@@ -19,8 +19,11 @@ export default defineSchema({
     // Profile
     bio: v.string(),
     height: v.optional(v.number()),
+    weight: v.optional(v.number()),
     smoking: v.optional(v.union(v.literal('never'), v.literal('sometimes'), v.literal('regularly'), v.literal('trying_to_quit'))),
     drinking: v.optional(v.union(v.literal('never'), v.literal('socially'), v.literal('regularly'), v.literal('sober'))),
+    exercise: v.optional(v.union(v.literal('never'), v.literal('sometimes'), v.literal('regularly'), v.literal('daily'))),
+    pets: v.optional(v.array(v.union(v.literal('dog'), v.literal('cat'), v.literal('bird'), v.literal('other'), v.literal('none'), v.literal('want_pets'), v.literal('allergic')))),
     kids: v.optional(v.union(
       v.literal('have_and_want_more'),
       v.literal('have_and_dont_want_more'),
@@ -353,4 +356,20 @@ export default defineSchema({
   })
     .index('by_user', ['userId'])
     .index('by_token', ['token']),
+
+  // Filter Presets table
+  filterPresets: defineTable({
+    userId: v.id('users'),
+    name: v.string(),
+    filters: v.object({
+      relationshipIntents: v.optional(v.array(v.string())),
+      activities: v.optional(v.array(v.string())),
+      timeFilters: v.optional(v.array(v.string())),
+      ageMin: v.optional(v.number()),
+      ageMax: v.optional(v.number()),
+      maxDistance: v.optional(v.number()),
+    }),
+    createdAt: v.number(),
+  })
+    .index('by_user', ['userId']),
 });

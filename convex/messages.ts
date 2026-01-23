@@ -399,6 +399,43 @@ export const getConversations = query({
 });
 
 // Get unread message count
+// Check if user can send messages
+export const canSendMessage = query({
+  args: {
+    userId: v.id('users'),
+  },
+  handler: async (ctx, args) => {
+    const user = await ctx.db.get(args.userId);
+    if (!user) return { canSend: false, remaining: 0, total: 0 };
+
+    // Women can always send
+    if (user.gender === 'female') {
+      return { canSend: true, remaining: 999999, total: 999999 };
+    }
+
+    // Check if reset time has passed
+    const now = Date.now();
+    if (now >= user.messagesResetAt) {
+      let newMessages = 0;
+      if (user.subscriptionTier === 'basic') newMessages = 10;
+      else if (user.subscriptionTier === 'premium') newMessages = 999999;
+      else if (user.trialEndsAt && now < user.trialEndsAt) newMessages = 5;
+
+      return {
+        canSend: newMessages > 0,
+        remaining: newMessages,
+        total: newMessages,
+      };
+    }
+
+    return {
+      canSend: user.messagesRemaining > 0,
+      remaining: user.messagesRemaining,
+      total: user.subscriptionTier === 'basic' ? 10 : user.subscriptionTier === 'premium' ? 999999 : 5,
+    };
+  },
+});
+
 export const getUnreadCount = query({
   args: {
     userId: v.id('users'),

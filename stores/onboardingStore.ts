@@ -23,9 +23,12 @@ interface OnboardingState {
   verificationPhotoUri: string | null;
   bio: string;
   height: number | null;
+  weight: number | null;
   smoking: SmokingStatus | null;
   drinking: DrinkingStatus | null;
   kids: KidsStatus | null;
+  exercise: string | null;
+  pets: string[];
   education: EducationLevel | null;
   religion: Religion | null;
   jobTitle: string;
@@ -52,9 +55,13 @@ interface OnboardingState {
   setVerificationPhoto: (uri: string | null) => void;
   setBio: (bio: string) => void;
   setHeight: (height: number | null) => void;
+  setWeight: (weight: number | null) => void;
   setSmoking: (status: SmokingStatus | null) => void;
   setDrinking: (status: DrinkingStatus | null) => void;
   setKids: (status: KidsStatus | null) => void;
+  setExercise: (exercise: string | null) => void;
+  setPets: (pets: string[]) => void;
+  togglePet: (pet: string) => void;
   setEducation: (level: EducationLevel | null) => void;
   setReligion: (religion: Religion | null) => void;
   setJobTitle: (title: string) => void;
@@ -84,9 +91,12 @@ const initialState = {
   verificationPhotoUri: null,
   bio: '',
   height: null,
+  weight: null,
   smoking: null,
   drinking: null,
   kids: null,
+  exercise: null,
+  pets: [],
   education: null,
   religion: null,
   jobTitle: '',
@@ -135,11 +145,24 @@ export const useOnboardingStore = create<OnboardingState>((set) => ({
 
   setHeight: (height) => set({ height }),
 
+  setWeight: (weight) => set({ weight }),
+
   setSmoking: (smoking) => set({ smoking }),
 
   setDrinking: (drinking) => set({ drinking }),
 
   setKids: (kids) => set({ kids }),
+
+  setExercise: (exercise) => set({ exercise }),
+
+  setPets: (pets) => set({ pets }),
+
+  togglePet: (pet) =>
+    set((state) => ({
+      pets: state.pets.includes(pet)
+        ? state.pets.filter((p) => p !== pet)
+        : [...state.pets, pet],
+    })),
 
   setEducation: (education) => set({ education }),
 

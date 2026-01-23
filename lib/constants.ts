@@ -234,6 +234,23 @@ export const RELIGION_OPTIONS = [
   { value: 'prefer_not_to_say', label: 'Prefer not to say' },
 ];
 
+export const EXERCISE_OPTIONS = [
+  { value: 'never', label: 'Never' },
+  { value: 'sometimes', label: 'Sometimes (1-2x/week)' },
+  { value: 'regularly', label: 'Regularly (3-4x/week)' },
+  { value: 'daily', label: 'Daily (5+ times/week)' },
+];
+
+export const PETS_OPTIONS = [
+  { value: 'dog', label: 'Dog(s)', emoji: '🐕' },
+  { value: 'cat', label: 'Cat(s)', emoji: '🐈' },
+  { value: 'bird', label: 'Bird(s)', emoji: '🦜' },
+  { value: 'other', label: 'Other pets', emoji: '🐾' },
+  { value: 'none', label: 'No pets', emoji: '🚫' },
+  { value: 'want_pets', label: 'Want pets', emoji: '💭' },
+  { value: 'allergic', label: 'Allergic to pets', emoji: '🤧' },
+];
+
 // Gender Options
 export const GENDER_OPTIONS = [
   { value: 'male', label: 'Man' },
