@@ -130,7 +130,6 @@ export interface Match {
 // Like
 export interface Like {
   id: string;
-visibilityMode: VisibilityMode;
   fromUserId: string;
   toUserId: string;
   action: SwipeAction;
@@ -278,6 +277,14 @@ export interface AuthState {
   token?: string;
   isLoading: boolean;
   error?: string;
+}
+
+// Profile (alias for swipe cards)
+export interface Profile {
+  _id: string;
+  user: UserProfile;
+  photos: Photo[];
+  distance?: number;
 }
 
 // Onboarding State

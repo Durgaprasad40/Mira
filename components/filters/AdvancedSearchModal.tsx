@@ -128,7 +128,7 @@ export function AdvancedSearchModal({
               <View style={styles.heightInput}>
                 <Text style={styles.heightLabel}>Min</Text>
                 <Input
-                  placeholder="5'4\""
+                  placeholder="5'4"
                   value={filters.heightMin?.toString()}
                   onChangeText={(text) =>
                     setFilters({ ...filters, heightMin: text ? parseInt(text) : undefined })
@@ -140,7 +140,7 @@ export function AdvancedSearchModal({
               <View style={styles.heightInput}>
                 <Text style={styles.heightLabel}>Max</Text>
                 <Input
-                  placeholder="6'2\""
+                  placeholder="6'2"
                   value={filters.heightMax?.toString()}
                   onChangeText={(text) =>
                     setFilters({ ...filters, heightMax: text ? parseInt(text) : undefined })

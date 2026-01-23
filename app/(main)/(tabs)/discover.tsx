@@ -22,47 +22,80 @@ import Animated, {
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 import * as Haptics from 'expo-haptics';
 import { useQuery, useMutation } from 'convex/react';
-import { api } from '../../../convex/_generated/api';
-import { ProfileCard, SwipeOverlay } from '../../../components/cards';
-import { FilterModal } from '../../../components/filters';
-import { ProfileQuickMenu } from '../../../components/profile';
-import { useAuthStore, useFilterStore, useSubscriptionStore } from '../../../stores';
-import { COLORS, SWIPE_CONFIG } from '../../../lib/constants';
-import type { Profile } from '../../../types';
+import { api } from '@/convex/_generated/api';
+import { ProfileCard, SwipeOverlay } from '@/components/cards';
+import { FilterModal } from '@/components/filters';
+import { useAuthStore } from '@/stores/authStore';
+import { useFilterStore } from '@/stores/filterStore';
+import { useSubscriptionStore } from '@/stores/subscriptionStore';
+import { COLORS } from '@/lib/constants';
+import { DEMO_PROFILES } from '@/lib/demoData';
+import { isDemoMode } from '@/hooks/useConvex';
+import type { SortOption } from '@/types';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
-const SWIPE_THRESHOLD_X = SCREEN_WIDTH * SWIPE_CONFIG.SWIPE_THRESHOLD_X; // 30%
-const SWIPE_THRESHOLD_Y = SCREEN_HEIGHT * SWIPE_CONFIG.SWIPE_THRESHOLD_Y; // 20%
+const SWIPE_THRESHOLD_X = SCREEN_WIDTH * 0.3;
+const SWIPE_THRESHOLD_Y = SCREEN_HEIGHT * 0.2;
 
-type SortOption = 'recommended' | 'distance' | 'age' | 'recently_active' | 'newest';
+interface ProfileData {
+  id: string;
+  name: string;
+  age: number;
+  bio?: string;
+  city?: string;
+  isVerified?: boolean;
+  distance?: number;
+  photos: { url: string }[];
+}
 
 export default function DiscoverScreen() {
   const insets = useSafeAreaInsets();
   const { userId } = useAuthStore();
-  const { filters, setFilters, sortBy, setSortBy } = useFilterStore();
-  const { isPremium } = useSubscriptionStore();
+  const filterStore = useFilterStore();
+  const subscriptionStore = useSubscriptionStore();
 
   const [currentIndex, setCurrentIndex] = useState(0);
-  const [sortByLocal, setSortByLocal] = useState<SortOption>(sortBy);
+  const [sortByLocal, setSortByLocal] = useState<SortOption>('recommended');
   const [showFilters, setShowFilters] = useState(false);
-  const [rewindAvailable, setRewindAvailable] = useState(true);
-  const [showQuickMenu, setShowQuickMenu] = useState(false);
-  const lastSwipedProfile = useRef<Profile | null>(null);
+  const lastSwipedProfile = useRef<ProfileData | null>(null);
 
-  // Fetch profiles
-  const profiles = useQuery(
+  // Use demo data if in demo mode, otherwise use Convex
+  const convexProfiles = useQuery(
     api.discover.getDiscoverProfiles,
-    userId
+    !isDemoMode && userId
       ? {
-          userId,
+          userId: userId as any,
           sortBy: sortByLocal,
           limit: 20,
         }
       : 'skip'
   );
 
-  // Mutations
-  const swipe = useMutation(api.likes.swipe);
+  // Transform to common format
+  const profiles: ProfileData[] = isDemoMode
+    ? DEMO_PROFILES.map((p) => ({
+        id: p._id,
+        name: p.name,
+        age: p.age,
+        bio: p.bio,
+        city: p.city,
+        isVerified: p.isVerified,
+        distance: p.distance,
+        photos: p.photos,
+      }))
+    : (convexProfiles || []).map((p: any) => ({
+        id: p._id || p.id,
+        name: p.name,
+        age: p.age,
+        bio: p.bio,
+        city: p.city,
+        isVerified: p.isVerified,
+        distance: p.distance,
+        photos: p.photos?.map((photo: any) => ({ url: photo.url || photo })) || [],
+      }));
+
+  const swipeMutation = useMutation(api.likes.swipe);
+  const rewindMutation = useMutation(api.likes.rewind);
 
   // Animation values
   const translateX = useSharedValue(0);
@@ -70,8 +103,8 @@ export default function DiscoverScreen() {
   const rotation = useSharedValue(0);
   const cardScale = useSharedValue(1);
 
-  const currentProfile = profiles?.[currentIndex];
-  const nextProfile = profiles?.[currentIndex + 1];
+  const currentProfile = profiles[currentIndex];
+  const nextProfile = profiles[currentIndex + 1];
 
   const resetPosition = useCallback(() => {
     'worklet';
@@ -83,34 +116,45 @@ export default function DiscoverScreen() {
 
   const handleSwipe = useCallback(
     async (direction: 'left' | 'right' | 'up') => {
-      if (!currentProfile || !userId) return;
+      if (!currentProfile) return;
 
       const action =
         direction === 'left' ? 'pass' : direction === 'up' ? 'super_like' : 'like';
 
+      if (isDemoMode) {
+        // Demo mode - just move to next profile
+        lastSwipedProfile.current = currentProfile;
+
+        if (direction === 'right' && Math.random() > 0.7) {
+          // 30% chance of match in demo mode
+          Alert.alert('🎉 It\'s a Match!', `You and ${currentProfile.name} liked each other!`);
+        }
+
+        setCurrentIndex((prev) => prev + 1);
+        return;
+      }
+
       try {
-        const result = await swipe({
-          fromUserId: userId,
+        const result = await swipeMutation({
+          fromUserId: userId as any,
           toUserId: currentProfile.id as any,
           action: action as any,
         });
 
         lastSwipedProfile.current = currentProfile;
 
-        // If match, navigate to celebration screen
-        if (result.isMatch) {
+        if (result?.isMatch) {
           router.push(
             `/(main)/match-celebration?matchId=${result.matchId}&userId=${currentProfile.id}`
           );
         } else {
-          // Move to next profile
           setCurrentIndex((prev) => prev + 1);
         }
       } catch (error: any) {
         Alert.alert('Error', error.message || 'Failed to swipe');
       }
     },
-    [currentProfile, userId, swipe]
+    [currentProfile, userId, swipeMutation]
   );
 
   const animateSwipe = useCallback(
@@ -141,14 +185,6 @@ export default function DiscoverScreen() {
         [-15, 0, 15],
         Extrapolation.CLAMP
       );
-
-      // Haptic feedback at threshold
-      if (Math.abs(event.translationX) > SWIPE_THRESHOLD_X && Math.abs(event.translationY) < 50) {
-        runOnJS(Haptics.impactAsync)(Haptics.ImpactFeedbackStyle.Medium);
-      }
-      if (event.translationY < -SWIPE_THRESHOLD_Y && Math.abs(event.translationX) < 50) {
-        runOnJS(Haptics.impactAsync)(Haptics.ImpactFeedbackStyle.Heavy);
-      }
     })
     .onEnd((event) => {
       if (event.translationX < -SWIPE_THRESHOLD_X) {
@@ -186,73 +222,70 @@ export default function DiscoverScreen() {
     };
   });
 
-  const likeOpacity = useAnimatedStyle(() => ({
-    opacity: interpolate(
-      translateX.value,
-      [0, SCREEN_WIDTH / 4],
-      [0, 1],
-      Extrapolation.CLAMP
-    ),
-  }));
-
-  const nopeOpacity = useAnimatedStyle(() => ({
-    opacity: interpolate(
-      translateX.value,
-      [-SCREEN_WIDTH / 4, 0],
-      [1, 0],
-      Extrapolation.CLAMP
-    ),
-  }));
-
-  const superlikeOpacity = useAnimatedStyle(() => ({
-    opacity: interpolate(
-      translateY.value,
-      [-SCREEN_HEIGHT / 6, 0],
-      [1, 0],
-      Extrapolation.CLAMP
-    ),
-  }));
-
-  const rewindMutation = useMutation(api.likes.rewind);
+  // Get swipe direction for overlay
+  const getSwipeDirection = (): 'left' | 'right' | 'up' | null => {
+    const x = translateX.value;
+    const y = translateY.value;
+    if (Math.abs(x) > 50 && x < 0) return 'left';
+    if (Math.abs(x) > 50 && x > 0) return 'right';
+    if (y < -50) return 'up';
+    return null;
+  };
 
   const handleRewind = useCallback(async () => {
-    if (!userId || !lastSwipedProfile.current) {
+    if (!lastSwipedProfile.current) {
       Alert.alert('Rewind', 'No recent swipe to undo');
       return;
     }
 
-    try {
-      const result = await rewindMutation({
-        userId: userId as any,
-      });
-
-      if (result.success) {
-        // Move back to previous profile
-        if (currentIndex > 0) {
-          setCurrentIndex(currentIndex - 1);
-        }
+    if (isDemoMode) {
+      if (currentIndex > 0) {
+        setCurrentIndex(currentIndex - 1);
         lastSwipedProfile.current = null;
-        // Don't show alert, just silently rewind
-        // The UI will update automatically via queries
       }
+      return;
+    }
+
+    try {
+      await rewindMutation({ userId: userId as any });
+      if (currentIndex > 0) {
+        setCurrentIndex(currentIndex - 1);
+      }
+      lastSwipedProfile.current = null;
     } catch (error: any) {
       Alert.alert('Error', error.message || 'Failed to rewind');
     }
-  }, [userId, currentIndex, rewind]);
+  }, [userId, currentIndex, rewindMutation]);
 
-  if (!profiles) {
+  const handleApplyFilters = (newFilters: any, newSortBy: SortOption) => {
+    setSortByLocal(newSortBy);
+    setShowFilters(false);
+    setCurrentIndex(0); // Reset to show filtered results
+  };
+
+  // Loading state
+  if (!isDemoMode && !convexProfiles) {
     return (
       <View style={[styles.container, styles.loadingContainer]}>
         <ActivityIndicator size="large" color={COLORS.primary} />
+        <Text style={styles.loadingText}>Loading profiles...</Text>
       </View>
     );
   }
 
+  // Empty state
   if (profiles.length === 0 || currentIndex >= profiles.length) {
     return (
       <View style={[styles.container, styles.emptyContainer]}>
+        <Text style={styles.emptyEmoji}>🔍</Text>
         <Text style={styles.emptyTitle}>No more profiles</Text>
         <Text style={styles.emptySubtitle}>Check back later for new matches!</Text>
+        <TouchableOpacity
+          style={styles.refreshButton}
+          onPress={() => setCurrentIndex(0)}
+        >
+          <Text style={styles.refreshButtonText}>Start Over</Text>
+        </TouchableOpacity>
       </View>
     );
   }
@@ -265,27 +298,15 @@ export default function DiscoverScreen() {
           style={styles.headerButton}
           onPress={() => setShowFilters(true)}
         >
-          <Text style={styles.headerButtonText}>☰ Sort</Text>
+          <Text style={styles.headerButtonText}>☰ Filters</Text>
         </TouchableOpacity>
         <Text style={styles.headerTitle}>Discover</Text>
         <View style={styles.headerRight}>
           <TouchableOpacity
             style={styles.headerIcon}
-            onPress={() => router.push('/(main)/notifications')}
-          >
-            <Text style={styles.headerIconText}>🔔</Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={styles.headerIcon}
             onPress={() => router.push('/(main)/likes')}
           >
             <Text style={styles.headerIconText}>❤️</Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={styles.headerIcon}
-            onPress={() => setShowQuickMenu(true)}
-          >
-            <Text style={styles.headerIconText}>👤</Text>
           </TouchableOpacity>
         </View>
       </View>
@@ -293,15 +314,35 @@ export default function DiscoverScreen() {
       {/* Profile Cards */}
       <View style={styles.cardsContainer}>
         {nextProfile && (
-          <View style={[styles.nextCard, nextCardAnimatedStyle]}>
-            <ProfileCard profile={nextProfile} isFirst={false} />
-          </View>
+          <Animated.View style={[styles.nextCard, nextCardAnimatedStyle]}>
+            <ProfileCard
+              name={nextProfile.name}
+              age={nextProfile.age}
+              bio={nextProfile.bio}
+              city={nextProfile.city}
+              isVerified={nextProfile.isVerified}
+              distance={nextProfile.distance}
+              photos={nextProfile.photos}
+            />
+          </Animated.View>
         )}
         {currentProfile && (
           <GestureDetector gesture={panGesture}>
             <Animated.View style={[styles.currentCard, cardAnimatedStyle]}>
-              <ProfileCard profile={currentProfile} isFirst={true} />
-              <SwipeOverlay translateX={translateX} translateY={translateY} />
+              <ProfileCard
+                name={currentProfile.name}
+                age={currentProfile.age}
+                bio={currentProfile.bio}
+                city={currentProfile.city}
+                isVerified={currentProfile.isVerified}
+                distance={currentProfile.distance}
+                photos={currentProfile.photos}
+                showCarousel
+              />
+              <SwipeOverlay
+                direction={getSwipeDirection()}
+                opacity={Math.min(Math.abs(translateX.value) / 100, 1)}
+              />
             </Animated.View>
           </GestureDetector>
         )}
@@ -312,56 +353,34 @@ export default function DiscoverScreen() {
         <TouchableOpacity
           style={[styles.actionButton, styles.rewindButton]}
           onPress={handleRewind}
-          disabled={!rewindAvailable}
         >
           <Text style={styles.actionIcon}>↶</Text>
         </TouchableOpacity>
         <TouchableOpacity
           style={[styles.actionButton, styles.passButton]}
-          onPress={() => handleSwipe('left')}
+          onPress={() => animateSwipe('left')}
         >
           <Text style={styles.actionIcon}>✕</Text>
         </TouchableOpacity>
         <TouchableOpacity
           style={[styles.actionButton, styles.superLikeButton]}
-          onPress={() => handleSwipe('up')}
+          onPress={() => animateSwipe('up')}
         >
           <Text style={styles.actionIcon}>⭐</Text>
         </TouchableOpacity>
         <TouchableOpacity
           style={[styles.actionButton, styles.likeButton]}
-          onPress={() => handleSwipe('right')}
+          onPress={() => animateSwipe('right')}
         >
           <Text style={styles.actionIcon}>❤️</Text>
-        </TouchableOpacity>
-        <TouchableOpacity
-          style={[styles.actionButton, styles.messageButton]}
-          onPress={() => {
-            if (currentProfile) {
-              router.push(`/(main)/chat/${currentProfile.id}`);
-            }
-          }}
-        >
-          <Text style={styles.actionIcon}>💬</Text>
         </TouchableOpacity>
       </View>
 
       <FilterModal
         visible={showFilters}
         onClose={() => setShowFilters(false)}
-        filters={filters}
-        sortBy={sortByLocal}
-        onApply={(newFilters, newSortBy) => {
-          setFilters(newFilters);
-          setSortByLocal(newSortBy);
-          setShowFilters(false);
-        }}
-        isPremium={isPremium}
-      />
-
-      <ProfileQuickMenu
-        visible={showQuickMenu}
-        onClose={() => setShowQuickMenu(false)}
+        onApply={handleApplyFilters}
+        initialSortBy={sortByLocal}
       />
     </View>
   );
@@ -376,10 +395,19 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
   },
+  loadingText: {
+    marginTop: 16,
+    fontSize: 16,
+    color: COLORS.textLight,
+  },
   emptyContainer: {
     justifyContent: 'center',
     alignItems: 'center',
     padding: 40,
+  },
+  emptyEmoji: {
+    fontSize: 64,
+    marginBottom: 16,
   },
   emptyTitle: {
     fontSize: 24,
@@ -391,6 +419,18 @@ const styles = StyleSheet.create({
     fontSize: 16,
     color: COLORS.textLight,
     textAlign: 'center',
+    marginBottom: 24,
+  },
+  refreshButton: {
+    backgroundColor: COLORS.primary,
+    paddingHorizontal: 24,
+    paddingVertical: 12,
+    borderRadius: 24,
+  },
+  refreshButtonText: {
+    color: COLORS.white,
+    fontSize: 16,
+    fontWeight: '600',
   },
   header: {
     flexDirection: 'row',
@@ -432,12 +472,12 @@ const styles = StyleSheet.create({
   currentCard: {
     position: 'absolute',
     width: SCREEN_WIDTH - 40,
-    height: SCREEN_HEIGHT * 0.65,
+    height: SCREEN_HEIGHT * 0.6,
   },
   nextCard: {
     position: 'absolute',
     width: SCREEN_WIDTH - 40,
-    height: SCREEN_HEIGHT * 0.65,
+    height: SCREEN_HEIGHT * 0.6,
     zIndex: 0,
   },
   actions: {
@@ -445,34 +485,42 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
     padding: 20,
-    gap: 12,
+    gap: 16,
     borderTopWidth: 1,
     borderTopColor: COLORS.border,
   },
   actionButton: {
-    width: 56,
-    height: 56,
-    borderRadius: 28,
+    width: 60,
+    height: 60,
+    borderRadius: 30,
     alignItems: 'center',
     justifyContent: 'center',
     backgroundColor: COLORS.backgroundDark,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 3,
   },
   rewindButton: {
-    backgroundColor: COLORS.warning + '20',
+    backgroundColor: '#FFF3E0',
   },
   passButton: {
-    backgroundColor: COLORS.pass + '20',
+    backgroundColor: '#FFEBEE',
+    width: 70,
+    height: 70,
+    borderRadius: 35,
   },
   superLikeButton: {
-    backgroundColor: COLORS.superLike + '20',
+    backgroundColor: '#E3F2FD',
   },
   likeButton: {
-    backgroundColor: COLORS.like + '20',
-  },
-  messageButton: {
-    backgroundColor: COLORS.secondary + '20',
+    backgroundColor: '#E8F5E9',
+    width: 70,
+    height: 70,
+    borderRadius: 35,
   },
   actionIcon: {
-    fontSize: 24,
+    fontSize: 28,
   },
 });

@@ -33,7 +33,7 @@ export const ProfileCard: React.FC<ProfileCardProps> = ({
   return (
     <View style={styles.card}>
       {showCarousel && photos.length > 1 ? (
-        <PhotoCarousel photos={photos} height={styles.card.height} />
+        <PhotoCarousel photos={photos} height={CARD_HEIGHT} />
       ) : mainPhoto ? (
         <Image
           source={{ uri: mainPhoto.url }}
@@ -73,12 +73,15 @@ export const ProfileCard: React.FC<ProfileCardProps> = ({
   );
 };
 
+const CARD_HEIGHT = 500;
+
 const styles = StyleSheet.create({
   card: {
     borderRadius: 24,
-    overflow: 'hidden',
+    overflow: 'hidden' as const,
     backgroundColor: COLORS.backgroundDark,
     flex: 1,
+    height: CARD_HEIGHT,
   },
   image: {
     width: '100%',
