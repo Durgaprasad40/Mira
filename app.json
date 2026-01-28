@@ -64,13 +64,6 @@
         {
           "locationAlwaysAndWhenInUsePermission": "Allow Mira to use your location to find crossed paths and show people near you."
         }
-      ],
-      [
-        "expo-notifications",
-        {
-          "icon": "./assets/notification-icon.png",
-          "color": "#FF6B6B"
-        }
       ]
     ],
     "experiments": {

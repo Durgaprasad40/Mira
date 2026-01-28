@@ -1,12 +1,19 @@
-import React, { useState } from 'react';
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Alert, Platform } from 'react-native';
-import { useRouter } from 'expo-router';
-import * as Location from 'expo-location';
-import * as Notifications from 'expo-notifications';
-import { COLORS } from '@/lib/constants';
-import { Button } from '@/components/ui';
-import { useOnboardingStore } from '@/stores/onboardingStore';
-import { Ionicons } from '@expo/vector-icons';
+import React, { useState } from "react";
+import {
+  View,
+  Text,
+  StyleSheet,
+  ScrollView,
+  TouchableOpacity,
+  Alert,
+  Platform,
+} from "react-native";
+import { useRouter } from "expo-router";
+import * as Location from "expo-location";
+import { COLORS } from "@/lib/constants";
+import { Button } from "@/components/ui";
+import { useOnboardingStore } from "@/stores/onboardingStore";
+import { Ionicons } from "@expo/vector-icons";
 
 export default function PermissionsScreen() {
   const { setStep } = useOnboardingStore();
@@ -17,45 +24,28 @@ export default function PermissionsScreen() {
   const requestLocation = async () => {
     try {
       const { status } = await Location.requestForegroundPermissionsAsync();
-      if (status === 'granted') {
+      if (status === "granted") {
         setLocationGranted(true);
-        
+
         // Also request background location if needed for Crossed Paths
-        if (Platform.OS !== 'web') {
+        if (Platform.OS !== "web") {
           await Location.requestBackgroundPermissionsAsync();
         }
       } else {
         Alert.alert(
-          'Location Permission',
-          'Location access helps you find people nearby and use Crossed Paths feature. You can enable it later in settings.',
-          [{ text: 'OK' }]
+          "Location Permission",
+          "Location access helps you find people nearby and use Crossed Paths feature. You can enable it later in settings.",
+          [{ text: "OK" }],
         );
       }
     } catch (error) {
-      Alert.alert('Error', 'Failed to request location permission');
-    }
-  };
-
-  const requestNotifications = async () => {
-    try {
-      const { status } = await Notifications.requestPermissionsAsync();
-      if (status === 'granted') {
-        setNotificationsGranted(true);
-      } else {
-        Alert.alert(
-          'Notification Permission',
-          'Notifications help you stay updated on new matches and messages. You can enable it later in settings.',
-          [{ text: 'OK' }]
-        );
-      }
-    } catch (error) {
-      Alert.alert('Error', 'Failed to request notification permission');
+      Alert.alert("Error", "Failed to request location permission");
     }
   };
 
   const handleNext = () => {
-    setStep('review');
-    router.push('/(onboarding)/review');
+    setStep("review");
+    router.push("/(onboarding)/review");
   };
 
   return (
@@ -76,8 +66,8 @@ export default function PermissionsScreen() {
           </View>
         </View>
         <Button
-          title={locationGranted ? 'Granted ✓' : 'Enable Location'}
-          variant={locationGranted ? 'outline' : 'primary'}
+          title={locationGranted ? "Granted ✓" : "Enable Location"}
+          variant={locationGranted ? "outline" : "primary"}
           onPress={requestLocation}
           disabled={locationGranted}
           style={styles.permissionButton}
@@ -94,13 +84,6 @@ export default function PermissionsScreen() {
             </Text>
           </View>
         </View>
-        <Button
-          title={notificationsGranted ? 'Granted ✓' : 'Enable Notifications'}
-          variant={notificationsGranted ? 'outline' : 'primary'}
-          onPress={requestNotifications}
-          disabled={notificationsGranted}
-          style={styles.permissionButton}
-        />
       </View>
 
       <View style={styles.infoBox}>
@@ -135,7 +118,7 @@ const styles = StyleSheet.create({
   },
   title: {
     fontSize: 28,
-    fontWeight: '700',
+    fontWeight: "700",
     color: COLORS.text,
     marginBottom: 8,
   },
@@ -152,8 +135,8 @@ const styles = StyleSheet.create({
     marginBottom: 16,
   },
   permissionHeader: {
-    flexDirection: 'row',
-    alignItems: 'flex-start',
+    flexDirection: "row",
+    alignItems: "flex-start",
     marginBottom: 16,
     gap: 16,
   },
@@ -162,7 +145,7 @@ const styles = StyleSheet.create({
   },
   permissionTitle: {
     fontSize: 18,
-    fontWeight: '600',
+    fontWeight: "600",
     color: COLORS.text,
     marginBottom: 4,
   },
@@ -175,8 +158,8 @@ const styles = StyleSheet.create({
     marginTop: 0,
   },
   infoBox: {
-    flexDirection: 'row',
-    backgroundColor: COLORS.primary + '20',
+    flexDirection: "row",
+    backgroundColor: COLORS.primary + "20",
     padding: 16,
     borderRadius: 12,
     marginBottom: 24,
@@ -192,12 +175,12 @@ const styles = StyleSheet.create({
     marginTop: 24,
   },
   skipButton: {
-    alignItems: 'center',
+    alignItems: "center",
     marginTop: 16,
   },
   skipText: {
     fontSize: 14,
     color: COLORS.textLight,
-    fontWeight: '500',
+    fontWeight: "500",
   },
 });

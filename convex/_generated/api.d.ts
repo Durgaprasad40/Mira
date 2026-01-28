@@ -9,6 +9,7 @@
  */
 
 import type * as auth from "../auth.js";
+import type * as cleanup from "../cleanup.js";
 import type * as crossedPaths from "../crossedPaths.js";
 import type * as dares from "../dares.js";
 import type * as discover from "../discover.js";
@@ -32,6 +33,7 @@ import type {
 
 declare const fullApi: ApiFromModules<{
   auth: typeof auth;
+  cleanup: typeof cleanup;
   crossedPaths: typeof crossedPaths;
   dares: typeof dares;
   discover: typeof discover;
