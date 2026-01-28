@@ -37,8 +37,8 @@ export default function ReviewScreen() {
   const { userId, setAuth, setOnboardingCompleted } = useAuthStore();
   const [isSubmitting, setIsSubmitting] = React.useState(false);
 
-  // TODO: Create user mutation
-  // const createUser = useMutation(api.auth.createUser);
+  const completeOnboarding = useMutation(api.users.completeOnboarding);
+  const generateUploadUrl = useMutation(api.photos.generateUploadUrl);
 
   const calculateAge = (dob: string) => {
     const birthDate = new Date(dob);
@@ -53,14 +53,44 @@ export default function ReviewScreen() {
 
   const handleComplete = async () => {
     if (!userId) {
-      // TODO: Handle case where user is not authenticated
+      Alert.alert('Error', 'User not authenticated');
       return;
     }
 
     setIsSubmitting(true);
     try {
-      // TODO: Submit all onboarding data to backend
-      // await createUser({ ...allData });
+      // For now, we'll skip photo upload since they're local URIs
+      // and would require additional handling (fetch blob, upload to Convex storage)
+      // Photos will need to be handled in a separate implementation
+      // TODO: Implement photo upload from local URIs to Convex storage
+
+      // Prepare onboarding data
+      const onboardingData = {
+        userId: userId as any,
+        name,
+        dateOfBirth,
+        gender,
+        bio,
+        height,
+        smoking,
+        drinking,
+        kids,
+        education,
+        religion,
+        jobTitle,
+        company,
+        school,
+        lookingFor,
+        relationshipIntent,
+        activities,
+        minAge,
+        maxAge,
+        maxDistance,
+        // photoStorageIds will be added once photo upload is implemented
+      };
+
+      // Submit all onboarding data to backend
+      await completeOnboarding(onboardingData);
       
       setOnboardingCompleted(true);
       setStep('tutorial');

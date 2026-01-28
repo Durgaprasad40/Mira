@@ -465,3 +465,148 @@ function calculateDistance(
 function toRad(deg: number): number {
   return deg * (Math.PI / 180);
 }
+
+// Complete onboarding with all user data
+export const completeOnboarding = mutation({
+  args: {
+    userId: v.id('users'),
+    name: v.optional(v.string()),
+    dateOfBirth: v.optional(v.string()),
+    gender: v.optional(v.union(v.literal('male'), v.literal('female'), v.literal('non_binary'), v.literal('other'))),
+    bio: v.optional(v.string()),
+    height: v.optional(v.number()),
+    weight: v.optional(v.number()),
+    smoking: v.optional(v.union(v.literal('never'), v.literal('sometimes'), v.literal('regularly'), v.literal('trying_to_quit'))),
+    drinking: v.optional(v.union(v.literal('never'), v.literal('socially'), v.literal('regularly'), v.literal('sober'))),
+    kids: v.optional(v.union(
+      v.literal('have_and_want_more'),
+      v.literal('have_and_dont_want_more'),
+      v.literal('dont_have_and_want'),
+      v.literal('dont_have_and_dont_want'),
+      v.literal('not_sure')
+    )),
+    exercise: v.optional(v.string()),
+    pets: v.optional(v.array(v.string())),
+    education: v.optional(v.union(
+      v.literal('high_school'),
+      v.literal('some_college'),
+      v.literal('bachelors'),
+      v.literal('masters'),
+      v.literal('doctorate'),
+      v.literal('trade_school'),
+      v.literal('other')
+    )),
+    religion: v.optional(v.union(
+      v.literal('christian'),
+      v.literal('muslim'),
+      v.literal('hindu'),
+      v.literal('buddhist'),
+      v.literal('jewish'),
+      v.literal('sikh'),
+      v.literal('atheist'),
+      v.literal('agnostic'),
+      v.literal('spiritual'),
+      v.literal('other'),
+      v.literal('prefer_not_to_say')
+    )),
+    jobTitle: v.optional(v.string()),
+    company: v.optional(v.string()),
+    school: v.optional(v.string()),
+    lookingFor: v.optional(v.array(v.union(v.literal('male'), v.literal('female'), v.literal('non_binary'), v.literal('other')))),
+    relationshipIntent: v.optional(v.array(v.union(
+      v.literal('long_term'),
+      v.literal('short_term'),
+      v.literal('fwb'),
+      v.literal('figuring_out'),
+      v.literal('short_to_long'),
+      v.literal('long_to_short'),
+      v.literal('new_friends'),
+      v.literal('open_to_anything')
+    ))),
+    activities: v.optional(v.array(v.union(
+      v.literal('coffee'),
+      v.literal('date_night'),
+      v.literal('sports'),
+      v.literal('movies'),
+      v.literal('free_tonight'),
+      v.literal('foodie'),
+      v.literal('gym_partner'),
+      v.literal('concerts'),
+      v.literal('travel'),
+      v.literal('outdoors'),
+      v.literal('art_culture'),
+      v.literal('gaming'),
+      v.literal('nightlife'),
+      v.literal('brunch'),
+      v.literal('study_date'),
+      v.literal('this_weekend'),
+      v.literal('beach_pool'),
+      v.literal('road_trip'),
+      v.literal('photography'),
+      v.literal('volunteering')
+    ))),
+    minAge: v.optional(v.number()),
+    maxAge: v.optional(v.number()),
+    maxDistance: v.optional(v.number()),
+    photoStorageIds: v.optional(v.array(v.id('_storage'))),
+  },
+  handler: async (ctx, args) => {
+    const { userId, photoStorageIds, ...updates } = args;
+
+    // Verify user exists
+    const user = await ctx.db.get(userId);
+    if (!user) {
+      throw new Error('User not found');
+    }
+
+    // Filter out undefined values
+    const cleanUpdates: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(updates)) {
+      if (value !== undefined) {
+        cleanUpdates[key] = value;
+      }
+    }
+
+    // Mark onboarding as completed
+    cleanUpdates.onboardingCompleted = true;
+    cleanUpdates.onboardingStep = undefined;
+    cleanUpdates.lastActive = Date.now();
+
+    // Update user profile
+    await ctx.db.patch(userId, cleanUpdates);
+
+    // Handle photos if provided
+    if (photoStorageIds && photoStorageIds.length > 0) {
+      // Delete existing photos
+      const existingPhotos = await ctx.db
+        .query('photos')
+        .withIndex('by_user', (q) => q.eq('userId', userId))
+        .collect();
+      
+      for (const photo of existingPhotos) {
+        await ctx.db.delete(photo._id);
+      }
+
+      // Add new photos
+      for (let i = 0; i < photoStorageIds.length; i++) {
+        const storageId = photoStorageIds[i];
+        const url = await ctx.storage.getUrl(storageId);
+        
+        if (url) {
+          await ctx.db.insert('photos', {
+            userId,
+            storageId,
+            url,
+            order: i,
+            isPrimary: i === 0,
+            hasFace: true, // Assuming face detection was done
+            isNsfw: false,
+            createdAt: Date.now(),
+          });
+        }
+      }
+    }
+
+    return { success: true };
+  },
+});
