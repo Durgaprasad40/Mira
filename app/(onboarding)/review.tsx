@@ -8,6 +8,7 @@ import { useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { useAuthStore } from '@/stores/authStore';
 import { Ionicons } from '@expo/vector-icons';
+import { uploadPhotosToConvex } from '@/lib/uploadUtils';
 
 export default function ReviewScreen() {
   const {
@@ -59,11 +60,35 @@ export default function ReviewScreen() {
 
     setIsSubmitting(true);
     try {
-      // For now, we'll skip photo upload since they're local URIs
-      // and would require additional handling (fetch blob, upload to Convex storage)
-      // Photos will need to be handled in a separate implementation
-      // TODO: Implement photo upload from local URIs to Convex storage
+      let photoStorageIds;
+      
+      // Upload photos if they exist
+      if (photos && photos.length > 0) {
+        try {
+          photoStorageIds = await uploadPhotosToConvex(photos, generateUploadUrl);
+        } catch (photoError) {
+          console.error('Photo upload error:', photoError);
+          Alert.alert(
+            'Photo Upload Failed',
+            'Failed to upload photos. Continue without photos?',
+            [
+              { text: 'Cancel', style: 'cancel', onPress: () => setIsSubmitting(false) },
+              { text: 'Continue', onPress: () => submitOnboardingData(undefined) }
+            ]
+          );
+          return;
+        }
+      }
 
+      await submitOnboardingData(photoStorageIds);
+    } catch (error: any) {
+      Alert.alert('Error', error.message || 'Failed to complete onboarding');
+      setIsSubmitting(false);
+    }
+  };
+
+  const submitOnboardingData = async (photoStorageIds: any) => {
+    try {
       // Prepare onboarding data
       const onboardingData = {
         userId: userId as any,
@@ -86,7 +111,7 @@ export default function ReviewScreen() {
         minAge,
         maxAge,
         maxDistance,
-        // photoStorageIds will be added once photo upload is implemented
+        photoStorageIds,
       };
 
       // Submit all onboarding data to backend
@@ -95,8 +120,6 @@ export default function ReviewScreen() {
       setOnboardingCompleted(true);
       setStep('tutorial');
       router.push('/(onboarding)/tutorial' as any);
-    } catch (error: any) {
-      Alert.alert('Error', error.message || 'Failed to complete onboarding');
     } finally {
       setIsSubmitting(false);
     }
