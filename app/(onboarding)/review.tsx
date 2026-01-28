@@ -18,9 +18,12 @@ export default function ReviewScreen() {
     photos,
     bio,
     height,
+    weight,
     smoking,
     drinking,
     kids,
+    exercise,
+    pets,
     education,
     religion,
     jobTitle,
@@ -68,12 +71,19 @@ export default function ReviewScreen() {
           photoStorageIds = await uploadPhotosToConvex(photos, generateUploadUrl);
         } catch (photoError) {
           console.error('Photo upload error:', photoError);
+          setIsSubmitting(false);
           Alert.alert(
             'Photo Upload Failed',
             'Failed to upload photos. Continue without photos?',
             [
-              { text: 'Cancel', style: 'cancel', onPress: () => setIsSubmitting(false) },
-              { text: 'Continue', onPress: () => submitOnboardingData(undefined) }
+              { text: 'Cancel', style: 'cancel' },
+              { text: 'Continue', onPress: () => {
+                setIsSubmitting(true);
+                submitOnboardingData(undefined).catch((error: any) => {
+                  Alert.alert('Error', error.message || 'Failed to complete onboarding');
+                  setIsSubmitting(false);
+                });
+              }}
             ]
           );
           return;
@@ -83,46 +93,46 @@ export default function ReviewScreen() {
       await submitOnboardingData(photoStorageIds);
     } catch (error: any) {
       Alert.alert('Error', error.message || 'Failed to complete onboarding');
+    } finally {
       setIsSubmitting(false);
     }
   };
 
   const submitOnboardingData = async (photoStorageIds: any) => {
-    try {
-      // Prepare onboarding data
-      const onboardingData = {
-        userId: userId as any,
-        name,
-        dateOfBirth,
-        gender,
-        bio,
-        height,
-        smoking,
-        drinking,
-        kids,
-        education,
-        religion,
-        jobTitle,
-        company,
-        school,
-        lookingFor,
-        relationshipIntent,
-        activities,
-        minAge,
-        maxAge,
-        maxDistance,
-        photoStorageIds,
-      };
+    // Prepare onboarding data with all available fields
+    const onboardingData = {
+      userId: userId as any,
+      name,
+      dateOfBirth,
+      gender,
+      bio,
+      height,
+      weight,
+      smoking,
+      drinking,
+      kids,
+      exercise,
+      pets,
+      education,
+      religion,
+      jobTitle,
+      company,
+      school,
+      lookingFor,
+      relationshipIntent,
+      activities,
+      minAge,
+      maxAge,
+      maxDistance,
+      photoStorageIds,
+    };
 
-      // Submit all onboarding data to backend
-      await completeOnboarding(onboardingData);
-      
-      setOnboardingCompleted(true);
-      setStep('tutorial');
-      router.push('/(onboarding)/tutorial' as any);
-    } finally {
-      setIsSubmitting(false);
-    }
+    // Submit all onboarding data to backend
+    await completeOnboarding(onboardingData);
+    
+    setOnboardingCompleted(true);
+    setStep('tutorial');
+    router.push('/(onboarding)/tutorial' as any);
   };
 
   const handleEdit = (step: string) => {

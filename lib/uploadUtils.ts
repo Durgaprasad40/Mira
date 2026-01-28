@@ -36,12 +36,12 @@ export async function uploadPhotoToConvex(
     return result.storageId as Id<'_storage'>;
   } catch (error) {
     console.error('Error uploading photo:', error);
-    throw new Error('Failed to upload photo');
+    throw error instanceof Error ? error : new Error('Failed to upload photo');
   }
 }
 
 /**
- * Upload multiple photos to Convex storage
+ * Upload multiple photos to Convex storage in parallel
  * @param photoUris - Array of local file URIs
  * @param generateUploadUrl - Convex mutation to generate upload URL
  * @returns Array of storage IDs
@@ -50,12 +50,10 @@ export async function uploadPhotosToConvex(
   photoUris: string[],
   generateUploadUrl: () => Promise<string>
 ): Promise<Id<'_storage'>[]> {
-  const storageIds: Id<'_storage'>[] = [];
+  // Upload all photos in parallel for better performance
+  const uploadPromises = photoUris.map(uri => 
+    uploadPhotoToConvex(uri, generateUploadUrl)
+  );
 
-  for (const uri of photoUris) {
-    const storageId = await uploadPhotoToConvex(uri, generateUploadUrl);
-    storageIds.push(storageId);
-  }
-
-  return storageIds;
+  return Promise.all(uploadPromises);
 }

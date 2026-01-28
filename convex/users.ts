@@ -485,8 +485,8 @@ export const completeOnboarding = mutation({
       v.literal('dont_have_and_dont_want'),
       v.literal('not_sure')
     )),
-    exercise: v.optional(v.string()),
-    pets: v.optional(v.array(v.string())),
+    exercise: v.optional(v.union(v.literal('never'), v.literal('sometimes'), v.literal('regularly'), v.literal('daily'))),
+    pets: v.optional(v.array(v.union(v.literal('dog'), v.literal('cat'), v.literal('bird'), v.literal('other'), v.literal('none'), v.literal('want_pets'), v.literal('allergic')))),
     education: v.optional(v.union(
       v.literal('high_school'),
       v.literal('some_college'),
@@ -577,13 +577,14 @@ export const completeOnboarding = mutation({
 
     // Handle photos if provided
     if (photoStorageIds && photoStorageIds.length > 0) {
-      // Delete existing photos
+      // Delete existing photos and their storage files
       const existingPhotos = await ctx.db
         .query('photos')
         .withIndex('by_user', (q) => q.eq('userId', userId))
         .collect();
       
       for (const photo of existingPhotos) {
+        await ctx.storage.delete(photo.storageId);
         await ctx.db.delete(photo._id);
       }
 
@@ -592,18 +593,21 @@ export const completeOnboarding = mutation({
         const storageId = photoStorageIds[i];
         const url = await ctx.storage.getUrl(storageId);
         
-        if (url) {
-          await ctx.db.insert('photos', {
-            userId,
-            storageId,
-            url,
-            order: i,
-            isPrimary: i === 0,
-            hasFace: true, // Assuming face detection was done
-            isNsfw: false,
-            createdAt: Date.now(),
-          });
+        if (!url) {
+          console.error(`Failed to get URL for storage ID: ${storageId}`);
+          throw new Error(`Failed to process photo ${i + 1}`);
         }
+
+        await ctx.db.insert('photos', {
+          userId,
+          storageId,
+          url,
+          order: i,
+          isPrimary: i === 0,
+          hasFace: true, // Will be validated by face detection in production
+          isNsfw: false,
+          createdAt: Date.now(),
+        });
       }
     }
 
