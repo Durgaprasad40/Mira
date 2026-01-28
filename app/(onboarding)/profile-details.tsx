@@ -1,9 +1,25 @@
-import React from 'react';
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity } from 'react-native';
-import { useRouter } from 'expo-router';
-import { COLORS, SMOKING_OPTIONS, DRINKING_OPTIONS, KIDS_OPTIONS, EDUCATION_OPTIONS, RELIGION_OPTIONS, EXERCISE_OPTIONS, PETS_OPTIONS } from '@/lib/constants';
-import { Input, Button } from '@/components/ui';
-import { useOnboardingStore } from '@/stores/onboardingStore';
+import React from "react";
+import {
+  View,
+  Text,
+  StyleSheet,
+  ScrollView,
+  TouchableOpacity,
+} from "react-native";
+import { useRouter } from "expo-router";
+import {
+  COLORS,
+  SMOKING_OPTIONS,
+  DRINKING_OPTIONS,
+  KIDS_OPTIONS,
+  EDUCATION_OPTIONS,
+  RELIGION_OPTIONS,
+  EXERCISE_OPTIONS,
+  PETS_OPTIONS,
+} from "@/lib/constants";
+import { Input, Button } from "@/components/ui";
+import { useOnboardingStore } from "@/stores/onboardingStore";
+import { ExerciseStatus, PetType } from "@/types";
 
 export default function ProfileDetailsScreen() {
   const {
@@ -37,15 +53,16 @@ export default function ProfileDetailsScreen() {
   const router = useRouter();
 
   const handleNext = () => {
-    setStep('preferences');
-    router.push('/(onboarding)/preferences');
+    setStep("preferences");
+    router.push("/(onboarding)/preferences");
   };
 
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.content}>
       <Text style={styles.title}>Profile Details</Text>
       <Text style={styles.subtitle}>
-        Share more about yourself. These details help others get to know you better.
+        Share more about yourself. These details help others get to know you
+        better.
       </Text>
 
       <View style={styles.section}>
@@ -53,7 +70,7 @@ export default function ProfileDetailsScreen() {
         <View style={styles.field}>
           <Input
             label="Height (cm)"
-            value={height ? height.toString() : ''}
+            value={height ? height.toString() : ""}
             onChangeText={(text) => setHeight(text ? parseInt(text) : null)}
             placeholder="170"
             keyboardType="numeric"
@@ -62,7 +79,7 @@ export default function ProfileDetailsScreen() {
         <View style={styles.field}>
           <Input
             label="Weight (kg) - Optional"
-            value={weight ? weight.toString() : ''}
+            value={weight ? weight.toString() : ""}
             onChangeText={(text) => setWeight(text ? parseInt(text) : null)}
             placeholder="70"
             keyboardType="numeric"
@@ -102,10 +119,22 @@ export default function ProfileDetailsScreen() {
             {SMOKING_OPTIONS.map((option) => (
               <TouchableOpacity
                 key={option.value}
-                style={[styles.optionChip, smoking === option.value && styles.optionChipSelected]}
-                onPress={() => setSmoking(smoking === option.value ? null : option.value as any)}
+                style={[
+                  styles.optionChip,
+                  smoking === option.value && styles.optionChipSelected,
+                ]}
+                onPress={() =>
+                  setSmoking(
+                    smoking === option.value ? null : (option.value as any),
+                  )
+                }
               >
-                <Text style={[styles.optionText, smoking === option.value && styles.optionTextSelected]}>
+                <Text
+                  style={[
+                    styles.optionText,
+                    smoking === option.value && styles.optionTextSelected,
+                  ]}
+                >
                   {option.label}
                 </Text>
               </TouchableOpacity>
@@ -119,10 +148,22 @@ export default function ProfileDetailsScreen() {
             {DRINKING_OPTIONS.map((option) => (
               <TouchableOpacity
                 key={option.value}
-                style={[styles.optionChip, drinking === option.value && styles.optionChipSelected]}
-                onPress={() => setDrinking(drinking === option.value ? null : option.value as any)}
+                style={[
+                  styles.optionChip,
+                  drinking === option.value && styles.optionChipSelected,
+                ]}
+                onPress={() =>
+                  setDrinking(
+                    drinking === option.value ? null : (option.value as any),
+                  )
+                }
               >
-                <Text style={[styles.optionText, drinking === option.value && styles.optionTextSelected]}>
+                <Text
+                  style={[
+                    styles.optionText,
+                    drinking === option.value && styles.optionTextSelected,
+                  ]}
+                >
                   {option.label}
                 </Text>
               </TouchableOpacity>
@@ -136,10 +177,20 @@ export default function ProfileDetailsScreen() {
             {KIDS_OPTIONS.map((option) => (
               <TouchableOpacity
                 key={option.value}
-                style={[styles.optionChip, kids === option.value && styles.optionChipSelected]}
-                onPress={() => setKids(kids === option.value ? null : option.value as any)}
+                style={[
+                  styles.optionChip,
+                  kids === option.value && styles.optionChipSelected,
+                ]}
+                onPress={() =>
+                  setKids(kids === option.value ? null : (option.value as any))
+                }
               >
-                <Text style={[styles.optionText, kids === option.value && styles.optionTextSelected]}>
+                <Text
+                  style={[
+                    styles.optionText,
+                    kids === option.value && styles.optionTextSelected,
+                  ]}
+                >
                   {option.label}
                 </Text>
               </TouchableOpacity>
@@ -153,10 +204,24 @@ export default function ProfileDetailsScreen() {
             {EXERCISE_OPTIONS.map((option) => (
               <TouchableOpacity
                 key={option.value}
-                style={[styles.optionChip, exercise === option.value && styles.optionChipSelected]}
-                onPress={() => setExercise(exercise === option.value ? null : option.value)}
+                style={[
+                  styles.optionChip,
+                  exercise === option.value && styles.optionChipSelected,
+                ]}
+                onPress={() =>
+                  setExercise(
+                    exercise === option.value
+                      ? null
+                      : (option.value as ExerciseStatus),
+                  )
+                }
               >
-                <Text style={[styles.optionText, exercise === option.value && styles.optionTextSelected]}>
+                <Text
+                  style={[
+                    styles.optionText,
+                    exercise === option.value && styles.optionTextSelected,
+                  ]}
+                >
                   {option.label}
                 </Text>
               </TouchableOpacity>
@@ -170,10 +235,20 @@ export default function ProfileDetailsScreen() {
             {PETS_OPTIONS.map((option) => (
               <TouchableOpacity
                 key={option.value}
-                style={[styles.optionChip, pets.includes(option.value) && styles.optionChipSelected]}
-                onPress={() => togglePet(option.value)}
+                style={[
+                  styles.optionChip,
+                  pets.includes(option.value as PetType) &&
+                    styles.optionChipSelected,
+                ]}
+                onPress={() => togglePet(option.value as PetType)}
               >
-                <Text style={[styles.optionText, pets.includes(option.value) && styles.optionTextSelected]}>
+                <Text
+                  style={[
+                    styles.optionText,
+                    pets.includes(option.value as PetType) &&
+                      styles.optionTextSelected,
+                  ]}
+                >
                   {option.emoji} {option.label}
                 </Text>
               </TouchableOpacity>
@@ -190,10 +265,22 @@ export default function ProfileDetailsScreen() {
             {EDUCATION_OPTIONS.map((option) => (
               <TouchableOpacity
                 key={option.value}
-                style={[styles.selectOption, education === option.value && styles.selectOptionSelected]}
-                onPress={() => setEducation(education === option.value ? null : option.value as any)}
+                style={[
+                  styles.selectOption,
+                  education === option.value && styles.selectOptionSelected,
+                ]}
+                onPress={() =>
+                  setEducation(
+                    education === option.value ? null : (option.value as any),
+                  )
+                }
               >
-                <Text style={[styles.selectText, education === option.value && styles.selectTextSelected]}>
+                <Text
+                  style={[
+                    styles.selectText,
+                    education === option.value && styles.selectTextSelected,
+                  ]}
+                >
                   {option.label}
                 </Text>
               </TouchableOpacity>
@@ -207,10 +294,22 @@ export default function ProfileDetailsScreen() {
             {RELIGION_OPTIONS.map((option) => (
               <TouchableOpacity
                 key={option.value}
-                style={[styles.selectOption, religion === option.value && styles.selectOptionSelected]}
-                onPress={() => setReligion(religion === option.value ? null : option.value as any)}
+                style={[
+                  styles.selectOption,
+                  religion === option.value && styles.selectOptionSelected,
+                ]}
+                onPress={() =>
+                  setReligion(
+                    religion === option.value ? null : (option.value as any),
+                  )
+                }
               >
-                <Text style={[styles.selectText, religion === option.value && styles.selectTextSelected]}>
+                <Text
+                  style={[
+                    styles.selectText,
+                    religion === option.value && styles.selectTextSelected,
+                  ]}
+                >
                   {option.label}
                 </Text>
               </TouchableOpacity>
@@ -241,7 +340,7 @@ const styles = StyleSheet.create({
   },
   title: {
     fontSize: 28,
-    fontWeight: '700',
+    fontWeight: "700",
     color: COLORS.text,
     marginBottom: 8,
   },
@@ -256,7 +355,7 @@ const styles = StyleSheet.create({
   },
   sectionTitle: {
     fontSize: 18,
-    fontWeight: '600',
+    fontWeight: "600",
     color: COLORS.text,
     marginBottom: 16,
   },
@@ -265,13 +364,13 @@ const styles = StyleSheet.create({
   },
   label: {
     fontSize: 14,
-    fontWeight: '500',
+    fontWeight: "500",
     color: COLORS.text,
     marginBottom: 8,
   },
   optionsRow: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
+    flexDirection: "row",
+    flexWrap: "wrap",
     gap: 8,
   },
   optionChip: {
@@ -292,7 +391,7 @@ const styles = StyleSheet.create({
   },
   optionTextSelected: {
     color: COLORS.white,
-    fontWeight: '600',
+    fontWeight: "600",
   },
   selectContainer: {
     gap: 8,
@@ -305,7 +404,7 @@ const styles = StyleSheet.create({
     borderColor: COLORS.border,
   },
   selectOptionSelected: {
-    backgroundColor: COLORS.primary + '20',
+    backgroundColor: COLORS.primary + "20",
     borderColor: COLORS.primary,
   },
   selectText: {
@@ -314,7 +413,7 @@ const styles = StyleSheet.create({
   },
   selectTextSelected: {
     color: COLORS.primary,
-    fontWeight: '600',
+    fontWeight: "600",
   },
   footer: {
     marginTop: 24,

@@ -1,4 +1,4 @@
-import { create } from 'zustand';
+import { create } from "zustand";
 import {
   OnboardingStep,
   Gender,
@@ -9,7 +9,9 @@ import {
   KidsStatus,
   EducationLevel,
   Religion,
-} from '@/types';
+  ExerciseStatus,
+  PetType,
+} from "@/types";
 
 interface OnboardingState {
   currentStep: OnboardingStep;
@@ -27,8 +29,8 @@ interface OnboardingState {
   smoking: SmokingStatus | null;
   drinking: DrinkingStatus | null;
   kids: KidsStatus | null;
-  exercise: string | null;
-  pets: string[];
+  exercise: ExerciseStatus | null;
+  pets: PetType[];
   education: EducationLevel | null;
   religion: Religion | null;
   jobTitle: string;
@@ -59,9 +61,9 @@ interface OnboardingState {
   setSmoking: (status: SmokingStatus | null) => void;
   setDrinking: (status: DrinkingStatus | null) => void;
   setKids: (status: KidsStatus | null) => void;
-  setExercise: (exercise: string | null) => void;
-  setPets: (pets: string[]) => void;
-  togglePet: (pet: string) => void;
+  setExercise: (exercise: ExerciseStatus | null) => void;
+  setPets: (pets: PetType[]) => void;
+  togglePet: (pet: PetType) => void;
   setEducation: (level: EducationLevel | null) => void;
   setReligion: (religion: Religion | null) => void;
   setJobTitle: (title: string) => void;
@@ -80,16 +82,16 @@ interface OnboardingState {
 }
 
 const initialState = {
-  currentStep: 'welcome' as OnboardingStep,
-  email: '',
-  phone: '',
-  password: '',
-  name: '',
-  dateOfBirth: '',
+  currentStep: "welcome" as OnboardingStep,
+  email: "",
+  phone: "",
+  password: "",
+  name: "",
+  dateOfBirth: "",
   gender: null,
   photos: [],
   verificationPhotoUri: null,
-  bio: '',
+  bio: "",
   height: null,
   weight: null,
   smoking: null,
@@ -99,9 +101,9 @@ const initialState = {
   pets: [],
   education: null,
   religion: null,
-  jobTitle: '',
-  company: '',
-  school: '',
+  jobTitle: "",
+  company: "",
+  school: "",
   lookingFor: [],
   relationshipIntent: [],
   activities: [],

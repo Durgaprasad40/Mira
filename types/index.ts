@@ -1,51 +1,92 @@
 // User Types
-export type Gender = 'male' | 'female' | 'non_binary' | 'other';
+export type Gender = "male" | "female" | "non_binary" | "other";
 
 export type RelationshipIntent =
-  | 'long_term'
-  | 'short_term'
-  | 'fwb'
-  | 'figuring_out'
-  | 'short_to_long'
-  | 'long_to_short'
-  | 'new_friends'
-  | 'open_to_anything';
+  | "long_term"
+  | "short_term"
+  | "fwb"
+  | "figuring_out"
+  | "short_to_long"
+  | "long_to_short"
+  | "new_friends"
+  | "open_to_anything";
 
 export type ActivityFilter =
-  | 'coffee'
-  | 'date_night'
-  | 'sports'
-  | 'movies'
-  | 'free_tonight'
-  | 'foodie'
-  | 'gym_partner'
-  | 'concerts'
-  | 'travel'
-  | 'outdoors'
-  | 'art_culture'
-  | 'gaming'
-  | 'nightlife'
-  | 'brunch'
-  | 'study_date'
-  | 'this_weekend'
-  | 'beach_pool'
-  | 'road_trip'
-  | 'photography'
-  | 'volunteering';
+  | "coffee"
+  | "date_night"
+  | "sports"
+  | "movies"
+  | "free_tonight"
+  | "foodie"
+  | "gym_partner"
+  | "concerts"
+  | "travel"
+  | "outdoors"
+  | "art_culture"
+  | "gaming"
+  | "nightlife"
+  | "brunch"
+  | "study_date"
+  | "this_weekend"
+  | "beach_pool"
+  | "road_trip"
+  | "photography"
+  | "volunteering";
 
-export type SubscriptionTier = 'free' | 'basic' | 'premium';
+export type SubscriptionTier = "free" | "basic" | "premium";
 
-export type SmokingStatus = 'never' | 'sometimes' | 'regularly' | 'trying_to_quit';
-export type DrinkingStatus = 'never' | 'socially' | 'regularly' | 'sober';
-export type KidsStatus = 'have_and_want_more' | 'have_and_dont_want_more' | 'dont_have_and_want' | 'dont_have_and_dont_want' | 'not_sure';
-export type EducationLevel = 'high_school' | 'some_college' | 'bachelors' | 'masters' | 'doctorate' | 'trade_school' | 'other';
-export type Religion = 'christian' | 'muslim' | 'hindu' | 'buddhist' | 'jewish' | 'sikh' | 'atheist' | 'agnostic' | 'spiritual' | 'other' | 'prefer_not_to_say';
+export type SmokingStatus =
+  | "never"
+  | "sometimes"
+  | "regularly"
+  | "trying_to_quit";
+export type DrinkingStatus = "never" | "socially" | "regularly" | "sober";
+export type KidsStatus =
+  | "have_and_want_more"
+  | "have_and_dont_want_more"
+  | "dont_have_and_want"
+  | "dont_have_and_dont_want"
+  | "not_sure";
+export type EducationLevel =
+  | "high_school"
+  | "some_college"
+  | "bachelors"
+  | "masters"
+  | "doctorate"
+  | "trade_school"
+  | "other";
+export type Religion =
+  | "christian"
+  | "muslim"
+  | "hindu"
+  | "buddhist"
+  | "jewish"
+  | "sikh"
+  | "atheist"
+  | "agnostic"
+  | "spiritual"
+  | "other"
+  | "prefer_not_to_say";
+export type ExerciseStatus = "never" | "sometimes" | "regularly" | "daily";
+export type PetType =
+  | "dog"
+  | "cat"
+  | "bird"
+  | "other"
+  | "none"
+  | "want_pets"
+  | "allergic";
 
-export type SortOption = 'recommended' | 'distance' | 'age' | 'recently_active' | 'newest';
+export type SortOption =
+  | "recommended"
+  | "distance"
+  | "age"
+  | "recently_active"
+  | "newest";
 
-export type SwipeAction = 'like' | 'pass' | 'super_like';
+export type SwipeAction = "like" | "pass" | "super_like";
 
-export type MessageType = 'text' | 'image' | 'template' | 'dare';
+export type MessageType = "text" | "image" | "template" | "dare";
 
 // User Profile
 export interface UserProfile {
@@ -164,7 +205,13 @@ export interface Conversation {
 export interface Notification {
   id: string;
   userId: string;
-  type: 'match' | 'message' | 'super_like' | 'crossed_paths' | 'subscription' | 'weekly_refresh';
+  type:
+    | "match"
+    | "message"
+    | "super_like"
+    | "crossed_paths"
+    | "subscription"
+    | "weekly_refresh";
   title: string;
   body: string;
   data?: Record<string, string>;
@@ -206,43 +253,43 @@ export interface SubscriptionPlan {
 // In-app Purchase
 export interface IAPProduct {
   id: string;
-  type: 'boost' | 'super_likes' | 'messages';
+  type: "boost" | "super_likes" | "messages";
   quantity: number;
   price: number;
   duration?: number; // hours for boost
 }
 
 // Feature access based on user type
-export type VisibilityMode = 'full' | 'partial' | 'limited';
+export type VisibilityMode = "full" | "partial" | "limited";
 
 export interface FeatureAccess {
-  swipesPerDay: number | 'unlimited';
-  superLikesPerWeek: number | 'unlimited';
-  messagesPerWeek: number | 'unlimited';
-  boostsPerMonth: number | 'unlimited';
+  swipesPerDay: number | "unlimited";
+  superLikesPerWeek: number | "unlimited";
+  messagesPerWeek: number | "unlimited";
+  boostsPerMonth: number | "unlimited";
   canRewind: boolean;
   canSeeWhoLikedYou: boolean;
   incognitoAccess: VisibilityMode;
-  customMessageLength: number | 'unlimited';
+  customMessageLength: number | "unlimited";
   templateCount: number;
 }
 
 // Onboarding Step
 export type OnboardingStep =
-  | 'welcome'
-  | 'email_phone'
-  | 'otp'
-  | 'password'
-  | 'basic_info'
-  | 'photo_upload'
-  | 'face_verification'
-  | 'additional_photos'
-  | 'bio'
-  | 'profile_details'
-  | 'preferences'
-  | 'permissions'
-  | 'review'
-  | 'tutorial';
+  | "welcome"
+  | "email_phone"
+  | "otp"
+  | "password"
+  | "basic_info"
+  | "photo_upload"
+  | "face_verification"
+  | "additional_photos"
+  | "bio"
+  | "profile_details"
+  | "preferences"
+  | "permissions"
+  | "review"
+  | "tutorial";
 
 // API Response Types
 export interface ApiResponse<T> {
