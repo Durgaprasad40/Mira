@@ -1,8 +1,8 @@
-import { Stack } from 'expo-router';
-import { ConvexProvider } from 'convex/react';
-import { convex, isDemoMode } from '@/hooks/useConvex';
-import { View, Text, StyleSheet } from 'react-native';
-import { StatusBar } from 'expo-status-bar';
+import { Stack } from "expo-router";
+import { ConvexProvider } from "convex/react";
+import { convex, isDemoMode } from "@/hooks/useConvex";
+import { View, Text, StyleSheet } from "react-native";
+import { StatusBar } from "expo-status-bar";
 
 function DemoBanner() {
   if (!isDemoMode) return null;
@@ -21,10 +21,11 @@ export default function RootLayout() {
     <ConvexProvider client={convex}>
       <StatusBar style="light" />
       <DemoBanner />
-      <Stack>
-        <Stack.Screen name="(auth)" options={{ headerShown: false }} />
-        <Stack.Screen name="(onboarding)" options={{ headerShown: false }} />
-        <Stack.Screen name="(main)" options={{ headerShown: false }} />
+      <Stack screenOptions={{ headerShown: false }}>
+        <Stack.Screen name="index" />
+        <Stack.Screen name="(auth)" />
+        <Stack.Screen name="(onboarding)" />
+        <Stack.Screen name="(main)" />
       </Stack>
     </ConvexProvider>
   );
@@ -32,13 +33,13 @@ export default function RootLayout() {
 
 const styles = StyleSheet.create({
   demoBanner: {
-    backgroundColor: '#FF6B6B',
+    backgroundColor: "#FF6B6B",
     padding: 8,
-    alignItems: 'center',
+    alignItems: "center",
   },
   demoText: {
-    color: 'white',
+    color: "white",
     fontSize: 12,
-    fontWeight: '600',
+    fontWeight: "600",
   },
 });

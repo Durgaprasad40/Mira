@@ -1,9 +1,8 @@
 import { View, Text, StyleSheet, Image } from "react-native";
 import { Button } from "@/components/ui";
-import { useRouter } from "expo-router";
+import { useRouter, Redirect } from "expo-router";
 import { COLORS } from "@/lib/constants";
 import { useAuthStore } from "@/stores/authStore";
-import { useEffect } from "react";
 import { Ionicons } from "@expo/vector-icons";
 import { LinearGradient } from "expo-linear-gradient";
 
@@ -11,16 +10,13 @@ export default function WelcomeScreen() {
   const router = useRouter();
   const { isAuthenticated, onboardingCompleted } = useAuthStore();
 
-  useEffect(() => {
-    // Check auth state and redirect accordingly
-    if (isAuthenticated) {
-      if (onboardingCompleted) {
-        router.replace("/(main)/(tabs)/home");
-      } else {
-        router.replace("/(onboarding)");
-      }
+  // Use Redirect component instead of useEffect navigation
+  if (isAuthenticated) {
+    if (onboardingCompleted) {
+      return <Redirect href="/(main)/(tabs)/discover" />;
     }
-  }, [isAuthenticated, onboardingCompleted]);
+    return <Redirect href="/(onboarding)" />;
+  }
 
   return (
     <LinearGradient

@@ -1,6 +1,6 @@
-import { Tabs } from 'expo-router';
-import { Ionicons } from '@expo/vector-icons';
-import { COLORS } from '@/lib/constants';
+import { Tabs } from "expo-router";
+import { Ionicons } from "@expo/vector-icons";
+import { COLORS } from "@/lib/constants";
 
 export default function MainTabsLayout() {
   return (
@@ -14,16 +14,22 @@ export default function MainTabsLayout() {
       <Tabs.Screen
         name="home"
         options={{
-          title: 'Discover',
+          title: "Discover",
           tabBarIcon: ({ color, size }) => (
             <Ionicons name="flame" size={size} color={color} />
           ),
         }}
       />
       <Tabs.Screen
+        name="discover"
+        options={{
+          href: null, // Hide from tab bar - duplicate functionality
+        }}
+      />
+      <Tabs.Screen
         name="explore"
         options={{
-          title: 'Explore',
+          title: "Explore",
           tabBarIcon: ({ color, size }) => (
             <Ionicons name="search" size={size} color={color} />
           ),
@@ -32,7 +38,7 @@ export default function MainTabsLayout() {
       <Tabs.Screen
         name="messages"
         options={{
-          title: 'Messages',
+          title: "Messages",
           tabBarIcon: ({ color, size }) => (
             <Ionicons name="chatbubbles" size={size} color={color} />
           ),
@@ -41,7 +47,7 @@ export default function MainTabsLayout() {
       <Tabs.Screen
         name="incognito"
         options={{
-          title: 'Incognito',
+          title: "Incognito",
           tabBarIcon: ({ color, size }) => (
             <Ionicons name="eye-off" size={size} color={color} />
           ),
@@ -50,7 +56,7 @@ export default function MainTabsLayout() {
       <Tabs.Screen
         name="rooms"
         options={{
-          title: 'Rooms',
+          title: "Rooms",
           tabBarIcon: ({ color, size }) => (
             <Ionicons name="people" size={size} color={color} />
           ),
@@ -59,7 +65,7 @@ export default function MainTabsLayout() {
       <Tabs.Screen
         name="profile"
         options={{
-          title: 'Profile',
+          title: "Profile",
           tabBarIcon: ({ color, size }) => (
             <Ionicons name="person" size={size} color={color} />
           ),
@@ -68,4 +74,3 @@ export default function MainTabsLayout() {
     </Tabs>
   );
 }
-

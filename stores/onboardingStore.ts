@@ -1,4 +1,6 @@
 import { create } from "zustand";
+import { persist, createJSONStorage } from "zustand/middleware";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import {
   OnboardingStep,
   Gender,
@@ -112,102 +114,112 @@ const initialState = {
   maxDistance: 50,
 };
 
-export const useOnboardingStore = create<OnboardingState>((set) => ({
-  ...initialState,
+export const useOnboardingStore = create<OnboardingState>()(
+  persist(
+    (set) => ({
+      ...initialState,
 
-  setStep: (step) => set({ currentStep: step }),
+      setStep: (step) => set({ currentStep: step }),
 
-  setEmail: (email) => set({ email }),
+      setEmail: (email) => set({ email }),
 
-  setPhone: (phone) => set({ phone }),
+      setPhone: (phone) => set({ phone }),
 
-  setPassword: (password) => set({ password }),
+      setPassword: (password) => set({ password }),
 
-  setName: (name) => set({ name }),
+      setName: (name) => set({ name }),
 
-  setDateOfBirth: (dateOfBirth) => set({ dateOfBirth }),
+      setDateOfBirth: (dateOfBirth) => set({ dateOfBirth }),
 
-  setGender: (gender) => set({ gender }),
+      setGender: (gender) => set({ gender }),
 
-  addPhoto: (uri) =>
-    set((state) => ({
-      photos: state.photos.length < 6 ? [...state.photos, uri] : state.photos,
-    })),
+      addPhoto: (uri) =>
+        set((state) => ({
+          photos:
+            state.photos.length < 6 ? [...state.photos, uri] : state.photos,
+        })),
 
-  removePhoto: (index) =>
-    set((state) => ({
-      photos: state.photos.filter((_, i) => i !== index),
-    })),
+      removePhoto: (index) =>
+        set((state) => ({
+          photos: state.photos.filter((_, i) => i !== index),
+        })),
 
-  reorderPhotos: (photos) => set({ photos }),
+      reorderPhotos: (photos) => set({ photos }),
 
-  setVerificationPhoto: (uri) => set({ verificationPhotoUri: uri }),
+      setVerificationPhoto: (uri) => set({ verificationPhotoUri: uri }),
 
-  setBio: (bio) => set({ bio }),
+      setBio: (bio) => set({ bio }),
 
-  setHeight: (height) => set({ height }),
+      setHeight: (height) => set({ height }),
 
-  setWeight: (weight) => set({ weight }),
+      setWeight: (weight) => set({ weight }),
 
-  setSmoking: (smoking) => set({ smoking }),
+      setSmoking: (smoking) => set({ smoking }),
 
-  setDrinking: (drinking) => set({ drinking }),
+      setDrinking: (drinking) => set({ drinking }),
 
-  setKids: (kids) => set({ kids }),
+      setKids: (kids) => set({ kids }),
 
-  setExercise: (exercise) => set({ exercise }),
+      setExercise: (exercise) => set({ exercise }),
 
-  setPets: (pets) => set({ pets }),
+      setPets: (pets) => set({ pets }),
 
-  togglePet: (pet) =>
-    set((state) => ({
-      pets: state.pets.includes(pet)
-        ? state.pets.filter((p) => p !== pet)
-        : [...state.pets, pet],
-    })),
+      togglePet: (pet) =>
+        set((state) => ({
+          pets: state.pets.includes(pet)
+            ? state.pets.filter((p) => p !== pet)
+            : [...state.pets, pet],
+        })),
 
-  setEducation: (education) => set({ education }),
+      setEducation: (education) => set({ education }),
 
-  setReligion: (religion) => set({ religion }),
+      setReligion: (religion) => set({ religion }),
 
-  setJobTitle: (jobTitle) => set({ jobTitle }),
+      setJobTitle: (jobTitle) => set({ jobTitle }),
 
-  setCompany: (company) => set({ company }),
+      setCompany: (company) => set({ company }),
 
-  setSchool: (school) => set({ school }),
+      setSchool: (school) => set({ school }),
 
-  setLookingFor: (lookingFor) => set({ lookingFor }),
+      setLookingFor: (lookingFor) => set({ lookingFor }),
 
-  toggleLookingFor: (gender) =>
-    set((state) => ({
-      lookingFor: state.lookingFor.includes(gender)
-        ? state.lookingFor.filter((g) => g !== gender)
-        : [...state.lookingFor, gender],
-    })),
+      toggleLookingFor: (gender) =>
+        set((state) => ({
+          lookingFor: state.lookingFor.includes(gender)
+            ? state.lookingFor.filter((g) => g !== gender)
+            : [...state.lookingFor, gender],
+        })),
 
-  setRelationshipIntent: (relationshipIntent) => set({ relationshipIntent }),
+      setRelationshipIntent: (relationshipIntent) =>
+        set({ relationshipIntent }),
 
-  toggleRelationshipIntent: (intent) =>
-    set((state) => ({
-      relationshipIntent: state.relationshipIntent.includes(intent)
-        ? state.relationshipIntent.filter((i) => i !== intent)
-        : [...state.relationshipIntent, intent],
-    })),
+      toggleRelationshipIntent: (intent) =>
+        set((state) => ({
+          relationshipIntent: state.relationshipIntent.includes(intent)
+            ? state.relationshipIntent.filter((i) => i !== intent)
+            : [...state.relationshipIntent, intent],
+        })),
 
-  setActivities: (activities) => set({ activities }),
+      setActivities: (activities) => set({ activities }),
 
-  toggleActivity: (activity) =>
-    set((state) => ({
-      activities: state.activities.includes(activity)
-        ? state.activities.filter((a) => a !== activity)
-        : [...state.activities, activity],
-    })),
+      toggleActivity: (activity) =>
+        set((state) => ({
+          activities: state.activities.includes(activity)
+            ? state.activities.filter((a) => a !== activity)
+            : [...state.activities, activity],
+        })),
 
-  setMinAge: (minAge) => set({ minAge }),
+      setMinAge: (minAge) => set({ minAge }),
 
-  setMaxAge: (maxAge) => set({ maxAge }),
+      setMaxAge: (maxAge) => set({ maxAge }),
 
-  setMaxDistance: (maxDistance) => set({ maxDistance }),
+      setMaxDistance: (maxDistance) => set({ maxDistance }),
 
-  reset: () => set(initialState),
-}));
+      reset: () => set(initialState),
+    }),
+    {
+      name: "onboarding-storage",
+      storage: createJSONStorage(() => AsyncStorage),
+    },
+  ),
+);

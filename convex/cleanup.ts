@@ -1,6 +1,6 @@
-import { mutation, internalMutation, query, action } from './_generated/server';
-import { v } from 'convex/values';
-import { internal } from './_generated/api';
+import { mutation, internalMutation, query, action } from "./_generated/server";
+import { v } from "convex/values";
+import { internal } from "./_generated/api";
 
 // ============================================
 // CLEANUP UTILITIES FOR CONVEX DATABASE
@@ -28,22 +28,22 @@ export const getDatabaseStats = query({
       sessions,
       filterPresets,
     ] = await Promise.all([
-      ctx.db.query('users').collect(),
-      ctx.db.query('photos').collect(),
-      ctx.db.query('likes').collect(),
-      ctx.db.query('matches').collect(),
-      ctx.db.query('conversations').collect(),
-      ctx.db.query('messages').collect(),
-      ctx.db.query('notifications').collect(),
-      ctx.db.query('crossedPaths').collect(),
-      ctx.db.query('dares').collect(),
-      ctx.db.query('subscriptionRecords').collect(),
-      ctx.db.query('purchases').collect(),
-      ctx.db.query('reports').collect(),
-      ctx.db.query('blocks').collect(),
-      ctx.db.query('otpCodes').collect(),
-      ctx.db.query('sessions').collect(),
-      ctx.db.query('filterPresets').collect(),
+      ctx.db.query("users").collect(),
+      ctx.db.query("photos").collect(),
+      ctx.db.query("likes").collect(),
+      ctx.db.query("matches").collect(),
+      ctx.db.query("conversations").collect(),
+      ctx.db.query("messages").collect(),
+      ctx.db.query("notifications").collect(),
+      ctx.db.query("crossedPaths").collect(),
+      ctx.db.query("dares").collect(),
+      ctx.db.query("subscriptionRecords").collect(),
+      ctx.db.query("purchases").collect(),
+      ctx.db.query("reports").collect(),
+      ctx.db.query("blocks").collect(),
+      ctx.db.query("otpCodes").collect(),
+      ctx.db.query("sessions").collect(),
+      ctx.db.query("filterPresets").collect(),
     ]);
 
     return {
@@ -94,8 +94,8 @@ export const cleanupExpiredOtpCodes = mutation({
   handler: async (ctx) => {
     const now = Date.now();
     const expiredOtps = await ctx.db
-      .query('otpCodes')
-      .filter((q) => q.lt(q.field('expiresAt'), now))
+      .query("otpCodes")
+      .filter((q) => q.lt(q.field("expiresAt"), now))
       .collect();
 
     let deletedCount = 0;
@@ -104,7 +104,10 @@ export const cleanupExpiredOtpCodes = mutation({
       deletedCount++;
     }
 
-    return { deletedCount, message: `Deleted ${deletedCount} expired OTP codes` };
+    return {
+      deletedCount,
+      message: `Deleted ${deletedCount} expired OTP codes`,
+    };
   },
 });
 
@@ -114,8 +117,8 @@ export const cleanupExpiredSessions = mutation({
   handler: async (ctx) => {
     const now = Date.now();
     const expiredSessions = await ctx.db
-      .query('sessions')
-      .filter((q) => q.lt(q.field('expiresAt'), now))
+      .query("sessions")
+      .filter((q) => q.lt(q.field("expiresAt"), now))
       .collect();
 
     let deletedCount = 0;
@@ -124,7 +127,10 @@ export const cleanupExpiredSessions = mutation({
       deletedCount++;
     }
 
-    return { deletedCount, message: `Deleted ${deletedCount} expired sessions` };
+    return {
+      deletedCount,
+      message: `Deleted ${deletedCount} expired sessions`,
+    };
   },
 });
 
@@ -138,12 +144,12 @@ export const cleanupOldNotifications = mutation({
     const cutoffDate = Date.now() - daysOld * 24 * 60 * 60 * 1000;
 
     const oldNotifications = await ctx.db
-      .query('notifications')
+      .query("notifications")
       .filter((q) =>
         q.and(
-          q.neq(q.field('readAt'), undefined),
-          q.lt(q.field('createdAt'), cutoffDate)
-        )
+          q.neq(q.field("readAt"), undefined),
+          q.lt(q.field("createdAt"), cutoffDate),
+        ),
       )
       .collect();
 
@@ -153,7 +159,10 @@ export const cleanupOldNotifications = mutation({
       deletedCount++;
     }
 
-    return { deletedCount, message: `Deleted ${deletedCount} old read notifications` };
+    return {
+      deletedCount,
+      message: `Deleted ${deletedCount} old read notifications`,
+    };
   },
 });
 
@@ -163,12 +172,12 @@ export const cleanupExpiredCrossedPathsUnlocks = mutation({
   handler: async (ctx) => {
     const now = Date.now();
     const expiredUnlocks = await ctx.db
-      .query('crossedPaths')
+      .query("crossedPaths")
       .filter((q) =>
         q.and(
-          q.neq(q.field('unlockExpiresAt'), undefined),
-          q.lt(q.field('unlockExpiresAt'), now)
-        )
+          q.neq(q.field("unlockExpiresAt"), undefined),
+          q.lt(q.field("unlockExpiresAt"), now),
+        ),
       )
       .collect();
 
@@ -178,7 +187,10 @@ export const cleanupExpiredCrossedPathsUnlocks = mutation({
       updatedCount++;
     }
 
-    return { updatedCount, message: `Reset ${updatedCount} expired crossed paths unlocks` };
+    return {
+      updatedCount,
+      message: `Reset ${updatedCount} expired crossed paths unlocks`,
+    };
   },
 });
 
@@ -190,7 +202,7 @@ export const cleanupExpiredCrossedPathsUnlocks = mutation({
 export const cleanupOrphanedPhotos = mutation({
   args: {},
   handler: async (ctx) => {
-    const photos = await ctx.db.query('photos').collect();
+    const photos = await ctx.db.query("photos").collect();
     let deletedCount = 0;
 
     for (const photo of photos) {
@@ -215,7 +227,7 @@ export const cleanupOrphanedPhotos = mutation({
 export const cleanupOrphanedLikes = mutation({
   args: {},
   handler: async (ctx) => {
-    const likes = await ctx.db.query('likes').collect();
+    const likes = await ctx.db.query("likes").collect();
     let deletedCount = 0;
 
     for (const like of likes) {
@@ -236,7 +248,7 @@ export const cleanupOrphanedLikes = mutation({
 export const cleanupOrphanedMatches = mutation({
   args: {},
   handler: async (ctx) => {
-    const matches = await ctx.db.query('matches').collect();
+    const matches = await ctx.db.query("matches").collect();
     let deletedCount = 0;
 
     for (const match of matches) {
@@ -249,7 +261,10 @@ export const cleanupOrphanedMatches = mutation({
       }
     }
 
-    return { deletedCount, message: `Deleted ${deletedCount} orphaned matches` };
+    return {
+      deletedCount,
+      message: `Deleted ${deletedCount} orphaned matches`,
+    };
   },
 });
 
@@ -257,7 +272,7 @@ export const cleanupOrphanedMatches = mutation({
 export const cleanupOrphanedConversations = mutation({
   args: {},
   handler: async (ctx) => {
-    const conversations = await ctx.db.query('conversations').collect();
+    const conversations = await ctx.db.query("conversations").collect();
     let deletedCount = 0;
 
     for (const conversation of conversations) {
@@ -282,8 +297,10 @@ export const cleanupOrphanedConversations = mutation({
       if (hasOrphanedParticipant) {
         // Delete all messages in the conversation first
         const messages = await ctx.db
-          .query('messages')
-          .withIndex('by_conversation', (q) => q.eq('conversationId', conversation._id))
+          .query("messages")
+          .withIndex("by_conversation", (q) =>
+            q.eq("conversationId", conversation._id),
+          )
           .collect();
 
         for (const message of messages) {
@@ -302,7 +319,10 @@ export const cleanupOrphanedConversations = mutation({
       }
     }
 
-    return { deletedCount, message: `Deleted ${deletedCount} orphaned conversations with their messages` };
+    return {
+      deletedCount,
+      message: `Deleted ${deletedCount} orphaned conversations with their messages`,
+    };
   },
 });
 
@@ -310,7 +330,7 @@ export const cleanupOrphanedConversations = mutation({
 export const cleanupOrphanedMessages = mutation({
   args: {},
   handler: async (ctx) => {
-    const messages = await ctx.db.query('messages').collect();
+    const messages = await ctx.db.query("messages").collect();
     let deletedCount = 0;
 
     for (const message of messages) {
@@ -328,7 +348,10 @@ export const cleanupOrphanedMessages = mutation({
       }
     }
 
-    return { deletedCount, message: `Deleted ${deletedCount} orphaned messages` };
+    return {
+      deletedCount,
+      message: `Deleted ${deletedCount} orphaned messages`,
+    };
   },
 });
 
@@ -336,7 +359,7 @@ export const cleanupOrphanedMessages = mutation({
 export const cleanupOrphanedNotifications = mutation({
   args: {},
   handler: async (ctx) => {
-    const notifications = await ctx.db.query('notifications').collect();
+    const notifications = await ctx.db.query("notifications").collect();
     let deletedCount = 0;
 
     for (const notification of notifications) {
@@ -347,7 +370,10 @@ export const cleanupOrphanedNotifications = mutation({
       }
     }
 
-    return { deletedCount, message: `Deleted ${deletedCount} orphaned notifications` };
+    return {
+      deletedCount,
+      message: `Deleted ${deletedCount} orphaned notifications`,
+    };
   },
 });
 
@@ -355,7 +381,7 @@ export const cleanupOrphanedNotifications = mutation({
 export const cleanupOrphanedDares = mutation({
   args: {},
   handler: async (ctx) => {
-    const dares = await ctx.db.query('dares').collect();
+    const dares = await ctx.db.query("dares").collect();
     let deletedCount = 0;
 
     for (const dare of dares) {
@@ -376,7 +402,7 @@ export const cleanupOrphanedDares = mutation({
 export const cleanupOrphanedCrossedPaths = mutation({
   args: {},
   handler: async (ctx) => {
-    const crossedPaths = await ctx.db.query('crossedPaths').collect();
+    const crossedPaths = await ctx.db.query("crossedPaths").collect();
     let deletedCount = 0;
 
     for (const crossedPath of crossedPaths) {
@@ -389,7 +415,10 @@ export const cleanupOrphanedCrossedPaths = mutation({
       }
     }
 
-    return { deletedCount, message: `Deleted ${deletedCount} orphaned crossed paths` };
+    return {
+      deletedCount,
+      message: `Deleted ${deletedCount} orphaned crossed paths`,
+    };
   },
 });
 
@@ -397,7 +426,7 @@ export const cleanupOrphanedCrossedPaths = mutation({
 export const cleanupOrphanedBlocks = mutation({
   args: {},
   handler: async (ctx) => {
-    const blocks = await ctx.db.query('blocks').collect();
+    const blocks = await ctx.db.query("blocks").collect();
     let deletedCount = 0;
 
     for (const block of blocks) {
@@ -418,7 +447,7 @@ export const cleanupOrphanedBlocks = mutation({
 export const cleanupOrphanedReports = mutation({
   args: {},
   handler: async (ctx) => {
-    const reports = await ctx.db.query('reports').collect();
+    const reports = await ctx.db.query("reports").collect();
     let deletedCount = 0;
 
     for (const report of reports) {
@@ -431,7 +460,10 @@ export const cleanupOrphanedReports = mutation({
       }
     }
 
-    return { deletedCount, message: `Deleted ${deletedCount} orphaned reports` };
+    return {
+      deletedCount,
+      message: `Deleted ${deletedCount} orphaned reports`,
+    };
   },
 });
 
@@ -439,7 +471,7 @@ export const cleanupOrphanedReports = mutation({
 export const cleanupOrphanedFilterPresets = mutation({
   args: {},
   handler: async (ctx) => {
-    const presets = await ctx.db.query('filterPresets').collect();
+    const presets = await ctx.db.query("filterPresets").collect();
     let deletedCount = 0;
 
     for (const preset of presets) {
@@ -450,7 +482,10 @@ export const cleanupOrphanedFilterPresets = mutation({
       }
     }
 
-    return { deletedCount, message: `Deleted ${deletedCount} orphaned filter presets` };
+    return {
+      deletedCount,
+      message: `Deleted ${deletedCount} orphaned filter presets`,
+    };
   },
 });
 
@@ -458,7 +493,7 @@ export const cleanupOrphanedFilterPresets = mutation({
 export const cleanupOrphanedSubscriptionRecords = mutation({
   args: {},
   handler: async (ctx) => {
-    const records = await ctx.db.query('subscriptionRecords').collect();
+    const records = await ctx.db.query("subscriptionRecords").collect();
     let deletedCount = 0;
 
     for (const record of records) {
@@ -469,7 +504,10 @@ export const cleanupOrphanedSubscriptionRecords = mutation({
       }
     }
 
-    return { deletedCount, message: `Deleted ${deletedCount} orphaned subscription records` };
+    return {
+      deletedCount,
+      message: `Deleted ${deletedCount} orphaned subscription records`,
+    };
   },
 });
 
@@ -477,7 +515,7 @@ export const cleanupOrphanedSubscriptionRecords = mutation({
 export const cleanupOrphanedPurchases = mutation({
   args: {},
   handler: async (ctx) => {
-    const purchases = await ctx.db.query('purchases').collect();
+    const purchases = await ctx.db.query("purchases").collect();
     let deletedCount = 0;
 
     for (const purchase of purchases) {
@@ -488,7 +526,10 @@ export const cleanupOrphanedPurchases = mutation({
       }
     }
 
-    return { deletedCount, message: `Deleted ${deletedCount} orphaned purchases` };
+    return {
+      deletedCount,
+      message: `Deleted ${deletedCount} orphaned purchases`,
+    };
   },
 });
 
@@ -502,7 +543,7 @@ export const cleanupAllExpiredData = mutation({
   handler: async (ctx) => {
     const now = Date.now();
     const thirtyDaysAgo = now - 30 * 24 * 60 * 60 * 1000;
-    
+
     let results = {
       expiredOtpCodes: 0,
       expiredSessions: 0,
@@ -512,8 +553,8 @@ export const cleanupAllExpiredData = mutation({
 
     // Clean expired OTP codes
     const expiredOtps = await ctx.db
-      .query('otpCodes')
-      .filter((q) => q.lt(q.field('expiresAt'), now))
+      .query("otpCodes")
+      .filter((q) => q.lt(q.field("expiresAt"), now))
       .collect();
     for (const otp of expiredOtps) {
       await ctx.db.delete(otp._id);
@@ -522,8 +563,8 @@ export const cleanupAllExpiredData = mutation({
 
     // Clean expired sessions
     const expiredSessions = await ctx.db
-      .query('sessions')
-      .filter((q) => q.lt(q.field('expiresAt'), now))
+      .query("sessions")
+      .filter((q) => q.lt(q.field("expiresAt"), now))
       .collect();
     for (const session of expiredSessions) {
       await ctx.db.delete(session._id);
@@ -532,12 +573,12 @@ export const cleanupAllExpiredData = mutation({
 
     // Clean old read notifications
     const oldNotifications = await ctx.db
-      .query('notifications')
+      .query("notifications")
       .filter((q) =>
         q.and(
-          q.neq(q.field('readAt'), undefined),
-          q.lt(q.field('createdAt'), thirtyDaysAgo)
-        )
+          q.neq(q.field("readAt"), undefined),
+          q.lt(q.field("createdAt"), thirtyDaysAgo),
+        ),
       )
       .collect();
     for (const notification of oldNotifications) {
@@ -547,12 +588,12 @@ export const cleanupAllExpiredData = mutation({
 
     // Reset expired crossed paths unlocks
     const expiredUnlocks = await ctx.db
-      .query('crossedPaths')
+      .query("crossedPaths")
       .filter((q) =>
         q.and(
-          q.neq(q.field('unlockExpiresAt'), undefined),
-          q.lt(q.field('unlockExpiresAt'), now)
-        )
+          q.neq(q.field("unlockExpiresAt"), undefined),
+          q.lt(q.field("unlockExpiresAt"), now),
+        ),
       )
       .collect();
     for (const crossedPath of expiredUnlocks) {
@@ -579,24 +620,24 @@ export const cleanupAllExpiredData = mutation({
 export const clearTable = mutation({
   args: {
     tableName: v.union(
-      v.literal('users'),
-      v.literal('photos'),
-      v.literal('likes'),
-      v.literal('matches'),
-      v.literal('conversations'),
-      v.literal('messages'),
-      v.literal('notifications'),
-      v.literal('crossedPaths'),
-      v.literal('dares'),
-      v.literal('subscriptionRecords'),
-      v.literal('purchases'),
-      v.literal('reports'),
-      v.literal('blocks'),
-      v.literal('otpCodes'),
-      v.literal('sessions'),
-      v.literal('filterPresets')
+      v.literal("users"),
+      v.literal("photos"),
+      v.literal("likes"),
+      v.literal("matches"),
+      v.literal("conversations"),
+      v.literal("messages"),
+      v.literal("notifications"),
+      v.literal("crossedPaths"),
+      v.literal("dares"),
+      v.literal("subscriptionRecords"),
+      v.literal("purchases"),
+      v.literal("reports"),
+      v.literal("blocks"),
+      v.literal("otpCodes"),
+      v.literal("sessions"),
+      v.literal("filterPresets"),
     ),
-    confirmDelete: v.literal('I_CONFIRM_DELETE_ALL_DATA'),
+    confirmDelete: v.literal("I_CONFIRM_DELETE_ALL_DATA"),
   },
   handler: async (ctx, args) => {
     const records = await ctx.db.query(args.tableName).collect();
@@ -604,21 +645,29 @@ export const clearTable = mutation({
 
     for (const record of records) {
       // Handle storage cleanup for photos and messages
-      if (args.tableName === 'photos' && 'storageId' in record) {
+      if (args.tableName === "photos" && "storageId" in record) {
         try {
           await ctx.storage.delete(record.storageId as any);
         } catch (e) {
           // Storage might already be deleted
         }
       }
-      if (args.tableName === 'messages' && 'imageStorageId' in record && record.imageStorageId) {
+      if (
+        args.tableName === "messages" &&
+        "imageStorageId" in record &&
+        record.imageStorageId
+      ) {
         try {
           await ctx.storage.delete(record.imageStorageId as any);
         } catch (e) {
           // Storage might already be deleted
         }
       }
-      if (args.tableName === 'users' && 'verificationPhotoId' in record && record.verificationPhotoId) {
+      if (
+        args.tableName === "users" &&
+        "verificationPhotoId" in record &&
+        record.verificationPhotoId
+      ) {
         try {
           await ctx.storage.delete(record.verificationPhotoId as any);
         } catch (e) {
@@ -640,26 +689,26 @@ export const clearTable = mutation({
 // DANGEROUS: Delete ALL data from ALL tables
 export const clearAllTables = mutation({
   args: {
-    confirmDelete: v.literal('I_CONFIRM_DELETE_ENTIRE_DATABASE'),
+    confirmDelete: v.literal("I_CONFIRM_DELETE_ENTIRE_DATABASE"),
   },
   handler: async (ctx) => {
     const tables = [
-      'messages',
-      'conversations',
-      'likes',
-      'matches',
-      'photos',
-      'notifications',
-      'crossedPaths',
-      'dares',
-      'subscriptionRecords',
-      'purchases',
-      'reports',
-      'blocks',
-      'otpCodes',
-      'sessions',
-      'filterPresets',
-      'users', // Delete users last due to foreign key references
+      "messages",
+      "conversations",
+      "likes",
+      "matches",
+      "photos",
+      "notifications",
+      "crossedPaths",
+      "dares",
+      "subscriptionRecords",
+      "purchases",
+      "reports",
+      "blocks",
+      "otpCodes",
+      "sessions",
+      "filterPresets",
+      "users", // Delete users last due to foreign key references
     ] as const;
 
     const results: Record<string, number> = {};
@@ -670,17 +719,25 @@ export const clearAllTables = mutation({
 
       for (const record of records) {
         // Handle storage cleanup
-        if (tableName === 'photos' && 'storageId' in record) {
+        if (tableName === "photos" && "storageId" in record) {
           try {
             await ctx.storage.delete(record.storageId as any);
           } catch (e) {}
         }
-        if (tableName === 'messages' && 'imageStorageId' in record && record.imageStorageId) {
+        if (
+          tableName === "messages" &&
+          "imageStorageId" in record &&
+          record.imageStorageId
+        ) {
           try {
             await ctx.storage.delete(record.imageStorageId as any);
           } catch (e) {}
         }
-        if (tableName === 'users' && 'verificationPhotoId' in record && record.verificationPhotoId) {
+        if (
+          tableName === "users" &&
+          "verificationPhotoId" in record &&
+          record.verificationPhotoId
+        ) {
           try {
             await ctx.storage.delete(record.verificationPhotoId as any);
           } catch (e) {}
@@ -708,20 +765,20 @@ export const clearAllTables = mutation({
 // Completely delete a user and all their data
 export const deleteUserCompletely = mutation({
   args: {
-    userId: v.id('users'),
+    userId: v.id("users"),
   },
   handler: async (ctx, args) => {
     const user = await ctx.db.get(args.userId);
     if (!user) {
-      throw new Error('User not found');
+      throw new Error("User not found");
     }
 
     const deletedData: Record<string, number> = {};
 
     // Delete photos
     const photos = await ctx.db
-      .query('photos')
-      .withIndex('by_user', (q) => q.eq('userId', args.userId))
+      .query("photos")
+      .withIndex("by_user", (q) => q.eq("userId", args.userId))
       .collect();
     deletedData.photos = 0;
     for (const photo of photos) {
@@ -741,12 +798,12 @@ export const deleteUserCompletely = mutation({
 
     // Delete likes (sent and received)
     const sentLikes = await ctx.db
-      .query('likes')
-      .withIndex('by_from_user', (q) => q.eq('fromUserId', args.userId))
+      .query("likes")
+      .withIndex("by_from_user", (q) => q.eq("fromUserId", args.userId))
       .collect();
     const receivedLikes = await ctx.db
-      .query('likes')
-      .withIndex('by_to_user', (q) => q.eq('toUserId', args.userId))
+      .query("likes")
+      .withIndex("by_to_user", (q) => q.eq("toUserId", args.userId))
       .collect();
     deletedData.likes = 0;
     for (const like of [...sentLikes, ...receivedLikes]) {
@@ -756,12 +813,12 @@ export const deleteUserCompletely = mutation({
 
     // Delete matches
     const matches1 = await ctx.db
-      .query('matches')
-      .withIndex('by_user1', (q) => q.eq('user1Id', args.userId))
+      .query("matches")
+      .withIndex("by_user1", (q) => q.eq("user1Id", args.userId))
       .collect();
     const matches2 = await ctx.db
-      .query('matches')
-      .withIndex('by_user2', (q) => q.eq('user2Id', args.userId))
+      .query("matches")
+      .withIndex("by_user2", (q) => q.eq("user2Id", args.userId))
       .collect();
     const allMatches = [...matches1, ...matches2];
     deletedData.matches = 0;
@@ -772,13 +829,15 @@ export const deleteUserCompletely = mutation({
     for (const match of allMatches) {
       if (match._id) {
         const conversations = await ctx.db
-          .query('conversations')
-          .withIndex('by_match', (q) => q.eq('matchId', match._id))
+          .query("conversations")
+          .withIndex("by_match", (q) => q.eq("matchId", match._id))
           .collect();
         for (const conversation of conversations) {
           const messages = await ctx.db
-            .query('messages')
-            .withIndex('by_conversation', (q) => q.eq('conversationId', conversation._id))
+            .query("messages")
+            .withIndex("by_conversation", (q) =>
+              q.eq("conversationId", conversation._id),
+            )
             .collect();
           for (const message of messages) {
             if (message.imageStorageId) {
@@ -799,8 +858,8 @@ export const deleteUserCompletely = mutation({
 
     // Delete notifications
     const notifications = await ctx.db
-      .query('notifications')
-      .withIndex('by_user', (q) => q.eq('userId', args.userId))
+      .query("notifications")
+      .withIndex("by_user", (q) => q.eq("userId", args.userId))
       .collect();
     deletedData.notifications = 0;
     for (const notification of notifications) {
@@ -810,12 +869,12 @@ export const deleteUserCompletely = mutation({
 
     // Delete crossed paths
     const crossedPaths1 = await ctx.db
-      .query('crossedPaths')
-      .withIndex('by_user1', (q) => q.eq('user1Id', args.userId))
+      .query("crossedPaths")
+      .withIndex("by_user1", (q) => q.eq("user1Id", args.userId))
       .collect();
     const crossedPaths2 = await ctx.db
-      .query('crossedPaths')
-      .withIndex('by_user2', (q) => q.eq('user2Id', args.userId))
+      .query("crossedPaths")
+      .withIndex("by_user2", (q) => q.eq("user2Id", args.userId))
       .collect();
     deletedData.crossedPaths = 0;
     for (const crossedPath of [...crossedPaths1, ...crossedPaths2]) {
@@ -825,12 +884,12 @@ export const deleteUserCompletely = mutation({
 
     // Delete dares
     const sentDares = await ctx.db
-      .query('dares')
-      .withIndex('by_from_user', (q) => q.eq('fromUserId', args.userId))
+      .query("dares")
+      .withIndex("by_from_user", (q) => q.eq("fromUserId", args.userId))
       .collect();
     const receivedDares = await ctx.db
-      .query('dares')
-      .withIndex('by_to_user', (q) => q.eq('toUserId', args.userId))
+      .query("dares")
+      .withIndex("by_to_user", (q) => q.eq("toUserId", args.userId))
       .collect();
     deletedData.dares = 0;
     for (const dare of [...sentDares, ...receivedDares]) {
@@ -840,8 +899,8 @@ export const deleteUserCompletely = mutation({
 
     // Delete subscription records
     const subscriptions = await ctx.db
-      .query('subscriptionRecords')
-      .withIndex('by_user', (q) => q.eq('userId', args.userId))
+      .query("subscriptionRecords")
+      .withIndex("by_user", (q) => q.eq("userId", args.userId))
       .collect();
     deletedData.subscriptionRecords = 0;
     for (const subscription of subscriptions) {
@@ -851,8 +910,8 @@ export const deleteUserCompletely = mutation({
 
     // Delete purchases
     const purchases = await ctx.db
-      .query('purchases')
-      .withIndex('by_user', (q) => q.eq('userId', args.userId))
+      .query("purchases")
+      .withIndex("by_user", (q) => q.eq("userId", args.userId))
       .collect();
     deletedData.purchases = 0;
     for (const purchase of purchases) {
@@ -862,12 +921,12 @@ export const deleteUserCompletely = mutation({
 
     // Delete blocks (by and against user)
     const blockedBy = await ctx.db
-      .query('blocks')
-      .withIndex('by_blocker', (q) => q.eq('blockerId', args.userId))
+      .query("blocks")
+      .withIndex("by_blocker", (q) => q.eq("blockerId", args.userId))
       .collect();
     const blockedUsers = await ctx.db
-      .query('blocks')
-      .withIndex('by_blocked', (q) => q.eq('blockedUserId', args.userId))
+      .query("blocks")
+      .withIndex("by_blocked", (q) => q.eq("blockedUserId", args.userId))
       .collect();
     deletedData.blocks = 0;
     for (const block of [...blockedBy, ...blockedUsers]) {
@@ -877,8 +936,8 @@ export const deleteUserCompletely = mutation({
 
     // Delete sessions
     const sessions = await ctx.db
-      .query('sessions')
-      .withIndex('by_user', (q) => q.eq('userId', args.userId))
+      .query("sessions")
+      .withIndex("by_user", (q) => q.eq("userId", args.userId))
       .collect();
     deletedData.sessions = 0;
     for (const session of sessions) {
@@ -888,8 +947,8 @@ export const deleteUserCompletely = mutation({
 
     // Delete filter presets
     const presets = await ctx.db
-      .query('filterPresets')
-      .withIndex('by_user', (q) => q.eq('userId', args.userId))
+      .query("filterPresets")
+      .withIndex("by_user", (q) => q.eq("userId", args.userId))
       .collect();
     deletedData.filterPresets = 0;
     for (const preset of presets) {
@@ -900,7 +959,8 @@ export const deleteUserCompletely = mutation({
     // Finally, delete the user
     await ctx.db.delete(args.userId);
 
-    const totalDeleted = Object.values(deletedData).reduce((a, b) => a + b, 0) + 1; // +1 for user
+    const totalDeleted =
+      Object.values(deletedData).reduce((a, b) => a + b, 0) + 1; // +1 for user
 
     return {
       deletedData,
@@ -924,8 +984,8 @@ export const getInactiveUsers = query({
     const cutoffDate = Date.now() - daysInactive * 24 * 60 * 60 * 1000;
 
     const inactiveUsers = await ctx.db
-      .query('users')
-      .filter((q) => q.lt(q.field('lastActive'), cutoffDate))
+      .query("users")
+      .filter((q) => q.lt(q.field("lastActive"), cutoffDate))
       .collect();
 
     return inactiveUsers.map((user) => ({
@@ -933,7 +993,9 @@ export const getInactiveUsers = query({
       name: user.name,
       email: user.email,
       lastActive: new Date(user.lastActive).toISOString(),
-      daysInactive: Math.floor((Date.now() - user.lastActive) / (24 * 60 * 60 * 1000)),
+      daysInactive: Math.floor(
+        (Date.now() - user.lastActive) / (24 * 60 * 60 * 1000),
+      ),
     }));
   },
 });
@@ -948,12 +1010,12 @@ export const cleanupIncompleteAccounts = mutation({
     const cutoffDate = Date.now() - daysOld * 24 * 60 * 60 * 1000;
 
     const incompleteUsers = await ctx.db
-      .query('users')
+      .query("users")
       .filter((q) =>
         q.and(
-          q.eq(q.field('onboardingCompleted'), false),
-          q.lt(q.field('createdAt'), cutoffDate)
-        )
+          q.eq(q.field("onboardingCompleted"), false),
+          q.lt(q.field("createdAt"), cutoffDate),
+        ),
       )
       .collect();
 
@@ -961,8 +1023,8 @@ export const cleanupIncompleteAccounts = mutation({
     for (const user of incompleteUsers) {
       // Delete associated photos first
       const photos = await ctx.db
-        .query('photos')
-        .withIndex('by_user', (q) => q.eq('userId', user._id))
+        .query("photos")
+        .withIndex("by_user", (q) => q.eq("userId", user._id))
         .collect();
       for (const photo of photos) {
         try {
@@ -976,6 +1038,141 @@ export const cleanupIncompleteAccounts = mutation({
       deletedCount++;
     }
 
-    return { deletedCount, message: `Deleted ${deletedCount} incomplete accounts older than ${daysOld} days` };
+    return {
+      deletedCount,
+      message: `Deleted ${deletedCount} incomplete accounts older than ${daysOld} days`,
+    };
+  },
+});
+
+// ============================================
+// WIPE ENTIRE DATABASE (NO CONFIRMATION - DEV ONLY!)
+// ============================================
+
+/**
+ * ⚠️ DANGER: Completely wipes the entire database without confirmation.
+ * This should ONLY be used in development environments.
+ * Deletes ALL data from ALL tables including storage files.
+ */
+export const wipeEntireDatabase = mutation({
+  args: {},
+  handler: async (ctx) => {
+    const tables = [
+      "messages",
+      "conversations",
+      "likes",
+      "matches",
+      "photos",
+      "notifications",
+      "crossedPaths",
+      "dares",
+      "subscriptionRecords",
+      "purchases",
+      "reports",
+      "blocks",
+      "otpCodes",
+      "sessions",
+      "filterPresets",
+      "users",
+    ] as const;
+
+    const results: Record<string, number> = {};
+    let storageFilesDeleted = 0;
+
+    for (const tableName of tables) {
+      const records = await ctx.db.query(tableName).collect();
+      results[tableName] = 0;
+
+      for (const record of records) {
+        // Clean up all storage files
+        if (tableName === "photos" && "storageId" in record) {
+          try {
+            await ctx.storage.delete(record.storageId as any);
+            storageFilesDeleted++;
+          } catch (e) {
+            // Ignore storage errors
+          }
+        }
+        if (
+          tableName === "messages" &&
+          "imageStorageId" in record &&
+          record.imageStorageId
+        ) {
+          try {
+            await ctx.storage.delete(record.imageStorageId as any);
+            storageFilesDeleted++;
+          } catch (e) {
+            // Ignore storage errors
+          }
+        }
+        if (
+          tableName === "users" &&
+          "verificationPhotoId" in record &&
+          record.verificationPhotoId
+        ) {
+          try {
+            await ctx.storage.delete(record.verificationPhotoId as any);
+            storageFilesDeleted++;
+          } catch (e) {
+            // Ignore storage errors
+          }
+        }
+
+        await ctx.db.delete(record._id);
+        results[tableName]++;
+      }
+    }
+
+    const totalDeleted = Object.values(results).reduce((a, b) => a + b, 0);
+
+    return {
+      success: true,
+      results,
+      totalRecordsDeleted: totalDeleted,
+      storageFilesDeleted,
+      message: `🗑️ DATABASE WIPED: Deleted ${totalDeleted} records and ${storageFilesDeleted} storage files`,
+    };
+  },
+});
+
+/**
+ * Quick helper to check if database is empty
+ */
+export const isDatabaseEmpty = query({
+  args: {},
+  handler: async (ctx) => {
+    const tables = [
+      "users",
+      "photos",
+      "likes",
+      "matches",
+      "conversations",
+      "messages",
+      "notifications",
+      "crossedPaths",
+      "dares",
+      "subscriptionRecords",
+      "purchases",
+      "reports",
+      "blocks",
+      "otpCodes",
+      "sessions",
+      "filterPresets",
+    ] as const;
+
+    const counts: Record<string, number> = {};
+    let totalRecords = 0;
+
+    for (const tableName of tables) {
+      const records = await ctx.db.query(tableName).collect();
+      counts[tableName] = records.length;
+      totalRecords += records.length;
+    }
+
+    return {
+      isEmpty: totalRecords === 0,
+      totalRecords,
+      counts,
+    };
   },
 });

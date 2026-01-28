@@ -1,6 +1,6 @@
-import { create } from 'zustand';
-import { persist, createJSONStorage } from 'zustand/middleware';
-import AsyncStorage from '@react-native-async-storage/async-storage';
+import { create } from "zustand";
+import { persist, createJSONStorage } from "zustand/middleware";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 
 interface AuthState {
   isAuthenticated: boolean;
@@ -9,13 +9,19 @@ interface AuthState {
   isLoading: boolean;
   error: string | null;
   onboardingCompleted: boolean;
+  _hasHydrated: boolean;
 
   // Actions
-  setAuth: (userId: string, token: string, onboardingCompleted: boolean) => void;
+  setAuth: (
+    userId: string,
+    token: string,
+    onboardingCompleted: boolean,
+  ) => void;
   setLoading: (isLoading: boolean) => void;
   setError: (error: string | null) => void;
   setOnboardingCompleted: (completed: boolean) => void;
   logout: () => void;
+  setHasHydrated: (state: boolean) => void;
 }
 
 export const useAuthStore = create<AuthState>()(
@@ -27,6 +33,7 @@ export const useAuthStore = create<AuthState>()(
       isLoading: false,
       error: null,
       onboardingCompleted: false,
+      _hasHydrated: false,
 
       setAuth: (userId, token, onboardingCompleted) =>
         set({
@@ -52,10 +59,15 @@ export const useAuthStore = create<AuthState>()(
           error: null,
           onboardingCompleted: false,
         }),
+
+      setHasHydrated: (state) => set({ _hasHydrated: state }),
     }),
     {
-      name: 'auth-storage',
+      name: "auth-storage",
       storage: createJSONStorage(() => AsyncStorage),
-    }
-  )
+      onRehydrateStorage: () => (state) => {
+        state?.setHasHydrated(true);
+      },
+    },
+  ),
 );

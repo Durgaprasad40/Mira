@@ -132,7 +132,7 @@ export default function BasicInfoScreen() {
               loginResult.onboardingCompleted || false,
             );
             if (loginResult.onboardingCompleted) {
-              router.replace("/(main)/(tabs)/home");
+              router.replace("/(main)/(tabs)/discover");
             } else {
               setStep("photo_upload");
               router.push("/(onboarding)/photo-upload" as any);

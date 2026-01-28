@@ -1,14 +1,21 @@
-import React, { useState } from 'react';
-import { View, Text, StyleSheet, ScrollView, Dimensions, TouchableOpacity } from 'react-native';
-import { useRouter } from 'expo-router';
-import { COLORS, SWIPE_CONFIG } from '@/lib/constants';
-import { Button } from '@/components/ui';
-import { useOnboardingStore } from '@/stores/onboardingStore';
-import { useAuthStore } from '@/stores/authStore';
-import { Ionicons } from '@expo/vector-icons';
-import { LinearGradient } from 'expo-linear-gradient';
+import React, { useState } from "react";
+import {
+  View,
+  Text,
+  StyleSheet,
+  ScrollView,
+  Dimensions,
+  TouchableOpacity,
+} from "react-native";
+import { useRouter } from "expo-router";
+import { COLORS, SWIPE_CONFIG } from "@/lib/constants";
+import { Button } from "@/components/ui";
+import { useOnboardingStore } from "@/stores/onboardingStore";
+import { useAuthStore } from "@/stores/authStore";
+import { Ionicons } from "@expo/vector-icons";
+import { LinearGradient } from "expo-linear-gradient";
 
-const { width } = Dimensions.get('window');
+const { width } = Dimensions.get("window");
 
 export default function TutorialScreen() {
   const router = useRouter();
@@ -18,39 +25,39 @@ export default function TutorialScreen() {
 
   const steps = [
     {
-      title: 'Swipe Right to Like',
-      description: 'Swipe right or tap the heart to like someone',
-      icon: 'heart',
+      title: "Swipe Right to Like",
+      description: "Swipe right or tap the heart to like someone",
+      icon: "heart",
       color: COLORS.like,
-      gesture: 'right',
+      gesture: "right",
     },
     {
-      title: 'Swipe Left to Pass',
-      description: 'Swipe left or tap the X to pass on someone',
-      icon: 'close',
+      title: "Swipe Left to Pass",
+      description: "Swipe left or tap the X to pass on someone",
+      icon: "close",
       color: COLORS.pass,
-      gesture: 'left',
+      gesture: "left",
     },
     {
-      title: 'Swipe Up for Super Like',
-      description: 'Swipe up or tap the star to super like someone',
-      icon: 'star',
+      title: "Swipe Up for Super Like",
+      description: "Swipe up or tap the star to super like someone",
+      icon: "star",
       color: COLORS.superLike,
-      gesture: 'up',
+      gesture: "up",
     },
     {
-      title: 'Tap to See More',
-      description: 'Tap on a profile card to see full details and photos',
-      icon: 'expand',
+      title: "Tap to See More",
+      description: "Tap on a profile card to see full details and photos",
+      icon: "expand",
       color: COLORS.primary,
-      gesture: 'tap',
+      gesture: "tap",
     },
   ];
 
   const handleComplete = () => {
     setOnboardingCompleted(true);
     reset();
-    router.replace('/(main)/(tabs)/home');
+    router.replace("/(main)/(tabs)/discover");
   };
 
   const handleNext = () => {
@@ -79,7 +86,12 @@ export default function TutorialScreen() {
 
         <View style={styles.content}>
           <View style={styles.iconContainer}>
-            <View style={[styles.iconCircle, { backgroundColor: steps[currentStep].color + '40' }]}>
+            <View
+              style={[
+                styles.iconCircle,
+                { backgroundColor: steps[currentStep].color + "40" },
+              ]}
+            >
               <Ionicons
                 name={steps[currentStep].icon as any}
                 size={64}
@@ -89,18 +101,24 @@ export default function TutorialScreen() {
           </View>
 
           <Text style={styles.title}>{steps[currentStep].title}</Text>
-          <Text style={styles.description}>{steps[currentStep].description}</Text>
+          <Text style={styles.description}>
+            {steps[currentStep].description}
+          </Text>
 
           <View style={styles.gestureDemo}>
-            {steps[currentStep].gesture === 'right' && (
+            {steps[currentStep].gesture === "right" && (
               <View style={styles.swipeDemo}>
                 <View style={styles.card}>
-                  <Ionicons name="arrow-forward" size={32} color={COLORS.like} />
+                  <Ionicons
+                    name="arrow-forward"
+                    size={32}
+                    color={COLORS.like}
+                  />
                 </View>
                 <Text style={styles.gestureText}>Swipe Right →</Text>
               </View>
             )}
-            {steps[currentStep].gesture === 'left' && (
+            {steps[currentStep].gesture === "left" && (
               <View style={styles.swipeDemo}>
                 <View style={styles.card}>
                   <Ionicons name="arrow-back" size={32} color={COLORS.pass} />
@@ -108,15 +126,19 @@ export default function TutorialScreen() {
                 <Text style={styles.gestureText}>← Swipe Left</Text>
               </View>
             )}
-            {steps[currentStep].gesture === 'up' && (
+            {steps[currentStep].gesture === "up" && (
               <View style={styles.swipeDemo}>
                 <View style={styles.card}>
-                  <Ionicons name="arrow-up" size={32} color={COLORS.superLike} />
+                  <Ionicons
+                    name="arrow-up"
+                    size={32}
+                    color={COLORS.superLike}
+                  />
                 </View>
                 <Text style={styles.gestureText}>↑ Swipe Up</Text>
               </View>
             )}
-            {steps[currentStep].gesture === 'tap' && (
+            {steps[currentStep].gesture === "tap" && (
               <View style={styles.swipeDemo}>
                 <View style={styles.card}>
                   <Ionicons name="hand-left" size={32} color={COLORS.primary} />
@@ -132,16 +154,13 @@ export default function TutorialScreen() {
             {steps.map((_, index) => (
               <View
                 key={index}
-                style={[
-                  styles.dot,
-                  index === currentStep && styles.dotActive,
-                ]}
+                style={[styles.dot, index === currentStep && styles.dotActive]}
               />
             ))}
           </View>
 
           <Button
-            title={currentStep === steps.length - 1 ? 'Get Started' : 'Next'}
+            title={currentStep === steps.length - 1 ? "Get Started" : "Next"}
             variant="primary"
             onPress={handleNext}
             fullWidth
@@ -163,7 +182,7 @@ const styles = StyleSheet.create({
   header: {
     paddingTop: 60,
     paddingHorizontal: 24,
-    alignItems: 'flex-end',
+    alignItems: "flex-end",
   },
   skipButton: {
     padding: 8,
@@ -171,12 +190,12 @@ const styles = StyleSheet.create({
   skipText: {
     fontSize: 16,
     color: COLORS.white,
-    fontWeight: '500',
+    fontWeight: "500",
   },
   content: {
     flex: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
+    alignItems: "center",
+    justifyContent: "center",
     paddingHorizontal: 24,
   },
   iconContainer: {
@@ -186,51 +205,51 @@ const styles = StyleSheet.create({
     width: 120,
     height: 120,
     borderRadius: 60,
-    alignItems: 'center',
-    justifyContent: 'center',
+    alignItems: "center",
+    justifyContent: "center",
   },
   title: {
     fontSize: 32,
-    fontWeight: '700',
+    fontWeight: "700",
     color: COLORS.white,
     marginBottom: 16,
-    textAlign: 'center',
+    textAlign: "center",
   },
   description: {
     fontSize: 18,
     color: COLORS.white,
-    textAlign: 'center',
+    textAlign: "center",
     lineHeight: 26,
     opacity: 0.9,
   },
   gestureDemo: {
     marginTop: 60,
-    alignItems: 'center',
+    alignItems: "center",
   },
   swipeDemo: {
-    alignItems: 'center',
+    alignItems: "center",
   },
   card: {
     width: 200,
     height: 300,
     borderRadius: 20,
-    backgroundColor: COLORS.white + '20',
-    alignItems: 'center',
-    justifyContent: 'center',
+    backgroundColor: COLORS.white + "20",
+    alignItems: "center",
+    justifyContent: "center",
     marginBottom: 20,
   },
   gestureText: {
     fontSize: 18,
     color: COLORS.white,
-    fontWeight: '600',
+    fontWeight: "600",
   },
   footer: {
     padding: 24,
     paddingBottom: 40,
   },
   dots: {
-    flexDirection: 'row',
-    justifyContent: 'center',
+    flexDirection: "row",
+    justifyContent: "center",
     gap: 8,
     marginBottom: 24,
   },
@@ -238,7 +257,7 @@ const styles = StyleSheet.create({
     width: 8,
     height: 8,
     borderRadius: 4,
-    backgroundColor: COLORS.white + '40',
+    backgroundColor: COLORS.white + "40",
   },
   dotActive: {
     backgroundColor: COLORS.white,
