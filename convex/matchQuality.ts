@@ -85,13 +85,13 @@ export const calculateMatchQuality = query({
     if (user1.height) completion1 += 0.1;
     if (user1.jobTitle) completion1 += 0.1;
     if (user1.education) completion1 += 0.1;
-    if (user1.photos && user1.photos.length >= 3) completion1 += 0.5;
+    // if (user1.photos && user1.photos.length >= 3) completion1 += 0.5;
 
     if (user2.bio) completion2 += 0.2;
     if (user2.height) completion2 += 0.1;
     if (user2.jobTitle) completion2 += 0.1;
     if (user2.education) completion2 += 0.1;
-    if (user2.photos && user2.photos.length >= 3) completion2 += 0.5;
+    // if (user2.photos && user2.photos.length >= 3) completion2 += 0.5;
 
     const avgCompletion = (completion1 + completion2) / 2;
     score += avgCompletion * 0.5;

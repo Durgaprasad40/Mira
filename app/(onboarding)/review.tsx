@@ -1,13 +1,28 @@
-import React from 'react';
-import { View, Text, StyleSheet, ScrollView, Image, TouchableOpacity, Alert } from 'react-native';
-import { useRouter } from 'expo-router';
-import { COLORS, GENDER_OPTIONS, RELATIONSHIP_INTENTS, ACTIVITY_FILTERS } from '@/lib/constants';
-import { Button } from '@/components/ui';
-import { useOnboardingStore } from '@/stores/onboardingStore';
-import { useMutation } from 'convex/react';
-import { api } from '@/convex/_generated/api';
-import { useAuthStore } from '@/stores/authStore';
-import { Ionicons } from '@expo/vector-icons';
+import React from "react";
+import {
+  View,
+  Text,
+  StyleSheet,
+  ScrollView,
+  Image,
+  TouchableOpacity,
+  Alert,
+  Platform,
+} from "react-native";
+import { useRouter } from "expo-router";
+import {
+  COLORS,
+  GENDER_OPTIONS,
+  RELATIONSHIP_INTENTS,
+  ACTIVITY_FILTERS,
+} from "@/lib/constants";
+import { Button } from "@/components/ui";
+import { useOnboardingStore } from "@/stores/onboardingStore";
+import { useMutation } from "convex/react";
+import { api } from "@/convex/_generated/api";
+import { useAuthStore } from "@/stores/authStore";
+import { Ionicons } from "@expo/vector-icons";
+import { Id } from "@/convex/_generated/dataModel";
 
 export default function ReviewScreen() {
   const {
@@ -17,9 +32,12 @@ export default function ReviewScreen() {
     photos,
     bio,
     height,
+    weight,
     smoking,
     drinking,
     kids,
+    exercise,
+    pets,
     education,
     religion,
     jobTitle,
@@ -34,39 +52,128 @@ export default function ReviewScreen() {
     setStep,
   } = useOnboardingStore();
   const router = useRouter();
-  const { userId, setAuth, setOnboardingCompleted } = useAuthStore();
+  const { userId, setOnboardingCompleted } = useAuthStore();
   const [isSubmitting, setIsSubmitting] = React.useState(false);
+  const [uploadProgress, setUploadProgress] = React.useState("");
 
-  // TODO: Create user mutation
-  // const createUser = useMutation(api.auth.createUser);
+  const completeOnboarding = useMutation(api.users.completeOnboarding);
+  const generateUploadUrl = useMutation(api.photos.generateUploadUrl);
 
   const calculateAge = (dob: string) => {
     const birthDate = new Date(dob);
     const today = new Date();
     let age = today.getFullYear() - birthDate.getFullYear();
     const monthDiff = today.getMonth() - birthDate.getMonth();
-    if (monthDiff < 0 || (monthDiff === 0 && today.getDate() < birthDate.getDate())) {
+    if (
+      monthDiff < 0 ||
+      (monthDiff === 0 && today.getDate() < birthDate.getDate())
+    ) {
       age--;
     }
     return age;
   };
 
+  // Upload a single photo to Convex storage
+  const uploadPhoto = async (uri: string): Promise<Id<"_storage"> | null> => {
+    try {
+      // Get upload URL from Convex
+      const uploadUrl = await generateUploadUrl();
+
+      // Fetch the image as blob
+      const response = await fetch(uri);
+      const blob = await response.blob();
+
+      // Upload to Convex storage
+      const uploadResponse = await fetch(uploadUrl, {
+        method: "POST",
+        headers: {
+          "Content-Type": blob.type || "image/jpeg",
+        },
+        body: blob,
+      });
+
+      if (!uploadResponse.ok) {
+        throw new Error("Failed to upload photo");
+      }
+
+      const result = await uploadResponse.json();
+      return result.storageId as Id<"_storage">;
+    } catch (error) {
+      console.error("Photo upload error:", error);
+      return null;
+    }
+  };
+
   const handleComplete = async () => {
     if (!userId) {
-      // TODO: Handle case where user is not authenticated
+      Alert.alert("Error", "User not authenticated");
       return;
     }
 
     setIsSubmitting(true);
     try {
-      // TODO: Submit all onboarding data to backend
-      // await createUser({ ...allData });
-      
+      // Upload all photos to Convex storage
+      const photoStorageIds: Id<"_storage">[] = [];
+
+      if (photos.length > 0) {
+        setUploadProgress("Uploading photos...");
+        for (let i = 0; i < photos.length; i++) {
+          setUploadProgress(`Uploading photo ${i + 1} of ${photos.length}...`);
+          const storageId = await uploadPhoto(photos[i]);
+          if (storageId) {
+            photoStorageIds.push(storageId);
+          }
+        }
+      }
+
+      setUploadProgress("Saving profile...");
+
+      // Prepare onboarding data
+      const onboardingData: any = {
+        userId: userId as Id<"users">,
+        name,
+        dateOfBirth,
+        gender,
+        bio,
+        height: height || undefined,
+        weight: weight || undefined,
+        smoking: smoking || undefined,
+        drinking: drinking || undefined,
+        kids: kids || undefined,
+        exercise: exercise || undefined,
+        pets: pets.length > 0 ? pets : undefined,
+        education: education || undefined,
+        religion: religion || undefined,
+        jobTitle: jobTitle || undefined,
+        company: company || undefined,
+        school: school || undefined,
+        lookingFor: lookingFor.length > 0 ? lookingFor : undefined,
+        relationshipIntent:
+          relationshipIntent.length > 0 ? relationshipIntent : undefined,
+        activities: activities.length > 0 ? activities : undefined,
+        minAge,
+        maxAge,
+        maxDistance,
+        photoStorageIds:
+          photoStorageIds.length > 0 ? photoStorageIds : undefined,
+      };
+
+      // Remove undefined values
+      Object.keys(onboardingData).forEach((key) => {
+        if (onboardingData[key] === undefined) {
+          delete onboardingData[key];
+        }
+      });
+
+      // Submit all onboarding data to backend
+      await completeOnboarding(onboardingData);
+
       setOnboardingCompleted(true);
-      setStep('tutorial');
-      router.push('/(onboarding)/tutorial' as any);
+      setStep("tutorial");
+      router.push("/(onboarding)/tutorial" as any);
     } catch (error: any) {
-      Alert.alert('Error', error.message || 'Failed to complete onboarding');
+      console.error("Onboarding error:", error);
+      Alert.alert("Error", error.message || "Failed to complete onboarding");
     } finally {
       setIsSubmitting(false);
     }
@@ -87,11 +194,15 @@ export default function ReviewScreen() {
       <View style={styles.section}>
         <View style={styles.sectionHeader}>
           <Text style={styles.sectionTitle}>Photos</Text>
-          <TouchableOpacity onPress={() => handleEdit('additional-photos')}>
+          <TouchableOpacity onPress={() => handleEdit("additional-photos")}>
             <Text style={styles.editLink}>Edit</Text>
           </TouchableOpacity>
         </View>
-        <ScrollView horizontal showsHorizontalScrollIndicator={false} style={styles.photosScroll}>
+        <ScrollView
+          horizontal
+          showsHorizontalScrollIndicator={false}
+          style={styles.photosScroll}
+        >
           {photos.map((uri, index) => (
             <Image key={index} source={{ uri }} style={styles.photoThumbnail} />
           ))}
@@ -101,7 +212,7 @@ export default function ReviewScreen() {
       <View style={styles.section}>
         <View style={styles.sectionHeader}>
           <Text style={styles.sectionTitle}>Basic Info</Text>
-          <TouchableOpacity onPress={() => handleEdit('basic-info')}>
+          <TouchableOpacity onPress={() => handleEdit("basic-info")}>
             <Text style={styles.editLink}>Edit</Text>
           </TouchableOpacity>
         </View>
@@ -111,7 +222,9 @@ export default function ReviewScreen() {
         </View>
         <View style={styles.infoRow}>
           <Text style={styles.infoLabel}>Age:</Text>
-          <Text style={styles.infoValue}>{dateOfBirth ? calculateAge(dateOfBirth) : 'N/A'}</Text>
+          <Text style={styles.infoValue}>
+            {dateOfBirth ? calculateAge(dateOfBirth) : "N/A"}
+          </Text>
         </View>
         {gender && (
           <View style={styles.infoRow}>
@@ -133,7 +246,7 @@ export default function ReviewScreen() {
         <View style={styles.section}>
           <View style={styles.sectionHeader}>
             <Text style={styles.sectionTitle}>Bio</Text>
-            <TouchableOpacity onPress={() => handleEdit('bio')}>
+            <TouchableOpacity onPress={() => handleEdit("bio")}>
               <Text style={styles.editLink}>Edit</Text>
             </TouchableOpacity>
           </View>
@@ -144,7 +257,7 @@ export default function ReviewScreen() {
       <View style={styles.section}>
         <View style={styles.sectionHeader}>
           <Text style={styles.sectionTitle}>Looking For</Text>
-          <TouchableOpacity onPress={() => handleEdit('preferences')}>
+          <TouchableOpacity onPress={() => handleEdit("preferences")}>
             <Text style={styles.editLink}>Edit</Text>
           </TouchableOpacity>
         </View>
@@ -166,11 +279,15 @@ export default function ReviewScreen() {
       </View>
 
       <View style={styles.footer}>
+        {uploadProgress ? (
+          <Text style={styles.progressText}>{uploadProgress}</Text>
+        ) : null}
         <Button
-          title="Complete Profile"
+          title={isSubmitting ? "Please wait..." : "Complete Profile"}
           variant="primary"
           onPress={handleComplete}
           loading={isSubmitting}
+          disabled={isSubmitting}
           fullWidth
         />
       </View>
@@ -186,9 +303,15 @@ const styles = StyleSheet.create({
   content: {
     padding: 24,
   },
+  progressText: {
+    fontSize: 14,
+    color: COLORS.primary,
+    textAlign: "center",
+    marginBottom: 12,
+  },
   title: {
     fontSize: 28,
-    fontWeight: '700',
+    fontWeight: "700",
     color: COLORS.text,
     marginBottom: 8,
   },
@@ -205,20 +328,20 @@ const styles = StyleSheet.create({
     borderBottomColor: COLORS.border,
   },
   sectionHeader: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
     marginBottom: 12,
   },
   sectionTitle: {
     fontSize: 18,
-    fontWeight: '600',
+    fontWeight: "600",
     color: COLORS.text,
   },
   editLink: {
     fontSize: 14,
     color: COLORS.primary,
-    fontWeight: '500',
+    fontWeight: "500",
   },
   photosScroll: {
     marginTop: 12,
@@ -230,7 +353,7 @@ const styles = StyleSheet.create({
     marginRight: 12,
   },
   infoRow: {
-    flexDirection: 'row',
+    flexDirection: "row",
     marginBottom: 8,
   },
   infoLabel: {
@@ -241,7 +364,7 @@ const styles = StyleSheet.create({
   infoValue: {
     fontSize: 15,
     color: COLORS.text,
-    fontWeight: '500',
+    fontWeight: "500",
     flex: 1,
   },
   bioText: {
@@ -251,8 +374,8 @@ const styles = StyleSheet.create({
     marginTop: 8,
   },
   chipsContainer: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
+    flexDirection: "row",
+    flexWrap: "wrap",
     gap: 8,
     marginTop: 8,
   },

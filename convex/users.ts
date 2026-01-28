@@ -1,11 +1,11 @@
-import { v } from 'convex/values';
-import { mutation, query } from './_generated/server';
-import { Id } from './_generated/dataModel';
+import { v } from "convex/values";
+import { mutation, query } from "./_generated/server";
+import { Id } from "./_generated/dataModel";
 
 // Get current user profile
 export const getCurrentUser = query({
   args: {
-    userId: v.id('users'),
+    userId: v.id("users"),
   },
   handler: async (ctx, args) => {
     const user = await ctx.db.get(args.userId);
@@ -13,8 +13,8 @@ export const getCurrentUser = query({
 
     // Get user's photos
     const photos = await ctx.db
-      .query('photos')
-      .withIndex('by_user_order', (q) => q.eq('userId', args.userId))
+      .query("photos")
+      .withIndex("by_user_order", (q) => q.eq("userId", args.userId))
       .collect();
 
     return {
@@ -27,8 +27,8 @@ export const getCurrentUser = query({
 // Get user by ID (for viewing profiles)
 export const getUserById = query({
   args: {
-    userId: v.id('users'),
-    viewerId: v.id('users'),
+    userId: v.id("users"),
+    viewerId: v.id("users"),
   },
   handler: async (ctx, args) => {
     const user = await ctx.db.get(args.userId);
@@ -36,18 +36,18 @@ export const getUserById = query({
 
     // Check if blocked
     const blocked = await ctx.db
-      .query('blocks')
-      .withIndex('by_blocker_blocked', (q) =>
-        q.eq('blockerId', args.userId).eq('blockedUserId', args.viewerId)
+      .query("blocks")
+      .withIndex("by_blocker_blocked", (q) =>
+        q.eq("blockerId", args.userId).eq("blockedUserId", args.viewerId),
       )
       .first();
 
     if (blocked) return null;
 
     const reverseBlocked = await ctx.db
-      .query('blocks')
-      .withIndex('by_blocker_blocked', (q) =>
-        q.eq('blockerId', args.viewerId).eq('blockedUserId', args.userId)
+      .query("blocks")
+      .withIndex("by_blocker_blocked", (q) =>
+        q.eq("blockerId", args.viewerId).eq("blockedUserId", args.userId),
       )
       .first();
 
@@ -55,19 +55,24 @@ export const getUserById = query({
 
     // Get photos
     const photos = await ctx.db
-      .query('photos')
-      .withIndex('by_user_order', (q) => q.eq('userId', args.userId))
+      .query("photos")
+      .withIndex("by_user_order", (q) => q.eq("userId", args.userId))
       .collect();
 
     // Calculate distance if both have location
     const viewer = await ctx.db.get(args.viewerId);
     let distance: number | undefined;
-    if (user.latitude && user.longitude && viewer?.latitude && viewer?.longitude) {
+    if (
+      user.latitude &&
+      user.longitude &&
+      viewer?.latitude &&
+      viewer?.longitude
+    ) {
       distance = calculateDistance(
         user.latitude,
         user.longitude,
         viewer.latitude,
-        viewer.longitude
+        viewer.longitude,
       );
     }
 
@@ -101,76 +106,104 @@ export const getUserById = query({
 // Update user profile
 export const updateProfile = mutation({
   args: {
-    userId: v.id('users'),
+    userId: v.id("users"),
     name: v.optional(v.string()),
     bio: v.optional(v.string()),
     height: v.optional(v.number()),
-    smoking: v.optional(v.union(v.literal('never'), v.literal('sometimes'), v.literal('regularly'), v.literal('trying_to_quit'))),
-    drinking: v.optional(v.union(v.literal('never'), v.literal('socially'), v.literal('regularly'), v.literal('sober'))),
-    kids: v.optional(v.union(
-      v.literal('have_and_want_more'),
-      v.literal('have_and_dont_want_more'),
-      v.literal('dont_have_and_want'),
-      v.literal('dont_have_and_dont_want'),
-      v.literal('not_sure')
-    )),
-    education: v.optional(v.union(
-      v.literal('high_school'),
-      v.literal('some_college'),
-      v.literal('bachelors'),
-      v.literal('masters'),
-      v.literal('doctorate'),
-      v.literal('trade_school'),
-      v.literal('other')
-    )),
-    religion: v.optional(v.union(
-      v.literal('christian'),
-      v.literal('muslim'),
-      v.literal('hindu'),
-      v.literal('buddhist'),
-      v.literal('jewish'),
-      v.literal('sikh'),
-      v.literal('atheist'),
-      v.literal('agnostic'),
-      v.literal('spiritual'),
-      v.literal('other'),
-      v.literal('prefer_not_to_say')
-    )),
+    smoking: v.optional(
+      v.union(
+        v.literal("never"),
+        v.literal("sometimes"),
+        v.literal("regularly"),
+        v.literal("trying_to_quit"),
+      ),
+    ),
+    drinking: v.optional(
+      v.union(
+        v.literal("never"),
+        v.literal("socially"),
+        v.literal("regularly"),
+        v.literal("sober"),
+      ),
+    ),
+    kids: v.optional(
+      v.union(
+        v.literal("have_and_want_more"),
+        v.literal("have_and_dont_want_more"),
+        v.literal("dont_have_and_want"),
+        v.literal("dont_have_and_dont_want"),
+        v.literal("not_sure"),
+      ),
+    ),
+    education: v.optional(
+      v.union(
+        v.literal("high_school"),
+        v.literal("some_college"),
+        v.literal("bachelors"),
+        v.literal("masters"),
+        v.literal("doctorate"),
+        v.literal("trade_school"),
+        v.literal("other"),
+      ),
+    ),
+    religion: v.optional(
+      v.union(
+        v.literal("christian"),
+        v.literal("muslim"),
+        v.literal("hindu"),
+        v.literal("buddhist"),
+        v.literal("jewish"),
+        v.literal("sikh"),
+        v.literal("atheist"),
+        v.literal("agnostic"),
+        v.literal("spiritual"),
+        v.literal("other"),
+        v.literal("prefer_not_to_say"),
+      ),
+    ),
     jobTitle: v.optional(v.string()),
     company: v.optional(v.string()),
     school: v.optional(v.string()),
-    relationshipIntent: v.optional(v.array(v.union(
-      v.literal('long_term'),
-      v.literal('short_term'),
-      v.literal('fwb'),
-      v.literal('figuring_out'),
-      v.literal('short_to_long'),
-      v.literal('long_to_short'),
-      v.literal('new_friends'),
-      v.literal('open_to_anything')
-    ))),
-    activities: v.optional(v.array(v.union(
-      v.literal('coffee'),
-      v.literal('date_night'),
-      v.literal('sports'),
-      v.literal('movies'),
-      v.literal('free_tonight'),
-      v.literal('foodie'),
-      v.literal('gym_partner'),
-      v.literal('concerts'),
-      v.literal('travel'),
-      v.literal('outdoors'),
-      v.literal('art_culture'),
-      v.literal('gaming'),
-      v.literal('nightlife'),
-      v.literal('brunch'),
-      v.literal('study_date'),
-      v.literal('this_weekend'),
-      v.literal('beach_pool'),
-      v.literal('road_trip'),
-      v.literal('photography'),
-      v.literal('volunteering')
-    ))),
+    relationshipIntent: v.optional(
+      v.array(
+        v.union(
+          v.literal("long_term"),
+          v.literal("short_term"),
+          v.literal("fwb"),
+          v.literal("figuring_out"),
+          v.literal("short_to_long"),
+          v.literal("long_to_short"),
+          v.literal("new_friends"),
+          v.literal("open_to_anything"),
+        ),
+      ),
+    ),
+    activities: v.optional(
+      v.array(
+        v.union(
+          v.literal("coffee"),
+          v.literal("date_night"),
+          v.literal("sports"),
+          v.literal("movies"),
+          v.literal("free_tonight"),
+          v.literal("foodie"),
+          v.literal("gym_partner"),
+          v.literal("concerts"),
+          v.literal("travel"),
+          v.literal("outdoors"),
+          v.literal("art_culture"),
+          v.literal("gaming"),
+          v.literal("nightlife"),
+          v.literal("brunch"),
+          v.literal("study_date"),
+          v.literal("this_weekend"),
+          v.literal("beach_pool"),
+          v.literal("road_trip"),
+          v.literal("photography"),
+          v.literal("volunteering"),
+        ),
+      ),
+    ),
   },
   handler: async (ctx, args) => {
     const { userId, ...updates } = args;
@@ -191,8 +224,17 @@ export const updateProfile = mutation({
 // Update preferences
 export const updatePreferences = mutation({
   args: {
-    userId: v.id('users'),
-    lookingFor: v.optional(v.array(v.union(v.literal('male'), v.literal('female'), v.literal('non_binary'), v.literal('other')))),
+    userId: v.id("users"),
+    lookingFor: v.optional(
+      v.array(
+        v.union(
+          v.literal("male"),
+          v.literal("female"),
+          v.literal("non_binary"),
+          v.literal("other"),
+        ),
+      ),
+    ),
     minAge: v.optional(v.number()),
     maxAge: v.optional(v.number()),
     maxDistance: v.optional(v.number()),
@@ -215,7 +257,7 @@ export const updatePreferences = mutation({
 // Update location
 export const updateLocation = mutation({
   args: {
-    userId: v.id('users'),
+    userId: v.id("users"),
     latitude: v.number(),
     longitude: v.number(),
     city: v.optional(v.string()),
@@ -237,24 +279,23 @@ export const updateLocation = mutation({
 // Toggle incognito mode
 export const toggleIncognito = mutation({
   args: {
-    userId: v.id('users'),
+    userId: v.id("users"),
     enabled: v.boolean(),
   },
   handler: async (ctx, args) => {
     const { userId, enabled } = args;
 
     const user = await ctx.db.get(userId);
-    if (!user) throw new Error('User not found');
+    if (!user) throw new Error("User not found");
 
     // Check if user has incognito access
     const hasFullAccess =
-      user.gender === 'female' ||
-      user.subscriptionTier === 'premium';
+      user.gender === "female" || user.subscriptionTier === "premium";
 
     if (!hasFullAccess && enabled) {
       // Limited or partial access
-      if (user.subscriptionTier === 'free') {
-        throw new Error('Upgrade to use incognito mode');
+      if (user.subscriptionTier === "free") {
+        throw new Error("Upgrade to use incognito mode");
       }
     }
 
@@ -266,7 +307,7 @@ export const toggleIncognito = mutation({
 // Complete onboarding step
 export const completeOnboardingStep = mutation({
   args: {
-    userId: v.id('users'),
+    userId: v.id("users"),
     step: v.string(),
     data: v.optional(v.any()),
   },
@@ -283,7 +324,7 @@ export const completeOnboardingStep = mutation({
     }
 
     // Check if this is the final step
-    if (step === 'completed') {
+    if (step === "completed") {
       updates.onboardingCompleted = true;
       updates.onboardingStep = undefined;
     }
@@ -296,7 +337,7 @@ export const completeOnboardingStep = mutation({
 // Update push token
 export const updatePushToken = mutation({
   args: {
-    userId: v.id('users'),
+    userId: v.id("users"),
     pushToken: v.string(),
   },
   handler: async (ctx, args) => {
@@ -311,8 +352,8 @@ export const updatePushToken = mutation({
 // Mark user as verified
 export const markVerified = mutation({
   args: {
-    userId: v.id('users'),
-    verificationPhotoId: v.id('_storage'),
+    userId: v.id("users"),
+    verificationPhotoId: v.id("_storage"),
   },
   handler: async (ctx, args) => {
     await ctx.db.patch(args.userId, {
@@ -327,23 +368,23 @@ export const markVerified = mutation({
 // Block user
 export const blockUser = mutation({
   args: {
-    blockerId: v.id('users'),
-    blockedUserId: v.id('users'),
+    blockerId: v.id("users"),
+    blockedUserId: v.id("users"),
   },
   handler: async (ctx, args) => {
     const { blockerId, blockedUserId } = args;
 
     // Check if already blocked
     const existing = await ctx.db
-      .query('blocks')
-      .withIndex('by_blocker_blocked', (q) =>
-        q.eq('blockerId', blockerId).eq('blockedUserId', blockedUserId)
+      .query("blocks")
+      .withIndex("by_blocker_blocked", (q) =>
+        q.eq("blockerId", blockerId).eq("blockedUserId", blockedUserId),
       )
       .first();
 
     if (existing) return { success: true };
 
-    await ctx.db.insert('blocks', {
+    await ctx.db.insert("blocks", {
       blockerId,
       blockedUserId,
       createdAt: Date.now(),
@@ -356,16 +397,16 @@ export const blockUser = mutation({
 // Unblock user
 export const unblockUser = mutation({
   args: {
-    blockerId: v.id('users'),
-    blockedUserId: v.id('users'),
+    blockerId: v.id("users"),
+    blockedUserId: v.id("users"),
   },
   handler: async (ctx, args) => {
     const { blockerId, blockedUserId } = args;
 
     const block = await ctx.db
-      .query('blocks')
-      .withIndex('by_blocker_blocked', (q) =>
-        q.eq('blockerId', blockerId).eq('blockedUserId', blockedUserId)
+      .query("blocks")
+      .withIndex("by_blocker_blocked", (q) =>
+        q.eq("blockerId", blockerId).eq("blockedUserId", blockedUserId),
       )
       .first();
 
@@ -380,27 +421,27 @@ export const unblockUser = mutation({
 // Report user
 export const reportUser = mutation({
   args: {
-    reporterId: v.id('users'),
-    reportedUserId: v.id('users'),
+    reporterId: v.id("users"),
+    reportedUserId: v.id("users"),
     reason: v.union(
-      v.literal('fake_profile'),
-      v.literal('inappropriate_photos'),
-      v.literal('harassment'),
-      v.literal('spam'),
-      v.literal('underage'),
-      v.literal('other')
+      v.literal("fake_profile"),
+      v.literal("inappropriate_photos"),
+      v.literal("harassment"),
+      v.literal("spam"),
+      v.literal("underage"),
+      v.literal("other"),
     ),
     description: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
     const { reporterId, reportedUserId, reason, description } = args;
 
-    await ctx.db.insert('reports', {
+    await ctx.db.insert("reports", {
       reporterId,
       reportedUserId,
       reason,
       description,
-      status: 'pending',
+      status: "pending",
       createdAt: Date.now(),
     });
 
@@ -411,7 +452,7 @@ export const reportUser = mutation({
 // Deactivate account
 export const deactivateAccount = mutation({
   args: {
-    userId: v.id('users'),
+    userId: v.id("users"),
   },
   handler: async (ctx, args) => {
     await ctx.db.patch(args.userId, { isActive: false });
@@ -422,7 +463,7 @@ export const deactivateAccount = mutation({
 // Reactivate account
 export const reactivateAccount = mutation({
   args: {
-    userId: v.id('users'),
+    userId: v.id("users"),
   },
   handler: async (ctx, args) => {
     await ctx.db.patch(args.userId, { isActive: true, lastActive: Date.now() });
@@ -447,7 +488,7 @@ function calculateDistance(
   lat1: number,
   lon1: number,
   lat2: number,
-  lon2: number
+  lon2: number,
 ): number {
   const R = 3959; // Earth's radius in miles
   const dLat = toRad(lat2 - lat1);
@@ -465,3 +506,212 @@ function calculateDistance(
 function toRad(deg: number): number {
   return deg * (Math.PI / 180);
 }
+
+// Complete onboarding with all user data
+export const completeOnboarding = mutation({
+  args: {
+    userId: v.id("users"),
+    name: v.optional(v.string()),
+    dateOfBirth: v.optional(v.string()),
+    gender: v.optional(
+      v.union(
+        v.literal("male"),
+        v.literal("female"),
+        v.literal("non_binary"),
+        v.literal("other"),
+      ),
+    ),
+    bio: v.optional(v.string()),
+    height: v.optional(v.number()),
+    weight: v.optional(v.number()),
+    smoking: v.optional(
+      v.union(
+        v.literal("never"),
+        v.literal("sometimes"),
+        v.literal("regularly"),
+        v.literal("trying_to_quit"),
+      ),
+    ),
+    drinking: v.optional(
+      v.union(
+        v.literal("never"),
+        v.literal("socially"),
+        v.literal("regularly"),
+        v.literal("sober"),
+      ),
+    ),
+    kids: v.optional(
+      v.union(
+        v.literal("have_and_want_more"),
+        v.literal("have_and_dont_want_more"),
+        v.literal("dont_have_and_want"),
+        v.literal("dont_have_and_dont_want"),
+        v.literal("not_sure"),
+      ),
+    ),
+    exercise: v.optional(
+      v.union(
+        v.literal("never"),
+        v.literal("sometimes"),
+        v.literal("regularly"),
+        v.literal("daily"),
+      ),
+    ),
+    pets: v.optional(
+      v.array(
+        v.union(
+          v.literal("dog"),
+          v.literal("cat"),
+          v.literal("bird"),
+          v.literal("other"),
+          v.literal("none"),
+          v.literal("want_pets"),
+          v.literal("allergic"),
+        ),
+      ),
+    ),
+    education: v.optional(
+      v.union(
+        v.literal("high_school"),
+        v.literal("some_college"),
+        v.literal("bachelors"),
+        v.literal("masters"),
+        v.literal("doctorate"),
+        v.literal("trade_school"),
+        v.literal("other"),
+      ),
+    ),
+    religion: v.optional(
+      v.union(
+        v.literal("christian"),
+        v.literal("muslim"),
+        v.literal("hindu"),
+        v.literal("buddhist"),
+        v.literal("jewish"),
+        v.literal("sikh"),
+        v.literal("atheist"),
+        v.literal("agnostic"),
+        v.literal("spiritual"),
+        v.literal("other"),
+        v.literal("prefer_not_to_say"),
+      ),
+    ),
+    jobTitle: v.optional(v.string()),
+    company: v.optional(v.string()),
+    school: v.optional(v.string()),
+    lookingFor: v.optional(
+      v.array(
+        v.union(
+          v.literal("male"),
+          v.literal("female"),
+          v.literal("non_binary"),
+          v.literal("other"),
+        ),
+      ),
+    ),
+    relationshipIntent: v.optional(
+      v.array(
+        v.union(
+          v.literal("long_term"),
+          v.literal("short_term"),
+          v.literal("fwb"),
+          v.literal("figuring_out"),
+          v.literal("short_to_long"),
+          v.literal("long_to_short"),
+          v.literal("new_friends"),
+          v.literal("open_to_anything"),
+        ),
+      ),
+    ),
+    activities: v.optional(
+      v.array(
+        v.union(
+          v.literal("coffee"),
+          v.literal("date_night"),
+          v.literal("sports"),
+          v.literal("movies"),
+          v.literal("free_tonight"),
+          v.literal("foodie"),
+          v.literal("gym_partner"),
+          v.literal("concerts"),
+          v.literal("travel"),
+          v.literal("outdoors"),
+          v.literal("art_culture"),
+          v.literal("gaming"),
+          v.literal("nightlife"),
+          v.literal("brunch"),
+          v.literal("study_date"),
+          v.literal("this_weekend"),
+          v.literal("beach_pool"),
+          v.literal("road_trip"),
+          v.literal("photography"),
+          v.literal("volunteering"),
+        ),
+      ),
+    ),
+    minAge: v.optional(v.number()),
+    maxAge: v.optional(v.number()),
+    maxDistance: v.optional(v.number()),
+    photoStorageIds: v.optional(v.array(v.id("_storage"))),
+  },
+  handler: async (ctx, args) => {
+    const { userId, photoStorageIds, ...updates } = args;
+
+    // Verify user exists
+    const user = await ctx.db.get(userId);
+    if (!user) {
+      throw new Error("User not found");
+    }
+
+    // Filter out undefined values
+    const cleanUpdates: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(updates)) {
+      if (value !== undefined) {
+        cleanUpdates[key] = value;
+      }
+    }
+
+    // Mark onboarding as completed
+    cleanUpdates.onboardingCompleted = true;
+    cleanUpdates.onboardingStep = undefined;
+    cleanUpdates.lastActive = Date.now();
+
+    // Update user profile
+    await ctx.db.patch(userId, cleanUpdates);
+
+    // Handle photos if provided
+    if (photoStorageIds && photoStorageIds.length > 0) {
+      // Delete existing photos and their storage files
+      const existingPhotos = await ctx.db
+        .query("photos")
+        .withIndex("by_user", (q) => q.eq("userId", userId))
+        .collect();
+
+      for (const photo of existingPhotos) {
+        await ctx.storage.delete(photo.storageId);
+        await ctx.db.delete(photo._id);
+      }
+
+      // Add new photos
+      for (let i = 0; i < photoStorageIds.length; i++) {
+        const storageId = photoStorageIds[i];
+        const url = await ctx.storage.getUrl(storageId);
+
+        if (url) {
+          await ctx.db.insert("photos", {
+            userId,
+            storageId,
+            url,
+            order: i,
+            isPrimary: i === 0,
+            hasFace: true, // Assuming face detection was done
+            isNsfw: false,
+            createdAt: Date.now(),
+          });
+        }
+      }
+    }
+
+    return { success: true };
+  },
+});

@@ -1,6 +1,6 @@
-import { v } from 'convex/values';
-import { mutation, query } from './_generated/server';
-import { Id } from './_generated/dataModel';
+import { v } from "convex/values";
+import { mutation, query } from "./_generated/server";
+import { Id } from "./_generated/dataModel";
 
 // Generate a random 6-digit OTP
 function generateOTP(): string {
@@ -9,8 +9,9 @@ function generateOTP(): string {
 
 // Generate a random session token
 function generateToken(): string {
-  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789';
-  let token = '';
+  const chars =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+  let token = "";
   for (let i = 0; i < 64; i++) {
     token += chars.charAt(Math.floor(Math.random() * chars.length));
   }
@@ -18,9 +19,18 @@ function generateToken(): string {
 }
 
 // Simple password hashing (in production, use bcrypt or similar)
+// Using a simple hash for demo - NOT secure for production!
 function hashPassword(password: string): string {
-  // This is a placeholder - in production use proper hashing
-  return Buffer.from(password).toString('base64');
+  // Simple hash function for demo purposes
+  // In production, use a proper hashing library via an action
+  let hash = 0;
+  for (let i = 0; i < password.length; i++) {
+    const char = password.charCodeAt(i);
+    hash = (hash << 5) - hash + char;
+    hash = hash & hash; // Convert to 32bit integer
+  }
+  // Add salt-like prefix and convert to string
+  return "hash_" + Math.abs(hash).toString(36) + "_" + password.length;
 }
 
 function verifyPassword(password: string, hash: string): boolean {
@@ -31,7 +41,7 @@ function verifyPassword(password: string, hash: string): boolean {
 export const sendOTP = mutation({
   args: {
     identifier: v.string(),
-    type: v.union(v.literal('email'), v.literal('phone')),
+    type: v.union(v.literal("email"), v.literal("phone")),
   },
   handler: async (ctx, args) => {
     const { identifier, type } = args;
@@ -39,22 +49,22 @@ export const sendOTP = mutation({
 
     // Check for existing unexpired OTP
     const existingOTP = await ctx.db
-      .query('otpCodes')
-      .withIndex('by_identifier', (q) => q.eq('identifier', identifier))
-      .filter((q) => q.gt(q.field('expiresAt'), now))
+      .query("otpCodes")
+      .withIndex("by_identifier", (q) => q.eq("identifier", identifier))
+      .filter((q) => q.gt(q.field("expiresAt"), now))
       .first();
 
     if (existingOTP) {
       // Rate limiting: don't send if OTP was sent in last 60 seconds
       if (now - existingOTP.createdAt < 60000) {
-        throw new Error('Please wait before requesting another OTP');
+        throw new Error("Please wait before requesting another OTP");
       }
     }
 
     const code = generateOTP();
     const expiresAt = now + 10 * 60 * 1000; // 10 minutes
 
-    await ctx.db.insert('otpCodes', {
+    await ctx.db.insert("otpCodes", {
       identifier,
       code,
       type,
@@ -66,7 +76,7 @@ export const sendOTP = mutation({
     // In production, integrate with email/SMS service
     console.log(`OTP for ${identifier}: ${code}`);
 
-    return { success: true, message: 'OTP sent successfully' };
+    return { success: true, message: "OTP sent successfully" };
   },
 });
 
@@ -81,26 +91,26 @@ export const verifyOTP = mutation({
     const now = Date.now();
 
     const otpRecord = await ctx.db
-      .query('otpCodes')
-      .withIndex('by_identifier_code', (q) =>
-        q.eq('identifier', identifier).eq('code', code)
+      .query("otpCodes")
+      .withIndex("by_identifier_code", (q) =>
+        q.eq("identifier", identifier).eq("code", code),
       )
       .first();
 
     if (!otpRecord) {
-      throw new Error('Invalid OTP');
+      throw new Error("Invalid OTP");
     }
 
     if (otpRecord.expiresAt < now) {
-      throw new Error('OTP has expired');
+      throw new Error("OTP has expired");
     }
 
     if (otpRecord.verifiedAt) {
-      throw new Error('OTP already used');
+      throw new Error("OTP already used");
     }
 
     if (otpRecord.attempts >= 3) {
-      throw new Error('Too many attempts');
+      throw new Error("Too many attempts");
     }
 
     // Mark as verified
@@ -119,7 +129,12 @@ export const registerWithEmail = mutation({
     password: v.string(),
     name: v.string(),
     dateOfBirth: v.string(),
-    gender: v.union(v.literal('male'), v.literal('female'), v.literal('non_binary'), v.literal('other')),
+    gender: v.union(
+      v.literal("male"),
+      v.literal("female"),
+      v.literal("non_binary"),
+      v.literal("other"),
+    ),
   },
   handler: async (ctx, args) => {
     const { email, password, name, dateOfBirth, gender } = args;
@@ -127,48 +142,49 @@ export const registerWithEmail = mutation({
 
     // Check if user already exists
     const existingUser = await ctx.db
-      .query('users')
-      .withIndex('by_email', (q) => q.eq('email', email))
+      .query("users")
+      .withIndex("by_email", (q) => q.eq("email", email))
       .first();
 
     if (existingUser) {
-      throw new Error('Email already registered');
+      throw new Error("Email already registered");
     }
 
     // Calculate trial end date (7 days from now)
-    const trialEndsAt = gender === 'male' ? now + 7 * 24 * 60 * 60 * 1000 : undefined;
+    const trialEndsAt =
+      gender === "male" ? now + 7 * 24 * 60 * 60 * 1000 : undefined;
 
     // Create user
-    const userId = await ctx.db.insert('users', {
+    const userId = await ctx.db.insert("users", {
       email,
       passwordHash: hashPassword(password),
-      authProvider: 'email',
+      authProvider: "email",
       name,
       dateOfBirth,
       gender,
-      bio: '',
+      bio: "",
       isVerified: false,
-      lookingFor: gender === 'male' ? ['female'] : ['male'],
+      lookingFor: gender === "male" ? ["female"] : ["male"],
       relationshipIntent: [],
       activities: [],
       minAge: 18,
       maxAge: 50,
       maxDistance: 50,
-      subscriptionTier: 'free',
+      subscriptionTier: "free",
       trialEndsAt,
       incognitoMode: false,
-      likesRemaining: gender === 'female' ? 999999 : 50,
-      superLikesRemaining: gender === 'female' ? 999999 : 1,
-      messagesRemaining: gender === 'female' ? 999999 : 5,
-      rewindsRemaining: gender === 'female' ? 999999 : 0,
-      boostsRemaining: gender === 'female' ? 999999 : 0,
+      likesRemaining: gender === "female" ? 999999 : 50,
+      superLikesRemaining: gender === "female" ? 999999 : 1,
+      messagesRemaining: gender === "female" ? 999999 : 5,
+      rewindsRemaining: gender === "female" ? 999999 : 0,
+      boostsRemaining: gender === "female" ? 999999 : 0,
       likesResetAt: now + 24 * 60 * 60 * 1000,
       superLikesResetAt: now + 7 * 24 * 60 * 60 * 1000,
       messagesResetAt: now + 7 * 24 * 60 * 60 * 1000,
       lastActive: now,
       createdAt: now,
       onboardingCompleted: false,
-      onboardingStep: 'photo_upload',
+      onboardingStep: "photo_upload",
       notificationsEnabled: false,
       isActive: true,
       isBanned: false,
@@ -176,7 +192,7 @@ export const registerWithEmail = mutation({
 
     // Create session
     const token = generateToken();
-    await ctx.db.insert('sessions', {
+    await ctx.db.insert("sessions", {
       userId,
       token,
       expiresAt: now + 30 * 24 * 60 * 60 * 1000, // 30 days
@@ -202,20 +218,20 @@ export const loginWithEmail = mutation({
     const now = Date.now();
 
     const user = await ctx.db
-      .query('users')
-      .withIndex('by_email', (q) => q.eq('email', email))
+      .query("users")
+      .withIndex("by_email", (q) => q.eq("email", email))
       .first();
 
     if (!user) {
-      throw new Error('Invalid email or password');
+      throw new Error("Invalid email or password");
     }
 
     if (!user.passwordHash || !verifyPassword(password, user.passwordHash)) {
-      throw new Error('Invalid email or password');
+      throw new Error("Invalid email or password");
     }
 
     if (user.isBanned) {
-      throw new Error('Account has been suspended');
+      throw new Error("Account has been suspended");
     }
 
     // Update last active
@@ -223,7 +239,7 @@ export const loginWithEmail = mutation({
 
     // Create session
     const token = generateToken();
-    await ctx.db.insert('sessions', {
+    await ctx.db.insert("sessions", {
       userId: user._id,
       token,
       expiresAt: now + 30 * 24 * 60 * 60 * 1000, // 30 days
@@ -242,7 +258,11 @@ export const loginWithEmail = mutation({
 // Social auth (Google, Apple, Facebook)
 export const socialAuth = mutation({
   args: {
-    provider: v.union(v.literal('google'), v.literal('apple'), v.literal('facebook')),
+    provider: v.union(
+      v.literal("google"),
+      v.literal("apple"),
+      v.literal("facebook"),
+    ),
     externalId: v.string(),
     email: v.optional(v.string()),
     name: v.optional(v.string()),
@@ -253,8 +273,8 @@ export const socialAuth = mutation({
 
     // Check if user already exists with this external ID
     let user = await ctx.db
-      .query('users')
-      .withIndex('by_external_id', (q) => q.eq('externalId', externalId))
+      .query("users")
+      .withIndex("by_external_id", (q) => q.eq("externalId", externalId))
       .first();
 
     if (user) {
@@ -262,7 +282,7 @@ export const socialAuth = mutation({
       await ctx.db.patch(user._id, { lastActive: now });
 
       const token = generateToken();
-      await ctx.db.insert('sessions', {
+      await ctx.db.insert("sessions", {
         userId: user._id,
         token,
         expiresAt: now + 30 * 24 * 60 * 60 * 1000,
@@ -281,8 +301,8 @@ export const socialAuth = mutation({
     // Check if user exists with same email
     if (email) {
       user = await ctx.db
-        .query('users')
-        .withIndex('by_email', (q) => q.eq('email', email))
+        .query("users")
+        .withIndex("by_email", (q) => q.eq("email", email))
         .first();
 
       if (user) {
@@ -294,7 +314,7 @@ export const socialAuth = mutation({
         });
 
         const token = generateToken();
-        await ctx.db.insert('sessions', {
+        await ctx.db.insert("sessions", {
           userId: user._id,
           token,
           expiresAt: now + 30 * 24 * 60 * 60 * 1000,
@@ -326,56 +346,66 @@ export const socialAuth = mutation({
 // Complete social auth registration
 export const completeSocialAuth = mutation({
   args: {
-    provider: v.union(v.literal('google'), v.literal('apple'), v.literal('facebook')),
+    provider: v.union(
+      v.literal("google"),
+      v.literal("apple"),
+      v.literal("facebook"),
+    ),
     externalId: v.string(),
     email: v.optional(v.string()),
     name: v.string(),
     dateOfBirth: v.string(),
-    gender: v.union(v.literal('male'), v.literal('female'), v.literal('non_binary'), v.literal('other')),
+    gender: v.union(
+      v.literal("male"),
+      v.literal("female"),
+      v.literal("non_binary"),
+      v.literal("other"),
+    ),
   },
   handler: async (ctx, args) => {
     const { provider, externalId, email, name, dateOfBirth, gender } = args;
     const now = Date.now();
 
-    const trialEndsAt = gender === 'male' ? now + 7 * 24 * 60 * 60 * 1000 : undefined;
+    const trialEndsAt =
+      gender === "male" ? now + 7 * 24 * 60 * 60 * 1000 : undefined;
 
-    const userId = await ctx.db.insert('users', {
+    const userId = await ctx.db.insert("users", {
       email,
       externalId,
       authProvider: provider,
       name,
       dateOfBirth,
       gender,
-      bio: '',
+      bio: "",
       isVerified: false,
-      lookingFor: gender === 'male' ? ['female'] : ['male'],
+      lookingFor: gender === "male" ? ["female"] : ["male"],
       relationshipIntent: [],
       activities: [],
       minAge: 18,
       maxAge: 50,
       maxDistance: 50,
-      subscriptionTier: 'free',
+      subscriptionTier: "free",
       trialEndsAt,
       incognitoMode: false,
-      likesRemaining: gender === 'female' ? 999999 : 50,
-      superLikesRemaining: gender === 'female' ? 999999 : 1,
-      messagesRemaining: gender === 'female' ? 999999 : 5,
-      rewindsRemaining: gender === 'female' ? 999999 : 0,
-      boostsRemaining: gender === 'female' ? 999999 : 0,
+      likesRemaining: gender === "female" ? 999999 : 50,
+      superLikesRemaining: gender === "female" ? 999999 : 1,
+      messagesRemaining: gender === "female" ? 999999 : 5,
+      rewindsRemaining: gender === "female" ? 999999 : 0,
+      boostsRemaining: gender === "female" ? 999999 : 0,
       likesResetAt: now + 24 * 60 * 60 * 1000,
       superLikesResetAt: now + 7 * 24 * 60 * 60 * 1000,
       messagesResetAt: now + 7 * 24 * 60 * 60 * 1000,
       lastActive: now,
       createdAt: now,
       onboardingCompleted: false,
-      onboardingStep: 'photo_upload',
+      onboardingStep: "photo_upload",
       notificationsEnabled: false,
       isActive: true,
       isBanned: false,
     });
 
     const token = generateToken();
-    await ctx.db.insert('sessions', {
+    await ctx.db.insert("sessions", {
       userId,
       token,
       expiresAt: now + 30 * 24 * 60 * 60 * 1000,
@@ -400,8 +430,8 @@ export const validateSession = query({
     const now = Date.now();
 
     const session = await ctx.db
-      .query('sessions')
-      .withIndex('by_token', (q) => q.eq('token', token))
+      .query("sessions")
+      .withIndex("by_token", (q) => q.eq("token", token))
       .first();
 
     if (!session) {
@@ -434,8 +464,8 @@ export const logout = mutation({
     const { token } = args;
 
     const session = await ctx.db
-      .query('sessions')
-      .withIndex('by_token', (q) => q.eq('token', token))
+      .query("sessions")
+      .withIndex("by_token", (q) => q.eq("token", token))
       .first();
 
     if (session) {
@@ -449,14 +479,14 @@ export const logout = mutation({
 // Logout all devices
 export const logoutAll = mutation({
   args: {
-    userId: v.id('users'),
+    userId: v.id("users"),
   },
   handler: async (ctx, args) => {
     const { userId } = args;
 
     const sessions = await ctx.db
-      .query('sessions')
-      .withIndex('by_user', (q) => q.eq('userId', userId))
+      .query("sessions")
+      .withIndex("by_user", (q) => q.eq("userId", userId))
       .collect();
 
     for (const session of sessions) {
