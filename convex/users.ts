@@ -681,13 +681,14 @@ export const completeOnboarding = mutation({
 
     // Handle photos if provided
     if (photoStorageIds && photoStorageIds.length > 0) {
-      // Delete existing photos
+      // Delete existing photos and their storage files
       const existingPhotos = await ctx.db
         .query("photos")
         .withIndex("by_user", (q) => q.eq("userId", userId))
         .collect();
 
       for (const photo of existingPhotos) {
+        await ctx.storage.delete(photo.storageId);
         await ctx.db.delete(photo._id);
       }
 
