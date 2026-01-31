@@ -1,3 +1,16 @@
+// Security & Verification Types
+export type VerificationStatus = 'unverified' | 'pending_verification' | 'verified';
+export type EnforcementLevel = 'none' | 'gentle_reminder' | 'reduced_reach' | 'security_only';
+export type BehaviorFlagType =
+  | 'rapid_swiping'
+  | 'mass_messaging'
+  | 'rapid_account_creation'
+  | 'reported_by_multiple'
+  | 'nsfw_photo_uploaded'
+  | 'suspicious_profile'
+  | 'manual_flag';
+export type BehaviorFlagSeverity = 'low' | 'medium' | 'high';
+
 // User Types
 export type Gender = "male" | "female" | "non_binary" | "other";
 
@@ -84,7 +97,7 @@ export type SortOption =
   | "recently_active"
   | "newest";
 
-export type SwipeAction = "like" | "pass" | "super_like";
+export type SwipeAction = "like" | "pass" | "super_like" | "text";
 
 export type MessageType = "text" | "image" | "template" | "dare";
 
@@ -107,6 +120,7 @@ export interface UserProfile {
   company?: string;
   school?: string;
   isVerified: boolean;
+  verificationStatus?: VerificationStatus;
   verificationPhotoUrl?: string;
   lastActive: number;
   createdAt: number;
@@ -272,6 +286,157 @@ export interface FeatureAccess {
   incognitoAccess: VisibilityMode;
   customMessageLength: number | "unlimited";
   templateCount: number;
+}
+
+// Incognito Types
+export type DesireCategory =
+  | "romantic"
+  | "adventurous"
+  | "intellectual"
+  | "social"
+  | "creative"
+  | "spiritual";
+
+export type TodResponseType = "text" | "video" | "audio" | "picture";
+
+export type TodResponseStatus = "pending" | "correct" | "declined";
+
+export type ConnectionSource = "tod" | "room" | "desire" | "friend";
+
+export type BodyStructure = "slim" | "athletic" | "average" | "curvy" | "muscular" | "plus_size";
+
+export interface IncognitoProfile {
+  id: string;
+  username: string;
+  age: number;
+  gender: Gender;
+  photoUrl: string;
+  desires: string[];
+  desireCategories: DesireCategory[];
+  distance: number;
+  city: string;
+  bio: string;
+  isOnline: boolean;
+  relationshipIntent: string;
+  interests: string[];
+  hobbies: string[];
+  faceUnblurred: boolean;
+  height?: number;
+  weight?: number;
+  bodyStructure?: BodyStructure;
+  ethnicity?: string;
+  hairColor?: string;
+  eyeColor?: string;
+  tattoos?: boolean;
+  piercings?: boolean;
+  smoking?: SmokingStatus;
+  drinking?: DrinkingStatus;
+}
+
+export interface TruthOrDarePost {
+  id: string;
+  authorId: string;
+  authorName: string;
+  authorAge: number;
+  authorPhotoUrl: string;
+  type: "truth" | "dare";
+  content: string;
+  responseCount: number;
+  createdAt: number;
+  isAnonymous: boolean;
+}
+
+export interface TodResponse {
+  id: string;
+  postId: string;
+  responderId: string;
+  responderName: string;
+  responderPhotoUrl: string;
+  responseType: TodResponseType;
+  content: string;
+  mediaUrl?: string;
+  status: TodResponseStatus;
+  createdAt: number;
+}
+
+export type TodUserState = "answered" | "skipped" | "could_not_answer";
+
+export type ProfileViewState = "viewed" | "could_not_open";
+
+export interface IncognitoChatRoom {
+  id: string;
+  name: string;
+  language: string;
+  memberCount: number;
+  onlineCount: number;
+  latestMessage?: string;
+  icon: string;
+  color: string;
+}
+
+export interface IncognitoConversation {
+  id: string;
+  participantId: string;
+  participantName: string;
+  participantAge: number;
+  participantPhotoUrl: string;
+  lastMessage: string;
+  lastMessageAt: number;
+  unreadCount: number;
+  connectionSource: ConnectionSource;
+}
+
+export interface IncognitoMessage {
+  id: string;
+  conversationId: string;
+  senderId: string;
+  content: string;
+  createdAt: number;
+  isRead: boolean;
+}
+
+// Discover Notification Types
+export type DiscoverNotificationType = 'crossed_paths' | 'new_matches' | 'message_reply' | 'interest_match' | 'weekly_refresh';
+
+export interface DiscoverNotification {
+  id: string;
+  type: DiscoverNotificationType;
+  message: string;
+  navigateTo?: string;
+  createdAt: number;
+  seen?: boolean;
+}
+
+// Discovery Feed Types
+export type FeedItemType = 'crossed_paths' | 'activity_highlight' | 'nearby_interest' | 'unread_messages';
+
+export interface DiscoveryFeedItem {
+  id: string;
+  type: FeedItemType;
+  icon: string;
+  message: string;
+  navigateTo?: string;
+}
+
+// AI Coaching Types
+export type CoachingSuggestionType = 'icebreaker' | 'rephrase' | 'follow_up';
+
+export interface CoachingSuggestion {
+  id: string;
+  type: CoachingSuggestionType;
+  text: string;
+  label: string;
+}
+
+export interface CoachingContext {
+  recipientName: string;
+  recipientActivities?: string[];
+  recipientPrompts?: { question: string; answer: string }[];
+  sharedActivities?: string[];
+  messageCount: number;
+  lastMessageFromMe: boolean;
+  lastMessageText?: string;
+  currentDraftText?: string;
 }
 
 // Onboarding Step

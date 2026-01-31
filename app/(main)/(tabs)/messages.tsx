@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import { View, Text, StyleSheet, FlatList, TouchableOpacity, RefreshControl, Platform } from 'react-native';
 import { useRouter } from 'expo-router';
+import { Image } from 'expo-image';
 import { useQuery } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { useAuthStore } from '@/stores/authStore';
@@ -9,78 +10,149 @@ import { ConversationItem } from '@/components/chat';
 import { useMessageQuota } from '@/hooks/useMessageQuota';
 import { Ionicons } from '@expo/vector-icons';
 import { Badge } from '@/components/ui';
+import { isDemoMode } from '@/hooks/useConvex';
+import { DEMO_MATCHES, DEMO_LIKES } from '@/lib/demoData';
+import { isActiveNow } from '@/lib/formatLastSeen';
 
 export default function MessagesScreen() {
   const router = useRouter();
   const { userId } = useAuthStore();
   const [refreshing, setRefreshing] = useState(false);
 
-  const conversations = useQuery(
+  const convexConversations = useQuery(
     api.messages.getConversations,
-    userId ? { userId: userId as any } : 'skip'
+    !isDemoMode && userId ? { userId: userId as any } : 'skip'
   );
 
-  const unreadCount = useQuery(
+  const convexUnreadCount = useQuery(
     api.messages.getUnreadCount,
-    userId ? { userId: userId as any } : 'skip'
+    !isDemoMode && userId ? { userId: userId as any } : 'skip'
   );
 
-  const currentUser = useQuery(
+  const convexCurrentUser = useQuery(
     api.users.getCurrentUser,
-    userId ? { userId: userId as any } : 'skip'
+    !isDemoMode && userId ? { userId: userId as any } : 'skip'
   );
 
-  const likesReceived = useQuery(
+  const convexLikesReceived = useQuery(
     api.likes.getLikesReceived,
-    userId ? { userId: userId as any } : 'skip'
+    !isDemoMode && userId ? { userId: userId as any } : 'skip'
   );
 
+  const conversations = isDemoMode ? DEMO_MATCHES as any : convexConversations;
+  const unreadCount = isDemoMode ? 1 : convexUnreadCount;
+  const currentUser = isDemoMode ? { gender: 'male', messagesRemaining: 99, messagesResetAt: undefined } : convexCurrentUser;
+  const likesReceived = isDemoMode ? DEMO_LIKES : convexLikesReceived;
+
+  // Convex queries are real-time/reactive — no manual refetch needed.
+  // Short spinner provides tactile feedback for the pull gesture.
   const onRefresh = async () => {
     setRefreshing(true);
-    // Convex queries auto-refresh, just wait a bit
-    setTimeout(() => setRefreshing(false), 1000);
+    setTimeout(() => setRefreshing(false), 300);
   };
 
-  const renderNewMatches = () => {
-    if (!likesReceived || likesReceived.length === 0) return null;
+  // Separate super likes from regular likes
+  const superLikes = (likesReceived || []).filter((l: any) => l.action === 'super_like');
+  const regularLikes = (likesReceived || []).filter((l: any) => l.action !== 'super_like');
+
+  const renderSuperLikesRow = () => {
+    if (superLikes.length === 0) return null;
 
     return (
-      <View style={styles.newMatchesSection}>
-        <Text style={styles.sectionTitle}>New Likes</Text>
+      <View style={styles.superLikesSection}>
+        <View style={styles.sectionHeader}>
+          <Ionicons name="star" size={18} color={COLORS.superLike} />
+          <Text style={styles.sectionTitle}>Super Likes</Text>
+          <View style={styles.countBadge}>
+            <Text style={styles.countBadgeText}>{superLikes.length}</Text>
+          </View>
+        </View>
         <FlatList
           horizontal
-          data={likesReceived.slice(0, 10)}
-          keyExtractor={(item) => item.likeId}
-          renderItem={({ item }) => (
+          data={superLikes.slice(0, 10)}
+          keyExtractor={(item: any) => item.likeId}
+          renderItem={({ item }: { item: any }) => (
             <TouchableOpacity
-              style={styles.newMatchItem}
-              onPress={() => {
-                // Navigate to profile or start conversation
-                router.push(`/(main)/profile/${item.userId}`);
-              }}
+              style={styles.superLikeItem}
+              activeOpacity={0.7}
+              onPress={() => router.push(`/profile/${item.userId}` as any)}
             >
-              {item.isBlurred ? (
-                <View style={[styles.newMatchAvatar, styles.blurredAvatar]}>
-                  <Ionicons name="lock-closed" size={20} color={COLORS.textLight} />
-                </View>
-              ) : (
-                <View style={styles.newMatchAvatar}>
-                  {item.photoUrl ? (
-                    <Text style={styles.avatarText}>{item.name?.[0] || '?'}</Text>
+              <View style={styles.superLikeAvatarContainer}>
+                <View style={styles.superLikeRing}>
+                  {item.photoUrl && !item.isBlurred ? (
+                    <Image
+                      source={{ uri: item.photoUrl }}
+                      style={styles.superLikeAvatar}
+                      contentFit="cover"
+                    />
+                  ) : item.isBlurred ? (
+                    <View style={[styles.superLikeAvatar, styles.blurredAvatar]}>
+                      <Ionicons name="lock-closed" size={18} color={COLORS.textLight} />
+                    </View>
                   ) : (
-                    <Ionicons name="person" size={24} color={COLORS.textLight} />
+                    <View style={[styles.superLikeAvatar, styles.placeholderAvatar]}>
+                      <Text style={styles.avatarInitial}>{item.name?.[0] || '?'}</Text>
+                    </View>
                   )}
                 </View>
-              )}
-              {item.action === 'super_like' && (
-                <View style={styles.superLikeBadge}>
-                  <Ionicons name="star" size={12} color={COLORS.superLike} />
+                <View style={styles.superLikeStarBadge}>
+                  <Ionicons name="star" size={10} color={COLORS.white} />
                 </View>
-              )}
+              </View>
+              <Text style={styles.superLikeName} numberOfLines={1}>{item.name || 'Someone'}</Text>
             </TouchableOpacity>
           )}
           showsHorizontalScrollIndicator={false}
-          contentContainerStyle={styles.newMatchesList}
+          contentContainerStyle={styles.superLikesList}
+        />
+      </View>
+    );
+  };
+
+  const renderNewLikes = () => {
+    if (regularLikes.length === 0) return null;
+
+    return (
+      <View style={styles.newLikesSection}>
+        <View style={styles.sectionHeader}>
+          <Ionicons name="heart" size={18} color={COLORS.primary} />
+          <Text style={styles.sectionTitle}>New Likes</Text>
+          <View style={[styles.countBadge, { backgroundColor: COLORS.primary + '20' }]}>
+            <Text style={[styles.countBadgeText, { color: COLORS.primary }]}>{regularLikes.length}</Text>
+          </View>
+        </View>
+        <FlatList
+          horizontal
+          data={regularLikes.slice(0, 10)}
+          keyExtractor={(item: any) => item.likeId}
+          renderItem={({ item }: { item: any }) => (
+            <TouchableOpacity
+              style={styles.likeItem}
+              activeOpacity={0.7}
+              onPress={() => router.push(`/profile/${item.userId}` as any)}
+            >
+              <View style={styles.likeAvatarContainer}>
+                {item.photoUrl && !item.isBlurred ? (
+                  <Image
+                    source={{ uri: item.photoUrl }}
+                    style={styles.likeAvatar}
+                    contentFit="cover"
+                  />
+                ) : item.isBlurred ? (
+                  <View style={[styles.likeAvatar, styles.blurredAvatar]}>
+                    <Ionicons name="lock-closed" size={18} color={COLORS.textLight} />
+                  </View>
+                ) : (
+                  <View style={[styles.likeAvatar, styles.placeholderAvatar]}>
+                    <Text style={styles.avatarInitial}>{item.name?.[0] || '?'}</Text>
+                  </View>
+                )}
+              </View>
+              <Text style={styles.likeName} numberOfLines={1}>{item.name || 'Someone'}</Text>
+            </TouchableOpacity>
+          )}
+          showsHorizontalScrollIndicator={false}
+          contentContainerStyle={styles.likesList}
         />
       </View>
     );
@@ -139,7 +211,8 @@ export default function MessagesScreen() {
       </View>
 
       {renderQuotaBanner()}
-      {renderNewMatches()}
+      {renderSuperLikesRow()}
+      {renderNewLikes()}
 
       <FlatList
         data={conversations || []}
@@ -236,51 +309,129 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: '600',
   },
-  newMatchesSection: {
+
+  // ── Super Likes Section (Tinder-style) ──
+  superLikesSection: {
     marginTop: 16,
-    marginBottom: 8,
+    marginBottom: 4,
+  },
+  sectionHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 16,
+    marginBottom: 12,
+    gap: 8,
   },
   sectionTitle: {
     fontSize: 16,
     fontWeight: '600',
     color: COLORS.text,
-    paddingHorizontal: 16,
-    marginBottom: 12,
   },
-  newMatchesList: {
+  countBadge: {
+    backgroundColor: COLORS.superLike + '20',
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    borderRadius: 10,
+  },
+  countBadgeText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: COLORS.superLike,
+  },
+  superLikesList: {
     paddingHorizontal: 16,
   },
-  newMatchItem: {
-    marginRight: 12,
+  superLikeItem: {
+    marginRight: 16,
     alignItems: 'center',
+    width: 72,
   },
-  newMatchAvatar: {
-    width: 64,
-    height: 64,
-    borderRadius: 32,
-    backgroundColor: COLORS.backgroundDark,
+  superLikeAvatarContainer: {
+    position: 'relative',
+    marginBottom: 6,
+  },
+  superLikeRing: {
+    width: 68,
+    height: 68,
+    borderRadius: 34,
+    borderWidth: 2.5,
+    borderColor: COLORS.superLike,
     alignItems: 'center',
     justifyContent: 'center',
+    padding: 2,
+  },
+  superLikeAvatar: {
+    width: 58,
+    height: 58,
+    borderRadius: 29,
+    backgroundColor: COLORS.backgroundDark,
+  },
+  superLikeStarBadge: {
+    position: 'absolute',
+    bottom: -2,
+    right: -2,
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    backgroundColor: COLORS.superLike,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 2,
+    borderColor: COLORS.background,
+  },
+  superLikeName: {
+    fontSize: 12,
+    color: COLORS.text,
+    fontWeight: '500',
+    textAlign: 'center',
+  },
+
+  // ── New Likes Section ──
+  newLikesSection: {
+    marginTop: 12,
+    marginBottom: 4,
+  },
+  likesList: {
+    paddingHorizontal: 16,
+  },
+  likeItem: {
+    marginRight: 14,
+    alignItems: 'center',
+    width: 64,
+  },
+  likeAvatarContainer: {
+    marginBottom: 6,
+  },
+  likeAvatar: {
+    width: 58,
+    height: 58,
+    borderRadius: 29,
+    backgroundColor: COLORS.backgroundDark,
     borderWidth: 2,
     borderColor: COLORS.primary,
   },
   blurredAvatar: {
     borderColor: COLORS.border,
     opacity: 0.6,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
-  avatarText: {
-    fontSize: 24,
+  placeholderAvatar: {
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  avatarInitial: {
+    fontSize: 22,
     fontWeight: '600',
     color: COLORS.text,
   },
-  superLikeBadge: {
-    position: 'absolute',
-    top: -4,
-    right: -4,
-    backgroundColor: COLORS.superLike,
-    borderRadius: 10,
-    padding: 2,
+  likeName: {
+    fontSize: 11,
+    color: COLORS.textLight,
+    textAlign: 'center',
   },
+
+  // ── Conversations List ──
   emptyContainer: {
     flex: 1,
     alignItems: 'center',
@@ -304,4 +455,3 @@ const styles = StyleSheet.create({
     lineHeight: 20,
   },
 });
-

@@ -96,7 +96,7 @@ export function AdvancedSearchModal({
               placeholder="Search interests, bio..."
               value={filters.keyword}
               onChangeText={(text) => setFilters({ ...filters, keyword: text })}
-              leftIcon={<Ionicons name="search" size={20} color={COLORS.textLight} />}
+              leftIcon="search"
             />
           </View>
 

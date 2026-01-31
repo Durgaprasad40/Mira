@@ -13,10 +13,13 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useQuery } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { Avatar, Badge } from '@/components/ui';
-import { useAuthStore, useSubscriptionStore } from '@/stores/authStore';
+import { useAuthStore } from '@/stores/authStore';
+import { useSubscriptionStore } from '@/stores/subscriptionStore';
 import { COLORS } from '@/lib/constants';
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
+import { isDemoMode } from '@/hooks/useConvex';
+import { DEMO_LIKES, DEMO_PROFILES } from '@/lib/demoData';
 // Note: expo-blur may not be available, using alternative blur effect
 
 const { width } = Dimensions.get('window');
@@ -26,17 +29,37 @@ export default function LikesScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const { userId } = useAuthStore();
-  const { isPremium } = useSubscriptionStore();
+  const { tier } = useSubscriptionStore();
+  const isPremium = tier === 'premium';
   const [sortBy, setSortBy] = useState<'recent' | 'distance' | 'active'>('recent');
 
-  const likes = useQuery(
+  const convexLikes = useQuery(
     api.likes.getLikesReceived,
-    userId ? { userId } : 'skip'
+    !isDemoMode && userId ? { userId: userId as any } : 'skip'
   );
 
+  const demoLikes = isDemoMode
+    ? DEMO_PROFILES.slice(0, 12).map((p, i) => ({
+        likeId: `demo_like_${i}`,
+        userId: p._id,
+        action: i % 4 === 0 ? 'super_like' : 'like',
+        message: null,
+        createdAt: Date.now() - 1000 * 60 * 60 * (i + 1),
+        name: p.name,
+        age: p.age,
+        photoUrl: p.photos[0]?.url,
+        distance: p.distance,
+        isBlurred: false,
+        isSuperLike: i % 4 === 0,
+      }))
+    : null;
+
+  const likes = isDemoMode ? demoLikes : convexLikes;
+
   const renderLikeCard = (like: any, index: number) => {
-    const isBlurred = !isPremium && index >= 3;
-    const isVisible = isPremium || index < 3;
+    // Testing mode: all likes visible, no blur restriction
+    const isBlurred = false;
+    const isVisible = true;
 
     return (
       <TouchableOpacity
@@ -46,7 +69,7 @@ export default function LikesScreen() {
             // Show upgrade prompt
             router.push('/(main)/subscription');
           } else {
-            router.push(`/(main)/profile/${like.userId}`);
+            router.push(`/profile/${like.userId}` as any);
           }
         }}
         activeOpacity={0.8}
@@ -100,7 +123,7 @@ export default function LikesScreen() {
         {!isBlurred && (
           <TouchableOpacity
             style={styles.viewButton}
-            onPress={() => router.push(`/(main)/profile/${like.userId}`)}
+            onPress={() => router.push(`/profile/${like.userId}` as any)}
           >
             <Text style={styles.viewButtonText}>View</Text>
           </TouchableOpacity>
@@ -109,8 +132,9 @@ export default function LikesScreen() {
     );
   };
 
-  const visibleLikes = likes?.filter((_, i) => isPremium || i < 3) || [];
-  const blurredCount = likes && !isPremium ? Math.max(0, likes.length - 3) : 0;
+  // Testing mode: all likes visible
+  const visibleLikes = (likes || []) as any[];
+  const blurredCount: number = 0;
 
   return (
     <View style={[styles.container, { paddingTop: insets.top }]}>

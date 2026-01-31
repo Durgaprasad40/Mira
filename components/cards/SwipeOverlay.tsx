@@ -1,15 +1,17 @@
 import React from 'react';
-import { View, Text, StyleSheet } from 'react-native';
+import { View, Text, StyleSheet, Animated } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { COLORS } from '@/lib/constants';
 
 interface SwipeOverlayProps {
   direction: 'left' | 'right' | 'up' | null;
-  opacity: number;
+  opacity: number | Animated.Value;
 }
 
 export function SwipeOverlay({ direction, opacity }: SwipeOverlayProps) {
-  if (!direction || opacity === 0) return null;
+  if (!direction) return null;
+  // Support both static number and Animated.Value
+  if (typeof opacity === 'number' && opacity === 0) return null;
 
   const getConfig = () => {
     switch (direction) {
@@ -40,12 +42,12 @@ export function SwipeOverlay({ direction, opacity }: SwipeOverlayProps) {
   if (!config) return null;
 
   return (
-    <View style={[styles.container, { opacity }]}>
+    <Animated.View style={[styles.container, { opacity }]}>
       <View style={[styles.overlay, { borderColor: config.color }]}>
         <Ionicons name={config.icon} size={48} color={config.color} />
         <Text style={[styles.text, { color: config.color }]}>{config.text}</Text>
       </View>
-    </View>
+    </Animated.View>
   );
 }
 

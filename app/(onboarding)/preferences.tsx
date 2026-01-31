@@ -5,6 +5,7 @@ import { COLORS, GENDER_OPTIONS, RELATIONSHIP_INTENTS, ACTIVITY_FILTERS } from '
 import { Input, Button } from '@/components/ui';
 import { useOnboardingStore } from '@/stores/onboardingStore';
 import { Ionicons } from '@expo/vector-icons';
+import type { Gender } from '@/types';
 
 export default function PreferencesScreen() {
   const {
@@ -48,10 +49,10 @@ export default function PreferencesScreen() {
           {GENDER_OPTIONS.map((option) => (
             <TouchableOpacity
               key={option.value}
-              style={[styles.chip, lookingFor.includes(option.value) && styles.chipSelected]}
-              onPress={() => toggleLookingFor(option.value)}
+              style={[styles.chip, lookingFor.includes(option.value as Gender) && styles.chipSelected]}
+              onPress={() => toggleLookingFor(option.value as Gender)}
             >
-              <Text style={[styles.chipText, lookingFor.includes(option.value) && styles.chipTextSelected]}>
+              <Text style={[styles.chipText, lookingFor.includes(option.value as Gender) && styles.chipTextSelected]}>
                 {option.label}
               </Text>
             </TouchableOpacity>

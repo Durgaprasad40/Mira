@@ -30,6 +30,8 @@ export const COLORS = {
 export const SWIPE_CONFIG = {
   SWIPE_THRESHOLD_X: 0.3, // 30% of screen width
   SWIPE_THRESHOLD_Y: 0.2, // 20% of screen height
+  SWIPE_VELOCITY_X: 0.7, // horizontal velocity threshold
+  SWIPE_VELOCITY_Y: 0.7, // vertical velocity threshold
   ROTATION_ANGLE: 15, // degrees
   ANIMATION_DURATION: 300, // ms
   HAPTIC_ENABLED: true,
@@ -291,3 +293,31 @@ export const MESSAGE_TEMPLATES = [
   { id: 'simple_hi', text: "Hey {name}! Your profile caught my attention. How's your day going? 😊" },
   { id: 'weekend', text: "Hi {name}! Got any exciting plans for the weekend? ✨" },
 ];
+
+// Micro Survey Questions (shown periodically during swiping)
+export const MICRO_SURVEY_QUESTIONS = [
+  { id: 'app_experience', text: 'How are you finding Mira so far?', options: ['Love it', 'It\'s okay', 'Needs improvement'] },
+  { id: 'match_quality', text: 'How relevant are the profiles you see?', options: ['Very relevant', 'Somewhat', 'Not really'] },
+  { id: 'feature_request', text: 'What would you most like to see next?', options: ['Video profiles', 'Better filters', 'Group activities', 'Events'] },
+  { id: 'usage_frequency', text: 'How often do you open Mira?', options: ['Daily', 'Few times a week', 'Weekly', 'Rarely'] },
+];
+
+// Profile Prompt Questions
+export const PROFILE_PROMPT_QUESTIONS = [
+  { id: 'perfect_day', text: 'My perfect first date would be...' },
+  { id: 'fun_fact', text: 'A fun fact about me...' },
+  { id: 'dealbreaker', text: 'My biggest dealbreaker is...' },
+  { id: 'superpower', text: 'If I had a superpower it would be...' },
+  { id: 'love_language', text: 'My love language is...' },
+  { id: 'bucket_list', text: 'Top of my bucket list...' },
+];
+
+// Incognito Mode Colors
+export const INCOGNITO_COLORS = {
+  background: '#1A1A2E',
+  surface: '#16213E',
+  accent: '#0F3460',
+  text: '#E0E0E0',
+  textLight: '#9E9E9E',
+  primary: '#E94560',
+};

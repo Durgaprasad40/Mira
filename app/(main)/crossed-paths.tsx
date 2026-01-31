@@ -93,7 +93,7 @@ export default function CrossedPathsScreen() {
               </View>
               {item.isUnlocked && item.unlockExpiresAt && (
                 <View style={styles.unlockBadge}>
-                  <Ionicons name="unlock" size={14} color={COLORS.success} />
+                  <Ionicons name="lock-open" size={14} color={COLORS.success} />
                   <Text style={styles.unlockText}>
                     Free messaging until{' '}
                     {new Date(item.unlockExpiresAt).toLocaleDateString()}

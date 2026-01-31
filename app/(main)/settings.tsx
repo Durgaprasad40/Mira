@@ -17,6 +17,8 @@ import { COLORS, SORT_OPTIONS, GENDER_OPTIONS } from '@/lib/constants';
 import { Button, Input } from '@/components/ui';
 import { Ionicons } from '@expo/vector-icons';
 import { useFilterStore } from '@/stores/filterStore';
+import { isDemoMode } from '@/hooks/useConvex';
+import type { Gender } from '@/types';
 
 export default function SettingsScreen() {
   const router = useRouter();
@@ -29,12 +31,14 @@ export default function SettingsScreen() {
 
   const updatePreferences = useMutation(api.users.updatePreferences);
   const toggleIncognito = useMutation(api.users.toggleIncognito);
+  const toggleDiscoveryPause = useMutation(api.users.toggleDiscoveryPause);
+  // toggleShowLastSeen is handled locally until a Convex mutation is added
 
   const {
     minAge,
     maxAge,
     maxDistance,
-    lookingFor,
+    gender: lookingFor,
     setMinAge,
     setMaxAge,
     setMaxDistance,
@@ -45,6 +49,8 @@ export default function SettingsScreen() {
   const [localMaxAge, setLocalMaxAge] = useState(maxAge.toString());
   const [localMaxDistance, setLocalMaxDistance] = useState(maxDistance.toString());
   const [incognitoEnabled, setIncognitoEnabled] = useState(currentUser?.incognitoMode || false);
+  const [pauseEnabled, setPauseEnabled] = useState(false);
+  const [showLastSeenEnabled, setShowLastSeenEnabled] = useState(currentUser?.showLastSeen !== false);
 
   React.useEffect(() => {
     if (currentUser) {
@@ -52,6 +58,13 @@ export default function SettingsScreen() {
       setLocalMaxAge(currentUser.maxAge.toString());
       setLocalMaxDistance(currentUser.maxDistance.toString());
       setIncognitoEnabled(currentUser.incognitoMode || false);
+      setShowLastSeenEnabled(currentUser.showLastSeen !== false);
+      // Check if pause is active and not expired
+      const isPaused =
+        currentUser.isDiscoveryPaused === true &&
+        typeof currentUser.discoveryPausedUntil === 'number' &&
+        currentUser.discoveryPausedUntil > Date.now();
+      setPauseEnabled(isPaused);
     }
   }, [currentUser]);
 
@@ -73,6 +86,26 @@ export default function SettingsScreen() {
     } catch (error: any) {
       Alert.alert('Error', error.message || 'Failed to update preferences');
     }
+  };
+
+  const handleTogglePause = async (paused: boolean) => {
+    if (isDemoMode) {
+      setPauseEnabled(paused);
+      return;
+    }
+    if (!userId) return;
+
+    try {
+      await toggleDiscoveryPause({ userId: userId as any, paused });
+      setPauseEnabled(paused);
+    } catch (error: any) {
+      Alert.alert('Error', error.message || 'Failed to toggle pause');
+      setPauseEnabled(!paused);
+    }
+  };
+
+  const handleToggleLastSeen = async (show: boolean) => {
+    setShowLastSeenEnabled(show);
   };
 
   const handleToggleIncognito = async (enabled: boolean) => {
@@ -119,14 +152,14 @@ export default function SettingsScreen() {
                 key={option.value}
                 style={[
                   styles.chip,
-                  lookingFor.includes(option.value) && styles.chipSelected,
+                  lookingFor.includes(option.value as Gender) && styles.chipSelected,
                 ]}
-                onPress={() => toggleGender(option.value)}
+                onPress={() => toggleGender(option.value as Gender)}
               >
                 <Text
                   style={[
                     styles.chipText,
-                    lookingFor.includes(option.value) && styles.chipTextSelected,
+                    lookingFor.includes(option.value as Gender) && styles.chipTextSelected,
                   ]}
                 >
                   {option.label}
@@ -191,6 +224,38 @@ export default function SettingsScreen() {
             value={incognitoEnabled}
             onValueChange={handleToggleIncognito}
             disabled={!canUseIncognito}
+            trackColor={{ false: COLORS.border, true: COLORS.primary }}
+            thumbColor={COLORS.white}
+          />
+        </View>
+
+        <View style={styles.settingRow}>
+          <View style={styles.settingInfo}>
+            <Text style={styles.settingTitle}>Show Last Seen</Text>
+            <Text style={styles.settingDescription}>
+              Let others see when you were last active
+            </Text>
+          </View>
+          <Switch
+            value={showLastSeenEnabled}
+            onValueChange={handleToggleLastSeen}
+            trackColor={{ false: COLORS.border, true: COLORS.primary }}
+            thumbColor={COLORS.white}
+          />
+        </View>
+
+        <View style={styles.settingRow}>
+          <View style={styles.settingInfo}>
+            <Text style={styles.settingTitle}>Pause Matching</Text>
+            <Text style={styles.settingDescription}>
+              {pauseEnabled && currentUser?.discoveryPausedUntil
+                ? `Paused until ${new Date(currentUser.discoveryPausedUntil).toLocaleString()}`
+                : 'Hide from discovery for 24 hours'}
+            </Text>
+          </View>
+          <Switch
+            value={pauseEnabled}
+            onValueChange={handleTogglePause}
             trackColor={{ false: COLORS.border, true: COLORS.primary }}
             thumbColor={COLORS.white}
           />

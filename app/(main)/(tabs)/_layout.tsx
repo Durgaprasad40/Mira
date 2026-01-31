@@ -36,6 +36,15 @@ export default function MainTabsLayout() {
         }}
       />
       <Tabs.Screen
+        name="nearby"
+        options={{
+          title: "Nearby",
+          tabBarIcon: ({ color, size }) => (
+            <Ionicons name="location" size={size} color={color} />
+          ),
+        }}
+      />
+      <Tabs.Screen
         name="messages"
         options={{
           title: "Messages",
@@ -47,7 +56,7 @@ export default function MainTabsLayout() {
       <Tabs.Screen
         name="incognito"
         options={{
-          title: "Incognito",
+          title: "Private",
           tabBarIcon: ({ color, size }) => (
             <Ionicons name="eye-off" size={size} color={color} />
           ),
@@ -56,10 +65,7 @@ export default function MainTabsLayout() {
       <Tabs.Screen
         name="rooms"
         options={{
-          title: "Rooms",
-          tabBarIcon: ({ color, size }) => (
-            <Ionicons name="people" size={size} color={color} />
-          ),
+          href: null,
         }}
       />
       <Tabs.Screen

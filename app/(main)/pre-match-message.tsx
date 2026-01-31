@@ -22,7 +22,8 @@ export default function PreMatchMessageScreen() {
   const insets = useSafeAreaInsets();
   const { userId: targetUserId } = useLocalSearchParams<{ userId: string }>();
   const { userId } = useAuthStore();
-  const { isPremium } = useSubscriptionStore();
+  const { tier } = useSubscriptionStore();
+  const isPremium = tier === 'premium';
 
   const [selectedTemplate, setSelectedTemplate] = useState<string | null>(null);
   const [customMessage, setCustomMessage] = useState('');
@@ -30,7 +31,7 @@ export default function PreMatchMessageScreen() {
 
   const targetUser = useQuery(
     api.users.getUserById,
-    targetUserId ? { userId: targetUserId as any, viewerId: userId } : 'skip'
+    targetUserId && userId ? { userId: targetUserId as any, viewerId: userId as any } : 'skip'
   );
 
   const templates = useQuery(
@@ -42,7 +43,7 @@ export default function PreMatchMessageScreen() {
 
   const canSend = useQuery(
     api.messages.canSendMessage,
-    userId ? { userId } : 'skip'
+    userId ? { userId: userId as any } : 'skip'
   );
 
   const sendPreMatchMessage = useMutation(api.messages.sendPreMatchMessage);
@@ -77,9 +78,9 @@ export default function PreMatchMessageScreen() {
     setSending(true);
     try {
       await sendPreMatchMessage({
-        senderId: userId as any,
-        receiverId: targetUserId as any,
-        message,
+        fromUserId: userId as any,
+        toUserId: targetUserId as any,
+        content: message,
         templateId: selectedTemplate || undefined,
       });
       Alert.alert('Success', 'Message sent! They\'ll see it at the top of their screen.', [
@@ -112,7 +113,7 @@ export default function PreMatchMessageScreen() {
 
       <ScrollView style={styles.content} contentContainerStyle={styles.contentContainer}>
         <View style={styles.targetUserCard}>
-          <Avatar source={{ uri: targetUser.photos?.[0]?.url }} size={64} />
+          <Avatar uri={targetUser.photos?.[0]?.url} size={64} />
           <Text style={styles.targetUserName}>{targetUser.name}</Text>
           <Text style={styles.targetUserSubtext}>
             Send a message to stand out! (Uses 1 of your {canSend?.remaining || 0} weekly messages)

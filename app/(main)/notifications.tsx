@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   View,
   Text,
@@ -9,40 +9,46 @@ import {
 } from 'react-native';
 import { useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { useQuery, useMutation } from 'convex/react';
-import { api } from '@/convex/_generated/api';
-import { Avatar, Badge } from '@/components/ui';
-import { useAuthStore } from '@/stores/authStore';
 import { COLORS } from '@/lib/constants';
 import { Ionicons } from '@expo/vector-icons';
+import { useNotifications, type AppNotification } from '@/hooks/useNotifications';
 
 interface NotificationGroup {
   title: string;
-  notifications: any[];
+  notifications: AppNotification[];
 }
 
 export default function NotificationsScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
-  const { userId } = useAuthStore();
   const [refreshing, setRefreshing] = useState(false);
 
-  const notifications = useQuery(
-    api.notifications.getNotifications,
-    userId ? { userId } : 'skip'
-  );
+  // ── Single source of truth — same hook the bell badge uses ──
+  const { notifications, unseenCount, markAllSeen, markRead } = useNotifications();
 
-  const markAsRead = useMutation(api.notifications.markAsRead);
-  const markAllAsRead = useMutation(api.notifications.markAllAsRead);
+  // ── Auto-mark all as seen on mount (clears bell badge) ──
+  const hasMarkedRef = useRef(false);
+  useEffect(() => {
+    if (!hasMarkedRef.current && unseenCount > 0) {
+      hasMarkedRef.current = true;
+      markAllSeen();
+    }
+  }, [unseenCount, markAllSeen]);
+
+  // ── Debug log ──
+  useEffect(() => {
+    console.log(
+      `[NotificationsScreen] total=${notifications.length} unseenCount=${unseenCount}`,
+    );
+  }, [notifications.length, unseenCount]);
 
   const onRefresh = async () => {
     setRefreshing(true);
-    // Refresh logic
     setTimeout(() => setRefreshing(false), 1000);
   };
 
-  const groupNotifications = (notifs: any[]): NotificationGroup[] => {
-    if (!notifs) return [];
+  const groupNotifications = (notifs: AppNotification[]): NotificationGroup[] => {
+    if (!notifs || notifs.length === 0) return [];
 
     const now = Date.now();
     const today = new Date(now).setHours(0, 0, 0, 0);
@@ -72,50 +78,56 @@ export default function NotificationsScreen() {
     return groups.filter((group) => group.notifications.length > 0);
   };
 
-  const handleNotificationPress = async (notification: any) => {
+  const handleNotificationPress = (notification: AppNotification) => {
     if (!notification.isRead) {
-      await markAsRead({ notificationId: notification._id });
+      markRead(notification._id);
     }
 
-    // Navigate based on notification type
     switch (notification.type) {
+      case 'match':
       case 'new_match':
-        router.push(`/(main)/match-celebration?matchId=${notification.data?.matchId}&userId=${notification.data?.userId}`);
+        if (notification.data?.matchId && notification.data?.userId) {
+          router.push(`/(main)/match-celebration?matchId=${notification.data.matchId}&userId=${notification.data.userId}`);
+        }
         break;
+      case 'message':
       case 'new_message':
-        router.push(`/(main)/chat/${notification.data?.userId}`);
+        if (notification.data?.userId) {
+          router.push(`/(main)/chat/${notification.data.userId}`);
+        }
         break;
+      case 'super_like':
       case 'superlike':
         router.push('/(main)/(tabs)/messages');
         break;
       case 'subscription':
         router.push('/(main)/subscription');
         break;
+      case 'crossed_paths':
+        router.push('/(main)/crossed-paths');
+        break;
       default:
         break;
     }
   };
 
-  const handleMarkAllAsRead = async () => {
-    if (userId) {
-      await markAllAsRead({ userId });
-    }
-  };
-
   const getNotificationIcon = (type: string) => {
     switch (type) {
+      case 'match':
       case 'new_match':
         return 'heart';
+      case 'message':
       case 'new_message':
         return 'chatbubble';
+      case 'super_like':
       case 'superlike':
         return 'star';
       case 'subscription':
         return 'card';
       case 'crossed_paths':
         return 'location';
-      case 'dare':
-        return 'dice';
+      case 'weekly_refresh':
+        return 'refresh';
       default:
         return 'notifications';
     }
@@ -123,18 +135,37 @@ export default function NotificationsScreen() {
 
   const getNotificationColor = (type: string) => {
     switch (type) {
+      case 'match':
       case 'new_match':
         return COLORS.primary;
+      case 'message':
       case 'new_message':
         return COLORS.secondary;
+      case 'super_like':
       case 'superlike':
         return COLORS.superLike;
+      case 'crossed_paths':
+        return '#FF9800';
       default:
         return COLORS.textLight;
     }
   };
 
-  const renderNotification = ({ item }: { item: any }) => (
+  const formatTime = (timestamp: number) => {
+    const now = Date.now();
+    const diff = now - timestamp;
+    const minutes = Math.floor(diff / 60000);
+    const hours = Math.floor(diff / 3600000);
+    const days = Math.floor(diff / 86400000);
+
+    if (minutes < 1) return 'Just now';
+    if (minutes < 60) return `${minutes}m ago`;
+    if (hours < 24) return `${hours}h ago`;
+    if (days < 7) return `${days}d ago`;
+    return new Date(timestamp).toLocaleDateString();
+  };
+
+  const renderNotification = ({ item }: { item: AppNotification }) => (
     <TouchableOpacity
       style={[styles.notificationItem, !item.isRead && styles.unread]}
       onPress={() => handleNotificationPress(item)}
@@ -166,21 +197,7 @@ export default function NotificationsScreen() {
     </TouchableOpacity>
   );
 
-  const formatTime = (timestamp: number) => {
-    const now = Date.now();
-    const diff = now - timestamp;
-    const minutes = Math.floor(diff / 60000);
-    const hours = Math.floor(diff / 3600000);
-    const days = Math.floor(diff / 86400000);
-
-    if (minutes < 1) return 'Just now';
-    if (minutes < 60) return `${minutes}m ago`;
-    if (hours < 24) return `${hours}h ago`;
-    if (days < 7) return `${days}d ago`;
-    return new Date(timestamp).toLocaleDateString();
-  };
-
-  const groupedNotifications = groupNotifications(notifications || []);
+  const groupedNotifications = groupNotifications(notifications);
 
   return (
     <View style={[styles.container, { paddingTop: insets.top }]}>
@@ -189,7 +206,7 @@ export default function NotificationsScreen() {
           <Ionicons name="arrow-back" size={24} color={COLORS.text} />
         </TouchableOpacity>
         <Text style={styles.headerTitle}>Notifications</Text>
-        <TouchableOpacity onPress={handleMarkAllAsRead}>
+        <TouchableOpacity onPress={markAllSeen}>
           <Text style={styles.markAllText}>Mark All Read</Text>
         </TouchableOpacity>
       </View>

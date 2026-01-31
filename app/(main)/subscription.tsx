@@ -51,7 +51,7 @@ export default function SubscriptionScreen() {
               await purchaseSubscription({
                 userId: userId as any,
                 planId: plan.id,
-                tier: plan.tier,
+                tier: plan.tier as "basic" | "premium",
                 duration: plan.duration,
                 price: plan.price,
                 currency: 'INR',

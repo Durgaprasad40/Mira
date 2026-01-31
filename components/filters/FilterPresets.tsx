@@ -24,7 +24,8 @@ interface FilterPresetsProps {
 
 export function FilterPresets({ visible, onClose, onLoadPreset }: FilterPresetsProps) {
   const { userId } = useAuthStore();
-  const { isPremium } = useSubscriptionStore();
+  const { tier } = useSubscriptionStore();
+  const isPremium = tier === 'premium';
   const [showCreate, setShowCreate] = useState(false);
   const [presetName, setPresetName] = useState('');
 

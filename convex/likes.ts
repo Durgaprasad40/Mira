@@ -7,7 +7,7 @@ export const swipe = mutation({
   args: {
     fromUserId: v.id('users'),
     toUserId: v.id('users'),
-    action: v.union(v.literal('like'), v.literal('pass'), v.literal('super_like')),
+    action: v.union(v.literal('like'), v.literal('pass'), v.literal('super_like'), v.literal('text')),
     message: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
@@ -17,45 +17,9 @@ export const swipe = mutation({
     const fromUser = await ctx.db.get(fromUserId);
     if (!fromUser) throw new Error('User not found');
 
-    // Check usage limits for men
-    if (fromUser.gender === 'male') {
-      // Reset daily likes if needed
-      if (now >= fromUser.likesResetAt) {
-        const newLikes = fromUser.subscriptionTier === 'free' ? 50 : 999999;
-        await ctx.db.patch(fromUserId, {
-          likesRemaining: newLikes,
-          likesResetAt: now + 24 * 60 * 60 * 1000,
-        });
-        fromUser.likesRemaining = newLikes;
-      }
-
-      // Reset weekly super likes if needed
-      if (now >= fromUser.superLikesResetAt) {
-        let newSuperLikes = 0;
-        if (fromUser.subscriptionTier === 'basic') newSuperLikes = 5;
-        else if (fromUser.subscriptionTier === 'premium') newSuperLikes = 999999;
-        else if (fromUser.trialEndsAt && now < fromUser.trialEndsAt) newSuperLikes = 1;
-
-        await ctx.db.patch(fromUserId, {
-          superLikesRemaining: newSuperLikes,
-          superLikesResetAt: now + 7 * 24 * 60 * 60 * 1000,
-        });
-        fromUser.superLikesRemaining = newSuperLikes;
-      }
-
-      // Check limits
-      if (action === 'like' || action === 'pass') {
-        if (fromUser.likesRemaining <= 0) {
-          throw new Error('No swipes remaining today');
-        }
-      }
-
-      if (action === 'super_like') {
-        if (fromUser.superLikesRemaining <= 0) {
-          throw new Error('No super likes remaining');
-        }
-      }
-    }
+    // TODO: Subscription restrictions disabled for testing mode.
+    // Re-enable usage limits once testing is complete.
+    // if (fromUser.gender === 'male') { ... }
 
     // Check if already swiped
     const existingLike = await ctx.db
@@ -78,18 +42,69 @@ export const swipe = mutation({
       createdAt: now,
     });
 
-    // Update usage count for men
-    if (fromUser.gender === 'male') {
-      if (action === 'like' || action === 'pass') {
-        await ctx.db.patch(fromUserId, {
-          likesRemaining: fromUser.likesRemaining - 1,
+    // Inline rapid-swiping check
+    const fiveMinAgo = now - 5 * 60 * 1000;
+    const recentSwipes = await ctx.db
+      .query('likes')
+      .withIndex('by_from_user', (q) => q.eq('fromUserId', fromUserId))
+      .collect();
+    const recentCount = recentSwipes.filter(s => s.createdAt > fiveMinAgo).length;
+    if (recentCount > 100) {
+      const existingFlag = await ctx.db
+        .query('behaviorFlags')
+        .withIndex('by_user_type', (q) =>
+          q.eq('userId', fromUserId).eq('flagType', 'rapid_swiping')
+        )
+        .collect();
+      const recentFlag = existingFlag.find(f => now - f.createdAt < 60 * 60 * 1000);
+      if (!recentFlag) {
+        await ctx.db.insert('behaviorFlags', {
+          userId: fromUserId,
+          flagType: 'rapid_swiping',
+          severity: 'medium',
+          description: `${recentCount} swipes in 5 minutes`,
+          createdAt: now,
         });
       }
-      if (action === 'super_like') {
-        await ctx.db.patch(fromUserId, {
-          superLikesRemaining: fromUser.superLikesRemaining - 1,
-        });
+    }
+
+    // TODO: Usage count updates disabled for testing mode.
+    // Re-enable once testing is complete.
+
+    // Handle text action: send a direct message via message token (pre-match conversation)
+    if (action === 'text') {
+      if (!message) {
+        throw new Error('Message is required for text action');
       }
+
+      // Create a pre-match conversation for the direct message
+      const conversationId = await ctx.db.insert('conversations', {
+        participants: [fromUserId, toUserId],
+        isPreMatch: true,
+        lastMessageAt: now,
+        createdAt: now,
+      });
+
+      // Insert the direct message
+      await ctx.db.insert('messages', {
+        conversationId,
+        senderId: fromUserId,
+        type: 'text',
+        content: message,
+        createdAt: now,
+      });
+
+      // Notify the receiver
+      await ctx.db.insert('notifications', {
+        userId: toUserId,
+        type: 'message',
+        title: 'New Direct Message!',
+        body: `${fromUser.name} sent you a message`,
+        data: { conversationId: conversationId },
+        createdAt: now,
+      });
+
+      return { success: true, isMatch: false };
     }
 
     // Check for match (only on like or super_like)
@@ -101,7 +116,13 @@ export const swipe = mutation({
         )
         .first();
 
-      if (reciprocalLike && (reciprocalLike.action === 'like' || reciprocalLike.action === 'super_like')) {
+      const isReciprocal = reciprocalLike && (
+        reciprocalLike.action === 'like' ||
+        reciprocalLike.action === 'super_like' ||
+        reciprocalLike.action === 'text'
+      );
+
+      if (isReciprocal) {
         // It's a match!
         const matchId = await ctx.db.insert('matches', {
           user1Id: fromUserId < toUserId ? fromUserId : toUserId,
@@ -169,15 +190,8 @@ export const rewind = mutation({
     const user = await ctx.db.get(userId);
     if (!user) throw new Error('User not found');
 
-    // Check if user can rewind
-    if (user.gender === 'male') {
-      if (user.subscriptionTier === 'free') {
-        throw new Error('Upgrade to rewind swipes');
-      }
-      if (user.rewindsRemaining <= 0) {
-        throw new Error('No rewinds remaining');
-      }
-    }
+    // TODO: Subscription restrictions disabled for testing mode.
+    // Re-enable rewind limits once testing is complete.
 
     // Get the last like
     const lastLike = await ctx.db
@@ -190,32 +204,11 @@ export const rewind = mutation({
       throw new Error('No swipe to rewind');
     }
 
-    // Can only rewind within 5 seconds (or any time for premium)
-    const canRewind =
-      user.subscriptionTier === 'premium' ||
-      Date.now() - lastLike.createdAt < 5000;
-
-    if (!canRewind) {
-      throw new Error('Too late to rewind');
-    }
+    // TODO: Time restriction disabled for testing mode.
+    // Re-enable 5-second window / premium check once testing is complete.
 
     // Delete the like
     await ctx.db.delete(lastLike._id);
-
-    // Restore usage count
-    if (user.gender === 'male') {
-      if (lastLike.action === 'super_like') {
-        await ctx.db.patch(userId, {
-          superLikesRemaining: user.superLikesRemaining + 1,
-          rewindsRemaining: user.rewindsRemaining - 1,
-        });
-      } else {
-        await ctx.db.patch(userId, {
-          likesRemaining: user.likesRemaining + 1,
-          rewindsRemaining: user.rewindsRemaining - 1,
-        });
-      }
-    }
 
     // Check if there was a match to undo
     const toUserId = lastLike.toUserId;
@@ -260,11 +253,9 @@ export const getLikesReceived = query({
     const user = await ctx.db.get(userId);
     if (!user) return [];
 
-    // Check if user can see who liked them
-    const canSee =
-      user.gender === 'female' ||
-      user.subscriptionTier === 'basic' ||
-      user.subscriptionTier === 'premium';
+    // TODO: Subscription restrictions disabled for testing mode.
+    // All users can see who liked them during testing.
+    const canSee = true;
 
     const likes = await ctx.db
       .query('likes')

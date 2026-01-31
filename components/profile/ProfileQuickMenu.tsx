@@ -9,7 +9,7 @@ import {
 } from 'react-native';
 import { useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { Avatar, Badge } from '@/components/ui';
+import { Avatar } from '@/components/ui';
 import { useAuthStore, useSubscriptionStore } from '@/stores';
 import { useQuery } from 'convex/react';
 import { api } from '@/convex/_generated/api';
@@ -25,16 +25,17 @@ export function ProfileQuickMenu({ visible, onClose }: ProfileQuickMenuProps) {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const { userId } = useAuthStore();
-  const { isPremium } = useSubscriptionStore();
+  const { tier } = useSubscriptionStore();
+  const isPremium = tier === 'premium';
 
   const currentUser = useQuery(
     api.users.getCurrentUser,
-    userId ? { userId } : 'skip'
+    userId ? { userId: userId as any } : 'skip'
   );
 
   const messageQuota = useQuery(
     api.messages.getUnreadCount,
-    userId ? { userId } : 'skip'
+    userId ? { userId: userId as any } : 'skip'
   );
 
   const menuItems = [
@@ -121,7 +122,7 @@ export function ProfileQuickMenu({ visible, onClose }: ProfileQuickMenuProps) {
           {currentUser && (
             <View style={styles.profileHeader}>
               <Avatar
-                source={{ uri: currentUser.photos?.[0]?.url }}
+                uri={currentUser.photos?.[0]?.url}
                 size={48}
               />
               <View style={styles.profileInfo}>
@@ -173,11 +174,9 @@ export function ProfileQuickMenu({ visible, onClose }: ProfileQuickMenuProps) {
                   {item.label}
                 </Text>
                 {item.badge && (
-                  <Badge
-                    text={item.badge}
-                    variant="primary"
-                    style={styles.badge}
-                  />
+                  <View style={styles.textBadge}>
+                    <Text style={styles.textBadgeLabel}>{item.badge}</Text>
+                  </View>
                 )}
                 <Ionicons
                   name="chevron-forward"
@@ -276,6 +275,18 @@ const styles = StyleSheet.create({
   },
   badge: {
     marginLeft: 'auto',
+  },
+  textBadge: {
+    marginLeft: 'auto',
+    backgroundColor: COLORS.primary + '15',
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    borderRadius: 8,
+  },
+  textBadgeLabel: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: COLORS.primary,
   },
   chevron: {
     marginLeft: 8,

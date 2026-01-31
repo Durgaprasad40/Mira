@@ -8,6 +8,10 @@ import {
 } from '@/types';
 
 interface FilterStoreState extends FilterState {
+  // Alias for gender
+  lookingFor: Gender[];
+  setLookingFor: (genders: Gender[]) => void;
+
   // Actions
   setGender: (genders: Gender[]) => void;
   toggleGender: (gender: Gender) => void;
@@ -36,15 +40,19 @@ const initialState: FilterState = {
 
 export const useFilterStore = create<FilterStoreState>((set) => ({
   ...initialState,
+  lookingFor: initialState.gender,
 
-  setGender: (gender) => set({ gender }),
+  setLookingFor: (genders) => set({ gender: genders, lookingFor: genders }),
+
+  setGender: (gender) => set({ gender, lookingFor: gender }),
 
   toggleGender: (gender) =>
-    set((state) => ({
-      gender: state.gender.includes(gender)
+    set((state) => {
+      const next = state.gender.includes(gender)
         ? state.gender.filter((g) => g !== gender)
-        : [...state.gender, gender],
-    })),
+        : [...state.gender, gender];
+      return { gender: next, lookingFor: next };
+    }),
 
   setMinAge: (minAge) => set({ minAge }),
 

@@ -26,13 +26,14 @@ export default function BoostScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const { userId } = useAuthStore();
-  const { isPremium } = useSubscriptionStore();
+  const { tier } = useSubscriptionStore();
+  const isPremium = tier === 'premium';
   const [selectedBoost, setSelectedBoost] = useState<string>('4hr');
   const [activating, setActivating] = useState(false);
 
   const user = useQuery(
     api.users.getCurrentUser,
-    userId ? { userId } : 'skip'
+    userId ? { userId: userId as any } : 'skip'
   );
 
   const activateBoost = useMutation(api.subscriptions.activateBoost);
@@ -48,7 +49,7 @@ export default function BoostScreen() {
     if (user?.boostsRemaining && user.boostsRemaining > 0) {
       setActivating(true);
       try {
-        await activateBoost({ userId: userId as any });
+        await activateBoost({ userId: userId as any, durationHours: boost.duration });
         Alert.alert('Success', `Your profile is now boosted for ${boost.duration} hour(s)!`, [
           { text: 'OK', onPress: () => router.back() },
         ]);

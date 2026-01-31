@@ -78,15 +78,8 @@ export default function PasswordScreen() {
           }}
           placeholder="Enter your password"
           secureTextEntry={!showPassword}
-          rightIcon={
-            <TouchableOpacity onPress={() => setShowPassword(!showPassword)}>
-              <Ionicons
-                name={showPassword ? 'eye-off' : 'eye'}
-                size={20}
-                color={COLORS.textLight}
-              />
-            </TouchableOpacity>
-          }
+          rightIcon={showPassword ? 'eye-off' : 'eye'}
+          onRightIconPress={() => setShowPassword(!showPassword)}
         />
         {password.length > 0 && (
           <View style={styles.strengthContainer}>
@@ -123,15 +116,8 @@ export default function PasswordScreen() {
           }}
           placeholder="Confirm your password"
           secureTextEntry={!showConfirmPassword}
-          rightIcon={
-            <TouchableOpacity onPress={() => setShowConfirmPassword(!showConfirmPassword)}>
-              <Ionicons
-                name={showConfirmPassword ? 'eye-off' : 'eye'}
-                size={20}
-                color={COLORS.textLight}
-              />
-            </TouchableOpacity>
-          }
+          rightIcon={showConfirmPassword ? 'eye-off' : 'eye'}
+          onRightIconPress={() => setShowConfirmPassword(!showConfirmPassword)}
         />
         {errors.confirm && <Text style={styles.error}>{errors.confirm}</Text>}
       </View>

@@ -93,13 +93,39 @@ export const getUserById = query({
       company: user.company,
       school: user.school,
       isVerified: user.isVerified,
+      verificationStatus: user.verificationStatus || "unverified",
       city: user.city,
       distance,
       lastActive: user.lastActive,
       relationshipIntent: user.relationshipIntent,
       activities: user.activities,
+      profilePrompts: user.profilePrompts ?? [],
       photos: photos.sort((a, b) => a.order - b.order),
     };
+  },
+});
+
+// Update profile prompts (icebreakers)
+export const updateProfilePrompts = mutation({
+  args: {
+    userId: v.id("users"),
+    prompts: v.array(v.object({
+      question: v.string(),
+      answer: v.string(),
+    })),
+  },
+  handler: async (ctx, args) => {
+    const user = await ctx.db.get(args.userId);
+    if (!user) throw new Error("User not found");
+
+    // Max 3 prompts, answer max 200 chars
+    const cleaned = args.prompts.slice(0, 3).map((p) => ({
+      question: p.question.slice(0, 100),
+      answer: p.answer.slice(0, 200),
+    }));
+
+    await ctx.db.patch(args.userId, { profilePrompts: cleaned });
+    return { success: true };
   },
 });
 
@@ -304,6 +330,34 @@ export const toggleIncognito = mutation({
   },
 });
 
+// Toggle discovery pause
+export const toggleDiscoveryPause = mutation({
+  args: {
+    userId: v.id("users"),
+    paused: v.boolean(),
+  },
+  handler: async (ctx, args) => {
+    const { userId, paused } = args;
+
+    const user = await ctx.db.get(userId);
+    if (!user) throw new Error("User not found");
+
+    if (paused) {
+      await ctx.db.patch(userId, {
+        isDiscoveryPaused: true,
+        discoveryPausedUntil: Date.now() + 24 * 60 * 60 * 1000,
+      });
+    } else {
+      await ctx.db.patch(userId, {
+        isDiscoveryPaused: false,
+        discoveryPausedUntil: undefined,
+      });
+    }
+
+    return { success: true };
+  },
+});
+
 // Complete onboarding step
 export const completeOnboardingStep = mutation({
   args: {
@@ -360,6 +414,8 @@ export const markVerified = mutation({
       isVerified: true,
       verificationPhotoId: args.verificationPhotoId,
       verificationCompletedAt: Date.now(),
+      verificationStatus: "verified",
+      verificationEnforcementLevel: "none",
     });
     return { success: true };
   },
@@ -435,6 +491,7 @@ export const reportUser = mutation({
   },
   handler: async (ctx, args) => {
     const { reporterId, reportedUserId, reason, description } = args;
+    const now = Date.now();
 
     await ctx.db.insert("reports", {
       reporterId,
@@ -442,8 +499,45 @@ export const reportUser = mutation({
       reason,
       description,
       status: "pending",
-      createdAt: Date.now(),
+      createdAt: now,
     });
+
+    // Count distinct reporters for this user
+    const allReports = await ctx.db
+      .query("reports")
+      .withIndex("by_reported_user", (q) =>
+        q.eq("reportedUserId", reportedUserId)
+      )
+      .collect();
+
+    const distinctReporters = new Set(allReports.map((r) => r.reporterId));
+
+    if (distinctReporters.size >= 3) {
+      // Check if already flagged
+      const existingFlag = await ctx.db
+        .query("behaviorFlags")
+        .withIndex("by_user_type", (q) =>
+          q.eq("userId", reportedUserId).eq("flagType", "reported_by_multiple")
+        )
+        .first();
+
+      if (!existingFlag) {
+        await ctx.db.insert("behaviorFlags", {
+          userId: reportedUserId,
+          flagType: "reported_by_multiple",
+          severity: distinctReporters.size >= 5 ? "high" : "medium",
+          description: `Reported by ${distinctReporters.size} distinct users`,
+          createdAt: now,
+        });
+
+        // Force security_only if 5+ reporters
+        if (distinctReporters.size >= 5) {
+          await ctx.db.patch(reportedUserId, {
+            verificationEnforcementLevel: "security_only",
+          });
+        }
+      }
+    }
 
     return { success: true };
   },
@@ -675,6 +769,8 @@ export const completeOnboarding = mutation({
     cleanUpdates.onboardingCompleted = true;
     cleanUpdates.onboardingStep = undefined;
     cleanUpdates.lastActive = Date.now();
+    cleanUpdates.verificationStatus = "unverified";
+    cleanUpdates.trustScore = 50;
 
     // Update user profile
     await ctx.db.patch(userId, cleanUpdates);
@@ -713,5 +809,52 @@ export const completeOnboarding = mutation({
     }
 
     return { success: true };
+  },
+});
+
+// Update enforcement level based on account age + verification status
+export const updateEnforcementLevel = mutation({
+  args: {
+    userId: v.id("users"),
+  },
+  handler: async (ctx, args) => {
+    const user = await ctx.db.get(args.userId);
+    if (!user) throw new Error("User not found");
+
+    const verificationStatus = user.verificationStatus || "unverified";
+
+    // Verified users always have no enforcement
+    if (verificationStatus === "verified") {
+      await ctx.db.patch(args.userId, {
+        verificationEnforcementLevel: "none",
+      });
+      return { level: "none" };
+    }
+
+    const accountAgeDays =
+      (Date.now() - user.createdAt) / (24 * 60 * 60 * 1000);
+
+    let level: "none" | "gentle_reminder" | "reduced_reach" | "security_only";
+
+    if (accountAgeDays < 3) {
+      level = "gentle_reminder";
+    } else if (accountAgeDays < 6) {
+      level =
+        verificationStatus === "pending_verification"
+          ? "gentle_reminder"
+          : "reduced_reach";
+    } else {
+      // Day 7+
+      level =
+        verificationStatus === "pending_verification"
+          ? "reduced_reach"
+          : "security_only";
+    }
+
+    await ctx.db.patch(args.userId, {
+      verificationEnforcementLevel: level,
+    });
+
+    return { level };
   },
 });

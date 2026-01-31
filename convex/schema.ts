@@ -113,6 +113,10 @@ export default defineSchema({
     // Incognito Mode
     incognitoMode: v.boolean(),
 
+    // Discovery Pause
+    isDiscoveryPaused: v.optional(v.boolean()),
+    discoveryPausedUntil: v.optional(v.number()),
+
     // Usage Stats
     likesRemaining: v.number(),
     superLikesRemaining: v.number(),
@@ -132,9 +136,18 @@ export default defineSchema({
     lastActive: v.number(),
     createdAt: v.number(),
 
+    // Profile Prompts (icebreakers)
+    profilePrompts: v.optional(v.array(v.object({
+      question: v.string(),
+      answer: v.string(),
+    }))),
+
     // Onboarding
     onboardingCompleted: v.boolean(),
     onboardingStep: v.optional(v.string()),
+
+    // Privacy
+    showLastSeen: v.optional(v.boolean()),
 
     // Push Notifications
     pushToken: v.optional(v.string()),
@@ -144,13 +157,25 @@ export default defineSchema({
     isActive: v.boolean(),
     isBanned: v.boolean(),
     banReason: v.optional(v.string()),
+
+    // Security & Verification
+    verificationStatus: v.optional(v.union(v.literal('unverified'), v.literal('pending_verification'), v.literal('verified'))),
+    emailVerified: v.optional(v.boolean()),
+    emailVerifiedAt: v.optional(v.number()),
+    trustScore: v.optional(v.number()),
+    trustScoreUpdatedAt: v.optional(v.number()),
+    primaryDeviceFingerprintId: v.optional(v.id('deviceFingerprints')),
+    verificationReminderDismissedAt: v.optional(v.number()),
+    verificationEnforcementLevel: v.optional(v.union(v.literal('none'), v.literal('gentle_reminder'), v.literal('reduced_reach'), v.literal('security_only'))),
+    profileQualityScore: v.optional(v.number()),
   })
     .index('by_email', ['email'])
     .index('by_phone', ['phone'])
     .index('by_external_id', ['externalId'])
     .index('by_gender', ['gender'])
     .index('by_last_active', ['lastActive'])
-    .index('by_boosted', ['boostedUntil']),
+    .index('by_boosted', ['boostedUntil'])
+    .index('by_verification_status', ['verificationStatus']),
 
   // Photos table
   photos: defineTable({
@@ -172,7 +197,7 @@ export default defineSchema({
   likes: defineTable({
     fromUserId: v.id('users'),
     toUserId: v.id('users'),
-    action: v.union(v.literal('like'), v.literal('pass'), v.literal('super_like')),
+    action: v.union(v.literal('like'), v.literal('pass'), v.literal('super_like'), v.literal('text')),
     message: v.optional(v.string()),
     createdAt: v.number(),
   })
@@ -214,6 +239,7 @@ export default defineSchema({
     content: v.string(),
     imageStorageId: v.optional(v.id('_storage')),
     templateId: v.optional(v.string()),
+    deliveredAt: v.optional(v.number()),
     readAt: v.optional(v.number()),
     createdAt: v.number(),
   })
@@ -253,6 +279,8 @@ export default defineSchema({
     lastCrossedAt: v.number(),
     lastLocation: v.optional(v.string()),
     unlockExpiresAt: v.optional(v.number()),
+    crossingLatitude: v.optional(v.number()),
+    crossingLongitude: v.optional(v.number()),
   })
     .index('by_user1', ['user1Id'])
     .index('by_user2', ['user2Id'])
@@ -356,6 +384,96 @@ export default defineSchema({
   })
     .index('by_user', ['userId'])
     .index('by_token', ['token']),
+
+  // Typing status table (ephemeral)
+  typingStatus: defineTable({
+    conversationId: v.id('conversations'),
+    userId: v.id('users'),
+    isTyping: v.boolean(),
+    updatedAt: v.number(),
+  }).index('by_conversation', ['conversationId']).index('by_user_conversation', ['userId', 'conversationId']),
+
+  // Nudges table (smart notifications)
+  nudges: defineTable({
+    userId: v.id('users'),
+    type: v.union(v.literal('crossed_paths'), v.literal('match_relevance'), v.literal('conversation_nudge'), v.literal('weekly_refresh')),
+    title: v.string(),
+    body: v.string(),
+    navigateTo: v.optional(v.string()),
+    dismissed: v.boolean(),
+    expiresAt: v.number(),
+    createdAt: v.number(),
+  }).index('by_user', ['userId']).index('by_user_active', ['userId', 'dismissed']),
+
+  // Survey Responses table
+  surveyResponses: defineTable({
+    userId: v.id('users'),
+    questionId: v.string(),
+    questionText: v.string(),
+    response: v.string(),
+    createdAt: v.number(),
+  }).index('by_user', ['userId']).index('by_question', ['questionId']),
+
+  // Verification Sessions table
+  verificationSessions: defineTable({
+    userId: v.id('users'),
+    selfieStorageId: v.id('_storage'),
+    status: v.union(v.literal('pending'), v.literal('approved'), v.literal('rejected'), v.literal('expired')),
+    rejectionReason: v.optional(v.string()),
+    selfieMetadata: v.optional(v.object({
+      width: v.optional(v.number()),
+      height: v.optional(v.number()),
+      format: v.optional(v.string()),
+    })),
+    reviewedBy: v.optional(v.string()),
+    reviewedAt: v.optional(v.number()),
+    createdAt: v.number(),
+    expiresAt: v.number(),
+  })
+    .index('by_user', ['userId'])
+    .index('by_status', ['status'])
+    .index('by_user_status', ['userId', 'status']),
+
+  // Device Fingerprints table
+  deviceFingerprints: defineTable({
+    userId: v.id('users'),
+    deviceId: v.string(),
+    platform: v.string(),
+    osVersion: v.string(),
+    appVersion: v.string(),
+    installId: v.string(),
+    deviceModel: v.optional(v.string()),
+    isMultiAccountFlagged: v.boolean(),
+    linkedUserIds: v.optional(v.array(v.id('users'))),
+    createdAt: v.number(),
+    lastSeenAt: v.number(),
+  })
+    .index('by_user', ['userId'])
+    .index('by_device_id', ['deviceId'])
+    .index('by_install_id', ['installId']),
+
+  // Behavior Flags table
+  behaviorFlags: defineTable({
+    userId: v.id('users'),
+    flagType: v.union(
+      v.literal('rapid_swiping'),
+      v.literal('mass_messaging'),
+      v.literal('rapid_account_creation'),
+      v.literal('reported_by_multiple'),
+      v.literal('nsfw_photo_uploaded'),
+      v.literal('suspicious_profile'),
+      v.literal('manual_flag')
+    ),
+    severity: v.union(v.literal('low'), v.literal('medium'), v.literal('high')),
+    description: v.optional(v.string()),
+    resolution: v.optional(v.string()),
+    resolvedAt: v.optional(v.number()),
+    resolvedBy: v.optional(v.string()),
+    createdAt: v.number(),
+  })
+    .index('by_user', ['userId'])
+    .index('by_type', ['flagType'])
+    .index('by_user_type', ['userId', 'flagType']),
 
   // Filter Presets table
   filterPresets: defineTable({

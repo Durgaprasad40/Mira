@@ -14,10 +14,22 @@ import { useQuery, useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { useAuthStore } from '@/stores/authStore';
 import { COLORS } from '@/lib/constants';
-import { MessageBubble, MessageInput, TypingIndicatorComponent } from '@/components/chat';
-import { TypingIndicator } from '@/components/chat/TypingIndicator';
+import { MessageBubble, MessageInput, TypingIndicator } from '@/components/chat';
 import { Ionicons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
+import { isDemoMode } from '@/hooks/useConvex';
+import { DEMO_MATCHES } from '@/lib/demoData';
+
+const DEMO_MESSAGES: Record<string, Array<{ _id: string; content: string; type: string; senderId: string; createdAt: number; readAt?: number }>> = {
+  match_1: [
+    { _id: 'dm_1', content: 'Hey! How are you?', type: 'text', senderId: 'demo_profile_1', createdAt: Date.now() - 1000 * 60 * 30, readAt: Date.now() - 1000 * 60 * 28 },
+    { _id: 'dm_2', content: "Hi Priya! I'm doing great, thanks for asking 😊", type: 'text', senderId: 'demo_user', createdAt: Date.now() - 1000 * 60 * 25 },
+    { _id: 'dm_3', content: 'What are you up to this weekend?', type: 'text', senderId: 'demo_profile_1', createdAt: Date.now() - 1000 * 60 * 20 },
+  ],
+  match_2: [
+    { _id: 'dm_4', content: 'You matched with Meera! Say hello 👋', type: 'text', senderId: 'system', createdAt: Date.now() - 1000 * 60 * 60 },
+  ],
+};
 
 export default function ChatScreen() {
   const { id: conversationId } = useLocalSearchParams<{ id: string }>();
@@ -25,20 +37,42 @@ export default function ChatScreen() {
   const { userId } = useAuthStore();
   const flatListRef = useRef<FlatList>(null);
 
+  const isDemo = isDemoMode || (conversationId?.startsWith('match_') ?? false);
+
+  const demoMatch = isDemo ? DEMO_MATCHES.find((m) => m.id === conversationId) : null;
+
   const conversation = useQuery(
     api.messages.getConversation,
-    conversationId && userId ? { conversationId: conversationId as any, userId: userId as any } : 'skip'
+    !isDemo && conversationId && userId ? { conversationId: conversationId as any, userId: userId as any } : 'skip'
   );
 
-  const messages = useQuery(
+  const convexMessages = useQuery(
     api.messages.getMessages,
-    conversationId ? { conversationId: conversationId as any, userId: userId as any } : 'skip'
+    !isDemo && conversationId ? { conversationId: conversationId as any, userId: userId as any } : 'skip'
   );
 
   const currentUser = useQuery(
     api.users.getCurrentUser,
-    userId ? { userId: userId as any } : 'skip'
+    !isDemo && userId ? { userId: userId as any } : 'skip'
   );
+
+  const [demoMessageList, setDemoMessageList] = useState(
+    DEMO_MESSAGES[conversationId || ''] || []
+  );
+
+  const messages = isDemo ? demoMessageList : convexMessages;
+
+  const demoConversation = demoMatch
+    ? {
+        otherUser: {
+          ...demoMatch.otherUser,
+          lastActive: Date.now() - 1000 * 60 * 2,
+        },
+        isPreMatch: demoMatch.isPreMatch,
+      }
+    : null;
+
+  const activeConversation = isDemo ? demoConversation : conversation;
 
   const sendMessage = useMutation(api.messages.sendMessage);
   const markAsRead = useMutation(api.messages.markAsRead);
@@ -47,10 +81,10 @@ export default function ChatScreen() {
   const [isSending, setIsSending] = useState(false);
 
   useEffect(() => {
-    if (conversationId && userId) {
+    if (!isDemo && conversationId && userId) {
       markAsRead({ conversationId: conversationId as any, userId: userId as any });
     }
-  }, [conversationId, userId]);
+  }, [conversationId, userId, isDemo]);
 
   useEffect(() => {
     if (messages && messages.length > 0) {
@@ -61,14 +95,26 @@ export default function ChatScreen() {
   }, [messages]);
 
   const handleSend = async (text: string, type: 'text' | 'template' = 'text') => {
-    if (!userId || !conversation) return;
+    if (!userId || !activeConversation) return;
+
+    if (isDemo) {
+      const newMsg = {
+        _id: `dm_${Date.now()}`,
+        content: text,
+        type: 'text',
+        senderId: 'demo_user',
+        createdAt: Date.now(),
+      };
+      setDemoMessageList((prev) => [...prev, newMsg]);
+      return;
+    }
 
     setIsSending(true);
     try {
-      if (conversation.isPreMatch) {
+      if (activeConversation.isPreMatch) {
         await sendPreMatchMessage({
           fromUserId: userId as any,
-          toUserId: conversation.otherUser.id as any,
+          toUserId: (activeConversation as any).otherUser.id as any,
           content: text,
           templateId: type === 'template' ? 'custom' : undefined,
         });
@@ -88,7 +134,7 @@ export default function ChatScreen() {
   };
 
   const handleSendImage = async () => {
-    if (!userId || !conversation) return;
+    if (!userId || !activeConversation) return;
 
     const permissionResult = await ImagePicker.requestMediaLibraryPermissionsAsync();
     if (!permissionResult.granted) {
@@ -109,10 +155,10 @@ export default function ChatScreen() {
   };
 
   const handleSendDare = () => {
-    router.push(`/(main)/dare/send?userId=${conversation?.otherUser.id}`);
+    router.push(`/(main)/dare/send?userId=${activeConversation?.otherUser.id}`);
   };
 
-  if (!conversation || !currentUser) {
+  if (!activeConversation) {
     return (
       <View style={styles.loadingContainer}>
         <Text style={styles.loadingText}>Loading...</Text>
@@ -120,12 +166,15 @@ export default function ChatScreen() {
     );
   }
 
-  const canSendCustom =
-    currentUser.gender === 'female' ||
-    currentUser.subscriptionTier === 'premium' ||
-    (!conversation.isPreMatch && currentUser.subscriptionTier !== 'free');
+  const canSendCustom = isDemo
+    ? true
+    : currentUser
+      ? currentUser.gender === 'female' ||
+        currentUser.subscriptionTier === 'premium' ||
+        (!activeConversation.isPreMatch && currentUser.subscriptionTier !== 'free')
+      : false;
 
-  const messagesRemaining = currentUser.messagesRemaining || 0;
+  const messagesRemaining = isDemo ? 10 : (currentUser?.messagesRemaining || 0);
 
   return (
     <KeyboardAvoidingView
@@ -138,14 +187,14 @@ export default function ChatScreen() {
           <Ionicons name="arrow-back" size={24} color={COLORS.text} />
         </TouchableOpacity>
         <View style={styles.headerInfo}>
-          <Text style={styles.headerName}>{conversation.otherUser.name}</Text>
+          <Text style={styles.headerName}>{activeConversation.otherUser.name}</Text>
           <Text style={styles.headerStatus}>
-            {conversation.otherUser.lastActive > Date.now() - 5 * 60 * 1000
+            {activeConversation.otherUser.lastActive > Date.now() - 5 * 60 * 1000
               ? 'Active now'
               : 'Recently active'}
           </Text>
         </View>
-        {conversation.otherUser.isVerified && (
+        {activeConversation.otherUser.isVerified && (
           <Ionicons name="checkmark-circle" size={20} color={COLORS.primary} />
         )}
       </View>
@@ -154,7 +203,7 @@ export default function ChatScreen() {
         ref={flatListRef}
         data={messages || []}
         ListFooterComponent={
-          <TypingIndicatorComponent conversationId={id} currentUserId={userId || ''} />
+          <TypingIndicator conversationId={conversationId || ''} currentUserId={userId || ''} />
         }
         keyExtractor={(item) => item._id}
         renderItem={({ item }) => (
@@ -168,7 +217,7 @@ export default function ChatScreen() {
               readAt: item.readAt,
             }}
             isOwn={item.senderId === userId}
-            otherUserName={conversation.otherUser.name}
+            otherUserName={activeConversation.otherUser.name}
           />
         )}
         contentContainerStyle={styles.messagesList}
@@ -178,13 +227,13 @@ export default function ChatScreen() {
       <MessageInput
         onSend={handleSend}
         onSendImage={handleSendImage}
-        onSendDare={conversation.isPreMatch ? handleSendDare : undefined}
+        onSendDare={activeConversation.isPreMatch ? handleSendDare : undefined}
         disabled={isSending}
-        isPreMatch={conversation.isPreMatch}
+        isPreMatch={activeConversation.isPreMatch}
         messagesRemaining={messagesRemaining}
-        subscriptionTier={currentUser.subscriptionTier}
+        subscriptionTier={isDemo ? 'premium' : (currentUser?.subscriptionTier || 'free')}
         canSendCustom={canSendCustom}
-        recipientName={conversation.otherUser.name}
+        recipientName={activeConversation.otherUser.name}
       />
     </KeyboardAvoidingView>
   );

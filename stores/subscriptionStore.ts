@@ -8,6 +8,7 @@ interface SubscriptionState {
   expiresAt: number | null;
   trialEndsAt: number | null;
   isInTrial: boolean;
+  isPremium: boolean;
 
   // Feature access
   likesRemaining: number;
@@ -71,6 +72,7 @@ export const useSubscriptionStore = create<SubscriptionState>()(
       expiresAt: null,
       trialEndsAt: null,
       isInTrial: false,
+      isPremium: false,
 
       likesRemaining: 50,
       superLikesRemaining: 1,
@@ -86,6 +88,7 @@ export const useSubscriptionStore = create<SubscriptionState>()(
         tier,
         expiresAt: expiresAt || null,
         isInTrial: false,
+        isPremium: tier === 'premium',
       }),
 
       startTrial: (endsAt) => set({

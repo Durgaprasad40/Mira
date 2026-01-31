@@ -9,9 +9,11 @@
  */
 
 import type * as auth from "../auth.js";
+import type * as behaviorDetection from "../behaviorDetection.js";
 import type * as cleanup from "../cleanup.js";
 import type * as crossedPaths from "../crossedPaths.js";
 import type * as dares from "../dares.js";
+import type * as deviceFingerprint from "../deviceFingerprint.js";
 import type * as discover from "../discover.js";
 import type * as filterPresets from "../filterPresets.js";
 import type * as likes from "../likes.js";
@@ -23,7 +25,10 @@ import type * as notifications from "../notifications.js";
 import type * as photos from "../photos.js";
 import type * as smartSuggestions from "../smartSuggestions.js";
 import type * as subscriptions from "../subscriptions.js";
+import type * as surveys from "../surveys.js";
+import type * as trustScore from "../trustScore.js";
 import type * as users from "../users.js";
+import type * as verification from "../verification.js";
 
 import type {
   ApiFromModules,
@@ -33,9 +38,11 @@ import type {
 
 declare const fullApi: ApiFromModules<{
   auth: typeof auth;
+  behaviorDetection: typeof behaviorDetection;
   cleanup: typeof cleanup;
   crossedPaths: typeof crossedPaths;
   dares: typeof dares;
+  deviceFingerprint: typeof deviceFingerprint;
   discover: typeof discover;
   filterPresets: typeof filterPresets;
   likes: typeof likes;
@@ -47,7 +54,10 @@ declare const fullApi: ApiFromModules<{
   photos: typeof photos;
   smartSuggestions: typeof smartSuggestions;
   subscriptions: typeof subscriptions;
+  surveys: typeof surveys;
+  trustScore: typeof trustScore;
   users: typeof users;
+  verification: typeof verification;
 }>;
 
 /**

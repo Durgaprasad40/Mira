@@ -12,29 +12,76 @@ import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useQuery, useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { useAuthStore } from '@/stores/authStore';
-import { COLORS, RELATIONSHIP_INTENTS, ACTIVITY_FILTERS } from '@/lib/constants';
+import { COLORS, RELATIONSHIP_INTENTS, ACTIVITY_FILTERS, PROFILE_PROMPT_QUESTIONS } from '@/lib/constants';
+import { computeIntentCompat, getIntentCompatColor, getIntentMismatchWarning } from '@/lib/intentCompat';
+import { getTrustBadges } from '@/lib/trustBadges';
 import { Button, Avatar } from '@/components/ui';
 import { Ionicons } from '@expo/vector-icons';
 import { Image } from 'expo-image';
 import { FlatList } from 'react-native';
+import { isDemoMode } from '@/hooks/useConvex';
+import { DEMO_PROFILES, DEMO_USER } from '@/lib/demoData';
+import { ReportBlockModal } from '@/components/security/ReportBlockModal';
 
 export default function ViewProfileScreen() {
   const { id: userId } = useLocalSearchParams<{ id: string }>();
   const router = useRouter();
   const { userId: currentUserId } = useAuthStore();
   const [currentPhotoIndex, setCurrentPhotoIndex] = useState(0);
+  const [showReportBlock, setShowReportBlock] = useState(false);
 
-  const profile = useQuery(
+  const convexProfile = useQuery(
     api.users.getUserById,
-    userId && currentUserId
+    !isDemoMode && userId && currentUserId
       ? { userId: userId as any, viewerId: currentUserId as any }
       : 'skip'
   );
+
+  const demoProfile = isDemoMode
+    ? (() => {
+        const p = DEMO_PROFILES.find((dp) => dp._id === userId);
+        if (!p) return null;
+        return {
+          name: p.name,
+          age: p.age,
+          bio: p.bio,
+          city: p.city,
+          isVerified: p.isVerified,
+          distance: p.distance,
+          photos: p.photos.map((photo, i) => ({ _id: `photo_${i}`, url: photo.url })),
+          relationshipIntent: p.relationshipIntent,
+          activities: p.activities,
+          profilePrompts: (p as any).profilePrompts ?? [],
+          height: undefined,
+          smoking: undefined,
+          drinking: undefined,
+          education: undefined,
+          jobTitle: undefined,
+          company: undefined,
+          // Simulated timestamps for trust badges in demo mode
+          lastActive: Date.now() - 2 * 60 * 60 * 1000, // 2 hours ago
+          createdAt: Date.now() - 60 * 24 * 60 * 60 * 1000, // 60 days ago
+        };
+      })()
+    : null;
+
+  const profile = isDemoMode ? demoProfile : convexProfile;
 
   const swipe = useMutation(api.likes.swipe);
 
   const handleSwipe = async (action: 'like' | 'pass' | 'super_like') => {
     if (!currentUserId || !userId) return;
+
+    if (isDemoMode) {
+      if (action === 'like' && Math.random() > 0.7) {
+        Alert.alert('It\'s a Match!', `You matched with ${profile?.name}!`, [
+          { text: 'Keep Browsing', onPress: () => router.back() },
+        ]);
+      } else {
+        router.back();
+      }
+      return;
+    }
 
     try {
       const result = await swipe({
@@ -44,7 +91,7 @@ export default function ViewProfileScreen() {
       });
 
       if (result.isMatch) {
-        Alert.alert('🎉 It\'s a Match!', 'You matched with this person!', [
+        Alert.alert('It\'s a Match!', 'You matched with this person!', [
           { text: 'Send Message', onPress: () => router.push('/(main)/(tabs)/messages') },
           { text: 'Keep Swiping', onPress: () => router.back() },
         ]);
@@ -72,12 +119,20 @@ export default function ViewProfileScreen() {
         <TouchableOpacity onPress={() => router.back()} style={styles.backButton}>
           <Ionicons name="arrow-back" size={24} color={COLORS.white} />
         </TouchableOpacity>
-        {profile.isVerified && (
-          <View style={styles.verifiedBadge}>
-            <Ionicons name="checkmark-circle" size={20} color={COLORS.primary} />
-            <Text style={styles.verifiedText}>Verified</Text>
-          </View>
-        )}
+        <View style={styles.headerRight}>
+          {profile.isVerified && (
+            <View style={styles.verifiedBadge}>
+              <Ionicons name="checkmark-circle" size={20} color={COLORS.primary} />
+              <Text style={styles.verifiedText}>Verified</Text>
+            </View>
+          )}
+          <TouchableOpacity
+            onPress={() => setShowReportBlock(true)}
+            style={styles.moreButton}
+          >
+            <Ionicons name="ellipsis-horizontal" size={24} color={COLORS.white} />
+          </TouchableOpacity>
+        </View>
       </View>
 
       {profile.photos && profile.photos.length > 0 ? (
@@ -130,29 +185,105 @@ export default function ViewProfileScreen() {
           )}
         </View>
 
+        {/* Trust Badges */}
+        {(() => {
+          const badges = getTrustBadges({
+            isVerified: profile.isVerified,
+            verificationStatus: (profile as any).verificationStatus,
+            lastActive: (profile as any).lastActive,
+            createdAt: (profile as any).createdAt,
+            photoCount: profile.photos?.length,
+          });
+          if (badges.length === 0) return null;
+          return (
+            <View style={styles.trustBadgeRow}>
+              {badges.map((badge) => (
+                <View key={badge.key} style={[styles.trustBadge, { borderColor: badge.color + '40' }]}>
+                  <Ionicons name={badge.icon as any} size={14} color={badge.color} />
+                  <Text style={[styles.trustBadgeText, { color: badge.color }]}>{badge.label}</Text>
+                </View>
+              ))}
+            </View>
+          );
+        })()}
+
         {profile.bio && (
           <View style={styles.section}>
             <Text style={styles.bio}>{profile.bio}</Text>
           </View>
         )}
 
-        {profile.relationshipIntent && profile.relationshipIntent.length > 0 && (
+        {profile.profilePrompts && profile.profilePrompts.length > 0 && (
           <View style={styles.section}>
-            <Text style={styles.sectionTitle}>Looking for</Text>
-            <View style={styles.chips}>
-              {profile.relationshipIntent.map((intent) => {
-                const intentData = RELATIONSHIP_INTENTS.find((i) => i.value === intent);
-                return (
-                  <View key={intent} style={styles.chip}>
-                    <Text style={styles.chipText}>
-                      {intentData?.emoji} {intentData?.label}
-                    </Text>
-                  </View>
-                );
-              })}
-            </View>
+            {profile.profilePrompts.map((prompt: { question: string; answer: string }, idx: number) => (
+              <View key={idx} style={styles.promptCard}>
+                <Text style={styles.promptQuestion}>{prompt.question}</Text>
+                <Text style={styles.promptAnswer}>{prompt.answer}</Text>
+              </View>
+            ))}
           </View>
         )}
+
+        {/* Shared Interests */}
+        {(() => {
+          const myActivities: string[] = isDemoMode ? DEMO_USER.activities : [];
+          const shared = (profile.activities || []).filter((a: string) => myActivities.includes(a));
+          if (shared.length === 0) return null;
+          return (
+            <View style={styles.section}>
+              <Text style={styles.sectionTitle}>You both enjoy</Text>
+              <View style={styles.chips}>
+                {shared.map((activity: string) => {
+                  const data = ACTIVITY_FILTERS.find((a) => a.value === activity);
+                  return (
+                    <View key={activity} style={styles.sharedChip}>
+                      <Text style={styles.sharedChipText}>
+                        {data?.emoji} {data?.label}
+                      </Text>
+                    </View>
+                  );
+                })}
+              </View>
+            </View>
+          );
+        })()}
+
+        {profile.relationshipIntent && profile.relationshipIntent.length > 0 && (() => {
+          const myIntents: string[] = isDemoMode ? DEMO_USER.relationshipIntent : [];
+          const { compat, theirPrimaryLabel, theirPrimaryEmoji } = computeIntentCompat(myIntents, profile.relationshipIntent);
+          const compatColor = getIntentCompatColor(compat);
+          const warning = getIntentMismatchWarning(compat);
+          return (
+            <View style={styles.section}>
+              <Text style={styles.sectionTitle}>Looking for</Text>
+              <View style={styles.chips}>
+                {profile.relationshipIntent.map((intent) => {
+                  const intentData = RELATIONSHIP_INTENTS.find((i) => i.value === intent);
+                  return (
+                    <View key={intent} style={styles.chip}>
+                      <Text style={styles.chipText}>
+                        {intentData?.emoji} {intentData?.label}
+                      </Text>
+                    </View>
+                  );
+                })}
+              </View>
+              {myIntents.length > 0 && (
+                <View style={[styles.intentCompatBadge, { backgroundColor: compatColor + '18' }]}>
+                  <Text style={[styles.intentCompatText, { color: compatColor }]}>
+                    {compat === 'match' ? 'Your intents align' : compat === 'partial' ? 'Possibly compatible' : 'Different intents'}
+                  </Text>
+                </View>
+              )}
+              {warning && (
+                <View style={styles.intentWarning}>
+                  <Ionicons name="information-circle-outline" size={16} color={COLORS.textLight} />
+                  <Text style={styles.intentWarningText}>{warning}</Text>
+                </View>
+              )}
+            </View>
+          );
+        })()}
 
         {profile.activities && profile.activities.length > 0 && (
           <View style={styles.section}>
@@ -226,6 +357,15 @@ export default function ViewProfileScreen() {
           </TouchableOpacity>
         </View>
       </View>
+
+      <ReportBlockModal
+        visible={showReportBlock}
+        onClose={() => setShowReportBlock(false)}
+        reportedUserId={userId || ''}
+        reportedUserName={profile?.name || 'this user'}
+        currentUserId={currentUserId || ''}
+        onBlockSuccess={() => router.back()}
+      />
     </ScrollView>
   );
 }
@@ -260,6 +400,16 @@ const styles = StyleSheet.create({
   },
   backButton: {
     padding: 8,
+  },
+  headerRight: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  moreButton: {
+    padding: 8,
+    backgroundColor: 'rgba(0,0,0,0.3)',
+    borderRadius: 16,
   },
   verifiedBadge: {
     flexDirection: 'row',
@@ -316,6 +466,26 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     marginBottom: 12,
   },
+  trustBadgeRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+    marginBottom: 16,
+  },
+  trustBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderRadius: 12,
+    borderWidth: 1,
+    backgroundColor: COLORS.backgroundDark,
+  },
+  trustBadgeText: {
+    fontSize: 12,
+    fontWeight: '600',
+  },
   name: {
     fontSize: 28,
     fontWeight: '700',
@@ -339,6 +509,27 @@ const styles = StyleSheet.create({
     color: COLORS.text,
     lineHeight: 24,
   },
+  promptCard: {
+    backgroundColor: COLORS.backgroundDark,
+    borderRadius: 16,
+    padding: 16,
+    marginBottom: 12,
+    borderLeftWidth: 3,
+    borderLeftColor: COLORS.primary,
+  },
+  promptQuestion: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: COLORS.textLight,
+    marginBottom: 6,
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+  },
+  promptAnswer: {
+    fontSize: 16,
+    color: COLORS.text,
+    lineHeight: 22,
+  },
   chips: {
     flexDirection: 'row',
     flexWrap: 'wrap',
@@ -355,6 +546,47 @@ const styles = StyleSheet.create({
   chipText: {
     fontSize: 14,
     color: COLORS.text,
+  },
+  sharedChip: {
+    backgroundColor: COLORS.secondary + '20',
+    borderWidth: 1,
+    borderColor: COLORS.secondary + '40',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 16,
+    marginRight: 8,
+    marginBottom: 8,
+  },
+  sharedChipText: {
+    fontSize: 14,
+    color: COLORS.secondary,
+    fontWeight: '600',
+  },
+  intentCompatBadge: {
+    alignSelf: 'flex-start',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 12,
+    marginTop: 10,
+  },
+  intentCompatText: {
+    fontSize: 13,
+    fontWeight: '600',
+  },
+  intentWarning: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: COLORS.backgroundDark,
+    borderRadius: 12,
+    padding: 12,
+    marginTop: 10,
+    gap: 8,
+  },
+  intentWarningText: {
+    fontSize: 13,
+    color: COLORS.textLight,
+    flex: 1,
+    lineHeight: 18,
   },
   details: {
     gap: 12,
