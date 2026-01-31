@@ -115,7 +115,7 @@ export default function SettingsScreen() {
       await toggleIncognito({ userId: userId as any, enabled });
       setIncognitoEnabled(enabled);
     } catch (error: any) {
-      Alert.alert('Error', error.message || 'Failed to toggle incognito mode');
+      Alert.alert('Error', error.message || 'Failed to update discovery visibility');
       setIncognitoEnabled(!enabled);
     }
   };
@@ -214,9 +214,9 @@ export default function SettingsScreen() {
 
         <View style={styles.settingRow}>
           <View style={styles.settingInfo}>
-            <Text style={styles.settingTitle}>Incognito Mode</Text>
+            <Text style={styles.settingTitle}>Hide from Discovery</Text>
             <Text style={styles.settingDescription}>
-              Browse profiles without being seen
+              Browse profiles without appearing in others' feeds
               {!canUseIncognito && ' (Premium required)'}
             </Text>
           </View>

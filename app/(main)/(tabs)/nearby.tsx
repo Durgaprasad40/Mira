@@ -8,6 +8,7 @@ import {
   Animated,
   Dimensions,
   Platform,
+  Alert,
 } from 'react-native';
 import MapView, { Marker, Region } from 'react-native-maps';
 import { useRouter } from 'expo-router';
@@ -69,59 +70,18 @@ function formatDistance(meters: number): string {
 }
 
 // ---------------------------------------------------------------------------
-// Notification helpers — lazy-load expo-notifications so that the module is
-// never evaluated in Expo Go (which prints ERROR + WARN on import alone).
+// In-app notification banner — no expo-notifications dependency, works
+// everywhere including Expo Go without any console errors or warnings.
 // ---------------------------------------------------------------------------
 
-let _Notifications: typeof import('expo-notifications') | null = null;
-let _notifInitialised = false;
+// A mutable ref that the component sets so the module-level helper can show
+// the in-app banner without needing a React context.
+let _showBanner: ((title: string, body: string) => void) | null = null;
 
-/** Lazily require expo-notifications. Returns null when unavailable. */
-function getNotifications() {
-  if (_Notifications !== null) return _Notifications;
-  try {
-    // Dynamic require avoids the module being evaluated at bundle time.
-    // eslint-disable-next-line @typescript-eslint/no-var-requires
-    _Notifications = require('expo-notifications') as typeof import('expo-notifications');
-    return _Notifications;
-  } catch {
-    return null;
-  }
-}
-
-/** One-time handler registration (called lazily before first notification). */
-function ensureNotifHandler() {
-  if (_notifInitialised) return;
-  _notifInitialised = true;
-  const Notif = getNotifications();
-  if (!Notif) return;
-  try {
-    Notif.setNotificationHandler({
-      handleNotification: async () => ({
-        shouldShowAlert: true,
-        shouldPlaySound: false,
-        shouldSetBadge: false,
-        shouldShowBanner: true,
-        shouldShowList: true,
-      }),
-    });
-  } catch {
-    // Expo Go — ignore
-  }
-}
-
-/** Fire-and-forget a local notification. Silently no-ops when unavailable. */
-async function sendLocalNotification(title: string, body: string) {
-  const Notif = getNotifications();
-  if (!Notif) return;
-  ensureNotifHandler();
-  try {
-    await Notif.scheduleNotificationAsync({
-      content: { title, body },
-      trigger: null,
-    });
-  } catch {
-    // Expo Go — ignore
+/** Show a crossed-path notification using the in-app banner. */
+function sendLocalNotification(title: string, body: string) {
+  if (_showBanner) {
+    _showBanner(title, body);
   }
 }
 
@@ -162,6 +122,29 @@ export default function NearbyScreen() {
   const notifCountRef = useRef(0);
   const hasFiredDemoNotif = useRef(false);
 
+  // In-app banner state
+  const [banner, setBanner] = useState<{ title: string; body: string } | null>(null);
+  const bannerAnim = useRef(new Animated.Value(0)).current; // 0 = hidden, 1 = visible
+  const bannerTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Register the module-level callback so sendLocalNotification can trigger the banner.
+  useEffect(() => {
+    _showBanner = (title: string, body: string) => {
+      setBanner({ title, body });
+      Animated.timing(bannerAnim, { toValue: 1, duration: 300, useNativeDriver: true }).start();
+      if (bannerTimerRef.current) clearTimeout(bannerTimerRef.current);
+      bannerTimerRef.current = setTimeout(() => {
+        Animated.timing(bannerAnim, { toValue: 0, duration: 300, useNativeDriver: true }).start(() => {
+          setBanner(null);
+        });
+      }, 4000);
+    };
+    return () => {
+      _showBanner = null;
+      if (bannerTimerRef.current) clearTimeout(bannerTimerRef.current);
+    };
+  }, [bannerAnim]);
+
   // ------------------------------------------------------------------
   // On mount: request location + schedule demo notification
   // ------------------------------------------------------------------
@@ -180,21 +163,8 @@ export default function NearbyScreen() {
     if (hasFiredDemoNotif.current) return;
     hasFiredDemoNotif.current = true;
 
-    const timeout = setTimeout(async () => {
-      const Notif = getNotifications();
-      if (Notif) {
-        try {
-          const { status } = await Notif.getPermissionsAsync();
-          if (status !== 'granted') {
-            const { status: newStatus } = await Notif.requestPermissionsAsync();
-            if (newStatus !== 'granted') return;
-          }
-        } catch {
-          // Permission APIs unavailable — still attempt the notification.
-        }
-      }
-
-      await sendLocalNotification('Mira', 'Someone crossed your path nearby.');
+    const timeout = setTimeout(() => {
+      sendLocalNotification('Mira', 'Someone crossed your path nearby.');
     }, 3000);
 
     return () => clearTimeout(timeout);
@@ -416,6 +386,32 @@ export default function NearbyScreen() {
           </>
         )}
       </Animated.View>
+
+      {/* In-app notification banner */}
+      {banner && (
+        <Animated.View
+          style={[
+            styles.notifBanner,
+            {
+              opacity: bannerAnim,
+              transform: [
+                {
+                  translateY: bannerAnim.interpolate({
+                    inputRange: [0, 1],
+                    outputRange: [-60, 0],
+                  }),
+                },
+              ],
+            },
+          ]}
+        >
+          <Ionicons name="footsteps" size={18} color={COLORS.white} style={{ marginRight: 10 }} />
+          <View style={{ flex: 1 }}>
+            <Text style={styles.notifTitle}>{banner.title}</Text>
+            <Text style={styles.notifBody}>{banner.body}</Text>
+          </View>
+        </Animated.View>
+      )}
     </View>
   );
 }
@@ -599,5 +595,35 @@ const styles = StyleSheet.create({
     color: COLORS.white,
     fontSize: 14,
     fontWeight: '600',
+  },
+
+  // In-app notification banner
+  notifBanner: {
+    position: 'absolute',
+    top: Platform.OS === 'ios' ? 54 : 18,
+    left: 16,
+    right: 16,
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(0,0,0,0.85)',
+    borderRadius: 14,
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    zIndex: 100,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.3,
+    shadowRadius: 6,
+    elevation: 12,
+  },
+  notifTitle: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: COLORS.white,
+  },
+  notifBody: {
+    fontSize: 12,
+    color: 'rgba(255,255,255,0.8)',
+    marginTop: 1,
   },
 });
