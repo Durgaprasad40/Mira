@@ -15,6 +15,7 @@ import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { INCOGNITO_COLORS } from '@/lib/constants';
+import { maskExplicitWords, MASKED_CONTENT_NOTICE } from '@/lib/contentFilter';
 import { usePrivateChatStore } from '@/stores/privateChatStore';
 import { ReportModal } from '@/components/private/ReportModal';
 import type { IncognitoMessage } from '@/types';
@@ -87,6 +88,9 @@ export default function PrivateChatScreen() {
       );
     }
 
+    // D2: Mask explicit words in private chat with "****"
+    const { masked, wasMasked } = maskExplicitWords(item.content);
+
     return (
       <View style={[styles.msgRow, isOwn && styles.msgRowOwn]}>
         {!isOwn && (
@@ -97,7 +101,10 @@ export default function PrivateChatScreen() {
           />
         )}
         <View style={[styles.msgBubble, isOwn ? styles.msgBubbleOwn : styles.msgBubbleOther]}>
-          <Text style={[styles.msgText, isOwn && styles.msgTextOwn]}>{item.content}</Text>
+          <Text style={[styles.msgText, isOwn && styles.msgTextOwn]}>{masked}</Text>
+          {wasMasked && (
+            <Text style={styles.maskedNotice}>{MASKED_CONTENT_NOTICE}</Text>
+          )}
           <Text style={[styles.msgTime, isOwn && styles.msgTimeOwn]}>
             {formatTime(item.createdAt)}
           </Text>
@@ -209,6 +216,7 @@ const styles = StyleSheet.create({
   msgTextOwn: { color: '#FFFFFF' },
   msgTime: { fontSize: 10, color: C.textLight, marginTop: 4, textAlign: 'right' },
   msgTimeOwn: { color: 'rgba(255,255,255,0.7)' },
+  maskedNotice: { fontSize: 10, color: C.textLight, fontStyle: 'italic', marginTop: 2 },
 
   inputBar: {
     flexDirection: 'row', alignItems: 'flex-end', paddingHorizontal: 12, paddingTop: 8,

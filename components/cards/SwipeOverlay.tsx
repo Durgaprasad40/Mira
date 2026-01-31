@@ -42,8 +42,8 @@ export function SwipeOverlay({ direction, opacity }: SwipeOverlayProps) {
   if (!config) return null;
 
   return (
-    <Animated.View style={[styles.container, { opacity }]}>
-      <View style={[styles.overlay, { borderColor: config.color }]}>
+    <Animated.View style={[styles.container, { opacity }]} pointerEvents="box-none">
+      <View style={[styles.overlay, { borderColor: config.color }]} pointerEvents="none">
         <Ionicons name={config.icon} size={48} color={config.color} />
         <Text style={[styles.text, { color: config.color }]}>{config.text}</Text>
       </View>

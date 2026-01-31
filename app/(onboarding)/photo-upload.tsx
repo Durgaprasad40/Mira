@@ -160,6 +160,21 @@ export default function PhotoUploadScreen() {
           <Ionicons name="checkmark-circle" size={16} color={COLORS.success} />
           <Text style={styles.requirementText}>No group photos</Text>
         </View>
+        <View style={styles.requirementItem}>
+          <Ionicons name="close-circle" size={16} color={COLORS.error} />
+          <Text style={styles.requirementText}>No inappropriate or revealing content</Text>
+        </View>
+        <View style={styles.requirementItem}>
+          <Ionicons name="close-circle" size={16} color={COLORS.error} />
+          <Text style={styles.requirementText}>No suggestive or inappropriate photos</Text>
+        </View>
+      </View>
+
+      <View style={styles.nsfwNotice}>
+        <Ionicons name="shield-checkmark" size={18} color={COLORS.textLight} />
+        <Text style={styles.nsfwNoticeText}>
+          All photos are screened for inappropriate content. Violations may result in account restriction.
+        </Text>
       </View>
 
       <View style={styles.footer}>
@@ -263,6 +278,21 @@ const styles = StyleSheet.create({
   requirementText: {
     fontSize: 13,
     color: COLORS.textLight,
+  },
+  nsfwNotice: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 8,
+    padding: 12,
+    backgroundColor: COLORS.backgroundDark,
+    borderRadius: 10,
+    marginBottom: 24,
+  },
+  nsfwNoticeText: {
+    fontSize: 12,
+    color: COLORS.textLight,
+    flex: 1,
+    lineHeight: 18,
   },
   footer: {
     marginTop: 24,

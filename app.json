@@ -64,7 +64,8 @@
         {
           "locationAlwaysAndWhenInUsePermission": "Allow Mira to use your location to find crossed paths and show people near you."
         }
-      ]
+      ],
+      "@react-native-community/datetimepicker"
     ],
     "experiments": {
       "typedRoutes": true

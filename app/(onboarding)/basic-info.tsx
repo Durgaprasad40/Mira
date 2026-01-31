@@ -38,6 +38,7 @@ export default function BasicInfoScreen() {
   );
   const [error, setError] = useState("");
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const [ageBlocked, setAgeBlocked] = useState(false);
 
   const registerWithEmail = useMutation(api.auth.registerWithEmail);
   const loginWithEmail = useMutation(api.auth.loginWithEmail);
@@ -64,9 +65,11 @@ export default function BasicInfoScreen() {
       setSelectedDate(date);
       const age = calculateAge(date.toISOString().split("T")[0]);
       if (age < VALIDATION.MIN_AGE) {
-        setError(`You must be at least ${VALIDATION.MIN_AGE} years old`);
+        setAgeBlocked(true);
+        setError("");
         return;
       }
+      setAgeBlocked(false);
       setDateOfBirth(date.toISOString().split("T")[0]);
       setError("");
     }
@@ -245,12 +248,23 @@ export default function BasicInfoScreen() {
 
       {error ? <Text style={styles.error}>{error}</Text> : null}
 
+      {ageBlocked && (
+        <View style={styles.ageBlockedContainer}>
+          <Text style={styles.ageBlockedTitle}>You must be 18+ to use Mira</Text>
+          <Text style={styles.ageBlockedText}>
+            Mira is only available for users who are 18 years of age or older.
+            We take age requirements seriously to ensure a safe experience for everyone.
+          </Text>
+        </View>
+      )}
+
       <View style={styles.footer}>
         <Button
           title="Continue"
           variant="primary"
           onPress={handleNext}
           loading={isSubmitting}
+          disabled={ageBlocked}
           fullWidth
         />
       </View>
@@ -337,5 +351,26 @@ const styles = StyleSheet.create({
   },
   genderTextSelected: {
     color: COLORS.primary,
+  },
+  ageBlockedContainer: {
+    backgroundColor: COLORS.error + "10",
+    borderWidth: 1,
+    borderColor: COLORS.error + "30",
+    borderRadius: 12,
+    padding: 16,
+    marginBottom: 16,
+    alignItems: "center",
+  },
+  ageBlockedTitle: {
+    fontSize: 16,
+    fontWeight: "700",
+    color: COLORS.error,
+    marginBottom: 8,
+  },
+  ageBlockedText: {
+    fontSize: 14,
+    color: COLORS.textLight,
+    textAlign: "center",
+    lineHeight: 20,
   },
 });

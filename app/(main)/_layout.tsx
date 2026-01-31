@@ -52,14 +52,25 @@ export default function MainLayout() {
         options={{ presentation: "modal" }}
       />
       <Stack.Screen name="profile/[id]" />
+      <Stack.Screen name="private-profile/[userId]" />
       <Stack.Screen name="settings" />
       <Stack.Screen name="subscription" options={{ presentation: "modal" }} />
       <Stack.Screen
         name="incognito-create-tod"
         options={{ presentation: "modal" }}
       />
+      <Stack.Screen name="prompt-thread" />
+      <Stack.Screen
+        name="camera-composer"
+        options={{ presentation: "fullScreenModal" }}
+      />
       <Stack.Screen name="incognito-chat" />
       <Stack.Screen name="incognito-room/[id]" />
+      <Stack.Screen name="(private)" options={{ headerShown: false }} />
+      <Stack.Screen
+        name="(private-setup)"
+        options={{ presentation: "fullScreenModal" }}
+      />
       <Stack.Screen
         name="verification"
         options={{ presentation: "fullScreenModal" }}

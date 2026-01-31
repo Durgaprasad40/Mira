@@ -1570,6 +1570,145 @@ export const DEMO_ROOM_MESSAGES = [
   { id: 'rm_6', senderId: 'inc_3', senderName: 'Velvet_Dreams', content: 'Let\'s play 20 questions!', createdAt: Date.now() - 1000 * 60 },
 ];
 
+// Demo Trending T&D Prompts
+export const DEMO_TRENDING_PROMPTS: import('@/types').TodPrompt[] = [
+  {
+    id: 'tp_truth_1',
+    type: 'truth',
+    text: "What's the most spontaneous thing you've ever done for someone you liked?",
+    isTrending: true,
+    ownerUserId: 'inc_2',
+    ownerName: 'Wanderlust_Soul',
+    ownerPhotoUrl: 'https://images.unsplash.com/photo-1494790108377-be9c29b29330?w=400',
+    ownerAge: 26,
+    ownerGender: 'female',
+    answerCount: 42,
+    activeCount: 18,
+    createdAt: Date.now() - 1000 * 60 * 60 * 2,
+    expiresAt: Date.now() - 1000 * 60 * 60 * 2 + 7 * 24 * 60 * 60 * 1000,
+  },
+  {
+    id: 'tp_dare_1',
+    type: 'dare',
+    text: 'Record a 15-second video of your best impression of your celebrity crush!',
+    isTrending: true,
+    ownerUserId: 'inc_7',
+    ownerName: 'Mystic_Luna',
+    ownerPhotoUrl: 'https://images.unsplash.com/photo-1524504388940-b1c1722653e1?w=400',
+    ownerAge: 28,
+    ownerGender: 'female',
+    answerCount: 27,
+    activeCount: 11,
+    createdAt: Date.now() - 1000 * 60 * 60 * 3,
+    expiresAt: Date.now() - 1000 * 60 * 60 * 3 + 7 * 24 * 60 * 60 * 1000,
+  },
+];
+
+export const DEMO_OTHER_PROMPTS: import('@/types').TodPrompt[] = [
+  {
+    id: 'tp_truth_2',
+    type: 'truth',
+    text: "What's a red flag you ignored because the person was too attractive?",
+    isTrending: false,
+    ownerUserId: 'inc_3',
+    ownerName: 'Velvet_Dreams',
+    ownerPhotoUrl: 'https://images.unsplash.com/photo-1517841905240-472988babdf9?w=400',
+    ownerAge: 23,
+    ownerGender: 'female',
+    answerCount: 19,
+    activeCount: 7,
+    createdAt: Date.now() - 1000 * 60 * 60 * 5,
+    expiresAt: Date.now() - 1000 * 60 * 60 * 5 + 7 * 24 * 60 * 60 * 1000,
+  },
+  {
+    id: 'tp_dare_2',
+    type: 'dare',
+    text: 'Send a voice note confessing your most embarrassing crush story!',
+    isTrending: false,
+    ownerUserId: 'inc_6',
+    ownerName: 'Neon_Butterfly',
+    ownerPhotoUrl: 'https://images.unsplash.com/photo-1488426862026-3ee34a7d66df?w=400',
+    ownerAge: 25,
+    ownerGender: 'female',
+    answerCount: 14,
+    activeCount: 5,
+    createdAt: Date.now() - 1000 * 60 * 60 * 6,
+    expiresAt: Date.now() - 1000 * 60 * 60 * 6 + 7 * 24 * 60 * 60 * 1000,
+  },
+  {
+    id: 'tp_truth_3',
+    type: 'truth',
+    text: "Have you ever pretended to like something just to impress a date?",
+    isTrending: false,
+    ownerUserId: 'inc_9',
+    ownerName: 'Electric_Sage',
+    ownerPhotoUrl: 'https://images.unsplash.com/photo-1438761681033-6461ffad8d80?w=400',
+    ownerAge: 26,
+    ownerGender: 'female',
+    answerCount: 31,
+    activeCount: 12,
+    createdAt: Date.now() - 1000 * 60 * 60 * 8,
+    expiresAt: Date.now() - 1000 * 60 * 60 * 8 + 7 * 24 * 60 * 60 * 1000,
+  },
+  {
+    id: 'tp_dare_3',
+    type: 'dare',
+    text: 'Post a photo doing the cheesiest pickup line pose you can think of!',
+    isTrending: false,
+    ownerUserId: 'inc_4',
+    ownerName: 'Phoenix_Fire',
+    ownerPhotoUrl: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=400',
+    ownerAge: 27,
+    ownerGender: 'female',
+    answerCount: 9,
+    activeCount: 3,
+    createdAt: Date.now() - 1000 * 60 * 60 * 10,
+    expiresAt: Date.now() - 1000 * 60 * 60 * 10 + 7 * 24 * 60 * 60 * 1000,
+  },
+];
+
+export const DEMO_OTHER_ANSWERS: import('@/types').TodAnswer[] = [
+  // truth_2 answers
+  { id: 'oa_1', promptId: 'tp_truth_2', userId: 'inc_1', userName: 'Midnight_Rose', userPhotoUrl: 'https://images.unsplash.com/photo-1529626455594-4ff0802cfb7e?w=400', type: 'text', text: 'They were 45 minutes late every single time. But those eyes... I let it slide for 3 months.', likeCount: 11, createdAt: Date.now() - 1000 * 60 * 60 * 4 },
+  { id: 'oa_2', promptId: 'tp_truth_2', userId: 'inc_8', userName: 'Cherry_Blossom', userPhotoUrl: 'https://images.unsplash.com/photo-1544005313-94ddf0286df2?w=400', type: 'text', text: 'He literally said he doesn\'t believe in texting back. I stayed for 2 more months.', likeCount: 16, createdAt: Date.now() - 1000 * 60 * 60 * 4.5 },
+  { id: 'oa_3', promptId: 'tp_truth_2', userId: 'inc_5', userName: 'Stargazer_22', userPhotoUrl: 'https://images.unsplash.com/photo-1524638431109-93d95c968f03?w=400', type: 'voice', text: 'Voice answer', durationSec: 18, likeCount: 5, createdAt: Date.now() - 1000 * 60 * 60 * 5 },
+  { id: 'oa_4', promptId: 'tp_truth_2', userId: 'inc_11', userName: 'Shadow_Dancer', userPhotoUrl: 'https://images.unsplash.com/photo-1506956191951-7a88da4435e5?w=400', type: 'text', text: 'She ghosted me twice and I STILL went on a third date. No regrets though, great sushi.', likeCount: 9, createdAt: Date.now() - 1000 * 60 * 60 * 5.5 },
+  // dare_2 answers
+  { id: 'oa_5', promptId: 'tp_dare_2', userId: 'inc_4', userName: 'Phoenix_Fire', userPhotoUrl: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=400', type: 'voice', text: 'Voice answer', durationSec: 32, likeCount: 14, createdAt: Date.now() - 1000 * 60 * 60 * 5.5 },
+  { id: 'oa_6', promptId: 'tp_dare_2', userId: 'inc_13', userName: 'Rebel_Heart', userPhotoUrl: 'https://images.unsplash.com/photo-1464863979621-258859e62245?w=400', type: 'text', text: 'I had the BIGGEST crush on my teacher in 10th grade. I used to purposely fail tests so I could get "extra help" sessions.', likeCount: 20, createdAt: Date.now() - 1000 * 60 * 60 * 6 },
+  { id: 'oa_7', promptId: 'tp_dare_2', userId: 'inc_3', userName: 'Velvet_Dreams', userPhotoUrl: 'https://images.unsplash.com/photo-1517841905240-472988babdf9?w=400', type: 'voice', text: 'Voice answer', durationSec: 27, likeCount: 10, createdAt: Date.now() - 1000 * 60 * 60 * 6.5 },
+  // truth_3 answers
+  { id: 'oa_8', promptId: 'tp_truth_3', userId: 'inc_6', userName: 'Neon_Butterfly', userPhotoUrl: 'https://images.unsplash.com/photo-1488426862026-3ee34a7d66df?w=400', type: 'text', text: 'I pretended to love hiking. I hate hiking. Three months of blisters before I confessed.', likeCount: 24, createdAt: Date.now() - 1000 * 60 * 60 * 7 },
+  { id: 'oa_9', promptId: 'tp_truth_3', userId: 'inc_9', userName: 'Electric_Sage', userPhotoUrl: 'https://images.unsplash.com/photo-1438761681033-6461ffad8d80?w=400', type: 'text', text: 'Told her I was into poetry. She made me read Rumi at a coffee shop open mic. Never again.', likeCount: 17, createdAt: Date.now() - 1000 * 60 * 60 * 7.5 },
+  { id: 'oa_10', promptId: 'tp_truth_3', userId: 'inc_1', userName: 'Midnight_Rose', userPhotoUrl: 'https://images.unsplash.com/photo-1529626455594-4ff0802cfb7e?w=400', type: 'photo', text: 'Me pretending to enjoy rock climbing', mediaUrl: 'https://images.unsplash.com/photo-1522163182402-834f871fd851?w=400', likeCount: 13, createdAt: Date.now() - 1000 * 60 * 60 * 8 },
+  { id: 'oa_11', promptId: 'tp_truth_3', userId: 'inc_4', userName: 'Phoenix_Fire', userPhotoUrl: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=400', type: 'text', text: 'I said I loved spicy food. First date at a Thai place. Tears streaming down my face. She thought I was emotional.', likeCount: 29, createdAt: Date.now() - 1000 * 60 * 60 * 8.5 },
+  // dare_3 answers
+  { id: 'oa_12', promptId: 'tp_dare_3', userId: 'inc_8', userName: 'Cherry_Blossom', userPhotoUrl: 'https://images.unsplash.com/photo-1544005313-94ddf0286df2?w=400', type: 'photo', text: 'Blue Steel meets "Are you a parking ticket?"', mediaUrl: 'https://images.unsplash.com/photo-1531746020798-e6953c6e8e04?w=400', likeCount: 15, createdAt: Date.now() - 1000 * 60 * 60 * 9 },
+  { id: 'oa_13', promptId: 'tp_dare_3', userId: 'inc_5', userName: 'Stargazer_22', userPhotoUrl: 'https://images.unsplash.com/photo-1524638431109-93d95c968f03?w=400', type: 'text', text: 'Did the classic lean-on-wall pose with sunglasses indoors. My roommate is still laughing.', likeCount: 8, createdAt: Date.now() - 1000 * 60 * 60 * 9.5 },
+];
+
+// Demo Answers for Trending Prompts
+export const DEMO_TRENDING_ANSWERS: import('@/types').TodAnswer[] = [
+  // Truth prompt answers
+  { id: 'ta_1', promptId: 'tp_truth_1', userId: 'inc_1', userName: 'Midnight_Rose', userPhotoUrl: 'https://images.unsplash.com/photo-1529626455594-4ff0802cfb7e?w=400', type: 'text', text: 'I once drove 4 hours at midnight just to surprise my crush with their favorite flowers. They opened the door half-asleep and it was magical.', likeCount: 14, createdAt: Date.now() - 1000 * 60 * 30 },
+  { id: 'ta_2', promptId: 'tp_truth_1', userId: 'inc_6', userName: 'Neon_Butterfly', userPhotoUrl: 'https://images.unsplash.com/photo-1488426862026-3ee34a7d66df?w=400', type: 'text', text: 'Booked a surprise trip to Goa. Didn\'t even tell them until we were at the airport. Best weekend ever.', likeCount: 9, createdAt: Date.now() - 1000 * 60 * 45 },
+  { id: 'ta_3', promptId: 'tp_truth_1', userId: 'inc_8', userName: 'Cherry_Blossom', userPhotoUrl: 'https://images.unsplash.com/photo-1544005313-94ddf0286df2?w=400', type: 'photo', text: 'Made them a hand-painted portrait!', mediaUrl: 'https://images.unsplash.com/photo-1579783902614-a3fb3927b6a5?w=400', likeCount: 22, createdAt: Date.now() - 1000 * 60 * 60 },
+  { id: 'ta_4', promptId: 'tp_truth_1', userId: 'inc_11', userName: 'Shadow_Dancer', userPhotoUrl: 'https://images.unsplash.com/photo-1506956191951-7a88da4435e5?w=400', type: 'voice', text: 'Voice answer', durationSec: 23, likeCount: 7, createdAt: Date.now() - 1000 * 60 * 75 },
+  { id: 'ta_5', promptId: 'tp_truth_1', userId: 'inc_4', userName: 'Phoenix_Fire', userPhotoUrl: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=400', type: 'text', text: 'Learned their favorite song on guitar in secret. Played it on our third date. They cried happy tears.', likeCount: 18, createdAt: Date.now() - 1000 * 60 * 90 },
+  // Dare prompt answers
+  { id: 'ta_6', promptId: 'tp_dare_1', userId: 'inc_3', userName: 'Velvet_Dreams', userPhotoUrl: 'https://images.unsplash.com/photo-1517841905240-472988babdf9?w=400', type: 'video', text: 'My SRK impression!', mediaUrl: 'https://example.com/video_dare_1.mp4', durationSec: 14, likeCount: 31, createdAt: Date.now() - 1000 * 60 * 40 },
+  { id: 'ta_7', promptId: 'tp_dare_1', userId: 'inc_9', userName: 'Electric_Sage', userPhotoUrl: 'https://images.unsplash.com/photo-1438761681033-6461ffad8d80?w=400', type: 'text', text: 'Too shy for video but here goes: I did the RRR dance in my living room and my roommate caught me.', likeCount: 12, createdAt: Date.now() - 1000 * 60 * 55 },
+  { id: 'ta_8', promptId: 'tp_dare_1', userId: 'inc_13', userName: 'Rebel_Heart', userPhotoUrl: 'https://images.unsplash.com/photo-1464863979621-258859e62245?w=400', type: 'photo', text: 'Striking my best Ranveer Singh pose!', mediaUrl: 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=400', likeCount: 19, createdAt: Date.now() - 1000 * 60 * 70 },
+  { id: 'ta_9', promptId: 'tp_dare_1', userId: 'inc_5', userName: 'Stargazer_22', userPhotoUrl: 'https://images.unsplash.com/photo-1524638431109-93d95c968f03?w=400', type: 'voice', text: 'Voice answer', durationSec: 15, likeCount: 8, createdAt: Date.now() - 1000 * 60 * 85 },
+  // Demo voice answers for testing playback
+  { id: 'ta_demo_voice_1', promptId: 'tp_truth_1', userId: 'inc_10', userName: 'Ocean_Whisper', userPhotoUrl: 'https://images.unsplash.com/photo-1504439904031-93ded9f93e4e?w=400', type: 'voice', text: 'Voice answer', durationSec: 8, likeCount: 5, createdAt: Date.now() - 1000 * 60 * 50, visibility: 'public', isDemo: true },
+  { id: 'ta_demo_voice_2', promptId: 'tp_dare_1', userId: 'inc_11', userName: 'Shadow_Dancer', userPhotoUrl: 'https://images.unsplash.com/photo-1506956191951-7a88da4435e5?w=400', type: 'voice', text: 'Voice answer', durationSec: 6, likeCount: 11, createdAt: Date.now() - 1000 * 60 * 60, visibility: 'public', isDemo: true },
+  { id: 'ta_demo_voice_3', promptId: 'tp_truth_2', userId: 'inc_10', userName: 'Ocean_Whisper', userPhotoUrl: 'https://images.unsplash.com/photo-1504439904031-93ded9f93e4e?w=400', type: 'voice', text: 'Voice answer', durationSec: 10, likeCount: 7, createdAt: Date.now() - 1000 * 60 * 60 * 4.2, visibility: 'public', isDemo: true },
+  // Anonymous demo answers
+  { id: 'ta_anon_1', promptId: 'tp_truth_1', userId: 'inc_12', userName: 'Golden_Hour', userPhotoUrl: 'https://images.unsplash.com/photo-1519699047748-de8e457a634e?w=400', type: 'text', text: 'I secretly wrote love letters and left them on their desk for weeks. They never figured out it was me.', likeCount: 25, createdAt: Date.now() - 1000 * 60 * 20, isAnonymous: true, userGender: 'female', profileVisibility: 'blurred' as const },
+  { id: 'ta_anon_2', promptId: 'tp_truth_2', userId: 'inc_14', userName: 'Silk_Road', userPhotoUrl: 'https://images.unsplash.com/photo-1485893086445-ed75865251e0?w=400', type: 'text', text: 'He would always cancel plans last minute. I pretended it didn\'t bother me for 6 months.', likeCount: 19, createdAt: Date.now() - 1000 * 60 * 60 * 3, isAnonymous: true, userGender: 'female', profileVisibility: 'blurred' as const },
+];
+
 export const isDemoMode = () => {
   return process.env.EXPO_PUBLIC_DEMO_MODE === 'true' ||
     process.env.EXPO_PUBLIC_CONVEX_URL?.includes('placeholder');

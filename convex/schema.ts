@@ -475,6 +475,132 @@ export default defineSchema({
     .index('by_type', ['flagType'])
     .index('by_user_type', ['userId', 'flagType']),
 
+  // Moderation Queue table (flagged UGC items for review)
+  moderationQueue: defineTable({
+    reporterId: v.optional(v.id('users')), // undefined if auto-flagged by system
+    reportedUserId: v.id('users'),
+    contentType: v.union(
+      v.literal('message'), v.literal('bio'), v.literal('room_title'),
+      v.literal('tod_prompt'), v.literal('desire_bio'), v.literal('profile_photo'),
+    ),
+    contentId: v.optional(v.string()), // messageId, roomId, storageId, etc.
+    contentText: v.optional(v.string()),
+    flagCategories: v.array(v.string()), // e.g. ['explicit', 'solicitation']
+    isAutoFlagged: v.boolean(),
+    status: v.union(v.literal('pending'), v.literal('reviewed'), v.literal('resolved'), v.literal('dismissed')),
+    reviewedAt: v.optional(v.number()),
+    reviewerNote: v.optional(v.string()),
+    createdAt: v.number(),
+  })
+    .index('by_status', ['status'])
+    .index('by_reported_user', ['reportedUserId'])
+    .index('by_content_type', ['contentType']),
+
+  // User Strikes table (tracks moderation violations and auto-action thresholds)
+  userStrikes: defineTable({
+    userId: v.id('users'),
+    reason: v.string(), // e.g. 'explicit, solicitation'
+    severity: v.union(v.literal('low'), v.literal('medium'), v.literal('high'), v.literal('critical')),
+    createdAt: v.number(),
+  })
+    .index('by_user', ['userId']),
+
+  // Private Profiles table (Face 2 / Private Mode)
+  userPrivateProfiles: defineTable({
+    userId: v.id('users'),
+    isPrivateEnabled: v.boolean(),
+    ageConfirmed18Plus: v.boolean(),
+    ageConfirmedAt: v.optional(v.number()),
+    privatePhotosBlurred: v.array(v.id('_storage')),
+    privatePhotoUrls: v.array(v.string()),
+    privatePhotoBlurLevel: v.optional(v.number()),
+    privateIntentKeys: v.array(v.string()),
+    privateDesireTagKeys: v.array(v.string()),
+    privateBoundaries: v.array(v.string()),
+    privateBio: v.optional(v.string()),
+    displayName: v.string(),
+    age: v.number(),
+    city: v.optional(v.string()),
+    gender: v.string(),
+    revealPolicy: v.optional(v.union(v.literal('mutual_only'), v.literal('request_based'))),
+    isSetupComplete: v.boolean(),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index('by_user', ['userId'])
+    .index('by_enabled', ['isPrivateEnabled']),
+
+  // Reveal Requests table (mutual photo reveal for Private Mode)
+  revealRequests: defineTable({
+    fromUserId: v.id('users'),
+    toUserId: v.id('users'),
+    status: v.union(v.literal('pending'), v.literal('accepted'), v.literal('declined')),
+    respondedAt: v.optional(v.number()),
+    createdAt: v.number(),
+  })
+    .index('by_from_user', ['fromUserId'])
+    .index('by_to_user', ['toUserId'])
+    .index('by_from_to', ['fromUserId', 'toUserId']),
+
+  // Truth & Dare Prompts (trending system)
+  todPrompts: defineTable({
+    type: v.union(v.literal('truth'), v.literal('dare')),
+    text: v.string(),
+    isTrending: v.boolean(),
+    ownerUserId: v.string(), // prompt creator (or 'system')
+    answerCount: v.number(),
+    activeCount: v.number(),
+    createdAt: v.number(),
+    expiresAt: v.optional(v.number()),
+  })
+    .index('by_trending', ['isTrending'])
+    .index('by_type', ['type'])
+    .index('by_owner', ['ownerUserId']),
+
+  // Truth & Dare Answers (one per user per prompt)
+  todAnswers: defineTable({
+    promptId: v.string(),
+    userId: v.string(),
+    type: v.union(v.literal('text'), v.literal('photo'), v.literal('video'), v.literal('voice')),
+    text: v.optional(v.string()),
+    mediaUrl: v.optional(v.string()),
+    mediaStorageId: v.optional(v.id('_storage')),
+    durationSec: v.optional(v.number()),
+    likeCount: v.number(),
+    createdAt: v.number(),
+    visibility: v.optional(v.union(v.literal('owner_only'), v.literal('public'))),
+    isDemo: v.optional(v.boolean()),
+    isAnonymous: v.optional(v.boolean()),
+    userGender: v.optional(v.string()),
+    profileVisibility: v.optional(v.union(v.literal('blurred'), v.literal('clear'))),
+  })
+    .index('by_prompt', ['promptId'])
+    .index('by_user', ['userId'])
+    .index('by_prompt_user', ['promptId', 'userId']),
+
+  // Truth & Dare Answer Likes
+  todAnswerLikes: defineTable({
+    answerId: v.string(),
+    likedByUserId: v.string(),
+    createdAt: v.number(),
+  })
+    .index('by_answer', ['answerId'])
+    .index('by_user', ['likedByUserId'])
+    .index('by_answer_user', ['answerId', 'likedByUserId']),
+
+  // Truth & Dare Connect Requests (triggered when someone likes an answer)
+  todConnectRequests: defineTable({
+    promptId: v.string(),
+    answerId: v.string(),
+    fromUserId: v.string(), // liker
+    toUserId: v.string(), // prompt owner
+    status: v.union(v.literal('pending'), v.literal('connected'), v.literal('removed')),
+    createdAt: v.number(),
+  })
+    .index('by_to_user', ['toUserId'])
+    .index('by_from_to', ['fromUserId', 'toUserId'])
+    .index('by_prompt', ['promptId']),
+
   // Filter Presets table
   filterPresets: defineTable({
     userId: v.id('users'),

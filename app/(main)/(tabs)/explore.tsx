@@ -47,20 +47,22 @@ interface SectionData {
   cats: ExploreCategory[];
 }
 
+// Store-safe intent taxonomy — avoids explicit sex-act categories
+// Uses relationship constructs: dating intent, connection style, interests
 const SECTIONS: SectionData[] = [
   {
-    title: 'Relationship Goals',
+    title: 'Connection Goals',
     cats: [
-      { id: 'long_term',       label: 'Long-term',       icon: 'heart',           filterType: 'intent',   filterValue: 'long_term',       color: '#E91E63', bg: '#FCE4EC' },
-      { id: 'short_term',      label: 'Short Term',      icon: 'flash',           filterType: 'intent',   filterValue: 'short_term',      color: '#FF9800', bg: '#FFF3E0' },
-      { id: 'new_friends',     label: 'Online Friends',  icon: 'people',          filterType: 'intent',   filterValue: 'new_friends',     color: '#4CAF50', bg: '#E8F5E9' },
-      { id: 'fwb',             label: 'FWB',             icon: 'flame',           filterType: 'intent',   filterValue: 'fwb',             color: '#F44336', bg: '#FFEBEE' },
-      { id: 'figuring_out',    label: 'Figuring Out',    icon: 'help-circle',     filterType: 'intent',   filterValue: 'figuring_out',    color: '#795548', bg: '#EFEBE9' },
-      { id: 'open_to_anything',label: 'Open to All',     icon: 'sparkles',        filterType: 'intent',   filterValue: 'open_to_anything',color: '#607D8B', bg: '#ECEFF1' },
-      { id: 'free_tonight',    label: 'Free Tonight',    icon: 'moon',            filterType: 'activity', filterValue: 'free_tonight',    color: '#7C4DFF', bg: '#EDE7F6' },
-      { id: 'this_weekend',    label: 'This Weekend',    icon: 'calendar',        filterType: 'activity', filterValue: 'this_weekend',    color: '#2196F3', bg: '#E3F2FD' },
-      { id: 'near_me',         label: 'Near Me',         icon: 'location',        filterType: 'distance', filterValue: '5',               color: '#00BCD4', bg: '#E0F7FA' },
-      { id: 'verified',        label: 'Verified Only',   icon: 'checkmark-circle',filterType: 'verified',                                 color: '#43A047', bg: '#E8F5E9' },
+      { id: 'long_term',       label: 'Long-term',         icon: 'heart',           filterType: 'intent',   filterValue: 'long_term',       color: '#E91E63', bg: '#FCE4EC' },
+      { id: 'short_term',      label: 'Casual Dating',     icon: 'flash',           filterType: 'intent',   filterValue: 'short_term',      color: '#FF9800', bg: '#FFF3E0' },
+      { id: 'new_friends',     label: 'New Friends',       icon: 'people',          filterType: 'intent',   filterValue: 'new_friends',     color: '#4CAF50', bg: '#E8F5E9' },
+      { id: 'fwb',             label: 'Non-committal',     icon: 'flame',           filterType: 'intent',   filterValue: 'fwb',             color: '#F44336', bg: '#FFEBEE' },
+      { id: 'figuring_out',    label: 'Open to Exploring', icon: 'help-circle',     filterType: 'intent',   filterValue: 'figuring_out',    color: '#795548', bg: '#EFEBE9' },
+      { id: 'open_to_anything',label: 'Open to All',       icon: 'sparkles',        filterType: 'intent',   filterValue: 'open_to_anything',color: '#607D8B', bg: '#ECEFF1' },
+      { id: 'free_tonight',    label: 'Free Tonight',      icon: 'moon',            filterType: 'activity', filterValue: 'free_tonight',    color: '#7C4DFF', bg: '#EDE7F6' },
+      { id: 'this_weekend',    label: 'This Weekend',      icon: 'calendar',        filterType: 'activity', filterValue: 'this_weekend',    color: '#2196F3', bg: '#E3F2FD' },
+      { id: 'near_me',         label: 'Near Me',           icon: 'location',        filterType: 'distance', filterValue: '5',               color: '#00BCD4', bg: '#E0F7FA' },
+      { id: 'verified',        label: 'Verified Only',     icon: 'checkmark-circle',filterType: 'verified',                                 color: '#43A047', bg: '#E8F5E9' },
     ],
   },
   {

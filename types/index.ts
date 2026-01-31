@@ -361,6 +361,60 @@ export interface TodResponse {
 
 export type TodUserState = "answered" | "skipped" | "could_not_answer";
 
+// Truth & Dare Trending System Types
+export type TodAnswerType = "text" | "photo" | "video" | "voice";
+export type TodConnectStatus = "pending" | "connected" | "removed";
+
+export type TodMediaVisibility = "owner_only" | "public";
+export type TodProfileVisibility = "blurred" | "clear";
+
+export interface TodPrompt {
+  id: string;
+  type: "truth" | "dare";
+  text: string;
+  isTrending: boolean;
+  ownerUserId: string;
+  ownerName?: string;
+  ownerPhotoUrl?: string;
+  ownerAge?: number;
+  ownerGender?: string;
+  answerCount: number;
+  activeCount: number;
+  createdAt: number;
+  expiresAt?: number;
+}
+
+export interface TodAnswer {
+  id: string;
+  promptId: string;
+  userId: string;
+  userName?: string;
+  userPhotoUrl?: string;
+  userGender?: string;
+  type: TodAnswerType;
+  text?: string;
+  mediaUrl?: string;
+  durationSec?: number;
+  likeCount: number;
+  createdAt: number;
+  isLikedByMe?: boolean;
+  visibility?: TodMediaVisibility;
+  isDemo?: boolean;
+  isAnonymous?: boolean;
+  profileVisibility?: TodProfileVisibility;
+}
+
+export interface TodConnectRequest {
+  id: string;
+  promptId: string;
+  answerId: string;
+  fromUserId: string;
+  fromUserName?: string;
+  toUserId: string;
+  status: TodConnectStatus;
+  createdAt: number;
+}
+
 export type ProfileViewState = "viewed" | "could_not_open";
 
 export interface IncognitoChatRoom {
@@ -393,6 +447,82 @@ export interface IncognitoMessage {
   content: string;
   createdAt: number;
   isRead: boolean;
+}
+
+// Private Mode Types
+export type PrivateIntentKey =
+  | 'casual_connection'
+  | 'fling'
+  | 'flirty_chats'
+  | 'situationship'
+  | 'fwb'
+  | 'low_commitment'
+  | 'discreet'
+  | 'open_to_exploring'
+  | 'chat_first';
+
+export type PrivateDesireTag =
+  | 'spontaneous'
+  | 'deep_conversations'
+  | 'physical_chemistry'
+  | 'emotional_connection'
+  | 'no_strings'
+  | 'travel_partner'
+  | 'late_night_talks'
+  | 'adventure_seeker'
+  | 'romantic_gestures'
+  | 'humor_wit'
+  | 'intellectual_match'
+  | 'creative_energy'
+  | 'fitness_partner'
+  | 'open_minded'
+  | 'slow_burn'
+  | 'confident_energy'
+  | 'mystery'
+  | 'eye_contact'
+  | 'respectful_flirting'
+  | 'mutual_attraction';
+
+export type PrivateBoundary =
+  | 'respect_consent'
+  | 'no_pressure'
+  | 'safe_space'
+  | 'clear_communication'
+  | 'no_unsolicited_content'
+  | 'mutual_respect'
+  | 'right_to_withdraw'
+  | 'privacy_protected'
+  | 'no_sharing_screenshots'
+  | 'meet_when_ready';
+
+export type RevealRequestStatus = 'none' | 'pending_sent' | 'pending_received' | 'mutual_accepted' | 'declined';
+
+export interface PrivateProfileData {
+  userId: string;
+  isPrivateEnabled: boolean;
+  ageConfirmed18Plus: boolean;
+  ageConfirmedAt?: number;
+  privatePhotosBlurred: string[];
+  privatePhotoUrls: string[];
+  privateIntentKeys: PrivateIntentKey[];
+  privateDesireTagKeys: PrivateDesireTag[];
+  privateBoundaries: PrivateBoundary[];
+  privateBio?: string;
+  displayName: string;
+  age: number;
+  city?: string;
+  gender: string;
+  revealPolicy: 'mutual_only' | 'request_based';
+  isSetupComplete: boolean;
+}
+
+export interface RevealRequest {
+  id: string;
+  fromUserId: string;
+  toUserId: string;
+  status: 'pending' | 'accepted' | 'declined';
+  respondedAt?: number;
+  createdAt: number;
 }
 
 // Discover Notification Types

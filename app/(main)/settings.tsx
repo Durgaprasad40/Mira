@@ -278,6 +278,26 @@ export default function SettingsScreen() {
       </View>
 
       <View style={styles.section}>
+        <Text style={styles.sectionTitle}>Safety</Text>
+        <TouchableOpacity
+          style={styles.menuItem}
+          onPress={() => router.push('/(main)/community-guidelines' as any)}
+        >
+          <Ionicons name="shield-checkmark-outline" size={20} color={COLORS.text} style={{ marginRight: 10 }} />
+          <Text style={[styles.menuText, { flex: 1 }]}>Community Guidelines</Text>
+          <Ionicons name="chevron-forward" size={20} color={COLORS.textLight} />
+        </TouchableOpacity>
+        <TouchableOpacity
+          style={styles.menuItem}
+          onPress={() => router.push('/(main)/safety-reporting' as any)}
+        >
+          <Ionicons name="warning-outline" size={20} color={COLORS.text} style={{ marginRight: 10 }} />
+          <Text style={[styles.menuText, { flex: 1 }]}>Safety & Reporting</Text>
+          <Ionicons name="chevron-forward" size={20} color={COLORS.textLight} />
+        </TouchableOpacity>
+      </View>
+
+      <View style={styles.section}>
         <Text style={styles.sectionTitle}>Account</Text>
         <TouchableOpacity
           style={styles.menuItem}

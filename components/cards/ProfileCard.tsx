@@ -8,7 +8,7 @@ import {
 } from 'react-native';
 import { Image } from 'expo-image';
 import { Ionicons } from '@expo/vector-icons';
-import { COLORS } from '@/lib/constants';
+import { COLORS, INCOGNITO_COLORS } from '@/lib/constants';
 import { MatchQualityIndicator } from './MatchQualityIndicator';
 import type { IntentCompat } from '@/lib/intentCompat';
 import type { TrustBadge } from '@/lib/trustBadges';
@@ -32,6 +32,8 @@ export interface ProfileCardProps {
   trustBadges?: TrustBadge[];
   /** Enable photo carousel + swipe mode (Discover card) */
   showCarousel?: boolean;
+  /** When "dark", uses INCOGNITO_COLORS for Face 2 dark theme */
+  theme?: 'light' | 'dark';
   /** Called when user taps the arrow to view full profile */
   onOpenProfile?: () => void;
   // Legacy props for non-Discover usage (explore grid etc.)
@@ -54,10 +56,13 @@ export const ProfileCard: React.FC<ProfileCardProps> = ({
   intentCompat,
   trustBadges,
   showCarousel = false,
+  theme = 'light',
   onOpenProfile,
   user,
   onPress,
 }) => {
+  const dark = theme === 'dark';
+  const TC = dark ? INCOGNITO_COLORS : COLORS;
   const [photoIndex, setPhotoIndex] = useState(0);
 
   const photoCount = photos?.length || 0;
@@ -92,7 +97,7 @@ export const ProfileCard: React.FC<ProfileCardProps> = ({
 
   // --- Discover card mode ---
   return (
-    <View style={styles.card}>
+    <View style={[styles.card, dark && { backgroundColor: INCOGNITO_COLORS.surface }]}>
       {/* Photo area fills entire card */}
       <View style={styles.photoContainer}>
         {currentPhoto ? (
@@ -102,8 +107,8 @@ export const ProfileCard: React.FC<ProfileCardProps> = ({
             contentFit="cover"
           />
         ) : (
-          <View style={styles.photoPlaceholder}>
-            <Ionicons name="image-outline" size={48} color={COLORS.textLight} />
+          <View style={[styles.photoPlaceholder, dark && { backgroundColor: INCOGNITO_COLORS.accent }]}>
+            <Ionicons name="image-outline" size={48} color={TC.textLight} />
           </View>
         )}
 
@@ -210,18 +215,16 @@ export const ProfileCard: React.FC<ProfileCardProps> = ({
 const styles = StyleSheet.create({
   // --- Discover card ---
   card: {
-    borderRadius: 16,
+    borderRadius: 0,
     overflow: 'hidden' as const,
     backgroundColor: COLORS.backgroundDark,
     flex: 1,
   },
   photoContainer: {
-    flex: 1,
-    position: 'relative',
+    ...StyleSheet.absoluteFillObject,
   },
   image: {
-    width: '100%',
-    height: '100%',
+    ...StyleSheet.absoluteFillObject,
   },
   photoPlaceholder: {
     flex: 1,
@@ -278,7 +281,7 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     zIndex: 15,
   },
-  // Info overlay
+  // Info overlay — sits above floating action buttons
   overlay: {
     position: 'absolute',
     left: 0,
@@ -286,10 +289,8 @@ const styles = StyleSheet.create({
     bottom: 0,
     paddingTop: 24,
     paddingHorizontal: 16,
-    paddingBottom: 90,
+    paddingBottom: 110, // room for floating action buttons overlay
     backgroundColor: 'transparent',
-    // Gradient-like effect using a semi-transparent bottom area
-    // Real gradient would use expo-linear-gradient — this is a solid approximation
   },
   headerRow: {
     flexDirection: 'row',

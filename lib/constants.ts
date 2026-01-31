@@ -153,16 +153,16 @@ export const IAP_PRODUCTS: IAPProduct[] = [
   { id: 'messages_50', type: 'messages', quantity: 50, price: 350 },
 ];
 
-// Relationship Intent Options
+// Relationship Intent Options (store-safe labels — relationship constructs, not explicit)
 export const RELATIONSHIP_INTENTS: { value: RelationshipIntent; label: string; emoji: string }[] = [
   { value: 'long_term', label: 'Long-term', emoji: '💑' },
-  { value: 'short_term', label: 'Short-term', emoji: '🎉' },
-  { value: 'fwb', label: 'FWB', emoji: '🔥' },
-  { value: 'figuring_out', label: 'Figuring out', emoji: '🤔' },
-  { value: 'short_to_long', label: 'Short → Long', emoji: '📈' },
-  { value: 'long_to_short', label: 'Long → Short', emoji: '📉' },
+  { value: 'short_term', label: 'Casual Dating', emoji: '🎉' },
+  { value: 'fwb', label: 'Non-committal', emoji: '🔥' },
+  { value: 'figuring_out', label: 'Open to Exploring', emoji: '🤔' },
+  { value: 'short_to_long', label: 'Short to Long', emoji: '📈' },
+  { value: 'long_to_short', label: 'Long to Short', emoji: '📉' },
   { value: 'new_friends', label: 'New Friends', emoji: '👋' },
-  { value: 'open_to_anything', label: 'Open to Anything', emoji: '✨' },
+  { value: 'open_to_anything', label: 'Open to All', emoji: '✨' },
 ];
 
 // Activity Filter Options

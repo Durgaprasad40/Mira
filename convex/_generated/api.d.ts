@@ -11,6 +11,7 @@
 import type * as auth from "../auth.js";
 import type * as behaviorDetection from "../behaviorDetection.js";
 import type * as cleanup from "../cleanup.js";
+import type * as contentModeration from "../contentModeration.js";
 import type * as crossedPaths from "../crossedPaths.js";
 import type * as dares from "../dares.js";
 import type * as deviceFingerprint from "../deviceFingerprint.js";
@@ -23,10 +24,14 @@ import type * as messageTemplates from "../messageTemplates.js";
 import type * as messages from "../messages.js";
 import type * as notifications from "../notifications.js";
 import type * as photos from "../photos.js";
+import type * as privateDiscover from "../privateDiscover.js";
+import type * as privateProfiles from "../privateProfiles.js";
+import type * as revealRequests from "../revealRequests.js";
 import type * as smartSuggestions from "../smartSuggestions.js";
 import type * as subscriptions from "../subscriptions.js";
 import type * as surveys from "../surveys.js";
 import type * as trustScore from "../trustScore.js";
+import type * as truthDare from "../truthDare.js";
 import type * as users from "../users.js";
 import type * as verification from "../verification.js";
 
@@ -40,6 +45,7 @@ declare const fullApi: ApiFromModules<{
   auth: typeof auth;
   behaviorDetection: typeof behaviorDetection;
   cleanup: typeof cleanup;
+  contentModeration: typeof contentModeration;
   crossedPaths: typeof crossedPaths;
   dares: typeof dares;
   deviceFingerprint: typeof deviceFingerprint;
@@ -52,10 +58,14 @@ declare const fullApi: ApiFromModules<{
   messages: typeof messages;
   notifications: typeof notifications;
   photos: typeof photos;
+  privateDiscover: typeof privateDiscover;
+  privateProfiles: typeof privateProfiles;
+  revealRequests: typeof revealRequests;
   smartSuggestions: typeof smartSuggestions;
   subscriptions: typeof subscriptions;
   surveys: typeof surveys;
   trustScore: typeof trustScore;
+  truthDare: typeof truthDare;
   users: typeof users;
   verification: typeof verification;
 }>;

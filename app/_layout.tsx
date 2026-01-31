@@ -3,6 +3,7 @@ import { Stack } from "expo-router";
 import { ConvexProvider, useMutation } from "convex/react";
 import { convex, isDemoMode } from "@/hooks/useConvex";
 import { View, Text, StyleSheet } from "react-native";
+import { GestureHandlerRootView } from "react-native-gesture-handler";
 import { StatusBar } from "expo-status-bar";
 import { Camera } from "expo-camera";
 import * as ImagePicker from "expo-image-picker";
@@ -55,17 +56,19 @@ export default function RootLayout() {
   }, []);
 
   return (
-    <ConvexProvider client={convex}>
-      <StatusBar style="light" />
-      <DemoBanner />
-      <DeviceFingerprintCollector />
-      <Stack screenOptions={{ headerShown: false }}>
-        <Stack.Screen name="index" />
-        <Stack.Screen name="(auth)" />
-        <Stack.Screen name="(onboarding)" />
-        <Stack.Screen name="(main)" />
-      </Stack>
-    </ConvexProvider>
+    <GestureHandlerRootView style={{ flex: 1 }}>
+      <ConvexProvider client={convex}>
+        <StatusBar style="light" />
+        <DemoBanner />
+        <DeviceFingerprintCollector />
+        <Stack screenOptions={{ headerShown: false }}>
+          <Stack.Screen name="index" />
+          <Stack.Screen name="(auth)" />
+          <Stack.Screen name="(onboarding)" />
+          <Stack.Screen name="(main)" />
+        </Stack>
+      </ConvexProvider>
+    </GestureHandlerRootView>
   );
 }
 
