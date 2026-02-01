@@ -10,7 +10,9 @@
 
 import type * as auth from "../auth.js";
 import type * as behaviorDetection from "../behaviorDetection.js";
+import type * as chatRooms from "../chatRooms.js";
 import type * as cleanup from "../cleanup.js";
+import type * as confessions from "../confessions.js";
 import type * as contentModeration from "../contentModeration.js";
 import type * as crossedPaths from "../crossedPaths.js";
 import type * as dares from "../dares.js";
@@ -44,7 +46,9 @@ import type {
 declare const fullApi: ApiFromModules<{
   auth: typeof auth;
   behaviorDetection: typeof behaviorDetection;
+  chatRooms: typeof chatRooms;
   cleanup: typeof cleanup;
+  confessions: typeof confessions;
   contentModeration: typeof contentModeration;
   crossedPaths: typeof crossedPaths;
   dares: typeof dares;

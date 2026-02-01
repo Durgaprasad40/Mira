@@ -525,6 +525,40 @@ export interface RevealRequest {
   createdAt: number;
 }
 
+// Confession Types
+export type ConfessionMood = 'romantic' | 'spicy' | 'emotional' | 'funny';
+export type ConfessionVisibility = 'global';
+export type ConfessionSortBy = 'trending' | 'latest';
+
+export interface Confession {
+  id: string;
+  userId: string;
+  text: string;
+  isAnonymous: boolean;
+  mood: ConfessionMood;
+  visibility: ConfessionVisibility;
+  replyCount: number;
+  reactionCount: number;
+  createdAt: number;
+}
+
+export interface ConfessionReply {
+  id: string;
+  confessionId: string;
+  userId: string;
+  text: string;
+  isAnonymous: boolean;
+  createdAt: number;
+}
+
+export interface ConfessionReaction {
+  id: string;
+  confessionId: string;
+  userId: string;
+  type: 'heart';
+  createdAt: number;
+}
+
 // Discover Notification Types
 export type DiscoverNotificationType = 'crossed_paths' | 'new_matches' | 'message_reply' | 'interest_match' | 'weekly_refresh';
 

@@ -36,12 +36,27 @@ export default function PrivateTabsLayout() {
         }}
       />
       <Tabs.Screen
-        name="rooms"
+        name="confess"
         options={{
-          title: 'Rooms',
+          title: 'Confess',
+          tabBarIcon: ({ color, size }) => (
+            <Ionicons name="heart-circle" size={size} color={color} />
+          ),
+        }}
+      />
+      <Tabs.Screen
+        name="chat-rooms"
+        options={{
+          title: 'Chat Rooms',
           tabBarIcon: ({ color, size }) => (
             <Ionicons name="chatbubbles" size={size} color={color} />
           ),
+        }}
+      />
+      <Tabs.Screen
+        name="rooms"
+        options={{
+          href: null,
         }}
       />
       <Tabs.Screen

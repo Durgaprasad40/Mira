@@ -60,6 +60,8 @@ export default function MainLayout() {
         options={{ presentation: "modal" }}
       />
       <Stack.Screen name="prompt-thread" />
+      <Stack.Screen name="confession-thread" />
+      <Stack.Screen name="chat-room/[roomId]" />
       <Stack.Screen
         name="camera-composer"
         options={{ presentation: "fullScreenModal" }}

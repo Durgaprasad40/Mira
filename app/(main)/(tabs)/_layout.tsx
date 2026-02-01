@@ -23,7 +23,13 @@ export default function MainTabsLayout() {
       <Tabs.Screen
         name="discover"
         options={{
-          href: null, // Hide from tab bar - duplicate functionality
+          href: null,
+        }}
+      />
+      <Tabs.Screen
+        name="confessions"
+        options={{
+          href: null,
         }}
       />
       <Tabs.Screen

@@ -1,4 +1,4 @@
-import { DiscoverNotification, DiscoveryFeedItem } from '@/types';
+import { DiscoverNotification, DiscoveryFeedItem, Confession, ConfessionReply } from '@/types';
 
 // Demo data for testing the app without Convex backend
 
@@ -1707,6 +1707,445 @@ export const DEMO_TRENDING_ANSWERS: import('@/types').TodAnswer[] = [
   // Anonymous demo answers
   { id: 'ta_anon_1', promptId: 'tp_truth_1', userId: 'inc_12', userName: 'Golden_Hour', userPhotoUrl: 'https://images.unsplash.com/photo-1519699047748-de8e457a634e?w=400', type: 'text', text: 'I secretly wrote love letters and left them on their desk for weeks. They never figured out it was me.', likeCount: 25, createdAt: Date.now() - 1000 * 60 * 20, isAnonymous: true, userGender: 'female', profileVisibility: 'blurred' as const },
   { id: 'ta_anon_2', promptId: 'tp_truth_2', userId: 'inc_14', userName: 'Silk_Road', userPhotoUrl: 'https://images.unsplash.com/photo-1485893086445-ed75865251e0?w=400', type: 'text', text: 'He would always cancel plans last minute. I pretended it didn\'t bother me for 6 months.', likeCount: 19, createdAt: Date.now() - 1000 * 60 * 60 * 3, isAnonymous: true, userGender: 'female', profileVisibility: 'blurred' as const },
+];
+
+// Demo Confessions
+export const DEMO_CONFESSIONS: Confession[] = [
+  {
+    id: 'conf_1',
+    userId: 'demo_user_1',
+    text: 'I matched with someone on here and we ended up being neighbors. We wave awkwardly every morning now.',
+    isAnonymous: true,
+    mood: 'funny',
+    visibility: 'global',
+    replyCount: 5,
+    reactionCount: 24,
+    createdAt: Date.now() - 1000 * 60 * 30,
+  },
+  {
+    id: 'conf_2',
+    userId: 'demo_profile_2',
+    text: 'I still think about my college crush. We never spoke but I knew their entire timetable by heart.',
+    isAnonymous: true,
+    mood: 'romantic',
+    visibility: 'global',
+    replyCount: 8,
+    reactionCount: 42,
+    createdAt: Date.now() - 1000 * 60 * 60 * 2,
+  },
+  {
+    id: 'conf_3',
+    userId: 'demo_profile_3',
+    text: 'I pretend to be on a call whenever I see my ex at the coffee shop. It has been 8 months.',
+    isAnonymous: false,
+    mood: 'funny',
+    visibility: 'global',
+    replyCount: 12,
+    reactionCount: 67,
+    createdAt: Date.now() - 1000 * 60 * 60 * 5,
+  },
+  {
+    id: 'conf_4',
+    userId: 'demo_profile_4',
+    text: 'I wrote a love letter but never sent it. I still have it folded in my wallet after 3 years.',
+    isAnonymous: true,
+    mood: 'emotional',
+    visibility: 'global',
+    replyCount: 15,
+    reactionCount: 89,
+    createdAt: Date.now() - 1000 * 60 * 60 * 8,
+  },
+  {
+    id: 'conf_5',
+    userId: 'demo_profile_5',
+    text: 'My friends think I am over them. I am not. I listen to our playlist every single night.',
+    isAnonymous: true,
+    mood: 'emotional',
+    visibility: 'global',
+    replyCount: 7,
+    reactionCount: 55,
+    createdAt: Date.now() - 1000 * 60 * 60 * 12,
+  },
+  {
+    id: 'conf_6',
+    userId: 'demo_profile_6',
+    text: 'I accidentally liked a 3-year-old photo while stalking my crush. I deleted the app for a week.',
+    isAnonymous: true,
+    mood: 'spicy',
+    visibility: 'global',
+    replyCount: 20,
+    reactionCount: 103,
+    createdAt: Date.now() - 1000 * 60 * 60 * 18,
+  },
+  {
+    id: 'conf_7',
+    userId: 'demo_profile_7',
+    text: 'I once drove 200km just because she said "I wish you were here." Best road trip of my life.',
+    isAnonymous: false,
+    mood: 'romantic',
+    visibility: 'global',
+    replyCount: 9,
+    reactionCount: 78,
+    createdAt: Date.now() - 1000 * 60 * 60 * 24,
+  },
+  {
+    id: 'conf_8',
+    userId: 'demo_profile_8',
+    text: 'I rehearse conversations in the shower before texting my crush. I still end up sending "haha nice".',
+    isAnonymous: true,
+    mood: 'funny',
+    visibility: 'global',
+    replyCount: 18,
+    reactionCount: 91,
+    createdAt: Date.now() - 1000 * 60 * 60 * 36,
+  },
+];
+
+// Demo Confession Replies
+export const DEMO_CONFESSION_REPLIES: Record<string, ConfessionReply[]> = {
+  conf_1: [
+    { id: 'cr_1_1', confessionId: 'conf_1', userId: 'demo_profile_2', text: 'This is peak awkward energy and I am here for it', isAnonymous: true, createdAt: Date.now() - 1000 * 60 * 25 },
+    { id: 'cr_1_2', confessionId: 'conf_1', userId: 'demo_profile_3', text: 'Just say hi! What is the worst that could happen?', isAnonymous: false, createdAt: Date.now() - 1000 * 60 * 20 },
+    { id: 'cr_1_3', confessionId: 'conf_1', userId: 'demo_user_1', text: 'OP here — we actually grabbed coffee last week!', isAnonymous: true, createdAt: Date.now() - 1000 * 60 * 10 },
+  ],
+  conf_2: [
+    { id: 'cr_2_1', confessionId: 'conf_2', userId: 'demo_profile_4', text: 'Knowing their timetable is dedication', isAnonymous: true, createdAt: Date.now() - 1000 * 60 * 60 },
+    { id: 'cr_2_2', confessionId: 'conf_2', userId: 'demo_profile_5', text: 'Send them a message! You never know', isAnonymous: false, createdAt: Date.now() - 1000 * 60 * 50 },
+  ],
+  conf_3: [
+    { id: 'cr_3_1', confessionId: 'conf_3', userId: 'demo_profile_6', text: 'Been there. I switched coffee shops entirely.', isAnonymous: true, createdAt: Date.now() - 1000 * 60 * 60 * 4 },
+    { id: 'cr_3_2', confessionId: 'conf_3', userId: 'demo_profile_7', text: '8 months is nothing. I have been doing this for 2 years.', isAnonymous: true, createdAt: Date.now() - 1000 * 60 * 60 * 3 },
+  ],
+  conf_4: [
+    { id: 'cr_4_1', confessionId: 'conf_4', userId: 'demo_profile_8', text: 'This is the most romantic thing I have read today', isAnonymous: false, createdAt: Date.now() - 1000 * 60 * 60 * 7 },
+    { id: 'cr_4_2', confessionId: 'conf_4', userId: 'demo_profile_1', text: 'Send it. What are you waiting for?', isAnonymous: true, createdAt: Date.now() - 1000 * 60 * 60 * 6 },
+  ],
+  conf_6: [
+    { id: 'cr_6_1', confessionId: 'conf_6', userId: 'demo_profile_1', text: 'We have all been there. The panic is REAL.', isAnonymous: true, createdAt: Date.now() - 1000 * 60 * 60 * 17 },
+    { id: 'cr_6_2', confessionId: 'conf_6', userId: 'demo_profile_2', text: 'Did they notice though?', isAnonymous: false, createdAt: Date.now() - 1000 * 60 * 60 * 16 },
+    { id: 'cr_6_3', confessionId: 'conf_6', userId: 'demo_profile_3', text: 'This is why I never stalk beyond page 2', isAnonymous: true, createdAt: Date.now() - 1000 * 60 * 60 * 15 },
+  ],
+};
+
+// Demo Confession Reaction State (which confessions the demo user has reacted to)
+export const DEMO_CONFESSION_USER_REACTIONS: Record<string, boolean> = {
+  conf_2: true,
+  conf_4: true,
+  conf_6: true,
+};
+
+// Demo Chat Rooms
+export interface DemoChatRoom {
+  id: string;
+  name: string;
+  slug: string;
+  category: 'language' | 'general';
+  memberCount: number;
+  lastMessageAt?: number;
+  lastMessageText?: string;
+}
+
+export interface DemoChatMessage {
+  id: string;
+  roomId: string;
+  senderId: string;
+  senderName: string;
+  senderAvatar?: string;
+  type: 'text' | 'image' | 'gif' | 'video' | 'system';
+  text?: string;
+  mediaUrl?: string;
+  createdAt: number;
+}
+
+export const DEMO_CHAT_ROOMS: DemoChatRoom[] = [
+  { id: 'cr_global', name: 'Global', slug: 'global', category: 'general', memberCount: 1024, lastMessageAt: Date.now() - 1000 * 30, lastMessageText: 'Anyone here from Delhi?' },
+  { id: 'cr_india', name: 'India', slug: 'india', category: 'general', memberCount: 856, lastMessageAt: Date.now() - 1000 * 60 * 2, lastMessageText: 'Good evening everyone!' },
+  { id: 'cr_hindi', name: 'Hindi', slug: 'hindi', category: 'language', memberCount: 512, lastMessageAt: Date.now() - 1000 * 60 * 5, lastMessageText: 'Kya haal hai sabke?' },
+  { id: 'cr_telugu', name: 'Telugu', slug: 'telugu', category: 'language', memberCount: 389, lastMessageAt: Date.now() - 1000 * 60 * 8, lastMessageText: 'Hyderabad lo evaraina unnara?' },
+  { id: 'cr_tamil', name: 'Tamil', slug: 'tamil', category: 'language', memberCount: 445, lastMessageAt: Date.now() - 1000 * 60 * 12, lastMessageText: 'Vanakkam nanba!' },
+  { id: 'cr_malayalam', name: 'Malayalam', slug: 'malayalam', category: 'language', memberCount: 298, lastMessageAt: Date.now() - 1000 * 60 * 18, lastMessageText: 'Sughamano ellavarum?' },
+  { id: 'cr_kannada', name: 'Kannada', slug: 'kannada', category: 'language', memberCount: 267, lastMessageAt: Date.now() - 1000 * 60 * 22, lastMessageText: 'Bangalore alli yaaraadruu idira?' },
+  { id: 'cr_marathi', name: 'Marathi', slug: 'marathi', category: 'language', memberCount: 334, lastMessageAt: Date.now() - 1000 * 60 * 30, lastMessageText: 'Kasa kay mandale?' },
+  { id: 'cr_bengali', name: 'Bengali', slug: 'bengali', category: 'language', memberCount: 412, lastMessageAt: Date.now() - 1000 * 60 * 35, lastMessageText: 'Kemon acho sabai?' },
+  { id: 'cr_gujarati', name: 'Gujarati', slug: 'gujarati', category: 'language', memberCount: 198, lastMessageAt: Date.now() - 1000 * 60 * 45, lastMessageText: 'Kem cho friends?' },
+  { id: 'cr_punjabi', name: 'Punjabi', slug: 'punjabi', category: 'language', memberCount: 245, lastMessageAt: Date.now() - 1000 * 60 * 55, lastMessageText: 'Sat sri akaal ji!' },
+  { id: 'cr_urdu', name: 'Urdu', slug: 'urdu', category: 'language', memberCount: 178, lastMessageAt: Date.now() - 1000 * 60 * 60, lastMessageText: 'Assalam o alaikum!' },
+  { id: 'cr_english', name: 'English', slug: 'english', category: 'language', memberCount: 678, lastMessageAt: Date.now() - 1000 * 60 * 3, lastMessageText: 'What are you all up to tonight?' },
+];
+
+export const DEMO_CHAT_ROOM_MESSAGES: Record<string, DemoChatMessage[]> = {
+  cr_global: [
+    { id: 'cm_sys_1', roomId: 'cr_global', senderId: '', senderName: '', type: 'system', text: 'Priya joined the room', createdAt: Date.now() - 1000 * 60 * 25 },
+    { id: 'cm_1', roomId: 'cr_global', senderId: 'demo_profile_1', senderName: 'Priya', senderAvatar: 'https://images.unsplash.com/photo-1494790108377-be9c29b29330?w=100', type: 'text', text: 'Hey everyone! First time here.', createdAt: Date.now() - 1000 * 60 * 20 },
+    { id: 'cm_2', roomId: 'cr_global', senderId: 'demo_profile_3', senderName: 'Ananya', senderAvatar: 'https://images.unsplash.com/photo-1517841905240-472988babdf9?w=100', type: 'text', text: 'Welcome! This place is great for meeting new people.', createdAt: Date.now() - 1000 * 60 * 18 },
+    { id: 'cm_me_g1', roomId: 'cr_global', senderId: 'demo_user_1', senderName: 'DemoUser', type: 'text', text: 'Thanks! Glad to be here.', createdAt: Date.now() - 1000 * 60 * 17 },
+    { id: 'cm_sys_2', roomId: 'cr_global', senderId: '', senderName: '', type: 'system', text: 'Kavya joined the room', createdAt: Date.now() - 1000 * 60 * 15 },
+    { id: 'cm_3', roomId: 'cr_global', senderId: 'demo_profile_5', senderName: 'Kavya', senderAvatar: 'https://images.unsplash.com/photo-1524638431109-93d95c968f03?w=100', type: 'text', text: 'True! I have met some really cool people here.', createdAt: Date.now() - 1000 * 60 * 12 },
+    { id: 'cm_4', roomId: 'cr_global', senderId: 'demo_profile_2', senderName: 'Neha', senderAvatar: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=100', type: 'text', text: 'Anyone from Mumbai here?', createdAt: Date.now() - 1000 * 60 * 8 },
+    { id: 'cm_me_g2', roomId: 'cr_global', senderId: 'demo_user_1', senderName: 'DemoUser', type: 'text', text: 'Not Mumbai, but Hyderabad!', createdAt: Date.now() - 1000 * 60 * 7 },
+    { id: 'cm_5', roomId: 'cr_global', senderId: 'demo_profile_1', senderName: 'Priya', senderAvatar: 'https://images.unsplash.com/photo-1494790108377-be9c29b29330?w=100', type: 'text', text: 'I am from Pune actually. Close enough?', createdAt: Date.now() - 1000 * 60 * 6 },
+    { id: 'cm_6', roomId: 'cr_global', senderId: 'demo_profile_7', senderName: 'Divya', senderAvatar: 'https://images.unsplash.com/photo-1502823403499-6ccfcf4fb453?w=100', type: 'text', text: 'Delhi here! Looking for people to hang out with this weekend.', createdAt: Date.now() - 1000 * 60 * 4 },
+    { id: 'cm_7', roomId: 'cr_global', senderId: 'demo_profile_3', senderName: 'Ananya', senderAvatar: 'https://images.unsplash.com/photo-1517841905240-472988babdf9?w=100', type: 'text', text: 'I wish I was in Delhi. Bangalore weather has been terrible.', createdAt: Date.now() - 1000 * 60 * 2 },
+    { id: 'cm_me_g3', roomId: 'cr_global', senderId: 'demo_user_1', senderName: 'DemoUser', type: 'text', text: 'Haha Bangalore is nice though. Great food scene!', createdAt: Date.now() - 1000 * 60 * 1 },
+    { id: 'cm_8', roomId: 'cr_global', senderId: 'demo_profile_5', senderName: 'Kavya', senderAvatar: 'https://images.unsplash.com/photo-1524638431109-93d95c968f03?w=100', type: 'text', text: 'At least the food is good everywhere.', createdAt: Date.now() - 1000 * 30 },
+  ],
+  cr_hindi: [
+    { id: 'cm_h_sys', roomId: 'cr_hindi', senderId: '', senderName: '', type: 'system', text: 'Riya joined the room', createdAt: Date.now() - 1000 * 60 * 30 },
+    { id: 'cm_h1', roomId: 'cr_hindi', senderId: 'demo_profile_4', senderName: 'Riya', senderAvatar: 'https://images.unsplash.com/photo-1488426862026-3ee34a7d66df?w=100', type: 'text', text: 'Namaste sabko!', createdAt: Date.now() - 1000 * 60 * 15 },
+    { id: 'cm_h2', roomId: 'cr_hindi', senderId: 'demo_profile_6', senderName: 'Meera', senderAvatar: 'https://images.unsplash.com/photo-1438761681033-6461ffad8d80?w=100', type: 'text', text: 'Aaj ka din kaisa raha?', createdAt: Date.now() - 1000 * 60 * 10 },
+    { id: 'cm_h_me1', roomId: 'cr_hindi', senderId: 'demo_user_1', senderName: 'DemoUser', type: 'text', text: 'Namaste! Mera din acha raha.', createdAt: Date.now() - 1000 * 60 * 9 },
+    { id: 'cm_h3', roomId: 'cr_hindi', senderId: 'demo_profile_8', senderName: 'Shreya', senderAvatar: 'https://images.unsplash.com/photo-1464863979621-258859e62245?w=100', type: 'text', text: 'Bahut acha! Weekend ki planning kar rahe hain.', createdAt: Date.now() - 1000 * 60 * 7 },
+    { id: 'cm_h4', roomId: 'cr_hindi', senderId: 'demo_profile_4', senderName: 'Riya', senderAvatar: 'https://images.unsplash.com/photo-1488426862026-3ee34a7d66df?w=100', type: 'text', text: 'Kya haal hai sabke?', createdAt: Date.now() - 1000 * 60 * 5 },
+    { id: 'cm_h_me2', roomId: 'cr_hindi', senderId: 'demo_user_1', senderName: 'DemoUser', type: 'text', text: 'Sab badhiya! Tum batao.', createdAt: Date.now() - 1000 * 60 * 3 },
+  ],
+  cr_english: [
+    { id: 'cm_e_sys', roomId: 'cr_english', senderId: '', senderName: '', type: 'system', text: 'Priya joined the room', createdAt: Date.now() - 1000 * 60 * 40 },
+    { id: 'cm_e1', roomId: 'cr_english', senderId: 'demo_profile_1', senderName: 'Priya', senderAvatar: 'https://images.unsplash.com/photo-1494790108377-be9c29b29330?w=100', type: 'text', text: 'Happy Friday everyone!', createdAt: Date.now() - 1000 * 60 * 20 },
+    { id: 'cm_e_me1', roomId: 'cr_english', senderId: 'demo_user_1', senderName: 'DemoUser', type: 'text', text: 'Happy Friday! Any weekend plans?', createdAt: Date.now() - 1000 * 60 * 18 },
+    { id: 'cm_e2', roomId: 'cr_english', senderId: 'demo_profile_3', senderName: 'Ananya', senderAvatar: 'https://images.unsplash.com/photo-1517841905240-472988babdf9?w=100', type: 'text', text: 'Any plans for the weekend?', createdAt: Date.now() - 1000 * 60 * 15 },
+    { id: 'cm_e_sys2', roomId: 'cr_english', senderId: '', senderName: '', type: 'system', text: 'Kavya joined the room', createdAt: Date.now() - 1000 * 60 * 12 },
+    { id: 'cm_e3', roomId: 'cr_english', senderId: 'demo_profile_5', senderName: 'Kavya', senderAvatar: 'https://images.unsplash.com/photo-1524638431109-93d95c968f03?w=100', type: 'text', text: 'Thinking about checking out that new cafe in Indiranagar.', createdAt: Date.now() - 1000 * 60 * 10 },
+    { id: 'cm_e_me2', roomId: 'cr_english', senderId: 'demo_user_1', senderName: 'DemoUser', type: 'text', text: 'Oh nice! I love trying new places.', createdAt: Date.now() - 1000 * 60 * 8 },
+    { id: 'cm_e4', roomId: 'cr_english', senderId: 'demo_profile_1', senderName: 'Priya', senderAvatar: 'https://images.unsplash.com/photo-1494790108377-be9c29b29330?w=100', type: 'text', text: 'Oh which one? I have been exploring new spots too.', createdAt: Date.now() - 1000 * 60 * 7 },
+    { id: 'cm_e5', roomId: 'cr_english', senderId: 'demo_profile_2', senderName: 'Neha', senderAvatar: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=100', type: 'text', text: 'What are you all up to tonight?', createdAt: Date.now() - 1000 * 60 * 3 },
+    { id: 'cm_e_me3', roomId: 'cr_english', senderId: 'demo_user_1', senderName: 'DemoUser', type: 'text', text: 'Probably just chilling at home. You?', createdAt: Date.now() - 1000 * 60 * 1 },
+  ],
+};
+
+// ── Fallback demo messages for rooms without predefined messages ──
+// Returns a mix of system, other-user, and "me" messages for any roomId
+export function getDemoMessagesForRoom(roomId: string): DemoChatMessage[] {
+  // If we have predefined messages, return those
+  if (DEMO_CHAT_ROOM_MESSAGES[roomId]) {
+    return DEMO_CHAT_ROOM_MESSAGES[roomId];
+  }
+  // Generate fallback messages for any room
+  const now = Date.now();
+  return [
+    { id: `${roomId}_sys1`, roomId, senderId: '', senderName: '', type: 'system', text: 'Ananya joined the room', createdAt: now - 1000 * 60 * 45 },
+    { id: `${roomId}_1`, roomId, senderId: 'demo_profile_3', senderName: 'Ananya', senderAvatar: 'https://images.unsplash.com/photo-1517841905240-472988babdf9?w=100', type: 'text', text: 'Hey! Anyone here?', createdAt: now - 1000 * 60 * 40 },
+    { id: `${roomId}_sys2`, roomId, senderId: '', senderName: '', type: 'system', text: 'Priya joined the room', createdAt: now - 1000 * 60 * 38 },
+    { id: `${roomId}_2`, roomId, senderId: 'demo_profile_1', senderName: 'Priya', senderAvatar: 'https://images.unsplash.com/photo-1494790108377-be9c29b29330?w=100', type: 'text', text: 'Hi! Just joined. What is everyone talking about?', createdAt: now - 1000 * 60 * 35 },
+    { id: `${roomId}_3`, roomId, senderId: 'demo_profile_3', senderName: 'Ananya', senderAvatar: 'https://images.unsplash.com/photo-1517841905240-472988babdf9?w=100', type: 'text', text: 'Nothing much yet, the room just opened!', createdAt: now - 1000 * 60 * 32 },
+    { id: `${roomId}_me1`, roomId, senderId: 'demo_user_1', senderName: 'DemoUser', type: 'text', text: 'Hey all! Good to see people here.', createdAt: now - 1000 * 60 * 28 },
+    { id: `${roomId}_4`, roomId, senderId: 'demo_profile_5', senderName: 'Kavya', senderAvatar: 'https://images.unsplash.com/photo-1524638431109-93d95c968f03?w=100', type: 'text', text: 'This room looks fun! What do you all do?', createdAt: now - 1000 * 60 * 22 },
+    { id: `${roomId}_5`, roomId, senderId: 'demo_profile_2', senderName: 'Neha', senderAvatar: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=100', type: 'text', text: 'I work in tech. Software engineer at a startup.', createdAt: now - 1000 * 60 * 18 },
+    { id: `${roomId}_me2`, roomId, senderId: 'demo_user_1', senderName: 'DemoUser', type: 'text', text: 'Nice! I am into design myself.', createdAt: now - 1000 * 60 * 15 },
+    { id: `${roomId}_6`, roomId, senderId: 'demo_profile_1', senderName: 'Priya', senderAvatar: 'https://images.unsplash.com/photo-1494790108377-be9c29b29330?w=100', type: 'text', text: 'Cool! We should share our work sometime.', createdAt: now - 1000 * 60 * 12 },
+    { id: `${roomId}_7`, roomId, senderId: 'demo_profile_4', senderName: 'Riya', senderAvatar: 'https://images.unsplash.com/photo-1488426862026-3ee34a7d66df?w=100', type: 'text', text: 'Hey everyone! Late to the party.', createdAt: now - 1000 * 60 * 9 },
+    { id: `${roomId}_me3`, roomId, senderId: 'demo_user_1', senderName: 'DemoUser', type: 'text', text: 'Better late than never! Welcome.', createdAt: now - 1000 * 60 * 7 },
+    { id: `${roomId}_8`, roomId, senderId: 'demo_profile_5', senderName: 'Kavya', senderAvatar: 'https://images.unsplash.com/photo-1524638431109-93d95c968f03?w=100', type: 'text', text: 'So what is everyone doing this weekend?', createdAt: now - 1000 * 60 * 5 },
+    { id: `${roomId}_9`, roomId, senderId: 'demo_profile_3', senderName: 'Ananya', senderAvatar: 'https://images.unsplash.com/photo-1517841905240-472988babdf9?w=100', type: 'text', text: 'Thinking of going to a concert. Anyone interested?', createdAt: now - 1000 * 60 * 3 },
+    { id: `${roomId}_me4`, roomId, senderId: 'demo_user_1', senderName: 'DemoUser', type: 'text', text: 'That sounds amazing! Which concert?', createdAt: now - 1000 * 60 * 1 },
+  ];
+}
+
+// Track which rooms demo user has joined
+export const DEMO_JOINED_ROOMS: Record<string, boolean> = {
+  cr_global: true,
+  cr_english: true,
+};
+
+// ──── Chat Room: DM Inbox ────
+export interface DemoDM {
+  id: string;
+  peerId: string;
+  peerName: string;
+  peerAvatar?: string;
+  lastMessage: string;
+  lastMessageAt: number;
+  unreadCount: number;
+  /** true = peer has replied back, so this DM is visible in inbox */
+  visible: boolean;
+  /** When true, thread is hidden until a new incoming message arrives */
+  hiddenUntilNextMessage: boolean;
+}
+
+export interface DemoPrivateMessage {
+  id: string;
+  dmId: string;
+  senderId: string;
+  senderName: string;
+  text: string;
+  type?: 'text' | 'image' | 'gif' | 'video';
+  mediaUrl?: string;
+  createdAt: number;
+}
+
+export const DEMO_DM_INBOX: DemoDM[] = [
+  {
+    id: 'dm_1',
+    peerId: 'demo_profile_1',
+    peerName: 'Priya',
+    peerAvatar: 'https://images.unsplash.com/photo-1494790108377-be9c29b29330?w=100',
+    lastMessage: 'Hey! Saw you in the Global room.',
+    lastMessageAt: Date.now() - 1000 * 60 * 3,
+    unreadCount: 2,
+    visible: true,
+    hiddenUntilNextMessage: false,
+  },
+  {
+    id: 'dm_2',
+    peerId: 'demo_profile_5',
+    peerName: 'Kavya',
+    peerAvatar: 'https://images.unsplash.com/photo-1524638431109-93d95c968f03?w=100',
+    lastMessage: 'That was hilarious 😂',
+    lastMessageAt: Date.now() - 1000 * 60 * 15,
+    unreadCount: 1,
+    visible: true,
+    hiddenUntilNextMessage: false,
+  },
+  {
+    id: 'dm_3',
+    peerId: 'demo_profile_3',
+    peerName: 'Ananya',
+    peerAvatar: 'https://images.unsplash.com/photo-1517841905240-472988babdf9?w=100',
+    lastMessage: 'Sure, let me know when you are free.',
+    lastMessageAt: Date.now() - 1000 * 60 * 45,
+    unreadCount: 0,
+    visible: true,
+    hiddenUntilNextMessage: false,
+  },
+  {
+    id: 'dm_hidden_1',
+    peerId: 'demo_profile_7',
+    peerName: 'Divya',
+    peerAvatar: 'https://images.unsplash.com/photo-1502823403499-6ccfcf4fb453?w=100',
+    lastMessage: 'Hi there!',
+    lastMessageAt: Date.now() - 1000 * 60 * 60,
+    unreadCount: 0,
+    visible: false, // sent by me, no reply yet → hidden
+    hiddenUntilNextMessage: false,
+  },
+];
+
+// ──── Chat Room: Private Chat Messages (demo) ────
+export const DEMO_PRIVATE_MESSAGES: Record<string, DemoPrivateMessage[]> = {
+  dm_1: [
+    { id: 'pm_1_1', dmId: 'dm_1', senderId: 'demo_profile_1', senderName: 'Priya', text: 'Hey there!', createdAt: Date.now() - 1000 * 60 * 10 },
+    { id: 'pm_1_2', dmId: 'dm_1', senderId: 'demo_user_1', senderName: 'You', text: 'Hi! How are you?', createdAt: Date.now() - 1000 * 60 * 8 },
+    { id: 'pm_1_3', dmId: 'dm_1', senderId: 'demo_profile_1', senderName: 'Priya', text: 'Good! Just hanging out in the chat rooms.', createdAt: Date.now() - 1000 * 60 * 5 },
+    { id: 'pm_1_4', dmId: 'dm_1', senderId: 'demo_profile_1', senderName: 'Priya', text: 'Hey! Saw you in the Global room.', createdAt: Date.now() - 1000 * 60 * 3 },
+  ],
+  dm_2: [
+    { id: 'pm_2_1', dmId: 'dm_2', senderId: 'demo_user_1', senderName: 'You', text: 'That joke in the room was amazing', createdAt: Date.now() - 1000 * 60 * 20 },
+    { id: 'pm_2_2', dmId: 'dm_2', senderId: 'demo_profile_5', senderName: 'Kavya', text: 'That was hilarious 😂', createdAt: Date.now() - 1000 * 60 * 15 },
+  ],
+  dm_3: [
+    { id: 'pm_3_1', dmId: 'dm_3', senderId: 'demo_profile_3', senderName: 'Ananya', text: 'Want to catch up sometime?', createdAt: Date.now() - 1000 * 60 * 50 },
+    { id: 'pm_3_2', dmId: 'dm_3', senderId: 'demo_user_1', senderName: 'You', text: 'Sure! When works for you?', createdAt: Date.now() - 1000 * 60 * 48 },
+    { id: 'pm_3_3', dmId: 'dm_3', senderId: 'demo_profile_3', senderName: 'Ananya', text: 'Sure, let me know when you are free.', createdAt: Date.now() - 1000 * 60 * 45 },
+  ],
+};
+
+// ──── Chat Room: Friend Requests ────
+export interface DemoFriendRequest {
+  id: string;
+  fromUserId: string;
+  fromUserName: string;
+  fromUserAvatar?: string;
+  createdAt: number;
+}
+
+export const DEMO_FRIEND_REQUESTS: DemoFriendRequest[] = [
+  {
+    id: 'fr_1',
+    fromUserId: 'demo_profile_2',
+    fromUserName: 'Neha',
+    fromUserAvatar: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=100',
+    createdAt: Date.now() - 1000 * 60 * 10,
+  },
+  {
+    id: 'fr_2',
+    fromUserId: 'demo_profile_6',
+    fromUserName: 'Meera',
+    fromUserAvatar: 'https://images.unsplash.com/photo-1438761681033-6461ffad8d80?w=100',
+    createdAt: Date.now() - 1000 * 60 * 30,
+  },
+  {
+    id: 'fr_3',
+    fromUserId: 'demo_profile_8',
+    fromUserName: 'Shreya',
+    fromUserAvatar: 'https://images.unsplash.com/photo-1464863979621-258859e62245?w=100',
+    createdAt: Date.now() - 1000 * 60 * 60 * 2,
+  },
+];
+
+// ──── Chat Room: Announcements / Notifications ────
+export interface DemoAnnouncement {
+  id: string;
+  title: string;
+  text: string;
+  createdAt: number;
+  seen: boolean;
+}
+
+export const DEMO_ANNOUNCEMENTS: DemoAnnouncement[] = [
+  {
+    id: 'ann_1',
+    title: 'Welcome to Chat Rooms!',
+    text: 'You can now join public rooms and chat with people. Enjoy!',
+    createdAt: Date.now() - 1000 * 60 * 5,
+    seen: false,
+  },
+  {
+    id: 'ann_2',
+    title: 'New Language Rooms Added',
+    text: 'We have added Telugu, Tamil, Malayalam, and more regional rooms.',
+    createdAt: Date.now() - 1000 * 60 * 60,
+    seen: false,
+  },
+  {
+    id: 'ann_3',
+    title: 'Community Guidelines',
+    text: 'Please be respectful. Any violations will result in a warning.',
+    createdAt: Date.now() - 1000 * 60 * 60 * 24,
+    seen: true,
+  },
+];
+
+// ──── Chat Room: Demo User Profile & Wallet ────
+export interface DemoUserProfile {
+  id: string;
+  username: string;
+  avatar?: string;
+  isActive: boolean;
+  coins: number;
+  messagesSent: number;
+}
+
+export const DEMO_CURRENT_USER: DemoUserProfile = {
+  id: 'demo_user_1',
+  username: 'DemoUser',
+  avatar: undefined,
+  isActive: true,
+  coins: 47,
+  messagesSent: 47,
+};
+
+// ──── Chat Room: Online Users ────
+export interface DemoOnlineUser {
+  id: string;
+  username: string;
+  avatar?: string;
+  isOnline: boolean;
+  gender?: 'male' | 'female' | 'other';
+  age?: number;
+  chatBio?: string;
+  lastSeen?: number;
+}
+
+export const DEMO_ONLINE_USERS: DemoOnlineUser[] = [
+  { id: 'demo_profile_1', username: 'Priya', avatar: 'https://images.unsplash.com/photo-1494790108377-be9c29b29330?w=100', isOnline: true, gender: 'female', age: 24, chatBio: 'Coffee addict & sunset chaser. Let\'s talk about travel and good music!' },
+  { id: 'demo_profile_3', username: 'Ananya', avatar: 'https://images.unsplash.com/photo-1517841905240-472988babdf9?w=100', isOnline: true, gender: 'female', age: 22, chatBio: 'Design student who loves late-night conversations. Ask me about art or anime.' },
+  { id: 'demo_profile_5', username: 'Kavya', avatar: 'https://images.unsplash.com/photo-1524638431109-93d95c968f03?w=100', isOnline: true, gender: 'female', age: 25 },
+  { id: 'demo_profile_2', username: 'Neha', avatar: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=100', isOnline: true, gender: 'female', age: 23, chatBio: 'Here to make friends, not followers. Dog mom. Bookworm. Probably overthinking something right now.' },
+  { id: 'demo_profile_7', username: 'Divya', avatar: 'https://images.unsplash.com/photo-1502823403499-6ccfcf4fb453?w=100', isOnline: false, gender: 'female', age: 26, chatBio: 'Fitness freak by morning, Netflix binger by night.', lastSeen: Date.now() - 1000 * 60 * 5 },
+  { id: 'demo_profile_4', username: 'Riya', avatar: 'https://images.unsplash.com/photo-1488426862026-3ee34a7d66df?w=100', isOnline: true, gender: 'female', age: 21 },
+  { id: 'demo_profile_6', username: 'Meera', avatar: 'https://images.unsplash.com/photo-1438761681033-6461ffad8d80?w=100', isOnline: false, gender: 'female', age: 27, chatBio: 'Photographer. Chai > coffee. Always up for deep conversations about life and the universe.', lastSeen: Date.now() - 1000 * 60 * 120 },
+  { id: 'demo_profile_8', username: 'Shreya', avatar: 'https://images.unsplash.com/photo-1464863979621-258859e62245?w=100', isOnline: true, gender: 'female', age: 23, chatBio: 'Music is my therapy. Send me your playlist!' },
+  { id: 'demo_profile_9', username: 'Arun', isOnline: true, gender: 'male', age: 25, chatBio: 'Coder by day, guitarist by night. Looking for interesting people to vibe with.' },
+  { id: 'demo_profile_10', username: 'Vikram', isOnline: false, gender: 'male', age: 28, lastSeen: Date.now() - 1000 * 60 * 60 * 3 },
 ];
 
 export const isDemoMode = () => {

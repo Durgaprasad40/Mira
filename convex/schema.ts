@@ -601,6 +601,79 @@ export default defineSchema({
     .index('by_from_to', ['fromUserId', 'toUserId'])
     .index('by_prompt', ['promptId']),
 
+  // Confessions table
+  confessions: defineTable({
+    userId: v.id('users'),
+    text: v.string(),
+    isAnonymous: v.boolean(),
+    mood: v.union(v.literal('romantic'), v.literal('spicy'), v.literal('emotional'), v.literal('funny')),
+    visibility: v.literal('global'),
+    replyCount: v.number(),
+    reactionCount: v.number(),
+    createdAt: v.number(),
+  })
+    .index('by_created', ['createdAt'])
+    .index('by_user', ['userId']),
+
+  // Confession Replies table
+  confessionReplies: defineTable({
+    confessionId: v.id('confessions'),
+    userId: v.id('users'),
+    text: v.string(),
+    isAnonymous: v.boolean(),
+    createdAt: v.number(),
+  })
+    .index('by_confession', ['confessionId'])
+    .index('by_user', ['userId']),
+
+  // Confession Reactions table
+  confessionReactions: defineTable({
+    confessionId: v.id('confessions'),
+    userId: v.id('users'),
+    type: v.literal('heart'),
+    createdAt: v.number(),
+  })
+    .index('by_confession', ['confessionId'])
+    .index('by_user', ['userId'])
+    .index('by_confession_user', ['confessionId', 'userId']),
+
+  // Chat Rooms table (group chat rooms in Private section)
+  chatRooms: defineTable({
+    name: v.string(),
+    slug: v.string(),
+    category: v.union(v.literal('language'), v.literal('general')),
+    isPublic: v.boolean(),
+    createdAt: v.number(),
+    lastMessageAt: v.optional(v.number()),
+    lastMessageText: v.optional(v.string()),
+    memberCount: v.number(),
+  })
+    .index('by_slug', ['slug'])
+    .index('by_last_message', ['lastMessageAt'])
+    .index('by_category', ['category']),
+
+  // Chat Room Members table
+  chatRoomMembers: defineTable({
+    roomId: v.id('chatRooms'),
+    userId: v.id('users'),
+    joinedAt: v.number(),
+  })
+    .index('by_room', ['roomId'])
+    .index('by_user', ['userId'])
+    .index('by_room_user', ['roomId', 'userId']),
+
+  // Chat Room Messages table
+  chatRoomMessages: defineTable({
+    roomId: v.id('chatRooms'),
+    senderId: v.id('users'),
+    type: v.union(v.literal('text'), v.literal('image'), v.literal('system')),
+    text: v.optional(v.string()),
+    imageUrl: v.optional(v.string()),
+    createdAt: v.number(),
+  })
+    .index('by_room', ['roomId'])
+    .index('by_room_created', ['roomId', 'createdAt']),
+
   // Filter Presets table
   filterPresets: defineTable({
     userId: v.id('users'),
