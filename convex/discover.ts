@@ -113,12 +113,12 @@ function completenessScore(user: {
 /** C) Preference match score (0–100) — age/city + common interests. */
 function preferenceMatchScore(
   candidate: {
-    city: string;
+    city?: string;
     activities: string[];
     relationshipIntent: string[];
   },
   currentUser: {
-    city: string;
+    city?: string;
     activities: string[];
     relationshipIntent: string[];
   },
@@ -177,7 +177,7 @@ function rankScore(
     activities: string[];
     relationshipIntent: string[];
     isVerified: boolean;
-    city: string;
+    city?: string;
     height?: number;
     jobTitle?: string;
     education?: string;
@@ -187,7 +187,7 @@ function rankScore(
   },
   currentUser: {
     _id: string;
-    city: string;
+    city?: string;
     activities: string[];
     relationshipIntent: string[];
   },
@@ -348,7 +348,7 @@ export const getDiscoverProfiles = query({
 
     // Sort
     if (sortBy === 'recommended') {
-      candidates.sort((a, b) => rankScore(b, currentUser as any) - rankScore(a, currentUser as any));
+      candidates.sort((a, b) => rankScore(b, currentUser) - rankScore(a, currentUser));
     } else {
       candidates.sort((a, b) => {
         // Boosted first
@@ -506,11 +506,11 @@ export const getExploreProfiles = query({
       candidates.sort((a, b) => {
         const scoreA = 0.45 * activityScore(a.lastActive) +
           0.35 * completenessScore(a, a.photoCount) +
-          0.15 * preferenceMatchScore(a, currentUser as any) +
+          0.15 * preferenceMatchScore(a, currentUser) +
           0.05 * rotationScore(currentUser._id as string, a.id as string);
         const scoreB = 0.45 * activityScore(b.lastActive) +
           0.35 * completenessScore(b, b.photoCount) +
-          0.15 * preferenceMatchScore(b, currentUser as any) +
+          0.15 * preferenceMatchScore(b, currentUser) +
           0.05 * rotationScore(currentUser._id as string, b.id as string);
         return scoreB - scoreA;
       });
