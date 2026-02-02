@@ -26,6 +26,7 @@ interface OnboardingState {
   photos: string[];
   verificationPhotoUri: string | null;
   bio: string;
+  profilePrompts: { question: string; answer: string }[];
   height: number | null;
   weight: number | null;
   smoking: SmokingStatus | null;
@@ -58,6 +59,7 @@ interface OnboardingState {
   reorderPhotos: (photos: string[]) => void;
   setVerificationPhoto: (uri: string | null) => void;
   setBio: (bio: string) => void;
+  setProfilePrompts: (prompts: { question: string; answer: string }[]) => void;
   setHeight: (height: number | null) => void;
   setWeight: (weight: number | null) => void;
   setSmoking: (status: SmokingStatus | null) => void;
@@ -94,6 +96,7 @@ const initialState = {
   photos: [],
   verificationPhotoUri: null,
   bio: "",
+  profilePrompts: [],
   height: null,
   weight: null,
   smoking: null,
@@ -149,6 +152,8 @@ export const useOnboardingStore = create<OnboardingState>()(
       setVerificationPhoto: (uri) => set({ verificationPhotoUri: uri }),
 
       setBio: (bio) => set({ bio }),
+
+      setProfilePrompts: (profilePrompts) => set({ profilePrompts }),
 
       setHeight: (height) => set({ height }),
 

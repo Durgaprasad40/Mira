@@ -528,9 +528,10 @@ export interface RevealRequest {
 // Confession Types
 export type ConfessionMood = 'romantic' | 'spicy' | 'emotional' | 'funny';
 export type ConfessionTopic = 'heartbreak' | 'crush' | 'funny' | 'late_night' | 'college' | 'office' | 'spicy';
-export type ConfessionReactionType = 'relatable' | 'feel_you' | 'bold' | 'curious';
+export type ConfessionReactionType = string; // free emoji — any emoji string
 export type ConfessionVisibility = 'global';
 export type ConfessionSortBy = 'trending' | 'latest';
+export type ConfessionReplyType = 'text' | 'voice';
 
 export type ConfessionRevealPolicy = 'never' | 'allow_later';
 export type TimedRevealOption = 'never' | '24h' | '48h';
@@ -542,20 +543,22 @@ export interface Confession {
   isAnonymous: boolean;
   mood: ConfessionMood;
   topic?: ConfessionTopic;
-  reactions?: Record<ConfessionReactionType, number>;
+  reactions?: Record<string, number>;
+  topEmojis?: { emoji: string; count: number }[];
+  replyPreviews?: { text: string; isAnonymous: boolean; type: string; createdAt: number }[];
   targetUserId?: string;
   visibility: ConfessionVisibility;
   replyCount: number;
   reactionCount: number;
+  voiceReplyCount?: number;
+  authorName?: string;
+  authorPhotoUrl?: string;
   createdAt: number;
-  /** User chose to allow revealing identity later */
   revealPolicy: ConfessionRevealPolicy;
-  /** Timed reveal: when identity will be revealed to targetUserId */
   timedReveal?: TimedRevealOption;
-  /** Timestamp when timed reveal activates (null if cancelled or 'never') */
   timedRevealAt?: number | null;
-  /** Whether user cancelled a pending timed reveal */
   timedRevealCancelled?: boolean;
+  trendingScore?: number;
 }
 
 export interface ConfessionReply {
@@ -564,6 +567,9 @@ export interface ConfessionReply {
   userId: string;
   text: string;
   isAnonymous: boolean;
+  type?: ConfessionReplyType;
+  voiceUrl?: string;
+  voiceDurationSec?: number;
   createdAt: number;
 }
 
@@ -571,7 +577,7 @@ export interface ConfessionReaction {
   id: string;
   confessionId: string;
   userId: string;
-  type: ConfessionReactionType;
+  type: string; // emoji string
   createdAt: number;
 }
 
@@ -665,6 +671,7 @@ export type OnboardingStep =
   | "face_verification"
   | "additional_photos"
   | "bio"
+  | "prompts"
   | "profile_details"
   | "preferences"
   | "permissions"

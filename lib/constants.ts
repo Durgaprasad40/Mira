@@ -1,4 +1,4 @@
-import { FeatureAccess, SubscriptionPlan, IAPProduct, RelationshipIntent, ActivityFilter, ConfessionTopic, ConfessionReactionType, ConfessionMood } from '@/types';
+import { FeatureAccess, SubscriptionPlan, IAPProduct, RelationshipIntent, ActivityFilter, ConfessionTopic, ConfessionMood } from '@/types';
 
 // App Colors
 export const COLORS = {
@@ -323,13 +323,6 @@ export const CONFESSION_TOPICS: Record<ConfessionTopic, { emoji: string; label: 
   spicy: { emoji: '\uD83D\uDD25', label: 'Spicy', color: '#FF5722', bg: 'rgba(255,87,34,0.12)' },
 };
 
-// Confession Reactions Config
-export const CONFESSION_REACTIONS: Record<ConfessionReactionType, { emoji: string; label: string }> = {
-  relatable: { emoji: '\u2764\uFE0F', label: 'Relatable' },
-  feel_you: { emoji: '\uD83D\uDE2D', label: 'Feel you' },
-  bold: { emoji: '\uD83D\uDD25', label: 'Bold' },
-  curious: { emoji: '\uD83D\uDC40', label: 'Curious' },
-};
 
 // Backward compat: map old mood to new topic
 export const MOOD_TO_TOPIC: Record<ConfessionMood, ConfessionTopic> = {

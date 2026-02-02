@@ -12,10 +12,15 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
+import { useQuery, useMutation } from 'convex/react';
+import { api } from '@/convex/_generated/api';
+import EmojiPicker from 'rn-emoji-keyboard';
 import { COLORS } from '@/lib/constants';
-import { ConfessionReactionType, ConfessionChat, ConfessionRevealPolicy, TimedRevealOption } from '@/types';
+import { isProbablyEmoji } from '@/lib/utils';
+import { ConfessionChat, ConfessionRevealPolicy, TimedRevealOption } from '@/types';
 import { useAuthStore } from '@/stores/authStore';
 import { useConfessionStore } from '@/stores/confessionStore';
+import { isDemoMode } from '@/hooks/useConvex';
 import ConfessionCard from '@/components/confessions/ConfessionCard';
 import ComposeConfessionModal from '@/components/confessions/ComposeConfessionModal';
 import SecretCrushCard from '@/components/confessions/SecretCrushCard';
@@ -28,14 +33,14 @@ export default function ConfessionsScreen() {
   const currentUserId = userId || 'demo_user_1';
 
   const {
-    confessions,
+    confessions: demoConfessions,
     userReactions,
     secretCrushes,
     chats,
     seedConfessions,
     addConfession,
-    toggleReaction,
-    reportConfession,
+    toggleReaction: demoToggleReaction,
+    reportConfession: demoReportConfession,
     addChat,
     addChatMessage,
     revealCrush,
@@ -51,20 +56,82 @@ export default function ConfessionsScreen() {
   const [showToast, setShowToast] = useState(false);
   const toastOpacity = useRef(new Animated.Value(0)).current;
 
+  // Emoji picker state
+  const [showEmojiPicker, setShowEmojiPicker] = useState(false);
+  const [emojiTargetConfessionId, setEmojiTargetConfessionId] = useState<string | null>(null);
+
+  // Seed demo data on mount
   useEffect(() => {
     seedConfessions();
   }, []);
 
-  // Single feed — sorted by trending score (engagement), no categories
-  const sortedConfessions = useMemo(() => {
-    const list = [...confessions];
-    list.sort((a, b) => {
-      const scoreA = a.replyCount * 2 + a.reactionCount;
-      const scoreB = b.replyCount * 2 + b.reactionCount;
-      return scoreB - scoreA;
+  // Convex queries (only when not in demo mode)
+  const convexConfessions = useQuery(
+    api.confessions.listConfessions,
+    !isDemoMode ? { sortBy: 'latest' as const } : 'skip'
+  );
+  const convexTrending = useQuery(
+    api.confessions.getTrendingConfessions,
+    !isDemoMode ? {} : 'skip'
+  );
+
+  // Convex mutations
+  const createConfessionMutation = useMutation(api.confessions.createConfession);
+  const toggleReactionMutation = useMutation(api.confessions.toggleReaction);
+  const reportConfessionMutation = useMutation(api.confessions.reportConfession);
+
+  // Use Convex data when available, demo data as fallback
+  const confessions = useMemo(() => {
+    if (!isDemoMode && convexConfessions) {
+      return convexConfessions.map((c: any) => ({
+        id: c._id,
+        userId: c.userId,
+        text: c.text,
+        isAnonymous: c.isAnonymous,
+        mood: c.mood,
+        authorName: c.authorName,
+        authorPhotoUrl: c.authorPhotoUrl,
+        topEmojis: c.topEmojis || [],
+        replyPreviews: c.replyPreviews || [],
+        replyCount: c.replyCount,
+        reactionCount: c.reactionCount,
+        createdAt: c.createdAt,
+        visibility: c.visibility,
+        revealPolicy: 'never' as const,
+      }));
+    }
+    // Demo mode — sort by latest
+    return [...demoConfessions].sort((a, b) => b.createdAt - a.createdAt);
+  }, [isDemoMode, convexConfessions, demoConfessions]);
+
+  // Trending confessions
+  const trendingConfessions = useMemo(() => {
+    if (!isDemoMode && convexTrending) {
+      return convexTrending.map((c: any) => ({
+        id: c._id,
+        userId: c.userId,
+        text: c.text,
+        isAnonymous: c.isAnonymous,
+        mood: c.mood,
+        authorName: c.authorName as string | undefined,
+        replyCount: c.replyCount,
+        reactionCount: c.reactionCount,
+        createdAt: c.createdAt,
+        trendingScore: c.trendingScore,
+      }));
+    }
+    // Demo mode — compute trending locally
+    const now = Date.now();
+    const cutoff = now - 48 * 60 * 60 * 1000;
+    const recent = demoConfessions.filter((c) => c.createdAt > cutoff);
+    const scored = recent.map((c) => {
+      const hoursSince = (now - c.createdAt) / (1000 * 60 * 60);
+      const score = (c.reactionCount * 3 + c.replyCount * 4) / (hoursSince + 2);
+      return { ...c, trendingScore: score };
     });
-    return list;
-  }, [confessions]);
+    scored.sort((a, b) => (b.trendingScore || 0) - (a.trendingScore || 0));
+    return scored.slice(0, 5);
+  }, [isDemoMode, convexTrending, demoConfessions]);
 
   const myCrushes = useMemo(
     () => secretCrushes.filter((sc) => sc.toUserId === currentUserId && !sc.isRevealed),
@@ -76,31 +143,52 @@ export default function ConfessionsScreen() {
     setTimeout(() => setRefreshing(false), 800);
   }, []);
 
-  const handleReact = useCallback(
-    (confessionId: string, type: ConfessionReactionType) => {
-      toggleReaction(confessionId, type);
-      notifyReaction(confessionId);
+  const handleOpenEmojiPicker = useCallback((confessionId: string) => {
+    setEmojiTargetConfessionId(confessionId);
+    setShowEmojiPicker(true);
+  }, []);
+
+  const handleEmojiSelected = useCallback(
+    (emojiObj: any) => {
+      if (!emojiTargetConfessionId) return;
+      const emoji = emojiObj.emoji;
+      if (isDemoMode) {
+        demoToggleReaction(emojiTargetConfessionId, emoji);
+        notifyReaction(emojiTargetConfessionId);
+        return;
+      }
+      demoToggleReaction(emojiTargetConfessionId, emoji);
+      toggleReactionMutation({
+        confessionId: emojiTargetConfessionId as any,
+        userId: currentUserId as any,
+        type: emoji,
+      }).catch(() => {
+        demoToggleReaction(emojiTargetConfessionId!, emoji);
+      });
+      notifyReaction(emojiTargetConfessionId);
     },
-    [toggleReaction, notifyReaction]
+    [emojiTargetConfessionId, demoToggleReaction, notifyReaction, toggleReactionMutation, currentUserId]
   );
 
   const handleCompose = useCallback(
-    (
+    async (
       text: string,
       isAnonymous: boolean,
       _topic: any,
       targetUserId?: string,
       revealPolicy?: ConfessionRevealPolicy,
       timedReveal?: TimedRevealOption,
+      _imageUrl?: string,
     ) => {
       const confessionId = `conf_new_${Date.now()}`;
       const newConfession = {
         id: confessionId,
         userId: currentUserId,
         text,
-        isAnonymous: true, // always anonymous on feed
+        isAnonymous,
         mood: 'emotional' as const,
-        reactions: { relatable: 0, feel_you: 0, bold: 0, curious: 0 } as Record<ConfessionReactionType, number>,
+        topEmojis: [],
+        replyPreviews: [],
         targetUserId,
         visibility: 'global' as const,
         replyCount: 0,
@@ -108,9 +196,23 @@ export default function ConfessionsScreen() {
         createdAt: Date.now(),
         revealPolicy: revealPolicy || 'never',
       };
+
       addConfession(newConfession);
 
-      // Set timed reveal if configured
+      if (!isDemoMode) {
+        try {
+          await createConfessionMutation({
+            userId: currentUserId as any,
+            text: text.trim(),
+            isAnonymous,
+            mood: 'emotional' as any,
+            visibility: 'global' as any,
+          });
+        } catch (error: any) {
+          Alert.alert('Error', error.message || 'Failed to post confession');
+        }
+      }
+
       if (timedReveal && timedReveal !== 'never' && targetUserId) {
         setTimedReveal(confessionId, timedReveal, targetUserId);
       }
@@ -130,7 +232,6 @@ export default function ConfessionsScreen() {
 
       setShowCompose(false);
 
-      // Show success toast
       setShowToast(true);
       Animated.sequence([
         Animated.timing(toastOpacity, { toValue: 1, duration: 250, useNativeDriver: true }),
@@ -138,7 +239,7 @@ export default function ConfessionsScreen() {
         Animated.timing(toastOpacity, { toValue: 0, duration: 250, useNativeDriver: true }),
       ]).start(() => setShowToast(false));
     },
-    [currentUserId, addConfession, setTimedReveal, toastOpacity]
+    [currentUserId, addConfession, setTimedReveal, toastOpacity, createConfessionMutation]
   );
 
   const handleOpenThread = useCallback(
@@ -205,11 +306,19 @@ export default function ConfessionsScreen() {
         {
           text: 'Report',
           style: 'destructive',
-          onPress: () => reportConfession(confessionId),
+          onPress: () => {
+            demoReportConfession(confessionId);
+            if (!isDemoMode) {
+              reportConfessionMutation({
+                confessionId: confessionId as any,
+                reporterId: currentUserId as any,
+              }).catch(() => {});
+            }
+          },
         },
       ]);
     },
-    [reportConfession]
+    [demoReportConfession, reportConfessionMutation, currentUserId]
   );
 
   const handleRevealCrush = useCallback(
@@ -225,44 +334,116 @@ export default function ConfessionsScreen() {
     [revealCrush]
   );
 
+  const isLoading = !isDemoMode && convexConfessions === undefined && demoConfessions.length === 0;
+
+  // Trending hero card (first trending confession, shown large)
+  const trendingHero = trendingConfessions.length > 0 ? trendingConfessions[0] : null;
+
+  const renderListHeader = () => (
+    <View>
+      {/* Secret Crushes */}
+      {myCrushes.length > 0 && (
+        <View style={styles.crushSection}>
+          {myCrushes.map((crush) => (
+            <SecretCrushCard
+              key={crush.id}
+              crush={crush}
+              onReveal={() => handleRevealCrush(crush.id)}
+              onDismiss={() => revealCrush(crush.id)}
+            />
+          ))}
+        </View>
+      )}
+
+      {/* Trending Section */}
+      {trendingConfessions.length > 0 && (
+        <View style={styles.trendingSection}>
+          <View style={styles.trendingSectionHeader}>
+            <Ionicons name="flame" size={16} color="#FF6B00" />
+            <Text style={styles.trendingSectionTitle}>Trending</Text>
+          </View>
+
+          {/* Hero card (first trending) */}
+          {trendingHero && (
+            <TouchableOpacity
+              style={styles.trendingHeroCard}
+              onPress={() => handleOpenThread(trendingHero.id)}
+              activeOpacity={0.85}
+            >
+              <Text style={styles.trendingHeroText} numberOfLines={3}>
+                {trendingHero.text}
+              </Text>
+              <View style={styles.trendingHeroMeta}>
+                <View style={styles.trendingHeroStat}>
+                  <Ionicons name="chatbubble-outline" size={12} color={COLORS.white} />
+                  <Text style={styles.trendingHeroStatText}>{trendingHero.replyCount}</Text>
+                </View>
+                <View style={styles.trendingHeroStat}>
+                  <Ionicons name="heart-outline" size={12} color={COLORS.white} />
+                  <Text style={styles.trendingHeroStatText}>{trendingHero.reactionCount}</Text>
+                </View>
+              </View>
+            </TouchableOpacity>
+          )}
+
+          {/* Smaller trending chips */}
+          {trendingConfessions.length > 1 && (
+            <FlatList<any>
+              data={trendingConfessions.slice(1, 5)}
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              keyExtractor={(item) => item.id}
+              contentContainerStyle={styles.trendingChipsContainer}
+              renderItem={({ item }) => (
+                <TouchableOpacity
+                  style={styles.trendingChip}
+                  onPress={() => handleOpenThread(item.id)}
+                  activeOpacity={0.8}
+                >
+                  <Text style={styles.trendingChipText} numberOfLines={2}>
+                    {item.text}
+                  </Text>
+                  <View style={styles.trendingChipMeta}>
+                    <Ionicons name="chatbubble-outline" size={10} color={COLORS.textMuted} />
+                    <Text style={styles.trendingChipCount}>{item.replyCount}</Text>
+                  </View>
+                </TouchableOpacity>
+              )}
+            />
+          )}
+        </View>
+      )}
+    </View>
+  );
+
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
-      {/* Compact header — matches T&D header pattern */}
+      {/* Compact header */}
       <View style={styles.header}>
         <Ionicons name="megaphone" size={16} color={COLORS.primary} />
         <Text style={styles.headerTitle}>Confess</Text>
       </View>
 
-      {/* Single feed — no categories, no filters */}
+      {/* Feed */}
       <FlatList
-        data={sortedConfessions}
+        data={confessions}
         keyExtractor={(item) => item.id}
-        ListHeaderComponent={
-          myCrushes.length > 0 ? (
-            <View style={styles.crushSection}>
-              {myCrushes.map((crush) => (
-                <SecretCrushCard
-                  key={crush.id}
-                  crush={crush}
-                  onReveal={() => handleRevealCrush(crush.id)}
-                  onDismiss={() => revealCrush(crush.id)}
-                />
-              ))}
-            </View>
-          ) : null
-        }
+        ListHeaderComponent={renderListHeader}
         renderItem={({ item }) => (
           <ConfessionCard
             id={item.id}
             text={item.text}
             isAnonymous={item.isAnonymous}
             mood={item.mood}
-            reactions={item.reactions || { relatable: 0, feel_you: 0, bold: 0, curious: 0 }}
-            userReactions={userReactions[item.id] || []}
+            topEmojis={item.topEmojis || []}
+            userEmoji={userReactions[item.id] && isProbablyEmoji(userReactions[item.id]!) ? userReactions[item.id]! : null}
+            replyPreviews={item.replyPreviews || []}
             replyCount={item.replyCount}
+            reactionCount={item.reactionCount}
+            authorName={(item as any).authorName}
             createdAt={item.createdAt}
             onPress={() => handleOpenThread(item.id)}
-            onReact={(type) => handleReact(item.id, type)}
+            onReact={() => handleOpenEmojiPicker(item.id)}
             onReplyAnonymously={() => handleReplyAnonymously(item.id, item.userId)}
             onReport={() => handleReport(item.id)}
           />
@@ -272,6 +453,18 @@ export default function ConfessionsScreen() {
           <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={COLORS.primary} />
         }
         showsVerticalScrollIndicator={false}
+        ListEmptyComponent={
+          isLoading ? null : (
+            <View style={styles.emptyContainer}>
+              <Ionicons name="megaphone-outline" size={56} color={COLORS.textMuted} />
+              <Text style={styles.emptyTitle}>No confessions yet</Text>
+              <Text style={styles.emptySubtitle}>Be the first to share something!</Text>
+              <TouchableOpacity style={styles.emptyButton} onPress={() => setShowCompose(true)}>
+                <Text style={styles.emptyButtonText}>Post a Confession</Text>
+              </TouchableOpacity>
+            </View>
+          )
+        }
       />
 
       {/* Success Toast */}
@@ -290,6 +483,16 @@ export default function ConfessionsScreen() {
       >
         <Ionicons name="add" size={24} color={COLORS.white} />
       </TouchableOpacity>
+
+      {/* Emoji Picker for reactions */}
+      <EmojiPicker
+        onEmojiSelected={handleEmojiSelected}
+        open={showEmojiPicker}
+        onClose={() => {
+          setShowEmojiPicker(false);
+          setEmojiTargetConfessionId(null);
+        }}
+      />
 
       {/* Compose Modal */}
       <ComposeConfessionModal
@@ -313,7 +516,6 @@ export default function ConfessionsScreen() {
         onAgreeReveal={() => {
           if (!activeChatModal) return;
           agreeMutualReveal(activeChatModal.id, currentUserId);
-          // Refresh local modal state from store
           const updated = useConfessionStore.getState().chats.find((c) => c.id === activeChatModal.id);
           if (updated) setActiveChatModal({ ...updated });
         }}
@@ -353,9 +555,117 @@ const styles = StyleSheet.create({
   crushSection: {
     marginBottom: 4,
   },
+  // Trending
+  trendingSection: {
+    marginBottom: 8,
+    paddingTop: 8,
+  },
+  trendingSectionHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 14,
+    marginBottom: 8,
+  },
+  trendingSectionTitle: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: COLORS.text,
+  },
+  trendingHeroCard: {
+    marginHorizontal: 10,
+    borderRadius: 14,
+    padding: 16,
+    backgroundColor: COLORS.primary,
+    marginBottom: 10,
+  },
+  trendingHeroText: {
+    fontSize: 15,
+    fontWeight: '600',
+    lineHeight: 22,
+    color: COLORS.white,
+    marginBottom: 10,
+  },
+  trendingHeroMeta: {
+    flexDirection: 'row',
+    gap: 14,
+  },
+  trendingHeroStat: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  trendingHeroStatText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: COLORS.white,
+    opacity: 0.85,
+  },
+  trendingChipsContainer: {
+    paddingHorizontal: 10,
+    gap: 8,
+  },
+  trendingChip: {
+    width: 160,
+    backgroundColor: COLORS.white,
+    borderRadius: 10,
+    padding: 10,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.04,
+    shadowRadius: 3,
+    elevation: 1,
+  },
+  trendingChipText: {
+    fontSize: 12,
+    fontWeight: '600',
+    lineHeight: 17,
+    color: COLORS.text,
+    marginBottom: 6,
+  },
+  trendingChipMeta: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  trendingChipCount: {
+    fontSize: 11,
+    color: COLORS.textMuted,
+    fontWeight: '500',
+  },
   listContent: {
     paddingTop: 4,
     paddingBottom: 96,
+  },
+  emptyContainer: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 40,
+    marginTop: 80,
+  },
+  emptyTitle: {
+    fontSize: 20,
+    fontWeight: '600',
+    color: COLORS.text,
+    marginTop: 16,
+    marginBottom: 8,
+  },
+  emptySubtitle: {
+    fontSize: 14,
+    color: COLORS.textLight,
+    textAlign: 'center',
+    marginBottom: 20,
+  },
+  emptyButton: {
+    backgroundColor: COLORS.primary,
+    paddingHorizontal: 24,
+    paddingVertical: 12,
+    borderRadius: 24,
+  },
+  emptyButtonText: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: COLORS.white,
   },
   toast: {
     position: 'absolute',

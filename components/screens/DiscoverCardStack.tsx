@@ -14,18 +14,16 @@ import {
   Platform,
   Alert,
 } from "react-native";
-import AsyncStorage from "@react-native-async-storage/async-storage";
 import { useQuery, useMutation } from "convex/react";
 import { api } from "@/convex/_generated/api";
-import { COLORS, INCOGNITO_COLORS, SWIPE_CONFIG, ACTIVITY_FILTERS, MICRO_SURVEY_QUESTIONS } from "@/lib/constants";
-import { computeIntentCompat } from "@/lib/intentCompat";
+import { COLORS, INCOGNITO_COLORS, SWIPE_CONFIG } from "@/lib/constants";
 import { getTrustBadges } from "@/lib/trustBadges";
 import { useAuthStore } from "@/stores/authStore";
+import { useDiscoverStore } from "@/stores/discoverStore";
 import { ProfileCard, SwipeOverlay } from "@/components/cards";
 import { isDemoMode } from "@/hooks/useConvex";
 import { useNotifications } from "@/hooks/useNotifications";
 import { DEMO_PROFILES, DEMO_USER } from "@/lib/demoData";
-import { MicroSurveyModal } from "@/components/discover/MicroSurveyModal";
 import { router } from "expo-router";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
@@ -33,6 +31,7 @@ import { Ionicons } from "@expo/vector-icons";
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get("window");
 
 const HEADER_H = 44;
+const STANDOUT_MAX_CHARS = 120;
 
 interface ProfileData {
   id: string;
@@ -48,6 +47,7 @@ interface ProfileData {
   relationshipIntent?: string[];
   lastActive?: number;
   createdAt?: number;
+  profilePrompts?: { question: string; answer: string }[];
 }
 
 export interface DiscoverCardStackProps {
@@ -62,49 +62,26 @@ export function DiscoverCardStack({ theme = "light" }: DiscoverCardStackProps) {
   const insets = useSafeAreaInsets();
   const { userId } = useAuthStore();
   const [index, setIndex] = useState(0);
-  const lastSwipedProfile = useRef<ProfileData | null>(null);
+
+  // Daily limits store
+  const discoverStore = useDiscoverStore();
+
+  // Reset daily limits if new day
+  useEffect(() => {
+    discoverStore.checkAndResetIfNewDay();
+  }, []);
 
   // Overlay refs + animated value (no React re-renders during drag)
   const overlayDirectionRef = useRef<"left" | "right" | "up" | null>(null);
   const overlayOpacityAnim = useRef(new Animated.Value(0)).current;
   const [overlayDirection, setOverlayDirection] = useState<"left" | "right" | "up" | null>(null);
-  const [showTextModal, setShowTextModal] = useState(false);
-  const [textMessage, setTextMessage] = useState("");
+
+  // Stand Out modal
+  const [showStandOutModal, setShowStandOutModal] = useState(false);
+  const [standOutMessage, setStandOutMessage] = useState("");
 
   // Notifications
   const { unseenCount } = useNotifications();
-
-  // Micro Surveys
-  const [showSurvey, setShowSurvey] = useState(false);
-  const [surveyQuestion, setSurveyQuestion] = useState(MICRO_SURVEY_QUESTIONS[0]);
-  const swipeCountRef = useRef(0);
-  const surveyCheckedRef = useRef(false);
-  const submitSurveyMutation = useMutation(api.surveys.submitSurveyResponse);
-
-  useEffect(() => {
-    AsyncStorage.getItem("mira_session_count").then((val) => {
-      const count = (parseInt(val || "0", 10) || 0) + 1;
-      AsyncStorage.setItem("mira_session_count", String(count));
-    });
-  }, []);
-
-  const checkSurveyEligibility = useCallback(async () => {
-    if (surveyCheckedRef.current) return;
-    const sessionCount = parseInt(await AsyncStorage.getItem("mira_session_count") || "0", 10);
-    if (sessionCount > 0 && sessionCount % 3 === 0) {
-      const questionIdx = (sessionCount / 3 - 1) % MICRO_SURVEY_QUESTIONS.length;
-      setSurveyQuestion(MICRO_SURVEY_QUESTIONS[Math.floor(questionIdx)]);
-      setShowSurvey(true);
-      surveyCheckedRef.current = true;
-    }
-  }, []);
-
-  const handleSurveySubmit = useCallback((questionId: string, questionText: string, response: string) => {
-    setShowSurvey(false);
-    if (!isDemoMode && userId) {
-      submitSurveyMutation({ userId: userId as any, questionId, questionText, response });
-    }
-  }, [userId, submitSurveyMutation]);
 
   // Profile data
   const convexProfiles = useQuery(
@@ -128,6 +105,7 @@ export function DiscoverCardStack({ theme = "light" }: DiscoverCardStackProps) {
         relationshipIntent: p.relationshipIntent,
         lastActive: Date.now() - 2 * 60 * 60 * 1000,
         createdAt: Date.now() - 60 * 24 * 60 * 60 * 1000,
+        profilePrompts: (p as any).profilePrompts,
       }))
     : (convexProfiles || []).map((p: any) => ({
         id: p._id || p.id,
@@ -143,6 +121,7 @@ export function DiscoverCardStack({ theme = "light" }: DiscoverCardStackProps) {
         relationshipIntent: p.relationshipIntent,
         lastActive: p.lastActive,
         createdAt: p.createdAt,
+        profilePrompts: p.profilePrompts,
       }));
 
   // Keep last non-empty profiles to prevent blank-frame flicker
@@ -151,23 +130,6 @@ export function DiscoverCardStack({ theme = "light" }: DiscoverCardStackProps) {
     stableProfilesRef.current = latestProfiles;
   }
   const profiles = latestProfiles.length > 0 ? latestProfiles : stableProfilesRef.current;
-
-  // Shared interests
-  const myActivities: string[] = isDemoMode ? DEMO_USER.activities : [];
-  const getSharedInterestLabels = (profileActivities?: string[]): string[] => {
-    if (!profileActivities || myActivities.length === 0) return [];
-    return profileActivities
-      .filter((a) => myActivities.includes(a))
-      .map((a) => ACTIVITY_FILTERS.find((f) => f.value === a)?.label || a);
-  };
-
-  // Intent compatibility
-  const myIntents: string[] = isDemoMode ? DEMO_USER.relationshipIntent : [];
-  const getIntentProps = (profileIntents?: string[]) => {
-    if (!profileIntents || profileIntents.length === 0) return {};
-    const { compat, theirPrimaryLabel, theirPrimaryEmoji } = computeIntentCompat(myIntents, profileIntents);
-    return { intentLabel: theirPrimaryLabel, intentEmoji: theirPrimaryEmoji, intentCompat: compat };
-  };
 
   // Trust badges
   const getBadges = (p: ProfileData) =>
@@ -180,7 +142,6 @@ export function DiscoverCardStack({ theme = "light" }: DiscoverCardStackProps) {
     });
 
   const swipeMutation = useMutation(api.likes.swipe);
-  const rewindMutation = useMutation(api.likes.rewind);
 
   // Two-pan alternating approach
   const panA = useRef(new Animated.ValueXY()).current;
@@ -238,18 +199,24 @@ export function DiscoverCardStack({ theme = "light" }: DiscoverCardStackProps) {
   }, [panA, panB, overlayOpacityAnim]);
 
   const handleSwipe = useCallback(
-    (direction: "left" | "right" | "up") => {
+    (direction: "left" | "right" | "up", message?: string) => {
       if (!current) return;
       const action = direction === "left" ? "pass" : direction === "up" ? "super_like" : "like";
+
+      // Check daily limits for likes and stand outs
+      if (direction === "right" && discoverStore.hasReachedLikeLimit()) return;
+      if (direction === "up" && discoverStore.hasReachedStandOutLimit()) return;
+
       const swipedProfile = current;
-      lastSwipedProfile.current = swipedProfile;
-      swipeCountRef.current++;
-      if (swipeCountRef.current === 3) checkSurveyEligibility();
       advanceCard();
+
+      // Increment counters
+      if (direction === "right") discoverStore.incrementLikes();
+      if (direction === "up") discoverStore.incrementStandOuts();
 
       if (isDemoMode) {
         if (direction === "right" && Math.random() > 0.7) {
-          Alert.alert("It's a Match!", `You and ${swipedProfile.name} liked each other!`);
+          router.push(`/(main)/match-celebration?matchId=demo_match&userId=${swipedProfile.id}` as any);
         }
         return;
       }
@@ -258,6 +225,7 @@ export function DiscoverCardStack({ theme = "light" }: DiscoverCardStackProps) {
         fromUserId: userId as any,
         toUserId: swipedProfile.id as any,
         action: action as any,
+        message: message,
       }).then((result) => {
         if (result?.isMatch) {
           router.push(`/(main)/match-celebration?matchId=${result.matchId}&userId=${swipedProfile.id}`);
@@ -266,11 +234,15 @@ export function DiscoverCardStack({ theme = "light" }: DiscoverCardStackProps) {
         Alert.alert("Error", error.message || "Failed to swipe");
       });
     },
-    [current, userId, swipeMutation, advanceCard, checkSurveyEligibility],
+    [current, userId, swipeMutation, advanceCard, discoverStore],
   );
 
   const animateSwipe = useCallback(
     (direction: "left" | "right" | "up", velocity?: number) => {
+      // Check limits before animating
+      if (direction === "right" && discoverStore.hasReachedLikeLimit()) return;
+      if (direction === "up" && discoverStore.hasReachedStandOutLimit()) return;
+
       const currentPan = getActivePan();
       const targetX = direction === "left" ? -SCREEN_WIDTH * 1.5 : direction === "right" ? SCREEN_WIDTH * 1.5 : 0;
       const targetY = direction === "up" ? -SCREEN_HEIGHT * 1.5 : 0;
@@ -288,7 +260,7 @@ export function DiscoverCardStack({ theme = "light" }: DiscoverCardStackProps) {
         handleSwipe(direction);
       });
     },
-    [handleSwipe, panA, panB, overlayOpacityAnim],
+    [handleSwipe, panA, panB, overlayOpacityAnim, discoverStore],
   );
 
   const thresholdX = SCREEN_WIDTH * SWIPE_CONFIG.SWIPE_THRESHOLD_X;
@@ -316,63 +288,40 @@ export function DiscoverCardStack({ theme = "light" }: DiscoverCardStackProps) {
         onPanResponderRelease: (_, gs) => {
           if (gs.dx < -thresholdX || gs.vx < -velocityX) { animateSwipe("left", gs.vx); return; }
           if (gs.dx > thresholdX  || gs.vx > velocityX)  { animateSwipe("right", gs.vx); return; }
-          if (gs.dy < -thresholdY || gs.vy < -velocityY)  { animateSwipe("up", gs.vy); return; }
+          if (gs.dy < -thresholdY || gs.vy < -velocityY)  {
+            // Up swipe triggers Stand Out modal instead of instant swipe
+            resetPosition();
+            if (!discoverStore.hasReachedStandOutLimit()) {
+              setShowStandOutModal(true);
+            }
+            return;
+          }
           resetPosition();
         },
         onPanResponderTerminate: () => resetPosition(),
       }),
-    [animateSwipe, panA, panB, overlayOpacityAnim, resetPosition, thresholdX, thresholdY, velocityX, velocityY],
+    [animateSwipe, panA, panB, overlayOpacityAnim, resetPosition, thresholdX, thresholdY, velocityX, velocityY, discoverStore],
   );
 
-  const rewindCard = useCallback(() => {
-    if (index <= 0) return;
-    const newSlot: 0 | 1 = activeSlotRef.current === 0 ? 1 : 0;
-    activeSlotRef.current = newSlot;
-    const newPan = newSlot === 0 ? panA : panB;
-    newPan.setValue({ x: 0, y: 0 });
-    overlayOpacityAnim.setValue(0);
-    overlayDirectionRef.current = null;
-    setOverlayDirection(null);
-    setActiveSlot(newSlot);
-    setIndex((prev) => prev - 1);
-    const oldPan = newSlot === 0 ? panB : panA;
-    requestAnimationFrame(() => oldPan.setValue({ x: 0, y: 0 }));
-    lastSwipedProfile.current = null;
-  }, [index, panA, panB, overlayOpacityAnim]);
+  // Stand Out send handler
+  const handleSendStandOut = useCallback(() => {
+    if (!current) return;
+    const msg = standOutMessage.trim();
+    setShowStandOutModal(false);
+    setStandOutMessage("");
 
-  const handleRewind = useCallback(async () => {
-    if (!lastSwipedProfile.current) { Alert.alert("Rewind", "No recent swipe to undo"); return; }
-    if (isDemoMode) { rewindCard(); return; }
-    try {
-      await rewindMutation({ userId: userId as any });
-      rewindCard();
-    } catch (error: any) {
-      Alert.alert("Error", error.message || "Failed to rewind");
-    }
-  }, [userId, rewindMutation, rewindCard]);
+    // Animate the card out (up direction)
+    const currentPan = getActivePan();
+    const targetY = -SCREEN_HEIGHT * 1.5;
 
-  const handleSendText = useCallback(() => {
-    if (!current || !textMessage.trim()) return;
-    const sentTo = current;
-    lastSwipedProfile.current = sentTo;
-    setShowTextModal(false);
-    setTextMessage("");
-    advanceCard();
-    if (isDemoMode) {
-      Alert.alert("Message Sent", `Your message to ${sentTo.name} has been sent!`);
-      return;
-    }
-    swipeMutation({
-      fromUserId: userId as any,
-      toUserId: sentTo.id as any,
-      action: "text" as any,
-      message: textMessage.trim(),
-    }).then(() => {
-      Alert.alert("Message Sent", `Your message to ${sentTo.name} has been sent!`);
-    }).catch((error: any) => {
-      Alert.alert("Error", error.message || "Failed to send message");
+    setOverlayDirection("up");
+    overlayOpacityAnim.setValue(1);
+
+    Animated.timing(currentPan.y, { toValue: targetY, duration: 250, useNativeDriver: true }).start(({ finished }) => {
+      if (!finished) return;
+      handleSwipe("up", msg || undefined);
     });
-  }, [current, textMessage, userId, swipeMutation, advanceCard]);
+  }, [current, standOutMessage, handleSwipe, overlayOpacityAnim]);
 
   // Loading state
   if (!isDemoMode && !convexProfiles) {
@@ -395,10 +344,44 @@ export function DiscoverCardStack({ theme = "light" }: DiscoverCardStackProps) {
     );
   }
 
+  // Daily like limit reached state
+  if (discoverStore.hasReachedLikeLimit()) {
+    return (
+      <View style={[styles.container, dark && { backgroundColor: INCOGNITO_COLORS.background }]}>
+        {/* Header */}
+        <View style={[styles.header, { paddingTop: insets.top, height: insets.top + HEADER_H }, dark && { backgroundColor: INCOGNITO_COLORS.background }]}>
+          <TouchableOpacity style={styles.headerBtn} onPress={() => router.push("/(main)/settings" as any)}>
+            <Ionicons name="options-outline" size={22} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
+          </TouchableOpacity>
+          <Text style={[styles.headerLogo, dark && { color: INCOGNITO_COLORS.primary }]}>mira</Text>
+          <TouchableOpacity style={styles.headerBtn} onPress={() => router.push("/(main)/likes" as any)}>
+            <Ionicons name="heart" size={22} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
+          </TouchableOpacity>
+        </View>
+
+        <View style={styles.limitContainer}>
+          <Ionicons name="heart-circle-outline" size={80} color={COLORS.primary} />
+          <Text style={[styles.limitTitle, dark && { color: INCOGNITO_COLORS.text }]}>You've used today's likes!</Text>
+          <Text style={[styles.limitSubtitle, dark && { color: INCOGNITO_COLORS.textLight }]}>Likes refresh at midnight</Text>
+          <TouchableOpacity
+            style={styles.limitButton}
+            onPress={() => router.push("/(main)/likes" as any)}
+          >
+            <Ionicons name="heart" size={18} color={COLORS.white} />
+            <Text style={styles.limitButtonText}>Check who liked you</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+    );
+  }
+
   // Layout: card fills from header to bottom of content area
   const cardTop = insets.top + HEADER_H;
   const cardBottom = 4;
   const actionRowBottom = 16;
+
+  const likesLeft = discoverStore.likesRemaining();
+  const standOutsLeft = discoverStore.standOutsRemaining();
 
   return (
     <View style={[styles.container, dark && { backgroundColor: INCOGNITO_COLORS.background }]}>
@@ -408,8 +391,8 @@ export function DiscoverCardStack({ theme = "light" }: DiscoverCardStackProps) {
           <Ionicons name="options-outline" size={22} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
         </TouchableOpacity>
         <Text style={[styles.headerLogo, dark && { color: INCOGNITO_COLORS.primary }]}>mira</Text>
-        <TouchableOpacity style={styles.headerBtn} onPress={() => router.push("/(main)/notifications" as any)}>
-          <Ionicons name="notifications-outline" size={22} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
+        <TouchableOpacity style={styles.headerBtn} onPress={() => router.push("/(main)/likes" as any)}>
+          <Ionicons name="heart" size={22} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
           {unseenCount > 0 && (
             <View style={styles.bellBadge}>
               <Text style={styles.bellBadgeText}>{unseenCount > 9 ? "9+" : unseenCount}</Text>
@@ -428,14 +411,12 @@ export function DiscoverCardStack({ theme = "light" }: DiscoverCardStackProps) {
             <ProfileCard
               name={next.name}
               age={next.age}
-              bio={next.bio}
               city={next.city}
               isVerified={next.isVerified}
               distance={next.distance}
               photos={next.photos}
-              sharedInterests={getSharedInterestLabels(next.activities)}
-              {...getIntentProps(next.relationshipIntent)}
               trustBadges={getBadges(next)}
+              profilePrompt={next.profilePrompts?.[0]}
             />
           </Animated.View>
         )}
@@ -445,14 +426,12 @@ export function DiscoverCardStack({ theme = "light" }: DiscoverCardStackProps) {
             <ProfileCard
               name={current.name}
               age={current.age}
-              bio={current.bio}
               city={current.city}
               isVerified={current.isVerified}
               distance={current.distance}
               photos={current.photos}
-              sharedInterests={getSharedInterestLabels(current.activities)}
-              {...getIntentProps(current.relationshipIntent)}
               trustBadges={getBadges(current)}
+              profilePrompt={current.profilePrompts?.[0]}
               showCarousel
               onOpenProfile={() => router.push(`/profile/${current.id}` as any)}
             />
@@ -461,62 +440,76 @@ export function DiscoverCardStack({ theme = "light" }: DiscoverCardStackProps) {
         )}
       </View>
 
-      {/* Action Buttons (overlaid on bottom of card, above tab bar) */}
+      {/* 3-Button Action Bar */}
       <View style={[styles.actions, { bottom: actionRowBottom }]} pointerEvents="box-none">
-        <TouchableOpacity style={[styles.actionButton, styles.smallBtn]} onPress={handleRewind}>
-          <Ionicons name="arrow-undo" size={24} color="#FF9800" />
+        {/* Skip (X) */}
+        <TouchableOpacity
+          style={[styles.actionButton, styles.skipBtn]}
+          onPress={() => animateSwipe("left")}
+        >
+          <Ionicons name="close" size={30} color="#F44336" />
         </TouchableOpacity>
-        <TouchableOpacity style={[styles.actionButton, styles.bigBtn]} onPress={() => animateSwipe("left")}>
-          <Ionicons name="close" size={34} color="#F44336" />
+
+        {/* Stand Out (star) */}
+        <TouchableOpacity
+          style={[
+            styles.actionButton,
+            styles.standOutBtn,
+            discoverStore.hasReachedStandOutLimit() && styles.actionBtnDisabled,
+          ]}
+          onPress={() => {
+            if (!discoverStore.hasReachedStandOutLimit()) {
+              setShowStandOutModal(true);
+            }
+          }}
+          disabled={discoverStore.hasReachedStandOutLimit()}
+        >
+          <Ionicons name="star" size={24} color={COLORS.white} />
+          <View style={styles.standOutBadge}>
+            <Text style={styles.standOutBadgeText}>{standOutsLeft}</Text>
+          </View>
         </TouchableOpacity>
-        <TouchableOpacity style={[styles.actionButton, styles.medBtn]} onPress={() => animateSwipe("up")}>
-          <Ionicons name="star" size={26} color="#2196F3" />
-        </TouchableOpacity>
-        <TouchableOpacity style={[styles.actionButton, styles.bigBtn]} onPress={() => animateSwipe("right")}>
-          <Ionicons name="heart" size={34} color="#4CAF50" />
-        </TouchableOpacity>
-        <TouchableOpacity style={[styles.actionButton, styles.smallBtn]} onPress={() => setShowTextModal(true)}>
-          <Ionicons name="chatbubble" size={22} color="#9C27B0" />
+
+        {/* Like (heart) */}
+        <TouchableOpacity
+          style={[styles.actionButton, styles.likeBtn]}
+          onPress={() => animateSwipe("right")}
+        >
+          <Ionicons name="heart" size={30} color={COLORS.white} />
         </TouchableOpacity>
       </View>
 
-      {/* Micro Survey Modal */}
-      <MicroSurveyModal
-        visible={showSurvey}
-        question={surveyQuestion}
-        onSubmit={handleSurveySubmit}
-        onCancel={() => setShowSurvey(false)}
-      />
-
-      {/* Text Message Modal */}
-      <Modal visible={showTextModal} transparent animationType="slide" onRequestClose={() => setShowTextModal(false)}>
+      {/* Stand Out Modal */}
+      <Modal visible={showStandOutModal} transparent animationType="slide" onRequestClose={() => setShowStandOutModal(false)}>
         <KeyboardAvoidingView style={styles.modalOverlay} behavior={Platform.OS === "ios" ? "padding" : "height"}>
           <View style={styles.modalBox}>
             <View style={styles.modalHeader}>
-              <Text style={styles.modalTitle}>Send a message to {current?.name}</Text>
-              <TouchableOpacity onPress={() => { setShowTextModal(false); setTextMessage(""); }}>
+              <View style={{ flex: 1 }}>
+                <Text style={styles.modalTitle}>Stand Out to {current?.name}</Text>
+                <Text style={styles.modalRemaining}>{standOutsLeft} Stand Out{standOutsLeft !== 1 ? "s" : ""} left today</Text>
+              </View>
+              <TouchableOpacity onPress={() => { setShowStandOutModal(false); setStandOutMessage(""); }}>
                 <Text style={styles.modalClose}>✕</Text>
               </TouchableOpacity>
             </View>
-            <Text style={styles.modalSubtitle}>Write a message to express your interest.</Text>
+            <Text style={styles.modalSubtitle}>Add a short message to get noticed.</Text>
             <TextInput
               style={styles.modalInput}
-              placeholder="Type your message..."
+              placeholder="Write something memorable..."
               placeholderTextColor={COLORS.textMuted}
-              value={textMessage}
-              onChangeText={setTextMessage}
-              multiline
-              maxLength={300}
+              value={standOutMessage}
+              onChangeText={setStandOutMessage}
+              maxLength={STANDOUT_MAX_CHARS}
               autoFocus
             />
             <View style={styles.modalFooter}>
-              <Text style={styles.modalCharCount}>{textMessage.length}/300</Text>
+              <Text style={styles.modalCharCount}>{standOutMessage.length}/{STANDOUT_MAX_CHARS}</Text>
               <TouchableOpacity
-                style={[styles.modalSend, !textMessage.trim() && styles.modalSendDisabled]}
-                onPress={handleSendText}
-                disabled={!textMessage.trim()}
+                style={styles.modalSend}
+                onPress={handleSendStandOut}
               >
-                <Text style={styles.modalSendText}>Send</Text>
+                <Ionicons name="star" size={16} color={COLORS.white} style={{ marginRight: 6 }} />
+                <Text style={styles.modalSendText}>Send Stand Out</Text>
               </TouchableOpacity>
             </View>
           </View>
@@ -606,7 +599,7 @@ const styles = StyleSheet.create({
     overflow: "hidden",
   },
 
-  // Action Buttons
+  // 3-Button Action Bar
   actions: {
     position: "absolute",
     left: 0,
@@ -614,36 +607,96 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     justifyContent: "center",
     alignItems: "center",
-    gap: 14,
+    gap: 20,
     zIndex: 50,
   },
   actionButton: {
     alignItems: "center",
     justifyContent: "center",
-    backgroundColor: "rgba(255,255,255,0.95)",
     shadowColor: "#000",
     shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.15,
     shadowRadius: 6,
     elevation: 4,
   },
-  smallBtn: {
-    width: 48,
-    height: 48,
-    borderRadius: 24,
+  skipBtn: {
+    width: 56,
+    height: 56,
+    borderRadius: 28,
+    backgroundColor: "rgba(255,255,255,0.95)",
   },
-  medBtn: {
+  standOutBtn: {
     width: 54,
     height: 54,
     borderRadius: 27,
+    backgroundColor: "#2196F3",
+    position: "relative",
   },
-  bigBtn: {
-    width: 64,
-    height: 64,
-    borderRadius: 32,
+  likeBtn: {
+    width: 56,
+    height: 56,
+    borderRadius: 28,
+    backgroundColor: COLORS.primary,
+  },
+  actionBtnDisabled: {
+    opacity: 0.4,
+  },
+  standOutBadge: {
+    position: "absolute",
+    top: -4,
+    right: -4,
+    minWidth: 20,
+    height: 20,
+    borderRadius: 10,
+    backgroundColor: COLORS.white,
+    alignItems: "center",
+    justifyContent: "center",
+    borderWidth: 1.5,
+    borderColor: "#2196F3",
+  },
+  standOutBadgeText: {
+    fontSize: 11,
+    fontWeight: "700",
+    color: "#2196F3",
   },
 
-  // Modal
+  // Daily limit reached
+  limitContainer: {
+    flex: 1,
+    alignItems: "center",
+    justifyContent: "center",
+    padding: 32,
+  },
+  limitTitle: {
+    fontSize: 22,
+    fontWeight: "700",
+    color: COLORS.text,
+    marginTop: 16,
+    marginBottom: 8,
+    textAlign: "center",
+  },
+  limitSubtitle: {
+    fontSize: 15,
+    color: COLORS.textLight,
+    marginBottom: 24,
+    textAlign: "center",
+  },
+  limitButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    backgroundColor: COLORS.primary,
+    paddingHorizontal: 24,
+    paddingVertical: 14,
+    borderRadius: 28,
+  },
+  limitButtonText: {
+    fontSize: 16,
+    fontWeight: "600",
+    color: COLORS.white,
+  },
+
+  // Stand Out Modal
   modalOverlay: { flex: 1, justifyContent: "flex-end", backgroundColor: COLORS.overlay },
   modalBox: {
     backgroundColor: COLORS.background,
@@ -655,10 +708,11 @@ const styles = StyleSheet.create({
   modalHeader: {
     flexDirection: "row",
     justifyContent: "space-between",
-    alignItems: "center",
+    alignItems: "flex-start",
     marginBottom: 8,
   },
-  modalTitle: { fontSize: 18, fontWeight: "700", color: COLORS.text, flex: 1 },
+  modalTitle: { fontSize: 18, fontWeight: "700", color: COLORS.text },
+  modalRemaining: { fontSize: 13, color: "#2196F3", fontWeight: "600", marginTop: 2 },
   modalClose: { fontSize: 20, color: COLORS.textLight, padding: 4 },
   modalSubtitle: { fontSize: 14, color: COLORS.textLight, marginBottom: 16 },
   modalInput: {
@@ -668,13 +722,19 @@ const styles = StyleSheet.create({
     padding: 14,
     fontSize: 16,
     color: COLORS.text,
-    minHeight: 100,
+    minHeight: 60,
     textAlignVertical: "top",
     marginBottom: 12,
   },
   modalFooter: { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
   modalCharCount: { fontSize: 13, color: COLORS.textMuted },
-  modalSend: { backgroundColor: COLORS.primary, paddingHorizontal: 28, paddingVertical: 12, borderRadius: 24 },
-  modalSendDisabled: { opacity: 0.5 },
+  modalSend: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: "#2196F3",
+    paddingHorizontal: 20,
+    paddingVertical: 12,
+    borderRadius: 24,
+  },
   modalSendText: { color: COLORS.white, fontSize: 16, fontWeight: "600" },
 });

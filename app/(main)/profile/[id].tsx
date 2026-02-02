@@ -215,7 +215,7 @@ export default function ViewProfileScreen() {
 
         {profile.profilePrompts && profile.profilePrompts.length > 0 && (
           <View style={styles.section}>
-            {profile.profilePrompts.map((prompt: { question: string; answer: string }, idx: number) => (
+            {profile.profilePrompts.slice(0, 3).map((prompt: { question: string; answer: string }, idx: number) => (
               <View key={idx} style={styles.promptCard}>
                 <Text style={styles.promptQuestion}>{prompt.question}</Text>
                 <Text style={styles.promptAnswer}>{prompt.answer}</Text>

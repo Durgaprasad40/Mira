@@ -30,8 +30,8 @@ export function SwipeOverlay({ direction, opacity }: SwipeOverlayProps) {
       case 'up':
         return {
           icon: 'star' as const,
-          color: COLORS.warning,
-          text: 'SUPER LIKE',
+          color: '#2196F3',
+          text: 'STAND OUT',
         };
       default:
         return null;

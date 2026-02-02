@@ -13,6 +13,7 @@ export default function OnboardingLayout() {
       <Stack.Screen name="face-verification" />
       <Stack.Screen name="additional-photos" />
       <Stack.Screen name="bio" />
+      <Stack.Screen name="prompts" />
       <Stack.Screen name="profile-details" />
       <Stack.Screen name="preferences" />
       <Stack.Screen name="permissions" />

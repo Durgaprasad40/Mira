@@ -608,8 +608,12 @@ export default defineSchema({
     isAnonymous: v.boolean(),
     mood: v.union(v.literal('romantic'), v.literal('spicy'), v.literal('emotional'), v.literal('funny')),
     visibility: v.literal('global'),
+    imageUrl: v.optional(v.string()),
+    authorName: v.optional(v.string()),
+    authorPhotoUrl: v.optional(v.string()),
     replyCount: v.number(),
     reactionCount: v.number(),
+    voiceReplyCount: v.optional(v.number()),
     createdAt: v.number(),
   })
     .index('by_created', ['createdAt'])
@@ -621,21 +625,34 @@ export default defineSchema({
     userId: v.id('users'),
     text: v.string(),
     isAnonymous: v.boolean(),
+    type: v.optional(v.union(v.literal('text'), v.literal('voice'))),
+    voiceUrl: v.optional(v.string()),
+    voiceDurationSec: v.optional(v.number()),
     createdAt: v.number(),
   })
     .index('by_confession', ['confessionId'])
     .index('by_user', ['userId']),
 
-  // Confession Reactions table
+  // Confession Reactions table (free emoji — one emoji per user per confession)
   confessionReactions: defineTable({
     confessionId: v.id('confessions'),
     userId: v.id('users'),
-    type: v.literal('heart'),
+    type: v.string(), // any emoji string
     createdAt: v.number(),
   })
     .index('by_confession', ['confessionId'])
     .index('by_user', ['userId'])
     .index('by_confession_user', ['confessionId', 'userId']),
+
+  // Confession Reports table
+  confessionReports: defineTable({
+    confessionId: v.id('confessions'),
+    reporterId: v.id('users'),
+    reason: v.optional(v.string()),
+    createdAt: v.number(),
+  })
+    .index('by_confession', ['confessionId'])
+    .index('by_reporter', ['reporterId']),
 
   // Chat Rooms table (group chat rooms in Private section)
   chatRooms: defineTable({

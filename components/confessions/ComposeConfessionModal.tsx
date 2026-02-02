@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
 import {
   View,
   Text,
@@ -10,8 +10,10 @@ import {
   Platform,
   Switch,
   Alert,
+  ScrollView,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import EmojiPicker from 'rn-emoji-keyboard';
 import { COLORS } from '@/lib/constants';
 import { ConfessionTopic, ConfessionRevealPolicy, TimedRevealOption } from '@/types';
 import { isContentClean } from '@/lib/contentFilter';
@@ -27,6 +29,7 @@ interface ComposeConfessionModalProps {
     targetUserId?: string,
     revealPolicy?: ConfessionRevealPolicy,
     timedReveal?: TimedRevealOption,
+    imageUrl?: string,
   ) => void;
 }
 
@@ -42,19 +45,21 @@ export default function ComposeConfessionModal({
   onSubmit,
 }: ComposeConfessionModalProps) {
   const [text, setText] = useState('');
+  const [isAnonymous, setIsAnonymous] = useState(true);
   const [confessToSomeone, setConfessToSomeone] = useState(false);
   const [targetUserId, setTargetUserId] = useState<string | undefined>();
   const [targetName, setTargetName] = useState<string | undefined>();
   const [showPersonPicker, setShowPersonPicker] = useState(false);
   const [revealPolicy, setRevealPolicy] = useState<ConfessionRevealPolicy>('never');
   const [timedReveal, setTimedReveal] = useState<TimedRevealOption>('never');
+  const [showEmojiPicker, setShowEmojiPicker] = useState(false);
+  const inputRef = useRef<TextInput>(null);
 
   const canSubmit = text.trim().length >= 10;
 
   const handleSubmit = () => {
     if (!canSubmit) return;
     const trimmed = text.trim();
-    // Block phone numbers and emails
     const phonePattern = /\b\d{10,}\b|\b\d{3}[-.\s]?\d{3}[-.\s]?\d{4}\b/;
     const emailPattern = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/;
     if (phonePattern.test(trimmed) || emailPattern.test(trimmed)) {
@@ -67,13 +72,15 @@ export default function ComposeConfessionModal({
     }
     onSubmit(
       text.trim(),
-      true, // always anonymous on the feed
+      isAnonymous,
       'crush',
       confessToSomeone ? targetUserId : undefined,
       revealPolicy,
       confessToSomeone ? timedReveal : 'never',
+      undefined, // no imageUrl — removed camera/gallery
     );
     setText('');
+    setIsAnonymous(true);
     setConfessToSomeone(false);
     setTargetUserId(undefined);
     setTargetName(undefined);
@@ -85,6 +92,10 @@ export default function ComposeConfessionModal({
     setTargetUserId(userId);
     setTargetName(name);
     setShowPersonPicker(false);
+  };
+
+  const handleEmojiSelected = (emoji: any) => {
+    setText((prev) => prev + emoji.emoji);
   };
 
   return (
@@ -115,123 +126,171 @@ export default function ComposeConfessionModal({
           </TouchableOpacity>
         </View>
 
-        {/* Safety text */}
-        <View style={styles.safetyBanner}>
-          <Ionicons name="shield-checkmark" size={14} color={COLORS.primary} />
-          <Text style={styles.safetyText}>Don't include phone numbers or personal details.</Text>
-        </View>
-
-        {/* Text Input */}
-        <TextInput
-          style={styles.textInput}
-          placeholder="What's on your mind? Share your confession..."
-          placeholderTextColor={COLORS.textMuted}
-          multiline
-          maxLength={500}
-          value={text}
-          onChangeText={setText}
-          autoFocus
-          textAlignVertical="top"
-        />
-        <Text style={styles.charCount}>{text.length}/500</Text>
-
-        {/* Confess to Someone Toggle */}
-        <View style={styles.toggleRow}>
-          <View style={styles.toggleInfo}>
-            <Ionicons
-              name="heart"
-              size={20}
-              color={confessToSomeone ? COLORS.primary : COLORS.textMuted}
-            />
-            <View>
-              <Text style={styles.toggleLabel}>Confess to Someone</Text>
-              <Text style={styles.toggleDesc}>
-                {confessToSomeone
-                  ? targetName
-                    ? `Sending to ${targetName}`
-                    : 'Tap to pick a person'
-                  : 'Send a secret confession to someone'}
-              </Text>
-            </View>
+        <ScrollView
+          style={styles.scrollBody}
+          contentContainerStyle={styles.scrollContent}
+          keyboardShouldPersistTaps="handled"
+          showsVerticalScrollIndicator={false}
+        >
+          {/* Safety text */}
+          <View style={styles.safetyBanner}>
+            <Ionicons name="shield-checkmark" size={14} color={COLORS.primary} />
+            <Text style={styles.safetyText}>Don't include phone numbers or personal details.</Text>
           </View>
-          <Switch
-            value={confessToSomeone}
-            onValueChange={(val) => {
-              setConfessToSomeone(val);
-              if (val && !targetUserId) {
-                setShowPersonPicker(true);
-              }
-            }}
-            trackColor={{ false: COLORS.border, true: COLORS.primaryLight }}
-            thumbColor={confessToSomeone ? COLORS.primary : '#f4f3f4'}
+
+          {/* Text Input */}
+          <TextInput
+            ref={inputRef}
+            style={styles.textInput}
+            placeholder="What's on your mind? Share your confession..."
+            placeholderTextColor={COLORS.textMuted}
+            multiline
+            maxLength={500}
+            value={text}
+            onChangeText={setText}
+            autoFocus
+            textAlignVertical="top"
           />
-        </View>
 
-        {confessToSomeone && (
-          <TouchableOpacity
-            style={styles.pickPersonButton}
-            onPress={() => setShowPersonPicker(true)}
-          >
-            <Text style={styles.pickPersonText}>
-              {targetName ? `Change person (${targetName})` : 'Pick a person'}
-            </Text>
-            <Ionicons name="chevron-forward" size={16} color={COLORS.primary} />
-          </TouchableOpacity>
-        )}
-
-        {/* Reveal Policy */}
-        <View style={styles.toggleRow}>
-          <View style={styles.toggleInfo}>
-            <Ionicons
-              name={revealPolicy === 'allow_later' ? 'eye' : 'eye-off'}
-              size={20}
-              color={revealPolicy === 'allow_later' ? COLORS.primary : COLORS.textMuted}
-            />
-            <View>
-              <Text style={styles.toggleLabel}>Allow Reveal Later</Text>
-              <Text style={styles.toggleDesc}>
-                {revealPolicy === 'allow_later'
-                  ? 'You can reveal your identity in chat'
-                  : 'Identity stays hidden forever'}
-              </Text>
-            </View>
+          {/* Toolbar row: emoji + char count (no camera/gallery) */}
+          <View style={styles.toolbarRow}>
+            <TouchableOpacity onPress={() => setShowEmojiPicker(true)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+              <Ionicons name="happy-outline" size={22} color={COLORS.textMuted} />
+            </TouchableOpacity>
+            <View style={{ flex: 1 }} />
+            <Text style={styles.charCount}>{text.length}/500</Text>
           </View>
-          <Switch
-            value={revealPolicy === 'allow_later'}
-            onValueChange={(val) => setRevealPolicy(val ? 'allow_later' : 'never')}
-            trackColor={{ false: COLORS.border, true: COLORS.primaryLight }}
-            thumbColor={revealPolicy === 'allow_later' ? COLORS.primary : '#f4f3f4'}
-          />
-        </View>
 
-        {/* Timed Reveal — only when confessing to someone */}
-        {confessToSomeone && revealPolicy === 'allow_later' && (
-          <View style={styles.timedSection}>
-            <Text style={styles.timedLabel}>Auto-reveal identity after:</Text>
-            <View style={styles.timedRow}>
-              {TIMED_OPTIONS.map((opt) => (
-                <TouchableOpacity
-                  key={opt.value}
-                  style={[
-                    styles.timedChip,
-                    timedReveal === opt.value && styles.timedChipActive,
-                  ]}
-                  onPress={() => setTimedReveal(opt.value)}
-                >
-                  <Text
+          {/* Anonymous / Open Toggle */}
+          <View style={styles.toggleRow}>
+            <View style={styles.toggleInfo}>
+              <Ionicons
+                name={isAnonymous ? 'eye-off' : 'person'}
+                size={20}
+                color={isAnonymous ? COLORS.textMuted : COLORS.primary}
+              />
+              <View>
+                <Text style={styles.toggleLabel}>{isAnonymous ? 'Anonymous' : 'Open'}</Text>
+                <Text style={styles.toggleDesc}>
+                  {isAnonymous
+                    ? 'Your identity is hidden'
+                    : 'Your name will be shown'}
+                </Text>
+              </View>
+            </View>
+            <Switch
+              value={!isAnonymous}
+              onValueChange={(val) => setIsAnonymous(!val)}
+              trackColor={{ false: COLORS.border, true: COLORS.primaryLight }}
+              thumbColor={!isAnonymous ? COLORS.primary : '#f4f3f4'}
+            />
+          </View>
+
+          {/* Confess to Someone Toggle */}
+          <View style={styles.toggleRow}>
+            <View style={styles.toggleInfo}>
+              <Ionicons
+                name="heart"
+                size={20}
+                color={confessToSomeone ? COLORS.primary : COLORS.textMuted}
+              />
+              <View>
+                <Text style={styles.toggleLabel}>Confess to Someone</Text>
+                <Text style={styles.toggleDesc}>
+                  {confessToSomeone
+                    ? targetName
+                      ? `Sending to ${targetName}`
+                      : 'Tap to pick a person'
+                    : 'Send a secret confession to someone'}
+                </Text>
+              </View>
+            </View>
+            <Switch
+              value={confessToSomeone}
+              onValueChange={(val) => {
+                setConfessToSomeone(val);
+                if (val && !targetUserId) {
+                  setShowPersonPicker(true);
+                }
+              }}
+              trackColor={{ false: COLORS.border, true: COLORS.primaryLight }}
+              thumbColor={confessToSomeone ? COLORS.primary : '#f4f3f4'}
+            />
+          </View>
+
+          {confessToSomeone && (
+            <TouchableOpacity
+              style={styles.pickPersonButton}
+              onPress={() => setShowPersonPicker(true)}
+            >
+              <Text style={styles.pickPersonText}>
+                {targetName ? `Change person (${targetName})` : 'Pick a person'}
+              </Text>
+              <Ionicons name="chevron-forward" size={16} color={COLORS.primary} />
+            </TouchableOpacity>
+          )}
+
+          {/* Reveal Policy */}
+          <View style={styles.toggleRow}>
+            <View style={styles.toggleInfo}>
+              <Ionicons
+                name={revealPolicy === 'allow_later' ? 'eye' : 'eye-off'}
+                size={20}
+                color={revealPolicy === 'allow_later' ? COLORS.primary : COLORS.textMuted}
+              />
+              <View>
+                <Text style={styles.toggleLabel}>Allow Reveal Later</Text>
+                <Text style={styles.toggleDesc}>
+                  {revealPolicy === 'allow_later'
+                    ? 'You can reveal your identity in chat'
+                    : 'Identity stays hidden forever'}
+                </Text>
+              </View>
+            </View>
+            <Switch
+              value={revealPolicy === 'allow_later'}
+              onValueChange={(val) => setRevealPolicy(val ? 'allow_later' : 'never')}
+              trackColor={{ false: COLORS.border, true: COLORS.primaryLight }}
+              thumbColor={revealPolicy === 'allow_later' ? COLORS.primary : '#f4f3f4'}
+            />
+          </View>
+
+          {/* Timed Reveal */}
+          {confessToSomeone && revealPolicy === 'allow_later' && (
+            <View style={styles.timedSection}>
+              <Text style={styles.timedLabel}>Auto-reveal identity after:</Text>
+              <View style={styles.timedRow}>
+                {TIMED_OPTIONS.map((opt) => (
+                  <TouchableOpacity
+                    key={opt.value}
                     style={[
-                      styles.timedChipText,
-                      timedReveal === opt.value && styles.timedChipTextActive,
+                      styles.timedChip,
+                      timedReveal === opt.value && styles.timedChipActive,
                     ]}
+                    onPress={() => setTimedReveal(opt.value)}
                   >
-                    {opt.label}
-                  </Text>
-                </TouchableOpacity>
-              ))}
+                    <Text
+                      style={[
+                        styles.timedChipText,
+                        timedReveal === opt.value && styles.timedChipTextActive,
+                      ]}
+                    >
+                      {opt.label}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
             </View>
-          </View>
-        )}
+          )}
+        </ScrollView>
       </KeyboardAvoidingView>
+
+      {/* Emoji Picker */}
+      <EmojiPicker
+        onEmojiSelected={handleEmojiSelected}
+        open={showEmojiPicker}
+        onClose={() => setShowEmojiPicker(false)}
+      />
 
       <PersonPicker
         visible={showPersonPicker}
@@ -279,6 +338,12 @@ const styles = StyleSheet.create({
   submitTextDisabled: {
     color: COLORS.textMuted,
   },
+  scrollBody: {
+    flex: 1,
+  },
+  scrollContent: {
+    paddingBottom: 40,
+  },
   safetyBanner: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -293,20 +358,26 @@ const styles = StyleSheet.create({
     fontWeight: '500',
   },
   textInput: {
-    flex: 1,
     fontSize: 16,
     lineHeight: 24,
     color: COLORS.text,
     paddingHorizontal: 16,
     paddingTop: 16,
-    maxHeight: 200,
+    minHeight: 120,
+    maxHeight: 220,
+  },
+  toolbarRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 16,
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: COLORS.border,
   },
   charCount: {
-    textAlign: 'right',
-    paddingHorizontal: 16,
     fontSize: 12,
     color: COLORS.textMuted,
-    marginBottom: 8,
   },
   toggleRow: {
     flexDirection: 'row',
@@ -321,6 +392,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 12,
+    flex: 1,
   },
   toggleLabel: {
     fontSize: 15,

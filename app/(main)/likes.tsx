@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React from 'react';
 import {
   View,
   Text,
@@ -7,39 +7,36 @@ import {
   TouchableOpacity,
   Image,
   Dimensions,
+  Alert,
 } from 'react-native';
 import { useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { useQuery } from 'convex/react';
+import { useQuery, useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
-import { Avatar, Badge } from '@/components/ui';
 import { useAuthStore } from '@/stores/authStore';
-import { useSubscriptionStore } from '@/stores/subscriptionStore';
 import { COLORS } from '@/lib/constants';
 import { Ionicons } from '@expo/vector-icons';
-import { LinearGradient } from 'expo-linear-gradient';
 import { isDemoMode } from '@/hooks/useConvex';
-import { DEMO_LIKES, DEMO_PROFILES } from '@/lib/demoData';
-// Note: expo-blur may not be available, using alternative blur effect
+import { DEMO_PROFILES } from '@/lib/demoData';
 
 const { width } = Dimensions.get('window');
-const CARD_WIDTH = (width - 48) / 3;
+const CARD_WIDTH = (width - 48) / 2;
+const MAX_VISIBLE_LIKES = 5;
 
 export default function LikesScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const { userId } = useAuthStore();
-  const { tier } = useSubscriptionStore();
-  const isPremium = tier === 'premium';
-  const [sortBy, setSortBy] = useState<'recent' | 'distance' | 'active'>('recent');
 
   const convexLikes = useQuery(
     api.likes.getLikesReceived,
     !isDemoMode && userId ? { userId: userId as any } : 'skip'
   );
 
+  const swipeMutation = useMutation(api.likes.swipe);
+
   const demoLikes = isDemoMode
-    ? DEMO_PROFILES.slice(0, 12).map((p, i) => ({
+    ? DEMO_PROFILES.slice(0, 8).map((p, i) => ({
         likeId: `demo_like_${i}`,
         userId: p._id,
         action: i % 4 === 0 ? 'super_like' : 'like',
@@ -49,92 +46,97 @@ export default function LikesScreen() {
         age: p.age,
         photoUrl: p.photos[0]?.url,
         distance: p.distance,
-        isBlurred: false,
+        isBlurred: true,
         isSuperLike: i % 4 === 0,
       }))
     : null;
 
-  const likes = isDemoMode ? demoLikes : convexLikes;
+  const allLikes = (isDemoMode ? demoLikes : convexLikes) || [];
+  // Cap at MAX_VISIBLE_LIKES
+  const likes = allLikes.slice(0, MAX_VISIBLE_LIKES) as any[];
+  const totalCount = allLikes.length;
 
-  const renderLikeCard = (like: any, index: number) => {
-    // Testing mode: all likes visible, no blur restriction
-    const isBlurred = false;
-    const isVisible = true;
+  const handleLikeBack = async (like: any) => {
+    if (isDemoMode) {
+      Alert.alert("It's a Match!", `You and ${like.name} liked each other!`);
+      return;
+    }
 
+    try {
+      const result = await swipeMutation({
+        fromUserId: userId as any,
+        toUserId: like.userId as any,
+        action: 'like' as any,
+      });
+      if (result?.isMatch) {
+        router.push(`/(main)/match-celebration?matchId=${result.matchId}&userId=${like.userId}`);
+      }
+    } catch (error: any) {
+      Alert.alert('Error', error.message || 'Failed to like back');
+    }
+  };
+
+  const handleIgnore = async (like: any) => {
+    if (isDemoMode) return;
+
+    try {
+      await swipeMutation({
+        fromUserId: userId as any,
+        toUserId: like.userId as any,
+        action: 'pass' as any,
+      });
+    } catch (error: any) {
+      Alert.alert('Error', error.message || 'Failed to ignore');
+    }
+  };
+
+  const renderLikeCard = ({ item: like }: { item: any }) => {
     return (
-      <TouchableOpacity
-        style={styles.card}
-        onPress={() => {
-          if (isBlurred) {
-            // Show upgrade prompt
-            router.push('/(main)/subscription');
-          } else {
-            router.push(`/profile/${like.userId}` as any);
-          }
-        }}
-        activeOpacity={0.8}
-      >
-        {isBlurred ? (
-          <View style={styles.blurredCard}>
-            <View style={styles.blurOverlay}>
-              <Ionicons name="lock-closed" size={32} color={COLORS.white} />
-              <Text style={styles.blurredText}>Subscribe to see</Text>
+      <View style={styles.card}>
+        {/* Blurred photo */}
+        <View style={styles.imageContainer}>
+          <Image
+            source={{ uri: like.photoUrl || 'https://via.placeholder.com/150' }}
+            style={styles.cardImage}
+            blurRadius={25}
+          />
+          {like.isSuperLike && (
+            <View style={styles.standOutBadge}>
+              <Ionicons name="star" size={14} color="#2196F3" />
             </View>
-            <Image
-              source={{ uri: like.photoUrl || 'https://via.placeholder.com/150' }}
-              style={styles.cardImage}
-              blurRadius={20}
-            />
-          </View>
-        ) : (
-          <>
-            <Image
-              source={{ uri: like.photoUrl || 'https://via.placeholder.com/150' }}
-              style={styles.cardImage}
-            />
-            {like.isSuperLike && (
-              <View style={styles.superLikeBadge}>
-                <Ionicons name="star" size={16} color={COLORS.superLike} />
-              </View>
-            )}
-          </>
-        )}
-
-        <View style={styles.cardInfo}>
-          {isBlurred ? (
-            <>
-              <Text style={styles.blurredName}>???</Text>
-              <Text style={styles.blurredAge}>??</Text>
-              <Text style={styles.blurredDistance}>?? mi</Text>
-            </>
-          ) : (
-            <>
-              <Text style={styles.cardName} numberOfLines={1}>
-                {like.name}
-              </Text>
-              <Text style={styles.cardAge}>{like.age}</Text>
-              {like.distance && (
-                <Text style={styles.cardDistance}>{like.distance.toFixed(1)} mi</Text>
-              )}
-            </>
+          )}
+          {/* Distance badge */}
+          {like.distance && (
+            <View style={styles.distanceBadge}>
+              <Text style={styles.distanceBadgeText}>{like.distance.toFixed(0)} km</Text>
+            </View>
           )}
         </View>
 
-        {!isBlurred && (
+        <View style={styles.cardInfo}>
+          <Text style={styles.cardName} numberOfLines={1}>
+            {like.name}, {like.age}
+          </Text>
+        </View>
+
+        {/* Action buttons */}
+        <View style={styles.cardActions}>
           <TouchableOpacity
-            style={styles.viewButton}
-            onPress={() => router.push(`/profile/${like.userId}` as any)}
+            style={styles.ignoreBtn}
+            onPress={() => handleIgnore(like)}
           >
-            <Text style={styles.viewButtonText}>View</Text>
+            <Ionicons name="close" size={20} color="#F44336" />
           </TouchableOpacity>
-        )}
-      </TouchableOpacity>
+          <TouchableOpacity
+            style={styles.likeBackBtn}
+            onPress={() => handleLikeBack(like)}
+          >
+            <Ionicons name="heart" size={20} color={COLORS.white} />
+          </TouchableOpacity>
+        </View>
+      </View>
     );
   };
-
-  // Testing mode: all likes visible
-  const visibleLikes = (likes || []) as any[];
-  const blurredCount: number = 0;
 
   return (
     <View style={[styles.container, { paddingTop: insets.top }]}>
@@ -143,59 +145,18 @@ export default function LikesScreen() {
           <Ionicons name="arrow-back" size={24} color={COLORS.text} />
         </TouchableOpacity>
         <Text style={styles.headerTitle}>
-          {likes?.length || 0} {likes?.length === 1 ? 'person has' : 'people have'} liked you
+          {totalCount} {totalCount === 1 ? 'person' : 'people'} liked you
         </Text>
         <View style={styles.placeholder} />
       </View>
 
-      {blurredCount > 0 && (
-        <View style={styles.upgradeBanner}>
-          <LinearGradient
-            colors={[COLORS.primary, COLORS.secondary]}
-            style={styles.upgradeGradient}
-          >
-            <Ionicons name="lock-closed" size={24} color={COLORS.white} />
-            <View style={styles.upgradeContent}>
-              <Text style={styles.upgradeTitle}>
-                Subscribe to see all {likes?.length} likes
-              </Text>
-              <Text style={styles.upgradeSubtitle}>
-                {blurredCount} more {blurredCount === 1 ? 'person' : 'people'} liked you
-              </Text>
-            </View>
-            <TouchableOpacity
-              style={styles.upgradeButton}
-              onPress={() => router.push('/(main)/subscription')}
-            >
-              <Text style={styles.upgradeButtonText}>Unlock</Text>
-            </TouchableOpacity>
-          </LinearGradient>
-        </View>
-      )}
-
-      {/* Sort Options */}
-      <View style={styles.sortContainer}>
-        {(['recent', 'distance', 'active'] as const).map((option) => (
-          <TouchableOpacity
-            key={option}
-            style={[styles.sortChip, sortBy === option && styles.sortChipActive]}
-            onPress={() => setSortBy(option)}
-          >
-            <Text
-              style={[styles.sortText, sortBy === option && styles.sortTextActive]}
-            >
-              {option.charAt(0).toUpperCase() + option.slice(1)}
-            </Text>
-          </TouchableOpacity>
-        ))}
-      </View>
-
       <FlatList
-        data={visibleLikes}
-        numColumns={3}
+        data={likes}
+        numColumns={2}
         keyExtractor={(item, index) => `like-${item.userId}-${index}`}
-        renderItem={({ item, index }) => renderLikeCard(item, index)}
+        renderItem={renderLikeCard}
         contentContainerStyle={styles.listContent}
+        columnWrapperStyle={styles.columnWrapper}
         ListEmptyComponent={
           <View style={styles.emptyContainer}>
             <Ionicons name="heart-outline" size={64} color={COLORS.textLight} />
@@ -233,158 +194,82 @@ const styles = StyleSheet.create({
   placeholder: {
     width: 24,
   },
-  upgradeBanner: {
-    margin: 16,
-    borderRadius: 12,
-    overflow: 'hidden',
-  },
-  upgradeGradient: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    padding: 16,
-    gap: 12,
-  },
-  upgradeContent: {
-    flex: 1,
-  },
-  upgradeTitle: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: COLORS.white,
-    marginBottom: 4,
-  },
-  upgradeSubtitle: {
-    fontSize: 13,
-    color: COLORS.white,
-    opacity: 0.9,
-  },
-  upgradeButton: {
-    backgroundColor: COLORS.white,
-    paddingHorizontal: 20,
-    paddingVertical: 10,
-    borderRadius: 20,
-  },
-  upgradeButtonText: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: COLORS.primary,
-  },
-  sortContainer: {
-    flexDirection: 'row',
-    paddingHorizontal: 16,
-    paddingVertical: 12,
-    gap: 8,
-    borderBottomWidth: 1,
-    borderBottomColor: COLORS.border,
-  },
-  sortChip: {
-    paddingHorizontal: 16,
-    paddingVertical: 8,
-    borderRadius: 20,
-    backgroundColor: COLORS.backgroundDark,
-    borderWidth: 1,
-    borderColor: COLORS.border,
-  },
-  sortChipActive: {
-    backgroundColor: COLORS.primary,
-    borderColor: COLORS.primary,
-  },
-  sortText: {
-    fontSize: 14,
-    fontWeight: '500',
-    color: COLORS.text,
-  },
-  sortTextActive: {
-    color: COLORS.white,
-  },
   listContent: {
     padding: 16,
   },
+  columnWrapper: {
+    gap: 12,
+    marginBottom: 12,
+  },
   card: {
-    width: CARD_WIDTH,
-    marginBottom: 16,
-    marginRight: 8,
-    borderRadius: 12,
+    flex: 1,
+    maxWidth: CARD_WIDTH,
+    borderRadius: 16,
     overflow: 'hidden',
     backgroundColor: COLORS.backgroundDark,
+  },
+  imageContainer: {
+    position: 'relative',
   },
   cardImage: {
     width: '100%',
     height: CARD_WIDTH * 1.3,
     backgroundColor: COLORS.border,
   },
-  blurredCard: {
-    position: 'relative',
-  },
-  blurOverlay: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    right: 0,
-    bottom: 0,
-    alignItems: 'center',
-    justifyContent: 'center',
-    zIndex: 1,
-    backgroundColor: 'rgba(0,0,0,0.7)',
-  },
-  blurredText: {
-    fontSize: 12,
-    color: COLORS.white,
-    fontWeight: '600',
-    marginTop: 8,
-  },
-  superLikeBadge: {
+  standOutBadge: {
     position: 'absolute',
     top: 8,
     right: 8,
     backgroundColor: COLORS.white,
     borderRadius: 12,
-    padding: 4,
+    padding: 5,
   },
-  cardInfo: {
-    padding: 8,
-  },
-  cardName: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: COLORS.text,
-    marginBottom: 2,
-  },
-  blurredName: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: COLORS.textLight,
-    marginBottom: 2,
-  },
-  cardAge: {
-    fontSize: 12,
-    color: COLORS.textLight,
-    marginBottom: 2,
-  },
-  blurredAge: {
-    fontSize: 12,
-    color: COLORS.textLight,
-    marginBottom: 2,
-  },
-  cardDistance: {
-    fontSize: 11,
-    color: COLORS.textLight,
-  },
-  blurredDistance: {
-    fontSize: 11,
-    color: COLORS.textLight,
-  },
-  viewButton: {
-    marginTop: 4,
-    paddingVertical: 6,
-    backgroundColor: COLORS.primary,
+  distanceBadge: {
+    position: 'absolute',
+    bottom: 8,
+    left: 8,
+    backgroundColor: 'rgba(0,0,0,0.5)',
     borderRadius: 8,
-    alignItems: 'center',
+    paddingHorizontal: 6,
+    paddingVertical: 3,
   },
-  viewButtonText: {
-    fontSize: 12,
+  distanceBadgeText: {
+    fontSize: 11,
     fontWeight: '600',
     color: COLORS.white,
+  },
+  cardInfo: {
+    padding: 10,
+    paddingBottom: 6,
+  },
+  cardName: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: COLORS.text,
+  },
+  cardActions: {
+    flexDirection: 'row',
+    paddingHorizontal: 10,
+    paddingBottom: 10,
+    gap: 8,
+  },
+  ignoreBtn: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 8,
+    borderRadius: 10,
+    borderWidth: 1.5,
+    borderColor: '#F44336',
+    backgroundColor: COLORS.background,
+  },
+  likeBackBtn: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 8,
+    borderRadius: 10,
+    backgroundColor: COLORS.primary,
   },
   emptyContainer: {
     flex: 1,

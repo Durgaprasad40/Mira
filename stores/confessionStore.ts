@@ -3,7 +3,6 @@ import { persist, createJSONStorage } from 'zustand/middleware';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import {
   Confession,
-  ConfessionReactionType,
   ConfessionChat,
   ConfessionChatMessage,
   SecretCrush,
@@ -16,10 +15,47 @@ import {
   DEMO_CONFESSION_CHATS,
   DEMO_SECRET_CRUSHES,
 } from '@/lib/demoData';
+import { isProbablyEmoji } from '@/lib/utils';
+
+// Map old fixed reaction keys → emoji characters
+const OLD_REACTION_TO_EMOJI: Record<string, string> = {
+  relatable: '\u2764\uFE0F',
+  feel_you: '\uD83D\uDE2D',
+  bold: '\uD83D\uDD25',
+  curious: '\uD83D\uDC40',
+};
+
+/** Convert old string-keyed reactions to emoji-keyed, drop invalid keys, and recompute topEmojis */
+function migrateConfessionReactions(c: Confession): Confession {
+  if (!c.reactions) return c;
+  const reactions: Record<string, number> = {};
+  let needsMigration = false;
+  for (const [key, count] of Object.entries(c.reactions)) {
+    if (OLD_REACTION_TO_EMOJI[key]) {
+      // Known old key → convert to emoji
+      reactions[OLD_REACTION_TO_EMOJI[key]] = (reactions[OLD_REACTION_TO_EMOJI[key]] || 0) + count;
+      needsMigration = true;
+    } else if (isProbablyEmoji(key)) {
+      // Already a real emoji → keep
+      reactions[key] = count;
+    } else {
+      // Unknown non-emoji string → drop it
+      needsMigration = true;
+    }
+  }
+  const topEmojis = Object.entries(reactions)
+    .sort((a, b) => b[1] - a[1])
+    .slice(0, 3)
+    .map(([emoji, count]) => ({ emoji, count }));
+  if (needsMigration || !c.topEmojis || c.topEmojis.length === 0) {
+    return { ...c, reactions, topEmojis };
+  }
+  return c;
+}
 
 interface ConfessionState {
   confessions: Confession[];
-  userReactions: Record<string, ConfessionReactionType[]>;
+  userReactions: Record<string, string | null>; // confessionId → emoji string (one per user)
   chats: ConfessionChat[];
   secretCrushes: SecretCrush[];
   reportedIds: string[];
@@ -28,7 +64,7 @@ interface ConfessionState {
 
   seedConfessions: () => void;
   addConfession: (confession: Confession) => void;
-  toggleReaction: (confessionId: string, type: ConfessionReactionType) => void;
+  toggleReaction: (confessionId: string, emoji: string) => void;
   addChat: (chat: ConfessionChat) => void;
   addChatMessage: (chatId: string, message: ConfessionChatMessage) => void;
   addSecretCrush: (crush: SecretCrush) => void;
@@ -63,12 +99,27 @@ export const useConfessionStore = create<ConfessionState>()(
       seeded: false,
 
       seedConfessions: () => {
-        if (get().seeded) return;
+        if (get().seeded) {
+          // Migrate persisted confessions that have old/invalid reaction keys
+          const current = get().confessions;
+          const needsMigration = current.some(
+            (c) =>
+              (c.reactions && Object.keys(c.reactions).some((k) => !isProbablyEmoji(k))) ||
+              (c.reactions && Object.keys(c.reactions).length > 0 && (!c.topEmojis || c.topEmojis.length === 0)) ||
+              (c.topEmojis && c.topEmojis.some((e) => !isProbablyEmoji(e.emoji)))
+          );
+          if (needsMigration) {
+            set({ confessions: current.map(migrateConfessionReactions) });
+          }
+          return;
+        }
         // Backfill revealPolicy and mutualRevealStatus on demo data
-        const confessions = DEMO_CONFESSIONS.map((c) => ({
-          ...c,
-          revealPolicy: c.revealPolicy || ('never' as const),
-        }));
+        const confessions = DEMO_CONFESSIONS.map((c) =>
+          migrateConfessionReactions({
+            ...c,
+            revealPolicy: c.revealPolicy || ('never' as const),
+          })
+        );
         const chats = DEMO_CONFESSION_CHATS.map((ch) => ({
           ...ch,
           mutualRevealStatus: ch.mutualRevealStatus || ('none' as MutualRevealStatus),
@@ -88,31 +139,51 @@ export const useConfessionStore = create<ConfessionState>()(
         }));
       },
 
-      toggleReaction: (confessionId, type) => {
+      toggleReaction: (confessionId, emoji) => {
         set((state) => {
-          const current = state.userReactions[confessionId] || [];
-          const hasReaction = current.includes(type);
-          const newReactions = hasReaction
-            ? current.filter((r) => r !== type)
-            : [...current, type];
-
+          const currentEmoji = state.userReactions[confessionId];
           const newUserReactions = { ...state.userReactions };
-          if (newReactions.length === 0) {
+
+          let countDelta = 0;
+          let oldEmoji: string | null = null;
+
+          if (currentEmoji === emoji) {
+            // Same emoji → toggle off
             delete newUserReactions[confessionId];
+            countDelta = -1;
+            oldEmoji = emoji;
+          } else if (currentEmoji) {
+            // Different emoji → replace (count stays same)
+            newUserReactions[confessionId] = emoji;
+            oldEmoji = currentEmoji;
           } else {
-            newUserReactions[confessionId] = newReactions;
+            // No existing → add
+            newUserReactions[confessionId] = emoji;
+            countDelta = 1;
           }
 
           const confessions = state.confessions.map((c) => {
             if (c.id !== confessionId) return c;
-            const reactions = { ...(c.reactions || { relatable: 0, feel_you: 0, bold: 0, curious: 0 }) };
-            reactions[type] = hasReaction
-              ? Math.max(0, reactions[type] - 1)
-              : reactions[type] + 1;
-            const reactionCount = hasReaction
-              ? Math.max(0, c.reactionCount - 1)
-              : c.reactionCount + 1;
-            return { ...c, reactions, reactionCount };
+            const reactions = { ...(c.reactions || {}) };
+            // Remove old emoji count
+            if (oldEmoji && reactions[oldEmoji]) {
+              reactions[oldEmoji] = Math.max(0, reactions[oldEmoji] - 1);
+              if (reactions[oldEmoji] === 0) delete reactions[oldEmoji];
+            }
+            // Add new emoji count (if not toggling off)
+            if (countDelta >= 0 && newUserReactions[confessionId]) {
+              reactions[emoji] = (reactions[emoji] || 0) + 1;
+            }
+
+            // Recompute topEmojis (only valid emojis)
+            const topEmojis = Object.entries(reactions)
+              .filter(([e]) => isProbablyEmoji(e))
+              .sort((a, b) => b[1] - a[1])
+              .slice(0, 3)
+              .map(([e, count]) => ({ emoji: e, count }));
+
+            const reactionCount = Math.max(0, c.reactionCount + countDelta);
+            return { ...c, reactions, topEmojis, reactionCount };
           });
 
           return { userReactions: newUserReactions, confessions };

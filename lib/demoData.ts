@@ -1,4 +1,4 @@
-import { DiscoverNotification, DiscoveryFeedItem, Confession, ConfessionReply, ConfessionReactionType, ConfessionChat, SecretCrush } from '@/types';
+import { DiscoverNotification, DiscoveryFeedItem, Confession, ConfessionReply, ConfessionChat, SecretCrush } from '@/types';
 
 // Demo data for testing the app without Convex backend
 
@@ -1718,11 +1718,12 @@ export const DEMO_CONFESSIONS: Confession[] = [
     isAnonymous: true,
     mood: 'funny',
     topic: 'funny',
-    reactions: { relatable: 12, feel_you: 4, bold: 3, curious: 5 },
+    reactions: { '\u2764\uFE0F': 12, '\uD83D\uDE2D': 4, '\uD83D\uDD25': 3, '\uD83D\uDC40': 5 },
     visibility: 'global',
     replyCount: 5,
     reactionCount: 24,
     createdAt: Date.now() - 1000 * 60 * 30,
+    revealPolicy: 'never' as const,
   },
   {
     id: 'conf_2',
@@ -1731,11 +1732,12 @@ export const DEMO_CONFESSIONS: Confession[] = [
     isAnonymous: true,
     mood: 'romantic',
     topic: 'crush',
-    reactions: { relatable: 20, feel_you: 12, bold: 5, curious: 5 },
+    reactions: { '\u2764\uFE0F': 20, '\uD83D\uDE2D': 12, '\uD83D\uDD25': 5, '\uD83D\uDC40': 5 },
     visibility: 'global',
     replyCount: 8,
     reactionCount: 42,
     createdAt: Date.now() - 1000 * 60 * 60 * 2,
+    revealPolicy: 'never' as const,
   },
   {
     id: 'conf_3',
@@ -1744,11 +1746,12 @@ export const DEMO_CONFESSIONS: Confession[] = [
     isAnonymous: false,
     mood: 'funny',
     topic: 'heartbreak',
-    reactions: { relatable: 30, feel_you: 20, bold: 7, curious: 10 },
+    reactions: { '\u2764\uFE0F': 30, '\uD83D\uDE2D': 20, '\uD83D\uDD25': 7, '\uD83D\uDC40': 10 },
     visibility: 'global',
     replyCount: 12,
     reactionCount: 67,
     createdAt: Date.now() - 1000 * 60 * 60 * 5,
+    revealPolicy: 'never' as const,
   },
   {
     id: 'conf_4',
@@ -1757,11 +1760,12 @@ export const DEMO_CONFESSIONS: Confession[] = [
     isAnonymous: true,
     mood: 'emotional',
     topic: 'heartbreak',
-    reactions: { relatable: 35, feel_you: 30, bold: 10, curious: 14 },
+    reactions: { '\u2764\uFE0F': 35, '\uD83D\uDE2D': 30, '\uD83D\uDD25': 10, '\uD83D\uDC40': 14 },
     visibility: 'global',
     replyCount: 15,
     reactionCount: 89,
     createdAt: Date.now() - 1000 * 60 * 60 * 8,
+    revealPolicy: 'never' as const,
   },
   {
     id: 'conf_5',
@@ -1770,11 +1774,12 @@ export const DEMO_CONFESSIONS: Confession[] = [
     isAnonymous: true,
     mood: 'emotional',
     topic: 'heartbreak',
-    reactions: { relatable: 25, feel_you: 18, bold: 2, curious: 10 },
+    reactions: { '\u2764\uFE0F': 25, '\uD83D\uDE2D': 18, '\uD83D\uDD25': 2, '\uD83D\uDC40': 10 },
     visibility: 'global',
     replyCount: 7,
     reactionCount: 55,
     createdAt: Date.now() - 1000 * 60 * 60 * 12,
+    revealPolicy: 'never' as const,
   },
   {
     id: 'conf_6',
@@ -1783,11 +1788,12 @@ export const DEMO_CONFESSIONS: Confession[] = [
     isAnonymous: true,
     mood: 'spicy',
     topic: 'spicy',
-    reactions: { relatable: 40, feel_you: 25, bold: 20, curious: 18 },
+    reactions: { '\u2764\uFE0F': 40, '\uD83D\uDE2D': 25, '\uD83D\uDD25': 20, '\uD83D\uDC40': 18 },
     visibility: 'global',
     replyCount: 20,
     reactionCount: 103,
     createdAt: Date.now() - 1000 * 60 * 60 * 18,
+    revealPolicy: 'never' as const,
   },
   {
     id: 'conf_7',
@@ -1796,11 +1802,12 @@ export const DEMO_CONFESSIONS: Confession[] = [
     isAnonymous: false,
     mood: 'romantic',
     topic: 'crush',
-    reactions: { relatable: 30, feel_you: 20, bold: 18, curious: 10 },
+    reactions: { '\u2764\uFE0F': 30, '\uD83D\uDE2D': 20, '\uD83D\uDD25': 18, '\uD83D\uDC40': 10 },
     visibility: 'global',
     replyCount: 9,
     reactionCount: 78,
     createdAt: Date.now() - 1000 * 60 * 60 * 24,
+    revealPolicy: 'never' as const,
   },
   {
     id: 'conf_8',
@@ -1809,11 +1816,12 @@ export const DEMO_CONFESSIONS: Confession[] = [
     isAnonymous: true,
     mood: 'funny',
     topic: 'crush',
-    reactions: { relatable: 40, feel_you: 25, bold: 10, curious: 16 },
+    reactions: { '\u2764\uFE0F': 40, '\uD83D\uDE2D': 25, '\uD83D\uDD25': 10, '\uD83D\uDC40': 16 },
     visibility: 'global',
     replyCount: 18,
     reactionCount: 91,
     createdAt: Date.now() - 1000 * 60 * 60 * 36,
+    revealPolicy: 'never' as const,
   },
   {
     id: 'conf_9',
@@ -1822,11 +1830,12 @@ export const DEMO_CONFESSIONS: Confession[] = [
     isAnonymous: true,
     mood: 'funny',
     topic: 'late_night',
-    reactions: { relatable: 22, feel_you: 15, bold: 8, curious: 12 },
+    reactions: { '\u2764\uFE0F': 22, '\uD83D\uDE2D': 15, '\uD83D\uDD25': 8, '\uD83D\uDC40': 12 },
     visibility: 'global',
     replyCount: 11,
     reactionCount: 57,
     createdAt: Date.now() - 1000 * 60 * 60 * 40,
+    revealPolicy: 'never' as const,
   },
   {
     id: 'conf_10',
@@ -1835,11 +1844,12 @@ export const DEMO_CONFESSIONS: Confession[] = [
     isAnonymous: true,
     mood: 'emotional',
     topic: 'college',
-    reactions: { relatable: 18, feel_you: 22, bold: 5, curious: 8 },
+    reactions: { '\u2764\uFE0F': 18, '\uD83D\uDE2D': 22, '\uD83D\uDD25': 5, '\uD83D\uDC40': 8 },
     visibility: 'global',
     replyCount: 6,
     reactionCount: 53,
     createdAt: Date.now() - 1000 * 60 * 60 * 48,
+    revealPolicy: 'never' as const,
   },
   {
     id: 'conf_11',
@@ -1848,11 +1858,12 @@ export const DEMO_CONFESSIONS: Confession[] = [
     isAnonymous: true,
     mood: 'spicy',
     topic: 'office',
-    reactions: { relatable: 15, feel_you: 10, bold: 20, curious: 25 },
+    reactions: { '\u2764\uFE0F': 15, '\uD83D\uDE2D': 10, '\uD83D\uDD25': 20, '\uD83D\uDC40': 25 },
     visibility: 'global',
     replyCount: 14,
     reactionCount: 70,
     createdAt: Date.now() - 1000 * 60 * 60 * 55,
+    revealPolicy: 'never' as const,
   },
   {
     id: 'conf_12',
@@ -1861,11 +1872,12 @@ export const DEMO_CONFESSIONS: Confession[] = [
     isAnonymous: true,
     mood: 'funny',
     topic: 'college',
-    reactions: { relatable: 28, feel_you: 12, bold: 6, curious: 10 },
+    reactions: { '\u2764\uFE0F': 28, '\uD83D\uDE2D': 12, '\uD83D\uDD25': 6, '\uD83D\uDC40': 10 },
     visibility: 'global',
     replyCount: 9,
     reactionCount: 56,
     createdAt: Date.now() - 1000 * 60 * 60 * 60,
+    revealPolicy: 'never' as const,
   },
 ];
 
@@ -1896,10 +1908,10 @@ export const DEMO_CONFESSION_REPLIES: Record<string, ConfessionReply[]> = {
 };
 
 // Demo Confession Reaction State (which confessions the demo user has reacted to)
-export const DEMO_CONFESSION_USER_REACTIONS: Record<string, ConfessionReactionType[]> = {
-  conf_2: ['relatable'],
-  conf_4: ['relatable', 'feel_you'],
-  conf_6: ['bold'],
+export const DEMO_CONFESSION_USER_REACTIONS: Record<string, string | null> = {
+  conf_2: '❤️',
+  conf_4: '😢',
+  conf_6: '🔥',
 };
 
 // Demo Confession Chats (anonymous temporary chats)
@@ -1916,6 +1928,7 @@ export const DEMO_CONFESSION_CHATS: ConfessionChat[] = [
     isRevealed: false,
     createdAt: Date.now() - 1000 * 60 * 60,
     expiresAt: Date.now() + 1000 * 60 * 60 * 23,
+    mutualRevealStatus: 'none' as const,
   },
   {
     id: 'cc_2',
@@ -1930,6 +1943,7 @@ export const DEMO_CONFESSION_CHATS: ConfessionChat[] = [
     isRevealed: false,
     createdAt: Date.now() - 1000 * 60 * 120,
     expiresAt: Date.now() + 1000 * 60 * 60 * 22,
+    mutualRevealStatus: 'none' as const,
   },
 ];
 

@@ -26,28 +26,29 @@ export default function MatchCelebrationScreen() {
   }>();
   const { userId } = useAuthStore();
 
+  const isDemo = matchId?.startsWith("demo_") || userId?.startsWith("demo_");
   const viewerId = userId ? (userId as Id<"users">) : null;
   const matchIdValue = matchId ? (matchId as unknown as Id<"matches">) : null;
   const otherUserIdValue = otherUserId
     ? (otherUserId as unknown as Id<"users">)
     : null;
 
-  // Fetch match and other user data
+  // Fetch match and other user data (skip in demo mode)
   const match = useQuery(
     api.matches.getMatch,
-    matchIdValue && viewerId
+    !isDemo && matchIdValue && viewerId
       ? { matchId: matchIdValue, userId: viewerId }
       : "skip",
   );
   const otherUser = useQuery(
     api.users.getUserById,
-    otherUserIdValue && viewerId
+    !isDemo && otherUserIdValue && viewerId
       ? { userId: otherUserIdValue, viewerId }
       : "skip",
   );
   const currentUser = useQuery(
     api.users.getCurrentUser,
-    viewerId ? { userId: viewerId } : "skip",
+    !isDemo && viewerId ? { userId: viewerId } : "skip",
   );
 
   // Animation values (React Native Animated)
@@ -235,7 +236,7 @@ export default function MatchCelebrationScreen() {
 
         <View style={styles.actions}>
           <Button
-            title="Send a Message 💬"
+            title="Say Hi 👋"
             variant="primary"
             onPress={handleSendMessage}
             fullWidth
@@ -245,7 +246,7 @@ export default function MatchCelebrationScreen() {
             style={styles.keepSwipingButton}
             onPress={handleKeepSwiping}
           >
-            <Text style={styles.keepSwipingText}>Keep Swiping</Text>
+            <Text style={styles.keepSwipingText}>Keep Discovering</Text>
           </TouchableOpacity>
         </View>
       </View>

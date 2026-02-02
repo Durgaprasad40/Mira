@@ -80,7 +80,7 @@ export const getDiscoverProfiles = query({
         if (distance > currentUser.maxDistance) continue;
       }
 
-      // Check if already swiped
+      // Check if already swiped (passes expire after 7 days)
       const existingLike = await ctx.db
         .query('likes')
         .withIndex('by_from_to', (q) =>
@@ -88,7 +88,14 @@ export const getDiscoverProfiles = query({
         )
         .first();
 
-      if (existingLike) continue;
+      if (existingLike) {
+        // Likes and super_likes are permanent exclusions
+        if (existingLike.action !== 'pass') continue;
+        // Passes only exclude for 7 days
+        const sevenDaysMs = 7 * 24 * 60 * 60 * 1000;
+        if (existingLike.createdAt > Date.now() - sevenDaysMs) continue;
+        // Pass expired — profile can reappear
+      }
 
       // Check if blocked
       const blocked = await ctx.db

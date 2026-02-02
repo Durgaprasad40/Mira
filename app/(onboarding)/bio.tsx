@@ -23,8 +23,8 @@ export default function BioScreen() {
     // TODO: Profanity filter check
     // TODO: Link detection check
 
-    setStep('profile_details');
-    router.push('/(onboarding)/profile-details' as any);
+    setStep('prompts');
+    router.push('/(onboarding)/prompts' as any);
   };
 
   const tips = [

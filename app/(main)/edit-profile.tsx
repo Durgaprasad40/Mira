@@ -7,12 +7,13 @@ import {
   TouchableOpacity,
   Platform,
   Alert,
+  TextInput,
 } from 'react-native';
 import { useRouter } from 'expo-router';
 import { useQuery, useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { useAuthStore } from '@/stores/authStore';
-import { COLORS, GENDER_OPTIONS, SMOKING_OPTIONS, DRINKING_OPTIONS, KIDS_OPTIONS, EDUCATION_OPTIONS, RELIGION_OPTIONS } from '@/lib/constants';
+import { COLORS, GENDER_OPTIONS, SMOKING_OPTIONS, DRINKING_OPTIONS, KIDS_OPTIONS, EDUCATION_OPTIONS, RELIGION_OPTIONS, PROFILE_PROMPT_QUESTIONS } from '@/lib/constants';
 import { Button, Input } from '@/components/ui';
 import { Ionicons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
@@ -27,8 +28,13 @@ export default function EditProfileScreen() {
   );
 
   const updateProfile = useMutation(api.users.updateProfile);
+  const updateProfilePrompts = useMutation(api.users.updateProfilePrompts);
 
   const [bio, setBio] = useState(currentUser?.bio || '');
+  const [prompts, setPrompts] = useState<{ question: string; answer: string }[]>(
+    (currentUser as any)?.profilePrompts ?? []
+  );
+  const [showPromptPicker, setShowPromptPicker] = useState(false);
   const [height, setHeight] = useState(currentUser?.height?.toString() || '');
   const [smoking, setSmoking] = useState(currentUser?.smoking || null);
   const [drinking, setDrinking] = useState(currentUser?.drinking || null);
@@ -42,6 +48,7 @@ export default function EditProfileScreen() {
   React.useEffect(() => {
     if (currentUser) {
       setBio(currentUser.bio || '');
+      setPrompts((currentUser as any)?.profilePrompts ?? []);
       setHeight(currentUser.height?.toString() || '');
       setSmoking(currentUser.smoking || null);
       setDrinking(currentUser.drinking || null);
@@ -54,8 +61,35 @@ export default function EditProfileScreen() {
     }
   }, [currentUser]);
 
+  const filledPrompts = prompts.filter((p) => p.answer.trim().length > 0);
+
+  const handleDeletePrompt = (index: number) => {
+    setPrompts(prompts.filter((_, i) => i !== index));
+  };
+
+  const handleUpdatePromptAnswer = (index: number, answer: string) => {
+    const updated = [...prompts];
+    updated[index] = { ...updated[index], answer };
+    setPrompts(updated);
+  };
+
+  const handleAddPrompt = (questionText: string) => {
+    setPrompts([...prompts, { question: questionText, answer: '' }]);
+    setShowPromptPicker(false);
+  };
+
+  const usedQuestions = prompts.map((p) => p.question);
+  const availableQuestions = PROFILE_PROMPT_QUESTIONS.filter(
+    (q) => !usedQuestions.includes(q.text)
+  );
+
   const handleSave = async () => {
     if (!userId) return;
+
+    if (filledPrompts.length === 0) {
+      Alert.alert('Prompts Required', 'Add at least one prompt to your profile.');
+      return;
+    }
 
     try {
       await updateProfile({
@@ -70,6 +104,10 @@ export default function EditProfileScreen() {
         jobTitle: jobTitle || undefined,
         company: company || undefined,
         school: school || undefined,
+      });
+      await updateProfilePrompts({
+        userId: userId as any,
+        prompts: filledPrompts,
       });
       Alert.alert('Success', 'Profile updated!');
       router.back();
@@ -110,6 +148,64 @@ export default function EditProfileScreen() {
           style={styles.bioInput}
         />
         <Text style={styles.charCount}>{bio.length}/500</Text>
+      </View>
+
+      <View style={styles.section}>
+        <Text style={styles.sectionTitle}>Prompts</Text>
+
+        {prompts.map((prompt, index) => (
+          <View key={index} style={styles.promptCard}>
+            <View style={styles.promptHeader}>
+              <Text style={styles.promptQuestion}>{prompt.question}</Text>
+              <TouchableOpacity onPress={() => handleDeletePrompt(index)}>
+                <Ionicons name="close-circle" size={22} color={COLORS.textMuted} />
+              </TouchableOpacity>
+            </View>
+            <TextInput
+              style={styles.promptAnswerInput}
+              value={prompt.answer}
+              onChangeText={(text) => handleUpdatePromptAnswer(index, text)}
+              placeholder="Type your answer..."
+              placeholderTextColor={COLORS.textMuted}
+              multiline
+              maxLength={200}
+            />
+            <Text style={styles.promptCharCount}>{prompt.answer.length}/200</Text>
+          </View>
+        ))}
+
+        {prompts.length < 3 && !showPromptPicker && (
+          <TouchableOpacity
+            style={styles.addPromptButton}
+            onPress={() => setShowPromptPicker(true)}
+          >
+            <Ionicons name="add-circle-outline" size={20} color={COLORS.primary} />
+            <Text style={styles.addPromptText}>
+              Add a prompt ({prompts.length}/3)
+            </Text>
+          </TouchableOpacity>
+        )}
+
+        {showPromptPicker && (
+          <View style={styles.promptPickerContainer}>
+            {availableQuestions.map((q) => (
+              <TouchableOpacity
+                key={q.id}
+                style={styles.promptPickerOption}
+                onPress={() => handleAddPrompt(q.text)}
+              >
+                <Text style={styles.promptPickerOptionText}>{q.text}</Text>
+                <Ionicons name="chevron-forward" size={16} color={COLORS.textMuted} />
+              </TouchableOpacity>
+            ))}
+            <TouchableOpacity
+              style={styles.promptPickerCancel}
+              onPress={() => setShowPromptPicker(false)}
+            >
+              <Text style={styles.promptPickerCancelText}>Cancel</Text>
+            </TouchableOpacity>
+          </View>
+        )}
       </View>
 
       <View style={styles.section}>
@@ -405,6 +501,81 @@ const styles = StyleSheet.create({
   selectOptionTextSelected: {
     color: COLORS.primary,
     fontWeight: '600',
+  },
+  promptCard: {
+    backgroundColor: COLORS.backgroundDark,
+    borderRadius: 12,
+    padding: 14,
+    marginBottom: 12,
+    borderLeftWidth: 3,
+    borderLeftColor: COLORS.primary,
+  },
+  promptHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 6,
+  },
+  promptQuestion: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: COLORS.textLight,
+    flex: 1,
+    marginRight: 8,
+  },
+  promptAnswerInput: {
+    fontSize: 15,
+    color: COLORS.text,
+    minHeight: 48,
+    textAlignVertical: 'top',
+    lineHeight: 20,
+  },
+  promptCharCount: {
+    fontSize: 11,
+    color: COLORS.textMuted,
+    textAlign: 'right',
+  },
+  addPromptButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 12,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: COLORS.primary + '40',
+    borderStyle: 'dashed',
+    gap: 6,
+  },
+  addPromptText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: COLORS.primary,
+  },
+  promptPickerContainer: {
+    backgroundColor: COLORS.backgroundDark,
+    borderRadius: 12,
+    padding: 12,
+  },
+  promptPickerOption: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingVertical: 11,
+    borderBottomWidth: 1,
+    borderBottomColor: COLORS.border,
+  },
+  promptPickerOptionText: {
+    fontSize: 14,
+    color: COLORS.text,
+    flex: 1,
+  },
+  promptPickerCancel: {
+    alignItems: 'center',
+    paddingTop: 10,
+  },
+  promptPickerCancelText: {
+    fontSize: 13,
+    color: COLORS.textMuted,
   },
   footer: {
     padding: 16,

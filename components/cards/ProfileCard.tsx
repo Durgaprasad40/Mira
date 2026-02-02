@@ -9,8 +9,6 @@ import {
 import { Image } from 'expo-image';
 import { Ionicons } from '@expo/vector-icons';
 import { COLORS, INCOGNITO_COLORS } from '@/lib/constants';
-import { MatchQualityIndicator } from './MatchQualityIndicator';
-import type { IntentCompat } from '@/lib/intentCompat';
 import type { TrustBadge } from '@/lib/trustBadges';
 
 export interface ProfileCardProps {
@@ -21,13 +19,8 @@ export interface ProfileCardProps {
   isVerified?: boolean;
   distance?: number;
   photos: { url: string }[];
-  matchQuality?: number;
-  /** Shared activity labels between current user and this profile */
-  sharedInterests?: string[];
-  /** Relationship intent display */
-  intentLabel?: string;
-  intentEmoji?: string;
-  intentCompat?: IntentCompat;
+  /** First profile prompt to display on discover card */
+  profilePrompt?: { question: string; answer: string };
   /** Trust badges computed via getTrustBadges() */
   trustBadges?: TrustBadge[];
   /** Enable photo carousel + swipe mode (Discover card) */
@@ -44,21 +37,15 @@ export interface ProfileCardProps {
 export const ProfileCard: React.FC<ProfileCardProps> = ({
   name,
   age,
-  bio,
   city,
   isVerified,
   distance,
   photos,
-  matchQuality,
-  sharedInterests,
-  intentLabel,
-  intentEmoji,
-  intentCompat,
+  profilePrompt,
   trustBadges,
   showCarousel = false,
   theme = 'light',
   onOpenProfile,
-  user,
   onPress,
 }) => {
   const dark = theme === 'dark';
@@ -146,7 +133,7 @@ export const ProfileCard: React.FC<ProfileCardProps> = ({
         )}
       </View>
 
-      {/* Info overlay at bottom — gradient style */}
+      {/* Info overlay at bottom */}
       <View style={styles.overlay} pointerEvents="none">
         <View style={styles.headerRow}>
           <View style={{ flex: 1 }}>
@@ -174,37 +161,14 @@ export const ProfileCard: React.FC<ProfileCardProps> = ({
           </View>
         )}
 
-        {!!intentLabel && (
-          <View style={[
-            styles.intentChip,
-            intentCompat === 'match' && styles.intentMatch,
-            intentCompat === 'partial' && styles.intentPartial,
-            intentCompat === 'mismatch' && styles.intentMismatch,
-          ]}>
-            <Text style={styles.intentText}>
-              {intentEmoji} {intentLabel}
+        {profilePrompt && (
+          <View style={styles.promptCard}>
+            <Text style={styles.promptQuestion} numberOfLines={1}>
+              {profilePrompt.question}
             </Text>
-          </View>
-        )}
-
-        {!!bio && (
-          <Text style={styles.bio} numberOfLines={2}>
-            {bio}
-          </Text>
-        )}
-        {sharedInterests && sharedInterests.length > 0 && (
-          <View style={styles.sharedRow}>
-            <Ionicons name="heart-half" size={13} color={COLORS.secondary} />
-            <Text style={styles.sharedText}>
-              {sharedInterests.length} shared {sharedInterests.length === 1 ? 'interest' : 'interests'}
-              {' \u00B7 '}
-              {sharedInterests.slice(0, 3).join(', ')}
+            <Text style={styles.promptAnswer} numberOfLines={2}>
+              {profilePrompt.answer}
             </Text>
-          </View>
-        )}
-        {matchQuality !== undefined && (
-          <View style={styles.matchQualityContainer}>
-            <MatchQualityIndicator score={matchQuality} showLabel={false} />
           </View>
         )}
       </View>
@@ -289,7 +253,7 @@ const styles = StyleSheet.create({
     bottom: 0,
     paddingTop: 24,
     paddingHorizontal: 16,
-    paddingBottom: 110, // room for floating action buttons overlay
+    paddingBottom: 90,
     backgroundColor: 'transparent',
   },
   headerRow: {
@@ -332,54 +296,30 @@ const styles = StyleSheet.create({
     textShadowOffset: { width: 0, height: 1 },
     textShadowRadius: 3,
   },
-  bio: {
-    fontSize: 14,
-    color: COLORS.white,
-    marginTop: 2,
-    textShadowColor: 'rgba(0,0,0,0.5)',
-    textShadowOffset: { width: 0, height: 1 },
-    textShadowRadius: 3,
-  },
-  intentChip: {
-    alignSelf: 'flex-start',
-    paddingHorizontal: 10,
-    paddingVertical: 4,
+  // Profile prompt card
+  promptCard: {
+    backgroundColor: 'rgba(0,0,0,0.35)',
     borderRadius: 12,
-    marginBottom: 4,
-    backgroundColor: 'rgba(255,255,255,0.2)',
-  },
-  intentMatch: {
-    backgroundColor: 'rgba(76,175,80,0.25)',
-  },
-  intentPartial: {
-    backgroundColor: 'rgba(255,152,0,0.25)',
-  },
-  intentMismatch: {
-    backgroundColor: 'rgba(244,67,54,0.25)',
-  },
-  intentText: {
-    fontSize: 12,
-    fontWeight: '600',
-    color: COLORS.white,
-  },
-  sharedRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 5,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
     marginTop: 6,
-    backgroundColor: 'rgba(78,205,196,0.18)',
-    alignSelf: 'flex-start',
-    paddingHorizontal: 10,
-    paddingVertical: 4,
-    borderRadius: 12,
   },
-  sharedText: {
+  promptQuestion: {
     fontSize: 12,
     fontWeight: '600',
-    color: COLORS.white,
+    color: 'rgba(255,255,255,0.7)',
+    marginBottom: 3,
+    textShadowColor: 'rgba(0,0,0,0.4)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 2,
   },
-  matchQualityContainer: {
-    marginTop: 8,
+  promptAnswer: {
+    fontSize: 14,
+    fontWeight: '500',
+    color: COLORS.white,
+    textShadowColor: 'rgba(0,0,0,0.4)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 2,
   },
   // Trust badge compact row (Discover overlay)
   trustBadgeRow: {

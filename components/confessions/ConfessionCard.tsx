@@ -7,22 +7,38 @@ import {
   Alert,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import * as Clipboard from 'expo-clipboard';
 import { COLORS } from '@/lib/constants';
-import { ConfessionReactionType, ConfessionMood } from '@/types';
-import ReactionBar from './ReactionBar';
+import { isProbablyEmoji } from '@/lib/utils';
+import { ConfessionMood } from '@/types';
+
+interface ReplyPreview {
+  text: string;
+  isAnonymous: boolean;
+  type: string;
+  createdAt: number;
+}
+
+interface EmojiCount {
+  emoji: string;
+  count: number;
+}
 
 interface ConfessionCardProps {
   id: string;
   text: string;
   isAnonymous: boolean;
   mood: ConfessionMood;
-  topic?: any; // accepted but unused — no categories
-  reactions: Record<ConfessionReactionType, number>;
-  userReactions: ConfessionReactionType[];
+  topEmojis: EmojiCount[];
+  userEmoji: string | null;
   replyCount: number;
+  replyPreviews: ReplyPreview[];
+  reactionCount: number;
+  authorName?: string;
+  authorPhotoUrl?: string;
   createdAt: number;
   onPress?: () => void;
-  onReact: (type: ConfessionReactionType) => void;
+  onReact: () => void; // opens emoji picker
   onReplyAnonymously?: () => void;
   onReport?: () => void;
 }
@@ -41,9 +57,12 @@ function getTimeAgo(timestamp: number): string {
 export default function ConfessionCard({
   text,
   isAnonymous,
-  reactions,
-  userReactions,
+  topEmojis,
+  userEmoji,
   replyCount,
+  replyPreviews,
+  reactionCount,
+  authorName,
   createdAt,
   onPress,
   onReact,
@@ -52,10 +71,18 @@ export default function ConfessionCard({
 }: ConfessionCardProps) {
   const handleMenu = () => {
     Alert.alert('Options', undefined, [
+      {
+        text: 'Copy Text',
+        onPress: async () => {
+          await Clipboard.setStringAsync(text);
+        },
+      },
       { text: 'Report', style: 'destructive', onPress: onReport },
       { text: 'Cancel', style: 'cancel' },
     ]);
   };
+
+  const displayName = isAnonymous ? 'Anonymous' : (authorName || 'Someone');
 
   return (
     <TouchableOpacity
@@ -72,9 +99,7 @@ export default function ConfessionCard({
             color={isAnonymous ? COLORS.textMuted : COLORS.primary}
           />
         </View>
-        <Text style={styles.authorName}>
-          {isAnonymous ? 'Anonymous' : 'Someone'}
-        </Text>
+        <Text style={styles.authorName}>{displayName}</Text>
         <Text style={styles.timeAgo}>{getTimeAgo(createdAt)}</Text>
         <View style={{ flex: 1 }} />
         <TouchableOpacity
@@ -90,13 +115,55 @@ export default function ConfessionCard({
         {text}
       </Text>
 
-      {/* Reaction Bar */}
-      <ReactionBar
-        reactions={reactions}
-        userReactions={userReactions}
-        onToggleReaction={(type) => onReact(type)}
-        compact
-      />
+      {/* Emoji Reactions Display */}
+      <View style={styles.emojiRow}>
+        {topEmojis.filter((e) => isProbablyEmoji(e.emoji)).map((e, i) => (
+          <View key={i} style={styles.emojiChip}>
+            <Text style={styles.emojiText}>{e.emoji}</Text>
+            <Text style={styles.emojiCount}>{e.count}</Text>
+          </View>
+        ))}
+        {(() => {
+          const valid = topEmojis.filter((e) => isProbablyEmoji(e.emoji));
+          const visibleCount = valid.reduce((s, e) => s + e.count, 0);
+          const remaining = reactionCount - visibleCount;
+          return remaining > 0 && valid.length > 0 ? (
+            <Text style={styles.moreReactions}>+{remaining}</Text>
+          ) : null;
+        })()}
+        <TouchableOpacity
+          style={[styles.addEmojiButton, userEmoji ? styles.addEmojiButtonActive : null]}
+          onPress={onReact}
+          hitSlop={{ top: 6, bottom: 6, left: 4, right: 4 }}
+        >
+          {userEmoji ? (
+            <Text style={styles.userEmojiText}>{userEmoji}</Text>
+          ) : (
+            <Ionicons name="happy-outline" size={16} color={COLORS.textMuted} />
+          )}
+        </TouchableOpacity>
+      </View>
+
+      {/* Reply Previews (first 2 replies) */}
+      {replyPreviews.length > 0 && (
+        <View style={styles.replyPreviewSection}>
+          {replyPreviews.map((r, i) => (
+            <View key={i} style={styles.replyPreviewRow}>
+              <View style={styles.replyPreviewAvatar}>
+                <Ionicons name="chatbubble" size={8} color={COLORS.textMuted} />
+              </View>
+              <Text style={styles.replyPreviewText} numberOfLines={1}>
+                {r.type === 'voice' ? '🎙️ Voice reply' : r.text}
+              </Text>
+            </View>
+          ))}
+          {replyCount > 2 && (
+            <TouchableOpacity onPress={onPress}>
+              <Text style={styles.viewAllReplies}>View all {replyCount} replies</Text>
+            </TouchableOpacity>
+          )}
+        </View>
+      )}
 
       {/* Footer */}
       <View style={styles.footer}>
@@ -164,6 +231,82 @@ const styles = StyleSheet.create({
     lineHeight: 18,
     color: COLORS.text,
     marginBottom: 8,
+  },
+  emojiRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    marginBottom: 6,
+  },
+  emojiChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 3,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 14,
+    backgroundColor: COLORS.backgroundDark,
+  },
+  emojiText: {
+    fontSize: 13,
+  },
+  emojiCount: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: COLORS.textMuted,
+  },
+  moreReactions: {
+    fontSize: 11,
+    color: COLORS.textMuted,
+    fontWeight: '500',
+    marginLeft: 2,
+  },
+  addEmojiButton: {
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: COLORS.backgroundDark,
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: 'transparent',
+  },
+  addEmojiButtonActive: {
+    backgroundColor: 'rgba(255,107,107,0.1)',
+    borderColor: COLORS.primary,
+  },
+  userEmojiText: {
+    fontSize: 14,
+  },
+  replyPreviewSection: {
+    marginBottom: 6,
+    gap: 4,
+  },
+  replyPreviewRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingLeft: 4,
+  },
+  replyPreviewAvatar: {
+    width: 16,
+    height: 16,
+    borderRadius: 8,
+    backgroundColor: 'rgba(153,153,153,0.1)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  replyPreviewText: {
+    fontSize: 12,
+    color: COLORS.textMuted,
+    flex: 1,
+  },
+  viewAllReplies: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: COLORS.primary,
+    paddingLeft: 26,
+    marginTop: 2,
   },
   footer: {
     flexDirection: 'row',

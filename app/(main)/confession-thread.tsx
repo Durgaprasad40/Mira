@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useMemo, useEffect } from 'react';
+import React, { useState, useCallback, useMemo } from 'react';
 import {
   View,
   Text,
@@ -10,17 +10,22 @@ import {
   Platform,
   Alert,
 } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
+import { useQuery, useMutation } from 'convex/react';
+import { api } from '@/convex/_generated/api';
+import EmojiPicker from 'rn-emoji-keyboard';
+import * as Clipboard from 'expo-clipboard';
 import { COLORS, CONFESSION_TOPICS } from '@/lib/constants';
-import { ConfessionMood, ConfessionReply, ConfessionReactionType, ConfessionTopic, ConfessionChat } from '@/types';
+import { isProbablyEmoji } from '@/lib/utils';
+import { ConfessionMood, ConfessionReply, ConfessionChat } from '@/types';
 import { useAuthStore } from '@/stores/authStore';
 import { useConfessionStore } from '@/stores/confessionStore';
+import { isDemoMode } from '@/hooks/useConvex';
 import {
   DEMO_CONFESSION_REPLIES,
 } from '@/lib/demoData';
-import ReactionBar from '@/components/confessions/ReactionBar';
 import ConfessionChatModal from '@/components/confessions/ConfessionChatModal';
 
 const MOOD_CONFIG: Record<ConfessionMood, { emoji: string; label: string; color: string; bg: string }> = {
@@ -43,6 +48,7 @@ function getTimeAgo(timestamp: number): string {
 
 export default function ConfessionThreadScreen() {
   const router = useRouter();
+  const insets = useSafeAreaInsets();
   const { confessionId } = useLocalSearchParams<{ confessionId: string }>();
   const { userId } = useAuthStore();
   const currentUserId = userId || 'demo_user_1';
@@ -64,25 +70,121 @@ export default function ConfessionThreadScreen() {
     [confessions, confessionId]
   );
 
-  const [replies, setReplies] = useState<ConfessionReply[]>(
+  // Convex replies (live mode)
+  const convexReplies = useQuery(
+    api.confessions.getReplies,
+    !isDemoMode && confessionId ? { confessionId: confessionId as any } : 'skip'
+  );
+
+  // Local demo replies
+  const [demoReplies, setDemoReplies] = useState<ConfessionReply[]>(
     () => (confessionId ? DEMO_CONFESSION_REPLIES[confessionId] : undefined) || []
   );
+
+  const replies: ConfessionReply[] = useMemo(() => {
+    if (!isDemoMode && convexReplies) {
+      return convexReplies.map((r: any) => ({
+        id: r._id,
+        confessionId: r.confessionId,
+        userId: r.userId,
+        text: r.text,
+        isAnonymous: r.isAnonymous,
+        type: r.type || 'text',
+        voiceUrl: r.voiceUrl,
+        voiceDurationSec: r.voiceDurationSec,
+        createdAt: r.createdAt,
+      }));
+    }
+    return demoReplies;
+  }, [isDemoMode, convexReplies, demoReplies]);
+
   const [replyText, setReplyText] = useState('');
   const [activeChatModal, setActiveChatModal] = useState<ConfessionChat | null>(null);
+  const [showEmojiPicker, setShowEmojiPicker] = useState(false);
+  const [showReactionPicker, setShowReactionPicker] = useState(false);
 
-  const handleSendReply = useCallback(() => {
+  // Convex mutations
+  const createReplyMutation = useMutation(api.confessions.createReply);
+  const deleteReplyMutation = useMutation(api.confessions.deleteReply);
+  const reportMutation = useMutation(api.confessions.reportConfession);
+  const toggleReactionMutation = useMutation(api.confessions.toggleReaction);
+
+  const handleSendReply = useCallback(async () => {
     if (!replyText.trim() || !confessionId) return;
+
     const newReply: ConfessionReply = {
       id: `cr_new_${Date.now()}`,
       confessionId,
       userId: currentUserId,
       text: replyText.trim(),
       isAnonymous: true,
+      type: 'text',
       createdAt: Date.now(),
     };
-    setReplies((prev) => [...prev, newReply]);
+
+    setDemoReplies((prev) => [...prev, newReply]);
+    const submittedText = replyText.trim();
     setReplyText('');
-  }, [replyText, confessionId, currentUserId]);
+
+    if (!isDemoMode) {
+      try {
+        await createReplyMutation({
+          confessionId: confessionId as any,
+          userId: currentUserId as any,
+          text: submittedText,
+          isAnonymous: true,
+          type: 'text',
+        });
+      } catch (error: any) {
+        Alert.alert('Error', error.message || 'Failed to send reply');
+        setDemoReplies((prev) => prev.filter((r) => r.id !== newReply.id));
+      }
+    }
+  }, [replyText, confessionId, currentUserId, createReplyMutation]);
+
+  const handleDeleteReply = useCallback(async (reply: ConfessionReply) => {
+    if (reply.userId !== currentUserId) return;
+
+    Alert.alert('Delete Reply', 'Are you sure you want to delete this reply?', [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Delete',
+        style: 'destructive',
+        onPress: async () => {
+          setDemoReplies((prev) => prev.filter((r) => r.id !== reply.id));
+          if (!isDemoMode) {
+            try {
+              await deleteReplyMutation({
+                replyId: reply.id as any,
+                userId: currentUserId as any,
+              });
+            } catch (error: any) {
+              setDemoReplies((prev) => [...prev, reply]);
+              Alert.alert('Error', error.message || 'Failed to delete reply');
+            }
+          }
+        },
+      },
+    ]);
+  }, [currentUserId, deleteReplyMutation]);
+
+  const handleReactEmoji = useCallback(
+    (emojiObj: any) => {
+      if (!confession) return;
+      const emoji = emojiObj.emoji;
+      toggleReaction(confession.id, emoji);
+      if (!isDemoMode) {
+        toggleReactionMutation({
+          confessionId: confession.id as any,
+          userId: currentUserId as any,
+          type: emoji,
+        }).catch(() => {
+          toggleReaction(confession.id, emoji);
+        });
+      }
+    },
+    [confession, toggleReaction, toggleReactionMutation, currentUserId]
+  );
 
   const handleReplyAnonymously = useCallback(() => {
     if (!confession || !confessionId) return;
@@ -137,11 +239,34 @@ export default function ConfessionThreadScreen() {
         style: 'destructive',
         onPress: () => {
           reportConfession(confessionId);
+          if (!isDemoMode) {
+            reportMutation({
+              confessionId: confessionId as any,
+              reporterId: currentUserId as any,
+            }).catch(() => {});
+          }
           router.back();
         },
       },
     ]);
-  }, [confessionId, reportConfession, router]);
+  }, [confessionId, reportConfession, reportMutation, currentUserId, router]);
+
+  const handleCopyText = useCallback(async () => {
+    if (!confession) return;
+    await Clipboard.setStringAsync(confession.text);
+  }, [confession]);
+
+  const handleMenu = useCallback(() => {
+    Alert.alert('Options', undefined, [
+      { text: 'Copy Text', onPress: handleCopyText },
+      { text: 'Report', style: 'destructive', onPress: handleReport },
+      { text: 'Cancel', style: 'cancel' },
+    ]);
+  }, [handleCopyText, handleReport]);
+
+  const handleEmojiSelected = useCallback((emoji: any) => {
+    setReplyText((prev) => prev + emoji.emoji);
+  }, []);
 
   if (!confession) {
     return (
@@ -161,12 +286,14 @@ export default function ConfessionThreadScreen() {
   const badgeInfo = confession.topic
     ? CONFESSION_TOPICS[confession.topic]
     : MOOD_CONFIG[confession.mood];
-  const reactions = confession.reactions || { relatable: 0, feel_you: 0, bold: 0, curious: 0 };
-  const myReactions = userReactions[confession.id] || [];
+  const rawReaction = userReactions[confession.id] || null;
+  const myReaction = rawReaction && isProbablyEmoji(rawReaction) ? rawReaction : null;
+  const topEmojis = confession.topEmojis || [];
   const isOP = (replyUserId: string) => replyUserId === confession.userId;
+  const displayName = confession.isAnonymous ? 'Anonymous' : ((confession as any).authorName || 'Someone');
 
   return (
-    <SafeAreaView style={styles.container}>
+    <SafeAreaView style={styles.container} edges={['top']}>
       <KeyboardAvoidingView
         style={{ flex: 1 }}
         behavior={Platform.OS === 'ios' ? 'padding' : undefined}
@@ -178,7 +305,7 @@ export default function ConfessionThreadScreen() {
             <Ionicons name="arrow-back" size={24} color={COLORS.text} />
           </TouchableOpacity>
           <Text style={styles.navTitle}>Thread</Text>
-          <TouchableOpacity onPress={handleReport} hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}>
+          <TouchableOpacity onPress={handleMenu} hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}>
             <Ionicons name="ellipsis-vertical" size={20} color={COLORS.text} />
           </TouchableOpacity>
         </View>
@@ -198,9 +325,7 @@ export default function ConfessionThreadScreen() {
                       color={confession.isAnonymous ? COLORS.textMuted : COLORS.primary}
                     />
                   </View>
-                  <Text style={styles.authorName}>
-                    {confession.isAnonymous ? 'Anonymous' : 'Someone'}
-                  </Text>
+                  <Text style={styles.authorName}>{displayName}</Text>
                   <Text style={styles.timeAgo}>{getTimeAgo(confession.createdAt)}</Text>
                 </View>
                 <View style={[styles.topicBadge, { backgroundColor: badgeInfo.bg }]}>
@@ -212,12 +337,26 @@ export default function ConfessionThreadScreen() {
               {/* Full text */}
               <Text style={styles.confessionText}>{confession.text}</Text>
 
-              {/* Reactions */}
-              <ReactionBar
-                reactions={reactions}
-                userReactions={myReactions}
-                onToggleReaction={(type) => toggleReaction(confession.id, type)}
-              />
+              {/* Emoji Reactions (free emoji display) */}
+              <View style={styles.emojiRow}>
+                {topEmojis.filter((e) => isProbablyEmoji(e.emoji)).map((e, i) => (
+                  <View key={i} style={styles.emojiChip}>
+                    <Text style={styles.emojiText}>{e.emoji}</Text>
+                    <Text style={styles.emojiCount}>{e.count}</Text>
+                  </View>
+                ))}
+                <TouchableOpacity
+                  style={[styles.addEmojiButton, myReaction ? styles.addEmojiButtonActive : null]}
+                  onPress={() => setShowReactionPicker(true)}
+                  hitSlop={{ top: 6, bottom: 6, left: 4, right: 4 }}
+                >
+                  {myReaction ? (
+                    <Text style={styles.userEmojiText}>{myReaction}</Text>
+                  ) : (
+                    <Ionicons name="happy-outline" size={18} color={COLORS.textMuted} />
+                  )}
+                </TouchableOpacity>
+              </View>
 
               {/* Anonymous Reply Button */}
               <TouchableOpacity style={styles.anonReplyButton} onPress={handleReplyAnonymously}>
@@ -228,12 +367,20 @@ export default function ConfessionThreadScreen() {
               {/* Divider */}
               <View style={styles.divider} />
               <Text style={styles.repliesHeader}>
-                {replies.length > 0 ? 'Replies' : 'No replies yet. Be the first!'}
+                {replies.length > 0 ? `${replies.length} ${replies.length === 1 ? 'Reply' : 'Replies'}` : 'No replies yet. Be the first!'}
               </Text>
             </View>
           }
           renderItem={({ item }) => (
-            <View style={styles.replyCard}>
+            <TouchableOpacity
+              style={styles.replyCard}
+              onLongPress={() => {
+                if (item.userId === currentUserId) {
+                  handleDeleteReply(item);
+                }
+              }}
+              activeOpacity={0.8}
+            >
               <View style={styles.replyHeader}>
                 <View style={[styles.replyAvatar, item.isAnonymous && styles.avatarAnonymous]}>
                   <Ionicons
@@ -250,17 +397,36 @@ export default function ConfessionThreadScreen() {
                     <Text style={styles.opBadgeText}>OP</Text>
                   </View>
                 )}
+                {item.type === 'voice' && (
+                  <View style={styles.voiceBadge}>
+                    <Ionicons name="mic" size={10} color={COLORS.primary} />
+                  </View>
+                )}
                 <Text style={styles.replyTime}>{getTimeAgo(item.createdAt)}</Text>
+                {item.userId === currentUserId && (
+                  <TouchableOpacity
+                    onPress={() => handleDeleteReply(item)}
+                    hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                    style={{ marginLeft: 4 }}
+                  >
+                    <Ionicons name="trash-outline" size={14} color={COLORS.textMuted} />
+                  </TouchableOpacity>
+                )}
               </View>
-              <Text style={styles.replyText}>{item.text}</Text>
-            </View>
+              <Text style={styles.replyText}>
+                {item.type === 'voice' ? `🎙️ Voice reply (${item.voiceDurationSec || 0}s)` : item.text}
+              </Text>
+            </TouchableOpacity>
           )}
-          contentContainerStyle={styles.listContent}
+          contentContainerStyle={[styles.listContent, { paddingBottom: 16 + insets.bottom }]}
           showsVerticalScrollIndicator={false}
         />
 
-        {/* Reply Input */}
-        <View style={styles.replyInputBar}>
+        {/* Reply Input Bar — text + emoji only (no camera/media) */}
+        <View style={[styles.replyInputBar, { paddingBottom: Math.max(insets.bottom, 10) }]}>
+          <TouchableOpacity onPress={() => setShowEmojiPicker(true)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+            <Ionicons name="happy-outline" size={22} color={COLORS.textMuted} />
+          </TouchableOpacity>
           <TextInput
             style={styles.replyInput}
             placeholder="Reply anonymously..."
@@ -286,6 +452,20 @@ export default function ConfessionThreadScreen() {
           </TouchableOpacity>
         </View>
       </KeyboardAvoidingView>
+
+      {/* Emoji Picker for reply text */}
+      <EmojiPicker
+        onEmojiSelected={handleEmojiSelected}
+        open={showEmojiPicker}
+        onClose={() => setShowEmojiPicker(false)}
+      />
+
+      {/* Emoji Picker for reactions */}
+      <EmojiPicker
+        onEmojiSelected={handleReactEmoji}
+        open={showReactionPicker}
+        onClose={() => setShowReactionPicker(false)}
+      />
 
       {/* Chat Modal */}
       <ConfessionChatModal
@@ -401,11 +581,51 @@ const styles = StyleSheet.create({
     color: COLORS.text,
     marginBottom: 16,
   },
+  emojiRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    marginBottom: 8,
+  },
+  emojiChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 3,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 16,
+    backgroundColor: COLORS.backgroundDark,
+  },
+  emojiText: {
+    fontSize: 14,
+  },
+  emojiCount: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: COLORS.textMuted,
+  },
+  addEmojiButton: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: COLORS.backgroundDark,
+    justifyContent: 'center',
+    alignItems: 'center',
+    borderWidth: 1,
+    borderColor: 'transparent',
+  },
+  addEmojiButtonActive: {
+    backgroundColor: 'rgba(255,107,107,0.1)',
+    borderColor: COLORS.primary,
+  },
+  userEmojiText: {
+    fontSize: 16,
+  },
   anonReplyButton: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 6,
-    marginTop: 12,
+    marginTop: 4,
     paddingVertical: 8,
     paddingHorizontal: 14,
     borderRadius: 20,
@@ -465,6 +685,12 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     color: COLORS.white,
   },
+  voiceBadge: {
+    backgroundColor: 'rgba(255,107,107,0.1)',
+    paddingHorizontal: 4,
+    paddingVertical: 2,
+    borderRadius: 6,
+  },
   replyTime: {
     fontSize: 11,
     color: COLORS.textMuted,
@@ -483,7 +709,7 @@ const styles = StyleSheet.create({
     alignItems: 'flex-end',
     backgroundColor: COLORS.white,
     paddingHorizontal: 12,
-    paddingVertical: 10,
+    paddingTop: 10,
     borderTopWidth: StyleSheet.hairlineWidth,
     borderTopColor: COLORS.border,
     gap: 8,
