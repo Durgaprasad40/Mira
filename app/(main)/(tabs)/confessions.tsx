@@ -199,20 +199,6 @@ export default function ConfessionsScreen() {
 
       addConfession(newConfession);
 
-      if (!isDemoMode) {
-        try {
-          await createConfessionMutation({
-            userId: currentUserId as any,
-            text: text.trim(),
-            isAnonymous,
-            mood: 'emotional' as any,
-            visibility: 'global' as any,
-          });
-        } catch (error: any) {
-          Alert.alert('Error', error.message || 'Failed to post confession');
-        }
-      }
-
       if (timedReveal && timedReveal !== 'never' && targetUserId) {
         setTimedReveal(confessionId, timedReveal, targetUserId);
       }
@@ -230,6 +216,7 @@ export default function ConfessionsScreen() {
         });
       }
 
+      // Close modal and show toast immediately (before network call)
       setShowCompose(false);
 
       setShowToast(true);
@@ -238,6 +225,19 @@ export default function ConfessionsScreen() {
         Animated.delay(1500),
         Animated.timing(toastOpacity, { toValue: 0, duration: 250, useNativeDriver: true }),
       ]).start(() => setShowToast(false));
+
+      // Sync to backend in the background
+      if (!isDemoMode) {
+        createConfessionMutation({
+          userId: currentUserId as any,
+          text: text.trim(),
+          isAnonymous,
+          mood: 'emotional' as any,
+          visibility: 'global' as any,
+        }).catch((error: any) => {
+          Alert.alert('Error', error.message || 'Failed to post confession');
+        });
+      }
     },
     [currentUserId, addConfession, setTimedReveal, toastOpacity, createConfessionMutation]
   );

@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import {
   View,
   Text,
@@ -53,12 +53,31 @@ export default function ComposeConfessionModal({
   const [revealPolicy, setRevealPolicy] = useState<ConfessionRevealPolicy>('never');
   const [timedReveal, setTimedReveal] = useState<TimedRevealOption>('never');
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
   const inputRef = useRef<TextInput>(null);
 
-  const canSubmit = text.trim().length >= 10;
+  const resetForm = () => {
+    setText('');
+    setIsAnonymous(true);
+    setConfessToSomeone(false);
+    setTargetUserId(undefined);
+    setTargetName(undefined);
+    setRevealPolicy('never');
+    setTimedReveal('never');
+    setIsSubmitting(false);
+  };
+
+  // Reset form when modal closes (after successful post or manual close)
+  useEffect(() => {
+    if (!visible) {
+      resetForm();
+    }
+  }, [visible]);
+
+  const canSubmit = text.trim().length >= 10 && !isSubmitting;
 
   const handleSubmit = () => {
-    if (!canSubmit) return;
+    if (!canSubmit || isSubmitting) return;
     const trimmed = text.trim();
     const phonePattern = /\b\d{10,}\b|\b\d{3}[-.\s]?\d{3}[-.\s]?\d{4}\b/;
     const emailPattern = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/;
@@ -70,6 +89,7 @@ export default function ComposeConfessionModal({
       Alert.alert('Content Warning', 'Your confession contains inappropriate content. Please revise it.');
       return;
     }
+    setIsSubmitting(true);
     onSubmit(
       text.trim(),
       isAnonymous,
@@ -79,13 +99,8 @@ export default function ComposeConfessionModal({
       confessToSomeone ? timedReveal : 'never',
       undefined, // no imageUrl — removed camera/gallery
     );
-    setText('');
-    setIsAnonymous(true);
-    setConfessToSomeone(false);
-    setTargetUserId(undefined);
-    setTargetName(undefined);
-    setRevealPolicy('never');
-    setTimedReveal('never');
+    // Don't reset form here — parent closes modal via visible=false,
+    // and we reset on close so the user never sees the draft vanish.
   };
 
   const handleSelectPerson = (userId: string, name: string) => {
@@ -117,11 +132,11 @@ export default function ComposeConfessionModal({
           <Text style={styles.headerTitle}>New Confession</Text>
           <TouchableOpacity
             onPress={handleSubmit}
-            disabled={!canSubmit}
-            style={[styles.submitButton, !canSubmit && styles.submitButtonDisabled]}
+            disabled={!canSubmit || isSubmitting}
+            style={[styles.submitButton, (!canSubmit || isSubmitting) && styles.submitButtonDisabled]}
           >
-            <Text style={[styles.submitText, !canSubmit && styles.submitTextDisabled]}>
-              Post
+            <Text style={[styles.submitText, (!canSubmit || isSubmitting) && styles.submitTextDisabled]}>
+              {isSubmitting ? 'Posting...' : 'Post'}
             </Text>
           </TouchableOpacity>
         </View>
