@@ -193,9 +193,9 @@ export default function PrivateChatView({ dm, onBack, topInset = 0 }: PrivateCha
           )}
           <View style={styles.bubbleOther}>
             {isMedia ? (
-              <MediaBubble
+              <MediaMessage
                 mediaUrl={item.mediaUrl!}
-                messageType={item.type as 'image' | 'video'}
+                type={item.type as 'image' | 'video'}
                 onPress={() => handleMediaPress(item.mediaUrl!, item.type as 'image' | 'video')}
               />
             ) : (

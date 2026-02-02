@@ -12,7 +12,7 @@ import {
   NativeSyntheticEvent,
   NativeScrollEvent,
 } from 'react-native';
-import { FlashList } from '@shopify/flash-list';
+import { FlashList, type FlashListRef } from '@shopify/flash-list';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useQuery, useMutation } from 'convex/react';
@@ -47,7 +47,7 @@ export default function ChatScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const { userId } = useAuthStore();
-  const flatListRef = useRef<FlashList<any>>(null);
+  const flatListRef = useRef<FlashListRef<any>>(null);
 
   // Measured header height — used as keyboardVerticalOffset so KAV
   // adjusts correctly regardless of device notch / status-bar height.
@@ -341,7 +341,6 @@ export default function ChatScreen() {
           }}
           onScroll={onScroll}
           scrollEventThrottle={16}
-          estimatedItemSize={60}
           keyboardShouldPersistTaps="handled"
           keyboardDismissMode="interactive"
         />

@@ -33,15 +33,15 @@ export default function FriendRequestsPopover({
 
   const renderRow = ({ item }: { item: DemoFriendRequest }) => (
     <View style={styles.row}>
-      {item.fromAvatar ? (
-        <Image source={{ uri: item.fromAvatar }} style={styles.avatar} />
+      {item.fromUserAvatar ? (
+        <Image source={{ uri: item.fromUserAvatar }} style={styles.avatar} />
       ) : (
         <View style={styles.avatarPlaceholder}>
           <Ionicons name="person" size={14} color={C.textLight} />
         </View>
       )}
       <Text style={styles.name} numberOfLines={1}>
-        {item.fromName}
+        {item.fromUserName}
       </Text>
       <TouchableOpacity
         onPress={() => onAccept(item.id)}

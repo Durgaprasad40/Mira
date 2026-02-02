@@ -99,7 +99,7 @@ export default function PrivateLayout() {
   }
 
   return (
-    <Stack screenOptions={{ headerShown: false, unmountOnBlur: true }}>
+    <Stack screenOptions={{ headerShown: false }}>
       <Stack.Screen name="(tabs)" />
     </Stack>
   );

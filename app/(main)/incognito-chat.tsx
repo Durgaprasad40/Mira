@@ -13,7 +13,7 @@ import {
   NativeScrollEvent,
 } from 'react-native';
 import { Image } from 'expo-image';
-import { FlashList } from '@shopify/flash-list';
+import { FlashList, type FlashListRef } from '@shopify/flash-list';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
@@ -27,7 +27,7 @@ export default function PrivateChatScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const router = useRouter();
   const insets = useSafeAreaInsets();
-  const flatListRef = useRef<FlashList<IncognitoMessage>>(null);
+  const flatListRef = useRef<FlashListRef<IncognitoMessage>>(null);
 
   // Measured header height for KAV offset
   const [headerHeight, setHeaderHeight] = useState(0);
@@ -197,7 +197,6 @@ export default function PrivateChatScreen() {
           }}
           onScroll={onScroll}
           scrollEventThrottle={16}
-          estimatedItemSize={70}
           keyboardShouldPersistTaps="handled"
           keyboardDismissMode="interactive"
         />

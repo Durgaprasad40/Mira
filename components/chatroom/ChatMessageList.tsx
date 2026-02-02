@@ -1,6 +1,6 @@
 import React, { useRef, useEffect, useCallback, useState, forwardRef, useImperativeHandle } from 'react';
 import { View, Text, TouchableOpacity, StyleSheet } from 'react-native';
-import { FlashList } from '@shopify/flash-list';
+import { FlashList, type FlashListRef } from '@shopify/flash-list';
 import { Ionicons } from '@expo/vector-icons';
 import { INCOGNITO_COLORS } from '@/lib/constants';
 import { DemoChatMessage } from '@/lib/demoData';
@@ -77,7 +77,7 @@ const ChatMessageList = forwardRef<ChatMessageListHandle, ChatMessageListProps>(
   onMediaPress,
   contentPaddingBottom = 0,
 }, ref) {
-  const listRef = useRef<FlashList<ListItem>>(null);
+  const listRef = useRef<FlashListRef<ListItem>>(null);
   const [isAtBottom, setIsAtBottom] = useState(true);
   const [newMessageCount, setNewMessageCount] = useState(0);
   const prevLengthRef = useRef(messages.length);
@@ -189,7 +189,6 @@ const ChatMessageList = forwardRef<ChatMessageListHandle, ChatMessageListProps>(
         data={listItems}
         keyExtractor={keyExtractor}
         renderItem={renderItem}
-        estimatedItemSize={44}
         showsVerticalScrollIndicator={false}
         contentContainerStyle={{
           flexGrow: 1,

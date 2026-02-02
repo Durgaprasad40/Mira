@@ -33,7 +33,7 @@ export default function ActiveUsersStrip({
   onMorePress,
   theme = 'light',
 }: ActiveUsersStripProps) {
-  const C = theme === 'dark' ? INCOGNITO_COLORS : COLORS;
+  const C = theme === 'dark' ? INCOGNITO_COLORS : COLORS as any;
   const onlineUsers = users.filter((u) => u.isOnline);
 
   if (onlineUsers.length === 0) return null;

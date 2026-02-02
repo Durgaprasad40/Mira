@@ -50,13 +50,7 @@ export default function NotificationsPopover({
     <View style={[styles.row, !item.seen && styles.rowUnseen]}>
       <View style={styles.iconCircle}>
         <Ionicons
-          name={
-            item.type === 'update'
-              ? 'megaphone-outline'
-              : item.type === 'event'
-                ? 'calendar-outline'
-                : 'information-circle-outline'
-          }
+          name="information-circle-outline"
           size={16}
           color={C.primary}
         />
