@@ -1,4 +1,4 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, useRef } from 'react';
 import { View, StyleSheet, ActivityIndicator } from 'react-native';
 import { useRouter } from 'expo-router';
 import { INCOGNITO_COLORS } from '@/lib/constants';
@@ -6,15 +6,26 @@ import { INCOGNITO_COLORS } from '@/lib/constants';
 const C = INCOGNITO_COLORS;
 
 /**
- * Thin redirect screen — immediately navigates to the Face 2 (Private) app shell.
- * Uses push (not replace) so Android back button can return to Face 1.
+ * Thin redirect screen — navigates to the Face 2 (Private) app shell.
+ * Uses router.navigate (idempotent) to avoid pushing duplicate stack entries
+ * when the user re-enters the Private tab.
  * Consent gate and setup checks are handled by (private)/_layout.tsx.
  */
 export default function PrivateRedirectScreen() {
   const router = useRouter();
+  const didNavigate = useRef(false);
 
   useEffect(() => {
-    router.push('/(main)/(private)/(tabs)/desire-land' as any);
+    // Guard: only navigate once per mount
+    if (didNavigate.current) return;
+    didNavigate.current = true;
+
+    // Use navigate (not push) — idempotent, won't stack duplicates
+    router.navigate('/(main)/(private)/(tabs)/desire-land' as any);
+
+    return () => {
+      didNavigate.current = false;
+    };
   }, [router]);
 
   return (

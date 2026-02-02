@@ -2,25 +2,15 @@ import { useEffect } from "react";
 import { Stack } from "expo-router";
 import { ConvexProvider, useMutation } from "convex/react";
 import { convex, isDemoMode } from "@/hooks/useConvex";
-import { View, Text, StyleSheet } from "react-native";
+
 import { GestureHandlerRootView } from "react-native-gesture-handler";
 import { StatusBar } from "expo-status-bar";
-import { Camera } from "expo-camera";
-import * as ImagePicker from "expo-image-picker";
 import { api } from "@/convex/_generated/api";
 import { useAuthStore } from "@/stores/authStore";
 import { collectDeviceFingerprint } from "@/lib/deviceFingerprint";
 
 function DemoBanner() {
-  if (!isDemoMode) return null;
-
-  return (
-    <View style={styles.demoBanner}>
-      <Text style={styles.demoText}>
-        🎮 DEMO MODE - Run "npx convex dev" to connect backend
-      </Text>
-    </View>
-  );
+  return null;
 }
 
 function DeviceFingerprintCollector() {
@@ -47,13 +37,11 @@ function DeviceFingerprintCollector() {
 }
 
 export default function RootLayout() {
-  useEffect(() => {
-    (async () => {
-      await Camera.requestCameraPermissionsAsync();
-      await Camera.requestMicrophonePermissionsAsync();
-      await ImagePicker.requestMediaLibraryPermissionsAsync();
-    })();
-  }, []);
+  // Permissions are NOT requested here. Each screen that needs camera,
+  // microphone, or media library access requests permission at point of
+  // use (e.g. AttachmentPopup, camera-composer, photo-upload).
+  // Requesting at launch violates App Store guidelines and causes users
+  // to deny permissions before they understand why they're needed.
 
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>
@@ -65,22 +53,10 @@ export default function RootLayout() {
           <Stack.Screen name="index" />
           <Stack.Screen name="(auth)" />
           <Stack.Screen name="(onboarding)" />
-          <Stack.Screen name="(main)" />
+          <Stack.Screen name="(main)" options={{ gestureEnabled: false }} />
         </Stack>
       </ConvexProvider>
     </GestureHandlerRootView>
   );
 }
 
-const styles = StyleSheet.create({
-  demoBanner: {
-    backgroundColor: "#FF6B6B",
-    padding: 8,
-    alignItems: "center",
-  },
-  demoText: {
-    color: "white",
-    fontSize: 12,
-    fontWeight: "600",
-  },
-});

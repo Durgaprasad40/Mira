@@ -1,4 +1,4 @@
-import { DiscoverNotification, DiscoveryFeedItem, Confession, ConfessionReply } from '@/types';
+import { DiscoverNotification, DiscoveryFeedItem, Confession, ConfessionReply, ConfessionReactionType, ConfessionChat, SecretCrush } from '@/types';
 
 // Demo data for testing the app without Convex backend
 
@@ -1717,6 +1717,8 @@ export const DEMO_CONFESSIONS: Confession[] = [
     text: 'I matched with someone on here and we ended up being neighbors. We wave awkwardly every morning now.',
     isAnonymous: true,
     mood: 'funny',
+    topic: 'funny',
+    reactions: { relatable: 12, feel_you: 4, bold: 3, curious: 5 },
     visibility: 'global',
     replyCount: 5,
     reactionCount: 24,
@@ -1728,6 +1730,8 @@ export const DEMO_CONFESSIONS: Confession[] = [
     text: 'I still think about my college crush. We never spoke but I knew their entire timetable by heart.',
     isAnonymous: true,
     mood: 'romantic',
+    topic: 'crush',
+    reactions: { relatable: 20, feel_you: 12, bold: 5, curious: 5 },
     visibility: 'global',
     replyCount: 8,
     reactionCount: 42,
@@ -1739,6 +1743,8 @@ export const DEMO_CONFESSIONS: Confession[] = [
     text: 'I pretend to be on a call whenever I see my ex at the coffee shop. It has been 8 months.',
     isAnonymous: false,
     mood: 'funny',
+    topic: 'heartbreak',
+    reactions: { relatable: 30, feel_you: 20, bold: 7, curious: 10 },
     visibility: 'global',
     replyCount: 12,
     reactionCount: 67,
@@ -1750,6 +1756,8 @@ export const DEMO_CONFESSIONS: Confession[] = [
     text: 'I wrote a love letter but never sent it. I still have it folded in my wallet after 3 years.',
     isAnonymous: true,
     mood: 'emotional',
+    topic: 'heartbreak',
+    reactions: { relatable: 35, feel_you: 30, bold: 10, curious: 14 },
     visibility: 'global',
     replyCount: 15,
     reactionCount: 89,
@@ -1761,6 +1769,8 @@ export const DEMO_CONFESSIONS: Confession[] = [
     text: 'My friends think I am over them. I am not. I listen to our playlist every single night.',
     isAnonymous: true,
     mood: 'emotional',
+    topic: 'heartbreak',
+    reactions: { relatable: 25, feel_you: 18, bold: 2, curious: 10 },
     visibility: 'global',
     replyCount: 7,
     reactionCount: 55,
@@ -1772,6 +1782,8 @@ export const DEMO_CONFESSIONS: Confession[] = [
     text: 'I accidentally liked a 3-year-old photo while stalking my crush. I deleted the app for a week.',
     isAnonymous: true,
     mood: 'spicy',
+    topic: 'spicy',
+    reactions: { relatable: 40, feel_you: 25, bold: 20, curious: 18 },
     visibility: 'global',
     replyCount: 20,
     reactionCount: 103,
@@ -1783,6 +1795,8 @@ export const DEMO_CONFESSIONS: Confession[] = [
     text: 'I once drove 200km just because she said "I wish you were here." Best road trip of my life.',
     isAnonymous: false,
     mood: 'romantic',
+    topic: 'crush',
+    reactions: { relatable: 30, feel_you: 20, bold: 18, curious: 10 },
     visibility: 'global',
     replyCount: 9,
     reactionCount: 78,
@@ -1794,10 +1808,64 @@ export const DEMO_CONFESSIONS: Confession[] = [
     text: 'I rehearse conversations in the shower before texting my crush. I still end up sending "haha nice".',
     isAnonymous: true,
     mood: 'funny',
+    topic: 'crush',
+    reactions: { relatable: 40, feel_you: 25, bold: 10, curious: 16 },
     visibility: 'global',
     replyCount: 18,
     reactionCount: 91,
     createdAt: Date.now() - 1000 * 60 * 60 * 36,
+  },
+  {
+    id: 'conf_9',
+    userId: 'demo_profile_1',
+    text: 'At 3 AM I texted my ex "I miss you" and then immediately threw my phone across the room. Woke up to "who is this?"',
+    isAnonymous: true,
+    mood: 'funny',
+    topic: 'late_night',
+    reactions: { relatable: 22, feel_you: 15, bold: 8, curious: 12 },
+    visibility: 'global',
+    replyCount: 11,
+    reactionCount: 57,
+    createdAt: Date.now() - 1000 * 60 * 60 * 40,
+  },
+  {
+    id: 'conf_10',
+    userId: 'demo_profile_2',
+    text: 'My college roommate and I had a secret crush on the same person. We found out at graduation. We all laughed. I cried later.',
+    isAnonymous: true,
+    mood: 'emotional',
+    topic: 'college',
+    reactions: { relatable: 18, feel_you: 22, bold: 5, curious: 8 },
+    visibility: 'global',
+    replyCount: 6,
+    reactionCount: 53,
+    createdAt: Date.now() - 1000 * 60 * 60 * 48,
+  },
+  {
+    id: 'conf_11',
+    userId: 'demo_profile_3',
+    text: 'My manager and I had a moment during a late meeting. Nothing happened but now every 1:1 feels different.',
+    isAnonymous: true,
+    mood: 'spicy',
+    topic: 'office',
+    reactions: { relatable: 15, feel_you: 10, bold: 20, curious: 25 },
+    visibility: 'global',
+    replyCount: 14,
+    reactionCount: 70,
+    createdAt: Date.now() - 1000 * 60 * 60 * 55,
+  },
+  {
+    id: 'conf_12',
+    userId: 'demo_profile_4',
+    text: 'I sit in the college library not to study but because my crush studies there every evening. I have read 0 books.',
+    isAnonymous: true,
+    mood: 'funny',
+    topic: 'college',
+    reactions: { relatable: 28, feel_you: 12, bold: 6, curious: 10 },
+    visibility: 'global',
+    replyCount: 9,
+    reactionCount: 56,
+    createdAt: Date.now() - 1000 * 60 * 60 * 60,
   },
 ];
 
@@ -1828,11 +1896,64 @@ export const DEMO_CONFESSION_REPLIES: Record<string, ConfessionReply[]> = {
 };
 
 // Demo Confession Reaction State (which confessions the demo user has reacted to)
-export const DEMO_CONFESSION_USER_REACTIONS: Record<string, boolean> = {
-  conf_2: true,
-  conf_4: true,
-  conf_6: true,
+export const DEMO_CONFESSION_USER_REACTIONS: Record<string, ConfessionReactionType[]> = {
+  conf_2: ['relatable'],
+  conf_4: ['relatable', 'feel_you'],
+  conf_6: ['bold'],
 };
+
+// Demo Confession Chats (anonymous temporary chats)
+export const DEMO_CONFESSION_CHATS: ConfessionChat[] = [
+  {
+    id: 'cc_1',
+    confessionId: 'conf_2',
+    initiatorId: 'demo_user_1',
+    responderId: 'demo_profile_2',
+    messages: [
+      { id: 'ccm_1', chatId: 'cc_1', senderId: 'demo_user_1', text: 'This hit me hard. Did you ever reach out?', createdAt: Date.now() - 1000 * 60 * 60 },
+      { id: 'ccm_2', chatId: 'cc_1', senderId: 'demo_profile_2', text: 'No, I was too scared. Still am.', createdAt: Date.now() - 1000 * 60 * 55 },
+    ],
+    isRevealed: false,
+    createdAt: Date.now() - 1000 * 60 * 60,
+    expiresAt: Date.now() + 1000 * 60 * 60 * 23,
+  },
+  {
+    id: 'cc_2',
+    confessionId: 'conf_4',
+    initiatorId: 'demo_profile_5',
+    responderId: 'demo_profile_4',
+    messages: [
+      { id: 'ccm_3', chatId: 'cc_2', senderId: 'demo_profile_5', text: 'Send the letter. Life is too short.', createdAt: Date.now() - 1000 * 60 * 120 },
+      { id: 'ccm_4', chatId: 'cc_2', senderId: 'demo_profile_4', text: 'What if they have moved on?', createdAt: Date.now() - 1000 * 60 * 115 },
+      { id: 'ccm_5', chatId: 'cc_2', senderId: 'demo_profile_5', text: 'Then at least you will know. Closure is a gift.', createdAt: Date.now() - 1000 * 60 * 110 },
+    ],
+    isRevealed: false,
+    createdAt: Date.now() - 1000 * 60 * 120,
+    expiresAt: Date.now() + 1000 * 60 * 60 * 22,
+  },
+];
+
+// Demo Secret Crushes
+export const DEMO_SECRET_CRUSHES: SecretCrush[] = [
+  {
+    id: 'sc_1',
+    fromUserId: 'demo_profile_1',
+    toUserId: 'demo_user_1',
+    confessionText: 'I have been wanting to tell you this for weeks... you have the most genuine smile.',
+    isRevealed: false,
+    createdAt: Date.now() - 1000 * 60 * 60 * 2,
+    expiresAt: Date.now() + 1000 * 60 * 60 * 46,
+  },
+  {
+    id: 'sc_2',
+    fromUserId: 'demo_profile_3',
+    toUserId: 'demo_user_1',
+    confessionText: 'Every time I see your profile I want to say hi but I chicken out. So here goes... hi.',
+    isRevealed: false,
+    createdAt: Date.now() - 1000 * 60 * 60 * 5,
+    expiresAt: Date.now() + 1000 * 60 * 60 * 43,
+  },
+];
 
 // Demo Chat Rooms
 export interface DemoChatRoom {
@@ -1851,7 +1972,7 @@ export interface DemoChatMessage {
   senderId: string;
   senderName: string;
   senderAvatar?: string;
-  type: 'text' | 'image' | 'gif' | 'video' | 'system';
+  type: 'text' | 'image' | 'video' | 'system';
   text?: string;
   mediaUrl?: string;
   createdAt: number;
@@ -1967,7 +2088,7 @@ export interface DemoPrivateMessage {
   senderId: string;
   senderName: string;
   text: string;
-  type?: 'text' | 'image' | 'gif' | 'video';
+  type?: 'text' | 'image' | 'video';
   mediaUrl?: string;
   createdAt: number;
 }

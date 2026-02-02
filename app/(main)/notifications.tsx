@@ -106,6 +106,15 @@ export default function NotificationsScreen() {
       case 'crossed_paths':
         router.push('/(main)/crossed-paths');
         break;
+      case 'confession_reaction':
+      case 'confession_reply':
+        if (notification.data?.confessionId) {
+          router.push({
+            pathname: '/(main)/confession-thread',
+            params: { confessionId: notification.data.confessionId },
+          } as any);
+        }
+        break;
       default:
         break;
     }
@@ -128,6 +137,10 @@ export default function NotificationsScreen() {
         return 'location';
       case 'weekly_refresh':
         return 'refresh';
+      case 'confession_reaction':
+        return 'heart';
+      case 'confession_reply':
+        return 'chatbubble-ellipses';
       default:
         return 'notifications';
     }
@@ -146,6 +159,9 @@ export default function NotificationsScreen() {
         return COLORS.superLike;
       case 'crossed_paths':
         return '#FF9800';
+      case 'confession_reaction':
+      case 'confession_reply':
+        return '#9C27B0';
       default:
         return COLORS.textLight;
     }

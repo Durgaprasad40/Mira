@@ -1,16 +1,16 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useCallback, useEffect } from 'react';
 import {
   View,
   Text,
   StyleSheet,
-  FlatList,
   TextInput,
   TouchableOpacity,
-  Image,
-  KeyboardAvoidingView,
-  Platform,
-  Alert,
+  LayoutChangeEvent,
+  NativeSyntheticEvent,
+  NativeScrollEvent,
 } from 'react-native';
+import { Image } from 'expo-image';
+import { FlashList } from '@shopify/flash-list';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
@@ -19,12 +19,36 @@ import { maskExplicitWords, MASKED_CONTENT_NOTICE } from '@/lib/contentFilter';
 import { usePrivateChatStore } from '@/stores/privateChatStore';
 import { ReportModal } from '@/components/private/ReportModal';
 import type { IncognitoMessage } from '@/types';
+import { useKeyboardHeight } from '@/hooks/useKeyboardHeight';
 
 export default function PrivateChatScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const router = useRouter();
   const insets = useSafeAreaInsets();
-  const flatListRef = useRef<FlatList>(null);
+  const keyboardHeight = useKeyboardHeight();
+  const flatListRef = useRef<FlashList<IncognitoMessage>>(null);
+
+  // Measured header height for KAV offset
+  const [headerHeight, setHeaderHeight] = useState(0);
+  const onHeaderLayout = useCallback((e: LayoutChangeEvent) => {
+    setHeaderHeight(e.nativeEvent.layout.height);
+  }, []);
+
+  // Measured composer height for list paddingBottom
+  const [composerHeight, setComposerHeight] = useState(0);
+  const onComposerLayout = useCallback((e: LayoutChangeEvent) => {
+    setComposerHeight(e.nativeEvent.layout.height);
+  }, []);
+
+  // Near-bottom tracking for smart auto-scroll
+  const isNearBottomRef = useRef(true);
+  const prevMessageCountRef = useRef(0);
+
+  const onScroll = useCallback((e: NativeSyntheticEvent<NativeScrollEvent>) => {
+    const { layoutMeasurement, contentOffset, contentSize } = e.nativeEvent;
+    const distanceFromBottom = contentSize.height - layoutMeasurement.height - contentOffset.y;
+    isNearBottomRef.current = distanceFromBottom < 80;
+  }, []);
 
   const conversations = usePrivateChatStore((s) => s.conversations);
   const storeMessages = usePrivateChatStore((s) => s.messages);
@@ -36,6 +60,17 @@ export default function PrivateChatScreen() {
 
   const [text, setText] = useState('');
   const [reportVisible, setReportVisible] = useState(false);
+
+  // Auto-scroll only when new messages arrive AND user is near bottom
+  useEffect(() => {
+    const count = messages.length;
+    if (count > prevMessageCountRef.current && isNearBottomRef.current) {
+      requestAnimationFrame(() => {
+        flatListRef.current?.scrollToEnd({ animated: true });
+      });
+    }
+    prevMessageCountRef.current = count;
+  }, [messages.length]);
 
   const handleSend = () => {
     if (!text.trim() || !id) return;
@@ -49,7 +84,6 @@ export default function PrivateChatScreen() {
     };
     addMessage(id, newMsg);
     setText('');
-    setTimeout(() => flatListRef.current?.scrollToEnd({ animated: true }), 100);
   };
 
   const handleReport = (reason: string) => {
@@ -114,58 +148,76 @@ export default function PrivateChatScreen() {
   };
 
   return (
-    <KeyboardAvoidingView
-      style={[styles.container, { paddingTop: insets.top }]}
-      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-      keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 0}
-    >
-      {/* Header */}
-      <View style={styles.header}>
-        <TouchableOpacity onPress={() => router.back()} style={styles.backButton}>
-          <Ionicons name="arrow-back" size={24} color={C.text} />
-        </TouchableOpacity>
-        <Image
-          source={{ uri: conversation.participantPhotoUrl }}
-          style={styles.headerAvatar}
-          blurRadius={10}
-        />
-        <View style={styles.headerInfo}>
-          <Text style={styles.headerName}>{conversation.participantName}</Text>
-          <Text style={styles.headerMeta}>{conversation.participantAge} · via {conversation.connectionSource}</Text>
+    <View style={styles.container}>
+      {/* Inner wrapper — paddingTop lives here */}
+      <View style={{ flex: 1, paddingTop: insets.top }}>
+        {/* Header — measured via onLayout for KAV offset */}
+        <View onLayout={onHeaderLayout} style={styles.header}>
+          <TouchableOpacity onPress={() => router.back()} style={styles.backButton}>
+            <Ionicons name="arrow-back" size={24} color={C.text} />
+          </TouchableOpacity>
+          <Image
+            source={{ uri: conversation.participantPhotoUrl }}
+            style={styles.headerAvatar}
+            blurRadius={10}
+            contentFit="cover"
+          />
+          <View style={styles.headerInfo}>
+            <Text style={styles.headerName}>{conversation.participantName}</Text>
+            <Text style={styles.headerMeta}>{conversation.participantAge} · via {conversation.connectionSource}</Text>
+          </View>
+          <TouchableOpacity onPress={() => setReportVisible(true)} style={styles.moreButton}>
+            <Ionicons name="ellipsis-vertical" size={20} color={C.textLight} />
+          </TouchableOpacity>
         </View>
-        <TouchableOpacity onPress={() => setReportVisible(true)} style={styles.moreButton}>
-          <Ionicons name="ellipsis-vertical" size={20} color={C.textLight} />
-        </TouchableOpacity>
-      </View>
 
-      {/* Messages */}
-      <FlatList
-        ref={flatListRef}
-        data={messages}
-        keyExtractor={(item) => item.id}
-        renderItem={renderMessage}
-        contentContainerStyle={styles.messageList}
-        onContentSizeChange={() => flatListRef.current?.scrollToEnd({ animated: true })}
-      />
-
-      {/* Input */}
-      <View style={[styles.inputBar, { paddingBottom: Math.max(insets.bottom, 8) }]}>
-        <TextInput
-          style={styles.textInput}
-          placeholder="Type a message..."
-          placeholderTextColor={C.textLight}
-          value={text}
-          onChangeText={setText}
-          multiline
-          maxLength={1000}
+        {/* Messages */}
+        <FlashList
+          ref={flatListRef}
+          data={messages}
+          keyExtractor={(item) => item.id}
+          renderItem={renderMessage}
+          contentContainerStyle={{
+            flexGrow: 1,
+            justifyContent: 'flex-end' as const,
+            padding: 16,
+            paddingBottom: composerHeight + keyboardHeight + Math.max(insets.bottom, 8) + 8,
+          }}
+          onScroll={onScroll}
+          scrollEventThrottle={16}
+          estimatedItemSize={70}
+          keyboardShouldPersistTaps="handled"
+          keyboardDismissMode="interactive"
         />
-        <TouchableOpacity
-          style={[styles.sendButton, !text.trim() && styles.sendButtonDisabled]}
-          onPress={handleSend}
-          disabled={!text.trim()}
+
+        {/* Input — lifted above keyboard via marginBottom */}
+        <View
+          onLayout={onComposerLayout}
+          style={[styles.inputBar, {
+            paddingBottom: Math.max(insets.bottom, 8),
+            marginBottom: keyboardHeight,
+          }]}
         >
-          <Ionicons name="send" size={20} color={text.trim() ? '#FFFFFF' : C.textLight} />
-        </TouchableOpacity>
+          <TextInput
+            style={styles.textInput}
+            placeholder="Type a message..."
+            placeholderTextColor={C.textLight}
+            value={text}
+            onChangeText={setText}
+            multiline
+            scrollEnabled
+            textAlignVertical="top"
+            blurOnSubmit={false}
+            maxLength={1000}
+          />
+          <TouchableOpacity
+            style={[styles.sendButton, !text.trim() && styles.sendButtonDisabled]}
+            onPress={handleSend}
+            disabled={!text.trim()}
+          >
+            <Ionicons name="send" size={20} color={text.trim() ? '#FFFFFF' : C.textLight} />
+          </TouchableOpacity>
+        </View>
       </View>
 
       {/* Report/Block Modal */}
@@ -176,7 +228,7 @@ export default function PrivateChatScreen() {
         onReport={handleReport}
         onBlock={handleBlock}
       />
-    </KeyboardAvoidingView>
+    </View>
   );
 }
 
@@ -201,7 +253,6 @@ const styles = StyleSheet.create({
   headerMeta: { fontSize: 12, color: C.textLight },
   moreButton: { padding: 8 },
 
-  messageList: { padding: 16, paddingBottom: 8 },
 
   systemMsgRow: { alignItems: 'center', marginBottom: 12 },
   systemMsgText: { fontSize: 12, color: C.textLight, fontStyle: 'italic', textAlign: 'center' },

@@ -59,7 +59,9 @@ interface ChatMessageListProps {
   mutedUserIds?: Set<string>;
   onMessageLongPress?: (message: DemoChatMessage) => void;
   onAvatarPress?: (senderId: string) => void;
-  onMediaPress?: (mediaUrl: string, type: 'image' | 'gif' | 'video') => void;
+  onMediaPress?: (mediaUrl: string, type: 'image' | 'video') => void;
+  /** Extra bottom padding on the list content (e.g. composerHeight + safeArea) */
+  contentPaddingBottom?: number;
 }
 
 export interface ChatMessageListHandle {
@@ -73,6 +75,7 @@ const ChatMessageList = forwardRef<ChatMessageListHandle, ChatMessageListProps>(
   onMessageLongPress,
   onAvatarPress,
   onMediaPress,
+  contentPaddingBottom = 0,
 }, ref) {
   const listRef = useRef<FlashList<ListItem>>(null);
   const [isAtBottom, setIsAtBottom] = useState(true);
@@ -155,7 +158,7 @@ const ChatMessageList = forwardRef<ChatMessageListHandle, ChatMessageListProps>(
           timestamp={msg.createdAt}
           isMe={isMe}
           dimmed={isMuted}
-          messageType={(msg.type || 'text') as 'text' | 'image' | 'gif' | 'video'}
+          messageType={(msg.type || 'text') as 'text' | 'image' | 'video'}
           mediaUrl={msg.mediaUrl}
           onLongPress={() => onMessageLongPress?.(msg)}
           onAvatarPress={() => onAvatarPress?.(msg.senderId)}
@@ -188,9 +191,16 @@ const ChatMessageList = forwardRef<ChatMessageListHandle, ChatMessageListProps>(
         renderItem={renderItem}
         estimatedItemSize={44}
         showsVerticalScrollIndicator={false}
-        contentContainerStyle={styles.listContent}
+        contentContainerStyle={{
+          flexGrow: 1,
+          justifyContent: 'flex-end' as const,
+          paddingTop: 8,
+          paddingBottom: contentPaddingBottom + 8,
+        }}
         onScroll={handleScroll}
-        scrollEventThrottle={100}
+        scrollEventThrottle={16}
+        keyboardShouldPersistTaps="handled"
+        keyboardDismissMode="interactive"
       />
 
       {!isAtBottom && (
@@ -210,9 +220,6 @@ export default ChatMessageList;
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-  },
-  listContent: {
-    paddingVertical: 6,
   },
   emptyContainer: {
     flex: 1,

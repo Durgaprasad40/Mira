@@ -38,10 +38,7 @@ export default function PrivateTabsLayout() {
       <Tabs.Screen
         name="confess"
         options={{
-          title: 'Confess',
-          tabBarIcon: ({ color, size }) => (
-            <Ionicons name="heart-circle" size={size} color={color} />
-          ),
+          href: null,
         }}
       />
       <Tabs.Screen

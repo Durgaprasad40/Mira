@@ -1,34 +1,44 @@
 import React from 'react';
 import { View, Text, StyleSheet } from 'react-native';
-import { Image } from 'expo-image';
 import { Ionicons } from '@expo/vector-icons';
 import { COLORS } from '@/lib/constants';
+import MediaMessage from './MediaMessage';
 
 interface MessageBubbleProps {
   message: {
     id: string;
     content: string;
-    type: 'text' | 'image' | 'template' | 'dare';
+    type: 'text' | 'image' | 'video' | 'template' | 'dare';
     senderId: string;
     createdAt: number;
     readAt?: number;
     imageUrl?: string;
+    mediaUrl?: string;
   };
   isOwn: boolean;
   otherUserName?: string;
+  onMediaPress?: (mediaUrl: string, type: 'image' | 'video') => void;
 }
 
-export function MessageBubble({ message, isOwn, otherUserName }: MessageBubbleProps) {
+export function MessageBubble({ message, isOwn, otherUserName, onMediaPress }: MessageBubbleProps) {
   const formatTime = (timestamp: number) => {
     const date = new Date(timestamp);
     return date.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
   };
 
-  if (message.type === 'image' && message.imageUrl) {
+  // Unified media rendering for image, video
+  const mediaUrl = message.mediaUrl || message.imageUrl;
+  const isMedia = (message.type === 'image' || message.type === 'video') && mediaUrl;
+
+  if (isMedia) {
     return (
       <View style={[styles.container, isOwn && styles.ownContainer]}>
         <View style={[styles.bubble, isOwn ? styles.ownBubble : styles.otherBubble]}>
-          <Image source={{ uri: message.imageUrl }} style={styles.image} contentFit="cover" />
+          <MediaMessage
+            mediaUrl={mediaUrl!}
+            type={message.type as 'image' | 'video'}
+            onPress={() => onMediaPress?.(mediaUrl!, message.type as 'image' | 'video')}
+          />
           <View style={styles.imageFooter}>
             <Text style={[styles.time, isOwn && styles.ownTime]}>
               {formatTime(message.createdAt)}
@@ -137,12 +147,6 @@ const styles = StyleSheet.create({
   },
   readIcon: {
     marginLeft: 4,
-  },
-  image: {
-    width: 200,
-    height: 200,
-    borderRadius: 12,
-    marginBottom: 8,
   },
   imageFooter: {
     flexDirection: 'row',

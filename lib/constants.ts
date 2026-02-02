@@ -1,4 +1,4 @@
-import { FeatureAccess, SubscriptionPlan, IAPProduct, RelationshipIntent, ActivityFilter } from '@/types';
+import { FeatureAccess, SubscriptionPlan, IAPProduct, RelationshipIntent, ActivityFilter, ConfessionTopic, ConfessionReactionType, ConfessionMood } from '@/types';
 
 // App Colors
 export const COLORS = {
@@ -311,6 +311,33 @@ export const PROFILE_PROMPT_QUESTIONS = [
   { id: 'love_language', text: 'My love language is...' },
   { id: 'bucket_list', text: 'Top of my bucket list...' },
 ];
+
+// Confession Topics Config
+export const CONFESSION_TOPICS: Record<ConfessionTopic, { emoji: string; label: string; color: string; bg: string }> = {
+  heartbreak: { emoji: '\uD83D\uDC94', label: 'Heartbreak', color: '#E91E63', bg: 'rgba(233,30,99,0.12)' },
+  crush: { emoji: '\uD83D\uDE0D', label: 'Crush', color: '#FF4081', bg: 'rgba(255,64,129,0.12)' },
+  funny: { emoji: '\uD83D\uDE02', label: 'Funny', color: '#FF9800', bg: 'rgba(255,152,0,0.12)' },
+  late_night: { emoji: '\uD83C\uDF19', label: 'Late Night', color: '#7C4DFF', bg: 'rgba(124,77,255,0.12)' },
+  college: { emoji: '\uD83C\uDF93', label: 'College', color: '#2196F3', bg: 'rgba(33,150,243,0.12)' },
+  office: { emoji: '\uD83D\uDCBC', label: 'Office', color: '#607D8B', bg: 'rgba(96,125,139,0.12)' },
+  spicy: { emoji: '\uD83D\uDD25', label: 'Spicy', color: '#FF5722', bg: 'rgba(255,87,34,0.12)' },
+};
+
+// Confession Reactions Config
+export const CONFESSION_REACTIONS: Record<ConfessionReactionType, { emoji: string; label: string }> = {
+  relatable: { emoji: '\u2764\uFE0F', label: 'Relatable' },
+  feel_you: { emoji: '\uD83D\uDE2D', label: 'Feel you' },
+  bold: { emoji: '\uD83D\uDD25', label: 'Bold' },
+  curious: { emoji: '\uD83D\uDC40', label: 'Curious' },
+};
+
+// Backward compat: map old mood to new topic
+export const MOOD_TO_TOPIC: Record<ConfessionMood, ConfessionTopic> = {
+  romantic: 'crush',
+  spicy: 'spicy',
+  emotional: 'heartbreak',
+  funny: 'funny',
+};
 
 // Incognito Mode Colors
 export const INCOGNITO_COLORS = {

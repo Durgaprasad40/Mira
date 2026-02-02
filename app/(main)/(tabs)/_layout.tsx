@@ -27,17 +27,20 @@ export default function MainTabsLayout() {
         }}
       />
       <Tabs.Screen
-        name="confessions"
-        options={{
-          href: null,
-        }}
-      />
-      <Tabs.Screen
         name="explore"
         options={{
           title: "Explore",
           tabBarIcon: ({ color, size }) => (
             <Ionicons name="search" size={size} color={color} />
+          ),
+        }}
+      />
+      <Tabs.Screen
+        name="confessions"
+        options={{
+          title: "Confess",
+          tabBarIcon: ({ color, size }) => (
+            <Ionicons name="megaphone" size={size} color={color} />
           ),
         }}
       />

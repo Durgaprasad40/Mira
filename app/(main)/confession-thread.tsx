@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useMemo } from 'react';
+import React, { useState, useCallback, useMemo, useEffect } from 'react';
 import {
   View,
   Text,
@@ -8,18 +8,20 @@ import {
   StyleSheet,
   KeyboardAvoidingView,
   Platform,
+  Alert,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
-import { COLORS } from '@/lib/constants';
-import { ConfessionMood, ConfessionReply } from '@/types';
+import { COLORS, CONFESSION_TOPICS } from '@/lib/constants';
+import { ConfessionMood, ConfessionReply, ConfessionReactionType, ConfessionTopic, ConfessionChat } from '@/types';
 import { useAuthStore } from '@/stores/authStore';
+import { useConfessionStore } from '@/stores/confessionStore';
 import {
-  DEMO_CONFESSIONS,
   DEMO_CONFESSION_REPLIES,
-  DEMO_CONFESSION_USER_REACTIONS,
 } from '@/lib/demoData';
+import ReactionBar from '@/components/confessions/ReactionBar';
+import ConfessionChatModal from '@/components/confessions/ConfessionChatModal';
 
 const MOOD_CONFIG: Record<ConfessionMood, { emoji: string; label: string; color: string; bg: string }> = {
   romantic: { emoji: '\u2764\uFE0F', label: 'Romantic', color: '#E91E63', bg: 'rgba(233,30,99,0.12)' },
@@ -43,43 +45,103 @@ export default function ConfessionThreadScreen() {
   const router = useRouter();
   const { confessionId } = useLocalSearchParams<{ confessionId: string }>();
   const { userId } = useAuthStore();
+  const currentUserId = userId || 'demo_user_1';
+
+  const {
+    confessions,
+    userReactions,
+    chats,
+    toggleReaction,
+    reportConfession,
+    addChat,
+    addChatMessage,
+    agreeMutualReveal,
+    declineMutualReveal,
+  } = useConfessionStore();
 
   const confession = useMemo(
-    () => DEMO_CONFESSIONS.find((c) => c.id === confessionId),
-    [confessionId]
+    () => confessions.find((c) => c.id === confessionId),
+    [confessions, confessionId]
   );
 
   const [replies, setReplies] = useState<ConfessionReply[]>(
     () => (confessionId ? DEMO_CONFESSION_REPLIES[confessionId] : undefined) || []
   );
   const [replyText, setReplyText] = useState('');
-  const [hasReacted, setHasReacted] = useState(
-    () => !!(confessionId && DEMO_CONFESSION_USER_REACTIONS[confessionId])
-  );
-  const [reactionCount, setReactionCount] = useState(
-    () => confession?.reactionCount ?? 0
-  );
+  const [activeChatModal, setActiveChatModal] = useState<ConfessionChat | null>(null);
 
   const handleSendReply = useCallback(() => {
     if (!replyText.trim() || !confessionId) return;
     const newReply: ConfessionReply = {
       id: `cr_new_${Date.now()}`,
       confessionId,
-      userId: userId || 'demo_user_1',
+      userId: currentUserId,
       text: replyText.trim(),
       isAnonymous: true,
       createdAt: Date.now(),
     };
     setReplies((prev) => [...prev, newReply]);
     setReplyText('');
-  }, [replyText, confessionId, userId]);
+  }, [replyText, confessionId, currentUserId]);
 
-  const handleToggleReaction = useCallback(() => {
-    setHasReacted((prev) => {
-      setReactionCount((c) => (prev ? Math.max(0, c - 1) : c + 1));
-      return !prev;
-    });
-  }, []);
+  const handleReplyAnonymously = useCallback(() => {
+    if (!confession || !confessionId) return;
+    const existing = chats.find(
+      (c) => c.confessionId === confessionId &&
+        (c.initiatorId === currentUserId || c.responderId === currentUserId)
+    );
+    if (existing) {
+      setActiveChatModal(existing);
+      return;
+    }
+
+    const newChat: ConfessionChat = {
+      id: `cc_new_${Date.now()}`,
+      confessionId,
+      initiatorId: currentUserId,
+      responderId: confession.userId,
+      messages: [],
+      isRevealed: false,
+      createdAt: Date.now(),
+      expiresAt: Date.now() + 1000 * 60 * 60 * 24,
+      mutualRevealStatus: 'none',
+    };
+    addChat(newChat);
+    setActiveChatModal(newChat);
+  }, [confession, confessionId, chats, currentUserId, addChat]);
+
+  const handleSendChatMessage = useCallback(
+    (text: string) => {
+      if (!activeChatModal) return;
+      const message = {
+        id: `ccm_new_${Date.now()}`,
+        chatId: activeChatModal.id,
+        senderId: currentUserId,
+        text,
+        createdAt: Date.now(),
+      };
+      addChatMessage(activeChatModal.id, message);
+      setActiveChatModal((prev) =>
+        prev ? { ...prev, messages: [...prev.messages, message] } : null
+      );
+    },
+    [activeChatModal, currentUserId, addChatMessage]
+  );
+
+  const handleReport = useCallback(() => {
+    if (!confessionId) return;
+    Alert.alert('Report Confession', 'Are you sure?', [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Report',
+        style: 'destructive',
+        onPress: () => {
+          reportConfession(confessionId);
+          router.back();
+        },
+      },
+    ]);
+  }, [confessionId, reportConfession, router]);
 
   if (!confession) {
     return (
@@ -96,9 +158,12 @@ export default function ConfessionThreadScreen() {
     );
   }
 
-  const moodInfo = MOOD_CONFIG[confession.mood];
-  const isOP = (replyUserId: string) =>
-    replyUserId === confession.userId;
+  const badgeInfo = confession.topic
+    ? CONFESSION_TOPICS[confession.topic]
+    : MOOD_CONFIG[confession.mood];
+  const reactions = confession.reactions || { relatable: 0, feel_you: 0, bold: 0, curious: 0 };
+  const myReactions = userReactions[confession.id] || [];
+  const isOP = (replyUserId: string) => replyUserId === confession.userId;
 
   return (
     <SafeAreaView style={styles.container}>
@@ -113,7 +178,9 @@ export default function ConfessionThreadScreen() {
             <Ionicons name="arrow-back" size={24} color={COLORS.text} />
           </TouchableOpacity>
           <Text style={styles.navTitle}>Thread</Text>
-          <View style={{ width: 24 }} />
+          <TouchableOpacity onPress={handleReport} hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}>
+            <Ionicons name="ellipsis-vertical" size={20} color={COLORS.text} />
+          </TouchableOpacity>
         </View>
 
         <FlatList
@@ -136,35 +203,27 @@ export default function ConfessionThreadScreen() {
                   </Text>
                   <Text style={styles.timeAgo}>{getTimeAgo(confession.createdAt)}</Text>
                 </View>
-                <View style={[styles.moodBadge, { backgroundColor: moodInfo.bg }]}>
-                  <Text style={styles.moodEmoji}>{moodInfo.emoji}</Text>
-                  <Text style={[styles.moodLabel, { color: moodInfo.color }]}>{moodInfo.label}</Text>
+                <View style={[styles.topicBadge, { backgroundColor: badgeInfo.bg }]}>
+                  <Text style={styles.topicEmoji}>{badgeInfo.emoji}</Text>
+                  <Text style={[styles.topicLabel, { color: badgeInfo.color }]}>{badgeInfo.label}</Text>
                 </View>
               </View>
 
               {/* Full text */}
               <Text style={styles.confessionText}>{confession.text}</Text>
 
-              {/* Actions */}
-              <View style={styles.actionRow}>
-                <TouchableOpacity
-                  style={styles.actionButton}
-                  onPress={handleToggleReaction}
-                >
-                  <Ionicons
-                    name={hasReacted ? 'heart' : 'heart-outline'}
-                    size={22}
-                    color={hasReacted ? COLORS.primary : COLORS.textMuted}
-                  />
-                  <Text style={[styles.actionCount, hasReacted && { color: COLORS.primary }]}>
-                    {reactionCount}
-                  </Text>
-                </TouchableOpacity>
-                <View style={styles.actionButton}>
-                  <Ionicons name="chatbubble-outline" size={20} color={COLORS.textMuted} />
-                  <Text style={styles.actionCount}>{replies.length}</Text>
-                </View>
-              </View>
+              {/* Reactions */}
+              <ReactionBar
+                reactions={reactions}
+                userReactions={myReactions}
+                onToggleReaction={(type) => toggleReaction(confession.id, type)}
+              />
+
+              {/* Anonymous Reply Button */}
+              <TouchableOpacity style={styles.anonReplyButton} onPress={handleReplyAnonymously}>
+                <Ionicons name="chatbubble-ellipses-outline" size={18} color={COLORS.primary} />
+                <Text style={styles.anonReplyText}>Reply Anonymously</Text>
+              </TouchableOpacity>
 
               {/* Divider */}
               <View style={styles.divider} />
@@ -227,6 +286,31 @@ export default function ConfessionThreadScreen() {
           </TouchableOpacity>
         </View>
       </KeyboardAvoidingView>
+
+      {/* Chat Modal */}
+      <ConfessionChatModal
+        visible={!!activeChatModal}
+        chat={activeChatModal}
+        currentUserId={currentUserId}
+        confessionText={confession?.text}
+        onClose={() => setActiveChatModal(null)}
+        onSendMessage={handleSendChatMessage}
+        onAgreeReveal={() => {
+          if (!activeChatModal) return;
+          agreeMutualReveal(activeChatModal.id, currentUserId);
+          const updated = useConfessionStore.getState().chats.find((c) => c.id === activeChatModal.id);
+          if (updated) setActiveChatModal({ ...updated });
+        }}
+        onDeclineReveal={() => {
+          if (!activeChatModal) return;
+          declineMutualReveal(activeChatModal.id, currentUserId);
+          const updated = useConfessionStore.getState().chats.find((c) => c.id === activeChatModal.id);
+          if (updated) setActiveChatModal({ ...updated });
+        }}
+        onBlock={() => {
+          setActiveChatModal(null);
+        }}
+      />
     </SafeAreaView>
   );
 }
@@ -296,7 +380,7 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: COLORS.textMuted,
   },
-  moodBadge: {
+  topicBadge: {
     flexDirection: 'row',
     alignItems: 'center',
     paddingHorizontal: 8,
@@ -304,10 +388,10 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     gap: 4,
   },
-  moodEmoji: {
+  topicEmoji: {
     fontSize: 12,
   },
-  moodLabel: {
+  topicLabel: {
     fontSize: 11,
     fontWeight: '600',
   },
@@ -317,24 +401,26 @@ const styles = StyleSheet.create({
     color: COLORS.text,
     marginBottom: 16,
   },
-  actionRow: {
-    flexDirection: 'row',
-    gap: 24,
-    marginBottom: 16,
-  },
-  actionButton: {
+  anonReplyButton: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 6,
+    marginTop: 12,
+    paddingVertical: 8,
+    paddingHorizontal: 14,
+    borderRadius: 20,
+    backgroundColor: 'rgba(255,107,107,0.08)',
+    alignSelf: 'flex-start',
   },
-  actionCount: {
-    fontSize: 14,
-    color: COLORS.textMuted,
-    fontWeight: '500',
+  anonReplyText: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: COLORS.primary,
   },
   divider: {
     height: StyleSheet.hairlineWidth,
     backgroundColor: COLORS.border,
+    marginTop: 16,
     marginBottom: 12,
   },
   repliesHeader: {

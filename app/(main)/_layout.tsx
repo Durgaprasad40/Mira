@@ -1,5 +1,4 @@
-import { useEffect } from "react";
-import { Stack, useRouter, useSegments } from "expo-router";
+import { Redirect, Stack } from "expo-router";
 import { useQuery } from "convex/react";
 import { api } from "@/convex/_generated/api";
 import { useAuthStore } from "@/stores/authStore";
@@ -7,8 +6,6 @@ import { isDemoMode } from "@/hooks/useConvex";
 import { computeEnforcementLevel } from "@/lib/securityEnforcement";
 
 export default function MainLayout() {
-  const router = useRouter();
-  const segments = useSegments();
   const { userId } = useAuthStore();
 
   const currentUser = useQuery(
@@ -16,24 +13,23 @@ export default function MainLayout() {
     !isDemoMode && userId ? { userId: userId as any } : "skip"
   );
 
-  // Security-only gating: redirect to verification if enforcement level is security_only
-  useEffect(() => {
-    if (isDemoMode || !currentUser) return;
-
-    const level = currentUser.verificationEnforcementLevel ||
+  // Security gate — render-based, no useEffect redirect loop.
+  // If enforcement level is "security_only" we render ONLY the
+  // verification screen; the user cannot navigate anywhere else
+  // until they verify.
+  if (!isDemoMode && currentUser) {
+    const level =
+      currentUser.verificationEnforcementLevel ||
       computeEnforcementLevel({
         createdAt: currentUser.createdAt,
-        verificationStatus: (currentUser.verificationStatus as any) || "unverified",
+        verificationStatus:
+          (currentUser.verificationStatus as any) || "unverified",
       });
 
     if (level === "security_only") {
-      // Check if already on verification screen
-      const currentRoute = segments.join("/");
-      if (!currentRoute.includes("verification")) {
-        router.replace("/(main)/verification" as any);
-      }
+      return <Redirect href={"/(main)/verification" as any} />;
     }
-  }, [currentUser, segments]);
+  }
 
   return (
     <Stack screenOptions={{ headerShown: false }}>

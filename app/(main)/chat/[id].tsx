@@ -1,26 +1,31 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   View,
   Text,
   StyleSheet,
-  FlatList,
-  KeyboardAvoidingView,
-  Platform,
   TouchableOpacity,
   Alert,
+  LayoutChangeEvent,
+  NativeSyntheticEvent,
+  NativeScrollEvent,
 } from 'react-native';
+import { FlashList } from '@shopify/flash-list';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useQuery, useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { useAuthStore } from '@/stores/authStore';
 import { COLORS } from '@/lib/constants';
-import { MessageBubble, MessageInput, TypingIndicator } from '@/components/chat';
+import { MessageBubble, MessageInput } from '@/components/chat';
 import { Ionicons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
 import { isDemoMode } from '@/hooks/useConvex';
 import { DEMO_MATCHES } from '@/lib/demoData';
+import { useDemoDmStore, DemoDmMessage } from '@/stores/demoDmStore';
+import { useKeyboardHeight } from '@/hooks/useKeyboardHeight';
 
-const DEMO_MESSAGES: Record<string, Array<{ _id: string; content: string; type: string; senderId: string; createdAt: number; readAt?: number }>> = {
+/** Seed data — used only the very first time a conversation is opened. */
+const DEMO_SEED_MESSAGES: Record<string, DemoDmMessage[]> = {
   match_1: [
     { _id: 'dm_1', content: 'Hey! How are you?', type: 'text', senderId: 'demo_profile_1', createdAt: Date.now() - 1000 * 60 * 30, readAt: Date.now() - 1000 * 60 * 28 },
     { _id: 'dm_2', content: "Hi Priya! I'm doing great, thanks for asking 😊", type: 'text', senderId: 'demo_user', createdAt: Date.now() - 1000 * 60 * 25 },
@@ -34,12 +39,53 @@ const DEMO_MESSAGES: Record<string, Array<{ _id: string; content: string; type: 
 export default function ChatScreen() {
   const { id: conversationId } = useLocalSearchParams<{ id: string }>();
   const router = useRouter();
+  const insets = useSafeAreaInsets();
+  const keyboardHeight = useKeyboardHeight();
   const { userId } = useAuthStore();
-  const flatListRef = useRef<FlatList>(null);
+  const flatListRef = useRef<FlashList<any>>(null);
+
+  // Measured header height — used as keyboardVerticalOffset so KAV
+  // adjusts correctly regardless of device notch / status-bar height.
+  const [headerHeight, setHeaderHeight] = useState(0);
+  const onHeaderLayout = useCallback((e: LayoutChangeEvent) => {
+    setHeaderHeight(e.nativeEvent.layout.height);
+  }, []);
+
+  // Measured composer height — used as paddingBottom on the message list
+  // so the last message is always visible above the composer.
+  const [composerHeight, setComposerHeight] = useState(0);
+  const onComposerLayout = useCallback((e: LayoutChangeEvent) => {
+    setComposerHeight(e.nativeEvent.layout.height);
+  }, []);
+
+  // Track whether the user is scrolled near the bottom so we only
+  // auto-scroll on new messages when they are already reading the latest.
+  const isNearBottomRef = useRef(true);
+  const prevMessageCountRef = useRef(0);
+
+  const onScroll = useCallback((e: NativeSyntheticEvent<NativeScrollEvent>) => {
+    const { layoutMeasurement, contentOffset, contentSize } = e.nativeEvent;
+    const distanceFromBottom = contentSize.height - layoutMeasurement.height - contentOffset.y;
+    isNearBottomRef.current = distanceFromBottom < 80;
+  }, []);
 
   const isDemo = isDemoMode || (conversationId?.startsWith('match_') ?? false);
 
   const demoMatch = isDemo ? DEMO_MATCHES.find((m) => m.id === conversationId) : null;
+
+  // ── Demo DM store — messages survive navigation & restarts ──
+  const seedConversation = useDemoDmStore((s) => s.seedConversation);
+  const addDemoMessage = useDemoDmStore((s) => s.addMessage);
+  const demoConversations = useDemoDmStore((s) => s.conversations);
+
+  // Seed once per conversation (no-op if already seeded)
+  useEffect(() => {
+    if (isDemo && conversationId) {
+      seedConversation(conversationId, DEMO_SEED_MESSAGES[conversationId] || []);
+    }
+  }, [isDemo, conversationId, seedConversation]);
+
+  const demoMessageList = conversationId ? demoConversations[conversationId] ?? [] : [];
 
   const conversation = useQuery(
     api.messages.getConversation,
@@ -54,10 +100,6 @@ export default function ChatScreen() {
   const currentUser = useQuery(
     api.users.getCurrentUser,
     !isDemo && userId ? { userId: userId as any } : 'skip'
-  );
-
-  const [demoMessageList, setDemoMessageList] = useState(
-    DEMO_MESSAGES[conversationId || ''] || []
   );
 
   const messages = isDemo ? demoMessageList : convexMessages;
@@ -86,26 +128,30 @@ export default function ChatScreen() {
     }
   }, [conversationId, userId, isDemo]);
 
+  // Auto-scroll only when new messages arrive AND user is near the bottom.
+  // This prevents yanking the user back to the bottom when they are reading
+  // older messages.
   useEffect(() => {
-    if (messages && messages.length > 0) {
-      setTimeout(() => {
+    const count = messages?.length ?? 0;
+    if (count > prevMessageCountRef.current && isNearBottomRef.current) {
+      requestAnimationFrame(() => {
         flatListRef.current?.scrollToEnd({ animated: true });
-      }, 100);
+      });
     }
-  }, [messages]);
+    prevMessageCountRef.current = count;
+  }, [messages?.length]);
 
   const handleSend = async (text: string, type: 'text' | 'template' = 'text') => {
     if (!userId || !activeConversation) return;
 
     if (isDemo) {
-      const newMsg = {
+      addDemoMessage(conversationId!, {
         _id: `dm_${Date.now()}`,
         content: text,
         type: 'text',
         senderId: 'demo_user',
         createdAt: Date.now(),
-      };
-      setDemoMessageList((prev) => [...prev, newMsg]);
+      });
       return;
     }
 
@@ -177,12 +223,9 @@ export default function ChatScreen() {
   const messagesRemaining = isDemo ? 10 : (currentUser?.messagesRemaining || 0);
 
   return (
-    <KeyboardAvoidingView
-      style={styles.container}
-      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-      keyboardVerticalOffset={Platform.OS === 'ios' ? 90 : 0}
-    >
-      <View style={styles.header}>
+    <View style={styles.container}>
+      {/* Header — uses onLayout to measure its real pixel height */}
+      <View onLayout={onHeaderLayout} style={[styles.header, { paddingTop: insets.top }]}>
         <TouchableOpacity onPress={() => router.back()} style={styles.backButton}>
           <Ionicons name="arrow-back" size={24} color={COLORS.text} />
         </TouchableOpacity>
@@ -199,12 +242,9 @@ export default function ChatScreen() {
         )}
       </View>
 
-      <FlatList
+      <FlashList
         ref={flatListRef}
         data={messages || []}
-        ListFooterComponent={
-          <TypingIndicator conversationId={conversationId || ''} currentUserId={userId || ''} />
-        }
         keyExtractor={(item) => item._id}
         renderItem={({ item }) => (
           <MessageBubble
@@ -220,22 +260,40 @@ export default function ChatScreen() {
             otherUserName={activeConversation.otherUser.name}
           />
         )}
-        contentContainerStyle={styles.messagesList}
-        onContentSizeChange={() => flatListRef.current?.scrollToEnd({ animated: true })}
+        contentContainerStyle={{
+          flexGrow: 1,
+          justifyContent: 'flex-end' as const,
+          paddingTop: 8,
+          paddingBottom: composerHeight + keyboardHeight + insets.bottom + 8,
+        }}
+        onScroll={onScroll}
+        scrollEventThrottle={16}
+        estimatedItemSize={60}
+        keyboardShouldPersistTaps="handled"
+        keyboardDismissMode="interactive"
       />
 
-      <MessageInput
-        onSend={handleSend}
-        onSendImage={handleSendImage}
-        onSendDare={activeConversation.isPreMatch ? handleSendDare : undefined}
-        disabled={isSending}
-        isPreMatch={activeConversation.isPreMatch}
-        messagesRemaining={messagesRemaining}
-        subscriptionTier={isDemo ? 'premium' : (currentUser?.subscriptionTier || 'free')}
-        canSendCustom={canSendCustom}
-        recipientName={activeConversation.otherUser.name}
-      />
-    </KeyboardAvoidingView>
+      {/* Composer — lifted above keyboard via marginBottom */}
+      <View
+        onLayout={onComposerLayout}
+        style={{
+          paddingBottom: insets.bottom,
+          marginBottom: keyboardHeight,
+        }}
+      >
+        <MessageInput
+          onSend={handleSend}
+          onSendImage={handleSendImage}
+          onSendDare={activeConversation.isPreMatch ? handleSendDare : undefined}
+          disabled={isSending}
+          isPreMatch={activeConversation.isPreMatch}
+          messagesRemaining={messagesRemaining}
+          subscriptionTier={isDemo ? 'premium' : (currentUser?.subscriptionTier || 'free')}
+          canSendCustom={canSendCustom}
+          recipientName={activeConversation.otherUser.name}
+        />
+      </View>
+    </View>
   );
 }
 
@@ -258,7 +316,7 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     padding: 16,
-    paddingTop: Platform.OS === 'ios' ? 50 : 16,
+    // paddingTop is set dynamically via insets.top in the JSX
     backgroundColor: COLORS.background,
     borderBottomWidth: 1,
     borderBottomColor: COLORS.border,
@@ -278,8 +336,5 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: COLORS.textLight,
     marginTop: 2,
-  },
-  messagesList: {
-    paddingVertical: 16,
   },
 });

@@ -1,4 +1,4 @@
-import { View, Text, StyleSheet, Image } from "react-native";
+import { View, Text, StyleSheet } from "react-native";
 import { Button } from "@/components/ui";
 import { useRouter, Redirect } from "expo-router";
 import { COLORS } from "@/lib/constants";

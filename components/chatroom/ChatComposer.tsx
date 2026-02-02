@@ -15,16 +15,16 @@ const C = INCOGNITO_COLORS;
 const MIN_INPUT_HEIGHT = 40;
 const MAX_INPUT_HEIGHT = 120;
 
+export type ComposerPanel = 'none';
+
 interface ChatComposerProps {
   value: string;
   onChangeText: (text: string) => void;
   onSend: () => void;
   onPlusPress?: () => void;
-  onEmojiPress?: () => void;
   onMicPress?: () => void;
   onInputFocus?: () => void;
-  /** Optional right-side extra content (e.g. Online Users button) */
-  rightExtra?: React.ReactNode;
+  onPanelChange?: (panel: ComposerPanel) => void;
 }
 
 export default function ChatComposer({
@@ -32,10 +32,8 @@ export default function ChatComposer({
   onChangeText,
   onSend,
   onPlusPress,
-  onEmojiPress,
   onMicPress,
   onInputFocus,
-  rightExtra,
 }: ChatComposerProps) {
   const inputRef = useRef<TextInput>(null);
   const hasText = value.trim().length > 0;
@@ -47,14 +45,6 @@ export default function ChatComposer({
     setInputHeight(MIN_INPUT_HEIGHT);
     requestAnimationFrame(() => inputRef.current?.focus());
   }, [hasText, onSend]);
-
-  const handleEmojiPress = useCallback(() => {
-    if (onEmojiPress) {
-      onEmojiPress();
-    } else {
-      inputRef.current?.focus();
-    }
-  }, [onEmojiPress]);
 
   const handleContentSizeChange = useCallback(
     (e: NativeSyntheticEvent<TextInputContentSizeChangeEventData>) => {
@@ -70,30 +60,17 @@ export default function ChatComposer({
 
   return (
     <View style={styles.container}>
-      {/* Emoji — tapping focuses input for system emoji keyboard */}
-      <TouchableOpacity
-        onPress={handleEmojiPress}
-        hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-        style={styles.iconBtn}
-      >
-        <Ionicons name="happy-outline" size={26} color={C.textLight} />
+      {/* + Attachments */}
+      <TouchableOpacity onPress={onPlusPress} style={styles.iconBtn}>
+        <Ionicons name="add" size={22} color={C.textLight} />
       </TouchableOpacity>
 
-      {/* Multiline text input — takes all remaining space */}
+      {/* Multiline text input */}
       <View style={[styles.inputRow, { minHeight: inputHeight + 2 }]}>
-        {/* + inside the input area, left edge */}
-        <TouchableOpacity
-          onPress={onPlusPress}
-          hitSlop={{ top: 10, bottom: 10, left: 6, right: 6 }}
-          style={styles.plusBtn}
-        >
-          <Ionicons name="add" size={24} color={C.textLight} />
-        </TouchableOpacity>
-
         <TextInput
           ref={inputRef}
           style={[styles.input, { height: inputHeight }]}
-          placeholder="Type here…"
+          placeholder="Type here..."
           placeholderTextColor={C.textLight}
           value={value}
           onChangeText={onChangeText}
@@ -103,32 +80,23 @@ export default function ChatComposer({
           textAlignVertical="top"
           blurOnSubmit={false}
           onContentSizeChange={handleContentSizeChange}
-          onFocus={onInputFocus}
+          onFocus={() => {
+            onInputFocus?.();
+          }}
         />
       </View>
 
-      {/* Send or Mic */}
-      {hasText ? (
-        <TouchableOpacity
-          onPress={handleSend}
-          hitSlop={{ top: 10, bottom: 10, left: 8, right: 8 }}
-        >
-          <View style={styles.sendCircle}>
-            <Ionicons name="send" size={20} color="#FFFFFF" />
-          </View>
-        </TouchableOpacity>
-      ) : (
-        <TouchableOpacity
-          onPress={onMicPress}
-          hitSlop={{ top: 10, bottom: 10, left: 8, right: 8 }}
-          style={styles.iconBtn}
-        >
-          <Ionicons name="mic" size={26} color={C.textLight} />
+      {/* Voice */}
+      <TouchableOpacity onPress={onMicPress} style={styles.iconBtn}>
+        <Ionicons name="mic" size={22} color={C.textLight} />
+      </TouchableOpacity>
+
+      {/* Send (visible when there is text) */}
+      {hasText && (
+        <TouchableOpacity onPress={handleSend} style={styles.sendCircle}>
+          <Ionicons name="send" size={18} color="#FFFFFF" />
         </TouchableOpacity>
       )}
-
-      {/* Optional right extra (e.g. online users) */}
-      {rightExtra}
     </View>
   );
 }
@@ -138,15 +106,15 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'flex-end',
     backgroundColor: C.surface,
-    paddingHorizontal: 6,
-    paddingVertical: 6,
+    paddingHorizontal: 4,
+    paddingVertical: 4,
     borderTopWidth: 1,
     borderTopColor: C.accent,
-    gap: 4,
+    gap: 2,
   },
   iconBtn: {
-    width: 40,
-    height: 40,
+    width: 36,
+    height: 36,
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -155,30 +123,22 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'flex-end',
     backgroundColor: C.background,
-    borderRadius: 22,
+    borderRadius: 20,
     borderWidth: 1,
     borderColor: C.accent,
-    paddingLeft: 8,
-    paddingRight: 4,
-  },
-  plusBtn: {
-    width: 28,
-    height: 40,
-    alignItems: 'center',
-    justifyContent: 'center',
+    paddingHorizontal: 12,
   },
   input: {
     flex: 1,
     fontSize: 15,
     color: C.text,
-    paddingHorizontal: 6,
-    paddingTop: 10,
-    paddingBottom: 10,
+    paddingTop: 8,
+    paddingBottom: 8,
   },
   sendCircle: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
+    width: 36,
+    height: 36,
+    borderRadius: 18,
     backgroundColor: C.primary,
     alignItems: 'center',
     justifyContent: 'center',

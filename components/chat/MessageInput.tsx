@@ -112,9 +112,11 @@ export function MessageInput({
           value={text}
           onChangeText={setText}
           multiline
+          scrollEnabled
+          textAlignVertical="top"
+          blurOnSubmit={false}
           maxLength={canSendCustom ? undefined : 150}
           editable={!disabled && (canSendCustom || !isPreMatch)}
-          onSubmitEditing={handleSend}
         />
 
         {onSendImage && (

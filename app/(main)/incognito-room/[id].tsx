@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useCallback } from 'react';
 import {
   View,
   Text,
@@ -6,17 +6,18 @@ import {
   FlatList,
   TextInput,
   TouchableOpacity,
-  KeyboardAvoidingView,
-  Platform,
   Alert,
+  LayoutChangeEvent,
 } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { INCOGNITO_COLORS } from '@/lib/constants';
-import { DEMO_ROOM_MESSAGES } from '@/lib/demoData';
+import { DEMO_ROOM_MESSAGES, DEMO_ONLINE_USERS } from '@/lib/demoData';
+import ActiveUsersStrip from '@/components/chatroom/ActiveUsersStrip';
 import { usePrivateChatStore } from '@/stores/privateChatStore';
 import { ReportModal } from '@/components/private/ReportModal';
+import { useKeyboardHeight } from '@/hooks/useKeyboardHeight';
 
 interface RoomMessage {
   id: string;
@@ -39,7 +40,12 @@ export default function RoomChatScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const router = useRouter();
   const insets = useSafeAreaInsets();
+  const keyboardHeight = useKeyboardHeight();
   const flatListRef = useRef<FlatList>(null);
+  const [composerHeight, setComposerHeight] = useState(0);
+  const onComposerLayout = useCallback((e: LayoutChangeEvent) => {
+    setComposerHeight(e.nativeEvent.layout.height);
+  }, []);
 
   const blockUser = usePrivateChatStore((s) => s.blockUser);
 
@@ -127,10 +133,7 @@ export default function RoomChatScreen() {
   };
 
   return (
-    <KeyboardAvoidingView
-      style={[styles.container, { paddingTop: insets.top }]}
-      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-    >
+    <View style={[styles.container, { paddingTop: insets.top }]}>
       {/* Header */}
       <View style={styles.header}>
         <TouchableOpacity onPress={() => router.back()} style={styles.backButton}>
@@ -148,6 +151,13 @@ export default function RoomChatScreen() {
         </View>
       </View>
 
+      {/* Active users */}
+      <ActiveUsersStrip
+        users={DEMO_ONLINE_USERS.map((u) => ({ id: u.id, avatar: u.avatar, isOnline: u.isOnline }))}
+        theme="dark"
+        onUserPress={(userId) => Alert.alert('User', userId)}
+      />
+
       {/* Hint */}
       <View style={styles.hintBar}>
         <Ionicons name="information-circle-outline" size={14} color={C.textLight} />
@@ -160,12 +170,24 @@ export default function RoomChatScreen() {
         data={messages}
         keyExtractor={(item) => item.id}
         renderItem={renderMessage}
-        contentContainerStyle={styles.messageList}
-        onContentSizeChange={() => flatListRef.current?.scrollToEnd({ animated: true })}
+        contentContainerStyle={{
+          ...styles.messageList,
+          flexGrow: 1,
+          justifyContent: 'flex-end' as const,
+          paddingBottom: composerHeight + keyboardHeight + insets.bottom + 8,
+        }}
+        keyboardShouldPersistTaps="handled"
+        keyboardDismissMode="interactive"
       />
 
       {/* Input */}
-      <View style={[styles.inputBar, { paddingBottom: Math.max(insets.bottom, 8) }]}>
+      <View
+        onLayout={onComposerLayout}
+        style={[styles.inputBar, {
+          paddingBottom: Math.max(insets.bottom, 8),
+          marginBottom: keyboardHeight,
+        }]}
+      >
         <TextInput
           style={styles.textInput}
           placeholder={`Message ${room.name}...`}
@@ -173,6 +195,9 @@ export default function RoomChatScreen() {
           value={text}
           onChangeText={setText}
           multiline
+          scrollEnabled
+          textAlignVertical="top"
+          blurOnSubmit={false}
           maxLength={500}
         />
         <TouchableOpacity
@@ -194,7 +219,7 @@ export default function RoomChatScreen() {
           onBlock={handleBlock}
         />
       )}
-    </KeyboardAvoidingView>
+    </View>
   );
 }
 

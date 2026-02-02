@@ -527,8 +527,13 @@ export interface RevealRequest {
 
 // Confession Types
 export type ConfessionMood = 'romantic' | 'spicy' | 'emotional' | 'funny';
+export type ConfessionTopic = 'heartbreak' | 'crush' | 'funny' | 'late_night' | 'college' | 'office' | 'spicy';
+export type ConfessionReactionType = 'relatable' | 'feel_you' | 'bold' | 'curious';
 export type ConfessionVisibility = 'global';
 export type ConfessionSortBy = 'trending' | 'latest';
+
+export type ConfessionRevealPolicy = 'never' | 'allow_later';
+export type TimedRevealOption = 'never' | '24h' | '48h';
 
 export interface Confession {
   id: string;
@@ -536,10 +541,21 @@ export interface Confession {
   text: string;
   isAnonymous: boolean;
   mood: ConfessionMood;
+  topic?: ConfessionTopic;
+  reactions?: Record<ConfessionReactionType, number>;
+  targetUserId?: string;
   visibility: ConfessionVisibility;
   replyCount: number;
   reactionCount: number;
   createdAt: number;
+  /** User chose to allow revealing identity later */
+  revealPolicy: ConfessionRevealPolicy;
+  /** Timed reveal: when identity will be revealed to targetUserId */
+  timedReveal?: TimedRevealOption;
+  /** Timestamp when timed reveal activates (null if cancelled or 'never') */
+  timedRevealAt?: number | null;
+  /** Whether user cancelled a pending timed reveal */
+  timedRevealCancelled?: boolean;
 }
 
 export interface ConfessionReply {
@@ -555,8 +571,43 @@ export interface ConfessionReaction {
   id: string;
   confessionId: string;
   userId: string;
-  type: 'heart';
+  type: ConfessionReactionType;
   createdAt: number;
+}
+
+export type MutualRevealStatus = 'none' | 'initiator_agreed' | 'responder_agreed' | 'both_agreed' | 'declined';
+
+export interface ConfessionChat {
+  id: string;
+  confessionId: string;
+  initiatorId: string;
+  responderId: string;
+  messages: ConfessionChatMessage[];
+  isRevealed: boolean;
+  createdAt: number;
+  expiresAt: number;
+  /** Mutual reveal: tracks which sides have agreed */
+  mutualRevealStatus: MutualRevealStatus;
+  /** Who declined (if any) — reveal is then permanently blocked */
+  declinedBy?: string;
+}
+
+export interface ConfessionChatMessage {
+  id: string;
+  chatId: string;
+  senderId: string;
+  text: string;
+  createdAt: number;
+}
+
+export interface SecretCrush {
+  id: string;
+  fromUserId: string;
+  toUserId: string;
+  confessionText: string;
+  isRevealed: boolean;
+  createdAt: number;
+  expiresAt: number;
 }
 
 // Discover Notification Types

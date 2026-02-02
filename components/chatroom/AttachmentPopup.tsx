@@ -20,7 +20,6 @@ interface AttachmentPopupProps {
   onImageCaptured: (uri: string) => void;
   onGalleryImage: (uri: string) => void;
   onVideoSelected: (uri: string) => void;
-  onGifPress: () => void;
   onDoodlePress: () => void;
 }
 
@@ -30,30 +29,50 @@ export default function AttachmentPopup({
   onImageCaptured,
   onGalleryImage,
   onVideoSelected,
-  onGifPress,
   onDoodlePress,
 }: AttachmentPopupProps) {
-  const handleCamera = async () => {
+  const requestCameraPermission = async () => {
+    const { status } = await ImagePicker.requestCameraPermissionsAsync();
+    if (status !== 'granted') {
+      Alert.alert(
+        'Camera Permission',
+        'Camera access is needed. Please enable it in Settings.',
+        [{ text: 'OK' }]
+      );
+      return false;
+    }
+    return true;
+  };
+
+  const handleCameraPhoto = async () => {
     onClose();
     try {
-      const { status } = await ImagePicker.requestCameraPermissionsAsync();
-      if (status !== 'granted') {
-        Alert.alert(
-          'Camera Permission',
-          'Camera access is needed to take photos. Please enable it in Settings.',
-          [{ text: 'OK' }]
-        );
-        return;
-      }
-
+      if (!(await requestCameraPermission())) return;
       const result = await ImagePicker.launchCameraAsync({
         mediaTypes: ['images'],
         quality: 0.8,
         allowsEditing: false,
       });
-
       if (!result.canceled && result.assets?.[0]?.uri) {
         onImageCaptured(result.assets[0].uri);
+      }
+    } catch {
+      Alert.alert('Error', 'Could not open camera. Please try again.');
+    }
+  };
+
+  const handleCameraVideo = async () => {
+    onClose();
+    try {
+      if (!(await requestCameraPermission())) return;
+      const result = await ImagePicker.launchCameraAsync({
+        mediaTypes: ['videos'],
+        allowsEditing: false,
+        videoMaxDuration: 60,
+        videoQuality: 1,
+      });
+      if (!result.canceled && result.assets?.[0]?.uri) {
+        onVideoSelected(result.assets[0].uri);
       }
     } catch {
       Alert.alert('Error', 'Could not open camera. Please try again.');
@@ -67,57 +86,28 @@ export default function AttachmentPopup({
       if (status !== 'granted') {
         Alert.alert(
           'Photos Permission',
-          'Photo library access is needed to select images. Please enable it in Settings.',
+          'Photo library access is needed. Please enable it in Settings.',
           [{ text: 'OK' }]
         );
         return;
       }
-
       const result = await ImagePicker.launchImageLibraryAsync({
-        mediaTypes: ['images'],
-        quality: 0.8,
-        allowsEditing: false,
-      });
-
-      if (!result.canceled && result.assets?.[0]?.uri) {
-        onGalleryImage(result.assets[0].uri);
-      }
-    } catch {
-      Alert.alert('Error', 'Could not open photo library. Please try again.');
-    }
-  };
-
-  const handleVideo = async () => {
-    onClose();
-    try {
-      const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
-      if (status !== 'granted') {
-        Alert.alert(
-          'Media Permission',
-          'Media library access is needed to select videos. Please enable it in Settings.',
-          [{ text: 'OK' }]
-        );
-        return;
-      }
-
-      const result = await ImagePicker.launchImageLibraryAsync({
-        mediaTypes: ['videos'],
+        mediaTypes: ['images', 'videos'],
         quality: 0.8,
         allowsEditing: false,
         videoMaxDuration: 60,
       });
-
-      if (!result.canceled && result.assets?.[0]?.uri) {
-        onVideoSelected(result.assets[0].uri);
+      if (!result.canceled && result.assets?.[0]) {
+        const asset = result.assets[0];
+        if (asset.type === 'video') {
+          onVideoSelected(asset.uri);
+        } else {
+          onGalleryImage(asset.uri);
+        }
       }
     } catch {
-      Alert.alert('Error', 'Could not open video picker. Please try again.');
+      Alert.alert('Error', 'Could not open photo library. Please try again.');
     }
-  };
-
-  const handleGif = () => {
-    onClose();
-    onGifPress();
   };
 
   const handleDoodle = () => {
@@ -145,11 +135,18 @@ export default function AttachmentPopup({
             showsHorizontalScrollIndicator={false}
             contentContainerStyle={styles.scrollContent}
           >
-            <TouchableOpacity style={styles.option} onPress={handleCamera} activeOpacity={0.7}>
+            <TouchableOpacity style={styles.option} onPress={handleCameraPhoto} activeOpacity={0.7}>
               <View style={[styles.iconCircle, { backgroundColor: 'rgba(76,175,80,0.15)' }]}>
                 <Ionicons name="camera" size={24} color="#4CAF50" />
               </View>
-              <Text style={styles.optionText}>Camera</Text>
+              <Text style={styles.optionText}>Photo</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity style={styles.option} onPress={handleCameraVideo} activeOpacity={0.7}>
+              <View style={[styles.iconCircle, { backgroundColor: 'rgba(233,69,96,0.15)' }]}>
+                <Ionicons name="videocam" size={24} color="#E94560" />
+              </View>
+              <Text style={styles.optionText}>Record</Text>
             </TouchableOpacity>
 
             <TouchableOpacity style={styles.option} onPress={handleGallery} activeOpacity={0.7}>
@@ -157,20 +154,6 @@ export default function AttachmentPopup({
                 <Ionicons name="image" size={24} color="#2196F3" />
               </View>
               <Text style={styles.optionText}>Gallery</Text>
-            </TouchableOpacity>
-
-            <TouchableOpacity style={styles.option} onPress={handleVideo} activeOpacity={0.7}>
-              <View style={[styles.iconCircle, { backgroundColor: 'rgba(233,69,96,0.15)' }]}>
-                <Ionicons name="videocam" size={24} color="#E94560" />
-              </View>
-              <Text style={styles.optionText}>Video</Text>
-            </TouchableOpacity>
-
-            <TouchableOpacity style={styles.option} onPress={handleGif} activeOpacity={0.7}>
-              <View style={[styles.iconCircle, { backgroundColor: 'rgba(156,39,176,0.15)' }]}>
-                <Ionicons name="images" size={24} color="#9C27B0" />
-              </View>
-              <Text style={styles.optionText}>GIFs</Text>
             </TouchableOpacity>
 
             <TouchableOpacity style={styles.option} onPress={handleDoodle} activeOpacity={0.7}>

@@ -59,9 +59,10 @@ interface DemoNotifStore {
   notifications: AppNotification[];
   markAllRead: () => void;
   markRead: (id: string) => void;
+  addNotification: (notif: AppNotification) => void;
 }
 
-const useDemoNotifStore = create<DemoNotifStore>((set) => ({
+export const useDemoNotifStore = create<DemoNotifStore>((set) => ({
   notifications: createDemoNotifications(),
   markAllRead: () =>
     set((state) => ({
@@ -74,6 +75,10 @@ const useDemoNotifStore = create<DemoNotifStore>((set) => ({
       notifications: state.notifications.map((n) =>
         n._id === id ? { ...n, isRead: true, readAt: Date.now() } : n,
       ),
+    })),
+  addNotification: (notif: AppNotification) =>
+    set((state) => ({
+      notifications: [notif, ...state.notifications],
     })),
 }));
 

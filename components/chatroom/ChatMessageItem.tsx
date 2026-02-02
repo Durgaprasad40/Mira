@@ -3,6 +3,7 @@ import { View, Text, TouchableOpacity, StyleSheet } from 'react-native';
 import { Image } from 'expo-image';
 import { Ionicons } from '@expo/vector-icons';
 import { INCOGNITO_COLORS } from '@/lib/constants';
+import MediaMessage from '@/components/chat/MediaMessage';
 
 const C = INCOGNITO_COLORS;
 
@@ -18,11 +19,11 @@ interface ChatMessageItemProps {
   onNamePress?: () => void;
   dimmed?: boolean;
   /** Message type for media rendering */
-  messageType?: 'text' | 'image' | 'gif' | 'video';
-  /** Media URL for image/gif/video messages */
+  messageType?: 'text' | 'image' | 'video';
+  /** Media URL for image/video messages */
   mediaUrl?: string;
-  /** Called when user taps a media bubble (image/gif for preview, video for playback) */
-  onMediaPress?: (mediaUrl: string, type: 'image' | 'gif' | 'video') => void;
+  /** Called when user taps a media bubble (image for preview, video for playback) */
+  onMediaPress?: (mediaUrl: string, type: 'image' | 'video') => void;
 }
 
 function formatTime(timestamp: number): string {
@@ -35,45 +36,7 @@ function formatTime(timestamp: number): string {
   return `${h}:${m} ${ampm}`;
 }
 
-function MediaBubble({
-  mediaUrl,
-  messageType,
-  onPress,
-}: {
-  mediaUrl: string;
-  messageType: 'image' | 'gif' | 'video';
-  onPress?: () => void;
-}) {
-  if (messageType === 'video') {
-    return (
-      <TouchableOpacity style={styles.mediaBubble} onPress={onPress} activeOpacity={0.8}>
-        <View style={styles.videoThumb}>
-          <Ionicons name="play-circle" size={44} color="rgba(255,255,255,0.9)" />
-          <Text style={styles.videoLabel}>Video</Text>
-        </View>
-      </TouchableOpacity>
-    );
-  }
-
-  // image or gif
-  return (
-    <TouchableOpacity style={styles.mediaBubble} onPress={onPress} activeOpacity={0.8}>
-      <Image
-        source={{ uri: mediaUrl }}
-        style={styles.mediaImage}
-        contentFit="cover"
-        recyclingKey={mediaUrl}
-      />
-      {messageType === 'gif' && (
-        <View style={styles.gifBadge}>
-          <Text style={styles.gifBadgeText}>GIF</Text>
-        </View>
-      )}
-    </TouchableOpacity>
-  );
-}
-
-export default function ChatMessageItem({
+function ChatMessageItem({
   senderName,
   senderId,
   senderAvatar,
@@ -88,7 +51,7 @@ export default function ChatMessageItem({
   mediaUrl,
   onMediaPress,
 }: ChatMessageItemProps) {
-  const isMedia = (messageType === 'image' || messageType === 'gif' || messageType === 'video') && mediaUrl;
+  const isMedia = (messageType === 'image' || messageType === 'video') && mediaUrl;
 
   if (isMe) {
     return (
@@ -101,10 +64,10 @@ export default function ChatMessageItem({
         <View style={styles.contentMe}>
           <Text style={styles.meTime}>{formatTime(timestamp)}</Text>
           {isMedia ? (
-            <MediaBubble
+            <MediaMessage
               mediaUrl={mediaUrl!}
-              messageType={messageType as 'image' | 'gif' | 'video'}
-              onPress={() => onMediaPress?.(mediaUrl!, messageType as 'image' | 'gif' | 'video')}
+              type={messageType as 'image' | 'video'}
+              onPress={() => onMediaPress?.(mediaUrl!, messageType as 'image' | 'video')}
             />
           ) : (
             <View style={styles.bubbleMe}>
@@ -140,10 +103,10 @@ export default function ChatMessageItem({
           <Text style={styles.timeLabel}>{formatTime(timestamp)}</Text>
         </TouchableOpacity>
         {isMedia ? (
-          <MediaBubble
+          <MediaMessage
             mediaUrl={mediaUrl!}
-            messageType={messageType as 'image' | 'gif' | 'video'}
-            onPress={() => onMediaPress?.(mediaUrl!, messageType as 'image' | 'gif' | 'video')}
+            type={messageType as 'image' | 'video'}
+            onPress={() => onMediaPress?.(mediaUrl!, messageType as 'image' | 'video')}
           />
         ) : (
           <Text style={styles.messageText}>{text}</Text>
@@ -152,6 +115,8 @@ export default function ChatMessageItem({
     </TouchableOpacity>
   );
 }
+
+export default React.memo(ChatMessageItem);
 
 const styles = StyleSheet.create({
   // ── Other users: left-aligned ──
@@ -233,45 +198,5 @@ const styles = StyleSheet.create({
     fontSize: 14,
     lineHeight: 18,
     color: C.text,
-  },
-  // ── Media bubbles ──
-  mediaBubble: {
-    width: 200,
-    height: 150,
-    borderRadius: 12,
-    overflow: 'hidden',
-    backgroundColor: C.surface,
-    marginTop: 2,
-  },
-  mediaImage: {
-    width: '100%',
-    height: '100%',
-  },
-  gifBadge: {
-    position: 'absolute',
-    bottom: 6,
-    left: 6,
-    backgroundColor: 'rgba(0,0,0,0.6)',
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    borderRadius: 4,
-  },
-  gifBadgeText: {
-    fontSize: 9,
-    fontWeight: '800',
-    color: '#FFFFFF',
-  },
-  videoThumb: {
-    width: '100%',
-    height: '100%',
-    backgroundColor: '#2C2C3A',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 4,
-  },
-  videoLabel: {
-    fontSize: 12,
-    fontWeight: '600',
-    color: C.textLight,
   },
 });

@@ -1,18 +1,21 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import {
   View,
   Text,
   StyleSheet,
   FlatList,
   TouchableOpacity,
-  KeyboardAvoidingView,
   Platform,
   TextInput,
+  LayoutChangeEvent,
 } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { COLORS } from '@/lib/constants';
 import { Avatar } from '@/components/ui';
 import { Ionicons } from '@expo/vector-icons';
+import ActiveUsersStrip from '@/components/chatroom/ActiveUsersStrip';
+import { useKeyboardHeight } from '@/hooks/useKeyboardHeight';
 
 interface Message {
   id: string;
@@ -33,8 +36,14 @@ interface Member {
 export default function RoomScreen() {
   const { id: roomId } = useLocalSearchParams<{ id: string }>();
   const router = useRouter();
+  const insets = useSafeAreaInsets();
+  const keyboardHeight = useKeyboardHeight();
   const [message, setMessage] = useState('');
   const flatListRef = useRef<FlatList>(null);
+  const [composerHeight, setComposerHeight] = useState(0);
+  const onComposerLayout = useCallback((e: LayoutChangeEvent) => {
+    setComposerHeight(e.nativeEvent.layout.height);
+  }, []);
 
   // Mock data - replace with actual Convex queries
   const [messages] = useState<Message[]>([
@@ -82,12 +91,8 @@ export default function RoomScreen() {
   };
 
   return (
-    <KeyboardAvoidingView
-      style={styles.container}
-      behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-      keyboardVerticalOffset={Platform.OS === 'ios' ? 90 : 0}
-    >
-      <View style={styles.header}>
+    <View style={styles.container}>
+      <View style={[styles.header, { paddingTop: insets.top + 8 }]}>
         <TouchableOpacity onPress={() => router.back()} style={styles.backButton}>
           <Ionicons name="arrow-back" size={24} color={COLORS.text} />
         </TouchableOpacity>
@@ -95,10 +100,13 @@ export default function RoomScreen() {
           <Text style={styles.headerTitle}>Coffee Lovers ☕</Text>
           <Text style={styles.headerSubtitle}>{members.length} members</Text>
         </View>
-        <TouchableOpacity onPress={() => {}}>
-          <Ionicons name="people" size={24} color={COLORS.primary} />
-        </TouchableOpacity>
+        <View style={{ width: 24 }} />
       </View>
+
+      <ActiveUsersStrip
+        users={members.map((m) => ({ id: m.id, avatar: m.photoUrl, isOnline: m.isOnline }))}
+        theme="light"
+      />
 
       <FlatList
         ref={flatListRef}
@@ -122,11 +130,23 @@ export default function RoomScreen() {
             </View>
           </View>
         )}
-        contentContainerStyle={styles.messagesList}
-        onContentSizeChange={() => flatListRef.current?.scrollToEnd({ animated: true })}
+        contentContainerStyle={{
+          ...styles.messagesList,
+          flexGrow: 1,
+          justifyContent: 'flex-end' as const,
+          paddingBottom: composerHeight + keyboardHeight + insets.bottom + 8,
+        }}
+        keyboardShouldPersistTaps="handled"
+        keyboardDismissMode="interactive"
       />
 
-      <View style={styles.inputContainer}>
+      <View
+        onLayout={onComposerLayout}
+        style={[styles.inputContainer, {
+          paddingBottom: Math.max(insets.bottom, 16),
+          marginBottom: keyboardHeight,
+        }]}
+      >
         <TextInput
           style={styles.input}
           placeholder="Type a message..."
@@ -134,6 +154,9 @@ export default function RoomScreen() {
           value={message}
           onChangeText={setMessage}
           multiline
+          scrollEnabled
+          textAlignVertical="top"
+          blurOnSubmit={false}
           maxLength={500}
         />
         <TouchableOpacity
@@ -144,7 +167,7 @@ export default function RoomScreen() {
           <Ionicons name="send" size={20} color={COLORS.white} />
         </TouchableOpacity>
       </View>
-    </KeyboardAvoidingView>
+    </View>
   );
 }
 
@@ -157,7 +180,6 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     padding: 16,
-    paddingTop: Platform.OS === 'ios' ? 50 : 16,
     backgroundColor: COLORS.background,
     borderBottomWidth: 1,
     borderBottomColor: COLORS.border,
@@ -231,7 +253,6 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'flex-end',
     padding: 12,
-    paddingBottom: 16,
     backgroundColor: COLORS.background,
     borderTopWidth: 1,
     borderTopColor: COLORS.border,

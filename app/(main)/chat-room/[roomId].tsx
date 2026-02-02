@@ -1,12 +1,11 @@
 import React, { useState, useCallback, useRef, useEffect } from 'react';
 import {
-  KeyboardAvoidingView,
-  Platform,
   StyleSheet,
   View,
   Text,
   TouchableOpacity,
   Alert,
+  LayoutChangeEvent,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -30,7 +29,7 @@ import {
 
 import ChatHeader from '@/components/chatroom/ChatHeader';
 import ChatMessageList, { ChatMessageListHandle } from '@/components/chatroom/ChatMessageList';
-import ChatComposer from '@/components/chatroom/ChatComposer';
+import ChatComposer, { type ComposerPanel } from '@/components/chatroom/ChatComposer';
 import MessagesPopover from '@/components/chatroom/MessagesPopover';
 import FriendRequestsPopover from '@/components/chatroom/FriendRequestsPopover';
 import NotificationsPopover from '@/components/chatroom/NotificationsPopover';
@@ -43,20 +42,49 @@ import ReportUserModal, { ReportReason } from '@/components/chatroom/ReportUserM
 import PrivateChatView from '@/components/chatroom/PrivateChatView';
 import AttachmentPopup from '@/components/chatroom/AttachmentPopup';
 import DoodleCanvas from '@/components/chatroom/DoodleCanvas';
-import GifPickerModal from '@/components/chatroom/GifPickerModal';
+// GIF feature removed
 import VideoPlayerModal from '@/components/chatroom/VideoPlayerModal';
 import ImagePreviewModal from '@/components/chatroom/ImagePreviewModal';
+import ActiveUsersStrip from '@/components/chatroom/ActiveUsersStrip';
+import { useKeyboardHeight } from '@/hooks/useKeyboardHeight';
 
 const C = INCOGNITO_COLORS;
 
 const MUTE_STORAGE_KEY = (roomId: string) => `@muted_room_${roomId}`;
 
+type Overlay =
+  | 'none'
+  | 'profile'
+  | 'notifications'
+  | 'friendRequests'
+  | 'messages'
+  | 'onlineUsers'
+  | 'messageActions'
+  | 'userProfile'
+  | 'viewProfile'
+  | 'report'
+  | 'attachment'
+  | 'doodle';
+
 export default function ChatRoomScreen() {
   const { roomId } = useLocalSearchParams<{ roomId: string }>();
   const router = useRouter();
   const insets = useSafeAreaInsets();
+  const keyboardHeight = useKeyboardHeight();
 
   const room = DEMO_CHAT_ROOMS.find((r) => r.id === roomId);
+
+  // Measured header height
+  const [chatHeaderHeight, setChatHeaderHeight] = useState(0);
+  const onChatHeaderLayout = useCallback((e: LayoutChangeEvent) => {
+    setChatHeaderHeight(e.nativeEvent.layout.height);
+  }, []);
+
+  // Measured composer height — for list paddingBottom
+  const [composerHeight, setComposerHeight] = useState(0);
+  const onComposerLayout = useCallback((e: LayoutChangeEvent) => {
+    setComposerHeight(e.nativeEvent.layout.height);
+  }, []);
 
   // ── Chat messages ──
   const messageListRef = useRef<ChatMessageListHandle>(null);
@@ -97,39 +125,19 @@ export default function ChatRoomScreen() {
   );
   const unseenNotifications = announcements.filter((a) => !a.seen).length;
 
-  // ── Modal visibility ──
-  const [profileVisible, setProfileVisible] = useState(false);
-  const [notificationsVisible, setNotificationsVisible] = useState(false);
-  const [friendRequestsVisible, setFriendRequestsVisible] = useState(false);
-  const [messagesVisible, setMessagesVisible] = useState(false);
-
-  // ── Online users panel ──
-  const [onlineUsersVisible, setOnlineUsersVisible] = useState(false);
+  // ── Single overlay state — only one modal/panel can be open at a time ──
+  const [overlay, setOverlay] = useState<Overlay>('none');
+  const closeOverlay = useCallback(() => setOverlay('none'), []);
   const onlineCount = DEMO_ONLINE_USERS.filter((u) => u.isOnline).length;
 
-  // ── Message actions sheet ──
-  const [messageActionsVisible, setMessageActionsVisible] = useState(false);
+  // ── Payload data for overlays that need it ──
   const [selectedMessage, setSelectedMessage] = useState<DemoChatMessage | null>(null);
-
-  // ── User profile popup ──
-  const [userProfileVisible, setUserProfileVisible] = useState(false);
   const [selectedUser, setSelectedUser] = useState<DemoOnlineUser | null>(null);
-
-  // ── View Profile modal (large photo) ──
-  const [viewProfileVisible, setViewProfileVisible] = useState(false);
   const [viewProfileUser, setViewProfileUser] = useState<DemoOnlineUser | null>(null);
-
-  // ── Report modal ──
-  const [reportVisible, setReportVisible] = useState(false);
   const [reportTargetUser, setReportTargetUser] = useState<DemoOnlineUser | null>(null);
-
-  // ── Direct Private Chat (opened from profile popup "Private Message") ──
   const [directChatDM, setDirectChatDM] = useState<DemoDM | null>(null);
 
-  // ── Attachment popup + Doodle canvas + GIF picker + media preview ──
-  const [attachmentVisible, setAttachmentVisible] = useState(false);
-  const [doodleVisible, setDoodleVisible] = useState(false);
-  const [gifPickerVisible, setGifPickerVisible] = useState(false);
+  // ── Media preview (these use URI strings, not booleans) ──
   const [videoPlayerUri, setVideoPlayerUri] = useState('');
   const [imagePreviewUri, setImagePreviewUri] = useState('');
 
@@ -253,13 +261,15 @@ export default function ChatRoomScreen() {
     }, 300);
   }, []);
 
+  const handlePanelChange = useCallback((_panel: ComposerPanel) => {}, []);
+
   // ────────────────────────────────────────────
-  // SEND MEDIA (image / gif / video / doodle)
+  // SEND MEDIA (image / video / doodle)
   // ────────────────────────────────────────────
   const handleSendMedia = useCallback(
-    (uri: string, mediaType: 'image' | 'gif' | 'video') => {
+    (uri: string, mediaType: 'image' | 'video') => {
       if (!roomId) return;
-      const labelMap = { image: 'Photo', gif: 'GIF', video: 'Video' };
+      const labelMap = { image: 'Photo', video: 'Video' };
       const newMessage: DemoChatMessage = {
         id: `cm_me_${Date.now()}`,
         roomId,
@@ -283,7 +293,7 @@ export default function ChatRoomScreen() {
   // ────────────────────────────────────────────
   // MEDIA TAP — open preview/player
   // ────────────────────────────────────────────
-  const handleMediaPress = useCallback((mediaUrl: string, type: 'image' | 'gif' | 'video') => {
+  const handleMediaPress = useCallback((mediaUrl: string, type: 'image' | 'video') => {
     if (type === 'video') {
       setVideoPlayerUri(mediaUrl);
     } else {
@@ -352,7 +362,7 @@ export default function ChatRoomScreen() {
   // ────────────────────────────────────────────
   const handleMessageLongPress = useCallback((message: DemoChatMessage) => {
     setSelectedMessage(message);
-    setMessageActionsVisible(true);
+    setOverlay('messageActions');
   }, []);
 
   // ────────────────────────────────────────────
@@ -371,26 +381,23 @@ export default function ChatRoomScreen() {
         isOnline: false,
       });
     }
-    setUserProfileVisible(true);
+    setOverlay('userProfile');
   }, [messages]);
 
   // ────────────────────────────────────────────
   // Online users panel — user tap
   // ────────────────────────────────────────────
   const handleOnlineUserPress = useCallback((user: DemoOnlineUser) => {
-    setOnlineUsersVisible(false);
     setSelectedUser(user);
-    setUserProfileVisible(true);
+    setOverlay('userProfile');
   }, []);
 
   // ────────────────────────────────────────────
   // View Profile — open large photo modal
   // ────────────────────────────────────────────
   const handleViewProfile = useCallback((userId: string) => {
-    // Keep selectedUser reference for the view profile modal
     setViewProfileUser(selectedUser);
-    setUserProfileVisible(false);
-    setViewProfileVisible(true);
+    setOverlay('viewProfile');
   }, [selectedUser]);
 
   // ────────────────────────────────────────────
@@ -398,13 +405,10 @@ export default function ChatRoomScreen() {
   // Find or create DM thread, then open PrivateChatView
   // ────────────────────────────────────────────
   const handlePrivateMessage = useCallback((userId: string) => {
-    setUserProfileVisible(false);
-
     // Find existing DM thread for this peer
     let existingDM = dms.find((dm) => dm.peerId === userId);
 
     if (!existingDM) {
-      // Create a new DM thread on the fly
       const user = selectedUser;
       const newDM: DemoDM = {
         id: `dm_new_${userId}`,
@@ -421,9 +425,9 @@ export default function ChatRoomScreen() {
       existingDM = newDM;
     }
 
-    // Open the direct chat view overlay with this DM
     setDirectChatDM(existingDM);
     setSelectedUser(null);
+    setOverlay('none');
   }, [dms, selectedUser]);
 
   // ────────────────────────────────────────────
@@ -431,8 +435,7 @@ export default function ChatRoomScreen() {
   // ────────────────────────────────────────────
   const handleReport = useCallback((userId: string) => {
     setReportTargetUser(selectedUser);
-    setUserProfileVisible(false);
-    setReportVisible(true);
+    setOverlay('report');
   }, [selectedUser]);
 
   const handleSubmitReport = useCallback(
@@ -459,7 +462,7 @@ export default function ChatRoomScreen() {
         AsyncStorage.setItem('@chat_room_reports', JSON.stringify(reports));
       });
 
-      setReportVisible(false);
+      setOverlay('none');
       setReportTargetUser(null);
 
       // Show success toast
@@ -501,24 +504,33 @@ export default function ChatRoomScreen() {
 
   return (
     <View style={styles.container}>
-      <KeyboardAvoidingView
-        style={{ flex: 1 }}
-        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-        keyboardVerticalOffset={0}
-      >
-        {/* Header with badge counters */}
-        <ChatHeader
-          topInset={insets.top}
-          onMenuPress={() => router.back()}
-          onReloadPress={handleReload}
-          onMessagesPress={() => setMessagesVisible(true)}
-          onFriendRequestsPress={() => setFriendRequestsVisible(true)}
-          onNotificationsPress={() => setNotificationsVisible(true)}
-          onProfilePress={() => setProfileVisible(true)}
-          profileAvatar={DEMO_CURRENT_USER.avatar}
-          unreadDMs={unreadDMs}
-          pendingFriendRequests={friendRequests.length}
-          unseenNotifications={unseenNotifications}
+      <View style={{ flex: 1 }}>
+        {/* Header with badge counters — measured via onLayout */}
+        <View onLayout={onChatHeaderLayout}>
+          <ChatHeader
+            topInset={insets.top}
+            onMenuPress={() => router.back()}
+            onReloadPress={handleReload}
+            onMessagesPress={() => setOverlay('messages')}
+            onFriendRequestsPress={() => setOverlay('friendRequests')}
+            onNotificationsPress={() => setOverlay('notifications')}
+            onProfilePress={() => setOverlay('profile')}
+            profileAvatar={DEMO_CURRENT_USER.avatar}
+            unreadDMs={unreadDMs}
+            pendingFriendRequests={friendRequests.length}
+            unseenNotifications={unseenNotifications}
+          />
+        </View>
+
+        {/* Active users strip */}
+        <ActiveUsersStrip
+          users={DEMO_ONLINE_USERS.map((u) => ({ id: u.id, avatar: u.avatar, isOnline: u.isOnline }))}
+          theme="dark"
+          onUserPress={(userId) => {
+            const user = DEMO_ONLINE_USERS.find((u) => u.id === userId);
+            if (user) handleOnlineUserPress(user);
+          }}
+          onMorePress={() => setOverlay('onlineUsers')}
         />
 
         {/* Messages */}
@@ -530,64 +542,60 @@ export default function ChatRoomScreen() {
           onMessageLongPress={handleMessageLongPress}
           onAvatarPress={handleAvatarPress}
           onMediaPress={handleMediaPress}
+          contentPaddingBottom={composerHeight + keyboardHeight + insets.bottom}
         />
 
-        {/* Composer */}
-        <ChatComposer
-          value={inputText}
-          onChangeText={setInputText}
-          onSend={handleSend}
-          onPlusPress={() => setAttachmentVisible(true)}
-          onInputFocus={handleInputFocus}
-          rightExtra={
-            <TouchableOpacity
-              onPress={() => setOnlineUsersVisible(true)}
-              hitSlop={{ top: 10, bottom: 10, left: 8, right: 8 }}
-              style={{ width: 40, height: 40, alignItems: 'center', justifyContent: 'center', flexDirection: 'row', gap: 2 }}
-            >
-              <Ionicons name="people" size={24} color="#00B894" />
-              {onlineCount > 0 && (
-                <Text style={{ fontSize: 11, fontWeight: '700', color: '#00B894' }}>
-                  {onlineCount}
-                </Text>
-              )}
-            </TouchableOpacity>
-          }
-        />
-      </KeyboardAvoidingView>
+        {/* Composer — lifted above keyboard via marginBottom */}
+        <View
+          onLayout={onComposerLayout}
+          style={{
+            paddingBottom: insets.bottom,
+            marginBottom: keyboardHeight,
+          }}
+        >
+          <ChatComposer
+            value={inputText}
+            onChangeText={setInputText}
+            onSend={handleSend}
+            onPlusPress={() => setOverlay('attachment')}
+            onInputFocus={handleInputFocus}
+            onPanelChange={handlePanelChange}
+          />
+        </View>
+      </View>
 
       {/* ── Modals / Sheets / Panels ── */}
 
       <MessagesPopover
-        visible={messagesVisible}
-        onClose={() => setMessagesVisible(false)}
+        visible={overlay === 'messages'}
+        onClose={closeOverlay}
         dms={dms}
         onOpenChat={(dm) => {
           handleMarkDMRead(dm.id);
-          setMessagesVisible(false);
           setDirectChatDM(dm);
+          closeOverlay();
         }}
         onHideDM={handleHideDM}
       />
 
       <FriendRequestsPopover
-        visible={friendRequestsVisible}
-        onClose={() => setFriendRequestsVisible(false)}
+        visible={overlay === 'friendRequests'}
+        onClose={closeOverlay}
         requests={friendRequests}
         onAccept={handleAcceptFriendRequest}
         onReject={handleRejectFriendRequest}
       />
 
       <NotificationsPopover
-        visible={notificationsVisible}
-        onClose={() => setNotificationsVisible(false)}
+        visible={overlay === 'notifications'}
+        onClose={closeOverlay}
         announcements={announcements}
         onMarkAllSeen={handleMarkAllNotificationsSeen}
       />
 
       <ProfilePopover
-        visible={profileVisible}
-        onClose={() => setProfileVisible(false)}
+        visible={overlay === 'profile'}
+        onClose={closeOverlay}
         username={DEMO_CURRENT_USER.username}
         avatar={DEMO_CURRENT_USER.avatar}
         isActive={DEMO_CURRENT_USER.isActive}
@@ -599,36 +607,36 @@ export default function ChatRoomScreen() {
 
       {/* Online users right panel */}
       <OnlineUsersPanel
-        visible={onlineUsersVisible}
-        onClose={() => setOnlineUsersVisible(false)}
+        visible={overlay === 'onlineUsers'}
+        onClose={closeOverlay}
         users={DEMO_ONLINE_USERS}
         onUserPress={handleOnlineUserPress}
       />
 
       {/* Message actions sheet (long-press) */}
       <MessageActionsSheet
-        visible={messageActionsVisible}
+        visible={overlay === 'messageActions'}
         onClose={() => {
-          setMessageActionsVisible(false);
+          closeOverlay();
           setSelectedMessage(null);
         }}
         messageText={selectedMessage?.text || ''}
         senderName={selectedMessage?.senderName || ''}
         onReply={() => {
-          setMessageActionsVisible(false);
+          closeOverlay();
           setSelectedMessage(null);
         }}
         onReport={() => {
-          setMessageActionsVisible(false);
+          closeOverlay();
           setSelectedMessage(null);
         }}
       />
 
       {/* User profile popup (tap avatar/name) */}
       <UserProfilePopup
-        visible={userProfileVisible}
+        visible={overlay === 'userProfile'}
         onClose={() => {
-          setUserProfileVisible(false);
+          closeOverlay();
           setSelectedUser(null);
         }}
         user={selectedUser}
@@ -643,9 +651,9 @@ export default function ChatRoomScreen() {
 
       {/* View Profile modal (large 3x photo) */}
       <ViewProfileModal
-        visible={viewProfileVisible}
+        visible={overlay === 'viewProfile'}
         onClose={() => {
-          setViewProfileVisible(false);
+          closeOverlay();
           setViewProfileUser(null);
         }}
         user={viewProfileUser}
@@ -653,26 +661,18 @@ export default function ChatRoomScreen() {
 
       {/* Attachment popup (+ button) */}
       <AttachmentPopup
-        visible={attachmentVisible}
-        onClose={() => setAttachmentVisible(false)}
+        visible={overlay === 'attachment'}
+        onClose={closeOverlay}
         onImageCaptured={(uri) => handleSendMedia(uri, 'image')}
         onGalleryImage={(uri) => handleSendMedia(uri, 'image')}
         onVideoSelected={(uri) => handleSendMedia(uri, 'video')}
-        onGifPress={() => setGifPickerVisible(true)}
-        onDoodlePress={() => setDoodleVisible(true)}
-      />
-
-      {/* GIF picker modal */}
-      <GifPickerModal
-        visible={gifPickerVisible}
-        onClose={() => setGifPickerVisible(false)}
-        onGifSelected={(gifUrl) => handleSendMedia(gifUrl, 'gif')}
+        onDoodlePress={() => setOverlay('doodle')}
       />
 
       {/* Doodle canvas */}
       <DoodleCanvas
-        visible={doodleVisible}
-        onClose={() => setDoodleVisible(false)}
+        visible={overlay === 'doodle'}
+        onClose={closeOverlay}
         onSend={(uri) => handleSendMedia(uri, 'image')}
       />
 
@@ -692,9 +692,9 @@ export default function ChatRoomScreen() {
 
       {/* Report user modal */}
       <ReportUserModal
-        visible={reportVisible}
+        visible={overlay === 'report'}
         onClose={() => {
-          setReportVisible(false);
+          closeOverlay();
           setReportTargetUser(null);
         }}
         reportedUserId={reportTargetUser?.id || ''}

@@ -4,8 +4,6 @@ import {
   Text,
   TouchableOpacity,
   FlatList,
-  KeyboardAvoidingView,
-  Platform,
   StyleSheet,
 } from 'react-native';
 import { Image } from 'expo-image';
@@ -17,12 +15,13 @@ import {
   DEMO_PRIVATE_MESSAGES,
   DEMO_CURRENT_USER,
 } from '@/lib/demoData';
+import MediaMessage from '@/components/chat/MediaMessage';
 import ChatComposer from './ChatComposer';
 import AttachmentPopup from './AttachmentPopup';
 import DoodleCanvas from './DoodleCanvas';
-import GifPickerModal from './GifPickerModal';
 import VideoPlayerModal from './VideoPlayerModal';
 import ImagePreviewModal from './ImagePreviewModal';
+import { useKeyboardHeight } from '@/hooks/useKeyboardHeight';
 
 const C = INCOGNITO_COLORS;
 
@@ -52,43 +51,6 @@ function getDemoPrivateMessages(dm: DemoDM): DemoPrivateMessage[] {
   ];
 }
 
-// Media bubble for inline rendering
-function MediaBubble({
-  mediaUrl,
-  messageType,
-  onPress,
-}: {
-  mediaUrl: string;
-  messageType: 'image' | 'gif' | 'video';
-  onPress?: () => void;
-}) {
-  if (messageType === 'video') {
-    return (
-      <TouchableOpacity style={styles.mediaBubble} onPress={onPress} activeOpacity={0.8}>
-        <View style={styles.videoThumb}>
-          <Ionicons name="play-circle" size={44} color="rgba(255,255,255,0.9)" />
-          <Text style={styles.videoLabel}>Video</Text>
-        </View>
-      </TouchableOpacity>
-    );
-  }
-  return (
-    <TouchableOpacity style={styles.mediaBubble} onPress={onPress} activeOpacity={0.8}>
-      <Image
-        source={{ uri: mediaUrl }}
-        style={styles.mediaImage}
-        contentFit="cover"
-        recyclingKey={mediaUrl}
-      />
-      {messageType === 'gif' && (
-        <View style={styles.gifBadge}>
-          <Text style={styles.gifBadgeText}>GIF</Text>
-        </View>
-      )}
-    </TouchableOpacity>
-  );
-}
-
 interface PrivateChatViewProps {
   dm: DemoDM;
   onBack: () => void;
@@ -96,6 +58,7 @@ interface PrivateChatViewProps {
 }
 
 export default function PrivateChatView({ dm, onBack, topInset = 0 }: PrivateChatViewProps) {
+  const keyboardHeight = useKeyboardHeight();
   const flatListRef = useRef<FlatList>(null);
   const [messages, setMessages] = useState<DemoPrivateMessage[]>(
     () => getDemoPrivateMessages(dm)
@@ -103,7 +66,6 @@ export default function PrivateChatView({ dm, onBack, topInset = 0 }: PrivateCha
   const [inputText, setInputText] = useState('');
   const [attachmentVisible, setAttachmentVisible] = useState(false);
   const [doodleVisible, setDoodleVisible] = useState(false);
-  const [gifPickerVisible, setGifPickerVisible] = useState(false);
   const [videoPlayerUri, setVideoPlayerUri] = useState('');
   const [imagePreviewUri, setImagePreviewUri] = useState('');
 
@@ -136,8 +98,8 @@ export default function PrivateChatView({ dm, onBack, topInset = 0 }: PrivateCha
   }, [inputText, dm.id]);
 
   const handleSendMedia = useCallback(
-    (uri: string, mediaType: 'image' | 'gif' | 'video') => {
-      const labelMap = { image: 'Photo', gif: 'GIF', video: 'Video' };
+    (uri: string, mediaType: 'image' | 'video') => {
+      const labelMap = { image: 'Photo', video: 'Video' };
       const newMsg: DemoPrivateMessage = {
         id: `pm_me_${Date.now()}`,
         dmId: dm.id,
@@ -162,7 +124,7 @@ export default function PrivateChatView({ dm, onBack, topInset = 0 }: PrivateCha
     }, 300);
   }, []);
 
-  const handleMediaPress = useCallback((mediaUrl: string, type: 'image' | 'gif' | 'video') => {
+  const handleMediaPress = useCallback((mediaUrl: string, type: 'image' | 'video') => {
     if (type === 'video') {
       setVideoPlayerUri(mediaUrl);
     } else {
@@ -173,17 +135,17 @@ export default function PrivateChatView({ dm, onBack, topInset = 0 }: PrivateCha
   const renderMessage = useCallback(
     ({ item }: { item: DemoPrivateMessage }) => {
       const isMe = item.senderId === DEMO_CURRENT_USER.id;
-      const isMedia = (item.type === 'image' || item.type === 'gif' || item.type === 'video') && item.mediaUrl;
+      const isMedia = (item.type === 'image' || item.type === 'video') && item.mediaUrl;
 
       if (isMe) {
         return (
           <View style={styles.rowMe}>
             <View style={styles.bubbleMe}>
               {isMedia ? (
-                <MediaBubble
+                <MediaMessage
                   mediaUrl={item.mediaUrl!}
-                  messageType={item.type as 'image' | 'gif' | 'video'}
-                  onPress={() => handleMediaPress(item.mediaUrl!, item.type as 'image' | 'gif' | 'video')}
+                  type={item.type as 'image' | 'video'}
+                  onPress={() => handleMediaPress(item.mediaUrl!, item.type as 'image' | 'video')}
                 />
               ) : (
                 <Text style={styles.bubbleMeText}>{item.text}</Text>
@@ -207,8 +169,8 @@ export default function PrivateChatView({ dm, onBack, topInset = 0 }: PrivateCha
             {isMedia ? (
               <MediaBubble
                 mediaUrl={item.mediaUrl!}
-                messageType={item.type as 'image' | 'gif' | 'video'}
-                onPress={() => handleMediaPress(item.mediaUrl!, item.type as 'image' | 'gif' | 'video')}
+                messageType={item.type as 'image' | 'video'}
+                onPress={() => handleMediaPress(item.mediaUrl!, item.type as 'image' | 'video')}
               />
             ) : (
               <Text style={styles.bubbleOtherText}>{item.text}</Text>
@@ -222,11 +184,7 @@ export default function PrivateChatView({ dm, onBack, topInset = 0 }: PrivateCha
   );
 
   return (
-    <KeyboardAvoidingView
-      style={styles.container}
-      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-      keyboardVerticalOffset={0}
-    >
+    <View style={styles.container}>
       {/* Header */}
       <View style={[styles.header, topInset > 0 && { paddingTop: topInset + 8 }]}>
         <TouchableOpacity
@@ -252,11 +210,15 @@ export default function PrivateChatView({ dm, onBack, topInset = 0 }: PrivateCha
         data={messages}
         keyExtractor={(item) => item.id}
         renderItem={renderMessage}
-        contentContainerStyle={styles.messagesList}
-        showsVerticalScrollIndicator={false}
-        onContentSizeChange={() => {
-          flatListRef.current?.scrollToEnd({ animated: false });
+        contentContainerStyle={{
+          flexGrow: 1,
+          justifyContent: 'flex-end' as const,
+          paddingVertical: 6,
+          paddingBottom: keyboardHeight + 8,
         }}
+        showsVerticalScrollIndicator={false}
+        keyboardShouldPersistTaps="handled"
+        keyboardDismissMode="interactive"
         ListEmptyComponent={
           <View style={styles.emptyContainer}>
             <Ionicons name="chatbubble-outline" size={40} color={C.textLight} />
@@ -265,14 +227,16 @@ export default function PrivateChatView({ dm, onBack, topInset = 0 }: PrivateCha
         }
       />
 
-      {/* Composer */}
-      <ChatComposer
-        value={inputText}
-        onChangeText={setInputText}
-        onSend={handleSend}
-        onPlusPress={() => setAttachmentVisible(true)}
-        onInputFocus={handleInputFocus}
-      />
+      {/* Composer — lifted above keyboard via marginBottom */}
+      <View style={{ marginBottom: keyboardHeight }}>
+        <ChatComposer
+          value={inputText}
+          onChangeText={setInputText}
+          onSend={handleSend}
+          onPlusPress={() => setAttachmentVisible(true)}
+          onInputFocus={handleInputFocus}
+        />
+      </View>
 
       {/* Attachment popup */}
       <AttachmentPopup
@@ -281,15 +245,7 @@ export default function PrivateChatView({ dm, onBack, topInset = 0 }: PrivateCha
         onImageCaptured={(uri) => handleSendMedia(uri, 'image')}
         onGalleryImage={(uri) => handleSendMedia(uri, 'image')}
         onVideoSelected={(uri) => handleSendMedia(uri, 'video')}
-        onGifPress={() => setGifPickerVisible(true)}
         onDoodlePress={() => setDoodleVisible(true)}
-      />
-
-      {/* GIF picker */}
-      <GifPickerModal
-        visible={gifPickerVisible}
-        onClose={() => setGifPickerVisible(false)}
-        onGifSelected={(gifUrl) => handleSendMedia(gifUrl, 'gif')}
       />
 
       {/* Doodle canvas */}
@@ -312,7 +268,7 @@ export default function PrivateChatView({ dm, onBack, topInset = 0 }: PrivateCha
         imageUri={imagePreviewUri}
         onClose={() => setImagePreviewUri('')}
       />
-    </KeyboardAvoidingView>
+    </View>
   );
 }
 
@@ -348,11 +304,6 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: '700',
     color: C.text,
-  },
-  messagesList: {
-    paddingHorizontal: 12,
-    paddingVertical: 12,
-    flexGrow: 1,
   },
   // ── Other user: left-aligned ──
   rowOther: {
@@ -429,45 +380,6 @@ const styles = StyleSheet.create({
   },
   emptyText: {
     fontSize: 14,
-    color: C.textLight,
-  },
-  // ── Media bubbles ──
-  mediaBubble: {
-    width: 200,
-    height: 150,
-    borderRadius: 10,
-    overflow: 'hidden',
-    backgroundColor: C.surface,
-  },
-  mediaImage: {
-    width: '100%',
-    height: '100%',
-  },
-  gifBadge: {
-    position: 'absolute',
-    bottom: 6,
-    left: 6,
-    backgroundColor: 'rgba(0,0,0,0.6)',
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    borderRadius: 4,
-  },
-  gifBadgeText: {
-    fontSize: 9,
-    fontWeight: '800',
-    color: '#FFFFFF',
-  },
-  videoThumb: {
-    width: '100%',
-    height: '100%',
-    backgroundColor: '#2C2C3A',
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 4,
-  },
-  videoLabel: {
-    fontSize: 12,
-    fontWeight: '600',
     color: C.textLight,
   },
 });
