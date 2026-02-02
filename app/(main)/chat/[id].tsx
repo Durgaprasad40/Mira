@@ -344,17 +344,19 @@ export default function ChatScreen() {
           keyboardShouldPersistTaps="handled"
           keyboardDismissMode="interactive"
         />
-        <MessageInput
-          onSend={handleSend}
-          onSendImage={handleSendImage}
-          onSendDare={activeConversation.isPreMatch ? handleSendDare : undefined}
-          disabled={isSending}
-          isPreMatch={activeConversation.isPreMatch}
-          messagesRemaining={messagesRemaining}
-          subscriptionTier={isDemo ? 'premium' : (currentUser?.subscriptionTier || 'free')}
-          canSendCustom={canSendCustom}
-          recipientName={activeConversation.otherUser.name}
-        />
+        <View style={{ paddingBottom: insets.bottom }}>
+          <MessageInput
+            onSend={handleSend}
+            onSendImage={handleSendImage}
+            onSendDare={activeConversation.isPreMatch ? handleSendDare : undefined}
+            disabled={isSending}
+            isPreMatch={activeConversation.isPreMatch}
+            messagesRemaining={messagesRemaining}
+            subscriptionTier={isDemo ? 'premium' : (currentUser?.subscriptionTier || 'free')}
+            canSendCustom={canSendCustom}
+            recipientName={activeConversation.otherUser.name}
+          />
+        </View>
       </KeyboardAvoidingView>
 
       {/* Protected Media Options Sheet */}

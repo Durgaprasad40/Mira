@@ -9,6 +9,7 @@ import {
   KeyboardAvoidingView,
   Platform,
   Alert,
+  LayoutChangeEvent,
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useLocalSearchParams, useRouter } from 'expo-router';
@@ -103,6 +104,12 @@ export default function ConfessionThreadScreen() {
   const [activeChatModal, setActiveChatModal] = useState<ConfessionChat | null>(null);
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
   const [showReactionPicker, setShowReactionPicker] = useState(false);
+
+  // Measure nav bar height for KeyboardAvoidingView offset
+  const [navBarHeight, setNavBarHeight] = useState(0);
+  const onNavBarLayout = useCallback((e: LayoutChangeEvent) => {
+    setNavBarHeight(e.nativeEvent.layout.height);
+  }, []);
 
   // Convex mutations
   const createReplyMutation = useMutation(api.confessions.createReply);
@@ -298,10 +305,10 @@ export default function ConfessionThreadScreen() {
       <KeyboardAvoidingView
         style={{ flex: 1 }}
         behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-        keyboardVerticalOffset={0}
+        keyboardVerticalOffset={insets.top}
       >
         {/* Nav Bar */}
-        <View style={styles.navBar}>
+        <View style={styles.navBar} onLayout={onNavBarLayout}>
           <TouchableOpacity onPress={() => router.back()} hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}>
             <Ionicons name="arrow-back" size={24} color={COLORS.text} />
           </TouchableOpacity>

@@ -49,6 +49,7 @@ import DoodleCanvas from '@/components/chatroom/DoodleCanvas';
 import VideoPlayerModal from '@/components/chatroom/VideoPlayerModal';
 import ImagePreviewModal from '@/components/chatroom/ImagePreviewModal';
 import ActiveUsersStrip from '@/components/chatroom/ActiveUsersStrip';
+import { useDemoChatRoomStore } from '@/stores/demoChatRoomStore';
 const C = INCOGNITO_COLORS;
 
 const MUTE_STORAGE_KEY = (roomId: string) => `@muted_room_${roomId}`;
@@ -74,10 +75,14 @@ export default function ChatRoomScreen() {
 
   const room = DEMO_CHAT_ROOMS.find((r) => r.id === roomId);
 
-  // Measured header height
+  // Measured heights above the KeyboardAvoidingView
   const [chatHeaderHeight, setChatHeaderHeight] = useState(0);
+  const [stripHeight, setStripHeight] = useState(0);
   const onChatHeaderLayout = useCallback((e: LayoutChangeEvent) => {
     setChatHeaderHeight(e.nativeEvent.layout.height);
+  }, []);
+  const onStripLayout = useCallback((e: LayoutChangeEvent) => {
+    setStripHeight(e.nativeEvent.layout.height);
   }, []);
 
   // Scroll to end when keyboard opens (WhatsApp behavior)
@@ -91,23 +96,29 @@ export default function ChatRoomScreen() {
     return () => sub.remove();
   }, []);
 
-  // ── Chat messages ──
+  // ── Chat messages (persisted via Zustand store) ──
   const messageListRef = useRef<ChatMessageListHandle>(null);
-  const userSentRef = useRef<DemoChatMessage[]>([]);
-  const [messages, setMessages] = useState<DemoChatMessage[]>(() => {
-    const base = roomId ? getDemoMessagesForRoom(roomId) : [];
-    // Append a "joined" system message for current user on entry
+  const seedRoom = useDemoChatRoomStore((s) => s.seedRoom);
+  const addStoreMessage = useDemoChatRoomStore((s) => s.addMessage);
+  const setStoreMessages = useDemoChatRoomStore((s) => s.setMessages);
+  const messages = useDemoChatRoomStore((s) => (roomId ? s.rooms[roomId] ?? [] : []));
+
+  // Seed the room once with demo data + join message
+  useEffect(() => {
+    if (!roomId) return;
+    const base = getDemoMessagesForRoom(roomId);
     const joinMsg: DemoChatMessage = {
       id: `sys_join_${DEMO_CURRENT_USER.id}_${Date.now()}`,
-      roomId: roomId || '',
+      roomId,
       senderId: 'system',
       senderName: 'System',
       type: 'system',
       text: `${DEMO_CURRENT_USER.username} joined the room`,
       createdAt: Date.now(),
     };
-    return [...base, joinMsg];
-  });
+    seedRoom(roomId, [...base, joinMsg]);
+  }, [roomId, seedRoom]);
+
   const [inputText, setInputText] = useState('');
 
   // ── User state ──
@@ -148,17 +159,18 @@ export default function ChatRoomScreen() {
 
   // ── Auto-clear join messages after 1 minute ──
   useEffect(() => {
-    const joinIds = messages
-      .filter((m) => m.id.startsWith('sys_join_'))
-      .map((m) => m.id);
-    if (joinIds.length === 0) return;
+    if (!roomId) return;
+    const currentMsgs = useDemoChatRoomStore.getState().rooms[roomId] ?? [];
+    const hasJoin = currentMsgs.some((m) => m.id.startsWith('sys_join_'));
+    if (!hasJoin) return;
 
     const timer = setTimeout(() => {
-      setMessages((prev) => prev.filter((m) => !m.id.startsWith('sys_join_')));
+      const latest = useDemoChatRoomStore.getState().rooms[roomId] ?? [];
+      setStoreMessages(roomId, latest.filter((m) => !m.id.startsWith('sys_join_')));
     }, 60000);
 
     return () => clearTimeout(timer);
-  }, []); // run once on mount
+  }, [roomId, setStoreMessages]); // run once on mount
 
   // ── Mute room (persisted in AsyncStorage) ──
   const [isRoomMuted, setIsRoomMuted] = useState(false);
@@ -197,15 +209,19 @@ export default function ChatRoomScreen() {
   // RELOAD
   // ────────────────────────────────────────────
   const handleReload = useCallback(() => {
-    const baseMessages = roomId ? getDemoMessagesForRoom(roomId) : [];
+    if (!roomId) return;
+    const baseMessages = getDemoMessagesForRoom(roomId);
+    const currentMessages = useDemoChatRoomStore.getState().rooms[roomId] ?? [];
 
+    // Keep user-sent messages (not in base seed) merged with refreshed base
     const baseIds = new Set(baseMessages.map((m) => m.id));
+    const userSent = currentMessages.filter((m) => !baseIds.has(m.id) && !m.id.startsWith('sys_join_'));
     const merged = [
       ...baseMessages,
-      ...userSentRef.current.filter((m) => !baseIds.has(m.id)),
+      ...userSent,
     ].sort((a, b) => a.createdAt - b.createdAt);
 
-    setMessages(merged);
+    setStoreMessages(roomId, merged);
 
     setDMs((prev) =>
       prev.map((dm) => {
@@ -248,14 +264,10 @@ export default function ChatRoomScreen() {
       createdAt: Date.now(),
     };
 
-    userSentRef.current = [...userSentRef.current, newMessage];
-    setMessages((prev) => {
-      const next = [...prev, newMessage];
-      return next.length > 1000 ? next.slice(next.length - 1000) : next;
-    });
+    addStoreMessage(roomId, newMessage);
     setInputText('');
     setUserCoins((prev) => prev + 1);
-  }, [inputText, roomId]);
+  }, [inputText, roomId, addStoreMessage]);
 
   const handlePanelChange = useCallback((_panel: ComposerPanel) => {}, []);
 
@@ -276,14 +288,10 @@ export default function ChatRoomScreen() {
         mediaUrl: uri,
         createdAt: Date.now(),
       };
-      userSentRef.current = [...userSentRef.current, newMessage];
-      setMessages((prev) => {
-        const next = [...prev, newMessage];
-        return next.length > 1000 ? next.slice(next.length - 1000) : next;
-      });
+      addStoreMessage(roomId, newMessage);
       setUserCoins((prev) => prev + 1);
     },
-    [roomId]
+    [roomId, addStoreMessage]
   );
 
   // ────────────────────────────────────────────
@@ -518,20 +526,22 @@ export default function ChatRoomScreen() {
       </View>
 
       {/* Active users strip */}
-      <ActiveUsersStrip
-        users={DEMO_ONLINE_USERS.map((u) => ({ id: u.id, avatar: u.avatar, isOnline: u.isOnline }))}
-        theme="dark"
-        onUserPress={(userId) => {
-          const user = DEMO_ONLINE_USERS.find((u) => u.id === userId);
-          if (user) handleOnlineUserPress(user);
-        }}
-        onMorePress={() => setOverlay('onlineUsers')}
-      />
+      <View onLayout={onStripLayout}>
+        <ActiveUsersStrip
+          users={DEMO_ONLINE_USERS.map((u) => ({ id: u.id, avatar: u.avatar, isOnline: u.isOnline }))}
+          theme="dark"
+          onUserPress={(userId) => {
+            const user = DEMO_ONLINE_USERS.find((u) => u.id === userId);
+            if (user) handleOnlineUserPress(user);
+          }}
+          onMorePress={() => setOverlay('onlineUsers')}
+        />
+      </View>
 
       <KeyboardAvoidingView
         style={{ flex: 1 }}
         behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-        keyboardVerticalOffset={chatHeaderHeight}
+        keyboardVerticalOffset={chatHeaderHeight + stripHeight}
       >
         {/* Messages */}
         <ChatMessageList
@@ -546,13 +556,15 @@ export default function ChatRoomScreen() {
         />
 
         {/* Composer — pushed up by KAV */}
-        <ChatComposer
-          value={inputText}
-          onChangeText={setInputText}
-          onSend={handleSend}
-          onPlusPress={() => setOverlay('attachment')}
-          onPanelChange={handlePanelChange}
-        />
+        <View style={{ paddingBottom: insets.bottom }}>
+          <ChatComposer
+            value={inputText}
+            onChangeText={setInputText}
+            onSend={handleSend}
+            onPlusPress={() => setOverlay('attachment')}
+            onPanelChange={handlePanelChange}
+          />
+        </View>
       </KeyboardAvoidingView>
 
       {/* ── Modals / Sheets / Panels ── */}

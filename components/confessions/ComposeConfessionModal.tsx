@@ -13,6 +13,7 @@ import {
   ScrollView,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import EmojiPicker from 'rn-emoji-keyboard';
 import { COLORS } from '@/lib/constants';
 import { ConfessionTopic, ConfessionRevealPolicy, TimedRevealOption } from '@/types';
@@ -44,6 +45,7 @@ export default function ComposeConfessionModal({
   onClose,
   onSubmit,
 }: ComposeConfessionModalProps) {
+  const modalInsets = useSafeAreaInsets();
   const [text, setText] = useState('');
   const [isAnonymous, setIsAnonymous] = useState(true);
   const [confessToSomeone, setConfessToSomeone] = useState(false);
@@ -125,7 +127,7 @@ export default function ComposeConfessionModal({
         behavior={Platform.OS === 'ios' ? 'padding' : undefined}
       >
         {/* Header */}
-        <View style={styles.header}>
+        <View style={[styles.header, { paddingTop: Math.max(modalInsets.top, 16) }]}>
           <TouchableOpacity onPress={onClose} hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}>
             <Ionicons name="close" size={24} color={COLORS.text} />
           </TouchableOpacity>
