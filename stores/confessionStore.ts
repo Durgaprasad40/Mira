@@ -14,6 +14,7 @@ import {
   DEMO_CONFESSION_USER_REACTIONS,
   DEMO_CONFESSION_CHATS,
   DEMO_SECRET_CRUSHES,
+  DEMO_CONFESSION_REPLIES,
 } from '@/lib/demoData';
 import { isProbablyEmoji } from '@/lib/utils';
 
@@ -100,26 +101,48 @@ export const useConfessionStore = create<ConfessionState>()(
 
       seedConfessions: () => {
         if (get().seeded) {
-          // Migrate persisted confessions that have old/invalid reaction keys
+          // Migrate persisted confessions: fix old reaction keys + backfill replyPreviews
           const current = get().confessions;
-          const needsMigration = current.some(
-            (c) =>
-              (c.reactions && Object.keys(c.reactions).some((k) => !isProbablyEmoji(k))) ||
-              (c.reactions && Object.keys(c.reactions).length > 0 && (!c.topEmojis || c.topEmojis.length === 0)) ||
-              (c.topEmojis && c.topEmojis.some((e) => !isProbablyEmoji(e.emoji)))
-          );
-          if (needsMigration) {
-            set({ confessions: current.map(migrateConfessionReactions) });
+          const migrated = current.map((c) => {
+            let updated = migrateConfessionReactions(c);
+            // Backfill replyPreviews if missing
+            if (!updated.replyPreviews || updated.replyPreviews.length === 0) {
+              const replies = DEMO_CONFESSION_REPLIES[updated.id] || [];
+              if (replies.length > 0) {
+                updated = {
+                  ...updated,
+                  replyPreviews: replies.slice(0, 2).map((r) => ({
+                    text: r.text,
+                    isAnonymous: r.isAnonymous,
+                    type: (r as any).type || 'text',
+                    createdAt: r.createdAt,
+                  })),
+                };
+              }
+            }
+            return updated;
+          });
+          const changed = migrated.some((c, i) => c !== current[i]);
+          if (changed) {
+            set({ confessions: migrated });
           }
           return;
         }
-        // Backfill revealPolicy and mutualRevealStatus on demo data
-        const confessions = DEMO_CONFESSIONS.map((c) =>
-          migrateConfessionReactions({
+        // Backfill revealPolicy, replyPreviews, and mutualRevealStatus on demo data
+        const confessions = DEMO_CONFESSIONS.map((c) => {
+          const replies = DEMO_CONFESSION_REPLIES[c.id] || [];
+          const replyPreviews = replies.slice(0, 2).map((r) => ({
+            text: r.text,
+            isAnonymous: r.isAnonymous,
+            type: (r as any).type || 'text',
+            createdAt: r.createdAt,
+          }));
+          return migrateConfessionReactions({
             ...c,
+            replyPreviews,
             revealPolicy: c.revealPolicy || ('never' as const),
-          })
-        );
+          });
+        });
         const chats = DEMO_CONFESSION_CHATS.map((ch) => ({
           ...ch,
           mutualRevealStatus: ch.mutualRevealStatus || ('none' as MutualRevealStatus),

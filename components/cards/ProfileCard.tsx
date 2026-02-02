@@ -29,10 +29,14 @@ export interface ProfileCardProps {
   theme?: 'light' | 'dark';
   /** Called when user taps the arrow to view full profile */
   onOpenProfile?: () => void;
+  /** When true, photos are rendered with a blur effect (user-controlled privacy) */
+  photoBlurred?: boolean;
   // Legacy props for non-Discover usage (explore grid etc.)
   user?: any;
   onPress?: () => void;
 }
+
+const BLUR_RADIUS = 25; // Strong but recognisable blur
 
 export const ProfileCard: React.FC<ProfileCardProps> = ({
   name,
@@ -46,6 +50,7 @@ export const ProfileCard: React.FC<ProfileCardProps> = ({
   showCarousel = false,
   theme = 'light',
   onOpenProfile,
+  photoBlurred = false,
   onPress,
 }) => {
   const dark = theme === 'dark';
@@ -70,7 +75,12 @@ export const ProfileCard: React.FC<ProfileCardProps> = ({
     return (
       <TouchableOpacity style={styles.gridCard} onPress={onPress} activeOpacity={0.8}>
         {currentPhoto ? (
-          <Image source={{ uri: currentPhoto.url }} style={styles.gridImage} contentFit="cover" />
+          <Image
+            source={{ uri: currentPhoto.url }}
+            style={styles.gridImage}
+            contentFit="cover"
+            blurRadius={photoBlurred ? BLUR_RADIUS : undefined}
+          />
         ) : null}
         <View style={styles.gridOverlay}>
           <Text style={styles.gridName} numberOfLines={1}>
@@ -92,6 +102,7 @@ export const ProfileCard: React.FC<ProfileCardProps> = ({
             source={{ uri: currentPhoto.url }}
             style={styles.image}
             contentFit="cover"
+            blurRadius={photoBlurred ? BLUR_RADIUS : undefined}
           />
         ) : (
           <View style={[styles.photoPlaceholder, dark && { backgroundColor: INCOGNITO_COLORS.accent }]}>

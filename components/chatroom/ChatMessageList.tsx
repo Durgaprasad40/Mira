@@ -195,7 +195,7 @@ const ChatMessageList = forwardRef<ChatMessageListHandle, ChatMessageListProps>(
           flexGrow: 1,
           justifyContent: 'flex-end' as const,
           paddingTop: 8,
-          paddingBottom: contentPaddingBottom + 8,
+          paddingBottom: contentPaddingBottom,
         }}
         onScroll={handleScroll}
         scrollEventThrottle={16}

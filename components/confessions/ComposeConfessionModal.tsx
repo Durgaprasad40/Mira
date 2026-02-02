@@ -155,7 +155,7 @@ export default function ComposeConfessionModal({
           {/* Toolbar row: emoji + char count (no camera/gallery) */}
           <View style={styles.toolbarRow}>
             <TouchableOpacity onPress={() => setShowEmojiPicker(true)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
-              <Ionicons name="happy-outline" size={22} color={COLORS.textMuted} />
+              <Text style={{ fontSize: 20 }}>🙂</Text>
             </TouchableOpacity>
             <View style={{ flex: 1 }} />
             <Text style={styles.charCount}>{text.length}/500</Text>

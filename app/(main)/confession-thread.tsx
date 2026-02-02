@@ -20,6 +20,7 @@ import * as Clipboard from 'expo-clipboard';
 import { COLORS, CONFESSION_TOPICS } from '@/lib/constants';
 import { isProbablyEmoji } from '@/lib/utils';
 import { ConfessionMood, ConfessionReply, ConfessionChat } from '@/types';
+import ReactionBar from '@/components/confessions/ReactionBar';
 import { useAuthStore } from '@/stores/authStore';
 import { useConfessionStore } from '@/stores/confessionStore';
 import { isDemoMode } from '@/hooks/useConvex';
@@ -337,25 +338,27 @@ export default function ConfessionThreadScreen() {
               {/* Full text */}
               <Text style={styles.confessionText}>{confession.text}</Text>
 
-              {/* Emoji Reactions (free emoji display) */}
-              <View style={styles.emojiRow}>
-                {topEmojis.filter((e) => isProbablyEmoji(e.emoji)).map((e, i) => (
-                  <View key={i} style={styles.emojiChip}>
-                    <Text style={styles.emojiText}>{e.emoji}</Text>
-                    <Text style={styles.emojiCount}>{e.count}</Text>
-                  </View>
-                ))}
-                <TouchableOpacity
-                  style={[styles.addEmojiButton, myReaction ? styles.addEmojiButtonActive : null]}
-                  onPress={() => setShowReactionPicker(true)}
-                  hitSlop={{ top: 6, bottom: 6, left: 4, right: 4 }}
-                >
-                  {myReaction ? (
-                    <Text style={styles.userEmojiText}>{myReaction}</Text>
-                  ) : (
-                    <Ionicons name="happy-outline" size={18} color={COLORS.textMuted} />
-                  )}
-                </TouchableOpacity>
+              {/* Emoji Reactions */}
+              <View style={styles.reactionBarWrap}>
+                <ReactionBar
+                  topEmojis={topEmojis}
+                  userEmoji={myReaction}
+                  reactionCount={confession.reactionCount}
+                  onReact={() => setShowReactionPicker(true)}
+                  onToggleEmoji={(emoji) => {
+                    toggleReaction(confession.id, emoji);
+                    if (!isDemoMode) {
+                      toggleReactionMutation({
+                        confessionId: confession.id as any,
+                        userId: currentUserId as any,
+                        type: emoji,
+                      }).catch(() => {
+                        toggleReaction(confession.id, emoji);
+                      });
+                    }
+                  }}
+                  size="regular"
+                />
               </View>
 
               {/* Anonymous Reply Button */}
@@ -425,7 +428,7 @@ export default function ConfessionThreadScreen() {
         {/* Reply Input Bar — text + emoji only (no camera/media) */}
         <View style={[styles.replyInputBar, { paddingBottom: Math.max(insets.bottom, 10) }]}>
           <TouchableOpacity onPress={() => setShowEmojiPicker(true)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
-            <Ionicons name="happy-outline" size={22} color={COLORS.textMuted} />
+            <Text style={{ fontSize: 20 }}>🙂</Text>
           </TouchableOpacity>
           <TextInput
             style={styles.replyInput}
@@ -581,45 +584,8 @@ const styles = StyleSheet.create({
     color: COLORS.text,
     marginBottom: 16,
   },
-  emojiRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
+  reactionBarWrap: {
     marginBottom: 8,
-  },
-  emojiChip: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 3,
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    borderRadius: 16,
-    backgroundColor: COLORS.backgroundDark,
-  },
-  emojiText: {
-    fontSize: 14,
-  },
-  emojiCount: {
-    fontSize: 12,
-    fontWeight: '600',
-    color: COLORS.textMuted,
-  },
-  addEmojiButton: {
-    width: 32,
-    height: 32,
-    borderRadius: 16,
-    backgroundColor: COLORS.backgroundDark,
-    justifyContent: 'center',
-    alignItems: 'center',
-    borderWidth: 1,
-    borderColor: 'transparent',
-  },
-  addEmojiButtonActive: {
-    backgroundColor: 'rgba(255,107,107,0.1)',
-    borderColor: COLORS.primary,
-  },
-  userEmojiText: {
-    fontSize: 16,
   },
   anonReplyButton: {
     flexDirection: 'row',

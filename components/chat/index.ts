@@ -1,3 +1,8 @@
 export { ConversationItem } from './ConversationItem';
 export { MessageBubble } from './MessageBubble';
 export { MessageInput } from './MessageInput';
+export { ProtectedMediaBubble } from './ProtectedMediaBubble';
+export { ProtectedMediaViewer } from './ProtectedMediaViewer';
+export { ProtectedMediaOptionsSheet } from './ProtectedMediaOptionsSheet';
+export { SystemMessage } from './SystemMessage';
+export { ReportModal } from './ReportModal';

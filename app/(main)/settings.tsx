@@ -18,6 +18,7 @@ import { Button, Input } from '@/components/ui';
 import { Ionicons } from '@expo/vector-icons';
 import { useFilterStore } from '@/stores/filterStore';
 import { isDemoMode } from '@/hooks/useConvex';
+import { BlurProfileNotice } from '@/components/profile/BlurProfileNotice';
 import type { Gender } from '@/types';
 
 export default function SettingsScreen() {
@@ -32,6 +33,7 @@ export default function SettingsScreen() {
   const updatePreferences = useMutation(api.users.updatePreferences);
   const toggleIncognito = useMutation(api.users.toggleIncognito);
   const toggleDiscoveryPause = useMutation(api.users.toggleDiscoveryPause);
+  const togglePhotoBlurMut = isDemoMode ? null : useMutation(api.users.togglePhotoBlur);
   // toggleShowLastSeen is handled locally until a Convex mutation is added
 
   const {
@@ -51,6 +53,8 @@ export default function SettingsScreen() {
   const [incognitoEnabled, setIncognitoEnabled] = useState(currentUser?.incognitoMode || false);
   const [pauseEnabled, setPauseEnabled] = useState(false);
   const [showLastSeenEnabled, setShowLastSeenEnabled] = useState(currentUser?.showLastSeen !== false);
+  const [blurEnabled, setBlurEnabled] = useState(currentUser?.photoBlurred === true);
+  const [showBlurNotice, setShowBlurNotice] = useState(false);
 
   React.useEffect(() => {
     if (currentUser) {
@@ -65,6 +69,7 @@ export default function SettingsScreen() {
         typeof currentUser.discoveryPausedUntil === 'number' &&
         currentUser.discoveryPausedUntil > Date.now();
       setPauseEnabled(isPaused);
+      setBlurEnabled(currentUser.photoBlurred === true);
     }
   }, [currentUser]);
 
@@ -108,6 +113,30 @@ export default function SettingsScreen() {
     setShowLastSeenEnabled(show);
   };
 
+  const handleBlurToggle = (newValue: boolean) => {
+    if (newValue) {
+      setShowBlurNotice(true);
+    } else {
+      if (isDemoMode) { setBlurEnabled(false); return; }
+      if (!userId || !togglePhotoBlurMut) return;
+      togglePhotoBlurMut({ userId: userId as any, blurred: false })
+        .then(() => setBlurEnabled(false))
+        .catch((err: any) => Alert.alert('Error', err.message));
+    }
+  };
+
+  const handleBlurConfirm = async () => {
+    setShowBlurNotice(false);
+    if (isDemoMode) { setBlurEnabled(true); return; }
+    if (!userId || !togglePhotoBlurMut) return;
+    try {
+      await togglePhotoBlurMut({ userId: userId as any, blurred: true });
+      setBlurEnabled(true);
+    } catch (err: any) {
+      Alert.alert('Error', err.message);
+    }
+  };
+
   const handleToggleIncognito = async (enabled: boolean) => {
     if (!userId) return;
 
@@ -133,6 +162,13 @@ export default function SettingsScreen() {
 
   return (
     <ScrollView style={styles.container} showsVerticalScrollIndicator={false}>
+      {/* Blur Notice Modal */}
+      <BlurProfileNotice
+        visible={showBlurNotice}
+        onConfirm={handleBlurConfirm}
+        onCancel={() => setShowBlurNotice(false)}
+      />
+
       <View style={styles.header}>
         <TouchableOpacity onPress={() => router.back()}>
           <Ionicons name="arrow-back" size={24} color={COLORS.text} />
@@ -211,6 +247,23 @@ export default function SettingsScreen() {
 
       <View style={styles.section}>
         <Text style={styles.sectionTitle}>Privacy</Text>
+
+        <View style={styles.settingRow}>
+          <View style={styles.settingInfo}>
+            <Text style={styles.settingTitle}>Blur My Photo</Text>
+            <Text style={styles.settingDescription}>
+              {blurEnabled
+                ? 'Your photo is blurred across Discover and your profile'
+                : 'Blur your photo to protect your privacy'}
+            </Text>
+          </View>
+          <Switch
+            value={blurEnabled}
+            onValueChange={handleBlurToggle}
+            trackColor={{ false: COLORS.border, true: COLORS.primary }}
+            thumbColor={COLORS.white}
+          />
+        </View>
 
         <View style={styles.settingRow}>
           <View style={styles.settingInfo}>

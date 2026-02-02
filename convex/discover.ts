@@ -2,7 +2,10 @@ import { v } from 'convex/values';
 import { query } from './_generated/server';
 import { Id } from './_generated/dataModel';
 
-// Check if a user is actively paused (pause not expired)
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
 function isUserPaused(user: { isDiscoveryPaused?: boolean; discoveryPausedUntil?: number }): boolean {
   return (
     user.isDiscoveryPaused === true &&
@@ -11,7 +14,208 @@ function isUserPaused(user: { isDiscoveryPaused?: boolean; discoveryPausedUntil?
   );
 }
 
-// Get profiles for discover/swiping
+function calculateAge(dateOfBirth: string): number {
+  const today = new Date();
+  const birthDate = new Date(dateOfBirth);
+  let age = today.getFullYear() - birthDate.getFullYear();
+  const m = today.getMonth() - birthDate.getMonth();
+  if (m < 0 || (m === 0 && today.getDate() < birthDate.getDate())) {
+    age--;
+  }
+  return age;
+}
+
+function calculateDistance(
+  lat1: number, lon1: number,
+  lat2: number, lon2: number,
+): number {
+  const R = 3959; // Earth's radius in miles
+  const dLat = toRad(lat2 - lat1);
+  const dLon = toRad(lon2 - lon1);
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) *
+    Math.sin(dLon / 2) * Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return Math.round(R * c);
+}
+
+function toRad(deg: number): number {
+  return deg * (Math.PI / 180);
+}
+
+// ---------------------------------------------------------------------------
+// Simple 4-signal scoring (0–100 each, then weighted)
+//
+//   score = 0.45 * activity + 0.35 * completeness
+//         + 0.15 * preference + 0.05 * rotation
+//
+// No hard-blocks — everyone appears; complete profiles rank higher.
+// ---------------------------------------------------------------------------
+
+/** A) Activity score (0–100) — recently active users rank higher. */
+function activityScore(lastActive: number): number {
+  const now = Date.now();
+  const hoursAgo = (now - lastActive) / (1000 * 60 * 60);
+  if (hoursAgo < 1)  return 100;
+  if (hoursAgo < 4)  return 85;
+  if (hoursAgo < 12) return 70;
+  if (hoursAgo < 24) return 55;
+  if (hoursAgo < 72) return 35;
+  if (hoursAgo < 168) return 15; // 7 days
+  return 5;
+}
+
+/** B) Profile completeness score (0–100). */
+function completenessScore(user: {
+  bio: string;
+  profilePrompts?: { question: string; answer: string }[];
+  activities: string[];
+  isVerified: boolean;
+  height?: number;
+  jobTitle?: string;
+  education?: string;
+}, photoCount: number): number {
+  let score = 0;
+
+  // Bio filled? (0–20)
+  if (user.bio && user.bio.trim().length >= 100) score += 20;
+  else if (user.bio && user.bio.trim().length >= 50) score += 15;
+  else if (user.bio && user.bio.trim().length > 0) score += 5;
+
+  // 3 prompts answered? (0–25)
+  const filledPrompts = (user.profilePrompts ?? []).filter(
+    (p) => p.answer.trim().length > 0,
+  ).length;
+  score += Math.min(filledPrompts, 3) * 8; // 0, 8, 16, 24 — cap at 24
+  if (filledPrompts >= 3) score += 1; // bonus for hitting 3
+
+  // Interests selected? (0–15)
+  if (user.activities.length >= 3) score += 15;
+  else if (user.activities.length >= 1) score += 8;
+
+  // At least 1 photo? (0–20)
+  if (photoCount >= 4) score += 20;
+  else if (photoCount >= 2) score += 15;
+  else if (photoCount >= 1) score += 10;
+
+  // Verified? (0–10)
+  if (user.isVerified) score += 10;
+
+  // Optional extras (0–10)
+  if (user.height) score += 3;
+  if (user.jobTitle) score += 3;
+  if (user.education) score += 4;
+
+  return Math.min(score, 100);
+}
+
+/** C) Preference match score (0–100) — age/city + common interests. */
+function preferenceMatchScore(
+  candidate: {
+    city: string;
+    activities: string[];
+    relationshipIntent: string[];
+  },
+  currentUser: {
+    city: string;
+    activities: string[];
+    relationshipIntent: string[];
+  },
+): number {
+  let score = 0;
+
+  // Same city? (0–30)
+  if (candidate.city && currentUser.city && candidate.city === currentUser.city) {
+    score += 30;
+  }
+
+  // Common interests (0–40) — 10 pts each, cap at 40
+  const shared = candidate.activities.filter((a) => currentUser.activities.includes(a));
+  score += Math.min(shared.length * 10, 40);
+
+  // Relationship intent alignment (0–30)
+  const intentCompat: Record<string, string[]> = {
+    long_term: ['long_term', 'short_to_long'],
+    short_term: ['short_term', 'long_to_short', 'fwb'],
+    fwb: ['fwb', 'short_term'],
+    figuring_out: ['figuring_out', 'open_to_anything'],
+    short_to_long: ['short_to_long', 'long_term', 'short_term'],
+    long_to_short: ['long_to_short', 'short_term'],
+    new_friends: ['new_friends', 'open_to_anything'],
+    open_to_anything: ['open_to_anything', 'figuring_out', 'new_friends'],
+  };
+  let bestIntent = 0;
+  for (const mine of currentUser.relationshipIntent) {
+    for (const theirs of candidate.relationshipIntent) {
+      if (mine === theirs) bestIntent = Math.max(bestIntent, 30);
+      else if (intentCompat[mine]?.includes(theirs)) bestIntent = Math.max(bestIntent, 15);
+    }
+  }
+  score += bestIntent;
+
+  return Math.min(score, 100);
+}
+
+/** D) Rotation score (0–100) — pseudo-random per viewer+candidate pair per day. */
+function rotationScore(viewerId: string, candidateId: string): number {
+  // Simple day-seeded hash so the order shuffles daily
+  const day = Math.floor(Date.now() / (1000 * 60 * 60 * 24));
+  let h = day;
+  for (let i = 0; i < viewerId.length; i++) h = ((h << 5) - h + viewerId.charCodeAt(i)) | 0;
+  for (let i = 0; i < candidateId.length; i++) h = ((h << 5) - h + candidateId.charCodeAt(i)) | 0;
+  return Math.abs(h) % 101; // 0–100
+}
+
+/** Combined weighted score. */
+function rankScore(
+  candidate: {
+    id: string;
+    lastActive: number;
+    bio: string;
+    profilePrompts?: { question: string; answer: string }[];
+    activities: string[];
+    relationshipIntent: string[];
+    isVerified: boolean;
+    city: string;
+    height?: number;
+    jobTitle?: string;
+    education?: string;
+    theyLikedMe: boolean;
+    isBoosted: boolean;
+    photoCount: number;
+  },
+  currentUser: {
+    _id: string;
+    city: string;
+    activities: string[];
+    relationshipIntent: string[];
+  },
+): number {
+  const activity    = activityScore(candidate.lastActive);
+  const complete    = completenessScore(candidate, candidate.photoCount);
+  const preference  = preferenceMatchScore(candidate, currentUser);
+  const rotation    = rotationScore(currentUser._id as string, candidate.id);
+
+  let score =
+    0.45 * activity +
+    0.35 * complete +
+    0.15 * preference +
+    0.05 * rotation;
+
+  // Bonus: they already liked the viewer — surface them first
+  if (candidate.theyLikedMe) score += 50;
+
+  // Bonus: currently boosted
+  if (candidate.isBoosted) score += 30;
+
+  return score;
+}
+
+// ---------------------------------------------------------------------------
+// getDiscoverProfiles — main swipe deck query
+// ---------------------------------------------------------------------------
+
 export const getDiscoverProfiles = query({
   args: {
     userId: v.id('users'),
@@ -20,7 +224,7 @@ export const getDiscoverProfiles = query({
       v.literal('distance'),
       v.literal('age'),
       v.literal('recently_active'),
-      v.literal('newest')
+      v.literal('newest'),
     )),
     limit: v.optional(v.number()),
     offset: v.optional(v.number()),
@@ -31,128 +235,84 @@ export const getDiscoverProfiles = query({
     const currentUser = await ctx.db.get(userId);
     if (!currentUser) return [];
 
-    // If current user is paused, return no profiles
     if (isUserPaused(currentUser)) return [];
 
-    // Get all users who match preferences
     const allUsers = await ctx.db.query('users').collect();
-
-    // Filter users
     const candidates = [];
 
     for (const user of allUsers) {
-      // Skip self
       if (user._id === userId) continue;
-
-      // Skip inactive or banned
       if (!user.isActive || user.isBanned) continue;
-
-      // Skip paused users
       if (isUserPaused(user)) continue;
 
-      // Skip users in incognito (unless current user is premium or female)
+      // Incognito check
       if (user.incognitoMode) {
-        const canSeeIncognito =
-          currentUser.gender === 'female' ||
-          currentUser.subscriptionTier === 'premium';
-        if (!canSeeIncognito) continue;
+        const canSee = currentUser.gender === 'female' || currentUser.subscriptionTier === 'premium';
+        if (!canSee) continue;
       }
 
-      // Check gender preference match (both ways)
+      // Gender preference match (both ways)
       if (!currentUser.lookingFor.includes(user.gender)) continue;
       if (!user.lookingFor.includes(currentUser.gender)) continue;
 
-      // Check age range
+      // Age range
       const userAge = calculateAge(user.dateOfBirth);
       if (userAge < currentUser.minAge || userAge > currentUser.maxAge) continue;
+      const myAge = calculateAge(currentUser.dateOfBirth);
+      if (myAge < user.minAge || myAge > user.maxAge) continue;
 
-      const currentUserAge = calculateAge(currentUser.dateOfBirth);
-      if (currentUserAge < user.minAge || currentUserAge > user.maxAge) continue;
-
-      // Check distance
+      // Distance
+      let distance: number | undefined;
       if (currentUser.latitude && currentUser.longitude && user.latitude && user.longitude) {
-        const distance = calculateDistance(
-          currentUser.latitude,
-          currentUser.longitude,
-          user.latitude,
-          user.longitude
+        distance = calculateDistance(
+          currentUser.latitude, currentUser.longitude,
+          user.latitude, user.longitude,
         );
         if (distance > currentUser.maxDistance) continue;
       }
 
-      // Check if already swiped (passes expire after 7 days)
+      // Already swiped (passes expire after 7 days)
       const existingLike = await ctx.db
         .query('likes')
-        .withIndex('by_from_to', (q) =>
-          q.eq('fromUserId', userId).eq('toUserId', user._id)
-        )
+        .withIndex('by_from_to', (q) => q.eq('fromUserId', userId).eq('toUserId', user._id))
         .first();
 
       if (existingLike) {
-        // Likes and super_likes are permanent exclusions
         if (existingLike.action !== 'pass') continue;
-        // Passes only exclude for 7 days
-        const sevenDaysMs = 7 * 24 * 60 * 60 * 1000;
-        if (existingLike.createdAt > Date.now() - sevenDaysMs) continue;
-        // Pass expired — profile can reappear
+        if (existingLike.createdAt > Date.now() - 7 * 24 * 60 * 60 * 1000) continue;
       }
 
-      // Check if blocked
+      // Blocked (both directions)
       const blocked = await ctx.db
         .query('blocks')
-        .withIndex('by_blocker_blocked', (q) =>
-          q.eq('blockerId', userId).eq('blockedUserId', user._id)
-        )
+        .withIndex('by_blocker_blocked', (q) => q.eq('blockerId', userId).eq('blockedUserId', user._id))
         .first();
-
       if (blocked) continue;
 
       const reverseBlocked = await ctx.db
         .query('blocks')
-        .withIndex('by_blocker_blocked', (q) =>
-          q.eq('blockerId', user._id).eq('blockedUserId', userId)
-        )
+        .withIndex('by_blocker_blocked', (q) => q.eq('blockerId', user._id).eq('blockedUserId', userId))
         .first();
-
       if (reverseBlocked) continue;
 
-      // Get photos
+      // Photos
       const photos = await ctx.db
         .query('photos')
         .withIndex('by_user_order', (q) => q.eq('userId', user._id))
         .collect();
 
-      // Hard filter: skip users with 0 non-NSFW photos
-      const nonNsfwPhotos = photos.filter(p => !p.isNsfw);
-      if (nonNsfwPhotos.length === 0) continue;
+      const nonNsfwPhotos = photos.filter((p) => !p.isNsfw);
+      if (nonNsfwPhotos.length === 0) continue; // at least 1 photo required
 
-      // Reduced visibility: if enforcement is reduced_reach, include with 50% probability
+      // Enforcement
+      if (user.verificationEnforcementLevel === 'security_only') continue;
       if (user.verificationEnforcementLevel === 'reduced_reach' && Math.random() > 0.5) continue;
 
-      // Full skip: if enforcement is security_only, exclude from discover
-      if (user.verificationEnforcementLevel === 'security_only') continue;
-
-      // Calculate distance for display
-      let distance: number | undefined;
-      if (currentUser.latitude && currentUser.longitude && user.latitude && user.longitude) {
-        distance = calculateDistance(
-          currentUser.latitude,
-          currentUser.longitude,
-          user.latitude,
-          user.longitude
-        );
-      }
-
-      // Check if they liked current user
+      // They liked me?
       const theyLikedMe = await ctx.db
         .query('likes')
-        .withIndex('by_from_to', (q) =>
-          q.eq('fromUserId', user._id).eq('toUserId', userId)
-        )
+        .withIndex('by_from_to', (q) => q.eq('fromUserId', user._id).eq('toUserId', userId))
         .first();
-
-      // Compute profile quality score
-      const profileQuality = computeProfileQualityScore(user, photos);
 
       candidates.push({
         id: user._id,
@@ -177,40 +337,42 @@ export const getDiscoverProfiles = query({
         createdAt: user.createdAt,
         relationshipIntent: user.relationshipIntent,
         activities: user.activities,
+        profilePrompts: user.profilePrompts,
         photos: photos.sort((a, b) => a.order - b.order),
-        isBoosted: user.boostedUntil && user.boostedUntil > Date.now(),
+        photoBlurred: user.photoBlurred === true,
+        isBoosted: !!(user.boostedUntil && user.boostedUntil > Date.now()),
         theyLikedMe: !!theyLikedMe,
-        profileQualityScore: profileQuality,
+        photoCount: nonNsfwPhotos.length,
       });
     }
 
-    // Sort candidates
-    candidates.sort((a, b) => {
-      // Boosted profiles first
-      if (a.isBoosted && !b.isBoosted) return -1;
-      if (!a.isBoosted && b.isBoosted) return 1;
+    // Sort
+    if (sortBy === 'recommended') {
+      candidates.sort((a, b) => rankScore(b, currentUser as any) - rankScore(a, currentUser as any));
+    } else {
+      candidates.sort((a, b) => {
+        // Boosted first
+        if (a.isBoosted && !b.isBoosted) return -1;
+        if (!a.isBoosted && b.isBoosted) return 1;
 
-      // Then by sort preference
-      switch (sortBy) {
-        case 'distance':
-          return (a.distance || 999) - (b.distance || 999);
-        case 'age':
-          return a.age - b.age;
-        case 'recently_active':
-          return b.lastActive - a.lastActive;
-        case 'newest':
-          return b.createdAt - a.createdAt;
-        case 'recommended':
-        default:
-          return calculateRecommendedScore(b, currentUser) - calculateRecommendedScore(a, currentUser);
-      }
-    });
+        switch (sortBy) {
+          case 'distance':       return (a.distance || 999) - (b.distance || 999);
+          case 'age':            return a.age - b.age;
+          case 'recently_active': return b.lastActive - a.lastActive;
+          case 'newest':         return b.createdAt - a.createdAt;
+          default:               return 0;
+        }
+      });
+    }
 
     return candidates.slice(offset, offset + limit);
   },
 });
 
-// Get explore profiles with filters
+// ---------------------------------------------------------------------------
+// getExploreProfiles — filtered category view
+// ---------------------------------------------------------------------------
+
 export const getExploreProfiles = query({
   args: {
     userId: v.id('users'),
@@ -219,36 +381,18 @@ export const getExploreProfiles = query({
     maxAge: v.optional(v.number()),
     maxDistance: v.optional(v.number()),
     relationshipIntent: v.optional(v.array(v.union(
-      v.literal('long_term'),
-      v.literal('short_term'),
-      v.literal('fwb'),
-      v.literal('figuring_out'),
-      v.literal('short_to_long'),
-      v.literal('long_to_short'),
-      v.literal('new_friends'),
-      v.literal('open_to_anything')
+      v.literal('long_term'), v.literal('short_term'), v.literal('fwb'),
+      v.literal('figuring_out'), v.literal('short_to_long'), v.literal('long_to_short'),
+      v.literal('new_friends'), v.literal('open_to_anything'),
     ))),
     activities: v.optional(v.array(v.union(
-      v.literal('coffee'),
-      v.literal('date_night'),
-      v.literal('sports'),
-      v.literal('movies'),
-      v.literal('free_tonight'),
-      v.literal('foodie'),
-      v.literal('gym_partner'),
-      v.literal('concerts'),
-      v.literal('travel'),
-      v.literal('outdoors'),
-      v.literal('art_culture'),
-      v.literal('gaming'),
-      v.literal('nightlife'),
-      v.literal('brunch'),
-      v.literal('study_date'),
-      v.literal('this_weekend'),
-      v.literal('beach_pool'),
-      v.literal('road_trip'),
-      v.literal('photography'),
-      v.literal('volunteering')
+      v.literal('coffee'), v.literal('date_night'), v.literal('sports'),
+      v.literal('movies'), v.literal('free_tonight'), v.literal('foodie'),
+      v.literal('gym_partner'), v.literal('concerts'), v.literal('travel'),
+      v.literal('outdoors'), v.literal('art_culture'), v.literal('gaming'),
+      v.literal('nightlife'), v.literal('brunch'), v.literal('study_date'),
+      v.literal('this_weekend'), v.literal('beach_pool'), v.literal('road_trip'),
+      v.literal('photography'), v.literal('volunteering'),
     ))),
     sortByInterests: v.optional(v.boolean()),
     limit: v.optional(v.number()),
@@ -256,25 +400,15 @@ export const getExploreProfiles = query({
   },
   handler: async (ctx, args) => {
     const {
-      userId,
-      genderFilter,
-      minAge,
-      maxAge,
-      maxDistance,
-      relationshipIntent,
-      activities,
-      sortByInterests,
-      limit = 20,
-      offset = 0,
+      userId, genderFilter, minAge, maxAge, maxDistance,
+      relationshipIntent, activities, sortByInterests,
+      limit = 20, offset = 0,
     } = args;
 
     const currentUser = await ctx.db.get(userId);
     if (!currentUser) return { profiles: [], totalCount: 0 };
-
-    // If current user is paused, return no profiles
     if (isUserPaused(currentUser)) return { profiles: [], totalCount: 0 };
 
-    // Use provided filters or user preferences
     const effectiveGender = genderFilter || currentUser.lookingFor;
     const effectiveMinAge = minAge ?? currentUser.minAge;
     const effectiveMaxAge = maxAge ?? currentUser.maxAge;
@@ -286,54 +420,34 @@ export const getExploreProfiles = query({
     for (const user of allUsers) {
       if (user._id === userId) continue;
       if (!user.isActive || user.isBanned) continue;
-
-      // Skip paused users
       if (isUserPaused(user)) continue;
-
-      // Gender filter
       if (!effectiveGender.includes(user.gender)) continue;
 
-      // Age filter
       const userAge = calculateAge(user.dateOfBirth);
       if (userAge < effectiveMinAge || userAge > effectiveMaxAge) continue;
 
-      // Distance filter
       if (currentUser.latitude && currentUser.longitude && user.latitude && user.longitude) {
-        const distance = calculateDistance(
-          currentUser.latitude,
-          currentUser.longitude,
-          user.latitude,
-          user.longitude
+        const dist = calculateDistance(
+          currentUser.latitude, currentUser.longitude,
+          user.latitude, user.longitude,
         );
-        if (distance > effectiveMaxDistance) continue;
+        if (dist > effectiveMaxDistance) continue;
       }
 
-      // Relationship intent filter (OR logic)
       if (relationshipIntent && relationshipIntent.length > 0) {
-        const hasMatchingIntent = relationshipIntent.some((intent) =>
-          user.relationshipIntent.includes(intent)
-        );
-        if (!hasMatchingIntent) continue;
+        if (!relationshipIntent.some((i) => user.relationshipIntent.includes(i))) continue;
       }
 
-      // Activities filter (OR logic)
       if (activities && activities.length > 0) {
-        const hasMatchingActivity = activities.some((activity) =>
-          user.activities.includes(activity)
-        );
-        if (!hasMatchingActivity) continue;
+        if (!activities.some((a) => user.activities.includes(a))) continue;
       }
 
-      // Check blocked
       const blocked = await ctx.db
         .query('blocks')
-        .withIndex('by_blocker_blocked', (q) =>
-          q.eq('blockerId', userId).eq('blockedUserId', user._id)
-        )
+        .withIndex('by_blocker_blocked', (q) => q.eq('blockerId', userId).eq('blockedUserId', user._id))
         .first();
       if (blocked) continue;
 
-      // Get photos
       const photos = await ctx.db
         .query('photos')
         .withIndex('by_user_order', (q) => q.eq('userId', user._id))
@@ -342,10 +456,8 @@ export const getExploreProfiles = query({
       let distance: number | undefined;
       if (currentUser.latitude && currentUser.longitude && user.latitude && user.longitude) {
         distance = calculateDistance(
-          currentUser.latitude,
-          currentUser.longitude,
-          user.latitude,
-          user.longitude
+          currentUser.latitude, currentUser.longitude,
+          user.latitude, user.longitude,
         );
       }
 
@@ -361,33 +473,45 @@ export const getExploreProfiles = query({
         lastActive: user.lastActive,
         relationshipIntent: user.relationshipIntent,
         activities: user.activities,
+        profilePrompts: user.profilePrompts,
         photos: photos.sort((a, b) => a.order - b.order),
+        photoBlurred: user.photoBlurred === true,
+        photoCount: photos.filter((p) => !p.isNsfw).length,
       });
     }
 
-    // Sort by shared interests with current user
+    // Sort: interests sort uses shared activities, filtered categories use relevance,
+    // default falls back to the simple 4-signal score.
     if (sortByInterests && currentUser.activities.length > 0) {
       candidates.sort((a, b) => {
-        const sharedA = a.activities.filter((act) => currentUser.activities.includes(act)).length;
-        const sharedB = b.activities.filter((act) => currentUser.activities.includes(act)).length;
-        return sharedB - sharedA;
+        const shA = a.activities.filter((act) => currentUser.activities.includes(act)).length;
+        const shB = b.activities.filter((act) => currentUser.activities.includes(act)).length;
+        return shB - shA;
       });
     } else if ((relationshipIntent && relationshipIntent.length > 0) || (activities && activities.length > 0)) {
-      // Sort by relevance (more matching filters = higher score)
       candidates.sort((a, b) => {
-        let scoreA = 0;
-        let scoreB = 0;
-
+        let sA = 0, sB = 0;
         if (relationshipIntent) {
-          scoreA += relationshipIntent.filter((i) => a.relationshipIntent.includes(i)).length;
-          scoreB += relationshipIntent.filter((i) => b.relationshipIntent.includes(i)).length;
+          sA += relationshipIntent.filter((i) => a.relationshipIntent.includes(i)).length;
+          sB += relationshipIntent.filter((i) => b.relationshipIntent.includes(i)).length;
         }
-
         if (activities) {
-          scoreA += activities.filter((act) => a.activities.includes(act)).length;
-          scoreB += activities.filter((act) => b.activities.includes(act)).length;
+          sA += activities.filter((act) => a.activities.includes(act)).length;
+          sB += activities.filter((act) => b.activities.includes(act)).length;
         }
-
+        return sB - sA;
+      });
+    } else {
+      // Default: rank by the same 4-signal formula
+      candidates.sort((a, b) => {
+        const scoreA = 0.45 * activityScore(a.lastActive) +
+          0.35 * completenessScore(a, a.photoCount) +
+          0.15 * preferenceMatchScore(a, currentUser as any) +
+          0.05 * rotationScore(currentUser._id as string, a.id as string);
+        const scoreB = 0.45 * activityScore(b.lastActive) +
+          0.35 * completenessScore(b, b.photoCount) +
+          0.15 * preferenceMatchScore(b, currentUser as any) +
+          0.05 * rotationScore(currentUser._id as string, b.id as string);
         return scoreB - scoreA;
       });
     }
@@ -399,20 +523,18 @@ export const getExploreProfiles = query({
   },
 });
 
-// Get filter counts (for showing badge numbers on filters)
+// ---------------------------------------------------------------------------
+// getFilterCounts — badge numbers for explore grid
+// ---------------------------------------------------------------------------
+
 export const getFilterCounts = query({
-  args: {
-    userId: v.id('users'),
-  },
+  args: { userId: v.id('users') },
   handler: async (ctx, args) => {
     const { userId } = args;
-
     const currentUser = await ctx.db.get(userId);
     if (!currentUser) return {};
 
     const allUsers = await ctx.db.query('users').collect();
-
-    // Count by relationship intent
     const intentCounts: Record<string, number> = {};
     const activityCounts: Record<string, number> = {};
 
@@ -425,12 +547,9 @@ export const getFilterCounts = query({
       const userAge = calculateAge(user.dateOfBirth);
       if (userAge < currentUser.minAge || userAge > currentUser.maxAge) continue;
 
-      // Count intents
       for (const intent of user.relationshipIntent) {
         intentCounts[intent] = (intentCounts[intent] || 0) + 1;
       }
-
-      // Count activities
       for (const activity of user.activities) {
         activityCounts[activity] = (activityCounts[activity] || 0) + 1;
       }
@@ -439,162 +558,3 @@ export const getFilterCounts = query({
     return { intentCounts, activityCounts };
   },
 });
-
-// Profile quality score computation
-function computeProfileQualityScore(
-  user: { bio: string; height?: number; jobTitle?: string; education?: string; profilePrompts?: { question: string; answer: string }[] },
-  photos: { hasFace: boolean; isNsfw: boolean }[]
-): number {
-  let score = 0;
-
-  // Photos (0-40pts): +10 per photo up to 3, +10 for at least 1 face photo
-  const nonNsfwPhotos = photos.filter(p => !p.isNsfw);
-  score += Math.min(nonNsfwPhotos.length, 3) * 10;
-  if (nonNsfwPhotos.some(p => p.hasFace)) score += 10;
-
-  // Bio (0-20pts): +10 for >=20 chars, +10 for >=100 chars
-  if (user.bio && user.bio.length >= 20) score += 10;
-  if (user.bio && user.bio.length >= 100) score += 10;
-
-  // Completeness (0-20pts): +5 each for height, jobTitle, education, profilePrompts
-  if (user.height) score += 5;
-  if (user.jobTitle) score += 5;
-  if (user.education) score += 5;
-  if (user.profilePrompts && user.profilePrompts.length > 0) score += 5;
-
-  return score;
-}
-
-// Enhanced recommended scoring
-function calculateRecommendedScore(
-  candidate: {
-    theyLikedMe: boolean;
-    isVerified: boolean;
-    verificationStatus?: string;
-    lastActive: number;
-    distance?: number;
-    bio: string;
-    photos: any[];
-    activities: string[];
-    relationshipIntent: string[];
-    height?: number;
-    jobTitle?: string;
-    education?: string;
-    religion?: string;
-    profileQualityScore?: number;
-  },
-  currentUser: {
-    activities: string[];
-    relationshipIntent: string[];
-  }
-): number {
-  let score = 0;
-
-  // Existing factors
-  if (candidate.theyLikedMe) score += 100;
-
-  // Verification-based scoring (replaces flat isVerified: +20)
-  if (candidate.verificationStatus === 'verified') score += 25;
-  else if (candidate.verificationStatus === 'pending_verification') score += 10;
-
-  // Profile quality contribution (0-20pts, scaled from 0-80 quality score)
-  if (candidate.profileQualityScore) {
-    score += Math.round((candidate.profileQualityScore / 80) * 20);
-  }
-
-  const hourAgo = Date.now() - 60 * 60 * 1000;
-  if (candidate.lastActive > hourAgo) score += 30;
-
-  if (candidate.bio && candidate.bio.length > 50) score += 10;
-  if (candidate.photos.length >= 3) score += 10;
-
-  // New: Common interests (0-25pts)
-  const sharedActivities = candidate.activities.filter((a) =>
-    currentUser.activities.includes(a)
-  );
-  score += Math.min(sharedActivities.length * 5, 25);
-
-  // New: Relationship intent alignment (0-20pts)
-  const intentCompatMap: Record<string, string[]> = {
-    long_term: ['long_term', 'short_to_long'],
-    short_term: ['short_term', 'long_to_short', 'fwb'],
-    fwb: ['fwb', 'short_term'],
-    figuring_out: ['figuring_out', 'open_to_anything'],
-    short_to_long: ['short_to_long', 'long_term', 'short_term'],
-    long_to_short: ['long_to_short', 'short_term'],
-    new_friends: ['new_friends', 'open_to_anything'],
-    open_to_anything: ['open_to_anything', 'figuring_out', 'new_friends'],
-  };
-  let bestIntentScore = 0;
-  for (const myIntent of currentUser.relationshipIntent) {
-    for (const theirIntent of candidate.relationshipIntent) {
-      if (myIntent === theirIntent) {
-        bestIntentScore = Math.max(bestIntentScore, 20);
-      } else if (intentCompatMap[myIntent]?.includes(theirIntent)) {
-        bestIntentScore = Math.max(bestIntentScore, 10);
-      }
-    }
-  }
-  score += bestIntentScore;
-
-  // New: Activity recency (0-15pts)
-  const fourHoursAgo = Date.now() - 4 * 60 * 60 * 1000;
-  if (candidate.lastActive > fourHoursAgo) score += 15;
-
-  // New: Profile completeness depth (0-15pts)
-  let completeness = 0;
-  if (candidate.bio && candidate.bio.length > 100) completeness += 3;
-  else if (candidate.bio && candidate.bio.length > 50) completeness += 2;
-  if (candidate.height) completeness += 2;
-  if (candidate.jobTitle) completeness += 2;
-  if (candidate.education) completeness += 2;
-  if (candidate.religion) completeness += 2;
-  if (candidate.photos.length >= 4) completeness += 2;
-  else if (candidate.photos.length >= 2) completeness += 1;
-  score += Math.min(completeness, 15);
-
-  // New: Distance gradient (0-10pts) — replaces binary <10mi check
-  if (candidate.distance !== undefined) {
-    if (candidate.distance < 2) score += 10;
-    else if (candidate.distance < 5) score += 8;
-    else if (candidate.distance < 10) score += 5;
-    else if (candidate.distance < 20) score += 2;
-  }
-
-  return score;
-}
-
-// Helper functions
-function calculateAge(dateOfBirth: string): number {
-  const today = new Date();
-  const birthDate = new Date(dateOfBirth);
-  let age = today.getFullYear() - birthDate.getFullYear();
-  const m = today.getMonth() - birthDate.getMonth();
-  if (m < 0 || (m === 0 && today.getDate() < birthDate.getDate())) {
-    age--;
-  }
-  return age;
-}
-
-function calculateDistance(
-  lat1: number,
-  lon1: number,
-  lat2: number,
-  lon2: number
-): number {
-  const R = 3959; // Earth's radius in miles
-  const dLat = toRad(lat2 - lat1);
-  const dLon = toRad(lon2 - lon1);
-  const a =
-    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-    Math.cos(toRad(lat1)) *
-      Math.cos(toRad(lat2)) *
-      Math.sin(dLon / 2) *
-      Math.sin(dLon / 2);
-  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-  return Math.round(R * c);
-}
-
-function toRad(deg: number): number {
-  return deg * (Math.PI / 180);
-}

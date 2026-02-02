@@ -101,6 +101,7 @@ export const getUserById = query({
       activities: user.activities,
       profilePrompts: user.profilePrompts ?? [],
       photos: photos.sort((a, b) => a.order - b.order),
+      photoBlurred: user.photoBlurred === true,
     };
   },
 });
@@ -809,6 +810,197 @@ export const completeOnboarding = mutation({
     }
 
     return { success: true };
+  },
+});
+
+// ---------------------------------------------------------------------------
+// Photo Blur
+// ---------------------------------------------------------------------------
+
+/** Toggle blur on/off. No hard-block — user can always toggle freely. */
+export const togglePhotoBlur = mutation({
+  args: {
+    userId: v.id("users"),
+    blurred: v.boolean(),
+  },
+  handler: async (ctx, args) => {
+    const user = await ctx.db.get(args.userId);
+    if (!user) throw new Error("User not found");
+    await ctx.db.patch(args.userId, { photoBlurred: args.blurred });
+    return { success: true, blurred: args.blurred };
+  },
+});
+
+// ---------------------------------------------------------------------------
+// Profile Completeness + Daily Nudge
+// ---------------------------------------------------------------------------
+
+const NUDGE_COOLDOWN_MS = 24 * 60 * 60 * 1000; // 24 hours
+const NUDGE_THRESHOLD = 70; // nudge if completeness < 70%
+const INACTIVE_DAYS = 7; // stop nudging if user hasn't been active in 7 days
+
+/**
+ * Returns profile completeness (0–100) and a list of recommendations
+ * for what to fill in next. Used by frontend for nudge banner.
+ */
+export const getProfileCompleteness = query({
+  args: { userId: v.id("users") },
+  handler: async (ctx, args) => {
+    const user = await ctx.db.get(args.userId);
+    if (!user) return { score: 0, recommendations: [] as string[] };
+
+    const photos = await ctx.db
+      .query("photos")
+      .withIndex("by_user", (q: any) => q.eq("userId", args.userId))
+      .collect();
+    const photoCount = photos.filter((p) => !p.isNsfw).length;
+
+    let score = 0;
+    const recommendations: string[] = [];
+
+    // Bio (0–20)
+    if (user.bio && user.bio.trim().length >= 100) {
+      score += 20;
+    } else if (user.bio && user.bio.trim().length >= 50) {
+      score += 15;
+    } else if (user.bio && user.bio.trim().length > 0) {
+      score += 5;
+      recommendations.push("Write a longer bio for better matches");
+    } else {
+      recommendations.push("Add a bio to tell others about yourself");
+    }
+
+    // Prompts (0–25)
+    const filledPrompts = (user.profilePrompts ?? []).filter(
+      (p: { answer: string }) => p.answer.trim().length > 0,
+    ).length;
+    score += Math.min(filledPrompts, 3) * 8;
+    if (filledPrompts >= 3) score += 1;
+    if (filledPrompts < 3) {
+      recommendations.push(
+        `Answer ${3 - filledPrompts} more prompt${3 - filledPrompts > 1 ? "s" : ""} to stand out`,
+      );
+    }
+
+    // Interests (0–15)
+    if (user.activities && user.activities.length >= 3) {
+      score += 15;
+    } else if (user.activities && user.activities.length >= 1) {
+      score += 8;
+      recommendations.push("Add more interests for better matches");
+    } else {
+      recommendations.push("Select your interests so we can match you better");
+    }
+
+    // Photos (0–20)
+    if (photoCount >= 4) score += 20;
+    else if (photoCount >= 2) score += 15;
+    else if (photoCount >= 1) {
+      score += 10;
+      recommendations.push("Add more photos — profiles with 3+ photos get more replies");
+    } else {
+      recommendations.push("Upload at least one photo");
+    }
+
+    // Verified (0–10)
+    if (user.isVerified) score += 10;
+    else recommendations.push("Verify your profile for a trust badge");
+
+    // Optional extras (0–10)
+    if (user.height) score += 3;
+    if (user.jobTitle) score += 3;
+    if (user.education) score += 4;
+
+    return {
+      score: Math.min(score, 100),
+      recommendations: recommendations.slice(0, 3), // max 3 suggestions
+    };
+  },
+});
+
+/**
+ * Send a daily profile-completion nudge notification.
+ * Rules:
+ *   - Max 1 per 24 hours
+ *   - Only if completeness < 70%
+ *   - Only if user was active in last 7 days
+ *   - Stops once profile is complete
+ */
+export const sendProfileNudge = mutation({
+  args: { userId: v.id("users") },
+  handler: async (ctx, args) => {
+    const user = await ctx.db.get(args.userId);
+    if (!user) return { sent: false, reason: "user_not_found" };
+
+    // Don't nudge inactive users (haven't opened app in 7 days)
+    const inactiveCutoff = Date.now() - INACTIVE_DAYS * 24 * 60 * 60 * 1000;
+    if (user.lastActive < inactiveCutoff) {
+      return { sent: false, reason: "inactive" };
+    }
+
+    // Cooldown: max 1 nudge per 24h
+    if (user.lastNudgeAt && Date.now() - user.lastNudgeAt < NUDGE_COOLDOWN_MS) {
+      return { sent: false, reason: "cooldown" };
+    }
+
+    // Check completeness
+    const photos = await ctx.db
+      .query("photos")
+      .withIndex("by_user", (q: any) => q.eq("userId", args.userId))
+      .collect();
+    const photoCount = photos.filter((p) => !p.isNsfw).length;
+
+    let score = 0;
+    if (user.bio && user.bio.trim().length >= 100) score += 20;
+    else if (user.bio && user.bio.trim().length >= 50) score += 15;
+    else if (user.bio && user.bio.trim().length > 0) score += 5;
+
+    const filledPrompts = (user.profilePrompts ?? []).filter(
+      (p: { answer: string }) => p.answer.trim().length > 0,
+    ).length;
+    score += Math.min(filledPrompts, 3) * 8;
+    if (filledPrompts >= 3) score += 1;
+
+    if (user.activities && user.activities.length >= 3) score += 15;
+    else if (user.activities && user.activities.length >= 1) score += 8;
+
+    if (photoCount >= 4) score += 20;
+    else if (photoCount >= 2) score += 15;
+    else if (photoCount >= 1) score += 10;
+
+    if (user.isVerified) score += 10;
+    if (user.height) score += 3;
+    if (user.jobTitle) score += 3;
+    if (user.education) score += 4;
+
+    score = Math.min(score, 100);
+
+    // Already complete — don't nudge
+    if (score >= NUDGE_THRESHOLD) {
+      return { sent: false, reason: "already_complete", score };
+    }
+
+    // Pick a positive nudge message
+    const nudgeMessages = [
+      "Profiles with photos + interests get more replies. Finish yours in 2 minutes.",
+      "Complete your profile to get better matches — add prompts + interests.",
+      "You're almost there! A complete profile is recommended for better matches.",
+    ];
+    const body = nudgeMessages[Math.floor(Math.random() * nudgeMessages.length)];
+
+    // Create notification
+    await ctx.db.insert("notifications", {
+      userId: args.userId,
+      type: "profile_nudge" as any,
+      title: "Complete your profile",
+      body,
+      createdAt: Date.now(),
+    });
+
+    // Update cooldown
+    await ctx.db.patch(args.userId, { lastNudgeAt: Date.now() });
+
+    return { sent: true, score };
   },
 });
 

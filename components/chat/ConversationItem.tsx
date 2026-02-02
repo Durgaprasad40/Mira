@@ -13,12 +13,14 @@ interface ConversationItemProps {
     photoUrl?: string;
     lastActive: number;
     isVerified: boolean;
+    photoBlurred?: boolean;
   };
   lastMessage?: {
     content: string;
     type: string;
     senderId: string;
     createdAt: number;
+    isProtected?: boolean;
   } | null;
   unreadCount: number;
   isPreMatch: boolean;
@@ -53,9 +55,11 @@ export function ConversationItem({
 
   const getMessagePreview = () => {
     if (!lastMessage) return 'No messages yet';
+    if (lastMessage.isProtected) return '🔒 Protected Photo';
     if (lastMessage.type === 'image') return '📷 Photo';
     if (lastMessage.type === 'template') return lastMessage.content;
     if (lastMessage.type === 'dare') return '🎲 Dare sent';
+    if (lastMessage.type === 'system') return lastMessage.content;
     return lastMessage.content;
   };
 
@@ -63,7 +67,12 @@ export function ConversationItem({
     <TouchableOpacity style={styles.container} onPress={onPress} activeOpacity={0.7}>
       <View style={styles.avatarContainer}>
         {otherUser.photoUrl ? (
-          <Image source={{ uri: otherUser.photoUrl }} style={styles.avatar} contentFit="cover" />
+          <Image
+            source={{ uri: otherUser.photoUrl }}
+            style={styles.avatar}
+            contentFit="cover"
+            blurRadius={otherUser.photoBlurred ? 20 : undefined}
+          />
         ) : (
           <View style={[styles.avatar, styles.avatarPlaceholder]}>
             <Ionicons name="person" size={24} color={COLORS.textLight} />

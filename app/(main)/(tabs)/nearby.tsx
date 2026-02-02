@@ -7,15 +7,18 @@ import {
   Image,
   Animated,
   Dimensions,
-  Platform,
-  Alert,
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import MapView, { Marker, Region } from 'react-native-maps';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
+import { useQuery, useMutation } from 'convex/react';
 import { useLocation } from '@/hooks/useLocation';
 import { COLORS } from '@/lib/constants';
 import { DEMO_USER, DEMO_PROFILES } from '@/lib/demoData';
+import { useAuthStore } from '@/stores/authStore';
+import { isDemoMode } from '@/hooks/useConvex';
+import { api } from '@/convex/_generated/api';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -28,10 +31,12 @@ interface NearbyProfile {
   latitude: number;
   longitude: number;
   lastSeenArea?: string;
-  photos: { url: string }[];
+  lastLocationUpdatedAt?: number;
+  photoUrl?: string;
+  photos?: { url: string }[];
+  isVerified?: boolean;
+  freshness: 'solid' | 'faded';
 }
-
-type RadiusOption = 500 | 1000;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -45,7 +50,7 @@ function haversineMeters(
   lon2: number,
 ): number {
   const toRad = (v: number) => (v * Math.PI) / 180;
-  const R = 6371000; // Earth radius in meters
+  const R = 6371000;
   const dLat = toRad(lat2 - lat1);
   const dLon = toRad(lon2 - lon1);
   const a =
@@ -56,29 +61,64 @@ function haversineMeters(
 
 /** Convert a radius in meters to a rough latitudeDelta for the MapView region. */
 function radiusToLatDelta(meters: number): number {
-  // 1 degree latitude ~ 111 320 m. We want the visible area to be ~2.5x the
-  // radius so pins near the edge are still visible.
   return (meters * 2.5) / 111320;
 }
 
-/** Format a distance in meters to a human-friendly approximate string. */
-function formatDistance(meters: number): string {
-  if (meters < 1000) {
-    return `~${Math.round(meters / 10) * 10}m`;
+/** Simple deterministic hash for client-side demo jitter. */
+function simpleHash(str: string): number {
+  let hash = 0;
+  for (let i = 0; i < str.length; i++) {
+    const char = str.charCodeAt(i);
+    hash = ((hash << 5) - hash) + char;
+    hash |= 0;
   }
-  return `~${(meters / 1000).toFixed(1)}km`;
+  return Math.abs(hash);
+}
+
+/** Offset a lat/lng by a distance (meters) and bearing (radians). */
+function offsetCoords(
+  lat: number,
+  lng: number,
+  distanceMeters: number,
+  bearingRad: number,
+): { lat: number; lng: number } {
+  const R = 6371000;
+  const toRad = (v: number) => (v * Math.PI) / 180;
+  const latRad = toRad(lat);
+  const lngRad = toRad(lng);
+  const d = distanceMeters / R;
+
+  const newLat = Math.asin(
+    Math.sin(latRad) * Math.cos(d) +
+    Math.cos(latRad) * Math.sin(d) * Math.cos(bearingRad),
+  );
+  const newLng = lngRad + Math.atan2(
+    Math.sin(bearingRad) * Math.sin(d) * Math.cos(latRad),
+    Math.cos(d) - Math.sin(latRad) * Math.sin(newLat),
+  );
+
+  return {
+    lat: newLat * (180 / Math.PI),
+    lng: newLng * (180 / Math.PI),
+  };
+}
+
+/** Compute freshness tier from lastLocationUpdatedAt. */
+function computeFreshness(timestamp: number): 'solid' | 'faded' | 'hidden' {
+  const ageMs = Date.now() - timestamp;
+  const THREE_DAYS = 3 * 24 * 60 * 60 * 1000;
+  const SIX_DAYS = 6 * 24 * 60 * 60 * 1000;
+  if (ageMs <= THREE_DAYS) return 'solid';
+  if (ageMs <= SIX_DAYS) return 'faded';
+  return 'hidden';
 }
 
 // ---------------------------------------------------------------------------
-// In-app notification banner — no expo-notifications dependency, works
-// everywhere including Expo Go without any console errors or warnings.
+// In-app notification banner
 // ---------------------------------------------------------------------------
 
-// A mutable ref that the component sets so the module-level helper can show
-// the in-app banner without needing a React context.
 let _showBanner: ((title: string, body: string) => void) | null = null;
 
-/** Show a crossed-path notification using the in-app banner. */
 function sendLocalNotification(title: string, body: string) {
   if (_showBanner) {
     _showBanner(title, body);
@@ -90,12 +130,36 @@ function sendLocalNotification(title: string, body: string) {
 // ---------------------------------------------------------------------------
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
-const BOTTOM_SHEET_HEIGHT = 220;
+const BOTTOM_SHEET_HEIGHT = 200;
+const FIXED_RADIUS = 1000; // 1km
 
-// Extract the 8 demo "nearby" profiles that have lat/lng.
-const NEARBY_DEMO_PROFILES: NearbyProfile[] = (DEMO_PROFILES as any[]).filter(
+// Extract demo "nearby" profiles that have lat/lng.
+const NEARBY_DEMO_PROFILES = (DEMO_PROFILES as any[]).filter(
   (p) => typeof p.latitude === 'number' && (p._id as string).startsWith('demo_nearby'),
 );
+
+/** Apply client-side jitter (50-150m) to demo profiles. */
+function jitterDemoProfiles(profiles: any[], viewerId: string): NearbyProfile[] {
+  return profiles
+    .map((p) => {
+      const ts = p.lastLocationUpdatedAt ?? Date.now();
+      const freshness = computeFreshness(ts);
+      if (freshness === 'hidden') return null;
+
+      const epoch = Math.floor(ts / (30 * 60 * 1000));
+      const seed = simpleHash(`${viewerId}:${p._id}:${epoch}`);
+      const angle = ((seed % 36000) / 100) * (Math.PI / 180);
+      const dist = 50 + (seed % 101); // 50-150m
+      const { lat, lng } = offsetCoords(p.latitude, p.longitude, dist, angle);
+      return {
+        ...p,
+        latitude: lat,
+        longitude: lng,
+        freshness,
+      } as NearbyProfile;
+    })
+    .filter(Boolean) as NearbyProfile[];
+}
 
 // ---------------------------------------------------------------------------
 // Component
@@ -104,30 +168,34 @@ const NEARBY_DEMO_PROFILES: NearbyProfile[] = (DEMO_PROFILES as any[]).filter(
 export default function NearbyScreen() {
   const router = useRouter();
   const { latitude, longitude, getCurrentLocation, requestPermission } = useLocation();
+  const { userId } = useAuthStore();
   const mapRef = useRef<MapView>(null);
 
   // User location — fallback to demo coords
   const userLat = latitude ?? DEMO_USER.latitude;
   const userLng = longitude ?? DEMO_USER.longitude;
 
-  // Radius toggle state
-  const [radius, setRadius] = useState<RadiusOption>(1000);
+  // Permission state
+  const [permissionDenied, setPermissionDenied] = useState(false);
 
   // Bottom sheet state
   const [selectedProfile, setSelectedProfile] = useState<NearbyProfile | null>(null);
-  const sheetAnim = useRef(new Animated.Value(0)).current; // 0 = hidden, 1 = visible
-
-  // Notification cooldown tracking
-  const notifiedRef = useRef<Record<string, number>>({});
-  const notifCountRef = useRef(0);
-  const hasFiredDemoNotif = useRef(false);
+  const sheetAnim = useRef(new Animated.Value(0)).current;
 
   // In-app banner state
   const [banner, setBanner] = useState<{ title: string; body: string } | null>(null);
-  const bannerAnim = useRef(new Animated.Value(0)).current; // 0 = hidden, 1 = visible
+  const bannerAnim = useRef(new Animated.Value(0)).current;
   const bannerTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const hasShownSessionBanner = useRef(false);
 
-  // Register the module-level callback so sendLocalNotification can trigger the banner.
+  // Convex mutation/query (skipped in demo mode)
+  const recordLocation = useMutation(api.crossedPaths.recordLocation);
+  const convexNearby = useQuery(
+    api.crossedPaths.getNearbyUsers,
+    !isDemoMode && userId ? { userId: userId as any } : 'skip',
+  );
+
+  // Register banner callback
   useEffect(() => {
     _showBanner = (title: string, body: string) => {
       setBanner({ title, body });
@@ -146,58 +214,57 @@ export default function NearbyScreen() {
   }, [bannerAnim]);
 
   // ------------------------------------------------------------------
-  // On mount: request location + schedule demo notification
+  // On mount: request location + call recordLocation
   // ------------------------------------------------------------------
   useEffect(() => {
     (async () => {
       const granted = await requestPermission();
-      if (granted) {
-        await getCurrentLocation();
+      if (!granted) {
+        setPermissionDenied(true);
+        return;
+      }
+      setPermissionDenied(false);
+      const loc = await getCurrentLocation();
+      if (loc && userId && !isDemoMode) {
+        const result = await recordLocation({
+          userId: userId as any,
+          latitude: loc.latitude,
+          longitude: loc.longitude,
+        });
+        // Show banner on first nearby detection per session
+        if (result?.nearbyCount && result.nearbyCount > 0 && !hasShownSessionBanner.current) {
+          hasShownSessionBanner.current = true;
+          sendLocalNotification('Mira', 'Someone crossed your path nearby.');
+        }
       }
     })();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Demo notification ~3s after first load
-  useEffect(() => {
-    if (hasFiredDemoNotif.current) return;
-    hasFiredDemoNotif.current = true;
-
-    const timeout = setTimeout(() => {
-      sendLocalNotification('Mira', 'Someone crossed your path nearby.');
-    }, 3000);
-
-    return () => clearTimeout(timeout);
-  }, []);
-
   // ------------------------------------------------------------------
-  // Filter nearby profiles by radius
+  // Build nearby profiles list
   // ------------------------------------------------------------------
-  const nearbyProfiles = NEARBY_DEMO_PROFILES.map((p) => ({
-    ...p,
-    distanceMeters: haversineMeters(userLat, userLng, p.latitude, p.longitude),
-  })).filter((p) => p.distanceMeters <= radius);
-
-  // ------------------------------------------------------------------
-  // Crossed-path notification check (runs when radius/location changes)
-  // ------------------------------------------------------------------
-  useEffect(() => {
-    const now = Date.now();
-    const SIX_HOURS = 6 * 60 * 60 * 1000;
-    const DAILY_CAP = 10;
-
-    nearbyProfiles.forEach((p) => {
-      const lastNotified = notifiedRef.current[p._id] ?? 0;
-      if (now - lastNotified > SIX_HOURS && notifCountRef.current < DAILY_CAP) {
-        notifiedRef.current[p._id] = now;
-        notifCountRef.current += 1;
-        // Fire-and-forget — safe helper swallows errors in Expo Go
-        sendLocalNotification('Mira', 'Someone crossed your path nearby.');
-      }
-    });
-    // We only want this to re-run when the filtered list changes meaningfully.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [radius, userLat, userLng]);
+  const nearbyProfiles: NearbyProfile[] = (() => {
+    if (isDemoMode || !convexNearby) {
+      // Demo mode: filter by 1km fixed radius + apply jitter + freshness
+      const filtered = NEARBY_DEMO_PROFILES.filter((p: any) => {
+        const d = haversineMeters(userLat, userLng, p.latitude, p.longitude);
+        return d <= FIXED_RADIUS;
+      });
+      return jitterDemoProfiles(filtered, userId ?? 'demo_viewer');
+    }
+    // Live mode: map Convex query results
+    return convexNearby.map((u) => ({
+      _id: u.id,
+      name: u.name,
+      age: u.age,
+      latitude: u.jitteredLat,
+      longitude: u.jitteredLng,
+      freshness: u.freshness as 'solid' | 'faded',
+      photoUrl: u.photoUrl ?? undefined,
+      isVerified: u.isVerified,
+    }));
+  })();
 
   // ------------------------------------------------------------------
   // Bottom sheet animation helpers
@@ -224,11 +291,10 @@ export default function NearbyScreen() {
   }, [sheetAnim]);
 
   // ------------------------------------------------------------------
-  // Map region — only used as initialRegion; radius changes animate.
-  // Using a controlled `region` prop would fight user pan/zoom gestures.
+  // Map region — fixed 1km radius
   // ------------------------------------------------------------------
-  const buildRegion = (r: number): Region => {
-    const d = radiusToLatDelta(r);
+  const buildRegion = (): Region => {
+    const d = radiusToLatDelta(FIXED_RADIUS);
     return {
       latitude: userLat,
       longitude: userLng,
@@ -236,13 +302,7 @@ export default function NearbyScreen() {
       longitudeDelta: d * (SCREEN_WIDTH / Dimensions.get('window').height),
     };
   };
-  const initialRegion = buildRegion(1000);
-
-  // Animate map when radius toggle changes
-  useEffect(() => {
-    mapRef.current?.animateToRegion(buildRegion(radius), 300);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [radius]);
+  const initialRegion = buildRegion();
 
   // ------------------------------------------------------------------
   // Bottom sheet transform
@@ -255,12 +315,40 @@ export default function NearbyScreen() {
   // ------------------------------------------------------------------
   // Render
   // ------------------------------------------------------------------
+
+  // Permission denied overlay
+  if (permissionDenied) {
+    return (
+      <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
+        <View style={styles.permissionOverlay}>
+          <Ionicons name="location-outline" size={48} color={COLORS.textLight} />
+          <Text style={styles.permissionTitle}>Enable location to see nearby people</Text>
+          <Text style={styles.permissionSubtitle}>
+            Your location is only shared as an approximate area, never your exact position.
+          </Text>
+          <TouchableOpacity
+            style={styles.permissionButton}
+            onPress={async () => {
+              const granted = await requestPermission();
+              if (granted) {
+                setPermissionDenied(false);
+                await getCurrentLocation();
+              }
+            }}
+          >
+            <Text style={styles.permissionButtonText}>Enable Location</Text>
+          </TouchableOpacity>
+        </View>
+      </SafeAreaView>
+    );
+  }
+
   return (
-    <View style={styles.container}>
+    <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
       {/* Full-screen map */}
       <MapView
         ref={mapRef}
-        style={StyleSheet.absoluteFillObject}
+        style={{ flex: 1 }}
         initialRegion={initialRegion}
         showsUserLocation={false}
         showsMyLocationButton={false}
@@ -277,7 +365,7 @@ export default function NearbyScreen() {
           </View>
         </Marker>
 
-        {/* Nearby profile markers */}
+        {/* Nearby profile markers — solid or faded, no text labels */}
         {nearbyProfiles.map((p) => (
           <Marker
             key={p._id}
@@ -289,35 +377,25 @@ export default function NearbyScreen() {
             }}
           >
             <View style={styles.pinWrapper}>
-              <View style={styles.pinDot}>
-                <Text style={styles.pinInitial}>{p.name.charAt(0)}</Text>
+              <View
+                style={[
+                  styles.pinDot,
+                  p.freshness === 'faded' && styles.pinDotFaded,
+                ]}
+              >
+                <Text
+                  style={[
+                    styles.pinInitial,
+                    p.freshness === 'faded' && styles.pinInitialFaded,
+                  ]}
+                >
+                  {p.name.charAt(0)}
+                </Text>
               </View>
             </View>
           </Marker>
         ))}
       </MapView>
-
-      {/* Radius toggle */}
-      <View style={styles.radiusToggleContainer}>
-        <View style={styles.radiusToggle}>
-          {([500, 1000] as RadiusOption[]).map((r) => (
-            <TouchableOpacity
-              key={r}
-              style={[styles.radiusOption, radius === r && styles.radiusOptionActive]}
-              onPress={() => setRadius(r)}
-            >
-              <Text
-                style={[
-                  styles.radiusText,
-                  radius === r && styles.radiusTextActive,
-                ]}
-              >
-                {r === 500 ? '500m' : '1km'}
-              </Text>
-            </TouchableOpacity>
-          ))}
-        </View>
-      </View>
 
       {/* "No one nearby" overlay */}
       {nearbyProfiles.length === 0 && (
@@ -334,7 +412,7 @@ export default function NearbyScreen() {
         <Ionicons name="footsteps" size={22} color={COLORS.white} />
       </TouchableOpacity>
 
-      {/* Bottom sheet */}
+      {/* Bottom sheet — no distance, no time text */}
       <Animated.View
         style={[
           styles.bottomSheet,
@@ -350,28 +428,17 @@ export default function NearbyScreen() {
 
             <View style={styles.sheetContent}>
               <Image
-                source={{ uri: selectedProfile.photos[0]?.url }}
+                source={{
+                  uri: selectedProfile.photoUrl ??
+                    selectedProfile.photos?.[0]?.url,
+                }}
                 style={styles.sheetPhoto}
               />
               <View style={styles.sheetInfo}>
                 <Text style={styles.sheetName}>
                   {selectedProfile.name}, {selectedProfile.age}
                 </Text>
-                <Text style={styles.sheetDistance}>
-                  {formatDistance(
-                    haversineMeters(
-                      userLat,
-                      userLng,
-                      selectedProfile.latitude,
-                      selectedProfile.longitude,
-                    ),
-                  )}
-                </Text>
-                {(selectedProfile as any).lastSeenArea && (
-                  <Text style={styles.sheetArea}>
-                    {(selectedProfile as any).lastSeenArea}
-                  </Text>
-                )}
+                <Text style={styles.sheetNearby}>Nearby</Text>
                 <TouchableOpacity
                   style={styles.viewProfileButton}
                   onPress={() => {
@@ -392,6 +459,7 @@ export default function NearbyScreen() {
         <Animated.View
           style={[
             styles.notifBanner,
+            { top: 4 },
             {
               opacity: bannerAnim,
               transform: [
@@ -412,7 +480,7 @@ export default function NearbyScreen() {
           </View>
         </Animated.View>
       )}
-    </View>
+    </SafeAreaView>
   );
 }
 
@@ -445,7 +513,7 @@ const styles = StyleSheet.create({
     marginTop: 2,
   },
 
-  // Profile pin markers
+  // Profile pin markers — solid state
   pinWrapper: {
     alignItems: 'center',
   },
@@ -465,34 +533,12 @@ const styles = StyleSheet.create({
     color: COLORS.white,
   },
 
-  // Radius toggle
-  radiusToggleContainer: {
-    position: 'absolute',
-    top: Platform.OS === 'ios' ? 60 : 24,
-    alignSelf: 'center',
+  // Faded state (3-6 days inactive) — semi-transparent
+  pinDotFaded: {
+    opacity: 0.45,
   },
-  radiusToggle: {
-    flexDirection: 'row',
-    backgroundColor: COLORS.white,
-    borderRadius: 24,
-    overflow: 'hidden',
-    borderWidth: 1,
-    borderColor: COLORS.border,
-  },
-  radiusOption: {
-    paddingHorizontal: 20,
-    paddingVertical: 10,
-  },
-  radiusOptionActive: {
-    backgroundColor: COLORS.primary,
-  },
-  radiusText: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: COLORS.text,
-  },
-  radiusTextActive: {
-    color: COLORS.white,
+  pinInitialFaded: {
+    opacity: 0.7,
   },
 
   // Empty overlay
@@ -508,6 +554,40 @@ const styles = StyleSheet.create({
   emptyText: {
     color: COLORS.white,
     fontSize: 15,
+    fontWeight: '600',
+  },
+
+  // Permission denied overlay
+  permissionOverlay: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 40,
+  },
+  permissionTitle: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: COLORS.text,
+    textAlign: 'center',
+    marginTop: 16,
+  },
+  permissionSubtitle: {
+    fontSize: 14,
+    color: COLORS.textLight,
+    textAlign: 'center',
+    marginTop: 8,
+    lineHeight: 20,
+  },
+  permissionButton: {
+    marginTop: 24,
+    backgroundColor: COLORS.primary,
+    borderRadius: 24,
+    paddingVertical: 12,
+    paddingHorizontal: 32,
+  },
+  permissionButtonText: {
+    color: COLORS.white,
+    fontSize: 16,
     fontWeight: '600',
   },
 
@@ -573,18 +653,13 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     color: COLORS.text,
   },
-  sheetDistance: {
+  sheetNearby: {
     fontSize: 14,
     color: COLORS.textLight,
     marginTop: 4,
   },
-  sheetArea: {
-    fontSize: 13,
-    color: COLORS.textMuted,
-    marginTop: 2,
-  },
   viewProfileButton: {
-    marginTop: 12,
+    marginTop: 14,
     backgroundColor: COLORS.primary,
     borderRadius: 24,
     paddingVertical: 10,
@@ -600,7 +675,6 @@ const styles = StyleSheet.create({
   // In-app notification banner
   notifBanner: {
     position: 'absolute',
-    top: Platform.OS === 'ios' ? 54 : 18,
     left: 16,
     right: 16,
     flexDirection: 'row',

@@ -3,28 +3,79 @@ import { View, Text, StyleSheet } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { COLORS } from '@/lib/constants';
 import MediaMessage from './MediaMessage';
+import { ProtectedMediaBubble } from './ProtectedMediaBubble';
+import { SystemMessage } from './SystemMessage';
 
 interface MessageBubbleProps {
   message: {
     id: string;
     content: string;
-    type: 'text' | 'image' | 'video' | 'template' | 'dare';
+    type: 'text' | 'image' | 'video' | 'template' | 'dare' | 'system';
     senderId: string;
     createdAt: number;
     readAt?: number;
     imageUrl?: string;
     mediaUrl?: string;
+    isProtected?: boolean;
+    protectedMedia?: {
+      timer: number;
+      screenshotAllowed: boolean;
+      viewOnce: boolean;
+      watermark: boolean;
+    };
+    isExpired?: boolean;
+    viewedAt?: number;
+    systemSubtype?: string;
+    mediaId?: string;
   };
   isOwn: boolean;
   otherUserName?: string;
+  currentUserId?: string;
   onMediaPress?: (mediaUrl: string, type: 'image' | 'video') => void;
+  onProtectedMediaPress?: (messageId: string) => void;
 }
 
-export function MessageBubble({ message, isOwn, otherUserName, onMediaPress }: MessageBubbleProps) {
+export function MessageBubble({ message, isOwn, otherUserName, currentUserId, onMediaPress, onProtectedMediaPress }: MessageBubbleProps) {
   const formatTime = (timestamp: number) => {
     const date = new Date(timestamp);
     return date.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
   };
+
+  // System messages
+  if (message.type === 'system') {
+    return <SystemMessage text={message.content} subtype={message.systemSubtype as any} />;
+  }
+
+  // Protected media messages (detected via mediaId or isProtected flag)
+  if (message.isProtected || message.mediaId) {
+    return (
+      <View style={[styles.container, isOwn && styles.ownContainer]}>
+        <View style={[styles.bubble, isOwn ? styles.ownBubble : styles.otherBubble]}>
+          <ProtectedMediaBubble
+            mediaId={message.mediaId}
+            userId={currentUserId}
+            protectedMedia={message.protectedMedia}
+            isExpired={!!message.isExpired}
+            isOwn={isOwn}
+            onPress={() => onProtectedMediaPress?.(message.id)}
+          />
+          <View style={styles.imageFooter}>
+            <Text style={[styles.time, isOwn && styles.ownTime]}>
+              {formatTime(message.createdAt)}
+            </Text>
+            {isOwn && (
+              <Ionicons
+                name={message.readAt ? 'checkmark-done' : 'checkmark'}
+                size={14}
+                color={isOwn ? COLORS.white : COLORS.textLight}
+                style={styles.readIcon}
+              />
+            )}
+          </View>
+        </View>
+      </View>
+    );
+  }
 
   // Unified media rendering for image, video
   const mediaUrl = message.mediaUrl || message.imageUrl;

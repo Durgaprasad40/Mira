@@ -5,6 +5,9 @@ import {
   TouchableOpacity,
   FlatList,
   StyleSheet,
+  Keyboard,
+  KeyboardAvoidingView,
+  Platform,
 } from 'react-native';
 import { Image } from 'expo-image';
 import { Ionicons } from '@expo/vector-icons';
@@ -21,7 +24,6 @@ import AttachmentPopup from './AttachmentPopup';
 import DoodleCanvas from './DoodleCanvas';
 import VideoPlayerModal from './VideoPlayerModal';
 import ImagePreviewModal from './ImagePreviewModal';
-import { useKeyboardHeight } from '@/hooks/useKeyboardHeight';
 
 const C = INCOGNITO_COLORS;
 
@@ -58,8 +60,8 @@ interface PrivateChatViewProps {
 }
 
 export default function PrivateChatView({ dm, onBack, topInset = 0 }: PrivateChatViewProps) {
-  const keyboardHeight = useKeyboardHeight();
   const flatListRef = useRef<FlatList>(null);
+  const [headerHeight, setHeaderHeight] = useState(0);
   const [messages, setMessages] = useState<DemoPrivateMessage[]>(
     () => getDemoPrivateMessages(dm)
   );
@@ -69,12 +71,41 @@ export default function PrivateChatView({ dm, onBack, topInset = 0 }: PrivateCha
   const [videoPlayerUri, setVideoPlayerUri] = useState('');
   const [imagePreviewUri, setImagePreviewUri] = useState('');
 
+  const isNearBottomRef = useRef(true);
+
   useEffect(() => {
     if (messages.length > 0) {
       setTimeout(() => {
         flatListRef.current?.scrollToEnd({ animated: false });
       }, 100);
     }
+  }, []);
+
+  // Scroll to end when keyboard opens (WhatsApp behavior)
+  useEffect(() => {
+    const showEvent = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
+    const sub = Keyboard.addListener(showEvent, () => {
+      if (isNearBottomRef.current) {
+        requestAnimationFrame(() => {
+          flatListRef.current?.scrollToEnd({ animated: true });
+        });
+      }
+    });
+    return () => sub.remove();
+  }, []);
+
+  const handleContentSizeChange = useCallback(() => {
+    if (isNearBottomRef.current) {
+      requestAnimationFrame(() => {
+        flatListRef.current?.scrollToEnd({ animated: true });
+      });
+    }
+  }, []);
+
+  const handleScroll = useCallback((e: any) => {
+    const { layoutMeasurement, contentOffset, contentSize } = e.nativeEvent;
+    const distanceFromBottom = contentSize.height - layoutMeasurement.height - contentOffset.y;
+    isNearBottomRef.current = distanceFromBottom < 80;
   }, []);
 
   const handleSend = useCallback(() => {
@@ -118,11 +149,6 @@ export default function PrivateChatView({ dm, onBack, topInset = 0 }: PrivateCha
     [dm.id]
   );
 
-  const handleInputFocus = useCallback(() => {
-    setTimeout(() => {
-      flatListRef.current?.scrollToEnd({ animated: true });
-    }, 300);
-  }, []);
 
   const handleMediaPress = useCallback((mediaUrl: string, type: 'image' | 'video') => {
     if (type === 'video') {
@@ -186,7 +212,10 @@ export default function PrivateChatView({ dm, onBack, topInset = 0 }: PrivateCha
   return (
     <View style={styles.container}>
       {/* Header */}
-      <View style={[styles.header, topInset > 0 && { paddingTop: topInset + 8 }]}>
+      <View
+        onLayout={(e) => setHeaderHeight(e.nativeEvent.layout.height)}
+        style={[styles.header, topInset > 0 && { paddingTop: topInset + 8 }]}
+      >
         <TouchableOpacity
           onPress={onBack}
           hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
@@ -204,39 +233,45 @@ export default function PrivateChatView({ dm, onBack, topInset = 0 }: PrivateCha
         <View style={{ flex: 1 }} />
       </View>
 
-      {/* Messages */}
-      <FlatList
-        ref={flatListRef}
-        data={messages}
-        keyExtractor={(item) => item.id}
-        renderItem={renderMessage}
-        contentContainerStyle={{
-          flexGrow: 1,
-          justifyContent: 'flex-end' as const,
-          paddingVertical: 6,
-          paddingBottom: keyboardHeight + 8,
-        }}
-        showsVerticalScrollIndicator={false}
-        keyboardShouldPersistTaps="handled"
-        keyboardDismissMode="interactive"
-        ListEmptyComponent={
-          <View style={styles.emptyContainer}>
-            <Ionicons name="chatbubble-outline" size={40} color={C.textLight} />
-            <Text style={styles.emptyText}>Start a conversation</Text>
-          </View>
-        }
-      />
+      <KeyboardAvoidingView
+        style={{ flex: 1 }}
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        keyboardVerticalOffset={headerHeight}
+      >
+        {/* Messages */}
+        <FlatList
+          ref={flatListRef}
+          data={messages}
+          keyExtractor={(item) => item.id}
+          renderItem={renderMessage}
+          contentContainerStyle={{
+            flexGrow: 1,
+            justifyContent: 'flex-end' as const,
+            paddingTop: 6,
+            paddingBottom: 0,
+          }}
+          onContentSizeChange={handleContentSizeChange}
+          onScroll={handleScroll}
+          scrollEventThrottle={16}
+          showsVerticalScrollIndicator={false}
+          keyboardShouldPersistTaps="handled"
+          keyboardDismissMode="interactive"
+          ListEmptyComponent={
+            <View style={styles.emptyContainer}>
+              <Ionicons name="chatbubble-outline" size={40} color={C.textLight} />
+              <Text style={styles.emptyText}>Start a conversation</Text>
+            </View>
+          }
+        />
 
-      {/* Composer — lifted above keyboard via marginBottom */}
-      <View style={{ marginBottom: keyboardHeight }}>
+        {/* Composer — pushed up by KAV */}
         <ChatComposer
           value={inputText}
           onChangeText={setInputText}
           onSend={handleSend}
           onPlusPress={() => setAttachmentVisible(true)}
-          onInputFocus={handleInputFocus}
         />
-      </View>
+      </KeyboardAvoidingView>
 
       {/* Attachment popup */}
       <AttachmentPopup

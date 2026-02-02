@@ -8,6 +8,7 @@ import {
   Platform,
   Alert,
   TextInput,
+  Switch,
 } from 'react-native';
 import { useRouter } from 'expo-router';
 import { useQuery, useMutation } from 'convex/react';
@@ -17,6 +18,8 @@ import { COLORS, GENDER_OPTIONS, SMOKING_OPTIONS, DRINKING_OPTIONS, KIDS_OPTIONS
 import { Button, Input } from '@/components/ui';
 import { Ionicons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
+import { BlurProfileNotice } from '@/components/profile/BlurProfileNotice';
+import { isDemoMode } from '@/hooks/useConvex';
 
 export default function EditProfileScreen() {
   const router = useRouter();
@@ -29,6 +32,10 @@ export default function EditProfileScreen() {
 
   const updateProfile = useMutation(api.users.updateProfile);
   const updateProfilePrompts = useMutation(api.users.updateProfilePrompts);
+  const togglePhotoBlur = isDemoMode ? null : useMutation(api.users.togglePhotoBlur);
+
+  const [blurEnabled, setBlurEnabled] = useState(currentUser?.photoBlurred === true);
+  const [showBlurNotice, setShowBlurNotice] = useState(false);
 
   const [bio, setBio] = useState(currentUser?.bio || '');
   const [prompts, setPrompts] = useState<{ question: string; answer: string }[]>(
@@ -58,6 +65,7 @@ export default function EditProfileScreen() {
       setJobTitle(currentUser.jobTitle || '');
       setCompany(currentUser.company || '');
       setSchool(currentUser.school || '');
+      setBlurEnabled(currentUser.photoBlurred === true);
     }
   }, [currentUser]);
 
@@ -82,6 +90,39 @@ export default function EditProfileScreen() {
   const availableQuestions = PROFILE_PROMPT_QUESTIONS.filter(
     (q) => !usedQuestions.includes(q.text)
   );
+
+  // Blur toggle handler — shows notice first, then toggles
+  const handleBlurToggle = (newValue: boolean) => {
+    if (newValue) {
+      // Turning blur ON → show notice
+      setShowBlurNotice(true);
+    } else {
+      // Turning blur OFF → immediate, no notice needed
+      if (isDemoMode) {
+        setBlurEnabled(false);
+        return;
+      }
+      if (!userId || !togglePhotoBlur) return;
+      togglePhotoBlur({ userId: userId as any, blurred: false })
+        .then(() => setBlurEnabled(false))
+        .catch((err: any) => Alert.alert('Error', err.message));
+    }
+  };
+
+  const handleBlurConfirm = async () => {
+    setShowBlurNotice(false);
+    if (isDemoMode) {
+      setBlurEnabled(true);
+      return;
+    }
+    if (!userId || !togglePhotoBlur) return;
+    try {
+      await togglePhotoBlur({ userId: userId as any, blurred: true });
+      setBlurEnabled(true);
+    } catch (err: any) {
+      Alert.alert('Error', err.message);
+    }
+  };
 
   const handleSave = async () => {
     if (!userId) return;
@@ -126,6 +167,13 @@ export default function EditProfileScreen() {
 
   return (
     <ScrollView style={styles.container} showsVerticalScrollIndicator={false}>
+      {/* Blur Notice Modal */}
+      <BlurProfileNotice
+        visible={showBlurNotice}
+        onConfirm={handleBlurConfirm}
+        onCancel={() => setShowBlurNotice(false)}
+      />
+
       <View style={styles.header}>
         <TouchableOpacity onPress={() => router.back()}>
           <Ionicons name="arrow-back" size={24} color={COLORS.text} />
@@ -134,6 +182,30 @@ export default function EditProfileScreen() {
         <TouchableOpacity onPress={handleSave}>
           <Text style={styles.saveButton}>Save</Text>
         </TouchableOpacity>
+      </View>
+
+      {/* Photo Visibility — Blur Toggle */}
+      <View style={styles.section}>
+        <Text style={styles.sectionTitle}>Photo Visibility</Text>
+        <View style={styles.blurRow}>
+          <View style={styles.blurInfo}>
+            <View style={styles.blurLabelRow}>
+              <Ionicons name="eye-off-outline" size={18} color={COLORS.primary} />
+              <Text style={styles.blurLabel}>Blur My Photo</Text>
+            </View>
+            <Text style={styles.blurDescription}>
+              {blurEnabled
+                ? 'Your photo is blurred across Discover and your profile.'
+                : 'Blur your photo to protect your privacy. You can unblur anytime.'}
+            </Text>
+          </View>
+          <Switch
+            value={blurEnabled}
+            onValueChange={handleBlurToggle}
+            trackColor={{ false: COLORS.border, true: COLORS.primary }}
+            thumbColor={COLORS.white}
+          />
+        </View>
       </View>
 
       <View style={styles.section}>
@@ -580,5 +652,31 @@ const styles = StyleSheet.create({
   footer: {
     padding: 16,
     paddingBottom: 32,
+  },
+  // Blur toggle
+  blurRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  blurInfo: {
+    flex: 1,
+    marginRight: 16,
+  },
+  blurLabelRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: 4,
+  },
+  blurLabel: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: COLORS.text,
+  },
+  blurDescription: {
+    fontSize: 12,
+    color: COLORS.textLight,
+    lineHeight: 16,
   },
 });

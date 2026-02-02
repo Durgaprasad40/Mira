@@ -134,6 +134,8 @@ export default defineSchema({
 
     // Activity
     lastActive: v.number(),
+    lastLocationUpdatedAt: v.optional(v.number()),   // timestamp of last location save (30-min gate)
+    nearbyEnabled: v.optional(v.boolean()),           // user opt-in toggle (default true)
     createdAt: v.number(),
 
     // Profile Prompts (icebreakers)
@@ -148,6 +150,12 @@ export default defineSchema({
 
     // Privacy
     showLastSeen: v.optional(v.boolean()),
+
+    // Photo Blur (user-controlled privacy)
+    photoBlurred: v.optional(v.boolean()),       // true = photo shown blurred in Discover/profile
+
+    // Daily nudge tracking
+    lastNudgeAt: v.optional(v.number()),         // timestamp of last profile-completion nudge
 
     // Push Notifications
     pushToken: v.optional(v.string()),
@@ -235,16 +243,90 @@ export default defineSchema({
   messages: defineTable({
     conversationId: v.id('conversations'),
     senderId: v.id('users'),
-    type: v.union(v.literal('text'), v.literal('image'), v.literal('template'), v.literal('dare')),
+    type: v.union(v.literal('text'), v.literal('image'), v.literal('video'), v.literal('template'), v.literal('dare'), v.literal('system')),
     content: v.string(),
     imageStorageId: v.optional(v.id('_storage')),
+    mediaId: v.optional(v.id('media')),
     templateId: v.optional(v.string()),
+    systemSubtype: v.optional(v.union(
+      v.literal('screenshot_taken'),
+      v.literal('screenshot_attempted'),
+      v.literal('access_requested'),
+      v.literal('permission_granted'),
+      v.literal('permission_revoked'),
+      v.literal('expired')
+    )),
     deliveredAt: v.optional(v.number()),
     readAt: v.optional(v.number()),
     createdAt: v.number(),
   })
     .index('by_conversation', ['conversationId'])
     .index('by_conversation_created', ['conversationId', 'createdAt']),
+
+  // Protected Media table (private storage references — never expose URLs)
+  media: defineTable({
+    chatId: v.id('conversations'),
+    ownerId: v.id('users'),
+    objectKey: v.id('_storage'),
+    mediaType: v.union(v.literal('image'), v.literal('video')),
+    createdAt: v.number(),
+    timerSeconds: v.optional(v.number()),
+    viewOnce: v.boolean(),
+    watermarkEnabled: v.boolean(),
+    deletedAt: v.optional(v.number()),
+  })
+    .index('by_chat', ['chatId'])
+    .index('by_owner', ['ownerId']),
+
+  // Media Permissions table (per-recipient access control)
+  mediaPermissions: defineTable({
+    mediaId: v.id('media'),
+    senderId: v.id('users'),
+    recipientId: v.id('users'),
+    canView: v.boolean(),
+    canScreenshot: v.boolean(),
+    allowedUntil: v.optional(v.number()),
+    revoked: v.boolean(),
+    openedAt: v.optional(v.number()),
+    expiresAt: v.optional(v.number()),
+    viewCount: v.number(),
+    lastViewedAt: v.optional(v.number()),
+  })
+    .index('by_media_recipient', ['mediaId', 'recipientId'])
+    .index('by_recipient', ['recipientId']),
+
+  // Security Events table (audit log for protected media)
+  securityEvents: defineTable({
+    chatId: v.id('conversations'),
+    mediaId: v.optional(v.id('media')),
+    actorId: v.id('users'),
+    type: v.string(),
+    metadata: v.optional(v.any()),
+    createdAt: v.number(),
+  })
+    .index('by_chat', ['chatId', 'createdAt'])
+    .index('by_media', ['mediaId']),
+
+  // Media Reports table
+  mediaReports: defineTable({
+    reporterId: v.id('users'),
+    reportedUserId: v.id('users'),
+    mediaId: v.optional(v.id('media')),
+    chatId: v.id('conversations'),
+    reason: v.union(
+      v.literal('inappropriate_content'),
+      v.literal('non_consensual'),
+      v.literal('screenshot_abuse'),
+      v.literal('harassment'),
+      v.literal('other')
+    ),
+    description: v.optional(v.string()),
+    status: v.union(v.literal('pending'), v.literal('reviewed'), v.literal('resolved')),
+    createdAt: v.number(),
+  })
+    .index('by_reporter', ['reporterId'])
+    .index('by_reported_user', ['reportedUserId'])
+    .index('by_status', ['status']),
 
   // Notifications table
   notifications: defineTable({
@@ -255,7 +337,8 @@ export default defineSchema({
       v.literal('super_like'),
       v.literal('crossed_paths'),
       v.literal('subscription'),
-      v.literal('weekly_refresh')
+      v.literal('weekly_refresh'),
+      v.literal('profile_nudge')
     ),
     title: v.string(),
     body: v.string(),
@@ -285,6 +368,20 @@ export default defineSchema({
     .index('by_user1', ['user1Id'])
     .index('by_user2', ['user2Id'])
     .index('by_users', ['user1Id', 'user2Id']),
+
+  // Cross-Path History table (memory-based, privacy-first)
+  crossPathHistory: defineTable({
+    user1Id: v.id('users'),           // ordered pair (user1Id < user2Id)
+    user2Id: v.id('users'),
+    areaName: v.string(),             // e.g. "Near Banjara Hills"
+    createdAt: v.number(),
+    expiresAt: v.number(),            // auto-expire after 14 days
+    lastNotifiedAt: v.optional(v.number()), // 24h cooldown tracking
+  })
+    .index('by_user1', ['user1Id'])
+    .index('by_user2', ['user2Id'])
+    .index('by_users', ['user1Id', 'user2Id'])
+    .index('by_expires', ['expiresAt']),
 
   // Dares table (Truth or Dare feature)
   dares: defineTable({

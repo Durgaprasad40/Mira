@@ -174,7 +174,7 @@ export default function RoomChatScreen() {
           ...styles.messageList,
           flexGrow: 1,
           justifyContent: 'flex-end' as const,
-          paddingBottom: composerHeight + keyboardHeight + insets.bottom + 8,
+          paddingBottom: composerHeight + keyboardHeight + 8,
         }}
         keyboardShouldPersistTaps="handled"
         keyboardDismissMode="interactive"
@@ -184,7 +184,7 @@ export default function RoomChatScreen() {
       <View
         onLayout={onComposerLayout}
         style={[styles.inputBar, {
-          paddingBottom: Math.max(insets.bottom, 8),
+          paddingBottom: 8,
           marginBottom: keyboardHeight,
         }]}
       >

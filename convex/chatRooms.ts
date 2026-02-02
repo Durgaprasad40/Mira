@@ -1,5 +1,6 @@
 import { mutation, query } from './_generated/server';
 import { v } from 'convex/values';
+import { softMaskText } from './softMask';
 
 const DEFAULT_ROOMS = [
   { name: 'Global', slug: 'global', category: 'general' as const },
@@ -202,11 +203,14 @@ export const sendMessage = mutation({
     const type = imageUrl ? 'image' : 'text';
     const now = Date.now();
 
+    // Soft-mask sensitive words in Face 1 text messages
+    const maskedText = text ? softMaskText(text) : undefined;
+
     const messageId = await ctx.db.insert('chatRoomMessages', {
       roomId,
       senderId,
       type,
-      text: text ?? undefined,
+      text: maskedText,
       imageUrl: imageUrl ?? undefined,
       createdAt: now,
     });
@@ -214,7 +218,7 @@ export const sendMessage = mutation({
     // Update room's last message info
     await ctx.db.patch(roomId, {
       lastMessageAt: now,
-      lastMessageText: text ?? (imageUrl ? '[Image]' : ''),
+      lastMessageText: maskedText ?? (imageUrl ? '[Image]' : ''),
     });
 
     return messageId;

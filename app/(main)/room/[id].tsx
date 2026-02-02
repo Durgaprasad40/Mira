@@ -134,7 +134,7 @@ export default function RoomScreen() {
           ...styles.messagesList,
           flexGrow: 1,
           justifyContent: 'flex-end' as const,
-          paddingBottom: composerHeight + keyboardHeight + insets.bottom + 8,
+          paddingBottom: composerHeight + keyboardHeight + 8,
         }}
         keyboardShouldPersistTaps="handled"
         keyboardDismissMode="interactive"
@@ -143,7 +143,7 @@ export default function RoomScreen() {
       <View
         onLayout={onComposerLayout}
         style={[styles.inputContainer, {
-          paddingBottom: Math.max(insets.bottom, 16),
+          paddingBottom: 10,
           marginBottom: keyboardHeight,
         }]}
       >

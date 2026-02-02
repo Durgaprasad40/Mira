@@ -5,6 +5,9 @@ import {
   StyleSheet,
   TextInput,
   TouchableOpacity,
+  Keyboard,
+  KeyboardAvoidingView,
+  Platform,
   LayoutChangeEvent,
   NativeSyntheticEvent,
   NativeScrollEvent,
@@ -19,25 +22,17 @@ import { maskExplicitWords, MASKED_CONTENT_NOTICE } from '@/lib/contentFilter';
 import { usePrivateChatStore } from '@/stores/privateChatStore';
 import { ReportModal } from '@/components/private/ReportModal';
 import type { IncognitoMessage } from '@/types';
-import { useKeyboardHeight } from '@/hooks/useKeyboardHeight';
 
 export default function PrivateChatScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const router = useRouter();
   const insets = useSafeAreaInsets();
-  const keyboardHeight = useKeyboardHeight();
   const flatListRef = useRef<FlashList<IncognitoMessage>>(null);
 
   // Measured header height for KAV offset
   const [headerHeight, setHeaderHeight] = useState(0);
   const onHeaderLayout = useCallback((e: LayoutChangeEvent) => {
     setHeaderHeight(e.nativeEvent.layout.height);
-  }, []);
-
-  // Measured composer height for list paddingBottom
-  const [composerHeight, setComposerHeight] = useState(0);
-  const onComposerLayout = useCallback((e: LayoutChangeEvent) => {
-    setComposerHeight(e.nativeEvent.layout.height);
   }, []);
 
   // Near-bottom tracking for smart auto-scroll
@@ -71,6 +66,19 @@ export default function PrivateChatScreen() {
     }
     prevMessageCountRef.current = count;
   }, [messages.length]);
+
+  // Scroll to end when keyboard opens (WhatsApp behavior)
+  useEffect(() => {
+    const showEvent = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
+    const sub = Keyboard.addListener(showEvent, () => {
+      if (isNearBottomRef.current) {
+        requestAnimationFrame(() => {
+          flatListRef.current?.scrollToEnd({ animated: true });
+        });
+      }
+    });
+    return () => sub.remove();
+  }, []);
 
   const handleSend = () => {
     if (!text.trim() || !id) return;
@@ -149,28 +157,31 @@ export default function PrivateChatScreen() {
 
   return (
     <View style={styles.container}>
-      {/* Inner wrapper — paddingTop lives here */}
-      <View style={{ flex: 1, paddingTop: insets.top }}>
-        {/* Header — measured via onLayout for KAV offset */}
-        <View onLayout={onHeaderLayout} style={styles.header}>
-          <TouchableOpacity onPress={() => router.back()} style={styles.backButton}>
-            <Ionicons name="arrow-back" size={24} color={C.text} />
-          </TouchableOpacity>
-          <Image
-            source={{ uri: conversation.participantPhotoUrl }}
-            style={styles.headerAvatar}
-            blurRadius={10}
-            contentFit="cover"
-          />
-          <View style={styles.headerInfo}>
-            <Text style={styles.headerName}>{conversation.participantName}</Text>
-            <Text style={styles.headerMeta}>{conversation.participantAge} · via {conversation.connectionSource}</Text>
-          </View>
-          <TouchableOpacity onPress={() => setReportVisible(true)} style={styles.moreButton}>
-            <Ionicons name="ellipsis-vertical" size={20} color={C.textLight} />
-          </TouchableOpacity>
+      {/* Header — sits above KAV, measured for keyboardVerticalOffset */}
+      <View onLayout={onHeaderLayout} style={[styles.header, { marginTop: insets.top }]}>
+        <TouchableOpacity onPress={() => router.back()} style={styles.backButton}>
+          <Ionicons name="arrow-back" size={24} color={C.text} />
+        </TouchableOpacity>
+        <Image
+          source={{ uri: conversation.participantPhotoUrl }}
+          style={styles.headerAvatar}
+          blurRadius={10}
+          contentFit="cover"
+        />
+        <View style={styles.headerInfo}>
+          <Text style={styles.headerName}>{conversation.participantName}</Text>
+          <Text style={styles.headerMeta}>{conversation.participantAge} · via {conversation.connectionSource}</Text>
         </View>
+        <TouchableOpacity onPress={() => setReportVisible(true)} style={styles.moreButton}>
+          <Ionicons name="ellipsis-vertical" size={20} color={C.textLight} />
+        </TouchableOpacity>
+      </View>
 
+      <KeyboardAvoidingView
+        style={{ flex: 1 }}
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        keyboardVerticalOffset={headerHeight + insets.top}
+      >
         {/* Messages */}
         <FlashList
           ref={flatListRef}
@@ -180,8 +191,9 @@ export default function PrivateChatScreen() {
           contentContainerStyle={{
             flexGrow: 1,
             justifyContent: 'flex-end' as const,
-            padding: 16,
-            paddingBottom: composerHeight + keyboardHeight + Math.max(insets.bottom, 8) + 8,
+            paddingHorizontal: 16,
+            paddingTop: 16,
+            paddingBottom: 0,
           }}
           onScroll={onScroll}
           scrollEventThrottle={16}
@@ -190,14 +202,8 @@ export default function PrivateChatScreen() {
           keyboardDismissMode="interactive"
         />
 
-        {/* Input — lifted above keyboard via marginBottom */}
-        <View
-          onLayout={onComposerLayout}
-          style={[styles.inputBar, {
-            paddingBottom: Math.max(insets.bottom, 8),
-            marginBottom: keyboardHeight,
-          }]}
-        >
+        {/* Input — sits at the bottom of KAV, pushed up by keyboard */}
+        <View style={[styles.inputBar, { paddingBottom: 8 }]}>
           <TextInput
             style={styles.textInput}
             placeholder="Type a message..."
@@ -218,7 +224,7 @@ export default function PrivateChatScreen() {
             <Ionicons name="send" size={20} color={text.trim() ? '#FFFFFF' : C.textLight} />
           </TouchableOpacity>
         </View>
-      </View>
+      </KeyboardAvoidingView>
 
       {/* Report/Block Modal */}
       <ReportModal

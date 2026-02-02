@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
-import { View, Text, StyleSheet, FlatList, TouchableOpacity, RefreshControl, Platform } from 'react-native';
+import { View, Text, StyleSheet, FlatList, TouchableOpacity, RefreshControl } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { Image } from 'expo-image';
 import { useQuery } from 'convex/react';
@@ -202,7 +203,7 @@ export default function MessagesScreen() {
   };
 
   return (
-    <View style={styles.container}>
+    <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
       <View style={styles.header}>
         <Text style={styles.title}>Messages</Text>
         {unreadCount !== undefined && unreadCount > 0 && (
@@ -241,7 +242,7 @@ export default function MessagesScreen() {
           (!conversations || conversations.length === 0) && styles.emptyListContainer
         }
       />
-    </View>
+    </SafeAreaView>
   );
 }
 
@@ -255,7 +256,6 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between',
     padding: 16,
-    paddingTop: Platform.OS === 'ios' ? 50 : 16,
     backgroundColor: COLORS.background,
     borderBottomWidth: 1,
     borderBottomColor: COLORS.border,

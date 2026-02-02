@@ -75,6 +75,8 @@ export const listConfessions = query({
           .collect();
         const emojiCounts: Record<string, number> = {};
         for (const r of allReactions) {
+          // Skip old string-based reaction keys (e.g. "relatable", "bold")
+          if (/^[a-zA-Z0-9_\s]+$/.test(r.type)) continue;
           emojiCounts[r.type] = (emojiCounts[r.type] || 0) + 1;
         }
         const topEmojis = Object.entries(emojiCounts)
@@ -304,6 +306,8 @@ export const getReactionCounts = query({
       .collect();
     const emojiCounts: Record<string, number> = {};
     for (const r of reactions) {
+      // Skip old string-based reaction keys (e.g. "relatable", "bold")
+      if (/^[a-zA-Z0-9_\s]+$/.test(r.type)) continue;
       emojiCounts[r.type] = (emojiCounts[r.type] || 0) + 1;
     }
     // Return top emojis sorted by count

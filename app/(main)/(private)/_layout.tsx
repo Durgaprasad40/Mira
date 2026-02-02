@@ -1,6 +1,6 @@
-import React, { useEffect } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, BackHandler } from 'react-native';
-import { Stack, useRouter } from 'expo-router';
+import React, { useEffect, useRef } from 'react';
+import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, BackHandler, Platform } from 'react-native';
+import { Stack, useRouter, useNavigation } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { useQuery } from 'convex/react';
@@ -21,15 +21,32 @@ export default function PrivateLayout() {
   const acceptPrivateTerms = useIncognitoStore((s) => s.acceptPrivateTerms);
   const { userId } = useAuthStore();
 
-  // Android back: go to Face 1 instead of exiting app
+  // Get the parent (main) stack navigator — beforeRemove fires here
+  // when this screen is about to be popped from the (main) stack.
+  const navigation = useNavigation();
+  const isExitingRef = useRef(false);
+
+  // 1) Intercept any navigation that would remove Private from the stack
+  //    (iOS swipe-back, header back, programmatic back). Replace with
+  //    Discover so Private is fully removed from the back-stack.
   useEffect(() => {
+    const unsub = navigation.addListener('beforeRemove', (e: any) => {
+      if (isExitingRef.current) return; // prevent loop
+      e.preventDefault();
+      isExitingRef.current = true;
+      router.replace('/(main)/(tabs)/home' as any);
+    });
+    return unsub;
+  }, [navigation, router]);
+
+  // 2) Android hardware back — extra safety net.
+  useEffect(() => {
+    if (Platform.OS !== 'android') return;
     const handler = BackHandler.addEventListener('hardwareBackPress', () => {
-      if (router.canGoBack()) {
-        router.back();
-      } else {
-        router.replace('/(main)/(tabs)/home' as any);
-      }
-      return true; // prevent default (app exit)
+      if (isExitingRef.current) return true;
+      isExitingRef.current = true;
+      router.replace('/(main)/(tabs)/home' as any);
+      return true; // block default (app exit)
     });
     return () => handler.remove();
   }, [router]);

@@ -9,19 +9,14 @@ import {
 import { Ionicons } from '@expo/vector-icons';
 import * as Clipboard from 'expo-clipboard';
 import { COLORS } from '@/lib/constants';
-import { isProbablyEmoji } from '@/lib/utils';
 import { ConfessionMood } from '@/types';
+import ReactionBar, { EmojiCount } from './ReactionBar';
 
 interface ReplyPreview {
   text: string;
   isAnonymous: boolean;
   type: string;
   createdAt: number;
-}
-
-interface EmojiCount {
-  emoji: string;
-  count: number;
 }
 
 interface ConfessionCardProps {
@@ -39,6 +34,7 @@ interface ConfessionCardProps {
   createdAt: number;
   onPress?: () => void;
   onReact: () => void; // opens emoji picker
+  onToggleEmoji?: (emoji: string) => void; // directly toggle a specific emoji
   onReplyAnonymously?: () => void;
   onReport?: () => void;
 }
@@ -66,6 +62,7 @@ export default function ConfessionCard({
   createdAt,
   onPress,
   onReact,
+  onToggleEmoji,
   onReplyAnonymously,
   onReport,
 }: ConfessionCardProps) {
@@ -115,33 +112,16 @@ export default function ConfessionCard({
         {text}
       </Text>
 
-      {/* Emoji Reactions Display */}
-      <View style={styles.emojiRow}>
-        {topEmojis.filter((e) => isProbablyEmoji(e.emoji)).map((e, i) => (
-          <View key={i} style={styles.emojiChip}>
-            <Text style={styles.emojiText}>{e.emoji}</Text>
-            <Text style={styles.emojiCount}>{e.count}</Text>
-          </View>
-        ))}
-        {(() => {
-          const valid = topEmojis.filter((e) => isProbablyEmoji(e.emoji));
-          const visibleCount = valid.reduce((s, e) => s + e.count, 0);
-          const remaining = reactionCount - visibleCount;
-          return remaining > 0 && valid.length > 0 ? (
-            <Text style={styles.moreReactions}>+{remaining}</Text>
-          ) : null;
-        })()}
-        <TouchableOpacity
-          style={[styles.addEmojiButton, userEmoji ? styles.addEmojiButtonActive : null]}
-          onPress={onReact}
-          hitSlop={{ top: 6, bottom: 6, left: 4, right: 4 }}
-        >
-          {userEmoji ? (
-            <Text style={styles.userEmojiText}>{userEmoji}</Text>
-          ) : (
-            <Ionicons name="happy-outline" size={16} color={COLORS.textMuted} />
-          )}
-        </TouchableOpacity>
+      {/* Emoji Reactions */}
+      <View style={styles.reactionBarWrap}>
+        <ReactionBar
+          topEmojis={topEmojis}
+          userEmoji={userEmoji}
+          reactionCount={reactionCount}
+          onReact={onReact}
+          onToggleEmoji={onToggleEmoji}
+          size="compact"
+        />
       </View>
 
       {/* Reply Previews (first 2 replies) */}
@@ -232,51 +212,8 @@ const styles = StyleSheet.create({
     color: COLORS.text,
     marginBottom: 8,
   },
-  emojiRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
+  reactionBarWrap: {
     marginBottom: 6,
-  },
-  emojiChip: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 3,
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 14,
-    backgroundColor: COLORS.backgroundDark,
-  },
-  emojiText: {
-    fontSize: 13,
-  },
-  emojiCount: {
-    fontSize: 11,
-    fontWeight: '600',
-    color: COLORS.textMuted,
-  },
-  moreReactions: {
-    fontSize: 11,
-    color: COLORS.textMuted,
-    fontWeight: '500',
-    marginLeft: 2,
-  },
-  addEmojiButton: {
-    width: 28,
-    height: 28,
-    borderRadius: 14,
-    backgroundColor: COLORS.backgroundDark,
-    justifyContent: 'center',
-    alignItems: 'center',
-    borderWidth: 1,
-    borderColor: 'transparent',
-  },
-  addEmojiButtonActive: {
-    backgroundColor: 'rgba(255,107,107,0.1)',
-    borderColor: COLORS.primary,
-  },
-  userEmojiText: {
-    fontSize: 14,
   },
   replyPreviewSection: {
     marginBottom: 6,

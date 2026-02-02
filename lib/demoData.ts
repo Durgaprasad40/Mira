@@ -1057,6 +1057,7 @@ export const DEMO_PROFILES = [
     latitude: 19.0895,   // ~1.5km North
     longitude: 72.8777,
     lastSeenArea: 'Powai',
+    lastLocationUpdatedAt: Date.now() - 1 * 24 * 60 * 60 * 1000, // 1 day ago (solid)
     relationshipIntent: ['long_term'],
     activities: ['gym_partner', 'outdoors', 'coffee'],
     photos: [
@@ -1075,6 +1076,7 @@ export const DEMO_PROFILES = [
     latitude: 19.0870,   // ~2km NE
     longitude: 72.8920,
     lastSeenArea: 'Ghatkopar West',
+    lastLocationUpdatedAt: Date.now() - 2 * 24 * 60 * 60 * 1000, // 2 days ago (solid)
     relationshipIntent: ['figuring_out'],
     activities: ['coffee', 'movies', 'gaming'],
     photos: [
@@ -1093,6 +1095,7 @@ export const DEMO_PROFILES = [
     latitude: 19.0760,   // ~1.8km East
     longitude: 72.8950,
     lastSeenArea: 'Vikhroli',
+    lastLocationUpdatedAt: Date.now() - 12 * 60 * 60 * 1000, // 12 hours ago (solid)
     relationshipIntent: ['new_friends', 'open_to_anything'],
     activities: ['concerts', 'nightlife', 'foodie'],
     photos: [
@@ -1111,6 +1114,7 @@ export const DEMO_PROFILES = [
     latitude: 19.0640,   // ~2.2km SE
     longitude: 72.8930,
     lastSeenArea: 'Chembur East',
+    lastLocationUpdatedAt: Date.now() - 4 * 24 * 60 * 60 * 1000, // 4 days ago (faded)
     relationshipIntent: ['long_term'],
     activities: ['brunch', 'date_night', 'travel'],
     photos: [
@@ -1129,6 +1133,7 @@ export const DEMO_PROFILES = [
     latitude: 19.0650,   // ~1.2km South
     longitude: 72.8777,
     lastSeenArea: 'Sion West',
+    lastLocationUpdatedAt: Date.now() - 2.5 * 24 * 60 * 60 * 1000, // 2.5 days ago (solid)
     relationshipIntent: ['short_to_long'],
     activities: ['coffee', 'art_culture', 'study_date'],
     photos: [
@@ -1147,6 +1152,7 @@ export const DEMO_PROFILES = [
     latitude: 19.0630,   // ~2.5km SW
     longitude: 72.8620,
     lastSeenArea: 'Dharavi',
+    lastLocationUpdatedAt: Date.now() - 5 * 24 * 60 * 60 * 1000, // 5 days ago (faded)
     relationshipIntent: ['new_friends'],
     activities: ['art_culture', 'photography', 'this_weekend'],
     photos: [
@@ -1165,6 +1171,7 @@ export const DEMO_PROFILES = [
     latitude: 19.0760,   // ~1.6km West
     longitude: 72.8620,
     lastSeenArea: 'Matunga East',
+    lastLocationUpdatedAt: Date.now() - 1.5 * 24 * 60 * 60 * 1000, // 1.5 days ago (solid)
     relationshipIntent: ['long_term', 'short_to_long'],
     activities: ['gym_partner', 'movies', 'foodie'],
     photos: [
@@ -1183,6 +1190,7 @@ export const DEMO_PROFILES = [
     latitude: 19.0880,   // ~2km NW
     longitude: 72.8650,
     lastSeenArea: 'Andheri East',
+    lastLocationUpdatedAt: Date.now() - 3.5 * 24 * 60 * 60 * 1000, // 3.5 days ago (faded)
     relationshipIntent: ['open_to_anything'],
     activities: ['coffee', 'gaming', 'photography'],
     photos: [

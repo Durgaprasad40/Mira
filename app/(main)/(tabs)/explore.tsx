@@ -10,6 +10,7 @@ import {
   Animated,
   PanResponder,
   Alert,
+  ActivityIndicator,
 } from 'react-native';
 import { useRouter } from 'expo-router';
 import { useQuery, useMutation } from 'convex/react';
@@ -17,10 +18,12 @@ import { api } from '@/convex/_generated/api';
 import { useAuthStore } from '@/stores/authStore';
 import { isDemoMode } from '@/hooks/useConvex';
 import { DEMO_PROFILES, DEMO_USER } from '@/lib/demoData';
+import { seedDemoProfiles } from '@/lib/seedDemoProfiles';
 import { COLORS, SWIPE_CONFIG } from '@/lib/constants';
 import { ProfileCard, SwipeOverlay } from '@/components/cards';
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { Image } from 'expo-image';
 import type { RelationshipIntent, ActivityFilter } from '@/types';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
@@ -29,6 +32,10 @@ const COL_GAP = 10;
 const ROW_GAP = 10;
 const CARD_W = (SCREEN_WIDTH - H_PAD * 2 - COL_GAP) / 2;
 const CARD_H = 100;
+
+// ---------------------------------------------------------------------------
+// Category types & sections
+// ---------------------------------------------------------------------------
 
 type FilterType = 'intent' | 'activity' | 'distance' | 'verified' | 'interests_sort';
 
@@ -47,8 +54,6 @@ interface SectionData {
   cats: ExploreCategory[];
 }
 
-// Store-safe intent taxonomy — avoids explicit sex-act categories
-// Uses relationship constructs: dating intent, connection style, interests
 const SECTIONS: SectionData[] = [
   {
     title: 'Connection Goals',
@@ -85,6 +90,10 @@ const SECTIONS: SectionData[] = [
   },
 ];
 
+// ---------------------------------------------------------------------------
+// Profile data type
+// ---------------------------------------------------------------------------
+
 interface ProfileData {
   id: string;
   name: string;
@@ -96,14 +105,80 @@ interface ProfileData {
   photos: { url: string }[];
   relationshipIntent?: string[];
   activities?: string[];
+  /** True when the profile owner has opted to blur their photo */
+  photoBlurred?: boolean;
 }
+
+// ---------------------------------------------------------------------------
+// Merged demo profiles (hand-written 50 + generated 300 = 350)
+// ---------------------------------------------------------------------------
+
+let _allDemoProfiles: ProfileData[] | null = null;
+
+function getAllDemoProfiles(): ProfileData[] {
+  if (_allDemoProfiles) return _allDemoProfiles;
+
+  const handWritten: ProfileData[] = DEMO_PROFILES.map((p: any) => ({
+    id: p._id,
+    name: p.name,
+    age: p.age,
+    bio: p.bio,
+    city: p.city,
+    isVerified: p.isVerified,
+    distance: p.distance,
+    photos: p.photos,
+    relationshipIntent: p.relationshipIntent,
+    activities: p.activities,
+  }));
+
+  const generated: ProfileData[] = seedDemoProfiles().map((p) => ({
+    id: p._id,
+    name: p.name,
+    age: p.age,
+    bio: p.bio,
+    city: p.city,
+    isVerified: p.isVerified,
+    distance: p.distance,
+    photos: p.photos,
+    relationshipIntent: p.relationshipIntent,
+    activities: p.activities,
+  }));
+
+  _allDemoProfiles = [...handWritten, ...generated];
+  return _allDemoProfiles;
+}
+
+// ---------------------------------------------------------------------------
+// Image preloader — prefetches the next N images
+// ---------------------------------------------------------------------------
+
+const preloadedUrls = new Set<string>();
+
+function preloadImages(profiles: ProfileData[], startIndex: number, count: number = 5) {
+  for (let i = startIndex; i < Math.min(startIndex + count, profiles.length); i++) {
+    const url = profiles[i]?.photos?.[0]?.url;
+    if (url && !preloadedUrls.has(url)) {
+      preloadedUrls.add(url);
+      Image.prefetch(url).catch(() => {});
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Memoized card wrapper — prevents re-render of cards that haven't changed
+// ---------------------------------------------------------------------------
+
+const MemoizedProfileCard = React.memo(ProfileCard);
+
+// ---------------------------------------------------------------------------
+// Component
+// ---------------------------------------------------------------------------
 
 export default function ExploreScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const { userId } = useAuthStore();
   const [selected, setSelected] = useState<ExploreCategory | null>(null);
-  // Swipe index within the current category
   const [cardIndex, setCardIndex] = useState(0);
 
   // Reset card index when category changes
@@ -111,7 +186,7 @@ export default function ExploreScreen() {
     setCardIndex(0);
   }, [selected?.id]);
 
-  // --- Back gesture handling for category detail view ---
+  // --- Back gesture handling ---
   const goBack = useCallback(() => {
     if (selected) {
       setSelected(null);
@@ -120,13 +195,12 @@ export default function ExploreScreen() {
     return false;
   }, [selected]);
 
-  // Android hardware back button
   useEffect(() => {
     const sub = BackHandler.addEventListener('hardwareBackPress', goBack);
     return () => sub.remove();
   }, [goBack]);
 
-  // iOS edge-swipe-from-left gesture for returning to grid
+  // iOS edge-swipe-from-left gesture
   const edgeSwipePan = useRef(new Animated.Value(0)).current;
   const edgeSwipeResponder = useMemo(
     () =>
@@ -151,7 +225,7 @@ export default function ExploreScreen() {
     [selected, edgeSwipePan],
   );
 
-  // --- Data fetching ---
+  // --- Data fetching (Convex — live mode only) ---
   const convexQueryArgs = (() => {
     if (isDemoMode || !userId || !selected) return 'skip' as const;
     if (selected.filterType === 'intent') {
@@ -165,33 +239,41 @@ export default function ExploreScreen() {
 
   const convexProfiles = useQuery(api.discover.getExploreProfiles, convexQueryArgs);
 
+  // --- Profile list builder ---
   const getProfiles = useCallback((cat: ExploreCategory): ProfileData[] => {
     if (!isDemoMode) {
       return (convexProfiles?.profiles || []).map((p: any) => ({
         id: p.id, name: p.name, age: p.age, bio: p.bio, city: p.city,
         isVerified: p.isVerified, distance: p.distance, photos: p.photos,
         relationshipIntent: p.relationshipIntent, activities: p.activities,
+        photoBlurred: p.photoBlurred,
       }));
     }
-    let list = [...DEMO_PROFILES];
+
+    // Demo mode: use merged 350+ profiles
+    let list = getAllDemoProfiles();
     switch (cat.filterType) {
-      case 'intent':   list = list.filter((p) => p.relationshipIntent.includes(cat.filterValue as RelationshipIntent)); break;
-      case 'activity': list = list.filter((p) => p.activities?.includes(cat.filterValue as ActivityFilter)); break;
-      case 'distance': list = list.filter((p) => p.distance <= Number(cat.filterValue)); break;
-      case 'verified': list = list.filter((p) => p.isVerified); break;
+      case 'intent':
+        list = list.filter((p) => p.relationshipIntent?.includes(cat.filterValue as RelationshipIntent));
+        break;
+      case 'activity':
+        list = list.filter((p) => p.activities?.includes(cat.filterValue as ActivityFilter));
+        break;
+      case 'distance':
+        list = list.filter((p) => (p.distance ?? 999) <= Number(cat.filterValue));
+        break;
+      case 'verified':
+        list = list.filter((p) => p.isVerified);
+        break;
       case 'interests_sort':
-        list.sort((a, b) => {
+        list = [...list].sort((a, b) => {
           const sharedA = (a.activities || []).filter((act) => DEMO_USER.activities.includes(act)).length;
           const sharedB = (b.activities || []).filter((act) => DEMO_USER.activities.includes(act)).length;
           return sharedB - sharedA;
         });
         break;
     }
-    return list.map((p) => ({
-      id: p._id, name: p.name, age: p.age, bio: p.bio, city: p.city,
-      isVerified: p.isVerified, distance: p.distance, photos: p.photos,
-      relationshipIntent: p.relationshipIntent, activities: p.activities,
-    }));
+    return list;
   }, [convexProfiles]);
 
   const getCount = (cat: ExploreCategory): number => {
@@ -200,24 +282,22 @@ export default function ExploreScreen() {
   };
 
   // ========================
-  // SWIPE CARD LOGIC — Two-pan alternating approach (same as Discover)
+  // SWIPE CARD LOGIC
   // ========================
+
   const overlayDirectionRef = useRef<'left' | 'right' | 'up' | null>(null);
   const overlayOpacityAnim = useRef(new Animated.Value(0)).current;
   const [overlayDirection, setOverlayDirection] = useState<'left' | 'right' | 'up' | null>(null);
 
-  // Two independent pan values — never reset a pan attached to a visible view
   const panA = useRef(new Animated.ValueXY()).current;
   const panB = useRef(new Animated.ValueXY()).current;
   const activeSlotRef = useRef<0 | 1>(0);
   const [activeSlot, setActiveSlot] = useState<0 | 1>(0);
   const getActivePan = () => (activeSlotRef.current === 0 ? panA : panB);
-
   const activePan = activeSlot === 0 ? panA : panB;
 
   const swipeMutation = useMutation(api.likes.swipe);
 
-  // Reset slot when category changes
   useEffect(() => {
     activeSlotRef.current = 0;
     setActiveSlot(0);
@@ -258,6 +338,7 @@ export default function ExploreScreen() {
       const action = direction === 'left' ? 'pass' : direction === 'up' ? 'super_like' : 'like';
       const swipedProfile = current;
 
+      // Advance card immediately (optimistic) — no waiting for network
       advanceCard();
 
       if (isDemoMode) {
@@ -267,6 +348,7 @@ export default function ExploreScreen() {
         return;
       }
 
+      // Fire mutation in background — never blocks the UI
       swipeMutation({
         fromUserId: userId as any,
         toUserId: swipedProfile.id as any,
@@ -275,8 +357,8 @@ export default function ExploreScreen() {
         if (result?.isMatch) {
           router.push(`/(main)/match-celebration?matchId=${result.matchId}&userId=${swipedProfile.id}`);
         }
-      }).catch((error: any) => {
-        Alert.alert('Error', error.message || 'Failed to swipe');
+      }).catch(() => {
+        // Silently fail — don't block swipe UX
       });
     },
     [cardIndex, userId, swipeMutation, advanceCard, router],
@@ -325,10 +407,8 @@ export default function ExploreScreen() {
     extrapolate: 'clamp',
   });
 
-  // Store latest profiles in a ref so the memoized PanResponder always sees current data
   const profilesRef = useRef<ProfileData[]>([]);
 
-  // Memoized PanResponder for category swipe cards — reads profiles from ref to avoid stale closures
   const categoryPanResponder = useMemo(
     () =>
       PanResponder.create({
@@ -363,13 +443,41 @@ export default function ExploreScreen() {
     [animateCategorySwipe, panA, panB, overlayOpacityAnim, resetPosition, thresholdX, thresholdY, velX, velY],
   );
 
-  // --- Category detail view (one-at-a-time swipe UI) ---
+  // ========================
+  // CATEGORY DETAIL VIEW
+  // ========================
+
   if (selected) {
     const profiles = getProfiles(selected);
     profilesRef.current = profiles;
     const current = cardIndex < profiles.length ? profiles[cardIndex] : undefined;
     const nextProfile = cardIndex + 1 < profiles.length ? profiles[cardIndex + 1] : undefined;
     const exhausted = cardIndex >= profiles.length;
+
+    // Preload next 5 images whenever cardIndex changes
+    // eslint-disable-next-line react-hooks/rules-of-hooks
+    useEffect(() => {
+      preloadImages(profiles, cardIndex + 2, 5);
+    }, [cardIndex, profiles]);
+
+    // Live mode: loading state (convex query pending)
+    if (!isDemoMode && convexProfiles === undefined) {
+      return (
+        <View style={[styles.container, { paddingTop: insets.top }]}>
+          <View style={[styles.detailHeader, { paddingTop: insets.top + 8 }]}>
+            <TouchableOpacity onPress={goBack} style={styles.detailBackBtn}>
+              <Ionicons name="arrow-back" size={22} color={COLORS.text} />
+            </TouchableOpacity>
+            <Ionicons name={selected.icon as any} size={20} color={selected.color} style={{ marginRight: 6 }} />
+            <Text style={styles.detailTitle}>{selected.label}</Text>
+          </View>
+          <View style={styles.loadingCenter}>
+            <ActivityIndicator size="large" color={COLORS.primary} />
+            <Text style={styles.loadingText}>Finding profiles...</Text>
+          </View>
+        </View>
+      );
+    }
 
     return (
       <Animated.View
@@ -390,20 +498,27 @@ export default function ExploreScreen() {
           </Text>
         </View>
 
-        {/* Card stack */}
+        {/* Card stack — or exhausted / empty state */}
         {exhausted || profiles.length === 0 ? (
           <View style={styles.emptyCenter}>
             <Ionicons name={selected.icon as any} size={48} color={COLORS.border} />
             <Text style={styles.emptyTitle}>
-              {profiles.length === 0 ? 'No profiles yet' : 'All caught up!'}
+              {profiles.length === 0 ? 'No profiles yet' : 'No more profiles'}
             </Text>
             <Text style={styles.emptySubtitle}>
               {profiles.length === 0
                 ? selected.filterType === 'interests_sort'
                   ? 'No profiles with shared interests found.'
                   : `No one matches "${selected.label}" yet.`
-                : "You've seen everyone in this category."}
+                : "You've seen everyone in this category. Check back later!"}
             </Text>
+            <TouchableOpacity
+              style={styles.reloadButton}
+              onPress={() => setCardIndex(0)}
+            >
+              <Ionicons name="refresh" size={18} color={COLORS.white} style={{ marginRight: 6 }} />
+              <Text style={styles.reloadText}>Start Over</Text>
+            </TouchableOpacity>
           </View>
         ) : (
           <>
@@ -416,7 +531,7 @@ export default function ExploreScreen() {
                     { zIndex: 0, transform: [{ scale: nextScale }] },
                   ]}
                 >
-                  <ProfileCard
+                  <MemoizedProfileCard
                     name={nextProfile.name}
                     age={nextProfile.age}
                     bio={nextProfile.bio}
@@ -424,16 +539,17 @@ export default function ExploreScreen() {
                     isVerified={nextProfile.isVerified}
                     distance={nextProfile.distance}
                     photos={nextProfile.photos}
+                    photoBlurred={nextProfile.photoBlurred}
                   />
                 </Animated.View>
               )}
-              {/* Top card — uses activePan which swaps to a fresh {0,0} pan on each swipe */}
+              {/* Top card */}
               {current && (
                 <Animated.View
                   style={[styles.swipeCard, { zIndex: 1 }, cardStyle]}
                   {...categoryPanResponder.panHandlers}
                 >
-                  <ProfileCard
+                  <MemoizedProfileCard
                     name={current.name}
                     age={current.age}
                     bio={current.bio}
@@ -441,6 +557,7 @@ export default function ExploreScreen() {
                     isVerified={current.isVerified}
                     distance={current.distance}
                     photos={current.photos}
+                    photoBlurred={current.photoBlurred}
                     showCarousel
                     onOpenProfile={() => router.push(`/profile/${current.id}` as any)}
                   />
@@ -476,13 +593,54 @@ export default function ExploreScreen() {
     );
   }
 
-  // --- Main explore grid ---
+  // ========================
+  // Profile completeness nudge
+  // ========================
+
+  const completeness = useQuery(
+    api.users.getProfileCompleteness,
+    !isDemoMode && userId ? { userId: userId as any } : 'skip',
+  );
+
+  const [nudgeDismissed, setNudgeDismissed] = useState(false);
+  const showNudge = !nudgeDismissed && completeness && completeness.score < 70;
+
+  // ========================
+  // MAIN EXPLORE GRID
+  // ========================
+
   return (
     <View style={styles.container}>
       <View style={[styles.header, { paddingTop: insets.top + 8 }]}>
         <Text style={styles.title}>Explore</Text>
       </View>
       <ScrollView contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>
+        {showNudge && (
+          <View style={styles.nudgeBanner}>
+            <View style={styles.nudgeContent}>
+              <Ionicons name="sparkles-outline" size={20} color={COLORS.primary} />
+              <View style={styles.nudgeText}>
+                <Text style={styles.nudgeTitle}>
+                  Complete your profile ({completeness.score}%)
+                </Text>
+                <Text style={styles.nudgeSubtitle}>
+                  {completeness.recommendations[0] || 'Finish your profile for better matches'}
+                </Text>
+              </View>
+            </View>
+            <View style={styles.nudgeActions}>
+              <TouchableOpacity
+                style={styles.nudgeBtn}
+                onPress={() => router.push('/(main)/edit-profile')}
+              >
+                <Text style={styles.nudgeBtnText}>Complete</Text>
+              </TouchableOpacity>
+              <TouchableOpacity onPress={() => setNudgeDismissed(true)}>
+                <Ionicons name="close" size={18} color={COLORS.textMuted} />
+              </TouchableOpacity>
+            </View>
+          </View>
+        )}
         {SECTIONS.map((section) => (
           <View key={section.title} style={styles.section}>
             <Text style={styles.sectionLabel}>{section.title}</Text>
@@ -515,6 +673,10 @@ export default function ExploreScreen() {
     </View>
   );
 }
+
+// ---------------------------------------------------------------------------
+// Styles
+// ---------------------------------------------------------------------------
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: COLORS.background },
@@ -632,8 +794,73 @@ const styles = StyleSheet.create({
   likeBtn: { backgroundColor: '#E8F5E9', width: 62, height: 62, borderRadius: 31 },
   actionIcon: { fontSize: 24 },
 
-  // Empty states
+  // Loading state
+  loadingCenter: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 40 },
+  loadingText: { fontSize: 15, color: COLORS.textLight, marginTop: 12 },
+
+  // Empty / exhausted states
   emptyCenter: { flex: 1, alignItems: 'center', justifyContent: 'center', padding: 40 },
   emptyTitle: { fontSize: 18, fontWeight: '600', color: COLORS.text, marginTop: 12, marginBottom: 6 },
-  emptySubtitle: { fontSize: 13, color: COLORS.textLight, textAlign: 'center' },
+  emptySubtitle: { fontSize: 13, color: COLORS.textLight, textAlign: 'center', marginBottom: 20 },
+
+  // Reload button
+  reloadButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: COLORS.primary,
+    borderRadius: 24,
+    paddingVertical: 12,
+    paddingHorizontal: 24,
+  },
+  reloadText: {
+    color: COLORS.white,
+    fontSize: 15,
+    fontWeight: '600',
+  },
+
+  // Nudge banner
+  nudgeBanner: {
+    backgroundColor: COLORS.primary + '10',
+    borderRadius: 14,
+    padding: 14,
+    marginBottom: 16,
+    borderWidth: 1,
+    borderColor: COLORS.primary + '25',
+  },
+  nudgeContent: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 10,
+    marginBottom: 10,
+  },
+  nudgeText: {
+    flex: 1,
+  },
+  nudgeTitle: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: COLORS.text,
+    marginBottom: 2,
+  },
+  nudgeSubtitle: {
+    fontSize: 12,
+    color: COLORS.textLight,
+    lineHeight: 16,
+  },
+  nudgeActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  nudgeBtn: {
+    backgroundColor: COLORS.primary,
+    borderRadius: 8,
+    paddingVertical: 7,
+    paddingHorizontal: 16,
+  },
+  nudgeBtnText: {
+    color: COLORS.white,
+    fontSize: 13,
+    fontWeight: '600',
+  },
 });

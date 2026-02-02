@@ -130,7 +130,7 @@ export default function ConfessionsScreen() {
       return { ...c, trendingScore: score };
     });
     scored.sort((a, b) => (b.trendingScore || 0) - (a.trendingScore || 0));
-    return scored.slice(0, 5);
+    return scored.slice(0, 1);
   }, [isDemoMode, convexTrending, demoConfessions]);
 
   const myCrushes = useMemo(
@@ -386,31 +386,6 @@ export default function ConfessionsScreen() {
             </TouchableOpacity>
           )}
 
-          {/* Smaller trending chips */}
-          {trendingConfessions.length > 1 && (
-            <FlatList<any>
-              data={trendingConfessions.slice(1, 5)}
-              horizontal
-              showsHorizontalScrollIndicator={false}
-              keyExtractor={(item) => item.id}
-              contentContainerStyle={styles.trendingChipsContainer}
-              renderItem={({ item }) => (
-                <TouchableOpacity
-                  style={styles.trendingChip}
-                  onPress={() => handleOpenThread(item.id)}
-                  activeOpacity={0.8}
-                >
-                  <Text style={styles.trendingChipText} numberOfLines={2}>
-                    {item.text}
-                  </Text>
-                  <View style={styles.trendingChipMeta}>
-                    <Ionicons name="chatbubble-outline" size={10} color={COLORS.textMuted} />
-                    <Text style={styles.trendingChipCount}>{item.replyCount}</Text>
-                  </View>
-                </TouchableOpacity>
-              )}
-            />
-          )}
         </View>
       )}
     </View>
@@ -444,6 +419,22 @@ export default function ConfessionsScreen() {
             createdAt={item.createdAt}
             onPress={() => handleOpenThread(item.id)}
             onReact={() => handleOpenEmojiPicker(item.id)}
+            onToggleEmoji={(emoji) => {
+              if (isDemoMode) {
+                demoToggleReaction(item.id, emoji);
+                notifyReaction(item.id);
+                return;
+              }
+              demoToggleReaction(item.id, emoji);
+              toggleReactionMutation({
+                confessionId: item.id as any,
+                userId: currentUserId as any,
+                type: emoji,
+              }).catch(() => {
+                demoToggleReaction(item.id, emoji);
+              });
+              notifyReaction(item.id);
+            }}
             onReplyAnonymously={() => handleReplyAnonymously(item.id, item.userId)}
             onReport={() => handleReport(item.id)}
           />
@@ -600,38 +591,6 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     color: COLORS.white,
     opacity: 0.85,
-  },
-  trendingChipsContainer: {
-    paddingHorizontal: 10,
-    gap: 8,
-  },
-  trendingChip: {
-    width: 160,
-    backgroundColor: COLORS.white,
-    borderRadius: 10,
-    padding: 10,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.04,
-    shadowRadius: 3,
-    elevation: 1,
-  },
-  trendingChipText: {
-    fontSize: 12,
-    fontWeight: '600',
-    lineHeight: 17,
-    color: COLORS.text,
-    marginBottom: 6,
-  },
-  trendingChipMeta: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-  },
-  trendingChipCount: {
-    fontSize: 11,
-    color: COLORS.textMuted,
-    fontWeight: '500',
   },
   listContent: {
     paddingTop: 4,

@@ -22,10 +22,6 @@ export default function PrivateRedirectScreen() {
 
     // Use navigate (not push) — idempotent, won't stack duplicates
     router.navigate('/(main)/(private)/(tabs)/desire-land' as any);
-
-    return () => {
-      didNavigate.current = false;
-    };
   }, [router]);
 
   return (

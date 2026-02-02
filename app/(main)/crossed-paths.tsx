@@ -11,38 +11,64 @@ import { useRouter } from 'expo-router';
 import { useQuery } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { useAuthStore } from '@/stores/authStore';
-import { COLORS, CROSSED_PATHS } from '@/lib/constants';
-import { Avatar } from '@/components/ui';
+import { COLORS } from '@/lib/constants';
 import { Ionicons } from '@expo/vector-icons';
-import { Image } from 'expo-image';
+import { isDemoMode } from '@/hooks/useConvex';
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/** Format a timestamp to a relative time string like "2 days ago". */
+function formatTimeAgo(timestamp: number): string {
+  const diff = Date.now() - timestamp;
+  const minutes = Math.floor(diff / 60000);
+  const hours = Math.floor(minutes / 60);
+  const days = Math.floor(hours / 24);
+
+  if (days > 0) return `${days} day${days > 1 ? 's' : ''} ago`;
+  if (hours > 0) return `${hours} hour${hours > 1 ? 's' : ''} ago`;
+  if (minutes > 0) return `${minutes} min ago`;
+  return 'Just now';
+}
+
+// ---------------------------------------------------------------------------
+// Demo data (used when in demo mode)
+// ---------------------------------------------------------------------------
+
+const DEMO_HISTORY = [
+  { id: '1', initial: 'A', areaName: 'Near Powai', createdAt: Date.now() - 2 * 24 * 60 * 60 * 1000 },
+  { id: '2', initial: 'S', areaName: 'Near Vikhroli', createdAt: Date.now() - 3 * 24 * 60 * 60 * 1000 },
+  { id: '3', initial: 'H', areaName: 'Near Sion West', createdAt: Date.now() - 5 * 24 * 60 * 60 * 1000 },
+  { id: '4', initial: 'J', areaName: 'Near Matunga East', createdAt: Date.now() - 1 * 24 * 60 * 60 * 1000 },
+  { id: '5', initial: 'R', areaName: 'Near Andheri East', createdAt: Date.now() - 4 * 24 * 60 * 60 * 1000 },
+];
+
+// ---------------------------------------------------------------------------
+// Component
+// ---------------------------------------------------------------------------
 
 export default function CrossedPathsScreen() {
   const router = useRouter();
   const { userId } = useAuthStore();
 
-  const crossedPaths = useQuery(
-    api.crossedPaths.getCrossedPaths,
-    userId ? { userId: userId as any } : 'skip'
+  const convexHistory = useQuery(
+    api.crossedPaths.getCrossPathHistory,
+    !isDemoMode && userId ? { userId: userId as any } : 'skip',
   );
 
-  const formatTime = (timestamp: number) => {
-    const date = new Date(timestamp);
-    const now = new Date();
-    const diff = now.getTime() - date.getTime();
-    const hours = Math.floor(diff / (1000 * 60 * 60));
-    const days = Math.floor(hours / 24);
-
-    if (days > 0) {
-      return `${days} day${days > 1 ? 's' : ''} ago`;
-    } else if (hours > 0) {
-      return `${hours} hour${hours > 1 ? 's' : ''} ago`;
-    } else {
-      return 'Recently';
-    }
-  };
+  const history = isDemoMode
+    ? DEMO_HISTORY
+    : (convexHistory ?? []).map((entry) => ({
+        id: entry.id,
+        initial: entry.initial,
+        areaName: entry.areaName,
+        createdAt: entry.createdAt,
+      }));
 
   return (
     <View style={styles.container}>
+      {/* Header */}
       <View style={styles.header}>
         <TouchableOpacity onPress={() => router.back()}>
           <Ionicons name="arrow-back" size={24} color={COLORS.text} />
@@ -51,73 +77,35 @@ export default function CrossedPathsScreen() {
         <View style={{ width: 24 }} />
       </View>
 
-      <View style={styles.infoBanner}>
-        <Ionicons name="information-circle" size={20} color={COLORS.primary} />
-        <Text style={styles.infoText}>
-          You've crossed paths with these people! {CROSSED_PATHS.MIN_CROSSINGS_FOR_UNLOCK}+
-          crossings unlock 48 hours of free messaging.
-        </Text>
-      </View>
+      {/* Section label */}
+      <Text style={styles.sectionLabel}>People you crossed paths with recently</Text>
 
+      {/* History list */}
       <FlatList
-        data={crossedPaths || []}
+        data={history}
         keyExtractor={(item) => item.id}
+        contentContainerStyle={styles.listContent}
         renderItem={({ item }) => (
-          <TouchableOpacity
-            style={styles.pathCard}
-            onPress={() => router.push(`/(main)/profile/${item.user.id}`)}
-          >
-            {item.user.photoUrl ? (
-              <Image
-                source={{ uri: item.user.photoUrl }}
-                style={styles.avatar}
-                contentFit="cover"
-              />
-            ) : (
-              <Avatar size={60} />
-            )}
-            <View style={styles.pathInfo}>
-              <View style={styles.pathHeader}>
-                <Text style={styles.pathName}>{item.user.name}</Text>
-                {item.user.isVerified && (
-                  <Ionicons name="checkmark-circle" size={16} color={COLORS.primary} />
-                )}
-              </View>
-              <View style={styles.pathDetails}>
-                <Ionicons name="location" size={14} color={COLORS.textLight} />
-                <Text style={styles.pathLocation}>
-                  {item.count} {item.count === 1 ? 'crossing' : 'crossings'}
-                </Text>
-                <Text style={styles.pathSeparator}>•</Text>
-                <Text style={styles.pathTime}>{formatTime(item.lastCrossedAt)}</Text>
-              </View>
-              {item.isUnlocked && item.unlockExpiresAt && (
-                <View style={styles.unlockBadge}>
-                  <Ionicons name="lock-open" size={14} color={COLORS.success} />
-                  <Text style={styles.unlockText}>
-                    Free messaging until{' '}
-                    {new Date(item.unlockExpiresAt).toLocaleDateString()}
-                  </Text>
-                </View>
-              )}
-              {!item.isUnlocked && item.count >= CROSSED_PATHS.MIN_CROSSINGS_FOR_UNLOCK && (
-                <View style={styles.unlockBadge}>
-                  <Ionicons name="lock-open" size={14} color={COLORS.warning} />
-                  <Text style={styles.unlockText}>
-                    {item.count}/{CROSSED_PATHS.MIN_CROSSINGS_FOR_UNLOCK} crossings - Unlock messaging!
-                  </Text>
-                </View>
-              )}
+          <View style={styles.historyCard}>
+            {/* Blurred / anonymous avatar circle with initial */}
+            <View style={styles.avatarCircle}>
+              <Text style={styles.avatarInitial}>{item.initial}</Text>
             </View>
-            <Ionicons name="chevron-forward" size={20} color={COLORS.textLight} />
-          </TouchableOpacity>
+
+            <View style={styles.historyInfo}>
+              {/* Area name only — no coordinates, no exact distance */}
+              <Text style={styles.areaName}>{item.areaName}</Text>
+              {/* Relative time */}
+              <Text style={styles.timeAgo}>{formatTimeAgo(item.createdAt)}</Text>
+            </View>
+          </View>
         )}
         ListEmptyComponent={
           <View style={styles.emptyContainer}>
             <Ionicons name="location-outline" size={64} color={COLORS.textLight} />
             <Text style={styles.emptyTitle}>No crossed paths yet</Text>
             <Text style={styles.emptySubtitle}>
-              Enable location services to see people you've crossed paths with
+              When you and someone else use the app in the same area, it will appear here.
             </Text>
           </View>
         }
@@ -125,6 +113,10 @@ export default function CrossedPathsScreen() {
     </View>
   );
 }
+
+// ---------------------------------------------------------------------------
+// Styles
+// ---------------------------------------------------------------------------
 
 const styles = StyleSheet.create({
   container: {
@@ -146,85 +138,60 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     color: COLORS.text,
   },
-  infoBanner: {
-    flexDirection: 'row',
-    backgroundColor: COLORS.primary + '20',
-    padding: 16,
-    margin: 16,
-    borderRadius: 12,
-    gap: 12,
-  },
-  infoText: {
-    flex: 1,
+  sectionLabel: {
     fontSize: 13,
-    color: COLORS.text,
-    lineHeight: 18,
+    color: COLORS.textLight,
+    paddingHorizontal: 16,
+    paddingTop: 16,
+    paddingBottom: 8,
   },
-  pathCard: {
+  listContent: {
+    paddingBottom: 40,
+  },
+
+  // History card — anonymous, area-only
+  historyCard: {
     flexDirection: 'row',
     alignItems: 'center',
-    padding: 16,
-    backgroundColor: COLORS.background,
+    paddingVertical: 14,
+    paddingHorizontal: 16,
     borderBottomWidth: 1,
     borderBottomColor: COLORS.border,
   },
-  avatar: {
-    width: 60,
-    height: 60,
-    borderRadius: 30,
-    marginRight: 12,
+  avatarCircle: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    backgroundColor: COLORS.primary + '30',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 14,
   },
-  pathInfo: {
+  avatarInitial: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: COLORS.primary,
+  },
+  historyInfo: {
     flex: 1,
   },
-  pathHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    marginBottom: 4,
-    gap: 6,
-  },
-  pathName: {
-    fontSize: 16,
+  areaName: {
+    fontSize: 15,
     fontWeight: '600',
     color: COLORS.text,
   },
-  pathDetails: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-  },
-  pathLocation: {
+  timeAgo: {
     fontSize: 13,
     color: COLORS.textLight,
+    marginTop: 3,
   },
-  pathSeparator: {
-    fontSize: 13,
-    color: COLORS.textLight,
-  },
-  pathTime: {
-    fontSize: 13,
-    color: COLORS.textLight,
-  },
-  unlockBadge: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: COLORS.success + '20',
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 8,
-    marginTop: 6,
-    gap: 4,
-  },
-  unlockText: {
-    fontSize: 11,
-    color: COLORS.success,
-    fontWeight: '500',
-  },
+
+  // Empty state
   emptyContainer: {
-    flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
     padding: 40,
+    marginTop: 60,
   },
   emptyTitle: {
     fontSize: 20,

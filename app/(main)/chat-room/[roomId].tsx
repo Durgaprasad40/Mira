@@ -5,6 +5,9 @@ import {
   Text,
   TouchableOpacity,
   Alert,
+  Keyboard,
+  KeyboardAvoidingView,
+  Platform,
   LayoutChangeEvent,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -46,8 +49,6 @@ import DoodleCanvas from '@/components/chatroom/DoodleCanvas';
 import VideoPlayerModal from '@/components/chatroom/VideoPlayerModal';
 import ImagePreviewModal from '@/components/chatroom/ImagePreviewModal';
 import ActiveUsersStrip from '@/components/chatroom/ActiveUsersStrip';
-import { useKeyboardHeight } from '@/hooks/useKeyboardHeight';
-
 const C = INCOGNITO_COLORS;
 
 const MUTE_STORAGE_KEY = (roomId: string) => `@muted_room_${roomId}`;
@@ -70,7 +71,6 @@ export default function ChatRoomScreen() {
   const { roomId } = useLocalSearchParams<{ roomId: string }>();
   const router = useRouter();
   const insets = useSafeAreaInsets();
-  const keyboardHeight = useKeyboardHeight();
 
   const room = DEMO_CHAT_ROOMS.find((r) => r.id === roomId);
 
@@ -80,10 +80,15 @@ export default function ChatRoomScreen() {
     setChatHeaderHeight(e.nativeEvent.layout.height);
   }, []);
 
-  // Measured composer height — for list paddingBottom
-  const [composerHeight, setComposerHeight] = useState(0);
-  const onComposerLayout = useCallback((e: LayoutChangeEvent) => {
-    setComposerHeight(e.nativeEvent.layout.height);
+  // Scroll to end when keyboard opens (WhatsApp behavior)
+  useEffect(() => {
+    const showEvent = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
+    const sub = Keyboard.addListener(showEvent, () => {
+      requestAnimationFrame(() => {
+        messageListRef.current?.scrollToEnd(true);
+      });
+    });
+    return () => sub.remove();
   }, []);
 
   // ── Chat messages ──
@@ -251,15 +256,6 @@ export default function ChatRoomScreen() {
     setInputText('');
     setUserCoins((prev) => prev + 1);
   }, [inputText, roomId]);
-
-  // ────────────────────────────────────────────
-  // INPUT FOCUS — scroll to latest messages
-  // ────────────────────────────────────────────
-  const handleInputFocus = useCallback(() => {
-    setTimeout(() => {
-      messageListRef.current?.scrollToEnd(true);
-    }, 300);
-  }, []);
 
   const handlePanelChange = useCallback((_panel: ComposerPanel) => {}, []);
 
@@ -504,35 +500,39 @@ export default function ChatRoomScreen() {
 
   return (
     <View style={styles.container}>
-      <View style={{ flex: 1 }}>
-        {/* Header with badge counters — measured via onLayout */}
-        <View onLayout={onChatHeaderLayout}>
-          <ChatHeader
-            topInset={insets.top}
-            onMenuPress={() => router.back()}
-            onReloadPress={handleReload}
-            onMessagesPress={() => setOverlay('messages')}
-            onFriendRequestsPress={() => setOverlay('friendRequests')}
-            onNotificationsPress={() => setOverlay('notifications')}
-            onProfilePress={() => setOverlay('profile')}
-            profileAvatar={DEMO_CURRENT_USER.avatar}
-            unreadDMs={unreadDMs}
-            pendingFriendRequests={friendRequests.length}
-            unseenNotifications={unseenNotifications}
-          />
-        </View>
-
-        {/* Active users strip */}
-        <ActiveUsersStrip
-          users={DEMO_ONLINE_USERS.map((u) => ({ id: u.id, avatar: u.avatar, isOnline: u.isOnline }))}
-          theme="dark"
-          onUserPress={(userId) => {
-            const user = DEMO_ONLINE_USERS.find((u) => u.id === userId);
-            if (user) handleOnlineUserPress(user);
-          }}
-          onMorePress={() => setOverlay('onlineUsers')}
+      {/* Header with badge counters — measured via onLayout */}
+      <View onLayout={onChatHeaderLayout}>
+        <ChatHeader
+          topInset={insets.top}
+          onMenuPress={() => router.back()}
+          onReloadPress={handleReload}
+          onMessagesPress={() => setOverlay('messages')}
+          onFriendRequestsPress={() => setOverlay('friendRequests')}
+          onNotificationsPress={() => setOverlay('notifications')}
+          onProfilePress={() => setOverlay('profile')}
+          profileAvatar={DEMO_CURRENT_USER.avatar}
+          unreadDMs={unreadDMs}
+          pendingFriendRequests={friendRequests.length}
+          unseenNotifications={unseenNotifications}
         />
+      </View>
 
+      {/* Active users strip */}
+      <ActiveUsersStrip
+        users={DEMO_ONLINE_USERS.map((u) => ({ id: u.id, avatar: u.avatar, isOnline: u.isOnline }))}
+        theme="dark"
+        onUserPress={(userId) => {
+          const user = DEMO_ONLINE_USERS.find((u) => u.id === userId);
+          if (user) handleOnlineUserPress(user);
+        }}
+        onMorePress={() => setOverlay('onlineUsers')}
+      />
+
+      <KeyboardAvoidingView
+        style={{ flex: 1 }}
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        keyboardVerticalOffset={chatHeaderHeight}
+      >
         {/* Messages */}
         <ChatMessageList
           ref={messageListRef}
@@ -542,27 +542,18 @@ export default function ChatRoomScreen() {
           onMessageLongPress={handleMessageLongPress}
           onAvatarPress={handleAvatarPress}
           onMediaPress={handleMediaPress}
-          contentPaddingBottom={composerHeight + keyboardHeight + insets.bottom}
+          contentPaddingBottom={0}
         />
 
-        {/* Composer — lifted above keyboard via marginBottom */}
-        <View
-          onLayout={onComposerLayout}
-          style={{
-            paddingBottom: insets.bottom,
-            marginBottom: keyboardHeight,
-          }}
-        >
-          <ChatComposer
-            value={inputText}
-            onChangeText={setInputText}
-            onSend={handleSend}
-            onPlusPress={() => setOverlay('attachment')}
-            onInputFocus={handleInputFocus}
-            onPanelChange={handlePanelChange}
-          />
-        </View>
-      </View>
+        {/* Composer — pushed up by KAV */}
+        <ChatComposer
+          value={inputText}
+          onChangeText={setInputText}
+          onSend={handleSend}
+          onPlusPress={() => setOverlay('attachment')}
+          onPanelChange={handlePanelChange}
+        />
+      </KeyboardAvoidingView>
 
       {/* ── Modals / Sheets / Panels ── */}
 

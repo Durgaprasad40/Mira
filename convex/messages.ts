@@ -1,13 +1,14 @@
 import { v } from 'convex/values';
 import { mutation, query } from './_generated/server';
 import { Id } from './_generated/dataModel';
+import { softMaskText } from './softMask';
 
 // Send a message
 export const sendMessage = mutation({
   args: {
     conversationId: v.id('conversations'),
     senderId: v.id('users'),
-    type: v.union(v.literal('text'), v.literal('image'), v.literal('template'), v.literal('dare')),
+    type: v.union(v.literal('text'), v.literal('image'), v.literal('video'), v.literal('template'), v.literal('dare')),
     content: v.string(),
     imageStorageId: v.optional(v.id('_storage')),
     templateId: v.optional(v.string()),
@@ -64,12 +65,15 @@ export const sendMessage = mutation({
       });
     }
 
-    // Create message
+    // Soft-mask sensitive words in Face 1 text messages
+    const maskedContent = type === 'text' ? softMaskText(content) : content;
+
+    // Create message (store masked text only)
     const messageId = await ctx.db.insert('messages', {
       conversationId,
       senderId,
       type,
-      content,
+      content: maskedContent,
       imageStorageId,
       templateId,
       createdAt: now,
@@ -87,7 +91,7 @@ export const sendMessage = mutation({
         userId: recipientId,
         type: 'message',
         title: 'New Message',
-        body: type === 'text' ? content.substring(0, 50) : 'Sent you a message',
+        body: type === 'text' ? maskedContent.substring(0, 50) : 'Sent you a message',
         data: { conversationId: conversationId },
         createdAt: now,
       });
@@ -167,11 +171,15 @@ export const sendPreMatchMessage = mutation({
       });
     }
 
+    // Soft-mask sensitive words in Face 1 text messages
+    const msgType = templateId ? 'template' : 'text';
+    const maskedContent = msgType === 'text' ? softMaskText(content) : content;
+
     const messageId = await ctx.db.insert('messages', {
       conversationId: conversation._id,
       senderId: fromUserId,
-      type: templateId ? 'template' : 'text',
-      content,
+      type: msgType,
+      content: maskedContent,
       templateId,
       createdAt: now,
     });
@@ -185,7 +193,7 @@ export const sendPreMatchMessage = mutation({
       userId: toUserId,
       type: 'message',
       title: `${fromUser.name} sent you a message`,
-      body: content.substring(0, 50),
+      body: maskedContent.substring(0, 50),
       data: { conversationId: conversation._id, userId: fromUserId },
       createdAt: now,
     });
@@ -225,7 +233,15 @@ export const getMessages = query({
 
     const messages = await query.order('desc').take(limit);
 
-    return messages.reverse();
+    // Strip imageStorageId from protected messages and add isProtected flag
+    return messages.reverse().map((msg) => {
+      if (msg.mediaId) {
+        // Protected media — strip storage keys, flag as protected
+        const { imageStorageId, ...rest } = msg;
+        return { ...rest, isProtected: true };
+      }
+      return { ...msg, isProtected: false };
+    });
   },
 });
 
@@ -381,13 +397,16 @@ export const getConversations = query({
           photoUrl: photo?.url,
           lastActive: otherUser.lastActive,
           isVerified: otherUser.isVerified,
+          photoBlurred: otherUser.photoBlurred === true,
         },
         lastMessage: lastMessage
           ? {
-              content: lastMessage.content,
+              content: lastMessage.mediaId ? 'Protected Photo' : lastMessage.content,
               type: lastMessage.type,
               senderId: lastMessage.senderId,
               createdAt: lastMessage.createdAt,
+              isProtected: !!lastMessage.mediaId,
+              systemSubtype: lastMessage.systemSubtype,
             }
           : null,
         unreadCount: unreadMessages.length,
