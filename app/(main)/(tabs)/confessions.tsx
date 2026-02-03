@@ -8,6 +8,7 @@ import {
   RefreshControl,
   Alert,
   Animated,
+  ActivityIndicator,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
@@ -315,6 +316,9 @@ export default function ConfessionsScreen() {
         <Text style={styles.headerTitle}>Confess</Text>
       </View>
 
+      {/* Top hint */}
+      <Text style={styles.topHint}>Anonymous by default • Be respectful</Text>
+
       {/* Feed */}
       <FlatList
         data={confessions}
@@ -346,11 +350,16 @@ export default function ConfessionsScreen() {
         }
         showsVerticalScrollIndicator={false}
         ListEmptyComponent={
-          isLoading ? null : (
+          isLoading ? (
+            <View style={styles.loadingContainer}>
+              <ActivityIndicator size="small" color={COLORS.primary} />
+              <Text style={styles.helperText}>Loading confessions...</Text>
+            </View>
+          ) : (
             <View style={styles.emptyContainer}>
               <Ionicons name="megaphone-outline" size={56} color={COLORS.textMuted} />
               <Text style={styles.emptyTitle}>No confessions yet</Text>
-              <Text style={styles.emptySubtitle}>Be the first to share something!</Text>
+              <Text style={styles.helperText}>Be the first to post something anonymous.</Text>
               <TouchableOpacity style={styles.emptyButton} onPress={handleOpenCompose}>
                 <Text style={styles.emptyButtonText}>Post a Confession</Text>
               </TouchableOpacity>
@@ -407,6 +416,27 @@ const styles = StyleSheet.create({
     fontSize: 15,
     fontWeight: '700',
     color: COLORS.text,
+  },
+  topHint: {
+    fontSize: 12,
+    color: COLORS.textLight,
+    textAlign: 'center',
+    paddingHorizontal: 16,
+    paddingTop: 8,
+    paddingBottom: 6,
+  },
+  loadingContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 24,
+    paddingTop: 80,
+    gap: 12,
+  },
+  helperText: {
+    fontSize: 14,
+    color: COLORS.textLight,
+    textAlign: 'center',
   },
   crushSection: {
     marginBottom: 4,
@@ -473,12 +503,6 @@ const styles = StyleSheet.create({
     color: COLORS.text,
     marginTop: 16,
     marginBottom: 8,
-  },
-  emptySubtitle: {
-    fontSize: 14,
-    color: COLORS.textLight,
-    textAlign: 'center',
-    marginBottom: 20,
   },
   emptyButton: {
     backgroundColor: COLORS.primary,

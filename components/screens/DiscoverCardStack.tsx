@@ -397,7 +397,7 @@ export function DiscoverCardStack({ theme = "light" }: DiscoverCardStackProps) {
         // Allow other responders (e.g. tab bar) to take over
         onPanResponderTerminationRequest: () => true,
         onPanResponderGrant: () => {
-          console.log("[DiscoverCardStack] pan grant");
+          if (__DEV__) console.log("[DiscoverCardStack] pan grant");
         },
         onPanResponderMove: (_, gs) => {
           getActivePan().setValue({ x: gs.dx, y: gs.dy });
@@ -412,7 +412,7 @@ export function DiscoverCardStack({ theme = "light" }: DiscoverCardStackProps) {
           setOverlayDirection((prev) => (prev === newDir ? prev : newDir));
         },
         onPanResponderRelease: (_, gs) => {
-          console.log("[DiscoverCardStack] pan release dx=", gs.dx.toFixed(0), "dy=", gs.dy.toFixed(0));
+          if (__DEV__) console.log("[DiscoverCardStack] pan release dx=", gs.dx.toFixed(0), "dy=", gs.dy.toFixed(0));
           // If screen lost focus during drag, just reset
           if (navigatingRef.current || !isFocusedRef.current) { resetPosition(); return; }
           if (gs.dx < -thresholdX || gs.vx < -velocityX) { animateSwipeRef.current("left", gs.vx); return; }
@@ -464,16 +464,16 @@ export function DiscoverCardStack({ theme = "light" }: DiscoverCardStackProps) {
   const renderCountRef = useRef(0);
   renderCountRef.current += 1;
   if (renderCountRef.current % 50 === 0) {
-    console.warn(`[DiscoverCardStack] render #${renderCountRef.current}`);
+    if (__DEV__) console.warn(`[DiscoverCardStack] render #${renderCountRef.current}`);
   }
 
   // Loading state — non-demo only; demo profiles are instant via useMemo
   if (!isDemoMode && !convexProfiles) {
-    console.log("[DiscoverCardStack] showing loading state — convexProfiles not yet available");
+    if (__DEV__) console.log("[DiscoverCardStack] showing loading state — convexProfiles not yet available");
     return (
       <View style={[styles.center, dark && { backgroundColor: INCOGNITO_COLORS.background }]}>
         <ActivityIndicator size="large" color={C.primary} />
-        <Text style={[styles.loadingText, dark && { color: INCOGNITO_COLORS.textLight }]}>Loading profiles...</Text>
+        <Text style={[styles.loadingText, dark && { color: INCOGNITO_COLORS.textLight }]}>Finding people for you...</Text>
       </View>
     );
   }
@@ -482,9 +482,9 @@ export function DiscoverCardStack({ theme = "light" }: DiscoverCardStackProps) {
   if (profiles.length === 0) {
     return (
       <View style={[styles.center, dark && { backgroundColor: INCOGNITO_COLORS.background }]}>
-        <Text style={styles.emptyEmoji}>🔍</Text>
-        <Text style={[styles.emptyTitle, dark && { color: INCOGNITO_COLORS.text }]}>No profiles available</Text>
-        <Text style={[styles.emptySubtitle, dark && { color: INCOGNITO_COLORS.textLight }]}>Check back later for new matches!</Text>
+        <Text style={styles.emptyEmoji}>✨</Text>
+        <Text style={[styles.emptyTitle, dark && { color: INCOGNITO_COLORS.text }]}>You're all caught up</Text>
+        <Text style={[styles.emptySubtitle, dark && { color: INCOGNITO_COLORS.textLight }]}>Check back soon — we'll bring you more people as they join.</Text>
       </View>
     );
   }
@@ -523,7 +523,7 @@ export function DiscoverCardStack({ theme = "light" }: DiscoverCardStackProps) {
   // Layout: card fills from header to bottom of content area
   const cardTop = insets.top + HEADER_H;
   const cardBottom = 4;
-  const actionRowBottom = 16;
+  const actionRowBottom = Math.max(insets.bottom, 12);
 
   const likesLeft = likesRemaining();
   const standOutsLeft = standOutsRemaining();

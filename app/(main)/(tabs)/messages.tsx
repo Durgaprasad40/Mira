@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { View, Text, StyleSheet, FlatList, TouchableOpacity, RefreshControl } from 'react-native';
+import { View, Text, StyleSheet, FlatList, TouchableOpacity, RefreshControl, ActivityIndicator } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { Image } from 'expo-image';
@@ -207,6 +207,23 @@ export default function MessagesScreen() {
     return null;
   };
 
+  // Loading state — live mode only; demo data is instant
+  const isLoading = !isDemoMode && conversations === undefined;
+
+  if (isLoading) {
+    return (
+      <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
+        <View style={styles.header}>
+          <Text style={styles.title}>Messages</Text>
+        </View>
+        <View style={styles.loadingContainer}>
+          <ActivityIndicator size="small" color={COLORS.primary} />
+          <Text style={styles.helperText}>Loading your conversations...</Text>
+        </View>
+      </SafeAreaView>
+    );
+  }
+
   return (
     <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
       <View style={styles.header}>
@@ -238,7 +255,7 @@ export default function MessagesScreen() {
             <Ionicons name="chatbubbles-outline" size={64} color={COLORS.textLight} />
             <Text style={styles.emptyTitle}>No messages yet</Text>
             <Text style={styles.emptySubtitle}>
-              Start swiping to find matches and begin conversations!
+              When you match or start a chat, it will appear here.
             </Text>
           </View>
         }
@@ -432,6 +449,20 @@ const styles = StyleSheet.create({
   },
   likeName: {
     fontSize: 11,
+    color: COLORS.textLight,
+    textAlign: 'center',
+  },
+
+  // ── Loading ──
+  loadingContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingHorizontal: 24,
+    gap: 12,
+  },
+  helperText: {
+    fontSize: 14,
     color: COLORS.textLight,
     textAlign: 'center',
   },
