@@ -30,6 +30,8 @@ const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get("window");
 const SWIPE_THRESHOLD_X = SCREEN_WIDTH * 0.15; // 15% — easier swipe
 const SWIPE_THRESHOLD_Y = SCREEN_HEIGHT * 0.12; // 12% — easier super-like
 
+const EMPTY_ARRAY: any[] = [];
+
 interface ProfileData {
   id: string;
   name: string;
@@ -54,7 +56,7 @@ export function DiscoverFeed({ mode = "main", theme = "light", onOpenProfile }: 
   const dark = theme === "dark";
   const TC = dark ? INCOGNITO_COLORS : COLORS;
   const insets = useSafeAreaInsets();
-  const { userId } = useAuthStore();
+  const userId = useAuthStore((s) => s.userId);
   useFilterStore();
   useSubscriptionStore();
 
@@ -69,20 +71,21 @@ export function DiscoverFeed({ mode = "main", theme = "light", onOpenProfile }: 
   const [overlayOpacity, setOverlayOpacity] = useState(0);
 
   // Use demo data if in demo mode, otherwise use Convex
-  const convexProfiles = useQuery(
-    api.discover.getDiscoverProfiles,
-    !isDemoMode && userId
-      ? {
-          userId: userId as any,
-          sortBy: sortByLocal,
-          limit: 20,
-        }
-      : "skip",
+  const convexUserId = userId as any;
+  const discoverArgs = useMemo(
+    () =>
+      !isDemoMode && userId
+        ? { userId: convexUserId, sortBy: sortByLocal, limit: 20 }
+        : "skip" as const,
+    [userId, convexUserId, sortByLocal],
   );
+  const convexProfiles = useQuery(api.discover.getDiscoverProfiles, discoverArgs);
+  const profilesSafe = convexProfiles ?? EMPTY_ARRAY;
 
-  // Transform to common format
-  const profiles: ProfileData[] = isDemoMode
-    ? DEMO_PROFILES.map((p) => ({
+  // Transform to common format — memoize to prevent new arrays each render
+  const demoItems = useMemo<ProfileData[]>(
+    () =>
+      DEMO_PROFILES.map((p) => ({
         id: p._id,
         name: p.name,
         age: p.age,
@@ -91,8 +94,13 @@ export function DiscoverFeed({ mode = "main", theme = "light", onOpenProfile }: 
         isVerified: p.isVerified,
         distance: p.distance,
         photos: p.photos,
-      }))
-    : (convexProfiles || []).map((p: any) => ({
+      })),
+    [],
+  );
+
+  const liveItems = useMemo<ProfileData[]>(
+    () =>
+      profilesSafe.map((p: any) => ({
         id: p._id || p.id,
         name: p.name,
         age: p.age,
@@ -101,8 +109,12 @@ export function DiscoverFeed({ mode = "main", theme = "light", onOpenProfile }: 
         isVerified: p.isVerified,
         distance: p.distance,
         photos:
-          p.photos?.map((photo: any) => ({ url: photo.url || photo })) || [],
-      }));
+          p.photos?.map((photo: any) => ({ url: photo.url || photo })) ?? EMPTY_ARRAY,
+      })),
+    [profilesSafe],
+  );
+
+  const profiles: ProfileData[] = isDemoMode ? demoItems : liveItems;
 
   const swipeMutation = useMutation(api.likes.swipe);
   const rewindMutation = useMutation(api.likes.rewind);

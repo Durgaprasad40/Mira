@@ -2,6 +2,7 @@ import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { SubscriptionTier, FeatureAccess } from '@/types';
+import { isDemoMode } from '@/config/demo';
 
 interface SubscriptionState {
   tier: SubscriptionTier;
@@ -102,25 +103,40 @@ export const useSubscriptionStore = create<SubscriptionState>()(
         ...limits,
       })),
 
-      decrementLike: () => set((state) => ({
-        likesRemaining: state.likesRemaining > 0 ? state.likesRemaining - 1 : 0,
-      })),
+      decrementLike: () => {
+        if (isDemoMode) return;
+        set((state) => ({
+          likesRemaining: state.likesRemaining > 0 ? state.likesRemaining - 1 : 0,
+        }));
+      },
 
-      decrementSuperLike: () => set((state) => ({
-        superLikesRemaining: state.superLikesRemaining > 0 ? state.superLikesRemaining - 1 : 0,
-      })),
+      decrementSuperLike: () => {
+        if (isDemoMode) return;
+        set((state) => ({
+          superLikesRemaining: state.superLikesRemaining > 0 ? state.superLikesRemaining - 1 : 0,
+        }));
+      },
 
-      decrementMessage: () => set((state) => ({
-        messagesRemaining: state.messagesRemaining > 0 ? state.messagesRemaining - 1 : 0,
-      })),
+      decrementMessage: () => {
+        if (isDemoMode) return;
+        set((state) => ({
+          messagesRemaining: state.messagesRemaining > 0 ? state.messagesRemaining - 1 : 0,
+        }));
+      },
 
-      decrementRewind: () => set((state) => ({
-        rewindsRemaining: state.rewindsRemaining > 0 ? state.rewindsRemaining - 1 : 0,
-      })),
+      decrementRewind: () => {
+        if (isDemoMode) return;
+        set((state) => ({
+          rewindsRemaining: state.rewindsRemaining > 0 ? state.rewindsRemaining - 1 : 0,
+        }));
+      },
 
-      decrementBoost: () => set((state) => ({
-        boostsRemaining: state.boostsRemaining > 0 ? state.boostsRemaining - 1 : 0,
-      })),
+      decrementBoost: () => {
+        if (isDemoMode) return;
+        set((state) => ({
+          boostsRemaining: state.boostsRemaining > 0 ? state.boostsRemaining - 1 : 0,
+        }));
+      },
 
       resetLimits: () => {
         const { tier } = get();
@@ -152,6 +168,21 @@ export const useSubscriptionStore = create<SubscriptionState>()(
 
       getFeatureAccess: (gender) => {
         const { tier } = get();
+
+        // Demo mode — everything unlimited
+        if (isDemoMode) {
+          return {
+            swipesPerDay: 'unlimited',
+            superLikesPerWeek: 'unlimited',
+            messagesPerWeek: 'unlimited',
+            boostsPerMonth: 'unlimited',
+            canRewind: true,
+            canSeeWhoLikedYou: true,
+            incognitoAccess: 'full',
+            customMessageLength: 'unlimited',
+            templateCount: 50,
+          };
+        }
 
         // Women get unlimited everything
         if (gender === 'female') {

@@ -12,34 +12,36 @@ import { useMessageQuota } from '@/hooks/useMessageQuota';
 import { Ionicons } from '@expo/vector-icons';
 import { Badge } from '@/components/ui';
 import { isDemoMode } from '@/hooks/useConvex';
+import { asUserId } from '@/convex/id';
 import { DEMO_MATCHES, DEMO_LIKES } from '@/lib/demoData';
 import { isActiveNow } from '@/lib/formatLastSeen';
 import { useScreenSafety } from '@/hooks/useScreenSafety';
 
 export default function MessagesScreen() {
   const router = useRouter();
-  const { userId } = useAuthStore();
+  const userId = useAuthStore((s) => s.userId);
+  const convexUserId = asUserId(userId);
   const [refreshing, setRefreshing] = useState(false);
   const { safeTimeout } = useScreenSafety();
 
   const convexConversations = useQuery(
     api.messages.getConversations,
-    !isDemoMode && userId ? { userId: userId as any } : 'skip'
+    !isDemoMode && convexUserId ? { userId: convexUserId } : 'skip'
   );
 
   const convexUnreadCount = useQuery(
     api.messages.getUnreadCount,
-    !isDemoMode && userId ? { userId: userId as any } : 'skip'
+    !isDemoMode && convexUserId ? { userId: convexUserId } : 'skip'
   );
 
   const convexCurrentUser = useQuery(
     api.users.getCurrentUser,
-    !isDemoMode && userId ? { userId: userId as any } : 'skip'
+    !isDemoMode && convexUserId ? { userId: convexUserId } : 'skip'
   );
 
   const convexLikesReceived = useQuery(
     api.likes.getLikesReceived,
-    !isDemoMode && userId ? { userId: userId as any } : 'skip'
+    !isDemoMode && convexUserId ? { userId: convexUserId } : 'skip'
   );
 
   const conversations = isDemoMode ? DEMO_MATCHES as any : convexConversations;

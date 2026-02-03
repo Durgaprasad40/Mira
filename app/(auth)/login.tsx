@@ -49,7 +49,7 @@ export default function LoginScreen() {
         );
 
         if (result.onboardingCompleted) {
-          router.replace("/(main)/(tabs)/discover");
+          router.replace("/(main)/(tabs)/home");
         } else {
           router.replace("/(onboarding)/photo-upload");
         }

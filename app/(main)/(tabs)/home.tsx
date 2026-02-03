@@ -1,5 +1,5 @@
 import { DiscoverCardStack } from "@/components/screens/DiscoverCardStack";
 
-export default function DiscoverScreen() {
+export default function HomeScreen() {
   return <DiscoverCardStack />;
 }

@@ -13,7 +13,7 @@ export default function WelcomeScreen() {
   // Use Redirect component instead of useEffect navigation
   if (isAuthenticated) {
     if (onboardingCompleted) {
-      return <Redirect href="/(main)/(tabs)/discover" />;
+      return <Redirect href="/(main)/(tabs)/home" />;
     }
     return <Redirect href="/(onboarding)" />;
   }

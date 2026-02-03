@@ -20,6 +20,7 @@ import type * as deviceFingerprint from "../deviceFingerprint.js";
 import type * as discover from "../discover.js";
 import type * as events from "../events.js";
 import type * as filterPresets from "../filterPresets.js";
+import type * as id from "../id.js";
 import type * as likes from "../likes.js";
 import type * as matchQuality from "../matchQuality.js";
 import type * as matches from "../matches.js";
@@ -61,6 +62,7 @@ declare const fullApi: ApiFromModules<{
   discover: typeof discover;
   events: typeof events;
   filterPresets: typeof filterPresets;
+  id: typeof id;
   likes: typeof likes;
   matchQuality: typeof matchQuality;
   matches: typeof matches;

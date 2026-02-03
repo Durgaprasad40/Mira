@@ -19,22 +19,33 @@ export default function PrivateLayout() {
   const insets = useSafeAreaInsets();
   const ageConfirmed18Plus = useIncognitoStore((s) => s.ageConfirmed18Plus);
   const acceptPrivateTerms = useIncognitoStore((s) => s.acceptPrivateTerms);
-  const { userId } = useAuthStore();
+  const userId = useAuthStore((s) => s.userId);
 
   // Get the parent (main) stack navigator — beforeRemove fires here
   // when this screen is about to be popped from the (main) stack.
   const navigation = useNavigation();
   const isExitingRef = useRef(false);
 
+  const exitToHome = () => {
+    if (isExitingRef.current) return;
+    isExitingRef.current = true;
+    try {
+      if (router.canGoBack?.()) {
+        router.back();
+        return;
+      }
+    } catch {}
+    router.navigate('/(main)/(tabs)/home' as any);
+  };
+
   // 1) Intercept any navigation that would remove Private from the stack
-  //    (iOS swipe-back, header back, programmatic back). Replace with
-  //    Discover so Private is fully removed from the back-stack.
+  //    (iOS swipe-back, header back, programmatic back). Navigate back
+  //    so Private is removed without remounting the tab navigator.
   useEffect(() => {
     const unsub = navigation.addListener('beforeRemove', (e: any) => {
       if (isExitingRef.current) return; // prevent loop
       e.preventDefault();
-      isExitingRef.current = true;
-      router.replace('/(main)/(tabs)/home' as any);
+      exitToHome();
     });
     return unsub;
   }, [navigation, router]);
@@ -43,9 +54,7 @@ export default function PrivateLayout() {
   useEffect(() => {
     if (Platform.OS !== 'android') return;
     const handler = BackHandler.addEventListener('hardwareBackPress', () => {
-      if (isExitingRef.current) return true;
-      isExitingRef.current = true;
-      router.replace('/(main)/(tabs)/home' as any);
+      exitToHome();
       return true; // block default (app exit)
     });
     return () => handler.remove();

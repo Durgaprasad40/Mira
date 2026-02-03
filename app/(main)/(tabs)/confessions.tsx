@@ -21,6 +21,7 @@ import { ConfessionChat } from '@/types';
 import { useAuthStore } from '@/stores/authStore';
 import { useConfessionStore } from '@/stores/confessionStore';
 import { isDemoMode } from '@/hooks/useConvex';
+import { asUserId } from '@/convex/id';
 import ConfessionCard from '@/components/confessions/ConfessionCard';
 import SecretCrushCard from '@/components/confessions/SecretCrushCard';
 import { useConfessionNotifications } from '@/hooks/useConfessionNotifications';
@@ -28,7 +29,7 @@ import { useScreenSafety } from '@/hooks/useScreenSafety';
 
 export default function ConfessionsScreen() {
   const router = useRouter();
-  const { userId } = useAuthStore();
+  const userId = useAuthStore((s) => s.userId);
   const currentUserId = userId || 'demo_user_1';
 
   // Individual selectors to avoid full re-render on any store change
@@ -139,26 +140,34 @@ export default function ConfessionsScreen() {
     setShowEmojiPicker(true);
   }, []);
 
+  const toggleReaction = useCallback(
+    (confessionId: string, emoji: string) => {
+      if (isDemoMode) {
+        demoToggleReaction(confessionId, emoji);
+        notifyReaction(confessionId);
+        return;
+      }
+      const convexUserId = asUserId(currentUserId);
+      demoToggleReaction(confessionId, emoji);
+      if (!convexUserId) return; // no valid user id — skip mutation
+      toggleReactionMutation({
+        confessionId: confessionId as any,
+        userId: convexUserId,
+        type: emoji,
+      }).catch(() => {
+        demoToggleReaction(confessionId, emoji);
+      });
+      notifyReaction(confessionId);
+    },
+    [demoToggleReaction, notifyReaction, toggleReactionMutation, currentUserId]
+  );
+
   const handleEmojiSelected = useCallback(
     (emojiObj: any) => {
       if (!emojiTargetConfessionId) return;
-      const emoji = emojiObj.emoji;
-      if (isDemoMode) {
-        demoToggleReaction(emojiTargetConfessionId, emoji);
-        notifyReaction(emojiTargetConfessionId);
-        return;
-      }
-      demoToggleReaction(emojiTargetConfessionId, emoji);
-      toggleReactionMutation({
-        confessionId: emojiTargetConfessionId as any,
-        userId: currentUserId as any,
-        type: emoji,
-      }).catch(() => {
-        demoToggleReaction(emojiTargetConfessionId!, emoji);
-      });
-      notifyReaction(emojiTargetConfessionId);
+      toggleReaction(emojiTargetConfessionId, emojiObj.emoji);
     },
-    [emojiTargetConfessionId, demoToggleReaction, notifyReaction, toggleReactionMutation, currentUserId]
+    [emojiTargetConfessionId, toggleReaction]
   );
 
   const handleOpenCompose = useCallback(() => {
@@ -214,9 +223,11 @@ export default function ConfessionsScreen() {
           onPress: () => {
             demoReportConfession(confessionId);
             if (!isDemoMode) {
+              const convexUserId = asUserId(currentUserId);
+              if (!convexUserId) return;
               reportConfessionMutation({
                 confessionId: confessionId as any,
-                reporterId: currentUserId as any,
+                reporterId: convexUserId,
               }).catch(console.error);
             }
           },
@@ -324,22 +335,7 @@ export default function ConfessionsScreen() {
             createdAt={item.createdAt}
             onPress={() => handleOpenThread(item.id)}
             onReact={() => handleOpenEmojiPicker(item.id)}
-            onToggleEmoji={(emoji) => {
-              if (isDemoMode) {
-                demoToggleReaction(item.id, emoji);
-                notifyReaction(item.id);
-                return;
-              }
-              demoToggleReaction(item.id, emoji);
-              toggleReactionMutation({
-                confessionId: item.id as any,
-                userId: currentUserId as any,
-                type: emoji,
-              }).catch(() => {
-                demoToggleReaction(item.id, emoji);
-              });
-              notifyReaction(item.id);
-            }}
+            onToggleEmoji={(emoji) => toggleReaction(item.id, emoji)}
             onReplyAnonymously={() => handleReplyAnonymously(item.id, item.userId)}
             onReport={() => handleReport(item.id)}
           />

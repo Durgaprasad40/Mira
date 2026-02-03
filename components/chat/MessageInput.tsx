@@ -3,6 +3,7 @@ import { View, Text, TextInput, StyleSheet, TouchableOpacity, Alert } from 'reac
 import { Ionicons } from '@expo/vector-icons';
 import { COLORS, MESSAGE_TEMPLATES } from '@/lib/constants';
 import { Button } from '@/components/ui';
+import { isDemoMode } from '@/config/demo';
 
 interface MessageInputProps {
   onSend: (text: string, type?: 'text' | 'template') => void;
@@ -33,12 +34,12 @@ export function MessageInput({
   const handleSend = () => {
     if (!text.trim()) return;
 
-    if (isPreMatch && !canSendCustom && subscriptionTier === 'free') {
+    if (!isDemoMode && isPreMatch && !canSendCustom && subscriptionTier === 'free') {
       Alert.alert('Upgrade Required', 'Free users can only send message templates. Upgrade to send custom messages.');
       return;
     }
 
-    if (isPreMatch && messagesRemaining <= 0) {
+    if (!isDemoMode && isPreMatch && messagesRemaining <= 0) {
       Alert.alert('No Messages Left', 'You have no messages remaining this week. Upgrade to get more!');
       return;
     }
@@ -80,7 +81,7 @@ export function MessageInput({
         </View>
       )}
 
-      {isPreMatch && messagesRemaining > 0 && (
+      {!isDemoMode && isPreMatch && messagesRemaining > 0 && (
         <View style={styles.quotaBanner}>
           <Ionicons name="information-circle" size={16} color={COLORS.warning} />
           <Text style={styles.quotaText}>
@@ -106,8 +107,8 @@ export function MessageInput({
         )}
 
         <TextInput
-          style={[styles.input, !canSendCustom && isPreMatch && styles.inputDisabled]}
-          placeholder={isPreMatch && !canSendCustom ? 'Use templates to message' : 'Type a message...'}
+          style={[styles.input, !isDemoMode && !canSendCustom && isPreMatch && styles.inputDisabled]}
+          placeholder={!isDemoMode && isPreMatch && !canSendCustom ? 'Use templates to message' : 'Type a message...'}
           placeholderTextColor={COLORS.textLight}
           value={text}
           onChangeText={setText}
@@ -115,8 +116,8 @@ export function MessageInput({
           scrollEnabled
           textAlignVertical="top"
           blurOnSubmit={false}
-          maxLength={canSendCustom ? undefined : 150}
-          editable={!disabled && (canSendCustom || !isPreMatch)}
+          maxLength={isDemoMode || canSendCustom ? undefined : 150}
+          editable={!disabled && (isDemoMode || canSendCustom || !isPreMatch)}
         />
 
         {onSendImage && (

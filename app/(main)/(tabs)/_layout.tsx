@@ -21,12 +21,6 @@ export default function MainTabsLayout() {
         }}
       />
       <Tabs.Screen
-        name="discover"
-        options={{
-          href: null,
-        }}
-      />
-      <Tabs.Screen
         name="explore"
         options={{
           title: "Explore",
@@ -69,12 +63,6 @@ export default function MainTabsLayout() {
           tabBarIcon: ({ color, size }) => (
             <Ionicons name="eye-off" size={size} color={color} />
           ),
-        }}
-      />
-      <Tabs.Screen
-        name="rooms"
-        options={{
-          href: null,
         }}
       />
       <Tabs.Screen

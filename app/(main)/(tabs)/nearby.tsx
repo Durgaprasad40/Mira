@@ -169,7 +169,7 @@ function jitterDemoProfiles(profiles: any[], viewerId: string): NearbyProfile[] 
 export default function NearbyScreen() {
   const router = useRouter();
   const { latitude, longitude, getCurrentLocation, requestPermission } = useLocation();
-  const { userId } = useAuthStore();
+  const userId = useAuthStore((s) => s.userId);
   const mapRef = useRef<MapView>(null);
   const { safeTimeout } = useScreenSafety();
 

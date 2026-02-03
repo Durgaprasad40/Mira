@@ -55,6 +55,7 @@ export default function PrivateChatScreen() {
 
   const [text, setText] = useState('');
   const [reportVisible, setReportVisible] = useState(false);
+  const [keyboardVisible, setKeyboardVisible] = useState(false);
 
   // Auto-scroll only when new messages arrive AND user is near bottom
   useEffect(() => {
@@ -67,17 +68,20 @@ export default function PrivateChatScreen() {
     prevMessageCountRef.current = count;
   }, [messages.length]);
 
-  // Scroll to end when keyboard opens (WhatsApp behavior)
+  // Scroll to end when keyboard opens (WhatsApp behavior) + track visibility
   useEffect(() => {
     const showEvent = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
-    const sub = Keyboard.addListener(showEvent, () => {
+    const hideEvent = Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide';
+    const s1 = Keyboard.addListener(showEvent, () => {
+      setKeyboardVisible(true);
       if (isNearBottomRef.current) {
         requestAnimationFrame(() => {
           flatListRef.current?.scrollToEnd({ animated: true });
         });
       }
     });
-    return () => sub.remove();
+    const s2 = Keyboard.addListener(hideEvent, () => setKeyboardVisible(false));
+    return () => { s1.remove(); s2.remove(); };
   }, []);
 
   const handleSend = () => {
@@ -202,7 +206,7 @@ export default function PrivateChatScreen() {
         />
 
         {/* Input — sits at the bottom of KAV, pushed up by keyboard */}
-        <View style={[styles.inputBar, { paddingBottom: 8 }]}>
+        <View style={[styles.inputBar, { paddingBottom: keyboardVisible ? 0 : Math.max(insets.bottom, 8) }]}>
           <TextInput
             style={styles.textInput}
             placeholder="Type a message..."

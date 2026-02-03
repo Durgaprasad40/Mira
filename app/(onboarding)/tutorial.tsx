@@ -57,7 +57,7 @@ export default function TutorialScreen() {
   const handleComplete = () => {
     setOnboardingCompleted(true);
     reset();
-    router.replace("/(main)/(tabs)/discover");
+    router.replace("/(main)/(tabs)/home");
   };
 
   const handleNext = () => {

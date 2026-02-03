@@ -1,5 +1,6 @@
 import { useMemo } from 'react';
 import { useSubscriptionStore } from '@/stores/subscriptionStore';
+import { isDemoMode } from '@/config/demo';
 
 interface MessageQuota {
   remaining: number;
@@ -18,6 +19,18 @@ export function useMessageQuota(): MessageQuota {
   } = useSubscriptionStore();
 
   return useMemo(() => {
+    // Demo mode — unlimited messages, no restrictions
+    if (isDemoMode) {
+      return {
+        remaining: -1,
+        total: -1,
+        isUnlimited: true,
+        resetAt: 0,
+        canSend: true,
+        timeUntilReset: '',
+      };
+    }
+
     const now = Date.now();
     const timeUntilResetMs = Math.max(0, messagesResetAt - now);
 

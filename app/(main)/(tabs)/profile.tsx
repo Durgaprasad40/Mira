@@ -19,7 +19,8 @@ import { Image } from 'expo-image';
 
 export default function ProfileScreen() {
   const router = useRouter();
-  const { userId, logout } = useAuthStore();
+  const userId = useAuthStore((s) => s.userId);
+  const logout = useAuthStore((s) => s.logout);
 
   const currentUser = useQuery(
     api.users.getCurrentUser,

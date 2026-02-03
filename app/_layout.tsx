@@ -14,7 +14,7 @@ function DemoBanner() {
 }
 
 function DeviceFingerprintCollector() {
-  const { userId } = useAuthStore();
+  const userId = useAuthStore((s) => s.userId);
   const registerFingerprint = useMutation(api.deviceFingerprint.registerDeviceFingerprint);
 
   useEffect(() => {

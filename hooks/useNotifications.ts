@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useRef } from 'react';
+import { useCallback, useEffect, useMemo, useRef } from 'react';
 import { useQuery, useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { useAuthStore } from '@/stores/authStore';
 import { isDemoMode } from '@/hooks/useConvex';
+import { asUserId } from '@/convex/id';
 import { create } from 'zustand';
 
 /**
@@ -82,6 +83,10 @@ export const useDemoNotifStore = create<DemoNotifStore>((set) => ({
     })),
 }));
 
+const EMPTY_ARRAY: any[] = [];
+
+let __notifLogged = false;
+
 /**
  * Single source-of-truth hook for notifications.
  *
@@ -97,12 +102,13 @@ export const useDemoNotifStore = create<DemoNotifStore>((set) => ({
  *  - markRead(id):  marks a single notification as read
  */
 export function useNotifications() {
-  const { userId } = useAuthStore();
+  const userId = useAuthStore((s) => s.userId);
+  const convexUserId = asUserId(userId);
 
   // ── Convex queries (skipped in demo mode) ──
   const convexNotifications = useQuery(
     api.notifications.getNotifications,
-    !isDemoMode && userId ? { userId: userId as any } : 'skip',
+    !isDemoMode && convexUserId ? { userId: convexUserId } : 'skip',
   );
   const markAsReadMutation = useMutation(api.notifications.markAsRead);
   const markAllAsReadMutation = useMutation(api.notifications.markAllAsRead);
@@ -112,10 +118,11 @@ export function useNotifications() {
   const demoMarkAllRead = useDemoNotifStore((s) => s.markAllRead);
   const demoMarkRead = useDemoNotifStore((s) => s.markRead);
 
-  // ── Unified notifications array ──
-  const notifications: AppNotification[] = isDemoMode
-    ? demoNotifs
-    : (convexNotifications || []).map((n: any) => ({
+  // ── Unified notifications array (memoized to prevent new refs each render) ──
+  const convexSafe = convexNotifications ?? EMPTY_ARRAY;
+  const mappedConvex = useMemo<AppNotification[]>(
+    () =>
+      convexSafe.map((n: any) => ({
         _id: n._id,
         type: n.type,
         title: n.title,
@@ -124,21 +131,22 @@ export function useNotifications() {
         createdAt: n.createdAt,
         readAt: n.readAt,
         isRead: !!n.readAt,
-      }));
+      })),
+    [convexSafe],
+  );
+  const notifications: AppNotification[] = isDemoMode ? demoNotifs : mappedConvex;
 
   // ── Derived count (single formula, no separate query) ──
   const unseenCount = notifications.filter((n) => !n.isRead).length;
 
-  // ── Debug logging ──
-  const prevLogRef = useRef('');
+  // ── Debug logging (once globally, DEV only) ──
   useEffect(() => {
-    const key = `${notifications.length}:${unseenCount}`;
-    if (prevLogRef.current !== key) {
+    if (__DEV__ && !__notifLogged) {
       console.log(
         `[useNotifications] mode=${isDemoMode ? 'demo' : 'convex'} ` +
           `total=${notifications.length} unseenCount=${unseenCount}`,
       );
-      prevLogRef.current = key;
+      __notifLogged = true;
     }
   }, [notifications.length, unseenCount]);
 
@@ -148,10 +156,10 @@ export function useNotifications() {
       demoMarkAllRead();
       return;
     }
-    if (userId) {
-      markAllAsReadMutation({ userId: userId as any }).catch(console.error);
+    if (convexUserId) {
+      markAllAsReadMutation({ userId: convexUserId }).catch(console.error);
     }
-  }, [userId, markAllAsReadMutation, demoMarkAllRead]);
+  }, [convexUserId, markAllAsReadMutation, demoMarkAllRead]);
 
   // ── Mark single notification as read ──
   const markRead = useCallback(
@@ -160,14 +168,14 @@ export function useNotifications() {
         demoMarkRead(notificationId);
         return;
       }
-      if (userId) {
+      if (convexUserId) {
         markAsReadMutation({
           notificationId: notificationId as any,
-          userId: userId as any,
+          userId: convexUserId,
         }).catch(console.error);
       }
     },
-    [userId, markAsReadMutation, demoMarkRead],
+    [convexUserId, markAsReadMutation, demoMarkRead],
   );
 
   return {

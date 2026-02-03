@@ -30,6 +30,7 @@ import {
   DemoOnlineUser,
 } from '@/lib/demoData';
 
+const EMPTY_MESSAGES: DemoChatMessage[] = [];
 import ChatHeader from '@/components/chatroom/ChatHeader';
 import ChatMessageList, { ChatMessageListHandle } from '@/components/chatroom/ChatMessageList';
 import ChatComposer, { type ComposerPanel } from '@/components/chatroom/ChatComposer';
@@ -75,6 +76,16 @@ export default function ChatRoomScreen() {
 
   const room = DEMO_CHAT_ROOMS.find((r) => r.id === roomId);
 
+  // ── Mounted guard: prevents setState after unmount ──
+  const isMountedRef = useRef(true);
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => { isMountedRef.current = false; };
+  }, []);
+  const safeSet = (fn: () => void) => {
+    if (isMountedRef.current) fn();
+  };
+
   // Measured heights above the KeyboardAvoidingView
   const [chatHeaderHeight, setChatHeaderHeight] = useState(0);
   const [stripHeight, setStripHeight] = useState(0);
@@ -101,7 +112,7 @@ export default function ChatRoomScreen() {
   const seedRoom = useDemoChatRoomStore((s) => s.seedRoom);
   const addStoreMessage = useDemoChatRoomStore((s) => s.addMessage);
   const setStoreMessages = useDemoChatRoomStore((s) => s.setMessages);
-  const messages = useDemoChatRoomStore((s) => (roomId ? s.rooms[roomId] ?? [] : []));
+  const messages = useDemoChatRoomStore((s) => (roomId ? s.rooms[roomId] ?? EMPTY_MESSAGES : EMPTY_MESSAGES));
 
   // Seed the room once with demo data + join message
   useEffect(() => {
@@ -177,7 +188,7 @@ export default function ChatRoomScreen() {
   useEffect(() => {
     if (!roomId) return;
     AsyncStorage.getItem(MUTE_STORAGE_KEY(roomId)).then((val) => {
-      if (val === 'true') setIsRoomMuted(true);
+      safeSet(() => { if (val === 'true') setIsRoomMuted(true); });
     });
   }, [roomId]);
 

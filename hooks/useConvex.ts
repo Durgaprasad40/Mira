@@ -11,12 +11,7 @@ export const isDemoMode =
 
 export const convex = new ConvexReactClient(convexUrl);
 
-// In demo mode the URL is a placeholder that will never connect.
-// The Convex client's WebSocket connection attempt hangs for several seconds
-// and then triggers reconnect cycles that cause re-renders across the entire
-// app, freezing all touch handling. Closing immediately prevents this while
-// still providing the client object that ConvexProvider/useQuery/useMutation
-// hooks require (all queries use "skip" in demo mode).
-if (isDemoMode) {
-  convex.close();
-}
+// In demo mode all hooks use useQuery("skip") which creates zero subscriptions,
+// and useMutation returns a memoized stub. The client stays open but idle —
+// closing it causes "ConvexReactClient has already been closed" when
+// Expo Router remounts layouts or on fast refresh.

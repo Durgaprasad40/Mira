@@ -1,12 +1,19 @@
+import { useRef } from "react";
 import { Redirect } from "expo-router";
+import type { Href } from "expo-router";
+
+const H = (p: string) => p as unknown as Href;
 import { useAuthStore } from "@/stores/authStore";
 import { View, ActivityIndicator, StyleSheet, Text } from "react-native";
 import { COLORS } from "@/lib/constants";
 
 export default function Index() {
-  const { isAuthenticated, onboardingCompleted, _hasHydrated } = useAuthStore();
+  const _hasHydrated = useAuthStore((s) => s._hasHydrated);
+  const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
+  const onboardingCompleted = useAuthStore((s) => s.onboardingCompleted);
+  const didRedirect = useRef(false);
 
-  // Show loading screen while store is hydrating
+  // Wait for Zustand hydration before deciding destination
   if (!_hasHydrated) {
     return (
       <View style={styles.loadingContainer}>
@@ -16,16 +23,23 @@ export default function Index() {
     );
   }
 
-  // Use Redirect component instead of imperative navigation
-  // This is safer and waits for the layout to be mounted
+  // Guard: render <Redirect> exactly once. After the first render that
+  // returns <Redirect>, all subsequent renders return null. This prevents
+  // the focus-loop caused by expo-router's <Redirect> internally using
+  // useFocusEffect with a new inline callback on every render.
+  if (didRedirect.current) {
+    return null;
+  }
+  didRedirect.current = true;
+
   if (isAuthenticated) {
     if (onboardingCompleted) {
-      return <Redirect href="/(main)/(tabs)/home" />;
+      return <Redirect href={H("/(main)/(tabs)/home")} />;
     }
-    return <Redirect href="/(onboarding)" />;
+    return <Redirect href={H("/(onboarding)")} />;
   }
 
-  return <Redirect href="/(auth)/welcome" />;
+  return <Redirect href={H("/(auth)/welcome")} />;
 }
 
 const styles = StyleSheet.create({
