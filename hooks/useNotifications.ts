@@ -149,7 +149,7 @@ export function useNotifications() {
       return;
     }
     if (userId) {
-      markAllAsReadMutation({ userId: userId as any }).catch(() => {});
+      markAllAsReadMutation({ userId: userId as any }).catch(console.error);
     }
   }, [userId, markAllAsReadMutation, demoMarkAllRead]);
 
@@ -164,7 +164,7 @@ export function useNotifications() {
         markAsReadMutation({
           notificationId: notificationId as any,
           userId: userId as any,
-        }).catch(() => {});
+        }).catch(console.error);
       }
     },
     [userId, markAsReadMutation, demoMarkRead],

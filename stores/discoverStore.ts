@@ -1,6 +1,7 @@
 import { create } from "zustand";
 import { persist, createJSONStorage } from "zustand/middleware";
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import { isDemoMode } from "@/hooks/useConvex";
 
 const DAILY_LIKE_LIMIT = 25;
 const DAILY_STANDOUT_LIMIT = 2;
@@ -34,20 +35,24 @@ export const useDiscoverStore = create<DiscoverState>()(
       lastResetDate: getTodayDateString(),
 
       likesRemaining: () => {
+        if (isDemoMode) return 999;
         const state = get();
         return Math.max(0, DAILY_LIKE_LIMIT - state.likesUsedToday);
       },
 
       standOutsRemaining: () => {
+        if (isDemoMode) return 99;
         const state = get();
         return Math.max(0, DAILY_STANDOUT_LIMIT - state.standOutsUsedToday);
       },
 
       hasReachedLikeLimit: () => {
+        if (isDemoMode) return false;
         return get().likesUsedToday >= DAILY_LIKE_LIMIT;
       },
 
       hasReachedStandOutLimit: () => {
+        if (isDemoMode) return false;
         return get().standOutsUsedToday >= DAILY_STANDOUT_LIMIT;
       },
 

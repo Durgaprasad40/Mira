@@ -268,6 +268,12 @@ export default function ChatScreen() {
     return (
       <View style={styles.loadingContainer}>
         <Text style={styles.loadingText}>Loading...</Text>
+        <TouchableOpacity
+          style={{ marginTop: 20, paddingHorizontal: 20, paddingVertical: 10, borderRadius: 20, backgroundColor: COLORS.primary }}
+          onPress={() => router.back()}
+        >
+          <Text style={{ fontSize: 14, fontWeight: '600', color: COLORS.white }}>Go Back</Text>
+        </TouchableOpacity>
       </View>
     );
   }
@@ -280,7 +286,7 @@ export default function ChatScreen() {
         (!activeConversation.isPreMatch && currentUser.subscriptionTier !== 'free')
       : false;
 
-  const messagesRemaining = isDemo ? 10 : (currentUser?.messagesRemaining || 0);
+  const messagesRemaining = isDemo ? 999999 : (currentUser?.messagesRemaining || 0);
 
   return (
     <View style={styles.container}>

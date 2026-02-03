@@ -54,9 +54,11 @@ export const DEMO_USER = {
   minAge: 18,
   maxAge: 35,
   maxDistance: 50,
-  likesRemaining: 50,
-  superLikesRemaining: 5,
-  messagesRemaining: 10,
+  likesRemaining: 999999,
+  superLikesRemaining: 999999,
+  messagesRemaining: 999999,
+  rewindsRemaining: 999999,
+  boostsRemaining: 999999,
   photos: [
     { url: 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=400' }
   ],

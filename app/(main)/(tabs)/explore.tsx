@@ -159,7 +159,7 @@ function preloadImages(profiles: ProfileData[], startIndex: number, count: numbe
     const url = profiles[i]?.photos?.[0]?.url;
     if (url && !preloadedUrls.has(url)) {
       preloadedUrls.add(url);
-      Image.prefetch(url).catch(() => {});
+      Image.prefetch(url).catch(console.error);
     }
   }
 }
@@ -357,9 +357,7 @@ export default function ExploreScreen() {
         if (result?.isMatch) {
           router.push(`/(main)/match-celebration?matchId=${result.matchId}&userId=${swipedProfile.id}`);
         }
-      }).catch(() => {
-        // Silently fail — don't block swipe UX
-      });
+      }).catch(console.error);
     },
     [cardIndex, userId, swipeMutation, advanceCard, router],
   );

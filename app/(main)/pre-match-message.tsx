@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   View,
   Text,
@@ -16,6 +16,7 @@ import { Button, Avatar } from '@/components/ui';
 import { useAuthStore, useSubscriptionStore } from '@/stores';
 import { COLORS } from '@/lib/constants';
 import { Ionicons } from '@expo/vector-icons';
+import { isDemoMode } from '@/hooks/useConvex';
 
 export default function PreMatchMessageScreen() {
   const router = useRouter();
@@ -23,11 +24,17 @@ export default function PreMatchMessageScreen() {
   const { userId: targetUserId } = useLocalSearchParams<{ userId: string }>();
   const { userId } = useAuthStore();
   const { tier } = useSubscriptionStore();
-  const isPremium = tier === 'premium';
+  const isPremium = isDemoMode || tier === 'premium';
 
   const [selectedTemplate, setSelectedTemplate] = useState<string | null>(null);
   const [customMessage, setCustomMessage] = useState('');
   const [sending, setSending] = useState(false);
+  const [timedOut, setTimedOut] = useState(false);
+
+  useEffect(() => {
+    const t = setTimeout(() => setTimedOut(true), 8000);
+    return () => clearTimeout(t);
+  }, []);
 
   const targetUser = useQuery(
     api.users.getUserById,
@@ -61,7 +68,7 @@ export default function PreMatchMessageScreen() {
     }
 
     // Check if user can send custom messages
-    if (!selectedTemplate && customMessage) {
+    if (!isDemoMode && !selectedTemplate && customMessage) {
       const maxLength = isPremium ? 500 : 100;
       if (customMessage.length > maxLength) {
         Alert.alert('Error', `Custom messages are limited to ${maxLength} characters for your tier`);
@@ -69,7 +76,7 @@ export default function PreMatchMessageScreen() {
       }
     }
 
-    if (!canSend?.canSend) {
+    if (!isDemoMode && !canSend?.canSend) {
       Alert.alert('No Messages Remaining', 'You have used all your weekly messages. They reset on Monday.');
       router.push('/(main)/subscription');
       return;
@@ -95,8 +102,16 @@ export default function PreMatchMessageScreen() {
 
   if (!targetUser || !templates) {
     return (
-      <View style={styles.container}>
-        <Text>Loading...</Text>
+      <View style={[styles.container, { alignItems: 'center', justifyContent: 'center' }]}>
+        <Text style={{ fontSize: 16, color: COLORS.textLight }}>
+          {timedOut ? 'Failed to load' : 'Loading...'}
+        </Text>
+        <TouchableOpacity
+          style={{ marginTop: 20, paddingHorizontal: 20, paddingVertical: 10, borderRadius: 20, backgroundColor: COLORS.primary }}
+          onPress={() => router.back()}
+        >
+          <Text style={{ fontSize: 14, fontWeight: '600', color: COLORS.white }}>Go Back</Text>
+        </TouchableOpacity>
       </View>
     );
   }
@@ -116,7 +131,7 @@ export default function PreMatchMessageScreen() {
           <Avatar uri={targetUser.photos?.[0]?.url} size={64} />
           <Text style={styles.targetUserName}>{targetUser.name}</Text>
           <Text style={styles.targetUserSubtext}>
-            Send a message to stand out! (Uses 1 of your {canSend?.remaining || 0} weekly messages)
+            Send a message to stand out!{isDemoMode ? '' : ` (Uses 1 of your ${canSend?.remaining || 0} weekly messages)`}
           </Text>
         </View>
 
@@ -177,10 +192,14 @@ export default function PreMatchMessageScreen() {
           disabled={sending || (!selectedTemplate && !customMessage.trim())}
           fullWidth
         />
-        <Text style={styles.footerText}>
-          Messages remaining: {canSend?.remaining || 0} of {canSend?.total || 0}
-        </Text>
-        <Text style={styles.footerSubtext}>Resets Monday</Text>
+        {!isDemoMode && (
+          <>
+            <Text style={styles.footerText}>
+              Messages remaining: {canSend?.remaining || 0} of {canSend?.total || 0}
+            </Text>
+            <Text style={styles.footerSubtext}>Resets Monday</Text>
+          </>
+        )}
       </View>
     </View>
   );

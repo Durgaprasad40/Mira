@@ -8,10 +8,6 @@ import {
   Animated,
   PanResponder,
   TouchableOpacity,
-  Modal,
-  TextInput,
-  KeyboardAvoidingView,
-  Platform,
   Alert,
 } from "react-native";
 import { useQuery, useMutation } from "convex/react";
@@ -24,14 +20,14 @@ import { ProfileCard, SwipeOverlay } from "@/components/cards";
 import { isDemoMode } from "@/hooks/useConvex";
 import { useNotifications } from "@/hooks/useNotifications";
 import { DEMO_PROFILES, DEMO_USER } from "@/lib/demoData";
-import { router } from "expo-router";
+import { router, useFocusEffect } from "expo-router";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
+import { useInteractionStore } from "@/stores/interactionStore";
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get("window");
 
 const HEADER_H = 44;
-const STANDOUT_MAX_CHARS = 120;
 
 interface ProfileData {
   id: string;
@@ -63,22 +59,36 @@ export function DiscoverCardStack({ theme = "light" }: DiscoverCardStackProps) {
   const { userId } = useAuthStore();
   const [index, setIndex] = useState(0);
 
-  // Daily limits store
-  const discoverStore = useDiscoverStore();
+  // Daily limits — individual selectors to avoid full re-render on AsyncStorage hydration
+  const likesRemaining = useDiscoverStore((s) => s.likesRemaining);
+  const standOutsRemaining = useDiscoverStore((s) => s.standOutsRemaining);
+  const hasReachedLikeLimit = useDiscoverStore((s) => s.hasReachedLikeLimit);
+  const hasReachedStandOutLimit = useDiscoverStore((s) => s.hasReachedStandOutLimit);
+  const incrementLikes = useDiscoverStore((s) => s.incrementLikes);
+  const incrementStandOuts = useDiscoverStore((s) => s.incrementStandOuts);
+  const checkAndResetIfNewDay = useDiscoverStore((s) => s.checkAndResetIfNewDay);
 
   // Reset daily limits if new day
   useEffect(() => {
-    discoverStore.checkAndResetIfNewDay();
-  }, []);
+    checkAndResetIfNewDay();
+  }, [checkAndResetIfNewDay]);
+
+  // ── Navigation lock: prevents handleSwipe/pan handlers from firing during navigation ──
+  const navigatingRef = useRef(false);
+  // ── Focus guard: tracks whether this screen is the active tab ──
+  const isFocusedRef = useRef(true);
+  // ── Track in-flight animation so we can cancel on blur ──
+  const activeAnimationRef = useRef<Animated.CompositeAnimation | null>(null);
+  // ── Swipe lock: prevents re-entrant handleSwipe from queued animation callbacks ──
+  const swipingRef = useRef(false);
 
   // Overlay refs + animated value (no React re-renders during drag)
   const overlayDirectionRef = useRef<"left" | "right" | "up" | null>(null);
   const overlayOpacityAnim = useRef(new Animated.Value(0)).current;
   const [overlayDirection, setOverlayDirection] = useState<"left" | "right" | "up" | null>(null);
 
-  // Stand Out modal
-  const [showStandOutModal, setShowStandOutModal] = useState(false);
-  const [standOutMessage, setStandOutMessage] = useState("");
+  // Stand Out result from route screen
+  const standOutResult = useInteractionStore((s) => s.standOutResult);
 
   // Notifications
   const { unseenCount } = useNotifications();
@@ -91,8 +101,13 @@ export function DiscoverCardStack({ theme = "light" }: DiscoverCardStackProps) {
       : "skip",
   );
 
-  const latestProfiles: ProfileData[] = isDemoMode
-    ? DEMO_PROFILES.map((p) => ({
+  // CRITICAL: useMemo prevents new array/object references on every render.
+  // Without this, DEMO_PROFILES.map() creates new objects each render,
+  // which cascades: new current → new handleSwipe → new animateSwipe → new panResponder
+  // → touches dropped between old/new panResponder attachment.
+  const latestProfiles: ProfileData[] = useMemo(() => {
+    if (isDemoMode) {
+      return DEMO_PROFILES.map((p) => ({
         id: p._id,
         name: p.name,
         age: p.age,
@@ -106,23 +121,25 @@ export function DiscoverCardStack({ theme = "light" }: DiscoverCardStackProps) {
         lastActive: Date.now() - 2 * 60 * 60 * 1000,
         createdAt: Date.now() - 60 * 24 * 60 * 60 * 1000,
         profilePrompts: (p as any).profilePrompts,
-      }))
-    : (convexProfiles || []).map((p: any) => ({
-        id: p._id || p.id,
-        name: p.name,
-        age: p.age,
-        bio: p.bio,
-        city: p.city,
-        isVerified: p.isVerified,
-        verificationStatus: p.verificationStatus,
-        distance: p.distance,
-        photos: p.photos?.map((photo: any) => ({ url: photo.url || photo })) || [],
-        activities: p.activities,
-        relationshipIntent: p.relationshipIntent,
-        lastActive: p.lastActive,
-        createdAt: p.createdAt,
-        profilePrompts: p.profilePrompts,
       }));
+    }
+    return (convexProfiles || []).map((p: any) => ({
+      id: p._id || p.id,
+      name: p.name,
+      age: p.age,
+      bio: p.bio,
+      city: p.city,
+      isVerified: p.isVerified,
+      verificationStatus: p.verificationStatus,
+      distance: p.distance,
+      photos: p.photos?.map((photo: any) => ({ url: photo.url || photo })) || [],
+      activities: p.activities,
+      relationshipIntent: p.relationshipIntent,
+      lastActive: p.lastActive,
+      createdAt: p.createdAt,
+      profilePrompts: p.profilePrompts,
+    }));
+  }, [convexProfiles]);
 
   // Keep last non-empty profiles to prevent blank-frame flicker
   const stableProfilesRef = useRef<ProfileData[]>([]);
@@ -150,6 +167,28 @@ export function DiscoverCardStack({ theme = "light" }: DiscoverCardStackProps) {
   const [activeSlot, setActiveSlot] = useState<0 | 1>(0);
   const getActivePan = () => (activeSlotRef.current === 0 ? panA : panB);
 
+  // ── Focus effect: cancel animations on blur, reset nav lock on focus ──
+  useFocusEffect(
+    useCallback(() => {
+      isFocusedRef.current = true;
+      navigatingRef.current = false;
+      swipingRef.current = false;
+      console.log("[DiscoverCardStack] focus gained");
+      return () => {
+        isFocusedRef.current = false;
+        console.log("[DiscoverCardStack] focus lost — cancelling animations");
+        if (activeAnimationRef.current) {
+          activeAnimationRef.current.stop();
+          activeAnimationRef.current = null;
+        }
+        panA.setValue({ x: 0, y: 0 });
+        panB.setValue({ x: 0, y: 0 });
+        overlayOpacityAnim.setValue(0);
+        overlayDirectionRef.current = null;
+      };
+    }, [panA, panB, overlayOpacityAnim]),
+  );
+
   const activePan = activeSlot === 0 ? panA : panB;
 
   const rotation = activePan.x.interpolate({
@@ -170,6 +209,11 @@ export function DiscoverCardStack({ theme = "light" }: DiscoverCardStackProps) {
 
   const current = profiles.length > 0 ? profiles[index % profiles.length] : undefined;
   const next = profiles.length > 0 ? profiles[(index + 1) % profiles.length] : undefined;
+
+  // Stable refs for panResponder callbacks — prevents panResponder recreation
+  // when current/handleSwipe/animateSwipe change between renders.
+  const currentRef = useRef(current);
+  currentRef.current = current;
 
   const resetPosition = useCallback(() => {
     const currentPan = getActivePan();
@@ -200,23 +244,43 @@ export function DiscoverCardStack({ theme = "light" }: DiscoverCardStackProps) {
 
   const handleSwipe = useCallback(
     (direction: "left" | "right" | "up", message?: string) => {
-      if (!current) return;
-      const action = direction === "left" ? "pass" : direction === "up" ? "super_like" : "like";
+      // Guard: skip if navigating away or screen lost focus (e.g. tab switched mid-animation)
+      if (navigatingRef.current || !isFocusedRef.current) {
+        console.log(`[DiscoverCardStack] handleSwipe BLOCKED (navigating=${navigatingRef.current} focused=${isFocusedRef.current})`);
+        return;
+      }
+      // Guard: prevent re-entrant calls from queued animation callbacks
+      if (swipingRef.current) {
+        console.log(`[DiscoverCardStack] handleSwipe BLOCKED (swipe in progress)`);
+        return;
+      }
+      swipingRef.current = true;
+
+      console.log(`[DiscoverCardStack] handleSwipe dir=${direction} current=${current?.name} index=${index}`);
+      if (!current) { swipingRef.current = false; return; }
 
       // Check daily limits for likes and stand outs
-      if (direction === "right" && discoverStore.hasReachedLikeLimit()) return;
-      if (direction === "up" && discoverStore.hasReachedStandOutLimit()) return;
+      if (direction === "right" && hasReachedLikeLimit()) { swipingRef.current = false; return; }
+      if (direction === "up" && hasReachedStandOutLimit()) { swipingRef.current = false; return; }
 
       const swipedProfile = current;
+      const action = direction === "left" ? "pass" : direction === "up" ? "super_like" : "like";
       advanceCard();
 
       // Increment counters
-      if (direction === "right") discoverStore.incrementLikes();
-      if (direction === "up") discoverStore.incrementStandOuts();
+      if (direction === "right") incrementLikes();
+      if (direction === "up") incrementStandOuts();
+
+      // Release swipe lock after React has batched the state updates
+      requestAnimationFrame(() => { swipingRef.current = false; });
 
       if (isDemoMode) {
         if (direction === "right" && Math.random() > 0.7) {
+          if (navigatingRef.current) return;
+          navigatingRef.current = true;
+          console.log(`[DiscoverCardStack] navigating to match-celebration userId=${swipedProfile.id}`);
           router.push(`/(main)/match-celebration?matchId=demo_match&userId=${swipedProfile.id}` as any);
+          setTimeout(() => { navigatingRef.current = false; }, 600);
         }
         return;
       }
@@ -227,21 +291,25 @@ export function DiscoverCardStack({ theme = "light" }: DiscoverCardStackProps) {
         action: action as any,
         message: message,
       }).then((result) => {
-        if (result?.isMatch) {
+        if (result?.isMatch && !navigatingRef.current && isFocusedRef.current) {
+          navigatingRef.current = true;
           router.push(`/(main)/match-celebration?matchId=${result.matchId}&userId=${swipedProfile.id}`);
+          setTimeout(() => { navigatingRef.current = false; }, 600);
         }
       }).catch((error: any) => {
         Alert.alert("Error", error.message || "Failed to swipe");
       });
     },
-    [current, userId, swipeMutation, advanceCard, discoverStore],
+    [current, userId, swipeMutation, advanceCard, hasReachedLikeLimit, hasReachedStandOutLimit, incrementLikes, incrementStandOuts],
   );
 
   const animateSwipe = useCallback(
     (direction: "left" | "right" | "up", velocity?: number) => {
+      // Guard: don't start new animations if navigating or unfocused
+      if (navigatingRef.current || !isFocusedRef.current) return;
       // Check limits before animating
-      if (direction === "right" && discoverStore.hasReachedLikeLimit()) return;
-      if (direction === "up" && discoverStore.hasReachedStandOutLimit()) return;
+      if (direction === "right" && hasReachedLikeLimit()) return;
+      if (direction === "up" && hasReachedStandOutLimit()) return;
 
       const currentPan = getActivePan();
       const targetX = direction === "left" ? -SCREEN_WIDTH * 1.5 : direction === "right" ? SCREEN_WIDTH * 1.5 : 0;
@@ -252,27 +320,46 @@ export function DiscoverCardStack({ theme = "light" }: DiscoverCardStackProps) {
       setOverlayDirection(direction);
       overlayOpacityAnim.setValue(1);
 
-      Animated.parallel([
+      const anim = Animated.parallel([
         Animated.timing(currentPan.x, { toValue: targetX, duration, useNativeDriver: true }),
         Animated.timing(currentPan.y, { toValue: targetY, duration, useNativeDriver: true }),
-      ]).start(({ finished }) => {
+      ]);
+      activeAnimationRef.current = anim;
+      anim.start(({ finished }) => {
+        activeAnimationRef.current = null;
         if (!finished) return;
-        handleSwipe(direction);
+        handleSwipeRef.current(direction);
       });
     },
-    [handleSwipe, panA, panB, overlayOpacityAnim, discoverStore],
+    [panA, panB, overlayOpacityAnim, hasReachedLikeLimit, hasReachedStandOutLimit],
   );
+
+  // Stable refs so the panResponder (created once) always calls the latest version
+  const handleSwipeRef = useRef(handleSwipe);
+  handleSwipeRef.current = handleSwipe;
+  const animateSwipeRef = useRef(animateSwipe);
+  animateSwipeRef.current = animateSwipe;
 
   const thresholdX = SCREEN_WIDTH * SWIPE_CONFIG.SWIPE_THRESHOLD_X;
   const thresholdY = SCREEN_HEIGHT * SWIPE_CONFIG.SWIPE_THRESHOLD_Y;
   const velocityX = SWIPE_CONFIG.SWIPE_VELOCITY_X;
   const velocityY = SWIPE_CONFIG.SWIPE_VELOCITY_Y;
 
+  // PanResponder created ONCE (empty deps). Uses refs for all callback logic
+  // so it always calls the latest handleSwipe/animateSwipe without recreation.
   const panResponder = useMemo(
     () =>
       PanResponder.create({
-        onMoveShouldSetPanResponder: (_, gs) => Math.abs(gs.dx) > 8 || Math.abs(gs.dy) > 8,
-        onPanResponderGrant: () => {},
+        onMoveShouldSetPanResponder: (_, gs) => {
+          // Don't claim touches if navigating or unfocused
+          if (navigatingRef.current || !isFocusedRef.current) return false;
+          return Math.abs(gs.dx) > 8 || Math.abs(gs.dy) > 8;
+        },
+        // Allow other responders (e.g. tab bar) to take over
+        onPanResponderTerminationRequest: () => true,
+        onPanResponderGrant: () => {
+          console.log("[DiscoverCardStack] pan grant");
+        },
         onPanResponderMove: (_, gs) => {
           getActivePan().setValue({ x: gs.dx, y: gs.dy });
           const absX = Math.abs(gs.dx);
@@ -286,13 +373,17 @@ export function DiscoverCardStack({ theme = "light" }: DiscoverCardStackProps) {
           setOverlayDirection((prev) => (prev === newDir ? prev : newDir));
         },
         onPanResponderRelease: (_, gs) => {
-          if (gs.dx < -thresholdX || gs.vx < -velocityX) { animateSwipe("left", gs.vx); return; }
-          if (gs.dx > thresholdX  || gs.vx > velocityX)  { animateSwipe("right", gs.vx); return; }
+          console.log("[DiscoverCardStack] pan release dx=", gs.dx.toFixed(0), "dy=", gs.dy.toFixed(0));
+          // If screen lost focus during drag, just reset
+          if (navigatingRef.current || !isFocusedRef.current) { resetPosition(); return; }
+          if (gs.dx < -thresholdX || gs.vx < -velocityX) { animateSwipeRef.current("left", gs.vx); return; }
+          if (gs.dx > thresholdX  || gs.vx > velocityX)  { animateSwipeRef.current("right", gs.vx); return; }
           if (gs.dy < -thresholdY || gs.vy < -velocityY)  {
-            // Up swipe triggers Stand Out modal instead of instant swipe
+            // Up swipe triggers Stand Out screen instead of instant swipe
             resetPosition();
-            if (!discoverStore.hasReachedStandOutLimit()) {
-              setShowStandOutModal(true);
+            const c = currentRef.current;
+            if (!hasReachedStandOutLimit() && c) {
+              router.push(`/(main)/stand-out?profileId=${c.id}&name=${encodeURIComponent(c.name)}&standOutsLeft=${standOutsRemaining()}` as any);
             }
             return;
           }
@@ -300,15 +391,16 @@ export function DiscoverCardStack({ theme = "light" }: DiscoverCardStackProps) {
         },
         onPanResponderTerminate: () => resetPosition(),
       }),
-    [animateSwipe, panA, panB, overlayOpacityAnim, resetPosition, thresholdX, thresholdY, velocityX, velocityY, discoverStore],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [panA, panB, overlayOpacityAnim, resetPosition, thresholdX, thresholdY, velocityX, velocityY],
   );
 
-  // Stand Out send handler
-  const handleSendStandOut = useCallback(() => {
-    if (!current) return;
-    const msg = standOutMessage.trim();
-    setShowStandOutModal(false);
-    setStandOutMessage("");
+  // Handle stand-out result from route screen
+  useEffect(() => {
+    if (!standOutResult || !current) return;
+    if (!isFocusedRef.current) return; // don't process if unfocused
+    useInteractionStore.getState().setStandOutResult(null);
+    const msg = standOutResult.message;
 
     // Animate the card out (up direction)
     const currentPan = getActivePan();
@@ -317,14 +409,27 @@ export function DiscoverCardStack({ theme = "light" }: DiscoverCardStackProps) {
     setOverlayDirection("up");
     overlayOpacityAnim.setValue(1);
 
-    Animated.timing(currentPan.y, { toValue: targetY, duration: 250, useNativeDriver: true }).start(({ finished }) => {
+    const anim = Animated.timing(currentPan.y, { toValue: targetY, duration: 250, useNativeDriver: true });
+    activeAnimationRef.current = anim;
+    anim.start(({ finished }) => {
+      activeAnimationRef.current = null;
       if (!finished) return;
       handleSwipe("up", msg || undefined);
     });
-  }, [current, standOutMessage, handleSwipe, overlayOpacityAnim]);
+  }, [standOutResult]);
 
-  // Loading state
+  // ── Diagnostic: detect render storms ──
+  // Expected: ~3 renders per swipe (overlay direction + advance card batched states).
+  // Warn only if we exceed 50 renders per session (indicates real problem).
+  const renderCountRef = useRef(0);
+  renderCountRef.current += 1;
+  if (renderCountRef.current % 50 === 0) {
+    console.warn(`[DiscoverCardStack] render #${renderCountRef.current}`);
+  }
+
+  // Loading state — non-demo only; demo profiles are instant via useMemo
   if (!isDemoMode && !convexProfiles) {
+    console.log("[DiscoverCardStack] showing loading state — convexProfiles not yet available");
     return (
       <View style={[styles.center, dark && { backgroundColor: INCOGNITO_COLORS.background }]}>
         <ActivityIndicator size="large" color={C.primary} />
@@ -345,7 +450,7 @@ export function DiscoverCardStack({ theme = "light" }: DiscoverCardStackProps) {
   }
 
   // Daily like limit reached state
-  if (discoverStore.hasReachedLikeLimit()) {
+  if (hasReachedLikeLimit()) {
     return (
       <View style={[styles.container, dark && { backgroundColor: INCOGNITO_COLORS.background }]}>
         {/* Header */}
@@ -380,8 +485,8 @@ export function DiscoverCardStack({ theme = "light" }: DiscoverCardStackProps) {
   const cardBottom = 4;
   const actionRowBottom = 16;
 
-  const likesLeft = discoverStore.likesRemaining();
-  const standOutsLeft = discoverStore.standOutsRemaining();
+  const likesLeft = likesRemaining();
+  const standOutsLeft = standOutsRemaining();
 
   return (
     <View style={[styles.container, dark && { backgroundColor: INCOGNITO_COLORS.background }]}>
@@ -402,7 +507,7 @@ export function DiscoverCardStack({ theme = "light" }: DiscoverCardStackProps) {
       </View>
 
       {/* Card Area (fills between header and tab bar) */}
-      <View style={[styles.cardArea, { top: cardTop, bottom: cardBottom }]}>
+      <View style={[styles.cardArea, { top: cardTop, bottom: cardBottom }]} pointerEvents="box-none">
         {/* Back card */}
         {next && (
           <Animated.View
@@ -445,7 +550,7 @@ export function DiscoverCardStack({ theme = "light" }: DiscoverCardStackProps) {
         {/* Skip (X) */}
         <TouchableOpacity
           style={[styles.actionButton, styles.skipBtn]}
-          onPress={() => animateSwipe("left")}
+          onPress={() => animateSwipeRef.current("left")}
         >
           <Ionicons name="close" size={30} color="#F44336" />
         </TouchableOpacity>
@@ -455,14 +560,15 @@ export function DiscoverCardStack({ theme = "light" }: DiscoverCardStackProps) {
           style={[
             styles.actionButton,
             styles.standOutBtn,
-            discoverStore.hasReachedStandOutLimit() && styles.actionBtnDisabled,
+            hasReachedStandOutLimit() && styles.actionBtnDisabled,
           ]}
           onPress={() => {
-            if (!discoverStore.hasReachedStandOutLimit()) {
-              setShowStandOutModal(true);
+            const c = currentRef.current;
+            if (!hasReachedStandOutLimit() && c) {
+              router.push(`/(main)/stand-out?profileId=${c.id}&name=${encodeURIComponent(c.name)}&standOutsLeft=${standOutsLeft}` as any);
             }
           }}
-          disabled={discoverStore.hasReachedStandOutLimit()}
+          disabled={hasReachedStandOutLimit()}
         >
           <Ionicons name="star" size={24} color={COLORS.white} />
           <View style={styles.standOutBadge}>
@@ -473,48 +579,12 @@ export function DiscoverCardStack({ theme = "light" }: DiscoverCardStackProps) {
         {/* Like (heart) */}
         <TouchableOpacity
           style={[styles.actionButton, styles.likeBtn]}
-          onPress={() => animateSwipe("right")}
+          onPress={() => animateSwipeRef.current("right")}
         >
           <Ionicons name="heart" size={30} color={COLORS.white} />
         </TouchableOpacity>
       </View>
 
-      {/* Stand Out Modal */}
-      <Modal visible={showStandOutModal} transparent animationType="slide" onRequestClose={() => setShowStandOutModal(false)}>
-        <KeyboardAvoidingView style={styles.modalOverlay} behavior={Platform.OS === "ios" ? "padding" : "height"}>
-          <View style={styles.modalBox}>
-            <View style={styles.modalHeader}>
-              <View style={{ flex: 1 }}>
-                <Text style={styles.modalTitle}>Stand Out to {current?.name}</Text>
-                <Text style={styles.modalRemaining}>{standOutsLeft} Stand Out{standOutsLeft !== 1 ? "s" : ""} left today</Text>
-              </View>
-              <TouchableOpacity onPress={() => { setShowStandOutModal(false); setStandOutMessage(""); }}>
-                <Text style={styles.modalClose}>✕</Text>
-              </TouchableOpacity>
-            </View>
-            <Text style={styles.modalSubtitle}>Add a short message to get noticed.</Text>
-            <TextInput
-              style={styles.modalInput}
-              placeholder="Write something memorable..."
-              placeholderTextColor={COLORS.textMuted}
-              value={standOutMessage}
-              onChangeText={setStandOutMessage}
-              maxLength={STANDOUT_MAX_CHARS}
-              autoFocus
-            />
-            <View style={styles.modalFooter}>
-              <Text style={styles.modalCharCount}>{standOutMessage.length}/{STANDOUT_MAX_CHARS}</Text>
-              <TouchableOpacity
-                style={styles.modalSend}
-                onPress={handleSendStandOut}
-              >
-                <Ionicons name="star" size={16} color={COLORS.white} style={{ marginRight: 6 }} />
-                <Text style={styles.modalSendText}>Send Stand Out</Text>
-              </TouchableOpacity>
-            </View>
-          </View>
-        </KeyboardAvoidingView>
-      </Modal>
     </View>
   );
 }
@@ -696,45 +766,4 @@ const styles = StyleSheet.create({
     color: COLORS.white,
   },
 
-  // Stand Out Modal
-  modalOverlay: { flex: 1, justifyContent: "flex-end", backgroundColor: COLORS.overlay },
-  modalBox: {
-    backgroundColor: COLORS.background,
-    borderTopLeftRadius: 24,
-    borderTopRightRadius: 24,
-    padding: 24,
-    paddingBottom: 40,
-  },
-  modalHeader: {
-    flexDirection: "row",
-    justifyContent: "space-between",
-    alignItems: "flex-start",
-    marginBottom: 8,
-  },
-  modalTitle: { fontSize: 18, fontWeight: "700", color: COLORS.text },
-  modalRemaining: { fontSize: 13, color: "#2196F3", fontWeight: "600", marginTop: 2 },
-  modalClose: { fontSize: 20, color: COLORS.textLight, padding: 4 },
-  modalSubtitle: { fontSize: 14, color: COLORS.textLight, marginBottom: 16 },
-  modalInput: {
-    borderWidth: 1,
-    borderColor: COLORS.border,
-    borderRadius: 12,
-    padding: 14,
-    fontSize: 16,
-    color: COLORS.text,
-    minHeight: 60,
-    textAlignVertical: "top",
-    marginBottom: 12,
-  },
-  modalFooter: { flexDirection: "row", justifyContent: "space-between", alignItems: "center" },
-  modalCharCount: { fontSize: 13, color: COLORS.textMuted },
-  modalSend: {
-    flexDirection: "row",
-    alignItems: "center",
-    backgroundColor: "#2196F3",
-    paddingHorizontal: 20,
-    paddingVertical: 12,
-    borderRadius: 24,
-  },
-  modalSendText: { color: COLORS.white, fontSize: 16, fontWeight: "600" },
 });

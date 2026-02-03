@@ -28,7 +28,6 @@ import { isDemoMode } from '@/hooks/useConvex';
 import {
   DEMO_CONFESSION_REPLIES,
 } from '@/lib/demoData';
-import ConfessionChatModal from '@/components/confessions/ConfessionChatModal';
 
 const MOOD_CONFIG: Record<ConfessionMood, { emoji: string; label: string; color: string; bg: string }> = {
   romantic: { emoji: '\u2764\uFE0F', label: 'Romantic', color: '#E91E63', bg: 'rgba(233,30,99,0.12)' },
@@ -55,17 +54,13 @@ export default function ConfessionThreadScreen() {
   const { userId } = useAuthStore();
   const currentUserId = userId || 'demo_user_1';
 
-  const {
-    confessions,
-    userReactions,
-    chats,
-    toggleReaction,
-    reportConfession,
-    addChat,
-    addChatMessage,
-    agreeMutualReveal,
-    declineMutualReveal,
-  } = useConfessionStore();
+  // Individual selectors to avoid full re-render on any store change
+  const confessions = useConfessionStore((s) => s.confessions);
+  const userReactions = useConfessionStore((s) => s.userReactions);
+  const chats = useConfessionStore((s) => s.chats);
+  const toggleReaction = useConfessionStore((s) => s.toggleReaction);
+  const reportConfession = useConfessionStore((s) => s.reportConfession);
+  const addChat = useConfessionStore((s) => s.addChat);
 
   const confession = useMemo(
     () => confessions.find((c) => c.id === confessionId),
@@ -101,7 +96,6 @@ export default function ConfessionThreadScreen() {
   }, [isDemoMode, convexReplies, demoReplies]);
 
   const [replyText, setReplyText] = useState('');
-  const [activeChatModal, setActiveChatModal] = useState<ConfessionChat | null>(null);
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
   const [showReactionPicker, setShowReactionPicker] = useState(false);
 
@@ -201,7 +195,7 @@ export default function ConfessionThreadScreen() {
         (c.initiatorId === currentUserId || c.responderId === currentUserId)
     );
     if (existing) {
-      setActiveChatModal(existing);
+      router.push(`/(main)/confession-chat?chatId=${existing.id}` as any);
       return;
     }
 
@@ -217,26 +211,8 @@ export default function ConfessionThreadScreen() {
       mutualRevealStatus: 'none',
     };
     addChat(newChat);
-    setActiveChatModal(newChat);
-  }, [confession, confessionId, chats, currentUserId, addChat]);
-
-  const handleSendChatMessage = useCallback(
-    (text: string) => {
-      if (!activeChatModal) return;
-      const message = {
-        id: `ccm_new_${Date.now()}`,
-        chatId: activeChatModal.id,
-        senderId: currentUserId,
-        text,
-        createdAt: Date.now(),
-      };
-      addChatMessage(activeChatModal.id, message);
-      setActiveChatModal((prev) =>
-        prev ? { ...prev, messages: [...prev.messages, message] } : null
-      );
-    },
-    [activeChatModal, currentUserId, addChatMessage]
-  );
+    router.push(`/(main)/confession-chat?chatId=${newChat.id}` as any);
+  }, [confession, confessionId, chats, currentUserId, addChat, router]);
 
   const handleReport = useCallback(() => {
     if (!confessionId) return;
@@ -251,7 +227,7 @@ export default function ConfessionThreadScreen() {
             reportMutation({
               confessionId: confessionId as any,
               reporterId: currentUserId as any,
-            }).catch(() => {});
+            }).catch(console.error);
           }
           router.back();
         },
@@ -477,30 +453,6 @@ export default function ConfessionThreadScreen() {
         onClose={() => setShowReactionPicker(false)}
       />
 
-      {/* Chat Modal */}
-      <ConfessionChatModal
-        visible={!!activeChatModal}
-        chat={activeChatModal}
-        currentUserId={currentUserId}
-        confessionText={confession?.text}
-        onClose={() => setActiveChatModal(null)}
-        onSendMessage={handleSendChatMessage}
-        onAgreeReveal={() => {
-          if (!activeChatModal) return;
-          agreeMutualReveal(activeChatModal.id, currentUserId);
-          const updated = useConfessionStore.getState().chats.find((c) => c.id === activeChatModal.id);
-          if (updated) setActiveChatModal({ ...updated });
-        }}
-        onDeclineReveal={() => {
-          if (!activeChatModal) return;
-          declineMutualReveal(activeChatModal.id, currentUserId);
-          const updated = useConfessionStore.getState().chats.find((c) => c.id === activeChatModal.id);
-          if (updated) setActiveChatModal({ ...updated });
-        }}
-        onBlock={() => {
-          setActiveChatModal(null);
-        }}
-      />
     </SafeAreaView>
   );
 }

@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   View,
   Text,
@@ -20,15 +20,25 @@ import { Ionicons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
 import { BlurProfileNotice } from '@/components/profile/BlurProfileNotice';
 import { isDemoMode } from '@/hooks/useConvex';
+import { DEMO_USER } from '@/lib/demoData';
 
 export default function EditProfileScreen() {
   const router = useRouter();
   const { userId } = useAuthStore();
 
-  const currentUser = useQuery(
+  const currentUserQuery = useQuery(
     api.users.getCurrentUser,
-    userId ? { userId: userId as any } : 'skip'
+    !isDemoMode && userId ? { userId: userId as any } : 'skip'
   );
+  const currentUser = isDemoMode ? (DEMO_USER as any) : currentUserQuery;
+
+  // Hard timeout for loading state
+  const [timedOut, setTimedOut] = useState(false);
+  useEffect(() => {
+    if (isDemoMode) return;
+    const t = setTimeout(() => setTimedOut(true), 8000);
+    return () => clearTimeout(t);
+  }, []);
 
   const updateProfile = useMutation(api.users.updateProfile);
   const updateProfilePrompts = useMutation(api.users.updateProfilePrompts);
@@ -160,7 +170,11 @@ export default function EditProfileScreen() {
   if (!currentUser) {
     return (
       <View style={styles.loadingContainer}>
-        <Text style={styles.loadingText}>Loading...</Text>
+        <Text style={styles.loadingText}>{timedOut ? 'Failed to load profile' : 'Loading...'}</Text>
+        <TouchableOpacity style={styles.loadingBackButton} onPress={() => router.back()}>
+          <Ionicons name="arrow-back" size={18} color={COLORS.white} />
+          <Text style={styles.loadingBackText}>Go Back</Text>
+        </TouchableOpacity>
       </View>
     );
   }
@@ -473,6 +487,21 @@ const styles = StyleSheet.create({
   loadingText: {
     fontSize: 16,
     color: COLORS.textLight,
+  },
+  loadingBackButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginTop: 20,
+    paddingHorizontal: 20,
+    paddingVertical: 10,
+    borderRadius: 20,
+    backgroundColor: COLORS.primary,
+  },
+  loadingBackText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: COLORS.white,
   },
   header: {
     flexDirection: 'row',

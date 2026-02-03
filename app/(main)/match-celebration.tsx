@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useRef } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import {
   View,
   Text,
@@ -17,6 +17,8 @@ import { useAuthStore } from "@/stores/authStore";
 import { Ionicons } from "@expo/vector-icons";
 import * as Haptics from "expo-haptics";
 import { Id } from "@/convex/_generated/dataModel";
+import { isDemoMode } from "@/hooks/useConvex";
+import { DEMO_USER, DEMO_PROFILES } from "@/lib/demoData";
 
 export default function MatchCelebrationScreen() {
   const router = useRouter();
@@ -26,7 +28,7 @@ export default function MatchCelebrationScreen() {
   }>();
   const { userId } = useAuthStore();
 
-  const isDemo = matchId?.startsWith("demo_") || userId?.startsWith("demo_");
+  const isDemo = isDemoMode || matchId?.startsWith("demo_") || userId?.startsWith("demo_");
   const viewerId = userId ? (userId as Id<"users">) : null;
   const matchIdValue = matchId ? (matchId as unknown as Id<"matches">) : null;
   const otherUserIdValue = otherUserId
@@ -34,22 +36,47 @@ export default function MatchCelebrationScreen() {
     : null;
 
   // Fetch match and other user data (skip in demo mode)
-  const match = useQuery(
+  const matchQuery = useQuery(
     api.matches.getMatch,
     !isDemo && matchIdValue && viewerId
       ? { matchId: matchIdValue, userId: viewerId }
       : "skip",
   );
-  const otherUser = useQuery(
+  const otherUserQuery = useQuery(
     api.users.getUserById,
     !isDemo && otherUserIdValue && viewerId
       ? { userId: otherUserIdValue, viewerId }
       : "skip",
   );
-  const currentUser = useQuery(
+  const currentUserQuery = useQuery(
     api.users.getCurrentUser,
     !isDemo && viewerId ? { userId: viewerId } : "skip",
   );
+
+  // In demo mode, use demo data directly; in live mode, use Convex queries
+  const demoOtherUser = useMemo(() => {
+    if (!isDemo) return null;
+    const found = DEMO_PROFILES.find((p) => p._id === otherUserId);
+    return found
+      ? { name: found.name, photos: found.photos }
+      : { name: "Someone", photos: [{ url: "https://via.placeholder.com/400" }] };
+  }, [isDemo, otherUserId]);
+
+  const match = isDemo ? { _id: matchId } : matchQuery;
+  const otherUser = isDemo ? demoOtherUser : otherUserQuery;
+  const currentUser = isDemo
+    ? { name: DEMO_USER.name, photos: DEMO_USER.photos }
+    : currentUserQuery;
+
+  console.log(`[MatchCelebration] isDemo=${isDemo} match=${!!match} otherUser=${!!otherUser} currentUser=${!!currentUser}`);
+
+  // Hard timeout: never stay on loading forever
+  const [timedOut, setTimedOut] = useState(false);
+  useEffect(() => {
+    if (isDemo) return; // demo data is immediate
+    const t = setTimeout(() => setTimedOut(true), 8000);
+    return () => clearTimeout(t);
+  }, [isDemo]);
 
   // Animation values (React Native Animated)
   const scale1 = useRef(new Animated.Value(0)).current;
@@ -156,13 +183,28 @@ export default function MatchCelebrationScreen() {
   };
 
   const handleKeepSwiping = () => {
-    router.replace("/(main)/(tabs)/discover");
+    router.replace("/(main)/(tabs)/home");
   };
 
   if (!match || !otherUser || !currentUser) {
     return (
-      <View style={styles.container}>
-        <Text style={styles.loadingText}>Loading...</Text>
+      <View style={[styles.container, styles.loadingContainer]}>
+        {timedOut ? (
+          <>
+            <Ionicons name="heart-dislike-outline" size={48} color={COLORS.textMuted} />
+            <Text style={styles.loadingText}>Couldn't load match details</Text>
+            <TouchableOpacity style={styles.loadingBackButton} onPress={() => router.back()}>
+              <Text style={styles.loadingBackText}>Go Back</Text>
+            </TouchableOpacity>
+          </>
+        ) : (
+          <>
+            <Text style={styles.loadingText}>Loading...</Text>
+            <TouchableOpacity style={styles.loadingBackButton} onPress={() => router.back()}>
+              <Text style={styles.loadingBackText}>Go Back</Text>
+            </TouchableOpacity>
+          </>
+        )}
       </View>
     );
   }
@@ -340,10 +382,27 @@ const styles = StyleSheet.create({
     color: COLORS.white,
     fontWeight: "500",
   },
+  loadingContainer: {
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: COLORS.background,
+  },
   loadingText: {
     fontSize: 18,
-    color: COLORS.white,
+    color: COLORS.textLight,
     textAlign: "center",
-    marginTop: "50%",
+    marginTop: 16,
+  },
+  loadingBackButton: {
+    marginTop: 24,
+    paddingHorizontal: 24,
+    paddingVertical: 12,
+    borderRadius: 24,
+    backgroundColor: COLORS.primary,
+  },
+  loadingBackText: {
+    fontSize: 16,
+    fontWeight: "600",
+    color: COLORS.white,
   },
 });

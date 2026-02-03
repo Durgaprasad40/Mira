@@ -14,11 +14,13 @@ import { Badge } from '@/components/ui';
 import { isDemoMode } from '@/hooks/useConvex';
 import { DEMO_MATCHES, DEMO_LIKES } from '@/lib/demoData';
 import { isActiveNow } from '@/lib/formatLastSeen';
+import { useScreenSafety } from '@/hooks/useScreenSafety';
 
 export default function MessagesScreen() {
   const router = useRouter();
   const { userId } = useAuthStore();
   const [refreshing, setRefreshing] = useState(false);
+  const { safeTimeout } = useScreenSafety();
 
   const convexConversations = useQuery(
     api.messages.getConversations,
@@ -42,14 +44,14 @@ export default function MessagesScreen() {
 
   const conversations = isDemoMode ? DEMO_MATCHES as any : convexConversations;
   const unreadCount = isDemoMode ? 1 : convexUnreadCount;
-  const currentUser = isDemoMode ? { gender: 'male', messagesRemaining: 99, messagesResetAt: undefined } : convexCurrentUser;
+  const currentUser = isDemoMode ? { gender: 'male', messagesRemaining: 999999, messagesResetAt: undefined, subscriptionTier: 'premium' as const } : convexCurrentUser;
   const likesReceived = isDemoMode ? DEMO_LIKES : convexLikesReceived;
 
   // Convex queries are real-time/reactive — no manual refetch needed.
   // Short spinner provides tactile feedback for the pull gesture.
   const onRefresh = async () => {
     setRefreshing(true);
-    setTimeout(() => setRefreshing(false), 300);
+    safeTimeout(() => setRefreshing(false), 300);
   };
 
   // Separate super likes from regular likes
@@ -160,6 +162,7 @@ export default function MessagesScreen() {
   };
 
   const renderQuotaBanner = () => {
+    if (isDemoMode) return null; // demo = unlimited, no quota banner
     if (!currentUser || currentUser.gender === 'female') return null;
     if (currentUser.messagesRemaining === undefined) return null;
 

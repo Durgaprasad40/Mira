@@ -17,42 +17,34 @@ import { api } from '@/convex/_generated/api';
 import EmojiPicker from 'rn-emoji-keyboard';
 import { COLORS } from '@/lib/constants';
 import { isProbablyEmoji } from '@/lib/utils';
-import { ConfessionChat, ConfessionRevealPolicy, TimedRevealOption } from '@/types';
+import { ConfessionChat } from '@/types';
 import { useAuthStore } from '@/stores/authStore';
 import { useConfessionStore } from '@/stores/confessionStore';
 import { isDemoMode } from '@/hooks/useConvex';
 import ConfessionCard from '@/components/confessions/ConfessionCard';
-import ComposeConfessionModal from '@/components/confessions/ComposeConfessionModal';
 import SecretCrushCard from '@/components/confessions/SecretCrushCard';
-import ConfessionChatModal from '@/components/confessions/ConfessionChatModal';
 import { useConfessionNotifications } from '@/hooks/useConfessionNotifications';
+import { useScreenSafety } from '@/hooks/useScreenSafety';
 
 export default function ConfessionsScreen() {
   const router = useRouter();
   const { userId } = useAuthStore();
   const currentUserId = userId || 'demo_user_1';
 
-  const {
-    confessions: demoConfessions,
-    userReactions,
-    secretCrushes,
-    chats,
-    seedConfessions,
-    addConfession,
-    toggleReaction: demoToggleReaction,
-    reportConfession: demoReportConfession,
-    addChat,
-    addChatMessage,
-    revealCrush,
-    agreeMutualReveal,
-    declineMutualReveal,
-    setTimedReveal,
-  } = useConfessionStore();
+  // Individual selectors to avoid full re-render on any store change
+  const demoConfessions = useConfessionStore((s) => s.confessions);
+  const userReactions = useConfessionStore((s) => s.userReactions);
+  const secretCrushes = useConfessionStore((s) => s.secretCrushes);
+  const chats = useConfessionStore((s) => s.chats);
+  const seedConfessions = useConfessionStore((s) => s.seedConfessions);
+  const demoToggleReaction = useConfessionStore((s) => s.toggleReaction);
+  const demoReportConfession = useConfessionStore((s) => s.reportConfession);
+  const addChat = useConfessionStore((s) => s.addChat);
+  const revealCrush = useConfessionStore((s) => s.revealCrush);
 
   const { notifyReaction, notifyReply } = useConfessionNotifications();
+  const { safeTimeout } = useScreenSafety();
   const [refreshing, setRefreshing] = useState(false);
-  const [showCompose, setShowCompose] = useState(false);
-  const [activeChatModal, setActiveChatModal] = useState<ConfessionChat | null>(null);
   const [showToast, setShowToast] = useState(false);
   const toastOpacity = useRef(new Animated.Value(0)).current;
 
@@ -76,7 +68,6 @@ export default function ConfessionsScreen() {
   );
 
   // Convex mutations
-  const createConfessionMutation = useMutation(api.confessions.createConfession);
   const toggleReactionMutation = useMutation(api.confessions.toggleReaction);
   const reportConfessionMutation = useMutation(api.confessions.reportConfession);
 
@@ -140,8 +131,8 @@ export default function ConfessionsScreen() {
 
   const onRefresh = useCallback(() => {
     setRefreshing(true);
-    setTimeout(() => setRefreshing(false), 800);
-  }, []);
+    safeTimeout(() => setRefreshing(false), 800);
+  }, [safeTimeout]);
 
   const handleOpenEmojiPicker = useCallback((confessionId: string) => {
     setEmojiTargetConfessionId(confessionId);
@@ -170,77 +161,9 @@ export default function ConfessionsScreen() {
     [emojiTargetConfessionId, demoToggleReaction, notifyReaction, toggleReactionMutation, currentUserId]
   );
 
-  const handleCompose = useCallback(
-    async (
-      text: string,
-      isAnonymous: boolean,
-      _topic: any,
-      targetUserId?: string,
-      revealPolicy?: ConfessionRevealPolicy,
-      timedReveal?: TimedRevealOption,
-      _imageUrl?: string,
-    ) => {
-      const confessionId = `conf_new_${Date.now()}`;
-      const newConfession = {
-        id: confessionId,
-        userId: currentUserId,
-        text,
-        isAnonymous,
-        mood: 'emotional' as const,
-        topEmojis: [],
-        replyPreviews: [],
-        targetUserId,
-        visibility: 'global' as const,
-        replyCount: 0,
-        reactionCount: 0,
-        createdAt: Date.now(),
-        revealPolicy: revealPolicy || 'never',
-      };
-
-      addConfession(newConfession);
-
-      if (timedReveal && timedReveal !== 'never' && targetUserId) {
-        setTimedReveal(confessionId, timedReveal, targetUserId);
-      }
-
-      if (targetUserId) {
-        const { addSecretCrush } = useConfessionStore.getState();
-        addSecretCrush({
-          id: `sc_new_${Date.now()}`,
-          fromUserId: currentUserId,
-          toUserId: targetUserId,
-          confessionText: text,
-          isRevealed: false,
-          createdAt: Date.now(),
-          expiresAt: Date.now() + 1000 * 60 * 60 * 48,
-        });
-      }
-
-      // Close modal and show toast immediately (before network call)
-      setShowCompose(false);
-
-      setShowToast(true);
-      Animated.sequence([
-        Animated.timing(toastOpacity, { toValue: 1, duration: 250, useNativeDriver: true }),
-        Animated.delay(1500),
-        Animated.timing(toastOpacity, { toValue: 0, duration: 250, useNativeDriver: true }),
-      ]).start(() => setShowToast(false));
-
-      // Sync to backend in the background
-      if (!isDemoMode) {
-        createConfessionMutation({
-          userId: currentUserId as any,
-          text: text.trim(),
-          isAnonymous,
-          mood: 'emotional' as any,
-          visibility: 'global' as any,
-        }).catch((error: any) => {
-          Alert.alert('Error', error.message || 'Failed to post confession');
-        });
-      }
-    },
-    [currentUserId, addConfession, setTimedReveal, toastOpacity, createConfessionMutation]
-  );
+  const handleOpenCompose = useCallback(() => {
+    router.push('/(main)/compose-confession' as any);
+  }, [router]);
 
   const handleOpenThread = useCallback(
     (confessionId: string) => {
@@ -259,7 +182,7 @@ export default function ConfessionsScreen() {
           (c.initiatorId === currentUserId || c.responderId === currentUserId)
       );
       if (existing) {
-        setActiveChatModal(existing);
+        router.push(`/(main)/confession-chat?chatId=${existing.id}` as any);
         return;
       }
 
@@ -275,28 +198,10 @@ export default function ConfessionsScreen() {
         mutualRevealStatus: 'none',
       };
       addChat(newChat);
-      setActiveChatModal(newChat);
+      router.push(`/(main)/confession-chat?chatId=${newChat.id}` as any);
       notifyReply(confessionId);
     },
-    [chats, currentUserId, addChat, notifyReply]
-  );
-
-  const handleSendChatMessage = useCallback(
-    (text: string) => {
-      if (!activeChatModal) return;
-      const message = {
-        id: `ccm_new_${Date.now()}`,
-        chatId: activeChatModal.id,
-        senderId: currentUserId,
-        text,
-        createdAt: Date.now(),
-      };
-      addChatMessage(activeChatModal.id, message);
-      setActiveChatModal((prev) =>
-        prev ? { ...prev, messages: [...prev.messages, message] } : null
-      );
-    },
-    [activeChatModal, currentUserId, addChatMessage]
+    [chats, currentUserId, addChat, notifyReply, router]
   );
 
   const handleReport = useCallback(
@@ -312,7 +217,7 @@ export default function ConfessionsScreen() {
               reportConfessionMutation({
                 confessionId: confessionId as any,
                 reporterId: currentUserId as any,
-              }).catch(() => {});
+              }).catch(console.error);
             }
           },
         },
@@ -450,7 +355,7 @@ export default function ConfessionsScreen() {
               <Ionicons name="megaphone-outline" size={56} color={COLORS.textMuted} />
               <Text style={styles.emptyTitle}>No confessions yet</Text>
               <Text style={styles.emptySubtitle}>Be the first to share something!</Text>
-              <TouchableOpacity style={styles.emptyButton} onPress={() => setShowCompose(true)}>
+              <TouchableOpacity style={styles.emptyButton} onPress={handleOpenCompose}>
                 <Text style={styles.emptyButtonText}>Post a Confession</Text>
               </TouchableOpacity>
             </View>
@@ -469,7 +374,7 @@ export default function ConfessionsScreen() {
       {/* FAB */}
       <TouchableOpacity
         style={styles.fab}
-        onPress={() => setShowCompose(true)}
+        onPress={handleOpenCompose}
         activeOpacity={0.85}
       >
         <Ionicons name="add" size={24} color={COLORS.white} />
@@ -482,42 +387,6 @@ export default function ConfessionsScreen() {
         onClose={() => {
           setShowEmojiPicker(false);
           setEmojiTargetConfessionId(null);
-        }}
-      />
-
-      {/* Compose Modal */}
-      <ComposeConfessionModal
-        visible={showCompose}
-        onClose={() => setShowCompose(false)}
-        onSubmit={handleCompose}
-      />
-
-      {/* Chat Modal */}
-      <ConfessionChatModal
-        visible={!!activeChatModal}
-        chat={activeChatModal}
-        currentUserId={currentUserId}
-        confessionText={
-          activeChatModal
-            ? confessions.find((c) => c.id === activeChatModal.confessionId)?.text
-            : undefined
-        }
-        onClose={() => setActiveChatModal(null)}
-        onSendMessage={handleSendChatMessage}
-        onAgreeReveal={() => {
-          if (!activeChatModal) return;
-          agreeMutualReveal(activeChatModal.id, currentUserId);
-          const updated = useConfessionStore.getState().chats.find((c) => c.id === activeChatModal.id);
-          if (updated) setActiveChatModal({ ...updated });
-        }}
-        onDeclineReveal={() => {
-          if (!activeChatModal) return;
-          declineMutualReveal(activeChatModal.id, currentUserId);
-          const updated = useConfessionStore.getState().chats.find((c) => c.id === activeChatModal.id);
-          if (updated) setActiveChatModal({ ...updated });
-        }}
-        onBlock={() => {
-          setActiveChatModal(null);
         }}
       />
     </SafeAreaView>

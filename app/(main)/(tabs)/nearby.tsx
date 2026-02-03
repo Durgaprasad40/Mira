@@ -19,6 +19,7 @@ import { DEMO_USER, DEMO_PROFILES } from '@/lib/demoData';
 import { useAuthStore } from '@/stores/authStore';
 import { isDemoMode } from '@/hooks/useConvex';
 import { api } from '@/convex/_generated/api';
+import { useScreenSafety } from '@/hooks/useScreenSafety';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -170,6 +171,7 @@ export default function NearbyScreen() {
   const { latitude, longitude, getCurrentLocation, requestPermission } = useLocation();
   const { userId } = useAuthStore();
   const mapRef = useRef<MapView>(null);
+  const { safeTimeout } = useScreenSafety();
 
   // User location — fallback to demo coords
   const userLat = latitude ?? DEMO_USER.latitude;
@@ -201,7 +203,7 @@ export default function NearbyScreen() {
       setBanner({ title, body });
       Animated.timing(bannerAnim, { toValue: 1, duration: 300, useNativeDriver: true }).start();
       if (bannerTimerRef.current) clearTimeout(bannerTimerRef.current);
-      bannerTimerRef.current = setTimeout(() => {
+      bannerTimerRef.current = safeTimeout(() => {
         Animated.timing(bannerAnim, { toValue: 0, duration: 300, useNativeDriver: true }).start(() => {
           setBanner(null);
         });
