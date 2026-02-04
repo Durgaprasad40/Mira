@@ -14,6 +14,9 @@ import { useMutation } from "convex/react";
 import { api } from "@/convex/_generated/api";
 import { COLORS } from "@/lib/constants";
 import { isDemoMode } from "@/hooks/useConvex";
+import { useDemoStore } from "@/stores/demoStore";
+import { Toast } from "@/components/ui/Toast";
+import { trackEvent } from "@/lib/analytics";
 
 type ReportReason =
   | "fake_profile"
@@ -64,11 +67,10 @@ export function ReportBlockModal({
 
   const handleBlock = async () => {
     if (isDemoMode) {
-      Alert.alert(
-        "Blocked",
-        `${reportedUserName} has been blocked. They won't see your profile or message you.`
-      );
+      useDemoStore.getState().blockUser(reportedUserId);
+      trackEvent({ name: 'block_user', blockedUserId: reportedUserId });
       resetAndClose();
+      Toast.show(`${reportedUserName} blocked`);
       onBlockSuccess?.();
       return;
     }
@@ -78,11 +80,9 @@ export function ReportBlockModal({
         blockerId: currentUserId as any,
         blockedUserId: reportedUserId as any,
       });
-      Alert.alert(
-        "Blocked",
-        `${reportedUserName} has been blocked. They won't see your profile or message you.`
-      );
+      trackEvent({ name: 'block_user', blockedUserId: reportedUserId });
       resetAndClose();
+      Toast.show(`${reportedUserName} blocked`);
       onBlockSuccess?.();
     } catch (error: any) {
       Alert.alert("Error", error.message || "Failed to block user.");
@@ -93,6 +93,12 @@ export function ReportBlockModal({
     if (!selectedReason) return;
 
     if (isDemoMode) {
+      useDemoStore.getState().reportUser(
+        reportedUserId,
+        selectedReason,
+        selectedReason === "other" ? otherDescription : undefined,
+      );
+      trackEvent({ name: 'report_user', reportedUserId, reason: selectedReason });
       setStep("confirm");
       return;
     }
@@ -112,6 +118,7 @@ export function ReportBlockModal({
         blockedUserId: reportedUserId as any,
       });
 
+      trackEvent({ name: 'report_user', reportedUserId, reason: selectedReason });
       setStep("confirm");
     } catch (error: any) {
       Alert.alert("Error", error.message || "Failed to submit report.");
@@ -254,6 +261,7 @@ export function ReportBlockModal({
         style={styles.submitButton}
         onPress={() => {
           resetAndClose();
+          Toast.show("Reported — thanks for keeping Mira safe");
           onBlockSuccess?.();
         }}
       >

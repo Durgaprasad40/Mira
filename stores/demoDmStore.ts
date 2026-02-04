@@ -21,9 +21,18 @@ export interface DemoDmMessage {
   readAt?: number;
 }
 
+/** Lightweight metadata so demo chat screens can render a header. */
+export interface DemoConversationMeta {
+  otherUser: { id?: string; name: string; lastActive: number; isVerified?: boolean };
+  isPreMatch: boolean;
+}
+
 interface DemoDmState {
   /** conversationId → ordered message array */
   conversations: Record<string, DemoDmMessage[]>;
+
+  /** conversationId → header / other-user metadata */
+  meta: Record<string, DemoConversationMeta>;
 
   /**
    * Seed a conversation with initial messages if it hasn't been
@@ -31,6 +40,9 @@ interface DemoDmState {
    * writes if the key is absent.
    */
   seedConversation: (id: string, seed: DemoDmMessage[]) => void;
+
+  /** Store or update conversation metadata (other-user info, etc.). */
+  setMeta: (id: string, m: DemoConversationMeta) => void;
 
   /** Append a new message to a conversation. */
   addMessage: (id: string, msg: DemoDmMessage) => void;
@@ -40,6 +52,7 @@ export const useDemoDmStore = create<DemoDmState>()(
   persist(
     (set, get) => ({
       conversations: {},
+      meta: {},
 
       seedConversation: (id, seed) => {
         // Only seed once — existing data takes precedence
@@ -48,6 +61,11 @@ export const useDemoDmStore = create<DemoDmState>()(
           conversations: { ...s.conversations, [id]: seed },
         }));
       },
+
+      setMeta: (id, m) =>
+        set((s) => ({
+          meta: { ...s.meta, [id]: m },
+        })),
 
       addMessage: (id, msg) =>
         set((s) => ({

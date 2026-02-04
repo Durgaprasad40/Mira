@@ -14,6 +14,10 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { COLORS } from '@/lib/constants';
+import { isDemoMode } from '@/hooks/useConvex';
+import { useDemoStore } from '@/stores/demoStore';
+import { Toast } from '@/components/ui/Toast';
+import { trackEvent } from '@/lib/analytics';
 
 type ReportReason =
   | 'inappropriate_content'
@@ -57,6 +61,18 @@ export function ReportModal({
   const handleSubmit = async () => {
     if (!selectedReason) return;
 
+    if (isDemoMode) {
+      useDemoStore.getState().reportUser(
+        reportedUserId,
+        selectedReason,
+        description.trim() || undefined,
+      );
+      trackEvent({ name: 'report_user', reportedUserId, reason: selectedReason });
+      handleClose();
+      Toast.show('Reported — thanks for keeping Mira safe');
+      return;
+    }
+
     setSubmitting(true);
     try {
       await reportMedia({
@@ -68,8 +84,9 @@ export function ReportModal({
         description: description.trim() || undefined,
       });
 
-      Alert.alert('Report Submitted', 'Thank you for reporting. We will review this shortly.');
+      trackEvent({ name: 'report_user', reportedUserId, reason: selectedReason });
       handleClose();
+      Toast.show('Reported — thanks for keeping Mira safe');
     } catch (error: any) {
       Alert.alert('Error', error.message || 'Failed to submit report');
     } finally {
