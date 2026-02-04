@@ -16,18 +16,15 @@ export interface TrustBadge {
 
 interface TrustBadgeInput {
   isVerified?: boolean;
-  /** Verification status: 'unverified' | 'pending_verification' | 'verified' */
-  verificationStatus?: string;
   /** Unix-ms timestamp of last activity */
   lastActive?: number;
-  /** Unix-ms timestamp of account creation */
-  createdAt?: number;
   /** Number of photos the user has uploaded */
   photoCount?: number;
+  /** User bio text */
+  bio?: string;
 }
 
 const ONE_DAY_MS = 24 * 60 * 60 * 1000;
-const THIRTY_DAYS_MS = 30 * ONE_DAY_MS;
 
 /**
  * Returns an array of 0-4 trust badges based on the available profile data.
@@ -37,50 +34,47 @@ export function getTrustBadges(input: TrustBadgeInput): TrustBadge[] {
   const badges: TrustBadge[] = [];
   const now = Date.now();
 
-  // 1. Verification status badge
-  const verificationStatus = input.verificationStatus;
-  if (verificationStatus === 'verified' || input.isVerified) {
-    badges.push({
-      key: 'verified',
-      label: 'ID Verified',
-      icon: 'shield-checkmark',
-      color: COLORS.primary,
-    });
-  } else if (verificationStatus === 'pending_verification') {
-    badges.push({
-      key: 'pending_verification',
-      label: 'Verification Pending',
-      icon: 'shield-half-outline',
-      color: COLORS.warning,
-    });
-  }
-
-  // 2. Recently Active — active within the last 24 hours
+  // 1. Active Today — active within the last 24 hours
   if (input.lastActive && now - input.lastActive < ONE_DAY_MS) {
     badges.push({
       key: 'active',
-      label: 'Recently Active',
-      icon: 'time-outline',
+      label: 'Active Today',
+      icon: 'flash-outline',
       color: COLORS.success,
     });
   }
 
-  // 3. Established Member — account older than 30 days
-  if (input.createdAt && now - input.createdAt >= THIRTY_DAYS_MS) {
+  // 2. Photos Added — 2 or more photos uploaded
+  if (input.photoCount && input.photoCount >= 2) {
     badges.push({
-      key: 'established',
-      label: 'Established',
-      icon: 'calendar-outline',
+      key: 'photos',
+      label: 'Photos Added',
+      icon: 'images-outline',
       color: COLORS.secondary,
     });
   }
 
-  // 4. Photo Rich — 3 or more photos uploaded
-  if (input.photoCount && input.photoCount >= 3) {
+  // 3. Profile Complete — bio >= 20 chars AND photoCount >= 2
+  if (
+    input.bio &&
+    input.bio.length >= 20 &&
+    input.photoCount &&
+    input.photoCount >= 2
+  ) {
     badges.push({
-      key: 'photos',
-      label: 'Photo Rich',
-      icon: 'images-outline',
+      key: 'complete',
+      label: 'Profile Complete',
+      icon: 'checkmark-done-outline',
+      color: COLORS.primary,
+    });
+  }
+
+  // 4. Phone Verified
+  if (input.isVerified) {
+    badges.push({
+      key: 'verified',
+      label: 'Phone Verified',
+      icon: 'shield-checkmark',
       color: COLORS.superLike,
     });
   }

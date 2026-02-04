@@ -163,12 +163,17 @@ export const ProfileCard: React.FC<ProfileCardProps> = ({
 
         {trustBadges && trustBadges.length > 0 && (
           <View style={styles.trustBadgeRow}>
-            {trustBadges.map((badge) => (
+            {trustBadges.slice(0, 3).map((badge) => (
               <View key={badge.key} style={[styles.trustBadgeCompact, { backgroundColor: badge.color + '30' }]}>
                 <Ionicons name={badge.icon as any} size={11} color={COLORS.white} />
                 <Text style={styles.trustBadgeLabel}>{badge.label}</Text>
               </View>
             ))}
+            {trustBadges.length > 3 && (
+              <View style={[styles.trustBadgeCompact, { backgroundColor: COLORS.textMuted + '30' }]}>
+                <Text style={styles.trustBadgeLabel}>+{trustBadges.length - 3}</Text>
+              </View>
+            )}
           </View>
         )}
 
@@ -246,7 +251,7 @@ const styles = StyleSheet.create({
   // Arrow button (opens full profile)
   arrowBtn: {
     position: 'absolute',
-    bottom: 130,
+    bottom: 140,
     right: 12,
     width: 36,
     height: 36,
@@ -256,16 +261,16 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     zIndex: 15,
   },
-  // Info overlay — sits above floating action buttons
+  // Info overlay — gradient backdrop for text legibility
   overlay: {
     position: 'absolute',
     left: 0,
     right: 0,
     bottom: 0,
-    paddingTop: 24,
+    paddingTop: 32,
     paddingHorizontal: 16,
-    paddingBottom: 90,
-    backgroundColor: 'transparent',
+    paddingBottom: 16,
+    backgroundColor: 'rgba(0,0,0,0.25)',
   },
   headerRow: {
     flexDirection: 'row',
@@ -301,8 +306,8 @@ const styles = StyleSheet.create({
     textShadowRadius: 3,
   },
   distance: {
-    fontSize: 14,
-    color: COLORS.white,
+    fontSize: 13,
+    color: 'rgba(255,255,255,0.7)',
     textShadowColor: 'rgba(0,0,0,0.5)',
     textShadowOffset: { width: 0, height: 1 },
     textShadowRadius: 3,

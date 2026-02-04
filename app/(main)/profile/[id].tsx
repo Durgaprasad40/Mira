@@ -189,20 +189,26 @@ export default function ViewProfileScreen() {
         {(() => {
           const badges = getTrustBadges({
             isVerified: profile.isVerified,
-            verificationStatus: (profile as any).verificationStatus,
             lastActive: (profile as any).lastActive,
-            createdAt: (profile as any).createdAt,
             photoCount: profile.photos?.length,
+            bio: profile.bio,
           });
           if (badges.length === 0) return null;
+          const visible = badges.slice(0, 3);
+          const overflow = badges.length - 3;
           return (
             <View style={styles.trustBadgeRow}>
-              {badges.map((badge) => (
+              {visible.map((badge) => (
                 <View key={badge.key} style={[styles.trustBadge, { borderColor: badge.color + '40' }]}>
                   <Ionicons name={badge.icon as any} size={14} color={badge.color} />
                   <Text style={[styles.trustBadgeText, { color: badge.color }]}>{badge.label}</Text>
                 </View>
               ))}
+              {overflow > 0 && (
+                <View style={[styles.trustBadge, { borderColor: COLORS.textMuted + '40' }]}>
+                  <Text style={[styles.trustBadgeText, { color: COLORS.textMuted }]}>+{overflow}</Text>
+                </View>
+              )}
             </View>
           );
         })()}
