@@ -55,19 +55,45 @@ export default function MessagesScreen() {
     !isDemoMode && convexUserId ? { userId: convexUserId } : 'skip'
   );
 
-  // In demo mode, only show conversations that have valid DM metadata
-  // AND at least one message (filters out empty/stale threads).
+  // In demo mode, build thread model from DM store messages.
   const demoMeta = useDemoDmStore((s) => s.meta);
   const demoConversations = useDemoDmStore((s) => s.conversations);
   const demoMatchedUserIds = new Set(demoMatches.map((m) => m.otherUser?.id));
-  const conversations = isDemoMode
-    ? (demoMatches as any[]).filter((m: any) =>
+
+  const demoThreads = React.useMemo(() => {
+    if (!isDemoMode) return [];
+    return (demoMatches as any[])
+      .filter((m: any) =>
         !blockedUserIds.includes(m.otherUser?.id) &&
         !!demoMeta[m.conversationId] &&
         (demoConversations[m.conversationId]?.length ?? 0) > 0
       )
-    : convexConversations;
-  const unreadCount = isDemoMode ? 1 : convexUnreadCount;
+      .map((m: any) => {
+        const msgs = demoConversations[m.conversationId] ?? [];
+        const lastMsg = msgs.length > 0 ? msgs[msgs.length - 1] : null;
+        const unread = msgs.filter(
+          (msg) => msg.senderId !== userId && !msg.readAt,
+        ).length;
+        return {
+          ...m,
+          lastMessage: lastMsg
+            ? { content: lastMsg.content, type: lastMsg.type, senderId: lastMsg.senderId, createdAt: lastMsg.createdAt }
+            : m.lastMessage,
+          unreadCount: unread,
+          _sortTs: lastMsg?.createdAt ?? 0,
+        };
+      })
+      .sort((a: any, b: any) => b._sortTs - a._sortTs);
+  }, [isDemoMode, demoMatches, blockedUserIds, demoMeta, demoConversations, userId]);
+
+  const conversations = isDemoMode ? demoThreads : convexConversations;
+
+  // Unread badge: count of conversations with >= 1 unread incoming message
+  const demoUnreadCount = React.useMemo(() => {
+    if (!isDemoMode) return 0;
+    return demoThreads.filter((t: any) => t.unreadCount > 0).length;
+  }, [isDemoMode, demoThreads]);
+  const unreadCount = isDemoMode ? demoUnreadCount : convexUnreadCount;
   const currentUser = isDemoMode ? { gender: 'male', messagesRemaining: 999999, messagesResetAt: undefined, subscriptionTier: 'premium' as const } : convexCurrentUser;
   // In demo mode, exclude likes from users who are already matched
   const likesReceived = isDemoMode

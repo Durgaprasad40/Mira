@@ -20,6 +20,7 @@ import { Image } from 'expo-image';
 import { FlatList } from 'react-native';
 import { isDemoMode } from '@/hooks/useConvex';
 import { DEMO_PROFILES, getDemoCurrentUser } from '@/lib/demoData';
+import { useDemoStore } from '@/stores/demoStore';
 import { ReportBlockModal } from '@/components/security/ReportBlockModal';
 import { Toast } from '@/components/ui/Toast';
 
@@ -69,14 +70,36 @@ export default function ViewProfileScreen() {
 
   const swipe = useMutation(api.likes.swipe);
 
+  const demoLikes = useDemoStore((s) => s.likes);
+  const simulateMatch = useDemoStore((s) => s.simulateMatch);
+
   const handleSwipe = async (action: 'like' | 'pass' | 'super_like') => {
     if (!currentUserId || !userId) return;
 
     if (isDemoMode) {
-      if (action === 'like' && Math.random() > 0.7) {
-        router.push(`/(main)/match-celebration?matchId=demo_match&userId=${userId}` as any);
-      } else {
+      if (action === 'pass') {
         router.back();
+        return;
+      }
+
+      // Check if this user already liked us (i.e. they're in our likes list).
+      // If so, liking or super-liking them back ALWAYS creates a match.
+      const isLikeBack = demoLikes.some((l) => l.userId === userId);
+
+      if (isLikeBack || action === 'super_like') {
+        // Create the match, DM conversation, and remove from discover + likes
+        simulateMatch(userId);
+        const matchId = `match_${userId}`;
+        router.push(`/(main)/match-celebration?matchId=${matchId}&userId=${userId}` as any);
+      } else {
+        // Regular like on someone NOT in our likes list — small random chance of instant match
+        if (Math.random() > 0.7) {
+          simulateMatch(userId);
+          const matchId = `match_${userId}`;
+          router.push(`/(main)/match-celebration?matchId=${matchId}&userId=${userId}` as any);
+        } else {
+          router.back();
+        }
       }
       return;
     }

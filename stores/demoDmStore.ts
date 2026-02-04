@@ -55,6 +55,9 @@ interface DemoDmState {
 
   /** Clear the draft for a conversation (e.g. after sending). */
   clearDraft: (id: string) => void;
+
+  /** Mark all incoming messages in a conversation as read. */
+  markConversationRead: (id: string, currentUserId: string) => void;
 }
 
 export const useDemoDmStore = create<DemoDmState>()(
@@ -94,6 +97,19 @@ export const useDemoDmStore = create<DemoDmState>()(
         set((s) => {
           const { [id]: _, ...rest } = s.drafts;
           return { drafts: rest };
+        }),
+
+      markConversationRead: (id, currentUserId) =>
+        set((s) => {
+          const msgs = s.conversations[id];
+          if (!msgs) return {};
+          const now = Date.now();
+          const updated = msgs.map((m) =>
+            m.senderId !== currentUserId && !m.readAt
+              ? { ...m, readAt: now }
+              : m,
+          );
+          return { conversations: { ...s.conversations, [id]: updated } };
         }),
     }),
     {

@@ -36,8 +36,13 @@ import { isDemoMode } from '@/hooks/useConvex';
 import { useDemoDmStore, DemoDmMessage } from '@/stores/demoDmStore';
 import { Toast } from '@/components/ui/Toast';
 
-/** Canonical demo user ID — must match demoData.ts DEMO_CURRENT_USER.id */
-const DEMO_USER_ID = 'demo_user_1';
+/** Resolve the current demo user ID at call-time from authStore.
+ *  Falls back to 'demo_user_1' for legacy data compatibility. */
+function getDemoUserId(): string {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  const { useAuthStore } = require('@/stores/authStore');
+  return useAuthStore.getState().userId || 'demo_user_1';
+}
 
 /** Seed data is no longer hardcoded — conversations are created dynamically
  * by simulateMatch() and match-celebration's "Say Hi" flow, both of which
@@ -148,11 +153,14 @@ export default function ChatScreenInner({ conversationId }: ChatScreenInnerProps
   const [reportModalVisible, setReportModalVisible] = useState(false);
   const [showReportBlock, setShowReportBlock] = useState(false);
 
+  const markDemoRead = useDemoDmStore((s) => s.markConversationRead);
   useEffect(() => {
-    if (!isDemo && conversationId && userId) {
+    if (isDemo && conversationId) {
+      markDemoRead(conversationId, getDemoUserId());
+    } else if (!isDemo && conversationId && userId) {
       markAsRead({ conversationId: conversationId as any, userId: userId as any });
     }
-  }, [conversationId, userId, isDemo]);
+  }, [conversationId, userId, isDemo, markDemoRead]);
 
   // Auto-scroll only when new messages arrive AND user is near the bottom.
   useEffect(() => {
@@ -196,7 +204,7 @@ export default function ChatScreenInner({ conversationId }: ChatScreenInnerProps
         _id: `dm_${Date.now()}`,
         content: text,
         type: 'text',
-        senderId: DEMO_USER_ID,
+        senderId: getDemoUserId(),
         createdAt: Date.now(),
       });
       // Clear the draft after sending
@@ -393,9 +401,9 @@ export default function ChatScreenInner({ conversationId }: ChatScreenInnerProps
                 systemSubtype: item.systemSubtype,
                 mediaId: item.mediaId,
               }}
-              isOwn={item.senderId === (isDemo ? DEMO_USER_ID : userId)}
+              isOwn={item.senderId === (isDemo ? getDemoUserId() : userId)}
               otherUserName={activeConversation.otherUser.name}
-              currentUserId={(isDemo ? DEMO_USER_ID : userId) || undefined}
+              currentUserId={(isDemo ? getDemoUserId() : userId) || undefined}
               onProtectedMediaPress={handleProtectedMediaPress}
             />
           )}
@@ -475,7 +483,7 @@ export default function ChatScreenInner({ conversationId }: ChatScreenInnerProps
         onClose={() => setShowReportBlock(false)}
         reportedUserId={(activeConversation as any).otherUser?.id || ''}
         reportedUserName={activeConversation.otherUser.name}
-        currentUserId={userId || DEMO_USER_ID}
+        currentUserId={userId || getDemoUserId()}
         onBlockSuccess={() => router.back()}
       />
     </View>

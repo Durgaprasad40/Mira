@@ -523,8 +523,13 @@ export function DiscoverCardStack({ theme = "light", externalProfiles, hideHeade
             <Ionicons name="options-outline" size={22} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
           </TouchableOpacity>
           <Text style={[styles.headerLogo, dark && { color: INCOGNITO_COLORS.primary }]}>mira</Text>
-          <TouchableOpacity style={styles.headerBtn} onPress={() => router.push("/(main)/likes" as any)}>
-            <Ionicons name="heart" size={22} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
+          <TouchableOpacity style={styles.headerBtn} onPress={() => router.push("/(main)/notifications" as any)}>
+            <Ionicons name="notifications-outline" size={22} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
+            {unseenCount > 0 && (
+              <View style={styles.bellBadge}>
+                <Text style={styles.bellBadgeText}>{unseenCount > 9 ? "9+" : unseenCount}</Text>
+              </View>
+            )}
           </TouchableOpacity>
         </View>
 
@@ -562,8 +567,8 @@ export function DiscoverCardStack({ theme = "light", externalProfiles, hideHeade
             <Ionicons name="options-outline" size={22} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
           </TouchableOpacity>
           <Text style={[styles.headerLogo, dark && { color: INCOGNITO_COLORS.primary }]}>mira</Text>
-          <TouchableOpacity style={styles.headerBtn} onPress={() => router.push("/(main)/likes" as any)}>
-            <Ionicons name="heart" size={22} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
+          <TouchableOpacity style={styles.headerBtn} onPress={() => router.push("/(main)/notifications" as any)}>
+            <Ionicons name="notifications-outline" size={22} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
             {unseenCount > 0 && (
               <View style={styles.bellBadge}>
                 <Text style={styles.bellBadgeText}>{unseenCount > 9 ? "9+" : unseenCount}</Text>
