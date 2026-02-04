@@ -35,7 +35,12 @@ interface MessageBubbleProps {
   onProtectedMediaPress?: (messageId: string) => void;
 }
 
+// Detect messages that are only emoji (1–8 emoji, no other text)
+const EMOJI_ONLY_RE = /^[\p{Emoji_Presentation}\p{Extended_Pictographic}\u200d\uFE0F]{1,8}$/u;
+
 export function MessageBubble({ message, isOwn, otherUserName, currentUserId, onMediaPress, onProtectedMediaPress }: MessageBubbleProps) {
+  const isEmojiOnly = message.type === 'text' && EMOJI_ONLY_RE.test(message.content.trim());
+
   const formatTime = (timestamp: number) => {
     const date = new Date(timestamp);
     return date.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
@@ -127,8 +132,18 @@ export function MessageBubble({ message, isOwn, otherUserName, currentUserId, on
 
   return (
     <View style={[styles.container, isOwn && styles.ownContainer]}>
-      <View style={[styles.bubble, isOwn ? styles.ownBubble : styles.otherBubble]}>
-        <Text style={[styles.text, isOwn && styles.ownText]}>{message.content}</Text>
+      <View style={[
+        styles.bubble,
+        isOwn ? styles.ownBubble : styles.otherBubble,
+        isEmojiOnly && styles.emojiBubble,
+      ]}>
+        <Text style={[
+          styles.text,
+          isOwn && styles.ownText,
+          isEmojiOnly && styles.emojiText,
+        ]}>
+          {message.content}
+        </Text>
         <View style={styles.footer}>
           <Text style={[styles.time, isOwn && styles.ownTime]}>
             {formatTime(message.createdAt)}
@@ -173,13 +188,24 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.secondary,
     maxWidth: '85%',
   },
+  emojiBubble: {
+    backgroundColor: 'transparent',
+    paddingHorizontal: 4,
+    paddingVertical: 4,
+  },
   text: {
     fontSize: 15,
     color: COLORS.text,
     lineHeight: 20,
+    flexShrink: 1,
   },
   ownText: {
     color: COLORS.white,
+  },
+  emojiText: {
+    fontSize: 36,
+    lineHeight: 44,
+    textAlign: 'center',
   },
   footer: {
     flexDirection: 'row',

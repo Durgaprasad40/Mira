@@ -6,7 +6,7 @@ import { Button } from '@/components/ui';
 import { isDemoMode } from '@/config/demo';
 
 interface MessageInputProps {
-  onSend: (text: string, type?: 'text' | 'template') => void;
+  onSend: (text: string, type?: 'text' | 'template') => void | Promise<void>;
   onSendImage?: () => void;
   onSendDare?: () => void;
   disabled?: boolean;
@@ -31,7 +31,7 @@ export function MessageInput({
   const [text, setText] = useState('');
   const [showTemplates, setShowTemplates] = useState(false);
 
-  const handleSend = () => {
+  const handleSend = async () => {
     if (!text.trim()) return;
 
     if (!isDemoMode && isPreMatch && !canSendCustom && subscriptionTier === 'free') {
@@ -44,8 +44,14 @@ export function MessageInput({
       return;
     }
 
-    onSend(text.trim(), 'text');
+    const trimmed = text.trim();
     setText('');
+    try {
+      await onSend(trimmed, 'text');
+    } catch {
+      // Restore text so user can retry
+      setText(trimmed);
+    }
   };
 
   const handleTemplateSelect = (template: typeof MESSAGE_TEMPLATES[0]) => {
@@ -203,6 +209,7 @@ const styles = StyleSheet.create({
     paddingVertical: 10,
     fontSize: 15,
     color: COLORS.text,
+    minHeight: 40,
     maxHeight: 100,
     marginRight: 8,
   },
