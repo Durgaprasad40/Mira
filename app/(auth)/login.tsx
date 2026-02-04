@@ -9,27 +9,18 @@ import {
 } from "react-native";
 import { COLORS } from "@/lib/constants";
 import { Button, Input } from "@/components/ui";
-import { useRouter, Redirect } from "expo-router";
+import { useRouter } from "expo-router";
 import { useMutation } from "convex/react";
 import { api } from "@/convex/_generated/api";
 import { useAuthStore } from "@/stores/authStore";
 import { Ionicons } from "@expo/vector-icons";
 import { isDemoMode } from "@/hooks/useConvex";
-import { DEMO_USER } from "@/lib/demoData";
 import { useDemoStore } from "@/stores/demoStore";
 
 export default function LoginScreen() {
   const router = useRouter();
   const { setAuth } = useAuthStore();
-  const demoUserProfile = useDemoStore((s) => s.demoUserProfile);
 
-  // Demo mode: never show login screen
-  if (isDemoMode) {
-    if (demoUserProfile) {
-      return <Redirect href={"/(main)/(tabs)/home" as any} />;
-    }
-    return <Redirect href={"/demo-profile" as any} />;
-  }
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [isLoading, setIsLoading] = useState(false);
@@ -38,10 +29,25 @@ export default function LoginScreen() {
   const loginWithEmail = useMutation(api.auth.loginWithEmail);
 
   const handleLogin = async () => {
-    // Demo mode: skip backend auth, log in as demo user
+    // Demo mode: local sign-in via demoStore
     if (isDemoMode) {
-      setAuth(DEMO_USER._id, "demo_token", true);
-      router.replace("/(main)/(tabs)/home");
+      if (!email) { setError("Please enter your email"); return; }
+      if (!password) { setError("Please enter your password"); return; }
+      setIsLoading(true);
+      setError("");
+      try {
+        const { userId, onboardingComplete } = useDemoStore.getState().demoSignIn(email, password);
+        setAuth(userId, "demo_token", onboardingComplete);
+        if (onboardingComplete) {
+          router.replace("/(main)/(tabs)/home");
+        } else {
+          router.replace("/(onboarding)");
+        }
+      } catch (e: any) {
+        setError(e.message || "Login failed");
+      } finally {
+        setIsLoading(false);
+      }
       return;
     }
 

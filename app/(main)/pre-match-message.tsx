@@ -38,19 +38,19 @@ export default function PreMatchMessageScreen() {
 
   const targetUser = useQuery(
     api.users.getUserById,
-    targetUserId && userId ? { userId: targetUserId as any, viewerId: userId as any } : 'skip'
+    !isDemoMode && targetUserId && userId ? { userId: targetUserId as any, viewerId: userId as any } : 'skip'
   );
 
   const templates = useQuery(
     api.messageTemplates.getMessageTemplates,
-    userId && targetUserId
+    !isDemoMode && userId && targetUserId
       ? { userId: userId as any, targetUserId: targetUserId as any }
       : 'skip'
   );
 
   const canSend = useQuery(
     api.messages.canSendMessage,
-    userId ? { userId: userId as any } : 'skip'
+    !isDemoMode && userId ? { userId: userId as any } : 'skip'
   );
 
   const sendPreMatchMessage = useMutation(api.messages.sendPreMatchMessage);

@@ -15,6 +15,7 @@ import { useAuthStore } from '@/stores/authStore';
 import { COLORS } from '@/lib/constants';
 import { Button } from '@/components/ui';
 import { Ionicons } from '@expo/vector-icons';
+import { isDemoMode } from '@/hooks/useConvex';
 
 export default function DaresScreen() {
   const router = useRouter();
@@ -22,12 +23,12 @@ export default function DaresScreen() {
 
   const pendingDares = useQuery(
     api.dares.getPendingDares,
-    userId ? { userId: userId as any } : 'skip'
+    !isDemoMode && userId ? { userId: userId as any } : 'skip'
   );
 
   const daresSent = useQuery(
     api.dares.getDaresSent,
-    userId ? { userId: userId as any } : 'skip'
+    !isDemoMode && userId ? { userId: userId as any } : 'skip'
   );
 
   const acceptDare = useMutation(api.dares.acceptDare);

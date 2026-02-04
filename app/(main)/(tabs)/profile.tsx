@@ -16,23 +16,43 @@ import { COLORS } from '@/lib/constants';
 import { Avatar, Button } from '@/components/ui';
 import { Ionicons } from '@expo/vector-icons';
 import { Image } from 'expo-image';
+import { isDemoMode } from '@/hooks/useConvex';
+import { useDemoStore } from '@/stores/demoStore';
+import { getDemoCurrentUser } from '@/lib/demoData';
 
 export default function ProfileScreen() {
   const router = useRouter();
   const userId = useAuthStore((s) => s.userId);
   const logout = useAuthStore((s) => s.logout);
 
-  const currentUser = useQuery(
+  const convexUser = useQuery(
     api.users.getCurrentUser,
-    userId ? { userId: userId as any } : 'skip'
+    !isDemoMode && userId ? { userId: userId as any } : 'skip'
   );
 
   const subscriptionStatus = useQuery(
     api.subscriptions.getSubscriptionStatus,
-    userId ? { userId: userId as any } : 'skip'
+    !isDemoMode && userId ? { userId: userId as any } : 'skip'
   );
 
   const deactivateAccount = useMutation(api.users.deactivateAccount);
+
+  // In demo mode, build a currentUser-like object from demoStore
+  const demoUser = isDemoMode ? getDemoCurrentUser() : null;
+  const currentUser = isDemoMode
+    ? demoUser
+      ? {
+          name: demoUser.name,
+          dateOfBirth: demoUser.dateOfBirth,
+          bio: demoUser.bio,
+          gender: demoUser.gender,
+          isVerified: demoUser.isVerified,
+          photos: demoUser.photos.map((p, i) => ({ url: p.url, isPrimary: i === 0 })),
+        }
+      : null
+    : convexUser;
+
+  if (__DEV__) console.log(`[Profile] mode=${isDemoMode ? 'demo' : 'live'} using ${isDemoMode ? 'local' : 'convex'} user`);
 
   const handleLogout = () => {
     Alert.alert('Logout', 'Are you sure you want to logout?', [
@@ -41,6 +61,9 @@ export default function ProfileScreen() {
         text: 'Logout',
         style: 'destructive',
         onPress: () => {
+          if (isDemoMode) {
+            useDemoStore.getState().demoLogout();
+          }
           logout();
           router.replace('/(auth)/welcome');
         },
@@ -60,7 +83,11 @@ export default function ProfileScreen() {
           style: 'destructive',
           onPress: async () => {
             try {
-              await deactivateAccount({ userId: userId as any });
+              if (!isDemoMode) {
+                await deactivateAccount({ userId: userId as any });
+              } else {
+                useDemoStore.getState().demoLogout();
+              }
               logout();
               router.replace('/(auth)/welcome');
             } catch (error: any) {

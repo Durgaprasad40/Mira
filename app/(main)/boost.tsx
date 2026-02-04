@@ -15,6 +15,7 @@ import { Button } from '@/components/ui';
 import { useAuthStore, useSubscriptionStore } from '@/stores';
 import { COLORS } from '@/lib/constants';
 import { Ionicons } from '@expo/vector-icons';
+import { isDemoMode } from '@/hooks/useConvex';
 
 const BOOST_OPTIONS = [
   { id: '1hr', duration: 1, price: 50, label: '1 Hour', popular: false },
@@ -33,7 +34,7 @@ export default function BoostScreen() {
 
   const user = useQuery(
     api.users.getCurrentUser,
-    userId ? { userId: userId as any } : 'skip'
+    !isDemoMode && userId ? { userId: userId as any } : 'skip'
   );
 
   const activateBoost = useMutation(api.subscriptions.activateBoost);

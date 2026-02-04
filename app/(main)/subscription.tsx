@@ -15,6 +15,7 @@ import { useAuthStore } from '@/stores/authStore';
 import { COLORS, SUBSCRIPTION_PLANS, IAP_PRODUCTS } from '@/lib/constants';
 import { Button } from '@/components/ui';
 import { Ionicons } from '@expo/vector-icons';
+import { isDemoMode } from '@/hooks/useConvex';
 
 export default function SubscriptionScreen() {
   const router = useRouter();
@@ -22,12 +23,12 @@ export default function SubscriptionScreen() {
 
   const subscriptionStatus = useQuery(
     api.subscriptions.getSubscriptionStatus,
-    userId ? { userId: userId as any } : 'skip'
+    !isDemoMode && userId ? { userId: userId as any } : 'skip'
   );
 
   const currentUser = useQuery(
     api.users.getCurrentUser,
-    userId ? { userId: userId as any } : 'skip'
+    !isDemoMode && userId ? { userId: userId as any } : 'skip'
   );
 
   const purchaseSubscription = useMutation(api.subscriptions.purchaseSubscription);

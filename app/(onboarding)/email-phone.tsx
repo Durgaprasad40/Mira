@@ -5,6 +5,7 @@ import { COLORS, VALIDATION } from '@/lib/constants';
 import { Input, Button } from '@/components/ui';
 import { useOnboardingStore } from '@/stores/onboardingStore';
 import { Ionicons } from '@expo/vector-icons';
+import { isDemoMode } from '@/hooks/useConvex';
 
 export default function EmailPhoneScreen() {
   const { email, phone, setEmail, setPhone, setStep } = useOnboardingStore();
@@ -45,8 +46,14 @@ export default function EmailPhoneScreen() {
       }
     }
 
-    setStep('otp');
-    router.push('/(onboarding)/otp' as any);
+    if (isDemoMode) {
+      // Skip OTP in demo mode — go straight to password
+      setStep('password');
+      router.push('/(onboarding)/password' as any);
+    } else {
+      setStep('otp');
+      router.push('/(onboarding)/otp' as any);
+    }
   };
 
   return (

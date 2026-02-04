@@ -73,15 +73,26 @@ export function getDemoCurrentUser(): typeof DEMO_USER {
   // Lazy import to avoid circular dependency (demoStore imports from demoData)
   // eslint-disable-next-line @typescript-eslint/no-var-requires
   const { useDemoStore } = require('@/stores/demoStore');
-  const stored = useDemoStore.getState().demoUserProfile;
+  const state = useDemoStore.getState();
+  const userId = state.currentDemoUserId;
+  const stored = userId ? state.demoProfiles[userId] : null;
   if (!stored) return DEMO_USER;
+
   return {
     ...DEMO_USER,
+    _id: userId ?? DEMO_USER._id,
     name: stored.name,
     photos: stored.photos,
     bio: stored.bio ?? DEMO_USER.bio,
     gender: stored.gender ?? DEMO_USER.gender,
+    dateOfBirth: stored.dateOfBirth ?? DEMO_USER.dateOfBirth,
     city: stored.city ?? DEMO_USER.city,
+    lookingFor: (stored.lookingFor as string[]) ?? DEMO_USER.lookingFor,
+    relationshipIntent: (stored.relationshipIntent as string[]) ?? DEMO_USER.relationshipIntent,
+    activities: (stored.activities as string[]) ?? DEMO_USER.activities,
+    minAge: stored.minAge ?? DEMO_USER.minAge,
+    maxAge: stored.maxAge ?? DEMO_USER.maxAge,
+    maxDistance: stored.maxDistance ?? DEMO_USER.maxDistance,
     isVerified: false, // demo user is not phone-verified
   };
 }
@@ -594,7 +605,98 @@ export const DEMO_PROFILES = [
 
 export const DEMO_MATCHES: any[] = [];
 
-export const DEMO_LIKES: any[] = [];
+export const DEMO_LIKES: import('@/stores/demoStore').DemoLike[] = [
+  // Super Likes (2)
+  {
+    likeId: 'like_sl_1',
+    userId: 'demo_profile_6',
+    action: 'super_like',
+    message: 'You seem really interesting!',
+    createdAt: Date.now() - 3600000,
+    name: 'Riya',
+    age: 22,
+    photoUrl: 'https://images.unsplash.com/photo-1504703395950-b89145a5425b?w=400',
+    isBlurred: false,
+  },
+  {
+    likeId: 'like_sl_2',
+    userId: 'demo_profile_9',
+    action: 'super_like',
+    message: null,
+    createdAt: Date.now() - 7200000,
+    name: 'Nisha',
+    age: 29,
+    photoUrl: 'https://images.unsplash.com/photo-1491349174775-aaafddd81942?w=400',
+    isBlurred: false,
+  },
+  // Regular Likes (6)
+  {
+    likeId: 'like_r_1',
+    userId: 'demo_profile_7',
+    action: 'like',
+    message: null,
+    createdAt: Date.now() - 1800000,
+    name: 'Sneha',
+    age: 28,
+    photoUrl: 'https://images.unsplash.com/photo-1506956191951-7a88da4435e5?w=400',
+    isBlurred: false,
+  },
+  {
+    likeId: 'like_r_2',
+    userId: 'demo_profile_8',
+    action: 'like',
+    message: null,
+    createdAt: Date.now() - 5400000,
+    name: 'Diya',
+    age: 21,
+    photoUrl: 'https://images.unsplash.com/photo-1503185912284-5271ff81b9a8?w=400',
+    isBlurred: false,
+  },
+  {
+    likeId: 'like_r_3',
+    userId: 'demo_profile_10',
+    action: 'like',
+    message: null,
+    createdAt: Date.now() - 10800000,
+    name: 'Tara',
+    age: 25,
+    photoUrl: 'https://images.unsplash.com/photo-1484399172022-72a90b12e3c1?w=400',
+    isBlurred: false,
+  },
+  {
+    likeId: 'like_r_4',
+    userId: 'demo_profile_11',
+    action: 'like',
+    message: null,
+    createdAt: Date.now() - 14400000,
+    name: 'Zara',
+    age: 24,
+    photoUrl: 'https://images.unsplash.com/photo-1487412720507-e7ab37603c6f?w=400',
+    isBlurred: false,
+  },
+  {
+    likeId: 'like_r_5',
+    userId: 'demo_profile_12',
+    action: 'like',
+    message: null,
+    createdAt: Date.now() - 18000000,
+    name: 'Isha',
+    age: 26,
+    photoUrl: 'https://images.unsplash.com/photo-1485893086445-ed75865251e0?w=400',
+    isBlurred: true,
+  },
+  {
+    likeId: 'like_r_6',
+    userId: 'demo_profile_13',
+    action: 'like',
+    message: null,
+    createdAt: Date.now() - 21600000,
+    name: 'Pooja',
+    age: 23,
+    photoUrl: 'https://images.unsplash.com/photo-1529626455594-4ff0802cfb7e?w=400',
+    isBlurred: true,
+  },
+];
 
 // === Incognito Demo Data ===
 

@@ -22,13 +22,14 @@ import * as ImagePicker from 'expo-image-picker';
 import { COLORS } from '@/lib/constants';
 import { Button, Input } from '@/components/ui';
 import { useDemoStore } from '@/stores/demoStore';
+import { useDemoDmStore } from '@/stores/demoDmStore';
 import { useAuthStore } from '@/stores/authStore';
 
 const DEMO_USER_ID = 'demo_user_1';
 
 export default function DemoProfileScreen() {
   const router = useRouter();
-  const setDemoUserProfile = useDemoStore((s) => s.setDemoUserProfile);
+  const saveDemoProfile = useDemoStore((s) => s.saveDemoProfile);
   const { setAuth } = useAuthStore();
 
   const [name, setName] = useState('');
@@ -70,7 +71,7 @@ export default function DemoProfileScreen() {
     }
 
     // Save profile to demoStore (persisted)
-    setDemoUserProfile({
+    saveDemoProfile(DEMO_USER_ID, {
       name: trimmedName,
       photos: photos.map((uri) => ({ url: uri })),
       bio: bio.trim() || undefined,
@@ -79,7 +80,9 @@ export default function DemoProfileScreen() {
     // Set auth so the app treats us as authenticated
     setAuth(DEMO_USER_ID, 'demo_token', true);
 
-    // Seed demo data
+    // Clear stale data from any previous demo session, then seed fresh
+    useDemoDmStore.setState({ conversations: {}, meta: {}, drafts: {} });
+    useDemoStore.setState({ seeded: false, matches: [], likes: [], profiles: [] });
     useDemoStore.getState().seed();
 
     if (__DEV__) console.log('[DemoGate] profile_created name=' + trimmedName + ' photos=' + photos.length);

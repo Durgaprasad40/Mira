@@ -242,6 +242,10 @@ export default function MatchCelebrationScreen() {
           isPreMatch: false,
         });
       }
+      // Remove matched user from likes so they don't appear in "New Likes"
+      if (otherUserId) {
+        store.removeLike(otherUserId);
+      }
 
       // Dismiss the celebration modal, push Messages list first, then chat.
       // Stack becomes: Messages list → Chat, so router.back() from chat

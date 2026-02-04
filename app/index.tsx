@@ -10,14 +10,18 @@ import { View, ActivityIndicator, StyleSheet, Text } from "react-native";
 import { COLORS } from "@/lib/constants";
 
 export default function Index() {
-  const _hasHydrated = useAuthStore((s) => s._hasHydrated);
+  const authHydrated = useAuthStore((s) => s._hasHydrated);
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
   const onboardingCompleted = useAuthStore((s) => s.onboardingCompleted);
-  const demoUserProfile = useDemoStore((s) => s.demoUserProfile);
+  const demoHydrated = useDemoStore((s) => s._hasHydrated);
+  const currentDemoUserId = useDemoStore((s) => s.currentDemoUserId);
+  const demoOnboardingComplete = useDemoStore((s) => s.demoOnboardingComplete);
   const didRedirect = useRef(false);
 
-  // Wait for Zustand hydration before deciding destination
-  if (!_hasHydrated) {
+  // Wait for BOTH stores to hydrate before deciding destination.
+  // Without this, demoUserProfile reads as null before AsyncStorage restores it,
+  // causing a false redirect to /demo-profile (perceived as "asks login again").
+  if (!authHydrated || (isDemoMode && !demoHydrated)) {
     return (
       <View style={styles.loadingContainer}>
         <ActivityIndicator size="large" color={COLORS.primary} />
@@ -35,21 +39,23 @@ export default function Index() {
   }
   didRedirect.current = true;
 
-  // ── Demo mode: skip all auth, check if profile exists ──
+  // ── Demo mode: email+password auth with full onboarding ──
   if (isDemoMode) {
-    const profileExists = !!demoUserProfile;
-    if (__DEV__) console.log(`[DemoGate] mode=demo profile_exists=${profileExists}`);
-
-    if (profileExists) {
-      // Ensure auth is set (covers app restart where authStore may have been cleared)
+    if (currentDemoUserId) {
+      // Restore auth session if needed (covers app restart)
       if (!isAuthenticated) {
-        useAuthStore.getState().setAuth('demo_user_1', 'demo_token', true);
+        const onbComplete = !!demoOnboardingComplete[currentDemoUserId];
+        useAuthStore.getState().setAuth(currentDemoUserId, 'demo_token', onbComplete);
       }
-      if (__DEV__) console.log('[DemoGate] redirect_to=main');
-      return <Redirect href={H("/(main)/(tabs)/home")} />;
+      const onbComplete = !!demoOnboardingComplete[currentDemoUserId];
+      if (__DEV__) console.log(`[DemoGate] userId=${currentDemoUserId} onboarding_complete=${onbComplete}`);
+      if (onbComplete) {
+        return <Redirect href={H("/(main)/(tabs)/home")} />;
+      }
+      return <Redirect href={H("/(onboarding)")} />;
     }
-    if (__DEV__) console.log('[DemoGate] redirect_to=profile_create');
-    return <Redirect href={H("/demo-profile")} />;
+    if (__DEV__) console.log('[DemoGate] no userId → welcome');
+    return <Redirect href={H("/(auth)/welcome")} />;
   }
 
   // ── Live mode: standard auth flow ──

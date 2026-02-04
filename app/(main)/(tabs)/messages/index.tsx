@@ -15,6 +15,7 @@ import { isDemoMode } from '@/hooks/useConvex';
 import { asUserId } from '@/convex/id';
 import { getDemoCurrentUser } from '@/lib/demoData';
 import { useDemoStore } from '@/stores/demoStore';
+import { useDemoDmStore } from '@/stores/demoDmStore';
 import { isActiveNow } from '@/lib/formatLastSeen';
 import { useScreenSafety } from '@/hooks/useScreenSafety';
 import { getProfileCompleteness, NUDGE_MESSAGES } from '@/lib/profileCompleteness';
@@ -54,13 +55,23 @@ export default function MessagesScreen() {
     !isDemoMode && convexUserId ? { userId: convexUserId } : 'skip'
   );
 
+  // In demo mode, only show conversations that have valid DM metadata
+  // AND at least one message (filters out empty/stale threads).
+  const demoMeta = useDemoDmStore((s) => s.meta);
+  const demoConversations = useDemoDmStore((s) => s.conversations);
+  const demoMatchedUserIds = new Set(demoMatches.map((m) => m.otherUser?.id));
   const conversations = isDemoMode
-    ? (demoMatches as any[]).filter((m: any) => !blockedUserIds.includes(m.otherUser?.id))
+    ? (demoMatches as any[]).filter((m: any) =>
+        !blockedUserIds.includes(m.otherUser?.id) &&
+        !!demoMeta[m.conversationId] &&
+        (demoConversations[m.conversationId]?.length ?? 0) > 0
+      )
     : convexConversations;
   const unreadCount = isDemoMode ? 1 : convexUnreadCount;
   const currentUser = isDemoMode ? { gender: 'male', messagesRemaining: 999999, messagesResetAt: undefined, subscriptionTier: 'premium' as const } : convexCurrentUser;
+  // In demo mode, exclude likes from users who are already matched
   const likesReceived = isDemoMode
-    ? demoLikes.filter((l) => !blockedUserIds.includes(l.userId))
+    ? demoLikes.filter((l) => !blockedUserIds.includes(l.userId) && !demoMatchedUserIds.has(l.userId))
     : convexLikesReceived;
 
   // Profile completeness nudge — messages tab only shows for needs_both
@@ -94,6 +105,7 @@ export default function MessagesScreen() {
   };
   const superLikes = dedup((likesReceived || []).filter((l: any) => l.action === 'super_like'));
   const regularLikes = dedup((likesReceived || []).filter((l: any) => l.action !== 'super_like'));
+  if (__DEV__ && isDemoMode) console.log(`[Messages] demo likes: total=${demoLikes.length} filtered=${(likesReceived || []).length} superLikes=${superLikes.length} regularLikes=${regularLikes.length}`);
 
   const renderSuperLikesRow = () => {
     if (superLikes.length === 0) return null;
@@ -156,7 +168,7 @@ export default function MessagesScreen() {
       <View style={styles.newLikesSection}>
         <View style={styles.sectionHeader}>
           <Ionicons name="heart" size={18} color={COLORS.primary} />
-          <Text style={styles.sectionTitle}>New Likes</Text>
+          <Text style={styles.sectionTitle}>Likes</Text>
           <View style={[styles.countBadge, { backgroundColor: COLORS.primary + '20' }]}>
             <Text style={[styles.countBadgeText, { color: COLORS.primary }]}>{regularLikes.length}</Text>
           </View>
@@ -265,6 +277,8 @@ export default function MessagesScreen() {
     );
   }
 
+  if (__DEV__ && isDemoMode) console.log(`[Messages] DEMO COUNTS: threads=${(conversations || []).length} likes=${regularLikes.length} super=${superLikes.length} matched=${demoMatchedUserIds.size} storeLikes=${demoLikes.length} user=${userId ?? 'none'}`);
+
   return (
     <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
       <View style={styles.header}>
@@ -273,17 +287,6 @@ export default function MessagesScreen() {
           <Badge count={unreadCount} />
         )}
       </View>
-
-      {showMessagesNudge && (
-        <ProfileNudge
-          message={NUDGE_MESSAGES.needs_both.messages}
-          onDismiss={() => dismissNudge('messages')}
-        />
-      )}
-
-      {renderQuotaBanner()}
-      {renderSuperLikesRow()}
-      {renderNewLikes()}
 
       <FlatList
         data={conversations || []}
@@ -298,6 +301,24 @@ export default function MessagesScreen() {
             onPress={() => router.push(`/(main)/(tabs)/messages/chat/${item.conversationId || item.id}` as any)}
           />
         )}
+        ListHeaderComponent={
+          <>
+            {showMessagesNudge && (
+              <ProfileNudge
+                message={NUDGE_MESSAGES.needs_both.messages}
+                onDismiss={() => dismissNudge('messages')}
+              />
+            )}
+            {renderQuotaBanner()}
+            {renderSuperLikesRow()}
+            {renderNewLikes()}
+            {(superLikes.length > 0 || regularLikes.length > 0) && (conversations || []).length > 0 && (
+              <View style={styles.threadsSectionHeader}>
+                <Text style={styles.sectionTitle}>Messages</Text>
+              </View>
+            )}
+          </>
+        }
         ListEmptyComponent={
           <View style={styles.emptyContainer}>
             <Ionicons name="chatbubbles-outline" size={64} color={COLORS.textLight} />
@@ -309,7 +330,9 @@ export default function MessagesScreen() {
         }
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
         contentContainerStyle={
-          (!conversations || conversations.length === 0) && styles.emptyListContainer
+          (!conversations || conversations.length === 0) && !(superLikes.length > 0 || regularLikes.length > 0)
+            ? styles.emptyListContainer
+            : undefined
         }
       />
     </SafeAreaView>
@@ -409,7 +432,8 @@ const styles = StyleSheet.create({
     color: COLORS.superLike,
   },
   superLikesList: {
-    paddingHorizontal: 16,
+    paddingLeft: 16,
+    paddingRight: 24,
   },
   superLikeItem: {
     marginRight: 16,
@@ -462,7 +486,8 @@ const styles = StyleSheet.create({
     marginBottom: 4,
   },
   likesList: {
-    paddingHorizontal: 16,
+    paddingLeft: 16,
+    paddingRight: 24,
   },
   likeItem: {
     marginRight: 14,
@@ -509,6 +534,16 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: '600',
     color: COLORS.primary,
+  },
+
+  // ── Threads section divider ──
+  threadsSectionHeader: {
+    paddingHorizontal: 16,
+    paddingTop: 16,
+    paddingBottom: 8,
+    borderTopWidth: 1,
+    borderTopColor: COLORS.border,
+    marginTop: 12,
   },
 
   // ── Loading ──

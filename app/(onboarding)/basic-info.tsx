@@ -17,6 +17,8 @@ import { useMutation } from "convex/react";
 import { api } from "@/convex/_generated/api";
 import DateTimePicker from "@react-native-community/datetimepicker";
 import { Gender } from "@/types";
+import { isDemoMode } from "@/hooks/useConvex";
+import { useDemoStore } from "@/stores/demoStore";
 
 export default function BasicInfoScreen() {
   const {
@@ -109,7 +111,42 @@ export default function BasicInfoScreen() {
     // Create user account
     setIsSubmitting(true);
     try {
-      // Try to register
+      if (isDemoMode) {
+        // Demo mode: local account creation via demoStore
+        const demoStore = useDemoStore.getState();
+        let userId: string;
+        try {
+          userId = demoStore.demoSignUp(email, password);
+        } catch (signUpError: any) {
+          // If email already exists, try sign-in
+          if (signUpError.message?.includes("already exists")) {
+            try {
+              const result = demoStore.demoSignIn(email, password);
+              userId = result.userId;
+              setAuth(userId, "demo_token", result.onboardingComplete);
+              if (result.onboardingComplete) {
+                router.replace("/(main)/(tabs)/home");
+                return;
+              }
+              setStep("photo_upload");
+              router.push("/(onboarding)/photo-upload" as any);
+              return;
+            } catch (loginError: any) {
+              Alert.alert("Error", loginError.message || "Failed to login. Please check your password.");
+              return;
+            }
+          } else {
+            Alert.alert("Error", signUpError.message || "Failed to create account");
+            return;
+          }
+        }
+        setAuth(userId, "demo_token", false);
+        setStep("photo_upload");
+        router.push("/(onboarding)/photo-upload" as any);
+        return;
+      }
+
+      // Live mode: register via Convex
       const result = await registerWithEmail({
         email,
         password,

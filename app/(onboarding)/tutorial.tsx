@@ -14,6 +14,9 @@ import { useOnboardingStore } from "@/stores/onboardingStore";
 import { useAuthStore } from "@/stores/authStore";
 import { Ionicons } from "@expo/vector-icons";
 import { LinearGradient } from "expo-linear-gradient";
+import { isDemoMode } from "@/hooks/useConvex";
+import { useDemoStore } from "@/stores/demoStore";
+import { useDemoDmStore } from "@/stores/demoDmStore";
 
 const { width } = Dimensions.get("window");
 
@@ -57,6 +60,11 @@ export default function TutorialScreen() {
   const handleComplete = () => {
     setOnboardingCompleted(true);
     reset();
+    if (isDemoMode) {
+      // Seed demo profiles/matches/likes and clear stale DM data
+      useDemoDmStore.setState({ conversations: {}, meta: {}, drafts: {} });
+      useDemoStore.getState().seed();
+    }
     router.replace("/(main)/(tabs)/home");
   };
 

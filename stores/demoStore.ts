@@ -81,7 +81,14 @@ export interface DemoReport {
   createdAt: number;
 }
 
-/** The demo user's own profile — created via the demo profile screen. */
+/** A demo account credential record. */
+export interface DemoAccount {
+  email: string;
+  password: string;
+  userId: string;
+}
+
+/** The demo user's own profile — created via onboarding. */
 export interface DemoUserProfile {
   name: string;
   photos: { url: string }[];
@@ -89,6 +96,25 @@ export interface DemoUserProfile {
   gender?: string;
   dateOfBirth?: string;
   city?: string;
+  height?: number | null;
+  weight?: number | null;
+  smoking?: string | null;
+  drinking?: string | null;
+  kids?: string | null;
+  exercise?: string | null;
+  pets?: string[];
+  education?: string | null;
+  religion?: string | null;
+  jobTitle?: string;
+  company?: string;
+  school?: string;
+  lookingFor?: string[];
+  relationshipIntent?: string[];
+  activities?: string[];
+  profilePrompts?: { question: string; answer: string }[];
+  minAge?: number;
+  maxAge?: number;
+  maxDistance?: number;
 }
 
 interface DemoState {
@@ -97,9 +123,25 @@ interface DemoState {
   likes: DemoLike[];
   seeded: boolean;
 
-  /** The current demo user's profile (null until created). */
-  demoUserProfile: DemoUserProfile | null;
-  setDemoUserProfile: (profile: DemoUserProfile) => void;
+  /** Multi-user demo accounts (email+password). */
+  demoAccounts: DemoAccount[];
+  /** Currently logged-in demo user id (null = not logged in). */
+  currentDemoUserId: string | null;
+  /** Per-user profiles keyed by userId. */
+  demoProfiles: Record<string, DemoUserProfile>;
+  /** Per-user onboarding completion flag keyed by userId. */
+  demoOnboardingComplete: Record<string, boolean>;
+
+  // Auth actions
+  demoSignUp: (email: string, password: string) => string;
+  demoSignIn: (email: string, password: string) => { userId: string; onboardingComplete: boolean };
+  demoLogout: () => void;
+  saveDemoProfile: (userId: string, data: Partial<DemoUserProfile>) => void;
+  setDemoOnboardingComplete: (userId: string) => void;
+
+  /** Hydration flag — true once AsyncStorage data has been restored. */
+  _hasHydrated: boolean;
+  setHasHydrated: (state: boolean) => void;
 
   // Safety
   blockedUserIds: string[];
@@ -139,13 +181,72 @@ export const useDemoStore = create<DemoState>()(
       matches: [],
       likes: [],
       seeded: false,
-      demoUserProfile: null,
+      demoAccounts: [],
+      currentDemoUserId: null,
+      demoProfiles: {},
+      demoOnboardingComplete: {},
+      _hasHydrated: false,
       blockedUserIds: [],
       reportedUserIds: [],
       reports: [],
       dismissedNudges: [],
 
-      setDemoUserProfile: (profile) => set({ demoUserProfile: profile }),
+      demoSignUp: (email, password) => {
+        const state = get();
+        const normalised = email.toLowerCase();
+        const existing = state.demoAccounts.find(
+          (a) => a.email.toLowerCase() === normalised,
+        );
+        if (existing) {
+          throw new Error('An account with this email already exists');
+        }
+        const userId = `demo_${normalised.replace(/[^a-z0-9]/g, '_')}`;
+        set({
+          demoAccounts: [...state.demoAccounts, { email: normalised, password, userId }],
+          currentDemoUserId: userId,
+        });
+        return userId;
+      },
+
+      demoSignIn: (email, password) => {
+        const state = get();
+        const normalised = email.toLowerCase();
+        const account = state.demoAccounts.find(
+          (a) => a.email.toLowerCase() === normalised,
+        );
+        if (!account) {
+          throw new Error('No account found with this email');
+        }
+        if (account.password !== password) {
+          throw new Error('Incorrect password');
+        }
+        set({ currentDemoUserId: account.userId });
+        return {
+          userId: account.userId,
+          onboardingComplete: !!state.demoOnboardingComplete[account.userId],
+        };
+      },
+
+      demoLogout: () => {
+        set({ currentDemoUserId: null });
+      },
+
+      saveDemoProfile: (userId, data) => {
+        set((s) => ({
+          demoProfiles: {
+            ...s.demoProfiles,
+            [userId]: { ...s.demoProfiles[userId], ...data } as DemoUserProfile,
+          },
+        }));
+      },
+
+      setDemoOnboardingComplete: (userId) => {
+        set((s) => ({
+          demoOnboardingComplete: { ...s.demoOnboardingComplete, [userId]: true },
+        }));
+      },
+
+      setHasHydrated: (state) => set({ _hasHydrated: state }),
 
       dismissNudge: (nudgeId) => {
         set((s) => ({
@@ -157,11 +258,19 @@ export const useDemoStore = create<DemoState>()(
 
       seed: () => {
         const state = get();
-        if (state.seeded && state.profiles.length > 0) return;
+        // Only skip if ALL data is present. If likes/profiles were drained
+        // (e.g. persisted from older session), re-seed the missing parts.
+        if (state.seeded && state.profiles.length > 0 && state.likes.length > 0) return;
         set({
-          profiles: withValidPhotos(JSON.parse(JSON.stringify(DEMO_PROFILES)) as DemoProfile[]),
-          matches: JSON.parse(JSON.stringify(DEMO_MATCHES)) as DemoMatch[],
-          likes: JSON.parse(JSON.stringify(DEMO_LIKES)) as DemoLike[],
+          profiles: state.profiles.length > 0
+            ? state.profiles
+            : withValidPhotos(JSON.parse(JSON.stringify(DEMO_PROFILES)) as DemoProfile[]),
+          matches: state.matches.length > 0
+            ? state.matches
+            : JSON.parse(JSON.stringify(DEMO_MATCHES)) as DemoMatch[],
+          likes: state.likes.length > 0
+            ? state.likes
+            : JSON.parse(JSON.stringify(DEMO_LIKES)) as DemoLike[],
           seeded: true,
         });
       },
@@ -177,7 +286,10 @@ export const useDemoStore = create<DemoState>()(
           matches: JSON.parse(JSON.stringify(DEMO_MATCHES)) as DemoMatch[],
           likes: JSON.parse(JSON.stringify(DEMO_LIKES)) as DemoLike[],
           seeded: true,
-          demoUserProfile: null,
+          demoAccounts: [],
+          currentDemoUserId: null,
+          demoProfiles: {},
+          demoOnboardingComplete: {},
           blockedUserIds: [],
           reportedUserIds: [],
           reports: [],
@@ -256,6 +368,7 @@ export const useDemoStore = create<DemoState>()(
         set((s) => ({
           profiles: s.profiles.filter((p) => p._id !== profileId),
           matches: [newMatch, ...s.matches],
+          likes: s.likes.filter((l) => l.userId !== profileId),
         }));
       },
 
@@ -303,11 +416,18 @@ export const useDemoStore = create<DemoState>()(
     {
       name: 'demo-store',
       storage: createJSONStorage(() => AsyncStorage),
+      onRehydrateStorage: () => (state) => {
+        state?.setHasHydrated(true);
+      },
       partialize: (state) => ({
         profiles: state.profiles,
         matches: state.matches,
         likes: state.likes,
         seeded: state.seeded,
+        demoAccounts: state.demoAccounts,
+        currentDemoUserId: state.currentDemoUserId,
+        demoProfiles: state.demoProfiles,
+        demoOnboardingComplete: state.demoOnboardingComplete,
         blockedUserIds: state.blockedUserIds,
         reportedUserIds: state.reportedUserIds,
         reports: state.reports,

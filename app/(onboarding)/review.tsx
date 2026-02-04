@@ -23,6 +23,8 @@ import { api } from "@/convex/_generated/api";
 import { useAuthStore } from "@/stores/authStore";
 import { Ionicons } from "@expo/vector-icons";
 import { Id } from "@/convex/_generated/dataModel";
+import { isDemoMode } from "@/hooks/useConvex";
+import { useDemoStore } from "@/stores/demoStore";
 
 export default function ReviewScreen() {
   const {
@@ -46,6 +48,7 @@ export default function ReviewScreen() {
     lookingFor,
     relationshipIntent,
     activities,
+    profilePrompts,
     minAge,
     maxAge,
     maxDistance,
@@ -112,7 +115,44 @@ export default function ReviewScreen() {
 
     setIsSubmitting(true);
     try {
-      // Upload all photos to Convex storage
+      if (isDemoMode) {
+        // Demo mode: save profile locally, skip Convex
+        setUploadProgress("Saving profile...");
+        const demoStore = useDemoStore.getState();
+        demoStore.saveDemoProfile(userId, {
+          name,
+          dateOfBirth,
+          gender: gender ?? undefined,
+          bio,
+          photos: photos.map((uri) => ({ url: uri })),
+          height,
+          weight,
+          smoking,
+          drinking,
+          kids,
+          exercise,
+          pets: pets as string[],
+          education,
+          religion,
+          jobTitle,
+          company,
+          school,
+          lookingFor: lookingFor as string[],
+          relationshipIntent: relationshipIntent as string[],
+          activities: activities as string[],
+          profilePrompts,
+          minAge,
+          maxAge,
+          maxDistance,
+        });
+        demoStore.setDemoOnboardingComplete(userId);
+        setOnboardingCompleted(true);
+        setStep("tutorial");
+        router.push("/(onboarding)/tutorial" as any);
+        return;
+      }
+
+      // Live mode: upload photos + complete onboarding via Convex
       const photoStorageIds: Id<"_storage">[] = [];
 
       if (photos.length > 0) {

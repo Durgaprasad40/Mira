@@ -21,14 +21,16 @@ export default function OTPScreen() {
   const { email, phone, setStep } = useOnboardingStore();
   const router = useRouter();
   const { setAuth } = useAuthStore();
-  const demoUserProfile = useDemoStore((s) => s.demoUserProfile);
+  const currentDemoUserId = useDemoStore((s) => s.currentDemoUserId);
+  const demoOnboardingComplete = useDemoStore((s) => s.demoOnboardingComplete);
 
   // Demo mode: never show OTP screen — redirect immediately
   if (isDemoMode) {
-    if (demoUserProfile) {
+    if (currentDemoUserId && demoOnboardingComplete[currentDemoUserId]) {
       return <Redirect href={"/(main)/(tabs)/home" as any} />;
     }
-    return <Redirect href={"/demo-profile" as any} />;
+    // If no user or onboarding not complete, go to password step (skip OTP)
+    return <Redirect href={"/(onboarding)/password" as any} />;
   }
   const [otp, setOtp] = useState(["", "", "", "", "", ""]);
   const inputRefs = useRef<(TextInput | null)[]>([]);
