@@ -20,12 +20,18 @@ import { ProfileCard, SwipeOverlay } from "@/components/cards";
 import { isDemoMode } from "@/hooks/useConvex";
 import { useNotifications } from "@/hooks/useNotifications";
 import { DEMO_PROFILES, DEMO_USER } from "@/lib/demoData";
+import { useDemoStore } from "@/stores/demoStore";
 import { router } from "expo-router";
 import { useIsFocused } from "@react-navigation/native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { useInteractionStore } from "@/stores/interactionStore";
 import { asUserId } from "@/convex/id";
+import { ProfileData, toProfileData } from "@/lib/profileData";
+import { rankProfiles } from "@/lib/rankProfiles";
+import { getProfileCompleteness, NUDGE_MESSAGES } from "@/lib/profileCompleteness";
+import { ProfileNudge } from "@/components/ui/ProfileNudge";
+import { trackEvent } from "@/lib/analytics";
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get("window");
 
@@ -33,29 +39,16 @@ const EMPTY_ARRAY: any[] = [];
 
 const HEADER_H = 44;
 
-interface ProfileData {
-  id: string;
-  name: string;
-  age: number;
-  bio?: string;
-  city?: string;
-  isVerified?: boolean;
-  verificationStatus?: string;
-  distance?: number;
-  photos: { url: string }[];
-  activities?: string[];
-  relationshipIntent?: string[];
-  lastActive?: number;
-  createdAt?: number;
-  profilePrompts?: { question: string; answer: string }[];
-}
-
 export interface DiscoverCardStackProps {
   /** 'dark' applies INCOGNITO_COLORS to background/header only; card UI stays identical */
   theme?: "light" | "dark";
+  /** When provided, skip internal Convex query and use these profiles instead (e.g. Explore category). */
+  externalProfiles?: any[];
+  /** Hide the built-in header (caller renders its own). */
+  hideHeader?: boolean;
 }
 
-export function DiscoverCardStack({ theme = "light" }: DiscoverCardStackProps) {
+export function DiscoverCardStack({ theme = "light", externalProfiles, hideHeader }: DiscoverCardStackProps) {
   const dark = theme === "dark";
   const C = dark ? INCOGNITO_COLORS : COLORS;
 
@@ -109,14 +102,21 @@ export function DiscoverCardStack({ theme = "light" }: DiscoverCardStackProps) {
   // Notifications
   const { unseenCount } = useNotifications();
 
+  // Demo store — seed on mount, read mutable profiles, filter blocked
+  const demoProfiles = useDemoStore((s) => s.profiles);
+  const demoSeed = useDemoStore((s) => s.seed);
+  const blockedUserIds = useDemoStore((s) => s.blockedUserIds);
+  useEffect(() => { if (isDemoMode) demoSeed(); }, [demoSeed]);
+
   // Profile data — memoize args to prevent Convex re-subscriptions
   const convexUserId = asUserId(userId);
+  const skipInternalQuery = !!externalProfiles;
   const discoverArgs = useMemo(
     () =>
-      !isDemoMode && convexUserId
+      !isDemoMode && convexUserId && !skipInternalQuery
         ? { userId: convexUserId, sortBy: "recommended" as any, limit: 20 }
         : "skip" as const,
-    [convexUserId],
+    [convexUserId, skipInternalQuery],
   );
   const convexProfiles = useQuery(api.discover.getDiscoverProfiles, discoverArgs);
   const profilesSafe = convexProfiles ?? EMPTY_ARRAY;
@@ -126,40 +126,25 @@ export function DiscoverCardStack({ theme = "light" }: DiscoverCardStackProps) {
   // which cascades: new current → new handleSwipe → new animateSwipe → new panResponder
   // → touches dropped between old/new panResponder attachment.
   const latestProfiles: ProfileData[] = useMemo(() => {
-    if (isDemoMode) {
-      return DEMO_PROFILES.map((p) => ({
-        id: p._id,
-        name: p.name,
-        age: p.age,
-        bio: p.bio,
-        city: p.city,
-        isVerified: p.isVerified,
-        distance: p.distance,
-        photos: p.photos,
-        activities: p.activities,
-        relationshipIntent: p.relationshipIntent,
-        lastActive: Date.now() - 2 * 60 * 60 * 1000,
-        createdAt: Date.now() - 60 * 24 * 60 * 60 * 1000,
-        profilePrompts: (p as any).profilePrompts,
-      }));
+    if (externalProfiles) {
+      // Filter blocked from external profiles (e.g. explore categories)
+      const filtered = isDemoMode
+        ? externalProfiles.filter((p: any) => !blockedUserIds.includes(p._id ?? p.id))
+        : externalProfiles;
+      return rankProfiles(filtered.map(toProfileData));
     }
-    return profilesSafe.map((p: any) => ({
-      id: p._id || p.id,
-      name: p.name,
-      age: p.age,
-      bio: p.bio,
-      city: p.city,
-      isVerified: p.isVerified,
-      verificationStatus: p.verificationStatus,
-      distance: p.distance,
-      photos: p.photos?.map((photo: any) => ({ url: photo.url || photo })) ?? EMPTY_ARRAY,
-      activities: p.activities,
-      relationshipIntent: p.relationshipIntent,
-      lastActive: p.lastActive,
-      createdAt: p.createdAt,
-      profilePrompts: p.profilePrompts,
-    }));
-  }, [profilesSafe]);
+    if (isDemoMode) {
+      const mapped = demoProfiles
+        .filter((p) => !blockedUserIds.includes(p._id))
+        .map((p) => toProfileData({
+          ...p,
+          lastActive: Date.now() - 2 * 60 * 60 * 1000,
+          createdAt: Date.now() - 60 * 24 * 60 * 60 * 1000,
+        }));
+      return rankProfiles(mapped);
+    }
+    return rankProfiles(profilesSafe.map(toProfileData));
+  }, [externalProfiles, profilesSafe, demoProfiles, blockedUserIds]);
 
   // Keep last non-empty profiles to prevent blank-frame flicker
   const stableProfilesRef = useRef<ProfileData[]>([]);
@@ -172,11 +157,31 @@ export function DiscoverCardStack({ theme = "light" }: DiscoverCardStackProps) {
   const getBadges = (p: ProfileData) =>
     getTrustBadges({
       isVerified: p.isVerified,
-      verificationStatus: p.verificationStatus,
       lastActive: p.lastActive,
-      createdAt: p.createdAt,
       photoCount: p.photos?.length,
+      bio: p.bio,
     });
+
+  // Profile completeness nudge (main Discover only, not explore categories)
+  const dismissedNudges = useDemoStore((s) => s.dismissedNudges);
+  const dismissNudge = useDemoStore((s) => s.dismissNudge);
+  const currentUserForNudge = useQuery(
+    api.users.getCurrentUser,
+    !isDemoMode && convexUserId ? { userId: convexUserId } : "skip" as const,
+  );
+  const currentUser = isDemoMode ? DEMO_USER : currentUserForNudge;
+  const nudgeStatus = currentUser
+    ? getProfileCompleteness({
+        photoCount: Array.isArray(currentUser.photos) ? currentUser.photos.length : 0,
+        bioLength: currentUser.bio?.length ?? 0,
+      })
+    : 'complete';
+  const showNudge =
+    !hideHeader &&
+    !externalProfiles &&
+    nudgeStatus !== 'complete' &&
+    !dismissedNudges.includes('discover');
+  const NUDGE_H = 38;
 
   const swipeMutation = useMutation(api.likes.swipe);
 
@@ -307,6 +312,7 @@ export function DiscoverCardStack({ theme = "light" }: DiscoverCardStackProps) {
             if (!mountedRef.current || !isFocusedRef.current || navigatingRef.current) return;
             navigatingRef.current = true;
             didNavigate = true;
+            trackEvent({ name: 'match_created', matchId: 'demo_match', otherUserId: swipedProfile.id });
             if (__DEV__) console.log(`[DiscoverCardStack] navigating to match-celebration userId=${swipedProfile.id}`);
             router.push(`/(main)/match-celebration?matchId=demo_match&userId=${swipedProfile.id}` as any);
             // navigatingRef is reset when focus is regained (focus effect)
@@ -327,6 +333,7 @@ export function DiscoverCardStack({ theme = "light" }: DiscoverCardStackProps) {
         if (result?.isMatch && !navigatingRef.current) {
           navigatingRef.current = true;
           didNavigate = true;
+          trackEvent({ name: 'match_created', matchId: result.matchId, otherUserId: swipedProfile.id });
           router.push(`/(main)/match-celebration?matchId=${result.matchId}&userId=${swipedProfile.id}`);
           // navigatingRef is reset when focus is regained (focus effect)
         }
@@ -467,8 +474,8 @@ export function DiscoverCardStack({ theme = "light" }: DiscoverCardStackProps) {
     if (__DEV__) console.warn(`[DiscoverCardStack] render #${renderCountRef.current}`);
   }
 
-  // Loading state — non-demo only; demo profiles are instant via useMemo
-  if (!isDemoMode && !convexProfiles) {
+  // Loading state — non-demo only; skip when using external profiles
+  if (!isDemoMode && !externalProfiles && !convexProfiles) {
     if (__DEV__) console.log("[DiscoverCardStack] showing loading state — convexProfiles not yet available");
     return (
       <View style={[styles.center, dark && { backgroundColor: INCOGNITO_COLORS.background }]}>
@@ -521,9 +528,10 @@ export function DiscoverCardStack({ theme = "light" }: DiscoverCardStackProps) {
   }
 
   // Layout: card fills from header to bottom of content area
-  const cardTop = insets.top + HEADER_H;
-  const cardBottom = 4;
+  const cardTop = hideHeader ? 0 : insets.top + HEADER_H + (showNudge ? NUDGE_H : 0);
   const actionRowBottom = Math.max(insets.bottom, 12);
+  // Leave room for the action bar so card content (bio) isn't hidden behind the buttons.
+  const cardBottom = actionRowBottom + 72;
 
   const likesLeft = likesRemaining();
   const standOutsLeft = standOutsRemaining();
@@ -531,20 +539,30 @@ export function DiscoverCardStack({ theme = "light" }: DiscoverCardStackProps) {
   return (
     <View style={[styles.container, dark && { backgroundColor: INCOGNITO_COLORS.background }]}>
       {/* Compact Header */}
-      <View style={[styles.header, { paddingTop: insets.top, height: insets.top + HEADER_H }, dark && { backgroundColor: INCOGNITO_COLORS.background }]}>
-        <TouchableOpacity style={styles.headerBtn} onPress={() => router.push("/(main)/settings" as any)}>
-          <Ionicons name="options-outline" size={22} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
-        </TouchableOpacity>
-        <Text style={[styles.headerLogo, dark && { color: INCOGNITO_COLORS.primary }]}>mira</Text>
-        <TouchableOpacity style={styles.headerBtn} onPress={() => router.push("/(main)/likes" as any)}>
-          <Ionicons name="heart" size={22} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
-          {unseenCount > 0 && (
-            <View style={styles.bellBadge}>
-              <Text style={styles.bellBadgeText}>{unseenCount > 9 ? "9+" : unseenCount}</Text>
-            </View>
-          )}
-        </TouchableOpacity>
-      </View>
+      {!hideHeader && (
+        <View style={[styles.header, { paddingTop: insets.top, height: insets.top + HEADER_H }, dark && { backgroundColor: INCOGNITO_COLORS.background }]}>
+          <TouchableOpacity style={styles.headerBtn} onPress={() => router.push("/(main)/settings" as any)}>
+            <Ionicons name="options-outline" size={22} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
+          </TouchableOpacity>
+          <Text style={[styles.headerLogo, dark && { color: INCOGNITO_COLORS.primary }]}>mira</Text>
+          <TouchableOpacity style={styles.headerBtn} onPress={() => router.push("/(main)/likes" as any)}>
+            <Ionicons name="heart" size={22} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
+            {unseenCount > 0 && (
+              <View style={styles.bellBadge}>
+                <Text style={styles.bellBadgeText}>{unseenCount > 9 ? "9+" : unseenCount}</Text>
+              </View>
+            )}
+          </TouchableOpacity>
+        </View>
+      )}
+
+      {/* Profile completeness nudge */}
+      {showNudge && (
+        <ProfileNudge
+          message={NUDGE_MESSAGES[nudgeStatus as Exclude<typeof nudgeStatus, 'complete'>].discover}
+          onDismiss={() => dismissNudge('discover')}
+        />
+      )}
 
       {/* Card Area (fills between header and tab bar) */}
       <View style={[styles.cardArea, { top: cardTop, bottom: cardBottom }]} pointerEvents="box-none">
@@ -646,9 +664,9 @@ const styles = StyleSheet.create({
     fontSize: 16,
     color: COLORS.textLight,
   },
-  emptyEmoji: { fontSize: 64, marginBottom: 16 },
-  emptyTitle: { fontSize: 24, fontWeight: "700", color: COLORS.text, marginBottom: 8 },
-  emptySubtitle: { fontSize: 16, color: COLORS.textLight, textAlign: "center" },
+  emptyEmoji: { fontSize: 56, marginBottom: 16 },
+  emptyTitle: { fontSize: 22, fontWeight: "700", color: COLORS.text, marginBottom: 8, textAlign: "center" },
+  emptySubtitle: { fontSize: 15, color: COLORS.textLight, textAlign: "center", lineHeight: 22 },
 
   // Compact Header
   header: {
@@ -701,10 +719,10 @@ const styles = StyleSheet.create({
   },
   card: {
     position: "absolute",
-    top: 4,
-    left: 8,
-    right: 8,
-    bottom: 4,
+    top: 8,
+    left: 10,
+    right: 10,
+    bottom: 8,
     borderRadius: 16,
     overflow: "hidden",
   },

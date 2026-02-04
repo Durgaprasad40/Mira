@@ -1,10 +1,12 @@
 import { useEffect, useRef } from "react";
+import { View } from "react-native";
 import { Stack, useRootNavigationState, useRouter, useSegments } from "expo-router";
 import { useQuery } from "convex/react";
 import { api } from "@/convex/_generated/api";
 import { useAuthStore } from "@/stores/authStore";
 import { isDemoMode } from "@/hooks/useConvex";
 import { computeEnforcementLevel } from "@/lib/securityEnforcement";
+import { ToastHost } from "@/components/ui/Toast";
 
 export default function MainLayout() {
   const userId = useAuthStore((s) => s.userId);
@@ -58,6 +60,7 @@ export default function MainLayout() {
   }, [needsVerification, rootNavState?.key, segmentsKey]);
 
   return (
+    <View style={{ flex: 1 }}>
     <Stack screenOptions={{ headerShown: false }}>
       <Stack.Screen name="(tabs)" />
       <Stack.Screen
@@ -100,6 +103,7 @@ export default function MainLayout() {
         name="stand-out"
         options={{ presentation: "modal" }}
       />
+      <Stack.Screen name="explore-category/[categoryId]" />
       <Stack.Screen name="chat-room/[roomId]" />
       <Stack.Screen
         name="camera-composer"
@@ -116,6 +120,9 @@ export default function MainLayout() {
         name="verification"
         options={{ presentation: "fullScreenModal" }}
       />
+      <Stack.Screen name="demo-panel" options={{ presentation: "modal" }} />
     </Stack>
+    <ToastHost />
+    </View>
   );
 }

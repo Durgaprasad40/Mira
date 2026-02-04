@@ -13,9 +13,12 @@ import { Ionicons } from '@expo/vector-icons';
 import { Badge } from '@/components/ui';
 import { isDemoMode } from '@/hooks/useConvex';
 import { asUserId } from '@/convex/id';
-import { DEMO_MATCHES, DEMO_LIKES } from '@/lib/demoData';
+import { DEMO_MATCHES, DEMO_LIKES, DEMO_USER } from '@/lib/demoData';
+import { useDemoStore } from '@/stores/demoStore';
 import { isActiveNow } from '@/lib/formatLastSeen';
 import { useScreenSafety } from '@/hooks/useScreenSafety';
+import { getProfileCompleteness, NUDGE_MESSAGES } from '@/lib/profileCompleteness';
+import { ProfileNudge } from '@/components/ui/ProfileNudge';
 
 export default function MessagesScreen() {
   const router = useRouter();
@@ -23,6 +26,13 @@ export default function MessagesScreen() {
   const convexUserId = asUserId(userId);
   const [refreshing, setRefreshing] = useState(false);
   const { safeTimeout } = useScreenSafety();
+
+  // Demo store — seed on mount, read mutable matches/likes
+  const demoMatches = useDemoStore((s) => s.matches);
+  const demoLikes = useDemoStore((s) => s.likes);
+  const demoSeed = useDemoStore((s) => s.seed);
+  const blockedUserIds = useDemoStore((s) => s.blockedUserIds);
+  React.useEffect(() => { if (isDemoMode) demoSeed(); }, [demoSeed]);
 
   const convexConversations = useQuery(
     api.messages.getConversations,
@@ -44,10 +54,27 @@ export default function MessagesScreen() {
     !isDemoMode && convexUserId ? { userId: convexUserId } : 'skip'
   );
 
-  const conversations = isDemoMode ? DEMO_MATCHES as any : convexConversations;
+  const conversations = isDemoMode
+    ? (demoMatches as any[]).filter((m: any) => !blockedUserIds.includes(m.otherUser?.id))
+    : convexConversations;
   const unreadCount = isDemoMode ? 1 : convexUnreadCount;
   const currentUser = isDemoMode ? { gender: 'male', messagesRemaining: 999999, messagesResetAt: undefined, subscriptionTier: 'premium' as const } : convexCurrentUser;
-  const likesReceived = isDemoMode ? DEMO_LIKES : convexLikesReceived;
+  const likesReceived = isDemoMode
+    ? demoLikes.filter((l) => !blockedUserIds.includes(l.userId))
+    : convexLikesReceived;
+
+  // Profile completeness nudge — messages tab only shows for needs_both
+  const dismissedNudges = useDemoStore((s) => s.dismissedNudges);
+  const dismissNudge = useDemoStore((s) => s.dismissNudge);
+  const nudgeUser = isDemoMode ? DEMO_USER : convexCurrentUser;
+  const messagesNudgeStatus = nudgeUser
+    ? getProfileCompleteness({
+        photoCount: Array.isArray(nudgeUser.photos) ? nudgeUser.photos.length : 0,
+        bioLength: (nudgeUser as any).bio?.length ?? 0,
+      })
+    : 'complete';
+  const showMessagesNudge =
+    messagesNudgeStatus === 'needs_both' && !dismissedNudges.includes('messages');
 
   // Convex queries are real-time/reactive — no manual refetch needed.
   // Short spinner provides tactile feedback for the pull gesture.
@@ -233,6 +260,13 @@ export default function MessagesScreen() {
         )}
       </View>
 
+      {showMessagesNudge && (
+        <ProfileNudge
+          message={NUDGE_MESSAGES.needs_both.messages}
+          onDismiss={() => dismissNudge('messages')}
+        />
+      )}
+
       {renderQuotaBanner()}
       {renderSuperLikesRow()}
       {renderNewLikes()}
@@ -247,7 +281,7 @@ export default function MessagesScreen() {
             lastMessage={item.lastMessage}
             unreadCount={item.unreadCount}
             isPreMatch={item.isPreMatch}
-            onPress={() => router.push(`/(main)/chat/${item.id}`)}
+            onPress={() => router.push(`/(main)/(tabs)/messages/chat/${item.id}` as any)}
           />
         )}
         ListEmptyComponent={
