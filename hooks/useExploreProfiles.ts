@@ -5,6 +5,7 @@ import { useAuthStore } from '@/stores/authStore';
 import { isDemoMode } from '@/hooks/useConvex';
 import { DEMO_PROFILES } from '@/lib/demoData';
 import { useDemoStore } from '@/stores/demoStore';
+import { useShallow } from 'zustand/react/shallow';
 
 const EMPTY_PROFILES: any[] = [];
 
@@ -15,7 +16,17 @@ const EMPTY_PROFILES: any[] = [];
  */
 export function useExploreProfiles(): any[] {
   const userId = useAuthStore((s) => s.userId);
-  const blockedUserIds = useDemoStore((s) => s.blockedUserIds);
+  const demo = useDemoStore(useShallow((s) => ({
+    blockedUserIds: s.blockedUserIds,
+    matchCount: s.matches.length,
+    getExcludedUserIds: s.getExcludedUserIds,
+  })));
+
+  // Derive excluded IDs as Set for O(1) lookup
+  const excludedSet = useMemo(() => {
+    if (!isDemoMode) return new Set(demo.blockedUserIds);
+    return new Set(demo.getExcludedUserIds());
+  }, [demo.blockedUserIds, demo.matchCount, demo.getExcludedUserIds]);
 
   const queryArgs = useMemo(() => {
     if (isDemoMode || !userId) return 'skip' as const;
@@ -27,11 +38,11 @@ export function useExploreProfiles(): any[] {
   return useMemo(() => {
     if (isDemoMode) {
       return (DEMO_PROFILES as any[]).filter(
-        (p) => !blockedUserIds.includes(p._id),
+        (p) => !excludedSet.has(p._id),
       );
     }
     // getExploreProfiles returns { profiles: [], totalCount }
     if (result && Array.isArray(result.profiles)) return result.profiles;
     return EMPTY_PROFILES;
-  }, [result, blockedUserIds]);
+  }, [result, excludedSet]);
 }

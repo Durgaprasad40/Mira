@@ -69,10 +69,12 @@ export default function LikesScreen() {
     if (__DEV__) console.log(`[Likes] seeded ${seenIds.size} unique demo likes`);
   }, []);
 
-  // Map store likes to UI shape (add computed fields)
+  // Map store likes to UI shape (add computed fields).
+  // Force isBlurred=false in demo so every card is fully visible & tappable.
   const demoLikes = isDemoMode
     ? storeLikes.map((l) => ({
         ...l,
+        isBlurred: false,
         distance: DEMO_PROFILES.find((p) => p._id === l.userId)?.distance,
         isSuperLike: l.action === 'super_like',
       }))
@@ -97,7 +99,7 @@ export default function LikesScreen() {
     if (isDemoMode) {
       removeLike(like.userId);
       simulateMatch(like.userId);
-      router.push(`/(main)/match-celebration?matchId=demo_match&userId=${like.userId}` as any);
+      router.push(`/(main)/match-celebration?matchId=match_${like.userId}&userId=${like.userId}` as any);
       return;
     }
 

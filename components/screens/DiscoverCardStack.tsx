@@ -8,7 +8,9 @@ import {
   Animated,
   PanResponder,
   TouchableOpacity,
+  InteractionManager,
 } from "react-native";
+import { useShallow } from "zustand/react/shallow";
 import { useQuery, useMutation } from "convex/react";
 import { api } from "@/convex/_generated/api";
 import { COLORS, INCOGNITO_COLORS, SWIPE_CONFIG } from "@/lib/constants";
@@ -76,8 +78,9 @@ export function DiscoverCardStack({ theme = "light", externalProfiles, hideHeade
   const isFocusedRef = useRef(true);
   // ── Track in-flight animation so we can cancel on blur ──
   const activeAnimationRef = useRef<Animated.CompositeAnimation | null>(null);
-  // ── Swipe lock: prevents re-entrant handleSwipe from queued animation callbacks ──
-  const swipingRef = useRef(false);
+  // ── Swipe lock: prevents re-entrant swipes while animation + processing is in flight ──
+  // Acquired in animateSwipe, released after advanceCard + match logic complete.
+  const swipeLockRef = useRef(false);
 
   // ── Mounted guard: prevents state updates and navigation after unmount ──
   const mountedRef = useRef(true);
@@ -87,7 +90,7 @@ export function DiscoverCardStack({ theme = "light", externalProfiles, hideHeade
       mountedRef.current = false;
       // Clean up locks so a future remount starts fresh
       navigatingRef.current = false;
-      swipingRef.current = false;
+      swipeLockRef.current = false;
     };
   }, []);
 
@@ -102,11 +105,23 @@ export function DiscoverCardStack({ theme = "light", externalProfiles, hideHeade
   // Notifications
   const { unseenCount } = useNotifications();
 
-  // Demo store — seed on mount, read mutable profiles, filter blocked
-  const demoProfiles = useDemoStore((s) => s.profiles);
-  const demoSeed = useDemoStore((s) => s.seed);
-  const blockedUserIds = useDemoStore((s) => s.blockedUserIds);
-  useEffect(() => { if (isDemoMode) demoSeed(); }, [demoSeed]);
+  // Demo store — single shallow selector to minimize re-renders.
+  // Only subscribes to fields Discover actually needs; shallow compare
+  // prevents re-renders when unrelated store slices change.
+  const demo = useDemoStore(useShallow((s) => ({
+    profiles: s.profiles,
+    seed: s.seed,
+    blockedUserIds: s.blockedUserIds,
+    matchCount: s.matches.length,          // only need length for exclusion deps
+    getExcludedUserIds: s.getExcludedUserIds,
+  })));
+  // Derive excluded IDs as a Set for O(1) lookup in filters.
+  // Deps: blockedUserIds + matchCount — changes when a new match/block occurs.
+  const excludedSet = useMemo(() => {
+    if (!isDemoMode) return new Set(demo.blockedUserIds);
+    return new Set(demo.getExcludedUserIds());
+  }, [demo.blockedUserIds, demo.matchCount, demo.getExcludedUserIds]);
+  useEffect(() => { if (isDemoMode) demo.seed(); }, [demo.seed]);
 
   // Profile data — memoize args to prevent Convex re-subscriptions
   const convexUserId = asUserId(userId);
@@ -127,9 +142,9 @@ export function DiscoverCardStack({ theme = "light", externalProfiles, hideHeade
   // → touches dropped between old/new panResponder attachment.
   const latestProfiles: ProfileData[] = useMemo(() => {
     if (externalProfiles) {
-      // Filter blocked from external profiles (e.g. explore categories)
+      // Filter excluded from external profiles (e.g. explore categories)
       const filtered = isDemoMode
-        ? externalProfiles.filter((p: any) => !blockedUserIds.includes(p._id ?? p.id))
+        ? externalProfiles.filter((p: any) => !excludedSet.has(p._id ?? p.id))
         : externalProfiles;
       const mapped = filtered.map(toProfileData);
       // Demo mode: preserve array order for deterministic Discover feed
@@ -137,8 +152,8 @@ export function DiscoverCardStack({ theme = "light", externalProfiles, hideHeade
     }
     if (isDemoMode) {
       // Demo mode: return profiles in their original demoData.ts order (no ranking)
-      return demoProfiles
-        .filter((p) => !blockedUserIds.includes(p._id))
+      return demo.profiles
+        .filter((p) => !excludedSet.has(p._id))
         .map((p) => toProfileData({
           ...p,
           lastActive: Date.now() - 2 * 60 * 60 * 1000,
@@ -146,7 +161,7 @@ export function DiscoverCardStack({ theme = "light", externalProfiles, hideHeade
         }));
     }
     return rankProfiles(profilesSafe.map(toProfileData));
-  }, [externalProfiles, profilesSafe, demoProfiles, blockedUserIds]);
+  }, [externalProfiles, profilesSafe, demo.profiles, excludedSet]);
 
   // Drop profiles with no valid primary photo — prevents blank Discover cards
   const validProfiles = useMemo(
@@ -161,18 +176,25 @@ export function DiscoverCardStack({ theme = "light", externalProfiles, hideHeade
   }
   const profiles = validProfiles.length > 0 ? validProfiles : stableProfilesRef.current;
 
-  // Trust badges
-  const getBadges = (p: ProfileData) =>
-    getTrustBadges({
-      isVerified: p.isVerified,
-      lastActive: p.lastActive,
-      photoCount: p.photos?.length,
-      bio: p.bio,
-    });
+  // ── Demo auto-replenish: re-inject profiles when pool is exhausted ──
+  // Guard ref prevents the effect from firing twice before the store update
+  // triggers a re-render with the new profiles.
+  const replenishingRef = useRef(false);
+  useEffect(() => {
+    if (!isDemoMode || externalProfiles) return;
+    if (profiles.length > 0) { replenishingRef.current = false; return; }
+    if (replenishingRef.current) return;
+    replenishingRef.current = true;
+    if (__DEV__) console.log('[DiscoverCardStack] demo pool exhausted — auto-replenishing');
+    useDemoStore.getState().resetDiscoverPool();
+    setIndex(0);
+  }, [profiles.length, externalProfiles]);
 
   // Profile completeness nudge (main Discover only, not explore categories)
-  const dismissedNudges = useDemoStore((s) => s.dismissedNudges);
-  const dismissNudge = useDemoStore((s) => s.dismissNudge);
+  const { dismissedNudges, dismissNudge } = useDemoStore(useShallow((s) => ({
+    dismissedNudges: s.dismissedNudges,
+    dismissNudge: s.dismissNudge,
+  })));
   const currentUserForNudge = useQuery(
     api.users.getCurrentUser,
     !isDemoMode && convexUserId ? { userId: convexUserId } : "skip" as const,
@@ -216,7 +238,7 @@ export function DiscoverCardStack({ theme = "light", externalProfiles, hideHeade
     if (isFocused) {
       isFocusedRef.current = true;
       navigatingRef.current = false;
-      swipingRef.current = false;
+      swipeLockRef.current = false;
       if (__DEV__) console.log("[DiscoverCardStack] focus gained");
     } else {
       isFocusedRef.current = false;
@@ -256,10 +278,28 @@ export function DiscoverCardStack({ theme = "light", externalProfiles, hideHeade
   const current = profiles.length > 0 ? profiles[index % profiles.length] : undefined;
   const next = profiles.length > 0 ? profiles[(index + 1) % profiles.length] : undefined;
 
+  // Trust badges — memoized per profile to avoid allocation each render
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const currentBadges = useMemo(
+    () => current ? getTrustBadges({ isVerified: current.isVerified, lastActive: current.lastActive, photoCount: current.photos?.length, bio: current.bio }) : [],
+    [current?.id],
+  );
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  const nextBadges = useMemo(
+    () => next ? getTrustBadges({ isVerified: next.isVerified, lastActive: next.lastActive, photoCount: next.photos?.length, bio: next.bio }) : [],
+    [next?.id],
+  );
+
   // Stable refs for panResponder callbacks — prevents panResponder recreation
   // when current/handleSwipe/animateSwipe change between renders.
   const currentRef = useRef(current);
   currentRef.current = current;
+
+  // Stable callback for opening profile — uses ref so it never changes identity
+  const openProfileCb = useCallback(() => {
+    const c = currentRef.current;
+    if (c) router.push(`/profile/${c.id}` as any);
+  }, []);
 
   const resetPosition = useCallback(() => {
     const currentPan = getActivePan();
@@ -300,44 +340,50 @@ export function DiscoverCardStack({ theme = "light", externalProfiles, hideHeade
   const handleSwipe = useCallback(
     async (direction: "left" | "right" | "up", message?: string) => {
       // Guard: unmounted or unfocused
-      if (!mountedRef.current || !isFocusedRef.current) return;
+      if (!mountedRef.current || !isFocusedRef.current) { swipeLockRef.current = false; return; }
       // Guard: navigation in progress
-      if (navigatingRef.current) return;
-      // Guard: prevent re-entrant calls from queued animation callbacks
-      if (swipingRef.current) return;
-      swipingRef.current = true;
-      let didNavigate = false;
+      if (navigatingRef.current) { swipeLockRef.current = false; return; }
+
+      // Read the swiped profile from ref (stable, not from closure)
+      const swipedProfile = currentRef.current;
+      if (!swipedProfile) { swipeLockRef.current = false; return; }
+
+      if (__DEV__) console.log(`[DiscoverCardStack] handleSwipe dir=${direction} profile=${swipedProfile.name}`);
+
+      // Check daily limits — release lock and bail without advancing
+      if (direction === "right" && hasReachedLikeLimit()) { swipeLockRef.current = false; return; }
+      if (direction === "up" && hasReachedStandOutLimit()) { swipeLockRef.current = false; return; }
+
+      // ★ ALWAYS advance card FIRST — this guarantees the index moves
+      // regardless of match/navigation/error below.
+      advanceCard();
+
+      // Increment daily counters
+      if (direction === "right") incrementLikes();
+      if (direction === "up") incrementStandOuts();
 
       try {
-        if (__DEV__) console.log(`[DiscoverCardStack] handleSwipe dir=${direction} current=${current?.name} index=${index}`);
-        if (!current) return;
-
-        // Check daily limits for likes and stand outs
-        if (direction === "right" && hasReachedLikeLimit()) return;
-        if (direction === "up" && hasReachedStandOutLimit()) return;
-
-        const swipedProfile = current;
-        const action = direction === "left" ? "pass" : direction === "up" ? "super_like" : "like";
-        advanceCard();
-
-        // Increment counters
-        if (direction === "right") incrementLikes();
-        if (direction === "up") incrementStandOuts();
-
         if (isDemoMode) {
           if (direction === "right" && Math.random() > 0.7) {
-            if (!mountedRef.current || !isFocusedRef.current || navigatingRef.current) return;
+            // Save match + DM thread BEFORE navigating.
+            useDemoStore.getState().simulateMatch(swipedProfile.id);
+            const matchId = `match_${swipedProfile.id}`;
+            if (__DEV__) console.log(`[DiscoverCardStack] match! navigating to celebration userId=${swipedProfile.id}`);
             navigatingRef.current = true;
-            didNavigate = true;
-            trackEvent({ name: 'match_created', matchId: 'demo_match', otherUserId: swipedProfile.id });
-            if (__DEV__) console.log(`[DiscoverCardStack] navigating to match-celebration userId=${swipedProfile.id}`);
-            router.push(`/(main)/match-celebration?matchId=demo_match&userId=${swipedProfile.id}` as any);
-            // navigatingRef is reset when focus is regained (focus effect)
+            // Defer navigation so advanceCard's setState commits first
+            InteractionManager.runAfterInteractions(() => {
+              if (!mountedRef.current) return;
+              trackEvent({ name: 'match_created', matchId, otherUserId: swipedProfile.id });
+              router.push(`/(main)/match-celebration?matchId=${matchId}&userId=${swipedProfile.id}` as any);
+            });
           }
+          // Release swipe lock (navigatingRef guards further swipes if navigating)
+          swipeLockRef.current = false;
           return;
         }
 
-        if (!convexUserId) return; // no valid user id — skip mutation
+        if (!convexUserId) { swipeLockRef.current = false; return; }
+        const action = direction === "left" ? "pass" : direction === "up" ? "super_like" : "like";
         const result = await swipeMutation({
           fromUserId: convexUserId,
           toUserId: swipedProfile.id as any,
@@ -349,30 +395,33 @@ export function DiscoverCardStack({ theme = "light", externalProfiles, hideHeade
         if (!mountedRef.current || !isFocusedRef.current) return;
         if (result?.isMatch && !navigatingRef.current) {
           navigatingRef.current = true;
-          didNavigate = true;
-          trackEvent({ name: 'match_created', matchId: result.matchId, otherUserId: swipedProfile.id });
-          router.push(`/(main)/match-celebration?matchId=${result.matchId}&userId=${swipedProfile.id}`);
-          // navigatingRef is reset when focus is regained (focus effect)
+          InteractionManager.runAfterInteractions(() => {
+            if (!mountedRef.current) return;
+            trackEvent({ name: 'match_created', matchId: result.matchId, otherUserId: swipedProfile.id });
+            router.push(`/(main)/match-celebration?matchId=${result.matchId}&userId=${swipedProfile.id}`);
+          });
         }
       } catch (error: any) {
         if (!mountedRef.current) return;
         Toast.show("Something went wrong. Please try again.");
       } finally {
-        // Always release swipe lock — guaranteed, no timers
-        swipingRef.current = false;
-        if (!didNavigate) navigatingRef.current = false;
+        swipeLockRef.current = false;
       }
     },
-    [current, userId, swipeMutation, advanceCard, hasReachedLikeLimit, hasReachedStandOutLimit, incrementLikes, incrementStandOuts],
+    [convexUserId, swipeMutation, advanceCard, hasReachedLikeLimit, hasReachedStandOutLimit, incrementLikes, incrementStandOuts],
   );
 
   const animateSwipe = useCallback(
     (direction: "left" | "right" | "up", velocity?: number) => {
-      // Guard: don't start new animations if navigating or unfocused
+      // Guard: don't start new animations if navigating, unfocused, or already swiping
       if (navigatingRef.current || !isFocusedRef.current) return;
+      if (swipeLockRef.current) return;
       // Check limits before animating
       if (direction === "right" && hasReachedLikeLimit()) return;
       if (direction === "up" && hasReachedStandOutLimit()) return;
+
+      // ★ Acquire swipe lock — released inside handleSwipe after advanceCard
+      swipeLockRef.current = true;
 
       const currentPan = getActivePan();
       const targetX = direction === "left" ? -SCREEN_WIDTH * 1.5 : direction === "right" ? SCREEN_WIDTH * 1.5 : 0;
@@ -390,7 +439,11 @@ export function DiscoverCardStack({ theme = "light", externalProfiles, hideHeade
       activeAnimationRef.current = anim;
       anim.start(({ finished }) => {
         activeAnimationRef.current = null;
-        if (!finished) return;
+        if (!finished) {
+          // Animation was interrupted (blur/unmount) — release lock
+          swipeLockRef.current = false;
+          return;
+        }
         handleSwipeRef.current(direction);
       });
     },
@@ -414,8 +467,8 @@ export function DiscoverCardStack({ theme = "light", externalProfiles, hideHeade
     () =>
       PanResponder.create({
         onMoveShouldSetPanResponder: (_, gs) => {
-          // Don't claim touches if navigating or unfocused
-          if (navigatingRef.current || !isFocusedRef.current) return false;
+          // Don't claim touches if navigating, unfocused, or swipe in flight
+          if (navigatingRef.current || !isFocusedRef.current || swipeLockRef.current) return false;
           return Math.abs(gs.dx) > 8 || Math.abs(gs.dy) > 8;
         },
         // Allow other responders (e.g. tab bar) to take over
@@ -437,8 +490,8 @@ export function DiscoverCardStack({ theme = "light", externalProfiles, hideHeade
         },
         onPanResponderRelease: (_, gs) => {
           if (__DEV__) console.log("[DiscoverCardStack] pan release dx=", gs.dx.toFixed(0), "dy=", gs.dy.toFixed(0));
-          // If screen lost focus during drag, just reset
-          if (navigatingRef.current || !isFocusedRef.current) { resetPosition(); return; }
+          // If screen lost focus during drag, or swipe already in flight, just reset
+          if (navigatingRef.current || !isFocusedRef.current || swipeLockRef.current) { resetPosition(); return; }
           if (gs.dx < -thresholdX || gs.vx < -velocityX) { animateSwipeRef.current("left", gs.vx); return; }
           if (gs.dx > thresholdX  || gs.vx > velocityX)  { animateSwipeRef.current("right", gs.vx); return; }
           if (gs.dy < -thresholdY || gs.vy < -velocityY)  {
@@ -460,10 +513,14 @@ export function DiscoverCardStack({ theme = "light", externalProfiles, hideHeade
 
   // Handle stand-out result from route screen
   useEffect(() => {
-    if (!standOutResult || !current) return;
+    if (!standOutResult || !currentRef.current) return;
     if (!mountedRef.current || !isFocusedRef.current) return;
+    if (swipeLockRef.current) return;
     useInteractionStore.getState().setStandOutResult(null);
     const msg = standOutResult.message;
+
+    // Acquire swipe lock for the stand-out animation
+    swipeLockRef.current = true;
 
     // Animate the card out (up direction)
     const currentPan = getActivePan();
@@ -476,19 +533,28 @@ export function DiscoverCardStack({ theme = "light", externalProfiles, hideHeade
     activeAnimationRef.current = anim;
     anim.start(({ finished }) => {
       activeAnimationRef.current = null;
-      if (!finished) return;
-      if (!mountedRef.current || !isFocusedRef.current) return;
-      handleSwipe("up", msg || undefined);
+      if (!finished) {
+        swipeLockRef.current = false;
+        return;
+      }
+      if (!mountedRef.current || !isFocusedRef.current) {
+        swipeLockRef.current = false;
+        return;
+      }
+      handleSwipeRef.current("up", msg || undefined);
     });
   }, [standOutResult]);
 
-  // ── Diagnostic: detect render storms ──
-  // Expected: ~3 renders per swipe (overlay direction + advance card batched states).
-  // Warn only if we exceed 50 renders per session (indicates real problem).
+  // ── Debug: log index changes so we can verify cards are advancing ──
+  useEffect(() => {
+    if (__DEV__) console.log(`[DiscoverCardStack] index changed -> ${index} (profile=${profiles[index % profiles.length]?.name ?? 'none'})`);
+  }, [index]);
+
+  // ── Diagnostic: render count (debug log, not warn) ──
   const renderCountRef = useRef(0);
   renderCountRef.current += 1;
-  if (renderCountRef.current % 50 === 0) {
-    if (__DEV__) console.warn(`[DiscoverCardStack] render #${renderCountRef.current}`);
+  if (__DEV__ && renderCountRef.current % 100 === 0) {
+    console.log(`[DiscoverCardStack] render #${renderCountRef.current}`);
   }
 
   // Loading state — non-demo only; skip when using external profiles
@@ -601,7 +667,7 @@ export function DiscoverCardStack({ theme = "light", externalProfiles, hideHeade
               isVerified={next.isVerified}
               distance={next.distance}
               photos={next.photos}
-              trustBadges={getBadges(next)}
+              trustBadges={nextBadges}
               profilePrompt={next.profilePrompts?.[0]}
             />
           </Animated.View>
@@ -617,10 +683,10 @@ export function DiscoverCardStack({ theme = "light", externalProfiles, hideHeade
               isVerified={current.isVerified}
               distance={current.distance}
               photos={current.photos}
-              trustBadges={getBadges(current)}
+              trustBadges={currentBadges}
               profilePrompt={current.profilePrompts?.[0]}
               showCarousel
-              onOpenProfile={() => router.push(`/profile/${current.id}` as any)}
+              onOpenProfile={openProfileCb}
             />
             <SwipeOverlay direction={overlayDirection} opacity={overlayOpacityAnim} />
           </Animated.View>

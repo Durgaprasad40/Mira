@@ -62,15 +62,21 @@ export default function MessagesScreen() {
 
   const demoThreads = React.useMemo(() => {
     if (!isDemoMode) return [];
+    const seen = new Set<string>();
     return (demoMatches as any[])
-      .filter((m: any) =>
-        !blockedUserIds.includes(m.otherUser?.id) &&
-        !!demoMeta[m.conversationId] &&
-        (demoConversations[m.conversationId]?.length ?? 0) > 0
-      )
+      .filter((m: any) => {
+        const uid = m.otherUser?.id;
+        if (!uid || blockedUserIds.includes(uid)) return false;
+        // Deduplicate by otherUser.id
+        if (seen.has(uid)) return false;
+        seen.add(uid);
+        // Only include matches that have at least one message
+        const msgs = demoConversations[m.conversationId] ?? [];
+        return msgs.length > 0;
+      })
       .map((m: any) => {
         const msgs = demoConversations[m.conversationId] ?? [];
-        const lastMsg = msgs.length > 0 ? msgs[msgs.length - 1] : null;
+        const lastMsg = msgs[msgs.length - 1];
         const unread = msgs.filter(
           (msg) => msg.senderId !== userId && !msg.readAt,
         ).length;
@@ -80,7 +86,7 @@ export default function MessagesScreen() {
             ? { content: lastMsg.content, type: lastMsg.type, senderId: lastMsg.senderId, createdAt: lastMsg.createdAt }
             : m.lastMessage,
           unreadCount: unread,
-          _sortTs: lastMsg?.createdAt ?? 0,
+          _sortTs: lastMsg?.createdAt ?? m.otherUser?.lastActive ?? 0,
         };
       })
       .sort((a: any, b: any) => b._sortTs - a._sortTs);
@@ -97,7 +103,9 @@ export default function MessagesScreen() {
   const currentUser = isDemoMode ? { gender: 'male', messagesRemaining: 999999, messagesResetAt: undefined, subscriptionTier: 'premium' as const } : convexCurrentUser;
   // In demo mode, exclude likes from users who are already matched
   const likesReceived = isDemoMode
-    ? demoLikes.filter((l) => !blockedUserIds.includes(l.userId) && !demoMatchedUserIds.has(l.userId))
+    ? demoLikes
+        .filter((l) => !blockedUserIds.includes(l.userId) && !demoMatchedUserIds.has(l.userId))
+        .map((l) => ({ ...l, isBlurred: false }))
     : convexLikesReceived;
 
   // Profile completeness nudge — messages tab only shows for needs_both
@@ -131,8 +139,6 @@ export default function MessagesScreen() {
   };
   const superLikes = dedup((likesReceived || []).filter((l: any) => l.action === 'super_like'));
   const regularLikes = dedup((likesReceived || []).filter((l: any) => l.action !== 'super_like'));
-  if (__DEV__ && isDemoMode) console.log(`[Messages] demo likes: total=${demoLikes.length} filtered=${(likesReceived || []).length} superLikes=${superLikes.length} regularLikes=${regularLikes.length}`);
-
   const renderSuperLikesRow = () => {
     if (superLikes.length === 0) return null;
 
@@ -242,6 +248,67 @@ export default function MessagesScreen() {
     );
   };
 
+  // ── New Matches row (demo mode) ──
+  // Shows matches that have NO messages yet as a horizontal avatar row,
+  // so users immediately see new matches even before chatting.
+  const newMatches = React.useMemo(() => {
+    if (!isDemoMode) return [];
+    const seen = new Set<string>();
+    return (demoMatches as any[]).filter((m: any) => {
+      const uid = m.otherUser?.id;
+      if (!uid || blockedUserIds.includes(uid)) return false;
+      if (seen.has(uid)) return false;
+      seen.add(uid);
+      return (demoConversations[m.conversationId]?.length ?? 0) === 0;
+    });
+  }, [demoMatches, blockedUserIds, demoConversations]);
+
+  const renderNewMatchesRow = () => {
+    if (newMatches.length === 0) return null;
+    return (
+      <View style={styles.newMatchesSection}>
+        <View style={styles.sectionHeader}>
+          <Ionicons name="heart-circle" size={18} color={COLORS.primary} />
+          <Text style={styles.sectionTitle}>New Matches</Text>
+          <View style={[styles.countBadge, { backgroundColor: COLORS.primary + '20' }]}>
+            <Text style={[styles.countBadgeText, { color: COLORS.primary }]}>{newMatches.length}</Text>
+          </View>
+        </View>
+        <FlatList
+          horizontal
+          data={newMatches}
+          keyExtractor={(item: any) => item.id}
+          renderItem={({ item }: { item: any }) => (
+            <TouchableOpacity
+              style={styles.matchItem}
+              activeOpacity={0.7}
+              onPress={() => router.push(`/(main)/(tabs)/messages/chat/${item.conversationId}` as any)}
+            >
+              <View style={styles.matchAvatarContainer}>
+                <View style={styles.matchRing}>
+                  {item.otherUser?.photoUrl ? (
+                    <Image
+                      source={{ uri: item.otherUser.photoUrl }}
+                      style={styles.matchAvatar}
+                      contentFit="cover"
+                    />
+                  ) : (
+                    <View style={[styles.matchAvatar, styles.placeholderAvatar]}>
+                      <Text style={styles.avatarInitial}>{item.otherUser?.name?.[0] || '?'}</Text>
+                    </View>
+                  )}
+                </View>
+              </View>
+              <Text style={styles.matchName} numberOfLines={1}>{item.otherUser?.name || 'Someone'}</Text>
+            </TouchableOpacity>
+          )}
+          showsHorizontalScrollIndicator={false}
+          contentContainerStyle={styles.matchesList}
+        />
+      </View>
+    );
+  };
+
   const renderQuotaBanner = () => {
     if (isDemoMode) return null; // demo = unlimited, no quota banner
     if (!currentUser || currentUser.gender === 'female') return null;
@@ -303,7 +370,11 @@ export default function MessagesScreen() {
     );
   }
 
-  if (__DEV__ && isDemoMode) console.log(`[Messages] DEMO COUNTS: threads=${(conversations || []).length} likes=${regularLikes.length} super=${superLikes.length} matched=${demoMatchedUserIds.size} storeLikes=${demoLikes.length} user=${userId ?? 'none'}`);
+  React.useEffect(() => {
+    if (__DEV__ && isDemoMode) {
+      console.log(`[Messages] DEMO COUNTS: threads=${(conversations || []).length} newMatches=${newMatches.length} likes=${regularLikes.length} super=${superLikes.length} matched=${demoMatchedUserIds.size} storeLikes=${demoLikes.length} user=${userId ?? 'none'}`);
+    }
+  }, [conversations, newMatches]);
 
   return (
     <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
@@ -336,9 +407,10 @@ export default function MessagesScreen() {
               />
             )}
             {renderQuotaBanner()}
+            {renderNewMatchesRow()}
             {renderSuperLikesRow()}
             {renderNewLikes()}
-            {(superLikes.length > 0 || regularLikes.length > 0) && (conversations || []).length > 0 && (
+            {(newMatches.length > 0 || superLikes.length > 0 || regularLikes.length > 0) && (conversations || []).length > 0 && (
               <View style={styles.threadsSectionHeader}>
                 <Text style={styles.sectionTitle}>Messages</Text>
               </View>
@@ -356,7 +428,7 @@ export default function MessagesScreen() {
         }
         refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
         contentContainerStyle={
-          (!conversations || conversations.length === 0) && !(superLikes.length > 0 || regularLikes.length > 0)
+          (!conversations || conversations.length === 0) && newMatches.length === 0 && !(superLikes.length > 0 || regularLikes.length > 0)
             ? styles.emptyListContainer
             : undefined
         }
@@ -427,6 +499,46 @@ const styles = StyleSheet.create({
     color: COLORS.white,
     fontSize: 12,
     fontWeight: '600',
+  },
+
+  // ── New Matches Section ──
+  newMatchesSection: {
+    marginTop: 16,
+    marginBottom: 4,
+  },
+  matchesList: {
+    paddingLeft: 16,
+    paddingRight: 24,
+  },
+  matchItem: {
+    marginRight: 16,
+    alignItems: 'center',
+    width: 72,
+  },
+  matchAvatarContainer: {
+    marginBottom: 6,
+  },
+  matchRing: {
+    width: 68,
+    height: 68,
+    borderRadius: 34,
+    borderWidth: 2.5,
+    borderColor: COLORS.primary,
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 2,
+  },
+  matchAvatar: {
+    width: 58,
+    height: 58,
+    borderRadius: 29,
+    backgroundColor: COLORS.backgroundDark,
+  },
+  matchName: {
+    fontSize: 12,
+    color: COLORS.text,
+    fontWeight: '500',
+    textAlign: 'center',
   },
 
   // ── Super Likes Section (Tinder-style) ──

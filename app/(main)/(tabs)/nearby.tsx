@@ -19,6 +19,7 @@ import { DEMO_PROFILES, getDemoCurrentUser } from '@/lib/demoData';
 import { useAuthStore } from '@/stores/authStore';
 import { isDemoMode } from '@/hooks/useConvex';
 import { useDemoStore } from '@/stores/demoStore';
+import { useDemoNotifStore } from '@/hooks/useNotifications';
 import { api } from '@/convex/_generated/api';
 import { useScreenSafety } from '@/hooks/useScreenSafety';
 import { rankNearbyProfiles } from '@/lib/rankProfiles';
@@ -290,6 +291,24 @@ export default function NearbyScreen() {
       isVerified: u.isVerified,
     })));
   }, [demoStoreProfiles, blockedUserIds, userLat, userLng, userId, convexNearby]);
+
+  // ------------------------------------------------------------------
+  // Fire crossed-paths notification once per session (demo mode)
+  // ------------------------------------------------------------------
+  const crossedPathsNotifiedRef = useRef(false);
+  useEffect(() => {
+    if (!isDemoMode || crossedPathsNotifiedRef.current) return;
+    if (nearbyProfiles.length === 0) return;
+    crossedPathsNotifiedRef.current = true;
+    // Pick the first nearby profile for the notification
+    const p = nearbyProfiles[0];
+    useDemoNotifStore.getState().addNotification({
+      type: 'crossed_paths',
+      title: 'Crossed paths',
+      body: `You crossed paths with ${p.name} nearby.`,
+      data: { otherUserId: p._id },
+    });
+  }, [nearbyProfiles]);
 
   // ------------------------------------------------------------------
   // Bottom sheet animation helpers

@@ -7,6 +7,7 @@ import {
   TouchableOpacity,
   Platform,
   Switch,
+  Alert,
 } from 'react-native';
 import { useRouter } from 'expo-router';
 import { useQuery, useMutation } from 'convex/react';
@@ -21,6 +22,8 @@ import { BlurProfileNotice } from '@/components/profile/BlurProfileNotice';
 import { Toast } from '@/components/ui/Toast';
 import { getDemoCurrentUser } from '@/lib/demoData';
 import { useDemoStore } from '@/stores/demoStore';
+import { useDemoDmStore } from '@/stores/demoDmStore';
+import { useDemoNotifStore } from '@/hooks/useNotifications';
 import { getProfileCompleteness, NUDGE_MESSAGES } from '@/lib/profileCompleteness';
 import { ProfileNudge } from '@/components/ui/ProfileNudge';
 import type { Gender } from '@/types';
@@ -396,14 +399,42 @@ export default function SettingsScreen() {
       <View style={styles.section}>
         <Text style={styles.sectionTitle}>Account</Text>
         {isDemoMode && (
-          <TouchableOpacity
-            style={styles.menuItem}
-            onPress={() => router.push('/(main)/demo-panel' as any)}
-          >
-            <Ionicons name="flask-outline" size={20} color={COLORS.primary} style={{ marginRight: 10 }} />
-            <Text style={[styles.menuText, { flex: 1, color: COLORS.primary }]}>Demo Test Panel</Text>
-            <Ionicons name="chevron-forward" size={20} color={COLORS.primary} />
-          </TouchableOpacity>
+          <>
+            <TouchableOpacity
+              style={styles.menuItem}
+              onPress={() => router.push('/(main)/demo-panel' as any)}
+            >
+              <Ionicons name="flask-outline" size={20} color={COLORS.primary} style={{ marginRight: 10 }} />
+              <Text style={[styles.menuText, { flex: 1, color: COLORS.primary }]}>Demo Test Panel</Text>
+              <Ionicons name="chevron-forward" size={20} color={COLORS.primary} />
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.menuItem}
+              onPress={() => {
+                Alert.alert(
+                  'Reset demo?',
+                  'This will clear matches, chats, likes, blocks, and notifications for demo mode.',
+                  [
+                    { text: 'Cancel', style: 'cancel' },
+                    {
+                      text: 'Reset',
+                      style: 'destructive',
+                      onPress: () => {
+                        useDemoStore.getState().reset();
+                        useDemoDmStore.getState().reset();
+                        useDemoNotifStore.getState().reset();
+                        router.replace('/(main)/(tabs)/home' as any);
+                      },
+                    },
+                  ],
+                );
+              }}
+            >
+              <Ionicons name="refresh-circle-outline" size={20} color={COLORS.error} style={{ marginRight: 10 }} />
+              <Text style={[styles.menuText, { flex: 1, color: COLORS.error }]}>Reset Demo Data</Text>
+              <Ionicons name="chevron-forward" size={20} color={COLORS.error} />
+            </TouchableOpacity>
+          </>
         )}
         <TouchableOpacity
           style={styles.menuItem}

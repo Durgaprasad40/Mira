@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   View,
   Text,
@@ -25,15 +25,6 @@ export default function NotificationsScreen() {
 
   // ── Single source of truth — same hook the bell badge uses ──
   const { notifications, unseenCount, markAllSeen, markRead } = useNotifications();
-
-  // ── Auto-mark all as seen on mount (clears bell badge) ──
-  const hasMarkedRef = useRef(false);
-  useEffect(() => {
-    if (!hasMarkedRef.current && unseenCount > 0) {
-      hasMarkedRef.current = true;
-      markAllSeen();
-    }
-  }, [unseenCount, markAllSeen]);
 
   // ── Debug log ──
   useEffect(() => {
@@ -86,9 +77,20 @@ export default function NotificationsScreen() {
     switch (notification.type) {
       case 'match':
       case 'new_match':
-        if (notification.data?.matchId && notification.data?.userId) {
-          router.push(`/(main)/match-celebration?matchId=${notification.data.matchId}&userId=${notification.data.userId}`);
+      case 'match_created':
+        if (notification.data?.otherUserId) {
+          const mId = notification.data.matchId ?? `match_${notification.data.otherUserId}`;
+          router.push(`/(main)/match-celebration?matchId=${mId}&userId=${notification.data.otherUserId}` as any);
         }
+        break;
+      case 'like':
+      case 'like_received':
+        router.push('/(main)/likes' as any);
+        break;
+      case 'super_like':
+      case 'superlike':
+      case 'super_like_received':
+        router.push('/(main)/likes' as any);
         break;
       case 'message':
       case 'new_message':
@@ -98,15 +100,17 @@ export default function NotificationsScreen() {
           router.push(`/(main)/(tabs)/messages/chat/${notification.data.userId}` as any);
         }
         break;
-      case 'super_like':
-      case 'superlike':
-        router.push('/(main)/(tabs)/messages');
+      case 'crossed_paths':
+        router.push('/(main)/(tabs)/nearby' as any);
+        break;
+      case 'profile_viewed':
+        router.push('/(main)/(tabs)/home' as any);
+        break;
+      case 'system':
+        router.push('/(main)/settings' as any);
         break;
       case 'subscription':
         router.push('/(main)/subscription');
-        break;
-      case 'crossed_paths':
-        router.push('/(main)/crossed-paths');
         break;
       case 'confession_reaction':
       case 'confession_reply':
@@ -126,17 +130,26 @@ export default function NotificationsScreen() {
     switch (type) {
       case 'match':
       case 'new_match':
+      case 'match_created':
         return 'heart';
+      case 'like':
+      case 'like_received':
+        return 'heart-outline';
+      case 'super_like':
+      case 'superlike':
+      case 'super_like_received':
+        return 'star';
       case 'message':
       case 'new_message':
         return 'chatbubble';
-      case 'super_like':
-      case 'superlike':
-        return 'star';
-      case 'subscription':
-        return 'card';
       case 'crossed_paths':
         return 'location';
+      case 'profile_viewed':
+        return 'eye';
+      case 'system':
+        return 'information-circle';
+      case 'subscription':
+        return 'card';
       case 'weekly_refresh':
         return 'refresh';
       case 'confession_reaction':
@@ -152,15 +165,24 @@ export default function NotificationsScreen() {
     switch (type) {
       case 'match':
       case 'new_match':
+      case 'match_created':
         return COLORS.primary;
+      case 'like':
+      case 'like_received':
+        return COLORS.primary;
+      case 'super_like':
+      case 'superlike':
+      case 'super_like_received':
+        return COLORS.superLike;
       case 'message':
       case 'new_message':
         return COLORS.secondary;
-      case 'super_like':
-      case 'superlike':
-        return COLORS.superLike;
       case 'crossed_paths':
         return '#FF9800';
+      case 'profile_viewed':
+        return '#607D8B';
+      case 'system':
+        return '#2196F3';
       case 'confession_reaction':
       case 'confession_reply':
         return '#9C27B0';

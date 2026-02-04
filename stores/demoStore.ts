@@ -13,6 +13,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { DEMO_PROFILES, DEMO_MATCHES, DEMO_LIKES } from '@/lib/demoData';
 import { useDemoDmStore } from '@/stores/demoDmStore';
 import { useConfessionStore } from '@/stores/confessionStore';
+import { useDemoNotifStore } from '@/hooks/useNotifications';
 
 // ---------------------------------------------------------------------------
 // Types — lightweight "Like" shapes matching the demo data constants
@@ -152,6 +153,11 @@ interface DemoState {
   dismissedNudges: string[];
   dismissNudge: (nudgeId: string) => void;
 
+  /** Profile ID of the most recent match — drives the match celebration modal.
+   *  Set by simulateMatch(), cleared when the user dismisses the modal. */
+  newMatchUserId: string | null;
+  setNewMatchUserId: (id: string | null) => void;
+
   seed: () => void;
   reset: () => void;
   addProfile: (p: DemoProfile) => void;
@@ -161,6 +167,14 @@ interface DemoState {
   addLike: (l: DemoLike) => void;
   removeLike: (userId: string) => void;
   simulateMatch: (profileId: string) => void;
+
+  /** Returns all user IDs that should be hidden from Discover/Explore:
+   *  blocked + matched + conversation partners. */
+  getExcludedUserIds: () => string[];
+
+  /** Re-inject all DEMO_PROFILES into the store so Discover never runs dry.
+   *  Does NOT touch matches, messages, blocks, or likes. */
+  resetDiscoverPool: () => void;
 
   // Safety actions
   blockUser: (userId: string) => void;
@@ -190,6 +204,7 @@ export const useDemoStore = create<DemoState>()(
       reportedUserIds: [],
       reports: [],
       dismissedNudges: [],
+      newMatchUserId: null,
 
       demoSignUp: (email, password) => {
         const state = get();
@@ -248,12 +263,37 @@ export const useDemoStore = create<DemoState>()(
 
       setHasHydrated: (state) => set({ _hasHydrated: state }),
 
+      setNewMatchUserId: (id) => set({ newMatchUserId: id }),
+
       dismissNudge: (nudgeId) => {
         set((s) => ({
           dismissedNudges: s.dismissedNudges.includes(nudgeId)
             ? s.dismissedNudges
             : [...s.dismissedNudges, nudgeId],
         }));
+      },
+
+      getExcludedUserIds: () => {
+        const s = get();
+        const ids = new Set(s.blockedUserIds);
+        // Add all matched user IDs
+        for (const m of s.matches) {
+          ids.add(m.otherUser.id);
+        }
+        // Add all conversation partner IDs from demoDmStore
+        const dmMeta = useDemoDmStore.getState().meta;
+        for (const key of Object.keys(dmMeta)) {
+          const partnerId = dmMeta[key]?.otherUser?.id;
+          if (partnerId) ids.add(partnerId);
+        }
+        return Array.from(ids);
+      },
+
+      resetDiscoverPool: () => {
+        if (__DEV__) console.log('[demoStore] resetDiscoverPool — re-injecting demo profiles');
+        set({
+          profiles: withValidPhotos(JSON.parse(JSON.stringify(DEMO_PROFILES)) as DemoProfile[]),
+        });
       },
 
       seed: () => {
@@ -294,6 +334,7 @@ export const useDemoStore = create<DemoState>()(
           reportedUserIds: [],
           reports: [],
           dismissedNudges: [],
+          newMatchUserId: null,
         });
       },
 
@@ -315,10 +356,30 @@ export const useDemoStore = create<DemoState>()(
       },
 
       addLike: (l) => {
+        const isDuplicate = get().likes.some((existing) => existing.userId === l.userId);
         set((s) => {
           if (s.likes.some((existing) => existing.userId === l.userId)) return s;
           return { likes: [l, ...s.likes] };
         });
+
+        // Fire bell notification (skip if duplicate — already notified)
+        if (!isDuplicate) {
+          if (l.action === 'super_like') {
+            useDemoNotifStore.getState().addNotification({
+              type: 'super_like_received',
+              title: 'Super Like',
+              body: 'Someone super-liked you!',
+              data: { otherUserId: l.userId },
+            });
+          } else {
+            useDemoNotifStore.getState().addNotification({
+              type: 'like_received',
+              title: 'New like',
+              body: 'Someone liked you.',
+              data: { otherUserId: l.userId },
+            });
+          }
+        }
       },
 
       removeLike: (userId) => {
@@ -369,7 +430,16 @@ export const useDemoStore = create<DemoState>()(
           profiles: s.profiles.filter((p) => p._id !== profileId),
           matches: [newMatch, ...s.matches],
           likes: s.likes.filter((l) => l.userId !== profileId),
+          newMatchUserId: profileId,
         }));
+
+        // Fire bell notification
+        useDemoNotifStore.getState().addNotification({
+          type: 'match_created',
+          title: "It's a match!",
+          body: `You and ${profile.name} liked each other.`,
+          data: { otherUserId: profileId, matchId },
+        });
       },
 
       // ── Safety actions ──
@@ -381,8 +451,20 @@ export const useDemoStore = create<DemoState>()(
       blockUser: (userId) => {
         set((s) => {
           if (s.blockedUserIds.includes(userId)) return s;
-          return { blockedUserIds: [...s.blockedUserIds, userId] };
+          return {
+            blockedUserIds: [...s.blockedUserIds, userId],
+            matches: s.matches.filter((m) => m.otherUser?.id !== userId),
+            likes: s.likes.filter((l) => l.userId !== userId),
+          };
         });
+        // Clean DM store — remove conversation & meta for this user
+        const dmState = useDemoDmStore.getState();
+        const meta = dmState.meta;
+        for (const convoId of Object.keys(meta)) {
+          if (meta[convoId]?.otherUser?.id === userId) {
+            dmState.deleteConversation(convoId);
+          }
+        }
       },
 
       reportUser: (userId, reason, description) => {
@@ -399,8 +481,18 @@ export const useDemoStore = create<DemoState>()(
             blockedUserIds: s.blockedUserIds.includes(userId)
               ? s.blockedUserIds
               : [...s.blockedUserIds, userId],
+            matches: s.matches.filter((m) => m.otherUser?.id !== userId),
+            likes: s.likes.filter((l) => l.userId !== userId),
           };
         });
+        // Clean DM store — remove conversation & meta for this user
+        const dmState = useDemoDmStore.getState();
+        const meta = dmState.meta;
+        for (const convoId of Object.keys(meta)) {
+          if (meta[convoId]?.otherUser?.id === userId) {
+            dmState.deleteConversation(convoId);
+          }
+        }
       },
 
       unblockUser: (userId) => {

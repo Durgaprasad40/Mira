@@ -1,5 +1,5 @@
 import { useCallback, useRef } from 'react';
-import { useDemoNotifStore, type AppNotification } from './useNotifications';
+import { useDemoNotifStore } from './useNotifications';
 
 const SIX_HOURS = 6 * 60 * 60 * 1000;
 const MAX_DAILY = 3;
@@ -48,16 +48,12 @@ export function useConfessionNotifications() {
   const notifyReaction = useCallback(
     (confessionId: string) => {
       if (isRateLimited(confessionId)) return;
-      const notif: AppNotification = {
-        _id: `cn_react_${Date.now()}`,
+      addNotification({
         type: 'confession_reaction',
         title: 'Confess',
         body: 'Someone felt the same',
         data: { confessionId },
-        createdAt: Date.now(),
-        isRead: false,
-      };
-      addNotification(notif);
+      });
       recordNotification(confessionId);
     },
     [addNotification, isRateLimited, recordNotification],
@@ -66,16 +62,12 @@ export function useConfessionNotifications() {
   const notifyReply = useCallback(
     (confessionId: string) => {
       if (isRateLimited(confessionId)) return;
-      const notif: AppNotification = {
-        _id: `cn_reply_${Date.now()}`,
+      addNotification({
         type: 'confession_reply',
         title: 'Confess',
         body: 'Someone replied to your confession',
         data: { confessionId },
-        createdAt: Date.now(),
-        isRead: false,
-      };
-      addNotification(notif);
+      });
       recordNotification(confessionId);
     },
     [addNotification, isRateLimited, recordNotification],

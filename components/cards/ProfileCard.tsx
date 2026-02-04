@@ -38,7 +38,7 @@ export interface ProfileCardProps {
 
 const BLUR_RADIUS = 25; // Strong but recognisable blur
 
-export const ProfileCard: React.FC<ProfileCardProps> = ({
+export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
   name,
   age,
   bio,
@@ -197,7 +197,7 @@ export const ProfileCard: React.FC<ProfileCardProps> = ({
       </View>
     </View>
   );
-};
+});
 
 const styles = StyleSheet.create({
   // --- Discover card ---

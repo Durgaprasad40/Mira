@@ -8,7 +8,7 @@ interface SwipeOverlayProps {
   opacity: number | Animated.Value;
 }
 
-export function SwipeOverlay({ direction, opacity }: SwipeOverlayProps) {
+export const SwipeOverlay = React.memo(function SwipeOverlay({ direction, opacity }: SwipeOverlayProps) {
   if (!direction) return null;
   // Support both static number and Animated.Value
   if (typeof opacity === 'number' && opacity === 0) return null;
@@ -49,7 +49,7 @@ export function SwipeOverlay({ direction, opacity }: SwipeOverlayProps) {
       </View>
     </Animated.View>
   );
-}
+});
 
 const styles = StyleSheet.create({
   container: {

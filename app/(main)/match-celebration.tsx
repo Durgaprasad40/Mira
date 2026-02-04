@@ -9,6 +9,7 @@ import {
 } from "react-native";
 import { useRouter, useLocalSearchParams } from "expo-router";
 import { LinearGradient } from "expo-linear-gradient";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { COLORS } from "@/lib/constants";
 import { Button } from "@/components/ui";
 import { useQuery, useMutation } from "convex/react";
@@ -26,6 +27,7 @@ import { Toast } from "@/components/ui/Toast";
 
 export default function MatchCelebrationScreen() {
   const router = useRouter();
+  const insets = useSafeAreaInsets();
   const { matchId, userId: otherUserId } = useLocalSearchParams<{
     matchId: string;
     userId: string;
@@ -201,51 +203,17 @@ export default function MatchCelebrationScreen() {
       console.log("[SayHi] conversationId(before)", (match as any)?.conversationId);
     }
 
-    // Demo mode: seed local store then navigate (no Convex backend)
+    // Demo mode: match + DM already created by simulateMatch() in the swipe
+    // handler. Just pre-fill a draft "Hi" and navigate to the chat.
     if (isDemo) {
       const demoConversationId = `demo_convo_${otherUserId}`;
       if (__DEV__) console.log("[SayHi] demo mode — convoId=", demoConversationId);
 
-      const otherName = otherUser?.name ?? "Someone";
-      const otherPhoto = otherUser?.photos?.[0]?.url ?? "";
+      // Pre-fill draft so the chat input shows "Hi" ready to send.
+      useDemoDmStore.getState().setDraft(demoConversationId, "Hi");
 
-      // 1. Seed DM conversation metadata + empty conversation (no auto-sent message).
-      //    A draft "Hi" is set so the chat input is pre-filled but not sent.
-      const dmStore = useDemoDmStore.getState();
-      dmStore.setMeta(demoConversationId, {
-        otherUser: { id: otherUserId, name: otherName, lastActive: Date.now(), isVerified: false },
-        isPreMatch: false,
-      });
-      dmStore.seedConversation(demoConversationId, []);
-      dmStore.setDraft(demoConversationId, "Hi");
-
-      // 2. Ensure a DemoMatch exists in demoStore so the Messages list shows it.
-      //    Uses the same deterministic conversationId so tapping the thread in
-      //    the list navigates to the same conversation.
-      const store = useDemoStore.getState();
-      const alreadyMatched = store.matches.some(
-        (m) => m.conversationId === demoConversationId
-      );
-      if (!alreadyMatched) {
-        store.addMatch({
-          id: `match_${otherUserId}`,
-          conversationId: demoConversationId,
-          otherUser: {
-            id: otherUserId ?? "",
-            name: otherName,
-            photoUrl: otherPhoto,
-            lastActive: Date.now(),
-            isVerified: false,
-          },
-          lastMessage: null,
-          unreadCount: 0,
-          isPreMatch: false,
-        });
-      }
-      // Remove matched user from likes so they don't appear in "New Likes"
-      if (otherUserId) {
-        store.removeLike(otherUserId);
-      }
+      // Clear the match celebration event.
+      useDemoStore.getState().setNewMatchUserId(null);
 
       // Dismiss the celebration modal, push Messages list first, then chat.
       // Stack becomes: Messages list → Chat, so router.back() from chat
@@ -312,12 +280,17 @@ export default function MatchCelebrationScreen() {
   };
 
   const handleKeepSwiping = () => {
+    // Only clear the UI event — the match itself was already saved by
+    // simulateMatch() before this screen opened.
+    if (isDemo) {
+      useDemoStore.getState().setNewMatchUserId(null);
+    }
     router.back();
   };
 
   if (!match || !otherUser || !currentUser) {
     return (
-      <View style={[styles.container, styles.loadingContainer]}>
+      <View style={[styles.container, styles.loadingContainer, { paddingTop: insets.top }]}>
         {timedOut ? (
           <>
             <Ionicons name="heart-dislike-outline" size={48} color={COLORS.textMuted} />
@@ -341,7 +314,7 @@ export default function MatchCelebrationScreen() {
   return (
     <LinearGradient
       colors={[COLORS.primary, COLORS.secondary]}
-      style={styles.container}
+      style={[styles.container, { paddingTop: insets.top }]}
     >
       {/* Confetti Effect */}
       <Animated.View

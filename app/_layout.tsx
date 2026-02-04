@@ -4,6 +4,7 @@ import { ConvexProvider, useMutation } from "convex/react";
 import { convex, isDemoMode } from "@/hooks/useConvex";
 
 import { GestureHandlerRootView } from "react-native-gesture-handler";
+import { SafeAreaProvider } from "react-native-safe-area-context";
 import { StatusBar } from "expo-status-bar";
 import { api } from "@/convex/_generated/api";
 import { useAuthStore } from "@/stores/authStore";
@@ -45,18 +46,20 @@ export default function RootLayout() {
 
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>
-      <ConvexProvider client={convex}>
-        <StatusBar style="light" />
-        <DemoBanner />
-        <DeviceFingerprintCollector />
-        <Stack screenOptions={{ headerShown: false }}>
-          <Stack.Screen name="index" />
-          <Stack.Screen name="demo-profile" />
-          <Stack.Screen name="(auth)" />
-          <Stack.Screen name="(onboarding)" />
-          <Stack.Screen name="(main)" options={{ gestureEnabled: false }} />
-        </Stack>
-      </ConvexProvider>
+      <SafeAreaProvider>
+        <ConvexProvider client={convex}>
+          <StatusBar style="light" />
+          <DemoBanner />
+          <DeviceFingerprintCollector />
+          <Stack screenOptions={{ headerShown: false }}>
+            <Stack.Screen name="index" />
+            <Stack.Screen name="demo-profile" />
+            <Stack.Screen name="(auth)" />
+            <Stack.Screen name="(onboarding)" />
+            <Stack.Screen name="(main)" options={{ gestureEnabled: false }} />
+          </Stack>
+        </ConvexProvider>
+      </SafeAreaProvider>
     </GestureHandlerRootView>
   );
 }

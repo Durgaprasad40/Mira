@@ -58,6 +58,32 @@ interface DemoDmState {
 
   /** Mark all incoming messages in a conversation as read. */
   markConversationRead: (id: string, currentUserId: string) => void;
+
+  /** Delete a conversation and its metadata/draft entirely. */
+  deleteConversation: (id: string) => void;
+
+  /** Clear all conversations, metadata, and drafts. */
+  reset: () => void;
+}
+
+/**
+ * Pure function: count conversations that have at least one unread incoming message.
+ * Use as a Zustand selector: `useDemoDmStore(s => computeUnreadConversationCount(s, userId))`
+ */
+export function computeUnreadConversationCount(
+  state: Pick<DemoDmState, 'conversations'>,
+  currentUserId: string,
+): number {
+  let count = 0;
+  for (const msgs of Object.values(state.conversations)) {
+    if (!msgs || msgs.length === 0) continue;
+    // Check if any incoming message is unread
+    const hasUnread = msgs.some(
+      (m) => m.senderId !== currentUserId && !m.readAt,
+    );
+    if (hasUnread) count++;
+  }
+  return count;
 }
 
 export const useDemoDmStore = create<DemoDmState>()(
@@ -111,6 +137,16 @@ export const useDemoDmStore = create<DemoDmState>()(
           );
           return { conversations: { ...s.conversations, [id]: updated } };
         }),
+
+      deleteConversation: (id) =>
+        set((s) => {
+          const { [id]: _c, ...restConvos } = s.conversations;
+          const { [id]: _m, ...restMeta } = s.meta;
+          const { [id]: _d, ...restDrafts } = s.drafts;
+          return { conversations: restConvos, meta: restMeta, drafts: restDrafts };
+        }),
+
+      reset: () => set({ conversations: {}, meta: {}, drafts: {} }),
     }),
     {
       name: 'demo-dm-storage',

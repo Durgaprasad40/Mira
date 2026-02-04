@@ -34,6 +34,7 @@ import { Ionicons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
 import { isDemoMode } from '@/hooks/useConvex';
 import { useDemoDmStore, DemoDmMessage } from '@/stores/demoDmStore';
+import { useDemoNotifStore } from '@/hooks/useNotifications';
 import { Toast } from '@/components/ui/Toast';
 
 /** Resolve the current demo user ID at call-time from authStore.
@@ -92,7 +93,13 @@ export default function ChatScreenInner({ conversationId }: ChatScreenInnerProps
   const setDemoDraft = useDemoDmStore((s) => s.setDraft);
   const clearDemoDraft = useDemoDmStore((s) => s.clearDraft);
 
-  if (__DEV__ && isDemo) console.log(`[Chat] lookup convoId=${conversationId} hasMeta=${!!demoMeta[conversationId]} hasMessages=${!!(demoConversations[conversationId]?.length)}`);
+  const hasMeta = !!demoMeta[conversationId ?? ''];
+  const hasMessages = !!(demoConversations[conversationId ?? '']?.length);
+  useEffect(() => {
+    if (__DEV__ && isDemo) {
+      console.log(`[Chat] lookup convoId=${conversationId} hasMeta=${hasMeta} hasMessages=${hasMessages}`);
+    }
+  }, [conversationId, hasMeta, hasMessages]);
 
   // Seed once per conversation (no-op if already seeded)
   useEffect(() => {
@@ -136,7 +143,12 @@ export default function ChatScreenInner({ conversationId }: ChatScreenInnerProps
 
   const activeConversation = isDemo ? demoConversation : conversation;
 
-  if (__DEV__) console.log("[Chat] route conversationId", conversationId, "query result", conversation === undefined ? "loading" : conversation ? "ok" : "null");
+  const _queryStatus = conversation === undefined ? 'loading' : conversation ? 'ok' : 'null';
+  useEffect(() => {
+    if (__DEV__) {
+      console.log('[Chat] route conversationId', conversationId, 'query result', _queryStatus);
+    }
+  }, [conversationId, _queryStatus]);
 
   const sendMessage = useMutation(api.messages.sendMessage);
   const markAsRead = useMutation(api.messages.markAsRead);
@@ -154,13 +166,15 @@ export default function ChatScreenInner({ conversationId }: ChatScreenInnerProps
   const [showReportBlock, setShowReportBlock] = useState(false);
 
   const markDemoRead = useDemoDmStore((s) => s.markConversationRead);
+  const markNotifReadForConvo = useDemoNotifStore((s) => s.markReadForConversation);
   useEffect(() => {
     if (isDemo && conversationId) {
       markDemoRead(conversationId, getDemoUserId());
+      markNotifReadForConvo(conversationId);
     } else if (!isDemo && conversationId && userId) {
       markAsRead({ conversationId: conversationId as any, userId: userId as any });
     }
-  }, [conversationId, userId, isDemo, markDemoRead]);
+  }, [conversationId, userId, isDemo, markDemoRead, markNotifReadForConvo]);
 
   // Auto-scroll only when new messages arrive AND user is near the bottom.
   useEffect(() => {

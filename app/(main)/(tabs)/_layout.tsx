@@ -1,8 +1,16 @@
 import { Tabs } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import { COLORS } from "@/lib/constants";
+import { isDemoMode } from "@/hooks/useConvex";
+import { useAuthStore } from "@/stores/authStore";
+import { useDemoDmStore, computeUnreadConversationCount } from "@/stores/demoDmStore";
 
 export default function MainTabsLayout() {
+  const userId = useAuthStore((s) => s.userId);
+  const unreadChats = useDemoDmStore((s) =>
+    isDemoMode ? computeUnreadConversationCount(s, userId || 'demo_user_1') : 0,
+  );
+
   return (
     <Tabs
       screenOptions={{
@@ -54,6 +62,8 @@ export default function MainTabsLayout() {
           tabBarIcon: ({ color, size }) => (
             <Ionicons name="chatbubbles" size={size} color={color} />
           ),
+          tabBarBadge: unreadChats > 0 ? unreadChats : undefined,
+          tabBarBadgeStyle: { backgroundColor: COLORS.primary, fontSize: 10 },
         }}
       />
       <Tabs.Screen
