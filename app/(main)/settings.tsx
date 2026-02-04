@@ -7,7 +7,6 @@ import {
   TouchableOpacity,
   Platform,
   Switch,
-  Alert,
 } from 'react-native';
 import { useRouter } from 'expo-router';
 import { useQuery, useMutation } from 'convex/react';
@@ -19,7 +18,8 @@ import { Ionicons } from '@expo/vector-icons';
 import { useFilterStore } from '@/stores/filterStore';
 import { isDemoMode } from '@/hooks/useConvex';
 import { BlurProfileNotice } from '@/components/profile/BlurProfileNotice';
-import { DEMO_USER } from '@/lib/demoData';
+import { Toast } from '@/components/ui/Toast';
+import { getDemoCurrentUser } from '@/lib/demoData';
 import { useDemoStore } from '@/stores/demoStore';
 import { getProfileCompleteness, NUDGE_MESSAGES } from '@/lib/profileCompleteness';
 import { ProfileNudge } from '@/components/ui/ProfileNudge';
@@ -33,7 +33,7 @@ export default function SettingsScreen() {
     api.users.getCurrentUser,
     !isDemoMode && userId ? { userId: userId as any } : 'skip'
   );
-  const currentUser = isDemoMode ? (DEMO_USER as any) : currentUserQuery;
+  const currentUser = isDemoMode ? (getDemoCurrentUser() as any) : currentUserQuery;
 
   // Profile completeness nudge
   const dismissedNudges = useDemoStore((s) => s.dismissedNudges);
@@ -80,6 +80,7 @@ export default function SettingsScreen() {
   const [showLastSeenEnabled, setShowLastSeenEnabled] = useState(currentUser?.showLastSeen !== false);
   const [blurEnabled, setBlurEnabled] = useState(currentUser?.photoBlurred === true);
   const [showBlurNotice, setShowBlurNotice] = useState(false);
+  const [saving, setSaving] = useState(false);
 
   React.useEffect(() => {
     if (currentUser) {
@@ -99,8 +100,9 @@ export default function SettingsScreen() {
   }, [currentUser]);
 
   const handleSavePreferences = async () => {
-    if (!userId) return;
+    if (!userId || saving) return;
 
+    setSaving(true);
     try {
       await updatePreferences({
         userId: userId as any,
@@ -112,9 +114,11 @@ export default function SettingsScreen() {
       setMinAge(parseInt(localMinAge));
       setMaxAge(parseInt(localMaxAge));
       setMaxDistance(parseInt(localMaxDistance));
-      Alert.alert('Success', 'Preferences updated!');
-    } catch (error: any) {
-      Alert.alert('Error', error.message || 'Failed to update preferences');
+      Toast.show('Preferences saved');
+    } catch {
+      Toast.show('Couldn\u2019t save preferences. Check your connection and try again.');
+    } finally {
+      setSaving(false);
     }
   };
 
@@ -128,8 +132,8 @@ export default function SettingsScreen() {
     try {
       await toggleDiscoveryPause({ userId: userId as any, paused });
       setPauseEnabled(paused);
-    } catch (error: any) {
-      Alert.alert('Error', error.message || 'Failed to toggle pause');
+    } catch {
+      Toast.show('Couldn\u2019t update this setting. Please try again.');
       setPauseEnabled(!paused);
     }
   };
@@ -146,7 +150,7 @@ export default function SettingsScreen() {
       if (!userId || !togglePhotoBlurMut) return;
       togglePhotoBlurMut({ userId: userId as any, blurred: false })
         .then(() => setBlurEnabled(false))
-        .catch((err: any) => Alert.alert('Error', err.message));
+        .catch(() => Toast.show('Couldn\u2019t update blur setting. Please try again.'));
     }
   };
 
@@ -157,8 +161,8 @@ export default function SettingsScreen() {
     try {
       await togglePhotoBlurMut({ userId: userId as any, blurred: true });
       setBlurEnabled(true);
-    } catch (err: any) {
-      Alert.alert('Error', err.message);
+    } catch {
+      Toast.show('Couldn\u2019t update blur setting. Please try again.');
     }
   };
 
@@ -168,8 +172,8 @@ export default function SettingsScreen() {
     try {
       await toggleIncognito({ userId: userId as any, enabled });
       setIncognitoEnabled(enabled);
-    } catch (error: any) {
-      Alert.alert('Error', error.message || 'Failed to update discovery visibility');
+    } catch {
+      Toast.show('Couldn\u2019t update this setting. Please try again.');
       setIncognitoEnabled(!enabled);
     }
   };
@@ -275,9 +279,11 @@ export default function SettingsScreen() {
         </View>
 
         <Button
-          title="Save Preferences"
+          title={saving ? "Saving…" : "Save Preferences"}
           variant="primary"
           onPress={handleSavePreferences}
+          disabled={saving}
+          loading={saving}
           style={styles.saveButton}
         />
       </View>
@@ -500,8 +506,10 @@ const styles = StyleSheet.create({
   },
   chip: {
     paddingHorizontal: 16,
-    paddingVertical: 8,
+    paddingVertical: 10,
     borderRadius: 20,
+    minHeight: 44,
+    justifyContent: 'center' as const,
     backgroundColor: COLORS.backgroundDark,
     borderWidth: 1,
     borderColor: COLORS.border,

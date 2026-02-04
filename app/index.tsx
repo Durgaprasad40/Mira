@@ -4,6 +4,8 @@ import type { Href } from "expo-router";
 
 const H = (p: string) => p as unknown as Href;
 import { useAuthStore } from "@/stores/authStore";
+import { useDemoStore } from "@/stores/demoStore";
+import { isDemoMode } from "@/hooks/useConvex";
 import { View, ActivityIndicator, StyleSheet, Text } from "react-native";
 import { COLORS } from "@/lib/constants";
 
@@ -11,6 +13,7 @@ export default function Index() {
   const _hasHydrated = useAuthStore((s) => s._hasHydrated);
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
   const onboardingCompleted = useAuthStore((s) => s.onboardingCompleted);
+  const demoUserProfile = useDemoStore((s) => s.demoUserProfile);
   const didRedirect = useRef(false);
 
   // Wait for Zustand hydration before deciding destination
@@ -32,6 +35,24 @@ export default function Index() {
   }
   didRedirect.current = true;
 
+  // ── Demo mode: skip all auth, check if profile exists ──
+  if (isDemoMode) {
+    const profileExists = !!demoUserProfile;
+    if (__DEV__) console.log(`[DemoGate] mode=demo profile_exists=${profileExists}`);
+
+    if (profileExists) {
+      // Ensure auth is set (covers app restart where authStore may have been cleared)
+      if (!isAuthenticated) {
+        useAuthStore.getState().setAuth('demo_user_1', 'demo_token', true);
+      }
+      if (__DEV__) console.log('[DemoGate] redirect_to=main');
+      return <Redirect href={H("/(main)/(tabs)/home")} />;
+    }
+    if (__DEV__) console.log('[DemoGate] redirect_to=profile_create');
+    return <Redirect href={H("/demo-profile")} />;
+  }
+
+  // ── Live mode: standard auth flow ──
   if (isAuthenticated) {
     if (onboardingCompleted) {
       return <Redirect href={H("/(main)/(tabs)/home")} />;

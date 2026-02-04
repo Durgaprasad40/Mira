@@ -13,6 +13,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { COLORS } from '@/lib/constants';
 import { useDemoStore } from '@/stores/demoStore';
 import { useDemoDmStore } from '@/stores/demoDmStore';
+import { useAuthStore } from '@/stores/authStore';
 import { useConfessionStore } from '@/stores/confessionStore';
 import {
   generateRandomProfile,
@@ -96,13 +97,19 @@ export default function DemoPanelScreen() {
       return;
     }
     const match = matches[0];
+    const convoId = match.conversationId || match.id;
     const dmStore = useDemoDmStore.getState();
-    dmStore.seedConversation(match.id, [
+    dmStore.seedConversation(convoId, [
       { _id: `seed_${Date.now()}_1`, content: 'Hey! Great to match with you.', type: 'text', senderId: match.otherUser.id, createdAt: Date.now() - 60000 },
       { _id: `seed_${Date.now()}_2`, content: 'Hi! Thanks, you seem really cool!', type: 'text', senderId: 'demo_user_1', createdAt: Date.now() - 30000 },
       { _id: `seed_${Date.now()}_3`, content: 'What do you like to do for fun?', type: 'text', senderId: match.otherUser.id, createdAt: Date.now() },
     ]);
     Alert.alert('Conversation seeded', `Messages added to chat with ${match.otherUser.name}`);
+  };
+
+  const handleResetChats = () => {
+    useDemoDmStore.setState({ conversations: {}, meta: {}, drafts: {} });
+    Alert.alert('Done', 'All demo chat threads have been cleared');
   };
 
   const handleAddConfession = () => {
@@ -144,14 +151,15 @@ export default function DemoPanelScreen() {
   };
 
   const handleResetAll = () => {
-    Alert.alert('Reset All Demo Data?', 'This will restore everything to defaults.', [
+    Alert.alert('Reset All Demo Data?', 'This will restore everything to defaults and return to profile creation.', [
       { text: 'Cancel', style: 'cancel' },
       {
         text: 'Reset',
         style: 'destructive',
         onPress: () => {
           reset();
-          Alert.alert('Done', 'All demo data has been reset');
+          useAuthStore.getState().logout();
+          router.replace('/' as any);
         },
       },
     ]);
@@ -224,6 +232,7 @@ export default function DemoPanelScreen() {
         <Text style={styles.sectionTitle}>Messages</Text>
         <View style={styles.buttonRow}>
           <ActionButton label="Seed Demo Conversation" icon="chatbubbles" onPress={handleSeedConversation} />
+          <ActionButton label="Reset Demo Chats" icon="trash" onPress={handleResetChats} color={COLORS.error} />
         </View>
       </View>
 

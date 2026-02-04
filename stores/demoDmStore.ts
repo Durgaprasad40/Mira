@@ -34,6 +34,9 @@ interface DemoDmState {
   /** conversationId → header / other-user metadata */
   meta: Record<string, DemoConversationMeta>;
 
+  /** conversationId → draft text (pre-filled but not yet sent) */
+  drafts: Record<string, string>;
+
   /**
    * Seed a conversation with initial messages if it hasn't been
    * seeded yet.  Calling this multiple times is safe — it only
@@ -46,6 +49,12 @@ interface DemoDmState {
 
   /** Append a new message to a conversation. */
   addMessage: (id: string, msg: DemoDmMessage) => void;
+
+  /** Set a draft message for a conversation (pre-fills the input). */
+  setDraft: (id: string, text: string) => void;
+
+  /** Clear the draft for a conversation (e.g. after sending). */
+  clearDraft: (id: string) => void;
 }
 
 export const useDemoDmStore = create<DemoDmState>()(
@@ -53,6 +62,7 @@ export const useDemoDmStore = create<DemoDmState>()(
     (set, get) => ({
       conversations: {},
       meta: {},
+      drafts: {},
 
       seedConversation: (id, seed) => {
         // Only seed once — existing data takes precedence
@@ -74,6 +84,17 @@ export const useDemoDmStore = create<DemoDmState>()(
             [id]: [...(s.conversations[id] ?? []), msg],
           },
         })),
+
+      setDraft: (id, text) =>
+        set((s) => ({
+          drafts: { ...s.drafts, [id]: text },
+        })),
+
+      clearDraft: (id) =>
+        set((s) => {
+          const { [id]: _, ...rest } = s.drafts;
+          return { drafts: rest };
+        }),
     }),
     {
       name: 'demo-dm-storage',

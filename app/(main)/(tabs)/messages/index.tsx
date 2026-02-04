@@ -13,7 +13,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { Badge } from '@/components/ui';
 import { isDemoMode } from '@/hooks/useConvex';
 import { asUserId } from '@/convex/id';
-import { DEMO_MATCHES, DEMO_LIKES, DEMO_USER } from '@/lib/demoData';
+import { getDemoCurrentUser } from '@/lib/demoData';
 import { useDemoStore } from '@/stores/demoStore';
 import { isActiveNow } from '@/lib/formatLastSeen';
 import { useScreenSafety } from '@/hooks/useScreenSafety';
@@ -66,7 +66,7 @@ export default function MessagesScreen() {
   // Profile completeness nudge — messages tab only shows for needs_both
   const dismissedNudges = useDemoStore((s) => s.dismissedNudges);
   const dismissNudge = useDemoStore((s) => s.dismissNudge);
-  const nudgeUser = isDemoMode ? DEMO_USER : convexCurrentUser;
+  const nudgeUser = isDemoMode ? getDemoCurrentUser() : convexCurrentUser;
   const messagesNudgeStatus = nudgeUser
     ? getProfileCompleteness({
         photoCount: Array.isArray(nudgeUser.photos) ? nudgeUser.photos.length : 0,
@@ -83,9 +83,17 @@ export default function MessagesScreen() {
     safeTimeout(() => setRefreshing(false), 300);
   };
 
-  // Separate super likes from regular likes
-  const superLikes = (likesReceived || []).filter((l: any) => l.action === 'super_like');
-  const regularLikes = (likesReceived || []).filter((l: any) => l.action !== 'super_like');
+  // Separate super likes from regular likes, dedup by userId
+  const dedup = (arr: any[]) => {
+    const seen = new Set<string>();
+    return arr.filter((l: any) => {
+      if (seen.has(l.userId)) return false;
+      seen.add(l.userId);
+      return true;
+    });
+  };
+  const superLikes = dedup((likesReceived || []).filter((l: any) => l.action === 'super_like'));
+  const regularLikes = dedup((likesReceived || []).filter((l: any) => l.action !== 'super_like'));
 
   const renderSuperLikesRow = () => {
     if (superLikes.length === 0) return null;
@@ -152,6 +160,12 @@ export default function MessagesScreen() {
           <View style={[styles.countBadge, { backgroundColor: COLORS.primary + '20' }]}>
             <Text style={[styles.countBadgeText, { color: COLORS.primary }]}>{regularLikes.length}</Text>
           </View>
+          <TouchableOpacity
+            style={styles.viewAllButton}
+            onPress={() => router.push('/(main)/likes' as any)}
+          >
+            <Text style={styles.viewAllText}>View all</Text>
+          </TouchableOpacity>
         </View>
         <FlatList
           horizontal
@@ -281,7 +295,7 @@ export default function MessagesScreen() {
             lastMessage={item.lastMessage}
             unreadCount={item.unreadCount}
             isPreMatch={item.isPreMatch}
-            onPress={() => router.push(`/(main)/(tabs)/messages/chat/${item.id}` as any)}
+            onPress={() => router.push(`/(main)/(tabs)/messages/chat/${item.conversationId || item.id}` as any)}
           />
         )}
         ListEmptyComponent={
@@ -485,6 +499,16 @@ const styles = StyleSheet.create({
     fontSize: 11,
     color: COLORS.textLight,
     textAlign: 'center',
+  },
+  viewAllButton: {
+    marginLeft: 'auto',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+  },
+  viewAllText: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: COLORS.primary,
   },
 
   // ── Loading ──

@@ -7,16 +7,29 @@ import {
   TouchableOpacity,
   Alert,
 } from "react-native";
-import { useRouter } from "expo-router";
+import { useRouter, Redirect } from "expo-router";
 import { COLORS, VALIDATION } from "@/lib/constants";
 import { Button } from "@/components/ui";
 import { useOnboardingStore } from "@/stores/onboardingStore";
 import { useMutation } from "convex/react";
 import { api } from "@/convex/_generated/api";
+import { isDemoMode } from "@/hooks/useConvex";
+import { useAuthStore } from "@/stores/authStore";
+import { useDemoStore } from "@/stores/demoStore";
 
 export default function OTPScreen() {
   const { email, phone, setStep } = useOnboardingStore();
   const router = useRouter();
+  const { setAuth } = useAuthStore();
+  const demoUserProfile = useDemoStore((s) => s.demoUserProfile);
+
+  // Demo mode: never show OTP screen — redirect immediately
+  if (isDemoMode) {
+    if (demoUserProfile) {
+      return <Redirect href={"/(main)/(tabs)/home" as any} />;
+    }
+    return <Redirect href={"/demo-profile" as any} />;
+  }
   const [otp, setOtp] = useState(["", "", "", "", "", ""]);
   const inputRefs = useRef<(TextInput | null)[]>([]);
   const [isVerifying, setIsVerifying] = useState(false);

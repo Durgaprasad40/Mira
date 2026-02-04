@@ -6,7 +6,6 @@ import {
   TouchableOpacity,
   Image,
   Animated,
-  Alert,
 } from "react-native";
 import { useRouter, useLocalSearchParams } from "expo-router";
 import { LinearGradient } from "expo-linear-gradient";
@@ -19,9 +18,11 @@ import { Ionicons } from "@expo/vector-icons";
 import * as Haptics from "expo-haptics";
 import { Id } from "@/convex/_generated/dataModel";
 import { isDemoMode } from "@/hooks/useConvex";
-import { DEMO_USER, DEMO_PROFILES } from "@/lib/demoData";
+import { DEMO_USER, DEMO_PROFILES, getDemoCurrentUser } from "@/lib/demoData";
 import { useDemoDmStore } from "@/stores/demoDmStore";
+import { useDemoStore } from "@/stores/demoStore";
 import { trackEvent } from "@/lib/analytics";
+import { Toast } from "@/components/ui/Toast";
 
 export default function MatchCelebrationScreen() {
   const router = useRouter();
@@ -67,8 +68,9 @@ export default function MatchCelebrationScreen() {
 
   const match = isDemo ? { _id: matchId } : matchQuery;
   const otherUser = isDemo ? demoOtherUser : otherUserQuery;
+  const demoCurrentUser = isDemo ? getDemoCurrentUser() : null;
   const currentUser = isDemo
-    ? { name: DEMO_USER.name, photos: DEMO_USER.photos }
+    ? { name: demoCurrentUser!.name, photos: demoCurrentUser!.photos }
     : currentUserQuery;
 
   const ensureConversation = useMutation(api.conversations.getOrCreateForMatch);
@@ -202,24 +204,61 @@ export default function MatchCelebrationScreen() {
     // Demo mode: seed local store then navigate (no Convex backend)
     if (isDemo) {
       const demoConversationId = `demo_convo_${otherUserId}`;
-      if (__DEV__) console.log("[SayHi] demo mode — seeding store, convoId=", demoConversationId);
+      if (__DEV__) console.log("[SayHi] demo mode — convoId=", demoConversationId);
 
       const otherName = otherUser?.name ?? "Someone";
-      useDemoDmStore.getState().setMeta(demoConversationId, {
+      const otherPhoto = otherUser?.photos?.[0]?.url ?? "";
+
+      // 1. Seed DM conversation metadata + empty conversation (no auto-sent message).
+      //    A draft "Hi" is set so the chat input is pre-filled but not sent.
+      const dmStore = useDemoDmStore.getState();
+      dmStore.setMeta(demoConversationId, {
         otherUser: { id: otherUserId, name: otherName, lastActive: Date.now(), isVerified: false },
         isPreMatch: false,
       });
-      useDemoDmStore.getState().seedConversation(demoConversationId, [
-        { _id: `dm_hi_${Date.now()}`, content: "Hi 👋", type: "text", senderId: "demo_user_1", createdAt: Date.now() },
-      ]);
+      dmStore.seedConversation(demoConversationId, []);
+      dmStore.setDraft(demoConversationId, "Hi");
 
-      router.replace(`/(main)/(tabs)/messages/chat/${demoConversationId}` as any);
+      // 2. Ensure a DemoMatch exists in demoStore so the Messages list shows it.
+      //    Uses the same deterministic conversationId so tapping the thread in
+      //    the list navigates to the same conversation.
+      const store = useDemoStore.getState();
+      const alreadyMatched = store.matches.some(
+        (m) => m.conversationId === demoConversationId
+      );
+      if (!alreadyMatched) {
+        store.addMatch({
+          id: `match_${otherUserId}`,
+          conversationId: demoConversationId,
+          otherUser: {
+            id: otherUserId ?? "",
+            name: otherName,
+            photoUrl: otherPhoto,
+            lastActive: Date.now(),
+            isVerified: false,
+          },
+          lastMessage: null,
+          unreadCount: 0,
+          isPreMatch: false,
+        });
+      }
+
+      // Dismiss the celebration modal, push Messages list first, then chat.
+      // Stack becomes: Messages list → Chat, so router.back() from chat
+      // returns to the Messages list instead of Discover.
+      router.dismiss();
+      setTimeout(() => {
+        router.push("/(main)/(tabs)/messages" as any);
+        setTimeout(() => {
+          router.push(`/(main)/(tabs)/messages/chat/${demoConversationId}` as any);
+        }, 0);
+      }, 0);
       sendingRef.current = false;
       return;
     }
 
     if (!matchIdValue || !viewerId) {
-      Alert.alert("Couldn't start chat", "Missing match or user info. Please try again.");
+      Toast.show("Something went wrong. Please go back and try again.");
       sendingRef.current = false;
       return;
     }
@@ -247,15 +286,21 @@ export default function MatchCelebrationScreen() {
       trackEvent({ name: 'first_message_sent', conversationId: conversationIdFinal as string });
       if (__DEV__) console.log("[SayHi] messageSent ok");
 
-      // STEP C: Navigate LAST — land inside the Messages tab so tab bar stays visible.
-      // Uses router.replace (not push) so the user can't go "back" to the
-      // celebration screen after the conversation is already started.
+      // STEP C: Navigate LAST — dismiss the celebration modal, push Messages
+      // list first, then chat. Stack becomes: Messages list → Chat, so
+      // router.back() from chat returns to Messages, not Discover.
       const target = `/(main)/(tabs)/messages/chat/${conversationIdFinal}`;
       if (__DEV__) console.log("[SayHi] navigating to", target);
-      router.replace(target as any);
+      router.dismiss();
+      setTimeout(() => {
+        router.push("/(main)/(tabs)/messages" as any);
+        setTimeout(() => {
+          router.push(target as any);
+        }, 0);
+      }, 0);
     } catch (error: any) {
       if (__DEV__) console.error("[SayHi] error", error);
-      Alert.alert("Couldn't start chat", error.message || "Please try again.");
+      Toast.show("Couldn\u2019t start chat. Please try again.");
     } finally {
       setSending(false);
       sendingRef.current = false;

@@ -92,8 +92,10 @@ export default function NotificationsScreen() {
         break;
       case 'message':
       case 'new_message':
-        if (notification.data?.userId) {
-          router.push(`/(main)/chat/${notification.data.userId}`);
+        if (notification.data?.conversationId) {
+          router.push(`/(main)/(tabs)/messages/chat/${notification.data.conversationId}` as any);
+        } else if (notification.data?.userId) {
+          router.push(`/(main)/(tabs)/messages/chat/${notification.data.userId}` as any);
         }
         break;
       case 'super_like':

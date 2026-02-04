@@ -8,7 +8,6 @@ import {
   Animated,
   PanResponder,
   TouchableOpacity,
-  Alert,
 } from "react-native";
 import { useQuery, useMutation } from "convex/react";
 import { api } from "@/convex/_generated/api";
@@ -19,7 +18,7 @@ import { useDiscoverStore } from "@/stores/discoverStore";
 import { ProfileCard, SwipeOverlay } from "@/components/cards";
 import { isDemoMode } from "@/hooks/useConvex";
 import { useNotifications } from "@/hooks/useNotifications";
-import { DEMO_PROFILES, DEMO_USER } from "@/lib/demoData";
+import { DEMO_PROFILES, getDemoCurrentUser } from "@/lib/demoData";
 import { useDemoStore } from "@/stores/demoStore";
 import { router } from "expo-router";
 import { useIsFocused } from "@react-navigation/native";
@@ -32,6 +31,7 @@ import { rankProfiles } from "@/lib/rankProfiles";
 import { getProfileCompleteness, NUDGE_MESSAGES } from "@/lib/profileCompleteness";
 import { ProfileNudge } from "@/components/ui/ProfileNudge";
 import { trackEvent } from "@/lib/analytics";
+import { Toast } from "@/components/ui/Toast";
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get("window");
 
@@ -131,27 +131,35 @@ export function DiscoverCardStack({ theme = "light", externalProfiles, hideHeade
       const filtered = isDemoMode
         ? externalProfiles.filter((p: any) => !blockedUserIds.includes(p._id ?? p.id))
         : externalProfiles;
-      return rankProfiles(filtered.map(toProfileData));
+      const mapped = filtered.map(toProfileData);
+      // Demo mode: preserve array order for deterministic Discover feed
+      return isDemoMode ? mapped : rankProfiles(mapped);
     }
     if (isDemoMode) {
-      const mapped = demoProfiles
+      // Demo mode: return profiles in their original demoData.ts order (no ranking)
+      return demoProfiles
         .filter((p) => !blockedUserIds.includes(p._id))
         .map((p) => toProfileData({
           ...p,
           lastActive: Date.now() - 2 * 60 * 60 * 1000,
           createdAt: Date.now() - 60 * 24 * 60 * 60 * 1000,
         }));
-      return rankProfiles(mapped);
     }
     return rankProfiles(profilesSafe.map(toProfileData));
   }, [externalProfiles, profilesSafe, demoProfiles, blockedUserIds]);
 
+  // Drop profiles with no valid primary photo — prevents blank Discover cards
+  const validProfiles = useMemo(
+    () => latestProfiles.filter((p) => p.photos.length > 0 && !!p.photos[0]?.url),
+    [latestProfiles],
+  );
+
   // Keep last non-empty profiles to prevent blank-frame flicker
   const stableProfilesRef = useRef<ProfileData[]>([]);
-  if (latestProfiles.length > 0) {
-    stableProfilesRef.current = latestProfiles;
+  if (validProfiles.length > 0) {
+    stableProfilesRef.current = validProfiles;
   }
-  const profiles = latestProfiles.length > 0 ? latestProfiles : stableProfilesRef.current;
+  const profiles = validProfiles.length > 0 ? validProfiles : stableProfilesRef.current;
 
   // Trust badges
   const getBadges = (p: ProfileData) =>
@@ -169,7 +177,7 @@ export function DiscoverCardStack({ theme = "light", externalProfiles, hideHeade
     api.users.getCurrentUser,
     !isDemoMode && convexUserId ? { userId: convexUserId } : "skip" as const,
   );
-  const currentUser = isDemoMode ? DEMO_USER : currentUserForNudge;
+  const currentUser = isDemoMode ? getDemoCurrentUser() : currentUserForNudge;
   const nudgeStatus = currentUser
     ? getProfileCompleteness({
         photoCount: Array.isArray(currentUser.photos) ? currentUser.photos.length : 0,
@@ -276,9 +284,18 @@ export function DiscoverCardStack({ theme = "light", externalProfiles, hideHeade
     setOverlayDirection(null);
     setActiveSlot(newSlot);
     setIndex((prev) => prev + 1);
-    const oldPan = newSlot === 0 ? panB : panA;
-    requestAnimationFrame(() => oldPan.setValue({ x: 0, y: 0 }));
+    // Old pan is reset in the useEffect below, AFTER React has re-rendered
+    // with the new activeSlot. This prevents a 1-frame flicker where the
+    // swiped-away card snaps back to center before the slot switch renders.
   }, [panA, panB, overlayOpacityAnim]);
+
+  // Reset the now-inactive pan AFTER React commits the new activeSlot.
+  // This avoids the race where requestAnimationFrame fires before the
+  // batched state update, causing the old card to flash at center.
+  useEffect(() => {
+    const oldPan = activeSlot === 0 ? panB : panA;
+    oldPan.setValue({ x: 0, y: 0 });
+  }, [activeSlot, panA, panB]);
 
   const handleSwipe = useCallback(
     async (direction: "left" | "right" | "up", message?: string) => {
@@ -339,7 +356,7 @@ export function DiscoverCardStack({ theme = "light", externalProfiles, hideHeade
         }
       } catch (error: any) {
         if (!mountedRef.current) return;
-        Alert.alert("Error", error.message || "Failed to swipe");
+        Toast.show("Something went wrong. Please try again.");
       } finally {
         // Always release swipe lock — guaranteed, no timers
         swipingRef.current = false;
@@ -574,6 +591,7 @@ export function DiscoverCardStack({ theme = "light", externalProfiles, hideHeade
             <ProfileCard
               name={next.name}
               age={next.age}
+              bio={next.bio}
               city={next.city}
               isVerified={next.isVerified}
               distance={next.distance}
@@ -589,6 +607,7 @@ export function DiscoverCardStack({ theme = "light", externalProfiles, hideHeade
             <ProfileCard
               name={current.name}
               age={current.age}
+              bio={current.bio}
               city={current.city}
               isVerified={current.isVerified}
               distance={current.distance}
@@ -609,6 +628,7 @@ export function DiscoverCardStack({ theme = "light", externalProfiles, hideHeade
         <TouchableOpacity
           style={[styles.actionButton, styles.skipBtn]}
           onPress={() => animateSwipeRef.current("left")}
+          activeOpacity={0.7}
         >
           <Ionicons name="close" size={30} color="#F44336" />
         </TouchableOpacity>
@@ -627,6 +647,7 @@ export function DiscoverCardStack({ theme = "light", externalProfiles, hideHeade
             }
           }}
           disabled={hasReachedStandOutLimit()}
+          activeOpacity={0.7}
         >
           <Ionicons name="star" size={24} color={COLORS.white} />
           <View style={styles.standOutBadge}>
@@ -638,6 +659,7 @@ export function DiscoverCardStack({ theme = "light", externalProfiles, hideHeade
         <TouchableOpacity
           style={[styles.actionButton, styles.likeBtn]}
           onPress={() => animateSwipeRef.current("right")}
+          activeOpacity={0.7}
         >
           <Ionicons name="heart" size={30} color={COLORS.white} />
         </TouchableOpacity>
@@ -679,8 +701,8 @@ const styles = StyleSheet.create({
     zIndex: 10,
   },
   headerBtn: {
-    width: 36,
-    height: 36,
+    width: 44,
+    height: 44,
     alignItems: "center",
     justifyContent: "center",
     position: "relative",

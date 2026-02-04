@@ -11,7 +11,8 @@ import {
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { COLORS } from '@/lib/constants';
-import { DEMO_MATCHES, DEMO_PROFILES } from '@/lib/demoData';
+import { DEMO_PROFILES } from '@/lib/demoData';
+import { useDemoStore } from '@/stores/demoStore';
 
 interface PersonPickerProps {
   visible: boolean;
@@ -27,9 +28,10 @@ interface PersonItem {
 
 export default function PersonPicker({ visible, onSelect, onClose }: PersonPickerProps) {
   const [search, setSearch] = useState('');
+  const storeMatches = useDemoStore((s) => s.matches);
 
   const people: PersonItem[] = useMemo(() => {
-    const fromMatches: PersonItem[] = DEMO_MATCHES.map((m) => ({
+    const fromMatches: PersonItem[] = storeMatches.map((m) => ({
       id: m.otherUser.id,
       name: m.otherUser.name,
       photoUrl: m.otherUser.photoUrl,
@@ -49,7 +51,7 @@ export default function PersonPicker({ visible, onSelect, onClose }: PersonPicke
       }
     }
     return all;
-  }, []);
+  }, [storeMatches]);
 
   const filtered = useMemo(() => {
     if (!search.trim()) return people;

@@ -1,6 +1,7 @@
 import React, { useMemo } from 'react';
 import { View, Text, TouchableOpacity, StyleSheet, Dimensions } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import { COLORS } from '@/lib/constants';
 import type { ExploreCategory } from './exploreCategories';
 
 const SCREEN_WIDTH = Dimensions.get('window').width;
@@ -91,7 +92,7 @@ const styles = StyleSheet.create({
   heading: {
     fontSize: 16,
     fontWeight: '700',
-    color: '#1a1a1a',
+    color: COLORS.text,
     marginBottom: 12,
   },
   grid: {

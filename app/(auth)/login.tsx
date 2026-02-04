@@ -9,15 +9,27 @@ import {
 } from "react-native";
 import { COLORS } from "@/lib/constants";
 import { Button, Input } from "@/components/ui";
-import { useRouter } from "expo-router";
+import { useRouter, Redirect } from "expo-router";
 import { useMutation } from "convex/react";
 import { api } from "@/convex/_generated/api";
 import { useAuthStore } from "@/stores/authStore";
 import { Ionicons } from "@expo/vector-icons";
+import { isDemoMode } from "@/hooks/useConvex";
+import { DEMO_USER } from "@/lib/demoData";
+import { useDemoStore } from "@/stores/demoStore";
 
 export default function LoginScreen() {
   const router = useRouter();
   const { setAuth } = useAuthStore();
+  const demoUserProfile = useDemoStore((s) => s.demoUserProfile);
+
+  // Demo mode: never show login screen
+  if (isDemoMode) {
+    if (demoUserProfile) {
+      return <Redirect href={"/(main)/(tabs)/home" as any} />;
+    }
+    return <Redirect href={"/demo-profile" as any} />;
+  }
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [isLoading, setIsLoading] = useState(false);
@@ -26,6 +38,13 @@ export default function LoginScreen() {
   const loginWithEmail = useMutation(api.auth.loginWithEmail);
 
   const handleLogin = async () => {
+    // Demo mode: skip backend auth, log in as demo user
+    if (isDemoMode) {
+      setAuth(DEMO_USER._id, "demo_token", true);
+      router.replace("/(main)/(tabs)/home");
+      return;
+    }
+
     if (!email) {
       setError("Please enter your email");
       return;

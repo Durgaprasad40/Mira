@@ -99,6 +99,7 @@ export function generateRandomProfile(): DemoProfile {
 export function generateMatch(profile: DemoProfile): DemoMatch {
   return {
     id: uid('match_gen'),
+    conversationId: `demo_convo_${profile._id}`,
     otherUser: {
       id: profile._id,
       name: profile.name,

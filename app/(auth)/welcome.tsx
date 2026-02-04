@@ -5,10 +5,22 @@ import { COLORS } from "@/lib/constants";
 import { useAuthStore } from "@/stores/authStore";
 import { Ionicons } from "@expo/vector-icons";
 import { LinearGradient } from "expo-linear-gradient";
+import { isDemoMode } from "@/hooks/useConvex";
+import { DEMO_USER } from "@/lib/demoData";
+import { useDemoStore } from "@/stores/demoStore";
 
 export default function WelcomeScreen() {
   const router = useRouter();
-  const { isAuthenticated, onboardingCompleted } = useAuthStore();
+  const { isAuthenticated, onboardingCompleted, setAuth } = useAuthStore();
+  const demoUserProfile = useDemoStore((s) => s.demoUserProfile);
+
+  // Demo mode: never show auth screens — redirect to profile create or main
+  if (isDemoMode) {
+    if (demoUserProfile) {
+      return <Redirect href={"/(main)/(tabs)/home" as any} />;
+    }
+    return <Redirect href={"/demo-profile" as any} />;
+  }
 
   // Use Redirect component instead of useEffect navigation
   if (isAuthenticated) {
@@ -17,6 +29,12 @@ export default function WelcomeScreen() {
     }
     return <Redirect href="/(onboarding)" />;
   }
+
+  const handleDemoLogin = () => {
+    // Auto-login as the demo user — skips OTP and onboarding entirely
+    setAuth(DEMO_USER._id, "demo_token", true);
+    router.replace("/(main)/(tabs)/home");
+  };
 
   return (
     <LinearGradient
@@ -48,20 +66,37 @@ export default function WelcomeScreen() {
       </View>
 
       <View style={styles.buttonContainer}>
-        <Button
-          title="Create Account"
-          variant="primary"
-          onPress={() => router.push("/(onboarding)")}
-          style={styles.createButton}
-          fullWidth
-        />
-        <Button
-          title="I already have an account"
-          variant="outline"
-          onPress={() => router.push("/(auth)/login")}
-          style={styles.loginButton}
-          fullWidth
-        />
+        {isDemoMode ? (
+          <>
+            <Button
+              title="Enter Demo Mode"
+              variant="primary"
+              onPress={handleDemoLogin}
+              style={styles.createButton}
+              fullWidth
+            />
+            <Text style={styles.demoHint}>
+              OTP is skipped in demo mode. You'll be logged in as a test user with sample data.
+            </Text>
+          </>
+        ) : (
+          <>
+            <Button
+              title="Create Account"
+              variant="primary"
+              onPress={() => router.push("/(onboarding)")}
+              style={styles.createButton}
+              fullWidth
+            />
+            <Button
+              title="I already have an account"
+              variant="outline"
+              onPress={() => router.push("/(auth)/login")}
+              style={styles.loginButton}
+              fullWidth
+            />
+          </>
+        )}
         <Text style={styles.terms}>
           By continuing, you agree to our Terms of Service and Privacy Policy
         </Text>
@@ -124,6 +159,14 @@ const styles = StyleSheet.create({
   loginButton: {
     borderColor: COLORS.white,
     marginBottom: 16,
+  },
+  demoHint: {
+    fontSize: 13,
+    color: COLORS.white,
+    textAlign: "center",
+    opacity: 0.85,
+    lineHeight: 18,
+    marginBottom: 12,
   },
   terms: {
     fontSize: 12,

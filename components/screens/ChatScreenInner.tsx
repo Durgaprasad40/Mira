@@ -33,24 +33,17 @@ import { ReportBlockModal } from '@/components/security/ReportBlockModal';
 import { Ionicons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
 import { isDemoMode } from '@/hooks/useConvex';
-import { DEMO_MATCHES } from '@/lib/demoData';
 import { useDemoDmStore, DemoDmMessage } from '@/stores/demoDmStore';
 import { Toast } from '@/components/ui/Toast';
 
 /** Canonical demo user ID — must match demoData.ts DEMO_CURRENT_USER.id */
 const DEMO_USER_ID = 'demo_user_1';
 
-/** Seed data — used only the very first time a conversation is opened. */
-const DEMO_SEED_MESSAGES: Record<string, DemoDmMessage[]> = {
-  match_1: [
-    { _id: 'dm_1', content: 'Hey! How are you?', type: 'text', senderId: 'demo_profile_1', createdAt: Date.now() - 1000 * 60 * 30, readAt: Date.now() - 1000 * 60 * 28 },
-    { _id: 'dm_2', content: "Hi Priya! I'm doing great, thanks for asking 😊", type: 'text', senderId: DEMO_USER_ID, createdAt: Date.now() - 1000 * 60 * 25 },
-    { _id: 'dm_3', content: 'What are you up to this weekend?', type: 'text', senderId: 'demo_profile_1', createdAt: Date.now() - 1000 * 60 * 20 },
-  ],
-  match_2: [
-    { _id: 'dm_4', content: 'You matched with Meera! Say hello 👋', type: 'text', senderId: 'system', createdAt: Date.now() - 1000 * 60 * 60 },
-  ],
-};
+/** Seed data is no longer hardcoded — conversations are created dynamically
+ * by simulateMatch() and match-celebration's "Say Hi" flow, both of which
+ * seed demoDmStore with a deterministic `demo_convo_${profileId}` key.
+ * This empty record is kept as a fallback for seedConversation(). */
+const DEMO_SEED_MESSAGES: Record<string, DemoDmMessage[]> = {};
 
 export interface ChatScreenInnerProps {
   conversationId: string;
@@ -85,13 +78,16 @@ export default function ChatScreenInner({ conversationId }: ChatScreenInnerProps
   // This lets the same ChatScreenInner work for both demo and live Convex data.
   const isDemo = isDemoMode || (conversationId?.startsWith('match_') ?? false) || (conversationId?.startsWith('demo_') ?? false);
 
-  const demoMatch = isDemo ? DEMO_MATCHES.find((m) => m.id === conversationId) : null;
-
   // ── Demo DM store — messages survive navigation & restarts ──
   const seedConversation = useDemoDmStore((s) => s.seedConversation);
   const addDemoMessage = useDemoDmStore((s) => s.addMessage);
   const demoConversations = useDemoDmStore((s) => s.conversations);
   const demoMeta = useDemoDmStore((s) => s.meta);
+  const demoDraft = useDemoDmStore((s) => conversationId ? s.drafts[conversationId] : undefined);
+  const setDemoDraft = useDemoDmStore((s) => s.setDraft);
+  const clearDemoDraft = useDemoDmStore((s) => s.clearDraft);
+
+  if (__DEV__ && isDemo) console.log(`[Chat] lookup convoId=${conversationId} hasMeta=${!!demoMeta[conversationId]} hasMessages=${!!(demoConversations[conversationId]?.length)}`);
 
   // Seed once per conversation (no-op if already seeded)
   useEffect(() => {
@@ -119,29 +115,19 @@ export default function ChatScreenInner({ conversationId }: ChatScreenInnerProps
 
   const messages = isDemo ? demoMessageList : convexMessages;
 
-  // Build demo conversation metadata from two possible sources:
-  //   1. DEMO_MATCHES (hardcoded) — for "match_1", "match_2" etc.
-  //   2. demoDmStore.meta (runtime) — seeded by match-celebration when the
-  //      user taps "Say Hi" on a dynamically created demo match.
-  // Falls back to null → triggers the "not found" empty state above.
+  // Demo conversation metadata comes from demoDmStore.meta, seeded by
+  // simulateMatch() or match-celebration's "Say Hi" flow.
+  // Falls back to null → triggers the "not found" empty state.
   const storedMeta = conversationId ? demoMeta[conversationId] : undefined;
-  const demoConversation = demoMatch
+  const demoConversation = storedMeta
     ? {
         otherUser: {
-          ...demoMatch.otherUser,
-          lastActive: Date.now() - 1000 * 60 * 2,
+          ...storedMeta.otherUser,
+          lastActive: storedMeta.otherUser.lastActive ?? Date.now(),
         },
-        isPreMatch: demoMatch.isPreMatch,
+        isPreMatch: storedMeta.isPreMatch,
       }
-    : storedMeta
-      ? {
-          otherUser: {
-            ...storedMeta.otherUser,
-            lastActive: storedMeta.otherUser.lastActive ?? Date.now(),
-          },
-          isPreMatch: storedMeta.isPreMatch,
-        }
-      : null;
+    : null;
 
   const activeConversation = isDemo ? demoConversation : conversation;
 
@@ -191,6 +177,16 @@ export default function ChatScreenInner({ conversationId }: ChatScreenInnerProps
     return () => sub.remove();
   }, []);
 
+  const handleDraftChange = useCallback((text: string) => {
+    if (isDemo && conversationId) {
+      if (text) {
+        setDemoDraft(conversationId, text);
+      } else {
+        clearDemoDraft(conversationId);
+      }
+    }
+  }, [isDemo, conversationId, setDemoDraft, clearDemoDraft]);
+
   const handleSend = async (text: string, type: 'text' | 'template' = 'text') => {
     if (!activeConversation) return;
     if (isSendingRef.current) return;
@@ -203,6 +199,8 @@ export default function ChatScreenInner({ conversationId }: ChatScreenInnerProps
         senderId: DEMO_USER_ID,
         createdAt: Date.now(),
       });
+      // Clear the draft after sending
+      if (conversationId) clearDemoDraft(conversationId);
       return;
     }
 
@@ -431,6 +429,8 @@ export default function ChatScreenInner({ conversationId }: ChatScreenInnerProps
             subscriptionTier={isDemo ? 'premium' : (currentUser?.subscriptionTier || 'free')}
             canSendCustom={canSendCustom}
             recipientName={activeConversation.otherUser.name}
+            initialText={isDemo ? (demoDraft ?? '') : ''}
+            onTextChange={handleDraftChange}
           />
         </View>
       </KeyboardAvoidingView>
@@ -523,6 +523,10 @@ const styles = StyleSheet.create({
   },
   backButton: {
     marginRight: 12,
+    minWidth: 44,
+    minHeight: 44,
+    alignItems: 'center' as const,
+    justifyContent: 'center' as const,
   },
   headerInfo: {
     flex: 1,
@@ -539,6 +543,10 @@ const styles = StyleSheet.create({
   },
   moreButton: {
     padding: 4,
+    minWidth: 44,
+    minHeight: 44,
+    alignItems: 'center' as const,
+    justifyContent: 'center' as const,
   },
   emptyChat: {
     alignItems: 'center',

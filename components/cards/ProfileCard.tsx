@@ -41,6 +41,7 @@ const BLUR_RADIUS = 25; // Strong but recognisable blur
 export const ProfileCard: React.FC<ProfileCardProps> = ({
   name,
   age,
+  bio,
   city,
   isVerified,
   distance,
@@ -177,6 +178,12 @@ export const ProfileCard: React.FC<ProfileCardProps> = ({
           </View>
         )}
 
+        {showCarousel && (
+          <Text style={styles.bio} numberOfLines={3}>
+            {bio || 'No bio yet'}
+          </Text>
+        )}
+
         {profilePrompt && (
           <View style={styles.promptCard}>
             <Text style={styles.promptQuestion} numberOfLines={1}>
@@ -253,9 +260,9 @@ const styles = StyleSheet.create({
     position: 'absolute',
     bottom: 140,
     right: 12,
-    width: 36,
-    height: 36,
-    borderRadius: 18,
+    width: 44,
+    height: 44,
+    borderRadius: 22,
     backgroundColor: 'rgba(0,0,0,0.45)',
     alignItems: 'center',
     justifyContent: 'center',
@@ -270,7 +277,7 @@ const styles = StyleSheet.create({
     paddingTop: 32,
     paddingHorizontal: 16,
     paddingBottom: 16,
-    backgroundColor: 'rgba(0,0,0,0.25)',
+    backgroundColor: 'rgba(0,0,0,0.45)',
   },
   headerRow: {
     flexDirection: 'row',
@@ -307,7 +314,16 @@ const styles = StyleSheet.create({
   },
   distance: {
     fontSize: 13,
-    color: 'rgba(255,255,255,0.7)',
+    color: 'rgba(255,255,255,0.9)',
+    textShadowColor: 'rgba(0,0,0,0.5)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 3,
+  },
+  bio: {
+    fontSize: 14,
+    color: 'rgba(255,255,255,0.9)',
+    lineHeight: 20,
+    marginBottom: 6,
     textShadowColor: 'rgba(0,0,0,0.5)',
     textShadowOffset: { width: 0, height: 1 },
     textShadowRadius: 3,
@@ -323,7 +339,7 @@ const styles = StyleSheet.create({
   promptQuestion: {
     fontSize: 12,
     fontWeight: '600',
-    color: 'rgba(255,255,255,0.7)',
+    color: 'rgba(255,255,255,0.85)',
     marginBottom: 3,
     textShadowColor: 'rgba(0,0,0,0.4)',
     textShadowOffset: { width: 0, height: 1 },

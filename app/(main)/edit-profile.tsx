@@ -20,7 +20,7 @@ import { Ionicons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
 import { BlurProfileNotice } from '@/components/profile/BlurProfileNotice';
 import { isDemoMode } from '@/hooks/useConvex';
-import { DEMO_USER } from '@/lib/demoData';
+import { getDemoCurrentUser } from '@/lib/demoData';
 
 export default function EditProfileScreen() {
   const router = useRouter();
@@ -30,7 +30,7 @@ export default function EditProfileScreen() {
     api.users.getCurrentUser,
     !isDemoMode && userId ? { userId: userId as any } : 'skip'
   );
-  const currentUser = isDemoMode ? (DEMO_USER as any) : currentUserQuery;
+  const currentUser = isDemoMode ? (getDemoCurrentUser() as any) : currentUserQuery;
 
   // Hard timeout for loading state
   const [timedOut, setTimedOut] = useState(false);

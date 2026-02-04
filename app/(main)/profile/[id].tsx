@@ -6,7 +6,6 @@ import {
   ScrollView,
   TouchableOpacity,
   Platform,
-  Alert,
 } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useQuery, useMutation } from 'convex/react';
@@ -20,8 +19,9 @@ import { Ionicons } from '@expo/vector-icons';
 import { Image } from 'expo-image';
 import { FlatList } from 'react-native';
 import { isDemoMode } from '@/hooks/useConvex';
-import { DEMO_PROFILES, DEMO_USER } from '@/lib/demoData';
+import { DEMO_PROFILES, getDemoCurrentUser } from '@/lib/demoData';
 import { ReportBlockModal } from '@/components/security/ReportBlockModal';
+import { Toast } from '@/components/ui/Toast';
 
 export default function ViewProfileScreen() {
   const { id: userId } = useLocalSearchParams<{ id: string }>();
@@ -74,9 +74,7 @@ export default function ViewProfileScreen() {
 
     if (isDemoMode) {
       if (action === 'like' && Math.random() > 0.7) {
-        Alert.alert('It\'s a Match!', `You matched with ${profile?.name}!`, [
-          { text: 'Keep Browsing', onPress: () => router.back() },
-        ]);
+        router.push(`/(main)/match-celebration?matchId=demo_match&userId=${userId}` as any);
       } else {
         router.back();
       }
@@ -91,15 +89,12 @@ export default function ViewProfileScreen() {
       });
 
       if (result.isMatch) {
-        Alert.alert('It\'s a Match!', 'You matched with this person!', [
-          { text: 'Send Message', onPress: () => router.push('/(main)/(tabs)/messages') },
-          { text: 'Keep Swiping', onPress: () => router.back() },
-        ]);
+        router.push(`/(main)/match-celebration?matchId=${result.matchId}&userId=${userId}` as any);
       } else {
         router.back();
       }
-    } catch (error: any) {
-      Alert.alert('Error', error.message || 'Failed to swipe');
+    } catch {
+      Toast.show('Something went wrong. Please try again.');
     }
   };
 
@@ -232,7 +227,7 @@ export default function ViewProfileScreen() {
 
         {/* Shared Interests */}
         {(() => {
-          const myActivities: string[] = isDemoMode ? DEMO_USER.activities : [];
+          const myActivities: string[] = isDemoMode ? getDemoCurrentUser().activities : [];
           const shared = (profile.activities || []).filter((a: string) => myActivities.includes(a));
           if (shared.length === 0) return null;
           return (
@@ -255,7 +250,7 @@ export default function ViewProfileScreen() {
         })()}
 
         {profile.relationshipIntent && profile.relationshipIntent.length > 0 && (() => {
-          const myIntents: string[] = isDemoMode ? DEMO_USER.relationshipIntent : [];
+          const myIntents: string[] = isDemoMode ? getDemoCurrentUser().relationshipIntent : [];
           const { compat, theirPrimaryLabel, theirPrimaryEmoji } = computeIntentCompat(myIntents, profile.relationshipIntent);
           const compatColor = getIntentCompatColor(compat);
           const warning = getIntentMismatchWarning(compat);
@@ -346,18 +341,21 @@ export default function ViewProfileScreen() {
           <TouchableOpacity
             style={[styles.actionButton, styles.passButton]}
             onPress={() => handleSwipe('pass')}
+            activeOpacity={0.7}
           >
             <Ionicons name="close" size={28} color={COLORS.pass} />
           </TouchableOpacity>
           <TouchableOpacity
             style={[styles.actionButton, styles.superLikeButton]}
             onPress={() => handleSwipe('super_like')}
+            activeOpacity={0.7}
           >
             <Ionicons name="star" size={28} color={COLORS.superLike} />
           </TouchableOpacity>
           <TouchableOpacity
             style={[styles.actionButton, styles.likeButton]}
             onPress={() => handleSwipe('like')}
+            activeOpacity={0.7}
           >
             <Ionicons name="heart" size={28} color={COLORS.like} />
           </TouchableOpacity>

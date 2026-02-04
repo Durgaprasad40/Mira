@@ -39,6 +39,8 @@ export interface DemoProfile {
 
 export interface DemoMatch {
   id: string;
+  /** Deterministic conversation key: `demo_convo_${otherUser.id}` */
+  conversationId: string;
   otherUser: {
     id: string;
     name: string;
@@ -79,11 +81,25 @@ export interface DemoReport {
   createdAt: number;
 }
 
+/** The demo user's own profile — created via the demo profile screen. */
+export interface DemoUserProfile {
+  name: string;
+  photos: { url: string }[];
+  bio?: string;
+  gender?: string;
+  dateOfBirth?: string;
+  city?: string;
+}
+
 interface DemoState {
   profiles: DemoProfile[];
   matches: DemoMatch[];
   likes: DemoLike[];
   seeded: boolean;
+
+  /** The current demo user's profile (null until created). */
+  demoUserProfile: DemoUserProfile | null;
+  setDemoUserProfile: (profile: DemoUserProfile) => void;
 
   // Safety
   blockedUserIds: string[];
@@ -101,6 +117,7 @@ interface DemoState {
   clearProfiles: () => void;
   addMatch: (m: DemoMatch) => void;
   addLike: (l: DemoLike) => void;
+  removeLike: (userId: string) => void;
   simulateMatch: (profileId: string) => void;
 
   // Safety actions
@@ -110,6 +127,11 @@ interface DemoState {
   clearSafety: () => void;
 }
 
+/** Filter out profiles with no valid primary photo */
+function withValidPhotos(profiles: DemoProfile[]): DemoProfile[] {
+  return profiles.filter((p) => p.photos?.length > 0 && !!p.photos[0]?.url);
+}
+
 export const useDemoStore = create<DemoState>()(
   persist(
     (set, get) => ({
@@ -117,10 +139,13 @@ export const useDemoStore = create<DemoState>()(
       matches: [],
       likes: [],
       seeded: false,
+      demoUserProfile: null,
       blockedUserIds: [],
       reportedUserIds: [],
       reports: [],
       dismissedNudges: [],
+
+      setDemoUserProfile: (profile) => set({ demoUserProfile: profile }),
 
       dismissNudge: (nudgeId) => {
         set((s) => ({
@@ -131,9 +156,10 @@ export const useDemoStore = create<DemoState>()(
       },
 
       seed: () => {
-        if (get().seeded) return;
+        const state = get();
+        if (state.seeded && state.profiles.length > 0) return;
         set({
-          profiles: JSON.parse(JSON.stringify(DEMO_PROFILES)) as DemoProfile[],
+          profiles: withValidPhotos(JSON.parse(JSON.stringify(DEMO_PROFILES)) as DemoProfile[]),
           matches: JSON.parse(JSON.stringify(DEMO_MATCHES)) as DemoMatch[],
           likes: JSON.parse(JSON.stringify(DEMO_LIKES)) as DemoLike[],
           seeded: true,
@@ -142,15 +168,16 @@ export const useDemoStore = create<DemoState>()(
 
       reset: () => {
         // Clear dependent stores
-        useDemoDmStore.setState({ conversations: {}, meta: {} });
+        useDemoDmStore.setState({ conversations: {}, meta: {}, drafts: {} });
         useConfessionStore.setState({ seeded: false });
         useConfessionStore.getState().seedConfessions();
 
         set({
-          profiles: JSON.parse(JSON.stringify(DEMO_PROFILES)) as DemoProfile[],
+          profiles: withValidPhotos(JSON.parse(JSON.stringify(DEMO_PROFILES)) as DemoProfile[]),
           matches: JSON.parse(JSON.stringify(DEMO_MATCHES)) as DemoMatch[],
           likes: JSON.parse(JSON.stringify(DEMO_LIKES)) as DemoLike[],
           seeded: true,
+          demoUserProfile: null,
           blockedUserIds: [],
           reportedUserIds: [],
           reports: [],
@@ -159,6 +186,7 @@ export const useDemoStore = create<DemoState>()(
       },
 
       addProfile: (p) => {
+        if (!p.photos?.length || !p.photos[0]?.url) return;
         set((s) => ({ profiles: [...s.profiles, p] }));
       },
 
@@ -175,7 +203,14 @@ export const useDemoStore = create<DemoState>()(
       },
 
       addLike: (l) => {
-        set((s) => ({ likes: [l, ...s.likes] }));
+        set((s) => {
+          if (s.likes.some((existing) => existing.userId === l.userId)) return s;
+          return { likes: [l, ...s.likes] };
+        });
+      },
+
+      removeLike: (userId) => {
+        set((s) => ({ likes: s.likes.filter((l) => l.userId !== userId) }));
       },
 
       simulateMatch: (profileId) => {
@@ -183,9 +218,16 @@ export const useDemoStore = create<DemoState>()(
         const profile = state.profiles.find((p) => p._id === profileId);
         if (!profile) return;
 
-        const matchId = `match_demo_${Date.now()}`;
+        // Deterministic IDs — same profileId always yields the same
+        // conversationId so every screen (messages list, chat, celebration)
+        // references the same conversation record.
+        const convoId = `demo_convo_${profileId}`;
+        const matchId = `match_${profileId}`;
+        if (__DEV__) console.log(`[simulateMatch] profileId=${profileId} convoId=${convoId}`);
+
         const newMatch: DemoMatch = {
           id: matchId,
+          conversationId: convoId,
           otherUser: {
             id: profile._id,
             name: profile.name,
@@ -198,16 +240,18 @@ export const useDemoStore = create<DemoState>()(
           isPreMatch: false,
         };
 
-        // Seed a starter conversation in the DM store
-        useDemoDmStore.getState().seedConversation(matchId, [
-          {
-            _id: `msg_${Date.now()}`,
-            content: `You matched with ${profile.name}! Say hi.`,
-            type: 'system',
-            senderId: 'system',
-            createdAt: Date.now(),
+        // Seed an empty conversation in the DM store with the deterministic id
+        const dmStore = useDemoDmStore.getState();
+        dmStore.seedConversation(convoId, []);
+        dmStore.setMeta(convoId, {
+          otherUser: {
+            id: profile._id,
+            name: profile.name,
+            lastActive: Date.now(),
+            isVerified: profile.isVerified,
           },
-        ]);
+          isPreMatch: false,
+        });
 
         set((s) => ({
           profiles: s.profiles.filter((p) => p._id !== profileId),

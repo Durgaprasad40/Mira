@@ -15,6 +15,10 @@ interface MessageInputProps {
   subscriptionTier?: 'free' | 'basic' | 'premium';
   canSendCustom?: boolean;
   recipientName?: string;
+  /** Pre-fill the input with this text (e.g. a draft). */
+  initialText?: string;
+  /** Called when the input text changes (for persisting drafts). */
+  onTextChange?: (text: string) => void;
 }
 
 export function MessageInput({
@@ -27,9 +31,16 @@ export function MessageInput({
   subscriptionTier = 'free',
   canSendCustom = false,
   recipientName = '',
+  initialText = '',
+  onTextChange,
 }: MessageInputProps) {
-  const [text, setText] = useState('');
+  const [text, setText] = useState(initialText);
   const [showTemplates, setShowTemplates] = useState(false);
+
+  const handleTextChange = (value: string) => {
+    setText(value);
+    onTextChange?.(value);
+  };
 
   const handleSend = async () => {
     if (!text.trim()) return;
@@ -45,12 +56,12 @@ export function MessageInput({
     }
 
     const trimmed = text.trim();
-    setText('');
+    handleTextChange('');
     try {
       await onSend(trimmed, 'text');
     } catch {
       // Restore text so user can retry
-      setText(trimmed);
+      handleTextChange(trimmed);
     }
   };
 
@@ -117,7 +128,7 @@ export function MessageInput({
           placeholder={!isDemoMode && isPreMatch && !canSendCustom ? 'Use templates to message' : 'Type a message...'}
           placeholderTextColor={COLORS.textLight}
           value={text}
-          onChangeText={setText}
+          onChangeText={handleTextChange}
           multiline
           scrollEnabled
           textAlignVertical="top"
@@ -198,8 +209,12 @@ const styles = StyleSheet.create({
     paddingBottom: 10,
   },
   iconButton: {
-    padding: 8,
+    padding: 10,
     marginRight: 8,
+    minWidth: 44,
+    minHeight: 44,
+    alignItems: 'center' as const,
+    justifyContent: 'center' as const,
   },
   input: {
     flex: 1,
@@ -217,9 +232,9 @@ const styles = StyleSheet.create({
     opacity: 0.5,
   },
   sendButton: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
+    width: 44,
+    height: 44,
+    borderRadius: 22,
     backgroundColor: COLORS.primary,
     alignItems: 'center',
     justifyContent: 'center',

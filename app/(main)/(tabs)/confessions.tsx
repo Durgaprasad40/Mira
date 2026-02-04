@@ -21,6 +21,7 @@ import { isProbablyEmoji } from '@/lib/utils';
 import { ConfessionChat } from '@/types';
 import { useAuthStore } from '@/stores/authStore';
 import { useConfessionStore } from '@/stores/confessionStore';
+import { useDemoStore } from '@/stores/demoStore';
 import { isDemoMode } from '@/hooks/useConvex';
 import { asUserId } from '@/convex/id';
 import ConfessionCard from '@/components/confessions/ConfessionCard';
@@ -43,6 +44,9 @@ export default function ConfessionsScreen() {
   const demoReportConfession = useConfessionStore((s) => s.reportConfession);
   const addChat = useConfessionStore((s) => s.addChat);
   const revealCrush = useConfessionStore((s) => s.revealCrush);
+
+  // Global blocked user IDs (from profile/chat block actions)
+  const globalBlockedIds = useDemoStore((s) => s.blockedUserIds);
 
   const { notifyReaction, notifyReply } = useConfessionNotifications();
   const { safeTimeout } = useScreenSafety();
@@ -75,8 +79,9 @@ export default function ConfessionsScreen() {
 
   // Use Convex data when available, demo data as fallback
   const confessions = useMemo(() => {
+    let items;
     if (!isDemoMode && convexConfessions) {
-      return convexConfessions.map((c: any) => ({
+      items = convexConfessions.map((c: any) => ({
         id: c._id,
         userId: c.userId,
         text: c.text,
@@ -92,10 +97,16 @@ export default function ConfessionsScreen() {
         visibility: c.visibility,
         revealPolicy: 'never' as const,
       }));
+    } else {
+      // Demo mode — sort by latest
+      items = [...demoConfessions].sort((a, b) => b.createdAt - a.createdAt);
     }
-    // Demo mode — sort by latest
-    return [...demoConfessions].sort((a, b) => b.createdAt - a.createdAt);
-  }, [isDemoMode, convexConfessions, demoConfessions]);
+    // Filter out confessions from globally blocked users
+    if (globalBlockedIds.length > 0) {
+      items = items.filter((c) => !globalBlockedIds.includes(c.userId));
+    }
+    return items;
+  }, [isDemoMode, convexConfessions, demoConfessions, globalBlockedIds]);
 
   // Trending confessions
   const trendingConfessions = useMemo(() => {
@@ -256,7 +267,7 @@ export default function ConfessionsScreen() {
   // Trending hero card (first trending confession, shown large)
   const trendingHero = trendingConfessions.length > 0 ? trendingConfessions[0] : null;
 
-  const renderListHeader = () => (
+  const renderListHeader = useCallback(() => (
     <View>
       {/* Secret Crushes */}
       {myCrushes.length > 0 && (
@@ -306,7 +317,7 @@ export default function ConfessionsScreen() {
         </View>
       )}
     </View>
-  );
+  ), [myCrushes, trendingConfessions, trendingHero, handleRevealCrush, revealCrush, handleOpenThread]);
 
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
@@ -352,14 +363,14 @@ export default function ConfessionsScreen() {
         ListEmptyComponent={
           isLoading ? (
             <View style={styles.loadingContainer}>
-              <ActivityIndicator size="small" color={COLORS.primary} />
-              <Text style={styles.helperText}>Loading confessions...</Text>
+              <ActivityIndicator size="large" color={COLORS.primary} />
+              <Text style={styles.loadingText}>Finding confessions...</Text>
             </View>
           ) : (
             <View style={styles.emptyContainer}>
-              <Ionicons name="megaphone-outline" size={56} color={COLORS.textMuted} />
+              <Text style={styles.emptyEmoji}>💬</Text>
               <Text style={styles.emptyTitle}>No confessions yet</Text>
-              <Text style={styles.helperText}>Be the first to post something anonymous.</Text>
+              <Text style={styles.emptySubtitle}>Be the first to share something — it's anonymous by default.</Text>
               <TouchableOpacity style={styles.emptyButton} onPress={handleOpenCompose}>
                 <Text style={styles.emptyButtonText}>Post a Confession</Text>
               </TouchableOpacity>
@@ -433,8 +444,8 @@ const styles = StyleSheet.create({
     paddingTop: 80,
     gap: 12,
   },
-  helperText: {
-    fontSize: 14,
+  loadingText: {
+    fontSize: 16,
     color: COLORS.textLight,
     textAlign: 'center',
   },
@@ -497,12 +508,23 @@ const styles = StyleSheet.create({
     padding: 40,
     marginTop: 80,
   },
+  emptyEmoji: {
+    fontSize: 56,
+    marginBottom: 16,
+  },
   emptyTitle: {
-    fontSize: 20,
-    fontWeight: '600',
+    fontSize: 22,
+    fontWeight: '700',
     color: COLORS.text,
-    marginTop: 16,
     marginBottom: 8,
+    textAlign: 'center',
+  },
+  emptySubtitle: {
+    fontSize: 15,
+    color: COLORS.textLight,
+    textAlign: 'center',
+    lineHeight: 22,
+    marginBottom: 24,
   },
   emptyButton: {
     backgroundColor: COLORS.primary,

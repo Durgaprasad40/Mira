@@ -20,10 +20,12 @@ import EmojiPicker from 'rn-emoji-keyboard';
 import * as Clipboard from 'expo-clipboard';
 import { COLORS, CONFESSION_TOPICS } from '@/lib/constants';
 import { isProbablyEmoji } from '@/lib/utils';
+import { Toast } from '@/components/ui/Toast';
 import { ConfessionMood, ConfessionReply, ConfessionChat } from '@/types';
 import ReactionBar from '@/components/confessions/ReactionBar';
 import { useAuthStore } from '@/stores/authStore';
 import { useConfessionStore } from '@/stores/confessionStore';
+import { useDemoStore } from '@/stores/demoStore';
 import { isDemoMode } from '@/hooks/useConvex';
 import {
   DEMO_CONFESSION_REPLIES,
@@ -61,6 +63,7 @@ export default function ConfessionThreadScreen() {
   const toggleReaction = useConfessionStore((s) => s.toggleReaction);
   const reportConfession = useConfessionStore((s) => s.reportConfession);
   const addChat = useConfessionStore((s) => s.addChat);
+  const globalBlockedIds = useDemoStore((s) => s.blockedUserIds);
 
   const confession = useMemo(
     () => confessions.find((c) => c.id === confessionId),
@@ -79,8 +82,9 @@ export default function ConfessionThreadScreen() {
   );
 
   const replies: ConfessionReply[] = useMemo(() => {
+    let items: ConfessionReply[];
     if (!isDemoMode && convexReplies) {
-      return convexReplies.map((r: any) => ({
+      items = convexReplies.map((r: any) => ({
         id: r._id,
         confessionId: r.confessionId,
         userId: r.userId,
@@ -91,11 +95,18 @@ export default function ConfessionThreadScreen() {
         voiceDurationSec: r.voiceDurationSec,
         createdAt: r.createdAt,
       }));
+    } else {
+      items = demoReplies;
     }
-    return demoReplies;
-  }, [isDemoMode, convexReplies, demoReplies]);
+    // Filter out replies from globally blocked users
+    if (globalBlockedIds.length > 0) {
+      items = items.filter((r) => !globalBlockedIds.includes(r.userId));
+    }
+    return items;
+  }, [isDemoMode, convexReplies, demoReplies, globalBlockedIds]);
 
   const [replyText, setReplyText] = useState('');
+  const [sending, setSending] = useState(false);
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
   const [showReactionPicker, setShowReactionPicker] = useState(false);
 
@@ -112,21 +123,22 @@ export default function ConfessionThreadScreen() {
   const toggleReactionMutation = useMutation(api.confessions.toggleReaction);
 
   const handleSendReply = useCallback(async () => {
-    if (!replyText.trim() || !confessionId) return;
+    if (!replyText.trim() || !confessionId || sending) return;
 
+    const submittedText = replyText.trim();
     const newReply: ConfessionReply = {
       id: `cr_new_${Date.now()}`,
       confessionId,
       userId: currentUserId,
-      text: replyText.trim(),
+      text: submittedText,
       isAnonymous: true,
       type: 'text',
       createdAt: Date.now(),
     };
 
     setDemoReplies((prev) => [...prev, newReply]);
-    const submittedText = replyText.trim();
     setReplyText('');
+    setSending(true);
 
     if (!isDemoMode) {
       try {
@@ -137,12 +149,14 @@ export default function ConfessionThreadScreen() {
           isAnonymous: true,
           type: 'text',
         });
-      } catch (error: any) {
-        Alert.alert('Error', error.message || 'Failed to send reply');
+      } catch {
+        Toast.show('Couldn\u2019t send reply. Please try again.');
         setDemoReplies((prev) => prev.filter((r) => r.id !== newReply.id));
+        setReplyText(submittedText);
       }
     }
-  }, [replyText, confessionId, currentUserId, createReplyMutation]);
+    setSending(false);
+  }, [replyText, confessionId, currentUserId, createReplyMutation, sending]);
 
   const handleDeleteReply = useCallback(async (reply: ConfessionReply) => {
     if (reply.userId !== currentUserId) return;
@@ -162,7 +176,7 @@ export default function ConfessionThreadScreen() {
               });
             } catch (error: any) {
               setDemoReplies((prev) => [...prev, reply]);
-              Alert.alert('Error', error.message || 'Failed to delete reply');
+              Toast.show('Couldn\u2019t delete reply. Please try again.');
             }
           }
         },
@@ -254,14 +268,18 @@ export default function ConfessionThreadScreen() {
 
   if (!confession) {
     return (
-      <SafeAreaView style={styles.container}>
+      <SafeAreaView style={styles.container} edges={['top']}>
         <View style={styles.navBar}>
-          <TouchableOpacity onPress={() => router.back()}>
+          <TouchableOpacity onPress={() => router.back()} hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}>
             <Ionicons name="arrow-back" size={24} color={COLORS.text} />
           </TouchableOpacity>
+          <Text style={styles.navTitle}>Thread</Text>
+          <View style={{ width: 24 }} />
         </View>
         <View style={styles.emptyContainer}>
-          <Text style={styles.emptyText}>Confession not found</Text>
+          <Text style={styles.emptyEmoji}>💬</Text>
+          <Text style={styles.emptyTitle}>Confession not found</Text>
+          <Text style={styles.emptySubtitle}>It may have been removed or is no longer available.</Text>
         </View>
       </SafeAreaView>
     );
@@ -425,15 +443,15 @@ export default function ConfessionThreadScreen() {
           <TouchableOpacity
             style={[
               styles.sendButton,
-              !replyText.trim() && styles.sendButtonDisabled,
+              (!replyText.trim() || sending) && styles.sendButtonDisabled,
             ]}
             onPress={handleSendReply}
-            disabled={!replyText.trim()}
+            disabled={!replyText.trim() || sending}
           >
             <Ionicons
               name="send"
               size={18}
-              color={replyText.trim() ? COLORS.white : COLORS.textMuted}
+              color={replyText.trim() && !sending ? COLORS.white : COLORS.textMuted}
             />
           </TouchableOpacity>
         </View>
@@ -481,10 +499,24 @@ const styles = StyleSheet.create({
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
+    padding: 24,
   },
-  emptyText: {
-    fontSize: 16,
-    color: COLORS.textMuted,
+  emptyEmoji: {
+    fontSize: 56,
+    marginBottom: 16,
+  },
+  emptyTitle: {
+    fontSize: 22,
+    fontWeight: '700',
+    color: COLORS.text,
+    marginBottom: 8,
+    textAlign: 'center',
+  },
+  emptySubtitle: {
+    fontSize: 15,
+    color: COLORS.textLight,
+    textAlign: 'center',
+    lineHeight: 22,
   },
   confessionFull: {
     backgroundColor: COLORS.white,
@@ -650,9 +682,9 @@ const styles = StyleSheet.create({
     borderRadius: 20,
   },
   sendButton: {
-    width: 38,
-    height: 38,
-    borderRadius: 19,
+    width: 44,
+    height: 44,
+    borderRadius: 22,
     backgroundColor: COLORS.primary,
     justifyContent: 'center',
     alignItems: 'center',

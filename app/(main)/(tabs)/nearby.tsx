@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import {
   View,
   Text,
@@ -15,7 +15,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { useQuery, useMutation } from 'convex/react';
 import { useLocation } from '@/hooks/useLocation';
 import { COLORS } from '@/lib/constants';
-import { DEMO_USER, DEMO_PROFILES } from '@/lib/demoData';
+import { DEMO_PROFILES, getDemoCurrentUser } from '@/lib/demoData';
 import { useAuthStore } from '@/stores/authStore';
 import { isDemoMode } from '@/hooks/useConvex';
 import { useDemoStore } from '@/stores/demoStore';
@@ -183,8 +183,9 @@ export default function NearbyScreen() {
   useEffect(() => { if (isDemoMode) demoSeed(); }, [demoSeed]);
 
   // User location — fallback to demo coords
-  const userLat = latitude ?? DEMO_USER.latitude;
-  const userLng = longitude ?? DEMO_USER.longitude;
+  const demoUser = getDemoCurrentUser();
+  const userLat = latitude ?? demoUser.latitude;
+  const userLng = longitude ?? demoUser.longitude;
 
   // Permission state
   const [permissionDenied, setPermissionDenied] = useState(false);
@@ -253,9 +254,9 @@ export default function NearbyScreen() {
   }, []);
 
   // ------------------------------------------------------------------
-  // Build nearby profiles list
+  // Build nearby profiles list (memoized to avoid recomputing each render)
   // ------------------------------------------------------------------
-  const nearbyProfiles: NearbyProfile[] = (() => {
+  const nearbyProfiles: NearbyProfile[] = useMemo(() => {
     if (isDemoMode || !convexNearby) {
       // Demo mode: use demoStore profiles that have lat/lng within radius,
       // plus the static NEARBY_DEMO_PROFILES as fallback
@@ -288,7 +289,7 @@ export default function NearbyScreen() {
       photoUrl: u.photoUrl ?? undefined,
       isVerified: u.isVerified,
     })));
-  })();
+  }, [demoStoreProfiles, blockedUserIds, userLat, userLng, userId, convexNearby]);
 
   // ------------------------------------------------------------------
   // Bottom sheet animation helpers
@@ -424,7 +425,9 @@ export default function NearbyScreen() {
       {/* "No one nearby" overlay */}
       {nearbyProfiles.length === 0 && (
         <View style={styles.emptyOverlay}>
-          <Text style={styles.emptyText}>No one nearby</Text>
+          <Text style={styles.emptyOverlayEmoji}>📍</Text>
+          <Text style={styles.emptyOverlayTitle}>No one nearby yet</Text>
+          <Text style={styles.emptyOverlaySubtitle}>Check back soon — people show up as they pass by.</Text>
         </View>
       )}
 
@@ -568,17 +571,36 @@ const styles = StyleSheet.create({
   // Empty overlay
   emptyOverlay: {
     position: 'absolute',
-    top: '50%',
+    top: '35%',
     alignSelf: 'center',
-    backgroundColor: 'rgba(0,0,0,0.6)',
-    paddingHorizontal: 20,
-    paddingVertical: 10,
-    borderRadius: 20,
+    backgroundColor: COLORS.white,
+    paddingHorizontal: 24,
+    paddingVertical: 20,
+    borderRadius: 16,
+    alignItems: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.12,
+    shadowRadius: 8,
+    elevation: 4,
+    maxWidth: 280,
   },
-  emptyText: {
-    color: COLORS.white,
-    fontSize: 15,
-    fontWeight: '600',
+  emptyOverlayEmoji: {
+    fontSize: 40,
+    marginBottom: 8,
+  },
+  emptyOverlayTitle: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: COLORS.text,
+    marginBottom: 4,
+    textAlign: 'center',
+  },
+  emptyOverlaySubtitle: {
+    fontSize: 14,
+    color: COLORS.textLight,
+    textAlign: 'center',
+    lineHeight: 20,
   },
 
   // Permission denied overlay
