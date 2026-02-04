@@ -18,8 +18,10 @@ import { COLORS } from '@/lib/constants';
 import { DEMO_USER, DEMO_PROFILES } from '@/lib/demoData';
 import { useAuthStore } from '@/stores/authStore';
 import { isDemoMode } from '@/hooks/useConvex';
+import { useDemoStore } from '@/stores/demoStore';
 import { api } from '@/convex/_generated/api';
 import { useScreenSafety } from '@/hooks/useScreenSafety';
+import { rankNearbyProfiles } from '@/lib/rankProfiles';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -135,6 +137,7 @@ const BOTTOM_SHEET_HEIGHT = 200;
 const FIXED_RADIUS = 1000; // 1km
 
 // Extract demo "nearby" profiles that have lat/lng.
+// Fallback: used when demoStore hasn't seeded yet.
 const NEARBY_DEMO_PROFILES = (DEMO_PROFILES as any[]).filter(
   (p) => typeof p.latitude === 'number' && (p._id as string).startsWith('demo_nearby'),
 );
@@ -172,6 +175,12 @@ export default function NearbyScreen() {
   const userId = useAuthStore((s) => s.userId);
   const mapRef = useRef<MapView>(null);
   const { safeTimeout } = useScreenSafety();
+
+  // Demo store — read mutable profiles for nearby display
+  const demoStoreProfiles = useDemoStore((s) => s.profiles);
+  const demoSeed = useDemoStore((s) => s.seed);
+  const blockedUserIds = useDemoStore((s) => s.blockedUserIds);
+  useEffect(() => { if (isDemoMode) demoSeed(); }, [demoSeed]);
 
   // User location — fallback to demo coords
   const userLat = latitude ?? DEMO_USER.latitude;
@@ -248,15 +257,28 @@ export default function NearbyScreen() {
   // ------------------------------------------------------------------
   const nearbyProfiles: NearbyProfile[] = (() => {
     if (isDemoMode || !convexNearby) {
-      // Demo mode: filter by 1km fixed radius + apply jitter + freshness
-      const filtered = NEARBY_DEMO_PROFILES.filter((p: any) => {
+      // Demo mode: use demoStore profiles that have lat/lng within radius,
+      // plus the static NEARBY_DEMO_PROFILES as fallback
+      const allCandidates = [
+        ...demoStoreProfiles.filter((p) => typeof p.latitude === 'number'),
+        ...NEARBY_DEMO_PROFILES,
+      ];
+      // Deduplicate by _id
+      const seen = new Set<string>();
+      const unique = allCandidates.filter((p: any) => {
+        if (seen.has(p._id)) return false;
+        seen.add(p._id);
+        return true;
+      });
+      const filtered = unique.filter((p: any) => {
+        if (blockedUserIds.includes(p._id)) return false;
         const d = haversineMeters(userLat, userLng, p.latitude, p.longitude);
         return d <= FIXED_RADIUS;
       });
-      return jitterDemoProfiles(filtered, userId ?? 'demo_viewer');
+      return rankNearbyProfiles(jitterDemoProfiles(filtered, userId ?? 'demo_viewer'));
     }
     // Live mode: map Convex query results
-    return convexNearby.map((u) => ({
+    return rankNearbyProfiles(convexNearby.map((u) => ({
       _id: u.id,
       name: u.name,
       age: u.age,
@@ -265,7 +287,7 @@ export default function NearbyScreen() {
       freshness: u.freshness as 'solid' | 'faded',
       photoUrl: u.photoUrl ?? undefined,
       isVerified: u.isVerified,
-    }));
+    })));
   })();
 
   // ------------------------------------------------------------------
