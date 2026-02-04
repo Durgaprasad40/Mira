@@ -20,6 +20,9 @@ import { useFilterStore } from '@/stores/filterStore';
 import { isDemoMode } from '@/hooks/useConvex';
 import { BlurProfileNotice } from '@/components/profile/BlurProfileNotice';
 import { DEMO_USER } from '@/lib/demoData';
+import { useDemoStore } from '@/stores/demoStore';
+import { getProfileCompleteness, NUDGE_MESSAGES } from '@/lib/profileCompleteness';
+import { ProfileNudge } from '@/components/ui/ProfileNudge';
 import type { Gender } from '@/types';
 
 export default function SettingsScreen() {
@@ -31,6 +34,18 @@ export default function SettingsScreen() {
     !isDemoMode && userId ? { userId: userId as any } : 'skip'
   );
   const currentUser = isDemoMode ? (DEMO_USER as any) : currentUserQuery;
+
+  // Profile completeness nudge
+  const dismissedNudges = useDemoStore((s) => s.dismissedNudges);
+  const dismissNudge = useDemoStore((s) => s.dismissNudge);
+  const settingsNudgeStatus = currentUser
+    ? getProfileCompleteness({
+        photoCount: Array.isArray(currentUser.photos) ? currentUser.photos.length : 0,
+        bioLength: currentUser.bio?.length ?? 0,
+      })
+    : 'complete';
+  const showSettingsNudge =
+    settingsNudgeStatus !== 'complete' && !dismissedNudges.includes('settings');
 
   // Hard timeout for loading state
   const [timedOut, setTimedOut] = useState(false);
@@ -190,6 +205,14 @@ export default function SettingsScreen() {
         <Text style={styles.headerTitle}>Settings</Text>
         <View style={{ width: 24 }} />
       </View>
+
+      {showSettingsNudge && (
+        <ProfileNudge
+          message={NUDGE_MESSAGES[settingsNudgeStatus as Exclude<typeof settingsNudgeStatus, 'complete'>].settings}
+          variant="inline"
+          onDismiss={() => dismissNudge('settings')}
+        />
+      )}
 
       <View style={styles.section}>
         <Text style={styles.sectionTitle}>Discovery Preferences</Text>
@@ -366,6 +389,16 @@ export default function SettingsScreen() {
 
       <View style={styles.section}>
         <Text style={styles.sectionTitle}>Account</Text>
+        {isDemoMode && (
+          <TouchableOpacity
+            style={styles.menuItem}
+            onPress={() => router.push('/(main)/demo-panel' as any)}
+          >
+            <Ionicons name="flask-outline" size={20} color={COLORS.primary} style={{ marginRight: 10 }} />
+            <Text style={[styles.menuText, { flex: 1, color: COLORS.primary }]}>Demo Test Panel</Text>
+            <Ionicons name="chevron-forward" size={20} color={COLORS.primary} />
+          </TouchableOpacity>
+        )}
         <TouchableOpacity
           style={styles.menuItem}
           onPress={() => router.push('/(main)/edit-profile')}
