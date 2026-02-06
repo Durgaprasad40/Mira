@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
   View,
   Text,
@@ -8,15 +8,15 @@ import {
   Platform,
   Switch,
   Alert,
+  Modal,
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { useQuery, useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { useAuthStore } from '@/stores/authStore';
-import { COLORS, SORT_OPTIONS, GENDER_OPTIONS } from '@/lib/constants';
-import { Button, Input } from '@/components/ui';
+import { COLORS } from '@/lib/constants';
 import { Ionicons } from '@expo/vector-icons';
-import { useFilterStore } from '@/stores/filterStore';
 import { isDemoMode } from '@/hooks/useConvex';
 import { BlurProfileNotice } from '@/components/profile/BlurProfileNotice';
 import { Toast } from '@/components/ui/Toast';
@@ -26,7 +26,6 @@ import { useDemoDmStore } from '@/stores/demoDmStore';
 import { useDemoNotifStore } from '@/hooks/useNotifications';
 import { getProfileCompleteness, NUDGE_MESSAGES } from '@/lib/profileCompleteness';
 import { ProfileNudge } from '@/components/ui/ProfileNudge';
-import type { Gender } from '@/types';
 
 export default function SettingsScreen() {
   const router = useRouter();
@@ -58,38 +57,76 @@ export default function SettingsScreen() {
     return () => clearTimeout(t);
   }, []);
 
-  const updatePreferences = useMutation(api.users.updatePreferences);
   const toggleIncognito = useMutation(api.users.toggleIncognito);
   const toggleDiscoveryPause = useMutation(api.users.toggleDiscoveryPause);
   const togglePhotoBlurMut = isDemoMode ? null : useMutation(api.users.togglePhotoBlur);
-  // toggleShowLastSeen is handled locally until a Convex mutation is added
 
-  const {
-    minAge,
-    maxAge,
-    maxDistance,
-    gender: lookingFor,
-    setMinAge,
-    setMaxAge,
-    setMaxDistance,
-    toggleGender,
-  } = useFilterStore();
-
-  const [localMinAge, setLocalMinAge] = useState(minAge.toString());
-  const [localMaxAge, setLocalMaxAge] = useState(maxAge.toString());
-  const [localMaxDistance, setLocalMaxDistance] = useState(maxDistance.toString());
   const [incognitoEnabled, setIncognitoEnabled] = useState(currentUser?.incognitoMode || false);
   const [pauseEnabled, setPauseEnabled] = useState(false);
   const [showLastSeenEnabled, setShowLastSeenEnabled] = useState(currentUser?.showLastSeen !== false);
   const [blurEnabled, setBlurEnabled] = useState(currentUser?.photoBlurred === true);
   const [showBlurNotice, setShowBlurNotice] = useState(false);
-  const [saving, setSaving] = useState(false);
+
+  // ── Hidden Dev Panel (7 taps on title) ──
+  const [showDevPanel, setShowDevPanel] = useState(false);
+  const tapCountRef = useRef(0);
+  const tapTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const handleTitleTap = useCallback(() => {
+    // Only works in demo/dev mode
+    if (!isDemoMode && !__DEV__) return;
+
+    tapCountRef.current += 1;
+
+    // Reset tap count after 2 seconds of no taps
+    if (tapTimeoutRef.current) clearTimeout(tapTimeoutRef.current);
+    tapTimeoutRef.current = setTimeout(() => {
+      tapCountRef.current = 0;
+    }, 2000);
+
+    // 7 taps triggers dev panel
+    if (tapCountRef.current >= 7) {
+      tapCountRef.current = 0;
+      setShowDevPanel(true);
+    }
+  }, []);
+
+  const handleDevAction = useCallback((action: 'debug-log' | 'qa-checklist' | 'demo-panel' | 'reset') => {
+    setShowDevPanel(false);
+    switch (action) {
+      case 'debug-log':
+        router.push('/(main)/qa-debug-log' as any);
+        break;
+      case 'qa-checklist':
+        router.push('/(main)/qa-checklist' as any);
+        break;
+      case 'demo-panel':
+        router.push('/(main)/demo-panel' as any);
+        break;
+      case 'reset':
+        Alert.alert(
+          'Reset demo?',
+          'This will clear matches, chats, likes, blocks, and notifications.',
+          [
+            { text: 'Cancel', style: 'cancel' },
+            {
+              text: 'Reset',
+              style: 'destructive',
+              onPress: () => {
+                useDemoStore.getState().reset();
+                useDemoDmStore.getState().reset();
+                useDemoNotifStore.getState().reset();
+                router.replace('/(main)/(tabs)/home' as any);
+              },
+            },
+          ],
+        );
+        break;
+    }
+  }, [router]);
 
   React.useEffect(() => {
     if (currentUser) {
-      setLocalMinAge(currentUser.minAge.toString());
-      setLocalMaxAge(currentUser.maxAge.toString());
-      setLocalMaxDistance(currentUser.maxDistance.toString());
       setIncognitoEnabled(currentUser.incognitoMode || false);
       setShowLastSeenEnabled(currentUser.showLastSeen !== false);
       // Check if pause is active and not expired
@@ -102,28 +139,6 @@ export default function SettingsScreen() {
     }
   }, [currentUser]);
 
-  const handleSavePreferences = async () => {
-    if (!userId || saving) return;
-
-    setSaving(true);
-    try {
-      await updatePreferences({
-        userId: userId as any,
-        minAge: parseInt(localMinAge),
-        maxAge: parseInt(localMaxAge),
-        maxDistance: parseInt(localMaxDistance),
-        lookingFor: lookingFor.length > 0 ? lookingFor : undefined,
-      });
-      setMinAge(parseInt(localMinAge));
-      setMaxAge(parseInt(localMaxAge));
-      setMaxDistance(parseInt(localMaxDistance));
-      Toast.show('Preferences saved');
-    } catch {
-      Toast.show('Couldn\u2019t save preferences. Check your connection and try again.');
-    } finally {
-      setSaving(false);
-    }
-  };
 
   const handleTogglePause = async (paused: boolean) => {
     if (isDemoMode) {
@@ -183,13 +198,15 @@ export default function SettingsScreen() {
 
   if (!currentUser) {
     return (
-      <View style={styles.loadingContainer}>
-        <Text style={styles.loadingText}>{timedOut ? 'Failed to load settings' : 'Loading...'}</Text>
-        <TouchableOpacity style={styles.loadingBackButton} onPress={() => router.back()}>
-          <Ionicons name="arrow-back" size={18} color={COLORS.white} />
-          <Text style={styles.loadingBackText}>Go Back</Text>
-        </TouchableOpacity>
-      </View>
+      <SafeAreaView style={styles.safeArea} edges={['top']}>
+        <View style={styles.loadingContainer}>
+          <Text style={styles.loadingText}>{timedOut ? 'Failed to load settings' : 'Loading...'}</Text>
+          <TouchableOpacity style={styles.loadingBackButton} onPress={() => router.back()}>
+            <Ionicons name="arrow-back" size={18} color={COLORS.white} />
+            <Text style={styles.loadingBackText}>Go Back</Text>
+          </TouchableOpacity>
+        </View>
+      </SafeAreaView>
     );
   }
 
@@ -197,6 +214,7 @@ export default function SettingsScreen() {
     currentUser.gender === 'female' || currentUser.subscriptionTier === 'premium';
 
   return (
+    <SafeAreaView style={styles.safeArea} edges={['top']}>
     <ScrollView style={styles.container} showsVerticalScrollIndicator={false}>
       {/* Blur Notice Modal */}
       <BlurProfileNotice
@@ -209,7 +227,9 @@ export default function SettingsScreen() {
         <TouchableOpacity onPress={() => router.back()}>
           <Ionicons name="arrow-back" size={24} color={COLORS.text} />
         </TouchableOpacity>
-        <Text style={styles.headerTitle}>Settings</Text>
+        <TouchableOpacity onPress={handleTitleTap} activeOpacity={1}>
+          <Text style={styles.headerTitle}>Settings</Text>
+        </TouchableOpacity>
         <View style={{ width: 24 }} />
       </View>
 
@@ -222,73 +242,17 @@ export default function SettingsScreen() {
       )}
 
       <View style={styles.section}>
-        <Text style={styles.sectionTitle}>Discovery Preferences</Text>
-
-        <View style={styles.inputGroup}>
-          <Text style={styles.label}>Looking for</Text>
-          <View style={styles.chips}>
-            {GENDER_OPTIONS.map((option) => (
-              <TouchableOpacity
-                key={option.value}
-                style={[
-                  styles.chip,
-                  lookingFor.includes(option.value as Gender) && styles.chipSelected,
-                ]}
-                onPress={() => toggleGender(option.value as Gender)}
-              >
-                <Text
-                  style={[
-                    styles.chipText,
-                    lookingFor.includes(option.value as Gender) && styles.chipTextSelected,
-                  ]}
-                >
-                  {option.label}
-                </Text>
-              </TouchableOpacity>
-            ))}
+        <Text style={styles.sectionTitle}>Discovery</Text>
+        <TouchableOpacity
+          style={styles.menuItem}
+          onPress={() => router.push('/(main)/discovery-preferences' as any)}
+        >
+          <View style={styles.settingInfo}>
+            <Text style={styles.settingTitle}>Discovery Preferences</Text>
+            <Text style={styles.settingDescription}>Age, distance, and who you see</Text>
           </View>
-        </View>
-
-        <View style={styles.inputGroup}>
-          <Text style={styles.label}>Age Range</Text>
-          <View style={styles.ageRow}>
-            <Input
-              placeholder="Min"
-              value={localMinAge}
-              onChangeText={setLocalMinAge}
-              keyboardType="numeric"
-              style={styles.ageInput}
-            />
-            <Text style={styles.ageSeparator}>to</Text>
-            <Input
-              placeholder="Max"
-              value={localMaxAge}
-              onChangeText={setLocalMaxAge}
-              keyboardType="numeric"
-              style={styles.ageInput}
-            />
-          </View>
-        </View>
-
-        <View style={styles.inputGroup}>
-          <Text style={styles.label}>Maximum Distance (miles)</Text>
-          <Input
-            placeholder="Distance"
-            value={localMaxDistance}
-            onChangeText={setLocalMaxDistance}
-            keyboardType="numeric"
-            style={styles.distanceInput}
-          />
-        </View>
-
-        <Button
-          title={saving ? "Saving…" : "Save Preferences"}
-          variant="primary"
-          onPress={handleSavePreferences}
-          disabled={saving}
-          loading={saving}
-          style={styles.saveButton}
-        />
+          <Ionicons name="chevron-forward" size={20} color={COLORS.textLight} />
+        </TouchableOpacity>
       </View>
 
       <View style={styles.section}>
@@ -398,44 +362,6 @@ export default function SettingsScreen() {
 
       <View style={styles.section}>
         <Text style={styles.sectionTitle}>Account</Text>
-        {isDemoMode && (
-          <>
-            <TouchableOpacity
-              style={styles.menuItem}
-              onPress={() => router.push('/(main)/demo-panel' as any)}
-            >
-              <Ionicons name="flask-outline" size={20} color={COLORS.primary} style={{ marginRight: 10 }} />
-              <Text style={[styles.menuText, { flex: 1, color: COLORS.primary }]}>Demo Test Panel</Text>
-              <Ionicons name="chevron-forward" size={20} color={COLORS.primary} />
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={styles.menuItem}
-              onPress={() => {
-                Alert.alert(
-                  'Reset demo?',
-                  'This will clear matches, chats, likes, blocks, and notifications for demo mode.',
-                  [
-                    { text: 'Cancel', style: 'cancel' },
-                    {
-                      text: 'Reset',
-                      style: 'destructive',
-                      onPress: () => {
-                        useDemoStore.getState().reset();
-                        useDemoDmStore.getState().reset();
-                        useDemoNotifStore.getState().reset();
-                        router.replace('/(main)/(tabs)/home' as any);
-                      },
-                    },
-                  ],
-                );
-              }}
-            >
-              <Ionicons name="refresh-circle-outline" size={20} color={COLORS.error} style={{ marginRight: 10 }} />
-              <Text style={[styles.menuText, { flex: 1, color: COLORS.error }]}>Reset Demo Data</Text>
-              <Ionicons name="chevron-forward" size={20} color={COLORS.error} />
-            </TouchableOpacity>
-          </>
-        )}
         <TouchableOpacity
           style={styles.menuItem}
           onPress={() => router.push('/(main)/edit-profile')}
@@ -456,11 +382,72 @@ export default function SettingsScreen() {
           <Ionicons name="chevron-forward" size={20} color={COLORS.textLight} />
         </TouchableOpacity>
       </View>
+
+      {/* Hidden Dev Panel Modal — triggered by 7 taps on "Settings" title */}
+      <Modal
+        visible={showDevPanel}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setShowDevPanel(false)}
+      >
+        <TouchableOpacity
+          style={styles.devPanelOverlay}
+          activeOpacity={1}
+          onPress={() => setShowDevPanel(false)}
+        >
+          <View style={styles.devPanelContainer}>
+            <Text style={styles.devPanelTitle}>Dev Tools</Text>
+            <TouchableOpacity
+              style={styles.devPanelItem}
+              onPress={() => handleDevAction('debug-log')}
+            >
+              <Ionicons name="list-outline" size={20} color="#3B82F6" />
+              <Text style={styles.devPanelItemText}>Debug Event Log</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.devPanelItem}
+              onPress={() => handleDevAction('qa-checklist')}
+            >
+              <Ionicons name="checkbox-outline" size={20} color="#10B981" />
+              <Text style={styles.devPanelItemText}>QA Checklist</Text>
+            </TouchableOpacity>
+            {isDemoMode && (
+              <>
+                <TouchableOpacity
+                  style={styles.devPanelItem}
+                  onPress={() => handleDevAction('demo-panel')}
+                >
+                  <Ionicons name="flask-outline" size={20} color={COLORS.primary} />
+                  <Text style={styles.devPanelItemText}>Demo Test Panel</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={styles.devPanelItem}
+                  onPress={() => handleDevAction('reset')}
+                >
+                  <Ionicons name="refresh-circle-outline" size={20} color={COLORS.error} />
+                  <Text style={styles.devPanelItemText}>Reset Demo Data</Text>
+                </TouchableOpacity>
+              </>
+            )}
+            <TouchableOpacity
+              style={styles.devPanelClose}
+              onPress={() => setShowDevPanel(false)}
+            >
+              <Text style={styles.devPanelCloseText}>Close</Text>
+            </TouchableOpacity>
+          </View>
+        </TouchableOpacity>
+      </Modal>
     </ScrollView>
+    </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
+  safeArea: {
+    flex: 1,
+    backgroundColor: COLORS.background,
+  },
   container: {
     flex: 1,
     backgroundColor: COLORS.background,
@@ -521,60 +508,6 @@ const styles = StyleSheet.create({
     color: COLORS.textLight,
     marginBottom: 16,
   },
-  inputGroup: {
-    marginBottom: 20,
-  },
-  label: {
-    fontSize: 14,
-    fontWeight: '500',
-    color: COLORS.text,
-    marginBottom: 8,
-  },
-  chips: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 8,
-  },
-  chip: {
-    paddingHorizontal: 16,
-    paddingVertical: 10,
-    borderRadius: 20,
-    minHeight: 44,
-    justifyContent: 'center' as const,
-    backgroundColor: COLORS.backgroundDark,
-    borderWidth: 1,
-    borderColor: COLORS.border,
-  },
-  chipSelected: {
-    backgroundColor: COLORS.primary,
-    borderColor: COLORS.primary,
-  },
-  chipText: {
-    fontSize: 14,
-    color: COLORS.text,
-  },
-  chipTextSelected: {
-    color: COLORS.white,
-    fontWeight: '600',
-  },
-  ageRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-  },
-  ageInput: {
-    flex: 1,
-  },
-  ageSeparator: {
-    fontSize: 16,
-    color: COLORS.textLight,
-  },
-  distanceInput: {
-    width: 150,
-  },
-  saveButton: {
-    marginTop: 8,
-  },
   settingRow: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -607,5 +540,50 @@ const styles = StyleSheet.create({
   menuText: {
     fontSize: 16,
     color: COLORS.text,
+  },
+  // Dev Panel styles
+  devPanelOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  devPanelContainer: {
+    backgroundColor: COLORS.background,
+    borderRadius: 16,
+    padding: 20,
+    width: '80%',
+    maxWidth: 300,
+  },
+  devPanelTitle: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: COLORS.text,
+    textAlign: 'center',
+    marginBottom: 16,
+  },
+  devPanelItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    paddingVertical: 14,
+    borderBottomWidth: 1,
+    borderBottomColor: COLORS.border,
+  },
+  devPanelItemText: {
+    fontSize: 15,
+    color: COLORS.text,
+  },
+  devPanelClose: {
+    marginTop: 16,
+    paddingVertical: 12,
+    borderRadius: 8,
+    backgroundColor: COLORS.backgroundDark,
+    alignItems: 'center',
+  },
+  devPanelCloseText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: COLORS.textLight,
   },
 });

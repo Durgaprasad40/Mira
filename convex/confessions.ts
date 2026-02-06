@@ -5,6 +5,9 @@ import { v } from 'convex/values';
 const PHONE_PATTERN = /\b\d{10,}\b|\b\d{3}[-.\s]?\d{3}[-.\s]?\d{4}\b/;
 const EMAIL_PATTERN = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/;
 
+// Confession expiry duration (24 hours in milliseconds)
+const CONFESSION_EXPIRY_MS = 24 * 60 * 60 * 1000;
+
 // Create a new confession
 export const createConfession = mutation({
   args: {
@@ -16,6 +19,7 @@ export const createConfession = mutation({
     imageUrl: v.optional(v.string()),
     authorName: v.optional(v.string()),
     authorPhotoUrl: v.optional(v.string()),
+    taggedUserId: v.optional(v.id('users')), // User being confessed to
   },
   handler: async (ctx, args) => {
     const trimmed = args.text.trim();
@@ -29,6 +33,28 @@ export const createConfession = mutation({
       throw new Error('Do not include email addresses in confessions.');
     }
 
+    // If taggedUserId provided, verify the current user has liked them
+    if (args.taggedUserId) {
+      const likeRecord = await ctx.db
+        .query('likes')
+        .withIndex('by_from_to', (q) =>
+          q.eq('fromUserId', args.userId).eq('toUserId', args.taggedUserId!)
+        )
+        .filter((q) =>
+          q.or(
+            q.eq(q.field('action'), 'like'),
+            q.eq(q.field('action'), 'super_like'),
+            q.eq(q.field('action'), 'text')
+          )
+        )
+        .first();
+
+      if (!likeRecord) {
+        throw new Error('You can only confess to users you have liked.');
+      }
+    }
+
+    const now = Date.now();
     const confessionId = await ctx.db.insert('confessions', {
       userId: args.userId,
       text: trimmed,
@@ -41,23 +67,45 @@ export const createConfession = mutation({
       replyCount: 0,
       reactionCount: 0,
       voiceReplyCount: 0,
-      createdAt: Date.now(),
+      createdAt: now,
+      expiresAt: now + CONFESSION_EXPIRY_MS,
+      taggedUserId: args.taggedUserId,
     });
+
+    // If tagged, create notification for the tagged user
+    if (args.taggedUserId) {
+      await ctx.db.insert('confessionNotifications', {
+        userId: args.taggedUserId,
+        confessionId,
+        fromUserId: args.userId,
+        type: 'TAGGED_CONFESSION',
+        seen: false,
+        createdAt: now,
+      });
+    }
+
     return confessionId;
   },
 });
 
 // List confessions (latest) with 2 reply previews per confession
+// Only returns non-expired confessions for public feed
 export const listConfessions = query({
   args: {
     sortBy: v.union(v.literal('trending'), v.literal('latest')),
   },
   handler: async (ctx, { sortBy }) => {
-    const confessions = await ctx.db
+    const now = Date.now();
+    const allConfessions = await ctx.db
       .query('confessions')
       .withIndex('by_created')
       .order('desc')
       .collect();
+
+    // Filter out expired confessions (expiresAt <= now, or undefined = legacy, include)
+    const confessions = allConfessions.filter(
+      (c) => c.expiresAt === undefined || c.expiresAt > now
+    );
 
     // Attach 2 reply previews per confession
     const withPreviews = await Promise.all(
@@ -111,6 +159,7 @@ export const listConfessions = query({
 });
 
 // Get trending confessions (last 48h, time-decay scoring)
+// Only returns non-expired confessions
 export const getTrendingConfessions = query({
   args: {},
   handler: async (ctx) => {
@@ -123,8 +172,10 @@ export const getTrendingConfessions = query({
       .order('desc')
       .collect();
 
-    // Filter to last 48h
-    const recent = confessions.filter((c) => c.createdAt > cutoff);
+    // Filter to last 48h AND not expired
+    const recent = confessions.filter(
+      (c) => c.createdAt > cutoff && (c.expiresAt === undefined || c.expiresAt > now)
+    );
 
     // Time-decay scoring: score = ((reactionCount * 3) + (commentCount * 4) + (voiceReplyCount * 4)) / (hoursSinceCreated + 2)
     const scored = recent.map((c) => {
@@ -246,6 +297,7 @@ export const getReplies = query({
 });
 
 // Toggle emoji reaction — one emoji per user per confession (toggle/replace)
+// Special behavior: if tagged user likes a tagged confession, create a DM thread
 export const toggleReaction = mutation({
   args: {
     confessionId: v.id('confessions'),
@@ -262,7 +314,7 @@ export const toggleReaction = mutation({
       .first();
 
     const confession = await ctx.db.get(args.confessionId);
-    if (!confession) return { added: false, replaced: false };
+    if (!confession) return { added: false, replaced: false, chatUnlocked: false };
 
     if (existing) {
       if (existing.type === args.type) {
@@ -271,14 +323,14 @@ export const toggleReaction = mutation({
         await ctx.db.patch(args.confessionId, {
           reactionCount: Math.max(0, confession.reactionCount - 1),
         });
-        return { added: false, replaced: false };
+        return { added: false, replaced: false, chatUnlocked: false };
       } else {
         // Different emoji → replace (count stays the same)
         await ctx.db.patch(existing._id, {
           type: args.type,
           createdAt: Date.now(),
         });
-        return { added: false, replaced: true };
+        return { added: false, replaced: true, chatUnlocked: false };
       }
     } else {
       // No existing → add new
@@ -291,7 +343,33 @@ export const toggleReaction = mutation({
       await ctx.db.patch(args.confessionId, {
         reactionCount: confession.reactionCount + 1,
       });
-      return { added: true, replaced: false };
+
+      // SPECIAL: If tagged user likes a tagged confession, create/find a DM thread
+      let chatUnlocked = false;
+      if (confession.taggedUserId && args.userId === confession.taggedUserId) {
+        // Check if conversation already exists for this confession (idempotency)
+        const existingConvo = await ctx.db
+          .query('conversations')
+          .withIndex('by_confession', (q) => q.eq('confessionId', args.confessionId))
+          .first();
+
+        if (!existingConvo) {
+          // Create new conversation between author and tagged user
+          const now = Date.now();
+          const TWENTY_FOUR_HOURS = 24 * 60 * 60 * 1000;
+          await ctx.db.insert('conversations', {
+            confessionId: args.confessionId,
+            participants: [confession.userId, confession.taggedUserId],
+            isPreMatch: true, // Confession-based threads are pre-match
+            createdAt: now,
+            lastMessageAt: now,
+            expiresAt: now + TWENTY_FOUR_HOURS, // Confession chats expire in 24h
+          });
+          chatUnlocked = true;
+        }
+      }
+
+      return { added: true, replaced: false, chatUnlocked };
     }
   },
 });
@@ -335,16 +413,22 @@ export const getUserReaction = query({
   },
 });
 
-// Get user's own confessions
+// Get user's own confessions (all, including expired, with isExpired flag)
 export const getMyConfessions = query({
   args: { userId: v.id('users') },
   handler: async (ctx, { userId }) => {
+    const now = Date.now();
     const confessions = await ctx.db
       .query('confessions')
       .withIndex('by_user', (q) => q.eq('userId', userId))
       .order('desc')
       .collect();
-    return confessions;
+
+    // Add isExpired flag for each confession
+    return confessions.map((c) => ({
+      ...c,
+      isExpired: c.expiresAt !== undefined && c.expiresAt <= now,
+    }));
   },
 });
 
@@ -362,6 +446,92 @@ export const reportConfession = mutation({
       reason: args.reason,
       createdAt: Date.now(),
     });
+    return { success: true };
+  },
+});
+
+// ============ TAGGED CONFESSION NOTIFICATIONS ============
+
+// Get badge count of unseen tagged confessions for a user
+export const getTaggedConfessionBadgeCount = query({
+  args: { userId: v.id('users') },
+  handler: async (ctx, { userId }) => {
+    const notifications = await ctx.db
+      .query('confessionNotifications')
+      .withIndex('by_user_seen', (q) => q.eq('userId', userId).eq('seen', false))
+      .collect();
+    return notifications.length;
+  },
+});
+
+// List tagged confessions for a user (privacy-safe: only for the tagged user's view)
+export const listTaggedConfessionsForUser = query({
+  args: { userId: v.id('users') },
+  handler: async (ctx, { userId }) => {
+    const now = Date.now();
+
+    // Get notifications for this user (limit 50)
+    const notifications = await ctx.db
+      .query('confessionNotifications')
+      .withIndex('by_user_created', (q) => q.eq('userId', userId))
+      .order('desc')
+      .take(50);
+
+    // Join with confession data
+    const result = [];
+    for (const notif of notifications) {
+      const confession = await ctx.db.get(notif.confessionId);
+      if (!confession) continue;
+
+      result.push({
+        notificationId: notif._id,
+        confessionId: notif.confessionId,
+        seen: notif.seen,
+        notificationCreatedAt: notif.createdAt,
+        // Confession data (do NOT include authorName or any identity info)
+        confessionText: confession.text,
+        confessionMood: confession.mood,
+        confessionCreatedAt: confession.createdAt,
+        confessionExpiresAt: confession.expiresAt,
+        isExpired: confession.expiresAt !== undefined && confession.expiresAt <= now,
+        replyCount: confession.replyCount,
+        reactionCount: confession.reactionCount,
+      });
+    }
+
+    return result;
+  },
+});
+
+// Mark tagged confession notifications as seen
+export const markTaggedConfessionsSeen = mutation({
+  args: {
+    userId: v.id('users'),
+    notificationIds: v.optional(v.array(v.id('confessionNotifications'))),
+  },
+  handler: async (ctx, args) => {
+    const { userId, notificationIds } = args;
+
+    if (notificationIds && notificationIds.length > 0) {
+      // Mark specific notifications as seen
+      for (const notifId of notificationIds) {
+        const notif = await ctx.db.get(notifId);
+        if (notif && notif.userId === userId && !notif.seen) {
+          await ctx.db.patch(notifId, { seen: true });
+        }
+      }
+    } else {
+      // Mark all unseen notifications for this user as seen
+      const unseen = await ctx.db
+        .query('confessionNotifications')
+        .withIndex('by_user_seen', (q) => q.eq('userId', userId).eq('seen', false))
+        .collect();
+
+      for (const notif of unseen) {
+        await ctx.db.patch(notif._id, { seen: true });
+      }
+    }
+
     return { success: true };
   },
 });

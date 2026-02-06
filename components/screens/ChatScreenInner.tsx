@@ -34,8 +34,15 @@ import { Ionicons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
 import { isDemoMode } from '@/hooks/useConvex';
 import { useDemoDmStore, DemoDmMessage } from '@/stores/demoDmStore';
+import { useDemoStore } from '@/stores/demoStore';
 import { useDemoNotifStore } from '@/hooks/useNotifications';
 import { Toast } from '@/components/ui/Toast';
+import { logDebugEvent } from '@/lib/debugEventLogger';
+import {
+  isUserBlocked,
+  isExpiredConfessionThread,
+  getOtherUserIdFromMeta,
+} from '@/lib/threadsIntegrity';
 
 /** Resolve the current demo user ID at call-time from authStore.
  *  Falls back to 'demo_user_1' for legacy data compatibility. */
@@ -51,13 +58,28 @@ function getDemoUserId(): string {
  * This empty record is kept as a fallback for seedConversation(). */
 const DEMO_SEED_MESSAGES: Record<string, DemoDmMessage[]> = {};
 
+export type ChatSource = 'messages' | 'discover' | 'confession' | 'notification' | 'match' | undefined;
+
 export interface ChatScreenInnerProps {
   conversationId: string;
+  /** Source of navigation — determines back button behavior */
+  source?: ChatSource;
 }
 
-export default function ChatScreenInner({ conversationId }: ChatScreenInnerProps) {
+export default function ChatScreenInner({ conversationId, source }: ChatScreenInnerProps) {
   const router = useRouter();
   const insets = useSafeAreaInsets();
+
+  // Back handler — routes based on source to ensure consistent navigation
+  const handleBack = useCallback(() => {
+    if (source === 'messages') {
+      // From Messages tab: return to Messages list
+      router.replace('/(main)/(tabs)/messages');
+    } else {
+      // Default: use router.back() for natural navigation
+      router.back();
+    }
+  }, [source, router]);
   const { userId } = useAuthStore();
   const flatListRef = useRef<FlashListRef<any>>(null);
 
@@ -92,6 +114,36 @@ export default function ChatScreenInner({ conversationId }: ChatScreenInnerProps
   const demoDraft = useDemoDmStore((s) => conversationId ? s.drafts[conversationId] : undefined);
   const setDemoDraft = useDemoDmStore((s) => s.setDraft);
   const clearDemoDraft = useDemoDmStore((s) => s.clearDraft);
+  const cleanupExpiredThreads = useDemoDmStore((s) => s.cleanupExpiredThreads);
+
+  // ── Safety / integrity guards ──
+  const blockedUserIds = useDemoStore((s) => s.blockedUserIds);
+  const currentMeta = conversationId ? demoMeta[conversationId] : undefined;
+  const otherUserIdFromMeta = getOtherUserIdFromMeta(currentMeta);
+
+  // Navigation guard: Check if user is blocked or thread is expired
+  const [guardTriggered, setGuardTriggered] = useState(false);
+  useEffect(() => {
+    if (!isDemo || guardTriggered) return;
+
+    // Guard 1: Blocked user
+    if (otherUserIdFromMeta && isUserBlocked(otherUserIdFromMeta, blockedUserIds)) {
+      setGuardTriggered(true);
+      logDebugEvent('BLOCK_OR_REPORT', 'Blocked user chat navigation prevented');
+      handleBack();
+      return;
+    }
+
+    // Guard 2: Expired confession thread
+    if (conversationId && isExpiredConfessionThread(currentMeta)) {
+      setGuardTriggered(true);
+      logDebugEvent('CHAT_EXPIRED', 'Expired confession thread cleaned on navigation');
+      // Clean up the expired thread
+      cleanupExpiredThreads([conversationId]);
+      handleBack();
+      return;
+    }
+  }, [isDemo, conversationId, otherUserIdFromMeta, blockedUserIds, currentMeta, guardTriggered, handleBack, cleanupExpiredThreads]);
 
   const hasMeta = !!demoMeta[conversationId ?? ''];
   const hasMessages = !!(demoConversations[conversationId ?? '']?.length);
@@ -138,10 +190,21 @@ export default function ChatScreenInner({ conversationId }: ChatScreenInnerProps
           lastActive: storedMeta.otherUser.lastActive ?? Date.now(),
         },
         isPreMatch: storedMeta.isPreMatch,
+        isConfessionChat: storedMeta.isConfessionChat,
+        expiresAt: storedMeta.expiresAt,
       }
     : null;
 
   const activeConversation = isDemo ? demoConversation : conversation;
+
+  // Check if this is an expired confession-based chat
+  const now = Date.now();
+  const isExpiredChat = activeConversation
+    ? (isDemo
+        ? !!(activeConversation.isConfessionChat && activeConversation.expiresAt && activeConversation.expiresAt <= now)
+        : ((activeConversation as any).isExpired === true)
+      )
+    : false;
 
   const _queryStatus = conversation === undefined ? 'loading' : conversation ? 'ok' : 'null';
   useEffect(() => {
@@ -149,6 +212,15 @@ export default function ChatScreenInner({ conversationId }: ChatScreenInnerProps
       console.log('[Chat] route conversationId', conversationId, 'query result', _queryStatus);
     }
   }, [conversationId, _queryStatus]);
+
+  // Log when chat is detected as expired
+  const hasLoggedExpired = useRef(false);
+  useEffect(() => {
+    if (isExpiredChat && !hasLoggedExpired.current) {
+      hasLoggedExpired.current = true;
+      logDebugEvent('CHAT_EXPIRED', 'Confession chat expired');
+    }
+  }, [isExpiredChat]);
 
   const sendMessage = useMutation(api.messages.sendMessage);
   const markAsRead = useMutation(api.messages.markAsRead);
@@ -212,6 +284,12 @@ export default function ChatScreenInner({ conversationId }: ChatScreenInnerProps
   const handleSend = async (text: string, type: 'text' | 'template' = 'text') => {
     if (!activeConversation) return;
     if (isSendingRef.current) return;
+
+    // Block sending if chat is expired
+    if (isExpiredChat) {
+      Alert.alert('Chat Expired', 'This confession chat has expired and can no longer receive messages.');
+      return;
+    }
 
     if (isDemo) {
       addDemoMessage(conversationId!, {
@@ -343,7 +421,7 @@ export default function ChatScreenInner({ conversationId }: ChatScreenInnerProps
             <Text style={styles.loadingText}>Chat not found</Text>
             <TouchableOpacity
               style={styles.errorBackButton}
-              onPress={() => router.back()}
+              onPress={handleBack}
             >
               <Text style={styles.errorBackText}>Go Back</Text>
             </TouchableOpacity>
@@ -367,7 +445,7 @@ export default function ChatScreenInner({ conversationId }: ChatScreenInnerProps
     <View style={styles.container}>
       {/* Header — sits above KAV, measured for keyboardVerticalOffset */}
       <View onLayout={onHeaderLayout} style={[styles.header, { paddingTop: insets.top }]}>
-        <TouchableOpacity onPress={() => router.back()} style={styles.backButton}>
+        <TouchableOpacity onPress={handleBack} style={styles.backButton}>
           <Ionicons name="arrow-back" size={24} color={COLORS.text} />
         </TouchableOpacity>
         <View style={styles.headerInfo}>
@@ -389,6 +467,14 @@ export default function ChatScreenInner({ conversationId }: ChatScreenInnerProps
           <Ionicons name="ellipsis-vertical" size={20} color={COLORS.textLight} />
         </TouchableOpacity>
       </View>
+
+      {/* Expired chat banner */}
+      {isExpiredChat && (
+        <View style={styles.expiredBanner}>
+          <Ionicons name="time-outline" size={16} color={COLORS.textMuted} />
+          <Text style={styles.expiredBannerText}>This chat has expired.</Text>
+        </View>
+      )}
 
       <KeyboardAvoidingView
         style={styles.kavContainer}
@@ -445,7 +531,7 @@ export default function ChatScreenInner({ conversationId }: ChatScreenInnerProps
             onSend={handleSend}
             onSendImage={handleSendImage}
             onSendDare={activeConversation.isPreMatch ? handleSendDare : undefined}
-            disabled={isSending}
+            disabled={isSending || isExpiredChat}
             isPreMatch={activeConversation.isPreMatch}
             messagesRemaining={messagesRemaining}
             subscriptionTier={isDemo ? 'premium' : (currentUser?.subscriptionTier || 'free')}
@@ -579,5 +665,19 @@ const styles = StyleSheet.create({
     color: COLORS.textMuted,
     marginTop: 12,
     textAlign: 'center',
+  },
+  expiredBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    backgroundColor: 'rgba(153,153,153,0.12)',
+    paddingVertical: 10,
+    paddingHorizontal: 16,
+  },
+  expiredBannerText: {
+    fontSize: 13,
+    fontWeight: '500',
+    color: COLORS.textMuted,
   },
 });

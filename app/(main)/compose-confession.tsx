@@ -25,6 +25,7 @@ import { useInteractionStore } from '@/stores/interactionStore';
 import { isDemoMode } from '@/hooks/useConvex';
 import { useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
+import { logDebugEvent } from '@/lib/debugEventLogger';
 
 const TIMED_OPTIONS: { value: TimedRevealOption; label: string }[] = [
   { value: 'never', label: 'Never' },
@@ -101,6 +102,12 @@ export default function ComposeConfessionScreen() {
       createdAt: Date.now(),
       revealPolicy: revealPolicy || 'never',
     });
+
+    // Debug event logging
+    logDebugEvent('CONFESSION_CREATED', 'New confession posted');
+    if (finalTarget) {
+      logDebugEvent('CONFESSION_TAGGED', 'Confession tagged someone');
+    }
 
     if (timedRevealOption && timedRevealOption !== 'never' && finalTarget) {
       setTimedReveal(confessionId, timedRevealOption, finalTarget);

@@ -5,8 +5,9 @@ import {
   StyleSheet,
   ScrollView,
   TouchableOpacity,
-  Platform,
+  useWindowDimensions,
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useQuery, useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
@@ -27,6 +28,8 @@ import { Toast } from '@/components/ui/Toast';
 export default function ViewProfileScreen() {
   const { id: userId } = useLocalSearchParams<{ id: string }>();
   const router = useRouter();
+  const insets = useSafeAreaInsets();
+  const { width: screenWidth } = useWindowDimensions();
   const { userId: currentUserId } = useAuthStore();
   const [currentPhotoIndex, setCurrentPhotoIndex] = useState(0);
   const [showReportBlock, setShowReportBlock] = useState(false);
@@ -133,7 +136,7 @@ export default function ViewProfileScreen() {
 
   return (
     <ScrollView style={styles.container} showsVerticalScrollIndicator={false}>
-      <View style={styles.header}>
+      <View style={[styles.header, { paddingTop: insets.top + 8 }]}>
         <TouchableOpacity onPress={() => router.back()} style={styles.backButton}>
           <Ionicons name="arrow-back" size={24} color={COLORS.white} />
         </TouchableOpacity>
@@ -158,18 +161,23 @@ export default function ViewProfileScreen() {
           horizontal
           pagingEnabled
           showsHorizontalScrollIndicator={false}
+          bounces={false}
+          snapToAlignment="start"
+          decelerationRate="fast"
           data={profile.photos}
           keyExtractor={(item, index) => item._id || `photo-${index}`}
           onMomentumScrollEnd={(e) => {
-            const index = Math.round(e.nativeEvent.contentOffset.x / e.nativeEvent.layoutMeasurement.width);
+            const index = Math.round(e.nativeEvent.contentOffset.x / screenWidth);
             setCurrentPhotoIndex(index);
           }}
           renderItem={({ item }) => (
-            <Image
-              source={{ uri: item.url }}
-              style={styles.photo}
-              contentFit="cover"
-            />
+            <View style={{ width: screenWidth, height: 500, overflow: 'hidden' }}>
+              <Image
+                source={{ uri: item.url }}
+                style={{ width: '100%', height: '100%' }}
+                contentFit="cover"
+              />
+            </View>
           )}
           style={styles.photoCarousel}
         />
@@ -421,8 +429,8 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    padding: 16,
-    paddingTop: Platform.OS === 'ios' ? 50 : 16,
+    paddingHorizontal: 16,
+    paddingBottom: 8,
     backgroundColor: 'rgba(0,0,0,0.3)',
   },
   backButton: {
@@ -454,10 +462,6 @@ const styles = StyleSheet.create({
   },
   photoCarousel: {
     width: '100%',
-    height: 500,
-  },
-  photo: {
-    width: 400,
     height: 500,
   },
   photoPlaceholder: {

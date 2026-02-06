@@ -11,9 +11,10 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import MapView, { Marker, Region } from 'react-native-maps';
 import { useRouter } from 'expo-router';
+import { LoadingGuard } from '@/components/safety';
 import { Ionicons } from '@expo/vector-icons';
 import { useQuery, useMutation } from 'convex/react';
-import { useLocation } from '@/hooks/useLocation';
+import { useLocation, hasCachedLocation } from '@/hooks/useLocation';
 import { COLORS } from '@/lib/constants';
 import { DEMO_PROFILES, getDemoCurrentUser } from '@/lib/demoData';
 import { useAuthStore } from '@/stores/authStore';
@@ -23,6 +24,8 @@ import { useDemoNotifStore } from '@/hooks/useNotifications';
 import { api } from '@/convex/_generated/api';
 import { useScreenSafety } from '@/hooks/useScreenSafety';
 import { rankNearbyProfiles } from '@/lib/rankProfiles';
+import { isWithinAllowedDistance } from '@/lib/distanceRules';
+import { logDebugEvent } from '@/lib/debugEventLogger';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -118,15 +121,44 @@ function computeFreshness(timestamp: number): 'solid' | 'faded' | 'hidden' {
 }
 
 // ---------------------------------------------------------------------------
-// In-app notification banner
+// Anti-Zoom Shifting: Zoom buckets + client-side fuzz
 // ---------------------------------------------------------------------------
 
-let _showBanner: ((title: string, body: string) => void) | null = null;
+/** Get zoom bucket from latitudeDelta (0-4, smaller = more zoomed in) */
+function getZoomBucket(latitudeDelta: number): number {
+  if (latitudeDelta > 0.30) return 0;
+  if (latitudeDelta > 0.15) return 1;
+  if (latitudeDelta > 0.08) return 2;
+  if (latitudeDelta > 0.04) return 3;
+  return 4;
+}
 
-function sendLocalNotification(title: string, body: string) {
-  if (_showBanner) {
-    _showBanner(title, body);
-  }
+/** Apply client-side fuzz with anti-zoom shifting.
+ * Jitter changes when zoom bucket or session changes, preventing triangulation.
+ *
+ * @param hideDistance - If true, use larger fuzz radius (200-400m) for privacy
+ */
+function applyClientFuzz(
+  lat: number,
+  lng: number,
+  viewerId: string,
+  otherUserId: string,
+  sessionSalt: number,
+  zoomBucket: number,
+  hideDistance: boolean = false,
+): { lat: number; lng: number } {
+  // Deterministic seed based on viewer, other user, session, and zoom bucket
+  const seed = simpleHash(`${viewerId}:${otherUserId}:${sessionSalt}:${zoomBucket}`);
+
+  // Random angle (0-360 degrees)
+  const angle = ((seed % 36000) / 100) * (Math.PI / 180);
+
+  // Random radius — larger for hideDistance users (200-400m vs 20-100m)
+  const radiusMeters = hideDistance
+    ? 200 + (seed % 201)   // 200-400m for hidden users
+    : 20 + (seed % 81);    // 20-100m for normal users
+
+  return offsetCoords(lat, lng, radiusMeters, angle);
 }
 
 // ---------------------------------------------------------------------------
@@ -135,7 +167,8 @@ function sendLocalNotification(title: string, body: string) {
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 const BOTTOM_SHEET_HEIGHT = 200;
-const FIXED_RADIUS = 1000; // 1km
+const FIXED_RADIUS_METERS = 1000; // 1km
+const FIXED_RADIUS_KM = 1; // 1km for distance rules
 
 // Extract demo "nearby" profiles that have lat/lng.
 // Fallback: used when demoStore hasn't seeded yet.
@@ -143,36 +176,13 @@ const NEARBY_DEMO_PROFILES = (DEMO_PROFILES as any[]).filter(
   (p) => typeof p.latitude === 'number' && (p._id as string).startsWith('demo_nearby'),
 );
 
-/** Apply client-side jitter (50-150m) to demo profiles. */
-function jitterDemoProfiles(profiles: any[], viewerId: string): NearbyProfile[] {
-  return profiles
-    .map((p) => {
-      const ts = p.lastLocationUpdatedAt ?? Date.now();
-      const freshness = computeFreshness(ts);
-      if (freshness === 'hidden') return null;
-
-      const epoch = Math.floor(ts / (30 * 60 * 1000));
-      const seed = simpleHash(`${viewerId}:${p._id}:${epoch}`);
-      const angle = ((seed % 36000) / 100) * (Math.PI / 180);
-      const dist = 50 + (seed % 101); // 50-150m
-      const { lat, lng } = offsetCoords(p.latitude, p.longitude, dist, angle);
-      return {
-        ...p,
-        latitude: lat,
-        longitude: lng,
-        freshness,
-      } as NearbyProfile;
-    })
-    .filter(Boolean) as NearbyProfile[];
-}
-
 // ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
 
 export default function NearbyScreen() {
   const router = useRouter();
-  const { latitude, longitude, getCurrentLocation, requestPermission } = useLocation();
+  const { latitude, longitude, getCurrentLocation, requestPermission, isLoading: locationLoading } = useLocation();
   const userId = useAuthStore((s) => s.userId);
   const mapRef = useRef<MapView>(null);
   const { safeTimeout } = useScreenSafety();
@@ -183,71 +193,92 @@ export default function NearbyScreen() {
   const blockedUserIds = useDemoStore((s) => s.blockedUserIds);
   useEffect(() => { if (isDemoMode) demoSeed(); }, [demoSeed]);
 
-  // User location — fallback to demo coords
+  // User location — only use demo coords in demo mode, otherwise require real location
   const demoUser = getDemoCurrentUser();
-  const userLat = latitude ?? demoUser.latitude;
-  const userLng = longitude ?? demoUser.longitude;
+  const userLat = isDemoMode ? (latitude ?? demoUser.latitude) : latitude;
+  const userLng = isDemoMode ? (longitude ?? demoUser.longitude) : longitude;
 
-  // Permission state
+  // Permission and loading states
+  // In demo mode with demo location, skip loading entirely
+  // Also skip if we have a cached location
+  const hasDemoLocation = isDemoMode && demoUser.latitude != null && demoUser.longitude != null;
+  const hasCached = hasCachedLocation();
   const [permissionDenied, setPermissionDenied] = useState(false);
+  const [isInitializing, setIsInitializing] = useState(!hasDemoLocation && !hasCached);
+  const [retryKey, setRetryKey] = useState(0); // For LoadingGuard retry
+  const hasAnimatedToLocation = useRef(false);
 
   // Bottom sheet state
   const [selectedProfile, setSelectedProfile] = useState<NearbyProfile | null>(null);
   const sheetAnim = useRef(new Animated.Value(0)).current;
 
-  // In-app banner state
-  const [banner, setBanner] = useState<{ title: string; body: string } | null>(null);
-  const bannerAnim = useRef(new Animated.Value(0)).current;
-  const bannerTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const hasShownSessionBanner = useRef(false);
+  // Anti-zoom shifting: session salt + zoom bucket
+  // Session salt changes when screen opens — prevents position prediction across sessions
+  const sessionSalt = useRef(Date.now()).current;
+  const [zoomBucket, setZoomBucket] = useState(4); // Start at most zoomed in
 
   // Convex mutation/query (skipped in demo mode)
+  const publishLocation = useMutation(api.crossedPaths.publishLocation);
   const recordLocation = useMutation(api.crossedPaths.recordLocation);
+  const detectCrossedUsers = useMutation(api.crossedPaths.detectCrossedUsers);
   const convexNearby = useQuery(
     api.crossedPaths.getNearbyUsers,
     !isDemoMode && userId ? { userId: userId as any } : 'skip',
   );
 
-  // Register banner callback
-  useEffect(() => {
-    _showBanner = (title: string, body: string) => {
-      setBanner({ title, body });
-      Animated.timing(bannerAnim, { toValue: 1, duration: 300, useNativeDriver: true }).start();
-      if (bannerTimerRef.current) clearTimeout(bannerTimerRef.current);
-      bannerTimerRef.current = safeTimeout(() => {
-        Animated.timing(bannerAnim, { toValue: 0, duration: 300, useNativeDriver: true }).start(() => {
-          setBanner(null);
-        });
-      }, 4000);
-    };
-    return () => {
-      _showBanner = null;
-      if (bannerTimerRef.current) clearTimeout(bannerTimerRef.current);
-    };
-  }, [bannerAnim]);
-
   // ------------------------------------------------------------------
-  // On mount: request location + call recordLocation
+  // On mount: request location + publish location (max once per 6 hours)
+  // In demo mode with demo location, skip loading and just fetch silently in background
   // ------------------------------------------------------------------
   useEffect(() => {
     (async () => {
-      const granted = await requestPermission();
-      if (!granted) {
-        setPermissionDenied(true);
-        return;
+      // If we have demo location or cached location, skip the loading state
+      // but still fetch fresh location in background
+      const skipLoading = hasDemoLocation || hasCached;
+
+      if (!skipLoading) {
+        // Only show loading for real location fetch
+        const granted = await requestPermission();
+        if (!granted) {
+          setPermissionDenied(true);
+          setIsInitializing(false);
+          return;
+        }
+        setPermissionDenied(false);
       }
-      setPermissionDenied(false);
+
+      // Fetch location (silently in demo mode, with loading in live mode)
       const loc = await getCurrentLocation();
+      if (!skipLoading) {
+        setIsInitializing(false);
+      }
+
       if (loc && userId && !isDemoMode) {
-        const result = await recordLocation({
+        // Publish location (respects 6-hour window — won't update if already published recently)
+        await publishLocation({
           userId: userId as any,
           latitude: loc.latitude,
           longitude: loc.longitude,
         });
-        // Show banner on first nearby detection per session
-        if (result?.nearbyCount && result.nearbyCount > 0 && !hasShownSessionBanner.current) {
-          hasShownSessionBanner.current = true;
-          sendLocalNotification('Mira', 'Someone crossed your path nearby.');
+
+        // Record location for crossed paths detection (unlock logic)
+        await recordLocation({
+          userId: userId as any,
+          latitude: loc.latitude,
+          longitude: loc.longitude,
+        });
+
+        // Detect "Someone crossed you" alert (privacy-safe, uses published locations)
+        // Has its own 6h cooldown + 24h per-person dedupe
+        const detectResult = await detectCrossedUsers({
+          userId: userId as any,
+          myLat: loc.latitude,
+          myLng: loc.longitude,
+        });
+
+        // Log crossed paths detection (system notifications handled separately)
+        if (detectResult?.triggered) {
+          logDebugEvent('NEARBY_CROSSED', 'Crossed paths alert triggered');
         }
       }
     })();
@@ -255,9 +286,33 @@ export default function NearbyScreen() {
   }, []);
 
   // ------------------------------------------------------------------
+  // Animate map to real location when it becomes available
+  // ------------------------------------------------------------------
+  useEffect(() => {
+    if (userLat != null && userLng != null && mapRef.current && !hasAnimatedToLocation.current) {
+      hasAnimatedToLocation.current = true;
+      const d = radiusToLatDelta(FIXED_RADIUS_METERS);
+      mapRef.current.animateToRegion({
+        latitude: userLat,
+        longitude: userLng,
+        latitudeDelta: d,
+        longitudeDelta: d * (SCREEN_WIDTH / Dimensions.get('window').height),
+      }, 500);
+    }
+  }, [userLat, userLng]);
+
+  // ------------------------------------------------------------------
   // Build nearby profiles list (memoized to avoid recomputing each render)
+  // Applies client-side fuzz that changes with zoom bucket (anti-triangulation)
   // ------------------------------------------------------------------
   const nearbyProfiles: NearbyProfile[] = useMemo(() => {
+    // If location is not available, return empty array
+    if (userLat == null || userLng == null) {
+      return [];
+    }
+
+    const viewerId = userId ?? 'demo_viewer';
+
     if (isDemoMode || !convexNearby) {
       // Demo mode: use demoStore profiles that have lat/lng within radius,
       // plus the static NEARBY_DEMO_PROFILES as fallback
@@ -274,39 +329,79 @@ export default function NearbyScreen() {
       });
       const filtered = unique.filter((p: any) => {
         if (blockedUserIds.includes(p._id)) return false;
-        const d = haversineMeters(userLat, userLng, p.latitude, p.longitude);
-        return d <= FIXED_RADIUS;
+        const distanceMeters = haversineMeters(userLat, userLng, p.latitude, p.longitude);
+        const distanceKm = distanceMeters / 1000;
+        return isWithinAllowedDistance({ distance: distanceKm }, FIXED_RADIUS_KM);
       });
-      return rankNearbyProfiles(jitterDemoProfiles(filtered, userId ?? 'demo_viewer'));
+      // Apply client-side fuzz to demo profiles
+      const fuzzedProfiles = filtered.map((p: any) => {
+        const ts = p.lastLocationUpdatedAt ?? Date.now();
+        const freshness = computeFreshness(ts);
+        if (freshness === 'hidden') return null;
+
+        // Apply anti-zoom fuzz
+        const { lat, lng } = applyClientFuzz(
+          p.latitude,
+          p.longitude,
+          viewerId,
+          p._id,
+          sessionSalt,
+          zoomBucket,
+        );
+        return {
+          ...p,
+          latitude: lat,
+          longitude: lng,
+          freshness,
+        } as NearbyProfile;
+      }).filter(Boolean) as NearbyProfile[];
+
+      return rankNearbyProfiles(fuzzedProfiles);
     }
-    // Live mode: map Convex query results
-    return rankNearbyProfiles(convexNearby.map((u) => ({
-      _id: u.id,
-      name: u.name,
-      age: u.age,
-      latitude: u.jitteredLat,
-      longitude: u.jitteredLng,
-      freshness: u.freshness as 'solid' | 'faded',
-      photoUrl: u.photoUrl ?? undefined,
-      isVerified: u.isVerified,
-    })));
-  }, [demoStoreProfiles, blockedUserIds, userLat, userLng, userId, convexNearby]);
+
+    // Live mode: map Convex query results with client-side fuzz
+    return rankNearbyProfiles(convexNearby.map((u) => {
+      // Apply anti-zoom fuzz to published coordinates
+      // hideDistance users get larger fuzz (200-400m vs 20-100m)
+      const { lat, lng } = applyClientFuzz(
+        u.publishedLat,
+        u.publishedLng,
+        viewerId,
+        u.id,
+        sessionSalt,
+        zoomBucket,
+        u.hideDistance,
+      );
+      return {
+        _id: u.id,
+        name: u.name,
+        age: u.age,
+        latitude: lat,
+        longitude: lng,
+        freshness: u.freshness as 'solid' | 'faded',
+        photoUrl: u.photoUrl ?? undefined,
+        isVerified: u.isVerified,
+      };
+    }));
+  }, [demoStoreProfiles, blockedUserIds, userLat, userLng, userId, convexNearby, sessionSalt, zoomBucket]);
 
   // ------------------------------------------------------------------
-  // Fire crossed-paths notification once per session (demo mode)
+  // Fire "Someone just crossed you" notification once per session (demo mode)
+  // Privacy-safe: no identity revealed, just generic alert
+  // System notification only — no in-app banner
   // ------------------------------------------------------------------
   const crossedPathsNotifiedRef = useRef(false);
   useEffect(() => {
     if (!isDemoMode || crossedPathsNotifiedRef.current) return;
     if (nearbyProfiles.length === 0) return;
     crossedPathsNotifiedRef.current = true;
-    // Pick the first nearby profile for the notification
-    const p = nearbyProfiles[0];
+
+    // Add to demo notification store (system notification, no in-app banner)
     useDemoNotifStore.getState().addNotification({
       type: 'crossed_paths',
-      title: 'Crossed paths',
-      body: `You crossed paths with ${p.name} nearby.`,
-      data: { otherUserId: p._id },
+      title: 'Mira',
+      body: 'Someone just crossed you',
+      data: {}, // No identity data — privacy-safe
     });
   }, [nearbyProfiles]);
 
@@ -336,17 +431,18 @@ export default function NearbyScreen() {
 
   // ------------------------------------------------------------------
   // Map region — fixed 1km radius
+  // Note: userLat/userLng are guaranteed non-null when map renders (due to early returns)
   // ------------------------------------------------------------------
   const buildRegion = (): Region => {
-    const d = radiusToLatDelta(FIXED_RADIUS);
+    const d = radiusToLatDelta(FIXED_RADIUS_METERS);
     return {
-      latitude: userLat,
-      longitude: userLng,
+      latitude: userLat!,
+      longitude: userLng!,
       latitudeDelta: d,
       longitudeDelta: d * (SCREEN_WIDTH / Dimensions.get('window').height),
     };
   };
-  const initialRegion = buildRegion();
+  const initialRegion = userLat != null && userLng != null ? buildRegion() : null;
 
   // ------------------------------------------------------------------
   // Bottom sheet transform
@@ -359,6 +455,32 @@ export default function NearbyScreen() {
   // ------------------------------------------------------------------
   // Render
   // ------------------------------------------------------------------
+
+  // Loading state while initializing location
+  if (isInitializing) {
+    return (
+      <LoadingGuard
+        isLoading={true}
+        onRetry={() => {
+          setRetryKey((k) => k + 1);
+          setIsInitializing(true);
+          getCurrentLocation().finally(() => setIsInitializing(false));
+        }}
+        title="Getting your location…"
+        subtitle="This is taking longer than expected. Check your connection and location settings."
+      >
+        <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
+          <View style={styles.permissionOverlay}>
+            <Ionicons name="location-outline" size={48} color={COLORS.primary} />
+            <Text style={styles.permissionTitle}>Getting your location...</Text>
+            <Text style={styles.permissionSubtitle}>
+              Please wait while we find your current location.
+            </Text>
+          </View>
+        </SafeAreaView>
+      </LoadingGuard>
+    );
+  }
 
   // Permission denied overlay
   if (permissionDenied) {
@@ -373,14 +495,42 @@ export default function NearbyScreen() {
           <TouchableOpacity
             style={styles.permissionButton}
             onPress={async () => {
+              setIsInitializing(true);
               const granted = await requestPermission();
               if (granted) {
                 setPermissionDenied(false);
                 await getCurrentLocation();
               }
+              setIsInitializing(false);
             }}
           >
             <Text style={styles.permissionButtonText}>Enable Location</Text>
+          </TouchableOpacity>
+        </View>
+      </SafeAreaView>
+    );
+  }
+
+  // No location available (non-demo mode, location fetch failed)
+  if (userLat == null || userLng == null) {
+    return (
+      <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
+        <View style={styles.permissionOverlay}>
+          <Ionicons name="warning-outline" size={48} color={COLORS.textLight} />
+          <Text style={styles.permissionTitle}>Unable to get your location</Text>
+          <Text style={styles.permissionSubtitle}>
+            We couldn't determine your location. Please check your device settings and try again.
+          </Text>
+          <TouchableOpacity
+            style={styles.permissionButton}
+            onPress={async () => {
+              setIsInitializing(true);
+              hasAnimatedToLocation.current = false;
+              await getCurrentLocation();
+              setIsInitializing(false);
+            }}
+          >
+            <Text style={styles.permissionButtonText}>Try Again</Text>
           </TouchableOpacity>
         </View>
       </SafeAreaView>
@@ -393,14 +543,21 @@ export default function NearbyScreen() {
       <MapView
         ref={mapRef}
         style={{ flex: 1 }}
-        initialRegion={initialRegion}
+        initialRegion={initialRegion!}
         showsUserLocation={false}
         showsMyLocationButton={false}
         onPress={closeSheet}
+        onRegionChangeComplete={(region) => {
+          // Update zoom bucket when user zooms — causes pins to shift (anti-triangulation)
+          const newBucket = getZoomBucket(region.latitudeDelta);
+          if (newBucket !== zoomBucket) {
+            setZoomBucket(newBucket);
+          }
+        }}
       >
         {/* "You" marker */}
         <Marker
-          coordinate={{ latitude: userLat, longitude: userLng }}
+          coordinate={{ latitude: userLat!, longitude: userLng! }}
           anchor={{ x: 0.5, y: 0.5 }}
         >
           <View style={styles.youMarkerWrapper}>
@@ -440,15 +597,6 @@ export default function NearbyScreen() {
           </Marker>
         ))}
       </MapView>
-
-      {/* "No one nearby" overlay */}
-      {nearbyProfiles.length === 0 && (
-        <View style={styles.emptyOverlay}>
-          <Text style={styles.emptyOverlayEmoji}>📍</Text>
-          <Text style={styles.emptyOverlayTitle}>No one nearby yet</Text>
-          <Text style={styles.emptyOverlaySubtitle}>Check back soon — people show up as they pass by.</Text>
-        </View>
-      )}
 
       {/* Crossed paths shortcut */}
       <TouchableOpacity
@@ -500,32 +648,6 @@ export default function NearbyScreen() {
         )}
       </Animated.View>
 
-      {/* In-app notification banner */}
-      {banner && (
-        <Animated.View
-          style={[
-            styles.notifBanner,
-            { top: 4 },
-            {
-              opacity: bannerAnim,
-              transform: [
-                {
-                  translateY: bannerAnim.interpolate({
-                    inputRange: [0, 1],
-                    outputRange: [-60, 0],
-                  }),
-                },
-              ],
-            },
-          ]}
-        >
-          <Ionicons name="footsteps" size={18} color={COLORS.white} style={{ marginRight: 10 }} />
-          <View style={{ flex: 1 }}>
-            <Text style={styles.notifTitle}>{banner.title}</Text>
-            <Text style={styles.notifBody}>{banner.body}</Text>
-          </View>
-        </Animated.View>
-      )}
     </SafeAreaView>
   );
 }
@@ -585,41 +707,6 @@ const styles = StyleSheet.create({
   },
   pinInitialFaded: {
     opacity: 0.7,
-  },
-
-  // Empty overlay
-  emptyOverlay: {
-    position: 'absolute',
-    top: '35%',
-    alignSelf: 'center',
-    backgroundColor: COLORS.white,
-    paddingHorizontal: 24,
-    paddingVertical: 20,
-    borderRadius: 16,
-    alignItems: 'center',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.12,
-    shadowRadius: 8,
-    elevation: 4,
-    maxWidth: 280,
-  },
-  emptyOverlayEmoji: {
-    fontSize: 40,
-    marginBottom: 8,
-  },
-  emptyOverlayTitle: {
-    fontSize: 18,
-    fontWeight: '700',
-    color: COLORS.text,
-    marginBottom: 4,
-    textAlign: 'center',
-  },
-  emptyOverlaySubtitle: {
-    fontSize: 14,
-    color: COLORS.textLight,
-    textAlign: 'center',
-    lineHeight: 20,
   },
 
   // Permission denied overlay
@@ -735,34 +822,5 @@ const styles = StyleSheet.create({
     color: COLORS.white,
     fontSize: 14,
     fontWeight: '600',
-  },
-
-  // In-app notification banner
-  notifBanner: {
-    position: 'absolute',
-    left: 16,
-    right: 16,
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: 'rgba(0,0,0,0.85)',
-    borderRadius: 14,
-    paddingVertical: 12,
-    paddingHorizontal: 16,
-    zIndex: 100,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 3 },
-    shadowOpacity: 0.3,
-    shadowRadius: 6,
-    elevation: 12,
-  },
-  notifTitle: {
-    fontSize: 13,
-    fontWeight: '700',
-    color: COLORS.white,
-  },
-  notifBody: {
-    fontSize: 12,
-    color: 'rgba(255,255,255,0.8)',
-    marginTop: 1,
   },
 });

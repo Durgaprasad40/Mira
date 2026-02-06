@@ -258,7 +258,10 @@ export const GENDER_OPTIONS = [
   { value: 'male', label: 'Man' },
   { value: 'female', label: 'Woman' },
   { value: 'non_binary', label: 'Non-binary' },
-  { value: 'other', label: 'Other' },
+  { value: 'lesbian', label: 'Lesbian' },
+  { value: 'gay', label: 'Gay' },
+  { value: 'bisexual', label: 'Bisexual' },
+  { value: 'other', label: 'Prefer not to say' },
 ];
 
 // Sort Options

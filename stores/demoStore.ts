@@ -14,6 +14,7 @@ import { DEMO_PROFILES, DEMO_MATCHES, DEMO_LIKES } from '@/lib/demoData';
 import { useDemoDmStore } from '@/stores/demoDmStore';
 import { useConfessionStore } from '@/stores/confessionStore';
 import { useDemoNotifStore } from '@/hooks/useNotifications';
+import { logDebugEvent } from '@/lib/debugEventLogger';
 
 // ---------------------------------------------------------------------------
 // Types — lightweight "Like" shapes matching the demo data constants
@@ -440,6 +441,9 @@ export const useDemoStore = create<DemoState>()(
           body: `You and ${profile.name} liked each other.`,
           data: { otherUserId: profileId, matchId },
         });
+
+        // Debug event logging
+        logDebugEvent('MATCH_CREATED', 'New match created');
       },
 
       // ── Safety actions ──
@@ -457,13 +461,47 @@ export const useDemoStore = create<DemoState>()(
             likes: s.likes.filter((l) => l.userId !== userId),
           };
         });
-        // Clean DM store — remove conversation & meta for this user
+        // Debug event logging
+        logDebugEvent('BLOCK_OR_REPORT', 'User blocked');
+
+        // Clean DM store — remove all conversations with this user
         const dmState = useDemoDmStore.getState();
         const meta = dmState.meta;
+        const convoIdsToDelete: string[] = [];
         for (const convoId of Object.keys(meta)) {
           if (meta[convoId]?.otherUser?.id === userId) {
-            dmState.deleteConversation(convoId);
+            convoIdsToDelete.push(convoId);
           }
+        }
+        if (convoIdsToDelete.length > 0) {
+          dmState.deleteConversations(convoIdsToDelete);
+        }
+
+        // Clean confession store — remove confessions from this user + confession threads
+        const confessionState = useConfessionStore.getState();
+        confessionState.blockUser(userId);
+        // Also clean confession threads that involve this user
+        const confessionThreads = confessionState.confessionThreads;
+        const confessions = confessionState.confessions;
+        const confessionIdsToClean: string[] = [];
+        for (const [confessionId, convoId] of Object.entries(confessionThreads)) {
+          const confession = confessions.find((c) => c.id === confessionId);
+          // If confession author is blocked or if tagged user is blocked
+          if (confession?.userId === userId || confession?.targetUserId === userId) {
+            confessionIdsToClean.push(confessionId);
+            // Also delete the conversation from DM store if not already deleted
+            if (!convoIdsToDelete.includes(convoId)) {
+              dmState.deleteConversation(convoId);
+            }
+          }
+        }
+        // Remove cleaned confession threads from tracking
+        if (confessionIdsToClean.length > 0) {
+          const newThreads = { ...confessionThreads };
+          for (const id of confessionIdsToClean) {
+            delete newThreads[id];
+          }
+          useConfessionStore.setState({ confessionThreads: newThreads });
         }
       },
 
@@ -471,6 +509,8 @@ export const useDemoStore = create<DemoState>()(
         // Reporting always auto-blocks — the reported user disappears immediately
         // from Discover, Explore, Nearby, and Messages. This matches the live
         // backend behavior where reportUser also calls blockUser server-side.
+
+        // First, add the report record
         set((s) => {
           const report: DemoReport = { userId, reason, description, createdAt: Date.now() };
           return {
@@ -478,21 +518,11 @@ export const useDemoStore = create<DemoState>()(
               ? s.reportedUserIds
               : [...s.reportedUserIds, userId],
             reports: [...s.reports, report],
-            blockedUserIds: s.blockedUserIds.includes(userId)
-              ? s.blockedUserIds
-              : [...s.blockedUserIds, userId],
-            matches: s.matches.filter((m) => m.otherUser?.id !== userId),
-            likes: s.likes.filter((l) => l.userId !== userId),
           };
         });
-        // Clean DM store — remove conversation & meta for this user
-        const dmState = useDemoDmStore.getState();
-        const meta = dmState.meta;
-        for (const convoId of Object.keys(meta)) {
-          if (meta[convoId]?.otherUser?.id === userId) {
-            dmState.deleteConversation(convoId);
-          }
-        }
+
+        // Then use blockUser for the full purge (handles matches, likes, DM, confessions)
+        get().blockUser(userId);
       },
 
       unblockUser: (userId) => {

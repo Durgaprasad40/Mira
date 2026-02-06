@@ -1,122 +1,276 @@
-import React, { useMemo } from 'react';
-import { View, Text, TouchableOpacity, StyleSheet, Dimensions } from 'react-native';
-import { Ionicons } from '@expo/vector-icons';
-import { COLORS } from '@/lib/constants';
-import type { ExploreCategory } from './exploreCategories';
+import React, { useMemo, memo } from "react";
+import {
+  View,
+  Text,
+  StyleSheet,
+  Pressable,
+  ScrollView,
+  RefreshControl,
+  Dimensions,
+} from "react-native";
+import { LinearGradient } from "expo-linear-gradient";
 
-const SCREEN_WIDTH = Dimensions.get('window').width;
-const TILE_GAP = 10;
-const TILE_W = (SCREEN_WIDTH - 32 - TILE_GAP) / 2;
+import {
+  RELATIONSHIP_CATEGORIES,
+  INTEREST_CATEGORIES,
+  countProfilesPerCategory,
+  ExploreCategory,
+} from "./exploreCategories";
 
-/** Hand-picked IDs that appear in the tile grid, in display order. */
-const CURATED_IDS = [
-  // Availability — highest engagement
-  "near_me",
-  "online_now",
-  "active_today",
-  // Intent — most popular
-  "long_term_partner",
-  "short_term_fun",
-  "new_friends",
-  // Interest
-  "coffee_date",
-  "travel",
-];
+const { width: SCREEN_WIDTH } = Dimensions.get("window");
+const TILE_GAP = 12;
+const HORIZONTAL_PADDING = 16;
+const TILE_WIDTH = (SCREEN_WIDTH - HORIZONTAL_PADDING * 2 - TILE_GAP) / 2;
 
-const TILE_OVERRIDES: Record<string, { color: string; bg: string; icon: string }> = {
-  near_me:            { color: '#00BCD4', bg: '#E0F7FA', icon: 'location' },
-  online_now:         { color: '#4CAF50', bg: '#E8F5E9', icon: 'radio-button-on' },
-  active_today:       { color: '#FF9800', bg: '#FFF3E0', icon: 'time' },
-  long_term_partner:  { color: '#E91E63', bg: '#FCE4EC', icon: 'heart' },
-  short_term_fun:     { color: '#FF5722', bg: '#FBE9E7', icon: 'flash' },
-  new_friends:        { color: '#9C27B0', bg: '#F3E5F5', icon: 'people' },
-  coffee_date:        { color: '#795548', bg: '#EFEBE9', icon: 'cafe' },
-  travel:             { color: '#2196F3', bg: '#E3F2FD', icon: 'airplane' },
+type Props = {
+  profiles: any[];
+  selectedCategory?: ExploreCategory | null;
+  onCategoryPress?: (category: ExploreCategory) => void;
+  refreshing?: boolean;
+  onRefresh?: () => void;
 };
 
-const KIND_FALLBACK: Record<string, { color: string; bg: string; icon: string }> = {
-  intent:       { color: '#E91E63', bg: '#FCE4EC', icon: 'heart' },
-  availability: { color: '#FF9800', bg: '#FFF3E0', icon: 'time' },
-  distance:     { color: '#00BCD4', bg: '#E0F7FA', icon: 'location' },
-  interest:     { color: '#4CAF50', bg: '#E8F5E9', icon: 'sparkles' },
-};
+// Memoized tile component for performance
+const ExploreTile = memo(function ExploreTile({
+  category,
+  count,
+  isSelected,
+  onPress,
+}: {
+  category: ExploreCategory;
+  count: number;
+  isSelected: boolean;
+  onPress: () => void;
+}) {
+  const isDisabled = count === 0;
 
-interface ExploreTileGridProps {
-  categories: ExploreCategory[];
-  onPressTile?: (category: ExploreCategory) => void;
-}
-
-export function ExploreTileGrid({ categories, onPressTile }: ExploreTileGridProps) {
-  // Curated IDs first, then the rest — unique by construction.
-  const tiles = useMemo(() => {
-    const curated = CURATED_IDS
-      .map((id) => categories.find((c) => c.id === id))
-      .filter(Boolean) as ExploreCategory[];
-    const rest = categories.filter((c) => !CURATED_IDS.includes(c.id));
-    return [...curated, ...rest];
-  }, [categories]);
+  // Generate gradient colors from the category color
+  const baseColor = category.color;
+  const darkerColor = adjustColorBrightness(baseColor, -30);
+  const lighterColor = adjustColorBrightness(baseColor, 20);
 
   return (
-    <View style={styles.container}>
-      <Text style={styles.heading}>Browse Categories</Text>
-      <View style={styles.grid}>
-        {tiles.map((cat) => {
-          const s = TILE_OVERRIDES[cat.id] ?? KIND_FALLBACK[cat.kind] ?? KIND_FALLBACK.interest;
-          return (
-            <TouchableOpacity
-              key={cat.id}
-              style={[styles.tile, { backgroundColor: s.bg }]}
-              activeOpacity={0.75}
-              onPress={() => onPressTile?.(cat)}
-            >
-              <View style={[styles.iconCircle, { backgroundColor: s.color + '20' }]}>
-                <Ionicons name={s.icon as any} size={22} color={s.color} />
-              </View>
-              <Text style={[styles.label, { color: s.color }]} numberOfLines={1}>
-                {cat.title}
-              </Text>
-            </TouchableOpacity>
-          );
-        })}
+    <Pressable
+      disabled={isDisabled}
+      onPress={onPress}
+      style={({ pressed }) => [
+        styles.tileWrapper,
+        isSelected && styles.tileSelected,
+        pressed && !isDisabled && styles.tilePressed,
+      ]}
+    >
+      <LinearGradient
+        colors={isDisabled ? ["#2a2a2a", "#1a1a1a"] : [lighterColor, baseColor, darkerColor]}
+        start={{ x: 0, y: 0 }}
+        end={{ x: 1, y: 1 }}
+        style={[
+          styles.tile,
+          isDisabled && styles.tileDisabled,
+        ]}
+      >
+        <View style={styles.tileContent}>
+          <Text style={styles.tileIcon}>{category.icon}</Text>
+          <Text
+            style={[styles.tileLabel, isDisabled && styles.tileLabelDisabled]}
+            numberOfLines={2}
+          >
+            {category.label}
+          </Text>
+          <View style={[styles.countBadge, isDisabled && styles.countBadgeDisabled]}>
+            <Text style={[styles.countText, isDisabled && styles.countTextDisabled]}>
+              {count}
+            </Text>
+          </View>
+        </View>
+      </LinearGradient>
+    </Pressable>
+  );
+});
+
+// Helper to adjust color brightness
+function adjustColorBrightness(hex: string, percent: number): string {
+  const num = parseInt(hex.replace("#", ""), 16);
+  const amt = Math.round(2.55 * percent);
+  const R = Math.min(255, Math.max(0, (num >> 16) + amt));
+  const G = Math.min(255, Math.max(0, ((num >> 8) & 0x00ff) + amt));
+  const B = Math.min(255, Math.max(0, (num & 0x0000ff) + amt));
+  return `#${((1 << 24) | (R << 16) | (G << 8) | B).toString(16).slice(1)}`;
+}
+
+export default function ExploreTileGrid({
+  profiles,
+  selectedCategory,
+  onCategoryPress,
+  refreshing = false,
+  onRefresh,
+}: Props) {
+  // Compute counts for all categories
+  const categoryCounts = useMemo(() => {
+    const counts: Record<string, number> = {};
+    for (const cat of [...RELATIONSHIP_CATEGORIES, ...INTEREST_CATEGORIES]) {
+      counts[cat.id] = countProfilesPerCategory(cat, profiles);
+    }
+    return counts;
+  }, [profiles]);
+
+  const renderTile = (category: ExploreCategory) => {
+    const count = categoryCounts[category.id] ?? 0;
+    const isSelected = selectedCategory?.id === category.id;
+
+    return (
+      <ExploreTile
+        key={category.id}
+        category={category}
+        count={count}
+        isSelected={isSelected}
+        onPress={() => {
+          if (count > 0 && onCategoryPress) {
+            onCategoryPress(category);
+          }
+        }}
+      />
+    );
+  };
+
+  return (
+    <ScrollView
+      style={styles.container}
+      contentContainerStyle={styles.content}
+      showsVerticalScrollIndicator={false}
+      refreshControl={
+        onRefresh ? (
+          <RefreshControl
+            refreshing={refreshing}
+            onRefresh={onRefresh}
+            tintColor="#FF6B6B"
+            colors={["#FF6B6B"]}
+          />
+        ) : undefined
+      }
+    >
+      {/* RELATIONSHIP Section */}
+      <View style={styles.sectionHeader}>
+        <Text style={styles.sectionEmoji}>💕</Text>
+        <Text style={styles.sectionTitle}>Relationship</Text>
       </View>
-    </View>
+      <View style={styles.grid}>
+        {RELATIONSHIP_CATEGORIES.map(renderTile)}
+      </View>
+
+      {/* INTERESTS Section */}
+      <View style={styles.sectionHeader}>
+        <Text style={styles.sectionEmoji}>✨</Text>
+        <Text style={styles.sectionTitle}>Interests</Text>
+      </View>
+      <View style={styles.grid}>
+        {INTEREST_CATEGORIES.map(renderTile)}
+      </View>
+
+      {/* Bottom spacing */}
+      <View style={styles.bottomSpacer} />
+    </ScrollView>
   );
 }
 
 const styles = StyleSheet.create({
   container: {
-    paddingHorizontal: 16,
-    paddingTop: 16,
-    paddingBottom: 8,
+    flex: 1,
+    backgroundColor: "#FFFFFF",
   },
-  heading: {
-    fontSize: 16,
-    fontWeight: '700',
-    color: COLORS.text,
-    marginBottom: 12,
+  content: {
+    paddingHorizontal: HORIZONTAL_PADDING,
+    paddingTop: 8,
+  },
+  sectionHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    marginTop: 24,
+    marginBottom: 16,
+    paddingLeft: 4,
+  },
+  sectionEmoji: {
+    fontSize: 24,
+    marginRight: 10,
+  },
+  sectionTitle: {
+    color: "#1a1a1a",
+    fontSize: 24,
+    fontWeight: "800",
+    letterSpacing: -0.5,
   },
   grid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    columnGap: TILE_GAP,
-    rowGap: TILE_GAP,
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: TILE_GAP,
+  },
+  tileWrapper: {
+    width: TILE_WIDTH,
+    borderRadius: 20,
+    overflow: "hidden",
+    // Shadow for iOS
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+    // Elevation for Android
+    elevation: 6,
+  },
+  tileSelected: {
+    borderWidth: 3,
+    borderColor: "#fff",
+  },
+  tilePressed: {
+    transform: [{ scale: 0.96 }],
+    opacity: 0.9,
   },
   tile: {
-    width: TILE_W,
-    height: 90,
-    borderRadius: 16,
+    height: 110,
+    borderRadius: 20,
     padding: 14,
-    justifyContent: 'space-between',
   },
-  iconCircle: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
-    alignItems: 'center',
-    justifyContent: 'center',
+  tileDisabled: {
+    opacity: 0.5,
   },
-  label: {
-    fontSize: 14,
-    fontWeight: '700',
+  tileContent: {
+    flex: 1,
+    justifyContent: "space-between",
+  },
+  tileIcon: {
+    fontSize: 28,
+  },
+  tileLabel: {
+    color: "#fff",
+    fontSize: 15,
+    fontWeight: "700",
+    lineHeight: 18,
+    textShadowColor: "rgba(0,0,0,0.3)",
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 2,
+  },
+  tileLabelDisabled: {
+    color: "#666",
+  },
+  countBadge: {
+    position: "absolute",
+    top: 0,
+    right: 0,
+    backgroundColor: "rgba(255,255,255,0.25)",
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 12,
+  },
+  countBadgeDisabled: {
+    backgroundColor: "rgba(255,255,255,0.1)",
+  },
+  countText: {
+    color: "#fff",
+    fontSize: 13,
+    fontWeight: "700",
+  },
+  countTextDisabled: {
+    color: "#555",
+  },
+  bottomSpacer: {
+    height: 100,
   },
 });

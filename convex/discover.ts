@@ -29,7 +29,7 @@ function calculateDistance(
   lat1: number, lon1: number,
   lat2: number, lon2: number,
 ): number {
-  const R = 3959; // Earth's radius in miles
+  const R = 6371; // Earth's radius in km
   const dLat = toRad(lat2 - lat1);
   const dLon = toRad(lon2 - lon1);
   const a =
@@ -42,6 +42,15 @@ function calculateDistance(
 
 function toRad(deg: number): number {
   return deg * (Math.PI / 180);
+}
+
+/**
+ * Check if a calculated distance is within the allowed max.
+ * Mirrors lib/distanceRules.ts - profiles without distance are allowed.
+ */
+function isDistanceAllowed(distance: number | undefined, maxDistanceKm: number): boolean {
+  if (distance == null) return true;
+  return distance <= maxDistanceKm;
 }
 
 // ---------------------------------------------------------------------------
@@ -228,9 +237,12 @@ export const getDiscoverProfiles = query({
     )),
     limit: v.optional(v.number()),
     offset: v.optional(v.number()),
+    // filterVersion is a cache-busting param — not used in logic, just forces re-fetch
+    filterVersion: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
     const { userId, sortBy = 'recommended', limit = 20, offset = 0 } = args;
+    // filterVersion intentionally unused — it's only to bust query cache
 
     const currentUser = await ctx.db.get(userId);
     if (!currentUser) return [];
@@ -268,7 +280,7 @@ export const getDiscoverProfiles = query({
           currentUser.latitude, currentUser.longitude,
           user.latitude, user.longitude,
         );
-        if (distance > currentUser.maxDistance) continue;
+        if (!isDistanceAllowed(distance, currentUser.maxDistance)) continue;
       }
 
       // Already swiped (passes expire after 7 days)
@@ -431,7 +443,7 @@ export const getExploreProfiles = query({
           currentUser.latitude, currentUser.longitude,
           user.latitude, user.longitude,
         );
-        if (dist > effectiveMaxDistance) continue;
+        if (!isDistanceAllowed(dist, effectiveMaxDistance)) continue;
       }
 
       if (relationshipIntent && relationshipIntent.length > 0) {

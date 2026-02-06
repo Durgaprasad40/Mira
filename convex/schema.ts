@@ -14,7 +14,7 @@ export default defineSchema({
     // Basic Info
     name: v.string(),
     dateOfBirth: v.string(),
-    gender: v.union(v.literal('male'), v.literal('female'), v.literal('non_binary'), v.literal('other')),
+    gender: v.union(v.literal('male'), v.literal('female'), v.literal('non_binary'), v.literal('lesbian'), v.literal('other')),
 
     // Profile
     bio: v.string(),
@@ -62,13 +62,18 @@ export default defineSchema({
     verificationPhotoId: v.optional(v.id('_storage')),
     verificationCompletedAt: v.optional(v.number()),
 
-    // Location
+    // Location (live device location - private)
     latitude: v.optional(v.number()),
     longitude: v.optional(v.number()),
     city: v.optional(v.string()),
 
+    // Published location (shared with others, updated max once per 6 hours)
+    publishedLat: v.optional(v.number()),
+    publishedLng: v.optional(v.number()),
+    publishedAt: v.optional(v.number()),
+
     // Preferences
-    lookingFor: v.array(v.union(v.literal('male'), v.literal('female'), v.literal('non_binary'), v.literal('other'))),
+    lookingFor: v.array(v.union(v.literal('male'), v.literal('female'), v.literal('non_binary'), v.literal('lesbian'), v.literal('other'))),
     relationshipIntent: v.array(v.union(
       v.literal('long_term'),
       v.literal('short_term'),
@@ -150,6 +155,7 @@ export default defineSchema({
 
     // Privacy
     showLastSeen: v.optional(v.boolean()),
+    hideDistance: v.optional(v.boolean()),        // true = larger fuzz on Nearby map (200-400m vs 20-100m)
 
     // Photo Blur (user-controlled privacy)
     photoBlurred: v.optional(v.boolean()),       // true = photo shown blurred in Discover/profile
@@ -231,12 +237,15 @@ export default defineSchema({
   // Conversations table
   conversations: defineTable({
     matchId: v.optional(v.id('matches')),
+    confessionId: v.optional(v.id('confessions')), // For confession-based threads (tagged user liked)
     participants: v.array(v.id('users')),
     isPreMatch: v.boolean(),
     lastMessageAt: v.optional(v.number()),
     createdAt: v.number(),
+    expiresAt: v.optional(v.number()), // Only set for confession-based threads (24h after creation)
   })
     .index('by_match', ['matchId'])
+    .index('by_confession', ['confessionId'])
     .index('by_last_message', ['lastMessageAt']),
 
   // Messages table
@@ -712,9 +721,13 @@ export default defineSchema({
     reactionCount: v.number(),
     voiceReplyCount: v.optional(v.number()),
     createdAt: v.number(),
+    expiresAt: v.optional(v.number()), // 24h after createdAt; undefined = never expires (legacy)
+    taggedUserId: v.optional(v.id('users')), // User being confessed to (must be someone current user has liked)
   })
     .index('by_created', ['createdAt'])
-    .index('by_user', ['userId']),
+    .index('by_user', ['userId'])
+    .index('by_expires', ['expiresAt'])
+    .index('by_tagged_user', ['taggedUserId']),
 
   // Confession Replies table
   confessionReplies: defineTable({
@@ -750,6 +763,19 @@ export default defineSchema({
   })
     .index('by_confession', ['confessionId'])
     .index('by_reporter', ['reporterId']),
+
+  // Confession Notifications table (for tagged confessions)
+  confessionNotifications: defineTable({
+    userId: v.id('users'),              // receiver (tagged user)
+    confessionId: v.id('confessions'),
+    fromUserId: v.id('users'),          // poster
+    type: v.literal('TAGGED_CONFESSION'),
+    seen: v.boolean(),
+    createdAt: v.number(),
+  })
+    .index('by_user_seen', ['userId', 'seen'])
+    .index('by_user_created', ['userId', 'createdAt'])
+    .index('by_confession', ['confessionId']),
 
   // Chat Rooms table (group chat rooms in Private section)
   chatRooms: defineTable({
@@ -803,4 +829,16 @@ export default defineSchema({
     createdAt: v.number(),
   })
     .index('by_user', ['userId']),
+
+  // Crossed Events table (privacy-safe "Someone crossed you" alerts)
+  // otherUserId is stored ONLY for dedupe — NEVER exposed to client/UI
+  crossedEvents: defineTable({
+    userId: v.id('users'),           // receiver (me)
+    otherUserId: v.id('users'),      // stored only for dedupe; NEVER shown to user
+    createdAt: v.number(),
+    expiresAt: v.number(),           // cleanup window (7 days)
+  })
+    .index('by_user_other', ['userId', 'otherUserId'])
+    .index('by_user_createdAt', ['userId', 'createdAt'])
+    .index('by_expires', ['expiresAt']),
 });

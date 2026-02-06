@@ -222,7 +222,7 @@ export default function MatchCelebrationScreen() {
       setTimeout(() => {
         router.push("/(main)/(tabs)/messages" as any);
         setTimeout(() => {
-          router.push(`/(main)/(tabs)/messages/chat/${demoConversationId}` as any);
+          router.push(`/(main)/(tabs)/messages/chat/${demoConversationId}?source=match` as any);
         }, 0);
       }, 0);
       sendingRef.current = false;
@@ -261,7 +261,7 @@ export default function MatchCelebrationScreen() {
       // STEP C: Navigate LAST — dismiss the celebration modal, push Messages
       // list first, then chat. Stack becomes: Messages list → Chat, so
       // router.back() from chat returns to Messages, not Discover.
-      const target = `/(main)/(tabs)/messages/chat/${conversationIdFinal}`;
+      const target = `/(main)/(tabs)/messages/chat/${conversationIdFinal}?source=match`;
       if (__DEV__) console.log("[SayHi] navigating to", target);
       router.dismiss();
       setTimeout(() => {

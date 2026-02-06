@@ -142,6 +142,14 @@ function createDemoNotifications(): AppNotification[] {
   ];
 }
 
+// ── Notification expiry ─────────────────────────────────────────
+const NOTIFICATION_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
+
+/** Check if a notification is expired (older than 24 hours). */
+function isExpired(notification: AppNotification, now: number = Date.now()): boolean {
+  return now - notification.createdAt > NOTIFICATION_TTL_MS;
+}
+
 // ── Zustand store for demo-mode notifications (shared across screens) ──
 interface DemoNotifStore {
   notifications: AppNotification[];
@@ -156,6 +164,11 @@ interface DemoNotifStore {
    * title/body/data merged). Otherwise a new notification is prepended.
    */
   addNotification: (input: AddNotificationInput) => void;
+  /**
+   * Remove notifications older than 24 hours.
+   * Call this on app start and when opening the notification list.
+   */
+  cleanupExpiredNotifications: (now?: number) => void;
   /** Clear all notifications. */
   reset: () => void;
 }
@@ -261,6 +274,16 @@ export const useDemoNotifStore = create<DemoNotifStore>((set) => ({
       if (__DEV__) console.log(`[DemoNotifStore] new notification key=${key}`);
       return { notifications: [notif, ...state.notifications] };
     }),
+  cleanupExpiredNotifications: (now: number = Date.now()) =>
+    set((state) => {
+      const before = state.notifications.length;
+      const filtered = state.notifications.filter((n) => !isExpired(n, now));
+      const removed = before - filtered.length;
+      if (removed > 0 && __DEV__) {
+        console.log(`[DemoNotifStore] cleaned up ${removed} expired notification(s)`);
+      }
+      return removed > 0 ? { notifications: filtered } : {};
+    }),
   reset: () => set({ notifications: [] }),
 }));
 
@@ -301,6 +324,7 @@ export function useNotifications() {
   const demoMarkReadByDedupeKey = useDemoNotifStore((s) => s.markReadByDedupeKey);
   const demoMarkReadForConversation = useDemoNotifStore((s) => s.markReadForConversation);
   const demoAddNotification = useDemoNotifStore((s) => s.addNotification);
+  const demoCleanupExpired = useDemoNotifStore((s) => s.cleanupExpiredNotifications);
 
   // ── Unified notifications array (memoized to prevent new refs each render) ──
   const convexSafe = convexNotifications ?? EMPTY_ARRAY;
@@ -318,7 +342,21 @@ export function useNotifications() {
       })),
     [convexSafe],
   );
-  const notifications: AppNotification[] = isDemoMode ? demoNotifs : mappedConvex;
+
+  // ── Filter out expired (24h TTL) and read notifications in display ──
+  // Read notifications disappear immediately when marked as read
+  const now = Date.now();
+  const filteredDemoNotifs = useMemo(
+    () => demoNotifs.filter((n) => !isExpired(n, now) && !n.isRead),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [demoNotifs], // Don't include `now` to avoid re-filtering every render
+  );
+  const filteredConvexNotifs = useMemo(
+    () => mappedConvex.filter((n) => !n.isRead && !isExpired(n, now)),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [mappedConvex], // Don't include `now` to avoid re-filtering every render
+  );
+  const notifications: AppNotification[] = isDemoMode ? filteredDemoNotifs : filteredConvexNotifs;
 
   // ── Derived count (single formula, no separate query) ──
   const unseenCount = notifications.filter((n) => !n.isRead).length;
@@ -393,6 +431,16 @@ export function useNotifications() {
     [demoAddNotification],
   );
 
+  // ── Cleanup expired notifications (demo mode only) ──
+  const cleanupExpiredNotifications = useCallback(
+    (timestamp?: number) => {
+      if (isDemoMode) {
+        demoCleanupExpired(timestamp);
+      }
+    },
+    [demoCleanupExpired],
+  );
+
   return {
     notifications,
     unseenCount,
@@ -401,5 +449,6 @@ export function useNotifications() {
     markReadByDedupeKey,
     markReadForConversation,
     addNotification,
+    cleanupExpiredNotifications,
   };
 }

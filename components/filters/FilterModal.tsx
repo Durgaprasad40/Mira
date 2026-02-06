@@ -7,6 +7,7 @@ import {
   ScrollView,
   TouchableOpacity,
 } from 'react-native';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { COLORS, RELATIONSHIP_INTENTS, ACTIVITY_FILTERS } from '@/lib/constants';
 import { Button, Chip } from '@/components/ui';
@@ -49,6 +50,7 @@ export function FilterModal({
   initialFilters = {},
   initialSortBy = 'recommended',
 }: FilterModalProps) {
+  const insets = useSafeAreaInsets();
   const [filters, setFilters] = useState<FilterValues>({
     gender: initialFilters.gender || [],
     minAge: initialFilters.minAge || 18,
@@ -106,7 +108,7 @@ export function FilterModal({
   return (
     <Modal visible={visible} animationType="slide" presentationStyle="pageSheet">
       <View style={styles.container}>
-        <View style={styles.header}>
+        <View style={[styles.header, { paddingTop: Math.max(insets.top, 16) }]}>
           <TouchableOpacity onPress={onClose}>
             <Ionicons name="close" size={24} color={COLORS.text} />
           </TouchableOpacity>

@@ -1,9 +1,10 @@
 import { useLocalSearchParams } from 'expo-router';
-import ChatScreenInner from '@/components/screens/ChatScreenInner';
+import ChatScreenInner, { ChatSource } from '@/components/screens/ChatScreenInner';
+import { AppErrorBoundary } from '@/components/safety';
 
-/** Standalone chat route — used from messages list, matches, etc. */
+/** Standalone chat route — used from discover, matches, confessions, etc. */
 export default function ChatScreen() {
-  const { id: conversationId } = useLocalSearchParams<{ id: string }>();
+  const { id: conversationId, source } = useLocalSearchParams<{ id: string; source?: string }>();
 
   // DEV guard: catch navigation bugs where conversationId is missing.
   // In production this is a no-op; the non-null assertion below is safe
@@ -12,5 +13,9 @@ export default function ChatScreen() {
     console.warn('[ChatScreen] navigated without conversationId — check the calling router.push/replace');
   }
 
-  return <ChatScreenInner conversationId={conversationId!} />;
+  return (
+    <AppErrorBoundary name="ChatScreen">
+      <ChatScreenInner conversationId={conversationId!} source={source as ChatSource} />
+    </AppErrorBoundary>
+  );
 }

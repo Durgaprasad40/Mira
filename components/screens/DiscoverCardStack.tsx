@@ -10,6 +10,7 @@ import {
   TouchableOpacity,
   InteractionManager,
 } from "react-native";
+import { LoadingGuard } from "@/components/safety";
 import { useShallow } from "zustand/react/shallow";
 import { useQuery, useMutation } from "convex/react";
 import { api } from "@/convex/_generated/api";
@@ -57,6 +58,7 @@ export function DiscoverCardStack({ theme = "light", externalProfiles, hideHeade
   const insets = useSafeAreaInsets();
   const userId = useAuthStore((s) => s.userId);
   const [index, setIndex] = useState(0);
+  const [retryKey, setRetryKey] = useState(0); // For LoadingGuard retry
 
   // Daily limits — individual selectors to avoid full re-render on AsyncStorage hydration
   const likesRemaining = useDiscoverStore((s) => s.likesRemaining);
@@ -126,12 +128,14 @@ export function DiscoverCardStack({ theme = "light", externalProfiles, hideHeade
   // Profile data — memoize args to prevent Convex re-subscriptions
   const convexUserId = asUserId(userId);
   const skipInternalQuery = !!externalProfiles;
+  // retryKey in deps forces re-evaluation on retry (even if args unchanged, Convex re-subscribes)
   const discoverArgs = useMemo(
     () =>
       !isDemoMode && convexUserId && !skipInternalQuery
         ? { userId: convexUserId, sortBy: "recommended" as any, limit: 20 }
         : "skip" as const,
-    [convexUserId, skipInternalQuery],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [convexUserId, skipInternalQuery, retryKey],
   );
   const convexProfiles = useQuery(api.discover.getDiscoverProfiles, discoverArgs);
   const profilesSafe = convexProfiles ?? EMPTY_ARRAY;
@@ -558,13 +562,21 @@ export function DiscoverCardStack({ theme = "light", externalProfiles, hideHeade
   }
 
   // Loading state — non-demo only; skip when using external profiles
-  if (!isDemoMode && !externalProfiles && !convexProfiles) {
+  const isDiscoverLoading = !isDemoMode && !externalProfiles && !convexProfiles;
+  if (isDiscoverLoading) {
     if (__DEV__) console.log("[DiscoverCardStack] showing loading state — convexProfiles not yet available");
     return (
-      <View style={[styles.center, dark && { backgroundColor: INCOGNITO_COLORS.background }]}>
-        <ActivityIndicator size="large" color={C.primary} />
-        <Text style={[styles.loadingText, dark && { color: INCOGNITO_COLORS.textLight }]}>Finding people for you...</Text>
-      </View>
+      <LoadingGuard
+        isLoading={true}
+        onRetry={() => setRetryKey((k) => k + 1)}
+        title="Finding people for you…"
+        subtitle="This is taking longer than expected. Check your connection and try again."
+      >
+        <View style={[styles.center, dark && { backgroundColor: INCOGNITO_COLORS.background }]}>
+          <ActivityIndicator size="large" color={C.primary} />
+          <Text style={[styles.loadingText, dark && { color: INCOGNITO_COLORS.textLight }]}>Finding people for you...</Text>
+        </View>
+      </LoadingGuard>
     );
   }
 
@@ -585,7 +597,7 @@ export function DiscoverCardStack({ theme = "light", externalProfiles, hideHeade
       <View style={[styles.container, dark && { backgroundColor: INCOGNITO_COLORS.background }]}>
         {/* Header */}
         <View style={[styles.header, { paddingTop: insets.top, height: insets.top + HEADER_H }, dark && { backgroundColor: INCOGNITO_COLORS.background }]}>
-          <TouchableOpacity style={styles.headerBtn} onPress={() => router.push("/(main)/settings" as any)}>
+          <TouchableOpacity style={styles.headerBtn} onPress={() => router.push("/(main)/discovery-preferences" as any)}>
             <Ionicons name="options-outline" size={22} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
           </TouchableOpacity>
           <Text style={[styles.headerLogo, dark && { color: INCOGNITO_COLORS.primary }]}>mira</Text>
@@ -629,7 +641,7 @@ export function DiscoverCardStack({ theme = "light", externalProfiles, hideHeade
       {/* Compact Header */}
       {!hideHeader && (
         <View style={[styles.header, { paddingTop: insets.top, height: insets.top + HEADER_H }, dark && { backgroundColor: INCOGNITO_COLORS.background }]}>
-          <TouchableOpacity style={styles.headerBtn} onPress={() => router.push("/(main)/settings" as any)}>
+          <TouchableOpacity style={styles.headerBtn} onPress={() => router.push("/(main)/discovery-preferences" as any)}>
             <Ionicons name="options-outline" size={22} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
           </TouchableOpacity>
           <Text style={[styles.headerLogo, dark && { color: INCOGNITO_COLORS.primary }]}>mira</Text>

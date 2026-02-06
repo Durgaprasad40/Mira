@@ -17,6 +17,9 @@ import {
   DEMO_CONFESSION_REPLIES,
 } from '@/lib/demoData';
 import { isProbablyEmoji } from '@/lib/utils';
+import { useDemoDmStore } from '@/stores/demoDmStore';
+import { useDemoStore, DemoMatch } from '@/stores/demoStore';
+import { logDebugEvent } from '@/lib/debugEventLogger';
 
 // Map old fixed reaction keys → emoji characters
 const OLD_REACTION_TO_EMOJI: Record<string, string> = {
@@ -54,6 +57,12 @@ function migrateConfessionReactions(c: Confession): Confession {
   return c;
 }
 
+// Track confession-based threads to prevent duplicates (confessionId → conversationId)
+// This is stored separately to support idempotent thread creation
+interface ConfessionThreads {
+  [confessionId: string]: string; // conversationId
+}
+
 interface ConfessionState {
   confessions: Confession[];
   userReactions: Record<string, string | null>; // confessionId → emoji string (one per user)
@@ -62,10 +71,14 @@ interface ConfessionState {
   reportedIds: string[];
   blockedIds: string[];
   seeded: boolean;
+  confessionThreads: ConfessionThreads; // Track threads created from confessions
+
+  // Seen tracking for demo mode (tagged confessions)
+  seenTaggedConfessionIds: string[];
 
   seedConfessions: () => void;
   addConfession: (confession: Confession) => void;
-  toggleReaction: (confessionId: string, emoji: string) => void;
+  toggleReaction: (confessionId: string, emoji: string, userId?: string) => { chatUnlocked: boolean };
   addChat: (chat: ConfessionChat) => void;
   addChatMessage: (chatId: string, message: ConfessionChatMessage) => void;
   addSecretCrush: (crush: SecretCrush) => void;
@@ -80,6 +93,20 @@ interface ConfessionState {
   // Time-Locked Reveal
   setTimedReveal: (confessionId: string, option: TimedRevealOption, targetUserId?: string) => void;
   cancelTimedReveal: (confessionId: string) => void;
+
+  // Integrity / Cleanup actions
+  /** Mark a tagged confession as seen (for badge computation) */
+  markTaggedConfessionSeen: (confessionId: string) => void;
+  /** Mark all tagged confessions as seen */
+  markAllTaggedConfessionsSeen: (confessionIds: string[]) => void;
+  /** Cleanup expired confessions from store */
+  cleanupExpiredConfessions: (expiredIds: string[]) => void;
+  /** Cleanup expired confession chats from store */
+  cleanupExpiredChats: (expiredChatIds: string[]) => void;
+  /** Cleanup expired secret crushes from store */
+  cleanupExpiredSecretCrushes: (expiredIds: string[]) => void;
+  /** Remove confession threads by conversation IDs */
+  removeConfessionThreads: (conversationIds: string[]) => void;
 }
 
 function computeTimedRevealAt(option: TimedRevealOption): number | null {
@@ -98,6 +125,8 @@ export const useConfessionStore = create<ConfessionState>()(
       reportedIds: [],
       blockedIds: [],
       seeded: false,
+      confessionThreads: {},
+      seenTaggedConfessionIds: [],
 
       seedConfessions: () => {
         if (get().seeded) {
@@ -162,55 +191,132 @@ export const useConfessionStore = create<ConfessionState>()(
         }));
       },
 
-      toggleReaction: (confessionId, emoji) => {
-        set((state) => {
-          const currentEmoji = state.userReactions[confessionId];
-          const newUserReactions = { ...state.userReactions };
+      toggleReaction: (confessionId, emoji, userId) => {
+        const state = get();
+        const currentEmoji = state.userReactions[confessionId];
+        const newUserReactions = { ...state.userReactions };
 
-          let countDelta = 0;
-          let oldEmoji: string | null = null;
+        let countDelta = 0;
+        let oldEmoji: string | null = null;
+        let isNewReaction = false;
 
-          if (currentEmoji === emoji) {
-            // Same emoji → toggle off
-            delete newUserReactions[confessionId];
-            countDelta = -1;
-            oldEmoji = emoji;
-          } else if (currentEmoji) {
-            // Different emoji → replace (count stays same)
-            newUserReactions[confessionId] = emoji;
-            oldEmoji = currentEmoji;
-          } else {
-            // No existing → add
-            newUserReactions[confessionId] = emoji;
-            countDelta = 1;
+        if (currentEmoji === emoji) {
+          // Same emoji → toggle off
+          delete newUserReactions[confessionId];
+          countDelta = -1;
+          oldEmoji = emoji;
+        } else if (currentEmoji) {
+          // Different emoji → replace (count stays same)
+          newUserReactions[confessionId] = emoji;
+          oldEmoji = currentEmoji;
+        } else {
+          // No existing → add
+          newUserReactions[confessionId] = emoji;
+          countDelta = 1;
+          isNewReaction = true;
+        }
+
+        const confessions = state.confessions.map((c) => {
+          if (c.id !== confessionId) return c;
+          const reactions = { ...(c.reactions || {}) };
+          // Remove old emoji count
+          if (oldEmoji && reactions[oldEmoji]) {
+            reactions[oldEmoji] = Math.max(0, reactions[oldEmoji] - 1);
+            if (reactions[oldEmoji] === 0) delete reactions[oldEmoji];
+          }
+          // Add new emoji count (if not toggling off)
+          if (countDelta >= 0 && newUserReactions[confessionId]) {
+            reactions[emoji] = (reactions[emoji] || 0) + 1;
           }
 
-          const confessions = state.confessions.map((c) => {
-            if (c.id !== confessionId) return c;
-            const reactions = { ...(c.reactions || {}) };
-            // Remove old emoji count
-            if (oldEmoji && reactions[oldEmoji]) {
-              reactions[oldEmoji] = Math.max(0, reactions[oldEmoji] - 1);
-              if (reactions[oldEmoji] === 0) delete reactions[oldEmoji];
-            }
-            // Add new emoji count (if not toggling off)
-            if (countDelta >= 0 && newUserReactions[confessionId]) {
-              reactions[emoji] = (reactions[emoji] || 0) + 1;
-            }
+          // Recompute topEmojis (only valid emojis)
+          const topEmojis = Object.entries(reactions)
+            .filter(([e]) => isProbablyEmoji(e))
+            .sort((a, b) => b[1] - a[1])
+            .slice(0, 3)
+            .map(([e, count]) => ({ emoji: e, count }));
 
-            // Recompute topEmojis (only valid emojis)
-            const topEmojis = Object.entries(reactions)
-              .filter(([e]) => isProbablyEmoji(e))
-              .sort((a, b) => b[1] - a[1])
-              .slice(0, 3)
-              .map(([e, count]) => ({ emoji: e, count }));
+          const reactionCount = Math.max(0, c.reactionCount + countDelta);
+          return { ...c, reactions, topEmojis, reactionCount };
+        });
 
-            const reactionCount = Math.max(0, c.reactionCount + countDelta);
-            return { ...c, reactions, topEmojis, reactionCount };
+        // Check if we should create a confession-based thread
+        // Only when: 1) new reaction 2) tagged confession 3) liker is the tagged user
+        let chatUnlocked = false;
+        const confession = state.confessions.find((c) => c.id === confessionId);
+        if (
+          isNewReaction &&
+          userId &&
+          confession?.targetUserId &&
+          userId === confession.targetUserId &&
+          !state.confessionThreads[confessionId] // idempotency check
+        ) {
+          // Create a confession-based thread
+          const convoId = `demo_convo_confession_${confessionId}`;
+          const matchId = `match_confession_${confessionId}`;
+          const dmStore = useDemoDmStore.getState();
+          const demoStore = useDemoStore.getState();
+
+          const otherUserName = confession.isAnonymous
+            ? 'Anonymous Confessor'
+            : (confession.authorName || 'Someone');
+
+          // Seed conversation with initial system message so it shows in Messages
+          const now = Date.now();
+          const TWENTY_FOUR_HOURS = 24 * 60 * 60 * 1000;
+          dmStore.seedConversation(convoId, [{
+            _id: `sys_${confessionId}`,
+            content: `💌 You liked their confession: "${confession.text.slice(0, 50)}${confession.text.length > 50 ? '...' : ''}"`,
+            type: 'system',
+            senderId: 'system',
+            createdAt: now,
+          }]);
+          dmStore.setMeta(convoId, {
+            otherUser: {
+              id: confession.userId,
+              name: otherUserName,
+              lastActive: now,
+              isVerified: false,
+            },
+            isPreMatch: true,
+            isConfessionChat: true, // Confession-based thread
+            expiresAt: now + TWENTY_FOUR_HOURS, // Expires in 24h
           });
 
-          return { userReactions: newUserReactions, confessions };
-        });
+          // Add to matches so it appears in Messages list
+          const newMatch: DemoMatch = {
+            id: matchId,
+            conversationId: convoId,
+            otherUser: {
+              id: confession.userId,
+              name: otherUserName,
+              photoUrl: confession.authorPhotoUrl || '',
+              lastActive: now,
+              isVerified: false,
+            },
+            lastMessage: {
+              content: `💌 Confession thread`,
+              type: 'system',
+              senderId: 'system',
+              createdAt: now,
+            },
+            unreadCount: 0,
+            isPreMatch: true,
+          };
+          demoStore.addMatch(newMatch);
+
+          // Track this thread to prevent duplicates
+          set({
+            userReactions: newUserReactions,
+            confessions,
+            confessionThreads: { ...state.confessionThreads, [confessionId]: convoId },
+          });
+          chatUnlocked = true;
+        } else {
+          set({ userReactions: newUserReactions, confessions });
+        }
+
+        return { chatUnlocked };
       },
 
       addChat: (chat) => {
@@ -233,6 +339,8 @@ export const useConfessionStore = create<ConfessionState>()(
         set((state) => ({
           secretCrushes: [crush, ...state.secretCrushes],
         }));
+        // Log tag notification (secret crush = someone was tagged in a confession)
+        logDebugEvent('TAG_NOTIFICATION', 'Tagged confession notification sent');
       },
 
       reportConfession: (confessionId) => {
@@ -240,6 +348,7 @@ export const useConfessionStore = create<ConfessionState>()(
           reportedIds: [...state.reportedIds, confessionId],
           confessions: state.confessions.filter((c) => c.id !== confessionId),
         }));
+        logDebugEvent('BLOCK_OR_REPORT', 'Confession reported');
       },
 
       blockUser: (userId) => {
@@ -328,6 +437,97 @@ export const useConfessionStore = create<ConfessionState>()(
           ),
         }));
       },
+
+      // ── Integrity / Cleanup Actions ──
+
+      markTaggedConfessionSeen: (confessionId) => {
+        set((state) => {
+          if (state.seenTaggedConfessionIds.includes(confessionId)) return state;
+          return {
+            seenTaggedConfessionIds: [...state.seenTaggedConfessionIds, confessionId],
+          };
+        });
+      },
+
+      markAllTaggedConfessionsSeen: (confessionIds) => {
+        set((state) => {
+          const newIds = confessionIds.filter(
+            (id) => !state.seenTaggedConfessionIds.includes(id)
+          );
+          if (newIds.length === 0) return state;
+          return {
+            seenTaggedConfessionIds: [...state.seenTaggedConfessionIds, ...newIds],
+          };
+        });
+      },
+
+      cleanupExpiredConfessions: (expiredIds) => {
+        if (expiredIds.length === 0) return;
+        const expiredSet = new Set(expiredIds);
+        set((state) => ({
+          confessions: state.confessions.filter((c) => !expiredSet.has(c.id)),
+          // Also clean up user reactions for expired confessions
+          userReactions: Object.fromEntries(
+            Object.entries(state.userReactions).filter(
+              ([confessionId]) => !expiredSet.has(confessionId)
+            )
+          ),
+        }));
+        // Clean up related DM threads via demoDmStore
+        const dmStore = useDemoDmStore.getState();
+        const confessionThreads = get().confessionThreads;
+        const conversationIdsToDelete: string[] = [];
+        for (const expiredId of expiredIds) {
+          const convoId = confessionThreads[expiredId];
+          if (convoId) {
+            conversationIdsToDelete.push(convoId);
+          }
+        }
+        if (conversationIdsToDelete.length > 0) {
+          dmStore.deleteConversations(conversationIdsToDelete);
+        }
+        // Clean up thread tracking
+        if (expiredIds.length > 0) {
+          const newThreads = { ...get().confessionThreads };
+          for (const id of expiredIds) {
+            delete newThreads[id];
+          }
+          set({ confessionThreads: newThreads });
+        }
+      },
+
+      cleanupExpiredChats: (expiredChatIds) => {
+        if (expiredChatIds.length === 0) return;
+        const expiredSet = new Set(expiredChatIds);
+        set((state) => ({
+          chats: state.chats.filter((c) => !expiredSet.has(c.id)),
+        }));
+      },
+
+      cleanupExpiredSecretCrushes: (expiredIds) => {
+        if (expiredIds.length === 0) return;
+        const expiredSet = new Set(expiredIds);
+        set((state) => ({
+          secretCrushes: state.secretCrushes.filter((sc) => !expiredSet.has(sc.id)),
+        }));
+      },
+
+      removeConfessionThreads: (conversationIds) => {
+        if (conversationIds.length === 0) return;
+        const convoIdSet = new Set(conversationIds);
+        set((state) => {
+          const newThreads: ConfessionThreads = {};
+          for (const [confessionId, convoId] of Object.entries(state.confessionThreads)) {
+            if (!convoIdSet.has(convoId)) {
+              newThreads[confessionId] = convoId;
+            }
+          }
+          return { confessionThreads: newThreads };
+        });
+        // Also delete from DM store
+        const dmStore = useDemoDmStore.getState();
+        dmStore.deleteConversations(conversationIds);
+      },
     }),
     {
       name: 'confession-store',
@@ -340,6 +540,8 @@ export const useConfessionStore = create<ConfessionState>()(
         reportedIds: state.reportedIds,
         blockedIds: state.blockedIds,
         seeded: state.seeded,
+        confessionThreads: state.confessionThreads,
+        seenTaggedConfessionIds: state.seenTaggedConfessionIds,
       }),
     }
   )

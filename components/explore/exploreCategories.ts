@@ -1,19 +1,19 @@
+import { isWithinAllowedDistance, NEAR_ME_DISTANCE_KM } from "@/lib/distanceRules";
+
 export type ExploreCategory = {
   id: string;
-  title: string;
-  subtitle?: string;
-  icon?: string;
-  kind: "intent" | "availability" | "distance" | "interest";
+  label: string;
+  title?: string;
+  icon: string;
+  color: string;
+  kind: "relationship" | "interest";
   predicate: (p: any) => boolean;
 };
 
-/**
- * Normalise intent from whichever field the profile carries.
- * Returns the first recognised intent string, or null.
- *
- * Handles both string ("long_term") and array (["long_term","short_term"])
- * shapes, plus a tags-based fallback.
- */
+// ============================================
+// HELPER FUNCTIONS
+// ============================================
+
 const KNOWN_INTENTS = new Set([
   "long_term", "long_term_partner", "long_term_open_to_short",
   "short_term_open_to_long", "short_term_fun", "short_term",
@@ -55,15 +55,47 @@ const hasIntent = (p: any, ...targets: string[]): boolean => {
   return targets.some((t) => intents.includes(t));
 };
 
+const hasActivity = (p: any, ...targets: string[]): boolean => {
+  const activities: string[] = Array.isArray(p?.activities) ? p.activities : [];
+  const tags: string[] = Array.isArray(p?.tags) ? p.tags : [];
+  const combined = [...activities, ...tags];
+  return targets.some((t) => combined.includes(t));
+};
+
 const minutesAgo = (ts?: number) =>
   ts ? (Date.now() - ts) / 60000 : Number.POSITIVE_INFINITY;
 
-export const EXPLORE_CATEGORIES: ExploreCategory[] = [
-  // Intent
+// ============================================
+// TILE COLORS (vibrant gradients)
+// ============================================
+const TILE_COLORS = {
+  coral: "#FF6B6B",
+  orange: "#FF8C42",
+  gold: "#FFD93D",
+  lime: "#6BCB77",
+  teal: "#4ECDC4",
+  sky: "#45B7D1",
+  blue: "#4D96FF",
+  purple: "#9B5DE5",
+  pink: "#F15BB5",
+  rose: "#FF85A1",
+  mint: "#00D9A5",
+  amber: "#F9A826",
+  indigo: "#6366F1",
+  emerald: "#10B981",
+};
+
+// ============================================
+// RELATIONSHIP CATEGORIES (14 tiles)
+// ============================================
+const RELATIONSHIP_TILES: ExploreCategory[] = [
   {
     id: "serious_dater",
+    label: "Serious Dater",
     title: "Serious Dater",
-    kind: "intent",
+    icon: "💍",
+    color: TILE_COLORS.coral,
+    kind: "relationship",
     predicate: (p) => {
       const bioOk = !!p?.bio && p.bio.trim().length >= 5;
       const photosOk = Array.isArray(p?.photos) && p.photos.length >= 2;
@@ -75,115 +107,219 @@ export const EXPLORE_CATEGORIES: ExploreCategory[] = [
   },
   {
     id: "long_term_partner",
-    title: "Long-Term Partner",
-    kind: "intent",
+    label: "Long-term Partner",
+    title: "Long-term Partner",
+    icon: "❤️",
+    color: TILE_COLORS.rose,
+    kind: "relationship",
     predicate: (p) => hasIntent(p, "long_term", "long_term_partner"),
   },
   {
+    id: "long_term",
+    label: "Long-term",
+    title: "Long-term",
+    icon: "💕",
+    color: TILE_COLORS.pink,
+    kind: "relationship",
+    predicate: (p) => hasIntent(p, "long_term", "short_to_long"),
+  },
+  {
     id: "long_term_open_to_short",
-    title: "Long-Term, open to Short",
-    kind: "intent",
+    label: "Open to Short-term",
+    title: "Open to Short-term",
+    icon: "💫",
+    color: TILE_COLORS.purple,
+    kind: "relationship",
     predicate: (p) => hasIntent(p, "long_term_open_to_short"),
   },
   {
     id: "short_term_open_to_long",
-    title: "Short-Term, open to Long",
-    kind: "intent",
+    label: "Short open to Long",
+    title: "Short-term, open to Long",
+    icon: "✨",
+    color: TILE_COLORS.indigo,
+    kind: "relationship",
     predicate: (p) => hasIntent(p, "short_term_open_to_long", "short_to_long"),
   },
   {
-    id: "short_term_fun",
-    title: "Short-Term Fun",
-    kind: "intent",
+    id: "short_term",
+    label: "Short-term",
+    title: "Short-term",
+    icon: "⚡",
+    color: TILE_COLORS.orange,
+    kind: "relationship",
     predicate: (p) => hasIntent(p, "short_term_fun", "short_term", "fwb"),
   },
   {
     id: "new_friends",
+    label: "New Friends",
     title: "New Friends",
-    kind: "intent",
-    predicate: (p) => hasIntent(p, "new_friends", "open_to_anything"),
+    icon: "👋",
+    color: TILE_COLORS.teal,
+    kind: "relationship",
+    predicate: (p) => hasIntent(p, "new_friends", "open_to_anything", "figuring_out"),
   },
   {
     id: "figuring_out",
-    title: "Still Figuring It Out",
-    kind: "intent",
+    label: "Still Figuring Out",
+    title: "Still Figuring Out",
+    icon: "🤔",
+    color: TILE_COLORS.sky,
+    kind: "relationship",
     predicate: (p) => hasIntent(p, "figuring_out"),
   },
   {
     id: "non_monogamy",
+    label: "Non-Monogamy",
     title: "Non-Monogamy",
-    kind: "intent",
+    icon: "💜",
+    color: TILE_COLORS.purple,
+    kind: "relationship",
     predicate: (p) => hasIntent(p, "non_monogamy"),
   },
   {
     id: "leading_to_marriage",
+    label: "Leading to Marriage",
     title: "Leading to Marriage",
-    kind: "intent",
+    icon: "💒",
+    color: TILE_COLORS.gold,
+    kind: "relationship",
     predicate: (p) => hasIntent(p, "leading_to_marriage"),
   },
-
-  // Availability
   {
     id: "online_now",
+    label: "Online Now",
     title: "Online Now",
-    kind: "availability",
+    icon: "🟢",
+    color: TILE_COLORS.lime,
+    kind: "relationship",
     predicate: (p) => p?.isOnline === true || minutesAgo(p?.lastActive ?? p?.lastActiveAt) <= 10,
   },
   {
     id: "active_today",
+    label: "Active Today",
     title: "Active Today",
-    kind: "availability",
+    icon: "📱",
+    color: TILE_COLORS.blue,
+    kind: "relationship",
     predicate: (p) => minutesAgo(p?.lastActive ?? p?.lastActiveAt) <= 24 * 60,
   },
   {
     id: "free_tonight",
+    label: "Free Tonight",
     title: "Free Tonight",
-    kind: "availability",
+    icon: "🌙",
+    color: TILE_COLORS.indigo,
+    kind: "relationship",
     predicate: (p) => p?.freeTonight === true,
   },
-
-  // Distance
   {
     id: "near_me",
+    label: "Near Me",
     title: "Near Me",
-    kind: "distance",
-    predicate: (p) => typeof p?.distance === "number" && p.distance <= 5,
+    icon: "📍",
+    color: TILE_COLORS.emerald,
+    kind: "relationship",
+    predicate: (p) => typeof p?.distance === "number" && isWithinAllowedDistance(p, NEAR_ME_DISTANCE_KM),
   },
+];
 
-  // Interests
+// ============================================
+// INTEREST CATEGORIES (7 tiles)
+// ============================================
+const INTEREST_TILES: ExploreCategory[] = [
   {
     id: "coffee_date",
+    label: "Coffee Date",
     title: "Coffee Date",
+    icon: "☕",
+    color: TILE_COLORS.amber,
     kind: "interest",
     predicate: (p) =>
       p?.tags?.includes("coffee") || p?.activities?.includes("coffee"),
   },
   {
     id: "nature_lovers",
+    label: "Nature Lovers",
     title: "Nature Lovers",
+    icon: "🌿",
+    color: TILE_COLORS.emerald,
     kind: "interest",
     predicate: (p) =>
       p?.tags?.includes("outdoors") || p?.activities?.includes("outdoors"),
   },
   {
     id: "binge_watchers",
+    label: "Binge Watchers",
     title: "Binge Watchers",
+    icon: "🎬",
+    color: TILE_COLORS.coral,
     kind: "interest",
     predicate: (p) =>
       p?.tags?.includes("movies") || p?.activities?.includes("movies"),
   },
   {
     id: "travel",
+    label: "Travel",
     title: "Travel",
+    icon: "✈️",
+    color: TILE_COLORS.sky,
     kind: "interest",
     predicate: (p) =>
       p?.tags?.includes("travel") || p?.activities?.includes("travel"),
   },
   {
     id: "gaming",
+    label: "Gaming",
     title: "Gaming",
+    icon: "🎮",
+    color: TILE_COLORS.purple,
     kind: "interest",
     predicate: (p) =>
       p?.tags?.includes("gaming") || p?.activities?.includes("gaming"),
   },
+  {
+    id: "fitness",
+    label: "Fitness",
+    title: "Fitness",
+    icon: "💪",
+    color: TILE_COLORS.lime,
+    kind: "interest",
+    predicate: (p) =>
+      p?.tags?.includes("gym") || p?.tags?.includes("fitness") ||
+      p?.activities?.includes("gym") || p?.activities?.includes("fitness"),
+  },
+  {
+    id: "music",
+    label: "Music",
+    title: "Music",
+    icon: "🎵",
+    color: TILE_COLORS.pink,
+    kind: "interest",
+    predicate: (p) =>
+      p?.tags?.includes("music") || p?.activities?.includes("music"),
+  },
 ];
+
+// ============================================
+// COMBINED EXPORT (all categories)
+// ============================================
+export const EXPLORE_CATEGORIES: ExploreCategory[] = [
+  ...RELATIONSHIP_TILES,
+  ...INTEREST_TILES,
+];
+
+// Separate exports for easy access
+export const RELATIONSHIP_CATEGORIES = RELATIONSHIP_TILES;
+export const INTEREST_CATEGORIES = INTEREST_TILES;
+
+// ============================================
+// COUNT HELPER FUNCTION
+// ============================================
+export function countProfilesPerCategory(
+  category: ExploreCategory,
+  profiles: any[]
+): number {
+  if (!profiles || !Array.isArray(profiles)) return 0;
+  return profiles.filter(category.predicate).length;
+}

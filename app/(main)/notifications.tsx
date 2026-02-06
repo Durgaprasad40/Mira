@@ -24,7 +24,12 @@ export default function NotificationsScreen() {
   const [refreshing, setRefreshing] = useState(false);
 
   // ── Single source of truth — same hook the bell badge uses ──
-  const { notifications, unseenCount, markAllSeen, markRead } = useNotifications();
+  const { notifications, unseenCount, markAllSeen, markRead, cleanupExpiredNotifications } = useNotifications();
+
+  // ── Cleanup expired notifications on mount ──
+  useEffect(() => {
+    cleanupExpiredNotifications();
+  }, [cleanupExpiredNotifications]);
 
   // ── Debug log ──
   useEffect(() => {
@@ -95,9 +100,9 @@ export default function NotificationsScreen() {
       case 'message':
       case 'new_message':
         if (notification.data?.conversationId) {
-          router.push(`/(main)/(tabs)/messages/chat/${notification.data.conversationId}` as any);
+          router.push(`/(main)/(tabs)/messages/chat/${notification.data.conversationId}?source=notification` as any);
         } else if (notification.data?.userId) {
-          router.push(`/(main)/(tabs)/messages/chat/${notification.data.userId}` as any);
+          router.push(`/(main)/(tabs)/messages/chat/${notification.data.userId}?source=notification` as any);
         }
         break;
       case 'crossed_paths':

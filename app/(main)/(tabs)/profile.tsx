@@ -48,7 +48,7 @@ export default function ProfileScreen() {
           bio: demoUser.bio,
           gender: demoUser.gender,
           isVerified: demoUser.isVerified,
-          photos: demoUser.photos.map((p, i) => ({ url: p.url, isPrimary: i === 0 })),
+          photos: (demoUser.photos || []).map((p, i) => ({ url: p?.url, isPrimary: i === 0 })),
         }
       : null
     : convexUser;
@@ -170,10 +170,10 @@ export default function ProfileScreen() {
       <View style={styles.menuSection}>
         <TouchableOpacity
           style={styles.menuItem}
-          onPress={() => router.push('/(main)/settings')}
+          onPress={() => router.push('/(main)/edit-profile')}
         >
-          <Ionicons name="settings-outline" size={24} color={COLORS.text} />
-          <Text style={styles.menuText}>Settings</Text>
+          <Ionicons name="create-outline" size={24} color={COLORS.text} />
+          <Text style={styles.menuText}>Edit Profile</Text>
           <Ionicons name="chevron-forward" size={20} color={COLORS.textLight} />
         </TouchableOpacity>
 
@@ -188,10 +188,37 @@ export default function ProfileScreen() {
 
         <TouchableOpacity
           style={styles.menuItem}
-          onPress={() => router.push('/(main)/edit-profile')}
+          onPress={() => router.push('/(main)/settings')}
         >
-          <Ionicons name="create-outline" size={24} color={COLORS.text} />
-          <Text style={styles.menuText}>Edit Profile</Text>
+          <Ionicons name="lock-closed-outline" size={24} color={COLORS.text} />
+          <Text style={styles.menuText}>Privacy</Text>
+          <Ionicons name="chevron-forward" size={20} color={COLORS.textLight} />
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          style={styles.menuItem}
+          onPress={() => router.push('/(main)/settings')}
+        >
+          <Ionicons name="notifications-outline" size={24} color={COLORS.text} />
+          <Text style={styles.menuText}>Notifications</Text>
+          <Ionicons name="chevron-forward" size={20} color={COLORS.textLight} />
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          style={styles.menuItem}
+          onPress={() => router.push('/(main)/settings')}
+        >
+          <Ionicons name="shield-checkmark-outline" size={24} color={COLORS.text} />
+          <Text style={styles.menuText}>Safety</Text>
+          <Ionicons name="chevron-forward" size={20} color={COLORS.textLight} />
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          style={styles.menuItem}
+          onPress={() => router.push('/(main)/settings')}
+        >
+          <Ionicons name="person-outline" size={24} color={COLORS.text} />
+          <Text style={styles.menuText}>Account</Text>
           <Ionicons name="chevron-forward" size={20} color={COLORS.textLight} />
         </TouchableOpacity>
       </View>

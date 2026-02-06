@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import * as Location from 'expo-location';
 
 interface LocationState {
@@ -9,11 +9,38 @@ interface LocationState {
   isLoading: boolean;
 }
 
+// ── Module-level location cache ─────────────────────────────────
+// Persists across hook instances and component remounts
+interface CachedLocation {
+  latitude: number;
+  longitude: number;
+  city: string | null;
+  timestamp: number;
+}
+
+let __cachedLocation: CachedLocation | null = null;
+const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+
+/** Get the cached location if available and not stale. */
+export function getCachedLocation(): CachedLocation | null {
+  if (!__cachedLocation) return null;
+  const age = Date.now() - __cachedLocation.timestamp;
+  if (age > CACHE_TTL_MS) return null;
+  return __cachedLocation;
+}
+
+/** Check if we have a valid cached location. */
+export function hasCachedLocation(): boolean {
+  return getCachedLocation() !== null;
+}
+
 export function useLocation() {
+  // Initialize with cached location if available
+  const cached = getCachedLocation();
   const [location, setLocation] = useState<LocationState>({
-    latitude: null,
-    longitude: null,
-    city: null,
+    latitude: cached?.latitude ?? null,
+    longitude: cached?.longitude ?? null,
+    city: cached?.city ?? null,
     error: null,
     isLoading: false,
   });
@@ -66,19 +93,25 @@ export function useLocation() {
         // Geocoding failed, but we still have coordinates
       }
 
-      setLocation({
-        latitude: position.coords.latitude,
-        longitude: position.coords.longitude,
-        city,
-        error: null,
-        isLoading: false,
-      });
-
-      return {
+      const newLocation = {
         latitude: position.coords.latitude,
         longitude: position.coords.longitude,
         city,
       };
+
+      // Update cache
+      __cachedLocation = {
+        ...newLocation,
+        timestamp: Date.now(),
+      };
+
+      setLocation({
+        ...newLocation,
+        error: null,
+        isLoading: false,
+      });
+
+      return newLocation;
     } catch (error) {
       const errorMessage = error instanceof Error ? error.message : 'Failed to get location';
       setLocation((prev) => ({

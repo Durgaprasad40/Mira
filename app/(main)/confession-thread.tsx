@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useMemo } from 'react';
+import React, { useState, useCallback, useMemo, useEffect } from 'react';
 import {
   View,
   Text,
@@ -30,6 +30,8 @@ import { isDemoMode } from '@/hooks/useConvex';
 import {
   DEMO_CONFESSION_REPLIES,
 } from '@/lib/demoData';
+import { shouldBlockConfessionOpen } from '@/lib/confessionsIntegrity';
+import { logDebugEvent } from '@/lib/debugEventLogger';
 
 const MOOD_CONFIG: Record<ConfessionMood, { emoji: string; label: string; color: string; bg: string }> = {
   romantic: { emoji: '\u2764\uFE0F', label: 'Romantic', color: '#E91E63', bg: 'rgba(233,30,99,0.12)' },
@@ -63,12 +65,39 @@ export default function ConfessionThreadScreen() {
   const toggleReaction = useConfessionStore((s) => s.toggleReaction);
   const reportConfession = useConfessionStore((s) => s.reportConfession);
   const addChat = useConfessionStore((s) => s.addChat);
+  const reportedIds = useConfessionStore((s) => s.reportedIds);
+  const cleanupExpiredConfessions = useConfessionStore((s) => s.cleanupExpiredConfessions);
   const globalBlockedIds = useDemoStore((s) => s.blockedUserIds);
 
   const confession = useMemo(
     () => confessions.find((c) => c.id === confessionId),
     [confessions, confessionId]
   );
+
+  // Navigation guard: prevent opening expired/blocked confessions
+  const [guardTriggered, setGuardTriggered] = useState(false);
+  useEffect(() => {
+    if (guardTriggered || !confessionId) return;
+
+    const blockReason = shouldBlockConfessionOpen(
+      confessionId,
+      confessions,
+      globalBlockedIds,
+      reportedIds,
+    );
+
+    if (blockReason) {
+      setGuardTriggered(true);
+      logDebugEvent('CHAT_EXPIRED', `Confession thread blocked: ${blockReason}`);
+
+      // If expired, cleanup
+      if (blockReason === 'expired') {
+        cleanupExpiredConfessions([confessionId]);
+      }
+
+      router.back();
+    }
+  }, [confessionId, confessions, globalBlockedIds, reportedIds, guardTriggered, router, cleanupExpiredConfessions]);
 
   // Convex replies (live mode)
   const convexReplies = useQuery(

@@ -1,7 +1,8 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { View, Text, StyleSheet, FlatList, TouchableOpacity, RefreshControl, ActivityIndicator } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
+import { LoadingGuard } from '@/components/safety';
 import { Image } from 'expo-image';
 import { useQuery } from 'convex/react';
 import { api } from '@/convex/_generated/api';
@@ -20,12 +21,19 @@ import { isActiveNow } from '@/lib/formatLastSeen';
 import { useScreenSafety } from '@/hooks/useScreenSafety';
 import { getProfileCompleteness, NUDGE_MESSAGES } from '@/lib/profileCompleteness';
 import { ProfileNudge } from '@/components/ui/ProfileNudge';
+import {
+  processThreadsIntegrity,
+  processLikesIntegrity,
+  type ProcessedThread,
+  type LikeItem,
+} from '@/lib/threadsIntegrity';
 
 export default function MessagesScreen() {
   const router = useRouter();
   const userId = useAuthStore((s) => s.userId);
   const convexUserId = asUserId(userId);
   const [refreshing, setRefreshing] = useState(false);
+  const [retryKey, setRetryKey] = useState(0); // For LoadingGuard retry
   const { safeTimeout } = useScreenSafety();
 
   // Demo store — seed on mount, read mutable matches/likes
@@ -55,58 +63,79 @@ export default function MessagesScreen() {
     !isDemoMode && convexUserId ? { userId: convexUserId } : 'skip'
   );
 
-  // In demo mode, build thread model from DM store messages.
+  // In demo mode, build thread model from DM store messages using threadsIntegrity
   const demoMeta = useDemoDmStore((s) => s.meta);
   const demoConversations = useDemoDmStore((s) => s.conversations);
-  const demoMatchedUserIds = new Set(demoMatches.map((m) => m.otherUser?.id));
+  const cleanupExpiredThreads = useDemoDmStore((s) => s.cleanupExpiredThreads);
 
-  const demoThreads = React.useMemo(() => {
+  // Single source of truth: use processThreadsIntegrity for all demo thread categorization
+  const {
+    newMatches: demoNewMatches,
+    messageThreads: demoMessageThreads,
+    confessionThreads: demoConfessionThreads,
+    expiredThreadIds,
+    totalUnreadCount: demoUnreadCount,
+  } = useMemo(() => {
+    if (!isDemoMode) {
+      return {
+        newMatches: [],
+        messageThreads: [],
+        confessionThreads: [],
+        expiredThreadIds: [],
+        totalUnreadCount: 0,
+      };
+    }
+    return processThreadsIntegrity({
+      matches: demoMatches,
+      conversations: demoConversations,
+      meta: demoMeta,
+      blockedUserIds,
+      currentUserId: userId ?? undefined,
+    });
+  }, [isDemoMode, demoMatches, demoConversations, demoMeta, blockedUserIds, userId]);
+
+  // Cleanup expired threads on mount/refresh
+  useEffect(() => {
+    if (isDemoMode && expiredThreadIds.length > 0) {
+      cleanupExpiredThreads(expiredThreadIds);
+    }
+  }, [isDemoMode, expiredThreadIds, cleanupExpiredThreads]);
+
+  // Combine message threads + confession threads for the main list
+  const demoThreads = useMemo(() => {
     if (!isDemoMode) return [];
-    const seen = new Set<string>();
-    return (demoMatches as any[])
-      .filter((m: any) => {
-        const uid = m.otherUser?.id;
-        if (!uid || blockedUserIds.includes(uid)) return false;
-        // Deduplicate by otherUser.id
-        if (seen.has(uid)) return false;
-        seen.add(uid);
-        // Only include matches that have at least one message
-        const msgs = demoConversations[m.conversationId] ?? [];
-        return msgs.length > 0;
-      })
-      .map((m: any) => {
-        const msgs = demoConversations[m.conversationId] ?? [];
-        const lastMsg = msgs[msgs.length - 1];
-        const unread = msgs.filter(
-          (msg) => msg.senderId !== userId && !msg.readAt,
-        ).length;
-        return {
-          ...m,
-          lastMessage: lastMsg
-            ? { content: lastMsg.content, type: lastMsg.type, senderId: lastMsg.senderId, createdAt: lastMsg.createdAt }
-            : m.lastMessage,
-          unreadCount: unread,
-          _sortTs: lastMsg?.createdAt ?? m.otherUser?.lastActive ?? 0,
-        };
-      })
-      .sort((a: any, b: any) => b._sortTs - a._sortTs);
-  }, [isDemoMode, demoMatches, blockedUserIds, demoMeta, demoConversations, userId]);
+    // Merge and sort by activity (already sorted individually, merge-sort)
+    return [...demoMessageThreads, ...demoConfessionThreads].sort(
+      (a, b) => b._sortTs - a._sortTs
+    );
+  }, [isDemoMode, demoMessageThreads, demoConfessionThreads]);
 
   const conversations = isDemoMode ? demoThreads : convexConversations;
-
-  // Unread badge: count of conversations with >= 1 unread incoming message
-  const demoUnreadCount = React.useMemo(() => {
-    if (!isDemoMode) return 0;
-    return demoThreads.filter((t: any) => t.unreadCount > 0).length;
-  }, [isDemoMode, demoThreads]);
   const unreadCount = isDemoMode ? demoUnreadCount : convexUnreadCount;
   const currentUser = isDemoMode ? { gender: 'male', messagesRemaining: 999999, messagesResetAt: undefined, subscriptionTier: 'premium' as const } : convexCurrentUser;
-  // In demo mode, exclude likes from users who are already matched
-  const likesReceived = isDemoMode
-    ? demoLikes
-        .filter((l) => !blockedUserIds.includes(l.userId) && !demoMatchedUserIds.has(l.userId))
-        .map((l) => ({ ...l, isBlurred: false }))
-    : convexLikesReceived;
+
+  // Build matched user IDs set for likes filtering
+  const matchedUserIds = useMemo(() => {
+    return new Set(demoMatches.map((m) => m.otherUser?.id).filter(Boolean) as string[]);
+  }, [demoMatches]);
+
+  // In demo mode, use processLikesIntegrity for likes processing
+  const { superLikes, regularLikes } = useMemo(() => {
+    if (!isDemoMode) {
+      // For Convex mode, process similarly but from convexLikesReceived
+      const likes = (convexLikesReceived || []) as LikeItem[];
+      return processLikesIntegrity({
+        likes,
+        blockedUserIds,
+        matchedUserIds,
+      });
+    }
+    return processLikesIntegrity({
+      likes: demoLikes.map((l) => ({ ...l, isBlurred: false })) as LikeItem[],
+      blockedUserIds,
+      matchedUserIds,
+    });
+  }, [isDemoMode, demoLikes, convexLikesReceived, blockedUserIds, matchedUserIds]);
 
   // Profile completeness nudge — messages tab only shows for needs_both
   const dismissedNudges = useDemoStore((s) => s.dismissedNudges);
@@ -128,17 +157,7 @@ export default function MessagesScreen() {
     safeTimeout(() => setRefreshing(false), 300);
   };
 
-  // Separate super likes from regular likes, dedup by userId
-  const dedup = (arr: any[]) => {
-    const seen = new Set<string>();
-    return arr.filter((l: any) => {
-      if (seen.has(l.userId)) return false;
-      seen.add(l.userId);
-      return true;
-    });
-  };
-  const superLikes = dedup((likesReceived || []).filter((l: any) => l.action === 'super_like'));
-  const regularLikes = dedup((likesReceived || []).filter((l: any) => l.action !== 'super_like'));
+  // superLikes and regularLikes are now computed via processLikesIntegrity above
   const renderSuperLikesRow = () => {
     if (superLikes.length === 0) return null;
 
@@ -249,19 +268,9 @@ export default function MessagesScreen() {
   };
 
   // ── New Matches row (demo mode) ──
-  // Shows matches that have NO messages yet as a horizontal avatar row,
-  // so users immediately see new matches even before chatting.
-  const newMatches = React.useMemo(() => {
-    if (!isDemoMode) return [];
-    const seen = new Set<string>();
-    return (demoMatches as any[]).filter((m: any) => {
-      const uid = m.otherUser?.id;
-      if (!uid || blockedUserIds.includes(uid)) return false;
-      if (seen.has(uid)) return false;
-      seen.add(uid);
-      return (demoConversations[m.conversationId]?.length ?? 0) === 0;
-    });
-  }, [demoMatches, blockedUserIds, demoConversations]);
+  // Shows matches that have NO messages yet as a horizontal avatar row.
+  // Now uses demoNewMatches from processThreadsIntegrity (single source of truth).
+  const newMatches = demoNewMatches;
 
   const renderNewMatchesRow = () => {
     if (newMatches.length === 0) return null;
@@ -358,23 +367,30 @@ export default function MessagesScreen() {
 
   if (isLoading) {
     return (
-      <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
-        <View style={styles.header}>
-          <Text style={styles.title}>Messages</Text>
-        </View>
-        <View style={styles.loadingContainer}>
-          <ActivityIndicator size="small" color={COLORS.primary} />
-          <Text style={styles.helperText}>Loading your conversations...</Text>
-        </View>
-      </SafeAreaView>
+      <LoadingGuard
+        isLoading={true}
+        onRetry={() => setRetryKey((k) => k + 1)}
+        title="Loading conversations…"
+        subtitle="This is taking longer than expected. Check your connection and try again."
+      >
+        <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
+          <View style={styles.header}>
+            <Text style={styles.title}>Messages</Text>
+          </View>
+          <View style={styles.loadingContainer}>
+            <ActivityIndicator size="small" color={COLORS.primary} />
+            <Text style={styles.helperText}>Loading your conversations...</Text>
+          </View>
+        </SafeAreaView>
+      </LoadingGuard>
     );
   }
 
-  React.useEffect(() => {
+  useEffect(() => {
     if (__DEV__ && isDemoMode) {
-      console.log(`[Messages] DEMO COUNTS: threads=${(conversations || []).length} newMatches=${newMatches.length} likes=${regularLikes.length} super=${superLikes.length} matched=${demoMatchedUserIds.size} storeLikes=${demoLikes.length} user=${userId ?? 'none'}`);
+      console.log(`[Messages] DEMO COUNTS: threads=${(conversations || []).length} newMatches=${newMatches.length} confessionThreads=${demoConfessionThreads.length} likes=${regularLikes.length} super=${superLikes.length} matched=${matchedUserIds.size} storeLikes=${demoLikes.length} user=${userId ?? 'none'}`);
     }
-  }, [conversations, newMatches]);
+  }, [conversations, newMatches, demoConfessionThreads, regularLikes, superLikes, matchedUserIds, demoLikes, userId]);
 
   return (
     <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
@@ -386,9 +402,9 @@ export default function MessagesScreen() {
       </View>
 
       <FlatList
-        data={conversations || []}
-        keyExtractor={(item) => item.id}
-        renderItem={({ item }) => (
+        data={(conversations || []) as any[]}
+        keyExtractor={(item: any) => item.id}
+        renderItem={({ item }: { item: any }) => (
           <ConversationItem
             id={item.id}
             otherUser={item.otherUser}

@@ -12,7 +12,7 @@ export type BehaviorFlagType =
 export type BehaviorFlagSeverity = 'low' | 'medium' | 'high';
 
 // User Types
-export type Gender = "male" | "female" | "non_binary" | "other";
+export type Gender = "male" | "female" | "non_binary" | "lesbian" | "other";
 
 export type RelationshipIntent =
   | "long_term"

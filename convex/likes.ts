@@ -361,6 +361,65 @@ export const getSwipeHistory = query({
   },
 });
 
+// Get users that the current user has liked (for confession tagging)
+export const getLikedUsers = query({
+  args: {
+    userId: v.id('users'),
+  },
+  handler: async (ctx, args) => {
+    const { userId } = args;
+
+    // Get all likes from this user (like or super_like, not pass)
+    const likes = await ctx.db
+      .query('likes')
+      .withIndex('by_from_user', (q) => q.eq('fromUserId', userId))
+      .filter((q) =>
+        q.or(
+          q.eq(q.field('action'), 'like'),
+          q.eq(q.field('action'), 'super_like'),
+          q.eq(q.field('action'), 'text')
+        )
+      )
+      .collect();
+
+    const result = [];
+    for (const like of likes) {
+      const likedUser = await ctx.db.get(like.toUserId);
+      if (!likedUser || !likedUser.isActive) continue;
+
+      // Get primary photo
+      const photo = await ctx.db
+        .query('photos')
+        .withIndex('by_user', (q) => q.eq('userId', like.toUserId))
+        .filter((q) => q.eq(q.field('isPrimary'), true))
+        .first();
+
+      // Build disambiguator: prefer bio snippet, then school, then age, then masked userId
+      let disambiguator = '';
+      if (likedUser.bio && likedUser.bio.length > 0) {
+        disambiguator = likedUser.bio.slice(0, 30) + (likedUser.bio.length > 30 ? '...' : '');
+      } else if (likedUser.school) {
+        disambiguator = likedUser.school;
+      } else if (likedUser.dateOfBirth) {
+        disambiguator = `${calculateAge(likedUser.dateOfBirth)} years old`;
+      } else {
+        // Masked userId (last 4 chars)
+        const idStr = like.toUserId.toString();
+        disambiguator = `ID: ...${idStr.slice(-4)}`;
+      }
+
+      result.push({
+        id: like.toUserId,
+        name: likedUser.name,
+        avatarUrl: photo?.url || null,
+        disambiguator,
+      });
+    }
+
+    return result;
+  },
+});
+
 // Helper function
 function calculateAge(dateOfBirth: string): number {
   const today = new Date();

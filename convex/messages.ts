@@ -25,6 +25,11 @@ export const sendMessage = mutation({
       throw new Error('Not authorized');
     }
 
+    // Block sending to expired confession-based conversations
+    if (conversation.confessionId && conversation.expiresAt && conversation.expiresAt <= now) {
+      throw new Error('This chat has expired');
+    }
+
     const sender = await ctx.db.get(senderId);
     if (!sender) throw new Error('Sender not found');
 
@@ -290,6 +295,7 @@ export const getConversation = query({
   },
   handler: async (ctx, args) => {
     const { conversationId, userId } = args;
+    const now = Date.now();
 
     const conversation = await ctx.db.get(conversationId);
     if (!conversation) return null;
@@ -312,11 +318,20 @@ export const getConversation = query({
       .filter((q) => q.eq(q.field('isPrimary'), true))
       .first();
 
+    // Check if this is an expired confession-based conversation
+    const isConfessionChat = !!conversation.confessionId;
+    const isExpired = isConfessionChat && conversation.expiresAt
+      ? conversation.expiresAt <= now
+      : false;
+
     return {
       id: conversation._id,
       matchId: conversation.matchId,
       isPreMatch: conversation.isPreMatch,
       createdAt: conversation.createdAt,
+      isConfessionChat,
+      expiresAt: conversation.expiresAt,
+      isExpired,
       otherUser: {
         id: otherUserId,
         name: otherUser.name,
@@ -336,6 +351,7 @@ export const getConversations = query({
   },
   handler: async (ctx, args) => {
     const { userId, limit = 50 } = args;
+    const now = Date.now();
 
     // Get all conversations where user is a participant
     const allConversations = await ctx.db
@@ -345,7 +361,13 @@ export const getConversations = query({
       .collect();
 
     const userConversations = allConversations
-      .filter((c) => c.participants.includes(userId))
+      .filter((c) => {
+        // Must be a participant
+        if (!c.participants.includes(userId)) return false;
+        // Filter out expired confession-based conversations
+        if (c.confessionId && c.expiresAt && c.expiresAt <= now) return false;
+        return true;
+      })
       .slice(0, limit);
 
     const result = [];

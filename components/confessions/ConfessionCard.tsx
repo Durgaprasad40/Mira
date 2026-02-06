@@ -7,7 +7,6 @@ import {
   Alert,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
-import * as Clipboard from 'expo-clipboard';
 import { COLORS } from '@/lib/constants';
 import { ConfessionMood } from '@/types';
 import ReactionBar, { EmojiCount } from './ReactionBar';
@@ -32,6 +31,13 @@ interface ConfessionCardProps {
   authorName?: string;
   authorPhotoUrl?: string;
   createdAt: number;
+  isExpired?: boolean; // true if confession has expired from public feed
+  isTaggedForMe?: boolean; // true if current user is tagged in this confession
+  // Tagged user display (privacy-safe)
+  taggedUserId?: string;
+  authorId?: string;
+  viewerId?: string;
+  taggedUserName?: string; // only provided when viewer is author
   onPress?: () => void;
   onReact: () => void; // opens emoji picker
   onToggleEmoji?: (emoji: string) => void; // directly toggle a specific emoji
@@ -60,20 +66,28 @@ export default function ConfessionCard({
   reactionCount,
   authorName,
   createdAt,
+  isExpired,
+  isTaggedForMe,
+  taggedUserId,
+  authorId,
+  viewerId,
+  taggedUserName,
   onPress,
   onReact,
   onToggleEmoji,
   onReplyAnonymously,
   onReport,
 }: ConfessionCardProps) {
+  // Privacy-safe tag display logic
+  const getTagDisplayText = (): string | null => {
+    if (!taggedUserId) return null;
+    if (viewerId === taggedUserId) return 'You';
+    if (viewerId === authorId && taggedUserName) return taggedUserName;
+    return 'Someone';
+  };
+  const tagDisplayText = getTagDisplayText();
   const handleMenu = () => {
-    Alert.alert('Options', undefined, [
-      {
-        text: 'Copy Text',
-        onPress: async () => {
-          await Clipboard.setStringAsync(text);
-        },
-      },
+    Alert.alert('Report Confession', 'Are you sure you want to report this confession?', [
       { text: 'Report', style: 'destructive', onPress: onReport },
       { text: 'Cancel', style: 'cancel' },
     ]);
@@ -83,7 +97,7 @@ export default function ConfessionCard({
 
   return (
     <TouchableOpacity
-      style={styles.card}
+      style={[styles.card, isTaggedForMe && styles.cardHighlighted]}
       onPress={onPress}
       activeOpacity={0.8}
     >
@@ -98,19 +112,41 @@ export default function ConfessionCard({
         </View>
         <Text style={styles.authorName}>{displayName}</Text>
         <Text style={styles.timeAgo}>{getTimeAgo(createdAt)}</Text>
+        {isTaggedForMe && (
+          <View style={styles.forYouBadge}>
+            <Ionicons name="heart" size={9} color={COLORS.primary} />
+            <Text style={styles.forYouText}>For you</Text>
+          </View>
+        )}
+        {isExpired && (
+          <View style={styles.expiredBadge}>
+            <Text style={styles.expiredText}>Expired</Text>
+          </View>
+        )}
         <View style={{ flex: 1 }} />
-        <TouchableOpacity
-          onPress={handleMenu}
-          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-        >
-          <Ionicons name="ellipsis-horizontal" size={14} color={COLORS.textMuted} />
-        </TouchableOpacity>
+        {onReport && (
+          <TouchableOpacity
+            onPress={handleMenu}
+            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+          >
+            <Ionicons name="ellipsis-horizontal" size={14} color={COLORS.textMuted} />
+          </TouchableOpacity>
+        )}
       </View>
 
       {/* Body */}
       <Text style={styles.confessionText} numberOfLines={4}>
         {text}
       </Text>
+
+      {/* Tagged user display (non-clickable, privacy-safe) */}
+      {tagDisplayText && (
+        <View style={styles.taggedRow}>
+          <Ionicons name="heart" size={12} color={COLORS.primary} />
+          <Text style={styles.taggedLabel}>Confess-to:</Text>
+          <Text style={styles.taggedName}>{tagDisplayText}</Text>
+        </View>
+      )}
 
       {/* Emoji Reactions */}
       <View style={styles.reactionBarWrap}>
@@ -179,6 +215,26 @@ const styles = StyleSheet.create({
     shadowRadius: 4,
     elevation: 1,
   },
+  cardHighlighted: {
+    backgroundColor: 'rgba(255,107,107,0.04)', // Subtle pink tint
+    borderWidth: 1,
+    borderColor: 'rgba(255,107,107,0.15)', // Soft border
+  },
+  forYouBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 3,
+    backgroundColor: 'rgba(255,107,107,0.1)',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+    marginLeft: 4,
+  },
+  forYouText: {
+    fontSize: 10,
+    fontWeight: '600',
+    color: COLORS.primary,
+  },
   authorRow: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -205,12 +261,44 @@ const styles = StyleSheet.create({
     fontSize: 11,
     color: COLORS.textMuted,
   },
+  expiredBadge: {
+    backgroundColor: 'rgba(153,153,153,0.15)',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+    marginLeft: 4,
+  },
+  expiredText: {
+    fontSize: 10,
+    fontWeight: '600',
+    color: COLORS.textMuted,
+  },
   confessionText: {
     fontSize: 13,
     fontWeight: '600',
     lineHeight: 18,
     color: COLORS.text,
     marginBottom: 8,
+  },
+  taggedRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    marginBottom: 8,
+    paddingVertical: 4,
+    paddingHorizontal: 8,
+    backgroundColor: 'rgba(255,107,107,0.06)',
+    borderRadius: 6,
+    alignSelf: 'flex-start',
+  },
+  taggedLabel: {
+    fontSize: 11,
+    color: COLORS.textMuted,
+  },
+  taggedName: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: COLORS.primary,
   },
   reactionBarWrap: {
     marginBottom: 6,

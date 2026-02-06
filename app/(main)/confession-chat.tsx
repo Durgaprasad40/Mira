@@ -16,6 +16,7 @@ import { COLORS } from '@/lib/constants';
 import { useConfessionStore } from '@/stores/confessionStore';
 import { useAuthStore } from '@/stores/authStore';
 import { MutualRevealStatus } from '@/types';
+import { logDebugEvent } from '@/lib/debugEventLogger';
 
 function formatTimeLeft(expiresAt: number): string {
   const diff = expiresAt - Date.now();
@@ -68,11 +69,34 @@ export default function ConfessionChatScreen() {
   const addChatMessage = useConfessionStore((s) => s.addChatMessage);
   const agreeMutualReveal = useConfessionStore((s) => s.agreeMutualReveal);
   const declineMutualReveal = useConfessionStore((s) => s.declineMutualReveal);
+  const cleanupExpiredChats = useConfessionStore((s) => s.cleanupExpiredChats);
 
   const chat = chats.find((c) => c.id === chatId) || null;
   const confessionText = chat
     ? confessions.find((c) => c.id === chat.confessionId)?.text
     : undefined;
+
+  // Navigation guard: prevent opening expired chats
+  const [guardTriggered, setGuardTriggered] = useState(false);
+  useEffect(() => {
+    if (guardTriggered || !chatId) return;
+
+    // Check if chat doesn't exist or is expired
+    const now = Date.now();
+    if (!chat) {
+      setGuardTriggered(true);
+      logDebugEvent('CHAT_EXPIRED', `Confession chat not found: ${chatId}`);
+      router.back();
+      return;
+    }
+
+    if (now > chat.expiresAt) {
+      setGuardTriggered(true);
+      logDebugEvent('CHAT_EXPIRED', `Confession chat expired: ${chatId}`);
+      cleanupExpiredChats([chat.id]);
+      router.back();
+    }
+  }, [guardTriggered, chatId, chat, cleanupExpiredChats, router]);
 
   const [text, setText] = useState('');
   const listRef = useRef<FlatList>(null);

@@ -25,6 +25,8 @@ export interface DemoDmMessage {
 export interface DemoConversationMeta {
   otherUser: { id?: string; name: string; lastActive: number; isVerified?: boolean };
   isPreMatch: boolean;
+  isConfessionChat?: boolean; // True if created from confession (tagged user liked)
+  expiresAt?: number; // Only set for confession-based threads (24h after creation)
 }
 
 interface DemoDmState {
@@ -61,6 +63,12 @@ interface DemoDmState {
 
   /** Delete a conversation and its metadata/draft entirely. */
   deleteConversation: (id: string) => void;
+
+  /** Delete multiple conversations by IDs (batch cleanup). */
+  deleteConversations: (ids: string[]) => void;
+
+  /** Cleanup expired confession threads — removes threads + meta + drafts */
+  cleanupExpiredThreads: (expiredThreadIds: string[]) => void;
 
   /** Clear all conversations, metadata, and drafts. */
   reset: () => void;
@@ -145,6 +153,31 @@ export const useDemoDmStore = create<DemoDmState>()(
           const { [id]: _d, ...restDrafts } = s.drafts;
           return { conversations: restConvos, meta: restMeta, drafts: restDrafts };
         }),
+
+      deleteConversations: (ids) =>
+        set((s) => {
+          if (ids.length === 0) return s;
+          const idsSet = new Set(ids);
+          const conversations: Record<string, DemoDmMessage[]> = {};
+          const meta: Record<string, DemoConversationMeta> = {};
+          const drafts: Record<string, string> = {};
+          for (const key of Object.keys(s.conversations)) {
+            if (!idsSet.has(key)) conversations[key] = s.conversations[key];
+          }
+          for (const key of Object.keys(s.meta)) {
+            if (!idsSet.has(key)) meta[key] = s.meta[key];
+          }
+          for (const key of Object.keys(s.drafts)) {
+            if (!idsSet.has(key)) drafts[key] = s.drafts[key];
+          }
+          return { conversations, meta, drafts };
+        }),
+
+      cleanupExpiredThreads: (expiredThreadIds) => {
+        if (expiredThreadIds.length === 0) return;
+        // Use deleteConversations for the actual cleanup
+        get().deleteConversations(expiredThreadIds);
+      },
 
       reset: () => set({ conversations: {}, meta: {}, drafts: {} }),
     }),

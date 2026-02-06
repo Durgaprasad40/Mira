@@ -11,6 +11,9 @@ const MIN_CROSSINGS_FOR_UNLOCK = 10;
 const UNLOCK_DURATION_MS = 48 * 60 * 60 * 1000; // 48 hours
 const LOCATION_UPDATE_INTERVAL_MS = 30 * 60 * 1000; // 30 minutes
 
+// Published location window (privacy: only update shared location once per 6 hours)
+const PUBLISH_WINDOW_MS = 6 * 60 * 60 * 1000; // 6 hours
+
 // Marker visibility tiers (for map)
 const SOLID_WINDOW_MS = 3 * 24 * 60 * 60 * 1000; // 1–3 days → solid marker
 const FADED_WINDOW_MS = 6 * 24 * 60 * 60 * 1000; // 3–6 days → faded marker
@@ -19,6 +22,196 @@ const FADED_WINDOW_MS = 6 * 24 * 60 * 60 * 1000; // 3–6 days → faded marker
 const NOTIFICATION_COOLDOWN_MS = 24 * 60 * 60 * 1000; // 24h per pair
 const HISTORY_EXPIRY_MS = 14 * 24 * 60 * 60 * 1000; // 14 days
 const MAX_HISTORY_ENTRIES = 15;
+
+// ---------------------------------------------------------------------------
+// "Someone crossed you" alert constants
+// ---------------------------------------------------------------------------
+
+const CROSS_RADIUS_METERS = 1000;           // 1km
+const CROSS_COOLDOWN_MS = 6 * 60 * 60 * 1000;   // 6 hours between alerts
+const CROSS_DEDUPE_WINDOW_MS = 24 * 60 * 60 * 1000; // 24h per person (prevents same-person spam)
+const CROSS_EVENT_EXPIRY_MS = 7 * 24 * 60 * 60 * 1000; // 7 days (cleanup)
+
+// ---------------------------------------------------------------------------
+// publishLocation — updates published location (max once per 6 hours)
+// Called when Nearby screen is opened. Others see publishedLat/Lng, not live GPS.
+// ---------------------------------------------------------------------------
+
+export const publishLocation = mutation({
+  args: {
+    userId: v.id('users'),
+    latitude: v.number(),
+    longitude: v.number(),
+  },
+  handler: async (ctx, args) => {
+    const { userId, latitude, longitude } = args;
+    const now = Date.now();
+
+    const user = await ctx.db.get(userId);
+    if (!user) return { success: false, reason: 'user_not_found' };
+
+    // Check if published location is still within the 6-hour window
+    if (user.publishedAt && now - user.publishedAt < PUBLISH_WINDOW_MS) {
+      return {
+        success: true,
+        published: false,
+        reason: 'within_window',
+        nextPublishAt: user.publishedAt + PUBLISH_WINDOW_MS,
+      };
+    }
+
+    // Publish new location
+    await ctx.db.patch(userId, {
+      publishedLat: latitude,
+      publishedLng: longitude,
+      publishedAt: now,
+    });
+
+    return {
+      success: true,
+      published: true,
+      publishedAt: now,
+    };
+  },
+});
+
+// ---------------------------------------------------------------------------
+// detectCrossedUsers — privacy-safe "Someone crossed you" alert
+// Uses PUBLISHED locations only (not live GPS).
+// Returns { triggered: true } if alert should be shown, never reveals identity.
+// ---------------------------------------------------------------------------
+
+export const detectCrossedUsers = mutation({
+  args: {
+    userId: v.id('users'),
+    myLat: v.number(),
+    myLng: v.number(),
+  },
+  handler: async (ctx, args) => {
+    const { userId, myLat, myLng } = args;
+    const now = Date.now();
+
+    // 1) Validate user exists
+    const currentUser = await ctx.db.get(userId);
+    if (!currentUser) {
+      return { triggered: false, reason: 'user_not_found' };
+    }
+
+    // 2) Enforce cooldown — check most recent crossedEvent for this user
+    const lastEvent = await ctx.db
+      .query('crossedEvents')
+      .withIndex('by_user_createdAt', (q) => q.eq('userId', userId))
+      .order('desc')
+      .first();
+
+    if (lastEvent && now - lastEvent.createdAt < CROSS_COOLDOWN_MS) {
+      return { triggered: false, reason: 'cooldown' };
+    }
+
+    // 3) Find nearby users using PUBLISHED coords only
+    const allUsers = await ctx.db.query('users').collect();
+
+    // Get blocks for current user (both directions)
+    const blocksOut = await ctx.db
+      .query('blocks')
+      .withIndex('by_blocker', (q) => q.eq('blockerId', userId))
+      .collect();
+    const blocksIn = await ctx.db
+      .query('blocks')
+      .withIndex('by_blocked', (q) => q.eq('blockedUserId', userId))
+      .collect();
+    const blockedIds = new Set([
+      ...blocksOut.map((b) => b.blockedUserId as string),
+      ...blocksIn.map((b) => b.blockerId as string),
+    ]);
+
+    const candidates: Id<'users'>[] = [];
+
+    for (const user of allUsers) {
+      // Skip self
+      if (user._id === userId) continue;
+      // Skip inactive
+      if (!user.isActive) continue;
+      // Skip blocked
+      if (blockedIds.has(user._id as string)) continue;
+      // Skip if no published location
+      if (!user.publishedLat || !user.publishedLng || !user.publishedAt) continue;
+      // Skip if published location is stale (>6 days)
+      if (now - user.publishedAt > FADED_WINDOW_MS) continue;
+
+      // Compute distance using published location
+      const distance = calculateDistanceMeters(
+        myLat,
+        myLng,
+        user.publishedLat,
+        user.publishedLng,
+      );
+
+      // Within 1km?
+      if (distance <= CROSS_RADIUS_METERS) {
+        candidates.push(user._id);
+      }
+    }
+
+    // 4) Dedupe — filter out people we've already alerted about recently
+    const validCandidates: Id<'users'>[] = [];
+
+    for (const otherUserId of candidates) {
+      const existingEvent = await ctx.db
+        .query('crossedEvents')
+        .withIndex('by_user_other', (q) =>
+          q.eq('userId', userId).eq('otherUserId', otherUserId),
+        )
+        .first();
+
+      // If no existing event, or existing event is older than dedupe window, allow
+      if (!existingEvent || now - existingEvent.createdAt >= CROSS_DEDUPE_WINDOW_MS) {
+        validCandidates.push(otherUserId);
+      }
+    }
+
+    // 5) If any valid candidates, insert ONE event and return triggered
+    if (validCandidates.length > 0) {
+      // Pick the first candidate (doesn't matter which — we don't reveal identity)
+      const pickedOther = validCandidates[0];
+
+      await ctx.db.insert('crossedEvents', {
+        userId,
+        otherUserId: pickedOther,
+        createdAt: now,
+        expiresAt: now + CROSS_EVENT_EXPIRY_MS,
+      });
+
+      // Return triggered: true — client shows generic "Someone crossed you" toast
+      // IMPORTANT: We do NOT return pickedOther or any identity info
+      return { triggered: true };
+    }
+
+    // 6) No valid candidates
+    return { triggered: false, reason: 'none' };
+  },
+});
+
+// ---------------------------------------------------------------------------
+// cleanupExpiredCrossedEvents — call periodically to purge old entries
+// ---------------------------------------------------------------------------
+
+export const cleanupExpiredCrossedEvents = mutation({
+  handler: async (ctx) => {
+    const now = Date.now();
+    const expired = await ctx.db
+      .query('crossedEvents')
+      .withIndex('by_expires')
+      .filter((q) => q.lt(q.field('expiresAt'), now))
+      .collect();
+
+    for (const entry of expired) {
+      await ctx.db.delete(entry._id);
+    }
+
+    return { deleted: expired.length };
+  },
+});
 
 // ---------------------------------------------------------------------------
 // recordLocation — called when user opens app / becomes active
@@ -202,7 +395,12 @@ export const getNearbyUsers = query({
 
     const currentUser = await ctx.db.get(userId);
     if (!currentUser) return [];
-    if (!currentUser.latitude || !currentUser.longitude) return [];
+
+    // Use current user's published location for distance checks
+    // (they should have published when opening Nearby screen)
+    const myLat = currentUser.publishedLat ?? currentUser.latitude;
+    const myLng = currentUser.publishedLng ?? currentUser.longitude;
+    if (!myLat || !myLng) return [];
 
     const allUsers = await ctx.db.query('users').collect();
     const results = [];
@@ -224,20 +422,23 @@ export const getNearbyUsers = query({
     for (const user of allUsers) {
       if (user._id === userId) continue;
       if (!user.isActive) continue;
-      if (!user.latitude || !user.longitude) continue;
 
-      const userLocationUpdatedAt = user.lastLocationUpdatedAt ?? user.lastActive;
-      const age = now - userLocationUpdatedAt;
+      // Use other user's PUBLISHED location (privacy: not their live GPS)
+      // If they haven't published, they don't appear on the map
+      if (!user.publishedLat || !user.publishedLng || !user.publishedAt) continue;
 
-      // Hidden: inactive >6 days
+      // Freshness based on publishedAt (when they last shared their location)
+      const age = now - user.publishedAt;
+
+      // Hidden: published location is stale (>6 days old)
       if (age > FADED_WINDOW_MS) continue;
 
-      // Distance check — 1km
+      // Distance check — 1km using published locations
       const distance = calculateDistanceMeters(
-        currentUser.latitude,
-        currentUser.longitude,
-        user.latitude,
-        user.longitude,
+        myLat,
+        myLng,
+        user.publishedLat,
+        user.publishedLng,
       );
       if (distance > PROXIMITY_METERS) continue;
 
@@ -251,18 +452,6 @@ export const getNearbyUsers = query({
       // Freshness: solid (1-3 days) or faded (3-6 days)
       const freshness: 'solid' | 'faded' = age <= SOLID_WINDOW_MS ? 'solid' : 'faded';
 
-      // Compute jittered coordinates (50-150m offset)
-      const locationEpoch = Math.floor(userLocationUpdatedAt / LOCATION_UPDATE_INTERVAL_MS);
-      const seed = simpleHash(`${userId}:${user._id}:${locationEpoch}`);
-      const angle = ((seed % 36000) / 100) * (Math.PI / 180); // 0-360°
-      const offsetMeters = 50 + (seed % 101); // 50-150m
-      const { lat: jitteredLat, lng: jitteredLng } = offsetCoords(
-        user.latitude,
-        user.longitude,
-        offsetMeters,
-        angle,
-      );
-
       // Get primary photo
       const photo = await ctx.db
         .query('photos')
@@ -270,15 +459,18 @@ export const getNearbyUsers = query({
         .filter((q) => q.eq(q.field('isPrimary'), true))
         .first();
 
+      // Return raw published coordinates — client applies fuzz + anti-zoom shifting
+      // hideDistance controls fuzz radius: true = 200-400m, false = 20-100m
       results.push({
         id: user._id,
         name: user.name,
         age: calculateAge(user.dateOfBirth),
-        jitteredLat,
-        jitteredLng,
+        publishedLat: user.publishedLat!,
+        publishedLng: user.publishedLng!,
         freshness,
         photoUrl: photo?.url ?? null,
         isVerified: user.isVerified,
+        hideDistance: user.hideDistance ?? false,
       });
     }
 

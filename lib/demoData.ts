@@ -82,7 +82,7 @@ export function getDemoCurrentUser(): typeof DEMO_USER {
     ...DEMO_USER,
     _id: userId ?? DEMO_USER._id,
     name: stored.name,
-    photos: stored.photos,
+    photos: stored.photos?.length ? stored.photos : DEMO_USER.photos,
     bio: stored.bio ?? DEMO_USER.bio,
     gender: stored.gender ?? DEMO_USER.gender,
     dateOfBirth: stored.dateOfBirth ?? DEMO_USER.dateOfBirth,

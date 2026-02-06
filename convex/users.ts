@@ -258,6 +258,7 @@ export const updatePreferences = mutation({
           v.literal("male"),
           v.literal("female"),
           v.literal("non_binary"),
+          v.literal("lesbian"),
           v.literal("other"),
         ),
       ),
@@ -578,14 +579,14 @@ function calculateAge(dateOfBirth: string): number {
   return age;
 }
 
-// Helper function to calculate distance in miles
+// Helper function to calculate distance in km
 function calculateDistance(
   lat1: number,
   lon1: number,
   lat2: number,
   lon2: number,
 ): number {
-  const R = 3959; // Earth's radius in miles
+  const R = 6371; // Earth's radius in km
   const dLat = toRad(lat2 - lat1);
   const dLon = toRad(lon2 - lon1);
   const a =
@@ -613,6 +614,7 @@ export const completeOnboarding = mutation({
         v.literal("male"),
         v.literal("female"),
         v.literal("non_binary"),
+        v.literal("lesbian"),
         v.literal("other"),
       ),
     ),
@@ -700,6 +702,7 @@ export const completeOnboarding = mutation({
           v.literal("male"),
           v.literal("female"),
           v.literal("non_binary"),
+          v.literal("lesbian"),
           v.literal("other"),
         ),
       ),

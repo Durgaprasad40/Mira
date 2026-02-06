@@ -1,4 +1,4 @@
-import React, { useMemo, useState, useCallback, useRef } from "react";
+import React, { useMemo, useState, useCallback, useRef, useEffect } from "react";
 import {
   View,
   Text,
@@ -9,6 +9,7 @@ import {
   Alert,
   Animated,
   PanResponder,
+  Modal,
 } from "react-native";
 import { router } from "expo-router";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -17,14 +18,13 @@ import * as Haptics from "expo-haptics";
 import { useQuery, useMutation } from "convex/react";
 import { api } from "@/convex/_generated/api";
 import { ProfileCard, SwipeOverlay } from "@/components/cards";
-import { FilterModal } from "@/components/filters";
+import { Ionicons } from "@expo/vector-icons";
 import { useAuthStore } from "@/stores/authStore";
 import { useFilterStore } from "@/stores/filterStore";
 import { useSubscriptionStore } from "@/stores/subscriptionStore";
 import { COLORS, INCOGNITO_COLORS } from "@/lib/constants";
 import { DEMO_PROFILES } from "@/lib/demoData";
 import { isDemoMode } from "@/hooks/useConvex";
-import type { SortOption } from "@/types";
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get("window");
 const SWIPE_THRESHOLD_X = SCREEN_WIDTH * 0.15; // 15% — easier swipe
@@ -57,12 +57,22 @@ export function DiscoverFeed({ mode = "main", theme = "light", onOpenProfile }: 
   const TC = dark ? INCOGNITO_COLORS : COLORS;
   const insets = useSafeAreaInsets();
   const userId = useAuthStore((s) => s.userId);
-  useFilterStore();
+  const { minAge, maxAge, maxDistance, gender, relationshipIntent, filterVersion } = useFilterStore();
   useSubscriptionStore();
 
   const [currentIndex, setCurrentIndex] = useState(0);
-  const [sortByLocal, setSortByLocal] = useState<SortOption>("recommended");
-  const [showFilters, setShowFilters] = useState(false);
+  const [showPrefsMenu, setShowPrefsMenu] = useState(false);
+  const sortByLocal = "recommended" as const; // Default sort, user controls via Discovery Preferences
+
+  // Reset feed when filter preferences change (filterVersion incremented on save)
+  const filterKey = `${minAge}-${maxAge}-${maxDistance}-${gender.join(',')}-${relationshipIntent.join(',')}-v${filterVersion}`;
+  const prevFilterKey = useRef(filterKey);
+  useEffect(() => {
+    if (prevFilterKey.current !== filterKey) {
+      prevFilterKey.current = filterKey;
+      setCurrentIndex(0); // Reset to beginning when filters change
+    }
+  }, [filterKey]);
   const lastSwipedProfile = useRef<ProfileData | null>(null);
 
   const [overlayDirection, setOverlayDirection] = useState<
@@ -75,14 +85,15 @@ export function DiscoverFeed({ mode = "main", theme = "light", onOpenProfile }: 
   const discoverArgs = useMemo(
     () =>
       !isDemoMode && userId
-        ? { userId: convexUserId, sortBy: sortByLocal, limit: 20 }
+        ? { userId: convexUserId, sortBy: sortByLocal, limit: 20, filterVersion }
         : "skip" as const,
-    [userId, convexUserId, sortByLocal],
+    [userId, convexUserId, sortByLocal, filterVersion],
   );
   const convexProfiles = useQuery(api.discover.getDiscoverProfiles, discoverArgs);
   const profilesSafe = convexProfiles ?? EMPTY_ARRAY;
 
   // Transform to common format — memoize to prevent new arrays each render
+  // filterVersion in deps forces re-render when preferences saved (demo mode cache bust)
   const demoItems = useMemo<ProfileData[]>(
     () =>
       DEMO_PROFILES.map((p) => ({
@@ -95,7 +106,7 @@ export function DiscoverFeed({ mode = "main", theme = "light", onOpenProfile }: 
         distance: p.distance,
         photos: p.photos,
       })),
-    [],
+    [filterVersion],
   );
 
   const liveItems = useMemo<ProfileData[]>(
@@ -325,12 +336,6 @@ export function DiscoverFeed({ mode = "main", theme = "light", onOpenProfile }: 
     }
   }, [userId, currentIndex, rewindMutation]);
 
-  const handleApplyFilters = (newFilters: any, newSortBy: SortOption) => {
-    setSortByLocal(newSortBy);
-    setShowFilters(false);
-    setCurrentIndex(0); // Reset to show filtered results
-  };
-
   // Loading state
   if (!isDemoMode && !convexProfiles) {
     return (
@@ -366,9 +371,9 @@ export function DiscoverFeed({ mode = "main", theme = "light", onOpenProfile }: 
       <View style={[styles.header, dark && { backgroundColor: 'transparent', borderBottomColor: 'transparent' }]} pointerEvents="box-none">
         <TouchableOpacity
           style={styles.headerButton}
-          onPress={() => setShowFilters(true)}
+          onPress={() => setShowPrefsMenu(true)}
         >
-          <Text style={[styles.headerButtonText, dark && { color: TC.text }]}>{"\u2630"} Filters</Text>
+          <Text style={[styles.headerButtonText, dark && { color: TC.text }]}>Preferences</Text>
         </TouchableOpacity>
         <Text style={[styles.headerTitle, dark && { color: TC.text }]}>{dark ? "Desire Land" : "Discover"}</Text>
         <View style={styles.headerRight}>
@@ -450,12 +455,35 @@ export function DiscoverFeed({ mode = "main", theme = "light", onOpenProfile }: 
         </TouchableOpacity>
       </View>
 
-      <FilterModal
-        visible={showFilters}
-        onClose={() => setShowFilters(false)}
-        onApply={handleApplyFilters}
-        initialSortBy={sortByLocal}
-      />
+      {/* Preferences Menu */}
+      <Modal
+        visible={showPrefsMenu}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setShowPrefsMenu(false)}
+      >
+        <TouchableOpacity
+          style={styles.prefsMenuOverlay}
+          activeOpacity={1}
+          onPress={() => setShowPrefsMenu(false)}
+        >
+          <View style={[styles.prefsMenuContainer, { marginTop: insets.top + 50 }]}>
+            <TouchableOpacity
+              style={styles.prefsMenuItem}
+              onPress={() => {
+                setShowPrefsMenu(false);
+                router.push("/(main)/discovery-preferences");
+              }}
+            >
+              <View style={styles.prefsMenuItemContent}>
+                <Text style={styles.prefsMenuItemTitle}>Discovery Preferences</Text>
+                <Text style={styles.prefsMenuItemSubtitle}>Age, distance, and who you see</Text>
+              </View>
+              <Ionicons name="chevron-forward" size={20} color={COLORS.textLight} />
+            </TouchableOpacity>
+          </View>
+        </TouchableOpacity>
+      </Modal>
     </View>
   );
 }
@@ -612,5 +640,37 @@ const styles = StyleSheet.create({
   },
   actionIcon: {
     fontSize: 28,
+  },
+  prefsMenuOverlay: {
+    flex: 1,
+    backgroundColor: "rgba(0, 0, 0, 0.3)",
+  },
+  prefsMenuContainer: {
+    marginHorizontal: 16,
+    backgroundColor: COLORS.background,
+    borderRadius: 12,
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.15,
+    shadowRadius: 8,
+    elevation: 8,
+  },
+  prefsMenuItem: {
+    flexDirection: "row",
+    alignItems: "center",
+    padding: 16,
+  },
+  prefsMenuItemContent: {
+    flex: 1,
+  },
+  prefsMenuItemTitle: {
+    fontSize: 16,
+    fontWeight: "600",
+    color: COLORS.text,
+    marginBottom: 2,
+  },
+  prefsMenuItemSubtitle: {
+    fontSize: 13,
+    color: COLORS.textLight,
   },
 });
