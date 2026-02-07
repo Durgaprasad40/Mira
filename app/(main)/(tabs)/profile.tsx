@@ -249,14 +249,24 @@ export default function ProfileScreen() {
         </TouchableOpacity>
 
         {isAdmin && (
-          <TouchableOpacity
-            style={[styles.menuItem, styles.adminMenuItem]}
-            onPress={() => router.push('/(main)/admin/verification')}
-          >
-            <Ionicons name="shield-outline" size={24} color={COLORS.primary} />
-            <Text style={[styles.menuText, { color: COLORS.primary }]}>Admin: Verification Queue</Text>
-            <Ionicons name="chevron-forward" size={20} color={COLORS.primary} />
-          </TouchableOpacity>
+          <>
+            <TouchableOpacity
+              style={[styles.menuItem, styles.adminMenuItem]}
+              onPress={() => router.push('/(main)/admin/verification')}
+            >
+              <Ionicons name="shield-outline" size={24} color={COLORS.primary} />
+              <Text style={[styles.menuText, { color: COLORS.primary }]}>Admin: Verification Queue</Text>
+              <Ionicons name="chevron-forward" size={20} color={COLORS.primary} />
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.menuItem, styles.adminMenuItem]}
+              onPress={() => router.push('/(main)/admin/logs')}
+            >
+              <Ionicons name="document-text-outline" size={24} color={COLORS.primary} />
+              <Text style={[styles.menuText, { color: COLORS.primary }]}>Admin: Audit Logs</Text>
+              <Ionicons name="chevron-forward" size={20} color={COLORS.primary} />
+            </TouchableOpacity>
+          </>
         )}
       </View>
 

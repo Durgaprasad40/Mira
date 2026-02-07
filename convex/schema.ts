@@ -886,4 +886,19 @@ export default defineSchema({
     .index('by_user_other', ['userId', 'otherUserId'])
     .index('by_user_createdAt', ['userId', 'createdAt'])
     .index('by_expires', ['expiresAt']),
+
+  // Admin Logs table (audit trail for moderation/admin actions)
+  adminLogs: defineTable({
+    adminUserId: v.id('users'),
+    action: v.string(),  // "verify_approve", "verify_reject", "set_admin", "deactivate", "reactivate"
+    targetUserId: v.optional(v.id('users')),
+    conversationId: v.optional(v.string()),
+    reason: v.optional(v.string()),
+    metadata: v.optional(v.any()),  // small JSON: { oldStatus, newStatus, etc }
+    createdAt: v.number(),
+  })
+    .index('by_admin_createdAt', ['adminUserId', 'createdAt'])
+    .index('by_target_createdAt', ['targetUserId', 'createdAt'])
+    .index('by_action_createdAt', ['action', 'createdAt'])
+    .index('by_createdAt', ['createdAt']),  // For "latest logs" without filters
 });

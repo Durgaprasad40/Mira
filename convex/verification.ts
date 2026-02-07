@@ -1,5 +1,6 @@
 import { v } from "convex/values";
 import { mutation, query, internalMutation, QueryCtx, MutationCtx } from "./_generated/server";
+import { logAdminAction } from "./adminLog";
 
 const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
 const SESSION_EXPIRY_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
@@ -458,7 +459,7 @@ export const adminReviewVerification = mutation({
     const now = Date.now();
 
     // Admin gate: verify session token belongs to an admin
-    await requireAdmin(ctx, token);
+    const admin = await requireAdmin(ctx, token);
 
     const session = await ctx.db.get(sessionId);
     if (!session) throw new Error("Session not found");
@@ -468,6 +469,9 @@ export const adminReviewVerification = mutation({
 
     const user = await ctx.db.get(session.userId);
     if (!user) throw new Error("User not found");
+
+    // Capture old status for audit log
+    const oldStatus = user.verificationStatus || "unverified";
 
     if (action === "approve") {
       // Approve verification
@@ -526,6 +530,21 @@ export const adminReviewVerification = mutation({
         createdAt: now,
       });
     }
+
+    // Audit log: record the admin action
+    await logAdminAction(ctx, {
+      adminUserId: admin._id,
+      action: action === "approve" ? "verify_approve" : "verify_reject",
+      targetUserId: session.userId,
+      reason: rejectionReason,
+      metadata: {
+        sessionId,
+        oldStatus,
+        newStatus: action === "approve" ? "verified" : "rejected",
+        photoVerificationReason: rejectionReason,
+        reviewerNote,
+      },
+    });
 
     return { success: true, action };
   },

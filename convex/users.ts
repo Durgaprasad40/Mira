@@ -1,6 +1,7 @@
 import { v } from "convex/values";
 import { mutation, query } from "./_generated/server";
 import { Id } from "./_generated/dataModel";
+import { logAdminAction } from "./adminLog";
 
 // Get current user profile
 export const getCurrentUser = query({
@@ -1072,11 +1073,13 @@ export const setAdminStatus = mutation({
 
     // Authorization: either valid admin or valid setup secret
     let authorized = false;
+    let verifiedAdminId: Id<"users"> | undefined;
 
     if (adminUserId) {
       const admin = await ctx.db.get(adminUserId);
       if (admin?.isAdmin) {
         authorized = true;
+        verifiedAdminId = adminUserId;
       }
     }
 
@@ -1084,6 +1087,8 @@ export const setAdminStatus = mutation({
       const expectedSecret = process.env.ADMIN_SETUP_SECRET;
       if (expectedSecret && setupSecret === expectedSecret) {
         authorized = true;
+        // For bootstrap, the target user becomes the "admin" in the log
+        verifiedAdminId = targetUserId;
       }
     }
 
@@ -1096,7 +1101,22 @@ export const setAdminStatus = mutation({
       throw new Error("Target user not found");
     }
 
+    const oldIsAdmin = targetUser.isAdmin || false;
     await ctx.db.patch(targetUserId, { isAdmin });
+
+    // Audit log: record admin status change
+    if (verifiedAdminId) {
+      await logAdminAction(ctx, {
+        adminUserId: verifiedAdminId,
+        action: "set_admin",
+        targetUserId,
+        metadata: {
+          oldIsAdmin,
+          newIsAdmin: isAdmin,
+          usedSetupSecret: !!setupSecret,
+        },
+      });
+    }
 
     return { success: true, userId: targetUserId, isAdmin };
   },

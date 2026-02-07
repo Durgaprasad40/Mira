@@ -2,6 +2,7 @@ import { v } from "convex/values";
 import { mutation, query } from "./_generated/server";
 import { Id } from "./_generated/dataModel";
 import { api } from "./_generated/api";
+import { logAdminAction } from "./adminLog";
 
 // ============================================================================
 // Crypto helpers (Convex-compatible, no Node.js dependencies)
@@ -871,6 +872,8 @@ export const deactivateAccount = mutation({
       throw new Error("User not found");
     }
 
+    const previousIsActive = user.isActive;
+
     // Deactivate and revoke all sessions
     await ctx.db.patch(userId, {
       isActive: false,
@@ -886,6 +889,19 @@ export const deactivateAccount = mutation({
     for (const session of sessions) {
       await ctx.db.delete(session._id);
     }
+
+    // Audit log: record account deactivation
+    await logAdminAction(ctx, {
+      adminUserId: userId, // User acting on themselves
+      action: "deactivate",
+      targetUserId: userId,
+      reason,
+      metadata: {
+        previousIsActive,
+        newIsActive: false,
+        sessionsRevoked: sessions.length,
+      },
+    });
 
     return { success: true, sessionsRevoked: sessions.length };
   },
@@ -906,8 +922,21 @@ export const reactivateAccount = mutation({
       throw new Error("Account is banned and cannot be reactivated");
     }
 
+    const previousIsActive = user.isActive;
+
     await ctx.db.patch(args.userId, {
       isActive: true,
+    });
+
+    // Audit log: record account reactivation
+    await logAdminAction(ctx, {
+      adminUserId: args.userId, // User acting on themselves
+      action: "reactivate",
+      targetUserId: args.userId,
+      metadata: {
+        previousIsActive,
+        newIsActive: true,
+      },
     });
 
     return { success: true };

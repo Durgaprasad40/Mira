@@ -8,6 +8,7 @@
  * @module
  */
 
+import type * as adminLog from "../adminLog.js";
 import type * as auth from "../auth.js";
 import type * as behaviorDetection from "../behaviorDetection.js";
 import type * as chatRooms from "../chatRooms.js";
@@ -53,6 +54,7 @@ import type {
 } from "convex/server";
 
 declare const fullApi: ApiFromModules<{
+  adminLog: typeof adminLog;
   auth: typeof auth;
   behaviorDetection: typeof behaviorDetection;
   chatRooms: typeof chatRooms;
