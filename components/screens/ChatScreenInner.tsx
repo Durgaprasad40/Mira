@@ -27,7 +27,7 @@ import { useQuery, useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { useAuthStore } from '@/stores/authStore';
 import { COLORS } from '@/lib/constants';
-import { MessageBubble, MessageInput, ProtectedMediaOptionsSheet, ProtectedMediaViewer, ReportModal } from '@/components/chat';
+import { MessageBubble, MessageInput, ProtectedMediaOptionsSheet, ProtectedMediaViewer, ReportModal, BottleSpinGame } from '@/components/chat';
 import { ProtectedMediaOptions } from '@/components/chat/ProtectedMediaOptionsSheet';
 import { ReportBlockModal } from '@/components/security/ReportBlockModal';
 import { Ionicons } from '@expo/vector-icons';
@@ -121,29 +121,40 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
   const currentMeta = conversationId ? demoMeta[conversationId] : undefined;
   const otherUserIdFromMeta = getOtherUserIdFromMeta(currentMeta);
 
-  // Navigation guard: Check if user is blocked or thread is expired
-  const [guardTriggered, setGuardTriggered] = useState(false);
+  // 5-3: Live re-check of blocked user status (not one-time)
+  // Re-runs whenever blockedUserIds changes, even if chat is already open
   useEffect(() => {
-    if (!isDemo || guardTriggered) return;
+    if (!isDemo) return;
 
-    // Guard 1: Blocked user
+    // Guard 1: Blocked user — re-check live when blockedUserIds changes
     if (otherUserIdFromMeta && isUserBlocked(otherUserIdFromMeta, blockedUserIds)) {
-      setGuardTriggered(true);
       logDebugEvent('BLOCK_OR_REPORT', 'Blocked user chat navigation prevented');
-      handleBack();
+      Alert.alert(
+        'User Blocked',
+        'You cannot view this conversation because you blocked this user.',
+        [{ text: 'OK', onPress: handleBack }]
+      );
       return;
     }
+  }, [isDemo, otherUserIdFromMeta, blockedUserIds, handleBack]);
 
-    // Guard 2: Expired confession thread
-    if (conversationId && isExpiredConfessionThread(currentMeta)) {
-      setGuardTriggered(true);
+  // 5-4: Expired thread guard with explanation alert (separate effect)
+  useEffect(() => {
+    if (!isDemo || !conversationId) return;
+
+    // Guard 2: Expired confession thread — show alert before navigating back
+    if (isExpiredConfessionThread(currentMeta)) {
       logDebugEvent('CHAT_EXPIRED', 'Expired confession thread cleaned on navigation');
       // Clean up the expired thread
       cleanupExpiredThreads([conversationId]);
-      handleBack();
-      return;
+      // 5-4: Show alert explaining why access is removed
+      Alert.alert(
+        'Chat Expired',
+        'This confession chat has expired after 24 hours. The conversation is no longer accessible.',
+        [{ text: 'OK', onPress: handleBack }]
+      );
     }
-  }, [isDemo, conversationId, otherUserIdFromMeta, blockedUserIds, currentMeta, guardTriggered, handleBack, cleanupExpiredThreads]);
+  }, [isDemo, conversationId, currentMeta, handleBack, cleanupExpiredThreads]);
 
   const hasMeta = !!demoMeta[conversationId ?? ''];
   const hasMessages = !!(demoConversations[conversationId ?? '']?.length);
@@ -237,6 +248,40 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
   const [reportModalVisible, setReportModalVisible] = useState(false);
   const [showReportBlock, setShowReportBlock] = useState(false);
 
+  // Truth/Dare game state
+  const [showTruthDareGame, setShowTruthDareGame] = useState(false);
+
+  // Handler to send Truth/Dare result message to chat
+  // Uses system message style: demo mode uses type:'system', Convex uses [SYSTEM:truthdare] marker
+  const handleSendTruthDareResult = useCallback(async (message: string) => {
+    if (!conversationId) return;
+
+    try {
+      if (isDemo) {
+        // Demo mode: native system message type with subtype
+        addDemoMessage(conversationId, {
+          _id: `td_${Date.now()}`,
+          content: message,
+          senderId: getDemoUserId(),
+          type: 'system',
+          systemSubtype: 'truthdare',
+          createdAt: Date.now(),
+        } as any); // Cast needed since DemoDmMessage doesn't have systemSubtype
+      } else if (userId) {
+        // Convex mode: prefix with hidden marker (stripped by MessageBubble)
+        const markedMessage = `[SYSTEM:truthdare]${message}`;
+        await sendMessage({
+          conversationId: conversationId as any,
+          senderId: userId as any,
+          content: markedMessage,
+          type: 'text',
+        });
+      }
+    } catch {
+      // Silent fail - game continues even if message fails
+    }
+  }, [conversationId, isDemo, userId, addDemoMessage, sendMessage]);
+
   const markDemoRead = useDemoDmStore((s) => s.markConversationRead);
   const markNotifReadForConvo = useDemoNotifStore((s) => s.markReadForConversation);
   useEffect(() => {
@@ -248,16 +293,24 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
     }
   }, [conversationId, userId, isDemo, markDemoRead, markNotifReadForConvo]);
 
-  // Auto-scroll only when new messages arrive AND user is near the bottom.
+  // B6 fix: Auto-scroll when new messages arrive AND (user is near bottom OR message is from current user)
   useEffect(() => {
     const count = messages?.length ?? 0;
-    if (count > prevMessageCountRef.current && isNearBottomRef.current) {
-      requestAnimationFrame(() => {
-        flatListRef.current?.scrollToEnd({ animated: true });
-      });
+    if (count > prevMessageCountRef.current) {
+      // Check if latest message is from current user
+      const latestMsg = messages?.[messages.length - 1];
+      const currentUserId = isDemo ? getDemoUserId() : userId;
+      const isSentByCurrentUser = latestMsg?.senderId === currentUserId;
+
+      // Scroll if near bottom OR if current user sent the message
+      if (isNearBottomRef.current || isSentByCurrentUser) {
+        requestAnimationFrame(() => {
+          flatListRef.current?.scrollToEnd({ animated: true });
+        });
+      }
     }
     prevMessageCountRef.current = count;
-  }, [messages?.length]);
+  }, [messages?.length, messages, isDemo, userId]);
 
   // Scroll to end when keyboard opens (WhatsApp behavior).
   // Always scroll — opening the keyboard means the user is engaged at the bottom.
@@ -271,15 +324,16 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
     return () => sub.remove();
   }, []);
 
+  // B5 fix: persist drafts in both demo and Convex modes
   const handleDraftChange = useCallback((text: string) => {
-    if (isDemo && conversationId) {
+    if (conversationId) {
       if (text) {
         setDemoDraft(conversationId, text);
       } else {
         clearDemoDraft(conversationId);
       }
     }
-  }, [isDemo, conversationId, setDemoDraft, clearDemoDraft]);
+  }, [conversationId, setDemoDraft, clearDemoDraft]);
 
   const handleSend = async (text: string, type: 'text' | 'template' = 'text') => {
     if (!activeConversation) return;
@@ -292,8 +346,10 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
     }
 
     if (isDemo) {
+      // C9 fix: use unique ID to prevent collision on rapid sends
+      const uniqueId = `dm_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
       addDemoMessage(conversationId!, {
-        _id: `dm_${Date.now()}`,
+        _id: uniqueId,
         content: text,
         type: 'text',
         senderId: getDemoUserId(),
@@ -323,6 +379,8 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
           content: text,
         });
       }
+      // B5 fix: clear draft after successful send in Convex mode
+      if (conversationId) clearDemoDraft(conversationId);
     } catch (error: any) {
       Toast.show(error.message || 'Failed to send — tap send to retry');
       throw error; // Re-throw so MessageInput can restore text for retry
@@ -459,6 +517,19 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
         {activeConversation.otherUser.isVerified && (
           <Ionicons name="checkmark-circle" size={20} color={COLORS.primary} style={{ marginRight: 8 }} />
         )}
+        {/* Truth/Dare game button - only for matched users (non-pre-match) */}
+        {!activeConversation.isPreMatch && (
+          <TouchableOpacity
+            onPress={() => setShowTruthDareGame(true)}
+            hitSlop={8}
+            style={styles.gameButton}
+          >
+            <View style={styles.truthDareButton}>
+              <Ionicons name="wine" size={18} color={COLORS.white} />
+              <Text style={styles.truthDareLabel}>T/D</Text>
+            </View>
+          </TouchableOpacity>
+        )}
         <TouchableOpacity
           onPress={() => setShowReportBlock(true)}
           hitSlop={8}
@@ -524,7 +595,8 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
           onScroll={onScroll}
           scrollEventThrottle={16}
           keyboardShouldPersistTaps="handled"
-          keyboardDismissMode="interactive"
+          // 5-5: Use "on-drag" to avoid conflict with auto-scroll on new messages
+          keyboardDismissMode="on-drag"
         />
         <View style={{ paddingBottom: insets.bottom }}>
           <MessageInput
@@ -537,7 +609,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
             subscriptionTier={isDemo ? 'premium' : (currentUser?.subscriptionTier || 'free')}
             canSendCustom={canSendCustom}
             recipientName={activeConversation.otherUser.name}
-            initialText={isDemo ? (demoDraft ?? '') : ''}
+            initialText={demoDraft ?? ''}
             onTextChange={handleDraftChange}
           />
         </View>
@@ -585,6 +657,17 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
         reportedUserName={activeConversation.otherUser.name}
         currentUserId={userId || getDemoUserId()}
         onBlockSuccess={() => router.back()}
+      />
+
+      {/* Truth/Dare Bottle Spin Game */}
+      <BottleSpinGame
+        visible={showTruthDareGame}
+        onClose={() => setShowTruthDareGame(false)}
+        currentUserName={isDemo ? 'You' : (currentUser?.name || 'You')}
+        otherUserName={activeConversation.otherUser.name}
+        conversationId={conversationId || ''}
+        userId={userId || getDemoUserId()}
+        onSendResultMessage={handleSendTruthDareResult}
       />
     </View>
   );
@@ -648,6 +731,28 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: COLORS.textLight,
     marginTop: 2,
+  },
+  gameButton: {
+    padding: 4,
+    minWidth: 44,
+    minHeight: 44,
+    alignItems: 'center' as const,
+    justifyContent: 'center' as const,
+    marginRight: 4,
+  },
+  truthDareButton: {
+    flexDirection: 'row' as const,
+    alignItems: 'center' as const,
+    backgroundColor: COLORS.secondary,
+    paddingHorizontal: 8,
+    paddingVertical: 6,
+    borderRadius: 14,
+    gap: 4,
+  },
+  truthDareLabel: {
+    fontSize: 11,
+    fontWeight: '700' as const,
+    color: COLORS.white,
   },
   moreButton: {
     padding: 4,

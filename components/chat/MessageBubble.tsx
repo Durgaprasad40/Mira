@@ -38,6 +38,10 @@ interface MessageBubbleProps {
 // Detect messages that are only emoji (1–8 emoji, no other text)
 const EMOJI_ONLY_RE = /^[\p{Emoji_Presentation}\p{Extended_Pictographic}\u200d\uFE0F]{1,8}$/u;
 
+// System message marker for Convex mode (hidden from UI, used to detect system messages)
+// Format: [SYSTEM:subtype]actual message content
+const SYSTEM_MARKER_RE = /^\[SYSTEM:(\w+)\]/;
+
 export function MessageBubble({ message, isOwn, otherUserName, currentUserId, onMediaPress, onProtectedMediaPress }: MessageBubbleProps) {
   const isEmojiOnly = message.type === 'text' && EMOJI_ONLY_RE.test(message.content.trim());
 
@@ -46,9 +50,20 @@ export function MessageBubble({ message, isOwn, otherUserName, currentUserId, on
     return date.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
   };
 
-  // System messages
+  // System messages (native type)
   if (message.type === 'system') {
     return <SystemMessage text={message.content} subtype={message.systemSubtype as any} />;
+  }
+
+  // Detect system messages via hidden marker (Convex fallback)
+  // Format: [SYSTEM:subtype]actual message content
+  if (message.type === 'text') {
+    const markerMatch = message.content.match(SYSTEM_MARKER_RE);
+    if (markerMatch) {
+      const subtype = markerMatch[1];
+      const displayText = message.content.slice(markerMatch[0].length);
+      return <SystemMessage text={displayText} subtype={subtype as any} />;
+    }
   }
 
   // Protected media messages (detected via mediaId or isProtected flag)

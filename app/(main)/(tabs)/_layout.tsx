@@ -10,6 +10,8 @@ import { useDemoDmStore, computeUnreadConversationCount } from "@/stores/demoDmS
 import { useConfessionStore } from "@/stores/confessionStore";
 import { asUserId } from "@/convex/id";
 import { AppErrorBoundary, registerErrorBoundaryNavigation } from "@/components/safety";
+// 4-6: Import useNotifications for global badge count
+import { useNotifications } from "@/hooks/useNotifications";
 
 export default function MainTabsLayout() {
   const router = useRouter();
@@ -41,6 +43,9 @@ export default function MainTabsLayout() {
   });
 
   const taggedBadgeCount = isDemoMode ? demoTaggedCount : (convexTaggedCount || 0);
+
+  // 4-6: Get global notification count for Profile tab badge
+  const { unseenCount: notificationCount } = useNotifications();
 
   return (
     <AppErrorBoundary name="MainTabs">
@@ -116,6 +121,9 @@ export default function MainTabsLayout() {
             tabBarIcon: ({ color, size }) => (
               <Ionicons name="person" size={size} color={color} />
             ),
+            // 4-6: Show notification badge on Profile tab
+            tabBarBadge: notificationCount > 0 ? notificationCount : undefined,
+            tabBarBadgeStyle: { backgroundColor: COLORS.error, fontSize: 10 },
           }}
         />
       </Tabs>

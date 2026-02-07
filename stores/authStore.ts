@@ -24,6 +24,9 @@ interface AuthState {
   setHasHydrated: (state: boolean) => void;
 }
 
+// C8 fix: hydration timeout constant
+const HYDRATION_TIMEOUT_MS = 5000;
+
 export const useAuthStore = create<AuthState>()(
   persist(
     (set) => ({
@@ -65,9 +68,21 @@ export const useAuthStore = create<AuthState>()(
     {
       name: "auth-storage",
       storage: createJSONStorage(() => AsyncStorage),
-      onRehydrateStorage: () => (state) => {
+      onRehydrateStorage: () => (state, error) => {
+        // C9 fix: log rehydration errors
+        if (error) {
+          console.error('[authStore] Rehydration error:', error);
+        }
         state?.setHasHydrated(true);
       },
     },
   ),
 );
+
+// C8 fix: hydration timeout fallback — if AsyncStorage blocks, force hydration after timeout
+setTimeout(() => {
+  if (!useAuthStore.getState()._hasHydrated) {
+    console.warn('[authStore] Hydration timeout — forcing hydrated state');
+    useAuthStore.getState().setHasHydrated(true);
+  }
+}, HYDRATION_TIMEOUT_MS);

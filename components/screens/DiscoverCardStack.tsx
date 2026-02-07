@@ -115,14 +115,16 @@ export function DiscoverCardStack({ theme = "light", externalProfiles, hideHeade
     seed: s.seed,
     blockedUserIds: s.blockedUserIds,
     matchCount: s.matches.length,          // only need length for exclusion deps
+    swipedCount: s.swipedProfileIds.length, // 3B-1: track swiped count for deps
     getExcludedUserIds: s.getExcludedUserIds,
+    recordSwipe: s.recordSwipe,            // 3B-1: record swipes to prevent repeats
   })));
   // Derive excluded IDs as a Set for O(1) lookup in filters.
-  // Deps: blockedUserIds + matchCount — changes when a new match/block occurs.
+  // 3B-1: Deps now include swipedCount so excludedSet updates after each swipe
   const excludedSet = useMemo(() => {
     if (!isDemoMode) return new Set(demo.blockedUserIds);
     return new Set(demo.getExcludedUserIds());
-  }, [demo.blockedUserIds, demo.matchCount, demo.getExcludedUserIds]);
+  }, [demo.blockedUserIds, demo.matchCount, demo.swipedCount, demo.getExcludedUserIds]);
   useEffect(() => { if (isDemoMode) demo.seed(); }, [demo.seed]);
 
   // Profile data — memoize args to prevent Convex re-subscriptions
@@ -146,10 +148,9 @@ export function DiscoverCardStack({ theme = "light", externalProfiles, hideHeade
   // → touches dropped between old/new panResponder attachment.
   const latestProfiles: ProfileData[] = useMemo(() => {
     if (externalProfiles) {
-      // Filter excluded from external profiles (e.g. explore categories)
-      const filtered = isDemoMode
-        ? externalProfiles.filter((p: any) => !excludedSet.has(p._id ?? p.id))
-        : externalProfiles;
+      // 3B-6: Filter excluded from external profiles for both demo and live mode
+      // (blocked users, matched users, swiped users should not appear in explore categories)
+      const filtered = externalProfiles.filter((p: any) => !excludedSet.has(p._id ?? p.id));
       const mapped = filtered.map(toProfileData);
       // Demo mode: preserve array order for deterministic Discover feed
       return isDemoMode ? mapped : rankProfiles(mapped);
@@ -191,6 +192,8 @@ export function DiscoverCardStack({ theme = "light", externalProfiles, hideHeade
     replenishingRef.current = true;
     if (__DEV__) console.log('[DiscoverCardStack] demo pool exhausted — auto-replenishing');
     useDemoStore.getState().resetDiscoverPool();
+    // 7-3: Guard against setState after unmount
+    if (!mountedRef.current) return;
     setIndex(0);
   }, [profiles.length, externalProfiles]);
 
@@ -368,6 +371,9 @@ export function DiscoverCardStack({ theme = "light", externalProfiles, hideHeade
 
       try {
         if (isDemoMode) {
+          // 3B-1: Record swipe to prevent profile from reappearing
+          demo.recordSwipe(swipedProfile.id);
+
           if (direction === "right" && Math.random() > 0.7) {
             // Save match + DM thread BEFORE navigating.
             useDemoStore.getState().simulateMatch(swipedProfile.id);
@@ -375,11 +381,23 @@ export function DiscoverCardStack({ theme = "light", externalProfiles, hideHeade
             if (__DEV__) console.log(`[DiscoverCardStack] match! navigating to celebration userId=${swipedProfile.id}`);
             navigatingRef.current = true;
             // Defer navigation so advanceCard's setState commits first
+            // B6 fix: wrap navigation in try/catch and reset navigatingRef on failure
+            // 3B-4: Defer swipe lock release until after navigation initiated
             InteractionManager.runAfterInteractions(() => {
-              if (!mountedRef.current) return;
-              trackEvent({ name: 'match_created', matchId, otherUserId: swipedProfile.id });
-              router.push(`/(main)/match-celebration?matchId=${matchId}&userId=${swipedProfile.id}` as any);
+              if (!mountedRef.current) {
+                swipeLockRef.current = false;
+                return;
+              }
+              try {
+                trackEvent({ name: 'match_created', matchId, otherUserId: swipedProfile.id });
+                router.push(`/(main)/match-celebration?matchId=${matchId}&userId=${swipedProfile.id}` as any);
+              } catch {
+                navigatingRef.current = false;
+              } finally {
+                swipeLockRef.current = false;
+              }
             });
+            return; // 3B-4: Don't release lock here; deferred to callback
           }
           // Release swipe lock (navigatingRef guards further swipes if navigating)
           swipeLockRef.current = false;
@@ -388,22 +406,42 @@ export function DiscoverCardStack({ theme = "light", externalProfiles, hideHeade
 
         if (!convexUserId) { swipeLockRef.current = false; return; }
         const action = direction === "left" ? "pass" : direction === "up" ? "super_like" : "like";
-        const result = await swipeMutation({
-          fromUserId: convexUserId,
-          toUserId: swipedProfile.id as any,
-          action: action as any,
-          message: message,
-        });
+        // B5 fix: wrap mutation in Promise.race with 6s timeout to prevent stuck swipe lock
+        const SWIPE_TIMEOUT_MS = 6000;
+        const timeoutPromise = new Promise<null>((_, reject) =>
+          setTimeout(() => reject(new Error("Swipe timed out")), SWIPE_TIMEOUT_MS)
+        );
+        const result = await Promise.race([
+          swipeMutation({
+            fromUserId: convexUserId,
+            toUserId: swipedProfile.id as any,
+            action: action as any,
+            message: message,
+          }),
+          timeoutPromise,
+        ]);
 
         // Guard: check mounted/focused before navigating on match
         if (!mountedRef.current || !isFocusedRef.current) return;
         if (result?.isMatch && !navigatingRef.current) {
           navigatingRef.current = true;
+          // B6 fix: wrap navigation in try/catch and reset navigatingRef on failure
+          // 3B-4: Defer swipe lock release until after navigation initiated
           InteractionManager.runAfterInteractions(() => {
-            if (!mountedRef.current) return;
-            trackEvent({ name: 'match_created', matchId: result.matchId, otherUserId: swipedProfile.id });
-            router.push(`/(main)/match-celebration?matchId=${result.matchId}&userId=${swipedProfile.id}`);
+            if (!mountedRef.current) {
+              swipeLockRef.current = false;
+              return;
+            }
+            try {
+              trackEvent({ name: 'match_created', matchId: result.matchId, otherUserId: swipedProfile.id });
+              router.push(`/(main)/match-celebration?matchId=${result.matchId}&userId=${swipedProfile.id}`);
+            } catch {
+              navigatingRef.current = false;
+            } finally {
+              swipeLockRef.current = false;
+            }
           });
+          return; // 3B-4: Don't release lock in outer finally; deferred to callback
         }
       } catch (error: any) {
         if (!mountedRef.current) return;
@@ -412,7 +450,7 @@ export function DiscoverCardStack({ theme = "light", externalProfiles, hideHeade
         swipeLockRef.current = false;
       }
     },
-    [convexUserId, swipeMutation, advanceCard, hasReachedLikeLimit, hasReachedStandOutLimit, incrementLikes, incrementStandOuts],
+    [convexUserId, swipeMutation, advanceCard, hasReachedLikeLimit, hasReachedStandOutLimit, incrementLikes, incrementStandOuts, demo.recordSwipe],
   );
 
   const animateSwipe = useCallback(
@@ -445,6 +483,11 @@ export function DiscoverCardStack({ theme = "light", externalProfiles, hideHeade
         activeAnimationRef.current = null;
         if (!finished) {
           // Animation was interrupted (blur/unmount) — release lock
+          swipeLockRef.current = false;
+          return;
+        }
+        // B4 fix: guard against unmount before calling handleSwipe
+        if (!mountedRef.current) {
           swipeLockRef.current = false;
           return;
         }

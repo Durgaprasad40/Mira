@@ -9,6 +9,7 @@ export default function OnboardingLayout() {
       <Stack.Screen name="otp" />
       <Stack.Screen name="password" />
       <Stack.Screen name="basic-info" />
+      <Stack.Screen name="consent" />
       <Stack.Screen name="photo-upload" />
       <Stack.Screen name="face-verification" />
       <Stack.Screen name="additional-photos" />

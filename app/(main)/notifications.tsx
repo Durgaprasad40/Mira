@@ -74,10 +74,15 @@ export default function NotificationsScreen() {
     return groups.filter((group) => group.notifications.length > 0);
   };
 
+  // 4-4: Pass notificationId in navigation params so destination knows why it was opened
   const handleNotificationPress = (notification: AppNotification) => {
     if (!notification.isRead) {
       markRead(notification._id);
     }
+
+    // 4-4: Build common query params for context
+    const notifParams = `source=notification&notificationId=${notification._id}`;
+    const dedupeParam = notification.dedupeKey ? `&dedupeKey=${encodeURIComponent(notification.dedupeKey)}` : '';
 
     switch (notification.type) {
       case 'match':
@@ -85,44 +90,49 @@ export default function NotificationsScreen() {
       case 'match_created':
         if (notification.data?.otherUserId) {
           const mId = notification.data.matchId ?? `match_${notification.data.otherUserId}`;
-          router.push(`/(main)/match-celebration?matchId=${mId}&userId=${notification.data.otherUserId}` as any);
+          router.push(`/(main)/match-celebration?matchId=${mId}&userId=${notification.data.otherUserId}&${notifParams}${dedupeParam}` as any);
         }
         break;
       case 'like':
       case 'like_received':
-        router.push('/(main)/likes' as any);
+        router.push(`/(main)/likes?${notifParams}${dedupeParam}` as any);
         break;
       case 'super_like':
       case 'superlike':
       case 'super_like_received':
-        router.push('/(main)/likes' as any);
+        router.push(`/(main)/likes?${notifParams}${dedupeParam}` as any);
         break;
       case 'message':
       case 'new_message':
         if (notification.data?.conversationId) {
-          router.push(`/(main)/(tabs)/messages/chat/${notification.data.conversationId}?source=notification` as any);
+          router.push(`/(main)/(tabs)/messages/chat/${notification.data.conversationId}?${notifParams}${dedupeParam}` as any);
         } else if (notification.data?.userId) {
-          router.push(`/(main)/(tabs)/messages/chat/${notification.data.userId}?source=notification` as any);
+          router.push(`/(main)/(tabs)/messages/chat/${notification.data.userId}?${notifParams}${dedupeParam}` as any);
         }
         break;
       case 'crossed_paths':
-        router.push('/(main)/(tabs)/nearby' as any);
+        router.push(`/(main)/(tabs)/nearby?${notifParams}${dedupeParam}` as any);
         break;
       case 'profile_viewed':
-        router.push('/(main)/(tabs)/home' as any);
+        router.push(`/(main)/(tabs)/home?${notifParams}${dedupeParam}` as any);
         break;
       case 'system':
-        router.push('/(main)/settings' as any);
+        router.push(`/(main)/settings?${notifParams}${dedupeParam}` as any);
         break;
       case 'subscription':
-        router.push('/(main)/subscription');
+        router.push(`/(main)/subscription?${notifParams}${dedupeParam}` as any);
         break;
       case 'confession_reaction':
       case 'confession_reply':
         if (notification.data?.confessionId) {
           router.push({
             pathname: '/(main)/confession-thread',
-            params: { confessionId: notification.data.confessionId },
+            params: {
+              confessionId: notification.data.confessionId,
+              source: 'notification',
+              notificationId: notification._id,
+              dedupeKey: notification.dedupeKey,
+            },
           } as any);
         }
         break;

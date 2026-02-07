@@ -667,6 +667,7 @@ export type OnboardingStep =
   | "otp"
   | "password"
   | "basic_info"
+  | "consent"
   | "photo_upload"
   | "face_verification"
   | "additional_photos"

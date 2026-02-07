@@ -153,6 +153,9 @@ export default defineSchema({
     onboardingCompleted: v.boolean(),
     onboardingStep: v.optional(v.string()),
 
+    // 8C: Consent timestamp (required before permissions/photo upload)
+    consentAcceptedAt: v.optional(v.number()),
+
     // Privacy
     showLastSeen: v.optional(v.boolean()),
     hideDistance: v.optional(v.boolean()),        // true = larger fuzz on Nearby map (200-400m vs 20-100m)
@@ -172,16 +175,49 @@ export default defineSchema({
     isBanned: v.boolean(),
     banReason: v.optional(v.string()),
 
+    // 3A1-4: Login rate limiting
+    loginAttempts: v.optional(v.number()),
+    lastLoginAttemptAt: v.optional(v.number()),
+
+    // 3A2: Password hash versioning (1=legacy, 2=scrypt)
+    hashVersion: v.optional(v.number()),
+
     // Security & Verification
-    verificationStatus: v.optional(v.union(v.literal('unverified'), v.literal('pending_verification'), v.literal('verified'))),
+    // 8A: Expanded photo verification states
+    verificationStatus: v.optional(v.union(
+      v.literal('unverified'),
+      v.literal('pending_verification'), // Legacy: maps to pending_auto
+      v.literal('pending_auto'),          // Auto-verification in progress
+      v.literal('pending_manual'),        // Needs human review
+      v.literal('verified'),
+      v.literal('rejected')
+    )),
+    // 8A: Reason for verification failure/pending
+    photoVerificationReason: v.optional(v.union(
+      v.literal('no_face_detected'),
+      v.literal('multiple_faces'),
+      v.literal('blurry'),
+      v.literal('suspected_fake'),
+      v.literal('nsfw_content'),
+      v.literal('low_quality'),
+      v.literal('manual_review_required')
+    )),
     emailVerified: v.optional(v.boolean()),
     emailVerifiedAt: v.optional(v.number()),
+    // 8B: Email verification token (stored as hash for security)
+    emailVerificationTokenHash: v.optional(v.string()),
+    emailVerificationExpiresAt: v.optional(v.number()),
+    // 8B: Session revocation timestamp - all sessions created before this are invalid
+    sessionsRevokedAt: v.optional(v.number()),
     trustScore: v.optional(v.number()),
     trustScoreUpdatedAt: v.optional(v.number()),
     primaryDeviceFingerprintId: v.optional(v.id('deviceFingerprints')),
     verificationReminderDismissedAt: v.optional(v.number()),
     verificationEnforcementLevel: v.optional(v.union(v.literal('none'), v.literal('gentle_reminder'), v.literal('reduced_reach'), v.literal('security_only'))),
     profileQualityScore: v.optional(v.number()),
+
+    // Admin access (set manually for authorized users)
+    isAdmin: v.optional(v.boolean()),
   })
     .index('by_email', ['email'])
     .index('by_phone', ['phone'])
@@ -356,12 +392,20 @@ export default defineSchema({
       conversationId: v.optional(v.string()),
       userId: v.optional(v.string()),
     })),
+    // 4-1: Deduplication key — same key = same logical event (upsert instead of insert)
+    dedupeKey: v.optional(v.string()),
     readAt: v.optional(v.number()),
     sentAt: v.optional(v.number()),
     createdAt: v.number(),
+    // 4-2: Expiry timestamp for cleanup (24h after creation)
+    expiresAt: v.optional(v.number()),
   })
     .index('by_user', ['userId'])
-    .index('by_user_unread', ['userId', 'readAt']),
+    .index('by_user_unread', ['userId', 'readAt'])
+    // 4-1: Lookup by userId+dedupeKey for upsert
+    .index('by_user_dedupe', ['userId', 'dedupeKey'])
+    // 4-2: Cleanup index for expired notifications
+    .index('by_expires', ['expiresAt']),
 
   // Crossed Paths table
   crossedPaths: defineTable({
@@ -475,6 +519,7 @@ export default defineSchema({
     expiresAt: v.number(),
     verifiedAt: v.optional(v.number()),
     attempts: v.number(),
+    lastAttemptAt: v.optional(v.number()), // 3A1-3: for lockout timing
     createdAt: v.number(),
   })
     .index('by_identifier', ['identifier'])

@@ -42,7 +42,24 @@ export function ProtectedMediaViewer({
   const [mediaUrl, setMediaUrl] = useState<string | null>(null);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const hasMarkedViewed = useRef(false);
+  // 5-2: Prevent duplicate markExpired calls
+  const hasExpired = useRef(false);
+  // 5-1: Track mounted state to prevent setState after unmount
+  const mountedRef = useRef(true);
   const [requestedAccess, setRequestedAccess] = useState(false);
+
+  // 5-1: Track mounted state
+  React.useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      // 5-1: Clear any pending timers on unmount
+      if (timerRef.current) {
+        clearInterval(timerRef.current);
+        timerRef.current = null;
+      }
+    };
+  }, []);
 
   const mediaData = useQuery(
     api.protectedMedia.getMediaUrl,
@@ -101,6 +118,7 @@ export function ProtectedMediaViewer({
   }, [visible, mediaData]);
 
   // Countdown timer
+  // 5-1: Check mountedRef before setState to prevent memory leaks
   useEffect(() => {
     if (timeLeft === null || timeLeft <= 0) {
       if (timeLeft === 0) {
@@ -110,6 +128,11 @@ export function ProtectedMediaViewer({
     }
 
     timerRef.current = setInterval(() => {
+      // 5-1: Guard against setState after unmount
+      if (!mountedRef.current) {
+        if (timerRef.current) clearInterval(timerRef.current);
+        return;
+      }
       setTimeLeft((prev) => {
         if (prev === null || prev <= 1) {
           if (timerRef.current) clearInterval(timerRef.current);
@@ -120,11 +143,17 @@ export function ProtectedMediaViewer({
     }, 1000);
 
     return () => {
-      if (timerRef.current) clearInterval(timerRef.current);
+      if (timerRef.current) {
+        clearInterval(timerRef.current);
+        timerRef.current = null;
+      }
     };
   }, [timeLeft !== null]);
 
+  // 5-2: Guard against duplicate markExpired calls
   const handleExpire = useCallback(() => {
+    if (hasExpired.current) return; // Already expired
+    hasExpired.current = true;
     markExpired({
       messageId: messageId as any,
       userId: userId as any,
@@ -133,19 +162,29 @@ export function ProtectedMediaViewer({
   }, [messageId, userId, markExpired]);
 
   const handleClose = useCallback(() => {
-    // If view-once, expire on close
-    if (mediaData?.viewOnce) {
+    // 5-1: Clear timer before any state changes
+    if (timerRef.current) {
+      clearInterval(timerRef.current);
+      timerRef.current = null;
+    }
+
+    // 5-2: If view-once, expire on close (only once)
+    if (mediaData?.viewOnce && !hasExpired.current) {
+      hasExpired.current = true;
       markExpired({
         messageId: messageId as any,
         userId: userId as any,
       });
     }
 
-    setMediaUrl(null);
-    setTimeLeft(null);
+    // 5-1: Only update state if still mounted
+    if (mountedRef.current) {
+      setMediaUrl(null);
+      setTimeLeft(null);
+      setRequestedAccess(false);
+    }
     hasMarkedViewed.current = false;
-    setRequestedAccess(false);
-    if (timerRef.current) clearInterval(timerRef.current);
+    hasExpired.current = false; // Reset for next open
     onClose();
   }, [mediaData, messageId, userId, markExpired, onClose]);
 

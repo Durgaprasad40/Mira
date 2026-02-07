@@ -42,6 +42,12 @@ export const DEMO_USER = {
   dateOfBirth: '1995-01-15',
   bio: 'This is demo mode! Set up Convex to use real data.',
   isVerified: false,
+  // 8A: Demo user starts unverified until they complete onboarding with photo
+  verificationStatus: 'unverified' as 'unverified' | 'pending_auto' | 'pending_manual' | 'verified' | 'rejected',
+  // 8B: Email verification status
+  emailVerified: false,
+  // 8C: Consent timestamp (auto-set for demo users with photos)
+  consentAcceptedAt: undefined as number | undefined,
   city: 'Mumbai',
   latitude: 19.076,
   longitude: 72.8777,
@@ -78,6 +84,9 @@ export function getDemoCurrentUser(): typeof DEMO_USER {
   const stored = userId ? state.demoProfiles[userId] : null;
   if (!stored) return DEMO_USER;
 
+  // 8A: Auto-verify demo user if they have completed profile with photos
+  const hasPhotos = stored.photos?.length > 0;
+
   return {
     ...DEMO_USER,
     _id: userId ?? DEMO_USER._id,
@@ -94,6 +103,12 @@ export function getDemoCurrentUser(): typeof DEMO_USER {
     maxAge: stored.maxAge ?? DEMO_USER.maxAge,
     maxDistance: stored.maxDistance ?? DEMO_USER.maxDistance,
     isVerified: false, // demo user is not phone-verified
+    // 8A: Demo user is auto-verified if they have photos
+    verificationStatus: (hasPhotos ? 'verified' : 'unverified') as typeof DEMO_USER.verificationStatus,
+    // 8B: Demo user email is auto-verified after profile creation
+    emailVerified: hasPhotos,
+    // 8C: Demo user consent auto-accepted after profile creation
+    consentAcceptedAt: hasPhotos ? Date.now() : undefined,
   };
 }
 

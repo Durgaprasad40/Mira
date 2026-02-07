@@ -19,11 +19,13 @@ import { Ionicons } from '@expo/vector-icons';
 import { Image } from 'expo-image';
 import { isDemoMode } from '@/hooks/useConvex';
 import { useDemoStore } from '@/stores/demoStore';
+import { useOnboardingStore } from '@/stores/onboardingStore';
 import { getDemoCurrentUser } from '@/lib/demoData';
 
 export default function ProfileScreen() {
   const router = useRouter();
   const userId = useAuthStore((s) => s.userId);
+  const token = useAuthStore((s) => s.token);
   const logout = useAuthStore((s) => s.logout);
 
   const convexUser = useQuery(
@@ -36,7 +38,16 @@ export default function ProfileScreen() {
     !isDemoMode && userId ? { userId: userId as any } : 'skip'
   );
 
+  // Admin check for showing admin menu
+  const adminCheck = useQuery(
+    api.users.checkIsAdmin,
+    !isDemoMode && userId ? { userId: userId as any } : 'skip'
+  );
+  const isAdmin = adminCheck?.isAdmin === true;
+
   const deactivateAccount = useMutation(api.users.deactivateAccount);
+  // 3A1-2: Server-side logout mutation
+  const serverLogout = useMutation(api.auth.logout);
 
   // In demo mode, build a currentUser-like object from demoStore
   const demoUser = isDemoMode ? getDemoCurrentUser() : null;
@@ -55,16 +66,29 @@ export default function ProfileScreen() {
 
   if (__DEV__) console.log(`[Profile] mode=${isDemoMode ? 'demo' : 'live'} using ${isDemoMode ? 'local' : 'convex'} user`);
 
+  // 3A1-2: Logout clears client + server + onboarding
   const handleLogout = () => {
     Alert.alert('Logout', 'Are you sure you want to logout?', [
       { text: 'Cancel', style: 'cancel' },
       {
         text: 'Logout',
         style: 'destructive',
-        onPress: () => {
+        onPress: async () => {
+          try {
+            // Call server logout BEFORE clearing local state
+            if (!isDemoMode && token) {
+              await serverLogout({ token });
+            }
+          } catch {
+            // Ignore server errors — still clear local state
+          }
+          // Clear demo store
           if (isDemoMode) {
             useDemoStore.getState().demoLogout();
           }
+          // Clear onboarding store so previous user's data doesn't leak
+          useOnboardingStore.getState().reset();
+          // Clear auth state
           logout();
           router.replace('/(auth)/welcome');
         },
@@ -89,6 +113,8 @@ export default function ProfileScreen() {
               } else {
                 useDemoStore.getState().demoLogout();
               }
+              // 3A1-2: Also clear onboarding store on deactivate
+              useOnboardingStore.getState().reset();
               logout();
               router.replace('/(auth)/welcome');
             } catch (error: any) {
@@ -221,6 +247,17 @@ export default function ProfileScreen() {
           <Text style={styles.menuText}>Account</Text>
           <Ionicons name="chevron-forward" size={20} color={COLORS.textLight} />
         </TouchableOpacity>
+
+        {isAdmin && (
+          <TouchableOpacity
+            style={[styles.menuItem, styles.adminMenuItem]}
+            onPress={() => router.push('/(main)/admin/verification')}
+          >
+            <Ionicons name="shield-outline" size={24} color={COLORS.primary} />
+            <Text style={[styles.menuText, { color: COLORS.primary }]}>Admin: Verification Queue</Text>
+            <Ionicons name="chevron-forward" size={20} color={COLORS.primary} />
+          </TouchableOpacity>
+        )}
       </View>
 
       <View style={styles.footer}>
@@ -341,6 +378,10 @@ const styles = StyleSheet.create({
     padding: 16,
     borderBottomWidth: 1,
     borderBottomColor: COLORS.border,
+  },
+  adminMenuItem: {
+    backgroundColor: COLORS.primary + '10',
+    borderBottomColor: COLORS.primary + '30',
   },
   menuText: {
     flex: 1,

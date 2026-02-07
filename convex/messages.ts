@@ -33,6 +33,17 @@ export const sendMessage = mutation({
     const sender = await ctx.db.get(senderId);
     if (!sender) throw new Error('Sender not found');
 
+    // 8B: Check email verification before allowing message send
+    if (sender.emailVerified !== true) {
+      throw new Error('Please verify your email address before sending messages.');
+    }
+
+    // 8A: Check photo verification before allowing message send
+    const verificationStatus = sender.verificationStatus || 'unverified';
+    if (verificationStatus !== 'verified') {
+      throw new Error('Please complete profile verification before sending messages.');
+    }
+
     // Check message limits for pre-match conversations (men only)
     if (conversation.isPreMatch && sender.gender === 'male') {
       // Reset weekly messages if needed
@@ -90,16 +101,35 @@ export const sendMessage = mutation({
     });
 
     // Create notification for recipient
+    // 9-5: Add TTL and dedupe key for message notifications
     const recipientId = conversation.participants.find((id) => id !== senderId);
     if (recipientId) {
-      await ctx.db.insert('notifications', {
-        userId: recipientId,
-        type: 'message',
-        title: 'New Message',
-        body: type === 'text' ? maskedContent.substring(0, 50) : 'Sent you a message',
-        data: { conversationId: conversationId },
-        createdAt: now,
-      });
+      const dedupeKey = `message:${conversationId}:unread`;
+      // Check for existing notification with same dedupe key
+      const existingNotif = await ctx.db
+        .query('notifications')
+        .withIndex('by_user_dedupe', (q) => q.eq('userId', recipientId).eq('dedupeKey', dedupeKey))
+        .first();
+
+      if (existingNotif) {
+        // Update existing notification instead of creating duplicate
+        await ctx.db.patch(existingNotif._id, {
+          body: type === 'text' ? maskedContent.substring(0, 50) : 'Sent you a message',
+          createdAt: now,
+          expiresAt: now + 24 * 60 * 60 * 1000,
+        });
+      } else {
+        await ctx.db.insert('notifications', {
+          userId: recipientId,
+          type: 'message',
+          title: 'New Message',
+          body: type === 'text' ? maskedContent.substring(0, 50) : 'Sent you a message',
+          data: { conversationId: conversationId },
+          dedupeKey,
+          createdAt: now,
+          expiresAt: now + 24 * 60 * 60 * 1000,
+        });
+      }
     }
 
     return { success: true, messageId };
@@ -120,6 +150,17 @@ export const sendPreMatchMessage = mutation({
 
     const fromUser = await ctx.db.get(fromUserId);
     if (!fromUser) throw new Error('User not found');
+
+    // 9-1: Check email verification before allowing pre-match message
+    if (fromUser.emailVerified !== true) {
+      throw new Error('Please verify your email address before sending messages.');
+    }
+
+    // 9-1: Check photo verification before allowing pre-match message
+    const verificationStatus = fromUser.verificationStatus || 'unverified';
+    if (verificationStatus !== 'verified') {
+      throw new Error('Please complete profile verification before sending messages.');
+    }
 
     // Check if already have a conversation
     let conversation = await ctx.db
@@ -193,15 +234,32 @@ export const sendPreMatchMessage = mutation({
       lastMessageAt: now,
     });
 
-    // Notify recipient
-    await ctx.db.insert('notifications', {
-      userId: toUserId,
-      type: 'message',
-      title: `${fromUser.name} sent you a message`,
-      body: maskedContent.substring(0, 50),
-      data: { conversationId: conversation._id, userId: fromUserId },
-      createdAt: now,
-    });
+    // 9-5: Notify recipient with TTL and dedupe
+    const dedupeKey = `message:${conversation._id}:unread`;
+    const existingNotif = await ctx.db
+      .query('notifications')
+      .withIndex('by_user_dedupe', (q) => q.eq('userId', toUserId).eq('dedupeKey', dedupeKey))
+      .first();
+
+    if (existingNotif) {
+      await ctx.db.patch(existingNotif._id, {
+        title: `${fromUser.name} sent you a message`,
+        body: maskedContent.substring(0, 50),
+        createdAt: now,
+        expiresAt: now + 24 * 60 * 60 * 1000,
+      });
+    } else {
+      await ctx.db.insert('notifications', {
+        userId: toUserId,
+        type: 'message',
+        title: `${fromUser.name} sent you a message`,
+        body: maskedContent.substring(0, 50),
+        data: { conversationId: conversation._id, userId: fromUserId },
+        dedupeKey,
+        createdAt: now,
+        expiresAt: now + 24 * 60 * 60 * 1000,
+      });
+    }
 
     return { success: true, messageId, conversationId: conversation._id };
   },

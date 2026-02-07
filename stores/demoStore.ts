@@ -27,6 +27,8 @@ export interface DemoProfile {
   gender: string;
   bio: string;
   isVerified: boolean;
+  // 8A: Verification status for demo profiles (all demo profiles are 'verified')
+  verificationStatus?: 'unverified' | 'pending_auto' | 'pending_manual' | 'verified' | 'rejected';
   city: string;
   distance: number;
   latitude: number;
@@ -83,10 +85,25 @@ export interface DemoReport {
   createdAt: number;
 }
 
+/**
+ * 3A2: Simple hash for demo passwords (NOT cryptographically secure).
+ * Used to avoid storing plain text in demo mode.
+ * Production uses scrypt on the server.
+ */
+function hashDemoPassword(password: string): string {
+  let hash = 0;
+  for (let i = 0; i < password.length; i++) {
+    const char = password.charCodeAt(i);
+    hash = (hash << 5) - hash + char;
+    hash = hash & hash;
+  }
+  return "demo_hash_" + Math.abs(hash).toString(36) + "_" + password.length;
+}
+
 /** A demo account credential record. */
 export interface DemoAccount {
   email: string;
-  password: string;
+  passwordHash: string; // 3A2: store hash, not plain password
   userId: string;
 }
 
@@ -117,6 +134,8 @@ export interface DemoUserProfile {
   minAge?: number;
   maxAge?: number;
   maxDistance?: number;
+  // 8C: Consent timestamp
+  consentAcceptedAt?: number;
 }
 
 interface DemoState {
@@ -159,6 +178,10 @@ interface DemoState {
   newMatchUserId: string | null;
   setNewMatchUserId: (id: string | null) => void;
 
+  /** 3B-1: Track swiped profile IDs to prevent repeated profiles */
+  swipedProfileIds: string[];
+  recordSwipe: (profileId: string) => void;
+
   seed: () => void;
   reset: () => void;
   addProfile: (p: DemoProfile) => void;
@@ -170,11 +193,11 @@ interface DemoState {
   simulateMatch: (profileId: string) => void;
 
   /** Returns all user IDs that should be hidden from Discover/Explore:
-   *  blocked + matched + conversation partners. */
+   *  blocked + matched + conversation partners + swiped. */
   getExcludedUserIds: () => string[];
 
   /** Re-inject all DEMO_PROFILES into the store so Discover never runs dry.
-   *  Does NOT touch matches, messages, blocks, or likes. */
+   *  Does NOT touch matches, messages, blocks, likes, or swiped. */
   resetDiscoverPool: () => void;
 
   // Safety actions
@@ -184,9 +207,12 @@ interface DemoState {
   clearSafety: () => void;
 }
 
-/** Filter out profiles with no valid primary photo */
+/** Filter out profiles with no valid primary photo and ensure verification status */
 function withValidPhotos(profiles: DemoProfile[]): DemoProfile[] {
-  return profiles.filter((p) => p.photos?.length > 0 && !!p.photos[0]?.url);
+  return profiles
+    .filter((p) => p.photos?.length > 0 && !!p.photos[0]?.url)
+    // 8A: All demo profiles are treated as verified
+    .map((p) => ({ ...p, verificationStatus: 'verified' as const }));
 }
 
 export const useDemoStore = create<DemoState>()(
@@ -206,7 +232,9 @@ export const useDemoStore = create<DemoState>()(
       reports: [],
       dismissedNudges: [],
       newMatchUserId: null,
+      swipedProfileIds: [], // 3B-1: Track swiped profiles
 
+      // 3A2: Store hashed password, not plain text
       demoSignUp: (email, password) => {
         const state = get();
         const normalised = email.toLowerCase();
@@ -218,12 +246,17 @@ export const useDemoStore = create<DemoState>()(
         }
         const userId = `demo_${normalised.replace(/[^a-z0-9]/g, '_')}`;
         set({
-          demoAccounts: [...state.demoAccounts, { email: normalised, password, userId }],
+          demoAccounts: [...state.demoAccounts, {
+            email: normalised,
+            passwordHash: hashDemoPassword(password),
+            userId,
+          }],
           currentDemoUserId: userId,
         });
         return userId;
       },
 
+      // 3A2: Verify against hashed password
       demoSignIn: (email, password) => {
         const state = get();
         const normalised = email.toLowerCase();
@@ -233,7 +266,12 @@ export const useDemoStore = create<DemoState>()(
         if (!account) {
           throw new Error('No account found with this email');
         }
-        if (account.password !== password) {
+        // Support both legacy plain password and new hash format
+        const inputHash = hashDemoPassword(password);
+        const isValid = account.passwordHash === inputHash ||
+          // Backward compat: old accounts may have plain password stored
+          (account as any).password === password;
+        if (!isValid) {
           throw new Error('Incorrect password');
         }
         set({ currentDemoUserId: account.userId });
@@ -244,7 +282,25 @@ export const useDemoStore = create<DemoState>()(
       },
 
       demoLogout: () => {
-        set({ currentDemoUserId: null });
+        // C7 fix: clear session data on logout while preserving accounts
+        // Clear dependent stores
+        useDemoDmStore.getState().reset();
+        useDemoNotifStore.getState().reset();
+
+        // Reset in-app state but keep accounts for re-login
+        set({
+          currentDemoUserId: null,
+          matches: JSON.parse(JSON.stringify(DEMO_MATCHES)) as DemoMatch[],
+          likes: JSON.parse(JSON.stringify(DEMO_LIKES)) as DemoLike[],
+          profiles: withValidPhotos(JSON.parse(JSON.stringify(DEMO_PROFILES)) as DemoProfile[]),
+          blockedUserIds: [],
+          reportedUserIds: [],
+          reports: [],
+          dismissedNudges: [],
+          swipedProfileIds: [], // 3B-1: Clear swiped profiles on logout
+          newMatchUserId: null,
+          seeded: true,
+        });
       },
 
       saveDemoProfile: (userId, data) => {
@@ -274,9 +330,22 @@ export const useDemoStore = create<DemoState>()(
         }));
       },
 
+      // 3B-1: Record a swiped profile to prevent re-appearance
+      recordSwipe: (profileId) => {
+        set((s) => ({
+          swipedProfileIds: s.swipedProfileIds.includes(profileId)
+            ? s.swipedProfileIds
+            : [...s.swipedProfileIds, profileId],
+        }));
+      },
+
       getExcludedUserIds: () => {
         const s = get();
         const ids = new Set(s.blockedUserIds);
+        // 3B-1: Add swiped profiles
+        for (const id of s.swipedProfileIds) {
+          ids.add(id);
+        }
         // Add all matched user IDs
         for (const m of s.matches) {
           ids.add(m.otherUser.id);
@@ -335,6 +404,7 @@ export const useDemoStore = create<DemoState>()(
           reportedUserIds: [],
           reports: [],
           dismissedNudges: [],
+          swipedProfileIds: [], // 3B-1: Clear swiped profiles on reset
           newMatchUserId: null,
         });
       },
@@ -538,7 +608,11 @@ export const useDemoStore = create<DemoState>()(
     {
       name: 'demo-store',
       storage: createJSONStorage(() => AsyncStorage),
-      onRehydrateStorage: () => (state) => {
+      onRehydrateStorage: () => (state, error) => {
+        // C9 fix: log rehydration errors
+        if (error) {
+          console.error('[demoStore] Rehydration error:', error);
+        }
         state?.setHasHydrated(true);
       },
       partialize: (state) => ({
@@ -554,7 +628,17 @@ export const useDemoStore = create<DemoState>()(
         reportedUserIds: state.reportedUserIds,
         reports: state.reports,
         dismissedNudges: state.dismissedNudges,
+        swipedProfileIds: state.swipedProfileIds, // 3B-1: Persist swiped profiles
       }),
     },
   ),
 );
+
+// C8 fix: hydration timeout fallback
+const HYDRATION_TIMEOUT_MS = 5000;
+setTimeout(() => {
+  if (!useDemoStore.getState()._hasHydrated) {
+    console.warn('[demoStore] Hydration timeout — forcing hydrated state');
+    useDemoStore.getState().setHasHydrated(true);
+  }
+}, HYDRATION_TIMEOUT_MS);

@@ -257,6 +257,11 @@ export const getDiscoverProfiles = query({
       if (!user.isActive || user.isBanned) continue;
       if (isUserPaused(user)) continue;
 
+      // 8A: Filter out unverified/rejected users from Discover
+      // Only verified users can appear in the swipe deck
+      const verificationStatus = user.verificationStatus || 'unverified';
+      if (verificationStatus !== 'verified') continue;
+
       // Incognito check
       if (user.incognitoMode) {
         const canSee = currentUser.gender === 'female' || currentUser.subscriptionTier === 'premium';
@@ -433,6 +438,11 @@ export const getExploreProfiles = query({
       if (user._id === userId) continue;
       if (!user.isActive || user.isBanned) continue;
       if (isUserPaused(user)) continue;
+
+      // 8A: Filter out unverified/rejected users from Explore
+      const verificationStatus = user.verificationStatus || 'unverified';
+      if (verificationStatus !== 'verified') continue;
+
       if (!effectiveGender.includes(user.gender)) continue;
 
       const userAge = calculateAge(user.dateOfBirth);
@@ -459,6 +469,13 @@ export const getExploreProfiles = query({
         .withIndex('by_blocker_blocked', (q) => q.eq('blockerId', userId).eq('blockedUserId', user._id))
         .first();
       if (blocked) continue;
+
+      // 9-8: Check reverse block (candidate blocked current user)
+      const reverseBlocked = await ctx.db
+        .query('blocks')
+        .withIndex('by_blocker_blocked', (q) => q.eq('blockerId', user._id).eq('blockedUserId', userId))
+        .first();
+      if (reverseBlocked) continue;
 
       const photos = await ctx.db
         .query('photos')
@@ -555,6 +572,10 @@ export const getFilterCounts = query({
       if (!user.isActive || user.isBanned) continue;
       if (isUserPaused(user)) continue;
       if (!currentUser.lookingFor.includes(user.gender)) continue;
+
+      // 9-7: Exclude unverified users from filter counts to match discovery queries
+      const verificationStatus = user.verificationStatus || 'unverified';
+      if (verificationStatus !== 'verified') continue;
 
       const userAge = calculateAge(user.dateOfBirth);
       if (userAge < currentUser.minAge || userAge > currentUser.maxAge) continue;

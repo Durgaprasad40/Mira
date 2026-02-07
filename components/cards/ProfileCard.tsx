@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect, useRef } from 'react';
 import {
   View,
   Text,
@@ -57,9 +57,28 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
   const dark = theme === 'dark';
   const TC = dark ? INCOGNITO_COLORS : COLORS;
   const [photoIndex, setPhotoIndex] = useState(0);
+  // 7-1: Track image load errors to show placeholder on failure
+  const [imageError, setImageError] = useState(false);
 
   const photoCount = photos?.length || 0;
-  const currentPhoto = photos?.[photoIndex] || photos?.[0];
+
+  // 3B-2: Clamp photoIndex when photos array changes (prevents out-of-bounds)
+  useEffect(() => {
+    if (photoIndex >= photoCount && photoCount > 0) {
+      setPhotoIndex(photoCount - 1);
+    } else if (photoCount === 0) {
+      setPhotoIndex(0);
+    }
+  }, [photoCount, photoIndex]);
+
+  // 7-1: Reset error state when photo changes
+  useEffect(() => {
+    setImageError(false);
+  }, [photoIndex]);
+
+  // 3B-2: Safe access with clamping
+  const safeIndex = Math.min(Math.max(0, photoIndex), Math.max(0, photoCount - 1));
+  const currentPhoto = photos?.[safeIndex] || photos?.[0];
 
   const goNextPhoto = useCallback(() => {
     if (photoCount <= 1) return;
@@ -75,14 +94,20 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
   if (!showCarousel && onPress) {
     return (
       <TouchableOpacity style={styles.gridCard} onPress={onPress} activeOpacity={0.8}>
-        {currentPhoto ? (
+        {/* 7-1: Show placeholder on image error or missing photo */}
+        {currentPhoto && !imageError ? (
           <Image
             source={{ uri: currentPhoto.url }}
             style={styles.gridImage}
             contentFit="cover"
             blurRadius={photoBlurred ? BLUR_RADIUS : undefined}
+            onError={() => setImageError(true)}
           />
-        ) : null}
+        ) : (
+          <View style={[styles.gridImage, styles.gridPlaceholder]}>
+            <Ionicons name="image-outline" size={32} color={COLORS.textLight} />
+          </View>
+        )}
         <View style={styles.gridOverlay}>
           <Text style={styles.gridName} numberOfLines={1}>
             {name}, {age}
@@ -98,12 +123,14 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
     <View style={[styles.card, dark && { backgroundColor: INCOGNITO_COLORS.surface }]}>
       {/* Photo area fills entire card */}
       <View style={styles.photoContainer}>
-        {currentPhoto ? (
+        {/* 7-1: Show placeholder on image error or missing photo */}
+        {currentPhoto && !imageError ? (
           <Image
             source={{ uri: currentPhoto.url }}
             style={styles.image}
             contentFit="cover"
             blurRadius={photoBlurred ? BLUR_RADIUS : undefined}
+            onError={() => setImageError(true)}
           />
         ) : (
           <View style={[styles.photoPlaceholder, dark && { backgroundColor: INCOGNITO_COLORS.accent }]}>
@@ -126,9 +153,10 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
         )}
 
         {/* Photo indicator bars (Tinder-style) at top */}
+        {/* 7-2: Optional chaining for photos array null safety */}
         {showCarousel && photoCount > 1 && (
           <View style={styles.barsRow} pointerEvents="none">
-            {photos.map((_, i) => (
+            {photos?.map((_, i) => (
               <View
                 key={i}
                 style={[styles.bar, i === photoIndex && styles.barActive]}
@@ -386,6 +414,12 @@ const styles = StyleSheet.create({
   gridImage: {
     width: '100%',
     height: '100%',
+  },
+  // 7-1: Placeholder style for failed/missing images
+  gridPlaceholder: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: COLORS.backgroundDark,
   },
   gridOverlay: {
     position: 'absolute',

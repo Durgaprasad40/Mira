@@ -128,8 +128,8 @@ export default function BasicInfoScreen() {
                 router.replace("/(main)/(tabs)/home");
                 return;
               }
-              setStep("photo_upload");
-              router.push("/(onboarding)/photo-upload" as any);
+              setStep("consent");
+              router.push("/(onboarding)/consent" as any);
               return;
             } catch (loginError: any) {
               Alert.alert("Error", loginError.message || "Failed to login. Please check your password.");
@@ -141,8 +141,8 @@ export default function BasicInfoScreen() {
           }
         }
         setAuth(userId, "demo_token", false);
-        setStep("photo_upload");
-        router.push("/(onboarding)/photo-upload" as any);
+        setStep("consent");
+        router.push("/(onboarding)/consent" as any);
         return;
       }
 
@@ -157,8 +157,8 @@ export default function BasicInfoScreen() {
 
       if (result.success && result.userId && result.token) {
         setAuth(result.userId, result.token, false);
-        setStep("photo_upload");
-        router.push("/(onboarding)/photo-upload" as any);
+        setStep("consent");
+        router.push("/(onboarding)/consent" as any);
       }
     } catch (error: any) {
       // If user already exists, try to login
@@ -174,8 +174,8 @@ export default function BasicInfoScreen() {
             if (loginResult.onboardingCompleted) {
               router.replace("/(main)/(tabs)/home");
             } else {
-              setStep("photo_upload");
-              router.push("/(onboarding)/photo-upload" as any);
+              setStep("consent");
+              router.push("/(onboarding)/consent" as any);
             }
           }
         } catch (loginError: any) {

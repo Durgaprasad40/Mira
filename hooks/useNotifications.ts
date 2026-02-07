@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useQuery, useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { useAuthStore } from '@/stores/authStore';
@@ -316,6 +316,9 @@ export function useNotifications() {
   );
   const markAsReadMutation = useMutation(api.notifications.markAsRead);
   const markAllAsReadMutation = useMutation(api.notifications.markAllAsRead);
+  // A1 & A2 fix: Convex mutations for dedupeKey and conversation-based marking
+  const markReadByDedupeKeyMutation = useMutation(api.notifications.markReadByDedupeKey);
+  const markReadForConversationMutation = useMutation(api.notifications.markReadForConversation);
 
   // ── Demo-mode shared state ──
   const demoNotifs = useDemoNotifStore((s) => s.notifications);
@@ -345,16 +348,29 @@ export function useNotifications() {
 
   // ── Filter out expired (24h TTL) and read notifications in display ──
   // Read notifications disappear immediately when marked as read
-  const now = Date.now();
+  // A3 fix: use minute-granularity timestamp so expired notifications are filtered
+  // within 60s without causing re-renders every frame
+  const nowMinute = useMemo(() => Math.floor(Date.now() / 60000) * 60000, []);
+  const [stableNow, setStableNow] = useState(nowMinute);
+  useEffect(() => {
+    // Update every minute to catch newly expired notifications
+    const interval = setInterval(() => {
+      setStableNow(Math.floor(Date.now() / 60000) * 60000);
+    }, 60000);
+    return () => clearInterval(interval);
+  }, []);
+
+  // 4-5: Track pending optimistic reads for rollback on error
+  const [pendingReads, setPendingReads] = useState<Set<string>>(new Set());
+
   const filteredDemoNotifs = useMemo(
-    () => demoNotifs.filter((n) => !isExpired(n, now) && !n.isRead),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [demoNotifs], // Don't include `now` to avoid re-filtering every render
+    () => demoNotifs.filter((n) => !isExpired(n, stableNow) && !n.isRead),
+    [demoNotifs, stableNow],
   );
+  // 4-5: Filter out pending reads (optimistically marked as read) from Convex notifications
   const filteredConvexNotifs = useMemo(
-    () => mappedConvex.filter((n) => !n.isRead && !isExpired(n, now)),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [mappedConvex], // Don't include `now` to avoid re-filtering every render
+    () => mappedConvex.filter((n) => !n.isRead && !isExpired(n, stableNow) && !pendingReads.has(n._id)),
+    [mappedConvex, stableNow, pendingReads],
   );
   const notifications: AppNotification[] = isDemoMode ? filteredDemoNotifs : filteredConvexNotifs;
 
@@ -384,6 +400,7 @@ export function useNotifications() {
   }, [convexUserId, markAllAsReadMutation, demoMarkAllRead]);
 
   // ── Mark single notification as read ──
+  // 4-5: Implements optimistic update with rollback on error
   const markRead = useCallback(
     (notificationId: string) => {
       if (isDemoMode) {
@@ -391,34 +408,59 @@ export function useNotifications() {
         return;
       }
       if (convexUserId) {
+        // 4-5: Optimistically add to pending reads
+        setPendingReads((prev) => new Set(prev).add(notificationId));
+
         markAsReadMutation({
           notificationId: notificationId as any,
           userId: convexUserId,
-        }).catch(console.error);
+        })
+          .then(() => {
+            // 4-5: Remove from pending on success (Convex will update the query)
+            setPendingReads((prev) => {
+              const next = new Set(prev);
+              next.delete(notificationId);
+              return next;
+            });
+          })
+          .catch((error) => {
+            // 4-5: Rollback on error — remove from pending, notification stays unread
+            console.error('[useNotifications] markRead failed, rolling back:', error);
+            setPendingReads((prev) => {
+              const next = new Set(prev);
+              next.delete(notificationId);
+              return next;
+            });
+          });
       }
     },
     [convexUserId, markAsReadMutation, demoMarkRead],
   );
 
-  // ── Mark by dedupe key ──
+  // ── Mark by dedupe key (A1 fix: now supports Convex mode) ──
   const markReadByDedupeKey = useCallback(
     (dedupeKey: string) => {
       if (isDemoMode) {
         demoMarkReadByDedupeKey(dedupeKey);
+      } else if (convexUserId) {
+        markReadByDedupeKeyMutation({ userId: convexUserId, dedupeKey }).catch(console.error);
       }
     },
-    [demoMarkReadByDedupeKey],
+    [demoMarkReadByDedupeKey, convexUserId, markReadByDedupeKeyMutation],
   );
 
-  // ── Mark all message notifications for a conversation as read ──
+  // ── Mark all message notifications for a conversation as read (A2 fix: now supports Convex mode) ──
   const markReadForConversation = useCallback(
     (conversationId: string) => {
+      // A4 fix: normalize conversationId to string
+      const normalizedId = String(conversationId);
       if (isDemoMode) {
-        demoMarkReadForConversation(conversationId);
+        demoMarkReadForConversation(normalizedId);
+      } else if (convexUserId) {
+        markReadForConversationMutation({ userId: convexUserId, conversationId: normalizedId }).catch(console.error);
       }
-      // Convex mode: handled by the chat's own markAsRead mutation
     },
-    [demoMarkReadForConversation],
+    [demoMarkReadForConversation, convexUserId, markReadForConversationMutation],
   );
 
   // ── Add notification (demo mode only — Convex mode uses server push) ──

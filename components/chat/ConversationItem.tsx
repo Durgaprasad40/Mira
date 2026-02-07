@@ -53,14 +53,19 @@ export function ConversationItem({
     }
   };
 
+  // 5-7: Safe fallback for corrupted/missing preview content
   const getMessagePreview = () => {
     if (!lastMessage) return 'No messages yet';
     if (lastMessage.isProtected) return '🔒 Protected Photo';
     if (lastMessage.type === 'image') return '📷 Photo';
-    if (lastMessage.type === 'template') return lastMessage.content;
     if (lastMessage.type === 'dare') return '🎲 Dare sent';
-    if (lastMessage.type === 'system') return lastMessage.content;
-    return lastMessage.content;
+    // 5-7: Check for valid content before returning
+    const content = lastMessage.content;
+    if (typeof content === 'string' && content.trim()) {
+      return content;
+    }
+    // Fallback for corrupted/missing content
+    return 'New message';
   };
 
   return (

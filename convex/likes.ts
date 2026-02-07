@@ -17,6 +17,34 @@ export const swipe = mutation({
     const fromUser = await ctx.db.get(fromUserId);
     if (!fromUser) throw new Error('User not found');
 
+    // 8B: Check email verification before allowing swipe (except pass)
+    if (action !== 'pass' && fromUser.emailVerified !== true) {
+      throw new Error('Please verify your email address before swiping.');
+    }
+
+    // 8A: Check verification status before allowing swipe
+    // Unverified/rejected users cannot swipe (except pass)
+    const fromStatus = fromUser.verificationStatus || 'unverified';
+    if (action !== 'pass' && fromStatus !== 'verified') {
+      const statusMessages: Record<string, string> = {
+        unverified: 'Please upload a profile photo to get verified before swiping.',
+        pending_auto: 'Your profile is being verified. Please wait.',
+        pending_manual: 'Your profile is under review. Please wait.',
+        pending_verification: 'Your profile is being verified. Please wait.',
+        rejected: 'Your photo was rejected. Please upload a new one.',
+      };
+      throw new Error(statusMessages[fromStatus] || 'Verification required to swipe.');
+    }
+
+    // 8A: Check target user is also verified (shouldn't appear in deck but double-check)
+    const toUser = await ctx.db.get(toUserId);
+    if (toUser) {
+      const toStatus = toUser.verificationStatus || 'unverified';
+      if (toStatus !== 'verified') {
+        throw new Error('This user is no longer available.');
+      }
+    }
+
     // TODO: Subscription restrictions disabled for testing mode.
     // Re-enable usage limits once testing is complete.
     // if (fromUser.gender === 'male') { ... }
@@ -123,10 +151,24 @@ export const swipe = mutation({
       );
 
       if (isReciprocal) {
+        // 9-2: Check if match already exists to prevent duplicates from race conditions
+        const user1Id = fromUserId < toUserId ? fromUserId : toUserId;
+        const user2Id = fromUserId < toUserId ? toUserId : fromUserId;
+
+        const existingMatch = await ctx.db
+          .query('matches')
+          .withIndex('by_users', (q) => q.eq('user1Id', user1Id).eq('user2Id', user2Id))
+          .first();
+
+        if (existingMatch) {
+          // Match already exists, return success without creating duplicate
+          return { success: true, isMatch: true, matchId: existingMatch._id };
+        }
+
         // It's a match!
         const matchId = await ctx.db.insert('matches', {
-          user1Id: fromUserId < toUserId ? fromUserId : toUserId,
-          user2Id: fromUserId < toUserId ? toUserId : fromUserId,
+          user1Id,
+          user2Id,
           matchedAt: now,
           isActive: true,
         });

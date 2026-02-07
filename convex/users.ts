@@ -1053,3 +1053,64 @@ export const updateEnforcementLevel = mutation({
     return { level };
   },
 });
+
+/**
+ * Set admin status for a user.
+ * For bootstrap (first admin): use ADMIN_SETUP_SECRET env var.
+ * For subsequent admins: an existing admin can promote others.
+ */
+export const setAdminStatus = mutation({
+  args: {
+    targetUserId: v.id("users"),
+    isAdmin: v.boolean(),
+    // For bootstrap: use secret. For admin promotion: use adminUserId.
+    adminUserId: v.optional(v.id("users")),
+    setupSecret: v.optional(v.string()),
+  },
+  handler: async (ctx, args) => {
+    const { targetUserId, isAdmin, adminUserId, setupSecret } = args;
+
+    // Authorization: either valid admin or valid setup secret
+    let authorized = false;
+
+    if (adminUserId) {
+      const admin = await ctx.db.get(adminUserId);
+      if (admin?.isAdmin) {
+        authorized = true;
+      }
+    }
+
+    if (setupSecret) {
+      const expectedSecret = process.env.ADMIN_SETUP_SECRET;
+      if (expectedSecret && setupSecret === expectedSecret) {
+        authorized = true;
+      }
+    }
+
+    if (!authorized) {
+      throw new Error("Unauthorized: Admin access or valid setup secret required");
+    }
+
+    const targetUser = await ctx.db.get(targetUserId);
+    if (!targetUser) {
+      throw new Error("Target user not found");
+    }
+
+    await ctx.db.patch(targetUserId, { isAdmin });
+
+    return { success: true, userId: targetUserId, isAdmin };
+  },
+});
+
+/**
+ * Check if user is admin (for frontend route guards).
+ */
+export const checkIsAdmin = query({
+  args: {
+    userId: v.id("users"),
+  },
+  handler: async (ctx, args) => {
+    const user = await ctx.db.get(args.userId);
+    return { isAdmin: user?.isAdmin === true };
+  },
+});

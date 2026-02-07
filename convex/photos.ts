@@ -2,11 +2,59 @@ import { v } from 'convex/values';
 import { mutation, query, action } from './_generated/server';
 import { Id } from './_generated/dataModel';
 
+// ---------------------------------------------------------------------------
+// 8A: Photo Upload Validation Constants
+// ---------------------------------------------------------------------------
+
+const MAX_PHOTO_SIZE_BYTES = 10 * 1024 * 1024; // 10MB max
+const ALLOWED_PHOTO_TYPES = ['image/jpeg', 'image/png', 'image/webp', 'image/heic'];
+const MIN_PHOTO_DIMENSION = 200; // Minimum width/height in pixels
+
 // Generate upload URL
 export const generateUploadUrl = mutation({
   args: {},
   handler: async (ctx) => {
     return await ctx.storage.generateUploadUrl();
+  },
+});
+
+/**
+ * 8A: Validate photo before upload.
+ * Call this before uploading to check size/type constraints.
+ */
+export const validatePhotoUpload = query({
+  args: {
+    fileSize: v.number(),
+    mimeType: v.string(),
+    width: v.optional(v.number()),
+    height: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    const { fileSize, mimeType, width, height } = args;
+    const errors: string[] = [];
+
+    // Check file size
+    if (fileSize > MAX_PHOTO_SIZE_BYTES) {
+      errors.push(`Photo must be under ${MAX_PHOTO_SIZE_BYTES / (1024 * 1024)}MB`);
+    }
+
+    // Check mime type
+    if (!ALLOWED_PHOTO_TYPES.includes(mimeType.toLowerCase())) {
+      errors.push(`Photo must be JPEG, PNG, WebP, or HEIC format`);
+    }
+
+    // Check dimensions if provided
+    if (width && width < MIN_PHOTO_DIMENSION) {
+      errors.push(`Photo width must be at least ${MIN_PHOTO_DIMENSION}px`);
+    }
+    if (height && height < MIN_PHOTO_DIMENSION) {
+      errors.push(`Photo height must be at least ${MIN_PHOTO_DIMENSION}px`);
+    }
+
+    return {
+      valid: errors.length === 0,
+      errors,
+    };
   },
 });
 
@@ -19,9 +67,28 @@ export const addPhoto = mutation({
     hasFace: v.boolean(),
     width: v.optional(v.number()),
     height: v.optional(v.number()),
+    // 8C: Client-reported flags for upload hardening
+    fileSize: v.optional(v.number()),
+    mimeType: v.optional(v.string()),
+    isNsfwDetected: v.optional(v.boolean()), // Client-side NSFW detection result
   },
   handler: async (ctx, args) => {
-    const { userId, storageId, isPrimary, hasFace, width, height } = args;
+    const { userId, storageId, isPrimary, hasFace, width, height, fileSize, mimeType, isNsfwDetected } = args;
+
+    // 9-3: Verify user has accepted consent before allowing photo upload
+    const user = await ctx.db.get(userId);
+    if (!user) throw new Error('User not found');
+    if (!user.consentAcceptedAt) {
+      throw new Error('Please accept the data consent agreement before uploading photos.');
+    }
+
+    // 8C: Server-side validation of file constraints
+    if (fileSize !== undefined && fileSize > MAX_PHOTO_SIZE_BYTES) {
+      throw new Error(`Photo must be under ${MAX_PHOTO_SIZE_BYTES / (1024 * 1024)}MB`);
+    }
+    if (mimeType !== undefined && !ALLOWED_PHOTO_TYPES.includes(mimeType.toLowerCase())) {
+      throw new Error('Photo must be JPEG, PNG, WebP, or HEIC format');
+    }
 
     // Get the URL for the uploaded file
     const url = await ctx.storage.getUrl(storageId);
@@ -47,20 +114,54 @@ export const addPhoto = mutation({
     }
 
     const order = existingPhotos.length;
+    const isFirstPhoto = existingPhotos.length === 0;
+    const willBePrimary = isPrimary || isFirstPhoto;
+
+    // 8C: Use client-reported NSFW detection
+    const flaggedNsfw = isNsfwDetected === true;
+
     const photoId = await ctx.db.insert('photos', {
       userId,
       storageId,
       url,
       order,
-      isPrimary: isPrimary || existingPhotos.length === 0,
+      isPrimary: willBePrimary,
       hasFace,
-      isNsfw: false, // Would be set by moderation
+      isNsfw: flaggedNsfw,
       width,
       height,
       createdAt: Date.now(),
     });
 
-    return { success: true, photoId, url };
+    // 8C: If NSFW detected, route to moderation queue for manual review
+    if (flaggedNsfw) {
+      await ctx.db.insert('moderationQueue', {
+        reportedUserId: userId,
+        contentType: 'profile_photo',
+        contentId: photoId,
+        flagCategories: ['nsfw_content'],
+        isAutoFlagged: true,
+        status: 'pending',
+        createdAt: Date.now(),
+      });
+    }
+
+    // 8A: If this is the primary photo and user is not yet verified,
+    // set verification status to pending_auto to trigger verification flow
+    if (willBePrimary) {
+      const user = await ctx.db.get(userId);
+      if (user) {
+        const currentStatus = user.verificationStatus || 'unverified';
+        // Only update if not already verified
+        if (currentStatus !== 'verified') {
+          await ctx.db.patch(userId, {
+            verificationStatus: 'pending_auto',
+          });
+        }
+      }
+    }
+
+    return { success: true, photoId, url, requiresVerification: willBePrimary };
   },
 });
 

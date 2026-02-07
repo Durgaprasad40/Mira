@@ -246,6 +246,12 @@ export const recordLocation = mutation({
       lastLocationUpdatedAt: now,
     });
 
+    // 9-6: Skip crossed-path computation if current user is not verified
+    const currentStatus = currentUser.verificationStatus || 'unverified';
+    if (currentStatus !== 'verified') {
+      return { success: true, nearbyCount: 0, skipped: true, reason: 'unverified' };
+    }
+
     // Find nearby users (within 1km, location updated within 6 days)
     const allUsers = await ctx.db.query('users').collect();
     const nearbyUsers = [];
@@ -254,6 +260,10 @@ export const recordLocation = mutation({
       if (user._id === userId) continue;
       if (!user.isActive) continue;
       if (!user.latitude || !user.longitude) continue;
+
+      // 9-6: Skip unverified users in crossed paths
+      const userStatus = user.verificationStatus || 'unverified';
+      if (userStatus !== 'verified') continue;
 
       const userLocationUpdatedAt = user.lastLocationUpdatedAt ?? user.lastActive;
       if (now - userLocationUpdatedAt > FADED_WINDOW_MS) continue;
@@ -422,6 +432,10 @@ export const getNearbyUsers = query({
     for (const user of allUsers) {
       if (user._id === userId) continue;
       if (!user.isActive) continue;
+
+      // 8A: Filter out unverified/rejected users from Nearby map
+      const verificationStatus = user.verificationStatus || 'unverified';
+      if (verificationStatus !== 'verified') continue;
 
       // Use other user's PUBLISHED location (privacy: not their live GPS)
       // If they haven't published, they don't appear on the map

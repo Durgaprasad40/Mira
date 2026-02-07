@@ -9,7 +9,8 @@ type SystemSubtype =
   | 'access_requested'
   | 'permission_granted'
   | 'permission_revoked'
-  | 'expired';
+  | 'expired'
+  | 'truthdare';
 
 interface SystemMessageProps {
   text: string;
@@ -23,6 +24,7 @@ const SUBTYPE_ICONS: Record<string, { name: string; color: string }> = {
   permission_granted: { name: 'lock-open-outline', color: '#4CAF50' },
   permission_revoked: { name: 'lock-closed-outline', color: '#F44336' },
   expired: { name: 'timer-outline', color: COLORS.textMuted },
+  truthdare: { name: 'dice', color: COLORS.secondary },
 };
 
 export function SystemMessage({ text, subtype }: SystemMessageProps) {

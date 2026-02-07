@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import { View, Text, TextInput, StyleSheet, TouchableOpacity, Alert } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { COLORS, MESSAGE_TEMPLATES } from '@/lib/constants';
@@ -65,16 +65,27 @@ export function MessageInput({
     }
   };
 
-  const handleTemplateSelect = (template: typeof MESSAGE_TEMPLATES[0]) => {
+  // C7 fix: make async with await and try/catch to prevent double-send
+  const [isSendingTemplate, setIsSendingTemplate] = useState(false);
+  const handleTemplateSelect = async (template: typeof MESSAGE_TEMPLATES[0]) => {
+    if (isSendingTemplate) return;
+    setIsSendingTemplate(true);
     const personalizedText = template.text.replace('{name}', recipientName || 'there');
-    onSend(personalizedText, 'template');
-    setShowTemplates(false);
+    try {
+      await onSend(personalizedText, 'template');
+      setShowTemplates(false);
+    } catch {
+      // Error handled by parent; keep templates open so user can retry
+    } finally {
+      setIsSendingTemplate(false);
+    }
   };
 
-  const availableTemplates = MESSAGE_TEMPLATES.slice(
-    0,
-    subscriptionTier === 'premium' ? 50 : subscriptionTier === 'basic' ? 25 : 10
-  );
+  // 5-6: Memoize templates list to prevent re-creation on every render
+  const availableTemplates = useMemo(() => {
+    const limit = subscriptionTier === 'premium' ? 50 : subscriptionTier === 'basic' ? 25 : 10;
+    return MESSAGE_TEMPLATES.slice(0, limit);
+  }, [subscriptionTier]);
 
   return (
     <View style={styles.container}>
