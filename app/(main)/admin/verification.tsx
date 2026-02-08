@@ -268,7 +268,6 @@ export default function AdminVerificationScreen() {
               source={{ uri: item.verificationPhotoUrl }}
               style={styles.verificationPhoto}
               contentFit="cover"
-              placeholder={require('@/assets/images/placeholder-avatar.png')}
             />
           ) : (
             <View style={[styles.verificationPhoto, styles.photoPlaceholder]}>

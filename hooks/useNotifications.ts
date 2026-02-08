@@ -1,10 +1,20 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useQuery, useMutation } from 'convex/react';
+import { useSegments } from 'expo-router';
 import { api } from '@/convex/_generated/api';
 import { useAuthStore } from '@/stores/authStore';
 import { isDemoMode } from '@/hooks/useConvex';
 import { asUserId } from '@/convex/id';
 import { create } from 'zustand';
+
+// Phase 1-only notification types — never shown in Phase 2 (private tabs)
+const PHASE1_ONLY_TYPES = new Set(['crossed_paths', 'nearby']);
+
+// Module-level phase tracking for creation-side blocking in Zustand store
+let _isInPhase2 = false;
+export function setPhase2Active(active: boolean) {
+  _isInPhase2 = active;
+}
 
 /**
  * Notification shape used by the UI.
@@ -208,6 +218,13 @@ export const useDemoNotifStore = create<DemoNotifStore>((set) => ({
     }),
   addNotification: (input: AddNotificationInput) =>
     set((state) => {
+      // Creation-side guard: Block Phase 1-only notifications if currently in Phase 2
+      // This prevents crossed_paths/nearby from accumulating while in private tabs
+      if (PHASE1_ONLY_TYPES.has(input.type) && _isInPhase2) {
+        if (__DEV__) console.log(`[DemoNotifStore] blocked Phase1-only type=${input.type} — currently in Phase 2`);
+        return {};
+      }
+
       const now = Date.now();
       const key = computeDedupeKey(input.type, input.data);
       const existingIdx = state.notifications.findIndex((n) => n.dedupeKey === key);
@@ -309,6 +326,10 @@ export function useNotifications() {
   const userId = useAuthStore((s) => s.userId);
   const convexUserId = asUserId(userId);
 
+  // Detect if we're in Phase 2 (private tabs) — filter out Phase 1-only notifications
+  const segments = useSegments();
+  const isInPhase2 = segments.includes('(private)' as never);
+
   // ── Convex queries (skipped in demo mode) ──
   const convexNotifications = useQuery(
     api.notifications.getNotifications,
@@ -372,7 +393,13 @@ export function useNotifications() {
     () => mappedConvex.filter((n) => !n.isRead && !isExpired(n, stableNow) && !pendingReads.has(n._id)),
     [mappedConvex, stableNow, pendingReads],
   );
-  const notifications: AppNotification[] = isDemoMode ? filteredDemoNotifs : filteredConvexNotifs;
+
+  // Phase 2 isolation: filter out Phase 1-only notification types when in private tabs
+  const baseNotifications = isDemoMode ? filteredDemoNotifs : filteredConvexNotifs;
+  const notifications: AppNotification[] = useMemo(
+    () => isInPhase2 ? baseNotifications.filter((n) => !PHASE1_ONLY_TYPES.has(n.type)) : baseNotifications,
+    [baseNotifications, isInPhase2],
+  );
 
   // ── Derived count (single formula, no separate query) ──
   const unseenCount = notifications.filter((n) => !n.isRead).length;

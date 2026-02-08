@@ -449,17 +449,28 @@ export interface IncognitoMessage {
   isRead: boolean;
 }
 
-// Private Mode Types
+// Private Mode Types (Face 2 only — 20 categories)
 export type PrivateIntentKey =
-  | 'casual_connection'
   | 'fling'
-  | 'flirty_chats'
+  | 'non_committal'
+  | 'short_term'
   | 'situationship'
+  | 'no_labels'
+  | 'go_with_the_flow'
+  | 'weekend_thing'
+  | 'chemistry_first'
+  | 'connection_first'
+  | 'private_thing'
+  | 'friends_plus'
   | 'fwb'
-  | 'low_commitment'
-  | 'discreet'
-  | 'open_to_exploring'
-  | 'chat_first';
+  | 'trusted_connection'
+  | 'intimate'
+  | 'open_minded'
+  | 'late_night'
+  | 'casual_vibes'
+  | 'undefined'
+  | 'mutual_interest'
+  | 'off_record';
 
 export type PrivateDesireTag =
   | 'spontaneous'

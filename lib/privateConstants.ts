@@ -1,14 +1,26 @@
 // Private Mode Intent Categories — admin-defined, no user creation
+// Face 2 ONLY — these categories do NOT appear in Face 1
 export const PRIVATE_INTENT_CATEGORIES = [
-  { key: 'casual_connection', label: 'Casual connection', icon: 'heart-half', color: '#E91E63' },
   { key: 'fling', label: 'Fling', icon: 'flash', color: '#FF5722' },
-  { key: 'flirty_chats', label: 'Flirty chats', icon: 'chatbubble-ellipses', color: '#6C5CE7' },
-  { key: 'situationship', label: 'Situationship', icon: 'shuffle', color: '#FF9800' },
-  { key: 'fwb', label: 'Friends with benefits', icon: 'people', color: '#F44336' },
-  { key: 'low_commitment', label: 'Low-commitment', icon: 'leaf', color: '#4CAF50' },
-  { key: 'discreet', label: 'Discreet', icon: 'eye-off', color: '#607D8B' },
-  { key: 'open_to_exploring', label: 'Open to exploring', icon: 'compass', color: '#00BCD4' },
-  { key: 'chat_first', label: 'Chat first', icon: 'chatbubbles', color: '#795548' },
+  { key: 'non_committal', label: 'Non-Committal', icon: 'leaf', color: '#4CAF50' },
+  { key: 'short_term', label: 'Short-Term', icon: 'time', color: '#FF9800' },
+  { key: 'situationship', label: 'Situationship', icon: 'shuffle', color: '#E91E63' },
+  { key: 'no_labels', label: 'No Labels', icon: 'pricetag-outline', color: '#9C27B0' },
+  { key: 'go_with_the_flow', label: 'Go With the Flow', icon: 'water', color: '#00BCD4' },
+  { key: 'weekend_thing', label: 'Weekend Thing', icon: 'calendar', color: '#795548' },
+  { key: 'chemistry_first', label: 'Chemistry First', icon: 'flask', color: '#673AB7' },
+  { key: 'connection_first', label: 'Connection First', icon: 'heart', color: '#E91E63' },
+  { key: 'private_thing', label: 'Private Thing', icon: 'eye-off', color: '#607D8B' },
+  { key: 'friends_plus', label: 'Friends Plus', icon: 'people', color: '#2196F3' },
+  { key: 'fwb', label: 'FWB (Friends with Benefits)', icon: 'people-circle', color: '#F44336' },
+  { key: 'trusted_connection', label: 'Trusted Connection', icon: 'shield-checkmark', color: '#4CAF50' },
+  { key: 'intimate', label: 'Intimate', icon: 'moon', color: '#9C27B0' },
+  { key: 'open_minded', label: 'Open-Minded', icon: 'compass', color: '#00BCD4' },
+  { key: 'late_night', label: 'Late Night', icon: 'moon-outline', color: '#3F51B5' },
+  { key: 'casual_vibes', label: 'Casual Vibes', icon: 'cafe', color: '#FF9800' },
+  { key: 'undefined', label: 'Undefined', icon: 'help-circle', color: '#9E9E9E' },
+  { key: 'mutual_interest', label: 'Mutual Interest', icon: 'git-compare', color: '#8BC34A' },
+  { key: 'off_record', label: 'Off-Record', icon: 'recording-outline', color: '#607D8B' },
 ] as const;
 
 // Private Mode Desire Tags — chip picker options

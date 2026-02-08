@@ -35,6 +35,48 @@ import { getProfileCompleteness, NUDGE_MESSAGES } from "@/lib/profileCompletenes
 import { ProfileNudge } from "@/components/ui/ProfileNudge";
 import { trackEvent } from "@/lib/analytics";
 import { Toast } from "@/components/ui/Toast";
+import { usePrivateChatStore } from "@/stores/privateChatStore";
+import type { IncognitoConversation, ConnectionSource } from "@/types";
+
+import { markPhase2Matched } from "@/lib/phase2MatchSession";
+
+// DEV-only match rate for demo mode (80% for fast testing, 30% for prod)
+const DEMO_MATCH_RATE = __DEV__ ? 0.8 : 0.3;
+
+/** Create Phase 2 private conversation for match. Returns true if new, false if duplicate. */
+function handlePhase2Match(profile: { id: string; name: string; age?: number; photoUrl?: string }): boolean {
+  // Check idempotency via shared session module
+  if (!markPhase2Matched(profile.id)) {
+    if (__DEV__) console.log(`[Phase2Match] SKIP duplicate — already matched ${profile.id}`);
+    return false;
+  }
+
+  const conversationId = `ic_desire_${profile.id}`;
+  const conversation: IncognitoConversation = {
+    id: conversationId,
+    participantId: profile.id,
+    participantName: profile.name,
+    participantAge: profile.age ?? 0,
+    participantPhotoUrl: profile.photoUrl ?? '',
+    lastMessage: 'Matched! Start chatting.',
+    lastMessageAt: Date.now(),
+    unreadCount: 0,
+    connectionSource: 'desire' as ConnectionSource,
+  };
+
+  usePrivateChatStore.getState().createConversation(conversation);
+  usePrivateChatStore.getState().unlockUser({
+    id: profile.id,
+    username: profile.name,
+    photoUrl: profile.photoUrl ?? '',
+    age: profile.age ?? 0,
+    source: 'tod',
+    unlockedAt: Date.now(),
+  });
+
+  if (__DEV__) console.log(`[Phase2Match] Created ${conversationId} for ${profile.name}`);
+  return true;
+}
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get("window");
 
@@ -45,14 +87,21 @@ const HEADER_H = 44;
 export interface DiscoverCardStackProps {
   /** 'dark' applies INCOGNITO_COLORS to background/header only; card UI stays identical */
   theme?: "light" | "dark";
+  /**
+   * Phase context for match routing:
+   * - 'phase1' (default): Match goes to match-celebration → Phase 1 messages
+   * - 'phase2': Match creates Phase 2 private chat (no navigation, stays on Desire Land)
+   */
+  mode?: "phase1" | "phase2";
   /** When provided, skip internal Convex query and use these profiles instead (e.g. Explore category). */
   externalProfiles?: any[];
   /** Hide the built-in header (caller renders its own). */
   hideHeader?: boolean;
 }
 
-export function DiscoverCardStack({ theme = "light", externalProfiles, hideHeader }: DiscoverCardStackProps) {
+export function DiscoverCardStack({ theme = "light", mode = "phase1", externalProfiles, hideHeader }: DiscoverCardStackProps) {
   const dark = theme === "dark";
+  const isPhase2 = mode === "phase2";
   const C = dark ? INCOGNITO_COLORS : COLORS;
 
   const insets = useSafeAreaInsets();
@@ -374,15 +423,34 @@ export function DiscoverCardStack({ theme = "light", externalProfiles, hideHeade
           // 3B-1: Record swipe to prevent profile from reappearing
           demo.recordSwipe(swipedProfile.id);
 
-          if (direction === "right" && Math.random() > 0.7) {
-            // Save match + DM thread BEFORE navigating.
+          // Match probability: DEMO_MATCH_RATE (50% in DEV, 30% in prod)
+          const shouldMatch = direction === "right" && Math.random() < DEMO_MATCH_RATE;
+
+          if (shouldMatch) {
+            if (isPhase2) {
+              // Phase 2: Create private conversation, NO navigation (stay on Desire Land)
+              const isNewMatch = handlePhase2Match({
+                id: swipedProfile.id,
+                name: swipedProfile.name,
+                age: swipedProfile.age,
+                photoUrl: swipedProfile.photos[0]?.url,
+              });
+              if (__DEV__) {
+                console.log(`[DiscoverCardStack] match! userId=${swipedProfile.id} isPhase2=true isNew=${isNewMatch}`);
+              }
+              if (isNewMatch) {
+                trackEvent({ name: 'match_created', otherUserId: swipedProfile.id });
+              }
+              swipeLockRef.current = false;
+              return;
+            }
+
+            // Phase 1: Save match + DM thread BEFORE navigating.
             useDemoStore.getState().simulateMatch(swipedProfile.id);
             const matchId = `match_${swipedProfile.id}`;
-            if (__DEV__) console.log(`[DiscoverCardStack] match! navigating to celebration userId=${swipedProfile.id}`);
+            if (__DEV__) console.log(`[DiscoverCardStack] match! userId=${swipedProfile.id} isPhase2=false`);
             navigatingRef.current = true;
             // Defer navigation so advanceCard's setState commits first
-            // B6 fix: wrap navigation in try/catch and reset navigatingRef on failure
-            // 3B-4: Defer swipe lock release until after navigation initiated
             InteractionManager.runAfterInteractions(() => {
               if (!mountedRef.current) {
                 swipeLockRef.current = false;
@@ -397,7 +465,7 @@ export function DiscoverCardStack({ theme = "light", externalProfiles, hideHeade
                 swipeLockRef.current = false;
               }
             });
-            return; // 3B-4: Don't release lock here; deferred to callback
+            return;
           }
           // Release swipe lock (navigatingRef guards further swipes if navigating)
           swipeLockRef.current = false;
@@ -644,14 +712,19 @@ export function DiscoverCardStack({ theme = "light", externalProfiles, hideHeade
             <Ionicons name="options-outline" size={22} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
           </TouchableOpacity>
           <Text style={[styles.headerLogo, dark && { color: INCOGNITO_COLORS.primary }]}>mira</Text>
-          <TouchableOpacity style={styles.headerBtn} onPress={() => router.push("/(main)/notifications" as any)}>
-            <Ionicons name="notifications-outline" size={22} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
-            {unseenCount > 0 && (
-              <View style={styles.bellBadge}>
-                <Text style={styles.bellBadgeText}>{unseenCount > 9 ? "9+" : unseenCount}</Text>
-              </View>
-            )}
-          </TouchableOpacity>
+          {/* Hide bell in Phase 2 — notifications are Phase 1 only */}
+          {!isPhase2 ? (
+            <TouchableOpacity style={styles.headerBtn} onPress={() => router.push("/(main)/notifications" as any)}>
+              <Ionicons name="notifications-outline" size={22} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
+              {unseenCount > 0 && (
+                <View style={styles.bellBadge}>
+                  <Text style={styles.bellBadgeText}>{unseenCount > 9 ? "9+" : unseenCount}</Text>
+                </View>
+              )}
+            </TouchableOpacity>
+          ) : (
+            <View style={styles.headerBtn} />
+          )}
         </View>
 
         <View style={styles.limitContainer}>
@@ -688,14 +761,19 @@ export function DiscoverCardStack({ theme = "light", externalProfiles, hideHeade
             <Ionicons name="options-outline" size={22} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
           </TouchableOpacity>
           <Text style={[styles.headerLogo, dark && { color: INCOGNITO_COLORS.primary }]}>mira</Text>
-          <TouchableOpacity style={styles.headerBtn} onPress={() => router.push("/(main)/notifications" as any)}>
-            <Ionicons name="notifications-outline" size={22} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
-            {unseenCount > 0 && (
-              <View style={styles.bellBadge}>
-                <Text style={styles.bellBadgeText}>{unseenCount > 9 ? "9+" : unseenCount}</Text>
-              </View>
-            )}
-          </TouchableOpacity>
+          {/* Hide bell in Phase 2 — notifications are Phase 1 only */}
+          {!isPhase2 ? (
+            <TouchableOpacity style={styles.headerBtn} onPress={() => router.push("/(main)/notifications" as any)}>
+              <Ionicons name="notifications-outline" size={22} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
+              {unseenCount > 0 && (
+                <View style={styles.bellBadge}>
+                  <Text style={styles.bellBadgeText}>{unseenCount > 9 ? "9+" : unseenCount}</Text>
+                </View>
+              )}
+            </TouchableOpacity>
+          ) : (
+            <View style={styles.headerBtn} />
+          )}
         </View>
       )}
 

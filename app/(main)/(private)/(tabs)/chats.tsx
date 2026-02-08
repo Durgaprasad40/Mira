@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { View, Text, StyleSheet, ScrollView, TouchableOpacity } from 'react-native';
 import { Image } from 'expo-image';
 import { useRouter } from 'expo-router';
@@ -28,6 +28,13 @@ export default function ChatsScreen() {
   const conversations = usePrivateChatStore((s) => s.conversations);
   const blockUser = usePrivateChatStore((s) => s.blockUser);
   const [reportTarget, setReportTarget] = useState<{ id: string; name: string } | null>(null);
+
+  // Debug log for Phase 2 Messages
+  useEffect(() => {
+    if (__DEV__) {
+      console.log('[Phase2Messages] conversations=', conversations.length, conversations.map(c => c.id));
+    }
+  }, [conversations]);
 
   return (
     <View style={[styles.container, { paddingTop: insets.top }]}>

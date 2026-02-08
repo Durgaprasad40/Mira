@@ -11,6 +11,7 @@ import { INCOGNITO_COLORS } from '@/lib/constants';
 import { useIncognitoStore } from '@/stores/incognitoStore';
 import { usePrivateProfileStore } from '@/stores/privateProfileStore';
 import { PrivateConsentGate } from '@/components/private/PrivateConsentGate';
+import { setPhase2Active } from '@/hooks/useNotifications';
 
 const C = INCOGNITO_COLORS;
 
@@ -25,6 +26,12 @@ export default function PrivateLayout() {
   // when this screen is about to be popped from the (main) stack.
   const navigation = useNavigation();
   const isExitingRef = useRef(false);
+
+  // Phase 2 isolation: Set module-level flag to block Phase 1-only notifications
+  useEffect(() => {
+    setPhase2Active(true);
+    return () => setPhase2Active(false);
+  }, []);
 
   const exitToHome = () => {
     if (isExitingRef.current) return;

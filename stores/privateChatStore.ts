@@ -49,6 +49,8 @@ interface PrivateChatState {
   messages: Record<string, IncognitoMessage[]>; // keyed by conversationId
   addMessage: (conversationId: string, msg: IncognitoMessage) => void;
   createConversation: (convo: IncognitoConversation) => void;
+  /** Mark a conversation as read (clears unread count) */
+  markAsRead: (conversationId: string) => void;
 
   // Truth or Dare
   pendingDares: PendingDare[];
@@ -141,6 +143,13 @@ export const usePrivateChatStore = create<PrivateChatState>((set, get) => ({
       if (s.conversations.some((c) => c.id === convo.id)) return s;
       return { conversations: [convo, ...s.conversations] };
     }),
+
+  markAsRead: (conversationId) =>
+    set((s) => ({
+      conversations: s.conversations.map((c) =>
+        c.id === conversationId ? { ...c, unreadCount: 0 } : c
+      ),
+    })),
 
   pendingDares: DEMO_PENDING_DARES,
   sentDares: [],
@@ -236,3 +245,32 @@ export const usePrivateChatStore = create<PrivateChatState>((set, get) => ({
     })),
   isBlocked: (userId) => get().blockedUserIds.includes(userId),
 }));
+
+/**
+ * DEV ONLY: Full Phase 2 "Start Fresh" reset for testing.
+ * Clears ALL Phase 2 state: conversations, messages, metadata, unread counts, unlocked users.
+ */
+export function resetPrivateChatForTesting(): void {
+  const stateBefore = usePrivateChatStore.getState();
+  const convoBefore = stateBefore.conversations.length;
+  const unreadBefore = stateBefore.conversations.reduce((sum, c) => sum + (c.unreadCount || 0), 0);
+  const messageThreads = Object.keys(stateBefore.messages).length;
+  const unlockedBefore = stateBefore.unlockedUsers.length;
+
+  usePrivateChatStore.setState({
+    conversations: [],
+    messages: {},
+    unlockedUsers: [],
+    pendingDares: [],
+    sentDares: [],
+    blockedUserIds: [],
+  });
+
+  if (__DEV__) {
+    console.log(
+      `[Phase2Reset] BEFORE: conversations=${convoBefore} unread=${unreadBefore} ` +
+      `messageThreads=${messageThreads} unlockedUsers=${unlockedBefore}`
+    );
+    console.log(`[Phase2Reset] AFTER: conversations=0 unread=0 messageThreads=0 unlockedUsers=0`);
+  }
+}

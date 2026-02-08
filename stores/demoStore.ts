@@ -12,13 +12,36 @@ import { persist, createJSONStorage } from 'zustand/middleware';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { DEMO_PROFILES, DEMO_MATCHES, DEMO_LIKES } from '@/lib/demoData';
 import { useDemoDmStore } from '@/stores/demoDmStore';
-import { useConfessionStore } from '@/stores/confessionStore';
+// NOTE: useConfessionStore is imported lazily inside functions to break require cycle
 import { useDemoNotifStore } from '@/hooks/useNotifications';
 import { logDebugEvent } from '@/lib/debugEventLogger';
+import { resetPhase2MatchSession } from '../lib/phase2MatchSession';
+import { resetPrivateChatForTesting } from './privateChatStore';
 
 // ---------------------------------------------------------------------------
 // Types — lightweight "Like" shapes matching the demo data constants
 // ---------------------------------------------------------------------------
+
+/** Match record for demo mode */
+export interface DemoMatch {
+  id: string;
+  conversationId: string;
+  otherUser: {
+    id: string;
+    name: string;
+    photoUrl: string;
+    lastActive: number;
+    isVerified: boolean;
+  };
+  lastMessage: {
+    content: string;
+    type: string;
+    senderId: string;
+    createdAt: number;
+  } | null;
+  unreadCount: number;
+  isPreMatch: boolean;
+}
 
 export interface DemoProfile {
   _id: string;
@@ -41,26 +64,6 @@ export interface DemoProfile {
   lastLocationUpdatedAt?: number;
 }
 
-export interface DemoMatch {
-  id: string;
-  /** Deterministic conversation key: `demo_convo_${otherUser.id}` */
-  conversationId: string;
-  otherUser: {
-    id: string;
-    name: string;
-    photoUrl: string;
-    lastActive: number;
-    isVerified: boolean;
-  };
-  lastMessage: {
-    content: string;
-    type: string;
-    senderId: string;
-    createdAt: number;
-  } | null;
-  unreadCount: number;
-  isPreMatch: boolean;
-}
 
 export interface DemoLike {
   likeId: string;
@@ -346,21 +349,17 @@ export const useDemoStore = create<DemoState>()(
         for (const id of s.swipedProfileIds) {
           ids.add(id);
         }
-        // Add all matched user IDs
-        for (const m of s.matches) {
-          ids.add(m.otherUser.id);
-        }
-        // Add all conversation partner IDs from demoDmStore
-        const dmMeta = useDemoDmStore.getState().meta;
-        for (const key of Object.keys(dmMeta)) {
-          const partnerId = dmMeta[key]?.otherUser?.id;
-          if (partnerId) ids.add(partnerId);
-        }
+        // NOTE: In demo mode, do NOT exclude matched users from discover pool.
+        // This keeps 50+ profiles available for testing.
+        // Matches remain visible in Messages; users just won't re-appear in feed
+        // until swiped (which adds them to swipedProfileIds).
         return Array.from(ids);
       },
 
       resetDiscoverPool: () => {
-        if (__DEV__) console.log('[demoStore] resetDiscoverPool — re-injecting demo profiles');
+        // Re-inject profiles but KEEP swipedProfileIds to prevent duplicates.
+        // If all profiles have been swiped, the pool will remain empty (intended).
+        if (__DEV__) console.log('[demoStore] resetDiscoverPool — re-injecting demo profiles (swipedProfileIds preserved)');
         set({
           profiles: withValidPhotos(JSON.parse(JSON.stringify(DEMO_PROFILES)) as DemoProfile[]),
         });
@@ -370,7 +369,30 @@ export const useDemoStore = create<DemoState>()(
         const state = get();
         // Only skip if ALL data is present. If likes/profiles were drained
         // (e.g. persisted from older session), re-seed the missing parts.
-        if (state.seeded && state.profiles.length > 0 && state.likes.length > 0) return;
+        if (state.seeded && state.profiles.length > 0 && state.likes.length > 0) {
+          // Check if all profiles would be filtered out by FULL excluded set
+          // (swipedProfileIds + matchedUserIds + blockedUserIds)
+          const excludedIds = get().getExcludedUserIds();
+          const excludedSet = new Set(excludedIds);
+          const availableProfiles = state.profiles.filter(p => !excludedSet.has(p._id));
+
+          if (availableProfiles.length === 0 && state.swipedProfileIds.length > 0) {
+            // All filtered out — clear swipedProfileIds to recycle non-matched profiles
+            if (__DEV__) console.log('[demo] seed: all profiles excluded — clearing swipedProfileIds for fresh start');
+            set({ swipedProfileIds: [] });
+            // Recalculate available after clearing swiped
+            const newExcludedIds = get().getExcludedUserIds();
+            const newExcludedSet = new Set(newExcludedIds);
+            const newAvailable = state.profiles.filter(p => !newExcludedSet.has(p._id));
+            if (__DEV__) {
+              console.log(`[demo] seed complete profiles.length=${state.profiles.length} swipedCount=0 excludedCount=${newExcludedSet.size} availableCount=${newAvailable.length}`);
+            }
+          } else if (__DEV__) {
+            console.log(`[demo] seed complete profiles.length=${state.profiles.length} swipedCount=${state.swipedProfileIds.length} excludedCount=${excludedSet.size} availableCount=${availableProfiles.length}`);
+          }
+          return;
+        }
+        const newSwipedCount = state.swipedProfileIds.length >= DEMO_PROFILES.length ? 0 : state.swipedProfileIds.length;
         set({
           profiles: state.profiles.length > 0
             ? state.profiles
@@ -382,12 +404,29 @@ export const useDemoStore = create<DemoState>()(
             ? state.likes
             : JSON.parse(JSON.stringify(DEMO_LIKES)) as DemoLike[],
           seeded: true,
+          // If first seed and swipedProfileIds would filter all, clear them
+          swipedProfileIds: state.swipedProfileIds.length >= DEMO_PROFILES.length ? [] : state.swipedProfileIds,
         });
+        // Log after initial seed
+        if (__DEV__) {
+          const newState = get();
+          const excludedIds = newState.getExcludedUserIds();
+          const availableCount = newState.profiles.filter(p => !new Set(excludedIds).has(p._id)).length;
+          console.log(`[demo] seed complete profiles.length=${newState.profiles.length} swipedCount=${newSwipedCount} excludedCount=${excludedIds.length} availableCount=${availableCount}`);
+        }
       },
 
       reset: () => {
         // Clear dependent stores
         useDemoDmStore.setState({ conversations: {}, meta: {}, drafts: {} });
+        // Lazy require to break cycle: demoStore <-> confessionStore
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        const { useConfessionStore } = require('@/stores/confessionStore') as {
+          useConfessionStore: {
+            getState: () => { seedConfessions: () => void };
+            setState: (state: { seeded: boolean }) => void;
+          };
+        };
         useConfessionStore.setState({ seeded: false });
         useConfessionStore.getState().seedConfessions();
 
@@ -548,6 +587,18 @@ export const useDemoStore = create<DemoState>()(
         }
 
         // Clean confession store — remove confessions from this user + confession threads
+        // Lazy require to break cycle: demoStore <-> confessionStore
+        // eslint-disable-next-line @typescript-eslint/no-var-requires
+        const { useConfessionStore } = require('@/stores/confessionStore') as {
+          useConfessionStore: {
+            getState: () => {
+              confessionThreads: Record<string, string>;
+              confessions: Array<{ id: string; userId: string; targetUserId?: string }>;
+              blockUser: (userId: string) => void;
+            };
+            setState: (state: { confessionThreads: Record<string, string> }) => void;
+          };
+        };
         const confessionState = useConfessionStore.getState();
         confessionState.blockUser(userId);
         // Also clean confession threads that involve this user
@@ -642,3 +693,36 @@ setTimeout(() => {
     useDemoStore.getState().setHasHydrated(true);
   }
 }, HYDRATION_TIMEOUT_MS);
+
+/**
+ * DEV ONLY: Master reset for all demo state (Phase 1 + Phase 2).
+ * Clears everything for fresh testing:
+ * - Demo profiles, matches, likes
+ * - Swiped profile IDs
+ * - Phase 1 DM conversations
+ * - Phase 2 private chat state
+ * - Session-scoped matched user IDs
+ *
+ * Call this to start testing from a completely clean slate.
+ */
+export async function resetAllDemoForTesting(): Promise<void> {
+  if (__DEV__) {
+    console.log('[demoStore] resetAllDemoForTesting — clearing ALL demo state');
+  }
+
+  // 1) Reset Phase 1 demo state (includes DM store)
+  useDemoStore.getState().reset();
+
+  // 2) Reset Phase 2 private chat state (conversations, messages, unlocked users)
+  resetPrivateChatForTesting();
+
+  // 3) Reset Phase 2 session match tracking (prevents duplicate matches)
+  resetPhase2MatchSession();
+
+  // 4) Clear notification counts
+  useDemoNotifStore.getState().reset();
+
+  if (__DEV__) {
+    console.log('[demoStore] resetAllDemoForTesting — complete');
+  }
+}
