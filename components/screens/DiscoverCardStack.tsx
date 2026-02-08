@@ -9,12 +9,14 @@ import {
   PanResponder,
   TouchableOpacity,
   InteractionManager,
+  ScrollView,
 } from "react-native";
 import { LoadingGuard } from "@/components/safety";
 import { useShallow } from "zustand/react/shallow";
 import { useQuery, useMutation } from "convex/react";
 import { api } from "@/convex/_generated/api";
 import { COLORS, INCOGNITO_COLORS, SWIPE_CONFIG } from "@/lib/constants";
+import { PRIVATE_INTENT_CATEGORIES } from "@/lib/privateConstants";
 import { getTrustBadges } from "@/lib/trustBadges";
 import { useAuthStore } from "@/stores/authStore";
 import { useDiscoverStore } from "@/stores/discoverStore";
@@ -108,6 +110,9 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   const userId = useAuthStore((s) => s.userId);
   const [index, setIndex] = useState(0);
   const [retryKey, setRetryKey] = useState(0); // For LoadingGuard retry
+
+  // Phase-2 only: Intent filter for Desire Land
+  const [intentFilter, setIntentFilter] = useState<string | null>(null);
 
   // Daily limits — individual selectors to avoid full re-render on AsyncStorage hydration
   const likesRemaining = useDiscoverStore((s) => s.likesRemaining);
@@ -230,6 +235,21 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   }
   const profiles = validProfiles.length > 0 ? validProfiles : stableProfilesRef.current;
 
+  // Phase-2 only: Filter profiles by intent category
+  const filteredProfiles = useMemo(() => {
+    if (!isPhase2 || !intentFilter) return profiles;
+    return profiles.filter((p: any) => p.privateIntentKey === intentFilter);
+  }, [profiles, isPhase2, intentFilter]);
+
+  // Reset index when filter changes (always show first matching profile)
+  const prevFilterRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (isPhase2 && prevFilterRef.current !== intentFilter) {
+      setIndex(0);
+      prevFilterRef.current = intentFilter;
+    }
+  }, [intentFilter, isPhase2]);
+
   // ── Demo auto-replenish: re-inject profiles when pool is exhausted ──
   // Guard ref prevents the effect from firing twice before the store update
   // triggers a re-render with the new profiles.
@@ -332,8 +352,10 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   });
 
   // Strict bounds: no modulo wrapping — when deck exhausted, current becomes undefined
-  const current = index < profiles.length ? profiles[index] : undefined;
-  const next = index + 1 < profiles.length ? profiles[index + 1] : undefined;
+  // Phase-2: Use filteredProfiles when intent filter is active
+  const displayProfiles = isPhase2 ? filteredProfiles : profiles;
+  const current = index < displayProfiles.length ? displayProfiles[index] : undefined;
+  const next = index + 1 < displayProfiles.length ? displayProfiles[index + 1] : undefined;
 
   // Trust badges — memoized per profile to avoid allocation each render
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -663,8 +685,8 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
 
   // ── Debug: log index changes so we can verify cards are advancing ──
   useEffect(() => {
-    if (__DEV__) console.log(`[DiscoverCardStack] index changed -> ${index} (profile=${index < profiles.length ? profiles[index]?.name : 'EXHAUSTED'})`);
-  }, [index]);
+    if (__DEV__) console.log(`[DiscoverCardStack] index changed -> ${index} (profile=${index < displayProfiles.length ? displayProfiles[index]?.name : 'EXHAUSTED'})`);
+  }, [index, displayProfiles]);
 
   // ── Diagnostic: render count (debug log, not warn) ──
   const renderCountRef = useRef(0);
@@ -699,6 +721,27 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
         <Text style={styles.emptyEmoji}>✨</Text>
         <Text style={[styles.emptyTitle, dark && { color: INCOGNITO_COLORS.text }]}>You're all caught up</Text>
         <Text style={[styles.emptySubtitle, dark && { color: INCOGNITO_COLORS.textLight }]}>Check back soon — we'll bring you more people as they join.</Text>
+      </View>
+    );
+  }
+
+  // Phase-2: Filter results in no matches
+  if (isPhase2 && intentFilter && filteredProfiles.length === 0) {
+    const filterLabel = PRIVATE_INTENT_CATEGORIES.find((c) => c.key === intentFilter)?.label ?? intentFilter;
+    return (
+      <View style={[styles.center, dark && { backgroundColor: INCOGNITO_COLORS.background }]}>
+        <Text style={styles.emptyEmoji}>🔍</Text>
+        <Text style={[styles.emptyTitle, dark && { color: INCOGNITO_COLORS.text }]}>No "{filterLabel}" profiles</Text>
+        <Text style={[styles.emptySubtitle, dark && { color: INCOGNITO_COLORS.textLight }]}>
+          Try selecting a different intent or "All" to see everyone.
+        </Text>
+        <TouchableOpacity
+          style={[styles.resetButton, { marginTop: 24 }]}
+          onPress={() => setIntentFilter(null)}
+        >
+          <Ionicons name="funnel-outline" size={18} color="#FFFFFF" style={{ marginRight: 8 }} />
+          <Text style={styles.resetButtonText}>Show All</Text>
+        </TouchableOpacity>
       </View>
     );
   }
@@ -775,7 +818,8 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   }
 
   // Layout: card fills from header to bottom of content area
-  const cardTop = hideHeader ? 0 : insets.top + HEADER_H + (showNudge ? NUDGE_H : 0);
+  const FILTER_BAR_H = 44;
+  const cardTop = hideHeader ? 0 : insets.top + HEADER_H + (showNudge ? NUDGE_H : 0) + (isPhase2 ? FILTER_BAR_H : 0);
   const actionRowBottom = Math.max(insets.bottom, 12);
   // Leave room for the action bar so card content (bio) isn't hidden behind the buttons.
   const cardBottom = actionRowBottom + 72;
@@ -805,6 +849,35 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
           ) : (
             <View style={styles.headerBtn} />
           )}
+        </View>
+      )}
+
+      {/* Phase-2 Intent Filter Bar */}
+      {isPhase2 && !hideHeader && (
+        <View style={styles.filterBar}>
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            contentContainerStyle={styles.filterScrollContent}
+          >
+            <TouchableOpacity
+              style={[styles.filterChip, !intentFilter && styles.filterChipActive]}
+              onPress={() => setIntentFilter(null)}
+            >
+              <Text style={[styles.filterChipText, !intentFilter && styles.filterChipTextActive]}>All</Text>
+            </TouchableOpacity>
+            {PRIVATE_INTENT_CATEGORIES.map((cat) => (
+              <TouchableOpacity
+                key={cat.key}
+                style={[styles.filterChip, intentFilter === cat.key && styles.filterChipActive]}
+                onPress={() => setIntentFilter(intentFilter === cat.key ? null : cat.key)}
+              >
+                <Text style={[styles.filterChipText, intentFilter === cat.key && styles.filterChipTextActive]}>
+                  {cat.label}
+                </Text>
+              </TouchableOpacity>
+            ))}
+          </ScrollView>
         </View>
       )}
 
@@ -970,6 +1043,37 @@ const styles = StyleSheet.create({
     fontSize: 10,
     fontWeight: "700",
     color: COLORS.white,
+  },
+
+  // Phase-2 Intent Filter Bar
+  filterBar: {
+    height: 44,
+    backgroundColor: INCOGNITO_COLORS.background,
+    borderBottomWidth: 1,
+    borderBottomColor: INCOGNITO_COLORS.surface,
+  },
+  filterScrollContent: {
+    paddingHorizontal: 12,
+    alignItems: "center",
+    gap: 8,
+  },
+  filterChip: {
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 16,
+    backgroundColor: INCOGNITO_COLORS.surface,
+  },
+  filterChipActive: {
+    backgroundColor: INCOGNITO_COLORS.primary,
+  },
+  filterChipText: {
+    fontSize: 13,
+    fontWeight: "500",
+    color: INCOGNITO_COLORS.textLight,
+  },
+  filterChipTextActive: {
+    color: "#FFFFFF",
+    fontWeight: "600",
   },
 
   // Card Area
