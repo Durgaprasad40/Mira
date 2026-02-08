@@ -20,6 +20,7 @@ import { PRIVATE_INTENT_CATEGORIES } from "@/lib/privateConstants";
 import { getTrustBadges } from "@/lib/trustBadges";
 import { useAuthStore } from "@/stores/authStore";
 import { useDiscoverStore } from "@/stores/discoverStore";
+import { useFilterStore } from "@/stores/filterStore";
 import { ProfileCard, SwipeOverlay } from "@/components/cards";
 import { isDemoMode } from "@/hooks/useConvex";
 import { useNotifications } from "@/hooks/useNotifications";
@@ -111,8 +112,8 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   const [index, setIndex] = useState(0);
   const [retryKey, setRetryKey] = useState(0); // For LoadingGuard retry
 
-  // Phase-2 only: Intent filter for Desire Land
-  const [intentFilter, setIntentFilter] = useState<string | null>(null);
+  // Phase-2 only: Intent filter from store (syncs with Discovery Preferences)
+  const { privateIntentKey: intentFilter, togglePrivateIntentKey, setPrivateIntentKey } = useFilterStore();
 
   // Daily limits — individual selectors to avoid full re-render on AsyncStorage hydration
   const likesRemaining = useDiscoverStore((s) => s.likesRemaining);
@@ -753,7 +754,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
         </Text>
         <TouchableOpacity
           style={[styles.resetButton, { marginTop: 24 }]}
-          onPress={() => setIntentFilter(null)}
+          onPress={() => setPrivateIntentKey(null)}
         >
           <Ionicons name="funnel-outline" size={18} color="#FFFFFF" style={{ marginRight: 8 }} />
           <Text style={styles.resetButtonText}>Show All</Text>
@@ -878,7 +879,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
           >
             <TouchableOpacity
               style={[styles.filterChip, !intentFilter && styles.filterChipActive]}
-              onPress={() => setIntentFilter(null)}
+              onPress={() => setPrivateIntentKey(null)}
             >
               <Text style={[styles.filterChipText, !intentFilter && styles.filterChipTextActive]}>All</Text>
             </TouchableOpacity>
@@ -886,7 +887,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
               <TouchableOpacity
                 key={cat.key}
                 style={[styles.filterChip, intentFilter === cat.key && styles.filterChipActive]}
-                onPress={() => setIntentFilter(intentFilter === cat.key ? null : cat.key)}
+                onPress={() => togglePrivateIntentKey(cat.key)}
               >
                 <Text style={[styles.filterChipText, intentFilter === cat.key && styles.filterChipTextActive]}>
                   {cat.label}
