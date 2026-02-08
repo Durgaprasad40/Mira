@@ -835,8 +835,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   }
 
   // Layout: card fills from header to bottom of content area
-  const FILTER_BAR_H = 44;
-  const cardTop = hideHeader ? 0 : insets.top + HEADER_H + (showNudge ? NUDGE_H : 0) + (isPhase2 ? FILTER_BAR_H : 0);
+  const cardTop = hideHeader ? 0 : insets.top + HEADER_H + (showNudge ? NUDGE_H : 0);
   const actionRowBottom = Math.max(insets.bottom, 12);
   // Leave room for the action bar so card content (bio) isn't hidden behind the buttons.
   const cardBottom = actionRowBottom + 72;
@@ -869,34 +868,6 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
         </View>
       )}
 
-      {/* Phase-2 Intent Filter Bar */}
-      {isPhase2 && !hideHeader && (
-        <View style={styles.filterBar}>
-          <ScrollView
-            horizontal
-            showsHorizontalScrollIndicator={false}
-            contentContainerStyle={styles.filterScrollContent}
-          >
-            <TouchableOpacity
-              style={[styles.filterChip, !intentFilter && styles.filterChipActive]}
-              onPress={() => setPrivateIntentKey(null)}
-            >
-              <Text style={[styles.filterChipText, !intentFilter && styles.filterChipTextActive]}>All</Text>
-            </TouchableOpacity>
-            {PRIVATE_INTENT_CATEGORIES.map((cat) => (
-              <TouchableOpacity
-                key={cat.key}
-                style={[styles.filterChip, intentFilter === cat.key && styles.filterChipActive]}
-                onPress={() => togglePrivateIntentKey(cat.key)}
-              >
-                <Text style={[styles.filterChipText, intentFilter === cat.key && styles.filterChipTextActive]}>
-                  {cat.label}
-                </Text>
-              </TouchableOpacity>
-            ))}
-          </ScrollView>
-        </View>
-      )}
 
       {/* Profile completeness nudge */}
       {showNudge && (
@@ -1060,37 +1031,6 @@ const styles = StyleSheet.create({
     fontSize: 10,
     fontWeight: "700",
     color: COLORS.white,
-  },
-
-  // Phase-2 Intent Filter Bar
-  filterBar: {
-    height: 44,
-    backgroundColor: INCOGNITO_COLORS.background,
-    borderBottomWidth: 1,
-    borderBottomColor: INCOGNITO_COLORS.surface,
-  },
-  filterScrollContent: {
-    paddingHorizontal: 12,
-    alignItems: "center",
-    gap: 8,
-  },
-  filterChip: {
-    paddingHorizontal: 14,
-    paddingVertical: 8,
-    borderRadius: 16,
-    backgroundColor: INCOGNITO_COLORS.surface,
-  },
-  filterChipActive: {
-    backgroundColor: INCOGNITO_COLORS.primary,
-  },
-  filterChipText: {
-    fontSize: 13,
-    fontWeight: "500",
-    color: INCOGNITO_COLORS.textLight,
-  },
-  filterChipTextActive: {
-    color: "#FFFFFF",
-    fontWeight: "600",
   },
 
   // Card Area
