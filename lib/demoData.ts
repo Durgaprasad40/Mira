@@ -1474,7 +1474,7 @@ export const DEMO_INCOGNITO_PROFILES: import('@/types').IncognitoProfile[] = [
     desireCategories: ['romantic', 'intellectual'], distance: 3.2, city: 'Mumbai',
     bio: 'Night owl seeking meaningful connections under the stars.',
     isOnline: true, height: 165, bodyStructure: 'slim', hairColor: 'Black', eyeColor: 'Brown',
-    relationshipIntent: 'Long-term', interests: ['Music', 'Poetry', 'Stargazing'], hobbies: ['Writing', 'Cooking', 'Reading'], faceUnblurred: false,
+    privateIntentKey: 'connection_first', interests: ['Music', 'Poetry', 'Stargazing'], hobbies: ['Writing', 'Cooking', 'Reading'], faceUnblurred: false,
   },
   {
     id: 'inc_2', username: 'Wanderlust_Soul', age: 26, gender: 'female',
@@ -1483,7 +1483,7 @@ export const DEMO_INCOGNITO_PROFILES: import('@/types').IncognitoProfile[] = [
     desireCategories: ['adventurous', 'social'], distance: 5.1, city: 'Mumbai',
     bio: 'Life is too short for boring plans. Let\'s get lost together.',
     isOnline: true, height: 160, bodyStructure: 'athletic', hairColor: 'Brown', eyeColor: 'Hazel',
-    relationshipIntent: 'Short-term', interests: ['Travel', 'Hiking', 'Photography'], hobbies: ['Backpacking', 'Surfing', 'Journaling'], faceUnblurred: false,
+    privateIntentKey: 'go_with_the_flow', interests: ['Travel', 'Hiking', 'Photography'], hobbies: ['Backpacking', 'Surfing', 'Journaling'], faceUnblurred: false,
   },
   {
     id: 'inc_3', username: 'Velvet_Dreams', age: 23, gender: 'female',
@@ -1492,7 +1492,7 @@ export const DEMO_INCOGNITO_PROFILES: import('@/types').IncognitoProfile[] = [
     desireCategories: ['creative', 'romantic'], distance: 1.8, city: 'Mumbai',
     bio: 'Artist by passion, dreamer by nature.',
     isOnline: false, height: 158, bodyStructure: 'slim', hairColor: 'Black', eyeColor: 'Dark Brown',
-    relationshipIntent: 'Long-term', interests: ['Art', 'Design', 'Film'], hobbies: ['Painting', 'Sculpting', 'Cinema'], faceUnblurred: false,
+    privateIntentKey: 'situationship', interests: ['Art', 'Design', 'Film'], hobbies: ['Painting', 'Sculpting', 'Cinema'], faceUnblurred: false,
   },
   {
     id: 'inc_4', username: 'Phoenix_Fire', age: 27, gender: 'female',
@@ -1501,7 +1501,7 @@ export const DEMO_INCOGNITO_PROFILES: import('@/types').IncognitoProfile[] = [
     desireCategories: ['intellectual', 'spiritual'], distance: 7.4, city: 'Pune',
     bio: 'Rising from the ashes of mundane conversations.',
     isOnline: true, height: 170, bodyStructure: 'athletic', hairColor: 'Auburn', eyeColor: 'Green',
-    relationshipIntent: 'Long-term', interests: ['Philosophy', 'Science', 'Literature'], hobbies: ['Reading', 'Debating', 'Chess'], faceUnblurred: true,
+    privateIntentKey: 'trusted_connection', interests: ['Philosophy', 'Science', 'Literature'], hobbies: ['Reading', 'Debating', 'Chess'], faceUnblurred: true,
   },
   {
     id: 'inc_5', username: 'Stargazer_22', age: 22, gender: 'female',
@@ -1510,7 +1510,7 @@ export const DEMO_INCOGNITO_PROFILES: import('@/types').IncognitoProfile[] = [
     desireCategories: ['spiritual', 'romantic'], distance: 2.5, city: 'Mumbai',
     bio: 'Looking up at the sky, looking for you.',
     isOnline: false, height: 155, bodyStructure: 'curvy', hairColor: 'Black', eyeColor: 'Brown',
-    relationshipIntent: 'Figuring out', interests: ['Astronomy', 'Philosophy', 'Music'], hobbies: ['Stargazing', 'Meditation', 'Guitar'], faceUnblurred: false,
+    privateIntentKey: 'open_minded', interests: ['Astronomy', 'Philosophy', 'Music'], hobbies: ['Stargazing', 'Meditation', 'Guitar'], faceUnblurred: false,
   },
   {
     id: 'inc_6', username: 'Neon_Butterfly', age: 25, gender: 'female',
@@ -1519,7 +1519,7 @@ export const DEMO_INCOGNITO_PROFILES: import('@/types').IncognitoProfile[] = [
     desireCategories: ['social', 'adventurous'], distance: 4.0, city: 'Mumbai',
     bio: 'Transforming every moment into magic.',
     isOnline: true, height: 163, bodyStructure: 'slim', hairColor: 'Highlighted', eyeColor: 'Brown',
-    relationshipIntent: 'Short-term', interests: ['Dancing', 'Music Festivals', 'Fashion'], hobbies: ['Dancing', 'DJing', 'Styling'], faceUnblurred: false,
+    privateIntentKey: 'fling', interests: ['Dancing', 'Music Festivals', 'Fashion'], hobbies: ['Dancing', 'DJing', 'Styling'], faceUnblurred: false,
   },
   {
     id: 'inc_7', username: 'Mystic_Luna', age: 28, gender: 'female',
@@ -1528,7 +1528,7 @@ export const DEMO_INCOGNITO_PROFILES: import('@/types').IncognitoProfile[] = [
     desireCategories: ['spiritual', 'creative'], distance: 6.8, city: 'Bangalore',
     bio: 'Finding peace in chaos, seeking light in darkness.',
     isOnline: false, height: 167, bodyStructure: 'athletic', hairColor: 'Black', eyeColor: 'Dark Brown',
-    relationshipIntent: 'Long-term', interests: ['Yoga', 'Meditation', 'Wellness'], hobbies: ['Yoga', 'Herbalism', 'Journaling'], faceUnblurred: true,
+    privateIntentKey: 'intimate', interests: ['Yoga', 'Meditation', 'Wellness'], hobbies: ['Yoga', 'Herbalism', 'Journaling'], faceUnblurred: true,
   },
   {
     id: 'inc_8', username: 'Cherry_Blossom', age: 23, gender: 'female',
@@ -1537,7 +1537,7 @@ export const DEMO_INCOGNITO_PROFILES: import('@/types').IncognitoProfile[] = [
     desireCategories: ['romantic', 'social'], distance: 1.2, city: 'Mumbai',
     bio: 'Blooming where I\'m planted. Come grow with me.',
     isOnline: true, height: 157, bodyStructure: 'average', hairColor: 'Black', eyeColor: 'Brown',
-    relationshipIntent: 'Long-term', interests: ['Coffee', 'Books', 'Gardening'], hobbies: ['Baking', 'Gardening', 'Crafting'], faceUnblurred: false,
+    privateIntentKey: 'chemistry_first', interests: ['Coffee', 'Books', 'Gardening'], hobbies: ['Baking', 'Gardening', 'Crafting'], faceUnblurred: false,
   },
   {
     id: 'inc_9', username: 'Electric_Sage', age: 26, gender: 'female',
@@ -1546,7 +1546,7 @@ export const DEMO_INCOGNITO_PROFILES: import('@/types').IncognitoProfile[] = [
     desireCategories: ['creative', 'intellectual'], distance: 3.9, city: 'Mumbai',
     bio: 'Electricity runs through my veins, wisdom in my soul.',
     isOnline: true, height: 164, bodyStructure: 'slim', hairColor: 'Brown', eyeColor: 'Hazel',
-    relationshipIntent: 'Short-term', interests: ['Music Production', 'Vinyl', 'Jazz'], hobbies: ['Producing', 'Piano', 'Record Hunting'], faceUnblurred: false,
+    privateIntentKey: 'casual_vibes', interests: ['Music Production', 'Vinyl', 'Jazz'], hobbies: ['Producing', 'Piano', 'Record Hunting'], faceUnblurred: false,
   },
   {
     id: 'inc_10', username: 'Ocean_Whisper', age: 24, gender: 'female',
@@ -1555,7 +1555,7 @@ export const DEMO_INCOGNITO_PROFILES: import('@/types').IncognitoProfile[] = [
     desireCategories: ['adventurous', 'romantic'], distance: 8.5, city: 'Goa',
     bio: 'The ocean whispers secrets only hearts can hear.',
     isOnline: false, height: 162, bodyStructure: 'curvy', hairColor: 'Wavy Brown', eyeColor: 'Brown',
-    relationshipIntent: 'Figuring out', interests: ['Ocean', 'Travel', 'Sunsets'], hobbies: ['Swimming', 'Snorkeling', 'Shell Collecting'], faceUnblurred: false,
+    privateIntentKey: 'weekend_thing', interests: ['Ocean', 'Travel', 'Sunsets'], hobbies: ['Swimming', 'Snorkeling', 'Shell Collecting'], faceUnblurred: false,
   },
   {
     id: 'inc_11', username: 'Shadow_Dancer', age: 25, gender: 'female',
@@ -1564,7 +1564,7 @@ export const DEMO_INCOGNITO_PROFILES: import('@/types').IncognitoProfile[] = [
     desireCategories: ['adventurous', 'creative'], distance: 2.1, city: 'Mumbai',
     bio: 'Dancing between light and shadow.',
     isOnline: true, height: 168, bodyStructure: 'athletic', hairColor: 'Black', eyeColor: 'Dark Brown',
-    relationshipIntent: 'Short-term', interests: ['Dance', 'Fitness', 'Nightlife'], hobbies: ['Contemporary Dance', 'Salsa', 'Boxing'], faceUnblurred: true,
+    privateIntentKey: 'late_night', interests: ['Dance', 'Fitness', 'Nightlife'], hobbies: ['Contemporary Dance', 'Salsa', 'Boxing'], faceUnblurred: true,
   },
   {
     id: 'inc_12', username: 'Golden_Hour', age: 27, gender: 'female',
@@ -1573,7 +1573,7 @@ export const DEMO_INCOGNITO_PROFILES: import('@/types').IncognitoProfile[] = [
     desireCategories: ['creative', 'social'], distance: 4.7, city: 'Delhi',
     bio: 'Everything is more beautiful in golden light.',
     isOnline: false, height: 161, bodyStructure: 'slim', hairColor: 'Blonde Highlights', eyeColor: 'Brown',
-    relationshipIntent: 'Long-term', interests: ['Photography', 'Travel', 'Nature'], hobbies: ['Landscape Photography', 'Hiking', 'Editing'], faceUnblurred: false,
+    privateIntentKey: 'mutual_interest', interests: ['Photography', 'Travel', 'Nature'], hobbies: ['Landscape Photography', 'Hiking', 'Editing'], faceUnblurred: false,
   },
   {
     id: 'inc_13', username: 'Rebel_Heart', age: 24, gender: 'female',
@@ -1583,7 +1583,7 @@ export const DEMO_INCOGNITO_PROFILES: import('@/types').IncognitoProfile[] = [
     bio: 'Breaking rules and hearts since \'99.',
     isOnline: true, height: 166, bodyStructure: 'average', tattoos: true, piercings: true,
     hairColor: 'Red', eyeColor: 'Green',
-    relationshipIntent: 'Open to anything', interests: ['Tattoo Art', 'Rock Music', 'Motorcycles'], hobbies: ['Riding', 'Sketching', 'Concerts'], faceUnblurred: false,
+    privateIntentKey: 'no_labels', interests: ['Tattoo Art', 'Rock Music', 'Motorcycles'], hobbies: ['Riding', 'Sketching', 'Concerts'], faceUnblurred: false,
   },
   {
     id: 'inc_14', username: 'Silk_Road', age: 29, gender: 'female',
@@ -1592,7 +1592,7 @@ export const DEMO_INCOGNITO_PROFILES: import('@/types').IncognitoProfile[] = [
     desireCategories: ['intellectual', 'social'], distance: 9.2, city: 'Hyderabad',
     bio: 'Traveling through cultures, one conversation at a time.',
     isOnline: false, height: 172, bodyStructure: 'slim', hairColor: 'Black', eyeColor: 'Brown',
-    relationshipIntent: 'Long-term', interests: ['Culture', 'Cuisine', 'History'], hobbies: ['Cooking', 'Wine Tasting', 'Museum Visits'], faceUnblurred: true,
+    privateIntentKey: 'trusted_connection', interests: ['Culture', 'Cuisine', 'History'], hobbies: ['Cooking', 'Wine Tasting', 'Museum Visits'], faceUnblurred: true,
   },
   {
     id: 'inc_15', username: 'Aurora_Sky', age: 22, gender: 'female',
@@ -1601,7 +1601,7 @@ export const DEMO_INCOGNITO_PROFILES: import('@/types').IncognitoProfile[] = [
     desireCategories: ['spiritual', 'adventurous'], distance: 3.6, city: 'Mumbai',
     bio: 'Chasing auroras and authentic connections.',
     isOnline: true, height: 156, bodyStructure: 'curvy', hairColor: 'Black', eyeColor: 'Brown',
-    relationshipIntent: 'Figuring out', interests: ['Astronomy', 'Nature', 'Spirituality'], hobbies: ['Telescope Viewing', 'Camping', 'Crystal Collecting'], faceUnblurred: false,
+    privateIntentKey: 'open_minded', interests: ['Astronomy', 'Nature', 'Spirituality'], hobbies: ['Telescope Viewing', 'Camping', 'Crystal Collecting'], faceUnblurred: false,
   },
   {
     id: 'inc_16', username: 'Crimson_Tide', age: 26, gender: 'female',
@@ -1610,7 +1610,7 @@ export const DEMO_INCOGNITO_PROFILES: import('@/types').IncognitoProfile[] = [
     desireCategories: ['social', 'creative'], distance: 2.7, city: 'Mumbai',
     bio: 'Fiercely competitive but fiercely loyal.',
     isOnline: true, height: 164, bodyStructure: 'athletic', hairColor: 'Black', eyeColor: 'Brown',
-    relationshipIntent: 'Long-term', interests: ['Board Games', 'Cooking', 'Fitness'], hobbies: ['Strategy Games', 'Meal Prep', 'Running'], faceUnblurred: false,
+    privateIntentKey: 'friends_plus', interests: ['Board Games', 'Cooking', 'Fitness'], hobbies: ['Strategy Games', 'Meal Prep', 'Running'], faceUnblurred: false,
   },
   {
     id: 'inc_17', username: 'Velvet_Storm', age: 23, gender: 'female',
@@ -1619,7 +1619,7 @@ export const DEMO_INCOGNITO_PROFILES: import('@/types').IncognitoProfile[] = [
     desireCategories: ['adventurous', 'intellectual'], distance: 4.1, city: 'Mumbai',
     bio: 'Soft outside, thunder inside. Handle with curiosity.',
     isOnline: false, height: 159, bodyStructure: 'slim', hairColor: 'Dark Brown', eyeColor: 'Dark Brown',
-    relationshipIntent: 'Figuring out', interests: ['Road Trips', 'Psychology', 'Poetry'], hobbies: ['Driving', 'Journaling', 'Spoken Word'], faceUnblurred: false,
+    privateIntentKey: 'private_thing', interests: ['Road Trips', 'Psychology', 'Poetry'], hobbies: ['Driving', 'Journaling', 'Spoken Word'], faceUnblurred: false,
   },
   {
     id: 'inc_18', username: 'Ivory_Flame', age: 25, gender: 'female',
@@ -1628,7 +1628,7 @@ export const DEMO_INCOGNITO_PROFILES: import('@/types').IncognitoProfile[] = [
     desireCategories: ['romantic', 'social'], distance: 1.5, city: 'Mumbai',
     bio: 'Feed me tacos and tell me I\'m pretty.',
     isOnline: true, height: 160, bodyStructure: 'curvy', hairColor: 'Brown', eyeColor: 'Hazel',
-    relationshipIntent: 'Short-term', interests: ['Food', 'Comedy', 'Travel'], hobbies: ['Street Food Tours', 'Stand-up Comedy', 'Brunch Hopping'], faceUnblurred: true,
+    privateIntentKey: 'fwb', interests: ['Food', 'Comedy', 'Travel'], hobbies: ['Street Food Tours', 'Stand-up Comedy', 'Brunch Hopping'], faceUnblurred: true,
   },
   {
     id: 'inc_19', username: 'Moonlit_Fox', age: 27, gender: 'female',
@@ -1637,7 +1637,7 @@ export const DEMO_INCOGNITO_PROFILES: import('@/types').IncognitoProfile[] = [
     desireCategories: ['intellectual', 'romantic'], distance: 6.3, city: 'Pune',
     bio: 'Cunning mind, gentle heart. Let\'s outsmart the world together.',
     isOnline: false, height: 167, bodyStructure: 'slim', hairColor: 'Black', eyeColor: 'Brown',
-    relationshipIntent: 'Long-term', interests: ['Literature', 'Chess', 'Film Noir'], hobbies: ['Book Clubs', 'Crosswords', 'Classic Cinema'], faceUnblurred: false,
+    privateIntentKey: 'connection_first', interests: ['Literature', 'Chess', 'Film Noir'], hobbies: ['Book Clubs', 'Crosswords', 'Classic Cinema'], faceUnblurred: false,
   },
   {
     id: 'inc_20', username: 'Prism_Light', age: 24, gender: 'female',
@@ -1646,7 +1646,7 @@ export const DEMO_INCOGNITO_PROFILES: import('@/types').IncognitoProfile[] = [
     desireCategories: ['adventurous', 'creative'], distance: 3.4, city: 'Mumbai',
     bio: 'I see the world in color. Come paint with me.',
     isOnline: true, height: 162, bodyStructure: 'average', hairColor: 'Highlighted', eyeColor: 'Brown',
-    relationshipIntent: 'Open to anything', interests: ['Music Festivals', 'Art', 'Fashion'], hobbies: ['Painting', 'Thrifting', 'Dancing'], faceUnblurred: false,
+    privateIntentKey: 'go_with_the_flow', interests: ['Music Festivals', 'Art', 'Fashion'], hobbies: ['Painting', 'Thrifting', 'Dancing'], faceUnblurred: false,
   },
   {
     id: 'inc_21', username: 'Sage_Whisper', age: 28, gender: 'female',
@@ -1655,7 +1655,7 @@ export const DEMO_INCOGNITO_PROFILES: import('@/types').IncognitoProfile[] = [
     desireCategories: ['spiritual', 'romantic'], distance: 5.8, city: 'Bangalore',
     bio: 'In a world full of noise, I choose stillness.',
     isOnline: false, height: 170, bodyStructure: 'athletic', hairColor: 'Black', eyeColor: 'Dark Brown',
-    relationshipIntent: 'Long-term', interests: ['Meditation', 'Wellness', 'Tea Ceremonies'], hobbies: ['Yoga', 'Herbalism', 'Nature Walks'], faceUnblurred: true,
+    privateIntentKey: 'intimate', interests: ['Meditation', 'Wellness', 'Tea Ceremonies'], hobbies: ['Yoga', 'Herbalism', 'Nature Walks'], faceUnblurred: true,
   },
   {
     id: 'inc_22', username: 'Ember_Kiss', age: 22, gender: 'female',
@@ -1664,7 +1664,7 @@ export const DEMO_INCOGNITO_PROFILES: import('@/types').IncognitoProfile[] = [
     desireCategories: ['romantic', 'social'], distance: 1.9, city: 'Mumbai',
     bio: 'Warm like embers, sweet like a first kiss.',
     isOnline: true, height: 155, bodyStructure: 'slim', hairColor: 'Black', eyeColor: 'Brown',
-    relationshipIntent: 'Short-term', interests: ['Movies', 'Anime', 'Gaming'], hobbies: ['Binge Watching', 'Cosplay', 'Digital Art'], faceUnblurred: false,
+    privateIntentKey: 'casual_vibes', interests: ['Movies', 'Anime', 'Gaming'], hobbies: ['Binge Watching', 'Cosplay', 'Digital Art'], faceUnblurred: false,
   },
   {
     id: 'inc_23', username: 'Wild_Orchid', age: 26, gender: 'female',
@@ -1673,7 +1673,7 @@ export const DEMO_INCOGNITO_PROFILES: import('@/types').IncognitoProfile[] = [
     desireCategories: ['adventurous', 'creative'], distance: 7.1, city: 'Goa',
     bio: 'Wild at heart, rooted in kindness.',
     isOnline: true, height: 165, bodyStructure: 'athletic', hairColor: 'Wavy Brown', eyeColor: 'Green',
-    relationshipIntent: 'Figuring out', interests: ['Scuba Diving', 'Music', 'Nature'], hobbies: ['Guitar', 'Camping', 'Surfing'], faceUnblurred: false,
+    privateIntentKey: 'off_record', interests: ['Scuba Diving', 'Music', 'Nature'], hobbies: ['Guitar', 'Camping', 'Surfing'], faceUnblurred: false,
   },
   {
     id: 'inc_24', username: 'Neon_Mirage', age: 24, gender: 'female',
@@ -1682,7 +1682,7 @@ export const DEMO_INCOGNITO_PROFILES: import('@/types').IncognitoProfile[] = [
     desireCategories: ['social', 'adventurous'], distance: 2.3, city: 'Mumbai',
     bio: 'Now you see me, now you\'re intrigued.',
     isOnline: false, height: 163, bodyStructure: 'average', hairColor: 'Black', eyeColor: 'Brown',
-    relationshipIntent: 'Open to anything', interests: ['Karaoke', 'Urban Exploring', 'Nightlife'], hobbies: ['Singing', 'Photography', 'Street Art Tours'], faceUnblurred: false,
+    privateIntentKey: 'non_committal', interests: ['Karaoke', 'Urban Exploring', 'Nightlife'], hobbies: ['Singing', 'Photography', 'Street Art Tours'], faceUnblurred: false,
   },
   {
     id: 'inc_25', username: 'Copper_Moon', age: 29, gender: 'female',
@@ -1691,7 +1691,7 @@ export const DEMO_INCOGNITO_PROFILES: import('@/types').IncognitoProfile[] = [
     desireCategories: ['intellectual', 'social'], distance: 4.6, city: 'Delhi',
     bio: 'Aged like fine wine. Still aging, actually.',
     isOnline: true, height: 171, bodyStructure: 'slim', hairColor: 'Auburn', eyeColor: 'Hazel',
-    relationshipIntent: 'Long-term', interests: ['Wine', 'Philosophy', 'Economics'], hobbies: ['Wine Tasting', 'Debating', 'Writing'], faceUnblurred: true,
+    privateIntentKey: 'chemistry_first', interests: ['Wine', 'Philosophy', 'Economics'], hobbies: ['Wine Tasting', 'Debating', 'Writing'], faceUnblurred: true,
   },
 ];
 

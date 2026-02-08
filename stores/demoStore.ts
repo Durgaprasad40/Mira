@@ -17,6 +17,7 @@ import { useDemoNotifStore } from '@/hooks/useNotifications';
 import { logDebugEvent } from '@/lib/debugEventLogger';
 import { resetPhase2MatchSession } from '../lib/phase2MatchSession';
 import { resetPrivateChatForTesting } from './privateChatStore';
+import { PRIVATE_INTENT_CATEGORIES } from '@/lib/privateConstants';
 
 // ---------------------------------------------------------------------------
 // Types — lightweight "Like" shapes matching the demo data constants
@@ -62,6 +63,8 @@ export interface DemoProfile {
   profilePrompts?: { question: string; answer: string }[];
   photos: { url: string }[];
   lastLocationUpdatedAt?: number;
+  // Face 2 (Phase 2) only: intent category from PRIVATE_INTENT_CATEGORIES
+  privateIntentKey?: string;
 }
 
 
@@ -210,12 +213,31 @@ interface DemoState {
   clearSafety: () => void;
 }
 
-/** Filter out profiles with no valid primary photo and ensure verification status */
+/**
+ * Simple string hash for deterministic category assignment.
+ * Same profile ID always gets same category index.
+ */
+function simpleHash(str: string): number {
+  let hash = 0;
+  for (let i = 0; i < str.length; i++) {
+    const char = str.charCodeAt(i);
+    hash = ((hash << 5) - hash) + char;
+    hash = hash & hash; // Convert to 32bit integer
+  }
+  return Math.abs(hash);
+}
+
+/** Filter out profiles with no valid primary photo, ensure verification status, and assign Phase 2 category */
 function withValidPhotos(profiles: DemoProfile[]): DemoProfile[] {
   return profiles
     .filter((p) => p.photos?.length > 0 && !!p.photos[0]?.url)
-    // 8A: All demo profiles are treated as verified
-    .map((p) => ({ ...p, verificationStatus: 'verified' as const }));
+    .map((p) => ({
+      ...p,
+      // 8A: All demo profiles are treated as verified
+      verificationStatus: 'verified' as const,
+      // Face 2: Assign deterministic intent category based on profile ID
+      privateIntentKey: PRIVATE_INTENT_CATEGORIES[simpleHash(p._id) % PRIVATE_INTENT_CATEGORIES.length].key,
+    }));
 }
 
 export const useDemoStore = create<DemoState>()(

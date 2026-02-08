@@ -317,7 +317,8 @@ export interface IncognitoProfile {
   city: string;
   bio: string;
   isOnline: boolean;
-  relationshipIntent: string;
+  /** Phase-2 intent key (replaces Face-1 relationshipIntent) */
+  privateIntentKey?: PrivateIntentKey;
   interests: string[];
   hobbies: string[];
   faceUnblurred: boolean;

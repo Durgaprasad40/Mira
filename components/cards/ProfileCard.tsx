@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useEffect, useRef } from 'react';
+import React, { useState, useCallback, useEffect, useRef, useMemo } from 'react';
 import {
   View,
   Text,
@@ -10,6 +10,7 @@ import { Image } from 'expo-image';
 import { Ionicons } from '@expo/vector-icons';
 import { COLORS, INCOGNITO_COLORS } from '@/lib/constants';
 import type { TrustBadge } from '@/lib/trustBadges';
+import { PRIVATE_INTENT_CATEGORIES } from '@/lib/privateConstants';
 
 export interface ProfileCardProps {
   name: string;
@@ -31,6 +32,8 @@ export interface ProfileCardProps {
   onOpenProfile?: () => void;
   /** When true, photos are rendered with a blur effect (user-controlled privacy) */
   photoBlurred?: boolean;
+  /** Face 2 only: intent category key from PRIVATE_INTENT_CATEGORIES */
+  privateIntentKey?: string;
   // Legacy props for non-Discover usage (explore grid etc.)
   user?: any;
   onPress?: () => void;
@@ -52,10 +55,18 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
   theme = 'light',
   onOpenProfile,
   photoBlurred = false,
+  privateIntentKey,
   onPress,
 }) => {
   const dark = theme === 'dark';
   const TC = dark ? INCOGNITO_COLORS : COLORS;
+
+  // Face 2 only: Look up intent category label from key
+  const intentLabel = useMemo(() => {
+    if (!dark || !privateIntentKey) return null;
+    const category = PRIVATE_INTENT_CATEGORIES.find(c => c.key === privateIntentKey);
+    return category?.label ?? null;
+  }, [dark, privateIntentKey]);
   const [photoIndex, setPhotoIndex] = useState(0);
   // 7-1: Track image load errors to show placeholder on failure
   const [imageError, setImageError] = useState(false);
@@ -184,6 +195,10 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
               {isVerified && <Text style={styles.verified}>✔︎</Text>}
             </View>
             {!!city && <Text style={styles.city}>{city}</Text>}
+            {/* Face 2 only: Intent category label */}
+            {intentLabel && (
+              <Text style={styles.intentLabel}>{intentLabel}</Text>
+            )}
           </View>
           {!!distance && (
             <Text style={styles.distance}>{distance.toFixed(0)} km away</Text>
@@ -336,6 +351,15 @@ const styles = StyleSheet.create({
   city: {
     fontSize: 14,
     color: COLORS.white,
+    textShadowColor: 'rgba(0,0,0,0.5)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 3,
+  },
+  intentLabel: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: 'rgba(255,255,255,0.9)',
+    marginTop: 2,
     textShadowColor: 'rgba(0,0,0,0.5)',
     textShadowOffset: { width: 0, height: 1 },
     textShadowRadius: 3,

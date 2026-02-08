@@ -331,8 +331,9 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
     extrapolate: "clamp",
   });
 
-  const current = profiles.length > 0 ? profiles[index % profiles.length] : undefined;
-  const next = profiles.length > 0 ? profiles[(index + 1) % profiles.length] : undefined;
+  // Strict bounds: no modulo wrapping — when deck exhausted, current becomes undefined
+  const current = index < profiles.length ? profiles[index] : undefined;
+  const next = index + 1 < profiles.length ? profiles[index + 1] : undefined;
 
   // Trust badges — memoized per profile to avoid allocation each render
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -662,7 +663,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
 
   // ── Debug: log index changes so we can verify cards are advancing ──
   useEffect(() => {
-    if (__DEV__) console.log(`[DiscoverCardStack] index changed -> ${index} (profile=${profiles[index % profiles.length]?.name ?? 'none'})`);
+    if (__DEV__) console.log(`[DiscoverCardStack] index changed -> ${index} (profile=${index < profiles.length ? profiles[index]?.name : 'EXHAUSTED'})`);
   }, [index]);
 
   // ── Diagnostic: render count (debug log, not warn) ──
@@ -691,13 +692,43 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
     );
   }
 
-  // Empty state
+  // Empty state (no profiles at all)
   if (profiles.length === 0) {
     return (
       <View style={[styles.center, dark && { backgroundColor: INCOGNITO_COLORS.background }]}>
         <Text style={styles.emptyEmoji}>✨</Text>
         <Text style={[styles.emptyTitle, dark && { color: INCOGNITO_COLORS.text }]}>You're all caught up</Text>
         <Text style={[styles.emptySubtitle, dark && { color: INCOGNITO_COLORS.textLight }]}>Check back soon — we'll bring you more people as they join.</Text>
+      </View>
+    );
+  }
+
+  // Deck exhausted state (swiped through all profiles)
+  if (!current) {
+    const handleResetDeck = () => {
+      if (isDemoMode) {
+        useDemoStore.getState().resetDiscoverPool();
+        setIndex(0);
+        if (__DEV__) console.log('[DiscoverCardStack] deck reset — starting fresh');
+      }
+    };
+
+    return (
+      <View style={[styles.center, dark && { backgroundColor: INCOGNITO_COLORS.background }]}>
+        <Text style={styles.emptyEmoji}>🎉</Text>
+        <Text style={[styles.emptyTitle, dark && { color: INCOGNITO_COLORS.text }]}>No more profiles</Text>
+        <Text style={[styles.emptySubtitle, dark && { color: INCOGNITO_COLORS.textLight }]}>
+          You've seen everyone available right now.
+        </Text>
+        {isDemoMode && (
+          <TouchableOpacity
+            style={[styles.resetButton, { marginTop: 24 }]}
+            onPress={handleResetDeck}
+          >
+            <Ionicons name="refresh" size={18} color="#FFFFFF" style={{ marginRight: 8 }} />
+            <Text style={styles.resetButtonText}>Reset Demo Deck</Text>
+          </TouchableOpacity>
+        )}
       </View>
     );
   }
@@ -802,6 +833,8 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
               photos={next.photos}
               trustBadges={nextBadges}
               profilePrompt={next.profilePrompts?.[0]}
+              theme={isPhase2 ? "dark" : "light"}
+              privateIntentKey={(next as any).privateIntentKey}
             />
           </Animated.View>
         )}
@@ -820,6 +853,8 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
               profilePrompt={current.profilePrompts?.[0]}
               showCarousel
               onOpenProfile={openProfileCb}
+              theme={isPhase2 ? "dark" : "light"}
+              privateIntentKey={(current as any).privateIntentKey}
             />
             <SwipeOverlay direction={overlayDirection} opacity={overlayOpacityAnim} />
           </Animated.View>
@@ -1045,6 +1080,19 @@ const styles = StyleSheet.create({
     borderRadius: 28,
   },
   limitButtonText: {
+    fontSize: 16,
+    fontWeight: "600",
+    color: COLORS.white,
+  },
+  resetButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: COLORS.primary,
+    paddingHorizontal: 24,
+    paddingVertical: 14,
+    borderRadius: 28,
+  },
+  resetButtonText: {
     fontSize: 16,
     fontWeight: "600",
     color: COLORS.white,

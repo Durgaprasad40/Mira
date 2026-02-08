@@ -124,16 +124,6 @@ export default function PrivateProfileViewScreen() {
           </View>
         ) : null}
 
-        {/* Relationship Intent */}
-        {profile.relationshipIntent ? (
-          <View style={styles.section}>
-            <Text style={styles.sectionTitle}>Looking for</Text>
-            <View style={styles.intentChip}>
-              <Text style={styles.intentChipText}>{profile.relationshipIntent}</Text>
-            </View>
-          </View>
-        ) : null}
-
         {/* Desires */}
         {profile.desires && profile.desires.length > 0 && (
           <View style={styles.section}>
@@ -270,12 +260,6 @@ const styles = StyleSheet.create({
   section: { marginBottom: 20 },
   sectionTitle: { fontSize: 13, fontWeight: '700', color: C.textLight, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 8 },
   bioText: { fontSize: 15, color: C.text, lineHeight: 22 },
-  // Intent
-  intentChip: {
-    alignSelf: 'flex-start',
-    backgroundColor: C.primary + '20', paddingHorizontal: 14, paddingVertical: 6, borderRadius: 12,
-  },
-  intentChipText: { fontSize: 13, fontWeight: '600', color: C.primary },
   // Chips
   chipRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
   chip: { backgroundColor: C.surface, paddingHorizontal: 12, paddingVertical: 6, borderRadius: 12 },

@@ -1,14 +1,16 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { View, Text, StyleSheet, ScrollView, TouchableOpacity } from 'react-native';
 import { Image } from 'expo-image';
 import { useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { INCOGNITO_COLORS } from '@/lib/constants';
+import { PRIVATE_INTENT_CATEGORIES } from '@/lib/privateConstants';
 import { usePrivateChatStore } from '@/stores/privateChatStore';
 import { textForPublicSurface } from '@/lib/contentFilter';
 import { ReportModal } from '@/components/private/ReportModal';
 import { getTimeAgo } from '@/lib/utils';
+import { DEMO_INCOGNITO_PROFILES } from '@/lib/demoData';
 
 const C = INCOGNITO_COLORS;
 
@@ -20,6 +22,14 @@ const connectionIcon = (source: string) => {
     case 'friend': return 'people';
     default: return 'chatbubble';
   }
+};
+
+/** Look up Phase-2 intent label for a participant */
+const getIntentLabel = (participantId: string): string | null => {
+  const profile = DEMO_INCOGNITO_PROFILES.find((p) => p.id === participantId);
+  if (!profile?.privateIntentKey) return null;
+  const category = PRIVATE_INTENT_CATEGORIES.find((c) => c.key === profile.privateIntentKey);
+  return category?.label ?? null;
 };
 
 export default function ChatsScreen() {
@@ -68,7 +78,15 @@ export default function ChatsScreen() {
               </View>
               <View style={styles.chatInfo}>
                 <View style={styles.chatNameRow}>
-                  <Text style={styles.chatName}>{convo.participantName}</Text>
+                  <View style={styles.chatNameCol}>
+                    <Text style={styles.chatName}>{convo.participantName}</Text>
+                    {(() => {
+                      const intentLabel = getIntentLabel(convo.participantId);
+                      return intentLabel ? (
+                        <Text style={styles.chatIntentLabel}>{intentLabel}</Text>
+                      ) : null;
+                    })()}
+                  </View>
                   <Text style={styles.chatTime}>{getTimeAgo(convo.lastMessageAt)}</Text>
                 </View>
                 <Text style={styles.chatLastMsg} numberOfLines={1}>{textForPublicSurface(convo.lastMessage)}</Text>
@@ -122,7 +140,9 @@ const styles = StyleSheet.create({
   },
   chatInfo: { flex: 1, marginLeft: 12 },
   chatNameRow: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 4 },
+  chatNameCol: { flex: 1 },
   chatName: { fontSize: 14, fontWeight: '600', color: C.text },
+  chatIntentLabel: { fontSize: 11, color: C.primary, marginTop: 1, opacity: 0.85 },
   chatTime: { fontSize: 11, color: C.textLight },
   chatLastMsg: { fontSize: 13, color: C.textLight },
   unreadBadge: {

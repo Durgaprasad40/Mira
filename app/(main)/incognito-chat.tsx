@@ -18,10 +18,20 @@ import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { INCOGNITO_COLORS } from '@/lib/constants';
+import { PRIVATE_INTENT_CATEGORIES } from '@/lib/privateConstants';
 import { maskExplicitWords, MASKED_CONTENT_NOTICE } from '@/lib/contentFilter';
 import { usePrivateChatStore } from '@/stores/privateChatStore';
 import { ReportModal } from '@/components/private/ReportModal';
+import { DEMO_INCOGNITO_PROFILES } from '@/lib/demoData';
 import type { IncognitoMessage } from '@/types';
+
+/** Look up Phase-2 intent label for a participant */
+const getIntentLabel = (participantId: string): string | null => {
+  const profile = DEMO_INCOGNITO_PROFILES.find((p) => p.id === participantId);
+  if (!profile?.privateIntentKey) return null;
+  const category = PRIVATE_INTENT_CATEGORIES.find((c) => c.key === profile.privateIntentKey);
+  return category?.label ?? null;
+};
 
 export default function PrivateChatScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
@@ -174,6 +184,12 @@ export default function PrivateChatScreen() {
         />
         <View style={styles.headerInfo}>
           <Text style={styles.headerName}>{conversation.participantName}</Text>
+          {(() => {
+            const intentLabel = getIntentLabel(conversation.participantId);
+            return intentLabel ? (
+              <Text style={styles.headerIntent}>{intentLabel}</Text>
+            ) : null;
+          })()}
           <Text style={styles.headerMeta}>{conversation.participantAge} · via {conversation.connectionSource}</Text>
         </View>
         <TouchableOpacity onPress={() => setReportVisible(true)} style={styles.moreButton}>
@@ -259,6 +275,7 @@ const styles = StyleSheet.create({
   headerAvatar: { width: 36, height: 36, borderRadius: 18, backgroundColor: C.accent },
   headerInfo: { flex: 1, marginLeft: 10 },
   headerName: { fontSize: 16, fontWeight: '600', color: C.text },
+  headerIntent: { fontSize: 11, color: C.primary, opacity: 0.85, marginTop: 1 },
   headerMeta: { fontSize: 12, color: C.textLight },
   moreButton: { padding: 8 },
 
