@@ -246,6 +246,8 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   useEffect(() => {
     if (isPhase2 && prevFilterRef.current !== intentFilter) {
       setIndex(0);
+      // Track Phase-2 intent filter selection
+      trackEvent({ name: 'phase2_intent_filter_selected', intentKey: intentFilter ?? 'all' });
       prevFilterRef.current = intentFilter;
     }
   }, [intentFilter, isPhase2]);
@@ -368,6 +370,20 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
     () => next ? getTrustBadges({ isVerified: next.isVerified, lastActive: next.lastActive, photoCount: next.photos?.length, bio: next.bio }) : [],
     [next?.id],
   );
+
+  // Phase-2 only: Track profile views when card is shown
+  const trackedProfileRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!isPhase2 || !current) return;
+    // Only track once per profile (avoid re-tracking on re-renders)
+    if (trackedProfileRef.current === current.id) return;
+    trackedProfileRef.current = current.id;
+    trackEvent({
+      name: 'phase2_profile_viewed',
+      profileId: current.id,
+      privateIntentKey: (current as any).privateIntentKey,
+    });
+  }, [isPhase2, current?.id]);
 
   // Stable refs for panResponder callbacks — prevents panResponder recreation
   // when current/handleSwipe/animateSwipe change between renders.

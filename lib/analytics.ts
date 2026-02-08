@@ -10,7 +10,11 @@ type AnalyticsEvent =
   | { name: 'match_created'; matchId?: string; otherUserId: string }
   | { name: 'first_message_sent'; conversationId: string }
   | { name: 'block_user'; blockedUserId: string }
-  | { name: 'report_user'; reportedUserId: string; reason: string };
+  | { name: 'report_user'; reportedUserId: string; reason: string }
+  // Phase-2 (Desire Land) analytics
+  | { name: 'phase2_intent_filter_selected'; intentKey: string }
+  | { name: 'phase2_profile_viewed'; profileId: string; privateIntentKey?: string }
+  | { name: 'phase2_match_started'; conversationId: string; privateIntentKey?: string };
 
 /**
  * Track a named event with structured payload.

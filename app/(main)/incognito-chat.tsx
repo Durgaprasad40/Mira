@@ -23,6 +23,7 @@ import { maskExplicitWords, MASKED_CONTENT_NOTICE } from '@/lib/contentFilter';
 import { usePrivateChatStore } from '@/stores/privateChatStore';
 import { ReportModal } from '@/components/private/ReportModal';
 import { DEMO_INCOGNITO_PROFILES } from '@/lib/demoData';
+import { trackEvent } from '@/lib/analytics';
 import type { IncognitoMessage } from '@/types';
 
 /** Look up Phase-2 intent label for a participant */
@@ -93,6 +94,18 @@ export default function PrivateChatScreen() {
     const s2 = Keyboard.addListener(hideEvent, () => setKeyboardVisible(false));
     return () => { s1.remove(); s2.remove(); };
   }, []);
+
+  // Phase-2 analytics: Track when chat opens
+  useEffect(() => {
+    if (!conversation || !id) return;
+    // Look up participant's privateIntentKey for analytics
+    const profile = DEMO_INCOGNITO_PROFILES.find((p) => p.id === conversation.participantId);
+    trackEvent({
+      name: 'phase2_match_started',
+      conversationId: id,
+      privateIntentKey: profile?.privateIntentKey,
+    });
+  }, [id, conversation?.id]);
 
   const handleSend = () => {
     if (!text.trim() || !id) return;
