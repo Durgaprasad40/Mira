@@ -11,21 +11,14 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { COLORS, GENDER_OPTIONS } from '@/lib/constants';
+import { PRIVATE_INTENT_CATEGORIES } from '@/lib/privateConstants';
 import { Button, Input } from '@/components/ui';
 import { useFilterStore, kmToMiles, milesToKm } from '@/stores/filterStore';
 import { isDemoMode } from '@/hooks/useConvex';
 import { useAuthStore } from '@/stores/authStore';
 import { useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
-import type { Gender, RelationshipIntent } from '@/types';
-
-// Intent options for discovery preferences
-const INTENT_OPTIONS: { value: RelationshipIntent | 'open_to_all' | 'not_fixed'; label: string }[] = [
-  { value: 'short_term', label: 'Short-term' },
-  { value: 'long_term', label: 'Long-term' },
-  { value: 'open_to_all', label: 'Open to all' },
-  { value: 'not_fixed', label: 'Not fixed yet' },
-];
+import type { Gender } from '@/types';
 
 // Age and distance limits
 const MIN_AGE = 18;
@@ -42,12 +35,12 @@ export default function DiscoveryPreferencesScreen() {
     maxAge,
     maxDistance, // Stored in km
     gender: lookingFor,
-    relationshipIntent,
+    privateIntentKey,
     setMinAge,
     setMaxAge,
     setMaxDistanceKm,
     toggleGender,
-    toggleRelationshipIntent,
+    togglePrivateIntentKey,
     incrementFilterVersion,
   } = useFilterStore();
 
@@ -156,22 +149,28 @@ export default function DiscoveryPreferencesScreen() {
           </View>
 
           <View style={styles.inputGroup}>
-            <Text style={styles.label}>Relationship Intent</Text>
-            <Text style={styles.sublabel}>What are you looking for?</Text>
+            <Text style={styles.label}>What are you looking for?</Text>
+            <Text style={styles.sublabel}>Select one (tap again to clear)</Text>
             <View style={styles.chips}>
-              {INTENT_OPTIONS.map((intent) => (
+              {PRIVATE_INTENT_CATEGORIES.map((intent) => (
                 <TouchableOpacity
-                  key={intent.value}
+                  key={intent.key}
                   style={[
                     styles.chip,
-                    relationshipIntent.includes(intent.value as RelationshipIntent) && styles.chipSelected,
+                    privateIntentKey === intent.key && styles.chipSelected,
                   ]}
-                  onPress={() => toggleRelationshipIntent(intent.value as RelationshipIntent)}
+                  onPress={() => togglePrivateIntentKey(intent.key)}
                 >
+                  <Ionicons
+                    name={intent.icon as any}
+                    size={14}
+                    color={privateIntentKey === intent.key ? COLORS.white : COLORS.textLight}
+                    style={styles.chipIcon}
+                  />
                   <Text
                     style={[
                       styles.chipText,
-                      relationshipIntent.includes(intent.value as RelationshipIntent) && styles.chipTextSelected,
+                      privateIntentKey === intent.key && styles.chipTextSelected,
                     ]}
                   >
                     {intent.label}
@@ -274,14 +273,18 @@ const styles = StyleSheet.create({
     gap: 8,
   },
   chip: {
-    paddingHorizontal: 16,
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 14,
     paddingVertical: 10,
     borderRadius: 20,
-    minHeight: 44,
-    justifyContent: 'center',
+    minHeight: 40,
     backgroundColor: COLORS.backgroundDark,
     borderWidth: 1,
     borderColor: COLORS.border,
+  },
+  chipIcon: {
+    marginRight: 6,
   },
   chipSelected: {
     backgroundColor: COLORS.primary,

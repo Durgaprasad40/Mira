@@ -715,6 +715,8 @@ export interface FilterState {
   relationshipIntent: RelationshipIntent[];
   activities: ActivityFilter[];
   sortBy: SortOption;
+  /** Phase-2 (Face-2) intent — single-select, null means no preference */
+  privateIntentKey: string | null;
 }
 
 // Auth State

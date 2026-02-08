@@ -46,6 +46,10 @@ interface FilterStoreState extends FilterState {
   clearFilters: () => void;
   clearIntentFilters: () => void;
   clearActivityFilters: () => void;
+
+  // Phase-2 (Face-2) intent — single-select
+  setPrivateIntentKey: (key: string | null) => void;
+  togglePrivateIntentKey: (key: string) => void;
 }
 
 // Default 80km (~50 miles)
@@ -59,6 +63,7 @@ const initialState: FilterState = {
   relationshipIntent: [],
   activities: [],
   sortBy: 'recommended',
+  privateIntentKey: null, // Phase-2: single-select intent
 };
 
 export const useFilterStore = create<FilterStoreState>((set, get) => ({
@@ -119,4 +124,12 @@ export const useFilterStore = create<FilterStoreState>((set, get) => ({
   clearIntentFilters: () => set({ relationshipIntent: [] }),
 
   clearActivityFilters: () => set({ activities: [] }),
+
+  // Phase-2 (Face-2) intent — single-select
+  setPrivateIntentKey: (key) => set({ privateIntentKey: key }),
+
+  togglePrivateIntentKey: (key) =>
+    set((state) => ({
+      privateIntentKey: state.privateIntentKey === key ? null : key,
+    })),
 }));
