@@ -294,6 +294,8 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
   }, [conversationId, userId, isDemo, markDemoRead, markNotifReadForConvo]);
 
   // B6 fix: Auto-scroll when new messages arrive AND (user is near bottom OR message is from current user)
+  // 6-4: Removed redundant `messages` from deps — only need `messages?.length` since
+  // we only act when count increases. Access to `messages` for content is via closure.
   useEffect(() => {
     const count = messages?.length ?? 0;
     if (count > prevMessageCountRef.current) {
@@ -310,7 +312,8 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
       }
     }
     prevMessageCountRef.current = count;
-  }, [messages?.length, messages, isDemo, userId]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [messages?.length, isDemo, userId]);
 
   // Scroll to end when keyboard opens (WhatsApp behavior).
   // Always scroll — opening the keyboard means the user is engaged at the bottom.

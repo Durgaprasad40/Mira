@@ -95,72 +95,7 @@ export function ProtectedMediaViewer({
     onScreenshot: handleScreenshot,
   });
 
-  // Load media URL and mark viewed
-  useEffect(() => {
-    if (visible && mediaData?.url && !hasMarkedViewed.current) {
-      setMediaUrl(mediaData.url);
-      hasMarkedViewed.current = true;
-
-      markViewed({
-        messageId: messageId as any,
-        userId: userId as any,
-      });
-
-      // Start timer if applicable
-      if (mediaData.timerSeconds && mediaData.timerSeconds > 0) {
-        setTimeLeft(mediaData.timerSeconds);
-      }
-    }
-
-    if (visible && mediaData?.isExpired) {
-      handleClose();
-    }
-  }, [visible, mediaData]);
-
-  // Countdown timer
-  // 5-1: Check mountedRef before setState to prevent memory leaks
-  useEffect(() => {
-    if (timeLeft === null || timeLeft <= 0) {
-      if (timeLeft === 0) {
-        handleExpire();
-      }
-      return;
-    }
-
-    timerRef.current = setInterval(() => {
-      // 5-1: Guard against setState after unmount
-      if (!mountedRef.current) {
-        if (timerRef.current) clearInterval(timerRef.current);
-        return;
-      }
-      setTimeLeft((prev) => {
-        if (prev === null || prev <= 1) {
-          if (timerRef.current) clearInterval(timerRef.current);
-          return 0;
-        }
-        return prev - 1;
-      });
-    }, 1000);
-
-    return () => {
-      if (timerRef.current) {
-        clearInterval(timerRef.current);
-        timerRef.current = null;
-      }
-    };
-  }, [timeLeft !== null]);
-
-  // 5-2: Guard against duplicate markExpired calls
-  const handleExpire = useCallback(() => {
-    if (hasExpired.current) return; // Already expired
-    hasExpired.current = true;
-    markExpired({
-      messageId: messageId as any,
-      userId: userId as any,
-    });
-    handleClose();
-  }, [messageId, userId, markExpired]);
-
+  // 6-2: Define handleClose BEFORE other callbacks that reference it
   const handleClose = useCallback(() => {
     // 5-1: Clear timer before any state changes
     if (timerRef.current) {
@@ -187,6 +122,80 @@ export function ProtectedMediaViewer({
     hasExpired.current = false; // Reset for next open
     onClose();
   }, [mediaData, messageId, userId, markExpired, onClose]);
+
+  // Load media URL and mark viewed
+  // 6-1: Added handleClose to deps to avoid stale closure
+  useEffect(() => {
+    if (visible && mediaData?.url && !hasMarkedViewed.current) {
+      setMediaUrl(mediaData.url);
+      hasMarkedViewed.current = true;
+
+      markViewed({
+        messageId: messageId as any,
+        userId: userId as any,
+      });
+
+      // Start timer if applicable
+      if (mediaData.timerSeconds && mediaData.timerSeconds > 0) {
+        setTimeLeft(mediaData.timerSeconds);
+      }
+    }
+
+    if (visible && mediaData?.isExpired) {
+      handleClose();
+    }
+  }, [visible, mediaData, handleClose, markViewed, messageId, userId]);
+
+  // 6-2: handleExpire now includes handleClose in deps (no stale closure)
+  const handleExpire = useCallback(() => {
+    if (hasExpired.current) return; // Already expired
+    hasExpired.current = true;
+    markExpired({
+      messageId: messageId as any,
+      userId: userId as any,
+    });
+    handleClose();
+  }, [messageId, userId, markExpired, handleClose]);
+
+  // Countdown timer - sets up interval when timer starts
+  // 5-1: Check mountedRef before setState to prevent memory leaks
+  useEffect(() => {
+    // 6-3: Skip if no timer or timer already at 0 (handled by separate effect below)
+    if (timeLeft === null || timeLeft <= 0) {
+      return;
+    }
+
+    timerRef.current = setInterval(() => {
+      // 5-1: Guard against setState after unmount
+      if (!mountedRef.current) {
+        if (timerRef.current) clearInterval(timerRef.current);
+        return;
+      }
+      setTimeLeft((prev) => {
+        if (prev === null || prev <= 1) {
+          if (timerRef.current) clearInterval(timerRef.current);
+          return 0;
+        }
+        return prev - 1;
+      });
+    }, 1000);
+
+    return () => {
+      if (timerRef.current) {
+        clearInterval(timerRef.current);
+        timerRef.current = null;
+      }
+    };
+  // 6-3: Changed from [timeLeft !== null] to proper check - only re-run when timeLeft transitions
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [timeLeft === null || timeLeft <= 0]);
+
+  // 6-3: Separate effect to handle timer expiry (fixes bug where timer hitting 0 never called handleExpire)
+  useEffect(() => {
+    if (timeLeft === 0) {
+      handleExpire();
+    }
+  }, [timeLeft, handleExpire]);
 
   const handleRequestAccess = useCallback(() => {
     if (mediaId) {
