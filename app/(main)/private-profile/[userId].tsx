@@ -7,6 +7,7 @@ import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { INCOGNITO_COLORS } from '@/lib/constants';
+import { PRIVATE_INTENT_CATEGORIES } from '@/lib/privateConstants';
 import { DEMO_INCOGNITO_PROFILES } from '@/lib/demoData';
 import { usePrivateChatStore } from '@/stores/privateChatStore';
 import type { IncognitoProfile } from '@/types';
@@ -124,19 +125,36 @@ export default function PrivateProfileViewScreen() {
           </View>
         ) : null}
 
-        {/* Desires */}
-        {profile.desires && profile.desires.length > 0 && (
-          <View style={styles.section}>
-            <Text style={styles.sectionTitle}>Desires</Text>
-            <View style={styles.chipRow}>
-              {profile.desires.map((d, i) => (
-                <View key={i} style={styles.chip}>
-                  <Text style={styles.chipText}>{d}</Text>
-                </View>
-              ))}
+        {/* DESIRE - Phase 2 desires as text */}
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>DESIRE</Text>
+          {profile.desires && profile.desires.length > 0 ? (
+            <Text style={styles.desireText}>{profile.desires.join(' • ')}</Text>
+          ) : (
+            <Text style={styles.placeholderText}>No desire added yet</Text>
+          )}
+        </View>
+
+        {/* LOOKING FOR - Phase 2 intent category */}
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>LOOKING FOR</Text>
+          {profile.privateIntentKey ? (
+            <View style={styles.intentChipRow}>
+              {(() => {
+                const intent = PRIVATE_INTENT_CATEGORIES.find(c => c.key === profile.privateIntentKey);
+                if (!intent) return <Text style={styles.placeholderText}>Not set</Text>;
+                return (
+                  <View style={[styles.intentChip, { borderColor: intent.color + '50' }]}>
+                    <Ionicons name={intent.icon as any} size={16} color={intent.color} />
+                    <Text style={[styles.intentChipText, { color: intent.color }]}>{intent.label}</Text>
+                  </View>
+                );
+              })()}
             </View>
-          </View>
-        )}
+          ) : (
+            <Text style={styles.placeholderText}>Not set</Text>
+          )}
+        </View>
 
         {/* Interests */}
         {profile.interests && profile.interests.length > 0 && (
@@ -260,6 +278,15 @@ const styles = StyleSheet.create({
   section: { marginBottom: 20 },
   sectionTitle: { fontSize: 13, fontWeight: '700', color: C.textLight, textTransform: 'uppercase', letterSpacing: 0.5, marginBottom: 8 },
   bioText: { fontSize: 15, color: C.text, lineHeight: 22 },
+  desireText: { fontSize: 15, color: C.text, lineHeight: 22, fontStyle: 'italic' },
+  placeholderText: { fontSize: 14, color: C.textLight, fontStyle: 'italic' },
+  intentChipRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  intentChip: {
+    flexDirection: 'row', alignItems: 'center', gap: 6,
+    backgroundColor: C.surface, paddingHorizontal: 14, paddingVertical: 8,
+    borderRadius: 16, borderWidth: 1,
+  },
+  intentChipText: { fontSize: 14, fontWeight: '600' },
   // Chips
   chipRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
   chip: { backgroundColor: C.surface, paddingHorizontal: 12, paddingVertical: 6, borderRadius: 12 },

@@ -392,10 +392,16 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   currentRef.current = current;
 
   // Stable callback for opening profile — uses ref so it never changes identity
+  // Phase 2 navigates to private-profile, Phase 1 navigates to profile
   const openProfileCb = useCallback(() => {
     const c = currentRef.current;
-    if (c) router.push(`/profile/${c.id}` as any);
-  }, []);
+    if (!c) return;
+    if (isPhase2) {
+      router.push(`/private-profile/${c.id}` as any);
+    } else {
+      router.push(`/profile/${c.id}` as any);
+    }
+  }, [isPhase2]);
 
   const resetPosition = useCallback(() => {
     const currentPan = getActivePan();
