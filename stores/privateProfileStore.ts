@@ -3,6 +3,9 @@ import { createJSONStorage, persist } from 'zustand/middleware';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import type { PrivateIntentKey, PrivateDesireTag, PrivateBoundary, DesireCategory } from '@/types';
 
+// Version constant - bump this to force re-setup
+export const CURRENT_PHASE2_SETUP_VERSION = 1;
+
 interface PrivateProfile {
   username: string;
   bio: string;
@@ -43,6 +46,12 @@ interface PrivateProfileState {
   convexProfileId: string | null;
   _hasHydrated: boolean;
 
+  // Phase-2 setup tracking
+  acceptedTermsAt: number | null;
+  phase2SetupVersion: number | null;
+  blurMyPhoto: boolean;
+  phase1PhotoUrls: string[];  // imported from Phase-1 for reference
+
   // Actions — wizard navigation
   setCurrentStep: (step: number) => void;
 
@@ -73,6 +82,12 @@ interface PrivateProfileState {
 
   // Hydration
   setHasHydrated: (hydrated: boolean) => void;
+
+  // Phase-2 setup actions
+  setAcceptedTermsAt: (timestamp: number) => void;
+  setBlurMyPhoto: (blur: boolean) => void;
+  importPhase1Data: (photos: string[]) => void;
+  completeSetup: () => void;
 }
 
 const initialWizardState = {
@@ -93,6 +108,11 @@ const initialWizardState = {
   gender: '',
   isSetupComplete: false,
   convexProfileId: null as string | null,
+  // Phase-2 setup tracking
+  acceptedTermsAt: null as number | null,
+  phase2SetupVersion: null as number | null,
+  blurMyPhoto: false,
+  phase1PhotoUrls: [] as string[],
 };
 
 export const usePrivateProfileStore = create<PrivateProfileState>()(
@@ -130,6 +150,15 @@ export const usePrivateProfileStore = create<PrivateProfileState>()(
       setConvexProfileId: (id) => set({ convexProfileId: id }),
       resetWizard: () => set(initialWizardState),
       setHasHydrated: (hydrated) => set({ _hasHydrated: hydrated }),
+
+      // Phase-2 setup actions
+      setAcceptedTermsAt: (timestamp) => set({ acceptedTermsAt: timestamp }),
+      setBlurMyPhoto: (blur) => set({ blurMyPhoto: blur }),
+      importPhase1Data: (photos) => set({ phase1PhotoUrls: photos }),
+      completeSetup: () => set({
+        isSetupComplete: true,
+        phase2SetupVersion: CURRENT_PHASE2_SETUP_VERSION,
+      }),
     }),
     {
       name: 'private-profile-store',
@@ -151,6 +180,11 @@ export const usePrivateProfileStore = create<PrivateProfileState>()(
         gender: state.gender,
         isSetupComplete: state.isSetupComplete,
         convexProfileId: state.convexProfileId,
+        // Phase-2 setup tracking
+        acceptedTermsAt: state.acceptedTermsAt,
+        phase2SetupVersion: state.phase2SetupVersion,
+        blurMyPhoto: state.blurMyPhoto,
+        phase1PhotoUrls: state.phase1PhotoUrls,
         // Legacy
         profile: state.profile,
         isSetup: state.isSetup,
@@ -161,3 +195,56 @@ export const usePrivateProfileStore = create<PrivateProfileState>()(
     },
   ),
 );
+
+// Helper to validate photo URLs
+function isValidPhotoUrl(url: unknown): url is string {
+  return (
+    typeof url === 'string' &&
+    url.length > 0 &&
+    url !== 'undefined' &&
+    url !== 'null' &&
+    (url.startsWith('http') || url.startsWith('file://'))
+  );
+}
+
+// Selector: Check if Phase-2 setup is complete and valid
+export const selectIsSetupValid = (state: PrivateProfileState): boolean => {
+  // Must be hydrated first
+  if (!state._hasHydrated) return false;
+
+  // Must have completed setup
+  if (!state.isSetupComplete) return false;
+
+  // Version must match current
+  if (state.phase2SetupVersion !== CURRENT_PHASE2_SETUP_VERSION) return false;
+
+  // Must have accepted terms
+  if (state.acceptedTermsAt === null) return false;
+
+  // Must have at least 2 valid photos
+  const validPhotos = state.selectedPhotoUrls.filter(isValidPhotoUrl);
+  if (validPhotos.length < 2) return false;
+
+  // Must have at least 3 categories
+  if (state.intentKeys.length < 3) return false;
+
+  // Bio must be at least 10 characters
+  if (state.privateBio.trim().length < 10) return false;
+
+  return true;
+};
+
+// Selector: Check if photos step is valid (min 2 selected)
+export const selectCanContinuePhotos = (state: PrivateProfileState): boolean => {
+  const validPhotos = state.selectedPhotoUrls.filter(isValidPhotoUrl);
+  return validPhotos.length >= 2;
+};
+
+// Selector: Check if categories step is valid (min 3, max 10 + bio)
+export const selectCanContinueCategories = (state: PrivateProfileState): boolean => {
+  return (
+    state.intentKeys.length >= 3 &&
+    state.intentKeys.length <= 10 &&
+    state.privateBio.trim().length >= 10
+  );
+};
