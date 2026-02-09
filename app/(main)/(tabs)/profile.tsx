@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState, useCallback } from 'react';
 import {
   View,
   Text,
@@ -9,7 +9,7 @@ import {
   Alert,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { useRouter } from 'expo-router';
+import { useRouter, useFocusEffect } from 'expo-router';
 import { useQuery, useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { useAuthStore } from '@/stores/authStore';
@@ -27,6 +27,19 @@ export default function ProfileScreen() {
   const userId = useAuthStore((s) => s.userId);
   const token = useAuthStore((s) => s.token);
   const logout = useAuthStore((s) => s.logout);
+
+  // FIX C: Force re-render when navigating back from Edit Profile
+  const [refreshKey, setRefreshKey] = useState(0);
+  useFocusEffect(
+    useCallback(() => {
+      // Increment key to force re-read of demoStore/convex data
+      setRefreshKey((k) => k + 1);
+    }, [])
+  );
+
+  // FIX C: Subscribe to demoStore photos reactively (so changes trigger re-render)
+  const demoProfiles = useDemoStore((s) => s.demoProfiles);
+  const currentDemoUserId = useDemoStore((s) => s.currentDemoUserId);
 
   const convexUser = useQuery(
     api.users.getCurrentUser,
@@ -49,7 +62,36 @@ export default function ProfileScreen() {
   // 3A1-2: Server-side logout mutation
   const serverLogout = useMutation(api.auth.logout);
 
-  // In demo mode, build a currentUser-like object from demoStore
+  // FIX C: Extract photos robustly from any format
+  const extractPhotos = (user: any): { url: string; isPrimary: boolean }[] => {
+    if (!user) return [];
+
+    // Try user.photos first (most common)
+    let rawPhotos = user.photos;
+
+    // Fallback to user.photoUrls if photos doesn't exist
+    if (!rawPhotos?.length && user.photoUrls?.length) {
+      rawPhotos = user.photoUrls;
+    }
+
+    if (!rawPhotos?.length) return [];
+
+    return rawPhotos
+      .map((p: any, i: number) => {
+        // Handle string URLs directly
+        if (typeof p === 'string') {
+          return { url: p, isPrimary: i === 0 };
+        }
+        // Handle { url: string } objects
+        if (p?.url) {
+          return { url: p.url, isPrimary: p.isPrimary ?? i === 0 };
+        }
+        return null;
+      })
+      .filter((p: any) => p && p.url);
+  };
+
+  // FIX C: Build currentUser with reactive photo data
   const demoUser = isDemoMode ? getDemoCurrentUser() : null;
   const currentUser = isDemoMode
     ? demoUser
@@ -59,12 +101,47 @@ export default function ProfileScreen() {
           bio: demoUser.bio,
           gender: demoUser.gender,
           isVerified: demoUser.isVerified,
-          photos: (demoUser.photos || []).map((p, i) => ({ url: p?.url, isPrimary: i === 0 })),
+          photos: extractPhotos(demoUser),
+          // Use existing blur fields from demoUser (if any exist)
+          blurMyPhoto: (demoUser as any).blurMyPhoto,
+          blurPhoto: (demoUser as any).blurPhoto,
+          blurEnabled: (demoUser as any).blurEnabled,
+          photoVisibilityBlur: (demoUser as any).photoVisibilityBlur,
         }
       : null
-    : convexUser;
+    : convexUser
+      ? {
+          ...convexUser,
+          photos: extractPhotos(convexUser),
+        }
+      : null;
 
-  if (__DEV__) console.log(`[Profile] mode=${isDemoMode ? 'demo' : 'live'} using ${isDemoMode ? 'local' : 'convex'} user`);
+  // FIX C: Get main photo (index 0 after reorder)
+  const mainPhotoUrl = currentUser?.photos?.[0]?.url || null;
+
+  // Blur status: detect from existing field names only (no new fields added)
+  const blurEnabled = Boolean(
+    (currentUser as any)?.blurMyPhoto ??
+    (currentUser as any)?.blurPhoto ??
+    (currentUser as any)?.blurEnabled ??
+    (currentUser as any)?.photoVisibilityBlur ??
+    false
+  );
+
+  // Preview toggle state (UI only, doesn't change settings)
+  const [previewBlur, setPreviewBlur] = useState(false);
+
+  if (__DEV__) {
+    const source = isDemoMode ? 'demoStore' : 'convex';
+    const count = currentUser?.photos?.length ?? 0;
+    console.log('[ProfileTab] photoSource', {
+      source,
+      count,
+      main: !!mainPhotoUrl,
+      refreshKey,
+    });
+    console.log('[ProfileTab] blurStatus', { blurEnabled, previewBlur, isDemoMode });
+  }
 
   // 3A1-2: Logout clears client + server + onboarding
   const handleLogout = () => {
@@ -137,7 +214,6 @@ export default function ProfileScreen() {
   }
 
   const age = new Date().getFullYear() - new Date(currentUser.dateOfBirth).getFullYear();
-  const primaryPhoto = currentUser.photos?.find((p) => p.isPrimary) || currentUser.photos?.[0];
 
   return (
     <SafeAreaView edges={['top']} style={styles.container}>
@@ -150,11 +226,55 @@ export default function ProfileScreen() {
       </View>
 
       <View style={styles.profileSection}>
-        {primaryPhoto ? (
-          <Image source={{ uri: primaryPhoto.url }} style={styles.avatar} contentFit="cover" />
+        {/* Main photo - always clear for owner */}
+        {mainPhotoUrl ? (
+          <Image source={{ uri: mainPhotoUrl }} style={styles.avatar} contentFit="cover" />
         ) : (
           <Avatar size={100} />
         )}
+
+        {/* Blur status badge */}
+        <View style={[styles.blurStatusBadge, blurEnabled ? styles.blurStatusOn : styles.blurStatusOff]}>
+          <Ionicons
+            name={blurEnabled ? 'eye-off' : 'eye'}
+            size={16}
+            color={blurEnabled ? COLORS.primary : COLORS.textLight}
+          />
+          <Text style={[styles.blurStatusText, blurEnabled && styles.blurStatusTextOn]}>
+            {blurEnabled ? 'Blur ON — others see your photos blurred' : 'Blur OFF — others see your photos clearly'}
+          </Text>
+        </View>
+
+        {/* Preview toggle */}
+        {mainPhotoUrl && (
+          <TouchableOpacity
+            style={styles.previewToggle}
+            onPress={() => setPreviewBlur((p) => !p)}
+            activeOpacity={0.7}
+          >
+            <Ionicons name={previewBlur ? 'eye' : 'eye-off-outline'} size={14} color={COLORS.primary} />
+            <Text style={styles.previewToggleText}>
+              {previewBlur ? 'Hide preview' : 'Preview how others see it'}
+            </Text>
+          </TouchableOpacity>
+        )}
+
+        {/* Blurred preview thumbnail */}
+        {previewBlur && mainPhotoUrl && (
+          <View style={styles.previewContainer}>
+            <Image
+              source={{ uri: mainPhotoUrl }}
+              style={styles.previewThumbnail}
+              contentFit="cover"
+              blurRadius={blurEnabled ? 20 : 0}
+            />
+            <Text style={styles.previewLabel}>
+              {blurEnabled ? 'Others see this (blurred)' : 'Others see this (clear)'}
+            </Text>
+            <Text style={styles.previewHint}>Preview only — does not change your setting</Text>
+          </View>
+        )}
+
         {currentUser.isVerified && (
           <View style={styles.verifiedBadge}>
             <Ionicons name="checkmark-circle" size={24} color={COLORS.primary} />
@@ -411,5 +531,68 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: COLORS.error,
     fontWeight: '500',
+  },
+  // Blur status badge
+  blurStatusBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 20,
+    marginTop: 12,
+    marginBottom: 8,
+    gap: 6,
+  },
+  blurStatusOn: {
+    backgroundColor: COLORS.primary + '20',
+  },
+  blurStatusOff: {
+    backgroundColor: COLORS.backgroundDark,
+  },
+  blurStatusText: {
+    fontSize: 12,
+    color: COLORS.textLight,
+  },
+  blurStatusTextOn: {
+    color: COLORS.primary,
+    fontWeight: '500',
+  },
+  // Preview toggle
+  previewToggle: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingVertical: 6,
+  },
+  previewToggleText: {
+    fontSize: 12,
+    color: COLORS.primary,
+    fontWeight: '500',
+  },
+  // Preview container
+  previewContainer: {
+    alignItems: 'center',
+    marginTop: 8,
+    marginBottom: 8,
+    padding: 12,
+    backgroundColor: COLORS.backgroundDark,
+    borderRadius: 12,
+  },
+  previewThumbnail: {
+    width: 60,
+    height: 60,
+    borderRadius: 30,
+    marginBottom: 8,
+  },
+  previewLabel: {
+    fontSize: 11,
+    color: COLORS.text,
+    fontWeight: '500',
+    marginBottom: 2,
+  },
+  previewHint: {
+    fontSize: 10,
+    color: COLORS.textMuted,
+    fontStyle: 'italic',
   },
 });

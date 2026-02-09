@@ -39,3 +39,6 @@ yarn-error.*
 # generated native folders
 /ios
 /android
+
+# Temporarily ignore untracked Convex file to prevent api.d.ts regeneration
+convex/verificationProviders.ts
