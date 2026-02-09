@@ -392,14 +392,22 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   currentRef.current = current;
 
   // Stable callback for opening profile — uses ref so it never changes identity
-  // Phase 2 navigates to private-profile, Phase 1 navigates to profile
+  // Both Phase-1 and Phase-2 use the same route for viewing OTHER users' profiles
+  // (private-profile is only for your OWN Phase-2 tab, not for viewing others)
+  // Pass mode param so profile view can show Phase-2 specific content
   const openProfileCb = useCallback(() => {
     const c = currentRef.current;
     if (!c) return;
+    if (__DEV__) {
+      console.log('[DiscoverCardStack] open full profile', c.id, 'isPhase2=', isPhase2);
+    }
     if (isPhase2) {
-      router.push(`/private-profile/${c.id}` as any);
+      // Phase-2: pass mode and intent key
+      const intentKey = (c as any).privateIntentKey || '';
+      router.push(`/(main)/profile/${c.id}?mode=phase2&intentKey=${intentKey}` as any);
     } else {
-      router.push(`/profile/${c.id}` as any);
+      // Phase-1: no params needed
+      router.push(`/(main)/profile/${c.id}` as any);
     }
   }, [isPhase2]);
 

@@ -178,7 +178,7 @@ export default function MessagesScreen() {
             <TouchableOpacity
               style={styles.superLikeItem}
               activeOpacity={0.7}
-              onPress={() => router.push(`/profile/${item.userId}` as any)}
+              onPress={() => router.push(`/(main)/profile/${item.userId}` as any)}
             >
               <View style={styles.superLikeAvatarContainer}>
                 <View style={styles.superLikeRing}>
@@ -238,7 +238,7 @@ export default function MessagesScreen() {
             <TouchableOpacity
               style={styles.likeItem}
               activeOpacity={0.7}
-              onPress={() => router.push(`/profile/${item.userId}` as any)}
+              onPress={() => router.push(`/(main)/profile/${item.userId}` as any)}
             >
               <View style={styles.likeAvatarContainer}>
                 {item.photoUrl && !item.isBlurred ? (

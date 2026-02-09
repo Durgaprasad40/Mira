@@ -6,6 +6,19 @@ import type { PrivateIntentKey, PrivateDesireTag, PrivateBoundary, DesireCategor
 // Version constant - bump this to force re-setup
 export const CURRENT_PHASE2_SETUP_VERSION = 1;
 
+// Type for Phase-1 profile data imported during Phase-2 onboarding
+export interface Phase1ProfileData {
+  name: string;
+  photos: { url: string }[];
+  bio?: string;
+  gender?: string;
+  dateOfBirth?: string;
+  city?: string;
+  activities?: string[];
+  maxDistance?: number;
+  isVerified?: boolean;
+}
+
 interface PrivateProfile {
   username: string;
   bio: string;
@@ -86,7 +99,7 @@ interface PrivateProfileState {
   // Phase-2 setup actions
   setAcceptedTermsAt: (timestamp: number) => void;
   setBlurMyPhoto: (blur: boolean) => void;
-  importPhase1Data: (photos: string[]) => void;
+  importPhase1Data: (data: Phase1ProfileData) => void;
   completeSetup: () => void;
 }
 
@@ -154,7 +167,7 @@ export const usePrivateProfileStore = create<PrivateProfileState>()(
       // Phase-2 setup actions
       setAcceptedTermsAt: (timestamp) => set({ acceptedTermsAt: timestamp }),
       setBlurMyPhoto: (blur) => set({ blurMyPhoto: blur }),
-      importPhase1Data: (photos) => set({ phase1PhotoUrls: photos }),
+      importPhase1Data: (data) => set({ phase1PhotoUrls: data.photos.map((p) => p.url) }),
       completeSetup: () => set({
         isSetupComplete: true,
         phase2SetupVersion: CURRENT_PHASE2_SETUP_VERSION,

@@ -7,9 +7,11 @@ import {
   StyleSheet,
   KeyboardAvoidingView,
   Platform,
+  ScrollView,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter, useLocalSearchParams } from 'expo-router';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { COLORS } from '@/lib/constants';
 import { useInteractionStore } from '@/stores/interactionStore';
 
@@ -17,6 +19,7 @@ const STANDOUT_MAX_CHARS = 120;
 
 export default function StandOutScreen() {
   const router = useRouter();
+  const insets = useSafeAreaInsets();
   const { profileId, name, standOutsLeft } = useLocalSearchParams<{
     profileId: string;
     name: string;
@@ -40,49 +43,56 @@ export default function StandOutScreen() {
     <View style={styles.overlay}>
       <KeyboardAvoidingView
         style={styles.sheetWrapper}
-        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 20}
       >
-        <View style={styles.box}>
-          <View style={styles.header}>
-            <View>
-              <Text style={styles.title}>
-                Stand Out to {name || 'this person'}
-              </Text>
-              <Text style={styles.remaining}>
-                {standOutsLeft || '0'} Stand Outs left today
-              </Text>
+        <ScrollView
+          contentContainerStyle={styles.scrollContent}
+          keyboardShouldPersistTaps="handled"
+          bounces={false}
+        >
+          <View style={[styles.box, { paddingBottom: Math.max(insets.bottom, 24) + 16 }]}>
+            <View style={styles.header}>
+              <View>
+                <Text style={styles.title}>
+                  Stand Out to {name || 'this person'}
+                </Text>
+                <Text style={styles.remaining}>
+                  {standOutsLeft || '0'} Stand Outs left today
+                </Text>
+              </View>
+              <TouchableOpacity onPress={handleClose}>
+                <Text style={styles.close}>x</Text>
+              </TouchableOpacity>
             </View>
-            <TouchableOpacity onPress={handleClose}>
-              <Text style={styles.close}>x</Text>
-            </TouchableOpacity>
-          </View>
-          <Text style={styles.subtitle}>
-            Write a short message to get noticed
-          </Text>
-          <TextInput
-            style={styles.input}
-            placeholder="Say something genuine..."
-            placeholderTextColor={COLORS.textMuted}
-            value={message}
-            onChangeText={setMessage}
-            maxLength={STANDOUT_MAX_CHARS}
-            autoFocus
-          />
-          <View style={styles.footer}>
-            <Text style={styles.charCount}>
-              {message.length}/{STANDOUT_MAX_CHARS}
+            <Text style={styles.subtitle}>
+              Write a short message to get noticed
             </Text>
-            <TouchableOpacity style={styles.send} onPress={handleSend}>
-              <Ionicons
-                name="star"
-                size={16}
-                color={COLORS.white}
-                style={{ marginRight: 6 }}
-              />
-              <Text style={styles.sendText}>Send Stand Out</Text>
-            </TouchableOpacity>
+            <TextInput
+              style={styles.input}
+              placeholder="Say something genuine..."
+              placeholderTextColor={COLORS.textMuted}
+              value={message}
+              onChangeText={setMessage}
+              maxLength={STANDOUT_MAX_CHARS}
+              autoFocus
+            />
+            <View style={styles.footer}>
+              <Text style={styles.charCount}>
+                {message.length}/{STANDOUT_MAX_CHARS}
+              </Text>
+              <TouchableOpacity style={styles.send} onPress={handleSend}>
+                <Ionicons
+                  name="star"
+                  size={16}
+                  color={COLORS.white}
+                  style={{ marginRight: 6 }}
+                />
+                <Text style={styles.sendText}>Send Stand Out</Text>
+              </TouchableOpacity>
+            </View>
           </View>
-        </View>
+        </ScrollView>
       </KeyboardAvoidingView>
     </View>
   );
@@ -95,6 +105,11 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(0,0,0,0.5)',
   },
   sheetWrapper: {
+    flex: 1,
+    justifyContent: 'flex-end',
+  },
+  scrollContent: {
+    flexGrow: 1,
     justifyContent: 'flex-end',
   },
   box: {
@@ -102,7 +117,7 @@ const styles = StyleSheet.create({
     borderTopLeftRadius: 24,
     borderTopRightRadius: 24,
     padding: 24,
-    paddingBottom: 40,
+    // paddingBottom is now set dynamically with safe area insets
   },
   header: {
     flexDirection: 'row',
