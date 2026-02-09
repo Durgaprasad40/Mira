@@ -1,4 +1,4 @@
-import React, { useState, useRef, useCallback, useEffect } from 'react';
+import React, { useState, useRef, useCallback, useEffect, useMemo } from 'react';
 import {
   View,
   Text,
@@ -21,6 +21,8 @@ import { INCOGNITO_COLORS } from '@/lib/constants';
 import { PRIVATE_INTENT_CATEGORIES } from '@/lib/privateConstants';
 import { maskExplicitWords, MASKED_CONTENT_NOTICE } from '@/lib/contentFilter';
 import { usePrivateChatStore } from '@/stores/privateChatStore';
+import { useIsMandatoryComplete } from '@/stores/chatTodStore';
+import { ChatTodOverlay, type ChatTodUser } from '@/components/truthdare/ChatTodOverlay';
 import { ReportModal } from '@/components/private/ReportModal';
 import { DEMO_INCOGNITO_PROFILES } from '@/lib/demoData';
 import { trackEvent } from '@/lib/analytics';
@@ -67,6 +69,42 @@ export default function PrivateChatScreen() {
   const [text, setText] = useState('');
   const [reportVisible, setReportVisible] = useState(false);
   const [keyboardVisible, setKeyboardVisible] = useState(false);
+
+  // ─── Truth-or-Dare Mandatory Game ───
+  // Check if the mandatory T&D round is complete for this conversation
+  const isMandatoryComplete = useIsMandatoryComplete(id || '');
+  // Local state to force re-render when T&D unlocks (store updates may lag)
+  const [localUnlocked, setLocalUnlocked] = useState(false);
+  const showTodOverlay = !isMandatoryComplete && !localUnlocked;
+
+  // Build users array for T&D overlay
+  const todUsers: [ChatTodUser, ChatTodUser] | null = useMemo(() => {
+    if (!conversation) return null;
+    return [
+      { id: 'me', name: 'You', avatarUrl: undefined }, // Current user (demo)
+      {
+        id: conversation.participantId,
+        name: conversation.participantName,
+        avatarUrl: conversation.participantPhotoUrl,
+      },
+    ];
+  }, [conversation]);
+
+  // T&D callbacks
+  const handleTodUnlock = useCallback(() => {
+    setLocalUnlocked(true);
+    if (__DEV__) {
+      console.log('[IncognitoChat] T&D unlocked, chat now available');
+    }
+  }, []);
+
+  const handleTodOpenCamera = useCallback(() => {
+    // Navigate to camera-composer with T&D context
+    router.push({
+      pathname: '/(main)/camera-composer' as any,
+      params: { todConversationId: id, mode: 'tod_answer' },
+    });
+  }, [router, id]);
 
   // Auto-scroll only when new messages arrive AND user is near bottom
   useEffect(() => {
@@ -266,6 +304,16 @@ export default function PrivateChatScreen() {
         onReport={handleReport}
         onBlock={handleBlock}
       />
+
+      {/* Truth-or-Dare Mandatory Overlay */}
+      {showTodOverlay && todUsers && id && (
+        <ChatTodOverlay
+          conversationId={id}
+          users={todUsers}
+          onUnlock={handleTodUnlock}
+          onOpenCamera={handleTodOpenCamera}
+        />
+      )}
     </View>
   );
 }
