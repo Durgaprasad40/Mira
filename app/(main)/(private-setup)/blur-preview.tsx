@@ -31,6 +31,7 @@ export default function BlurPreviewScreen() {
 
   const [processing, setProcessing] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [blurError, setBlurError] = useState<string | null>(null);
 
   const generateUploadUrl = useMutation(api.photos.generateUploadUrl);
 
@@ -53,13 +54,24 @@ export default function BlurPreviewScreen() {
 
   const generateBlurs = async () => {
     setProcessing(true);
+    setBlurError(null);
     try {
       const blurredUris = await createBlurredImages(selectedPhotoUrls);
+      // Validate that all photos were blurred successfully
+      if (blurredUris.length !== selectedPhotoUrls.length) {
+        throw new Error('Not all photos were blurred');
+      }
+      // Ensure no undefined/null URIs
+      if (blurredUris.some((uri) => !uri)) {
+        throw new Error('Some blurred photos are invalid');
+      }
       setBlurredPhotoLocalUris(blurredUris);
     } catch (error) {
-      // Graceful fallback — use originals
-      console.warn('Blur generation failed, using originals:', error);
-      setBlurredPhotoLocalUris(selectedPhotoUrls);
+      // CRITICAL: Never fall back to originals — this would be a privacy breach
+      console.error('Blur generation failed:', error);
+      setBlurError('Blur generation failed. Please try again.');
+      // Clear any partial results — do NOT use originals
+      setBlurredPhotoLocalUris([]);
     }
     setProcessing(false);
   };
@@ -108,7 +120,12 @@ export default function BlurPreviewScreen() {
     setUploading(false);
   };
 
-  const canProceed = blurredPhotoLocalUris.length > 0 && !processing;
+  // CRITICAL: Only allow proceeding if ALL photos are successfully blurred
+  const canProceed =
+    !processing &&
+    !blurError &&
+    blurredPhotoLocalUris.length > 0 &&
+    blurredPhotoLocalUris.length === selectedPhotoUrls.length;
 
   return (
     <View style={[styles.container, { paddingTop: insets.top }]}>
@@ -134,6 +151,24 @@ export default function BlurPreviewScreen() {
             <Text style={styles.processingText}>
               Generating blurred previews...
             </Text>
+          </View>
+        ) : blurError ? (
+          /* Error state — blur generation failed */
+          <View style={styles.errorContainer}>
+            <View style={styles.errorBanner}>
+              <Ionicons name="warning" size={24} color="#FF6B6B" />
+              <Text style={styles.errorText}>{blurError}</Text>
+            </View>
+            <Text style={styles.errorSubtext}>
+              For your privacy, we cannot continue without successfully blurred photos.
+            </Text>
+            <TouchableOpacity style={styles.retryBtn} onPress={generateBlurs}>
+              <Ionicons name="refresh" size={18} color="#FFFFFF" />
+              <Text style={styles.retryBtnText}>Retry Blur Generation</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.backBtn} onPress={() => router.back()}>
+              <Text style={styles.backBtnText}>Go Back & Select Different Photos</Text>
+            </TouchableOpacity>
           </View>
         ) : (
           <>
@@ -214,6 +249,61 @@ const styles = StyleSheet.create({
     gap: 16,
   },
   processingText: { fontSize: 14, color: C.textLight },
+  errorContainer: {
+    alignItems: 'center',
+    paddingVertical: 40,
+    paddingHorizontal: 16,
+  },
+  errorBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    backgroundColor: 'rgba(255, 107, 107, 0.15)',
+    borderWidth: 1,
+    borderColor: '#FF6B6B',
+    borderRadius: 12,
+    padding: 16,
+    marginBottom: 16,
+    width: '100%',
+  },
+  errorText: {
+    flex: 1,
+    fontSize: 15,
+    fontWeight: '600',
+    color: '#FF6B6B',
+  },
+  errorSubtext: {
+    fontSize: 13,
+    color: C.textLight,
+    textAlign: 'center',
+    lineHeight: 20,
+    marginBottom: 24,
+  },
+  retryBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    backgroundColor: C.primary,
+    borderRadius: 12,
+    paddingVertical: 14,
+    paddingHorizontal: 24,
+    marginBottom: 12,
+    width: '100%',
+  },
+  retryBtnText: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: '#FFFFFF',
+  },
+  backBtn: {
+    paddingVertical: 12,
+  },
+  backBtnText: {
+    fontSize: 14,
+    color: C.textLight,
+    textDecorationLine: 'underline',
+  },
   grid: {
     flexDirection: 'row',
     flexWrap: 'wrap',

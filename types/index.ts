@@ -310,7 +310,10 @@ export interface IncognitoProfile {
   username: string;
   age: number;
   gender: Gender;
+  /** @deprecated Use photos[] instead for multi-photo support */
   photoUrl: string;
+  /** Multiple profile photos for Phase-2 carousel (blurred in UI) */
+  photos?: string[];
   desires: string[];
   desireCategories: DesireCategory[];
   distance: number;
@@ -439,6 +442,8 @@ export interface IncognitoConversation {
   lastMessageAt: number;
   unreadCount: number;
   connectionSource: ConnectionSource;
+  /** Match origin for Desire Land matches: 'super_like' shows blue ring in New Matches row */
+  matchSource?: 'super_like' | 'normal';
 }
 
 export interface IncognitoMessage {
@@ -448,6 +453,23 @@ export interface IncognitoMessage {
   content: string;
   createdAt: number;
   isRead: boolean;
+  // Protected media fields (secure photos for Phase-2)
+  isProtected?: boolean;
+  protectedMedia?: {
+    localUri: string;
+    timer: number;
+    viewingMode: 'tap' | 'hold';
+    screenshotAllowed: boolean;
+    viewOnce: boolean;
+    watermark: boolean;
+  };
+  viewedAt?: number;
+  timerEndsAt?: number;
+  isExpired?: boolean;
+  /** Timestamp when message expired (for auto-delete countdown) */
+  expiredAt?: number;
+  /** Timestamp when message should be auto-deleted */
+  deleteAt?: number;
 }
 
 // Private Mode Types (Face 2 only — 20 categories)

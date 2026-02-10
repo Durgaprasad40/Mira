@@ -17,6 +17,8 @@ export interface ProfileData {
   lastActive?: number;
   createdAt?: number;
   profilePrompts?: { question: string; answer: string }[];
+  /** Phase-2 only: Private intent category key */
+  privateIntentKey?: string;
 }
 
 const EMPTY_PHOTOS: { url: string }[] = [];
@@ -55,6 +57,8 @@ export function toProfileData(p: any): ProfileData {
     lastActive: p.lastActive ?? p.lastActiveAt,
     createdAt: p.createdAt,
     profilePrompts: p.profilePrompts,
+    // Phase-2 only: preserve privateIntentKey if present
+    privateIntentKey: p.privateIntentKey,
   };
 
   if (__DEV__ && rawPhotos.length === 0) {

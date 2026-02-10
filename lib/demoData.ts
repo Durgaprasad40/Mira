@@ -1367,12 +1367,124 @@ export const DEMO_PROFILES = [
       { url: 'https://images.unsplash.com/photo-1509967419530-da38b4704bc6?w=400' },
     ],
   },
+  // Super Like profiles — these exist so /profile/[id] can resolve them
+  {
+    _id: 'demo_superlike_kavya',
+    name: 'Kavya',
+    age: 23,
+    gender: 'female',
+    bio: 'Travel photographer chasing golden hour in every city. My camera roll is 90% sunsets and 10% street food.',
+    isVerified: true,
+    city: 'Mumbai',
+    distance: 3,
+    latitude: 19.076,
+    longitude: 72.877,
+    lastSeenArea: 'Colaba',
+    relationshipIntent: ['long_term'],
+    activities: ['travel', 'photography', 'coffee', 'foodie'],
+    profilePrompts: [
+      { question: 'My ideal first date is...', answer: 'Golden hour photowalk followed by chai at a hidden rooftop cafe' },
+      { question: 'A green flag for me is...', answer: 'Someone who doesn\'t mind me stopping mid-conversation to capture the light' },
+      { question: 'I geek out about...', answer: 'Camera lenses, obscure travel destinations, and perfectly composed shots' },
+    ],
+    photos: [
+      { url: 'https://images.unsplash.com/photo-1524504388940-b1c1722653e1?w=400' },
+      { url: 'https://images.unsplash.com/photo-1502823403499-6ccfcf4fb453?w=400' },
+      { url: 'https://images.unsplash.com/photo-1517841905240-472988babdf9?w=400' },
+      { url: 'https://images.unsplash.com/photo-1496440737103-cd596325d314?w=400' },
+    ],
+  },
+  {
+    _id: 'demo_superlike_meera',
+    name: 'Meera',
+    age: 25,
+    gender: 'female',
+    bio: 'Coffee enthusiast and weekend baker. I believe every problem can be solved with the right espresso.',
+    isVerified: true,
+    city: 'Mumbai',
+    distance: 4,
+    latitude: 19.080,
+    longitude: 72.880,
+    lastSeenArea: 'Bandra',
+    relationshipIntent: ['figuring_out', 'long_term'],
+    activities: ['coffee', 'brunch', 'foodie', 'art_culture'],
+    profilePrompts: [
+      { question: 'The way to my heart is...', answer: 'A perfectly pulled espresso and genuine conversation' },
+      { question: 'My Sunday morning looks like...', answer: 'Farmers market, fresh croissants, and a new coffee recipe experiment' },
+      { question: 'A non-negotiable for me is...', answer: 'You have to appreciate a good latte art. It\'s an art form!' },
+    ],
+    photos: [
+      { url: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=400' },
+      { url: 'https://images.unsplash.com/photo-1494790108377-be9c29b29330?w=400' },
+      { url: 'https://images.unsplash.com/photo-1488426862026-3ee34a7d66df?w=400' },
+      { url: 'https://images.unsplash.com/photo-1529626455594-4ff0802cfb7e?w=400' },
+    ],
+  },
+  {
+    _id: 'demo_superlike_ananya',
+    name: 'Ananya',
+    age: 24,
+    gender: 'female',
+    bio: 'Late night walks & indie music. Looking for someone to share playlists and stargazing sessions with.',
+    isVerified: true,
+    city: 'Mumbai',
+    distance: 5,
+    latitude: 19.082,
+    longitude: 72.882,
+    lastSeenArea: 'Juhu',
+    relationshipIntent: ['long_term'],
+    activities: ['music', 'travel', 'reading', 'coffee'],
+    profilePrompts: [
+      { question: 'My ideal first date is...', answer: 'Midnight walk on the beach with good music in our ears' },
+      { question: 'I geek out about...', answer: 'Obscure indie bands and vintage vinyl records' },
+      { question: 'A green flag for me is...', answer: 'Someone who shares their favorite songs without hesitation' },
+    ],
+    photos: [
+      { url: 'https://images.unsplash.com/photo-1488716820095-cbe80883c496?w=400' },
+      { url: 'https://images.unsplash.com/photo-1531746020798-e6953c6e8e04?w=400' },
+      { url: 'https://images.unsplash.com/photo-1502823403499-6ccfcf4fb453?w=400' },
+      { url: 'https://images.unsplash.com/photo-1517841905240-472988babdf9?w=400' },
+    ],
+  },
 ];
 
 export const DEMO_MATCHES: any[] = [];
 
 export const DEMO_LIKES: import('@/stores/demoStore').DemoLike[] = [
-  // Super Likes (2)
+  // Super Likes (5) - includes 3 fresh IDs that won't conflict with persisted matches
+  {
+    likeId: 'like_sl_fresh_1',
+    userId: 'demo_superlike_kavya',
+    action: 'super_like',
+    message: 'Love your travel photos! Where was that sunset pic taken? ✨',
+    createdAt: Date.now() - 1800000,
+    name: 'Kavya',
+    age: 23,
+    photoUrl: 'https://images.unsplash.com/photo-1524504388940-b1c1722653e1?w=400',
+    isBlurred: false,
+  },
+  {
+    likeId: 'like_sl_fresh_2',
+    userId: 'demo_superlike_meera',
+    action: 'super_like',
+    message: 'Fellow coffee addict here! We should grab a cup sometime ☕',
+    createdAt: Date.now() - 2700000,
+    name: 'Meera',
+    age: 25,
+    photoUrl: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=400',
+    isBlurred: false,
+  },
+  {
+    likeId: 'like_sl_fresh_3',
+    userId: 'demo_superlike_ananya',
+    action: 'super_like',
+    message: 'Your music taste seems amazing! What are you listening to lately? 🎧',
+    createdAt: Date.now() - 900000,
+    name: 'Ananya',
+    age: 24,
+    photoUrl: 'https://images.unsplash.com/photo-1488716820095-cbe80883c496?w=400',
+    isBlurred: false,
+  },
   {
     likeId: 'like_sl_1',
     userId: 'demo_profile_6',
@@ -1470,6 +1582,12 @@ export const DEMO_INCOGNITO_PROFILES: import('@/types').IncognitoProfile[] = [
   {
     id: 'inc_1', username: 'Midnight_Rose', age: 24, gender: 'female',
     photoUrl: 'https://images.unsplash.com/photo-1529626455594-4ff0802cfb7e?w=400',
+    photos: [
+      'https://images.unsplash.com/photo-1529626455594-4ff0802cfb7e?w=400',
+      'https://images.unsplash.com/photo-1524502397800-2eeaad7c3fe5?w=400',
+      'https://images.unsplash.com/photo-1502767089025-6572583495f9?w=400',
+      'https://images.unsplash.com/photo-1519699047748-de8e457a634e?w=400',
+    ],
     desires: ['Deep late-night conversations', 'Someone who gets my humor'],
     desireCategories: ['romantic', 'intellectual'], distance: 3.2, city: 'Mumbai',
     bio: 'Night owl seeking meaningful connections under the stars.',
@@ -1479,6 +1597,11 @@ export const DEMO_INCOGNITO_PROFILES: import('@/types').IncognitoProfile[] = [
   {
     id: 'inc_2', username: 'Wanderlust_Soul', age: 26, gender: 'female',
     photoUrl: 'https://images.unsplash.com/photo-1494790108377-be9c29b29330?w=400',
+    photos: [
+      'https://images.unsplash.com/photo-1494790108377-be9c29b29330?w=400',
+      'https://images.unsplash.com/photo-1524504388940-b1c1722653e1?w=400',
+      'https://images.unsplash.com/photo-1531746020798-e6953c6e8e04?w=400',
+    ],
     desires: ['Adventure partner', 'Spontaneous weekend trips'],
     desireCategories: ['adventurous', 'social'], distance: 5.1, city: 'Mumbai',
     bio: 'Life is too short for boring plans. Let\'s get lost together.',
@@ -1488,6 +1611,12 @@ export const DEMO_INCOGNITO_PROFILES: import('@/types').IncognitoProfile[] = [
   {
     id: 'inc_3', username: 'Velvet_Dreams', age: 23, gender: 'female',
     photoUrl: 'https://images.unsplash.com/photo-1517841905240-472988babdf9?w=400',
+    photos: [
+      'https://images.unsplash.com/photo-1517841905240-472988babdf9?w=400',
+      'https://images.unsplash.com/photo-1502685104226-ee32379fefbe?w=400',
+      'https://images.unsplash.com/photo-1515886657613-9f3515b0c78f?w=400',
+      'https://images.unsplash.com/photo-1485893086445-ed75865251e0?w=400',
+    ],
     desires: ['Creative collaborator', 'Art gallery dates'],
     desireCategories: ['creative', 'romantic'], distance: 1.8, city: 'Mumbai',
     bio: 'Artist by passion, dreamer by nature.',
@@ -1497,6 +1626,11 @@ export const DEMO_INCOGNITO_PROFILES: import('@/types').IncognitoProfile[] = [
   {
     id: 'inc_4', username: 'Phoenix_Fire', age: 27, gender: 'female',
     photoUrl: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=400',
+    photos: [
+      'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=400',
+      'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=400',
+      'https://images.unsplash.com/photo-1499952127939-9bbf5af6c51c?w=400',
+    ],
     desires: ['Intellectual debates', 'Book exchange partner'],
     desireCategories: ['intellectual', 'spiritual'], distance: 7.4, city: 'Pune',
     bio: 'Rising from the ashes of mundane conversations.',
@@ -1506,6 +1640,12 @@ export const DEMO_INCOGNITO_PROFILES: import('@/types').IncognitoProfile[] = [
   {
     id: 'inc_5', username: 'Stargazer_22', age: 22, gender: 'female',
     photoUrl: 'https://images.unsplash.com/photo-1524638431109-93d95c968f03?w=400',
+    photos: [
+      'https://images.unsplash.com/photo-1524638431109-93d95c968f03?w=400',
+      'https://images.unsplash.com/photo-1509967419530-da38b4704bc6?w=400',
+      'https://images.unsplash.com/photo-1508214751196-bcfd4ca60f91?w=400',
+      'https://images.unsplash.com/photo-1517365830460-955ce3ccd263?w=400',
+    ],
     desires: ['Someone to stargaze with', 'Deep philosophical talks'],
     desireCategories: ['spiritual', 'romantic'], distance: 2.5, city: 'Mumbai',
     bio: 'Looking up at the sky, looking for you.',
@@ -1515,6 +1655,11 @@ export const DEMO_INCOGNITO_PROFILES: import('@/types').IncognitoProfile[] = [
   {
     id: 'inc_6', username: 'Neon_Butterfly', age: 25, gender: 'female',
     photoUrl: 'https://images.unsplash.com/photo-1488426862026-3ee34a7d66df?w=400',
+    photos: [
+      'https://images.unsplash.com/photo-1488426862026-3ee34a7d66df?w=400',
+      'https://images.unsplash.com/photo-1496440737103-cd596325d314?w=400',
+      'https://images.unsplash.com/photo-1529139574466-a303027c1d8b?w=400',
+    ],
     desires: ['Dance floor chemistry', 'Festival buddy'],
     desireCategories: ['social', 'adventurous'], distance: 4.0, city: 'Mumbai',
     bio: 'Transforming every moment into magic.',
@@ -1524,6 +1669,12 @@ export const DEMO_INCOGNITO_PROFILES: import('@/types').IncognitoProfile[] = [
   {
     id: 'inc_7', username: 'Mystic_Luna', age: 28, gender: 'female',
     photoUrl: 'https://images.unsplash.com/photo-1502823403499-6ccfcf4fb453?w=400',
+    photos: [
+      'https://images.unsplash.com/photo-1502823403499-6ccfcf4fb453?w=400',
+      'https://images.unsplash.com/photo-1506863530036-1efeddceb993?w=400',
+      'https://images.unsplash.com/photo-1487412720507-e7ab37603c6f?w=400',
+      'https://images.unsplash.com/photo-1489424731084-a5d8b219a5bb?w=400',
+    ],
     desires: ['Yoga partner', 'Mindfulness companion'],
     desireCategories: ['spiritual', 'creative'], distance: 6.8, city: 'Bangalore',
     bio: 'Finding peace in chaos, seeking light in darkness.',
@@ -1533,6 +1684,11 @@ export const DEMO_INCOGNITO_PROFILES: import('@/types').IncognitoProfile[] = [
   {
     id: 'inc_8', username: 'Cherry_Blossom', age: 23, gender: 'female',
     photoUrl: 'https://images.unsplash.com/photo-1544005313-94ddf0286df2?w=400',
+    photos: [
+      'https://images.unsplash.com/photo-1544005313-94ddf0286df2?w=400',
+      'https://images.unsplash.com/photo-1484399172022-72a90b12e3c1?w=400',
+      'https://images.unsplash.com/photo-1539571696357-5a69c17a67c6?w=400',
+    ],
     desires: ['Coffee date vibes', 'Rainy day cuddles'],
     desireCategories: ['romantic', 'social'], distance: 1.2, city: 'Mumbai',
     bio: 'Blooming where I\'m planted. Come grow with me.',
@@ -1542,6 +1698,12 @@ export const DEMO_INCOGNITO_PROFILES: import('@/types').IncognitoProfile[] = [
   {
     id: 'inc_9', username: 'Electric_Sage', age: 26, gender: 'female',
     photoUrl: 'https://images.unsplash.com/photo-1438761681033-6461ffad8d80?w=400',
+    photos: [
+      'https://images.unsplash.com/photo-1438761681033-6461ffad8d80?w=400',
+      'https://images.unsplash.com/photo-1504703395950-b89145a5425b?w=400',
+      'https://images.unsplash.com/photo-1464863979621-258859e62245?w=400',
+      'https://images.unsplash.com/photo-1507152927154-d7ea36a23c5f?w=400',
+    ],
     desires: ['Music jam sessions', 'Vinyl collection sharing'],
     desireCategories: ['creative', 'intellectual'], distance: 3.9, city: 'Mumbai',
     bio: 'Electricity runs through my veins, wisdom in my soul.',
@@ -1551,6 +1713,11 @@ export const DEMO_INCOGNITO_PROFILES: import('@/types').IncognitoProfile[] = [
   {
     id: 'inc_10', username: 'Ocean_Whisper', age: 24, gender: 'female',
     photoUrl: 'https://images.unsplash.com/photo-1504439904031-93ded9f93e4e?w=400',
+    photos: [
+      'https://images.unsplash.com/photo-1504439904031-93ded9f93e4e?w=400',
+      'https://images.unsplash.com/photo-1523264653613-be267f4846c9?w=400',
+      'https://images.unsplash.com/photo-1521572267360-ee0c2909d518?w=400',
+    ],
     desires: ['Beach sunset walks', 'Travel companion'],
     desireCategories: ['adventurous', 'romantic'], distance: 8.5, city: 'Goa',
     bio: 'The ocean whispers secrets only hearts can hear.',
@@ -1560,6 +1727,12 @@ export const DEMO_INCOGNITO_PROFILES: import('@/types').IncognitoProfile[] = [
   {
     id: 'inc_11', username: 'Shadow_Dancer', age: 25, gender: 'female',
     photoUrl: 'https://images.unsplash.com/photo-1506956191951-7a88da4435e5?w=400',
+    photos: [
+      'https://images.unsplash.com/photo-1506956191951-7a88da4435e5?w=400',
+      'https://images.unsplash.com/photo-1519764622345-23439dd774f7?w=400',
+      'https://images.unsplash.com/photo-1488716820149-c2a10b1fdac7?w=400',
+      'https://images.unsplash.com/photo-1514315384763-ba401779410f?w=400',
+    ],
     desires: ['Late night dance sessions', 'Someone fearless'],
     desireCategories: ['adventurous', 'creative'], distance: 2.1, city: 'Mumbai',
     bio: 'Dancing between light and shadow.',
@@ -1569,6 +1742,11 @@ export const DEMO_INCOGNITO_PROFILES: import('@/types').IncognitoProfile[] = [
   {
     id: 'inc_12', username: 'Golden_Hour', age: 27, gender: 'female',
     photoUrl: 'https://images.unsplash.com/photo-1519699047748-de8e457a634e?w=400',
+    photos: [
+      'https://images.unsplash.com/photo-1519699047748-de8e457a634e?w=400',
+      'https://images.unsplash.com/photo-1513379733131-47fc74b45fc7?w=400',
+      'https://images.unsplash.com/photo-1500336624523-d727130c3328?w=400',
+    ],
     desires: ['Photography adventures', 'Golden hour shoots'],
     desireCategories: ['creative', 'social'], distance: 4.7, city: 'Delhi',
     bio: 'Everything is more beautiful in golden light.',
@@ -1578,6 +1756,12 @@ export const DEMO_INCOGNITO_PROFILES: import('@/types').IncognitoProfile[] = [
   {
     id: 'inc_13', username: 'Rebel_Heart', age: 24, gender: 'female',
     photoUrl: 'https://images.unsplash.com/photo-1464863979621-258859e62245?w=400',
+    photos: [
+      'https://images.unsplash.com/photo-1464863979621-258859e62245?w=400',
+      'https://images.unsplash.com/photo-1508186225823-0963cf9ab0de?w=400',
+      'https://images.unsplash.com/photo-1505033575518-a36ea2ef75ae?w=400',
+      'https://images.unsplash.com/photo-1526510747491-312a8f96d3a6?w=400',
+    ],
     desires: ['Rule-breaking adventures', 'No-filter conversations'],
     desireCategories: ['adventurous', 'social'], distance: 5.3, city: 'Mumbai',
     bio: 'Breaking rules and hearts since \'99.',
@@ -1588,6 +1772,11 @@ export const DEMO_INCOGNITO_PROFILES: import('@/types').IncognitoProfile[] = [
   {
     id: 'inc_14', username: 'Silk_Road', age: 29, gender: 'female',
     photoUrl: 'https://images.unsplash.com/photo-1485893086445-ed75865251e0?w=400',
+    photos: [
+      'https://images.unsplash.com/photo-1485893086445-ed75865251e0?w=400',
+      'https://images.unsplash.com/photo-1519764622345-23439dd774f7?w=400',
+      'https://images.unsplash.com/photo-1522075469751-3a6694fb2f61?w=400',
+    ],
     desires: ['Cultural exploration', 'Fine dining partner'],
     desireCategories: ['intellectual', 'social'], distance: 9.2, city: 'Hyderabad',
     bio: 'Traveling through cultures, one conversation at a time.',
@@ -1597,6 +1786,12 @@ export const DEMO_INCOGNITO_PROFILES: import('@/types').IncognitoProfile[] = [
   {
     id: 'inc_15', username: 'Aurora_Sky', age: 22, gender: 'female',
     photoUrl: 'https://images.unsplash.com/photo-1496440737103-cd596325d314?w=400',
+    photos: [
+      'https://images.unsplash.com/photo-1496440737103-cd596325d314?w=400',
+      'https://images.unsplash.com/photo-1513379733131-47fc74b45fc7?w=400',
+      'https://images.unsplash.com/photo-1524504388940-b1c1722653e1?w=400',
+      'https://images.unsplash.com/photo-1531746020798-e6953c6e8e04?w=400',
+    ],
     desires: ['Northern lights trip', 'Astronomy buddy'],
     desireCategories: ['spiritual', 'adventurous'], distance: 3.6, city: 'Mumbai',
     bio: 'Chasing auroras and authentic connections.',
@@ -1606,6 +1801,11 @@ export const DEMO_INCOGNITO_PROFILES: import('@/types').IncognitoProfile[] = [
   {
     id: 'inc_16', username: 'Crimson_Tide', age: 26, gender: 'female',
     photoUrl: 'https://images.unsplash.com/photo-1529635204996-ef54f42e1804?w=400',
+    photos: [
+      'https://images.unsplash.com/photo-1529635204996-ef54f42e1804?w=400',
+      'https://images.unsplash.com/photo-1495366691023-cc4eadcc2f7e?w=400',
+      'https://images.unsplash.com/photo-1526510747491-312a8f96d3a6?w=400',
+    ],
     desires: ['Competitive board game nights', 'Cooking experiments together'],
     desireCategories: ['social', 'creative'], distance: 2.7, city: 'Mumbai',
     bio: 'Fiercely competitive but fiercely loyal.',
@@ -1615,6 +1815,12 @@ export const DEMO_INCOGNITO_PROFILES: import('@/types').IncognitoProfile[] = [
   {
     id: 'inc_17', username: 'Velvet_Storm', age: 23, gender: 'female',
     photoUrl: 'https://images.unsplash.com/photo-1524502397800-2eeaad7c3fe5?w=400',
+    photos: [
+      'https://images.unsplash.com/photo-1524502397800-2eeaad7c3fe5?w=400',
+      'https://images.unsplash.com/photo-1523264653613-be267f4846c9?w=400',
+      'https://images.unsplash.com/photo-1502767089025-6572583495f9?w=400',
+      'https://images.unsplash.com/photo-1519764622345-23439dd774f7?w=400',
+    ],
     desires: ['Midnight road trips', 'Raw honest conversations'],
     desireCategories: ['adventurous', 'intellectual'], distance: 4.1, city: 'Mumbai',
     bio: 'Soft outside, thunder inside. Handle with curiosity.',
@@ -1624,6 +1830,11 @@ export const DEMO_INCOGNITO_PROFILES: import('@/types').IncognitoProfile[] = [
   {
     id: 'inc_18', username: 'Ivory_Flame', age: 25, gender: 'female',
     photoUrl: 'https://images.unsplash.com/photo-1500917293891-ef795e70e1f6?w=400',
+    photos: [
+      'https://images.unsplash.com/photo-1500917293891-ef795e70e1f6?w=400',
+      'https://images.unsplash.com/photo-1508186225823-0963cf9ab0de?w=400',
+      'https://images.unsplash.com/photo-1488716820149-c2a10b1fdac7?w=400',
+    ],
     desires: ['Partner in crime for food crawls', 'Lazy Sunday mornings'],
     desireCategories: ['romantic', 'social'], distance: 1.5, city: 'Mumbai',
     bio: 'Feed me tacos and tell me I\'m pretty.',
@@ -1633,6 +1844,12 @@ export const DEMO_INCOGNITO_PROFILES: import('@/types').IncognitoProfile[] = [
   {
     id: 'inc_19', username: 'Moonlit_Fox', age: 27, gender: 'female',
     photoUrl: 'https://images.unsplash.com/photo-1491349174775-aaafddd81942?w=400',
+    photos: [
+      'https://images.unsplash.com/photo-1491349174775-aaafddd81942?w=400',
+      'https://images.unsplash.com/photo-1507152927154-d7ea36a23c5f?w=400',
+      'https://images.unsplash.com/photo-1504439904031-93ded9f93e4e?w=400',
+      'https://images.unsplash.com/photo-1514315384763-ba401779410f?w=400',
+    ],
     desires: ['Someone who reads between the lines', 'Quiet library dates'],
     desireCategories: ['intellectual', 'romantic'], distance: 6.3, city: 'Pune',
     bio: 'Cunning mind, gentle heart. Let\'s outsmart the world together.',
@@ -1642,6 +1859,11 @@ export const DEMO_INCOGNITO_PROFILES: import('@/types').IncognitoProfile[] = [
   {
     id: 'inc_20', username: 'Prism_Light', age: 24, gender: 'female',
     photoUrl: 'https://images.unsplash.com/photo-1503185912284-5271ff81b9a8?w=400',
+    photos: [
+      'https://images.unsplash.com/photo-1503185912284-5271ff81b9a8?w=400',
+      'https://images.unsplash.com/photo-1521572267360-ee0c2909d518?w=400',
+      'https://images.unsplash.com/photo-1505033575518-a36ea2ef75ae?w=400',
+    ],
     desires: ['Festival season companion', 'Spontaneous dancing in the rain'],
     desireCategories: ['adventurous', 'creative'], distance: 3.4, city: 'Mumbai',
     bio: 'I see the world in color. Come paint with me.',
@@ -1692,6 +1914,151 @@ export const DEMO_INCOGNITO_PROFILES: import('@/types').IncognitoProfile[] = [
     bio: 'Aged like fine wine. Still aging, actually.',
     isOnline: true, height: 171, bodyStructure: 'slim', hairColor: 'Auburn', eyeColor: 'Hazel',
     privateIntentKey: 'chemistry_first', interests: ['Wine', 'Philosophy', 'Economics'], hobbies: ['Wine Tasting', 'Debating', 'Writing'], faceUnblurred: true,
+  },
+  {
+    id: 'inc_26', username: 'Twilight_Muse', age: 23, gender: 'female',
+    photoUrl: 'https://images.unsplash.com/photo-1524504388940-b1c1722653e1?w=400',
+    photos: [
+      'https://images.unsplash.com/photo-1524504388940-b1c1722653e1?w=400',
+      'https://images.unsplash.com/photo-1502767089025-6572583495f9?w=400',
+      'https://images.unsplash.com/photo-1519699047748-de8e457a634e?w=400',
+    ],
+    desires: ['Sunset conversations', 'Rooftop adventures'],
+    desireCategories: ['romantic', 'adventurous'], distance: 3.1, city: 'Mumbai',
+    bio: 'Caught between daydreams and reality.',
+    isOnline: true, height: 160, bodyStructure: 'slim', hairColor: 'Black', eyeColor: 'Brown',
+    privateIntentKey: 'short_term', interests: ['Photography', 'Rooftop Bars', 'Sunsets'], hobbies: ['Journaling', 'Sketching', 'Poetry'], faceUnblurred: false,
+  },
+  {
+    id: 'inc_27', username: 'Indigo_Dream', age: 26, gender: 'female',
+    photoUrl: 'https://images.unsplash.com/photo-1531746020798-e6953c6e8e04?w=400',
+    photos: [
+      'https://images.unsplash.com/photo-1531746020798-e6953c6e8e04?w=400',
+      'https://images.unsplash.com/photo-1517841905240-472988babdf9?w=400',
+      'https://images.unsplash.com/photo-1502685104226-ee32379fefbe?w=400',
+      'https://images.unsplash.com/photo-1515886657613-9f3515b0c78f?w=400',
+    ],
+    desires: ['Art museum dates', 'Cozy bookstore browsing'],
+    desireCategories: ['intellectual', 'creative'], distance: 2.8, city: 'Mumbai',
+    bio: 'Living in shades of blue and purple.',
+    isOnline: false, height: 165, bodyStructure: 'athletic', hairColor: 'Brown', eyeColor: 'Hazel',
+    privateIntentKey: 'undefined', interests: ['Art', 'Literature', 'Museums'], hobbies: ['Painting', 'Reading', 'Gallery Hopping'], faceUnblurred: false,
+  },
+  {
+    id: 'inc_28', username: 'Scarlet_Fever', age: 24, gender: 'female',
+    photoUrl: 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=400',
+    photos: [
+      'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=400',
+      'https://images.unsplash.com/photo-1499952127939-9bbf5af6c51c?w=400',
+      'https://images.unsplash.com/photo-1524638431109-93d95c968f03?w=400',
+    ],
+    desires: ['Spontaneous road trips', 'Late night food runs'],
+    desireCategories: ['adventurous', 'social'], distance: 4.2, city: 'Pune',
+    bio: 'Burning bright and living louder.',
+    isOnline: true, height: 168, bodyStructure: 'average', hairColor: 'Red', eyeColor: 'Green',
+    privateIntentKey: 'fling', interests: ['Travel', 'Food', 'Cars'], hobbies: ['Driving', 'Cooking', 'Exploring'], faceUnblurred: true,
+  },
+  {
+    id: 'inc_29', username: 'Misty_Harbor', age: 27, gender: 'female',
+    photoUrl: 'https://images.unsplash.com/photo-1513379733131-47fc74b45fc7?w=400',
+    photos: [
+      'https://images.unsplash.com/photo-1513379733131-47fc74b45fc7?w=400',
+      'https://images.unsplash.com/photo-1500336624523-d727130c3328?w=400',
+      'https://images.unsplash.com/photo-1522075469751-3a6694fb2f61?w=400',
+      'https://images.unsplash.com/photo-1488716820149-c2a10b1fdac7?w=400',
+    ],
+    desires: ['Beach bonfires', 'Sailing adventures'],
+    desireCategories: ['adventurous', 'romantic'], distance: 6.5, city: 'Goa',
+    bio: 'Where the sea meets the soul.',
+    isOnline: false, height: 163, bodyStructure: 'curvy', hairColor: 'Wavy Brown', eyeColor: 'Brown',
+    privateIntentKey: 'weekend_thing', interests: ['Sailing', 'Beach', 'Water Sports'], hobbies: ['Kayaking', 'Beach Volleyball', 'Sunset Watching'], faceUnblurred: false,
+  },
+  {
+    id: 'inc_30', username: 'Jade_Spirit', age: 25, gender: 'female',
+    photoUrl: 'https://images.unsplash.com/photo-1505033575518-a36ea2ef75ae?w=400',
+    photos: [
+      'https://images.unsplash.com/photo-1505033575518-a36ea2ef75ae?w=400',
+      'https://images.unsplash.com/photo-1526510747491-312a8f96d3a6?w=400',
+      'https://images.unsplash.com/photo-1514315384763-ba401779410f?w=400',
+    ],
+    desires: ['Meditation retreats', 'Plant-based cooking'],
+    desireCategories: ['spiritual', 'creative'], distance: 3.9, city: 'Bangalore',
+    bio: 'Finding balance in chaos.',
+    isOnline: true, height: 158, bodyStructure: 'slim', hairColor: 'Black', eyeColor: 'Dark Brown',
+    privateIntentKey: 'intimate', interests: ['Wellness', 'Yoga', 'Sustainability'], hobbies: ['Gardening', 'Cooking', 'Meditation'], faceUnblurred: false,
+  },
+  {
+    id: 'inc_31', username: 'Silver_Lining', age: 28, gender: 'female',
+    photoUrl: 'https://images.unsplash.com/photo-1495366691023-cc4eadcc2f7e?w=400',
+    photos: [
+      'https://images.unsplash.com/photo-1495366691023-cc4eadcc2f7e?w=400',
+      'https://images.unsplash.com/photo-1521572267360-ee0c2909d518?w=400',
+      'https://images.unsplash.com/photo-1504439904031-93ded9f93e4e?w=400',
+      'https://images.unsplash.com/photo-1507152927154-d7ea36a23c5f?w=400',
+    ],
+    desires: ['Rainy day movies', 'Comfort food cooking'],
+    desireCategories: ['romantic', 'social'], distance: 2.3, city: 'Mumbai',
+    bio: 'Every cloud has one. Looking for mine.',
+    isOnline: true, height: 166, bodyStructure: 'average', hairColor: 'Silver Highlights', eyeColor: 'Hazel',
+    privateIntentKey: 'connection_first', interests: ['Movies', 'Cooking', 'Cozy Vibes'], hobbies: ['Baking', 'Movie Marathons', 'Knitting'], faceUnblurred: true,
+  },
+  {
+    id: 'inc_32', username: 'Cosmic_Ray', age: 22, gender: 'female',
+    photoUrl: 'https://images.unsplash.com/photo-1489424731084-a5d8b219a5bb?w=400',
+    photos: [
+      'https://images.unsplash.com/photo-1489424731084-a5d8b219a5bb?w=400',
+      'https://images.unsplash.com/photo-1491349174775-aaafddd81942?w=400',
+      'https://images.unsplash.com/photo-1503185912284-5271ff81b9a8?w=400',
+    ],
+    desires: ['Stargazing trips', 'Science fiction discussions'],
+    desireCategories: ['intellectual', 'adventurous'], distance: 5.7, city: 'Hyderabad',
+    bio: 'Made of stardust, seeking cosmic connections.',
+    isOnline: false, height: 155, bodyStructure: 'slim', hairColor: 'Black', eyeColor: 'Brown',
+    privateIntentKey: 'open_minded', interests: ['Astronomy', 'Sci-Fi', 'Space'], hobbies: ['Telescope Viewing', 'Reading', 'Star Mapping'], faceUnblurred: false,
+  },
+  {
+    id: 'inc_33', username: 'Honey_Dew', age: 24, gender: 'female',
+    photoUrl: 'https://images.unsplash.com/photo-1546961342-ea1f71b193f3?w=400',
+    photos: [
+      'https://images.unsplash.com/photo-1546961342-ea1f71b193f3?w=400',
+      'https://images.unsplash.com/photo-1529626455594-4ff0802cfb7e?w=400',
+      'https://images.unsplash.com/photo-1494790108377-be9c29b29330?w=400',
+      'https://images.unsplash.com/photo-1517841905240-472988babdf9?w=400',
+    ],
+    desires: ['Farmers market Sundays', 'Picnics in the park'],
+    desireCategories: ['romantic', 'social'], distance: 1.8, city: 'Mumbai',
+    bio: 'Sweet as honey, warm as sunshine.',
+    isOnline: true, height: 162, bodyStructure: 'curvy', hairColor: 'Blonde', eyeColor: 'Blue',
+    privateIntentKey: 'casual_vibes', interests: ['Food', 'Nature', 'Outdoors'], hobbies: ['Picnics', 'Farmers Markets', 'Gardening'], faceUnblurred: false,
+  },
+  {
+    id: 'inc_34', username: 'Thunder_Rose', age: 26, gender: 'female',
+    photoUrl: 'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=400',
+    photos: [
+      'https://images.unsplash.com/photo-1534528741775-53994a69daeb?w=400',
+      'https://images.unsplash.com/photo-1488426862026-3ee34a7d66df?w=400',
+      'https://images.unsplash.com/photo-1544005313-94ddf0286df2?w=400',
+    ],
+    desires: ['Rock concert buddies', 'Adrenaline adventures'],
+    desireCategories: ['adventurous', 'creative'], distance: 4.8, city: 'Delhi',
+    bio: 'Loud music, quiet soul.',
+    isOnline: true, height: 170, bodyStructure: 'athletic', hairColor: 'Black', eyeColor: 'Dark Brown',
+    privateIntentKey: 'late_night', interests: ['Rock Music', 'Concerts', 'Extreme Sports'], hobbies: ['Guitar', 'Bungee Jumping', 'Mosh Pits'], faceUnblurred: true,
+  },
+  {
+    id: 'inc_35', username: 'Velvet_Noir', age: 27, gender: 'female',
+    photoUrl: 'https://images.unsplash.com/photo-1438761681033-6461ffad8d80?w=400',
+    photos: [
+      'https://images.unsplash.com/photo-1438761681033-6461ffad8d80?w=400',
+      'https://images.unsplash.com/photo-1506863530036-1efeddceb993?w=400',
+      'https://images.unsplash.com/photo-1502823403499-6ccfcf4fb453?w=400',
+      'https://images.unsplash.com/photo-1504703395950-b89145a5425b?w=400',
+    ],
+    desires: ['Jazz club nights', 'Poetry slams'],
+    desireCategories: ['creative', 'intellectual'], distance: 3.5, city: 'Mumbai',
+    bio: 'Dark aesthetics, bright mind.',
+    isOnline: false, height: 167, bodyStructure: 'slim', hairColor: 'Black', eyeColor: 'Brown',
+    privateIntentKey: 'private_thing', interests: ['Jazz', 'Poetry', 'Film Noir'], hobbies: ['Writing', 'Spoken Word', 'Vintage Shopping'], faceUnblurred: false,
   },
 ];
 

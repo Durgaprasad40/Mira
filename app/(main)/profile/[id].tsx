@@ -20,13 +20,15 @@ import { Ionicons } from '@expo/vector-icons';
 import { Image } from 'expo-image';
 import { FlatList } from 'react-native';
 import { isDemoMode } from '@/hooks/useConvex';
-import { DEMO_PROFILES, getDemoCurrentUser } from '@/lib/demoData';
+import { DEMO_PROFILES, getDemoCurrentUser, DEMO_INCOGNITO_PROFILES } from '@/lib/demoData';
 import { useDemoStore } from '@/stores/demoStore';
 import { ReportBlockModal } from '@/components/security/ReportBlockModal';
 import { Toast } from '@/components/ui/Toast';
+import { PRIVATE_INTENT_CATEGORIES } from '@/lib/privateConstants';
 
 export default function ViewProfileScreen() {
-  const { id: userId } = useLocalSearchParams<{ id: string }>();
+  const { id: userId, mode } = useLocalSearchParams<{ id: string; mode?: string }>();
+  const isPhase2 = mode === 'phase2';
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const { width: screenWidth } = useWindowDimensions();
@@ -41,10 +43,63 @@ export default function ViewProfileScreen() {
       : 'skip'
   );
 
+  // In demo mode, check both static DEMO_PROFILES and dynamic demoStore.profiles
+  // (fallback Stand Out profiles like Riya/Keerthi/Sana are in demoStore.profiles)
+  // For Phase-2, also check DEMO_INCOGNITO_PROFILES
+  const demoStoreProfiles = useDemoStore((s) => s.profiles);
   const demoProfile = isDemoMode
     ? (() => {
-        const p = DEMO_PROFILES.find((dp) => dp._id === userId);
+        // Phase-2: Check DEMO_INCOGNITO_PROFILES first
+        if (isPhase2) {
+          const incognitoProfile = DEMO_INCOGNITO_PROFILES.find((dp) => dp.id === userId);
+          if (incognitoProfile) {
+            // Phase-2 profile found - convert to common format
+            // Prefer photos[] array if available, fallback to [photoUrl] for backward compat
+            const photoUrls = incognitoProfile.photos && incognitoProfile.photos.length > 0
+              ? incognitoProfile.photos
+              : incognitoProfile.photoUrl
+                ? [incognitoProfile.photoUrl]
+                : [];
+            const photos = photoUrls.map((url, i) => ({ _id: `photo_${i}`, url }));
+
+            return {
+              name: incognitoProfile.username,
+              age: incognitoProfile.age,
+              bio: incognitoProfile.bio,
+              city: incognitoProfile.city,
+              isVerified: false, // Phase-2 profiles don't have verification
+              distance: incognitoProfile.distance,
+              photos,
+              // Phase-2 specific fields (NO Phase-1 intent!)
+              privateIntentKey: incognitoProfile.privateIntentKey,
+              activities: incognitoProfile.interests || incognitoProfile.hobbies || [],
+              // Phase-2 does NOT have prompts - explicitly exclude
+              profilePrompts: [],
+              relationshipIntent: [], // Empty - Phase-2 doesn't use Phase-1 intents
+              height: incognitoProfile.height,
+              smoking: undefined,
+              drinking: undefined,
+              education: undefined,
+              jobTitle: undefined,
+              company: undefined,
+              lastActive: Date.now() - 2 * 60 * 60 * 1000,
+              createdAt: Date.now() - 60 * 24 * 60 * 60 * 1000,
+            };
+          }
+        }
+
+        // Phase-1: Check static DEMO_PROFILES, then fallback to demoStore.profiles
+        const staticProfile = DEMO_PROFILES.find((dp) => dp._id === userId);
+        const storeProfile = demoStoreProfiles.find((dp) => dp._id === userId);
+        const p = staticProfile || storeProfile;
         if (!p) return null;
+
+        // Schema-tolerant field resolution (supports old persisted data with different keys)
+        const pAny = p as any;
+        const resolvedIntent = p.relationshipIntent || pAny.intent || pAny.lookingFor || [];
+        const resolvedActivities = p.activities || pAny.interests || pAny.hobbies || [];
+        const resolvedPrompts = pAny.profilePrompts || pAny.prompts || [];
+
         return {
           name: p.name,
           age: p.age,
@@ -53,9 +108,9 @@ export default function ViewProfileScreen() {
           isVerified: p.isVerified,
           distance: p.distance,
           photos: p.photos.map((photo, i) => ({ _id: `photo_${i}`, url: photo.url })),
-          relationshipIntent: p.relationshipIntent,
-          activities: p.activities,
-          profilePrompts: (p as any).profilePrompts ?? [],
+          relationshipIntent: resolvedIntent,
+          activities: resolvedActivities,
+          profilePrompts: resolvedPrompts,
           height: undefined,
           smoking: undefined,
           drinking: undefined,
@@ -93,13 +148,16 @@ export default function ViewProfileScreen() {
         // Create the match, DM conversation, and remove from discover + likes
         simulateMatch(userId);
         const matchId = `match_${userId}`;
-        router.push(`/(main)/match-celebration?matchId=${matchId}&userId=${userId}` as any);
+        // Pass mode param so match-celebration knows the phase context
+        const modeParam = isPhase2 ? '&mode=phase2' : '';
+        router.push(`/(main)/match-celebration?matchId=${matchId}&userId=${userId}${modeParam}` as any);
       } else {
         // Regular like on someone NOT in our likes list — small random chance of instant match
         if (Math.random() > 0.7) {
           simulateMatch(userId);
           const matchId = `match_${userId}`;
-          router.push(`/(main)/match-celebration?matchId=${matchId}&userId=${userId}` as any);
+          const modeParam = isPhase2 ? '&mode=phase2' : '';
+          router.push(`/(main)/match-celebration?matchId=${matchId}&userId=${userId}${modeParam}` as any);
         } else {
           router.back();
         }
@@ -132,7 +190,8 @@ export default function ViewProfileScreen() {
     );
   }
 
-  const age = new Date().getFullYear() - new Date(profile.age || 0).getFullYear();
+  // profile.age is already the age in years (not a date), use it directly
+  const age = profile.age || 0;
 
   return (
     <ScrollView style={styles.container} showsVerticalScrollIndicator={false}>
@@ -176,6 +235,7 @@ export default function ViewProfileScreen() {
                 source={{ uri: item.url }}
                 style={{ width: '100%', height: '100%' }}
                 contentFit="cover"
+                blurRadius={isPhase2 ? 20 : 0}
               />
             </View>
           )}
@@ -239,13 +299,37 @@ export default function ViewProfileScreen() {
           );
         })()}
 
+        {/* Phase-2 Intent - show privateIntentKey from PRIVATE_INTENT_CATEGORIES (NOT Phase-1 intents!) */}
+        {isPhase2 && (profile as any).privateIntentKey && (() => {
+          const intentCategory = PRIVATE_INTENT_CATEGORIES.find(
+            (c) => c.key === (profile as any).privateIntentKey
+          );
+          if (!intentCategory) return null;
+          return (
+            <View style={styles.section}>
+              <Text style={styles.sectionTitle}>Looking for</Text>
+              <View style={styles.chips}>
+                <View style={[styles.intentChip, { borderColor: intentCategory.color + '40' }]}>
+                  <Ionicons name={intentCategory.icon as any} size={16} color={intentCategory.color} />
+                  <Text style={[styles.intentChipText, { color: intentCategory.color, marginLeft: 6 }]}>
+                    {intentCategory.label}
+                  </Text>
+                </View>
+              </View>
+            </View>
+          );
+        })()}
+
+        {/* Bio section with heading */}
         {profile.bio && (
           <View style={styles.section}>
+            <Text style={styles.sectionTitle}>{isPhase2 ? 'About (Bio)' : 'About'}</Text>
             <Text style={styles.bio}>{profile.bio}</Text>
           </View>
         )}
 
-        {profile.profilePrompts && profile.profilePrompts.length > 0 && (
+        {/* Profile Prompts - Phase-1 ONLY (never show in Phase-2) */}
+        {!isPhase2 && profile.profilePrompts && profile.profilePrompts.length > 0 && (
           <View style={styles.section}>
             {profile.profilePrompts.slice(0, 3).map((prompt: { question: string; answer: string }, idx: number) => (
               <View key={idx} style={styles.promptCard}>
@@ -280,48 +364,12 @@ export default function ViewProfileScreen() {
           );
         })()}
 
-        {profile.relationshipIntent && profile.relationshipIntent.length > 0 && (() => {
-          const myIntents: string[] = isDemoMode ? getDemoCurrentUser().relationshipIntent : [];
-          const { compat, theirPrimaryLabel, theirPrimaryEmoji } = computeIntentCompat(myIntents, profile.relationshipIntent);
-          const compatColor = getIntentCompatColor(compat);
-          const warning = getIntentMismatchWarning(compat);
-          return (
-            <View style={styles.section}>
-              <Text style={styles.sectionTitle}>Looking for</Text>
-              <View style={styles.chips}>
-                {profile.relationshipIntent.map((intent) => {
-                  const intentData = RELATIONSHIP_INTENTS.find((i) => i.value === intent);
-                  return (
-                    <View key={intent} style={styles.chip}>
-                      <Text style={styles.chipText}>
-                        {intentData?.emoji} {intentData?.label}
-                      </Text>
-                    </View>
-                  );
-                })}
-              </View>
-              {myIntents.length > 0 && (
-                <View style={[styles.intentCompatBadge, { backgroundColor: compatColor + '18' }]}>
-                  <Text style={[styles.intentCompatText, { color: compatColor }]}>
-                    {compat === 'match' ? 'Your intents align' : compat === 'partial' ? 'Possibly compatible' : 'Different intents'}
-                  </Text>
-                </View>
-              )}
-              {warning && (
-                <View style={styles.intentWarning}>
-                  <Ionicons name="information-circle-outline" size={16} color={COLORS.textLight} />
-                  <Text style={styles.intentWarningText}>{warning}</Text>
-                </View>
-              )}
-            </View>
-          );
-        })()}
-
+        {/* Interests - All activities */}
         {profile.activities && profile.activities.length > 0 && (
           <View style={styles.section}>
             <Text style={styles.sectionTitle}>Interests</Text>
             <View style={styles.chips}>
-              {profile.activities.map((activity) => {
+              {profile.activities.map((activity: string) => {
                 const activityData = ACTIVITY_FILTERS.find((a) => a.value === activity);
                 return (
                   <View key={activity} style={styles.chip}>
@@ -591,6 +639,21 @@ const styles = StyleSheet.create({
   sharedChipText: {
     fontSize: 14,
     color: COLORS.secondary,
+    fontWeight: '600',
+  },
+  intentChip: {
+    backgroundColor: COLORS.primary + '15',
+    borderWidth: 1,
+    borderColor: COLORS.primary + '30',
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 20,
+    marginRight: 8,
+    marginBottom: 8,
+  },
+  intentChipText: {
+    fontSize: 15,
+    color: COLORS.primary,
     fontWeight: '600',
   },
   intentCompatBadge: {
