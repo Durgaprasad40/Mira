@@ -98,6 +98,7 @@ export const getUserById = query({
       city: user.city,
       distance,
       lastActive: user.lastActive,
+      lookingFor: user.lookingFor,
       relationshipIntent: user.relationshipIntent,
       activities: user.activities,
       profilePrompts: user.profilePrompts ?? [],

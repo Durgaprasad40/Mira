@@ -5,12 +5,13 @@ import { COLORS } from '@/lib/constants';
 import MediaMessage from './MediaMessage';
 import { ProtectedMediaBubble } from './ProtectedMediaBubble';
 import { SystemMessage } from './SystemMessage';
+import { VoiceMessageBubble } from './VoiceMessageBubble';
 
 interface MessageBubbleProps {
   message: {
     id: string;
     content: string;
-    type: 'text' | 'image' | 'video' | 'template' | 'dare' | 'system';
+    type: 'text' | 'image' | 'video' | 'template' | 'dare' | 'system' | 'voice';
     senderId: string;
     createdAt: number;
     readAt?: number;
@@ -27,12 +28,16 @@ interface MessageBubbleProps {
     viewedAt?: number;
     systemSubtype?: string;
     mediaId?: string;
+    // Voice message fields
+    audioUri?: string;
+    durationMs?: number;
   };
   isOwn: boolean;
   otherUserName?: string;
   currentUserId?: string;
   onMediaPress?: (mediaUrl: string, type: 'image' | 'video') => void;
   onProtectedMediaPress?: (messageId: string) => void;
+  onVoiceDelete?: (messageId: string) => void;
 }
 
 // Detect messages that are only emoji (1–8 emoji, no other text)
@@ -42,7 +47,7 @@ const EMOJI_ONLY_RE = /^[\p{Emoji_Presentation}\p{Extended_Pictographic}\u200d\u
 // Format: [SYSTEM:subtype]actual message content
 const SYSTEM_MARKER_RE = /^\[SYSTEM:(\w+)\]/;
 
-export function MessageBubble({ message, isOwn, otherUserName, currentUserId, onMediaPress, onProtectedMediaPress }: MessageBubbleProps) {
+export function MessageBubble({ message, isOwn, otherUserName, currentUserId, onMediaPress, onProtectedMediaPress, onVoiceDelete }: MessageBubbleProps) {
   const isEmojiOnly = message.type === 'text' && EMOJI_ONLY_RE.test(message.content.trim());
 
   const formatTime = (timestamp: number) => {
@@ -124,6 +129,22 @@ export function MessageBubble({ message, isOwn, otherUserName, currentUserId, on
             )}
           </View>
         </View>
+      </View>
+    );
+  }
+
+  // Voice message rendering
+  if (message.type === 'voice' && message.audioUri) {
+    return (
+      <View style={[styles.container, isOwn && styles.ownContainer]}>
+        <VoiceMessageBubble
+          messageId={message.id}
+          audioUri={message.audioUri}
+          durationMs={message.durationMs || 0}
+          isOwn={isOwn}
+          timestamp={message.createdAt}
+          onDelete={isOwn && onVoiceDelete ? () => onVoiceDelete(message.id) : undefined}
+        />
       </View>
     );
   }

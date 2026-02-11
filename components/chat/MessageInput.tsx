@@ -1,14 +1,16 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useCallback } from 'react';
 import { View, Text, TextInput, StyleSheet, TouchableOpacity, Alert } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { COLORS, MESSAGE_TEMPLATES } from '@/lib/constants';
 import { Button } from '@/components/ui';
 import { isDemoMode } from '@/config/demo';
+import { useVoiceRecorder, type VoiceRecorderResult } from '@/hooks/useVoiceRecorder';
 
 interface MessageInputProps {
   onSend: (text: string, type?: 'text' | 'template') => void | Promise<void>;
   onSendImage?: () => void;
   onSendDare?: () => void;
+  onSendVoice?: (audioUri: string, durationMs: number) => void | Promise<void>;
   disabled?: boolean;
   isPreMatch?: boolean;
   messagesRemaining?: number;
@@ -25,6 +27,7 @@ export function MessageInput({
   onSend,
   onSendImage,
   onSendDare,
+  onSendVoice,
   disabled = false,
   isPreMatch = false,
   messagesRemaining = 0,
@@ -36,6 +39,33 @@ export function MessageInput({
 }: MessageInputProps) {
   const [text, setText] = useState(initialText);
   const [showTemplates, setShowTemplates] = useState(false);
+
+  // Voice recording
+  const handleRecordingComplete = useCallback((result: VoiceRecorderResult) => {
+    onSendVoice?.(result.audioUri, result.durationMs);
+  }, [onSendVoice]);
+
+  const handleRecordingError = useCallback((message: string) => {
+    Alert.alert('Recording Error', message);
+  }, []);
+
+  const {
+    isRecording,
+    elapsedMs,
+    maxDurationMs,
+    toggleRecording,
+  } = useVoiceRecorder({
+    onRecordingComplete: handleRecordingComplete,
+    onError: handleRecordingError,
+  });
+
+  // Format elapsed time as 0:xx
+  const formatTime = (ms: number) => {
+    const totalSec = Math.floor(ms / 1000);
+    const min = Math.floor(totalSec / 60);
+    const sec = totalSec % 60;
+    return `${min}:${sec.toString().padStart(2, '0')}`;
+  };
 
   const handleTextChange = (value: string) => {
     setText(value);
@@ -109,7 +139,17 @@ export function MessageInput({
         </View>
       )}
 
-      {!isDemoMode && isPreMatch && messagesRemaining > 0 && (
+      {/* Recording indicator */}
+      {isRecording && (
+        <View style={styles.recordingBanner}>
+          <View style={styles.recordingDot} />
+          <Text style={styles.recordingText}>
+            Recording... {formatTime(elapsedMs)} / {formatTime(maxDurationMs)}
+          </Text>
+        </View>
+      )}
+
+      {!isDemoMode && isPreMatch && messagesRemaining > 0 && !isRecording && (
         <View style={styles.quotaBanner}>
           <Ionicons name="information-circle" size={16} color={COLORS.warning} />
           <Text style={styles.quotaText}>
@@ -119,7 +159,22 @@ export function MessageInput({
       )}
 
       <View style={styles.inputContainer}>
-        {isPreMatch && (
+        {/* Mic button - LEFT side of TextInput */}
+        {onSendVoice && (
+          <TouchableOpacity
+            style={[styles.iconButton, isRecording && styles.iconButtonRecording]}
+            onPress={toggleRecording}
+            disabled={disabled}
+          >
+            <Ionicons
+              name={isRecording ? 'stop' : 'mic'}
+              size={24}
+              color={isRecording ? COLORS.error : COLORS.primary}
+            />
+          </TouchableOpacity>
+        )}
+
+        {isPreMatch && !isRecording && (
           <TouchableOpacity
             style={styles.iconButton}
             onPress={() => setShowTemplates(!showTemplates)}
@@ -128,16 +183,20 @@ export function MessageInput({
           </TouchableOpacity>
         )}
 
-        {onSendDare && (
+        {onSendDare && !isRecording && (
           <TouchableOpacity style={styles.iconButton} onPress={onSendDare} disabled={disabled}>
             <Ionicons name="dice" size={24} color={COLORS.secondary} />
           </TouchableOpacity>
         )}
 
         <TextInput
-          style={[styles.input, !isDemoMode && !canSendCustom && isPreMatch && styles.inputDisabled]}
-          placeholder={!isDemoMode && isPreMatch && !canSendCustom ? 'Use templates to message' : 'Type a message...'}
-          placeholderTextColor={COLORS.textLight}
+          style={[
+            styles.input,
+            !isDemoMode && !canSendCustom && isPreMatch && styles.inputDisabled,
+            isRecording && styles.inputRecording,
+          ]}
+          placeholder={isRecording ? 'Recording voice message...' : (!isDemoMode && isPreMatch && !canSendCustom ? 'Use templates to message' : 'Type a message...')}
+          placeholderTextColor={isRecording ? COLORS.error : COLORS.textLight}
           value={text}
           onChangeText={handleTextChange}
           multiline
@@ -145,22 +204,24 @@ export function MessageInput({
           textAlignVertical="top"
           blurOnSubmit={false}
           maxLength={isDemoMode || canSendCustom ? undefined : 150}
-          editable={!disabled && (isDemoMode || canSendCustom || !isPreMatch)}
+          editable={!disabled && !isRecording && (isDemoMode || canSendCustom || !isPreMatch)}
         />
 
-        {onSendImage && (
+        {onSendImage && !isRecording && (
           <TouchableOpacity style={styles.iconButton} onPress={onSendImage} disabled={disabled}>
             <Ionicons name="camera" size={24} color={COLORS.primary} />
           </TouchableOpacity>
         )}
 
-        <TouchableOpacity
-          style={[styles.sendButton, (!text.trim() || disabled) && styles.sendButtonDisabled]}
-          onPress={handleSend}
-          disabled={!text.trim() || disabled}
-        >
-          <Ionicons name="send" size={20} color={COLORS.white} />
-        </TouchableOpacity>
+        {!isRecording && (
+          <TouchableOpacity
+            style={[styles.sendButton, (!text.trim() || disabled) && styles.sendButtonDisabled]}
+            onPress={handleSend}
+            disabled={!text.trim() || disabled}
+          >
+            <Ionicons name="send" size={20} color={COLORS.white} />
+          </TouchableOpacity>
+        )}
       </View>
     </View>
   );
@@ -200,6 +261,25 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: COLORS.text,
   },
+  recordingBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: COLORS.error + '15',
+    padding: 8,
+    paddingHorizontal: 16,
+  },
+  recordingDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: COLORS.error,
+    marginRight: 8,
+  },
+  recordingText: {
+    fontSize: 13,
+    color: COLORS.error,
+    fontWeight: '600',
+  },
   quotaBanner: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -227,6 +307,10 @@ const styles = StyleSheet.create({
     alignItems: 'center' as const,
     justifyContent: 'center' as const,
   },
+  iconButtonRecording: {
+    backgroundColor: COLORS.error + '20',
+    borderRadius: 22,
+  },
   input: {
     flex: 1,
     backgroundColor: COLORS.backgroundDark,
@@ -241,6 +325,10 @@ const styles = StyleSheet.create({
   },
   inputDisabled: {
     opacity: 0.5,
+  },
+  inputRecording: {
+    borderWidth: 1,
+    borderColor: COLORS.error + '40',
   },
   sendButton: {
     width: 44,

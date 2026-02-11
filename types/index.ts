@@ -12,7 +12,9 @@ export type BehaviorFlagType =
 export type BehaviorFlagSeverity = 'low' | 'medium' | 'high';
 
 // User Types
-export type Gender = "male" | "female" | "non_binary" | "lesbian" | "other";
+export type Gender = "male" | "female" | "non_binary";
+
+export type Orientation = "straight" | "gay" | "lesbian" | "bisexual" | "prefer_not_to_say";
 
 export type RelationshipIntent =
   | "long_term"
@@ -99,7 +101,7 @@ export type SortOption =
 
 export type SwipeAction = "like" | "pass" | "super_like" | "text";
 
-export type MessageType = "text" | "image" | "template" | "dare";
+export type MessageType = "text" | "image" | "template" | "dare" | "voice";
 
 // User Profile
 export interface UserProfile {
@@ -203,6 +205,9 @@ export interface Message {
   templateId?: string;
   readAt?: number;
   createdAt: number;
+  // Voice message fields
+  audioUri?: string;
+  durationMs?: number;
 }
 
 // Conversation
@@ -320,8 +325,10 @@ export interface IncognitoProfile {
   city: string;
   bio: string;
   isOnline: boolean;
-  /** Phase-2 intent key (replaces Face-1 relationshipIntent) */
+  /** @deprecated Use privateIntentKeys[] instead for multi-select (1-5) */
   privateIntentKey?: PrivateIntentKey;
+  /** Phase-2 intent keys - multi-select (1-5 items) */
+  privateIntentKeys?: PrivateIntentKey[];
   interests: string[];
   hobbies: string[];
   faceUnblurred: boolean;
@@ -470,6 +477,10 @@ export interface IncognitoMessage {
   expiredAt?: number;
   /** Timestamp when message should be auto-deleted */
   deleteAt?: number;
+  // Voice message fields
+  type?: 'text' | 'voice';
+  audioUri?: string;
+  durationMs?: number;
 }
 
 // Private Mode Types (Face 2 only — 20 categories)
@@ -548,6 +559,9 @@ export interface PrivateProfileData {
   gender: string;
   revealPolicy: 'mutual_only' | 'request_based';
   isSetupComplete: boolean;
+  // Phase-1 imported fields (read-only after import)
+  hobbies?: string[];
+  isVerified?: boolean;
 }
 
 export interface RevealRequest {
@@ -581,6 +595,7 @@ export interface Confession {
   topEmojis?: { emoji: string; count: number }[];
   replyPreviews?: { text: string; isAnonymous: boolean; type: string; createdAt: number }[];
   targetUserId?: string;
+  targetUserName?: string; // Name of tagged user (for display)
   visibility: ConfessionVisibility;
   replyCount: number;
   reactionCount: number;
@@ -731,14 +746,15 @@ export interface SwipeCardProps {
 // Filter State
 export interface FilterState {
   gender: Gender[];
+  orientation: Orientation | null;
   minAge: number;
   maxAge: number;
   maxDistance: number;
   relationshipIntent: RelationshipIntent[];
   activities: ActivityFilter[];
   sortBy: SortOption;
-  /** Phase-2 (Face-2) intent — single-select, null means no preference */
-  privateIntentKey: string | null;
+  /** Phase-2 (Face-2) intents — multi-select (1-5), empty means no preference */
+  privateIntentKeys: string[];
 }
 
 // Auth State

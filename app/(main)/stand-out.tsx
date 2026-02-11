@@ -27,9 +27,24 @@ export default function StandOutScreen() {
   }>();
   const [message, setMessage] = useState('');
 
+  // Guard: require profileId to prevent sending to invalid target
+  if (!profileId) {
+    return (
+      <View style={styles.overlay}>
+        <View style={[styles.box, styles.errorBox]}>
+          <Ionicons name="alert-circle-outline" size={48} color={COLORS.textMuted} />
+          <Text style={styles.errorText}>Profile not found</Text>
+          <TouchableOpacity style={styles.errorBackBtn} onPress={() => router.back()}>
+            <Text style={styles.errorBackText}>Go Back</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+    );
+  }
+
   const handleSend = useCallback(() => {
     useInteractionStore.getState().setStandOutResult({
-      profileId: profileId || '',
+      profileId,
       message: message.trim(),
     });
     router.back();
@@ -43,8 +58,8 @@ export default function StandOutScreen() {
     <View style={styles.overlay}>
       <KeyboardAvoidingView
         style={styles.sheetWrapper}
-        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-        keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 20}
+        behavior="padding"
+        keyboardVerticalOffset={Platform.OS === 'ios' ? 10 : 0}
       >
         <ScrollView
           contentContainerStyle={styles.scrollContent}
@@ -178,5 +193,27 @@ const styles = StyleSheet.create({
     color: COLORS.white,
     fontSize: 16,
     fontWeight: '600',
+  },
+  errorBox: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 48,
+  },
+  errorText: {
+    fontSize: 16,
+    color: COLORS.textMuted,
+    marginTop: 12,
+    marginBottom: 20,
+  },
+  errorBackBtn: {
+    paddingHorizontal: 24,
+    paddingVertical: 12,
+    backgroundColor: COLORS.primary,
+    borderRadius: 8,
+  },
+  errorBackText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: COLORS.white,
   },
 });

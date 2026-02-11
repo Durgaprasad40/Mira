@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import {
   Gender,
+  Orientation,
   RelationshipIntent,
   ActivityFilter,
   SortOption,
@@ -47,9 +48,15 @@ interface FilterStoreState extends FilterState {
   clearIntentFilters: () => void;
   clearActivityFilters: () => void;
 
-  // Phase-2 (Face-2) intent — single-select
-  setPrivateIntentKey: (key: string | null) => void;
+  // Phase-2 (Face-2) intents — multi-select (1-5)
+  setPrivateIntentKeys: (keys: string[]) => void;
   togglePrivateIntentKey: (key: string) => void;
+  // Legacy single-key getter for backward compatibility
+  getPrivateIntentKey: () => string | null;
+
+  // Orientation — optional, single-select
+  setOrientation: (orientation: Orientation | null) => void;
+  toggleOrientation: (orientation: Orientation) => void;
 }
 
 // Default 80km (~50 miles)
@@ -57,13 +64,14 @@ const DEFAULT_MAX_DISTANCE_KM = 80;
 
 const initialState: FilterState = {
   gender: [],
+  orientation: null, // Optional, single-select
   minAge: 18,
   maxAge: 70,
   maxDistance: DEFAULT_MAX_DISTANCE_KM, // Stored in km
   relationshipIntent: [],
   activities: [],
   sortBy: 'recommended',
-  privateIntentKey: null, // Phase-2: single-select intent
+  privateIntentKeys: [], // Phase-2: multi-select intents (1-5)
 };
 
 export const useFilterStore = create<FilterStoreState>((set, get) => ({
@@ -125,11 +133,24 @@ export const useFilterStore = create<FilterStoreState>((set, get) => ({
 
   clearActivityFilters: () => set({ activities: [] }),
 
-  // Phase-2 (Face-2) intent — single-select
-  setPrivateIntentKey: (key) => set({ privateIntentKey: key }),
+  // Phase-2 (Face-2) intents — multi-select (1-5)
+  setPrivateIntentKeys: (keys) => set({ privateIntentKeys: keys }),
 
   togglePrivateIntentKey: (key) =>
     set((state) => ({
-      privateIntentKey: state.privateIntentKey === key ? null : key,
+      privateIntentKeys: state.privateIntentKeys.includes(key)
+        ? state.privateIntentKeys.filter((k) => k !== key)
+        : [...state.privateIntentKeys, key],
+    })),
+
+  // Legacy single-key getter for backward compatibility
+  getPrivateIntentKey: () => get().privateIntentKeys[0] ?? null,
+
+  // Orientation — optional, single-select (tap again to clear)
+  setOrientation: (orientation) => set({ orientation }),
+
+  toggleOrientation: (orientation) =>
+    set((state) => ({
+      orientation: state.orientation === orientation ? null : orientation,
     })),
 }));

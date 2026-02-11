@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   View,
   Text,
@@ -8,9 +8,9 @@ import {
   Alert,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { useRouter } from 'expo-router';
+import { useRouter, useLocalSearchParams, useSegments } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
-import { COLORS, GENDER_OPTIONS } from '@/lib/constants';
+import { COLORS, GENDER_OPTIONS, ORIENTATION_OPTIONS, RELATIONSHIP_INTENTS, INCOGNITO_COLORS } from '@/lib/constants';
 import { PRIVATE_INTENT_CATEGORIES } from '@/lib/privateConstants';
 import { Button, Input } from '@/components/ui';
 import { useFilterStore, kmToMiles, milesToKm } from '@/stores/filterStore';
@@ -18,7 +18,7 @@ import { isDemoMode } from '@/hooks/useConvex';
 import { useAuthStore } from '@/stores/authStore';
 import { useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
-import type { Gender } from '@/types';
+import type { Gender, Orientation } from '@/types';
 
 // Age and distance limits
 const MIN_AGE = 18;
@@ -26,8 +26,28 @@ const MAX_AGE = 70;
 const MAX_DISTANCE_MILES = 100; // UI shows miles
 const MAX_DISTANCE_KM = milesToKm(MAX_DISTANCE_MILES); // ~161km stored
 
+// "Looking for" selection limits (applies to BOTH phases)
+const MIN_LOOKING_FOR = 1;
+const MAX_LOOKING_FOR = 2;
+
+// Phase-1 intent selection limits
+const MIN_PHASE1_INTENTS = 1;
+const MAX_PHASE1_INTENTS = 3;
+
+// Phase-2 intent selection limits
+const MIN_PHASE2_INTENTS = 1;
+const MAX_PHASE2_INTENTS = 5;
+
 export default function DiscoveryPreferencesScreen() {
   const router = useRouter();
+  const { mode } = useLocalSearchParams<{ mode?: string }>();
+  const segments = useSegments();
+
+  // Phase detection: explicit param takes priority, then infer from route segments
+  // Phase-2 ONLY if mode='phase2' explicitly OR navigated from (private) route group
+  const isInPrivateRoute = segments.some(s => String(s).includes('private'));
+  const isPhase2 = mode === 'phase2' || (mode === undefined && isInPrivateRoute);
+
   const { userId } = useAuthStore();
 
   const {
@@ -35,14 +55,109 @@ export default function DiscoveryPreferencesScreen() {
     maxAge,
     maxDistance, // Stored in km
     gender: lookingFor,
-    privateIntentKey,
+    orientation,
+    relationshipIntent,
+    privateIntentKeys,
     setMinAge,
     setMaxAge,
     setMaxDistanceKm,
     toggleGender,
+    toggleOrientation,
+    toggleRelationshipIntent,
     togglePrivateIntentKey,
+    setRelationshipIntent,
+    setPrivateIntentKeys,
     incrementFilterVersion,
   } = useFilterStore();
+
+  // Theme colors based on phase
+  const theme = isPhase2 ? INCOGNITO_COLORS : COLORS;
+  const bgColor = isPhase2 ? INCOGNITO_COLORS.background : COLORS.background;
+  const textColor = isPhase2 ? INCOGNITO_COLORS.text : COLORS.text;
+  const textLightColor = isPhase2 ? INCOGNITO_COLORS.textLight : COLORS.textLight;
+  const accentColor = isPhase2 ? INCOGNITO_COLORS.primary : COLORS.primary;
+
+  // Defensive cleanup: remove stale/invalid intent values from old saves
+  useEffect(() => {
+    // Phase-1: Filter relationshipIntent to only valid RELATIONSHIP_INTENTS values
+    const validPhase1Keys = RELATIONSHIP_INTENTS.map(i => i.value);
+    const cleanedPhase1 = relationshipIntent.filter(v => validPhase1Keys.includes(v));
+    if (cleanedPhase1.length !== relationshipIntent.length) {
+      setRelationshipIntent(cleanedPhase1);
+      if (__DEV__) console.log('[Prefs] Cleaned stale Phase-1 intents:', relationshipIntent.length - cleanedPhase1.length, 'removed');
+    }
+
+    // Phase-2: Filter privateIntentKeys to only valid PRIVATE_INTENT_CATEGORIES values
+    const validPhase2Keys: string[] = PRIVATE_INTENT_CATEGORIES.map(c => c.key);
+    const cleanedPhase2 = privateIntentKeys.filter(k => validPhase2Keys.includes(k));
+    if (cleanedPhase2.length !== privateIntentKeys.length) {
+      setPrivateIntentKeys(cleanedPhase2);
+      if (__DEV__) console.log('[Prefs] Cleaned stale Phase-2 intents:', privateIntentKeys.length - cleanedPhase2.length, 'removed');
+    }
+  }, []); // Run once on mount
+
+  // "Looking for" toggle with min/max enforcement (applies to BOTH phases)
+  const handleLookingForToggle = (genderValue: Gender) => {
+    const isSelected = lookingFor.includes(genderValue);
+
+    if (isSelected) {
+      // Trying to deselect — enforce minimum
+      if (lookingFor.length <= MIN_LOOKING_FOR) {
+        Alert.alert('Selection limit', `Select at least ${MIN_LOOKING_FOR}.`);
+        return;
+      }
+    } else {
+      // Trying to select — enforce maximum
+      if (lookingFor.length >= MAX_LOOKING_FOR) {
+        Alert.alert('Selection limit', `You can select up to ${MAX_LOOKING_FOR}.`);
+        return;
+      }
+    }
+
+    toggleGender(genderValue);
+  };
+
+  // Phase-1 intent toggle with min/max enforcement
+  const handlePhase1IntentToggle = (intentValue: typeof RELATIONSHIP_INTENTS[number]['value']) => {
+    const isSelected = relationshipIntent.includes(intentValue);
+
+    if (isSelected) {
+      // Trying to deselect — enforce minimum
+      if (relationshipIntent.length <= MIN_PHASE1_INTENTS) {
+        Alert.alert('Selection limit', `Select at least ${MIN_PHASE1_INTENTS}.`);
+        return;
+      }
+    } else {
+      // Trying to select — enforce maximum
+      if (relationshipIntent.length >= MAX_PHASE1_INTENTS) {
+        Alert.alert('Selection limit', `You can select up to ${MAX_PHASE1_INTENTS}.`);
+        return;
+      }
+    }
+
+    toggleRelationshipIntent(intentValue);
+  };
+
+  // Phase-2 intent toggle with min/max enforcement
+  const handlePhase2IntentToggle = (intentKey: string) => {
+    const isSelected = privateIntentKeys.includes(intentKey);
+
+    if (isSelected) {
+      // Trying to deselect — enforce minimum
+      if (privateIntentKeys.length <= MIN_PHASE2_INTENTS) {
+        Alert.alert('Selection limit', `Select at least ${MIN_PHASE2_INTENTS}.`);
+        return;
+      }
+    } else {
+      // Trying to select — enforce maximum
+      if (privateIntentKeys.length >= MAX_PHASE2_INTENTS) {
+        Alert.alert('Selection limit', `You can select up to ${MAX_PHASE2_INTENTS}.`);
+        return;
+      }
+    }
+
+    togglePrivateIntentKey(intentKey);
+  };
 
   // Convert km to miles for display
   const initialDistanceMiles = kmToMiles(maxDistance);
@@ -56,6 +171,18 @@ export default function DiscoveryPreferencesScreen() {
 
   const handleSavePreferences = async () => {
     if (!userId || saving) return;
+
+    // Both phases: Enforce minimum "Looking for" selection before saving
+    if (lookingFor.length < MIN_LOOKING_FOR) {
+      Alert.alert('Selection limit', `Select at least ${MIN_LOOKING_FOR} in "Looking for".`);
+      return;
+    }
+
+    // Phase-1: Enforce minimum intent selection before saving
+    if (!isPhase2 && relationshipIntent.length < MIN_PHASE1_INTENTS) {
+      Alert.alert('Selection limit', `Select at least ${MIN_PHASE1_INTENTS}.`);
+      return;
+    }
 
     setSaving(true);
     try {
@@ -112,32 +239,39 @@ export default function DiscoveryPreferencesScreen() {
   };
 
   return (
-    <SafeAreaView style={styles.safeArea} edges={['top']}>
-      <ScrollView style={styles.container} showsVerticalScrollIndicator={false}>
-        <View style={styles.header}>
+    <SafeAreaView style={[styles.safeArea, { backgroundColor: bgColor }]} edges={['top']}>
+      <ScrollView style={[styles.container, { backgroundColor: bgColor }]} showsVerticalScrollIndicator={false}>
+        <View style={[styles.header, isPhase2 && { borderBottomColor: INCOGNITO_COLORS.accent }]}>
           <TouchableOpacity onPress={() => router.back()}>
-            <Ionicons name="arrow-back" size={24} color={COLORS.text} />
+            <Ionicons name="arrow-back" size={24} color={textColor} />
           </TouchableOpacity>
-          <Text style={styles.headerTitle}>Discovery Preferences</Text>
+          <Text style={[styles.headerTitle, { color: textColor }]}>
+            {isPhase2 ? 'Desire Preferences' : 'Discovery Preferences'}
+          </Text>
           <View style={{ width: 24 }} />
         </View>
 
         <View style={styles.content}>
           <View style={styles.inputGroup}>
-            <Text style={styles.label}>Looking for</Text>
+            <Text style={[styles.label, { color: textColor }]}>Looking for</Text>
+            <Text style={[styles.sublabel, { color: textLightColor }]}>
+              {`Select ${MIN_LOOKING_FOR}–${MAX_LOOKING_FOR} (${lookingFor.length} selected)`}
+            </Text>
             <View style={styles.chips}>
               {GENDER_OPTIONS.map((option) => (
                 <TouchableOpacity
                   key={option.value}
                   style={[
                     styles.chip,
-                    lookingFor.includes(option.value as Gender) && styles.chipSelected,
+                    isPhase2 && styles.chipDark,
+                    lookingFor.includes(option.value as Gender) && [styles.chipSelected, { backgroundColor: accentColor, borderColor: accentColor }],
                   ]}
-                  onPress={() => toggleGender(option.value as Gender)}
+                  onPress={() => handleLookingForToggle(option.value as Gender)}
                 >
                   <Text
                     style={[
                       styles.chipText,
+                      { color: isPhase2 ? INCOGNITO_COLORS.text : COLORS.text },
                       lookingFor.includes(option.value as Gender) && styles.chipTextSelected,
                     ]}
                   >
@@ -149,28 +283,86 @@ export default function DiscoveryPreferencesScreen() {
           </View>
 
           <View style={styles.inputGroup}>
-            <Text style={styles.label}>What are you looking for?</Text>
-            <Text style={styles.sublabel}>Select one (tap again to clear)</Text>
+            <Text style={[styles.label, { color: textColor }]}>Orientation</Text>
+            <Text style={[styles.sublabel, { color: textLightColor }]}>
+              Optional (tap again to clear)
+            </Text>
             <View style={styles.chips}>
-              {PRIVATE_INTENT_CATEGORIES.map((intent) => (
+              {ORIENTATION_OPTIONS.map((option) => (
+                <TouchableOpacity
+                  key={option.value}
+                  style={[
+                    styles.chip,
+                    isPhase2 && styles.chipDark,
+                    orientation === option.value && [styles.chipSelected, { backgroundColor: accentColor, borderColor: accentColor }],
+                  ]}
+                  onPress={() => toggleOrientation(option.value as Orientation)}
+                >
+                  <Text
+                    style={[
+                      styles.chipText,
+                      { color: isPhase2 ? INCOGNITO_COLORS.text : COLORS.text },
+                      orientation === option.value && styles.chipTextSelected,
+                    ]}
+                  >
+                    {option.label}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+          </View>
+
+          <View style={styles.inputGroup}>
+            <Text style={[styles.label, { color: textColor }]}>What are you looking for?</Text>
+            <Text style={[styles.sublabel, { color: textLightColor }]}>
+              {isPhase2
+                ? `Select ${MIN_PHASE2_INTENTS}–${MAX_PHASE2_INTENTS} (${privateIntentKeys.length} selected)`
+                : `Select ${MIN_PHASE1_INTENTS}–${MAX_PHASE1_INTENTS} (${relationshipIntent.length} selected)`}
+            </Text>
+            <View style={styles.chips}>
+              {/* Phase 1: Multi-select relationship intents (min 1, max 3) */}
+              {!isPhase2 && RELATIONSHIP_INTENTS.map((intent) => (
+                <TouchableOpacity
+                  key={intent.value}
+                  style={[
+                    styles.chip,
+                    relationshipIntent.includes(intent.value) && styles.chipSelected,
+                  ]}
+                  onPress={() => handlePhase1IntentToggle(intent.value)}
+                >
+                  <Text style={styles.chipEmoji}>{intent.emoji}</Text>
+                  <Text
+                    style={[
+                      styles.chipText,
+                      relationshipIntent.includes(intent.value) && styles.chipTextSelected,
+                    ]}
+                  >
+                    {intent.label}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+              {/* Phase 2: Multi-select private intents (min 1, max 5) */}
+              {isPhase2 && PRIVATE_INTENT_CATEGORIES.map((intent) => (
                 <TouchableOpacity
                   key={intent.key}
                   style={[
                     styles.chip,
-                    privateIntentKey === intent.key && styles.chipSelected,
+                    styles.chipDark,
+                    privateIntentKeys.includes(intent.key) && [styles.chipSelected, { backgroundColor: accentColor, borderColor: accentColor }],
                   ]}
-                  onPress={() => togglePrivateIntentKey(intent.key)}
+                  onPress={() => handlePhase2IntentToggle(intent.key)}
                 >
                   <Ionicons
                     name={intent.icon as any}
                     size={14}
-                    color={privateIntentKey === intent.key ? COLORS.white : COLORS.textLight}
+                    color={privateIntentKeys.includes(intent.key) ? COLORS.white : INCOGNITO_COLORS.textLight}
                     style={styles.chipIcon}
                   />
                   <Text
                     style={[
                       styles.chipText,
-                      privateIntentKey === intent.key && styles.chipTextSelected,
+                      { color: INCOGNITO_COLORS.text },
+                      privateIntentKeys.includes(intent.key) && styles.chipTextSelected,
                     ]}
                   >
                     {intent.label}
@@ -181,8 +373,8 @@ export default function DiscoveryPreferencesScreen() {
           </View>
 
           <View style={styles.inputGroup}>
-            <Text style={styles.label}>Age Range</Text>
-            <Text style={styles.sublabel}>{MIN_AGE} to {MAX_AGE} years</Text>
+            <Text style={[styles.label, { color: textColor }]}>Age Range</Text>
+            <Text style={[styles.sublabel, { color: textLightColor }]}>{MIN_AGE} to {MAX_AGE} years</Text>
             <View style={styles.ageRow}>
               <Input
                 placeholder={`Min (${MIN_AGE})`}
@@ -191,7 +383,7 @@ export default function DiscoveryPreferencesScreen() {
                 keyboardType="numeric"
                 style={styles.ageInput}
               />
-              <Text style={styles.ageSeparator}>to</Text>
+              <Text style={[styles.ageSeparator, { color: textLightColor }]}>to</Text>
               <Input
                 placeholder={`Max (${MAX_AGE})`}
                 value={localMaxAge}
@@ -203,8 +395,8 @@ export default function DiscoveryPreferencesScreen() {
           </View>
 
           <View style={styles.inputGroup}>
-            <Text style={styles.label}>Maximum Distance</Text>
-            <Text style={styles.sublabel}>Up to {MAX_DISTANCE_MILES} miles</Text>
+            <Text style={[styles.label, { color: textColor }]}>Maximum Distance</Text>
+            <Text style={[styles.sublabel, { color: textLightColor }]}>Up to {MAX_DISTANCE_MILES} miles</Text>
             <Input
               placeholder="Distance in miles"
               value={localMaxDistanceMiles}
@@ -283,7 +475,15 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: COLORS.border,
   },
+  chipDark: {
+    backgroundColor: INCOGNITO_COLORS.surface,
+    borderColor: INCOGNITO_COLORS.accent,
+  },
   chipIcon: {
+    marginRight: 6,
+  },
+  chipEmoji: {
+    fontSize: 14,
     marginRight: 6,
   },
   chipSelected: {

@@ -181,7 +181,13 @@ export default function ChatsScreen() {
                     styles.chatAvatarRing,
                     isSuperLike && { borderColor: COLORS.superLike, borderWidth: 2.5 }
                   ]}>
-                    <Image source={{ uri: convo.participantPhotoUrl }} style={styles.chatAvatar} blurRadius={10} />
+                    {convo.participantPhotoUrl ? (
+                      <Image source={{ uri: convo.participantPhotoUrl }} style={styles.chatAvatar} blurRadius={10} />
+                    ) : (
+                      <View style={[styles.chatAvatar, styles.placeholderChatAvatar]}>
+                        <Text style={styles.chatAvatarInitial}>{convo.participantName?.[0] || '?'}</Text>
+                      </View>
+                    )}
                   </View>
                   {isSuperLike ? (
                     <View style={styles.chatSuperLikeBadge}>
@@ -354,6 +360,8 @@ const styles = StyleSheet.create({
     alignItems: 'center', justifyContent: 'center',
   },
   chatAvatar: { width: 46, height: 46, borderRadius: 23, backgroundColor: C.accent },
+  placeholderChatAvatar: { alignItems: 'center', justifyContent: 'center' },
+  chatAvatarInitial: { fontSize: 18, fontWeight: '600', color: C.text },
   chatSuperLikeBadge: {
     position: 'absolute', bottom: -2, right: -2, width: 18, height: 18,
     borderRadius: 9, alignItems: 'center', justifyContent: 'center',

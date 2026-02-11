@@ -7,3 +7,4 @@ export { ProtectedMediaOptionsSheet } from './ProtectedMediaOptionsSheet';
 export { SystemMessage } from './SystemMessage';
 export { ReportModal } from './ReportModal';
 export { BottleSpinGame } from './BottleSpinGame';
+export { VoiceMessageBubble } from './VoiceMessageBubble';

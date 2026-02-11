@@ -657,6 +657,9 @@ export default defineSchema({
     .index('by_user', ['userId']),
 
   // Private Profiles table (Face 2 / Private Mode)
+  // NOTE: Phase-2 profile is stored SEPARATELY from Phase-1.
+  // Only minimal data is imported from Phase-1 during setup (name, age, hobbies, photos, verification).
+  // After setup, Phase-2 screens read ONLY from this table, not Phase-1 data.
   userPrivateProfiles: defineTable({
     userId: v.id('users'),
     isPrivateEnabled: v.boolean(),
@@ -675,6 +678,9 @@ export default defineSchema({
     gender: v.string(),
     revealPolicy: v.optional(v.union(v.literal('mutual_only'), v.literal('request_based'))),
     isSetupComplete: v.boolean(),
+    // Phase-1 imported fields (read-only after import, stored in Phase-2 for isolation)
+    hobbies: v.optional(v.array(v.string())),
+    isVerified: v.optional(v.boolean()),
     createdAt: v.number(),
     updatedAt: v.number(),
   })

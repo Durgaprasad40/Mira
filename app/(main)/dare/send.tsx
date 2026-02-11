@@ -69,6 +69,19 @@ export default function SendDareScreen() {
 
   const sendDare = useMutation(api.dares.sendDare);
 
+  // Guard: require userId param
+  if (!userId) {
+    return (
+      <View style={[styles.container, styles.errorContainer]}>
+        <Ionicons name="alert-circle-outline" size={48} color={COLORS.textMuted} />
+        <Text style={styles.errorText}>User not found</Text>
+        <TouchableOpacity style={styles.backButton} onPress={() => router.back()}>
+          <Text style={styles.backButtonText}>Go Back</Text>
+        </TouchableOpacity>
+      </View>
+    );
+  }
+
   const handleSendDare = async (dareText: string) => {
     if (!currentUserId || !userId) return;
 
@@ -258,5 +271,27 @@ const styles = StyleSheet.create({
   },
   sendButton: {
     marginTop: 8,
+  },
+  errorContainer: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 24,
+  },
+  errorText: {
+    fontSize: 16,
+    color: COLORS.textMuted,
+    marginTop: 12,
+    marginBottom: 20,
+  },
+  backButton: {
+    paddingHorizontal: 24,
+    paddingVertical: 12,
+    backgroundColor: COLORS.primary,
+    borderRadius: 8,
+  },
+  backButtonText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: COLORS.white,
   },
 });

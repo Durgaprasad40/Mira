@@ -1,13 +1,16 @@
 /**
  * Phase 2 Onboarding - Step 2: Photo Selection (9-slot grid)
  *
- * Shows a 3x3 grid prefilled with Phase 1 photos. User can toggle selection
- * and upload new photos to empty slots. Must select at least 2 to continue.
+ * Shows a 3x3 grid with:
+ * - Pre-selected Phase-1 photos (imported from terms screen, max 3)
+ * - Option to upload new photos from camera roll
+ * - Must have at least 2 photos total to continue
  *
  * IMPORTANT:
  * - Owner always sees photos CLEAR (no blur applied here)
  * - blurMyPhoto toggle stores preference (blur applied when OTHERS view)
  * - Demo mode never calls Convex
+ * - Phase-1 imports are limited to MAX_PHASE1_PHOTO_IMPORTS (3)
  */
 import React, { useState, useMemo, useCallback, useEffect, useRef } from 'react';
 import {
@@ -27,7 +30,7 @@ import { Ionicons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
 import { Paths, File as ExpoFile, Directory } from 'expo-file-system';
 import { INCOGNITO_COLORS } from '@/lib/constants';
-import { usePrivateProfileStore, selectCanContinuePhotos } from '@/stores/privateProfileStore';
+import { usePrivateProfileStore, selectCanContinuePhotos, MAX_PHASE1_PHOTO_IMPORTS } from '@/stores/privateProfileStore';
 
 // Permanent storage directory name for private profile photos
 const PRIVATE_PHOTOS_DIR_NAME = 'private_photos';
@@ -127,6 +130,7 @@ interface PhotoCandidate {
   id: string;
   uri: string;
   source: 'phase1' | 'uploaded';
+  isImported: boolean; // True if this was imported from Phase-1
 }
 
 export default function Phase2PhotoSelect() {
@@ -154,9 +158,9 @@ export default function Phase2PhotoSelect() {
   const [isImporting, setIsImporting] = useState(true);
 
   /**
-   * Auto-select Phase-1 photos on mount
-   * Phase-1 data is already imported by the terms screen (index.tsx)
-   * This effect just auto-selects photos from the already-imported phase1PhotoUrls
+   * Photo initialization on mount
+   * Photos are pre-selected by the terms screen (index.tsx) from Phase-1
+   * This effect just marks initialization as complete
    */
   useEffect(() => {
     // Skip if already processed
@@ -165,31 +169,26 @@ export default function Phase2PhotoSelect() {
       return;
     }
 
-    // Get valid Phase-1 photos from store (already imported by terms screen)
-    const safePhase1Photos = Array.isArray(phase1PhotoUrls) ? phase1PhotoUrls : [];
-    const validUrls = safePhase1Photos.filter(isValidPhotoUrl);
+    // Photos are already selected by the terms screen
+    // Just log the current state and mark as ready
+    const currentSelectedCount = Array.isArray(selectedPhotoUrls) ? selectedPhotoUrls.length : 0;
 
     if (__DEV__) {
-      console.log('[Phase2PhotoSelect] Phase-1 photos from store:', {
-        total: safePhase1Photos.length,
-        valid: validUrls.length,
+      console.log('[Phase2PhotoSelect] Photos from terms screen:', {
+        selectedCount: currentSelectedCount,
+        phase1PhotosAvailable: phase1PhotoUrls?.length || 0,
+        maxPhase1Imports: MAX_PHASE1_PHOTO_IMPORTS,
       });
-    }
-
-    // Auto-select all Phase-1 photos initially if none selected
-    const currentSelectedCount = Array.isArray(selectedPhotoUrls) ? selectedPhotoUrls.length : 0;
-    if (currentSelectedCount === 0 && validUrls.length > 0) {
-      setSelectedPhotos([], validUrls);
     }
 
     hasImportedRef.current = true;
     setIsImporting(false);
-  }, [phase1PhotoUrls, selectedPhotoUrls, setSelectedPhotos]);
+  }, [phase1PhotoUrls, selectedPhotoUrls]);
 
   /**
-   * Build candidate photos list: Phase 1 photos + uploaded photos
-   * - Filter out invalid URLs
-   * - Filter out failed images
+   * Build candidate photos list: selected photos + uploaded photos
+   * - Selected photos may include Phase-1 imports (marked with isImported=true)
+   * - Filter out invalid URLs and failed images
    * - Deduplicate
    * - NEVER return blank entries
    */
@@ -198,22 +197,28 @@ export default function Phase2PhotoSelect() {
     const seen = new Set<string>();
 
     // DEFENSIVE: Ensure arrays are iterable (may be null/undefined after hydration)
+    const safeSelectedPhotos = Array.isArray(selectedPhotoUrls) ? selectedPhotoUrls : [];
     const safePhase1Photos = Array.isArray(phase1PhotoUrls) ? phase1PhotoUrls : [];
     const safeUploadedPhotos = Array.isArray(uploadedPhotos) ? uploadedPhotos : [];
 
-    // First, add Phase 1 photos
-    for (const url of safePhase1Photos) {
+    // Create a set of Phase-1 URLs to identify imported photos
+    const phase1UrlSet = new Set(safePhase1Photos.filter(isValidPhotoUrl));
+
+    // First, add already-selected photos (from terms screen import)
+    for (const url of safeSelectedPhotos) {
       if (isValidPhotoUrl(url) && !seen.has(url) && !failedImages.has(url)) {
         seen.add(url);
+        const isFromPhase1 = phase1UrlSet.has(url);
         result.push({
-          id: `p1-${result.length}`,
+          id: `sel-${result.length}`,
           uri: url,
-          source: 'phase1',
+          source: isFromPhase1 ? 'phase1' : 'uploaded',
+          isImported: isFromPhase1,
         });
       }
     }
 
-    // Then, add uploaded photos
+    // Then, add newly uploaded photos (not already selected)
     for (const url of safeUploadedPhotos) {
       if (isValidPhotoUrl(url) && !seen.has(url) && !failedImages.has(url)) {
         seen.add(url);
@@ -221,21 +226,23 @@ export default function Phase2PhotoSelect() {
           id: `up-${result.length}`,
           uri: url,
           source: 'uploaded',
+          isImported: false,
         });
       }
     }
 
     if (__DEV__) {
       console.log('[Phase2PhotoSelect] Candidates computed:', {
-        phase1Count: safePhase1Photos.length,
+        selectedCount: safeSelectedPhotos.length,
         uploadedCount: safeUploadedPhotos.length,
         validCandidates: result.length,
+        importedFromPhase1: result.filter(c => c.isImported).length,
         failedCount: failedImages.size,
       });
     }
 
     return result.slice(0, GRID_SIZE);
-  }, [phase1PhotoUrls, uploadedPhotos, failedImages]);
+  }, [selectedPhotoUrls, phase1PhotoUrls, uploadedPhotos, failedImages]);
 
   // Selected URIs as a Set for O(1) lookup (defensive: ensure array)
   const safeSelectedUrls = Array.isArray(selectedPhotoUrls) ? selectedPhotoUrls : [];
@@ -372,6 +379,12 @@ export default function Phase2PhotoSelect() {
         {isSelected && (
           <View style={styles.checkBadge}>
             <Ionicons name="checkmark" size={14} color="#FFFFFF" />
+          </View>
+        )}
+        {/* Show "Imported" badge for Phase-1 photos */}
+        {candidate.isImported && (
+          <View style={styles.importedBadge}>
+            <Text style={styles.importedBadgeText}>P1</Text>
           </View>
         )}
       </TouchableOpacity>
@@ -591,6 +604,20 @@ const styles = StyleSheet.create({
     backgroundColor: C.primary,
     alignItems: 'center',
     justifyContent: 'center',
+  },
+  importedBadge: {
+    position: 'absolute',
+    bottom: 6,
+    left: 6,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+    backgroundColor: 'rgba(0,0,0,0.6)',
+  },
+  importedBadgeText: {
+    fontSize: 9,
+    fontWeight: '600',
+    color: '#FFFFFF',
   },
   uploadText: {
     fontSize: 10,

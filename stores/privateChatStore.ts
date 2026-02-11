@@ -52,6 +52,8 @@ interface PrivateChatState {
   createConversation: (convo: IncognitoConversation) => void;
   /** Mark a conversation as read (clears unread count) */
   markAsRead: (conversationId: string) => void;
+  /** Delete a single message by ID */
+  deleteMessage: (conversationId: string, messageId: string) => void;
   /** Remove a conversation and its messages (for unmatch/uncrush) */
   removeConversation: (conversationId: string) => void;
   /** Remove a conversation by participant ID (for block/unmatch) */
@@ -173,6 +175,14 @@ export const usePrivateChatStore = create<PrivateChatState>()(
         c.id === conversationId ? { ...c, unreadCount: 0 } : c
       ),
     })),
+
+  deleteMessage: (conversationId, messageId) =>
+    set((s) => {
+      const msgs = s.messages[conversationId];
+      if (!msgs) return s;
+      const filtered = msgs.filter((m) => m.id !== messageId);
+      return { messages: { ...s.messages, [conversationId]: filtered } };
+    }),
 
   removeConversation: (conversationId) =>
     set((s) => {

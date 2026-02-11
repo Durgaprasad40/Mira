@@ -11,6 +11,7 @@ import {
   LayoutChangeEvent,
   NativeSyntheticEvent,
   NativeScrollEvent,
+  Alert,
 } from 'react-native';
 import { Image } from 'expo-image';
 import { FlashList, type FlashListRef } from '@shopify/flash-list';
@@ -29,6 +30,8 @@ import { Phase2ProtectedMediaViewer } from '@/components/private/Phase2Protected
 import { DEMO_INCOGNITO_PROFILES } from '@/lib/demoData';
 import { useDemoStore } from '@/stores/demoStore';
 import { trackEvent } from '@/lib/analytics';
+import { useVoiceRecorder, type VoiceRecorderResult } from '@/hooks/useVoiceRecorder';
+import { VoiceMessageBubble } from '@/components/chat/VoiceMessageBubble';
 import type { IncognitoMessage } from '@/types';
 
 /** Look up Phase-2 intent label for a participant (checks both demoStore and DEMO_INCOGNITO_PROFILES) */
@@ -81,6 +84,7 @@ export default function PrivateChatScreen() {
   const conversations = usePrivateChatStore((s) => s.conversations);
   const storeMessages = usePrivateChatStore((s) => s.messages);
   const addMessage = usePrivateChatStore((s) => s.addMessage);
+  const deleteMessage = usePrivateChatStore((s) => s.deleteMessage);
   const blockUser = usePrivateChatStore((s) => s.blockUser);
   const pruneDeletedMessages = usePrivateChatStore((s) => s.pruneDeletedMessages);
 
@@ -112,6 +116,51 @@ export default function PrivateChatScreen() {
   const [text, setText] = useState('');
   const [reportVisible, setReportVisible] = useState(false);
   const [keyboardVisible, setKeyboardVisible] = useState(false);
+
+  // Voice recording
+  const handleRecordingComplete = useCallback((result: VoiceRecorderResult) => {
+    if (!id) return;
+    const newMsg: IncognitoMessage = {
+      id: `im_voice_${Date.now()}`,
+      conversationId: id,
+      senderId: 'me',
+      content: 'Voice message',
+      type: 'voice',
+      audioUri: result.audioUri,
+      durationMs: result.durationMs,
+      createdAt: Date.now(),
+      isRead: false,
+    };
+    addMessage(id, newMsg);
+  }, [id, addMessage]);
+
+  const handleRecordingError = useCallback((message: string) => {
+    Alert.alert('Recording Error', message);
+  }, []);
+
+  const {
+    isRecording,
+    elapsedMs,
+    maxDurationMs,
+    toggleRecording,
+  } = useVoiceRecorder({
+    onRecordingComplete: handleRecordingComplete,
+    onError: handleRecordingError,
+  });
+
+  // Format elapsed time as 0:xx
+  const formatRecordingTime = (ms: number) => {
+    const totalSec = Math.floor(ms / 1000);
+    const min = Math.floor(totalSec / 60);
+    const sec = totalSec % 60;
+    return `${min}:${sec.toString().padStart(2, '0')}`;
+  };
+
+  // Delete voice message handler
+  const handleDeleteVoiceMessage = useCallback((messageId: string) => {
+    if (!id) return;
+    deleteMessage(id, messageId);
+  }, [id, deleteMessage]);
 
   // Camera/gallery state for secure photos
   const [showCameraSheet, setShowCameraSheet] = useState(false);
@@ -296,6 +345,30 @@ export default function PrivateChatScreen() {
       return (
         <View style={styles.systemMsgRow}>
           <Text style={styles.systemMsgText}>{item.content}</Text>
+        </View>
+      );
+    }
+
+    // Voice message
+    if (item.type === 'voice' && item.audioUri) {
+      return (
+        <View style={[styles.msgRow, isOwn && styles.msgRowOwn]}>
+          {!isOwn && (
+            <Image
+              source={{ uri: conversation.participantPhotoUrl }}
+              style={styles.msgAvatar}
+              blurRadius={10}
+            />
+          )}
+          <VoiceMessageBubble
+            messageId={item.id}
+            audioUri={item.audioUri}
+            durationMs={item.durationMs || 0}
+            isOwn={isOwn}
+            timestamp={item.createdAt}
+            onDelete={isOwn ? () => handleDeleteVoiceMessage(item.id) : undefined}
+            darkTheme
+          />
         </View>
       );
     }
@@ -490,12 +563,34 @@ export default function PrivateChatScreen() {
 
         {/* ToD inline banner removed — ToD accessed via header icon only */}
 
+        {/* Recording indicator */}
+        {isRecording && (
+          <View style={styles.recordingBanner}>
+            <View style={styles.recordingDot} />
+            <Text style={styles.recordingText}>
+              Recording... {formatRecordingTime(elapsedMs)} / {formatRecordingTime(maxDurationMs)}
+            </Text>
+          </View>
+        )}
+
         {/* Input — sits at the bottom of KAV, pushed up by keyboard */}
         <View style={[styles.inputBar, { paddingBottom: keyboardVisible ? 0 : Math.max(insets.bottom, 8) }]}>
+          {/* Mic button - LEFT side of TextInput */}
+          <TouchableOpacity
+            style={[styles.micButton, isRecording && styles.micButtonRecording]}
+            onPress={toggleRecording}
+          >
+            <Ionicons
+              name={isRecording ? 'stop' : 'mic'}
+              size={22}
+              color={isRecording ? '#FF4444' : C.primary}
+            />
+          </TouchableOpacity>
+
           <TextInput
-            style={styles.textInput}
-            placeholder="Type a message..."
-            placeholderTextColor={C.textLight}
+            style={[styles.textInput, isRecording && styles.textInputRecording]}
+            placeholder={isRecording ? 'Recording voice message...' : 'Type a message...'}
+            placeholderTextColor={isRecording ? '#FF4444' : C.textLight}
             value={text}
             onChangeText={setText}
             multiline
@@ -503,18 +598,23 @@ export default function PrivateChatScreen() {
             textAlignVertical="top"
             blurOnSubmit={false}
             maxLength={1000}
+            editable={!isRecording}
           />
           {/* Camera button for secure photos */}
-          <TouchableOpacity style={styles.cameraButton} onPress={handleSendImage}>
-            <Ionicons name="camera" size={22} color={C.primary} />
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={[styles.sendButton, !text.trim() && styles.sendButtonDisabled]}
-            onPress={handleSend}
-            disabled={!text.trim()}
-          >
-            <Ionicons name="send" size={20} color={text.trim() ? '#FFFFFF' : C.textLight} />
-          </TouchableOpacity>
+          {!isRecording && (
+            <TouchableOpacity style={styles.cameraButton} onPress={handleSendImage}>
+              <Ionicons name="camera" size={22} color={C.primary} />
+            </TouchableOpacity>
+          )}
+          {!isRecording && (
+            <TouchableOpacity
+              style={[styles.sendButton, !text.trim() && styles.sendButtonDisabled]}
+              onPress={handleSend}
+              disabled={!text.trim()}
+            >
+              <Ionicons name="send" size={20} color={text.trim() ? '#FFFFFF' : C.textLight} />
+            </TouchableOpacity>
+          )}
         </View>
       </KeyboardAvoidingView>
 
@@ -704,13 +804,51 @@ const styles = StyleSheet.create({
   msgTimeOwn: { color: 'rgba(255,255,255,0.7)' },
   maskedNotice: { fontSize: 10, color: C.textLight, fontStyle: 'italic', marginTop: 2 },
 
+  // Recording indicator
+  recordingBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: '#FF444420',
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderTopWidth: 1,
+    borderTopColor: C.surface,
+  },
+  recordingDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: '#FF4444',
+    marginRight: 8,
+  },
+  recordingText: {
+    fontSize: 13,
+    color: '#FF4444',
+    fontWeight: '600',
+  },
+
   inputBar: {
     flexDirection: 'row', alignItems: 'flex-end', paddingHorizontal: 12, paddingTop: 8,
     borderTopWidth: 1, borderTopColor: C.surface, gap: 8,
   },
+  micButton: {
+    padding: 8,
+    alignItems: 'center' as const,
+    justifyContent: 'center' as const,
+    minWidth: 40,
+    minHeight: 40,
+  },
+  micButtonRecording: {
+    backgroundColor: '#FF444420',
+    borderRadius: 20,
+  },
   textInput: {
     flex: 1, backgroundColor: C.surface, borderRadius: 20, paddingHorizontal: 16,
     paddingVertical: 10, fontSize: 14, color: C.text, maxHeight: 100,
+  },
+  textInputRecording: {
+    borderWidth: 1,
+    borderColor: '#FF444440',
   },
   cameraButton: {
     padding: 8, marginRight: 4,

@@ -24,7 +24,7 @@ import { useFilterStore } from "@/stores/filterStore";
 import { ProfileCard, SwipeOverlay } from "@/components/cards";
 import { isDemoMode } from "@/hooks/useConvex";
 import { useNotifications } from "@/hooks/useNotifications";
-import { DEMO_PROFILES, getDemoCurrentUser } from "@/lib/demoData";
+import { DEMO_PROFILES, getDemoCurrentUser, DEMO_INCOGNITO_PROFILES } from "@/lib/demoData";
 import { useDemoStore } from "@/stores/demoStore";
 import { router } from "expo-router";
 import { useIsFocused } from "@react-navigation/native";
@@ -112,8 +112,8 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   const [index, setIndex] = useState(0);
   const [retryKey, setRetryKey] = useState(0); // For LoadingGuard retry
 
-  // Phase-2 only: Intent filter from store (syncs with Discovery Preferences)
-  const { privateIntentKey: intentFilter, togglePrivateIntentKey, setPrivateIntentKey } = useFilterStore();
+  // Phase-2 only: Intent filters from store (syncs with Discovery Preferences)
+  const { privateIntentKeys: intentFilters, togglePrivateIntentKey, setPrivateIntentKeys } = useFilterStore();
 
   // Daily limits — individual selectors to avoid full re-render on AsyncStorage hydration
   const likesRemaining = useDiscoverStore((s) => s.likesRemaining);
@@ -211,7 +211,37 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       return isDemoMode ? mapped : rankProfiles(mapped);
     }
     if (isDemoMode) {
-      // Demo mode: return profiles in their original demoData.ts order (no ranking)
+      // Phase-2 demo mode: use DEMO_INCOGNITO_PROFILES (with privateIntentKeys)
+      if (isPhase2) {
+        const DEFAULT_INTENT_KEYS = ['go_with_the_flow'];
+        return DEMO_INCOGNITO_PROFILES
+          .filter((p) => !excludedSet.has(p.id))
+          .map((p) => {
+            // Resolve intent keys: privateIntentKeys > privateIntentKey > default
+            const intentKeys = p.privateIntentKeys ??
+              (p.privateIntentKey && p.privateIntentKey !== 'undefined' ? [p.privateIntentKey] : DEFAULT_INTENT_KEYS);
+            // DEV assertion: warn if profile has no valid intent keys
+            if (__DEV__ && (!intentKeys || intentKeys.length === 0)) {
+              console.warn('[demo] Missing privateIntentKeys for', p.id);
+            }
+            return toProfileData({
+              _id: p.id,
+              name: p.username,
+              age: p.age,
+              bio: p.bio,
+              city: p.city,
+              distance: p.distance,
+              isVerified: false,
+              photos: (p.photos ?? [p.photoUrl]).map(url => ({ url })),
+              activities: p.interests ?? p.hobbies ?? [],
+              privateIntentKeys: intentKeys,
+              privateIntentKey: intentKeys[0],
+              lastActive: Date.now() - 2 * 60 * 60 * 1000,
+              createdAt: Date.now() - 60 * 24 * 60 * 60 * 1000,
+            });
+          });
+      }
+      // Phase-1 demo mode: use demo.profiles from demoStore
       return demo.profiles
         .filter((p) => !excludedSet.has(p._id))
         .map((p) => toProfileData({
@@ -221,7 +251,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
         }));
     }
     return rankProfiles(profilesSafe.map(toProfileData));
-  }, [externalProfiles, profilesSafe, demo.profiles, excludedSet]);
+  }, [externalProfiles, profilesSafe, demo.profiles, excludedSet, isPhase2]);
 
   // Drop profiles with no valid primary photo — prevents blank Discover cards
   const validProfiles = useMemo(
@@ -236,22 +266,31 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   }
   const profiles = validProfiles.length > 0 ? validProfiles : stableProfilesRef.current;
 
-  // Phase-2 only: Filter profiles by intent category
+  // Phase-2 only: Filter profiles by intent categories (any match)
   const filteredProfiles = useMemo(() => {
-    if (!isPhase2 || !intentFilter) return profiles;
-    return profiles.filter((p: any) => p.privateIntentKey === intentFilter);
-  }, [profiles, isPhase2, intentFilter]);
+    if (!isPhase2 || intentFilters.length === 0) return profiles;
+    return profiles.filter((p) => {
+      // Support: privateIntentKeys (new) > intentKeys > privateIntentKey (legacy)
+      const profileKeys: string[] =
+        p.privateIntentKeys ??
+        (p as any).intentKeys ??
+        (p.privateIntentKey ? [p.privateIntentKey] : []);
+      // Match if any profile intent is in the filter set
+      return profileKeys.some(k => intentFilters.includes(k));
+    });
+  }, [profiles, isPhase2, intentFilters]);
 
   // Reset index when filter changes (always show first matching profile)
-  const prevFilterRef = useRef<string | null>(null);
+  const prevFilterRef = useRef<string>(JSON.stringify([]));
   useEffect(() => {
-    if (isPhase2 && prevFilterRef.current !== intentFilter) {
+    const filterKey = JSON.stringify(intentFilters);
+    if (isPhase2 && prevFilterRef.current !== filterKey) {
       setIndex(0);
-      // Track Phase-2 intent filter selection
-      trackEvent({ name: 'phase2_intent_filter_selected', intentKey: intentFilter ?? 'all' });
-      prevFilterRef.current = intentFilter;
+      // Track Phase-2 intent filter selection (use first key for backward compat)
+      trackEvent({ name: 'phase2_intent_filter_selected', intentKey: intentFilters[0] ?? 'all' });
+      prevFilterRef.current = filterKey;
     }
-  }, [intentFilter, isPhase2]);
+  }, [intentFilters, isPhase2]);
 
   // ── Demo auto-replenish: re-inject profiles when pool is exhausted ──
   // Guard ref prevents the effect from firing twice before the store update
@@ -379,10 +418,16 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
     // Only track once per profile (avoid re-tracking on re-renders)
     if (trackedProfileRef.current === current.id) return;
     trackedProfileRef.current = current.id;
+    // Resolve intent keys: privateIntentKeys > intentKeys > privateIntentKey > default
+    const DEFAULT_INTENT_KEY = 'go_with_the_flow';
+    const intentKeys: string[] =
+      current.privateIntentKeys ??
+      (current as any).intentKeys ??
+      (current.privateIntentKey && current.privateIntentKey !== 'undefined' ? [current.privateIntentKey] : [DEFAULT_INTENT_KEY]);
     trackEvent({
       name: 'phase2_profile_viewed',
       profileId: current.id,
-      privateIntentKey: (current as any).privateIntentKey,
+      privateIntentKey: intentKeys[0] ?? DEFAULT_INTENT_KEY, // Never send undefined
     });
   }, [isPhase2, current?.id]);
 
@@ -402,9 +447,8 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       console.log('[DiscoverCardStack] open full profile', c.id, 'isPhase2=', isPhase2);
     }
     if (isPhase2) {
-      // Phase-2: pass mode and intent key
-      const intentKey = (c as any).privateIntentKey || '';
-      router.push(`/(main)/profile/${c.id}?mode=phase2&intentKey=${intentKey}` as any);
+      // Phase-2: pass mode (intentKeys are read from profile in the detail view)
+      router.push(`/(main)/profile/${c.id}?mode=phase2` as any);
     } else {
       // Phase-1: no params needed
       router.push(`/(main)/profile/${c.id}` as any);
@@ -757,18 +801,20 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   }
 
   // Phase-2: Filter results in no matches
-  if (isPhase2 && intentFilter && filteredProfiles.length === 0) {
-    const filterLabel = PRIVATE_INTENT_CATEGORIES.find((c) => c.key === intentFilter)?.label ?? intentFilter;
+  if (isPhase2 && intentFilters.length > 0 && filteredProfiles.length === 0) {
+    const filterLabels = intentFilters
+      .map(k => PRIVATE_INTENT_CATEGORIES.find((c) => c.key === k)?.label ?? k)
+      .join(', ');
     return (
       <View style={[styles.center, dark && { backgroundColor: INCOGNITO_COLORS.background }]}>
         <Text style={styles.emptyEmoji}>🔍</Text>
-        <Text style={[styles.emptyTitle, dark && { color: INCOGNITO_COLORS.text }]}>No "{filterLabel}" profiles</Text>
+        <Text style={[styles.emptyTitle, dark && { color: INCOGNITO_COLORS.text }]}>No matching profiles</Text>
         <Text style={[styles.emptySubtitle, dark && { color: INCOGNITO_COLORS.textLight }]}>
-          Try selecting a different intent or "All" to see everyone.
+          No profiles match "{filterLabels}". Try different intents or clear filters.
         </Text>
         <TouchableOpacity
           style={[styles.resetButton, { marginTop: 24 }]}
-          onPress={() => setPrivateIntentKey(null)}
+          onPress={() => setPrivateIntentKeys([])}
         >
           <Ionicons name="funnel-outline" size={18} color="#FFFFFF" style={{ marginRight: 8 }} />
           <Text style={styles.resetButtonText}>Show All</Text>
@@ -813,7 +859,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       <View style={[styles.container, dark && { backgroundColor: INCOGNITO_COLORS.background }]}>
         {/* Header */}
         <View style={[styles.header, { paddingTop: insets.top, height: insets.top + HEADER_H }, dark && { backgroundColor: INCOGNITO_COLORS.background }]}>
-          <TouchableOpacity style={styles.headerBtn} onPress={() => router.push("/(main)/discovery-preferences" as any)}>
+          <TouchableOpacity style={styles.headerBtn} onPress={() => router.push({ pathname: "/(main)/discovery-preferences", params: { mode: isPhase2 ? 'phase2' : 'phase1' } } as any)}>
             <Ionicons name="options-outline" size={22} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
           </TouchableOpacity>
           <Text style={[styles.headerLogo, dark && { color: INCOGNITO_COLORS.primary }]}>mira</Text>
@@ -862,7 +908,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       {/* Compact Header */}
       {!hideHeader && (
         <View style={[styles.header, { paddingTop: insets.top, height: insets.top + HEADER_H }, dark && { backgroundColor: INCOGNITO_COLORS.background }]}>
-          <TouchableOpacity style={styles.headerBtn} onPress={() => router.push("/(main)/discovery-preferences" as any)}>
+          <TouchableOpacity style={styles.headerBtn} onPress={() => router.push({ pathname: "/(main)/discovery-preferences", params: { mode: isPhase2 ? 'phase2' : 'phase1' } } as any)}>
             <Ionicons name="options-outline" size={22} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
           </TouchableOpacity>
           <Text style={[styles.headerLogo, dark && { color: INCOGNITO_COLORS.primary }]}>mira</Text>
@@ -909,7 +955,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
               trustBadges={nextBadges}
               profilePrompt={next.profilePrompts?.[0]}
               theme={isPhase2 ? "dark" : "light"}
-              privateIntentKey={(next as any).privateIntentKey}
+              privateIntentKeys={next.privateIntentKeys ?? (next as any).intentKeys ?? (next.privateIntentKey ? [next.privateIntentKey] : [])}
             />
           </Animated.View>
         )}
@@ -929,7 +975,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
               showCarousel
               onOpenProfile={openProfileCb}
               theme={isPhase2 ? "dark" : "light"}
-              privateIntentKey={(current as any).privateIntentKey}
+              privateIntentKeys={current.privateIntentKeys ?? (current as any).intentKeys ?? (current.privateIntentKey ? [current.privateIntentKey] : [])}
             />
             <SwipeOverlay direction={overlayDirection} opacity={overlayOpacityAnim} />
           </Animated.View>

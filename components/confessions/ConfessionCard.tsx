@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useMemo } from 'react';
 import {
   View,
   Text,
@@ -33,6 +33,8 @@ interface ConfessionCardProps {
   createdAt: number;
   isExpired?: boolean; // true if confession has expired from public feed
   isTaggedForMe?: boolean; // true if current user is tagged in this confession
+  previewUsed?: boolean; // true if one-time profile preview has been used
+  isConnected?: boolean; // true if tagged user has connected (chat created)
   // Tagged user display (privacy-safe)
   taggedUserId?: string;
   authorId?: string;
@@ -43,6 +45,10 @@ interface ConfessionCardProps {
   onToggleEmoji?: (emoji: string) => void; // directly toggle a specific emoji
   onReplyAnonymously?: () => void;
   onReport?: () => void;
+  onViewProfile?: () => void; // one-time profile preview for tagged receivers
+  onLongPress?: () => void; // for author manual delete
+  onTagPress?: () => void; // tap @tag to open profile preview
+  onConnect?: () => void; // tagged user connects to start chat
 }
 
 function getTimeAgo(timestamp: number): string {
@@ -68,6 +74,8 @@ export default function ConfessionCard({
   createdAt,
   isExpired,
   isTaggedForMe,
+  previewUsed,
+  isConnected,
   taggedUserId,
   authorId,
   viewerId,
@@ -77,6 +85,10 @@ export default function ConfessionCard({
   onToggleEmoji,
   onReplyAnonymously,
   onReport,
+  onViewProfile,
+  onLongPress,
+  onTagPress,
+  onConnect,
 }: ConfessionCardProps) {
   // Privacy-safe tag display logic
   const getTagDisplayText = (): string | null => {
@@ -87,18 +99,21 @@ export default function ConfessionCard({
   };
   const tagDisplayText = getTagDisplayText();
   const handleMenu = () => {
-    Alert.alert('Report Confession', 'Are you sure you want to report this confession?', [
-      { text: 'Report', style: 'destructive', onPress: onReport },
-      { text: 'Cancel', style: 'cancel' },
-    ]);
+    // Now handled by parent component via onReport (shows Report/Block menu)
+    onReport?.();
   };
 
   const displayName = isAnonymous ? 'Anonymous' : (authorName || 'Someone');
+
+  // Check if we have a tappable tag to display
+  const hasTag = taggedUserId && taggedUserName;
 
   return (
     <TouchableOpacity
       style={[styles.card, isTaggedForMe && styles.cardHighlighted]}
       onPress={onPress}
+      onLongPress={onLongPress}
+      delayLongPress={700}
       activeOpacity={0.8}
     >
       {/* Author row */}
@@ -134,9 +149,23 @@ export default function ConfessionCard({
         )}
       </View>
 
-      {/* Body */}
+      {/* Body - text with tappable @tag */}
       <Text style={styles.confessionText} numberOfLines={4}>
         {text}
+        {hasTag && (
+          <>
+            {' '}
+            <Text
+              style={styles.tagLink}
+              onPress={(e) => {
+                e.stopPropagation?.();
+                onTagPress?.();
+              }}
+            >
+              @{taggedUserName}
+            </Text>
+          </>
+        )}
       </Text>
 
       {/* Tagged user display (non-clickable, privacy-safe) */}
@@ -146,6 +175,60 @@ export default function ConfessionCard({
           <Text style={styles.taggedLabel}>Confess-to:</Text>
           <Text style={styles.taggedName}>{tagDisplayText}</Text>
         </View>
+      )}
+
+      {/* View Profile button for tagged receivers (one-time use) */}
+      {isTaggedForMe && onViewProfile && (
+        <TouchableOpacity
+          style={[
+            styles.viewProfileButton,
+            previewUsed && styles.viewProfileButtonUsed,
+          ]}
+          onPress={previewUsed ? undefined : onViewProfile}
+          activeOpacity={previewUsed ? 1 : 0.7}
+          disabled={previewUsed}
+        >
+          <Ionicons
+            name={previewUsed ? 'checkmark-circle' : 'eye-outline'}
+            size={14}
+            color={previewUsed ? COLORS.textMuted : COLORS.primary}
+          />
+          <Text
+            style={[
+              styles.viewProfileText,
+              previewUsed && styles.viewProfileTextUsed,
+            ]}
+          >
+            {previewUsed ? 'Profile viewed' : 'View their profile'}
+          </Text>
+        </TouchableOpacity>
+      )}
+
+      {/* Connect button - ONLY for the tagged user */}
+      {isTaggedForMe && onConnect && (
+        <TouchableOpacity
+          style={[
+            styles.connectButton,
+            isConnected && styles.connectButtonConnected,
+          ]}
+          onPress={isConnected ? undefined : onConnect}
+          activeOpacity={isConnected ? 1 : 0.7}
+          disabled={isConnected}
+        >
+          <Ionicons
+            name={isConnected ? 'checkmark-circle' : 'chatbubbles-outline'}
+            size={14}
+            color={isConnected ? COLORS.textMuted : COLORS.white}
+          />
+          <Text
+            style={[
+              styles.connectButtonText,
+              isConnected && styles.connectButtonTextConnected,
+            ]}
+          >
+            {isConnected ? 'Connected' : 'Connect'}
+          </Text>
+        </TouchableOpacity>
       )}
 
       {/* Emoji Reactions */}
@@ -280,6 +363,11 @@ const styles = StyleSheet.create({
     color: COLORS.text,
     marginBottom: 8,
   },
+  tagLink: {
+    color: COLORS.primary,
+    fontWeight: '700',
+    textDecorationLine: 'underline',
+  },
   taggedRow: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -299,6 +387,50 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontWeight: '600',
     color: COLORS.primary,
+  },
+  viewProfileButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    alignSelf: 'flex-start',
+    backgroundColor: 'rgba(255,107,107,0.1)',
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 8,
+    marginBottom: 8,
+  },
+  viewProfileButtonUsed: {
+    backgroundColor: 'rgba(153,153,153,0.1)',
+  },
+  viewProfileText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: COLORS.primary,
+  },
+  viewProfileTextUsed: {
+    color: COLORS.textMuted,
+  },
+  connectButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    alignSelf: 'flex-start',
+    backgroundColor: COLORS.primary,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 8,
+    marginBottom: 8,
+  },
+  connectButtonConnected: {
+    backgroundColor: 'rgba(153,153,153,0.1)',
+  },
+  connectButtonText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: COLORS.white,
+  },
+  connectButtonTextConnected: {
+    color: COLORS.textMuted,
   },
   reactionBarWrap: {
     marginBottom: 6,

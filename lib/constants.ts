@@ -153,11 +153,10 @@ export const IAP_PRODUCTS: IAPProduct[] = [
   { id: 'messages_50', type: 'messages', quantity: 50, price: 350 },
 ];
 
-// Relationship Intent Options (store-safe labels — relationship constructs, not explicit)
+// Relationship Intent Options (Phase-1 ONLY — store-safe labels, no overlap with Phase-2)
 export const RELATIONSHIP_INTENTS: { value: RelationshipIntent; label: string; emoji: string }[] = [
   { value: 'long_term', label: 'Long-term', emoji: '💑' },
   { value: 'short_term', label: 'Casual Dating', emoji: '🎉' },
-  { value: 'fwb', label: 'Non-committal', emoji: '🔥' },
   { value: 'figuring_out', label: 'Open to Exploring', emoji: '🤔' },
   { value: 'short_to_long', label: 'Short to Long', emoji: '📈' },
   { value: 'long_to_short', label: 'Long to Short', emoji: '📉' },
@@ -253,15 +252,20 @@ export const PETS_OPTIONS = [
   { value: 'allergic', label: 'Allergic to pets', emoji: '🤧' },
 ];
 
-// Gender Options
+// Gender Options (required, min 1, max 2)
 export const GENDER_OPTIONS = [
   { value: 'male', label: 'Man' },
   { value: 'female', label: 'Woman' },
   { value: 'non_binary', label: 'Non-binary' },
-  { value: 'lesbian', label: 'Lesbian' },
+];
+
+// Orientation Options (optional, single-select)
+export const ORIENTATION_OPTIONS = [
+  { value: 'straight', label: 'Straight' },
   { value: 'gay', label: 'Gay' },
+  { value: 'lesbian', label: 'Lesbian' },
   { value: 'bisexual', label: 'Bisexual' },
-  { value: 'other', label: 'Prefer not to say' },
+  { value: 'prefer_not_to_say', label: 'Prefer not to say' },
 ];
 
 // Sort Options

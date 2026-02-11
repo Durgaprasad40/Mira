@@ -72,7 +72,9 @@ export default function MatchCelebrationScreen() {
   const otherUser = isDemo ? demoOtherUser : otherUserQuery;
   const demoCurrentUser = isDemo ? getDemoCurrentUser() : null;
   const currentUser = isDemo
-    ? { name: demoCurrentUser!.name, photos: demoCurrentUser!.photos }
+    ? demoCurrentUser
+      ? { name: demoCurrentUser.name, photos: demoCurrentUser.photos }
+      : { name: 'You', photos: [{ url: 'https://via.placeholder.com/400' }] }
     : currentUserQuery;
 
   const ensureConversation = useMutation(api.conversations.getOrCreateForMatch);

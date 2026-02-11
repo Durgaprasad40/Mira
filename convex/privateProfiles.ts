@@ -14,6 +14,7 @@ export const getByUserId = query({
 });
 
 // Create or update private profile
+// NOTE: hobbies and isVerified are imported from Phase-1 during setup and stored here for isolation
 export const upsert = mutation({
   args: {
     userId: v.id('users'),
@@ -33,6 +34,9 @@ export const upsert = mutation({
     gender: v.string(),
     revealPolicy: v.optional(v.union(v.literal('mutual_only'), v.literal('request_based'))),
     isSetupComplete: v.boolean(),
+    // Phase-1 imported fields (stored in Phase-2 for isolation)
+    hobbies: v.optional(v.array(v.string())),
+    isVerified: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
     const existing = await ctx.db

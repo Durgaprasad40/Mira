@@ -34,6 +34,7 @@ import { Ionicons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
 import { isDemoMode } from '@/hooks/useConvex';
 import { useDemoDmStore, DemoDmMessage } from '@/stores/demoDmStore';
+import { VoiceMessageBubble } from '@/components/chat/VoiceMessageBubble';
 import { useDemoStore } from '@/stores/demoStore';
 import { useDemoNotifStore } from '@/hooks/useNotifications';
 import { Toast } from '@/components/ui/Toast';
@@ -109,6 +110,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
   // ── Demo DM store — messages survive navigation & restarts ──
   const seedConversation = useDemoDmStore((s) => s.seedConversation);
   const addDemoMessage = useDemoDmStore((s) => s.addMessage);
+  const deleteDemoMessage = useDemoDmStore((s) => s.deleteMessage);
   const demoConversations = useDemoDmStore((s) => s.conversations);
   const demoMeta = useDemoDmStore((s) => s.meta);
   const demoDraft = useDemoDmStore((s) => conversationId ? s.drafts[conversationId] : undefined);
@@ -393,6 +395,34 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
     }
   };
 
+  // Voice message sending (demo mode only for now)
+  const handleSendVoice = useCallback((audioUri: string, durationMs: number) => {
+    if (!activeConversation || !conversationId) return;
+
+    if (isDemo) {
+      const uniqueId = `dm_voice_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
+      addDemoMessage(conversationId, {
+        _id: uniqueId,
+        content: 'Voice message',
+        type: 'voice',
+        senderId: getDemoUserId(),
+        createdAt: Date.now(),
+        audioUri,
+        durationMs,
+      });
+    }
+    // TODO: Add Convex voice message support when backend is ready
+  }, [isDemo, activeConversation, conversationId, addDemoMessage]);
+
+  // Delete voice message (demo mode only)
+  const handleVoiceDelete = useCallback((messageId: string) => {
+    if (!conversationId) return;
+    if (isDemo) {
+      deleteDemoMessage(conversationId, messageId);
+    }
+    // TODO: Add Convex delete support when backend is ready
+  }, [isDemo, conversationId, deleteDemoMessage]);
+
   const handleSendImage = async () => {
     if (!userId || !activeConversation) return;
 
@@ -574,11 +604,14 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
                 viewedAt: item.viewedAt,
                 systemSubtype: item.systemSubtype,
                 mediaId: item.mediaId,
+                audioUri: item.audioUri,
+                durationMs: item.durationMs,
               }}
               isOwn={item.senderId === (isDemo ? getDemoUserId() : userId)}
               otherUserName={activeConversation.otherUser.name}
               currentUserId={(isDemo ? getDemoUserId() : userId) || undefined}
               onProtectedMediaPress={handleProtectedMediaPress}
+              onVoiceDelete={handleVoiceDelete}
             />
           )}
           ListEmptyComponent={
@@ -605,6 +638,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
           <MessageInput
             onSend={handleSend}
             onSendImage={handleSendImage}
+            onSendVoice={handleSendVoice}
             onSendDare={activeConversation.isPreMatch ? handleSendDare : undefined}
             disabled={isSending || isExpiredChat}
             isPreMatch={activeConversation.isPreMatch}
