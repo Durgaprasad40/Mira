@@ -1,13 +1,16 @@
 /**
  * Phase 2 Onboarding - Step 2: Photo Selection (9-slot grid)
  *
- * Shows a 3x3 grid prefilled with Phase 1 photos. User can toggle selection
- * and upload new photos to empty slots. Must select at least 2 to continue.
+ * Shows a 3x3 grid with:
+ * - Pre-selected Phase-1 photos (imported from terms screen, max 3)
+ * - Option to upload new photos from camera roll
+ * - Must have at least 2 photos total to continue
  *
  * IMPORTANT:
  * - Owner always sees photos CLEAR (no blur applied here)
  * - blurMyPhoto toggle stores preference (blur applied when OTHERS view)
  * - Demo mode never calls Convex
+ * - Phase-1 imports are limited to MAX_PHASE1_PHOTO_IMPORTS (3)
  */
 import React, { useState, useMemo, useCallback, useEffect, useRef } from 'react';
 import {
@@ -25,13 +28,19 @@ import { useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
+import { Paths, File as ExpoFile, Directory } from 'expo-file-system';
 import { INCOGNITO_COLORS } from '@/lib/constants';
-import { usePrivateProfileStore, selectCanContinuePhotos } from '@/stores/privateProfileStore';
-import { isDemoMode } from '@/hooks/useConvex';
-import { getDemoCurrentUser } from '@/lib/demoData';
-import { useQuery } from 'convex/react';
-import { api } from '@/convex/_generated/api';
-import { useAuthStore } from '@/stores/authStore';
+import { usePrivateProfileStore, selectCanContinuePhotos, MAX_PHASE1_PHOTO_IMPORTS } from '@/stores/privateProfileStore';
+
+// Permanent storage directory name for private profile photos
+const PRIVATE_PHOTOS_DIR_NAME = 'private_photos';
+
+/**
+ * Get the private photos directory
+ */
+function getPrivatePhotosDir(): Directory {
+  return new Directory(Paths.document, PRIVATE_PHOTOS_DIR_NAME);
+}
 
 const C = INCOGNITO_COLORS;
 const GRID_SIZE = 9;
@@ -56,36 +65,90 @@ function isValidPhotoUrl(url: unknown): url is string {
   );
 }
 
+/**
+ * Check if a URI is already in permanent storage (documentDirectory)
+ */
+function isInPermanentStorage(uri: string): boolean {
+  return uri.includes(PRIVATE_PHOTOS_DIR_NAME) || uri.includes(Paths.document.uri);
+}
+
+/**
+ * Copy a photo from cache/temporary location to permanent storage
+ * Uses expo-file-system v19 class-based API (Paths, File, Directory)
+ */
+async function copyToPermamentStorage(sourceUri: string, index: number): Promise<string> {
+  // Skip if already in permanent storage or is a remote URL
+  if (isInPermanentStorage(sourceUri) || sourceUri.startsWith('http')) {
+    return sourceUri;
+  }
+
+  try {
+    // Ensure directory exists
+    const privateDir = getPrivatePhotosDir();
+    if (!privateDir.exists) {
+      privateDir.create();
+    }
+
+    // Generate unique filename
+    const timestamp = Date.now();
+    const extension = sourceUri.split('.').pop()?.toLowerCase() || 'jpg';
+    const filename = `photo_${timestamp}_${index}.${extension}`;
+    const destFile = new ExpoFile(privateDir, filename);
+
+    // Check if destination already exists (avoid duplicate copies)
+    if (destFile.exists) {
+      return destFile.uri;
+    }
+
+    // Copy the file
+    const sourceFile = new ExpoFile(sourceUri);
+    sourceFile.copy(destFile);
+
+    return destFile.uri;
+  } catch (error) {
+    if (__DEV__) {
+      console.error('[PhotoSelect] Copy failed:', error);
+    }
+    // Return original URI as fallback (risky but better than nothing)
+    return sourceUri;
+  }
+}
+
+/**
+ * Copy multiple photos to permanent storage
+ */
+async function copyAllToPermanentStorage(uris: string[]): Promise<string[]> {
+  const results: string[] = [];
+  for (let i = 0; i < uris.length; i++) {
+    const newUri = await copyToPermamentStorage(uris[i], i);
+    results.push(newUri);
+  }
+  return results;
+}
+
 interface PhotoCandidate {
   id: string;
   uri: string;
   source: 'phase1' | 'uploaded';
+  isImported: boolean; // True if this was imported from Phase-1
 }
 
 export default function Phase2PhotoSelect() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
-  const userId = useAuthStore((s) => s.userId);
 
-  // Track if we've already imported Phase-1 photos (prevent duplicate imports)
+  // Track if we've already processed Phase-1 photos
   const hasImportedRef = useRef(false);
 
-  // Store state
+  // Store state (Phase-1 photos already imported by terms screen)
   const phase1PhotoUrls = usePrivateProfileStore((s) => s.phase1PhotoUrls);
   const selectedPhotoUrls = usePrivateProfileStore((s) => s.selectedPhotoUrls);
   const blurMyPhoto = usePrivateProfileStore((s) => s.blurMyPhoto);
-  const importPhase1Data = usePrivateProfileStore((s) => s.importPhase1Data);
   const setSelectedPhotos = usePrivateProfileStore((s) => s.setSelectedPhotos);
   const setBlurMyPhoto = usePrivateProfileStore((s) => s.setBlurMyPhoto);
 
   // Use the selector for validation
   const canContinueFromStore = usePrivateProfileStore(selectCanContinuePhotos);
-
-  // Convex query for prod mode (skip in demo mode)
-  const convexUser = useQuery(
-    api.users.getCurrentUser,
-    !isDemoMode && userId ? { userId: userId as any } : 'skip'
-  );
 
   // Local state for uploaded photos (not from Phase 1)
   const [uploadedPhotos, setUploadedPhotos] = useState<string[]>([]);
@@ -95,75 +158,37 @@ export default function Phase2PhotoSelect() {
   const [isImporting, setIsImporting] = useState(true);
 
   /**
-   * CRITICAL: Import Phase-1 photos on mount
-   * - Demo mode: from getDemoCurrentUser()
-   * - Prod mode: from Convex user query
-   * - Filter invalid URLs BEFORE storing
+   * Photo initialization on mount
+   * Photos are pre-selected by the terms screen (index.tsx) from Phase-1
+   * This effect just marks initialization as complete
    */
   useEffect(() => {
-    // Skip if already imported
+    // Skip if already processed
     if (hasImportedRef.current) {
       setIsImporting(false);
       return;
     }
 
-    // Demo mode: import from demo user
-    if (isDemoMode) {
-      const demoUser = getDemoCurrentUser();
-      const demoPhotos = demoUser?.photos || [];
+    // Photos are already selected by the terms screen
+    // Just log the current state and mark as ready
+    const currentSelectedCount = Array.isArray(selectedPhotoUrls) ? selectedPhotoUrls.length : 0;
 
-      // Extract URLs and filter invalid ones
-      const validUrls = demoPhotos
-        .map((p: any) => (typeof p === 'string' ? p : p?.url))
-        .filter(isValidPhotoUrl);
-
-      if (__DEV__) {
-        console.log('[Phase2PhotoSelect] Importing demo photos:', {
-          raw: demoPhotos.length,
-          valid: validUrls.length,
-        });
-      }
-
-      importPhase1Data(validUrls);
-      // Auto-select all imported photos initially
-      if (selectedPhotoUrls.length === 0 && validUrls.length > 0) {
-        setSelectedPhotos([], validUrls);
-      }
-      hasImportedRef.current = true;
-      setIsImporting(false);
-      return;
+    if (__DEV__) {
+      console.log('[Phase2PhotoSelect] Photos from terms screen:', {
+        selectedCount: currentSelectedCount,
+        phase1PhotosAvailable: phase1PhotoUrls?.length || 0,
+        maxPhase1Imports: MAX_PHASE1_PHOTO_IMPORTS,
+      });
     }
 
-    // Prod mode: wait for Convex user data
-    if (convexUser) {
-      const convexPhotos = convexUser.photos || [];
-
-      // Extract URLs and filter invalid ones
-      const validUrls = convexPhotos
-        .map((p: any) => (typeof p === 'string' ? p : p?.url))
-        .filter(isValidPhotoUrl);
-
-      if (__DEV__) {
-        console.log('[Phase2PhotoSelect] Importing convex photos:', {
-          raw: convexPhotos.length,
-          valid: validUrls.length,
-        });
-      }
-
-      importPhase1Data(validUrls);
-      // Auto-select all imported photos initially
-      if (selectedPhotoUrls.length === 0 && validUrls.length > 0) {
-        setSelectedPhotos([], validUrls);
-      }
-      hasImportedRef.current = true;
-      setIsImporting(false);
-    }
-  }, [isDemoMode, convexUser, importPhase1Data, setSelectedPhotos, selectedPhotoUrls.length]);
+    hasImportedRef.current = true;
+    setIsImporting(false);
+  }, [phase1PhotoUrls, selectedPhotoUrls]);
 
   /**
-   * Build candidate photos list: Phase 1 photos + uploaded photos
-   * - Filter out invalid URLs
-   * - Filter out failed images
+   * Build candidate photos list: selected photos + uploaded photos
+   * - Selected photos may include Phase-1 imports (marked with isImported=true)
+   * - Filter out invalid URLs and failed images
    * - Deduplicate
    * - NEVER return blank entries
    */
@@ -171,51 +196,64 @@ export default function Phase2PhotoSelect() {
     const result: PhotoCandidate[] = [];
     const seen = new Set<string>();
 
-    // First, add Phase 1 photos
-    for (const url of phase1PhotoUrls) {
+    // DEFENSIVE: Ensure arrays are iterable (may be null/undefined after hydration)
+    const safeSelectedPhotos = Array.isArray(selectedPhotoUrls) ? selectedPhotoUrls : [];
+    const safePhase1Photos = Array.isArray(phase1PhotoUrls) ? phase1PhotoUrls : [];
+    const safeUploadedPhotos = Array.isArray(uploadedPhotos) ? uploadedPhotos : [];
+
+    // Create a set of Phase-1 URLs to identify imported photos
+    const phase1UrlSet = new Set(safePhase1Photos.filter(isValidPhotoUrl));
+
+    // First, add already-selected photos (from terms screen import)
+    for (const url of safeSelectedPhotos) {
       if (isValidPhotoUrl(url) && !seen.has(url) && !failedImages.has(url)) {
         seen.add(url);
+        const isFromPhase1 = phase1UrlSet.has(url);
         result.push({
-          id: `p1-${result.length}`,
+          id: `sel-${result.length}`,
           uri: url,
-          source: 'phase1',
+          source: isFromPhase1 ? 'phase1' : 'uploaded',
+          isImported: isFromPhase1,
         });
       }
     }
 
-    // Then, add uploaded photos
-    for (const url of uploadedPhotos) {
+    // Then, add newly uploaded photos (not already selected)
+    for (const url of safeUploadedPhotos) {
       if (isValidPhotoUrl(url) && !seen.has(url) && !failedImages.has(url)) {
         seen.add(url);
         result.push({
           id: `up-${result.length}`,
           uri: url,
           source: 'uploaded',
+          isImported: false,
         });
       }
     }
 
     if (__DEV__) {
       console.log('[Phase2PhotoSelect] Candidates computed:', {
-        phase1Count: phase1PhotoUrls.length,
-        uploadedCount: uploadedPhotos.length,
+        selectedCount: safeSelectedPhotos.length,
+        uploadedCount: safeUploadedPhotos.length,
         validCandidates: result.length,
+        importedFromPhase1: result.filter(c => c.isImported).length,
         failedCount: failedImages.size,
       });
     }
 
     return result.slice(0, GRID_SIZE);
-  }, [phase1PhotoUrls, uploadedPhotos, failedImages]);
+  }, [selectedPhotoUrls, phase1PhotoUrls, uploadedPhotos, failedImages]);
 
-  // Selected URIs as a Set for O(1) lookup
-  const selectedSet = useMemo(() => new Set(selectedPhotoUrls), [selectedPhotoUrls]);
+  // Selected URIs as a Set for O(1) lookup (defensive: ensure array)
+  const safeSelectedUrls = Array.isArray(selectedPhotoUrls) ? selectedPhotoUrls : [];
+  const selectedSet = useMemo(() => new Set(safeSelectedUrls), [safeSelectedUrls]);
 
   // Filter selected to only include valid, non-failed photos
   const validSelectedCount = useMemo(() => {
-    return selectedPhotoUrls.filter(
+    return safeSelectedUrls.filter(
       (url) => isValidPhotoUrl(url) && !failedImages.has(url)
     ).length;
-  }, [selectedPhotoUrls, failedImages]);
+  }, [safeSelectedUrls, failedImages]);
 
   const canContinue = validSelectedCount >= MIN_SELECTED;
   const isFull = candidates.length >= GRID_SIZE;
@@ -268,11 +306,14 @@ export default function Phase2PhotoSelect() {
       });
 
       if (!result.canceled && result.assets[0]) {
-        const uri = result.assets[0].uri;
-        if (isValidPhotoUrl(uri)) {
-          setUploadedPhotos((prev) => [...prev, uri]);
+        const cacheUri = result.assets[0].uri;
+        if (isValidPhotoUrl(cacheUri)) {
+          // Copy to permanent storage immediately
+          const permanentUri = await copyToPermamentStorage(cacheUri, Date.now());
+
+          setUploadedPhotos((prev) => [...prev, permanentUri]);
           // Auto-select the uploaded photo
-          setSelectedPhotos([], [...selectedPhotoUrls, uri]);
+          setSelectedPhotos([], [...selectedPhotoUrls, permanentUri]);
         }
       }
     } catch (error) {
@@ -281,26 +322,41 @@ export default function Phase2PhotoSelect() {
     }
   };
 
-  const handleContinue = () => {
+  // Track if we're processing (prevent double-tap)
+  const [isProcessing, setIsProcessing] = useState(false);
+
+  const handleContinue = async () => {
     if (!canContinue) {
       Alert.alert('More Photos Needed', `Please select at least ${MIN_SELECTED} photos.`);
       return;
     }
 
-    // Filter to only valid, non-failed photos before saving
-    const finalSelection = selectedPhotoUrls.filter(
-      (url) => isValidPhotoUrl(url) && !failedImages.has(url)
-    );
-    setSelectedPhotos([], finalSelection);
+    if (isProcessing) return;
+    setIsProcessing(true);
 
-    if (__DEV__) {
-      console.log('[Phase2PhotoSelect] Continuing with photos:', {
-        count: finalSelection.length,
-        blurMyPhoto,
-      });
+    try {
+      // Filter to only valid, non-failed photos
+      const validSelection = selectedPhotoUrls.filter(
+        (url) => isValidPhotoUrl(url) && !failedImages.has(url)
+      );
+
+      // Copy all selected photos to permanent storage (handles cache URIs)
+      const permanentUris = await copyAllToPermanentStorage(validSelection);
+
+      // Save the permanent URIs
+      setSelectedPhotos([], permanentUris);
+
+      if (__DEV__) {
+        console.log('[Phase2PhotoSelect] Saved', permanentUris.length, 'photos to permanent storage');
+      }
+
+      router.push('/(main)/phase2-onboarding/profile-setup' as any);
+    } catch (error) {
+      console.error('[Phase2PhotoSelect] Error saving photos:', error);
+      Alert.alert('Error', 'Failed to save photos. Please try again.');
+    } finally {
+      setIsProcessing(false);
     }
-
-    router.push('/(main)/phase2-onboarding/profile-setup' as any);
   };
 
   // Render a single photo slot
@@ -323,6 +379,12 @@ export default function Phase2PhotoSelect() {
         {isSelected && (
           <View style={styles.checkBadge}>
             <Ionicons name="checkmark" size={14} color="#FFFFFF" />
+          </View>
+        )}
+        {/* Show "Imported" badge for Phase-1 photos */}
+        {candidate.isImported && (
+          <View style={styles.importedBadge}>
+            <Text style={styles.importedBadgeText}>P1</Text>
           </View>
         )}
       </TouchableOpacity>
@@ -378,8 +440,9 @@ export default function Phase2PhotoSelect() {
     return slots;
   }, [candidates, selectedSet, isFull]);
 
-  // Show loading while importing Phase-1 photos
-  if (isImporting && phase1PhotoUrls.length === 0) {
+  // Show loading while importing Phase-1 photos (defensive: ensure array before .length)
+  const safePhase1Count = Array.isArray(phase1PhotoUrls) ? phase1PhotoUrls.length : 0;
+  if (isImporting && safePhase1Count === 0) {
     return (
       <View style={[styles.container, styles.loadingContainer, { paddingTop: insets.top }]}>
         <ActivityIndicator size="large" color={C.primary} />
@@ -435,15 +498,24 @@ export default function Phase2PhotoSelect() {
             : `Selected ${validSelectedCount} / ${MIN_SELECTED} required`}
         </Text>
         <TouchableOpacity
-          style={[styles.continueBtn, !canContinue && styles.continueBtnDisabled]}
+          style={[styles.continueBtn, (!canContinue || isProcessing) && styles.continueBtnDisabled]}
           onPress={handleContinue}
-          disabled={!canContinue}
+          disabled={!canContinue || isProcessing}
           activeOpacity={0.8}
         >
-          <Text style={[styles.continueBtnText, !canContinue && styles.continueBtnTextDisabled]}>
-            Continue
-          </Text>
-          <Ionicons name="arrow-forward" size={18} color={canContinue ? '#FFFFFF' : C.textLight} />
+          {isProcessing ? (
+            <>
+              <ActivityIndicator size="small" color="#FFFFFF" />
+              <Text style={styles.continueBtnText}>Saving...</Text>
+            </>
+          ) : (
+            <>
+              <Text style={[styles.continueBtnText, !canContinue && styles.continueBtnTextDisabled]}>
+                Continue
+              </Text>
+              <Ionicons name="arrow-forward" size={18} color={canContinue ? '#FFFFFF' : C.textLight} />
+            </>
+          )}
         </TouchableOpacity>
       </View>
     </View>
@@ -532,6 +604,20 @@ const styles = StyleSheet.create({
     backgroundColor: C.primary,
     alignItems: 'center',
     justifyContent: 'center',
+  },
+  importedBadge: {
+    position: 'absolute',
+    bottom: 6,
+    left: 6,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+    backgroundColor: 'rgba(0,0,0,0.6)',
+  },
+  importedBadgeText: {
+    fontSize: 9,
+    fontWeight: '600',
+    color: '#FFFFFF',
   },
   uploadText: {
     fontSize: 10,

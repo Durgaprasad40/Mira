@@ -19,7 +19,15 @@ const MAX_VIDEO_SEC = 60;
 export default function CameraComposerScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
-  const params = useLocalSearchParams<{ mode?: string; promptId?: string; promptType?: string }>();
+  const params = useLocalSearchParams<{
+    mode?: string;
+    promptId?: string;
+    promptType?: string;
+    todConversationId?: string; // For in-chat T&D answers
+  }>();
+
+  // Check if this is an in-chat T&D answer (mandatory game)
+  const isTodAnswer = params.mode === 'tod_answer' && params.todConversationId;
 
   // Support both: explicit mode from old callers, or switchable mode (default)
   const [captureMode, setCaptureMode] = useState<'photo' | 'video'>(
@@ -130,9 +138,15 @@ export default function CameraComposerScreen() {
       sourceFile.copy(destFile);
       const permanentUri = destFile.uri;
 
-      await AsyncStorage.setItem('tod_captured_media', JSON.stringify({
+      // Use conversation-specific key for in-chat T&D, generic key for public T&D
+      const storageKey = isTodAnswer
+        ? `tod_camera_answer_${params.todConversationId}`
+        : 'tod_captured_media';
+
+      await AsyncStorage.setItem(storageKey, JSON.stringify({
         uri: permanentUri,
         type: capturedType,
+        mediaUri: permanentUri, // Alias for ChatTodOverlay compatibility
         promptId: params.promptId,
         durationSec: capturedType === 'video' ? videoSeconds : undefined,
         visibility: mediaVisibility,

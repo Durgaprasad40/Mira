@@ -17,6 +17,7 @@ import {
   Dimensions,
   TouchableWithoutFeedback,
   Keyboard,
+  ActionSheetIOS,
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter, useLocalSearchParams } from 'expo-router';
@@ -25,7 +26,21 @@ import { Ionicons } from '@expo/vector-icons';
 import { useQuery, useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import EmojiPicker from 'rn-emoji-keyboard';
+import * as Haptics from 'expo-haptics';
+
+// Safe haptic feedback helpers (guarded for unsupported devices)
+const triggerSuccessHaptic = () => {
+  try {
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+  } catch {}
+};
+const triggerWarningHaptic = () => {
+  try {
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
+  } catch {}
+};
 import { COLORS } from '@/lib/constants';
+import { Image } from 'expo-image';
 import { isProbablyEmoji } from '@/lib/utils';
 import { isContentClean } from '@/lib/contentFilter';
 import { ConfessionChat } from '@/types';
@@ -38,6 +53,7 @@ import { asUserId } from '@/convex/id';
 import ConfessionCard from '@/components/confessions/ConfessionCard';
 import SecretCrushCard from '@/components/confessions/SecretCrushCard';
 import { useConfessionNotifications } from '@/hooks/useConfessionNotifications';
+import { useConfessPreviewStore } from '@/stores/confessPreviewStore';
 import { useScreenSafety } from '@/hooks/useScreenSafety';
 import { logDebugEvent } from '@/lib/debugEventLogger';
 import {
@@ -77,6 +93,16 @@ export default function ConfessionsScreen() {
   const cleanupExpiredChats = useConfessionStore((s) => s.cleanupExpiredChats);
   const cleanupExpiredSecretCrushes = useConfessionStore((s) => s.cleanupExpiredSecretCrushes);
   const removeConfessionThreads = useConfessionStore((s) => s.removeConfessionThreads);
+  const deleteConfession = useConfessionStore((s) => s.deleteConfession);
+  const connectToConfession = useConfessionStore((s) => s.connectToConfession);
+  const isConfessionConnected = useConfessionStore((s) => s.isConfessionConnected);
+  const connectedConfessionIds = useConfessionStore((s) => s.connectedConfessionIds);
+  const canPostConfession = useConfessionStore((s) => s.canPostConfession);
+  const getConfessionCountToday = useConfessionStore((s) => s.getConfessionCountToday);
+  const recordConfessionTimestamp = useConfessionStore((s) => s.recordConfessionTimestamp);
+  const blockAuthor = useConfessionStore((s) => s.blockAuthor);
+  const isAuthorBlocked = useConfessionStore((s) => s.isAuthorBlocked);
+  const blockedAuthorIds = useConfessionStore((s) => s.blockedAuthorIds);
 
   // Global blocked user IDs (from profile/chat block actions)
   const globalBlockedIds = useDemoStore((s) => s.blockedUserIds);
@@ -97,6 +123,11 @@ export default function ConfessionsScreen() {
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
   const [emojiTargetConfessionId, setEmojiTargetConfessionId] = useState<string | null>(null);
 
+  // Profile preview state (one-time preview for tagged confessions)
+  const isPreviewUsed = useConfessPreviewStore((s) => s.isPreviewUsed);
+  const [showPreviewConfirm, setShowPreviewConfirm] = useState(false);
+  const [previewTarget, setPreviewTarget] = useState<{ confessionId: string; authorId: string } | null>(null);
+
   // Composer modal state
   const [showComposer, setShowComposer] = useState(false);
   const [composerText, setComposerText] = useState('');
@@ -110,9 +141,9 @@ export default function ConfessionsScreen() {
 
   // Tagging (confess-to) state
   const [tagInput, setTagInput] = useState('');
-  const [taggedUser, setTaggedUser] = useState<{ id: string; name: string; avatarUrl: string | null; disambiguator: string } | null>(null);
+  const [taggedUser, setTaggedUser] = useState<{ id: string; name: string; avatarUrl: string | null; age?: number; disambiguator: string } | null>(null);
   const [showDuplicatePicker, setShowDuplicatePicker] = useState(false);
-  const [duplicateCandidates, setDuplicateCandidates] = useState<{ id: string; name: string; avatarUrl: string | null; disambiguator: string }[]>([]);
+  const [duplicateCandidates, setDuplicateCandidates] = useState<{ id: string; name: string; avatarUrl: string | null; age?: number; disambiguator: string }[]>([]);
 
   // Query liked users for tagging candidates
   const convexUserId = asUserId(currentUserId);
@@ -121,16 +152,16 @@ export default function ConfessionsScreen() {
     !isDemoMode && convexUserId ? { userId: convexUserId } : 'skip'
   );
 
-  // Demo liked users (for demo mode)
+  // Demo liked users (for demo mode) - IDs must match DEMO_PROFILES for profile lookup
   const demoLikedUsers = useMemo(() => {
     if (!isDemoMode) return [];
-    // In demo mode, provide some sample liked users
+    // Use actual DEMO_PROFILES IDs so profile screen can look them up
     return [
-      { id: 'demo_user_2', name: 'Priya', avatarUrl: null, disambiguator: 'Loves coffee' },
-      { id: 'demo_user_3', name: 'Rahul', avatarUrl: null, disambiguator: 'Tech enthusiast' },
-      { id: 'demo_user_4', name: 'Ananya Sharma', avatarUrl: null, disambiguator: 'Mumbai' },
-      { id: 'demo_user_5', name: 'Vikram Singh', avatarUrl: null, disambiguator: 'Photographer' },
-      { id: 'demo_user_6', name: 'Priya', avatarUrl: null, disambiguator: 'Yoga instructor' }, // Duplicate name
+      { id: 'demo_profile_2', name: 'Priya', avatarUrl: 'https://i.pravatar.cc/150?img=5', age: 24, disambiguator: 'Loves coffee' },
+      { id: 'demo_profile_3', name: 'Rahul', avatarUrl: 'https://i.pravatar.cc/150?img=12', age: 27, disambiguator: 'Tech enthusiast' },
+      { id: 'demo_profile_4', name: 'Ananya', avatarUrl: 'https://i.pravatar.cc/150?img=9', age: 25, disambiguator: 'Mumbai' },
+      { id: 'demo_profile_5', name: 'Vikram', avatarUrl: 'https://i.pravatar.cc/150?img=11', age: 29, disambiguator: 'Photographer' },
+      { id: 'demo_profile_6', name: 'Priya', avatarUrl: 'https://i.pravatar.cc/150?img=16', age: 22, disambiguator: 'Yoga instructor' }, // Duplicate name
     ];
   }, []);
 
@@ -160,6 +191,10 @@ export default function ConfessionsScreen() {
 
   // Check for exact match (for short names that require full typing)
   const handleTagInputChange = useCallback((text: string) => {
+    // If user was previously tagged, log the clear event
+    if (taggedUser && text !== taggedUser.name) {
+      if (__DEV__) console.log('[CONFESS] confess_tag_cleared_on_edit');
+    }
     setTagInput(text);
     setTaggedUser(null); // Clear any selected user when typing
 
@@ -185,12 +220,12 @@ export default function ConfessionsScreen() {
     }
   }, [likedUsers]);
 
-  const handleSelectSuggestion = useCallback((user: { id: string; name: string; avatarUrl: string | null; disambiguator: string }) => {
+  const handleSelectSuggestion = useCallback((user: { id: string; name: string; avatarUrl: string | null; age?: number; disambiguator: string }) => {
     setTaggedUser(user);
     setTagInput(user.name);
   }, []);
 
-  const handleSelectDuplicate = useCallback((user: { id: string; name: string; avatarUrl: string | null; disambiguator: string }) => {
+  const handleSelectDuplicate = useCallback((user: { id: string; name: string; avatarUrl: string | null; age?: number; disambiguator: string }) => {
     setTaggedUser(user);
     setTagInput(user.name);
     setShowDuplicatePicker(false);
@@ -354,11 +389,20 @@ export default function ConfessionsScreen() {
       if (globalBlockedIds.length > 0) {
         items = items.filter((c) => !globalBlockedIds.includes(c.userId));
       }
+      // Filter blocked authors (confession-specific blocking)
+      if (blockedAuthorIds.length > 0) {
+        items = items.filter((c) => !blockedAuthorIds.includes(c.userId));
+      }
       return items;
     }
     // Demo mode: use integrity output (already filtered and sorted)
-    return integrityOutput.activePosts;
-  }, [isDemoMode, convexConfessions, globalBlockedIds, integrityOutput.activePosts]);
+    // Also filter blocked authors
+    let posts = integrityOutput.activePosts;
+    if (blockedAuthorIds.length > 0) {
+      posts = posts.filter((c) => !blockedAuthorIds.includes(c.userId));
+    }
+    return posts;
+  }, [isDemoMode, convexConfessions, globalBlockedIds, integrityOutput.activePosts, blockedAuthorIds]);
 
   // Trending confessions
   const trendingConfessions = useMemo(() => {
@@ -513,6 +557,26 @@ export default function ConfessionsScreen() {
     if (!canSubmitComposer) return;
     const trimmed = composerText.trim();
 
+    // Rate limit check
+    if (!canPostConfession()) {
+      if (__DEV__) console.log('[CONFESS] confess_rate_limit_hit');
+      Alert.alert(
+        'Limit Reached',
+        "You've reached today's confession limit. Try again later."
+      );
+      return;
+    }
+
+    // Tag accuracy lock: if mention text exists but no valid selection, block
+    if (tagInput.trim() && !taggedUser) {
+      if (__DEV__) console.log('[CONFESS] confess_tag_blocked_submit');
+      Alert.alert(
+        'Select a Person',
+        'Please select a person from the suggestions to tag them, or clear the tag field.'
+      );
+      return;
+    }
+
     // Validation
     const phonePattern = /\b\d{10,}\b|\b\d{3}[-.\s]?\d{3}[-.\s]?\d{4}\b/;
     const emailPattern = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/;
@@ -542,6 +606,7 @@ export default function ConfessionsScreen() {
       createdAt: Date.now(),
       revealPolicy: 'never',
       targetUserId: taggedUser?.id,
+      targetUserName: taggedUser?.name,
     });
 
     // Sync to backend
@@ -558,12 +623,18 @@ export default function ConfessionsScreen() {
       });
     }
 
+    // Record timestamp for rate limiting
+    recordConfessionTimestamp();
+
+    // Haptic feedback for successful post
+    triggerSuccessHaptic();
+
     setComposerSubmitting(false);
     setShowComposer(false);
     setComposerText('');
     setTagInput('');
     setTaggedUser(null);
-  }, [canSubmitComposer, composerText, composerAnonymous, currentUserId, addConfession, createConfessionMutation, taggedUser]);
+  }, [canSubmitComposer, composerText, composerAnonymous, currentUserId, addConfession, createConfessionMutation, taggedUser, canPostConfession, tagInput, recordConfessionTimestamp]);
 
   const handleComposerEmojiSelected = useCallback((emojiObj: any) => {
     setComposerText((prev) => prev + emojiObj.emoji);
@@ -612,17 +683,98 @@ export default function ConfessionsScreen() {
     [chats, currentUserId, addChat, notifyReply, router]
   );
 
+  // Handle Report/Block menu for a confession
+  const handleReportBlock = useCallback(
+    (confessionId: string, authorId: string) => {
+      const options = Platform.OS === 'ios'
+        ? ['Cancel', 'Report Confession', 'Block User']
+        : undefined;
+
+      if (Platform.OS === 'ios') {
+        ActionSheetIOS.showActionSheetWithOptions(
+          {
+            options: options!,
+            cancelButtonIndex: 0,
+            destructiveButtonIndex: 2,
+            title: 'Actions',
+          },
+          (buttonIndex) => {
+            if (buttonIndex === 1) {
+              // Report
+              demoReportConfession(confessionId);
+              if (__DEV__) console.log('[CONFESS] confess_reported:', confessionId);
+              if (!isDemoMode) {
+                const convexUserId = asUserId(currentUserId);
+                if (convexUserId) {
+                  reportConfessionMutation({
+                    confessionId: confessionId as any,
+                    reporterId: convexUserId,
+                  }).catch(() => {});
+                }
+              }
+              triggerWarningHaptic();
+              showToastMessage('Reported', 'checkmark-circle');
+            } else if (buttonIndex === 2) {
+              // Block
+              blockAuthor(authorId);
+              triggerWarningHaptic();
+              showToastMessage('User blocked', 'checkmark-circle');
+            }
+          }
+        );
+      } else {
+        // Android: use Alert with buttons
+        Alert.alert(
+          'Actions',
+          'What would you like to do?',
+          [
+            { text: 'Cancel', style: 'cancel' },
+            {
+              text: 'Report Confession',
+              onPress: () => {
+                demoReportConfession(confessionId);
+                if (__DEV__) console.log('[CONFESS] confess_reported:', confessionId);
+                if (!isDemoMode) {
+                  const convexUserId = asUserId(currentUserId);
+                  if (convexUserId) {
+                    reportConfessionMutation({
+                      confessionId: confessionId as any,
+                      reporterId: convexUserId,
+                    }).catch(() => {});
+                  }
+                }
+                triggerWarningHaptic();
+                showToastMessage('Reported', 'checkmark-circle');
+              },
+            },
+            {
+              text: 'Block User',
+              style: 'destructive',
+              onPress: () => {
+                blockAuthor(authorId);
+                triggerWarningHaptic();
+                showToastMessage('User blocked', 'checkmark-circle');
+              },
+            },
+          ]
+        );
+      }
+    },
+    [demoReportConfession, reportConfessionMutation, currentUserId, showToastMessage, blockAuthor]
+  );
+
   const handleReport = useCallback(
     (confessionId: string) => {
-      // Confirmation already shown in ConfessionCard's handleMenu
+      // Legacy handler - now just logs and reports
       demoReportConfession(confessionId);
+      if (__DEV__) console.log('[CONFESS] confess_reported:', confessionId);
       if (!isDemoMode) {
         const convexUserId = asUserId(currentUserId);
         if (!convexUserId) return;
         reportConfessionMutation({
           confessionId: confessionId as any,
           reporterId: convexUserId,
-        }).catch(console.error);
+        }).catch(() => {});
       }
       // Show confirmation toast
       showToastMessage('Reported', 'checkmark-circle');
@@ -641,6 +793,157 @@ export default function ConfessionsScreen() {
       ]);
     },
     [revealCrush]
+  );
+
+  // Profile preview handlers (one-time preview for tagged confession receivers)
+  const handleViewProfileRequest = useCallback(
+    (confessionId: string, authorId: string) => {
+      // Check if already used
+      if (isPreviewUsed(confessionId, currentUserId)) {
+        Alert.alert('Already Viewed', 'You have already used your one-time profile preview for this confession.');
+        return;
+      }
+      // Show confirmation modal
+      setPreviewTarget({ confessionId, authorId });
+      setShowPreviewConfirm(true);
+    },
+    [isPreviewUsed, currentUserId]
+  );
+
+  const handleConfirmPreview = useCallback(() => {
+    if (!previewTarget) return;
+    // Close modal first
+    setShowPreviewConfirm(false);
+    const { confessionId, authorId } = previewTarget;
+    setPreviewTarget(null);
+    // Navigate to profile in read-only mode
+    // Pass confessionId and receiverId so the profile screen can mark preview as used on mount
+    router.push({
+      pathname: '/(main)/profile/[id]',
+      params: {
+        id: authorId,
+        mode: 'confess_preview',
+        confessionId,
+        receiverId: currentUserId,
+      },
+    } as any);
+    // NOTE: markPreviewUsed is called in the profile screen on successful mount, not here
+  }, [previewTarget, currentUserId, router]);
+
+  const handleCancelPreview = useCallback(() => {
+    setShowPreviewConfirm(false);
+    setPreviewTarget(null);
+  }, []);
+
+  // Handle tapping @tag to open profile preview (read-only)
+  const handleTagPress = useCallback(
+    (targetUserId: string) => {
+      router.push({
+        pathname: '/(main)/profile/[id]',
+        params: { id: targetUserId, mode: 'confess_preview' },
+      } as any);
+    },
+    [router]
+  );
+
+  // Handle Connect button (tagged user only)
+  const handleConnect = useCallback(
+    (confessionId: string, authorName?: string) => {
+      const displayName = authorName || 'this person';
+      const dialogMessage = `Connect with ${displayName} and start chatting in Messages?`;
+
+      if (Platform.OS === 'ios') {
+        ActionSheetIOS.showActionSheetWithOptions(
+          {
+            options: ['Cancel', 'Connect'],
+            cancelButtonIndex: 0,
+            title: 'Connect?',
+            message: dialogMessage,
+          },
+          (buttonIndex) => {
+            if (buttonIndex === 1) {
+              const success = connectToConfession(confessionId, currentUserId);
+              if (success) {
+                if (__DEV__) console.log('[CONFESS] confess_connect_confirmed');
+                triggerSuccessHaptic();
+                showToastMessage('Connected! Check Messages', 'chatbubbles');
+              }
+            }
+          }
+        );
+      } else {
+        Alert.alert(
+          'Connect?',
+          dialogMessage,
+          [
+            { text: 'Cancel', style: 'cancel' },
+            {
+              text: 'Connect',
+              onPress: () => {
+                const success = connectToConfession(confessionId, currentUserId);
+                if (success) {
+                  if (__DEV__) console.log('[CONFESS] confess_connect_confirmed');
+                  triggerSuccessHaptic();
+                  showToastMessage('Connected! Check Messages', 'chatbubbles');
+                }
+              },
+            },
+          ]
+        );
+      }
+    },
+    [connectToConfession, currentUserId, showToastMessage]
+  );
+
+  // Long-press delete handler (author only)
+  const handleLongPressConfession = useCallback(
+    (confessionId: string, authorId: string) => {
+      // Only allow delete for the author
+      if (authorId !== currentUserId) {
+        // Non-author: show info toast
+        showToastMessage('You can only delete your own confession', 'checkmark-circle');
+        return;
+      }
+
+      // Author: show delete confirmation
+      if (Platform.OS === 'ios') {
+        ActionSheetIOS.showActionSheetWithOptions(
+          {
+            options: ['Cancel', 'Delete Confession'],
+            destructiveButtonIndex: 1,
+            cancelButtonIndex: 0,
+            title: 'Delete this confession?',
+            message: 'This action cannot be undone.',
+          },
+          (buttonIndex) => {
+            if (buttonIndex === 1) {
+              deleteConfession(confessionId);
+              triggerWarningHaptic();
+              showToastMessage('Confession deleted', 'checkmark-circle');
+            }
+          }
+        );
+      } else {
+        // Android: use Alert
+        Alert.alert(
+          'Delete Confession',
+          'This action cannot be undone.',
+          [
+            { text: 'Cancel', style: 'cancel' },
+            {
+              text: 'Delete',
+              style: 'destructive',
+              onPress: () => {
+                deleteConfession(confessionId);
+                triggerWarningHaptic();
+                showToastMessage('Confession deleted', 'checkmark-circle');
+              },
+            },
+          ]
+        );
+      }
+    },
+    [currentUserId, deleteConfession, showToastMessage]
   );
 
   const isLoading = !isDemoMode && convexConfessions === undefined && demoConfessions.length === 0;
@@ -701,6 +1004,20 @@ export default function ConfessionsScreen() {
             >
               <Text style={styles.trendingHeroText} numberOfLines={3}>
                 {trendingHero.text}
+                {(trendingHero as any).targetUserId && (trendingHero as any).targetUserName && (
+                  <>
+                    {' '}
+                    <Text
+                      style={styles.trendingHeroTagLink}
+                      onPress={(e) => {
+                        e.stopPropagation?.();
+                        handleTagPress((trendingHero as any).targetUserId);
+                      }}
+                    >
+                      @{(trendingHero as any).targetUserName}
+                    </Text>
+                  </>
+                )}
               </Text>
               <View style={styles.trendingHeroMeta}>
                 <View style={styles.trendingHeroStat}>
@@ -750,27 +1067,42 @@ export default function ConfessionsScreen() {
         data={confessions}
         keyExtractor={(item) => item.id}
         ListHeaderComponent={renderListHeader}
-        renderItem={({ item }) => (
-          <ConfessionCard
-            id={item.id}
-            text={item.text}
-            isAnonymous={item.isAnonymous}
-            mood={item.mood}
-            topEmojis={item.topEmojis || []}
-            userEmoji={userReactions[item.id] && isProbablyEmoji(userReactions[item.id]!) ? userReactions[item.id]! : null}
-            replyPreviews={item.replyPreviews || []}
-            replyCount={item.replyCount}
-            reactionCount={item.reactionCount}
-            authorName={(item as any).authorName}
-            createdAt={item.createdAt}
-            isTaggedForMe={(item as any).targetUserId === currentUserId}
-            onPress={() => handleOpenThread(item.id)}
-            onReact={() => handleOpenEmojiPicker(item.id)}
-            onToggleEmoji={(emoji) => toggleReaction(item.id, emoji)}
-            onReplyAnonymously={() => handleReplyAnonymously(item.id, item.userId)}
-            onReport={() => handleReport(item.id)}
-          />
-        )}
+        renderItem={({ item }) => {
+          const isTaggedForMe = (item as any).targetUserId === currentUserId;
+          const hasTag = item.targetUserId && (item as any).targetUserName;
+          const authorDisplayName = item.isAnonymous ? 'Anonymous' : ((item as any).authorName || 'Someone');
+          return (
+            <ConfessionCard
+              id={item.id}
+              text={item.text}
+              isAnonymous={item.isAnonymous}
+              mood={item.mood}
+              topEmojis={item.topEmojis || []}
+              userEmoji={userReactions[item.id] && isProbablyEmoji(userReactions[item.id]!) ? userReactions[item.id]! : null}
+              replyPreviews={item.replyPreviews || []}
+              replyCount={item.replyCount}
+              reactionCount={item.reactionCount}
+              authorName={(item as any).authorName}
+              createdAt={item.createdAt}
+              isTaggedForMe={isTaggedForMe}
+              previewUsed={isTaggedForMe ? isPreviewUsed(item.id, currentUserId) : undefined}
+              isConnected={isConfessionConnected(item.id)}
+              taggedUserId={item.targetUserId}
+              taggedUserName={(item as any).targetUserName}
+              authorId={item.userId}
+              viewerId={currentUserId}
+              onPress={() => handleOpenThread(item.id)}
+              onReact={() => handleOpenEmojiPicker(item.id)}
+              onToggleEmoji={(emoji) => toggleReaction(item.id, emoji)}
+              onReplyAnonymously={() => handleReplyAnonymously(item.id, item.userId)}
+              onReport={() => handleReportBlock(item.id, item.userId)}
+              onViewProfile={isTaggedForMe ? () => handleViewProfileRequest(item.id, item.userId) : undefined}
+              onLongPress={() => handleLongPressConfession(item.id, item.userId)}
+              onTagPress={hasTag ? () => handleTagPress(item.targetUserId!) : undefined}
+              onConnect={isTaggedForMe ? () => handleConnect(item.id, authorDisplayName) : undefined}
+            />
+          );
+        }}
         contentContainerStyle={styles.listContent}
         refreshControl={
           <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={COLORS.primary} />
@@ -897,15 +1229,22 @@ export default function ConfessionsScreen() {
 
                   {taggedUser ? (
                     <View style={styles.taggedUserRow}>
-                      <View style={styles.taggedUserAvatar}>
-                        {taggedUser.avatarUrl ? (
-                          <View style={styles.taggedUserAvatarImg} />
-                        ) : (
+                      <Text style={styles.taggedLabel}>Tagged:</Text>
+                      {taggedUser.avatarUrl ? (
+                        <Image
+                          source={{ uri: taggedUser.avatarUrl }}
+                          style={styles.taggedUserAvatarImg}
+                          contentFit="cover"
+                        />
+                      ) : (
+                        <View style={styles.taggedUserAvatar}>
                           <Ionicons name="person" size={16} color={COLORS.white} />
-                        )}
-                      </View>
+                        </View>
+                      )}
                       <View style={{ flex: 1 }}>
-                        <Text style={styles.taggedUserName}>{taggedUser.name}</Text>
+                        <Text style={styles.taggedUserName}>
+                          {taggedUser.name}{taggedUser.age ? `, ${taggedUser.age}` : ''}
+                        </Text>
                         <Text style={styles.taggedUserDisambiguator}>{taggedUser.disambiguator}</Text>
                       </View>
                       <TouchableOpacity onPress={handleClearTag} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
@@ -1008,12 +1347,24 @@ export default function ConfessionsScreen() {
                       style={styles.duplicateRow}
                       onPress={() => handleSelectDuplicate(user)}
                     >
-                      <View style={styles.duplicateAvatar}>
-                        <Ionicons name="person" size={18} color={COLORS.white} />
-                      </View>
+                      {user.avatarUrl ? (
+                        <Image
+                          source={{ uri: user.avatarUrl }}
+                          style={styles.duplicateAvatarImage}
+                          contentFit="cover"
+                        />
+                      ) : (
+                        <View style={styles.duplicateAvatar}>
+                          <Ionicons name="person" size={18} color={COLORS.white} />
+                        </View>
+                      )}
                       <View style={{ flex: 1 }}>
-                        <Text style={styles.duplicateName}>{user.name}</Text>
-                        <Text style={styles.duplicateDisambiguator}>{user.disambiguator}</Text>
+                        <Text style={styles.duplicateName} numberOfLines={1}>
+                          {user.name}{user.age ? `, ${user.age}` : ''}
+                        </Text>
+                        <Text style={styles.duplicateDisambiguator} numberOfLines={1}>
+                          {user.disambiguator}
+                        </Text>
                       </View>
                       <Ionicons name="chevron-forward" size={18} color={COLORS.textMuted} />
                     </TouchableOpacity>
@@ -1023,6 +1374,45 @@ export default function ConfessionsScreen() {
             </View>
           </TouchableWithoutFeedback>
         </Modal>
+      </Modal>
+
+      {/* Profile Preview Confirmation Modal */}
+      <Modal
+        visible={showPreviewConfirm}
+        animationType="fade"
+        transparent
+        onRequestClose={handleCancelPreview}
+      >
+        <TouchableWithoutFeedback onPress={handleCancelPreview}>
+          <View style={styles.previewConfirmOverlay}>
+            <TouchableWithoutFeedback>
+              <View style={styles.previewConfirmSheet}>
+                <View style={styles.previewConfirmIcon}>
+                  <Ionicons name="eye-outline" size={32} color={COLORS.primary} />
+                </View>
+                <Text style={styles.previewConfirmTitle}>View Profile?</Text>
+                <Text style={styles.previewConfirmDesc}>
+                  You can view this person's profile once. This is your only chance to see who confessed to you.
+                </Text>
+                <View style={styles.previewConfirmActions}>
+                  <TouchableOpacity
+                    style={styles.previewConfirmCancelBtn}
+                    onPress={handleCancelPreview}
+                  >
+                    <Text style={styles.previewConfirmCancelText}>Cancel</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={styles.previewConfirmViewBtn}
+                    onPress={handleConfirmPreview}
+                  >
+                    <Ionicons name="eye" size={18} color={COLORS.white} />
+                    <Text style={styles.previewConfirmViewText}>View Profile</Text>
+                  </TouchableOpacity>
+                </View>
+              </View>
+            </TouchableWithoutFeedback>
+          </View>
+        </TouchableWithoutFeedback>
       </Modal>
 
       {/* Tagged for you modal */}
@@ -1225,6 +1615,11 @@ const styles = StyleSheet.create({
     lineHeight: 22,
     color: COLORS.white,
     marginBottom: 10,
+  },
+  trendingHeroTagLink: {
+    color: COLORS.white,
+    fontWeight: '700',
+    textDecorationLine: 'underline',
   },
   trendingHeroMeta: {
     flexDirection: 'row',
@@ -1478,6 +1873,11 @@ const styles = StyleSheet.create({
     borderRadius: 10,
     padding: 10,
   },
+  taggedLabel: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: COLORS.primary,
+  },
   taggedUserAvatar: {
     width: 36,
     height: 36,
@@ -1490,6 +1890,7 @@ const styles = StyleSheet.create({
     width: 36,
     height: 36,
     borderRadius: 18,
+    backgroundColor: COLORS.backgroundDark,
   },
   taggedUserName: {
     fontSize: 14,
@@ -1573,12 +1974,18 @@ const styles = StyleSheet.create({
     borderTopColor: COLORS.border,
   },
   duplicateAvatar: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
+    width: 44,
+    height: 44,
+    borderRadius: 22,
     backgroundColor: COLORS.primary,
     justifyContent: 'center',
     alignItems: 'center',
+  },
+  duplicateAvatarImage: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: COLORS.backgroundDark,
   },
   duplicateName: {
     fontSize: 15,
@@ -1772,5 +2179,76 @@ const styles = StyleSheet.create({
     fontSize: 10,
     fontWeight: '600',
     color: COLORS.primary,
+  },
+  // Profile preview confirmation modal styles
+  previewConfirmOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 24,
+  },
+  previewConfirmSheet: {
+    backgroundColor: COLORS.white,
+    borderRadius: 20,
+    padding: 24,
+    width: '100%',
+    maxWidth: 320,
+    alignItems: 'center',
+  },
+  previewConfirmIcon: {
+    width: 64,
+    height: 64,
+    borderRadius: 32,
+    backgroundColor: 'rgba(255,107,107,0.1)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: 16,
+  },
+  previewConfirmTitle: {
+    fontSize: 20,
+    fontWeight: '700',
+    color: COLORS.text,
+    marginBottom: 8,
+    textAlign: 'center',
+  },
+  previewConfirmDesc: {
+    fontSize: 14,
+    color: COLORS.textMuted,
+    textAlign: 'center',
+    lineHeight: 20,
+    marginBottom: 24,
+  },
+  previewConfirmActions: {
+    flexDirection: 'row',
+    gap: 12,
+    width: '100%',
+  },
+  previewConfirmCancelBtn: {
+    flex: 1,
+    paddingVertical: 14,
+    borderRadius: 12,
+    backgroundColor: COLORS.backgroundDark,
+    alignItems: 'center',
+  },
+  previewConfirmCancelText: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: COLORS.text,
+  },
+  previewConfirmViewBtn: {
+    flex: 1,
+    flexDirection: 'row',
+    paddingVertical: 14,
+    borderRadius: 12,
+    backgroundColor: COLORS.primary,
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+  },
+  previewConfirmViewText: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: COLORS.white,
   },
 });

@@ -1,9 +1,10 @@
 import { create } from 'zustand';
+import { persist, createJSONStorage } from 'zustand/middleware';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import type { IncognitoConversation, IncognitoMessage } from '@/types';
-import {
-  DEMO_INCOGNITO_CONVERSATIONS,
-  DEMO_INCOGNITO_MESSAGES,
-} from '@/lib/demoData';
+// NOTE: Phase-2 no longer seeds demo conversations/messages.
+// Conversations are created dynamically via Desire Land matches.
+// Messages are created when users actually chat.
 
 /** Tracks which users are unlocked for private chat (via accepted T&D or room interaction) */
 interface UnlockedUser {
@@ -44,13 +45,19 @@ interface PrivateChatState {
   isUnlocked: (userId: string) => boolean;
   unlockUser: (user: UnlockedUser) => void;
 
-  // Conversations (demo-seeded)
+  // Conversations (created dynamically via matches)
   conversations: IncognitoConversation[];
   messages: Record<string, IncognitoMessage[]>; // keyed by conversationId
   addMessage: (conversationId: string, msg: IncognitoMessage) => void;
   createConversation: (convo: IncognitoConversation) => void;
   /** Mark a conversation as read (clears unread count) */
   markAsRead: (conversationId: string) => void;
+  /** Delete a single message by ID */
+  deleteMessage: (conversationId: string, messageId: string) => void;
+  /** Remove a conversation and its messages (for unmatch/uncrush) */
+  removeConversation: (conversationId: string) => void;
+  /** Remove a conversation by participant ID (for block/unmatch) */
+  removeConversationByParticipant: (participantId: string) => void;
 
   // Truth or Dare
   pendingDares: PendingDare[];
@@ -65,6 +72,13 @@ interface PrivateChatState {
   blockUser: (userId: string) => void;
   unblockUser: (userId: string) => void;
   isBlocked: (userId: string) => boolean;
+
+  // Secure Photo viewing (Phase-2 parity with Phase-1)
+  markSecurePhotoViewed: (conversationId: string, messageId: string) => void;
+  markSecurePhotoExpired: (conversationId: string, messageId: string) => void;
+
+  // Auto-cleanup: Remove messages past their deleteAt timestamp
+  pruneDeletedMessages: () => void;
 }
 
 // Group demo messages by conversationId
@@ -77,15 +91,10 @@ function groupMessages(msgs: IncognitoMessage[]): Record<string, IncognitoMessag
   return grouped;
 }
 
-// Pre-seed some unlocked users from demo conversations
-const DEMO_UNLOCKED: UnlockedUser[] = DEMO_INCOGNITO_CONVERSATIONS.map((c) => ({
-  id: c.participantId,
-  username: c.participantName,
-  photoUrl: c.participantPhotoUrl,
-  age: c.participantAge,
-  source: c.connectionSource === 'tod' || c.connectionSource === 'desire' ? 'tod' : 'room',
-  unlockedAt: c.lastMessageAt,
-}));
+// NOTE: Phase-2 unlocked users are now created dynamically when:
+// - User accepts a Truth-or-Dare
+// - User matches via Desire Land swipe/super-like
+// No pre-seeded unlocked users.
 
 // Pre-seed pending dares for demo
 const DEMO_PENDING_DARES: PendingDare[] = [
@@ -111,8 +120,10 @@ const DEMO_PENDING_DARES: PendingDare[] = [
   },
 ];
 
-export const usePrivateChatStore = create<PrivateChatState>((set, get) => ({
-  unlockedUsers: DEMO_UNLOCKED,
+export const usePrivateChatStore = create<PrivateChatState>()(
+  persist(
+    (set, get) => ({
+  unlockedUsers: [],
   isUnlocked: (userId) => get().unlockedUsers.some((u) => u.id === userId),
 
   unlockUser: (user) =>
@@ -121,19 +132,33 @@ export const usePrivateChatStore = create<PrivateChatState>((set, get) => ({
       return { unlockedUsers: [...s.unlockedUsers, user] };
     }),
 
-  conversations: [...DEMO_INCOGNITO_CONVERSATIONS],
-  messages: groupMessages(DEMO_INCOGNITO_MESSAGES),
+  conversations: [],
+  messages: {},
 
   addMessage: (conversationId, msg) =>
     set((s) => {
       const existing = s.messages[conversationId] || [];
+
+      // GOAL D2: If this is a normal user message (not ToD/system),
+      // schedule deletion for any ToD messages that don't have deleteAt yet
+      const isNormalMessage = msg.senderId !== 'tod' && msg.senderId !== 'system';
+      const updatedExisting = isNormalMessage
+        ? existing.map((m) => {
+            // Only ToD messages without deleteAt get scheduled
+            if (m.senderId === 'tod' && !m.deleteAt) {
+              return { ...m, deleteAt: Date.now() + 3_600_000 }; // 1 hour
+            }
+            return m;
+          })
+        : existing;
+
       const convos = s.conversations.map((c) =>
         c.id === conversationId
           ? { ...c, lastMessage: msg.content, lastMessageAt: msg.createdAt }
           : c
       );
       return {
-        messages: { ...s.messages, [conversationId]: [...existing, msg] },
+        messages: { ...s.messages, [conversationId]: [...updatedExisting, msg] },
         conversations: convos,
       };
     }),
@@ -150,6 +175,39 @@ export const usePrivateChatStore = create<PrivateChatState>((set, get) => ({
         c.id === conversationId ? { ...c, unreadCount: 0 } : c
       ),
     })),
+
+  deleteMessage: (conversationId, messageId) =>
+    set((s) => {
+      const msgs = s.messages[conversationId];
+      if (!msgs) return s;
+      const filtered = msgs.filter((m) => m.id !== messageId);
+      return { messages: { ...s.messages, [conversationId]: filtered } };
+    }),
+
+  removeConversation: (conversationId) =>
+    set((s) => {
+      const { [conversationId]: removed, ...remainingMessages } = s.messages;
+      return {
+        conversations: s.conversations.filter((c) => c.id !== conversationId),
+        messages: remainingMessages,
+      };
+    }),
+
+  removeConversationByParticipant: (participantId) =>
+    set((s) => {
+      const conversationIds = s.conversations
+        .filter((c) => c.participantId === participantId)
+        .map((c) => c.id);
+      const remainingMessages = { ...s.messages };
+      for (const id of conversationIds) {
+        delete remainingMessages[id];
+      }
+      return {
+        conversations: s.conversations.filter((c) => c.participantId !== participantId),
+        messages: remainingMessages,
+        unlockedUsers: s.unlockedUsers.filter((u) => u.id !== participantId),
+      };
+    }),
 
   pendingDares: DEMO_PENDING_DARES,
   sentDares: [],
@@ -233,9 +291,18 @@ export const usePrivateChatStore = create<PrivateChatState>((set, get) => ({
   blockUser: (userId) =>
     set((s) => {
       if (s.blockedUserIds.includes(userId)) return s;
+      // Find conversation IDs for this user to remove their messages
+      const conversationIds = s.conversations
+        .filter((c) => c.participantId === userId)
+        .map((c) => c.id);
+      const remainingMessages = { ...s.messages };
+      for (const id of conversationIds) {
+        delete remainingMessages[id];
+      }
       return {
         blockedUserIds: [...s.blockedUserIds, userId],
         conversations: s.conversations.filter((c) => c.participantId !== userId),
+        messages: remainingMessages,
         unlockedUsers: s.unlockedUsers.filter((u) => u.id !== userId),
       };
     }),
@@ -244,7 +311,103 @@ export const usePrivateChatStore = create<PrivateChatState>((set, get) => ({
       blockedUserIds: s.blockedUserIds.filter((id) => id !== userId),
     })),
   isBlocked: (userId) => get().blockedUserIds.includes(userId),
-}));
+
+  // Secure Photo viewing: Set viewedAt and timerEndsAt on first open
+  markSecurePhotoViewed: (conversationId, messageId) =>
+    set((s) => {
+      const msgs = s.messages[conversationId];
+      if (!msgs) return s;
+
+      const updated = msgs.map((m) => {
+        if (m.id !== messageId) return m;
+        // Already viewed - don't reset timer
+        if (m.viewedAt || m.timerEndsAt) return m;
+
+        const timer = m.protectedMedia?.timer ?? 0;
+        return {
+          ...m,
+          viewedAt: Date.now(),
+          timerEndsAt: timer > 0 ? Date.now() + timer * 1000 : undefined,
+        };
+      });
+
+      return { messages: { ...s.messages, [conversationId]: updated } };
+    }),
+
+  // Secure Photo expiry: Mark as expired and schedule deletion in 1 minute
+  markSecurePhotoExpired: (conversationId, messageId) =>
+    set((s) => {
+      const msgs = s.messages[conversationId];
+      if (!msgs) return s;
+
+      const now = Date.now();
+      const updated = msgs.map((m) => {
+        if (m.id !== messageId) return m;
+        // Already expired - don't reset timestamps
+        if (m.isExpired) return m;
+        return {
+          ...m,
+          isExpired: true,
+          expiredAt: now,
+          deleteAt: now + 60_000, // 1 minute after expiry
+        };
+      });
+
+      return { messages: { ...s.messages, [conversationId]: updated } };
+    }),
+
+  // Auto-cleanup: Remove messages past their deleteAt timestamp
+  pruneDeletedMessages: () =>
+    set((s) => {
+      const now = Date.now();
+      let changed = false;
+
+      const prunedMessages: Record<string, IncognitoMessage[]> = {};
+      for (const [convId, msgs] of Object.entries(s.messages)) {
+        const filtered = msgs.filter((m) => {
+          if (m.deleteAt && m.deleteAt <= now) {
+            changed = true;
+            return false; // Remove this message
+          }
+          return true;
+        });
+        prunedMessages[convId] = filtered;
+      }
+
+      if (!changed) return s;
+
+      if (__DEV__) {
+        const totalBefore = Object.values(s.messages).flat().length;
+        const totalAfter = Object.values(prunedMessages).flat().length;
+        console.log(`[Phase2Prune] Removed ${totalBefore - totalAfter} expired messages`);
+      }
+
+      return { messages: prunedMessages };
+    }),
+    }),
+    {
+      name: 'mira-private-chat-store',
+      storage: createJSONStorage(() => AsyncStorage),
+      partialize: (state) => ({
+        unlockedUsers: state.unlockedUsers,
+        conversations: state.conversations,
+        messages: state.messages,
+        pendingDares: state.pendingDares,
+        sentDares: state.sentDares,
+        blockedUserIds: state.blockedUserIds,
+      }),
+      // Auto-cleanup on rehydrate: remove messages past deleteAt
+      onRehydrateStorage: () => (state) => {
+        if (state) {
+          // Delay slightly to ensure store is fully initialized
+          setTimeout(() => {
+            state.pruneDeletedMessages();
+          }, 100);
+        }
+      },
+    }
+  )
+);
 
 /**
  * DEV ONLY: Full Phase 2 "Start Fresh" reset for testing.

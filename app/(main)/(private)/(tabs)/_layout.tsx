@@ -4,6 +4,14 @@ import { INCOGNITO_COLORS } from '@/lib/constants';
 
 const C = INCOGNITO_COLORS;
 
+/**
+ * Phase-2 Private Tabs Layout
+ *
+ * Note: Android back navigation is handled by the parent PrivateLayout
+ * at app/(main)/(private)/_layout.tsx which enforces the 2-step back behavior:
+ * - From any Phase-2 screen → back to Desired Land
+ * - From Desired Land → back to Phase-1 Discover
+ */
 export default function PrivateTabsLayout() {
   return (
     <Tabs

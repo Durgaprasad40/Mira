@@ -63,6 +63,10 @@ interface ConfessionThreads {
   [confessionId: string]: string; // conversationId
 }
 
+// Rate limiting constants
+const CONFESSION_RATE_LIMIT = 5; // Max confessions per 24 hours
+const RATE_LIMIT_WINDOW_MS = 24 * 60 * 60 * 1000; // 24 hours in ms
+
 interface ConfessionState {
   confessions: Confession[];
   userReactions: Record<string, string | null>; // confessionId → emoji string (one per user)
@@ -70,11 +74,15 @@ interface ConfessionState {
   secretCrushes: SecretCrush[];
   reportedIds: string[];
   blockedIds: string[];
+  blockedAuthorIds: string[]; // Users whose confessions are hidden from current user
   seeded: boolean;
   confessionThreads: ConfessionThreads; // Track threads created from confessions
 
   // Seen tracking for demo mode (tagged confessions)
   seenTaggedConfessionIds: string[];
+
+  // Rate limiting: timestamps of user's own confessions (within 24h window)
+  confessionTimestamps: number[];
 
   seedConfessions: () => void;
   addConfession: (confession: Confession) => void;
@@ -107,6 +115,28 @@ interface ConfessionState {
   cleanupExpiredSecretCrushes: (expiredIds: string[]) => void;
   /** Remove confession threads by conversation IDs */
   removeConfessionThreads: (conversationIds: string[]) => void;
+  /** Delete a confession by ID (author manual delete) */
+  deleteConfession: (confessionId: string) => void;
+  /** Connect to a confession (tagged user starts chat with author) */
+  connectToConfession: (confessionId: string, currentUserId: string) => boolean;
+  /** Check if a confession is connected */
+  isConfessionConnected: (confessionId: string) => boolean;
+  /** Track connected confessions */
+  connectedConfessionIds: string[];
+
+  // Rate limiting
+  /** Check if user can post a new confession (rate limit check) */
+  canPostConfession: () => boolean;
+  /** Get count of confessions posted in last 24h */
+  getConfessionCountToday: () => number;
+  /** Record a confession timestamp (called when posting) */
+  recordConfessionTimestamp: () => void;
+
+  // Block author (hide their confessions from me)
+  /** Block an author - hide their confessions from current user */
+  blockAuthor: (authorId: string) => void;
+  /** Check if an author is blocked */
+  isAuthorBlocked: (authorId: string) => boolean;
 }
 
 function computeTimedRevealAt(option: TimedRevealOption): number | null {
@@ -124,9 +154,12 @@ export const useConfessionStore = create<ConfessionState>()(
       secretCrushes: [],
       reportedIds: [],
       blockedIds: [],
+      blockedAuthorIds: [],
       seeded: false,
       confessionThreads: {},
       seenTaggedConfessionIds: [],
+      connectedConfessionIds: [],
+      confessionTimestamps: [],
 
       seedConfessions: () => {
         if (get().seeded) {
@@ -528,6 +561,153 @@ export const useConfessionStore = create<ConfessionState>()(
         const dmStore = useDemoDmStore.getState();
         dmStore.deleteConversations(conversationIds);
       },
+
+      deleteConfession: (confessionId) => {
+        const state = get();
+        // Remove from confessions array
+        const confessions = state.confessions.filter((c) => c.id !== confessionId);
+        // Remove user reaction for this confession
+        const userReactions = { ...state.userReactions };
+        delete userReactions[confessionId];
+        // Remove confession thread if exists
+        const confessionThreads = { ...state.confessionThreads };
+        const convoId = confessionThreads[confessionId];
+        delete confessionThreads[confessionId];
+        // Update state
+        set({ confessions, userReactions, confessionThreads });
+        // Clean up related DM thread if it existed
+        if (convoId) {
+          const dmStore = useDemoDmStore.getState();
+          dmStore.deleteConversations([convoId]);
+        }
+      },
+
+      isConfessionConnected: (confessionId) => {
+        return get().connectedConfessionIds.includes(confessionId);
+      },
+
+      connectToConfession: (confessionId, currentUserId) => {
+        const state = get();
+        const confession = state.confessions.find((c) => c.id === confessionId);
+
+        // Hard gate: only tagged user can connect
+        if (!confession || confession.targetUserId !== currentUserId) {
+          return false;
+        }
+
+        // Idempotency: already connected?
+        if (state.connectedConfessionIds.includes(confessionId)) {
+          return true; // Already connected, don't create duplicate
+        }
+
+        // Create a conversation thread in the DM store
+        const convoId = `demo_convo_connect_${confessionId}`;
+        const dmStore = useDemoDmStore.getState();
+        const demoStore = useDemoStore.getState();
+        const now = Date.now();
+        const TWENTY_FOUR_HOURS = 24 * 60 * 60 * 1000;
+
+        const otherUserName = confession.isAnonymous
+          ? 'Anonymous Confessor'
+          : (confession.authorName || 'Someone');
+
+        // Seed conversation with initial system message
+        dmStore.seedConversation(convoId, [{
+          _id: `sys_connect_${confessionId}`,
+          content: `💬 You connected with ${otherUserName} on their confession`,
+          type: 'system',
+          senderId: 'system',
+          createdAt: now,
+        }]);
+
+        dmStore.setMeta(convoId, {
+          otherUser: {
+            id: confession.userId,
+            name: otherUserName,
+            lastActive: now,
+            isVerified: false,
+          },
+          isPreMatch: true,
+          isConfessionChat: true,
+          expiresAt: now + TWENTY_FOUR_HOURS,
+        });
+
+        // Add to matches so it appears in Messages list
+        const newMatch: DemoMatch = {
+          id: `match_connect_${confessionId}`,
+          conversationId: convoId,
+          otherUser: {
+            id: confession.userId,
+            name: otherUserName,
+            photoUrl: confession.authorPhotoUrl || '',
+            lastActive: now,
+            isVerified: false,
+          },
+          lastMessage: {
+            content: `💬 Connected via confession`,
+            type: 'system',
+            senderId: 'system',
+            createdAt: now,
+          },
+          unreadCount: 0,
+          isPreMatch: true,
+        };
+        demoStore.addMatch(newMatch);
+
+        // Mark as connected
+        set({
+          connectedConfessionIds: [...state.connectedConfessionIds, confessionId],
+        });
+
+        return true;
+      },
+
+      // ── Rate Limiting ──
+
+      canPostConfession: () => {
+        const state = get();
+        const now = Date.now();
+        // Filter timestamps within the 24h window
+        const recentTimestamps = state.confessionTimestamps.filter(
+          (ts) => now - ts < RATE_LIMIT_WINDOW_MS
+        );
+        return recentTimestamps.length < CONFESSION_RATE_LIMIT;
+      },
+
+      getConfessionCountToday: () => {
+        const state = get();
+        const now = Date.now();
+        return state.confessionTimestamps.filter(
+          (ts) => now - ts < RATE_LIMIT_WINDOW_MS
+        ).length;
+      },
+
+      recordConfessionTimestamp: () => {
+        const state = get();
+        const now = Date.now();
+        // Clean up old timestamps and add new one
+        const recentTimestamps = state.confessionTimestamps.filter(
+          (ts) => now - ts < RATE_LIMIT_WINDOW_MS
+        );
+        set({
+          confessionTimestamps: [...recentTimestamps, now],
+        });
+      },
+
+      // ── Block Author ──
+
+      blockAuthor: (authorId) => {
+        const state = get();
+        if (state.blockedAuthorIds.includes(authorId)) return;
+        set({
+          blockedAuthorIds: [...state.blockedAuthorIds, authorId],
+        });
+        if (__DEV__) console.log('[CONFESS] confess_blocked_user:', authorId);
+      },
+
+      isAuthorBlocked: (authorId) => {
+        return get().blockedAuthorIds.includes(authorId);
+      },
     }),
     {
       name: 'confession-store',
@@ -539,9 +719,12 @@ export const useConfessionStore = create<ConfessionState>()(
         secretCrushes: state.secretCrushes,
         reportedIds: state.reportedIds,
         blockedIds: state.blockedIds,
+        blockedAuthorIds: state.blockedAuthorIds,
         seeded: state.seeded,
         confessionThreads: state.confessionThreads,
         seenTaggedConfessionIds: state.seenTaggedConfessionIds,
+        connectedConfessionIds: state.connectedConfessionIds,
+        confessionTimestamps: state.confessionTimestamps,
       }),
     }
   )

@@ -178,7 +178,7 @@ export default function MessagesScreen() {
             <TouchableOpacity
               style={styles.superLikeItem}
               activeOpacity={0.7}
-              onPress={() => router.push(`/profile/${item.userId}` as any)}
+              onPress={() => router.push(`/(main)/profile/${item.userId}` as any)}
             >
               <View style={styles.superLikeAvatarContainer}>
                 <View style={styles.superLikeRing}>
@@ -238,7 +238,7 @@ export default function MessagesScreen() {
             <TouchableOpacity
               style={styles.likeItem}
               activeOpacity={0.7}
-              onPress={() => router.push(`/profile/${item.userId}` as any)}
+              onPress={() => router.push(`/(main)/profile/${item.userId}` as any)}
             >
               <View style={styles.likeAvatarContainer}>
                 {item.photoUrl && !item.isBlurred ? (
@@ -436,9 +436,9 @@ export default function MessagesScreen() {
         ListEmptyComponent={
           <View style={styles.emptyContainer}>
             <Ionicons name="chatbubbles-outline" size={64} color={COLORS.textLight} />
-            <Text style={styles.emptyTitle}>No messages yet</Text>
+            <Text style={styles.emptyTitle}>No chats yet</Text>
             <Text style={styles.emptySubtitle}>
-              When you match or start a chat, it will appear here.
+              Match with someone or accept a confession to start chatting.
             </Text>
           </View>
         }

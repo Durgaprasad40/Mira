@@ -1,6 +1,6 @@
 import React, { useEffect, useRef } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, BackHandler, Platform } from 'react-native';
-import { Stack, useRouter, useNavigation } from 'expo-router';
+import { Stack, useRouter, useNavigation, usePathname, useSegments } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { useQuery } from 'convex/react';
@@ -15,8 +15,26 @@ import { setPhase2Active } from '@/hooks/useNotifications';
 
 const C = INCOGNITO_COLORS;
 
+// Phase-2 Back Navigation Constants
+const PHASE2_HOME_ROUTE = '/(main)/(private)/(tabs)/desire-land';
+const PHASE1_DISCOVER_ROUTE = '/(main)/(tabs)/home';
+
+// Phase-2 tab root screens (BackGuard ONLY intercepts on these)
+// Nested screens (chat detail, etc.) use normal back behavior
+const PHASE2_TAB_ROOTS = new Set([
+  'desire-land',
+  'chats',
+  'chat-rooms',
+  'truth-or-dare',
+  'private-profile',
+  'confess',
+  'rooms',
+]);
+
 export default function PrivateLayout() {
   const router = useRouter();
+  const pathname = usePathname();
+  const segments = useSegments();
   const insets = useSafeAreaInsets();
   const ageConfirmed18Plus = useIncognitoStore((s) => s.ageConfirmed18Plus);
   const acceptPrivateTerms = useIncognitoStore((s) => s.acceptPrivateTerms);
@@ -26,6 +44,20 @@ export default function PrivateLayout() {
   // when this screen is about to be popped from the (main) stack.
   const navigation = useNavigation();
   const isExitingRef = useRef(false);
+
+  // Back navigation guards (Android only)
+  const lastBackAtRef = useRef(0);
+  const isNavigatingRef = useRef(false);
+
+  // 🚨 CRITICAL: Collapse phantom "/" route inside Phase-2
+  // Expo Router creates an implicit "/" entry before the real Phase-2 home.
+  // This causes double back gestures. Normalize immediately to desire-land.
+  useEffect(() => {
+    const segmentStrings = segments as string[];
+    if (pathname === '/' && segmentStrings.includes('(private)')) {
+      router.replace(PHASE2_HOME_ROUTE);
+    }
+  }, [pathname, segments, router]);
 
   // Phase 2 isolation: Set module-level flag to block Phase 1-only notifications
   useEffect(() => {
@@ -57,15 +89,87 @@ export default function PrivateLayout() {
     return unsub;
   }, [navigation, router]);
 
-  // 2) Android hardware back — extra safety net.
+  // 2) Android hardware back — Phase-2 Tab-to-Tab Back Controller
+  //    ONLY intercepts back on Phase-2 TAB ROOT screens.
+  //    Nested screens (chat detail, modals, etc.) use normal back behavior.
+  //
+  //    Tab root behavior:
+  //    - From any Phase-2 tab root (except desire-land) → go to desire-land
+  //    - From desire-land → go to Phase-1 Discover
+  //
+  //    Note: segments/pathname are captured in closure; useEffect re-registers handler when they change.
   useEffect(() => {
     if (Platform.OS !== 'android') return;
+
+    // Verify we're actually inside Phase-2 using segments
+    const segmentStrings = segments as string[];
+    const isInPhase2 = segmentStrings.includes('(private)');
+    if (!isInPhase2) return;
+
     const handler = BackHandler.addEventListener('hardwareBackPress', () => {
-      exitToHome();
-      return true; // block default (app exit)
+      // Get the last segment to check if we're on a tab root
+      const lastSegment = segmentStrings[segmentStrings.length - 1];
+      const isOnPhase2TabRoot = PHASE2_TAB_ROOTS.has(lastSegment);
+
+      // If NOT on a tab root (e.g., chat detail, nested screen), let normal back happen
+      if (!isOnPhase2TabRoot) {
+        if (__DEV__) {
+          console.log('[BackGuard] not on tab root, allowing normal back:', lastSegment);
+        }
+        return false; // Let native/router handle it
+      }
+
+      const now = Date.now();
+
+      // Debounce: ignore rapid back presses (< 600ms apart)
+      if (now - lastBackAtRef.current < 600) {
+        if (__DEV__) {
+          console.log('[BackGuard] debounced, ignoring');
+        }
+        return true; // Consume but don't act
+      }
+
+      // Transition lock: ignore if already navigating
+      if (isNavigatingRef.current) {
+        if (__DEV__) {
+          console.log('[BackGuard] transition locked, ignoring');
+        }
+        return true; // Consume but don't act
+      }
+
+      // Determine target based on current tab root
+      const isOnPhase2Home = lastSegment === 'desire-land';
+      const targetRoute = isOnPhase2Home ? PHASE1_DISCOVER_ROUTE : PHASE2_HOME_ROUTE;
+
+      // Prevent redundant navigation to same route
+      if (pathname === targetRoute) {
+        if (__DEV__) {
+          console.log('[BackGuard] already at target, ignoring');
+        }
+        return true; // Consume but don't act
+      }
+
+      // Set locks
+      lastBackAtRef.current = now;
+      isNavigatingRef.current = true;
+
+      if (__DEV__) {
+        console.log('[BackGuard] tab-to-tab:', lastSegment, '→', targetRoute);
+      }
+
+      // Navigate using replace() for tab-to-tab (no extra stack entries)
+      router.replace(targetRoute);
+
+      // Release transition lock after navigation settles
+      setTimeout(() => {
+        isNavigatingRef.current = false;
+      }, 400);
+
+      return true; // We handled it
     });
+
     return () => handler.remove();
-  }, [router]);
+  }, [router, pathname, segments]);
 
   const isSetupComplete = usePrivateProfileStore((s) => s.isSetupComplete);
   const hasHydrated = usePrivateProfileStore((s) => s._hasHydrated);

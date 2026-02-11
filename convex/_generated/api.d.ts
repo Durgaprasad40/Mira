@@ -12,6 +12,7 @@ import type * as adminLog from "../adminLog.js";
 import type * as auth from "../auth.js";
 import type * as behaviorDetection from "../behaviorDetection.js";
 import type * as chatRooms from "../chatRooms.js";
+import type * as chatTod from "../chatTod.js";
 import type * as cleanup from "../cleanup.js";
 import type * as confessions from "../confessions.js";
 import type * as contentModeration from "../contentModeration.js";
@@ -46,6 +47,7 @@ import type * as trustScore from "../trustScore.js";
 import type * as truthDare from "../truthDare.js";
 import type * as users from "../users.js";
 import type * as verification from "../verification.js";
+import type * as verificationProviders from "../verificationProviders.js";
 
 import type {
   ApiFromModules,
@@ -58,6 +60,7 @@ declare const fullApi: ApiFromModules<{
   auth: typeof auth;
   behaviorDetection: typeof behaviorDetection;
   chatRooms: typeof chatRooms;
+  chatTod: typeof chatTod;
   cleanup: typeof cleanup;
   confessions: typeof confessions;
   contentModeration: typeof contentModeration;
@@ -92,6 +95,7 @@ declare const fullApi: ApiFromModules<{
   truthDare: typeof truthDare;
   users: typeof users;
   verification: typeof verification;
+  verificationProviders: typeof verificationProviders;
 }>;
 
 /**

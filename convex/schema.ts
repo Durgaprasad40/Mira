@@ -657,6 +657,9 @@ export default defineSchema({
     .index('by_user', ['userId']),
 
   // Private Profiles table (Face 2 / Private Mode)
+  // NOTE: Phase-2 profile is stored SEPARATELY from Phase-1.
+  // Only minimal data is imported from Phase-1 during setup (name, age, hobbies, photos, verification).
+  // After setup, Phase-2 screens read ONLY from this table, not Phase-1 data.
   userPrivateProfiles: defineTable({
     userId: v.id('users'),
     isPrivateEnabled: v.boolean(),
@@ -675,6 +678,9 @@ export default defineSchema({
     gender: v.string(),
     revealPolicy: v.optional(v.union(v.literal('mutual_only'), v.literal('request_based'))),
     isSetupComplete: v.boolean(),
+    // Phase-1 imported fields (read-only after import, stored in Phase-2 for isolation)
+    hobbies: v.optional(v.array(v.string())),
+    isVerified: v.optional(v.boolean()),
     createdAt: v.number(),
     updatedAt: v.number(),
   })
@@ -886,6 +892,45 @@ export default defineSchema({
     .index('by_user_other', ['userId', 'otherUserId'])
     .index('by_user_createdAt', ['userId', 'createdAt'])
     .index('by_expires', ['expiresAt']),
+
+  // Chat Truth-or-Dare Games table (mandatory in-chat T&D game)
+  chatTodGames: defineTable({
+    conversationId: v.string(),
+    participant1Id: v.string(),
+    participant2Id: v.string(),
+    chooserUserId: v.union(v.string(), v.null()),
+    responderUserId: v.union(v.string(), v.null()),
+    promptType: v.union(v.literal('truth'), v.literal('dare'), v.null()),
+    promptText: v.union(v.string(), v.null()),
+    participant1Skips: v.number(),
+    participant2Skips: v.number(),
+    currentRound: v.number(),
+    roundPhase: v.union(
+      v.literal('idle'),
+      v.literal('spinning'),
+      v.literal('choosing'),
+      v.literal('writing'),
+      v.literal('answering'),
+      v.literal('round_complete'),
+      v.literal('unlocked')
+    ),
+    isMandatoryComplete: v.boolean(),
+    lastAnswerType: v.union(
+      v.literal('text'),
+      v.literal('voice'),
+      v.literal('photo'),
+      v.literal('video'),
+      v.null()
+    ),
+    lastAnswerText: v.union(v.string(), v.null()),
+    lastAnswerMediaUri: v.union(v.string(), v.null()),
+    lastAnswerDurationSec: v.union(v.number(), v.null()),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index('by_conversation', ['conversationId'])
+    .index('by_participant1', ['participant1Id'])
+    .index('by_participant2', ['participant2Id']),
 
   // Admin Logs table (audit trail for moderation/admin actions)
   adminLogs: defineTable({

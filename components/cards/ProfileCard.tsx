@@ -8,9 +8,18 @@ import {
 } from 'react-native';
 import { Image } from 'expo-image';
 import { Ionicons } from '@expo/vector-icons';
-import { COLORS, INCOGNITO_COLORS } from '@/lib/constants';
+import { COLORS, INCOGNITO_COLORS, RELATIONSHIP_INTENTS } from '@/lib/constants';
 import type { TrustBadge } from '@/lib/trustBadges';
 import { PRIVATE_INTENT_CATEGORIES } from '@/lib/privateConstants';
+
+// Gender labels for "Looking for" display
+const GENDER_LABELS: Record<string, string> = {
+  male: 'Men',
+  female: 'Women',
+  non_binary: 'Non-binary',
+  lesbian: 'Women',
+  other: 'Everyone',
+};
 
 export interface ProfileCardProps {
   name: string;
@@ -32,8 +41,12 @@ export interface ProfileCardProps {
   onOpenProfile?: () => void;
   /** When true, photos are rendered with a blur effect (user-controlled privacy) */
   photoBlurred?: boolean;
-  /** Face 2 only: intent category key from PRIVATE_INTENT_CATEGORIES */
-  privateIntentKey?: string;
+  /** Face 2 only: intent category keys from PRIVATE_INTENT_CATEGORIES (array) */
+  privateIntentKeys?: string[];
+  /** Phase-1 only: Gender preferences (looking for) */
+  lookingFor?: string[];
+  /** Phase-1 only: Relationship intent keys */
+  relationshipIntent?: string[];
   // Legacy props for non-Discover usage (explore grid etc.)
   user?: any;
   onPress?: () => void;
@@ -55,18 +68,46 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
   theme = 'light',
   onOpenProfile,
   photoBlurred = false,
-  privateIntentKey,
+  privateIntentKeys,
+  lookingFor,
+  relationshipIntent,
   onPress,
 }) => {
   const dark = theme === 'dark';
   const TC = dark ? INCOGNITO_COLORS : COLORS;
 
-  // Face 2 only: Look up intent category label from key
-  const intentLabel = useMemo(() => {
-    if (!dark || !privateIntentKey) return null;
-    const category = PRIVATE_INTENT_CATEGORIES.find(c => c.key === privateIntentKey);
-    return category?.label ?? null;
-  }, [dark, privateIntentKey]);
+  // Face 2 only: Look up intent category labels from keys (array)
+  const phase2IntentLabels = useMemo(() => {
+    if (!dark || !privateIntentKeys || privateIntentKeys.length === 0) return [];
+    return privateIntentKeys
+      .map(key => PRIVATE_INTENT_CATEGORIES.find(c => c.key === key))
+      .filter(Boolean)
+      .map(c => c!.label);
+  }, [dark, privateIntentKeys]);
+
+  // Phase-2: Show max 2 labels + overflow count
+  const phase2VisibleLabels = phase2IntentLabels.slice(0, 2);
+  const phase2OverflowCount = phase2IntentLabels.length > 2 ? phase2IntentLabels.length - 2 : 0;
+
+  // Phase-1 only: Compute "Looking for" text
+  const lookingForText = useMemo(() => {
+    if (dark || !lookingFor || lookingFor.length === 0) return null;
+    if (lookingFor.length >= 3) return 'Looking for: Everyone';
+    const labels = lookingFor.map(g => GENDER_LABELS[g] || g).filter(Boolean);
+    const unique = [...new Set(labels)];
+    return unique.length > 0 ? `Looking for: ${unique.join(', ')}` : null;
+  }, [dark, lookingFor]);
+
+  // Phase-1 only: Get relationship intent labels
+  const intentLabels = useMemo(() => {
+    if (dark || !relationshipIntent || relationshipIntent.length === 0) return [];
+    return relationshipIntent
+      .map(key => RELATIONSHIP_INTENTS.find(i => i.value === key))
+      .filter(Boolean)
+      .slice(0, 2) // Show max 2 on card
+      .map(i => i!.label);
+  }, [dark, relationshipIntent]);
+
   const [photoIndex, setPhotoIndex] = useState(0);
   // 7-1: Track image load errors to show placeholder on failure
   const [imageError, setImageError] = useState(false);
@@ -195,9 +236,35 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
               {isVerified && <Text style={styles.verified}>✔︎</Text>}
             </View>
             {!!city && <Text style={styles.city}>{city}</Text>}
-            {/* Face 2 only: Intent category label */}
-            {intentLabel && (
-              <Text style={styles.intentLabel}>{intentLabel}</Text>
+            {/* Phase-1 only: Looking for + intent chips */}
+            {!dark && (lookingForText || intentLabels.length > 0) && (
+              <View style={styles.intentChipRow}>
+                {lookingForText && (
+                  <View style={styles.intentChip}>
+                    <Text style={styles.intentChipText}>{lookingForText}</Text>
+                  </View>
+                )}
+                {intentLabels.map((label, idx) => (
+                  <View key={idx} style={styles.intentChip}>
+                    <Text style={styles.intentChipText}>{label}</Text>
+                  </View>
+                ))}
+              </View>
+            )}
+            {/* Face 2 only: Intent category chips (up to 2 + overflow) */}
+            {dark && phase2VisibleLabels.length > 0 && (
+              <View style={styles.phase2IntentRow}>
+                {phase2VisibleLabels.map((label, idx) => (
+                  <View key={idx} style={styles.phase2IntentChip}>
+                    <Text style={styles.phase2IntentText}>{label}</Text>
+                  </View>
+                ))}
+                {phase2OverflowCount > 0 && (
+                  <View style={styles.phase2IntentChip}>
+                    <Text style={styles.phase2IntentText}>+{phase2OverflowCount}</Text>
+                  </View>
+                )}
+              </View>
             )}
           </View>
           {!!distance && (
@@ -363,6 +430,48 @@ const styles = StyleSheet.create({
     textShadowColor: 'rgba(0,0,0,0.5)',
     textShadowOffset: { width: 0, height: 1 },
     textShadowRadius: 3,
+  },
+  // Phase-2 intent chips row (up to 2 + overflow)
+  phase2IntentRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 4,
+    marginTop: 4,
+  },
+  phase2IntentChip: {
+    backgroundColor: 'rgba(155,89,182,0.3)',
+    borderRadius: 10,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+  },
+  phase2IntentText: {
+    fontSize: 11,
+    fontWeight: '500',
+    color: COLORS.white,
+    textShadowColor: 'rgba(0,0,0,0.4)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 2,
+  },
+  // Phase-1 intent chips row
+  intentChipRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 4,
+    marginTop: 4,
+  },
+  intentChip: {
+    backgroundColor: 'rgba(255,255,255,0.2)',
+    borderRadius: 10,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+  },
+  intentChipText: {
+    fontSize: 11,
+    fontWeight: '500',
+    color: COLORS.white,
+    textShadowColor: 'rgba(0,0,0,0.4)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 2,
   },
   distance: {
     fontSize: 13,

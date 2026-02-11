@@ -15,10 +15,13 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 export interface DemoDmMessage {
   _id: string;
   content: string;
-  type: string;
+  type: string; // 'text' | 'image' | 'template' | 'dare' | 'voice'
   senderId: string;
   createdAt: number;
   readAt?: number;
+  // Voice message fields
+  audioUri?: string;
+  durationMs?: number;
 }
 
 /** Lightweight metadata so demo chat screens can render a header. */
@@ -60,6 +63,9 @@ interface DemoDmState {
 
   /** Mark all incoming messages in a conversation as read. */
   markConversationRead: (id: string, currentUserId: string) => void;
+
+  /** Delete a single message by ID. */
+  deleteMessage: (conversationId: string, messageId: string) => void;
 
   /** Delete a conversation and its metadata/draft entirely. */
   deleteConversation: (id: string) => void;
@@ -144,6 +150,14 @@ export const useDemoDmStore = create<DemoDmState>()(
               : m,
           );
           return { conversations: { ...s.conversations, [id]: updated } };
+        }),
+
+      deleteMessage: (conversationId, messageId) =>
+        set((s) => {
+          const msgs = s.conversations[conversationId];
+          if (!msgs) return s;
+          const filtered = msgs.filter((m) => m._id !== messageId);
+          return { conversations: { ...s.conversations, [conversationId]: filtered } };
         }),
 
       deleteConversation: (id) =>
