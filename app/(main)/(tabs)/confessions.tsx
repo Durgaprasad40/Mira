@@ -26,6 +26,19 @@ import { Ionicons } from '@expo/vector-icons';
 import { useQuery, useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import EmojiPicker from 'rn-emoji-keyboard';
+import * as Haptics from 'expo-haptics';
+
+// Safe haptic feedback helpers (guarded for unsupported devices)
+const triggerSuccessHaptic = () => {
+  try {
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+  } catch {}
+};
+const triggerWarningHaptic = () => {
+  try {
+    Haptics.notificationAsync(Haptics.NotificationFeedbackType.Warning);
+  } catch {}
+};
 import { COLORS } from '@/lib/constants';
 import { Image } from 'expo-image';
 import { isProbablyEmoji } from '@/lib/utils';
@@ -613,6 +626,9 @@ export default function ConfessionsScreen() {
     // Record timestamp for rate limiting
     recordConfessionTimestamp();
 
+    // Haptic feedback for successful post
+    triggerSuccessHaptic();
+
     setComposerSubmitting(false);
     setShowComposer(false);
     setComposerText('');
@@ -696,10 +712,12 @@ export default function ConfessionsScreen() {
                   }).catch(() => {});
                 }
               }
+              triggerWarningHaptic();
               showToastMessage('Reported', 'checkmark-circle');
             } else if (buttonIndex === 2) {
               // Block
               blockAuthor(authorId);
+              triggerWarningHaptic();
               showToastMessage('User blocked', 'checkmark-circle');
             }
           }
@@ -725,6 +743,7 @@ export default function ConfessionsScreen() {
                     }).catch(() => {});
                   }
                 }
+                triggerWarningHaptic();
                 showToastMessage('Reported', 'checkmark-circle');
               },
             },
@@ -733,6 +752,7 @@ export default function ConfessionsScreen() {
               style: 'destructive',
               onPress: () => {
                 blockAuthor(authorId);
+                triggerWarningHaptic();
                 showToastMessage('User blocked', 'checkmark-circle');
               },
             },
@@ -845,6 +865,7 @@ export default function ConfessionsScreen() {
               const success = connectToConfession(confessionId, currentUserId);
               if (success) {
                 if (__DEV__) console.log('[CONFESS] confess_connect_confirmed');
+                triggerSuccessHaptic();
                 showToastMessage('Connected! Check Messages', 'chatbubbles');
               }
             }
@@ -862,6 +883,7 @@ export default function ConfessionsScreen() {
                 const success = connectToConfession(confessionId, currentUserId);
                 if (success) {
                   if (__DEV__) console.log('[CONFESS] confess_connect_confirmed');
+                  triggerSuccessHaptic();
                   showToastMessage('Connected! Check Messages', 'chatbubbles');
                 }
               },
@@ -896,6 +918,7 @@ export default function ConfessionsScreen() {
           (buttonIndex) => {
             if (buttonIndex === 1) {
               deleteConfession(confessionId);
+              triggerWarningHaptic();
               showToastMessage('Confession deleted', 'checkmark-circle');
             }
           }
@@ -912,6 +935,7 @@ export default function ConfessionsScreen() {
               style: 'destructive',
               onPress: () => {
                 deleteConfession(confessionId);
+                triggerWarningHaptic();
                 showToastMessage('Confession deleted', 'checkmark-circle');
               },
             },

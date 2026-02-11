@@ -199,7 +199,7 @@ export default function ConfessionCard({
               previewUsed && styles.viewProfileTextUsed,
             ]}
           >
-            {previewUsed ? 'Profile viewed' : 'View their profile'}
+            {previewUsed ? 'Preview used' : 'View their profile'}
           </Text>
         </TouchableOpacity>
       )}
@@ -226,7 +226,7 @@ export default function ConfessionCard({
               isConnected && styles.connectButtonTextConnected,
             ]}
           >
-            {isConnected ? 'Connected' : 'Connect'}
+            {isConnected ? 'Chat unlocked' : 'Accept & start chat'}
           </Text>
         </TouchableOpacity>
       )}

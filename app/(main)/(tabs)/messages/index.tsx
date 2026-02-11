@@ -436,9 +436,9 @@ export default function MessagesScreen() {
         ListEmptyComponent={
           <View style={styles.emptyContainer}>
             <Ionicons name="chatbubbles-outline" size={64} color={COLORS.textLight} />
-            <Text style={styles.emptyTitle}>No messages yet</Text>
+            <Text style={styles.emptyTitle}>No chats yet</Text>
             <Text style={styles.emptySubtitle}>
-              When you match or start a chat, it will appear here.
+              Match with someone or accept a confession to start chatting.
             </Text>
           </View>
         }
