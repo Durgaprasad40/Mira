@@ -304,9 +304,13 @@ export default defineSchema({
     deliveredAt: v.optional(v.number()),
     readAt: v.optional(v.number()),
     createdAt: v.number(),
+    // BUGFIX #3: Client-provided idempotency key to prevent double-decrement on retry
+    clientMessageId: v.optional(v.string()),
   })
     .index('by_conversation', ['conversationId'])
-    .index('by_conversation_created', ['conversationId', 'createdAt']),
+    .index('by_conversation_created', ['conversationId', 'createdAt'])
+    // BUGFIX #3: Index for idempotency lookup by clientMessageId
+    .index('by_conversation_clientMessageId', ['conversationId', 'clientMessageId']),
 
   // Protected Media table (private storage references — never expose URLs)
   media: defineTable({
@@ -417,18 +421,29 @@ export default defineSchema({
     unlockExpiresAt: v.optional(v.number()),
     crossingLatitude: v.optional(v.number()),
     crossingLongitude: v.optional(v.number()),
+    // BUGFIX #28: Track last notification time to prevent duplicate notifications
+    lastNotifiedAt: v.optional(v.number()),
   })
     .index('by_user1', ['user1Id'])
     .index('by_user2', ['user2Id'])
     .index('by_users', ['user1Id', 'user2Id']),
 
   // Cross-Path History table (memory-based, privacy-first)
+  // Stores CROSSED PATHS with compatibility gate (at least one common element)
   crossPathHistory: defineTable({
     user1Id: v.id('users'),           // ordered pair (user1Id < user2Id)
     user2Id: v.id('users'),
     areaName: v.string(),             // e.g. "Near Banjara Hills"
+    // Approximate crossing location (rounded to ~500m grid for privacy)
+    crossedLatApprox: v.optional(v.number()),
+    crossedLngApprox: v.optional(v.number()),
+    // Reason tags for notification: "interest:coffee", "lookingFor:long_term"
+    reasonTags: v.optional(v.array(v.string())),
+    // Hidden by each user (manual hide/delete)
+    hiddenByUser1: v.optional(v.boolean()),
+    hiddenByUser2: v.optional(v.boolean()),
     createdAt: v.number(),
-    expiresAt: v.number(),            // auto-expire after 14 days
+    expiresAt: v.number(),            // auto-expire after 30 days
     lastNotifiedAt: v.optional(v.number()), // 24h cooldown tracking
   })
     .index('by_user1', ['user1Id'])

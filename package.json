@@ -8,7 +8,10 @@
     "ios": "expo start --ios",
     "web": "expo start --web",
     "lint": "eslint .",
-    "test": "jest"
+    "test": "jest",
+    "gen:demo-avatars": "node scripts/generateDemoAvatars.mjs",
+    "gen:demo-markers": "node scripts/generateDemoMarkers.mjs",
+    "gen:demo-clusters": "node scripts/generateDemoClusterMarkers.mjs"
   },
   "dependencies": {
     "@expo/ngrok": "^4.1.3",
@@ -48,6 +51,7 @@
     "react-dom": "19.1.0",
     "react-native": "0.81.5",
     "react-native-gesture-handler": "~2.28.0",
+    "react-native-map-clustering": "^4.0.0",
     "react-native-maps": "1.20.1",
     "react-native-reanimated": "~4.1.1",
     "react-native-safe-area-context": "~5.6.0",
@@ -62,6 +66,7 @@
   "devDependencies": {
     "@babel/core": "^7.26.0",
     "@types/react": "~19.1.0",
+    "sharp": "^0.34.5",
     "typescript": "~5.9.2"
   },
   "private": true

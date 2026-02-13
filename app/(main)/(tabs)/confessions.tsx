@@ -496,19 +496,31 @@ export default function ConfessionsScreen() {
     ]).start(() => setShowToast(false));
   }, [toastOpacity]);
 
+  // BUGFIX #24: Track pending reactions to prevent double toast on rapid taps
+  const pendingReactionsRef = useRef<Set<string>>(new Set());
+
   const toggleReaction = useCallback(
     (confessionId: string, emoji: string) => {
+      // BUGFIX #24: Debounce - skip if already processing this confession
+      const reactionKey = `${confessionId}:${emoji}`;
+      if (pendingReactionsRef.current.has(reactionKey)) return;
+      pendingReactionsRef.current.add(reactionKey);
+
+      // Clear pending after animation completes
+      setTimeout(() => pendingReactionsRef.current.delete(reactionKey), 500);
+
       if (isDemoMode) {
         const result = demoToggleReaction(confessionId, emoji, currentUserId);
         if (result?.chatUnlocked) {
           showToastMessage('Chat unlocked! Check Messages', 'chatbubbles');
           logDebugEvent('CHAT_UNLOCKED', 'Tagged user liked confession → chat unlocked');
         }
+        // BUGFIX #24: Only notify in demo mode (no duplicate with Convex)
         notifyReaction(confessionId);
         return;
       }
       const convexUserId = asUserId(currentUserId);
-      demoToggleReaction(confessionId, emoji, currentUserId);
+      // BUGFIX #24: Don't call demoToggleReaction in Convex mode - causes duplicate state updates
       if (!convexUserId) return; // no valid user id — skip mutation
       toggleReactionMutation({
         confessionId: confessionId as any,
@@ -518,10 +530,12 @@ export default function ConfessionsScreen() {
         if (result?.chatUnlocked) {
           showToastMessage('Chat unlocked! Check Messages', 'chatbubbles');
         }
-      }).catch(() => {
-        demoToggleReaction(confessionId, emoji, currentUserId);
+        // BUGFIX #24: Notify only on successful Convex mutation, not before
+        notifyReaction(confessionId);
+      }).catch((err) => {
+        console.error('[Confessions] toggleReaction failed:', err);
       });
-      notifyReaction(confessionId);
+      // BUGFIX #24: Removed duplicate notifyReaction call here
     },
     [demoToggleReaction, notifyReaction, toggleReactionMutation, currentUserId, showToastMessage]
   );
@@ -948,8 +962,10 @@ export default function ConfessionsScreen() {
 
   const isLoading = !isDemoMode && convexConfessions === undefined && demoConfessions.length === 0;
 
-  // Trending hero card (first trending confession, shown large)
-  const trendingHero = trendingConfessions.length > 0 ? trendingConfessions[0] : null;
+  // BUGFIX #20: Trending hero card with null/empty guards
+  const trendingHero = trendingConfessions.length > 0 && trendingConfessions[0]?.text
+    ? trendingConfessions[0]
+    : null;
 
   const renderListHeader = useCallback(() => (
     <View>

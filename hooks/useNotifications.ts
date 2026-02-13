@@ -6,6 +6,7 @@ import { useAuthStore } from '@/stores/authStore';
 import { isDemoMode } from '@/hooks/useConvex';
 import { asUserId } from '@/convex/id';
 import { create } from 'zustand';
+import { log } from '@/utils/logger';
 
 // Phase 1-only notification types — never shown in Phase 2 (private tabs)
 const PHASE1_ONLY_TYPES = new Set(['crossed_paths', 'nearby']);
@@ -29,6 +30,8 @@ export interface AppNotification {
   data?: Record<string, string | undefined>;
   createdAt: number;
   readAt?: number;
+  /** BUGFIX #19: Explicit expiry timestamp — if set and <= now, notification is expired */
+  expiresAt?: number;
   /** Derived convenience flag for the UI */
   isRead: boolean;
   /** Stable key used for deduplication — same key = same logical event. */
@@ -69,8 +72,8 @@ function computeDedupeKey(type: string, data?: Record<string, string | undefined
       return `match:${userId ?? 'unknown'}`;
     case 'like':
     case 'like_received':
-      // Aggregate all likes into a single daily notification
-      return 'like:daily';
+      // Per-event: each like is unique by liker's userId
+      return `like:${userId ?? 'unknown'}`;
     case 'super_like':
     case 'superlike':
     case 'super_like_received':
@@ -115,39 +118,63 @@ function isRateLimited(notifications: AppNotification[], type: string): boolean 
 }
 
 // ── Demo seed data ──────────────────────────────────────────────
+// IMPORTANT: Notification otherUserIds MUST match the userIds in:
+// - DEMO_LIKES (demoData.ts) for like notifications
+// - crossedPaths (demoStore.ts) for crossed_paths notifications
+// so that tapping a notification can find the corresponding entry.
+// BUGFIX #19: Demo notifications now include expiresAt for proper expiry filtering
+const DEMO_NOTIFICATION_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
+
 function createDemoNotifications(): AppNotification[] {
   const now = Date.now();
   return [
+    // crossed_paths notification — must match a crossedPaths entry seeded in demoStore
+    // Using demo_profile_12 which has lat/lng and will be seeded as a crossed path
     {
       _id: 'demo_notif_1',
       type: 'crossed_paths',
       title: 'Crossed paths',
-      body: 'You crossed paths with Sarah nearby.',
-      data: { otherUserId: 'demo_sarah' },
+      body: 'You crossed paths with Isha nearby.',
+      data: { otherUserId: 'demo_profile_12', crossedAt: String(now - 5 * 60 * 1000) },
       createdAt: now - 10 * 60 * 1000,
+      expiresAt: now - 10 * 60 * 1000 + DEMO_NOTIFICATION_TTL_MS, // BUGFIX #19
       isRead: false,
-      dedupeKey: 'crossed_paths:demo_sarah',
+      dedupeKey: 'crossed_paths:demo_profile_12',
     },
+    // Per-event like notifications — IDs match DEMO_LIKES in demoData.ts
     {
       _id: 'demo_notif_2',
       type: 'like_received',
-      title: 'New likes',
-      body: '3 people liked you today.',
-      data: { count: '3' },
+      title: 'New Like',
+      body: 'Kavya liked you',
+      data: { otherUserId: 'demo_superlike_kavya', likerName: 'Kavya' },
       createdAt: now - 30 * 60 * 1000,
+      expiresAt: now - 30 * 60 * 1000 + DEMO_NOTIFICATION_TTL_MS, // BUGFIX #19
       isRead: false,
-      dedupeKey: 'like:daily',
+      dedupeKey: 'like:demo_superlike_kavya',
+    },
+    {
+      _id: 'demo_notif_4',
+      type: 'like_received',
+      title: 'New Like',
+      body: 'Riya liked you',
+      data: { otherUserId: 'demo_profile_6', likerName: 'Riya' },
+      createdAt: now - 2 * 60 * 60 * 1000,
+      expiresAt: now - 2 * 60 * 60 * 1000 + DEMO_NOTIFICATION_TTL_MS, // BUGFIX #19
+      isRead: false,
+      dedupeKey: 'like:demo_profile_6',
     },
     {
       _id: 'demo_notif_3',
       type: 'super_like_received',
       title: 'Super Like',
-      body: 'Someone super-liked you!',
-      data: { otherUserId: 'demo_someone' },
+      body: 'Meera super-liked you!',
+      data: { otherUserId: 'demo_superlike_meera', likerName: 'Meera' },
       createdAt: now - 3 * 60 * 60 * 1000,
+      expiresAt: now - 3 * 60 * 60 * 1000 + DEMO_NOTIFICATION_TTL_MS, // BUGFIX #19
       isRead: true,
       readAt: now - 2 * 60 * 60 * 1000,
-      dedupeKey: 'super_like:demo_someone',
+      dedupeKey: 'super_like:demo_superlike_meera',
     },
   ];
 }
@@ -155,8 +182,17 @@ function createDemoNotifications(): AppNotification[] {
 // ── Notification expiry ─────────────────────────────────────────
 const NOTIFICATION_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
 
-/** Check if a notification is expired (older than 24 hours). */
+/**
+ * BUGFIX #19: Check if a notification is expired.
+ * 1) If expiresAt is set, use it directly (expiresAt <= now = expired)
+ * 2) Otherwise fall back to createdAt + 24h TTL
+ */
 function isExpired(notification: AppNotification, now: number = Date.now()): boolean {
+  // BUGFIX #19: Check expiresAt first if present
+  if (notification.expiresAt !== undefined) {
+    return notification.expiresAt <= now;
+  }
+  // Fallback: use createdAt + TTL
   return now - notification.createdAt > NOTIFICATION_TTL_MS;
 }
 
@@ -179,6 +215,28 @@ interface DemoNotifStore {
    * Call this on app start and when opening the notification list.
    */
   cleanupExpiredNotifications: (now?: number) => void;
+  /**
+   * Remove all like_received/super_like_received notifications for a user.
+   * Called when a Like is removed to maintain notification/like consistency.
+   */
+  removeLikeNotificationsForUser: (userId: string) => void;
+  /**
+   * Remove orphaned like notifications (those without corresponding likes).
+   * Called after seed/cleanup to enforce invariant.
+   * @param context - 'startup' for hydration/seed cleanup (logs summary), 'runtime' for active session bugs (logs per-profile)
+   */
+  removeOrphanedLikeNotifications: (validLikeUserIds: Set<string>, context?: 'startup' | 'runtime') => void;
+  /**
+   * Remove all crossed_paths notifications for a user.
+   * Called when a CrossedPath entry is removed to maintain notification/crossedPath consistency.
+   */
+  removeCrossedPathNotificationsForUser: (userId: string) => void;
+  /**
+   * Remove orphaned crossed_paths notifications (those without corresponding entries).
+   * Called after seed/cleanup to enforce invariant.
+   * @param context - 'startup' for hydration/seed cleanup (logs summary), 'runtime' for active session bugs (logs per-profile)
+   */
+  removeOrphanedCrossedPathNotifications: (validCrossedPathUserIds: Set<string>, context?: 'startup' | 'runtime') => void;
   /** Clear all notifications. */
   reset: () => void;
 }
@@ -219,9 +277,7 @@ export const useDemoNotifStore = create<DemoNotifStore>((set) => ({
   addNotification: (input: AddNotificationInput) =>
     set((state) => {
       // Creation-side guard: Block Phase 1-only notifications if currently in Phase 2
-      // This prevents crossed_paths/nearby from accumulating while in private tabs
       if (PHASE1_ONLY_TYPES.has(input.type) && _isInPhase2) {
-        if (__DEV__) console.log(`[DemoNotifStore] blocked Phase1-only type=${input.type} — currently in Phase 2`);
         return {};
       }
 
@@ -229,11 +285,9 @@ export const useDemoNotifStore = create<DemoNotifStore>((set) => ({
       const key = computeDedupeKey(input.type, input.data);
       const existingIdx = state.notifications.findIndex((n) => n.dedupeKey === key);
 
-      // ── Daily aggregation for like_received and profile_viewed ──
-      // These types use a single "daily" dedupeKey. When a new event
-      // arrives, we increment the count in the existing notification
-      // rather than creating a new row.
-      const isAggregated = key === 'like:daily' || key === 'view:daily';
+      // ── Daily aggregation for profile_viewed only ──
+      // Likes are now per-event (not aggregated). Profile views still aggregate.
+      const isAggregated = key === 'view:daily';
 
       if (existingIdx >= 0) {
         const existing = state.notifications[existingIdx];
@@ -245,9 +299,7 @@ export const useDemoNotifStore = create<DemoNotifStore>((set) => ({
           const prevCount = parseInt(existing.data?.count ?? '1', 10);
           const newCount = prevCount + 1;
           mergedData = { ...mergedData, count: String(newCount) };
-          if (input.type === 'like_received' || input.type === 'like') {
-            body = newCount === 1 ? 'Someone liked you.' : `${newCount} people liked you today.`;
-          } else if (input.type === 'profile_viewed') {
+          if (input.type === 'profile_viewed') {
             body = newCount === 1 ? 'Someone viewed your profile.' : `${newCount} people viewed your profile today.`;
           }
         }
@@ -258,18 +310,18 @@ export const useDemoNotifStore = create<DemoNotifStore>((set) => ({
           body,
           data: mergedData,
           createdAt: now,
+          // BUGFIX #19: Refresh expiresAt when notification is updated
+          expiresAt: now + NOTIFICATION_TTL_MS,
           readAt: undefined,
           isRead: false,
           dedupeKey: key,
         };
         const rest = state.notifications.filter((_, i) => i !== existingIdx);
-        if (__DEV__) console.log(`[DemoNotifStore] dedupe hit key=${key} — updating existing`);
         return { notifications: [updated, ...rest] };
       }
 
-      // ── Rate limiting: if type already hit daily cap, force-aggregate ──
+      // ── Rate limiting: if type already hit daily cap, skip ──
       if (!isAggregated && isRateLimited(state.notifications, input.type)) {
-        if (__DEV__) console.log(`[DemoNotifStore] rate-limited type=${input.type} — skipping`);
         return {};
       }
 
@@ -285,10 +337,12 @@ export const useDemoNotifStore = create<DemoNotifStore>((set) => ({
         body: input.body,
         data,
         createdAt: now,
+        // BUGFIX #19: Set expiresAt for proper expiry filtering
+        expiresAt: now + NOTIFICATION_TTL_MS,
         isRead: false,
         dedupeKey: key,
       };
-      if (__DEV__) console.log(`[DemoNotifStore] new notification key=${key}`);
+      log.info('[NOTIF]', 'created', { type: input.type });
       return { notifications: [notif, ...state.notifications] };
     }),
   cleanupExpiredNotifications: (now: number = Date.now()) =>
@@ -296,10 +350,95 @@ export const useDemoNotifStore = create<DemoNotifStore>((set) => ({
       const before = state.notifications.length;
       const filtered = state.notifications.filter((n) => !isExpired(n, now));
       const removed = before - filtered.length;
-      if (removed > 0 && __DEV__) {
-        console.log(`[DemoNotifStore] cleaned up ${removed} expired notification(s)`);
+      if (removed > 0) {
+        log.debug('[NOTIF]', 'cleanup', { removed });
       }
       return removed > 0 ? { notifications: filtered } : {};
+    }),
+  removeLikeNotificationsForUser: (userId: string) =>
+    set((state) => {
+      const likeTypes = new Set(['like', 'like_received', 'super_like', 'superlike', 'super_like_received']);
+      const filtered = state.notifications.filter((n) => {
+        if (!likeTypes.has(n.type)) return true;
+        return n.data?.otherUserId !== userId;
+      });
+      return { notifications: filtered };
+    }),
+  removeOrphanedLikeNotifications: (validLikeUserIds: Set<string>, context: 'startup' | 'runtime' = 'runtime') =>
+    set((state) => {
+      const likeTypes = new Set(['like', 'like_received', 'super_like', 'superlike', 'super_like_received']);
+      const orphanedIds: string[] = [];
+      // BUGFIX #35: Capture cleanup start time to avoid deleting notifications created in same tick
+      const cleanupStartTime = Date.now() - 100; // 100ms grace period
+      const filtered = state.notifications.filter((n) => {
+        if (!likeTypes.has(n.type)) return true;
+        const userId = n.data?.otherUserId;
+        if (!userId) return true;
+        // BUGFIX #35: Don't delete notifications created after cleanup started
+        if (n.createdAt && n.createdAt > cleanupStartTime) return true;
+        const isValid = validLikeUserIds.has(userId);
+        if (!isValid) {
+          orphanedIds.push(userId);
+        }
+        return isValid;
+      });
+
+      // Log based on context
+      if (orphanedIds.length > 0) {
+        if (context === 'startup') {
+          // Startup cleanup — log one summary, not per-profile warnings
+          log.once('orphan-like-cleanup', '[DEMO]', 'cleaned orphan like notifications', { count: orphanedIds.length });
+        } else {
+          // Runtime — real bug, log each orphan
+          for (const profileId of orphanedIds) {
+            log.warn('[BUG]', 'like_notification_without_like', { profileId });
+          }
+        }
+      }
+
+      return { notifications: filtered };
+    }),
+  removeCrossedPathNotificationsForUser: (userId: string) =>
+    set((state) => {
+      const filtered = state.notifications.filter((n) => {
+        if (n.type !== 'crossed_paths') return true;
+        return n.data?.otherUserId !== userId;
+      });
+      return { notifications: filtered };
+    }),
+  removeOrphanedCrossedPathNotifications: (validCrossedPathUserIds: Set<string>, context: 'startup' | 'runtime' = 'runtime') =>
+    set((state) => {
+      const orphanedIds: string[] = [];
+      // BUGFIX #35: Capture cleanup start time to avoid deleting notifications created in same tick
+      const cleanupStartTime = Date.now() - 100; // 100ms grace period
+      const filtered = state.notifications.filter((n) => {
+        if (n.type !== 'crossed_paths') return true;
+        const userId = n.data?.otherUserId;
+        // Keep notifications without otherUserId (legacy/generic crossed paths)
+        if (!userId) return true;
+        // BUGFIX #35: Don't delete notifications created after cleanup started
+        if (n.createdAt && n.createdAt > cleanupStartTime) return true;
+        const isValid = validCrossedPathUserIds.has(userId);
+        if (!isValid) {
+          orphanedIds.push(userId);
+        }
+        return isValid;
+      });
+
+      // Log based on context
+      if (orphanedIds.length > 0) {
+        if (context === 'startup') {
+          // Startup cleanup — log one summary, not per-profile warnings
+          log.once('orphan-crossed-paths-cleanup', '[DEMO]', 'cleaned orphan crossed_paths notifications', { count: orphanedIds.length });
+        } else {
+          // Runtime — real bug, log each orphan
+          for (const profileId of orphanedIds) {
+            log.warn('[BUG]', 'crossed_paths_notification_without_entry', { profileId });
+          }
+        }
+      }
+
+      return { notifications: filtered };
     }),
   reset: () => set({ notifications: [] }),
 }));
@@ -329,6 +468,55 @@ export function useNotifications() {
   // Detect if we're in Phase 2 (private tabs) — filter out Phase 1-only notifications
   const segments = useSegments();
   const isInPhase2 = segments.includes('(private)' as never);
+
+  // BUGFIX #32: Track mounted state to prevent state updates after unmount
+  const isMountedRef = useRef(true);
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => { isMountedRef.current = false; };
+  }, []);
+
+  // ORDERING FIX: In demo mode, wait for demoStore to be seeded before showing notifications
+  // This ensures orphan cleanup runs before notification counts are computed
+  // Import dynamically to avoid circular dependency
+  const [demoStoreReady, setDemoStoreReady] = useState(!isDemoMode);
+  useEffect(() => {
+    if (!isDemoMode) return;
+
+    // Check if demoStore is ready (hydrated and seeded)
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { useDemoStore } = require('@/stores/demoStore') as {
+      useDemoStore: { getState: () => { _hasHydrated: boolean; seeded: boolean; seed: () => void } };
+    };
+
+    const checkReady = () => {
+      const state = useDemoStore.getState();
+      if (state._hasHydrated) {
+        // Trigger seed to run orphan cleanup
+        state.seed();
+        if (state.seeded) {
+          // BUGFIX #32: Check mounted before state update
+          if (isMountedRef.current) {
+            setDemoStoreReady(true);
+          }
+          return true;
+        }
+      }
+      return false;
+    };
+
+    // Check immediately
+    if (checkReady()) return;
+
+    // Poll until ready (hydration + seed typically completes within a few frames)
+    const interval = setInterval(() => {
+      if (checkReady()) {
+        clearInterval(interval);
+      }
+    }, 50);
+
+    return () => clearInterval(interval);
+  }, []);
 
   // ── Convex queries (skipped in demo mode) ──
   const convexNotifications = useQuery(
@@ -362,6 +550,8 @@ export function useNotifications() {
         data: n.data,
         createdAt: n.createdAt,
         readAt: n.readAt,
+        // BUGFIX #19: Include expiresAt for proper expiry filtering
+        expiresAt: n.expiresAt,
         isRead: !!n.readAt,
       })),
     [convexSafe],
@@ -375,27 +565,37 @@ export function useNotifications() {
   const [stableNow, setStableNow] = useState(nowMinute);
   useEffect(() => {
     // Update every minute to catch newly expired notifications
+    // BUGFIX #32: Check mounted before state update
     const interval = setInterval(() => {
-      setStableNow(Math.floor(Date.now() / 60000) * 60000);
+      if (isMountedRef.current) {
+        setStableNow(Math.floor(Date.now() / 60000) * 60000);
+      }
     }, 60000);
     return () => clearInterval(interval);
   }, []);
 
-  // 4-5: Track pending optimistic reads for rollback on error
-  const [pendingReads, setPendingReads] = useState<Set<string>>(new Set());
+  // BUGFIX #33: Use ref instead of state to avoid setState warnings on unmount
+  // Ref is safe: updates don't cause re-renders, but Convex query updates will trigger re-render anyway
+  const pendingReadsRef = useRef<Set<string>>(new Set());
+  // Force re-render trigger for optimistic UI updates
+  const [, forceUpdate] = useState(0);
 
   const filteredDemoNotifs = useMemo(
     () => demoNotifs.filter((n) => !isExpired(n, stableNow) && !n.isRead),
     [demoNotifs, stableNow],
   );
-  // 4-5: Filter out pending reads (optimistically marked as read) from Convex notifications
+  // BUGFIX #33: Filter out pending reads using ref (checked on each render)
   const filteredConvexNotifs = useMemo(
-    () => mappedConvex.filter((n) => !n.isRead && !isExpired(n, stableNow) && !pendingReads.has(n._id)),
-    [mappedConvex, stableNow, pendingReads],
+    () => mappedConvex.filter((n) => !n.isRead && !isExpired(n, stableNow) && !pendingReadsRef.current.has(n._id)),
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- pendingReadsRef.current is intentionally not a dep
+    [mappedConvex, stableNow],
   );
 
   // Phase 2 isolation: filter out Phase 1-only notification types when in private tabs
-  const baseNotifications = isDemoMode ? filteredDemoNotifs : filteredConvexNotifs;
+  // ORDERING FIX: In demo mode, return empty array until demoStore is seeded (orphan cleanup complete)
+  const baseNotifications = isDemoMode
+    ? (demoStoreReady ? filteredDemoNotifs : EMPTY_ARRAY)
+    : filteredConvexNotifs;
   const notifications: AppNotification[] = useMemo(
     () => isInPhase2 ? baseNotifications.filter((n) => !PHASE1_ONLY_TYPES.has(n.type)) : baseNotifications,
     [baseNotifications, isInPhase2],
@@ -427,7 +627,7 @@ export function useNotifications() {
   }, [convexUserId, markAllAsReadMutation, demoMarkAllRead]);
 
   // ── Mark single notification as read ──
-  // 4-5: Implements optimistic update with rollback on error
+  // BUGFIX #33: Uses ref for pending reads to avoid setState on unmount warnings
   const markRead = useCallback(
     (notificationId: string) => {
       if (isDemoMode) {
@@ -435,29 +635,23 @@ export function useNotifications() {
         return;
       }
       if (convexUserId) {
-        // 4-5: Optimistically add to pending reads
-        setPendingReads((prev) => new Set(prev).add(notificationId));
+        // BUGFIX #33: Add to ref and force re-render for optimistic UI
+        pendingReadsRef.current.add(notificationId);
+        forceUpdate((n) => n + 1);
 
         markAsReadMutation({
           notificationId: notificationId as any,
           userId: convexUserId,
         })
           .then(() => {
-            // 4-5: Remove from pending on success (Convex will update the query)
-            setPendingReads((prev) => {
-              const next = new Set(prev);
-              next.delete(notificationId);
-              return next;
-            });
+            // BUGFIX #33: Remove from ref on success (Convex query update triggers re-render)
+            pendingReadsRef.current.delete(notificationId);
           })
           .catch((error) => {
-            // 4-5: Rollback on error — remove from pending, notification stays unread
+            // BUGFIX #33: Remove from ref on error (rollback) and force re-render to show notification again
             console.error('[useNotifications] markRead failed, rolling back:', error);
-            setPendingReads((prev) => {
-              const next = new Set(prev);
-              next.delete(notificationId);
-              return next;
-            });
+            pendingReadsRef.current.delete(notificationId);
+            forceUpdate((n) => n + 1);
           });
       }
     },
