@@ -81,6 +81,9 @@ interface PrivateChatState {
   pruneDeletedMessages: () => void;
 }
 
+// BUGFIX #45: Module-level timeout ID for cancellable prune
+let _pruneTimeoutId: ReturnType<typeof setTimeout> | null = null;
+
 // Group demo messages by conversationId
 function groupMessages(msgs: IncognitoMessage[]): Record<string, IncognitoMessage[]> {
   const grouped: Record<string, IncognitoMessage[]> = {};
@@ -396,14 +399,22 @@ export const usePrivateChatStore = create<PrivateChatState>()(
         sentDares: state.sentDares,
         blockedUserIds: state.blockedUserIds,
       }),
-      // Auto-cleanup on rehydrate: remove messages past deleteAt
-      onRehydrateStorage: () => (state) => {
-        if (state) {
-          // Delay slightly to ensure store is fully initialized
-          setTimeout(() => {
-            state.pruneDeletedMessages();
-          }, 100);
+      // BUGFIX #45: Store timeout ID to clear on re-init/hot reload
+      onRehydrateStorage: () => {
+        // Clear any previous timeout
+        if (_pruneTimeoutId !== null) {
+          clearTimeout(_pruneTimeoutId);
+          _pruneTimeoutId = null;
         }
+        return (state) => {
+          if (state) {
+            // Delay slightly to ensure store is fully initialized
+            _pruneTimeoutId = setTimeout(() => {
+              state.pruneDeletedMessages();
+              _pruneTimeoutId = null;
+            }, 100);
+          }
+        };
       },
     }
   )

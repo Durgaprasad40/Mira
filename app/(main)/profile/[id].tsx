@@ -307,6 +307,8 @@ export default function ViewProfileScreen() {
           bounces={false}
           snapToAlignment="start"
           decelerationRate="fast"
+          snapToInterval={screenWidth}
+          disableIntervalMomentum
           data={profile.photos}
           keyExtractor={(item, index) => item._id || `photo-${index}`}
           onMomentumScrollEnd={(e) => {
@@ -314,10 +316,10 @@ export default function ViewProfileScreen() {
             setCurrentPhotoIndex(index);
           }}
           renderItem={({ item }) => (
-            <View style={{ width: screenWidth, height: 500, overflow: 'hidden' }}>
+            <View style={{ width: screenWidth, height: 500 + insets.top, overflow: 'hidden', paddingTop: insets.top }}>
               <Image
                 source={{ uri: item.url }}
-                style={{ width: '100%', height: '100%' }}
+                style={{ width: '100%', height: 500 }}
                 contentFit="cover"
                 blurRadius={isPhase2 ? 20 : 0}
               />
@@ -326,7 +328,7 @@ export default function ViewProfileScreen() {
           style={styles.photoCarousel}
         />
       ) : (
-        <View style={styles.photoPlaceholder}>
+        <View style={[styles.photoPlaceholder, { height: 500 + insets.top, paddingTop: insets.top }]}>
           <Ionicons name="person" size={64} color={COLORS.textLight} />
         </View>
       )}
@@ -700,11 +702,11 @@ const styles = StyleSheet.create({
   },
   photoCarousel: {
     width: '100%',
-    height: 500,
+    // Height is now dynamic: 500 + insets.top (applied inline)
   },
   photoPlaceholder: {
     width: '100%',
-    height: 500,
+    // Height is now dynamic: 500 + insets.top (applied inline)
     backgroundColor: COLORS.backgroundDark,
     alignItems: 'center',
     justifyContent: 'center',

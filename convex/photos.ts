@@ -75,6 +75,22 @@ export const addPhoto = mutation({
   handler: async (ctx, args) => {
     const { userId, storageId, isPrimary, hasFace, width, height, fileSize, mimeType, isNsfwDetected } = args;
 
+    // BUGFIX #67: Validate storage ID exists before proceeding
+    // Get the URL for the uploaded file - this validates storageId exists
+    const url = await ctx.storage.getUrl(storageId);
+    if (!url) {
+      throw new Error('Invalid storage reference: file does not exist');
+    }
+
+    // BUGFIX #66: Validate URL is not empty and has valid format
+    if (typeof url !== 'string' || url.trim().length === 0) {
+      throw new Error('Invalid photo URL: URL cannot be empty');
+    }
+    // Basic URL format check (must start with http:// or https://)
+    if (!url.startsWith('http://') && !url.startsWith('https://')) {
+      throw new Error('Invalid photo URL: must be a valid HTTP(S) URL');
+    }
+
     // 9-3: Verify user has accepted consent before allowing photo upload
     const user = await ctx.db.get(userId);
     if (!user) throw new Error('User not found');
@@ -89,10 +105,6 @@ export const addPhoto = mutation({
     if (mimeType !== undefined && !ALLOWED_PHOTO_TYPES.includes(mimeType.toLowerCase())) {
       throw new Error('Photo must be JPEG, PNG, WebP, or HEIC format');
     }
-
-    // Get the URL for the uploaded file
-    const url = await ctx.storage.getUrl(storageId);
-    if (!url) throw new Error('Failed to get storage URL');
 
     // Get current photos count
     const existingPhotos = await ctx.db
@@ -308,6 +320,12 @@ export const saveVerificationPhoto = mutation({
   },
   handler: async (ctx, args) => {
     const { userId, storageId } = args;
+
+    // BUGFIX #67: Validate storage ID exists before saving
+    const url = await ctx.storage.getUrl(storageId);
+    if (!url) {
+      throw new Error('Invalid storage reference: verification photo does not exist');
+    }
 
     await ctx.db.patch(userId, {
       verificationPhotoId: storageId,

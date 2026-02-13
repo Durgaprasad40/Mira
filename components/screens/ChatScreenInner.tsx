@@ -160,11 +160,6 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
 
   const hasMeta = !!demoMeta[conversationId ?? ''];
   const hasMessages = !!(demoConversations[conversationId ?? '']?.length);
-  useEffect(() => {
-    if (__DEV__ && isDemo) {
-      console.log(`[Chat] lookup convoId=${conversationId} hasMeta=${hasMeta} hasMessages=${hasMessages}`);
-    }
-  }, [conversationId, hasMeta, hasMessages]);
 
   // Seed once per conversation (no-op if already seeded)
   useEffect(() => {
@@ -219,12 +214,6 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
       )
     : false;
 
-  const _queryStatus = conversation === undefined ? 'loading' : conversation ? 'ok' : 'null';
-  useEffect(() => {
-    if (__DEV__) {
-      console.log('[Chat] route conversationId', conversationId, 'query result', _queryStatus);
-    }
-  }, [conversationId, _queryStatus]);
 
   // Log when chat is detected as expired
   const hasLoggedExpired = useRef(false);
