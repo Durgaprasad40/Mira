@@ -18,6 +18,7 @@ type Milestone =
   | 'root_layout'
   | 'auth_hydrated'
   | 'demo_hydrated'
+  | 'boot_caches_ready'  // Fast boot caches loaded (bypasses full hydration)
   | 'boot_hidden'
   | 'route_decision'
   | 'first_tab'
@@ -94,15 +95,20 @@ function tryPrintSummary(): void {
   // Boot hidden time (from start)
   const bootHidden = t.boot_hidden ? t.boot_hidden - start : 0;
 
+  // Boot caches time (fast path vs full hydration)
+  const bootCaches = t.boot_caches_ready ? t.boot_caches_ready - start : 0;
+
   console.log(
-    `[STARTUP_TIMING] bootHidden=${bootHidden}ms total=${total}ms hydration=${hydration}ms route=${route}ms location=${location}ms firstScreen=${firstScreen}ms`
+    `[STARTUP_TIMING] bootHidden=${bootHidden}ms bootCaches=${bootCaches}ms total=${total}ms hydration=${hydration}ms route=${route}ms location=${location}ms firstScreen=${firstScreen}ms`
   );
 
   // Detailed breakdown
   console.log('[STARTUP_TIMING] Breakdown:', {
     bundle_to_root: t.root_layout ? t.root_layout - start : '-',
+    root_to_bootCaches: t.boot_caches_ready && t.root_layout ? t.boot_caches_ready - t.root_layout : '-',
     root_to_auth: t.auth_hydrated && t.root_layout ? t.auth_hydrated - t.root_layout : '-',
     root_to_demo: t.demo_hydrated && t.root_layout ? t.demo_hydrated - t.root_layout : '-',
+    bootCaches_to_route: t.route_decision && t.boot_caches_ready ? t.route_decision - t.boot_caches_ready : '-',
     hydration_to_route: t.route_decision && routeStart ? t.route_decision - routeStart : '-',
     route_to_tab: t.first_tab && t.route_decision ? t.first_tab - t.route_decision : '-',
     location_to_fix: t.location_fix && t.location_start ? t.location_fix - t.location_start : '-',

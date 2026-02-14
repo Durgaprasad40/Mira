@@ -6,39 +6,59 @@ const H = (p: string) => p as unknown as Href;
 import { useAuthStore } from "@/stores/authStore";
 import { useBootStore } from "@/stores/bootStore";
 import { getBootCache } from "@/stores/bootCache";
+import { getAuthBootCache, type AuthBootCacheData } from "@/stores/authBootCache";
 import { isDemoMode } from "@/hooks/useConvex";
 import { View, ActivityIndicator, StyleSheet, Text } from "react-native";
 import { COLORS } from "@/lib/constants";
 import { markTiming } from "@/utils/startupTiming";
 
 export default function Index() {
-  const authHydrated = useAuthStore((s) => s._hasHydrated);
-  const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
-  const onboardingCompleted = useAuthStore((s) => s.onboardingCompleted);
+  // We no longer wait for full authStore hydration - use boot caches for fast routing
   const setRouteDecisionMade = useBootStore((s) => s.setRouteDecisionMade);
   const didRedirect = useRef(false);
 
-  // FAST PATH for demo mode: use bootCache instead of waiting for full demoStore hydration
-  // bootCache reads only ~100 bytes (userId + onboarding flags) vs ~50KB+ for full store
+  // FAST PATH: use boot caches instead of waiting for full Zustand hydration
+  // Boot caches read only minimal data (~100 bytes) directly from AsyncStorage
+  // vs ~50KB+ for full stores with all matches, profiles, etc.
+
+  // Auth boot cache (for live mode routing)
+  const [authBootCacheData, setAuthBootCacheData] = useState<AuthBootCacheData | null>(null);
+
+  // Demo boot cache (for demo mode routing)
   const [bootCacheData, setBootCacheData] = useState<{
     currentDemoUserId: string | null;
     demoOnboardingComplete: Record<string, boolean>;
   } | null>(null);
 
   useEffect(() => {
+    // Load auth boot cache (always needed for live mode, also useful in demo)
+    if (!authBootCacheData) {
+      getAuthBootCache().then(setAuthBootCacheData);
+    }
+    // Load demo boot cache only in demo mode
     if (isDemoMode && !bootCacheData) {
       getBootCache().then(setBootCacheData);
     }
-  }, [bootCacheData]);
+  }, [authBootCacheData, bootCacheData]);
 
   // For demo mode: use bootCache (fast) for routing
-  // For live mode: use authStore only (no demo data needed)
+  // For live mode: use authBootCache (fast) for routing
   const currentDemoUserId = bootCacheData?.currentDemoUserId ?? null;
   const demoOnboardingComplete = bootCacheData?.demoOnboardingComplete ?? {};
 
-  // Wait for auth hydration always, and bootCache in demo mode
-  // This is MUCH faster than waiting for full demoStore hydration
-  if (!authHydrated || (isDemoMode && !bootCacheData)) {
+  // Wait for boot caches only - NOT full store hydration
+  // authBootCache: ~10-50ms vs authStore hydration: ~900ms
+  // bootCache: ~10-50ms vs demoStore hydration: ~100-200ms
+  const bootCachesReady = authBootCacheData && (!isDemoMode || bootCacheData);
+
+  // Mark timing when boot caches are ready (much faster than full hydration)
+  useEffect(() => {
+    if (bootCachesReady) {
+      markTiming('boot_caches_ready');
+    }
+  }, [bootCachesReady]);
+
+  if (!bootCachesReady) {
     return (
       <View style={styles.loadingContainer}>
         <ActivityIndicator size="large" color={COLORS.primary} />
@@ -67,7 +87,8 @@ export default function Index() {
   if (isDemoMode) {
     if (currentDemoUserId) {
       // Restore auth session if needed (covers app restart)
-      if (!isAuthenticated) {
+      // Use getState() for one-time sync check (not subscribing to store)
+      if (!useAuthStore.getState().isAuthenticated) {
         const onbComplete = !!demoOnboardingComplete[currentDemoUserId];
         useAuthStore.getState().setAuth(currentDemoUserId, 'demo_token', onbComplete);
       }
@@ -82,9 +103,9 @@ export default function Index() {
     return <Redirect href={H("/(auth)/welcome")} />;
   }
 
-  // ── Live mode: standard auth flow ──
-  if (isAuthenticated) {
-    if (onboardingCompleted) {
+  // ── Live mode: standard auth flow using authBootCache ──
+  if (authBootCacheData.isAuthenticated) {
+    if (authBootCacheData.onboardingCompleted) {
       return <Redirect href={H("/(main)/(tabs)/home")} />;
     }
     return <Redirect href={H("/(onboarding)")} />;
