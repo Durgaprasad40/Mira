@@ -1,10 +1,11 @@
-import { useRef } from "react";
+import { useRef, useEffect } from "react";
 import { Redirect } from "expo-router";
 import type { Href } from "expo-router";
 
 const H = (p: string) => p as unknown as Href;
 import { useAuthStore } from "@/stores/authStore";
 import { useDemoStore } from "@/stores/demoStore";
+import { useBootStore } from "@/stores/bootStore";
 import { isDemoMode } from "@/hooks/useConvex";
 import { View, ActivityIndicator, StyleSheet, Text } from "react-native";
 import { COLORS } from "@/lib/constants";
@@ -16,6 +17,7 @@ export default function Index() {
   const demoHydrated = useDemoStore((s) => s._hasHydrated);
   const currentDemoUserId = useDemoStore((s) => s.currentDemoUserId);
   const demoOnboardingComplete = useDemoStore((s) => s.demoOnboardingComplete);
+  const setRouteDecisionMade = useBootStore((s) => s.setRouteDecisionMade);
   const didRedirect = useRef(false);
 
   // Wait for BOTH stores to hydrate before deciding destination.
@@ -38,6 +40,10 @@ export default function Index() {
     return null;
   }
   didRedirect.current = true;
+
+  // Signal to BootScreen that routing decision has been made
+  // This allows the boot screen to hide
+  setRouteDecisionMade(true);
 
   // ── Demo mode: email+password auth with full onboarding ──
   if (isDemoMode) {

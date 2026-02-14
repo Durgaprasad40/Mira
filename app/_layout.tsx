@@ -11,10 +11,61 @@ import { api } from "@/convex/_generated/api";
 import { useAuthStore } from "@/stores/authStore";
 import { useOnboardingStore } from "@/stores/onboardingStore";
 import { useDemoStore } from "@/stores/demoStore";
+import { useBootStore } from "@/stores/bootStore";
+import { BootScreen } from "@/components/BootScreen";
 import { collectDeviceFingerprint } from "@/lib/deviceFingerprint";
 
 function DemoBanner() {
   return null;
+}
+
+/**
+ * BootStateTracker - Syncs hydration states to bootStore
+ *
+ * SAFETY:
+ * - READ-ONLY: Only reads from authStore/demoStore, writes to bootStore
+ * - Does NOT modify any user data, auth state, or messages
+ * - Does NOT affect onboarding completion status
+ */
+function BootStateTracker() {
+  const authHydrated = useAuthStore((s) => s._hasHydrated);
+  const demoHydrated = useDemoStore((s) => s._hasHydrated);
+  const setAuthHydrated = useBootStore((s) => s.setAuthHydrated);
+  const setDemoHydrated = useBootStore((s) => s.setDemoHydrated);
+
+  // Sync auth hydration state
+  useEffect(() => {
+    setAuthHydrated(authHydrated);
+  }, [authHydrated, setAuthHydrated]);
+
+  // Sync demo hydration state (or mark as ready if not in demo mode)
+  useEffect(() => {
+    // In live mode, demo hydration is always "ready"
+    // In demo mode, wait for actual hydration
+    const ready = isDemoMode ? demoHydrated : true;
+    setDemoHydrated(ready);
+  }, [demoHydrated, setDemoHydrated]);
+
+  return null;
+}
+
+/**
+ * BootScreenWrapper - Shows boot screen until app is ready
+ */
+function BootScreenWrapper() {
+  const authHydrated = useBootStore((s) => s.authHydrated);
+  const demoHydrated = useBootStore((s) => s.demoHydrated);
+  const routeDecisionMade = useBootStore((s) => s.routeDecisionMade);
+  const reset = useBootStore((s) => s.reset);
+
+  const isReady = authHydrated && demoHydrated && routeDecisionMade;
+
+  const handleRetry = () => {
+    // Reset boot state to trigger re-check
+    reset();
+  };
+
+  return <BootScreen isReady={isReady} onRetry={handleRetry} />;
 }
 
 /**
@@ -149,18 +200,14 @@ function DeviceFingerprintCollector() {
 }
 
 export default function RootLayout() {
-  // Permissions are NOT requested here. Each screen that needs camera,
-  // microphone, or media library access requests permission at point of
-  // use (e.g. AttachmentPopup, camera-composer, photo-upload).
-  // Requesting at launch violates App Store guidelines and causes users
-  // to deny permissions before they understand why they're needed.
-
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>
       <SafeAreaProvider>
         <ConvexProvider client={convex}>
           <StatusBar style="light" />
           <DemoBanner />
+          <BootStateTracker />
+          <BootScreenWrapper />
           <SessionValidator />
           <DeviceFingerprintCollector />
           <Stack screenOptions={{ headerShown: false }}>
@@ -175,4 +222,3 @@ export default function RootLayout() {
     </GestureHandlerRootView>
   );
 }
-
