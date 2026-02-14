@@ -48,6 +48,8 @@ interface ChatRoomsHeaderProps {
   title?: string;
   /** Show back arrow instead of menu */
   showBackButton?: boolean;
+  /** Hide the left button entirely (no menu or back icon) */
+  hideLeftButton?: boolean;
   /** Called when menu/back button pressed */
   onMenuPress?: () => void;
   /** Called when refresh button pressed */
@@ -75,6 +77,7 @@ interface ChatRoomsHeaderProps {
 export default function ChatRoomsHeader({
   title = 'Chat Rooms',
   showBackButton = false,
+  hideLeftButton = false,
   onMenuPress,
   onRefreshPress,
   onInboxPress,
@@ -117,18 +120,20 @@ export default function ChatRoomsHeader({
       end={{ x: 1, y: 0 }}
       style={[styles.container, { paddingTop: topInset + 8 }]}
     >
-      {/* Left: Menu or Back */}
-      <TouchableOpacity
-        onPress={onMenuPress}
-        hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-        style={styles.menuButton}
-      >
-        <Ionicons
-          name={showBackButton ? 'arrow-back' : 'menu'}
-          size={26}
-          color={HEADER_TEXT_COLOR}
-        />
-      </TouchableOpacity>
+      {/* Left: Menu or Back (hidden if hideLeftButton) */}
+      {!hideLeftButton && (
+        <TouchableOpacity
+          onPress={onMenuPress}
+          hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+          style={styles.menuButton}
+        >
+          <Ionicons
+            name={showBackButton ? 'arrow-back' : 'menu'}
+            size={26}
+            color={HEADER_TEXT_COLOR}
+          />
+        </TouchableOpacity>
+      )}
 
       {/* Center: Title */}
       <View style={styles.titleContainer}>

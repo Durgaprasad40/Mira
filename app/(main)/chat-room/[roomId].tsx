@@ -629,8 +629,7 @@ export default function ChatRoomScreen() {
       <View style={styles.container}>
         <ChatRoomsHeader
           title="Room Not Found"
-          showBackButton
-          onMenuPress={() => router.back()}
+          hideLeftButton
           topInset={insets.top}
         />
         <View style={styles.notFound}>
@@ -661,9 +660,8 @@ export default function ChatRoomScreen() {
       <View onLayout={onChatHeaderLayout}>
         <ChatRoomsHeader
           title={roomName}
-          showBackButton
+          hideLeftButton
           topInset={insets.top}
-          onMenuPress={() => router.back()}
           onRefreshPress={handleReload}
           onInboxPress={() => setOverlay('messages')}
           onNotificationsPress={() => setOverlay('notifications')}
