@@ -18,6 +18,7 @@ type Milestone =
   | 'root_layout'
   | 'auth_hydrated'
   | 'demo_hydrated'
+  | 'boot_hidden'
   | 'route_decision'
   | 'first_tab'
   | 'location_start'
@@ -90,8 +91,11 @@ function tryPrintSummary(): void {
 
   state.printed = true;
 
+  // Boot hidden time (from start)
+  const bootHidden = t.boot_hidden ? t.boot_hidden - start : 0;
+
   console.log(
-    `[STARTUP_TIMING] total=${total}ms hydration=${hydration}ms route=${route}ms location=${location}ms firstScreen=${firstScreen}ms`
+    `[STARTUP_TIMING] bootHidden=${bootHidden}ms total=${total}ms hydration=${hydration}ms route=${route}ms location=${location}ms firstScreen=${firstScreen}ms`
   );
 
   // Detailed breakdown

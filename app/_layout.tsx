@@ -1,4 +1,4 @@
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, useState } from "react";
 import { AppState, AppStateStatus } from "react-native";
 import { Stack, useRouter, useSegments } from "expo-router";
 import { ConvexProvider, useMutation, useQuery } from "convex/react";
@@ -52,14 +52,43 @@ function BootStateTracker() {
 
 /**
  * BootScreenWrapper - Shows boot screen until app is ready
+ *
+ * FAST BOOT STRATEGY:
+ * - Hide BootScreen after minimum time (250ms) to avoid flicker
+ * - Don't block on hydration - let Index.tsx show its loading state
+ * - routeDecisionMade still triggers immediate hide (hydration complete)
+ *
+ * SAFETY:
+ * - Does NOT modify any user data, auth state, or messages
+ * - Index.tsx handles hydration wait safely with its own loading UI
  */
+const BOOT_MIN_TIME_MS = 250;
+
 function BootScreenWrapper() {
-  const authHydrated = useBootStore((s) => s.authHydrated);
-  const demoHydrated = useBootStore((s) => s.demoHydrated);
   const routeDecisionMade = useBootStore((s) => s.routeDecisionMade);
   const reset = useBootStore((s) => s.reset);
+  const [minTimeElapsed, setMinTimeElapsed] = useState(false);
+  const hasMarkedHidden = useRef(false);
 
-  const isReady = authHydrated && demoHydrated && routeDecisionMade;
+  // Minimum display time to avoid flicker
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setMinTimeElapsed(true);
+    }, BOOT_MIN_TIME_MS);
+    return () => clearTimeout(timer);
+  }, []);
+
+  // Hide when: minimum time passed OR route decision made
+  // routeDecisionMade means hydration is complete and routing happened
+  const isReady = minTimeElapsed || routeDecisionMade;
+
+  // Mark boot_hidden timing milestone once
+  useEffect(() => {
+    if (isReady && !hasMarkedHidden.current) {
+      hasMarkedHidden.current = true;
+      markTiming('boot_hidden');
+    }
+  }, [isReady]);
 
   const handleRetry = () => {
     // Reset boot state to trigger re-check
