@@ -13,6 +13,9 @@ import { persist, createJSONStorage } from 'zustand/middleware';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { log } from '@/utils/logger';
 
+// Hydration timing: capture when store module loads
+const DM_STORE_LOAD_TIME = Date.now();
+
 export interface DemoDmMessage {
   _id: string;
   content: string;
@@ -250,6 +253,7 @@ export const useDemoDmStore = create<DemoDmState>()(
       name: 'demo-dm-storage',
       storage: createJSONStorage(() => AsyncStorage),
       onRehydrateStorage: () => (state, error) => {
+        const hydrationTime = Date.now() - DM_STORE_LOAD_TIME;
         if (error) {
           log.error('[DM]', 'rehydration error', error);
         }
@@ -264,6 +268,9 @@ export const useDemoDmStore = create<DemoDmState>()(
             conversations: convoIds.length,
             totalMessages,
           });
+          if (__DEV__) {
+            console.log(`[HYDRATION] demoDmStore: ${hydrationTime}ms (convos=${convoIds.length}, messages=${totalMessages})`);
+          }
         }
       },
     },

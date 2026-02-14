@@ -21,6 +21,9 @@ import { PRIVATE_INTENT_CATEGORIES } from '@/lib/privateConstants';
 import { log } from '@/utils/logger';
 import { markTiming } from '@/utils/startupTiming';
 
+// Hydration timing: capture when store module loads
+const DEMO_STORE_LOAD_TIME = Date.now();
+
 // ---------------------------------------------------------------------------
 // Types — lightweight "Like" shapes matching the demo data constants
 // ---------------------------------------------------------------------------
@@ -1032,6 +1035,14 @@ export const useDemoStore = create<DemoState>()(
         state?.setHasHydrated(true);
         // Milestone C: demoStore hydration complete
         markTiming('demo_hydrated');
+        if (__DEV__) {
+          const hydrationTime = Date.now() - DEMO_STORE_LOAD_TIME;
+          // Log data sizes for debugging
+          const profileCount = state?.profiles?.length ?? 0;
+          const matchCount = state?.matches?.length ?? 0;
+          const crossedPathsCount = state?.crossedPaths?.length ?? 0;
+          console.log(`[HYDRATION] demoStore: ${hydrationTime}ms (profiles=${profileCount}, matches=${matchCount}, crossedPaths=${crossedPathsCount})`);
+        }
       },
       partialize: (state) => ({
         profiles: state.profiles,

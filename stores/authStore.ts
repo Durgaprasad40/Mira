@@ -3,6 +3,9 @@ import { persist, createJSONStorage } from "zustand/middleware";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { markTiming } from "@/utils/startupTiming";
 
+// Hydration timing: capture when store module loads
+const AUTH_STORE_LOAD_TIME = Date.now();
+
 interface AuthState {
   isAuthenticated: boolean;
   userId: string | null;
@@ -107,9 +110,13 @@ export const useAuthStore = create<AuthState>()(
       name: "auth-storage",
       storage: createJSONStorage(() => AsyncStorage),
       onRehydrateStorage: () => (state, error) => {
+        const hydrationTime = Date.now() - AUTH_STORE_LOAD_TIME;
         // C9 fix: log rehydration errors
         if (error) {
           console.error('[authStore] Rehydration error:', error);
+        }
+        if (__DEV__) {
+          console.log(`[HYDRATION] authStore: ${hydrationTime}ms`);
         }
         state?.setHasHydrated(true);
         // Milestone B: authStore hydration complete
