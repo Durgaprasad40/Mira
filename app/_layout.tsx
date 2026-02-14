@@ -54,44 +54,55 @@ function BootStateTracker() {
  * BootScreenWrapper - Shows boot screen until app is ready
  *
  * FAST BOOT STRATEGY:
- * - Hide BootScreen after minimum time (250ms) to avoid flicker
- * - Don't block on hydration - let Index.tsx show its loading state
- * - routeDecisionMade still triggers immediate hide (hydration complete)
+ * - Hide BootScreen after 250ms from app start (module load time)
+ * - Does NOT wait for hydration - Index.tsx handles that with inline loading
+ * - Module-level timestamp ensures consistent timing across re-renders
  *
  * SAFETY:
  * - Does NOT modify any user data, auth state, or messages
- * - Index.tsx handles hydration wait safely with its own loading UI
+ * - Pure UI gating only
  */
 const BOOT_MIN_TIME_MS = 250;
+
+// Module-level timestamp: captured when this file loads (same as bundle start)
+const BOOT_START_TIME = Date.now();
+
+// Module-level flag to prevent double-marking
+let _hasMarkedBootHidden = false;
 
 function BootScreenWrapper() {
   const routeDecisionMade = useBootStore((s) => s.routeDecisionMade);
   const reset = useBootStore((s) => s.reset);
-  const [minTimeElapsed, setMinTimeElapsed] = useState(false);
-  const hasMarkedHidden = useRef(false);
+  const [, forceUpdate] = useState(0);
+  const timerStarted = useRef(false);
 
-  // Minimum display time to avoid flicker
+  // Calculate elapsed time from module load (not component mount)
+  const elapsedMs = Date.now() - BOOT_START_TIME;
+  const minTimeElapsed = elapsedMs >= BOOT_MIN_TIME_MS;
+
+  // Start a timer to trigger re-render when 250ms elapses (if not already elapsed)
   useEffect(() => {
-    const timer = setTimeout(() => {
-      setMinTimeElapsed(true);
-    }, BOOT_MIN_TIME_MS);
-    return () => clearTimeout(timer);
-  }, []);
+    if (minTimeElapsed || timerStarted.current) return;
+    timerStarted.current = true;
 
-  // Hide when: minimum time passed OR route decision made
-  // routeDecisionMade means hydration is complete and routing happened
+    const remainingMs = BOOT_MIN_TIME_MS - elapsedMs;
+    const timer = setTimeout(() => {
+      forceUpdate((n) => n + 1); // Trigger re-render to check elapsed time
+    }, Math.max(0, remainingMs));
+
+    return () => clearTimeout(timer);
+  }, [minTimeElapsed, elapsedMs]);
+
+  // Hide when: minimum time passed OR route decision made (whichever comes first)
   const isReady = minTimeElapsed || routeDecisionMade;
 
-  // Mark boot_hidden timing milestone once
-  useEffect(() => {
-    if (isReady && !hasMarkedHidden.current) {
-      hasMarkedHidden.current = true;
-      markTiming('boot_hidden');
-    }
-  }, [isReady]);
+  // Mark boot_hidden timing milestone once (module-level guard)
+  if (isReady && !_hasMarkedBootHidden) {
+    _hasMarkedBootHidden = true;
+    markTiming('boot_hidden');
+  }
 
   const handleRetry = () => {
-    // Reset boot state to trigger re-check
     reset();
   };
 
