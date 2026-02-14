@@ -48,7 +48,10 @@ interface LocationState {
   /** Error message if location fails */
   error: string | null;
 
-  /** Start location tracking — call on app boot */
+  /** Fetch last known position only (fast, no continuous tracking) */
+  fetchLastKnownOnly: () => Promise<void>;
+
+  /** Start full location tracking — call when Nearby tab opens */
   startLocationTracking: () => Promise<void>;
 
   /** Stop location tracking — call on app unmount (optional) */
@@ -79,6 +82,39 @@ export const useLocationStore = create<LocationState>((set, get) => ({
   city: null,
   isTracking: false,
   error: null,
+
+  // Fast: fetch last known position only, no continuous tracking
+  // Called on app boot for quick map display without blocking startup
+  fetchLastKnownOnly: async () => {
+    try {
+      // Check permission first (don't request, just check)
+      const { status } = await Location.getForegroundPermissionsAsync();
+      if (status !== 'granted') {
+        set({ permissionStatus: 'denied' });
+        return;
+      }
+      set({ permissionStatus: 'granted' });
+
+      // Get cached/last known position (very fast, no GPS wait)
+      const lastKnown = await Location.getLastKnownPositionAsync();
+      if (lastKnown) {
+        const coords: LocationCoords = {
+          latitude: lastKnown.coords.latitude,
+          longitude: lastKnown.coords.longitude,
+          timestamp: lastKnown.timestamp,
+          accuracy: lastKnown.coords.accuracy ?? undefined,
+        };
+        set({ lastKnownLocation: coords });
+        log.info('[LOCATION]', 'lastKnown fetched (fast path)', {
+          lat: coords.latitude.toFixed(4),
+          lng: coords.longitude.toFixed(4),
+        });
+      }
+    } catch (e) {
+      // Silent failure — this is non-blocking
+      log.info('[LOCATION]', 'fetchLastKnownOnly failed (non-critical)');
+    }
+  },
 
   startLocationTracking: async () => {
     const state = get();

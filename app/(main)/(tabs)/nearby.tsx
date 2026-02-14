@@ -287,6 +287,16 @@ export default function NearbyScreen() {
     if (isDemoMode && demoHasHydrated) demoSeed();
   }, [demoSeed, demoHasHydrated]);
 
+  // Start full location tracking when Nearby tab opens
+  // This is deferred from app boot to avoid blocking startup
+  const trackingStarted = useRef(false);
+  useEffect(() => {
+    if (!trackingStarted.current) {
+      trackingStarted.current = true;
+      startLocationTracking();
+    }
+  }, [startLocationTracking]);
+
   // Mark focused crossed path as seen when navigating from notification
   useEffect(() => {
     if (focusProfileId && isDemoMode) {

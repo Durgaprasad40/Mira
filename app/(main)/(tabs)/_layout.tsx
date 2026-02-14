@@ -21,15 +21,16 @@ export default function MainTabsLayout() {
 
   const router = useRouter();
   const locationPrewarmed = useRef(false);
-  const startLocationTracking = useLocationStore((s) => s.startLocationTracking);
+  const fetchLastKnownOnly = useLocationStore((s) => s.fetchLastKnownOnly);
 
-  // Prewarm location on app boot — so Nearby tab opens instantly
+  // Prewarm with lastKnown only (fast) — full tracking starts when Nearby tab opens
+  // This avoids blocking startup with slow GPS acquisition
   useEffect(() => {
     if (!locationPrewarmed.current) {
       locationPrewarmed.current = true;
-      startLocationTracking();
+      fetchLastKnownOnly();
     }
-  }, [startLocationTracking]);
+  }, [fetchLastKnownOnly]);
 
   // Register navigation for error boundary "Go Home" button
   useEffect(() => {
