@@ -6,6 +6,8 @@ import {
   TouchableOpacity,
   StyleSheet,
   RefreshControl,
+  Image,
+  ImageSourcePropType,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
@@ -17,12 +19,76 @@ import { isDemoMode } from '@/hooks/useConvex';
 import {
   DEMO_CHAT_ROOMS,
   DEMO_JOINED_ROOMS,
-  DEMO_CURRENT_USER,
   DemoChatRoom,
 } from '@/lib/demoData';
-import ChatRoomsHeader from '@/components/chatroom/ChatRoomsHeader';
 
 const C = INCOGNITO_COLORS;
+
+// ─────────────────────────────────────────────────────────────────────────────
+// ROOM ICONS - Local image assets for each room
+// Add images to: assets/chatrooms/ (PNG, ~256x256, square)
+// ─────────────────────────────────────────────────────────────────────────────
+// Recommended images per room:
+//   global.png    -> Globe/world icon
+//   india.png     -> India map outline or tricolor themed
+//   hindi.png     -> Taj Mahal silhouette
+//   telugu.png    -> Charminar silhouette
+//   tamil.png     -> Meenakshi Temple or Tamil temple
+//   malayalam.png -> Kerala backwaters / houseboat
+//   bengali.png   -> Howrah Bridge or Victoria Memorial
+//   kannada.png   -> Vidhana Soudha or Karnataka emblem
+//   marathi.png   -> Gateway of India
+//   gujarati.png  -> Somnath Temple or Rann of Kutch
+//   punjabi.png   -> Golden Temple
+//   urdu.png      -> Calligraphy or crescent moon
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Local asset mapping - require() for bundled images
+// Uncomment each line after adding the corresponding image file
+const ROOM_ICON_ASSETS: Record<string, ImageSourcePropType | null> = {
+  // global: require('@/assets/chatrooms/global.png'),
+  // india: require('@/assets/chatrooms/india.png'),
+  // hindi: require('@/assets/chatrooms/hindi.png'),
+  // telugu: require('@/assets/chatrooms/telugu.png'),
+  // tamil: require('@/assets/chatrooms/tamil.png'),
+  // malayalam: require('@/assets/chatrooms/malayalam.png'),
+  // bengali: require('@/assets/chatrooms/bengali.png'),
+  // kannada: require('@/assets/chatrooms/kannada.png'),
+  // marathi: require('@/assets/chatrooms/marathi.png'),
+  // gujarati: require('@/assets/chatrooms/gujarati.png'),
+  // punjabi: require('@/assets/chatrooms/punjabi.png'),
+  // urdu: require('@/assets/chatrooms/urdu.png'),
+
+  // Fallback: null means use Ionicons fallback
+  global: null,
+  india: null,
+  hindi: null,
+  telugu: null,
+  tamil: null,
+  malayalam: null,
+  bengali: null,
+  kannada: null,
+  marathi: null,
+  gujarati: null,
+  punjabi: null,
+  urdu: null,
+};
+
+// Fallback colors for when images are not available
+const ROOM_FALLBACK_COLORS: Record<string, string> = {
+  global: '#4A90D9',
+  india: '#FF9933',
+  hindi: '#E94560',
+  telugu: '#9C27B0',
+  tamil: '#2196F3',
+  malayalam: '#4CAF50',
+  kannada: '#FF5722',
+  marathi: '#795548',
+  bengali: '#009688',
+  gujarati: '#FFC107',
+  punjabi: '#3F51B5',
+  urdu: '#607D8B',
+};
 
 // Unified room type for both demo and Convex modes
 interface ChatRoom {
@@ -31,20 +97,10 @@ interface ChatRoom {
   slug: string;
   category: 'language' | 'general';
   memberCount: number;
-  lastMessageAt?: number;
   lastMessageText?: string;
-}
-
-function getTimeAgo(timestamp?: number): string {
-  if (!timestamp) return '';
-  const diff = Date.now() - timestamp;
-  const minutes = Math.floor(diff / 60000);
-  if (minutes < 1) return 'just now';
-  if (minutes < 60) return `${minutes}m`;
-  const hours = Math.floor(minutes / 60);
-  if (hours < 24) return `${hours}h`;
-  const days = Math.floor(hours / 24);
-  return `${days}d`;
+  // Icon support (admin-set, optional)
+  iconKey?: string;   // Maps to ROOM_ICON_CONFIG or local asset
+  iconUrl?: string;   // Remote image URL (takes priority over iconKey)
 }
 
 export default function ChatRoomsScreen() {
@@ -60,17 +116,28 @@ export default function ChatRoomsScreen() {
   );
 
   // Unified rooms list: demo or Convex
-  const rooms: ChatRoom[] = isDemoMode
-    ? DEMO_CHAT_ROOMS
+  // Filter out "English" room - users can chat in English inside Global
+  const rooms: ChatRoom[] = (isDemoMode
+    ? DEMO_CHAT_ROOMS.map((r) => ({
+        id: r.id,
+        name: r.name,
+        slug: r.slug,
+        category: r.category,
+        memberCount: r.memberCount,
+        lastMessageText: r.lastMessageText,
+        iconKey: r.slug, // Use slug as iconKey for demo rooms
+      }))
     : (convexRooms ?? []).map((r) => ({
         id: r._id,
         name: r.name,
         slug: r.slug,
         category: r.category,
         memberCount: r.memberCount,
-        lastMessageAt: r.lastMessageAt,
         lastMessageText: r.lastMessageText,
-      }));
+        iconKey: r.slug, // Use slug as iconKey fallback
+        // iconUrl: r.iconUrl, // Enable when schema supports it
+      }))
+  ).filter((r) => r.name.toLowerCase() !== 'english');
 
   const onRefresh = useCallback(() => {
     setRefreshing(true);
@@ -97,7 +164,50 @@ export default function ChatRoomsScreen() {
 
   const renderRoom = useCallback(
     ({ item }: { item: ChatRoom }) => {
-      const isGeneral = item.category === 'general';
+      // Get icon key for this room (by slug/iconKey)
+      const iconKey = item.iconKey ?? item.slug;
+      const localAsset = ROOM_ICON_ASSETS[iconKey];
+      const fallbackColor = ROOM_FALLBACK_COLORS[iconKey];
+
+      // Render room icon
+      const renderRoomIcon = () => {
+        // Priority 1: Remote URL (admin-set)
+        if (item.iconUrl) {
+          return (
+            <Image
+              source={{ uri: item.iconUrl }}
+              style={styles.roomIconImage}
+              resizeMode="cover"
+            />
+          );
+        }
+
+        // Priority 2: Local asset image (when available)
+        if (localAsset) {
+          return (
+            <Image
+              source={localAsset}
+              style={styles.roomIconImage}
+              resizeMode="cover"
+            />
+          );
+        }
+
+        // Fallback: Colored circle with icon based on category
+        const isGeneral = item.category === 'general';
+        const bgColor = fallbackColor ? fallbackColor + '20' : (isGeneral ? 'rgba(100,181,246,0.12)' : 'rgba(233,69,96,0.12)');
+        const iconColor = fallbackColor ?? (isGeneral ? '#64B5F6' : C.primary);
+
+        return (
+          <View style={[styles.roomIcon, { backgroundColor: bgColor }]}>
+            <Ionicons
+              name={isGeneral ? 'globe' : 'language'}
+              size={22}
+              color={iconColor}
+            />
+          </View>
+        );
+      };
 
       return (
         <TouchableOpacity
@@ -105,21 +215,10 @@ export default function ChatRoomsScreen() {
           onPress={() => handleOpenRoom(item.id)}
           activeOpacity={0.7}
         >
-          <View style={[styles.roomIcon, isGeneral && styles.roomIconGeneral]}>
-            <Ionicons
-              name={isGeneral ? 'globe' : 'language'}
-              size={22}
-              color={isGeneral ? '#64B5F6' : C.primary}
-            />
-          </View>
+          {renderRoomIcon()}
 
           <View style={styles.roomInfo}>
-            <View style={styles.roomNameRow}>
-              <Text style={styles.roomName}>{item.name}</Text>
-              {item.lastMessageAt && (
-                <Text style={styles.roomTime}>{getTimeAgo(item.lastMessageAt)}</Text>
-              )}
-            </View>
+            <Text style={styles.roomName}>{item.name}</Text>
             {item.lastMessageText ? (
               <Text style={styles.roomPreview} numberOfLines={1}>
                 {item.lastMessageText}
@@ -144,28 +243,11 @@ export default function ChatRoomsScreen() {
   const languageRooms = rooms.filter((r) => r.category === 'language');
 
   return (
-    <View style={styles.container}>
-      {/* Purple/Blue Header Bar */}
-      <ChatRoomsHeader
-        title="Chat Rooms"
-        topInset={insets.top}
-        onMenuPress={() => {
-          // Menu placeholder - could open drawer if exists
-        }}
-        onRefreshPress={onRefresh}
-        onInboxPress={() => {
-          // Inbox placeholder
-        }}
-        onNotificationsPress={() => {
-          // Notifications placeholder
-        }}
-        onProfilePress={() => {
-          router.push('/(main)/edit-profile' as any);
-        }}
-        profileAvatar={DEMO_CURRENT_USER.avatar}
-        showCreateButton
-        onCreatePress={handleCreateRoom}
-      />
+    <View style={[styles.container, { paddingTop: insets.top }]}>
+      {/* Simple heading - NO icons on HOME screen */}
+      <View style={styles.header}>
+        <Text style={styles.headerTitle}>Chat Rooms</Text>
+      </View>
 
       <FlatList
         data={[]}
@@ -187,6 +269,23 @@ export default function ChatRoomsScreen() {
             ))}
           </>
         }
+        ListFooterComponent={
+          <View style={styles.footerSection}>
+            {/* Add a Room button */}
+            <TouchableOpacity
+              style={styles.addRoomButton}
+              onPress={handleCreateRoom}
+              activeOpacity={0.7}
+            >
+              <View style={styles.addRoomIcon}>
+                <Ionicons name="add" size={24} color={C.primary} />
+              </View>
+              <Text style={styles.addRoomText}>Add a Room</Text>
+              <Ionicons name="chevron-forward" size={16} color={C.textLight} />
+            </TouchableOpacity>
+            {/* TODO (Phase later): Require coins/tokens to create a room. */}
+          </View>
+        }
         contentContainerStyle={styles.listContent}
         refreshControl={
           <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={C.primary} />
@@ -202,8 +301,19 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: C.background,
   },
+  header: {
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: C.surface,
+  },
+  headerTitle: {
+    fontSize: 24,
+    fontWeight: '700',
+    color: C.text,
+  },
   listContent: {
-    paddingBottom: 16,
+    paddingBottom: 24,
   },
   sectionTitle: {
     fontSize: 12,
@@ -237,23 +347,19 @@ const styles = StyleSheet.create({
   roomIconGeneral: {
     backgroundColor: 'rgba(100,181,246,0.12)',
   },
+  roomIconImage: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+  },
   roomInfo: {
     flex: 1,
-  },
-  roomNameRow: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    marginBottom: 4,
   },
   roomName: {
     fontSize: 15,
     fontWeight: '600',
     color: C.text,
-  },
-  roomTime: {
-    fontSize: 12,
-    color: C.textLight,
+    marginBottom: 4,
   },
   roomPreview: {
     fontSize: 14,
@@ -274,5 +380,35 @@ const styles = StyleSheet.create({
   roomMembers: {
     fontSize: 12,
     color: C.textLight,
+  },
+  footerSection: {
+    paddingTop: 16,
+    paddingHorizontal: 12,
+  },
+  addRoomButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: C.surface,
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 14,
+    gap: 12,
+    borderWidth: 1,
+    borderColor: C.accent,
+    borderStyle: 'dashed',
+  },
+  addRoomIcon: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: 'rgba(233,69,96,0.12)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  addRoomText: {
+    flex: 1,
+    fontSize: 15,
+    fontWeight: '600',
+    color: C.primary,
   },
 });
