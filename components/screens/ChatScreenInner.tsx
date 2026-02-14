@@ -27,8 +27,11 @@ import { useQuery, useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { useAuthStore } from '@/stores/authStore';
 import { COLORS } from '@/lib/constants';
-import { MessageBubble, MessageInput, ProtectedMediaOptionsSheet, ProtectedMediaViewer, ReportModal, BottleSpinGame } from '@/components/chat';
-import { ProtectedMediaOptions } from '@/components/chat/ProtectedMediaOptionsSheet';
+import { MessageBubble, MessageInput, ProtectedMediaViewer, ReportModal, BottleSpinGame } from '@/components/chat';
+import { Phase2ProtectedMediaViewer } from '@/components/private/Phase2ProtectedMediaViewer';
+import { usePrivateChatStore } from '@/stores/privateChatStore';
+import type { IncognitoMessage } from '@/types';
+import { CameraPhotoSheet, CameraPhotoOptions } from '@/components/chat/CameraPhotoSheet';
 import { ReportBlockModal } from '@/components/security/ReportBlockModal';
 import { Ionicons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
@@ -117,6 +120,19 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
   const setDemoDraft = useDemoDmStore((s) => s.setDraft);
   const clearDemoDraft = useDemoDmStore((s) => s.clearDraft);
   const cleanupExpiredThreads = useDemoDmStore((s) => s.cleanupExpiredThreads);
+
+  // ── Phase-2 private chat store — for demo secure photos ──
+  const addPrivateMessage = usePrivateChatStore((s) => s.addMessage);
+  const privateMessages = usePrivateChatStore((s) => conversationId ? s.messages[conversationId] : undefined);
+
+  // ── Sync state from privateChatStore to demoDmStore ──
+  const markDemoSecurePhotoExpired = useDemoDmStore((s) => s.markSecurePhotoExpired);
+  const syncTimerEndsAt = useDemoDmStore((s) => s.syncTimerEndsAt);
+
+  // ── Log module for secure photo debugging ──
+  const logSecure = (action: string, data: Record<string, any>) => {
+    if (__DEV__) console.log(`[SECURE_SYNC] ${action}`, data);
+  };
 
   // ── Safety / integrity guards ──
   const blockedUserIds = useDemoStore((s) => s.blockedUserIds);
@@ -236,6 +252,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
   // Protected media state
   const [pendingImageUri, setPendingImageUri] = useState<string | null>(null);
   const [viewerMessageId, setViewerMessageId] = useState<string | null>(null);
+  const [demoSecurePhotoId, setDemoSecurePhotoId] = useState<string | null>(null); // Demo mode viewer
   const [reportModalVisible, setReportModalVisible] = useState(false);
   const [showReportBlock, setShowReportBlock] = useState(false);
 
@@ -423,7 +440,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
 
     const result = await ImagePicker.launchImageLibraryAsync({
       mediaTypes: ['images' as const],
-      allowsEditing: true,
+      allowsEditing: false,
       quality: 0.8,
     });
 
@@ -432,14 +449,63 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
     }
   };
 
-  const handleProtectedMediaConfirm = async (options: ProtectedMediaOptions) => {
-    if (!pendingImageUri || !userId || !conversationId) return;
+  const handleSecurePhotoConfirm = async (imageUri: string, options: CameraPhotoOptions) => {
+    if (!userId || !conversationId) return;
 
-    const imageUri = pendingImageUri;
     setPendingImageUri(null);
     setIsSending(true);
 
     try {
+      // Demo mode: Store in BOTH stores
+      // - demoDmStore: for chat list display (bubble rendering)
+      // - privateChatStore: for Phase2ProtectedMediaViewer (timer logic)
+      if (isDemo) {
+        const uniqueId = `secure_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
+        const now = Date.now();
+        const protectedMedia = {
+          localUri: imageUri,
+          timer: options.timer,
+          viewingMode: options.viewingMode,
+          screenshotAllowed: false,
+          viewOnce: options.timer === 0,
+          watermark: false,
+        };
+
+        // Add to demoDmStore for chat list (bubble uses isProtected + protectedMedia for display)
+        addDemoMessage(conversationId, {
+          _id: uniqueId,
+          content: 'Secure Photo',
+          type: 'image',
+          senderId: getDemoUserId(),
+          createdAt: now,
+          isProtected: true,
+          protectedMedia: {
+            timer: options.timer,
+            viewingMode: options.viewingMode,
+            screenshotAllowed: false,
+            viewOnce: options.timer === 0,
+            watermark: false,
+          },
+        });
+
+        // Add to privateChatStore for viewer (has full schema with localUri)
+        const privateMsg: IncognitoMessage = {
+          id: uniqueId, // Same ID for lookup
+          conversationId,
+          senderId: 'me',
+          content: 'Secure Photo',
+          createdAt: now,
+          isRead: false,
+          isProtected: true,
+          protectedMedia,
+        };
+        addPrivateMessage(conversationId, privateMsg);
+
+        setIsSending(false);
+        return;
+      }
+
+      // Convex mode: upload and send
       // 1. Get upload URL
       const uploadUrl = await generateUploadUrl();
 
@@ -455,25 +521,66 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
 
       const { storageId } = await uploadResponse.json();
 
-      // 3. Send protected image message
+      // 3. Send protected image message with Phase-1 options mapped to Convex format
       await sendProtectedImage({
         conversationId: conversationId as any,
         senderId: userId as any,
         imageStorageId: storageId,
         timer: options.timer,
-        screenshotAllowed: options.screenshotAllowed,
-        viewOnce: options.viewOnce,
-        watermark: options.watermark,
+        screenshotAllowed: false, // Phase-1 default: no screenshots
+        viewOnce: options.timer === 0, // "Once" timer = view once
+        watermark: false, // Phase-1 default: no watermark
       });
     } catch (error: any) {
-      Alert.alert('Error', error.message || 'Failed to send protected photo');
+      Alert.alert('Error', error.message || 'Failed to send secure photo');
     } finally {
       setIsSending(false);
     }
   };
 
   const handleProtectedMediaPress = (messageId: string) => {
-    setViewerMessageId(messageId);
+    if (isDemo) {
+      // Demo mode: use Phase2ProtectedMediaViewer (reads from privateChatStore)
+      setDemoSecurePhotoId(messageId);
+    } else {
+      // Convex mode: use ProtectedMediaViewer
+      setViewerMessageId(messageId);
+    }
+  };
+
+  // Hold mode: press in => open viewer
+  const handleProtectedMediaHoldStart = (messageId: string) => {
+    if (isDemo) {
+      logSecure('holdStart', { messageId });
+      setDemoSecurePhotoId(messageId);
+    }
+    // Convex mode hold is not implemented yet
+  };
+
+  // Hold mode: press out => close viewer
+  const handleProtectedMediaHoldEnd = (messageId: string) => {
+    if (isDemo && demoSecurePhotoId === messageId) {
+      logSecure('holdEnd', { messageId });
+      // Check and sync expired state before closing
+      const privateMsg = privateMessages?.find((m) => m.id === messageId);
+      if (privateMsg?.isExpired) {
+        markDemoSecurePhotoExpired(conversationId!, messageId);
+        logSecure('expired synced on holdEnd', { messageId, expiredAt: Date.now() });
+      }
+      // Sync timerEndsAt if set
+      if (privateMsg?.timerEndsAt && conversationId) {
+        syncTimerEndsAt(conversationId, messageId, privateMsg.timerEndsAt);
+      }
+      setDemoSecurePhotoId(null);
+    }
+  };
+
+  // Called when bubble countdown reaches 0
+  const handleProtectedMediaExpire = (messageId: string) => {
+    if (isDemo && conversationId) {
+      logSecure('expired from bubble', { messageId });
+      markDemoSecurePhotoExpired(conversationId, messageId);
+    }
   };
 
   const handleSendDare = () => {
@@ -590,6 +697,8 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
                 isProtected: item.isProtected ?? false,
                 protectedMedia: item.protectedMedia,
                 isExpired: item.isExpired,
+                timerEndsAt: item.timerEndsAt,
+                expiredAt: item.expiredAt,
                 viewedAt: item.viewedAt,
                 systemSubtype: item.systemSubtype,
                 mediaId: item.mediaId,
@@ -600,6 +709,9 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
               otherUserName={activeConversation.otherUser.name}
               currentUserId={(isDemo ? getDemoUserId() : userId) || undefined}
               onProtectedMediaPress={handleProtectedMediaPress}
+              onProtectedMediaHoldStart={handleProtectedMediaHoldStart}
+              onProtectedMediaHoldEnd={handleProtectedMediaHoldEnd}
+              onProtectedMediaExpire={handleProtectedMediaExpire}
               onVoiceDelete={handleVoiceDelete}
             />
           )}
@@ -641,16 +753,16 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
         </View>
       </KeyboardAvoidingView>
 
-      {/* Protected Media Options Sheet */}
-      <ProtectedMediaOptionsSheet
+      {/* Phase-1 Secure Photo Sheet (old design with TIME / Timed/Hold) */}
+      <CameraPhotoSheet
         visible={!!pendingImageUri}
-        imageUri={pendingImageUri || ''}
-        onConfirm={handleProtectedMediaConfirm}
+        imageUri={pendingImageUri}
+        onConfirm={handleSecurePhotoConfirm}
         onCancel={() => setPendingImageUri(null)}
       />
 
-      {/* Protected Media Viewer */}
-      {viewerMessageId && userId && (
+      {/* Protected Media Viewer (Convex mode) */}
+      {viewerMessageId && userId && !isDemo && (
         <ProtectedMediaViewer
           visible={!!viewerMessageId}
           messageId={viewerMessageId}
@@ -660,6 +772,28 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
           onReport={() => {
             setViewerMessageId(null);
             setReportModalVisible(true);
+          }}
+        />
+      )}
+
+      {/* Demo Protected Media Viewer (demo mode — uses Phase2ProtectedMediaViewer) */}
+      {demoSecurePhotoId && conversationId && isDemo && (
+        <Phase2ProtectedMediaViewer
+          visible={!!demoSecurePhotoId}
+          conversationId={conversationId}
+          messageId={demoSecurePhotoId}
+          onClose={() => {
+            // Sync timerEndsAt and isExpired from privateChatStore to demoDmStore
+            const privateMsg = privateMessages?.find((m) => m.id === demoSecurePhotoId);
+            if (privateMsg?.timerEndsAt) {
+              syncTimerEndsAt(conversationId, demoSecurePhotoId, privateMsg.timerEndsAt);
+              logSecure('timerEndsAt synced', { messageId: demoSecurePhotoId, timerEndsAt: privateMsg.timerEndsAt });
+            }
+            if (privateMsg?.isExpired) {
+              markDemoSecurePhotoExpired(conversationId, demoSecurePhotoId);
+              logSecure('expired synced', { messageId: demoSecurePhotoId });
+            }
+            setDemoSecurePhotoId(null);
           }}
         />
       )}

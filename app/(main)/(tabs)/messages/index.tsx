@@ -752,38 +752,8 @@ export default function MessagesScreen() {
               )}
               {renderQuotaBanner()}
               {renderNewMatchesRow()}
-              {/* Compact likes preview if any */}
-              {displayLikes.length > 0 && (
-                <TouchableOpacity
-                  style={styles.likesPreview}
-                  onPress={() => {
-                    // BUGFIX #5: Reset layout ready flag since FlatList will be created fresh
-                    likesListLayoutReady.current = false;
-                    setActiveView('likes');
-                  }}
-                >
-                  <View style={styles.likesPreviewLeft}>
-                    <Ionicons name="heart" size={18} color={COLORS.primary} />
-                    <Text style={styles.likesPreviewText}>
-                      {pendingLikesCount} {pendingLikesCount === 1 ? 'like' : 'likes'} waiting
-                    </Text>
-                  </View>
-                  <View style={styles.likesPreviewAvatars}>
-                    {displayLikes.slice(0, 3).map((like: any, i: number) => (
-                      <Image
-                        key={like.likeId || like.userId}
-                        source={{ uri: like.photoUrl || 'https://via.placeholder.com/40' }}
-                        style={[
-                          styles.likesPreviewAvatar,
-                          { marginLeft: i > 0 ? -8 : 0, zIndex: 3 - i },
-                        ]}
-                      />
-                    ))}
-                  </View>
-                  <Ionicons name="chevron-forward" size={18} color={COLORS.textLight} />
-                </TouchableOpacity>
-              )}
-              {(newMatches.length > 0 || displayLikes.length > 0) && (conversations || []).length > 0 && (
+              {/* Messages section header - only show if there are new matches above */}
+              {newMatches.length > 0 && (conversations || []).length > 0 && (
                 <View style={styles.threadsSectionHeader}>
                   <Text style={styles.sectionTitle}>Messages</Text>
                 </View>
@@ -801,7 +771,7 @@ export default function MessagesScreen() {
           }
           refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
           contentContainerStyle={
-            (!conversations || conversations.length === 0) && newMatches.length === 0 && displayLikes.length === 0
+            (!conversations || conversations.length === 0) && newMatches.length === 0
               ? styles.emptyListContainer
               : undefined
           }

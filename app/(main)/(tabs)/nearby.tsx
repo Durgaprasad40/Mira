@@ -20,8 +20,8 @@ import ClusteredMapView from 'react-native-map-clustering';
 import { getDemoMarkerImage } from '@/components/map/demoMarkerIndex';
 import { getDemoClusterImage } from '@/components/map/demoClusterIndex';
 
-// Native pin image — rendered via Marker `image` prop to avoid Android snapshot issues
-// Pink Happn-style pin (72x92 @1x, 144x184 @2x)
+// Native pin image — rendered via Marker `image` prop to avoid Android snapshot OOM
+// Using image prop instead of React children eliminates bitmap snapshotting
 const PIN_PINK_IMAGE = require('../../../assets/map/pin_pink.png');
 import { useRouter, useFocusEffect, useLocalSearchParams } from 'expo-router';
 import { LoadingGuard } from '@/components/safety';
@@ -33,6 +33,7 @@ import { DEMO_PROFILES } from '@/lib/demoData';
 import { useAuthStore } from '@/stores/authStore';
 import { isDemoMode } from '@/hooks/useConvex';
 import { useDemoStore } from '@/stores/demoStore';
+import { useDemoDmStore } from '@/stores/demoDmStore';
 import { useDemoNotifStore } from '@/hooks/useNotifications';
 import { api } from '@/convex/_generated/api';
 import { useScreenSafety } from '@/hooks/useScreenSafety';
@@ -192,6 +193,15 @@ function applyClientFuzz(
 // Constants
 // ---------------------------------------------------------------------------
 
+// DEBUG FLAG: Set to true to disable MapView for crash isolation testing
+// When true, the map will not render, showing a placeholder instead
+// To re-enable the map, set this to false
+const DEBUG_DISABLE_MAP = false;
+
+// OOM PREVENTION: Hard limit on rendered markers to prevent Android native memory exhaustion
+// Markers with React children cause bitmap snapshotting; even with image prop, limit as safety net
+const MAX_NEARBY_MARKERS = 30;
+
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 const BOTTOM_SHEET_HEIGHT = 200;
 const FIXED_RADIUS_METERS = 1000; // 1km
@@ -245,6 +255,9 @@ export default function NearbyScreen() {
   const latitude = bestLocation?.latitude ?? null;
   const longitude = bestLocation?.longitude ?? null;
 
+  // Note: Heading is handled by native showsUserLocation={true} on the map
+  // which provides Google Maps style blue dot with direction cone automatically
+
   const userId = useAuthStore((s) => s.userId);
   const mapRef = useRef<MapView>(null);
   const { safeTimeout } = useScreenSafety();
@@ -258,12 +271,16 @@ export default function NearbyScreen() {
   const getVisibleCrossedPaths = useDemoStore((s) => s.getVisibleCrossedPaths);
   const demoSeed = useDemoStore((s) => s.seed);
   const blockedUserIds = useDemoStore((s) => s.blockedUserIds);
+  const demoMatches = useDemoStore((s) => s.matches);
   const markCrossedPathSeen = useDemoStore((s) => s.markCrossedPathSeen);
   const hideCrossedPath = useDemoStore((s) => s.hideCrossedPath);
   const seedCrossedPathsWithLocation = useDemoStore((s) => s.seedCrossedPathsWithLocation);
   const crossedPathsSeeded = useDemoStore((s) => s.crossedPathsSeeded);
   // BUGFIX #34: Subscribe to hydration status to prevent seed before hydration
   const demoHasHydrated = useDemoStore((s) => s._hasHydrated);
+
+  // Demo DM store — to check for existing conversations
+  const demoConversations = useDemoDmStore((s) => s.conversations);
   useEffect(() => {
     // BUGFIX #34: Only seed after hydration completes
     if (isDemoMode && demoHasHydrated) demoSeed();
@@ -280,11 +297,19 @@ export default function NearbyScreen() {
   // Maps crash if Marker receives null/undefined/NaN/Infinity latitude or longitude
   // Also filters out hidden and expired entries via getVisibleCrossedPaths
   // BUGFIX #12: Use isValidMapCoordinate for comprehensive validation
+  // SAFETY FIX: Exclude blocked users from crossed paths (critical safety requirement)
   const validCrossedPaths = useMemo(() => {
     // Use getVisibleCrossedPaths to filter out hidden/expired entries
     const visiblePaths = getVisibleCrossedPaths();
-    return visiblePaths.filter((cp) => isValidMapCoordinate(cp.latitude, cp.longitude));
-  }, [demoCrossedPaths, getVisibleCrossedPaths]);
+    return visiblePaths.filter((cp) => {
+      // SAFETY: Exclude blocked users - they must NEVER appear on map
+      if (blockedUserIds.includes(cp.otherUserId)) return false;
+      // Exclude current user
+      if (userId && cp.otherUserId === userId) return false;
+      // Validate coordinates
+      return isValidMapCoordinate(cp.latitude, cp.longitude);
+    });
+  }, [demoCrossedPaths, getVisibleCrossedPaths, userId, blockedUserIds]);
 
   // DEV: Log invalid crossed paths so we can debug seed/creation issues
   useEffect(() => {
@@ -341,6 +366,22 @@ export default function NearbyScreen() {
   // Bottom sheet state
   const [selectedProfile, setSelectedProfile] = useState<NearbyProfile | null>(null);
   const sheetAnim = useRef(new Animated.Value(0)).current;
+
+  // Check if selected profile has an existing match or conversation
+  // If yes, we show "Message" CTA instead of "View Profile"
+  const selectedProfileConversationId = useMemo(() => {
+    if (!selectedProfile) return null;
+    const profileId = selectedProfile._id;
+    // Check for existing match
+    const existingMatch = demoMatches.find((m) => m.otherUser?.id === profileId);
+    if (existingMatch) return existingMatch.conversationId;
+    // Check for existing conversation in demoDmStore
+    const convoId = `demo_convo_${profileId}`;
+    if (demoConversations[convoId] && demoConversations[convoId].length > 0) {
+      return convoId;
+    }
+    return null;
+  }, [selectedProfile, demoMatches, demoConversations]);
 
   // Refresh button state (simplified — store handles auto-refresh)
   const [isRefreshing, setIsRefreshing] = useState(false);
@@ -664,6 +705,8 @@ export default function NearbyScreen() {
         return true;
       });
       const filtered = unique.filter((p: any) => {
+        // FIX: Exclude current user from nearby profiles (don't show "me")
+        if (userId && p._id === userId) return false;
         if (blockedUserIds.includes(p._id)) return false;
         // 6-4: Validate profile coordinates before using
         if (
@@ -706,6 +749,8 @@ export default function NearbyScreen() {
 
     // Live mode: map Convex query results with client-side fuzz
     return rankNearbyProfiles(convexNearby
+      // FIX: Exclude current user from nearby profiles
+      .filter((u) => !(userId && u.id === userId))
       // 6-4: Filter out profiles with invalid coordinates
       .filter((u) =>
         typeof u.publishedLat === 'number' &&
@@ -737,6 +782,24 @@ export default function NearbyScreen() {
         };
       }));
   }, [demoStoreProfiles, blockedUserIds, userLat, userLng, userId, convexNearby, sessionSalt, zoomBucket]);
+
+  // ------------------------------------------------------------------
+  // DEBUG: Log marker counts for OOM debugging
+  // "You" marker is now native (showsUserLocation), not counted in custom markers
+  // ------------------------------------------------------------------
+  useEffect(() => {
+    const renderedNearby = Math.min(nearbyProfiles.length, MAX_NEARBY_MARKERS);
+    const renderedCrossed = validCrossedPaths.length;
+    const totalCustomMarkers = renderedNearby + renderedCrossed; // "You" is native, not counted
+    log.info('[MAP_OOM_DEBUG]', 'Marker counts (excluding native "You" marker)', {
+      nearbyTotal: nearbyProfiles.length,
+      nearbyRendered: renderedNearby,
+      crossedPaths: renderedCrossed,
+      totalCustomMarkers,
+      maxAllowed: MAX_NEARBY_MARKERS,
+      truncated: nearbyProfiles.length > MAX_NEARBY_MARKERS,
+    });
+  }, [nearbyProfiles.length, validCrossedPaths.length]);
 
   // ------------------------------------------------------------------
   // Fire "Someone just crossed you" notification once per session (demo mode)
@@ -897,12 +960,21 @@ export default function NearbyScreen() {
 
   return (
     <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
-      {/* Full-screen map with clustering — shown immediately with prewarmed location */}
+      {/* DEBUG: Map disabled for crash isolation */}
+      {DEBUG_DISABLE_MAP ? (
+        <View style={styles.debugMapPlaceholder}>
+          <Ionicons name="map-outline" size={48} color={COLORS.textLight} />
+          <Text style={styles.debugMapText}>Map temporarily disabled for debugging</Text>
+          <Text style={styles.debugMapSubtext}>Testing Android crash isolation</Text>
+        </View>
+      ) : (
+      /* Full-screen map with clustering — shown immediately with prewarmed location */
       <ClusteredMapView
         ref={mapRef}
         style={{ flex: 1 }}
         initialRegion={mapRegion}
-        showsUserLocation={false}
+        showsUserLocation={true}
+        followsUserLocation={false}
         showsMyLocationButton={false}
         toolbarEnabled={false}
         rotateEnabled={false}
@@ -947,49 +1019,23 @@ export default function NearbyScreen() {
           );
         }}
       >
-        {/* "You" marker — only show when we have valid coordinates */}
-        {/* BUGFIX #12: Use isValidMapCoordinate to guard against NaN/Infinity crash */}
-        {isValidMapCoordinate(userLat, userLng) && (
-          <Marker
-            coordinate={{ latitude: userLat!, longitude: userLng! }}
-            anchor={{ x: 0.5, y: 0.5 }}
-          >
-            <View style={styles.youMarkerWrapper}>
-              <View style={styles.youMarkerDot} />
-              <Text style={styles.youMarkerLabel}>You</Text>
-            </View>
-          </Marker>
-        )}
+        {/* "You" marker — handled by native showsUserLocation={true} above */}
+        {/* This provides Google Maps style: blue dot + accuracy circle + heading indicator */}
 
-        {/* Nearby profile markers — solid or faded, no text labels */}
-        {nearbyProfiles.map((p) => (
+        {/* Nearby profile markers — OOM FIX: use image prop, limit count, no React children */}
+        {nearbyProfiles.slice(0, MAX_NEARBY_MARKERS).map((p) => (
           <Marker
             key={p._id}
             coordinate={{ latitude: p.latitude, longitude: p.longitude }}
-            anchor={{ x: 0.5, y: 0.5 }}
+            anchor={{ x: 0.5, y: 1 }}
+            image={PIN_PINK_IMAGE}
+            tracksViewChanges={false}
+            opacity={p.freshness === 'faded' ? 0.5 : 1}
             onPress={(e) => {
               e.stopPropagation();
               openSheet(p);
             }}
-          >
-            <View style={styles.pinWrapper}>
-              <View
-                style={[
-                  styles.pinDot,
-                  p.freshness === 'faded' && styles.pinDotFaded,
-                ]}
-              >
-                <Text
-                  style={[
-                    styles.pinInitial,
-                    p.freshness === 'faded' && styles.pinInitialFaded,
-                  ]}
-                >
-                  {p.name.charAt(0)}
-                </Text>
-              </View>
-            </View>
-          </Marker>
+          />
         ))}
 
         {/* Crossed paths markers — SINGLE pre-composited image (pin + avatar baked in) */}
@@ -1008,6 +1054,7 @@ export default function NearbyScreen() {
           />
         ))}
       </ClusteredMapView>
+      )}
 
       {/* Locating overlay — shown briefly when no location yet */}
       {showLocatingOverlay && (
@@ -1102,15 +1149,30 @@ export default function NearbyScreen() {
                   {selectedProfile.name}, {selectedProfile.age}
                 </Text>
                 <Text style={styles.sheetNearby}>Nearby</Text>
-                <TouchableOpacity
-                  style={styles.viewProfileButton}
-                  onPress={() => {
-                    closeSheet();
-                    router.push(`/(main)/profile/${selectedProfile._id}`);
-                  }}
-                >
-                  <Text style={styles.viewProfileText}>View Profile</Text>
-                </TouchableOpacity>
+                {selectedProfileConversationId ? (
+                  // Existing match/conversation: show "Message" CTA
+                  <TouchableOpacity
+                    style={[styles.viewProfileButton, styles.messageButton]}
+                    onPress={() => {
+                      closeSheet();
+                      router.push(`/(main)/(tabs)/messages/chat/${selectedProfileConversationId}`);
+                    }}
+                  >
+                    <Ionicons name="chatbubble" size={14} color={COLORS.white} style={{ marginRight: 6 }} />
+                    <Text style={styles.viewProfileText}>Message</Text>
+                  </TouchableOpacity>
+                ) : (
+                  // No existing thread: show "View Profile"
+                  <TouchableOpacity
+                    style={styles.viewProfileButton}
+                    onPress={() => {
+                      closeSheet();
+                      router.push(`/(main)/profile/${selectedProfile._id}`);
+                    }}
+                  >
+                    <Text style={styles.viewProfileText}>View Profile</Text>
+                  </TouchableOpacity>
+                )}
               </View>
             </View>
           </>
@@ -1129,6 +1191,26 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: COLORS.background,
+  },
+
+  // DEBUG: Placeholder when map is disabled for crash isolation
+  debugMapPlaceholder: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: COLORS.backgroundDark,
+  },
+  debugMapText: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: COLORS.text,
+    marginTop: 16,
+    textAlign: 'center',
+  },
+  debugMapSubtext: {
+    fontSize: 13,
+    color: COLORS.textLight,
+    marginTop: 6,
   },
 
   // Locating overlay — small, non-blocking indicator
@@ -1378,6 +1460,10 @@ const styles = StyleSheet.create({
     paddingVertical: 10,
     paddingHorizontal: 24,
     alignSelf: 'flex-start',
+  },
+  messageButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
   },
   viewProfileText: {
     color: COLORS.white,

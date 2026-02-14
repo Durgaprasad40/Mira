@@ -4,6 +4,7 @@ export { MessageInput } from './MessageInput';
 export { ProtectedMediaBubble } from './ProtectedMediaBubble';
 export { ProtectedMediaViewer } from './ProtectedMediaViewer';
 export { ProtectedMediaOptionsSheet } from './ProtectedMediaOptionsSheet';
+export { CameraPhotoSheet } from './CameraPhotoSheet';
 export { SystemMessage } from './SystemMessage';
 export { ReportModal } from './ReportModal';
 export { BottleSpinGame } from './BottleSpinGame';

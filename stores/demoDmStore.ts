@@ -11,6 +11,7 @@
 import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { log } from '@/utils/logger';
 
 export interface DemoDmMessage {
   _id: string;
@@ -22,6 +23,18 @@ export interface DemoDmMessage {
   // Voice message fields
   audioUri?: string;
   durationMs?: number;
+  // Protected media fields (synced from privateChatStore for bubble rendering)
+  isProtected?: boolean;
+  protectedMedia?: {
+    timer: number;
+    viewingMode: 'tap' | 'hold';
+    screenshotAllowed: boolean;
+    viewOnce: boolean;
+    watermark: boolean;
+  };
+  timerEndsAt?: number;   // Wall-clock time when timer expires (set on first view)
+  isExpired?: boolean;
+  expiredAt?: number;     // Wall-clock time when expired (for auto-removal after 60s)
 }
 
 /** Lightweight metadata so demo chat screens can render a header. */
@@ -76,6 +89,12 @@ interface DemoDmState {
   /** Cleanup expired confession threads — removes threads + meta + drafts */
   cleanupExpiredThreads: (expiredThreadIds: string[]) => void;
 
+  /** Mark a secure photo as expired (for bubble to show Expired state) */
+  markSecurePhotoExpired: (conversationId: string, messageId: string) => void;
+
+  /** Sync timerEndsAt from privateChatStore (for live countdown on bubble) */
+  syncTimerEndsAt: (conversationId: string, messageId: string, timerEndsAt: number) => void;
+
   /** Clear all conversations, metadata, and drafts. */
   reset: () => void;
 }
@@ -120,13 +139,20 @@ export const useDemoDmStore = create<DemoDmState>()(
           meta: { ...s.meta, [id]: m },
         })),
 
-      addMessage: (id, msg) =>
+      addMessage: (id, msg) => {
+        // DEBUG: Log message send for persistence verification
+        const currentCount = get().conversations[id]?.length ?? 0;
+        log.info('[DM]', 'message added', {
+          conversationId: id,
+          messageCount: currentCount + 1,
+        });
         set((s) => ({
           conversations: {
             ...s.conversations,
             [id]: [...(s.conversations[id] ?? []), msg],
           },
-        })),
+        }));
+      },
 
       setDraft: (id, text) =>
         set((s) => ({
@@ -193,11 +219,53 @@ export const useDemoDmStore = create<DemoDmState>()(
         get().deleteConversations(expiredThreadIds);
       },
 
+      markSecurePhotoExpired: (conversationId, messageId) =>
+        set((s) => {
+          const msgs = s.conversations[conversationId];
+          if (!msgs) return s;
+          const now = Date.now();
+          const updated = msgs.map((m) =>
+            m._id === messageId && !m.isExpired
+              ? { ...m, isExpired: true, expiredAt: now }
+              : m
+          );
+          return { conversations: { ...s.conversations, [conversationId]: updated } };
+        }),
+
+      syncTimerEndsAt: (conversationId, messageId, timerEndsAt) =>
+        set((s) => {
+          const msgs = s.conversations[conversationId];
+          if (!msgs) return s;
+          const updated = msgs.map((m) =>
+            m._id === messageId && !m.timerEndsAt
+              ? { ...m, timerEndsAt }
+              : m
+          );
+          return { conversations: { ...s.conversations, [conversationId]: updated } };
+        }),
+
       reset: () => set({ conversations: {}, meta: {}, drafts: {} }),
     }),
     {
       name: 'demo-dm-storage',
       storage: createJSONStorage(() => AsyncStorage),
+      onRehydrateStorage: () => (state, error) => {
+        if (error) {
+          log.error('[DM]', 'rehydration error', error);
+        }
+        if (state) {
+          // DEBUG: Log conversation/message counts on hydrate for persistence verification
+          const convoIds = Object.keys(state.conversations);
+          const totalMessages = convoIds.reduce(
+            (sum, id) => sum + (state.conversations[id]?.length ?? 0),
+            0
+          );
+          log.info('[DM]', 'hydrated from storage', {
+            conversations: convoIds.length,
+            totalMessages,
+          });
+        }
+      },
     },
   ),
 );

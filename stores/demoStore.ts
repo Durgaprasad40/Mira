@@ -448,11 +448,13 @@ export const useDemoStore = create<DemoState>()(
 
         // Only skip if ALL data is present
         if (state.seeded && state.profiles.length > 0 && state.likes.length > 0) {
-          // Clean up matches that conflict with DEMO_LIKES
-          const demoLikeUserIds = new Set(DEMO_LIKES.map((l) => l.userId));
-          const conflictCount = state.matches.filter((m) => demoLikeUserIds.has(m.otherUser?.id || '')).length;
+          // Clean up matches that conflict with CURRENT likes (not DEMO_LIKES!)
+          // A match only conflicts if the same user exists in BOTH matches AND current likes
+          // Using DEMO_LIKES here would incorrectly remove user-created matches after reload
+          const currentLikeUserIds = new Set(state.likes.map((l) => l.userId));
+          const conflictCount = state.matches.filter((m) => currentLikeUserIds.has(m.otherUser?.id || '')).length;
           if (conflictCount > 0) {
-            const cleanedMatches = state.matches.filter((m) => !demoLikeUserIds.has(m.otherUser?.id || ''));
+            const cleanedMatches = state.matches.filter((m) => !currentLikeUserIds.has(m.otherUser?.id || ''));
             set({ matches: cleanedMatches });
           }
 
@@ -498,13 +500,6 @@ export const useDemoStore = create<DemoState>()(
           return;
         }
 
-        // Build set of DEMO_LIKES userIds to ensure fresh likes are always visible
-        const demoLikeUserIds = new Set(DEMO_LIKES.map((l) => l.userId));
-
-        // Remove any persisted matches that conflict with DEMO_LIKES
-        const cleanedMatches = (state.matches.length > 0 ? state.matches : JSON.parse(JSON.stringify(DEMO_MATCHES)) as DemoMatch[])
-          .filter((m) => !demoLikeUserIds.has(m.otherUser?.id || ''));
-
         // DEMO-ONLY GUARD: Filter out likes for profiles with existing conversations
         const dmState = useDemoDmStore.getState();
         const filterLikesWithExistingConvos = (likes: DemoLike[]): DemoLike[] => {
@@ -514,9 +509,19 @@ export const useDemoStore = create<DemoState>()(
           });
         };
 
+        // Determine which likes to use (preserve persisted or fallback to DEMO_LIKES)
         const seedLikes = state.likes.length > 0
           ? filterLikesWithExistingConvos(state.likes)
           : filterLikesWithExistingConvos(JSON.parse(JSON.stringify(DEMO_LIKES)) as DemoLike[]);
+
+        // Build set from ACTUAL likes that will be used (not static DEMO_LIKES!)
+        // A match only conflicts if the same user exists in BOTH matches AND current likes
+        // Using DEMO_LIKES here would incorrectly remove user-created matches after reload
+        const actualLikeUserIds = new Set(seedLikes.map((l) => l.userId));
+
+        // Remove any matches that conflict with actual current likes
+        const cleanedMatches = (state.matches.length > 0 ? state.matches : JSON.parse(JSON.stringify(DEMO_MATCHES)) as DemoMatch[])
+          .filter((m) => !actualLikeUserIds.has(m.otherUser?.id || ''));
 
         // NOTE: Crossed paths are seeded dynamically with live GPS location
         // in the Nearby screen via seedCrossedPathsWithLocation()
@@ -835,10 +840,14 @@ export const useDemoStore = create<DemoState>()(
             blockedUserIds: [...s.blockedUserIds, userId],
             matches: s.matches.filter((m) => m.otherUser?.id !== userId),
             likes: s.likes.filter((l) => l.userId !== userId),
+            // SAFETY FIX: Also remove blocked user from crossed paths immediately
+            crossedPaths: s.crossedPaths.filter((cp) => cp.otherUserId !== userId),
           };
         });
         // Debug event logging
         logDebugEvent('BLOCK_OR_REPORT', 'User blocked');
+        // Also remove crossed path notifications for blocked user
+        useDemoNotifStore.getState().removeCrossedPathNotificationsForUser(userId);
 
         // Clean DM store — remove all conversations with this user
         const dmState = useDemoDmStore.getState();
@@ -932,7 +941,12 @@ export const useDemoStore = create<DemoState>()(
         }
         if (state) {
           const profile = state.currentDemoUserId ? state.demoProfiles[state.currentDemoUserId] : null;
-          log.once('demo-hydrate', '[DEMO]', 'hydrated', {
+          // DEBUG: Log persistence state on hydrate for verification
+          log.info('[DEMO]', 'hydrated from storage', {
+            matches: state.matches?.length ?? 0,
+            likes: state.likes?.length ?? 0,
+            profiles: state.profiles?.length ?? 0,
+            seeded: state.seeded,
             photos: profile?.photos?.length ?? 0,
             onboarding: !!state.demoOnboardingComplete[state.currentDemoUserId || ''],
           });
