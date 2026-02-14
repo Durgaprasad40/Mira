@@ -26,8 +26,11 @@ type Milestone =
   | 'location_fix'
   | 'map_ready';
 
+type DurationMetric = 'boot_caches';
+
 interface TimingState {
   times: Partial<Record<Milestone, number>>;
+  durations: Partial<Record<DurationMetric, number>>;
   printed: boolean;
 }
 
@@ -35,6 +38,7 @@ const state: TimingState = {
   times: {
     bundle_start: Date.now(), // Captured when this module loads
   },
+  durations: {},
   printed: false,
 };
 
@@ -53,6 +57,19 @@ export function markTiming(milestone: Milestone): void {
 
   // Auto-print summary when key milestones are hit
   tryPrintSummary();
+}
+
+/**
+ * Record a duration metric (actual elapsed time for an operation).
+ * Unlike milestones (absolute timestamps), durations measure operation time.
+ */
+export function markDuration(metric: DurationMetric, durationMs: number): void {
+  if (state.durations[metric] !== undefined) return;
+  state.durations[metric] = durationMs;
+
+  if (__DEV__) {
+    console.log(`[DURATION] ${metric}: ${durationMs}ms`);
+  }
 }
 
 /**
@@ -95,11 +112,11 @@ function tryPrintSummary(): void {
   // Boot hidden time (from start)
   const bootHidden = t.boot_hidden ? t.boot_hidden - start : 0;
 
-  // Boot caches time (fast path vs full hydration)
-  const bootCaches = t.boot_caches_ready ? t.boot_caches_ready - start : 0;
+  // Boot caches duration (actual cache read time, not absolute timestamp)
+  const bootCachesDuration = state.durations.boot_caches ?? 0;
 
   console.log(
-    `[STARTUP_TIMING] bootHidden=${bootHidden}ms bootCaches=${bootCaches}ms total=${total}ms hydration=${hydration}ms route=${route}ms location=${location}ms firstScreen=${firstScreen}ms`
+    `[STARTUP_TIMING] bootHidden=${bootHidden}ms bootCachesDuration=${bootCachesDuration}ms total=${total}ms hydration=${hydration}ms route=${route}ms location=${location}ms firstScreen=${firstScreen}ms`
   );
 
   // Detailed breakdown
