@@ -10,14 +10,30 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
+import { useQuery } from 'convex/react';
+import { api } from '@/convex/_generated/api';
 import { INCOGNITO_COLORS } from '@/lib/constants';
+import { isDemoMode } from '@/hooks/useConvex';
 import {
   DEMO_CHAT_ROOMS,
   DEMO_JOINED_ROOMS,
+  DEMO_CURRENT_USER,
   DemoChatRoom,
 } from '@/lib/demoData';
+import ChatRoomsHeader from '@/components/chatroom/ChatRoomsHeader';
 
 const C = INCOGNITO_COLORS;
+
+// Unified room type for both demo and Convex modes
+interface ChatRoom {
+  id: string;
+  name: string;
+  slug: string;
+  category: 'language' | 'general';
+  memberCount: number;
+  lastMessageAt?: number;
+  lastMessageText?: string;
+}
 
 function getTimeAgo(timestamp?: number): string {
   if (!timestamp) return '';
@@ -37,14 +53,34 @@ export default function ChatRoomsScreen() {
   const [refreshing, setRefreshing] = useState(false);
   const [joinedRooms, setJoinedRooms] = useState(DEMO_JOINED_ROOMS);
 
+  // Convex query for live mode (skipped in demo mode)
+  const convexRooms = useQuery(
+    api.chatRooms.listRooms,
+    isDemoMode ? 'skip' : {}
+  );
+
+  // Unified rooms list: demo or Convex
+  const rooms: ChatRoom[] = isDemoMode
+    ? DEMO_CHAT_ROOMS
+    : (convexRooms ?? []).map((r) => ({
+        id: r._id,
+        name: r.name,
+        slug: r.slug,
+        category: r.category,
+        memberCount: r.memberCount,
+        lastMessageAt: r.lastMessageAt,
+        lastMessageText: r.lastMessageText,
+      }));
+
   const onRefresh = useCallback(() => {
     setRefreshing(true);
+    // In live mode, Convex auto-refreshes. For demo mode, simulate delay.
     setTimeout(() => setRefreshing(false), 800);
   }, []);
 
   const handleOpenRoom = useCallback(
     (roomId: string) => {
-      if (!joinedRooms[roomId]) {
+      if (isDemoMode && !joinedRooms[roomId]) {
         setJoinedRooms((prev) => ({ ...prev, [roomId]: true }));
       }
       router.push({
@@ -55,8 +91,12 @@ export default function ChatRoomsScreen() {
     [router, joinedRooms]
   );
 
+  const handleCreateRoom = useCallback(() => {
+    router.push('/(main)/create-room' as any);
+  }, [router]);
+
   const renderRoom = useCallback(
-    ({ item }: { item: DemoChatRoom }) => {
+    ({ item }: { item: ChatRoom }) => {
       const isGeneral = item.category === 'general';
 
       return (
@@ -68,7 +108,7 @@ export default function ChatRoomsScreen() {
           <View style={[styles.roomIcon, isGeneral && styles.roomIconGeneral]}>
             <Ionicons
               name={isGeneral ? 'globe' : 'language'}
-              size={18}
+              size={22}
               color={isGeneral ? '#64B5F6' : C.primary}
             />
           </View>
@@ -100,16 +140,32 @@ export default function ChatRoomsScreen() {
     [handleOpenRoom]
   );
 
-  const generalRooms = DEMO_CHAT_ROOMS.filter((r) => r.category === 'general');
-  const languageRooms = DEMO_CHAT_ROOMS.filter((r) => r.category === 'language');
+  const generalRooms = rooms.filter((r) => r.category === 'general');
+  const languageRooms = rooms.filter((r) => r.category === 'language');
 
   return (
-    <View style={[styles.container, { paddingTop: insets.top }]}>
-      {/* Header */}
-      <View style={styles.header}>
-        <Ionicons name="chatbubbles" size={20} color={C.primary} />
-        <Text style={styles.headerTitle}>Chat Rooms</Text>
-      </View>
+    <View style={styles.container}>
+      {/* Purple/Blue Header Bar */}
+      <ChatRoomsHeader
+        title="Chat Rooms"
+        topInset={insets.top}
+        onMenuPress={() => {
+          // Menu placeholder - could open drawer if exists
+        }}
+        onRefreshPress={onRefresh}
+        onInboxPress={() => {
+          // Inbox placeholder
+        }}
+        onNotificationsPress={() => {
+          // Notifications placeholder
+        }}
+        onProfilePress={() => {
+          router.push('/(main)/edit-profile' as any);
+        }}
+        profileAvatar={DEMO_CURRENT_USER.avatar}
+        showCreateButton
+        onCreatePress={handleCreateRoom}
+      />
 
       <FlatList
         data={[]}
@@ -146,48 +202,34 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: C.background,
   },
-  header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    paddingHorizontal: 14,
-    paddingVertical: 8,
-    borderBottomWidth: 1,
-    borderBottomColor: C.surface,
-  },
-  headerTitle: {
-    fontSize: 20,
-    fontWeight: '800',
-    color: C.text,
-  },
   listContent: {
     paddingBottom: 16,
   },
   sectionTitle: {
-    fontSize: 11,
+    fontSize: 12,
     fontWeight: '700',
     color: C.textLight,
     textTransform: 'uppercase',
     letterSpacing: 0.8,
     paddingHorizontal: 14,
-    paddingTop: 10,
-    paddingBottom: 4,
+    paddingTop: 14,
+    paddingBottom: 8,
   },
   roomCard: {
     flexDirection: 'row',
     alignItems: 'center',
     backgroundColor: C.surface,
-    marginHorizontal: 10,
-    marginBottom: 4,
-    borderRadius: 10,
-    paddingHorizontal: 10,
-    paddingVertical: 8,
-    gap: 10,
+    marginHorizontal: 12,
+    marginBottom: 8,
+    borderRadius: 12,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    gap: 12,
   },
   roomIcon: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
+    width: 44,
+    height: 44,
+    borderRadius: 22,
     backgroundColor: 'rgba(233,69,96,0.12)',
     alignItems: 'center',
     justifyContent: 'center',
@@ -202,35 +244,35 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: 2,
+    marginBottom: 4,
   },
   roomName: {
-    fontSize: 14,
+    fontSize: 15,
     fontWeight: '600',
     color: C.text,
   },
   roomTime: {
-    fontSize: 10,
+    fontSize: 12,
     color: C.textLight,
   },
   roomPreview: {
-    fontSize: 12,
+    fontSize: 14,
     color: C.textLight,
-    marginBottom: 3,
+    marginBottom: 4,
   },
   roomPreviewEmpty: {
-    fontSize: 12,
+    fontSize: 14,
     color: C.textLight,
     fontStyle: 'italic',
-    marginBottom: 3,
+    marginBottom: 4,
   },
   roomMeta: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 3,
+    gap: 4,
   },
   roomMembers: {
-    fontSize: 10,
+    fontSize: 12,
     color: C.textLight,
   },
 });

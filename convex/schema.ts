@@ -858,6 +858,8 @@ export default defineSchema({
     lastMessageAt: v.optional(v.number()),
     lastMessageText: v.optional(v.string()),
     memberCount: v.number(),
+    createdBy: v.optional(v.id('users')), // Room creator
+    isDemoRoom: v.optional(v.boolean()), // Demo mode flag
   })
     .index('by_slug', ['slug'])
     .index('by_last_message', ['lastMessageAt'])
@@ -868,6 +870,8 @@ export default defineSchema({
     roomId: v.id('chatRooms'),
     userId: v.id('users'),
     joinedAt: v.number(),
+    role: v.optional(v.union(v.literal('owner'), v.literal('mod'), v.literal('member'))), // Member role
+    lastMessageAt: v.optional(v.number()), // For rate limiting
   })
     .index('by_room', ['roomId'])
     .index('by_user', ['userId'])
@@ -881,9 +885,13 @@ export default defineSchema({
     text: v.optional(v.string()),
     imageUrl: v.optional(v.string()),
     createdAt: v.number(),
+    clientId: v.optional(v.string()), // For deduplication
+    status: v.optional(v.union(v.literal('pending'), v.literal('sent'), v.literal('failed'))), // Message status
+    deletedAt: v.optional(v.number()), // Soft delete
   })
     .index('by_room', ['roomId'])
-    .index('by_room_created', ['roomId', 'createdAt']),
+    .index('by_room_created', ['roomId', 'createdAt'])
+    .index('by_room_clientId', ['roomId', 'clientId']), // For idempotency check
 
   // Filter Presets table
   filterPresets: defineTable({

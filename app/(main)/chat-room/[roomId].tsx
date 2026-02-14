@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useRef, useEffect } from 'react';
+import React, { useState, useCallback, useRef, useEffect, useMemo } from 'react';
 import {
   StyleSheet,
   View,
@@ -14,6 +14,11 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
+import { useQuery, useMutation } from 'convex/react';
+import { api } from '@/convex/_generated/api';
+import { Id } from '@/convex/_generated/dataModel';
+import { isDemoMode } from '@/hooks/useConvex';
+import { useAuthStore } from '@/stores/authStore';
 import { INCOGNITO_COLORS } from '@/lib/constants';
 import {
   DEMO_CHAT_ROOMS,
@@ -30,8 +35,17 @@ import {
   DemoOnlineUser,
 } from '@/lib/demoData';
 
+// Generate UUID for clientId (idempotency)
+function generateUUID(): string {
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, (c) => {
+    const r = (Math.random() * 16) | 0;
+    const v = c === 'x' ? r : (r & 0x3) | 0x8;
+    return v.toString(16);
+  });
+}
+
 const EMPTY_MESSAGES: DemoChatMessage[] = [];
-import ChatHeader from '@/components/chatroom/ChatHeader';
+import ChatRoomsHeader from '@/components/chatroom/ChatRoomsHeader';
 import ChatMessageList, { ChatMessageListHandle } from '@/components/chatroom/ChatMessageList';
 import ChatComposer, { type ComposerPanel } from '@/components/chatroom/ChatComposer';
 import MessagesPopover from '@/components/chatroom/MessagesPopover';
@@ -74,7 +88,29 @@ export default function ChatRoomScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
 
-  const room = DEMO_CHAT_ROOMS.find((r) => r.id === roomId);
+  // Get current user ID for Convex (live mode)
+  const authUserId = useAuthStore((s) => s.userId);
+
+  // Demo mode: use local room data
+  const demoRoom = DEMO_CHAT_ROOMS.find((r) => r.id === roomId);
+
+  // Convex queries (skipped in demo mode)
+  const convexRoom = useQuery(
+    api.chatRooms.getRoom,
+    isDemoMode ? 'skip' : { roomId: roomId as Id<'chatRooms'> }
+  );
+
+  const convexMessagesResult = useQuery(
+    api.chatRooms.listMessages,
+    isDemoMode ? 'skip' : { roomId: roomId as Id<'chatRooms'>, limit: 50 }
+  );
+
+  // Convex mutations
+  const sendMessageMutation = useMutation(api.chatRooms.sendMessage);
+  const joinRoomMutation = useMutation(api.chatRooms.joinRoom);
+
+  // Unified room object
+  const room = isDemoMode ? demoRoom : convexRoom;
 
   // ── Mounted guard: prevents setState after unmount ──
   const isMountedRef = useRef(true);
@@ -107,16 +143,40 @@ export default function ChatRoomScreen() {
     return () => sub.remove();
   }, []);
 
-  // ── Chat messages (persisted via Zustand store) ──
+  // ── Chat messages (persisted via Zustand store for demo mode) ──
   const messageListRef = useRef<ChatMessageListHandle>(null);
   const seedRoom = useDemoChatRoomStore((s) => s.seedRoom);
   const addStoreMessage = useDemoChatRoomStore((s) => s.addMessage);
   const setStoreMessages = useDemoChatRoomStore((s) => s.setMessages);
-  const messages = useDemoChatRoomStore((s) => (roomId ? s.rooms[roomId] ?? EMPTY_MESSAGES : EMPTY_MESSAGES));
+  const demoMessages = useDemoChatRoomStore((s) => (roomId ? s.rooms[roomId] ?? EMPTY_MESSAGES : EMPTY_MESSAGES));
 
-  // Seed the room once with demo data + join message
+  // Optimistic messages for live mode (pending messages before server confirms)
+  const [pendingMessages, setPendingMessages] = useState<DemoChatMessage[]>([]);
+
+  // Unified messages: demo mode uses store, live mode uses Convex + pending
+  const messages: DemoChatMessage[] = useMemo(() => {
+    if (isDemoMode) {
+      return demoMessages;
+    }
+    // Live mode: convert Convex messages to DemoChatMessage format
+    const convexMsgs = convexMessagesResult?.messages ?? [];
+    const converted: DemoChatMessage[] = convexMsgs.map((m) => ({
+      id: m._id,
+      roomId: m.roomId,
+      senderId: m.senderId,
+      senderName: 'User', // Would need user lookup for names
+      type: m.type as 'text' | 'image' | 'system',
+      text: m.text,
+      mediaUrl: m.imageUrl,
+      createdAt: m.createdAt,
+    }));
+    // Add pending messages at the end
+    return [...converted, ...pendingMessages];
+  }, [isDemoMode, demoMessages, convexMessagesResult, pendingMessages]);
+
+  // Seed the room once with demo data + join message (demo mode only)
   useEffect(() => {
-    if (!roomId) return;
+    if (!isDemoMode || !roomId) return;
     const base = getDemoMessagesForRoom(roomId);
     const joinMsg: DemoChatMessage = {
       id: `sys_join_${DEMO_CURRENT_USER.id}_${Date.now()}`,
@@ -129,6 +189,19 @@ export default function ChatRoomScreen() {
     };
     seedRoom(roomId, [...base, joinMsg]);
   }, [roomId, seedRoom]);
+
+  // Auto-join room on mount (live mode)
+  useEffect(() => {
+    if (isDemoMode || !roomId || !authUserId) return;
+    // Auto-join the room when entering
+    joinRoomMutation({
+      roomId: roomId as Id<'chatRooms'>,
+      userId: authUserId as Id<'users'>,
+    }).catch((err) => {
+      // Silently ignore - user may already be a member
+      console.log('Join room:', err.message);
+    });
+  }, [roomId, authUserId, joinRoomMutation]);
 
   const [inputText, setInputText] = useState('');
 
@@ -261,24 +334,60 @@ export default function ChatRoomScreen() {
   // ────────────────────────────────────────────
   // SEND MESSAGE
   // ────────────────────────────────────────────
-  const handleSend = useCallback(() => {
+  const handleSend = useCallback(async () => {
     const trimmed = inputText.trim();
     if (!trimmed || !roomId) return;
 
-    const newMessage: DemoChatMessage = {
-      id: `cm_me_${Date.now()}`,
-      roomId,
-      senderId: DEMO_CURRENT_USER.id,
-      senderName: DEMO_CURRENT_USER.username,
-      type: 'text',
-      text: trimmed,
-      createdAt: Date.now(),
-    };
+    if (isDemoMode) {
+      // Demo mode: use local store
+      const newMessage: DemoChatMessage = {
+        id: `cm_me_${Date.now()}`,
+        roomId,
+        senderId: DEMO_CURRENT_USER.id,
+        senderName: DEMO_CURRENT_USER.username,
+        type: 'text',
+        text: trimmed,
+        createdAt: Date.now(),
+      };
+      addStoreMessage(roomId, newMessage);
+      setInputText('');
+      setUserCoins((prev) => prev + 1);
+    } else {
+      // Live mode: use Convex with idempotency
+      if (!authUserId) return;
 
-    addStoreMessage(roomId, newMessage);
-    setInputText('');
-    setUserCoins((prev) => prev + 1);
-  }, [inputText, roomId, addStoreMessage]);
+      const clientId = generateUUID();
+      const now = Date.now();
+
+      // Optimistic update: add pending message
+      const pendingMsg: DemoChatMessage = {
+        id: `pending_${clientId}`,
+        roomId,
+        senderId: authUserId,
+        senderName: 'You',
+        type: 'text',
+        text: trimmed,
+        createdAt: now,
+      };
+      setPendingMessages((prev) => [...prev, pendingMsg]);
+      setInputText('');
+
+      try {
+        await sendMessageMutation({
+          roomId: roomId as Id<'chatRooms'>,
+          senderId: authUserId as Id<'users'>,
+          text: trimmed,
+          clientId,
+        });
+        // Remove pending message on success (Convex will add the real one)
+        setPendingMessages((prev) => prev.filter((m) => m.id !== `pending_${clientId}`));
+      } catch (err: any) {
+        // On failure, mark message as failed or remove
+        Alert.alert('Error', err.message || 'Failed to send message');
+        setPendingMessages((prev) => prev.filter((m) => m.id !== `pending_${clientId}`));
+      }
+    }
+  }, [inputText, roomId, addStoreMessage, authUserId, sendMessageMutation]);
 
   const handlePanelChange = useCallback((_panel: ComposerPanel) => {}, []);
 
@@ -286,23 +395,42 @@ export default function ChatRoomScreen() {
   // SEND MEDIA (image / video / doodle)
   // ────────────────────────────────────────────
   const handleSendMedia = useCallback(
-    (uri: string, mediaType: 'image' | 'video') => {
+    async (uri: string, mediaType: 'image' | 'video') => {
       if (!roomId) return;
       const labelMap = { image: 'Photo', video: 'Video' };
-      const newMessage: DemoChatMessage = {
-        id: `cm_me_${Date.now()}`,
-        roomId,
-        senderId: DEMO_CURRENT_USER.id,
-        senderName: DEMO_CURRENT_USER.username,
-        type: mediaType,
-        text: `[${labelMap[mediaType]}]`,
-        mediaUrl: uri,
-        createdAt: Date.now(),
-      };
-      addStoreMessage(roomId, newMessage);
-      setUserCoins((prev) => prev + 1);
+
+      if (isDemoMode) {
+        // Demo mode: use local store
+        const newMessage: DemoChatMessage = {
+          id: `cm_me_${Date.now()}`,
+          roomId,
+          senderId: DEMO_CURRENT_USER.id,
+          senderName: DEMO_CURRENT_USER.username,
+          type: mediaType,
+          text: `[${labelMap[mediaType]}]`,
+          mediaUrl: uri,
+          createdAt: Date.now(),
+        };
+        addStoreMessage(roomId, newMessage);
+        setUserCoins((prev) => prev + 1);
+      } else {
+        // Live mode: use Convex with idempotency
+        if (!authUserId) return;
+
+        const clientId = generateUUID();
+        try {
+          await sendMessageMutation({
+            roomId: roomId as Id<'chatRooms'>,
+            senderId: authUserId as Id<'users'>,
+            imageUrl: uri,
+            clientId,
+          });
+        } catch (err: any) {
+          Alert.alert('Error', err.message || 'Failed to send media');
+        }
+      }
     },
-    [roomId, addStoreMessage]
+    [roomId, addStoreMessage, authUserId, sendMessageMutation]
   );
 
   // ────────────────────────────────────────────
@@ -499,7 +627,12 @@ export default function ChatRoomScreen() {
   if (!room) {
     return (
       <View style={styles.container}>
-        <ChatHeader onMenuPress={() => router.back()} topInset={insets.top} />
+        <ChatRoomsHeader
+          title="Room Not Found"
+          showBackButton
+          onMenuPress={() => router.back()}
+          topInset={insets.top}
+        />
         <View style={styles.notFound}>
           <Ionicons name="alert-circle-outline" size={48} color={C.textLight} />
           <Text style={styles.notFoundText}>Room not found</Text>
@@ -517,21 +650,26 @@ export default function ChatRoomScreen() {
     );
   }
 
+  // Get room name for header
+  const roomName = isDemoMode
+    ? (room as any)?.name ?? 'Chat Room'
+    : (room as any)?.name ?? 'Chat Room';
+
   return (
     <View style={styles.container}>
       {/* Header with badge counters — measured via onLayout */}
       <View onLayout={onChatHeaderLayout}>
-        <ChatHeader
+        <ChatRoomsHeader
+          title={roomName}
+          showBackButton
           topInset={insets.top}
           onMenuPress={() => router.back()}
-          onReloadPress={handleReload}
-          onMessagesPress={() => setOverlay('messages')}
-          onFriendRequestsPress={() => setOverlay('friendRequests')}
+          onRefreshPress={handleReload}
+          onInboxPress={() => setOverlay('messages')}
           onNotificationsPress={() => setOverlay('notifications')}
           onProfilePress={() => setOverlay('profile')}
           profileAvatar={DEMO_CURRENT_USER.avatar}
-          unreadDMs={unreadDMs}
-          pendingFriendRequests={friendRequests.length}
+          unreadInbox={unreadDMs}
           unseenNotifications={unseenNotifications}
         />
       </View>
@@ -558,7 +696,7 @@ export default function ChatRoomScreen() {
         <ChatMessageList
           ref={messageListRef}
           messages={messages}
-          currentUserId={DEMO_CURRENT_USER.id}
+          currentUserId={isDemoMode ? DEMO_CURRENT_USER.id : (authUserId ?? '')}
           mutedUserIds={mutedUserIds}
           onMessageLongPress={handleMessageLongPress}
           onAvatarPress={handleAvatarPress}

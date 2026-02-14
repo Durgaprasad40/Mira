@@ -26,14 +26,28 @@ interface ChatMessageItemProps {
   onMediaPress?: (mediaUrl: string, type: 'image' | 'video') => void;
 }
 
-function formatTime(timestamp: number): string {
+function formatDateTime(timestamp: number): string {
   const d = new Date(timestamp);
+  const now = new Date();
+  const isToday =
+    d.getFullYear() === now.getFullYear() &&
+    d.getMonth() === now.getMonth() &&
+    d.getDate() === now.getDate();
+
   const hours = d.getHours();
   const minutes = d.getMinutes();
   const ampm = hours >= 12 ? 'PM' : 'AM';
   const h = hours % 12 || 12;
   const m = minutes < 10 ? `0${minutes}` : minutes;
-  return `${h}:${m} ${ampm}`;
+  const timeStr = `${h}:${m} ${ampm}`;
+
+  if (isToday) {
+    return timeStr;
+  }
+
+  // Show date + time for older messages
+  const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
+  return `${d.getDate()} ${months[d.getMonth()]} ${timeStr}`;
 }
 
 function ChatMessageItem({
@@ -53,32 +67,8 @@ function ChatMessageItem({
 }: ChatMessageItemProps) {
   const isMedia = (messageType === 'image' || messageType === 'video') && mediaUrl;
 
-  if (isMe) {
-    return (
-      <TouchableOpacity
-        style={[styles.containerMe, dimmed && styles.dimmed]}
-        onLongPress={onLongPress}
-        activeOpacity={0.8}
-        delayLongPress={400}
-      >
-        <View style={styles.contentMe}>
-          <Text style={styles.meTime}>{formatTime(timestamp)}</Text>
-          {isMedia ? (
-            <MediaMessage
-              mediaUrl={mediaUrl!}
-              type={messageType as 'image' | 'video'}
-              onPress={() => onMediaPress?.(mediaUrl!, messageType as 'image' | 'video')}
-            />
-          ) : (
-            <View style={styles.bubbleMe}>
-              <Text style={styles.messageTextMe}>{text}</Text>
-            </View>
-          )}
-        </View>
-      </TouchableOpacity>
-    );
-  }
-
+  // Layout: Avatar (left) | Name + Time (line 1), Message (line 2)
+  // Same layout for both "me" and "others" - only styling differs
   return (
     <TouchableOpacity
       style={[styles.container, dimmed && styles.dimmed]}
@@ -86,28 +76,38 @@ function ChatMessageItem({
       activeOpacity={0.8}
       delayLongPress={400}
     >
+      {/* Avatar */}
       <TouchableOpacity onPress={onAvatarPress} activeOpacity={0.7}>
         {senderAvatar ? (
           <Image source={{ uri: senderAvatar }} style={styles.avatar} />
         ) : (
-          <View style={styles.avatarPlaceholder}>
-            <Ionicons name="person" size={12} color={C.textLight} />
+          <View style={[styles.avatarPlaceholder, isMe && styles.avatarPlaceholderMe]}>
+            <Ionicons name="person" size={16} color={isMe ? '#FFFFFF' : C.textLight} />
           </View>
         )}
       </TouchableOpacity>
 
+      {/* Content: Name + Time (row 1), Message (row 2) */}
       <View style={styles.content}>
-        {/* Name + time on same line */}
-        <TouchableOpacity onPress={onNamePress} activeOpacity={0.7} style={styles.nameRow}>
-          <Text style={styles.senderName}>{senderName}</Text>
-          <Text style={styles.timeLabel}>{formatTime(timestamp)}</Text>
-        </TouchableOpacity>
+        {/* Row 1: Name (bold) + Time (right) */}
+        <View style={styles.headerRow}>
+          <TouchableOpacity onPress={onNamePress} activeOpacity={0.7}>
+            <Text style={[styles.senderName, isMe && styles.senderNameMe]}>
+              {isMe ? 'You' : senderName}
+            </Text>
+          </TouchableOpacity>
+          <Text style={styles.timeLabel}>{formatDateTime(timestamp)}</Text>
+        </View>
+
+        {/* Row 2: Message text or media */}
         {isMedia ? (
-          <MediaMessage
-            mediaUrl={mediaUrl!}
-            type={messageType as 'image' | 'video'}
-            onPress={() => onMediaPress?.(mediaUrl!, messageType as 'image' | 'video')}
-          />
+          <View style={styles.mediaContainer}>
+            <MediaMessage
+              mediaUrl={mediaUrl!}
+              type={messageType as 'image' | 'video'}
+              onPress={() => onMediaPress?.(mediaUrl!, messageType as 'image' | 'video')}
+            />
+          </View>
         ) : (
           <Text style={styles.messageText}>{text}</Text>
         )}
@@ -119,84 +119,66 @@ function ChatMessageItem({
 export default React.memo(ChatMessageItem);
 
 const styles = StyleSheet.create({
-  // ── Other users: left-aligned ──
+  // ── Message row with MEDIUM spacing ──
   container: {
     flexDirection: 'row',
     alignItems: 'flex-start',
-    paddingHorizontal: 10,
-    paddingVertical: 2,
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    gap: 12,
   },
   dimmed: {
     opacity: 0.3,
   },
+  // ── Avatar: slightly larger for better visibility ──
   avatar: {
-    width: 28,
-    height: 28,
-    borderRadius: 14,
-    marginRight: 6,
-    marginTop: 2,
+    width: 40,
+    height: 40,
+    borderRadius: 20,
   },
   avatarPlaceholder: {
-    width: 28,
-    height: 28,
-    borderRadius: 14,
+    width: 40,
+    height: 40,
+    borderRadius: 20,
     backgroundColor: C.accent,
     alignItems: 'center',
     justifyContent: 'center',
-    marginRight: 6,
-    marginTop: 2,
   },
+  avatarPlaceholderMe: {
+    backgroundColor: C.primary,
+  },
+  // ── Content area ──
   content: {
     flex: 1,
+    gap: 4,
   },
-  nameRow: {
+  // ── Header row: Name (bold, left) + Time (right) ──
+  headerRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 6,
+    justifyContent: 'space-between',
   },
   senderName: {
-    fontSize: 11,
+    fontSize: 14,
     fontWeight: '700',
     color: C.primary,
   },
+  senderNameMe: {
+    color: '#6B5CE7',
+  },
   timeLabel: {
-    fontSize: 10,
+    fontSize: 12,
     color: C.textLight,
   },
+  // ── Message text ──
   messageText: {
-    fontSize: 14,
-    lineHeight: 18,
+    fontSize: 15,
+    lineHeight: 20,
     color: C.text,
-    marginTop: 1,
   },
-  // ── My messages: right-aligned ──
-  containerMe: {
-    flexDirection: 'row',
-    justifyContent: 'flex-end',
-    paddingHorizontal: 10,
-    paddingVertical: 2,
-  },
-  contentMe: {
-    flexDirection: 'row',
-    alignItems: 'flex-end',
-    maxWidth: '80%',
-    gap: 4,
-  },
-  meTime: {
-    fontSize: 10,
-    color: C.textLight,
-    marginBottom: 2,
-  },
-  bubbleMe: {
-    backgroundColor: C.accent,
-    borderRadius: 12,
-    borderTopRightRadius: 3,
-    paddingHorizontal: 10,
-    paddingVertical: 5,
-  },
-  messageTextMe: {
-    fontSize: 14,
-    lineHeight: 18,
-    color: C.text,
+  // ── Media container ──
+  mediaContainer: {
+    marginTop: 4,
+    maxWidth: '85%',
   },
 });
