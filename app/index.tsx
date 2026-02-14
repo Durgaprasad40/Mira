@@ -9,6 +9,7 @@ import { useBootStore } from "@/stores/bootStore";
 import { isDemoMode } from "@/hooks/useConvex";
 import { View, ActivityIndicator, StyleSheet, Text } from "react-native";
 import { COLORS } from "@/lib/constants";
+import { markTiming } from "@/utils/startupTiming";
 
 export default function Index() {
   const authHydrated = useAuthStore((s) => s._hasHydrated);
@@ -44,6 +45,9 @@ export default function Index() {
   // Signal to BootScreen that routing decision has been made
   // This allows the boot screen to hide
   setRouteDecisionMade(true);
+
+  // Milestone D: route decision made
+  markTiming('route_decision');
 
   // ── Demo mode: email+password auth with full onboarding ──
   if (isDemoMode) {

@@ -19,6 +19,7 @@ import { resetPhase2MatchSession } from '../lib/phase2MatchSession';
 import { resetPrivateChatForTesting } from './privateChatStore';
 import { PRIVATE_INTENT_CATEGORIES } from '@/lib/privateConstants';
 import { log } from '@/utils/logger';
+import { markTiming } from '@/utils/startupTiming';
 
 // ---------------------------------------------------------------------------
 // Types — lightweight "Like" shapes matching the demo data constants
@@ -1029,6 +1030,8 @@ export const useDemoStore = create<DemoState>()(
           }
         }
         state?.setHasHydrated(true);
+        // Milestone C: demoStore hydration complete
+        markTiming('demo_hydrated');
       },
       partialize: (state) => ({
         profiles: state.profiles,

@@ -14,6 +14,7 @@ import { create } from 'zustand';
 import * as Location from 'expo-location';
 import { AppState, AppStateStatus } from 'react-native';
 import { log } from '@/utils/logger';
+import { markTiming } from '@/utils/startupTiming';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -103,6 +104,8 @@ export const useLocationStore = create<LocationState>((set, get) => ({
 
     set({ isTracking: true, error: null });
     log.info('[LOCATION]', 'starting location tracking');
+    // Milestone F: location start
+    markTiming('location_start');
 
     try {
       // 1. Check/request permission
@@ -197,6 +200,8 @@ export const useLocationStore = create<LocationState>((set, get) => ({
             lat: coords.latitude.toFixed(4),
             lng: coords.longitude.toFixed(4),
           });
+          // Milestone F: location first fix
+          markTiming('location_fix');
 
           // Reverse geocode for city name
           try {

@@ -14,6 +14,7 @@ import { useDemoStore } from "@/stores/demoStore";
 import { useBootStore } from "@/stores/bootStore";
 import { BootScreen } from "@/components/BootScreen";
 import { collectDeviceFingerprint } from "@/lib/deviceFingerprint";
+import { markTiming } from "@/utils/startupTiming";
 
 function DemoBanner() {
   return null;
@@ -200,6 +201,9 @@ function DeviceFingerprintCollector() {
 }
 
 export default function RootLayout() {
+  // Milestone A: RootLayout first render
+  markTiming('root_layout');
+
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>
       <SafeAreaProvider>

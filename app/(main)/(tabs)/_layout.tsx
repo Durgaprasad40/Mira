@@ -13,8 +13,12 @@ import { useLocationStore } from "@/stores/locationStore";
 import { asUserId } from "@/convex/id";
 import { AppErrorBoundary, registerErrorBoundaryNavigation } from "@/components/safety";
 import { processThreadsIntegrity } from "@/lib/threadsIntegrity";
+import { markTiming } from "@/utils/startupTiming";
 
 export default function MainTabsLayout() {
+  // Milestone E: first tab screen mounted
+  markTiming('first_tab');
+
   const router = useRouter();
   const locationPrewarmed = useRef(false);
   const startLocationTracking = useLocationStore((s) => s.startLocationTracking);

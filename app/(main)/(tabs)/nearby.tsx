@@ -41,6 +41,7 @@ import { rankNearbyProfiles } from '@/lib/rankProfiles';
 import { isWithinAllowedDistance } from '@/lib/distanceRules';
 import { logDebugEvent } from '@/lib/debugEventLogger';
 import { log } from '@/utils/logger';
+import { markTiming } from '@/utils/startupTiming';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -799,6 +800,10 @@ export default function NearbyScreen() {
       maxAllowed: MAX_NEARBY_MARKERS,
       truncated: nearbyProfiles.length > MAX_NEARBY_MARKERS,
     });
+    // Milestone G: map markers ready
+    if (totalCustomMarkers > 0) {
+      markTiming('map_ready');
+    }
   }, [nearbyProfiles.length, validCrossedPaths.length]);
 
   // ------------------------------------------------------------------
