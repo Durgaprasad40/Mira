@@ -3027,6 +3027,10 @@ export interface DemoUserProfile {
   isActive: boolean;
   coins: number;
   messagesSent: number;
+  /** User age (for chat room identity) */
+  age?: number;
+  /** User gender (for chat room identity) */
+  gender?: string;
 }
 
 export const DEMO_CURRENT_USER: DemoUserProfile = {
@@ -3036,6 +3040,8 @@ export const DEMO_CURRENT_USER: DemoUserProfile = {
   isActive: true,
   coins: 47,
   messagesSent: 47,
+  age: 25,
+  gender: 'Male',
 };
 
 // ──── Chat Room: Online Users ────

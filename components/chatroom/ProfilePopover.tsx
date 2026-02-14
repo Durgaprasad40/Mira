@@ -19,7 +19,13 @@ interface ProfilePopoverProps {
   avatar?: string;
   isActive: boolean;
   coins: number;
-  onEditProfile?: () => void;
+  /** Age (read-only in chat room context) */
+  age?: number;
+  /** Gender (read-only in chat room context) */
+  gender?: string;
+  /** Called when user wants to change profile photo (stubbed for now) */
+  onChangePhoto?: () => void;
+  /** Called when user wants to leave the room */
   onLogout?: () => void;
 }
 
@@ -30,7 +36,9 @@ export default function ProfilePopover({
   avatar,
   isActive,
   coins,
-  onEditProfile,
+  age,
+  gender,
+  onChangePhoto,
   onLogout,
 }: ProfilePopoverProps) {
   if (!visible) return null;
@@ -67,9 +75,28 @@ export default function ProfilePopover({
               />
             </View>
             <Text style={styles.statusLabel}>
-              {isActive ? 'Active' : 'Inactive'}
+              {isActive ? 'Online in Room' : 'Offline'}
             </Text>
           </View>
+
+          {/* Identity info (read-only) */}
+          {(age || gender) && (
+            <View style={styles.identitySection}>
+              {age && (
+                <View style={styles.identityRow}>
+                  <Text style={styles.identityLabel}>Age</Text>
+                  <Text style={styles.identityValue}>{age}</Text>
+                </View>
+              )}
+              {gender && (
+                <View style={styles.identityRow}>
+                  <Text style={styles.identityLabel}>Gender</Text>
+                  <Text style={styles.identityValue}>{gender}</Text>
+                </View>
+              )}
+              <Text style={styles.identityNote}>Identity cannot be changed in chat rooms</Text>
+            </View>
+          )}
 
           {/* Divider */}
           <View style={styles.divider} />
@@ -81,29 +108,31 @@ export default function ProfilePopover({
             <Text style={styles.menuValue}>{coins}</Text>
           </TouchableOpacity>
 
+          {/* Change Photo - stubbed for now */}
           <TouchableOpacity
             style={styles.menuItem}
             activeOpacity={0.7}
             onPress={() => {
               onClose();
-              onEditProfile?.();
+              onChangePhoto?.();
             }}
           >
-            <Ionicons name="create-outline" size={18} color={C.text} />
-            <Text style={styles.menuLabel}>Edit Profile</Text>
+            <Ionicons name="camera-outline" size={18} color={C.text} />
+            <Text style={styles.menuLabel}>Change Photo</Text>
             <Ionicons name="chevron-forward" size={16} color={C.textLight} />
           </TouchableOpacity>
 
+          {/* Leave Room button */}
           <TouchableOpacity
-            style={styles.menuItem}
+            style={[styles.menuItem, styles.leaveRoomItem]}
             activeOpacity={0.7}
             onPress={() => {
               onClose();
               onLogout?.();
             }}
           >
-            <Ionicons name="log-out-outline" size={18} color={C.primary} />
-            <Text style={[styles.menuLabel, { color: C.primary }]}>Logout</Text>
+            <Ionicons name="exit-outline" size={18} color="#FF4757" />
+            <Text style={[styles.menuLabel, styles.leaveRoomText]}>Leave Room</Text>
           </TouchableOpacity>
         </View>
       </TouchableOpacity>
@@ -192,5 +221,42 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: '700',
     color: C.primary,
+  },
+  // Identity section (read-only)
+  identitySection: {
+    paddingVertical: 8,
+    gap: 4,
+  },
+  identityRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingVertical: 4,
+  },
+  identityLabel: {
+    fontSize: 13,
+    color: C.textLight,
+  },
+  identityValue: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: C.text,
+  },
+  identityNote: {
+    fontSize: 10,
+    color: C.textLight,
+    fontStyle: 'italic',
+    textAlign: 'center',
+    marginTop: 4,
+  },
+  // Leave Room button
+  leaveRoomItem: {
+    marginTop: 8,
+    paddingTop: 12,
+    borderTopWidth: 1,
+    borderTopColor: C.accent,
+  },
+  leaveRoomText: {
+    color: '#FF4757',
   },
 });

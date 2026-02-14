@@ -9,6 +9,7 @@ import {
   KeyboardAvoidingView,
   Platform,
   LayoutChangeEvent,
+  BackHandler,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -65,6 +66,7 @@ import VideoPlayerModal from '@/components/chatroom/VideoPlayerModal';
 import ImagePreviewModal from '@/components/chatroom/ImagePreviewModal';
 import ActiveUsersStrip from '@/components/chatroom/ActiveUsersStrip';
 import { useDemoChatRoomStore } from '@/stores/demoChatRoomStore';
+import { useChatRoomSessionStore } from '@/stores/chatRoomSessionStore';
 const C = INCOGNITO_COLORS;
 
 const MUTE_STORAGE_KEY = (roomId: string) => `@muted_room_${roomId}`;
@@ -90,6 +92,11 @@ export default function ChatRoomScreen() {
 
   // Get current user ID for Convex (live mode)
   const authUserId = useAuthStore((s) => s.userId);
+
+  // Chat room session management
+  const enterRoom = useChatRoomSessionStore((s) => s.enterRoom);
+  const exitRoom = useChatRoomSessionStore((s) => s.exitRoom);
+  const isInChatRoom = useChatRoomSessionStore((s) => s.isInChatRoom);
 
   // Demo mode: use local room data
   const demoRoom = DEMO_CHAT_ROOMS.find((r) => r.id === roomId);
@@ -121,6 +128,34 @@ export default function ChatRoomScreen() {
   const safeSet = (fn: () => void) => {
     if (isMountedRef.current) fn();
   };
+
+  // ── Enter room session on mount ──
+  useEffect(() => {
+    if (roomId) {
+      // Build identity from demo user or auth user
+      const identity = {
+        userId: isDemoMode ? DEMO_CURRENT_USER.id : (authUserId ?? 'unknown'),
+        name: DEMO_CURRENT_USER.username,
+        age: DEMO_CURRENT_USER.age ?? 25,
+        gender: DEMO_CURRENT_USER.gender ?? 'Unknown',
+        profilePicture: DEMO_CURRENT_USER.avatar ?? '',
+      };
+      enterRoom(roomId, identity);
+    }
+    // Note: We do NOT call exitRoom on unmount - user must explicitly leave via Profile
+  }, [roomId, enterRoom, authUserId]);
+
+  // ── Block hardware back button (Android) ──
+  useEffect(() => {
+    const onBackPress = () => {
+      // Return true to prevent default back behavior
+      // User must use "Leave Room" from profile menu to exit
+      return true;
+    };
+
+    const subscription = BackHandler.addEventListener('hardwareBackPress', onBackPress);
+    return () => subscription.remove();
+  }, []);
 
   // Measured heights above the KeyboardAvoidingView
   const [chatHeaderHeight, setChatHeaderHeight] = useState(0);
@@ -229,6 +264,13 @@ export default function ChatRoomScreen() {
   const [overlay, setOverlay] = useState<Overlay>('none');
   const closeOverlay = useCallback(() => setOverlay('none'), []);
   const onlineCount = DEMO_ONLINE_USERS.filter((u) => u.isOnline).length;
+
+  // ── Leave Room handler (ends session, navigates to Chat Rooms HOME) ──
+  const handleLeaveRoom = useCallback(() => {
+    closeOverlay();
+    exitRoom();
+    router.replace('/(main)/(private)/(tabs)/chat-rooms');
+  }, [closeOverlay, exitRoom, router]);
 
   // ── Payload data for overlays that need it ──
   const [selectedMessage, setSelectedMessage] = useState<DemoChatMessage | null>(null);
@@ -748,11 +790,11 @@ export default function ChatRoomScreen() {
         onClose={closeOverlay}
         username={DEMO_CURRENT_USER.username}
         avatar={DEMO_CURRENT_USER.avatar}
-        isActive={DEMO_CURRENT_USER.isActive}
+        isActive={true}
         coins={userCoins}
-        onEditProfile={() => {
-          router.push('/(main)/edit-profile' as any);
-        }}
+        age={DEMO_CURRENT_USER.age ?? 25}
+        gender={DEMO_CURRENT_USER.gender ?? 'Unknown'}
+        onLogout={handleLeaveRoom}
       />
 
       {/* Online users right panel */}
