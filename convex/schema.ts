@@ -174,6 +174,7 @@ export default defineSchema({
     isActive: v.boolean(),
     isBanned: v.boolean(),
     banReason: v.optional(v.string()),
+    deletedAt: v.optional(v.number()), // Soft delete timestamp (account deletion)
 
     // 3A1-4: Login rate limiting
     loginAttempts: v.optional(v.number()),
@@ -540,11 +541,15 @@ export default defineSchema({
     .index('by_identifier', ['identifier'])
     .index('by_identifier_code', ['identifier', 'code']),
 
-  // Sessions table
+  // Sessions table (auth sessions for identity-bound login)
   sessions: defineTable({
     userId: v.id('users'),
     token: v.string(),
     deviceInfo: v.optional(v.string()),
+    ipAddress: v.optional(v.string()),      // For security audit
+    userAgent: v.optional(v.string()),      // For device identification
+    lastActiveAt: v.optional(v.number()),   // Last activity timestamp
+    revokedAt: v.optional(v.number()),      // Per-session revocation (logout)
     expiresAt: v.number(),
     createdAt: v.number(),
   })

@@ -1033,3 +1033,569 @@ export const getConsentStatus = query({
     };
   },
 });
+
+// ============================================================================
+// IDENTITY-BASED AUTHENTICATION (Industry Standard Pattern)
+// ============================================================================
+//
+// SAFETY PRINCIPLES:
+// 1. userId is the ONLY source of truth for identity
+// 2. Same identity (email/phone/externalId) MUST map to same userId ALWAYS
+// 3. Logout = session revocation ONLY, NEVER data deletion
+// 4. Messages, profiles, preferences are NEVER touched by auth functions
+// 5. Soft-deleted users are RESTORED on login (same identity = same account)
+//
+// This follows WhatsApp/Instagram/Tinder architecture.
+// ============================================================================
+
+// Default counters for new free-tier users
+const DEFAULT_FREE_TIER_LIMITS = {
+  likesRemaining: 10,
+  superLikesRemaining: 1,
+  messagesRemaining: 10,
+  rewindsRemaining: 1,
+  boostsRemaining: 0,
+};
+
+/**
+ * Maps an identity (email, phone, or externalId) to a userId.
+ *
+ * BEHAVIOR:
+ * - If user exists and is active → return userId
+ * - If user exists but is soft-deleted → RESTORE and return userId
+ *   (Preserves ALL data: messages, matches, profile, onboarding state)
+ * - If user doesn't exist → CREATE new user with onboardingCompleted: false
+ *
+ * SAFETY:
+ * - Uses database indexes to ensure uniqueness (by_email, by_phone, by_external_id)
+ * - NEVER creates duplicate users for same identity
+ * - NEVER deletes or modifies existing user data (except clearing deletedAt)
+ * - NEVER changes onboardingCompleted for existing users
+ *
+ * This is the PRIMARY auth entry point for identity mapping.
+ */
+export const getOrCreateUserByIdentity = mutation({
+  args: {
+    email: v.optional(v.string()),
+    phone: v.optional(v.string()),
+    externalId: v.optional(v.string()),
+  },
+  handler: async (ctx, args) => {
+    const { email, phone, externalId } = args;
+
+    // Validate: at least one identifier must be provided
+    const identifiers = [email, phone, externalId].filter(Boolean);
+    if (identifiers.length === 0) {
+      throw new Error("At least one identifier (email, phone, or externalId) is required");
+    }
+
+    // -------------------------------------------------------------------------
+    // Step 1: Look up existing user by identity (check all provided identifiers)
+    // -------------------------------------------------------------------------
+    let existingUser = null;
+
+    if (email) {
+      existingUser = await ctx.db
+        .query("users")
+        .withIndex("by_email", (q) => q.eq("email", email))
+        .first();
+    }
+
+    if (!existingUser && phone) {
+      existingUser = await ctx.db
+        .query("users")
+        .withIndex("by_phone", (q) => q.eq("phone", phone))
+        .first();
+    }
+
+    if (!existingUser && externalId) {
+      existingUser = await ctx.db
+        .query("users")
+        .withIndex("by_external_id", (q) => q.eq("externalId", externalId))
+        .first();
+    }
+
+    // -------------------------------------------------------------------------
+    // Step 2: Handle existing user
+    // -------------------------------------------------------------------------
+    if (existingUser) {
+      // CASE A: User is soft-deleted → RESTORE them
+      // SAFETY: We restore ALL their data (messages, matches, profile)
+      // This ensures same identity = same userId = same account ALWAYS
+      if (existingUser.deletedAt) {
+        await ctx.db.patch(existingUser._id, {
+          deletedAt: undefined,
+          isActive: true,
+          lastActive: Date.now(),
+        });
+        return {
+          userId: existingUser._id,
+          isNewUser: false,
+          wasRestored: true,
+          onboardingCompleted: existingUser.onboardingCompleted,
+        };
+      }
+
+      // CASE B: User exists and is active → return userId
+      // Update lastActive timestamp only
+      await ctx.db.patch(existingUser._id, {
+        lastActive: Date.now(),
+      });
+
+      return {
+        userId: existingUser._id,
+        isNewUser: false,
+        wasRestored: false,
+        onboardingCompleted: existingUser.onboardingCompleted,
+      };
+    }
+
+    // -------------------------------------------------------------------------
+    // Step 3: Create new user (no existing identity found)
+    // -------------------------------------------------------------------------
+    // SAFETY: New user created with:
+    // - onboardingCompleted: false → app routes them through onboarding
+    // - isActive: true → account is active
+    // - Minimal placeholder data → onboarding fills real values
+    //
+    // NOTE: We do NOT pre-fill profile data. Onboarding handles that.
+
+    const now = Date.now();
+    const authProvider = email ? "email" : phone ? "phone" : "google";
+
+    const newUserId = await ctx.db.insert("users", {
+      // Auth fields (only set what was provided)
+      email: email || undefined,
+      phone: phone || undefined,
+      externalId: externalId || undefined,
+      authProvider,
+
+      // Profile placeholders (filled during onboarding)
+      name: "",
+      dateOfBirth: "",
+      gender: "other",
+      bio: "",
+
+      // Preferences placeholders
+      lookingFor: [],
+      relationshipIntent: [],
+      activities: [],
+      minAge: 18,
+      maxAge: 100,
+      maxDistance: 100,
+
+      // Subscription (free tier)
+      subscriptionTier: "free",
+
+      // Privacy
+      incognitoMode: false,
+
+      // Counters (free tier defaults)
+      ...DEFAULT_FREE_TIER_LIMITS,
+      likesResetAt: now,
+      superLikesResetAt: now,
+      messagesResetAt: now,
+
+      // Activity
+      lastActive: now,
+      createdAt: now,
+
+      // Verification
+      isVerified: false,
+
+      // Notifications
+      notificationsEnabled: true,
+
+      // CRITICAL: New users must complete onboarding
+      onboardingCompleted: false,
+
+      // Account status
+      isActive: true,
+      isBanned: false,
+    });
+
+    return {
+      userId: newUserId,
+      isNewUser: true,
+      wasRestored: false,
+      onboardingCompleted: false,
+    };
+  },
+});
+
+/**
+ * Creates a new session for an authenticated user.
+ *
+ * SAFETY:
+ * - Session token is cryptographically random
+ * - Validates user exists and is active before creating session
+ * - Does NOT check onboarding state (app handles routing)
+ * - Stores device info for "manage devices" feature
+ */
+export const createSession = mutation({
+  args: {
+    userId: v.id("users"),
+    deviceInfo: v.optional(v.string()),
+    userAgent: v.optional(v.string()),
+    ipAddress: v.optional(v.string()),
+  },
+  handler: async (ctx, args) => {
+    const { userId, deviceInfo, userAgent, ipAddress } = args;
+
+    const user = await ctx.db.get(userId);
+    if (!user) {
+      throw new Error("User not found");
+    }
+
+    if (!user.isActive) {
+      throw new Error("User account is deactivated");
+    }
+
+    if (user.deletedAt) {
+      throw new Error("User account has been deleted");
+    }
+
+    const token = generateToken();
+    const now = Date.now();
+    const expiresAt = now + 30 * 24 * 60 * 60 * 1000; // 30 days
+
+    const sessionId = await ctx.db.insert("sessions", {
+      userId,
+      token,
+      deviceInfo,
+      userAgent,
+      ipAddress,
+      lastActiveAt: now,
+      expiresAt,
+      createdAt: now,
+      // revokedAt: undefined (not revoked initially)
+    });
+
+    return {
+      sessionId,
+      token,
+      expiresAt,
+      userId,
+    };
+  },
+});
+
+/**
+ * Enhanced session validation with full safety checks.
+ *
+ * A session is INVALID if:
+ * - Token doesn't exist
+ * - Session is expired (expiresAt < now)
+ * - Session is individually revoked (revokedAt is set)
+ * - User's sessions were mass-revoked after session creation
+ * - User is inactive or soft-deleted
+ *
+ * SAFETY:
+ * - Does NOT auto-delete or modify user data
+ * - Does NOT change onboarding state
+ * - Returns detailed reason for invalid sessions
+ */
+export const validateSessionFull = query({
+  args: {
+    token: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const { token } = args;
+    const now = Date.now();
+
+    const session = await ctx.db
+      .query("sessions")
+      .withIndex("by_token", (q) => q.eq("token", token))
+      .first();
+
+    if (!session) {
+      return { valid: false, reason: "session_not_found" };
+    }
+
+    if (session.expiresAt < now) {
+      return { valid: false, reason: "session_expired", sessionId: session._id };
+    }
+
+    // Check per-session revocation
+    if (session.revokedAt) {
+      return { valid: false, reason: "session_revoked", sessionId: session._id };
+    }
+
+    const user = await ctx.db.get(session.userId);
+    if (!user) {
+      return { valid: false, reason: "user_not_found", sessionId: session._id };
+    }
+
+    // Check mass session revocation
+    if (user.sessionsRevokedAt && session.createdAt < user.sessionsRevokedAt) {
+      return { valid: false, reason: "sessions_mass_revoked", sessionId: session._id };
+    }
+
+    if (!user.isActive) {
+      return { valid: false, reason: "user_deactivated", sessionId: session._id };
+    }
+
+    if (user.deletedAt) {
+      return { valid: false, reason: "user_deleted", sessionId: session._id };
+    }
+
+    // Session is valid
+    return {
+      valid: true,
+      userId: user._id,
+      sessionId: session._id,
+      userInfo: {
+        onboardingCompleted: user.onboardingCompleted,
+        isVerified: user.isVerified,
+        isBanned: user.isBanned,
+        name: user.name,
+        emailVerified: user.emailVerified === true,
+      },
+    };
+  },
+});
+
+/**
+ * Logout by REVOKING the session (sets revokedAt).
+ *
+ * SAFETY:
+ * - Does NOT delete the session record (preserves audit trail)
+ * - Does NOT delete or modify user data
+ * - Does NOT affect other sessions for the same user
+ *
+ * This follows the "Logout ≠ Delete" principle.
+ */
+export const logoutSafe = mutation({
+  args: {
+    token: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const { token } = args;
+
+    const session = await ctx.db
+      .query("sessions")
+      .withIndex("by_token", (q) => q.eq("token", token))
+      .first();
+
+    if (!session) {
+      return { success: false, reason: "session_not_found" };
+    }
+
+    if (session.revokedAt) {
+      return { success: true, reason: "already_logged_out" };
+    }
+
+    // Revoke session (DO NOT delete)
+    await ctx.db.patch(session._id, {
+      revokedAt: Date.now(),
+    });
+
+    return { success: true, sessionId: session._id };
+  },
+});
+
+/**
+ * Revoke ALL sessions for a user using sessionsRevokedAt timestamp.
+ *
+ * USE CASES:
+ * - "Logout all devices" feature
+ * - Security: password change, suspected compromise
+ * - Account deletion preparation
+ *
+ * SAFETY:
+ * - Does NOT delete session records (preserves audit trail)
+ * - Does NOT delete or modify user profile/messages/matches
+ * - All sessions created BEFORE sessionsRevokedAt will fail validation
+ * - Sessions created AFTER will still work
+ */
+export const revokeAllSessions = mutation({
+  args: {
+    userId: v.id("users"),
+  },
+  handler: async (ctx, args) => {
+    const { userId } = args;
+
+    const user = await ctx.db.get(userId);
+    if (!user) {
+      return { success: false, reason: "user_not_found" };
+    }
+
+    // Set sessionsRevokedAt to invalidate all existing sessions
+    await ctx.db.patch(userId, {
+      sessionsRevokedAt: Date.now(),
+    });
+
+    return { success: true, message: "All sessions have been revoked" };
+  },
+});
+
+/**
+ * Update session activity timestamp.
+ * Call periodically to track session activity.
+ */
+export const updateSessionActivity = mutation({
+  args: {
+    token: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const session = await ctx.db
+      .query("sessions")
+      .withIndex("by_token", (q) => q.eq("token", args.token))
+      .first();
+
+    if (!session) {
+      return { success: false, reason: "session_not_found" };
+    }
+
+    if (session.revokedAt) {
+      return { success: false, reason: "session_revoked" };
+    }
+
+    await ctx.db.patch(session._id, {
+      lastActiveAt: Date.now(),
+    });
+
+    return { success: true };
+  },
+});
+
+/**
+ * Get all active sessions for a user (for "manage devices" feature).
+ * Does NOT return session tokens (security).
+ */
+export const getUserSessions = query({
+  args: {
+    userId: v.id("users"),
+  },
+  handler: async (ctx, args) => {
+    const { userId } = args;
+    const now = Date.now();
+
+    const user = await ctx.db.get(userId);
+    if (!user) {
+      return { sessions: [] };
+    }
+
+    const allSessions = await ctx.db
+      .query("sessions")
+      .withIndex("by_user", (q) => q.eq("userId", userId))
+      .collect();
+
+    // Filter to active sessions only
+    const activeSessions = allSessions.filter((session) => {
+      if (session.expiresAt < now) return false;
+      if (session.revokedAt) return false;
+      if (user.sessionsRevokedAt && session.createdAt < user.sessionsRevokedAt) {
+        return false;
+      }
+      return true;
+    });
+
+    // Return session info (NOT tokens)
+    return {
+      sessions: activeSessions.map((s) => ({
+        sessionId: s._id,
+        deviceInfo: s.deviceInfo,
+        userAgent: s.userAgent,
+        createdAt: s.createdAt,
+        lastActiveAt: s.lastActiveAt,
+        expiresAt: s.expiresAt,
+      })),
+    };
+  },
+});
+
+/**
+ * Check if an identity is already registered.
+ * Useful for signup flows to check availability.
+ */
+export const checkIdentityExists = query({
+  args: {
+    email: v.optional(v.string()),
+    phone: v.optional(v.string()),
+    externalId: v.optional(v.string()),
+  },
+  handler: async (ctx, args) => {
+    const { email, phone, externalId } = args;
+
+    let user = null;
+
+    if (email) {
+      user = await ctx.db
+        .query("users")
+        .withIndex("by_email", (q) => q.eq("email", email))
+        .first();
+    } else if (phone) {
+      user = await ctx.db
+        .query("users")
+        .withIndex("by_phone", (q) => q.eq("phone", phone))
+        .first();
+    } else if (externalId) {
+      user = await ctx.db
+        .query("users")
+        .withIndex("by_external_id", (q) => q.eq("externalId", externalId))
+        .first();
+    }
+
+    if (!user) {
+      return { exists: false };
+    }
+
+    return {
+      exists: true,
+      isDeleted: !!user.deletedAt,
+      isActive: user.isActive,
+      // Do NOT return userId or sensitive info
+    };
+  },
+});
+
+/**
+ * Soft delete account (marks as deleted, preserves data).
+ *
+ * SAFETY:
+ * - Sets deletedAt timestamp (soft delete)
+ * - Sets isActive: false
+ * - Revokes all sessions
+ * - Does NOT delete any user data (messages, matches, photos)
+ * - User can recover by logging in with same identity
+ */
+export const softDeleteAccount = mutation({
+  args: {
+    userId: v.id("users"),
+    reason: v.optional(v.string()),
+  },
+  handler: async (ctx, args) => {
+    const { userId, reason } = args;
+    const now = Date.now();
+
+    const user = await ctx.db.get(userId);
+    if (!user) {
+      throw new Error("User not found");
+    }
+
+    // Soft delete: set flags, revoke sessions
+    await ctx.db.patch(userId, {
+      deletedAt: now,
+      isActive: false,
+      sessionsRevokedAt: now,
+    });
+
+    // Audit log
+    await logAdminAction(ctx, {
+      adminUserId: userId,
+      action: "soft_delete",
+      targetUserId: userId,
+      reason,
+      metadata: {
+        previousIsActive: user.isActive,
+        deletedAt: now,
+      },
+    });
+
+    return {
+      success: true,
+      message: "Account has been deleted. You can recover by logging in again.",
+    };
+  },
+});

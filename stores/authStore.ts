@@ -10,6 +10,9 @@ interface AuthState {
   error: string | null;
   onboardingCompleted: boolean;
   _hasHydrated: boolean;
+  // Hydration status for initial session validation
+  _sessionValidated: boolean;
+  _sessionValidationError: string | null;
 
   // Actions
   setAuth: (
@@ -22,6 +25,14 @@ interface AuthState {
   setOnboardingCompleted: (completed: boolean) => void;
   logout: () => void;
   setHasHydrated: (state: boolean) => void;
+  // Sync local state from server validation (READ-ONLY - updates local state only)
+  syncFromServerValidation: (userInfo: {
+    onboardingCompleted: boolean;
+    isVerified?: boolean;
+    name?: string;
+  }) => void;
+  // Mark session as validated (or failed)
+  setSessionValidated: (validated: boolean, error?: string | null) => void;
 }
 
 // C8 fix: hydration timeout constant
@@ -37,6 +48,8 @@ export const useAuthStore = create<AuthState>()(
       error: null,
       onboardingCompleted: false,
       _hasHydrated: false,
+      _sessionValidated: false,
+      _sessionValidationError: null,
 
       setAuth: (userId, token, onboardingCompleted) =>
         set({
@@ -45,6 +58,9 @@ export const useAuthStore = create<AuthState>()(
           token,
           error: null,
           onboardingCompleted,
+          // Reset validation state on new auth
+          _sessionValidated: false,
+          _sessionValidationError: null,
         }),
 
       setLoading: (isLoading) => set({ isLoading }),
@@ -54,6 +70,8 @@ export const useAuthStore = create<AuthState>()(
       setOnboardingCompleted: (completed) =>
         set({ onboardingCompleted: completed }),
 
+      // Logout clears LOCAL state ONLY — server data is untouched
+      // This follows the "Logout ≠ Delete" principle
       logout: () =>
         set({
           isAuthenticated: false,
@@ -61,9 +79,28 @@ export const useAuthStore = create<AuthState>()(
           token: null,
           error: null,
           onboardingCompleted: false,
+          _sessionValidated: false,
+          _sessionValidationError: null,
         }),
 
       setHasHydrated: (state) => set({ _hasHydrated: state }),
+
+      // Sync local state from server validation result
+      // SAFETY: This only UPDATES local state from server truth
+      // It NEVER modifies server data (read-only sync)
+      syncFromServerValidation: (userInfo) =>
+        set((state) => ({
+          // Only update onboardingCompleted if server says it's true
+          // NEVER reset to false — prevents onboarding reset
+          onboardingCompleted: userInfo.onboardingCompleted || state.onboardingCompleted,
+        })),
+
+      // Mark session validation complete (success or failure)
+      setSessionValidated: (validated, error = null) =>
+        set({
+          _sessionValidated: true,
+          _sessionValidationError: validated ? null : error,
+        }),
     }),
     {
       name: "auth-storage",

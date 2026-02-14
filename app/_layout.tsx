@@ -18,44 +18,83 @@ function DemoBanner() {
 }
 
 /**
- * 3A1-1: Validate session on app resume
- * When app returns from background, validates the session token.
- * If invalid/expired, forces logout and navigates to login.
+ * 3A1-1: Validate session on app launch AND resume
+ *
+ * HYDRATION FLOW:
+ * 1. On mount: Validate session token against server
+ * 2. On app resume: Re-validate session
+ * 3. If invalid: Clear LOCAL token only, navigate to login
+ * 4. If valid: Sync onboarding state from server (READ-ONLY)
+ *
+ * SAFETY:
+ * - Uses validateSessionFull for detailed error reasons
+ * - NEVER modifies server data
+ * - NEVER resets onboarding (syncs FROM server, never overwrites)
+ * - logout() clears LOCAL state only
  */
 function SessionValidator() {
   const router = useRouter();
   const segments = useSegments();
   const token = useAuthStore((s) => s.token);
   const logout = useAuthStore((s) => s.logout);
+  const syncFromServerValidation = useAuthStore((s) => s.syncFromServerValidation);
+  const setSessionValidated = useAuthStore((s) => s.setSessionValidated);
   const appStateRef = useRef<AppStateStatus>(AppState.currentState);
   const isValidatingRef = useRef(false);
+  const hasInitialValidation = useRef(false);
 
-  // Use Convex query to validate session (skip if demo mode or no token)
+  // Use Convex query to validate session with FULL checks
+  // validateSessionFull checks: expiry, revocation, user status, deletedAt
   const sessionStatus = useQuery(
-    api.auth.validateSession,
+    api.auth.validateSessionFull,
     !isDemoMode && token ? { token } : 'skip'
   );
 
-  // Handle invalid session from query result
+  // Handle session validation result
   useEffect(() => {
-    if (isDemoMode || !token) return;
+    if (isDemoMode || !token) {
+      // No token = mark as validated (nothing to validate)
+      if (!token) {
+        setSessionValidated(true);
+      }
+      return;
+    }
     if (sessionStatus === undefined) return; // Still loading
 
-    if (sessionStatus && !sessionStatus.valid) {
-      console.warn('[SessionValidator] Session invalid/expired — forcing logout');
-      // Clear all local state
+    // Mark validation as complete
+    hasInitialValidation.current = true;
+
+    if (sessionStatus.valid) {
+      // Session is valid — sync onboarding state from server
+      // SAFETY: This only updates LOCAL state, never modifies server
+      if (sessionStatus.userInfo) {
+        syncFromServerValidation({
+          onboardingCompleted: sessionStatus.userInfo.onboardingCompleted,
+          isVerified: sessionStatus.userInfo.isVerified,
+          name: sessionStatus.userInfo.name,
+        });
+      }
+      setSessionValidated(true);
+    } else {
+      // Session is invalid — clear LOCAL token only
+      console.warn(`[SessionValidator] Session invalid: ${sessionStatus.reason}`);
+
+      // Clear all LOCAL state (server data untouched)
       logout();
       useOnboardingStore.getState().reset();
       if (isDemoMode) {
         useDemoStore.getState().demoLogout();
       }
+
+      setSessionValidated(false, sessionStatus.reason);
+
       // Navigate to login (only if currently in main/protected area)
       const inProtectedRoute = segments[0] === '(main)';
       if (inProtectedRoute) {
         router.replace('/(auth)/welcome');
       }
     }
-  }, [sessionStatus, token, logout, router, segments]);
+  }, [sessionStatus, token, logout, syncFromServerValidation, setSessionValidated, router, segments]);
 
   // Validate on app resume
   useEffect(() => {
@@ -70,9 +109,8 @@ function SessionValidator() {
         !isValidatingRef.current
       ) {
         // The query will automatically re-fetch when app becomes active
-        // due to Convex's reactivity, but we can force a check here
+        // due to Convex's reactivity
         isValidatingRef.current = true;
-        // Reset validation flag after a short delay
         setTimeout(() => {
           isValidatingRef.current = false;
         }, 2000);
