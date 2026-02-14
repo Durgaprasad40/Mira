@@ -96,6 +96,9 @@ export default function ChatRoomScreen() {
   // Chat room session management
   const enterRoom = useChatRoomSessionStore((s) => s.enterRoom);
   const exitRoom = useChatRoomSessionStore((s) => s.exitRoom);
+  const exitToHome = useChatRoomSessionStore((s) => s.exitToHome);
+  const incrementCoins = useChatRoomSessionStore((s) => s.incrementCoins);
+  const userCoinsFromStore = useChatRoomSessionStore((s) => s.coins);
   const isInChatRoom = useChatRoomSessionStore((s) => s.isInChatRoom);
 
   // Demo mode: use local room data
@@ -240,8 +243,9 @@ export default function ChatRoomScreen() {
 
   const [inputText, setInputText] = useState('');
 
-  // ── User state ──
-  const [userCoins, setUserCoins] = useState(DEMO_CURRENT_USER.coins);
+  // ── User coins (from session store, persisted) ──
+  // Initial coins from demo user, then store takes over
+  const userCoins = userCoinsFromStore > 0 ? userCoinsFromStore : DEMO_CURRENT_USER.coins;
 
   // ── DM inbox state ──
   const [dms, setDMs] = useState<DemoDM[]>(DEMO_DM_INBOX);
@@ -265,7 +269,14 @@ export default function ChatRoomScreen() {
   const closeOverlay = useCallback(() => setOverlay('none'), []);
   const onlineCount = DEMO_ONLINE_USERS.filter((u) => u.isOnline).length;
 
-  // ── Leave Room handler (ends session, navigates to Chat Rooms HOME) ──
+  // ── Exit to Chat Rooms Home (keeps session active, can return) ──
+  const handleExitToHome = useCallback(() => {
+    closeOverlay();
+    exitToHome();
+    router.replace('/(main)/(private)/(tabs)/chat-rooms');
+  }, [closeOverlay, exitToHome, router]);
+
+  // ── Leave Room handler (ends session completely, clears identity) ──
   const handleLeaveRoom = useCallback(() => {
     closeOverlay();
     exitRoom();
@@ -393,7 +404,7 @@ export default function ChatRoomScreen() {
       };
       addStoreMessage(roomId, newMessage);
       setInputText('');
-      setUserCoins((prev) => prev + 1);
+      incrementCoins(); // +1 coin for sending message
     } else {
       // Live mode: use Convex with idempotency
       if (!authUserId) return;
@@ -423,13 +434,14 @@ export default function ChatRoomScreen() {
         });
         // Remove pending message on success (Convex will add the real one)
         setPendingMessages((prev) => prev.filter((m) => m.id !== `pending_${clientId}`));
+        incrementCoins(); // +1 coin for sending message
       } catch (err: any) {
         // On failure, mark message as failed or remove
         Alert.alert('Error', err.message || 'Failed to send message');
         setPendingMessages((prev) => prev.filter((m) => m.id !== `pending_${clientId}`));
       }
     }
-  }, [inputText, roomId, addStoreMessage, authUserId, sendMessageMutation]);
+  }, [inputText, roomId, addStoreMessage, authUserId, sendMessageMutation, incrementCoins]);
 
   const handlePanelChange = useCallback((_panel: ComposerPanel) => {}, []);
 
@@ -454,7 +466,7 @@ export default function ChatRoomScreen() {
           createdAt: Date.now(),
         };
         addStoreMessage(roomId, newMessage);
-        setUserCoins((prev) => prev + 1);
+        incrementCoins(); // +1 coin for sending media
       } else {
         // Live mode: use Convex with idempotency
         if (!authUserId) return;
@@ -467,12 +479,13 @@ export default function ChatRoomScreen() {
             imageUrl: uri,
             clientId,
           });
+          incrementCoins(); // +1 coin for sending media
         } catch (err: any) {
           Alert.alert('Error', err.message || 'Failed to send media');
         }
       }
     },
-    [roomId, addStoreMessage, authUserId, sendMessageMutation]
+    [roomId, addStoreMessage, authUserId, sendMessageMutation, incrementCoins]
   );
 
   // ────────────────────────────────────────────
@@ -794,7 +807,8 @@ export default function ChatRoomScreen() {
         coins={userCoins}
         age={DEMO_CURRENT_USER.age ?? 25}
         gender={DEMO_CURRENT_USER.gender ?? 'Unknown'}
-        onLogout={handleLeaveRoom}
+        onExitToHome={handleExitToHome}
+        onLeaveRoom={handleLeaveRoom}
       />
 
       {/* Online users right panel */}

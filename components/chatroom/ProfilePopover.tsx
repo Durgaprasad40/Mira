@@ -25,8 +25,10 @@ interface ProfilePopoverProps {
   gender?: string;
   /** Called when user wants to change profile photo (stubbed for now) */
   onChangePhoto?: () => void;
-  /** Called when user wants to leave the room */
-  onLogout?: () => void;
+  /** Called when user wants to exit to Chat Rooms Home (session retained) */
+  onExitToHome?: () => void;
+  /** Called when user wants to leave the room completely (session cleared) */
+  onLeaveRoom?: () => void;
 }
 
 export default function ProfilePopover({
@@ -39,7 +41,8 @@ export default function ProfilePopover({
   age,
   gender,
   onChangePhoto,
-  onLogout,
+  onExitToHome,
+  onLeaveRoom,
 }: ProfilePopoverProps) {
   if (!visible) return null;
 
@@ -122,16 +125,29 @@ export default function ProfilePopover({
             <Ionicons name="chevron-forward" size={16} color={C.textLight} />
           </TouchableOpacity>
 
-          {/* Leave Room button */}
+          {/* Exit to Chat Rooms Home (session retained) */}
+          <TouchableOpacity
+            style={[styles.menuItem, styles.exitHomeItem]}
+            activeOpacity={0.7}
+            onPress={() => {
+              onClose();
+              onExitToHome?.();
+            }}
+          >
+            <Ionicons name="home-outline" size={18} color={C.primary} />
+            <Text style={[styles.menuLabel, styles.exitHomeText]}>Exit to Chat Rooms Home</Text>
+          </TouchableOpacity>
+
+          {/* Leave Room button (clears session) */}
           <TouchableOpacity
             style={[styles.menuItem, styles.leaveRoomItem]}
             activeOpacity={0.7}
             onPress={() => {
               onClose();
-              onLogout?.();
+              onLeaveRoom?.();
             }}
           >
-            <Ionicons name="exit-outline" size={18} color="#FF4757" />
+            <Ionicons name="log-out-outline" size={18} color="#FF4757" />
             <Text style={[styles.menuLabel, styles.leaveRoomText]}>Leave Room</Text>
           </TouchableOpacity>
         </View>
@@ -249,12 +265,19 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     marginTop: 4,
   },
-  // Leave Room button
-  leaveRoomItem: {
+  // Exit to Home button
+  exitHomeItem: {
     marginTop: 8,
     paddingTop: 12,
     borderTopWidth: 1,
     borderTopColor: C.accent,
+  },
+  exitHomeText: {
+    color: C.primary,
+  },
+  // Leave Room button (danger)
+  leaveRoomItem: {
+    marginTop: 4,
   },
   leaveRoomText: {
     color: '#FF4757',

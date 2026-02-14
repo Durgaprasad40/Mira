@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useMemo } from 'react';
 import {
   View,
   Text,
@@ -21,6 +21,8 @@ import {
   DEMO_JOINED_ROOMS,
   DemoChatRoom,
 } from '@/lib/demoData';
+import { useChatRoomSessionStore } from '@/stores/chatRoomSessionStore';
+import { useDemoChatRoomStore } from '@/stores/demoChatRoomStore';
 
 const C = INCOGNITO_COLORS;
 
@@ -109,11 +111,34 @@ export default function ChatRoomsScreen() {
   const [refreshing, setRefreshing] = useState(false);
   const [joinedRooms, setJoinedRooms] = useState(DEMO_JOINED_ROOMS);
 
+  // Session store for lastVisitedAt tracking
+  const lastVisitedAt = useChatRoomSessionStore((s) => s.lastVisitedAt);
+  const markRoomVisited = useChatRoomSessionStore((s) => s.markRoomVisited);
+
+  // Demo chat room messages for unread calculation
+  const demoRoomMessages = useDemoChatRoomStore((s) => s.rooms);
+
   // Convex query for live mode (skipped in demo mode)
   const convexRooms = useQuery(
     api.chatRooms.listRooms,
     isDemoMode ? 'skip' : {}
   );
+
+  // Calculate unread counts per room
+  const unreadCounts = useMemo(() => {
+    const counts: Record<string, number> = {};
+    if (isDemoMode) {
+      // Demo mode: count messages after lastVisitedAt
+      Object.keys(demoRoomMessages).forEach((roomId) => {
+        const messages = demoRoomMessages[roomId] || [];
+        const lastVisit = lastVisitedAt[roomId] ?? 0;
+        const unread = messages.filter((m) => m.createdAt > lastVisit).length;
+        counts[roomId] = unread;
+      });
+    }
+    // Live mode: would use Convex query with lastVisitedAt filter
+    return counts;
+  }, [demoRoomMessages, lastVisitedAt]);
 
   // Unified rooms list: demo or Convex
   // Filter out "English" room - users can chat in English inside Global
@@ -150,12 +175,14 @@ export default function ChatRoomsScreen() {
       if (isDemoMode && !joinedRooms[roomId]) {
         setJoinedRooms((prev) => ({ ...prev, [roomId]: true }));
       }
+      // Mark room as visited to clear unread badge
+      markRoomVisited(roomId);
       router.push({
         pathname: '/(main)/chat-room/[roomId]',
         params: { roomId },
       } as any);
     },
-    [router, joinedRooms]
+    [router, joinedRooms, markRoomVisited]
   );
 
   const handleCreateRoom = useCallback(() => {
@@ -168,6 +195,9 @@ export default function ChatRoomsScreen() {
       const iconKey = item.iconKey ?? item.slug;
       const localAsset = ROOM_ICON_ASSETS[iconKey];
       const fallbackColor = ROOM_FALLBACK_COLORS[iconKey];
+
+      // Get unread count for this room
+      const unreadCount = unreadCounts[item.id] ?? 0;
 
       // Render room icon
       const renderRoomIcon = () => {
@@ -218,7 +248,14 @@ export default function ChatRoomsScreen() {
           {renderRoomIcon()}
 
           <View style={styles.roomInfo}>
-            <Text style={styles.roomName}>{item.name}</Text>
+            <View style={styles.roomNameRow}>
+              <Text style={styles.roomName}>{item.name}</Text>
+              {unreadCount > 0 && (
+                <View style={styles.unreadBadge}>
+                  <Text style={styles.unreadText}>{unreadCount > 99 ? '99+' : unreadCount}</Text>
+                </View>
+              )}
+            </View>
             {item.lastMessageText ? (
               <Text style={styles.roomPreview} numberOfLines={1}>
                 {item.lastMessageText}
@@ -236,7 +273,7 @@ export default function ChatRoomsScreen() {
         </TouchableOpacity>
       );
     },
-    [handleOpenRoom]
+    [handleOpenRoom, unreadCounts]
   );
 
   const generalRooms = rooms.filter((r) => r.category === 'general');
@@ -355,11 +392,30 @@ const styles = StyleSheet.create({
   roomInfo: {
     flex: 1,
   },
+  roomNameRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: 4,
+  },
   roomName: {
     fontSize: 15,
     fontWeight: '600',
     color: C.text,
-    marginBottom: 4,
+  },
+  unreadBadge: {
+    minWidth: 20,
+    height: 20,
+    borderRadius: 10,
+    backgroundColor: C.primary,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 6,
+  },
+  unreadText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#FFFFFF',
   },
   roomPreview: {
     fontSize: 14,
