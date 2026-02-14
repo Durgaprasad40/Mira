@@ -1,11 +1,11 @@
-import { useRef, useEffect } from "react";
+import { useRef, useEffect, useState } from "react";
 import { Redirect } from "expo-router";
 import type { Href } from "expo-router";
 
 const H = (p: string) => p as unknown as Href;
 import { useAuthStore } from "@/stores/authStore";
-import { useDemoStore } from "@/stores/demoStore";
 import { useBootStore } from "@/stores/bootStore";
+import { getBootCache } from "@/stores/bootCache";
 import { isDemoMode } from "@/hooks/useConvex";
 import { View, ActivityIndicator, StyleSheet, Text } from "react-native";
 import { COLORS } from "@/lib/constants";
@@ -15,16 +15,30 @@ export default function Index() {
   const authHydrated = useAuthStore((s) => s._hasHydrated);
   const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
   const onboardingCompleted = useAuthStore((s) => s.onboardingCompleted);
-  const demoHydrated = useDemoStore((s) => s._hasHydrated);
-  const currentDemoUserId = useDemoStore((s) => s.currentDemoUserId);
-  const demoOnboardingComplete = useDemoStore((s) => s.demoOnboardingComplete);
   const setRouteDecisionMade = useBootStore((s) => s.setRouteDecisionMade);
   const didRedirect = useRef(false);
 
-  // Wait for BOTH stores to hydrate before deciding destination.
-  // Without this, demoUserProfile reads as null before AsyncStorage restores it,
-  // causing a false redirect to /demo-profile (perceived as "asks login again").
-  if (!authHydrated || (isDemoMode && !demoHydrated)) {
+  // FAST PATH for demo mode: use bootCache instead of waiting for full demoStore hydration
+  // bootCache reads only ~100 bytes (userId + onboarding flags) vs ~50KB+ for full store
+  const [bootCacheData, setBootCacheData] = useState<{
+    currentDemoUserId: string | null;
+    demoOnboardingComplete: Record<string, boolean>;
+  } | null>(null);
+
+  useEffect(() => {
+    if (isDemoMode && !bootCacheData) {
+      getBootCache().then(setBootCacheData);
+    }
+  }, [bootCacheData]);
+
+  // For demo mode: use bootCache (fast) for routing
+  // For live mode: use authStore only (no demo data needed)
+  const currentDemoUserId = bootCacheData?.currentDemoUserId ?? null;
+  const demoOnboardingComplete = bootCacheData?.demoOnboardingComplete ?? {};
+
+  // Wait for auth hydration always, and bootCache in demo mode
+  // This is MUCH faster than waiting for full demoStore hydration
+  if (!authHydrated || (isDemoMode && !bootCacheData)) {
     return (
       <View style={styles.loadingContainer}>
         <ActivityIndicator size="large" color={COLORS.primary} />
