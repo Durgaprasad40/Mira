@@ -542,7 +542,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
             navigatingRef.current = true;
             // Defer navigation so advanceCard's setState commits first
             InteractionManager.runAfterInteractions(() => {
-              if (!mountedRef.current) {
+              if (!mountedRef.current || !isFocusedRef.current) {
                 swipeLockRef.current = false;
                 return;
               }
@@ -586,7 +586,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
           // B6 fix: wrap navigation in try/catch and reset navigatingRef on failure
           // 3B-4: Defer swipe lock release until after navigation initiated
           InteractionManager.runAfterInteractions(() => {
-            if (!mountedRef.current) {
+            if (!mountedRef.current || !isFocusedRef.current) {
               swipeLockRef.current = false;
               return;
             }
