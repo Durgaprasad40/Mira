@@ -216,6 +216,10 @@ export default function ChatRoomScreen() {
   const listRef = useRef<FlatList<ListItem>>(null);
   const [composerHeight, setComposerHeight] = useState(56);
 
+  // Near-bottom tracking for smart auto-scroll (don't jump when user reads older messages)
+  const isNearBottomRef = useRef(true);
+  const SCROLL_THRESHOLD = 120;
+
   // ─────────────────────────────────────────────────────────────────────────
   // SCROLL TO BOTTOM HELPER (with Android timing fix)
   // ─────────────────────────────────────────────────────────────────────────
@@ -228,13 +232,22 @@ export default function ChatRoomScreen() {
     }
   }, []);
 
+  // Track scroll position to determine if user is near bottom
+  const handleScroll = useCallback((event: any) => {
+    const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
+    const distanceFromBottom = contentSize.height - (contentOffset.y + layoutMeasurement.height);
+    isNearBottomRef.current = distanceFromBottom < SCROLL_THRESHOLD;
+  }, []);
+
   // ─────────────────────────────────────────────────────────────────────────
   // KEYBOARD LISTENERS (scroll on open)
   // ─────────────────────────────────────────────────────────────────────────
   useEffect(() => {
     const showEvent = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
     const sub = Keyboard.addListener(showEvent, () => {
-      scrollToBottom(true);
+      if (isNearBottomRef.current) {
+        scrollToBottom(true);
+      }
     });
     return () => sub.remove();
   }, [scrollToBottom]);
@@ -268,10 +281,10 @@ export default function ChatRoomScreen() {
   // Build list items (normal order)
   const listItems = useMemo(() => buildListItems(messages), [messages]);
 
-  // Scroll to bottom when message count increases
+  // Scroll to bottom when message count increases (only if user is near bottom)
   const prevMessageCount = useRef(messages.length);
   useEffect(() => {
-    if (messages.length > prevMessageCount.current) {
+    if (messages.length > prevMessageCount.current && isNearBottomRef.current) {
       scrollToBottom(true);
     }
     prevMessageCount.current = messages.length;
@@ -798,6 +811,8 @@ export default function ChatRoomScreen() {
               showsVerticalScrollIndicator={false}
               keyboardShouldPersistTaps="handled"
               keyboardDismissMode="interactive"
+              onScroll={handleScroll}
+              scrollEventThrottle={16}
             />
           )}
 

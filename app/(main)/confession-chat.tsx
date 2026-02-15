@@ -9,6 +9,9 @@ import {
   KeyboardAvoidingView,
   Platform,
   Alert,
+  NativeSyntheticEvent,
+  NativeScrollEvent,
+  InteractionManager,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter, useLocalSearchParams } from 'expo-router';
@@ -101,11 +104,45 @@ export default function ConfessionChatScreen() {
   const [text, setText] = useState('');
   const listRef = useRef<FlatList>(null);
 
-  useEffect(() => {
-    if (chat?.messages.length) {
-      setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), 100);
+  // Near-bottom tracking for smart auto-scroll
+  const isNearBottomRef = useRef(true);
+  const SCROLL_THRESHOLD = 120;
+  const prevMessageCount = useRef(0);
+  const hasInitialScrolled = useRef(false);
+
+  // Scroll to bottom helper with platform-specific timing
+  const scrollToBottom = useCallback((animated = true) => {
+    const run = () => listRef.current?.scrollToEnd({ animated });
+    if (Platform.OS === 'android') {
+      InteractionManager.runAfterInteractions(() => setTimeout(run, 120));
+    } else {
+      requestAnimationFrame(run);
     }
-  }, [chat?.messages.length]);
+  }, []);
+
+  // Track scroll position to determine if user is near bottom
+  const handleScroll = useCallback((event: NativeSyntheticEvent<NativeScrollEvent>) => {
+    const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
+    const distanceFromBottom = contentSize.height - (contentOffset.y + layoutMeasurement.height);
+    isNearBottomRef.current = distanceFromBottom < SCROLL_THRESHOLD;
+  }, []);
+
+  // Initial scroll on first load
+  useEffect(() => {
+    if (!hasInitialScrolled.current && chat?.messages.length) {
+      hasInitialScrolled.current = true;
+      scrollToBottom(false);
+    }
+  }, [chat?.messages.length, scrollToBottom]);
+
+  // Scroll to bottom when message count increases (only if user is near bottom)
+  useEffect(() => {
+    const currentCount = chat?.messages.length ?? 0;
+    if (currentCount > prevMessageCount.current && isNearBottomRef.current) {
+      scrollToBottom(true);
+    }
+    prevMessageCount.current = currentCount;
+  }, [chat?.messages.length, scrollToBottom]);
 
   const handleSend = useCallback(() => {
     if (!text.trim() || !chat) return;
@@ -118,7 +155,10 @@ export default function ConfessionChatScreen() {
     };
     addChatMessage(chat.id, message);
     setText('');
-  }, [text, chat, currentUserId, addChatMessage]);
+    // Always scroll to bottom on send (user's own message)
+    isNearBottomRef.current = true;
+    scrollToBottom(true);
+  }, [text, chat, currentUserId, addChatMessage, scrollToBottom]);
 
   const handleAgreeReveal = useCallback(() => {
     if (!chat) return;
@@ -265,6 +305,8 @@ export default function ConfessionChatScreen() {
         }}
         contentContainerStyle={styles.messageList}
         showsVerticalScrollIndicator={false}
+        onScroll={handleScroll}
+        scrollEventThrottle={16}
       />
 
       {/* Input */}

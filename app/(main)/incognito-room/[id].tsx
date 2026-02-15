@@ -1,4 +1,4 @@
-import React, { useState, useRef, useCallback } from 'react';
+import React, { useState, useRef, useCallback, useEffect } from 'react';
 import {
   View,
   Text,
@@ -8,6 +8,10 @@ import {
   TouchableOpacity,
   Alert,
   LayoutChangeEvent,
+  NativeSyntheticEvent,
+  NativeScrollEvent,
+  Platform,
+  InteractionManager,
 } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -47,6 +51,29 @@ export default function RoomChatScreen() {
     setComposerHeight(e.nativeEvent.layout.height);
   }, []);
 
+  // Near-bottom tracking for smart auto-scroll
+  const isNearBottomRef = useRef(true);
+  const SCROLL_THRESHOLD = 120;
+  const prevMessageCount = useRef(0);
+  const hasInitialScrolled = useRef(false);
+
+  // Scroll to bottom helper with platform-specific timing
+  const scrollToBottom = useCallback((animated = true) => {
+    const run = () => flatListRef.current?.scrollToEnd({ animated });
+    if (Platform.OS === 'android') {
+      InteractionManager.runAfterInteractions(() => setTimeout(run, 120));
+    } else {
+      requestAnimationFrame(run);
+    }
+  }, []);
+
+  // Track scroll position to determine if user is near bottom
+  const handleScroll = useCallback((event: NativeSyntheticEvent<NativeScrollEvent>) => {
+    const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
+    const distanceFromBottom = contentSize.height - (contentOffset.y + layoutMeasurement.height);
+    isNearBottomRef.current = distanceFromBottom < SCROLL_THRESHOLD;
+  }, []);
+
   const blockUser = usePrivateChatStore((s) => s.blockUser);
 
   const room = id ? ROOM_INFO[id] : null;
@@ -54,6 +81,22 @@ export default function RoomChatScreen() {
   const [text, setText] = useState('');
   const [reportVisible, setReportVisible] = useState(false);
   const [reportTarget, setReportTarget] = useState<{ id: string; name: string } | null>(null);
+
+  // Initial scroll on first load
+  useEffect(() => {
+    if (!hasInitialScrolled.current && messages.length > 0) {
+      hasInitialScrolled.current = true;
+      scrollToBottom(false);
+    }
+  }, [messages.length, scrollToBottom]);
+
+  // Scroll to bottom when message count increases (only if user is near bottom)
+  useEffect(() => {
+    if (messages.length > prevMessageCount.current && isNearBottomRef.current) {
+      scrollToBottom(true);
+    }
+    prevMessageCount.current = messages.length;
+  }, [messages.length, scrollToBottom]);
 
   const handleSend = () => {
     if (!text.trim()) return;
@@ -66,7 +109,9 @@ export default function RoomChatScreen() {
     };
     setMessages((prev) => [...prev, newMsg]);
     setText('');
-    setTimeout(() => flatListRef.current?.scrollToEnd({ animated: true }), 100);
+    // Always scroll to bottom on send (user's own message)
+    isNearBottomRef.current = true;
+    scrollToBottom(true);
   };
 
   const handleLongPressMessage = (msg: RoomMessage) => {
@@ -185,6 +230,8 @@ export default function RoomChatScreen() {
         }}
         keyboardShouldPersistTaps="handled"
         keyboardDismissMode="interactive"
+        onScroll={handleScroll}
+        scrollEventThrottle={16}
       />
 
       {/* Input */}
