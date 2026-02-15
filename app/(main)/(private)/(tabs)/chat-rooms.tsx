@@ -177,10 +177,7 @@ export default function ChatRoomsScreen() {
       }
       // Mark room as visited to clear unread badge
       markRoomVisited(roomId);
-      router.push({
-        pathname: '/(main)/chat-room/[roomId]',
-        params: { roomId },
-      } as any);
+      router.push(`/(main)/chat-room/${roomId}` as any);
     },
     [router, joinedRooms, markRoomVisited]
   );

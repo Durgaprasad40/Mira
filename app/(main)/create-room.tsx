@@ -74,10 +74,7 @@ export default function CreateRoomScreen() {
       });
 
       // Navigate to the new room
-      router.replace({
-        pathname: '/(main)/chat-room/[roomId]',
-        params: { roomId },
-      } as any);
+      router.replace(`/(main)/chat-room/${roomId}` as any);
     } catch (err: any) {
       Alert.alert('Error', err.message || 'Failed to create room');
     } finally {
