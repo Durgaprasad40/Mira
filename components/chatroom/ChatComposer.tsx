@@ -6,6 +6,8 @@ import {
   StyleSheet,
   NativeSyntheticEvent,
   TextInputContentSizeChangeEventData,
+  ActivityIndicator,
+  Alert,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { INCOGNITO_COLORS } from '@/lib/constants';
@@ -20,7 +22,8 @@ export type ComposerPanel = 'none';
 interface ChatComposerProps {
   value: string;
   onChangeText: (text: string) => void;
-  onSend: () => void;
+  /** Called when send is pressed. Can be async. If it throws, text is preserved. */
+  onSend: () => void | Promise<void>;
   onPlusPress?: () => void;
   onMicPress?: () => void;
   onInputFocus?: () => void;
@@ -38,13 +41,24 @@ export default function ChatComposer({
   const inputRef = useRef<TextInput>(null);
   const hasText = value.trim().length > 0;
   const [inputHeight, setInputHeight] = useState(MIN_INPUT_HEIGHT);
+  const [isSending, setIsSending] = useState(false);
 
-  const handleSend = useCallback(() => {
-    if (!hasText) return;
-    onSend();
-    setInputHeight(MIN_INPUT_HEIGHT);
-    requestAnimationFrame(() => inputRef.current?.focus());
-  }, [hasText, onSend]);
+  const handleSend = useCallback(async () => {
+    if (!hasText || isSending) return;
+    const textBeforeSend = value;
+    setIsSending(true);
+    try {
+      await onSend();
+      setInputHeight(MIN_INPUT_HEIGHT);
+    } catch {
+      // Restore text on failure (parent may have cleared it)
+      onChangeText(textBeforeSend);
+      Alert.alert('Send Failed', 'Message could not be sent. Please try again.');
+    } finally {
+      setIsSending(false);
+      requestAnimationFrame(() => inputRef.current?.focus());
+    }
+  }, [hasText, isSending, value, onSend, onChangeText]);
 
   const handleContentSizeChange = useCallback(
     (e: NativeSyntheticEvent<TextInputContentSizeChangeEventData>) => {
@@ -93,8 +107,16 @@ export default function ChatComposer({
 
       {/* Send (visible when there is text) */}
       {hasText && (
-        <TouchableOpacity onPress={handleSend} style={styles.sendCircle}>
-          <Ionicons name="send" size={18} color="#FFFFFF" />
+        <TouchableOpacity
+          onPress={handleSend}
+          style={[styles.sendCircle, isSending && styles.sendCircleDisabled]}
+          disabled={isSending}
+        >
+          {isSending ? (
+            <ActivityIndicator size="small" color="#FFFFFF" />
+          ) : (
+            <Ionicons name="send" size={18} color="#FFFFFF" />
+          )}
         </TouchableOpacity>
       )}
     </View>
@@ -142,5 +164,8 @@ const styles = StyleSheet.create({
     backgroundColor: C.primary,
     alignItems: 'center',
     justifyContent: 'center',
+  },
+  sendCircleDisabled: {
+    opacity: 0.6,
   },
 });

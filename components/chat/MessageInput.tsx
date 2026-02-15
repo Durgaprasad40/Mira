@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useCallback } from 'react';
-import { View, Text, TextInput, StyleSheet, TouchableOpacity, Alert } from 'react-native';
+import { View, Text, TextInput, StyleSheet, TouchableOpacity, Alert, ActivityIndicator } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { COLORS, MESSAGE_TEMPLATES } from '@/lib/constants';
 import { Button } from '@/components/ui';
@@ -72,8 +72,10 @@ export function MessageInput({
     onTextChange?.(value);
   };
 
+  const [isSending, setIsSending] = useState(false);
+
   const handleSend = async () => {
-    if (!text.trim()) return;
+    if (!text.trim() || isSending) return;
 
     if (!isDemoMode && isPreMatch && !canSendCustom && subscriptionTier === 'free') {
       Alert.alert('Upgrade Required', 'Free users can only send message templates. Upgrade to send custom messages.');
@@ -87,11 +89,15 @@ export function MessageInput({
 
     const trimmed = text.trim();
     handleTextChange('');
+    setIsSending(true);
     try {
       await onSend(trimmed, 'text');
     } catch {
       // Restore text so user can retry
       handleTextChange(trimmed);
+      Alert.alert('Send Failed', 'Message could not be sent. Please try again.');
+    } finally {
+      setIsSending(false);
     }
   };
 
@@ -215,11 +221,15 @@ export function MessageInput({
 
         {!isRecording && (
           <TouchableOpacity
-            style={[styles.sendButton, (!text.trim() || disabled) && styles.sendButtonDisabled]}
+            style={[styles.sendButton, (!text.trim() || disabled || isSending) && styles.sendButtonDisabled]}
             onPress={handleSend}
-            disabled={!text.trim() || disabled}
+            disabled={!text.trim() || disabled || isSending}
           >
-            <Ionicons name="send" size={20} color={COLORS.white} />
+            {isSending ? (
+              <ActivityIndicator size="small" color={COLORS.white} />
+            ) : (
+              <Ionicons name="send" size={20} color={COLORS.white} />
+            )}
           </TouchableOpacity>
         )}
       </View>

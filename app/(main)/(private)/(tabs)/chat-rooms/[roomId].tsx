@@ -465,8 +465,8 @@ export default function ChatRoomScreen() {
         setPendingMessages((prev) => prev.filter((m) => m.id !== `pending_${clientId}`));
         incrementCoins();
       } catch (err: any) {
-        Alert.alert('Error', err.message || 'Failed to send message');
         setPendingMessages((prev) => prev.filter((m) => m.id !== `pending_${clientId}`));
+        throw err; // Re-throw so ChatComposer can catch and show feedback
       }
     }
   }, [inputText, roomId, addStoreMessage, authUserId, sendMessageMutation, incrementCoins]);
