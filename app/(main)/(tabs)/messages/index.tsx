@@ -238,7 +238,7 @@ export default function MessagesScreen() {
       conversations: demoConversations,
       meta: demoMeta,
       blockedUserIds,
-      currentUserId: userId ?? undefined,
+      currentUserId: userId || 'demo_user_1',
     });
   }, [isDemoMode, demoMatches, demoConversations, demoMeta, blockedUserIds, userId]);
 
