@@ -21,6 +21,7 @@ import {
   DEMO_CHAT_ROOM_MESSAGES,
   DEMO_JOINED_ROOMS,
   DemoChatRoom,
+  getDemoMessagesForRoom,
 } from '@/lib/demoData';
 import { useChatRoomSessionStore } from '@/stores/chatRoomSessionStore';
 import { useDemoChatRoomStore } from '@/stores/demoChatRoomStore';
@@ -135,19 +136,24 @@ export default function ChatRoomsScreen() {
     const counts: Record<string, number> = {};
     if (isDemoMode) {
       // Demo mode: count incoming messages after lastVisitedAt
-      // Use store messages if available, otherwise fallback to demo data
-      const allRoomIds = new Set([
-        ...Object.keys(demoRoomMessages),
-        ...Object.keys(DEMO_CHAT_ROOM_MESSAGES),
-      ]);
-      allRoomIds.forEach((roomId) => {
-        const messages = demoRoomMessages[roomId] || DEMO_CHAT_ROOM_MESSAGES[roomId] || [];
+      // Iterate over ALL rooms from DEMO_CHAT_ROOMS (not just rooms with stored messages)
+      DEMO_CHAT_ROOMS.forEach((room) => {
+        const roomId = room.id;
+        // Priority: store > DEMO_CHAT_ROOM_MESSAGES > getDemoMessagesForRoom fallback
+        const messages = demoRoomMessages[roomId]
+          ?? DEMO_CHAT_ROOM_MESSAGES[roomId]
+          ?? getDemoMessagesForRoom(roomId);
         const lastVisit = lastVisitedAt[roomId] ?? 0;
-        const unread = messages.filter((m) => m.createdAt > lastVisit && m.senderId !== currentUserId).length;
+        // Filter: incoming messages (not from current user, not system) after last visit
+        const unread = messages.filter((m) =>
+          m.createdAt > lastVisit &&
+          m.senderId !== currentUserId &&
+          m.senderId !== '' &&
+          m.type !== 'system'
+        ).length;
         counts[roomId] = unread;
       });
     }
-    // Live mode: would use Convex query with lastVisitedAt filter
     return counts;
   }, [demoRoomMessages, lastVisitedAt, currentUserId]);
 
