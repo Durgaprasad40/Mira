@@ -170,10 +170,17 @@ export default function RoomChatScreen() {
         data={messages}
         keyExtractor={(item) => item.id}
         renderItem={renderMessage}
+        ListEmptyComponent={
+          <View style={styles.emptyState}>
+            <Ionicons name="chatbubbles-outline" size={40} color={C.textLight} />
+            <Text style={styles.emptyStateText}>No messages yet</Text>
+            <Text style={styles.emptyStateHint}>Be the first to say something!</Text>
+          </View>
+        }
         contentContainerStyle={{
           ...styles.messageList,
           flexGrow: 1,
-          justifyContent: 'flex-end' as const,
+          justifyContent: messages.length > 0 ? 'flex-end' as const : 'center' as const,
           paddingBottom: composerHeight + keyboardHeight + 8,
         }}
         keyboardShouldPersistTaps="handled"
@@ -252,6 +259,10 @@ const styles = StyleSheet.create({
   hintText: { fontSize: 11, color: C.textLight },
 
   messageList: { padding: 16, paddingBottom: 8 },
+
+  emptyState: { alignItems: 'center', padding: 24 },
+  emptyStateText: { fontSize: 16, fontWeight: '600', color: C.textLight, marginTop: 12 },
+  emptyStateHint: { fontSize: 13, color: C.textLight, marginTop: 4, opacity: 0.7 },
 
   msgRow: { flexDirection: 'row', marginBottom: 12, alignItems: 'flex-start' },
   msgRowOwn: { flexDirection: 'row-reverse' },
