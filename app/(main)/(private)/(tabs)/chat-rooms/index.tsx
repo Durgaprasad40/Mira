@@ -23,6 +23,7 @@ import {
 } from '@/lib/demoData';
 import { useChatRoomSessionStore } from '@/stores/chatRoomSessionStore';
 import { useDemoChatRoomStore } from '@/stores/demoChatRoomStore';
+import { useAuthStore } from '@/stores/authStore';
 
 const C = INCOGNITO_COLORS;
 
@@ -118,6 +119,10 @@ export default function ChatRoomsScreen() {
   // Demo chat room messages for unread calculation
   const demoRoomMessages = useDemoChatRoomStore((s) => s.rooms);
 
+  // Current user ID for filtering out own messages
+  const userId = useAuthStore((s) => s.userId);
+  const currentUserId = userId || 'demo_user_1';
+
   // Convex query for live mode (skipped in demo mode)
   const convexRooms = useQuery(
     api.chatRooms.listRooms,
@@ -128,17 +133,17 @@ export default function ChatRoomsScreen() {
   const unreadCounts = useMemo(() => {
     const counts: Record<string, number> = {};
     if (isDemoMode) {
-      // Demo mode: count messages after lastVisitedAt
+      // Demo mode: count incoming messages after lastVisitedAt
       Object.keys(demoRoomMessages).forEach((roomId) => {
         const messages = demoRoomMessages[roomId] || [];
         const lastVisit = lastVisitedAt[roomId] ?? 0;
-        const unread = messages.filter((m) => m.createdAt > lastVisit).length;
+        const unread = messages.filter((m) => m.createdAt > lastVisit && m.senderId !== currentUserId).length;
         counts[roomId] = unread;
       });
     }
     // Live mode: would use Convex query with lastVisitedAt filter
     return counts;
-  }, [demoRoomMessages, lastVisitedAt]);
+  }, [demoRoomMessages, lastVisitedAt, currentUserId]);
 
   // Unified rooms list: demo or Convex
   // Filter out "English" room - users can chat in English inside Global
