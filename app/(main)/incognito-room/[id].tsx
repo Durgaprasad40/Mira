@@ -210,15 +210,13 @@ export default function RoomChatScreen() {
       </View>
 
       {/* Report/Block Modal */}
-      {reportTarget && (
-        <ReportModal
-          visible={reportVisible}
-          targetName={reportTarget.name}
-          onClose={() => { setReportVisible(false); setReportTarget(null); }}
-          onReport={handleReport}
-          onBlock={handleBlock}
-        />
-      )}
+      <ReportModal
+        visible={reportVisible}
+        targetName={reportTarget?.name || ''}
+        onClose={() => { setReportVisible(false); setReportTarget(null); }}
+        onReport={handleReport}
+        onBlock={handleBlock}
+      />
     </View>
   );
 }
