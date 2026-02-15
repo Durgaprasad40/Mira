@@ -20,6 +20,7 @@ import { useConfessionStore } from '@/stores/confessionStore';
 import { useAuthStore } from '@/stores/authStore';
 import { MutualRevealStatus } from '@/types';
 import { logDebugEvent } from '@/lib/debugEventLogger';
+import { formatTime, shouldShowTimestamp } from '@/utils/chatTime';
 
 function formatTimeLeft(expiresAt: number): string {
   const diff = expiresAt - Date.now();
@@ -28,11 +29,6 @@ function formatTimeLeft(expiresAt: number): string {
   const minutes = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
   if (hours > 0) return `${hours}h ${minutes}m left`;
   return `${minutes}m left`;
-}
-
-function formatTime(timestamp: number): string {
-  const d = new Date(timestamp);
-  return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
 
 function getRevealStatusText(
@@ -291,15 +287,19 @@ export default function ConfessionChatScreen() {
         ref={listRef}
         data={chat.messages}
         keyExtractor={(item) => item.id}
-        renderItem={({ item }) => {
+        renderItem={({ item, index }) => {
           const isMe = item.senderId === currentUserId;
+          const prevMessage = index > 0 ? chat.messages[index - 1] : undefined;
+          const showTime = shouldShowTimestamp(item.createdAt, prevMessage?.createdAt);
           return (
             <View style={[styles.bubble, isMe ? styles.bubbleMe : styles.bubbleThem]}>
               <Text style={[styles.bubbleSender, isMe && styles.bubbleSenderMe]}>{isMe ? 'You' : 'Anon'}</Text>
               <Text style={[styles.bubbleText, isMe && styles.bubbleTextMe]}>{item.text}</Text>
-              <Text style={[styles.bubbleTime, isMe && styles.bubbleTimeMe]}>
-                {formatTime(item.createdAt)}
-              </Text>
+              {showTime && (
+                <Text style={[styles.bubbleTime, isMe && styles.bubbleTimeMe]}>
+                  {formatTime(item.createdAt)}
+                </Text>
+              )}
             </View>
           );
         }}

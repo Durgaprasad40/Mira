@@ -4,6 +4,7 @@ import { Image } from 'expo-image';
 import { Ionicons } from '@expo/vector-icons';
 import { INCOGNITO_COLORS } from '@/lib/constants';
 import MediaMessage from '@/components/chat/MediaMessage';
+import { formatSmartTimestamp } from '@/utils/chatTime';
 
 const C = INCOGNITO_COLORS;
 
@@ -24,30 +25,8 @@ interface ChatMessageItemProps {
   mediaUrl?: string;
   /** Called when user taps a media bubble (image for preview, video for playback) */
   onMediaPress?: (mediaUrl: string, type: 'image' | 'video') => void;
-}
-
-function formatDateTime(timestamp: number): string {
-  const d = new Date(timestamp);
-  const now = new Date();
-  const isToday =
-    d.getFullYear() === now.getFullYear() &&
-    d.getMonth() === now.getMonth() &&
-    d.getDate() === now.getDate();
-
-  const hours = d.getHours();
-  const minutes = d.getMinutes();
-  const ampm = hours >= 12 ? 'PM' : 'AM';
-  const h = hours % 12 || 12;
-  const m = minutes < 10 ? `0${minutes}` : minutes;
-  const timeStr = `${h}:${m} ${ampm}`;
-
-  if (isToday) {
-    return timeStr;
-  }
-
-  // Show date + time for older messages
-  const months = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
-  return `${d.getDate()} ${months[d.getMonth()]} ${timeStr}`;
+  /** Whether to show the timestamp (for grouping). Defaults to true. */
+  showTimestamp?: boolean;
 }
 
 function ChatMessageItem({
@@ -64,6 +43,7 @@ function ChatMessageItem({
   messageType = 'text',
   mediaUrl,
   onMediaPress,
+  showTimestamp = true,
 }: ChatMessageItemProps) {
   const isMedia = (messageType === 'image' || messageType === 'video') && mediaUrl;
 
@@ -97,7 +77,9 @@ function ChatMessageItem({
               {isMe ? 'You' : senderName}
             </Text>
           </TouchableOpacity>
-          <Text style={styles.timeLabel}>{formatDateTime(timestamp)}</Text>
+          {showTimestamp && (
+            <Text style={styles.timeLabel}>{formatSmartTimestamp(timestamp)}</Text>
+          )}
         </View>
 
         {/* Row 2: Message text or media */}

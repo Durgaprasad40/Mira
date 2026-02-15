@@ -22,6 +22,7 @@ import ActiveUsersStrip from '@/components/chatroom/ActiveUsersStrip';
 import { usePrivateChatStore } from '@/stores/privateChatStore';
 import { ReportModal } from '@/components/private/ReportModal';
 import { useKeyboardHeight } from '@/hooks/useKeyboardHeight';
+import { formatTime, shouldShowTimestamp } from '@/utils/chatTime';
 
 interface RoomMessage {
   id: string;
@@ -147,8 +148,11 @@ export default function RoomChatScreen() {
     );
   }
 
-  const renderMessage = ({ item }: { item: RoomMessage }) => {
+  const renderMessage = ({ item, index }: { item: RoomMessage; index: number }) => {
     const isOwn = item.senderId === 'me';
+    const prevMessage = index > 0 ? messages[index - 1] : undefined;
+    const showTime = shouldShowTimestamp(item.createdAt, prevMessage?.createdAt);
+
     return (
       <TouchableOpacity
         activeOpacity={0.7}
@@ -168,9 +172,11 @@ export default function RoomChatScreen() {
             <View style={[styles.msgBubble, isOwn ? styles.msgBubbleOwn : styles.msgBubbleOther]}>
               <Text style={[styles.msgText, isOwn && styles.msgTextOwn]}>{item.content}</Text>
             </View>
-            <Text style={[styles.msgTime, isOwn && styles.msgTimeOwn]}>
-              {formatTime(item.createdAt)}
-            </Text>
+            {showTime && (
+              <Text style={[styles.msgTime, isOwn && styles.msgTimeOwn]}>
+                {formatTime(item.createdAt)}
+              </Text>
+            )}
           </View>
         </View>
       </TouchableOpacity>
@@ -273,11 +279,6 @@ export default function RoomChatScreen() {
       />
     </View>
   );
-}
-
-function formatTime(ts: number): string {
-  const d = new Date(ts);
-  return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: true });
 }
 
 const C = INCOGNITO_COLORS;

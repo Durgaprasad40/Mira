@@ -24,18 +24,9 @@ import AttachmentPopup from './AttachmentPopup';
 import DoodleCanvas from './DoodleCanvas';
 import VideoPlayerModal from './VideoPlayerModal';
 import ImagePreviewModal from './ImagePreviewModal';
+import { formatTime, shouldShowTimestamp } from '@/utils/chatTime';
 
 const C = INCOGNITO_COLORS;
-
-function formatTime(timestamp: number): string {
-  const d = new Date(timestamp);
-  const hours = d.getHours();
-  const minutes = d.getMinutes();
-  const ampm = hours >= 12 ? 'PM' : 'AM';
-  const h = hours % 12 || 12;
-  const m = minutes < 10 ? `0${minutes}` : minutes;
-  return `${h}:${m} ${ampm}`;
-}
 
 function getDemoPrivateMessages(dm: DemoDM): DemoPrivateMessage[] {
   if (DEMO_PRIVATE_MESSAGES[dm.id]?.length) {
@@ -159,9 +150,11 @@ export default function PrivateChatView({ dm, onBack, topInset = 0 }: PrivateCha
   }, []);
 
   const renderMessage = useCallback(
-    ({ item }: { item: DemoPrivateMessage }) => {
+    ({ item, index }: { item: DemoPrivateMessage; index: number }) => {
       const isMe = item.senderId === DEMO_CURRENT_USER.id;
       const isMedia = (item.type === 'image' || item.type === 'video') && item.mediaUrl;
+      const prevMessage = index > 0 ? messages[index - 1] : undefined;
+      const showTime = shouldShowTimestamp(item.createdAt, prevMessage?.createdAt);
 
       if (isMe) {
         return (
@@ -176,7 +169,7 @@ export default function PrivateChatView({ dm, onBack, topInset = 0 }: PrivateCha
               ) : (
                 <Text style={styles.bubbleMeText}>{item.text}</Text>
               )}
-              <Text style={styles.timeMe}>{formatTime(item.createdAt)}</Text>
+              {showTime && <Text style={styles.timeMe}>{formatTime(item.createdAt)}</Text>}
             </View>
           </View>
         );
@@ -201,12 +194,12 @@ export default function PrivateChatView({ dm, onBack, topInset = 0 }: PrivateCha
             ) : (
               <Text style={styles.bubbleOtherText}>{item.text}</Text>
             )}
-            <Text style={styles.timeOther}>{formatTime(item.createdAt)}</Text>
+            {showTime && <Text style={styles.timeOther}>{formatTime(item.createdAt)}</Text>}
           </View>
         </View>
       );
     },
-    [dm.peerAvatar, handleMediaPress]
+    [dm.peerAvatar, handleMediaPress, messages]
   );
 
   return (

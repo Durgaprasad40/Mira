@@ -6,6 +6,7 @@ import MediaMessage from './MediaMessage';
 import { ProtectedMediaBubble } from './ProtectedMediaBubble';
 import { SystemMessage } from './SystemMessage';
 import { VoiceMessageBubble } from './VoiceMessageBubble';
+import { formatTime } from '@/utils/chatTime';
 
 interface MessageBubbleProps {
   message: {
@@ -44,6 +45,8 @@ interface MessageBubbleProps {
   onProtectedMediaHoldEnd?: (messageId: string) => void;
   onProtectedMediaExpire?: (messageId: string) => void;
   onVoiceDelete?: (messageId: string) => void;
+  /** Whether to show the timestamp (for grouping). Defaults to true. */
+  showTimestamp?: boolean;
 }
 
 // Detect messages that are only emoji (1–8 emoji, no other text)
@@ -64,13 +67,9 @@ export function MessageBubble({
   onProtectedMediaHoldEnd,
   onProtectedMediaExpire,
   onVoiceDelete,
+  showTimestamp = true,
 }: MessageBubbleProps) {
   const isEmojiOnly = message.type === 'text' && EMOJI_ONLY_RE.test(message.content.trim());
-
-  const formatTime = (timestamp: number) => {
-    const date = new Date(timestamp);
-    return date.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit' });
-  };
 
   // System messages (native type)
   if (message.type === 'system') {
@@ -213,19 +212,21 @@ export function MessageBubble({
         ]}>
           {message.content}
         </Text>
-        <View style={styles.footer}>
-          <Text style={[styles.time, isOwn && styles.ownTime]}>
-            {formatTime(message.createdAt)}
-          </Text>
-          {isOwn && (
-            <Ionicons
-              name={message.readAt ? 'checkmark-done' : 'checkmark'}
-              size={14}
-              color={isOwn ? COLORS.white : COLORS.textLight}
-              style={styles.readIcon}
-            />
-          )}
-        </View>
+        {showTimestamp && (
+          <View style={styles.footer}>
+            <Text style={[styles.time, isOwn && styles.ownTime]}>
+              {formatTime(message.createdAt)}
+            </Text>
+            {isOwn && (
+              <Ionicons
+                name={message.readAt ? 'checkmark-done' : 'checkmark'}
+                size={14}
+                color={isOwn ? COLORS.white : COLORS.textLight}
+                style={styles.readIcon}
+              />
+            )}
+          </View>
+        )}
       </View>
     </View>
   );
