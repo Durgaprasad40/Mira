@@ -18,6 +18,7 @@ import { INCOGNITO_COLORS } from '@/lib/constants';
 import { isDemoMode } from '@/hooks/useConvex';
 import {
   DEMO_CHAT_ROOMS,
+  DEMO_CHAT_ROOM_MESSAGES,
   DEMO_JOINED_ROOMS,
   DemoChatRoom,
 } from '@/lib/demoData';
@@ -134,8 +135,13 @@ export default function ChatRoomsScreen() {
     const counts: Record<string, number> = {};
     if (isDemoMode) {
       // Demo mode: count incoming messages after lastVisitedAt
-      Object.keys(demoRoomMessages).forEach((roomId) => {
-        const messages = demoRoomMessages[roomId] || [];
+      // Use store messages if available, otherwise fallback to demo data
+      const allRoomIds = new Set([
+        ...Object.keys(demoRoomMessages),
+        ...Object.keys(DEMO_CHAT_ROOM_MESSAGES),
+      ]);
+      allRoomIds.forEach((roomId) => {
+        const messages = demoRoomMessages[roomId] || DEMO_CHAT_ROOM_MESSAGES[roomId] || [];
         const lastVisit = lastVisitedAt[roomId] ?? 0;
         const unread = messages.filter((m) => m.createdAt > lastVisit && m.senderId !== currentUserId).length;
         counts[roomId] = unread;
