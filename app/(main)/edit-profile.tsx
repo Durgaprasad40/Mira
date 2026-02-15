@@ -109,7 +109,25 @@ export default function EditProfileScreen() {
       setBlurEnabled(currentUser.photoBlurred === true);
 
       const existingPhotos = currentUser.photos?.map((p: any) => p?.url || p).filter(isValidPhotoUrl) || [];
-      setPhotoUrls(existingPhotos.slice(0, GRID_SIZE));
+      const slicedPhotos = existingPhotos.slice(0, GRID_SIZE);
+      if (__DEV__) {
+        console.log('[EditProfile] INIT from currentUser', {
+          currentUserId,
+          photoCount: slicedPhotos.length,
+          promptCount: (currentUser as any)?.profilePrompts?.length ?? 0,
+          basicInfo: {
+            height: currentUser.height,
+            education: currentUser.education,
+            religion: currentUser.religion,
+          },
+          lifestyle: {
+            smoking: currentUser.smoking,
+            drinking: currentUser.drinking,
+            kids: currentUser.kids,
+          },
+        });
+      }
+      setPhotoUrls(slicedPhotos);
     }
   }, [currentUser?._id, currentUser?.id]);
 
@@ -155,7 +173,17 @@ export default function EditProfileScreen() {
               // Add new photo
               updated.push(uri);
             }
-            return updated.slice(0, GRID_SIZE);
+            const final = updated.slice(0, GRID_SIZE);
+            if (__DEV__) {
+              console.log('[EditProfile] handleUploadPhoto', {
+                action: isReplacing ? 'replace' : 'add',
+                slotIndex,
+                prevCount: prev.length,
+                nextCount: final.length,
+                newUri: uri.slice(-40),
+              });
+            }
+            return final;
           });
         }
       }
@@ -301,26 +329,58 @@ export default function EditProfileScreen() {
     if (isDemoMode) {
       const demoUserId = useDemoStore.getState().currentDemoUserId;
       if (demoUserId) {
-        // Update demo profile with edited fields
-        useDemoStore.getState().saveDemoProfile(demoUserId, {
-          bio: bio || undefined,
-          photos: validPhotos.map((url) => ({ url })),
-          profilePrompts: filledPrompts,
-          height: height ? parseInt(height) : null,
-          smoking: smoking || null,
-          drinking: drinking || null,
-          kids: kids || null,
-          education: education || null,
-          religion: religion || null,
-          jobTitle: jobTitle || undefined,
-          company: company || undefined,
-          school: school || undefined,
-        });
+        // Build WIPE-SAFE patch: only include fields that have actual values
+        // This prevents undefined/null from overwriting stored data
+        const patch: Record<string, any> = {};
+
+        // Photos - always include since validPhotos is the source of truth
+        patch.photos = validPhotos.map((url) => ({ url }));
+
+        // Prompts - always include (empty array is valid)
+        patch.profilePrompts = filledPrompts;
+
+        // Bio/About - only include if non-empty
+        if (bio && bio.trim()) patch.bio = bio.trim();
+
+        // Basic info - only include if set
+        if (height && height.trim()) patch.height = parseInt(height);
+        if (education) patch.education = education;
+        if (religion) patch.religion = religion;
+        if (jobTitle && jobTitle.trim()) patch.jobTitle = jobTitle.trim();
+        if (company && company.trim()) patch.company = company.trim();
+        if (school && school.trim()) patch.school = school.trim();
+
+        // Lifestyle - only include if set
+        if (smoking) patch.smoking = smoking;
+        if (drinking) patch.drinking = drinking;
+        if (kids) patch.kids = kids;
+
+        // Log BEFORE save to trace what we're about to write
         if (__DEV__) {
-          console.log('[EditProfile] saving mode=demo userIdType=string (local store updated)', {
+          const prevProfile = useDemoStore.getState().demoProfiles[demoUserId];
+          console.log('[EditProfile] SAVE PRESSED (demo)', {
             demoUserId,
-            photoCount: validPhotos.length,
-            promptCount: filledPrompts.length,
+            patchKeys: Object.keys(patch),
+            photoCount: patch.photos?.length ?? 0,
+            promptCount: patch.profilePrompts?.length ?? 0,
+            basicInfo: { height: patch.height, education: patch.education, religion: patch.religion },
+            lifestyle: { smoking: patch.smoking, drinking: patch.drinking, kids: patch.kids },
+            prevPromptCount: prevProfile?.profilePrompts?.length ?? 0,
+            prevEducation: prevProfile?.education,
+          });
+        }
+
+        // Update demo profile with PATCH (merge, not overwrite)
+        useDemoStore.getState().saveDemoProfile(demoUserId, patch);
+
+        // Log AFTER save to confirm what was written
+        if (__DEV__) {
+          const afterProfile = useDemoStore.getState().demoProfiles[demoUserId];
+          console.log('[EditProfile] SAVE COMPLETE (demo)', {
+            afterPhotoCount: afterProfile?.photos?.length ?? 0,
+            afterPromptCount: afterProfile?.profilePrompts?.length ?? 0,
+            afterEducation: afterProfile?.education,
+            afterSmoking: afterProfile?.smoking,
           });
         }
       }

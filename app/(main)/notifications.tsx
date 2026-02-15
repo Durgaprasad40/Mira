@@ -11,7 +11,10 @@ import { useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { COLORS } from '@/lib/constants';
 import { Ionicons } from '@expo/vector-icons';
-import { useNotifications, type AppNotification } from '@/hooks/useNotifications';
+import { useNotifications, useDemoNotifStore, type AppNotification } from '@/hooks/useNotifications';
+import { useDemoStore } from '@/stores/demoStore';
+import { isDemoMode } from '@/hooks/useConvex';
+import { log } from '@/utils/logger';
 
 interface NotificationGroup {
   title: string;
@@ -26,17 +29,16 @@ export default function NotificationsScreen() {
   // ── Single source of truth — same hook the bell badge uses ──
   const { notifications, unseenCount, markAllSeen, markRead, cleanupExpiredNotifications } = useNotifications();
 
+  // ── Demo mode: access likes and crossedPaths to validate notification invariants ──
+  const demoLikes = useDemoStore((s) => s.likes);
+  const demoCrossedPaths = useDemoStore((s) => s.crossedPaths);
+  const removeLikeNotificationsForUser = useDemoNotifStore((s) => s.removeLikeNotificationsForUser);
+  const removeCrossedPathNotificationsForUser = useDemoNotifStore((s) => s.removeCrossedPathNotificationsForUser);
+
   // ── Cleanup expired notifications on mount ──
   useEffect(() => {
     cleanupExpiredNotifications();
   }, [cleanupExpiredNotifications]);
-
-  // ── Debug log ──
-  useEffect(() => {
-    console.log(
-      `[NotificationsScreen] total=${notifications.length} unseenCount=${unseenCount}`,
-    );
-  }, [notifications.length, unseenCount]);
 
   const onRefresh = async () => {
     setRefreshing(true);
@@ -95,13 +97,48 @@ export default function NotificationsScreen() {
         break;
       case 'like':
       case 'like_received':
-        router.push(`/(main)/likes?${notifParams}${dedupeParam}` as any);
-        break;
       case 'super_like':
       case 'superlike':
-      case 'super_like_received':
-        router.push(`/(main)/likes?${notifParams}${dedupeParam}` as any);
+      case 'super_like_received': {
+        // INVARIANT: A like_received notification may exist IF AND ONLY IF a pending Like exists
+        // Validate the like still exists before navigating to Likes screen
+        const likeUserId = notification.data?.otherUserId;
+
+        if (isDemoMode && likeUserId) {
+          const likeExists = demoLikes.some((l) => l.userId === likeUserId);
+
+          if (!likeExists) {
+            // Like no longer exists - this is an orphaned notification
+            log.warn('[BUG]', 'like_notification_without_like', { profileId: likeUserId });
+
+            // Remove the orphaned notification to prevent future taps
+            removeLikeNotificationsForUser(likeUserId);
+
+            // Navigate to Messages home instead of Likes (NEVER show empty Likes screen)
+            router.push({
+              pathname: '/(main)/(tabs)/messages',
+              params: {
+                source: 'notification',
+                notificationId: notification._id,
+              },
+            } as any);
+            return;
+          }
+        }
+
+        // Like exists - navigate to Messages tab with focus on Likes section
+        router.push({
+          pathname: '/(main)/(tabs)/messages',
+          params: {
+            focus: 'likes',
+            profileId: likeUserId,
+            source: 'notification',
+            notificationId: notification._id,
+            dedupeKey: notification.dedupeKey,
+          },
+        } as any);
         break;
+      }
       case 'message':
       case 'new_message':
         if (notification.data?.conversationId) {
@@ -110,9 +147,46 @@ export default function NotificationsScreen() {
           router.push(`/(main)/(tabs)/messages/chat/${notification.data.userId}?${notifParams}${dedupeParam}` as any);
         }
         break;
-      case 'crossed_paths':
-        router.push(`/(main)/(tabs)/nearby?${notifParams}${dedupeParam}` as any);
+      case 'crossed_paths': {
+        // INVARIANT: A crossed_paths notification may exist IF AND ONLY IF a crossedPaths entry exists
+        // Validate the crossed path still exists before navigating to Nearby screen
+        const crossedUserId = notification.data?.otherUserId;
+
+        if (isDemoMode && crossedUserId) {
+          const crossedPathExists = demoCrossedPaths.some((cp) => cp.otherUserId === crossedUserId);
+
+          if (!crossedPathExists) {
+            // Crossed path no longer exists - this is an orphaned notification
+            log.warn('[BUG]', 'crossed_paths_notification_without_entry', { profileId: crossedUserId });
+
+            // Remove the orphaned notification to prevent future taps
+            removeCrossedPathNotificationsForUser(crossedUserId);
+
+            // Navigate to Nearby home instead of focusing on a specific profile
+            router.push({
+              pathname: '/(main)/(tabs)/nearby',
+              params: {
+                source: 'notification',
+                notificationId: notification._id,
+              },
+            } as any);
+            return;
+          }
+        }
+
+        // Crossed path exists - navigate to Nearby with focus on crossed_paths section
+        router.push({
+          pathname: '/(main)/(tabs)/nearby',
+          params: {
+            focus: 'crossed_paths',
+            profileId: crossedUserId,
+            source: 'notification',
+            notificationId: notification._id,
+            dedupeKey: notification.dedupeKey,
+          },
+        } as any);
         break;
+      }
       case 'profile_viewed':
         router.push(`/(main)/(tabs)/home?${notifParams}${dedupeParam}` as any);
         break;

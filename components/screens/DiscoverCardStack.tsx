@@ -42,6 +42,7 @@ import { usePrivateChatStore } from "@/stores/privateChatStore";
 import type { IncognitoConversation, ConnectionSource } from "@/types";
 
 import { markPhase2Matched } from "@/lib/phase2MatchSession";
+import { log } from "@/utils/logger";
 
 // DEV-only match rate for demo mode (80% for fast testing, 30% for prod)
 const DEMO_MATCH_RATE = __DEV__ ? 0.8 : 0.3;
@@ -50,7 +51,6 @@ const DEMO_MATCH_RATE = __DEV__ ? 0.8 : 0.3;
 function handlePhase2Match(profile: { id: string; name: string; age?: number; photoUrl?: string }): boolean {
   // Check idempotency via shared session module
   if (!markPhase2Matched(profile.id)) {
-    if (__DEV__) console.log(`[Phase2Match] SKIP duplicate — already matched ${profile.id}`);
     return false;
   }
 
@@ -77,7 +77,7 @@ function handlePhase2Match(profile: { id: string; name: string; age?: number; ph
     unlockedAt: Date.now(),
   });
 
-  if (__DEV__) console.log(`[Phase2Match] Created ${conversationId} for ${profile.name}`);
+  log.info('[MATCH]', 'private', { name: profile.name });
   return true;
 }
 
@@ -173,6 +173,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
     swipedCount: s.swipedProfileIds.length, // 3B-1: track swiped count for deps
     getExcludedUserIds: s.getExcludedUserIds,
     recordSwipe: s.recordSwipe,            // 3B-1: record swipes to prevent repeats
+    hasHydrated: s._hasHydrated,           // FIX: track hydration for safe seeding
   })));
   // Derive excluded IDs as a Set for O(1) lookup in filters.
   // 3B-1: Deps now include swipedCount so excludedSet updates after each swipe
@@ -180,7 +181,8 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
     if (!isDemoMode) return new Set(demo.blockedUserIds);
     return new Set(demo.getExcludedUserIds());
   }, [demo.blockedUserIds, demo.matchCount, demo.swipedCount, demo.getExcludedUserIds]);
-  useEffect(() => { if (isDemoMode) demo.seed(); }, [demo.seed]);
+  // FIX: Only seed after hydration completes to prevent overwriting persisted data
+  useEffect(() => { if (isDemoMode && demo.hasHydrated) demo.seed(); }, [demo.seed, demo.hasHydrated]);
 
   // Profile data — memoize args to prevent Convex re-subscriptions
   const convexUserId = asUserId(userId);
@@ -301,7 +303,6 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
     if (profiles.length > 0) { replenishingRef.current = false; return; }
     if (replenishingRef.current) return;
     replenishingRef.current = true;
-    if (__DEV__) console.log('[DiscoverCardStack] demo pool exhausted — auto-replenishing');
     useDemoStore.getState().resetDiscoverPool();
     // 7-3: Guard against setState after unmount
     if (!mountedRef.current) return;
@@ -357,10 +358,8 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       isFocusedRef.current = true;
       navigatingRef.current = false;
       swipeLockRef.current = false;
-      if (__DEV__) console.log("[DiscoverCardStack] focus gained");
     } else {
       isFocusedRef.current = false;
-      if (__DEV__) console.log("[DiscoverCardStack] focus lost — cancelling animations");
       if (activeAnimationRef.current) {
         activeAnimationRef.current.stop();
         activeAnimationRef.current = null;
@@ -443,9 +442,6 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   const openProfileCb = useCallback(() => {
     const c = currentRef.current;
     if (!c) return;
-    if (__DEV__) {
-      console.log('[DiscoverCardStack] open full profile', c.id, 'isPhase2=', isPhase2);
-    }
     if (isPhase2) {
       // Phase-2: pass mode (intentKeys are read from profile in the detail view)
       router.push(`/(main)/profile/${c.id}?mode=phase2` as any);
@@ -502,7 +498,6 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       const swipedProfile = currentRef.current;
       if (!swipedProfile) { swipeLockRef.current = false; return; }
 
-      if (__DEV__) console.log(`[DiscoverCardStack] handleSwipe dir=${direction} profile=${swipedProfile.name}`);
 
       // Check daily limits — release lock and bail without advancing
       if (direction === "right" && hasReachedLikeLimit()) { swipeLockRef.current = false; return; }
@@ -533,10 +528,8 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
                 age: swipedProfile.age,
                 photoUrl: swipedProfile.photos[0]?.url,
               });
-              if (__DEV__) {
-                console.log(`[DiscoverCardStack] match! userId=${swipedProfile.id} isPhase2=true isNew=${isNewMatch}`);
-              }
               if (isNewMatch) {
+                log.info('[MATCH]', 'phase2', { name: swipedProfile.name });
                 trackEvent({ name: 'match_created', otherUserId: swipedProfile.id });
               }
               swipeLockRef.current = false;
@@ -546,7 +539,6 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
             // Phase 1: Save match + DM thread BEFORE navigating.
             useDemoStore.getState().simulateMatch(swipedProfile.id);
             const matchId = `match_${swipedProfile.id}`;
-            if (__DEV__) console.log(`[DiscoverCardStack] match! userId=${swipedProfile.id} isPhase2=false`);
             navigatingRef.current = true;
             // Defer navigation so advanceCard's setState commits first
             InteractionManager.runAfterInteractions(() => {
@@ -686,9 +678,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
         },
         // Allow other responders (e.g. tab bar) to take over
         onPanResponderTerminationRequest: () => true,
-        onPanResponderGrant: () => {
-          if (__DEV__) console.log("[DiscoverCardStack] pan grant");
-        },
+        onPanResponderGrant: () => {},
         onPanResponderMove: (_, gs) => {
           getActivePan().setValue({ x: gs.dx, y: gs.dy });
           const absX = Math.abs(gs.dx);
@@ -702,7 +692,6 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
           setOverlayDirection((prev) => (prev === newDir ? prev : newDir));
         },
         onPanResponderRelease: (_, gs) => {
-          if (__DEV__) console.log("[DiscoverCardStack] pan release dx=", gs.dx.toFixed(0), "dy=", gs.dy.toFixed(0));
           // If screen lost focus during drag, or swipe already in flight, just reset
           if (navigatingRef.current || !isFocusedRef.current || swipeLockRef.current) { resetPosition(); return; }
           if (gs.dx < -thresholdX || gs.vx < -velocityX) { animateSwipeRef.current("left", gs.vx); return; }
@@ -758,22 +747,9 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
     });
   }, [standOutResult]);
 
-  // ── Debug: log index changes so we can verify cards are advancing ──
-  useEffect(() => {
-    if (__DEV__) console.log(`[DiscoverCardStack] index changed -> ${index} (profile=${index < displayProfiles.length ? displayProfiles[index]?.name : 'EXHAUSTED'})`);
-  }, [index, displayProfiles]);
-
-  // ── Diagnostic: render count (debug log, not warn) ──
-  const renderCountRef = useRef(0);
-  renderCountRef.current += 1;
-  if (__DEV__ && renderCountRef.current % 100 === 0) {
-    console.log(`[DiscoverCardStack] render #${renderCountRef.current}`);
-  }
-
   // Loading state — non-demo only; skip when using external profiles
   const isDiscoverLoading = !isDemoMode && !externalProfiles && !convexProfiles;
   if (isDiscoverLoading) {
-    if (__DEV__) console.log("[DiscoverCardStack] showing loading state — convexProfiles not yet available");
     return (
       <LoadingGuard
         isLoading={true}
@@ -829,7 +805,6 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       if (isDemoMode) {
         useDemoStore.getState().resetDiscoverPool();
         setIndex(0);
-        if (__DEV__) console.log('[DiscoverCardStack] deck reset — starting fresh');
       }
     };
 

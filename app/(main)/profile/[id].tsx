@@ -279,24 +279,16 @@ export default function ViewProfileScreen() {
 
   return (
     <ScrollView style={styles.container} showsVerticalScrollIndicator={false}>
+      {/* Header: No back button, no overlay, just the 3-dots menu in top-right */}
       <View style={[styles.header, { paddingTop: insets.top + 8 }]}>
-        <TouchableOpacity onPress={() => router.back()} style={styles.backButton}>
-          <Ionicons name="arrow-back" size={24} color={COLORS.white} />
+        {/* Spacer to push menu to the right */}
+        <View style={{ flex: 1 }} />
+        <TouchableOpacity
+          onPress={() => setShowReportBlock(true)}
+          style={styles.moreButton}
+        >
+          <Ionicons name="ellipsis-horizontal" size={18} color={COLORS.white} />
         </TouchableOpacity>
-        <View style={styles.headerRight}>
-          {profile.isVerified && (
-            <View style={styles.verifiedBadge}>
-              <Ionicons name="checkmark-circle" size={20} color={COLORS.primary} />
-              <Text style={styles.verifiedText}>Verified</Text>
-            </View>
-          )}
-          <TouchableOpacity
-            onPress={() => setShowReportBlock(true)}
-            style={styles.moreButton}
-          >
-            <Ionicons name="ellipsis-horizontal" size={24} color={COLORS.white} />
-          </TouchableOpacity>
-        </View>
       </View>
 
       {profile.photos && profile.photos.length > 0 ? (
@@ -307,6 +299,8 @@ export default function ViewProfileScreen() {
           bounces={false}
           snapToAlignment="start"
           decelerationRate="fast"
+          snapToInterval={screenWidth}
+          disableIntervalMomentum
           data={profile.photos}
           keyExtractor={(item, index) => item._id || `photo-${index}`}
           onMomentumScrollEnd={(e) => {
@@ -314,10 +308,10 @@ export default function ViewProfileScreen() {
             setCurrentPhotoIndex(index);
           }}
           renderItem={({ item }) => (
-            <View style={{ width: screenWidth, height: 500, overflow: 'hidden' }}>
+            <View style={{ width: screenWidth, height: 500 + insets.top, overflow: 'hidden', paddingTop: insets.top }}>
               <Image
                 source={{ uri: item.url }}
-                style={{ width: '100%', height: '100%' }}
+                style={{ width: '100%', height: 500 }}
                 contentFit="cover"
                 blurRadius={isPhase2 ? 20 : 0}
               />
@@ -326,7 +320,7 @@ export default function ViewProfileScreen() {
           style={styles.photoCarousel}
         />
       ) : (
-        <View style={styles.photoPlaceholder}>
+        <View style={[styles.photoPlaceholder, { height: 500 + insets.top, paddingTop: insets.top }]}>
           <Ionicons name="person" size={64} color={COLORS.textLight} />
         </View>
       )}
@@ -355,7 +349,7 @@ export default function ViewProfileScreen() {
           )}
         </View>
 
-        {/* Trust Badges */}
+        {/* Trust Badges - includes verification status */}
         {(() => {
           const badges = getTrustBadges({
             isVerified: profile.isVerified,
@@ -363,11 +357,29 @@ export default function ViewProfileScreen() {
             photoCount: profile.photos?.length,
             bio: profile.bio,
           });
-          if (badges.length === 0) return null;
-          const visible = badges.slice(0, 3);
-          const overflow = badges.length - 3;
+          // Filter out the "Verified" badge from getTrustBadges since we show it separately
+          const otherBadges = badges.filter((b) => b.key !== 'verified');
+          const visible = otherBadges.slice(0, 2); // Show 2 other badges max
+          const overflow = otherBadges.length - 2;
+
+          // Verification badge: both verified and unverified show green check (per product decision)
+          const verificationBadge = {
+            label: profile.isVerified ? 'Verified' : 'Unverified',
+            color: '#22C55E', // Green for both states
+            icon: 'checkmark-circle' as const,
+          };
+
           return (
             <View style={styles.trustBadgeRow}>
+              {/* Verification badge - always first */}
+              <View style={[styles.trustBadge, { borderColor: verificationBadge.color + '40' }]}>
+                <Ionicons name={verificationBadge.icon} size={14} color={verificationBadge.color} />
+                <Text style={[styles.trustBadgeText, { color: verificationBadge.color }]}>
+                  {verificationBadge.label}
+                </Text>
+              </View>
+
+              {/* Other trust badges */}
               {visible.map((badge) => (
                 <View key={badge.key} style={[styles.trustBadge, { borderColor: badge.color + '40' }]}>
                   <Ionicons name={badge.icon as any} size={14} color={badge.color} />
@@ -665,46 +677,24 @@ const styles = StyleSheet.create({
     right: 0,
     zIndex: 10,
     flexDirection: 'row',
-    justifyContent: 'space-between',
+    justifyContent: 'flex-end',
     alignItems: 'center',
     paddingHorizontal: 16,
     paddingBottom: 8,
-    backgroundColor: 'rgba(0,0,0,0.3)',
-  },
-  backButton: {
-    padding: 8,
-  },
-  headerRight: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
+    // No background - photo is fully visible
   },
   moreButton: {
-    padding: 8,
-    backgroundColor: 'rgba(0,0,0,0.3)',
-    borderRadius: 16,
-  },
-  verifiedBadge: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: COLORS.background,
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 16,
-  },
-  verifiedText: {
-    fontSize: 12,
-    fontWeight: '600',
-    color: COLORS.text,
-    marginLeft: 4,
+    padding: 6,
+    backgroundColor: 'rgba(0,0,0,0.4)',
+    borderRadius: 14,
   },
   photoCarousel: {
     width: '100%',
-    height: 500,
+    // Height is now dynamic: 500 + insets.top (applied inline)
   },
   photoPlaceholder: {
     width: '100%',
-    height: 500,
+    // Height is now dynamic: 500 + insets.top (applied inline)
     backgroundColor: COLORS.backgroundDark,
     alignItems: 'center',
     justifyContent: 'center',

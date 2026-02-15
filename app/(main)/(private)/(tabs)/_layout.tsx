@@ -1,6 +1,7 @@
 import { Tabs } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { INCOGNITO_COLORS } from '@/lib/constants';
+import { usePrivateChatStore } from '@/stores/privateChatStore';
 
 const C = INCOGNITO_COLORS;
 
@@ -13,6 +14,10 @@ const C = INCOGNITO_COLORS;
  * - From Desired Land → back to Phase-1 Discover
  */
 export default function PrivateTabsLayout() {
+  // Calculate total unread count for Messages tab badge
+  const conversations = usePrivateChatStore((s) => s.conversations);
+  const totalUnread = conversations.reduce((sum, c) => sum + (c.unreadCount || 0), 0);
+
   return (
     <Tabs
       screenOptions={{
@@ -71,6 +76,13 @@ export default function PrivateTabsLayout() {
           tabBarIcon: ({ color, size }) => (
             <Ionicons name="mail" size={size} color={color} />
           ),
+          tabBarBadge: totalUnread > 0 ? totalUnread : undefined,
+          tabBarBadgeStyle: {
+            backgroundColor: C.primary,
+            fontSize: 10,
+            minWidth: 18,
+            height: 18,
+          },
         }}
       />
       <Tabs.Screen

@@ -8,10 +8,10 @@ import {
   Keyboard,
   KeyboardAvoidingView,
   Platform,
-  LayoutChangeEvent,
   NativeSyntheticEvent,
   NativeScrollEvent,
   Alert,
+  InteractionManager,
 } from 'react-native';
 import { Image } from 'expo-image';
 import { FlashList, type FlashListRef } from '@shopify/flash-list';
@@ -65,11 +65,8 @@ export default function PrivateChatScreen() {
   const insets = useSafeAreaInsets();
   const flatListRef = useRef<FlashListRef<IncognitoMessage>>(null);
 
-  // Measured header height for KAV offset
-  const [headerHeight, setHeaderHeight] = useState(0);
-  const onHeaderLayout = useCallback((e: LayoutChangeEvent) => {
-    setHeaderHeight(e.nativeEvent.layout.height);
-  }, []);
+  // ─── Composer height tracking (matches locked chat-rooms pattern) ───
+  const [composerHeight, setComposerHeight] = useState(56);
 
   // Near-bottom tracking for smart auto-scroll
   const isNearBottomRef = useRef(true);
@@ -115,7 +112,16 @@ export default function PrivateChatScreen() {
 
   const [text, setText] = useState('');
   const [reportVisible, setReportVisible] = useState(false);
-  const [keyboardVisible, setKeyboardVisible] = useState(false);
+
+  // ─── Scroll to bottom helper (with Android timing fix - matches locked pattern) ───
+  const scrollToBottom = useCallback((animated = true) => {
+    const run = () => flatListRef.current?.scrollToEnd({ animated });
+    if (Platform.OS === 'android') {
+      InteractionManager.runAfterInteractions(() => setTimeout(run, 120));
+    } else {
+      requestAnimationFrame(run);
+    }
+  }, []);
 
   // Voice recording
   const handleRecordingComplete = useCallback((result: VoiceRecorderResult) => {
@@ -199,28 +205,19 @@ export default function PrivateChatScreen() {
   useEffect(() => {
     const count = messages.length;
     if (count > prevMessageCountRef.current && isNearBottomRef.current) {
-      requestAnimationFrame(() => {
-        flatListRef.current?.scrollToEnd({ animated: true });
-      });
+      scrollToBottom(true);
     }
     prevMessageCountRef.current = count;
-  }, [messages.length]);
+  }, [messages.length, scrollToBottom]);
 
-  // Scroll to end when keyboard opens (WhatsApp behavior) + track visibility
+  // ─── Keyboard listener: scroll on open (matches locked chat-rooms pattern) ───
   useEffect(() => {
     const showEvent = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
-    const hideEvent = Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide';
-    const s1 = Keyboard.addListener(showEvent, () => {
-      setKeyboardVisible(true);
-      if (isNearBottomRef.current) {
-        requestAnimationFrame(() => {
-          flatListRef.current?.scrollToEnd({ animated: true });
-        });
-      }
+    const sub = Keyboard.addListener(showEvent, () => {
+      scrollToBottom(true);
     });
-    const s2 = Keyboard.addListener(hideEvent, () => setKeyboardVisible(false));
-    return () => { s1.remove(); s2.remove(); };
-  }, []);
+    return () => sub.remove();
+  }, [scrollToBottom]);
 
   // Phase-2 analytics: Track when chat opens
   useEffect(() => {
@@ -497,8 +494,8 @@ export default function PrivateChatScreen() {
 
   return (
     <View style={styles.container}>
-      {/* Header — sits above KAV, measured for keyboardVerticalOffset */}
-      <View onLayout={onHeaderLayout} style={[styles.header, { marginTop: insets.top }]}>
+      {/* Header — sits above KAV (does not move when keyboard opens) */}
+      <View style={[styles.header, { marginTop: insets.top }]}>
         <TouchableOpacity onPress={() => router.back()} style={styles.backButton}>
           <Ionicons name="arrow-back" size={24} color={C.text} />
         </TouchableOpacity>
@@ -537,84 +534,90 @@ export default function PrivateChatScreen() {
         </TouchableOpacity>
       </View>
 
+      {/* ─── KEYBOARD AVOIDING VIEW (matches locked chat-rooms pattern) ─── */}
       <KeyboardAvoidingView
-        style={{ flex: 1 }}
+        style={styles.keyboardAvoid}
         behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-        keyboardVerticalOffset={headerHeight + insets.top}
+        keyboardVerticalOffset={0}
       >
-        {/* Messages */}
-        <FlashList
-          ref={flatListRef}
-          data={messages}
-          keyExtractor={(item) => item.id}
-          renderItem={renderMessage}
-          contentContainerStyle={{
-            flexGrow: 1,
-            justifyContent: 'flex-end' as const,
-            paddingHorizontal: 16,
-            paddingTop: 16,
-            paddingBottom: 0,
-          }}
-          onScroll={onScroll}
-          scrollEventThrottle={16}
-          keyboardShouldPersistTaps="handled"
-          keyboardDismissMode="interactive"
-        />
-
-        {/* ToD inline banner removed — ToD accessed via header icon only */}
-
-        {/* Recording indicator */}
-        {isRecording && (
-          <View style={styles.recordingBanner}>
-            <View style={styles.recordingDot} />
-            <Text style={styles.recordingText}>
-              Recording... {formatRecordingTime(elapsedMs)} / {formatRecordingTime(maxDurationMs)}
-            </Text>
-          </View>
-        )}
-
-        {/* Input — sits at the bottom of KAV, pushed up by keyboard */}
-        <View style={[styles.inputBar, { paddingBottom: keyboardVisible ? 0 : Math.max(insets.bottom, 8) }]}>
-          {/* Mic button - LEFT side of TextInput */}
-          <TouchableOpacity
-            style={[styles.micButton, isRecording && styles.micButtonRecording]}
-            onPress={toggleRecording}
-          >
-            <Ionicons
-              name={isRecording ? 'stop' : 'mic'}
-              size={22}
-              color={isRecording ? '#FF4444' : C.primary}
-            />
-          </TouchableOpacity>
-
-          <TextInput
-            style={[styles.textInput, isRecording && styles.textInputRecording]}
-            placeholder={isRecording ? 'Recording voice message...' : 'Type a message...'}
-            placeholderTextColor={isRecording ? '#FF4444' : C.textLight}
-            value={text}
-            onChangeText={setText}
-            multiline
-            scrollEnabled
-            textAlignVertical="top"
-            blurOnSubmit={false}
-            maxLength={1000}
-            editable={!isRecording}
+        <View style={styles.chatArea}>
+          {/* Messages */}
+          <FlashList
+            ref={flatListRef}
+            data={messages}
+            keyExtractor={(item) => item.id}
+            renderItem={renderMessage}
+            contentContainerStyle={{
+              flexGrow: 1,
+              justifyContent: 'flex-end' as const,
+              paddingHorizontal: 16,
+              paddingTop: 16,
+              paddingBottom: composerHeight,
+            }}
+            onScroll={onScroll}
+            scrollEventThrottle={16}
+            keyboardShouldPersistTaps="handled"
+            keyboardDismissMode="interactive"
           />
-          {/* Camera button for secure photos */}
-          {!isRecording && (
-            <TouchableOpacity style={styles.cameraButton} onPress={handleSendImage}>
-              <Ionicons name="camera" size={22} color={C.primary} />
-            </TouchableOpacity>
+
+          {/* Recording indicator */}
+          {isRecording && (
+            <View style={styles.recordingBanner}>
+              <View style={styles.recordingDot} />
+              <Text style={styles.recordingText}>
+                Recording... {formatRecordingTime(elapsedMs)} / {formatRecordingTime(maxDurationMs)}
+              </Text>
+            </View>
           )}
-          {!isRecording && (
-            <TouchableOpacity
-              style={[styles.sendButton, !text.trim() && styles.sendButtonDisabled]}
-              onPress={handleSend}
-              disabled={!text.trim()}
-            >
-              <Ionicons name="send" size={20} color={text.trim() ? '#FFFFFF' : C.textLight} />
-            </TouchableOpacity>
-          )}
+
+          {/* ─── COMPOSER (matches locked chat-rooms pattern) ─── */}
+          <View
+            style={[styles.composerWrapper, { paddingBottom: Platform.OS === 'ios' ? insets.bottom : 0 }]}
+            onLayout={(e) => setComposerHeight(e.nativeEvent.layout.height)}
+          >
+            <View style={styles.inputBar}>
+              {/* Mic button - LEFT side of TextInput */}
+              <TouchableOpacity
+                style={[styles.micButton, isRecording && styles.micButtonRecording]}
+                onPress={toggleRecording}
+              >
+                <Ionicons
+                  name={isRecording ? 'stop' : 'mic'}
+                  size={22}
+                  color={isRecording ? '#FF4444' : C.primary}
+                />
+              </TouchableOpacity>
+
+              <TextInput
+                style={[styles.textInput, isRecording && styles.textInputRecording]}
+                placeholder={isRecording ? 'Recording voice message...' : 'Type a message...'}
+                placeholderTextColor={isRecording ? '#FF4444' : C.textLight}
+                value={text}
+                onChangeText={setText}
+                multiline
+                scrollEnabled
+                textAlignVertical="top"
+                blurOnSubmit={false}
+                maxLength={1000}
+                editable={!isRecording}
+              />
+              {/* Camera button for secure photos */}
+              {!isRecording && (
+                <TouchableOpacity style={styles.cameraButton} onPress={handleSendImage}>
+                  <Ionicons name="camera" size={22} color={C.primary} />
+                </TouchableOpacity>
+              )}
+              {!isRecording && (
+                <TouchableOpacity
+                  style={[styles.sendButton, !text.trim() && styles.sendButtonDisabled]}
+                  onPress={handleSend}
+                  disabled={!text.trim()}
+                >
+                  <Ionicons name="send" size={20} color={text.trim() ? '#FFFFFF' : C.textLight} />
+                </TouchableOpacity>
+              )}
+            </View>
+          </View>
         </View>
       </KeyboardAvoidingView>
 
@@ -676,6 +679,9 @@ const SOFT_ACCENT_ACTIVE = '#9B7DC4'; // Slightly brighter for active timer
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: C.background },
+  keyboardAvoid: { flex: 1 },
+  chatArea: { flex: 1 },
+  composerWrapper: { backgroundColor: C.background },
 
   header: {
     flexDirection: 'row', alignItems: 'center', paddingHorizontal: 12, paddingVertical: 10,
@@ -828,7 +834,7 @@ const styles = StyleSheet.create({
   },
 
   inputBar: {
-    flexDirection: 'row', alignItems: 'flex-end', paddingHorizontal: 12, paddingTop: 8,
+    flexDirection: 'row', alignItems: 'flex-end', paddingHorizontal: 12, paddingVertical: 8,
     borderTopWidth: 1, borderTopColor: C.surface, gap: 8,
   },
   micButton: {

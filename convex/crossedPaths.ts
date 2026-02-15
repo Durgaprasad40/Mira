@@ -20,8 +20,11 @@ const FADED_WINDOW_MS = 6 * 24 * 60 * 60 * 1000; // 3–6 days → faded marker
 // >6 days → hidden
 
 const NOTIFICATION_COOLDOWN_MS = 24 * 60 * 60 * 1000; // 24h per pair
-const HISTORY_EXPIRY_MS = 14 * 24 * 60 * 60 * 1000; // 14 days
-const MAX_HISTORY_ENTRIES = 15;
+const HISTORY_EXPIRY_MS = 30 * 24 * 60 * 60 * 1000; // 30 days (persists across travel)
+const MAX_HISTORY_ENTRIES = 50; // Increased from 15 since crossed paths persist longer
+
+// Grid size for approximate location (privacy: round to ~500m)
+const LOCATION_GRID_METERS = 500;
 
 // ---------------------------------------------------------------------------
 // "Someone crossed you" alert constants
@@ -282,7 +285,7 @@ export const recordLocation = mutation({
 
     // Record crossed paths + history
     for (const nearbyUser of nearbyUsers) {
-      // Check preferences match
+      // Check preferences match (gender eligibility)
       if (!currentUser.lookingFor.includes(nearbyUser.gender)) continue;
       if (!nearbyUser.lookingFor.includes(currentUser.gender)) continue;
 
@@ -303,11 +306,29 @@ export const recordLocation = mutation({
         .first();
       if (reverseBlocked) continue;
 
+      // --- COMPATIBILITY GATE: At least ONE common element required ---
+      const compatibility = computeCompatibility(
+        {
+          activities: currentUser.activities,
+          relationshipIntent: currentUser.relationshipIntent,
+          profilePrompts: currentUser.profilePrompts,
+        },
+        {
+          activities: nearbyUser.activities,
+          relationshipIntent: nearbyUser.relationshipIntent,
+          profilePrompts: nearbyUser.profilePrompts,
+        },
+      );
+
+      // Skip if no compatibility (no shared interests/intent/prompts)
+      if (!compatibility.isCompatible) continue;
+
       // Order user IDs for consistent lookup
       const user1Id = userId < nearbyUser._id ? userId : nearbyUser._id;
       const user2Id = userId < nearbyUser._id ? nearbyUser._id : userId;
 
       // --- Crossed paths record (for unlock logic) ---
+      // BUGFIX #28: Use idempotent upsert pattern to prevent duplicate records
       let crossedPath = await ctx.db
         .query('crossedPaths')
         .withIndex('by_users', (q) =>
@@ -329,37 +350,72 @@ export const recordLocation = mutation({
         if (newCount >= MIN_CROSSINGS_FOR_UNLOCK && !crossedPath.unlockExpiresAt) {
           updates.unlockExpiresAt = now + UNLOCK_DURATION_MS;
 
-          await ctx.db.insert('notifications', {
-            userId: user1Id,
-            type: 'crossed_paths' as const,
-            title: 'Crossed Paths Milestone!',
-            body: `You've crossed paths ${newCount} times! Enjoy 48 hours of free messaging.`,
-            data: { userId: user2Id as string },
-            createdAt: now,
-          });
+          // BUGFIX #28: Check notification cooldown before sending milestone notification
+          const canNotifyMilestone = !crossedPath.lastNotifiedAt ||
+            now - crossedPath.lastNotifiedAt >= NOTIFICATION_COOLDOWN_MS;
 
-          await ctx.db.insert('notifications', {
-            userId: user2Id,
-            type: 'crossed_paths' as const,
-            title: 'Crossed Paths Milestone!',
-            body: `You've crossed paths ${newCount} times! Enjoy 48 hours of free messaging.`,
-            data: { userId: user1Id as string },
-            createdAt: now,
-          });
+          if (canNotifyMilestone) {
+            updates.lastNotifiedAt = now;
+
+            // Notification with reason
+            const reasonText = formatReasonForNotification(compatibility.reasonTags[0] ?? 'common');
+            await ctx.db.insert('notifications', {
+              userId: user1Id,
+              type: 'crossed_paths' as const,
+              title: 'Crossed Paths Milestone!',
+              body: `You've crossed paths ${newCount} times! ${reasonText}. Enjoy 48 hours of free messaging.`,
+              data: { userId: user2Id as string },
+              dedupeKey: `crossed_paths_milestone:${user1Id}:${user2Id}`,
+              createdAt: now,
+              expiresAt: now + 24 * 60 * 60 * 1000,
+            });
+
+            await ctx.db.insert('notifications', {
+              userId: user2Id,
+              type: 'crossed_paths' as const,
+              title: 'Crossed Paths Milestone!',
+              body: `You've crossed paths ${newCount} times! ${reasonText}. Enjoy 48 hours of free messaging.`,
+              data: { userId: user1Id as string },
+              dedupeKey: `crossed_paths_milestone:${user2Id}:${user1Id}`,
+              createdAt: now,
+              expiresAt: now + 24 * 60 * 60 * 1000,
+            });
+          }
         }
 
         await ctx.db.patch(crossedPath._id, updates);
       } else {
-        await ctx.db.insert('crossedPaths', {
+        // BUGFIX #28: Insert new record, then check for race condition duplicate
+        const newId = await ctx.db.insert('crossedPaths', {
           user1Id,
           user2Id,
           count: 1,
           lastCrossedAt: now,
         });
+
+        // BUGFIX #28: Re-query to detect concurrent insert race condition
+        const allForPair = await ctx.db
+          .query('crossedPaths')
+          .withIndex('by_users', (q) =>
+            q.eq('user1Id', user1Id).eq('user2Id', user2Id),
+          )
+          .collect();
+
+        // If multiple records exist, keep oldest (lowest _creationTime), delete rest
+        if (allForPair.length > 1) {
+          // Sort by _creationTime ascending to keep oldest
+          allForPair.sort((a, b) => a._creationTime - b._creationTime);
+          // Delete all except the first (oldest)
+          for (let i = 1; i < allForPair.length; i++) {
+            await ctx.db.delete(allForPair[i]._id);
+          }
+          // Update crossedPath reference to the kept record
+          crossedPath = allForPair[0];
+        }
       }
 
-      // --- Cross-path history entry ---
-      // Check 24h duplicate control for same pair
+      // --- Cross-path history entry (MUTUAL — both users see this) ---
+      // BUGFIX #28: Check 24h duplicate control for same pair
       const existingHistory = await ctx.db
         .query('crossPathHistory')
         .withIndex('by_users', (q) =>
@@ -378,15 +434,90 @@ export const recordLocation = mutation({
         ? `Near ${nearbyUser.city}`
         : 'Nearby area';
 
-      await ctx.db.insert('crossPathHistory', {
+      // Compute approximate crossing location (privacy: rounded to ~500m grid)
+      const approxLocation = roundToGrid(latitude, longitude);
+
+      // BUGFIX #28: Insert history entry, then check for race condition duplicate
+      const newHistoryId = await ctx.db.insert('crossPathHistory', {
         user1Id,
         user2Id,
         areaName,
+        crossedLatApprox: approxLocation.lat,
+        crossedLngApprox: approxLocation.lng,
+        reasonTags: compatibility.reasonTags,
         createdAt: now,
         expiresAt: now + HISTORY_EXPIRY_MS,
       });
 
-      // Enforce max 15 entries per user — trim oldest
+      // BUGFIX #28: Re-query to detect concurrent insert race condition for history
+      const recentHistories = await ctx.db
+        .query('crossPathHistory')
+        .withIndex('by_users', (q) =>
+          q.eq('user1Id', user1Id).eq('user2Id', user2Id),
+        )
+        .filter((q) => q.gt(q.field('createdAt'), now - 60000)) // Within last minute
+        .collect();
+
+      // If multiple records created in last minute, keep oldest, delete rest
+      if (recentHistories.length > 1) {
+        recentHistories.sort((a, b) => a._creationTime - b._creationTime);
+        for (let i = 1; i < recentHistories.length; i++) {
+          await ctx.db.delete(recentHistories[i]._id);
+        }
+        // If our record was deleted, skip notifications
+        if (recentHistories[0]._id !== newHistoryId) {
+          continue;
+        }
+      }
+
+      // BUGFIX #28: Use crossedPaths.lastNotifiedAt as single source of truth for notification cooldown
+      // Re-fetch crossedPath to get latest state (may have been created/updated above)
+      const currentCrossedPath = await ctx.db
+        .query('crossedPaths')
+        .withIndex('by_users', (q) =>
+          q.eq('user1Id', user1Id).eq('user2Id', user2Id),
+        )
+        .first();
+
+      // Check notification cooldown on the canonical crossedPaths record
+      const canNotify = currentCrossedPath && (
+        !currentCrossedPath.lastNotifiedAt ||
+        now - currentCrossedPath.lastNotifiedAt >= NOTIFICATION_COOLDOWN_MS
+      );
+
+      if (canNotify && currentCrossedPath) {
+        // BUGFIX #28: Update lastNotifiedAt FIRST to prevent race condition duplicates
+        await ctx.db.patch(currentCrossedPath._id, { lastNotifiedAt: now });
+
+        // Send notification to BOTH users with reason
+        const reasonText = formatReasonForNotification(compatibility.reasonTags[0] ?? 'common');
+
+        // Notification for user1
+        await ctx.db.insert('notifications', {
+          userId: user1Id,
+          type: 'crossed_paths' as const,
+          title: 'You crossed paths!',
+          body: reasonText,
+          data: { userId: user2Id as string },
+          dedupeKey: `crossed_paths:${user1Id}:${user2Id}`,
+          createdAt: now,
+          expiresAt: now + 24 * 60 * 60 * 1000,
+        });
+
+        // Notification for user2
+        await ctx.db.insert('notifications', {
+          userId: user2Id,
+          type: 'crossed_paths' as const,
+          title: 'You crossed paths!',
+          body: reasonText,
+          data: { userId: user1Id as string },
+          dedupeKey: `crossed_paths:${user2Id}:${user1Id}`,
+          createdAt: now,
+          expiresAt: now + 24 * 60 * 60 * 1000,
+        });
+      }
+
+      // Enforce max entries per user — trim oldest
       await trimHistoryForUser(ctx, userId);
     }
 
@@ -493,7 +624,9 @@ export const getNearbyUsers = query({
 });
 
 // ---------------------------------------------------------------------------
-// getCrossPathHistory — memory-based history list (max 15, 14-day expiry)
+// getCrossPathHistory — crossed paths history list (30-day retention)
+// Returns crossed paths with approximate location and reason tags.
+// Filters out hidden entries for the requesting user.
 // ---------------------------------------------------------------------------
 
 export const getCrossPathHistory = query({
@@ -512,7 +645,17 @@ export const getCrossPathHistory = query({
       .collect();
 
     const all = [...asUser1, ...asUser2]
-      .filter((entry) => entry.expiresAt > now) // filter expired
+      .filter((entry) => {
+        // Filter expired entries
+        if (entry.expiresAt <= now) return false;
+
+        // Filter hidden entries for this user
+        const isUser1 = entry.user1Id === userId;
+        if (isUser1 && entry.hiddenByUser1) return false;
+        if (!isUser1 && entry.hiddenByUser2) return false;
+
+        return true;
+      })
       .sort((a, b) => b.createdAt - a.createdAt) // newest first
       .slice(0, MAX_HISTORY_ENTRIES);
 
@@ -522,24 +665,105 @@ export const getCrossPathHistory = query({
       const otherUser = await ctx.db.get(otherUserId);
       if (!otherUser || !otherUser.isActive) continue;
 
-      // Get blurred photo (primary photo, will be blurred client-side)
+      // Get primary photo
       const photo = await ctx.db
         .query('photos')
         .withIndex('by_user', (q) => q.eq('userId', otherUserId))
         .filter((q) => q.eq(q.field('isPrimary'), true))
         .first();
 
+      // Format first reason for display
+      const reasonTags = entry.reasonTags ?? [];
+      const reasonText = reasonTags.length > 0
+        ? formatReasonForNotification(reasonTags[0])
+        : null;
+
       results.push({
         id: entry._id,
         otherUserId,
+        otherUserName: otherUser.name,
+        otherUserAge: calculateAge(otherUser.dateOfBirth),
         areaName: entry.areaName,
+        // Approximate crossing location (not current location — persists across travel)
+        crossedLatApprox: entry.crossedLatApprox,
+        crossedLngApprox: entry.crossedLngApprox,
+        // Reason tags and formatted text
+        reasonTags,
+        reasonText,
         createdAt: entry.createdAt,
+        expiresAt: entry.expiresAt,
         photoUrl: photo?.url ?? null,
         initial: otherUser.name.charAt(0),
+        isVerified: otherUser.isVerified,
       });
     }
 
     return results;
+  },
+});
+
+// ---------------------------------------------------------------------------
+// hideCrossedPath — mark a crossed path as hidden for the current user
+// ---------------------------------------------------------------------------
+
+export const hideCrossedPath = mutation({
+  args: {
+    userId: v.id('users'),
+    historyId: v.id('crossPathHistory'),
+  },
+  handler: async (ctx, args) => {
+    const { userId, historyId } = args;
+
+    const entry = await ctx.db.get(historyId);
+    if (!entry) {
+      return { success: false, reason: 'not_found' };
+    }
+
+    // Determine which user is hiding this entry
+    const isUser1 = entry.user1Id === userId;
+    const isUser2 = entry.user2Id === userId;
+
+    if (!isUser1 && !isUser2) {
+      return { success: false, reason: 'unauthorized' };
+    }
+
+    // Set the appropriate hidden flag
+    if (isUser1) {
+      await ctx.db.patch(historyId, { hiddenByUser1: true });
+    } else {
+      await ctx.db.patch(historyId, { hiddenByUser2: true });
+    }
+
+    return { success: true };
+  },
+});
+
+// ---------------------------------------------------------------------------
+// deleteCrossedPath — permanently delete a crossed path entry
+// ---------------------------------------------------------------------------
+
+export const deleteCrossedPath = mutation({
+  args: {
+    userId: v.id('users'),
+    historyId: v.id('crossPathHistory'),
+  },
+  handler: async (ctx, args) => {
+    const { userId, historyId } = args;
+
+    const entry = await ctx.db.get(historyId);
+    if (!entry) {
+      return { success: false, reason: 'not_found' };
+    }
+
+    // Verify user is part of this crossed path
+    if (entry.user1Id !== userId && entry.user2Id !== userId) {
+      return { success: false, reason: 'unauthorized' };
+    }
+
+    // Delete the entry
+    await ctx.db.delete(historyId);
+
+    return { success: true };
   },
 });
 
@@ -792,4 +1016,158 @@ async function trimHistoryForUser(ctx: any, userId: Id<'users'>) {
       await ctx.db.delete(entry._id);
     }
   }
+}
+
+// ---------------------------------------------------------------------------
+// Compatibility Gate: At least ONE common element required
+// ---------------------------------------------------------------------------
+
+interface CompatibilityResult {
+  isCompatible: boolean;
+  reasonTags: string[]; // e.g. ["interest:coffee", "lookingFor:long_term"]
+}
+
+/**
+ * Check if two users have at least ONE common element across Phase-1 data.
+ * Required for crossed paths to appear.
+ *
+ * Checks:
+ * 1. Shared activities/interests (e.g., both like "coffee")
+ * 2. Shared relationship intent (e.g., both want "long_term")
+ * 3. Shared profile prompt topic (e.g., both answered travel-related prompts)
+ */
+function computeCompatibility(
+  userA: {
+    activities?: string[];
+    relationshipIntent?: string[];
+    profilePrompts?: { question: string; answer: string }[];
+  },
+  userB: {
+    activities?: string[];
+    relationshipIntent?: string[];
+    profilePrompts?: { question: string; answer: string }[];
+  },
+): CompatibilityResult {
+  const reasonTags: string[] = [];
+
+  // 1. Shared activities/interests
+  const activitiesA = new Set(userA.activities ?? []);
+  const activitiesB = new Set(userB.activities ?? []);
+  for (const activity of activitiesA) {
+    if (activitiesB.has(activity)) {
+      reasonTags.push(`interest:${activity}`);
+    }
+  }
+
+  // 2. Shared relationship intent
+  const intentA = new Set(userA.relationshipIntent ?? []);
+  const intentB = new Set(userB.relationshipIntent ?? []);
+  for (const intent of intentA) {
+    if (intentB.has(intent)) {
+      reasonTags.push(`lookingFor:${intent}`);
+    }
+  }
+
+  // 3. Shared profile prompt topics (basic keyword matching)
+  // Extract keywords from prompts and check for overlap
+  const promptKeywordsA = extractPromptKeywords(userA.profilePrompts ?? []);
+  const promptKeywordsB = extractPromptKeywords(userB.profilePrompts ?? []);
+  for (const keyword of promptKeywordsA) {
+    if (promptKeywordsB.has(keyword)) {
+      reasonTags.push(`prompt:${keyword}`);
+    }
+  }
+
+  return {
+    isCompatible: reasonTags.length > 0,
+    reasonTags: reasonTags.slice(0, 3), // Limit to top 3 reasons
+  };
+}
+
+/** Extract topic keywords from profile prompts for matching. */
+function extractPromptKeywords(
+  prompts: { question: string; answer: string }[],
+): Set<string> {
+  const keywords = new Set<string>();
+
+  // Common topic keywords to look for
+  const topicPatterns: Record<string, RegExp> = {
+    travel: /travel|trip|vacation|explore|adventure/i,
+    food: /food|cook|cuisine|restaurant|eat/i,
+    music: /music|song|concert|band|singer/i,
+    movies: /movie|film|cinema|watch|series/i,
+    fitness: /gym|fitness|workout|exercise|run/i,
+    reading: /book|read|author|novel|story/i,
+    art: /art|paint|draw|museum|creative/i,
+    nature: /nature|hike|outdoor|mountain|beach/i,
+    pets: /dog|cat|pet|animal/i,
+    coffee: /coffee|café|cafe/i,
+  };
+
+  for (const prompt of prompts) {
+    const text = `${prompt.question} ${prompt.answer}`.toLowerCase();
+    for (const [topic, pattern] of Object.entries(topicPatterns)) {
+      if (pattern.test(text)) {
+        keywords.add(topic);
+      }
+    }
+  }
+
+  return keywords;
+}
+
+/**
+ * Round coordinates to a grid for privacy.
+ * Returns approximate location that doesn't reveal exact position.
+ */
+function roundToGrid(lat: number, lng: number): { lat: number; lng: number } {
+  // 1 degree latitude ≈ 111km, so 500m ≈ 0.0045 degrees
+  const gridSize = LOCATION_GRID_METERS / 111000;
+  return {
+    lat: Math.round(lat / gridSize) * gridSize,
+    lng: Math.round(lng / gridSize) * gridSize,
+  };
+}
+
+/**
+ * Format reason tag for notification display.
+ * "interest:coffee" → "You both enjoy coffee"
+ * "lookingFor:long_term" → "You're both looking for long-term"
+ */
+function formatReasonForNotification(reasonTag: string): string {
+  const [type, value] = reasonTag.split(':');
+
+  if (type === 'interest') {
+    const labels: Record<string, string> = {
+      coffee: 'coffee',
+      travel: 'traveling',
+      foodie: 'food',
+      movies: 'movies',
+      concerts: 'concerts',
+      sports: 'sports',
+      gaming: 'gaming',
+      nightlife: 'nightlife',
+      outdoors: 'the outdoors',
+      gym_partner: 'fitness',
+      art_culture: 'art & culture',
+    };
+    return `You both enjoy ${labels[value] ?? value}`;
+  }
+
+  if (type === 'lookingFor') {
+    const labels: Record<string, string> = {
+      long_term: 'something long-term',
+      short_term: 'something casual',
+      fwb: 'keeping it casual',
+      figuring_out: 'figuring things out',
+      new_friends: 'new friends',
+    };
+    return `You're both looking for ${labels[value] ?? value}`;
+  }
+
+  if (type === 'prompt') {
+    return `You both mentioned ${value}`;
+  }
+
+  return 'You have something in common';
 }

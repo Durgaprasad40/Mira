@@ -104,7 +104,6 @@ export default function MainLayout() {
         options={{ presentation: "modal" }}
       />
       <Stack.Screen name="explore-category/[categoryId]" />
-      <Stack.Screen name="chat-room/[roomId]" />
       <Stack.Screen
         name="camera-composer"
         options={{ presentation: "fullScreenModal" }}

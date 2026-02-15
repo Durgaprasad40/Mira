@@ -20,11 +20,14 @@ interface MessageBubbleProps {
     isProtected?: boolean;
     protectedMedia?: {
       timer: number;
+      viewingMode?: 'tap' | 'hold';
       screenshotAllowed: boolean;
       viewOnce: boolean;
       watermark: boolean;
     };
     isExpired?: boolean;
+    timerEndsAt?: number;   // Wall-clock time when timer expires
+    expiredAt?: number;     // Wall-clock time when expired (for auto-removal)
     viewedAt?: number;
     systemSubtype?: string;
     mediaId?: string;
@@ -37,6 +40,9 @@ interface MessageBubbleProps {
   currentUserId?: string;
   onMediaPress?: (mediaUrl: string, type: 'image' | 'video') => void;
   onProtectedMediaPress?: (messageId: string) => void;
+  onProtectedMediaHoldStart?: (messageId: string) => void;
+  onProtectedMediaHoldEnd?: (messageId: string) => void;
+  onProtectedMediaExpire?: (messageId: string) => void;
   onVoiceDelete?: (messageId: string) => void;
 }
 
@@ -47,7 +53,18 @@ const EMOJI_ONLY_RE = /^[\p{Emoji_Presentation}\p{Extended_Pictographic}\u200d\u
 // Format: [SYSTEM:subtype]actual message content
 const SYSTEM_MARKER_RE = /^\[SYSTEM:(\w+)\]/;
 
-export function MessageBubble({ message, isOwn, otherUserName, currentUserId, onMediaPress, onProtectedMediaPress, onVoiceDelete }: MessageBubbleProps) {
+export function MessageBubble({
+  message,
+  isOwn,
+  otherUserName,
+  currentUserId,
+  onMediaPress,
+  onProtectedMediaPress,
+  onProtectedMediaHoldStart,
+  onProtectedMediaHoldEnd,
+  onProtectedMediaExpire,
+  onVoiceDelete,
+}: MessageBubbleProps) {
   const isEmojiOnly = message.type === 'text' && EMOJI_ONLY_RE.test(message.content.trim());
 
   const formatTime = (timestamp: number) => {
@@ -73,30 +90,46 @@ export function MessageBubble({ message, isOwn, otherUserName, currentUserId, on
 
   // Protected media messages (detected via mediaId or isProtected flag)
   if (message.isProtected || message.mediaId) {
+    // Auto-hide expired messages after 60s
+    if (message.isExpired && message.expiredAt) {
+      const timeSinceExpiry = Date.now() - message.expiredAt;
+      if (timeSinceExpiry > 60_000) {
+        return null; // Hide entirely
+      }
+    }
+
     return (
       <View style={[styles.container, isOwn && styles.ownContainer]}>
-        <View style={[styles.bubble, isOwn ? styles.ownBubble : styles.otherBubble]}>
+        <View style={[styles.bubble, isOwn ? styles.ownBubble : styles.otherBubble, styles.protectedBubble]}>
           <ProtectedMediaBubble
+            messageId={message.id}
             mediaId={message.mediaId}
             userId={currentUserId}
-            protectedMedia={message.protectedMedia}
+            protectedMedia={message.protectedMedia as any}
+            timerEndsAt={message.timerEndsAt}
             isExpired={!!message.isExpired}
+            expiredAt={message.expiredAt}
             isOwn={isOwn}
             onPress={() => onProtectedMediaPress?.(message.id)}
+            onHoldStart={() => onProtectedMediaHoldStart?.(message.id)}
+            onHoldEnd={() => onProtectedMediaHoldEnd?.(message.id)}
+            onExpire={() => onProtectedMediaExpire?.(message.id)}
           />
-          <View style={styles.imageFooter}>
-            <Text style={[styles.time, isOwn && styles.ownTime]}>
-              {formatTime(message.createdAt)}
-            </Text>
-            {isOwn && (
-              <Ionicons
-                name={message.readAt ? 'checkmark-done' : 'checkmark'}
-                size={14}
-                color={isOwn ? COLORS.white : COLORS.textLight}
-                style={styles.readIcon}
-              />
-            )}
-          </View>
+          {!message.isExpired && (
+            <View style={styles.imageFooter}>
+              <Text style={[styles.time, isOwn && styles.ownTime]}>
+                {formatTime(message.createdAt)}
+              </Text>
+              {isOwn && (
+                <Ionicons
+                  name={message.readAt ? 'checkmark-done' : 'checkmark'}
+                  size={14}
+                  color={isOwn ? COLORS.white : COLORS.textLight}
+                  style={styles.readIcon}
+                />
+              )}
+            </View>
+          )}
         </View>
       </View>
     );
@@ -223,6 +256,10 @@ const styles = StyleSheet.create({
   dareBubble: {
     backgroundColor: COLORS.secondary,
     maxWidth: '85%',
+  },
+  protectedBubble: {
+    padding: 6,
+    backgroundColor: 'transparent',
   },
   emojiBubble: {
     backgroundColor: 'transparent',

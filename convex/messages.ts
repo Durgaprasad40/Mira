@@ -12,10 +12,26 @@ export const sendMessage = mutation({
     content: v.string(),
     imageStorageId: v.optional(v.id('_storage')),
     templateId: v.optional(v.string()),
+    // BUGFIX #3: Client-provided idempotency key to prevent double-decrement on retry
+    clientMessageId: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const { conversationId, senderId, type, content, imageStorageId, templateId } = args;
+    const { conversationId, senderId, type, content, imageStorageId, templateId, clientMessageId } = args;
     const now = Date.now();
+
+    // BUGFIX #3: Check for duplicate message (idempotency for retries)
+    if (clientMessageId) {
+      const existing = await ctx.db
+        .query('messages')
+        .withIndex('by_conversation_clientMessageId', (q) =>
+          q.eq('conversationId', conversationId).eq('clientMessageId', clientMessageId)
+        )
+        .first();
+      if (existing) {
+        // Already processed this message, return success without decrementing again
+        return { success: true, messageId: existing._id, duplicate: true };
+      }
+    }
 
     const conversation = await ctx.db.get(conversationId);
     if (!conversation) throw new Error('Conversation not found');
@@ -75,9 +91,16 @@ export const sendMessage = mutation({
         }
       }
 
-      // Decrement message count
+      // BUGFIX #3: Atomic check-and-decrement to prevent race condition bypass
+      // Re-read sender to get fresh messagesRemaining value before decrementing
+      const freshSender = await ctx.db.get(senderId);
+      if (!freshSender || freshSender.messagesRemaining <= 0) {
+        throw new Error('No messages remaining this week');
+      }
+
+      // Decrement message count using fresh value
       await ctx.db.patch(senderId, {
-        messagesRemaining: sender.messagesRemaining - 1,
+        messagesRemaining: freshSender.messagesRemaining - 1,
       });
     }
 
@@ -85,6 +108,7 @@ export const sendMessage = mutation({
     const maskedContent = type === 'text' ? softMaskText(content) : content;
 
     // Create message (store masked text only)
+    // BUGFIX #3: Store clientMessageId for idempotency on retries
     const messageId = await ctx.db.insert('messages', {
       conversationId,
       senderId,
@@ -92,6 +116,7 @@ export const sendMessage = mutation({
       content: maskedContent,
       imageStorageId,
       templateId,
+      clientMessageId, // For retry idempotency
       createdAt: now,
     });
 
@@ -143,9 +168,11 @@ export const sendPreMatchMessage = mutation({
     toUserId: v.id('users'),
     content: v.string(),
     templateId: v.optional(v.string()),
+    // BUGFIX #3: Client-provided idempotency key to prevent double-decrement on retry
+    clientMessageId: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const { fromUserId, toUserId, content, templateId } = args;
+    const { fromUserId, toUserId, content, templateId, clientMessageId } = args;
     const now = Date.now();
 
     const fromUser = await ctx.db.get(fromUserId);
@@ -192,6 +219,20 @@ export const sendPreMatchMessage = mutation({
 
     if (!conversation) throw new Error('Failed to create conversation');
 
+    // BUGFIX #3: Check for duplicate message (idempotency for retries)
+    if (clientMessageId) {
+      const existing = await ctx.db
+        .query('messages')
+        .withIndex('by_conversation_clientMessageId', (q) =>
+          q.eq('conversationId', conversation._id).eq('clientMessageId', clientMessageId)
+        )
+        .first();
+      if (existing) {
+        // Already processed this message, return success without decrementing again
+        return { success: true, messageId: existing._id, conversationId: conversation._id, duplicate: true };
+      }
+    }
+
     // Send the message using the main send function logic
     // Check limits for men
     if (fromUser.gender === 'male') {
@@ -212,8 +253,16 @@ export const sendPreMatchMessage = mutation({
         throw new Error('No messages remaining this week');
       }
 
+      // BUGFIX #3: Atomic check-and-decrement to prevent race condition bypass
+      // Re-read user to get fresh messagesRemaining value before decrementing
+      const freshFromUser = await ctx.db.get(fromUserId);
+      if (!freshFromUser || freshFromUser.messagesRemaining <= 0) {
+        throw new Error('No messages remaining this week');
+      }
+
+      // Decrement message count using fresh value
       await ctx.db.patch(fromUserId, {
-        messagesRemaining: fromUser.messagesRemaining - 1,
+        messagesRemaining: freshFromUser.messagesRemaining - 1,
       });
     }
 
@@ -221,12 +270,14 @@ export const sendPreMatchMessage = mutation({
     const msgType = templateId ? 'template' : 'text';
     const maskedContent = msgType === 'text' ? softMaskText(content) : content;
 
+    // BUGFIX #3: Store clientMessageId for idempotency on retries
     const messageId = await ctx.db.insert('messages', {
       conversationId: conversation._id,
       senderId: fromUserId,
       type: msgType,
       content: maskedContent,
       templateId,
+      clientMessageId, // For retry idempotency
       createdAt: now,
     });
 
@@ -428,43 +479,75 @@ export const getConversations = query({
       })
       .slice(0, limit);
 
+    if (userConversations.length === 0) return [];
+
+    // PERF #7: Batch-fetch all related data in parallel instead of N+1 queries
+    const otherUserIds = userConversations
+      .map((c) => c.participants.find((id) => id !== userId))
+      .filter((id): id is Id<'users'> => id !== undefined);
+
+    // Parallel batch: users, photos, last messages, and unread counts
+    const [users, photos, lastMessages, unreadCounts] = await Promise.all([
+      // Batch fetch all other users
+      Promise.all(otherUserIds.map((id) => ctx.db.get(id))),
+      // Batch fetch primary photos for all other users
+      Promise.all(
+        otherUserIds.map((id) =>
+          ctx.db
+            .query('photos')
+            .withIndex('by_user', (q) => q.eq('userId', id))
+            .filter((q) => q.eq(q.field('isPrimary'), true))
+            .first()
+        )
+      ),
+      // Batch fetch last message for each conversation
+      Promise.all(
+        userConversations.map((c) =>
+          ctx.db
+            .query('messages')
+            .withIndex('by_conversation_created', (q) =>
+              q.eq('conversationId', c._id)
+            )
+            .order('desc')
+            .first()
+        )
+      ),
+      // Batch fetch unread messages for each conversation
+      Promise.all(
+        userConversations.map((c) =>
+          ctx.db
+            .query('messages')
+            .withIndex('by_conversation', (q) =>
+              q.eq('conversationId', c._id)
+            )
+            .filter((q) =>
+              q.and(
+                q.neq(q.field('senderId'), userId),
+                q.eq(q.field('readAt'), undefined)
+              )
+            )
+            .collect()
+        )
+      ),
+    ]);
+
+    // Build maps for O(1) lookup
+    const userMap = new Map(otherUserIds.map((id, i) => [id, users[i]]));
+    const photoMap = new Map(otherUserIds.map((id, i) => [id, photos[i]]));
+
+    // Build result
     const result = [];
-    for (const conversation of userConversations) {
+    for (let i = 0; i < userConversations.length; i++) {
+      const conversation = userConversations[i];
       const otherUserId = conversation.participants.find((id) => id !== userId);
       if (!otherUserId) continue;
 
-      const otherUser = await ctx.db.get(otherUserId);
+      const otherUser = userMap.get(otherUserId);
       if (!otherUser || !otherUser.isActive) continue;
 
-      // Get primary photo
-      const photo = await ctx.db
-        .query('photos')
-        .withIndex('by_user', (q) => q.eq('userId', otherUserId))
-        .filter((q) => q.eq(q.field('isPrimary'), true))
-        .first();
-
-      // Get last message
-      const lastMessage = await ctx.db
-        .query('messages')
-        .withIndex('by_conversation_created', (q) =>
-          q.eq('conversationId', conversation._id)
-        )
-        .order('desc')
-        .first();
-
-      // Count unread
-      const unreadMessages = await ctx.db
-        .query('messages')
-        .withIndex('by_conversation', (q) =>
-          q.eq('conversationId', conversation._id)
-        )
-        .filter((q) =>
-          q.and(
-            q.neq(q.field('senderId'), userId),
-            q.eq(q.field('readAt'), undefined)
-          )
-        )
-        .collect();
+      const photo = photoMap.get(otherUserId);
+      const lastMessage = lastMessages[i];
+      const unreadCount = unreadCounts[i]?.length || 0;
 
       result.push({
         id: conversation._id,
@@ -489,7 +572,7 @@ export const getConversations = query({
               systemSubtype: lastMessage.systemSubtype,
             }
           : null,
-        unreadCount: unreadMessages.length,
+        unreadCount,
       });
     }
 

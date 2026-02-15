@@ -174,6 +174,7 @@ export default defineSchema({
     isActive: v.boolean(),
     isBanned: v.boolean(),
     banReason: v.optional(v.string()),
+    deletedAt: v.optional(v.number()), // Soft delete timestamp (account deletion)
 
     // 3A1-4: Login rate limiting
     loginAttempts: v.optional(v.number()),
@@ -304,9 +305,13 @@ export default defineSchema({
     deliveredAt: v.optional(v.number()),
     readAt: v.optional(v.number()),
     createdAt: v.number(),
+    // BUGFIX #3: Client-provided idempotency key to prevent double-decrement on retry
+    clientMessageId: v.optional(v.string()),
   })
     .index('by_conversation', ['conversationId'])
-    .index('by_conversation_created', ['conversationId', 'createdAt']),
+    .index('by_conversation_created', ['conversationId', 'createdAt'])
+    // BUGFIX #3: Index for idempotency lookup by clientMessageId
+    .index('by_conversation_clientMessageId', ['conversationId', 'clientMessageId']),
 
   // Protected Media table (private storage references — never expose URLs)
   media: defineTable({
@@ -417,18 +422,29 @@ export default defineSchema({
     unlockExpiresAt: v.optional(v.number()),
     crossingLatitude: v.optional(v.number()),
     crossingLongitude: v.optional(v.number()),
+    // BUGFIX #28: Track last notification time to prevent duplicate notifications
+    lastNotifiedAt: v.optional(v.number()),
   })
     .index('by_user1', ['user1Id'])
     .index('by_user2', ['user2Id'])
     .index('by_users', ['user1Id', 'user2Id']),
 
   // Cross-Path History table (memory-based, privacy-first)
+  // Stores CROSSED PATHS with compatibility gate (at least one common element)
   crossPathHistory: defineTable({
     user1Id: v.id('users'),           // ordered pair (user1Id < user2Id)
     user2Id: v.id('users'),
     areaName: v.string(),             // e.g. "Near Banjara Hills"
+    // Approximate crossing location (rounded to ~500m grid for privacy)
+    crossedLatApprox: v.optional(v.number()),
+    crossedLngApprox: v.optional(v.number()),
+    // Reason tags for notification: "interest:coffee", "lookingFor:long_term"
+    reasonTags: v.optional(v.array(v.string())),
+    // Hidden by each user (manual hide/delete)
+    hiddenByUser1: v.optional(v.boolean()),
+    hiddenByUser2: v.optional(v.boolean()),
     createdAt: v.number(),
-    expiresAt: v.number(),            // auto-expire after 14 days
+    expiresAt: v.number(),            // auto-expire after 30 days
     lastNotifiedAt: v.optional(v.number()), // 24h cooldown tracking
   })
     .index('by_user1', ['user1Id'])
@@ -525,11 +541,15 @@ export default defineSchema({
     .index('by_identifier', ['identifier'])
     .index('by_identifier_code', ['identifier', 'code']),
 
-  // Sessions table
+  // Sessions table (auth sessions for identity-bound login)
   sessions: defineTable({
     userId: v.id('users'),
     token: v.string(),
     deviceInfo: v.optional(v.string()),
+    ipAddress: v.optional(v.string()),      // For security audit
+    userAgent: v.optional(v.string()),      // For device identification
+    lastActiveAt: v.optional(v.number()),   // Last activity timestamp
+    revokedAt: v.optional(v.number()),      // Per-session revocation (logout)
     expiresAt: v.number(),
     createdAt: v.number(),
   })
@@ -838,6 +858,8 @@ export default defineSchema({
     lastMessageAt: v.optional(v.number()),
     lastMessageText: v.optional(v.string()),
     memberCount: v.number(),
+    createdBy: v.optional(v.id('users')), // Room creator
+    isDemoRoom: v.optional(v.boolean()), // Demo mode flag
   })
     .index('by_slug', ['slug'])
     .index('by_last_message', ['lastMessageAt'])
@@ -848,6 +870,8 @@ export default defineSchema({
     roomId: v.id('chatRooms'),
     userId: v.id('users'),
     joinedAt: v.number(),
+    role: v.optional(v.union(v.literal('owner'), v.literal('mod'), v.literal('member'))), // Member role
+    lastMessageAt: v.optional(v.number()), // For rate limiting
   })
     .index('by_room', ['roomId'])
     .index('by_user', ['userId'])
@@ -861,9 +885,13 @@ export default defineSchema({
     text: v.optional(v.string()),
     imageUrl: v.optional(v.string()),
     createdAt: v.number(),
+    clientId: v.optional(v.string()), // For deduplication
+    status: v.optional(v.union(v.literal('pending'), v.literal('sent'), v.literal('failed'))), // Message status
+    deletedAt: v.optional(v.number()), // Soft delete
   })
     .index('by_room', ['roomId'])
-    .index('by_room_created', ['roomId', 'createdAt']),
+    .index('by_room_created', ['roomId', 'createdAt'])
+    .index('by_room_clientId', ['roomId', 'clientId']), // For idempotency check
 
   // Filter Presets table
   filterPresets: defineTable({

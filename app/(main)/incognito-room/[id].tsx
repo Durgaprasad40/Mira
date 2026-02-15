@@ -114,12 +114,12 @@ export default function RoomChatScreen() {
           {!isOwn && (
             <View style={[styles.msgAvatarCircle, { backgroundColor: room.color + '30' }]}>
               <Text style={[styles.msgAvatarText, { color: room.color }]}>
-                {item.senderName.charAt(0)}
+                {(item.senderName || '?').charAt(0)}
               </Text>
             </View>
           )}
           <View style={styles.msgContent}>
-            {!isOwn && <Text style={styles.msgSenderName}>{item.senderName}</Text>}
+            {!isOwn && <Text style={styles.msgSenderName}>{item.senderName || 'Unknown'}</Text>}
             <View style={[styles.msgBubble, isOwn ? styles.msgBubbleOwn : styles.msgBubbleOther]}>
               <Text style={[styles.msgText, isOwn && styles.msgTextOwn]}>{item.content}</Text>
             </View>
@@ -170,10 +170,17 @@ export default function RoomChatScreen() {
         data={messages}
         keyExtractor={(item) => item.id}
         renderItem={renderMessage}
+        ListEmptyComponent={
+          <View style={styles.emptyState}>
+            <Ionicons name="chatbubbles-outline" size={40} color={C.textLight} />
+            <Text style={styles.emptyStateText}>No messages yet</Text>
+            <Text style={styles.emptyStateHint}>Be the first to say something!</Text>
+          </View>
+        }
         contentContainerStyle={{
           ...styles.messageList,
           flexGrow: 1,
-          justifyContent: 'flex-end' as const,
+          justifyContent: messages.length > 0 ? 'flex-end' as const : 'center' as const,
           paddingBottom: composerHeight + keyboardHeight + 8,
         }}
         keyboardShouldPersistTaps="handled"
@@ -210,22 +217,20 @@ export default function RoomChatScreen() {
       </View>
 
       {/* Report/Block Modal */}
-      {reportTarget && (
-        <ReportModal
-          visible={reportVisible}
-          targetName={reportTarget.name}
-          onClose={() => { setReportVisible(false); setReportTarget(null); }}
-          onReport={handleReport}
-          onBlock={handleBlock}
-        />
-      )}
+      <ReportModal
+        visible={reportVisible}
+        targetName={reportTarget?.name || ''}
+        onClose={() => { setReportVisible(false); setReportTarget(null); }}
+        onReport={handleReport}
+        onBlock={handleBlock}
+      />
     </View>
   );
 }
 
 function formatTime(ts: number): string {
   const d = new Date(ts);
-  return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+  return d.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: true });
 }
 
 const C = INCOGNITO_COLORS;
@@ -254,6 +259,10 @@ const styles = StyleSheet.create({
   hintText: { fontSize: 11, color: C.textLight },
 
   messageList: { padding: 16, paddingBottom: 8 },
+
+  emptyState: { alignItems: 'center', padding: 24 },
+  emptyStateText: { fontSize: 16, fontWeight: '600', color: C.textLight, marginTop: 12 },
+  emptyStateHint: { fontSize: 13, color: C.textLight, marginTop: 4, opacity: 0.7 },
 
   msgRow: { flexDirection: 'row', marginBottom: 12, alignItems: 'flex-start' },
   msgRowOwn: { flexDirection: 'row-reverse' },
@@ -284,5 +293,5 @@ const styles = StyleSheet.create({
     width: 40, height: 40, borderRadius: 20, backgroundColor: C.primary,
     alignItems: 'center', justifyContent: 'center',
   },
-  sendButtonDisabled: { backgroundColor: C.surface },
+  sendButtonDisabled: { backgroundColor: C.surface, opacity: 0.6 },
 });

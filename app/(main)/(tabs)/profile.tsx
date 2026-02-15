@@ -40,6 +40,8 @@ export default function ProfileScreen() {
   // FIX C: Subscribe to demoStore photos reactively (so changes trigger re-render)
   const demoProfiles = useDemoStore((s) => s.demoProfiles);
   const currentDemoUserId = useDemoStore((s) => s.currentDemoUserId);
+  // FIX D: Subscribe to hydration status to re-render when hydration completes
+  const demoHydrated = useDemoStore((s) => s._hasHydrated);
 
   const convexUser = useQuery(
     api.users.getCurrentUser,
@@ -91,22 +93,28 @@ export default function ProfileScreen() {
       .filter((p: any) => p && p.url);
   };
 
-  // FIX C: Build currentUser with reactive photo data
-  const demoUser = isDemoMode ? getDemoCurrentUser() : null;
+  // BUGFIX #26: Build currentUser reactively from subscribed demoProfiles
+  // Use demoProfiles[currentDemoUserId] directly instead of getDemoCurrentUser() for reactivity
+  const demoUserProfile = isDemoMode && currentDemoUserId && demoHydrated
+    ? demoProfiles[currentDemoUserId]
+    : null;
+  const demoUserBase = isDemoMode ? getDemoCurrentUser() : null;
+
   const currentUser = isDemoMode
-    ? demoUser
+    ? demoUserProfile || demoUserBase
       ? {
-          name: demoUser.name,
-          dateOfBirth: demoUser.dateOfBirth,
-          bio: demoUser.bio,
-          gender: demoUser.gender,
-          isVerified: demoUser.isVerified,
-          photos: extractPhotos(demoUser),
+          name: demoUserProfile?.name ?? demoUserBase?.name ?? '',
+          dateOfBirth: demoUserProfile?.dateOfBirth ?? demoUserBase?.dateOfBirth ?? '',
+          bio: demoUserProfile?.bio ?? demoUserBase?.bio ?? '',
+          gender: demoUserProfile?.gender ?? demoUserBase?.gender ?? '',
+          isVerified: demoUserBase?.isVerified ?? false,
+          // BUGFIX #26: Use reactive demoUserProfile.photos first, then fall back
+          photos: extractPhotos(demoUserProfile ?? demoUserBase),
           // Use existing blur fields from demoUser (if any exist)
-          blurMyPhoto: (demoUser as any).blurMyPhoto,
-          blurPhoto: (demoUser as any).blurPhoto,
-          blurEnabled: (demoUser as any).blurEnabled,
-          photoVisibilityBlur: (demoUser as any).photoVisibilityBlur,
+          blurMyPhoto: (demoUserBase as any)?.blurMyPhoto,
+          blurPhoto: (demoUserBase as any)?.blurPhoto,
+          blurEnabled: (demoUserBase as any)?.blurEnabled,
+          photoVisibilityBlur: (demoUserBase as any)?.photoVisibilityBlur,
         }
       : null
     : convexUser
@@ -139,8 +147,8 @@ export default function ProfileScreen() {
       count,
       main: !!mainPhotoUrl,
       refreshKey,
+      hydrated: demoHydrated,
     });
-    console.log('[ProfileTab] blurStatus', { blurEnabled, previewBlur, isDemoMode });
   }
 
   // 3A1-2: Logout clears client + server + onboarding

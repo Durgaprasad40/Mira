@@ -121,10 +121,22 @@ export const updateProfilePrompts = mutation({
     const user = await ctx.db.get(args.userId);
     if (!user) throw new Error("User not found");
 
+    // BUGFIX #62: Reject empty prompts after trimming whitespace
+    for (const prompt of args.prompts) {
+      const trimmedQuestion = prompt.question.trim();
+      const trimmedAnswer = prompt.answer.trim();
+      if (trimmedQuestion.length === 0) {
+        throw new Error("Prompt question cannot be empty");
+      }
+      if (trimmedAnswer.length === 0) {
+        throw new Error("Prompt answer cannot be empty");
+      }
+    }
+
     // Max 3 prompts, answer max 200 chars
     const cleaned = args.prompts.slice(0, 3).map((p) => ({
-      question: p.question.slice(0, 100),
-      answer: p.answer.slice(0, 200),
+      question: p.question.trim().slice(0, 100),
+      answer: p.answer.trim().slice(0, 200),
     }));
 
     await ctx.db.patch(args.userId, { profilePrompts: cleaned });
@@ -235,11 +247,17 @@ export const updateProfile = mutation({
     ),
   },
   handler: async (ctx, args) => {
-    const { userId, ...updates } = args;
+    const { userId, bio, ...otherUpdates } = args;
+
+    // BUGFIX #61: Bio length validation (max 300 chars)
+    if (bio !== undefined && bio.length > 300) {
+      throw new Error("Bio must be 300 characters or less");
+    }
 
     // Filter out undefined values
     const cleanUpdates: Record<string, unknown> = {};
-    for (const [key, value] of Object.entries(updates)) {
+    if (bio !== undefined) cleanUpdates.bio = bio;
+    for (const [key, value] of Object.entries(otherUpdates)) {
       if (value !== undefined) {
         cleanUpdates[key] = value;
       }
@@ -270,10 +288,42 @@ export const updatePreferences = mutation({
     maxDistance: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
-    const { userId, ...updates } = args;
+    const { userId, minAge, maxAge, maxDistance, ...otherUpdates } = args;
+
+    // BUGFIX #37: Age bounds validation
+    if (minAge !== undefined) {
+      if (!Number.isFinite(minAge) || minAge < 18 || minAge > 99) {
+        throw new Error("minAge must be between 18 and 99");
+      }
+    }
+    if (maxAge !== undefined) {
+      if (!Number.isFinite(maxAge) || maxAge < 18 || maxAge > 99) {
+        throw new Error("maxAge must be between 18 and 99");
+      }
+    }
+    // Validate minAge <= maxAge (considering existing values if only one is updated)
+    if (minAge !== undefined || maxAge !== undefined) {
+      const user = await ctx.db.get(userId);
+      if (!user) throw new Error("User not found");
+      const effectiveMin = minAge ?? user.minAge;
+      const effectiveMax = maxAge ?? user.maxAge;
+      if (effectiveMin > effectiveMax) {
+        throw new Error("minAge cannot be greater than maxAge");
+      }
+    }
+
+    // BUGFIX #38: Distance bounds validation
+    if (maxDistance !== undefined) {
+      if (!Number.isFinite(maxDistance) || maxDistance < 1 || maxDistance > 500) {
+        throw new Error("maxDistance must be between 1 and 500 km");
+      }
+    }
 
     const cleanUpdates: Record<string, unknown> = {};
-    for (const [key, value] of Object.entries(updates)) {
+    if (minAge !== undefined) cleanUpdates.minAge = minAge;
+    if (maxAge !== undefined) cleanUpdates.maxAge = maxAge;
+    if (maxDistance !== undefined) cleanUpdates.maxDistance = maxDistance;
+    for (const [key, value] of Object.entries(otherUpdates)) {
       if (value !== undefined) {
         cleanUpdates[key] = value;
       }
@@ -569,10 +619,12 @@ export const reactivateAccount = mutation({
   },
 });
 
-// Helper function to calculate age
+// BUGFIX #21: Safe date parsing with NaN guard
 function calculateAge(dateOfBirth: string): number {
+  if (!dateOfBirth) return 0;
   const today = new Date();
   const birthDate = new Date(dateOfBirth);
+  if (isNaN(birthDate.getTime())) return 0;
   let age = today.getFullYear() - birthDate.getFullYear();
   const m = today.getMonth() - birthDate.getMonth();
   if (m < 0 || (m === 0 && today.getDate() < birthDate.getDate())) {

@@ -14,9 +14,12 @@ function isUserPaused(user: { isDiscoveryPaused?: boolean; discoveryPausedUntil?
   );
 }
 
+// BUGFIX #21: Safe date parsing with NaN guard
 function calculateAge(dateOfBirth: string): number {
+  if (!dateOfBirth) return 0;
   const today = new Date();
   const birthDate = new Date(dateOfBirth);
+  if (isNaN(birthDate.getTime())) return 0;
   let age = today.getFullYear() - birthDate.getFullYear();
   const m = today.getMonth() - birthDate.getMonth();
   if (m < 0 || (m === 0 && today.getDate() < birthDate.getDate())) {
@@ -249,8 +252,80 @@ export const getDiscoverProfiles = query({
 
     if (isUserPaused(currentUser)) return [];
 
-    const allUsers = await ctx.db.query('users').collect();
-    const candidates = [];
+    // PERF #8: Pre-fetch all swipes, matches, blocks, and incoming likes upfront
+    // This converts O(6*N) queries into O(6) queries
+    const now = Date.now();
+    const passExpiry = now - 7 * 24 * 60 * 60 * 1000;
+
+    const [
+      mySwipes,
+      matchesAsUser1,
+      matchesAsUser2,
+      blocksICreated,
+      blocksAgainstMe,
+      likesToMe,
+    ] = await Promise.all([
+      // All my swipes (likes/passes)
+      ctx.db
+        .query('likes')
+        .withIndex('by_from_user', (q) => q.eq('fromUserId', userId))
+        .collect(),
+      // Matches where I'm user1
+      ctx.db
+        .query('matches')
+        .withIndex('by_user1', (q) => q.eq('user1Id', userId))
+        .filter((q) => q.eq(q.field('isActive'), true))
+        .collect(),
+      // Matches where I'm user2
+      ctx.db
+        .query('matches')
+        .withIndex('by_user2', (q) => q.eq('user2Id', userId))
+        .filter((q) => q.eq(q.field('isActive'), true))
+        .collect(),
+      // Blocks I created
+      ctx.db
+        .query('blocks')
+        .withIndex('by_blocker', (q) => q.eq('blockerId', userId))
+        .collect(),
+      // Blocks against me
+      ctx.db
+        .query('blocks')
+        .withIndex('by_blocked', (q) => q.eq('blockedUserId', userId))
+        .collect(),
+      // Likes to me (for theyLikedMe feature)
+      ctx.db
+        .query('likes')
+        .withIndex('by_to_user', (q) => q.eq('toUserId', userId))
+        .filter((q) => q.eq(q.field('action'), 'like'))
+        .collect(),
+    ]);
+
+    // Build Sets for O(1) lookups
+    const swipedUserIds = new Set<string>();
+    for (const swipe of mySwipes) {
+      // Skip expired passes (can re-show after 7 days)
+      if (swipe.action === 'pass' && swipe.createdAt < passExpiry) continue;
+      swipedUserIds.add(swipe.toUserId as string);
+    }
+
+    const matchedUserIds = new Set<string>();
+    for (const m of matchesAsUser1) matchedUserIds.add(m.user2Id as string);
+    for (const m of matchesAsUser2) matchedUserIds.add(m.user1Id as string);
+
+    const blockedUserIds = new Set<string>();
+    for (const b of blocksICreated) blockedUserIds.add(b.blockedUserId as string);
+    for (const b of blocksAgainstMe) blockedUserIds.add(b.blockerId as string);
+
+    const usersWhoLikedMe = new Set<string>();
+    for (const like of likesToMe) usersWhoLikedMe.add(like.fromUserId as string);
+
+    // PERF #8: Use take() with buffer to avoid loading entire user table
+    // Fetch more than needed since many will be filtered out
+    const fetchLimit = (offset + limit) * 10; // 10x buffer for filtering
+    const allUsers = await ctx.db.query('users').take(fetchLimit);
+
+    // First pass: filter candidates without photo queries
+    const filteredCandidates: { user: typeof allUsers[number]; distance?: number }[] = [];
 
     for (const user of allUsers) {
       if (user._id === userId) continue;
@@ -258,7 +333,6 @@ export const getDiscoverProfiles = query({
       if (isUserPaused(user)) continue;
 
       // 8A: Filter out unverified/rejected users from Discover
-      // Only verified users can appear in the swipe deck
       const verificationStatus = user.verificationStatus || 'unverified';
       if (verificationStatus !== 'verified') continue;
 
@@ -288,48 +362,40 @@ export const getDiscoverProfiles = query({
         if (!isDistanceAllowed(distance, currentUser.maxDistance)) continue;
       }
 
-      // Already swiped (passes expire after 7 days)
-      const existingLike = await ctx.db
-        .query('likes')
-        .withIndex('by_from_to', (q) => q.eq('fromUserId', userId).eq('toUserId', user._id))
-        .first();
-
-      if (existingLike) {
-        if (existingLike.action !== 'pass') continue;
-        if (existingLike.createdAt > Date.now() - 7 * 24 * 60 * 60 * 1000) continue;
-      }
-
-      // Blocked (both directions)
-      const blocked = await ctx.db
-        .query('blocks')
-        .withIndex('by_blocker_blocked', (q) => q.eq('blockerId', userId).eq('blockedUserId', user._id))
-        .first();
-      if (blocked) continue;
-
-      const reverseBlocked = await ctx.db
-        .query('blocks')
-        .withIndex('by_blocker_blocked', (q) => q.eq('blockerId', user._id).eq('blockedUserId', userId))
-        .first();
-      if (reverseBlocked) continue;
-
-      // Photos
-      const photos = await ctx.db
-        .query('photos')
-        .withIndex('by_user_order', (q) => q.eq('userId', user._id))
-        .collect();
-
-      const nonNsfwPhotos = photos.filter((p) => !p.isNsfw);
-      if (nonNsfwPhotos.length === 0) continue; // at least 1 photo required
+      // PERF #8: O(1) Set lookups instead of database queries
+      if (swipedUserIds.has(user._id as string)) continue;
+      if (matchedUserIds.has(user._id as string)) continue;
+      if (blockedUserIds.has(user._id as string)) continue;
 
       // Enforcement
       if (user.verificationEnforcementLevel === 'security_only') continue;
       if (user.verificationEnforcementLevel === 'reduced_reach' && Math.random() > 0.5) continue;
 
-      // They liked me?
-      const theyLikedMe = await ctx.db
-        .query('likes')
-        .withIndex('by_from_to', (q) => q.eq('fromUserId', user._id).eq('toUserId', userId))
-        .first();
+      filteredCandidates.push({ user, distance });
+    }
+
+    // PERF #8: Only fetch photos for candidates that passed all filters
+    // Batch fetch photos in parallel
+    const photoResults = await Promise.all(
+      filteredCandidates.map(({ user }) =>
+        ctx.db
+          .query('photos')
+          .withIndex('by_user_order', (q) => q.eq('userId', user._id))
+          .collect()
+      )
+    );
+
+    // Build final candidates with photos
+    const candidates = [];
+    for (let i = 0; i < filteredCandidates.length; i++) {
+      const { user, distance } = filteredCandidates[i];
+      const photos = photoResults[i];
+
+      const nonNsfwPhotos = photos.filter((p) => !p.isNsfw);
+      if (nonNsfwPhotos.length === 0) continue; // at least 1 photo required
+
+      const userAge = calculateAge(user.dateOfBirth);
+      const theyLikedMe = usersWhoLikedMe.has(user._id as string);
 
       candidates.push({
         id: user._id,
@@ -359,7 +425,7 @@ export const getDiscoverProfiles = query({
         photos: photos.sort((a, b) => a.order - b.order),
         photoBlurred: user.photoBlurred === true,
         isBoosted: !!(user.boostedUntil && user.boostedUntil > Date.now()),
-        theyLikedMe: !!theyLikedMe,
+        theyLikedMe,
         photoCount: nonNsfwPhotos.length,
       });
     }
@@ -464,6 +530,29 @@ export const getExploreProfiles = query({
       if (activities && activities.length > 0) {
         if (!activities.some((a) => user.activities.includes(a))) continue;
       }
+
+      // BUGFIX #17: Exclude users I already swiped on (likes/superlikes, passes within 7 days)
+      const existingLike = await ctx.db
+        .query('likes')
+        .withIndex('by_from_to', (q) => q.eq('fromUserId', userId).eq('toUserId', user._id))
+        .first();
+
+      if (existingLike) {
+        if (existingLike.action !== 'pass') continue;
+        if (existingLike.createdAt > Date.now() - 7 * 24 * 60 * 60 * 1000) continue;
+      }
+
+      // BUGFIX #17: Exclude users I'm already matched with
+      const orderedUser1 = userId < user._id ? userId : user._id;
+      const orderedUser2 = userId < user._id ? user._id : userId;
+      const existingMatch = await ctx.db
+        .query('matches')
+        .withIndex('by_users', (q) =>
+          q.eq('user1Id', orderedUser1).eq('user2Id', orderedUser2)
+        )
+        .first();
+
+      if (existingMatch && existingMatch.isActive) continue;
 
       const blocked = await ctx.db
         .query('blocks')

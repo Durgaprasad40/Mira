@@ -10,7 +10,8 @@ export type AdminAction =
   | "verify_reject"
   | "set_admin"
   | "deactivate"
-  | "reactivate";
+  | "reactivate"
+  | "soft_delete";
 
 /**
  * Parameters for logging an admin action.
@@ -98,6 +99,7 @@ const ALLOWED_ACTIONS: readonly string[] = [
   "set_admin",
   "deactivate",
   "reactivate",
+  "soft_delete",
 ] as const;
 
 /**

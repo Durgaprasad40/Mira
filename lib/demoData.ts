@@ -68,6 +68,22 @@ export const DEMO_USER = {
   photos: [
     { url: 'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=400' }
   ],
+  // Profile prompts (Q/A pairs)
+  profilePrompts: [] as { question: string; answer: string }[],
+  // Basic info
+  height: null as number | null,
+  weight: null as number | null,
+  education: null as string | null,
+  religion: null as string | null,
+  jobTitle: undefined as string | undefined,
+  company: undefined as string | undefined,
+  school: undefined as string | undefined,
+  // Lifestyle
+  smoking: null as string | null,
+  drinking: null as string | null,
+  kids: null as string | null,
+  exercise: null as string | null,
+  pets: [] as string[],
 };
 
 /**
@@ -80,6 +96,12 @@ export function getDemoCurrentUser(): typeof DEMO_USER {
   // eslint-disable-next-line @typescript-eslint/no-var-requires
   const { useDemoStore } = require('@/stores/demoStore');
   const state = useDemoStore.getState();
+
+  // CRITICAL: If not hydrated yet, return default user to prevent stale reads
+  if (!state._hasHydrated) {
+    return DEMO_USER;
+  }
+
   const userId = state.currentDemoUserId;
   const stored = userId ? state.demoProfiles[userId] : null;
   if (!stored) return DEMO_USER;
@@ -87,6 +109,7 @@ export function getDemoCurrentUser(): typeof DEMO_USER {
   // 8A: Auto-verify demo user if they have completed profile with photos
   const hasPhotos = stored.photos?.length > 0;
 
+  // Return ALL stored fields, falling back to DEMO_USER defaults where needed
   return {
     ...DEMO_USER,
     _id: userId ?? DEMO_USER._id,
@@ -102,13 +125,29 @@ export function getDemoCurrentUser(): typeof DEMO_USER {
     minAge: stored.minAge ?? DEMO_USER.minAge,
     maxAge: stored.maxAge ?? DEMO_USER.maxAge,
     maxDistance: stored.maxDistance ?? DEMO_USER.maxDistance,
+    // Profile prompts (Q/A pairs)
+    profilePrompts: stored.profilePrompts ?? [],
+    // Basic info
+    height: stored.height ?? null,
+    weight: stored.weight ?? null,
+    education: stored.education ?? null,
+    religion: stored.religion ?? null,
+    jobTitle: stored.jobTitle ?? undefined,
+    company: stored.company ?? undefined,
+    school: stored.school ?? undefined,
+    // Lifestyle
+    smoking: stored.smoking ?? null,
+    drinking: stored.drinking ?? null,
+    kids: stored.kids ?? null,
+    exercise: stored.exercise ?? null,
+    pets: stored.pets ?? [],
     isVerified: false, // demo user is not phone-verified
     // 8A: Demo user is auto-verified if they have photos
     verificationStatus: (hasPhotos ? 'verified' : 'unverified') as typeof DEMO_USER.verificationStatus,
     // 8B: Demo user email is auto-verified after profile creation
     emailVerified: hasPhotos,
     // 8C: Demo user consent auto-accepted after profile creation
-    consentAcceptedAt: hasPhotos ? Date.now() : undefined,
+    consentAcceptedAt: stored.consentAcceptedAt ?? (hasPhotos ? Date.now() : undefined),
   };
 }
 
@@ -1576,6 +1615,166 @@ export const DEMO_LIKES: import('@/stores/demoStore').DemoLike[] = [
   },
 ];
 
+/**
+ * DEMO_CROSSED_PATHS_TEMPLATES — Profile data for crossed paths (without hardcoded coordinates).
+ * Coordinates are generated dynamically based on user's live GPS location.
+ * INVARIANT: Every crossed_paths notification MUST have a corresponding entry.
+ *
+ * Each crossed path now includes:
+ * - reasonTags: Compatibility match reasons (interest, lookingFor, prompt)
+ * - areaName: Where the crossing happened (persists even if user travels)
+ * - expiresAt: 30-day expiration timestamp
+ */
+const DEMO_CROSSED_PATHS_TEMPLATES = [
+  {
+    id: 'cp_1',
+    otherUserId: 'demo_profile_12',
+    timeOffsetMs: 5 * 60 * 1000, // 5 minutes ago
+    seen: false,
+    name: 'Isha',
+    age: 26,
+    photoUrl: 'https://images.unsplash.com/photo-1485893086445-ed75865251e0?w=400',
+    accuracyMeters: 50,
+    areaName: 'Near Bandra West',
+    reasonTags: ['interest:coffee', 'lookingFor:long_term'],
+    reasonText: 'You both enjoy coffee',
+  },
+  {
+    id: 'cp_2',
+    otherUserId: 'demo_profile_18',
+    timeOffsetMs: 15 * 60 * 1000, // 15 minutes ago
+    seen: false,
+    name: 'Kriti',
+    age: 24,
+    photoUrl: 'https://images.unsplash.com/photo-1579783902614-a3fb3927b6a5?w=400',
+    accuracyMeters: 75,
+    areaName: 'Near Marine Drive',
+    reasonTags: ['interest:travel', 'prompt:travel'],
+    reasonText: 'You both enjoy traveling',
+  },
+  {
+    id: 'cp_3',
+    otherUserId: 'demo_profile_9',
+    timeOffsetMs: 45 * 60 * 1000, // 45 minutes ago
+    seen: true,
+    name: 'Nisha',
+    age: 29,
+    photoUrl: 'https://images.unsplash.com/photo-1491349174775-aaafddd81942?w=400',
+    accuracyMeters: 100,
+    areaName: 'Near Juhu Beach',
+    reasonTags: ['lookingFor:long_term'],
+    reasonText: "You're both looking for something long-term",
+  },
+];
+
+// 30-day expiration constant for crossed paths
+const CROSSED_PATHS_EXPIRY_MS = 30 * 24 * 60 * 60 * 1000;
+
+/**
+ * Offset a lat/lng by a distance (meters) and bearing (radians).
+ * Used to place crossed paths around user's current location.
+ */
+function offsetCoordsByBearing(
+  lat: number,
+  lng: number,
+  distanceMeters: number,
+  bearingRad: number,
+): { latitude: number; longitude: number } {
+  const R = 6371000; // Earth radius in meters
+  const toRad = (v: number) => (v * Math.PI) / 180;
+  const latRad = toRad(lat);
+  const lngRad = toRad(lng);
+  const d = distanceMeters / R;
+
+  const newLat = Math.asin(
+    Math.sin(latRad) * Math.cos(d) +
+    Math.cos(latRad) * Math.sin(d) * Math.cos(bearingRad),
+  );
+  const newLng = lngRad + Math.atan2(
+    Math.sin(bearingRad) * Math.sin(d) * Math.cos(latRad),
+    Math.cos(d) - Math.sin(latRad) * Math.sin(newLat),
+  );
+
+  return {
+    latitude: newLat * (180 / Math.PI),
+    longitude: newLng * (180 / Math.PI),
+  };
+}
+
+/**
+ * Generate demo crossed paths based on user's live GPS location.
+ * Places 3 crossed paths within 100m-800m radius of the given coordinates.
+ *
+ * @param userLat - User's current latitude
+ * @param userLng - User's current longitude
+ * @returns Array of DemoCrossedPath entries with coordinates relative to user's location
+ */
+export function generateDemoCrossedPaths(
+  userLat: number,
+  userLng: number,
+): import('@/stores/demoStore').DemoCrossedPath[] {
+  // Validate coordinates
+  if (
+    typeof userLat !== 'number' ||
+    typeof userLng !== 'number' ||
+    Number.isNaN(userLat) ||
+    Number.isNaN(userLng)
+  ) {
+    // Return empty array if coordinates are invalid — caller should handle this
+    return [];
+  }
+
+  const now = Date.now();
+
+  return DEMO_CROSSED_PATHS_TEMPLATES.map((template, index) => {
+    // Generate distance within 100m-800m (spread evenly across templates)
+    const minDistance = 100;
+    const maxDistance = 800;
+    const distanceRange = maxDistance - minDistance;
+    const distance = minDistance + ((index + 1) / DEMO_CROSSED_PATHS_TEMPLATES.length) * distanceRange;
+
+    // Generate bearing (angle) - spread evenly around the user, with some randomness
+    // Use template index for deterministic but varied angles
+    const baseBearing = (index * 120 + 30) * (Math.PI / 180); // 30°, 150°, 270° converted to radians
+
+    // Calculate offset coordinates
+    const coords = offsetCoordsByBearing(userLat, userLng, distance, baseBearing);
+
+    // Crossing timestamp (relative to now, using timeOffsetMs)
+    const crossedAt = now - template.timeOffsetMs;
+
+    return {
+      id: template.id,
+      otherUserId: template.otherUserId,
+      crossedAt,
+      seen: template.seen,
+      hidden: false,
+      distance: Math.round(distance),
+      name: template.name,
+      age: template.age,
+      photoUrl: template.photoUrl,
+      // CROSSING location (not current location — persists even if user travels)
+      latitude: coords.latitude,
+      longitude: coords.longitude,
+      accuracyMeters: template.accuracyMeters,
+      // New fields for compatibility gate and persistence
+      areaName: template.areaName,
+      reasonTags: template.reasonTags,
+      reasonText: template.reasonText,
+      // 30-day expiration from crossing time
+      expiresAt: crossedAt + CROSSED_PATHS_EXPIRY_MS,
+    };
+  });
+}
+
+/**
+ * DEPRECATED: Legacy export for backwards compatibility during migration.
+ * New code should use generateDemoCrossedPaths(userLat, userLng) instead.
+ * This fallback uses a safe default location (0, 0) which will be off-screen
+ * and should trigger re-seeding with live location.
+ */
+export const DEMO_CROSSED_PATHS: import('@/stores/demoStore').DemoCrossedPath[] = [];
+
 // === Incognito Demo Data ===
 
 export const DEMO_INCOGNITO_PROFILES: import('@/types').IncognitoProfile[] = [
@@ -2828,6 +3027,10 @@ export interface DemoUserProfile {
   isActive: boolean;
   coins: number;
   messagesSent: number;
+  /** User age (for chat room identity) */
+  age?: number;
+  /** User gender (for chat room identity) */
+  gender?: string;
 }
 
 export const DEMO_CURRENT_USER: DemoUserProfile = {
@@ -2837,6 +3040,8 @@ export const DEMO_CURRENT_USER: DemoUserProfile = {
   isActive: true,
   coins: 47,
   messagesSent: 47,
+  age: 25,
+  gender: 'Male',
 };
 
 // ──── Chat Room: Online Users ────

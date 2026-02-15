@@ -16,22 +16,32 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useBottomTabBarHeight } from '@react-navigation/bottom-tabs';
 import MapView, { Marker, Region } from 'react-native-maps';
-import { useRouter, useFocusEffect } from 'expo-router';
+import ClusteredMapView from 'react-native-map-clustering';
+import { getDemoMarkerImage } from '@/components/map/demoMarkerIndex';
+import { getDemoClusterImage } from '@/components/map/demoClusterIndex';
+
+// Native pin image — rendered via Marker `image` prop to avoid Android snapshot OOM
+// Using image prop instead of React children eliminates bitmap snapshotting
+const PIN_PINK_IMAGE = require('../../../assets/map/pin_pink.png');
+import { useRouter, useFocusEffect, useLocalSearchParams } from 'expo-router';
 import { LoadingGuard } from '@/components/safety';
 import { Ionicons } from '@expo/vector-icons';
 import { useQuery, useMutation } from 'convex/react';
-import { useLocation, hasCachedLocation } from '@/hooks/useLocation';
+import { useLocationStore, useBestLocation } from '@/stores/locationStore';
 import { COLORS } from '@/lib/constants';
-import { DEMO_PROFILES, getDemoCurrentUser } from '@/lib/demoData';
+import { DEMO_PROFILES } from '@/lib/demoData';
 import { useAuthStore } from '@/stores/authStore';
 import { isDemoMode } from '@/hooks/useConvex';
 import { useDemoStore } from '@/stores/demoStore';
+import { useDemoDmStore } from '@/stores/demoDmStore';
 import { useDemoNotifStore } from '@/hooks/useNotifications';
 import { api } from '@/convex/_generated/api';
 import { useScreenSafety } from '@/hooks/useScreenSafety';
 import { rankNearbyProfiles } from '@/lib/rankProfiles';
 import { isWithinAllowedDistance } from '@/lib/distanceRules';
 import { logDebugEvent } from '@/lib/debugEventLogger';
+import { log } from '@/utils/logger';
+import { markTiming } from '@/utils/startupTiming';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -126,6 +136,19 @@ function computeFreshness(timestamp: number): 'solid' | 'faded' | 'hidden' {
   return 'hidden';
 }
 
+/**
+ * BUGFIX #12: Validate coordinates before passing to map.
+ * Checks for NaN, Infinity, and out-of-range values.
+ * Invalid coords cause react-native-maps to crash on Android.
+ */
+function isValidMapCoordinate(lat: number | null | undefined, lng: number | null | undefined): boolean {
+  if (lat == null || lng == null) return false;
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return false;
+  if (lat < -90 || lat > 90) return false;
+  if (lng < -180 || lng > 180) return false;
+  return true;
+}
+
 // ---------------------------------------------------------------------------
 // Anti-Zoom Shifting: Zoom buckets + client-side fuzz
 // ---------------------------------------------------------------------------
@@ -171,6 +194,15 @@ function applyClientFuzz(
 // Constants
 // ---------------------------------------------------------------------------
 
+// DEBUG FLAG: Set to true to disable MapView for crash isolation testing
+// When true, the map will not render, showing a placeholder instead
+// To re-enable the map, set this to false
+const DEBUG_DISABLE_MAP = false;
+
+// OOM PREVENTION: Hard limit on rendered markers to prevent Android native memory exhaustion
+// Markers with React children cause bitmap snapshotting; even with image prop, limit as safety net
+const MAX_NEARBY_MARKERS = 30;
+
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 const BOTTOM_SHEET_HEIGHT = 200;
 const FIXED_RADIUS_METERS = 1000; // 1km
@@ -201,65 +233,178 @@ const TOAST_DURATION_MS = 2000; // Duration to show cooldown toast
 export default function NearbyScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
+  // Check if we arrived from tapping a notification — if so, skip creating new notification
+  // Also check for focus=crossed_paths to center map on specific crossed path marker
+  const { source, dedupeKey, focus, profileId: focusProfileId } = useLocalSearchParams<{
+    source?: string;
+    dedupeKey?: string;
+    focus?: string;
+    profileId?: string;
+  }>();
+  const arrivedFromNotification = source === 'notification';
   const tabBarHeight = useBottomTabBarHeight();
   const { width: screenWidth, height: screenHeight } = Dimensions.get('window');
-  const {
-    latitude,
-    longitude,
-    getCurrentLocation,
-    forceGetCurrentLocation,
-    requestPermission,
-    isLoading: locationLoading,
-    error: locationError,
-  } = useLocation();
+
+  // Centralized location store — prewarmed on app boot for instant display
+  const bestLocation = useBestLocation();
+  const permissionStatus = useLocationStore((s) => s.permissionStatus);
+  const refreshLocation = useLocationStore((s) => s.refreshLocation);
+  const startLocationTracking = useLocationStore((s) => s.startLocationTracking);
+  const locationError = useLocationStore((s) => s.error);
+
+  // Extract coordinates from best available location
+  const latitude = bestLocation?.latitude ?? null;
+  const longitude = bestLocation?.longitude ?? null;
+
+  // Note: Heading is handled by native showsUserLocation={true} on the map
+  // which provides Google Maps style blue dot with direction cone automatically
+
   const userId = useAuthStore((s) => s.userId);
   const mapRef = useRef<MapView>(null);
   const { safeTimeout } = useScreenSafety();
 
+  // BUGFIX #12: Track if we've warned about invalid coords (avoid log spam)
+  const hasWarnedInvalidCoordsRef = useRef(false);
+
   // Demo store — read mutable profiles for nearby display
   const demoStoreProfiles = useDemoStore((s) => s.profiles);
+  const demoCrossedPaths = useDemoStore((s) => s.crossedPaths);
+  const getVisibleCrossedPaths = useDemoStore((s) => s.getVisibleCrossedPaths);
   const demoSeed = useDemoStore((s) => s.seed);
   const blockedUserIds = useDemoStore((s) => s.blockedUserIds);
-  useEffect(() => { if (isDemoMode) demoSeed(); }, [demoSeed]);
+  const demoMatches = useDemoStore((s) => s.matches);
+  const markCrossedPathSeen = useDemoStore((s) => s.markCrossedPathSeen);
+  const hideCrossedPath = useDemoStore((s) => s.hideCrossedPath);
+  const seedCrossedPathsWithLocation = useDemoStore((s) => s.seedCrossedPathsWithLocation);
+  const crossedPathsSeeded = useDemoStore((s) => s.crossedPathsSeeded);
+  // BUGFIX #34: Subscribe to hydration status to prevent seed before hydration
+  const demoHasHydrated = useDemoStore((s) => s._hasHydrated);
 
-  // User location — only use demo coords in demo mode, otherwise require real location
-  const demoUser = getDemoCurrentUser();
-  const userLat = isDemoMode ? (latitude ?? demoUser.latitude) : latitude;
-  const userLng = isDemoMode ? (longitude ?? demoUser.longitude) : longitude;
+  // Demo DM store — to check for existing conversations
+  const demoConversations = useDemoDmStore((s) => s.conversations);
+  useEffect(() => {
+    // BUGFIX #34: Only seed after hydration completes
+    if (isDemoMode && demoHasHydrated) demoSeed();
+  }, [demoSeed, demoHasHydrated]);
 
-  // Permission and loading states
-  // In demo mode with demo location, skip loading entirely
-  // Also skip if we have a cached location
-  const hasDemoLocation = isDemoMode && demoUser.latitude != null && demoUser.longitude != null;
-  const hasCached = hasCachedLocation();
-  const [permissionDenied, setPermissionDenied] = useState(false);
-  const [isInitializing, setIsInitializing] = useState(!hasDemoLocation && !hasCached);
-  const [retryKey, setRetryKey] = useState(0); // For LoadingGuard retry
+  // Start full location tracking when Nearby tab opens
+  // This is deferred from app boot to avoid blocking startup
+  const trackingStarted = useRef(false);
+  useEffect(() => {
+    if (!trackingStarted.current) {
+      trackingStarted.current = true;
+      startLocationTracking();
+    }
+  }, [startLocationTracking]);
+
+  // Mark focused crossed path as seen when navigating from notification
+  useEffect(() => {
+    if (focusProfileId && isDemoMode) {
+      markCrossedPathSeen(focusProfileId);
+    }
+  }, [focusProfileId, markCrossedPathSeen]);
+
+  // GUARD: Filter crossed paths with valid coordinates to prevent map crash
+  // Maps crash if Marker receives null/undefined/NaN/Infinity latitude or longitude
+  // Also filters out hidden and expired entries via getVisibleCrossedPaths
+  // BUGFIX #12: Use isValidMapCoordinate for comprehensive validation
+  // SAFETY FIX: Exclude blocked users from crossed paths (critical safety requirement)
+  const validCrossedPaths = useMemo(() => {
+    // Use getVisibleCrossedPaths to filter out hidden/expired entries
+    const visiblePaths = getVisibleCrossedPaths();
+    return visiblePaths.filter((cp) => {
+      // SAFETY: Exclude blocked users - they must NEVER appear on map
+      if (blockedUserIds.includes(cp.otherUserId)) return false;
+      // Exclude current user
+      if (userId && cp.otherUserId === userId) return false;
+      // Validate coordinates
+      return isValidMapCoordinate(cp.latitude, cp.longitude);
+    });
+  }, [demoCrossedPaths, getVisibleCrossedPaths, userId, blockedUserIds]);
+
+  // DEV: Log invalid crossed paths so we can debug seed/creation issues
+  useEffect(() => {
+    if (__DEV__ && demoCrossedPaths.length > 0) {
+      const invalid = demoCrossedPaths.filter((cp) =>
+        typeof cp.latitude !== 'number' ||
+        typeof cp.longitude !== 'number' ||
+        Number.isNaN(cp.latitude) ||
+        Number.isNaN(cp.longitude)
+      );
+      if (invalid.length > 0) {
+        log.error('[MAP]', 'Invalid crossedPath coordinates - skipping markers', {
+          count: invalid.length,
+          ids: invalid.map((cp) => cp.id).join(','),
+        });
+      }
+    }
+  }, [demoCrossedPaths]);
+
+  // User location — ALWAYS use live GPS location (no hardcoded fallbacks)
+  // In demo mode, we still require real GPS to place crossed paths near the user
+  const userLat = latitude;
+  const userLng = longitude;
+
+  // Seed crossed paths with bestLocation (once location is available)
+  // This generates crossed paths relative to where the user actually is
+  const hasSeededWithLiveLocation = useRef(false);
+  useEffect(() => {
+    if (
+      isDemoMode &&
+      !hasSeededWithLiveLocation.current &&
+      bestLocation &&
+      !Number.isNaN(bestLocation.latitude) &&
+      !Number.isNaN(bestLocation.longitude)
+    ) {
+      hasSeededWithLiveLocation.current = true;
+      // Only seed if not already seeded OR if we have no valid crossed paths
+      if (!crossedPathsSeeded || demoCrossedPaths.length === 0) {
+        seedCrossedPathsWithLocation(bestLocation.latitude, bestLocation.longitude);
+      }
+    }
+  }, [isDemoMode, bestLocation, crossedPathsSeeded, demoCrossedPaths.length, seedCrossedPathsWithLocation]);
+
+  // Permission and loading states — minimal since location is prewarmed
+  // If we have any location (lastKnown or current), show map immediately
+  const hasLocation = bestLocation != null;
+  const permissionDenied = permissionStatus === 'denied';
+  // Only show brief "locating" overlay if no location at all and permission not denied
+  const showLocatingOverlay = !hasLocation && !permissionDenied && permissionStatus !== 'unknown';
   const hasAnimatedToLocation = useRef(false);
+  const hasCenteredOnBestLocation = useRef(false);
+
 
   // Bottom sheet state
   const [selectedProfile, setSelectedProfile] = useState<NearbyProfile | null>(null);
   const sheetAnim = useRef(new Animated.Value(0)).current;
 
-  // Refresh button state
+  // Check if selected profile has an existing match or conversation
+  // If yes, we show "Message" CTA instead of "View Profile"
+  const selectedProfileConversationId = useMemo(() => {
+    if (!selectedProfile) return null;
+    const profileId = selectedProfile._id;
+    // Check for existing match
+    const existingMatch = demoMatches.find((m) => m.otherUser?.id === profileId);
+    if (existingMatch) return existingMatch.conversationId;
+    // Check for existing conversation in demoDmStore
+    const convoId = `demo_convo_${profileId}`;
+    if (demoConversations[convoId] && demoConversations[convoId].length > 0) {
+      return convoId;
+    }
+    return null;
+  }, [selectedProfile, demoMatches, demoConversations]);
+
+  // Refresh button state (simplified — store handles auto-refresh)
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [refreshError, setRefreshError] = useState<string | null>(null);
   const [lastRefreshTime, setLastRefreshTime] = useState(0);
   const [cooldownRemaining, setCooldownRemaining] = useState(0);
 
-  // Auto-refresh state
-  const [isAutoRefreshing, setIsAutoRefreshing] = useState(false);
-  const lastSuccessfulLocationAt = useRef<number>(0);
-  const appStateRef = useRef<AppStateStatus>(AppState.currentState);
-
-  // 6-5: Auto-refresh request ID to cancel stale refreshes
-  const autoRefreshRequestIdRef = useRef<number>(0);
-
   // Toast state for cooldown message
   const [showCooldownToast, setShowCooldownToast] = useState(false);
   const toastTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Cleanup toast timeout on unmount (A1 fix)
+  // Cleanup timeouts on unmount
   useEffect(() => {
     return () => {
       if (toastTimeoutRef.current) {
@@ -403,115 +548,6 @@ export default function NearbyScreen() {
   );
 
   // ------------------------------------------------------------------
-  // Auto-refresh location function (used on focus and app foreground)
-  // 6-5: Uses requestId pattern to cancel stale refreshes
-  // ------------------------------------------------------------------
-  const performAutoRefresh = useCallback(async () => {
-    // Check if location is stale
-    const timeSinceLastSuccess = Date.now() - lastSuccessfulLocationAt.current;
-    if (timeSinceLastSuccess < AUTO_REFRESH_STALE_MS && lastSuccessfulLocationAt.current > 0) {
-      // Location is fresh, no need to refresh
-      return;
-    }
-
-    // Don't auto-refresh if already doing a manual refresh
-    if (isRefreshing) {
-      return;
-    }
-
-    // 6-5: Generate unique request ID for this refresh
-    const thisRequestId = Date.now();
-    autoRefreshRequestIdRef.current = thisRequestId;
-
-    // 6-5: If another auto-refresh is in progress, it will be stale after we set our ID
-    setIsAutoRefreshing(true);
-    setRefreshError(null);
-
-    try {
-      const loc = await forceGetCurrentLocation(AUTO_REFRESH_TIMEOUT_MS);
-
-      // 6-5: Check if this request is still the latest (not cancelled by a newer one)
-      if (autoRefreshRequestIdRef.current !== thisRequestId) {
-        // Stale request — discard results
-        return;
-      }
-
-      if (loc) {
-        // 6-4: Validate coordinates before using
-        if (Number.isNaN(loc.latitude) || Number.isNaN(loc.longitude)) {
-          setRefreshError('Invalid location coordinates');
-          return;
-        }
-
-        // Update success timestamp
-        lastSuccessfulLocationAt.current = Date.now();
-
-        // Reset map animation flag so it re-centers on new location
-        hasAnimatedToLocation.current = false;
-
-        // Re-publish location to Convex (live mode only)
-        if (userId && !isDemoMode) {
-          await publishLocation({
-            userId: userId as any,
-            latitude: loc.latitude,
-            longitude: loc.longitude,
-          });
-
-          await recordLocation({
-            userId: userId as any,
-            latitude: loc.latitude,
-            longitude: loc.longitude,
-          });
-        }
-      } else {
-        // Location fetch failed - show error but keep old location
-        setRefreshError(locationError || 'Could not get location');
-      }
-    } catch (error) {
-      // 6-5: Only set error if this is still the current request
-      if (autoRefreshRequestIdRef.current !== thisRequestId) return;
-      const errorMessage = error instanceof Error ? error.message : 'Failed to get location';
-      setRefreshError(errorMessage);
-    } finally {
-      // 6-5: Only update state if this is still the current request
-      if (autoRefreshRequestIdRef.current === thisRequestId) {
-        setIsAutoRefreshing(false);
-      }
-    }
-  }, [isRefreshing, forceGetCurrentLocation, userId, publishLocation, recordLocation, locationError]);
-
-  // ------------------------------------------------------------------
-  // Auto-refresh on screen focus
-  // ------------------------------------------------------------------
-  useFocusEffect(
-    useCallback(() => {
-      // Trigger auto-refresh when screen gains focus
-      performAutoRefresh();
-    }, [performAutoRefresh])
-  );
-
-  // ------------------------------------------------------------------
-  // Auto-refresh when app returns from background (A2 fix: stable listener)
-  // ------------------------------------------------------------------
-  const performAutoRefreshRef = useRef(performAutoRefresh);
-  performAutoRefreshRef.current = performAutoRefresh;
-
-  useEffect(() => {
-    const subscription = AppState.addEventListener('change', (nextAppState: AppStateStatus) => {
-      // If app was in background and is now active
-      if (appStateRef.current.match(/inactive|background/) && nextAppState === 'active') {
-        // Trigger auto-refresh via ref to avoid stale closure
-        performAutoRefreshRef.current();
-      }
-      appStateRef.current = nextAppState;
-    });
-
-    return () => {
-      subscription.remove();
-    };
-  }, []);
-
-  // ------------------------------------------------------------------
   // Cooldown timer: update remaining time every second when active
   // ------------------------------------------------------------------
   useEffect(() => {
@@ -530,179 +566,123 @@ export default function NearbyScreen() {
   }, [cooldownRemaining, lastRefreshTime]);
 
   // ------------------------------------------------------------------
-  // Refresh location handler: force-fetch new GPS + re-publish
+  // Recenter button handler: INSTANT using stored locations
+  // Only calls refreshLocation() if no location exists at all
   // ------------------------------------------------------------------
-  const handleRefreshLocation = useCallback(async () => {
-    // Check cooldown
-    const timeSinceLastRefresh = Date.now() - lastRefreshTime;
-    if (timeSinceLastRefresh < REFRESH_COOLDOWN_MS) {
-      setCooldownRemaining(REFRESH_COOLDOWN_MS - timeSinceLastRefresh);
-      // Show toast message
-      setShowCooldownToast(true);
-      if (toastTimeoutRef.current) {
-        clearTimeout(toastTimeoutRef.current);
-      }
-      toastTimeoutRef.current = setTimeout(() => {
-        setShowCooldownToast(false);
-      }, TOAST_DURATION_MS);
+  const handleRecenterMap = useCallback(() => {
+    // Use stored location for instant recenter
+    const loc = bestLocation;
+
+    // BUGFIX #12: Validate coords before animateToRegion (prevents Android crash)
+    if (loc && mapRef.current && isValidMapCoordinate(loc.latitude, loc.longitude)) {
+      const d = radiusToLatDelta(FIXED_RADIUS_METERS);
+      mapRef.current.animateToRegion({
+        latitude: loc.latitude,
+        longitude: loc.longitude,
+        latitudeDelta: d,
+        longitudeDelta: d * (SCREEN_WIDTH / Dimensions.get('window').height),
+      }, 400);
       return;
     }
 
-    setIsRefreshing(true);
-    setRefreshError(null);
-
-    try {
-      // Force-fetch fresh GPS location with high accuracy
-      const loc = await forceGetCurrentLocation();
-
-      if (!loc) {
-        // forceGetCurrentLocation handles permission request internally
-        // If it returns null, permission was denied or timeout occurred
-        setRefreshError(locationError || 'Could not get location. Please try again.');
-        setIsRefreshing(false);
-        return;
-      }
-
-      // 6-4: Validate coordinates before using
-      if (Number.isNaN(loc.latitude) || Number.isNaN(loc.longitude)) {
-        setRefreshError('Invalid location coordinates received');
-        setIsRefreshing(false);
-        return;
-      }
-
-      // Update refresh timestamps (both cooldown and success tracking)
-      const now = Date.now();
-      setLastRefreshTime(now);
-      setCooldownRemaining(REFRESH_COOLDOWN_MS);
-      lastSuccessfulLocationAt.current = now;
-
-      // Reset map animation flag so it re-centers on new location
-      hasAnimatedToLocation.current = false;
-
-      // Re-publish location to Convex (live mode only)
-      if (userId && !isDemoMode) {
-        await publishLocation({
-          userId: userId as any,
-          latitude: loc.latitude,
-          longitude: loc.longitude,
-        });
-
-        await recordLocation({
-          userId: userId as any,
-          latitude: loc.latitude,
-          longitude: loc.longitude,
+    // Invalid coords or no location — log warning once and try refresh
+    if (loc && !isValidMapCoordinate(loc.latitude, loc.longitude)) {
+      if (!hasWarnedInvalidCoordsRef.current) {
+        hasWarnedInvalidCoordsRef.current = true;
+        log.warn('[MAP]', 'Invalid coords in handleRecenterMap, skipping animate', {
+          lat: loc.latitude,
+          lng: loc.longitude,
         });
       }
-
-      setRefreshError(null);
-    } catch (error) {
-      const errorMessage = error instanceof Error ? error.message : 'Failed to refresh location';
-      setRefreshError(errorMessage);
-    } finally {
-      setIsRefreshing(false);
     }
-  }, [lastRefreshTime, forceGetCurrentLocation, locationError, userId, publishLocation, recordLocation]);
+
+    // No stored location or invalid — trigger refresh (rare case)
+    setIsRefreshing(true);
+    refreshLocation().then((newLoc) => {
+      setIsRefreshing(false);
+      // BUGFIX #12: Validate refreshed coords before animateToRegion
+      if (newLoc && mapRef.current && isValidMapCoordinate(newLoc.latitude, newLoc.longitude)) {
+        const d = radiusToLatDelta(FIXED_RADIUS_METERS);
+        mapRef.current.animateToRegion({
+          latitude: newLoc.latitude,
+          longitude: newLoc.longitude,
+          latitudeDelta: d,
+          longitudeDelta: d * (SCREEN_WIDTH / Dimensions.get('window').height),
+        }, 400);
+      }
+    }).catch(() => {
+      setIsRefreshing(false);
+    });
+  }, [bestLocation, refreshLocation]);
 
   // ------------------------------------------------------------------
-  // On mount: request location + publish location (max once per 6 hours)
-  // In demo mode with demo location, skip loading and just fetch silently in background
-  // Also try to get fresh location once on mount (auto-fix)
-  // A3 fix: isMountedRef guards async operations
+  // Publish location to Convex when available (live mode only)
+  // Location tracking is handled by the centralized store
+  // ------------------------------------------------------------------
+  const hasPublishedRef = useRef(false);
+  useEffect(() => {
+    if (
+      !hasPublishedRef.current &&
+      bestLocation &&
+      userId &&
+      !isDemoMode
+    ) {
+      hasPublishedRef.current = true;
+      (async () => {
+        try {
+          // Publish location (respects 6-hour window on server)
+          await publishLocation({
+            userId: userId as any,
+            latitude: bestLocation.latitude,
+            longitude: bestLocation.longitude,
+          });
+
+          // Record location for crossed paths detection
+          await recordLocation({
+            userId: userId as any,
+            latitude: bestLocation.latitude,
+            longitude: bestLocation.longitude,
+          });
+
+          // Detect "Someone crossed you" alert
+          const detectResult = await detectCrossedUsers({
+            userId: userId as any,
+            myLat: bestLocation.latitude,
+            myLng: bestLocation.longitude,
+          });
+
+          if (detectResult?.triggered) {
+            logDebugEvent('NEARBY_CROSSED', 'Crossed paths alert triggered');
+          }
+        } catch {
+          // Silently fail — user can still view map
+        }
+      })();
+    }
+  }, [bestLocation, userId, publishLocation, recordLocation, detectCrossedUsers]);
+
+  // ------------------------------------------------------------------
+  // Center map on bestLocation when it becomes available (FIRST time only)
+  // This ensures map centers on Jamnagar (actual location), not Mumbai default
   // ------------------------------------------------------------------
   useEffect(() => {
-    let isMounted = true;
-
-    (async () => {
-      // If we have demo location or cached location, skip the loading state
-      // but still fetch fresh location in background with auto-fix
-      const skipLoading = hasDemoLocation || hasCached;
-
-      if (!skipLoading) {
-        // Only show loading for real location fetch
-        const granted = await requestPermission();
-        if (!isMounted) return;
-        if (!granted) {
-          setPermissionDenied(true);
-          setIsInitializing(false);
-          return;
-        }
-        setPermissionDenied(false);
-      }
-
-      // Auto-fix: Try to get fresh location on mount with shorter timeout
-      // Use forceGetCurrentLocation to bypass cache and get accurate position
-      const loc = await forceGetCurrentLocation(AUTO_REFRESH_TIMEOUT_MS);
-      if (!isMounted) return;
-
-      if (!skipLoading) {
-        setIsInitializing(false);
-      }
-
-      // If location was successfully fetched, update the success timestamp
-      if (loc) {
-        lastSuccessfulLocationAt.current = Date.now();
-      }
-
-      // If force location failed but we have cached location, that's okay -
-      // user can use the refresh button. Don't show error.
-      if (!loc && hasCached) {
-        // Keep using cached location, no error shown
-      }
-
-      if (loc && userId && !isDemoMode) {
-        // Publish location (respects 6-hour window — won't update if already published recently)
-        await publishLocation({
-          userId: userId as any,
-          latitude: loc.latitude,
-          longitude: loc.longitude,
-        });
-        if (!isMounted) return;
-
-        // Record location for crossed paths detection (unlock logic)
-        await recordLocation({
-          userId: userId as any,
-          latitude: loc.latitude,
-          longitude: loc.longitude,
-        });
-        if (!isMounted) return;
-
-        // Detect "Someone crossed you" alert (privacy-safe, uses published locations)
-        // Has its own 6h cooldown + 24h per-person dedupe
-        const detectResult = await detectCrossedUsers({
-          userId: userId as any,
-          myLat: loc.latitude,
-          myLng: loc.longitude,
-        });
-        if (!isMounted) return;
-
-        // Log crossed paths detection (system notifications handled separately)
-        if (detectResult?.triggered) {
-          logDebugEvent('NEARBY_CROSSED', 'Crossed paths alert triggered');
-        }
-      }
-    })();
-
-    return () => {
-      isMounted = false;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  // ------------------------------------------------------------------
-  // Animate map to real location when it becomes available
-  // ------------------------------------------------------------------
-  useEffect(() => {
-    if (userLat != null && userLng != null && mapRef.current && !hasAnimatedToLocation.current) {
-      hasAnimatedToLocation.current = true;
+    if (
+      bestLocation &&
+      !hasCenteredOnBestLocation.current &&
+      mapRef.current &&
+      // BUGFIX #12: Validate coords before animateToRegion (prevents Android crash)
+      isValidMapCoordinate(bestLocation.latitude, bestLocation.longitude)
+    ) {
+      hasCenteredOnBestLocation.current = true;
       const d = radiusToLatDelta(FIXED_RADIUS_METERS);
       mapRef.current.animateToRegion({
-        latitude: userLat,
-        longitude: userLng,
+        latitude: bestLocation.latitude,
+        longitude: bestLocation.longitude,
         latitudeDelta: d,
         longitudeDelta: d * (SCREEN_WIDTH / Dimensions.get('window').height),
-      }, 500);
+      }, 600);
     }
-  }, [userLat, userLng]);
+  }, [bestLocation]);
 
   // ------------------------------------------------------------------
   // Build nearby profiles list (memoized to avoid recomputing each render)
@@ -736,6 +716,8 @@ export default function NearbyScreen() {
         return true;
       });
       const filtered = unique.filter((p: any) => {
+        // FIX: Exclude current user from nearby profiles (don't show "me")
+        if (userId && p._id === userId) return false;
         if (blockedUserIds.includes(p._id)) return false;
         // 6-4: Validate profile coordinates before using
         if (
@@ -778,6 +760,8 @@ export default function NearbyScreen() {
 
     // Live mode: map Convex query results with client-side fuzz
     return rankNearbyProfiles(convexNearby
+      // FIX: Exclude current user from nearby profiles
+      .filter((u) => !(userId && u.id === userId))
       // 6-4: Filter out profiles with invalid coordinates
       .filter((u) =>
         typeof u.publishedLat === 'number' &&
@@ -811,14 +795,43 @@ export default function NearbyScreen() {
   }, [demoStoreProfiles, blockedUserIds, userLat, userLng, userId, convexNearby, sessionSalt, zoomBucket]);
 
   // ------------------------------------------------------------------
+  // DEBUG: Log marker counts for OOM debugging
+  // "You" marker is now native (showsUserLocation), not counted in custom markers
+  // ------------------------------------------------------------------
+  useEffect(() => {
+    const renderedNearby = Math.min(nearbyProfiles.length, MAX_NEARBY_MARKERS);
+    const renderedCrossed = validCrossedPaths.length;
+    const totalCustomMarkers = renderedNearby + renderedCrossed; // "You" is native, not counted
+    log.info('[MAP_OOM_DEBUG]', 'Marker counts (excluding native "You" marker)', {
+      nearbyTotal: nearbyProfiles.length,
+      nearbyRendered: renderedNearby,
+      crossedPaths: renderedCrossed,
+      totalCustomMarkers,
+      maxAllowed: MAX_NEARBY_MARKERS,
+      truncated: nearbyProfiles.length > MAX_NEARBY_MARKERS,
+    });
+    // Milestone G: map markers ready
+    if (totalCustomMarkers > 0) {
+      markTiming('map_ready');
+    }
+  }, [nearbyProfiles.length, validCrossedPaths.length]);
+
+  // ------------------------------------------------------------------
   // Fire "Someone just crossed you" notification once per session (demo mode)
   // Privacy-safe: no identity revealed, just generic alert
   // System notification only — no in-app banner
+  // SKIP if we arrived from tapping a notification (prevents unseenCount bounce-back)
   // ------------------------------------------------------------------
   const crossedPathsNotifiedRef = useRef(false);
   useEffect(() => {
     if (!isDemoMode || crossedPathsNotifiedRef.current) return;
     if (nearbyProfiles.length === 0) return;
+    // Skip creating notification if we arrived from a notification tap
+    // This prevents the unseenCount from bouncing back up after marking as read
+    if (arrivedFromNotification) {
+      crossedPathsNotifiedRef.current = true;
+      return;
+    }
     crossedPathsNotifiedRef.current = true;
 
     // Add to demo notification store (system notification, no in-app banner)
@@ -828,7 +841,7 @@ export default function NearbyScreen() {
       body: 'Someone just crossed you',
       data: {}, // No identity data — privacy-safe
     });
-  }, [nearbyProfiles]);
+  }, [nearbyProfiles, arrivedFromNotification]);
 
   // ------------------------------------------------------------------
   // Bottom sheet animation helpers
@@ -856,9 +869,13 @@ export default function NearbyScreen() {
 
   // ------------------------------------------------------------------
   // Map region — fixed 1km radius
-  // Note: userLat/userLng are guaranteed non-null when map renders (due to early returns)
+  // BUGFIX #12: Validate coordinates before building region (prevents Android crash)
   // ------------------------------------------------------------------
-  const buildRegion = (): Region => {
+  const buildRegion = (): Region | null => {
+    // Validate coords first — NaN/Infinity/out-of-range will crash react-native-maps
+    if (!isValidMapCoordinate(userLat, userLng)) {
+      return null;
+    }
     const d = radiusToLatDelta(FIXED_RADIUS_METERS);
     return {
       latitude: userLat!,
@@ -867,7 +884,7 @@ export default function NearbyScreen() {
       longitudeDelta: d * (SCREEN_WIDTH / Dimensions.get('window').height),
     };
   };
-  const initialRegion = userLat != null && userLng != null ? buildRegion() : null;
+  const initialRegion = buildRegion();
 
   // ------------------------------------------------------------------
   // Bottom sheet transform
@@ -878,36 +895,50 @@ export default function NearbyScreen() {
   });
 
   // ------------------------------------------------------------------
-  // Render
+  // Crossed path marker handlers (must be before any early returns)
   // ------------------------------------------------------------------
 
-  // Loading state while initializing location
-  if (isInitializing) {
-    return (
-      <LoadingGuard
-        isLoading={true}
-        onRetry={() => {
-          setRetryKey((k) => k + 1);
-          setIsInitializing(true);
-          getCurrentLocation().finally(() => setIsInitializing(false));
-        }}
-        title="Getting your location…"
-        subtitle="This is taking longer than expected. Check your connection and location settings."
-      >
-        <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
-          <View style={styles.permissionOverlay}>
-            <Ionicons name="location-outline" size={48} color={COLORS.primary} />
-            <Text style={styles.permissionTitle}>Getting your location...</Text>
-            <Text style={styles.permissionSubtitle}>
-              Please wait while we find your current location.
-            </Text>
-          </View>
-        </SafeAreaView>
-      </LoadingGuard>
-    );
-  }
+  // Handle crossed path marker tap — mark seen and open profile
+  const handleCrossedPathMarkerPress = useCallback((cp: typeof demoCrossedPaths[0]) => {
+    markCrossedPathSeen(cp.otherUserId);
+    router.push(`/(main)/profile/${cp.otherUserId}`);
+  }, [markCrossedPathSeen, router]);
 
-  // Permission denied overlay
+  // Deep link: animate to focused crossed path marker
+  useEffect(() => {
+    if (focusProfileId && mapRef.current && isDemoMode) {
+      // Use validCrossedPaths to ensure we only animate to entries with valid coordinates
+      const crossedPath = validCrossedPaths.find((cp) => cp.otherUserId === focusProfileId);
+      // BUGFIX #12: Extra validation before animateToRegion
+      if (crossedPath && isValidMapCoordinate(crossedPath.latitude, crossedPath.longitude)) {
+        // Animate map to the crossed path location
+        const d = radiusToLatDelta(FIXED_RADIUS_METERS);
+        mapRef.current.animateToRegion({
+          latitude: crossedPath.latitude,
+          longitude: crossedPath.longitude,
+          latitudeDelta: d * 0.5, // Zoom in closer
+          longitudeDelta: d * 0.5 * (SCREEN_WIDTH / Dimensions.get('window').height),
+        }, 500);
+      }
+    }
+  }, [focusProfileId, validCrossedPaths]);
+
+  // Format crossed time (e.g., "5m ago", "1h ago") - helper function
+  const formatCrossedTime = useCallback((timestamp: number) => {
+    const diff = Date.now() - timestamp;
+    const minutes = Math.floor(diff / 60000);
+    const hours = Math.floor(diff / 3600000);
+    if (minutes < 1) return 'Just now';
+    if (minutes < 60) return `${minutes}m ago`;
+    if (hours < 24) return `${hours}h ago`;
+    return `${Math.floor(hours / 24)}d ago`;
+  }, []);
+
+  // ------------------------------------------------------------------
+  // Render — map shown immediately, no heavy loading screens
+  // ------------------------------------------------------------------
+
+  // Permission denied — show overlay but still render map underneath
   if (permissionDenied) {
     return (
       <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
@@ -919,18 +950,9 @@ export default function NearbyScreen() {
           </Text>
           <TouchableOpacity
             style={styles.permissionButton}
-            onPress={async () => {
-              // 6-1: Clear permission denied state before re-requesting
-              setPermissionDenied(false);
-              setIsInitializing(true);
-              const granted = await requestPermission();
-              if (granted) {
-                await getCurrentLocation();
-              } else {
-                // 6-1: Only set denied if actually denied after request
-                setPermissionDenied(true);
-              }
-              setIsInitializing(false);
+            onPress={() => {
+              // Re-trigger location tracking (will request permission)
+              startLocationTracking();
             }}
           >
             <Text style={styles.permissionButtonText}>Enable Location</Text>
@@ -940,41 +962,38 @@ export default function NearbyScreen() {
     );
   }
 
-  // No location available (non-demo mode, location fetch failed)
-  if (userLat == null || userLng == null) {
-    return (
-      <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
-        <View style={styles.permissionOverlay}>
-          <Ionicons name="warning-outline" size={48} color={COLORS.textLight} />
-          <Text style={styles.permissionTitle}>Unable to get your location</Text>
-          <Text style={styles.permissionSubtitle}>
-            We couldn't determine your location. Please check your device settings and try again.
-          </Text>
-          <TouchableOpacity
-            style={styles.permissionButton}
-            onPress={async () => {
-              setIsInitializing(true);
-              hasAnimatedToLocation.current = false;
-              await getCurrentLocation();
-              setIsInitializing(false);
-            }}
-          >
-            <Text style={styles.permissionButtonText}>Try Again</Text>
-          </TouchableOpacity>
-        </View>
-      </SafeAreaView>
-    );
-  }
+  // Default region for map when no location yet (center of India as safe default)
+  const defaultRegion: Region = {
+    latitude: 20.5937,
+    longitude: 78.9629,
+    latitudeDelta: 10,
+    longitudeDelta: 10,
+  };
+
+  // Use real location region if available, else default
+  const mapRegion = initialRegion || defaultRegion;
 
   return (
     <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
-      {/* Full-screen map */}
-      <MapView
+      {/* DEBUG: Map disabled for crash isolation */}
+      {DEBUG_DISABLE_MAP ? (
+        <View style={styles.debugMapPlaceholder}>
+          <Ionicons name="map-outline" size={48} color={COLORS.textLight} />
+          <Text style={styles.debugMapText}>Map temporarily disabled for debugging</Text>
+          <Text style={styles.debugMapSubtext}>Testing Android crash isolation</Text>
+        </View>
+      ) : (
+      /* Full-screen map with clustering — shown immediately with prewarmed location */
+      <ClusteredMapView
         ref={mapRef}
         style={{ flex: 1 }}
-        initialRegion={initialRegion!}
-        showsUserLocation={false}
+        initialRegion={mapRegion}
+        showsUserLocation={true}
+        followsUserLocation={false}
         showsMyLocationButton={false}
+        toolbarEnabled={false}
+        rotateEnabled={false}
+        pitchEnabled={false}
         onPress={closeSheet}
         onRegionChangeComplete={(region) => {
           // Update zoom bucket when user zooms — causes pins to shift (anti-triangulation)
@@ -983,49 +1002,82 @@ export default function NearbyScreen() {
             setZoomBucket(newBucket);
           }
         }}
-      >
-        {/* "You" marker */}
-        <Marker
-          coordinate={{ latitude: userLat!, longitude: userLng! }}
-          anchor={{ x: 0.5, y: 0.5 }}
-        >
-          <View style={styles.youMarkerWrapper}>
-            <View style={styles.youMarkerDot} />
-            <Text style={styles.youMarkerLabel}>You</Text>
-          </View>
-        </Marker>
+        // Clustering configuration — cluster until city zoom, then show individual pins
+        // maxZoom=11 shows profiles earlier (less zoom needed)
+        clusterColor={COLORS.primary}
+        clusterTextColor={COLORS.white}
+        clusterFontFamily="System"
+        radius={50} // Cluster nearby points
+        minZoom={1}
+        maxZoom={11} // Stop clustering at zoom 11 — profiles appear earlier
+        minPoints={2} // Minimum points to form a cluster
+        extent={512}
+        nodeSize={64}
+        // Single pre-composited cluster marker (pin + count number baked in)
+        // No React children inside Marker — 100% Android stable
+        renderCluster={(cluster) => {
+          const { id, geometry, onPress, properties } = cluster;
+          const points = properties.point_count;
 
-        {/* Nearby profile markers — solid or faded, no text labels */}
-        {nearbyProfiles.map((p) => (
+          return (
+            <Marker
+              key={`cluster-${id}`}
+              coordinate={{
+                latitude: geometry.coordinates[1],
+                longitude: geometry.coordinates[0],
+              }}
+              image={getDemoClusterImage(points)}
+              anchor={{ x: 0.5, y: 1 }}
+              tracksViewChanges={false}
+              onPress={onPress}
+            />
+          );
+        }}
+      >
+        {/* "You" marker — handled by native showsUserLocation={true} above */}
+        {/* This provides Google Maps style: blue dot + accuracy circle + heading indicator */}
+
+        {/* Nearby profile markers — OOM FIX: use image prop, limit count, no React children */}
+        {nearbyProfiles.slice(0, MAX_NEARBY_MARKERS).map((p) => (
           <Marker
             key={p._id}
             coordinate={{ latitude: p.latitude, longitude: p.longitude }}
-            anchor={{ x: 0.5, y: 0.5 }}
+            anchor={{ x: 0.5, y: 1 }}
+            image={PIN_PINK_IMAGE}
+            tracksViewChanges={false}
+            opacity={p.freshness === 'faded' ? 0.5 : 1}
             onPress={(e) => {
               e.stopPropagation();
               openSheet(p);
             }}
-          >
-            <View style={styles.pinWrapper}>
-              <View
-                style={[
-                  styles.pinDot,
-                  p.freshness === 'faded' && styles.pinDotFaded,
-                ]}
-              >
-                <Text
-                  style={[
-                    styles.pinInitial,
-                    p.freshness === 'faded' && styles.pinInitialFaded,
-                  ]}
-                >
-                  {p.name.charAt(0)}
-                </Text>
-              </View>
-            </View>
-          </Marker>
+          />
         ))}
-      </MapView>
+
+        {/* Crossed paths markers — SINGLE pre-composited image (pin + avatar baked in) */}
+        {/* No overlay marker, no drift, no delay — instant stable rendering */}
+        {isDemoMode && validCrossedPaths.map((cp) => (
+          <Marker
+            key={`crossed-${cp.id}`}
+            coordinate={{ latitude: cp.latitude, longitude: cp.longitude }}
+            image={getDemoMarkerImage(cp.otherUserId)}
+            anchor={{ x: 0.5, y: 1 }}
+            tracksViewChanges={false}
+            onPress={(e) => {
+              e.stopPropagation();
+              handleCrossedPathMarkerPress(cp);
+            }}
+          />
+        ))}
+      </ClusteredMapView>
+      )}
+
+      {/* Locating overlay — shown briefly when no location yet */}
+      {showLocatingOverlay && (
+        <View style={styles.locatingOverlay}>
+          <ActivityIndicator size="small" color={COLORS.primary} />
+          <Text style={styles.locatingText}>Locating...</Text>
+        </View>
+      )}
 
       {/* Draggable Refresh FAB */}
       {fabLoaded && (
@@ -1044,13 +1096,13 @@ export default function NearbyScreen() {
           <TouchableOpacity
             style={[
               styles.fabButton,
-              (isRefreshing || isAutoRefreshing) && styles.fabButtonLoading,
+              isRefreshing && styles.fabButtonLoading,
             ]}
-            onPress={handleRefreshLocation}
-            disabled={isRefreshing || isAutoRefreshing}
+            onPress={handleRecenterMap}
+            disabled={isRefreshing}
             activeOpacity={0.8}
           >
-            {isRefreshing || isAutoRefreshing ? (
+            {isRefreshing ? (
               <ActivityIndicator size="small" color={COLORS.white} />
             ) : (
               <Ionicons name="locate" size={24} color={COLORS.white} />
@@ -1112,15 +1164,30 @@ export default function NearbyScreen() {
                   {selectedProfile.name}, {selectedProfile.age}
                 </Text>
                 <Text style={styles.sheetNearby}>Nearby</Text>
-                <TouchableOpacity
-                  style={styles.viewProfileButton}
-                  onPress={() => {
-                    closeSheet();
-                    router.push(`/(main)/profile/${selectedProfile._id}`);
-                  }}
-                >
-                  <Text style={styles.viewProfileText}>View Profile</Text>
-                </TouchableOpacity>
+                {selectedProfileConversationId ? (
+                  // Existing match/conversation: show "Message" CTA
+                  <TouchableOpacity
+                    style={[styles.viewProfileButton, styles.messageButton]}
+                    onPress={() => {
+                      closeSheet();
+                      router.push(`/(main)/(tabs)/messages/chat/${selectedProfileConversationId}`);
+                    }}
+                  >
+                    <Ionicons name="chatbubble" size={14} color={COLORS.white} style={{ marginRight: 6 }} />
+                    <Text style={styles.viewProfileText}>Message</Text>
+                  </TouchableOpacity>
+                ) : (
+                  // No existing thread: show "View Profile"
+                  <TouchableOpacity
+                    style={styles.viewProfileButton}
+                    onPress={() => {
+                      closeSheet();
+                      router.push(`/(main)/profile/${selectedProfile._id}`);
+                    }}
+                  >
+                    <Text style={styles.viewProfileText}>View Profile</Text>
+                  </TouchableOpacity>
+                )}
               </View>
             </View>
           </>
@@ -1139,6 +1206,50 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: COLORS.background,
+  },
+
+  // DEBUG: Placeholder when map is disabled for crash isolation
+  debugMapPlaceholder: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: COLORS.backgroundDark,
+  },
+  debugMapText: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: COLORS.text,
+    marginTop: 16,
+    textAlign: 'center',
+  },
+  debugMapSubtext: {
+    fontSize: 13,
+    color: COLORS.textLight,
+    marginTop: 6,
+  },
+
+  // Locating overlay — small, non-blocking indicator
+  locatingOverlay: {
+    position: 'absolute',
+    top: 60,
+    alignSelf: 'center',
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(255, 255, 255, 0.95)',
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderRadius: 20,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.15,
+    shadowRadius: 4,
+    elevation: 4,
+    gap: 8,
+  },
+  locatingText: {
+    fontSize: 14,
+    fontWeight: '500',
+    color: COLORS.text,
   },
 
   // "You" marker
@@ -1365,9 +1476,14 @@ const styles = StyleSheet.create({
     paddingHorizontal: 24,
     alignSelf: 'flex-start',
   },
+  messageButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
   viewProfileText: {
     color: COLORS.white,
     fontSize: 14,
     fontWeight: '600',
   },
+
 });

@@ -12,79 +12,116 @@ export const getMatches = query({
     const { userId, limit = 50 } = args;
 
     // Get matches where user is either user1 or user2
-    const matchesAsUser1 = await ctx.db
-      .query('matches')
-      .withIndex('by_user1', (q) => q.eq('user1Id', userId))
-      .filter((q) => q.eq(q.field('isActive'), true))
-      .take(limit);
-
-    const matchesAsUser2 = await ctx.db
-      .query('matches')
-      .withIndex('by_user2', (q) => q.eq('user2Id', userId))
-      .filter((q) => q.eq(q.field('isActive'), true))
-      .take(limit);
+    const [matchesAsUser1, matchesAsUser2] = await Promise.all([
+      ctx.db
+        .query('matches')
+        .withIndex('by_user1', (q) => q.eq('user1Id', userId))
+        .filter((q) => q.eq(q.field('isActive'), true))
+        .take(limit),
+      ctx.db
+        .query('matches')
+        .withIndex('by_user2', (q) => q.eq('user2Id', userId))
+        .filter((q) => q.eq(q.field('isActive'), true))
+        .take(limit),
+    ]);
 
     const allMatches = [...matchesAsUser1, ...matchesAsUser2];
+    if (allMatches.length === 0) return [];
 
-    // Get match details with other user info
+    // PERF #6: Batch-fetch all other users and conversations in parallel
+    const otherUserIds = allMatches.map((m) =>
+      m.user1Id === userId ? m.user2Id : m.user1Id
+    );
+
+    // Parallel batch: users, conversations, and photos
+    const [users, conversations, photos] = await Promise.all([
+      // Batch fetch all other users
+      Promise.all(otherUserIds.map((id) => ctx.db.get(id))),
+      // Batch fetch all conversations by matchId
+      Promise.all(
+        allMatches.map((m) =>
+          ctx.db
+            .query('conversations')
+            .withIndex('by_match', (q) => q.eq('matchId', m._id))
+            .first()
+        )
+      ),
+      // Batch fetch primary photos for all other users
+      Promise.all(
+        otherUserIds.map((id) =>
+          ctx.db
+            .query('photos')
+            .withIndex('by_user', (q) => q.eq('userId', id))
+            .filter((q) => q.eq(q.field('isPrimary'), true))
+            .first()
+        )
+      ),
+    ]);
+
+    // Build user and photo maps for O(1) lookup
+    const userMap = new Map(
+      otherUserIds.map((id, i) => [id, users[i]])
+    );
+    const photoMap = new Map(
+      otherUserIds.map((id, i) => [id, photos[i]])
+    );
+    const conversationMap = new Map(
+      allMatches.map((m, i) => [m._id as string, conversations[i]])
+    );
+
+    // Get conversation IDs that exist
+    const validConversations = conversations.filter(Boolean) as NonNullable<typeof conversations[number]>[];
+
+    // Batch fetch last messages and unread counts for all conversations
+    const [lastMessages, unreadCounts] = await Promise.all([
+      Promise.all(
+        validConversations.map((c) =>
+          ctx.db
+            .query('messages')
+            .withIndex('by_conversation_created', (q) =>
+              q.eq('conversationId', c._id)
+            )
+            .order('desc')
+            .first()
+        )
+      ),
+      Promise.all(
+        validConversations.map((c) =>
+          ctx.db
+            .query('messages')
+            .withIndex('by_conversation', (q) =>
+              q.eq('conversationId', c._id)
+            )
+            .filter((q) =>
+              q.and(
+                q.neq(q.field('senderId'), userId),
+                q.eq(q.field('readAt'), undefined)
+              )
+            )
+            .collect()
+        )
+      ),
+    ]);
+
+    // Build conversation data maps
+    const lastMessageMap = new Map(
+      validConversations.map((c, i) => [c._id as string, lastMessages[i]])
+    );
+    const unreadCountMap = new Map(
+      validConversations.map((c, i) => [c._id as string, unreadCounts[i]?.length || 0])
+    );
+
+    // Build result
     const result = [];
     for (const match of allMatches) {
       const otherUserId = match.user1Id === userId ? match.user2Id : match.user1Id;
-      const otherUser = await ctx.db.get(otherUserId);
-
+      const otherUser = userMap.get(otherUserId);
       if (!otherUser || !otherUser.isActive) continue;
 
-      // Get conversation
-      const conversation = await ctx.db
-        .query('conversations')
-        .withIndex('by_match', (q) => q.eq('matchId', match._id))
-        .first();
-
-      // Get last message
-      let lastMessage = null;
-      if (conversation) {
-        const message = await ctx.db
-          .query('messages')
-          .withIndex('by_conversation_created', (q) =>
-            q.eq('conversationId', conversation._id)
-          )
-          .order('desc')
-          .first();
-
-        if (message) {
-          lastMessage = {
-            content: message.content,
-            senderId: message.senderId,
-            createdAt: message.createdAt,
-            isRead: !!message.readAt,
-          };
-        }
-      }
-
-      // Get primary photo
-      const photo = await ctx.db
-        .query('photos')
-        .withIndex('by_user', (q) => q.eq('userId', otherUserId))
-        .filter((q) => q.eq(q.field('isPrimary'), true))
-        .first();
-
-      // Count unread messages
-      let unreadCount = 0;
-      if (conversation) {
-        const unreadMessages = await ctx.db
-          .query('messages')
-          .withIndex('by_conversation', (q) =>
-            q.eq('conversationId', conversation._id)
-          )
-          .filter((q) =>
-            q.and(
-              q.neq(q.field('senderId'), userId),
-              q.eq(q.field('readAt'), undefined)
-            )
-          )
-          .collect();
-        unreadCount = unreadMessages.length;
-      }
+      const conversation = conversationMap.get(match._id as string);
+      const photo = photoMap.get(otherUserId);
+      const message = conversation ? lastMessageMap.get(conversation._id as string) : null;
+      const unreadCount = conversation ? unreadCountMap.get(conversation._id as string) || 0 : 0;
 
       result.push({
         matchId: match._id,
@@ -98,7 +135,14 @@ export const getMatches = query({
           lastActive: otherUser.lastActive,
           isVerified: otherUser.isVerified,
         },
-        lastMessage,
+        lastMessage: message
+          ? {
+              content: message.content,
+              senderId: message.senderId,
+              createdAt: message.createdAt,
+              isRead: !!message.readAt,
+            }
+          : null,
         unreadCount,
       });
     }
@@ -259,10 +303,12 @@ export const areMatched = query({
   },
 });
 
-// Helper function
+// BUGFIX #21: Safe date parsing with NaN guard
 function calculateAge(dateOfBirth: string): number {
+  if (!dateOfBirth) return 0;
   const today = new Date();
   const birthDate = new Date(dateOfBirth);
+  if (isNaN(birthDate.getTime())) return 0;
   let age = today.getFullYear() - birthDate.getFullYear();
   const m = today.getMonth() - birthDate.getMonth();
   if (m < 0 || (m === 0 && today.getDate() < birthDate.getDate())) {
