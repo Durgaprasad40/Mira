@@ -10,14 +10,7 @@ export default function ChatRoomsTabLayout() {
   return (
     <Stack screenOptions={{ headerShown: false }}>
       <Stack.Screen name="index" />
-      <Stack.Screen
-        name="[roomId]"
-        options={{
-          // Disable iOS swipe-back gesture inside chat room
-          gestureEnabled: false,
-          animation: 'slide_from_right',
-        }}
-      />
+      {/* [roomId] is auto-registered via folder-based routing */}
     </Stack>
   );
 }
