@@ -19,6 +19,7 @@ import {
   NativeSyntheticEvent,
   NativeScrollEvent,
   ActivityIndicator,
+  InteractionManager,
 } from 'react-native';
 import { FlashList, type FlashListRef } from '@shopify/flash-list';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -92,6 +93,13 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
   const [headerHeight, setHeaderHeight] = useState(0);
   const onHeaderLayout = useCallback((e: LayoutChangeEvent) => {
     setHeaderHeight(e.nativeEvent.layout.height);
+  }, []);
+
+  // Measured composer height — used to pad the message list so last message
+  // sits directly above the input area (WhatsApp-style layout).
+  const [composerHeight, setComposerHeight] = useState(0);
+  const onComposerLayout = useCallback((e: LayoutChangeEvent) => {
+    setComposerHeight(e.nativeEvent.layout.height);
   }, []);
 
   // Track whether the user is scrolled near the bottom so we only
@@ -301,6 +309,17 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
     }
   }, [conversationId, userId, isDemo, markDemoRead, markNotifReadForConvo]);
 
+  // Helper: scroll to bottom with reliable Android timing
+  const scrollToBottom = useCallback((animated = true) => {
+    const doScroll = () => flatListRef.current?.scrollToEnd({ animated });
+    if (Platform.OS === 'android') {
+      // Android needs extra delay after keyboard animations settle
+      InteractionManager.runAfterInteractions(() => setTimeout(doScroll, 120));
+    } else {
+      requestAnimationFrame(doScroll);
+    }
+  }, []);
+
   // B6 fix: Auto-scroll when new messages arrive AND (user is near bottom OR message is from current user)
   // 6-4: Removed redundant `messages` from deps — only need `messages?.length` since
   // we only act when count increases. Access to `messages` for content is via closure.
@@ -314,26 +333,22 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
 
       // Scroll if near bottom OR if current user sent the message
       if (isNearBottomRef.current || isSentByCurrentUser) {
-        requestAnimationFrame(() => {
-          flatListRef.current?.scrollToEnd({ animated: true });
-        });
+        scrollToBottom(true);
       }
     }
     prevMessageCountRef.current = count;
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [messages?.length, isDemo, userId]);
+  }, [messages?.length, isDemo, userId, scrollToBottom]);
 
   // Scroll to end when keyboard opens (WhatsApp behavior).
   // Always scroll — opening the keyboard means the user is engaged at the bottom.
   useEffect(() => {
     const showEvent = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
     const sub = Keyboard.addListener(showEvent, () => {
-      requestAnimationFrame(() => {
-        flatListRef.current?.scrollToEnd({ animated: true });
-      });
+      scrollToBottom(true);
     });
     return () => sub.remove();
-  }, []);
+  }, [scrollToBottom]);
 
   // B5 fix: persist drafts in both demo and Convex modes
   const handleDraftChange = useCallback((text: string) => {
@@ -678,7 +693,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
 
       <KeyboardAvoidingView
         style={styles.kavContainer}
-        behavior="padding"
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
         keyboardVerticalOffset={headerHeight}
       >
         <FlashList
@@ -727,15 +742,18 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
             flexGrow: 1,
             justifyContent: (messages?.length ?? 0) > 0 ? 'flex-end' as const : 'center' as const,
             paddingTop: 8,
-            paddingBottom: 0,
+            paddingHorizontal: 12,
+            paddingBottom: composerHeight,
           }}
           onScroll={onScroll}
           scrollEventThrottle={16}
           keyboardShouldPersistTaps="handled"
-          // 5-5: Use "on-drag" to avoid conflict with auto-scroll on new messages
-          keyboardDismissMode="on-drag"
+          keyboardDismissMode="interactive"
         />
-        <View style={{ paddingBottom: insets.bottom }}>
+        <View
+          onLayout={onComposerLayout}
+          style={{ paddingBottom: Platform.OS === 'ios' ? insets.bottom : 0 }}
+        >
           <MessageInput
             onSend={handleSend}
             onSendImage={handleSendImage}
