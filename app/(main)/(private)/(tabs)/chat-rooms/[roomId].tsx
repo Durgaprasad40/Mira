@@ -196,13 +196,13 @@ export default function ChatRoomScreen() {
   }, [roomId, enterRoom, authUserId]);
 
   // ─────────────────────────────────────────────────────────────────────────
-  // ANDROID BACK BUTTON → Navigate back to chat-rooms tab (no stacking)
+  // ANDROID BACK BUTTON → Go back to chat-rooms list (within tab stack)
   // ─────────────────────────────────────────────────────────────────────────
   useEffect(() => {
     if (Platform.OS !== 'android') return;
     const onBackPress = () => {
-      // Use replace to remove chat-room from stack, preventing back-loop
-      router.replace('/(main)/(private)/(tabs)/chat-rooms');
+      // Navigate back to the list screen within the same tab
+      router.back();
       return true;
     };
     const subscription = BackHandler.addEventListener('hardwareBackPress', onBackPress);

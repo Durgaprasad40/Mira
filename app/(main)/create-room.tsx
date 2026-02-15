@@ -73,8 +73,8 @@ export default function CreateRoomScreen() {
         category,
       });
 
-      // Navigate to the new room
-      router.replace(`/(main)/chat-room/${roomId}` as any);
+      // Navigate to the new room (within Phase-2 tabs to keep tab bar)
+      router.replace(`/(main)/(private)/(tabs)/chat-rooms/${roomId}` as any);
     } catch (err: any) {
       Alert.alert('Error', err.message || 'Failed to create room');
     } finally {

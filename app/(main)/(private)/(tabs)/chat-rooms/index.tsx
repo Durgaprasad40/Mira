@@ -177,7 +177,8 @@ export default function ChatRoomsScreen() {
       }
       // Mark room as visited to clear unread badge
       markRoomVisited(roomId);
-      router.push(`/(main)/chat-room/${roomId}` as any);
+      // Navigate within the tab stack to keep tab bar visible
+      router.push(`/(main)/(private)/(tabs)/chat-rooms/${roomId}` as any);
     },
     [router, joinedRooms, markRoomVisited]
   );
