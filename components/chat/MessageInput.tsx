@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useCallback } from 'react';
+import React, { useState, useMemo, useCallback, useRef, useEffect } from 'react';
 import { View, Text, TextInput, StyleSheet, TouchableOpacity, Alert, ActivityIndicator } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { COLORS, MESSAGE_TEMPLATES } from '@/lib/constants';
@@ -70,9 +70,43 @@ export function MessageInput({
   const handleTextChange = (value: string) => {
     setText(value);
     onTextChange?.(value);
+
+    // Demo typing indicator logic (simulates other user typing)
+    // Clear any existing timers
+    if (showTypingTimerRef.current) clearTimeout(showTypingTimerRef.current);
+    if (hideTypingTimerRef.current) clearTimeout(hideTypingTimerRef.current);
+
+    if (value.trim().length > 0) {
+      // User started typing - show "other typing" after 600ms
+      if (!otherTyping) {
+        showTypingTimerRef.current = setTimeout(() => {
+          setOtherTyping(true);
+        }, 600);
+      }
+      // Reset hide timer - hide after 1200ms of inactivity
+      hideTypingTimerRef.current = setTimeout(() => {
+        setOtherTyping(false);
+      }, 1200);
+    } else {
+      // Input is empty - hide typing indicator immediately
+      setOtherTyping(false);
+    }
   };
 
   const [isSending, setIsSending] = useState(false);
+
+  // Demo typing indicator state (simulates other user typing)
+  const [otherTyping, setOtherTyping] = useState(false);
+  const showTypingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const hideTypingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Cleanup timers on unmount
+  useEffect(() => {
+    return () => {
+      if (showTypingTimerRef.current) clearTimeout(showTypingTimerRef.current);
+      if (hideTypingTimerRef.current) clearTimeout(hideTypingTimerRef.current);
+    };
+  }, []);
 
   const handleSend = async () => {
     if (!text.trim() || isSending) return;
@@ -161,6 +195,13 @@ export function MessageInput({
           <Text style={styles.quotaText}>
             {messagesRemaining} {messagesRemaining === 1 ? 'message' : 'messages'} remaining this week
           </Text>
+        </View>
+      )}
+
+      {/* Demo typing indicator (simulates other user typing) */}
+      {otherTyping && !isRecording && (
+        <View style={styles.typingBanner}>
+          <Text style={styles.typingText}>Typing…</Text>
         </View>
       )}
 
@@ -302,6 +343,15 @@ const styles = StyleSheet.create({
     color: COLORS.warning,
     marginLeft: 8,
     fontWeight: '500',
+  },
+  typingBanner: {
+    paddingHorizontal: 16,
+    paddingVertical: 4,
+  },
+  typingText: {
+    fontSize: 12,
+    color: COLORS.textLight,
+    fontStyle: 'italic',
   },
   inputContainer: {
     flexDirection: 'row',
