@@ -67,11 +67,12 @@ function ChatMessageItem({
 }: ChatMessageItemProps) {
   const isMedia = (messageType === 'image' || messageType === 'video') && mediaUrl;
 
-  // Layout: Avatar (left) | Name + Time (line 1), Message (line 2)
-  // Same layout for both "me" and "others" - only styling differs
+  // Layout: Avatar + Name/Time/Message
+  // Others: avatar left, content right (row)
+  // Me: avatar right, content left (row-reverse), aligned to right edge
   return (
     <TouchableOpacity
-      style={[styles.container, dimmed && styles.dimmed]}
+      style={[styles.container, isMe && styles.containerMe, dimmed && styles.dimmed]}
       onLongPress={onLongPress}
       activeOpacity={0.8}
       delayLongPress={400}
@@ -126,6 +127,10 @@ const styles = StyleSheet.create({
     paddingHorizontal: 14,
     paddingVertical: 8,
     gap: 12,
+  },
+  containerMe: {
+    flexDirection: 'row-reverse',
+    alignSelf: 'flex-end',
   },
   dimmed: {
     opacity: 0.3,
