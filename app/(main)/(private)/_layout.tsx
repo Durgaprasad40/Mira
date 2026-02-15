@@ -113,9 +113,6 @@ export default function PrivateLayout() {
 
       // If NOT on a tab root (e.g., chat detail, nested screen), let normal back happen
       if (!isOnPhase2TabRoot) {
-        if (__DEV__) {
-          console.log('[BackGuard] not on tab root, allowing normal back:', lastSegment);
-        }
         return false; // Let native/router handle it
       }
 
@@ -123,17 +120,11 @@ export default function PrivateLayout() {
 
       // Debounce: ignore rapid back presses (< 600ms apart)
       if (now - lastBackAtRef.current < 600) {
-        if (__DEV__) {
-          console.log('[BackGuard] debounced, ignoring');
-        }
         return true; // Consume but don't act
       }
 
       // Transition lock: ignore if already navigating
       if (isNavigatingRef.current) {
-        if (__DEV__) {
-          console.log('[BackGuard] transition locked, ignoring');
-        }
         return true; // Consume but don't act
       }
 
@@ -143,19 +134,12 @@ export default function PrivateLayout() {
 
       // Prevent redundant navigation to same route
       if (pathname === targetRoute) {
-        if (__DEV__) {
-          console.log('[BackGuard] already at target, ignoring');
-        }
         return true; // Consume but don't act
       }
 
       // Set locks
       lastBackAtRef.current = now;
       isNavigatingRef.current = true;
-
-      if (__DEV__) {
-        console.log('[BackGuard] tab-to-tab:', lastSegment, '→', targetRoute);
-      }
 
       // Navigate using replace() for tab-to-tab (no extra stack entries)
       router.replace(targetRoute);
