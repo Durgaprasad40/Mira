@@ -203,10 +203,10 @@ export function processThreadsIntegrity(input: ThreadsIntegrityInput): ThreadsIn
     }
   }
 
-  // Calculate total unread count
+  // Calculate total unread count (number of conversations with unread, not total messages)
   const totalUnreadCount =
-    messageThreads.reduce((acc, t) => acc + t.unreadCount, 0) +
-    confessionThreads.reduce((acc, t) => acc + t.unreadCount, 0);
+    messageThreads.filter((t) => t.unreadCount > 0).length +
+    confessionThreads.filter((t) => t.unreadCount > 0).length;
 
   return {
     newMatches,
