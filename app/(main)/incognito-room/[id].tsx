@@ -293,5 +293,5 @@ const styles = StyleSheet.create({
     width: 40, height: 40, borderRadius: 20, backgroundColor: C.primary,
     alignItems: 'center', justifyContent: 'center',
   },
-  sendButtonDisabled: { backgroundColor: C.surface },
+  sendButtonDisabled: { backgroundColor: C.surface, opacity: 0.6 },
 });
