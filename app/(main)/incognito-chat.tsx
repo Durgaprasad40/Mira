@@ -547,9 +547,15 @@ export default function PrivateChatScreen() {
             data={messages}
             keyExtractor={(item) => item.id}
             renderItem={renderMessage}
+            ListEmptyComponent={
+              <View style={styles.emptyContainer}>
+                <Ionicons name="chatbubble-outline" size={40} color={C.textLight} />
+                <Text style={styles.emptyText}>Say hi 👋</Text>
+              </View>
+            }
             contentContainerStyle={{
               flexGrow: 1,
-              justifyContent: 'flex-end' as const,
+              justifyContent: messages.length > 0 ? 'flex-end' as const : 'center' as const,
               paddingHorizontal: 16,
               paddingTop: 16,
               paddingBottom: composerHeight,
@@ -681,6 +687,17 @@ const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: C.background },
   keyboardAvoid: { flex: 1 },
   chatArea: { flex: 1 },
+  emptyContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    gap: 8,
+  },
+  emptyText: {
+    fontSize: 15,
+    fontWeight: '500',
+    color: C.textLight,
+  },
   composerWrapper: { backgroundColor: C.background },
 
   header: {
