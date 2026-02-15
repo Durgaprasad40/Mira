@@ -114,12 +114,12 @@ export default function RoomChatScreen() {
           {!isOwn && (
             <View style={[styles.msgAvatarCircle, { backgroundColor: room.color + '30' }]}>
               <Text style={[styles.msgAvatarText, { color: room.color }]}>
-                {item.senderName.charAt(0)}
+                {(item.senderName || '?').charAt(0)}
               </Text>
             </View>
           )}
           <View style={styles.msgContent}>
-            {!isOwn && <Text style={styles.msgSenderName}>{item.senderName}</Text>}
+            {!isOwn && <Text style={styles.msgSenderName}>{item.senderName || 'Unknown'}</Text>}
             <View style={[styles.msgBubble, isOwn ? styles.msgBubbleOwn : styles.msgBubbleOther]}>
               <Text style={[styles.msgText, isOwn && styles.msgTextOwn]}>{item.content}</Text>
             </View>
