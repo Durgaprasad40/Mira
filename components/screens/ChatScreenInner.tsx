@@ -88,16 +88,8 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
   const { userId } = useAuthStore();
   const flatListRef = useRef<FlashListRef<any>>(null);
 
-  // Measured header height — used as keyboardVerticalOffset so KAV
-  // adjusts correctly regardless of device notch / status-bar height.
-  const [headerHeight, setHeaderHeight] = useState(0);
-  const onHeaderLayout = useCallback((e: LayoutChangeEvent) => {
-    setHeaderHeight(e.nativeEvent.layout.height);
-  }, []);
-
-  // Measured composer height — used to pad the message list so last message
-  // sits directly above the input area (WhatsApp-style layout).
-  const [composerHeight, setComposerHeight] = useState(0);
+  // ─── Composer height tracking (matches locked chat-rooms pattern) ───
+  const [composerHeight, setComposerHeight] = useState(56);
   const onComposerLayout = useCallback((e: LayoutChangeEvent) => {
     setComposerHeight(e.nativeEvent.layout.height);
   }, []);
@@ -645,8 +637,8 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
 
   return (
     <View style={styles.container}>
-      {/* Header — sits above KAV, measured for keyboardVerticalOffset */}
-      <View onLayout={onHeaderLayout} style={[styles.header, { paddingTop: insets.top }]}>
+      {/* Header — sits above KAV (does not move when keyboard opens) */}
+      <View style={[styles.header, { paddingTop: insets.top }]}>
         <TouchableOpacity onPress={handleBack} style={styles.backButton}>
           <Ionicons name="arrow-back" size={24} color={COLORS.text} />
         </TouchableOpacity>
@@ -691,12 +683,14 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
         </View>
       )}
 
+      {/* ─── KEYBOARD AVOIDING VIEW (matches locked chat-rooms pattern) ─── */}
       <KeyboardAvoidingView
         style={styles.kavContainer}
         behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-        keyboardVerticalOffset={headerHeight}
+        keyboardVerticalOffset={0}
       >
-        <FlashList
+        <View style={styles.chatArea}>
+          <FlashList
           ref={flatListRef}
           data={messages || []}
           keyExtractor={(item) => item._id}
@@ -750,24 +744,28 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
           keyboardShouldPersistTaps="handled"
           keyboardDismissMode="interactive"
         />
-        <View
-          onLayout={onComposerLayout}
-          style={{ paddingBottom: Platform.OS === 'ios' ? insets.bottom : 0 }}
-        >
-          <MessageInput
-            onSend={handleSend}
-            onSendImage={handleSendImage}
-            onSendVoice={handleSendVoice}
-            onSendDare={activeConversation.isPreMatch ? handleSendDare : undefined}
-            disabled={isSending || isExpiredChat}
-            isPreMatch={activeConversation.isPreMatch}
-            messagesRemaining={messagesRemaining}
-            subscriptionTier={isDemo ? 'premium' : (currentUser?.subscriptionTier || 'free')}
-            canSendCustom={canSendCustom}
-            recipientName={activeConversation.otherUser.name}
-            initialText={demoDraft ?? ''}
-            onTextChange={handleDraftChange}
-          />
+          {/* ─── COMPOSER (matches locked chat-rooms pattern) ─── */}
+          <View
+            onLayout={onComposerLayout}
+            style={styles.composerWrapper}
+          >
+            <View style={{ paddingBottom: Platform.OS === 'ios' ? insets.bottom : 0 }}>
+              <MessageInput
+                onSend={handleSend}
+                onSendImage={handleSendImage}
+                onSendVoice={handleSendVoice}
+                onSendDare={activeConversation.isPreMatch ? handleSendDare : undefined}
+                disabled={isSending || isExpiredChat}
+                isPreMatch={activeConversation.isPreMatch}
+                messagesRemaining={messagesRemaining}
+                subscriptionTier={isDemo ? 'premium' : (currentUser?.subscriptionTier || 'free')}
+                canSendCustom={canSendCustom}
+                recipientName={activeConversation.otherUser.name}
+                initialText={demoDraft ?? ''}
+                onTextChange={handleDraftChange}
+              />
+            </View>
+          </View>
         </View>
       </KeyboardAvoidingView>
 
@@ -858,6 +856,12 @@ const styles = StyleSheet.create({
   },
   kavContainer: {
     flex: 1,
+  },
+  chatArea: {
+    flex: 1,
+  },
+  composerWrapper: {
+    backgroundColor: COLORS.background,
   },
   loadingContainer: {
     flex: 1,
