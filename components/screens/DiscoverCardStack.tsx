@@ -557,9 +557,13 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       // F2-A: Track swipe for random match control
       incSwipe();
 
-      // F2-B: Check if random match popup should trigger (Discover-only entry point)
-      // Currently NO-OP placeholder; gating logic added in F2-C.
-      maybeTriggerRandomMatch();
+      // F2-D: Check if random match popup should trigger (Discover-only entry point)
+      const shouldTriggerRandomMatch = maybeTriggerRandomMatch();
+      if (shouldTriggerRandomMatch) {
+        // F2-D: Gate returned true - no existing popup handler function exists in this file.
+        // Match logic is inline (simulateMatch + router.push). Future: extract handler or add UI.
+        if (__DEV__) console.log('[F2-D] Gate returned true but no existing match popup handler found');
+      }
 
       // Increment daily counters
       if (direction === "right") incrementLikes();
