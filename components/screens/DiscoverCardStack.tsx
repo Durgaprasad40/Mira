@@ -127,8 +127,9 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   const incrementLikes = useDiscoverStore((s) => s.incrementLikes);
   const incrementStandOuts = useDiscoverStore((s) => s.incrementStandOuts);
   const checkAndResetIfNewDay = useDiscoverStore((s) => s.checkAndResetIfNewDay);
-  // F2-A: Random match control — swipe tracking
+  // F2-A/F2-B: Random match control — swipe tracking + trigger entry point
   const incSwipe = useDiscoverStore((s) => s.incSwipe);
+  const maybeTriggerRandomMatch = useDiscoverStore((s) => s.maybeTriggerRandomMatch);
 
   // Reset daily limits if new day
   useEffect(() => {
@@ -556,6 +557,10 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       // F2-A: Track swipe for random match control
       incSwipe();
 
+      // F2-B: Check if random match popup should trigger (Discover-only entry point)
+      // Currently NO-OP placeholder; gating logic added in F2-C.
+      maybeTriggerRandomMatch();
+
       // Increment daily counters
       if (direction === "right") incrementLikes();
       if (direction === "up") incrementStandOuts();
@@ -657,7 +662,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
         swipeLockRef.current = false;
       }
     },
-    [convexUserId, swipeMutation, advanceCard, hasReachedLikeLimit, hasReachedStandOutLimit, incrementLikes, incrementStandOuts, demo.recordSwipe, incSwipe],
+    [convexUserId, swipeMutation, advanceCard, hasReachedLikeLimit, hasReachedStandOutLimit, incrementLikes, incrementStandOuts, demo.recordSwipe, incSwipe, maybeTriggerRandomMatch],
   );
 
   const animateSwipe = useCallback(

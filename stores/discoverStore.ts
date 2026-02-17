@@ -40,6 +40,11 @@ interface DiscoverState {
   setLastRandomMatchAt: (ts: number) => void;
   setRandomMatchShownThisSession: (v: boolean) => void;
   resetRandomMatchSessionFlags: () => void;
+
+  // F2-B: Discover-only entry point for random match popup
+  // This function should ONLY be called from DiscoverCardStack after swipe/profile view.
+  // Returns true if a random match popup should be shown (gating logic added in F2-C).
+  maybeTriggerRandomMatch: () => boolean;
 }
 
 export const useDiscoverStore = create<DiscoverState>()(
@@ -128,6 +133,16 @@ export const useDiscoverStore = create<DiscoverState>()(
 
       resetRandomMatchSessionFlags: () => {
         set({ randomMatchShownThisSession: false });
+      },
+
+      // F2-B: Discover-only entry point for random match popup
+      // NO-OP placeholder for F2-B. Gating logic (cooldown, probability, intent check) added in F2-C.
+      // IMPORTANT: This function must ONLY be called from DiscoverCardStack.
+      maybeTriggerRandomMatch: () => {
+        if (__DEV__) console.log('[F2-B] maybeTriggerRandomMatch called (NO-OP placeholder)');
+        // F2-B: Always return false - no popup triggered yet.
+        // F2-C will add: intent check, cooldown check, probability roll, session flag.
+        return false;
       },
     }),
     {
