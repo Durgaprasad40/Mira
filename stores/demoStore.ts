@@ -355,24 +355,25 @@ export const useDemoStore = create<DemoState>()(
 
       demoLogout: () => {
         // C7 fix: clear session data on logout while preserving accounts
-        // Clear dependent stores
-        useDemoDmStore.getState().reset();
+        // NOTE: demoDmStore is NOT reset here — DM messages persist across logout/login
+        // Only explicit "Reset Demo Data" (via reset()) should wipe demo messages
         useDemoNotifStore.getState().reset();
         useBlockStore.getState().clearBlocks();
 
-        // Reset in-app state but keep accounts for re-login
+        // Reset session-scoped state but preserve persistent user data
+        // DM-FIX: matches, likes, swipedProfileIds are NOT reset — they persist across logout/login
+        // This ensures DM conversations remain visible (since Messages screen uses matches)
         set({
           currentDemoUserId: null,
-          matches: JSON.parse(JSON.stringify(DEMO_MATCHES)) as DemoMatch[],
-          likes: JSON.parse(JSON.stringify(DEMO_LIKES)) as DemoLike[],
-          crossedPaths: [], // Empty — will be seeded with live location in Nearby screen
+          // matches: preserved — user-created matches persist
+          // likes: preserved — incoming likes persist
+          // swipedProfileIds: preserved — swipe history persists
+          crossedPaths: [], // Session-scoped — re-seeded with live GPS on Nearby screen
           profiles: withValidPhotos(JSON.parse(JSON.stringify(DEMO_PROFILES)) as DemoProfile[]),
           reportedUserIds: [],
           reports: [],
           dismissedNudges: [],
-          swipedProfileIds: [], // 3B-1: Clear swiped profiles on logout
           newMatchUserId: null,
-          seeded: true,
           crossedPathsSeeded: false, // Reset so Nearby will seed with live GPS location
         });
       },
@@ -788,6 +789,14 @@ export const useDemoStore = create<DemoState>()(
 
       simulateMatch: (profileId) => {
         const state = get();
+
+        // IDEMPOTENT: Skip if match already exists for this profile
+        const existingMatch = state.matches.find((m) => m.otherUser?.id === profileId);
+        if (existingMatch) {
+          if (__DEV__) log.info('[MATCH]', 'skipped (already exists)', { profileId });
+          return;
+        }
+
         const profile = state.profiles.find((p) => p._id === profileId);
         if (!profile) return;
 

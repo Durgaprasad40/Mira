@@ -741,6 +741,7 @@ export default function MessagesScreen() {
               unreadCount={item.unreadCount}
               isPreMatch={item.isPreMatch}
               onPress={() => router.push(`/(main)/(tabs)/messages/chat/${item.conversationId || item.id}` as any)}
+              onAvatarPress={() => router.push(`/(main)/profile/${item.otherUser?.id}` as any)}
             />
           )}
           ListHeaderComponent={

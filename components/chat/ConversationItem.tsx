@@ -25,6 +25,8 @@ interface ConversationItemProps {
   unreadCount: number;
   isPreMatch: boolean;
   onPress: () => void;
+  /** DM-FIX: Tap avatar to view profile (optional, falls back to onPress if not provided) */
+  onAvatarPress?: () => void;
 }
 
 export function ConversationItem({
@@ -33,6 +35,7 @@ export function ConversationItem({
   unreadCount,
   isPreMatch,
   onPress,
+  onAvatarPress,
 }: ConversationItemProps) {
   const formatTime = (timestamp: number) => {
     const date = new Date(timestamp);
@@ -70,7 +73,12 @@ export function ConversationItem({
 
   return (
     <TouchableOpacity style={styles.container} onPress={onPress} activeOpacity={0.7}>
-      <View style={styles.avatarContainer}>
+      <TouchableOpacity
+        style={styles.avatarContainer}
+        onPress={onAvatarPress}
+        activeOpacity={onAvatarPress ? 0.7 : 1}
+        disabled={!onAvatarPress}
+      >
         {otherUser.photoUrl ? (
           <Image
             source={{ uri: otherUser.photoUrl }}
@@ -93,7 +101,7 @@ export function ConversationItem({
             <Text style={styles.preMatchText}>Pre-Match</Text>
           </View>
         )}
-      </View>
+      </TouchableOpacity>
 
       <View style={styles.content}>
         <View style={styles.header}>
