@@ -116,6 +116,9 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   // Phase-2 only: Intent filters from store (syncs with Discovery Preferences)
   const { privateIntentKeys: intentFilters, togglePrivateIntentKey, setPrivateIntentKeys } = useFilterStore();
 
+  // P1-7 fix: Phase-1 filter preferences (age, gender, distance)
+  const { minAge, maxAge, maxDistance, gender: genderFilter } = useFilterStore();
+
   // Daily limits — individual selectors to avoid full re-render on AsyncStorage hydration
   const likesRemaining = useDiscoverStore((s) => s.likesRemaining);
   const standOutsRemaining = useDiscoverStore((s) => s.standOutsRemaining);
@@ -245,16 +248,56 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
           });
       }
       // Phase-1 demo mode: use demo.profiles from demoStore
-      return demo.profiles
-        .filter((p) => !excludedSet.has(p._id))
-        .map((p) => toProfileData({
-          ...p,
-          lastActive: Date.now() - 2 * 60 * 60 * 1000,
-          createdAt: Date.now() - 60 * 24 * 60 * 60 * 1000,
-        }));
+      // P1-7 fix: Apply filter preferences (age, gender, distance) to demo profiles
+      // STEP 2.6: Demo-mode fallback — if < 5 profiles, progressively relax filters
+      const MIN_DEMO_PROFILES = 5;
+      const baseProfiles = demo.profiles.filter((p) => !excludedSet.has(p._id));
+
+      // Helper to apply filters with optional relaxation
+      const applyFilters = (profiles: typeof baseProfiles, relaxDistance: boolean, relaxGender: boolean, relaxAge: boolean) => {
+        return profiles
+          .filter((p) => {
+            // Gender filter (relaxed if relaxGender=true)
+            if (relaxGender || genderFilter.length === 0) return true;
+            return genderFilter.includes(p.gender as any);
+          })
+          .filter((p) => {
+            // Age filter (relaxed to 18-60 if relaxAge=true)
+            const ageMin = relaxAge ? 18 : minAge;
+            const ageMax = relaxAge ? 60 : maxAge;
+            return p.age >= ageMin && p.age <= ageMax;
+          })
+          .filter((p) => {
+            // Distance filter (relaxed if relaxDistance=true)
+            if (relaxDistance) return true;
+            return p.distance <= maxDistance;
+          });
+      };
+
+      // Try with strict filters first
+      let filtered = applyFilters(baseProfiles, false, false, false);
+
+      // Fallback 1: Relax distance filter
+      if (filtered.length < MIN_DEMO_PROFILES) {
+        filtered = applyFilters(baseProfiles, true, false, false);
+      }
+      // Fallback 2: Also relax gender filter
+      if (filtered.length < MIN_DEMO_PROFILES) {
+        filtered = applyFilters(baseProfiles, true, true, false);
+      }
+      // Fallback 3: Also widen age range to 18-60
+      if (filtered.length < MIN_DEMO_PROFILES) {
+        filtered = applyFilters(baseProfiles, true, true, true);
+      }
+
+      return filtered.map((p) => toProfileData({
+        ...p,
+        lastActive: Date.now() - 2 * 60 * 60 * 1000,
+        createdAt: Date.now() - 60 * 24 * 60 * 60 * 1000,
+      }));
     }
     return rankProfiles(profilesSafe.map(toProfileData));
-  }, [externalProfiles, profilesSafe, demo.profiles, excludedSet, isPhase2]);
+  }, [externalProfiles, profilesSafe, demo.profiles, excludedSet, isPhase2, genderFilter, minAge, maxAge, maxDistance]);
 
   // Drop profiles with no valid primary photo — prevents blank Discover cards
   const validProfiles = useMemo(
@@ -768,11 +811,46 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
 
   // Empty state (no profiles at all)
   if (profiles.length === 0) {
+    // STEP 2.7: Demo-only reset that clears swipedProfileIds + re-injects profiles
+    const handleResetDemoSwipes = () => {
+      if (isDemoMode) {
+        // Clear swiped history so profiles reappear
+        useDemoStore.setState({ swipedProfileIds: [] });
+        useDemoStore.getState().resetDiscoverPool();
+        setIndex(0);
+      }
+    };
+
     return (
       <View style={[styles.center, dark && { backgroundColor: INCOGNITO_COLORS.background }]}>
         <Text style={styles.emptyEmoji}>✨</Text>
-        <Text style={[styles.emptyTitle, dark && { color: INCOGNITO_COLORS.text }]}>You're all caught up</Text>
-        <Text style={[styles.emptySubtitle, dark && { color: INCOGNITO_COLORS.textLight }]}>Check back soon — we'll bring you more people as they join.</Text>
+        <Text style={[styles.emptyTitle, dark && { color: INCOGNITO_COLORS.text }]}>No more profiles right now</Text>
+        <Text style={[styles.emptySubtitle, dark && { color: INCOGNITO_COLORS.textLight }]}>
+          {isDemoMode
+            ? "You may have swiped through the demo deck or your filters are strict."
+            : "Check back soon — we'll bring you more people as they join."}
+        </Text>
+        {isDemoMode && (
+          <>
+            <TouchableOpacity
+              style={[styles.resetButton, { marginTop: 24 }]}
+              onPress={handleResetDemoSwipes}
+            >
+              <Ionicons name="refresh" size={18} color="#FFFFFF" style={{ marginRight: 8 }} />
+              <Text style={styles.resetButtonText}>Reset Demo Swipes</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.secondaryButton, { marginTop: 12 }]}
+              onPress={() => router.push({ pathname: "/(main)/discovery-preferences", params: { mode: 'phase1' } } as any)}
+            >
+              <Ionicons name="options-outline" size={18} color={C.primary} style={{ marginRight: 8 }} />
+              <Text style={[styles.secondaryButtonText, { color: C.primary }]}>Open Filters</Text>
+            </TouchableOpacity>
+            <Text style={[styles.tipText, dark && { color: INCOGNITO_COLORS.textLight }]}>
+              Tip: Set distance 200+ km and age 18–60 to see more.
+            </Text>
+          </>
+        )}
       </View>
     );
   }
@@ -802,8 +880,11 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
 
   // Deck exhausted state (swiped through all profiles)
   if (!current) {
+    // STEP 2.7: Demo-only reset that clears swipedProfileIds + re-injects profiles
     const handleResetDeck = () => {
       if (isDemoMode) {
+        // Clear swiped history so profiles reappear
+        useDemoStore.setState({ swipedProfileIds: [] });
         useDemoStore.getState().resetDiscoverPool();
         setIndex(0);
       }
@@ -814,16 +895,27 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
         <Text style={styles.emptyEmoji}>🎉</Text>
         <Text style={[styles.emptyTitle, dark && { color: INCOGNITO_COLORS.text }]}>No more profiles</Text>
         <Text style={[styles.emptySubtitle, dark && { color: INCOGNITO_COLORS.textLight }]}>
-          You've seen everyone available right now.
+          {isDemoMode
+            ? "You've swiped through the demo deck. Reset to see everyone again!"
+            : "You've seen everyone available right now."}
         </Text>
         {isDemoMode && (
-          <TouchableOpacity
-            style={[styles.resetButton, { marginTop: 24 }]}
-            onPress={handleResetDeck}
-          >
-            <Ionicons name="refresh" size={18} color="#FFFFFF" style={{ marginRight: 8 }} />
-            <Text style={styles.resetButtonText}>Reset Demo Deck</Text>
-          </TouchableOpacity>
+          <>
+            <TouchableOpacity
+              style={[styles.resetButton, { marginTop: 24 }]}
+              onPress={handleResetDeck}
+            >
+              <Ionicons name="refresh" size={18} color="#FFFFFF" style={{ marginRight: 8 }} />
+              <Text style={styles.resetButtonText}>Reset Demo Deck</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.secondaryButton, { marginTop: 12 }]}
+              onPress={() => router.push({ pathname: "/(main)/discovery-preferences", params: { mode: 'phase1' } } as any)}
+            >
+              <Ionicons name="options-outline" size={18} color={C.primary} style={{ marginRight: 8 }} />
+              <Text style={[styles.secondaryButtonText, { color: C.primary }]}>Open Filters</Text>
+            </TouchableOpacity>
+          </>
         )}
       </View>
     );
@@ -1193,6 +1285,29 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: "600",
     color: COLORS.white,
+  },
+  // STEP 2.7: Empty state secondary button styles
+  secondaryButton: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: "transparent",
+    paddingHorizontal: 24,
+    paddingVertical: 12,
+    borderRadius: 28,
+    borderWidth: 1,
+    borderColor: COLORS.primary,
+  },
+  secondaryButtonText: {
+    fontSize: 15,
+    fontWeight: "600",
+  },
+  tipText: {
+    fontSize: 13,
+    color: COLORS.textLight,
+    textAlign: "center",
+    marginTop: 20,
+    paddingHorizontal: 32,
+    lineHeight: 18,
   },
 
 });

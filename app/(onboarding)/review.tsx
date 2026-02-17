@@ -76,35 +76,50 @@ export default function ReviewScreen() {
     return age;
   };
 
-  // Upload a single photo to Convex storage
+  // OB-9: Upload a single photo to Convex storage with retry logic
+  const MAX_UPLOAD_RETRIES = 2;
+
   const uploadPhoto = async (uri: string): Promise<Id<"_storage"> | null> => {
-    try {
-      // Get upload URL from Convex
-      const uploadUrl = await generateUploadUrl();
+    let lastError: Error | null = null;
 
-      // Fetch the image as blob
-      const response = await fetch(uri);
-      const blob = await response.blob();
+    for (let attempt = 0; attempt <= MAX_UPLOAD_RETRIES; attempt++) {
+      try {
+        // Get upload URL from Convex
+        const uploadUrl = await generateUploadUrl();
 
-      // Upload to Convex storage
-      const uploadResponse = await fetch(uploadUrl, {
-        method: "POST",
-        headers: {
-          "Content-Type": blob.type || "image/jpeg",
-        },
-        body: blob,
-      });
+        // Fetch the image as blob
+        const response = await fetch(uri);
+        const blob = await response.blob();
 
-      if (!uploadResponse.ok) {
-        throw new Error("Failed to upload photo");
+        // Upload to Convex storage
+        const uploadResponse = await fetch(uploadUrl, {
+          method: "POST",
+          headers: {
+            "Content-Type": blob.type || "image/jpeg",
+          },
+          body: blob,
+        });
+
+        if (!uploadResponse.ok) {
+          throw new Error(`Upload failed with status ${uploadResponse.status}`);
+        }
+
+        const result = await uploadResponse.json();
+        return result.storageId as Id<"_storage">;
+      } catch (error: any) {
+        lastError = error;
+        console.error(`Photo upload attempt ${attempt + 1} failed:`, error);
+        // Only retry if not the last attempt
+        if (attempt < MAX_UPLOAD_RETRIES) {
+          // Small delay before retry (exponential backoff)
+          await new Promise((resolve) => setTimeout(resolve, 1000 * (attempt + 1)));
+        }
       }
-
-      const result = await uploadResponse.json();
-      return result.storageId as Id<"_storage">;
-    } catch (error) {
-      console.error("Photo upload error:", error);
-      return null;
     }
+
+    // All retries failed
+    console.error("Photo upload failed after all retries:", lastError);
+    return null;
   };
 
   const handleComplete = async () => {
@@ -117,6 +132,8 @@ export default function ReviewScreen() {
     try {
       if (isDemoMode) {
         // Demo mode: save profile locally, skip Convex
+        // OB-4 fix: Do NOT mark onboarding complete here — that happens in tutorial.tsx
+        // to ensure user sees the tutorial before being marked complete.
         setUploadProgress("Saving profile...");
         const demoStore = useDemoStore.getState();
         demoStore.saveDemoProfile(userId, {
@@ -145,8 +162,7 @@ export default function ReviewScreen() {
           maxAge,
           maxDistance,
         });
-        demoStore.setDemoOnboardingComplete(userId);
-        setOnboardingCompleted(true);
+        // OB-4: Profile saved, but completion flags set ONLY in tutorial.tsx after user finishes tutorial
         setStep("tutorial");
         router.push("/(onboarding)/tutorial" as any);
         return;
@@ -154,6 +170,7 @@ export default function ReviewScreen() {
 
       // Live mode: upload photos + complete onboarding via Convex
       const photoStorageIds: Id<"_storage">[] = [];
+      let failedUploads = 0;
 
       if (photos.length > 0) {
         setUploadProgress("Uploading photos...");
@@ -162,7 +179,41 @@ export default function ReviewScreen() {
           const storageId = await uploadPhoto(photos[i]);
           if (storageId) {
             photoStorageIds.push(storageId);
+          } else {
+            failedUploads++;
           }
+        }
+      }
+
+      // OB-9 fix: If any photos failed to upload, alert user and allow retry
+      if (failedUploads > 0) {
+        const uploadedCount = photoStorageIds.length;
+        const totalCount = photos.length;
+
+        // At least one photo is required for a profile
+        if (uploadedCount === 0) {
+          Alert.alert(
+            "Upload Failed",
+            "We couldn't upload your photos. Please check your internet connection and try again.",
+            [{ text: "OK" }]
+          );
+          return;
+        }
+
+        // Some photos uploaded but not all - let user decide
+        const proceed = await new Promise<boolean>((resolve) => {
+          Alert.alert(
+            "Some Photos Failed",
+            `${uploadedCount} of ${totalCount} photos uploaded successfully. Continue with uploaded photos or try again?`,
+            [
+              { text: "Try Again", onPress: () => resolve(false) },
+              { text: "Continue", onPress: () => resolve(true) },
+            ]
+          );
+        });
+
+        if (!proceed) {
+          return;
         }
       }
 

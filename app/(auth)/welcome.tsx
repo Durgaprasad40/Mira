@@ -1,4 +1,4 @@
-import { View, Text, StyleSheet } from "react-native";
+import { View, Text, StyleSheet, ActivityIndicator } from "react-native";
 import { Button } from "@/components/ui";
 import { useRouter, Redirect } from "expo-router";
 import { COLORS } from "@/lib/constants";
@@ -13,6 +13,22 @@ export default function WelcomeScreen() {
   const { isAuthenticated, onboardingCompleted } = useAuthStore();
   const currentDemoUserId = useDemoStore((s) => s.currentDemoUserId);
   const demoOnboardingComplete = useDemoStore((s) => s.demoOnboardingComplete);
+  const demoStoreHydrated = useDemoStore((s) => s._hasHydrated);
+
+  // OB-6 fix: Wait for demoStore to hydrate before making redirect decisions
+  // This prevents incorrect redirects during startup when store values are stale/default
+  if (isDemoMode && !demoStoreHydrated) {
+    return (
+      <LinearGradient
+        colors={[COLORS.primary, COLORS.secondary]}
+        style={styles.container}
+      >
+        <View style={styles.content}>
+          <ActivityIndicator size="large" color={COLORS.white} />
+        </View>
+      </LinearGradient>
+    );
+  }
 
   // Demo mode: if already logged in, redirect
   if (isDemoMode && currentDemoUserId) {

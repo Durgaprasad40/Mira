@@ -58,11 +58,24 @@ export default function TutorialScreen() {
   ];
 
   const handleComplete = () => {
+    // OB-4 fix: Mark onboarding complete ONLY here (after tutorial is finished)
+    // This ensures user sees the tutorial before being marked complete
     setOnboardingCompleted(true);
     reset();
     if (isDemoMode) {
-      // Seed demo profiles/matches/likes and clear stale DM data
-      useDemoDmStore.setState({ conversations: {}, meta: {}, drafts: {} });
+      // OB-4: Mark demo onboarding complete (moved from review.tsx)
+      const userId = useAuthStore.getState().userId;
+      if (userId) {
+        useDemoStore.getState().setDemoOnboardingComplete(userId);
+      }
+      // OB-8 fix: Only clear DM data if store is empty (fresh onboarding)
+      // This prevents data loss if user somehow re-enters onboarding/tutorial
+      const dmState = useDemoDmStore.getState();
+      const hasExistingData = Object.keys(dmState.conversations).length > 0;
+      if (!hasExistingData) {
+        useDemoDmStore.setState({ conversations: {}, meta: {}, drafts: {} });
+      }
+      // Seed demo profiles/matches/likes
       useDemoStore.getState().seed();
     }
     router.replace("/(main)/(tabs)/home");

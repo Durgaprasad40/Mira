@@ -15,6 +15,9 @@ import {
   PetType,
 } from "@/types";
 
+// OB-1: Hydration timing for timeout fallback
+const ONBOARDING_STORE_LOAD_TIME = Date.now();
+
 interface OnboardingState {
   currentStep: OnboardingStep;
   email: string;
@@ -83,6 +86,10 @@ interface OnboardingState {
   setMaxAge: (age: number) => void;
   setMaxDistance: (distance: number) => void;
   reset: () => void;
+
+  // OB-1: Hydration state for startup safety
+  _hasHydrated: boolean;
+  setHasHydrated: (state: boolean) => void;
 }
 
 const initialState = {
@@ -121,6 +128,9 @@ export const useOnboardingStore = create<OnboardingState>()(
   persist(
     (set) => ({
       ...initialState,
+      _hasHydrated: false,
+
+      setHasHydrated: (state) => set({ _hasHydrated: state }),
 
       setStep: (step) => set({ currentStep: step }),
 
@@ -225,6 +235,40 @@ export const useOnboardingStore = create<OnboardingState>()(
     {
       name: "onboarding-storage",
       storage: createJSONStorage(() => AsyncStorage),
+      // OB-1: Set hydration flag when store rehydrates from AsyncStorage
+      onRehydrateStorage: () => (state, error) => {
+        if (error) {
+          console.error('[onboardingStore] Rehydration error:', error);
+        }
+        if (__DEV__) {
+          const hydrationTime = Date.now() - ONBOARDING_STORE_LOAD_TIME;
+          console.log(`[HYDRATION] onboardingStore: ${hydrationTime}ms`);
+        }
+        state?.setHasHydrated(true);
+      },
     },
   ),
 );
+
+// OB-1: Hydration timeout fallback (matches authStore/demoStore/blockStore pattern)
+const HYDRATION_TIMEOUT_MS = 5000;
+let _onboardingHydrationTimeoutId: ReturnType<typeof setTimeout> | null = null;
+
+function setupOnboardingHydrationTimeout() {
+  // Clear any existing timeout (hot reload safety)
+  if (_onboardingHydrationTimeoutId !== null) {
+    clearTimeout(_onboardingHydrationTimeoutId);
+  }
+  _onboardingHydrationTimeoutId = setTimeout(() => {
+    if (!useOnboardingStore.getState()._hasHydrated) {
+      if (__DEV__) {
+        console.warn('[onboardingStore] Hydration timeout — forcing hydrated state');
+      }
+      useOnboardingStore.getState().setHasHydrated(true);
+    }
+    _onboardingHydrationTimeoutId = null;
+  }, HYDRATION_TIMEOUT_MS);
+}
+
+// OB-1 fix: hydration timeout fallback — if AsyncStorage blocks, force hydration after timeout
+setupOnboardingHydrationTimeout();
