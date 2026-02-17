@@ -6,6 +6,10 @@ import { isDemoMode } from "@/hooks/useConvex";
 const DAILY_LIKE_LIMIT = 25;
 const DAILY_STANDOUT_LIMIT = 2;
 
+// F2-C: Random match popup gating constants
+const RANDOM_MATCH_COOLDOWN_MS = 24 * 60 * 60 * 1000; // 24 hours
+const RANDOM_MATCH_PROB = 0.10; // 10% chance per eligible swipe
+
 function getTodayDateString(): string {
   return new Date().toISOString().slice(0, 10);
 }
@@ -135,14 +139,41 @@ export const useDiscoverStore = create<DiscoverState>()(
         set({ randomMatchShownThisSession: false });
       },
 
-      // F2-B: Discover-only entry point for random match popup
-      // NO-OP placeholder for F2-B. Gating logic (cooldown, probability, intent check) added in F2-C.
+      // F2-B/F2-C: Discover-only entry point for random match popup with gating logic
       // IMPORTANT: This function must ONLY be called from DiscoverCardStack.
       maybeTriggerRandomMatch: () => {
-        if (__DEV__) console.log('[F2-B] maybeTriggerRandomMatch called (NO-OP placeholder)');
-        // F2-B: Always return false - no popup triggered yet.
-        // F2-C will add: intent check, cooldown check, probability roll, session flag.
-        return false;
+        const { hasUserShownIntent, randomMatchShownThisSession, lastRandomMatchAt } = get();
+        const now = Date.now();
+
+        // Gate 1: User must have shown intent (swiped or viewed profiles)
+        if (!hasUserShownIntent) {
+          if (__DEV__) console.log('[F2-C] random match blocked: no intent');
+          return false;
+        }
+
+        // Gate 2: Only one random match per session
+        if (randomMatchShownThisSession) {
+          if (__DEV__) console.log('[F2-C] random match blocked: session limit');
+          return false;
+        }
+
+        // Gate 3: Cooldown - 24 hours since last random match
+        if (lastRandomMatchAt !== null && (now - lastRandomMatchAt) < RANDOM_MATCH_COOLDOWN_MS) {
+          if (__DEV__) console.log('[F2-C] random match blocked: cooldown');
+          return false;
+        }
+
+        // Gate 4: Probability roll (10% chance)
+        const roll = Math.random();
+        if (roll >= RANDOM_MATCH_PROB) {
+          if (__DEV__) console.log('[F2-C] random match blocked: prob', roll.toFixed(3));
+          return false;
+        }
+
+        // All gates passed - TRIGGER random match (atomic update)
+        if (__DEV__) console.log('[F2-C] random match TRIGGERED');
+        set((s) => ({ ...s, randomMatchShownThisSession: true, lastRandomMatchAt: now }));
+        return true;
       },
     }),
     {
