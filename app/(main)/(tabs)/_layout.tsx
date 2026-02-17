@@ -7,6 +7,7 @@ import { COLORS } from "@/lib/constants";
 import { isDemoMode } from "@/hooks/useConvex";
 import { useAuthStore } from "@/stores/authStore";
 import { useDemoStore } from "@/stores/demoStore";
+import { useBlockStore } from "@/stores/blockStore";
 import { useDemoDmStore } from "@/stores/demoDmStore";
 import { useConfessionStore } from "@/stores/confessionStore";
 import { useLocationStore } from "@/stores/locationStore";
@@ -45,7 +46,7 @@ export default function MainTabsLayout() {
   // BUGFIX #27: Use same unread logic for badge as messages list
   // Demo mode: use processThreadsIntegrity for consistency
   const demoMatches = useDemoStore((s) => s.matches);
-  const blockedUserIds = useDemoStore((s) => s.blockedUserIds);
+  const blockedUserIds = useBlockStore((s) => s.blockedUserIds);
   const demoConversations = useDemoDmStore((s) => s.conversations);
   const demoMeta = useDemoDmStore((s) => s.meta);
 

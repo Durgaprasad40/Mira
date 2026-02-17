@@ -27,6 +27,7 @@ import { isDemoMode } from '@/hooks/useConvex';
 import { asUserId } from '@/convex/id';
 import { getDemoCurrentUser, DEMO_PROFILES } from '@/lib/demoData';
 import { useDemoStore } from '@/stores/demoStore';
+import { useBlockStore } from '@/stores/blockStore';
 import { useDemoDmStore } from '@/stores/demoDmStore';
 import { useScreenSafety } from '@/hooks/useScreenSafety';
 import { getProfileCompleteness, NUDGE_MESSAGES } from '@/lib/profileCompleteness';
@@ -117,7 +118,7 @@ export default function MessagesScreen() {
   const demoMatches = useDemoStore((s) => s.matches);
   const demoLikesRaw = useDemoStore((s) => s.likes);
   const demoSeed = useDemoStore((s) => s.seed);
-  const blockedUserIds = useDemoStore((s) => s.blockedUserIds);
+  const blockedUserIds = useBlockStore((s) => s.blockedUserIds);
   const removeLike = useDemoStore((s) => s.removeLike);
   const simulateMatch = useDemoStore((s) => s.simulateMatch);
   const hasHydrated = useDemoStore((s) => s._hasHydrated);

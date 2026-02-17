@@ -3069,7 +3069,4 @@ export const DEMO_ONLINE_USERS: DemoOnlineUser[] = [
   { id: 'demo_profile_10', username: 'Vikram', isOnline: false, gender: 'male', age: 28, lastSeen: Date.now() - 1000 * 60 * 60 * 3 },
 ];
 
-export const isDemoMode = () => {
-  return process.env.EXPO_PUBLIC_DEMO_MODE === 'true' ||
-    process.env.EXPO_PUBLIC_CONVEX_URL?.includes('placeholder');
-};
+// isDemoMode is defined in @/config/demo — import from there or @/hooks/useConvex

@@ -20,6 +20,7 @@ import { isProbablyEmoji } from '@/lib/utils';
 import { useDemoDmStore } from '@/stores/demoDmStore';
 import { useDemoStore, DemoMatch } from '@/stores/demoStore';
 import { logDebugEvent } from '@/lib/debugEventLogger';
+import { useBlockStore } from './blockStore';
 
 // Map old fixed reaction keys → emoji characters
 const OLD_REACTION_TO_EMOJI: Record<string, string> = {
@@ -74,7 +75,6 @@ interface ConfessionState {
   secretCrushes: SecretCrush[];
   reportedIds: string[];
   blockedIds: string[];
-  blockedAuthorIds: string[]; // Users whose confessions are hidden from current user
   seeded: boolean;
   confessionThreads: ConfessionThreads; // Track threads created from confessions
 
@@ -154,7 +154,6 @@ export const useConfessionStore = create<ConfessionState>()(
       secretCrushes: [],
       reportedIds: [],
       blockedIds: [],
-      blockedAuthorIds: [],
       seeded: false,
       confessionThreads: {},
       seenTaggedConfessionIds: [],
@@ -694,19 +693,16 @@ export const useConfessionStore = create<ConfessionState>()(
         });
       },
 
-      // ── Block Author ──
+      // ── Block Author (delegates to shared blockStore) ──
 
       blockAuthor: (authorId) => {
-        const state = get();
-        if (state.blockedAuthorIds.includes(authorId)) return;
-        set({
-          blockedAuthorIds: [...state.blockedAuthorIds, authorId],
-        });
+        // Delegate to shared blockStore (single source of truth)
+        useBlockStore.getState().blockUser(authorId);
         if (__DEV__) console.log('[CONFESS] confess_blocked_user:', authorId);
       },
 
       isAuthorBlocked: (authorId) => {
-        return get().blockedAuthorIds.includes(authorId);
+        return useBlockStore.getState().isBlocked(authorId);
       },
     }),
     {
@@ -719,7 +715,6 @@ export const useConfessionStore = create<ConfessionState>()(
         secretCrushes: state.secretCrushes,
         reportedIds: state.reportedIds,
         blockedIds: state.blockedIds,
-        blockedAuthorIds: state.blockedAuthorIds,
         seeded: state.seeded,
         confessionThreads: state.confessionThreads,
         seenTaggedConfessionIds: state.seenTaggedConfessionIds,

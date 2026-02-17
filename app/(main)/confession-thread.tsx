@@ -26,6 +26,7 @@ import ReactionBar from '@/components/confessions/ReactionBar';
 import { useAuthStore } from '@/stores/authStore';
 import { useConfessionStore } from '@/stores/confessionStore';
 import { useDemoStore } from '@/stores/demoStore';
+import { useBlockStore } from '@/stores/blockStore';
 import { isDemoMode } from '@/hooks/useConvex';
 import {
   DEMO_CONFESSION_REPLIES,
@@ -67,7 +68,7 @@ export default function ConfessionThreadScreen() {
   const addChat = useConfessionStore((s) => s.addChat);
   const reportedIds = useConfessionStore((s) => s.reportedIds);
   const cleanupExpiredConfessions = useConfessionStore((s) => s.cleanupExpiredConfessions);
-  const globalBlockedIds = useDemoStore((s) => s.blockedUserIds);
+  const globalBlockedIds = useBlockStore((s) => s.blockedUserIds);
 
   const confession = useMemo(
     () => confessions.find((c) => c.id === confessionId),

@@ -4,6 +4,7 @@ import { api } from "@/convex/_generated/api";
 import { useAuthStore } from "@/stores/authStore";
 import { isDemoMode } from "@/hooks/useConvex";
 import { useDemoStore } from "@/stores/demoStore";
+import { useBlockStore } from "@/stores/blockStore";
 import { useShallow } from "zustand/react/shallow";
 
 const EMPTY_PROFILES: any[] = [];
@@ -19,17 +20,17 @@ export function useDiscoverProfiles(): any[] {
   const demo = useDemoStore(
     useShallow((s) => ({
       profiles: s.profiles,
-      blockedUserIds: s.blockedUserIds,
       matchCount: s.matches.length,
       getExcludedUserIds: s.getExcludedUserIds,
     }))
   );
+  const blockedUserIds = useBlockStore((s) => s.blockedUserIds);
 
   // Derive excluded IDs as Set for O(1) lookup
   const excludedSet = useMemo(() => {
-    if (!isDemoMode) return new Set(demo.blockedUserIds);
+    if (!isDemoMode) return new Set(blockedUserIds);
     return new Set(demo.getExcludedUserIds());
-  }, [demo.blockedUserIds, demo.matchCount, demo.getExcludedUserIds]);
+  }, [blockedUserIds, demo.matchCount, demo.getExcludedUserIds]);
 
   // Query args for Convex (skip in demo mode)
   const queryArgs = useMemo(() => {

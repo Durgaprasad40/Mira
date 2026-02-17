@@ -26,6 +26,7 @@ import { isDemoMode } from "@/hooks/useConvex";
 import { useNotifications } from "@/hooks/useNotifications";
 import { DEMO_PROFILES, getDemoCurrentUser, DEMO_INCOGNITO_PROFILES } from "@/lib/demoData";
 import { useDemoStore } from "@/stores/demoStore";
+import { useBlockStore } from "@/stores/blockStore";
 import { router } from "expo-router";
 import { useIsFocused } from "@react-navigation/native";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
@@ -168,19 +169,19 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   const demo = useDemoStore(useShallow((s) => ({
     profiles: s.profiles,
     seed: s.seed,
-    blockedUserIds: s.blockedUserIds,
     matchCount: s.matches.length,          // only need length for exclusion deps
     swipedCount: s.swipedProfileIds.length, // 3B-1: track swiped count for deps
     getExcludedUserIds: s.getExcludedUserIds,
     recordSwipe: s.recordSwipe,            // 3B-1: record swipes to prevent repeats
     hasHydrated: s._hasHydrated,           // FIX: track hydration for safe seeding
   })));
+  const blockedUserIds = useBlockStore((s) => s.blockedUserIds);
   // Derive excluded IDs as a Set for O(1) lookup in filters.
   // 3B-1: Deps now include swipedCount so excludedSet updates after each swipe
   const excludedSet = useMemo(() => {
-    if (!isDemoMode) return new Set(demo.blockedUserIds);
+    if (!isDemoMode) return new Set(blockedUserIds);
     return new Set(demo.getExcludedUserIds());
-  }, [demo.blockedUserIds, demo.matchCount, demo.swipedCount, demo.getExcludedUserIds]);
+  }, [blockedUserIds, demo.matchCount, demo.swipedCount, demo.getExcludedUserIds]);
   // FIX: Only seed after hydration completes to prevent overwriting persisted data
   useEffect(() => { if (isDemoMode && demo.hasHydrated) demo.seed(); }, [demo.seed, demo.hasHydrated]);
 

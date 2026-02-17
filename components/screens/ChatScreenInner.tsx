@@ -40,6 +40,7 @@ import { isDemoMode } from '@/hooks/useConvex';
 import { useDemoDmStore, DemoDmMessage } from '@/stores/demoDmStore';
 import { VoiceMessageBubble } from '@/components/chat/VoiceMessageBubble';
 import { useDemoStore } from '@/stores/demoStore';
+import { useBlockStore } from '@/stores/blockStore';
 import { useDemoNotifStore } from '@/hooks/useNotifications';
 import { Toast } from '@/components/ui/Toast';
 import { logDebugEvent } from '@/lib/debugEventLogger';
@@ -135,7 +136,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
   };
 
   // ── Safety / integrity guards ──
-  const blockedUserIds = useDemoStore((s) => s.blockedUserIds);
+  const blockedUserIds = useBlockStore((s) => s.blockedUserIds);
   const currentMeta = conversationId ? demoMeta[conversationId] : undefined;
   const otherUserIdFromMeta = getOtherUserIdFromMeta(currentMeta);
 

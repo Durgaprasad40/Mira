@@ -5,6 +5,7 @@ import { useAuthStore } from '@/stores/authStore';
 import { isDemoMode } from '@/hooks/useConvex';
 import { DEMO_PROFILES } from '@/lib/demoData';
 import { useDemoStore } from '@/stores/demoStore';
+import { useBlockStore } from '@/stores/blockStore';
 import { useShallow } from 'zustand/react/shallow';
 
 const EMPTY_PROFILES: any[] = [];
@@ -22,19 +23,19 @@ const EMPTY_PROFILES: any[] = [];
 export function useExploreProfiles(): any[] {
   const userId = useAuthStore((s) => s.userId);
   const demo = useDemoStore(useShallow((s) => ({
-    blockedUserIds: s.blockedUserIds,
     matchCount: s.matches.length,
     likesCount: s.likes.length,
     profiles: s.profiles,
     getExcludedUserIds: s.getExcludedUserIds,
   })));
+  const blockedUserIds = useBlockStore((s) => s.blockedUserIds);
 
   // Derive excluded IDs as Set for O(1) lookup
   // Depends on matches, likes, and blocked users to stay fresh
   const excludedSet = useMemo(() => {
-    if (!isDemoMode) return new Set(demo.blockedUserIds);
+    if (!isDemoMode) return new Set(blockedUserIds);
     return new Set(demo.getExcludedUserIds());
-  }, [demo.blockedUserIds, demo.matchCount, demo.likesCount, demo.getExcludedUserIds]);
+  }, [blockedUserIds, demo.matchCount, demo.likesCount, demo.getExcludedUserIds]);
 
   const queryArgs = useMemo(() => {
     if (isDemoMode || !userId) return 'skip' as const;

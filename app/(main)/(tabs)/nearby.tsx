@@ -33,6 +33,7 @@ import { DEMO_PROFILES } from '@/lib/demoData';
 import { useAuthStore } from '@/stores/authStore';
 import { isDemoMode } from '@/hooks/useConvex';
 import { useDemoStore } from '@/stores/demoStore';
+import { useBlockStore } from '@/stores/blockStore';
 import { useDemoDmStore } from '@/stores/demoDmStore';
 import { useDemoNotifStore } from '@/hooks/useNotifications';
 import { api } from '@/convex/_generated/api';
@@ -271,7 +272,7 @@ export default function NearbyScreen() {
   const demoCrossedPaths = useDemoStore((s) => s.crossedPaths);
   const getVisibleCrossedPaths = useDemoStore((s) => s.getVisibleCrossedPaths);
   const demoSeed = useDemoStore((s) => s.seed);
-  const blockedUserIds = useDemoStore((s) => s.blockedUserIds);
+  const blockedUserIds = useBlockStore((s) => s.blockedUserIds);
   const demoMatches = useDemoStore((s) => s.matches);
   const markCrossedPathSeen = useDemoStore((s) => s.markCrossedPathSeen);
   const hideCrossedPath = useDemoStore((s) => s.hideCrossedPath);

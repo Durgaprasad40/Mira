@@ -17,6 +17,7 @@ import { useDemoNotifStore } from '@/hooks/useNotifications';
 import { logDebugEvent } from '@/lib/debugEventLogger';
 import { resetPhase2MatchSession } from '../lib/phase2MatchSession';
 import { resetPrivateChatForTesting } from './privateChatStore';
+import { useBlockStore } from './blockStore';
 import { PRIVATE_INTENT_CATEGORIES } from '@/lib/privateConstants';
 import { log } from '@/utils/logger';
 import { markTiming } from '@/utils/startupTiming';
@@ -204,8 +205,7 @@ interface DemoState {
   _hasHydrated: boolean;
   setHasHydrated: (state: boolean) => void;
 
-  // Safety
-  blockedUserIds: string[];
+  // Safety (blockedUserIds moved to blockStore for cross-phase sharing)
   reportedUserIds: string[];
   reports: DemoReport[];
 
@@ -300,7 +300,6 @@ export const useDemoStore = create<DemoState>()(
       demoProfiles: {},
       demoOnboardingComplete: {},
       _hasHydrated: false,
-      blockedUserIds: [],
       reportedUserIds: [],
       reports: [],
       dismissedNudges: [],
@@ -359,6 +358,7 @@ export const useDemoStore = create<DemoState>()(
         // Clear dependent stores
         useDemoDmStore.getState().reset();
         useDemoNotifStore.getState().reset();
+        useBlockStore.getState().clearBlocks();
 
         // Reset in-app state but keep accounts for re-login
         set({
@@ -367,7 +367,6 @@ export const useDemoStore = create<DemoState>()(
           likes: JSON.parse(JSON.stringify(DEMO_LIKES)) as DemoLike[],
           crossedPaths: [], // Empty — will be seeded with live location in Nearby screen
           profiles: withValidPhotos(JSON.parse(JSON.stringify(DEMO_PROFILES)) as DemoProfile[]),
-          blockedUserIds: [],
           reportedUserIds: [],
           reports: [],
           dismissedNudges: [],
@@ -425,7 +424,7 @@ export const useDemoStore = create<DemoState>()(
 
       getExcludedUserIds: () => {
         const s = get();
-        const ids = new Set(s.blockedUserIds);
+        const ids = new Set(useBlockStore.getState().blockedUserIds);
         // 3B-1: Add swiped profiles
         for (const id of s.swipedProfileIds) {
           ids.add(id);
@@ -448,7 +447,20 @@ export const useDemoStore = create<DemoState>()(
         const state = get();
 
         // CRITICAL: Do not seed before hydration completes
+        // CR-3: Also check dependent stores (demoDmStore, blockStore) to prevent race conditions
         if (!state._hasHydrated) return;
+        if (!useDemoDmStore.getState()._hasHydrated) {
+          if (__DEV__) {
+            console.log('[demoStore] seed() aborted — demoDmStore not hydrated yet');
+          }
+          return;
+        }
+        if (!useBlockStore.getState()._hasHydrated) {
+          if (__DEV__) {
+            console.log('[demoStore] seed() aborted — blockStore not hydrated yet');
+          }
+          return;
+        }
 
         // Only skip if ALL data is present
         if (state.seeded && state.profiles.length > 0 && state.likes.length > 0) {
@@ -578,6 +590,7 @@ export const useDemoStore = create<DemoState>()(
         useConfessionStore.setState({ seeded: false });
         useConfessionStore.getState().seedConfessions();
 
+        useBlockStore.getState().clearBlocks();
         set({
           profiles: withValidPhotos(JSON.parse(JSON.stringify(DEMO_PROFILES)) as DemoProfile[]),
           matches: JSON.parse(JSON.stringify(DEMO_MATCHES)) as DemoMatch[],
@@ -589,7 +602,6 @@ export const useDemoStore = create<DemoState>()(
           currentDemoUserId: null,
           demoProfiles: {},
           demoOnboardingComplete: {},
-          blockedUserIds: [],
           reportedUserIds: [],
           reports: [],
           dismissedNudges: [],
@@ -832,22 +844,20 @@ export const useDemoStore = create<DemoState>()(
       },
 
       // ── Safety actions ──
-      // These update blockedUserIds which is read (via .includes() / .filter())
-      // by every consumer that shows profiles: DiscoverCardStack, useExploreProfiles,
-      // nearby, and messages. Blocking takes effect instantly across the whole app
-      // because Zustand triggers re-renders in all subscribed components.
+      // These delegate to blockStore (single source of truth for blocked IDs).
+      // Also clean up demoStore entities (matches, likes, crossedPaths, DM, confessions).
 
       blockUser: (userId) => {
-        set((s) => {
-          if (s.blockedUserIds.includes(userId)) return s;
-          return {
-            blockedUserIds: [...s.blockedUserIds, userId],
-            matches: s.matches.filter((m) => m.otherUser?.id !== userId),
-            likes: s.likes.filter((l) => l.userId !== userId),
-            // SAFETY FIX: Also remove blocked user from crossed paths immediately
-            crossedPaths: s.crossedPaths.filter((cp) => cp.otherUserId !== userId),
-          };
-        });
+        // Delegate to shared blockStore (single source of truth)
+        useBlockStore.getState().blockUser(userId);
+
+        // Clean up demoStore entities that reference this user
+        set((s) => ({
+          matches: s.matches.filter((m) => m.otherUser?.id !== userId),
+          likes: s.likes.filter((l) => l.userId !== userId),
+          // SAFETY FIX: Also remove blocked user from crossed paths immediately
+          crossedPaths: s.crossedPaths.filter((cp) => cp.otherUserId !== userId),
+        }));
         // Debug event logging
         logDebugEvent('BLOCK_OR_REPORT', 'User blocked');
         // Also remove crossed path notifications for blocked user
@@ -927,13 +937,14 @@ export const useDemoStore = create<DemoState>()(
       },
 
       unblockUser: (userId) => {
-        set((s) => ({
-          blockedUserIds: s.blockedUserIds.filter((id) => id !== userId),
-        }));
+        // Delegate to shared blockStore (single source of truth)
+        useBlockStore.getState().unblockUser(userId);
       },
 
       clearSafety: () => {
-        set({ blockedUserIds: [], reportedUserIds: [], reports: [] });
+        // Delegate to shared blockStore (single source of truth)
+        useBlockStore.getState().clearBlocks();
+        set({ reportedUserIds: [], reports: [] });
       },
     }),
     {
@@ -1055,7 +1066,6 @@ export const useDemoStore = create<DemoState>()(
         currentDemoUserId: state.currentDemoUserId,
         demoProfiles: state.demoProfiles,
         demoOnboardingComplete: state.demoOnboardingComplete,
-        blockedUserIds: state.blockedUserIds,
         reportedUserIds: state.reportedUserIds,
         reports: state.reports,
         dismissedNudges: state.dismissedNudges,

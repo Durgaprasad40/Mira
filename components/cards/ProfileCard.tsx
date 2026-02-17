@@ -8,7 +8,7 @@ import {
 } from 'react-native';
 import { Image } from 'expo-image';
 import { Ionicons } from '@expo/vector-icons';
-import { COLORS, INCOGNITO_COLORS, RELATIONSHIP_INTENTS } from '@/lib/constants';
+import { COLORS, INCOGNITO_COLORS, RELATIONSHIP_INTENTS, ACTIVITY_FILTERS } from '@/lib/constants';
 import type { TrustBadge } from '@/lib/trustBadges';
 import { PRIVATE_INTENT_CATEGORIES } from '@/lib/privateConstants';
 
@@ -47,6 +47,8 @@ export interface ProfileCardProps {
   lookingFor?: string[];
   /** Phase-1 only: Relationship intent keys */
   relationshipIntent?: string[];
+  /** Phase-1 only: Activities/interests keys */
+  activities?: string[];
   // Legacy props for non-Discover usage (explore grid etc.)
   user?: any;
   onPress?: () => void;
@@ -71,6 +73,7 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
   privateIntentKeys,
   lookingFor,
   relationshipIntent,
+  activities,
   onPress,
 }) => {
   const dark = theme === 'dark';
@@ -107,6 +110,16 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
       .slice(0, 2) // Show max 2 on card
       .map(i => i!.label);
   }, [dark, relationshipIntent]);
+
+  // Phase-1 only: Get activity labels with emojis
+  const activityItems = useMemo(() => {
+    if (dark || !activities || activities.length === 0) return [];
+    return activities
+      .map(key => ACTIVITY_FILTERS.find(a => a.value === key))
+      .filter(Boolean)
+      .slice(0, 3) // Show max 3 on card
+      .map(a => ({ emoji: a!.emoji, label: a!.label }));
+  }, [dark, activities]);
 
   const [photoIndex, setPhotoIndex] = useState(0);
   // 7-1: Track image load errors to show placeholder on failure
@@ -247,6 +260,16 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
                 {intentLabels.map((label, idx) => (
                   <View key={idx} style={styles.intentChip}>
                     <Text style={styles.intentChipText}>{label}</Text>
+                  </View>
+                ))}
+              </View>
+            )}
+            {/* Phase-1 only: Activities/interests chips */}
+            {!dark && activityItems.length > 0 && (
+              <View style={styles.activityChipRow}>
+                {activityItems.map((item, idx) => (
+                  <View key={idx} style={styles.activityChip}>
+                    <Text style={styles.activityChipText}>{item.emoji} {item.label}</Text>
                   </View>
                 ))}
               </View>
@@ -466,6 +489,27 @@ const styles = StyleSheet.create({
     paddingVertical: 3,
   },
   intentChipText: {
+    fontSize: 11,
+    fontWeight: '500',
+    color: COLORS.white,
+    textShadowColor: 'rgba(0,0,0,0.4)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 2,
+  },
+  // Phase-1 activity chips row
+  activityChipRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 4,
+    marginTop: 4,
+  },
+  activityChip: {
+    backgroundColor: 'rgba(255,255,255,0.15)',
+    borderRadius: 10,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+  },
+  activityChipText: {
     fontSize: 11,
     fontWeight: '500',
     color: COLORS.white,

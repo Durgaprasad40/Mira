@@ -47,6 +47,7 @@ import { ConfessionChat } from '@/types';
 import { useAuthStore } from '@/stores/authStore';
 import { useConfessionStore } from '@/stores/confessionStore';
 import { useDemoStore } from '@/stores/demoStore';
+import { useBlockStore } from '@/stores/blockStore';
 import { useDemoDmStore } from '@/stores/demoDmStore';
 import { isDemoMode } from '@/hooks/useConvex';
 import { asUserId } from '@/convex/id';
@@ -101,11 +102,9 @@ export default function ConfessionsScreen() {
   const getConfessionCountToday = useConfessionStore((s) => s.getConfessionCountToday);
   const recordConfessionTimestamp = useConfessionStore((s) => s.recordConfessionTimestamp);
   const blockAuthor = useConfessionStore((s) => s.blockAuthor);
-  const isAuthorBlocked = useConfessionStore((s) => s.isAuthorBlocked);
-  const blockedAuthorIds = useConfessionStore((s) => s.blockedAuthorIds);
 
-  // Global blocked user IDs (from profile/chat block actions)
-  const globalBlockedIds = useDemoStore((s) => s.blockedUserIds);
+  // Global blocked user IDs (unified via blockStore - includes confession author blocks)
+  const globalBlockedIds = useBlockStore((s) => s.blockedUserIds);
 
   // DM store for conversation metadata
   const conversationMeta = useDemoDmStore((s) => s.meta);
@@ -385,24 +384,20 @@ export default function ConfessionsScreen() {
         revealPolicy: 'never' as const,
         targetUserId: c.taggedUserId,
       }));
-      // Filter blocked users (Convex may not filter all)
+      // Filter blocked users (unified via blockStore)
       if (globalBlockedIds.length > 0) {
         items = items.filter((c) => !globalBlockedIds.includes(c.userId));
-      }
-      // Filter blocked authors (confession-specific blocking)
-      if (blockedAuthorIds.length > 0) {
-        items = items.filter((c) => !blockedAuthorIds.includes(c.userId));
       }
       return items;
     }
     // Demo mode: use integrity output (already filtered and sorted)
-    // Also filter blocked authors
+    // Also filter blocked users via blockStore
     let posts = integrityOutput.activePosts;
-    if (blockedAuthorIds.length > 0) {
-      posts = posts.filter((c) => !blockedAuthorIds.includes(c.userId));
+    if (globalBlockedIds.length > 0) {
+      posts = posts.filter((c) => !globalBlockedIds.includes(c.userId));
     }
     return posts;
-  }, [isDemoMode, convexConfessions, globalBlockedIds, integrityOutput.activePosts, blockedAuthorIds]);
+  }, [isDemoMode, convexConfessions, globalBlockedIds, integrityOutput.activePosts]);
 
   // Trending confessions
   const trendingConfessions = useMemo(() => {

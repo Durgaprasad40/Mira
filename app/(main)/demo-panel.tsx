@@ -12,6 +12,7 @@ import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { COLORS } from '@/lib/constants';
 import { useDemoStore } from '@/stores/demoStore';
+import { useBlockStore } from '@/stores/blockStore';
 import { useDemoDmStore } from '@/stores/demoDmStore';
 import { useAuthStore } from '@/stores/authStore';
 import { useConfessionStore } from '@/stores/confessionStore';
@@ -40,7 +41,7 @@ export default function DemoPanelScreen() {
   const confessions = useConfessionStore((s) => s.confessions);
   const addConfession = useConfessionStore((s) => s.addConfession);
 
-  const blockedUserIds = useDemoStore((s) => s.blockedUserIds);
+  const blockedUserIds = useBlockStore((s) => s.blockedUserIds);
   const reportedUserIds = useDemoStore((s) => s.reportedUserIds);
   const clearSafety = useDemoStore((s) => s.clearSafety);
 

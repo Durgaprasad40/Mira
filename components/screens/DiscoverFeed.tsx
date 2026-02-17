@@ -22,8 +22,9 @@ import { Ionicons } from "@expo/vector-icons";
 import { useAuthStore } from "@/stores/authStore";
 import { useFilterStore } from "@/stores/filterStore";
 import { useSubscriptionStore } from "@/stores/subscriptionStore";
+import { useDemoStore } from "@/stores/demoStore";
+import { useBlockStore } from "@/stores/blockStore";
 import { COLORS, INCOGNITO_COLORS } from "@/lib/constants";
-import { DEMO_PROFILES } from "@/lib/demoData";
 import { isDemoMode } from "@/hooks/useConvex";
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get("window");
@@ -41,6 +42,9 @@ interface ProfileData {
   isVerified?: boolean;
   distance?: number;
   photos: { url: string }[];
+  relationshipIntent?: string[];
+  activities?: string[];
+  profilePrompt?: { question: string; answer: string };
 }
 
 export interface DiscoverFeedProps {
@@ -59,6 +63,12 @@ export function DiscoverFeed({ mode = "main", theme = "light", onOpenProfile }: 
   const userId = useAuthStore((s) => s.userId);
   const { minAge, maxAge, maxDistance, gender, relationshipIntent, filterVersion } = useFilterStore();
   useSubscriptionStore();
+
+  // Demo store — single source of truth for Phase-1 demo profiles
+  const demoProfiles = useDemoStore((s) => s.profiles);
+  const demoExcludedIds = useDemoStore((s) => s.getExcludedUserIds());
+  const blockedIds = useBlockStore((s) => s.blockedUserIds);
+  const excludedIds = isDemoMode ? demoExcludedIds : blockedIds;
 
   const [currentIndex, setCurrentIndex] = useState(0);
   const [showPrefsMenu, setShowPrefsMenu] = useState(false);
@@ -92,21 +102,48 @@ export function DiscoverFeed({ mode = "main", theme = "light", onOpenProfile }: 
   const convexProfiles = useQuery(api.discover.getDiscoverProfiles, discoverArgs);
   const profilesSafe = convexProfiles ?? EMPTY_ARRAY;
 
+  // Memoize excluded set from store-selected IDs
+  const excludedSet = useMemo(() => new Set(excludedIds), [excludedIds]);
+
   // Transform to common format — memoize to prevent new arrays each render
   // filterVersion in deps forces re-render when preferences saved (demo mode cache bust)
+  // Apply gender filter: only show profiles matching user's "Looking for" preference
+  // Uses demoStore.profiles as single source of truth (not static DEMO_PROFILES)
   const demoItems = useMemo<ProfileData[]>(
     () =>
-      DEMO_PROFILES.map((p) => ({
-        id: p._id,
-        name: p.name,
-        age: p.age,
-        bio: p.bio,
-        city: p.city,
-        isVerified: p.isVerified,
-        distance: p.distance,
-        photos: p.photos,
-      })),
-    [filterVersion],
+      demoProfiles
+        .filter((p) => {
+          // Exclude blocked/swiped/matched users
+          const pid = p._id ?? (p as any).id;
+          if (pid && excludedSet.has(pid)) return false;
+          // Gender filter: If user has set gender preferences, only show matching profiles
+          // If no gender preference is set (empty array), show all profiles
+          if (gender.length === 0) return true;
+          return gender.includes(p.gender as any);
+        })
+        .filter((p) => {
+          // Age filter: Only show profiles within the user's age range
+          return p.age >= minAge && p.age <= maxAge;
+        })
+        .filter((p) => {
+          // Distance filter: Only show profiles within the user's max distance
+          // maxDistance is stored in km
+          return p.distance <= maxDistance;
+        })
+        .map((p) => ({
+          id: p._id,
+          name: p.name,
+          age: p.age,
+          bio: p.bio,
+          city: p.city,
+          isVerified: p.isVerified,
+          distance: p.distance,
+          photos: p.photos,
+          relationshipIntent: p.relationshipIntent,
+          activities: p.activities,
+          profilePrompt: p.profilePrompts?.[0], // Show first prompt on card
+        })),
+    [demoProfiles, excludedSet, filterVersion, gender, minAge, maxAge, maxDistance],
   );
 
   const liveItems = useMemo<ProfileData[]>(
@@ -121,6 +158,9 @@ export function DiscoverFeed({ mode = "main", theme = "light", onOpenProfile }: 
         distance: p.distance,
         photos:
           p.photos?.map((photo: any) => ({ url: photo.url || photo })) ?? EMPTY_ARRAY,
+        relationshipIntent: p.relationshipIntent,
+        activities: p.activities,
+        profilePrompt: p.profilePrompts?.[0],
       })),
     [profilesSafe],
   );
@@ -415,6 +455,9 @@ export function DiscoverFeed({ mode = "main", theme = "light", onOpenProfile }: 
               isVerified={currentProfile.isVerified}
               distance={currentProfile.distance}
               photos={currentProfile.photos}
+              relationshipIntent={currentProfile.relationshipIntent}
+              activities={currentProfile.activities}
+              profilePrompt={currentProfile.profilePrompt}
               showCarousel
               theme={theme}
               onOpenProfile={onOpenProfile ? () => onOpenProfile(currentProfile.id) : undefined}

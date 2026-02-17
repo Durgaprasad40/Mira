@@ -100,6 +100,10 @@ interface DemoDmState {
 
   /** Clear all conversations, metadata, and drafts. */
   reset: () => void;
+
+  /** Hydration state for startup safety */
+  _hasHydrated: boolean;
+  setHasHydrated: (state: boolean) => void;
 }
 
 /**
@@ -128,6 +132,9 @@ export const useDemoDmStore = create<DemoDmState>()(
       conversations: {},
       meta: {},
       drafts: {},
+      _hasHydrated: false,
+
+      setHasHydrated: (state) => set({ _hasHydrated: state }),
 
       seedConversation: (id, seed) => {
         // Only seed once — existing data takes precedence
@@ -271,8 +278,32 @@ export const useDemoDmStore = create<DemoDmState>()(
           if (__DEV__) {
             console.log(`[HYDRATION] demoDmStore: ${hydrationTime}ms (convos=${convoIds.length}, messages=${totalMessages})`);
           }
+          state.setHasHydrated(true);
         }
       },
     },
   ),
 );
+
+// CR-3: Hydration timeout fallback (matches authStore/demoStore/blockStore pattern)
+const HYDRATION_TIMEOUT_MS = 5000;
+let _dmHydrationTimeoutId: ReturnType<typeof setTimeout> | null = null;
+
+function setupDmHydrationTimeout() {
+  // Clear any existing timeout (hot reload safety)
+  if (_dmHydrationTimeoutId !== null) {
+    clearTimeout(_dmHydrationTimeoutId);
+  }
+  _dmHydrationTimeoutId = setTimeout(() => {
+    if (!useDemoDmStore.getState()._hasHydrated) {
+      if (__DEV__) {
+        console.warn('[demoDmStore] Hydration timeout — forcing hydrated state');
+      }
+      useDemoDmStore.getState().setHasHydrated(true);
+    }
+    _dmHydrationTimeoutId = null;
+  }, HYDRATION_TIMEOUT_MS);
+}
+
+// CR-3 fix: hydration timeout fallback — if AsyncStorage blocks, force hydration after timeout
+setupDmHydrationTimeout();

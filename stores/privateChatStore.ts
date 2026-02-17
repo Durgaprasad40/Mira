@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { useBlockStore } from './blockStore';
 import type { IncognitoConversation, IncognitoMessage } from '@/types';
 // NOTE: Phase-2 no longer seeds demo conversations/messages.
 // Conversations are created dynamically via Desire Land matches.
@@ -67,8 +68,7 @@ interface PrivateChatState {
   acceptDare: (dareId: string) => void;
   declineDare: (dareId: string) => void;
 
-  // Block/Report
-  blockedUserIds: string[];
+  // Block/Report (delegates to shared blockStore for cross-phase consistency)
   blockUser: (userId: string) => void;
   unblockUser: (userId: string) => void;
   isBlocked: (userId: string) => boolean;
@@ -290,11 +290,12 @@ export const usePrivateChatStore = create<PrivateChatState>()(
       pendingDares: s.pendingDares.filter((d) => d.id !== dareId),
     })),
 
-  blockedUserIds: [],
-  blockUser: (userId) =>
+  blockUser: (userId) => {
+    // Delegate to shared blockStore (single source of truth)
+    useBlockStore.getState().blockUser(userId);
+
+    // Clean up privateChatStore entities that reference this user
     set((s) => {
-      if (s.blockedUserIds.includes(userId)) return s;
-      // Find conversation IDs for this user to remove their messages
       const conversationIds = s.conversations
         .filter((c) => c.participantId === userId)
         .map((c) => c.id);
@@ -303,17 +304,17 @@ export const usePrivateChatStore = create<PrivateChatState>()(
         delete remainingMessages[id];
       }
       return {
-        blockedUserIds: [...s.blockedUserIds, userId],
         conversations: s.conversations.filter((c) => c.participantId !== userId),
         messages: remainingMessages,
         unlockedUsers: s.unlockedUsers.filter((u) => u.id !== userId),
       };
-    }),
-  unblockUser: (userId) =>
-    set((s) => ({
-      blockedUserIds: s.blockedUserIds.filter((id) => id !== userId),
-    })),
-  isBlocked: (userId) => get().blockedUserIds.includes(userId),
+    });
+  },
+  unblockUser: (userId) => {
+    // Delegate to shared blockStore (single source of truth)
+    useBlockStore.getState().unblockUser(userId);
+  },
+  isBlocked: (userId) => useBlockStore.getState().isBlocked(userId),
 
   // Secure Photo viewing: Set viewedAt and timerEndsAt on first open
   markSecurePhotoViewed: (conversationId, messageId) =>
@@ -397,7 +398,6 @@ export const usePrivateChatStore = create<PrivateChatState>()(
         messages: state.messages,
         pendingDares: state.pendingDares,
         sentDares: state.sentDares,
-        blockedUserIds: state.blockedUserIds,
       }),
       // BUGFIX #45: Store timeout ID to clear on re-init/hot reload
       onRehydrateStorage: () => {
@@ -431,13 +431,15 @@ export function resetPrivateChatForTesting(): void {
   const messageThreads = Object.keys(stateBefore.messages).length;
   const unlockedBefore = stateBefore.unlockedUsers.length;
 
+  // Clear blocks via shared blockStore
+  useBlockStore.getState().clearBlocks();
+
   usePrivateChatStore.setState({
     conversations: [],
     messages: {},
     unlockedUsers: [],
     pendingDares: [],
     sentDares: [],
-    blockedUserIds: [],
   });
 
   if (__DEV__) {
