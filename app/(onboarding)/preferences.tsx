@@ -4,9 +4,13 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { COLORS, GENDER_OPTIONS, RELATIONSHIP_INTENTS, ACTIVITY_FILTERS } from '@/lib/constants';
 import { Input, Button } from '@/components/ui';
+import { Toast } from '@/components/ui/Toast';
 import { useOnboardingStore } from '@/stores/onboardingStore';
 import { Ionicons } from '@expo/vector-icons';
-import type { Gender } from '@/types';
+import type { Gender, ActivityFilter } from '@/types';
+
+const MIN_INTERESTS = 3;
+const MAX_INTERESTS = 7;
 
 export default function PreferencesScreen() {
   const {
@@ -26,15 +30,30 @@ export default function PreferencesScreen() {
   } = useOnboardingStore();
   const router = useRouter();
 
+  const handleActivityToggle = (activity: ActivityFilter) => {
+    const isSelected = activities.includes(activity);
+    if (!isSelected && activities.length >= MAX_INTERESTS) {
+      Toast.show(`Maximum ${MAX_INTERESTS} interests allowed`);
+      return;
+    }
+    toggleActivity(activity);
+  };
+
   const handleNext = () => {
     if (lookingFor.length === 0) {
       Alert.alert('Required', 'Please select who you\'re looking for');
+      return;
+    }
+    if (activities.length < MIN_INTERESTS) {
+      Alert.alert('Required', `Please select at least ${MIN_INTERESTS} interests`);
       return;
     }
 
     setStep('permissions');
     router.push('/(onboarding)/permissions' as any);
   };
+
+  const canContinue = lookingFor.length > 0 && activities.length >= MIN_INTERESTS;
 
   return (
     <SafeAreaView style={styles.safeArea} edges={['top']}>
@@ -82,17 +101,28 @@ export default function PreferencesScreen() {
       </View>
 
       <View style={styles.section}>
-        <Text style={styles.sectionTitle}>Activities</Text>
-        <Text style={styles.sectionSubtitle}>What do you like to do?</Text>
-        <View style={styles.chipsContainer}>
+        <View style={styles.interestsHeader}>
+          <Text style={styles.sectionTitle}>Interests</Text>
+          <Text style={[
+            styles.interestsCounter,
+            activities.length >= MIN_INTERESTS && styles.interestsCounterValid
+          ]}>
+            {activities.length}/{MAX_INTERESTS} selected
+          </Text>
+        </View>
+        <View style={styles.interestsGrid}>
           {ACTIVITY_FILTERS.map((activity) => (
             <TouchableOpacity
               key={activity.value}
-              style={[styles.chip, activities.includes(activity.value) && styles.chipSelected]}
-              onPress={() => toggleActivity(activity.value)}
+              style={[styles.interestChip, activities.includes(activity.value) && styles.interestChipSelected]}
+              onPress={() => handleActivityToggle(activity.value)}
+              activeOpacity={0.7}
             >
-              <Text style={styles.chipEmoji}>{activity.emoji}</Text>
-              <Text style={[styles.chipText, activities.includes(activity.value) && styles.chipTextSelected]}>
+              <Text style={styles.interestEmoji}>{activity.emoji}</Text>
+              <Text
+                style={[styles.interestLabel, activities.includes(activity.value) && styles.interestLabelSelected]}
+                numberOfLines={1}
+              >
                 {activity.label}
               </Text>
             </TouchableOpacity>
@@ -143,7 +173,7 @@ export default function PreferencesScreen() {
           title="Continue"
           variant="primary"
           onPress={handleNext}
-          disabled={lookingFor.length === 0}
+          disabled={!canContinue}
           fullWidth
         />
       </View>
@@ -218,6 +248,51 @@ const styles = StyleSheet.create({
     color: COLORS.text,
   },
   chipTextSelected: {
+    color: COLORS.white,
+    fontWeight: '600',
+  },
+  interestsHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  interestsCounter: {
+    fontSize: 14,
+    color: COLORS.textMuted,
+    fontWeight: '500',
+  },
+  interestsCounterValid: {
+    color: COLORS.success,
+  },
+  interestsGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+  },
+  interestChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 16,
+    backgroundColor: COLORS.backgroundDark,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    gap: 4,
+  },
+  interestChipSelected: {
+    backgroundColor: COLORS.primary,
+    borderColor: COLORS.primary,
+  },
+  interestEmoji: {
+    fontSize: 14,
+  },
+  interestLabel: {
+    fontSize: 12,
+    color: COLORS.text,
+  },
+  interestLabelSelected: {
     color: COLORS.white,
     fontWeight: '600',
   },

@@ -1,7 +1,9 @@
 import { Stack } from 'expo-router';
+import { ToastHost } from '@/components/ui/Toast';
 
 export default function OnboardingLayout() {
   return (
+    <>
     <Stack screenOptions={{ headerShown: false }}>
       <Stack.Screen name="index" />
       <Stack.Screen name="welcome" />
@@ -21,6 +23,8 @@ export default function OnboardingLayout() {
       <Stack.Screen name="review" />
       <Stack.Screen name="tutorial" />
     </Stack>
+    <ToastHost />
+    </>
   );
 }
 
