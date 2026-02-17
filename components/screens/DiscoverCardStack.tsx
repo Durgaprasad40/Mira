@@ -127,6 +127,8 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   const incrementLikes = useDiscoverStore((s) => s.incrementLikes);
   const incrementStandOuts = useDiscoverStore((s) => s.incrementStandOuts);
   const checkAndResetIfNewDay = useDiscoverStore((s) => s.checkAndResetIfNewDay);
+  // F2-A: Random match control — swipe tracking
+  const incSwipe = useDiscoverStore((s) => s.incSwipe);
 
   // Reset daily limits if new day
   useEffect(() => {
@@ -551,6 +553,9 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       // regardless of match/navigation/error below.
       advanceCard();
 
+      // F2-A: Track swipe for random match control
+      incSwipe();
+
       // Increment daily counters
       if (direction === "right") incrementLikes();
       if (direction === "up") incrementStandOuts();
@@ -652,7 +657,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
         swipeLockRef.current = false;
       }
     },
-    [convexUserId, swipeMutation, advanceCard, hasReachedLikeLimit, hasReachedStandOutLimit, incrementLikes, incrementStandOuts, demo.recordSwipe],
+    [convexUserId, swipeMutation, advanceCard, hasReachedLikeLimit, hasReachedStandOutLimit, incrementLikes, incrementStandOuts, demo.recordSwipe, incSwipe],
   );
 
   const animateSwipe = useCallback(

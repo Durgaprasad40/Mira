@@ -15,6 +15,13 @@ interface DiscoverState {
   standOutsUsedToday: number;
   lastResetDate: string;
 
+  // Random match control state (F2-A)
+  hasUserShownIntent: boolean;
+  swipeCount: number;
+  profileViewCount: number;
+  lastRandomMatchAt: number | null;
+  randomMatchShownThisSession: boolean;
+
   // Computed-like getters
   likesRemaining: () => number;
   standOutsRemaining: () => number;
@@ -25,6 +32,14 @@ interface DiscoverState {
   incrementLikes: () => void;
   incrementStandOuts: () => void;
   checkAndResetIfNewDay: () => void;
+
+  // Random match control actions (F2-A)
+  markIntent: () => void;
+  incSwipe: () => void;
+  incProfileView: () => void;
+  setLastRandomMatchAt: (ts: number) => void;
+  setRandomMatchShownThisSession: (v: boolean) => void;
+  resetRandomMatchSessionFlags: () => void;
 }
 
 export const useDiscoverStore = create<DiscoverState>()(
@@ -33,6 +48,13 @@ export const useDiscoverStore = create<DiscoverState>()(
       likesUsedToday: 0,
       standOutsUsedToday: 0,
       lastResetDate: getTodayDateString(),
+
+      // Random match control state defaults (F2-A)
+      hasUserShownIntent: false,
+      swipeCount: 0,
+      profileViewCount: 0,
+      lastRandomMatchAt: null,
+      randomMatchShownThisSession: false,
 
       likesRemaining: () => {
         if (isDemoMode) return 999;
@@ -74,6 +96,39 @@ export const useDiscoverStore = create<DiscoverState>()(
           });
         }
       },
+
+      // Random match control actions (F2-A)
+      markIntent: () => {
+        set((s) => (s.hasUserShownIntent ? s : { hasUserShownIntent: true }));
+      },
+
+      incSwipe: () => {
+        const { swipeCount, hasUserShownIntent } = get();
+        const newCount = swipeCount + 1;
+        const newIntent = hasUserShownIntent || newCount >= 1;
+        set({ swipeCount: newCount, hasUserShownIntent: newIntent });
+        if (__DEV__) console.log('[F2-A] incSwipe:', newCount, 'intent:', newIntent);
+      },
+
+      incProfileView: () => {
+        const { profileViewCount, hasUserShownIntent } = get();
+        const newCount = profileViewCount + 1;
+        const newIntent = hasUserShownIntent || newCount >= 3;
+        set({ profileViewCount: newCount, hasUserShownIntent: newIntent });
+        if (__DEV__) console.log('[F2-A] incProfileView:', newCount, 'intent:', newIntent);
+      },
+
+      setLastRandomMatchAt: (ts: number) => {
+        set({ lastRandomMatchAt: ts });
+      },
+
+      setRandomMatchShownThisSession: (v: boolean) => {
+        set({ randomMatchShownThisSession: v });
+      },
+
+      resetRandomMatchSessionFlags: () => {
+        set({ randomMatchShownThisSession: false });
+      },
     }),
     {
       name: "discover-limits-storage",
@@ -82,6 +137,9 @@ export const useDiscoverStore = create<DiscoverState>()(
         likesUsedToday: state.likesUsedToday,
         standOutsUsedToday: state.standOutsUsedToday,
         lastResetDate: state.lastResetDate,
+        // Persist random match control state (F2-A)
+        // Note: randomMatchShownThisSession is NOT persisted (session-only)
+        lastRandomMatchAt: state.lastRandomMatchAt,
       }),
     },
   ),
