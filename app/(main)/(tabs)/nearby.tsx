@@ -11,6 +11,8 @@ import {
   PanResponder,
   AppState,
   AppStateStatus,
+  Linking,
+  Platform,
 } from 'react-native';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -225,6 +227,7 @@ const NEARBY_DEMO_PROFILES = (DEMO_PROFILES as any[]).filter(
 const REFRESH_COOLDOWN_MS = 10000; // 10 seconds cooldown between manual refreshes
 const AUTO_REFRESH_TIMEOUT_MS = 8000; // 8 seconds timeout for location fetch
 const AUTO_REFRESH_STALE_MS = 90000; // 90 seconds - auto-refresh if location older than this
+const LOCATION_TIMEOUT_MS = 15000; // 15 seconds - show error if no location obtained
 const FAB_SIZE = 52; // Size of the floating action button
 const FAB_EDGE_MARGIN = 16; // Margin from screen edges (left/right snap positions)
 const FAB_SAFE_PADDING = 12; // Extra padding from safe area boundaries
@@ -369,8 +372,6 @@ export default function NearbyScreen() {
   // If we have any location (lastKnown or current), show map immediately
   const hasLocation = bestLocation != null;
   const permissionDenied = permissionStatus === 'denied';
-  // Only show brief "locating" overlay if no location at all and permission not denied
-  const showLocatingOverlay = !hasLocation && !permissionDenied && permissionStatus !== 'unknown';
   const hasAnimatedToLocation = useRef(false);
   const hasCenteredOnBestLocation = useRef(false);
 
@@ -405,14 +406,62 @@ export default function NearbyScreen() {
   const [showCooldownToast, setShowCooldownToast] = useState(false);
   const toastTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // LOC-FIX: Timeout state - show error if no location after 15 seconds
+  const [locationTimedOut, setLocationTimedOut] = useState(false);
+  const locationTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   // Cleanup timeouts on unmount
   useEffect(() => {
     return () => {
       if (toastTimeoutRef.current) {
         clearTimeout(toastTimeoutRef.current);
       }
+      if (locationTimeoutRef.current) {
+        clearTimeout(locationTimeoutRef.current);
+      }
     };
   }, []);
+
+  // LOC-FIX: Start timeout when screen mounts, clear when location obtained
+  useEffect(() => {
+    const hasLocation = bestLocation != null;
+    const permissionDenied = permissionStatus === 'denied';
+
+    // Clear any existing timeout
+    if (locationTimeoutRef.current) {
+      clearTimeout(locationTimeoutRef.current);
+      locationTimeoutRef.current = null;
+    }
+
+    // If we have location, reset timeout state
+    if (hasLocation) {
+      setLocationTimedOut(false);
+      return;
+    }
+
+    // If permission already denied or error, no need for timeout
+    if (permissionDenied || locationError) {
+      return;
+    }
+
+    // Start timeout - if no location after 15s, show error state
+    locationTimeoutRef.current = setTimeout(() => {
+      setLocationTimedOut(true);
+      log.warn('[NEARBY]', 'Location timeout - no location after 15s');
+    }, LOCATION_TIMEOUT_MS);
+
+    return () => {
+      if (locationTimeoutRef.current) {
+        clearTimeout(locationTimeoutRef.current);
+      }
+    };
+  }, [bestLocation, permissionStatus, locationError]);
+
+  // LOC-FIX: Unified location error - permission denied, store error, or timeout
+  // Must be computed AFTER locationTimedOut state is declared
+  const showLocationError = permissionDenied || !!locationError || locationTimedOut;
+  // Only show brief "locating" overlay if no location, no error, and still within timeout
+  const showLocatingOverlay = !hasLocation && !showLocationError && permissionStatus !== 'unknown';
 
   // FAB safe area bounds - computed from real insets and tab bar height
   const fabMinX = FAB_EDGE_MARGIN;
@@ -939,22 +988,36 @@ export default function NearbyScreen() {
   // Render — map shown immediately, no heavy loading screens
   // ------------------------------------------------------------------
 
-  // Permission denied — show overlay but still render map underneath
-  if (permissionDenied) {
+  // LOC-FIX: Handle "Enable Location" button press
+  const handleEnableLocation = useCallback(() => {
+    // Reset timeout state so we can try again
+    setLocationTimedOut(false);
+
+    if (permissionDenied) {
+      // Permission was denied — open system settings
+      Linking.openSettings();
+    } else {
+      // Try to get location again (permission not explicitly denied, may be services OFF)
+      startLocationTracking();
+      refreshLocation();
+    }
+  }, [permissionDenied, startLocationTracking, refreshLocation]);
+
+  // LOC-FIX: Unified error state - permission denied, location error, or timeout
+  if (showLocationError && !hasLocation) {
     return (
       <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
         <View style={styles.permissionOverlay}>
           <Ionicons name="location-outline" size={48} color={COLORS.textLight} />
-          <Text style={styles.permissionTitle}>Enable location to see nearby people</Text>
+          <Text style={styles.permissionTitle}>Turn on location to see people nearby</Text>
           <Text style={styles.permissionSubtitle}>
-            Your location is only shared as an approximate area, never your exact position.
+            {locationTimedOut
+              ? 'Unable to get your location. Please check that location services are enabled.'
+              : 'Your location is only shared as an approximate area, never your exact position.'}
           </Text>
           <TouchableOpacity
             style={styles.permissionButton}
-            onPress={() => {
-              // Re-trigger location tracking (will request permission)
-              startLocationTracking();
-            }}
+            onPress={handleEnableLocation}
           >
             <Text style={styles.permissionButtonText}>Enable Location</Text>
           </TouchableOpacity>
