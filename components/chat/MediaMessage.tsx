@@ -1,6 +1,7 @@
-import React from 'react';
-import { View, Text, TouchableOpacity, StyleSheet } from 'react-native';
+import React, { useState, useEffect, useRef } from 'react';
+import { View, TouchableOpacity, StyleSheet, Pressable } from 'react-native';
 import { Image } from 'expo-image';
+import { useVideoPlayer, VideoView } from 'expo-video';
 import { Ionicons } from '@expo/vector-icons';
 
 interface MediaMessageProps {
@@ -13,6 +14,95 @@ interface MediaMessageProps {
   height?: number;
 }
 
+// Video player component using expo-video
+function VideoMessage({
+  mediaUrl,
+  width,
+  height,
+}: {
+  mediaUrl: string;
+  width: number;
+  height: number;
+}) {
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [hasError, setHasError] = useState(false);
+  const mountedRef = useRef(true);
+
+  const player = useVideoPlayer(mediaUrl, (p) => {
+    p.loop = false;
+  });
+
+  // Track mounted state for safe setState
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
+  // Listen for playback status changes
+  useEffect(() => {
+    if (!player) return;
+
+    const subscription = player.addListener('statusChange', (status) => {
+      if (!mountedRef.current) return;
+      if (status.status === 'error') {
+        console.error('[MediaMessage][Video] Playback error:', status.error);
+        setHasError(true);
+      }
+    });
+
+    const playingSubscription = player.addListener('playingChange', (event) => {
+      if (!mountedRef.current) return;
+      setIsPlaying(event.isPlaying);
+    });
+
+    return () => {
+      subscription.remove();
+      playingSubscription.remove();
+    };
+  }, [player]);
+
+  const handleVideoPress = () => {
+    if (!player) return;
+
+    if (player.playing) {
+      player.pause();
+    } else {
+      player.play();
+    }
+  };
+
+  if (hasError) {
+    return (
+      <View style={[styles.container, { width, height }]}>
+        <View style={styles.errorContainer}>
+          <Ionicons name="alert-circle" size={32} color="rgba(255,255,255,0.6)" />
+        </View>
+      </View>
+    );
+  }
+
+  return (
+    <Pressable
+      style={[styles.container, { width, height }]}
+      onPress={handleVideoPress}
+    >
+      <VideoView
+        player={player}
+        style={styles.video}
+        contentFit="cover"
+        nativeControls={false}
+      />
+      {!isPlaying && (
+        <View style={styles.playOverlay}>
+          <Ionicons name="play-circle" size={44} color="rgba(255,255,255,0.9)" />
+        </View>
+      )}
+    </Pressable>
+  );
+}
+
 export default function MediaMessage({
   mediaUrl,
   type,
@@ -20,19 +110,10 @@ export default function MediaMessage({
   width = 200,
   height = 150,
 }: MediaMessageProps) {
+  console.log('[MediaMessage] Rendering:', { type, mediaUrl: mediaUrl?.slice(0, 50) });
+
   if (type === 'video') {
-    return (
-      <TouchableOpacity
-        style={[styles.container, { width, height }]}
-        onPress={onPress}
-        activeOpacity={0.8}
-      >
-        <View style={styles.videoThumb}>
-          <Ionicons name="play-circle" size={44} color="rgba(255,255,255,0.9)" />
-          <Text style={styles.videoLabel}>Video</Text>
-        </View>
-      </TouchableOpacity>
-    );
+    return <VideoMessage mediaUrl={mediaUrl} width={width} height={height} />;
   }
 
   return (
@@ -61,17 +142,20 @@ const styles = StyleSheet.create({
     width: '100%',
     height: '100%',
   },
-  videoThumb: {
+  video: {
     width: '100%',
     height: '100%',
-    backgroundColor: '#2C2C3A',
+  },
+  playOverlay: {
+    ...StyleSheet.absoluteFillObject,
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 4,
+    backgroundColor: 'rgba(0,0,0,0.3)',
   },
-  videoLabel: {
-    fontSize: 12,
-    fontWeight: '600',
-    color: '#8E8E9A',
+  errorContainer: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#2C2C3A',
   },
 });

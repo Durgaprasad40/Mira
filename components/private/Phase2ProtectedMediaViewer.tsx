@@ -22,8 +22,10 @@ import {
   StatusBar,
   BackHandler,
   Platform,
+  Pressable,
 } from 'react-native';
 import { Image } from 'expo-image';
+import { useVideoPlayer, VideoView } from 'expo-video';
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { INCOGNITO_COLORS } from '@/lib/constants';
@@ -39,6 +41,121 @@ interface Phase2ProtectedMediaViewerProps {
 // Module-level Set to track ONCE + HOLD messages that have been viewed.
 // Persists across component unmounts to prevent re-viewing.
 const viewedOnceHoldMessages = new Set<string>();
+
+// Secure Video Player component using expo-video with wall-clock resume
+interface SecureVideoPlayerProps {
+  uri: string;
+  elapsedMs: number; // How long since first view (for resume calculation)
+}
+
+function SecureVideoPlayer({ uri, elapsedMs }: SecureVideoPlayerProps) {
+  const [isPlaying, setIsPlaying] = useState(true);
+  const hasSeekRef = useRef(false); // Only seek once on mount
+  const mountedRef = useRef(true);
+
+  const player = useVideoPlayer(uri, (p) => {
+    p.loop = true;
+    // Don't auto-play yet; wait for seek
+  });
+
+  // Track mounted state for safe operations
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
+  // Handle seek to correct position based on elapsed time
+  useEffect(() => {
+    if (!player || hasSeekRef.current) return;
+
+    // Get video duration when available
+    const checkAndSeek = () => {
+      if (!mountedRef.current) return;
+      const videoDurationMs = player.duration * 1000; // duration is in seconds
+
+      if (videoDurationMs > 0 && !hasSeekRef.current) {
+        hasSeekRef.current = true;
+
+        // Calculate resume position: elapsedMs mod videoDurationMs
+        const resumeMs = elapsedMs > 0 ? elapsedMs % videoDurationMs : 0;
+        const resumeSec = resumeMs / 1000;
+
+        console.log('[SECURE_VIDEO_RESUME]', {
+          elapsedMs,
+          videoDurationMs,
+          resumeMs,
+          resumeSec: resumeSec.toFixed(2),
+        });
+
+        // Seek to resume position and play
+        if (mountedRef.current) {
+          player.currentTime = resumeSec;
+          player.play();
+        }
+      }
+    };
+
+    // Check immediately (player might already have duration)
+    checkAndSeek();
+
+    // Also listen for status changes in case duration wasn't ready
+    const subscription = player.addListener('statusChange', (status) => {
+      if (status.status === 'readyToPlay') {
+        checkAndSeek();
+      }
+    });
+
+    return () => subscription.remove();
+  }, [player, elapsedMs]);
+
+  // Track playing state for UI
+  useEffect(() => {
+    if (!player) return;
+
+    const subscription = player.addListener('playingChange', (event) => {
+      if (!mountedRef.current) return;
+      setIsPlaying(event.isPlaying);
+    });
+
+    return () => subscription.remove();
+  }, [player]);
+
+  const togglePlayback = () => {
+    if (!player) return;
+    if (player.playing) {
+      player.pause();
+    } else {
+      player.play();
+    }
+  };
+
+  return (
+    <Pressable style={StyleSheet.absoluteFill} onPress={togglePlayback}>
+      <VideoView
+        player={player}
+        style={StyleSheet.absoluteFill}
+        contentFit="contain"
+        nativeControls={false}
+      />
+      {!isPlaying && (
+        <View style={secureVideoStyles.playOverlay}>
+          <Ionicons name="play-circle" size={64} color="rgba(255,255,255,0.9)" />
+        </View>
+      )}
+    </Pressable>
+  );
+}
+
+const secureVideoStyles = StyleSheet.create({
+  playOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(0,0,0,0.3)',
+  },
+});
 
 export function Phase2ProtectedMediaViewer({
   visible,
@@ -78,10 +195,41 @@ export function Phase2ProtectedMediaViewer({
   const timerSeconds = message?.protectedMedia?.timer ?? 0;
   const viewingMode = message?.protectedMedia?.viewingMode ?? 'tap';
   const isHoldMode = viewingMode === 'hold';
-  const imageUri = message?.protectedMedia?.localUri;
+  const mediaUri = message?.protectedMedia?.localUri;
+  const isVideo = message?.protectedMedia?.mediaType === 'video';
+  const expiresDurationMs = message?.protectedMedia?.expiresDurationMs ?? (timerSeconds * 1000);
 
   // ONCE view detection: timer === 0 means view once then expire
   const isOnce = timerSeconds === 0;
+
+  // Calculate elapsed time for video resume (wall-clock based)
+  // elapsedMs = how long since first view started
+  const computeElapsedMs = useCallback((): number => {
+    const timerEndsAt = message?.timerEndsAt;
+    if (!timerEndsAt || !expiresDurationMs || expiresDurationMs <= 0) return 0;
+
+    const now = Date.now();
+    const remainingMs = Math.max(0, timerEndsAt - now);
+    const elapsedMs = expiresDurationMs - remainingMs;
+
+    console.log('[SECURE_VIDEO_RESUME] computeElapsed:', {
+      expiresDurationMs,
+      timerEndsAt,
+      remainingMs,
+      elapsedMs,
+    });
+
+    return Math.max(0, elapsedMs);
+  }, [message?.timerEndsAt, expiresDurationMs]);
+
+  // Compute elapsed once when viewer opens (stable for the session)
+  const [elapsedMs, setElapsedMs] = useState(0);
+
+  useEffect(() => {
+    if (visible && message?.timerEndsAt) {
+      setElapsedMs(computeElapsedMs());
+    }
+  }, [visible, message?.timerEndsAt, computeElapsedMs]);
 
   // Track if photo was viewed this session (for ONCE expiration on close)
   const wasViewedThisSessionRef = useRef(false);
@@ -261,14 +409,18 @@ export function Phase2ProtectedMediaViewer({
     <Modal visible={visible} transparent animationType="fade" statusBarTranslucent onRequestClose={handleClose}>
       <StatusBar hidden />
       <View style={styles.container}>
-        {/* Photo layer - fullscreen */}
-        {imageUri ? (
+        {/* Media layer - fullscreen (photo or video) */}
+        {mediaUri ? (
           <View style={StyleSheet.absoluteFill}>
-            <Image
-              source={{ uri: imageUri }}
-              style={StyleSheet.absoluteFill}
-              contentFit="contain"
-            />
+            {isVideo ? (
+              <SecureVideoPlayer uri={mediaUri} elapsedMs={elapsedMs} />
+            ) : (
+              <Image
+                source={{ uri: mediaUri }}
+                style={StyleSheet.absoluteFill}
+                contentFit="contain"
+              />
+            )}
             {/* Corner countdown badge - only UI for timer */}
             {hasActiveTimer && (
               <View style={[styles.cornerBadge, { top: insets.top + 16 }]}>
@@ -278,7 +430,7 @@ export function Phase2ProtectedMediaViewer({
           </View>
         ) : (
           <View style={styles.placeholder}>
-            <Ionicons name="image-outline" size={64} color={C.textLight} />
+            <Ionicons name={isVideo ? "videocam-outline" : "image-outline"} size={64} color={C.textLight} />
             <Text style={styles.placeholderText}>Loading...</Text>
           </View>
         )}
@@ -296,7 +448,7 @@ export function Phase2ProtectedMediaViewer({
         <View style={[styles.footer, { paddingBottom: insets.bottom + 16 }]} pointerEvents="none">
           <View style={styles.infoRow}>
             <Ionicons name="shield-checkmark" size={16} color={SOFT_ACCENT} />
-            <Text style={styles.infoText}>Secure Photo</Text>
+            <Text style={styles.infoText}>{isVideo ? 'Secure Video' : 'Secure Photo'}</Text>
           </View>
         </View>
       </View>
