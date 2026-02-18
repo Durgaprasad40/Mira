@@ -14,7 +14,27 @@ import { useLocationStore } from "@/stores/locationStore";
 import { asUserId } from "@/convex/id";
 import { AppErrorBoundary, registerErrorBoundaryNavigation } from "@/components/safety";
 import { processThreadsIntegrity } from "@/lib/threadsIntegrity";
-import { markTiming } from "@/utils/startupTiming";
+import { markTiming, printStartupPerfReport } from "@/utils/startupTiming";
+import {
+  schedulePostFirstPaint,
+  registerStartupTask,
+} from "@/utils/startupCoordinator";
+import { applyDemoDataCaps } from "@/utils/demoDataCaps";
+
+// Register startup tasks once at module load (runs after first paint)
+if (isDemoMode) {
+  registerStartupTask({
+    name: 'applyDemoDataCaps',
+    fn: applyDemoDataCaps,
+    critical: false,
+  });
+}
+
+registerStartupTask({
+  name: 'printStartupPerfReport',
+  fn: printStartupPerfReport,
+  critical: false,
+});
 
 export default function MainTabsLayout() {
   // Milestone E: first tab screen mounted
@@ -32,6 +52,12 @@ export default function MainTabsLayout() {
       fetchLastKnownOnly();
     }
   }, [fetchLastKnownOnly]);
+
+  // Schedule post-first-paint tasks (data caps, perf report, etc.)
+  // Runs once after InteractionManager settles + 500ms delay
+  useEffect(() => {
+    schedulePostFirstPaint();
+  }, []);
 
   // Register navigation for error boundary "Go Home" button
   useEffect(() => {

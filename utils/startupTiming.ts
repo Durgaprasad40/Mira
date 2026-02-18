@@ -24,9 +24,11 @@ type Milestone =
   | 'first_tab'
   | 'location_start'
   | 'location_fix'
-  | 'map_ready';
+  | 'map_ready'
+  | 'startup_tasks_begin'  // StartupCoordinator begins deferred tasks
+  | 'startup_tasks_end';   // StartupCoordinator finishes all tasks
 
-type DurationMetric = 'boot_caches';
+type DurationMetric = 'boot_caches' | 'startup_tasks';
 
 interface TimingState {
   times: Partial<Record<Milestone, number>>;
@@ -145,5 +147,63 @@ export function printTimingSummary(): void {
  */
 export function resetTiming(): void {
   state.times = { bundle_start: Date.now() };
+  state.durations = {};
   state.printed = false;
+}
+
+/**
+ * Generate consolidated STARTUP_PERF_REPORT for instrumentation.
+ * Call this after startup tasks complete for a full picture.
+ */
+export function generateStartupPerfReport(): Record<string, number | string> {
+  const t = state.times;
+  const d = state.durations;
+  const start = t.bundle_start ?? Date.now();
+
+  return {
+    // Key metrics
+    bundle_to_first_tab: t.first_tab ? t.first_tab - start : '-',
+    bundle_to_boot_hidden: t.boot_hidden ? t.boot_hidden - start : '-',
+    bundle_to_route_decision: t.route_decision ? t.route_decision - start : '-',
+
+    // Location metrics (should be deferred to Map focus)
+    location_start_delay: t.location_start ? t.location_start - start : '-',
+    location_fix_time: t.location_fix && t.location_start
+      ? t.location_fix - t.location_start
+      : '-',
+
+    // Map metrics
+    map_ready_delay: t.map_ready ? t.map_ready - start : '-',
+
+    // Startup coordinator metrics
+    startup_tasks_begin: t.startup_tasks_begin
+      ? t.startup_tasks_begin - start
+      : '-',
+    startup_tasks_duration: t.startup_tasks_end && t.startup_tasks_begin
+      ? t.startup_tasks_end - t.startup_tasks_begin
+      : '-',
+
+    // Duration metrics
+    boot_caches_ms: d.boot_caches ?? '-',
+  };
+}
+
+/**
+ * Print the consolidated startup performance report.
+ * Safe to call multiple times - only prints once.
+ */
+let _reportPrinted = false;
+export function printStartupPerfReport(): void {
+  if (_reportPrinted || !__DEV__) return;
+  _reportPrinted = true;
+
+  const report = generateStartupPerfReport();
+  console.log('='.repeat(50));
+  console.log('STARTUP_PERF_REPORT');
+  console.log('='.repeat(50));
+  for (const [key, value] of Object.entries(report)) {
+    const displayValue = typeof value === 'number' ? `${value}ms` : value;
+    console.log(`  ${key}: ${displayValue}`);
+  }
+  console.log('='.repeat(50));
 }

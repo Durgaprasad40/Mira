@@ -205,6 +205,7 @@ const DEBUG_DISABLE_MAP = false;
 // OOM PREVENTION: Hard limit on rendered markers to prevent Android native memory exhaustion
 // Markers with React children cause bitmap snapshotting; even with image prop, limit as safety net
 const MAX_NEARBY_MARKERS = 30;
+const MAX_CROSSED_PATH_MARKERS = 20; // Cap crossed paths for startup performance
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 const BOTTOM_SHEET_HEIGHT = 200;
@@ -1119,7 +1120,8 @@ export default function NearbyScreen() {
 
         {/* Crossed paths markers — SINGLE pre-composited image (pin + avatar baked in) */}
         {/* No overlay marker, no drift, no delay — instant stable rendering */}
-        {isDemoMode && validCrossedPaths.map((cp) => (
+        {/* Capped at MAX_CROSSED_PATH_MARKERS for startup performance */}
+        {isDemoMode && validCrossedPaths.slice(0, MAX_CROSSED_PATH_MARKERS).map((cp) => (
           <Marker
             key={`crossed-${cp.id}`}
             coordinate={{ latitude: cp.latitude, longitude: cp.longitude }}
