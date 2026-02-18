@@ -39,6 +39,7 @@ import { Ionicons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
 import { isDemoMode } from '@/hooks/useConvex';
 import { useDemoDmStore, DemoDmMessage } from '@/stores/demoDmStore';
+import { DEMO_PROFILES } from '@/lib/demoData';
 import { VoiceMessageBubble } from '@/components/chat/VoiceMessageBubble';
 import { useDemoStore } from '@/stores/demoStore';
 import { useBlockStore } from '@/stores/blockStore';
@@ -209,11 +210,15 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
   // simulateMatch() or match-celebration's "Say Hi" flow.
   // Falls back to null → triggers the "not found" empty state.
   const storedMeta = conversationId ? demoMeta[conversationId] : undefined;
+  // Fallback: if photoUrl missing from stored meta, lookup from DEMO_PROFILES
+  const resolvedPhotoUrl = storedMeta?.otherUser?.photoUrl
+    || DEMO_PROFILES.find((p: any) => p._id === storedMeta?.otherUser?.id)?.photos?.[0]?.url;
   const demoConversation = storedMeta
     ? {
         otherUser: {
           ...storedMeta.otherUser,
           lastActive: storedMeta.otherUser.lastActive ?? Date.now(),
+          photoUrl: resolvedPhotoUrl,
         },
         isPreMatch: storedMeta.isPreMatch,
         isConfessionChat: storedMeta.isConfessionChat,
