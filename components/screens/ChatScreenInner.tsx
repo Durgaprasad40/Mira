@@ -672,6 +672,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
 
   return (
     <View style={styles.container}>
+      {/* LOCKED: P1 chat header avatar + open profile. Do not modify without explicit approval. */}
       {/* Header — sits above KAV (does not move when keyboard opens) */}
       <View style={[styles.header, { paddingTop: insets.top }]}>
         <TouchableOpacity onPress={handleBack} style={styles.backButton}>
