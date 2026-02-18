@@ -86,6 +86,17 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
       router.back();
     }
   }, [source, router]);
+
+  // Open other user's profile when tapping header (with fromChat flag to hide action buttons)
+  const handleOpenProfile = useCallback((otherUserId: string | undefined) => {
+    if (otherUserId) {
+      router.push({
+        pathname: '/(main)/profile/[id]',
+        params: { id: otherUserId, fromChat: '1' },
+      });
+    }
+  }, [router]);
+
   const { userId } = useAuthStore();
   const flatListRef = useRef<FlashListRef<any>>(null);
 
@@ -643,14 +654,18 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
         <TouchableOpacity onPress={handleBack} style={styles.backButton}>
           <Ionicons name="arrow-back" size={24} color={COLORS.text} />
         </TouchableOpacity>
-        <View style={styles.headerInfo}>
+        <TouchableOpacity
+          style={styles.headerInfo}
+          onPress={() => handleOpenProfile(activeConversation.otherUser.id)}
+          activeOpacity={0.7}
+        >
           <Text style={styles.headerName}>{activeConversation.otherUser.name}</Text>
           <Text style={styles.headerStatus}>
             {activeConversation.otherUser.lastActive > Date.now() - 5 * 60 * 1000
               ? 'Active now'
               : 'Recently active'}
           </Text>
-        </View>
+        </TouchableOpacity>
         {activeConversation.otherUser.isVerified && (
           <Ionicons name="checkmark-circle" size={20} color={COLORS.primary} style={{ marginRight: 8 }} />
         )}
