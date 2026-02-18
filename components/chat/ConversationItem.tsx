@@ -1,9 +1,10 @@
-import React from 'react';
+import React, { useMemo } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity } from 'react-native';
 import { Image } from 'expo-image';
 import { Ionicons } from '@expo/vector-icons';
 import { COLORS } from '@/lib/constants';
 import { Badge } from '@/components/ui';
+import { DEMO_PROFILES } from '@/lib/demoData';
 
 interface ConversationItemProps {
   id: string;
@@ -56,9 +57,27 @@ export function ConversationItem({
     }
   };
 
+  // P1-MSG: Resolve photo URL with DEMO_PROFILES fallback
+  const resolvedPhotoUrl = useMemo(() => {
+    if (otherUser.photoUrl) return otherUser.photoUrl;
+    // Fallback: lookup from DEMO_PROFILES by user ID
+    const demoProfile = DEMO_PROFILES.find((p: any) => p._id === otherUser.id);
+    return demoProfile?.photos?.[0]?.url;
+  }, [otherUser.photoUrl, otherUser.id]);
+
+  // P1-MSG: Compute initials for avatar placeholder
+  const avatarInitials = useMemo(() => {
+    const name = otherUser.name || '';
+    const parts = name.split(' ').filter(Boolean);
+    if (parts.length >= 2) {
+      return (parts[0][0] + parts[1][0]).toUpperCase();
+    }
+    return name.slice(0, 2).toUpperCase() || '??';
+  }, [otherUser.name]);
+
   // 5-7: Safe fallback for corrupted/missing preview content
   const getMessagePreview = () => {
-    if (!lastMessage) return 'No messages yet';
+    if (!lastMessage) return 'Say hi 👋';
     if (lastMessage.isProtected) return '🔒 Protected Photo';
     if (lastMessage.type === 'image') return '📷 Photo';
     if (lastMessage.type === 'dare') return '🎲 Dare sent';
@@ -79,16 +98,16 @@ export function ConversationItem({
         activeOpacity={onAvatarPress ? 0.7 : 1}
         disabled={!onAvatarPress}
       >
-        {otherUser.photoUrl ? (
+        {resolvedPhotoUrl ? (
           <Image
-            source={{ uri: otherUser.photoUrl }}
+            source={{ uri: resolvedPhotoUrl }}
             style={styles.avatar}
             contentFit="cover"
             blurRadius={otherUser.photoBlurred ? 20 : undefined}
           />
         ) : (
           <View style={[styles.avatar, styles.avatarPlaceholder]}>
-            <Ionicons name="person" size={24} color={COLORS.textLight} />
+            <Text style={styles.avatarInitials}>{avatarInitials}</Text>
           </View>
         )}
         {otherUser.isVerified && (
@@ -147,6 +166,12 @@ const styles = StyleSheet.create({
   avatarPlaceholder: {
     alignItems: 'center',
     justifyContent: 'center',
+    backgroundColor: COLORS.primary,
+  },
+  avatarInitials: {
+    fontSize: 18,
+    fontWeight: '600',
+    color: COLORS.white,
   },
   verifiedBadge: {
     position: 'absolute',
