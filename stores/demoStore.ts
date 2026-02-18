@@ -829,6 +829,7 @@ export const useDemoStore = create<DemoState>()(
             name: profile.name,
             lastActive: Date.now(),
             isVerified: profile.isVerified,
+            photoUrl: profile.photos?.[0]?.url,
           },
           isPreMatch: false,
         });

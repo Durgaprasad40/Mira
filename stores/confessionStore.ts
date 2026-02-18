@@ -303,12 +303,15 @@ export const useConfessionStore = create<ConfessionState>()(
             senderId: 'system',
             createdAt: now,
           }]);
+          // Try to get photo from demoStore profiles
+          const otherUserProfile = demoStore.profiles.find((p) => p._id === confession.userId);
           dmStore.setMeta(convoId, {
             otherUser: {
               id: confession.userId,
               name: otherUserName,
               lastActive: now,
               isVerified: false,
+              photoUrl: otherUserProfile?.photos?.[0]?.url,
             },
             isPreMatch: true,
             isConfessionChat: true, // Confession-based thread
@@ -619,12 +622,15 @@ export const useConfessionStore = create<ConfessionState>()(
           createdAt: now,
         }]);
 
+        // Try to get photo from demoStore profiles
+        const otherUserProfile = demoStore.profiles.find((p) => p._id === confession.userId);
         dmStore.setMeta(convoId, {
           otherUser: {
             id: confession.userId,
             name: otherUserName,
             lastActive: now,
             isVerified: false,
+            photoUrl: otherUserProfile?.photos?.[0]?.url,
           },
           isPreMatch: true,
           isConfessionChat: true,
