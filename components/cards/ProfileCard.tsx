@@ -52,6 +52,10 @@ export interface ProfileCardProps {
   // Legacy props for non-Discover usage (explore grid etc.)
   user?: any;
   onPress?: () => void;
+  /** Performance: Called when card is rendered (for timing) */
+  onCardRendered?: () => void;
+  /** Performance: Called when image loads (for timing) */
+  onImageLoad?: () => void;
 }
 
 const BLUR_RADIUS = 25; // Strong but recognisable blur
@@ -75,9 +79,20 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
   relationshipIntent,
   activities,
   onPress,
+  onCardRendered,
+  onImageLoad,
 }) => {
   const dark = theme === 'dark';
   const TC = dark ? INCOGNITO_COLORS : COLORS;
+
+  // Performance: Track card render once
+  const cardRenderedRef = useRef(false);
+  useEffect(() => {
+    if (!cardRenderedRef.current && onCardRendered) {
+      cardRenderedRef.current = true;
+      onCardRendered();
+    }
+  }, [onCardRendered]);
 
   // Face 2 only: Look up intent category labels from keys (array)
   const phase2IntentLabels = useMemo(() => {
@@ -121,52 +136,113 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
       .map(a => ({ emoji: a!.emoji, label: a!.label }));
   }, [dark, activities]);
 
-  const [photoIndex, setPhotoIndex] = useState(0);
-  // 7-1: Track image load errors to show placeholder on failure
-  const [imageError, setImageError] = useState(false);
-
   const photoCount = photos?.length || 0;
 
-  // 3B-2: Clamp photoIndex when photos array changes (prevents out-of-bounds)
+  // ═══════════════════════════════════════════════════════════════════════════
+  // HOLD-LAST-FRAME PHOTO SWITCHING
+  // ═══════════════════════════════════════════════════════════════════════════
+  // - `targetIndex`: The photo index the user wants to see (changes on tap)
+  // - `displayedIndex`: The photo currently shown (only updates when image loads)
+  // - When user taps, we set targetIndex but keep showing displayedIndex
+  // - A hidden Image preloads targetIndex, and on load success we swap
+  // - This ensures NO blank frames, NO skeleton, NO fade between photos
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  const [targetIndex, setTargetIndex] = useState(0);
+  const [displayedIndex, setDisplayedIndex] = useState(0);
+  const [imageError, setImageError] = useState(false);
+  const imageLoadTrackedRef = useRef(false);
+  const prefetchedUrlsRef = useRef<Set<string>>(new Set());
+
+  // Clamp indices when photos array changes
   useEffect(() => {
-    if (photoIndex >= photoCount && photoCount > 0) {
-      setPhotoIndex(photoCount - 1);
-    } else if (photoCount === 0) {
-      setPhotoIndex(0);
+    if (photoCount === 0) {
+      setTargetIndex(0);
+      setDisplayedIndex(0);
+    } else {
+      if (targetIndex >= photoCount) setTargetIndex(photoCount - 1);
+      if (displayedIndex >= photoCount) setDisplayedIndex(photoCount - 1);
     }
-  }, [photoCount, photoIndex]);
+  }, [photoCount, targetIndex, displayedIndex]);
 
-  // 7-1: Reset error state when photo changes
-  useEffect(() => {
+  // Safe access for displayed and target photos
+  const safeDisplayedIndex = Math.min(Math.max(0, displayedIndex), Math.max(0, photoCount - 1));
+  const safeTargetIndex = Math.min(Math.max(0, targetIndex), Math.max(0, photoCount - 1));
+  const displayedPhoto = photos?.[safeDisplayedIndex] || photos?.[0];
+  const targetPhoto = photos?.[safeTargetIndex] || photos?.[0];
+  const isPending = targetIndex !== displayedIndex;
+
+  // When pending image loads successfully, swap to it
+  const handlePendingLoad = useCallback(() => {
+    setDisplayedIndex(targetIndex);
     setImageError(false);
-  }, [photoIndex]);
+    // Track first image load for performance timing
+    if (!imageLoadTrackedRef.current && onImageLoad) {
+      imageLoadTrackedRef.current = true;
+      onImageLoad();
+    }
+  }, [targetIndex, onImageLoad]);
 
-  // 3B-2: Safe access with clamping
-  const safeIndex = Math.min(Math.max(0, photoIndex), Math.max(0, photoCount - 1));
-  const currentPhoto = photos?.[safeIndex] || photos?.[0];
+  // Handle load error for pending image - revert to displayed
+  const handlePendingError = useCallback(() => {
+    setTargetIndex(displayedIndex);
+  }, [displayedIndex]);
 
+  // Handle error on displayed image
+  const handleDisplayedError = useCallback(() => {
+    setImageError(true);
+  }, []);
+
+  // Navigation handlers
   const goNextPhoto = useCallback(() => {
     if (photoCount <= 1) return;
-    setPhotoIndex((i) => (i + 1 < photoCount ? i + 1 : i));
+    setTargetIndex((i) => (i + 1 < photoCount ? i + 1 : i));
   }, [photoCount]);
 
   const goPrevPhoto = useCallback(() => {
     if (photoCount <= 1) return;
-    setPhotoIndex((i) => (i > 0 ? i - 1 : i));
+    setTargetIndex((i) => (i > 0 ? i - 1 : i));
   }, [photoCount]);
+
+  // Aggressive prefetch: preload adjacent photos on mount and index change
+  useEffect(() => {
+    if (photoCount <= 1) return;
+
+    const prefetchAdjacent = async () => {
+      const indicesToPrefetch = [
+        targetIndex - 1,
+        targetIndex + 1,
+        targetIndex + 2,
+      ].filter(i => i >= 0 && i < photoCount);
+
+      for (const idx of indicesToPrefetch) {
+        const url = photos?.[idx]?.url;
+        if (url && !prefetchedUrlsRef.current.has(url)) {
+          prefetchedUrlsRef.current.add(url);
+          // Fire and forget - don't block
+          Image.prefetch(url).catch(() => {});
+        }
+      }
+    };
+
+    // Slight delay to not compete with current image
+    const timer = setTimeout(prefetchAdjacent, 50);
+    return () => clearTimeout(timer);
+  }, [targetIndex, photoCount, photos]);
 
   // Non-discover mode (explore grid, etc.) — simple card with onPress
   if (!showCarousel && onPress) {
     return (
       <TouchableOpacity style={styles.gridCard} onPress={onPress} activeOpacity={0.8}>
-        {/* 7-1: Show placeholder on image error or missing photo */}
-        {currentPhoto && !imageError ? (
+        {/* Show placeholder on image error or missing photo */}
+        {displayedPhoto && !imageError ? (
           <Image
-            source={{ uri: currentPhoto.url }}
+            source={{ uri: displayedPhoto.url }}
             style={styles.gridImage}
             contentFit="cover"
             blurRadius={photoBlurred ? BLUR_RADIUS : undefined}
-            onError={() => setImageError(true)}
+            onError={handleDisplayedError}
+            cachePolicy="memory-disk"
           />
         ) : (
           <View style={[styles.gridImage, styles.gridPlaceholder]}>
@@ -188,15 +264,38 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
     <View style={[styles.card, dark && { backgroundColor: INCOGNITO_COLORS.surface }]}>
       {/* Photo area fills entire card */}
       <View style={styles.photoContainer}>
-        {/* 7-1: Show placeholder on image error or missing photo */}
-        {currentPhoto && !imageError ? (
-          <Image
-            source={{ uri: currentPhoto.url }}
-            style={styles.image}
-            contentFit="cover"
-            blurRadius={photoBlurred ? BLUR_RADIUS : undefined}
-            onError={() => setImageError(true)}
-          />
+        {/* ═══════════════════════════════════════════════════════════════════
+            HOLD-LAST-FRAME RENDERING
+            ═══════════════════════════════════════════════════════════════════
+            1. Always show displayedPhoto (the last successfully loaded image)
+            2. When isPending, mount a HIDDEN image to preload targetPhoto
+            3. When hidden image fires onLoad, swap displayedIndex = targetIndex
+            4. NO transition, NO skeleton, NO blank frames
+            ═══════════════════════════════════════════════════════════════════ */}
+        {displayedPhoto && !imageError ? (
+          <>
+            {/* VISIBLE: Currently displayed image (stable, no changes until swap) */}
+            <Image
+              source={{ uri: displayedPhoto.url }}
+              style={styles.image}
+              contentFit="cover"
+              blurRadius={photoBlurred ? BLUR_RADIUS : undefined}
+              onError={handleDisplayedError}
+              cachePolicy="memory-disk"
+            />
+
+            {/* HIDDEN PRELOADER: Loads target image in background, triggers swap on success */}
+            {isPending && targetPhoto && (
+              <Image
+                source={{ uri: targetPhoto.url }}
+                style={styles.hiddenPreloader}
+                contentFit="cover"
+                onLoad={handlePendingLoad}
+                onError={handlePendingError}
+                cachePolicy="memory-disk"
+              />
+            )}
+          </>
         ) : (
           <View style={[styles.photoPlaceholder, dark && { backgroundColor: INCOGNITO_COLORS.accent }]}>
             <Ionicons name="image-outline" size={48} color={TC.textLight} />
@@ -218,13 +317,13 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
         )}
 
         {/* Photo indicator bars (Tinder-style) at top */}
-        {/* 7-2: Optional chaining for photos array null safety */}
+        {/* Highlight the TARGET index so user sees immediate visual feedback */}
         {showCarousel && photoCount > 1 && (
           <View style={styles.barsRow} pointerEvents="none">
             {photos?.map((_, i) => (
               <View
                 key={i}
-                style={[styles.bar, i === photoIndex && styles.barActive]}
+                style={[styles.bar, i === targetIndex && styles.barActive]}
               />
             ))}
           </View>
@@ -613,5 +712,17 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: '600',
     color: COLORS.white,
+  },
+
+  // HOLD-LAST-FRAME: Hidden preloader image (offscreen, 1x1 pixel)
+  // Loads the target image in background without being visible
+  hiddenPreloader: {
+    position: 'absolute',
+    width: 1,
+    height: 1,
+    opacity: 0,
+    // Position offscreen as extra safety
+    left: -9999,
+    top: -9999,
   },
 });
