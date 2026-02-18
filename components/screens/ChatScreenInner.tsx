@@ -5,7 +5,7 @@
  *
  * Accepts conversationId as a prop so the route file handles param extraction.
  */
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import {
   View,
   Text,
@@ -20,6 +20,7 @@ import {
   NativeScrollEvent,
   ActivityIndicator,
   InteractionManager,
+  Image,
 } from 'react-native';
 import { FlashList, type FlashListRef } from '@shopify/flash-list';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -38,6 +39,7 @@ import { Ionicons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
 import { isDemoMode } from '@/hooks/useConvex';
 import { useDemoDmStore, DemoDmMessage } from '@/stores/demoDmStore';
+import { DEMO_PROFILES } from '@/lib/demoData';
 import { VoiceMessageBubble } from '@/components/chat/VoiceMessageBubble';
 import { useDemoStore } from '@/stores/demoStore';
 import { useBlockStore } from '@/stores/blockStore';
@@ -86,6 +88,17 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
       router.back();
     }
   }, [source, router]);
+
+  // Open other user's profile when tapping header (with fromChat flag to hide action buttons)
+  const handleOpenProfile = useCallback((otherUserId: string | undefined) => {
+    if (otherUserId) {
+      router.push({
+        pathname: '/(main)/profile/[id]',
+        params: { id: otherUserId, fromChat: '1' },
+      });
+    }
+  }, [router]);
+
   const { userId } = useAuthStore();
   const flatListRef = useRef<FlashListRef<any>>(null);
 
@@ -208,11 +221,15 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
   // simulateMatch() or match-celebration's "Say Hi" flow.
   // Falls back to null → triggers the "not found" empty state.
   const storedMeta = conversationId ? demoMeta[conversationId] : undefined;
+  // Fallback: if photoUrl missing from stored meta, lookup from DEMO_PROFILES
+  const resolvedPhotoUrl = storedMeta?.otherUser?.photoUrl
+    || DEMO_PROFILES.find((p: any) => p._id === storedMeta?.otherUser?.id)?.photos?.[0]?.url;
   const demoConversation = storedMeta
     ? {
         otherUser: {
           ...storedMeta.otherUser,
           lastActive: storedMeta.otherUser.lastActive ?? Date.now(),
+          photoUrl: resolvedPhotoUrl,
         },
         isPreMatch: storedMeta.isPreMatch,
         isConfessionChat: storedMeta.isConfessionChat,
@@ -595,6 +612,16 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
     router.push(`/(main)/dare/send?userId=${activeConversation?.otherUser.id}`);
   };
 
+  // Get initials for avatar placeholder fallback
+  const avatarInitials = useMemo(() => {
+    const name = activeConversation?.otherUser?.name || '';
+    const parts = name.split(' ').filter(Boolean);
+    if (parts.length >= 2) {
+      return (parts[0][0] + parts[1][0]).toUpperCase();
+    }
+    return name.slice(0, 2).toUpperCase() || '?';
+  }, [activeConversation?.otherUser?.name]);
+
   // CRITICAL DISTINCTION:
   //   conversation === undefined  → Convex query still loading (show spinner)
   //   conversation === null       → Convex returned no result (show "not found")
@@ -643,14 +670,36 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
         <TouchableOpacity onPress={handleBack} style={styles.backButton}>
           <Ionicons name="arrow-back" size={24} color={COLORS.text} />
         </TouchableOpacity>
-        <View style={styles.headerInfo}>
+        {/* Avatar - tappable to open profile */}
+        <TouchableOpacity
+          onPress={() => handleOpenProfile(activeConversation.otherUser.id)}
+          style={styles.avatarButton}
+          activeOpacity={0.7}
+        >
+          {activeConversation.otherUser.photoUrl ? (
+            <Image
+              source={{ uri: activeConversation.otherUser.photoUrl }}
+              style={styles.headerAvatar}
+            />
+          ) : (
+            <View style={styles.headerAvatarPlaceholder}>
+              <Text style={styles.headerAvatarInitials}>{avatarInitials}</Text>
+            </View>
+          )}
+        </TouchableOpacity>
+        {/* Name + status - tappable to open profile */}
+        <TouchableOpacity
+          onPress={() => handleOpenProfile(activeConversation.otherUser.id)}
+          style={styles.headerInfo}
+          activeOpacity={0.7}
+        >
           <Text style={styles.headerName}>{activeConversation.otherUser.name}</Text>
           <Text style={styles.headerStatus}>
             {activeConversation.otherUser.lastActive > Date.now() - 5 * 60 * 1000
               ? 'Active now'
               : 'Recently active'}
           </Text>
-        </View>
+        </TouchableOpacity>
         {activeConversation.otherUser.isVerified && (
           <Ionicons name="checkmark-circle" size={20} color={COLORS.primary} style={{ marginRight: 8 }} />
         )}
@@ -901,6 +950,28 @@ const styles = StyleSheet.create({
     minHeight: 44,
     alignItems: 'center' as const,
     justifyContent: 'center' as const,
+  },
+  avatarButton: {
+    marginRight: 10,
+  },
+  headerAvatar: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: COLORS.backgroundDark,
+  },
+  headerAvatarPlaceholder: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: COLORS.primary,
+    alignItems: 'center' as const,
+    justifyContent: 'center' as const,
+  },
+  headerAvatarInitials: {
+    fontSize: 14,
+    fontWeight: '600' as const,
+    color: COLORS.white,
   },
   headerInfo: {
     flex: 1,

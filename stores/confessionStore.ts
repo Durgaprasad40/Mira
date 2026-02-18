@@ -293,6 +293,9 @@ export const useConfessionStore = create<ConfessionState>()(
             ? 'Anonymous Confessor'
             : (confession.authorName || 'Someone');
 
+          // Lookup profile for photoUrl
+          const otherUserProfile = demoStore.profiles.find((p) => p._id === confession.userId);
+
           // Seed conversation with initial system message so it shows in Messages
           const now = Date.now();
           const TWENTY_FOUR_HOURS = 24 * 60 * 60 * 1000;
@@ -309,6 +312,7 @@ export const useConfessionStore = create<ConfessionState>()(
               name: otherUserName,
               lastActive: now,
               isVerified: false,
+              photoUrl: otherUserProfile?.photos?.[0]?.url,
             },
             isPreMatch: true,
             isConfessionChat: true, // Confession-based thread
@@ -610,6 +614,9 @@ export const useConfessionStore = create<ConfessionState>()(
           ? 'Anonymous Confessor'
           : (confession.authorName || 'Someone');
 
+        // Lookup profile for photoUrl
+        const otherUserProfile = demoStore.profiles.find((p) => p._id === confession.userId);
+
         // Seed conversation with initial system message
         dmStore.seedConversation(convoId, [{
           _id: `sys_connect_${confessionId}`,
@@ -625,6 +632,7 @@ export const useConfessionStore = create<ConfessionState>()(
             name: otherUserName,
             lastActive: now,
             isVerified: false,
+            photoUrl: otherUserProfile?.photos?.[0]?.url,
           },
           isPreMatch: true,
           isConfessionChat: true,
