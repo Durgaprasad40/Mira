@@ -2,17 +2,17 @@
  * TelegramMediaSheet - Telegram-style bottom sheet for camera + gallery media selection.
  *
  * Features:
+ * - Requests both Camera + Gallery permissions upfront
  * - Camera tile at top (expandable to full camera view)
- * - Gallery grid with recent photos (when available)
+ * - Gallery grid with recent photos
  * - Photo capture (tap shutter)
  * - Video capture (long press shutter, max 30s)
  * - Preview with OK/Retake
  * - Routes selected/captured media to existing Secure Photo flow
  *
- * Expo Go Fallback:
- * - If gallery fails to load (permission issues in Expo Go), shows fallback UI
- * - "Open Gallery" button uses expo-image-picker as fallback
- * - "Open Camera" fallback if native camera fails
+ * Permission Behavior:
+ * - If either permission is denied: Shows "Grant Permissions" screen
+ * - Only shows Telegram UI when BOTH are granted
  */
 import React, { useState, useEffect, useRef, useCallback } from 'react';
 import {
@@ -26,26 +26,22 @@ import {
   Dimensions,
   Alert,
   ActivityIndicator,
-  Platform,
+  Linking,
 } from 'react-native';
 import { Image } from 'expo-image';
-import { CameraView, useCameraPermissions, CameraType } from 'expo-camera';
+import { CameraView, useCameraPermissions } from 'expo-camera';
+import type { CameraType } from 'expo-camera';
 import * as MediaLibrary from 'expo-media-library';
-import * as ImagePicker from 'expo-image-picker';
 import { Audio } from 'expo-av';
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { COLORS } from '@/lib/constants';
-import Constants from 'expo-constants';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 const SHEET_HEIGHT = SCREEN_HEIGHT * 0.7;
 const CAMERA_TILE_HEIGHT = 180;
 const THUMBNAIL_SIZE = (SCREEN_WIDTH - 48) / 3;
 const MAX_VIDEO_DURATION_MS = 30000; // 30 seconds
-
-// Detect if running in Expo Go
-const isExpoGo = Constants.appOwnership === 'expo';
 
 interface TelegramMediaSheetProps {
   visible: boolean;
@@ -70,13 +66,13 @@ export function TelegramMediaSheet({
 
   // Permissions
   const [cameraPermission, requestCameraPermission] = useCameraPermissions();
-  const [mediaLibraryStatus, setMediaLibraryStatus] = useState<'loading' | 'granted' | 'denied' | 'unavailable'>('loading');
+  const [mediaLibraryPermission, setMediaLibraryPermission] = useState<'loading' | 'granted' | 'denied'>('loading');
   const [micPermission, setMicPermission] = useState<boolean | null>(null);
+  const [permissionsChecked, setPermissionsChecked] = useState(false);
 
   // State
   const [cameraExpanded, setCameraExpanded] = useState(false);
   const [cameraFacing, setCameraFacing] = useState<CameraType>('back');
-  const [cameraUnavailable, setCameraUnavailable] = useState(false);
   const [galleryAssets, setGalleryAssets] = useState<GalleryAsset[]>([]);
   const [isLoadingGallery, setIsLoadingGallery] = useState(false);
 
@@ -90,10 +86,14 @@ export function TelegramMediaSheet({
   const [previewUri, setPreviewUri] = useState<string | null>(null);
   const [previewType, setPreviewType] = useState<'photo' | 'video'>('photo');
 
-  // Load gallery on mount
+  // Computed: both permissions granted
+  const bothPermissionsGranted =
+    cameraPermission?.granted === true && mediaLibraryPermission === 'granted';
+
+  // Request both permissions upfront when sheet becomes visible
   useEffect(() => {
-    if (visible) {
-      loadGalleryAssets();
+    if (visible && !permissionsChecked) {
+      requestBothPermissions();
     }
     return () => {
       // Cleanup recording timer
@@ -102,125 +102,78 @@ export function TelegramMediaSheet({
         recordingTimerRef.current = null;
       }
     };
-  }, [visible]);
+  }, [visible, permissionsChecked]);
 
-  // Request media library permission and load assets
-  // IMPORTANT: Only request photo/video permissions, NOT audio
+  // Request both camera + media library permissions
+  const requestBothPermissions = async () => {
+    setPermissionsChecked(true);
+
+    // Request camera permission
+    if (!cameraPermission?.granted) {
+      await requestCameraPermission();
+    }
+
+    // Request media library permission (read-only)
+    try {
+      const { status } = await MediaLibrary.requestPermissionsAsync(false);
+      setMediaLibraryPermission(status === 'granted' ? 'granted' : 'denied');
+    } catch (error) {
+      console.warn('[TelegramMediaSheet] MediaLibrary permission failed:', error);
+      setMediaLibraryPermission('denied');
+    }
+  };
+
+  // Load gallery assets when both permissions granted
+  useEffect(() => {
+    if (visible && bothPermissionsGranted) {
+      loadGalleryAssets();
+    }
+  }, [visible, bothPermissionsGranted]);
+
+  // Load gallery assets
   const loadGalleryAssets = async () => {
     setIsLoadingGallery(true);
     try {
-      // Request only read permissions for photos/videos (not audio)
-      // On Android 13+, this requests READ_MEDIA_IMAGES and READ_MEDIA_VIDEO
-      // On older Android, this requests READ_EXTERNAL_STORAGE
-      const { status } = await MediaLibrary.requestPermissionsAsync(false); // false = don't request write
-
-      if (status !== 'granted') {
-        setMediaLibraryStatus('denied');
-        setIsLoadingGallery(false);
-        return;
-      }
-
-      // Try to load assets
       const assets = await MediaLibrary.getAssetsAsync({
         first: 50,
         sortBy: [MediaLibrary.SortBy.creationTime],
         mediaType: [MediaLibrary.MediaType.photo, MediaLibrary.MediaType.video],
       });
 
-      if (assets.assets.length === 0) {
-        // Empty gallery or Expo Go limitation
-        setMediaLibraryStatus(isExpoGo ? 'unavailable' : 'granted');
-        setGalleryAssets([]);
-      } else {
-        setMediaLibraryStatus('granted');
-        setGalleryAssets(
-          assets.assets.map((a) => ({
-            id: a.id,
-            uri: a.uri,
-            mediaType: a.mediaType === MediaLibrary.MediaType.video ? 'video' : 'photo',
-            duration: a.duration,
-          }))
-        );
-      }
-    } catch (error: any) {
-      console.warn('[TelegramMediaSheet] Gallery load failed:', error?.message || error);
-      // In Expo Go, MediaLibrary often fails due to permission config
-      setMediaLibraryStatus('unavailable');
+      setGalleryAssets(
+        assets.assets.map((a) => ({
+          id: a.id,
+          uri: a.uri,
+          mediaType: a.mediaType === MediaLibrary.MediaType.video ? 'video' : 'photo',
+          duration: a.duration,
+        }))
+      );
+    } catch (error) {
+      console.warn('[TelegramMediaSheet] Gallery load failed:', error);
       setGalleryAssets([]);
     } finally {
       setIsLoadingGallery(false);
     }
   };
 
-  // Fallback: Open system gallery picker (works in Expo Go)
-  const handleOpenGalleryPicker = async () => {
-    try {
-      const result = await ImagePicker.launchImageLibraryAsync({
-        mediaTypes: ['images', 'videos'],
-        allowsEditing: false,
-        quality: 0.8,
-      });
+  // Handle "Grant Permissions" button press
+  const handleGrantPermissions = async () => {
+    // Re-request permissions
+    const cameraResult = await requestCameraPermission();
+    const { status: mediaStatus } = await MediaLibrary.requestPermissionsAsync(false);
+    setMediaLibraryPermission(mediaStatus === 'granted' ? 'granted' : 'denied');
 
-      if (!result.canceled && result.assets[0]) {
-        const asset = result.assets[0];
-        const type = asset.type === 'video' ? 'video' : 'photo';
-        setPreviewUri(asset.uri);
-        setPreviewType(type);
-      }
-    } catch (error) {
-      console.warn('[TelegramMediaSheet] Gallery picker failed:', error);
-      Alert.alert('Error', 'Failed to open gallery. Please try again.');
+    // If still denied after re-request, open settings
+    if (!cameraResult.granted || mediaStatus !== 'granted') {
+      Alert.alert(
+        'Permissions Required',
+        'Camera and Gallery permissions are required. Please enable them in Settings.',
+        [
+          { text: 'Cancel', style: 'cancel' },
+          { text: 'Open Settings', onPress: () => Linking.openSettings() },
+        ]
+      );
     }
-  };
-
-  // Fallback: Open system camera (works in Expo Go)
-  const handleOpenCameraPicker = async () => {
-    try {
-      const { status } = await ImagePicker.requestCameraPermissionsAsync();
-      if (status !== 'granted') {
-        Alert.alert('Camera Permission', 'Camera permission is required to take photos.');
-        return;
-      }
-
-      const result = await ImagePicker.launchCameraAsync({
-        mediaTypes: ['images'],
-        allowsEditing: false,
-        quality: 0.8,
-      });
-
-      if (!result.canceled && result.assets[0]) {
-        setPreviewUri(result.assets[0].uri);
-        setPreviewType('photo');
-      }
-    } catch (error) {
-      console.warn('[TelegramMediaSheet] Camera picker failed:', error);
-      Alert.alert('Error', 'Failed to open camera. Please try again.');
-    }
-  };
-
-  // Request camera permission when expanding camera
-  const handleExpandCamera = async () => {
-    // In Expo Go, native camera might not work well - offer fallback
-    if (isExpoGo) {
-      // Try native camera first, fall back to ImagePicker
-      if (!cameraPermission?.granted) {
-        const result = await requestCameraPermission();
-        if (!result.granted) {
-          // Use ImagePicker as fallback
-          handleOpenCameraPicker();
-          return;
-        }
-      }
-    } else {
-      if (!cameraPermission?.granted) {
-        const result = await requestCameraPermission();
-        if (!result.granted) {
-          Alert.alert('Camera Permission', 'Camera permission is required to take photos and videos.');
-          return;
-        }
-      }
-    }
-    setCameraExpanded(true);
   };
 
   // Request mic permission for video recording
@@ -239,15 +192,14 @@ export function TelegramMediaSheet({
     }
   };
 
+  // Expand camera to full screen
+  const handleExpandCamera = () => {
+    setCameraExpanded(true);
+  };
+
   // Take photo
   const handleTakePhoto = async () => {
-    if (!cameraRef.current) {
-      // Camera not available, use fallback
-      if (isExpoGo || cameraUnavailable) {
-        handleOpenCameraPicker();
-      }
-      return;
-    }
+    if (!cameraRef.current) return;
 
     try {
       const photo = await cameraRef.current.takePictureAsync({
@@ -259,16 +211,7 @@ export function TelegramMediaSheet({
       }
     } catch (error) {
       console.warn('[TelegramMediaSheet] Photo capture failed:', error);
-      // Mark camera as unavailable and offer fallback
-      setCameraUnavailable(true);
-      Alert.alert(
-        'Camera Error',
-        'Native camera failed. Would you like to use the system camera instead?',
-        [
-          { text: 'Cancel', style: 'cancel' },
-          { text: 'Open Camera', onPress: handleOpenCameraPicker },
-        ]
-      );
+      Alert.alert('Error', 'Failed to capture photo. Please try again.');
     }
   };
 
@@ -313,10 +256,9 @@ export function TelegramMediaSheet({
       }
     } catch (error: any) {
       console.warn('[TelegramMediaSheet] Video recording failed:', error);
-      // Don't show alert if recording was just stopped (expected error)
       const errorMsg = error?.message || '';
       if (!errorMsg.includes('stop') && !errorMsg.includes('cancelled')) {
-        Alert.alert('Recording Error', 'Failed to record video. Video recording may not be available in Expo Go.');
+        Alert.alert('Recording Error', 'Failed to record video. Please try again.');
       }
     } finally {
       setIsRecording(false);
@@ -370,6 +312,7 @@ export function TelegramMediaSheet({
     setCameraExpanded(false);
     setIsRecording(false);
     setRecordingDuration(0);
+    setPermissionsChecked(false);
     if (recordingTimerRef.current) {
       clearInterval(recordingTimerRef.current);
       recordingTimerRef.current = null;
@@ -439,27 +382,12 @@ export function TelegramMediaSheet({
     return (
       <Modal visible={visible} transparent animationType="slide">
         <View style={styles.expandedCameraContainer}>
-          {cameraPermission?.granted && !cameraUnavailable ? (
-            <CameraView
-              ref={cameraRef}
-              style={styles.expandedCamera}
-              facing={cameraFacing}
-              mode={isRecording ? 'video' : 'picture'}
-              onCameraReady={() => setCameraUnavailable(false)}
-              onMountError={() => setCameraUnavailable(true)}
-            />
-          ) : (
-            <View style={styles.cameraPlaceholder}>
-              <Ionicons name="camera-outline" size={48} color={COLORS.textLight} />
-              <Text style={styles.cameraPlaceholderText}>
-                {cameraUnavailable ? 'Camera not available' : 'Camera permission required'}
-              </Text>
-              <TouchableOpacity style={styles.fallbackButton} onPress={handleOpenCameraPicker}>
-                <Ionicons name="camera" size={20} color={COLORS.white} />
-                <Text style={styles.fallbackButtonText}>Open System Camera</Text>
-              </TouchableOpacity>
-            </View>
-          )}
+          <CameraView
+            ref={cameraRef}
+            style={styles.expandedCamera}
+            facing={cameraFacing}
+            mode={isRecording ? 'video' : 'picture'}
+          />
 
           {/* Recording indicator */}
           {isRecording && (
@@ -472,45 +400,43 @@ export function TelegramMediaSheet({
           )}
 
           {/* Camera controls */}
-          {cameraPermission?.granted && !cameraUnavailable && (
-            <View style={[styles.cameraControls, { paddingBottom: insets.bottom + 20 }]}>
-              {/* Back button */}
-              <TouchableOpacity
-                style={styles.cameraControlButton}
-                onPress={() => setCameraExpanded(false)}
-                disabled={isRecording}
-              >
-                <Ionicons name="arrow-back" size={28} color={COLORS.white} />
-              </TouchableOpacity>
+          <View style={[styles.cameraControls, { paddingBottom: insets.bottom + 20 }]}>
+            {/* Back button */}
+            <TouchableOpacity
+              style={styles.cameraControlButton}
+              onPress={() => setCameraExpanded(false)}
+              disabled={isRecording}
+            >
+              <Ionicons name="arrow-back" size={28} color={COLORS.white} />
+            </TouchableOpacity>
 
-              {/* Shutter button - tap for photo, long press for video */}
-              <Pressable
-                style={[styles.shutterButton, isRecording && styles.shutterButtonRecording]}
-                onPress={isRecording ? undefined : handleTakePhoto}
-                onLongPress={handleStartRecording}
-                onPressOut={isRecording ? handleStopRecording : undefined}
-                delayLongPress={300}
-              >
-                {isRecording ? (
-                  <View style={styles.shutterInnerRecording} />
-                ) : (
-                  <View style={styles.shutterInner} />
-                )}
-              </Pressable>
+            {/* Shutter button - tap for photo, long press for video */}
+            <Pressable
+              style={[styles.shutterButton, isRecording && styles.shutterButtonRecording]}
+              onPress={isRecording ? undefined : handleTakePhoto}
+              onLongPress={handleStartRecording}
+              onPressOut={isRecording ? handleStopRecording : undefined}
+              delayLongPress={300}
+            >
+              {isRecording ? (
+                <View style={styles.shutterInnerRecording} />
+              ) : (
+                <View style={styles.shutterInner} />
+              )}
+            </Pressable>
 
-              {/* Flip camera button */}
-              <TouchableOpacity
-                style={styles.cameraControlButton}
-                onPress={toggleCameraFacing}
-                disabled={isRecording}
-              >
-                <Ionicons name="camera-reverse" size={28} color={COLORS.white} />
-              </TouchableOpacity>
-            </View>
-          )}
+            {/* Flip camera button */}
+            <TouchableOpacity
+              style={styles.cameraControlButton}
+              onPress={toggleCameraFacing}
+              disabled={isRecording}
+            >
+              <Ionicons name="camera-reverse" size={28} color={COLORS.white} />
+            </TouchableOpacity>
+          </View>
 
           {/* Instruction text */}
-          {cameraPermission?.granted && !cameraUnavailable && !isRecording && (
+          {!isRecording && (
             <View style={styles.instructionContainer}>
               <Text style={styles.instructionText}>
                 Tap for photo, hold for video (max 30s)
@@ -531,11 +457,41 @@ export function TelegramMediaSheet({
     );
   }
 
-  // Determine if we should show the fallback UI
-  const showFallbackUI = mediaLibraryStatus === 'unavailable' ||
-    (mediaLibraryStatus === 'granted' && galleryAssets.length === 0 && isExpoGo);
+  // Permission request screen (if either permission not granted)
+  if (!bothPermissionsGranted) {
+    return (
+      <Modal visible={visible} transparent animationType="slide">
+        <Pressable style={styles.overlay} onPress={handleClose}>
+          <Pressable
+            style={[styles.sheet, { paddingBottom: insets.bottom + 16 }]}
+            onPress={(e) => e.stopPropagation()}
+          >
+            <View style={styles.handle} />
 
-  // Main sheet view (camera tile + gallery grid)
+            <View style={styles.permissionContainer}>
+              <View style={styles.permissionIconRow}>
+                <Ionicons name="camera" size={32} color={COLORS.primary} />
+                <Text style={styles.permissionPlus}>+</Text>
+                <Ionicons name="images" size={32} color={COLORS.primary} />
+              </View>
+              <Text style={styles.permissionTitle}>Allow Camera & Gallery</Text>
+              <Text style={styles.permissionSubtitle}>
+                Camera and gallery access is required to take photos, record videos, and select media.
+              </Text>
+              <TouchableOpacity
+                style={styles.grantButton}
+                onPress={handleGrantPermissions}
+              >
+                <Text style={styles.grantButtonText}>Grant Permissions</Text>
+              </TouchableOpacity>
+            </View>
+          </Pressable>
+        </Pressable>
+      </Modal>
+    );
+  }
+
+  // Main sheet view (camera tile + gallery grid) - only shown when both permissions granted
   return (
     <Modal visible={visible} transparent animationType="slide">
       <Pressable style={styles.overlay} onPress={handleClose}>
@@ -557,47 +513,17 @@ export function TelegramMediaSheet({
             </View>
           </TouchableOpacity>
 
-          {/* Gallery grid or fallback UI */}
+          {/* Gallery grid */}
           <View style={styles.galleryContainer}>
             {isLoadingGallery ? (
               <View style={styles.loadingContainer}>
                 <ActivityIndicator size="small" color={COLORS.primary} />
                 <Text style={styles.loadingText}>Loading gallery...</Text>
               </View>
-            ) : showFallbackUI ? (
-              // Expo Go fallback UI
-              <View style={styles.fallbackContainer}>
-                <Ionicons name="images-outline" size={48} color={COLORS.textLight} />
-                <Text style={styles.fallbackTitle}>Gallery Preview Unavailable</Text>
-                <Text style={styles.fallbackSubtitle}>
-                  {isExpoGo
-                    ? 'Gallery preview is not available in Expo Go. Use the system picker instead.'
-                    : 'No photos or videos found in your gallery.'}
-                </Text>
-                <TouchableOpacity style={styles.fallbackButton} onPress={handleOpenGalleryPicker}>
-                  <Ionicons name="folder-open" size={20} color={COLORS.white} />
-                  <Text style={styles.fallbackButtonText}>Open Gallery</Text>
-                </TouchableOpacity>
-              </View>
-            ) : mediaLibraryStatus === 'denied' ? (
-              <View style={styles.permissionDenied}>
-                <Ionicons name="images-outline" size={40} color={COLORS.textLight} />
-                <Text style={styles.permissionDeniedText}>
-                  Gallery access not granted
-                </Text>
-                <TouchableOpacity style={styles.fallbackButton} onPress={handleOpenGalleryPicker}>
-                  <Ionicons name="folder-open" size={20} color={COLORS.white} />
-                  <Text style={styles.fallbackButtonText}>Open Gallery</Text>
-                </TouchableOpacity>
-              </View>
             ) : galleryAssets.length === 0 ? (
               <View style={styles.emptyGallery}>
                 <Ionicons name="images-outline" size={40} color={COLORS.textLight} />
                 <Text style={styles.emptyGalleryText}>No photos or videos</Text>
-                <TouchableOpacity style={styles.fallbackButton} onPress={handleOpenGalleryPicker}>
-                  <Ionicons name="folder-open" size={20} color={COLORS.white} />
-                  <Text style={styles.fallbackButtonText}>Open Gallery</Text>
-                </TouchableOpacity>
               </View>
             ) : (
               <FlatList
@@ -659,6 +585,50 @@ const styles = StyleSheet.create({
     alignSelf: 'center',
     marginTop: 8,
     marginBottom: 12,
+  },
+
+  // Permission screen
+  permissionContainer: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 32,
+  },
+  permissionIconRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    marginBottom: 24,
+  },
+  permissionPlus: {
+    fontSize: 24,
+    color: COLORS.textLight,
+    fontWeight: '300',
+  },
+  permissionTitle: {
+    fontSize: 20,
+    fontWeight: '600',
+    color: COLORS.text,
+    textAlign: 'center',
+    marginBottom: 12,
+  },
+  permissionSubtitle: {
+    fontSize: 15,
+    color: COLORS.textLight,
+    textAlign: 'center',
+    lineHeight: 22,
+    marginBottom: 32,
+  },
+  grantButton: {
+    paddingHorizontal: 32,
+    paddingVertical: 16,
+    backgroundColor: COLORS.primary,
+    borderRadius: 25,
+  },
+  grantButtonText: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: COLORS.white,
   },
 
   // Camera tile
@@ -729,57 +699,6 @@ const styles = StyleSheet.create({
     color: COLORS.textLight,
   },
 
-  // Fallback UI (Expo Go)
-  fallbackContainer: {
-    flex: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 12,
-    padding: 24,
-  },
-  fallbackTitle: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: COLORS.text,
-    textAlign: 'center',
-  },
-  fallbackSubtitle: {
-    fontSize: 14,
-    color: COLORS.textLight,
-    textAlign: 'center',
-    lineHeight: 20,
-    marginBottom: 8,
-  },
-  fallbackButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    paddingHorizontal: 24,
-    paddingVertical: 14,
-    backgroundColor: COLORS.primary,
-    borderRadius: 25,
-    marginTop: 8,
-  },
-  fallbackButtonText: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: COLORS.white,
-  },
-
-  // Permission denied
-  permissionDenied: {
-    flex: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 12,
-    padding: 24,
-  },
-  permissionDeniedText: {
-    fontSize: 14,
-    color: COLORS.textLight,
-    textAlign: 'center',
-  },
-
   // Empty gallery
   emptyGallery: {
     flex: 1,
@@ -799,19 +718,6 @@ const styles = StyleSheet.create({
   },
   expandedCamera: {
     flex: 1,
-  },
-  cameraPlaceholder: {
-    flex: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: '#1a1a1a',
-    gap: 16,
-    padding: 24,
-  },
-  cameraPlaceholderText: {
-    fontSize: 14,
-    color: COLORS.textLight,
-    textAlign: 'center',
   },
 
   // Camera controls
