@@ -42,7 +42,7 @@ export interface DemoDmMessage {
 
 /** Lightweight metadata so demo chat screens can render a header. */
 export interface DemoConversationMeta {
-  otherUser: { id?: string; name: string; lastActive: number; isVerified?: boolean };
+  otherUser: { id?: string; name: string; lastActive: number; isVerified?: boolean; photoUrl?: string };
   isPreMatch: boolean;
   isConfessionChat?: boolean; // True if created from confession (tagged user liked)
   expiresAt?: number; // Only set for confession-based threads (24h after creation)

@@ -37,11 +37,12 @@ const GENDER_LABELS: Record<string, string> = {
 };
 
 export default function ViewProfileScreen() {
-  const { id: userId, mode, confessionId, receiverId } = useLocalSearchParams<{
+  const { id: userId, mode, confessionId, receiverId, fromChat } = useLocalSearchParams<{
     id: string;
     mode?: string;
     confessionId?: string;
     receiverId?: string;
+    fromChat?: string;
   }>();
   const isPhase2 = mode === 'phase2';
   const isConfessPreview = mode === 'confess_preview';
@@ -610,13 +611,13 @@ export default function ViewProfileScreen() {
           </View>
         )}
 
-        {/* Action Buttons - Hidden in confess_preview mode */}
+        {/* Action Buttons - Hidden in confess_preview mode or when opened from chat */}
         {isConfessPreview ? (
           <View style={styles.previewOnlyBanner}>
             <Ionicons name="eye-outline" size={18} color={COLORS.textMuted} />
             <Text style={styles.previewOnlyText}>View Only — One-time preview</Text>
           </View>
-        ) : (
+        ) : fromChat === '1' ? null : (
           <View style={styles.actions}>
             <TouchableOpacity
               style={[styles.actionButton, styles.passButton]}
