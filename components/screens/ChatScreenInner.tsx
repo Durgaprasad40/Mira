@@ -29,7 +29,7 @@ import { useQuery, useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { useAuthStore } from '@/stores/authStore';
 import { COLORS } from '@/lib/constants';
-import { MessageBubble, MessageInput, ProtectedMediaViewer, ReportModal, BottleSpinGame } from '@/components/chat';
+import { MessageBubble, MessageInput, ProtectedMediaViewer, ReportModal, BottleSpinGame, TelegramMediaSheet } from '@/components/chat';
 import { Phase2ProtectedMediaViewer } from '@/components/private/Phase2ProtectedMediaViewer';
 import { usePrivateChatStore } from '@/stores/privateChatStore';
 import type { IncognitoMessage } from '@/types';
@@ -275,6 +275,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
   const isSendingRef = useRef(false);
 
   // Protected media state
+  const [showMediaSheet, setShowMediaSheet] = useState(false);
   const [pendingImageUri, setPendingImageUri] = useState<string | null>(null);
   const [viewerMessageId, setViewerMessageId] = useState<string | null>(null);
   const [demoSecurePhotoId, setDemoSecurePhotoId] = useState<string | null>(null); // Demo mode viewer
@@ -461,25 +462,18 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
     // TODO: Add Convex delete support when backend is ready
   }, [isDemo, conversationId, deleteDemoMessage]);
 
-  const handleSendImage = async () => {
-    if (!userId || !activeConversation) return;
-
-    const permissionResult = await ImagePicker.requestMediaLibraryPermissionsAsync();
-    if (!permissionResult.granted) {
-      Alert.alert('Permission Required', 'Please allow access to your photos.');
-      return;
-    }
-
-    const result = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ['images' as const],
-      allowsEditing: false,
-      quality: 0.8,
-    });
-
-    if (!result.canceled && result.assets[0]) {
-      setPendingImageUri(result.assets[0].uri);
-    }
+  // Open Telegram-style media sheet (replaces direct ImagePicker)
+  const handleSendImage = () => {
+    if (!activeConversation) return;
+    setShowMediaSheet(true);
   };
+
+  // Handle media selection from TelegramMediaSheet → routes to Secure Photo options
+  const handleMediaSelected = useCallback((uri: string, _type: 'photo' | 'video') => {
+    setShowMediaSheet(false);
+    // Route to existing Secure Photo flow (CameraPhotoSheet)
+    setPendingImageUri(uri);
+  }, []);
 
   const handleSecurePhotoConfirm = async (imageUri: string, options: CameraPhotoOptions) => {
     if (!userId || !conversationId) return;
@@ -827,7 +821,14 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
         </View>
       </KeyboardAvoidingView>
 
-      {/* Phase-1 Secure Photo Sheet (old design with TIME / Timed/Hold) */}
+      {/* Telegram-style media sheet (camera + gallery) */}
+      <TelegramMediaSheet
+        visible={showMediaSheet}
+        onSelectMedia={handleMediaSelected}
+        onClose={() => setShowMediaSheet(false)}
+      />
+
+      {/* Phase-1 Secure Photo Sheet (LOCKED - do not modify) */}
       <CameraPhotoSheet
         visible={!!pendingImageUri}
         imageUri={pendingImageUri}
