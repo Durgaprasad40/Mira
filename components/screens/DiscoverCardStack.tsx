@@ -44,6 +44,7 @@ import type { IncognitoConversation, ConnectionSource } from "@/types";
 
 import { markPhase2Matched } from "@/lib/phase2MatchSession";
 import { log } from "@/utils/logger";
+import { RandomMatchPopup, RandomMatchProfile } from "@/components/discover/RandomMatchPopup";
 
 // DEV-only match rate for demo mode (80% for fast testing, 30% for prod)
 const DEMO_MATCH_RATE = __DEV__ ? 0.8 : 0.3;
@@ -130,6 +131,11 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   // F2-A/F2-B: Random match control — swipe tracking + trigger entry point
   const incSwipe = useDiscoverStore((s) => s.incSwipe);
   const maybeTriggerRandomMatch = useDiscoverStore((s) => s.maybeTriggerRandomMatch);
+  const setLastRandomMatchDismissAt = useDiscoverStore((s) => s.setLastRandomMatchDismissAt);
+
+  // F2-D: Random match popup state
+  const [randomMatchPopupVisible, setRandomMatchPopupVisible] = useState(false);
+  const [randomMatchProfile, setRandomMatchProfile] = useState<RandomMatchProfile | null>(null);
 
   // Reset daily limits if new day
   useEffect(() => {
@@ -481,6 +487,11 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   // when current/handleSwipe/animateSwipe change between renders.
   const currentRef = useRef(current);
   currentRef.current = current;
+  // F2-D: Refs for random match popup profile selection (avoids stale closure)
+  const displayProfilesRef = useRef(displayProfiles);
+  displayProfilesRef.current = displayProfiles;
+  const indexRef = useRef(index);
+  indexRef.current = index;
 
   // Stable callback for opening profile — uses ref so it never changes identity
   // Both Phase-1 and Phase-2 use the same route for viewing OTHER users' profiles
@@ -560,9 +571,23 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       // F2-D: Check if random match popup should trigger (Discover-only entry point)
       const shouldTriggerRandomMatch = maybeTriggerRandomMatch();
       if (shouldTriggerRandomMatch) {
-        // F2-D: Gate returned true - no existing popup handler function exists in this file.
-        // Match logic is inline (simulateMatch + router.push). Future: extract handler or add UI.
-        if (__DEV__) console.log('[F2-D] Gate returned true but no existing match popup handler found');
+        // F2-D: Pick a random upcoming profile to suggest (use refs to avoid stale closure)
+        const currentDisplayProfiles = displayProfilesRef.current;
+        const currentIndex = indexRef.current;
+        const upcomingProfiles = currentDisplayProfiles.slice(currentIndex + 1, currentIndex + 10);
+        if (upcomingProfiles.length > 0) {
+          const suggestedProfile = upcomingProfiles[Math.floor(Math.random() * upcomingProfiles.length)];
+          setRandomMatchProfile({
+            id: suggestedProfile.id,
+            name: suggestedProfile.name,
+            age: suggestedProfile.age,
+            photoUrl: suggestedProfile.photos[0]?.url || '',
+            city: suggestedProfile.city,
+          });
+          setRandomMatchPopupVisible(true);
+          trackEvent({ name: 'random_match_popup_shown', profileId: suggestedProfile.id });
+          if (__DEV__) console.log('[F2-D] Random match popup shown for:', suggestedProfile.name);
+        }
       }
 
       // Increment daily counters
@@ -804,6 +829,38 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       handleSwipeRef.current("up", msg || undefined);
     });
   }, [standOutResult]);
+
+  // F2-D: Random match popup handlers
+  const handleRandomMatchAccept = useCallback(() => {
+    if (!randomMatchProfile) return;
+    setRandomMatchPopupVisible(false);
+
+    // Create match with the suggested profile
+    if (isDemoMode) {
+      useDemoStore.getState().simulateMatch(randomMatchProfile.id);
+      const matchId = `match_${randomMatchProfile.id}`;
+      trackEvent({ name: 'match_created', matchId, otherUserId: randomMatchProfile.id, source: 'random_match_popup' });
+      log.info('[F2-D]', 'Random match accepted', { name: randomMatchProfile.name });
+
+      // Navigate to match celebration
+      InteractionManager.runAfterInteractions(() => {
+        if (mountedRef.current) {
+          router.push(`/(main)/match-celebration?matchId=${matchId}&userId=${randomMatchProfile.id}` as any);
+        }
+      });
+    }
+    // Note: Convex mode would need mutation call here (future enhancement)
+
+    setRandomMatchProfile(null);
+  }, [randomMatchProfile]);
+
+  const handleRandomMatchDismiss = useCallback(() => {
+    setRandomMatchPopupVisible(false);
+    // F2: Set dismiss backoff (+3 days)
+    setLastRandomMatchDismissAt(Date.now());
+    log.info('[F2-D]', 'Random match dismissed', { profileId: randomMatchProfile?.id });
+    setRandomMatchProfile(null);
+  }, [randomMatchProfile, setLastRandomMatchDismissAt]);
 
   // Loading state — non-demo only; skip when using external profiles
   const isDiscoverLoading = !isDemoMode && !externalProfiles && !convexProfiles;
@@ -1107,6 +1164,13 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
         </TouchableOpacity>
       </View>
 
+      {/* F2-D: Random match popup */}
+      <RandomMatchPopup
+        visible={randomMatchPopupVisible}
+        profile={randomMatchProfile}
+        onAccept={handleRandomMatchAccept}
+        onDismiss={handleRandomMatchDismiss}
+      />
     </View>
   );
 }
