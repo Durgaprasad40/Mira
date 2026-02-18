@@ -656,11 +656,19 @@ export default function ChatRoomScreen() {
         createdAt: Date.now(),
       };
 
-      AsyncStorage.getItem('@chat_room_reports').then((raw) => {
-        const reports = raw ? JSON.parse(raw) : [];
-        reports.push(reportEntry);
-        AsyncStorage.setItem('@chat_room_reports', JSON.stringify(reports));
-      });
+      AsyncStorage.getItem('@chat_room_reports')
+        .then((raw) => {
+          try {
+            const reports = raw ? JSON.parse(raw) : [];
+            reports.push(reportEntry);
+            AsyncStorage.setItem('@chat_room_reports', JSON.stringify(reports));
+          } catch {
+            AsyncStorage.setItem('@chat_room_reports', JSON.stringify([reportEntry]));
+          }
+        })
+        .catch(() => {
+          // ignore storage read failure; do not crash
+        });
 
       setOverlay('none');
       setReportTargetUser(null);
