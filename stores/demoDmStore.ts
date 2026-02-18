@@ -19,13 +19,16 @@ const DM_STORE_LOAD_TIME = Date.now();
 export interface DemoDmMessage {
   _id: string;
   content: string;
-  type: string; // 'text' | 'image' | 'template' | 'dare' | 'voice'
+  type: string; // 'text' | 'image' | 'video' | 'template' | 'dare' | 'voice'
   senderId: string;
   createdAt: number;
   readAt?: number;
   // Voice message fields
   audioUri?: string;
   durationMs?: number;
+  // Video message fields
+  videoUri?: string;
+  videoDurationMs?: number;
   // Protected media fields (synced from privateChatStore for bubble rendering)
   isProtected?: boolean;
   protectedMedia?: {

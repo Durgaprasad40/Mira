@@ -18,6 +18,9 @@ interface MessageBubbleProps {
     readAt?: number;
     imageUrl?: string;
     mediaUrl?: string;
+    // Video message fields (demo mode)
+    videoUri?: string;
+    videoDurationMs?: number;
     isProtected?: boolean;
     protectedMedia?: {
       timer: number;
@@ -135,7 +138,8 @@ export function MessageBubble({
   }
 
   // Unified media rendering for image, video
-  const mediaUrl = message.mediaUrl || message.imageUrl;
+  // Check multiple possible URI fields: mediaUrl, imageUrl, videoUri
+  const mediaUrl = message.mediaUrl || message.imageUrl || message.videoUri;
   const isMedia = (message.type === 'image' || message.type === 'video') && mediaUrl;
 
   if (isMedia) {

@@ -181,6 +181,8 @@ export function Phase2ProtectedMediaViewer({
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const hasExpiredRef = useRef(false);
   const onCloseRef = useRef(onClose);
+  // Stability fix: track prev displayed time to avoid unnecessary rerenders
+  const prevTimeLeftRef = useRef<number | null>(null);
 
   // Keep refs up to date
   useEffect(() => {
@@ -280,6 +282,10 @@ export function Phase2ProtectedMediaViewer({
     }
 
     // First hold - mark as viewed
+    // Stability fix: cap Set growth to prevent unbounded memory usage
+    if (viewedOnceHoldMessages.size > 3000) {
+      viewedOnceHoldMessages.clear();
+    }
     viewedOnceHoldMessages.add(messageId);
 
     // Cleanup: expire on release (component unmount)
@@ -316,6 +322,7 @@ export function Phase2ProtectedMediaViewer({
       // Reset session state
       wasViewedThisSessionRef.current = false;
       hasExpiredRef.current = false;
+      prevTimeLeftRef.current = null; // Reset for next open
       setTimeLeft(null);
       clearTimer();
     }
@@ -357,7 +364,12 @@ export function Phase2ProtectedMediaViewer({
 
       const now = Date.now();
       const remaining = Math.max(0, Math.ceil((endTime - now) / 1000));
-      setTimeLeft(remaining);
+
+      // Stability fix: only update state when displayed value changes (reduces rerenders)
+      if (remaining !== prevTimeLeftRef.current) {
+        prevTimeLeftRef.current = remaining;
+        setTimeLeft(remaining);
+      }
 
       if (remaining <= 0 && !hasExpiredRef.current) {
         hasExpiredRef.current = true;

@@ -566,7 +566,9 @@ export interface IncognitoMessage {
   isProtected?: boolean;
   protectedMedia?: {
     localUri: string;
+    mediaType?: 'photo' | 'video'; // For secure video support
     timer: number;
+    expiresDurationMs?: number; // Total expiry duration in ms (for continuous playback resume)
     viewingMode: 'tap' | 'hold';
     screenshotAllowed: boolean;
     viewOnce: boolean;

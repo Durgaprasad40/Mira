@@ -104,6 +104,13 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
   const { userId } = useAuthStore();
   const flatListRef = useRef<FlashListRef<any>>(null);
 
+  // ─── Mounted guard for async safety (stability fix 2.1/2.2) ───
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
+
   // ─── Composer height tracking (matches locked chat-rooms pattern) ───
   const [composerHeight, setComposerHeight] = useState(56);
   const onComposerLayout = useCallback((e: LayoutChangeEvent) => {
@@ -277,6 +284,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
   // Protected media state
   const [showMediaSheet, setShowMediaSheet] = useState(false);
   const [pendingImageUri, setPendingImageUri] = useState<string | null>(null);
+  const [pendingMediaType, setPendingMediaType] = useState<'photo' | 'video'>('photo');
   const [viewerMessageId, setViewerMessageId] = useState<string | null>(null);
   const [demoSecurePhotoId, setDemoSecurePhotoId] = useState<string | null>(null); // Demo mode viewer
   const [reportModalVisible, setReportModalVisible] = useState(false);
@@ -406,7 +414,8 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
 
     if (!userId) return;
     isSendingRef.current = true;
-    setIsSending(true);
+    if (mountedRef.current) setIsSending(true);
+    if (__DEV__) console.log('[STABILITY][ChatSend] starting async send');
     try {
       if (activeConversation.isPreMatch) {
         await sendPreMatchMessage({
@@ -426,11 +435,11 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
       // B5 fix: clear draft after successful send in Convex mode
       if (conversationId) clearDemoDraft(conversationId);
     } catch (error: any) {
-      Toast.show(error.message || 'Failed to send — tap send to retry');
+      if (mountedRef.current) Toast.show(error.message || 'Failed to send — tap send to retry');
       throw error; // Re-throw so MessageInput can restore text for retry
     } finally {
       isSendingRef.current = false;
-      setIsSending(false);
+      if (mountedRef.current) setIsSending(false);
     }
   };
 
@@ -468,18 +477,23 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
     setShowMediaSheet(true);
   };
 
-  // Handle media selection from TelegramMediaSheet → routes to Secure Photo options
-  const handleMediaSelected = useCallback((uri: string, _type: 'photo' | 'video') => {
+  // Handle media selection from TelegramMediaSheet
+  // Routes BOTH photos AND videos through Secure Photo flow
+  const handleMediaSelected = useCallback((uri: string, mediaType: 'photo' | 'video') => {
     setShowMediaSheet(false);
-    // Route to existing Secure Photo flow (CameraPhotoSheet)
+    // Store both URI and type for the Secure Photo confirm flow
     setPendingImageUri(uri);
+    setPendingMediaType(mediaType);
   }, []);
 
   const handleSecurePhotoConfirm = async (imageUri: string, options: CameraPhotoOptions) => {
     if (!userId || !conversationId) return;
 
+    const isVideo = pendingMediaType === 'video';
     setPendingImageUri(null);
-    setIsSending(true);
+    setPendingMediaType('photo'); // Reset for next time
+    if (mountedRef.current) setIsSending(true);
+    if (__DEV__) console.log('[STABILITY][SecureConfirm] starting async secure photo/video send');
 
     try {
       // Demo mode: Store in BOTH stores
@@ -488,9 +502,15 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
       if (isDemo) {
         const uniqueId = `secure_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
         const now = Date.now();
+        // Calculate expiry duration in ms (for continuous video resume)
+        // timer=0 means "Once" (view once), otherwise timer is in seconds
+        const expiresDurationMs = options.timer > 0 ? options.timer * 1000 : 0;
+
         const protectedMedia = {
           localUri: imageUri,
+          mediaType: isVideo ? 'video' as const : 'photo' as const,
           timer: options.timer,
+          expiresDurationMs, // Store for wall-clock based video resume
           viewingMode: options.viewingMode,
           screenshotAllowed: false,
           viewOnce: options.timer === 0,
@@ -498,13 +518,16 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
         };
 
         // Add to demoDmStore for chat list (bubble uses isProtected + protectedMedia for display)
+        // For videos: use type 'video' and videoUri; for photos: use type 'image'
         addDemoMessage(conversationId, {
           _id: uniqueId,
-          content: 'Secure Photo',
-          type: 'image',
+          content: isVideo ? 'Secure Video' : 'Secure Photo',
+          type: isVideo ? 'video' : 'image',
           senderId: getDemoUserId(),
           createdAt: now,
           isProtected: true,
+          // For videos, store in videoUri; for photos, the protectedMedia.localUri is used
+          ...(isVideo ? { videoUri: imageUri } : {}),
           protectedMedia: {
             timer: options.timer,
             viewingMode: options.viewingMode,
@@ -519,7 +542,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
           id: uniqueId, // Same ID for lookup
           conversationId,
           senderId: 'me',
-          content: 'Secure Photo',
+          content: isVideo ? 'Secure Video' : 'Secure Photo',
           createdAt: now,
           isRead: false,
           isProtected: true,
@@ -527,7 +550,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
         };
         addPrivateMessage(conversationId, privateMsg);
 
-        setIsSending(false);
+        if (mountedRef.current) setIsSending(false);
         return;
       }
 
@@ -558,9 +581,9 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
         watermark: false, // Phase-1 default: no watermark
       });
     } catch (error: any) {
-      Alert.alert('Error', error.message || 'Failed to send secure photo');
+      if (mountedRef.current) Alert.alert('Error', error.message || 'Failed to send secure photo');
     } finally {
-      setIsSending(false);
+      if (mountedRef.current) setIsSending(false);
     }
   };
 
@@ -828,12 +851,13 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
         onClose={() => setShowMediaSheet(false)}
       />
 
-      {/* Phase-1 Secure Photo Sheet (LOCKED - do not modify) */}
+      {/* Phase-1 Secure Photo/Video Sheet */}
       <CameraPhotoSheet
         visible={!!pendingImageUri}
         imageUri={pendingImageUri}
+        mediaType={pendingMediaType}
         onConfirm={handleSecurePhotoConfirm}
-        onCancel={() => setPendingImageUri(null)}
+        onCancel={() => { setPendingImageUri(null); setPendingMediaType('photo'); }}
       />
 
       {/* Protected Media Viewer (Convex mode) */}

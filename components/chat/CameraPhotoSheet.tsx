@@ -36,8 +36,10 @@ export interface CameraPhotoOptions {
 
 interface CameraPhotoSheetProps {
   visible: boolean;
-  /** URI of the image picked from gallery */
+  /** URI of the image/video picked from gallery or camera */
   imageUri: string | null;
+  /** Media type: 'photo' or 'video' (affects title display) */
+  mediaType?: 'photo' | 'video';
   onConfirm: (imageUri: string, options: CameraPhotoOptions) => void;
   onCancel: () => void;
 }
@@ -53,9 +55,11 @@ const TIMER_OPTIONS = [
 export function CameraPhotoSheet({
   visible,
   imageUri,
+  mediaType = 'photo',
   onConfirm,
   onCancel,
 }: CameraPhotoSheetProps) {
+  const isVideo = mediaType === 'video';
   const insets = useSafeAreaInsets();
 
   // State
@@ -107,9 +111,15 @@ export function CameraPhotoSheet({
               <View style={styles.headerTextContainer}>
                 <View style={styles.titleRow}>
                   <Ionicons name="shield-checkmark" size={18} color={COLORS.primary} />
-                  <Text style={styles.secureTitle}>Secure Photo</Text>
+                  <Text style={styles.secureTitle}>
+                    {isVideo ? 'Secure Video' : 'Secure Photo'}
+                  </Text>
                 </View>
-                <Text style={styles.secureSubtitle}>Photo disappears after viewing once</Text>
+                <Text style={styles.secureSubtitle}>
+                  {isVideo
+                    ? 'Video disappears after viewing once'
+                    : 'Photo disappears after viewing once'}
+                </Text>
               </View>
             </View>
 

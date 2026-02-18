@@ -111,6 +111,9 @@ export default function MessagesScreen() {
   // BUGFIX #5: Track if list layout is ready (prevents scrollToIndex crash)
   const likesListLayoutReady = useRef(false);
 
+  // Stability fix: track scroll timeout for cleanup on unmount/blur
+  const scrollTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   // Track if we arrived from notification to prevent bounce-back
   const arrivedFromNotification = source === 'notification';
 
@@ -137,7 +140,14 @@ export default function MessagesScreen() {
         setActiveView('likes');
         // If profileId is provided, scroll to that like after render
         if (profileId && likesListRef.current) {
-          setTimeout(() => {
+          // Stability fix: clear any pending scroll timeout
+          if (scrollTimeoutRef.current) {
+            clearTimeout(scrollTimeoutRef.current);
+          }
+          scrollTimeoutRef.current = setTimeout(() => {
+            // Guard: ensure list ref still exists after timeout
+            if (!likesListRef.current) return;
+
             const idx = demoLikesRaw.findIndex((l) => l.userId === profileId);
             // BUGFIX #5: Bounds checks before scrollToIndex to prevent crash
             // 1) idx must be >= 0 (findIndex returns -1 if not found)
@@ -172,6 +182,14 @@ export default function MessagesScreen() {
           }, 150); // Slightly longer delay to allow layout
         }
       }
+
+      // Cleanup: clear pending scroll timeout on blur/unmount
+      return () => {
+        if (scrollTimeoutRef.current) {
+          clearTimeout(scrollTimeoutRef.current);
+          scrollTimeoutRef.current = null;
+        }
+      };
     }, [focus, profileId, demoLikesRaw])
   );
 
