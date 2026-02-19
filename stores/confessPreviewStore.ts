@@ -10,6 +10,8 @@ import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 
+const HYDRATION_TIMEOUT_MS = 3000;
+
 interface ConfessPreviewState {
   // Map of previewKey → boolean (true = preview has been used)
   usedPreviews: Record<string, boolean>;
@@ -22,6 +24,10 @@ interface ConfessPreviewState {
 
   // Reset for testing/debugging
   resetAllPreviews: () => void;
+
+  // Hydration
+  _hasHydrated: boolean;
+  setHasHydrated: (state: boolean) => void;
 }
 
 const getPreviewKey = (confessionId: string, receiverId: string): string => {
@@ -32,6 +38,9 @@ export const useConfessPreviewStore = create<ConfessPreviewState>()(
   persist(
     (set, get) => ({
       usedPreviews: {},
+
+      _hasHydrated: false,
+      setHasHydrated: (state) => set({ _hasHydrated: state }),
 
       isPreviewUsed: (confessionId: string, receiverId: string) => {
         const key = getPreviewKey(confessionId, receiverId);
@@ -55,6 +64,21 @@ export const useConfessPreviewStore = create<ConfessPreviewState>()(
     {
       name: 'confess-preview-store',
       storage: createJSONStorage(() => AsyncStorage),
+      onRehydrateStorage: () => (state, error) => {
+        if (error) console.warn('[confessPreviewStore] Rehydration error:', error);
+        if (state) state.setHasHydrated(true);
+      },
     }
   )
 );
+
+// Hydration timeout fallback
+let _confessPreviewHydrationTimeoutId: ReturnType<typeof setTimeout> | null = null;
+if (_confessPreviewHydrationTimeoutId !== null) clearTimeout(_confessPreviewHydrationTimeoutId);
+_confessPreviewHydrationTimeoutId = setTimeout(() => {
+  if (!useConfessPreviewStore.getState()._hasHydrated) {
+    console.warn('[HYDRATION] confessPreviewStore timed out, continuing');
+    useConfessPreviewStore.getState().setHasHydrated(true);
+  }
+  _confessPreviewHydrationTimeoutId = null;
+}, HYDRATION_TIMEOUT_MS);

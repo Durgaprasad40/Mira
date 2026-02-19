@@ -1,4 +1,4 @@
-import React, { useRef, useCallback } from 'react';
+import React, { useEffect } from 'react';
 import {
   View,
   Text,
@@ -24,6 +24,18 @@ export default function VideoPlayerModal({ visible, videoUri, onClose }: VideoPl
     p.loop = false;
     p.play();
   });
+
+  // CR-4: Cleanup video on close/unmount
+  useEffect(() => {
+    if (!visible && player) {
+      player.pause();
+    }
+    return () => {
+      if (player) {
+        player.pause();
+      }
+    };
+  }, [visible, player]);
 
   if (!visible || !videoUri) return null;
 

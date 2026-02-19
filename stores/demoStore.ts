@@ -25,6 +25,12 @@ import { markTiming } from '@/utils/startupTiming';
 // Hydration timing: capture when store module loads
 const DEMO_STORE_LOAD_TIME = Date.now();
 
+// Seed retry tracking (CR-2: prevent silent failure when dependencies slow)
+const SEED_RETRY_DELAY_MS = 250;
+const SEED_MAX_RETRIES = 20; // 20 * 250ms = 5s max wait
+let _seedRetryCount = 0;
+let _seedRetryTimeoutId: ReturnType<typeof setTimeout> | null = null;
+
 // ---------------------------------------------------------------------------
 // Types — lightweight "Like" shapes matching the demo data constants
 // ---------------------------------------------------------------------------
@@ -450,17 +456,36 @@ export const useDemoStore = create<DemoState>()(
         // CRITICAL: Do not seed before hydration completes
         // CR-3: Also check dependent stores (demoDmStore, blockStore) to prevent race conditions
         if (!state._hasHydrated) return;
-        if (!useDemoDmStore.getState()._hasHydrated) {
-          if (__DEV__) {
-            console.log('[demoStore] seed() aborted — demoDmStore not hydrated yet');
+
+        // CR-2: Check dependent stores with retry logic instead of silent return
+        const demoDmHydrated = useDemoDmStore.getState()._hasHydrated;
+        const blockHydrated = useBlockStore.getState()._hasHydrated;
+
+        if (!demoDmHydrated || !blockHydrated) {
+          // Clear any existing retry timeout
+          if (_seedRetryTimeoutId !== null) {
+            clearTimeout(_seedRetryTimeoutId);
+            _seedRetryTimeoutId = null;
           }
-          return;
-        }
-        if (!useBlockStore.getState()._hasHydrated) {
-          if (__DEV__) {
-            console.log('[demoStore] seed() aborted — blockStore not hydrated yet');
+
+          if (_seedRetryCount < SEED_MAX_RETRIES) {
+            _seedRetryCount++;
+            if (__DEV__) {
+              console.log(`[demoStore] seed() waiting for deps (attempt ${_seedRetryCount}/${SEED_MAX_RETRIES}) — demoDm:${demoDmHydrated}, block:${blockHydrated}`);
+            }
+            _seedRetryTimeoutId = setTimeout(() => {
+              _seedRetryTimeoutId = null;
+              get().seed();
+            }, SEED_RETRY_DELAY_MS);
+            return;
+          } else {
+            // Max retries exceeded — proceed with warning
+            console.warn(`[DEMO] seed() timed out waiting for dependencies (demoDm:${demoDmHydrated}, block:${blockHydrated}), proceeding anyway`);
+            _seedRetryCount = 0; // Reset for future calls
           }
-          return;
+        } else {
+          // Dependencies ready — reset retry counter
+          _seedRetryCount = 0;
         }
 
         // Only skip if ALL data is present
