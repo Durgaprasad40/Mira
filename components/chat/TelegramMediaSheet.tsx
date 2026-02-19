@@ -43,6 +43,7 @@ import {
   Alert,
   ActivityIndicator,
   Linking,
+  AppState,
 } from 'react-native';
 import { Image } from 'expo-image';
 import { CameraView, Camera } from 'expo-camera';
@@ -225,6 +226,25 @@ export function TelegramMediaSheet({
       void checkExistingPermissions();
     }
   }, [visible, permissionState]);
+
+  // AppState listener: invalidate mic permission cache when returning from Settings
+  useEffect(() => {
+    if (!visible) return;
+
+    const handleAppStateChange = (nextState: string) => {
+      if (nextState === 'active' && mountedRef.current) {
+        // User returned to app - if mic was denied, invalidate cache so next
+        // video recording attempt re-checks via checkMicPermission()
+        if (micPermissionChecked.current && !hasMicPermission.current) {
+          micPermissionChecked.current = false;
+          console.log('[TelegramMediaSheet] Mic permission cache invalidated for re-check');
+        }
+      }
+    };
+
+    const subscription = AppState.addEventListener('change', handleAppStateChange);
+    return () => subscription.remove();
+  }, [visible]);
 
   // EXPO GO: Launch camera directly
   const launchExpoGoCamera = async () => {

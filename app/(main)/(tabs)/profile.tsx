@@ -158,24 +158,21 @@ export default function ProfileScreen() {
       {
         text: 'Logout',
         style: 'destructive',
-        onPress: async () => {
-          try {
-            // Call server logout BEFORE clearing local state
-            if (!isDemoMode && token) {
-              await serverLogout({ token });
-            }
-          } catch {
-            // Ignore server errors — still clear local state
-          }
-          // Clear demo store
+        onPress: () => {
+          // Clear local state FIRST for crash safety
           if (isDemoMode) {
             useDemoStore.getState().demoLogout();
           }
-          // Clear onboarding store so previous user's data doesn't leak
           useOnboardingStore.getState().reset();
-          // Clear auth state
           logout();
           router.replace('/(auth)/welcome');
+
+          // Server logout in background (best-effort)
+          if (!isDemoMode && token) {
+            serverLogout({ token }).catch((e) => {
+              console.warn('[Logout] Server logout failed:', e);
+            });
+          }
         },
       },
     ]);
