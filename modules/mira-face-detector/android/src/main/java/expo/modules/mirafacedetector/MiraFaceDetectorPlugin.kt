@@ -1,9 +1,6 @@
 package expo.modules.mirafacedetector
 
-import android.graphics.Rect
 import android.media.Image
-import androidx.annotation.OptIn
-import androidx.camera.core.ExperimentalGetImage
 import com.google.mlkit.vision.common.InputImage
 import com.google.mlkit.vision.face.Face
 import com.google.mlkit.vision.face.FaceDetection
@@ -37,7 +34,6 @@ class MiraFaceDetectorPlugin(proxy: VisionCameraProxy, options: Map<String, Any>
         detector = FaceDetection.getClient(detectorOptions)
     }
 
-    @OptIn(ExperimentalGetImage::class)
     override fun callback(frame: Frame, arguments: Map<String, Any>?): Any {
         val currentTime = System.currentTimeMillis()
 
@@ -47,10 +43,18 @@ class MiraFaceDetectorPlugin(proxy: VisionCameraProxy, options: Map<String, Any>
         }
         lastProcessedTime = currentTime
 
-        val mediaImage: Image = frame.image ?: return createEmptyResult()
-        val rotation = frame.orientation.toDegrees()
+        // Get media image from frame
+        val mediaImage: Image
+        try {
+            mediaImage = frame.image
+        } catch (e: Exception) {
+            return createEmptyResult()
+        }
 
-        val inputImage = InputImage.fromMediaImage(mediaImage, rotation)
+        // Get rotation from imageProxy
+        val rotationDegrees = frame.imageProxy.imageInfo.rotationDegrees
+
+        val inputImage = InputImage.fromMediaImage(mediaImage, rotationDegrees)
 
         // Synchronous detection using latch
         val latch = CountDownLatch(1)
@@ -97,16 +101,10 @@ class MiraFaceDetectorPlugin(proxy: VisionCameraProxy, options: Map<String, Any>
             )
         )
 
-        // Add angles if available
-        primaryFace.headEulerAngleY.let { yaw ->
-            primaryData["yaw"] = yaw
-        }
-        primaryFace.headEulerAngleX.let { pitch ->
-            primaryData["pitch"] = pitch
-        }
-        primaryFace.headEulerAngleZ.let { roll ->
-            primaryData["roll"] = roll
-        }
+        // Add angles
+        primaryData["yaw"] = primaryFace.headEulerAngleY
+        primaryData["pitch"] = primaryFace.headEulerAngleX
+        primaryData["roll"] = primaryFace.headEulerAngleZ
 
         // Add classification probabilities if available
         primaryFace.leftEyeOpenProbability?.let { prob ->
@@ -123,8 +121,8 @@ class MiraFaceDetectorPlugin(proxy: VisionCameraProxy, options: Map<String, Any>
             "hasFace" to true,
             "facesCount" to facesCount,
             "primary" to primaryData,
-            "frameWidth" to mediaImage.width,
-            "frameHeight" to mediaImage.height
+            "frameWidth" to frame.imageProxy.width,
+            "frameHeight" to frame.imageProxy.height
         )
     }
 
