@@ -1,6 +1,12 @@
 import { useEffect, useRef, useState } from "react";
-import { AppState, AppStateStatus } from "react-native";
+import { AppState, AppStateStatus, LogBox } from "react-native";
 import { Stack, useRouter, useSegments } from "expo-router";
+
+// Suppress known dev-mode warning: Expo's withDevTools calls useKeepAwake() which can fail
+// on Android before activity is ready. This is non-critical (screen may sleep during dev).
+if (__DEV__) {
+  LogBox.ignoreLogs(["Unable to activate keep awake"]);
+}
 import { ConvexProvider, useMutation, useQuery } from "convex/react";
 import { convex, isDemoMode } from "@/hooks/useConvex";
 
