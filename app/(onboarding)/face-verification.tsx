@@ -19,9 +19,24 @@ export default function FaceVerificationScreen() {
   const [isPermissionBlocked, setIsPermissionBlocked] = useState(false);
   const [isCheckingPermission, setIsCheckingPermission] = useState(false);
 
+  // =========================================================================
+  // DEBUG: Log screen mount for Durga to see in Metro logs
+  // =========================================================================
+  useEffect(() => {
+    console.log('[FaceDebug] ========================================');
+    console.log('[FaceDebug] Face Verification screen MOUNTED');
+    console.log('[FaceDebug] ========================================');
+    return () => {
+      console.log('[FaceDebug] Face Verification screen UNMOUNTED');
+    };
+  }, []);
+
   // Check permission status on mount and refresh if needed
   useEffect(() => {
     const checkPermission = async () => {
+      // DEBUG: Clear permission log
+      console.log(`[FaceDebug] permission=${permission?.granted ? 'GRANTED' : 'DENIED'} canAskAgain=${permission?.canAskAgain}`);
+
       log.info('[FaceVerification]', 'Initial permission check', {
         permissionExists: !!permission,
         granted: permission?.granted,
