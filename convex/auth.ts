@@ -30,6 +30,12 @@ function constantTimeCompare(a: string, b: string): boolean {
   return result === 0;
 }
 
+// ============================================================================
+// DEV MODE: Skip OTP entirely for faster onboarding testing
+// SAFE: Only active when NODE_ENV !== "production"
+// ============================================================================
+const IS_DEV_MODE = process.env.NODE_ENV !== "production";
+
 // Generate a random 6-digit OTP
 function generateOTP(): string {
   return Math.floor(100000 + Math.random() * 900000).toString();
@@ -177,6 +183,14 @@ export const sendOTP = mutation({
     const { identifier, type } = args;
     const now = Date.now();
 
+    // =========================================================================
+    // DEV MODE: Skip OTP entirely - immediate success
+    // =========================================================================
+    if (IS_DEV_MODE) {
+      console.log(`[DEV_AUTH] OTP skipped for ${identifier} – auto-success`);
+      return { success: true, message: "OTP skipped (dev mode)", devSkipped: true };
+    }
+
     // Check for existing unexpired OTP
     const existingOTP = await ctx.db
       .query("otpCodes")
@@ -223,6 +237,14 @@ export const verifyOTP = mutation({
   handler: async (ctx, args) => {
     const { identifier, code } = args;
     const now = Date.now();
+
+    // =========================================================================
+    // DEV MODE: Always succeed - no OTP validation
+    // =========================================================================
+    if (IS_DEV_MODE) {
+      console.log(`[DEV_AUTH] OTP verification skipped for ${identifier} – auto-verified`);
+      return { success: true, verified: true, devSkipped: true };
+    }
 
     // First, find the latest OTP for this identifier (regardless of code)
     const latestOTP = await ctx.db

@@ -13,9 +13,14 @@ import { Button } from "@/components/ui";
 import { useOnboardingStore } from "@/stores/onboardingStore";
 import { useMutation } from "convex/react";
 import { api } from "@/convex/_generated/api";
-import { isDemoMode } from "@/hooks/useConvex";
 import { useAuthStore } from "@/stores/authStore";
 import { useDemoStore } from "@/stores/demoStore";
+
+// ============================================================================
+// DEV MODE: Skip OTP entirely – auto-redirect to password step
+// In production builds, __DEV__ is false, so OTP screen works normally
+// ============================================================================
+const SKIP_OTP_IN_DEV = __DEV__;
 
 export default function OTPScreen() {
   const { email, phone, setStep } = useOnboardingStore();
@@ -24,12 +29,9 @@ export default function OTPScreen() {
   const currentDemoUserId = useDemoStore((s) => s.currentDemoUserId);
   const demoOnboardingComplete = useDemoStore((s) => s.demoOnboardingComplete);
 
-  // Demo mode: never show OTP screen — redirect immediately
-  if (isDemoMode) {
-    if (currentDemoUserId && demoOnboardingComplete[currentDemoUserId]) {
-      return <Redirect href={"/(main)/(tabs)/home" as any} />;
-    }
-    // If no user or onboarding not complete, go to password step (skip OTP)
+  // DEV MODE: Skip OTP screen entirely – redirect to password
+  if (SKIP_OTP_IN_DEV) {
+    console.log('[DEV_AUTH] OTP screen accessed – auto-redirecting to password');
     return <Redirect href={"/(onboarding)/password" as any} />;
   }
   const [otp, setOtp] = useState(["", "", "", "", "", ""]);

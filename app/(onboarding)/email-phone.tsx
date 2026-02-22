@@ -5,7 +5,12 @@ import { COLORS, VALIDATION } from '@/lib/constants';
 import { Input, Button } from '@/components/ui';
 import { useOnboardingStore } from '@/stores/onboardingStore';
 import { Ionicons } from '@expo/vector-icons';
-import { isDemoMode } from '@/hooks/useConvex';
+
+// ============================================================================
+// DEV MODE: Skip OTP entirely for faster onboarding testing
+// In production builds, __DEV__ is false, so OTP will be required
+// ============================================================================
+const SKIP_OTP_IN_DEV = __DEV__;
 
 export default function EmailPhoneScreen() {
   const { email, phone, setEmail, setPhone, setStep } = useOnboardingStore();
@@ -46,8 +51,12 @@ export default function EmailPhoneScreen() {
       }
     }
 
-    if (isDemoMode) {
-      // Skip OTP in demo mode — go straight to password
+    // =========================================================================
+    // DEV MODE: Skip OTP entirely – go straight to password step
+    // Production: Require OTP verification
+    // =========================================================================
+    if (SKIP_OTP_IN_DEV) {
+      console.log('[DEV_AUTH] Skipping OTP screen – going to password');
       setStep('password');
       router.push('/(onboarding)/password' as any);
     } else {
