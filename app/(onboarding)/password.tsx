@@ -7,12 +7,17 @@ import { useOnboardingStore } from '@/stores/onboardingStore';
 import { Ionicons } from '@expo/vector-icons';
 
 export default function PasswordScreen() {
-  const { password, setPassword, setStep } = useOnboardingStore();
+  const { email, setEmail, password, setPassword, setStep } = useOnboardingStore();
   const router = useRouter();
   const [confirmPassword, setConfirmPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [showConfirmPassword, setShowConfirmPassword] = useState(false);
-  const [errors, setErrors] = useState<{ password?: string; confirm?: string }>({});
+  const [errors, setErrors] = useState<{ email?: string; password?: string; confirm?: string }>({});
+
+  const validateEmail = (emailValue: string) => {
+    const re = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    return re.test(emailValue);
+  };
 
   const getPasswordStrength = (pwd: string) => {
     if (pwd.length === 0) return { strength: 0, label: '', color: COLORS.border };
@@ -40,7 +45,14 @@ export default function PasswordScreen() {
   const passwordStrength = getPasswordStrength(password);
 
   const validate = () => {
-    const newErrors: { password?: string; confirm?: string } = {};
+    const newErrors: { email?: string; password?: string; confirm?: string } = {};
+
+    // Always validate email
+    if (!email || email.trim().length === 0) {
+      newErrors.email = 'Please enter your email';
+    } else if (!validateEmail(email)) {
+      newErrors.email = 'Please enter a valid email address';
+    }
 
     if (password.length < VALIDATION.PASSWORD_MIN_LENGTH) {
       newErrors.password = `Password must be at least ${VALIDATION.PASSWORD_MIN_LENGTH} characters`;
@@ -63,10 +75,27 @@ export default function PasswordScreen() {
 
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.content}>
-      <Text style={styles.title}>Create a password</Text>
+      <Text style={styles.title}>Create your account</Text>
       <Text style={styles.subtitle}>
-        Choose a strong password to keep your account secure.
+        Enter your email and create a password to get started.
       </Text>
+
+      {/* Email input - always visible and editable */}
+      <View style={styles.field}>
+        <Input
+          label="Email"
+          value={email}
+          onChangeText={(text) => {
+            setEmail(text);
+            setErrors((prev) => ({ ...prev, email: undefined }));
+          }}
+          placeholder="you@example.com"
+          keyboardType="email-address"
+          autoCapitalize="none"
+          autoComplete="email"
+        />
+        {errors.email && <Text style={styles.error}>{errors.email}</Text>}
+      </View>
 
       <View style={styles.field}>
         <Input
