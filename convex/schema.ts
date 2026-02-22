@@ -541,6 +541,19 @@ export default defineSchema({
     .index('by_identifier', ['identifier'])
     .index('by_identifier_code', ['identifier', 'code']),
 
+  // Phone OTP table (secure, hashed codes)
+  phoneOtps: defineTable({
+    phone: v.string(),
+    codeHash: v.string(),           // SHA-256 hashed OTP code with pepper
+    expiresAt: v.number(),          // TTL: 5 minutes
+    attempts: v.number(),           // Max 5 attempts
+    createdAt: v.number(),
+    lastSentAt: v.number(),         // Rate limiting: min 30s between sends
+    windowStart: v.number(),        // Rate window start timestamp
+    sendCount: v.number(),          // OTPs sent in current window
+  })
+    .index('by_phone', ['phone']),
+
   // Sessions table (auth sessions for identity-bound login)
   sessions: defineTable({
     userId: v.id('users'),
