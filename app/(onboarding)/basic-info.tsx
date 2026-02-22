@@ -13,12 +13,11 @@ import { COLORS, VALIDATION, GENDER_OPTIONS } from "@/lib/constants";
 import { Input, Button } from "@/components/ui";
 import { useOnboardingStore } from "@/stores/onboardingStore";
 import { useAuthStore } from "@/stores/authStore";
-import { useMutation } from "convex/react";
-import { api } from "@/convex/_generated/api";
 import DateTimePicker from "@react-native-community/datetimepicker";
 import { Gender } from "@/types";
 import { isDemoMode } from "@/hooks/useConvex";
 import { useDemoStore } from "@/stores/demoStore";
+import { useAuthSubmit } from "@/hooks/useAuthSubmit";
 
 export default function BasicInfoScreen() {
   const {
@@ -42,8 +41,7 @@ export default function BasicInfoScreen() {
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [ageBlocked, setAgeBlocked] = useState(false);
 
-  const registerWithEmail = useMutation(api.auth.registerWithEmail);
-  const loginWithEmail = useMutation(api.auth.loginWithEmail);
+  const { submitEmailRegistration } = useAuthSubmit();
 
   const calculateAge = (dob: string) => {
     const birthDate = new Date(dob);
@@ -146,8 +144,8 @@ export default function BasicInfoScreen() {
         return;
       }
 
-      // Live mode: register via Convex
-      const result = await registerWithEmail({
+      // Live mode: register via Convex using central auth hook
+      const result = await submitEmailRegistration({
         email,
         password,
         name,
@@ -155,39 +153,20 @@ export default function BasicInfoScreen() {
         gender,
       });
 
+      // If result is null, USER_EXISTS was handled (Alert shown, routing done)
+      // Stop execution immediately - do NOT continue onboarding
+      if (!result) {
+        return;
+      }
+
       if (result.success && result.userId && result.token) {
         setAuth(result.userId, result.token, false);
         setStep("consent");
         router.push("/(onboarding)/consent" as any);
       }
     } catch (error: any) {
-      // If user already exists, try to login
-      if (error.message?.includes("already registered")) {
-        try {
-          const loginResult = await loginWithEmail({ email, password });
-          if (loginResult.success && loginResult.userId && loginResult.token) {
-            setAuth(
-              loginResult.userId,
-              loginResult.token,
-              loginResult.onboardingCompleted || false,
-            );
-            if (loginResult.onboardingCompleted) {
-              router.replace("/(main)/(tabs)/home");
-            } else {
-              setStep("consent");
-              router.push("/(onboarding)/consent" as any);
-            }
-          }
-        } catch (loginError: any) {
-          Alert.alert(
-            "Error",
-            loginError.message ||
-              "Failed to login. Please check your password.",
-          );
-        }
-      } else {
-        Alert.alert("Error", error.message || "Failed to create account");
-      }
+      // Handle unexpected errors (USER_EXISTS is already handled by the hook)
+      Alert.alert("Error", error.message || "Failed to create account");
     } finally {
       setIsSubmitting(false);
     }
