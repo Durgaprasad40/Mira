@@ -89,15 +89,24 @@ export default function Index() {
     }
 
     // ── Live mode: standard auth flow using authBootCache ──
-    // IMPORTANT: Require BOTH isAuthenticated AND a valid token
-    // This prevents stale isAuthenticated=true with missing token from skipping welcome
-    if (authBootCacheData.isAuthenticated && authBootCacheData.token) {
-      return authBootCacheData.onboardingCompleted
-        ? "/(main)/(tabs)/home"
-        : "/(onboarding)";
+    // STRICT TOKEN CHECK: only proceed if we have a non-empty token string
+    const hasValidToken = typeof authBootCacheData.token === 'string' && authBootCacheData.token.trim().length > 0;
+
+    // Debug logging for route decision (visible in adb logcat)
+    if (__DEV__) {
+      console.log(`[BOOT] route_decision hasValidToken=${hasValidToken} isAuthenticated=${authBootCacheData.isAuthenticated} tokenLen=${authBootCacheData.token?.length ?? 0}`);
     }
 
-    // No valid session → always show welcome screen first
+    if (hasValidToken) {
+      const destination = authBootCacheData.onboardingCompleted
+        ? "/(main)/(tabs)/home"
+        : "/(onboarding)";
+      if (__DEV__) console.log(`[BOOT] → ${destination}`);
+      return destination;
+    }
+
+    // No valid token → ALWAYS show welcome screen first
+    if (__DEV__) console.log('[BOOT] → /(auth)/welcome (no valid token)');
     return "/(auth)/welcome";
   }, [bootCachesReady, authBootCacheData, currentDemoUserId, demoOnboardingComplete]);
 
