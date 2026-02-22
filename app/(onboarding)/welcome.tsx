@@ -1,5 +1,5 @@
 import React from 'react';
-import { View, Text, StyleSheet, TouchableOpacity } from 'react-native';
+import { View, Text, StyleSheet } from 'react-native';
 import { useRouter } from 'expo-router';
 import { COLORS } from '@/lib/constants';
 import { Button } from '@/components/ui';
@@ -49,11 +49,30 @@ export default function OnboardingWelcomeScreen() {
 
       <View style={styles.footer}>
         <Button
-          title="Get Started"
+          title="Create Account"
           variant="primary"
           onPress={handleGetStarted}
           fullWidth
-          style={styles.button}
+          style={{
+            backgroundColor: COLORS.primary,
+            borderWidth: 0,
+            elevation: 0,
+            borderRadius: 12,
+            height: 52,
+            marginBottom: 12,
+          }}
+          textStyle={{
+            color: COLORS.white,
+            fontWeight: '600',
+          }}
+        />
+        <Button
+          title="I already have an account"
+          variant="outline"
+          onPress={handleGetStarted}
+          fullWidth
+          style={styles.outlineButton}
+          textStyle={styles.outlineButtonText}
         />
         <Text style={styles.terms}>
           By continuing, you agree to our Terms of Service and Privacy Policy
@@ -112,9 +131,15 @@ const styles = StyleSheet.create({
     padding: 24,
     paddingBottom: 40,
   },
-  button: {
-    backgroundColor: COLORS.white,
-    marginBottom: 16,
+  outlineButton: {
+    backgroundColor: '#00000000',
+    borderWidth: 2,
+    borderColor: COLORS.white,
+    marginBottom: 12,
+    elevation: 0,
+  },
+  outlineButtonText: {
+    color: COLORS.white,
   },
   terms: {
     fontSize: 12,
