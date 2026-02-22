@@ -89,12 +89,15 @@ export default function Index() {
     }
 
     // ── Live mode: standard auth flow using authBootCache ──
-    if (authBootCacheData.isAuthenticated) {
+    // IMPORTANT: Require BOTH isAuthenticated AND a valid token
+    // This prevents stale isAuthenticated=true with missing token from skipping welcome
+    if (authBootCacheData.isAuthenticated && authBootCacheData.token) {
       return authBootCacheData.onboardingCompleted
         ? "/(main)/(tabs)/home"
         : "/(onboarding)";
     }
 
+    // No valid session → always show welcome screen first
     return "/(auth)/welcome";
   }, [bootCachesReady, authBootCacheData, currentDemoUserId, demoOnboardingComplete]);
 
