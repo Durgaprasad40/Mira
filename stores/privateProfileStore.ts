@@ -3,6 +3,15 @@ import { createJSONStorage, persist } from 'zustand/middleware';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import type { PrivateIntentKey, PrivateDesireTag, PrivateBoundary, DesireCategory } from '@/types';
 
+/** Parse "YYYY-MM-DD" to local Date (noon to avoid DST issues) */
+function parseDOBString(dobString: string): Date {
+  if (!dobString || !/^\d{4}-\d{2}-\d{2}$/.test(dobString)) {
+    return new Date(2000, 0, 1, 12, 0, 0);
+  }
+  const [y, m, d] = dobString.split("-").map(Number);
+  return new Date(y, m - 1, d, 12, 0, 0);
+}
+
 // Version constant - bump this to force re-setup
 export const CURRENT_PHASE2_SETUP_VERSION = 1;
 
@@ -175,10 +184,10 @@ export const usePrivateProfileStore = create<PrivateProfileState>()(
       setAcceptedTermsAt: (timestamp) => set({ acceptedTermsAt: timestamp }),
       setBlurMyPhoto: (blur) => set({ blurMyPhoto: blur }),
       importPhase1Data: (data) => {
-        // Calculate age from DOB
+        // Calculate age from DOB using local parsing (not UTC)
         let age = 0;
         if (data.dateOfBirth) {
-          const dob = new Date(data.dateOfBirth);
+          const dob = parseDOBString(data.dateOfBirth);
           const today = new Date();
           age = today.getFullYear() - dob.getFullYear();
           const monthDiff = today.getMonth() - dob.getMonth();

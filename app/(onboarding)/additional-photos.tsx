@@ -48,6 +48,15 @@ export default function AdditionalPhotosScreen() {
       return;
     }
 
+    if (__DEV__) console.log('[ONB] additional-photos → bio (continue)');
+    setStep('bio');
+    router.push('/(onboarding)/bio');
+  };
+
+  // POST-VERIFICATION: Skip advances to next step
+  // No Previous button on this screen - can't cross back into face verification
+  const handleSkip = () => {
+    if (__DEV__) console.log('[ONB] additional-photos → bio (skip)');
     setStep('bio');
     router.push('/(onboarding)/bio');
   };
@@ -143,6 +152,9 @@ export default function AdditionalPhotosScreen() {
             Add at least {VALIDATION.MIN_PHOTOS} photo{VALIDATION.MIN_PHOTOS > 1 ? 's' : ''} to continue
           </Text>
         )}
+        <TouchableOpacity style={styles.skipButton} onPress={handleSkip}>
+          <Text style={styles.skipText}>Skip for now</Text>
+        </TouchableOpacity>
       </View>
     </ScrollView>
   );
@@ -246,5 +258,15 @@ const styles = StyleSheet.create({
     color: COLORS.textLight,
     textAlign: 'center',
     marginTop: 8,
+  },
+  skipButton: {
+    alignSelf: 'center',
+    paddingVertical: 12,
+    marginTop: 8,
+  },
+  skipText: {
+    fontSize: 14,
+    color: COLORS.textLight,
+    fontWeight: '500',
   },
 });

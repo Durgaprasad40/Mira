@@ -56,9 +56,24 @@ export default function PromptsScreen() {
   const filledPrompts = prompts.filter((p) => p.answer.trim().length > 0);
 
   const handleNext = () => {
+    if (__DEV__) console.log('[ONB] prompts → profile-details (continue)');
     setProfilePrompts(filledPrompts);
     setStep('profile_details');
     router.push('/(onboarding)/profile-details' as any);
+  };
+
+  // POST-VERIFICATION: Skip advances to next step
+  const handleSkip = () => {
+    if (__DEV__) console.log('[ONB] prompts → profile-details (skip)');
+    setStep('profile_details');
+    router.push('/(onboarding)/profile-details' as any);
+  };
+
+  // POST-VERIFICATION: Previous goes back
+  const handlePrevious = () => {
+    if (__DEV__) console.log('[ONB] prompts → bio (previous)');
+    setStep('bio');
+    router.push('/(onboarding)/bio' as any);
   };
 
   return (
@@ -138,6 +153,14 @@ export default function PromptsScreen() {
           disabled={filledPrompts.length < 1}
           fullWidth
         />
+        <View style={styles.navRow}>
+          <TouchableOpacity style={styles.navButton} onPress={handlePrevious}>
+            <Text style={styles.navText}>Previous</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.navButton} onPress={handleSkip}>
+            <Text style={styles.navText}>Skip</Text>
+          </TouchableOpacity>
+        </View>
       </View>
     </ScrollView>
   );
@@ -257,5 +280,19 @@ const styles = StyleSheet.create({
   },
   footer: {
     marginTop: 24,
+  },
+  navRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginTop: 12,
+  },
+  navButton: {
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+  },
+  navText: {
+    fontSize: 14,
+    color: COLORS.textLight,
+    fontWeight: '500',
   },
 });

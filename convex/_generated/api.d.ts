@@ -20,10 +20,12 @@ import type * as conversations from "../conversations.js";
 import type * as crons from "../crons.js";
 import type * as crossedPaths from "../crossedPaths.js";
 import type * as dares from "../dares.js";
+import type * as devReset from "../devReset.js";
 import type * as deviceFingerprint from "../deviceFingerprint.js";
 import type * as discover from "../discover.js";
 import type * as emailActions from "../emailActions.js";
 import type * as events from "../events.js";
+import type * as faceVerification from "../faceVerification.js";
 import type * as filterPresets from "../filterPresets.js";
 import type * as id from "../id.js";
 import type * as likes from "../likes.js";
@@ -48,6 +50,7 @@ import type * as truthDare from "../truthDare.js";
 import type * as users from "../users.js";
 import type * as verification from "../verification.js";
 import type * as verificationProviders from "../verificationProviders.js";
+import type * as verifyFaceMatch from "../verifyFaceMatch.js";
 
 import type {
   ApiFromModules,
@@ -68,10 +71,12 @@ declare const fullApi: ApiFromModules<{
   crons: typeof crons;
   crossedPaths: typeof crossedPaths;
   dares: typeof dares;
+  devReset: typeof devReset;
   deviceFingerprint: typeof deviceFingerprint;
   discover: typeof discover;
   emailActions: typeof emailActions;
   events: typeof events;
+  faceVerification: typeof faceVerification;
   filterPresets: typeof filterPresets;
   id: typeof id;
   likes: typeof likes;
@@ -96,6 +101,7 @@ declare const fullApi: ApiFromModules<{
   users: typeof users;
   verification: typeof verification;
   verificationProviders: typeof verificationProviders;
+  verifyFaceMatch: typeof verifyFaceMatch;
 }>;
 
 /**

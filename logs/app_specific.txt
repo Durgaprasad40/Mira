@@ -1,0 +1,326 @@
+--------- beginning of main
+02-23 17:26:36.124  2198 24003 E WifiHAL : WLAN_DIAG_TYPE_CONFIG - possible buffer over access, length=1456 count=16 hdr_size=8 payload len=12966
+02-23 17:26:36.125  2198 24003 E WifiHAL : WLAN_DIAG_TYPE_CONFIG - possible buffer over access, length=1456 count=16 hdr_size=8 payload len=12966
+02-23 17:26:36.125  2198 24003 E WifiHAL : WLAN_DIAG_TYPE_CONFIG - possible buffer over access, length=1464 count=16 hdr_size=8 payload len=12966
+02-23 17:26:36.292  3819 11087 E OplusStorageUFSBandwidth: storage_io_metrics_path is /proc/oplus_storage/io_metrics/forever/
+02-23 17:26:36.294  3819 11087 E OplusStorageUFSBandwidth: Bandwidth - Read: 1.99 MB/s, Write: 0.50 MB/s
+02-23 17:26:36.295  3819 11087 E OplusStorageUFSBandwidth: Task time: 2ms
+02-23 17:26:36.301  3819 11087 E OplusStorageUFSBandwidth: Alarm set to trigger in 10 seconds
+02-23 17:26:36.358  2058  2105 E TetherController: property_get sys.radio.data.modem_share_flag return 0, 1!
+02-23 17:26:36.425  2198 24003 E WifiHAL : WLAN_DIAG_TYPE_CONFIG - possible buffer over access, length=1460 count=16 hdr_size=8 payload len=12966
+02-23 17:26:36.426  2198 24003 E WifiHAL : WLAN_DIAG_TYPE_CONFIG - possible buffer over access, length=1444 count=16 hdr_size=8 payload len=12966
+02-23 17:26:36.426  2198 24003 E WifiHAL : WLAN_DIAG_TYPE_CONFIG - possible buffer over access, length=1456 count=16 hdr_size=8 payload len=12966
+02-23 17:26:36.468  5472  5472 E LockScreenNotificationDispatcherImp: updateNotificationListOnKg size:0
+02-23 17:26:36.538  5472  5472 E LockScreenNotificationDispatcherImp: updateNotificationListOnKg size:0
+02-23 17:26:36.703  2198 24003 E WifiHAL : WLAN_DIAG_TYPE_CONFIG - possible buffer over access, length=1468 count=16 hdr_size=8 payload len=12966
+02-23 17:26:36.704  2198 24003 E WifiHAL : WLAN_DIAG_TYPE_CONFIG - possible buffer over access, length=1472 count=16 hdr_size=8 payload len=12966
+02-23 17:26:36.705  2198 24003 E WifiHAL : WLAN_DIAG_TYPE_CONFIG - possible buffer over access, length=1444 count=16 hdr_size=8 payload len=12966
+02-23 17:26:37.065  2198 24003 E WifiHAL : WLAN_DIAG_TYPE_CONFIG - possible buffer over access, length=1468 count=16 hdr_size=8 payload len=12966
+02-23 17:26:37.065  2198 24003 E WifiHAL : WLAN_DIAG_TYPE_CONFIG - possible buffer over access, length=1472 count=16 hdr_size=8 payload len=12966
+--------- beginning of system
+02-23 17:26:37.250  3819  3902 E QosSceneRecognizer[ActivityStartScene]: notifyActivityStart get launchedFromUid failed through AppManager! launchedFromPackage: com.android.shell, pkg: com.mira.dating
+02-23 17:26:37.261  2274  2483 E ANDR-PERF-RESOURCEQS: ANDR-PERF-RESOURCEQS: AddAndApply() 125: Resource with major=16, minor=0 not supported
+02-23 17:26:37.266  2198 24003 E WifiHAL : WLAN_DIAG_TYPE_CONFIG - possible buffer over access, length=1480 count=16 hdr_size=8 payload len=12966
+02-23 17:26:37.272  2198 24003 E WifiHAL : WLAN_DIAG_TYPE_CONFIG - possible buffer over access, length=1456 count=16 hdr_size=8 payload len=12966
+02-23 17:26:37.272  2198 24003 E WifiHAL : WLAN_DIAG_TYPE_CONFIG - possible buffer over access, length=1472 count=16 hdr_size=8 payload len=12966
+02-23 17:26:37.285  2237  2612 E SDM     : DRMConnector::Perform: Connector 69: Setting Qsync min fps 12714112
+02-23 17:26:37.285  2237  2612 E SDM     : DRMConnector::Perform: Connector 69: Setting high_precision_fps 8880128
+02-23 17:26:37.286  5472  5567 E OplusBracketLog: [OplusViewMirrorManager] updateHostViewRootIfNeeded, not support android.view.ViewRootImpl@9053bc7
+02-23 17:26:37.286  2060  2086 E statsd  : Stats puller failed for tag: 150134 at 182704971046073
+02-23 17:26:37.291  2274  2483 E ANDR-PERF-RESOURCEQS: ANDR-PERF-RESOURCEQS: AddAndApply() 125: Resource with major=16, minor=41 not supported
+02-23 17:26:37.291  2274  2483 E ANDR-PERF-RESOURCEQS: ANDR-PERF-RESOURCEQS: AddAndApply() 125: Resource with major=16, minor=0 not supported
+02-23 17:26:37.296  3819  3893 E OplusAppQuickStart_AppQuickStartController: not start from launcher transition:4154
+02-23 17:26:37.301  3819  3893 E FlexibleWindowManagerService: notifyTaskObserverToAttachController not need to notify!
+02-23 17:26:37.304  2274 10447 E ANDR-PERF-LM: MetaMeter: handleAsync() 166: AdaptLaunch Invalid Async
+02-23 17:26:37.305  2198 24003 E WifiHAL : WLAN_DIAG_TYPE_CONFIG - possible buffer over access, length=1476 count=16 hdr_size=8 payload len=12966
+02-23 17:26:37.305  2198 24003 E WifiHAL : WLAN_DIAG_TYPE_CONFIG - possible buffer over access, length=1456 count=16 hdr_size=8 payload len=12966
+02-23 17:26:37.305  2198 24003 E WifiHAL : WLAN_DIAG_TYPE_CONFIG - possible buffer over access, length=1472 count=16 hdr_size=8 payload len=12966
+02-23 17:26:37.306  2282  2282 E qspmHal : setAppInfoH atPid = 6339, gpuFname:com.mira.dating, gpuFver:11
+02-23 17:26:37.324  2282  2282 E qspmHal : setAppInfoH atPid = 6347, gpuFname:com.qualcomm.qti.workloadclassifier, gpuFver:361
+02-23 17:26:37.327  6339  6339 E com.mira.dating: Unknown bits set in runtime_flags: 0x40000000
+02-23 17:26:37.329  6347  6347 E kloadclassifier: Unknown bits set in runtime_flags: 0x40000000
+02-23 17:26:37.346  2274 10447 E ANDR-PERF-LM: MetaMeter: handleAsync() 166: AdaptLaunch Invalid Async
+02-23 17:26:37.350  3819  6049 E FlexibleWindowManagerService: notifyTaskObserverToAttachController not need to notify!
+02-23 17:26:37.364  6347  6347 E OplusCustomizePackageManager: mIOplusCustomizePackageManagerService is null
+02-23 17:26:37.364  6347  6347 E OplusCustomizePackageManager: mIOplusCustomizePackageManagerService is null
+02-23 17:26:37.364  6347  6347 E OplusCustomizePackageManager: isOplusCertificatePackage Errorjava.lang.NullPointerException: Attempt to invoke interface method 'boolean android.os.customize.IOplusCustomizePackageManagerService.isOplusCertificatePackage(java.lang.String)' on a null object reference
+02-23 17:26:37.365  2060  2086 E statsd  : Stats puller failed for tag: 150134 at 182705050888469
+02-23 17:26:37.367  3819  3924 E OplusThermalStats: Error getting package info: com.mira.dating
+02-23 17:26:37.374  2290  2290 E android.hardware.power.stats-impl.oplus: HandleFactory::read open charger_input_current_now(/proc/charger/input_current_now) failed! fd: -1 errno: 2
+02-23 17:26:37.383  2060  2086 E statsd  : Gauge Stats puller failed for tag: 150146 at 182705061875813
+02-23 17:26:37.397 29078 29213 E metis_v2_JenaHandlerManager: local thread match
+02-23 17:26:37.397 29078 29213 E metis_v2_JenaHandlerManager: local thread match
+02-23 17:26:37.400 29078 29556 E metis_v2_FactManager: There is no subModel: com.oplus.linker [Metis|com.oplus.metis|2.0.20-aa39d14]
+02-23 17:26:37.401  6347  6347 E ANDR-PERF-CLIENT-SYS: death recipent object is fine
+02-23 17:26:37.438  6347  6388 E ashmem  : Pinning is deprecated since Android Q. Please use trim or other methods.
+02-23 17:26:37.467  3571  3658 E OplusTouchDaemon: syna_touch_node_handle:Id=0, nodeFlag=188, info=mod para_effect sensitive_level:16;mod para_effect set_package_type:0, wrFlag=0, cbsize=2048, readlen=2048
+02-23 17:26:37.467  3571  3658 E OplusTouchDaemon: [OplusTouchDaemon][algo_set_info][8744]: algo_set_info: set paramId 10, buf: , ret=0
+02-23 17:26:37.467  3571  3658 E OplusTouchDaemon: syna_touch_node_handle:TOUCH_SCENE_PARA_NODE set to mod para_effect sensitive_level:16, ret = 0
+02-23 17:26:37.584  2198 24003 E WifiHAL : WLAN_DIAG_TYPE_CONFIG - possible buffer over access, length=1480 count=16 hdr_size=8 payload len=12966
+02-23 17:26:37.584  2198 24003 E WifiHAL : WLAN_DIAG_TYPE_CONFIG - possible buffer over access, length=1452 count=16 hdr_size=8 payload len=12966
+02-23 17:26:37.585  2198 24003 E WifiHAL : WLAN_DIAG_TYPE_CONFIG - possible buffer over access, length=1476 count=16 hdr_size=8 payload len=12966
+02-23 17:26:37.594  3819  3893 E FlexibleWindowManagerService: notifyTaskObserverToAttachController not need to notify!
+02-23 17:26:37.594  3819  3893 E FlexibleWindowManagerService: notifyTaskObserverToAttachController not need to notify!
+02-23 17:26:37.612  3819  3819 E OplusGestureAnimationManagerPolicy: mScreenHeight:2376 mScreenWidth:1080 mRotation:0
+02-23 17:26:37.675  6339  6397 E ashmem  : Pinning is deprecated since Android Q. Please use trim or other methods.
+02-23 17:26:37.679  6339  6339 E [UAH_CLIENT]: uahInit enter
+02-23 17:26:37.720  2237  2612 E SDM     : DRMConnector::Perform: Connector 69: Setting Qsync min fps 12616065
+02-23 17:26:37.862  6339  6339 E SchedAssist: open sharedFd failed with error=Permission denied
+02-23 17:26:37.862  6339  6339 E SchedAssist: open sharedFd failed with error=Permission denied
+02-23 17:26:37.862  6339  6339 E SchedAssist: open sharedFd failed with error=Permission denied
+02-23 17:26:37.862  6339  6339 E SchedAssist: open sharedFd failed with error=Permission denied
+02-23 17:26:37.877  2282  2282 E qspmHal : GPU profile file NOT found !!
+02-23 17:26:37.898  6339  6339 E OplusPredictiveBackController:  NoSuchMethodException 
+02-23 17:26:37.920  3819  6033 E SensorService: Required app com.facebook.react.common.ShakeDetector, uid 10474, pid 6339
+02-23 17:26:37.944  3819  6078 E SchedAssist: ofbCfgFrameTask tid(6417) failed with error=Socket operation on non-socket
+02-23 17:26:37.948  2198 24003 E WifiHAL : WLAN_DIAG_TYPE_CONFIG - possible buffer over access, length=1448 count=16 hdr_size=8 payload len=12966
+02-23 17:26:37.949  2198 24003 E WifiHAL : WLAN_DIAG_TYPE_CONFIG - possible buffer over access, length=1444 count=16 hdr_size=8 payload len=12966
+02-23 17:26:37.949  2198 24003 E WifiHAL : WLAN_DIAG_TYPE_CONFIG - possible buffer over access, length=1460 count=16 hdr_size=8 payload len=12966
+02-23 17:26:37.951  6339  6339 E OplusBracketLog: [OplusViewMirrorManager] updateHostViewRootIfNeeded, not support android.view.ViewRootImpl@105784a
+02-23 17:26:37.954  3819  3893 E FlexibleWindowManagerService: notifyTaskObserverToAttachController not need to notify!
+02-23 17:26:37.956  3819  6078 E FlexibleWindowManagerService: notifyTaskObserverToAttachController not need to notify!
+02-23 17:26:37.965  6339  6339 E OplusCustomizeRestrictionManager: sInstance is null, start a new sInstance
+02-23 17:26:37.974  6339  6339 E OplusBracketLog: [OplusViewMirrorManager] updateHostViewRootIfNeeded, not support android.view.ViewRootImpl@c75e3a1
+02-23 17:26:38.157  2198 24003 E WifiHAL : WLAN_DIAG_TYPE_CONFIG - possible buffer over access, length=1456 count=16 hdr_size=8 payload len=12966
+02-23 17:26:38.157  2198 24003 E WifiHAL : WLAN_DIAG_TYPE_CONFIG - possible buffer over access, length=1468 count=16 hdr_size=8 payload len=12966
+02-23 17:26:38.220  2237  2612 E SDM     : DRMConnector::Perform: Connector 69: Setting Qsync min fps 12616065
+02-23 17:26:38.295  3819 11087 E OplusStorageUFSBandwidth: storage_io_metrics_path is /proc/oplus_storage/io_metrics/forever/
+02-23 17:26:38.295  3819 11087 E OplusStorageUFSBandwidth: Bandwidth - Read: 13.49 MB/s, Write: 0.00 MB/s
+02-23 17:26:38.295  3819 11087 E OplusStorageUFSBandwidth: Task time: 0ms
+02-23 17:26:38.298  2274 10423 E ANDR-PERF-LM: VmRssMeter:: start() 359: Could not find pid, can not collect vmrss data
+02-23 17:26:38.298  2274 10422 E ANDR-PERF-LM: VmRssMeter:: start() 359: Could not find pid, can not collect vmrss data
+02-23 17:26:38.298  2274 10423 E ANDR-PERF-LM: AdaptiveLaunch: writeToDataBase() 64: Meter aborted or could not get meter data for this run
+02-23 17:26:38.299  3819 11087 E OplusStorageUFSBandwidth: Alarm set to trigger in 10 seconds
+02-23 17:26:38.346  2198 24003 E WifiHAL : WLAN_DIAG_TYPE_CONFIG - possible buffer over access, length=1452 count=16 hdr_size=8 payload len=12966
+02-23 17:26:38.347  2198 24003 E WifiHAL : WLAN_DIAG_TYPE_CONFIG - possible buffer over access, length=1468 count=16 hdr_size=8 payload len=12966
+02-23 17:26:38.347  2198 24003 E WifiHAL : WLAN_DIAG_TYPE_CONFIG - possible buffer over access, length=1472 count=16 hdr_size=8 payload len=12966
+02-23 17:26:38.579  2198 24003 E WifiHAL : WLAN_DIAG_TYPE_CONFIG - possible buffer over access, length=1452 count=16 hdr_size=8 payload len=12966
+02-23 17:26:38.579  2198 24003 E WifiHAL : WLAN_DIAG_TYPE_CONFIG - possible buffer over access, length=1456 count=16 hdr_size=8 payload len=12966
+02-23 17:26:38.580  2198 24003 E WifiHAL : WLAN_DIAG_TYPE_CONFIG - possible buffer over access, length=1464 count=16 hdr_size=8 payload len=12966
+02-23 17:26:38.678  3819  3902 E UserAwareMgr: thread exist: {threadName='cameraservice', tid=3077, reporterPid=2834, currentThreadCount=13, maxThreadCount=16, extendTids=[5015, 9991, 2834, 483, 8332, 2172, 30455, 30457, 30671, 30673, 31229, 31231]}
+02-23 17:26:38.678  2834  2834 E cameraserver: CameraServiceExtImpl_sm8650.cpp: 900 Set UX successfully for 2834
+02-23 17:26:38.680  3819  3819 E OplusGestureAnimationManagerPolicy: mScreenHeight:2376 mScreenWidth:1080 mRotation:0
+02-23 17:26:38.781  2237  2612 E SDM     : DRMConnector::Perform: Connector 69: Setting Qsync min fps 12615809
+02-23 17:26:38.831  2198 24003 E WifiHAL : WLAN_DIAG_TYPE_CONFIG - possible buffer over access, length=1472 count=16 hdr_size=8 payload len=12966
+02-23 17:26:38.832  2198 24003 E WifiHAL : WLAN_DIAG_TYPE_CONFIG - possible buffer over access, length=1468 count=16 hdr_size=8 payload len=12966
+02-23 17:26:38.832  2198 24003 E WifiHAL : WLAN_DIAG_TYPE_CONFIG - possible buffer over access, length=1472 count=16 hdr_size=8 payload len=12966
+02-23 17:26:38.958  6339  6504 E unknown:UIManagerModuleConstantsHelper: Direct event name for 'CameraView' doesn't correspond to the naming convention, expected 'topEventName'->'onEventName', got 'topCameraStarted'->'onStarted'
+02-23 17:26:38.958  6339  6504 E unknown:UIManagerModuleConstantsHelper: Direct event name for 'CameraView' doesn't correspond to the naming convention, expected 'topEventName'->'onEventName', got 'topCameraError'->'onError'
+02-23 17:26:38.958  6339  6504 E unknown:UIManagerModuleConstantsHelper: Direct event name for 'CameraView' doesn't correspond to the naming convention, expected 'topEventName'->'onEventName', got 'topCameraViewReady'->'onViewReady'
+02-23 17:26:38.958  6339  6504 E unknown:UIManagerModuleConstantsHelper: Direct event name for 'CameraView' doesn't correspond to the naming convention, expected 'topEventName'->'onEventName', got 'topCameraAverageFpsChanged'->'onAverageFpsChanged'
+02-23 17:26:38.958  6339  6504 E unknown:UIManagerModuleConstantsHelper: Direct event name for 'CameraView' doesn't correspond to the naming convention, expected 'topEventName'->'onEventName', got 'topCameraShutter'->'onShutter'
+02-23 17:26:38.958  6339  6504 E unknown:UIManagerModuleConstantsHelper: Direct event name for 'CameraView' doesn't correspond to the naming convention, expected 'topEventName'->'onEventName', got 'topCameraOutputOrientationChanged'->'onOutputOrientationChanged'
+02-23 17:26:38.958  6339  6504 E unknown:UIManagerModuleConstantsHelper: Direct event name for 'CameraView' doesn't correspond to the naming convention, expected 'topEventName'->'onEventName', got 'topCameraInitialized'->'onInitialized'
+02-23 17:26:38.958  6339  6504 E unknown:UIManagerModuleConstantsHelper: Direct event name for 'CameraView' doesn't correspond to the naming convention, expected 'topEventName'->'onEventName', got 'topCameraCodeScanned'->'onCodeScanned'
+02-23 17:26:38.958  6339  6504 E unknown:UIManagerModuleConstantsHelper: Direct event name for 'CameraView' doesn't correspond to the naming convention, expected 'topEventName'->'onEventName', got 'topCameraPreviewOrientationChanged'->'onPreviewOrientationChanged'
+02-23 17:26:38.958  6339  6504 E unknown:UIManagerModuleConstantsHelper: Direct event name for 'CameraView' doesn't correspond to the naming convention, expected 'topEventName'->'onEventName', got 'topCameraStopped'->'onStopped'
+02-23 17:26:38.958  6339  6504 E unknown:UIManagerModuleConstantsHelper: Direct event name for 'CameraView' doesn't correspond to the naming convention, expected 'topEventName'->'onEventName', got 'topCameraPreviewStarted'->'onPreviewStarted'
+02-23 17:26:38.958  6339  6504 E unknown:UIManagerModuleConstantsHelper: Direct event name for 'CameraView' doesn't correspond to the naming convention, expected 'topEventName'->'onEventName', got 'topCameraPreviewStopped'->'onPreviewStopped'
+02-23 17:26:39.051  2198 24003 E WifiHAL : WLAN_DIAG_TYPE_CONFIG - possible buffer over access, length=1460 count=16 hdr_size=8 payload len=12966
+02-23 17:26:39.051  2198 24003 E WifiHAL : WLAN_DIAG_TYPE_CONFIG - possible buffer over access, length=1472 count=16 hdr_size=8 payload len=12966
+02-23 17:26:39.051  2198 24003 E WifiHAL : WLAN_DIAG_TYPE_CONFIG - possible buffer over access, length=1444 count=16 hdr_size=8 payload len=12966
+02-23 17:26:39.138  2058  2105 E TetherController: property_get sys.radio.data.modem_share_flag return 0, 1!
+02-23 17:26:39.155  6339  6504 E AVManager: Cannot install JSI bindings for AV module because JS context is not available
+02-23 17:26:39.280  2237  2612 E SDM     : DRMConnector::Perform: Connector 69: Setting Qsync min fps 12615809
+02-23 17:26:39.293  6339  6504 I ReactNativeJS: Running "main" with {"rootTag":1,"initialProps":{},"fabric":true}
+02-23 17:26:39.390  2198 24003 E WifiHAL : WLAN_DIAG_TYPE_CONFIG - possible buffer over access, length=1468 count=16 hdr_size=8 payload len=12966
+02-23 17:26:39.390  2198 24003 E WifiHAL : WLAN_DIAG_TYPE_CONFIG - possible buffer over access, length=1456 count=16 hdr_size=8 payload len=12966
+02-23 17:26:39.448  2058  2105 E TetherController: property_get sys.radio.data.modem_share_flag return 0, 1!
+02-23 17:26:39.481  5472  5472 E LockScreenNotificationDispatcherImp: updateNotificationListOnKg size:0
+02-23 17:26:39.541  5472  5472 E LockScreenNotificationDispatcherImp: updateNotificationListOnKg size:0
+02-23 17:26:39.642  2198 24003 E WifiHAL : WLAN_DIAG_TYPE_CONFIG - possible buffer over access, length=1480 count=16 hdr_size=8 payload len=12966
+02-23 17:26:39.643  2198 24003 E WifiHAL : WLAN_DIAG_TYPE_CONFIG - possible buffer over access, length=1440 count=16 hdr_size=8 payload len=12966
+02-23 17:26:39.644  2198 24003 E WifiHAL : WLAN_DIAG_TYPE_CONFIG - possible buffer over access, length=1464 count=16 hdr_size=8 payload len=12966
+02-23 17:26:39.999  2198 24003 E WifiHAL : WLAN_DIAG_TYPE_CONFIG - possible buffer over access, length=1464 count=16 hdr_size=8 payload len=12966
+02-23 17:26:40.000  2198 24003 E WifiHAL : WLAN_DIAG_TYPE_CONFIG - possible buffer over access, length=1480 count=16 hdr_size=8 payload len=12966
+02-23 17:26:40.001  2198 24003 E WifiHAL : WLAN_DIAG_TYPE_CONFIG - possible buffer over access, length=1456 count=16 hdr_size=8 payload len=12966
+02-23 17:26:40.194  6339  6504 W ReactNativeJS: '[expo-av]: Expo AV has been deprecated and will be removed in SDK 54. Use the `expo-audio` and `expo-video` packages to replace the required functionality.', { [Stack] name: 'Stack' }
+02-23 17:26:40.273  3819  8526 E TaskPersister: File error accessing recents directory (directory doesn't exist?).
+02-23 17:26:40.297  3819 11087 E OplusStorageUFSBandwidth: storage_io_metrics_path is /proc/oplus_storage/io_metrics/forever/
+02-23 17:26:40.298  3819 11087 E OplusStorageUFSBandwidth: Bandwidth - Read: 1.00 MB/s, Write: 0.50 MB/s
+02-23 17:26:40.298  3819 11087 E OplusStorageUFSBandwidth: Task time: 1ms
+02-23 17:26:40.302  3819 11087 E OplusStorageUFSBandwidth: Alarm set to trigger in 10 seconds
+02-23 17:26:40.311  2198 24003 E WifiHAL : WLAN_DIAG_TYPE_CONFIG - possible buffer over access, length=1472 count=16 hdr_size=8 payload len=12966
+02-23 17:26:40.312  2198 24003 E WifiHAL : WLAN_DIAG_TYPE_CONFIG - possible buffer over access, length=1472 count=16 hdr_size=8 payload len=12966
+02-23 17:26:40.312  2198 24003 E WifiHAL : WLAN_DIAG_TYPE_CONFIG - possible buffer over access, length=1456 count=16 hdr_size=8 payload len=12966
+02-23 17:26:40.328  6339  6504 I ReactNativeJS: Loading react-native-worklets-core...
+02-23 17:26:40.330  6339  6504 I ReactNativeJS: Worklets loaded successfully
+02-23 17:26:40.439  6339  6504 E CapabilitiesByQuality: No supported EncoderProfiles
+02-23 17:26:40.439  6339  6504 E CapabilitiesByQuality: No supported EncoderProfiles
+02-23 17:26:40.487  6339  6504 E CapabilitiesByQuality: No supported EncoderProfiles
+02-23 17:26:40.487  6339  6504 E CapabilitiesByQuality: No supported EncoderProfiles
+02-23 17:26:40.510  6339  6504 E CapabilitiesByQuality: No supported EncoderProfiles
+02-23 17:26:40.510  6339  6504 E CapabilitiesByQuality: No supported EncoderProfiles
+02-23 17:26:40.577  6339  6504 E CapabilitiesByQuality: No supported EncoderProfiles
+02-23 17:26:40.577  6339  6504 E CapabilitiesByQuality: No supported EncoderProfiles
+02-23 17:26:40.583  2198 24003 E WifiHAL : WLAN_DIAG_TYPE_CONFIG - possible buffer over access, length=1480 count=16 hdr_size=8 payload len=12966
+02-23 17:26:40.583  2198 24003 E WifiHAL : WLAN_DIAG_TYPE_CONFIG - possible buffer over access, length=1472 count=16 hdr_size=8 payload len=12966
+02-23 17:26:40.584  2198 24003 E WifiHAL : WLAN_DIAG_TYPE_CONFIG - possible buffer over access, length=1480 count=16 hdr_size=8 payload len=12966
+02-23 17:26:40.631  6339  6504 E CapabilitiesByQuality: No supported EncoderProfiles
+02-23 17:26:40.631  6339  6504 E CapabilitiesByQuality: No supported EncoderProfiles
+02-23 17:26:40.683  6339  6504 E CapabilitiesByQuality: No supported EncoderProfiles
+02-23 17:26:40.683  6339  6504 E CapabilitiesByQuality: No supported EncoderProfiles
+02-23 17:26:40.705  6339  6504 E CapabilitiesByQuality: No supported EncoderProfiles
+02-23 17:26:40.705  6339  6504 E CapabilitiesByQuality: No supported EncoderProfiles
+02-23 17:26:40.776  6339  6504 E CapabilitiesByQuality: No supported EncoderProfiles
+02-23 17:26:40.776  6339  6504 E CapabilitiesByQuality: No supported EncoderProfiles
+02-23 17:26:40.921  2198 24003 E WifiHAL : WLAN_DIAG_TYPE_CONFIG - possible buffer over access, length=1472 count=16 hdr_size=8 payload len=12966
+02-23 17:26:40.922  2198 24003 E WifiHAL : WLAN_DIAG_TYPE_CONFIG - possible buffer over access, length=1464 count=16 hdr_size=8 payload len=12966
+02-23 17:26:41.244  2198 24003 E WifiHAL : WLAN_DIAG_TYPE_CONFIG - possible buffer over access, length=1464 count=16 hdr_size=8 payload len=12966
+02-23 17:26:41.245  2198 24003 E WifiHAL : WLAN_DIAG_TYPE_CONFIG - possible buffer over access, length=1472 count=16 hdr_size=8 payload len=12966
+02-23 17:26:41.246  2198 24003 E WifiHAL : WLAN_DIAG_TYPE_CONFIG - possible buffer over access, length=1472 count=16 hdr_size=8 payload len=12966
+02-23 17:26:41.443  2198 24003 E WifiHAL : WLAN_DIAG_TYPE_CONFIG - possible buffer over access, length=1468 count=16 hdr_size=8 payload len=12966
+02-23 17:26:41.448  2198 24003 E WifiHAL : WLAN_DIAG_TYPE_CONFIG - possible buffer over access, length=1456 count=16 hdr_size=8 payload len=12966
+02-23 17:26:41.449  2198 24003 E WifiHAL : WLAN_DIAG_TYPE_CONFIG - possible buffer over access, length=1480 count=16 hdr_size=8 payload len=12966
+02-23 17:26:41.496  6339  6504 I ReactNativeJS: [HYDRATION] authStore: 1621ms
+02-23 17:26:41.496  6339  6504 I ReactNativeJS: [TIMING] auth_hydrated @ +1621ms
+02-23 17:26:41.498  6339  6504 I ReactNativeJS: [DM] hydrated from storage conversations=0 totalMessages=0
+02-23 17:26:41.498  6339  6504 I ReactNativeJS: [HYDRATION] demoDmStore: 1594ms (convos=0, messages=0)
+02-23 17:26:41.499  6339  6504 I ReactNativeJS: [DEMO] hydrated from storage {6 keys}
+02-23 17:26:41.499  6339  6504 I ReactNativeJS: [TIMING] demo_hydrated @ +1624ms
+02-23 17:26:41.499  6339  6504 I ReactNativeJS: [HYDRATION] demoStore: 1589ms (profiles=0, matches=0, crossedPaths=0)
+02-23 17:26:41.500  6339  6504 I ReactNativeJS: [HYDRATION] onboardingStore: 1242ms
+02-23 17:26:41.531  2198 24003 E WifiHAL : WLAN_DIAG_TYPE_CONFIG - possible buffer over access, length=1460 count=16 hdr_size=8 payload len=12966
+02-23 17:26:41.532  2198 24003 E WifiHAL : WLAN_DIAG_TYPE_CONFIG - possible buffer over access, length=1440 count=16 hdr_size=8 payload len=12966
+02-23 17:26:41.532  2198 24003 E WifiHAL : WLAN_DIAG_TYPE_CONFIG - possible buffer over access, length=1472 count=16 hdr_size=8 payload len=12966
+02-23 17:26:41.633  6339  6504 I ReactNativeJS: [TIMING] root_layout @ +1757ms
+02-23 17:26:41.636  6339  6504 I ReactNativeJS: [TIMING] boot_hidden @ +1761ms
+02-23 17:26:41.715  6339  6504 I ReactNativeJS: [HYDRATION] auth-storage payload: 331 bytes
+02-23 17:26:41.716  6339  6504 I ReactNativeJS: [HYDRATION] authBootCache: 14ms
+02-23 17:26:41.716  6339  6504 I ReactNativeJS: [DURATION] boot_caches: 16ms
+02-23 17:26:41.721  6339  6504 I ReactNativeJS: [ONB] pre-verify → forcing logout, routing to /(auth)/welcome
+02-23 17:26:41.735  6339  6504 I ReactNativeJS: [ONB] boot_decision facePassed=false onboardingCompleted=false hasToken=true action=FORCE_WELCOME_LOGOUT
+02-23 17:26:41.736  6339  6504 I ReactNativeJS: [ONB] route_decision routeDestination=/(auth)/welcome
+02-23 17:26:41.737  6339  6504 I ReactNativeJS: [TIMING] boot_caches_ready @ +1861ms
+02-23 17:26:41.738  6339  6504 I ReactNativeJS: [TIMING] route_decision @ +1862ms
+02-23 17:26:41.889  2060  2086 E statsd  : Gauge Stats puller failed for tag: 150134 at 182709568746853
+02-23 17:26:41.898  2198 24003 E WifiHAL : WLAN_DIAG_TYPE_CONFIG - possible buffer over access, length=1468 count=16 hdr_size=8 payload len=12966
+02-23 17:26:41.898  2198 24003 E WifiHAL : WLAN_DIAG_TYPE_CONFIG - possible buffer over access, length=1480 count=16 hdr_size=8 payload len=12966
+02-23 17:26:41.898  2198 24003 E WifiHAL : WLAN_DIAG_TYPE_CONFIG - possible buffer over access, length=1476 count=16 hdr_size=8 payload len=12966
+02-23 17:26:42.198  5687  8062 E OplusNetlinkConnect: parse rsp msg failed!Message missing required fields: header
+02-23 17:26:42.199  2822  2933 E QmiVsClient: sendAsyncRequest QMI_VS_SET_QOS_CONFIG_REQ_MSG_V01 ret 0
+02-23 17:26:42.299  3819 11087 E OplusStorageUFSBandwidth: storage_io_metrics_path is /proc/oplus_storage/io_metrics/forever/
+02-23 17:26:42.301  3819 11087 E OplusStorageUFSBandwidth: Bandwidth - Read: 3.49 MB/s, Write: 0.00 MB/s
+02-23 17:26:42.302  3819 11087 E OplusStorageUFSBandwidth: Task time: 3ms
+02-23 17:26:42.303  3819 11087 E OplusStorageUFSBandwidth: Alarm set to trigger in 10 seconds
+02-23 17:26:42.309  2058  2105 E         : destroyAllSocketForUid:10380
+02-23 17:26:42.315  2198 24003 E WifiHAL : WLAN_DIAG_TYPE_CONFIG - possible buffer over access, length=1464 count=16 hdr_size=8 payload len=12966
+02-23 17:26:42.315  2198 24003 E WifiHAL : WLAN_DIAG_TYPE_CONFIG - possible buffer over access, length=1468 count=16 hdr_size=8 payload len=12966
+02-23 17:26:42.389  6814 15614 E midasd  : getTotalFlipsFromSf mCurFrameCount: 4053784
+02-23 17:26:42.478  2058  2105 E TetherController: property_get sys.radio.data.modem_share_flag return 0, 1!
+02-23 17:26:42.562  5472  5472 E LockScreenNotificationDispatcherImp: updateNotificationListOnKg size:0
+02-23 17:26:42.580  3819  7726 E WindowProcessControllerExtImpl: shouldMakeAbnormalActivityFinishing, list may empty, mHasActivities: false
+02-23 17:26:42.580  2282  2282 E qspmHal : setAppInfoH atPid = 5896, gpuFname:com.oplus.phonemanager, gpuFver:160130030
+02-23 17:26:42.581  3819  5974 E Athena  : athena_optimize: pkg: com.oplus.phonemanager, processName: com.oplus.phonemanager:cardgetPercentage: 50
+02-23 17:26:42.612  5472  5472 E LockScreenNotificationDispatcherImp: updateNotificationListOnKg size:0
+02-23 17:26:42.666  2198 24003 E WifiHAL : WLAN_DIAG_TYPE_CONFIG - possible buffer over access, length=1468 count=16 hdr_size=8 payload len=12966
+02-23 17:26:42.667  2198 24003 E WifiHAL : WLAN_DIAG_TYPE_CONFIG - possible buffer over access, length=1472 count=16 hdr_size=8 payload len=12966
+02-23 17:26:42.668  2198 24003 E WifiHAL : WLAN_DIAG_TYPE_CONFIG - possible buffer over access, length=1448 count=16 hdr_size=8 payload len=12966
+02-23 17:26:43.016  2198 24003 E WifiHAL : WLAN_DIAG_TYPE_CONFIG - possible buffer over access, length=1456 count=16 hdr_size=8 payload len=12966
+02-23 17:26:43.017  2198 24003 E WifiHAL : WLAN_DIAG_TYPE_CONFIG - possible buffer over access, length=1472 count=16 hdr_size=8 payload len=12966
+02-23 17:26:43.017  2198 24003 E WifiHAL : WLAN_DIAG_TYPE_CONFIG - possible buffer over access, length=1448 count=16 hdr_size=8 payload len=12966
+02-23 17:26:43.223  5640  5640 E PhoneInterfaceManager: queryModemActivityInfo: invalid response
+02-23 17:26:43.226  2822  2933 E QmiVsClient: sendAsyncRequest QMI_VS_SET_SYNC_WITH_AP_REQ_MSG_V01 ret 0
+02-23 17:26:43.232  5687  6445 E AMC     : [P-ooslimited_deep/0] execute failed in triggers[0]:[nwsrcht:0][nwsrcht:0]
+02-23 17:26:43.233  5687  6445 E AMC     : [P-ooslimited_deep/1] execute failed in triggers[0]:[nwsrcht:0][nwsrcht:0]
+02-23 17:26:43.233  5687  6445 E AMC     : [P-mpss_reset/0] execute failed in triggers[0]:[sleept:2][sleept:288]
+02-23 17:26:43.233  5687  6445 E AMC     : [P-mpss_reset/1] execute failed in triggers[0]:[sleept:2][sleept:288]
+02-23 17:26:43.233  5687  6445 E AMC     : [P-pidnetdisable_recovery] execute failed in triggers[0]:[sleept:2][pidnetdisable:null]
+02-23 17:26:43.236  5687  6445 E AMC     : [P-standby_5gbackoff/0] execute failed check triggers[0]:[sleept:2][inactive:false, charge:true, endcactt:0, screen:true]
+02-23 17:26:43.239  5687  6445 E AMC     : [P-standby_5gbackoff/1] execute failed check triggers[0]:[sleept:2][inactive:false, charge:true, endcactt:0, screen:true]
+02-23 17:26:43.384  2198 24003 E WifiHAL : WLAN_DIAG_TYPE_CONFIG - possible buffer over access, length=1448 count=16 hdr_size=8 payload len=12966
+02-23 17:26:43.385  2198 24003 E WifiHAL : WLAN_DIAG_TYPE_CONFIG - possible buffer over access, length=1472 count=16 hdr_size=8 payload len=12966
+02-23 17:26:43.385  2198 24003 E WifiHAL : WLAN_DIAG_TYPE_CONFIG - possible buffer over access, length=1468 count=16 hdr_size=8 payload len=12966
+02-23 17:26:43.532  3571  3571 E OplusTouchDaemon: [prevent][curved_large_handle_V2][3008]: id:0 pos:18 center_down:1 (16843 683)(3 0 8 0) 
+02-23 17:26:43.532  3571  3571 E OplusTouchDaemon: [touchEvent][ts_report_touch_data][659]: first touch point id 0 [16843  683    4    0    3    0    8](ignore)
+02-23 17:26:43.572  3571  3571 E OplusTouchDaemon: [prevent][large_exit_matched_v4][1888]: large_exit_matched_v4: exit matched(0) (16773 965 3 0 2 0)
+02-23 17:26:43.572  3571  3571 E OplusTouchDaemon: [prevent][large_exit_matched_v4][1888]: large_exit_matched_v4: exit matched(0) (16773 965 3 0 2 0)
+02-23 17:26:43.580  3571  3571 E OplusTouchDaemon: [prevent][large_exit_matched_v4][1888]: large_exit_matched_v4: exit matched(0) (16651 1389 3 0 1 0)
+02-23 17:26:43.580  3571  3571 E OplusTouchDaemon: [prevent][large_area_judged_V2][2763]: large_area_judged_V2: id(0) judge middle top exit.
+02-23 17:26:43.586  5472  5472 E IJankManager: slideSceneEnd unknown scene 1000 mScene:-1
+02-23 17:26:43.596  3819  4590 E OsenseCommonUtils: write /dev/memcg/memory.force_shrink_file failed
+02-23 17:26:43.596  3819  4590 E OsenseCommonUtils: java.io.IOException: write failed: EBUSY (Device or resource busy)
+02-23 17:26:43.596  3819  4590 E OsenseCommonUtils: 	at libcore.io.IoBridge.write(IoBridge.java:651)
+02-23 17:26:43.596  3819  4590 E OsenseCommonUtils: 	at java.io.FileOutputStream.write(FileOutputStream.java:436)
+02-23 17:26:43.596  3819  4590 E OsenseCommonUtils: 	at sun.nio.cs.StreamEncoder.writeBytes(StreamEncoder.java:233)
+02-23 17:26:43.596  3819  4590 E OsenseCommonUtils: 	at sun.nio.cs.StreamEncoder.implFlushBuffer(StreamEncoder.java:309)
+02-23 17:26:43.596  3819  4590 E OsenseCommonUtils: 	at sun.nio.cs.StreamEncoder.implFlush(StreamEncoder.java:313)
+02-23 17:26:43.596  3819  4590 E OsenseCommonUtils: 	at sun.nio.cs.StreamEncoder.flush(StreamEncoder.java:153)
+02-23 17:26:43.596  3819  4590 E OsenseCommonUtils: 	at java.io.OutputStreamWriter.flush(OutputStreamWriter.java:248)
+02-23 17:26:43.596  3819  4590 E OsenseCommonUtils: 	at com.android.server.oplus.osense.utils.OsenseCommonUtils.writeFile(OsenseCommonUtils.java:154)
+02-23 17:26:43.596  3819  4590 E OsenseCommonUtils: 	at com.android.server.am.OplusOsenseCompressAction.doGlobalShrink(OplusOsenseCompressAction.java:1886)
+02-23 17:26:43.596  3819  4590 E OsenseCommonUtils: 	at com.android.server.am.OplusOsenseCompressAction.-$$Nest$mdoGlobalShrink(Unknown Source:0)
+02-23 17:26:43.596  3819  4590 E OsenseCommonUtils: 	at com.android.server.am.OplusOsenseCompressAction$CompressHandler.handleMessage(OplusOsenseCompressAction.java:1334)
+02-23 17:26:43.596  3819  4590 E OsenseCommonUtils: 	at android.os.Handler.dispatchMessage(Handler.java:115)
+02-23 17:26:43.596  3819  4590 E OsenseCommonUtils: 	at android.os.Looper.loopOnce(Looper.java:298)
+02-23 17:26:43.596  3819  4590 E OsenseCommonUtils: 	at android.os.Looper.loop(Looper.java:408)
+02-23 17:26:43.596  3819  4590 E OsenseCommonUtils: 	at android.os.HandlerThread.run(HandlerThread.java:85)
+02-23 17:26:43.596  3819  4590 E OsenseCommonUtils: Caused by: android.system.ErrnoException: write failed: EBUSY (Device or resource busy)
+02-23 17:26:43.596  3819  4590 E OsenseCommonUtils: 	at libcore.io.Linux.writeBytes(Native Method)
+02-23 17:26:43.596  3819  4590 E OsenseCommonUtils: 	at libcore.io.Linux.write(Linux.java:338)
+02-23 17:26:43.596  3819  4590 E OsenseCommonUtils: 	at libcore.io.ForwardingOs.write(ForwardingOs.java:954)
+02-23 17:26:43.596  3819  4590 E OsenseCommonUtils: 	at libcore.io.BlockGuardOs.write(BlockGuardOs.java:448)
+02-23 17:26:43.596  3819  4590 E OsenseCommonUtils: 	at libcore.io.IoBridge.write(IoBridge.java:646)
+02-23 17:26:43.596  3819  4590 E OsenseCommonUtils: 	... 14 more
+02-23 17:26:43.606  5472  5472 E [OPLUS_AFS_CONFIG]: Failed to open AFS config file: /proc/oplus_afs_config/afs_config
+02-23 17:26:43.606  5472  5472 E AFS_CONFIG: Failed to get scene config
+02-23 17:26:43.606  5472  5472 E OplusAfsManager: afsConfigSceneConfigGet sceneType is null
+02-23 17:26:43.606  5472  5472 E IJankManager: latencySceneEnd unknown scene 40 mScene:-1
+02-23 17:26:43.606  5472  5472 E [OPLUS_AFS_CONFIG]: Failed to open AFS config file: /proc/oplus_afs_config/afs_config
+02-23 17:26:43.606  5472  5472 E AFS_CONFIG: Failed to get scene config
+02-23 17:26:43.607  5472  5472 E OplusAfsManager: afsConfigSceneConfigGet sceneType is null
+02-23 17:26:43.607  5472  5472 E IJankManager: latencySceneEnd unknown scene 42 mScene:-1
+02-23 17:26:43.627  2058  2105 E TetherController: property_get sys.radio.data.modem_share_flag return 0, 1!
+02-23 17:26:43.627  3819  4962 E UAH-Framework: invalid window type -1
+02-23 17:26:43.634  3819  3819 E OplusGestureAnimationManagerPolicy: mScreenHeight:2376 mScreenWidth:1080 mRotation:0
+02-23 17:26:43.639  5973  6174 E ScreenCapture: Failed to generate screen capture. Error code: -12
+02-23 17:26:43.639  5973  6174 E Blur_ScreenCapture: [captureScreenInternal] exceeds fail times limit=1
+02-23 17:26:43.651  5472  5472 E [OPLUS_AFS_CONFIG]: Failed to open AFS config file: /proc/oplus_afs_config/afs_config
+02-23 17:26:43.651  5472  5472 E AFS_CONFIG: Failed to get scene config
+02-23 17:26:43.651  5472  5472 E OplusAfsManager: afsConfigSceneConfigGet sceneType is null
+02-23 17:26:43.668  3571  3571 E OplusTouchDaemon: [prevent][curved_large_handle_V2][3082]: up id(0) status: 18, 1, 1, 1.
+02-23 17:26:43.670  3819  3819 E OplusGestureAnimationManagerPolicy: mScreenHeight:2376 mScreenWidth:1080 mRotation:0
+02-23 17:26:43.722  2198 24003 E WifiHAL : WLAN_DIAG_TYPE_CONFIG - possible buffer over access, length=1476 count=16 hdr_size=8 payload len=12966
+02-23 17:26:43.723  2198 24003 E WifiHAL : WLAN_DIAG_TYPE_CONFIG - possible buffer over access, length=1472 count=16 hdr_size=8 payload len=12966
+02-23 17:26:43.723  2198 24003 E WifiHAL : WLAN_DIAG_TYPE_CONFIG - possible buffer over access, length=1440 count=16 hdr_size=8 payload len=12966
+02-23 17:26:43.754  5472  5472 E [OPLUS_AFS_CONFIG]: Failed to open AFS config file: /proc/oplus_afs_config/afs_config
+02-23 17:26:43.754  5472  5472 E AFS_CONFIG: Failed to get scene config
+02-23 17:26:43.754  5472  5472 E OplusAfsManager: afsConfigSceneConfigGet sceneType is null
+02-23 17:26:43.761  5472  5472 E [OPLUS_AFS_CONFIG]: Failed to open AFS config file: /proc/oplus_afs_config/afs_config
+02-23 17:26:43.761  5472  5472 E AFS_CONFIG: Failed to get scene config
+02-23 17:26:43.761  5472  5472 E OplusAfsManager: afsConfigSceneConfigGet sceneType is null
+02-23 17:26:43.784  2237  2612 E SDM     : DRMConnector::Perform: Connector 69: Setting Qsync min fps 12616065
+02-23 17:26:44.013  2198 24003 E WifiHAL : WLAN_DIAG_TYPE_CONFIG - possible buffer over access, length=1472 count=16 hdr_size=8 payload len=12966
+02-23 17:26:44.014  2198 24003 E WifiHAL : WLAN_DIAG_TYPE_CONFIG - possible buffer over access, length=1452 count=16 hdr_size=8 payload len=12966
+02-23 17:26:44.014  2198 24003 E WifiHAL : WLAN_DIAG_TYPE_CONFIG - possible buffer over access, length=1460 count=16 hdr_size=8 payload len=12966
+02-23 17:26:44.026  3819  6080 E OplusInputManagerService_jni: updateInvalidRegion start!!!
+02-23 17:26:44.026  3819  6080 E InputDispatcherExtImpl: rectF left: 0.000000, top: 2310.000000, right: 1080.000000, bottom: 2376.000000 offset_left: 0.000000, offset_top: 0.000000, offset_right: 0.000000, offset_bottom: 0.000000, isClosedRegion:0
+02-23 17:26:44.026  3819  6080 E OplusInputManagerService_jni: updateInvalidRegion start!!!
+02-23 17:26:44.027  3819  6080 E OplusInputManagerService_jni: updateInvalidRegion start!!!
+02-23 17:26:44.186  2198 24003 E WifiHAL : WLAN_DIAG_TYPE_CONFIG - possible buffer over access, length=1480 count=16 hdr_size=8 payload len=12966
+02-23 17:26:44.186  2198 24003 E WifiHAL : WLAN_DIAG_TYPE_CONFIG - possible buffer over access, length=1472 count=16 hdr_size=8 payload len=12966
+02-23 17:26:44.292  2237  2612 E SDM     : DRMConnector::Perform: Connector 69: Setting Qsync min fps 12616065
+02-23 17:26:44.303  3819 11087 E OplusStorageUFSBandwidth: storage_io_metrics_path is /proc/oplus_storage/io_metrics/forever/
+02-23 17:26:44.304  3819 11087 E OplusStorageUFSBandwidth: Bandwidth - Read: 0.00 MB/s, Write: 7.49 MB/s
+02-23 17:26:44.305  3819 11087 E OplusStorageUFSBandwidth: Task time: 2ms
+02-23 17:26:44.311  3819 11087 E OplusStorageUFSBandwidth: Alarm set to trigger in 10 seconds
+02-23 17:26:44.335  2198 24003 E WifiHAL : WLAN_DIAG_TYPE_CONFIG - possible buffer over access, length=1452 count=16 hdr_size=8 payload len=12966
+02-23 17:26:44.336  2198 24003 E WifiHAL : WLAN_DIAG_TYPE_CONFIG - possible buffer over access, length=1472 count=16 hdr_size=8 payload len=12966
+02-23 17:26:44.336  2198 24003 E WifiHAL : WLAN_DIAG_TYPE_CONFIG - possible buffer over access, length=1476 count=16 hdr_size=8 payload len=12966
+02-23 17:26:44.481  5472  5472 E [OPLUS_AFS_CONFIG]: Failed to open AFS config file: /proc/oplus_afs_config/afs_config
+02-23 17:26:44.481  5472  5472 E AFS_CONFIG: Failed to get scene config
+02-23 17:26:44.481  5472  5472 E OplusAfsManager: afsConfigSceneConfigGet sceneType is null
+02-23 17:26:44.671  2198 24003 E WifiHAL : WLAN_DIAG_TYPE_CONFIG - possible buffer over access, length=1480 count=16 hdr_size=8 payload len=12966
+02-23 17:26:44.672  2198 24003 E WifiHAL : WLAN_DIAG_TYPE_CONFIG - possible buffer over access, length=1472 count=16 hdr_size=8 payload len=12966
+02-23 17:26:44.674  2198 24003 E WifiHAL : WLAN_DIAG_TYPE_CONFIG - possible buffer over access, length=1476 count=16 hdr_size=8 payload len=12966
+02-23 17:26:44.739  2237  2612 E SDM     : DRMConnector::Perform: Connector 69: Setting Qsync min fps 12714172
+02-23 17:26:44.754  2237  2612 E SDM     : DRMConnector::Perform: Connector 69: Setting high_precision_fps 8634368
+02-23 17:26:44.975  2198 24003 E WifiHAL : WLAN_DIAG_TYPE_CONFIG - possible buffer over access, length=1460 count=16 hdr_size=8 payload len=12966
+02-23 17:26:44.976  2198 24003 E WifiHAL : WLAN_DIAG_TYPE_CONFIG - possible buffer over access, length=1472 count=16 hdr_size=8 payload len=12966
+02-23 17:26:44.977  2198 24003 E WifiHAL : WLAN_DIAG_TYPE_CONFIG - possible buffer over access, length=1472 count=16 hdr_size=8 payload len=12966
+02-23 17:26:45.198  2198 24003 E WifiHAL : WLAN_DIAG_TYPE_CONFIG - possible buffer over access, length=1456 count=16 hdr_size=8 payload len=12966
+02-23 17:26:45.198  2198 24003 E WifiHAL : WLAN_DIAG_TYPE_CONFIG - possible buffer over access, length=1448 count=16 hdr_size=8 payload len=12966
+02-23 17:26:45.198  2198 24003 E WifiHAL : WLAN_DIAG_TYPE_CONFIG - possible buffer over access, length=1472 count=16 hdr_size=8 payload len=12966
+02-23 17:26:45.246  9177  9203 E MIDASApplication: MIDASPullAtomManager: onPullAtom 150122
+02-23 17:26:45.282  3819  4583 E SettingsTelemetryUtils: PEAK_REFRESH_RATE value is null
+02-23 17:26:45.287  3819  4583 E SettingsTelemetryUtils: PEAK_REFRESH_RATE value is null

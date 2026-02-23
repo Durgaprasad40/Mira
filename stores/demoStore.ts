@@ -155,6 +155,7 @@ export interface DemoAccount {
 /** The demo user's own profile — created via onboarding. */
 export interface DemoUserProfile {
   name: string;
+  handle?: string; // User's nickname/username
   photos: { url: string }[];
   bio?: string;
   gender?: string;

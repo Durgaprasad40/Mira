@@ -30,6 +30,12 @@ function constantTimeCompare(a: string, b: string): boolean {
   return result === 0;
 }
 
+// ============================================================================
+// DEV MODE: Skip OTP entirely for faster onboarding testing
+// SAFE: Only active when NODE_ENV !== "production"
+// ============================================================================
+const IS_DEV_MODE = process.env.NODE_ENV !== "production";
+
 // Generate a random 6-digit OTP
 function generateOTP(): string {
   return Math.floor(100000 + Math.random() * 900000).toString();
@@ -177,6 +183,14 @@ export const sendOTP = mutation({
     const { identifier, type } = args;
     const now = Date.now();
 
+    // =========================================================================
+    // DEV MODE: Skip OTP entirely - immediate success
+    // =========================================================================
+    if (IS_DEV_MODE) {
+      console.log(`[DEV_AUTH] OTP skipped for ${identifier} – auto-success`);
+      return { success: true, message: "OTP skipped (dev mode)", devSkipped: true };
+    }
+
     // Check for existing unexpired OTP
     const existingOTP = await ctx.db
       .query("otpCodes")
@@ -223,6 +237,14 @@ export const verifyOTP = mutation({
   handler: async (ctx, args) => {
     const { identifier, code } = args;
     const now = Date.now();
+
+    // =========================================================================
+    // DEV MODE: Always succeed - no OTP validation
+    // =========================================================================
+    if (IS_DEV_MODE) {
+      console.log(`[DEV_AUTH] OTP verification skipped for ${identifier} – auto-verified`);
+      return { success: true, verified: true, devSkipped: true };
+    }
 
     // First, find the latest OTP for this identifier (regardless of code)
     const latestOTP = await ctx.db
@@ -290,6 +312,7 @@ export const registerWithEmail = mutation({
     email: v.string(),
     password: v.string(),
     name: v.string(),
+    handle: v.string(), // Required unique nickname
     dateOfBirth: v.string(),
     gender: v.union(
       v.literal("male"),
@@ -300,17 +323,55 @@ export const registerWithEmail = mutation({
     ),
   },
   handler: async (ctx, args) => {
-    const { email, password, name, dateOfBirth, gender } = args;
+    const { email, password, name, handle, dateOfBirth, gender } = args;
     const now = Date.now();
 
-    // Check if user already exists
-    const existingUser = await ctx.db
+    // Normalize handle: lowercase and trim
+    const normalizedHandle = handle.toLowerCase().trim();
+
+    // Validate handle format
+    if (normalizedHandle.length < 3) {
+      return {
+        success: false,
+        code: "INVALID_HANDLE" as const,
+        message: "Nickname must be at least 3 characters",
+      };
+    }
+    if (!/^[a-z0-9_]+$/.test(normalizedHandle)) {
+      return {
+        success: false,
+        code: "INVALID_HANDLE" as const,
+        message: "Nickname can only contain lowercase letters, numbers, and underscores",
+      };
+    }
+
+    // Check if handle is already taken
+    const existingByHandle = await ctx.db
+      .query("users")
+      .withIndex("by_handle", (q) => q.eq("handle", normalizedHandle))
+      .first();
+
+    if (existingByHandle) {
+      return {
+        success: false,
+        code: "HANDLE_TAKEN" as const,
+        message: "This nickname is already taken. Please choose another.",
+      };
+    }
+
+    // Check if user already exists by email
+    const existingByEmail = await ctx.db
       .query("users")
       .withIndex("by_email", (q) => q.eq("email", email))
       .first();
 
-    if (existingUser) {
-      throw new Error("Email already registered");
+    if (existingByEmail) {
+      return {
+        success: false,
+        code: "USER_EXISTS" as const,
+        provider: existingByEmail.authProvider || "email",
+        message: "You already have an account. Please log in.",
+      };
     }
 
     // Calculate trial end date (7 days from now)
@@ -328,6 +389,7 @@ export const registerWithEmail = mutation({
       hashVersion: CURRENT_HASH_VERSION,
       authProvider: "email",
       name,
+      handle: normalizedHandle, // Store the normalized handle
       dateOfBirth,
       gender,
       bio: "",
@@ -1597,5 +1659,360 @@ export const softDeleteAccount = mutation({
       success: true,
       message: "Account has been deleted. You can recover by logging in again.",
     };
+  },
+});
+
+// ============================================================================
+// PHONE OTP AUTHENTICATION
+// ============================================================================
+
+// Pure-JS SHA-256 (Convex-safe, no crypto.subtle dependency)
+const SHA256_K = new Uint32Array([
+  0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
+  0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
+  0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
+  0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,
+  0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,
+  0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
+  0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,
+  0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2,
+]);
+
+function sha256Hex(message: string): string {
+  const msgBytes = new TextEncoder().encode(message);
+  const msgLen = msgBytes.length;
+  const bitLen = msgLen * 8;
+  const padLen = (msgLen % 64 < 56 ? 56 : 120) - (msgLen % 64);
+  const padded = new Uint8Array(msgLen + padLen + 8);
+  padded.set(msgBytes);
+  padded[msgLen] = 0x80;
+  const dv = new DataView(padded.buffer);
+  dv.setUint32(padded.length - 4, bitLen, false);
+  let h0 = 0x6a09e667, h1 = 0xbb67ae85, h2 = 0x3c6ef372, h3 = 0xa54ff53a;
+  let h4 = 0x510e527f, h5 = 0x9b05688c, h6 = 0x1f83d9ab, h7 = 0x5be0cd19;
+  const w = new Uint32Array(64);
+  for (let offset = 0; offset < padded.length; offset += 64) {
+    for (let i = 0; i < 16; i++) w[i] = dv.getUint32(offset + i * 4, false);
+    for (let i = 16; i < 64; i++) {
+      const s0 = ((w[i-15]>>>7)|(w[i-15]<<25))^((w[i-15]>>>18)|(w[i-15]<<14))^(w[i-15]>>>3);
+      const s1 = ((w[i-2]>>>17)|(w[i-2]<<15))^((w[i-2]>>>19)|(w[i-2]<<13))^(w[i-2]>>>10);
+      w[i] = (w[i-16]+s0+w[i-7]+s1)>>>0;
+    }
+    let a=h0,b=h1,c=h2,d=h3,e=h4,f=h5,g=h6,h=h7;
+    for (let i = 0; i < 64; i++) {
+      const S1 = ((e>>>6)|(e<<26))^((e>>>11)|(e<<21))^((e>>>25)|(e<<7));
+      const ch = (e&f)^(~e&g);
+      const temp1 = (h+S1+ch+SHA256_K[i]+w[i])>>>0;
+      const S0 = ((a>>>2)|(a<<30))^((a>>>13)|(a<<19))^((a>>>22)|(a<<10));
+      const maj = (a&b)^(a&c)^(b&c);
+      const temp2 = (S0+maj)>>>0;
+      h=g;g=f;f=e;e=(d+temp1)>>>0;d=c;c=b;b=a;a=(temp1+temp2)>>>0;
+    }
+    h0=(h0+a)>>>0;h1=(h1+b)>>>0;h2=(h2+c)>>>0;h3=(h3+d)>>>0;
+    h4=(h4+e)>>>0;h5=(h5+f)>>>0;h6=(h6+g)>>>0;h7=(h7+h)>>>0;
+  }
+  const hex = (n: number) => n.toString(16).padStart(8, "0");
+  return hex(h0)+hex(h1)+hex(h2)+hex(h3)+hex(h4)+hex(h5)+hex(h6)+hex(h7);
+}
+
+// Phone OTP constants
+const PHONE_OTP_EXPIRY_MS = 5 * 60 * 1000;        // 5 minutes
+const PHONE_OTP_MAX_ATTEMPTS = 5;
+const PHONE_OTP_MIN_RESEND_MS = 30 * 1000;        // 30 seconds
+const PHONE_OTP_RATE_WINDOW_MS = 60 * 60 * 1000;  // 1 hour
+const PHONE_OTP_MAX_SENDS_PER_WINDOW = 5;
+
+function getOtpPepper(): { ok: true; pepper: string } | { ok: false; err: { success: false; code: "CONFIG_ERROR"; message: string } } {
+  const pepper = process.env.PHONE_OTP_PEPPER;
+  if (pepper) return { ok: true, pepper };
+  if (IS_DEV_MODE) return { ok: true, pepper: "dev_otp_pepper_not_for_production" };
+  return { ok: false, err: { success: false, code: "CONFIG_ERROR" as const, message: "Server configuration error. Please try again later." } };
+}
+
+function hashOtpCode(code: string, pepper: string): string {
+  return sha256Hex(pepper + ":" + code);
+}
+
+/**
+ * Request phone OTP - sends verification code to phone number.
+ */
+export const requestPhoneOtp = mutation({
+  args: { phone: v.string() },
+  handler: async (ctx, args) => {
+    const { phone } = args;
+    const now = Date.now();
+
+    // Validate E.164 format
+    if (!phone.startsWith("+") || phone.length < 8 || phone.length > 16) {
+      return { success: false, code: "INVALID_PHONE" as const, message: "Invalid phone number format." };
+    }
+
+    // Get pepper
+    const pepperResult = getOtpPepper();
+    if (!pepperResult.ok) return pepperResult.err;
+    const pepper = pepperResult.pepper;
+
+    // Lookup existing OTP
+    const existingOtp = await ctx.db.query("phoneOtps").withIndex("by_phone", (q) => q.eq("phone", phone)).first();
+
+    // Rate limiting
+    if (existingOtp) {
+      const timeSinceLastSend = now - existingOtp.lastSentAt;
+      if (timeSinceLastSend < PHONE_OTP_MIN_RESEND_MS) {
+        const waitSeconds = Math.ceil((PHONE_OTP_MIN_RESEND_MS - timeSinceLastSend) / 1000);
+        return { success: false, code: "RATE_LIMITED" as const, message: `Please wait ${waitSeconds} seconds before requesting another code.`, retryAfter: waitSeconds };
+      }
+      const inWindow = now - existingOtp.windowStart < PHONE_OTP_RATE_WINDOW_MS;
+      if (inWindow && existingOtp.sendCount >= PHONE_OTP_MAX_SENDS_PER_WINDOW) {
+        const windowResetAt = existingOtp.windowStart + PHONE_OTP_RATE_WINDOW_MS;
+        const waitMinutes = Math.ceil((windowResetAt - now) / 60000);
+        const retryAfter = Math.ceil((windowResetAt - now) / 1000);
+        return { success: false, code: "RATE_LIMITED" as const, message: `Too many requests. Try again in ${waitMinutes} minute(s).`, retryAfter };
+      }
+    }
+
+    // Generate OTP
+    const otpCode = generateOTP();
+    const codeHash = hashOtpCode(otpCode, pepper);
+
+    // Compute window state
+    const inWindow = existingOtp && (now - existingOtp.windowStart < PHONE_OTP_RATE_WINDOW_MS);
+    const windowStart = inWindow ? existingOtp.windowStart : now;
+    const sendCount = inWindow ? existingOtp.sendCount + 1 : 1;
+
+    // Upsert OTP record
+    if (existingOtp) {
+      await ctx.db.patch(existingOtp._id, {
+        codeHash,
+        expiresAt: now + PHONE_OTP_EXPIRY_MS,
+        attempts: 0,
+        lastSentAt: now,
+        windowStart,
+        sendCount,
+      });
+    } else {
+      await ctx.db.insert("phoneOtps", {
+        phone,
+        codeHash,
+        expiresAt: now + PHONE_OTP_EXPIRY_MS,
+        attempts: 0,
+        createdAt: now,
+        lastSentAt: now,
+        windowStart,
+        sendCount,
+      });
+    }
+
+    // TODO: Send SMS via Twilio/etc.
+    devLog(`[DEV] Phone OTP for ${phone}: ${otpCode}`);
+
+    if (IS_DEV_MODE) {
+      return { success: true, message: "OTP sent.", devCode: otpCode };
+    }
+    return { success: true, message: "OTP sent." };
+  },
+});
+
+/**
+ * Verify phone OTP and authenticate user.
+ * - For existing users: login (create session)
+ * - For new users: create user with placeholder profile, then login
+ */
+export const verifyPhoneOtp = mutation({
+  args: { phone: v.string(), code: v.string() },
+  handler: async (ctx, args) => {
+    const { phone, code } = args;
+    const now = Date.now();
+
+    // Get pepper
+    const pepperResult = getOtpPepper();
+    if (!pepperResult.ok) return pepperResult.err;
+    const pepper = pepperResult.pepper;
+
+    // Lookup OTP record
+    const otpRecord = await ctx.db.query("phoneOtps").withIndex("by_phone", (q) => q.eq("phone", phone)).first();
+    if (!otpRecord) {
+      return { success: false, code: "NO_OTP_FOUND" as const, message: "No verification code found. Please request a new code." };
+    }
+
+    // Check expiry
+    if (otpRecord.expiresAt < now) {
+      await ctx.db.delete(otpRecord._id);
+      return { success: false, code: "OTP_EXPIRED" as const, message: "Verification code has expired. Please request a new code." };
+    }
+
+    // Check attempts
+    if (otpRecord.attempts >= PHONE_OTP_MAX_ATTEMPTS) {
+      await ctx.db.delete(otpRecord._id);
+      return { success: false, code: "TOO_MANY_ATTEMPTS" as const, message: "Too many failed attempts. Please request a new code." };
+    }
+
+    // Increment attempts BEFORE verification
+    await ctx.db.patch(otpRecord._id, { attempts: otpRecord.attempts + 1 });
+
+    // Verify code using constant-time comparison
+    const expectedHash = hashOtpCode(code, pepper);
+    if (!constantTimeCompare(expectedHash, otpRecord.codeHash)) {
+      const attemptsLeft = PHONE_OTP_MAX_ATTEMPTS - (otpRecord.attempts + 1);
+      if (attemptsLeft <= 0) {
+        await ctx.db.delete(otpRecord._id);
+        return { success: false, code: "TOO_MANY_ATTEMPTS" as const, message: "Too many failed attempts. Please request a new code." };
+      }
+      return { success: false, code: "INVALID_CODE" as const, message: `Invalid code. ${attemptsLeft} attempt(s) remaining.`, attemptsLeft };
+    }
+
+    // OTP valid - delete record (one-time use)
+    await ctx.db.delete(otpRecord._id);
+
+    // Lookup user by phone
+    let user = await ctx.db.query("users").withIndex("by_phone", (q) => q.eq("phone", phone)).first();
+    let isNewUser = false;
+
+    if (!user) {
+      // New user - create with placeholder profile (same defaults as registerWithEmail)
+      // gender="other" so: trialEndsAt=undefined, lookingFor=["male"], quotas=50/1/5/0/0
+      isNewUser = true;
+
+      const userId = await ctx.db.insert("users", {
+        phone,
+        authProvider: "phone",
+        name: "",
+        dateOfBirth: "",
+        gender: "other",
+        bio: "",
+        isVerified: false,
+        emailVerified: false,
+        lookingFor: ["male"],
+        relationshipIntent: [],
+        activities: [],
+        minAge: 18,
+        maxAge: 50,
+        maxDistance: 50,
+        subscriptionTier: "free",
+        trialEndsAt: undefined,
+        incognitoMode: false,
+        likesRemaining: 50,
+        superLikesRemaining: 1,
+        messagesRemaining: 5,
+        rewindsRemaining: 0,
+        boostsRemaining: 0,
+        likesResetAt: now + 24 * 60 * 60 * 1000,
+        superLikesResetAt: now + 7 * 24 * 60 * 60 * 1000,
+        messagesResetAt: now + 7 * 24 * 60 * 60 * 1000,
+        lastActive: now,
+        createdAt: now,
+        onboardingCompleted: false,
+        onboardingStep: "photo_upload",
+        notificationsEnabled: false,
+        isActive: true,
+        isBanned: false,
+      });
+      user = await ctx.db.get(userId);
+    } else {
+      // Existing user checks
+      if (user.isBanned) {
+        return { success: false, code: "ACCOUNT_BANNED" as const, message: "Account has been suspended." };
+      }
+      if (user.isActive === false) {
+        return { success: false, code: "ACCOUNT_INACTIVE" as const, message: "Account is inactive." };
+      }
+      // Update lastActive
+      await ctx.db.patch(user._id, { lastActive: now });
+    }
+
+    if (!user) {
+      return { success: false, code: "USER_CREATE_FAILED" as const, message: "Failed to create account. Please try again." };
+    }
+
+    // Create session (same as email login)
+    const token = generateToken();
+    await ctx.db.insert("sessions", {
+      userId: user._id,
+      token,
+      expiresAt: now + 30 * 24 * 60 * 60 * 1000,
+      createdAt: now,
+    });
+
+    return {
+      success: true,
+      userId: user._id,
+      token,
+      isNewUser,
+      onboardingCompleted: user.onboardingCompleted,
+    };
+  },
+});
+
+/**
+ * Check if phone number is already registered.
+ */
+export const checkPhoneExists = query({
+  args: { phone: v.string() },
+  handler: async (ctx, args) => {
+    const user = await ctx.db.query("users").withIndex("by_phone", (q) => q.eq("phone", args.phone)).first();
+    if (!user) return { exists: false };
+    return {
+      exists: true,
+      provider: user.authProvider || "phone",
+      onboardingCompleted: user.onboardingCompleted,
+    };
+  },
+});
+
+/**
+ * Check if email is already registered.
+ * Used for Create Account email-first flow.
+ */
+export const checkEmailExists = query({
+  args: { email: v.string() },
+  handler: async (ctx, args) => {
+    const user = await ctx.db
+      .query("users")
+      .withIndex("by_email", (q) => q.eq("email", args.email))
+      .first();
+    if (!user) return { exists: false };
+    return { exists: true };
+  },
+});
+
+/**
+ * Check if handle/nickname is already registered.
+ * Used for nickname availability check in Create Account flow.
+ */
+export const checkHandleExists = query({
+  args: { handle: v.string() },
+  handler: async (ctx, args) => {
+    // Normalize handle: lowercase and trim
+    const normalizedHandle = args.handle.toLowerCase().trim();
+
+    const user = await ctx.db
+      .query("users")
+      .withIndex("by_handle", (q) => q.eq("handle", normalizedHandle))
+      .first();
+
+    if (!user) return { exists: false };
+    return { exists: true, ownerId: user._id };
+  },
+});
+
+/**
+ * Get user's basic info for read-only confirmation screen.
+ * Used when existing user logs in to confirm their info.
+ */
+export const getUserBasicInfo = query({
+  args: { userId: v.string() },
+  handler: async (ctx, args) => {
+    try {
+      const user = await ctx.db.get(args.userId as Id<"users">);
+      if (!user) return null;
+      return {
+        name: user.name,
+        dateOfBirth: user.dateOfBirth,
+        gender: user.gender,
+        handle: user.handle || null,
+      };
+    } catch {
+      return null;
+    }
   },
 });

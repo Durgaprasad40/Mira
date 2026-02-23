@@ -41,7 +41,8 @@ export default function LoginScreen() {
         if (onboardingComplete) {
           router.replace("/(main)/(tabs)/home");
         } else {
-          router.replace("/(onboarding)");
+          // Route to basic-info in confirm mode so user sees their info before continuing
+          router.replace("/(onboarding)/basic-info?confirm=true" as any);
         }
       } catch (e: any) {
         setError(e.message || "Login failed");
@@ -76,7 +77,8 @@ export default function LoginScreen() {
         if (result.onboardingCompleted) {
           router.replace("/(main)/(tabs)/home");
         } else {
-          router.replace("/(onboarding)/photo-upload");
+          // Route to basic-info in confirm mode so user sees their info before continuing
+          router.replace("/(onboarding)/basic-info?confirm=true" as any);
         }
       }
     } catch (error: any) {

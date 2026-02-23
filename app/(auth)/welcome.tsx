@@ -10,10 +10,13 @@ import { useDemoStore } from "@/stores/demoStore";
 
 export default function WelcomeScreen() {
   const router = useRouter();
-  const { isAuthenticated, onboardingCompleted } = useAuthStore();
+  const { isAuthenticated, onboardingCompleted, token } = useAuthStore();
   const currentDemoUserId = useDemoStore((s) => s.currentDemoUserId);
   const demoOnboardingComplete = useDemoStore((s) => s.demoOnboardingComplete);
   const demoStoreHydrated = useDemoStore((s) => s._hasHydrated);
+
+  // STRICT TOKEN CHECK: only consider authenticated if we have a valid token
+  const hasValidToken = typeof token === 'string' && token.trim().length > 0;
 
   // OB-6 fix: Wait for demoStore to hydrate before making redirect decisions
   // This prevents incorrect redirects during startup when store values are stale/default
@@ -39,7 +42,10 @@ export default function WelcomeScreen() {
   }
 
   // Use Redirect component instead of useEffect navigation
-  if (!isDemoMode && isAuthenticated) {
+  // STRICT: Only redirect if we have BOTH isAuthenticated AND a valid token
+  // This prevents stale isAuthenticated=true with missing token from skipping welcome
+  if (!isDemoMode && isAuthenticated && hasValidToken) {
+    if (__DEV__) console.log(`[WELCOME] redirect: onboardingCompleted=${onboardingCompleted}`);
     if (onboardingCompleted) {
       return <Redirect href="/(main)/(tabs)/home" />;
     }
@@ -78,17 +84,37 @@ export default function WelcomeScreen() {
       <View style={styles.buttonContainer}>
         <Button
           title="Create Account"
-          variant="primary"
-          onPress={() => router.push("/(onboarding)")}
-          style={styles.createButton}
+          variant="outline"
+          onPress={() => router.push("/(onboarding)/email-phone")}
           fullWidth
+          style={{
+            backgroundColor: '#00000000',
+            borderWidth: 2,
+            borderColor: COLORS.white,
+            elevation: 0,
+            marginBottom: 12,
+          }}
+          textStyle={{
+            color: COLORS.white,
+            fontWeight: '600',
+          }}
         />
         <Button
           title="I already have an account"
           variant="outline"
           onPress={() => router.push("/(auth)/login")}
-          style={styles.loginButton}
           fullWidth
+          style={{
+            backgroundColor: '#00000000',
+            borderWidth: 2,
+            borderColor: COLORS.white,
+            elevation: 0,
+            marginBottom: 16,
+          }}
+          textStyle={{
+            color: COLORS.white,
+            fontWeight: '600',
+          }}
         />
         <Text style={styles.terms}>
           By continuing, you agree to our Terms of Service and Privacy Policy
@@ -144,14 +170,6 @@ const styles = StyleSheet.create({
     width: "100%",
     padding: 24,
     paddingBottom: 40,
-  },
-  createButton: {
-    backgroundColor: COLORS.white,
-    marginBottom: 12,
-  },
-  loginButton: {
-    borderColor: COLORS.white,
-    marginBottom: 16,
   },
   terms: {
     fontSize: 12,

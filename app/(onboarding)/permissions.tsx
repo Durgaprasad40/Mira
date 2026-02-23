@@ -44,8 +44,16 @@ export default function PermissionsScreen() {
   };
 
   const handleNext = () => {
+    if (__DEV__) console.log('[ONB] permissions → review (continue)');
     setStep("review");
     router.push("/(onboarding)/review");
+  };
+
+  // POST-VERIFICATION: Previous goes back
+  const handlePrevious = () => {
+    if (__DEV__) console.log('[ONB] permissions → preferences (previous)');
+    setStep("preferences");
+    router.push("/(onboarding)/preferences");
   };
 
   return (
@@ -100,9 +108,17 @@ export default function PermissionsScreen() {
           onPress={handleNext}
           fullWidth
         />
-        <TouchableOpacity onPress={handleNext} style={styles.skipButton}>
-          <Text style={styles.skipText}>Skip for now</Text>
-        </TouchableOpacity>
+        <View style={styles.navRow}>
+          <TouchableOpacity style={styles.navButton} onPress={handlePrevious}>
+            <Text style={styles.navText}>Previous</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.navButton} onPress={() => {
+            if (__DEV__) console.log('[ONB] permissions → review (skip)');
+            handleNext();
+          }}>
+            <Text style={styles.navText}>Skip</Text>
+          </TouchableOpacity>
+        </View>
       </View>
     </ScrollView>
   );
@@ -174,11 +190,16 @@ const styles = StyleSheet.create({
   footer: {
     marginTop: 24,
   },
-  skipButton: {
-    alignItems: "center",
-    marginTop: 16,
+  navRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    marginTop: 12,
   },
-  skipText: {
+  navButton: {
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+  },
+  navText: {
     fontSize: 14,
     color: COLORS.textLight,
     fontWeight: "500",

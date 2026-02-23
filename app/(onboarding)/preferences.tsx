@@ -49,8 +49,23 @@ export default function PreferencesScreen() {
       return;
     }
 
+    if (__DEV__) console.log('[ONB] preferences → permissions (continue)');
     setStep('permissions');
     router.push('/(onboarding)/permissions' as any);
+  };
+
+  // POST-VERIFICATION: Skip advances to next step
+  const handleSkip = () => {
+    if (__DEV__) console.log('[ONB] preferences → permissions (skip)');
+    setStep('permissions');
+    router.push('/(onboarding)/permissions' as any);
+  };
+
+  // POST-VERIFICATION: Previous goes back
+  const handlePrevious = () => {
+    if (__DEV__) console.log('[ONB] preferences → profile-details (previous)');
+    setStep('profile_details');
+    router.push('/(onboarding)/profile-details' as any);
   };
 
   const canContinue = lookingFor.length > 0 && activities.length >= MIN_INTERESTS;
@@ -176,6 +191,14 @@ export default function PreferencesScreen() {
           disabled={!canContinue}
           fullWidth
         />
+        <View style={styles.navRow}>
+          <TouchableOpacity style={styles.navButton} onPress={handlePrevious}>
+            <Text style={styles.navText}>Previous</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.navButton} onPress={handleSkip}>
+            <Text style={styles.navText}>Skip</Text>
+          </TouchableOpacity>
+        </View>
       </View>
     </ScrollView>
     </SafeAreaView>
@@ -333,5 +356,19 @@ const styles = StyleSheet.create({
   },
   footer: {
     marginTop: 24,
+  },
+  navRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginTop: 12,
+  },
+  navButton: {
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+  },
+  navText: {
+    fontSize: 14,
+    color: COLORS.textLight,
+    fontWeight: '500',
   },
 });

@@ -1,131 +1,195 @@
 import React, { useState } from 'react';
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity } from 'react-native';
+import { View, Text, StyleSheet, TouchableOpacity, Platform, Alert } from 'react-native';
 import { useRouter } from 'expo-router';
-import { COLORS, VALIDATION } from '@/lib/constants';
-import { Input, Button } from '@/components/ui';
-import { useOnboardingStore } from '@/stores/onboardingStore';
+import { COLORS } from '@/lib/constants';
 import { Ionicons } from '@expo/vector-icons';
-import { isDemoMode } from '@/hooks/useConvex';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import * as AppleAuthentication from 'expo-apple-authentication';
+import { useMutation } from 'convex/react';
+import { api } from '@/convex/_generated/api';
+import { useOnboardingStore } from '@/stores/onboardingStore';
+import { useAuthStore } from '@/stores/authStore';
+
+type AuthMethod = 'email' | 'phone' | 'apple' | 'google';
 
 export default function EmailPhoneScreen() {
-  const { email, phone, setEmail, setPhone, setStep } = useOnboardingStore();
   const router = useRouter();
-  const [useEmail, setUseEmail] = useState(true);
-  const [error, setError] = useState('');
+  const insets = useSafeAreaInsets();
+  const [isLoading, setIsLoading] = useState(false);
+  const { setStep } = useOnboardingStore();
+  const { setAuth } = useAuthStore();
 
-  const validateEmail = (email: string) => {
-    const re = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    return re.test(email);
-  };
+  // Convex mutations
+  const socialAuth = useMutation(api.auth.socialAuth);
 
-  const validatePhone = (phone: string) => {
-    const cleaned = phone.replace(/\D/g, '');
-    return cleaned.length >= 10;
-  };
-
-  const handleNext = () => {
-    setError('');
-    
-    if (useEmail) {
-      if (!email) {
-        setError('Please enter your email');
-        return;
-      }
-      if (!validateEmail(email)) {
-        setError('Please enter a valid email address');
-        return;
-      }
-    } else {
-      if (!phone) {
-        setError('Please enter your phone number');
-        return;
-      }
-      if (!validatePhone(phone)) {
-        setError('Please enter a valid phone number');
-        return;
-      }
+  // =========================================================================
+  // Apple Sign-In Handler (iOS only)
+  // =========================================================================
+  const handleAppleSignIn = async () => {
+    if (Platform.OS !== 'ios') {
+      return;
     }
 
-    if (isDemoMode) {
-      // Skip OTP in demo mode — go straight to password
-      setStep('password');
-      router.push('/(onboarding)/password' as any);
-    } else {
-      setStep('otp');
-      router.push('/(onboarding)/otp' as any);
+    setIsLoading(true);
+
+    try {
+      const credential = await AppleAuthentication.signInAsync({
+        requestedScopes: [
+          AppleAuthentication.AppleAuthenticationScope.FULL_NAME,
+          AppleAuthentication.AppleAuthenticationScope.EMAIL,
+        ],
+      });
+
+      if (!credential.identityToken) {
+        Alert.alert('Sign-In Failed', 'No identity token received from Apple.');
+        setIsLoading(false);
+        return;
+      }
+
+      console.log('[AppleAuth] Success, token prefix:', credential.identityToken.substring(0, 20) + '...');
+
+      try {
+        const result = await socialAuth({
+          provider: 'apple',
+          externalId: credential.user,
+          email: credential.email || undefined,
+          name: credential.fullName?.givenName
+            ? `${credential.fullName.givenName} ${credential.fullName.familyName || ''}`.trim()
+            : undefined,
+        });
+
+        if (result.isNewUser) {
+          Alert.alert('Welcome!', 'Please complete your profile setup.');
+          setStep('basic_info');
+          router.push('/(onboarding)/basic-info' as any);
+        } else if (result.token && result.userId) {
+          setAuth(result.userId as string, result.token, result.onboardingCompleted || false);
+          if (result.onboardingCompleted) {
+            router.replace('/(main)/(tabs)/home' as any);
+          } else {
+            setStep('basic_info');
+            router.push('/(onboarding)/basic-info' as any);
+          }
+        }
+      } catch (backendError: any) {
+        console.error('[AppleAuth] Backend error:', backendError.message);
+        Alert.alert('Sign-In Error', backendError.message || 'Failed to authenticate with server.');
+      }
+    } catch (e: any) {
+      if (e.code === 'ERR_REQUEST_CANCELED') {
+        console.log('[AppleAuth] User cancelled');
+      } else {
+        console.error('[AppleAuth] Error:', e);
+        Alert.alert('Sign-In Failed', e.message || 'An error occurred during Apple Sign-In.');
+      }
+    } finally {
+      setIsLoading(false);
     }
+  };
+
+  // =========================================================================
+  // Handle Auth Option Press
+  // =========================================================================
+  const handleOptionPress = (method: AuthMethod) => {
+    if (isLoading) return;
+
+    switch (method) {
+      case 'email':
+        setStep('password');
+        router.push('/(onboarding)/password' as any);
+        break;
+      case 'phone':
+        router.push('/(onboarding)/phone-entry' as any);
+        break;
+      case 'apple':
+        if (Platform.OS === 'ios') {
+          handleAppleSignIn();
+        }
+        break;
+      case 'google':
+        Alert.alert('Coming Soon', 'Google Sign-In will be available soon.');
+        break;
+    }
+  };
+
+  // =========================================================================
+  // Render Auth Option Button
+  // =========================================================================
+  const renderAuthOption = (
+    method: AuthMethod,
+    icon: string,
+    label: string,
+    disabled: boolean = false,
+    note?: string
+  ) => {
+    return (
+      <TouchableOpacity
+        key={method}
+        style={[
+          styles.authOption,
+          disabled && styles.authOptionDisabled,
+        ]}
+        onPress={() => handleOptionPress(method)}
+        disabled={disabled || isLoading}
+        activeOpacity={0.7}
+      >
+        <View style={styles.authOptionContent}>
+          <Ionicons
+            name={icon as any}
+            size={24}
+            color={disabled ? COLORS.textLight : COLORS.text}
+          />
+          <View style={styles.authOptionTextContainer}>
+            <Text
+              style={[
+                styles.authOptionLabel,
+                disabled && styles.authOptionLabelDisabled,
+              ]}
+            >
+              {label}
+            </Text>
+            {note && <Text style={styles.authOptionNote}>{note}</Text>}
+          </View>
+        </View>
+        <Ionicons
+          name="chevron-forward"
+          size={20}
+          color={disabled ? COLORS.textLight : COLORS.textLight}
+        />
+      </TouchableOpacity>
+    );
   };
 
   return (
-    <ScrollView style={styles.container} contentContainerStyle={styles.content}>
-      <Text style={styles.title}>What's your contact info?</Text>
+    <View style={[styles.container, { paddingTop: insets.top + 16 }]}>
+      <Text style={styles.title}>How do you want to sign in?</Text>
       <Text style={styles.subtitle}>
-        Use your email or phone number so we can verify your account.
+        Choose your preferred method to create or access your account.
       </Text>
 
-      <View style={styles.toggleContainer}>
-        <TouchableOpacity
-          style={[styles.toggle, useEmail && styles.toggleActive]}
-          onPress={() => {
-            setUseEmail(true);
-            setError('');
-          }}
-        >
-          <Ionicons name="mail" size={20} color={useEmail ? COLORS.white : COLORS.textLight} />
-          <Text style={[styles.toggleText, useEmail && styles.toggleTextActive]}>Email</Text>
-        </TouchableOpacity>
-        <TouchableOpacity
-          style={[styles.toggle, !useEmail && styles.toggleActive]}
-          onPress={() => {
-            setUseEmail(false);
-            setError('');
-          }}
-        >
-          <Ionicons name="call" size={20} color={!useEmail ? COLORS.white : COLORS.textLight} />
-          <Text style={[styles.toggleText, !useEmail && styles.toggleTextActive]}>Phone</Text>
-        </TouchableOpacity>
-      </View>
+      {/* Auth Options List */}
+      <View style={styles.authOptionsContainer}>
+        {renderAuthOption('email', 'mail-outline', 'Continue with Email')}
+        {renderAuthOption('phone', 'call-outline', 'Continue with Phone')}
 
-      <View style={styles.field}>
-        {useEmail ? (
-          <Input
-            label="Email"
-            value={email}
-            onChangeText={(text) => {
-              setEmail(text);
-              setError('');
-            }}
-            placeholder="you@example.com"
-            keyboardType="email-address"
-            autoCapitalize="none"
-            autoComplete="email"
-          />
+        {/* Apple - iOS only */}
+        {Platform.OS === 'ios' ? (
+          renderAuthOption('apple', 'logo-apple', 'Continue with Apple')
         ) : (
-          <Input
-            label="Phone Number"
-            value={phone}
-            onChangeText={(text) => {
-              setPhone(text);
-              setError('');
-            }}
-            placeholder="+91 98765 43210"
-            keyboardType="phone-pad"
-            autoComplete="tel"
-          />
+          renderAuthOption('apple', 'logo-apple', 'Continue with Apple', true, 'iOS only')
         )}
+
+        {/* Google - Coming soon */}
+        {renderAuthOption('google', 'logo-google', 'Continue with Google', false, 'Coming soon')}
       </View>
 
-      {error ? <Text style={styles.error}>{error}</Text> : null}
-
-      <View style={styles.footer}>
-        <Button
-          title="Continue"
-          variant="primary"
-          onPress={handleNext}
-          fullWidth
-        />
-      </View>
-    </ScrollView>
+      {/* Loading indicator */}
+      {isLoading && (
+        <View style={styles.loadingContainer}>
+          <Text style={styles.loadingText}>Signing in...</Text>
+        </View>
+      )}
+    </View>
   );
 }
 
@@ -133,8 +197,6 @@ const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: COLORS.background,
-  },
-  content: {
     padding: 24,
   },
   title: {
@@ -146,44 +208,50 @@ const styles = StyleSheet.create({
   subtitle: {
     fontSize: 16,
     color: COLORS.textLight,
-    marginBottom: 24,
+    marginBottom: 32,
     lineHeight: 22,
   },
-  toggleContainer: {
-    flexDirection: 'row',
+  authOptionsContainer: {
     gap: 12,
-    marginBottom: 24,
   },
-  toggle: {
-    flex: 1,
+  authOption: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'center',
+    justifyContent: 'space-between',
     padding: 16,
     borderRadius: 12,
     backgroundColor: COLORS.backgroundDark,
-    gap: 8,
   },
-  toggleActive: {
-    backgroundColor: COLORS.primary,
+  authOptionDisabled: {
+    opacity: 0.5,
   },
-  toggleText: {
+  authOptionContent: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+  },
+  authOptionTextContainer: {
+    flexDirection: 'column',
+  },
+  authOptionLabel: {
     fontSize: 16,
     fontWeight: '500',
+    color: COLORS.text,
+  },
+  authOptionLabelDisabled: {
     color: COLORS.textLight,
   },
-  toggleTextActive: {
-    color: COLORS.white,
+  authOptionNote: {
+    fontSize: 12,
+    color: COLORS.textLight,
+    marginTop: 2,
   },
-  field: {
-    marginBottom: 16,
-  },
-  error: {
-    fontSize: 14,
-    color: COLORS.error,
-    marginBottom: 16,
-  },
-  footer: {
+  loadingContainer: {
     marginTop: 24,
+    alignItems: 'center',
+  },
+  loadingText: {
+    fontSize: 14,
+    color: COLORS.textLight,
   },
 });
