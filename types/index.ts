@@ -24,7 +24,9 @@ export type RelationshipIntent =
   | "short_to_long"
   | "long_to_short"
   | "new_friends"
-  | "open_to_anything";
+  | "open_to_anything"
+  | "single_parent"
+  | "just_18";
 
 export type ActivityFilter =
   // Original 20 (backward compatible)

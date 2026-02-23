@@ -182,14 +182,16 @@ function getActivityIcon(activity: string): string {
 
 function formatIntentLabel(intent: string): string {
   const labels: Record<string, string> = {
-    long_term: 'Long-term',
-    short_term: 'Short-term',
+    long_term: 'Serious Vibes',
+    short_term: "Keepin' It Casual",
     fwb: 'Friends with Benefits',
-    figuring_out: 'Figuring It Out',
-    short_to_long: 'Short → Long',
-    long_to_short: 'Long → Short',
-    new_friends: 'New Friends',
+    figuring_out: 'Exploring Vibes',
+    short_to_long: 'See Where It Goes',
+    long_to_short: 'Open to Vibes',
+    new_friends: 'Just Friends',
     open_to_anything: 'Open to Anything',
+    single_parent: 'Single Parent',
+    just_18: 'Just 18',
   };
   return labels[intent] || intent;
 }
@@ -204,6 +206,8 @@ function getIntentIcon(intent: string): string {
     long_to_short: '💕→💫',
     new_friends: '🤝',
     open_to_anything: '🌟',
+    single_parent: '',
+    just_18: '',
   };
   return icons[intent] || '💫';
 }
