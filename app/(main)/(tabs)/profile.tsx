@@ -22,6 +22,27 @@ import { useDemoStore } from '@/stores/demoStore';
 import { useOnboardingStore } from '@/stores/onboardingStore';
 import { getDemoCurrentUser } from '@/lib/demoData';
 
+/** Parse "YYYY-MM-DD" to local Date (noon to avoid DST issues) */
+function parseDOBString(dobString: string): Date {
+  if (!dobString || !/^\d{4}-\d{2}-\d{2}$/.test(dobString)) {
+    return new Date(2000, 0, 1, 12, 0, 0);
+  }
+  const [y, m, d] = dobString.split("-").map(Number);
+  return new Date(y, m - 1, d, 12, 0, 0);
+}
+
+/** Calculate age from DOB string using local date parsing */
+function calculateAge(dob: string): number {
+  const birthDate = parseDOBString(dob);
+  const today = new Date();
+  let age = today.getFullYear() - birthDate.getFullYear();
+  const m = today.getMonth() - birthDate.getMonth();
+  if (m < 0 || (m === 0 && today.getDate() < birthDate.getDate())) {
+    age--;
+  }
+  return age;
+}
+
 export default function ProfileScreen() {
   const router = useRouter();
   const userId = useAuthStore((s) => s.userId);
@@ -218,7 +239,7 @@ export default function ProfileScreen() {
     );
   }
 
-  const age = new Date().getFullYear() - new Date(currentUser.dateOfBirth).getFullYear();
+  const age = calculateAge(currentUser.dateOfBirth);
 
   return (
     <SafeAreaView edges={['top']} style={styles.container}>

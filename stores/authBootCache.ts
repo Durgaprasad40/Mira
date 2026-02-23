@@ -17,6 +17,8 @@ export interface AuthBootCacheData {
   userId: string | null;
   token: string | null;
   onboardingCompleted: boolean;
+  faceVerificationPassed: boolean;
+  faceVerificationPending: boolean;
 }
 
 let _authBootCache: AuthBootCacheData | null = null;
@@ -28,6 +30,8 @@ const DEFAULT_AUTH_BOOT: AuthBootCacheData = {
   userId: null,
   token: null,
   onboardingCompleted: false,
+  faceVerificationPassed: false,
+  faceVerificationPending: false,
 };
 
 /**
@@ -59,6 +63,8 @@ export async function getAuthBootCache(): Promise<AuthBootCacheData> {
           userId: state?.userId ?? null,
           token: state?.token ?? null,
           onboardingCompleted: state?.onboardingCompleted ?? false,
+          faceVerificationPassed: state?.faceVerificationPassed ?? false,
+          faceVerificationPending: state?.faceVerificationPending ?? false,
         };
       } else {
         _authBootCache = { ...DEFAULT_AUTH_BOOT };
@@ -87,4 +93,12 @@ export function getAuthBootCacheSync(): AuthBootCacheData | null {
  */
 export function isAuthBootCacheReady(): boolean {
   return _authBootCache !== null;
+}
+
+/**
+ * Clear auth boot cache (call on logout to prevent stale routing)
+ */
+export function clearAuthBootCache(): void {
+  _authBootCache = null;
+  _authBootCachePromise = null;
 }

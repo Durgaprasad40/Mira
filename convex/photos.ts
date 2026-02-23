@@ -312,7 +312,7 @@ export const markPhotoNsfw = mutation({
   },
 });
 
-// Save verification photo
+// Save verification photo (legacy - use uploadVerificationReferencePhoto instead)
 export const saveVerificationPhoto = mutation({
   args: {
     userId: v.id('users'),
@@ -332,5 +332,332 @@ export const saveVerificationPhoto = mutation({
     });
 
     return { success: true };
+  },
+});
+
+// =============================================================================
+// "Verified Face Required, Privacy After" Policy Mutations
+// =============================================================================
+
+/**
+ * Photo Gate: Upload a verification reference photo during onboarding.
+ *
+ * Requirements:
+ * - Photo must have exactly one clearly visible face
+ * - This photo is stored privately and used for face verification
+ * - User cannot proceed until this gate passes
+ *
+ * Returns success if photo meets requirements, or error with specific reason.
+ */
+export const uploadVerificationReferencePhoto = mutation({
+  args: {
+    userId: v.id('users'),
+    storageId: v.id('_storage'),
+    hasFace: v.boolean(),           // Client-side face detection result
+    faceCount: v.optional(v.number()), // Number of faces detected
+    width: v.optional(v.number()),
+    height: v.optional(v.number()),
+    fileSize: v.optional(v.number()),
+    mimeType: v.optional(v.string()),
+  },
+  handler: async (ctx, args) => {
+    const { userId, storageId, hasFace, faceCount, width, height, fileSize, mimeType } = args;
+
+    console.log(`[PHOTO_GATE] start user=${userId}`);
+
+    // Validate storage exists
+    const url = await ctx.storage.getUrl(storageId);
+    if (!url) {
+      console.log(`[PHOTO_GATE] FAIL: Invalid storage reference`);
+      throw new Error('Invalid storage reference: file does not exist');
+    }
+
+    // Verify user exists and has accepted consent
+    const user = await ctx.db.get(userId);
+    if (!user) {
+      console.log(`[PHOTO_GATE] FAIL: User not found`);
+      throw new Error('User not found');
+    }
+    if (!user.consentAcceptedAt) {
+      console.log(`[PHOTO_GATE] FAIL: No consent`);
+      throw new Error('Please accept the data consent agreement before uploading photos.');
+    }
+
+    // Validate file constraints
+    if (fileSize !== undefined && fileSize > MAX_PHOTO_SIZE_BYTES) {
+      console.log(`[PHOTO_GATE] FAIL: file_too_large size=${fileSize}`);
+      return {
+        success: false,
+        error: 'file_too_large',
+        message: `Photo must be under ${MAX_PHOTO_SIZE_BYTES / (1024 * 1024)}MB`,
+      };
+    }
+    if (mimeType !== undefined && !ALLOWED_PHOTO_TYPES.includes(mimeType.toLowerCase())) {
+      console.log(`[PHOTO_GATE] FAIL: invalid_format type=${mimeType}`);
+      return {
+        success: false,
+        error: 'invalid_format',
+        message: 'Photo must be JPEG, PNG, WebP, or HEIC format',
+      };
+    }
+
+    console.log(`[PHOTO_GATE] faces=${faceCount ?? (hasFace ? 1 : 0)} hasFace=${hasFace}`);
+
+    // GATE CHECK: Must have exactly one face
+    if (!hasFace) {
+      console.log(`[PHOTO_GATE] FAIL: no_face_detected`);
+      return {
+        success: false,
+        error: 'no_face_detected',
+        message: 'No face detected in the photo. Please upload a clear photo showing your face.',
+      };
+    }
+
+    // Check for multiple faces
+    if (faceCount !== undefined && faceCount > 1) {
+      console.log(`[PHOTO_GATE] FAIL: multiple_faces count=${faceCount}`);
+      return {
+        success: false,
+        error: 'multiple_faces',
+        message: 'Multiple faces detected. Please upload a solo photo showing only your face.',
+      };
+    }
+
+    console.log(`[PHOTO_GATE] faces=1 pass=true`);
+
+    // Create the photo record as verification_reference type
+    const photoId = await ctx.db.insert('photos', {
+      userId,
+      storageId,
+      url,
+      order: 0,
+      isPrimary: true, // Will be primary until display photo is set differently
+      hasFace: true,
+      isNsfw: false,
+      width,
+      height,
+      createdAt: Date.now(),
+      photoType: 'verification_reference',
+    });
+
+    console.log(`[PHOTO_GATE] stored verificationReferencePhotoId=${storageId}`);
+
+    // Update user with verification reference photo
+    await ctx.db.patch(userId, {
+      verificationReferencePhotoId: storageId,
+      verificationReferencePhotoUrl: url,
+      // Also set as display photo initially (original variant)
+      displayPrimaryPhotoId: storageId,
+      displayPrimaryPhotoUrl: url,
+      displayPrimaryPhotoVariant: 'original',
+      // Set verification status to pending
+      faceVerificationStatus: 'unverified',
+      verificationStatus: 'pending_auto',
+    });
+
+    console.log(`[PHOTO_GATE] user updated verificationReferencePhotoId set=true`);
+
+    return {
+      success: true,
+      photoId,
+      url,
+      message: 'Photo uploaded successfully. You can now proceed to face verification.',
+    };
+  },
+});
+
+/**
+ * Set display photo variant after face verification passes.
+ *
+ * Options:
+ * - 'original': Use the verification reference photo as-is
+ * - 'blurred': Apply blur effect to the face (client provides blurred version)
+ * - 'cartoon': Use AI-generated cartoon version (client provides cartoon version)
+ *
+ * Only allowed after faceVerificationStatus === 'verified'
+ */
+export const setDisplayPhotoVariant = mutation({
+  args: {
+    userId: v.id('users'),
+    variant: v.union(v.literal('original'), v.literal('blurred'), v.literal('cartoon')),
+    // For blurred/cartoon, client uploads a processed version
+    processedStorageId: v.optional(v.id('_storage')),
+  },
+  handler: async (ctx, args) => {
+    const { userId, variant, processedStorageId } = args;
+
+    const user = await ctx.db.get(userId);
+    if (!user) throw new Error('User not found');
+
+    // SECURITY: Only allow changing display photo after face verification passes
+    if (user.faceVerificationStatus !== 'verified') {
+      throw new Error('Face verification must be completed before changing display photo privacy.');
+    }
+
+    // Ensure verification reference exists
+    if (!user.verificationReferencePhotoId) {
+      throw new Error('No verification reference photo found. Please complete photo upload first.');
+    }
+
+    if (variant === 'original') {
+      // Use the original verification reference photo
+      await ctx.db.patch(userId, {
+        displayPrimaryPhotoId: user.verificationReferencePhotoId,
+        displayPrimaryPhotoUrl: user.verificationReferencePhotoUrl,
+        displayPrimaryPhotoVariant: 'original',
+      });
+    } else {
+      // For blurred/cartoon, need the processed version
+      if (!processedStorageId) {
+        throw new Error(`Processed photo required for ${variant} variant.`);
+      }
+
+      const url = await ctx.storage.getUrl(processedStorageId);
+      if (!url) {
+        throw new Error('Invalid processed photo storage reference');
+      }
+
+      // Create a new photo record for the variant
+      const existingPhotos = await ctx.db
+        .query('photos')
+        .withIndex('by_user', (q) => q.eq('userId', userId))
+        .collect();
+
+      const originalPhoto = existingPhotos.find(p => p.photoType === 'verification_reference');
+
+      await ctx.db.insert('photos', {
+        userId,
+        storageId: processedStorageId,
+        url,
+        order: 0,
+        isPrimary: true,
+        hasFace: true,
+        isNsfw: false,
+        createdAt: Date.now(),
+        photoType: 'display',
+        derivedFromPhotoId: originalPhoto?._id,
+        variantType: variant,
+      });
+
+      await ctx.db.patch(userId, {
+        displayPrimaryPhotoId: processedStorageId,
+        displayPrimaryPhotoUrl: url,
+        displayPrimaryPhotoVariant: variant,
+      });
+    }
+
+    return { success: true, variant };
+  },
+});
+
+/**
+ * Get user's display photo (what others see).
+ * Returns the display variant, not the private verification photo.
+ */
+export const getDisplayPhoto = query({
+  args: {
+    userId: v.id('users'),
+  },
+  handler: async (ctx, args) => {
+    const user = await ctx.db.get(args.userId);
+    if (!user) return null;
+
+    return {
+      photoUrl: user.displayPrimaryPhotoUrl,
+      variant: user.displayPrimaryPhotoVariant || 'original',
+      isVerified: user.faceVerificationStatus === 'verified',
+    };
+  },
+});
+
+/**
+ * Get verification reference photo (INTERNAL/ADMIN ONLY).
+ * This is the private face photo used for verification.
+ * Should only be accessible by the user themselves or admins for audit.
+ */
+export const getVerificationReferencePhoto = query({
+  args: {
+    requestingUserId: v.id('users'),
+    targetUserId: v.id('users'),
+  },
+  handler: async (ctx, args) => {
+    const { requestingUserId, targetUserId } = args;
+
+    // Security: Only allow if requesting user is the same as target, or is an admin
+    const requestingUser = await ctx.db.get(requestingUserId);
+    if (!requestingUser) throw new Error('Requesting user not found');
+
+    const isSelf = requestingUserId === targetUserId;
+    const isAdmin = requestingUser.isAdmin === true;
+
+    if (!isSelf && !isAdmin) {
+      throw new Error('Access denied: Verification photos are private.');
+    }
+
+    const targetUser = await ctx.db.get(targetUserId);
+    if (!targetUser) throw new Error('Target user not found');
+
+    return {
+      verificationReferencePhotoUrl: targetUser.verificationReferencePhotoUrl,
+      faceVerificationStatus: targetUser.faceVerificationStatus,
+      faceMatchScore: targetUser.faceMatchScore,
+      verificationAttemptedAt: targetUser.faceVerificationAttemptedAt,
+    };
+  },
+});
+
+/**
+ * Check if user has completed the photo gate (has valid verification reference photo).
+ */
+export const checkPhotoGateStatus = query({
+  args: {
+    userId: v.id('users'),
+  },
+  handler: async (ctx, args) => {
+    const user = await ctx.db.get(args.userId);
+    if (!user) return { hasPhoto: false, isVerified: false };
+
+    const hasVerificationPhoto = !!user.verificationReferencePhotoId;
+    const isVerified = user.faceVerificationStatus === 'verified';
+
+    return {
+      hasPhoto: hasVerificationPhoto,
+      isVerified,
+      faceVerificationStatus: user.faceVerificationStatus || 'unverified',
+      canChangeDisplayVariant: isVerified,
+      currentDisplayVariant: user.displayPrimaryPhotoVariant || 'original',
+    };
+  },
+});
+
+/**
+ * Debug query: Get detailed photo gate status for debugging.
+ * Returns all relevant fields for troubleshooting photo upload and verification flow.
+ */
+export const getPhotoGateStatus = query({
+  args: {
+    userId: v.id('users'),
+  },
+  handler: async (ctx, args) => {
+    const user = await ctx.db.get(args.userId);
+    if (!user) {
+      return {
+        userId: args.userId,
+        exists: false,
+        verificationReferencePhotoId: null,
+        verificationReferencePhotoUrl: null,
+        displayPrimaryPhotoId: null,
+        faceVerificationStatus: null,
+      };
+    }
+
+    return {
+      userId: args.userId,
+      exists: true,
+      verificationReferencePhotoId: user.verificationReferencePhotoId || null,
+      verificationReferencePhotoUrl: user.verificationReferencePhotoUrl || null,
+      displayPrimaryPhotoId: user.displayPrimaryPhotoId || null,
+      faceVerificationStatus: user.faceVerificationStatus || 'unverified',
+    };
   },
 });

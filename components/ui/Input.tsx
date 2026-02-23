@@ -1,10 +1,11 @@
-import React, { useState } from 'react';
+import React, { useState, forwardRef, useRef, useImperativeHandle } from 'react';
 import {
   View,
   TextInput,
   Text,
   StyleSheet,
   TouchableOpacity,
+  Pressable,
   TextInputProps,
   ViewStyle,
 } from 'react-native';
@@ -21,7 +22,12 @@ interface InputProps extends TextInputProps {
   containerStyle?: ViewStyle;
 }
 
-export function Input({
+export interface InputRef {
+  focus: () => void;
+  blur: () => void;
+}
+
+export const Input = forwardRef<InputRef, InputProps>(({
   label,
   error,
   hint,
@@ -31,70 +37,88 @@ export function Input({
   containerStyle,
   secureTextEntry,
   ...props
-}: InputProps) {
+}, ref) => {
   const [isFocused, setIsFocused] = useState(false);
   const [showPassword, setShowPassword] = useState(false);
+  const inputRef = useRef<TextInput>(null);
 
   const isPassword = secureTextEntry !== undefined;
+
+  // Expose focus/blur methods via ref
+  useImperativeHandle(ref, () => ({
+    focus: () => inputRef.current?.focus(),
+    blur: () => inputRef.current?.blur(),
+  }));
+
+  // Handle tap anywhere in the input container to focus the TextInput
+  const handleContainerPress = () => {
+    if (props.editable !== false) {
+      inputRef.current?.focus();
+    }
+  };
 
   return (
     <View style={[styles.container, containerStyle]}>
       {label && <Text style={styles.label}>{label}</Text>}
 
-      <View
-        style={[
-          styles.inputContainer,
-          isFocused && styles.inputContainerFocused,
-          error && styles.inputContainerError,
-        ]}
-      >
-        {leftIcon && (
-          <Ionicons
-            name={leftIcon}
-            size={20}
-            color={error ? COLORS.error : isFocused ? COLORS.primary : COLORS.textMuted}
-            style={styles.leftIcon}
-          />
-        )}
-
-        <TextInput
-          style={[styles.input, leftIcon && styles.inputWithLeftIcon]}
-          placeholderTextColor={COLORS.textMuted}
-          onFocus={() => setIsFocused(true)}
-          onBlur={() => setIsFocused(false)}
-          secureTextEntry={isPassword && !showPassword}
-          {...props}
-        />
-
-        {isPassword && (
-          <TouchableOpacity
-            onPress={() => setShowPassword(!showPassword)}
-            style={styles.rightIconButton}
-          >
+      {/* Pressable wrapper ensures tapping anywhere in the box focuses the input */}
+      <Pressable onPress={handleContainerPress}>
+        <View
+          style={[
+            styles.inputContainer,
+            isFocused && styles.inputContainerFocused,
+            error && styles.inputContainerError,
+          ]}
+        >
+          {leftIcon && (
             <Ionicons
-              name={showPassword ? 'eye-off' : 'eye'}
+              name={leftIcon}
               size={20}
-              color={COLORS.textMuted}
+              color={error ? COLORS.error : isFocused ? COLORS.primary : COLORS.textMuted}
+              style={styles.leftIcon}
             />
-          </TouchableOpacity>
-        )}
+          )}
 
-        {rightIcon && !isPassword && (
-          <TouchableOpacity
-            onPress={onRightIconPress}
-            style={styles.rightIconButton}
-            disabled={!onRightIconPress}
-          >
-            <Ionicons name={rightIcon} size={20} color={COLORS.textMuted} />
-          </TouchableOpacity>
-        )}
-      </View>
+          <TextInput
+            ref={inputRef}
+            style={[styles.input, leftIcon && styles.inputWithLeftIcon]}
+            placeholderTextColor={COLORS.textMuted}
+            onFocus={() => setIsFocused(true)}
+            onBlur={() => setIsFocused(false)}
+            secureTextEntry={isPassword && !showPassword}
+            {...props}
+          />
+
+          {isPassword && (
+            <TouchableOpacity
+              onPress={() => setShowPassword(!showPassword)}
+              style={styles.rightIconButton}
+            >
+              <Ionicons
+                name={showPassword ? 'eye-off' : 'eye'}
+                size={20}
+                color={COLORS.textMuted}
+              />
+            </TouchableOpacity>
+          )}
+
+          {rightIcon && !isPassword && (
+            <TouchableOpacity
+              onPress={onRightIconPress}
+              style={styles.rightIconButton}
+              disabled={!onRightIconPress}
+            >
+              <Ionicons name={rightIcon} size={20} color={COLORS.textMuted} />
+            </TouchableOpacity>
+          )}
+        </View>
+      </Pressable>
 
       {error && <Text style={styles.error}>{error}</Text>}
       {hint && !error && <Text style={styles.hint}>{hint}</Text>}
     </View>
   );
-}
+});
 
 const styles = StyleSheet.create({
   container: {

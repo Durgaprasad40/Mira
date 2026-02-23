@@ -85,7 +85,7 @@ export default function WelcomeScreen() {
         <Button
           title="Create Account"
           variant="outline"
-          onPress={() => router.push("/(onboarding)")}
+          onPress={() => router.push("/(onboarding)/email-phone")}
           fullWidth
           style={{
             backgroundColor: '#00000000',

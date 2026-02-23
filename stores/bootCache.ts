@@ -77,3 +77,11 @@ export function getBootCacheSync(): BootCacheData | null {
 export function isBootCacheReady(): boolean {
   return _bootCache !== null;
 }
+
+/**
+ * Clear boot cache (call on logout to prevent stale routing)
+ */
+export function clearBootCache(): void {
+  _bootCache = null;
+  _bootCachePromise = null;
+}

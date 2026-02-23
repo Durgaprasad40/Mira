@@ -26,6 +26,19 @@ import { Id } from "@/convex/_generated/dataModel";
 import { isDemoMode } from "@/hooks/useConvex";
 import { useDemoStore } from "@/stores/demoStore";
 
+/**
+ * Parse "YYYY-MM-DD" string to local Date object.
+ * Uses noon to avoid DST edge cases.
+ * DO NOT use new Date("YYYY-MM-DD") as it parses as UTC!
+ */
+function parseDOBString(dobString: string): Date {
+  if (!dobString || !/^\d{4}-\d{2}-\d{2}$/.test(dobString)) {
+    return new Date(2000, 0, 1, 12, 0, 0);
+  }
+  const [y, m, d] = dobString.split("-").map(Number);
+  return new Date(y, m - 1, d, 12, 0, 0);
+}
+
 export default function ReviewScreen() {
   const {
     name,
@@ -55,7 +68,15 @@ export default function ReviewScreen() {
     setStep,
   } = useOnboardingStore();
   const router = useRouter();
-  const { userId, setOnboardingCompleted } = useAuthStore();
+  const { userId, setOnboardingCompleted, faceVerificationPassed } = useAuthStore();
+
+  // CHECKPOINT GATE: Block access if face verification not completed
+  React.useEffect(() => {
+    if (!faceVerificationPassed) {
+      console.log("[REVIEW_GATE] blocked: faceVerificationPassed=false");
+      router.replace("/(onboarding)/face-verification" as any);
+    }
+  }, [faceVerificationPassed, router]);
   const [isSubmitting, setIsSubmitting] = React.useState(false);
   const [uploadProgress, setUploadProgress] = React.useState("");
 
@@ -63,7 +84,7 @@ export default function ReviewScreen() {
   const generateUploadUrl = useMutation(api.photos.generateUploadUrl);
 
   const calculateAge = (dob: string) => {
-    const birthDate = new Date(dob);
+    const birthDate = parseDOBString(dob); // Use local parsing, not UTC
     const today = new Date();
     let age = today.getFullYear() - birthDate.getFullYear();
     const monthDiff = today.getMonth() - birthDate.getMonth();

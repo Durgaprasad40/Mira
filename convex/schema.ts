@@ -13,6 +13,7 @@ export default defineSchema({
 
     // Basic Info
     name: v.string(),
+    handle: v.optional(v.string()), // Unique user ID / nickname (e.g., @johndoe)
     dateOfBirth: v.string(),
     gender: v.union(v.literal('male'), v.literal('female'), v.literal('non_binary'), v.literal('lesbian'), v.literal('other')),
 
@@ -59,8 +60,21 @@ export default defineSchema({
 
     // Verification
     isVerified: v.boolean(),
-    verificationPhotoId: v.optional(v.id('_storage')),
+    verificationPhotoId: v.optional(v.id('_storage')), // Legacy - use verificationReferencePhotoId
     verificationCompletedAt: v.optional(v.number()),
+
+    // "Verified Face Required, Privacy After" Policy
+    // The user must upload a clear face photo for verification (stored privately)
+    // After verification, they can blur/cartoon/replace the display photo
+    verificationReferencePhotoId: v.optional(v.id('_storage')), // Private face photo used for matching
+    verificationReferencePhotoUrl: v.optional(v.string()),      // URL for the private reference photo
+    displayPrimaryPhotoId: v.optional(v.id('_storage')),        // What's shown publicly on profile
+    displayPrimaryPhotoUrl: v.optional(v.string()),             // URL for the display photo
+    displayPrimaryPhotoVariant: v.optional(v.union(
+      v.literal('original'),   // Unmodified original photo
+      v.literal('blurred'),    // Photo with face blur applied
+      v.literal('cartoon')     // AI-generated cartoon/avatar version
+    )),
 
     // Location (live device location - private)
     latitude: v.optional(v.number()),
@@ -201,7 +215,21 @@ export default defineSchema({
       v.literal('suspected_fake'),
       v.literal('nsfw_content'),
       v.literal('low_quality'),
-      v.literal('manual_review_required')
+      v.literal('manual_review_required'),
+      v.literal('face_mismatch')
+    )),
+    // Face verification score from AWS Rekognition (0-100)
+    faceMatchScore: v.optional(v.number()),
+    // When face verification was attempted
+    faceVerificationAttemptedAt: v.optional(v.number()),
+    // Storage ID of the selfie used for verification
+    faceVerificationSelfieId: v.optional(v.id('_storage')),
+    // Clean face verification status (replaces complex verificationStatus for face matching)
+    faceVerificationStatus: v.optional(v.union(
+      v.literal('unverified'),  // Not yet verified
+      v.literal('pending'),     // Verification in progress or needs manual review
+      v.literal('verified'),    // Face verified successfully
+      v.literal('failed')       // Face verification failed
     )),
     emailVerified: v.optional(v.boolean()),
     emailVerifiedAt: v.optional(v.number()),
@@ -222,6 +250,7 @@ export default defineSchema({
   })
     .index('by_email', ['email'])
     .index('by_phone', ['phone'])
+    .index('by_handle', ['handle'])
     .index('by_external_id', ['externalId'])
     .index('by_gender', ['gender'])
     .index('by_last_active', ['lastActive'])
@@ -240,9 +269,23 @@ export default defineSchema({
     width: v.optional(v.number()),
     height: v.optional(v.number()),
     createdAt: v.number(),
+    // Photo purpose for "Verified Face Required, Privacy After" policy
+    photoType: v.optional(v.union(
+      v.literal('verification_reference'), // Private photo used for face verification
+      v.literal('display'),                 // Shown publicly on profile
+      v.literal('gallery')                  // Additional gallery photos
+    )),
+    // If this is a derived photo (blurred/cartoon version), link to original
+    derivedFromPhotoId: v.optional(v.id('photos')),
+    // Variant type if this is a derived photo
+    variantType: v.optional(v.union(
+      v.literal('blurred'),
+      v.literal('cartoon')
+    )),
   })
     .index('by_user', ['userId'])
-    .index('by_user_order', ['userId', 'order']),
+    .index('by_user_order', ['userId', 'order'])
+    .index('by_user_type', ['userId', 'photoType']),
 
   // Likes table
   likes: defineTable({

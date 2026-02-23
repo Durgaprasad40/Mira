@@ -200,6 +200,7 @@ export default function PhoneEntryScreen() {
       const result = await verifyPhoneOtp({ phone: fullPhone, code: otpCode });
 
       if (result.success && result.userId && result.token) {
+        if (__DEV__) console.log("[AUTH] login success, onboardingCompleted =", result.onboardingCompleted);
         // Store auth credentials
         setAuth(result.userId, result.token, result.onboardingCompleted || false);
 
@@ -207,8 +208,11 @@ export default function PhoneEntryScreen() {
         if (result.onboardingCompleted) {
           router.replace('/(main)/(tabs)/home');
         } else {
+          // Resume at photo-upload (safe screen that doesn't create accounts)
+          const resumeRoute = '/(onboarding)/photo-upload';
+          if (__DEV__) console.log("[AUTH] resuming onboarding at", resumeRoute);
           setStep('photo_upload');
-          router.replace('/(onboarding)/photo-upload');
+          router.replace(resumeRoute);
         }
       }
     } catch (err: any) {

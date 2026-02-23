@@ -1,0 +1,11 @@
+env: load .env.local
+env: export CONVEX_DEPLOYMENT EXPO_PUBLIC_CONVEX_URL EXPO_PUBLIC_DEMO_MODE EXPO_PUBLIC_CONVEX_SITE_URL
+Running 17 checks on your project...
+16/17 checks passed. 1 checks failed. Possible issues detected:
+Use the --verbose flag to see more details about passed checks.
+
+✖ Check native tooling versions
+CocoaPods version check failed. CocoaPods may not be installed or there may be an issue with your CocoaPods installation. Installing version 1.15.2 or higher is recommended.
+Advice:
+Update your native tooling to the recommended versions.
+

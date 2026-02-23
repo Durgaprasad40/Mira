@@ -63,15 +63,42 @@ export function useAuthSubmit() {
   );
 
   /**
+   * Handles HANDLE_TAKEN response by showing alert.
+   * Returns true if handled (caller should stop), false otherwise.
+   */
+  const handleHandleTaken = useCallback((): boolean => {
+    Alert.alert(
+      "Nickname taken",
+      "This nickname is already taken. Try another.",
+      [{ text: "OK", style: "default" }]
+    );
+    return true;
+  }, []);
+
+  /**
+   * Handles INVALID_HANDLE response by showing alert.
+   * Returns true if handled (caller should stop), false otherwise.
+   */
+  const handleInvalidHandle = useCallback((message: string): boolean => {
+    Alert.alert(
+      "Invalid nickname",
+      message || "Nickname must be 3-20 characters, letters, numbers, and underscores only.",
+      [{ text: "OK", style: "default" }]
+    );
+    return true;
+  }, []);
+
+  /**
    * Submit email registration with centralized USER_EXISTS handling.
-   * Returns the mutation result on success, or null if USER_EXISTS was handled.
-   * Catches errors and maps USER_EXISTS responses to alert + routing.
+   * Returns the mutation result on success, or null if error was handled.
+   * Catches errors and maps USER_EXISTS/HANDLE_TAKEN responses to alert + routing.
    */
   const submitEmailRegistration = useCallback(
     async (args: {
       email: string;
       password: string;
       name: string;
+      handle: string; // Required unique nickname
       dateOfBirth: string;
       gender: "male" | "female" | "non_binary" | "lesbian" | "other";
     }): Promise<{
@@ -80,9 +107,22 @@ export function useAuthSubmit() {
       token?: string;
       code?: string;
       provider?: string;
+      message?: string;
     } | null> => {
       try {
         const result = await registerWithEmail(args);
+
+        // Handle HANDLE_TAKEN response
+        if (result.code === "HANDLE_TAKEN") {
+          handleHandleTaken();
+          return null;
+        }
+
+        // Handle INVALID_HANDLE response
+        if (result.code === "INVALID_HANDLE") {
+          handleInvalidHandle(result.message || "");
+          return null;
+        }
 
         // Handle USER_EXISTS response (structured response, not exception)
         if (result.code === "USER_EXISTS") {
@@ -94,6 +134,14 @@ export function useAuthSubmit() {
       } catch (error: any) {
         // Handle case where Convex throws instead of returning structured response
         const message = error?.message || "";
+        if (message.includes("HANDLE_TAKEN") || message.includes("nickname is already taken")) {
+          handleHandleTaken();
+          return null;
+        }
+        if (message.includes("INVALID_HANDLE")) {
+          handleInvalidHandle(message);
+          return null;
+        }
         if (
           message.includes("USER_EXISTS") ||
           message.includes("already exists") ||
@@ -108,7 +156,7 @@ export function useAuthSubmit() {
         throw error;
       }
     },
-    [registerWithEmail, handleUserExists]
+    [registerWithEmail, handleUserExists, handleHandleTaken, handleInvalidHandle]
   );
 
   /**

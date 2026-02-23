@@ -15,6 +15,15 @@ import { isDemoMode } from '@/hooks/useConvex';
 import { INCOGNITO_COLORS } from '@/lib/constants';
 import { PRIVATE_INTENT_CATEGORIES, PRIVATE_DESIRE_TAGS, PRIVATE_BOUNDARIES } from '@/lib/privateConstants';
 
+/** Parse "YYYY-MM-DD" to local Date (noon to avoid DST issues) */
+function parseDOBString(dobString: string): Date {
+  if (!dobString || !/^\d{4}-\d{2}-\d{2}$/.test(dobString)) {
+    return new Date(2000, 0, 1, 12, 0, 0);
+  }
+  const [y, m, d] = dobString.split("-").map(Number);
+  return new Date(y, m - 1, d, 12, 0, 0);
+}
+
 const C = INCOGNITO_COLORS;
 
 export default function ActivateScreen() {
@@ -41,7 +50,7 @@ export default function ActivateScreen() {
 
     // Auto-import user info
     if (currentUser) {
-      const birthDate = new Date(currentUser.dateOfBirth);
+      const birthDate = parseDOBString(currentUser.dateOfBirth); // Use local parsing
       const today = new Date();
       let age = today.getFullYear() - birthDate.getFullYear();
       const monthDiff = today.getMonth() - birthDate.getMonth();

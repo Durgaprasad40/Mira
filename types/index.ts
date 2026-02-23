@@ -823,6 +823,7 @@ export type OnboardingStep =
   | "consent"
   | "photo_upload"
   | "face_verification"
+  | "display_privacy"  // Privacy options after verification
   | "additional_photos"
   | "bio"
   | "prompts"

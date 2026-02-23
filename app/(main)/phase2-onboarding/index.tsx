@@ -38,12 +38,21 @@ const C = INCOGNITO_COLORS;
 const screenWidth = Dimensions.get("window").width;
 const PHOTO_SIZE = (screenWidth - 48 - 16) / 3; // 3 photos with gaps
 
+/** Parse "YYYY-MM-DD" to local Date (noon to avoid DST issues) */
+function parseDOBString(dobString: string): Date {
+  if (!dobString || !/^\d{4}-\d{2}-\d{2}$/.test(dobString)) {
+    return new Date(2000, 0, 1, 12, 0, 0);
+  }
+  const [y, m, d] = dobString.split("-").map(Number);
+  return new Date(y, m - 1, d, 12, 0, 0);
+}
+
 /**
- * Calculate age from date of birth string
+ * Calculate age from date of birth string (uses local parsing, not UTC)
  */
 function calculateAge(dateOfBirth?: string): number {
   if (!dateOfBirth) return 0;
-  const dob = new Date(dateOfBirth);
+  const dob = parseDOBString(dateOfBirth);
   const today = new Date();
   let age = today.getFullYear() - dob.getFullYear();
   const monthDiff = today.getMonth() - dob.getMonth();

@@ -312,6 +312,7 @@ export const registerWithEmail = mutation({
     email: v.string(),
     password: v.string(),
     name: v.string(),
+    handle: v.string(), // Required unique nickname
     dateOfBirth: v.string(),
     gender: v.union(
       v.literal("male"),
@@ -322,8 +323,41 @@ export const registerWithEmail = mutation({
     ),
   },
   handler: async (ctx, args) => {
-    const { email, password, name, dateOfBirth, gender } = args;
+    const { email, password, name, handle, dateOfBirth, gender } = args;
     const now = Date.now();
+
+    // Normalize handle: lowercase and trim
+    const normalizedHandle = handle.toLowerCase().trim();
+
+    // Validate handle format
+    if (normalizedHandle.length < 3) {
+      return {
+        success: false,
+        code: "INVALID_HANDLE" as const,
+        message: "Nickname must be at least 3 characters",
+      };
+    }
+    if (!/^[a-z0-9_]+$/.test(normalizedHandle)) {
+      return {
+        success: false,
+        code: "INVALID_HANDLE" as const,
+        message: "Nickname can only contain lowercase letters, numbers, and underscores",
+      };
+    }
+
+    // Check if handle is already taken
+    const existingByHandle = await ctx.db
+      .query("users")
+      .withIndex("by_handle", (q) => q.eq("handle", normalizedHandle))
+      .first();
+
+    if (existingByHandle) {
+      return {
+        success: false,
+        code: "HANDLE_TAKEN" as const,
+        message: "This nickname is already taken. Please choose another.",
+      };
+    }
 
     // Check if user already exists by email
     const existingByEmail = await ctx.db
@@ -355,6 +389,7 @@ export const registerWithEmail = mutation({
       hashVersion: CURRENT_HASH_VERSION,
       authProvider: "email",
       name,
+      handle: normalizedHandle, // Store the normalized handle
       dateOfBirth,
       gender,
       bio: "",
@@ -1921,5 +1956,63 @@ export const checkPhoneExists = query({
       provider: user.authProvider || "phone",
       onboardingCompleted: user.onboardingCompleted,
     };
+  },
+});
+
+/**
+ * Check if email is already registered.
+ * Used for Create Account email-first flow.
+ */
+export const checkEmailExists = query({
+  args: { email: v.string() },
+  handler: async (ctx, args) => {
+    const user = await ctx.db
+      .query("users")
+      .withIndex("by_email", (q) => q.eq("email", args.email))
+      .first();
+    if (!user) return { exists: false };
+    return { exists: true };
+  },
+});
+
+/**
+ * Check if handle/nickname is already registered.
+ * Used for nickname availability check in Create Account flow.
+ */
+export const checkHandleExists = query({
+  args: { handle: v.string() },
+  handler: async (ctx, args) => {
+    // Normalize handle: lowercase and trim
+    const normalizedHandle = args.handle.toLowerCase().trim();
+
+    const user = await ctx.db
+      .query("users")
+      .withIndex("by_handle", (q) => q.eq("handle", normalizedHandle))
+      .first();
+
+    if (!user) return { exists: false };
+    return { exists: true, ownerId: user._id };
+  },
+});
+
+/**
+ * Get user's basic info for read-only confirmation screen.
+ * Used when existing user logs in to confirm their info.
+ */
+export const getUserBasicInfo = query({
+  args: { userId: v.string() },
+  handler: async (ctx, args) => {
+    try {
+      const user = await ctx.db.get(args.userId as Id<"users">);
+      if (!user) return null;
+      return {
+        name: user.name,
+        dateOfBirth: user.dateOfBirth,
+        gender: user.gender,
+        handle: user.handle || null,
+      };
+    } catch {
+      return null;
+    }
   },
 });

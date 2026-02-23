@@ -53,8 +53,23 @@ export default function ProfileDetailsScreen() {
   const router = useRouter();
 
   const handleNext = () => {
+    if (__DEV__) console.log('[ONB] profile-details → preferences (continue)');
     setStep("preferences");
     router.push("/(onboarding)/preferences");
+  };
+
+  // POST-VERIFICATION: Skip advances to next step
+  const handleSkip = () => {
+    if (__DEV__) console.log('[ONB] profile-details → preferences (skip)');
+    setStep("preferences");
+    router.push("/(onboarding)/preferences");
+  };
+
+  // POST-VERIFICATION: Previous goes back
+  const handlePrevious = () => {
+    if (__DEV__) console.log('[ONB] profile-details → prompts (previous)');
+    setStep("prompts");
+    router.push("/(onboarding)/prompts");
   };
 
   return (
@@ -325,6 +340,14 @@ export default function ProfileDetailsScreen() {
           onPress={handleNext}
           fullWidth
         />
+        <View style={styles.navRow}>
+          <TouchableOpacity style={styles.navButton} onPress={handlePrevious}>
+            <Text style={styles.navText}>Previous</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.navButton} onPress={handleSkip}>
+            <Text style={styles.navText}>Skip</Text>
+          </TouchableOpacity>
+        </View>
       </View>
     </ScrollView>
   );
@@ -417,5 +440,19 @@ const styles = StyleSheet.create({
   },
   footer: {
     marginTop: 24,
+  },
+  navRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    marginTop: 12,
+  },
+  navButton: {
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+  },
+  navText: {
+    fontSize: 14,
+    color: COLORS.textLight,
+    fontWeight: "500",
   },
 });

@@ -41,6 +41,27 @@ import { usePrivateProfileStore } from '@/stores/privateProfileStore';
 import { isDemoMode } from '@/hooks/useConvex';
 import { getDemoCurrentUser } from '@/lib/demoData';
 
+/** Parse "YYYY-MM-DD" to local Date (noon to avoid DST issues) */
+function parseDOBString(dobString: string): Date {
+  if (!dobString || !/^\d{4}-\d{2}-\d{2}$/.test(dobString)) {
+    return new Date(2000, 0, 1, 12, 0, 0);
+  }
+  const [y, m, d] = dobString.split("-").map(Number);
+  return new Date(y, m - 1, d, 12, 0, 0);
+}
+
+/** Calculate age from DOB string using local date parsing */
+function calculateAgeFromDOB(dob: string): number {
+  const birthDate = parseDOBString(dob);
+  const today = new Date();
+  let age = today.getFullYear() - birthDate.getFullYear();
+  const m = today.getMonth() - birthDate.getMonth();
+  if (m < 0 || (m === 0 && today.getDate() < birthDate.getDate())) {
+    age--;
+  }
+  return age;
+}
+
 // Permanent storage directory for private profile photos
 const PRIVATE_PHOTOS_DIR_NAME = 'private_photos';
 const MAX_PHOTOS = 9;
@@ -207,9 +228,7 @@ export default function PrivateProfileScreen() {
       const demoUser = getDemoCurrentUser();
       return {
         name: demoUser?.name || 'User',
-        age: demoUser?.dateOfBirth
-          ? Math.floor((Date.now() - new Date(demoUser.dateOfBirth).getTime()) / (365.25 * 24 * 60 * 60 * 1000))
-          : 0,
+        age: demoUser?.dateOfBirth ? calculateAgeFromDOB(demoUser.dateOfBirth) : 0,
       };
     }
     return { name: 'User', age: 0 };

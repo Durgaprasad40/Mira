@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { View, Text, StyleSheet, ScrollView, TextInput } from 'react-native';
+import { View, Text, StyleSheet, ScrollView, TextInput, TouchableOpacity } from 'react-native';
 import { useRouter } from 'expo-router';
 import { COLORS, VALIDATION } from '@/lib/constants';
 import { Button } from '@/components/ui';
@@ -23,8 +23,23 @@ export default function BioScreen() {
     // TODO: Profanity filter check
     // TODO: Link detection check
 
+    if (__DEV__) console.log('[ONB] bio → prompts (continue)');
     setStep('prompts');
     router.push('/(onboarding)/prompts' as any);
+  };
+
+  // POST-VERIFICATION: Skip advances to next step
+  const handleSkip = () => {
+    if (__DEV__) console.log('[ONB] bio → prompts (skip)');
+    setStep('prompts');
+    router.push('/(onboarding)/prompts' as any);
+  };
+
+  // POST-VERIFICATION: Previous goes back (within post-verify screens only)
+  const handlePrevious = () => {
+    if (__DEV__) console.log('[ONB] bio → additional-photos (previous)');
+    setStep('additional_photos');
+    router.push('/(onboarding)/additional-photos' as any);
   };
 
   const tips = [
@@ -83,6 +98,14 @@ export default function BioScreen() {
           disabled={bio.length < VALIDATION.BIO_MIN_LENGTH}
           fullWidth
         />
+        <View style={styles.navRow}>
+          <TouchableOpacity style={styles.navButton} onPress={handlePrevious}>
+            <Text style={styles.navText}>Previous</Text>
+          </TouchableOpacity>
+          <TouchableOpacity style={styles.navButton} onPress={handleSkip}>
+            <Text style={styles.navText}>Skip</Text>
+          </TouchableOpacity>
+        </View>
       </View>
     </ScrollView>
   );
@@ -167,5 +190,19 @@ const styles = StyleSheet.create({
   },
   footer: {
     marginTop: 24,
+  },
+  navRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    marginTop: 12,
+  },
+  navButton: {
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+  },
+  navText: {
+    fontSize: 14,
+    color: COLORS.textLight,
+    fontWeight: '500',
   },
 });

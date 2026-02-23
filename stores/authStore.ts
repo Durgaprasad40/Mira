@@ -2,6 +2,9 @@ import { create } from "zustand";
 import { persist, createJSONStorage } from "zustand/middleware";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { markTiming } from "@/utils/startupTiming";
+import { useOnboardingStore } from "@/stores/onboardingStore";
+import { clearAuthBootCache } from "@/stores/authBootCache";
+import { clearBootCache } from "@/stores/bootCache";
 
 // Hydration timing: capture when store module loads
 const AUTH_STORE_LOAD_TIME = Date.now();
@@ -13,6 +16,10 @@ interface AuthState {
   isLoading: boolean;
   error: string | null;
   onboardingCompleted: boolean;
+  // Checkpoint: face verification passed (strict gate in onboarding)
+  faceVerificationPassed: boolean;
+  // Checkpoint: face verification pending manual review (allows onboarding resume)
+  faceVerificationPending: boolean;
   _hasHydrated: boolean;
   // Hydration status for initial session validation
   _sessionValidated: boolean;
@@ -27,6 +34,8 @@ interface AuthState {
   setLoading: (isLoading: boolean) => void;
   setError: (error: string | null) => void;
   setOnboardingCompleted: (completed: boolean) => void;
+  setFaceVerificationPassed: (passed: boolean) => void;
+  setFaceVerificationPending: (pending: boolean) => void;
   logout: () => void;
   setHasHydrated: (state: boolean) => void;
   // Sync local state from server validation (READ-ONLY - updates local state only)
@@ -51,6 +60,8 @@ export const useAuthStore = create<AuthState>()(
       isLoading: false,
       error: null,
       onboardingCompleted: false,
+      faceVerificationPassed: false,
+      faceVerificationPending: false,
       _hasHydrated: false,
       _sessionValidated: false,
       _sessionValidationError: null,
@@ -74,18 +85,35 @@ export const useAuthStore = create<AuthState>()(
       setOnboardingCompleted: (completed) =>
         set({ onboardingCompleted: completed }),
 
+      setFaceVerificationPassed: (passed) =>
+        set({ faceVerificationPassed: passed }),
+
+      setFaceVerificationPending: (pending) =>
+        set({ faceVerificationPending: pending }),
+
       // Logout clears LOCAL state ONLY — server data is untouched
       // This follows the "Logout ≠ Delete" principle
-      logout: () =>
+      logout: () => {
+        // Reset onboarding store to prevent photo/data leakage between users
+        useOnboardingStore.getState().reset();
+        // Clear boot caches to prevent stale routing on next boot
+        clearAuthBootCache();
+        clearBootCache();
+        if (__DEV__) console.log('[AUTH] logout: cleared onboardingStore');
+        if (__DEV__) console.log('[BOOT_CACHE] cleared boot caches on logout');
+
         set({
           isAuthenticated: false,
           userId: null,
           token: null,
           error: null,
           onboardingCompleted: false,
+          faceVerificationPassed: false,
+          faceVerificationPending: false,
           _sessionValidated: false,
           _sessionValidationError: null,
-        }),
+        });
+      },
 
       setHasHydrated: (state) => set({ _hasHydrated: state }),
 

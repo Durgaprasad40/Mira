@@ -1,418 +1,711 @@
 import React, { useState, useRef, useEffect, useCallback } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, Alert, Linking, Platform } from 'react-native';
+import {
+  View,
+  Text,
+  StyleSheet,
+  Alert,
+  Linking,
+  ActivityIndicator,
+} from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
-import { CameraView, CameraType, useCameraPermissions, Camera } from 'expo-camera';
+import {
+  Camera,
+  useCameraDevice,
+  useCameraPermission,
+} from 'react-native-vision-camera';
+import Animated, { useAnimatedStyle, withTiming, useSharedValue } from 'react-native-reanimated';
 import { COLORS } from '@/lib/constants';
 import { Button } from '@/components/ui';
 import { useOnboardingStore } from '@/stores/onboardingStore';
+import { useAuthStore } from '@/stores/authStore';
 import { Ionicons } from '@expo/vector-icons';
-import { log } from '@/utils/logger';
+import { verifyFace, type CapturedFrame, type FaceMatchStatus, type FaceMatchReasonCode } from '@/services/faceVerification';
+import { isDemoMode } from '@/hooks/useConvex';
+
+// =============================================================================
+// Constants
+// =============================================================================
+
+const FRAME_COUNT = 3;
+const CAPTURE_INTERVAL_MS = 800; // ~2.4s total for 3 frames
+
+// =============================================================================
+// Types
+// =============================================================================
+
+type VerificationState =
+  | 'waiting'   // Waiting for face to be positioned
+  | 'capturing' // Capturing 3 frames
+  | 'verifying' // Sending to backend for face comparison
+  | 'success'   // Verification passed (face matches profile photo)
+  | 'pending'   // Pending manual review (uncertain match)
+  | 'failed';   // Verification failed (face mismatch or error)
+
+// =============================================================================
+// Component
+// =============================================================================
 
 export default function FaceVerificationScreen() {
-  const { setVerificationPhoto, setStep } = useOnboardingStore();
+  const { photos, setStep } = useOnboardingStore();
+  const { userId, setFaceVerificationPassed, setFaceVerificationPending } = useAuthStore();
   const router = useRouter();
-  const [facing, setFacing] = useState<CameraType>('front');
-  const [permission, requestPermission] = useCameraPermissions();
-  const cameraRef = useRef<CameraView>(null);
-  const [captured, setCaptured] = useState(false);
-  const [photoUri, setPhotoUri] = useState<string | null>(null);
-  const [isPermissionBlocked, setIsPermissionBlocked] = useState(false);
-  const [isCheckingPermission, setIsCheckingPermission] = useState(false);
 
-  // =========================================================================
-  // DEBUG: Log screen mount for Durga to see in Metro logs
-  // =========================================================================
+  // Camera
+  const device = useCameraDevice('front');
+  const { hasPermission, requestPermission } = useCameraPermission();
+  const cameraRef = useRef<Camera>(null);
+
+  // State
+  const [verificationState, setVerificationState] = useState<VerificationState>('waiting');
+  const [capturedFrames, setCapturedFrames] = useState<CapturedFrame[]>([]);
+  const [framesCaptured, setFramesCaptured] = useState(0);
+  const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [matchScore, setMatchScore] = useState<number | null>(null);
+  const [isPermissionBlocked, setIsPermissionBlocked] = useState(false);
+  const [failReasonCode, setFailReasonCode] = useState<FaceMatchReasonCode | null>(null);
+
+  // Manual capture mode - user taps button to start
+  const isCapturing = useSharedValue(false);
+
+  // Animated circle color (stays primary in manual mode, green when capturing)
+  const circleColor = useAnimatedStyle(() => ({
+    borderColor: withTiming(isCapturing.value ? '#4CAF50' : COLORS.primary, { duration: 200 }),
+  }));
+
+  // =============================================================================
+  // Debug logging and gate check on mount
+  // =============================================================================
+
   useEffect(() => {
+    const referencePhotoPresent = !!(photos && photos.length > 0 && photos[0]);
     console.log('[FaceDebug] ========================================');
     console.log('[FaceDebug] Face Verification screen MOUNTED');
+    console.log('[FaceDebug] userId:', userId);
+    console.log('[FaceDebug] profilePhotos:', photos.length);
+    console.log(`[FaceDebug] referencePhotoPresent=${referencePhotoPresent}`);
     console.log('[FaceDebug] ========================================');
+
+    // GATE CHECK: If no reference photo, redirect to photo-upload immediately
+    if (!referencePhotoPresent) {
+      console.log('[ONB] route_decision: NO_REFERENCE_PHOTO - redirecting to photo-upload');
+      Alert.alert(
+        'Photo Required',
+        'Please upload a clear photo showing your face before verification.',
+        [{
+          text: 'Upload Photo',
+          onPress: () => {
+            setStep('photo_upload');
+            router.replace('/(onboarding)/photo-upload' as any);
+          }
+        }]
+      );
+    }
+
     return () => {
       console.log('[FaceDebug] Face Verification screen UNMOUNTED');
     };
   }, []);
 
-  // Check permission status on mount and refresh if needed
+  // =============================================================================
+  // Permission handling
+  // =============================================================================
+
   useEffect(() => {
-    const checkPermission = async () => {
-      // DEBUG: Clear permission log
-      console.log(`[FaceDebug] permission=${permission?.granted ? 'GRANTED' : 'DENIED'} canAskAgain=${permission?.canAskAgain}`);
-
-      log.info('[FaceVerification]', 'Initial permission check', {
-        permissionExists: !!permission,
-        granted: permission?.granted,
-        canAskAgain: permission?.canAskAgain,
-      });
-
-      // If hook says not granted, double-check with direct API call
-      // This handles cases where Android settings changed while app was backgrounded
-      if (permission && !permission.granted) {
-        const freshStatus = await Camera.getCameraPermissionsAsync();
-        log.info('[FaceVerification]', 'Fresh permission status from API', {
-          granted: freshStatus.granted,
-          canAskAgain: freshStatus.canAskAgain,
-          status: freshStatus.status,
-        });
-
-        if (freshStatus.granted) {
-          // Permission was granted in settings, refresh the hook state
-          log.info('[FaceVerification]', 'Permission granted in settings, refreshing...');
-          await requestPermission();
-        } else if (!freshStatus.canAskAgain) {
-          // Permission permanently denied
-          log.warn('[FaceVerification]', 'Permission permanently blocked');
+    if (hasPermission === false) {
+      console.log('[FaceDebug] permission=DENIED, requesting...');
+      requestPermission().then((granted) => {
+        if (!granted) {
           setIsPermissionBlocked(true);
         }
-      }
-    };
-
-    checkPermission();
-  }, [permission]);
-
-  // Handler for the "Grant Permission" button
-  const handleGrantPermission = useCallback(async () => {
-    log.info('[FaceVerification]', 'Grant Permission button pressed');
-    setIsCheckingPermission(true);
-
-    try {
-      // First, check current permission status directly from the system
-      const currentStatus = await Camera.getCameraPermissionsAsync();
-      log.info('[FaceVerification]', 'Current permission status', {
-        granted: currentStatus.granted,
-        canAskAgain: currentStatus.canAskAgain,
-        status: currentStatus.status,
       });
-
-      if (currentStatus.granted) {
-        // Permission already granted - just refresh the hook state
-        log.info('[FaceVerification]', 'Permission already granted, refreshing hook state');
-        await requestPermission();
-        return;
-      }
-
-      if (!currentStatus.canAskAgain) {
-        // Permission permanently denied - show settings option
-        log.warn('[FaceVerification]', 'Permission blocked, showing settings option');
-        setIsPermissionBlocked(true);
-        return;
-      }
-
-      // Can ask again - request permission
-      log.info('[FaceVerification]', 'Requesting permission from system');
-      const result = await requestPermission();
-      log.info('[FaceVerification]', 'Permission request result', {
-        granted: result.granted,
-        canAskAgain: result.canAskAgain,
-        status: result.status,
-      });
-
-      if (!result.granted && !result.canAskAgain) {
-        setIsPermissionBlocked(true);
-      }
-    } catch (error) {
-      log.error('[FaceVerification]', 'Error handling permission', { error });
-      Alert.alert('Error', 'Failed to request camera permission. Please try again.');
-    } finally {
-      setIsCheckingPermission(false);
     }
-  }, [requestPermission]);
+  }, [hasPermission, requestPermission]);
 
-  // Handler for opening system settings
   const handleOpenSettings = useCallback(async () => {
-    log.info('[FaceVerification]', 'Opening system settings');
     try {
       await Linking.openSettings();
     } catch (error) {
-      log.error('[FaceVerification]', 'Failed to open settings', { error });
-      Alert.alert('Error', 'Unable to open settings. Please go to Settings > Apps > Mira > Permissions manually.');
+      Alert.alert('Error', 'Unable to open settings.');
     }
   }, []);
 
-  const takePicture = async () => {
-    if (!cameraRef.current) return;
+  // =============================================================================
+  // Capture Logic
+  // =============================================================================
+
+  const startCapture = useCallback(async () => {
+    if (!cameraRef.current || verificationState !== 'waiting') return;
+
+    console.log('[FaceMatch] Starting 3-frame capture for face verification...');
+    isCapturing.value = true;
+    setVerificationState('capturing');
+    setCapturedFrames([]);
+    setFramesCaptured(0);
+    setErrorMessage(null);
+    setMatchScore(null);
+
+    const frames: CapturedFrame[] = [];
+
+    for (let i = 0; i < FRAME_COUNT; i++) {
+      try {
+        console.log(`[FaceMatch] Capture frame ${i + 1}/${FRAME_COUNT}...`);
+
+        // Take photo
+        const photo = await cameraRef.current.takePhoto({});
+
+        frames.push({
+          base64: photo.path, // File path - will be converted to base64 in service
+          hasFace: true, // Assume face present in manual mode
+          timestamp: Date.now(),
+        });
+
+        setFramesCaptured(i + 1);
+        console.log(`[FaceMatch] Frame ${i + 1}/${FRAME_COUNT} captured: ${photo.path}`);
+
+        // Wait before next capture (except for last frame)
+        if (i < FRAME_COUNT - 1) {
+          await new Promise(resolve => setTimeout(resolve, CAPTURE_INTERVAL_MS));
+        }
+      } catch (error) {
+        console.error(`[FaceMatch] Frame ${i + 1} capture error:`, error);
+        frames.push({
+          base64: '',
+          hasFace: false,
+          timestamp: Date.now(),
+        });
+        setFramesCaptured(i + 1);
+      }
+    }
+
+    isCapturing.value = false;
+    setCapturedFrames(frames);
+    console.log('[FaceMatch] All frames captured, sending to server for face comparison...');
+
+    // Start server-side verification
+    setVerificationState('verifying');
 
     try {
-      const photo = await cameraRef.current.takePictureAsync({
-        quality: 0.8,
-        base64: false,
+      // SECURITY: Face comparison happens on the server, not the client
+      // The server compares the selfie against the user's uploaded profile photo
+      const result = await verifyFace({
+        userId: userId || 'unknown',
+        profilePhotoUri: photos[0] || '',
+        frames,
       });
 
-      if (photo) {
-        setPhotoUri(photo.uri);
-        setCaptured(true);
-        setVerificationPhoto(photo.uri);
+      console.log(`[FaceMatch] Server result: status=${result.status}, score=${result.score}, reasonCode=${result.reasonCode}`);
+      console.log(`[FaceMatch] Reason: ${result.reason || result.message}`);
+
+      setMatchScore(result.score);
+      setFailReasonCode(result.reasonCode || null);
+
+      // Handle verification result based on server response
+      switch (result.status) {
+        case 'PASS':
+          // Face matches profile photo - verification successful
+          console.log('[FaceMatch] PASS - Face matches profile photo');
+          setVerificationState('success');
+          // Short delay to show success state before navigating
+          setTimeout(() => {
+            handleVerificationSuccess();
+          }, 1500);
+          break;
+
+        case 'PENDING':
+          // Uncertain match - requires manual review
+          console.log('[FaceMatch] PENDING - Manual review required');
+          setVerificationState('pending');
+          setErrorMessage(result.message);
+          break;
+
+        case 'FAIL':
+          // Check if failure is due to missing/invalid reference photo
+          if (result.reasonCode === 'NO_REFERENCE_PHOTO' || result.reasonCode === 'REFERENCE_NO_FACE') {
+            console.log(`[FaceMatch] FAIL reason=${result.reasonCode} - Redirecting to photo upload`);
+            Alert.alert(
+              'Photo Required',
+              'Please upload a clear photo showing your face. Your current photo could not be used for verification.',
+              [{
+                text: 'Upload Photo',
+                onPress: () => {
+                  setStep('photo_upload');
+                  router.replace('/(onboarding)/photo-upload' as any);
+                }
+              }]
+            );
+            return;
+          }
+
+          // Face doesn't match or selfie error - stay on this screen for retry
+          console.log(`[FaceMatch] FAIL reason=${result.reasonCode} - Stay for retry`);
+          setVerificationState('failed');
+          setErrorMessage(result.message);
+          break;
+
+        default:
+          // Unexpected status - treat as failure
+          console.error('[FaceMatch] Unexpected status:', result.status);
+          setVerificationState('failed');
+          setErrorMessage('Unexpected verification result. Please try again.');
       }
-    } catch (error) {
-      Alert.alert('Error', 'Failed to take photo. Please try again.');
+    } catch (error: any) {
+      console.error('[FaceMatch] Verification error:', error);
+      setVerificationState('failed');
+      setErrorMessage('Failed to capture selfie. Please try again.');
+      setFailReasonCode('SELFIE_NO_FACE');
     }
-  };
+  }, [verificationState, userId, photos, isCapturing]);
 
-  const retake = () => {
-    setCaptured(false);
-    setPhotoUri(null);
-  };
+  // =============================================================================
+  // Success Handler - ONLY called when server returns PASS
+  // =============================================================================
 
-  const handleNext = () => {
-    if (!photoUri) {
-      Alert.alert('Photo Required', 'Please take a verification photo to continue.');
-      return;
-    }
+  const handleVerificationSuccess = useCallback(() => {
+    // SECURITY: Only set faceVerificationPassed when server confirms PASS
+    // This cannot be bypassed by the client
+    console.log('[FaceMatch] Setting faceVerificationPassed=true (server confirmed PASS)');
+    setFaceVerificationPassed(true);
+    setFaceVerificationPending(false); // Clear pending flag on success
+    // Navigate to privacy options screen where user can choose display variant
+    setStep('display_privacy');
+    router.push('/(onboarding)/display-privacy' as any);
+  }, [setFaceVerificationPassed, setFaceVerificationPending, setStep, router]);
 
-    // TODO: Send to backend for face verification
+  // =============================================================================
+  // Retry Handler
+  // =============================================================================
+
+  const handleRetry = useCallback(() => {
+    console.log('[FaceMatch] User retrying verification');
+    setVerificationState('waiting');
+    setCapturedFrames([]);
+    setFramesCaptured(0);
+    setErrorMessage(null);
+    setMatchScore(null);
+  }, []);
+
+  // =============================================================================
+  // Pending: Continue to waiting state (profile under review)
+  // =============================================================================
+
+  const handlePendingContinue = useCallback(() => {
+    // Navigate to next step with pending verification status
+    // User can continue onboarding but profile shows "pending" badge
+    console.log('[FaceMatch] User continuing with pending verification (manual review mode)');
+
+    // Mark as pending so user can resume onboarding after app restart
+    setFaceVerificationPending(true);
+
+    // Continue to next step - faceVerificationPassed stays false until admin approves
+    // But we allow user to proceed with onboarding
     setStep('additional_photos');
     router.push('/(onboarding)/additional-photos' as any);
-  };
+  }, [setFaceVerificationPending, setStep, router]);
 
-  if (!permission) {
+  // =============================================================================
+  // Render: Permission not determined
+  // =============================================================================
+
+  if (hasPermission === null) {
     return (
-      <View style={styles.container}>
-        <Text style={styles.title}>Requesting camera permission...</Text>
-      </View>
+      <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
+        <View style={styles.centered}>
+          <ActivityIndicator size="large" color={COLORS.primary} />
+          <Text style={styles.loadingText}>Checking camera permission...</Text>
+        </View>
+      </SafeAreaView>
     );
   }
 
-  if (!permission.granted) {
-    // Show different UI based on whether permission is permanently blocked
-    if (isPermissionBlocked) {
-      return (
-        <View style={styles.container}>
-          <Ionicons name="settings-outline" size={64} color={COLORS.textLight} />
-          <Text style={styles.title}>Camera Access Blocked</Text>
+  // =============================================================================
+  // Render: Permission denied
+  // =============================================================================
+
+  if (!hasPermission || isPermissionBlocked) {
+    return (
+      <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
+        <View style={styles.centered}>
+          <Ionicons name="camera-outline" size={64} color={COLORS.textLight} />
+          <Text style={styles.title}>Camera Permission Required</Text>
           <Text style={styles.subtitle}>
-            Camera permission was denied. Please enable it in your device settings to continue with verification.
+            We need camera access to verify your identity with a selfie.
           </Text>
           <Button
-            title="Open Settings"
+            title={isPermissionBlocked ? "Open Settings" : "Grant Permission"}
             variant="primary"
-            onPress={handleOpenSettings}
+            onPress={isPermissionBlocked ? handleOpenSettings : requestPermission}
             style={styles.permissionButton}
           />
-          <TouchableOpacity
-            style={styles.retryLink}
-            onPress={() => {
-              setIsPermissionBlocked(false);
-              handleGrantPermission();
-            }}
-          >
-            <Text style={styles.retryLinkText}>Try Again</Text>
-          </TouchableOpacity>
         </View>
-      );
-    }
-
-    return (
-      <View style={styles.container}>
-        <Ionicons name="camera-outline" size={64} color={COLORS.textLight} />
-        <Text style={styles.title}>Camera Permission Required</Text>
-        <Text style={styles.subtitle}>
-          We need camera access to verify your identity with a selfie.
-        </Text>
-        <Button
-          title={isCheckingPermission ? "Checking..." : "Grant Permission"}
-          variant="primary"
-          onPress={handleGrantPermission}
-          disabled={isCheckingPermission}
-          style={styles.permissionButton}
-        />
-      </View>
+      </SafeAreaView>
     );
   }
 
-  return (
-    <View style={styles.container}>
-      <Text style={styles.title}>Face Verification</Text>
-      <Text style={styles.subtitle}>
-        Take a selfie to verify your identity. Make sure your face is clearly visible and well-lit.
-      </Text>
+  // =============================================================================
+  // Render: No camera device
+  // =============================================================================
 
-      <View style={styles.cameraContainer}>
-        {!captured ? (
-          <>
-            {/* CameraView must be self-closing with no children (Android requirement) */}
-            <CameraView
-              ref={cameraRef}
-              style={styles.camera}
-              facing={facing}
-              mode="picture"
-            />
-            {/* Overlay sits on top using absolute positioning */}
-            <View style={styles.cameraOverlay} pointerEvents="box-none">
-              <View style={styles.faceGuide} />
+  if (!device) {
+    return (
+      <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
+        <View style={styles.centered}>
+          <Ionicons name="warning-outline" size={64} color={COLORS.error} />
+          <Text style={styles.title}>No Camera Found</Text>
+          <Text style={styles.subtitle}>
+            Unable to find a front camera on this device.
+          </Text>
+        </View>
+      </SafeAreaView>
+    );
+  }
+
+  // =============================================================================
+  // Get subtitle text based on state
+  // =============================================================================
+
+  const getSubtitle = () => {
+    switch (verificationState) {
+      case 'waiting':
+        return 'Position your face in the circle and tap Start';
+      case 'capturing':
+        return `Capturing selfie... ${framesCaptured}/${FRAME_COUNT}`;
+      case 'verifying':
+        return isDemoMode ? 'Verifying your selfie...' : 'Submitting your selfie for review...';
+      case 'success':
+        return isDemoMode ? 'Verified (Demo Mode)' : 'Your identity has been verified!';
+      case 'pending':
+        return 'Profile submitted for manual review';
+      case 'failed':
+        return 'Selfie capture failed';
+      default:
+        return '';
+    }
+  };
+
+  // =============================================================================
+  // Render: Main UI
+  // =============================================================================
+
+  return (
+    <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
+      <View style={styles.content}>
+        <Text style={styles.title}>Face Verification</Text>
+        <Text style={styles.subtitle}>{getSubtitle()}</Text>
+
+        {/* Camera View */}
+        <View style={styles.cameraContainer}>
+          {verificationState !== 'success' && verificationState !== 'failed' && verificationState !== 'pending' ? (
+            <>
+              <Camera
+                ref={cameraRef}
+                style={styles.camera}
+                device={device}
+                isActive={verificationState === 'waiting' || verificationState === 'capturing'}
+                photo={true}
+              />
+              {/* Overlay with circular guide */}
+              <View style={styles.overlay} pointerEvents="none">
+                <Animated.View style={[styles.faceGuide, circleColor]} />
+                {verificationState === 'capturing' && (
+                  <View style={styles.captureIndicator}>
+                    <ActivityIndicator size="small" color={COLORS.white} />
+                    <Text style={styles.captureText}>
+                      {framesCaptured}/{FRAME_COUNT}
+                    </Text>
+                  </View>
+                )}
+              </View>
+            </>
+          ) : (
+            <View style={styles.resultContainer}>
+              {verificationState === 'success' && (
+                <>
+                  <Ionicons name="checkmark-circle" size={80} color={COLORS.success} />
+                  <Text style={styles.resultText}>
+                    {isDemoMode ? 'Verified (Demo)' : 'Identity Verified!'}
+                  </Text>
+                  {matchScore !== null && !isDemoMode && (
+                    <Text style={styles.scoreText}>Match confidence: {matchScore.toFixed(0)}%</Text>
+                  )}
+                  {isDemoMode && (
+                    <Text style={styles.scoreText}>Demo mode - auto-approved</Text>
+                  )}
+                </>
+              )}
+              {verificationState === 'pending' && (
+                <>
+                  <Ionicons name="time-outline" size={80} color={COLORS.warning || '#FFA500'} />
+                  <Text style={styles.resultText}>Profile Under Review</Text>
+                  <Text style={styles.errorText}>
+                    Your selfie has been submitted.{'\n'}Our team will verify your identity shortly.
+                  </Text>
+                </>
+              )}
+              {verificationState === 'failed' && (
+                <>
+                  <Ionicons name="close-circle" size={80} color={COLORS.error} />
+                  <Text style={styles.resultText}>Verification Failed</Text>
+                  <Text style={styles.errorText}>{errorMessage}</Text>
+                  {matchScore !== null && matchScore > 0 && (
+                    <Text style={styles.scoreText}>Match score: {matchScore.toFixed(0)}%</Text>
+                  )}
+                </>
+              )}
+            </View>
+          )}
+
+          {verificationState === 'verifying' && (
+            <View style={styles.verifyingOverlay}>
+              <ActivityIndicator size="large" color={COLORS.white} />
+              <Text style={styles.verifyingText}>Submitting selfie...</Text>
+              <Text style={styles.verifyingSubtext}>This may take a few seconds</Text>
+            </View>
+          )}
+        </View>
+
+        {/* Instructions / Actions */}
+        <View style={styles.footer}>
+          {verificationState === 'waiting' && (
+            <>
               <View style={styles.instructions}>
+                <Text style={styles.instructionTitle}>Tips for best results:</Text>
                 <Text style={styles.instructionText}>
-                  Position your face within the frame
+                  <Ionicons name="sunny" size={14} color={COLORS.textLight} /> Good lighting - face the light source
+                </Text>
+                <Text style={styles.instructionText}>
+                  <Ionicons name="person" size={14} color={COLORS.textLight} /> Face the camera directly
+                </Text>
+                <Text style={styles.instructionText}>
+                  <Ionicons name="glasses-outline" size={14} color={COLORS.textLight} /> Remove sunglasses/hats
+                </Text>
+                <Text style={styles.instructionText}>
+                  <Ionicons name="ellipse-outline" size={14} color={COLORS.textLight} /> Keep your face in the circle
                 </Text>
               </View>
-            </View>
-          </>
-        ) : (
-          <View style={styles.previewContainer}>
-            {photoUri && (
-              <View style={styles.preview}>
-                <Text style={styles.previewText}>Photo captured!</Text>
-                <View style={styles.previewActions}>
-                  <Button
-                    title="Retake"
-                    variant="outline"
-                    onPress={retake}
-                    style={styles.retakeButton}
-                  />
-                  <Button
-                    title="Looks Good"
-                    variant="primary"
-                    onPress={handleNext}
-                    style={styles.confirmButton}
-                  />
-                </View>
-              </View>
-            )}
-          </View>
-        )}
-      </View>
+              <Button
+                title="Start Verification"
+                variant="primary"
+                onPress={startCapture}
+                fullWidth
+                style={{ marginTop: 16 }}
+              />
+            </>
+          )}
 
-      {!captured && (
-        <View style={styles.actions}>
-          <TouchableOpacity
-            style={styles.flipButton}
-            onPress={() => setFacing(facing === 'back' ? 'front' : 'back')}
-          >
-            <Ionicons name="camera-reverse" size={24} color={COLORS.white} />
-          </TouchableOpacity>
-          <TouchableOpacity style={styles.captureButton} onPress={takePicture}>
-            <View style={styles.captureButtonInner} />
-          </TouchableOpacity>
-          <View style={styles.flipButton} />
+          {verificationState === 'failed' && (
+            <>
+              <View style={styles.failedHint}>
+                <Text style={styles.failedHintText}>
+                  Make sure your selfie matches your profile photo. Try better lighting or a different angle.
+                </Text>
+              </View>
+              <Button
+                title="Try Again"
+                variant="primary"
+                onPress={handleRetry}
+                fullWidth
+              />
+            </>
+          )}
+
+          {verificationState === 'pending' && (
+            <>
+              <View style={styles.pendingInfo}>
+                <Text style={styles.pendingInfoText}>
+                  Your profile will show a "Pending" badge until verification is complete. You can continue setting up your profile now.
+                </Text>
+              </View>
+              <Button
+                title="Continue to Profile Setup"
+                variant="primary"
+                onPress={handlePendingContinue}
+                fullWidth
+              />
+              <Button
+                title="Retake Selfie"
+                variant="outline"
+                onPress={handleRetry}
+                fullWidth
+                style={{ marginTop: 8 }}
+              />
+            </>
+          )}
         </View>
-      )}
-    </View>
+      </View>
+    </SafeAreaView>
   );
 }
+
+// =============================================================================
+// Styles
+// =============================================================================
 
 const styles = StyleSheet.create({
   container: {
     flex: 1,
     backgroundColor: COLORS.background,
+  },
+  content: {
+    flex: 1,
+    padding: 20,
+    paddingTop: 8,
+  },
+  centered: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
     padding: 24,
   },
   title: {
-    fontSize: 28,
+    fontSize: 24,
     fontWeight: '700',
     color: COLORS.text,
-    marginBottom: 8,
+    marginBottom: 4,
     textAlign: 'center',
   },
   subtitle: {
-    fontSize: 16,
+    fontSize: 14,
     color: COLORS.textLight,
-    marginBottom: 24,
+    marginBottom: 16,
     textAlign: 'center',
-    lineHeight: 22,
+    lineHeight: 20,
+  },
+  loadingText: {
+    fontSize: 14,
+    color: COLORS.textLight,
+    marginTop: 16,
   },
   cameraContainer: {
     flex: 1,
     borderRadius: 20,
     overflow: 'hidden',
-    marginBottom: 24,
+    backgroundColor: COLORS.backgroundDark,
   },
   camera: {
     flex: 1,
   },
-  cameraOverlay: {
-    // Absolute positioning to sit on top of CameraView
+  overlay: {
     position: 'absolute',
     top: 0,
     left: 0,
     right: 0,
     bottom: 0,
-    backgroundColor: 'transparent',
     justifyContent: 'center',
     alignItems: 'center',
   },
   faceGuide: {
     width: 250,
-    height: 300,
+    height: 320,
     borderRadius: 125,
-    borderWidth: 3,
+    borderWidth: 4,
     borderColor: COLORS.primary,
-    borderStyle: 'dashed',
+    backgroundColor: 'transparent',
   },
-  instructions: {
+  captureIndicator: {
     position: 'absolute',
     bottom: 40,
+    flexDirection: 'row',
+    alignItems: 'center',
     backgroundColor: 'rgba(0,0,0,0.6)',
-    paddingHorizontal: 20,
-    paddingVertical: 12,
+    paddingHorizontal: 16,
+    paddingVertical: 8,
     borderRadius: 20,
+    gap: 8,
   },
-  instructionText: {
+  captureText: {
     color: COLORS.white,
     fontSize: 14,
-    fontWeight: '500',
+    fontWeight: '600',
   },
-  previewContainer: {
+  verifyingOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: 'rgba(0,0,0,0.7)',
+  },
+  verifyingText: {
+    color: COLORS.white,
+    fontSize: 16,
+    fontWeight: '600',
+    marginTop: 12,
+  },
+  verifyingSubtext: {
+    color: COLORS.white,
+    fontSize: 12,
+    opacity: 0.8,
+    marginTop: 4,
+  },
+  resultContainer: {
     flex: 1,
-    backgroundColor: COLORS.backgroundDark,
     justifyContent: 'center',
     alignItems: 'center',
   },
-  preview: {
-    alignItems: 'center',
-  },
-  previewText: {
-    fontSize: 18,
+  resultText: {
+    fontSize: 20,
     fontWeight: '600',
     color: COLORS.text,
-    marginBottom: 24,
+    marginTop: 16,
   },
-  previewActions: {
-    flexDirection: 'row',
-    gap: 12,
+  scoreText: {
+    fontSize: 14,
+    color: COLORS.textLight,
+    marginTop: 4,
   },
-  retakeButton: {
-    minWidth: 120,
+  errorText: {
+    fontSize: 14,
+    color: COLORS.textLight,
+    marginTop: 8,
+    textAlign: 'center',
+    paddingHorizontal: 20,
   },
-  confirmButton: {
-    minWidth: 120,
+  footer: {
+    paddingTop: 16,
   },
-  actions: {
-    flexDirection: 'row',
-    justifyContent: 'space-between',
-    alignItems: 'center',
-    paddingBottom: 24,
-  },
-  flipButton: {
-    width: 56,
-    height: 56,
-    borderRadius: 28,
+  instructions: {
     backgroundColor: COLORS.backgroundDark,
-    alignItems: 'center',
-    justifyContent: 'center',
+    padding: 12,
+    borderRadius: 10,
+    gap: 6,
   },
-  captureButton: {
-    width: 80,
-    height: 80,
-    borderRadius: 40,
-    borderWidth: 4,
-    borderColor: COLORS.white,
-    backgroundColor: 'transparent',
-    alignItems: 'center',
-    justifyContent: 'center',
+  instructionTitle: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: COLORS.text,
+    marginBottom: 4,
   },
-  captureButtonInner: {
-    width: 64,
-    height: 64,
-    borderRadius: 32,
-    backgroundColor: COLORS.white,
+  instructionText: {
+    fontSize: 13,
+    color: COLORS.textLight,
+  },
+  failedHint: {
+    backgroundColor: COLORS.error + '15',
+    padding: 12,
+    borderRadius: 10,
+    marginBottom: 12,
+  },
+  failedHintText: {
+    fontSize: 13,
+    color: COLORS.error,
+    textAlign: 'center',
+  },
+  pendingInfo: {
+    backgroundColor: '#FFA50015',
+    padding: 12,
+    borderRadius: 10,
+    marginBottom: 12,
+  },
+  pendingInfoText: {
+    fontSize: 13,
+    color: '#B8860B',
+    textAlign: 'center',
   },
   permissionButton: {
     marginTop: 24,
-  },
-  retryLink: {
-    marginTop: 16,
-    padding: 12,
-  },
-  retryLinkText: {
-    color: COLORS.primary,
-    fontSize: 15,
-    fontWeight: '500',
+    minWidth: 200,
   },
 });

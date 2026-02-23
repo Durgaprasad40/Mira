@@ -3,11 +3,11 @@ import {
   View,
   Text,
   StyleSheet,
-  ScrollView,
   TouchableOpacity,
   Linking,
   Alert,
 } from "react-native";
+import { SafeAreaView } from "react-native-safe-area-context";
 import { useRouter } from "expo-router";
 import { COLORS } from "@/lib/constants";
 import { Button } from "@/components/ui";
@@ -73,78 +73,80 @@ export default function ConsentScreen() {
   };
 
   return (
-    <ScrollView style={styles.container} contentContainerStyle={styles.content}>
-      <Text style={styles.title}>Data & Privacy</Text>
-      <Text style={styles.subtitle}>
-        Before we continue, please review how Mira uses your data.
-      </Text>
-
-      <View style={styles.card}>
-        <View style={styles.cardHeader}>
-          <Ionicons name="location" size={28} color={COLORS.primary} />
-          <Text style={styles.cardTitle}>Location Data</Text>
-        </View>
-        <Text style={styles.cardDescription}>
-          We collect your location to power the Nearby feature, helping you
-          discover people who cross your path. Your exact location is never
-          shared with other users.
+    <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
+      <View style={styles.content}>
+        <Text style={styles.title}>Data & Privacy</Text>
+        <Text style={styles.subtitle}>
+          Before we continue, please review how Mira uses your data.
         </Text>
-      </View>
 
-      <View style={styles.card}>
-        <View style={styles.cardHeader}>
-          <Ionicons name="camera" size={28} color={COLORS.primary} />
-          <Text style={styles.cardTitle}>Photos</Text>
-        </View>
-        <Text style={styles.cardDescription}>
-          Your photos are used for your profile and identity verification.
-          Verification photos are securely processed and retained only as long
-          as needed.
-        </Text>
-      </View>
-
-      <View style={styles.card}>
-        <View style={styles.cardHeader}>
-          <Ionicons name="shield-checkmark" size={28} color={COLORS.primary} />
-          <Text style={styles.cardTitle}>Your Privacy</Text>
-        </View>
-        <Text style={styles.cardDescription}>
-          We take your privacy seriously. Your data is encrypted, never sold,
-          and you can request deletion at any time.
-        </Text>
-      </View>
-
-      <TouchableOpacity
-        style={styles.checkboxRow}
-        onPress={() => setIsAgreed(!isAgreed)}
-        activeOpacity={0.7}
-      >
-        <View style={[styles.checkbox, isAgreed && styles.checkboxChecked]}>
-          {isAgreed && (
-            <Ionicons name="checkmark" size={16} color={COLORS.white} />
-          )}
-        </View>
-        <Text style={styles.checkboxLabel}>
-          I agree to the collection and use of my data as described above and in
-          the{" "}
-          <Text style={styles.link} onPress={handlePrivacyPolicy}>
-            Privacy Policy
+        <View style={styles.card}>
+          <View style={styles.cardHeader}>
+            <Ionicons name="location" size={24} color={COLORS.primary} />
+            <Text style={styles.cardTitle}>Location Data</Text>
+          </View>
+          <Text style={styles.cardDescription}>
+            We collect your location to power the Nearby feature, helping you
+            discover people who cross your path. Your exact location is never
+            shared with other users.
           </Text>
-          .
-        </Text>
-      </TouchableOpacity>
+        </View>
 
-      <View style={styles.footer}>
-        <Button
-          title="Continue"
-          variant="primary"
-          onPress={handleContinue}
-          disabled={!isAgreed}
-          loading={isSubmitting}
-          fullWidth
-        />
+        <View style={styles.card}>
+          <View style={styles.cardHeader}>
+            <Ionicons name="camera" size={24} color={COLORS.primary} />
+            <Text style={styles.cardTitle}>Photos</Text>
+          </View>
+          <Text style={styles.cardDescription}>
+            Your photos are used for your profile and identity verification.
+            Verification photos are securely processed and retained only as long
+            as needed.
+          </Text>
+        </View>
+
+        <View style={styles.card}>
+          <View style={styles.cardHeader}>
+            <Ionicons name="shield-checkmark" size={24} color={COLORS.primary} />
+            <Text style={styles.cardTitle}>Your Privacy</Text>
+          </View>
+          <Text style={styles.cardDescription}>
+            We take your privacy seriously. Your data is encrypted, never sold,
+            and you can request deletion at any time.
+          </Text>
+        </View>
+
+        <TouchableOpacity
+          style={styles.checkboxRow}
+          onPress={() => setIsAgreed(!isAgreed)}
+          activeOpacity={0.7}
+        >
+          <View style={[styles.checkbox, isAgreed && styles.checkboxChecked]}>
+            {isAgreed && (
+              <Ionicons name="checkmark" size={16} color={COLORS.white} />
+            )}
+          </View>
+          <Text style={styles.checkboxLabel}>
+            I agree to the collection and use of my data as described above and in
+            the{" "}
+            <Text style={styles.link} onPress={handlePrivacyPolicy}>
+              Privacy Policy
+            </Text>
+            .
+          </Text>
+        </TouchableOpacity>
+
+        <View style={styles.footer}>
+          <Button
+            title="Continue"
+            variant="primary"
+            onPress={handleContinue}
+            disabled={!isAgreed}
+            loading={isSubmitting}
+            fullWidth
+          />
+        </View>
       </View>
-    </ScrollView>
+    </SafeAreaView>
   );
 }
 
@@ -154,52 +156,53 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.background,
   },
   content: {
-    padding: 24,
+    flex: 1,
+    padding: 20,
+    paddingTop: 8,
   },
   title: {
-    fontSize: 28,
+    fontSize: 24,
     fontWeight: "700",
     color: COLORS.text,
-    marginBottom: 8,
+    marginBottom: 4,
   },
   subtitle: {
-    fontSize: 16,
+    fontSize: 14,
     color: COLORS.textLight,
-    marginBottom: 24,
-    lineHeight: 22,
+    marginBottom: 16,
+    lineHeight: 20,
   },
   card: {
     backgroundColor: COLORS.backgroundDark,
-    borderRadius: 16,
-    padding: 20,
-    marginBottom: 16,
+    borderRadius: 12,
+    padding: 14,
+    marginBottom: 10,
   },
   cardHeader: {
     flexDirection: "row",
     alignItems: "center",
-    gap: 12,
-    marginBottom: 12,
+    gap: 10,
+    marginBottom: 6,
   },
   cardTitle: {
-    fontSize: 18,
+    fontSize: 16,
     fontWeight: "600",
     color: COLORS.text,
   },
   cardDescription: {
-    fontSize: 14,
+    fontSize: 13,
     color: COLORS.textLight,
-    lineHeight: 20,
+    lineHeight: 18,
   },
   checkboxRow: {
     flexDirection: "row",
     alignItems: "flex-start",
-    gap: 12,
-    marginTop: 8,
-    marginBottom: 24,
+    gap: 10,
+    marginTop: 6,
   },
   checkbox: {
-    width: 24,
-    height: 24,
+    width: 22,
+    height: 22,
     borderRadius: 6,
     borderWidth: 2,
     borderColor: COLORS.border,
@@ -214,15 +217,16 @@ const styles = StyleSheet.create({
   },
   checkboxLabel: {
     flex: 1,
-    fontSize: 14,
+    fontSize: 13,
     color: COLORS.text,
-    lineHeight: 20,
+    lineHeight: 18,
   },
   link: {
     color: COLORS.primary,
     textDecorationLine: "underline",
   },
   footer: {
-    marginTop: 8,
+    marginTop: "auto",
+    paddingTop: 12,
   },
 });

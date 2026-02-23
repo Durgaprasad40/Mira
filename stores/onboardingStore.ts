@@ -15,6 +15,9 @@ import {
   PetType,
 } from "@/types";
 
+// Display photo privacy variant
+export type DisplayPhotoVariant = 'original' | 'blurred' | 'cartoon';
+
 // OB-1: Hydration timing for timeout fallback
 const ONBOARDING_STORE_LOAD_TIME = Date.now();
 
@@ -24,10 +27,12 @@ interface OnboardingState {
   phone: string;
   password: string;
   name: string;
+  nickname: string; // User ID / handle
   dateOfBirth: string;
   gender: Gender | null;
   photos: string[];
   verificationPhotoUri: string | null;
+  displayPhotoVariant: DisplayPhotoVariant; // Privacy option: original, blurred, or cartoon
   bio: string;
   profilePrompts: { question: string; answer: string }[];
   height: number | null;
@@ -55,12 +60,14 @@ interface OnboardingState {
   setPhone: (phone: string) => void;
   setPassword: (password: string) => void;
   setName: (name: string) => void;
+  setNickname: (nickname: string) => void;
   setDateOfBirth: (dob: string) => void;
   setGender: (gender: Gender) => void;
   addPhoto: (uri: string) => void;
   removePhoto: (index: number) => void;
   reorderPhotos: (photos: string[]) => void;
   setVerificationPhoto: (uri: string | null) => void;
+  setDisplayPhotoVariant: (variant: DisplayPhotoVariant) => void;
   setBio: (bio: string) => void;
   setProfilePrompts: (prompts: { question: string; answer: string }[]) => void;
   setHeight: (height: number | null) => void;
@@ -98,10 +105,12 @@ const initialState = {
   phone: "",
   password: "",
   name: "",
+  nickname: "",
   dateOfBirth: "",
   gender: null,
   photos: [],
   verificationPhotoUri: null,
+  displayPhotoVariant: 'original' as DisplayPhotoVariant,
   bio: "",
   profilePrompts: [],
   height: null,
@@ -142,6 +151,8 @@ export const useOnboardingStore = create<OnboardingState>()(
 
       setName: (name) => set({ name }),
 
+      setNickname: (nickname) => set({ nickname }),
+
       setDateOfBirth: (dateOfBirth) => set({ dateOfBirth }),
 
       setGender: (gender) => set({ gender }),
@@ -160,6 +171,8 @@ export const useOnboardingStore = create<OnboardingState>()(
       reorderPhotos: (photos) => set({ photos }),
 
       setVerificationPhoto: (uri) => set({ verificationPhotoUri: uri }),
+
+      setDisplayPhotoVariant: (displayPhotoVariant) => set({ displayPhotoVariant }),
 
       setBio: (bio) => set({ bio }),
 
