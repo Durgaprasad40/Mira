@@ -10,6 +10,7 @@ import {
   Platform,
   TextInput,
   Keyboard,
+  useWindowDimensions,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
@@ -49,6 +50,14 @@ export default function PreferencesScreen() {
   } = useOnboardingStore();
   const router = useRouter();
   const scrollRef = useRef<ScrollView>(null);
+  const { width: screenWidth } = useWindowDimensions();
+
+  // Calculate interest chip width for 3-column layout
+  // Screen padding: 24px each side, gap: 4px between items (2 gaps for 3 cols)
+  const contentPadding = 48; // 24 * 2
+  const gapSize = 4;
+  const numColumns = 3;
+  const interestChipWidth = (screenWidth - contentPadding - gapSize * (numColumns - 1)) / numColumns;
 
   // Keyboard height state for Android
   const [keyboardHeight, setKeyboardHeight] = useState(0);
@@ -215,7 +224,11 @@ export default function PreferencesScreen() {
           {ACTIVITY_FILTERS.map((activity) => (
             <TouchableOpacity
               key={activity.value}
-              style={[styles.interestChip, activities.includes(activity.value) && styles.interestChipSelected]}
+              style={[
+                styles.interestChip,
+                { width: interestChipWidth },
+                activities.includes(activity.value) && styles.interestChipSelected
+              ]}
               onPress={() => handleActivityToggle(activity.value)}
               activeOpacity={0.7}
             >
@@ -389,29 +402,30 @@ const styles = StyleSheet.create({
   interestsGrid: {
     flexDirection: 'row',
     flexWrap: 'wrap',
-    gap: 6,
+    gap: 4,
   },
   interestChip: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: 10,
-    paddingVertical: 6,
+    paddingHorizontal: 8,
+    paddingVertical: 5,
     borderRadius: 16,
     backgroundColor: COLORS.backgroundDark,
     borderWidth: 1,
     borderColor: COLORS.border,
-    gap: 4,
+    gap: 3,
   },
   interestChipSelected: {
     backgroundColor: COLORS.primary,
     borderColor: COLORS.primary,
   },
   interestEmoji: {
-    fontSize: 14,
+    fontSize: 13,
   },
   interestLabel: {
-    fontSize: 12,
+    fontSize: 11,
     color: COLORS.text,
+    flexShrink: 1,
   },
   interestLabelSelected: {
     color: COLORS.white,
