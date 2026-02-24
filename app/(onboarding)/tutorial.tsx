@@ -186,6 +186,7 @@ export default function TutorialScreen() {
             onPress={handleNext}
             fullWidth
             style={styles.nextButton}
+            textStyle={styles.nextButtonText}
           />
         </View>
       </LinearGradient>
@@ -286,5 +287,8 @@ const styles = StyleSheet.create({
   },
   nextButton: {
     backgroundColor: COLORS.white,
+  },
+  nextButtonText: {
+    color: COLORS.primary,
   },
 });
