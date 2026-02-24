@@ -90,11 +90,11 @@ export default function PromptsScreen() {
     router.push('/(onboarding)/profile-details' as any);
   };
 
-  // POST-VERIFICATION: Previous goes back
+  // Previous goes back to consent
   const handlePrevious = () => {
-    if (__DEV__) console.log('[ONB] prompts → bio (previous)');
-    setStep('bio');
-    router.push('/(onboarding)/bio' as any);
+    if (__DEV__) console.log('[ONB] prompts → consent (previous)');
+    setStep('consent');
+    router.push('/(onboarding)/consent' as any);
   };
 
   return (

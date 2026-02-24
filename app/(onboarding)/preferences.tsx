@@ -210,9 +210,9 @@ export default function PreferencesScreen() {
     }
 
     setShowTopError(false);
-    if (__DEV__) console.log('[ONB] preferences → permissions (continue)');
-    setStep('permissions');
-    router.push('/(onboarding)/permissions' as any);
+    if (__DEV__) console.log('[ONB] preferences → display-privacy (continue)');
+    setStep('display_privacy');
+    router.push('/(onboarding)/display-privacy' as any);
   };
 
   // POST-VERIFICATION: Previous goes back

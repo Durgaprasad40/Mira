@@ -45,9 +45,9 @@ export default function BioScreen() {
     // TODO: Profanity filter check
     // TODO: Link detection check
 
-    if (__DEV__) console.log('[ONB] bio → prompts (continue)');
-    setStep('prompts');
-    router.push('/(onboarding)/prompts' as any);
+    if (__DEV__) console.log('[ONB] bio → permissions (continue)');
+    setStep('permissions');
+    router.push('/(onboarding)/permissions' as any);
   };
 
   // Clear field error when user types

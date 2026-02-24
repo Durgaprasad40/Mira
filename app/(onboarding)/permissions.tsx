@@ -62,9 +62,9 @@ export default function PermissionsScreen() {
 
   // POST-VERIFICATION: Previous goes back
   const handlePrevious = () => {
-    if (__DEV__) console.log('[ONB] permissions → preferences (previous)');
-    setStep("preferences");
-    router.push("/(onboarding)/preferences");
+    if (__DEV__) console.log('[ONB] permissions → bio (previous)');
+    setStep("bio");
+    router.push("/(onboarding)/bio");
   };
 
   return (

@@ -268,9 +268,9 @@ export default function FaceVerificationScreen() {
     console.log('[FaceMatch] Setting faceVerificationPassed=true (server confirmed PASS)');
     setFaceVerificationPassed(true);
     setFaceVerificationPending(false); // Clear pending flag on success
-    // Navigate to privacy options screen where user can choose display variant
-    setStep('display_privacy');
-    router.push('/(onboarding)/display-privacy' as any);
+    // Navigate to additional photos
+    setStep('additional_photos');
+    router.push('/(onboarding)/additional-photos' as any);
   }, [setFaceVerificationPassed, setFaceVerificationPending, setStep, router]);
 
   // =============================================================================

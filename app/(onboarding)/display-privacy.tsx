@@ -114,9 +114,9 @@ export default function DisplayPrivacyScreen() {
 
       console.log(`[DisplayPrivacy] User selected variant: ${selectedVariant}`);
 
-      // Navigate to additional photos
-      setStep('additional_photos');
-      router.push('/(onboarding)/additional-photos' as any);
+      // Navigate to photo upload
+      setStep('photo_upload');
+      router.push('/(onboarding)/photo-upload' as any);
     } catch (error) {
       console.error('[DisplayPrivacy] Error:', error);
       Alert.alert('Error', 'Something went wrong. Please try again.');

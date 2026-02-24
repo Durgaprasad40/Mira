@@ -64,8 +64,8 @@ export default function ConsentScreen() {
         }
       }
 
-      setStep("photo_upload");
-      router.push("/(onboarding)/photo-upload" as any);
+      setStep("prompts");
+      router.push("/(onboarding)/prompts" as any);
     } catch (error: any) {
       Alert.alert("Error", error.message || "Failed to save consent");
     } finally {
