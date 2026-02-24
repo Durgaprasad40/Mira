@@ -1,5 +1,6 @@
 import React, { useState } from 'react';
 import { View, Text, StyleSheet } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { COLORS } from '@/lib/constants';
 import { Button } from '@/components/ui';
@@ -35,6 +36,7 @@ export default function ManualVerificationScreen() {
   // STRICT: After submit, show waiting screen and do NOT proceed
   if (submitted) {
     return (
+      <SafeAreaView style={styles.safeArea} edges={['top']}>
       <View style={styles.container}>
         <Ionicons name="time-outline" size={80} color={COLORS.primary} />
         <Text style={styles.title}>Review in Progress</Text>
@@ -58,10 +60,12 @@ export default function ManualVerificationScreen() {
           style={styles.retryButton}
         />
       </View>
+      </SafeAreaView>
     );
   }
 
   return (
+    <SafeAreaView style={styles.safeArea} edges={['top']}>
     <View style={styles.container}>
       <Ionicons name="person-circle-outline" size={80} color={COLORS.textLight} />
 
@@ -99,10 +103,15 @@ export default function ManualVerificationScreen() {
         />
       </View>
     </View>
+    </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
+  safeArea: {
+    flex: 1,
+    backgroundColor: COLORS.background,
+  },
   container: {
     flex: 1,
     backgroundColor: COLORS.background,
