@@ -52,10 +52,10 @@ export default function PreferencesScreen() {
   const scrollRef = useRef<ScrollView>(null);
   const { width: screenWidth } = useWindowDimensions();
 
-  // Calculate interest chip width: 2 columns default, 3 columns for wide screens (>=420px)
+  // Calculate interest chip width: 3 columns default, 2 for narrow screens (<360px)
   const contentPadding = 48; // 24px * 2
-  const gapSize = 8;
-  const numColumns = screenWidth >= 420 ? 3 : 2;
+  const gapSize = 6;
+  const numColumns = screenWidth < 360 ? 2 : 3;
   const interestChipWidth = (screenWidth - contentPadding - gapSize * (numColumns - 1)) / numColumns;
 
   // Keyboard height state for Android
@@ -235,6 +235,7 @@ export default function PreferencesScreen() {
               <Text
                 style={[styles.interestLabel, activities.includes(activity.value) && styles.interestLabelSelected]}
                 numberOfLines={1}
+                ellipsizeMode="tail"
               >
                 {activity.label}
               </Text>
@@ -401,14 +402,15 @@ const styles = StyleSheet.create({
   interestsGrid: {
     flexDirection: 'row',
     flexWrap: 'wrap',
-    gap: 8,
+    gap: 6,
   },
   interestChip: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: 10,
-    paddingVertical: 6,
-    borderRadius: 16,
+    justifyContent: 'center',
+    paddingHorizontal: 8,
+    paddingVertical: 8,
+    borderRadius: 999,
     backgroundColor: COLORS.backgroundDark,
     borderWidth: 1,
     borderColor: COLORS.border,
@@ -419,11 +421,12 @@ const styles = StyleSheet.create({
     borderColor: COLORS.primary,
   },
   interestEmoji: {
-    fontSize: 14,
+    fontSize: 13,
   },
   interestLabel: {
-    fontSize: 13,
+    fontSize: 12,
     color: COLORS.text,
+    flexShrink: 1,
   },
   interestLabelSelected: {
     color: COLORS.white,
