@@ -15,6 +15,13 @@ import {
   GENDER_OPTIONS,
   RELATIONSHIP_INTENTS,
   ACTIVITY_FILTERS,
+  SMOKING_OPTIONS,
+  DRINKING_OPTIONS,
+  KIDS_OPTIONS,
+  EXERCISE_OPTIONS,
+  PETS_OPTIONS,
+  EDUCATION_OPTIONS,
+  RELIGION_OPTIONS,
 } from "@/lib/constants";
 import { Button } from "@/components/ui";
 import { useOnboardingStore } from "@/stores/onboardingStore";
@@ -304,6 +311,15 @@ export default function ReviewScreen() {
     router.push(`/(onboarding)/${step}` as any);
   };
 
+  // Filter valid photos for display
+  const validPhotos = photos.filter((uri): uri is string => uri !== null && uri !== '');
+
+  // Helper to get label from options array
+  const getLabel = (options: { value: string; label: string }[], value: string | null) => {
+    if (!value) return null;
+    return options.find((o) => o.value === value)?.label ?? value;
+  };
+
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.content}>
       <Text style={styles.title}>Review Your Profile</Text>
@@ -311,6 +327,7 @@ export default function ReviewScreen() {
         Make sure everything looks good before you start matching!
       </Text>
 
+      {/* Photos Section */}
       <View style={styles.section}>
         <View style={styles.sectionHeader}>
           <Text style={styles.sectionTitle}>Photos</Text>
@@ -318,17 +335,22 @@ export default function ReviewScreen() {
             <Text style={styles.editLink}>Edit</Text>
           </TouchableOpacity>
         </View>
-        <ScrollView
-          horizontal
-          showsHorizontalScrollIndicator={false}
-          style={styles.photosScroll}
-        >
-          {photos.filter((uri): uri is string => uri !== null && uri !== '').map((uri, index) => (
-            <Image key={index} source={{ uri }} style={styles.photoThumbnail} />
-          ))}
-        </ScrollView>
+        {validPhotos.length > 0 ? (
+          <ScrollView
+            horizontal
+            showsHorizontalScrollIndicator={false}
+            style={styles.photosScroll}
+          >
+            {validPhotos.map((uri, index) => (
+              <Image key={index} source={{ uri }} style={styles.photoThumbnail} />
+            ))}
+          </ScrollView>
+        ) : (
+          <Text style={styles.emptyText}>No photos added</Text>
+        )}
       </View>
 
+      {/* Basic Info Section */}
       <View style={styles.section}>
         <View style={styles.sectionHeader}>
           <Text style={styles.sectionTitle}>Basic Info</Text>
@@ -338,7 +360,7 @@ export default function ReviewScreen() {
         </View>
         <View style={styles.infoRow}>
           <Text style={styles.infoLabel}>Name:</Text>
-          <Text style={styles.infoValue}>{name}</Text>
+          <Text style={styles.infoValue}>{name || "Not set"}</Text>
         </View>
         <View style={styles.infoRow}>
           <Text style={styles.infoLabel}>Age:</Text>
@@ -346,34 +368,190 @@ export default function ReviewScreen() {
             {dateOfBirth ? calculateAge(dateOfBirth) : "N/A"}
           </Text>
         </View>
-        {gender && (
-          <View style={styles.infoRow}>
-            <Text style={styles.infoLabel}>Gender:</Text>
-            <Text style={styles.infoValue}>
-              {GENDER_OPTIONS.find((g) => g.value === gender)?.label}
-            </Text>
-          </View>
-        )}
+        <View style={styles.infoRow}>
+          <Text style={styles.infoLabel}>Gender:</Text>
+          <Text style={styles.infoValue}>
+            {gender ? GENDER_OPTIONS.find((g) => g.value === gender)?.label : "Not set"}
+          </Text>
+        </View>
         {height && (
           <View style={styles.infoRow}>
             <Text style={styles.infoLabel}>Height:</Text>
             <Text style={styles.infoValue}>{height} cm</Text>
           </View>
         )}
+        {weight && (
+          <View style={styles.infoRow}>
+            <Text style={styles.infoLabel}>Weight:</Text>
+            <Text style={styles.infoValue}>{weight} kg</Text>
+          </View>
+        )}
       </View>
 
-      {bio && (
+      {/* Profile Details Section */}
+      {(jobTitle || company || school || education || religion) && (
         <View style={styles.section}>
           <View style={styles.sectionHeader}>
-            <Text style={styles.sectionTitle}>Bio</Text>
-            <TouchableOpacity onPress={() => handleEdit("bio")}>
+            <Text style={styles.sectionTitle}>Profile Details</Text>
+            <TouchableOpacity onPress={() => handleEdit("profile-details")}>
               <Text style={styles.editLink}>Edit</Text>
             </TouchableOpacity>
           </View>
-          <Text style={styles.bioText}>{bio}</Text>
+          {jobTitle && (
+            <View style={styles.infoRow}>
+              <Text style={styles.infoLabel}>Job Title:</Text>
+              <Text style={styles.infoValue}>{jobTitle}</Text>
+            </View>
+          )}
+          {company && (
+            <View style={styles.infoRow}>
+              <Text style={styles.infoLabel}>Company:</Text>
+              <Text style={styles.infoValue}>{company}</Text>
+            </View>
+          )}
+          {school && (
+            <View style={styles.infoRow}>
+              <Text style={styles.infoLabel}>School:</Text>
+              <Text style={styles.infoValue}>{school}</Text>
+            </View>
+          )}
+          {education && (
+            <View style={styles.infoRow}>
+              <Text style={styles.infoLabel}>Education:</Text>
+              <Text style={styles.infoValue}>{getLabel(EDUCATION_OPTIONS, education)}</Text>
+            </View>
+          )}
+          {religion && (
+            <View style={styles.infoRow}>
+              <Text style={styles.infoLabel}>Religion:</Text>
+              <Text style={styles.infoValue}>{getLabel(RELIGION_OPTIONS, religion)}</Text>
+            </View>
+          )}
         </View>
       )}
 
+      {/* Lifestyle Section */}
+      {(smoking || drinking || kids || exercise || pets.length > 0) && (
+        <View style={styles.section}>
+          <View style={styles.sectionHeader}>
+            <Text style={styles.sectionTitle}>Lifestyle</Text>
+            <TouchableOpacity onPress={() => handleEdit("profile-details/lifestyle")}>
+              <Text style={styles.editLink}>Edit</Text>
+            </TouchableOpacity>
+          </View>
+          {smoking && (
+            <View style={styles.infoRow}>
+              <Text style={styles.infoLabel}>Smoking:</Text>
+              <Text style={styles.infoValue}>{getLabel(SMOKING_OPTIONS, smoking)}</Text>
+            </View>
+          )}
+          {drinking && (
+            <View style={styles.infoRow}>
+              <Text style={styles.infoLabel}>Drinking:</Text>
+              <Text style={styles.infoValue}>{getLabel(DRINKING_OPTIONS, drinking)}</Text>
+            </View>
+          )}
+          {kids && (
+            <View style={styles.infoRow}>
+              <Text style={styles.infoLabel}>Kids:</Text>
+              <Text style={styles.infoValue}>{getLabel(KIDS_OPTIONS, kids)}</Text>
+            </View>
+          )}
+          {exercise && (
+            <View style={styles.infoRow}>
+              <Text style={styles.infoLabel}>Exercise:</Text>
+              <Text style={styles.infoValue}>{getLabel(EXERCISE_OPTIONS, exercise)}</Text>
+            </View>
+          )}
+          {pets.length > 0 && (
+            <View style={styles.infoRow}>
+              <Text style={styles.infoLabel}>Pets:</Text>
+              <Text style={styles.infoValue}>
+                {pets.map((p) => PETS_OPTIONS.find((o) => o.value === p)?.label ?? p).join(", ")}
+              </Text>
+            </View>
+          )}
+        </View>
+      )}
+
+      {/* Bio Section */}
+      <View style={styles.section}>
+        <View style={styles.sectionHeader}>
+          <Text style={styles.sectionTitle}>Bio</Text>
+          <TouchableOpacity onPress={() => handleEdit("bio")}>
+            <Text style={styles.editLink}>Edit</Text>
+          </TouchableOpacity>
+        </View>
+        <Text style={styles.bioText}>{bio || "No bio added"}</Text>
+      </View>
+
+      {/* Prompts Section */}
+      {profilePrompts.length > 0 && (
+        <View style={styles.section}>
+          <View style={styles.sectionHeader}>
+            <Text style={styles.sectionTitle}>Prompts</Text>
+            <TouchableOpacity onPress={() => handleEdit("prompts")}>
+              <Text style={styles.editLink}>Edit</Text>
+            </TouchableOpacity>
+          </View>
+          {profilePrompts.map((prompt, index) => (
+            <View key={index} style={styles.promptItem}>
+              <Text style={styles.promptQuestion}>{prompt.question}</Text>
+              <Text style={styles.promptAnswer}>{prompt.answer}</Text>
+            </View>
+          ))}
+        </View>
+      )}
+
+      {/* Relationship Intent Section */}
+      {relationshipIntent.length > 0 && (
+        <View style={styles.section}>
+          <View style={styles.sectionHeader}>
+            <Text style={styles.sectionTitle}>Relationship Goals</Text>
+            <TouchableOpacity onPress={() => handleEdit("preferences")}>
+              <Text style={styles.editLink}>Edit</Text>
+            </TouchableOpacity>
+          </View>
+          <View style={styles.chipsContainer}>
+            {relationshipIntent.map((intent) => {
+              const intentObj = RELATIONSHIP_INTENTS.find((r) => r.value === intent);
+              return (
+                <View key={intent} style={styles.chip}>
+                  <Text style={styles.chipText}>
+                    {intentObj?.emoji} {intentObj?.label}
+                  </Text>
+                </View>
+              );
+            })}
+          </View>
+        </View>
+      )}
+
+      {/* Interests Section */}
+      {activities.length > 0 && (
+        <View style={styles.section}>
+          <View style={styles.sectionHeader}>
+            <Text style={styles.sectionTitle}>Interests</Text>
+            <TouchableOpacity onPress={() => handleEdit("preferences")}>
+              <Text style={styles.editLink}>Edit</Text>
+            </TouchableOpacity>
+          </View>
+          <View style={styles.chipsContainer}>
+            {activities.map((activity) => {
+              const activityObj = ACTIVITY_FILTERS.find((a) => a.value === activity);
+              return (
+                <View key={activity} style={styles.chip}>
+                  <Text style={styles.chipText}>
+                    {activityObj?.emoji} {activityObj?.label}
+                  </Text>
+                </View>
+              );
+            })}
+          </View>
+        </View>
+      )}
+
+      {/* Looking For Section */}
       <View style={styles.section}>
         <View style={styles.sectionHeader}>
           <Text style={styles.sectionTitle}>Looking For</Text>
@@ -381,15 +559,19 @@ export default function ReviewScreen() {
             <Text style={styles.editLink}>Edit</Text>
           </TouchableOpacity>
         </View>
-        <View style={styles.chipsContainer}>
-          {lookingFor.map((gender) => (
-            <View key={gender} style={styles.chip}>
-              <Text style={styles.chipText}>
-                {GENDER_OPTIONS.find((g) => g.value === gender)?.label}
-              </Text>
-            </View>
-          ))}
-        </View>
+        {lookingFor.length > 0 ? (
+          <View style={styles.chipsContainer}>
+            {lookingFor.map((g) => (
+              <View key={g} style={styles.chip}>
+                <Text style={styles.chipText}>
+                  {GENDER_OPTIONS.find((opt) => opt.value === g)?.label}
+                </Text>
+              </View>
+            ))}
+          </View>
+        ) : (
+          <Text style={styles.emptyText}>Not specified</Text>
+        )}
         <Text style={styles.preferenceText}>
           Age: {minAge} - {maxAge} years
         </Text>
@@ -398,6 +580,7 @@ export default function ReviewScreen() {
         </Text>
       </View>
 
+      {/* Footer */}
       <View style={styles.footer}>
         {uploadProgress ? (
           <Text style={styles.progressText}>{uploadProgress}</Text>
@@ -492,6 +675,26 @@ const styles = StyleSheet.create({
     color: COLORS.text,
     lineHeight: 22,
     marginTop: 8,
+  },
+  emptyText: {
+    fontSize: 14,
+    color: COLORS.textMuted,
+    fontStyle: "italic",
+    marginTop: 8,
+  },
+  promptItem: {
+    marginBottom: 12,
+  },
+  promptQuestion: {
+    fontSize: 13,
+    fontWeight: "600",
+    color: COLORS.textLight,
+    marginBottom: 4,
+  },
+  promptAnswer: {
+    fontSize: 15,
+    color: COLORS.text,
+    lineHeight: 20,
   },
   chipsContainer: {
     flexDirection: "row",
