@@ -19,6 +19,7 @@ import { Input, Button } from '@/components/ui';
 import { Toast } from '@/components/ui/Toast';
 import { useOnboardingStore } from '@/stores/onboardingStore';
 import type { Gender, ActivityFilter, RelationshipIntent } from '@/types';
+import { OnboardingProgressHeader } from '@/components/OnboardingProgressHeader';
 
 // Age range constraints
 const MIN_AGE_LIMIT = 18;
@@ -225,6 +226,7 @@ export default function PreferencesScreen() {
 
   return (
     <SafeAreaView style={styles.safeArea} edges={['top']}>
+    <OnboardingProgressHeader />
     <KeyboardAvoidingView
       style={styles.keyboardAvoid}
       behavior={Platform.OS === 'ios' ? 'padding' : undefined}

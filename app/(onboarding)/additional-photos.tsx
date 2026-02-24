@@ -17,6 +17,7 @@ import { COLORS } from '@/lib/constants';
 import { Button } from '@/components/ui';
 import { useOnboardingStore } from '@/stores/onboardingStore';
 import { Ionicons } from '@expo/vector-icons';
+import { OnboardingProgressHeader } from '@/components/OnboardingProgressHeader';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 
@@ -244,6 +245,7 @@ export default function AdditionalPhotosScreen() {
 
   return (
     <SafeAreaView style={styles.safeArea} edges={['top', 'left', 'right']}>
+      <OnboardingProgressHeader />
       <View style={styles.container}>
         {/* Header */}
         <Text style={styles.title}>Add more photos</Text>

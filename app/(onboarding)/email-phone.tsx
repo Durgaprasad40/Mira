@@ -9,6 +9,7 @@ import { useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { useOnboardingStore } from '@/stores/onboardingStore';
 import { useAuthStore } from '@/stores/authStore';
+import { OnboardingProgressHeader } from '@/components/OnboardingProgressHeader';
 
 type AuthMethod = 'email' | 'phone' | 'apple' | 'google';
 
@@ -161,7 +162,8 @@ export default function EmailPhoneScreen() {
   };
 
   return (
-    <View style={[styles.container, { paddingTop: insets.top + 16 }]}>
+    <View style={[styles.container, { paddingTop: insets.top }]}>
+      <OnboardingProgressHeader />
       <Text style={styles.title}>How do you want to sign in?</Text>
       <Text style={styles.subtitle}>
         Choose your preferred method to create or access your account.

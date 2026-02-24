@@ -11,6 +11,7 @@ import { useRouter } from "expo-router";
 import { COLORS } from "@/lib/constants";
 import { Input, Button } from "@/components/ui";
 import { useOnboardingStore } from "@/stores/onboardingStore";
+import { OnboardingProgressHeader } from "@/components/OnboardingProgressHeader";
 
 export default function ProfileDetailsBasicScreen() {
   const {
@@ -42,6 +43,7 @@ export default function ProfileDetailsBasicScreen() {
 
   return (
     <SafeAreaView style={styles.safeArea} edges={["top"]}>
+      <OnboardingProgressHeader />
       <ScrollView
         style={styles.container}
         contentContainerStyle={[

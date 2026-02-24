@@ -7,6 +7,7 @@ import {
   TouchableOpacity,
   Alert,
 } from "react-native";
+import { SafeAreaView } from "react-native-safe-area-context";
 import { useRouter, Redirect } from "expo-router";
 import { COLORS, VALIDATION } from "@/lib/constants";
 import { Button } from "@/components/ui";
@@ -15,6 +16,7 @@ import { useMutation } from "convex/react";
 import { api } from "@/convex/_generated/api";
 import { useAuthStore } from "@/stores/authStore";
 import { useDemoStore } from "@/stores/demoStore";
+import { OnboardingProgressHeader } from "@/components/OnboardingProgressHeader";
 
 // ============================================================================
 // DEV MODE: Skip OTP entirely – auto-redirect to password step
@@ -135,7 +137,9 @@ export default function OTPScreen() {
   };
 
   return (
+    <SafeAreaView style={styles.safeArea} edges={['top']}>
     <View style={styles.container}>
+      <OnboardingProgressHeader />
       <Text style={styles.title}>Enter verification code</Text>
       <Text style={styles.subtitle}>
         We sent a {VALIDATION.OTP_LENGTH}-digit code to{"\n"}
@@ -186,10 +190,15 @@ export default function OTPScreen() {
         />
       </View>
     </View>
+    </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
+  safeArea: {
+    flex: 1,
+    backgroundColor: COLORS.background,
+  },
   container: {
     flex: 1,
     backgroundColor: COLORS.background,
@@ -200,7 +209,6 @@ const styles = StyleSheet.create({
     fontWeight: "700",
     color: COLORS.text,
     marginBottom: 8,
-    marginTop: 40,
   },
   subtitle: {
     fontSize: 16,

@@ -14,6 +14,7 @@ import { useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { Id } from '@/convex/_generated/dataModel';
 import { isDemoMode, convex } from '@/hooks/useConvex';
+import { OnboardingProgressHeader } from '@/components/OnboardingProgressHeader';
 
 export default function PhotoUploadScreen() {
   const { photos, reorderPhotos, setStep, setVerificationPhoto } = useOnboardingStore();
@@ -224,6 +225,7 @@ export default function PhotoUploadScreen() {
 
   return (
     <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
+      <OnboardingProgressHeader />
       <ScrollView style={styles.scrollView} contentContainerStyle={styles.content}>
         <Text style={styles.title}>Upload your verification photo</Text>
         <Text style={styles.subtitle}>

@@ -8,12 +8,14 @@ import {
   Alert,
   Platform,
 } from "react-native";
+import { SafeAreaView } from "react-native-safe-area-context";
 import { useRouter } from "expo-router";
 import * as Location from "expo-location";
 import { COLORS } from "@/lib/constants";
 import { Button } from "@/components/ui";
 import { useOnboardingStore } from "@/stores/onboardingStore";
 import { Ionicons } from "@expo/vector-icons";
+import { OnboardingProgressHeader } from "@/components/OnboardingProgressHeader";
 
 export default function PermissionsScreen() {
   const { setStep } = useOnboardingStore();
@@ -66,6 +68,8 @@ export default function PermissionsScreen() {
   };
 
   return (
+    <SafeAreaView style={styles.safeArea} edges={['top']}>
+    <OnboardingProgressHeader />
     <ScrollView style={styles.container} contentContainerStyle={styles.content}>
       <Text style={styles.title}>Enable Permissions</Text>
       <Text style={styles.subtitle}>
@@ -131,10 +135,15 @@ export default function PermissionsScreen() {
         </View>
       </View>
     </ScrollView>
+    </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
+  safeArea: {
+    flex: 1,
+    backgroundColor: COLORS.background,
+  },
   container: {
     flex: 1,
     backgroundColor: COLORS.background,

@@ -10,7 +10,9 @@ import {
   ActivityIndicator,
   TextInput,
 } from "react-native";
+import { SafeAreaView } from "react-native-safe-area-context";
 import { useRouter, useLocalSearchParams } from "expo-router";
+import { OnboardingProgressHeader } from "@/components/OnboardingProgressHeader";
 import { COLORS, VALIDATION, GENDER_OPTIONS } from "@/lib/constants";
 import { Input, Button } from "@/components/ui";
 import { useOnboardingStore } from "@/stores/onboardingStore";
@@ -430,6 +432,8 @@ export default function BasicInfoScreen() {
   }
 
   return (
+    <SafeAreaView style={styles.safeArea} edges={['top']}>
+    <OnboardingProgressHeader />
     <ScrollView
       ref={scrollRef}
       style={styles.container}
@@ -607,10 +611,15 @@ export default function BasicInfoScreen() {
         />
       </View>
     </ScrollView>
+    </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
+  safeArea: {
+    flex: 1,
+    backgroundColor: COLORS.background,
+  },
   container: {
     flex: 1,
     backgroundColor: COLORS.background,

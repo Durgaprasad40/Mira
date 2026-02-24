@@ -15,6 +15,7 @@ import {
 } from "@/lib/constants";
 import { Button } from "@/components/ui";
 import { useOnboardingStore } from "@/stores/onboardingStore";
+import { OnboardingProgressHeader } from "@/components/OnboardingProgressHeader";
 
 export default function ProfileDetailsEducationReligionScreen() {
   const {
@@ -39,6 +40,7 @@ export default function ProfileDetailsEducationReligionScreen() {
 
   return (
     <SafeAreaView style={styles.safeArea} edges={["top"]}>
+      <OnboardingProgressHeader />
       <ScrollView
         style={styles.container}
         contentContainerStyle={[

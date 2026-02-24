@@ -16,6 +16,7 @@ import { Button } from '@/components/ui';
 import { useOnboardingStore } from '@/stores/onboardingStore';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { processPhotoVariant, PhotoVariant } from '@/services/photoPrivacy';
+import { OnboardingProgressHeader } from '@/components/OnboardingProgressHeader';
 
 // =============================================================================
 // Types
@@ -134,6 +135,7 @@ export default function DisplayPrivacyScreen() {
 
   return (
     <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
+      <OnboardingProgressHeader />
       <ScrollView style={styles.scrollView} contentContainerStyle={styles.content}>
         {/* Header */}
         <View style={styles.header}>

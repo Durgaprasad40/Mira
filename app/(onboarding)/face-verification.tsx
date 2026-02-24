@@ -22,6 +22,7 @@ import { useAuthStore } from '@/stores/authStore';
 import { Ionicons } from '@expo/vector-icons';
 import { verifyFace, type CapturedFrame, type FaceMatchStatus, type FaceMatchReasonCode } from '@/services/faceVerification';
 import { isDemoMode } from '@/hooks/useConvex';
+import { OnboardingProgressHeader } from '@/components/OnboardingProgressHeader';
 
 // =============================================================================
 // Constants
@@ -389,6 +390,7 @@ export default function FaceVerificationScreen() {
 
   return (
     <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
+      <OnboardingProgressHeader />
       <View style={styles.content}>
         <Text style={styles.title}>Face Verification</Text>
         <Text style={styles.subtitle}>{getSubtitle()}</Text>

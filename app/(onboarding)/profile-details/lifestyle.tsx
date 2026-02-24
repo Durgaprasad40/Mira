@@ -21,6 +21,7 @@ import {
 import { Button } from "@/components/ui";
 import { useOnboardingStore } from "@/stores/onboardingStore";
 import { ExerciseStatus, PetType, InsectType } from "@/types";
+import { OnboardingProgressHeader } from "@/components/OnboardingProgressHeader";
 
 export default function ProfileDetailsLifestyleScreen() {
   const {
@@ -66,6 +67,7 @@ export default function ProfileDetailsLifestyleScreen() {
 
   return (
     <SafeAreaView style={styles.safeArea} edges={["top"]}>
+      <OnboardingProgressHeader />
       <ScrollView
         style={styles.container}
         contentContainerStyle={[

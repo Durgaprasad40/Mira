@@ -33,6 +33,7 @@ import { Ionicons } from "@expo/vector-icons";
 import { Id } from "@/convex/_generated/dataModel";
 import { isDemoMode } from "@/hooks/useConvex";
 import { useDemoStore } from "@/stores/demoStore";
+import { OnboardingProgressHeader } from "@/components/OnboardingProgressHeader";
 
 /**
  * Parse "YYYY-MM-DD" string to local Date object.
@@ -323,6 +324,7 @@ export default function ReviewScreen() {
 
   return (
     <SafeAreaView style={styles.safeArea} edges={["top"]}>
+    <OnboardingProgressHeader />
     <ScrollView style={styles.container} contentContainerStyle={styles.content}>
       <Text style={styles.title}>Review Your Profile</Text>
       <Text style={styles.subtitle}>

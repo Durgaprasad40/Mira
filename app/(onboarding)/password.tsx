@@ -10,6 +10,7 @@ import { useQuery } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { isDemoMode } from '@/hooks/useConvex';
 import { useDemoStore } from '@/stores/demoStore';
+import { OnboardingProgressHeader } from '@/components/OnboardingProgressHeader';
 
 export default function PasswordScreen() {
   const { email, setEmail, password, setPassword, setStep } = useOnboardingStore();
@@ -144,6 +145,7 @@ export default function PasswordScreen() {
 
   return (
     <SafeAreaView style={styles.safeArea} edges={['top']}>
+    <OnboardingProgressHeader />
     <ScrollView style={styles.container} contentContainerStyle={styles.content}>
       <Text style={styles.title}>Create your account</Text>
       <Text style={styles.subtitle}>

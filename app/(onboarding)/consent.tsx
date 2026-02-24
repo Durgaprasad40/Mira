@@ -19,6 +19,7 @@ import { api } from "@/convex/_generated/api";
 import { isDemoMode } from "@/hooks/useConvex";
 import { useDemoStore } from "@/stores/demoStore";
 import { Id } from "@/convex/_generated/dataModel";
+import { OnboardingProgressHeader } from "@/components/OnboardingProgressHeader";
 
 const PRIVACY_POLICY_URL = "https://mira.app/privacy"; // Placeholder
 
@@ -74,6 +75,7 @@ export default function ConsentScreen() {
 
   return (
     <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
+      <OnboardingProgressHeader />
       <View style={styles.content}>
         <Text style={styles.title}>Data & Privacy</Text>
         <Text style={styles.subtitle}>

@@ -7,6 +7,7 @@ import {
   Dimensions,
   TouchableOpacity,
 } from "react-native";
+import { SafeAreaView } from "react-native-safe-area-context";
 import { useRouter } from "expo-router";
 import { COLORS, SWIPE_CONFIG } from "@/lib/constants";
 import { Button } from "@/components/ui";
@@ -17,6 +18,7 @@ import { LinearGradient } from "expo-linear-gradient";
 import { isDemoMode } from "@/hooks/useConvex";
 import { useDemoStore } from "@/stores/demoStore";
 import { useDemoDmStore } from "@/stores/demoDmStore";
+import { OnboardingProgressHeader } from "@/components/OnboardingProgressHeader";
 
 const { width } = Dimensions.get("window");
 
@@ -90,6 +92,8 @@ export default function TutorialScreen() {
   };
 
   return (
+    <SafeAreaView style={styles.safeArea} edges={['top']}>
+    <OnboardingProgressHeader />
     <View style={styles.container}>
       <LinearGradient
         colors={[COLORS.primary, COLORS.secondary]}
@@ -183,10 +187,15 @@ export default function TutorialScreen() {
         </View>
       </LinearGradient>
     </View>
+    </SafeAreaView>
   );
 }
 
 const styles = StyleSheet.create({
+  safeArea: {
+    flex: 1,
+    backgroundColor: COLORS.background,
+  },
   container: {
     flex: 1,
   },

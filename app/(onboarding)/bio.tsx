@@ -6,6 +6,7 @@ import { COLORS, VALIDATION } from '@/lib/constants';
 import { Button } from '@/components/ui';
 import { useOnboardingStore } from '@/stores/onboardingStore';
 import { validateRequired, scrollToFirstInvalid, createRules } from '@/lib/onboardingValidation';
+import { OnboardingProgressHeader } from '@/components/OnboardingProgressHeader';
 
 export default function BioScreen() {
   const { bio, setBio, setStep } = useOnboardingStore();
@@ -75,6 +76,7 @@ export default function BioScreen() {
 
   return (
     <SafeAreaView style={styles.safeArea} edges={['top']}>
+    <OnboardingProgressHeader />
     <ScrollView ref={scrollRef} style={styles.container} contentContainerStyle={styles.content}>
       {/* Top error banner */}
       {showTopError && (
