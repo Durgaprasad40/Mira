@@ -1,25 +1,45 @@
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
 import { View, Text, StyleSheet, ScrollView, TextInput, TouchableOpacity } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { COLORS, VALIDATION } from '@/lib/constants';
 import { Button } from '@/components/ui';
 import { useOnboardingStore } from '@/stores/onboardingStore';
+import { validateRequired, scrollToFirstInvalid, createRules } from '@/lib/onboardingValidation';
 
 export default function BioScreen() {
   const { bio, setBio, setStep } = useOnboardingStore();
   const router = useRouter();
-  const [error, setError] = useState('');
+  const [errors, setErrors] = useState<Record<string, string>>({});
+  const [showTopError, setShowTopError] = useState(false);
+
+  // Refs for scroll-to-invalid behavior
+  const scrollRef = useRef<ScrollView>(null);
+  const bioInputRef = useRef<TextInput>(null);
+
+  // Validation rules
+  const validationRules = {
+    bio: createRules.combine(
+      createRules.minLength(VALIDATION.BIO_MIN_LENGTH, 'Bio'),
+      createRules.maxLength(VALIDATION.BIO_MAX_LENGTH, 'Bio')
+    ),
+  };
 
   const handleNext = () => {
-    if (!bio || bio.trim().length < VALIDATION.BIO_MIN_LENGTH) {
-      setError(`Bio must be at least ${VALIDATION.BIO_MIN_LENGTH} characters`);
+    // Run validation
+    const result = validateRequired({ bio }, validationRules);
+
+    if (!result.ok) {
+      setErrors(result.errors as Record<string, string>);
+      setShowTopError(true);
+      // Scroll to first invalid field
+      scrollToFirstInvalid(scrollRef, { bio: bioInputRef }, result.firstInvalidKey as string);
       return;
     }
-    if (bio.length > VALIDATION.BIO_MAX_LENGTH) {
-      setError(`Bio must be no more than ${VALIDATION.BIO_MAX_LENGTH} characters`);
-      return;
-    }
+
+    // Clear errors and proceed
+    setErrors({});
+    setShowTopError(false);
 
     // TODO: Profanity filter check
     // TODO: Link detection check
@@ -27,6 +47,15 @@ export default function BioScreen() {
     if (__DEV__) console.log('[ONB] bio → prompts (continue)');
     setStep('prompts');
     router.push('/(onboarding)/prompts' as any);
+  };
+
+  // Clear field error when user types
+  const handleBioChange = (text: string) => {
+    setBio(text);
+    if (errors.bio) {
+      setErrors((prev) => ({ ...prev, bio: '' }));
+      setShowTopError(false);
+    }
   };
 
   // POST-VERIFICATION: Previous goes back (within post-verify screens only)
@@ -46,7 +75,14 @@ export default function BioScreen() {
 
   return (
     <SafeAreaView style={styles.safeArea} edges={['top']}>
-    <ScrollView style={styles.container} contentContainerStyle={styles.content}>
+    <ScrollView ref={scrollRef} style={styles.container} contentContainerStyle={styles.content}>
+      {/* Top error banner */}
+      {showTopError && (
+        <View style={styles.topErrorBanner}>
+          <Text style={styles.topErrorText}>Please complete highlighted fields.</Text>
+        </View>
+      )}
+
       <Text style={styles.title}>Write your bio</Text>
       <Text style={styles.subtitle}>
         Tell people about yourself. What makes you unique?
@@ -54,12 +90,10 @@ export default function BioScreen() {
 
       <View style={styles.inputContainer}>
         <TextInput
-          style={styles.input}
+          ref={bioInputRef}
+          style={[styles.input, errors.bio ? styles.inputError : null]}
           value={bio}
-          onChangeText={(text) => {
-            setBio(text);
-            setError('');
-          }}
+          onChangeText={handleBioChange}
           placeholder="Write a few sentences about yourself..."
           multiline
           numberOfLines={6}
@@ -71,9 +105,9 @@ export default function BioScreen() {
             {bio.length}/{VALIDATION.BIO_MAX_LENGTH}
           </Text>
         </View>
+        {/* Inline field error */}
+        {errors.bio ? <Text style={styles.fieldError}>{errors.bio}</Text> : null}
       </View>
-
-      {error ? <Text style={styles.error}>{error}</Text> : null}
 
       <View style={styles.tipsContainer}>
         <Text style={styles.tipsTitle}>Tips for a great bio:</Text>
@@ -90,7 +124,6 @@ export default function BioScreen() {
           title="Continue"
           variant="primary"
           onPress={handleNext}
-          disabled={bio.length < VALIDATION.BIO_MIN_LENGTH}
           fullWidth
         />
         <View style={styles.navRow}>
@@ -153,10 +186,28 @@ const styles = StyleSheet.create({
   charCountWarning: {
     color: COLORS.error,
   },
-  error: {
+  topErrorBanner: {
+    backgroundColor: COLORS.error + '15',
+    borderWidth: 1,
+    borderColor: COLORS.error + '40',
+    borderRadius: 8,
+    padding: 12,
+    marginBottom: 16,
+  },
+  topErrorText: {
     fontSize: 14,
     color: COLORS.error,
-    marginBottom: 16,
+    fontWeight: '500',
+    textAlign: 'center',
+  },
+  inputError: {
+    borderColor: COLORS.error,
+    borderWidth: 2,
+  },
+  fieldError: {
+    fontSize: 13,
+    color: COLORS.error,
+    marginTop: 6,
   },
   tipsContainer: {
     backgroundColor: COLORS.backgroundDark,
