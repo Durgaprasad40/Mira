@@ -157,12 +157,14 @@ export default function ReviewScreen() {
         // to ensure user sees the tutorial before being marked complete.
         setUploadProgress("Saving profile...");
         const demoStore = useDemoStore.getState();
+        // Filter out null slots for display/storage
+        const validPhotos = photos.filter((p): p is string => p !== null && p !== '');
         demoStore.saveDemoProfile(userId, {
           name,
           dateOfBirth,
           gender: gender ?? undefined,
           bio,
-          photos: photos.map((uri) => ({ url: uri })),
+          photos: validPhotos.map((uri) => ({ url: uri })),
           height,
           weight,
           smoking,
@@ -193,11 +195,14 @@ export default function ReviewScreen() {
       const photoStorageIds: Id<"_storage">[] = [];
       let failedUploads = 0;
 
-      if (photos.length > 0) {
+      // Filter out null slots for upload
+      const photosToUpload = photos.filter((p): p is string => p !== null && p !== '');
+
+      if (photosToUpload.length > 0) {
         setUploadProgress("Uploading photos...");
-        for (let i = 0; i < photos.length; i++) {
-          setUploadProgress(`Uploading photo ${i + 1} of ${photos.length}...`);
-          const storageId = await uploadPhoto(photos[i]);
+        for (let i = 0; i < photosToUpload.length; i++) {
+          setUploadProgress(`Uploading photo ${i + 1} of ${photosToUpload.length}...`);
+          const storageId = await uploadPhoto(photosToUpload[i]);
           if (storageId) {
             photoStorageIds.push(storageId);
           } else {
@@ -315,7 +320,7 @@ export default function ReviewScreen() {
           showsHorizontalScrollIndicator={false}
           style={styles.photosScroll}
         >
-          {photos.map((uri, index) => (
+          {photos.filter((uri): uri is string => uri !== null && uri !== '').map((uri, index) => (
             <Image key={index} source={{ uri }} style={styles.photoThumbnail} />
           ))}
         </ScrollView>

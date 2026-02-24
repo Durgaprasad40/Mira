@@ -41,7 +41,8 @@ export default function DisplayPrivacyScreen() {
   const [isProcessing, setIsProcessing] = useState(false);
   const [previewUri, setPreviewUri] = useState<string | null>(null);
 
-  const profilePhoto = photos[0];
+  // Get first non-null photo for display
+  const profilePhoto = photos[0] ?? null;
 
   // Privacy options
   const privacyOptions: PrivacyOption[] = [
@@ -123,12 +124,12 @@ export default function DisplayPrivacyScreen() {
     }
   };
 
-  // Get display image URI
-  const getDisplayUri = () => {
+  // Get display image URI (returns string for rendering, empty string if no photo)
+  const getDisplayUri = (): string => {
     if (selectedVariant === 'blurred' && previewUri) {
       return previewUri;
     }
-    return profilePhoto;
+    return profilePhoto ?? '';
   };
 
   return (

@@ -18,6 +18,36 @@ import {
 // Display photo privacy variant
 export type DisplayPhotoVariant = 'original' | 'blurred' | 'cartoon';
 
+/**
+ * Normalize photos array to exactly 9 slots.
+ * - Missing/undefined input => Array(9).fill(null)
+ * - string[] (old data) => copy into slots, fill remaining with null
+ * - (string|null)[] shorter than 9 => pad with null
+ * - Longer than 9 => slice(0,9)
+ * - Convert any undefined/'' to null
+ */
+function normalizePhotos(input: unknown): (string | null)[] {
+  // Handle missing/undefined/non-array
+  if (!input || !Array.isArray(input)) {
+    return Array(9).fill(null);
+  }
+
+  // Normalize each slot: convert undefined/'' to null, keep valid strings
+  const normalized: (string | null)[] = input.slice(0, 9).map((item) => {
+    if (typeof item === 'string' && item.length > 0) {
+      return item;
+    }
+    return null;
+  });
+
+  // Pad to exactly 9 slots if shorter
+  while (normalized.length < 9) {
+    normalized.push(null);
+  }
+
+  return normalized;
+}
+
 // OB-1: Hydration timing for timeout fallback
 const ONBOARDING_STORE_LOAD_TIME = Date.now();
 
@@ -30,7 +60,7 @@ interface OnboardingState {
   nickname: string; // User ID / handle
   dateOfBirth: string;
   gender: Gender | null;
-  photos: string[];
+  photos: (string | null)[];
   verificationPhotoUri: string | null;
   displayPhotoVariant: DisplayPhotoVariant; // Privacy option: original, blurred, or cartoon
   bio: string;
@@ -64,8 +94,9 @@ interface OnboardingState {
   setDateOfBirth: (dob: string) => void;
   setGender: (gender: Gender) => void;
   addPhoto: (uri: string) => void;
+  setPhotoAtIndex: (index: number, uri: string) => void;
   removePhoto: (index: number) => void;
-  reorderPhotos: (photos: string[]) => void;
+  reorderPhotos: (photos: (string | null)[]) => void;
   setVerificationPhoto: (uri: string | null) => void;
   setDisplayPhotoVariant: (variant: DisplayPhotoVariant) => void;
   setBio: (bio: string) => void;
@@ -108,7 +139,7 @@ const initialState = {
   nickname: "",
   dateOfBirth: "",
   gender: null,
-  photos: [],
+  photos: [null, null, null, null, null, null, null, null, null] as (string | null)[],
   verificationPhotoUri: null,
   displayPhotoVariant: 'original' as DisplayPhotoVariant,
   bio: "",
@@ -157,18 +188,36 @@ export const useOnboardingStore = create<OnboardingState>()(
 
       setGender: (gender) => set({ gender }),
 
+      // Add photo to first available empty slot
       addPhoto: (uri) =>
-        set((state) => ({
-          photos:
-            state.photos.length < 6 ? [...state.photos, uri] : state.photos,
-        })),
+        set((state) => {
+          const newPhotos = [...state.photos];
+          const emptyIndex = newPhotos.findIndex((p) => p === null || p === '');
+          if (emptyIndex !== -1) {
+            newPhotos[emptyIndex] = uri;
+          }
+          return { photos: newPhotos };
+        }),
 
+      // Set photo at specific slot index (no shifting, fixed slots)
+      setPhotoAtIndex: (index, uri) =>
+        set((state) => {
+          if (index < 0 || index >= 9) return state;
+          const newPhotos = [...state.photos];
+          newPhotos[index] = uri;
+          return { photos: newPhotos };
+        }),
+
+      // Clear photo at specific slot (no shifting, fixed slots)
       removePhoto: (index) =>
-        set((state) => ({
-          photos: state.photos.filter((_, i) => i !== index),
-        })),
+        set((state) => {
+          if (index < 0 || index >= 9) return state;
+          const newPhotos = [...state.photos];
+          newPhotos[index] = null;
+          return { photos: newPhotos };
+        }),
 
-      reorderPhotos: (photos) => set({ photos }),
+      reorderPhotos: (photos) => set({ photos: normalizePhotos(photos) }),
 
       setVerificationPhoto: (uri) => set({ verificationPhotoUri: uri }),
 
@@ -256,6 +305,11 @@ export const useOnboardingStore = create<OnboardingState>()(
         if (__DEV__) {
           const hydrationTime = Date.now() - ONBOARDING_STORE_LOAD_TIME;
           console.log(`[HYDRATION] onboardingStore: ${hydrationTime}ms`);
+        }
+        // Normalize photos array from persisted data (handles old string[] format, undefined slots, etc.)
+        if (state) {
+          const normalized = normalizePhotos(state.photos);
+          useOnboardingStore.setState({ photos: normalized });
         }
         state?.setHasHydrated(true);
       },
