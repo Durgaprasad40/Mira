@@ -52,7 +52,12 @@ export default function PreferencesScreen() {
   const router = useRouter();
   const scrollRef = useRef<ScrollView>(null);
   const distanceSectionRef = useRef<View>(null);
+  const interestsSectionRef = useRef<View>(null);
   const { width: screenWidth } = useWindowDimensions();
+
+  // Interests validation state
+  const [showTopError, setShowTopError] = useState(false);
+  const [interestsError, setInterestsError] = useState('');
 
   // Calculate interest chip width: 3 columns default, 2 for narrow screens (<360px)
   const contentPadding = 48; // 24px * 2
@@ -146,6 +151,11 @@ export default function PreferencesScreen() {
       return;
     }
     toggleActivity(activity);
+    // Clear error when user selects at least 1 interest
+    if (!isSelected && interestsError) {
+      setInterestsError('');
+      setShowTopError(false);
+    }
   };
 
   const handleNext = () => {
@@ -153,11 +163,21 @@ export default function PreferencesScreen() {
       Alert.alert('Required', 'Please select who you\'re looking for');
       return;
     }
-    if (activities.length < MIN_INTERESTS) {
-      Alert.alert('Required', `Please select at least ${MIN_INTERESTS} interests`);
+    // Validate interests: require at least 1
+    if (activities.length < 1) {
+      setInterestsError('Select at least 1 interest to continue.');
+      setShowTopError(true);
+      // Scroll to interests section
+      interestsSectionRef.current?.measureLayout(
+        scrollRef.current?.getInnerViewNode() as any,
+        (_x, y) => scrollRef.current?.scrollTo({ y: y - 100, animated: true }),
+        () => {}
+      );
       return;
     }
 
+    setInterestsError('');
+    setShowTopError(false);
     if (__DEV__) console.log('[ONB] preferences → permissions (continue)');
     setStep('permissions');
     router.push('/(onboarding)/permissions' as any);
@@ -170,7 +190,7 @@ export default function PreferencesScreen() {
     router.push('/(onboarding)/profile-details' as any);
   };
 
-  const canContinue = lookingFor.length > 0 && activities.length >= MIN_INTERESTS;
+  const canContinue = lookingFor.length > 0 && activities.length >= 1;
 
   return (
     <SafeAreaView style={styles.safeArea} edges={['top']}>
@@ -185,6 +205,11 @@ export default function PreferencesScreen() {
       contentContainerStyle={[styles.content, { paddingBottom: 24 + keyboardHeight }]}
       keyboardShouldPersistTaps="handled"
     >
+      {showTopError && (
+        <View style={styles.topErrorBanner}>
+          <Text style={styles.topErrorText}>Please complete highlighted fields.</Text>
+        </View>
+      )}
       <Text style={styles.title}>Match Preferences</Text>
       <Text style={styles.subtitle}>
         Tell us what you're looking for. You can change these anytime.
@@ -227,17 +252,17 @@ export default function PreferencesScreen() {
         </View>
       </View>
 
-      <View style={styles.section}>
+      <View ref={interestsSectionRef} style={styles.section}>
         <View style={styles.interestsHeader}>
           <Text style={styles.sectionTitle}>Interests</Text>
           <Text style={[
             styles.interestsCounter,
-            activities.length >= MIN_INTERESTS && styles.interestsCounterValid
+            activities.length >= 1 && styles.interestsCounterValid
           ]}>
             {activities.length}/{MAX_INTERESTS} selected
           </Text>
         </View>
-        <View style={styles.interestsGrid}>
+        <View style={[styles.interestsGrid, interestsError ? styles.interestsGridError : null]}>
           {ACTIVITY_FILTERS.map((activity) => (
             <TouchableOpacity
               key={activity.value}
@@ -260,6 +285,7 @@ export default function PreferencesScreen() {
             </TouchableOpacity>
           ))}
         </View>
+        {interestsError ? <Text style={styles.fieldError}>{interestsError}</Text> : null}
       </View>
 
       <View style={styles.section}>
@@ -358,6 +384,32 @@ const styles = StyleSheet.create({
   },
   section: {
     marginBottom: 32,
+  },
+  topErrorBanner: {
+    backgroundColor: COLORS.error + '15',
+    borderWidth: 1,
+    borderColor: COLORS.error + '40',
+    borderRadius: 8,
+    padding: 12,
+    marginBottom: 16,
+  },
+  topErrorText: {
+    fontSize: 14,
+    color: COLORS.error,
+    fontWeight: '500',
+    textAlign: 'center',
+  },
+  fieldError: {
+    fontSize: 13,
+    color: COLORS.error,
+    marginTop: 8,
+  },
+  interestsGridError: {
+    borderRadius: 12,
+    borderWidth: 2,
+    borderColor: COLORS.error,
+    padding: 4,
+    margin: -4,
   },
   sectionTitle: {
     fontSize: 18,
