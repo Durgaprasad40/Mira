@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useRef } from 'react';
 import {
   View,
   Text,
@@ -13,6 +13,7 @@ import { COLORS, PROFILE_PROMPT_QUESTIONS } from '@/lib/constants';
 import { Button } from '@/components/ui';
 import { useOnboardingStore } from '@/stores/onboardingStore';
 import { Ionicons } from '@expo/vector-icons';
+import { scrollToFirstInvalid } from '@/lib/onboardingValidation';
 
 const MAX_PROMPTS = 3;
 const MAX_ANSWER_LENGTH = 200;
@@ -26,6 +27,12 @@ export default function PromptsScreen() {
   );
   const [editingIndex, setEditingIndex] = useState<number | null>(null);
   const [showPicker, setShowPicker] = useState(false);
+  const [showTopError, setShowTopError] = useState(false);
+  const [promptsError, setPromptsError] = useState('');
+
+  // Refs for scroll-to-invalid behavior
+  const scrollRef = useRef<ScrollView>(null);
+  const promptsSectionRef = useRef<View>(null);
 
   const usedQuestions = prompts.map((p) => p.question);
   const availableQuestions = PROFILE_PROMPT_QUESTIONS.filter(
@@ -43,6 +50,11 @@ export default function PromptsScreen() {
     const updated = [...prompts];
     updated[index] = { ...updated[index], answer };
     setPrompts(updated);
+    // Clear error when user types an answer
+    if (answer.trim().length > 0 && promptsError) {
+      setPromptsError('');
+      setShowTopError(false);
+    }
   };
 
   const handleDeletePrompt = (index: number) => {
@@ -54,9 +66,23 @@ export default function PromptsScreen() {
     }
   };
 
+  // Count prompts with non-empty answers (trimmed)
   const filledPrompts = prompts.filter((p) => p.answer.trim().length > 0);
 
   const handleNext = () => {
+    // Validate: at least 1 prompt must be answered
+    if (filledPrompts.length < 1) {
+      setPromptsError('Answer at least 1 prompt to continue.');
+      setShowTopError(true);
+      // Scroll to prompts section
+      scrollToFirstInvalid(scrollRef, { prompts: promptsSectionRef }, 'prompts');
+      return;
+    }
+
+    // Clear errors and proceed
+    setPromptsError('');
+    setShowTopError(false);
+
     if (__DEV__) console.log('[ONB] prompts → profile-details (continue)');
     setProfilePrompts(filledPrompts);
     setStep('profile_details');
@@ -72,14 +98,23 @@ export default function PromptsScreen() {
 
   return (
     <SafeAreaView style={styles.safeArea} edges={['top']}>
-    <ScrollView style={styles.container} contentContainerStyle={styles.content}>
+    <ScrollView ref={scrollRef} style={styles.container} contentContainerStyle={styles.content}>
+      {/* Top error banner */}
+      {showTopError && (
+        <View style={styles.topErrorBanner}>
+          <Text style={styles.topErrorText}>Please complete highlighted fields.</Text>
+        </View>
+      )}
+
       <Text style={styles.title}>Profile prompts</Text>
       <Text style={styles.subtitle}>
         Answer prompts to let others know more about you. At least 1 is required, up to 3 max.
       </Text>
 
+      {/* Prompts section with ref for scroll-to */}
+      <View ref={promptsSectionRef}>
       {prompts.map((prompt, index) => (
-        <View key={index} style={styles.promptCard}>
+        <View key={index} style={[styles.promptCard, promptsError ? styles.promptCardError : null]}>
           <View style={styles.promptHeader}>
             <Text style={styles.promptQuestion}>{prompt.question}</Text>
             <TouchableOpacity onPress={() => handleDeletePrompt(index)}>
@@ -108,15 +143,19 @@ export default function PromptsScreen() {
 
       {prompts.length < MAX_PROMPTS && !showPicker && (
         <TouchableOpacity
-          style={styles.addButton}
+          style={[styles.addButton, promptsError ? styles.addButtonError : null]}
           onPress={() => setShowPicker(true)}
         >
-          <Ionicons name="add-circle-outline" size={22} color={COLORS.primary} />
-          <Text style={styles.addButtonText}>
+          <Ionicons name="add-circle-outline" size={22} color={promptsError ? COLORS.error : COLORS.primary} />
+          <Text style={[styles.addButtonText, promptsError ? styles.addButtonTextError : null]}>
             Add a prompt ({prompts.length}/{MAX_PROMPTS})
           </Text>
         </TouchableOpacity>
       )}
+
+      {/* Inline error for prompts section */}
+      {promptsError ? <Text style={styles.fieldError}>{promptsError}</Text> : null}
+      </View>
 
       {showPicker && (
         <View style={styles.pickerContainer}>
@@ -145,7 +184,6 @@ export default function PromptsScreen() {
           title="Continue"
           variant="primary"
           onPress={handleNext}
-          disabled={filledPrompts.length < 1}
           fullWidth
         />
         <View style={styles.navRow}>
@@ -190,6 +228,31 @@ const styles = StyleSheet.create({
     marginBottom: 16,
     borderLeftWidth: 3,
     borderLeftColor: COLORS.primary,
+  },
+  promptCardError: {
+    borderLeftColor: COLORS.error,
+    borderWidth: 1,
+    borderColor: COLORS.error,
+  },
+  topErrorBanner: {
+    backgroundColor: COLORS.error + '15',
+    borderWidth: 1,
+    borderColor: COLORS.error + '40',
+    borderRadius: 8,
+    padding: 12,
+    marginBottom: 16,
+  },
+  topErrorText: {
+    fontSize: 14,
+    color: COLORS.error,
+    fontWeight: '500',
+    textAlign: 'center',
+  },
+  fieldError: {
+    fontSize: 13,
+    color: COLORS.error,
+    marginTop: 4,
+    marginBottom: 8,
   },
   promptHeader: {
     flexDirection: 'row',
@@ -241,6 +304,12 @@ const styles = StyleSheet.create({
     fontSize: 15,
     fontWeight: '600',
     color: COLORS.primary,
+  },
+  addButtonError: {
+    borderColor: COLORS.error,
+  },
+  addButtonTextError: {
+    color: COLORS.error,
   },
   pickerContainer: {
     backgroundColor: COLORS.backgroundDark,
