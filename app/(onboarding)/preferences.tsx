@@ -43,6 +43,7 @@ export default function PreferencesScreen() {
     toggleLookingFor,
     toggleRelationshipIntent,
     toggleActivity,
+    setActivities,
     setMinAge,
     setMaxAge,
     setMaxDistance,
@@ -74,6 +75,16 @@ export default function PreferencesScreen() {
       hideSub.remove();
     };
   }, []);
+
+  // Sanitize interests on mount: remove any "ghost" items not in current ACTIVITY_FILTERS
+  useEffect(() => {
+    const validKeys = new Set(ACTIVITY_FILTERS.map((a) => a.value));
+    const sanitized = activities.filter((item) => validKeys.has(item));
+    if (sanitized.length !== activities.length) {
+      // Ghost items found, update store to remove them
+      setActivities(sanitized as typeof activities);
+    }
+  }, []); // Run only on mount
 
   // Distance clamping handler
   const handleDistanceBlur = () => {
