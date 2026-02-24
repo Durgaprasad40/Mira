@@ -1,4 +1,4 @@
-import React, { useRef } from 'react';
+import React, { useRef, useState, useEffect } from 'react';
 import {
   View,
   Text,
@@ -9,6 +9,7 @@ import {
   KeyboardAvoidingView,
   Platform,
   TextInput,
+  Keyboard,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
@@ -21,6 +22,11 @@ import type { Gender, ActivityFilter } from '@/types';
 // Age range constraints
 const MIN_AGE_LIMIT = 18;
 const MAX_AGE_LIMIT = 70;
+
+// Distance constraints
+const DISTANCE_MIN = 1;
+const DISTANCE_MAX = 75;
+const DISTANCE_DEFAULT = 50;
 
 const MIN_INTERESTS = 3;
 const MAX_INTERESTS = 7;
@@ -43,6 +49,33 @@ export default function PreferencesScreen() {
   } = useOnboardingStore();
   const router = useRouter();
   const scrollRef = useRef<ScrollView>(null);
+
+  // Keyboard height state for Android
+  const [keyboardHeight, setKeyboardHeight] = useState(0);
+
+  useEffect(() => {
+    const showSub = Keyboard.addListener('keyboardDidShow', (e) => {
+      setKeyboardHeight(e.endCoordinates.height);
+    });
+    const hideSub = Keyboard.addListener('keyboardDidHide', () => {
+      setKeyboardHeight(0);
+    });
+    return () => {
+      showSub.remove();
+      hideSub.remove();
+    };
+  }, []);
+
+  // Distance clamping handler
+  const handleDistanceBlur = () => {
+    let val = maxDistance;
+    if (isNaN(val) || val < DISTANCE_MIN) {
+      val = DISTANCE_MIN;
+    } else if (val > DISTANCE_MAX) {
+      val = DISTANCE_MAX;
+    }
+    setMaxDistance(val);
+  };
 
   // Age clamping handlers
   const handleMinAgeBlur = () => {
@@ -123,7 +156,7 @@ export default function PreferencesScreen() {
     <ScrollView
       ref={scrollRef}
       style={styles.container}
-      contentContainerStyle={styles.content}
+      contentContainerStyle={[styles.content, { paddingBottom: 24 + keyboardHeight }]}
       keyboardShouldPersistTaps="handled"
     >
       <Text style={styles.title}>Match Preferences</Text>
@@ -228,10 +261,12 @@ export default function PreferencesScreen() {
 
       <View style={styles.section}>
         <Text style={styles.sectionTitle}>Maximum Distance</Text>
+        <Text style={styles.sectionSubtitle}>{DISTANCE_MIN} - {DISTANCE_MAX} miles</Text>
         <View style={styles.distanceInputWrapper}>
           <TextInput
             value={maxDistance.toString()}
-            onChangeText={(text) => setMaxDistance(parseInt(text) || 50)}
+            onChangeText={(text) => setMaxDistance(parseInt(text) || DISTANCE_DEFAULT)}
+            onBlur={handleDistanceBlur}
             keyboardType="numeric"
             style={styles.distanceTextInput}
             placeholderTextColor={COLORS.textMuted}
@@ -279,7 +314,6 @@ const styles = StyleSheet.create({
   },
   content: {
     padding: 24,
-    paddingBottom: 48,
   },
   title: {
     fontSize: 28,
