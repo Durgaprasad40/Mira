@@ -216,7 +216,7 @@ export default function ReviewScreen() {
       // OB-9 fix: If any photos failed to upload, alert user and allow retry
       if (failedUploads > 0) {
         const uploadedCount = photoStorageIds.length;
-        const totalCount = photos.length;
+        const totalCount = photosToUpload.length;
 
         // At least one photo is required for a profile
         if (uploadedCount === 0) {

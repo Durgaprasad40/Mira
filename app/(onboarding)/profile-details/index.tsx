@@ -30,6 +30,7 @@ export default function ProfileDetailsBasicScreen() {
 
   const handleNext = () => {
     if (__DEV__) console.log('[ONB] profile-details/basic → lifestyle');
+    setStep('profile_details');
     router.push("/(onboarding)/profile-details/lifestyle");
   };
 

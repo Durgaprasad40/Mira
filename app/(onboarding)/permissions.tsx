@@ -43,6 +43,15 @@ export default function PermissionsScreen() {
     }
   };
 
+  const requestNotifications = () => {
+    // expo-notifications not installed - show fallback message
+    Alert.alert(
+      "Notifications",
+      "Notifications permission is not available in this build yet. You can enable notifications later in your device settings.",
+      [{ text: "OK", onPress: () => setNotificationsGranted(true) }]
+    );
+  };
+
   const handleNext = () => {
     if (__DEV__) console.log('[ONB] permissions → review (continue)');
     setStep("review");
@@ -92,6 +101,13 @@ export default function PermissionsScreen() {
             </Text>
           </View>
         </View>
+        <Button
+          title={notificationsGranted ? "Granted ✓" : "Enable Notifications"}
+          variant={notificationsGranted ? "outline" : "primary"}
+          onPress={requestNotifications}
+          disabled={notificationsGranted}
+          style={styles.permissionButton}
+        />
       </View>
 
       <View style={styles.infoBox}>
