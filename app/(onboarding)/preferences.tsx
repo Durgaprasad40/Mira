@@ -1,13 +1,26 @@
-import React from 'react';
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Alert } from 'react-native';
+import React, { useRef } from 'react';
+import {
+  View,
+  Text,
+  StyleSheet,
+  ScrollView,
+  TouchableOpacity,
+  Alert,
+  KeyboardAvoidingView,
+  Platform,
+  TextInput,
+} from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { COLORS, GENDER_OPTIONS, RELATIONSHIP_INTENTS, ACTIVITY_FILTERS } from '@/lib/constants';
 import { Input, Button } from '@/components/ui';
 import { Toast } from '@/components/ui/Toast';
 import { useOnboardingStore } from '@/stores/onboardingStore';
-import { Ionicons } from '@expo/vector-icons';
 import type { Gender, ActivityFilter } from '@/types';
+
+// Age range constraints
+const MIN_AGE_LIMIT = 18;
+const MAX_AGE_LIMIT = 70;
 
 const MIN_INTERESTS = 3;
 const MAX_INTERESTS = 7;
@@ -29,6 +42,36 @@ export default function PreferencesScreen() {
     setStep,
   } = useOnboardingStore();
   const router = useRouter();
+  const scrollRef = useRef<ScrollView>(null);
+
+  // Age clamping handlers
+  const handleMinAgeBlur = () => {
+    let val = minAge;
+    if (isNaN(val) || val < MIN_AGE_LIMIT) {
+      val = MIN_AGE_LIMIT;
+    } else if (val > MAX_AGE_LIMIT) {
+      val = MAX_AGE_LIMIT;
+    }
+    setMinAge(val);
+    // Ensure maxAge >= minAge
+    if (maxAge < val) {
+      setMaxAge(val);
+    }
+  };
+
+  const handleMaxAgeBlur = () => {
+    let val = maxAge;
+    if (isNaN(val) || val < MIN_AGE_LIMIT) {
+      val = MIN_AGE_LIMIT;
+    } else if (val > MAX_AGE_LIMIT) {
+      val = MAX_AGE_LIMIT;
+    }
+    // Ensure maxAge >= minAge
+    if (val < minAge) {
+      val = minAge;
+    }
+    setMaxAge(val);
+  };
 
   const handleActivityToggle = (activity: ActivityFilter) => {
     const isSelected = activities.includes(activity);
@@ -72,7 +115,17 @@ export default function PreferencesScreen() {
 
   return (
     <SafeAreaView style={styles.safeArea} edges={['top']}>
-    <ScrollView style={styles.container} contentContainerStyle={styles.content}>
+    <KeyboardAvoidingView
+      style={styles.keyboardAvoid}
+      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+      keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 0}
+    >
+    <ScrollView
+      ref={scrollRef}
+      style={styles.container}
+      contentContainerStyle={styles.content}
+      keyboardShouldPersistTaps="handled"
+    >
       <Text style={styles.title}>Match Preferences</Text>
       <Text style={styles.subtitle}>
         Tell us what you're looking for. You can change these anytime.
@@ -147,12 +200,14 @@ export default function PreferencesScreen() {
 
       <View style={styles.section}>
         <Text style={styles.sectionTitle}>Age Range</Text>
+        <Text style={styles.sectionSubtitle}>{MIN_AGE_LIMIT} - {MAX_AGE_LIMIT} years</Text>
         <View style={styles.ageRow}>
           <View style={styles.ageInputContainer}>
             <Text style={styles.ageLabel}>Min</Text>
             <Input
               value={minAge.toString()}
-              onChangeText={(text) => setMinAge(parseInt(text) || 18)}
+              onChangeText={(text) => setMinAge(parseInt(text) || MIN_AGE_LIMIT)}
+              onBlur={handleMinAgeBlur}
               keyboardType="numeric"
               style={styles.ageInput}
             />
@@ -162,7 +217,8 @@ export default function PreferencesScreen() {
             <Text style={styles.ageLabel}>Max</Text>
             <Input
               value={maxAge.toString()}
-              onChangeText={(text) => setMaxAge(parseInt(text) || 100)}
+              onChangeText={(text) => setMaxAge(parseInt(text) || MAX_AGE_LIMIT)}
+              onBlur={handleMaxAgeBlur}
               keyboardType="numeric"
               style={styles.ageInput}
             />
@@ -172,14 +228,17 @@ export default function PreferencesScreen() {
 
       <View style={styles.section}>
         <Text style={styles.sectionTitle}>Maximum Distance</Text>
-        <View style={styles.distanceContainer}>
-          <Input
+        <View style={styles.distanceInputWrapper}>
+          <TextInput
             value={maxDistance.toString()}
             onChangeText={(text) => setMaxDistance(parseInt(text) || 50)}
             keyboardType="numeric"
-            style={styles.distanceInput}
+            style={styles.distanceTextInput}
+            placeholderTextColor={COLORS.textMuted}
           />
-          <Text style={styles.distanceUnit}>miles</Text>
+          <View style={styles.distanceSuffixContainer} pointerEvents="none">
+            <Text style={styles.distanceSuffix}>miles</Text>
+          </View>
         </View>
       </View>
 
@@ -201,6 +260,7 @@ export default function PreferencesScreen() {
         </View>
       </View>
     </ScrollView>
+    </KeyboardAvoidingView>
     </SafeAreaView>
   );
 }
@@ -210,12 +270,16 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: COLORS.background,
   },
+  keyboardAvoid: {
+    flex: 1,
+  },
   container: {
     flex: 1,
     backgroundColor: COLORS.background,
   },
   content: {
     padding: 24,
+    paddingBottom: 48,
   },
   title: {
     fontSize: 28,
@@ -341,18 +405,28 @@ const styles = StyleSheet.create({
     color: COLORS.textLight,
     marginTop: 24,
   },
-  distanceContainer: {
+  distanceInputWrapper: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 12,
+    backgroundColor: COLORS.backgroundDark,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+    paddingHorizontal: 16,
+    height: 52,
   },
-  distanceInput: {
+  distanceTextInput: {
     flex: 1,
+    fontSize: 16,
+    color: COLORS.text,
+    paddingVertical: 0,
   },
-  distanceUnit: {
+  distanceSuffixContainer: {
+    marginLeft: 8,
+  },
+  distanceSuffix: {
     fontSize: 16,
     color: COLORS.textLight,
-    marginTop: 24,
   },
   footer: {
     marginTop: 24,
