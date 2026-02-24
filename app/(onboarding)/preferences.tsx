@@ -18,7 +18,7 @@ import { COLORS, GENDER_OPTIONS, RELATIONSHIP_INTENTS, ACTIVITY_FILTERS } from '
 import { Input, Button } from '@/components/ui';
 import { Toast } from '@/components/ui/Toast';
 import { useOnboardingStore } from '@/stores/onboardingStore';
-import type { Gender, ActivityFilter } from '@/types';
+import type { Gender, ActivityFilter, RelationshipIntent } from '@/types';
 
 // Age range constraints
 const MIN_AGE_LIMIT = 18;
@@ -53,11 +53,13 @@ export default function PreferencesScreen() {
   const scrollRef = useRef<ScrollView>(null);
   const distanceSectionRef = useRef<View>(null);
   const interestsSectionRef = useRef<View>(null);
+  const relationshipIntentSectionRef = useRef<View>(null);
   const { width: screenWidth } = useWindowDimensions();
 
-  // Interests validation state
+  // Validation state
   const [showTopError, setShowTopError] = useState(false);
   const [interestsError, setInterestsError] = useState('');
+  const [relationshipIntentError, setRelationshipIntentError] = useState('');
 
   // Calculate interest chip width: 3 columns default, 2 for narrow screens (<360px)
   const contentPadding = 48; // 24px * 2
@@ -154,7 +156,17 @@ export default function PreferencesScreen() {
     // Clear error when user selects at least 1 interest
     if (!isSelected && interestsError) {
       setInterestsError('');
-      setShowTopError(false);
+      if (!relationshipIntentError) setShowTopError(false);
+    }
+  };
+
+  const handleRelationshipIntentToggle = (intentValue: RelationshipIntent) => {
+    toggleRelationshipIntent(intentValue);
+    // Clear error when user selects at least 1 intent
+    const isSelected = relationshipIntent.includes(intentValue);
+    if (!isSelected && relationshipIntentError) {
+      setRelationshipIntentError('');
+      if (!interestsError) setShowTopError(false);
     }
   };
 
@@ -163,12 +175,32 @@ export default function PreferencesScreen() {
       Alert.alert('Required', 'Please select who you\'re looking for');
       return;
     }
+
+    let hasError = false;
+    let firstErrorRef: React.RefObject<View | null> | null = null;
+
+    // Validate relationship intent: require at least 1
+    if (relationshipIntent.length < 1) {
+      setRelationshipIntentError('Select a relationship goal to continue.');
+      hasError = true;
+      if (!firstErrorRef) firstErrorRef = relationshipIntentSectionRef;
+    } else {
+      setRelationshipIntentError('');
+    }
+
     // Validate interests: require at least 1
     if (activities.length < 1) {
       setInterestsError('Select at least 1 interest to continue.');
+      hasError = true;
+      if (!firstErrorRef) firstErrorRef = interestsSectionRef;
+    } else {
+      setInterestsError('');
+    }
+
+    if (hasError) {
       setShowTopError(true);
-      // Scroll to interests section
-      interestsSectionRef.current?.measureLayout(
+      // Scroll to first error section
+      firstErrorRef?.current?.measureLayout(
         scrollRef.current?.getInnerViewNode() as any,
         (_x, y) => scrollRef.current?.scrollTo({ y: y - 100, animated: true }),
         () => {}
@@ -176,7 +208,6 @@ export default function PreferencesScreen() {
       return;
     }
 
-    setInterestsError('');
     setShowTopError(false);
     if (__DEV__) console.log('[ONB] preferences → permissions (continue)');
     setStep('permissions');
@@ -190,7 +221,7 @@ export default function PreferencesScreen() {
     router.push('/(onboarding)/profile-details' as any);
   };
 
-  const canContinue = lookingFor.length > 0 && activities.length >= 1;
+  const canContinue = lookingFor.length > 0 && relationshipIntent.length >= 1 && activities.length >= 1;
 
   return (
     <SafeAreaView style={styles.safeArea} edges={['top']}>
@@ -233,15 +264,15 @@ export default function PreferencesScreen() {
         </View>
       </View>
 
-      <View style={styles.section}>
+      <View ref={relationshipIntentSectionRef} style={styles.section}>
         <Text style={styles.sectionTitle}>Relationship Intent</Text>
         <Text style={styles.sectionSubtitle}>What are you looking for?</Text>
-        <View style={styles.chipsContainer}>
+        <View style={[styles.chipsContainer, relationshipIntentError ? styles.chipsContainerError : null]}>
           {RELATIONSHIP_INTENTS.map((intent) => (
             <TouchableOpacity
               key={intent.value}
               style={[styles.chip, relationshipIntent.includes(intent.value) && styles.chipSelected]}
-              onPress={() => toggleRelationshipIntent(intent.value)}
+              onPress={() => handleRelationshipIntentToggle(intent.value)}
             >
               <Text style={styles.chipEmoji}>{intent.emoji}</Text>
               <Text style={[styles.chipText, relationshipIntent.includes(intent.value) && styles.chipTextSelected]}>
@@ -250,6 +281,7 @@ export default function PreferencesScreen() {
             </TouchableOpacity>
           ))}
         </View>
+        {relationshipIntentError ? <Text style={styles.fieldError}>{relationshipIntentError}</Text> : null}
       </View>
 
       <View ref={interestsSectionRef} style={styles.section}>
@@ -405,6 +437,13 @@ const styles = StyleSheet.create({
     marginTop: 8,
   },
   interestsGridError: {
+    borderRadius: 12,
+    borderWidth: 2,
+    borderColor: COLORS.error,
+    padding: 4,
+    margin: -4,
+  },
+  chipsContainerError: {
     borderRadius: 12,
     borderWidth: 2,
     borderColor: COLORS.error,
