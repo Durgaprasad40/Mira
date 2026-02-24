@@ -50,6 +50,7 @@ export default function PreferencesScreen() {
   } = useOnboardingStore();
   const router = useRouter();
   const scrollRef = useRef<ScrollView>(null);
+  const distanceSectionRef = useRef<View>(null);
   const { width: screenWidth } = useWindowDimensions();
 
   // Calculate interest chip width: 3 columns default, 2 for narrow screens (<360px)
@@ -83,6 +84,19 @@ export default function PreferencesScreen() {
       val = DISTANCE_MAX;
     }
     setMaxDistance(val);
+  };
+
+  // Scroll to distance input when focused (ensures visibility above keyboard)
+  const handleDistanceFocus = () => {
+    setTimeout(() => {
+      distanceSectionRef.current?.measureLayout(
+        scrollRef.current?.getInnerViewRef() as any,
+        (_x, y) => {
+          scrollRef.current?.scrollTo({ y: y - 100, animated: true });
+        },
+        () => {}
+      );
+    }, 100);
   };
 
   // Age clamping handlers
@@ -272,7 +286,7 @@ export default function PreferencesScreen() {
         </View>
       </View>
 
-      <View style={styles.section}>
+      <View ref={distanceSectionRef} style={styles.section}>
         <Text style={styles.sectionTitle}>Maximum Distance</Text>
         <Text style={styles.sectionSubtitle}>{DISTANCE_MIN} - {DISTANCE_MAX} miles</Text>
         <View style={styles.distanceInputWrapper}>
@@ -280,6 +294,7 @@ export default function PreferencesScreen() {
             value={maxDistance.toString()}
             onChangeText={(text) => setMaxDistance(parseInt(text) || DISTANCE_DEFAULT)}
             onBlur={handleDistanceBlur}
+            onFocus={handleDistanceFocus}
             keyboardType="numeric"
             style={styles.distanceTextInput}
             placeholderTextColor={COLORS.textMuted}
