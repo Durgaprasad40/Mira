@@ -141,7 +141,7 @@ const styles = StyleSheet.create({
   stepIndicator: {
     fontSize: 14,
     color: COLORS.textLight,
-    marginBottom: 8,
+    marginBottom: 10,
   },
   subtitle: {
     fontSize: 16,
