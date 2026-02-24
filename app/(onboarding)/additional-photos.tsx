@@ -216,7 +216,6 @@ export default function AdditionalPhotosScreen() {
                   <Image
                     key={renderKey}
                     recyclingKey={renderKey}
-                    cacheKey={renderKey}
                     source={{ uri: photo }}
                     cachePolicy="memory-disk"
                     style={[StyleSheet.absoluteFillObject, styles.photoImage]}
