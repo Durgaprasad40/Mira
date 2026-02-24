@@ -168,6 +168,7 @@ export interface DemoUserProfile {
   kids?: string | null;
   exercise?: string | null;
   pets?: string[];
+  insect?: string | null;
   education?: string | null;
   religion?: string | null;
   jobTitle?: string;

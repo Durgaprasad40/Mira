@@ -191,10 +191,32 @@ export type PetType =
   | "dog"
   | "cat"
   | "bird"
+  | "fish"
+  | "rabbit"
+  | "hamster"
+  | "guinea_pig"
+  | "turtle"
+  | "parrot"
+  | "pigeon"
+  | "chicken"
+  | "duck"
+  | "goat"
+  | "cow"
+  | "horse"
+  | "snake"
+  | "lizard"
+  | "frog"
   | "other"
   | "none"
   | "want_pets"
   | "allergic";
+
+export type InsectType =
+  | "mosquito"
+  | "bee"
+  | "butterfly"
+  | "ant"
+  | "cockroach";
 
 export type SortOption =
   | "recommended"

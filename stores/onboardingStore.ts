@@ -13,6 +13,7 @@ import {
   Religion,
   ExerciseStatus,
   PetType,
+  InsectType,
 } from "@/types";
 
 // Display photo privacy variant
@@ -72,6 +73,7 @@ interface OnboardingState {
   kids: KidsStatus | null;
   exercise: ExerciseStatus | null;
   pets: PetType[];
+  insect: InsectType | null;
   education: EducationLevel | null;
   religion: Religion | null;
   jobTitle: string;
@@ -108,7 +110,8 @@ interface OnboardingState {
   setKids: (status: KidsStatus | null) => void;
   setExercise: (exercise: ExerciseStatus | null) => void;
   setPets: (pets: PetType[]) => void;
-  togglePet: (pet: PetType) => void;
+  togglePet: (pet: PetType) => boolean;
+  setInsect: (insect: InsectType | null) => void;
   setEducation: (level: EducationLevel | null) => void;
   setReligion: (religion: Religion | null) => void;
   setJobTitle: (title: string) => void;
@@ -151,6 +154,7 @@ const initialState = {
   kids: null,
   exercise: null,
   pets: [],
+  insect: null,
   education: null,
   religion: null,
   jobTitle: "",
@@ -239,14 +243,22 @@ export const useOnboardingStore = create<OnboardingState>()(
 
       setExercise: (exercise) => set({ exercise }),
 
-      setPets: (pets) => set({ pets }),
+      setPets: (pets) => set({ pets: pets.slice(0, 3) }),
 
-      togglePet: (pet) =>
-        set((state) => ({
-          pets: state.pets.includes(pet)
-            ? state.pets.filter((p) => p !== pet)
-            : [...state.pets, pet],
-        })),
+      togglePet: (pet) => {
+        const state = useOnboardingStore.getState();
+        if (state.pets.includes(pet)) {
+          set({ pets: state.pets.filter((p) => p !== pet) });
+          return true;
+        }
+        if (state.pets.length >= 3) {
+          return false;
+        }
+        set({ pets: [...state.pets, pet] });
+        return true;
+      },
+
+      setInsect: (insect) => set({ insect }),
 
       setEducation: (education) => set({ education }),
 

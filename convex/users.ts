@@ -245,18 +245,63 @@ export const updateProfile = mutation({
         ),
       ),
     ),
+    pets: v.optional(
+      v.array(
+        v.union(
+          v.literal("dog"),
+          v.literal("cat"),
+          v.literal("bird"),
+          v.literal("fish"),
+          v.literal("rabbit"),
+          v.literal("hamster"),
+          v.literal("guinea_pig"),
+          v.literal("turtle"),
+          v.literal("parrot"),
+          v.literal("pigeon"),
+          v.literal("chicken"),
+          v.literal("duck"),
+          v.literal("goat"),
+          v.literal("cow"),
+          v.literal("horse"),
+          v.literal("snake"),
+          v.literal("lizard"),
+          v.literal("frog"),
+          v.literal("other"),
+          v.literal("none"),
+          v.literal("want_pets"),
+          v.literal("allergic"),
+        ),
+      ),
+    ),
+    insect: v.optional(
+      v.union(
+        v.literal("mosquito"),
+        v.literal("bee"),
+        v.literal("butterfly"),
+        v.literal("ant"),
+        v.literal("cockroach"),
+        v.null(),
+      ),
+    ),
   },
   handler: async (ctx, args) => {
-    const { userId, bio, ...otherUpdates } = args;
+    const { userId, bio, pets, insect, ...otherUpdates } = args;
 
     // BUGFIX #61: Bio length validation (max 300 chars)
     if (bio !== undefined && bio.length > 300) {
       throw new Error("Bio must be 300 characters or less");
     }
 
+    // Server-side validation: pets max 3
+    if (pets !== undefined && pets.length > 3) {
+      throw new Error("You can select up to 3 pets only");
+    }
+
     // Filter out undefined values
     const cleanUpdates: Record<string, unknown> = {};
     if (bio !== undefined) cleanUpdates.bio = bio;
+    if (pets !== undefined) cleanUpdates.pets = pets;
+    if (insect !== undefined) cleanUpdates.insect = insect;
     for (const [key, value] of Object.entries(otherUpdates)) {
       if (value !== undefined) {
         cleanUpdates[key] = value;
@@ -714,11 +759,36 @@ export const completeOnboarding = mutation({
           v.literal("dog"),
           v.literal("cat"),
           v.literal("bird"),
+          v.literal("fish"),
+          v.literal("rabbit"),
+          v.literal("hamster"),
+          v.literal("guinea_pig"),
+          v.literal("turtle"),
+          v.literal("parrot"),
+          v.literal("pigeon"),
+          v.literal("chicken"),
+          v.literal("duck"),
+          v.literal("goat"),
+          v.literal("cow"),
+          v.literal("horse"),
+          v.literal("snake"),
+          v.literal("lizard"),
+          v.literal("frog"),
           v.literal("other"),
           v.literal("none"),
           v.literal("want_pets"),
           v.literal("allergic"),
         ),
+      ),
+    ),
+    insect: v.optional(
+      v.union(
+        v.literal("mosquito"),
+        v.literal("bee"),
+        v.literal("butterfly"),
+        v.literal("ant"),
+        v.literal("cockroach"),
+        v.null(),
       ),
     ),
     education: v.optional(
@@ -807,12 +877,17 @@ export const completeOnboarding = mutation({
     photoStorageIds: v.optional(v.array(v.id("_storage"))),
   },
   handler: async (ctx, args) => {
-    const { userId, photoStorageIds, ...updates } = args;
+    const { userId, photoStorageIds, pets, insect, ...updates } = args;
 
     // Verify user exists
     const user = await ctx.db.get(userId);
     if (!user) {
       throw new Error("User not found");
+    }
+
+    // Server-side validation: pets max 3
+    if (pets !== undefined && pets.length > 3) {
+      throw new Error("You can select up to 3 pets only");
     }
 
     // Filter out undefined values
@@ -822,6 +897,10 @@ export const completeOnboarding = mutation({
         cleanUpdates[key] = value;
       }
     }
+
+    // Add pets and insect to cleanUpdates
+    if (pets !== undefined) cleanUpdates.pets = pets;
+    if (insect !== undefined) cleanUpdates.insect = insect;
 
     // Mark onboarding as completed
     cleanUpdates.onboardingCompleted = true;

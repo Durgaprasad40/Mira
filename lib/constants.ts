@@ -349,11 +349,34 @@ export const EXERCISE_OPTIONS = [
 export const PETS_OPTIONS = [
   { value: 'dog', label: 'Dog(s)', emoji: '🐕' },
   { value: 'cat', label: 'Cat(s)', emoji: '🐈' },
-  { value: 'bird', label: 'Bird(s)', emoji: '🦜' },
+  { value: 'bird', label: 'Bird(s)', emoji: '🐦' },
+  { value: 'fish', label: 'Fish', emoji: '🐟' },
+  { value: 'rabbit', label: 'Rabbit', emoji: '🐇' },
+  { value: 'hamster', label: 'Hamster', emoji: '🐹' },
+  { value: 'guinea_pig', label: 'Guinea pig', emoji: '🐹' },
+  { value: 'turtle', label: 'Turtle', emoji: '🐢' },
+  { value: 'parrot', label: 'Parrot', emoji: '🦜' },
+  { value: 'pigeon', label: 'Pigeon', emoji: '🐦' },
+  { value: 'chicken', label: 'Chicken', emoji: '🐔' },
+  { value: 'duck', label: 'Duck', emoji: '🦆' },
+  { value: 'goat', label: 'Goat', emoji: '🐐' },
+  { value: 'cow', label: 'Cow', emoji: '🐄' },
+  { value: 'horse', label: 'Horse', emoji: '🐴' },
+  { value: 'snake', label: 'Snake', emoji: '🐍' },
+  { value: 'lizard', label: 'Lizard', emoji: '🦎' },
+  { value: 'frog', label: 'Frog', emoji: '🐸' },
   { value: 'other', label: 'Other pets', emoji: '🐾' },
   { value: 'none', label: 'No pets', emoji: '🚫' },
   { value: 'want_pets', label: 'Want pets', emoji: '💭' },
   { value: 'allergic', label: 'Allergic to pets', emoji: '🤧' },
+];
+
+export const INSECT_OPTIONS = [
+  { value: 'mosquito', label: 'Mosquito', emoji: '🦟' },
+  { value: 'bee', label: 'Bee', emoji: '🐝' },
+  { value: 'butterfly', label: 'Butterfly', emoji: '🦋' },
+  { value: 'ant', label: 'Ant', emoji: '🐜' },
+  { value: 'cockroach', label: 'Cockroach', emoji: '🪳' },
 ];
 
 // Gender Options (required, min 1, max 2)
