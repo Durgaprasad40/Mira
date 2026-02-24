@@ -101,7 +101,7 @@ export default function PreferencesScreen() {
   const handleDistanceFocus = () => {
     setTimeout(() => {
       distanceSectionRef.current?.measureLayout(
-        scrollRef.current?.getInnerViewRef() as any,
+        scrollRef.current?.getInnerViewNode() as any,
         (_x, y) => {
           scrollRef.current?.scrollTo({ y: y - 100, animated: true });
         },
