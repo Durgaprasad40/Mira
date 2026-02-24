@@ -128,12 +128,6 @@ export default function PermissionsScreen() {
           <TouchableOpacity style={styles.navButton} onPress={handlePrevious}>
             <Text style={styles.navText}>Previous</Text>
           </TouchableOpacity>
-          <TouchableOpacity style={styles.navButton} onPress={() => {
-            if (__DEV__) console.log('[ONB] permissions → review (skip)');
-            handleNext();
-          }}>
-            <Text style={styles.navText}>Skip</Text>
-          </TouchableOpacity>
         </View>
       </View>
     </ScrollView>

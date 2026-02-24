@@ -63,13 +63,6 @@ export default function PromptsScreen() {
     router.push('/(onboarding)/profile-details' as any);
   };
 
-  // POST-VERIFICATION: Skip advances to next step
-  const handleSkip = () => {
-    if (__DEV__) console.log('[ONB] prompts → profile-details (skip)');
-    setStep('profile_details');
-    router.push('/(onboarding)/profile-details' as any);
-  };
-
   // POST-VERIFICATION: Previous goes back
   const handlePrevious = () => {
     if (__DEV__) console.log('[ONB] prompts → bio (previous)');
@@ -158,9 +151,6 @@ export default function PromptsScreen() {
         <View style={styles.navRow}>
           <TouchableOpacity style={styles.navButton} onPress={handlePrevious}>
             <Text style={styles.navText}>Previous</Text>
-          </TouchableOpacity>
-          <TouchableOpacity style={styles.navButton} onPress={handleSkip}>
-            <Text style={styles.navText}>Skip</Text>
           </TouchableOpacity>
         </View>
       </View>

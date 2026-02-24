@@ -163,13 +163,6 @@ export default function PreferencesScreen() {
     router.push('/(onboarding)/permissions' as any);
   };
 
-  // POST-VERIFICATION: Skip advances to next step
-  const handleSkip = () => {
-    if (__DEV__) console.log('[ONB] preferences → permissions (skip)');
-    setStep('permissions');
-    router.push('/(onboarding)/permissions' as any);
-  };
-
   // POST-VERIFICATION: Previous goes back
   const handlePrevious = () => {
     if (__DEV__) console.log('[ONB] preferences → profile-details (previous)');
@@ -327,9 +320,6 @@ export default function PreferencesScreen() {
         <View style={styles.navRow}>
           <TouchableOpacity style={styles.navButton} onPress={handlePrevious}>
             <Text style={styles.navText}>Previous</Text>
-          </TouchableOpacity>
-          <TouchableOpacity style={styles.navButton} onPress={handleSkip}>
-            <Text style={styles.navText}>Skip</Text>
           </TouchableOpacity>
         </View>
       </View>

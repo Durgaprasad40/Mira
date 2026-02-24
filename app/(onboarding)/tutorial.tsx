@@ -89,21 +89,13 @@ export default function TutorialScreen() {
     }
   };
 
-  const handleSkip = () => {
-    handleComplete();
-  };
-
   return (
     <View style={styles.container}>
       <LinearGradient
         colors={[COLORS.primary, COLORS.secondary]}
         style={styles.gradient}
       >
-        <View style={styles.header}>
-          <TouchableOpacity onPress={handleSkip} style={styles.skipButton}>
-            <Text style={styles.skipText}>Skip</Text>
-          </TouchableOpacity>
-        </View>
+        <View style={styles.header} />
 
         <View style={styles.content}>
           <View style={styles.iconContainer}>
@@ -205,14 +197,6 @@ const styles = StyleSheet.create({
     paddingTop: 60,
     paddingHorizontal: 24,
     alignItems: "flex-end",
-  },
-  skipButton: {
-    padding: 8,
-  },
-  skipText: {
-    fontSize: 16,
-    color: COLORS.white,
-    fontWeight: "500",
   },
   content: {
     flex: 1,

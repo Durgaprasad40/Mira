@@ -174,12 +174,6 @@ export default function AdditionalPhotosScreen() {
     router.push('/(onboarding)/bio');
   };
 
-  const handleSkip = () => {
-    if (__DEV__) console.log('[ONB] additional-photos → bio (skip)');
-    setStep('bio');
-    router.push('/(onboarding)/bio');
-  };
-
   const renderPhotoGrid = () => {
     const grid = [];
 
@@ -286,9 +280,6 @@ export default function AdditionalPhotosScreen() {
           {photoCount < MIN_PHOTOS_REQUIRED && (
             <Text style={styles.hint}>Add at least {MIN_PHOTOS_REQUIRED} photo to continue</Text>
           )}
-          <TouchableOpacity style={styles.skipButton} onPress={handleSkip}>
-            <Text style={styles.skipText}>Skip for now</Text>
-          </TouchableOpacity>
         </View>
       </View>
 
@@ -453,16 +444,6 @@ const styles = StyleSheet.create({
     color: COLORS.textLight,
     textAlign: 'center',
     marginTop: 4,
-  },
-  skipButton: {
-    alignSelf: 'center',
-    paddingVertical: 8,
-    marginTop: 4,
-  },
-  skipText: {
-    fontSize: 12,
-    color: COLORS.textLight,
-    fontWeight: '500',
   },
   // Viewer modal styles
   viewerContainer: {

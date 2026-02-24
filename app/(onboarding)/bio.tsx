@@ -29,13 +29,6 @@ export default function BioScreen() {
     router.push('/(onboarding)/prompts' as any);
   };
 
-  // POST-VERIFICATION: Skip advances to next step
-  const handleSkip = () => {
-    if (__DEV__) console.log('[ONB] bio → prompts (skip)');
-    setStep('prompts');
-    router.push('/(onboarding)/prompts' as any);
-  };
-
   // POST-VERIFICATION: Previous goes back (within post-verify screens only)
   const handlePrevious = () => {
     if (__DEV__) console.log('[ONB] bio → additional-photos (previous)');
@@ -103,9 +96,6 @@ export default function BioScreen() {
         <View style={styles.navRow}>
           <TouchableOpacity style={styles.navButton} onPress={handlePrevious}>
             <Text style={styles.navText}>Previous</Text>
-          </TouchableOpacity>
-          <TouchableOpacity style={styles.navButton} onPress={handleSkip}>
-            <Text style={styles.navText}>Skip</Text>
           </TouchableOpacity>
         </View>
       </View>

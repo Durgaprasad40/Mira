@@ -32,12 +32,6 @@ export default function ProfileDetailsEducationReligionScreen() {
     router.push("/(onboarding)/preferences");
   };
 
-  const handleSkip = () => {
-    if (__DEV__) console.log('[ONB] profile-details/education-religion → preferences (skip)');
-    setStep("preferences");
-    router.push("/(onboarding)/preferences");
-  };
-
   const handlePrevious = () => {
     if (__DEV__) console.log('[ONB] profile-details/education-religion → lifestyle (previous)');
     router.back();
@@ -131,9 +125,6 @@ export default function ProfileDetailsEducationReligionScreen() {
           <View style={styles.navRow}>
             <TouchableOpacity style={styles.navButton} onPress={handlePrevious}>
               <Text style={styles.navText}>Previous</Text>
-            </TouchableOpacity>
-            <TouchableOpacity style={styles.navButton} onPress={handleSkip}>
-              <Text style={styles.navText}>Skip</Text>
             </TouchableOpacity>
           </View>
         </View>
