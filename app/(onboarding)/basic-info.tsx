@@ -23,6 +23,7 @@ import { useAuthSubmit } from "@/hooks/useAuthSubmit";
 import { useQuery } from "convex/react";
 import { api } from "@/convex/_generated/api";
 import { Ionicons } from "@expo/vector-icons";
+import { validateRequired, scrollToFirstInvalid, ValidationRule } from "@/lib/onboardingValidation";
 
 // =============================================================================
 // DOB Date Helpers - Avoid UTC conversion bugs
@@ -77,9 +78,17 @@ export default function BasicInfoScreen() {
   const [selectedDate, setSelectedDate] = useState(
     parseDOBString(dateOfBirth), // Uses local date parsing, not UTC
   );
-  const [error, setError] = useState("");
+  const [errors, setErrors] = useState<Record<string, string>>({});
+  const [showTopError, setShowTopError] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [ageBlocked, setAgeBlocked] = useState(false);
+
+  // Refs for scroll-to-invalid behavior
+  const scrollRef = useRef<ScrollView>(null);
+  const nameFieldRef = useRef<View>(null);
+  const nicknameFieldRef = useRef<View>(null);
+  const dobFieldRef = useRef<View>(null);
+  const genderFieldRef = useRef<View>(null);
 
   // Read-only mode state for displaying existing user data
   const [displayName, setDisplayName] = useState("");
@@ -221,13 +230,65 @@ export default function BasicInfoScreen() {
       const age = calculateAge(dobString);
       if (age < VALIDATION.MIN_AGE) {
         setAgeBlocked(true);
-        setError("");
+        clearFieldError("dateOfBirth");
         return;
       }
       setAgeBlocked(false);
       setDateOfBirth(dobString);
-      setError("");
+      clearFieldError("dateOfBirth");
     }
+  };
+
+  // Clear a single field error
+  const clearFieldError = (field: string) => {
+    if (errors[field]) {
+      setErrors((prev) => ({ ...prev, [field]: "" }));
+      setShowTopError(false);
+    }
+  };
+
+  // Validation rules for all required fields
+  const validationRules: Record<string, ValidationRule> = {
+    name: (value: string) => {
+      if (!value || value.trim().length < VALIDATION.NAME_MIN_LENGTH) {
+        return `Name must be at least ${VALIDATION.NAME_MIN_LENGTH} characters`;
+      }
+      if (value.length > VALIDATION.NAME_MAX_LENGTH) {
+        return `Name must be no more than ${VALIDATION.NAME_MAX_LENGTH} characters`;
+      }
+      // Allow letters, spaces, dots, underscores, hyphens, apostrophes
+      if (!/^[a-zA-Z\s.\-_']+$/.test(value)) {
+        return "Name can only contain letters, spaces, dots, hyphens, underscores, and apostrophes";
+      }
+      return undefined;
+    },
+    nickname: (value: string) => {
+      if (!value || value.length < 3) {
+        return "Nickname must be at least 3 characters";
+      }
+      // Only allow letters, numbers, underscores (no spaces, no dots)
+      // Input is normalized to lowercase in onChangeText, so check lowercase pattern
+      if (!/^[a-z0-9_]+$/.test(value)) {
+        return "Nickname can only contain letters, numbers, and underscores (no spaces or dots)";
+      }
+      return undefined;
+    },
+    dateOfBirth: (value: string) => {
+      if (!value) {
+        return "Please select your date of birth";
+      }
+      const age = calculateAge(value);
+      if (age < VALIDATION.MIN_AGE) {
+        return `You must be at least ${VALIDATION.MIN_AGE} years old`;
+      }
+      return undefined;
+    },
+    gender: (value: string) => {
+      if (!value) {
+        return "Please select your gender";
+      }
+      return undefined;
+    },
   };
 
   // Handle Continue in READ-ONLY mode (existing user)
@@ -239,52 +300,43 @@ export default function BasicInfoScreen() {
 
   // Handle Continue in EDIT mode (new signup)
   const handleNext = async () => {
-    if (!name || name.length < VALIDATION.NAME_MIN_LENGTH) {
-      setError(
-        `Name must be at least ${VALIDATION.NAME_MIN_LENGTH} characters`,
-      );
+    // Run validation using the helper
+    const result = validateRequired(
+      { name, nickname, dateOfBirth, gender },
+      validationRules
+    );
+
+    if (!result.ok) {
+      setErrors(result.errors as Record<string, string>);
+      setShowTopError(true);
+      // Scroll to first invalid field
+      const fieldRefs = {
+        name: nameFieldRef,
+        nickname: nicknameFieldRef,
+        dateOfBirth: dobFieldRef,
+        gender: genderFieldRef,
+      };
+      scrollToFirstInvalid(scrollRef, fieldRefs, result.firstInvalidKey as string);
       return;
     }
-    if (name.length > VALIDATION.NAME_MAX_LENGTH) {
-      setError(
-        `Name must be no more than ${VALIDATION.NAME_MAX_LENGTH} characters`,
-      );
-      return;
-    }
-    if (!/^[a-zA-Z\s]+$/.test(name)) {
-      setError("Name can only contain letters");
-      return;
-    }
-    if (!dateOfBirth) {
-      setError("Please select your date of birth");
-      return;
-    }
-    const age = calculateAge(dateOfBirth);
-    if (age < VALIDATION.MIN_AGE) {
-      setError(`You must be at least ${VALIDATION.MIN_AGE} years old`);
-      return;
-    }
-    if (!gender) {
-      setError("Please select your gender");
-      return;
-    }
-    if (!nickname || nickname.length < 3) {
-      setError("Nickname must be at least 3 characters");
-      return;
-    }
-    if (!/^[a-z0-9_]+$/.test(nickname)) {
-      setError("Nickname can only contain lowercase letters, numbers, and underscores");
-      return;
-    }
-    // Block if nickname availability is still checking or known to be taken
+
+    // Additional async checks (nickname availability)
     if (isCheckingAvailability) {
-      setError("Please wait while we check nickname availability");
+      setErrors({ nickname: "Please wait while we check nickname availability" });
+      setShowTopError(true);
+      scrollToFirstInvalid(scrollRef, { nickname: nicknameFieldRef }, "nickname");
       return;
     }
     if (isNicknameAvailable === false) {
-      setError("This nickname is already taken. Please choose another.");
+      setErrors({ nickname: "This nickname is already taken. Please choose another." });
+      setShowTopError(true);
+      scrollToFirstInvalid(scrollRef, { nickname: nicknameFieldRef }, "nickname");
       return;
     }
+
+    // Clear errors and proceed
+    setErrors({});
+    setShowTopError(false);
 
     // Create user account
     setIsSubmitting(true);
@@ -331,7 +383,7 @@ export default function BasicInfoScreen() {
         name,
         handle: nickname,
         dateOfBirth,
-        gender,
+        gender: gender!, // Validated above - gender is not null here
       });
 
       // If result is null, USER_EXISTS was handled (Alert shown, routing done)
@@ -379,10 +431,18 @@ export default function BasicInfoScreen() {
 
   return (
     <ScrollView
+      ref={scrollRef}
       style={styles.container}
       contentContainerStyle={styles.content}
       keyboardShouldPersistTaps="handled"
     >
+      {/* Top error banner (only in edit mode) */}
+      {!isReadOnly && showTopError && (
+        <View style={styles.topErrorBanner}>
+          <Text style={styles.topErrorText}>Please complete highlighted fields.</Text>
+        </View>
+      )}
+
       <Text style={styles.title}>Tell us about yourself</Text>
       <Text style={styles.subtitle}>
         {isReadOnly
@@ -391,29 +451,30 @@ export default function BasicInfoScreen() {
       </Text>
 
       {/* Name field */}
-      <View style={styles.field}>
+      <View ref={nameFieldRef} style={styles.field}>
         <Input
           label="Name"
           value={currentName}
           onChangeText={isReadOnly ? undefined : (text) => {
             setName(text);
-            setError("");
+            clearFieldError("name");
           }}
           placeholder="Your first name"
           autoCapitalize="words"
           maxLength={VALIDATION.NAME_MAX_LENGTH}
           editable={!isReadOnly}
-          style={isReadOnly ? styles.disabledInput : undefined}
+          style={[isReadOnly ? styles.disabledInput : undefined, errors.name ? styles.inputError : undefined]}
         />
         {!isReadOnly && (
           <Text style={styles.hint}>
             {name.length}/{VALIDATION.NAME_MAX_LENGTH} characters
           </Text>
         )}
+        {errors.name ? <Text style={styles.fieldError}>{errors.name}</Text> : null}
       </View>
 
       {/* Nickname (User ID) field */}
-      <View style={styles.field}>
+      <View ref={nicknameFieldRef} style={styles.field}>
         <Input
           label="Nickname (User ID)"
           value={isReadOnly ? (displayHandle || "—") : nickname}
@@ -421,7 +482,7 @@ export default function BasicInfoScreen() {
             // Only allow alphanumeric and underscores, lowercase
             const sanitized = text.toLowerCase().replace(/[^a-z0-9_]/g, '');
             setNickname(sanitized);
-            setError("");
+            clearFieldError("nickname");
             // Trigger availability check for new users
             checkNicknameAvailability(sanitized);
           }}
@@ -430,7 +491,7 @@ export default function BasicInfoScreen() {
           autoCorrect={false}
           maxLength={20}
           editable={!isReadOnly}
-          style={isReadOnly ? styles.disabledInput : undefined}
+          style={[isReadOnly ? styles.disabledInput : undefined, errors.nickname ? styles.inputError : undefined]}
         />
         {/* Availability indicator (only for new users) */}
         {!isReadOnly && nickname.length >= 3 && (
@@ -458,16 +519,17 @@ export default function BasicInfoScreen() {
             Letters, numbers, and underscores only. {nickname.length}/20
           </Text>
         )}
+        {errors.nickname ? <Text style={styles.fieldError}>{errors.nickname}</Text> : null}
       </View>
 
       {/* Date of Birth field */}
-      <View style={styles.field}>
+      <View ref={dobFieldRef} style={styles.field}>
         <Text style={styles.label}>Date of Birth</Text>
         <Button
           title={currentDOB ? formatDate(currentDOB) : "Select your date of birth"}
           variant="outline"
           onPress={() => !isReadOnly && setShowDatePicker(true)}
-          style={{ ...styles.dateButton, ...(isReadOnly ? styles.disabledButton : {}) }}
+          style={{ ...styles.dateButton, ...(isReadOnly ? styles.disabledButton : {}), ...(errors.dateOfBirth ? styles.buttonError : {}) }}
           disabled={isReadOnly}
         />
         {currentDOB && (
@@ -475,6 +537,7 @@ export default function BasicInfoScreen() {
             Age: {calculateAge(currentDOB)} years old
           </Text>
         )}
+        {errors.dateOfBirth ? <Text style={styles.fieldError}>{errors.dateOfBirth}</Text> : null}
       </View>
 
       {showDatePicker && !isReadOnly && (
@@ -489,9 +552,9 @@ export default function BasicInfoScreen() {
       )}
 
       {/* Gender field */}
-      <View style={styles.field}>
+      <View ref={genderFieldRef} style={styles.field}>
         <Text style={styles.label}>I am a</Text>
-        <View style={styles.genderContainer}>
+        <View style={[styles.genderContainer, errors.gender ? styles.genderContainerError : undefined]}>
           {GENDER_OPTIONS.map((option) => (
             <TouchableOpacity
               key={option.value}
@@ -502,7 +565,7 @@ export default function BasicInfoScreen() {
               ]}
               onPress={isReadOnly ? undefined : () => {
                 setGender(option.value as Gender);
-                setError("");
+                clearFieldError("gender");
               }}
               disabled={isReadOnly}
               activeOpacity={isReadOnly ? 1 : 0.7}
@@ -518,10 +581,8 @@ export default function BasicInfoScreen() {
             </TouchableOpacity>
           ))}
         </View>
+        {errors.gender ? <Text style={styles.fieldError}>{errors.gender}</Text> : null}
       </View>
-
-      {/* Error display (only in edit mode) */}
-      {!isReadOnly && error ? <Text style={styles.error}>{error}</Text> : null}
 
       {/* Age blocked warning (only in edit mode) */}
       {!isReadOnly && ageBlocked && (
@@ -541,7 +602,7 @@ export default function BasicInfoScreen() {
           variant="primary"
           onPress={isReadOnly ? handleReadOnlyContinue : handleNext}
           loading={!isReadOnly && isSubmitting}
-          disabled={!isReadOnly && (ageBlocked || isNicknameAvailable === false || isCheckingAvailability)}
+          disabled={!isReadOnly && ageBlocked}
           fullWidth
         />
       </View>
@@ -635,6 +696,40 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: COLORS.error,
     marginBottom: 16,
+  },
+  topErrorBanner: {
+    backgroundColor: COLORS.error + "15",
+    borderWidth: 1,
+    borderColor: COLORS.error + "40",
+    borderRadius: 8,
+    padding: 12,
+    marginBottom: 16,
+  },
+  topErrorText: {
+    fontSize: 14,
+    color: COLORS.error,
+    fontWeight: "500",
+    textAlign: "center",
+  },
+  inputError: {
+    borderColor: COLORS.error,
+    borderWidth: 2,
+  },
+  buttonError: {
+    borderColor: COLORS.error,
+    borderWidth: 2,
+  },
+  fieldError: {
+    fontSize: 13,
+    color: COLORS.error,
+    marginTop: 6,
+  },
+  genderContainerError: {
+    borderRadius: 14,
+    borderWidth: 2,
+    borderColor: COLORS.error,
+    padding: 2,
+    margin: -2,
   },
   footer: {
     marginTop: 24,
