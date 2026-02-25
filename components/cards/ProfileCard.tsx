@@ -5,6 +5,7 @@ import {
   StyleSheet,
   TouchableOpacity,
   Pressable,
+  useWindowDimensions,
 } from 'react-native';
 import { Image } from 'expo-image';
 import { Ionicons } from '@expo/vector-icons';
@@ -78,6 +79,11 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
 }) => {
   const dark = theme === 'dark';
   const TC = dark ? INCOGNITO_COLORS : COLORS;
+  const { height: windowHeight } = useWindowDimensions();
+
+  // Responsive bottom offset for arrow button (was hardcoded 140px)
+  // On ~850px device, 140px ≈ 16.5% from bottom — scale proportionally
+  const arrowButtonBottom = Math.round(windowHeight * 0.165);
 
   // Face 2 only: Look up intent category labels from keys (array)
   const phase2IntentLabels = useMemo(() => {
@@ -232,7 +238,7 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
 
         {/* Arrow button to open full profile */}
         {showCarousel && onOpenProfile && (
-          <TouchableOpacity style={styles.arrowBtn} onPress={onOpenProfile} activeOpacity={0.7}>
+          <TouchableOpacity style={[styles.arrowBtn, { bottom: arrowButtonBottom }]} onPress={onOpenProfile} activeOpacity={0.7}>
             <Ionicons name="arrow-up" size={20} color={COLORS.white} />
           </TouchableOpacity>
         )}
@@ -389,9 +395,9 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.white,
   },
   // Arrow button (opens full profile)
+  // NOTE: `bottom` is computed dynamically via arrowButtonBottom for device responsiveness
   arrowBtn: {
     position: 'absolute',
-    bottom: 140,
     right: 12,
     width: 44,
     height: 44,
