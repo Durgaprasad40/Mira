@@ -12,6 +12,7 @@ import { LinearGradient } from "expo-linear-gradient";
 
 import {
   RELATIONSHIP_CATEGORIES,
+  RIGHT_NOW_CATEGORIES,
   INTEREST_CATEGORIES,
   countProfilesPerCategory,
   ExploreCategory,
@@ -107,7 +108,7 @@ export default function ExploreTileGrid({
   // Compute counts for all categories
   const categoryCounts = useMemo(() => {
     const counts: Record<string, number> = {};
-    for (const cat of [...RELATIONSHIP_CATEGORIES, ...INTEREST_CATEGORIES]) {
+    for (const cat of [...RELATIONSHIP_CATEGORIES, ...RIGHT_NOW_CATEGORIES, ...INTEREST_CATEGORIES]) {
       counts[cat.id] = countProfilesPerCategory(cat, profiles);
     }
     return counts;
@@ -155,6 +156,15 @@ export default function ExploreTileGrid({
       </View>
       <View style={styles.grid}>
         {RELATIONSHIP_CATEGORIES.map(renderTile)}
+      </View>
+
+      {/* RIGHT NOW Section */}
+      <View style={styles.sectionHeader}>
+        <Text style={styles.sectionEmoji}>⚡</Text>
+        <Text style={styles.sectionTitle}>Right Now</Text>
+      </View>
+      <View style={styles.grid}>
+        {RIGHT_NOW_CATEGORIES.map(renderTile)}
       </View>
 
       {/* INTERESTS Section */}

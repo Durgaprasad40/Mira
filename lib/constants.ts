@@ -154,16 +154,17 @@ export const IAP_PRODUCTS: IAPProduct[] = [
 ];
 
 // Relationship Intent Options (Phase-1 ONLY — store-safe labels, no overlap with Phase-2)
+// CANONICAL LIST: 9 Relationship Goals used across Explore, Sort By, Filters
 export const RELATIONSHIP_INTENTS: { value: RelationshipIntent; label: string; emoji: string }[] = [
   { value: 'long_term', label: 'Serious Vibes', emoji: '💑' },
-  { value: 'short_term', label: "Keepin' It Casual", emoji: '🎉' },
+  { value: 'short_term', label: 'Keep It Casual', emoji: '🎉' },
   { value: 'figuring_out', label: 'Exploring Vibes', emoji: '🤔' },
   { value: 'short_to_long', label: 'See Where It Goes', emoji: '📈' },
   { value: 'long_to_short', label: 'Open to Vibes', emoji: '📉' },
   { value: 'new_friends', label: 'Just Friends', emoji: '👋' },
   { value: 'open_to_anything', label: 'Open to Anything', emoji: '✨' },
-  { value: 'single_parent', label: 'Single Parent', emoji: '' },
-  { value: 'just_18', label: 'Just 18', emoji: '' },
+  { value: 'single_parent', label: 'Single Parent', emoji: '👨‍👧' },
+  { value: 'just_18', label: 'New to Dating', emoji: '🌱' },
 ];
 
 // Activity Filter Options (70 interests for onboarding)

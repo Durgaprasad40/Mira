@@ -86,69 +86,54 @@ const TILE_COLORS = {
 };
 
 // ============================================
-// RELATIONSHIP CATEGORIES (14 tiles)
+// RELATIONSHIP CATEGORIES (9 canonical goals)
+// Matches RELATIONSHIP_INTENTS in constants.ts
 // ============================================
 const RELATIONSHIP_TILES: ExploreCategory[] = [
-  {
-    id: "serious_dater",
-    label: "Serious Dater",
-    title: "Serious Dater",
-    icon: "💍",
-    color: TILE_COLORS.coral,
-    kind: "relationship",
-    predicate: (p) => {
-      const bioOk = !!p?.bio && p.bio.trim().length >= 5;
-      const photosOk = Array.isArray(p?.photos) && p.photos.length >= 2;
-      return (
-        hasIntent(p, "long_term", "long_term_partner", "long_term_open_to_short") &&
-        (bioOk || photosOk)
-      );
-    },
-  },
-  {
-    id: "long_term_partner",
-    label: "Long-term Partner",
-    title: "Long-term Partner",
-    icon: "❤️",
-    color: TILE_COLORS.rose,
-    kind: "relationship",
-    predicate: (p) => hasIntent(p, "long_term", "long_term_partner"),
-  },
   {
     id: "long_term",
     label: "Serious Vibes",
     title: "Serious Vibes",
-    icon: "💕",
+    icon: "💑",
     color: TILE_COLORS.pink,
     kind: "relationship",
-    predicate: (p) => hasIntent(p, "long_term", "short_to_long"),
+    predicate: (p) => hasIntent(p, "long_term", "long_term_partner", "long_term_open_to_short"),
   },
   {
-    id: "long_term_open_to_short",
-    label: "Open to Short-term",
-    title: "Open to Short-term",
-    icon: "💫",
-    color: TILE_COLORS.purple,
+    id: "short_term",
+    label: "Keep It Casual",
+    title: "Keep It Casual",
+    icon: "🎉",
+    color: TILE_COLORS.orange,
     kind: "relationship",
-    predicate: (p) => hasIntent(p, "long_term_open_to_short"),
+    predicate: (p) => hasIntent(p, "short_term_fun", "short_term", "fwb"),
   },
   {
-    id: "short_term_open_to_long",
-    label: "Short open to Long",
-    title: "Short-term, open to Long",
-    icon: "✨",
+    id: "figuring_out",
+    label: "Exploring Vibes",
+    title: "Exploring Vibes",
+    icon: "🤔",
+    color: TILE_COLORS.sky,
+    kind: "relationship",
+    predicate: (p) => hasIntent(p, "figuring_out"),
+  },
+  {
+    id: "short_to_long",
+    label: "See Where It Goes",
+    title: "See Where It Goes",
+    icon: "📈",
     color: TILE_COLORS.indigo,
     kind: "relationship",
     predicate: (p) => hasIntent(p, "short_term_open_to_long", "short_to_long"),
   },
   {
-    id: "short_term",
-    label: "Short-term",
-    title: "Short-term",
-    icon: "⚡",
-    color: TILE_COLORS.orange,
+    id: "long_to_short",
+    label: "Open to Vibes",
+    title: "Open to Vibes",
+    icon: "📉",
+    color: TILE_COLORS.purple,
     kind: "relationship",
-    predicate: (p) => hasIntent(p, "short_term_fun", "short_term", "fwb"),
+    predicate: (p) => hasIntent(p, "long_to_short", "long_term_open_to_short"),
   },
   {
     id: "new_friends",
@@ -157,41 +142,57 @@ const RELATIONSHIP_TILES: ExploreCategory[] = [
     icon: "👋",
     color: TILE_COLORS.teal,
     kind: "relationship",
-    predicate: (p) => hasIntent(p, "new_friends", "open_to_anything", "figuring_out"),
+    predicate: (p) => hasIntent(p, "new_friends"),
   },
   {
-    id: "figuring_out",
-    label: "Still Figuring Out",
-    title: "Still Figuring Out",
-    icon: "🤔",
-    color: TILE_COLORS.sky,
-    kind: "relationship",
-    predicate: (p) => hasIntent(p, "figuring_out"),
-  },
-  {
-    id: "non_monogamy",
-    label: "Non-Monogamy",
-    title: "Non-Monogamy",
-    icon: "💜",
-    color: TILE_COLORS.purple,
-    kind: "relationship",
-    predicate: (p) => hasIntent(p, "non_monogamy"),
-  },
-  {
-    id: "leading_to_marriage",
-    label: "Leading to Marriage",
-    title: "Leading to Marriage",
-    icon: "💒",
+    id: "open_to_anything",
+    label: "Open to Anything",
+    title: "Open to Anything",
+    icon: "✨",
     color: TILE_COLORS.gold,
     kind: "relationship",
-    predicate: (p) => hasIntent(p, "leading_to_marriage"),
+    predicate: (p) => hasIntent(p, "open_to_anything"),
+  },
+  {
+    id: "single_parent",
+    label: "Single Parent",
+    title: "Single Parent",
+    icon: "👨‍👧",
+    color: TILE_COLORS.rose,
+    kind: "relationship",
+    predicate: (p) => hasIntent(p, "single_parent"),
+  },
+  {
+    id: "just_18",
+    label: "New to Dating",
+    title: "New to Dating",
+    icon: "🌱",
+    color: TILE_COLORS.lime,
+    kind: "relationship",
+    predicate: (p) => hasIntent(p, "just_18"),
+  },
+];
+
+// ============================================
+// RIGHT NOW CATEGORIES (4 activity signals)
+// These are Explore-only signals, not Relationship Goals
+// ============================================
+const RIGHT_NOW_TILES: ExploreCategory[] = [
+  {
+    id: "near_me",
+    label: "Near Me",
+    title: "Near Me",
+    icon: "📍",
+    color: TILE_COLORS.emerald,
+    kind: "relationship",
+    predicate: (p) => typeof p?.distance === "number" && isWithinAllowedDistance(p, NEAR_ME_DISTANCE_KM),
   },
   {
     id: "online_now",
     label: "Online Now",
     title: "Online Now",
     icon: "🟢",
-    color: TILE_COLORS.lime,
+    color: TILE_COLORS.mint,
     kind: "relationship",
     predicate: (p) => p?.isOnline === true || minutesAgo(p?.lastActive ?? p?.lastActiveAt) <= 10,
   },
@@ -212,15 +213,6 @@ const RELATIONSHIP_TILES: ExploreCategory[] = [
     color: TILE_COLORS.indigo,
     kind: "relationship",
     predicate: (p) => p?.freeTonight === true,
-  },
-  {
-    id: "near_me",
-    label: "Near Me",
-    title: "Near Me",
-    icon: "📍",
-    color: TILE_COLORS.emerald,
-    kind: "relationship",
-    predicate: (p) => typeof p?.distance === "number" && isWithinAllowedDistance(p, NEAR_ME_DISTANCE_KM),
   },
 ];
 
@@ -306,11 +298,13 @@ const INTEREST_TILES: ExploreCategory[] = [
 // ============================================
 export const EXPLORE_CATEGORIES: ExploreCategory[] = [
   ...RELATIONSHIP_TILES,
+  ...RIGHT_NOW_TILES,
   ...INTEREST_TILES,
 ];
 
 // Separate exports for easy access
 export const RELATIONSHIP_CATEGORIES = RELATIONSHIP_TILES;
+export const RIGHT_NOW_CATEGORIES = RIGHT_NOW_TILES;
 export const INTEREST_CATEGORIES = INTEREST_TILES;
 
 // ============================================
