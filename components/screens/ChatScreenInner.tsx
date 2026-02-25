@@ -824,7 +824,9 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
             onLayout={onComposerLayout}
             style={styles.composerWrapper}
           >
-            <View style={{ paddingBottom: Platform.OS === 'ios' ? insets.bottom : 0 }}>
+            {/* ANDROID FIX: Apply bottom inset on both platforms.
+                useSafeAreaInsets() returns correct values for Android gesture nav. */}
+            <View style={{ paddingBottom: insets.bottom }}>
               <MessageInput
                 onSend={handleSend}
                 onSendImage={handleSendImage}
