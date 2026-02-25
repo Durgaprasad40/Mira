@@ -118,6 +118,7 @@ export default function BasicInfoScreen() {
   const [isCheckingAvailability, setIsCheckingAvailability] = useState(false);
   const [isNicknameAvailable, setIsNicknameAvailable] = useState<boolean | null>(null);
   const availabilityTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const isMountedRef = useRef(true); // Track mounted state to ignore late async results
 
   // Fetch existing user data in read-only mode (live mode only)
   const existingUserData = useQuery(
@@ -155,8 +156,9 @@ export default function BasicInfoScreen() {
     console.log(`[BASIC]   onboardingStore.gender=${gender || '(empty)'}`);
     console.log('[BASIC] ════════════════════════════════════════');
 
-    // Cleanup timeout on unmount
+    // Cleanup on unmount: clear timeout and mark as unmounted
     return () => {
+      isMountedRef.current = false;
       if (availabilityTimeoutRef.current) {
         clearTimeout(availabilityTimeoutRef.current);
       }
@@ -290,20 +292,32 @@ export default function BasicInfoScreen() {
           const profiles = Object.values(demoStore.demoProfiles);
           const taken = profiles.some((p: any) => p.handle === handle);
           console.log(`[BASIC] nickname=${handle} available=${!taken} (demo mode - checked local demoStore)`);
-          setIsNicknameAvailable(!taken);
+          // Only update state if still mounted
+          if (isMountedRef.current) {
+            setIsNicknameAvailable(!taken);
+          }
         } else {
           // Live mode: query Convex database for handle availability
           console.log(`[BASIC] nickname=${handle} querying Convex checkHandleExists...`);
           const result = await convex.query(api.auth.checkHandleExists, { handle });
           const available = !result.exists;
           console.log(`[BASIC] nickname=${handle} available=${available} (live mode - Convex DB, exists=${result.exists})`);
-          setIsNicknameAvailable(available);
+          // Only update state if still mounted
+          if (isMountedRef.current) {
+            setIsNicknameAvailable(available);
+          }
         }
       } catch (error) {
         console.error('[BASIC] availability check error:', error);
-        setIsNicknameAvailable(null);
+        // Only update state if still mounted
+        if (isMountedRef.current) {
+          setIsNicknameAvailable(null);
+        }
       } finally {
-        setIsCheckingAvailability(false);
+        // Only update state if still mounted
+        if (isMountedRef.current) {
+          setIsCheckingAvailability(false);
+        }
       }
     }, 400); // 400ms debounce
   }, []);
