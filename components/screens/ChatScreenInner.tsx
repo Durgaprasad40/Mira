@@ -917,6 +917,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
         reportedUserId={(activeConversation as any).otherUser?.id || ''}
         reportedUserName={activeConversation.otherUser.name}
         currentUserId={userId || getDemoUserId()}
+        conversationId={conversationId}
         onBlockSuccess={() => router.back()}
       />
 

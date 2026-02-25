@@ -11,6 +11,8 @@ type AnalyticsEvent =
   | { name: 'first_message_sent'; conversationId: string }
   | { name: 'block_user'; blockedUserId: string }
   | { name: 'report_user'; reportedUserId: string; reason: string }
+  // Chat menu actions
+  | { name: 'chat_action'; action: 'uncrush' | 'block' | 'report' | 'spam' | 'scam' | 'other'; userId: string; conversationId?: string; timestamp: number; reason?: string }
   // Phase-2 (Desire Land) analytics
   | { name: 'phase2_intent_filter_selected'; intentKey: string }
   | { name: 'phase2_profile_viewed'; profileId: string; privateIntentKey?: string }
