@@ -24,6 +24,16 @@ This file records locked areas of the codebase that must not be modified without
 
 ---
 
+## LOCKED: Chat Composer (+ Menu) Behavior
+
+- **Scope:** `components/chat/MessageInput.tsx` — specifically the + button menu, attachment handling, and voice recording trigger
+- **Locked by:** Durgaprasad
+- **Date:** 2025-02-25
+- **Rule:** Do not modify the + menu UI, menu item handlers (Camera/Gallery/Voice), or the popup behavior without explicit approval.
+- **Note:** The existing secure photo flow (CameraPhotoSheet) remains unchanged; only the entry point (+ menu) is locked.
+
+---
+
 *To request an unlock, Durgaprasad must explicitly state the unlock in a message.*
 
 ---

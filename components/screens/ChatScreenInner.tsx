@@ -29,7 +29,7 @@ import { useQuery, useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { useAuthStore } from '@/stores/authStore';
 import { COLORS } from '@/lib/constants';
-import { MessageBubble, MessageInput, ProtectedMediaViewer, ReportModal, BottleSpinGame, TelegramMediaSheet } from '@/components/chat';
+import { MessageBubble, MessageInput, ProtectedMediaViewer, ReportModal, BottleSpinGame } from '@/components/chat';
 import { Phase2ProtectedMediaViewer } from '@/components/private/Phase2ProtectedMediaViewer';
 import { usePrivateChatStore } from '@/stores/privateChatStore';
 import type { IncognitoMessage } from '@/types';
@@ -282,7 +282,6 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
   const isSendingRef = useRef(false);
 
   // Protected media state
-  const [showMediaSheet, setShowMediaSheet] = useState(false);
   const [pendingImageUri, setPendingImageUri] = useState<string | null>(null);
   const [pendingMediaType, setPendingMediaType] = useState<'photo' | 'video'>('photo');
   const [viewerMessageId, setViewerMessageId] = useState<string | null>(null);
@@ -471,20 +470,51 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
     // TODO: Add Convex delete support when backend is ready
   }, [isDemo, conversationId, deleteDemoMessage]);
 
-  // Open Telegram-style media sheet (replaces direct ImagePicker)
-  const handleSendImage = () => {
+  // Camera handler: launch system camera directly
+  const handleSendCamera = useCallback(async () => {
     if (!activeConversation) return;
-    setShowMediaSheet(true);
-  };
 
-  // Handle media selection from TelegramMediaSheet
-  // Routes BOTH photos AND videos through Secure Photo flow
-  const handleMediaSelected = useCallback((uri: string, mediaType: 'photo' | 'video') => {
-    setShowMediaSheet(false);
-    // Store both URI and type for the Secure Photo confirm flow
-    setPendingImageUri(uri);
-    setPendingMediaType(mediaType);
-  }, []);
+    const { status } = await ImagePicker.requestCameraPermissionsAsync();
+    if (status !== 'granted') {
+      Alert.alert('Permission Required', 'Camera access is needed to take photos.');
+      return;
+    }
+
+    const result = await ImagePicker.launchCameraAsync({
+      mediaTypes: ['images'],
+      quality: 1,
+      allowsEditing: false,
+    });
+
+    if (!result.canceled && result.assets[0]) {
+      const asset = result.assets[0];
+      setPendingImageUri(asset.uri);
+      setPendingMediaType('photo');
+    }
+  }, [activeConversation]);
+
+  // Gallery handler: launch system gallery picker directly
+  const handleSendGallery = useCallback(async () => {
+    if (!activeConversation) return;
+
+    const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (status !== 'granted') {
+      Alert.alert('Permission Required', 'Photo library access is needed to select photos.');
+      return;
+    }
+
+    const result = await ImagePicker.launchImageLibraryAsync({
+      mediaTypes: ['images'],
+      quality: 1,
+      allowsEditing: false,
+    });
+
+    if (!result.canceled && result.assets[0]) {
+      const asset = result.assets[0];
+      setPendingImageUri(asset.uri);
+      setPendingMediaType('photo');
+    }
+  }, [activeConversation]);
 
   const handleSecurePhotoConfirm = async (imageUri: string, options: CameraPhotoOptions) => {
     if (!userId || !conversationId) return;
@@ -829,7 +859,8 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
             <View style={{ paddingBottom: insets.bottom }}>
               <MessageInput
                 onSend={handleSend}
-                onSendImage={handleSendImage}
+                onSendCamera={handleSendCamera}
+                onSendGallery={handleSendGallery}
                 onSendVoice={handleSendVoice}
                 onSendDare={activeConversation.isPreMatch ? handleSendDare : undefined}
                 disabled={isSending || isExpiredChat}
@@ -845,13 +876,6 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
           </View>
         </View>
       </KeyboardAvoidingView>
-
-      {/* Telegram-style media sheet (camera + gallery) */}
-      <TelegramMediaSheet
-        visible={showMediaSheet}
-        onSelectMedia={handleMediaSelected}
-        onClose={() => setShowMediaSheet(false)}
-      />
 
       {/* Phase-1 Secure Photo/Video Sheet */}
       <CameraPhotoSheet

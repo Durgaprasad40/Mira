@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useCallback, useRef, useEffect } from 'react';
-import { View, Text, TextInput, StyleSheet, TouchableOpacity, Alert, ActivityIndicator } from 'react-native';
+import { View, Text, TextInput, StyleSheet, TouchableOpacity, Alert, ActivityIndicator, Modal, Pressable } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { COLORS, MESSAGE_TEMPLATES } from '@/lib/constants';
 import { Button } from '@/components/ui';
@@ -8,7 +8,8 @@ import { useVoiceRecorder, type VoiceRecorderResult } from '@/hooks/useVoiceReco
 
 interface MessageInputProps {
   onSend: (text: string, type?: 'text' | 'template') => void | Promise<void>;
-  onSendImage?: () => void;
+  onSendCamera?: () => void;
+  onSendGallery?: () => void;
   onSendDare?: () => void;
   onSendVoice?: (audioUri: string, durationMs: number) => void | Promise<void>;
   disabled?: boolean;
@@ -25,7 +26,8 @@ interface MessageInputProps {
 
 export function MessageInput({
   onSend,
-  onSendImage,
+  onSendCamera,
+  onSendGallery,
   onSendDare,
   onSendVoice,
   disabled = false,
@@ -39,6 +41,7 @@ export function MessageInput({
 }: MessageInputProps) {
   const [text, setText] = useState(initialText);
   const [showTemplates, setShowTemplates] = useState(false);
+  const [showAttachMenu, setShowAttachMenu] = useState(false);
 
   // Voice recording
   const handleRecordingComplete = useCallback((result: VoiceRecorderResult) => {
@@ -70,6 +73,11 @@ export function MessageInput({
   const handleTextChange = (value: string) => {
     setText(value);
     onTextChange?.(value);
+
+    // Close attach menu when user starts typing
+    if (value.trim().length > 0 && showAttachMenu) {
+      setShowAttachMenu(false);
+    }
 
     // Demo typing indicator logic (simulates other user typing)
     // Clear any existing timers
@@ -157,6 +165,22 @@ export function MessageInput({
     return MESSAGE_TEMPLATES.slice(0, limit);
   }, [subscriptionTier]);
 
+  // Attachment menu handlers
+  const handleCameraPress = () => {
+    setShowAttachMenu(false);
+    onSendCamera?.();
+  };
+
+  const handleGalleryPress = () => {
+    setShowAttachMenu(false);
+    onSendGallery?.();
+  };
+
+  const handleVoicePress = () => {
+    setShowAttachMenu(false);
+    toggleRecording();
+  };
+
   return (
     <View style={styles.container}>
       {showTemplates && (
@@ -186,6 +210,9 @@ export function MessageInput({
           <Text style={styles.recordingText}>
             Recording... {formatTime(elapsedMs)} / {formatTime(maxDurationMs)}
           </Text>
+          <TouchableOpacity onPress={toggleRecording} style={styles.stopRecordingButton}>
+            <Ionicons name="stop" size={20} color={COLORS.white} />
+          </TouchableOpacity>
         </View>
       )}
 
@@ -206,19 +233,59 @@ export function MessageInput({
       )}
 
       <View style={styles.inputContainer}>
-        {/* Mic button - LEFT side of TextInput */}
-        {onSendVoice && (
-          <TouchableOpacity
-            style={[styles.iconButton, isRecording && styles.iconButtonRecording]}
-            onPress={toggleRecording}
-            disabled={disabled}
-          >
-            <Ionicons
-              name={isRecording ? 'stop' : 'mic'}
-              size={24}
-              color={isRecording ? COLORS.error : COLORS.primary}
-            />
-          </TouchableOpacity>
+        {/* + Button with popup menu - LEFT side of TextInput */}
+        {!isRecording && (
+          <View style={styles.attachButtonWrapper}>
+            <TouchableOpacity
+              style={styles.attachButton}
+              onPress={() => setShowAttachMenu(true)}
+              disabled={disabled}
+            >
+              <Ionicons name="add" size={26} color={COLORS.primary} />
+            </TouchableOpacity>
+
+            {/* Popup menu */}
+            <Modal
+              visible={showAttachMenu}
+              transparent
+              animationType="fade"
+              onRequestClose={() => setShowAttachMenu(false)}
+            >
+              <Pressable style={styles.menuOverlay} onPress={() => setShowAttachMenu(false)}>
+                <View style={styles.menuContainer}>
+                  {/* Camera option */}
+                  {onSendCamera && (
+                    <TouchableOpacity style={styles.menuItem} onPress={handleCameraPress}>
+                      <View style={[styles.menuIcon, { backgroundColor: COLORS.primary }]}>
+                        <Ionicons name="camera" size={20} color={COLORS.white} />
+                      </View>
+                      <Text style={styles.menuText}>Camera</Text>
+                    </TouchableOpacity>
+                  )}
+
+                  {/* Gallery option */}
+                  {onSendGallery && (
+                    <TouchableOpacity style={styles.menuItem} onPress={handleGalleryPress}>
+                      <View style={[styles.menuIcon, { backgroundColor: COLORS.secondary }]}>
+                        <Ionicons name="images" size={20} color={COLORS.white} />
+                      </View>
+                      <Text style={styles.menuText}>Gallery</Text>
+                    </TouchableOpacity>
+                  )}
+
+                  {/* Voice option */}
+                  {onSendVoice && (
+                    <TouchableOpacity style={styles.menuItem} onPress={handleVoicePress}>
+                      <View style={[styles.menuIcon, { backgroundColor: '#9B59B6' }]}>
+                        <Ionicons name="mic" size={20} color={COLORS.white} />
+                      </View>
+                      <Text style={styles.menuText}>Voice</Text>
+                    </TouchableOpacity>
+                  )}
+                </View>
+              </Pressable>
+            </Modal>
+          </View>
         )}
 
         {isPreMatch && !isRecording && (
@@ -253,12 +320,6 @@ export function MessageInput({
           maxLength={isDemoMode || canSendCustom ? undefined : 150}
           editable={!disabled && !isRecording && (isDemoMode || canSendCustom || !isPreMatch)}
         />
-
-        {onSendImage && !isRecording && (
-          <TouchableOpacity style={styles.iconButton} onPress={onSendImage} disabled={disabled}>
-            <Ionicons name="camera" size={24} color={COLORS.primary} />
-          </TouchableOpacity>
-        )}
 
         {!isRecording && (
           <TouchableOpacity
@@ -327,9 +388,18 @@ const styles = StyleSheet.create({
     marginRight: 8,
   },
   recordingText: {
+    flex: 1,
     fontSize: 13,
     color: COLORS.error,
     fontWeight: '600',
+  },
+  stopRecordingButton: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: COLORS.error,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   quotaBanner: {
     flexDirection: 'row',
@@ -356,14 +426,65 @@ const styles = StyleSheet.create({
   inputContainer: {
     flexDirection: 'row',
     alignItems: 'flex-end',
-    padding: 12,
-    paddingBottom: 10,
+    paddingHorizontal: 8,
+    paddingTop: 8,
+    paddingBottom: 8,
+  },
+  attachButtonWrapper: {
+    position: 'relative',
+  },
+  attachButton: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: COLORS.backgroundDark,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 8,
+  },
+  menuOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.3)',
+    justifyContent: 'flex-end',
+  },
+  menuContainer: {
+    position: 'absolute',
+    left: 16,
+    bottom: 80,
+    backgroundColor: COLORS.background,
+    borderRadius: 12,
+    paddingVertical: 8,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.25,
+    shadowRadius: 8,
+    elevation: 8,
+  },
+  menuItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 10,
+    paddingHorizontal: 16,
+    minWidth: 140,
+  },
+  menuIcon: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginRight: 12,
+  },
+  menuText: {
+    fontSize: 15,
+    color: COLORS.text,
+    fontWeight: '500',
   },
   iconButton: {
-    padding: 10,
-    marginRight: 8,
-    minWidth: 44,
-    minHeight: 44,
+    padding: 8,
+    marginRight: 4,
+    minWidth: 40,
+    minHeight: 40,
     alignItems: 'center' as const,
     justifyContent: 'center' as const,
   },
@@ -391,9 +512,9 @@ const styles = StyleSheet.create({
     borderColor: COLORS.error + '40',
   },
   sendButton: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
+    width: 40,
+    height: 40,
+    borderRadius: 20,
     backgroundColor: COLORS.primary,
     alignItems: 'center',
     justifyContent: 'center',
