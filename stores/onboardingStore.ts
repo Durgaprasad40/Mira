@@ -52,6 +52,17 @@ function normalizePhotos(input: unknown): (string | null)[] {
 // OB-1: Hydration timing for timeout fallback
 const ONBOARDING_STORE_LOAD_TIME = Date.now();
 
+// LGBTQ identity options (max 2 selections)
+export type LgbtqOption = 'gay' | 'lesbian' | 'bisexual' | 'transgender' | 'prefer_not_to_say';
+
+export const LGBTQ_OPTIONS: { value: LgbtqOption; label: string }[] = [
+  { value: 'gay', label: 'Gay' },
+  { value: 'lesbian', label: 'Lesbian' },
+  { value: 'bisexual', label: 'Bisexual' },
+  { value: 'transgender', label: 'Transgender' },
+  { value: 'prefer_not_to_say', label: 'Prefer not to say' },
+];
+
 interface OnboardingState {
   currentStep: OnboardingStep;
   email: string;
@@ -61,6 +72,8 @@ interface OnboardingState {
   nickname: string; // User ID / handle
   dateOfBirth: string;
   gender: Gender | null;
+  lgbtqSelf: LgbtqOption[]; // "What am I?" - identity, optional, max 2
+  lgbtqPreference: LgbtqOption[]; // "What I need?" - dating preference, optional, max 2
   photos: (string | null)[];
   verificationPhotoUri: string | null;
   displayPhotoVariant: DisplayPhotoVariant; // Privacy option: original, blurred, or cartoon
@@ -75,6 +88,7 @@ interface OnboardingState {
   pets: PetType[];
   insect: InsectType | null;
   education: EducationLevel | null;
+  educationOther: string; // Custom text when education === 'other'
   religion: Religion | null;
   jobTitle: string;
   company: string;
@@ -95,6 +109,10 @@ interface OnboardingState {
   setNickname: (nickname: string) => void;
   setDateOfBirth: (dob: string) => void;
   setGender: (gender: Gender) => void;
+  setLgbtqSelf: (lgbtq: LgbtqOption[]) => void;
+  toggleLgbtqSelf: (option: LgbtqOption) => boolean; // Returns false if max 2 reached
+  setLgbtqPreference: (lgbtq: LgbtqOption[]) => void;
+  toggleLgbtqPreference: (option: LgbtqOption) => boolean; // Returns false if max 2 reached
   addPhoto: (uri: string) => void;
   setPhotoAtIndex: (index: number, uri: string) => void;
   removePhoto: (index: number) => void;
@@ -113,6 +131,7 @@ interface OnboardingState {
   togglePet: (pet: PetType) => boolean;
   setInsect: (insect: InsectType | null) => void;
   setEducation: (level: EducationLevel | null) => void;
+  setEducationOther: (text: string) => void;
   setReligion: (religion: Religion | null) => void;
   setJobTitle: (title: string) => void;
   setCompany: (company: string) => void;
@@ -142,6 +161,8 @@ const initialState = {
   nickname: "",
   dateOfBirth: "",
   gender: null,
+  lgbtqSelf: [] as LgbtqOption[],
+  lgbtqPreference: [] as LgbtqOption[],
   photos: [null, null, null, null, null, null, null, null, null] as (string | null)[],
   verificationPhotoUri: null,
   displayPhotoVariant: 'original' as DisplayPhotoVariant,
@@ -156,6 +177,7 @@ const initialState = {
   pets: [],
   insect: null,
   education: null,
+  educationOther: "",
   religion: null,
   jobTitle: "",
   company: "",
@@ -191,6 +213,36 @@ export const useOnboardingStore = create<OnboardingState>()(
       setDateOfBirth: (dateOfBirth) => set({ dateOfBirth }),
 
       setGender: (gender) => set({ gender }),
+
+      setLgbtqSelf: (lgbtqSelf) => set({ lgbtqSelf: lgbtqSelf.slice(0, 2) }),
+
+      toggleLgbtqSelf: (option) => {
+        const state = useOnboardingStore.getState();
+        if (state.lgbtqSelf.includes(option)) {
+          set({ lgbtqSelf: state.lgbtqSelf.filter((o) => o !== option) });
+          return true;
+        }
+        if (state.lgbtqSelf.length >= 2) {
+          return false; // Max 2 selections reached
+        }
+        set({ lgbtqSelf: [...state.lgbtqSelf, option] });
+        return true;
+      },
+
+      setLgbtqPreference: (lgbtqPreference) => set({ lgbtqPreference: lgbtqPreference.slice(0, 2) }),
+
+      toggleLgbtqPreference: (option) => {
+        const state = useOnboardingStore.getState();
+        if (state.lgbtqPreference.includes(option)) {
+          set({ lgbtqPreference: state.lgbtqPreference.filter((o) => o !== option) });
+          return true;
+        }
+        if (state.lgbtqPreference.length >= 2) {
+          return false; // Max 2 selections reached
+        }
+        set({ lgbtqPreference: [...state.lgbtqPreference, option] });
+        return true;
+      },
 
       // Add photo to first available empty slot
       addPhoto: (uri) =>
@@ -261,6 +313,8 @@ export const useOnboardingStore = create<OnboardingState>()(
       setInsect: (insect) => set({ insect }),
 
       setEducation: (education) => set({ education }),
+
+      setEducationOther: (educationOther) => set({ educationOther }),
 
       setReligion: (religion) => set({ religion }),
 

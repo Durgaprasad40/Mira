@@ -1,13 +1,15 @@
 /**
  * Onboarding Progress Mapping
  * Maps onboarding steps/routes to progress indices for the progress header.
+ * Each screen gets its own progress step for smooth advancement.
  */
 
 import type { OnboardingStep } from '@/types';
 
 /**
  * Ordered list of onboarding steps for progress calculation.
- * This represents the main user-facing flow (excludes welcome which is pre-progress).
+ * Each screen/route gets its own entry for per-screen progress advancement.
+ * Excludes: welcome (pre-progress), tutorial (no progress bar shown).
  */
 export const ONBOARDING_PROGRESS_STEPS: OnboardingStep[] = [
   'email_phone',
@@ -16,16 +18,15 @@ export const ONBOARDING_PROGRESS_STEPS: OnboardingStep[] = [
   'basic_info',
   'consent',
   'prompts',
-  'profile_details',
+  'profile_details',   // profile-details/index.tsx
+  'lifestyle',         // profile-details/lifestyle.tsx
   'preferences',
-  'display_privacy',
   'photo_upload',
   'face_verification',
   'additional_photos',
-  'bio',
   'permissions',
-  'review',
-  'tutorial',
+  'review',            // Final step = 100%
+  // 'tutorial' excluded - tutorial screen doesn't show progress bar
 ];
 
 /**
@@ -35,7 +36,7 @@ export const ONBOARDING_TOTAL_STEPS = ONBOARDING_PROGRESS_STEPS.length;
 
 /**
  * Get the 1-based step number for a given onboarding step.
- * Returns null if step is not in the progress flow (e.g., welcome).
+ * Returns null if step is not in the progress flow (e.g., welcome, tutorial).
  */
 export function getStepNumber(step: OnboardingStep | undefined): number | null {
   if (!step) return null;
@@ -54,32 +55,69 @@ export function getProgressPercentage(step: OnboardingStep | undefined): number 
 }
 
 /**
- * Map route path to OnboardingStep.
- * Useful when step state is not available but route is.
+ * Route-to-step mapping for specific routes.
+ * More specific routes are checked first.
  */
-export function routeToStep(routePath: string): OnboardingStep | null {
+const ROUTE_TO_STEP_MAP: Record<string, OnboardingStep> = {
+  // Profile details sub-routes (must be before generic profile-details)
+  'profile-details/lifestyle': 'lifestyle',
+  'profile-details/index': 'profile_details',
+  'profile-details': 'profile_details',
+  // All other routes use kebab-to-snake conversion
+};
+
+/**
+ * Map route path to OnboardingStep.
+ * Handles per-screen mapping for accurate progress tracking.
+ *
+ * @param routePath - The current route path
+ * @param editFromReview - If true, returns 'review' to keep progress at 100%
+ */
+export function routeToStep(routePath: string, editFromReview?: boolean): OnboardingStep | null {
+  // EDIT FROM REVIEW: Keep progress at 100% when editing from review
+  if (editFromReview) {
+    return 'review';
+  }
+
   // Remove leading slash and (onboarding) prefix
   const cleanPath = routePath
     .replace(/^\/?\(onboarding\)\/?/, '')
-    .replace(/^\//, '');
+    .replace(/^\//, '')
+    .replace(/\?.*$/, ''); // Remove query params
 
-  // Handle profile-details sub-routes
-  if (cleanPath.startsWith('profile-details')) {
-    return 'profile_details';
-  }
-
-  // Convert kebab-case to snake_case
-  const stepName = cleanPath.replace(/-/g, '_');
-
-  // Check if it's a valid step
-  if (ONBOARDING_PROGRESS_STEPS.includes(stepName as OnboardingStep)) {
-    return stepName as OnboardingStep;
-  }
-
-  // Handle index route
-  if (cleanPath === '' || cleanPath === 'index') {
+  // Handle index route (welcome screen)
+  if (cleanPath === '' || cleanPath === 'index' || cleanPath === 'welcome') {
     return 'welcome';
   }
 
+  // Check specific route mappings first
+  for (const [route, step] of Object.entries(ROUTE_TO_STEP_MAP)) {
+    if (cleanPath === route || cleanPath.startsWith(route + '/')) {
+      return step;
+    }
+  }
+
+  // Convert kebab-case to snake_case for standard routes
+  const stepName = cleanPath.replace(/-/g, '_') as OnboardingStep;
+
+  // Check if it's a valid step in our progress array
+  if (ONBOARDING_PROGRESS_STEPS.includes(stepName)) {
+    return stepName;
+  }
+
+  // Fallback: return null for unknown routes (progress header will handle gracefully)
   return null;
+}
+
+/**
+ * Get progress step from route path string.
+ * Convenience wrapper for OnboardingProgressHeader.
+ */
+export function getProgressFromRoute(
+  routePath: string,
+  editFromReview?: boolean
+): { step: OnboardingStep | null; percentage: number | null } {
+  const step = routeToStep(routePath, editFromReview);
+  const percentage = step ? getProgressPercentage(step) : null;
+  return { step, percentage };
 }

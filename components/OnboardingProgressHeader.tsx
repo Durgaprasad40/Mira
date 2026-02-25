@@ -1,34 +1,33 @@
 import React from 'react';
 import { View, Text, StyleSheet } from 'react-native';
+import { usePathname, useLocalSearchParams } from 'expo-router';
 import { COLORS } from '@/lib/constants';
-import { useOnboardingStore } from '@/stores/onboardingStore';
-import {
-  getStepNumber,
-  getProgressPercentage,
-  ONBOARDING_TOTAL_STEPS,
-} from '@/lib/onboardingProgress';
+import { getProgressFromRoute } from '@/lib/onboardingProgress';
 
 /**
  * OnboardingProgressHeader - Displays progress bar for onboarding flow.
- * Shows "Step X of Y" on left, percentage on right, with thin progress bar.
+ * Uses current route path for per-screen progress tracking.
+ * When editFromReview=true, keeps progress at 100% (review state).
  */
 export function OnboardingProgressHeader() {
-  const currentStep = useOnboardingStore((state) => state.currentStep);
+  const pathname = usePathname();
+  const params = useLocalSearchParams<{ editFromReview?: string }>();
 
-  const stepNumber = getStepNumber(currentStep);
-  const percentage = getProgressPercentage(currentStep);
+  // Check if editing from review - keep progress at 100%
+  const isEditFromReview = params.editFromReview === 'true';
 
-  // Don't render if step is not in progress flow (e.g., welcome)
-  if (stepNumber === null || percentage === null) {
+  // Get progress based on current route path
+  const { percentage } = getProgressFromRoute(pathname, isEditFromReview);
+
+  // Don't render if route is not in progress flow (e.g., welcome, tutorial)
+  if (percentage === null) {
     return null;
   }
 
   return (
     <View style={styles.container}>
       <View style={styles.textRow}>
-        <Text style={styles.stepText}>
-          Step {stepNumber} of {ONBOARDING_TOTAL_STEPS}
-        </Text>
+        <View />
         <Text style={styles.percentText}>{percentage}%</Text>
       </View>
       <View style={styles.progressBarBackground}>

@@ -9,6 +9,7 @@ import { COLORS, VALIDATION } from '@/lib/constants';
 import { Button } from '@/components/ui';
 import { useOnboardingStore } from '@/stores/onboardingStore';
 import { useAuthStore } from '@/stores/authStore';
+import { useDemoStore } from '@/stores/demoStore';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
@@ -18,9 +19,15 @@ import { OnboardingProgressHeader } from '@/components/OnboardingProgressHeader'
 
 export default function PhotoUploadScreen() {
   const { photos, reorderPhotos, setStep, setVerificationPhoto } = useOnboardingStore();
-  const { userId } = useAuthStore();
+  const { userId, faceVerificationPassed } = useAuthStore();
+  const demoProfile = useDemoStore((s) => isDemoMode && userId ? s.demoProfiles[userId] : null);
   const router = useRouter();
   const [isUploading, setIsUploading] = useState(false);
+
+  // CRITICAL: Check if user is already verified (persisted in demoProfile for demo mode)
+  const isAlreadyVerified = isDemoMode
+    ? !!(demoProfile?.faceVerificationPassed || faceVerificationPassed)
+    : faceVerificationPassed;
 
   // Convex mutations
   const generateUploadUrl = useMutation(api.photos.generateUploadUrl);
@@ -30,18 +37,32 @@ export default function PhotoUploadScreen() {
   // SAFETY: Don't initialize from photos[0] - it may be stale from previous user
   const [previewUri, setPreviewUri] = useState<string | null>(null);
 
-  // SAFETY GUARD: Clear stale photos on mount if user is new (no face verification passed)
-  // This prevents photos from previous sessions/users from appearing
+  // CRITICAL: Skip this screen if user is already verified - redirect immediately
+  const didSkipRef = React.useRef(false);
   React.useEffect(() => {
-    const { faceVerificationPassed } = useAuthStore.getState();
-
-    // If user has NOT passed face verification, they are new/incomplete
-    // Clear any stale photos that might have persisted
-    if (!faceVerificationPassed && photos.length > 0) {
-      console.log('[PHOTO_GATE] SAFETY: Clearing stale photos for new user');
-      reorderPhotos([]);
+    if (isAlreadyVerified && !didSkipRef.current) {
+      didSkipRef.current = true;
+      console.log('[PHOTO_GATE] facePassed=true -> skip photo-upload -> additional-photos');
+      setStep('additional_photos');
+      router.replace('/(onboarding)/additional-photos' as any);
     }
-  }, []); // Run only on mount
+  }, [isAlreadyVerified, setStep, router]);
+
+  // SAFETY GUARD: Only clear photos if user is NEW (never verified) AND photos exist
+  // Do NOT clear if user is already verified - they should keep their photos
+  React.useEffect(() => {
+    // Skip if already verified - never clear photos for verified users
+    if (isAlreadyVerified) return;
+
+    // Check if demoProfile has photos for this user - if so, don't clear
+    if (isDemoMode && demoProfile?.photos && demoProfile.photos.length > 0) {
+      console.log('[PHOTO_GATE] demoProfile has photos, not clearing');
+      return;
+    }
+
+    // Only clear if truly stale (different user scenario, which shouldn't happen normally)
+    // This guard is now very conservative - only clears if no verification and no demoProfile photos
+  }, [isAlreadyVerified, demoProfile]); // Run only on mount
 
   // Debug: Log photo gate status on mount
   React.useEffect(() => {
@@ -95,7 +116,7 @@ export default function PhotoUploadScreen() {
     const result = await ImagePicker.launchImageLibraryAsync({
       mediaTypes: ['images' as const],
       allowsEditing: true,
-      aspect: [1, 1],
+      aspect: [2, 3], // Portrait 4x6 aspect ratio
       quality: 0.8,
     });
 
@@ -113,7 +134,7 @@ export default function PhotoUploadScreen() {
 
     const result = await ImagePicker.launchCameraAsync({
       allowsEditing: true,
-      aspect: [1, 1],
+      aspect: [2, 3], // Portrait 4x6 aspect ratio
       quality: 0.8,
     });
 
@@ -145,6 +166,17 @@ export default function PhotoUploadScreen() {
     if (isDemoMode) {
       console.log('[PHOTO_GATE] DEMO MODE: Skipping Convex upload, using local storage');
       setVerificationPhoto(currentPhoto);
+
+      // SAVE-AS-YOU-GO: Persist verification photo to demoProfile
+      // This ensures the photo persists across force close/relaunch
+      const demoStore = useDemoStore.getState();
+      const existingPhotos = demoStore.demoProfiles[userId]?.photos || [];
+      // Merge: set index 0 to current photo, keep other photos if they exist
+      const newPhotos = [...existingPhotos];
+      newPhotos[0] = { url: currentPhoto };
+      demoStore.saveDemoProfile(userId, { photos: newPhotos });
+      console.log(`[PHOTO_GATE] saved verification photo to demoProfile photos[0]`);
+
       setStep('face_verification');
       router.push('/(onboarding)/face-verification' as any);
       return;

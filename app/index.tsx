@@ -15,10 +15,8 @@ import { markTiming, markDuration } from "@/utils/startupTiming";
 // Boot action types for pure computation (no side effects in useMemo)
 type BootAction =
   | { type: "LOADING" }
-  | { type: "FORCE_WELCOME_LOGOUT"; route: "/(auth)/welcome" }
+  | { type: "FORCE_WELCOME_ONBOARDING_INCOMPLETE"; route: "/(auth)/welcome" }
   | { type: "ROUTE_WELCOME"; route: "/(auth)/welcome" }
-  | { type: "ROUTE_ADDITIONAL"; route: "/(onboarding)/additional-photos" }
-  | { type: "ROUTE_FACE_VERIFICATION"; route: "/(onboarding)/face-verification" }
   | { type: "ROUTE_HOME"; route: "/(main)/(tabs)/home" };
 
 export default function Index() {
@@ -96,22 +94,13 @@ export default function Index() {
     if (isDemoMode) {
       if (currentDemoUserId) {
         const onbComplete = !!demoOnboardingComplete[currentDemoUserId];
-        const facePassed = authBootCacheData.faceVerificationPassed;
 
         if (onbComplete) {
           return { type: "ROUTE_HOME", route: "/(main)/(tabs)/home" };
         }
 
-        // CHECKPOINT SYSTEM: face verification is the strict gate
-        if (facePassed) {
-          return { type: "ROUTE_ADDITIONAL", route: "/(onboarding)/additional-photos" };
-        } else if (authBootCacheData.faceVerificationPending) {
-          // PENDING: User is awaiting manual review — resume at face-verification screen
-          return { type: "ROUTE_FACE_VERIFICATION", route: "/(onboarding)/face-verification" };
-        } else {
-          // Face NOT passed and NOT pending → need to force logout (done in useEffect)
-          return { type: "FORCE_WELCOME_LOGOUT", route: "/(auth)/welcome" };
-        }
+        // ONBOARDING INCOMPLETE: Always route to welcome on cold start (logout first)
+        return { type: "FORCE_WELCOME_ONBOARDING_INCOMPLETE", route: "/(auth)/welcome" };
       }
       return { type: "ROUTE_WELCOME", route: "/(auth)/welcome" };
     }
@@ -125,16 +114,8 @@ export default function Index() {
         return { type: "ROUTE_HOME", route: "/(main)/(tabs)/home" };
       }
 
-      // CHECKPOINT SYSTEM: face verification is the strict gate
-      if (authBootCacheData.faceVerificationPassed) {
-        return { type: "ROUTE_ADDITIONAL", route: "/(onboarding)/additional-photos" };
-      } else if (authBootCacheData.faceVerificationPending) {
-        // PENDING: User is awaiting manual review — resume at face-verification screen
-        return { type: "ROUTE_FACE_VERIFICATION", route: "/(onboarding)/face-verification" };
-      } else {
-        // Face NOT passed and NOT pending → need to force logout (done in useEffect)
-        return { type: "FORCE_WELCOME_LOGOUT", route: "/(auth)/welcome" };
-      }
+      // ONBOARDING INCOMPLETE: Always route to welcome on cold start (logout first)
+      return { type: "FORCE_WELCOME_ONBOARDING_INCOMPLETE", route: "/(auth)/welcome" };
     }
 
     // No valid token → show welcome screen
@@ -144,14 +125,14 @@ export default function Index() {
   // Derive route for use in render (null if loading)
   const routeDestination = bootAction.type === "LOADING" ? null : bootAction.route;
 
-  // SIDE EFFECT: Handle FORCE_WELCOME_LOGOUT (must run in useEffect, not during render)
-  // This logs out the user and navigates to welcome screen
+  // SIDE EFFECT: Handle FORCE_WELCOME_ONBOARDING_INCOMPLETE
+  // Logout and route to welcome when onboarding is not completed
   useEffect(() => {
-    if (bootAction.type !== "FORCE_WELCOME_LOGOUT") return;
+    if (bootAction.type !== "FORCE_WELCOME_ONBOARDING_INCOMPLETE") return;
     if (didForceLogout.current) return; // Guard: only run once
     didForceLogout.current = true;
 
-    if (__DEV__) console.log('[ONB] pre-verify → forcing logout, routing to /(auth)/welcome');
+    if (__DEV__) console.log('[ONB] boot_decision action=FORCE_WELCOME_ONBOARDING_INCOMPLETE → logout + welcome');
     useAuthStore.getState().logout();
     router.replace("/(auth)/welcome");
   }, [bootAction, router]);
@@ -175,8 +156,8 @@ export default function Index() {
     markTiming('boot_caches_ready');
 
     // Restore demo auth session if needed (covers app restart)
-    // Skip if we're forcing logout (face verification not passed)
-    if (isDemoMode && currentDemoUserId && !useAuthStore.getState().isAuthenticated && bootAction.type !== "FORCE_WELCOME_LOGOUT") {
+    // Skip if we're forcing logout (onboarding not completed)
+    if (isDemoMode && currentDemoUserId && !useAuthStore.getState().isAuthenticated && bootAction.type !== "FORCE_WELCOME_ONBOARDING_INCOMPLETE") {
       const onbComplete = !!demoOnboardingComplete[currentDemoUserId];
       useAuthStore.getState().setAuth(currentDemoUserId, 'demo_token', onbComplete);
     }
@@ -190,10 +171,10 @@ export default function Index() {
 
   // IMPERATIVE NAVIGATION for unauthenticated users → welcome screen
   // Uses router.replace() to OVERRIDE any restored navigation state from Expo Go
-  // Skip if FORCE_WELCOME_LOGOUT already handled navigation
+  // Skip if FORCE_WELCOME_ONBOARDING_INCOMPLETE already handled navigation
   useEffect(() => {
     if (!routeDestination || didForceWelcome.current) return;
-    if (bootAction.type === "FORCE_WELCOME_LOGOUT") return; // Already handled above
+    if (bootAction.type === "FORCE_WELCOME_ONBOARDING_INCOMPLETE") return; // Already handled above
 
     if (routeDestination === "/(auth)/welcome") {
       didForceWelcome.current = true;
@@ -212,8 +193,8 @@ export default function Index() {
     );
   }
 
-  // FORCE_WELCOME_LOGOUT: useEffect handles logout + navigation, render nothing
-  if (bootAction.type === "FORCE_WELCOME_LOGOUT") {
+  // FORCE_WELCOME_ONBOARDING_INCOMPLETE: useEffect handles logout + navigation, render nothing
+  if (bootAction.type === "FORCE_WELCOME_ONBOARDING_INCOMPLETE") {
     return null;
   }
 

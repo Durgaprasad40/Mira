@@ -1,15 +1,8 @@
 import React, { useState } from "react";
-import {
-  View,
-  Text,
-  StyleSheet,
-  ScrollView,
-  Dimensions,
-  TouchableOpacity,
-} from "react-native";
+import { View, Text, StyleSheet } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useRouter } from "expo-router";
-import { COLORS, SWIPE_CONFIG } from "@/lib/constants";
+import { COLORS } from "@/lib/constants";
 import { Button } from "@/components/ui";
 import { useOnboardingStore } from "@/stores/onboardingStore";
 import { useAuthStore } from "@/stores/authStore";
@@ -18,9 +11,6 @@ import { LinearGradient } from "expo-linear-gradient";
 import { isDemoMode } from "@/hooks/useConvex";
 import { useDemoStore } from "@/stores/demoStore";
 import { useDemoDmStore } from "@/stores/demoDmStore";
-import { OnboardingProgressHeader } from "@/components/OnboardingProgressHeader";
-
-const { width } = Dimensions.get("window");
 
 export default function TutorialScreen() {
   const router = useRouter();
@@ -91,28 +81,43 @@ export default function TutorialScreen() {
     }
   };
 
-  return (
-    <SafeAreaView style={styles.safeArea} edges={['top']}>
-    <OnboardingProgressHeader />
-    <View style={styles.container}>
-      <LinearGradient
-        colors={[COLORS.primary, COLORS.secondary]}
-        style={styles.gradient}
-      >
-        <View style={styles.header} />
+  // Get gesture helper text for current step
+  const getGestureText = () => {
+    switch (steps[currentStep].gesture) {
+      case "right": return "Swipe Right →";
+      case "left": return "← Swipe Left";
+      case "up": return "↑ Swipe Up";
+      case "tap": return "Tap to View";
+      default: return "";
+    }
+  };
 
+  // Get arrow icon for current step
+  const getArrowIcon = () => {
+    switch (steps[currentStep].gesture) {
+      case "right": return "arrow-forward";
+      case "left": return "arrow-back";
+      case "up": return "arrow-up";
+      case "tap": return "hand-left";
+      default: return "arrow-forward";
+    }
+  };
+
+  return (
+    <LinearGradient
+      colors={[COLORS.primary, COLORS.secondary]}
+      style={styles.gradient}
+    >
+      <SafeAreaView style={styles.safeArea} edges={['top', 'bottom']}>
+        {/* Content area - centered */}
         <View style={styles.content}>
+          {/* Icon with high contrast background */}
           <View style={styles.iconContainer}>
-            <View
-              style={[
-                styles.iconCircle,
-                { backgroundColor: steps[currentStep].color + "40" },
-              ]}
-            >
+            <View style={styles.iconCircle}>
               <Ionicons
                 name={steps[currentStep].icon as any}
-                size={64}
-                color={steps[currentStep].color}
+                size={56}
+                color={COLORS.white}
               />
             </View>
           </View>
@@ -122,50 +127,19 @@ export default function TutorialScreen() {
             {steps[currentStep].description}
           </Text>
 
+          {/* Gesture demo card */}
           <View style={styles.gestureDemo}>
-            {steps[currentStep].gesture === "right" && (
-              <View style={styles.swipeDemo}>
-                <View style={styles.card}>
-                  <Ionicons
-                    name="arrow-forward"
-                    size={32}
-                    color={COLORS.like}
-                  />
-                </View>
-                <Text style={styles.gestureText}>Swipe Right →</Text>
-              </View>
-            )}
-            {steps[currentStep].gesture === "left" && (
-              <View style={styles.swipeDemo}>
-                <View style={styles.card}>
-                  <Ionicons name="arrow-back" size={32} color={COLORS.pass} />
-                </View>
-                <Text style={styles.gestureText}>← Swipe Left</Text>
-              </View>
-            )}
-            {steps[currentStep].gesture === "up" && (
-              <View style={styles.swipeDemo}>
-                <View style={styles.card}>
-                  <Ionicons
-                    name="arrow-up"
-                    size={32}
-                    color={COLORS.superLike}
-                  />
-                </View>
-                <Text style={styles.gestureText}>↑ Swipe Up</Text>
-              </View>
-            )}
-            {steps[currentStep].gesture === "tap" && (
-              <View style={styles.swipeDemo}>
-                <View style={styles.card}>
-                  <Ionicons name="hand-left" size={32} color={COLORS.primary} />
-                </View>
-                <Text style={styles.gestureText}>Tap to View</Text>
-              </View>
-            )}
+            <View style={styles.card}>
+              <Ionicons
+                name={getArrowIcon() as any}
+                size={28}
+                color={steps[currentStep].color}
+              />
+            </View>
           </View>
         </View>
 
+        {/* Footer - stacked: dots, helper text, button */}
         <View style={styles.footer}>
           <View style={styles.dots}>
             {steps.map((_, index) => (
@@ -176,6 +150,8 @@ export default function TutorialScreen() {
             ))}
           </View>
 
+          <Text style={styles.gestureText}>{getGestureText()}</Text>
+
           <Button
             title={currentStep === steps.length - 1 ? "Get Started" : "Next"}
             variant="primary"
@@ -185,27 +161,17 @@ export default function TutorialScreen() {
             textStyle={styles.nextButtonText}
           />
         </View>
-      </LinearGradient>
-    </View>
-    </SafeAreaView>
+      </SafeAreaView>
+    </LinearGradient>
   );
 }
 
 const styles = StyleSheet.create({
-  safeArea: {
-    flex: 1,
-    backgroundColor: COLORS.background,
-  },
-  container: {
-    flex: 1,
-  },
   gradient: {
     flex: 1,
   },
-  header: {
-    paddingTop: 60,
-    paddingHorizontal: 24,
-    alignItems: "flex-end",
+  safeArea: {
+    flex: 1,
   },
   content: {
     flex: 1,
@@ -214,69 +180,69 @@ const styles = StyleSheet.create({
     paddingHorizontal: 24,
   },
   iconContainer: {
-    marginBottom: 40,
+    marginBottom: 24,
   },
   iconCircle: {
-    width: 120,
-    height: 120,
-    borderRadius: 60,
+    width: 100,
+    height: 100,
+    borderRadius: 50,
     alignItems: "center",
     justifyContent: "center",
+    backgroundColor: "rgba(255, 255, 255, 0.25)",
   },
   title: {
-    fontSize: 32,
+    fontSize: 28,
     fontWeight: "700",
     color: COLORS.white,
-    marginBottom: 16,
+    marginBottom: 12,
     textAlign: "center",
   },
   description: {
-    fontSize: 18,
+    fontSize: 16,
     color: COLORS.white,
     textAlign: "center",
-    lineHeight: 26,
+    lineHeight: 24,
     opacity: 0.9,
+    paddingHorizontal: 16,
   },
   gestureDemo: {
-    marginTop: 60,
-    alignItems: "center",
-  },
-  swipeDemo: {
+    marginTop: 32,
     alignItems: "center",
   },
   card: {
-    width: 200,
-    height: 300,
-    borderRadius: 20,
-    backgroundColor: COLORS.white + "20",
+    width: 160,
+    height: 220,
+    borderRadius: 16,
+    backgroundColor: "rgba(255, 255, 255, 0.2)",
     alignItems: "center",
     justifyContent: "center",
-    marginBottom: 20,
-  },
-  gestureText: {
-    fontSize: 18,
-    color: COLORS.white,
-    fontWeight: "600",
   },
   footer: {
-    padding: 24,
-    paddingBottom: 40,
+    paddingHorizontal: 24,
+    paddingBottom: 16,
   },
   dots: {
     flexDirection: "row",
     justifyContent: "center",
     gap: 8,
-    marginBottom: 24,
+    marginBottom: 16,
   },
   dot: {
     width: 8,
     height: 8,
     borderRadius: 4,
-    backgroundColor: COLORS.white + "40",
+    backgroundColor: "rgba(255, 255, 255, 0.4)",
   },
   dotActive: {
     backgroundColor: COLORS.white,
     width: 24,
+  },
+  gestureText: {
+    fontSize: 16,
+    color: COLORS.white,
+    fontWeight: "600",
+    textAlign: "center",
+    marginBottom: 16,
   },
   nextButton: {
     backgroundColor: COLORS.white,

@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useEffect } from "react";
 import {
   View,
   Text,
@@ -7,7 +7,7 @@ import {
   TouchableOpacity,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { useRouter } from "expo-router";
+import { useRouter, useLocalSearchParams } from "expo-router";
 import {
   COLORS,
   EDUCATION_OPTIONS,
@@ -15,6 +15,9 @@ import {
 } from "@/lib/constants";
 import { Button } from "@/components/ui";
 import { useOnboardingStore } from "@/stores/onboardingStore";
+import { useDemoStore } from "@/stores/demoStore";
+import { useAuthStore } from "@/stores/authStore";
+import { isDemoMode } from "@/hooks/useConvex";
 import { OnboardingProgressHeader } from "@/components/OnboardingProgressHeader";
 
 export default function ProfileDetailsEducationReligionScreen() {
@@ -25,9 +28,53 @@ export default function ProfileDetailsEducationReligionScreen() {
     setReligion,
     setStep,
   } = useOnboardingStore();
+  const { userId } = useAuthStore();
+  const demoHydrated = useDemoStore((s) => s._hasHydrated);
+  const demoProfile = useDemoStore((s) =>
+    isDemoMode && userId ? s.demoProfiles[userId] : null
+  );
   const router = useRouter();
+  const params = useLocalSearchParams<{ editFromReview?: string }>();
+
+  // CENTRAL EDIT HUB: Detect if editing from Review screen
+  const isEditFromReview = params.editFromReview === 'true';
+
+  // Prefill from demoProfiles if onboardingStore is empty
+  useEffect(() => {
+    if (isDemoMode && demoHydrated && demoProfile) {
+      let loaded = false;
+      if (demoProfile.education && !education) {
+        setEducation(demoProfile.education as any);
+        loaded = true;
+      }
+      if (demoProfile.religion && !religion) {
+        setReligion(demoProfile.religion as any);
+        loaded = true;
+      }
+      if (loaded) console.log('[EDUCATION] prefilled education/religion from demoProfile');
+    }
+  }, [demoHydrated, demoProfile]);
 
   const handleContinue = () => {
+    // SAVE-AS-YOU-GO: Persist to demoProfiles immediately
+    if (isDemoMode && userId) {
+      const demoStore = useDemoStore.getState();
+      const dataToSave: Record<string, any> = {};
+      if (education) dataToSave.education = education;
+      if (religion) dataToSave.religion = religion;
+      if (Object.keys(dataToSave).length > 0) {
+        demoStore.saveDemoProfile(userId, dataToSave);
+        console.log(`[EDUCATION] saved: ${JSON.stringify(dataToSave)}`);
+      }
+    }
+
+    // CENTRAL EDIT HUB: Return to Review if editing from there
+    if (isEditFromReview) {
+      if (__DEV__) console.log('[ONB] profile-details/education-religion → review (editFromReview)');
+      router.replace('/(onboarding)/review' as any);
+      return;
+    }
+
     if (__DEV__) console.log('[ONB] profile-details/education-religion → preferences (continue)');
     setStep("preferences");
     router.push("/(onboarding)/preferences");

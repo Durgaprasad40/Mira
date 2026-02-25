@@ -25,7 +25,7 @@ import {
   RELIGION_OPTIONS,
 } from "@/lib/constants";
 import { Button } from "@/components/ui";
-import { useOnboardingStore } from "@/stores/onboardingStore";
+import { useOnboardingStore, LGBTQ_OPTIONS } from "@/stores/onboardingStore";
 import { useMutation } from "convex/react";
 import { api } from "@/convex/_generated/api";
 import { useAuthStore } from "@/stores/authStore";
@@ -51,8 +51,11 @@ function parseDOBString(dobString: string): Date {
 export default function ReviewScreen() {
   const {
     name,
+    nickname,
     dateOfBirth,
     gender,
+    lgbtqSelf,
+    lgbtqPreference,
     photos,
     bio,
     height,
@@ -64,6 +67,7 @@ export default function ReviewScreen() {
     pets,
     insect,
     education,
+    educationOther,
     religion,
     jobTitle,
     company,
@@ -75,18 +79,27 @@ export default function ReviewScreen() {
     minAge,
     maxAge,
     maxDistance,
+    displayPhotoVariant,
     setStep,
   } = useOnboardingStore();
   const router = useRouter();
   const { userId, setOnboardingCompleted, faceVerificationPassed } = useAuthStore();
+  const demoProfile = useDemoStore((s) => isDemoMode && userId ? s.demoProfiles[userId] : null);
+
+  // CRITICAL: Check demoProfile.faceVerificationPassed for demo mode (persisted across logout)
+  const isVerified = isDemoMode
+    ? !!(demoProfile?.faceVerificationPassed || faceVerificationPassed)
+    : faceVerificationPassed;
 
   // CHECKPOINT GATE: Block access if face verification not completed
   React.useEffect(() => {
-    if (!faceVerificationPassed) {
-      console.log("[REVIEW_GATE] blocked: faceVerificationPassed=false");
-      router.replace("/(onboarding)/face-verification" as any);
+    if (isVerified) {
+      console.log("[REVIEW_GATE] verified=true -> allow");
+      return;
     }
-  }, [faceVerificationPassed, router]);
+    console.log("[REVIEW_GATE] verified=false -> block");
+    router.replace("/(onboarding)/face-verification" as any);
+  }, [isVerified, router]);
   const [isSubmitting, setIsSubmitting] = React.useState(false);
   const [uploadProgress, setUploadProgress] = React.useState("");
 
@@ -169,10 +182,11 @@ export default function ReviewScreen() {
         const demoStore = useDemoStore.getState();
         // Filter out null slots for display/storage
         const validPhotos = photos.filter((p): p is string => p !== null && p !== '');
-        demoStore.saveDemoProfile(userId, {
-          name,
-          dateOfBirth,
-          gender: gender ?? undefined,
+
+        // Build profile data, only including basic fields if they're not empty
+        // This prevents overwriting existing demoProfile data with empty values
+        // if onboardingStore was reset (e.g., after forced logout)
+        const profileData: any = {
           bio,
           photos: validPhotos.map((uri) => ({ url: uri })),
           height,
@@ -195,7 +209,18 @@ export default function ReviewScreen() {
           minAge,
           maxAge,
           maxDistance,
-        });
+        };
+
+        // Only include basic fields if they have values (don't overwrite with empty)
+        if (name && name.trim().length > 0) profileData.name = name.trim();
+        if (nickname && nickname.length > 0) profileData.handle = nickname;
+        if (dateOfBirth && dateOfBirth.length > 0) profileData.dateOfBirth = dateOfBirth;
+        if (gender) profileData.gender = gender;
+        // LGBTQ fields are optional - only save if user selected any
+        if (lgbtqSelf.length > 0) profileData.lgbtqSelf = lgbtqSelf;
+        if (lgbtqPreference.length > 0) profileData.lgbtqPreference = lgbtqPreference;
+
+        demoStore.saveDemoProfile(userId, profileData);
         // OB-4: Profile saved, but completion flags set ONLY in tutorial.tsx after user finishes tutorial
         setStep("tutorial");
         router.push("/(onboarding)/tutorial" as any);
@@ -309,8 +334,11 @@ export default function ReviewScreen() {
   };
 
   const handleEdit = (step: string) => {
-    setStep(step as any);
-    router.push(`/(onboarding)/${step}` as any);
+    // CENTRAL EDIT HUB: All edits from Review pass editFromReview=true
+    // so each screen knows to:
+    // 1. Pre-fill from demoProfile
+    // 2. Return directly to Review on Continue (not continue through onboarding flow)
+    router.push(`/(onboarding)/${step}?editFromReview=true` as any);
   };
 
   // Filter valid photos for display
@@ -346,7 +374,16 @@ export default function ReviewScreen() {
             style={styles.photosScroll}
           >
             {validPhotos.map((uri, index) => (
-              <Image key={index} source={{ uri }} style={styles.photoThumbnail} />
+              <View key={index} style={styles.photoWrapper}>
+                <Image source={{ uri }} style={styles.photoThumbnail} />
+                {index === 0 && displayPhotoVariant !== 'original' && (
+                  <View style={styles.variantBadge}>
+                    <Text style={styles.variantBadgeText}>
+                      {displayPhotoVariant === 'blurred' ? 'Blurred' : 'Cartoon'}
+                    </Text>
+                  </View>
+                )}
+              </View>
             ))}
           </ScrollView>
         ) : (
@@ -354,7 +391,7 @@ export default function ReviewScreen() {
         )}
       </View>
 
-      {/* Basic Info Section */}
+      {/* Basic Info Section - Name, Handle, Age, Gender, LGBTQ Identity */}
       <View style={styles.section}>
         <View style={styles.sectionHeader}>
           <Text style={styles.sectionTitle}>Basic Info</Text>
@@ -364,198 +401,152 @@ export default function ReviewScreen() {
         </View>
         <View style={styles.infoRow}>
           <Text style={styles.infoLabel}>Name:</Text>
-          <Text style={styles.infoValue}>{name || "Not set"}</Text>
+          <Text style={styles.infoValue}>{name || demoProfile?.name || "Not set"}</Text>
+        </View>
+        <View style={styles.infoRow}>
+          <Text style={styles.infoLabel}>User ID:</Text>
+          <Text style={styles.infoValue}>@{nickname || demoProfile?.handle || "—"}</Text>
         </View>
         <View style={styles.infoRow}>
           <Text style={styles.infoLabel}>Age:</Text>
           <Text style={styles.infoValue}>
-            {dateOfBirth ? calculateAge(dateOfBirth) : "N/A"}
+            {(dateOfBirth || demoProfile?.dateOfBirth) ? calculateAge(dateOfBirth || demoProfile?.dateOfBirth || "") : "N/A"}
           </Text>
         </View>
         <View style={styles.infoRow}>
           <Text style={styles.infoLabel}>Gender:</Text>
           <Text style={styles.infoValue}>
-            {gender ? GENDER_OPTIONS.find((g) => g.value === gender)?.label : "Not set"}
+            {(gender || demoProfile?.gender) ? GENDER_OPTIONS.find((g) => g.value === (gender || demoProfile?.gender))?.label : "Not set"}
           </Text>
         </View>
-        {height && (
-          <View style={styles.infoRow}>
-            <Text style={styles.infoLabel}>Height:</Text>
-            <Text style={styles.infoValue}>{height} cm</Text>
-          </View>
-        )}
-        {weight && (
-          <View style={styles.infoRow}>
-            <Text style={styles.infoLabel}>Weight:</Text>
-            <Text style={styles.infoValue}>{weight} kg</Text>
-          </View>
-        )}
+        <View style={styles.infoRow}>
+          <Text style={styles.infoLabel}>LGBTQ (Identity):</Text>
+          <Text style={styles.infoValue}>
+            {(() => {
+              const values = lgbtqSelf.length > 0 ? lgbtqSelf : (demoProfile?.lgbtqSelf || []);
+              if (values.length === 0) return "–";
+              return values.map((v: string) => LGBTQ_OPTIONS.find((o) => o.value === v)?.label || v).join(", ");
+            })()}
+          </Text>
+        </View>
       </View>
 
-      {/* Profile Details Section */}
-      {(jobTitle || company || school || education || religion) && (
-        <View style={styles.section}>
-          <View style={styles.sectionHeader}>
-            <Text style={styles.sectionTitle}>Profile Details</Text>
-            <TouchableOpacity onPress={() => handleEdit("profile-details")}>
-              <Text style={styles.editLink}>Edit</Text>
-            </TouchableOpacity>
-          </View>
-          {jobTitle && (
-            <View style={styles.infoRow}>
-              <Text style={styles.infoLabel}>Job Title:</Text>
-              <Text style={styles.infoValue}>{jobTitle}</Text>
-            </View>
-          )}
-          {company && (
-            <View style={styles.infoRow}>
-              <Text style={styles.infoLabel}>Company:</Text>
-              <Text style={styles.infoValue}>{company}</Text>
-            </View>
-          )}
-          {school && (
-            <View style={styles.infoRow}>
-              <Text style={styles.infoLabel}>School:</Text>
-              <Text style={styles.infoValue}>{school}</Text>
-            </View>
-          )}
-          {education && (
-            <View style={styles.infoRow}>
-              <Text style={styles.infoLabel}>Education:</Text>
-              <Text style={styles.infoValue}>{getLabel(EDUCATION_OPTIONS, education)}</Text>
-            </View>
-          )}
-          {religion && (
-            <View style={styles.infoRow}>
-              <Text style={styles.infoLabel}>Religion:</Text>
-              <Text style={styles.infoValue}>{getLabel(RELIGION_OPTIONS, religion)}</Text>
-            </View>
-          )}
-        </View>
-      )}
-
-      {/* Lifestyle Section */}
-      {(smoking || drinking || kids || exercise || pets.length > 0) && (
-        <View style={styles.section}>
-          <View style={styles.sectionHeader}>
-            <Text style={styles.sectionTitle}>Lifestyle</Text>
-            <TouchableOpacity onPress={() => handleEdit("profile-details/lifestyle")}>
-              <Text style={styles.editLink}>Edit</Text>
-            </TouchableOpacity>
-          </View>
-          {smoking && (
-            <View style={styles.infoRow}>
-              <Text style={styles.infoLabel}>Smoking:</Text>
-              <Text style={styles.infoValue}>{getLabel(SMOKING_OPTIONS, smoking)}</Text>
-            </View>
-          )}
-          {drinking && (
-            <View style={styles.infoRow}>
-              <Text style={styles.infoLabel}>Drinking:</Text>
-              <Text style={styles.infoValue}>{getLabel(DRINKING_OPTIONS, drinking)}</Text>
-            </View>
-          )}
-          {kids && (
-            <View style={styles.infoRow}>
-              <Text style={styles.infoLabel}>Kids:</Text>
-              <Text style={styles.infoValue}>{getLabel(KIDS_OPTIONS, kids)}</Text>
-            </View>
-          )}
-          {exercise && (
-            <View style={styles.infoRow}>
-              <Text style={styles.infoLabel}>Exercise:</Text>
-              <Text style={styles.infoValue}>{getLabel(EXERCISE_OPTIONS, exercise)}</Text>
-            </View>
-          )}
-          {pets.length > 0 && (
-            <View style={styles.infoRow}>
-              <Text style={styles.infoLabel}>Pets:</Text>
-              <Text style={styles.infoValue}>
-                {pets.map((p) => PETS_OPTIONS.find((o) => o.value === p)?.label ?? p).join(", ")}
-              </Text>
-            </View>
-          )}
-        </View>
-      )}
-
-      {/* Bio Section */}
+      {/* Photos & Bio Section */}
       <View style={styles.section}>
         <View style={styles.sectionHeader}>
-          <Text style={styles.sectionTitle}>Bio</Text>
-          <TouchableOpacity onPress={() => handleEdit("bio")}>
+          <Text style={styles.sectionTitle}>Photos & Bio</Text>
+          <TouchableOpacity onPress={() => handleEdit("additional-photos")}>
             <Text style={styles.editLink}>Edit</Text>
           </TouchableOpacity>
         </View>
-        <Text style={styles.bioText}>{bio || "No bio added"}</Text>
+        <Text style={styles.bioText}>{bio || demoProfile?.bio || "No bio added"}</Text>
       </View>
 
       {/* Prompts Section */}
-      {profilePrompts.length > 0 && (
-        <View style={styles.section}>
-          <View style={styles.sectionHeader}>
-            <Text style={styles.sectionTitle}>Prompts</Text>
-            <TouchableOpacity onPress={() => handleEdit("prompts")}>
-              <Text style={styles.editLink}>Edit</Text>
-            </TouchableOpacity>
-          </View>
-          {profilePrompts.map((prompt, index) => (
+      <View style={styles.section}>
+        <View style={styles.sectionHeader}>
+          <Text style={styles.sectionTitle}>Prompts</Text>
+          <TouchableOpacity onPress={() => handleEdit("prompts")}>
+            <Text style={styles.editLink}>Edit</Text>
+          </TouchableOpacity>
+        </View>
+        {(profilePrompts.length > 0 || (demoProfile?.profilePrompts && demoProfile.profilePrompts.length > 0)) ? (
+          (profilePrompts.length > 0 ? profilePrompts : demoProfile?.profilePrompts || []).map((prompt, index) => (
             <View key={index} style={styles.promptItem}>
               <Text style={styles.promptQuestion}>{prompt.question}</Text>
               <Text style={styles.promptAnswer}>{prompt.answer}</Text>
             </View>
-          ))}
-        </View>
-      )}
+          ))
+        ) : (
+          <Text style={styles.emptyText}>No prompts added</Text>
+        )}
+      </View>
 
-      {/* Relationship Intent Section */}
-      {relationshipIntent.length > 0 && (
-        <View style={styles.section}>
-          <View style={styles.sectionHeader}>
-            <Text style={styles.sectionTitle}>Relationship Goals</Text>
-            <TouchableOpacity onPress={() => handleEdit("preferences")}>
-              <Text style={styles.editLink}>Edit</Text>
-            </TouchableOpacity>
-          </View>
-          <View style={styles.chipsContainer}>
-            {relationshipIntent.map((intent) => {
-              const intentObj = RELATIONSHIP_INTENTS.find((r) => r.value === intent);
-              return (
-                <View key={intent} style={styles.chip}>
-                  <Text style={styles.chipText}>
-                    {intentObj?.emoji} {intentObj?.label}
-                  </Text>
-                </View>
-              );
-            })}
-          </View>
+      {/* Profile Details Section - Height, Weight, Job, Company, School, Education, Religion */}
+      <View style={styles.section}>
+        <View style={styles.sectionHeader}>
+          <Text style={styles.sectionTitle}>Profile Details</Text>
+          <TouchableOpacity onPress={() => handleEdit("profile-details")}>
+            <Text style={styles.editLink}>Edit</Text>
+          </TouchableOpacity>
         </View>
-      )}
-
-      {/* Interests Section */}
-      {activities.length > 0 && (
-        <View style={styles.section}>
-          <View style={styles.sectionHeader}>
-            <Text style={styles.sectionTitle}>Interests</Text>
-            <TouchableOpacity onPress={() => handleEdit("preferences")}>
-              <Text style={styles.editLink}>Edit</Text>
-            </TouchableOpacity>
-          </View>
-          <View style={styles.chipsContainer}>
-            {activities.map((activity) => {
-              const activityObj = ACTIVITY_FILTERS.find((a) => a.value === activity);
-              return (
-                <View key={activity} style={styles.chip}>
-                  <Text style={styles.chipText}>
-                    {activityObj?.emoji} {activityObj?.label}
-                  </Text>
-                </View>
-              );
-            })}
-          </View>
+        <View style={styles.infoRow}>
+          <Text style={styles.infoLabel}>Height:</Text>
+          <Text style={styles.infoValue}>{(height || demoProfile?.height) ? `${height || demoProfile?.height} cm` : "–"}</Text>
         </View>
-      )}
+        <View style={styles.infoRow}>
+          <Text style={styles.infoLabel}>Weight:</Text>
+          <Text style={styles.infoValue}>{(weight || demoProfile?.weight) ? `${weight || demoProfile?.weight} kg` : "–"}</Text>
+        </View>
+        <View style={styles.infoRow}>
+          <Text style={styles.infoLabel}>Job Title:</Text>
+          <Text style={styles.infoValue}>{jobTitle || demoProfile?.jobTitle || "–"}</Text>
+        </View>
+        <View style={styles.infoRow}>
+          <Text style={styles.infoLabel}>Company:</Text>
+          <Text style={styles.infoValue}>{company || demoProfile?.company || "–"}</Text>
+        </View>
+        <View style={styles.infoRow}>
+          <Text style={styles.infoLabel}>School:</Text>
+          <Text style={styles.infoValue}>{school || demoProfile?.school || "–"}</Text>
+        </View>
+        <View style={styles.infoRow}>
+          <Text style={styles.infoLabel}>Education:</Text>
+          <Text style={styles.infoValue}>
+            {(() => {
+              const eduValue = education || demoProfile?.education || null;
+              if (!eduValue) return "–";
+              if (eduValue === 'other') {
+                const otherText = educationOther || demoProfile?.educationOther || '';
+                return otherText ? `Other: ${otherText}` : 'Other';
+              }
+              return getLabel(EDUCATION_OPTIONS, eduValue) || "–";
+            })()}
+          </Text>
+        </View>
+        <View style={styles.infoRow}>
+          <Text style={styles.infoLabel}>Religion:</Text>
+          <Text style={styles.infoValue}>{getLabel(RELIGION_OPTIONS, religion || demoProfile?.religion || null) || "–"}</Text>
+        </View>
+      </View>
 
-      {/* Looking For Section */}
+      {/* Lifestyle Section */}
+      <View style={styles.section}>
+        <View style={styles.sectionHeader}>
+          <Text style={styles.sectionTitle}>Lifestyle</Text>
+          <TouchableOpacity onPress={() => handleEdit("profile-details/lifestyle")}>
+            <Text style={styles.editLink}>Edit</Text>
+          </TouchableOpacity>
+        </View>
+        <View style={styles.infoRow}>
+          <Text style={styles.infoLabel}>Smoking:</Text>
+          <Text style={styles.infoValue}>{getLabel(SMOKING_OPTIONS, smoking || demoProfile?.smoking || null) || "–"}</Text>
+        </View>
+        <View style={styles.infoRow}>
+          <Text style={styles.infoLabel}>Drinking:</Text>
+          <Text style={styles.infoValue}>{getLabel(DRINKING_OPTIONS, drinking || demoProfile?.drinking || null) || "–"}</Text>
+        </View>
+        <View style={styles.infoRow}>
+          <Text style={styles.infoLabel}>Kids:</Text>
+          <Text style={styles.infoValue}>{getLabel(KIDS_OPTIONS, kids || demoProfile?.kids || null) || "–"}</Text>
+        </View>
+        <View style={styles.infoRow}>
+          <Text style={styles.infoLabel}>Exercise:</Text>
+          <Text style={styles.infoValue}>{getLabel(EXERCISE_OPTIONS, exercise || demoProfile?.exercise || null) || "–"}</Text>
+        </View>
+        <View style={styles.infoRow}>
+          <Text style={styles.infoLabel}>Pets:</Text>
+          <Text style={styles.infoValue}>
+            {(() => {
+              const petsData = pets.length > 0 ? pets : (demoProfile?.pets || []);
+              if (petsData.length === 0) return "–";
+              return petsData.map((p) => PETS_OPTIONS.find((o) => o.value === p)?.label ?? p).join(", ");
+            })()}
+          </Text>
+        </View>
+      </View>
+
+      {/* Looking For Section - Gender Preference, LGBTQ Preference, Age, Distance */}
       <View style={styles.section}>
         <View style={styles.sectionHeader}>
           <Text style={styles.sectionTitle}>Looking For</Text>
@@ -563,25 +554,90 @@ export default function ReviewScreen() {
             <Text style={styles.editLink}>Edit</Text>
           </TouchableOpacity>
         </View>
-        {lookingFor.length > 0 ? (
-          <View style={styles.chipsContainer}>
-            {lookingFor.map((g) => (
-              <View key={g} style={styles.chip}>
-                <Text style={styles.chipText}>
-                  {GENDER_OPTIONS.find((opt) => opt.value === g)?.label}
-                </Text>
-              </View>
-            ))}
-          </View>
-        ) : (
-          <Text style={styles.emptyText}>Not specified</Text>
-        )}
-        <Text style={styles.preferenceText}>
-          Age: {minAge} - {maxAge} years
-        </Text>
-        <Text style={styles.preferenceText}>
-          Distance: Up to {maxDistance} miles
-        </Text>
+        <View style={styles.infoRow}>
+          <Text style={styles.infoLabel}>Gender:</Text>
+          <Text style={styles.infoValue}>
+            {(() => {
+              const lookingForData = lookingFor.length > 0 ? lookingFor : (demoProfile?.lookingFor || []);
+              if (lookingForData.length === 0) return "–";
+              return lookingForData.map((g) => GENDER_OPTIONS.find((opt) => opt.value === g)?.label || g).join(", ");
+            })()}
+          </Text>
+        </View>
+        <View style={styles.infoRow}>
+          <Text style={styles.infoLabel}>LGBTQ (Preference):</Text>
+          <Text style={styles.infoValue}>
+            {(() => {
+              const values = lgbtqPreference.length > 0 ? lgbtqPreference : (demoProfile?.lgbtqPreference || []);
+              if (values.length === 0) return "–";
+              return values.map((v: string) => LGBTQ_OPTIONS.find((o) => o.value === v)?.label || v).join(", ");
+            })()}
+          </Text>
+        </View>
+        <View style={styles.infoRow}>
+          <Text style={styles.infoLabel}>Age Range:</Text>
+          <Text style={styles.infoValue}>{minAge || demoProfile?.minAge || 18} - {maxAge || demoProfile?.maxAge || 70} years</Text>
+        </View>
+        <View style={styles.infoRow}>
+          <Text style={styles.infoLabel}>Distance:</Text>
+          <Text style={styles.infoValue}>Up to {maxDistance || demoProfile?.maxDistance || 50} miles</Text>
+        </View>
+      </View>
+
+      {/* Relationship Goals Section */}
+      <View style={styles.section}>
+        <View style={styles.sectionHeader}>
+          <Text style={styles.sectionTitle}>Relationship Goals</Text>
+          <TouchableOpacity onPress={() => handleEdit("preferences")}>
+            <Text style={styles.editLink}>Edit</Text>
+          </TouchableOpacity>
+        </View>
+        {(() => {
+          const intentData = relationshipIntent.length > 0 ? relationshipIntent : (demoProfile?.relationshipIntent || []);
+          if (intentData.length === 0) return <Text style={styles.emptyText}>Not specified</Text>;
+          return (
+            <View style={styles.chipsContainer}>
+              {intentData.map((intent) => {
+                const intentObj = RELATIONSHIP_INTENTS.find((r) => r.value === intent);
+                return (
+                  <View key={intent} style={styles.chip}>
+                    <Text style={styles.chipText}>
+                      {intentObj?.emoji} {intentObj?.label}
+                    </Text>
+                  </View>
+                );
+              })}
+            </View>
+          );
+        })()}
+      </View>
+
+      {/* Interests Section */}
+      <View style={styles.section}>
+        <View style={styles.sectionHeader}>
+          <Text style={styles.sectionTitle}>Interests</Text>
+          <TouchableOpacity onPress={() => handleEdit("preferences")}>
+            <Text style={styles.editLink}>Edit</Text>
+          </TouchableOpacity>
+        </View>
+        {(() => {
+          const activitiesData = activities.length > 0 ? activities : (demoProfile?.activities || []);
+          if (activitiesData.length === 0) return <Text style={styles.emptyText}>No interests selected</Text>;
+          return (
+            <View style={styles.chipsContainer}>
+              {activitiesData.map((activity) => {
+                const activityObj = ACTIVITY_FILTERS.find((a) => a.value === activity);
+                return (
+                  <View key={activity} style={styles.chip}>
+                    <Text style={styles.chipText}>
+                      {activityObj?.emoji} {activityObj?.label}
+                    </Text>
+                  </View>
+                );
+              })}
+            </View>
+          );
+        })()}
       </View>
 
       {/* Footer */}
@@ -658,11 +714,30 @@ const styles = StyleSheet.create({
   photosScroll: {
     marginTop: 12,
   },
+  photoWrapper: {
+    position: 'relative',
+    marginRight: 12,
+  },
   photoThumbnail: {
     width: 80,
-    height: 80,
+    height: 120,
     borderRadius: 12,
-    marginRight: 12,
+  },
+  variantBadge: {
+    position: 'absolute',
+    bottom: 4,
+    left: 4,
+    right: 4,
+    backgroundColor: COLORS.primary + 'E0',
+    borderRadius: 6,
+    paddingVertical: 2,
+    paddingHorizontal: 4,
+    alignItems: 'center',
+  },
+  variantBadgeText: {
+    fontSize: 9,
+    fontWeight: '600',
+    color: COLORS.white,
   },
   infoRow: {
     flexDirection: "row",

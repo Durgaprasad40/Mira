@@ -13,11 +13,15 @@ import {
   useWindowDimensions,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { useRouter } from 'expo-router';
+import { useRouter, useLocalSearchParams } from 'expo-router';
 import { COLORS, GENDER_OPTIONS, RELATIONSHIP_INTENTS, ACTIVITY_FILTERS } from '@/lib/constants';
 import { Input, Button } from '@/components/ui';
 import { Toast } from '@/components/ui/Toast';
-import { useOnboardingStore } from '@/stores/onboardingStore';
+import { useOnboardingStore, LGBTQ_OPTIONS, LgbtqOption } from '@/stores/onboardingStore';
+import { useDemoStore } from '@/stores/demoStore';
+import { useAuthStore } from '@/stores/authStore';
+// FIX: Import faceVerificationPassed to skip verification if already passed
+import { isDemoMode } from '@/hooks/useConvex';
 import type { Gender, ActivityFilter, RelationshipIntent } from '@/types';
 import { OnboardingProgressHeader } from '@/components/OnboardingProgressHeader';
 
@@ -32,25 +36,40 @@ const DISTANCE_DEFAULT = 50;
 
 const MIN_INTERESTS = 3;
 const MAX_INTERESTS = 7;
+const MAX_RELATIONSHIP_INTENTS = 3;
 
 export default function PreferencesScreen() {
   const {
     lookingFor,
     relationshipIntent,
     activities,
+    lgbtqPreference,
     minAge,
     maxAge,
     maxDistance,
     toggleLookingFor,
     toggleRelationshipIntent,
     toggleActivity,
+    toggleLgbtqPreference,
     setActivities,
     setMinAge,
     setMaxAge,
     setMaxDistance,
+    setLookingFor,
+    setRelationshipIntent,
+    setLgbtqPreference,
     setStep,
   } = useOnboardingStore();
+  const { userId, faceVerificationPassed } = useAuthStore();
+  const demoHydrated = useDemoStore((s) => s._hasHydrated);
+  const demoProfile = useDemoStore((s) =>
+    isDemoMode && userId ? s.demoProfiles[userId] : null
+  );
   const router = useRouter();
+  const params = useLocalSearchParams<{ editFromReview?: string }>();
+
+  // CENTRAL EDIT HUB: Detect if editing from Review screen
+  const isEditFromReview = params.editFromReview === 'true';
   const scrollRef = useRef<ScrollView>(null);
   const distanceSectionRef = useRef<View>(null);
   const interestsSectionRef = useRef<View>(null);
@@ -61,6 +80,20 @@ export default function PreferencesScreen() {
   const [showTopError, setShowTopError] = useState(false);
   const [interestsError, setInterestsError] = useState('');
   const [relationshipIntentError, setRelationshipIntentError] = useState('');
+  const [distanceError, setDistanceError] = useState('');
+  const [lgbtqError, setLgbtqError] = useState('');
+
+  // Local text states for age inputs (allows temporary empty string while typing)
+  const [minAgeText, setMinAgeText] = useState(minAge.toString());
+  const [maxAgeText, setMaxAgeText] = useState(maxAge.toString());
+
+  // Local text state for distance input (allows empty/any value while typing, clamp only on Continue)
+  const [distanceText, setDistanceText] = useState(maxDistance.toString());
+
+  // Y positions for sections (captured via onLayout for safe scrolling)
+  const [distanceSectionY, setDistanceSectionY] = useState<number | null>(null);
+  const [relationshipIntentSectionY, setRelationshipIntentSectionY] = useState<number | null>(null);
+  const [interestsSectionY, setInterestsSectionY] = useState<number | null>(null);
 
   // Calculate interest chip width: 3 columns default, 2 for narrow screens (<360px)
   const contentPadding = 48; // 24px * 2
@@ -94,57 +127,88 @@ export default function PreferencesScreen() {
     }
   }, []); // Run only on mount
 
-  // Distance clamping handler
-  const handleDistanceBlur = () => {
-    let val = maxDistance;
-    if (isNaN(val) || val < DISTANCE_MIN) {
-      val = DISTANCE_MIN;
-    } else if (val > DISTANCE_MAX) {
-      val = DISTANCE_MAX;
+  // Prefill from demoProfiles if onboardingStore is empty
+  useEffect(() => {
+    if (isDemoMode && demoHydrated && demoProfile) {
+      let loaded = false;
+      if (demoProfile.lookingFor && demoProfile.lookingFor.length > 0 && lookingFor.length === 0) {
+        setLookingFor(demoProfile.lookingFor as Gender[]);
+        loaded = true;
+      }
+      if (demoProfile.relationshipIntent && demoProfile.relationshipIntent.length > 0 && relationshipIntent.length === 0) {
+        setRelationshipIntent(demoProfile.relationshipIntent as RelationshipIntent[]);
+        loaded = true;
+      }
+      if (demoProfile.activities && demoProfile.activities.length > 0 && activities.length === 0) {
+        setActivities(demoProfile.activities as ActivityFilter[]);
+        loaded = true;
+      }
+      if (demoProfile.minAge != null && minAge === MIN_AGE_LIMIT) {
+        setMinAge(demoProfile.minAge);
+        setMinAgeText(demoProfile.minAge.toString());
+        loaded = true;
+      }
+      if (demoProfile.maxAge != null && maxAge === MAX_AGE_LIMIT) {
+        setMaxAge(demoProfile.maxAge);
+        setMaxAgeText(demoProfile.maxAge.toString());
+        loaded = true;
+      }
+      if (demoProfile.maxDistance != null && maxDistance === DISTANCE_DEFAULT) {
+        setMaxDistance(demoProfile.maxDistance);
+        setDistanceText(demoProfile.maxDistance.toString());
+        loaded = true;
+      }
+      // Prefill LGBTQ Preference if available
+      if (demoProfile.lgbtqPreference && demoProfile.lgbtqPreference.length > 0 && lgbtqPreference.length === 0) {
+        setLgbtqPreference(demoProfile.lgbtqPreference as LgbtqOption[]);
+        loaded = true;
+      }
+      if (loaded) console.log('[PREFERENCES] prefilled preferences from demoProfile');
     }
-    setMaxDistance(val);
-  };
+  }, [demoHydrated, demoProfile]);
 
   // Scroll to distance input when focused (ensures visibility above keyboard)
   const handleDistanceFocus = () => {
-    setTimeout(() => {
-      distanceSectionRef.current?.measureLayout(
-        scrollRef.current?.getInnerViewNode() as any,
-        (_x, y) => {
-          scrollRef.current?.scrollTo({ y: y - 100, animated: true });
-        },
-        () => {}
-      );
-    }, 100);
-  };
-
-  // Age clamping handlers
-  const handleMinAgeBlur = () => {
-    let val = minAge;
-    if (isNaN(val) || val < MIN_AGE_LIMIT) {
-      val = MIN_AGE_LIMIT;
-    } else if (val > MAX_AGE_LIMIT) {
-      val = MAX_AGE_LIMIT;
-    }
-    setMinAge(val);
-    // Ensure maxAge >= minAge
-    if (maxAge < val) {
-      setMaxAge(val);
+    if (distanceSectionY !== null) {
+      setTimeout(() => {
+        scrollRef.current?.scrollTo({ y: distanceSectionY - 100, animated: true });
+      }, 100);
     }
   };
 
-  const handleMaxAgeBlur = () => {
-    let val = maxAge;
-    if (isNaN(val) || val < MIN_AGE_LIMIT) {
-      val = MIN_AGE_LIMIT;
-    } else if (val > MAX_AGE_LIMIT) {
-      val = MAX_AGE_LIMIT;
+  // Distance input change handler (text state only, no clamping until Continue)
+  const handleDistanceChange = (text: string) => {
+    // Allow only digits or empty string
+    const cleaned = text.replace(/[^0-9]/g, '');
+    setDistanceText(cleaned);
+    // Clear error when user types
+    if (distanceError) {
+      setDistanceError('');
+      if (!interestsError && !relationshipIntentError) setShowTopError(false);
     }
-    // Ensure maxAge >= minAge
-    if (val < minAge) {
-      val = minAge;
+  };
+
+  // Age input change handlers (text state only, no store update, no clamping)
+  const handleMinAgeChange = (text: string) => {
+    // Allow only digits or empty string - no snapping back
+    const cleaned = text.replace(/[^0-9]/g, '');
+    setMinAgeText(cleaned);
+  };
+
+  const handleMaxAgeChange = (text: string) => {
+    // Allow only digits or empty string - no snapping back
+    const cleaned = text.replace(/[^0-9]/g, '');
+    setMaxAgeText(cleaned);
+  };
+
+  // A) Looking For: SINGLE-SELECT only
+  const handleLookingForSelect = (gender: Gender) => {
+    // If already selected, keep it selected (don't allow empty)
+    if (lookingFor.includes(gender) && lookingFor.length === 1) {
+      return; // Already selected, do nothing
     }
-    setMaxAge(val);
+    // Replace with single selection
+    setLookingFor([gender]);
   };
 
   const handleActivityToggle = (activity: ActivityFilter) => {
@@ -161,10 +225,19 @@ export default function PreferencesScreen() {
     }
   };
 
+  // C) Relationship Goal: MIN 1, MAX 3
   const handleRelationshipIntentToggle = (intentValue: RelationshipIntent) => {
-    toggleRelationshipIntent(intentValue);
-    // Clear error when user selects at least 1 intent
     const isSelected = relationshipIntent.includes(intentValue);
+
+    // If trying to add and already at max, ignore tap
+    if (!isSelected && relationshipIntent.length >= MAX_RELATIONSHIP_INTENTS) {
+      Toast.show(`Maximum ${MAX_RELATIONSHIP_INTENTS} relationship goals allowed`);
+      return;
+    }
+
+    toggleRelationshipIntent(intentValue);
+
+    // Clear error when user selects at least 1 intent
     if (!isSelected && relationshipIntentError) {
       setRelationshipIntentError('');
       if (!interestsError) setShowTopError(false);
@@ -178,13 +251,17 @@ export default function PreferencesScreen() {
     }
 
     let hasError = false;
-    let firstErrorRef: React.RefObject<View | null> | null = null;
+    let firstErrorY: number | null = null;
 
-    // Validate relationship intent: require at least 1
+    // C) Validate relationship intent: require 1-3
     if (relationshipIntent.length < 1) {
-      setRelationshipIntentError('Select a relationship goal to continue.');
+      setRelationshipIntentError('Select at least 1 relationship goal to continue.');
       hasError = true;
-      if (!firstErrorRef) firstErrorRef = relationshipIntentSectionRef;
+      if (firstErrorY === null) firstErrorY = relationshipIntentSectionY;
+    } else if (relationshipIntent.length > MAX_RELATIONSHIP_INTENTS) {
+      setRelationshipIntentError(`Select up to ${MAX_RELATIONSHIP_INTENTS} relationship goals.`);
+      hasError = true;
+      if (firstErrorY === null) firstErrorY = relationshipIntentSectionY;
     } else {
       setRelationshipIntentError('');
     }
@@ -193,26 +270,106 @@ export default function PreferencesScreen() {
     if (activities.length < 1) {
       setInterestsError('Select at least 1 interest to continue.');
       hasError = true;
-      if (!firstErrorRef) firstErrorRef = interestsSectionRef;
+      if (firstErrorY === null) firstErrorY = interestsSectionY;
     } else {
       setInterestsError('');
+    }
+
+    // D) Validate distance: required, must be valid number
+    const trimmedDistance = distanceText.trim();
+    const parsedDistance = parseInt(trimmedDistance, 10);
+    if (!trimmedDistance || isNaN(parsedDistance)) {
+      setDistanceError('Enter a distance (1-75 miles).');
+      hasError = true;
+      if (firstErrorY === null) firstErrorY = distanceSectionY;
+    } else if (parsedDistance < DISTANCE_MIN) {
+      setDistanceError(`Distance must be at least ${DISTANCE_MIN} mile.`);
+      hasError = true;
+      if (firstErrorY === null) firstErrorY = distanceSectionY;
+    } else {
+      setDistanceError('');
     }
 
     if (hasError) {
       setShowTopError(true);
       // Scroll to first error section
-      firstErrorRef?.current?.measureLayout(
-        scrollRef.current?.getInnerViewNode() as any,
-        (_x, y) => scrollRef.current?.scrollTo({ y: y - 100, animated: true }),
-        () => {}
-      );
+      if (firstErrorY !== null) {
+        scrollRef.current?.scrollTo({ y: firstErrorY - 100, animated: true });
+      }
       return;
     }
 
     setShowTopError(false);
-    if (__DEV__) console.log('[ONB] preferences → display-privacy (continue)');
-    setStep('display_privacy');
-    router.push('/(onboarding)/display-privacy' as any);
+
+    // Commit age values: parse, default if empty, clamp to bounds, ensure min <= max
+    let finalMin = parseInt(minAgeText, 10);
+    let finalMax = parseInt(maxAgeText, 10);
+
+    // Default empty values
+    if (isNaN(finalMin)) finalMin = MIN_AGE_LIMIT;
+    if (isNaN(finalMax)) finalMax = MAX_AGE_LIMIT;
+
+    // Clamp to bounds
+    finalMin = Math.max(MIN_AGE_LIMIT, Math.min(MAX_AGE_LIMIT, finalMin));
+    finalMax = Math.max(MIN_AGE_LIMIT, Math.min(MAX_AGE_LIMIT, finalMax));
+
+    // Ensure min <= max (if violated, set max = min)
+    if (finalMin > finalMax) {
+      finalMax = finalMin;
+    }
+
+    // D) Commit distance: clamp to max 75 (validation already passed)
+    let finalDistance = parsedDistance;
+    if (finalDistance > DISTANCE_MAX) {
+      finalDistance = DISTANCE_MAX;
+    }
+
+    // Commit to store and update text display
+    setMinAge(finalMin);
+    setMaxAge(finalMax);
+    setMinAgeText(finalMin.toString());
+    setMaxAgeText(finalMax.toString());
+    setMaxDistance(finalDistance);
+    setDistanceText(finalDistance.toString());
+
+    // SAVE-AS-YOU-GO: Persist to demoProfiles immediately
+    if (isDemoMode && userId) {
+      const demoStore = useDemoStore.getState();
+      const dataToSave: Record<string, any> = {};
+      if (lookingFor.length > 0) dataToSave.lookingFor = lookingFor;
+      if (relationshipIntent.length > 0) dataToSave.relationshipIntent = relationshipIntent;
+      if (activities.length > 0) dataToSave.activities = activities;
+      // LGBTQ Preference is optional - only save if user selected any
+      if (lgbtqPreference.length > 0) dataToSave.lgbtqPreference = lgbtqPreference;
+      dataToSave.minAge = finalMin;
+      dataToSave.maxAge = finalMax;
+      dataToSave.maxDistance = finalDistance;
+      demoStore.saveDemoProfile(userId, dataToSave);
+      console.log(`[PREFERENCES] saved: lookingFor=${lookingFor.length}, intent=${relationshipIntent.length}, activities=${activities.length}, lgbtqPref=${lgbtqPreference.length}, age=${finalMin}-${finalMax}, dist=${finalDistance}`);
+    }
+
+    // CENTRAL EDIT HUB: Return to Review if editing from there
+    if (isEditFromReview) {
+      if (__DEV__) console.log('[ONB] preferences → review (editFromReview)');
+      router.replace('/(onboarding)/review' as any);
+      return;
+    }
+
+    // FIX: Skip verification screens if user already passed face verification
+    // For demo mode, check demoProfile.faceVerificationPassed (persisted across logout)
+    const isAlreadyVerified = isDemoMode
+      ? !!(demoProfile?.faceVerificationPassed || faceVerificationPassed)
+      : faceVerificationPassed;
+
+    if (isAlreadyVerified) {
+      if (__DEV__) console.log('[ONB] preferences: facePassed=true -> skipping verification -> additional-photos');
+      setStep('additional_photos');
+      router.push('/(onboarding)/additional-photos' as any);
+    } else {
+      if (__DEV__) console.log('[ONB] preferences → photo-upload (continue)');
+      setStep('photo_upload');
+      router.push('/(onboarding)/photo-upload' as any);
+    }
   };
 
   // POST-VERIFICATION: Previous goes back
@@ -250,13 +407,13 @@ export default function PreferencesScreen() {
 
       <View style={styles.section}>
         <Text style={styles.sectionTitle}>Looking For</Text>
-        <Text style={styles.sectionSubtitle}>Select all that apply</Text>
+        <Text style={styles.sectionSubtitle}>Select one</Text>
         <View style={styles.chipsContainer}>
           {GENDER_OPTIONS.map((option) => (
             <TouchableOpacity
               key={option.value}
               style={[styles.chip, lookingFor.includes(option.value as Gender) && styles.chipSelected]}
-              onPress={() => toggleLookingFor(option.value as Gender)}
+              onPress={() => handleLookingForSelect(option.value as Gender)}
             >
               <Text style={[styles.chipText, lookingFor.includes(option.value as Gender) && styles.chipTextSelected]}>
                 {option.label}
@@ -266,9 +423,51 @@ export default function PreferencesScreen() {
         </View>
       </View>
 
-      <View ref={relationshipIntentSectionRef} style={styles.section}>
-        <Text style={styles.sectionTitle}>Relationship Intent</Text>
-        <Text style={styles.sectionSubtitle}>What are you looking for?</Text>
+      {/* LGBTQ Preference (Optional) - "What I need?" */}
+      <View style={styles.section}>
+        <Text style={styles.sectionTitle}>LGBTQ (Optional) — What I need</Text>
+        <Text style={styles.sectionSubtitle}>Select up to 2 options</Text>
+        <View style={styles.chipsContainer}>
+          {LGBTQ_OPTIONS.map((option) => {
+            const isSelected = lgbtqPreference.includes(option.value);
+            return (
+              <TouchableOpacity
+                key={option.value}
+                style={[styles.chip, isSelected && styles.chipSelected]}
+                onPress={() => {
+                  const success = toggleLgbtqPreference(option.value);
+                  if (!success) {
+                    setLgbtqError('You can select up to 2 options');
+                    setTimeout(() => setLgbtqError(''), 2000);
+                  } else {
+                    setLgbtqError('');
+                    // Save-as-you-go: update demoProfile immediately
+                    if (isDemoMode && userId) {
+                      const newLgbtqPref = lgbtqPreference.includes(option.value)
+                        ? lgbtqPreference.filter((o) => o !== option.value)
+                        : [...lgbtqPreference, option.value];
+                      useDemoStore.getState().saveDemoProfile(userId, { lgbtqPreference: newLgbtqPref });
+                    }
+                  }
+                }}
+              >
+                <Text style={[styles.chipText, isSelected && styles.chipTextSelected]}>
+                  {option.label}
+                </Text>
+              </TouchableOpacity>
+            );
+          })}
+        </View>
+        {lgbtqError ? <Text style={styles.fieldError}>{lgbtqError}</Text> : null}
+      </View>
+
+      <View
+        ref={relationshipIntentSectionRef}
+        style={styles.section}
+        onLayout={(e) => setRelationshipIntentSectionY(e.nativeEvent.layout.y)}
+      >
+        <Text style={styles.sectionTitle}>Relationship Goal</Text>
+        <Text style={styles.sectionSubtitle}>Select 1 to {MAX_RELATIONSHIP_INTENTS}</Text>
         <View style={[styles.chipsContainer, relationshipIntentError ? styles.chipsContainerError : null]}>
           {RELATIONSHIP_INTENTS.map((intent) => (
             <TouchableOpacity
@@ -286,7 +485,11 @@ export default function PreferencesScreen() {
         {relationshipIntentError ? <Text style={styles.fieldError}>{relationshipIntentError}</Text> : null}
       </View>
 
-      <View ref={interestsSectionRef} style={styles.section}>
+      <View
+        ref={interestsSectionRef}
+        style={styles.section}
+        onLayout={(e) => setInterestsSectionY(e.nativeEvent.layout.y)}
+      >
         <View style={styles.interestsHeader}>
           <Text style={styles.sectionTitle}>Interests</Text>
           <Text style={[
@@ -302,7 +505,6 @@ export default function PreferencesScreen() {
               key={activity.value}
               style={[
                 styles.interestChip,
-                { width: interestChipWidth },
                 activities.includes(activity.value) && styles.interestChipSelected
               ]}
               onPress={() => handleActivityToggle(activity.value)}
@@ -311,8 +513,6 @@ export default function PreferencesScreen() {
               <Text style={styles.interestEmoji}>{activity.emoji}</Text>
               <Text
                 style={[styles.interestLabel, activities.includes(activity.value) && styles.interestLabelSelected]}
-                numberOfLines={1}
-                ellipsizeMode="tail"
               >
                 {activity.label}
               </Text>
@@ -329,9 +529,8 @@ export default function PreferencesScreen() {
           <View style={styles.ageInputContainer}>
             <Text style={styles.ageLabel}>Min</Text>
             <Input
-              value={minAge.toString()}
-              onChangeText={(text) => setMinAge(parseInt(text) || MIN_AGE_LIMIT)}
-              onBlur={handleMinAgeBlur}
+              value={minAgeText}
+              onChangeText={handleMinAgeChange}
               keyboardType="numeric"
               style={styles.ageInput}
             />
@@ -340,9 +539,8 @@ export default function PreferencesScreen() {
           <View style={styles.ageInputContainer}>
             <Text style={styles.ageLabel}>Max</Text>
             <Input
-              value={maxAge.toString()}
-              onChangeText={(text) => setMaxAge(parseInt(text) || MAX_AGE_LIMIT)}
-              onBlur={handleMaxAgeBlur}
+              value={maxAgeText}
+              onChangeText={handleMaxAgeChange}
               keyboardType="numeric"
               style={styles.ageInput}
             />
@@ -350,23 +548,28 @@ export default function PreferencesScreen() {
         </View>
       </View>
 
-      <View ref={distanceSectionRef} style={styles.section}>
+      <View
+        ref={distanceSectionRef}
+        style={styles.section}
+        onLayout={(e) => setDistanceSectionY(e.nativeEvent.layout.y)}
+      >
         <Text style={styles.sectionTitle}>Maximum Distance</Text>
         <Text style={styles.sectionSubtitle}>{DISTANCE_MIN} - {DISTANCE_MAX} miles</Text>
-        <View style={styles.distanceInputWrapper}>
+        <View style={[styles.distanceInputWrapper, distanceError ? styles.distanceInputError : null]}>
           <TextInput
-            value={maxDistance.toString()}
-            onChangeText={(text) => setMaxDistance(parseInt(text) || DISTANCE_DEFAULT)}
-            onBlur={handleDistanceBlur}
+            value={distanceText}
+            onChangeText={handleDistanceChange}
             onFocus={handleDistanceFocus}
             keyboardType="numeric"
             style={styles.distanceTextInput}
             placeholderTextColor={COLORS.textMuted}
+            placeholder=""
           />
           <View style={styles.distanceSuffixContainer} pointerEvents="none">
             <Text style={styles.distanceSuffix}>miles</Text>
           </View>
         </View>
+        {distanceError ? <Text style={styles.fieldError}>{distanceError}</Text> : null}
       </View>
 
       <View style={styles.footer}>
@@ -516,9 +719,8 @@ const styles = StyleSheet.create({
   interestChip: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'center',
-    paddingHorizontal: 8,
-    paddingVertical: 8,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
     borderRadius: 999,
     backgroundColor: COLORS.backgroundDark,
     borderWidth: 1,
@@ -535,7 +737,6 @@ const styles = StyleSheet.create({
   interestLabel: {
     fontSize: 12,
     color: COLORS.text,
-    flexShrink: 1,
   },
   interestLabelSelected: {
     color: COLORS.white,
@@ -572,6 +773,10 @@ const styles = StyleSheet.create({
     borderColor: COLORS.border,
     paddingHorizontal: 16,
     height: 52,
+  },
+  distanceInputError: {
+    borderColor: COLORS.error,
+    borderWidth: 2,
   },
   distanceTextInput: {
     flex: 1,

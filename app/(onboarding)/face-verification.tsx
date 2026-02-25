@@ -19,6 +19,7 @@ import { COLORS } from '@/lib/constants';
 import { Button } from '@/components/ui';
 import { useOnboardingStore } from '@/stores/onboardingStore';
 import { useAuthStore } from '@/stores/authStore';
+import { useDemoStore } from '@/stores/demoStore';
 import { Ionicons } from '@expo/vector-icons';
 import { verifyFace, type CapturedFrame, type FaceMatchStatus, type FaceMatchReasonCode } from '@/services/faceVerification';
 import { isDemoMode } from '@/hooks/useConvex';
@@ -49,16 +50,35 @@ type VerificationState =
 
 export default function FaceVerificationScreen() {
   const { photos, setStep } = useOnboardingStore();
-  const { userId, setFaceVerificationPassed, setFaceVerificationPending } = useAuthStore();
+  const { userId, faceVerificationPassed, setFaceVerificationPassed, setFaceVerificationPending } = useAuthStore();
+  const demoProfile = useDemoStore((s) => isDemoMode && userId ? s.demoProfiles[userId] : null);
   const router = useRouter();
+
+  // CRITICAL: Check demoProfile.faceVerificationPassed for demo mode (persisted across logout)
+  const isAlreadyVerified = isDemoMode
+    ? !!(demoProfile?.faceVerificationPassed || faceVerificationPassed)
+    : faceVerificationPassed;
 
   // Camera
   const device = useCameraDevice('front');
   const { hasPermission, requestPermission } = useCameraPermission();
   const cameraRef = useRef<Camera>(null);
 
-  // State
-  const [verificationState, setVerificationState] = useState<VerificationState>('waiting');
+  // State - initialize to 'success' if already verified (prevents re-verification on back)
+  const [verificationState, setVerificationState] = useState<VerificationState>(
+    isAlreadyVerified ? 'success' : 'waiting'
+  );
+
+  // CRITICAL: Skip verification entirely if already verified - redirect immediately
+  const didSkipRef = useRef(false);
+  useEffect(() => {
+    if (isAlreadyVerified && !didSkipRef.current) {
+      didSkipRef.current = true;
+      console.log('[FaceDebug] facePassed=true -> skip capture -> additional-photos');
+      setStep('additional_photos');
+      router.replace('/(onboarding)/additional-photos' as any);
+    }
+  }, [isAlreadyVerified, setStep, router]);
   const [capturedFrames, setCapturedFrames] = useState<CapturedFrame[]>([]);
   const [framesCaptured, setFramesCaptured] = useState(0);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -207,10 +227,14 @@ export default function FaceVerificationScreen() {
           // Face matches profile photo - verification successful
           console.log('[FaceMatch] PASS - Face matches profile photo');
           setVerificationState('success');
-          // Short delay to show success state before navigating
-          setTimeout(() => {
-            handleVerificationSuccess();
-          }, 1500);
+          // Set flag immediately, user clicks Continue to proceed
+          setFaceVerificationPassed(true);
+          setFaceVerificationPending(false);
+          // DEMO MODE: Also persist to demoProfile so it survives logout/relaunch
+          if (isDemoMode && userId) {
+            useDemoStore.getState().saveDemoProfile(userId, { faceVerificationPassed: true });
+            console.log('[FaceMatch] saved faceVerificationPassed=true to demoProfile');
+          }
           break;
 
         case 'PENDING':
@@ -263,15 +287,11 @@ export default function FaceVerificationScreen() {
   // =============================================================================
 
   const handleVerificationSuccess = useCallback(() => {
-    // SECURITY: Only set faceVerificationPassed when server confirms PASS
-    // This cannot be bypassed by the client
-    console.log('[FaceMatch] Setting faceVerificationPassed=true (server confirmed PASS)');
-    setFaceVerificationPassed(true);
-    setFaceVerificationPending(false); // Clear pending flag on success
-    // Navigate to additional photos
+    // Navigate to additional photos (flags already set on PASS)
+    console.log('[FaceMatch] Continuing to additional photos');
     setStep('additional_photos');
     router.push('/(onboarding)/additional-photos' as any);
-  }, [setFaceVerificationPassed, setFaceVerificationPending, setStep, router]);
+  }, [setStep, router]);
 
   // =============================================================================
   // Retry Handler
@@ -532,6 +552,15 @@ export default function FaceVerificationScreen() {
                 style={{ marginTop: 8 }}
               />
             </>
+          )}
+
+          {verificationState === 'success' && (
+            <Button
+              title="Continue"
+              variant="primary"
+              onPress={handleVerificationSuccess}
+              fullWidth
+            />
           )}
         </View>
       </View>

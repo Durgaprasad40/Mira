@@ -5,6 +5,7 @@ import { markTiming } from "@/utils/startupTiming";
 import { useOnboardingStore } from "@/stores/onboardingStore";
 import { clearAuthBootCache } from "@/stores/authBootCache";
 import { clearBootCache } from "@/stores/bootCache";
+import { isDemoMode } from "@/hooks/useConvex";
 
 // Hydration timing: capture when store module loads
 const AUTH_STORE_LOAD_TIME = Date.now();
@@ -99,6 +100,14 @@ export const useAuthStore = create<AuthState>()(
         // Clear boot caches to prevent stale routing on next boot
         clearAuthBootCache();
         clearBootCache();
+        // BUG B FIX: Clear demo session to prevent stale currentDemoUserId
+        // causing welcome.tsx to redirect to onboarding instead of showing welcome
+        if (isDemoMode) {
+          // Use dynamic require to avoid circular dependency
+          const { useDemoStore } = require('@/stores/demoStore');
+          useDemoStore.getState().demoLogout();
+          if (__DEV__) console.log('[AUTH] logout: called demoLogout()');
+        }
         if (__DEV__) console.log('[AUTH] logout: cleared onboardingStore');
         if (__DEV__) console.log('[BOOT_CACHE] cleared boot caches on logout');
 

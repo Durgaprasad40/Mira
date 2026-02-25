@@ -159,6 +159,10 @@ export interface DemoUserProfile {
   photos: { url: string }[];
   bio?: string;
   gender?: string;
+  lgbtqSelf?: string[]; // "What am I?" - identity (optional, max 2)
+  lgbtqPreference?: string[]; // "What I need?" - dating preference (optional, max 2)
+  /** @deprecated Use lgbtqSelf instead. Kept for migration only. */
+  lgbtq?: string[];
   dateOfBirth?: string;
   city?: string;
   height?: number | null;
@@ -170,6 +174,7 @@ export interface DemoUserProfile {
   pets?: string[];
   insect?: string | null;
   education?: string | null;
+  educationOther?: string; // Custom text when education === 'other'
   religion?: string | null;
   jobTitle?: string;
   company?: string;
@@ -183,6 +188,8 @@ export interface DemoUserProfile {
   maxDistance?: number;
   // 8C: Consent timestamp
   consentAcceptedAt?: number;
+  // Face verification passed flag (persists across logout/relaunch)
+  faceVerificationPassed?: boolean;
 }
 
 interface DemoState {
@@ -1076,6 +1083,29 @@ export const useDemoStore = create<DemoState>()(
                 fixed: fixedCount,
                 removed: removedCount,
               });
+            }
+          }
+
+          // MIGRATION: lgbtq -> lgbtqSelf (one-time migration)
+          // If old lgbtq exists but lgbtqSelf doesn't, migrate it
+          if (state.demoProfiles) {
+            let migratedCount = 0;
+            const updatedProfiles: Record<string, DemoUserProfile> = {};
+            for (const [userId, profile] of Object.entries(state.demoProfiles)) {
+              if (profile.lgbtq && profile.lgbtq.length > 0 && !profile.lgbtqSelf) {
+                updatedProfiles[userId] = {
+                  ...profile,
+                  lgbtqSelf: profile.lgbtq,
+                  lgbtq: undefined, // Clear old field
+                };
+                migratedCount++;
+              }
+            }
+            if (migratedCount > 0) {
+              useDemoStore.setState({
+                demoProfiles: { ...state.demoProfiles, ...updatedProfiles },
+              });
+              log.once('lgbtq-migration', '[DEMO]', 'migrated lgbtq -> lgbtqSelf', { count: migratedCount });
             }
           }
         }

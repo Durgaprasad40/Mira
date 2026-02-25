@@ -16,6 +16,10 @@ export default function OnboardingWelcomeScreen() {
     router.push('/(onboarding)/email-phone' as any);
   };
 
+  const handleLogin = () => {
+    router.push('/(auth)/login' as any);
+  };
+
   return (
     <LinearGradient
       colors={[COLORS.primary, COLORS.secondary]}
@@ -69,7 +73,7 @@ export default function OnboardingWelcomeScreen() {
         <Button
           title="I already have an account"
           variant="outline"
-          onPress={handleGetStarted}
+          onPress={handleLogin}
           fullWidth
           style={styles.outlineButton}
           textStyle={styles.outlineButtonText}

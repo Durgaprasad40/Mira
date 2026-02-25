@@ -1,15 +1,23 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { View, Text, StyleSheet, ScrollView, TextInput, TouchableOpacity } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { COLORS, VALIDATION } from '@/lib/constants';
 import { Button } from '@/components/ui';
 import { useOnboardingStore } from '@/stores/onboardingStore';
+import { useDemoStore } from '@/stores/demoStore';
+import { useAuthStore } from '@/stores/authStore';
+import { isDemoMode } from '@/hooks/useConvex';
 import { validateRequired, scrollToFirstInvalid, createRules } from '@/lib/onboardingValidation';
 import { OnboardingProgressHeader } from '@/components/OnboardingProgressHeader';
 
 export default function BioScreen() {
   const { bio, setBio, setStep } = useOnboardingStore();
+  const { userId } = useAuthStore();
+  const demoHydrated = useDemoStore((s) => s._hasHydrated);
+  const demoProfile = useDemoStore((s) =>
+    isDemoMode && userId ? s.demoProfiles[userId] : null
+  );
   const router = useRouter();
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [showTopError, setShowTopError] = useState(false);
@@ -17,6 +25,14 @@ export default function BioScreen() {
   // Refs for scroll-to-invalid behavior
   const scrollRef = useRef<ScrollView>(null);
   const bioInputRef = useRef<TextInput>(null);
+
+  // Prefill from demoProfiles if onboardingStore is empty
+  useEffect(() => {
+    if (isDemoMode && demoHydrated && demoProfile?.bio && !bio) {
+      setBio(demoProfile.bio);
+      console.log('[BIO] prefilled bio from demoProfile');
+    }
+  }, [demoHydrated, demoProfile]);
 
   // Validation rules
   const validationRules = {
@@ -41,6 +57,13 @@ export default function BioScreen() {
     // Clear errors and proceed
     setErrors({});
     setShowTopError(false);
+
+    // SAVE-AS-YOU-GO: Persist to demoProfiles immediately
+    if (isDemoMode && userId && bio.trim()) {
+      const demoStore = useDemoStore.getState();
+      demoStore.saveDemoProfile(userId, { bio: bio.trim() });
+      console.log(`[BIO] saved bio (${bio.trim().length} chars)`);
+    }
 
     // TODO: Profanity filter check
     // TODO: Link detection check

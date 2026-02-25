@@ -9,13 +9,14 @@ import {
   Alert,
   ActivityIndicator,
   TextInput,
+  Modal,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useRouter, useLocalSearchParams } from "expo-router";
 import { OnboardingProgressHeader } from "@/components/OnboardingProgressHeader";
 import { COLORS, VALIDATION, GENDER_OPTIONS } from "@/lib/constants";
 import { Input, Button } from "@/components/ui";
-import { useOnboardingStore } from "@/stores/onboardingStore";
+import { useOnboardingStore, LGBTQ_OPTIONS, LgbtqOption } from "@/stores/onboardingStore";
 import { useAuthStore } from "@/stores/authStore";
 import DateTimePicker from "@react-native-community/datetimepicker";
 import { Gender } from "@/types";
@@ -60,6 +61,7 @@ export default function BasicInfoScreen() {
     name,
     dateOfBirth,
     gender,
+    lgbtqSelf,
     email,
     password,
     nickname,
@@ -67,6 +69,8 @@ export default function BasicInfoScreen() {
     setDateOfBirth,
     setGender,
     setNickname,
+    toggleLgbtqSelf,
+    setLgbtqSelf,
     setStep,
   } = useOnboardingStore();
   const { setAuth, userId } = useAuthStore();
@@ -74,7 +78,17 @@ export default function BasicInfoScreen() {
   const params = useLocalSearchParams();
 
   // Read-only mode: when confirm=true (existing user login)
-  const isReadOnly = params.confirm === "true";
+  const isConfirmMode = params.confirm === "true";
+
+  // Edit from Review mode: when editFromReview=true (editing LGBTQ only from Review screen)
+  const isEditFromReview = params.editFromReview === "true";
+
+  // Recovery mode: confirm=true but basic fields missing in demoProfile
+  const [isRecoveryMode, setIsRecoveryMode] = useState(false);
+
+  // Effective read-only: confirm mode (but NOT recovery mode) OR editFromReview mode
+  // In editFromReview mode, name/handle/DOB/gender are read-only, only LGBTQ is editable
+  const isReadOnly = (isConfirmMode && !isRecoveryMode) || isEditFromReview;
 
   const [showDatePicker, setShowDatePicker] = useState(false);
   const [selectedDate, setSelectedDate] = useState(
@@ -84,6 +98,7 @@ export default function BasicInfoScreen() {
   const [showTopError, setShowTopError] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [ageBlocked, setAgeBlocked] = useState(false);
+  const [showConfirmModal, setShowConfirmModal] = useState(false);
 
   // Refs for scroll-to-invalid behavior
   const scrollRef = useRef<ScrollView>(null);
@@ -97,6 +112,7 @@ export default function BasicInfoScreen() {
   const [displayDOB, setDisplayDOB] = useState("");
   const [displayGender, setDisplayGender] = useState<Gender | "">("");
   const [displayHandle, setDisplayHandle] = useState("");
+  const [lgbtqError, setLgbtqError] = useState("");
 
   // Nickname availability state (for new users)
   const [isCheckingAvailability, setIsCheckingAvailability] = useState(false);
@@ -109,12 +125,35 @@ export default function BasicInfoScreen() {
     !isDemoMode && isReadOnly && userId ? { userId } : "skip"
   );
 
+  // Demo mode: reactively subscribe to demoStore profile (handles hydration timing)
+  const demoProfile = useDemoStore((s) =>
+    isDemoMode && isConfirmMode && userId ? s.demoProfiles[userId] : null
+  );
+  const demoHydrated = useDemoStore((s) => s._hasHydrated);
+
   // Debug logging on mount and cleanup
   useEffect(() => {
-    console.log('[BASIC] ========================================');
-    console.log(`[BASIC] mounted mode=${isReadOnly ? 'existing' : 'new'}, userId=${userId || 'none'}, confirm=${params.confirm}`);
-    console.log(`[BASIC] inputs editable=${!isReadOnly} reason=${isReadOnly ? 'confirm=true (existing user)' : 'new signup'}`);
-    console.log('[BASIC] ========================================');
+    // Comprehensive diagnostic logging on mount
+    const demoStore = useDemoStore.getState();
+    const profile = isDemoMode && userId ? demoStore.demoProfiles[userId] : null;
+
+    console.log('[BASIC] ════════════════════════════════════════');
+    console.log(`[BASIC] MOUNT DIAGNOSTIC`);
+    console.log(`[BASIC]   userId=${userId || 'none'}`);
+    console.log(`[BASIC]   confirm=${params.confirm}, isConfirmMode=${isConfirmMode}`);
+    console.log(`[BASIC]   demoHydrated=${demoHydrated}`);
+    console.log(`[BASIC]   demoProfile exists=${!!profile}`);
+    if (profile) {
+      console.log(`[BASIC]   demoProfile.name=${profile.name || '(empty)'}`);
+      console.log(`[BASIC]   demoProfile.handle=${profile.handle || '(empty)'}`);
+      console.log(`[BASIC]   demoProfile.dateOfBirth=${profile.dateOfBirth || '(empty)'}`);
+      console.log(`[BASIC]   demoProfile.gender=${profile.gender || '(empty)'}`);
+    }
+    console.log(`[BASIC]   onboardingStore.name=${name || '(empty)'}`);
+    console.log(`[BASIC]   onboardingStore.nickname=${nickname || '(empty)'}`);
+    console.log(`[BASIC]   onboardingStore.dateOfBirth=${dateOfBirth || '(empty)'}`);
+    console.log(`[BASIC]   onboardingStore.gender=${gender || '(empty)'}`);
+    console.log('[BASIC] ════════════════════════════════════════');
 
     // Cleanup timeout on unmount
     return () => {
@@ -124,34 +163,98 @@ export default function BasicInfoScreen() {
     };
   }, []);
 
-  // Load existing data into display state
+  // Load existing data into display state OR detect recovery mode
   useEffect(() => {
-    if (isReadOnly) {
-      if (isDemoMode && userId) {
-        // Demo mode: get from demoStore
-        const demoStore = useDemoStore.getState();
-        const profile = demoStore.demoProfiles[userId];
-        if (profile) {
-          setDisplayName(profile.name || "");
-          setDisplayDOB(profile.dateOfBirth || "");
-          setDisplayGender((profile.gender as Gender) || "");
-          setDisplayHandle(profile.handle || "");
-          if (profile.dateOfBirth) {
-            setSelectedDate(parseDOBString(profile.dateOfBirth));
+    // Handle editFromReview mode: pre-fill all fields from demoProfile
+    if (isEditFromReview && isDemoMode && demoHydrated && demoProfile) {
+      console.log('[BASIC] editFromReview mode - pre-filling from demoProfile');
+      setDisplayName(demoProfile.name || "");
+      setDisplayDOB(demoProfile.dateOfBirth || "");
+      setDisplayGender((demoProfile.gender as Gender) || "");
+      setDisplayHandle(demoProfile.handle || "");
+      if (demoProfile.dateOfBirth) {
+        setSelectedDate(parseDOBString(demoProfile.dateOfBirth));
+      }
+      // Pre-fill LGBTQ Self
+      if (demoProfile.lgbtqSelf && demoProfile.lgbtqSelf.length > 0 && lgbtqSelf.length === 0) {
+        setLgbtqSelf(demoProfile.lgbtqSelf as LgbtqOption[]);
+        console.log(`[BASIC] editFromReview: pre-populated lgbtqSelf from demoProfile`);
+      }
+      return; // Don't run confirm mode logic
+    }
+
+    if (isConfirmMode && isDemoMode && demoHydrated) {
+      if (demoProfile) {
+        // Check if ALL basic fields are present (strict check)
+        const hasName = !!demoProfile.name && demoProfile.name.trim().length > 0;
+        const hasHandle = !!demoProfile.handle && demoProfile.handle.trim().length > 0;
+        const hasDOB = !!demoProfile.dateOfBirth && demoProfile.dateOfBirth.length > 0;
+        const hasGender = !!demoProfile.gender && demoProfile.gender.length > 0;
+        const hasAllFields = hasName && hasHandle && hasDOB && hasGender;
+
+        console.log(`[BASIC] confirm mode check: name=${hasName}, handle=${hasHandle}, dob=${hasDOB}, gender=${hasGender}, allPresent=${hasAllFields}`);
+
+        if (hasAllFields) {
+          // ALL fields present → normal confirm mode (read-only)
+          setIsRecoveryMode(false);
+          setDisplayName(demoProfile.name!);
+          setDisplayDOB(demoProfile.dateOfBirth!);
+          setDisplayGender(demoProfile.gender as Gender);
+          setDisplayHandle(demoProfile.handle!);
+          setSelectedDate(parseDOBString(demoProfile.dateOfBirth!));
+          // LGBTQ Self is always editable - prefill from demoProfile if available
+          if (demoProfile.lgbtqSelf && demoProfile.lgbtqSelf.length > 0 && lgbtqSelf.length === 0) {
+            setLgbtqSelf(demoProfile.lgbtqSelf as LgbtqOption[]);
+            console.log(`[BASIC] pre-populated lgbtqSelf from demoProfile`);
+          }
+          console.log('[BASIC] → read-only mode (all fields present)');
+        } else {
+          // Some fields missing → recovery mode (editable)
+          // CRITICAL: Pre-populate onboardingStore with existing partial data
+          // This prevents losing data that DOES exist
+          setIsRecoveryMode(true);
+          console.log('[BASIC] → recovery mode (some fields missing)');
+
+          // Pre-populate onboardingStore from demoProfile's existing data
+          if (hasName && !name) {
+            setName(demoProfile.name!);
+            console.log(`[BASIC] pre-populated name="${demoProfile.name}" from demoProfile`);
+          }
+          if (hasHandle && !nickname) {
+            setNickname(demoProfile.handle!);
+            console.log(`[BASIC] pre-populated nickname="${demoProfile.handle}" from demoProfile`);
+          }
+          if (hasDOB && !dateOfBirth) {
+            setDateOfBirth(demoProfile.dateOfBirth!);
+            setSelectedDate(parseDOBString(demoProfile.dateOfBirth!));
+            console.log(`[BASIC] pre-populated dateOfBirth="${demoProfile.dateOfBirth}" from demoProfile`);
+          }
+          if (hasGender && !gender) {
+            setGender(demoProfile.gender as Gender);
+            console.log(`[BASIC] pre-populated gender="${demoProfile.gender}" from demoProfile`);
+          }
+          // LGBTQ Self is always editable - prefill in recovery mode too
+          if (demoProfile.lgbtqSelf && demoProfile.lgbtqSelf.length > 0 && lgbtqSelf.length === 0) {
+            setLgbtqSelf(demoProfile.lgbtqSelf as LgbtqOption[]);
+            console.log(`[BASIC] pre-populated lgbtqSelf from demoProfile`);
           }
         }
-      } else if (existingUserData) {
-        // Live mode: use query result
-        setDisplayName(existingUserData.name || "");
-        setDisplayDOB(existingUserData.dateOfBirth || "");
-        setDisplayGender((existingUserData.gender as Gender) || "");
-        setDisplayHandle(existingUserData.handle || "");
-        if (existingUserData.dateOfBirth) {
-          setSelectedDate(parseDOBString(existingUserData.dateOfBirth));
-        }
+      } else {
+        // No profile at all - recovery mode, nothing to pre-populate
+        setIsRecoveryMode(true);
+        console.log('[BASIC] → recovery mode (no demoProfile exists)');
+      }
+    } else if (isConfirmMode && !isDemoMode && existingUserData) {
+      // Live mode: use query result
+      setDisplayName(existingUserData.name || "");
+      setDisplayDOB(existingUserData.dateOfBirth || "");
+      setDisplayGender((existingUserData.gender as Gender) || "");
+      setDisplayHandle(existingUserData.handle || "");
+      if (existingUserData.dateOfBirth) {
+        setSelectedDate(parseDOBString(existingUserData.dateOfBirth));
       }
     }
-  }, [isReadOnly, userId, existingUserData]);
+  }, [isConfirmMode, isEditFromReview, demoHydrated, demoProfile, existingUserData]);
 
   const { submitEmailRegistration } = useAuthSubmit();
 
@@ -293,15 +396,85 @@ export default function BasicInfoScreen() {
     },
   };
 
-  // Handle Continue in READ-ONLY mode (existing user)
+  // Handle Continue in READ-ONLY mode (existing user OR edit from Review)
   const handleReadOnlyContinue = () => {
+    // LGBTQ Self is always editable - save any changes before continuing
+    if (isDemoMode && userId) {
+      // Only save lgbtqSelf (don't touch other fields)
+      useDemoStore.getState().saveDemoProfile(userId, { lgbtqSelf });
+      console.log(`[BASIC] saved lgbtqSelf: ${JSON.stringify(lgbtqSelf)}`);
+    }
+
+    // If editing from Review, go back to Review (not through onboarding flow)
+    if (isEditFromReview) {
+      if (__DEV__) console.log("[ONB] basic_info editFromReview → back to review");
+      router.replace("/(onboarding)/review" as any);
+      return;
+    }
+
     if (__DEV__) console.log("[ONB] basic_info_confirm readOnly=true → continue_to_consent");
     setStep("consent");
     router.replace("/(onboarding)/consent" as any);
   };
 
-  // Handle Continue in EDIT mode (new signup)
-  const handleNext = async () => {
+  // Handle Continue in RECOVERY mode (existing user with missing fields)
+  const handleRecoveryContinue = () => {
+    // Run validation using the helper
+    const result = validateRequired(
+      { name, nickname, dateOfBirth, gender },
+      validationRules
+    );
+
+    if (!result.ok) {
+      setErrors(result.errors as Record<string, string>);
+      setShowTopError(true);
+      // Scroll to first invalid field
+      const fieldRefs = {
+        name: nameFieldRef,
+        nickname: nicknameFieldRef,
+        dateOfBirth: dobFieldRef,
+        gender: genderFieldRef,
+      };
+      scrollToFirstInvalid(scrollRef, fieldRefs, result.firstInvalidKey as string);
+      return;
+    }
+
+    // Clear errors
+    setErrors({});
+    setShowTopError(false);
+
+    // Save recovered data to demoProfiles (user already exists)
+    // GUARD: Only save non-empty values to avoid overwriting existing data with empty strings
+    if (isDemoMode && userId) {
+      const demoStore = useDemoStore.getState();
+      const dataToSave: Record<string, string | string[]> = {};
+
+      // Only include non-empty values
+      if (name && name.trim().length > 0) dataToSave.name = name.trim();
+      if (nickname && nickname.length > 0) dataToSave.handle = nickname;
+      if (dateOfBirth && dateOfBirth.length > 0) dataToSave.dateOfBirth = dateOfBirth;
+      if (gender) dataToSave.gender = gender;
+      // LGBTQ Self is optional - only save if user selected any
+      if (lgbtqSelf.length > 0) dataToSave.lgbtqSelf = lgbtqSelf;
+
+      // Log exactly what we're saving
+      console.log('[BASIC] ════════════════════════════════════════');
+      console.log('[BASIC] RECOVERY SAVE');
+      console.log(`[BASIC]   userId=${userId}`);
+      console.log(`[BASIC]   saving: ${JSON.stringify(dataToSave)}`);
+      console.log('[BASIC] ════════════════════════════════════════');
+
+      demoStore.saveDemoProfile(userId, dataToSave);
+    }
+
+    // Proceed to consent
+    console.log("[ONB] basic_info recovery → consent");
+    setStep("consent");
+    router.replace("/(onboarding)/consent" as any);
+  };
+
+  // Handle Continue in EDIT mode (new signup) - first validates, then shows modal
+  const handleNextWithConfirmation = () => {
     // Run validation using the helper
     const result = validateRequired(
       { name, nickname, dateOfBirth, gender },
@@ -336,9 +509,16 @@ export default function BasicInfoScreen() {
       return;
     }
 
-    // Clear errors and proceed
+    // Clear errors and show confirmation modal
     setErrors({});
     setShowTopError(false);
+    setShowConfirmModal(true);
+  };
+
+  // Handle confirmed submission (after user confirms in modal)
+  const handleNext = async () => {
+    // Close modal
+    setShowConfirmModal(false);
 
     // Create user account
     setIsSubmitting(true);
@@ -372,6 +552,26 @@ export default function BasicInfoScreen() {
             return;
           }
         }
+        // BUG A FIX: Save basic info to demoProfiles immediately so it's available
+        // if user logs out and back in before completing full onboarding
+        const dataToSave: Record<string, any> = {
+          name: name.trim(),
+          handle: nickname,
+          dateOfBirth,
+          gender: gender ?? undefined,
+          photos: [], // Empty initially, will be filled later in onboarding
+        };
+        // LGBTQ Self is optional - only save if user selected any
+        if (lgbtqSelf.length > 0) dataToSave.lgbtqSelf = lgbtqSelf;
+
+        // Log exactly what we're saving
+        console.log('[BASIC] ════════════════════════════════════════');
+        console.log('[BASIC] NEW SIGNUP SAVE');
+        console.log(`[BASIC]   userId=${newUserId}`);
+        console.log(`[BASIC]   saving: ${JSON.stringify(dataToSave)}`);
+        console.log('[BASIC] ════════════════════════════════════════');
+
+        demoStore.saveDemoProfile(newUserId, dataToSave);
         setAuth(newUserId, "demo_token", false);
         setStep("consent");
         router.push("/(onboarding)/consent" as any);
@@ -423,12 +623,23 @@ export default function BasicInfoScreen() {
   const currentGender = isReadOnly ? displayGender : gender;
 
   // Loading state for read-only mode
-  if (isReadOnly && !isDemoMode && existingUserData === undefined) {
-    return (
-      <View style={styles.loadingContainer}>
-        <Text style={styles.loadingText}>Loading...</Text>
-      </View>
-    );
+  if (isReadOnly) {
+    // Demo mode: wait for demoStore to hydrate
+    if (isDemoMode && !demoHydrated) {
+      return (
+        <View style={styles.loadingContainer}>
+          <Text style={styles.loadingText}>Loading...</Text>
+        </View>
+      );
+    }
+    // Live mode: wait for Convex query
+    if (!isDemoMode && existingUserData === undefined) {
+      return (
+        <View style={styles.loadingContainer}>
+          <Text style={styles.loadingText}>Loading...</Text>
+        </View>
+      );
+    }
   }
 
   return (
@@ -451,6 +662,8 @@ export default function BasicInfoScreen() {
       <Text style={styles.subtitle}>
         {isReadOnly
           ? "Please verify your information before continuing."
+          : isRecoveryMode
+          ? "We couldn't load your details. Please re-enter to continue."
           : "This information will be shown on your profile."}
       </Text>
 
@@ -588,6 +801,54 @@ export default function BasicInfoScreen() {
         {errors.gender ? <Text style={styles.fieldError}>{errors.gender}</Text> : null}
       </View>
 
+      {/* LGBTQ Self (Optional) - "What am I?" - ALWAYS editable, even in read-only mode */}
+      <View style={styles.field}>
+        <Text style={styles.label}>LGBTQ (Optional) — What am I?</Text>
+        <Text style={styles.hint}>Select up to 2 options</Text>
+        <View style={styles.lgbtqContainer}>
+          {LGBTQ_OPTIONS.map((option) => {
+            const isSelected = lgbtqSelf.includes(option.value);
+            return (
+              <TouchableOpacity
+                key={option.value}
+                style={[
+                  styles.lgbtqOption,
+                  isSelected && styles.lgbtqOptionSelected,
+                ]}
+                onPress={() => {
+                  const success = toggleLgbtqSelf(option.value);
+                  if (!success) {
+                    setLgbtqError("You can select up to 2 options");
+                    // Clear error after 2 seconds
+                    setTimeout(() => setLgbtqError(""), 2000);
+                  } else {
+                    setLgbtqError("");
+                    // Save-as-you-go: update demoProfile immediately
+                    if (isDemoMode && userId) {
+                      const newLgbtqSelf = lgbtqSelf.includes(option.value)
+                        ? lgbtqSelf.filter((o) => o !== option.value)
+                        : [...lgbtqSelf, option.value];
+                      useDemoStore.getState().saveDemoProfile(userId, { lgbtqSelf: newLgbtqSelf });
+                    }
+                  }
+                }}
+                activeOpacity={0.7}
+              >
+                <Text
+                  style={[
+                    styles.lgbtqText,
+                    isSelected && styles.lgbtqTextSelected,
+                  ]}
+                >
+                  {option.label}
+                </Text>
+              </TouchableOpacity>
+            );
+          })}
+        </View>
+        {lgbtqError ? <Text style={styles.fieldError}>{lgbtqError}</Text> : null}
+      </View>
+
       {/* Age blocked warning (only in edit mode) */}
       {!isReadOnly && ageBlocked && (
         <View style={styles.ageBlockedContainer}>
@@ -604,12 +865,43 @@ export default function BasicInfoScreen() {
         <Button
           title="Continue"
           variant="primary"
-          onPress={isReadOnly ? handleReadOnlyContinue : handleNext}
-          loading={!isReadOnly && isSubmitting}
-          disabled={!isReadOnly && ageBlocked}
+          onPress={isReadOnly ? handleReadOnlyContinue : isRecoveryMode ? handleRecoveryContinue : handleNextWithConfirmation}
+          loading={!isReadOnly && !isRecoveryMode && isSubmitting}
+          disabled={!isReadOnly && !isRecoveryMode && ageBlocked}
           fullWidth
         />
       </View>
+
+      {/* Confirmation Modal (only for new signups, not confirm/recovery mode) */}
+      <Modal
+        visible={showConfirmModal}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setShowConfirmModal(false)}
+      >
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            <Text style={styles.modalTitle}>Basic info is fixed</Text>
+            <Text style={styles.modalMessage}>
+              Your Name, User ID, Date of Birth and Gender can't be changed later. Please make sure they are correct.
+            </Text>
+            <View style={styles.modalButtons}>
+              <TouchableOpacity
+                style={styles.modalButtonEdit}
+                onPress={() => setShowConfirmModal(false)}
+              >
+                <Text style={styles.modalButtonEditText}>Edit</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={styles.modalButtonConfirm}
+                onPress={handleNext}
+              >
+                <Text style={styles.modalButtonConfirmText}>Confirm & Continue</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
     </ScrollView>
     </SafeAreaView>
   );
@@ -792,5 +1084,88 @@ const styles = StyleSheet.create({
     color: COLORS.textLight,
     textAlign: "center",
     lineHeight: 20,
+  },
+  modalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 24,
+  },
+  modalContent: {
+    backgroundColor: COLORS.background,
+    borderRadius: 16,
+    padding: 24,
+    width: '100%',
+    maxWidth: 340,
+  },
+  modalTitle: {
+    fontSize: 20,
+    fontWeight: '700',
+    color: COLORS.text,
+    marginBottom: 12,
+    textAlign: 'center',
+  },
+  modalMessage: {
+    fontSize: 15,
+    color: COLORS.textLight,
+    lineHeight: 22,
+    marginBottom: 24,
+    textAlign: 'center',
+  },
+  modalButtons: {
+    flexDirection: 'row',
+    gap: 12,
+  },
+  modalButtonEdit: {
+    flex: 1,
+    paddingVertical: 14,
+    borderRadius: 12,
+    borderWidth: 2,
+    borderColor: COLORS.border,
+    alignItems: 'center',
+  },
+  modalButtonEditText: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: COLORS.text,
+  },
+  modalButtonConfirm: {
+    flex: 1,
+    paddingVertical: 14,
+    borderRadius: 12,
+    backgroundColor: COLORS.primary,
+    alignItems: 'center',
+  },
+  modalButtonConfirmText: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: COLORS.white,
+  },
+  lgbtqContainer: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 10,
+    marginTop: 8,
+  },
+  lgbtqOption: {
+    paddingVertical: 10,
+    paddingHorizontal: 16,
+    borderRadius: 20,
+    backgroundColor: COLORS.backgroundDark,
+    borderWidth: 2,
+    borderColor: COLORS.border,
+  },
+  lgbtqOptionSelected: {
+    borderColor: COLORS.primary,
+    backgroundColor: COLORS.primary + '10',
+  },
+  lgbtqText: {
+    fontSize: 14,
+    fontWeight: '500',
+    color: COLORS.text,
+  },
+  lgbtqTextSelected: {
+    color: COLORS.primary,
   },
 });

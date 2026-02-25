@@ -165,10 +165,13 @@ export type KidsStatus =
 export type EducationLevel =
   | "high_school"
   | "some_college"
+  | "associate"
   | "bachelors"
   | "masters"
   | "doctorate"
   | "trade_school"
+  | "professional"
+  | "diploma"
   | "other";
 export type Religion =
   | "christian"
@@ -848,6 +851,7 @@ export type OnboardingStep =
   | "bio"
   | "prompts"
   | "profile_details"
+  | "lifestyle"
   | "preferences"
   | "permissions"
   | "review"

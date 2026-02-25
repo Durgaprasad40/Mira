@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import {
   View,
   Text,
@@ -8,10 +8,13 @@ import {
   TextInput,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
-import { useRouter } from 'expo-router';
+import { useRouter, useLocalSearchParams } from 'expo-router';
 import { COLORS, PROFILE_PROMPT_QUESTIONS } from '@/lib/constants';
 import { Button } from '@/components/ui';
 import { useOnboardingStore } from '@/stores/onboardingStore';
+import { useDemoStore } from '@/stores/demoStore';
+import { useAuthStore } from '@/stores/authStore';
+import { isDemoMode } from '@/hooks/useConvex';
 import { Ionicons } from '@expo/vector-icons';
 import { scrollToFirstInvalid } from '@/lib/onboardingValidation';
 import { OnboardingProgressHeader } from '@/components/OnboardingProgressHeader';
@@ -21,7 +24,16 @@ const MAX_ANSWER_LENGTH = 200;
 
 export default function PromptsScreen() {
   const { profilePrompts, setProfilePrompts, setStep } = useOnboardingStore();
+  const { userId } = useAuthStore();
+  const demoHydrated = useDemoStore((s) => s._hasHydrated);
+  const demoProfile = useDemoStore((s) =>
+    isDemoMode && userId ? s.demoProfiles[userId] : null
+  );
   const router = useRouter();
+  const params = useLocalSearchParams<{ editFromReview?: string }>();
+
+  // CENTRAL EDIT HUB: Detect if editing from Review screen
+  const isEditFromReview = params.editFromReview === 'true';
 
   const [prompts, setPrompts] = useState<{ question: string; answer: string }[]>(
     profilePrompts.length > 0 ? profilePrompts : []
@@ -34,6 +46,18 @@ export default function PromptsScreen() {
   // Refs for scroll-to-invalid behavior
   const scrollRef = useRef<ScrollView>(null);
   const promptsSectionRef = useRef<View>(null);
+
+  // Prefill from demoProfiles if onboardingStore is empty
+  useEffect(() => {
+    if (isDemoMode && demoHydrated && demoProfile?.profilePrompts && prompts.length === 0) {
+      const saved = demoProfile.profilePrompts;
+      if (saved.length > 0) {
+        console.log(`[PROMPTS] prefilled ${saved.length} prompts from demoProfile`);
+        setPrompts(saved);
+        setProfilePrompts(saved);
+      }
+    }
+  }, [demoHydrated, demoProfile]);
 
   const usedQuestions = prompts.map((p) => p.question);
   const availableQuestions = PROFILE_PROMPT_QUESTIONS.filter(
@@ -84,17 +108,32 @@ export default function PromptsScreen() {
     setPromptsError('');
     setShowTopError(false);
 
-    if (__DEV__) console.log('[ONB] prompts → profile-details (continue)');
+    // Save to onboardingStore
     setProfilePrompts(filledPrompts);
+
+    // SAVE-AS-YOU-GO: Persist to demoProfiles immediately
+    if (isDemoMode && userId) {
+      const demoStore = useDemoStore.getState();
+      demoStore.saveDemoProfile(userId, { profilePrompts: filledPrompts });
+      console.log(`[PROMPTS] saved ${filledPrompts.length} prompts to demoProfile`);
+    }
+
+    // CENTRAL EDIT HUB: Return to Review if editing from there
+    if (isEditFromReview) {
+      if (__DEV__) console.log('[ONB] prompts → review (editFromReview)');
+      router.replace('/(onboarding)/review' as any);
+      return;
+    }
+
+    if (__DEV__) console.log('[ONB] prompts → profile-details (continue)');
     setStep('profile_details');
     router.push('/(onboarding)/profile-details' as any);
   };
 
-  // Previous goes back to consent
+  // Previous goes back (respects navigation history)
   const handlePrevious = () => {
-    if (__DEV__) console.log('[ONB] prompts → consent (previous)');
-    setStep('consent');
-    router.push('/(onboarding)/consent' as any);
+    if (__DEV__) console.log('[ONB] prompts → back (previous)');
+    router.back();
   };
 
   return (

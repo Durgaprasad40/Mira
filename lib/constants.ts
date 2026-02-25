@@ -267,10 +267,13 @@ export const KIDS_OPTIONS = [
 export const EDUCATION_OPTIONS = [
   { value: 'high_school', label: 'High School' },
   { value: 'some_college', label: 'Some College' },
-  { value: 'bachelors', label: "Bachelor's" },
-  { value: 'masters', label: "Master's" },
-  { value: 'doctorate', label: 'Doctorate' },
+  { value: 'associate', label: 'Associate Degree' },
+  { value: 'bachelors', label: "Bachelor's Degree" },
+  { value: 'masters', label: "Master's Degree" },
+  { value: 'doctorate', label: 'Doctorate / PhD' },
   { value: 'trade_school', label: 'Trade School' },
+  { value: 'professional', label: 'Professional Degree (MD, JD, CA, etc.)' },
+  { value: 'diploma', label: 'Diploma / Polytechnic' },
   { value: 'other', label: 'Other' },
 ];
 

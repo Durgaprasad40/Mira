@@ -81,13 +81,36 @@ export function scrollToFirstInvalid<T extends string>(
 
   // Try to focus if it's a TextInput
   if (typeof fieldRef.current.focus === 'function') {
-    fieldRef.current.focus();
+    try {
+      fieldRef.current.focus();
+    } catch {
+      // Focus failed silently - not a critical error
+    }
   }
 
   // Try to scroll to the field
   try {
+    // SAFETY: Check if measureLayout is available on the ref
+    if (typeof fieldRef.current.measureLayout !== 'function') {
+      // Ref doesn't support measureLayout - scroll to top as fallback
+      scrollRef.current?.scrollTo({ y: 0, animated: true });
+      return;
+    }
+
+    // SAFETY: Check if getInnerViewNode is available and returns a valid node
+    if (typeof scrollRef.current.getInnerViewNode !== 'function') {
+      scrollRef.current?.scrollTo({ y: 0, animated: true });
+      return;
+    }
+
+    const innerViewNode = scrollRef.current.getInnerViewNode();
+    if (!innerViewNode) {
+      scrollRef.current?.scrollTo({ y: 0, animated: true });
+      return;
+    }
+
     fieldRef.current.measureLayout(
-      scrollRef.current.getInnerViewNode(),
+      innerViewNode,
       (_x: number, y: number) => {
         scrollRef.current?.scrollTo({ y: Math.max(0, y - offsetY), animated: true });
       },

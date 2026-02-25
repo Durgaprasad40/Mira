@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useEffect } from "react";
 import {
   View,
   Text,
@@ -8,7 +8,7 @@ import {
   Alert,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { useRouter } from "expo-router";
+import { useRouter, useLocalSearchParams } from "expo-router";
 import {
   COLORS,
   SMOKING_OPTIONS,
@@ -20,6 +20,9 @@ import {
 } from "@/lib/constants";
 import { Button } from "@/components/ui";
 import { useOnboardingStore } from "@/stores/onboardingStore";
+import { useDemoStore } from "@/stores/demoStore";
+import { useAuthStore } from "@/stores/authStore";
+import { isDemoMode } from "@/hooks/useConvex";
 import { ExerciseStatus, PetType, InsectType } from "@/types";
 import { OnboardingProgressHeader } from "@/components/OnboardingProgressHeader";
 
@@ -36,13 +39,78 @@ export default function ProfileDetailsLifestyleScreen() {
     setKids,
     setExercise,
     togglePet,
+    setPets,
     setInsect,
   } = useOnboardingStore();
+  const { userId } = useAuthStore();
+  const demoHydrated = useDemoStore((s) => s._hasHydrated);
+  const demoProfile = useDemoStore((s) =>
+    isDemoMode && userId ? s.demoProfiles[userId] : null
+  );
   const router = useRouter();
+  const params = useLocalSearchParams<{ editFromReview?: string }>();
+
+  // CENTRAL EDIT HUB: Detect if editing from Review screen
+  const isEditFromReview = params.editFromReview === 'true';
+
+  // Prefill from demoProfiles if onboardingStore is empty
+  useEffect(() => {
+    if (isDemoMode && demoHydrated && demoProfile) {
+      let loaded = false;
+      if (demoProfile.smoking && !smoking) {
+        setSmoking(demoProfile.smoking as any);
+        loaded = true;
+      }
+      if (demoProfile.drinking && !drinking) {
+        setDrinking(demoProfile.drinking as any);
+        loaded = true;
+      }
+      if (demoProfile.kids && !kids) {
+        setKids(demoProfile.kids as any);
+        loaded = true;
+      }
+      if (demoProfile.exercise && !exercise) {
+        setExercise(demoProfile.exercise as ExerciseStatus);
+        loaded = true;
+      }
+      if (demoProfile.pets && demoProfile.pets.length > 0 && pets.length === 0) {
+        demoProfile.pets.forEach((p) => togglePet(p as PetType));
+        loaded = true;
+      }
+      if (demoProfile.insect && !insect) {
+        setInsect(demoProfile.insect as InsectType);
+        loaded = true;
+      }
+      if (loaded) console.log('[LIFESTYLE] prefilled lifestyle fields from demoProfile');
+    }
+  }, [demoHydrated, demoProfile]);
 
   const handleNext = () => {
-    if (__DEV__) console.log('[ONB] profile-details/lifestyle → education-religion');
-    router.push("/(onboarding)/profile-details/education-religion");
+    // SAVE-AS-YOU-GO: Persist to demoProfiles immediately
+    if (isDemoMode && userId) {
+      const demoStore = useDemoStore.getState();
+      const dataToSave: Record<string, any> = {};
+      if (smoking) dataToSave.smoking = smoking;
+      if (drinking) dataToSave.drinking = drinking;
+      if (kids) dataToSave.kids = kids;
+      if (exercise) dataToSave.exercise = exercise;
+      if (pets.length > 0) dataToSave.pets = pets;
+      if (insect) dataToSave.insect = insect;
+      if (Object.keys(dataToSave).length > 0) {
+        demoStore.saveDemoProfile(userId, dataToSave);
+        console.log(`[LIFESTYLE] saved: ${JSON.stringify(dataToSave)}`);
+      }
+    }
+
+    // CENTRAL EDIT HUB: Return to Review if editing from there
+    if (isEditFromReview) {
+      if (__DEV__) console.log('[ONB] profile-details/lifestyle → review (editFromReview)');
+      router.replace('/(onboarding)/review' as any);
+      return;
+    }
+
+    if (__DEV__) console.log('[ONB] profile-details/lifestyle → preferences');
+    router.push("/(onboarding)/preferences");
   };
 
   const handlePrevious = () => {
@@ -77,7 +145,7 @@ export default function ProfileDetailsLifestyleScreen() {
         keyboardShouldPersistTaps="handled"
       >
         <Text style={styles.title}>Profile Details</Text>
-        <Text style={styles.stepIndicator}>Step 2 of 3</Text>
+        <Text style={styles.stepIndicator}>Step 2 of 2</Text>
         <Text style={styles.subtitle}>
           Tell us about your lifestyle preferences.
         </Text>
