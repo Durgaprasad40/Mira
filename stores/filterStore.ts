@@ -1,4 +1,6 @@
 import { create } from 'zustand';
+import { persist, createJSONStorage } from 'zustand/middleware';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import {
   Gender,
   Orientation,
@@ -17,6 +19,10 @@ export const milesToKm = (miles: number): number => Math.round(miles * KM_PER_MI
 export const kmToMiles = (km: number): number => Math.round(km * MILE_PER_KM);
 
 interface FilterStoreState extends FilterState {
+  // Hydration tracking
+  _hasHydrated: boolean;
+  setHasHydrated: (state: boolean) => void;
+
   // Alias for gender
   lookingFor: Gender[];
   setLookingFor: (genders: Gender[]) => void;
@@ -74,12 +80,17 @@ const initialState: FilterState = {
   privateIntentKeys: [], // Phase-2: multi-select intents (1-5)
 };
 
-export const useFilterStore = create<FilterStoreState>((set, get) => ({
-  ...initialState,
-  lookingFor: initialState.gender,
-  filterVersion: 0,
+export const useFilterStore = create<FilterStoreState>()(
+  persist(
+    (set, get) => ({
+      ...initialState,
+      _hasHydrated: false,
+      lookingFor: initialState.gender,
+      filterVersion: 0,
 
-  incrementFilterVersion: () => set((state) => ({ filterVersion: state.filterVersion + 1 })),
+      setHasHydrated: (state) => set({ _hasHydrated: state }),
+
+      incrementFilterVersion: () => set((state) => ({ filterVersion: state.filterVersion + 1 })),
 
   setLookingFor: (genders) => set({ gender: genders, lookingFor: genders }),
 
@@ -153,4 +164,31 @@ export const useFilterStore = create<FilterStoreState>((set, get) => ({
     set((state) => ({
       orientation: state.orientation === orientation ? null : orientation,
     })),
-}));
+    }),
+    {
+      name: 'filter-storage',
+      storage: createJSONStorage(() => AsyncStorage),
+      // Persist all filter values except transient state
+      partialize: (state) => ({
+        gender: state.gender,
+        orientation: state.orientation,
+        minAge: state.minAge,
+        maxAge: state.maxAge,
+        maxDistance: state.maxDistance,
+        relationshipIntent: state.relationshipIntent,
+        activities: state.activities,
+        sortBy: state.sortBy,
+        privateIntentKeys: state.privateIntentKeys,
+      }),
+      onRehydrateStorage: () => (state, error) => {
+        if (error) {
+          console.error('[filterStore] Rehydration error:', error);
+        }
+        if (__DEV__) {
+          console.log('[filterStore] Hydrated:', state ? 'success' : 'empty');
+        }
+        state?.setHasHydrated(true);
+      },
+    },
+  ),
+);

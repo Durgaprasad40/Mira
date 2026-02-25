@@ -6,8 +6,10 @@ import {
   ScrollView,
   TouchableOpacity,
   Alert,
+  KeyboardAvoidingView,
+  Platform,
 } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter, useLocalSearchParams, useSegments } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { COLORS, GENDER_OPTIONS, ORIENTATION_OPTIONS, RELATIONSHIP_INTENTS, INCOGNITO_COLORS } from '@/lib/constants';
@@ -26,9 +28,8 @@ const MAX_AGE = 70;
 const MAX_DISTANCE_MILES = 100; // UI shows miles
 const MAX_DISTANCE_KM = milesToKm(MAX_DISTANCE_MILES); // ~161km stored
 
-// "Looking for" selection limits (applies to BOTH phases)
-const MIN_LOOKING_FOR = 1;
-const MAX_LOOKING_FOR = 2;
+// "Looking for" is single-select (exactly 1)
+const LOOKING_FOR_COUNT = 1;
 
 // Phase-1 intent selection limits
 const MIN_PHASE1_INTENTS = 1;
@@ -61,13 +62,14 @@ export default function DiscoveryPreferencesScreen() {
     setMinAge,
     setMaxAge,
     setMaxDistanceKm,
-    toggleGender,
+    setGender,
     toggleOrientation,
     toggleRelationshipIntent,
     togglePrivateIntentKey,
     setRelationshipIntent,
     setPrivateIntentKeys,
     incrementFilterVersion,
+    _hasHydrated,
   } = useFilterStore();
 
   // Theme colors based on phase
@@ -96,25 +98,10 @@ export default function DiscoveryPreferencesScreen() {
     }
   }, []); // Run once on mount
 
-  // "Looking for" toggle with min/max enforcement (applies to BOTH phases)
-  const handleLookingForToggle = (genderValue: Gender) => {
-    const isSelected = lookingFor.includes(genderValue);
-
-    if (isSelected) {
-      // Trying to deselect — enforce minimum
-      if (lookingFor.length <= MIN_LOOKING_FOR) {
-        Alert.alert('Selection limit', `Select at least ${MIN_LOOKING_FOR}.`);
-        return;
-      }
-    } else {
-      // Trying to select — enforce maximum
-      if (lookingFor.length >= MAX_LOOKING_FOR) {
-        Alert.alert('Selection limit', `You can select up to ${MAX_LOOKING_FOR}.`);
-        return;
-      }
-    }
-
-    toggleGender(genderValue);
+  // "Looking for" is single-select — selecting replaces previous selection
+  const handleLookingForSelect = (genderValue: Gender) => {
+    // Always set to the selected value (single-select behavior)
+    setGender([genderValue]);
   };
 
   // Phase-1 intent toggle with min/max enforcement
@@ -167,14 +154,29 @@ export default function DiscoveryPreferencesScreen() {
   const [localMaxDistanceMiles, setLocalMaxDistanceMiles] = useState(initialDistanceMiles.toString());
   const [saving, setSaving] = useState(false);
 
+  // Sync local state when store hydrates (fixes stale defaults after app restart)
+  useEffect(() => {
+    if (_hasHydrated) {
+      setLocalMinAge(minAge.toString());
+      setLocalMaxAge(maxAge.toString());
+      setLocalMaxDistanceMiles(kmToMiles(maxDistance).toString());
+      if (__DEV__) {
+        console.log('[Prefs] Synced from hydrated store:', { minAge, maxAge, maxDistance, lookingFor, orientation, relationshipIntent });
+      }
+    }
+  }, [_hasHydrated]);
+
+  // Keyboard avoidance insets
+  const insets = useSafeAreaInsets();
+
   const updatePreferences = useMutation(api.users.updatePreferences);
 
   const handleSavePreferences = async () => {
     if (!userId || saving) return;
 
-    // Both phases: Enforce minimum "Looking for" selection before saving
-    if (lookingFor.length < MIN_LOOKING_FOR) {
-      Alert.alert('Selection limit', `Select at least ${MIN_LOOKING_FOR} in "Looking for".`);
+    // Both phases: Enforce "Looking for" selection before saving
+    if (lookingFor.length < LOOKING_FOR_COUNT) {
+      Alert.alert('Selection required', 'Please select who you are looking for.');
       return;
     }
 
@@ -240,22 +242,32 @@ export default function DiscoveryPreferencesScreen() {
 
   return (
     <SafeAreaView style={[styles.safeArea, { backgroundColor: bgColor }]} edges={['top']}>
-      <ScrollView style={[styles.container, { backgroundColor: bgColor }]} showsVerticalScrollIndicator={false}>
-        <View style={[styles.header, isPhase2 && { borderBottomColor: INCOGNITO_COLORS.accent }]}>
-          <TouchableOpacity onPress={() => router.back()}>
-            <Ionicons name="arrow-back" size={24} color={textColor} />
-          </TouchableOpacity>
-          <Text style={[styles.headerTitle, { color: textColor }]}>
-            {isPhase2 ? 'Desire Preferences' : 'Discovery Preferences'}
-          </Text>
-          <View style={{ width: 24 }} />
-        </View>
+      <KeyboardAvoidingView
+        style={styles.keyboardAvoid}
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 0}
+      >
+        <ScrollView
+          style={[styles.container, { backgroundColor: bgColor }]}
+          contentContainerStyle={{ paddingBottom: insets.bottom + 24 }}
+          showsVerticalScrollIndicator={false}
+          keyboardShouldPersistTaps="handled"
+        >
+          <View style={[styles.header, isPhase2 && { borderBottomColor: INCOGNITO_COLORS.accent }]}>
+            <TouchableOpacity onPress={() => router.back()}>
+              <Ionicons name="arrow-back" size={24} color={textColor} />
+            </TouchableOpacity>
+            <Text style={[styles.headerTitle, { color: textColor }]}>
+              {isPhase2 ? 'Desire Preferences' : 'Discovery Preferences'}
+            </Text>
+            <View style={{ width: 24 }} />
+          </View>
 
         <View style={styles.content}>
           <View style={styles.inputGroup}>
             <Text style={[styles.label, { color: textColor }]}>Looking for</Text>
             <Text style={[styles.sublabel, { color: textLightColor }]}>
-              {`Select ${MIN_LOOKING_FOR}–${MAX_LOOKING_FOR} (${lookingFor.length} selected)`}
+              Select one
             </Text>
             <View style={styles.chips}>
               {GENDER_OPTIONS.map((option) => (
@@ -266,7 +278,7 @@ export default function DiscoveryPreferencesScreen() {
                     isPhase2 && styles.chipDark,
                     lookingFor.includes(option.value as Gender) && [styles.chipSelected, { backgroundColor: accentColor, borderColor: accentColor }],
                   ]}
-                  onPress={() => handleLookingForToggle(option.value as Gender)}
+                  onPress={() => handleLookingForSelect(option.value as Gender)}
                 >
                   <Text
                     style={[
@@ -285,7 +297,7 @@ export default function DiscoveryPreferencesScreen() {
           <View style={styles.inputGroup}>
             <Text style={[styles.label, { color: textColor }]}>Orientation</Text>
             <Text style={[styles.sublabel, { color: textLightColor }]}>
-              Optional (tap again to clear)
+              Optional — tap to select, tap again to clear
             </Text>
             <View style={styles.chips}>
               {ORIENTATION_OPTIONS.map((option) => (
@@ -313,7 +325,9 @@ export default function DiscoveryPreferencesScreen() {
           </View>
 
           <View style={styles.inputGroup}>
-            <Text style={[styles.label, { color: textColor }]}>What are you looking for?</Text>
+            <Text style={[styles.label, { color: textColor }]}>
+              {isPhase2 ? 'What are you looking for?' : 'Relationship Goal'}
+            </Text>
             <Text style={[styles.sublabel, { color: textLightColor }]}>
               {isPhase2
                 ? `Select ${MIN_PHASE2_INTENTS}–${MAX_PHASE2_INTENTS} (${privateIntentKeys.length} selected)`
@@ -415,7 +429,8 @@ export default function DiscoveryPreferencesScreen() {
             style={styles.saveButton}
           />
         </View>
-      </ScrollView>
+        </ScrollView>
+      </KeyboardAvoidingView>
     </SafeAreaView>
   );
 }
@@ -424,6 +439,9 @@ const styles = StyleSheet.create({
   safeArea: {
     flex: 1,
     backgroundColor: COLORS.background,
+  },
+  keyboardAvoid: {
+    flex: 1,
   },
   container: {
     flex: 1,
