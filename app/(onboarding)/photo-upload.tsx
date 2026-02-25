@@ -18,7 +18,7 @@ import { isDemoMode, convex } from '@/hooks/useConvex';
 import { OnboardingProgressHeader } from '@/components/OnboardingProgressHeader';
 
 export default function PhotoUploadScreen() {
-  const { photos, reorderPhotos, setStep, setVerificationPhoto } = useOnboardingStore();
+  const { photos, setPhotoAtIndex, setStep, setVerificationPhoto } = useOnboardingStore();
   const { userId, faceVerificationPassed } = useAuthStore();
   const demoProfile = useDemoStore((s) => isDemoMode && userId ? s.demoProfiles[userId] : null);
   const router = useRouter();
@@ -105,8 +105,8 @@ export default function PhotoUploadScreen() {
     // Update local preview immediately for instant feedback
     setPreviewUri(finalUri);
 
-    // REPLACE the first photo (not append) by setting photos array to just this one
-    reorderPhotos([finalUri]);
+    // Set first photo slot only (preserves existing photos at other slots)
+    setPhotoAtIndex(0, finalUri);
   };
 
   const pickImage = async () => {
