@@ -95,20 +95,41 @@ export default function FaceVerificationScreen() {
   }));
 
   // =============================================================================
-  // Debug logging and gate check on mount
+  // Debug logging and gate check - waits for hydration before blocking
   // =============================================================================
+
+  // Track if we've already shown the "no photo" alert to prevent spam
+  const didShowNoPhotoAlertRef = useRef(false);
+
+  // Get hydration state to avoid checking before store is ready
+  const storeHydrated = useOnboardingStore((s) => s._hasHydrated);
 
   useEffect(() => {
     const referencePhotoPresent = !!(photos && photos.length > 0 && photos[0]);
     console.log('[FaceDebug] ========================================');
-    console.log('[FaceDebug] Face Verification screen MOUNTED');
+    console.log('[FaceDebug] Face Verification screen check');
     console.log('[FaceDebug] userId:', userId);
+    console.log('[FaceDebug] storeHydrated:', storeHydrated);
     console.log('[FaceDebug] profilePhotos:', photos.length);
     console.log(`[FaceDebug] referencePhotoPresent=${referencePhotoPresent}`);
     console.log('[FaceDebug] ========================================');
 
-    // GATE CHECK: If no reference photo, redirect to photo-upload immediately
-    if (!referencePhotoPresent) {
+    // GATE CHECK: Wait for store hydration before blocking user
+    // This prevents false positives when photos haven't loaded yet
+    if (!storeHydrated) {
+      console.log('[FaceDebug] Store not hydrated yet, waiting...');
+      return;
+    }
+
+    // If photos are present, clear the alert flag (in case user returns after uploading)
+    if (referencePhotoPresent) {
+      didShowNoPhotoAlertRef.current = false;
+      return;
+    }
+
+    // No reference photo AND store is hydrated - show alert (but only once)
+    if (!didShowNoPhotoAlertRef.current) {
+      didShowNoPhotoAlertRef.current = true;
       console.log('[ONB] route_decision: NO_REFERENCE_PHOTO - redirecting to photo-upload');
       Alert.alert(
         'Photo Required',
@@ -122,7 +143,11 @@ export default function FaceVerificationScreen() {
         }]
       );
     }
+  }, [storeHydrated, photos, setStep, router]);
 
+  // Log mount/unmount separately (no deps needed)
+  useEffect(() => {
+    console.log('[FaceDebug] Face Verification screen MOUNTED');
     return () => {
       console.log('[FaceDebug] Face Verification screen UNMOUNTED');
     };
