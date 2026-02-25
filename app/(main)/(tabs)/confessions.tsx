@@ -21,6 +21,7 @@ import {
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter, useLocalSearchParams } from 'expo-router';
+import { safePush } from '@/lib/safeRouter';
 import { LoadingGuard } from '@/components/safety';
 import { Ionicons } from '@expo/vector-icons';
 import { useQuery, useMutation } from 'convex/react';
@@ -650,15 +651,15 @@ export default function ConfessionsScreen() {
   }, []);
 
   const handleOpenMyConfessions = useCallback(() => {
-    router.push('/(main)/my-confessions' as any);
+    safePush(router, '/(main)/my-confessions' as any, 'confessions->myConfessions');
   }, [router]);
 
   const handleOpenThread = useCallback(
     (confessionId: string) => {
-      router.push({
+      safePush(router, {
         pathname: '/(main)/confession-thread',
         params: { confessionId },
-      } as any);
+      } as any, 'confessions->thread');
     },
     [router]
   );
@@ -670,7 +671,7 @@ export default function ConfessionsScreen() {
           (c.initiatorId === currentUserId || c.responderId === currentUserId)
       );
       if (existing) {
-        router.push(`/(main)/confession-chat?chatId=${existing.id}` as any);
+        safePush(router, `/(main)/confession-chat?chatId=${existing.id}` as any, 'confessions->chat');
         return;
       }
 
@@ -686,7 +687,7 @@ export default function ConfessionsScreen() {
         mutualRevealStatus: 'none',
       };
       addChat(newChat);
-      router.push(`/(main)/confession-chat?chatId=${newChat.id}` as any);
+      safePush(router, `/(main)/confession-chat?chatId=${newChat.id}` as any, 'confessions->newChat');
       notifyReply(confessionId);
     },
     [chats, currentUserId, addChat, notifyReply, router]
@@ -827,7 +828,7 @@ export default function ConfessionsScreen() {
     setPreviewTarget(null);
     // Navigate to profile in read-only mode
     // Pass confessionId and receiverId so the profile screen can mark preview as used on mount
-    router.push({
+    safePush(router, {
       pathname: '/(main)/profile/[id]',
       params: {
         id: authorId,
@@ -835,7 +836,7 @@ export default function ConfessionsScreen() {
         confessionId,
         receiverId: currentUserId,
       },
-    } as any);
+    } as any, 'confessions->profilePreview');
     // NOTE: markPreviewUsed is called in the profile screen on successful mount, not here
   }, [previewTarget, currentUserId, router]);
 
@@ -847,10 +848,10 @@ export default function ConfessionsScreen() {
   // Handle tapping @tag to open profile preview (read-only)
   const handleTagPress = useCallback(
     (targetUserId: string) => {
-      router.push({
+      safePush(router, {
         pathname: '/(main)/profile/[id]',
         params: { id: targetUserId, mode: 'confess_preview' },
-      } as any);
+      } as any, 'confessions->tagProfile');
     },
     [router]
   );

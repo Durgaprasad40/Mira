@@ -2,6 +2,7 @@ import { useCallback, useMemo, useState, useRef } from "react";
 import { StyleSheet } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useFocusEffect, useRouter, useLocalSearchParams } from "expo-router";
+import { safePush } from "@/lib/safeRouter";
 
 import ExploreTileGrid from "@/components/explore/ExploreTileGrid";
 import { useExploreProfiles } from "@/components/explore/useExploreProfiles";
@@ -38,10 +39,10 @@ export default function ExploreScreen() {
   // when user taps a category
   const handleCategoryPress = useCallback(
     (category: ExploreCategory) => {
-      router.push({
+      safePush(router, {
         pathname: "/explore-category/[categoryId]",
         params: { categoryId: category.id },
-      });
+      }, 'explore->category');
     },
     [router]
   );

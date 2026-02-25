@@ -26,6 +26,7 @@ import { getDemoClusterImage } from '@/components/map/demoClusterIndex';
 // Using image prop instead of React children eliminates bitmap snapshotting
 const PIN_PINK_IMAGE = require('../../../assets/map/pin_pink.png');
 import { useRouter, useFocusEffect, useLocalSearchParams } from 'expo-router';
+import { safePush } from '@/lib/safeRouter';
 import { LoadingGuard } from '@/components/safety';
 import { Ionicons } from '@expo/vector-icons';
 import { useQuery, useMutation } from 'convex/react';
@@ -951,7 +952,7 @@ export default function NearbyScreen() {
   // Handle crossed path marker tap — mark seen and open profile
   const handleCrossedPathMarkerPress = useCallback((cp: typeof demoCrossedPaths[0]) => {
     markCrossedPathSeen(cp.otherUserId);
-    router.push(`/(main)/profile/${cp.otherUserId}`);
+    safePush(router, `/(main)/profile/${cp.otherUserId}`, 'nearby->crossedPath');
   }, [markCrossedPathSeen, router]);
 
   // Deep link: animate to focused crossed path marker
@@ -1196,7 +1197,7 @@ export default function NearbyScreen() {
       {/* Crossed paths shortcut */}
       <TouchableOpacity
         style={styles.crossedPathsButton}
-        onPress={() => router.push('/(main)/crossed-paths')}
+        onPress={() => safePush(router, '/(main)/crossed-paths', 'nearby->crossedPaths')}
       >
         <Ionicons name="footsteps" size={22} color={COLORS.white} />
       </TouchableOpacity>
@@ -1234,7 +1235,7 @@ export default function NearbyScreen() {
                     style={[styles.viewProfileButton, styles.messageButton]}
                     onPress={() => {
                       closeSheet();
-                      router.push(`/(main)/(tabs)/messages/chat/${selectedProfileConversationId}`);
+                      safePush(router, `/(main)/(tabs)/messages/chat/${selectedProfileConversationId}`, 'nearby->chat');
                     }}
                   >
                     <Ionicons name="chatbubble" size={14} color={COLORS.white} style={{ marginRight: 6 }} />
@@ -1246,7 +1247,7 @@ export default function NearbyScreen() {
                     style={styles.viewProfileButton}
                     onPress={() => {
                       closeSheet();
-                      router.push(`/(main)/profile/${selectedProfile._id}`);
+                      safePush(router, `/(main)/profile/${selectedProfile._id}`, 'nearby->profile');
                     }}
                   >
                     <Text style={styles.viewProfileText}>View Profile</Text>

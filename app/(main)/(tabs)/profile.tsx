@@ -10,6 +10,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter, useFocusEffect } from 'expo-router';
+import { safePush, safeReplace } from '@/lib/safeRouter';
 import { useQuery, useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { useAuthStore } from '@/stores/authStore';
@@ -186,7 +187,7 @@ export default function ProfileScreen() {
           }
           useOnboardingStore.getState().reset();
           logout();
-          router.replace('/(auth)/welcome');
+          safeReplace(router, '/(auth)/welcome', 'profile->logout');
 
           // Server logout in background (best-effort)
           if (!isDemoMode && token) {
@@ -219,7 +220,7 @@ export default function ProfileScreen() {
               // 3A1-2: Also clear onboarding store on deactivate
               useOnboardingStore.getState().reset();
               logout();
-              router.replace('/(auth)/welcome');
+              safeReplace(router, '/(auth)/welcome', 'profile->deactivate');
             } catch (error: any) {
               Alert.alert('Error', error.message || 'Failed to deactivate account');
             }
@@ -246,7 +247,7 @@ export default function ProfileScreen() {
     <ScrollView style={{ flex: 1 }} showsVerticalScrollIndicator={false}>
       <View style={styles.header}>
         <Text style={styles.headerTitle}>Profile</Text>
-        <TouchableOpacity onPress={() => router.push('/(main)/edit-profile')}>
+        <TouchableOpacity onPress={() => safePush(router, '/(main)/edit-profile', 'profile->edit')}>
           <Ionicons name="create-outline" size={24} color={COLORS.primary} />
         </TouchableOpacity>
       </View>
@@ -333,7 +334,7 @@ export default function ProfileScreen() {
           <Button
             title="Manage Subscription"
             variant="outline"
-            onPress={() => router.push('/(main)/subscription')}
+            onPress={() => safePush(router, '/(main)/subscription', 'profile->subscription')}
             style={styles.subscriptionButton}
           />
         </View>
@@ -342,7 +343,7 @@ export default function ProfileScreen() {
       <View style={styles.menuSection}>
         <TouchableOpacity
           style={styles.menuItem}
-          onPress={() => router.push('/(main)/edit-profile')}
+          onPress={() => safePush(router, '/(main)/edit-profile', 'profile->editMenu')}
         >
           <Ionicons name="create-outline" size={24} color={COLORS.text} />
           <Text style={styles.menuText}>Edit Profile</Text>
@@ -351,7 +352,7 @@ export default function ProfileScreen() {
 
         <TouchableOpacity
           style={styles.menuItem}
-          onPress={() => router.push('/(main)/subscription')}
+          onPress={() => safePush(router, '/(main)/subscription', 'profile->subscriptionMenu')}
         >
           <Ionicons name="diamond-outline" size={24} color={COLORS.text} />
           <Text style={styles.menuText}>Subscription</Text>
@@ -360,7 +361,7 @@ export default function ProfileScreen() {
 
         <TouchableOpacity
           style={styles.menuItem}
-          onPress={() => router.push('/(main)/settings')}
+          onPress={() => safePush(router, '/(main)/settings', 'profile->privacy')}
         >
           <Ionicons name="lock-closed-outline" size={24} color={COLORS.text} />
           <Text style={styles.menuText}>Privacy</Text>
@@ -369,7 +370,7 @@ export default function ProfileScreen() {
 
         <TouchableOpacity
           style={styles.menuItem}
-          onPress={() => router.push('/(main)/settings')}
+          onPress={() => safePush(router, '/(main)/settings', 'profile->notifications')}
         >
           <Ionicons name="notifications-outline" size={24} color={COLORS.text} />
           <Text style={styles.menuText}>Notifications</Text>
@@ -378,7 +379,7 @@ export default function ProfileScreen() {
 
         <TouchableOpacity
           style={styles.menuItem}
-          onPress={() => router.push('/(main)/settings')}
+          onPress={() => safePush(router, '/(main)/settings', 'profile->safety')}
         >
           <Ionicons name="shield-checkmark-outline" size={24} color={COLORS.text} />
           <Text style={styles.menuText}>Safety</Text>
@@ -387,7 +388,7 @@ export default function ProfileScreen() {
 
         <TouchableOpacity
           style={styles.menuItem}
-          onPress={() => router.push('/(main)/settings')}
+          onPress={() => safePush(router, '/(main)/settings', 'profile->account')}
         >
           <Ionicons name="person-outline" size={24} color={COLORS.text} />
           <Text style={styles.menuText}>Account</Text>
@@ -398,7 +399,7 @@ export default function ProfileScreen() {
           <>
             <TouchableOpacity
               style={[styles.menuItem, styles.adminMenuItem]}
-              onPress={() => router.push('/(main)/admin/verification')}
+              onPress={() => safePush(router, '/(main)/admin/verification', 'profile->adminVerification')}
             >
               <Ionicons name="shield-outline" size={24} color={COLORS.primary} />
               <Text style={[styles.menuText, { color: COLORS.primary }]}>Admin: Verification Queue</Text>
@@ -406,7 +407,7 @@ export default function ProfileScreen() {
             </TouchableOpacity>
             <TouchableOpacity
               style={[styles.menuItem, styles.adminMenuItem]}
-              onPress={() => router.push('/(main)/admin/logs')}
+              onPress={() => safePush(router, '/(main)/admin/logs', 'profile->adminLogs')}
             >
               <Ionicons name="document-text-outline" size={24} color={COLORS.primary} />
               <Text style={[styles.menuText, { color: COLORS.primary }]}>Admin: Audit Logs</Text>

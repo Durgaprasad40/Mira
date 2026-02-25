@@ -14,6 +14,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter, useLocalSearchParams, useFocusEffect } from 'expo-router';
+import { safePush } from '@/lib/safeRouter';
 import { LoadingGuard } from '@/components/safety';
 import { Image } from 'expo-image';
 import { useQuery } from 'convex/react';
@@ -433,7 +434,7 @@ export default function MessagesScreen() {
     setMatchedProfile(null);
 
     // Navigate to chat
-    router.push(`/(main)/(tabs)/messages/chat/${convoId}?source=match` as any);
+    safePush(router, `/(main)/(tabs)/messages/chat/${convoId}?source=match` as any, 'messages->matchChat');
   }, [matchedProfile, router, modalScale, heartScale]);
 
   const handleKeepDiscovering = useCallback(() => {
@@ -447,7 +448,7 @@ export default function MessagesScreen() {
   }, [modalScale, heartScale]);
 
   const handleProfileTap = useCallback((like: any) => {
-    router.push(`/(main)/profile/${like.userId}` as any);
+    safePush(router, `/(main)/profile/${like.userId}` as any, 'messages->likeProfile');
   }, [router]);
 
   // Back to messages (for in-place header button)
@@ -540,7 +541,7 @@ export default function MessagesScreen() {
             <TouchableOpacity
               style={styles.matchItem}
               activeOpacity={0.7}
-              onPress={() => router.push(`/(main)/(tabs)/messages/chat/${item.conversationId}` as any)}
+              onPress={() => safePush(router, `/(main)/(tabs)/messages/chat/${item.conversationId}` as any, 'messages->newMatchChat')}
             >
               <View style={styles.matchAvatarContainer}>
                 <View style={styles.matchRing}>
@@ -589,7 +590,7 @@ export default function MessagesScreen() {
           </View>
           <TouchableOpacity
             style={styles.upgradeButton}
-            onPress={() => router.push('/(main)/subscription')}
+            onPress={() => safePush(router, '/(main)/subscription', 'messages->upgrade')}
           >
             <Text style={styles.upgradeButtonText}>Upgrade</Text>
           </TouchableOpacity>
@@ -758,8 +759,8 @@ export default function MessagesScreen() {
               lastMessage={item.lastMessage}
               unreadCount={item.unreadCount}
               isPreMatch={item.isPreMatch}
-              onPress={() => router.push(`/(main)/(tabs)/messages/chat/${item.conversationId || item.id}` as any)}
-              onAvatarPress={() => router.push(`/(main)/profile/${item.otherUser?.id}` as any)}
+              onPress={() => safePush(router, `/(main)/(tabs)/messages/chat/${item.conversationId || item.id}` as any, 'messages->chat')}
+              onAvatarPress={() => safePush(router, `/(main)/profile/${item.otherUser?.id}` as any, 'messages->avatarProfile')}
             />
           )}
           ListHeaderComponent={

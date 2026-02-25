@@ -9,6 +9,7 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useLocalSearchParams, useRouter } from 'expo-router';
+import { safePush } from '@/lib/safeRouter';
 import { useQuery, useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { useAuthStore } from '@/stores/authStore';
@@ -205,14 +206,14 @@ export default function ViewProfileScreen() {
         const matchId = `match_${userId}`;
         // Pass mode param so match-celebration knows the phase context
         const modeParam = isPhase2 ? '&mode=phase2' : '';
-        router.push(`/(main)/match-celebration?matchId=${matchId}&userId=${userId}${modeParam}` as any);
+        safePush(router, `/(main)/match-celebration?matchId=${matchId}&userId=${userId}${modeParam}` as any, 'profile->matchCelebration');
       } else {
         // Regular like on someone NOT in our likes list — small random chance of instant match
         if (Math.random() > 0.7) {
           simulateMatch(userId);
           const matchId = `match_${userId}`;
           const modeParam = isPhase2 ? '&mode=phase2' : '';
-          router.push(`/(main)/match-celebration?matchId=${matchId}&userId=${userId}${modeParam}` as any);
+          safePush(router, `/(main)/match-celebration?matchId=${matchId}&userId=${userId}${modeParam}` as any, 'profile->matchCelebration');
         } else {
           router.back();
         }
@@ -228,7 +229,7 @@ export default function ViewProfileScreen() {
       });
 
       if (result.isMatch) {
-        router.push(`/(main)/match-celebration?matchId=${result.matchId}&userId=${userId}` as any);
+        safePush(router, `/(main)/match-celebration?matchId=${result.matchId}&userId=${userId}` as any, 'profile->matchCelebration');
       } else {
         router.back();
       }
