@@ -110,8 +110,12 @@ export default function ProfileDetailsBasicScreen() {
       if (company) dataToSave.company = company;
       if (school) dataToSave.school = school;
       if (education) dataToSave.education = education;
+      // Clear educationOther when education is not "other" to prevent ghost data
       if (education === 'other' && educationOther.trim()) {
         dataToSave.educationOther = educationOther.trim();
+      } else if (education !== 'other') {
+        // Explicitly delete educationOther when not needed
+        dataToSave.educationOther = undefined;
       }
       if (religion) dataToSave.religion = religion;
       if (Object.keys(dataToSave).length > 0) {

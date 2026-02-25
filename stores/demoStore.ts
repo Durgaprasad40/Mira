@@ -401,14 +401,32 @@ export const useDemoStore = create<DemoState>()(
           log.info('[PROFILE]', 'photos updated', { count: data.photos?.length });
         }
 
-        // PATCH-safe merge: only update fields that are explicitly provided
-        // Spread prev profile first, then spread patch data to overwrite only provided fields
-        set((s) => ({
-          demoProfiles: {
-            ...s.demoProfiles,
-            [userId]: { ...s.demoProfiles[userId], ...data } as DemoUserProfile,
-          },
-        }));
+        // PATCH-safe merge with explicit deletion support:
+        // - Fields with values are merged/updated
+        // - Fields explicitly set to `undefined` are DELETED from the profile
+        // - This prevents "ghost data" where old values persist after clearing
+        set((s) => {
+          const existingProfile = s.demoProfiles[userId] || {};
+          const merged = { ...existingProfile };
+
+          // Apply updates: set values or delete if undefined
+          for (const key of Object.keys(data) as (keyof typeof data)[]) {
+            if (data[key] === undefined) {
+              // Explicit undefined = delete the field
+              delete merged[key as keyof typeof merged];
+            } else {
+              // Normal update
+              (merged as any)[key] = data[key];
+            }
+          }
+
+          return {
+            demoProfiles: {
+              ...s.demoProfiles,
+              [userId]: merged as DemoUserProfile,
+            },
+          };
+        });
       },
 
       setDemoOnboardingComplete: (userId) => {
