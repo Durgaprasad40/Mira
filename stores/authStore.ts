@@ -155,6 +155,9 @@ export const useAuthStore = create<AuthState>()(
         if (__DEV__) {
           console.log(`[HYDRATION] authStore: ${hydrationTime}ms`);
         }
+        // RACE FIX: Clear fallback timeout BEFORE setting hydrated state
+        // This ensures the timeout callback won't fire after successful hydration
+        clearAuthHydrationTimeout();
         state?.setHasHydrated(true);
         // Milestone B: authStore hydration complete
         markTiming('auth_hydrated');
@@ -166,12 +169,25 @@ export const useAuthStore = create<AuthState>()(
 // BUGFIX #14: Store timeout ID to prevent multiple timers on hot reload
 let _authHydrationTimeoutId: ReturnType<typeof setTimeout> | null = null;
 
-function setupAuthHydrationTimeout() {
-  // Clear any existing timeout (hot reload safety)
+/**
+ * RACE FIX: Clear the hydration timeout.
+ * Called when hydration completes successfully (to cancel the fallback)
+ * and on hot reload (to prevent stale timers).
+ */
+function clearAuthHydrationTimeout() {
   if (_authHydrationTimeoutId !== null) {
     clearTimeout(_authHydrationTimeoutId);
+    _authHydrationTimeoutId = null;
   }
+}
+
+function setupAuthHydrationTimeout() {
+  // Clear any existing timeout (hot reload safety)
+  clearAuthHydrationTimeout();
+
   _authHydrationTimeoutId = setTimeout(() => {
+    // RACE FIX: Double-check hydration state before forcing
+    // This prevents overwriting if hydration completed between timer start and fire
     if (!useAuthStore.getState()._hasHydrated) {
       console.warn('[authStore] Hydration timeout — forcing hydrated state');
       useAuthStore.getState().setHasHydrated(true);
@@ -182,3 +198,6 @@ function setupAuthHydrationTimeout() {
 
 // C8 fix: hydration timeout fallback — if AsyncStorage blocks, force hydration after timeout
 setupAuthHydrationTimeout();
+
+// Export for use in onRehydrateStorage callback
+export { clearAuthHydrationTimeout };

@@ -1127,6 +1127,12 @@ export const useDemoStore = create<DemoState>()(
             }
           }
         }
+        // RACE FIX: Clear fallback timeout and seed retry timeout BEFORE setting hydrated state
+        // This ensures:
+        // 1. The fallback timeout won't fire after successful hydration
+        // 2. Any stale seed retries from a previous session are cancelled
+        clearDemoHydrationTimeout();
+        clearSeedRetryTimeout();
         state?.setHasHydrated(true);
         // Milestone C: demoStore hydration complete
         markTiming('demo_hydrated');
@@ -1163,12 +1169,37 @@ export const useDemoStore = create<DemoState>()(
 const HYDRATION_TIMEOUT_MS = 5000;
 let _demoHydrationTimeoutId: ReturnType<typeof setTimeout> | null = null;
 
-function setupDemoHydrationTimeout() {
-  // Clear any existing timeout (hot reload safety)
+/**
+ * RACE FIX: Clear the hydration timeout.
+ * Called when hydration completes successfully (to cancel the fallback)
+ * and on hot reload (to prevent stale timers).
+ */
+function clearDemoHydrationTimeout() {
   if (_demoHydrationTimeoutId !== null) {
     clearTimeout(_demoHydrationTimeoutId);
+    _demoHydrationTimeoutId = null;
   }
+}
+
+/**
+ * RACE FIX: Clear seed retry timeout.
+ * Called when hydration completes to cancel any stale seed retries.
+ */
+function clearSeedRetryTimeout() {
+  if (_seedRetryTimeoutId !== null) {
+    clearTimeout(_seedRetryTimeoutId);
+    _seedRetryTimeoutId = null;
+  }
+  _seedRetryCount = 0; // Reset retry counter for clean state
+}
+
+function setupDemoHydrationTimeout() {
+  // Clear any existing timeout (hot reload safety)
+  clearDemoHydrationTimeout();
+
   _demoHydrationTimeoutId = setTimeout(() => {
+    // RACE FIX: Double-check hydration state before forcing
+    // This prevents overwriting if hydration completed between timer start and fire
     if (!useDemoStore.getState()._hasHydrated) {
       console.warn('[demoStore] Hydration timeout — forcing hydrated state');
       useDemoStore.getState().setHasHydrated(true);

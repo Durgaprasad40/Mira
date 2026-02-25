@@ -146,6 +146,34 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   // Acquired in animateSwipe, released after advanceCard + match logic complete.
   const swipeLockRef = useRef(false);
 
+  // ── RACE CONDITION FIX: Swipe ID for deterministic lock ownership ──
+  // Each swipe gets a unique ID. Only the callback holding the current ID can release the lock.
+  // This prevents stale async callbacks (from animation, network, timeout) from releasing
+  // a lock that belongs to a newer swipe.
+  const swipeIdRef = useRef(0);
+
+  /**
+   * Acquire the swipe lock and return a unique swipe ID.
+   * Only the holder of this ID should release the lock.
+   */
+  const acquireSwipeLock = useCallback((): number => {
+    swipeIdRef.current += 1;
+    swipeLockRef.current = true;
+    return swipeIdRef.current;
+  }, []);
+
+  /**
+   * Release the swipe lock ONLY if the provided ID matches the current swipe.
+   * Stale callbacks (from interrupted animations, old network responses) will have
+   * outdated IDs and their release attempts will be safely ignored.
+   */
+  const releaseSwipeLock = useCallback((id: number): void => {
+    if (swipeIdRef.current === id) {
+      swipeLockRef.current = false;
+    }
+    // else: stale callback from old swipe — ignore silently
+  }, []);
+
   // ── Mounted guard: prevents state updates and navigation after unmount ──
   const mountedRef = useRef(true);
   useEffect(() => {
@@ -407,6 +435,10 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       swipeLockRef.current = false;
     } else {
       isFocusedRef.current = false;
+      // RACE FIX: Increment swipeId to invalidate any in-flight async callbacks
+      // from the previous focus session. Their releaseSwipeLock(oldId) calls will no-op.
+      swipeIdRef.current += 1;
+      swipeLockRef.current = false;
       if (activeAnimationRef.current) {
         activeAnimationRef.current.stop();
         activeAnimationRef.current = null;
@@ -535,20 +567,23 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   }, [activeSlot, panA, panB]);
 
   const handleSwipe = useCallback(
-    async (direction: "left" | "right" | "up", message?: string) => {
+    async (direction: "left" | "right" | "up", message?: string, swipeId?: number) => {
+      // RACE FIX: Use provided swipeId, or current if not provided (backward compat)
+      const activeSwipeId = swipeId ?? swipeIdRef.current;
+
       // Guard: unmounted or unfocused
-      if (!mountedRef.current || !isFocusedRef.current) { swipeLockRef.current = false; return; }
+      if (!mountedRef.current || !isFocusedRef.current) { releaseSwipeLock(activeSwipeId); return; }
       // Guard: navigation in progress
-      if (navigatingRef.current) { swipeLockRef.current = false; return; }
+      if (navigatingRef.current) { releaseSwipeLock(activeSwipeId); return; }
 
       // Read the swiped profile from ref (stable, not from closure)
       const swipedProfile = currentRef.current;
-      if (!swipedProfile) { swipeLockRef.current = false; return; }
+      if (!swipedProfile) { releaseSwipeLock(activeSwipeId); return; }
 
 
       // Check daily limits — release lock and bail without advancing
-      if (direction === "right" && hasReachedLikeLimit()) { swipeLockRef.current = false; return; }
-      if (direction === "up" && hasReachedStandOutLimit()) { swipeLockRef.current = false; return; }
+      if (direction === "right" && hasReachedLikeLimit()) { releaseSwipeLock(activeSwipeId); return; }
+      if (direction === "up" && hasReachedStandOutLimit()) { releaseSwipeLock(activeSwipeId); return; }
 
       // ★ ALWAYS advance card FIRST — this guarantees the index moves
       // regardless of match/navigation/error below.
@@ -590,7 +625,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
                 log.info('[MATCH]', 'phase2', { name: swipedProfile.name });
                 trackEvent({ name: 'match_created', otherUserId: swipedProfile.id });
               }
-              swipeLockRef.current = false;
+              releaseSwipeLock(activeSwipeId);
               return;
             }
 
@@ -599,9 +634,11 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
             const matchId = `match_${swipedProfile.id}`;
             navigatingRef.current = true;
             // Defer navigation so advanceCard's setState commits first
+            // RACE FIX: Capture swipeId in closure so deferred callback releases correct lock
+            const deferredSwipeId = activeSwipeId;
             InteractionManager.runAfterInteractions(() => {
               if (!mountedRef.current || !isFocusedRef.current) {
-                swipeLockRef.current = false;
+                releaseSwipeLock(deferredSwipeId);
                 return;
               }
               try {
@@ -610,17 +647,17 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
               } catch {
                 navigatingRef.current = false;
               } finally {
-                swipeLockRef.current = false;
+                releaseSwipeLock(deferredSwipeId);
               }
             });
             return;
           }
           // Release swipe lock (navigatingRef guards further swipes if navigating)
-          swipeLockRef.current = false;
+          releaseSwipeLock(activeSwipeId);
           return;
         }
 
-        if (!convexUserId) { swipeLockRef.current = false; return; }
+        if (!convexUserId) { releaseSwipeLock(activeSwipeId); return; }
         const action = direction === "left" ? "pass" : direction === "up" ? "super_like" : "like";
         // B5 fix: wrap mutation in Promise.race with 6s timeout to prevent stuck swipe lock
         const SWIPE_TIMEOUT_MS = 6000;
@@ -643,9 +680,11 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
           navigatingRef.current = true;
           // B6 fix: wrap navigation in try/catch and reset navigatingRef on failure
           // 3B-4: Defer swipe lock release until after navigation initiated
+          // RACE FIX: Capture swipeId in closure so deferred callback releases correct lock
+          const deferredSwipeId = activeSwipeId;
           InteractionManager.runAfterInteractions(() => {
             if (!mountedRef.current || !isFocusedRef.current) {
-              swipeLockRef.current = false;
+              releaseSwipeLock(deferredSwipeId);
               return;
             }
             try {
@@ -654,7 +693,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
             } catch {
               navigatingRef.current = false;
             } finally {
-              swipeLockRef.current = false;
+              releaseSwipeLock(deferredSwipeId);
             }
           });
           return; // 3B-4: Don't release lock in outer finally; deferred to callback
@@ -663,10 +702,10 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
         if (!mountedRef.current) return;
         Toast.show("Something went wrong. Please try again.");
       } finally {
-        swipeLockRef.current = false;
+        releaseSwipeLock(activeSwipeId);
       }
     },
-    [convexUserId, swipeMutation, advanceCard, hasReachedLikeLimit, hasReachedStandOutLimit, incrementLikes, incrementStandOuts, demo.recordSwipe, incSwipe, maybeTriggerRandomMatch],
+    [convexUserId, swipeMutation, advanceCard, hasReachedLikeLimit, hasReachedStandOutLimit, incrementLikes, incrementStandOuts, demo.recordSwipe, incSwipe, maybeTriggerRandomMatch, releaseSwipeLock],
   );
 
   const animateSwipe = useCallback(
@@ -678,8 +717,8 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       if (direction === "right" && hasReachedLikeLimit()) return;
       if (direction === "up" && hasReachedStandOutLimit()) return;
 
-      // ★ Acquire swipe lock — released inside handleSwipe after advanceCard
-      swipeLockRef.current = true;
+      // ★ RACE FIX: Acquire swipe lock and capture unique ID for this swipe lifecycle
+      const swipeId = acquireSwipeLock();
 
       const currentPan = getActivePan();
       const targetX = direction === "left" ? -SCREEN_WIDTH * 1.5 : direction === "right" ? SCREEN_WIDTH * 1.5 : 0;
@@ -698,19 +737,20 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       anim.start(({ finished }) => {
         activeAnimationRef.current = null;
         if (!finished) {
-          // Animation was interrupted (blur/unmount) — release lock
-          swipeLockRef.current = false;
+          // Animation was interrupted (blur/unmount) — release lock only if we still own it
+          releaseSwipeLock(swipeId);
           return;
         }
         // B4 fix: guard against unmount before calling handleSwipe
         if (!mountedRef.current) {
-          swipeLockRef.current = false;
+          releaseSwipeLock(swipeId);
           return;
         }
-        handleSwipeRef.current(direction);
+        // Pass swipeId to handleSwipe so it can release the correct lock
+        handleSwipeRef.current(direction, undefined, swipeId);
       });
     },
-    [panA, panB, overlayOpacityAnim, hasReachedLikeLimit, hasReachedStandOutLimit],
+    [panA, panB, overlayOpacityAnim, hasReachedLikeLimit, hasReachedStandOutLimit, acquireSwipeLock, releaseSwipeLock],
   );
 
   // Stable refs so the panResponder (created once) always calls the latest version
@@ -779,8 +819,8 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
     useInteractionStore.getState().setStandOutResult(null);
     const msg = standOutResult.message;
 
-    // Acquire swipe lock for the stand-out animation
-    swipeLockRef.current = true;
+    // ★ RACE FIX: Acquire swipe lock and capture unique ID for this stand-out lifecycle
+    const swipeId = acquireSwipeLock();
 
     // Animate the card out (up direction)
     const currentPan = getActivePan();
@@ -794,16 +834,17 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
     anim.start(({ finished }) => {
       activeAnimationRef.current = null;
       if (!finished) {
-        swipeLockRef.current = false;
+        releaseSwipeLock(swipeId);
         return;
       }
       if (!mountedRef.current || !isFocusedRef.current) {
-        swipeLockRef.current = false;
+        releaseSwipeLock(swipeId);
         return;
       }
-      handleSwipeRef.current("up", msg || undefined);
+      // Pass swipeId to handleSwipe so it can release the correct lock
+      handleSwipeRef.current("up", msg || undefined, swipeId);
     });
-  }, [standOutResult]);
+  }, [standOutResult, acquireSwipeLock, releaseSwipeLock]);
 
   // Loading state — non-demo only; skip when using external profiles
   const isDiscoverLoading = !isDemoMode && !externalProfiles && !convexProfiles;
