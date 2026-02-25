@@ -630,8 +630,8 @@ export const useDemoStore = create<DemoState>()(
       },
 
       reset: () => {
-        // Clear dependent stores
-        useDemoDmStore.setState({ conversations: {}, meta: {}, drafts: {} });
+        // Clear dependent stores (use proper action, not direct setState mutation)
+        useDemoDmStore.getState().reset();
         // Lazy require to break cycle: demoStore <-> confessionStore
         // eslint-disable-next-line @typescript-eslint/no-var-requires
         const { useConfessionStore } = require('@/stores/confessionStore') as {
