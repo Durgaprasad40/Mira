@@ -23,22 +23,23 @@ import { useDemoStore } from '@/stores/demoStore';
 import { useOnboardingStore } from '@/stores/onboardingStore';
 import { getDemoCurrentUser } from '@/lib/demoData';
 
-/** Parse "YYYY-MM-DD" to local Date (noon to avoid DST issues) */
-function parseDOBString(dobString: string): Date {
-  if (!dobString || !/^\d{4}-\d{2}-\d{2}$/.test(dobString)) {
-    return new Date(2000, 0, 1, 12, 0, 0);
+/**
+ * Calculate age from DOB string ("YYYY-MM-DD").
+ * Returns null for invalid/missing DOB to avoid false adult age display.
+ * SAFETY: Never default to a fake age — could bypass age verification.
+ */
+function calculateAge(dob: string | undefined | null): number | null {
+  // Reject missing or malformed DOB — do NOT default to a fake date
+  if (!dob || !/^\d{4}-\d{2}-\d{2}$/.test(dob)) {
+    return null;
   }
-  const [y, m, d] = dobString.split("-").map(Number);
-  return new Date(y, m - 1, d, 12, 0, 0);
-}
-
-/** Calculate age from DOB string using local date parsing */
-function calculateAge(dob: string): number {
-  const birthDate = parseDOBString(dob);
+  const [y, m, d] = dob.split("-").map(Number);
+  // Parse to local Date at noon to avoid DST edge cases
+  const birthDate = new Date(y, m - 1, d, 12, 0, 0);
   const today = new Date();
   let age = today.getFullYear() - birthDate.getFullYear();
-  const m = today.getMonth() - birthDate.getMonth();
-  if (m < 0 || (m === 0 && today.getDate() < birthDate.getDate())) {
+  const monthDiff = today.getMonth() - birthDate.getMonth();
+  if (monthDiff < 0 || (monthDiff === 0 && today.getDate() < birthDate.getDate())) {
     age--;
   }
   return age;
@@ -309,7 +310,7 @@ export default function ProfileScreen() {
           </View>
         )}
         <Text style={styles.name}>
-          {currentUser.name}, {age}
+          {currentUser.name}{age !== null ? `, ${age}` : ''}
         </Text>
         {currentUser.bio && <Text style={styles.bio}>{currentUser.bio}</Text>}
       </View>
