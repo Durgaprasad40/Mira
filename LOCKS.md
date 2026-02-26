@@ -34,6 +34,24 @@ This file records locked areas of the codebase that must not be modified without
 
 ---
 
+## LOCKED: Confessions Feature
+
+- **Scope:**
+  - `app/(main)/(tabs)/confessions.tsx` — Confess feed screen
+  - `app/(main)/confession-thread.tsx` — Confession reply thread
+  - `app/(main)/confession-chat.tsx` — Anonymous chat between confessor and tagged user
+  - `components/confessions/**` — All confession UI components
+  - `stores/confessionStore.ts` — Confession state management
+  - `lib/confessionsIntegrity.ts` — Confession expiry and integrity logic
+  - `app/(main)/profile/[id].tsx` — Only `confess_preview` and `confess_reveal` modes
+  - Related type definitions in `types/index.ts` for Confession types
+- **Locked by:** Durgaprasad
+- **Date:** 2026-02-26
+- **Rule:** No changes allowed unless Durgaprasad explicitly unlocks.
+- **Future work allowed:** Bug fixes and stability improvements ONLY if explicitly requested.
+
+---
+
 *To request an unlock, Durgaprasad must explicitly state the unlock in a message.*
 
 ---
