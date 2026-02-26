@@ -87,6 +87,71 @@ This file records locked areas of the codebase that must not be modified without
 
 ---
 
+## LOCKED: Phase-1 Tabs (Tab-by-tab Freeze)
+
+- **Locked by:** Durgaprasad
+- **Date:** 2026-02-26
+- **Rule:** No changes allowed unless Durgaprasad explicitly unlocks.
+- **Status:** Phase-1 complete, stable, and frozen for beta.
+
+### 1. Discover Tab (Phase-1)
+- **Scope:**
+  - `app/(main)/(tabs)/home.tsx` — Discover tab entry point
+  - `components/screens/DiscoverCardStack.tsx` — Card stack logic and UI
+  - `components/cards/ProfileCard.tsx` — Profile card component
+  - Related Convex queries in `convex/discover.ts`
+- **Status:** Locked — swipe logic, filters, and card rendering frozen.
+
+### 2. Explore Tab (Phase-1)
+- **Scope:**
+  - `app/(main)/(tabs)/explore.tsx` — Explore category browsing
+  - Related explore queries and pagination behavior
+- **Status:** Locked — category browsing frozen as currently implemented.
+
+### 3. Confessions Tab (Phase-1)
+- **Scope:** See "LOCKED: Confessions Feature" section above.
+- **Status:** Already locked — no additional changes.
+
+### 4. Nearby Tab (Phase-1)
+- **Scope:**
+  - `app/(main)/(tabs)/nearby.tsx` — Map-based discovery
+  - Location-based filtering and display logic
+- **Status:** Locked — nearby discovery frozen as currently implemented.
+
+### 5. Messages Tab (Phase-1)
+- **Scope:**
+  - `app/(main)/(tabs)/messages/` — All chat list and chat screens
+  - `app/(main)/(tabs)/messages/index.tsx` — Messages list
+  - `app/(main)/(tabs)/messages/chat/[conversationId].tsx` — Chat screen
+  - `components/screens/ChatScreenInner.tsx` — Chat logic
+  - `components/chat/**` — Chat UI components
+  - `stores/demoDmStore.ts` — Demo messaging state
+  - Blocking from chat behavior
+- **Status:** Locked — messaging, read receipts, and blocking behavior frozen.
+
+### 6. Profile Tab (Phase-1)
+- **Scope:** See "LOCKED: Profile Tab — FINAL & FROZEN" section above.
+- **Status:** Already locked — no additional changes.
+
+### 7. Safety & Settings (Phase-1)
+- **Scope:**
+  - `app/(main)/settings/**` — All settings screens
+  - `stores/verificationStore.ts` — Face & KYC verification
+  - `stores/privacyStore.ts` — Privacy settings persistence
+  - `stores/blockStore.ts` — Block list management
+  - `stores/photoBlurStore.ts` — Photo blur settings
+- **Status:** Locked — Face Verification, KYC, Blocking, Reporting, Account Deletion frozen.
+
+---
+
+## OPEN: Private Tab (Phase-2 work allowed)
+
+- **Scope:** `app/(main)/(tabs)/incognito.tsx` — Private/Incognito tab
+- **Status:** **NOT LOCKED** — Phase-2 development will happen here.
+- **Note:** This tab is explicitly excluded from the Phase-1 freeze.
+
+---
+
 ## Onboarding Page Stability Log
 
 Each onboarding page with a one-line summary of why it is considered stable.
