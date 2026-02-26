@@ -361,21 +361,25 @@ export default function Phase2ProfileSetup() {
                 const isBlurred = photoBlurStates[idx];
 
                 return (
-                  <Pressable key={`p2-${idx}`} style={styles.slot} onPress={() => openPreview(idx)}>
-                    <Image source={{ uri }} style={styles.slotImage} resizeMode="cover" blurRadius={isBlurred ? 15 : 0} />
+                  <View key={`p2-${idx}`} style={styles.slot}>
+                    <Pressable style={StyleSheet.absoluteFill} onPress={() => openPreview(idx)}>
+                      <Image source={{ uri }} style={styles.slotImage} resizeMode="cover" blurRadius={isBlurred ? 15 : 0} />
+                    </Pressable>
                     {/* Main photo star */}
                     {isMain && (
                       <View pointerEvents="none" style={styles.starBadge}>
                         <Ionicons name="star" size={14} color="#FFD700" />
                       </View>
                     )}
-                    {/* Blur indicator */}
-                    {isBlurred && (
-                      <View pointerEvents="none" style={styles.blurIndicator}>
-                        <Ionicons name="eye-off" size={16} color="#FFF" />
-                      </View>
-                    )}
-                  </Pressable>
+                    {/* Blur toggle eye icon - tappable */}
+                    <TouchableOpacity
+                      style={styles.blurToggleBtn}
+                      onPress={() => togglePhotoBlur(idx)}
+                      hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                    >
+                      <Ionicons name={isBlurred ? 'eye-off' : 'eye'} size={16} color="#FFF" />
+                    </TouchableOpacity>
+                  </View>
                 );
               })
             )}
@@ -390,7 +394,7 @@ export default function Phase2ProfileSetup() {
             >
               <Ionicons name="checkmark-circle" size={20} color={canSelectPhotos ? '#FFF' : C.textLight} />
               <Text style={[styles.selectPhotosBtnText, !canSelectPhotos && styles.selectPhotosBtnTextDisabled]}>
-                Confirm Photos ({selectedCount}/{PHASE2_MIN_PHOTOS})
+                {canSelectPhotos ? 'Confirm Photos' : `Confirm Photos (select at least ${PHASE2_MIN_PHOTOS})`}
               </Text>
             </TouchableOpacity>
           )}
@@ -398,7 +402,9 @@ export default function Phase2ProfileSetup() {
           {/* Photo count */}
           {isSelectionMode && (
             <Text style={[styles.countText, !canSelectPhotos && styles.countWarning]}>
-              {selectedCount} / {PHASE2_MIN_PHOTOS} photos selected
+              {selectedCount < PHASE2_MIN_PHOTOS
+                ? `Select ${PHASE2_MIN_PHOTOS - selectedCount} more photo${PHASE2_MIN_PHOTOS - selectedCount === 1 ? '' : 's'}`
+                : `${selectedCount}/${GRID_SLOTS} selected`}
             </Text>
           )}
           {isPhotoMode && (
@@ -536,11 +542,6 @@ export default function Phase2ProfileSetup() {
                 <Text style={styles.actionBtnText}>Set Main</Text>
               </TouchableOpacity>
 
-              <TouchableOpacity style={styles.actionBtn} onPress={() => previewIndex !== null && togglePhotoBlur(previewIndex)}>
-                <Ionicons name={previewIndex !== null && photoBlurStates[previewIndex] ? 'eye' : 'eye-off'} size={22} color="#FFF" />
-                <Text style={styles.actionBtnText}>{previewIndex !== null && photoBlurStates[previewIndex] ? 'Unblur' : 'Blur'}</Text>
-              </TouchableOpacity>
-
               <TouchableOpacity style={styles.actionBtn} onPress={handleReplacePhoto}>
                 <Ionicons name="swap-horizontal" size={22} color="#FFF" />
                 <Text style={styles.actionBtnText}>Replace</Text>
@@ -549,6 +550,11 @@ export default function Phase2ProfileSetup() {
               <TouchableOpacity style={styles.actionBtn} onPress={handleDeletePhoto}>
                 <Ionicons name="trash" size={22} color="#FF6B6B" />
                 <Text style={[styles.actionBtnText, { color: '#FF6B6B' }]}>Delete</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity style={styles.actionBtn} onPress={closePreview}>
+                <Ionicons name="close" size={22} color="#FFF" />
+                <Text style={styles.actionBtnText}>Cancel</Text>
               </TouchableOpacity>
             </View>
 
@@ -597,10 +603,10 @@ const styles = StyleSheet.create({
     borderRadius: 13, backgroundColor: 'rgba(0,0,0,0.6)',
     alignItems: 'center', justifyContent: 'center',
   },
-  blurIndicator: {
-    position: 'absolute', bottom: 6, right: 6, width: 26, height: 26,
-    borderRadius: 13, backgroundColor: 'rgba(0,0,0,0.6)',
-    alignItems: 'center', justifyContent: 'center',
+  blurToggleBtn: {
+    position: 'absolute', bottom: 6, right: 6, width: 28, height: 28,
+    borderRadius: 14, backgroundColor: 'rgba(0,0,0,0.6)',
+    alignItems: 'center', justifyContent: 'center', zIndex: 10,
   },
 
   // Select button
