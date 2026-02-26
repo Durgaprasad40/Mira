@@ -108,8 +108,8 @@ export default function Phase2DesireReview() {
   }, [router]);
 
   const handleEditLookingFor = useCallback(() => {
-    // Looking For is edited on photo-select screen (Step 2)
-    router.push('/(main)/phase2-onboarding/photo-select' as any);
+    // Navigate to dedicated Looking For edit screen
+    router.push('/(main)/phase2-onboarding/looking-for-edit' as any);
   }, [router]);
 
   // Focus desire input when tapping the container
