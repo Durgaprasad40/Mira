@@ -28,9 +28,6 @@ import { useConfessionStore } from '@/stores/confessionStore';
 import { useDemoStore } from '@/stores/demoStore';
 import { useBlockStore } from '@/stores/blockStore';
 import { isDemoMode } from '@/hooks/useConvex';
-import {
-  DEMO_CONFESSION_REPLIES,
-} from '@/lib/demoData';
 import { shouldBlockConfessionOpen } from '@/lib/confessionsIntegrity';
 import { logDebugEvent } from '@/lib/debugEventLogger';
 
@@ -62,10 +59,13 @@ export default function ConfessionThreadScreen() {
   // Individual selectors to avoid full re-render on any store change
   const confessions = useConfessionStore((s) => s.confessions);
   const userReactions = useConfessionStore((s) => s.userReactions);
+  const storeReplies = useConfessionStore((s) => s.replies);
   const chats = useConfessionStore((s) => s.chats);
   const toggleReaction = useConfessionStore((s) => s.toggleReaction);
   const reportConfession = useConfessionStore((s) => s.reportConfession);
   const addChat = useConfessionStore((s) => s.addChat);
+  const addReplyToStore = useConfessionStore((s) => s.addReply);
+  const deleteReplyFromStore = useConfessionStore((s) => s.deleteReply);
   const reportedIds = useConfessionStore((s) => s.reportedIds);
   const cleanupExpiredConfessions = useConfessionStore((s) => s.cleanupExpiredConfessions);
   const globalBlockedIds = useBlockStore((s) => s.blockedUserIds);
@@ -106,10 +106,8 @@ export default function ConfessionThreadScreen() {
     !isDemoMode && confessionId ? { confessionId: confessionId as any } : 'skip'
   );
 
-  // Local demo replies
-  const [demoReplies, setDemoReplies] = useState<ConfessionReply[]>(
-    () => (confessionId ? DEMO_CONFESSION_REPLIES[confessionId] : undefined) || []
-  );
+  // Demo replies from store (persisted)
+  const demoReplies = confessionId ? (storeReplies[confessionId] || []) : [];
 
   const replies: ConfessionReply[] = useMemo(() => {
     let items: ConfessionReply[];
@@ -132,8 +130,9 @@ export default function ConfessionThreadScreen() {
     if (globalBlockedIds.length > 0) {
       items = items.filter((r) => !globalBlockedIds.includes(r.userId));
     }
+    if (__DEV__) console.log('[CONFESS] replies count:', items.length, 'for confessionId:', confessionId);
     return items;
-  }, [isDemoMode, convexReplies, demoReplies, globalBlockedIds]);
+  }, [isDemoMode, convexReplies, demoReplies, globalBlockedIds, confessionId]);
 
   const [replyText, setReplyText] = useState('');
   const [sending, setSending] = useState(false);
@@ -166,7 +165,10 @@ export default function ConfessionThreadScreen() {
       createdAt: Date.now(),
     };
 
-    setDemoReplies((prev) => [...prev, newReply]);
+    if (__DEV__) console.log('[CONFESS] handleSendReply: adding reply', { confessionId, replyId: newReply.id });
+
+    // Add to store (persisted)
+    addReplyToStore(confessionId, newReply);
     setReplyText('');
     setSending(true);
 
@@ -181,15 +183,16 @@ export default function ConfessionThreadScreen() {
         });
       } catch {
         Toast.show('Couldn\u2019t send reply. Please try again.');
-        setDemoReplies((prev) => prev.filter((r) => r.id !== newReply.id));
+        // Rollback on failure
+        deleteReplyFromStore(confessionId, newReply.id);
         setReplyText(submittedText);
       }
     }
     setSending(false);
-  }, [replyText, confessionId, currentUserId, createReplyMutation, sending]);
+  }, [replyText, confessionId, currentUserId, createReplyMutation, sending, addReplyToStore, deleteReplyFromStore]);
 
   const handleDeleteReply = useCallback(async (reply: ConfessionReply) => {
-    if (reply.userId !== currentUserId) return;
+    if (reply.userId !== currentUserId || !confessionId) return;
 
     Alert.alert('Delete Reply', 'Are you sure you want to delete this reply?', [
       { text: 'Cancel', style: 'cancel' },
@@ -197,7 +200,8 @@ export default function ConfessionThreadScreen() {
         text: 'Delete',
         style: 'destructive',
         onPress: async () => {
-          setDemoReplies((prev) => prev.filter((r) => r.id !== reply.id));
+          if (__DEV__) console.log('[CONFESS] handleDeleteReply: deleting reply', { confessionId, replyId: reply.id });
+          deleteReplyFromStore(confessionId, reply.id);
           if (!isDemoMode) {
             try {
               await deleteReplyMutation({
@@ -205,14 +209,15 @@ export default function ConfessionThreadScreen() {
                 userId: currentUserId as any,
               });
             } catch (error: any) {
-              setDemoReplies((prev) => [...prev, reply]);
+              // Rollback on failure
+              addReplyToStore(confessionId, reply);
               Toast.show('Couldn\u2019t delete reply. Please try again.');
             }
           }
         },
       },
     ]);
-  }, [currentUserId, deleteReplyMutation]);
+  }, [currentUserId, confessionId, deleteReplyMutation, deleteReplyFromStore, addReplyToStore]);
 
   const handleReactEmoji = useCallback(
     (emojiObj: any) => {

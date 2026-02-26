@@ -5,6 +5,7 @@ import {
   Confession,
   ConfessionChat,
   ConfessionChatMessage,
+  ConfessionReply,
   SecretCrush,
   MutualRevealStatus,
   TimedRevealOption,
@@ -71,6 +72,7 @@ const RATE_LIMIT_WINDOW_MS = 24 * 60 * 60 * 1000; // 24 hours in ms
 interface ConfessionState {
   confessions: Confession[];
   userReactions: Record<string, string | null>; // confessionId → emoji string (one per user)
+  replies: Record<string, ConfessionReply[]>; // confessionId → replies array
   chats: ConfessionChat[];
   secretCrushes: SecretCrush[];
   reportedIds: string[];
@@ -93,6 +95,11 @@ interface ConfessionState {
   reportConfession: (confessionId: string) => void;
   blockUser: (userId: string) => void;
   revealCrush: (crushId: string) => void;
+
+  // Replies
+  addReply: (confessionId: string, reply: ConfessionReply) => void;
+  deleteReply: (confessionId: string, replyId: string) => void;
+  getReplies: (confessionId: string) => ConfessionReply[];
 
   // Mutual Reveal
   agreeMutualReveal: (chatId: string, userId: string) => void;
@@ -150,6 +157,7 @@ export const useConfessionStore = create<ConfessionState>()(
     (set, get) => ({
       confessions: [],
       userReactions: {},
+      replies: {},
       chats: [],
       secretCrushes: [],
       reportedIds: [],
@@ -211,6 +219,7 @@ export const useConfessionStore = create<ConfessionState>()(
         set({
           confessions,
           userReactions: DEMO_CONFESSION_USER_REACTIONS,
+          replies: { ...DEMO_CONFESSION_REPLIES },
           chats,
           secretCrushes: DEMO_SECRET_CRUSHES,
           seeded: true,
@@ -396,6 +405,69 @@ export const useConfessionStore = create<ConfessionState>()(
             sc.id === crushId ? { ...sc, isRevealed: true } : sc
           ),
         }));
+      },
+
+      // ── Replies ──
+      addReply: (confessionId, reply) => {
+        if (__DEV__) console.log('[CONFESS] addReply:', { confessionId, replyId: reply.id });
+        set((state) => {
+          const currentReplies = state.replies[confessionId] || [];
+          const newReplies = [...currentReplies, reply];
+
+          // Update the confession's replyCount and replyPreviews
+          const updatedConfessions = state.confessions.map((c) => {
+            if (c.id !== confessionId) return c;
+            const replyPreviews = newReplies.slice(-2).map((r) => ({
+              text: r.text,
+              isAnonymous: r.isAnonymous,
+              type: r.type || 'text',
+              createdAt: r.createdAt,
+            }));
+            return {
+              ...c,
+              replyCount: newReplies.length,
+              replyPreviews,
+            };
+          });
+
+          return {
+            replies: { ...state.replies, [confessionId]: newReplies },
+            confessions: updatedConfessions,
+          };
+        });
+      },
+
+      deleteReply: (confessionId, replyId) => {
+        if (__DEV__) console.log('[CONFESS] deleteReply:', { confessionId, replyId });
+        set((state) => {
+          const currentReplies = state.replies[confessionId] || [];
+          const newReplies = currentReplies.filter((r) => r.id !== replyId);
+
+          // Update the confession's replyCount and replyPreviews
+          const updatedConfessions = state.confessions.map((c) => {
+            if (c.id !== confessionId) return c;
+            const replyPreviews = newReplies.slice(-2).map((r) => ({
+              text: r.text,
+              isAnonymous: r.isAnonymous,
+              type: r.type || 'text',
+              createdAt: r.createdAt,
+            }));
+            return {
+              ...c,
+              replyCount: newReplies.length,
+              replyPreviews,
+            };
+          });
+
+          return {
+            replies: { ...state.replies, [confessionId]: newReplies },
+            confessions: updatedConfessions,
+          };
+        });
+      },
+
+      getReplies: (confessionId) => {
+        return get().replies[confessionId] || [];
       },
 
       // ── Mutual Reveal ──
@@ -711,6 +783,7 @@ export const useConfessionStore = create<ConfessionState>()(
       partialize: (state) => ({
         confessions: state.confessions,
         userReactions: state.userReactions,
+        replies: state.replies,
         chats: state.chats,
         secretCrushes: state.secretCrushes,
         reportedIds: state.reportedIds,
