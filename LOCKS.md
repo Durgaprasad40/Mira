@@ -52,6 +52,37 @@ This file records locked areas of the codebase that must not be modified without
 
 ---
 
+---
+
+## LOCKED: Profile Tab — FINAL & FROZEN
+
+- **Scope:**
+  - `app/(main)/(tabs)/profile.tsx` — Profile tab main screen
+  - `app/(main)/edit-profile.tsx` — Edit Profile screen
+  - `app/(main)/profile/[id].tsx` — Profile view screen (non-confession modes)
+  - `app/(main)/settings/**` — All settings screens:
+    - `privacy.tsx` — Privacy settings
+    - `safety.tsx` — Safety & Verification settings
+    - `blocked-users.tsx` — Blocked users management
+    - `report-user.tsx` — Report user flow
+    - `account.tsx` — Account settings (logout, delete)
+    - `help.tsx` — Help & Support
+    - `notifications.tsx` — Notification settings
+  - `stores/verificationStore.ts` — Face & KYC verification state
+  - `stores/photoBlurStore.ts` — Per-photo blur settings
+  - `stores/blockStore.ts` — Block list management
+- **Locked by:** Durgaprasad
+- **Date:** 2026-02-26
+- **Rule:**
+  - ❌ No UI, UX, flow, logic, limits, copy, layout, or behavior changes
+  - ❌ No refactoring, optimization, renaming, or "improvements"
+  - ❌ No enhancement suggestions or alternatives
+  - ✅ ONLY critical bug fixes (crash, broken navigation, data corruption)
+  - 🚫 Non-critical changes require explicit approval from Durgaprasad
+- **Status:** Production-ready and frozen
+
+---
+
 *To request an unlock, Durgaprasad must explicitly state the unlock in a message.*
 
 ---
