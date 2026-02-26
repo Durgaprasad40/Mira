@@ -12,6 +12,7 @@ import {
   Switch,
   Image,
   Dimensions,
+  Modal,
 } from 'react-native';
 import { useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -26,6 +27,7 @@ import { BlurProfileNotice } from '@/components/profile/BlurProfileNotice';
 import { isDemoMode } from '@/hooks/useConvex';
 import { getDemoCurrentUser } from '@/lib/demoData';
 import { useDemoStore } from '@/stores/demoStore';
+import { usePhotoBlurStore } from '@/stores/photoBlurStore';
 
 const GRID_SIZE = 9;
 const COLUMNS = 3;
@@ -34,8 +36,25 @@ const SCREEN_PADDING = 16;
 const screenWidth = Dimensions.get('window').width;
 const slotSize = (screenWidth - SCREEN_PADDING * 2 - GRID_GAP * (COLUMNS - 1)) / COLUMNS;
 
+// Stable empty object reference to avoid re-renders when no blur settings exist
+const EMPTY_BLURRED_PHOTOS: Record<number, boolean> = {};
+
 function isValidPhotoUrl(url: unknown): url is string {
   return typeof url === 'string' && url.length > 0 && url !== 'undefined' && url !== 'null';
+}
+
+// Detect if a photo URL is a cartoon/avatar (should never be blurred)
+function isCartoonPhoto(url: string): boolean {
+  const lowerUrl = url.toLowerCase();
+  return (
+    lowerUrl.includes('cartoon') ||
+    lowerUrl.includes('avatar') ||
+    lowerUrl.includes('illustrated') ||
+    lowerUrl.includes('anime') ||
+    lowerUrl.includes('robohash') ||
+    lowerUrl.includes('dicebear') ||
+    lowerUrl.includes('ui-avatars')
+  );
 }
 
 export default function EditProfileScreen() {
@@ -67,7 +86,28 @@ export default function EditProfileScreen() {
   const updateProfilePrompts = useMutation(api.users.updateProfilePrompts);
   const togglePhotoBlur = isDemoMode ? null : useMutation(api.users.togglePhotoBlur);
 
-  const [blurEnabled, setBlurEnabled] = useState(false);
+  // Subscribe to currentDemoUserId to prevent stale closures on account switch
+  const currentDemoUserId = useDemoStore((s) => s.currentDemoUserId);
+
+  // Get effective userId for blur settings (works for both demo and prod)
+  const effectiveUserId = isDemoMode
+    ? currentDemoUserId || 'demo_user'
+    : userId || '';
+
+  // Per-photo blur from persisted store - use direct selectors for stable references
+  const userBlurSettings = usePhotoBlurStore((s) => s.userSettings[effectiveUserId]);
+  const blurEnabled = userBlurSettings?.blurEnabled ?? false;
+  const blurredPhotos = userBlurSettings?.blurredPhotos ?? EMPTY_BLURRED_PHOTOS;
+
+  const setBlurEnabled = useCallback(
+    (enabled: boolean) => usePhotoBlurStore.getState().setBlurEnabled(effectiveUserId, enabled),
+    [effectiveUserId]
+  );
+  const setBlurredPhotos = useCallback(
+    (photos: Record<number, boolean>) => usePhotoBlurStore.getState().setBlurredPhotos(effectiveUserId, photos),
+    [effectiveUserId]
+  );
+
   const [showBlurNotice, setShowBlurNotice] = useState(false);
   const [bio, setBio] = useState('');
   const [prompts, setPrompts] = useState<{ question: string; answer: string }[]>([]);
@@ -87,6 +127,8 @@ export default function EditProfileScreen() {
   // Photo state for 9-slot grid
   const [photoUrls, setPhotoUrls] = useState<string[]>([]);
   const [failedImages, setFailedImages] = useState<Set<string>>(new Set());
+  // Photo preview modal state - stores both url and index for actions
+  const [previewPhoto, setPreviewPhoto] = useState<{ url: string; index: number } | null>(null);
 
   // FIX 1: Initialize state ONCE per user using refs to prevent infinite loop
   useEffect(() => {
@@ -106,7 +148,7 @@ export default function EditProfileScreen() {
       setJobTitle(currentUser.jobTitle || '');
       setCompany(currentUser.company || '');
       setSchool(currentUser.school || '');
-      setBlurEnabled(currentUser.photoBlurred === true);
+      // Note: blurEnabled is now persisted in photoBlurStore, not initialized from server
 
       const existingPhotos = currentUser.photos?.map((p: any) => p?.url || p).filter(isValidPhotoUrl) || [];
       const slicedPhotos = existingPhotos.slice(0, GRID_SIZE);
@@ -134,6 +176,13 @@ export default function EditProfileScreen() {
   const validPhotos = useMemo(() => {
     return photoUrls.filter((url) => isValidPhotoUrl(url) && !failedImages.has(url));
   }, [photoUrls, failedImages]);
+
+  // Cleanup blur state when photos are removed (indices may shift)
+  useEffect(() => {
+    if (effectiveUserId && validPhotos.length > 0) {
+      usePhotoBlurStore.getState().cleanupBlurredPhotos(effectiveUserId, validPhotos.length);
+    }
+  }, [validPhotos.length, effectiveUserId]);
 
   const handleImageError = useCallback((uri: string) => {
     setFailedImages((prev) => new Set(prev).add(uri));
@@ -213,26 +262,49 @@ export default function EditProfileScreen() {
     });
   };
 
+  // Toggle blur for a specific photo (persisted to store)
+  const handleTogglePhotoBlur = useCallback((index: number) => {
+    usePhotoBlurStore.getState().togglePhotoBlur(effectiveUserId, index);
+    if (__DEV__) {
+      console.log('[EditProfile] togglePhotoBlur', { index, userId: effectiveUserId });
+    }
+  }, [effectiveUserId]);
+
   const renderPhotoSlot = (index: number) => {
     const url = validPhotos[index];
     if (url) {
       const isMain = index === 0;
+      const isCartoon = isCartoonPhoto(url);
+      const isPhotoBlurred = blurEnabled && !isCartoon && blurredPhotos[index];
+
       return (
         <View key={index} style={styles.photoSlot}>
-          {/* FIX 3: Show blur preview when blurEnabled is ON */}
-          <Image
-            source={{ uri: url }}
-            style={styles.photoImage}
-            blurRadius={blurEnabled ? 20 : 0}
-            onError={() => handleImageError(url)}
-          />
-          <TouchableOpacity style={styles.photoEditButton} onPress={() => handleUploadPhoto(index)}>
-            <Ionicons name="pencil" size={14} color={COLORS.white} />
-          </TouchableOpacity>
+          {/* Tap photo to preview */}
+          <Pressable style={StyleSheet.absoluteFill} onPress={() => setPreviewPhoto({ url, index })}>
+            <Image
+              source={{ uri: url }}
+              style={styles.photoImage}
+              blurRadius={isPhotoBlurred ? 10 : 0}
+              onError={() => handleImageError(url)}
+            />
+          </Pressable>
+          {/* Per-photo blur toggle - only show when blur mode enabled and not a cartoon */}
+          {blurEnabled && !isCartoon && (
+            <TouchableOpacity
+              style={[styles.photoBlurButton, blurredPhotos[index] && styles.photoBlurButtonActive]}
+              onPress={() => handleTogglePhotoBlur(index)}
+            >
+              <Ionicons
+                name={blurredPhotos[index] ? 'eye-off' : 'eye'}
+                size={14}
+                color={COLORS.white}
+              />
+            </TouchableOpacity>
+          )}
           <TouchableOpacity style={styles.photoRemoveButton} onPress={() => handleRemovePhoto(index)}>
             <Ionicons name="close" size={14} color={COLORS.white} />
           </TouchableOpacity>
-          {/* FIX D: Main badge or Set as Main button */}
+          {/* Main badge or Set as Main button */}
           {isMain ? (
             <View style={styles.mainBadge}><Text style={styles.mainBadgeText}>Main</Text></View>
           ) : (
@@ -327,8 +399,7 @@ export default function EditProfileScreen() {
 
     // Demo mode: persist to local demo store, skip Convex
     if (isDemoMode) {
-      const demoUserId = useDemoStore.getState().currentDemoUserId;
-      if (demoUserId) {
+      if (currentDemoUserId) {
         // Build WIPE-SAFE patch: only include fields that have actual values
         // This prevents undefined/null from overwriting stored data
         const patch: Record<string, any> = {};
@@ -357,9 +428,9 @@ export default function EditProfileScreen() {
 
         // Log BEFORE save to trace what we're about to write
         if (__DEV__) {
-          const prevProfile = useDemoStore.getState().demoProfiles[demoUserId];
+          const prevProfile = useDemoStore.getState().demoProfiles[currentDemoUserId];
           console.log('[EditProfile] SAVE PRESSED (demo)', {
-            demoUserId,
+            currentDemoUserId,
             patchKeys: Object.keys(patch),
             photoCount: patch.photos?.length ?? 0,
             promptCount: patch.profilePrompts?.length ?? 0,
@@ -371,11 +442,11 @@ export default function EditProfileScreen() {
         }
 
         // Update demo profile with PATCH (merge, not overwrite)
-        useDemoStore.getState().saveDemoProfile(demoUserId, patch);
+        useDemoStore.getState().saveDemoProfile(currentDemoUserId, patch);
 
         // Log AFTER save to confirm what was written
         if (__DEV__) {
-          const afterProfile = useDemoStore.getState().demoProfiles[demoUserId];
+          const afterProfile = useDemoStore.getState().demoProfiles[currentDemoUserId];
           console.log('[EditProfile] SAVE COMPLETE (demo)', {
             afterPhotoCount: afterProfile?.photos?.length ?? 0,
             afterPromptCount: afterProfile?.profilePrompts?.length ?? 0,
@@ -452,6 +523,75 @@ export default function EditProfileScreen() {
     >
       <BlurProfileNotice visible={showBlurNotice} onConfirm={handleBlurConfirm} onCancel={() => setShowBlurNotice(false)} />
 
+      {/* Photo Preview Modal - Full Screen with Floating Action Tray */}
+      <Modal
+        visible={!!previewPhoto}
+        animationType="fade"
+        statusBarTranslucent
+        onRequestClose={() => setPreviewPhoto(null)}
+      >
+        <View style={styles.previewFullScreen}>
+          {/* Photo Container */}
+          <View style={styles.previewImageContainer}>
+            {previewPhoto && (
+              <Image
+                source={{ uri: previewPhoto.url }}
+                style={styles.previewImage}
+                resizeMode="contain"
+              />
+            )}
+          </View>
+          {/* Floating Action Buttons - No Container Background */}
+          <View style={[styles.previewButtonsRow, { paddingBottom: Math.max(insets.bottom, 20) + 12 }]}>
+            {/* Delete Button */}
+            <TouchableOpacity
+              style={styles.previewFloatingButton}
+              onPress={() => {
+                if (previewPhoto) {
+                  const indexToDelete = previewPhoto.index;
+                  setPreviewPhoto(null);
+                  handleRemovePhoto(indexToDelete);
+                }
+              }}
+              activeOpacity={0.8}
+            >
+              <View style={[styles.previewButtonCircle, styles.previewButtonDanger]}>
+                <Ionicons name="trash-outline" size={26} color={COLORS.white} />
+              </View>
+              <Text style={[styles.previewButtonLabel, styles.previewButtonLabelDanger]}>Delete</Text>
+            </TouchableOpacity>
+            {/* Replace Button */}
+            <TouchableOpacity
+              style={styles.previewFloatingButton}
+              onPress={() => {
+                if (previewPhoto) {
+                  const indexToReplace = previewPhoto.index;
+                  setPreviewPhoto(null);
+                  handleUploadPhoto(indexToReplace);
+                }
+              }}
+              activeOpacity={0.8}
+            >
+              <View style={styles.previewButtonCircle}>
+                <Ionicons name="refresh-outline" size={26} color={COLORS.white} />
+              </View>
+              <Text style={styles.previewButtonLabel}>Replace</Text>
+            </TouchableOpacity>
+            {/* Cancel Button */}
+            <TouchableOpacity
+              style={styles.previewFloatingButton}
+              onPress={() => setPreviewPhoto(null)}
+              activeOpacity={0.8}
+            >
+              <View style={styles.previewButtonCircle}>
+                <Ionicons name="close" size={26} color={COLORS.white} />
+              </View>
+              <Text style={styles.previewButtonLabel}>Cancel</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
+
       <View style={styles.header}>
         <TouchableOpacity onPress={() => router.back()}><Ionicons name="arrow-back" size={24} color={COLORS.text} /></TouchableOpacity>
         <Text style={styles.headerTitle}>Edit Profile</Text>
@@ -473,10 +613,12 @@ export default function EditProfileScreen() {
           <View style={styles.blurInfo}>
             <View style={styles.blurLabelRow}>
               <Ionicons name="eye-off-outline" size={18} color={COLORS.primary} />
-              <Text style={styles.blurLabel}>Blur My Photo</Text>
+              <Text style={styles.blurLabel}>Enable Photo Blur</Text>
             </View>
             <Text style={styles.blurDescription}>
-              {blurEnabled ? 'Your photo is blurred across Discover and your profile.' : 'Blur your photo to protect your privacy.'}
+              {blurEnabled
+                ? 'Tap the eye icon on each photo to blur/unblur it individually.'
+                : 'Turn on to choose which photos to blur for privacy.'}
             </Text>
           </View>
           <Switch value={blurEnabled} onValueChange={handleBlurToggle} trackColor={{ false: COLORS.border, true: COLORS.primary }} thumbColor={COLORS.white} />
@@ -658,7 +800,20 @@ const styles = StyleSheet.create({
   photoSlot: { width: slotSize, height: slotSize * 1.25, borderRadius: 10, overflow: 'hidden', backgroundColor: COLORS.backgroundDark },
   photoSlotEmpty: { alignItems: 'center', justifyContent: 'center', borderWidth: 1.5, borderColor: COLORS.border, borderStyle: 'dashed' },
   photoImage: { width: '100%', height: '100%' },
-  photoEditButton: { position: 'absolute', bottom: 6, right: 6, width: 26, height: 26, borderRadius: 13, backgroundColor: COLORS.primary, alignItems: 'center', justifyContent: 'center' },
+  photoBlurButton: {
+    position: 'absolute',
+    bottom: 6,
+    right: 6,
+    width: 26,
+    height: 26,
+    borderRadius: 13,
+    backgroundColor: 'rgba(0,0,0,0.6)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  photoBlurButtonActive: {
+    backgroundColor: COLORS.primary,
+  },
   photoRemoveButton: { position: 'absolute', top: 6, right: 6, width: 22, height: 22, borderRadius: 11, backgroundColor: 'rgba(0,0,0,0.6)', alignItems: 'center', justifyContent: 'center' },
   slotBadge: { position: 'absolute', top: 6, left: 6, width: 20, height: 20, borderRadius: 10, backgroundColor: COLORS.primary, alignItems: 'center', justifyContent: 'center' },
   slotBadgeText: { fontSize: 11, fontWeight: '700', color: COLORS.white },
@@ -771,5 +926,59 @@ const styles = StyleSheet.create({
     borderColor: COLORS.border,
     fontSize: 14,
     color: COLORS.text,
+  },
+  // Photo preview modal - Full Screen with Floating Buttons
+  previewFullScreen: {
+    flex: 1,
+    backgroundColor: '#000',
+  },
+  previewImageContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  previewImage: {
+    width: '100%',
+    height: '100%',
+  },
+  previewButtonsRow: {
+    position: 'absolute',
+    bottom: 0,
+    left: 0,
+    right: 0,
+    flexDirection: 'row',
+    justifyContent: 'center',
+    alignItems: 'flex-end',
+    gap: 32,
+  },
+  previewFloatingButton: {
+    alignItems: 'center',
+  },
+  previewButtonCircle: {
+    width: 60,
+    height: 60,
+    borderRadius: 30,
+    backgroundColor: 'rgba(50, 50, 50, 0.9)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    // Shadow for each button
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.5,
+    shadowRadius: 8,
+    elevation: 8,
+  },
+  previewButtonDanger: {
+    backgroundColor: COLORS.error,
+  },
+  previewButtonLabel: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: 'rgba(255, 255, 255, 0.85)',
+    marginTop: 8,
+    textAlign: 'center',
+  },
+  previewButtonLabelDanger: {
+    color: COLORS.error,
   },
 });
