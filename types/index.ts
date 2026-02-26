@@ -730,6 +730,7 @@ export interface Confession {
   authorName?: string;
   authorPhotoUrl?: string;
   createdAt: number;
+  expiresAt?: number; // Confession expires 24h after creation (optional for backward compat)
   revealPolicy: ConfessionRevealPolicy;
   timedReveal?: TimedRevealOption;
   timedRevealAt?: number | null;

@@ -159,8 +159,22 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
 
   // ── Safety / integrity guards ──
   const blockedUserIds = useBlockStore((s) => s.blockedUserIds);
+  const justUnblockedUserId = useBlockStore((s) => s.justUnblockedUserId);
+  const clearJustUnblocked = useBlockStore((s) => s.clearJustUnblocked);
   const currentMeta = conversationId ? demoMeta[conversationId] : undefined;
   const otherUserIdFromMeta = getOtherUserIdFromMeta(currentMeta);
+
+  // ── "Just unblocked" one-time banner state ──
+  const [showJustUnblockedBanner, setShowJustUnblockedBanner] = useState(false);
+
+  // Check if this chat is with the just-unblocked user and show banner once
+  useEffect(() => {
+    if (justUnblockedUserId && otherUserIdFromMeta === justUnblockedUserId) {
+      setShowJustUnblockedBanner(true);
+      // Clear the flag immediately so it only shows once
+      clearJustUnblocked();
+    }
+  }, [justUnblockedUserId, otherUserIdFromMeta, clearJustUnblocked]);
 
   // 5-3: Live re-check of blocked user status (not one-time)
   // Re-runs whenever blockedUserIds changes, even if chat is already open
@@ -788,6 +802,14 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
         </View>
       )}
 
+      {/* Just unblocked banner - one-time indicator */}
+      {showJustUnblockedBanner && (
+        <View style={styles.justUnblockedBanner}>
+          <Ionicons name="checkmark-circle" size={16} color={COLORS.success} />
+          <Text style={styles.justUnblockedBannerText}>Unblocked just now</Text>
+        </View>
+      )}
+
       {/* ─── KEYBOARD AVOIDING VIEW (matches locked chat-rooms pattern) ─── */}
       <KeyboardAvoidingView
         style={styles.kavContainer}
@@ -1098,5 +1120,19 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: '500',
     color: COLORS.textMuted,
+  },
+  justUnblockedBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    backgroundColor: 'rgba(76, 175, 80, 0.12)',
+    paddingVertical: 10,
+    paddingHorizontal: 16,
+  },
+  justUnblockedBannerText: {
+    fontSize: 13,
+    fontWeight: '500',
+    color: COLORS.success,
   },
 });

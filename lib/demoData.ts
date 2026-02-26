@@ -2505,6 +2505,21 @@ export const DEMO_CONFESSIONS: Confession[] = [
     createdAt: Date.now() - 1000 * 60 * 30,
     revealPolicy: 'never' as const,
   },
+  // Expired confession for testing (25 hours old, owned by demo_user_1)
+  {
+    id: 'conf_expired_test',
+    userId: 'demo_user_1',
+    text: 'This is an old confession that has expired. It should only appear in My Confessions.',
+    isAnonymous: true,
+    mood: 'emotional',
+    topic: 'late_night',
+    reactions: { '\u2764\uFE0F': 8, '\uD83D\uDE2D': 3 },
+    visibility: 'global',
+    replyCount: 2,
+    reactionCount: 11,
+    createdAt: Date.now() - 1000 * 60 * 60 * 25, // 25 hours ago (expired)
+    revealPolicy: 'never' as const,
+  },
   {
     id: 'conf_2',
     userId: 'demo_profile_2',
