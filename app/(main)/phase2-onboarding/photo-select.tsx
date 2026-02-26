@@ -1,13 +1,19 @@
 /**
- * Phase 2 Onboarding - Step 2: Profile Setup
+ * Phase 2 Onboarding - Step 2: Photo Import/Selection (ONE-TIME)
  *
- * UPDATED: Always show 9 photo slots, allow adding new photos
- * - Selection mode: Select from Phase-1 photos
- * - Photo mode: Manage 9 slots (fill, preview, replace, delete, add new)
- * - Blur ON by default, per-photo toggle
- * - Main photo with star icon
+ * This screen is ONLY for initial photo selection from Phase-1.
+ * After confirmation, user is redirected to profile-edit (Step 2.5).
+ *
+ * Shows:
+ * - Phase-1 photos grid for selection
+ * - Basic info summary
+ *
+ * Does NOT show:
+ * - Intent categories
+ * - Desire input
+ * - Photo editing tools (replace/delete/main/blur)
  */
-import React, { useState, useCallback, useMemo } from 'react';
+import React, { useState, useCallback, useMemo, useEffect } from 'react';
 import {
   View,
   Text,
@@ -17,21 +23,15 @@ import {
   Dimensions,
   ActivityIndicator,
   ScrollView,
-  Modal,
   Pressable,
-  Alert,
 } from 'react-native';
 import { useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
-import * as ImagePicker from 'expo-image-picker';
 import { INCOGNITO_COLORS } from '@/lib/constants';
-import { PRIVATE_INTENT_CATEGORIES } from '@/lib/privateConstants';
 import {
   usePrivateProfileStore,
   PHASE2_MIN_PHOTOS,
-  PHASE2_MIN_INTENTS,
-  PHASE2_MAX_INTENTS,
 } from '@/stores/privateProfileStore';
 import { useDemoStore } from '@/stores/demoStore';
 
@@ -43,29 +43,6 @@ const SCREEN_PADDING = 16;
 const screenWidth = Dimensions.get('window').width;
 const slotSize = (screenWidth - SCREEN_PADDING * 2 - GRID_GAP * (COLUMNS - 1)) / COLUMNS;
 
-// Type for 9-slot photo array
-type PhotoSlots9 = (string | null)[];
-
-const LIFESTYLE_LABELS: Record<string, string> = {
-  never: 'Never', sometimes: 'Sometimes', socially: 'Socially',
-  regularly: 'Regularly', trying_to_quit: 'Trying to quit',
-  sober: 'Sober', daily: 'Daily',
-};
-const KIDS_LABELS: Record<string, string> = {
-  have_and_want_more: 'Have kids, want more', have_and_dont_want_more: 'Have kids, done',
-  dont_have_and_want: "Don't have, want", dont_have_and_dont_want: "Don't have, don't want",
-  not_sure: 'Not sure yet',
-};
-const EDUCATION_LABELS: Record<string, string> = {
-  high_school: 'High School', some_college: 'Some College', associate: 'Associate',
-  bachelors: "Bachelor's", masters: "Master's", doctorate: 'Doctorate',
-  trade_school: 'Trade School', professional: 'Professional', diploma: 'Diploma', other: 'Other',
-};
-const RELIGION_LABELS: Record<string, string> = {
-  christian: 'Christian', muslim: 'Muslim', hindu: 'Hindu', buddhist: 'Buddhist',
-  jewish: 'Jewish', sikh: 'Sikh', atheist: 'Atheist', agnostic: 'Agnostic',
-  spiritual: 'Spiritual', other: 'Other', prefer_not_to_say: 'Prefer not to say',
-};
 const GENDER_LABELS: Record<string, string> = {
   male: 'Man', female: 'Woman', non_binary: 'Non-binary',
 };
@@ -84,17 +61,26 @@ function calculateAgeFromDob(dob: string | undefined | null): number {
 }
 
 // Create empty 9-slot array
-function createEmptySlots(): PhotoSlots9 {
+function createEmptySlots(): (string | null)[] {
   return [null, null, null, null, null, null, null, null, null];
 }
 
-export default function Phase2ProfileSetup() {
+export default function Phase2PhotoSelect() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
 
-  // ============================================================
-  // SOURCE OF TRUTH: Read photos from Phase-1 profile
-  // ============================================================
+  // Check if already confirmed - redirect to profile-edit
+  const phase2PhotosConfirmed = usePrivateProfileStore((s) => s.phase2PhotosConfirmed);
+  const _hasHydrated = usePrivateProfileStore((s) => s._hasHydrated);
+
+  useEffect(() => {
+    if (_hasHydrated && phase2PhotosConfirmed) {
+      // Already confirmed, redirect to profile-edit
+      router.replace('/(main)/phase2-onboarding/profile-edit' as any);
+    }
+  }, [_hasHydrated, phase2PhotosConfirmed, router]);
+
+  // Source: Phase-1 photos
   const demoProfiles = useDemoStore((s) => s.demoProfiles);
   const currentDemoUserId = useDemoStore((s) => s.currentDemoUserId);
   const getCurrentProfile = useDemoStore((s) => s.getCurrentProfile);
@@ -102,8 +88,6 @@ export default function Phase2ProfileSetup() {
   const phase1PhotoSlots = useMemo(() => {
     const profile = getCurrentProfile();
     const slots = profile?.photoSlots || createEmptySlots();
-    const nonNullSlots = slots.map((uri, idx) => (uri ? idx : -1)).filter((i) => i >= 0);
-    console.log('[P2 STEP2 RENDER] nonNullSlots=' + JSON.stringify(nonNullSlots));
     return slots;
   }, [getCurrentProfile, demoProfiles, currentDemoUserId]);
 
@@ -112,254 +96,65 @@ export default function Phase2ProfileSetup() {
   const displayName = phase1Profile?.name || 'Anonymous';
   const age = phase1Profile?.dateOfBirth ? calculateAgeFromDob(phase1Profile.dateOfBirth) : 0;
   const gender = phase1Profile?.gender || '';
-  const height = (phase1Profile as any)?.height || 0;
-  const smoking = (phase1Profile as any)?.smoking || '';
-  const drinking = (phase1Profile as any)?.drinking || '';
-  const kids = (phase1Profile as any)?.kids || '';
-  const education = (phase1Profile as any)?.education || '';
-  const religion = (phase1Profile as any)?.religion || '';
-  const hobbies = (phase1Profile as any)?.hobbies || [];
 
-  // Store
-  const intentKeys = usePrivateProfileStore((s) => s.intentKeys);
+  // Store actions
   const setSelectedPhotos = usePrivateProfileStore((s) => s.setSelectedPhotos);
-  const setIntentKeys = usePrivateProfileStore((s) => s.setIntentKeys);
+  const setPhase2PhotosConfirmed = usePrivateProfileStore((s) => s.setPhase2PhotosConfirmed);
 
-  // ============================================================
-  // LOCAL STATE
-  // ============================================================
-  // Selection mode state
+  // Local state
   const [selectedSlots, setSelectedSlots] = useState<number[]>([]);
   const [failedSlots, setFailedSlots] = useState<number[]>([]);
-
-  // Post-confirmation state: 9-slot based arrays
-  const [phase2PhotoSlots, setPhase2PhotoSlots] = useState<PhotoSlots9 | null>(null);
-  const [photoBlurSlots, setPhotoBlurSlots] = useState<boolean[]>(Array(GRID_SLOTS).fill(true));
-  const [mainPhotoSlot, setMainPhotoSlot] = useState<number>(0);
-
-  // Preview state
-  const [previewSlot, setPreviewSlot] = useState<number | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
-
-  // Mode flags
-  const isSelectionMode = phase2PhotoSlots === null;
-  const isPhotoMode = phase2PhotoSlots !== null;
 
   // Computed values
   const validPhotoCount = phase1PhotoSlots.filter((uri, idx) => uri && !failedSlots.includes(idx)).length;
   const selectedCount = selectedSlots.length;
-  const canSelectPhotos = selectedCount >= PHASE2_MIN_PHOTOS;
+  const canConfirm = selectedCount >= PHASE2_MIN_PHOTOS;
 
-  // Count actual photos in Phase-2 slots
-  const phase2PhotoCount = useMemo(() => {
-    if (!phase2PhotoSlots) return 0;
-    return phase2PhotoSlots.filter((uri) => uri !== null).length;
-  }, [phase2PhotoSlots]);
-
-  // Get list of filled slot indices
-  const filledSlotIndices = useMemo(() => {
-    if (!phase2PhotoSlots) return [];
-    return phase2PhotoSlots.map((uri, idx) => (uri ? idx : -1)).filter((i) => i >= 0);
-  }, [phase2PhotoSlots]);
-
-  const canContinueIntents = intentKeys.length >= PHASE2_MIN_INTENTS && intentKeys.length <= PHASE2_MAX_INTENTS;
-  const canContinue = isPhotoMode && canContinueIntents && phase2PhotoCount >= PHASE2_MIN_PHOTOS;
-
-  // ============================================================
-  // SELECTION MODE HANDLERS
-  // ============================================================
+  // Handlers
   const toggleSelection = useCallback((slotIndex: number) => {
-    if (!isSelectionMode) return;
     setSelectedSlots((prev) => {
       if (prev.includes(slotIndex)) {
         return prev.filter((s) => s !== slotIndex);
       }
       return [...prev, slotIndex];
     });
-  }, [isSelectionMode]);
-
-  const handleConfirmPhotos = useCallback(() => {
-    if (selectedSlots.length < PHASE2_MIN_PHOTOS) return;
-
-    // Create Phase-2 photo slots from selected Phase-1 slots
-    const newPhotoSlots = createEmptySlots();
-    const newBlurSlots = Array(GRID_SLOTS).fill(true);
-
-    // Fill slots in order (0, 1, 2, ...) with selected photos
-    let fillIndex = 0;
-    for (const slotIndex of selectedSlots) {
-      const uri = phase1PhotoSlots[slotIndex];
-      if (uri && fillIndex < GRID_SLOTS) {
-        newPhotoSlots[fillIndex] = uri;
-        newBlurSlots[fillIndex] = true; // Blur ON by default
-        fillIndex++;
-      }
-    }
-
-    setPhase2PhotoSlots(newPhotoSlots);
-    setPhotoBlurSlots(newBlurSlots);
-    setMainPhotoSlot(0); // First photo is main by default
-  }, [selectedSlots, phase1PhotoSlots]);
+  }, []);
 
   const onSlotError = useCallback((slotIndex: number) => {
     setFailedSlots((prev) => prev.includes(slotIndex) ? prev : [...prev, slotIndex]);
     setSelectedSlots((prev) => prev.filter((s) => s !== slotIndex));
   }, []);
 
-  // ============================================================
-  // PHOTO MODE HANDLERS
-  // ============================================================
-  const openPreview = useCallback((slotIndex: number) => {
-    if (!isPhotoMode || !phase2PhotoSlots || !phase2PhotoSlots[slotIndex]) return;
-    setPreviewSlot(slotIndex);
-  }, [isPhotoMode, phase2PhotoSlots]);
-
-  const closePreview = useCallback(() => {
-    setPreviewSlot(null);
-  }, []);
-
-  const togglePhotoBlur = useCallback((slotIndex: number) => {
-    setPhotoBlurSlots((prev) => {
-      const next = [...prev];
-      next[slotIndex] = !next[slotIndex];
-      return next;
-    });
-  }, []);
-
-  const setAsMainPhoto = useCallback(() => {
-    if (previewSlot === null) return;
-    setMainPhotoSlot(previewSlot);
-    closePreview();
-  }, [previewSlot, closePreview]);
-
-  // Add new photo to empty slot
-  const handleAddPhoto = useCallback(async (slotIndex: number) => {
-    if (!isPhotoMode || !phase2PhotoSlots) return;
-    if (phase2PhotoSlots[slotIndex] !== null) return; // Slot not empty
-
-    try {
-      const result = await ImagePicker.launchImageLibraryAsync({
-        mediaTypes: ImagePicker.MediaTypeOptions.Images,
-        allowsEditing: true,
-        aspect: [3, 4],
-        quality: 0.8,
-      });
-
-      if (!result.canceled && result.assets[0]) {
-        const newUri = result.assets[0].uri;
-        setPhase2PhotoSlots((prev) => {
-          if (!prev) return prev;
-          const next = [...prev];
-          next[slotIndex] = newUri;
-          return next;
-        });
-        // Set blur ON by default for new photo
-        setPhotoBlurSlots((prev) => {
-          const next = [...prev];
-          next[slotIndex] = true;
-          return next;
-        });
-      }
-    } catch (e) {
-      Alert.alert('Error', 'Failed to pick image');
-    }
-  }, [isPhotoMode, phase2PhotoSlots]);
-
-  const handleReplacePhoto = useCallback(async () => {
-    if (previewSlot === null || !phase2PhotoSlots) return;
-    try {
-      const result = await ImagePicker.launchImageLibraryAsync({
-        mediaTypes: ImagePicker.MediaTypeOptions.Images,
-        allowsEditing: true,
-        aspect: [3, 4],
-        quality: 0.8,
-      });
-      if (!result.canceled && result.assets[0]) {
-        const newUri = result.assets[0].uri;
-        setPhase2PhotoSlots((prev) => {
-          if (!prev) return prev;
-          const next = [...prev];
-          next[previewSlot] = newUri;
-          return next;
-        });
-        closePreview();
-      }
-    } catch (e) {
-      Alert.alert('Error', 'Failed to pick image');
-    }
-  }, [previewSlot, phase2PhotoSlots, closePreview]);
-
-  const handleDeletePhoto = useCallback(() => {
-    if (previewSlot === null || !phase2PhotoSlots) return;
-
-    // Count current photos
-    const currentCount = phase2PhotoSlots.filter((uri) => uri !== null).length;
-    if (currentCount <= PHASE2_MIN_PHOTOS) {
-      Alert.alert('Cannot Delete', `You must have at least ${PHASE2_MIN_PHOTOS} photos.`);
-      return;
-    }
-
-    Alert.alert('Delete Photo', 'Are you sure you want to remove this photo?', [
-      { text: 'Cancel', style: 'cancel' },
-      {
-        text: 'Delete',
-        style: 'destructive',
-        onPress: () => {
-          setPhase2PhotoSlots((prev) => {
-            if (!prev) return prev;
-            const next = [...prev];
-            next[previewSlot] = null;
-            return next;
-          });
-
-          // If deleting main photo, find next filled slot as main
-          if (previewSlot === mainPhotoSlot) {
-            const nextMain = phase2PhotoSlots.findIndex((uri, idx) => uri !== null && idx !== previewSlot);
-            setMainPhotoSlot(nextMain >= 0 ? nextMain : 0);
-          }
-
-          closePreview();
-        },
-      },
-    ]);
-  }, [previewSlot, phase2PhotoSlots, mainPhotoSlot, closePreview]);
-
-  // ============================================================
-  // OTHER HANDLERS
-  // ============================================================
-  const toggleIntent = useCallback((key: string) => {
-    const current = usePrivateProfileStore.getState().intentKeys;
-    if (current.includes(key as any)) {
-      setIntentKeys(current.filter((k) => k !== key) as any);
-    } else if (current.length < PHASE2_MAX_INTENTS) {
-      setIntentKeys([...current, key] as any);
-    }
-  }, [setIntentKeys]);
-
-  const handleContinue = () => {
-    if (!canContinue || isProcessing || !phase2PhotoSlots) return;
+  const handleConfirmPhotos = useCallback(() => {
+    if (selectedSlots.length < PHASE2_MIN_PHOTOS || isProcessing) return;
     setIsProcessing(true);
 
-    // Convert slot-based array to URL array for store
-    const photoUrls = phase2PhotoSlots.filter((uri): uri is string => uri !== null);
+    // Collect selected photo URLs
+    const photoUrls: string[] = [];
+    for (const slotIndex of selectedSlots) {
+      const uri = phase1PhotoSlots[slotIndex];
+      if (uri) photoUrls.push(uri);
+    }
+
+    // Save to store
     setSelectedPhotos([], photoUrls);
+    setPhase2PhotosConfirmed(true);
 
-    router.push('/(main)/phase2-onboarding/profile-setup' as any);
+    // Navigate to profile-edit (Step 2.5)
+    router.push('/(main)/phase2-onboarding/profile-edit' as any);
     setIsProcessing(false);
-  };
+  }, [selectedSlots, phase1PhotoSlots, isProcessing, setSelectedPhotos, setPhase2PhotosConfirmed, router]);
 
-  const infoItems = [
-    height ? { label: 'Height', value: `${height} cm` } : null,
-    smoking ? { label: 'Smoking', value: LIFESTYLE_LABELS[smoking] || smoking } : null,
-    drinking ? { label: 'Drinking', value: LIFESTYLE_LABELS[drinking] || drinking } : null,
-    kids ? { label: 'Kids', value: KIDS_LABELS[kids] || kids } : null,
-    education ? { label: 'Education', value: EDUCATION_LABELS[education] || education } : null,
-    religion ? { label: 'Religion', value: RELIGION_LABELS[religion] || religion } : null,
-  ].filter(Boolean) as { label: string; value: string }[];
+  // Show loading while checking hydration
+  if (!_hasHydrated) {
+    return (
+      <View style={[styles.container, styles.centered]}>
+        <ActivityIndicator size="large" color={C.primary} />
+      </View>
+    );
+  }
 
-  // ============================================================
-  // RENDER
-  // ============================================================
   return (
     <View style={[styles.container, { paddingTop: insets.top }]}>
       {/* Header */}
@@ -367,24 +162,20 @@ export default function Phase2ProfileSetup() {
         <TouchableOpacity onPress={() => router.back()} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
           <Ionicons name="arrow-back" size={24} color={C.text} />
         </TouchableOpacity>
-        <Text style={styles.headerTitle}>Profile Setup</Text>
+        <Text style={styles.headerTitle}>Select Photos</Text>
         <Text style={styles.stepLabel}>Step 2 of 3</Text>
       </View>
 
       <ScrollView style={styles.scrollView} showsVerticalScrollIndicator={false}>
-        {/* Section A: Photos */}
+        {/* Section: Photo Selection */}
         <View style={styles.section}>
-          <Text style={styles.sectionTitle}>
-            {isSelectionMode ? 'Select Your Photos' : 'Your Phase-2 Photos'}
-          </Text>
+          <Text style={styles.sectionTitle}>Choose Your Photos</Text>
           <Text style={styles.sectionSubtitle}>
-            {isSelectionMode
-              ? `Select at least ${PHASE2_MIN_PHOTOS} photos for your Phase-2 profile.`
-              : 'Tap to preview. Tap + to add more photos.'}
+            Select at least {PHASE2_MIN_PHOTOS} photos from your Phase-1 profile for Private Mode.
           </Text>
 
           {/* Empty state */}
-          {validPhotoCount === 0 && isSelectionMode && (
+          {validPhotoCount === 0 && (
             <View style={styles.emptyStateContainer}>
               <Ionicons name="images-outline" size={48} color={C.textLight} />
               <Text style={styles.emptyStateTitle}>No Photos Found</Text>
@@ -394,271 +185,105 @@ export default function Phase2ProfileSetup() {
             </View>
           )}
 
-          {/* GRID - Always 9 slots */}
+          {/* Photo Grid */}
           <View style={styles.grid}>
-            {isSelectionMode ? (
-              // SELECTION MODE - Show Phase-1 photos for selection
-              phase1PhotoSlots.map((uri, slotIndex) => {
-                const hasFailed = failedSlots.includes(slotIndex);
-                const isSelected = selectedSlots.includes(slotIndex);
-                const selectionOrder = isSelected ? selectedSlots.indexOf(slotIndex) + 1 : 0;
+            {phase1PhotoSlots.map((uri, slotIndex) => {
+              const hasFailed = failedSlots.includes(slotIndex);
+              const isSelected = selectedSlots.includes(slotIndex);
+              const selectionOrder = isSelected ? selectedSlots.indexOf(slotIndex) + 1 : 0;
 
-                if (uri && !hasFailed) {
-                  return (
-                    <Pressable
-                      key={`slot-${slotIndex}`}
-                      style={styles.slot}
-                      onPress={() => toggleSelection(slotIndex)}
-                    >
-                      <Image source={{ uri }} style={styles.slotImage} resizeMode="cover" onError={() => onSlotError(slotIndex)} />
-                      {isSelected && (
-                        <View pointerEvents="none" style={styles.orderBadge}>
-                          <Text style={styles.orderBadgeText}>{selectionOrder}</Text>
-                        </View>
-                      )}
-                    </Pressable>
-                  );
-                }
-
+              if (uri && !hasFailed) {
                 return (
-                  <View key={`empty-${slotIndex}`} style={[styles.slot, styles.emptySlot]}>
-                    <Ionicons name="image-outline" size={24} color={C.textLight} />
-                  </View>
-                );
-              })
-            ) : (
-              // PHOTO MODE - Always show 9 slots
-              Array.from({ length: GRID_SLOTS }).map((_, slotIndex) => {
-                const uri = phase2PhotoSlots![slotIndex];
-                const isMain = slotIndex === mainPhotoSlot && uri !== null;
-                const isBlurred = photoBlurSlots[slotIndex];
-
-                if (uri) {
-                  // Filled slot - show photo with controls
-                  return (
-                    <View key={`p2-${slotIndex}`} style={styles.slot}>
-                      <Pressable style={StyleSheet.absoluteFill} onPress={() => openPreview(slotIndex)}>
-                        <Image source={{ uri }} style={styles.slotImage} resizeMode="cover" blurRadius={isBlurred ? 15 : 0} />
-                      </Pressable>
-                      {/* Main photo star */}
-                      {isMain && (
-                        <View pointerEvents="none" style={styles.starBadge}>
-                          <Ionicons name="star" size={14} color="#FFD700" />
-                        </View>
-                      )}
-                      {/* Blur toggle eye icon - tappable */}
-                      <TouchableOpacity
-                        style={styles.blurToggleBtn}
-                        onPress={() => togglePhotoBlur(slotIndex)}
-                        hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-                      >
-                        <Ionicons name={isBlurred ? 'eye-off' : 'eye'} size={16} color="#FFF" />
-                      </TouchableOpacity>
-                    </View>
-                  );
-                }
-
-                // Empty slot - show "Add Photo" button
-                return (
-                  <TouchableOpacity
-                    key={`add-${slotIndex}`}
-                    style={[styles.slot, styles.addPhotoSlot]}
-                    onPress={() => handleAddPhoto(slotIndex)}
+                  <Pressable
+                    key={`slot-${slotIndex}`}
+                    style={styles.slot}
+                    onPress={() => toggleSelection(slotIndex)}
                   >
-                    <Ionicons name="add-circle-outline" size={32} color={C.primary} />
-                    <Text style={styles.addPhotoText}>Add</Text>
-                  </TouchableOpacity>
+                    <Image
+                      source={{ uri }}
+                      style={styles.slotImage}
+                      resizeMode="cover"
+                      onError={() => onSlotError(slotIndex)}
+                    />
+                    {isSelected && (
+                      <View pointerEvents="none" style={styles.orderBadge}>
+                        <Text style={styles.orderBadgeText}>{selectionOrder}</Text>
+                      </View>
+                    )}
+                  </Pressable>
                 );
-              })
-            )}
-          </View>
+              }
 
-          {/* SELECT PHOTOS BUTTON (selection mode only) */}
-          {isSelectionMode && (
-            <TouchableOpacity
-              style={[styles.selectPhotosBtn, !canSelectPhotos && styles.selectPhotosBtnDisabled]}
-              onPress={handleConfirmPhotos}
-              disabled={!canSelectPhotos}
-            >
-              <Ionicons name="checkmark-circle" size={20} color={canSelectPhotos ? '#FFF' : C.textLight} />
-              <Text style={[styles.selectPhotosBtnText, !canSelectPhotos && styles.selectPhotosBtnTextDisabled]}>
-                {canSelectPhotos ? 'Confirm Photos' : `Confirm Photos (select at least ${PHASE2_MIN_PHOTOS})`}
-              </Text>
-            </TouchableOpacity>
-          )}
-
-          {/* Photo count */}
-          {isSelectionMode && (
-            <Text style={[styles.countText, !canSelectPhotos && styles.countWarning]}>
-              {selectedCount < PHASE2_MIN_PHOTOS
-                ? `Select ${PHASE2_MIN_PHOTOS - selectedCount} more photo${PHASE2_MIN_PHOTOS - selectedCount === 1 ? '' : 's'}`
-                : `${selectedCount}/${GRID_SLOTS} selected`}
-            </Text>
-          )}
-          {isPhotoMode && (
-            <Text style={styles.countText}>
-              {phase2PhotoCount}/{GRID_SLOTS} photos (blur ON by default)
-            </Text>
-          )}
-        </View>
-
-        {/* Section B: Profile Info */}
-        <View style={styles.section}>
-          <Text style={styles.sectionTitle}>Your Profile Info</Text>
-          <Text style={styles.sectionSubtitle}>Imported from main profile. Edit later in settings.</Text>
-
-          <View style={styles.profileCard}>
-            <View style={styles.mainInfo}>
-              <View style={styles.infoItem}>
-                <Text style={styles.infoLabel}>Name</Text>
-                <Text style={styles.infoValue}>{displayName || 'Anonymous'}</Text>
-              </View>
-              <View style={styles.infoItem}>
-                <Text style={styles.infoLabel}>Age</Text>
-                <Text style={styles.infoValue}>{age > 0 ? age : '-'}</Text>
-              </View>
-              <View style={styles.infoItem}>
-                <Text style={styles.infoLabel}>Gender</Text>
-                <Text style={styles.infoValue}>{GENDER_LABELS[gender] || gender || '-'}</Text>
-              </View>
-            </View>
-
-            {infoItems.length > 0 && (
-              <View style={styles.infoChips}>
-                {infoItems.map((item, i) => (
-                  <View key={i} style={styles.chip}>
-                    <Text style={styles.chipLabel}>{item.label}</Text>
-                    <Text style={styles.chipValue}>{item.value}</Text>
-                  </View>
-                ))}
-              </View>
-            )}
-
-            {hobbies && hobbies.length > 0 && (
-              <View style={styles.hobbiesSection}>
-                <Text style={styles.hobbiesLabel}>Interests</Text>
-                <View style={styles.hobbyTags}>
-                  {hobbies.slice(0, 6).map((h: string, i: number) => (
-                    <View key={i} style={styles.hobbyTag}>
-                      <Text style={styles.hobbyText}>{h}</Text>
-                    </View>
-                  ))}
-                  {hobbies.length > 6 && (
-                    <View style={styles.hobbyTag}>
-                      <Text style={styles.hobbyText}>+{hobbies.length - 6}</Text>
-                    </View>
-                  )}
-                </View>
-              </View>
-            )}
-          </View>
-        </View>
-
-        {/* Section C: Intents */}
-        <View style={styles.section}>
-          <View style={styles.intentHeader}>
-            <Text style={styles.sectionTitle}>What are you looking for?</Text>
-            <Text style={[styles.intentCount, canContinueIntents && styles.intentCountValid]}>
-              {intentKeys.length}/{PHASE2_MAX_INTENTS}
-            </Text>
-          </View>
-          <Text style={[styles.sectionSubtitle, !canContinueIntents && styles.countWarning]}>
-            Select {PHASE2_MIN_INTENTS}-{PHASE2_MAX_INTENTS} intents
-          </Text>
-
-          <View style={styles.intentGrid}>
-            {PRIVATE_INTENT_CATEGORIES.map((cat) => {
-              const selected = intentKeys.includes(cat.key as any);
               return (
-                <TouchableOpacity
-                  key={cat.key}
-                  style={[styles.intentChip, selected && styles.intentChipSelected]}
-                  onPress={() => toggleIntent(cat.key)}
-                >
-                  <Ionicons name={cat.icon as any} size={16} color={selected ? C.primary : C.textLight} />
-                  <Text style={[styles.intentText, selected && styles.intentTextSelected]}>{cat.label}</Text>
-                  {selected && <Ionicons name="checkmark" size={14} color={C.primary} />}
-                </TouchableOpacity>
+                <View key={`empty-${slotIndex}`} style={[styles.slot, styles.emptySlot]}>
+                  <Ionicons name="image-outline" size={24} color={C.textLight} />
+                </View>
               );
             })}
+          </View>
+
+          {/* Selection count */}
+          <Text style={[styles.countText, !canConfirm && styles.countWarning]}>
+            {selectedCount < PHASE2_MIN_PHOTOS
+              ? `Select ${PHASE2_MIN_PHOTOS - selectedCount} more photo${PHASE2_MIN_PHOTOS - selectedCount === 1 ? '' : 's'}`
+              : `${selectedCount}/${GRID_SLOTS} selected`}
+          </Text>
+        </View>
+
+        {/* Section: Basic Info Summary */}
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>Your Info</Text>
+          <Text style={styles.sectionSubtitle}>Imported from your main profile.</Text>
+
+          <View style={styles.infoCard}>
+            <View style={styles.infoRow}>
+              <Text style={styles.infoLabel}>Name</Text>
+              <Text style={styles.infoValue}>{displayName}</Text>
+            </View>
+            {age > 0 && (
+              <View style={styles.infoRow}>
+                <Text style={styles.infoLabel}>Age</Text>
+                <Text style={styles.infoValue}>{age}</Text>
+              </View>
+            )}
+            {gender && (
+              <View style={[styles.infoRow, styles.infoRowLast]}>
+                <Text style={styles.infoLabel}>Gender</Text>
+                <Text style={styles.infoValue}>{GENDER_LABELS[gender] || gender}</Text>
+              </View>
+            )}
           </View>
         </View>
 
         <View style={{ height: 120 }} />
       </ScrollView>
 
-      {/* Bottom */}
+      {/* Bottom Bar */}
       <View style={[styles.bottomBar, { paddingBottom: Math.max(insets.bottom, 16) + 12 }]}>
-        {isSelectionMode && (
-          <Text style={styles.bottomHint}>Select photos above, then press "Confirm Photos"</Text>
-        )}
-        {isPhotoMode && !canContinueIntents && (
-          <Text style={styles.bottomHint}>Select at least {PHASE2_MIN_INTENTS} intent to continue</Text>
-        )}
         <TouchableOpacity
-          style={[styles.continueBtn, (!canContinue || isProcessing) && styles.continueBtnDisabled]}
-          onPress={handleContinue}
-          disabled={!canContinue || isProcessing}
+          style={[styles.confirmBtn, (!canConfirm || isProcessing) && styles.confirmBtnDisabled]}
+          onPress={handleConfirmPhotos}
+          disabled={!canConfirm || isProcessing}
         >
           {isProcessing ? (
             <ActivityIndicator size="small" color="#FFF" />
           ) : (
             <>
-              <Text style={[styles.continueText, !canContinue && styles.continueTextDisabled]}>Continue</Text>
-              <Ionicons name="arrow-forward" size={18} color={canContinue ? '#FFF' : C.textLight} />
+              <Ionicons name="checkmark-circle" size={20} color={canConfirm ? '#FFF' : C.textLight} />
+              <Text style={[styles.confirmBtnText, !canConfirm && styles.confirmBtnTextDisabled]}>
+                {canConfirm ? 'Continue' : `Select at least ${PHASE2_MIN_PHOTOS} photos`}
+              </Text>
             </>
           )}
         </TouchableOpacity>
       </View>
-
-      {/* FULL-SCREEN PREVIEW MODAL */}
-      <Modal visible={isPhotoMode && previewSlot !== null} transparent animationType="fade" onRequestClose={closePreview}>
-        <View style={styles.modalOverlay}>
-          <View style={styles.modalContent}>
-            {previewSlot !== null && phase2PhotoSlots && phase2PhotoSlots[previewSlot] && (
-              <Image
-                source={{ uri: phase2PhotoSlots[previewSlot]! }}
-                style={styles.previewImage}
-                resizeMode="contain"
-              />
-            )}
-
-            {/* Action buttons */}
-            <View style={styles.previewActions}>
-              <TouchableOpacity style={styles.actionBtn} onPress={setAsMainPhoto}>
-                <Ionicons name="star" size={22} color="#FFD700" />
-                <Text style={styles.actionBtnText}>Set Main</Text>
-              </TouchableOpacity>
-
-              <TouchableOpacity style={styles.actionBtn} onPress={handleReplacePhoto}>
-                <Ionicons name="swap-horizontal" size={22} color="#FFF" />
-                <Text style={styles.actionBtnText}>Replace</Text>
-              </TouchableOpacity>
-
-              <TouchableOpacity style={styles.actionBtn} onPress={handleDeletePhoto}>
-                <Ionicons name="trash" size={22} color="#FF6B6B" />
-                <Text style={[styles.actionBtnText, { color: '#FF6B6B' }]}>Delete</Text>
-              </TouchableOpacity>
-
-              <TouchableOpacity style={styles.actionBtn} onPress={closePreview}>
-                <Ionicons name="close" size={22} color="#FFF" />
-                <Text style={styles.actionBtnText}>Cancel</Text>
-              </TouchableOpacity>
-            </View>
-
-            {/* Close button */}
-            <TouchableOpacity style={styles.modalCloseBtn} onPress={closePreview}>
-              <Ionicons name="close" size={28} color="#FFF" />
-            </TouchableOpacity>
-          </View>
-        </View>
-      </Modal>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: C.background },
+  centered: { alignItems: 'center', justifyContent: 'center' },
   scrollView: { flex: 1 },
   header: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
@@ -677,14 +302,6 @@ const styles = StyleSheet.create({
     overflow: 'hidden', backgroundColor: C.surface, position: 'relative',
   },
   emptySlot: { alignItems: 'center', justifyContent: 'center', opacity: 0.5 },
-  addPhotoSlot: {
-    alignItems: 'center', justifyContent: 'center',
-    borderWidth: 2, borderColor: C.primary + '40', borderStyle: 'dashed',
-    backgroundColor: C.primary + '08',
-  },
-  addPhotoText: {
-    fontSize: 11, color: C.primary, fontWeight: '600', marginTop: 4,
-  },
   slotImage: { width: '100%', height: '100%' },
 
   // Badges
@@ -694,25 +311,6 @@ const styles = StyleSheet.create({
     alignItems: 'center', justifyContent: 'center',
   },
   orderBadgeText: { fontSize: 13, fontWeight: '700', color: '#FFF' },
-  starBadge: {
-    position: 'absolute', top: 6, left: 6, width: 26, height: 26,
-    borderRadius: 13, backgroundColor: 'rgba(0,0,0,0.6)',
-    alignItems: 'center', justifyContent: 'center',
-  },
-  blurToggleBtn: {
-    position: 'absolute', bottom: 6, right: 6, width: 28, height: 28,
-    borderRadius: 14, backgroundColor: 'rgba(0,0,0,0.6)',
-    alignItems: 'center', justifyContent: 'center', zIndex: 10,
-  },
-
-  // Select button
-  selectPhotosBtn: {
-    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8,
-    backgroundColor: C.primary, borderRadius: 10, paddingVertical: 14, marginTop: 16,
-  },
-  selectPhotosBtnDisabled: { backgroundColor: C.surface },
-  selectPhotosBtnText: { fontSize: 15, fontWeight: '600', color: '#FFF' },
-  selectPhotosBtnTextDisabled: { color: C.textLight },
 
   countText: { fontSize: 13, color: C.textLight, textAlign: 'center', marginTop: 12 },
   countWarning: { color: C.primary, fontWeight: '500' },
@@ -725,41 +323,15 @@ const styles = StyleSheet.create({
   emptyStateTitle: { fontSize: 16, fontWeight: '600', color: C.text, marginTop: 12, marginBottom: 8 },
   emptyStateText: { fontSize: 13, color: C.textLight, textAlign: 'center', paddingHorizontal: 24 },
 
-  // Profile card
-  profileCard: { backgroundColor: C.surface, borderRadius: 12, padding: 16 },
-  mainInfo: {
-    flexDirection: 'row', justifyContent: 'space-between', marginBottom: 16,
-    paddingBottom: 16, borderBottomWidth: 1, borderBottomColor: C.background,
+  // Info card
+  infoCard: { backgroundColor: C.surface, borderRadius: 12, padding: 16 },
+  infoRow: {
+    flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center',
+    paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: C.background,
   },
-  infoItem: { alignItems: 'center', flex: 1 },
-  infoLabel: { fontSize: 11, color: C.textLight, marginBottom: 4 },
-  infoValue: { fontSize: 16, fontWeight: '700', color: C.text },
-  infoChips: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
-  chip: { backgroundColor: C.background, borderRadius: 8, paddingHorizontal: 12, paddingVertical: 8 },
-  chipLabel: { fontSize: 10, color: C.textLight, marginBottom: 2 },
-  chipValue: { fontSize: 13, fontWeight: '600', color: C.text },
-  hobbiesSection: { marginTop: 16 },
-  hobbiesLabel: { fontSize: 11, color: C.textLight, marginBottom: 8 },
-  hobbyTags: { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
-  hobbyTag: { backgroundColor: C.primary + '20', borderRadius: 12, paddingHorizontal: 10, paddingVertical: 4 },
-  hobbyText: { fontSize: 11, color: C.primary, fontWeight: '500' },
-
-  // Intents
-  intentHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 },
-  intentCount: {
-    fontSize: 12, fontWeight: '600', color: C.textLight,
-    backgroundColor: C.surface, paddingHorizontal: 8, paddingVertical: 2, borderRadius: 10,
-  },
-  intentCountValid: { color: '#4CAF50', backgroundColor: 'rgba(76,175,80,0.15)' },
-  intentGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
-  intentChip: {
-    flexDirection: 'row', alignItems: 'center', gap: 6,
-    paddingHorizontal: 12, paddingVertical: 10, borderRadius: 20,
-    backgroundColor: '#2A2A2A', borderWidth: 1.5, borderColor: '#3A3A3A',
-  },
-  intentChipSelected: { backgroundColor: C.primary + '18', borderColor: C.primary },
-  intentText: { fontSize: 13, color: '#CCC', fontWeight: '500' },
-  intentTextSelected: { color: C.primary, fontWeight: '600' },
+  infoRowLast: { borderBottomWidth: 0 },
+  infoLabel: { fontSize: 14, color: C.textLight },
+  infoValue: { fontSize: 14, fontWeight: '600', color: C.text },
 
   // Bottom
   bottomBar: {
@@ -767,35 +339,11 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16, paddingTop: 12, borderTopWidth: 1,
     borderTopColor: C.surface, backgroundColor: C.background,
   },
-  bottomHint: { fontSize: 12, color: C.primary, textAlign: 'center', marginBottom: 8 },
-  continueBtn: {
+  confirmBtn: {
     flexDirection: 'row', backgroundColor: C.primary, borderRadius: 10,
     paddingVertical: 14, alignItems: 'center', justifyContent: 'center', gap: 8,
   },
-  continueBtnDisabled: { backgroundColor: C.surface },
-  continueText: { fontSize: 15, fontWeight: '600', color: '#FFF' },
-  continueTextDisabled: { color: C.textLight },
-
-  // Preview Modal
-  modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.95)' },
-  modalContent: {
-    flex: 1, alignItems: 'center', justifyContent: 'center', padding: 20,
-  },
-  previewImage: {
-    width: screenWidth - 40, height: screenWidth * 1.25, borderRadius: 12,
-  },
-  previewActions: {
-    flexDirection: 'row', justifyContent: 'center', gap: 16, marginTop: 24,
-  },
-  actionBtn: {
-    alignItems: 'center', justifyContent: 'center', padding: 12,
-    backgroundColor: 'rgba(255,255,255,0.1)', borderRadius: 12, minWidth: 70,
-  },
-  actionBtnText: { fontSize: 11, color: '#FFF', marginTop: 4, fontWeight: '500' },
-  modalCloseBtn: {
-    position: 'absolute', top: 50, right: 20,
-    width: 44, height: 44, borderRadius: 22,
-    backgroundColor: 'rgba(255,255,255,0.2)',
-    alignItems: 'center', justifyContent: 'center',
-  },
+  confirmBtnDisabled: { backgroundColor: C.surface },
+  confirmBtnText: { fontSize: 15, fontWeight: '600', color: '#FFF' },
+  confirmBtnTextDisabled: { color: C.textLight },
 });

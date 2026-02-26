@@ -97,6 +97,7 @@ interface PrivateProfileState {
   phase2SetupVersion: number | null;
   blurMyPhoto: boolean;
   phase1PhotoSlots: PhotoSlots9;  // Slot-preserving photos from Phase-1 (9 slots)
+  phase2PhotosConfirmed: boolean; // True after initial photo selection in Step-2
 
   // Actions — wizard navigation
   setCurrentStep: (step: number) => void;
@@ -135,6 +136,7 @@ interface PrivateProfileState {
   setBlurMyPhoto: (blur: boolean) => void;
   importPhase1Data: (data: Phase1ProfileData) => void;
   completeSetup: () => void;
+  setPhase2PhotosConfirmed: (confirmed: boolean) => void;
 }
 
 const initialWizardState = {
@@ -171,6 +173,7 @@ const initialWizardState = {
   phase2SetupVersion: null as number | null,
   blurMyPhoto: true, // Default blur ON
   phase1PhotoSlots: createEmptyPhotoSlots(),
+  phase2PhotosConfirmed: false, // True after Step-2 photo selection
 };
 
 export const usePrivateProfileStore = create<PrivateProfileState>()(
@@ -212,6 +215,8 @@ export const usePrivateProfileStore = create<PrivateProfileState>()(
         ...initialWizardState,
         // PRESERVE permanent flag - onboarding never shows again once completed
         phase2OnboardingCompleted: state.phase2OnboardingCompleted,
+        // Reset photos confirmed flag
+        phase2PhotosConfirmed: false,
         // Also reset legacy profile fields
         profile: {
           username: 'Anonymous_User',
@@ -296,6 +301,7 @@ export const usePrivateProfileStore = create<PrivateProfileState>()(
         phase2OnboardingCompleted: true, // Permanent flag - never shows onboarding again
         phase2SetupVersion: CURRENT_PHASE2_SETUP_VERSION,
       }),
+      setPhase2PhotosConfirmed: (confirmed) => set({ phase2PhotosConfirmed: confirmed }),
     }),
     {
       name: 'private-profile-store',
@@ -332,6 +338,7 @@ export const usePrivateProfileStore = create<PrivateProfileState>()(
         acceptedTermsAt: state.acceptedTermsAt,
         phase2SetupVersion: state.phase2SetupVersion,
         blurMyPhoto: state.blurMyPhoto,
+        phase2PhotosConfirmed: state.phase2PhotosConfirmed,
         // NOTE: phase1PhotoSlots intentionally NOT persisted
         // It's re-imported from onboardingStore each session to avoid stale data
         // Legacy

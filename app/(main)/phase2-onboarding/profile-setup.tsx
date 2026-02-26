@@ -1,25 +1,20 @@
 /**
- * Phase 2 Onboarding - Step 3: Review + Desire
+ * Phase 2 Onboarding - Step 3: Review
  *
  * Layout order (top to bottom):
  * A) Title: "Review your profile"
- * B) Photos + Name + DOB + Looking For (with Edit buttons)
- * C) Desire (new input section - Phase-2 only, NOT prefilled from Phase-1 Bio)
+ * B) Photos + Name + DOB + Looking For + Desire (with Edit buttons)
  *
  * Photos: tap → full-screen preview
- * Edit Photos → navigate to photo-select (Step 2)
- * Edit Looking For → navigate to photo-select (Step 2)
+ * All Edit buttons → navigate to profile-edit (Step 2.5)
  */
-import React, { useState, useRef, useMemo, useCallback } from 'react';
+import React, { useState, useMemo, useCallback } from 'react';
 import {
   View,
   Text,
   StyleSheet,
   ScrollView,
   TouchableOpacity,
-  TextInput,
-  Alert,
-  Keyboard,
   Dimensions,
   Modal,
   Pressable,
@@ -33,18 +28,17 @@ import { PRIVATE_INTENT_CATEGORIES } from '@/lib/privateConstants';
 import {
   usePrivateProfileStore,
   selectCanContinueDesire,
-  PHASE2_DESIRE_MIN_LENGTH,
-  PHASE2_DESIRE_MAX_LENGTH,
+  selectCanContinueIntents,
+  PHASE2_MIN_PHOTOS,
 } from '@/stores/privateProfileStore';
 import { useDemoStore } from '@/stores/demoStore';
 
 const C = INCOGNITO_COLORS;
 const screenWidth = Dimensions.get('window').width;
 
-export default function Phase2DesireReview() {
+export default function Phase2Review() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
-  const desireInputRef = useRef<TextInput>(null);
 
   // Get Phase-1 profile for DOB
   const demoProfiles = useDemoStore((s) => s.demoProfiles);
@@ -63,17 +57,16 @@ export default function Phase2DesireReview() {
   const privateBio = usePrivateProfileStore((s) => s.privateBio);
 
   // Store actions
-  const setPrivateBio = usePrivateProfileStore((s) => s.setPrivateBio);
   const completeSetup = usePrivateProfileStore((s) => s.completeSetup);
 
   // Validation
   const canContinueDesire = usePrivateProfileStore(selectCanContinueDesire);
+  const canContinueIntents = usePrivateProfileStore(selectCanContinueIntents);
 
   // Preview state
   const [previewIndex, setPreviewIndex] = useState<number | null>(null);
 
   // Computed values
-  const desireLength = privateBio.trim().length;
   const photoCount = selectedPhotoUrls.length;
 
   // Format DOB for display
@@ -90,8 +83,8 @@ export default function Phase2DesireReview() {
     intentKeys.includes(cat.key as any)
   );
 
-  // Can complete: desire is valid
-  const canComplete = canContinueDesire;
+  // Can complete: photos + intents + desire all valid
+  const canComplete = photoCount >= PHASE2_MIN_PHOTOS && canContinueIntents && canContinueDesire;
 
   // Photo preview handlers
   const openPreview = useCallback((index: number) => {
@@ -102,60 +95,29 @@ export default function Phase2DesireReview() {
     setPreviewIndex(null);
   }, []);
 
-  // Navigation handlers
-  const handleEditPhotos = useCallback(() => {
-    router.push('/(main)/phase2-onboarding/photo-select' as any);
+  // Navigation handlers - all go to profile-edit (Step 2.5)
+  const handleEditProfile = useCallback(() => {
+    router.push('/(main)/phase2-onboarding/profile-edit' as any);
   }, [router]);
-
-  const handleEditLookingFor = useCallback(() => {
-    // Navigate to dedicated Looking For edit screen
-    router.push('/(main)/phase2-onboarding/looking-for-edit' as any);
-  }, [router]);
-
-  // Focus desire input when tapping the container
-  const handleDesireContainerPress = () => {
-    desireInputRef.current?.focus();
-  };
 
   // Handle completion
-  const handleComplete = () => {
-    if (!canComplete) {
-      if (desireLength < PHASE2_DESIRE_MIN_LENGTH) {
-        Alert.alert('Desire Required', `Please write at least ${PHASE2_DESIRE_MIN_LENGTH} characters about what you desire.`);
-      } else if (desireLength > PHASE2_DESIRE_MAX_LENGTH) {
-        Alert.alert('Too Long', `Please keep your desire under ${PHASE2_DESIRE_MAX_LENGTH} characters.`);
-      }
-      return;
-    }
-
-    // Dismiss keyboard before navigating
-    Keyboard.dismiss();
+  const handleComplete = useCallback(() => {
+    if (!canComplete) return;
 
     // Call completeSetup - this sets isSetupComplete + phase2OnboardingCompleted permanently
     completeSetup();
 
     if (__DEV__) {
-      console.log('[Phase2DesireReview] Setup complete:', {
+      console.log('[Phase2Review] Setup complete:', {
         intentCount: intentKeys.length,
-        desireLength,
+        desireLength: privateBio.trim().length,
         photoCount,
       });
     }
 
     // Navigate to Phase-2 private tabs
     router.replace('/(main)/(private)/(tabs)' as any);
-  };
-
-  // Get validation hint text
-  const getDesireHint = () => {
-    if (desireLength < PHASE2_DESIRE_MIN_LENGTH) {
-      return `Write ${PHASE2_DESIRE_MIN_LENGTH - desireLength} more character${PHASE2_DESIRE_MIN_LENGTH - desireLength > 1 ? 's' : ''}`;
-    }
-    if (desireLength > PHASE2_DESIRE_MAX_LENGTH) {
-      return `${desireLength - PHASE2_DESIRE_MAX_LENGTH} characters over limit`;
-    }
-    return `${desireLength}/${PHASE2_DESIRE_MAX_LENGTH}`;
-  };
+  }, [canComplete, completeSetup, intentKeys.length, privateBio, photoCount, router]);
 
   return (
     <View style={[styles.container, { paddingTop: insets.top }]}>
@@ -188,7 +150,7 @@ export default function Phase2DesireReview() {
         <View style={styles.section}>
           <View style={styles.sectionHeader}>
             <Text style={styles.sectionTitle}>Photos</Text>
-            <TouchableOpacity style={styles.editBtn} onPress={handleEditPhotos}>
+            <TouchableOpacity style={styles.editBtn} onPress={handleEditProfile}>
               <Ionicons name="pencil" size={14} color={C.primary} />
               <Text style={styles.editBtnText}>Edit</Text>
             </TouchableOpacity>
@@ -233,7 +195,7 @@ export default function Phase2DesireReview() {
         <View style={styles.section}>
           <View style={styles.sectionHeader}>
             <Text style={styles.sectionTitle}>Looking For</Text>
-            <TouchableOpacity style={styles.editBtn} onPress={handleEditLookingFor}>
+            <TouchableOpacity style={styles.editBtn} onPress={handleEditProfile}>
               <Ionicons name="pencil" size={14} color={C.primary} />
               <Text style={styles.editBtnText}>Edit</Text>
             </TouchableOpacity>
@@ -253,41 +215,23 @@ export default function Phase2DesireReview() {
           )}
         </View>
 
-        {/* === SECTION C: Desire (Phase-2 only, NOT from Phase-1 Bio) === */}
+        {/* === SECTION C: Desire (read-only display) === */}
         <View style={styles.section}>
-          <Text style={styles.sectionTitle}>Desire</Text>
-          <Text style={styles.guidanceLine}>
-            Share what you're looking for in a private connection.
-          </Text>
-          <TouchableOpacity
-            style={styles.desireContainer}
-            onPress={handleDesireContainerPress}
-            activeOpacity={1}
-          >
-            <TextInput
-              ref={desireInputRef}
-              style={styles.desireInput}
-              value={privateBio}
-              onChangeText={setPrivateBio}
-              maxLength={PHASE2_DESIRE_MAX_LENGTH + 50}
-              multiline
-              placeholder="Describe what you desire..."
-              placeholderTextColor={C.textLight}
-              textAlignVertical="top"
-            />
-          </TouchableOpacity>
-          <View style={styles.desireFooter}>
-            <Text
-              style={[
-                styles.charCount,
-                desireLength < PHASE2_DESIRE_MIN_LENGTH && styles.charCountWarning,
-                desireLength > PHASE2_DESIRE_MAX_LENGTH && styles.charCountError,
-                desireLength >= PHASE2_DESIRE_MIN_LENGTH && desireLength <= PHASE2_DESIRE_MAX_LENGTH && styles.charCountValid,
-              ]}
-            >
-              {getDesireHint()}
-            </Text>
+          <View style={styles.sectionHeader}>
+            <Text style={styles.sectionTitle}>Desire</Text>
+            <TouchableOpacity style={styles.editBtn} onPress={handleEditProfile}>
+              <Ionicons name="pencil" size={14} color={C.primary} />
+              <Text style={styles.editBtnText}>Edit</Text>
+            </TouchableOpacity>
           </View>
+
+          {privateBio.trim().length > 0 ? (
+            <View style={styles.desireDisplay}>
+              <Text style={styles.desireText}>{privateBio}</Text>
+            </View>
+          ) : (
+            <Text style={styles.emptyText}>No desire written yet</Text>
+          )}
         </View>
 
         {/* Info Note */}
@@ -306,11 +250,13 @@ export default function Phase2DesireReview() {
       <View style={[styles.bottomBar, { paddingBottom: Math.max(insets.bottom, 16) + 20 }]}>
         {!canComplete && (
           <Text style={styles.bottomHint}>
-            {desireLength < PHASE2_DESIRE_MIN_LENGTH
-              ? `Write ${PHASE2_DESIRE_MIN_LENGTH - desireLength} more character${PHASE2_DESIRE_MIN_LENGTH - desireLength > 1 ? 's' : ''} in Desire`
-              : desireLength > PHASE2_DESIRE_MAX_LENGTH
-              ? 'Desire text is too long'
-              : ''}
+            {photoCount < PHASE2_MIN_PHOTOS
+              ? 'Add more photos'
+              : !canContinueIntents
+              ? 'Select intents'
+              : 'Write your desire'}
+            {' - '}
+            <Text style={styles.bottomHintLink} onPress={handleEditProfile}>Edit Profile</Text>
           </Text>
         )}
         <TouchableOpacity
@@ -495,39 +441,16 @@ const styles = StyleSheet.create({
     fontStyle: 'italic',
   },
 
-  // Desire Input
-  desireContainer: {
+  // Desire Display (read-only)
+  desireDisplay: {
     backgroundColor: C.surface,
     borderRadius: 12,
-    minHeight: 140,
-  },
-  desireInput: {
     padding: 14,
+  },
+  desireText: {
     fontSize: 14,
     color: C.text,
-    minHeight: 140,
-    textAlignVertical: 'top',
     lineHeight: 22,
-  },
-  desireFooter: {
-    flexDirection: 'row',
-    justifyContent: 'flex-end',
-    marginTop: 8,
-  },
-  charCount: {
-    fontSize: 12,
-    color: C.textLight,
-  },
-  charCountWarning: {
-    color: C.primary,
-    fontWeight: '500',
-  },
-  charCountError: {
-    color: '#FF6B6B',
-    fontWeight: '600',
-  },
-  charCountValid: {
-    color: '#4CAF50',
   },
 
   // Info Note
@@ -560,9 +483,14 @@ const styles = StyleSheet.create({
   },
   bottomHint: {
     fontSize: 12,
-    color: C.primary,
+    color: C.textLight,
     textAlign: 'center',
     marginBottom: 10,
+  },
+  bottomHintLink: {
+    color: C.primary,
+    fontWeight: '600',
+    textDecorationLine: 'underline',
   },
   completeBtn: {
     flexDirection: 'row',
