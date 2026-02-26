@@ -8,13 +8,15 @@ import {
   StyleSheet,
   KeyboardAvoidingView,
   Platform,
-  Alert,
   NativeSyntheticEvent,
   NativeScrollEvent,
-  InteractionManager,
+  Keyboard,
+  LayoutChangeEvent,
 } from 'react-native';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { useRouter, useLocalSearchParams } from 'expo-router';
+import { safePush } from '@/lib/safeRouter';
 import { COLORS } from '@/lib/constants';
 import { useConfessionStore } from '@/stores/confessionStore';
 import { useAuthStore } from '@/stores/authStore';
@@ -59,6 +61,7 @@ function getRevealStatusText(
 
 export default function ConfessionChatScreen() {
   const router = useRouter();
+  const insets = useSafeAreaInsets();
   const { chatId } = useLocalSearchParams<{ chatId: string }>();
   const { userId } = useAuthStore();
   const currentUserId = userId || 'demo_user_1';
@@ -71,17 +74,18 @@ export default function ConfessionChatScreen() {
   const cleanupExpiredChats = useConfessionStore((s) => s.cleanupExpiredChats);
 
   const chat = chats.find((c) => c.id === chatId) || null;
-  const confessionText = chat
-    ? confessions.find((c) => c.id === chat.confessionId)?.text
-    : undefined;
+  const confession = chat ? confessions.find((c) => c.id === chat.confessionId) : null;
+  const confessionText = confession?.text;
 
-  // Navigation guard: prevent opening expired chats
+  // Navigation guard: prevent opening expired chats or chats for expired confessions
+  const EXPIRY_MS = 24 * 60 * 60 * 1000;
   const [guardTriggered, setGuardTriggered] = useState(false);
   useEffect(() => {
     if (guardTriggered || !chatId) return;
 
-    // Check if chat doesn't exist or is expired
     const now = Date.now();
+
+    // Check if chat doesn't exist
     if (!chat) {
       setGuardTriggered(true);
       logDebugEvent('CHAT_EXPIRED', `Confession chat not found: ${chatId}`);
@@ -89,13 +93,27 @@ export default function ConfessionChatScreen() {
       return;
     }
 
+    // Check if chat is expired
     if (now > chat.expiresAt) {
       setGuardTriggered(true);
       logDebugEvent('CHAT_EXPIRED', `Confession chat expired: ${chatId}`);
       cleanupExpiredChats([chat.id]);
       router.back();
+      return;
     }
-  }, [guardTriggered, chatId, chat, cleanupExpiredChats, router]);
+
+    // Check if underlying confession is expired
+    const confession = confessions.find((c) => c.id === chat.confessionId);
+    if (confession) {
+      const confessionExpiresAt = confession.expiresAt ?? (confession.createdAt + EXPIRY_MS);
+      if (now > confessionExpiresAt) {
+        setGuardTriggered(true);
+        logDebugEvent('CHAT_EXPIRED', `Confession for chat expired: ${chat.confessionId}`);
+        cleanupExpiredChats([chat.id]);
+        router.back();
+      }
+    }
+  }, [guardTriggered, chatId, chat, confessions, cleanupExpiredChats, router]);
 
   const [text, setText] = useState('');
   const listRef = useRef<FlatList>(null);
@@ -106,14 +124,27 @@ export default function ConfessionChatScreen() {
   const prevMessageCount = useRef(0);
   const hasInitialScrolled = useRef(false);
 
-  // Scroll to bottom helper with platform-specific timing
+  // Keyboard visibility and composer height for proper layout
+  const [keyboardVisible, setKeyboardVisible] = useState(false);
+  const [composerH, setComposerH] = useState(0);
+
+  useEffect(() => {
+    const showSub = Keyboard.addListener('keyboardDidShow', () => setKeyboardVisible(true));
+    const hideSub = Keyboard.addListener('keyboardDidHide', () => setKeyboardVisible(false));
+    return () => {
+      showSub.remove();
+      hideSub.remove();
+    };
+  }, []);
+
+  // Footer height for FlatList (exact spacing above composer)
+  const footerH = composerH + (keyboardVisible ? 0 : insets.bottom) + 8;
+
+  // Scroll to bottom helper
   const scrollToBottom = useCallback((animated = true) => {
-    const run = () => listRef.current?.scrollToEnd({ animated });
-    if (Platform.OS === 'android') {
-      InteractionManager.runAfterInteractions(() => setTimeout(run, 120));
-    } else {
-      requestAnimationFrame(run);
-    }
+    requestAnimationFrame(() => {
+      listRef.current?.scrollToEnd({ animated });
+    });
   }, []);
 
   // Track scroll position to determine if user is near bottom
@@ -123,22 +154,32 @@ export default function ConfessionChatScreen() {
     isNearBottomRef.current = distanceFromBottom < SCROLL_THRESHOLD;
   }, []);
 
-  // Initial scroll on first load
+  // Initial scroll only after composer is measured
   useEffect(() => {
-    if (!hasInitialScrolled.current && chat?.messages.length) {
+    if (!hasInitialScrolled.current && composerH > 0 && chat?.messages.length) {
+      requestAnimationFrame(() => {
+        listRef.current?.scrollToEnd({ animated: false });
+      });
       hasInitialScrolled.current = true;
-      scrollToBottom(false);
+      prevMessageCount.current = chat.messages.length;
     }
-  }, [chat?.messages.length, scrollToBottom]);
+  }, [composerH, chat?.messages.length]);
 
   // Scroll to bottom when message count increases (only if user is near bottom)
   useEffect(() => {
     const currentCount = chat?.messages.length ?? 0;
-    if (currentCount > prevMessageCount.current && isNearBottomRef.current) {
+    if (hasInitialScrolled.current && currentCount > prevMessageCount.current && isNearBottomRef.current) {
       scrollToBottom(true);
     }
     prevMessageCount.current = currentCount;
   }, [chat?.messages.length, scrollToBottom]);
+
+  // Auto-scroll when keyboard opens
+  useEffect(() => {
+    if (keyboardVisible && chat?.messages.length) {
+      scrollToBottom(true);
+    }
+  }, [keyboardVisible, chat?.messages.length, scrollToBottom]);
 
   const handleSend = useCallback(() => {
     if (!text.trim() || !chat) return;
@@ -166,16 +207,25 @@ export default function ConfessionChatScreen() {
     declineMutualReveal(chat.id, currentUserId);
   }, [chat, currentUserId, declineMutualReveal]);
 
-  const handleMenu = useCallback(() => {
-    Alert.alert('Options', undefined, [
-      {
-        text: 'Block & Report',
-        style: 'destructive',
-        onPress: () => router.back(),
+  // Navigate to other person's profile during active reveal
+  const handleViewRevealProfile = useCallback(() => {
+    if (!chat || !confession) return;
+    // Determine who the other person is
+    const isTagged = confession.targetUserId === currentUserId;
+    const otherUserId = isTagged ? confession.userId : confession.targetUserId;
+    if (!otherUserId) return;
+
+    // Navigate to profile with confess_reveal mode
+    safePush(router, {
+      pathname: '/(main)/profile/[id]',
+      params: {
+        id: otherUserId,
+        mode: 'confess_reveal',
+        chatId: chat.id,
+        confessionId: confession.id,
       },
-      { text: 'Cancel', style: 'cancel' },
-    ]);
-  }, [router]);
+    } as any, 'confessionChat->revealProfile');
+  }, [chat, confession, currentUserId, router]);
 
   if (!chat) {
     return (
@@ -191,23 +241,44 @@ export default function ConfessionChatScreen() {
   const revealStatus = chat.mutualRevealStatus || 'none';
   const isRevealed = revealStatus === 'both_agreed';
   const isDeclined = revealStatus === 'declined';
-  const iAmInitiator = chat.initiatorId === currentUserId;
+
+  // Expiry check: hide reveal CTAs when chat is expired (expiry overrides pending reveal)
+  const isChatExpired = Date.now() > chat.expiresAt;
+
+  // Per spec: Only the TAGGED person can request reveal
+  // Confessor (author) can only accept/decline after tagged person requests
+  const isTaggedPerson = confession?.targetUserId === currentUserId;
+  const isConfessor = confession?.userId === currentUserId;
+
+  // Track reveal agreement states based on chat role (initiator/responder in chat)
+  const iAmChatInitiator = chat.initiatorId === currentUserId;
   const iHaveAgreed =
-    (iAmInitiator && (revealStatus === 'initiator_agreed' || revealStatus === 'both_agreed')) ||
-    (!iAmInitiator && (revealStatus === 'responder_agreed' || revealStatus === 'both_agreed'));
-  const otherRequested =
-    (!iAmInitiator && revealStatus === 'initiator_agreed') ||
-    (iAmInitiator && revealStatus === 'responder_agreed');
-  const showRevealActions = !isRevealed && !isDeclined && !iHaveAgreed;
+    (iAmChatInitiator && (revealStatus === 'initiator_agreed' || revealStatus === 'both_agreed')) ||
+    (!iAmChatInitiator && (revealStatus === 'responder_agreed' || revealStatus === 'both_agreed'));
+
+  // Tagged person requested reveal (regardless of chat role)
+  const taggedPersonRequested = revealStatus === 'initiator_agreed' || revealStatus === 'responder_agreed';
+
+  // Show accept/decline to confessor only when tagged person has requested (and chat not expired)
+  const showConfessorPrompt = isConfessor && taggedPersonRequested && !iHaveAgreed && !isDeclined && !isChatExpired;
+
+  // Show request button only to tagged person who hasn't agreed yet (and chat not expired)
+  const showTaggedRequestButton = isTaggedPerson && revealStatus === 'none' && !isDeclined && !isChatExpired;
+
+  // Show "waiting" status to tagged person after they requested (and chat not expired)
+  const showTaggedWaiting = isTaggedPerson && taggedPersonRequested && !isRevealed && !isDeclined && iHaveAgreed && !isChatExpired;
+
   const statusText = getRevealStatusText(revealStatus, currentUserId, chat.initiatorId, chat.declinedBy);
 
   return (
-    <KeyboardAvoidingView
-      style={styles.container}
-      behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-    >
-      {/* Header */}
-      <View style={styles.header}>
+    <SafeAreaView style={styles.container} edges={['top']}>
+      <KeyboardAvoidingView
+        style={{ flex: 1 }}
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 0}
+      >
+        {/* Header */}
+        <View style={styles.header}>
         <TouchableOpacity onPress={() => router.back()} hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}>
           <Ionicons name="arrow-back" size={24} color={COLORS.text} />
         </TouchableOpacity>
@@ -217,9 +288,7 @@ export default function ConfessionChatScreen() {
           </Text>
           <Text style={styles.headerSubtitle}>{formatTimeLeft(chat.expiresAt)}</Text>
         </View>
-        <TouchableOpacity onPress={handleMenu} hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}>
-          <Ionicons name="ellipsis-vertical" size={20} color={COLORS.text} />
-        </TouchableOpacity>
+        <View style={{ width: 24 }} />
       </View>
 
       {/* Anonymous Chat Tag */}
@@ -256,83 +325,114 @@ export default function ConfessionChatScreen() {
         </View>
       )}
 
-      {/* Reveal Action Buttons */}
-      {showRevealActions && (
+      {/* View Profile Button - Active when mutual reveal is complete */}
+      {isRevealed && (
         <View style={styles.revealActions}>
-          {otherRequested ? (
-            <>
-              <Text style={styles.revealPrompt}>The other person wants to reveal identities. Do you agree?</Text>
-              <View style={styles.revealButtonRow}>
-                <TouchableOpacity style={styles.revealAgreeButton} onPress={handleAgreeReveal}>
-                  <Ionicons name="checkmark" size={16} color={COLORS.white} />
-                  <Text style={styles.revealAgreeText}>Agree to Reveal</Text>
-                </TouchableOpacity>
-                <TouchableOpacity style={styles.revealDeclineButton} onPress={handleDeclineReveal}>
-                  <Ionicons name="close" size={16} color={COLORS.text} />
-                  <Text style={styles.revealDeclineText}>Decline</Text>
-                </TouchableOpacity>
-              </View>
-            </>
-          ) : (
-            <TouchableOpacity style={styles.revealRequestButton} onPress={handleAgreeReveal}>
-              <Ionicons name="eye" size={16} color={COLORS.primary} />
-              <Text style={styles.revealRequestText}>Request Mutual Reveal</Text>
-            </TouchableOpacity>
-          )}
+          <TouchableOpacity style={styles.viewRevealProfileButton} onPress={handleViewRevealProfile}>
+            <Ionicons name="person-circle-outline" size={18} color={COLORS.white} />
+            <Text style={styles.viewRevealProfileText}>View Their Profile</Text>
+          </TouchableOpacity>
+          <Text style={styles.viewRevealHint}>Like to connect in Messages • Skip to keep chatting anonymously</Text>
         </View>
       )}
 
-      {/* Messages */}
-      <FlatList
-        ref={listRef}
-        data={chat.messages}
-        keyExtractor={(item) => item.id}
-        renderItem={({ item, index }) => {
-          const isMe = item.senderId === currentUserId;
-          const prevMessage = index > 0 ? chat.messages[index - 1] : undefined;
-          const showTime = shouldShowTimestamp(item.createdAt, prevMessage?.createdAt);
-          return (
-            <View style={[styles.bubble, isMe ? styles.bubbleMe : styles.bubbleThem]}>
-              <Text style={[styles.bubbleSender, isMe && styles.bubbleSenderMe]}>{isMe ? 'You' : 'Anon'}</Text>
-              <Text style={[styles.bubbleText, isMe && styles.bubbleTextMe]}>{item.text}</Text>
-              {showTime && (
-                <Text style={[styles.bubbleTime, isMe && styles.bubbleTimeMe]}>
-                  {formatTime(item.createdAt)}
-                </Text>
-              )}
-            </View>
-          );
-        }}
-        contentContainerStyle={styles.messageList}
-        showsVerticalScrollIndicator={false}
-        onScroll={handleScroll}
-        scrollEventThrottle={16}
-      />
+      {/* Reveal Action Buttons */}
+      {/* Tagged person: show request button (only they can initiate) */}
+      {showTaggedRequestButton && (
+        <View style={styles.revealActions}>
+          <TouchableOpacity style={styles.revealRequestButton} onPress={handleAgreeReveal}>
+            <Ionicons name="eye" size={16} color={COLORS.primary} />
+            <Text style={styles.revealRequestText}>Request Mutual Reveal</Text>
+          </TouchableOpacity>
+        </View>
+      )}
 
-      {/* Input */}
-      <View style={styles.inputBar}>
-        <TextInput
-          style={styles.input}
-          placeholder="Type a message..."
-          placeholderTextColor={COLORS.textMuted}
-          value={text}
-          onChangeText={setText}
-          maxLength={500}
-          multiline
+      {/* Tagged person: show waiting status after they requested */}
+      {showTaggedWaiting && (
+        <View style={styles.revealActions}>
+          <View style={styles.revealWaitingRow}>
+            <Ionicons name="time-outline" size={16} color={COLORS.textMuted} />
+            <Text style={styles.revealWaitingText}>Waiting for them to accept reveal...</Text>
+          </View>
+        </View>
+      )}
+
+      {/* Confessor: show accept/decline prompt when tagged person has requested */}
+      {showConfessorPrompt && (
+        <View style={styles.revealActions}>
+          <Text style={styles.revealPrompt}>The person you confessed to wants to reveal identities. Accept?</Text>
+          <View style={styles.revealButtonRow}>
+            <TouchableOpacity style={styles.revealAgreeButton} onPress={handleAgreeReveal}>
+              <Ionicons name="checkmark" size={16} color={COLORS.white} />
+              <Text style={styles.revealAgreeText}>Accept Reveal</Text>
+            </TouchableOpacity>
+            <TouchableOpacity style={styles.revealDeclineButton} onPress={handleDeclineReveal}>
+              <Ionicons name="close" size={16} color={COLORS.text} />
+              <Text style={styles.revealDeclineText}>Decline</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      )}
+
+        {/* Messages */}
+        <FlatList
+          ref={listRef}
+          data={chat.messages}
+          keyExtractor={(item) => item.id}
+          keyboardShouldPersistTaps="handled"
+          renderItem={({ item }) => {
+            const isMe = item.senderId === currentUserId;
+            // Simple status: own messages shown as "seen" (blue ticks) for demo
+            const ticks = isMe ? '✓✓' : '';
+            const tickColor = '#34B7F1'; // WhatsApp blue for seen
+            return (
+              <View style={[styles.bubble, isMe ? styles.bubbleMe : styles.bubbleThem]}>
+                {!isMe && <Text style={styles.bubbleSender}>Anon</Text>}
+                <Text style={[styles.bubbleText, isMe && styles.bubbleTextMe]}>{item.text}</Text>
+                <View style={styles.bubbleMeta}>
+                  <Text style={[styles.bubbleTime, isMe && styles.bubbleTimeMe]}>
+                    {formatTime(item.createdAt)}
+                  </Text>
+                  {isMe && <Text style={[styles.bubbleTicks, { color: tickColor }]}>{ticks}</Text>}
+                </View>
+              </View>
+            );
+          }}
+          ListFooterComponent={<View style={{ height: footerH }} />}
+          contentContainerStyle={styles.messageList}
+          showsVerticalScrollIndicator={false}
+          onScroll={handleScroll}
+          scrollEventThrottle={16}
         />
-        <TouchableOpacity
-          style={[styles.sendButton, !text.trim() && styles.sendButtonDisabled]}
-          onPress={handleSend}
-          disabled={!text.trim()}
+
+        {/* Input */}
+        <View
+          style={[styles.inputBar, { paddingBottom: keyboardVisible ? 10 : Math.max(insets.bottom, 10) }]}
+          onLayout={(e) => setComposerH(e.nativeEvent.layout.height)}
         >
-          <Ionicons
-            name="send"
-            size={18}
-            color={text.trim() ? COLORS.white : COLORS.textMuted}
+          <TextInput
+            style={styles.input}
+            placeholder="Type a message..."
+            placeholderTextColor={COLORS.textMuted}
+            value={text}
+            onChangeText={setText}
+            maxLength={500}
+            multiline
           />
-        </TouchableOpacity>
-      </View>
-    </KeyboardAvoidingView>
+          <TouchableOpacity
+            style={[styles.sendButton, !text.trim() && styles.sendButtonDisabled]}
+            onPress={handleSend}
+            disabled={!text.trim()}
+          >
+            <Ionicons
+              name="send"
+              size={18}
+              color={text.trim() ? COLORS.white : COLORS.textMuted}
+            />
+          </TouchableOpacity>
+        </View>
+      </KeyboardAvoidingView>
+    </SafeAreaView>
   );
 }
 
@@ -362,8 +462,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between',
     paddingHorizontal: 16,
-    paddingTop: Platform.OS === 'ios' ? 56 : 16,
-    paddingBottom: 12,
+    paddingVertical: 12,
     backgroundColor: COLORS.white,
     borderBottomWidth: StyleSheet.hairlineWidth,
     borderBottomColor: COLORS.border,
@@ -509,15 +608,50 @@ const styles = StyleSheet.create({
     fontWeight: '700',
     color: COLORS.primary,
   },
+  revealWaitingRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    paddingVertical: 10,
+  },
+  revealWaitingText: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: COLORS.textMuted,
+  },
+  viewRevealProfileButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    paddingVertical: 12,
+    paddingHorizontal: 20,
+    borderRadius: 12,
+    backgroundColor: COLORS.primary,
+  },
+  viewRevealProfileText: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: COLORS.white,
+  },
+  viewRevealHint: {
+    fontSize: 11,
+    color: COLORS.textMuted,
+    textAlign: 'center',
+    marginTop: 8,
+  },
   messageList: {
-    padding: 16,
-    paddingBottom: 8,
+    paddingHorizontal: 10,
+    paddingTop: 8,
+    paddingBottom: 0,
   },
   bubble: {
-    maxWidth: '78%',
-    padding: 12,
-    borderRadius: 16,
-    marginBottom: 10,
+    maxWidth: '80%',
+    paddingVertical: 6,
+    paddingHorizontal: 10,
+    borderRadius: 12,
+    marginBottom: 3,
   },
   bubbleMe: {
     alignSelf: 'flex-end',
@@ -533,35 +667,40 @@ const styles = StyleSheet.create({
     fontSize: 10,
     fontWeight: '600',
     color: COLORS.textMuted,
-    marginBottom: 4,
-  },
-  bubbleSenderMe: {
-    color: 'rgba(255,255,255,0.7)',
+    marginBottom: 2,
   },
   bubbleText: {
-    fontSize: 15,
-    lineHeight: 20,
+    fontSize: 14,
+    lineHeight: 18,
     color: COLORS.text,
   },
   bubbleTextMe: {
     color: COLORS.white,
   },
+  bubbleMeta: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'flex-end',
+    marginTop: 2,
+    gap: 3,
+  },
   bubbleTime: {
     fontSize: 10,
     color: COLORS.textMuted,
-    marginTop: 4,
-    alignSelf: 'flex-end',
   },
   bubbleTimeMe: {
-    color: 'rgba(255,255,255,0.7)',
+    color: 'rgba(255,255,255,0.6)',
+  },
+  bubbleTicks: {
+    fontSize: 11,
+    fontWeight: '600',
   },
   inputBar: {
     flexDirection: 'row',
     alignItems: 'flex-end',
     backgroundColor: COLORS.white,
     paddingHorizontal: 12,
-    paddingVertical: 10,
-    paddingBottom: Platform.OS === 'ios' ? 30 : 10,
+    paddingTop: 10,
     borderTopWidth: StyleSheet.hairlineWidth,
     borderTopColor: COLORS.border,
     gap: 8,

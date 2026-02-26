@@ -113,8 +113,8 @@ export function getConfessionPostState(
     return 'REMOVED';
   }
 
-  // Check if expired (expiresAt exists and passed)
-  const expiresAt = confession.createdAt + TWENTY_FOUR_HOURS_MS;
+  // Check if expired (use expiresAt field if exists, else fallback to createdAt + 24h)
+  const expiresAt = confession.expiresAt ?? (confession.createdAt + TWENTY_FOUR_HOURS_MS);
   if (now > expiresAt) {
     return 'EXPIRED';
   }
@@ -235,8 +235,9 @@ export function processConfessionsIntegrity(
   for (const [confessionId, conversationId] of Object.entries(confessionThreads)) {
     // Find the linked confession to get its expiry
     const linkedConfession = confessions.find((c) => c.id === confessionId);
+    // Prefer expiresAt field; fallback to createdAt + 24h for backward compat
     const confessionExpiresAt = linkedConfession
-      ? linkedConfession.createdAt + TWENTY_FOUR_HOURS_MS
+      ? (linkedConfession.expiresAt ?? linkedConfession.createdAt + TWENTY_FOUR_HOURS_MS)
       : undefined;
 
     const isExpired = isConfessionThreadExpired(

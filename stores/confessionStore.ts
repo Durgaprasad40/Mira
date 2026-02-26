@@ -68,6 +68,7 @@ interface ConfessionThreads {
 // Rate limiting constants
 const CONFESSION_RATE_LIMIT = 5; // Max confessions per 24 hours
 const RATE_LIMIT_WINDOW_MS = 24 * 60 * 60 * 1000; // 24 hours in ms
+const CONFESSION_EXPIRY_MS = 24 * 60 * 60 * 1000; // 24 hours in ms
 
 interface ConfessionState {
   confessions: Confession[];
@@ -131,6 +132,16 @@ interface ConfessionState {
   /** Track connected confessions */
   connectedConfessionIds: string[];
 
+  /** Track skip actions during reveal (chatId -> [userIds who skipped]) */
+  revealSkippedChats: Record<string, string[]>;
+
+  /** Mark that a user skipped during active reveal (hides buttons, keeps profile viewable) */
+  markRevealSkipped: (chatId: string, userId: string) => void;
+  /** Check if user has skipped a reveal */
+  hasSkippedReveal: (chatId: string, userId: string) => boolean;
+  /** Create a permanent match from confession reveal (Like action) */
+  createRevealMatch: (confessionId: string, chatId: string, fromUserId: string, toUserId: string) => void;
+
   // Rate limiting
   /** Check if user can post a new confession (rate limit check) */
   canPostConfession: () => boolean;
@@ -144,6 +155,11 @@ interface ConfessionState {
   blockAuthor: (authorId: string) => void;
   /** Check if an author is blocked */
   isAuthorBlocked: (authorId: string) => boolean;
+
+  /** Purge expired confessions (24h) - removes from public feeds, deletes replies/chats */
+  purgeExpiredNow: (currentUserId: string) => void;
+  /** Get expiry time for a confession */
+  getExpiresAt: (confession: Confession) => number;
 }
 
 function computeTimedRevealAt(option: TimedRevealOption): number | null {
@@ -167,10 +183,11 @@ export const useConfessionStore = create<ConfessionState>()(
       seenTaggedConfessionIds: [],
       connectedConfessionIds: [],
       confessionTimestamps: [],
+      revealSkippedChats: {},
 
       seedConfessions: () => {
         if (get().seeded) {
-          // Migrate persisted confessions: fix old reaction keys + backfill replyPreviews
+          // Migrate persisted confessions: fix old reaction keys + backfill replyPreviews + expiresAt
           const current = get().confessions;
           const migrated = current.map((c) => {
             let updated = migrateConfessionReactions(c);
@@ -189,6 +206,13 @@ export const useConfessionStore = create<ConfessionState>()(
                 };
               }
             }
+            // Backfill expiresAt if missing
+            if (!updated.expiresAt) {
+              updated = {
+                ...updated,
+                expiresAt: updated.createdAt + CONFESSION_EXPIRY_MS,
+              };
+            }
             return updated;
           });
           const changed = migrated.some((c, i) => c !== current[i]);
@@ -197,7 +221,7 @@ export const useConfessionStore = create<ConfessionState>()(
           }
           return;
         }
-        // Backfill revealPolicy, replyPreviews, and mutualRevealStatus on demo data
+        // Backfill revealPolicy, replyPreviews, expiresAt, and mutualRevealStatus on demo data
         const confessions = DEMO_CONFESSIONS.map((c) => {
           const replies = DEMO_CONFESSION_REPLIES[c.id] || [];
           const replyPreviews = replies.slice(0, 2).map((r) => ({
@@ -210,6 +234,7 @@ export const useConfessionStore = create<ConfessionState>()(
             ...c,
             replyPreviews,
             revealPolicy: c.revealPolicy || ('never' as const),
+            expiresAt: c.expiresAt || (c.createdAt + CONFESSION_EXPIRY_MS),
           });
         });
         const chats = DEMO_CONFESSION_CHATS.map((ch) => ({
@@ -472,6 +497,14 @@ export const useConfessionStore = create<ConfessionState>()(
 
       // ── Mutual Reveal ──
       agreeMutualReveal: (chatId, userId) => {
+        // Guard: no-op if chat is expired (expiry overrides pending reveal)
+        const now = Date.now();
+        const targetChat = get().chats.find((c) => c.id === chatId);
+        if (!targetChat || now > targetChat.expiresAt) {
+          if (__DEV__) console.log('[CONFESS] agreeMutualReveal: skipped (chat expired or not found)');
+          return;
+        }
+
         set((state) => ({
           chats: state.chats.map((ch) => {
             if (ch.id !== chatId) return ch;
@@ -507,6 +540,14 @@ export const useConfessionStore = create<ConfessionState>()(
       },
 
       declineMutualReveal: (chatId, userId) => {
+        // Guard: no-op if chat is expired (expiry overrides pending reveal)
+        const now = Date.now();
+        const targetChat = get().chats.find((c) => c.id === chatId);
+        if (!targetChat || now > targetChat.expiresAt) {
+          if (__DEV__) console.log('[CONFESS] declineMutualReveal: skipped (chat expired or not found)');
+          return;
+        }
+
         set((state) => ({
           chats: state.chats.map((ch) =>
             ch.id === chatId
@@ -733,6 +774,102 @@ export const useConfessionStore = create<ConfessionState>()(
         return true;
       },
 
+      // ── Reveal Actions (Like/Skip during active mutual reveal) ──
+
+      markRevealSkipped: (chatId, userId) => {
+        set((state) => {
+          const existing = state.revealSkippedChats[chatId] || [];
+          if (existing.includes(userId)) return state; // Already skipped
+          return {
+            revealSkippedChats: {
+              ...state.revealSkippedChats,
+              [chatId]: [...existing, userId],
+            },
+          };
+        });
+        if (__DEV__) console.log('[CONFESS] markRevealSkipped:', { chatId, userId });
+      },
+
+      hasSkippedReveal: (chatId, userId) => {
+        const skipped = get().revealSkippedChats[chatId] || [];
+        return skipped.includes(userId);
+      },
+
+      createRevealMatch: (confessionId, chatId, fromUserId, toUserId) => {
+        const state = get();
+        const confession = state.confessions.find((c) => c.id === confessionId);
+        if (!confession) return;
+
+        const dmStore = useDemoDmStore.getState();
+        const demoStore = useDemoStore.getState();
+        const now = Date.now();
+
+        // Determine the other user's display name
+        // If fromUserId is the tagged person, toUserId is the confessor
+        const isFromTagged = confession.targetUserId === fromUserId;
+        const otherUserId = isFromTagged ? confession.userId : confession.targetUserId;
+        const otherUserName = isFromTagged
+          ? (confession.isAnonymous ? 'Confessor' : (confession.authorName || 'Someone'))
+          : (confession.targetUserName || 'Someone');
+
+        // Create a PERMANENT conversation (no expiry)
+        const convoId = `demo_convo_reveal_match_${confessionId}_${fromUserId}`;
+        const matchId = `match_reveal_${confessionId}_${fromUserId}`;
+
+        // Check if match already exists (idempotency)
+        const existingMatch = demoStore.matches.find((m) => m.id === matchId);
+        if (existingMatch) {
+          if (__DEV__) console.log('[CONFESS] createRevealMatch: match already exists');
+          return;
+        }
+
+        // Seed conversation with system message about the match origin
+        dmStore.seedConversation(convoId, [{
+          _id: `sys_reveal_${confessionId}`,
+          content: `💕 You matched through Confessions! Start chatting...`,
+          type: 'system',
+          senderId: 'system',
+          createdAt: now,
+        }]);
+
+        // Set meta WITHOUT expiry (permanent match)
+        dmStore.setMeta(convoId, {
+          otherUser: {
+            id: otherUserId || '',
+            name: otherUserName,
+            lastActive: now,
+            isVerified: confession.isAnonymous ? false : true,
+          },
+          isPreMatch: false, // This is a REAL match now
+          isConfessionChat: false, // No longer a confession thread, it's a real match
+          // No expiresAt - permanent thread
+        });
+
+        // Add to matches
+        const newMatch: DemoMatch = {
+          id: matchId,
+          conversationId: convoId,
+          otherUser: {
+            id: otherUserId || '',
+            name: otherUserName,
+            photoUrl: confession.authorPhotoUrl || '',
+            lastActive: now,
+            isVerified: false,
+          },
+          lastMessage: {
+            content: `💕 Matched via Confessions`,
+            type: 'system',
+            senderId: 'system',
+            createdAt: now,
+          },
+          unreadCount: 0,
+          isPreMatch: false, // Real match
+        };
+        demoStore.addMatch(newMatch);
+
+        if (__DEV__) console.log('[CONFESS] createRevealMatch: created permanent match', { matchId, confessionId });
+      },
+
       // ── Rate Limiting ──
 
       canPostConfession: () => {
@@ -776,6 +913,84 @@ export const useConfessionStore = create<ConfessionState>()(
       isAuthorBlocked: (authorId) => {
         return useBlockStore.getState().isBlocked(authorId);
       },
+
+      getExpiresAt: (confession) => {
+        return confession.expiresAt || (confession.createdAt + CONFESSION_EXPIRY_MS);
+      },
+
+      purgeExpiredNow: (currentUserId) => {
+        const state = get();
+        const now = Date.now();
+
+        // Find expired confessions (not owned by current user for public feed removal)
+        const expiredConfessionIds: string[] = [];
+        const expiredOtherUserIds: string[] = []; // Confessions from other users (remove completely)
+
+        for (const c of state.confessions) {
+          const expiresAt = c.expiresAt || (c.createdAt + CONFESSION_EXPIRY_MS);
+          if (expiresAt <= now) {
+            expiredConfessionIds.push(c.id);
+            if (c.userId !== currentUserId) {
+              expiredOtherUserIds.push(c.id);
+            }
+          }
+        }
+
+        if (expiredConfessionIds.length === 0) return;
+
+        if (__DEV__) console.log('[CONFESS] purgeExpiredNow: found', expiredConfessionIds.length, 'expired confessions');
+
+        // 1) Remove replies for ALL expired confessions
+        const newReplies = { ...state.replies };
+        for (const id of expiredConfessionIds) {
+          delete newReplies[id];
+        }
+
+        // 2) Remove chats tied to expired confessions
+        const expiredChatIds = state.chats
+          .filter((ch) => expiredConfessionIds.includes(ch.confessionId))
+          .map((ch) => ch.id);
+        const newChats = state.chats.filter((ch) => !expiredConfessionIds.includes(ch.confessionId));
+
+        // 3) Remove confessions from OTHER users (not OP's own) from main list
+        // OP's confessions stay in store but are filtered out from public feeds by screens
+        const newConfessions = state.confessions.filter((c) => !expiredOtherUserIds.includes(c.id));
+
+        // 4) Clean up related DM threads via demoDmStore
+        const dmStore = useDemoDmStore.getState();
+        const conversationIdsToDelete: string[] = [];
+        for (const expiredId of expiredConfessionIds) {
+          const convoId = state.confessionThreads[expiredId];
+          if (convoId) {
+            conversationIdsToDelete.push(convoId);
+          }
+        }
+        if (conversationIdsToDelete.length > 0) {
+          dmStore.deleteConversations(conversationIdsToDelete);
+        }
+
+        // 5) Clean up thread tracking
+        const newThreads = { ...state.confessionThreads };
+        for (const id of expiredConfessionIds) {
+          delete newThreads[id];
+        }
+
+        // 6) Clean up user reactions for expired OTHER user confessions
+        const newUserReactions = { ...state.userReactions };
+        for (const id of expiredOtherUserIds) {
+          delete newUserReactions[id];
+        }
+
+        set({
+          confessions: newConfessions,
+          replies: newReplies,
+          chats: newChats,
+          confessionThreads: newThreads,
+          userReactions: newUserReactions,
+        });
+
+        if (__DEV__) console.log('[CONFESS] purgeExpiredNow: cleaned up', expiredConfessionIds.length, 'confessions,', expiredChatIds.length, 'chats');
+      },
     }),
     {
       name: 'confession-store',
@@ -793,6 +1008,7 @@ export const useConfessionStore = create<ConfessionState>()(
         seenTaggedConfessionIds: state.seenTaggedConfessionIds,
         connectedConfessionIds: state.connectedConfessionIds,
         confessionTimestamps: state.confessionTimestamps,
+        revealSkippedChats: state.revealSkippedChats,
       }),
     }
   )
