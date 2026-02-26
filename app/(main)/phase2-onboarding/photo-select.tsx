@@ -1,456 +1,293 @@
 /**
- * Phase 2 Onboarding - Step 2: Photo Selection (9-slot grid)
+ * Phase 2 Onboarding - Step 2: Profile Setup
  *
- * Shows a 3x3 grid with:
- * - Pre-selected Phase-1 photos (imported from terms screen, max 3)
- * - Option to upload new photos from camera roll
- * - Must have at least 2 photos total to continue
- *
- * IMPORTANT:
- * - Owner always sees photos CLEAR (no blur applied here)
- * - blurMyPhoto toggle stores preference (blur applied when OTHERS view)
- * - Demo mode never calls Convex
- * - Phase-1 imports are limited to MAX_PHASE1_PHOTO_IMPORTS (3)
+ * FINALIZED: Phase-1 style photo management after confirmation
+ * - Blur ON by default, per-photo toggle
+ * - Main photo with star icon
+ * - Full preview with Replace/Delete/Set Main actions
  */
-import React, { useState, useMemo, useCallback, useEffect, useRef } from 'react';
+import React, { useState, useCallback, useMemo } from 'react';
 import {
   View,
   Text,
   StyleSheet,
   TouchableOpacity,
   Image,
-  Alert,
   Dimensions,
   Switch,
   ActivityIndicator,
+  ScrollView,
+  Modal,
+  Pressable,
+  Alert,
 } from 'react-native';
 import { useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
-import { Paths, File as ExpoFile, Directory } from 'expo-file-system';
 import { INCOGNITO_COLORS } from '@/lib/constants';
-import { usePrivateProfileStore, selectCanContinuePhotos, MAX_PHASE1_PHOTO_IMPORTS } from '@/stores/privateProfileStore';
-
-// Permanent storage directory name for private profile photos
-const PRIVATE_PHOTOS_DIR_NAME = 'private_photos';
-
-/**
- * Get the private photos directory
- */
-function getPrivatePhotosDir(): Directory {
-  return new Directory(Paths.document, PRIVATE_PHOTOS_DIR_NAME);
-}
+import { PRIVATE_INTENT_CATEGORIES } from '@/lib/privateConstants';
+import {
+  usePrivateProfileStore,
+  PHASE2_MIN_PHOTOS,
+  PHASE2_MIN_INTENTS,
+  PHASE2_MAX_INTENTS,
+} from '@/stores/privateProfileStore';
+import { useDemoStore } from '@/stores/demoStore';
 
 const C = INCOGNITO_COLORS;
-const GRID_SIZE = 9;
-const MIN_SELECTED = 2;
+const GRID_SLOTS = 9;
 const COLUMNS = 3;
 const GRID_GAP = 8;
 const SCREEN_PADDING = 16;
 const screenWidth = Dimensions.get('window').width;
 const slotSize = (screenWidth - SCREEN_PADDING * 2 - GRID_GAP * (COLUMNS - 1)) / COLUMNS;
 
-/**
- * Validate a photo URL is usable
- * MUST be: string, non-empty, not "undefined"/"null", starts with http or file://
- */
-function isValidPhotoUrl(url: unknown): url is string {
-  return (
-    typeof url === 'string' &&
-    url.length > 0 &&
-    url !== 'undefined' &&
-    url !== 'null' &&
-    (url.startsWith('http') || url.startsWith('file://'))
-  );
-}
+const LIFESTYLE_LABELS: Record<string, string> = {
+  never: 'Never', sometimes: 'Sometimes', socially: 'Socially',
+  regularly: 'Regularly', trying_to_quit: 'Trying to quit',
+  sober: 'Sober', daily: 'Daily',
+};
+const KIDS_LABELS: Record<string, string> = {
+  have_and_want_more: 'Have kids, want more', have_and_dont_want_more: 'Have kids, done',
+  dont_have_and_want: "Don't have, want", dont_have_and_dont_want: "Don't have, don't want",
+  not_sure: 'Not sure yet',
+};
+const EDUCATION_LABELS: Record<string, string> = {
+  high_school: 'High School', some_college: 'Some College', associate: 'Associate',
+  bachelors: "Bachelor's", masters: "Master's", doctorate: 'Doctorate',
+  trade_school: 'Trade School', professional: 'Professional', diploma: 'Diploma', other: 'Other',
+};
+const RELIGION_LABELS: Record<string, string> = {
+  christian: 'Christian', muslim: 'Muslim', hindu: 'Hindu', buddhist: 'Buddhist',
+  jewish: 'Jewish', sikh: 'Sikh', atheist: 'Atheist', agnostic: 'Agnostic',
+  spiritual: 'Spiritual', other: 'Other', prefer_not_to_say: 'Prefer not to say',
+};
+const GENDER_LABELS: Record<string, string> = {
+  male: 'Man', female: 'Woman', non_binary: 'Non-binary',
+};
 
-/**
- * Check if a URI is already in permanent storage (documentDirectory)
- */
-function isInPermanentStorage(uri: string): boolean {
-  return uri.includes(PRIVATE_PHOTOS_DIR_NAME) || uri.includes(Paths.document.uri);
-}
-
-/**
- * Copy a photo from cache/temporary location to permanent storage
- * Uses expo-file-system v19 class-based API (Paths, File, Directory)
- */
-async function copyToPermamentStorage(sourceUri: string, index: number): Promise<string> {
-  // Skip if already in permanent storage or is a remote URL
-  if (isInPermanentStorage(sourceUri) || sourceUri.startsWith('http')) {
-    return sourceUri;
+function calculateAgeFromDob(dob: string | undefined | null): number {
+  if (!dob || !/^\d{4}-\d{2}-\d{2}$/.test(dob)) return 0;
+  const [y, m, d] = dob.split('-').map(Number);
+  const birthDate = new Date(y, m - 1, d, 12, 0, 0);
+  const today = new Date();
+  let age = today.getFullYear() - birthDate.getFullYear();
+  const monthDiff = today.getMonth() - birthDate.getMonth();
+  if (monthDiff < 0 || (monthDiff === 0 && today.getDate() < birthDate.getDate())) {
+    age--;
   }
-
-  try {
-    // Ensure directory exists
-    const privateDir = getPrivatePhotosDir();
-    if (!privateDir.exists) {
-      privateDir.create();
-    }
-
-    // Generate unique filename
-    const timestamp = Date.now();
-    const extension = sourceUri.split('.').pop()?.toLowerCase() || 'jpg';
-    const filename = `photo_${timestamp}_${index}.${extension}`;
-    const destFile = new ExpoFile(privateDir, filename);
-
-    // Check if destination already exists (avoid duplicate copies)
-    if (destFile.exists) {
-      return destFile.uri;
-    }
-
-    // Copy the file
-    const sourceFile = new ExpoFile(sourceUri);
-    sourceFile.copy(destFile);
-
-    return destFile.uri;
-  } catch (error) {
-    if (__DEV__) {
-      console.error('[PhotoSelect] Copy failed:', error);
-    }
-    // Return original URI as fallback (risky but better than nothing)
-    return sourceUri;
-  }
+  return age;
 }
 
-/**
- * Copy multiple photos to permanent storage
- */
-async function copyAllToPermanentStorage(uris: string[]): Promise<string[]> {
-  const results: string[] = [];
-  for (let i = 0; i < uris.length; i++) {
-    const newUri = await copyToPermamentStorage(uris[i], i);
-    results.push(newUri);
-  }
-  return results;
-}
-
-interface PhotoCandidate {
-  id: string;
-  uri: string;
-  source: 'phase1' | 'uploaded';
-  isImported: boolean; // True if this was imported from Phase-1
-}
-
-export default function Phase2PhotoSelect() {
+export default function Phase2ProfileSetup() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
 
-  // Track if we've already processed Phase-1 photos
-  const hasImportedRef = useRef(false);
+  // ============================================================
+  // SOURCE OF TRUTH: Read photos from Phase-1 profile
+  // ============================================================
+  const demoProfiles = useDemoStore((s) => s.demoProfiles);
+  const currentDemoUserId = useDemoStore((s) => s.currentDemoUserId);
+  const getCurrentProfile = useDemoStore((s) => s.getCurrentProfile);
 
-  // Store state (Phase-1 photos already imported by terms screen)
-  const phase1PhotoUrls = usePrivateProfileStore((s) => s.phase1PhotoUrls);
-  const selectedPhotoUrls = usePrivateProfileStore((s) => s.selectedPhotoUrls);
-  const blurMyPhoto = usePrivateProfileStore((s) => s.blurMyPhoto);
+  const phase1PhotoSlots = useMemo(() => {
+    const profile = getCurrentProfile();
+    const slots = profile?.photoSlots || [null, null, null, null, null, null, null, null, null];
+    const nonNullSlots = slots.map((uri, idx) => (uri ? idx : -1)).filter((i) => i >= 0);
+    console.log('[P2 STEP2 RENDER] nonNullSlots=' + JSON.stringify(nonNullSlots));
+    return slots;
+  }, [getCurrentProfile, demoProfiles, currentDemoUserId]);
+
+  // Profile info from Phase-1
+  const phase1Profile = useMemo(() => getCurrentProfile(), [getCurrentProfile, demoProfiles, currentDemoUserId]);
+  const displayName = phase1Profile?.name || 'Anonymous';
+  const age = phase1Profile?.dateOfBirth ? calculateAgeFromDob(phase1Profile.dateOfBirth) : 0;
+  const gender = phase1Profile?.gender || '';
+  const height = (phase1Profile as any)?.height || 0;
+  const smoking = (phase1Profile as any)?.smoking || '';
+  const drinking = (phase1Profile as any)?.drinking || '';
+  const kids = (phase1Profile as any)?.kids || '';
+  const education = (phase1Profile as any)?.education || '';
+  const religion = (phase1Profile as any)?.religion || '';
+  const hobbies = (phase1Profile as any)?.hobbies || [];
+
+  // Store
+  const intentKeys = usePrivateProfileStore((s) => s.intentKeys);
   const setSelectedPhotos = usePrivateProfileStore((s) => s.setSelectedPhotos);
-  const setBlurMyPhoto = usePrivateProfileStore((s) => s.setBlurMyPhoto);
+  const setIntentKeys = usePrivateProfileStore((s) => s.setIntentKeys);
 
-  // Use the selector for validation
-  const canContinueFromStore = usePrivateProfileStore(selectCanContinuePhotos);
+  // ============================================================
+  // LOCAL STATE
+  // ============================================================
+  // Selection mode state
+  const [selectedSlots, setSelectedSlots] = useState<number[]>([]);
+  const [failedSlots, setFailedSlots] = useState<number[]>([]);
 
-  // Local state for uploaded photos (not from Phase 1)
-  const [uploadedPhotos, setUploadedPhotos] = useState<string[]>([]);
-  // Track failed image loads
-  const [failedImages, setFailedImages] = useState<Set<string>>(new Set());
-  // Loading state for initial import
-  const [isImporting, setIsImporting] = useState(true);
+  // Post-confirmation state (Phase-1 style)
+  const [phase2Photos, setPhase2Photos] = useState<string[] | null>(null);
+  const [mainPhotoIndex, setMainPhotoIndex] = useState(0);
+  const [photoBlurStates, setPhotoBlurStates] = useState<boolean[]>([]);
 
-  /**
-   * Photo initialization on mount
-   * Photos are pre-selected by the terms screen (index.tsx) from Phase-1
-   * This effect just marks initialization as complete
-   */
-  useEffect(() => {
-    // Skip if already processed
-    if (hasImportedRef.current) {
-      setIsImporting(false);
-      return;
-    }
-
-    // Photos are already selected by the terms screen
-    // Just log the current state and mark as ready
-    const currentSelectedCount = Array.isArray(selectedPhotoUrls) ? selectedPhotoUrls.length : 0;
-
-    if (__DEV__) {
-      console.log('[Phase2PhotoSelect] Photos from terms screen:', {
-        selectedCount: currentSelectedCount,
-        phase1PhotosAvailable: phase1PhotoUrls?.length || 0,
-        maxPhase1Imports: MAX_PHASE1_PHOTO_IMPORTS,
-      });
-    }
-
-    hasImportedRef.current = true;
-    setIsImporting(false);
-  }, [phase1PhotoUrls, selectedPhotoUrls]);
-
-  /**
-   * Build candidate photos list: selected photos + uploaded photos
-   * - Selected photos may include Phase-1 imports (marked with isImported=true)
-   * - Filter out invalid URLs and failed images
-   * - Deduplicate
-   * - NEVER return blank entries
-   */
-  const candidates: PhotoCandidate[] = useMemo(() => {
-    const result: PhotoCandidate[] = [];
-    const seen = new Set<string>();
-
-    // DEFENSIVE: Ensure arrays are iterable (may be null/undefined after hydration)
-    const safeSelectedPhotos = Array.isArray(selectedPhotoUrls) ? selectedPhotoUrls : [];
-    const safePhase1Photos = Array.isArray(phase1PhotoUrls) ? phase1PhotoUrls : [];
-    const safeUploadedPhotos = Array.isArray(uploadedPhotos) ? uploadedPhotos : [];
-
-    // Create a set of Phase-1 URLs to identify imported photos
-    const phase1UrlSet = new Set(safePhase1Photos.filter(isValidPhotoUrl));
-
-    // First, add already-selected photos (from terms screen import)
-    for (const url of safeSelectedPhotos) {
-      if (isValidPhotoUrl(url) && !seen.has(url) && !failedImages.has(url)) {
-        seen.add(url);
-        const isFromPhase1 = phase1UrlSet.has(url);
-        result.push({
-          id: `sel-${result.length}`,
-          uri: url,
-          source: isFromPhase1 ? 'phase1' : 'uploaded',
-          isImported: isFromPhase1,
-        });
-      }
-    }
-
-    // Then, add newly uploaded photos (not already selected)
-    for (const url of safeUploadedPhotos) {
-      if (isValidPhotoUrl(url) && !seen.has(url) && !failedImages.has(url)) {
-        seen.add(url);
-        result.push({
-          id: `up-${result.length}`,
-          uri: url,
-          source: 'uploaded',
-          isImported: false,
-        });
-      }
-    }
-
-    if (__DEV__) {
-      console.log('[Phase2PhotoSelect] Candidates computed:', {
-        selectedCount: safeSelectedPhotos.length,
-        uploadedCount: safeUploadedPhotos.length,
-        validCandidates: result.length,
-        importedFromPhase1: result.filter(c => c.isImported).length,
-        failedCount: failedImages.size,
-      });
-    }
-
-    return result.slice(0, GRID_SIZE);
-  }, [selectedPhotoUrls, phase1PhotoUrls, uploadedPhotos, failedImages]);
-
-  // Selected URIs as a Set for O(1) lookup (defensive: ensure array)
-  const safeSelectedUrls = Array.isArray(selectedPhotoUrls) ? selectedPhotoUrls : [];
-  const selectedSet = useMemo(() => new Set(safeSelectedUrls), [safeSelectedUrls]);
-
-  // Filter selected to only include valid, non-failed photos
-  const validSelectedCount = useMemo(() => {
-    return safeSelectedUrls.filter(
-      (url) => isValidPhotoUrl(url) && !failedImages.has(url)
-    ).length;
-  }, [safeSelectedUrls, failedImages]);
-
-  const canContinue = validSelectedCount >= MIN_SELECTED;
-  const isFull = candidates.length >= GRID_SIZE;
-
-  const handleTogglePhoto = useCallback(
-    (uri: string) => {
-      if (selectedSet.has(uri)) {
-        // Deselect
-        const newSelection = selectedPhotoUrls.filter((u) => u !== uri);
-        setSelectedPhotos([], newSelection);
-      } else {
-        // Select
-        setSelectedPhotos([], [...selectedPhotoUrls, uri]);
-      }
-    },
-    [selectedSet, selectedPhotoUrls, setSelectedPhotos]
-  );
-
-  const handleImageError = useCallback(
-    (uri: string) => {
-      if (__DEV__) {
-        console.log('[Phase2PhotoSelect] Image failed to load:', { uri: uri.slice(0, 50) });
-      }
-      setFailedImages((prev) => new Set(prev).add(uri));
-      // Also remove from selection if it was selected
-      if (selectedPhotoUrls.includes(uri)) {
-        setSelectedPhotos([], selectedPhotoUrls.filter((u) => u !== uri));
-      }
-    },
-    [selectedPhotoUrls, setSelectedPhotos]
-  );
-
-  const handleUpload = async () => {
-    if (isFull) {
-      Alert.alert('Grid Full', 'You have already added 9 photos.');
-      return;
-    }
-
-    try {
-      const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
-      if (status !== 'granted') {
-        Alert.alert('Permission Required', 'Please grant photo library access to upload photos.');
-        return;
-      }
-
-      const result = await ImagePicker.launchImageLibraryAsync({
-        mediaTypes: 'images',
-        allowsEditing: false,
-        quality: 0.8,
-      });
-
-      if (!result.canceled && result.assets[0]) {
-        const cacheUri = result.assets[0].uri;
-        if (isValidPhotoUrl(cacheUri)) {
-          // Copy to permanent storage immediately
-          const permanentUri = await copyToPermamentStorage(cacheUri, Date.now());
-
-          setUploadedPhotos((prev) => [...prev, permanentUri]);
-          // Auto-select the uploaded photo
-          setSelectedPhotos([], [...selectedPhotoUrls, permanentUri]);
-        }
-      }
-    } catch (error) {
-      console.error('[Phase2PhotoSelect] Upload error:', error);
-      Alert.alert('Error', 'Failed to upload photo. Please try again.');
-    }
-  };
-
-  // Track if we're processing (prevent double-tap)
+  // Preview state
+  const [previewIndex, setPreviewIndex] = useState<number | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
 
-  const handleContinue = async () => {
-    if (!canContinue) {
-      Alert.alert('More Photos Needed', `Please select at least ${MIN_SELECTED} photos.`);
+  // Mode flags
+  const isSelectionMode = phase2Photos === null;
+  const isPhotoMode = phase2Photos !== null;
+
+  // Validation
+  const validPhotoCount = phase1PhotoSlots.filter((uri, idx) => uri && !failedSlots.includes(idx)).length;
+  const selectedCount = selectedSlots.length;
+  const canSelectPhotos = selectedCount >= PHASE2_MIN_PHOTOS;
+  const canContinueIntents = intentKeys.length >= PHASE2_MIN_INTENTS && intentKeys.length <= PHASE2_MAX_INTENTS;
+  const canContinue = isPhotoMode && canContinueIntents && phase2Photos.length >= PHASE2_MIN_PHOTOS;
+
+  // ============================================================
+  // SELECTION MODE HANDLERS
+  // ============================================================
+  const toggleSelection = useCallback((slotIndex: number) => {
+    if (!isSelectionMode) return;
+    setSelectedSlots((prev) => {
+      if (prev.includes(slotIndex)) {
+        return prev.filter((s) => s !== slotIndex);
+      }
+      return [...prev, slotIndex];
+    });
+  }, [isSelectionMode]);
+
+  const handleConfirmPhotos = useCallback(() => {
+    if (selectedSlots.length < PHASE2_MIN_PHOTOS) return;
+    // Create Phase-2 photos array from selected slots
+    const photos: string[] = [];
+    for (const slotIndex of selectedSlots) {
+      const uri = phase1PhotoSlots[slotIndex];
+      if (uri) photos.push(uri);
+    }
+    setPhase2Photos(photos);
+    // Blur ON by default for all photos
+    setPhotoBlurStates(photos.map(() => true));
+    setMainPhotoIndex(0);
+  }, [selectedSlots, phase1PhotoSlots]);
+
+  const onSlotError = useCallback((slotIndex: number) => {
+    setFailedSlots((prev) => prev.includes(slotIndex) ? prev : [...prev, slotIndex]);
+    setSelectedSlots((prev) => prev.filter((s) => s !== slotIndex));
+  }, []);
+
+  // ============================================================
+  // PHOTO MODE HANDLERS (Phase-1 style)
+  // ============================================================
+  const openPreview = useCallback((index: number) => {
+    if (!isPhotoMode) return;
+    setPreviewIndex(index);
+  }, [isPhotoMode]);
+
+  const closePreview = useCallback(() => {
+    setPreviewIndex(null);
+  }, []);
+
+  const togglePhotoBlur = useCallback((index: number) => {
+    setPhotoBlurStates((prev) => {
+      const next = [...prev];
+      next[index] = !next[index];
+      return next;
+    });
+  }, []);
+
+  const setAsMainPhoto = useCallback(() => {
+    if (previewIndex === null) return;
+    setMainPhotoIndex(previewIndex);
+    closePreview();
+  }, [previewIndex, closePreview]);
+
+  const handleReplacePhoto = useCallback(async () => {
+    if (previewIndex === null || !phase2Photos) return;
+    try {
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ImagePicker.MediaTypeOptions.Images,
+        allowsEditing: true,
+        aspect: [3, 4],
+        quality: 0.8,
+      });
+      if (!result.canceled && result.assets[0]) {
+        const newUri = result.assets[0].uri;
+        setPhase2Photos((prev) => {
+          if (!prev) return prev;
+          const next = [...prev];
+          next[previewIndex] = newUri;
+          return next;
+        });
+        closePreview();
+      }
+    } catch (e) {
+      Alert.alert('Error', 'Failed to pick image');
+    }
+  }, [previewIndex, phase2Photos, closePreview]);
+
+  const handleDeletePhoto = useCallback(() => {
+    if (previewIndex === null || !phase2Photos) return;
+    if (phase2Photos.length <= PHASE2_MIN_PHOTOS) {
+      Alert.alert('Cannot Delete', `You must have at least ${PHASE2_MIN_PHOTOS} photos.`);
       return;
     }
+    Alert.alert('Delete Photo', 'Are you sure you want to remove this photo?', [
+      { text: 'Cancel', style: 'cancel' },
+      {
+        text: 'Delete',
+        style: 'destructive',
+        onPress: () => {
+          setPhase2Photos((prev) => {
+            if (!prev) return prev;
+            const next = prev.filter((_, i) => i !== previewIndex);
+            return next;
+          });
+          setPhotoBlurStates((prev) => prev.filter((_, i) => i !== previewIndex));
+          // Adjust main photo index if needed
+          if (previewIndex === mainPhotoIndex) {
+            setMainPhotoIndex(0);
+          } else if (previewIndex < mainPhotoIndex) {
+            setMainPhotoIndex((prev) => prev - 1);
+          }
+          closePreview();
+        },
+      },
+    ]);
+  }, [previewIndex, phase2Photos, mainPhotoIndex, closePreview]);
 
-    if (isProcessing) return;
+  // ============================================================
+  // OTHER HANDLERS
+  // ============================================================
+  const toggleIntent = useCallback((key: string) => {
+    const current = usePrivateProfileStore.getState().intentKeys;
+    if (current.includes(key as any)) {
+      setIntentKeys(current.filter((k) => k !== key) as any);
+    } else if (current.length < PHASE2_MAX_INTENTS) {
+      setIntentKeys([...current, key] as any);
+    }
+  }, [setIntentKeys]);
+
+  const handleContinue = () => {
+    if (!canContinue || isProcessing || !phase2Photos) return;
     setIsProcessing(true);
-
-    try {
-      // Filter to only valid, non-failed photos
-      const validSelection = selectedPhotoUrls.filter(
-        (url) => isValidPhotoUrl(url) && !failedImages.has(url)
-      );
-
-      // Copy all selected photos to permanent storage (handles cache URIs)
-      const permanentUris = await copyAllToPermanentStorage(validSelection);
-
-      // Save the permanent URIs
-      setSelectedPhotos([], permanentUris);
-
-      if (__DEV__) {
-        console.log('[Phase2PhotoSelect] Saved', permanentUris.length, 'photos to permanent storage');
-      }
-
-      router.push('/(main)/phase2-onboarding/profile-setup' as any);
-    } catch (error) {
-      console.error('[Phase2PhotoSelect] Error saving photos:', error);
-      Alert.alert('Error', 'Failed to save photos. Please try again.');
-    } finally {
-      setIsProcessing(false);
-    }
+    setSelectedPhotos([], phase2Photos);
+    router.push('/(main)/phase2-onboarding/profile-setup' as any);
+    setIsProcessing(false);
   };
 
-  // Render a single photo slot
-  const renderPhotoSlot = (candidate: PhotoCandidate) => {
-    const isSelected = selectedSet.has(candidate.uri);
+  const infoItems = [
+    height ? { label: 'Height', value: `${height} cm` } : null,
+    smoking ? { label: 'Smoking', value: LIFESTYLE_LABELS[smoking] || smoking } : null,
+    drinking ? { label: 'Drinking', value: LIFESTYLE_LABELS[drinking] || drinking } : null,
+    kids ? { label: 'Kids', value: KIDS_LABELS[kids] || kids } : null,
+    education ? { label: 'Education', value: EDUCATION_LABELS[education] || education } : null,
+    religion ? { label: 'Religion', value: RELIGION_LABELS[religion] || religion } : null,
+  ].filter(Boolean) as { label: string; value: string }[];
 
-    return (
-      <TouchableOpacity
-        key={candidate.id}
-        style={[styles.slot, isSelected && styles.slotSelected]}
-        onPress={() => handleTogglePhoto(candidate.uri)}
-        activeOpacity={0.8}
-      >
-        {/* Owner always sees photos CLEAR - no blurRadius here */}
-        <Image
-          source={{ uri: candidate.uri }}
-          style={styles.slotImage}
-          onError={() => handleImageError(candidate.uri)}
-        />
-        {isSelected && (
-          <View style={styles.checkBadge}>
-            <Ionicons name="checkmark" size={14} color="#FFFFFF" />
-          </View>
-        )}
-        {/* Show "Imported" badge for Phase-1 photos */}
-        {candidate.isImported && (
-          <View style={styles.importedBadge}>
-            <Text style={styles.importedBadgeText}>P1</Text>
-          </View>
-        )}
-      </TouchableOpacity>
-    );
-  };
-
-  // Render upload slot
-  const renderUploadSlot = (index: number) => (
-    <TouchableOpacity
-      key={`upload-${index}`}
-      style={[styles.slot, styles.slotEmpty]}
-      onPress={handleUpload}
-      activeOpacity={0.7}
-    >
-      <Ionicons name="add" size={28} color={C.primary} />
-      <Text style={styles.uploadText}>Upload</Text>
-    </TouchableOpacity>
-  );
-
-  // Render empty slot (placeholder)
-  const renderEmptySlot = (index: number) => (
-    <View key={`empty-${index}`} style={[styles.slot, styles.slotEmpty, styles.slotPlaceholder]}>
-      <Ionicons name="image-outline" size={24} color={C.textLight} />
-    </View>
-  );
-
-  /**
-   * Build grid slots:
-   * - First: render all valid photo candidates
-   * - Then: ONE upload slot (if not full)
-   * - Finally: empty placeholders to fill 9 slots
-   * - NEVER render blank first tile
-   */
-  const gridSlots = useMemo(() => {
-    const slots: React.ReactNode[] = [];
-    let uploadSlotAdded = false;
-
-    for (let i = 0; i < GRID_SIZE; i++) {
-      const candidate = candidates[i];
-      if (candidate) {
-        // Render photo
-        slots.push(renderPhotoSlot(candidate));
-      } else if (!uploadSlotAdded && !isFull) {
-        // Render upload slot (only one)
-        slots.push(renderUploadSlot(i));
-        uploadSlotAdded = true;
-      } else {
-        // Render empty placeholder
-        slots.push(renderEmptySlot(i));
-      }
-    }
-
-    return slots;
-  }, [candidates, selectedSet, isFull]);
-
-  // Show loading while importing Phase-1 photos (defensive: ensure array before .length)
-  const safePhase1Count = Array.isArray(phase1PhotoUrls) ? phase1PhotoUrls.length : 0;
-  if (isImporting && safePhase1Count === 0) {
-    return (
-      <View style={[styles.container, styles.loadingContainer, { paddingTop: insets.top }]}>
-        <ActivityIndicator size="large" color={C.primary} />
-        <Text style={styles.loadingText}>Loading your photos...</Text>
-      </View>
-    );
-  }
-
+  // ============================================================
+  // RENDER
+  // ============================================================
   return (
     <View style={[styles.container, { paddingTop: insets.top }]}>
       {/* Header */}
@@ -458,231 +295,405 @@ export default function Phase2PhotoSelect() {
         <TouchableOpacity onPress={() => router.back()} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
           <Ionicons name="arrow-back" size={24} color={C.text} />
         </TouchableOpacity>
-        <Text style={styles.headerTitle}>Select Photos</Text>
+        <Text style={styles.headerTitle}>Profile Setup</Text>
         <Text style={styles.stepLabel}>Step 2 of 3</Text>
       </View>
 
-      <Text style={styles.subtitle}>
-        Tap photos to select them. You need at least {MIN_SELECTED} for your private profile.
-      </Text>
+      <ScrollView style={styles.scrollView} showsVerticalScrollIndicator={false}>
+        {/* Section A: Photos */}
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>
+            {isSelectionMode ? 'Select Your Photos' : 'Your Phase-2 Photos'}
+          </Text>
+          <Text style={styles.sectionSubtitle}>
+            {isSelectionMode
+              ? `Select at least ${PHASE2_MIN_PHOTOS} photos for your Phase-2 profile.`
+              : 'Tap a photo to preview, replace, or delete.'}
+          </Text>
 
-      {/* 3x3 Grid */}
-      <View style={styles.gridContainer}>
-        <View style={styles.grid}>{gridSlots}</View>
-
-        {/* Blur Toggle */}
-        <View style={styles.blurToggleCard}>
-          <View style={styles.blurToggleContent}>
-            <View style={styles.blurToggleHeader}>
-              <Ionicons name="eye-off-outline" size={20} color={C.text} />
-              <Text style={styles.blurToggleTitle}>Blur my photos to others</Text>
+          {/* Empty state */}
+          {validPhotoCount === 0 && isSelectionMode && (
+            <View style={styles.emptyStateContainer}>
+              <Ionicons name="images-outline" size={48} color={C.textLight} />
+              <Text style={styles.emptyStateTitle}>No Photos Found</Text>
+              <Text style={styles.emptyStateText}>
+                Your Phase-1 photos could not be loaded. Please go back and add photos first.
+              </Text>
             </View>
-            <Text style={styles.blurToggleHint}>
-              Your photos appear blurred to other users. You always see them clearly.
+          )}
+
+          {/* GRID */}
+          <View style={styles.grid}>
+            {isSelectionMode ? (
+              // SELECTION MODE
+              phase1PhotoSlots.map((uri, slotIndex) => {
+                const hasFailed = failedSlots.includes(slotIndex);
+                const isSelected = selectedSlots.includes(slotIndex);
+                const selectionOrder = isSelected ? selectedSlots.indexOf(slotIndex) + 1 : 0;
+
+                if (uri && !hasFailed) {
+                  return (
+                    <Pressable
+                      key={`slot-${slotIndex}`}
+                      style={styles.slot}
+                      onPress={() => toggleSelection(slotIndex)}
+                    >
+                      <Image source={{ uri }} style={styles.slotImage} resizeMode="cover" onError={() => onSlotError(slotIndex)} />
+                      {isSelected && (
+                        <View pointerEvents="none" style={styles.orderBadge}>
+                          <Text style={styles.orderBadgeText}>{selectionOrder}</Text>
+                        </View>
+                      )}
+                    </Pressable>
+                  );
+                }
+
+                return (
+                  <View key={`empty-${slotIndex}`} style={[styles.slot, styles.emptySlot]}>
+                    <Ionicons name="image-outline" size={24} color={C.textLight} />
+                  </View>
+                );
+              })
+            ) : (
+              // PHOTO MODE (Phase-1 style)
+              phase2Photos!.map((uri, idx) => {
+                const isMain = idx === mainPhotoIndex;
+                const isBlurred = photoBlurStates[idx];
+
+                return (
+                  <Pressable key={`p2-${idx}`} style={styles.slot} onPress={() => openPreview(idx)}>
+                    <Image source={{ uri }} style={styles.slotImage} resizeMode="cover" blurRadius={isBlurred ? 15 : 0} />
+                    {/* Main photo star */}
+                    {isMain && (
+                      <View pointerEvents="none" style={styles.starBadge}>
+                        <Ionicons name="star" size={14} color="#FFD700" />
+                      </View>
+                    )}
+                    {/* Blur indicator */}
+                    {isBlurred && (
+                      <View pointerEvents="none" style={styles.blurIndicator}>
+                        <Ionicons name="eye-off" size={16} color="#FFF" />
+                      </View>
+                    )}
+                  </Pressable>
+                );
+              })
+            )}
+          </View>
+
+          {/* SELECT PHOTOS BUTTON (selection mode only) */}
+          {isSelectionMode && (
+            <TouchableOpacity
+              style={[styles.selectPhotosBtn, !canSelectPhotos && styles.selectPhotosBtnDisabled]}
+              onPress={handleConfirmPhotos}
+              disabled={!canSelectPhotos}
+            >
+              <Ionicons name="checkmark-circle" size={20} color={canSelectPhotos ? '#FFF' : C.textLight} />
+              <Text style={[styles.selectPhotosBtnText, !canSelectPhotos && styles.selectPhotosBtnTextDisabled]}>
+                Confirm Photos ({selectedCount}/{PHASE2_MIN_PHOTOS})
+              </Text>
+            </TouchableOpacity>
+          )}
+
+          {/* Photo count */}
+          {isSelectionMode && (
+            <Text style={[styles.countText, !canSelectPhotos && styles.countWarning]}>
+              {selectedCount} / {PHASE2_MIN_PHOTOS} photos selected
+            </Text>
+          )}
+          {isPhotoMode && (
+            <Text style={styles.countText}>
+              {phase2Photos!.length} photos (blur ON by default)
+            </Text>
+          )}
+        </View>
+
+        {/* Section B: Profile Info */}
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>Your Profile Info</Text>
+          <Text style={styles.sectionSubtitle}>Imported from main profile. Edit later in settings.</Text>
+
+          <View style={styles.profileCard}>
+            <View style={styles.mainInfo}>
+              <View style={styles.infoItem}>
+                <Text style={styles.infoLabel}>Name</Text>
+                <Text style={styles.infoValue}>{displayName || 'Anonymous'}</Text>
+              </View>
+              <View style={styles.infoItem}>
+                <Text style={styles.infoLabel}>Age</Text>
+                <Text style={styles.infoValue}>{age > 0 ? age : '-'}</Text>
+              </View>
+              <View style={styles.infoItem}>
+                <Text style={styles.infoLabel}>Gender</Text>
+                <Text style={styles.infoValue}>{GENDER_LABELS[gender] || gender || '-'}</Text>
+              </View>
+            </View>
+
+            {infoItems.length > 0 && (
+              <View style={styles.infoChips}>
+                {infoItems.map((item, i) => (
+                  <View key={i} style={styles.chip}>
+                    <Text style={styles.chipLabel}>{item.label}</Text>
+                    <Text style={styles.chipValue}>{item.value}</Text>
+                  </View>
+                ))}
+              </View>
+            )}
+
+            {hobbies && hobbies.length > 0 && (
+              <View style={styles.hobbiesSection}>
+                <Text style={styles.hobbiesLabel}>Interests</Text>
+                <View style={styles.hobbyTags}>
+                  {hobbies.slice(0, 6).map((h: string, i: number) => (
+                    <View key={i} style={styles.hobbyTag}>
+                      <Text style={styles.hobbyText}>{h}</Text>
+                    </View>
+                  ))}
+                  {hobbies.length > 6 && (
+                    <View style={styles.hobbyTag}>
+                      <Text style={styles.hobbyText}>+{hobbies.length - 6}</Text>
+                    </View>
+                  )}
+                </View>
+              </View>
+            )}
+          </View>
+        </View>
+
+        {/* Section C: Intents */}
+        <View style={styles.section}>
+          <View style={styles.intentHeader}>
+            <Text style={styles.sectionTitle}>What are you looking for?</Text>
+            <Text style={[styles.intentCount, canContinueIntents && styles.intentCountValid]}>
+              {intentKeys.length}/{PHASE2_MAX_INTENTS}
             </Text>
           </View>
-          <Switch
-            value={blurMyPhoto}
-            onValueChange={setBlurMyPhoto}
-            trackColor={{ false: C.surface, true: C.primary + '60' }}
-            thumbColor={blurMyPhoto ? C.primary : '#f4f3f4'}
-          />
-        </View>
-      </View>
+          <Text style={[styles.sectionSubtitle, !canContinueIntents && styles.countWarning]}>
+            Select {PHASE2_MIN_INTENTS}-{PHASE2_MAX_INTENTS} intents
+          </Text>
 
-      {/* Bottom Action */}
+          <View style={styles.intentGrid}>
+            {PRIVATE_INTENT_CATEGORIES.map((cat) => {
+              const selected = intentKeys.includes(cat.key as any);
+              return (
+                <TouchableOpacity
+                  key={cat.key}
+                  style={[styles.intentChip, selected && styles.intentChipSelected]}
+                  onPress={() => toggleIntent(cat.key)}
+                >
+                  <Ionicons name={cat.icon as any} size={16} color={selected ? C.primary : C.textLight} />
+                  <Text style={[styles.intentText, selected && styles.intentTextSelected]}>{cat.label}</Text>
+                  {selected && <Ionicons name="checkmark" size={14} color={C.primary} />}
+                </TouchableOpacity>
+              );
+            })}
+          </View>
+        </View>
+
+        <View style={{ height: 120 }} />
+      </ScrollView>
+
+      {/* Bottom */}
       <View style={[styles.bottomBar, { paddingBottom: Math.max(insets.bottom, 16) + 12 }]}>
-        <Text style={[styles.selectionCount, !canContinue && styles.selectionCountWarning]}>
-          {canContinue
-            ? `Selected ${validSelectedCount} photo${validSelectedCount > 1 ? 's' : ''}`
-            : `Selected ${validSelectedCount} / ${MIN_SELECTED} required`}
-        </Text>
+        {isSelectionMode && (
+          <Text style={styles.bottomHint}>Select photos above, then press "Confirm Photos"</Text>
+        )}
+        {isPhotoMode && !canContinueIntents && (
+          <Text style={styles.bottomHint}>Select at least {PHASE2_MIN_INTENTS} intent to continue</Text>
+        )}
         <TouchableOpacity
           style={[styles.continueBtn, (!canContinue || isProcessing) && styles.continueBtnDisabled]}
           onPress={handleContinue}
           disabled={!canContinue || isProcessing}
-          activeOpacity={0.8}
         >
           {isProcessing ? (
-            <>
-              <ActivityIndicator size="small" color="#FFFFFF" />
-              <Text style={styles.continueBtnText}>Saving...</Text>
-            </>
+            <ActivityIndicator size="small" color="#FFF" />
           ) : (
             <>
-              <Text style={[styles.continueBtnText, !canContinue && styles.continueBtnTextDisabled]}>
-                Continue
-              </Text>
-              <Ionicons name="arrow-forward" size={18} color={canContinue ? '#FFFFFF' : C.textLight} />
+              <Text style={[styles.continueText, !canContinue && styles.continueTextDisabled]}>Continue</Text>
+              <Ionicons name="arrow-forward" size={18} color={canContinue ? '#FFF' : C.textLight} />
             </>
           )}
         </TouchableOpacity>
       </View>
+
+      {/* FULL-SCREEN PREVIEW MODAL (Phase-1 style) */}
+      <Modal visible={isPhotoMode && previewIndex !== null} transparent animationType="fade" onRequestClose={closePreview}>
+        <View style={styles.modalOverlay}>
+          <View style={styles.modalContent}>
+            {previewIndex !== null && phase2Photos && phase2Photos[previewIndex] && (
+              <Image
+                source={{ uri: phase2Photos[previewIndex] }}
+                style={styles.previewImage}
+                resizeMode="contain"
+              />
+            )}
+
+            {/* Action buttons */}
+            <View style={styles.previewActions}>
+              <TouchableOpacity style={styles.actionBtn} onPress={setAsMainPhoto}>
+                <Ionicons name="star" size={22} color="#FFD700" />
+                <Text style={styles.actionBtnText}>Set Main</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity style={styles.actionBtn} onPress={() => previewIndex !== null && togglePhotoBlur(previewIndex)}>
+                <Ionicons name={previewIndex !== null && photoBlurStates[previewIndex] ? 'eye' : 'eye-off'} size={22} color="#FFF" />
+                <Text style={styles.actionBtnText}>{previewIndex !== null && photoBlurStates[previewIndex] ? 'Unblur' : 'Blur'}</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity style={styles.actionBtn} onPress={handleReplacePhoto}>
+                <Ionicons name="swap-horizontal" size={22} color="#FFF" />
+                <Text style={styles.actionBtnText}>Replace</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity style={styles.actionBtn} onPress={handleDeletePhoto}>
+                <Ionicons name="trash" size={22} color="#FF6B6B" />
+                <Text style={[styles.actionBtnText, { color: '#FF6B6B' }]}>Delete</Text>
+              </TouchableOpacity>
+            </View>
+
+            {/* Close button */}
+            <TouchableOpacity style={styles.modalCloseBtn} onPress={closePreview}>
+              <Ionicons name="close" size={28} color="#FFF" />
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: C.background },
-  loadingContainer: {
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  loadingText: {
-    marginTop: 12,
-    fontSize: 14,
-    color: C.textLight,
-  },
+  scrollView: { flex: 1 },
   header: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingHorizontal: 16,
-    paddingVertical: 10,
-    borderBottomWidth: 1,
-    borderBottomColor: C.surface,
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    paddingHorizontal: 16, paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: C.surface,
   },
   headerTitle: { fontSize: 18, fontWeight: '700', color: C.text },
   stepLabel: { fontSize: 12, color: C.textLight },
-  subtitle: {
-    fontSize: 13,
-    color: C.textLight,
-    paddingHorizontal: SCREEN_PADDING,
-    paddingVertical: 10,
-  },
+  section: { paddingHorizontal: SCREEN_PADDING, paddingTop: 20 },
+  sectionTitle: { fontSize: 16, fontWeight: '700', color: C.text, marginBottom: 4 },
+  sectionSubtitle: { fontSize: 13, color: C.textLight, marginBottom: 12 },
 
   // Grid
-  gridContainer: {
-    flex: 1,
-    paddingHorizontal: SCREEN_PADDING,
-    paddingTop: 8,
-  },
-  grid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: GRID_GAP,
-  },
+  grid: { flexDirection: 'row', flexWrap: 'wrap', gap: GRID_GAP },
   slot: {
-    width: slotSize,
-    height: slotSize * 1.25,
-    borderRadius: 10,
-    overflow: 'hidden',
-    backgroundColor: C.surface,
+    width: slotSize, height: slotSize * 1.25, borderRadius: 10,
+    overflow: 'hidden', backgroundColor: C.surface, position: 'relative',
   },
-  slotSelected: {
-    borderWidth: 2,
-    borderColor: C.primary,
-    shadowColor: C.primary,
-    shadowOffset: { width: 0, height: 0 },
-    shadowOpacity: 0.3,
-    shadowRadius: 4,
-    elevation: 3,
+  emptySlot: { alignItems: 'center', justifyContent: 'center', opacity: 0.5 },
+  slotImage: { width: '100%', height: '100%' },
+
+  // Badges
+  orderBadge: {
+    position: 'absolute', top: 6, right: 6, width: 26, height: 26,
+    borderRadius: 13, backgroundColor: C.primary,
+    alignItems: 'center', justifyContent: 'center',
   },
-  slotEmpty: {
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderWidth: 1,
-    borderColor: C.surface,
-    borderStyle: 'dashed',
+  orderBadgeText: { fontSize: 13, fontWeight: '700', color: '#FFF' },
+  starBadge: {
+    position: 'absolute', top: 6, left: 6, width: 26, height: 26,
+    borderRadius: 13, backgroundColor: 'rgba(0,0,0,0.6)',
+    alignItems: 'center', justifyContent: 'center',
   },
-  slotPlaceholder: {
-    borderStyle: 'solid',
-    borderColor: C.surface,
-    opacity: 0.5,
-  },
-  slotImage: {
-    width: '100%',
-    height: '100%',
-  },
-  checkBadge: {
-    position: 'absolute',
-    top: 6,
-    right: 6,
-    width: 22,
-    height: 22,
-    borderRadius: 11,
-    backgroundColor: C.primary,
-    alignItems: 'center',
-    justifyContent: 'center',
-  },
-  importedBadge: {
-    position: 'absolute',
-    bottom: 6,
-    left: 6,
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    borderRadius: 4,
-    backgroundColor: 'rgba(0,0,0,0.6)',
-  },
-  importedBadgeText: {
-    fontSize: 9,
-    fontWeight: '600',
-    color: '#FFFFFF',
-  },
-  uploadText: {
-    fontSize: 10,
-    color: C.primary,
-    marginTop: 2,
-    fontWeight: '500',
+  blurIndicator: {
+    position: 'absolute', bottom: 6, right: 6, width: 26, height: 26,
+    borderRadius: 13, backgroundColor: 'rgba(0,0,0,0.6)',
+    alignItems: 'center', justifyContent: 'center',
   },
 
-  // Blur toggle
-  blurToggleCard: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: C.surface,
-    borderRadius: 12,
-    padding: 16,
-    marginTop: 20,
-    gap: 12,
+  // Select button
+  selectPhotosBtn: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: 8,
+    backgroundColor: C.primary, borderRadius: 10, paddingVertical: 14, marginTop: 16,
   },
-  blurToggleContent: {
-    flex: 1,
+  selectPhotosBtnDisabled: { backgroundColor: C.surface },
+  selectPhotosBtnText: { fontSize: 15, fontWeight: '600', color: '#FFF' },
+  selectPhotosBtnTextDisabled: { color: C.textLight },
+
+  countText: { fontSize: 13, color: C.textLight, textAlign: 'center', marginTop: 12 },
+  countWarning: { color: C.primary, fontWeight: '500' },
+
+  // Empty state
+  emptyStateContainer: {
+    alignItems: 'center', justifyContent: 'center', paddingVertical: 32,
+    backgroundColor: C.surface, borderRadius: 12, marginBottom: 16,
   },
-  blurToggleHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 8,
-    marginBottom: 4,
+  emptyStateTitle: { fontSize: 16, fontWeight: '600', color: C.text, marginTop: 12, marginBottom: 8 },
+  emptyStateText: { fontSize: 13, color: C.textLight, textAlign: 'center', paddingHorizontal: 24 },
+
+  // Profile card
+  profileCard: { backgroundColor: C.surface, borderRadius: 12, padding: 16 },
+  mainInfo: {
+    flexDirection: 'row', justifyContent: 'space-between', marginBottom: 16,
+    paddingBottom: 16, borderBottomWidth: 1, borderBottomColor: C.background,
   },
-  blurToggleTitle: {
-    fontSize: 14,
-    fontWeight: '600',
-    color: C.text,
+  infoItem: { alignItems: 'center', flex: 1 },
+  infoLabel: { fontSize: 11, color: C.textLight, marginBottom: 4 },
+  infoValue: { fontSize: 16, fontWeight: '700', color: C.text },
+  infoChips: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  chip: { backgroundColor: C.background, borderRadius: 8, paddingHorizontal: 12, paddingVertical: 8 },
+  chipLabel: { fontSize: 10, color: C.textLight, marginBottom: 2 },
+  chipValue: { fontSize: 13, fontWeight: '600', color: C.text },
+  hobbiesSection: { marginTop: 16 },
+  hobbiesLabel: { fontSize: 11, color: C.textLight, marginBottom: 8 },
+  hobbyTags: { flexDirection: 'row', flexWrap: 'wrap', gap: 6 },
+  hobbyTag: { backgroundColor: C.primary + '20', borderRadius: 12, paddingHorizontal: 10, paddingVertical: 4 },
+  hobbyText: { fontSize: 11, color: C.primary, fontWeight: '500' },
+
+  // Intents
+  intentHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 },
+  intentCount: {
+    fontSize: 12, fontWeight: '600', color: C.textLight,
+    backgroundColor: C.surface, paddingHorizontal: 8, paddingVertical: 2, borderRadius: 10,
   },
-  blurToggleHint: {
-    fontSize: 12,
-    color: C.textLight,
-    lineHeight: 18,
+  intentCountValid: { color: '#4CAF50', backgroundColor: 'rgba(76,175,80,0.15)' },
+  intentGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  intentChip: {
+    flexDirection: 'row', alignItems: 'center', gap: 6,
+    paddingHorizontal: 12, paddingVertical: 10, borderRadius: 20,
+    backgroundColor: '#2A2A2A', borderWidth: 1.5, borderColor: '#3A3A3A',
   },
+  intentChipSelected: { backgroundColor: C.primary + '18', borderColor: C.primary },
+  intentText: { fontSize: 13, color: '#CCC', fontWeight: '500' },
+  intentTextSelected: { color: C.primary, fontWeight: '600' },
 
   // Bottom
   bottomBar: {
-    paddingHorizontal: 16,
-    paddingTop: 10,
-    borderTopWidth: 1,
-    borderTopColor: C.surface,
+    position: 'absolute', bottom: 0, left: 0, right: 0,
+    paddingHorizontal: 16, paddingTop: 12, borderTopWidth: 1,
+    borderTopColor: C.surface, backgroundColor: C.background,
   },
-  selectionCount: {
-    fontSize: 13,
-    color: C.textLight,
-    textAlign: 'center',
-    marginBottom: 8,
-  },
-  selectionCountWarning: {
-    color: C.primary,
-    fontWeight: '500',
-  },
+  bottomHint: { fontSize: 12, color: C.primary, textAlign: 'center', marginBottom: 8 },
   continueBtn: {
-    flexDirection: 'row',
-    backgroundColor: C.primary,
-    borderRadius: 10,
-    paddingVertical: 14,
-    alignItems: 'center',
-    justifyContent: 'center',
-    gap: 8,
+    flexDirection: 'row', backgroundColor: C.primary, borderRadius: 10,
+    paddingVertical: 14, alignItems: 'center', justifyContent: 'center', gap: 8,
   },
   continueBtnDisabled: { backgroundColor: C.surface },
-  continueBtnText: { fontSize: 15, fontWeight: '600', color: '#FFFFFF' },
-  continueBtnTextDisabled: { color: C.textLight },
+  continueText: { fontSize: 15, fontWeight: '600', color: '#FFF' },
+  continueTextDisabled: { color: C.textLight },
+
+  // Preview Modal
+  modalOverlay: { flex: 1, backgroundColor: 'rgba(0,0,0,0.95)' },
+  modalContent: {
+    flex: 1, alignItems: 'center', justifyContent: 'center', padding: 20,
+  },
+  previewImage: {
+    width: screenWidth - 40, height: screenWidth * 1.25, borderRadius: 12,
+  },
+  previewActions: {
+    flexDirection: 'row', justifyContent: 'center', gap: 16, marginTop: 24,
+  },
+  actionBtn: {
+    alignItems: 'center', justifyContent: 'center', padding: 12,
+    backgroundColor: 'rgba(255,255,255,0.1)', borderRadius: 12, minWidth: 70,
+  },
+  actionBtnText: { fontSize: 11, color: '#FFF', marginTop: 4, fontWeight: '500' },
+  modalCloseBtn: {
+    position: 'absolute', top: 50, right: 20,
+    width: 44, height: 44, borderRadius: 22,
+    backgroundColor: 'rgba(255,255,255,0.2)',
+    alignItems: 'center', justifyContent: 'center',
+  },
 });

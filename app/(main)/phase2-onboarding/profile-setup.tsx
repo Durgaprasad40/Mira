@@ -1,15 +1,14 @@
 /**
- * Phase 2 Onboarding - Step 3: Categories & Bio
+ * Phase 2 Onboarding - Step 3: Desire (Bio) + Review
  *
- * Final setup step where user selects intent categories (3-10) and writes a bio.
- * This screen is STORE-ONLY — no Convex calls.
- *
- * IMPORTANT:
- * - Demo mode: store-only (no Convex)
- * - Prod mode: store-only for now (Convex sync can be added later)
- * - completeSetup() handles versioning automatically
+ * - Single text field named "Desire (Bio)"
+ * - Min length: 30 characters
+ * - Max length: 300 characters
+ * - One short guidance line
+ * - Review screen showing: selected photos, relationship intents, desire text
+ * - Confirm → enter Phase-2 and mark permanently complete
  */
-import React, { useState, useCallback, useRef } from 'react';
+import React, { useState, useRef } from 'react';
 import {
   View,
   Text,
@@ -19,6 +18,7 @@ import {
   TextInput,
   Alert,
   Keyboard,
+  Dimensions,
 } from 'react-native';
 import { useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -28,16 +28,15 @@ import { INCOGNITO_COLORS } from '@/lib/constants';
 import { PRIVATE_INTENT_CATEGORIES } from '@/lib/privateConstants';
 import {
   usePrivateProfileStore,
-  selectCanContinueCategories,
+  selectCanContinueDesire,
+  PHASE2_DESIRE_MIN_LENGTH,
+  PHASE2_DESIRE_MAX_LENGTH,
 } from '@/stores/privateProfileStore';
 
 const C = INCOGNITO_COLORS;
-const BIO_MAX = 500;
-const BIO_MIN = 10;
-const MIN_INTENTS = 3;
-const MAX_INTENTS = 10;
+const screenWidth = Dimensions.get('window').width;
 
-export default function Phase2ProfileSetup() {
+export default function Phase2DesireReview() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const bioInputRef = useRef<TextInput>(null);
@@ -45,55 +44,29 @@ export default function Phase2ProfileSetup() {
   // Store state
   const displayName = usePrivateProfileStore((s) => s.displayName);
   const age = usePrivateProfileStore((s) => s.age);
-  const city = usePrivateProfileStore((s) => s.city);
   const selectedPhotoUrls = usePrivateProfileStore((s) => s.selectedPhotoUrls);
   const intentKeys = usePrivateProfileStore((s) => s.intentKeys);
   const privateBio = usePrivateProfileStore((s) => s.privateBio);
   const blurMyPhoto = usePrivateProfileStore((s) => s.blurMyPhoto);
 
   // Store actions
-  const setIntentKeys = usePrivateProfileStore((s) => s.setIntentKeys);
   const setPrivateBio = usePrivateProfileStore((s) => s.setPrivateBio);
   const completeSetup = usePrivateProfileStore((s) => s.completeSetup);
 
-  // Use selector for validation
-  const canContinueFromStore = usePrivateProfileStore(selectCanContinueCategories);
-
-  // Local UI state
-  const [maxWarning, setMaxWarning] = useState(false);
+  // Validation
+  const canContinueDesire = usePrivateProfileStore(selectCanContinueDesire);
 
   // Computed values
-  const photoCount = selectedPhotoUrls.length;
-  const intentCount = intentKeys.length;
   const bioLength = privateBio.trim().length;
+  const photoCount = selectedPhotoUrls.length;
 
-  // Validation: 3-10 categories + bio >= 10 chars + photos >= 2
-  const canSave =
-    intentCount >= MIN_INTENTS &&
-    intentCount <= MAX_INTENTS &&
-    bioLength >= BIO_MIN &&
-    photoCount >= 2;
-
-  // Toggle intent category with min/max validation
-  const toggleCategory = useCallback(
-    (key: string) => {
-      if (intentKeys.includes(key as any)) {
-        // Deselect
-        setIntentKeys(intentKeys.filter((k) => k !== key) as any);
-        setMaxWarning(false);
-      } else {
-        // Select - check max limit
-        if (intentKeys.length >= MAX_INTENTS) {
-          setMaxWarning(true);
-          setTimeout(() => setMaxWarning(false), 2000);
-          return;
-        }
-        setIntentKeys([...intentKeys, key] as any);
-        setMaxWarning(false);
-      }
-    },
-    [intentKeys, setIntentKeys]
+  // Get selected intent labels
+  const selectedIntents = PRIVATE_INTENT_CATEGORIES.filter((cat) =>
+    intentKeys.includes(cat.key as any)
   );
+
+  // Can complete: desire is valid
+  const canComplete = canContinueDesire;
 
   // Focus bio input when tapping the container
   const handleBioContainerPress = () => {
@@ -102,15 +75,11 @@ export default function Phase2ProfileSetup() {
 
   // Handle completion
   const handleComplete = () => {
-    if (!canSave) {
-      if (photoCount < 2) {
-        Alert.alert('Photos Required', 'Please go back and select at least 2 photos.');
-      } else if (intentCount < MIN_INTENTS) {
-        Alert.alert('More Categories Needed', `Please select at least ${MIN_INTENTS} intent categories.`);
-      } else if (intentCount > MAX_INTENTS) {
-        Alert.alert('Too Many Categories', `Please select no more than ${MAX_INTENTS} intent categories.`);
-      } else if (bioLength < BIO_MIN) {
-        Alert.alert('Bio Required', `Please write at least ${BIO_MIN} characters about yourself.`);
+    if (!canComplete) {
+      if (bioLength < PHASE2_DESIRE_MIN_LENGTH) {
+        Alert.alert('Desire Required', `Please write at least ${PHASE2_DESIRE_MIN_LENGTH} characters about what you desire.`);
+      } else if (bioLength > PHASE2_DESIRE_MAX_LENGTH) {
+        Alert.alert('Too Long', `Please keep your desire under ${PHASE2_DESIRE_MAX_LENGTH} characters.`);
       }
       return;
     }
@@ -118,12 +87,12 @@ export default function Phase2ProfileSetup() {
     // Dismiss keyboard before navigating
     Keyboard.dismiss();
 
-    // Call completeSetup - this sets isSetupComplete + phase2SetupVersion automatically
+    // Call completeSetup - this sets isSetupComplete + phase2OnboardingCompleted permanently
     completeSetup();
 
     if (__DEV__) {
-      console.log('[Phase2ProfileSetup] Setup complete:', {
-        intentCount,
+      console.log('[Phase2DesireReview] Setup complete:', {
+        intentCount: intentKeys.length,
         bioLength,
         photoCount,
         blurMyPhoto,
@@ -135,28 +104,14 @@ export default function Phase2ProfileSetup() {
   };
 
   // Get validation hint text
-  const getIntentHint = () => {
-    if (maxWarning) {
-      return `Maximum ${MAX_INTENTS} categories allowed`;
+  const getDesireHint = () => {
+    if (bioLength < PHASE2_DESIRE_MIN_LENGTH) {
+      return `Write ${PHASE2_DESIRE_MIN_LENGTH - bioLength} more character${PHASE2_DESIRE_MIN_LENGTH - bioLength > 1 ? 's' : ''}`;
     }
-    if (intentCount < MIN_INTENTS) {
-      return `Select at least ${MIN_INTENTS - intentCount} more`;
+    if (bioLength > PHASE2_DESIRE_MAX_LENGTH) {
+      return `${bioLength - PHASE2_DESIRE_MAX_LENGTH} characters over limit`;
     }
-    return `${intentCount} of ${MIN_INTENTS}-${MAX_INTENTS} selected ✓`;
-  };
-
-  // Get bottom hint text
-  const getBottomHint = () => {
-    if (photoCount < 2) {
-      return 'Go back and select at least 2 photos';
-    }
-    if (intentCount < MIN_INTENTS) {
-      return `Select ${MIN_INTENTS - intentCount} more category${MIN_INTENTS - intentCount > 1 ? 'ies' : 'y'}`;
-    }
-    if (bioLength < BIO_MIN) {
-      return `Write ${BIO_MIN - bioLength} more character${BIO_MIN - bioLength > 1 ? 's' : ''} in bio`;
-    }
-    return '';
+    return `${bioLength}/${PHASE2_DESIRE_MAX_LENGTH}`;
   };
 
   return (
@@ -169,7 +124,7 @@ export default function Phase2ProfileSetup() {
         >
           <Ionicons name="arrow-back" size={24} color={C.text} />
         </TouchableOpacity>
-        <Text style={styles.headerTitle}>Complete Profile</Text>
+        <Text style={styles.headerTitle}>Desire & Review</Text>
         <Text style={styles.stepLabel}>Step 3 of 3</Text>
       </View>
 
@@ -178,90 +133,11 @@ export default function Phase2ProfileSetup() {
         keyboardShouldPersistTaps="handled"
         showsVerticalScrollIndicator={false}
       >
-        {/* Profile Summary Card - Owner always sees clear photo */}
-        <View style={styles.summaryCard}>
-          {selectedPhotoUrls[0] && (
-            <Image
-              source={{ uri: selectedPhotoUrls[0] }}
-              style={styles.summaryPhoto}
-              contentFit="cover"
-            />
-          )}
-          <View style={styles.summaryInfo}>
-            <Text style={styles.summaryName}>
-              {displayName || 'Anonymous'}
-              {age > 0 ? `, ${age}` : ''}
-            </Text>
-            {city ? <Text style={styles.summaryCity}>{city}</Text> : null}
-            <View style={styles.statusRow}>
-              <View style={[styles.statusBadge, photoCount >= 2 && styles.statusBadgeActive]}>
-                <Ionicons
-                  name={photoCount >= 2 ? 'checkmark-circle' : 'image-outline'}
-                  size={12}
-                  color={photoCount >= 2 ? '#4CAF50' : C.textLight}
-                />
-                <Text style={[styles.statusText, photoCount >= 2 && styles.statusTextActive]}>
-                  {photoCount} Photos
-                </Text>
-              </View>
-              {blurMyPhoto && (
-                <View style={styles.statusBadge}>
-                  <Ionicons name="eye-off" size={12} color={C.primary} />
-                  <Text style={[styles.statusText, { color: C.primary }]}>Blur ON</Text>
-                </View>
-              )}
-            </View>
-          </View>
-        </View>
-
-        {/* Intent Categories */}
+        {/* Desire (Bio) Section */}
         <View style={styles.section}>
-          <View style={styles.sectionHeader}>
-            <Text style={styles.sectionTitle}>What are you looking for?</Text>
-            <Text
-              style={[
-                styles.countBadge,
-                intentCount >= MIN_INTENTS && styles.countBadgeValid,
-                maxWarning && styles.countBadgeWarning,
-              ]}
-            >
-              {intentCount}/{MAX_INTENTS}
-            </Text>
-          </View>
-          <Text
-            style={[
-              styles.sectionHint,
-              intentCount < MIN_INTENTS && styles.hintWarning,
-              maxWarning && styles.hintError,
-            ]}
-          >
-            {getIntentHint()}
-          </Text>
-          <View style={styles.chipGrid}>
-            {PRIVATE_INTENT_CATEGORIES.map((cat) => {
-              const isSelected = intentKeys.includes(cat.key as any);
-              return (
-                <TouchableOpacity
-                  key={cat.key}
-                  style={[styles.intentChip, isSelected && styles.intentChipSelected]}
-                  onPress={() => toggleCategory(cat.key)}
-                  activeOpacity={0.7}
-                >
-                  <Text style={[styles.intentChipText, isSelected && styles.intentChipTextSelected]}>
-                    {cat.label}
-                  </Text>
-                  {isSelected && <Ionicons name="checkmark" size={14} color={C.primary} />}
-                </TouchableOpacity>
-              );
-            })}
-          </View>
-        </View>
-
-        {/* Bio Input */}
-        <View style={styles.section}>
-          <Text style={styles.sectionTitle}>Tell others about yourself</Text>
-          <Text style={styles.sectionHint}>
-            Describe your vibe, what you're open to, and what makes you unique
+          <Text style={styles.sectionTitle}>Desire (Bio)</Text>
+          <Text style={styles.guidanceLine}>
+            Share what you're looking for in a private connection.
           </Text>
           <TouchableOpacity
             style={styles.bioContainer}
@@ -273,9 +149,9 @@ export default function Phase2ProfileSetup() {
               style={styles.bioInput}
               value={privateBio}
               onChangeText={setPrivateBio}
-              maxLength={BIO_MAX}
+              maxLength={PHASE2_DESIRE_MAX_LENGTH + 50} // Allow slightly over for UX, show warning
               multiline
-              placeholder="Tell others about yourself..."
+              placeholder="Describe what you desire..."
               placeholderTextColor={C.textLight}
               textAlignVertical="top"
             />
@@ -284,34 +160,125 @@ export default function Phase2ProfileSetup() {
             <Text
               style={[
                 styles.charCount,
-                bioLength < BIO_MIN && styles.charCountWarning,
-                bioLength >= BIO_MIN && styles.charCountValid,
+                bioLength < PHASE2_DESIRE_MIN_LENGTH && styles.charCountWarning,
+                bioLength > PHASE2_DESIRE_MAX_LENGTH && styles.charCountError,
+                bioLength >= PHASE2_DESIRE_MIN_LENGTH && bioLength <= PHASE2_DESIRE_MAX_LENGTH && styles.charCountValid,
               ]}
             >
-              {bioLength < BIO_MIN ? `${BIO_MIN - bioLength} more needed` : `${bioLength}/${BIO_MAX}`}
+              {getDesireHint()}
             </Text>
           </View>
         </View>
+
+        {/* Review Section */}
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>Review Your Profile</Text>
+          <Text style={styles.sectionSubtitle}>
+            This is how your private profile will appear to others.
+          </Text>
+
+          {/* Profile Preview Card */}
+          <View style={styles.previewCard}>
+            {/* Photos Preview */}
+            <View style={styles.photosPreview}>
+              {selectedPhotoUrls.slice(0, 3).map((url, idx) => (
+                <View key={idx} style={styles.photoPreviewSlot}>
+                  <Image
+                    source={{ uri: url }}
+                    style={styles.photoPreviewImage}
+                    contentFit="cover"
+                  />
+                  {blurMyPhoto && (
+                    <View style={styles.blurOverlay}>
+                      <Ionicons name="eye-off" size={16} color="#FFFFFF" />
+                    </View>
+                  )}
+                </View>
+              ))}
+              {photoCount > 3 && (
+                <View style={[styles.photoPreviewSlot, styles.morePhotosSlot]}>
+                  <Text style={styles.morePhotosText}>+{photoCount - 3}</Text>
+                </View>
+              )}
+            </View>
+
+            {/* Name & Age */}
+            <View style={styles.nameRow}>
+              <Text style={styles.previewName}>
+                {displayName || 'Anonymous'}
+                {age > 0 ? `, ${age}` : ''}
+              </Text>
+              {blurMyPhoto && (
+                <View style={styles.blurBadge}>
+                  <Ionicons name="eye-off" size={12} color={C.primary} />
+                  <Text style={styles.blurBadgeText}>Blur ON</Text>
+                </View>
+              )}
+            </View>
+
+            {/* Relationship Intents */}
+            {selectedIntents.length > 0 && (
+              <View style={styles.intentsPreview}>
+                <Text style={styles.intentsLabel}>Looking for</Text>
+                <View style={styles.intentsTags}>
+                  {selectedIntents.map((intent) => (
+                    <View key={intent.key} style={styles.intentTag}>
+                      <Ionicons name={intent.icon as any} size={14} color={C.primary} />
+                      <Text style={styles.intentTagText}>{intent.label}</Text>
+                    </View>
+                  ))}
+                </View>
+              </View>
+            )}
+
+            {/* Desire Preview */}
+            {privateBio.trim().length > 0 && (
+              <View style={styles.desirePreview}>
+                <Text style={styles.desireLabel}>Desire</Text>
+                <Text style={styles.desireText} numberOfLines={4}>
+                  {privateBio.trim()}
+                </Text>
+              </View>
+            )}
+          </View>
+        </View>
+
+        {/* Info Note */}
+        <View style={styles.infoNote}>
+          <Ionicons name="information-circle-outline" size={18} color={C.textLight} />
+          <Text style={styles.infoNoteText}>
+            After completing setup, you can edit your profile anytime from Phase-2 settings.
+          </Text>
+        </View>
+
+        {/* Bottom spacing */}
+        <View style={{ height: 100 }} />
       </ScrollView>
 
       {/* Bottom Action */}
       <View style={[styles.bottomBar, { paddingBottom: Math.max(insets.bottom, 16) + 20 }]}>
-        {!canSave && (
-          <Text style={styles.bottomHint}>{getBottomHint()}</Text>
+        {!canComplete && (
+          <Text style={styles.bottomHint}>
+            {bioLength < PHASE2_DESIRE_MIN_LENGTH
+              ? `Write ${PHASE2_DESIRE_MIN_LENGTH - bioLength} more character${PHASE2_DESIRE_MIN_LENGTH - bioLength > 1 ? 's' : ''} in Desire`
+              : bioLength > PHASE2_DESIRE_MAX_LENGTH
+              ? 'Desire text is too long'
+              : ''}
+          </Text>
         )}
         <TouchableOpacity
-          style={[styles.saveBtn, !canSave && styles.saveBtnDisabled]}
+          style={[styles.completeBtn, !canComplete && styles.completeBtnDisabled]}
           onPress={handleComplete}
-          disabled={!canSave}
+          disabled={!canComplete}
           activeOpacity={0.8}
         >
-          <Text style={[styles.saveBtnText, !canSave && styles.saveBtnTextDisabled]}>
-            Complete Setup
+          <Text style={[styles.completeBtnText, !canComplete && styles.completeBtnTextDisabled]}>
+            Enter Private Mode
           </Text>
           <Ionicons
             name="checkmark-circle"
             size={20}
-            color={canSave ? '#FFFFFF' : C.textLight}
+            color={canComplete ? '#FFFFFF' : C.textLight}
           />
         </TouchableOpacity>
       </View>
@@ -334,180 +301,195 @@ const styles = StyleSheet.create({
   stepLabel: { fontSize: 12, color: C.textLight },
   content: { padding: 16, paddingBottom: 40 },
 
-  // Summary Card
-  summaryCard: {
-    flexDirection: 'row',
-    backgroundColor: C.surface,
-    borderRadius: 16,
-    padding: 16,
-    marginBottom: 24,
-    gap: 16,
-  },
-  summaryPhoto: {
-    width: 80,
-    height: 100,
-    borderRadius: 12,
-    backgroundColor: C.accent,
-  },
-  summaryInfo: {
-    flex: 1,
-    justifyContent: 'center',
-  },
-  summaryName: {
-    fontSize: 18,
-    fontWeight: '700',
-    color: C.text,
-  },
-  summaryCity: {
-    fontSize: 13,
-    color: C.textLight,
-    marginTop: 2,
-  },
-  statusRow: {
-    flexDirection: 'row',
-    gap: 8,
-    marginTop: 12,
-    flexWrap: 'wrap',
-  },
-  statusBadge: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 4,
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 12,
-    backgroundColor: C.background,
-  },
-  statusBadgeActive: {
-    backgroundColor: 'rgba(76, 175, 80, 0.1)',
-  },
-  statusText: {
-    fontSize: 11,
-    color: C.textLight,
-  },
-  statusTextActive: {
-    color: '#4CAF50',
-    fontWeight: '500',
-  },
-
   // Sections
-  section: {
-    marginBottom: 24,
-  },
-  sectionHeader: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    marginBottom: 4,
-  },
-  sectionTitle: {
-    fontSize: 16,
-    fontWeight: '700',
-    color: C.text,
-  },
-  countBadge: {
-    fontSize: 12,
-    fontWeight: '600',
-    color: C.textLight,
-    backgroundColor: C.surface,
-    paddingHorizontal: 8,
-    paddingVertical: 2,
-    borderRadius: 10,
-  },
-  countBadgeValid: {
-    color: '#4CAF50',
-    backgroundColor: 'rgba(76, 175, 80, 0.15)',
-  },
-  countBadgeWarning: {
-    color: '#FF6B6B',
-    backgroundColor: 'rgba(255, 107, 107, 0.15)',
-  },
-  sectionHint: {
-    fontSize: 12,
-    color: C.textLight,
-    marginBottom: 12,
-  },
-  hintWarning: {
-    color: C.primary,
-  },
-  hintError: {
-    color: '#FF6B6B',
-    fontWeight: '500',
-  },
-
-  // Chip Grid
-  chipGrid: {
-    flexDirection: 'row',
-    flexWrap: 'wrap',
-    gap: 8,
-  },
-
-  // Intent Chips
-  intentChip: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    paddingHorizontal: 14,
-    paddingVertical: 10,
-    borderRadius: 20,
-    backgroundColor: '#2A2A2A',
-    borderWidth: 1.5,
-    borderColor: '#3A3A3A',
-  },
-  intentChipSelected: {
-    backgroundColor: C.primary + '18',
-    borderColor: C.primary,
-    shadowColor: C.primary,
-    shadowOffset: { width: 0, height: 0 },
-    shadowOpacity: 0.4,
-    shadowRadius: 6,
-    elevation: 3,
-  },
-  intentChipText: {
-    fontSize: 13,
-    color: '#CCCCCC',
-    fontWeight: '500',
-  },
-  intentChipTextSelected: {
-    color: C.primary,
-    fontWeight: '600',
-  },
+  section: { marginBottom: 24 },
+  sectionTitle: { fontSize: 16, fontWeight: '700', color: C.text, marginBottom: 4 },
+  sectionSubtitle: { fontSize: 13, color: C.textLight, marginBottom: 12 },
+  guidanceLine: { fontSize: 13, color: C.textLight, marginBottom: 12, fontStyle: 'italic' },
 
   // Bio Input
   bioContainer: {
     backgroundColor: C.surface,
     borderRadius: 12,
-    minHeight: 120,
+    minHeight: 140,
   },
   bioInput: {
     padding: 14,
     fontSize: 14,
     color: C.text,
-    minHeight: 120,
+    minHeight: 140,
     textAlignVertical: 'top',
+    lineHeight: 22,
   },
   bioFooter: {
     flexDirection: 'row',
     justifyContent: 'flex-end',
-    marginTop: 6,
+    marginTop: 8,
   },
   charCount: {
-    fontSize: 11,
+    fontSize: 12,
     color: C.textLight,
   },
   charCountWarning: {
     color: C.primary,
     fontWeight: '500',
   },
+  charCountError: {
+    color: '#FF6B6B',
+    fontWeight: '600',
+  },
   charCountValid: {
     color: '#4CAF50',
   },
 
+  // Preview Card
+  previewCard: {
+    backgroundColor: C.surface,
+    borderRadius: 16,
+    padding: 16,
+  },
+
+  // Photos Preview
+  photosPreview: {
+    flexDirection: 'row',
+    gap: 8,
+    marginBottom: 16,
+  },
+  photoPreviewSlot: {
+    width: (screenWidth - 64 - 24) / 4,
+    height: (screenWidth - 64 - 24) / 4 * 1.2,
+    borderRadius: 8,
+    overflow: 'hidden',
+    backgroundColor: C.background,
+  },
+  photoPreviewImage: {
+    width: '100%',
+    height: '100%',
+  },
+  blurOverlay: {
+    position: 'absolute',
+    bottom: 0,
+    left: 0,
+    right: 0,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    paddingVertical: 4,
+    alignItems: 'center',
+  },
+  morePhotosSlot: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: C.primary + '20',
+  },
+  morePhotosText: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: C.primary,
+  },
+
+  // Name Row
+  nameRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 12,
+  },
+  previewName: {
+    fontSize: 20,
+    fontWeight: '700',
+    color: C.text,
+  },
+  blurBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    backgroundColor: C.primary + '20',
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 12,
+  },
+  blurBadgeText: {
+    fontSize: 11,
+    color: C.primary,
+    fontWeight: '500',
+  },
+
+  // Intents Preview
+  intentsPreview: {
+    marginBottom: 12,
+  },
+  intentsLabel: {
+    fontSize: 11,
+    color: C.textLight,
+    marginBottom: 6,
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+  },
+  intentsTags: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 6,
+  },
+  intentTag: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    backgroundColor: C.primary + '15',
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 14,
+  },
+  intentTagText: {
+    fontSize: 12,
+    color: C.primary,
+    fontWeight: '500',
+  },
+
+  // Desire Preview
+  desirePreview: {
+    paddingTop: 12,
+    borderTopWidth: 1,
+    borderTopColor: C.background,
+  },
+  desireLabel: {
+    fontSize: 11,
+    color: C.textLight,
+    marginBottom: 6,
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+  },
+  desireText: {
+    fontSize: 14,
+    color: C.text,
+    lineHeight: 20,
+  },
+
+  // Info Note
+  infoNote: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    gap: 10,
+    paddingVertical: 12,
+    paddingHorizontal: 14,
+    backgroundColor: C.surface,
+    borderRadius: 8,
+  },
+  infoNoteText: {
+    flex: 1,
+    fontSize: 12,
+    color: C.textLight,
+    lineHeight: 18,
+  },
+
   // Bottom Bar
   bottomBar: {
+    position: 'absolute',
+    bottom: 0,
+    left: 0,
+    right: 0,
     padding: 16,
     borderTopWidth: 1,
     borderTopColor: C.surface,
+    backgroundColor: C.background,
   },
   bottomHint: {
     fontSize: 12,
@@ -515,7 +497,7 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     marginBottom: 10,
   },
-  saveBtn: {
+  completeBtn: {
     flexDirection: 'row',
     backgroundColor: C.primary,
     borderRadius: 12,
@@ -524,15 +506,15 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     gap: 8,
   },
-  saveBtnDisabled: {
+  completeBtnDisabled: {
     backgroundColor: C.surface,
   },
-  saveBtnText: {
+  completeBtnText: {
     fontSize: 16,
     fontWeight: '700',
     color: '#FFFFFF',
   },
-  saveBtnTextDisabled: {
+  completeBtnTextDisabled: {
     color: C.textLight,
   },
 });

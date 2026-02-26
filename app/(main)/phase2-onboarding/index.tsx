@@ -1,10 +1,9 @@
 /**
  * Phase 2 Onboarding - Step 1: Terms & Consent
  *
- * Fresh start for Phase-2:
- * - NO auto-import from Phase-1
  * - User must agree to Private Mode rules
- * - Proceeds to photo selection (Step 2)
+ * - Imports Phase-1 profile data from Convex (or demoStore in demo mode)
+ * - Proceeds to profile setup (Step 2)
  *
  * 18+ check already done by PrivateConsentGate in _layout.tsx
  */
@@ -15,12 +14,196 @@ import {
   StyleSheet,
   TouchableOpacity,
   ScrollView,
+  ActivityIndicator,
+  Alert,
 } from "react-native";
 import { useRouter } from "expo-router";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
+import { useQuery } from "convex/react";
+import * as FileSystem from "expo-file-system/legacy";
+import { api } from "@/convex/_generated/api";
 import { INCOGNITO_COLORS } from "@/lib/constants";
-import { usePrivateProfileStore } from "@/stores/privateProfileStore";
+import { usePrivateProfileStore, Phase1ProfileData } from "@/stores/privateProfileStore";
+import { useAuthStore } from "@/stores/authStore";
+import { useOnboardingStore } from "@/stores/onboardingStore";
+import { isDemoMode } from "@/hooks/useConvex";
+import { getDemoCurrentUser } from "@/lib/demoData";
+import { useDemoStore, photosToSlotsStable } from "@/stores/demoStore";
+import { PhotoSlots9, createEmptyPhotoSlots } from "@/types";
+
+// Persistent directory for Phase-1 photos imported into Phase-2
+const PHASE1_PHOTOS_DIR = "mira/phase1Photos/";
+
+/**
+ * Check if a URI is a valid persistent photo URI.
+ * Only accepts local file:// URIs that are NOT in cache directories.
+ */
+function isValidPhotoUri(uri: string | null | undefined): boolean {
+  if (!uri || typeof uri !== 'string' || uri.length === 0) return false;
+  if (!uri.startsWith('file://')) return false;
+  if (uri.includes('/cache/') || uri.includes('/Cache/') || uri.includes('ImageManipulator')) return false;
+  if (uri.includes('unsplash.com')) return false;
+  return true;
+}
+
+/**
+ * Validate and filter PhotoSlots9 - keeps slot positions, invalid URIs become null.
+ */
+function validatePhotoSlots(slots: PhotoSlots9): PhotoSlots9 {
+  const result: PhotoSlots9 = createEmptyPhotoSlots();
+  for (let i = 0; i < 9; i++) {
+    const uri = slots[i];
+    result[i] = isValidPhotoUri(uri) ? uri : null;
+  }
+  return result;
+}
+
+/**
+ * Filter out stale cache URIs that no longer exist on disk.
+ * Cache files (ImageManipulator, etc.) are deleted after app relaunch.
+ * Returns only URIs that actually exist or are remote (https).
+ */
+async function filterStaleCacheUris(uris: string[]): Promise<{ kept: string[]; droppedMissing: number }> {
+  const kept: string[] = [];
+  let droppedMissing = 0;
+
+  for (const uri of uris) {
+    if (!uri || typeof uri !== "string") continue;
+
+    // Remote URLs are always valid (no local file check needed)
+    if (uri.startsWith("http://") || uri.startsWith("https://")) {
+      kept.push(uri);
+      continue;
+    }
+
+    // content:// and ph:// are system-managed, assume valid
+    if (uri.startsWith("content://") || uri.startsWith("ph://")) {
+      kept.push(uri);
+      continue;
+    }
+
+    // For file:// URIs, check if the file actually exists
+    if (uri.startsWith("file://")) {
+      try {
+        const info = await FileSystem.getInfoAsync(uri);
+        if (info.exists) {
+          kept.push(uri);
+        } else {
+          droppedMissing++;
+          if (__DEV__) console.log("[FilterStale] Dropped missing:", uri.slice(-60));
+        }
+      } catch (err) {
+        droppedMissing++;
+        if (__DEV__) console.log("[FilterStale] Check error:", uri.slice(-60), err);
+      }
+      continue;
+    }
+
+    // Unknown scheme, keep it
+    kept.push(uri);
+  }
+
+  return { kept, droppedMissing };
+}
+
+/**
+ * Copy cache file:// URIs to persistent storage so they survive app restarts.
+ * - Cache URIs (ImageManipulator, etc.) are volatile and disappear on relaunch
+ * - We copy them to FileSystem.documentDirectory which is persistent
+ */
+async function persistPhotoUris(uris: string[]): Promise<string[]> {
+  const results: string[] = [];
+  const destDir = FileSystem.documentDirectory + PHASE1_PHOTOS_DIR;
+
+  // Ensure destination directory exists (ignore errors if already exists)
+  await FileSystem.makeDirectoryAsync(destDir, { intermediates: true }).catch(() => {});
+  if (__DEV__) console.log("[PersistPhotos] destDir:", destDir);
+
+  for (const uri of uris) {
+    // CRITICAL: Keep fullUri as the UNMODIFIED original - never slice it
+    const fullUri = uri;
+    // short is ONLY for logging - NEVER use it for file operations
+    const short = typeof fullUri === "string" ? fullUri.slice(-70) : String(fullUri);
+
+    // Skip empty/invalid
+    if (!fullUri || typeof fullUri !== "string") continue;
+
+    // DEV assertion: fullUri must start with valid prefix
+    if (__DEV__) {
+      const isValidPrefix = fullUri.startsWith("file://") || fullUri.startsWith("http") || fullUri.startsWith("content://");
+      if (!isValidPrefix) {
+        console.error("[PersistPhotos] INVALID URI PREFIX:", fullUri);
+      }
+    }
+
+    // http/https/content/ph URIs don't need copying - they're either remote or system-managed
+    if (fullUri.startsWith("http") || fullUri.startsWith("content://") || fullUri.startsWith("ph://")) {
+      results.push(fullUri);
+      continue;
+    }
+
+    // Check if it's a cache URI that needs copying
+    const isCache = fullUri.startsWith("file://") &&
+      (fullUri.includes("/cache/") || fullUri.includes("/Cache/") || fullUri.includes("ImageManipulator"));
+
+    if (!isCache) {
+      // Already persistent or unknown format, keep as-is
+      results.push(fullUri);
+      continue;
+    }
+
+    // Copy cache file to persistent storage
+    try {
+      // Verify source exists - MUST use fullUri
+      if (__DEV__) console.log("[PersistPhotos] Checking source:", fullUri);
+      const sourceInfo = await FileSystem.getInfoAsync(fullUri);
+      if (!sourceInfo.exists) {
+        if (__DEV__) console.warn("[PersistPhotos] Source missing (short):", short);
+        // Still add to results so fallback works
+        results.push(fullUri);
+        continue;
+      }
+
+      // Generate filename and destination path
+      const filename = fullUri.split("/").pop() || `p1_${Date.now()}.jpg`;
+      const dest = destDir + filename;
+
+      // Check if already copied
+      const destInfo = await FileSystem.getInfoAsync(dest);
+      if (destInfo.exists) {
+        if (__DEV__) console.log("[PersistPhotos] Already exists:", dest);
+        results.push(dest);
+        continue;
+      }
+
+      // Copy to persistent storage - MUST use fullUri
+      await FileSystem.copyAsync({ from: fullUri, to: dest });
+
+      // Verify copy succeeded
+      const check = await FileSystem.getInfoAsync(dest);
+      if (__DEV__) {
+        console.log("[PersistPhotos] Copied:", { from: short, dest, exists: check.exists });
+      }
+
+      if (check.exists) {
+        results.push(dest);
+      } else {
+        results.push(fullUri);
+      }
+    } catch (err) {
+      if (__DEV__) console.error("[PersistPhotos] Error (short):", short, err);
+      results.push(fullUri);
+    }
+  }
+
+  if (__DEV__) {
+    console.log("[PersistPhotos] Done:", { input: uris.length, output: results.length });
+    results.forEach((r, i) => console.log(`[PersistPhotos] [${i}]:`, r));
+  }
+
+  return results;
+}
 
 const C = INCOGNITO_COLORS;
 
@@ -31,17 +214,144 @@ export default function Phase2OnboardingTerms() {
   // Terms checkboxes
   const [rulesChecked, setRulesChecked] = useState(false);
   const [screenshotChecked, setScreenshotChecked] = useState(false);
+  const [isProcessing, setIsProcessing] = useState(false);
 
   const setAcceptedTermsAt = usePrivateProfileStore((s) => s.setAcceptedTermsAt);
+  const importPhase1Data = usePrivateProfileStore((s) => s.importPhase1Data);
 
-  const canContinue = rulesChecked && screenshotChecked;
+  // Get userId for Convex query
+  const userId = useAuthStore((s) => s.userId);
 
-  const handleContinue = () => {
-    // Mark terms accepted
-    setAcceptedTermsAt(Date.now());
+  // Query Phase-1 profile from Convex (the real source of truth after onboarding)
+  const convexUser = useQuery(
+    api.users.getCurrentUser,
+    !isDemoMode && userId ? { userId: userId as any } : 'skip'
+  );
 
-    // Proceed to photo selection (fresh start, no Phase-1 import)
-    router.push("/(main)/phase2-onboarding/photo-select" as any);
+  // For demo mode, get demo user data
+  const demoUser = isDemoMode ? getDemoCurrentUser() : null;
+
+  // Extract photos from user object (handles different formats)
+  const extractPhotos = (user: any): { url: string }[] => {
+    if (!user) return [];
+
+    // Try user.photos first (most common)
+    let rawPhotos = user.photos;
+
+    // Fallback to user.photoUrls if photos doesn't exist
+    if (!rawPhotos?.length && user.photoUrls?.length) {
+      rawPhotos = user.photoUrls;
+    }
+
+    if (!rawPhotos?.length) return [];
+
+    return rawPhotos
+      .map((p: any) => {
+        // Handle string URLs directly
+        if (typeof p === 'string' && p.length > 0) {
+          return { url: p };
+        }
+        // Handle { url: string } objects
+        if (p?.url && typeof p.url === 'string' && p.url.length > 0) {
+          return { url: p.url };
+        }
+        // Handle { uri: string } objects
+        if (p?.uri && typeof p.uri === 'string' && p.uri.length > 0) {
+          return { url: p.uri };
+        }
+        return null;
+      })
+      .filter((p: any): p is { url: string } => p !== null);
+  };
+
+  const canContinue = rulesChecked && screenshotChecked && !isProcessing;
+
+  const handleContinue = async () => {
+    if (isProcessing) return;
+    setIsProcessing(true);
+
+    try {
+      // Mark terms accepted
+      setAcceptedTermsAt(Date.now());
+
+      // Get Phase-1 profile data from Convex or demo
+      const phase1User = isDemoMode ? demoUser : convexUser;
+
+      // ============================================================
+      // SINGLE SOURCE OF TRUTH: Use getCurrentProfile() for import
+      // This ensures Phase-2 sees the same profile as Edit Profile
+      // ============================================================
+      const canonicalProfile = useDemoStore.getState().getCurrentProfile();
+
+      // FATAL: If no profile exists, block progression
+      if (!canonicalProfile) {
+        console.error("[P2 IMPORT] FATAL: No current profile found");
+        Alert.alert("Error", "No profile found. Please complete Phase-1 setup first.");
+        setIsProcessing(false);
+        return;
+      }
+
+      const profileId = canonicalProfile.userId;
+      let phase1PhotoSlots: PhotoSlots9 = createEmptyPhotoSlots();
+
+      // Use photoSlots from canonical profile (single source of truth)
+      if (canonicalProfile.photoSlots && canonicalProfile.photoSlots.some((s) => s !== null)) {
+        phase1PhotoSlots = [...canonicalProfile.photoSlots] as PhotoSlots9;
+      }
+      // Fallback: Convert flat photos array to slots
+      else if (canonicalProfile.photos && canonicalProfile.photos.length > 0) {
+        canonicalProfile.photos.forEach((p, idx) => {
+          if (idx < 9 && p.url) phase1PhotoSlots[idx] = p.url;
+        });
+      }
+      // Final fallback: onboardingStore for fresh users
+      else {
+        phase1PhotoSlots = useOnboardingStore.getState().photos;
+      }
+
+      // Validate slots - invalid URIs become null but slot positions are preserved
+      const validatedSlots = validatePhotoSlots(phase1PhotoSlots);
+
+      // Count non-null slots for logging
+      const nonNullSlots = validatedSlots
+        .map((uri, idx) => (uri ? idx : -1))
+        .filter((idx) => idx >= 0);
+
+      if (__DEV__) {
+        console.log("[P2 IMPORT]", {
+          profileId,
+          name: canonicalProfile.name,
+          nonNullSlots,
+          source: "demoStore.currentProfile",
+        });
+      }
+
+      // Build Phase-1 data object with SLOT-BASED photos
+      const phase1Data: Phase1ProfileData = {
+        name: canonicalProfile.name || phase1User?.name || '',
+        photoSlots: validatedSlots, // Pass full PhotoSlots9
+        photos: validatedSlots.filter(Boolean).map((url) => ({ url: url! })), // Legacy compat
+        dateOfBirth: canonicalProfile.dateOfBirth || phase1User?.dateOfBirth || '',
+        gender: canonicalProfile.gender || phase1User?.gender || '',
+        activities: canonicalProfile.activities || phase1User?.activities || [],
+        maxDistance: canonicalProfile.maxDistance || phase1User?.maxDistance || 50,
+        height: canonicalProfile.height ?? phase1User?.height ?? null,
+        smoking: canonicalProfile.smoking ?? phase1User?.smoking ?? null,
+        drinking: canonicalProfile.drinking ?? phase1User?.drinking ?? null,
+        kids: canonicalProfile.kids ?? phase1User?.kids ?? null,
+        education: canonicalProfile.education ?? phase1User?.education ?? null,
+        religion: canonicalProfile.religion ?? phase1User?.religion ?? null,
+      };
+
+      importPhase1Data(phase1Data);
+
+      // Proceed to profile setup (Step 2)
+      router.push("/(main)/phase2-onboarding/photo-select" as any);
+    } catch (err) {
+      if (__DEV__) console.error("[Phase2Onboarding] Error:", err);
+    } finally {
+      setIsProcessing(false);
+    }
   };
 
   return (
@@ -163,19 +473,28 @@ export default function Phase2OnboardingTerms() {
           disabled={!canContinue}
           activeOpacity={0.8}
         >
-          <Text
-            style={[
-              styles.continueBtnText,
-              !canContinue && styles.continueBtnTextDisabled,
-            ]}
-          >
-            Continue
-          </Text>
-          <Ionicons
-            name="arrow-forward"
-            size={18}
-            color={canContinue ? "#FFFFFF" : C.textLight}
-          />
+          {isProcessing ? (
+            <>
+              <ActivityIndicator size="small" color="#FFFFFF" />
+              <Text style={styles.continueBtnText}>Importing...</Text>
+            </>
+          ) : (
+            <>
+              <Text
+                style={[
+                  styles.continueBtnText,
+                  !canContinue && styles.continueBtnTextDisabled,
+                ]}
+              >
+                Continue
+              </Text>
+              <Ionicons
+                name="arrow-forward"
+                size={18}
+                color={canContinue ? "#FFFFFF" : C.textLight}
+              />
+            </>
+          )}
         </TouchableOpacity>
       </View>
     </View>

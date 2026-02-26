@@ -14,39 +14,54 @@ import {
   ExerciseStatus,
   PetType,
   InsectType,
+  PhotoSlots9,
+  createEmptyPhotoSlots,
 } from "@/types";
 
 // Display photo privacy variant
 export type DisplayPhotoVariant = 'original' | 'blurred' | 'cartoon';
 
 /**
- * Normalize photos array to exactly 9 slots.
- * - Missing/undefined input => Array(9).fill(null)
- * - string[] (old data) => copy into slots, fill remaining with null
- * - (string|null)[] shorter than 9 => pad with null
- * - Longer than 9 => slice(0,9)
- * - Convert any undefined/'' to null
+ * Check if a URI is a valid persistent photo URI.
+ * Only accepts local file:// URIs that are NOT in cache directories.
+ * Rejects: cache URIs, Unsplash URLs, any http/https URLs.
  */
-function normalizePhotos(input: unknown): (string | null)[] {
+function isValidPhotoUri(uri: string | null | undefined): boolean {
+  if (!uri || typeof uri !== 'string' || uri.length === 0) return false;
+  // Must be a local file:// URI
+  if (!uri.startsWith('file://')) return false;
+  // Reject cache URIs (they disappear on app restart)
+  if (uri.includes('/cache/') || uri.includes('/Cache/') || uri.includes('ImageManipulator')) return false;
+  // Reject any Unsplash/demo URLs (should never happen for file://, but extra safety)
+  if (uri.includes('unsplash.com')) return false;
+  return true;
+}
+
+/**
+ * Normalize photos array to exactly 9 slots (PhotoSlots9).
+ * - Missing/undefined input => 9 nulls
+ * - string[] (old data) => copy into slots, fill remaining with null
+ * - Filter out invalid URIs (cache, Unsplash, non-file://)
+ * - Ensure final is always length 9
+ */
+function normalizePhotos(input: unknown): PhotoSlots9 {
+  const result: PhotoSlots9 = createEmptyPhotoSlots();
+
   // Handle missing/undefined/non-array
   if (!input || !Array.isArray(input)) {
-    return Array(9).fill(null);
+    return result;
   }
 
-  // Normalize each slot: convert undefined/'' to null, keep valid strings
-  const normalized: (string | null)[] = input.slice(0, 9).map((item) => {
-    if (typeof item === 'string' && item.length > 0) {
-      return item;
+  // Copy valid URIs into their slots (preserving index)
+  for (let i = 0; i < Math.min(input.length, 9); i++) {
+    const item = input[i];
+    if (isValidPhotoUri(item)) {
+      result[i] = item;
     }
-    return null;
-  });
-
-  // Pad to exactly 9 slots if shorter
-  while (normalized.length < 9) {
-    normalized.push(null);
+    // Invalid URIs become null (slot preserved but empty)
   }
 
-  return normalized;
+  return result;
 }
 
 // OB-1: Hydration timing for timeout fallback
@@ -74,7 +89,7 @@ interface OnboardingState {
   gender: Gender | null;
   lgbtqSelf: LgbtqOption[]; // "What am I?" - identity, optional, max 2
   lgbtqPreference: LgbtqOption[]; // "What I need?" - dating preference, optional, max 2
-  photos: (string | null)[];
+  photos: PhotoSlots9;
   verificationPhotoUri: string | null;
   displayPhotoVariant: DisplayPhotoVariant; // Privacy option: original, blurred, or cartoon
   bio: string;
@@ -116,7 +131,7 @@ interface OnboardingState {
   addPhoto: (uri: string) => void;
   setPhotoAtIndex: (index: number, uri: string) => void;
   removePhoto: (index: number) => void;
-  reorderPhotos: (photos: (string | null)[]) => void;
+  reorderPhotos: (photos: PhotoSlots9) => void;
   setVerificationPhoto: (uri: string | null) => void;
   setDisplayPhotoVariant: (variant: DisplayPhotoVariant) => void;
   setBio: (bio: string) => void;
@@ -146,6 +161,7 @@ interface OnboardingState {
   setMaxAge: (age: number) => void;
   setMaxDistance: (distance: number) => void;
   reset: () => void;
+  clearAllPhotos: () => void; // DEV: Clear all photos for re-selection
 
   // OB-1: Hydration state for startup safety
   _hasHydrated: boolean;
@@ -163,7 +179,7 @@ const initialState = {
   gender: null,
   lgbtqSelf: [] as LgbtqOption[],
   lgbtqPreference: [] as LgbtqOption[],
-  photos: [null, null, null, null, null, null, null, null, null] as (string | null)[],
+  photos: createEmptyPhotoSlots(),
   verificationPhotoUri: null,
   displayPhotoVariant: 'original' as DisplayPhotoVariant,
   bio: "",
@@ -247,10 +263,11 @@ export const useOnboardingStore = create<OnboardingState>()(
       // Add photo to first available empty slot
       addPhoto: (uri) =>
         set((state) => {
-          const newPhotos = [...state.photos];
+          const newPhotos: PhotoSlots9 = [...state.photos] as PhotoSlots9;
           const emptyIndex = newPhotos.findIndex((p) => p === null || p === '');
           if (emptyIndex !== -1) {
             newPhotos[emptyIndex] = uri;
+            if (__DEV__) console.log(`[P1] addPhoto slot ${emptyIndex} ->`, uri.slice(-40));
           }
           return { photos: newPhotos };
         }),
@@ -259,8 +276,9 @@ export const useOnboardingStore = create<OnboardingState>()(
       setPhotoAtIndex: (index, uri) =>
         set((state) => {
           if (index < 0 || index >= 9) return state;
-          const newPhotos = [...state.photos];
+          const newPhotos: PhotoSlots9 = [...state.photos] as PhotoSlots9;
           newPhotos[index] = uri;
+          if (__DEV__) console.log(`[P1] set slot ${index} ->`, uri.slice(-40));
           return { photos: newPhotos };
         }),
 
@@ -268,8 +286,9 @@ export const useOnboardingStore = create<OnboardingState>()(
       removePhoto: (index) =>
         set((state) => {
           if (index < 0 || index >= 9) return state;
-          const newPhotos = [...state.photos];
+          const newPhotos: PhotoSlots9 = [...state.photos] as PhotoSlots9;
           newPhotos[index] = null;
+          if (__DEV__) console.log(`[P1] clear slot ${index}`);
           return { photos: newPhotos };
         }),
 
@@ -359,6 +378,15 @@ export const useOnboardingStore = create<OnboardingState>()(
       setMaxDistance: (maxDistance) => set({ maxDistance }),
 
       reset: () => set(initialState),
+
+      // DEV: Clear all photos for re-selection (used after stale cache migration)
+      clearAllPhotos: () => {
+        if (__DEV__) console.log('[onboardingStore] clearAllPhotos called');
+        set({
+          photos: createEmptyPhotoSlots(),
+          verificationPhotoUri: null,
+        });
+      },
     }),
     {
       name: "onboarding-storage",
@@ -372,9 +400,22 @@ export const useOnboardingStore = create<OnboardingState>()(
           const hydrationTime = Date.now() - ONBOARDING_STORE_LOAD_TIME;
           console.log(`[HYDRATION] onboardingStore: ${hydrationTime}ms`);
         }
-        // Normalize photos array from persisted data (handles old string[] format, undefined slots, etc.)
+        // Normalize photos array from persisted data
+        // normalizePhotos handles: old string[] format, filtering invalid URIs, ensuring length 9
         if (state) {
-          const normalized = normalizePhotos(state.photos);
+          const rawPhotos = state.photos;
+          const normalized = normalizePhotos(rawPhotos);
+
+          // Log migration if photos were cleared
+          const rawCount = Array.isArray(rawPhotos) ? rawPhotos.filter(Boolean).length : 0;
+          const normalizedCount = normalized.filter(Boolean).length;
+          if (rawCount > 0 && normalizedCount < rawCount) {
+            if (__DEV__) {
+              console.warn('[MIGRATION] Cleared invalid photo URIs. User must re-add photos.');
+              console.log('[onboardingStore] Photo migration:', { before: rawCount, after: normalizedCount });
+            }
+          }
+
           useOnboardingStore.setState({ photos: normalized });
         }
         state?.setHasHydrated(true);

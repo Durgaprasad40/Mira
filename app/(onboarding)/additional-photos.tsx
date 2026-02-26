@@ -17,6 +17,7 @@ import { Image } from 'expo-image';
 import { useRouter, useLocalSearchParams } from 'expo-router';
 import * as ImagePicker from 'expo-image-picker';
 import * as ImageManipulator from 'expo-image-manipulator';
+import * as FileSystem from 'expo-file-system/legacy';
 import { COLORS, VALIDATION } from '@/lib/constants';
 import { Button } from '@/components/ui';
 import { useOnboardingStore, DisplayPhotoVariant } from '@/stores/onboardingStore';
@@ -28,9 +29,9 @@ import { OnboardingProgressHeader } from '@/components/OnboardingProgressHeader'
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 
-// Total 7 photos: 1 primary (circle) + 6 additional (grid)
-const TOTAL_SLOTS = 7;
-const GRID_SLOTS = 6; // Additional photos grid slots (indices 1-6)
+// Total 9 photos: 1 primary (circle) + 8 additional (grid)
+const TOTAL_SLOTS = 9;
+const GRID_SLOTS = 8; // Additional photos grid slots (indices 1-8)
 const MIN_PHOTOS_REQUIRED = 2; // Must have at least 2 photos to continue
 
 // Compute uniform tile size: 3 columns with gaps, portrait aspect ratio
@@ -42,8 +43,50 @@ const TILE_HEIGHT = TILE_WIDTH * 1.4; // Portrait aspect ratio
 // Primary photo circle size
 const PRIMARY_CIRCLE_SIZE = 160;
 
+// Persistent photos directory - files here survive app restarts
+const PHOTOS_DIR = FileSystem.documentDirectory + 'mira/photos/';
+
+// Ensure photos directory exists
+async function ensurePhotosDir(): Promise<void> {
+  const dirInfo = await FileSystem.getInfoAsync(PHOTOS_DIR);
+  if (!dirInfo.exists) {
+    await FileSystem.makeDirectoryAsync(PHOTOS_DIR, { intermediates: true });
+  }
+}
+
+// Generate unique filename
+function generatePhotoFilename(): string {
+  const timestamp = Date.now();
+  const random = Math.random().toString(36).slice(2, 10);
+  return `photo_${timestamp}_${random}.jpg`;
+}
+
+// Copy cache URI to persistent storage
+// Returns the persistent URI, or falls back to original if copy fails
+async function persistPhoto(cacheUri: string): Promise<string> {
+  try {
+    await ensurePhotosDir();
+    const filename = generatePhotoFilename();
+    const persistentUri = PHOTOS_DIR + filename;
+
+    await FileSystem.copyAsync({
+      from: cacheUri,
+      to: persistentUri,
+    });
+
+    if (__DEV__) {
+      console.log('[PHOTO] persisted:', { from: cacheUri.slice(-40), to: persistentUri });
+    }
+
+    return persistentUri;
+  } catch (error) {
+    console.error('[PHOTO] Failed to persist photo, using cache URI:', error);
+    return cacheUri;
+  }
+}
+
 export default function AdditionalPhotosScreen() {
-  const { photos, setPhotoAtIndex, removePhoto, setStep, displayPhotoVariant, setDisplayPhotoVariant, bio, setBio } = useOnboardingStore();
+  const { photos, setPhotoAtIndex, removePhoto, setStep, displayPhotoVariant, setDisplayPhotoVariant, bio, setBio, clearAllPhotos } = useOnboardingStore();
   const { userId } = useAuthStore();
   const demoHydrated = useDemoStore((s) => s._hasHydrated);
   const demoProfile = useDemoStore((s) =>
@@ -167,13 +210,32 @@ export default function AdditionalPhotosScreen() {
             [],
             { compress: 0.95, format: ImageManipulator.SaveFormat.JPEG }
           );
-          const finalUri = normalized?.uri ?? uri;
-          setPhotoAtIndex(targetIndex, finalUri);
+          const cacheUri = normalized?.uri ?? uri;
+
+          // CRITICAL: Copy to persistent storage so photo survives app relaunch
+          // ImageManipulator cache URIs are cleared on app restart
+          const persistentUri = await persistPhoto(cacheUri);
+
+          setPhotoAtIndex(targetIndex, persistentUri);
           markSlotError(targetIndex, false);
           bumpSlot(targetIndex);
+
+          // DEBUG: Log final stored URI - must start with documentDirectory, NOT /cache/
+          if (__DEV__) {
+            const isValidPersistent = persistentUri.includes('/Documents/') || persistentUri.includes('/files/');
+            const isStaleCache = persistentUri.includes('/cache/ImageManipulator/') || persistentUri.includes('/Cache/');
+            console.log(`[PHOTO] STORED URI CHECK (slot ${targetIndex}):`, {
+              source: 'gallery',
+              uri: persistentUri,
+              isValidPersistent,
+              isStaleCache: isStaleCache ? 'WARNING: STILL CACHE!' : 'OK',
+            });
+          }
         } catch (e) {
-          console.log('[AdditionalPhotos] normalize failed, using original uri', uri, e);
-          setPhotoAtIndex(targetIndex, uri);
+          console.log('[AdditionalPhotos] normalize failed, trying to persist original uri', uri, e);
+          // Still try to persist the original URI
+          const persistentUri = await persistPhoto(uri);
+          setPhotoAtIndex(targetIndex, persistentUri);
           markSlotError(targetIndex, false);
           bumpSlot(targetIndex);
         }
@@ -212,13 +274,32 @@ export default function AdditionalPhotosScreen() {
             [],
             { compress: 0.95, format: ImageManipulator.SaveFormat.JPEG }
           );
-          const finalUri = normalized?.uri ?? uri;
-          setPhotoAtIndex(targetIndex, finalUri);
+          const cacheUri = normalized?.uri ?? uri;
+
+          // CRITICAL: Copy to persistent storage so photo survives app relaunch
+          // ImageManipulator cache URIs are cleared on app restart
+          const persistentUri = await persistPhoto(cacheUri);
+
+          setPhotoAtIndex(targetIndex, persistentUri);
           markSlotError(targetIndex, false);
           bumpSlot(targetIndex);
+
+          // DEBUG: Log final stored URI - must start with documentDirectory, NOT /cache/
+          if (__DEV__) {
+            const isValidPersistent = persistentUri.includes('/Documents/') || persistentUri.includes('/files/');
+            const isStaleCache = persistentUri.includes('/cache/ImageManipulator/') || persistentUri.includes('/Cache/');
+            console.log(`[PHOTO] STORED URI CHECK (slot ${targetIndex}):`, {
+              source: 'camera',
+              uri: persistentUri,
+              isValidPersistent,
+              isStaleCache: isStaleCache ? 'WARNING: STILL CACHE!' : 'OK',
+            });
+          }
         } catch (e) {
-          console.log('[AdditionalPhotos] normalize failed, using original uri', uri, e);
-          setPhotoAtIndex(targetIndex, uri);
+          console.log('[AdditionalPhotos] normalize failed, trying to persist original uri', uri, e);
+          // Still try to persist the original URI
+          const persistentUri = await persistPhoto(uri);
+          setPhotoAtIndex(targetIndex, persistentUri);
           markSlotError(targetIndex, false);
           bumpSlot(targetIndex);
         }
@@ -320,6 +401,30 @@ export default function AdditionalPhotosScreen() {
   const handleCloseViewer = () => {
     setViewerOpen(false);
     setViewerIndex(null);
+  };
+
+  // DEV: Reset all photos (for testing stale cache migration)
+  const handleResetPhotos = () => {
+    Alert.alert(
+      'Reset Photos',
+      'This will clear ALL photos from onboardingStore and demoProfile. You will need to re-select photos.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Reset',
+          style: 'destructive',
+          onPress: () => {
+            // Clear onboardingStore photos
+            clearAllPhotos();
+            // Clear demoProfile photos if in demo mode
+            if (isDemoMode && userId) {
+              useDemoStore.getState().saveDemoProfile(userId, { photos: [] });
+            }
+            console.log('[PHOTO] DEV: All photos cleared');
+          },
+        },
+      ]
+    );
   };
 
   const handleNext = () => {
@@ -483,6 +588,30 @@ export default function AdditionalPhotosScreen() {
           </TouchableOpacity>
           <Text style={styles.primaryLabel}>Primary Photo</Text>
         </View>
+
+        {/* DEV: Reset Photos button */}
+        {__DEV__ && (
+          <TouchableOpacity
+            style={{
+              marginHorizontal: 16,
+              marginBottom: 16,
+              padding: 12,
+              borderRadius: 8,
+              borderWidth: 1,
+              borderColor: COLORS.error,
+              flexDirection: 'row',
+              alignItems: 'center',
+              justifyContent: 'center',
+              gap: 8,
+            }}
+            onPress={handleResetPhotos}
+          >
+            <Ionicons name="trash-outline" size={18} color={COLORS.error} />
+            <Text style={{ color: COLORS.error, fontWeight: '600', fontSize: 14 }}>
+              Reset Photos (DEV)
+            </Text>
+          </TouchableOpacity>
+        )}
 
         {/* Bio Section */}
         <View style={styles.bioSection}>

@@ -49,13 +49,28 @@ export default function PrivateLayout() {
   const lastBackAtRef = useRef(0);
   const isNavigatingRef = useRef(false);
 
+  // CRASH FIX: Proper mount lifecycle tracking
+  const didRedirectRef = useRef(false);
+  const mountedRef = useRef(false);
+
+  // CRASH FIX: Track mount lifecycle
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
   // 🚨 CRITICAL: Collapse phantom "/" route inside Phase-2
   // Expo Router creates an implicit "/" entry before the real Phase-2 home.
   // This causes double back gestures. Normalize immediately to desire-land.
   useEffect(() => {
+    if (!mountedRef.current) return;
     const segmentStrings = segments as string[];
     if (pathname === '/' && segmentStrings.includes('(private)')) {
-      router.replace(PHASE2_HOME_ROUTE);
+      requestAnimationFrame(() => {
+        router.replace(PHASE2_HOME_ROUTE);
+      });
     }
   }, [pathname, segments, router]);
 
@@ -156,6 +171,7 @@ export default function PrivateLayout() {
   }, [router, pathname, segments]);
 
   const isSetupComplete = usePrivateProfileStore((s) => s.isSetupComplete);
+  const phase2OnboardingCompleted = usePrivateProfileStore((s) => s.phase2OnboardingCompleted);
   const hasHydrated = usePrivateProfileStore((s) => s._hasHydrated);
 
   const convexPrivateProfile = useQuery(
@@ -177,27 +193,33 @@ export default function PrivateLayout() {
     );
   }
 
-  // Check setup status
-  const setupComplete = isDemoMode
-    ? isSetupComplete
-    : (convexPrivateProfile?.isSetupComplete ?? isSetupComplete);
+  // Check if Phase-2 onboarding has been completed (permanent flag)
+  // This runs ONE TIME ONLY - after completion, onboarding never shows again
+  const onboardingComplete = isDemoMode
+    ? phase2OnboardingCompleted
+    : (convexPrivateProfile?.isSetupComplete ?? phase2OnboardingCompleted);
 
-  if (!setupComplete) {
+  // CRASH FIX: Single-pass redirect with proper lifecycle checks
+  // Uses requestAnimationFrame to ensure previous screen is fully unmounted
+  useEffect(() => {
+    if (!mountedRef.current) return;
+    if (didRedirectRef.current) return;
+    if (!hasHydrated) return; // Wait for hydration
+
+    if (!onboardingComplete) {
+      didRedirectRef.current = true;
+      requestAnimationFrame(() => {
+        router.replace('/(main)/phase2-onboarding' as any);
+      });
+    }
+  }, [onboardingComplete, hasHydrated, router]);
+
+  // CRASH FIX: While redirecting or not ready, render ONLY loading view
+  // Do NOT render Stack/children to prevent double mount
+  if (!hasHydrated || !onboardingComplete) {
     return (
-      <View style={[styles.container, { paddingTop: insets.top }]}>
-        <View style={styles.setupPrompt}>
-          <Ionicons name="eye-off" size={56} color={C.primary} />
-          <Text style={styles.setupTitle}>Set Up Private Mode</Text>
-          <Text style={styles.setupSubtitle}>
-            Create your private profile with blurred photos, intent tags, and boundaries.
-          </Text>
-          <TouchableOpacity
-            style={styles.setupBtn}
-            onPress={() => router.push('/(main)/(private-setup)/select-photos' as any)}
-          >
-            <Text style={styles.setupBtnText}>Start Setup</Text>
-          </TouchableOpacity>
-        </View>
+      <View style={[styles.container, { paddingTop: insets.top, alignItems: 'center', justifyContent: 'center' }]}>
+        <ActivityIndicator size="large" color={C.primary} />
       </View>
     );
   }

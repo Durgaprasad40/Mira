@@ -1,3 +1,18 @@
+// Photo Slots Type - 9-slot array for slot-preserving photo carryover
+// Index = slot position (0-8), value = file:// URI or null for empty
+export type PhotoSlots9 = [
+  string | null, string | null, string | null,
+  string | null, string | null, string | null,
+  string | null, string | null, string | null
+];
+
+// Helper to create empty PhotoSlots9
+export const createEmptyPhotoSlots = (): PhotoSlots9 => [null, null, null, null, null, null, null, null, null];
+
+// Helper to validate PhotoSlots9 length
+export const isValidPhotoSlots9 = (arr: unknown): arr is PhotoSlots9 =>
+  Array.isArray(arr) && arr.length === 9;
+
 // Security & Verification Types
 export type VerificationStatus = 'unverified' | 'pending_verification' | 'verified';
 export type EnforcementLevel = 'none' | 'gentle_reminder' | 'reduced_reach' | 'security_only';

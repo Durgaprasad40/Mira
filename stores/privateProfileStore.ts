@@ -1,7 +1,8 @@
 import { create } from 'zustand';
 import { createJSONStorage, persist } from 'zustand/middleware';
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import type { PrivateIntentKey, PrivateDesireTag, PrivateBoundary, DesireCategory } from '@/types';
+import type { PrivateIntentKey, PrivateDesireTag, PrivateBoundary, DesireCategory, PhotoSlots9 } from '@/types';
+import { createEmptyPhotoSlots } from '@/types';
 
 /** Parse "YYYY-MM-DD" to local Date (noon to avoid DST issues) */
 function parseDOBString(dobString: string): Date {
@@ -21,7 +22,8 @@ export const MAX_PHASE1_PHOTO_IMPORTS = 3;
 // Type for Phase-1 profile data imported during Phase-2 onboarding
 export interface Phase1ProfileData {
   name: string;
-  photos: { url: string }[];
+  photoSlots?: PhotoSlots9; // NEW: Slot-preserving photo array (9 slots)
+  photos: { url: string }[]; // Legacy: list of photo URLs (for backward compat)
   bio?: string;
   gender?: string;
   dateOfBirth?: string;
@@ -29,6 +31,13 @@ export interface Phase1ProfileData {
   activities?: string[]; // Hobbies/activities from Phase-1
   maxDistance?: number;
   isVerified?: boolean;
+  // Extended fields for Phase-2 onboarding info preview
+  height?: number | null;
+  smoking?: string | null;
+  drinking?: string | null;
+  kids?: string | null;
+  education?: string | null;
+  religion?: string | null;
 }
 
 interface PrivateProfile {
@@ -67,9 +76,19 @@ interface PrivateProfileState {
   gender: string;
   hobbies: string[];      // Imported from Phase-1 activities
   isVerified: boolean;    // Imported from Phase-1 verification status
+  // Extended imported fields (read-only, editable later in settings)
+  height: number | null;
+  smoking: string | null;
+  drinking: string | null;
+  kids: string | null;
+  education: string | null;
+  religion: string | null;
+  maxDistanceKm: number;  // Distance in km
 
   // Flags
   isSetupComplete: boolean;
+  // Permanent flag - once true, onboarding NEVER shows again
+  phase2OnboardingCompleted: boolean;
   convexProfileId: string | null;
   _hasHydrated: boolean;
 
@@ -77,7 +96,7 @@ interface PrivateProfileState {
   acceptedTermsAt: number | null;
   phase2SetupVersion: number | null;
   blurMyPhoto: boolean;
-  phase1PhotoUrls: string[];  // imported from Phase-1 for reference
+  phase1PhotoSlots: PhotoSlots9;  // Slot-preserving photos from Phase-1 (9 slots)
 
   // Actions — wizard navigation
   setCurrentStep: (step: number) => void;
@@ -136,13 +155,22 @@ const initialWizardState = {
   gender: '',
   hobbies: [] as string[],
   isVerified: false,
+  // Extended imported fields
+  height: null as number | null,
+  smoking: null as string | null,
+  drinking: null as string | null,
+  kids: null as string | null,
+  education: null as string | null,
+  religion: null as string | null,
+  maxDistanceKm: 50,
   isSetupComplete: false,
+  phase2OnboardingCompleted: false, // Permanent - never reset
   convexProfileId: null as string | null,
   // Phase-2 setup tracking
   acceptedTermsAt: null as number | null,
   phase2SetupVersion: null as number | null,
-  blurMyPhoto: false,
-  phase1PhotoUrls: [] as string[],
+  blurMyPhoto: true, // Default blur ON
+  phase1PhotoSlots: createEmptyPhotoSlots(),
 };
 
 export const usePrivateProfileStore = create<PrivateProfileState>()(
@@ -179,9 +207,11 @@ export const usePrivateProfileStore = create<PrivateProfileState>()(
       setIsSetupComplete: (complete) => set({ isSetupComplete: complete }),
       setConvexProfileId: (id) => set({ convexProfileId: id }),
       resetWizard: () => set(initialWizardState),
-      resetPhase2: () => set({
-        // Reset all wizard state
+      resetPhase2: () => set((state) => ({
+        // Reset all wizard state EXCEPT permanent onboarding flag
         ...initialWizardState,
+        // PRESERVE permanent flag - onboarding never shows again once completed
+        phase2OnboardingCompleted: state.phase2OnboardingCompleted,
         // Also reset legacy profile fields
         profile: {
           username: 'Anonymous_User',
@@ -190,7 +220,7 @@ export const usePrivateProfileStore = create<PrivateProfileState>()(
           blurPhoto: true,
         },
         isSetup: false,
-      }),
+      })),
       setHasHydrated: (hydrated) => set({ _hasHydrated: hydrated }),
 
       // Phase-2 setup actions
@@ -209,9 +239,39 @@ export const usePrivateProfileStore = create<PrivateProfileState>()(
           }
         }
 
+        // Convert maxDistance from miles to km (Phase-1 stores in miles)
+        const maxDistanceKm = data.maxDistance ? Math.round(data.maxDistance * 1.60934) : 50;
+
+        // SLOT-PRESERVING: Use photoSlots if available, otherwise convert from legacy photos array
+        let photoSlots: PhotoSlots9;
+        if (data.photoSlots) {
+          // Use the slot-based array directly
+          photoSlots = data.photoSlots;
+        } else {
+          // Legacy: convert photos array to slots (loses slot info, places in order)
+          photoSlots = createEmptyPhotoSlots();
+          data.photos.forEach((p, idx) => {
+            if (idx < 9 && p.url) {
+              photoSlots[idx] = p.url;
+            }
+          });
+        }
+
+        // DEBUG: Log what we're storing
+        if (__DEV__) {
+          const nonNullIndices = photoSlots
+            .map((uri, idx) => (uri ? idx : -1))
+            .filter((idx) => idx >= 0);
+          console.log('[privateProfileStore] importPhase1Data:', {
+            photoSlotsProvided: !!data.photoSlots,
+            nonNullSlots: nonNullIndices,
+            firstUri: photoSlots.find(Boolean)?.slice(-40) || 'none',
+          });
+        }
+
         set({
-          // Store Phase-1 photo URLs (limited to MAX_PHASE1_PHOTO_IMPORTS)
-          phase1PhotoUrls: data.photos.slice(0, MAX_PHASE1_PHOTO_IMPORTS).map((p) => p.url),
+          // Store Phase-1 photo slots (9 slots, preserving positions)
+          phase1PhotoSlots: photoSlots,
           // Import profile info
           displayName: data.name || '',
           age,
@@ -221,10 +281,19 @@ export const usePrivateProfileStore = create<PrivateProfileState>()(
           hobbies: data.activities || [],
           // Import verification status
           isVerified: data.isVerified || false,
+          // Extended fields for info preview
+          height: data.height ?? null,
+          smoking: data.smoking ?? null,
+          drinking: data.drinking ?? null,
+          kids: data.kids ?? null,
+          education: data.education ?? null,
+          religion: data.religion ?? null,
+          maxDistanceKm,
         });
       },
       completeSetup: () => set({
         isSetupComplete: true,
+        phase2OnboardingCompleted: true, // Permanent flag - never shows onboarding again
         phase2SetupVersion: CURRENT_PHASE2_SETUP_VERSION,
       }),
     }),
@@ -248,13 +317,23 @@ export const usePrivateProfileStore = create<PrivateProfileState>()(
         gender: state.gender,
         hobbies: state.hobbies,
         isVerified: state.isVerified,
+        // Extended imported fields
+        height: state.height,
+        smoking: state.smoking,
+        drinking: state.drinking,
+        kids: state.kids,
+        education: state.education,
+        religion: state.religion,
+        maxDistanceKm: state.maxDistanceKm,
         isSetupComplete: state.isSetupComplete,
+        phase2OnboardingCompleted: state.phase2OnboardingCompleted, // Permanent flag
         convexProfileId: state.convexProfileId,
         // Phase-2 setup tracking
         acceptedTermsAt: state.acceptedTermsAt,
         phase2SetupVersion: state.phase2SetupVersion,
         blurMyPhoto: state.blurMyPhoto,
-        phase1PhotoUrls: state.phase1PhotoUrls,
+        // NOTE: phase1PhotoSlots intentionally NOT persisted
+        // It's re-imported from onboardingStore each session to avoid stale data
         // Legacy
         profile: state.profile,
         isSetup: state.isSetup,
@@ -277,6 +356,13 @@ function isValidPhotoUrl(url: unknown): url is string {
   );
 }
 
+// Phase-2 onboarding validation constants
+export const PHASE2_MIN_PHOTOS = 2;
+export const PHASE2_MIN_INTENTS = 1;
+export const PHASE2_MAX_INTENTS = 3;
+export const PHASE2_DESIRE_MIN_LENGTH = 30;
+export const PHASE2_DESIRE_MAX_LENGTH = 300;
+
 // Selector: Check if Phase-2 setup is complete and valid
 export const selectIsSetupValid = (state: PrivateProfileState): boolean => {
   // Must be hydrated first
@@ -293,13 +379,13 @@ export const selectIsSetupValid = (state: PrivateProfileState): boolean => {
 
   // Must have at least 2 valid photos
   const validPhotos = state.selectedPhotoUrls.filter(isValidPhotoUrl);
-  if (validPhotos.length < 2) return false;
+  if (validPhotos.length < PHASE2_MIN_PHOTOS) return false;
 
-  // Must have at least 3 categories
-  if (state.intentKeys.length < 3) return false;
+  // Must have 1-3 intent categories
+  if (state.intentKeys.length < PHASE2_MIN_INTENTS || state.intentKeys.length > PHASE2_MAX_INTENTS) return false;
 
-  // Bio must be at least 10 characters
-  if (state.privateBio.trim().length < 10) return false;
+  // Desire (bio) must be at least 30 characters
+  if (state.privateBio.trim().length < PHASE2_DESIRE_MIN_LENGTH) return false;
 
   return true;
 };
@@ -307,14 +393,28 @@ export const selectIsSetupValid = (state: PrivateProfileState): boolean => {
 // Selector: Check if photos step is valid (min 2 selected)
 export const selectCanContinuePhotos = (state: PrivateProfileState): boolean => {
   const validPhotos = state.selectedPhotoUrls.filter(isValidPhotoUrl);
-  return validPhotos.length >= 2;
+  return validPhotos.length >= PHASE2_MIN_PHOTOS;
 };
 
-// Selector: Check if categories step is valid (min 3, max 10 + bio)
+// Selector: Check if intents are valid (1-3 selected)
+export const selectCanContinueIntents = (state: PrivateProfileState): boolean => {
+  return (
+    state.intentKeys.length >= PHASE2_MIN_INTENTS &&
+    state.intentKeys.length <= PHASE2_MAX_INTENTS
+  );
+};
+
+// Selector: Check if desire (bio) is valid (30-300 chars)
+export const selectCanContinueDesire = (state: PrivateProfileState): boolean => {
+  const length = state.privateBio.trim().length;
+  return length >= PHASE2_DESIRE_MIN_LENGTH && length <= PHASE2_DESIRE_MAX_LENGTH;
+};
+
+// Legacy selector: Check if categories step is valid (kept for backward compatibility)
 export const selectCanContinueCategories = (state: PrivateProfileState): boolean => {
   return (
-    state.intentKeys.length >= 3 &&
-    state.intentKeys.length <= 10 &&
-    state.privateBio.trim().length >= 10
+    state.intentKeys.length >= PHASE2_MIN_INTENTS &&
+    state.intentKeys.length <= PHASE2_MAX_INTENTS &&
+    state.privateBio.trim().length >= PHASE2_DESIRE_MIN_LENGTH
   );
 };

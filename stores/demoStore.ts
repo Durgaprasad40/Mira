@@ -21,6 +21,37 @@ import { useBlockStore } from './blockStore';
 import { PRIVATE_INTENT_CATEGORIES } from '@/lib/privateConstants';
 import { log } from '@/utils/logger';
 import { markTiming } from '@/utils/startupTiming';
+import { PhotoSlots9, createEmptyPhotoSlots } from '@/types';
+import { useAuthStore } from '@/stores/authStore';
+
+// ============================================================
+// PHOTO SLOT HELPERS - Canonical slot-based photo storage
+// ============================================================
+
+/**
+ * Convert PhotoSlots9 to flat array of photo URLs (for backward compat)
+ * Filters out null slots and returns only valid URLs.
+ */
+export function slotsToPhotos(slots: PhotoSlots9): { url: string }[] {
+  return slots
+    .filter((uri): uri is string => typeof uri === 'string' && uri.length > 0)
+    .map((url) => ({ url }));
+}
+
+/**
+ * Convert flat photos array to PhotoSlots9 (sequential fill as fallback).
+ * Used only for legacy data migration - preserves order but not original slot indices.
+ */
+export function photosToSlotsStable(photos: { url: string }[] | undefined): PhotoSlots9 {
+  const slots = createEmptyPhotoSlots();
+  if (!photos) return slots;
+  photos.forEach((p, idx) => {
+    if (idx < 9 && p.url && typeof p.url === 'string' && p.url.length > 0) {
+      slots[idx] = p.url;
+    }
+  });
+  return slots;
+}
 
 // Hydration timing: capture when store module loads
 const DEMO_STORE_LOAD_TIME = Date.now();
@@ -156,6 +187,9 @@ export interface DemoAccount {
 export interface DemoUserProfile {
   name: string;
   handle?: string; // User's nickname/username
+  /** Canonical slot-based photo storage (9 slots, nulls allowed) */
+  photoSlots?: PhotoSlots9;
+  /** Legacy flat array - derived from photoSlots for backward compat */
   photos: { url: string }[];
   bio?: string;
   gender?: string;
@@ -213,8 +247,12 @@ interface DemoState {
   demoSignUp: (email: string, password: string) => string;
   demoSignIn: (email: string, password: string) => { userId: string; onboardingComplete: boolean };
   demoLogout: () => void;
+  /** Save profile data - MUST be called with currentDemoUserId */
   saveDemoProfile: (userId: string, data: Partial<DemoUserProfile>) => void;
   setDemoOnboardingComplete: (userId: string) => void;
+
+  /** Get the canonical current user profile (single source of truth) */
+  getCurrentProfile: () => (DemoUserProfile & { userId: string }) | null;
 
   /** Hydration flag — true once AsyncStorage data has been restored. */
   _hasHydrated: boolean;
@@ -394,11 +432,51 @@ export const useDemoStore = create<DemoState>()(
       },
 
       saveDemoProfile: (userId, data) => {
-        // Log only significant changes (photos, prompts)
-        const prevProfile = get().demoProfiles[userId];
-        const photoChange = data.photos && data.photos.length !== (prevProfile?.photos?.length ?? 0);
-        if (photoChange) {
-          log.info('[PROFILE]', 'photos updated', { count: data.photos?.length });
+        const state = get();
+        const authUserId = useAuthStore.getState().userId;
+
+        // HARD ASSERTION: currentDemoUserId must be set
+        if (!state.currentDemoUserId) {
+          console.error('[DemoStore] saveDemoProfile FAILED: currentDemoUserId is null', {
+            providedUserId: userId,
+            authUserId,
+          });
+          return;
+        }
+
+        // HARD ASSERTION: userId must match currentDemoUserId
+        if (userId !== state.currentDemoUserId) {
+          console.error('[DemoStore] saveDemoProfile FAILED: userId mismatch (saving to wrong profile!)', {
+            providedUserId: userId,
+            currentDemoUserId: state.currentDemoUserId,
+            authUserId,
+          });
+          return;
+        }
+
+        // HARD ASSERTION: currentDemoUserId should match authUserId
+        if (authUserId && state.currentDemoUserId !== authUserId) {
+          console.error('[DemoStore] saveDemoProfile WARNING: currentDemoUserId != authUserId', {
+            currentDemoUserId: state.currentDemoUserId,
+            authUserId,
+          });
+          // Continue but log warning - this indicates a binding issue
+        }
+
+        // Compute non-null slots for logging
+        const nonNullSlots = data.photoSlots
+          ? data.photoSlots.map((s, i) => (s ? i : -1)).filter((i) => i >= 0)
+          : data.photos
+            ? data.photos.map((_, i) => i)
+            : [];
+
+        // Log the save operation
+        if (__DEV__) {
+          console.log('[DemoStore] saveDemoProfile', {
+            profileId: userId,
+            name: data.name ?? state.demoProfiles[userId]?.name,
+            nonNullPhotoSlots: nonNullSlots,
+          });
         }
 
         // PATCH-safe merge with explicit deletion support:
@@ -420,6 +498,15 @@ export const useDemoStore = create<DemoState>()(
             }
           }
 
+          // SLOT SYNC: If photoSlots was updated, derive photos array
+          if (data.photoSlots) {
+            merged.photos = slotsToPhotos(data.photoSlots);
+          }
+          // LEGACY SYNC: If only photos was updated (no photoSlots), create slots as fallback
+          else if (data.photos && !data.photoSlots) {
+            merged.photoSlots = photosToSlotsStable(data.photos);
+          }
+
           return {
             demoProfiles: {
               ...s.demoProfiles,
@@ -436,6 +523,39 @@ export const useDemoStore = create<DemoState>()(
       },
 
       setHasHydrated: (state) => set({ _hasHydrated: state }),
+
+      // SINGLE SOURCE OF TRUTH: Get the canonical current user profile
+      // HARD ASSERTIONS: No silent failures - log errors for debugging
+      getCurrentProfile: () => {
+        const state = get();
+        const { currentDemoUserId, demoProfiles } = state;
+
+        // HARD ASSERTION: currentDemoUserId must be set
+        if (!currentDemoUserId) {
+          const authUserId = useAuthStore.getState().userId;
+          console.error('[DemoStore] getCurrentProfile FAILED: currentDemoUserId is null', {
+            authUserId,
+            profileKeys: Object.keys(demoProfiles),
+          });
+          return null;
+        }
+
+        const profile = demoProfiles[currentDemoUserId];
+
+        // HARD ASSERTION: Profile must exist for currentDemoUserId
+        if (!profile) {
+          const authUserId = useAuthStore.getState().userId;
+          console.error('[DemoStore] getCurrentProfile FAILED: No profile for currentDemoUserId', {
+            currentDemoUserId,
+            authUserId,
+            profileKeys: Object.keys(demoProfiles),
+          });
+          return null;
+        }
+
+        // Return profile with userId attached for identification
+        return { ...profile, userId: currentDemoUserId };
+      },
 
       setNewMatchUserId: (id) => set({ newMatchUserId: id }),
 
@@ -1124,6 +1244,97 @@ export const useDemoStore = create<DemoState>()(
                 demoProfiles: { ...state.demoProfiles, ...updatedProfiles },
               });
               log.once('lgbtq-migration', '[DEMO]', 'migrated lgbtq -> lgbtqSelf', { count: migratedCount });
+            }
+          }
+
+          // MIGRATION: Clear stale cache URIs AND demo/Unsplash URLs from user photos
+          // User photos must ONLY be real user-selected photos from persistent local storage
+          // Remove: ImageManipulator cache URIs, Unsplash URLs, any remote demo faces
+          if (state.demoProfiles) {
+            let clearedCount = 0;
+            const clearedProfiles: Record<string, DemoUserProfile> = {};
+            for (const [userId, profile] of Object.entries(state.demoProfiles)) {
+              if (profile.photos && profile.photos.length > 0) {
+                // Filter out: stale cache URIs, Unsplash URLs, any remote URLs (user photos must be local)
+                const cleanedPhotos = profile.photos.filter((p) => {
+                  if (!p.url) return false;
+                  // Remove stale cache URIs
+                  if (p.url.includes('/cache/ImageManipulator/') || p.url.includes('/Cache/')) return false;
+                  // Remove Unsplash/demo photos - user photos should never be remote URLs
+                  if (p.url.includes('unsplash.com')) return false;
+                  // Keep only local file:// URIs (persistent storage)
+                  return p.url.startsWith('file://');
+                });
+                if (cleanedPhotos.length !== profile.photos.length) {
+                  clearedProfiles[userId] = {
+                    ...profile,
+                    photos: cleanedPhotos,
+                  };
+                  clearedCount += profile.photos.length - cleanedPhotos.length;
+                }
+              }
+            }
+            if (clearedCount > 0) {
+              useDemoStore.setState({
+                demoProfiles: { ...state.demoProfiles, ...clearedProfiles },
+              });
+              log.once('user-photo-migration', '[DEMO]', 'cleared invalid user photos', { count: clearedCount });
+              console.warn('[MIGRATION] Cleared stale/demo photo URIs. User must re-add photos.');
+            }
+          }
+
+          // MIGRATION: Create photoSlots from photos for profiles that don't have slots
+          // This ensures slot-based photo storage works after upgrade
+          let slotsCreatedCount = 0;
+          const updatedProfilesWithSlots: Record<string, DemoUserProfile> = {};
+          for (const [uId, prof] of Object.entries(state.demoProfiles)) {
+            // Skip if already has photoSlots with data
+            if (prof.photoSlots && prof.photoSlots.some((s) => s !== null)) {
+              continue;
+            }
+            // Create slots from existing photos array
+            if (prof.photos && prof.photos.length > 0) {
+              updatedProfilesWithSlots[uId] = {
+                ...prof,
+                photoSlots: photosToSlotsStable(prof.photos),
+              };
+              slotsCreatedCount++;
+            }
+          }
+          if (slotsCreatedCount > 0) {
+            useDemoStore.setState({
+              demoProfiles: { ...state.demoProfiles, ...updatedProfilesWithSlots },
+            });
+            log.once('photo-slots-migration', '[DEMO]', 'created photoSlots from photos', { count: slotsCreatedCount });
+          }
+
+          // ============================================================
+          // AUTH BINDING: Ensure currentDemoUserId matches authStore.userId
+          // This is CRITICAL for profile identity alignment
+          // ============================================================
+          const authUserId = useAuthStore.getState().userId;
+          const currentDemoId = state.currentDemoUserId;
+
+          if (authUserId && currentDemoId !== authUserId) {
+            // Check if a profile exists for the auth user
+            const profileExists = !!state.demoProfiles[authUserId];
+            if (profileExists) {
+              useDemoStore.setState({ currentDemoUserId: authUserId });
+              console.log('[DemoStore] AUTH BINDING: currentDemoUserId synced to authUserId', {
+                previous: currentDemoId,
+                new: authUserId,
+              });
+            } else {
+              console.error('[DemoStore] AUTH BINDING FAILED: No profile for authUserId', {
+                authUserId,
+                currentDemoUserId: currentDemoId,
+                profileKeys: Object.keys(state.demoProfiles),
+              });
+            }
+          } else if (authUserId && currentDemoId === authUserId) {
+            // Already bound - log for verification
+            if (__DEV__) {
+              console.log('[DemoStore] AUTH BINDING: Already synced', { authUserId });
             }
           }
         }

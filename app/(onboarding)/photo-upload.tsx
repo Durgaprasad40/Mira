@@ -5,6 +5,7 @@ import { Image } from 'expo-image';
 import { useRouter } from 'expo-router';
 import * as ImagePicker from 'expo-image-picker';
 import * as ImageManipulator from 'expo-image-manipulator';
+import * as FileSystem from 'expo-file-system/legacy';
 import { COLORS, VALIDATION } from '@/lib/constants';
 import { Button } from '@/components/ui';
 import { useOnboardingStore } from '@/stores/onboardingStore';
@@ -17,8 +18,50 @@ import { Id } from '@/convex/_generated/dataModel';
 import { isDemoMode, convex } from '@/hooks/useConvex';
 import { OnboardingProgressHeader } from '@/components/OnboardingProgressHeader';
 
+// Persistent photos directory - files here survive app restarts
+const PHOTOS_DIR = FileSystem.documentDirectory + 'mira/photos/';
+
+// Ensure photos directory exists
+async function ensurePhotosDir(): Promise<void> {
+  const dirInfo = await FileSystem.getInfoAsync(PHOTOS_DIR);
+  if (!dirInfo.exists) {
+    await FileSystem.makeDirectoryAsync(PHOTOS_DIR, { intermediates: true });
+  }
+}
+
+// Generate unique filename
+function generatePhotoFilename(): string {
+  const timestamp = Date.now();
+  const random = Math.random().toString(36).slice(2, 10);
+  return `photo_${timestamp}_${random}.jpg`;
+}
+
+// Copy cache URI to persistent storage
+// Returns the persistent URI, or falls back to original if copy fails
+async function persistPhoto(cacheUri: string): Promise<string> {
+  try {
+    await ensurePhotosDir();
+    const filename = generatePhotoFilename();
+    const persistentUri = PHOTOS_DIR + filename;
+
+    await FileSystem.copyAsync({
+      from: cacheUri,
+      to: persistentUri,
+    });
+
+    if (__DEV__) {
+      console.log('[PHOTO] persisted:', { from: cacheUri.slice(-40), to: persistentUri });
+    }
+
+    return persistentUri;
+  } catch (error) {
+    console.error('[PHOTO] Failed to persist photo, using cache URI:', error);
+    return cacheUri;
+  }
+}
+
 export default function PhotoUploadScreen() {
-  const { photos, setPhotoAtIndex, setStep, setVerificationPhoto } = useOnboardingStore();
+  const { photos, setPhotoAtIndex, setStep, setVerificationPhoto, clearAllPhotos } = useOnboardingStore();
   const { userId, faceVerificationPassed } = useAuthStore();
   const demoProfile = useDemoStore((s) => isDemoMode && userId ? s.demoProfiles[userId] : null);
   const router = useRouter();
@@ -89,24 +132,38 @@ export default function PhotoUploadScreen() {
       return;
     }
 
-    // Resize if needed
-    let finalUri = asset.uri;
+    // Resize if needed (creates cache URI via ImageManipulator)
+    let cacheUri = asset.uri;
     if (asset.width > 2000 || asset.height > 2000) {
       const manipResult = await ImageManipulator.manipulateAsync(
         asset.uri,
         [{ resize: { width: 2000 } }],
         { compress: 0.8, format: ImageManipulator.SaveFormat.JPEG }
       );
-      finalUri = manipResult.uri;
+      cacheUri = manipResult.uri;
     }
 
-    if (__DEV__) console.log(`[PHOTO] selected source=${source} uri=${finalUri}`);
+    // CRITICAL: Copy to persistent storage so photo survives app relaunch
+    // ImageManipulator cache URIs are cleared on app restart
+    const persistentUri = await persistPhoto(cacheUri);
 
     // Update local preview immediately for instant feedback
-    setPreviewUri(finalUri);
+    setPreviewUri(persistentUri);
 
     // Set first photo slot only (preserves existing photos at other slots)
-    setPhotoAtIndex(0, finalUri);
+    setPhotoAtIndex(0, persistentUri);
+
+    // DEBUG: Log final stored URI - must start with documentDirectory, NOT /cache/
+    if (__DEV__) {
+      const isValidPersistent = persistentUri.includes('/Documents/') || persistentUri.includes('/files/');
+      const isStaleCache = persistentUri.includes('/cache/ImageManipulator/') || persistentUri.includes('/Cache/');
+      console.log(`[PHOTO] STORED URI CHECK:`, {
+        source,
+        uri: persistentUri,
+        isValidPersistent,
+        isStaleCache: isStaleCache ? 'WARNING: STILL CACHE!' : 'OK',
+      });
+    }
   };
 
   const pickImage = async () => {
@@ -255,6 +312,32 @@ export default function PhotoUploadScreen() {
   // Use local previewUri for immediate updates, fallback to store
   const displayUri = previewUri || photos[0];
 
+  // DEV: Reset all photos (for testing stale cache migration)
+  const handleResetPhotos = () => {
+    Alert.alert(
+      'Reset Photos',
+      'This will clear ALL photos from onboardingStore and demoProfile. You will need to re-select photos.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Reset',
+          style: 'destructive',
+          onPress: () => {
+            // Clear onboardingStore photos
+            clearAllPhotos();
+            // Clear local preview
+            setPreviewUri(null);
+            // Clear demoProfile photos if in demo mode
+            if (isDemoMode && userId) {
+              useDemoStore.getState().saveDemoProfile(userId, { photos: [] });
+            }
+            console.log('[PHOTO] DEV: All photos cleared');
+          },
+        },
+      ]
+    );
+  };
+
   return (
     <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
       <OnboardingProgressHeader />
@@ -302,6 +385,17 @@ export default function PhotoUploadScreen() {
             style={styles.actionButton}
           />
         </View>
+
+        {/* DEV: Reset Photos button */}
+        {__DEV__ && (
+          <Button
+            title="Reset Photos (DEV)"
+            variant="outline"
+            onPress={handleResetPhotos}
+            icon={<Ionicons name="trash-outline" size={20} color={COLORS.error} />}
+            style={{ ...styles.actionButton, borderColor: COLORS.error, marginBottom: 16 }}
+          />
+        )}
 
         {/* Photo Requirements */}
         <View style={styles.requirements}>

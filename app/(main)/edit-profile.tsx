@@ -26,8 +26,9 @@ import * as ImagePicker from 'expo-image-picker';
 import { BlurProfileNotice } from '@/components/profile/BlurProfileNotice';
 import { isDemoMode } from '@/hooks/useConvex';
 import { getDemoCurrentUser } from '@/lib/demoData';
-import { useDemoStore } from '@/stores/demoStore';
+import { useDemoStore, slotsToPhotos } from '@/stores/demoStore';
 import { usePhotoBlurStore } from '@/stores/photoBlurStore';
+import { PhotoSlots9, createEmptyPhotoSlots } from '@/types';
 
 const GRID_SIZE = 9;
 const COLUMNS = 3;
@@ -124,11 +125,14 @@ export default function EditProfileScreen() {
   const [company, setCompany] = useState('');
   const [school, setSchool] = useState('');
 
-  // Photo state for 9-slot grid
-  const [photoUrls, setPhotoUrls] = useState<string[]>([]);
-  const [failedImages, setFailedImages] = useState<Set<string>>(new Set());
+  // Photo state for 9-slot grid (SLOT-BASED: index = slot number)
+  const [photoSlots, setPhotoSlots] = useState<PhotoSlots9>(createEmptyPhotoSlots());
+  const [failedSlots, setFailedSlots] = useState<Set<number>>(new Set());
   // Photo preview modal state - stores both url and index for actions
   const [previewPhoto, setPreviewPhoto] = useState<{ url: string; index: number } | null>(null);
+
+  // Profile error state - blocks rendering if profile identity is broken
+  const [profileError, setProfileError] = useState<string | null>(null);
 
   // FIX 1: Initialize state ONCE per user using refs to prevent infinite loop
   useEffect(() => {
@@ -150,50 +154,84 @@ export default function EditProfileScreen() {
       setSchool(currentUser.school || '');
       // Note: blurEnabled is now persisted in photoBlurStore, not initialized from server
 
-      const existingPhotos = currentUser.photos?.map((p: any) => p?.url || p).filter(isValidPhotoUrl) || [];
-      const slicedPhotos = existingPhotos.slice(0, GRID_SIZE);
-      if (__DEV__) {
-        console.log('[EditProfile] INIT from currentUser', {
-          currentUserId,
-          photoCount: slicedPhotos.length,
-          promptCount: (currentUser as any)?.profilePrompts?.length ?? 0,
-          basicInfo: {
-            height: currentUser.height,
-            education: currentUser.education,
-            religion: currentUser.religion,
-          },
-          lifestyle: {
-            smoking: currentUser.smoking,
-            drinking: currentUser.drinking,
-            kids: currentUser.kids,
-          },
+      // SLOT-BASED: Initialize from getCurrentProfile() (SINGLE SOURCE OF TRUTH)
+      let initSlots: PhotoSlots9 = createEmptyPhotoSlots();
+      const canonicalProfile = isDemoMode
+        ? useDemoStore.getState().getCurrentProfile()
+        : null;
+
+      // HARD ASSERTION: In demo mode, canonicalProfile MUST exist
+      if (isDemoMode && !canonicalProfile) {
+        console.error('[EditProfile ARTBOARD] FATAL: getCurrentProfile returned null', {
+          currentDemoUserId,
+          userId,
+        });
+        setProfileError('No profile found. Please sign in again.');
+        return;
+      }
+      // Clear any previous error
+      setProfileError(null);
+
+      if (canonicalProfile?.photoSlots && canonicalProfile.photoSlots.some((s) => s !== null)) {
+        // Use canonical slot storage from getCurrentProfile()
+        initSlots = [...canonicalProfile.photoSlots] as PhotoSlots9;
+      } else if (canonicalProfile?.photos && canonicalProfile.photos.length > 0) {
+        // Fallback: Convert flat photos array to slots
+        canonicalProfile.photos.forEach((p, idx) => {
+          if (idx < 9 && p.url) initSlots[idx] = p.url;
+        });
+      } else if (!isDemoMode) {
+        // Non-demo mode: Use currentUser photos
+        const existingPhotos = currentUser.photos?.map((p: any) => p?.url || p).filter(isValidPhotoUrl) || [];
+        existingPhotos.forEach((url: string, idx: number) => {
+          if (idx < 9) initSlots[idx] = url;
         });
       }
-      setPhotoUrls(slicedPhotos);
+
+      const nonNullSlots = initSlots.map((s, i) => (s ? i : -1)).filter((i) => i >= 0);
+
+      // ARTBOARD RENDER LOG: Critical for debugging identity alignment
+      console.log('[EditProfile ARTBOARD]', {
+        profileId: canonicalProfile?.userId ?? currentUserId,
+        userId: userId,
+        nonNullSlots,
+      });
+
+      setPhotoSlots(initSlots);
     }
-  }, [currentUser?._id, currentUser?.id]);
+  }, [currentUser?._id, currentUser?.id, currentDemoUserId]);
 
-  const validPhotos = useMemo(() => {
-    return photoUrls.filter((url) => isValidPhotoUrl(url) && !failedImages.has(url));
-  }, [photoUrls, failedImages]);
+  // SLOT-BASED: Get valid photos with their slot indices
+  const validPhotoEntries = useMemo(() => {
+    const entries: { slotIndex: number; url: string }[] = [];
+    photoSlots.forEach((url, slotIndex) => {
+      if (isValidPhotoUrl(url) && !failedSlots.has(slotIndex)) {
+        entries.push({ slotIndex, url });
+      }
+    });
+    return entries;
+  }, [photoSlots, failedSlots]);
 
-  // Cleanup blur state when photos are removed (indices may shift)
+  const validPhotoCount = validPhotoEntries.length;
+
+  // Cleanup blur state when photos are removed
   useEffect(() => {
-    if (effectiveUserId && validPhotos.length > 0) {
-      usePhotoBlurStore.getState().cleanupBlurredPhotos(effectiveUserId, validPhotos.length);
+    if (effectiveUserId && validPhotoCount > 0) {
+      usePhotoBlurStore.getState().cleanupBlurredPhotos(effectiveUserId, validPhotoCount);
     }
-  }, [validPhotos.length, effectiveUserId]);
+  }, [validPhotoCount, effectiveUserId]);
 
-  const handleImageError = useCallback((uri: string) => {
-    setFailedImages((prev) => new Set(prev).add(uri));
+  const handleImageError = useCallback((slotIndex: number) => {
+    setFailedSlots((prev) => new Set(prev).add(slotIndex));
   }, []);
 
   const handleUploadPhoto = async (slotIndex: number) => {
-    const isReplacing = slotIndex < validPhotos.length;
-    const isAdding = !isReplacing;
+    // SLOT-BASED: Check if slot already has a photo (replacing) or is empty (adding)
+    const existingUrl = photoSlots[slotIndex];
+    const isReplacing = isValidPhotoUrl(existingUrl) && !failedSlots.has(slotIndex);
 
     // Block adding new photo if already at max 9
-    if (isAdding && validPhotos.length >= GRID_SIZE) {
+    if (!isReplacing && validPhotoCount >= GRID_SIZE) {
       Alert.alert('Maximum Photos', 'You can only have up to 9 photos.');
       return;
     }
@@ -213,26 +251,24 @@ export default function EditProfileScreen() {
       if (!result.canceled && result.assets[0]) {
         const uri = result.assets[0].uri;
         if (isValidPhotoUrl(uri)) {
-          setPhotoUrls((prev) => {
-            const updated = [...prev];
-            if (isReplacing) {
-              // Replace existing photo at index
-              updated[slotIndex] = uri;
-            } else {
-              // Add new photo
-              updated.push(uri);
-            }
-            const final = updated.slice(0, GRID_SIZE);
+          // SLOT-BASED: Update specific slot directly (no shifting)
+          setPhotoSlots((prev) => {
+            const updated = [...prev] as PhotoSlots9;
+            updated[slotIndex] = uri;
             if (__DEV__) {
               console.log('[EditProfile] handleUploadPhoto', {
                 action: isReplacing ? 'replace' : 'add',
                 slotIndex,
-                prevCount: prev.length,
-                nextCount: final.length,
                 newUri: uri.slice(-40),
               });
             }
-            return final;
+            return updated;
+          });
+          // Clear failed state for this slot
+          setFailedSlots((prev) => {
+            const next = new Set(prev);
+            next.delete(slotIndex);
+            return next;
           });
         }
       }
@@ -241,22 +277,38 @@ export default function EditProfileScreen() {
     }
   };
 
-  const handleRemovePhoto = (index: number) => {
+  // SLOT-BASED: Remove photo by setting slot to null (no shifting)
+  const handleRemovePhoto = (slotIndex: number) => {
     Alert.alert('Remove Photo', 'Are you sure you want to remove this photo?', [
       { text: 'Cancel', style: 'cancel' },
-      { text: 'Remove', style: 'destructive', onPress: () => setPhotoUrls((prev) => prev.filter((_, i) => i !== index)) },
+      {
+        text: 'Remove',
+        style: 'destructive',
+        onPress: () => {
+          setPhotoSlots((prev) => {
+            const updated = [...prev] as PhotoSlots9;
+            updated[slotIndex] = null;
+            if (__DEV__) {
+              console.log('[EditProfile] handleRemovePhoto slot', slotIndex);
+            }
+            return updated;
+          });
+        },
+      },
     ]);
   };
 
-  // FIX D: Set photo as main (move to index 0)
-  const handleSetMainPhoto = (index: number) => {
-    if (index === 0) return; // Already main
-    setPhotoUrls((prev) => {
-      const updated = [...prev];
-      const [photo] = updated.splice(index, 1);
-      updated.unshift(photo);
+  // SLOT-BASED: Swap photo to slot 0 (main position)
+  const handleSetMainPhoto = (fromSlot: number) => {
+    if (fromSlot === 0) return; // Already main
+    setPhotoSlots((prev) => {
+      const updated = [...prev] as PhotoSlots9;
+      // Swap positions
+      const temp = updated[0];
+      updated[0] = updated[fromSlot];
+      updated[fromSlot] = temp;
       if (__DEV__) {
-        console.log('[EditProfile] setMainPhoto from index', index, '-> 0');
+        console.log('[EditProfile] setMainPhoto swap slot', fromSlot, '<-> 0');
       }
       return updated;
     });
@@ -270,53 +322,57 @@ export default function EditProfileScreen() {
     }
   }, [effectiveUserId]);
 
-  const renderPhotoSlot = (index: number) => {
-    const url = validPhotos[index];
-    if (url) {
-      const isMain = index === 0;
-      const isCartoon = isCartoonPhoto(url);
-      const isPhotoBlurred = blurEnabled && !isCartoon && blurredPhotos[index];
+  // SLOT-BASED: Render slot at specific index
+  const renderPhotoSlot = (slotIndex: number) => {
+    const url = photoSlots[slotIndex];
+    const hasValidPhoto = isValidPhotoUrl(url) && !failedSlots.has(slotIndex);
+
+    if (hasValidPhoto) {
+      const isMain = slotIndex === 0;
+      const isCartoon = isCartoonPhoto(url!);
+      const isPhotoBlurred = blurEnabled && !isCartoon && blurredPhotos[slotIndex];
 
       return (
-        <View key={index} style={styles.photoSlot}>
+        <View key={slotIndex} style={styles.photoSlot}>
           {/* Tap photo to preview */}
-          <Pressable style={StyleSheet.absoluteFill} onPress={() => setPreviewPhoto({ url, index })}>
+          <Pressable style={StyleSheet.absoluteFill} onPress={() => setPreviewPhoto({ url: url!, index: slotIndex })}>
             <Image
               source={{ uri: url }}
               style={styles.photoImage}
               blurRadius={isPhotoBlurred ? 10 : 0}
-              onError={() => handleImageError(url)}
+              onError={() => handleImageError(slotIndex)}
             />
           </Pressable>
           {/* Per-photo blur toggle - only show when blur mode enabled and not a cartoon */}
           {blurEnabled && !isCartoon && (
             <TouchableOpacity
-              style={[styles.photoBlurButton, blurredPhotos[index] && styles.photoBlurButtonActive]}
-              onPress={() => handleTogglePhotoBlur(index)}
+              style={[styles.photoBlurButton, blurredPhotos[slotIndex] && styles.photoBlurButtonActive]}
+              onPress={() => handleTogglePhotoBlur(slotIndex)}
             >
               <Ionicons
-                name={blurredPhotos[index] ? 'eye-off' : 'eye'}
+                name={blurredPhotos[slotIndex] ? 'eye-off' : 'eye'}
                 size={14}
                 color={COLORS.white}
               />
             </TouchableOpacity>
           )}
-          <TouchableOpacity style={styles.photoRemoveButton} onPress={() => handleRemovePhoto(index)}>
+          <TouchableOpacity style={styles.photoRemoveButton} onPress={() => handleRemovePhoto(slotIndex)}>
             <Ionicons name="close" size={14} color={COLORS.white} />
           </TouchableOpacity>
           {/* Main badge or Set as Main button */}
           {isMain ? (
             <View style={styles.mainBadge}><Text style={styles.mainBadgeText}>Main</Text></View>
           ) : (
-            <TouchableOpacity style={styles.setMainButton} onPress={() => handleSetMainPhoto(index)}>
+            <TouchableOpacity style={styles.setMainButton} onPress={() => handleSetMainPhoto(slotIndex)}>
               <Ionicons name="star" size={10} color={COLORS.white} />
             </TouchableOpacity>
           )}
         </View>
       );
     }
+    // Empty slot
     return (
-      <TouchableOpacity key={index} style={[styles.photoSlot, styles.photoSlotEmpty]} onPress={() => handleUploadPhoto(index)} activeOpacity={0.7}>
+      <TouchableOpacity key={slotIndex} style={[styles.photoSlot, styles.photoSlotEmpty]} onPress={() => handleUploadPhoto(slotIndex)} activeOpacity={0.7}>
         <Ionicons name="add" size={28} color={COLORS.primary} />
         <Text style={styles.uploadText}>Add</Text>
       </TouchableOpacity>
@@ -392,69 +448,65 @@ export default function EditProfileScreen() {
       Alert.alert('Prompts Required', 'Add at least one prompt to your profile.');
       return;
     }
-    if (validPhotos.length === 0) {
+    if (validPhotoCount === 0) {
       Alert.alert('Photos Required', 'Add at least one photo to your profile.');
       return;
     }
 
     // Demo mode: persist to local demo store, skip Convex
     if (isDemoMode) {
-      if (currentDemoUserId) {
-        // Build WIPE-SAFE patch: only include fields that have actual values
-        // This prevents undefined/null from overwriting stored data
-        const patch: Record<string, any> = {};
-
-        // Photos - always include since validPhotos is the source of truth
-        patch.photos = validPhotos.map((url) => ({ url }));
-
-        // Prompts - always include (empty array is valid)
-        patch.profilePrompts = filledPrompts;
-
-        // Bio/About - only include if non-empty
-        if (bio && bio.trim()) patch.bio = bio.trim();
-
-        // Basic info - only include if set
-        if (height && height.trim()) patch.height = parseInt(height);
-        if (education) patch.education = education;
-        if (religion) patch.religion = religion;
-        if (jobTitle && jobTitle.trim()) patch.jobTitle = jobTitle.trim();
-        if (company && company.trim()) patch.company = company.trim();
-        if (school && school.trim()) patch.school = school.trim();
-
-        // Lifestyle - only include if set
-        if (smoking) patch.smoking = smoking;
-        if (drinking) patch.drinking = drinking;
-        if (kids) patch.kids = kids;
-
-        // Log BEFORE save to trace what we're about to write
-        if (__DEV__) {
-          const prevProfile = useDemoStore.getState().demoProfiles[currentDemoUserId];
-          console.log('[EditProfile] SAVE PRESSED (demo)', {
-            currentDemoUserId,
-            patchKeys: Object.keys(patch),
-            photoCount: patch.photos?.length ?? 0,
-            promptCount: patch.profilePrompts?.length ?? 0,
-            basicInfo: { height: patch.height, education: patch.education, religion: patch.religion },
-            lifestyle: { smoking: patch.smoking, drinking: patch.drinking, kids: patch.kids },
-            prevPromptCount: prevProfile?.profilePrompts?.length ?? 0,
-            prevEducation: prevProfile?.education,
-          });
-        }
-
-        // Update demo profile with PATCH (merge, not overwrite)
-        useDemoStore.getState().saveDemoProfile(currentDemoUserId, patch);
-
-        // Log AFTER save to confirm what was written
-        if (__DEV__) {
-          const afterProfile = useDemoStore.getState().demoProfiles[currentDemoUserId];
-          console.log('[EditProfile] SAVE COMPLETE (demo)', {
-            afterPhotoCount: afterProfile?.photos?.length ?? 0,
-            afterPromptCount: afterProfile?.profilePrompts?.length ?? 0,
-            afterEducation: afterProfile?.education,
-            afterSmoking: afterProfile?.smoking,
-          });
-        }
+      // SINGLE SOURCE OF TRUTH: Get canonical profile
+      const canonicalProfile = useDemoStore.getState().getCurrentProfile();
+      if (!canonicalProfile) {
+        console.error('[EditProfile SAVE] FAILED: No current profile');
+        Alert.alert('Error', 'No profile found. Please sign in again.');
+        return;
       }
+
+      const profileId = canonicalProfile.userId;
+
+      // Build WIPE-SAFE patch: only include fields that have actual values
+      // This prevents undefined/null from overwriting stored data
+      const patch: Record<string, any> = {};
+
+      // SLOT-BASED: Save canonical photoSlots (demoStore will derive photos array)
+      patch.photoSlots = photoSlots;
+      // Also include photos for backward compat (demoStore.saveDemoProfile will sync)
+      patch.photos = slotsToPhotos(photoSlots);
+
+      // Prompts - always include (empty array is valid)
+      patch.profilePrompts = filledPrompts;
+
+      // Bio/About - only include if non-empty
+      if (bio && bio.trim()) patch.bio = bio.trim();
+
+      // Basic info - only include if set
+      if (height && height.trim()) patch.height = parseInt(height);
+      if (education) patch.education = education;
+      if (religion) patch.religion = religion;
+      if (jobTitle && jobTitle.trim()) patch.jobTitle = jobTitle.trim();
+      if (company && company.trim()) patch.company = company.trim();
+      if (school && school.trim()) patch.school = school.trim();
+
+      // Lifestyle - only include if set
+      if (smoking) patch.smoking = smoking;
+      if (drinking) patch.drinking = drinking;
+      if (kids) patch.kids = kids;
+
+      // Compute non-null slots for logging
+      const nonNullSlots = photoSlots.map((s, i) => (s ? i : -1)).filter((i) => i >= 0);
+
+      if (__DEV__) {
+        console.log('[EditProfile SAVE]', {
+          profileId,
+          name: canonicalProfile.name,
+          nonNullSlots,
+        });
+      }
+
+      // Update demo profile with PATCH (merge, not overwrite)
+      useDemoStore.getState().saveDemoProfile(profileId, patch);
+
       Alert.alert('Success', 'Profile updated!');
       router.back();
       return;
@@ -507,6 +559,20 @@ export default function EditProfileScreen() {
     return (
       <View style={[styles.loadingContainer, { paddingTop: insets.top }]}>
         <Text style={styles.loadingText}>{timedOut ? 'Failed to load profile' : 'Loading...'}</Text>
+        <TouchableOpacity style={styles.loadingBackButton} onPress={() => router.back()}>
+          <Ionicons name="arrow-back" size={18} color={COLORS.white} />
+          <Text style={styles.loadingBackText}>Go Back</Text>
+        </TouchableOpacity>
+      </View>
+    );
+  }
+
+  // BLOCKING ERROR: Profile identity broken - don't render empty photo grid
+  if (profileError) {
+    return (
+      <View style={[styles.loadingContainer, { paddingTop: insets.top }]}>
+        <Ionicons name="alert-circle" size={48} color={COLORS.error} style={{ marginBottom: 12 }} />
+        <Text style={[styles.loadingText, { color: COLORS.error }]}>{profileError}</Text>
         <TouchableOpacity style={styles.loadingBackButton} onPress={() => router.back()}>
           <Ionicons name="arrow-back" size={18} color={COLORS.white} />
           <Text style={styles.loadingBackText}>Go Back</Text>
@@ -603,7 +669,7 @@ export default function EditProfileScreen() {
         <Text style={styles.sectionTitle}>Photos</Text>
         <Text style={styles.sectionHint}>Add up to 9 photos. Your first photo will be your main profile picture.</Text>
         <View style={styles.photoGrid}>{Array.from({ length: GRID_SIZE }).map((_, i) => renderPhotoSlot(i))}</View>
-        <Text style={styles.photoCount}>{validPhotos.length} of {GRID_SIZE} photos</Text>
+        <Text style={styles.photoCount}>{validPhotoCount} of {GRID_SIZE} photos</Text>
       </View>
 
       {/* Photo Visibility */}

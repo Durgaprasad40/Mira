@@ -2,6 +2,13 @@ import { DiscoverNotification, DiscoveryFeedItem, Confession, ConfessionReply, C
 
 // Demo data for testing the app without Convex backend
 
+// STABLE demo photo URLs (https) for Phase-2 fallback when cache URIs are stale
+export const DEMO_STABLE_PHOTO_URLS = [
+  'https://images.unsplash.com/photo-1507003211169-0a1dd7228f2d?w=400',
+  'https://images.unsplash.com/photo-1500648767791-00dcc994a43e?w=400',
+  'https://images.unsplash.com/photo-1494790108377-be9c29b29330?w=400',
+];
+
 // Demo discover notifications (cycle every 30s)
 export const DEMO_DISCOVER_NOTIFICATIONS: DiscoverNotification[] = [
   {
@@ -110,11 +117,12 @@ export function getDemoCurrentUser(): typeof DEMO_USER {
   const hasPhotos = stored.photos?.length > 0;
 
   // Return ALL stored fields, falling back to DEMO_USER defaults where needed
+  // IMPORTANT: User photos are NEVER replaced with demo photos - empty array if no real photos
   return {
     ...DEMO_USER,
     _id: userId ?? DEMO_USER._id,
     name: stored.name,
-    photos: stored.photos?.length ? stored.photos : DEMO_USER.photos,
+    photos: stored.photos?.length ? stored.photos : [],
     bio: stored.bio ?? DEMO_USER.bio,
     gender: stored.gender ?? DEMO_USER.gender,
     dateOfBirth: stored.dateOfBirth ?? DEMO_USER.dateOfBirth,
