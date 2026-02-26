@@ -1,10 +1,11 @@
 /**
  * Phase 2 Onboarding - Step 2: Profile Setup
  *
- * FINALIZED: Phase-1 style photo management after confirmation
+ * UPDATED: Always show 9 photo slots, allow adding new photos
+ * - Selection mode: Select from Phase-1 photos
+ * - Photo mode: Manage 9 slots (fill, preview, replace, delete, add new)
  * - Blur ON by default, per-photo toggle
  * - Main photo with star icon
- * - Full preview with Replace/Delete/Set Main actions
  */
 import React, { useState, useCallback, useMemo } from 'react';
 import {
@@ -14,7 +15,6 @@ import {
   TouchableOpacity,
   Image,
   Dimensions,
-  Switch,
   ActivityIndicator,
   ScrollView,
   Modal,
@@ -42,6 +42,9 @@ const GRID_GAP = 8;
 const SCREEN_PADDING = 16;
 const screenWidth = Dimensions.get('window').width;
 const slotSize = (screenWidth - SCREEN_PADDING * 2 - GRID_GAP * (COLUMNS - 1)) / COLUMNS;
+
+// Type for 9-slot photo array
+type PhotoSlots9 = (string | null)[];
 
 const LIFESTYLE_LABELS: Record<string, string> = {
   never: 'Never', sometimes: 'Sometimes', socially: 'Socially',
@@ -80,6 +83,11 @@ function calculateAgeFromDob(dob: string | undefined | null): number {
   return age;
 }
 
+// Create empty 9-slot array
+function createEmptySlots(): PhotoSlots9 {
+  return [null, null, null, null, null, null, null, null, null];
+}
+
 export default function Phase2ProfileSetup() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
@@ -93,7 +101,7 @@ export default function Phase2ProfileSetup() {
 
   const phase1PhotoSlots = useMemo(() => {
     const profile = getCurrentProfile();
-    const slots = profile?.photoSlots || [null, null, null, null, null, null, null, null, null];
+    const slots = profile?.photoSlots || createEmptySlots();
     const nonNullSlots = slots.map((uri, idx) => (uri ? idx : -1)).filter((i) => i >= 0);
     console.log('[P2 STEP2 RENDER] nonNullSlots=' + JSON.stringify(nonNullSlots));
     return slots;
@@ -124,25 +132,38 @@ export default function Phase2ProfileSetup() {
   const [selectedSlots, setSelectedSlots] = useState<number[]>([]);
   const [failedSlots, setFailedSlots] = useState<number[]>([]);
 
-  // Post-confirmation state (Phase-1 style)
-  const [phase2Photos, setPhase2Photos] = useState<string[] | null>(null);
-  const [mainPhotoIndex, setMainPhotoIndex] = useState(0);
-  const [photoBlurStates, setPhotoBlurStates] = useState<boolean[]>([]);
+  // Post-confirmation state: 9-slot based arrays
+  const [phase2PhotoSlots, setPhase2PhotoSlots] = useState<PhotoSlots9 | null>(null);
+  const [photoBlurSlots, setPhotoBlurSlots] = useState<boolean[]>(Array(GRID_SLOTS).fill(true));
+  const [mainPhotoSlot, setMainPhotoSlot] = useState<number>(0);
 
   // Preview state
-  const [previewIndex, setPreviewIndex] = useState<number | null>(null);
+  const [previewSlot, setPreviewSlot] = useState<number | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
 
   // Mode flags
-  const isSelectionMode = phase2Photos === null;
-  const isPhotoMode = phase2Photos !== null;
+  const isSelectionMode = phase2PhotoSlots === null;
+  const isPhotoMode = phase2PhotoSlots !== null;
 
-  // Validation
+  // Computed values
   const validPhotoCount = phase1PhotoSlots.filter((uri, idx) => uri && !failedSlots.includes(idx)).length;
   const selectedCount = selectedSlots.length;
   const canSelectPhotos = selectedCount >= PHASE2_MIN_PHOTOS;
+
+  // Count actual photos in Phase-2 slots
+  const phase2PhotoCount = useMemo(() => {
+    if (!phase2PhotoSlots) return 0;
+    return phase2PhotoSlots.filter((uri) => uri !== null).length;
+  }, [phase2PhotoSlots]);
+
+  // Get list of filled slot indices
+  const filledSlotIndices = useMemo(() => {
+    if (!phase2PhotoSlots) return [];
+    return phase2PhotoSlots.map((uri, idx) => (uri ? idx : -1)).filter((i) => i >= 0);
+  }, [phase2PhotoSlots]);
+
   const canContinueIntents = intentKeys.length >= PHASE2_MIN_INTENTS && intentKeys.length <= PHASE2_MAX_INTENTS;
-  const canContinue = isPhotoMode && canContinueIntents && phase2Photos.length >= PHASE2_MIN_PHOTOS;
+  const canContinue = isPhotoMode && canContinueIntents && phase2PhotoCount >= PHASE2_MIN_PHOTOS;
 
   // ============================================================
   // SELECTION MODE HANDLERS
@@ -159,16 +180,25 @@ export default function Phase2ProfileSetup() {
 
   const handleConfirmPhotos = useCallback(() => {
     if (selectedSlots.length < PHASE2_MIN_PHOTOS) return;
-    // Create Phase-2 photos array from selected slots
-    const photos: string[] = [];
+
+    // Create Phase-2 photo slots from selected Phase-1 slots
+    const newPhotoSlots = createEmptySlots();
+    const newBlurSlots = Array(GRID_SLOTS).fill(true);
+
+    // Fill slots in order (0, 1, 2, ...) with selected photos
+    let fillIndex = 0;
     for (const slotIndex of selectedSlots) {
       const uri = phase1PhotoSlots[slotIndex];
-      if (uri) photos.push(uri);
+      if (uri && fillIndex < GRID_SLOTS) {
+        newPhotoSlots[fillIndex] = uri;
+        newBlurSlots[fillIndex] = true; // Blur ON by default
+        fillIndex++;
+      }
     }
-    setPhase2Photos(photos);
-    // Blur ON by default for all photos
-    setPhotoBlurStates(photos.map(() => true));
-    setMainPhotoIndex(0);
+
+    setPhase2PhotoSlots(newPhotoSlots);
+    setPhotoBlurSlots(newBlurSlots);
+    setMainPhotoSlot(0); // First photo is main by default
   }, [selectedSlots, phase1PhotoSlots]);
 
   const onSlotError = useCallback((slotIndex: number) => {
@@ -177,33 +207,66 @@ export default function Phase2ProfileSetup() {
   }, []);
 
   // ============================================================
-  // PHOTO MODE HANDLERS (Phase-1 style)
+  // PHOTO MODE HANDLERS
   // ============================================================
-  const openPreview = useCallback((index: number) => {
-    if (!isPhotoMode) return;
-    setPreviewIndex(index);
-  }, [isPhotoMode]);
+  const openPreview = useCallback((slotIndex: number) => {
+    if (!isPhotoMode || !phase2PhotoSlots || !phase2PhotoSlots[slotIndex]) return;
+    setPreviewSlot(slotIndex);
+  }, [isPhotoMode, phase2PhotoSlots]);
 
   const closePreview = useCallback(() => {
-    setPreviewIndex(null);
+    setPreviewSlot(null);
   }, []);
 
-  const togglePhotoBlur = useCallback((index: number) => {
-    setPhotoBlurStates((prev) => {
+  const togglePhotoBlur = useCallback((slotIndex: number) => {
+    setPhotoBlurSlots((prev) => {
       const next = [...prev];
-      next[index] = !next[index];
+      next[slotIndex] = !next[slotIndex];
       return next;
     });
   }, []);
 
   const setAsMainPhoto = useCallback(() => {
-    if (previewIndex === null) return;
-    setMainPhotoIndex(previewIndex);
+    if (previewSlot === null) return;
+    setMainPhotoSlot(previewSlot);
     closePreview();
-  }, [previewIndex, closePreview]);
+  }, [previewSlot, closePreview]);
+
+  // Add new photo to empty slot
+  const handleAddPhoto = useCallback(async (slotIndex: number) => {
+    if (!isPhotoMode || !phase2PhotoSlots) return;
+    if (phase2PhotoSlots[slotIndex] !== null) return; // Slot not empty
+
+    try {
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ImagePicker.MediaTypeOptions.Images,
+        allowsEditing: true,
+        aspect: [3, 4],
+        quality: 0.8,
+      });
+
+      if (!result.canceled && result.assets[0]) {
+        const newUri = result.assets[0].uri;
+        setPhase2PhotoSlots((prev) => {
+          if (!prev) return prev;
+          const next = [...prev];
+          next[slotIndex] = newUri;
+          return next;
+        });
+        // Set blur ON by default for new photo
+        setPhotoBlurSlots((prev) => {
+          const next = [...prev];
+          next[slotIndex] = true;
+          return next;
+        });
+      }
+    } catch (e) {
+      Alert.alert('Error', 'Failed to pick image');
+    }
+  }, [isPhotoMode, phase2PhotoSlots]);
 
   const handleReplacePhoto = useCallback(async () => {
-    if (previewIndex === null || !phase2Photos) return;
+    if (previewSlot === null || !phase2PhotoSlots) return;
     try {
       const result = await ImagePicker.launchImageLibraryAsync({
         mediaTypes: ImagePicker.MediaTypeOptions.Images,
@@ -213,10 +276,10 @@ export default function Phase2ProfileSetup() {
       });
       if (!result.canceled && result.assets[0]) {
         const newUri = result.assets[0].uri;
-        setPhase2Photos((prev) => {
+        setPhase2PhotoSlots((prev) => {
           if (!prev) return prev;
           const next = [...prev];
-          next[previewIndex] = newUri;
+          next[previewSlot] = newUri;
           return next;
         });
         closePreview();
@@ -224,37 +287,42 @@ export default function Phase2ProfileSetup() {
     } catch (e) {
       Alert.alert('Error', 'Failed to pick image');
     }
-  }, [previewIndex, phase2Photos, closePreview]);
+  }, [previewSlot, phase2PhotoSlots, closePreview]);
 
   const handleDeletePhoto = useCallback(() => {
-    if (previewIndex === null || !phase2Photos) return;
-    if (phase2Photos.length <= PHASE2_MIN_PHOTOS) {
+    if (previewSlot === null || !phase2PhotoSlots) return;
+
+    // Count current photos
+    const currentCount = phase2PhotoSlots.filter((uri) => uri !== null).length;
+    if (currentCount <= PHASE2_MIN_PHOTOS) {
       Alert.alert('Cannot Delete', `You must have at least ${PHASE2_MIN_PHOTOS} photos.`);
       return;
     }
+
     Alert.alert('Delete Photo', 'Are you sure you want to remove this photo?', [
       { text: 'Cancel', style: 'cancel' },
       {
         text: 'Delete',
         style: 'destructive',
         onPress: () => {
-          setPhase2Photos((prev) => {
+          setPhase2PhotoSlots((prev) => {
             if (!prev) return prev;
-            const next = prev.filter((_, i) => i !== previewIndex);
+            const next = [...prev];
+            next[previewSlot] = null;
             return next;
           });
-          setPhotoBlurStates((prev) => prev.filter((_, i) => i !== previewIndex));
-          // Adjust main photo index if needed
-          if (previewIndex === mainPhotoIndex) {
-            setMainPhotoIndex(0);
-          } else if (previewIndex < mainPhotoIndex) {
-            setMainPhotoIndex((prev) => prev - 1);
+
+          // If deleting main photo, find next filled slot as main
+          if (previewSlot === mainPhotoSlot) {
+            const nextMain = phase2PhotoSlots.findIndex((uri, idx) => uri !== null && idx !== previewSlot);
+            setMainPhotoSlot(nextMain >= 0 ? nextMain : 0);
           }
+
           closePreview();
         },
       },
     ]);
-  }, [previewIndex, phase2Photos, mainPhotoIndex, closePreview]);
+  }, [previewSlot, phase2PhotoSlots, mainPhotoSlot, closePreview]);
 
   // ============================================================
   // OTHER HANDLERS
@@ -269,9 +337,13 @@ export default function Phase2ProfileSetup() {
   }, [setIntentKeys]);
 
   const handleContinue = () => {
-    if (!canContinue || isProcessing || !phase2Photos) return;
+    if (!canContinue || isProcessing || !phase2PhotoSlots) return;
     setIsProcessing(true);
-    setSelectedPhotos([], phase2Photos);
+
+    // Convert slot-based array to URL array for store
+    const photoUrls = phase2PhotoSlots.filter((uri): uri is string => uri !== null);
+    setSelectedPhotos([], photoUrls);
+
     router.push('/(main)/phase2-onboarding/profile-setup' as any);
     setIsProcessing(false);
   };
@@ -308,7 +380,7 @@ export default function Phase2ProfileSetup() {
           <Text style={styles.sectionSubtitle}>
             {isSelectionMode
               ? `Select at least ${PHASE2_MIN_PHOTOS} photos for your Phase-2 profile.`
-              : 'Tap a photo to preview, replace, or delete.'}
+              : 'Tap to preview. Tap + to add more photos.'}
           </Text>
 
           {/* Empty state */}
@@ -322,10 +394,10 @@ export default function Phase2ProfileSetup() {
             </View>
           )}
 
-          {/* GRID */}
+          {/* GRID - Always 9 slots */}
           <View style={styles.grid}>
             {isSelectionMode ? (
-              // SELECTION MODE
+              // SELECTION MODE - Show Phase-1 photos for selection
               phase1PhotoSlots.map((uri, slotIndex) => {
                 const hasFailed = failedSlots.includes(slotIndex);
                 const isSelected = selectedSlots.includes(slotIndex);
@@ -355,31 +427,47 @@ export default function Phase2ProfileSetup() {
                 );
               })
             ) : (
-              // PHOTO MODE (Phase-1 style)
-              phase2Photos!.map((uri, idx) => {
-                const isMain = idx === mainPhotoIndex;
-                const isBlurred = photoBlurStates[idx];
+              // PHOTO MODE - Always show 9 slots
+              Array.from({ length: GRID_SLOTS }).map((_, slotIndex) => {
+                const uri = phase2PhotoSlots![slotIndex];
+                const isMain = slotIndex === mainPhotoSlot && uri !== null;
+                const isBlurred = photoBlurSlots[slotIndex];
 
+                if (uri) {
+                  // Filled slot - show photo with controls
+                  return (
+                    <View key={`p2-${slotIndex}`} style={styles.slot}>
+                      <Pressable style={StyleSheet.absoluteFill} onPress={() => openPreview(slotIndex)}>
+                        <Image source={{ uri }} style={styles.slotImage} resizeMode="cover" blurRadius={isBlurred ? 15 : 0} />
+                      </Pressable>
+                      {/* Main photo star */}
+                      {isMain && (
+                        <View pointerEvents="none" style={styles.starBadge}>
+                          <Ionicons name="star" size={14} color="#FFD700" />
+                        </View>
+                      )}
+                      {/* Blur toggle eye icon - tappable */}
+                      <TouchableOpacity
+                        style={styles.blurToggleBtn}
+                        onPress={() => togglePhotoBlur(slotIndex)}
+                        hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                      >
+                        <Ionicons name={isBlurred ? 'eye-off' : 'eye'} size={16} color="#FFF" />
+                      </TouchableOpacity>
+                    </View>
+                  );
+                }
+
+                // Empty slot - show "Add Photo" button
                 return (
-                  <View key={`p2-${idx}`} style={styles.slot}>
-                    <Pressable style={StyleSheet.absoluteFill} onPress={() => openPreview(idx)}>
-                      <Image source={{ uri }} style={styles.slotImage} resizeMode="cover" blurRadius={isBlurred ? 15 : 0} />
-                    </Pressable>
-                    {/* Main photo star */}
-                    {isMain && (
-                      <View pointerEvents="none" style={styles.starBadge}>
-                        <Ionicons name="star" size={14} color="#FFD700" />
-                      </View>
-                    )}
-                    {/* Blur toggle eye icon - tappable */}
-                    <TouchableOpacity
-                      style={styles.blurToggleBtn}
-                      onPress={() => togglePhotoBlur(idx)}
-                      hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-                    >
-                      <Ionicons name={isBlurred ? 'eye-off' : 'eye'} size={16} color="#FFF" />
-                    </TouchableOpacity>
-                  </View>
+                  <TouchableOpacity
+                    key={`add-${slotIndex}`}
+                    style={[styles.slot, styles.addPhotoSlot]}
+                    onPress={() => handleAddPhoto(slotIndex)}
+                  >
+                    <Ionicons name="add-circle-outline" size={32} color={C.primary} />
+                    <Text style={styles.addPhotoText}>Add</Text>
+                  </TouchableOpacity>
                 );
               })
             )}
@@ -409,7 +497,7 @@ export default function Phase2ProfileSetup() {
           )}
           {isPhotoMode && (
             <Text style={styles.countText}>
-              {phase2Photos!.length} photos (blur ON by default)
+              {phase2PhotoCount}/{GRID_SLOTS} photos (blur ON by default)
             </Text>
           )}
         </View>
@@ -523,13 +611,13 @@ export default function Phase2ProfileSetup() {
         </TouchableOpacity>
       </View>
 
-      {/* FULL-SCREEN PREVIEW MODAL (Phase-1 style) */}
-      <Modal visible={isPhotoMode && previewIndex !== null} transparent animationType="fade" onRequestClose={closePreview}>
+      {/* FULL-SCREEN PREVIEW MODAL */}
+      <Modal visible={isPhotoMode && previewSlot !== null} transparent animationType="fade" onRequestClose={closePreview}>
         <View style={styles.modalOverlay}>
           <View style={styles.modalContent}>
-            {previewIndex !== null && phase2Photos && phase2Photos[previewIndex] && (
+            {previewSlot !== null && phase2PhotoSlots && phase2PhotoSlots[previewSlot] && (
               <Image
-                source={{ uri: phase2Photos[previewIndex] }}
+                source={{ uri: phase2PhotoSlots[previewSlot]! }}
                 style={styles.previewImage}
                 resizeMode="contain"
               />
@@ -589,6 +677,14 @@ const styles = StyleSheet.create({
     overflow: 'hidden', backgroundColor: C.surface, position: 'relative',
   },
   emptySlot: { alignItems: 'center', justifyContent: 'center', opacity: 0.5 },
+  addPhotoSlot: {
+    alignItems: 'center', justifyContent: 'center',
+    borderWidth: 2, borderColor: C.primary + '40', borderStyle: 'dashed',
+    backgroundColor: C.primary + '08',
+  },
+  addPhotoText: {
+    fontSize: 11, color: C.primary, fontWeight: '600', marginTop: 4,
+  },
   slotImage: { width: '100%', height: '100%' },
 
   // Badges
