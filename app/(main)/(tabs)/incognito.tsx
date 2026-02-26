@@ -6,6 +6,18 @@ import { usePrivateProfileStore, selectIsSetupValid } from '@/stores/privateProf
 
 const C = INCOGNITO_COLORS;
 
+// Module-level lock: prevents repeated navigation across component remounts
+// Reset only on app restart or explicit reset
+let moduleDidNavigate = false;
+
+/** Reset the navigation lock - call this when user exits Phase-2 or logs out */
+export function resetPrivateEntryGuard() {
+  moduleDidNavigate = false;
+  if (__DEV__) {
+    console.log('[PrivateEntryGuard] Navigation lock reset');
+  }
+}
+
 /**
  * Private Tab Entry Guard
  *
@@ -48,11 +60,22 @@ export default function PrivateEntryGuard() {
       return;
     }
 
-    // Guard: only navigate once per mount
+    // Guard: only navigate once per mount (ref-level)
     if (didNavigate.current) {
       return;
     }
+
+    // Guard: only navigate once per session (module-level)
+    // This prevents repeated navigation when component remounts
+    if (moduleDidNavigate) {
+      if (__DEV__) {
+        console.log('[PrivateEntryGuard] Already navigated this session, skipping');
+      }
+      return;
+    }
+
     didNavigate.current = true;
+    moduleDidNavigate = true;
 
     // CRASH FIX: Use requestAnimationFrame to ensure previous screen unmounted
     requestAnimationFrame(() => {

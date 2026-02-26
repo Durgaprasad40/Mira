@@ -3,10 +3,15 @@
  *
  * Layout order (top to bottom):
  * A) Title: "Review your profile"
- * B) Photos + Name + DOB + Looking For + Desire (with Edit buttons)
+ * B) Photos section (grid + preview on tap + Edit)
+ * C) Desire section (text display + Edit)
+ * D) Profile Details (Name, DOB, Gender, Height, etc.)
+ * E) Looking For section (tags + Edit)
+ * F) Info note + validation/continue button
  *
- * Photos: tap → full-screen preview
+ * Photos: tap → full-screen preview (with blur if enabled)
  * All Edit buttons → navigate to profile-edit (Step 2.5)
+ * Blur consistency: uses blurMyPhoto from store
  */
 import React, { useState, useMemo, useCallback } from 'react';
 import {
@@ -75,6 +80,7 @@ export default function Phase2Review() {
   const drinking = usePrivateProfileStore((s) => s.drinking);
   const education = usePrivateProfileStore((s) => s.education);
   const religion = usePrivateProfileStore((s) => s.religion);
+  const blurMyPhoto = usePrivateProfileStore((s) => s.blurMyPhoto);
 
   // Store actions
   const completeSetup = usePrivateProfileStore((s) => s.completeSetup);
@@ -223,14 +229,41 @@ export default function Phase2Review() {
                   source={{ uri: url }}
                   style={styles.photoImage}
                   contentFit="cover"
+                  blurRadius={blurMyPhoto ? 15 : 0}
                 />
+                {blurMyPhoto && (
+                  <View style={styles.blurBadge}>
+                    <Ionicons name="eye-off" size={12} color="#FFF" />
+                  </View>
+                )}
               </Pressable>
             ))}
           </View>
-          <Text style={styles.photoHint}>Tap a photo to preview</Text>
+          <Text style={styles.photoHint}>
+            Tap a photo to preview{blurMyPhoto ? ' (blur ON)' : ''}
+          </Text>
         </View>
 
-        {/* === Profile Details === */}
+        {/* === SECTION C: Desire (read-only display) === */}
+        <View style={styles.section}>
+          <View style={styles.sectionHeader}>
+            <Text style={styles.sectionTitle}>Desire</Text>
+            <TouchableOpacity style={styles.editBtn} onPress={handleEditProfile}>
+              <Ionicons name="pencil" size={14} color={C.primary} />
+              <Text style={styles.editBtnText}>Edit</Text>
+            </TouchableOpacity>
+          </View>
+
+          {privateBio.trim().length > 0 ? (
+            <View style={styles.desireDisplay}>
+              <Text style={styles.desireText}>{privateBio}</Text>
+            </View>
+          ) : (
+            <Text style={styles.emptyText}>No desire written yet</Text>
+          )}
+        </View>
+
+        {/* === SECTION D: Profile Details === */}
         <View style={styles.section}>
           <View style={styles.sectionHeader}>
             <Text style={styles.sectionTitle}>Profile Details</Text>
@@ -297,7 +330,7 @@ export default function Phase2Review() {
           </View>
         </View>
 
-        {/* === SECTION: Looking For === */}
+        {/* === SECTION E: Looking For === */}
         <View style={styles.section}>
           <View style={styles.sectionHeader}>
             <Text style={styles.sectionTitle}>Looking For</Text>
@@ -321,26 +354,7 @@ export default function Phase2Review() {
           )}
         </View>
 
-        {/* === SECTION C: Desire (read-only display) === */}
-        <View style={styles.section}>
-          <View style={styles.sectionHeader}>
-            <Text style={styles.sectionTitle}>Desire</Text>
-            <TouchableOpacity style={styles.editBtn} onPress={handleEditProfile}>
-              <Ionicons name="pencil" size={14} color={C.primary} />
-              <Text style={styles.editBtnText}>Edit</Text>
-            </TouchableOpacity>
-          </View>
-
-          {privateBio.trim().length > 0 ? (
-            <View style={styles.desireDisplay}>
-              <Text style={styles.desireText}>{privateBio}</Text>
-            </View>
-          ) : (
-            <Text style={styles.emptyText}>No desire written yet</Text>
-          )}
-        </View>
-
-        {/* Info Note */}
+        {/* === SECTION F: Info Note === */}
         <View style={styles.infoNote}>
           <Ionicons name="information-circle-outline" size={18} color={C.textLight} />
           <Text style={styles.infoNoteText}>
@@ -394,7 +408,16 @@ export default function Phase2Review() {
                 source={{ uri: selectedPhotoUrls[previewIndex] }}
                 style={styles.previewImage}
                 contentFit="contain"
+                blurRadius={blurMyPhoto ? 20 : 0}
               />
+            )}
+
+            {/* Blur indicator */}
+            {blurMyPhoto && (
+              <View style={styles.blurIndicator}>
+                <Ionicons name="eye-off" size={16} color="#FFF" />
+                <Text style={styles.blurIndicatorText}>Blur enabled</Text>
+              </View>
             )}
 
             {/* Close button */}
@@ -493,6 +516,17 @@ const styles = StyleSheet.create({
     color: C.textLight,
     textAlign: 'center',
     marginTop: 8,
+  },
+  blurBadge: {
+    position: 'absolute',
+    bottom: 6,
+    right: 6,
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    backgroundColor: 'rgba(0,0,0,0.6)',
+    alignItems: 'center',
+    justifyContent: 'center',
   },
 
   // Info card
@@ -683,6 +717,22 @@ const styles = StyleSheet.create({
   photoCounterText: {
     fontSize: 14,
     fontWeight: '600',
+    color: '#FFF',
+  },
+  blurIndicator: {
+    position: 'absolute',
+    top: 100,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    backgroundColor: 'rgba(0,0,0,0.6)',
+    borderRadius: 20,
+  },
+  blurIndicatorText: {
+    fontSize: 14,
+    fontWeight: '500',
     color: '#FFF',
   },
 });
