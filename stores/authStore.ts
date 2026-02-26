@@ -111,6 +111,10 @@ export const useAuthStore = create<AuthState>()(
         if (__DEV__) console.log('[AUTH] logout: cleared onboardingStore');
         if (__DEV__) console.log('[BOOT_CACHE] cleared boot caches on logout');
 
+        // Reset verification store to prevent badge leakage between accounts
+        const { useVerificationStore } = require('@/stores/verificationStore');
+        useVerificationStore.getState().resetVerification();
+
         set({
           isAuthenticated: false,
           userId: null,
