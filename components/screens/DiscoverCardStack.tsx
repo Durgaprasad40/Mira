@@ -332,7 +332,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
 
   // Drop profiles with no valid primary photo — prevents blank Discover cards
   const validProfiles = useMemo(
-    () => latestProfiles.filter((p) => p.photos.length > 0 && !!p.photos[0]?.url),
+    () => latestProfiles.filter((p) => (p.photos?.length ?? 0) > 0 && !!p.photos?.[0]?.url),
     [latestProfiles],
   );
 
