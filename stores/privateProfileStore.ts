@@ -106,6 +106,7 @@ interface PrivateProfileState {
 
   // Actions — reset
   resetWizard: () => void;
+  resetPhase2: () => void; // Full Phase-2 profile reset (clears everything)
 
   // Hydration
   setHasHydrated: (hydrated: boolean) => void;
@@ -178,6 +179,18 @@ export const usePrivateProfileStore = create<PrivateProfileState>()(
       setIsSetupComplete: (complete) => set({ isSetupComplete: complete }),
       setConvexProfileId: (id) => set({ convexProfileId: id }),
       resetWizard: () => set(initialWizardState),
+      resetPhase2: () => set({
+        // Reset all wizard state
+        ...initialWizardState,
+        // Also reset legacy profile fields
+        profile: {
+          username: 'Anonymous_User',
+          bio: '',
+          desireCategories: [],
+          blurPhoto: true,
+        },
+        isSetup: false,
+      }),
       setHasHydrated: (hydrated) => set({ _hasHydrated: hydrated }),
 
       // Phase-2 setup actions

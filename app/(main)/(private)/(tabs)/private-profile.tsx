@@ -150,6 +150,7 @@ export default function PrivateProfileScreen() {
   const privateBio = usePrivateProfileStore((s) => s.privateBio);
   const setSelectedPhotos = usePrivateProfileStore((s) => s.setSelectedPhotos);
   const setBlurMyPhoto = usePrivateProfileStore((s) => s.setBlurMyPhoto);
+  const resetPhase2 = usePrivateProfileStore((s) => s.resetPhase2);
 
   // Local UI state
   const [previewAsOthers, setPreviewAsOthers] = useState(false);
@@ -442,6 +443,27 @@ export default function PrivateProfileScreen() {
   };
 
   /**
+   * Reset Phase-2 profile and restart onboarding
+   */
+  const handleResetPhase2 = () => {
+    Alert.alert(
+      'Reset Private Profile?',
+      'This will clear all your Private Mode photos, preferences, and settings. You will need to set up your Private profile again.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Reset',
+          style: 'destructive',
+          onPress: () => {
+            resetPhase2();
+            router.replace('/(main)/phase2-onboarding' as any);
+          },
+        },
+      ]
+    );
+  };
+
+  /**
    * Render grid photo with optional blur (used for photo grid)
    */
   const renderGridPhoto = (uri: string, index: number, onPress?: () => void) => {
@@ -699,6 +721,23 @@ export default function PrivateProfileScreen() {
               <View>
                 <Text style={styles.settingsRowLabel}>Privacy Settings</Text>
                 <Text style={styles.settingsRowValue}>Manage who can see you</Text>
+              </View>
+            </View>
+            <Ionicons name="chevron-forward" size={20} color={C.textLight} />
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={[styles.settingsRow, styles.settingsRowDanger]}
+            onPress={handleResetPhase2}
+            activeOpacity={0.7}
+          >
+            <View style={styles.settingsRowLeft}>
+              <Ionicons name="refresh-outline" size={20} color="#FF6B6B" />
+              <View>
+                <Text style={[styles.settingsRowLabel, styles.settingsRowLabelDanger]}>
+                  Reset Private Profile
+                </Text>
+                <Text style={styles.settingsRowValue}>Start over with a fresh setup</Text>
               </View>
             </View>
             <Ionicons name="chevron-forward" size={20} color={C.textLight} />
@@ -1126,6 +1165,13 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: C.textLight,
     marginTop: 2,
+  },
+  settingsRowDanger: {
+    borderWidth: 1,
+    borderColor: 'rgba(255,107,107,0.2)',
+  },
+  settingsRowLabelDanger: {
+    color: '#FF6B6B',
   },
 
   // Privacy Note
