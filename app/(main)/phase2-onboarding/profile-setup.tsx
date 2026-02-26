@@ -25,12 +25,26 @@ import { Ionicons } from '@expo/vector-icons';
 import { Image } from 'expo-image';
 import { INCOGNITO_COLORS } from '@/lib/constants';
 import { PRIVATE_INTENT_CATEGORIES } from '@/lib/privateConstants';
+import { useShallow } from 'zustand/react/shallow';
 import {
   usePrivateProfileStore,
   selectCanContinueDesire,
   selectCanContinueIntents,
+  selectIsProfileDetailsComplete,
+  selectIsPhase2ProfileComplete,
   PHASE2_MIN_PHOTOS,
+  PHASE2_MIN_INTENTS,
+  PHASE2_MAX_INTENTS,
+  PHASE2_DESIRE_MIN_LENGTH,
+  PHASE2_DESIRE_MAX_LENGTH,
 } from '@/stores/privateProfileStore';
+import {
+  GENDER_OPTIONS,
+  SMOKING_OPTIONS,
+  DRINKING_OPTIONS,
+  EDUCATION_OPTIONS,
+  RELIGION_OPTIONS,
+} from '@/lib/constants';
 import { useDemoStore } from '@/stores/demoStore';
 
 const C = INCOGNITO_COLORS;
@@ -55,6 +69,12 @@ export default function Phase2Review() {
   const selectedPhotoUrls = usePrivateProfileStore((s) => s.selectedPhotoUrls);
   const intentKeys = usePrivateProfileStore((s) => s.intentKeys);
   const privateBio = usePrivateProfileStore((s) => s.privateBio);
+  const gender = usePrivateProfileStore((s) => s.gender);
+  const height = usePrivateProfileStore((s) => s.height);
+  const smoking = usePrivateProfileStore((s) => s.smoking);
+  const drinking = usePrivateProfileStore((s) => s.drinking);
+  const education = usePrivateProfileStore((s) => s.education);
+  const religion = usePrivateProfileStore((s) => s.religion);
 
   // Store actions
   const completeSetup = usePrivateProfileStore((s) => s.completeSetup);
@@ -62,6 +82,36 @@ export default function Phase2Review() {
   // Validation
   const canContinueDesire = usePrivateProfileStore(selectCanContinueDesire);
   const canContinueIntents = usePrivateProfileStore(selectCanContinueIntents);
+  const isProfileDetailsComplete = usePrivateProfileStore(selectIsProfileDetailsComplete);
+  const isPhase2Complete = usePrivateProfileStore(selectIsPhase2ProfileComplete);
+  const allMissingItems = usePrivateProfileStore(
+    useShallow((s) => {
+      const missing: string[] = [];
+      // Photos
+      const validPhotos = s.selectedPhotoUrls.filter(
+        (url) => typeof url === 'string' && url.length > 0 && url !== 'undefined' && url !== 'null' && (url.startsWith('http') || url.startsWith('file://'))
+      );
+      if (validPhotos.length < PHASE2_MIN_PHOTOS) {
+        missing.push(`${PHASE2_MIN_PHOTOS - validPhotos.length} more photo${PHASE2_MIN_PHOTOS - validPhotos.length > 1 ? 's' : ''}`);
+      }
+      // Intents
+      if (s.intentKeys.length < PHASE2_MIN_INTENTS) {
+        missing.push('Looking For selection');
+      }
+      // Desire
+      if (s.privateBio.trim().length < PHASE2_DESIRE_MIN_LENGTH) {
+        missing.push('Desire text');
+      }
+      // Profile details
+      if (!s.gender) missing.push('Gender');
+      if (s.height === null || s.height <= 0) missing.push('Height');
+      if (!s.smoking) missing.push('Smoking');
+      if (!s.drinking) missing.push('Drinking');
+      if (!s.education) missing.push('Education');
+      if (!s.religion) missing.push('Religion');
+      return missing;
+    })
+  );
 
   // Preview state
   const [previewIndex, setPreviewIndex] = useState<number | null>(null);
@@ -83,8 +133,14 @@ export default function Phase2Review() {
     intentKeys.includes(cat.key as any)
   );
 
-  // Can complete: photos + intents + desire all valid
-  const canComplete = photoCount >= PHASE2_MIN_PHOTOS && canContinueIntents && canContinueDesire;
+  // Helper to get display label from options
+  const getOptionLabel = (options: { value: string; label: string }[], value: string | null) => {
+    if (!value) return null;
+    return options.find((o) => o.value === value)?.label || value;
+  };
+
+  // Can complete: photos + intents + desire + profile details all valid
+  const canComplete = isPhase2Complete;
 
   // Photo preview handlers
   const openPreview = useCallback((index: number) => {
@@ -174,9 +230,23 @@ export default function Phase2Review() {
           <Text style={styles.photoHint}>Tap a photo to preview</Text>
         </View>
 
-        {/* === Name & DOB === */}
+        {/* === Profile Details === */}
         <View style={styles.section}>
-          <Text style={styles.sectionTitle}>Profile Info</Text>
+          <View style={styles.sectionHeader}>
+            <Text style={styles.sectionTitle}>Profile Details</Text>
+            <TouchableOpacity style={styles.editBtn} onPress={handleEditProfile}>
+              <Ionicons name="pencil" size={14} color={C.primary} />
+              <Text style={styles.editBtnText}>Edit</Text>
+            </TouchableOpacity>
+          </View>
+          {!isProfileDetailsComplete && (
+            <View style={styles.warningBanner}>
+              <Ionicons name="alert-circle" size={16} color="#FF6B6B" />
+              <Text style={styles.warningText}>
+                Complete all fields to continue
+              </Text>
+            </View>
+          )}
           <View style={styles.infoCard}>
             <View style={styles.infoRow}>
               <Text style={styles.infoLabel}>Name</Text>
@@ -188,6 +258,42 @@ export default function Phase2Review() {
                 <Text style={styles.infoValue}>{formattedDOB}</Text>
               </View>
             )}
+            <View style={styles.infoRow}>
+              <Text style={[styles.infoLabel, !gender && styles.infoLabelMissing]}>Gender</Text>
+              <Text style={[styles.infoValue, !gender && styles.infoValueMissing]}>
+                {getOptionLabel(GENDER_OPTIONS, gender) || 'Not set'}
+              </Text>
+            </View>
+            <View style={styles.infoRow}>
+              <Text style={[styles.infoLabel, (!height || height <= 0) && styles.infoLabelMissing]}>Height</Text>
+              <Text style={[styles.infoValue, (!height || height <= 0) && styles.infoValueMissing]}>
+                {height && height > 0 ? `${height} cm` : 'Not set'}
+              </Text>
+            </View>
+            <View style={styles.infoRow}>
+              <Text style={[styles.infoLabel, !smoking && styles.infoLabelMissing]}>Smoking</Text>
+              <Text style={[styles.infoValue, !smoking && styles.infoValueMissing]}>
+                {getOptionLabel(SMOKING_OPTIONS, smoking) || 'Not set'}
+              </Text>
+            </View>
+            <View style={styles.infoRow}>
+              <Text style={[styles.infoLabel, !drinking && styles.infoLabelMissing]}>Drinking</Text>
+              <Text style={[styles.infoValue, !drinking && styles.infoValueMissing]}>
+                {getOptionLabel(DRINKING_OPTIONS, drinking) || 'Not set'}
+              </Text>
+            </View>
+            <View style={styles.infoRow}>
+              <Text style={[styles.infoLabel, !education && styles.infoLabelMissing]}>Education</Text>
+              <Text style={[styles.infoValue, !education && styles.infoValueMissing]}>
+                {getOptionLabel(EDUCATION_OPTIONS, education) || 'Not set'}
+              </Text>
+            </View>
+            <View style={[styles.infoRow, styles.infoRowLast]}>
+              <Text style={[styles.infoLabel, !religion && styles.infoLabelMissing]}>Religion</Text>
+              <Text style={[styles.infoValue, !religion && styles.infoValueMissing]}>
+                {getOptionLabel(RELIGION_OPTIONS, religion) || 'Not set'}
+              </Text>
+            </View>
           </View>
         </View>
 
@@ -250,11 +356,9 @@ export default function Phase2Review() {
       <View style={[styles.bottomBar, { paddingBottom: Math.max(insets.bottom, 16) + 20 }]}>
         {!canComplete && (
           <Text style={styles.bottomHint}>
-            {photoCount < PHASE2_MIN_PHOTOS
-              ? 'Add more photos'
-              : !canContinueIntents
-              ? 'Select intents'
-              : 'Write your desire'}
+            {allMissingItems.length > 0
+              ? `Missing: ${allMissingItems.slice(0, 2).join(', ')}${allMissingItems.length > 2 ? '...' : ''}`
+              : 'Complete your profile'}
             {' - '}
             <Text style={styles.bottomHintLink} onPress={handleEditProfile}>Edit Profile</Text>
           </Text>
@@ -413,6 +517,34 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: '600',
     color: C.text,
+  },
+  infoRowLast: {
+    borderBottomWidth: 0,
+  },
+  infoLabelMissing: {
+    color: '#FF6B6B',
+  },
+  infoValueMissing: {
+    color: '#FF6B6B',
+    fontStyle: 'italic',
+    fontWeight: '400',
+  },
+
+  // Warning banner
+  warningBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    backgroundColor: 'rgba(255,107,107,0.12)',
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderRadius: 8,
+    marginBottom: 12,
+  },
+  warningText: {
+    fontSize: 13,
+    color: '#FF6B6B',
+    fontWeight: '500',
   },
 
   // Intents

@@ -119,6 +119,13 @@ interface PrivateProfileState {
 
   // Actions — profile info
   setProfileInfo: (info: { displayName: string; age: number; city: string; gender: string }) => void;
+  // Actions — individual profile field setters (for Phase-2 editing)
+  setGender: (gender: string) => void;
+  setHeight: (height: number | null) => void;
+  setSmoking: (smoking: string | null) => void;
+  setDrinking: (drinking: string | null) => void;
+  setEducation: (education: string | null) => void;
+  setReligion: (religion: string | null) => void;
 
   // Actions — completion
   setIsSetupComplete: (complete: boolean) => void;
@@ -207,6 +214,13 @@ export const usePrivateProfileStore = create<PrivateProfileState>()(
       setPrivateBio: (bio) => set({ privateBio: bio }),
       setConsentAgreed: (agreed) => set({ consentAgreed: agreed }),
       setProfileInfo: (info) => set(info),
+      // Individual profile field setters
+      setGender: (gender) => set({ gender }),
+      setHeight: (height) => set({ height }),
+      setSmoking: (smoking) => set({ smoking }),
+      setDrinking: (drinking) => set({ drinking }),
+      setEducation: (education) => set({ education }),
+      setReligion: (religion) => set({ religion }),
       setIsSetupComplete: (complete) => set({ isSetupComplete: complete }),
       setConvexProfileId: (id) => set({ convexProfileId: id }),
       resetWizard: () => set(initialWizardState),
@@ -424,4 +438,66 @@ export const selectCanContinueCategories = (state: PrivateProfileState): boolean
     state.intentKeys.length <= PHASE2_MAX_INTENTS &&
     state.privateBio.trim().length >= PHASE2_DESIRE_MIN_LENGTH
   );
+};
+
+// Selector: Check if profile details are complete (mandatory fields)
+export const selectIsProfileDetailsComplete = (state: PrivateProfileState): boolean => {
+  return (
+    !!state.gender &&
+    state.height !== null && state.height > 0 &&
+    !!state.smoking &&
+    !!state.drinking &&
+    !!state.education &&
+    !!state.religion
+  );
+};
+
+// Selector: Get list of missing mandatory fields
+export const selectMissingProfileFields = (state: PrivateProfileState): string[] => {
+  const missing: string[] = [];
+  if (!state.gender) missing.push('Gender');
+  if (state.height === null || state.height <= 0) missing.push('Height');
+  if (!state.smoking) missing.push('Smoking');
+  if (!state.drinking) missing.push('Drinking');
+  if (!state.education) missing.push('Education');
+  if (!state.religion) missing.push('Religion');
+  return missing;
+};
+
+// Selector: Check if entire Phase-2 profile is complete (photos + intents + desire + profile details)
+export const selectIsPhase2ProfileComplete = (state: PrivateProfileState): boolean => {
+  const validPhotos = state.selectedPhotoUrls.filter(isValidPhotoUrl);
+  const hasEnoughPhotos = validPhotos.length >= PHASE2_MIN_PHOTOS;
+  const hasValidIntents = state.intentKeys.length >= PHASE2_MIN_INTENTS && state.intentKeys.length <= PHASE2_MAX_INTENTS;
+  const hasValidDesire = state.privateBio.trim().length >= PHASE2_DESIRE_MIN_LENGTH && state.privateBio.trim().length <= PHASE2_DESIRE_MAX_LENGTH;
+  const hasProfileDetails = selectIsProfileDetailsComplete(state);
+
+  return hasEnoughPhotos && hasValidIntents && hasValidDesire && hasProfileDetails;
+};
+
+// Selector: Get all missing items for Phase-2 completion
+export const selectAllMissingItems = (state: PrivateProfileState): string[] => {
+  const missing: string[] = [];
+
+  // Photos
+  const validPhotos = state.selectedPhotoUrls.filter(isValidPhotoUrl);
+  if (validPhotos.length < PHASE2_MIN_PHOTOS) {
+    missing.push(`${PHASE2_MIN_PHOTOS - validPhotos.length} more photo${PHASE2_MIN_PHOTOS - validPhotos.length > 1 ? 's' : ''}`);
+  }
+
+  // Intents
+  if (state.intentKeys.length < PHASE2_MIN_INTENTS) {
+    missing.push('Looking For selection');
+  }
+
+  // Desire
+  if (state.privateBio.trim().length < PHASE2_DESIRE_MIN_LENGTH) {
+    missing.push('Desire text');
+  }
+
+  // Profile details
+  const missingFields = selectMissingProfileFields(state);
+  missing.push(...missingFields);
+
+  return missing;
 };

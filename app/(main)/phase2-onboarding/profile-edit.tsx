@@ -31,6 +31,7 @@ import { Ionicons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
 import { INCOGNITO_COLORS } from '@/lib/constants';
 import { PRIVATE_INTENT_CATEGORIES } from '@/lib/privateConstants';
+import { useShallow } from 'zustand/react/shallow';
 import {
   usePrivateProfileStore,
   PHASE2_MIN_PHOTOS,
@@ -40,7 +41,15 @@ import {
   PHASE2_DESIRE_MAX_LENGTH,
   selectCanContinueIntents,
   selectCanContinueDesire,
+  selectIsProfileDetailsComplete,
 } from '@/stores/privateProfileStore';
+import {
+  GENDER_OPTIONS,
+  SMOKING_OPTIONS,
+  DRINKING_OPTIONS,
+  EDUCATION_OPTIONS,
+  RELIGION_OPTIONS,
+} from '@/lib/constants';
 
 const C = INCOGNITO_COLORS;
 const GRID_SLOTS = 9;
@@ -65,15 +74,40 @@ export default function Phase2ProfileEdit() {
   const selectedPhotoUrls = usePrivateProfileStore((s) => s.selectedPhotoUrls);
   const intentKeys = usePrivateProfileStore((s) => s.intentKeys);
   const privateBio = usePrivateProfileStore((s) => s.privateBio);
+  const gender = usePrivateProfileStore((s) => s.gender);
+  const height = usePrivateProfileStore((s) => s.height);
+  const smoking = usePrivateProfileStore((s) => s.smoking);
+  const drinking = usePrivateProfileStore((s) => s.drinking);
+  const education = usePrivateProfileStore((s) => s.education);
+  const religion = usePrivateProfileStore((s) => s.religion);
 
   // Store actions
   const setSelectedPhotos = usePrivateProfileStore((s) => s.setSelectedPhotos);
   const setIntentKeys = usePrivateProfileStore((s) => s.setIntentKeys);
   const setPrivateBio = usePrivateProfileStore((s) => s.setPrivateBio);
+  const setGender = usePrivateProfileStore((s) => s.setGender);
+  const setHeight = usePrivateProfileStore((s) => s.setHeight);
+  const setSmoking = usePrivateProfileStore((s) => s.setSmoking);
+  const setDrinking = usePrivateProfileStore((s) => s.setDrinking);
+  const setEducation = usePrivateProfileStore((s) => s.setEducation);
+  const setReligion = usePrivateProfileStore((s) => s.setReligion);
 
   // Validation
   const canContinueIntents = usePrivateProfileStore(selectCanContinueIntents);
   const canContinueDesire = usePrivateProfileStore(selectCanContinueDesire);
+  const isProfileDetailsComplete = usePrivateProfileStore(selectIsProfileDetailsComplete);
+  const missingProfileFields = usePrivateProfileStore(
+    useShallow((s) => {
+      const missing: string[] = [];
+      if (!s.gender) missing.push('Gender');
+      if (s.height === null || s.height <= 0) missing.push('Height');
+      if (!s.smoking) missing.push('Smoking');
+      if (!s.drinking) missing.push('Drinking');
+      if (!s.education) missing.push('Education');
+      if (!s.religion) missing.push('Religion');
+      return missing;
+    })
+  );
 
   // ============================================================
   // LOCAL STATE: 9-slot photo management
@@ -93,10 +127,13 @@ export default function Phase2ProfileEdit() {
   const [previewSlot, setPreviewSlot] = useState<number | null>(null);
   const [isProcessing, setIsProcessing] = useState(false);
 
+  // Local state for height input
+  const [heightInput, setHeightInput] = useState<string>(height ? height.toString() : '');
+
   // Computed values
   const photoCount = useMemo(() => photoSlots.filter((uri) => uri !== null).length, [photoSlots]);
   const desireLength = privateBio.trim().length;
-  const canContinue = photoCount >= PHASE2_MIN_PHOTOS && canContinueIntents && canContinueDesire;
+  const canContinue = photoCount >= PHASE2_MIN_PHOTOS && canContinueIntents && canContinueDesire && isProfileDetailsComplete;
 
   // ============================================================
   // PHOTO HANDLERS
@@ -347,7 +384,136 @@ export default function Phase2ProfileEdit() {
           </View>
         </View>
 
-        {/* Section C: Desire */}
+        {/* Section C: Profile Details */}
+        <View style={styles.section}>
+          <View style={styles.sectionHeader}>
+            <Text style={styles.sectionTitle}>Profile Details</Text>
+            {isProfileDetailsComplete ? (
+              <View style={styles.completeBadge}>
+                <Ionicons name="checkmark-circle" size={14} color="#4CAF50" />
+                <Text style={styles.completeBadgeText}>Complete</Text>
+              </View>
+            ) : (
+              <Text style={styles.missingCount}>{missingProfileFields.length} missing</Text>
+            )}
+          </View>
+          <Text style={[styles.sectionSubtitle, !isProfileDetailsComplete && styles.countWarning]}>
+            All fields required for Phase-2
+          </Text>
+
+          {/* Gender */}
+          <View style={styles.detailField}>
+            <Text style={styles.detailLabel}>Gender {!gender && <Text style={styles.requiredStar}>*</Text>}</Text>
+            <View style={styles.optionsRow}>
+              {GENDER_OPTIONS.map((opt) => (
+                <TouchableOpacity
+                  key={opt.value}
+                  style={[styles.optionChip, gender === opt.value && styles.optionChipSelected]}
+                  onPress={() => setGender(gender === opt.value ? '' : opt.value)}
+                >
+                  <Text style={[styles.optionText, gender === opt.value && styles.optionTextSelected]}>
+                    {opt.label}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+          </View>
+
+          {/* Height */}
+          <View style={styles.detailField}>
+            <Text style={styles.detailLabel}>Height (cm) {(!height || height <= 0) && <Text style={styles.requiredStar}>*</Text>}</Text>
+            <View style={styles.heightInputRow}>
+              <TextInput
+                style={styles.heightInput}
+                value={heightInput}
+                onChangeText={(text) => {
+                  setHeightInput(text);
+                  const num = parseInt(text, 10);
+                  setHeight(isNaN(num) || num <= 0 ? null : num);
+                }}
+                placeholder="e.g. 175"
+                placeholderTextColor={C.textLight}
+                keyboardType="numeric"
+                maxLength={3}
+              />
+              <Text style={styles.heightUnit}>cm</Text>
+            </View>
+          </View>
+
+          {/* Smoking */}
+          <View style={styles.detailField}>
+            <Text style={styles.detailLabel}>Smoking {!smoking && <Text style={styles.requiredStar}>*</Text>}</Text>
+            <View style={styles.optionsRow}>
+              {SMOKING_OPTIONS.map((opt) => (
+                <TouchableOpacity
+                  key={opt.value}
+                  style={[styles.optionChip, smoking === opt.value && styles.optionChipSelected]}
+                  onPress={() => setSmoking(smoking === opt.value ? null : opt.value)}
+                >
+                  <Text style={[styles.optionText, smoking === opt.value && styles.optionTextSelected]}>
+                    {opt.label}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+          </View>
+
+          {/* Drinking */}
+          <View style={styles.detailField}>
+            <Text style={styles.detailLabel}>Drinking {!drinking && <Text style={styles.requiredStar}>*</Text>}</Text>
+            <View style={styles.optionsRow}>
+              {DRINKING_OPTIONS.map((opt) => (
+                <TouchableOpacity
+                  key={opt.value}
+                  style={[styles.optionChip, drinking === opt.value && styles.optionChipSelected]}
+                  onPress={() => setDrinking(drinking === opt.value ? null : opt.value)}
+                >
+                  <Text style={[styles.optionText, drinking === opt.value && styles.optionTextSelected]}>
+                    {opt.label}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+          </View>
+
+          {/* Education */}
+          <View style={styles.detailField}>
+            <Text style={styles.detailLabel}>Education {!education && <Text style={styles.requiredStar}>*</Text>}</Text>
+            <View style={styles.optionsRow}>
+              {EDUCATION_OPTIONS.map((opt) => (
+                <TouchableOpacity
+                  key={opt.value}
+                  style={[styles.optionChip, education === opt.value && styles.optionChipSelected]}
+                  onPress={() => setEducation(education === opt.value ? null : opt.value)}
+                >
+                  <Text style={[styles.optionText, education === opt.value && styles.optionTextSelected]}>
+                    {opt.label}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+          </View>
+
+          {/* Religion */}
+          <View style={styles.detailField}>
+            <Text style={styles.detailLabel}>Religion {!religion && <Text style={styles.requiredStar}>*</Text>}</Text>
+            <View style={styles.optionsRow}>
+              {RELIGION_OPTIONS.map((opt) => (
+                <TouchableOpacity
+                  key={opt.value}
+                  style={[styles.optionChip, religion === opt.value && styles.optionChipSelected]}
+                  onPress={() => setReligion(religion === opt.value ? null : opt.value)}
+                >
+                  <Text style={[styles.optionText, religion === opt.value && styles.optionTextSelected]}>
+                    {opt.label}
+                  </Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+          </View>
+        </View>
+
+        {/* Section D: Desire */}
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Desire</Text>
           <Text style={styles.sectionSubtitle}>
@@ -394,6 +560,8 @@ export default function Phase2ProfileEdit() {
               ? `Add ${PHASE2_MIN_PHOTOS - photoCount} more photo${PHASE2_MIN_PHOTOS - photoCount > 1 ? 's' : ''}`
               : !canContinueIntents
               ? `Select ${PHASE2_MIN_INTENTS}-${PHASE2_MAX_INTENTS} intents`
+              : !isProfileDetailsComplete
+              ? `Complete: ${missingProfileFields.slice(0, 2).join(', ')}${missingProfileFields.length > 2 ? '...' : ''}`
               : `Write ${PHASE2_DESIRE_MIN_LENGTH - desireLength} more characters in Desire`}
           </Text>
         )}
@@ -558,4 +726,33 @@ const styles = StyleSheet.create({
     position: 'absolute', top: 50, right: 20, width: 44, height: 44, borderRadius: 22,
     backgroundColor: 'rgba(255,255,255,0.2)', alignItems: 'center', justifyContent: 'center',
   },
+
+  // Profile Details
+  completeBadge: {
+    flexDirection: 'row', alignItems: 'center', gap: 4,
+    backgroundColor: 'rgba(76,175,80,0.15)', paddingHorizontal: 8, paddingVertical: 3, borderRadius: 10,
+  },
+  completeBadgeText: { fontSize: 11, fontWeight: '600', color: '#4CAF50' },
+  missingCount: {
+    fontSize: 12, fontWeight: '600', color: C.primary,
+    backgroundColor: C.primary + '15', paddingHorizontal: 8, paddingVertical: 2, borderRadius: 10,
+  },
+  detailField: { marginBottom: 18 },
+  detailLabel: { fontSize: 13, fontWeight: '600', color: C.text, marginBottom: 8 },
+  requiredStar: { color: '#FF6B6B', fontWeight: '700' },
+  optionsRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
+  optionChip: {
+    paddingHorizontal: 14, paddingVertical: 10, borderRadius: 18,
+    backgroundColor: '#2A2A2A', borderWidth: 1.5, borderColor: '#3A3A3A',
+  },
+  optionChipSelected: { backgroundColor: C.primary + '20', borderColor: C.primary },
+  optionText: { fontSize: 13, color: '#CCC', fontWeight: '500' },
+  optionTextSelected: { color: C.primary, fontWeight: '600' },
+  heightInputRow: { flexDirection: 'row', alignItems: 'center', gap: 10 },
+  heightInput: {
+    flex: 1, backgroundColor: C.surface, borderRadius: 10,
+    paddingHorizontal: 14, paddingVertical: 12, fontSize: 15, color: C.text,
+    borderWidth: 1.5, borderColor: '#3A3A3A',
+  },
+  heightUnit: { fontSize: 14, color: C.textLight, fontWeight: '500' },
 });
