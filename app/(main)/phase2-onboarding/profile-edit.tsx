@@ -9,7 +9,7 @@
  * - Intent categories (Looking For)
  * - Desire text input
  */
-import React, { useState, useCallback, useMemo, useRef } from 'react';
+import React, { useState, useCallback, useMemo, useRef, useEffect } from 'react';
 import {
   View,
   Text,
@@ -25,7 +25,7 @@ import {
   TextInput,
   Keyboard,
 } from 'react-native';
-import { useRouter } from 'expo-router';
+import { useRouter, useFocusEffect } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
@@ -72,6 +72,16 @@ export default function Phase2ProfileEdit() {
 
   // P2-003 FIX: Ref guard to prevent double-tap navigation
   const isContinuingRef = useRef(false);
+
+  // FIX #2: Reset loading state when screen regains focus (e.g., user navigates back)
+  const [isProcessing, setIsProcessing] = useState(false);
+  useFocusEffect(
+    useCallback(() => {
+      // Reset loading and nav guard when screen comes into focus
+      setIsProcessing(false);
+      isContinuingRef.current = false;
+    }, [])
+  );
 
   // Store state
   const selectedPhotoUrls = usePrivateProfileStore((s) => s.selectedPhotoUrls);
@@ -123,12 +133,13 @@ export default function Phase2ProfileEdit() {
     });
     return slots;
   });
-  const [photoBlurSlots, setPhotoBlurSlots] = useState<boolean[]>(() =>
-    Array(GRID_SLOTS).fill(true)
-  );
+  // FIX #1: Use store state for blur so it persists to Step 3 review
+  const photoBlurSlots = usePrivateProfileStore((s) => s.photoBlurSlots);
+  const togglePhotoBlurSlot = usePrivateProfileStore((s) => s.togglePhotoBlurSlot);
+  const setPhotoBlurSlots = usePrivateProfileStore((s) => s.setPhotoBlurSlots);
   const [mainPhotoSlot, setMainPhotoSlot] = useState<number>(0);
   const [previewSlot, setPreviewSlot] = useState<number | null>(null);
-  const [isProcessing, setIsProcessing] = useState(false);
+  // Note: isProcessing moved above with useFocusEffect for FIX #2
 
   // Local state for height input
   const [heightInput, setHeightInput] = useState<string>(height ? height.toString() : '');
@@ -150,13 +161,10 @@ export default function Phase2ProfileEdit() {
     setPreviewSlot(null);
   }, []);
 
+  // FIX #1: Use store action for blur toggle so it persists
   const togglePhotoBlur = useCallback((slotIndex: number) => {
-    setPhotoBlurSlots((prev) => {
-      const next = [...prev];
-      next[slotIndex] = !next[slotIndex];
-      return next;
-    });
-  }, []);
+    togglePhotoBlurSlot(slotIndex);
+  }, [togglePhotoBlurSlot]);
 
   const setAsMainPhoto = useCallback(() => {
     if (previewSlot === null) return;
@@ -182,16 +190,15 @@ export default function Phase2ProfileEdit() {
           next[slotIndex] = newUri;
           return next;
         });
-        setPhotoBlurSlots((prev) => {
-          const next = [...prev];
-          next[slotIndex] = true;
-          return next;
-        });
+        // FIX #1: Set blur in store so it persists
+        const nextBlur = [...photoBlurSlots];
+        nextBlur[slotIndex] = true;
+        setPhotoBlurSlots(nextBlur);
       }
     } catch (e) {
       Alert.alert('Error', 'Failed to pick image');
     }
-  }, [photoSlots]);
+  }, [photoSlots, photoBlurSlots, setPhotoBlurSlots]);
 
   const handleReplacePhoto = useCallback(async () => {
     if (previewSlot === null) return;

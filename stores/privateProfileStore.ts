@@ -96,6 +96,7 @@ interface PrivateProfileState {
   acceptedTermsAt: number | null;
   phase2SetupVersion: number | null;
   blurMyPhoto: boolean;
+  photoBlurSlots: boolean[];  // Per-slot blur state (9 slots, true=blurred)
   phase1PhotoSlots: PhotoSlots9;  // Slot-preserving photos from Phase-1 (9 slots)
   phase2PhotosConfirmed: boolean; // True after initial photo selection in Step-2
 
@@ -144,6 +145,8 @@ interface PrivateProfileState {
   // Phase-2 setup actions
   setAcceptedTermsAt: (timestamp: number) => void;
   setBlurMyPhoto: (blur: boolean) => void;
+  setPhotoBlurSlots: (slots: boolean[]) => void;
+  togglePhotoBlurSlot: (slotIndex: number) => void;
   importPhase1Data: (data: Phase1ProfileData) => void;
   completeSetup: () => void;
   setPhase2PhotosConfirmed: (confirmed: boolean) => void;
@@ -183,6 +186,7 @@ const initialWizardState = {
   acceptedTermsAt: null as number | null,
   phase2SetupVersion: null as number | null,
   blurMyPhoto: true, // Default blur ON
+  photoBlurSlots: [true, true, true, true, true, true, true, true, true] as boolean[], // Per-slot blur (default all blurred)
   phase1PhotoSlots: createEmptyPhotoSlots(),
   phase2PhotosConfirmed: false, // True after Step-2 photo selection
   privateEntryNavLock: false, // Navigation lock for PrivateEntryGuard
@@ -250,6 +254,12 @@ export const usePrivateProfileStore = create<PrivateProfileState>()(
       // Phase-2 setup actions
       setAcceptedTermsAt: (timestamp) => set({ acceptedTermsAt: timestamp }),
       setBlurMyPhoto: (blur) => set({ blurMyPhoto: blur }),
+      setPhotoBlurSlots: (slots) => set({ photoBlurSlots: slots }),
+      togglePhotoBlurSlot: (slotIndex) => set((state) => {
+        const next = [...state.photoBlurSlots];
+        next[slotIndex] = !next[slotIndex];
+        return { photoBlurSlots: next };
+      }),
       importPhase1Data: (data) => {
         const startTime = __DEV__ ? Date.now() : 0;
         if (__DEV__) console.log('[P2 IMPORT] start');
@@ -386,6 +396,7 @@ export const usePrivateProfileStore = create<PrivateProfileState>()(
         acceptedTermsAt: state.acceptedTermsAt,
         phase2SetupVersion: state.phase2SetupVersion,
         blurMyPhoto: state.blurMyPhoto,
+        photoBlurSlots: state.photoBlurSlots,
         phase2PhotosConfirmed: state.phase2PhotosConfirmed,
         // NOTE: phase1PhotoSlots intentionally NOT persisted
         // It's re-imported from onboardingStore each session to avoid stale data

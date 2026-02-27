@@ -80,7 +80,8 @@ export default function Phase2Review() {
   const drinking = usePrivateProfileStore((s) => s.drinking);
   const education = usePrivateProfileStore((s) => s.education);
   const religion = usePrivateProfileStore((s) => s.religion);
-  const blurMyPhoto = usePrivateProfileStore((s) => s.blurMyPhoto);
+  // FIX #1: Use per-slot blur state from store (persisted from edit screen)
+  const photoBlurSlots = usePrivateProfileStore((s) => s.photoBlurSlots);
 
   // Store actions
   const completeSetup = usePrivateProfileStore((s) => s.completeSetup);
@@ -224,28 +225,32 @@ export default function Phase2Review() {
           </View>
 
           <View style={styles.photosGrid}>
-            {selectedPhotoUrls.map((url, idx) => (
-              <Pressable
-                key={idx}
-                style={styles.photoSlot}
-                onPress={() => openPreview(idx)}
-              >
-                <Image
-                  source={{ uri: url }}
-                  style={styles.photoImage}
-                  contentFit="cover"
-                  blurRadius={blurMyPhoto ? 15 : 0}
-                />
-                {blurMyPhoto && (
-                  <View style={styles.blurBadge}>
-                    <Ionicons name="eye-off" size={12} color="#FFF" />
-                  </View>
-                )}
-              </Pressable>
-            ))}
+            {selectedPhotoUrls.map((url, idx) => {
+              // FIX #1: Use per-slot blur state
+              const isBlurred = photoBlurSlots[idx] ?? true;
+              return (
+                <Pressable
+                  key={idx}
+                  style={styles.photoSlot}
+                  onPress={() => openPreview(idx)}
+                >
+                  <Image
+                    source={{ uri: url }}
+                    style={styles.photoImage}
+                    contentFit="cover"
+                    blurRadius={isBlurred ? 15 : 0}
+                  />
+                  {isBlurred && (
+                    <View style={styles.blurBadge}>
+                      <Ionicons name="eye-off" size={12} color="#FFF" />
+                    </View>
+                  )}
+                </Pressable>
+              );
+            })}
           </View>
           <Text style={styles.photoHint}>
-            Tap a photo to preview{blurMyPhoto ? ' (blur ON)' : ''}
+            Tap a photo to preview
           </Text>
         </View>
 
@@ -413,12 +418,12 @@ export default function Phase2Review() {
                 source={{ uri: selectedPhotoUrls[previewIndex] }}
                 style={styles.previewImage}
                 contentFit="contain"
-                blurRadius={blurMyPhoto ? 20 : 0}
+                blurRadius={(photoBlurSlots[previewIndex] ?? true) ? 20 : 0}
               />
             )}
 
-            {/* Blur indicator */}
-            {blurMyPhoto && (
+            {/* Blur indicator - FIX #1: Use per-slot blur */}
+            {previewIndex !== null && (photoBlurSlots[previewIndex] ?? true) && (
               <View style={styles.blurIndicator}>
                 <Ionicons name="eye-off" size={16} color="#FFF" />
                 <Text style={styles.blurIndicatorText}>Blur enabled</Text>
