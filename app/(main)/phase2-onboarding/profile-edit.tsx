@@ -70,6 +70,9 @@ export default function Phase2ProfileEdit() {
   const insets = useSafeAreaInsets();
   const desireInputRef = useRef<TextInput>(null);
 
+  // P2-003 FIX: Ref guard to prevent double-tap navigation
+  const isContinuingRef = useRef(false);
+
   // Store state
   const selectedPhotoUrls = usePrivateProfileStore((s) => s.selectedPhotoUrls);
   const intentKeys = usePrivateProfileStore((s) => s.intentKeys);
@@ -262,6 +265,10 @@ export default function Phase2ProfileEdit() {
   // ============================================================
   const handleContinue = useCallback(() => {
     if (!canContinue || isProcessing) return;
+    // P2-003 FIX: Ref guard prevents double-tap in same render cycle
+    if (isContinuingRef.current) return;
+    isContinuingRef.current = true;
+
     setIsProcessing(true);
     Keyboard.dismiss();
 
@@ -271,7 +278,7 @@ export default function Phase2ProfileEdit() {
 
     // Navigate to review (Step 3)
     router.push('/(main)/phase2-onboarding/profile-setup' as any);
-    setIsProcessing(false);
+    // NOTE: Don't reset isProcessing/ref - component will unmount after navigation
   }, [canContinue, isProcessing, photoSlots, setSelectedPhotos, router]);
 
   // Desire hint

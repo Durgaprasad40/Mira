@@ -5,7 +5,7 @@
  * Reuses the same intent categories and logic from photo-select.
  * Saves to privateProfileStore and navigates back to Step-3.
  */
-import React, { useCallback } from 'react';
+import React, { useCallback, useRef } from 'react';
 import {
   View,
   Text,
@@ -30,6 +30,9 @@ export default function LookingForEdit() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
 
+  // P2-005 FIX: Ref guard to prevent multiple back() calls
+  const didSaveRef = useRef(false);
+
   // Store state
   const intentKeys = usePrivateProfileStore((s) => s.intentKeys);
   const setIntentKeys = usePrivateProfileStore((s) => s.setIntentKeys);
@@ -50,6 +53,9 @@ export default function LookingForEdit() {
   // Save and go back
   const handleSave = useCallback(() => {
     if (!canSave) return;
+    // P2-005 FIX: Ref guard prevents multiple back() calls on rapid taps
+    if (didSaveRef.current) return;
+    didSaveRef.current = true;
     router.back();
   }, [canSave, router]);
 

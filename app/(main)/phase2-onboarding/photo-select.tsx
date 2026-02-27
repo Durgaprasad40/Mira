@@ -76,6 +76,9 @@ export default function Phase2PhotoSelect() {
   // Single-fire redirect guard
   const didRedirectRef = useRef(false);
 
+  // P2-004 FIX: Ref guard to prevent double-tap navigation
+  const isConfirmingRef = useRef(false);
+
   useEffect(() => {
     if (didRedirectRef.current) return;
     if (_hasHydrated && phase2PhotosConfirmed) {
@@ -133,6 +136,10 @@ export default function Phase2PhotoSelect() {
 
   const handleConfirmPhotos = useCallback(() => {
     if (selectedSlots.length < PHASE2_MIN_PHOTOS || isProcessing) return;
+    // P2-004 FIX: Ref guard prevents double-tap in same render cycle
+    if (isConfirmingRef.current) return;
+    isConfirmingRef.current = true;
+
     setIsProcessing(true);
 
     // Collect selected photo URLs
@@ -148,7 +155,7 @@ export default function Phase2PhotoSelect() {
 
     // Navigate to profile-edit (Step 2.5)
     router.push('/(main)/phase2-onboarding/profile-edit' as any);
-    setIsProcessing(false);
+    // NOTE: Don't reset isProcessing/ref - component will unmount after navigation
   }, [selectedSlots, phase1PhotoSlots, isProcessing, setSelectedPhotos, setPhase2PhotosConfirmed, router]);
 
   // Show loading while checking hydration
