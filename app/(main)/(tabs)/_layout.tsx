@@ -11,6 +11,7 @@ import { useBlockStore } from "@/stores/blockStore";
 import { useDemoDmStore } from "@/stores/demoDmStore";
 import { useConfessionStore } from "@/stores/confessionStore";
 import { useLocationStore } from "@/stores/locationStore";
+import { usePrivateProfileStore } from "@/stores/privateProfileStore";
 import { asUserId } from "@/convex/id";
 import { AppErrorBoundary, registerErrorBoundaryNavigation } from "@/components/safety";
 import { processThreadsIntegrity } from "@/lib/threadsIntegrity";
@@ -85,6 +86,34 @@ export default function MainTabsLayout() {
 
   const taggedBadgeCount = isDemoMode ? demoTaggedCount : (convexTaggedCount || 0);
 
+  // Private tab state - check if Phase-2 onboarding is complete
+  // MUST match the same logic used in PrivateLayout to avoid redirect flash
+  const phase2OnboardingCompleted = usePrivateProfileStore((s) => s.phase2OnboardingCompleted);
+  const privateNavLockRef = useRef(false);
+
+  // Handle Private tab press - navigate on user tap only
+  const handlePrivateTabPress = (e: any) => {
+    // Prevent default tab navigation (we handle it manually)
+    e.preventDefault();
+
+    // Debounce: ignore rapid taps
+    if (privateNavLockRef.current) {
+      if (__DEV__) console.log('[PRIVATE TAP] ignored (debounce)');
+      return;
+    }
+    privateNavLockRef.current = true;
+    setTimeout(() => { privateNavLockRef.current = false; }, 600);
+
+    // Navigate based on onboarding completion (same check as PrivateLayout)
+    if (phase2OnboardingCompleted) {
+      if (__DEV__) console.log('[PRIVATE TAP] pressed -> Phase-2 tabs');
+      router.replace('/(main)/(private)/(tabs)' as any);
+    } else {
+      if (__DEV__) console.log('[PRIVATE TAP] pressed -> onboarding (direct)');
+      router.replace('/(main)/phase2-onboarding' as any);
+    }
+  };
+
   return (
     <AppErrorBoundary name="MainTabs">
       <Tabs
@@ -150,6 +179,9 @@ export default function MainTabsLayout() {
             tabBarIcon: ({ color, size }) => (
               <Ionicons name="eye-off" size={size} color={color} />
             ),
+          }}
+          listeners={{
+            tabPress: handlePrivateTabPress,
           }}
         />
         <Tabs.Screen

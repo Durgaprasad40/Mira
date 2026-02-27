@@ -7,7 +7,7 @@
  *
  * 18+ check already done by PrivateConsentGate in _layout.tsx
  */
-import React, { useState } from "react";
+import React, { useState, useEffect } from "react";
 import {
   View,
   Text,
@@ -16,8 +16,9 @@ import {
   ScrollView,
   ActivityIndicator,
   Alert,
+  InteractionManager,
 } from "react-native";
-import { useRouter } from "expo-router";
+import { useRouter, usePathname } from "expo-router";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
 import { useQuery } from "convex/react";
@@ -25,6 +26,9 @@ import * as FileSystem from "expo-file-system/legacy";
 import { api } from "@/convex/_generated/api";
 import { INCOGNITO_COLORS } from "@/lib/constants";
 import { usePrivateProfileStore, Phase1ProfileData } from "@/stores/privateProfileStore";
+
+// Phase-1 Discover route for exit navigation
+const PHASE1_DISCOVER_ROUTE = "/(main)/(tabs)/home";
 import { useAuthStore } from "@/stores/authStore";
 import { useOnboardingStore } from "@/stores/onboardingStore";
 import { isDemoMode } from "@/hooks/useConvex";
@@ -209,7 +213,20 @@ const C = INCOGNITO_COLORS;
 
 export default function Phase2OnboardingTerms() {
   const router = useRouter();
+  const pathname = usePathname();
   const insets = useSafeAreaInsets();
+
+  // Log mount for debugging
+  useEffect(() => {
+    if (__DEV__) {
+      console.log(`[P2] step1 MOUNTED pathname=${pathname}`);
+    }
+    return () => {
+      if (__DEV__) {
+        console.log(`[P2] step1 UNMOUNTED`);
+      }
+    };
+  }, []);
 
   // Terms checkboxes
   const [rulesChecked, setRulesChecked] = useState(false);
@@ -218,6 +235,15 @@ export default function Phase2OnboardingTerms() {
 
   const setAcceptedTermsAt = usePrivateProfileStore((s) => s.setAcceptedTermsAt);
   const importPhase1Data = usePrivateProfileStore((s) => s.importPhase1Data);
+
+  // Handle X/Cancel button - explicit exit from Phase-2 onboarding
+  const handleExitOnboarding = () => {
+    if (__DEV__) {
+      console.log("[P2 EXIT] pressed X -> routing to Phase-1 Discover");
+    }
+    // Navigate to Phase-1 Discover
+    router.replace(PHASE1_DISCOVER_ROUTE as any);
+  };
 
   // Get userId for Convex query
   const userId = useAuthStore((s) => s.userId);
@@ -343,10 +369,16 @@ export default function Phase2OnboardingTerms() {
         religion: canonicalProfile.religion ?? phase1User?.religion ?? null,
       };
 
-      importPhase1Data(phase1Data);
-
-      // Proceed to profile setup (Step 2)
+      // Navigate FIRST - synchronous, minimal blocking for smooth animation
       router.push("/(main)/phase2-onboarding/photo-select" as any);
+
+      // Defer heavy import work to run AFTER navigation animation completes
+      // This prevents frame jank during the transition
+      InteractionManager.runAfterInteractions(async () => {
+        await new Promise((r) => setTimeout(r, 0)); // microtask break
+        if (__DEV__) console.log("[P2 IMPORT] InteractionManager: starting deferred import");
+        importPhase1Data(phase1Data);
+      });
     } catch (err) {
       if (__DEV__) console.error("[Phase2Onboarding] Error:", err);
     } finally {
@@ -359,7 +391,7 @@ export default function Phase2OnboardingTerms() {
       {/* Header */}
       <View style={styles.topBar}>
         <TouchableOpacity
-          onPress={() => router.replace("/(main)/(tabs)" as any)}
+          onPress={handleExitOnboarding}
           hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
         >
           <Ionicons name="close" size={22} color={C.textLight} />

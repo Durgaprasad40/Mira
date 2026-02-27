@@ -53,6 +53,7 @@ export default function PrivateLayout() {
   const didRedirectRef = useRef(false);
   const mountedRef = useRef(false);
 
+
   // CRASH FIX: Track mount lifecycle
   useEffect(() => {
     mountedRef.current = true;
@@ -174,6 +175,9 @@ export default function PrivateLayout() {
   const phase2OnboardingCompleted = usePrivateProfileStore((s) => s.phase2OnboardingCompleted);
   const hasHydrated = usePrivateProfileStore((s) => s._hasHydrated);
 
+  // NOTE: Nav lock reset is handled ONLY by explicit exit actions (X button in onboarding)
+  // No automatic segment-based or focus-based reset here to prevent double-entry bugs
+
   const convexPrivateProfile = useQuery(
     api.privateProfiles.getByUserId,
     !isDemoMode && userId ? { userId: userId as any } : 'skip'
@@ -214,9 +218,14 @@ export default function PrivateLayout() {
     }
   }, [onboardingComplete, hasHydrated, router]);
 
-  // CRASH FIX: While redirecting or not ready, render ONLY loading view
-  // Do NOT render Stack/children to prevent double mount
-  if (!hasHydrated || !onboardingComplete) {
+  // FLASH FIX: Render null while redirecting to avoid visual flash
+  // The tab press handler routes directly to onboarding, so this is just a safety net
+  if (!onboardingComplete) {
+    return null;
+  }
+
+  // Show loading only while waiting for hydration (onboarding already complete)
+  if (!hasHydrated) {
     return (
       <View style={[styles.container, { paddingTop: insets.top, alignItems: 'center', justifyContent: 'center' }]}>
         <ActivityIndicator size="large" color={C.primary} />

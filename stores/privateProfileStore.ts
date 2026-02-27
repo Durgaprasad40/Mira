@@ -99,6 +99,9 @@ interface PrivateProfileState {
   phase1PhotoSlots: PhotoSlots9;  // Slot-preserving photos from Phase-1 (9 slots)
   phase2PhotosConfirmed: boolean; // True after initial photo selection in Step-2
 
+  // Navigation lock: prevents duplicate router.replace calls in PrivateEntryGuard
+  privateEntryNavLock: boolean;
+
   // Actions — wizard navigation
   setCurrentStep: (step: number) => void;
 
@@ -144,6 +147,7 @@ interface PrivateProfileState {
   importPhase1Data: (data: Phase1ProfileData) => void;
   completeSetup: () => void;
   setPhase2PhotosConfirmed: (confirmed: boolean) => void;
+  setPrivateEntryNavLock: (locked: boolean) => void;
 }
 
 const initialWizardState = {
@@ -181,6 +185,7 @@ const initialWizardState = {
   blurMyPhoto: true, // Default blur ON
   phase1PhotoSlots: createEmptyPhotoSlots(),
   phase2PhotosConfirmed: false, // True after Step-2 photo selection
+  privateEntryNavLock: false, // Navigation lock for PrivateEntryGuard
 };
 
 export const usePrivateProfileStore = create<PrivateProfileState>()(
@@ -246,6 +251,30 @@ export const usePrivateProfileStore = create<PrivateProfileState>()(
       setAcceptedTermsAt: (timestamp) => set({ acceptedTermsAt: timestamp }),
       setBlurMyPhoto: (blur) => set({ blurMyPhoto: blur }),
       importPhase1Data: (data) => {
+        const startTime = __DEV__ ? Date.now() : 0;
+        if (__DEV__) console.log('[P2 IMPORT] start');
+
+        // GUARD: Check if we have any photos to process
+        const hasPhotoSlots = data.photoSlots && data.photoSlots.some((s) => s !== null);
+        const hasLegacyPhotos = data.photos && data.photos.length > 0;
+
+        // If no photos at all, do minimal import (just basic profile info)
+        if (!hasPhotoSlots && !hasLegacyPhotos) {
+          if (__DEV__) {
+            console.log('[P2 IMPORT] skip heavy work: no photos');
+          }
+          // Minimal state update - no photo processing
+          set({
+            displayName: data.name || '',
+            gender: data.gender || '',
+            phase1PhotoSlots: createEmptyPhotoSlots(),
+          });
+          if (__DEV__) {
+            console.log(`[P2 IMPORT] end (duration=${Date.now() - startTime}ms, minimal)`);
+          }
+          return;
+        }
+
         // Calculate age from DOB using local parsing (not UTC)
         let age = 0;
         if (data.dateOfBirth) {
@@ -309,6 +338,10 @@ export const usePrivateProfileStore = create<PrivateProfileState>()(
           religion: data.religion ?? null,
           maxDistanceKm,
         });
+
+        if (__DEV__) {
+          console.log(`[P2 IMPORT] end (duration=${Date.now() - startTime}ms)`);
+        }
       },
       completeSetup: () => set({
         isSetupComplete: true,
@@ -316,6 +349,7 @@ export const usePrivateProfileStore = create<PrivateProfileState>()(
         phase2SetupVersion: CURRENT_PHASE2_SETUP_VERSION,
       }),
       setPhase2PhotosConfirmed: (confirmed) => set({ phase2PhotosConfirmed: confirmed }),
+      setPrivateEntryNavLock: (locked) => set({ privateEntryNavLock: locked }),
     }),
     {
       name: 'private-profile-store',
