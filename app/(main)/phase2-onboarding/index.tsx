@@ -374,16 +374,12 @@ export default function Phase2OnboardingTerms() {
         religion: canonicalProfile.religion ?? phase1User?.religion ?? null,
       };
 
-      // Navigate FIRST - synchronous, minimal blocking for smooth animation
-      router.push("/(main)/phase2-onboarding/photo-select" as any);
+      // FIX P2-DATA-001: Import data BEFORE navigation to prevent race condition
+      // photo-select reads from store immediately on mount, so data must be ready first
+      importPhase1Data(phase1Data);
 
-      // Defer heavy import work to run AFTER navigation animation completes
-      // This prevents frame jank during the transition
-      InteractionManager.runAfterInteractions(async () => {
-        await new Promise((r) => setTimeout(r, 0)); // microtask break
-        if (__DEV__) console.log("[P2 IMPORT] InteractionManager: starting deferred import");
-        importPhase1Data(phase1Data);
-      });
+      // Navigate after data is ready
+      router.push("/(main)/phase2-onboarding/photo-select" as any);
     } catch (err) {
       if (__DEV__) console.error("[Phase2Onboarding] Error:", err);
     } finally {
