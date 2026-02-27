@@ -89,12 +89,20 @@ export default function MainTabsLayout() {
   // Private tab state - check if Phase-2 onboarding is complete
   // MUST match the same logic used in PrivateLayout to avoid redirect flash
   const phase2OnboardingCompleted = usePrivateProfileStore((s) => s.phase2OnboardingCompleted);
+  const privateStoreHydrated = usePrivateProfileStore((s) => s._hasHydrated);
   const privateNavLockRef = useRef(false);
 
   // Handle Private tab press - navigate on user tap only
   const handlePrivateTabPress = (e: any) => {
     // Prevent default tab navigation (we handle it manually)
     e.preventDefault();
+
+    // P2-001 FIX: Wait for store hydration before routing
+    // Prevents mis-routing to onboarding when store hasn't loaded persisted state yet
+    if (!privateStoreHydrated) {
+      if (__DEV__) console.log('[PRIVATE TAP] ignored: not hydrated');
+      return;
+    }
 
     // Debounce: ignore rapid taps
     if (privateNavLockRef.current) {

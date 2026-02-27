@@ -199,9 +199,11 @@ export default function PrivateLayout() {
 
   // Check if Phase-2 onboarding has been completed (permanent flag)
   // This runs ONE TIME ONLY - after completion, onboarding never shows again
+  // P2-002 FIX: Use OR logic so local completion is respected even if Convex hasn't synced yet
+  // This prevents re-triggering onboarding when server returns false due to sync lag
   const onboardingComplete = isDemoMode
     ? phase2OnboardingCompleted
-    : (convexPrivateProfile?.isSetupComplete ?? phase2OnboardingCompleted);
+    : (phase2OnboardingCompleted || convexPrivateProfile?.isSetupComplete === true);
 
   // CRASH FIX: Single-pass redirect with proper lifecycle checks
   // Uses requestAnimationFrame to ensure previous screen is fully unmounted
