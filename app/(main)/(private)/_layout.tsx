@@ -86,13 +86,9 @@ export default function PrivateLayout() {
   const exitToHome = () => {
     if (isExitingRef.current) return;
     isExitingRef.current = true;
-    try {
-      if (router.canGoBack?.()) {
-        router.back();
-        return;
-      }
-    } catch {}
-    router.navigate('/(main)/(tabs)/home' as any);
+    // FIX: Use replace() instead of back() to exit in ONE action
+    // back() caused double-swipe because of stacked route entries
+    router.replace(PHASE1_DISCOVER_ROUTE);
   };
 
   // 1) Intercept any navigation that would remove Private from the stack
