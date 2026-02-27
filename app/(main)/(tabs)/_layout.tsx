@@ -90,7 +90,9 @@ export default function MainTabsLayout() {
   // MUST match the same logic used in PrivateLayout to avoid redirect flash
   const phase2OnboardingCompleted = usePrivateProfileStore((s) => s.phase2OnboardingCompleted);
   const privateStoreHydrated = usePrivateProfileStore((s) => s._hasHydrated);
-  const privateNavLockRef = useRef(false);
+  // N-001/C-004 FIX: Permanent guard to prevent duplicate router.replace calls
+  // Only resets on component remount (not timeout-based)
+  const didRouteToPrivateRef = useRef(false);
 
   // Handle Private tab press - navigate on user tap only
   const handlePrivateTabPress = (e: any) => {
@@ -104,13 +106,13 @@ export default function MainTabsLayout() {
       return;
     }
 
-    // Debounce: ignore rapid taps
-    if (privateNavLockRef.current) {
-      if (__DEV__) console.log('[PRIVATE TAP] ignored (debounce)');
+    // N-001/C-004 FIX: Prevent duplicate navigation during same component lifecycle
+    // This guards against rapid state changes triggering multiple router.replace calls
+    if (didRouteToPrivateRef.current) {
+      if (__DEV__) console.log('[PRIVATE TAP] ignored: already routed');
       return;
     }
-    privateNavLockRef.current = true;
-    setTimeout(() => { privateNavLockRef.current = false; }, 600);
+    didRouteToPrivateRef.current = true;
 
     // Navigate based on onboarding completion (same check as PrivateLayout)
     if (phase2OnboardingCompleted) {
@@ -120,6 +122,9 @@ export default function MainTabsLayout() {
       if (__DEV__) console.log('[PRIVATE TAP] pressed -> onboarding (direct)');
       router.replace('/(main)/phase2-onboarding' as any);
     }
+
+    // N-001/C-004: Reset guard after navigation settles (allows future taps after returning)
+    setTimeout(() => { didRouteToPrivateRef.current = false; }, 1000);
   };
 
   return (
