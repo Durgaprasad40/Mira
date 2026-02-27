@@ -161,9 +161,14 @@ export default function Phase2Review() {
     setPreviewIndex(null);
   }, []);
 
-  // Navigation handlers - all go to profile-edit (Step 2.5)
+  // Navigation handlers
   const handleEditProfile = useCallback(() => {
     router.push('/(main)/phase2-onboarding/profile-edit' as any);
+  }, [router]);
+
+  // P2-UX-001 FIX: Dedicated handler for Looking For edit
+  const handleEditLookingFor = useCallback(() => {
+    router.push('/(main)/phase2-onboarding/looking-for-edit' as any);
   }, [router]);
 
   // Handle completion
@@ -344,7 +349,8 @@ export default function Phase2Review() {
         <View style={styles.section}>
           <View style={styles.sectionHeader}>
             <Text style={styles.sectionTitle}>Looking For</Text>
-            <TouchableOpacity style={styles.editBtn} onPress={handleEditProfile}>
+            {/* P2-UX-001 FIX: Use dedicated looking-for-edit route */}
+            <TouchableOpacity style={styles.editBtn} onPress={handleEditLookingFor}>
               <Ionicons name="pencil" size={14} color={C.primary} />
               <Text style={styles.editBtnText}>Edit</Text>
             </TouchableOpacity>
