@@ -28,6 +28,7 @@ import {
 import { useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
+import * as FileSystem from 'expo-file-system';
 import { INCOGNITO_COLORS } from '@/lib/constants';
 import {
   usePrivateProfileStore,
@@ -65,6 +66,26 @@ function createEmptySlots(): (string | null)[] {
   return [null, null, null, null, null, null, null, null, null];
 }
 
+// P2-DATA-004 FIX: Validate URI existence for file:// URIs
+async function validatePhotoUri(uri: string): Promise<boolean> {
+  if (!uri || typeof uri !== 'string') return false;
+  // http/https URIs are assumed valid (network images)
+  if (uri.startsWith('http://') || uri.startsWith('https://')) return true;
+  // content:// and ph:// URIs cannot be reliably validated without extra APIs
+  if (uri.startsWith('content://') || uri.startsWith('ph://')) return true;
+  // file:// URIs - check if file actually exists
+  if (uri.startsWith('file://')) {
+    try {
+      const info = await FileSystem.getInfoAsync(uri);
+      return info.exists;
+    } catch {
+      return false;
+    }
+  }
+  // Unknown scheme - treat as invalid
+  return false;
+}
+
 export default function Phase2PhotoSelect() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
@@ -72,6 +93,8 @@ export default function Phase2PhotoSelect() {
   // Check if already confirmed - redirect to profile-edit
   const phase2PhotosConfirmed = usePrivateProfileStore((s) => s.phase2PhotosConfirmed);
   const _hasHydrated = usePrivateProfileStore((s) => s._hasHydrated);
+  // P2-DATA-004: Get stored photo URLs to validate before redirect
+  const storedPhotoUrls = usePrivateProfileStore((s) => s.selectedPhotoUrls);
 
   // Single-fire redirect guard
   const didRedirectRef = useRef(false);
@@ -79,14 +102,51 @@ export default function Phase2PhotoSelect() {
   // P2-004 FIX: Ref guard to prevent double-tap navigation
   const isConfirmingRef = useRef(false);
 
+  // P2-DATA-004: Track validation state
+  const [photosValidated, setPhotosValidated] = useState(false);
+  const [hasValidPhotos, setHasValidPhotos] = useState(false);
+
+  // P2-DATA-004: Validate stored photos before allowing redirect
+  useEffect(() => {
+    if (!_hasHydrated || !phase2PhotosConfirmed) return;
+    if (photosValidated) return; // Already validated
+
+    let cancelled = false;
+
+    async function validateStoredPhotos() {
+      const urls = storedPhotoUrls || [];
+      if (urls.length < PHASE2_MIN_PHOTOS) {
+        // Not enough photos stored - definitely invalid
+        if (!cancelled) {
+          setHasValidPhotos(false);
+          setPhotosValidated(true);
+        }
+        return;
+      }
+
+      // Validate each URI
+      const validationResults = await Promise.all(urls.map(validatePhotoUri));
+      const validCount = validationResults.filter(Boolean).length;
+
+      if (!cancelled) {
+        setHasValidPhotos(validCount >= PHASE2_MIN_PHOTOS);
+        setPhotosValidated(true);
+      }
+    }
+
+    validateStoredPhotos();
+    return () => { cancelled = true; };
+  }, [_hasHydrated, phase2PhotosConfirmed, storedPhotoUrls, photosValidated]);
+
+  // P2-DATA-004: Only redirect if photos are confirmed AND validated as valid
   useEffect(() => {
     if (didRedirectRef.current) return;
-    if (_hasHydrated && phase2PhotosConfirmed) {
+    if (_hasHydrated && phase2PhotosConfirmed && photosValidated && hasValidPhotos) {
       didRedirectRef.current = true;
-      // Already confirmed, redirect to profile-edit
+      // Already confirmed with valid photos, redirect to profile-edit
       router.replace('/(main)/phase2-onboarding/profile-edit' as any);
     }
-  }, [_hasHydrated, phase2PhotosConfirmed, router]);
+  }, [_hasHydrated, phase2PhotosConfirmed, photosValidated, hasValidPhotos, router]);
 
   // Source: Phase-1 photos
   const demoProfiles = useDemoStore((s) => s.demoProfiles);
@@ -158,8 +218,9 @@ export default function Phase2PhotoSelect() {
     // NOTE: Don't reset isProcessing/ref - component will unmount after navigation
   }, [selectedSlots, phase1PhotoSlots, isProcessing, setSelectedPhotos, setPhase2PhotosConfirmed, router]);
 
-  // Show loading while checking hydration
-  if (!_hasHydrated) {
+  // Show loading while checking hydration or validating photos (when confirmed)
+  // P2-DATA-004: Also wait for validation to complete before showing UI
+  if (!_hasHydrated || (phase2PhotosConfirmed && !photosValidated)) {
     return (
       <View style={[styles.container, styles.centered]}>
         <ActivityIndicator size="large" color={C.primary} />
