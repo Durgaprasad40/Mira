@@ -13,27 +13,41 @@ const MAX_CHARS = 400;
 interface TextComposerModalProps {
   visible: boolean;
   prompt: TodPrompt | null;
+  /** Initial text to prefill when editing existing comment */
+  initialText?: string;
   onClose: () => void;
   onSubmit: (text: string, isAnonymous?: boolean, profileVisibility?: TodProfileVisibility) => void;
 }
 
-export function TextComposerModal({ visible, prompt, onClose, onSubmit }: TextComposerModalProps) {
-  const [text, setText] = useState('');
-  const [isAnonymous, setIsAnonymous] = useState(false);
-  const [profileVisibility, setProfileVisibility] = useState<TodProfileVisibility>('blurred');
+// Identity mode: 'show_profile' | 'blur_photo' | 'anonymous'
+type IdentityMode = 'show_profile' | 'blur_photo' | 'anonymous';
+
+export function TextComposerModal({ visible, prompt, initialText, onClose, onSubmit }: TextComposerModalProps) {
+  const [text, setText] = useState(initialText || '');
+  const [identityMode, setIdentityMode] = useState<IdentityMode>('show_profile');
+
+  // Reset state when modal opens
+  React.useEffect(() => {
+    if (visible) {
+      setText(initialText || '');
+      // Reset to default: show profile (NOT anonymous)
+      setIdentityMode('show_profile');
+    }
+  }, [visible, initialText]);
 
   const handleSubmit = () => {
     if (text.trim().length < 3) return;
-    onSubmit(text.trim(), isAnonymous, isAnonymous ? profileVisibility : 'clear');
+    // Map identity mode to isAnonymous and profileVisibility
+    const isAnonymous = identityMode === 'anonymous';
+    const profileVisibility: TodProfileVisibility = identityMode === 'blur_photo' ? 'blurred' : 'clear';
+    onSubmit(text.trim(), isAnonymous, profileVisibility);
     setText('');
-    setIsAnonymous(false);
-    setProfileVisibility('blurred');
+    setIdentityMode('show_profile');
   };
 
   const handleClose = () => {
     setText('');
-    setIsAnonymous(false);
-    setProfileVisibility('blurred');
+    setIdentityMode('show_profile');
     onClose();
   };
 
@@ -65,54 +79,59 @@ export function TextComposerModal({ visible, prompt, onClose, onSubmit }: TextCo
             autoFocus
           />
 
-          {/* Anonymous toggle — Truth & Dare */}
-          <View style={styles.anonRow}>
-            <Ionicons name="eye-off-outline" size={16} color={isAnonymous ? C.primary : C.textLight} />
-            <Text style={[styles.anonLabel, isAnonymous && { color: C.primary }]}>Answer anonymously</Text>
-            <Switch
-              value={isAnonymous}
-              onValueChange={setIsAnonymous}
-              trackColor={{ false: C.accent, true: C.primary + '60' }}
-              thumbColor={isAnonymous ? C.primary : C.textLight}
-            />
-          </View>
-
-          {/* Profile visibility picker — shown when anonymous */}
-          {isAnonymous && (
-            <View style={styles.visibilitySection}>
-              <View style={styles.visibilityHeader}>
-                <Ionicons name="lock-closed-outline" size={14} color={C.textLight} />
-                <Text style={styles.visibilityTitle}>Profile visibility</Text>
-              </View>
-              <View style={styles.visibilityOptions}>
-                <TouchableOpacity
-                  style={[styles.visibilityOption, profileVisibility === 'blurred' && styles.visibilityOptionActive]}
-                  onPress={() => setProfileVisibility('blurred')}
-                >
-                  <View style={styles.radioOuter}>
-                    {profileVisibility === 'blurred' && <View style={styles.radioInner} />}
-                  </View>
-                  <Text style={[styles.visibilityOptionText, profileVisibility === 'blurred' && { color: C.primary }]}>
-                    Blurred profile
-                  </Text>
-                  <View style={styles.recommendedBadge}>
-                    <Text style={styles.recommendedText}>Recommended</Text>
-                  </View>
-                </TouchableOpacity>
-                <TouchableOpacity
-                  style={[styles.visibilityOption, profileVisibility === 'clear' && styles.visibilityOptionActive]}
-                  onPress={() => setProfileVisibility('clear')}
-                >
-                  <View style={styles.radioOuter}>
-                    {profileVisibility === 'clear' && <View style={styles.radioInner} />}
-                  </View>
-                  <Text style={[styles.visibilityOptionText, profileVisibility === 'clear' && { color: C.primary }]}>
-                    Show profile clearly
-                  </Text>
-                </TouchableOpacity>
-              </View>
+          {/* Identity Mode Picker - 3 clear options */}
+          <View style={styles.identitySection}>
+            <View style={styles.identityHeader}>
+              <Ionicons name="person-outline" size={14} color={C.textLight} />
+              <Text style={styles.identityTitle}>Your identity</Text>
             </View>
-          )}
+            <View style={styles.identityOptions}>
+              {/* Option 1: Show profile (default) */}
+              <TouchableOpacity
+                style={[styles.identityOption, identityMode === 'show_profile' && styles.identityOptionActive]}
+                onPress={() => setIdentityMode('show_profile')}
+              >
+                <View style={styles.radioOuter}>
+                  {identityMode === 'show_profile' && <View style={styles.radioInner} />}
+                </View>
+                <Ionicons name="person" size={16} color={identityMode === 'show_profile' ? C.primary : C.textLight} />
+                <Text style={[styles.identityOptionText, identityMode === 'show_profile' && { color: C.primary }]}>
+                  Show profile
+                </Text>
+                <View style={styles.recommendedBadge}>
+                  <Text style={styles.recommendedText}>Default</Text>
+                </View>
+              </TouchableOpacity>
+
+              {/* Option 2: Blur photo */}
+              <TouchableOpacity
+                style={[styles.identityOption, identityMode === 'blur_photo' && styles.identityOptionActive]}
+                onPress={() => setIdentityMode('blur_photo')}
+              >
+                <View style={styles.radioOuter}>
+                  {identityMode === 'blur_photo' && <View style={styles.radioInner} />}
+                </View>
+                <Ionicons name="eye-outline" size={16} color={identityMode === 'blur_photo' ? C.primary : C.textLight} />
+                <Text style={[styles.identityOptionText, identityMode === 'blur_photo' && { color: C.primary }]}>
+                  Blur photo
+                </Text>
+              </TouchableOpacity>
+
+              {/* Option 3: Anonymous */}
+              <TouchableOpacity
+                style={[styles.identityOption, identityMode === 'anonymous' && styles.identityOptionActive]}
+                onPress={() => setIdentityMode('anonymous')}
+              >
+                <View style={styles.radioOuter}>
+                  {identityMode === 'anonymous' && <View style={styles.radioInner} />}
+                </View>
+                <Ionicons name="eye-off" size={16} color={identityMode === 'anonymous' ? C.primary : C.textLight} />
+                <Text style={[styles.identityOptionText, identityMode === 'anonymous' && { color: C.primary }]}>
+                  Anonymous
+                </Text>
+              </TouchableOpacity>
+            </View>
+          </View>
 
           <View style={styles.footer}>
             <Text style={styles.charCount}>{text.length}/{MAX_CHARS}</Text>
@@ -149,27 +168,22 @@ const styles = StyleSheet.create({
     fontSize: 15, color: C.text, minHeight: 120, textAlignVertical: 'top',
     marginBottom: 12,
   },
-  anonRow: {
-    flexDirection: 'row', alignItems: 'center', gap: 8,
-    marginBottom: 8, paddingHorizontal: 4,
-  },
-  anonLabel: { flex: 1, fontSize: 13, color: C.textLight, fontWeight: '500' },
-  // Profile visibility picker
-  visibilitySection: {
+  // Identity picker (3 options)
+  identitySection: {
     backgroundColor: C.surface, borderRadius: 10,
     padding: 12, marginBottom: 12,
   },
-  visibilityHeader: {
+  identityHeader: {
     flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 10,
   },
-  visibilityTitle: { fontSize: 12, fontWeight: '600', color: C.textLight, textTransform: 'uppercase', letterSpacing: 0.3 },
-  visibilityOptions: { gap: 6 },
-  visibilityOption: {
+  identityTitle: { fontSize: 12, fontWeight: '600', color: C.textLight, textTransform: 'uppercase', letterSpacing: 0.3 },
+  identityOptions: { gap: 6 },
+  identityOption: {
     flexDirection: 'row', alignItems: 'center', gap: 10,
-    paddingVertical: 8, paddingHorizontal: 8, borderRadius: 8,
+    paddingVertical: 10, paddingHorizontal: 8, borderRadius: 8,
   },
-  visibilityOptionActive: { backgroundColor: C.primary + '10' },
-  visibilityOptionText: { fontSize: 13, color: C.text, fontWeight: '500' },
+  identityOptionActive: { backgroundColor: C.primary + '10' },
+  identityOptionText: { flex: 1, fontSize: 13, color: C.text, fontWeight: '500' },
   radioOuter: {
     width: 18, height: 18, borderRadius: 9,
     borderWidth: 2, borderColor: C.textLight,

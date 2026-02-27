@@ -815,6 +815,12 @@ export default defineSchema({
     activeCount: v.number(),
     createdAt: v.number(),
     expiresAt: v.optional(v.number()),
+    // Owner profile snapshot (immutable at creation time)
+    isAnonymous: v.optional(v.boolean()), // true = hide photo/name, show only age+gender
+    ownerName: v.optional(v.string()),
+    ownerPhotoUrl: v.optional(v.string()),
+    ownerAge: v.optional(v.number()),
+    ownerGender: v.optional(v.string()),
   })
     .index('by_trending', ['isTrending'])
     .index('by_type', ['type'])
@@ -829,19 +835,32 @@ export default defineSchema({
     mediaUrl: v.optional(v.string()),
     mediaStorageId: v.optional(v.id('_storage')),
     durationSec: v.optional(v.number()),
-    likeCount: v.number(),
+    likeCount: v.number(), // legacy, kept for compatibility
     createdAt: v.number(),
+    editedAt: v.optional(v.number()), // timestamp when answer was last edited
     visibility: v.optional(v.union(v.literal('owner_only'), v.literal('public'))),
     isDemo: v.optional(v.boolean()),
     isAnonymous: v.optional(v.boolean()),
     userGender: v.optional(v.string()),
     profileVisibility: v.optional(v.union(v.literal('blurred'), v.literal('clear'))),
+    // Author identity snapshot (stored at creation/edit time)
+    authorName: v.optional(v.string()),
+    authorPhotoUrl: v.optional(v.string()),
+    authorAge: v.optional(v.number()),
+    authorGender: v.optional(v.string()),
+    photoBlurMode: v.optional(v.union(v.literal('none'), v.literal('blur'))),
+    // Reaction and report counts (denormalized for ranking)
+    totalReactionCount: v.optional(v.number()), // total emoji reactions
+    reportCount: v.optional(v.number()), // unique reporters
+    // One-time view gating fields (for both owner_only and public visibility)
+    viewMode: v.optional(v.union(v.literal('tap'), v.literal('hold'))),
+    viewDurationSec: v.optional(v.number()), // 1-60 seconds for one-time view
   })
     .index('by_prompt', ['promptId'])
     .index('by_user', ['userId'])
     .index('by_prompt_user', ['promptId', 'userId']),
 
-  // Truth & Dare Answer Likes
+  // Truth & Dare Answer Likes (legacy, kept for migration)
   todAnswerLikes: defineTable({
     answerId: v.string(),
     likedByUserId: v.string(),
@@ -850,6 +869,42 @@ export default defineSchema({
     .index('by_answer', ['answerId'])
     .index('by_user', ['likedByUserId'])
     .index('by_answer_user', ['answerId', 'likedByUserId']),
+
+  // Truth & Dare Answer Reactions (emoji reactions - one per user per answer)
+  todAnswerReactions: defineTable({
+    answerId: v.string(),
+    userId: v.string(),
+    emoji: v.string(), // any emoji: "😂", "🔥", "❤️", "😮", "👏"
+    createdAt: v.number(),
+    updatedAt: v.optional(v.number()),
+  })
+    .index('by_answer', ['answerId'])
+    .index('by_user', ['userId'])
+    .index('by_answer_user', ['answerId', 'userId']),
+
+  // Truth & Dare Answer Reports (for hiding answers with 5+ reports)
+  todAnswerReports: defineTable({
+    answerId: v.string(),
+    reporterId: v.string(),
+    reason: v.optional(v.string()),
+    createdAt: v.number(),
+  })
+    .index('by_answer', ['answerId'])
+    .index('by_reporter', ['reporterId'])
+    .index('by_answer_reporter', ['answerId', 'reporterId']),
+
+  // Truth & Dare Rate Limiting (tracks user action counts per day)
+  todRateLimits: defineTable({
+    userId: v.string(),
+    actionType: v.union(
+      v.literal('answer'),
+      v.literal('reaction'),
+      v.literal('report')
+    ),
+    windowStart: v.number(), // Start of the rate limit window (day start)
+    count: v.number(), // Actions in this window
+  })
+    .index('by_user_action', ['userId', 'actionType']),
 
   // Truth & Dare Connect Requests (triggered when someone likes an answer)
   todConnectRequests: defineTable({
@@ -863,6 +918,43 @@ export default defineSchema({
     .index('by_to_user', ['toUserId'])
     .index('by_from_to', ['fromUserId', 'toUserId'])
     .index('by_prompt', ['promptId']),
+
+  // Truth & Dare Private Media (one-time view photo/video responses)
+  todPrivateMedia: defineTable({
+    promptId: v.string(),
+    fromUserId: v.string(), // responder who sent the media
+    toUserId: v.string(), // prompt owner (only person who can view)
+    mediaType: v.union(v.literal('photo'), v.literal('video')),
+    storageId: v.optional(v.id('_storage')), // cleared after deletion
+    viewMode: v.union(v.literal('tap'), v.literal('hold')), // how owner views: tap once or hold to view
+    durationSec: v.number(), // view timer in seconds (1-60, default 20)
+    status: v.union(
+      v.literal('pending'),  // not yet viewed
+      v.literal('viewing'),  // currently being viewed (timer running)
+      v.literal('expired'),  // timer ended, media deleted
+      v.literal('deleted')   // manually deleted or cleaned up
+    ),
+    createdAt: v.number(),
+    viewedAt: v.optional(v.number()), // when owner started viewing
+    expiresAt: v.optional(v.number()), // viewedAt + durationSec*1000
+    connectStatus: v.union(
+      v.literal('none'),
+      v.literal('pending'),
+      v.literal('accepted'),
+      v.literal('rejected')
+    ),
+    // Responder profile info (cached for display after media deletion)
+    responderName: v.optional(v.string()),
+    responderAge: v.optional(v.number()),
+    responderGender: v.optional(v.string()),
+    responderPhotoUrl: v.optional(v.string()),
+  })
+    .index('by_prompt', ['promptId'])
+    .index('by_to_user', ['toUserId'])
+    .index('by_from_user', ['fromUserId'])
+    .index('by_prompt_from', ['promptId', 'fromUserId'])
+    .index('by_status', ['status'])
+    .index('by_expires', ['expiresAt']),
 
   // Confessions table
   confessions: defineTable({

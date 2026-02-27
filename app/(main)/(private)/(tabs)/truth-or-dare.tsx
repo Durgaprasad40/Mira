@@ -1,273 +1,226 @@
-import React, { useState, useCallback, useEffect, useRef } from 'react';
+import React, { useCallback, useMemo, useState } from 'react';
 import {
-  View, Text, StyleSheet, FlatList, TouchableOpacity, Alert,
-  RefreshControl, Animated,
+  View, Text, StyleSheet, FlatList, TouchableOpacity,
+  RefreshControl, ActivityIndicator,
 } from 'react-native';
 import { Image } from 'expo-image';
 import { useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
-import AsyncStorage from '@react-native-async-storage/async-storage';
+import { useQuery } from 'convex/react';
+import { api } from '@/convex/_generated/api';
 import { INCOGNITO_COLORS } from '@/lib/constants';
-import {
-  DEMO_TRENDING_PROMPTS, DEMO_TRENDING_ANSWERS,
-  DEMO_OTHER_PROMPTS, DEMO_OTHER_ANSWERS,
-} from '@/lib/demoData';
-import { TextComposerModal } from '@/components/truthdare/TextComposerModal';
-import { VoiceComposer } from '@/components/truthdare/VoiceComposer';
-import { getTimeAgo } from '@/lib/utils';
-import type { TodPrompt, TodAnswer, TodProfileVisibility } from '@/types';
+import { useAuthStore } from '@/stores/authStore';
 
 const C = INCOGNITO_COLORS;
-const SEVEN_DAYS = 7 * 24 * 60 * 60 * 1000;
 
-/* ─── Inline "+" Menu (Text / Voice / Camera) ─── */
-function InlinePlusMenu({
-  hasAnswered,
-  onSelectText,
-  onSelectVoice,
-  onSelectCamera,
-}: {
-  hasAnswered: boolean;
-  onSelectText: () => void;
-  onSelectVoice: () => void;
-  onSelectCamera: () => void;
-}) {
-  const [open, setOpen] = useState(false);
-  const anim = useRef(new Animated.Value(0)).current;
+// Gender icon helper
+function getGenderIcon(gender?: string): keyof typeof Ionicons.glyphMap {
+  if (!gender) return 'male-female';
+  const g = gender.toLowerCase();
+  if (g === 'male') return 'male';
+  if (g === 'female') return 'female';
+  return 'male-female';
+}
 
-  const toggle = () => {
-    if (hasAnswered) {
-      Alert.alert('Already posted', 'You already posted for this prompt.');
-      return;
-    }
-    const toOpen = !open;
-    setOpen(toOpen);
-    Animated.spring(anim, {
-      toValue: toOpen ? 1 : 0,
-      useNativeDriver: true,
-      friction: 8,
-      tension: 100,
-    }).start();
-  };
-
-  const close = () => {
-    setOpen(false);
-    Animated.spring(anim, {
-      toValue: 0,
-      useNativeDriver: true,
-      friction: 8,
-      tension: 100,
-    }).start();
-  };
-
-  const select = (handler: () => void) => {
-    close();
-    handler();
-  };
-
-  const optionsOpacity = anim.interpolate({
-    inputRange: [0, 0.5, 1],
-    outputRange: [0, 0, 1],
-  });
-  const optionsScale = anim.interpolate({
-    inputRange: [0, 1],
-    outputRange: [0.85, 1],
-  });
-  const optionsTranslateX = anim.interpolate({
-    inputRange: [0, 1],
-    outputRange: [20, 0],
-  });
+/* ─── Compact Comment Preview Row ─── */
+function CommentPreviewRow({ answer }: { answer: any }) {
+  const isMedia = answer.type === 'photo' || answer.type === 'video' || answer.type === 'voice';
+  const displayName = answer.isAnonymous !== false ? 'Anonymous' : (answer.authorName || 'User');
 
   return (
-    <View style={styles.inlineMenuWrap}>
-      {/* Always mounted, absolute overlay — no layout reflow */}
-      <Animated.View
-        style={[
-          styles.inlineOptions,
-          {
-            opacity: optionsOpacity,
-            transform: [{ scale: optionsScale }, { translateX: optionsTranslateX }],
-          },
-        ]}
-        pointerEvents={open ? 'auto' : 'none'}
-      >
-        <TouchableOpacity style={styles.inlineIcon} onPress={() => select(onSelectText)} hitSlop={6}>
-          <Ionicons name="create-outline" size={18} color="#6C5CE7" />
-        </TouchableOpacity>
-        <TouchableOpacity style={styles.inlineIcon} onPress={() => select(onSelectVoice)} hitSlop={6}>
-          <Ionicons name="mic-outline" size={18} color="#FF9800" />
-        </TouchableOpacity>
-        <TouchableOpacity style={styles.inlineIcon} onPress={() => select(onSelectCamera)} hitSlop={6}>
-          <Ionicons name="camera-outline" size={18} color="#E94560" />
-        </TouchableOpacity>
-      </Animated.View>
-
-      <TouchableOpacity
-        style={[styles.plusBtn, hasAnswered && styles.plusBtnDisabled, open && styles.plusBtnOpen]}
-        onPress={toggle}
-        activeOpacity={0.7}
-      >
-        <Ionicons
-          name={hasAnswered ? 'checkmark' : open ? 'close' : 'add'}
-          size={20}
-          color={hasAnswered ? C.textLight : '#FFF'}
-        />
-      </TouchableOpacity>
+    <View style={styles.commentRow}>
+      <View style={styles.commentAvatar}>
+        <Ionicons name="person" size={10} color={C.textLight} />
+      </View>
+      <Text style={styles.commentText} numberOfLines={1} ellipsizeMode="tail">
+        <Text style={styles.commentName}>{displayName}</Text>
+        {'  '}
+        {isMedia ? (
+          <Text style={styles.commentMedia}>
+            {answer.type === 'voice' ? '🎤 Voice' : answer.type === 'video' ? '🎬 Video' : '📷 Photo'}
+          </Text>
+        ) : (
+          <Text style={styles.commentSnippet}>{answer.text || ''}</Text>
+        )}
+      </Text>
     </View>
   );
 }
 
-/* ─── Poster Profile Row ─── */
-function PosterProfile({ prompt, onPress }: { prompt: TodPrompt; onPress: () => void }) {
-  const genderIcon = prompt.ownerGender === 'male' ? 'male' : prompt.ownerGender === 'female' ? 'female' : 'male-female';
+/* ─── Trending Prompt Data Type ─── */
+type TrendingPromptData = {
+  _id: any;
+  type: 'truth' | 'dare';
+  text: string;
+  isTrending: boolean;
+  expiresAt: number;
+  answerCount: number;
+  isAnonymous?: boolean;
+  ownerName?: string;
+  ownerPhotoUrl?: string;
+  ownerAge?: number;
+  ownerGender?: string;
+};
 
-  return (
-    <TouchableOpacity style={styles.posterRow} onPress={onPress} activeOpacity={0.7}>
-      {prompt.ownerPhotoUrl ? (
-        <Image source={{ uri: prompt.ownerPhotoUrl }} style={styles.posterAvatar} />
-      ) : (
-        <View style={styles.posterAvatarPlaceholder}>
-          <Ionicons name="person" size={12} color={C.textLight} />
-        </View>
-      )}
-      <Text style={styles.posterName} numberOfLines={1}>{prompt.ownerName || 'Anonymous'}</Text>
-      {prompt.ownerAge ? <Text style={styles.posterAge}>{prompt.ownerAge}</Text> : null}
-      <Ionicons name={genderIcon} size={11} color={C.textLight} />
-    </TouchableOpacity>
-  );
-}
-
-/* ─── Trending Card (question only — NO answers/previews) ─── */
+/* ─── Trending Card (compact, no previews, "X answers" only) ─── */
 function TrendingCard({
   prompt,
-  hasAnswered,
-  onSelectText,
-  onSelectVoice,
-  onSelectCamera,
-  onPressMore,
-  onPressProfile,
+  onOpenThread,
+  onAddComment,
 }: {
-  prompt: TodPrompt;
-  hasAnswered: boolean;
-  onSelectText: () => void;
-  onSelectVoice: () => void;
-  onSelectCamera: () => void;
-  onPressMore: () => void;
-  onPressProfile: () => void;
+  prompt: TrendingPromptData;
+  onOpenThread: () => void;
+  onAddComment: () => void;
 }) {
   const isTruth = prompt.type === 'truth';
+  const isAnon = prompt.isAnonymous ?? true;
+  const answerCount = prompt.answerCount ?? 0;
 
   return (
-    <TouchableOpacity style={styles.card} activeOpacity={0.8} onPress={onPressMore}>
-      {/* Top-right type badge overlay */}
-      <View style={[styles.typeBadgeOverlay, { backgroundColor: isTruth ? 'rgba(108,92,231,0.85)' : 'rgba(225,112,85,0.85)' }]}>
-        <Text style={styles.typeBadgeText}>{isTruth ? 'Truth' : 'Dare'}</Text>
+    <TouchableOpacity style={styles.card} onPress={onOpenThread} activeOpacity={0.7}>
+      {/* Card content wrapper */}
+      <View style={styles.cardContent}>
+        {/* Header Row: LEFT = Identity, RIGHT = Type pill */}
+        <View style={styles.cardHeader}>
+          {/* LEFT: Owner Identity */}
+          <View style={styles.ownerIdentity}>
+            {!isAnon && prompt.ownerPhotoUrl ? (
+              <Image source={{ uri: prompt.ownerPhotoUrl }} style={styles.ownerPhoto} />
+            ) : (
+              <View style={styles.ownerPhotoPlaceholder}>
+                <Ionicons name={isAnon ? 'eye-off' : 'person'} size={12} color={C.textLight} />
+              </View>
+            )}
+            <View style={styles.ownerInfo}>
+              <Text style={styles.ownerName} numberOfLines={1}>
+                {isAnon ? 'Anonymous' : (prompt.ownerName || 'User')}
+                {prompt.ownerAge ? `, ${prompt.ownerAge}` : ''}
+              </Text>
+              {prompt.ownerGender && (
+                <Ionicons name={getGenderIcon(prompt.ownerGender)} size={11} color={C.textLight} />
+              )}
+            </View>
+          </View>
+
+          {/* RIGHT: Type pill */}
+          <View style={[styles.typePill, { backgroundColor: isTruth ? '#6C5CE7' : '#E17055' }]}>
+            <Ionicons name={isTruth ? 'help-circle' : 'flash'} size={10} color="#FFF" />
+            <Text style={styles.typePillText}>{isTruth ? 'Truth' : 'Dare'}</Text>
+          </View>
+        </View>
+
+        {/* Prompt text */}
+        <Text style={styles.promptText} numberOfLines={3}>{prompt.text}</Text>
+
+        {/* Footer: +N more */}
+        <View style={styles.cardFooter}>
+          <Text style={styles.moreCountLabel}>+{answerCount} more</Text>
+        </View>
       </View>
-      <PosterProfile prompt={prompt} onPress={onPressProfile} />
-      <View style={styles.cardBody}>
-        <Text style={styles.cardPromptFull}>{prompt.text}</Text>
-        <InlinePlusMenu
-          hasAnswered={hasAnswered}
-          onSelectText={onSelectText}
-          onSelectVoice={onSelectVoice}
-          onSelectCamera={onSelectCamera}
-        />
-      </View>
-      <View style={styles.trendingFooter}>
-        <Text style={styles.trendingFooterText}>{prompt.answerCount} answers</Text>
-        <Ionicons name="chevron-forward" size={12} color={C.textLight} />
-      </View>
+
+      {/* Big + button on right side */}
+      <TouchableOpacity
+        style={styles.addButton}
+        onPress={(e) => { e.stopPropagation(); onAddComment(); }}
+        activeOpacity={0.8}
+      >
+        <Ionicons name="add" size={22} color="#FFF" />
+      </TouchableOpacity>
     </TouchableOpacity>
   );
 }
 
-/* ─── Non-Trending Prompt Card (2 previews + "More") ─── */
+/* ─── Prompt Card (with comment previews) ─── */
 function PromptCard({
   prompt,
-  previews,
-  totalAnswers,
-  hasAnswered,
-  onSelectText,
-  onSelectVoice,
-  onSelectCamera,
-  onPressMore,
-  onPressProfile,
+  onOpenThread,
+  onAddComment,
 }: {
-  prompt: TodPrompt;
-  previews: TodAnswer[];
-  totalAnswers: number;
-  hasAnswered: boolean;
-  onSelectText: () => void;
-  onSelectVoice: () => void;
-  onSelectCamera: () => void;
-  onPressMore: () => void;
-  onPressProfile: () => void;
+  prompt: {
+    _id: any;
+    type: 'truth' | 'dare';
+    text: string;
+    isTrending: boolean;
+    expiresAt: number;
+    top2Answers: any[];
+    totalAnswers: number;
+    hasAnswered: boolean;
+    myAnswerId: string | null;
+    isAnonymous?: boolean;
+    ownerName?: string;
+    ownerPhotoUrl?: string;
+    ownerAge?: number;
+    ownerGender?: string;
+    answerCount?: number;
+  };
+  onOpenThread: () => void;
+  onAddComment: () => void;
 }) {
   const isTruth = prompt.type === 'truth';
-  const hiddenCount = totalAnswers - previews.length;
+  const isAnon = prompt.isAnonymous ?? true;
+  const answerCount = prompt.totalAnswers ?? prompt.answerCount ?? 0;
+  const previewCount = prompt.top2Answers?.length ?? 0;
 
   return (
-    <TouchableOpacity style={styles.card} activeOpacity={0.8} onPress={onPressMore}>
-      {/* Top-right type badge overlay */}
-      <View style={[styles.typeBadgeOverlay, { backgroundColor: isTruth ? 'rgba(108,92,231,0.85)' : 'rgba(225,112,85,0.85)' }]}>
-        <Text style={styles.typeBadgeText}>{isTruth ? 'Truth' : 'Dare'}</Text>
-      </View>
-      <PosterProfile prompt={prompt} onPress={onPressProfile} />
-      <View style={styles.cardBody}>
-        <Text style={styles.cardPrompt} numberOfLines={2}>{prompt.text}</Text>
-        <InlinePlusMenu
-          hasAnswered={hasAnswered}
-          onSelectText={onSelectText}
-          onSelectVoice={onSelectVoice}
-          onSelectCamera={onSelectCamera}
-        />
-      </View>
-
-      {/* Up to 2 response previews */}
-      {previews.length > 0 && (
-        <View style={styles.previewsArea}>
-          {previews.map((answer) => {
-            const previewBlurred = answer.isAnonymous && answer.profileVisibility !== 'clear';
-            return (
-            <View key={answer.id} style={styles.previewRow}>
-              {answer.userPhotoUrl ? (
-                <Image
-                  source={{ uri: answer.userPhotoUrl }}
-                  style={styles.previewAvatar}
-                  blurRadius={previewBlurred ? 8 : 0}
-                />
-              ) : (
-                <View style={styles.previewAvatarPlaceholder}>
-                  <Ionicons name="person" size={9} color={C.textLight} />
-                </View>
-              )}
-              <Text style={styles.previewName}>{answer.userName}</Text>
-              {answer.type === 'text' ? (
-                <Text style={styles.previewText} numberOfLines={1}>{answer.text}</Text>
-              ) : answer.type === 'voice' ? (
-                <View style={styles.previewMediaTag}>
-                  <Ionicons name="mic" size={10} color="#FF9800" />
-                  <Text style={styles.previewMediaText}>{answer.durationSec}s</Text>
-                </View>
-              ) : (
-                <View style={styles.previewMediaTag}>
-                  <Ionicons name="lock-closed" size={10} color={C.textLight} />
-                  <Text style={styles.previewMediaText}>Media</Text>
-                </View>
+    <TouchableOpacity style={styles.card} onPress={onOpenThread} activeOpacity={0.7}>
+      {/* Card content wrapper */}
+      <View style={styles.cardContent}>
+        {/* Header Row: LEFT = Identity, RIGHT = Type pill */}
+        <View style={styles.cardHeader}>
+          {/* LEFT: Owner Identity */}
+          <View style={styles.ownerIdentity}>
+            {!isAnon && prompt.ownerPhotoUrl ? (
+              <Image source={{ uri: prompt.ownerPhotoUrl }} style={styles.ownerPhoto} />
+            ) : (
+              <View style={styles.ownerPhotoPlaceholder}>
+                <Ionicons name={isAnon ? 'eye-off' : 'person'} size={12} color={C.textLight} />
+              </View>
+            )}
+            <View style={styles.ownerInfo}>
+              <Text style={styles.ownerName} numberOfLines={1}>
+                {isAnon ? 'Anonymous' : (prompt.ownerName || 'User')}
+                {prompt.ownerAge ? `, ${prompt.ownerAge}` : ''}
+              </Text>
+              {prompt.ownerGender && (
+                <Ionicons name={getGenderIcon(prompt.ownerGender)} size={11} color={C.textLight} />
               )}
             </View>
-            );
-          })}
-        </View>
-      )}
+          </View>
 
-      {/* "More" */}
-      {hiddenCount > 0 && (
-        <View style={styles.moreRow}>
-          <Text style={styles.moreText}>+{hiddenCount} more</Text>
+          {/* RIGHT: Type pill */}
+          <View style={[styles.typePill, { backgroundColor: isTruth ? '#6C5CE7' : '#E17055' }]}>
+            <Ionicons name={isTruth ? 'help-circle' : 'flash'} size={10} color="#FFF" />
+            <Text style={styles.typePillText}>{isTruth ? 'Truth' : 'Dare'}</Text>
+          </View>
         </View>
-      )}
+
+        {/* Prompt text */}
+        <Text style={styles.promptText} numberOfLines={3}>{prompt.text}</Text>
+
+        {/* Comment previews (up to 2) */}
+        {previewCount > 0 && (
+          <View style={styles.previewSection}>
+            {prompt.top2Answers.map((answer) => (
+              <CommentPreviewRow key={answer._id} answer={answer} />
+            ))}
+          </View>
+        )}
+
+        {/* Footer: +N more */}
+        <View style={styles.cardFooter}>
+          <Text style={styles.moreCountLabel}>+{answerCount} more</Text>
+        </View>
+      </View>
+
+      {/* Big + button on right side */}
+      <TouchableOpacity
+        style={styles.addButton}
+        onPress={(e) => { e.stopPropagation(); onAddComment(); }}
+        activeOpacity={0.8}
+      >
+        <Ionicons name="add" size={22} color="#FFF" />
+      </TouchableOpacity>
     </TouchableOpacity>
   );
 }
@@ -276,134 +229,86 @@ function PromptCard({
 export default function TruthOrDareScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
-  const [refreshing, setRefreshing] = useState(false);
+  const [refreshKey, setRefreshKey] = useState(0);
 
-  // Composer state
-  const [composerPrompt, setComposerPrompt] = useState<TodPrompt | null>(null);
-  const [showTextComposer, setShowTextComposer] = useState(false);
-  const [showVoiceComposer, setShowVoiceComposer] = useState(false);
+  const userId = useAuthStore((s) => s.userId);
 
-  // Track answered prompts (demo: local)
-  const [answeredPromptIds, setAnsweredPromptIds] = useState<Set<string>>(new Set());
+  // Get trending prompts (1 Dare + 1 Truth)
+  const trendingData = useQuery(api.truthDare.getTrendingTruthAndDare);
 
-  // Demo data — filter out expired (> 7 days)
-  const now = Date.now();
+  // Get all prompts (sorted by engagement)
+  const promptsData = useQuery(
+    api.truthDare.listActivePromptsWithTop2Answers,
+    { viewerUserId: userId ?? undefined }
+  );
 
-  const allAnswers = [...DEMO_TRENDING_ANSWERS, ...DEMO_OTHER_ANSWERS];
+  const isLoading = promptsData === undefined || trendingData === undefined;
+  const prompts = promptsData ?? [];
 
-  const isNotExpired = (p: TodPrompt) => {
-    const expires = p.expiresAt ?? p.createdAt + SEVEN_DAYS;
-    return expires > now;
-  };
+  // Get trending prompt IDs to exclude from normal list
+  const trendingIds = useMemo(() => {
+    const ids = new Set<string>();
+    if (trendingData?.trendingDarePrompt) {
+      ids.add(trendingData.trendingDarePrompt._id as unknown as string);
+    }
+    if (trendingData?.trendingTruthPrompt) {
+      ids.add(trendingData.trendingTruthPrompt._id as unknown as string);
+    }
+    return ids;
+  }, [trendingData]);
 
-  // Trending: exactly 1 Truth + 1 Dare using isTrending flag
-  const allPrompts = [...DEMO_TRENDING_PROMPTS, ...DEMO_OTHER_PROMPTS].filter(isNotExpired);
-  const trendingTruth = allPrompts.find((p) => p.isTrending && p.type === 'truth');
-  const trendingDare = allPrompts.find((p) => p.isTrending && p.type === 'dare');
-  const trendingPrompts = [trendingTruth, trendingDare].filter(Boolean) as TodPrompt[];
-  const trendingIds = new Set(trendingPrompts.map((p) => p.id));
-  const otherPrompts = allPrompts
-    .filter((p) => !trendingIds.has(p.id))
-    .sort((a, b) => b.createdAt - a.createdAt);
-
-  // Mark prompt as answered when returning from camera-composer
-  // (camera-composer saves media to AsyncStorage, prompt-thread picks it up via its own poll)
-  useEffect(() => {
-    const check = async () => {
-      try {
-        const raw = await AsyncStorage.getItem('tod_answered_prompts');
-        if (raw) {
-          const ids: string[] = JSON.parse(raw);
-          if (ids.length > 0) {
-            setAnsweredPromptIds((prev) => {
-              const next = new Set(prev);
-              ids.forEach((id) => next.add(id));
-              return next;
-            });
-          }
-        }
-      } catch { /* silent */ }
-    };
-    check();
-    const interval = setInterval(check, 2000);
-    return () => clearInterval(interval);
-  }, []);
+  // Filter out trending prompts from normal list
+  const normalPrompts = useMemo(() => {
+    return prompts.filter((p) => !trendingIds.has(p._id as unknown as string));
+  }, [prompts, trendingIds]);
 
   const onRefresh = useCallback(() => {
-    setRefreshing(true);
-    setTimeout(() => setRefreshing(false), 800);
+    setRefreshKey((k: number) => k + 1);
   }, []);
 
-  // Previews: up to N, prioritize text/voice (visible to all)
-  const getPreviews = (promptId: string, max: number): TodAnswer[] => {
-    const answers = allAnswers
-      .filter((a) => a.promptId === promptId)
-      .sort((a, b) => a.createdAt - b.createdAt);
-    const tv = answers.filter((a) => a.type === 'text' || a.type === 'voice');
-    const media = answers.filter((a) => a.type === 'photo' || a.type === 'video');
-    return [...tv, ...media].slice(0, max);
-  };
-
-  const getTotalAnswers = (promptId: string): number =>
-    allAnswers.filter((a) => a.promptId === promptId).length;
-
-  // Composer helpers
-  const selectText = (prompt: TodPrompt) => {
-    setComposerPrompt(prompt);
-    setShowTextComposer(true);
-  };
-
-  const selectVoice = (prompt: TodPrompt) => {
-    setComposerPrompt(prompt);
-    setShowVoiceComposer(true);
-  };
-
-  // Camera handles both photo and video (Telegram-style)
-  const selectCamera = (prompt: TodPrompt) => {
-    router.push({
-      pathname: '/(main)/camera-composer' as any,
-      params: { promptId: prompt.id, promptType: prompt.type },
-    });
-  };
-
-  const handleTextSubmit = (text: string, _isAnonymous?: boolean, _profileVisibility?: TodProfileVisibility) => {
-    setShowTextComposer(false);
-    if (composerPrompt) {
-      const pid = composerPrompt.id;
-      setAnsweredPromptIds((prev) => new Set([...prev, pid]));
-      openThread(pid);
-    }
-  };
-
-  const handleVoiceSubmit = (durationSec: number, _isAnonymous?: boolean, _profileVisibility?: TodProfileVisibility) => {
-    setShowVoiceComposer(false);
-    if (composerPrompt) {
-      const pid = composerPrompt.id;
-      setAnsweredPromptIds((prev) => new Set([...prev, pid]));
-      openThread(pid);
-    }
-  };
-
-  const openThread = (promptId: string) => {
+  const openThread = useCallback((promptId: string) => {
     router.push({ pathname: '/(main)/prompt-thread' as any, params: { promptId } });
-  };
+  }, [router]);
 
-  const openProfile = (userId: string) => {
-    router.push({ pathname: '/(main)/private-profile/[userId]' as any, params: { userId } });
-  };
+  const openCreateTod = useCallback(() => {
+    router.push('/(main)/incognito-create-tod' as any);
+  }, [router]);
 
-  // Build feed
+  // Open thread for adding comment (same as opening thread, composer auto-shows)
+  const openThreadForComment = useCallback((promptId: string) => {
+    router.push({ pathname: '/(main)/prompt-thread' as any, params: { promptId, autoOpenComposer: 'true' } });
+  }, [router]);
+
   type FeedItem =
-    | { type: 'trending'; prompt: TodPrompt }
     | { type: 'section'; label: string }
-    | { type: 'other'; prompt: TodPrompt };
+    | { type: 'trending'; prompt: TrendingPromptData }
+    | { type: 'prompt'; prompt: typeof prompts[0] };
 
-  const feedData: FeedItem[] = [];
-  trendingPrompts.forEach((p) => feedData.push({ type: 'trending', prompt: p }));
-  if (otherPrompts.length > 0) {
-    feedData.push({ type: 'section', label: 'More Truths & Dares' });
-    otherPrompts.forEach((p) => feedData.push({ type: 'other', prompt: p }));
-  }
+  const feedData: FeedItem[] = useMemo(() => {
+    const items: FeedItem[] = [];
+
+    // Trending section (Dare first, then Truth)
+    const hasTrendingDare = !!trendingData?.trendingDarePrompt;
+    const hasTrendingTruth = !!trendingData?.trendingTruthPrompt;
+
+    if (hasTrendingDare || hasTrendingTruth) {
+      items.push({ type: 'section', label: '🔥 Trending' });
+      if (hasTrendingDare) {
+        items.push({ type: 'trending', prompt: trendingData!.trendingDarePrompt! });
+      }
+      if (hasTrendingTruth) {
+        items.push({ type: 'trending', prompt: trendingData!.trendingTruthPrompt! });
+      }
+    }
+
+    // Normal prompts section
+    if (normalPrompts.length > 0) {
+      items.push({ type: 'section', label: 'More Truths & Dares' });
+      normalPrompts.forEach((p) => items.push({ type: 'prompt', prompt: p }));
+    }
+
+    return items;
+  }, [trendingData, normalPrompts]);
 
   const renderItem = ({ item }: { item: FeedItem }) => {
     if (item.type === 'section') {
@@ -411,46 +316,66 @@ export default function TruthOrDareScreen() {
     }
 
     if (item.type === 'trending') {
+      const promptId = item.prompt._id as unknown as string;
       return (
         <TrendingCard
           prompt={item.prompt}
-          hasAnswered={answeredPromptIds.has(item.prompt.id)}
-          onSelectText={() => selectText(item.prompt)}
-          onSelectVoice={() => selectVoice(item.prompt)}
-          onSelectCamera={() => selectCamera(item.prompt)}
-          onPressMore={() => openThread(item.prompt.id)}
-          onPressProfile={() => openProfile(item.prompt.ownerUserId)}
+          onOpenThread={() => openThread(promptId)}
+          onAddComment={() => openThreadForComment(promptId)}
         />
       );
     }
 
-    // Non-trending: show 2 previews + More
+    const promptId = item.prompt._id as unknown as string;
     return (
       <PromptCard
         prompt={item.prompt}
-        previews={getPreviews(item.prompt.id, 2)}
-        totalAnswers={getTotalAnswers(item.prompt.id)}
-        hasAnswered={answeredPromptIds.has(item.prompt.id)}
-        onSelectText={() => selectText(item.prompt)}
-        onSelectVoice={() => selectVoice(item.prompt)}
-        onSelectCamera={() => selectCamera(item.prompt)}
-        onPressMore={() => openThread(item.prompt.id)}
-        onPressProfile={() => openProfile(item.prompt.ownerUserId)}
+        onOpenThread={() => openThread(promptId)}
+        onAddComment={() => openThreadForComment(promptId)}
       />
     );
   };
 
   const getKey = (item: FeedItem, idx: number) => {
-    if (item.type === 'section') return `sh_${idx}`;
-    return `p_${item.prompt.id}`;
+    if (item.type === 'section') return `section_${idx}`;
+    if (item.type === 'trending') return `trending_${item.prompt._id}`;
+    return `prompt_${item.prompt._id}`;
   };
+
+  if (isLoading) {
+    return (
+      <View style={[styles.container, styles.centered, { paddingTop: insets.top }]}>
+        <ActivityIndicator size="large" color={C.primary} />
+        <Text style={styles.loadingText}>Loading...</Text>
+      </View>
+    );
+  }
+
+  if (prompts.length === 0) {
+    return (
+      <View style={[styles.container, { paddingTop: insets.top }]}>
+        <View style={styles.header}>
+          <Ionicons name="flame" size={16} color={C.primary} />
+          <Text style={styles.headerTitle}>Truth or Dare</Text>
+        </View>
+        <View style={styles.emptyState}>
+          <Ionicons name="help-circle-outline" size={48} color={C.textLight} />
+          <Text style={styles.emptyTitle}>No active prompts</Text>
+          <Text style={styles.emptySubtitle}>Be the first to create a Truth or Dare!</Text>
+          <TouchableOpacity style={styles.createFirstBtn} onPress={openCreateTod}>
+            <Ionicons name="add" size={18} color="#FFF" />
+            <Text style={styles.createFirstBtnText}>Create Post</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+    );
+  }
 
   return (
     <View style={[styles.container, { paddingTop: insets.top }]}>
-      {/* Compact header — "Trending" only */}
       <View style={styles.header}>
         <Ionicons name="flame" size={16} color={C.primary} />
-        <Text style={styles.headerTitle}>Trending</Text>
+        <Text style={styles.headerTitle}>Truth or Dare</Text>
       </View>
 
       <FlatList
@@ -458,118 +383,167 @@ export default function TruthOrDareScreen() {
         keyExtractor={getKey}
         renderItem={renderItem}
         contentContainerStyle={styles.listContent}
-        refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={C.primary} />}
+        refreshControl={
+          <RefreshControl
+            refreshing={false}
+            onRefresh={onRefresh}
+            tintColor={C.primary}
+          />
+        }
       />
 
-      <TextComposerModal
-        visible={showTextComposer}
-        prompt={composerPrompt}
-        onClose={() => setShowTextComposer(false)}
-        onSubmit={handleTextSubmit}
-      />
-
-      <VoiceComposer
-        visible={showVoiceComposer}
-        prompt={composerPrompt}
-        onClose={() => setShowVoiceComposer(false)}
-        onSubmit={handleVoiceSubmit}
-      />
+      <TouchableOpacity
+        style={styles.fab}
+        onPress={openCreateTod}
+        activeOpacity={0.85}
+      >
+        <Ionicons name="add" size={24} color="#FFF" />
+      </TouchableOpacity>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: C.background },
+  centered: { justifyContent: 'center', alignItems: 'center' },
+  loadingText: { marginTop: 12, fontSize: 14, color: C.textLight },
 
   header: {
     flexDirection: 'row', alignItems: 'center', gap: 6,
-    paddingHorizontal: 14, paddingVertical: 8,
+    paddingHorizontal: 14, paddingVertical: 10,
     borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: C.surface,
   },
-  headerTitle: { fontSize: 15, fontWeight: '700', color: C.text },
+  headerTitle: { fontSize: 16, fontWeight: '700', color: C.text },
 
   sectionLabel: {
-    fontSize: 11, fontWeight: '700', color: C.textLight, textTransform: 'uppercase',
-    letterSpacing: 1, paddingHorizontal: 14, paddingTop: 10, paddingBottom: 4,
+    fontSize: 11, fontWeight: '700', color: C.textLight,
+    textTransform: 'uppercase', letterSpacing: 0.5,
+    paddingHorizontal: 14, paddingTop: 12, paddingBottom: 4,
   },
 
-  listContent: { paddingBottom: 32 },
+  listContent: { paddingBottom: 96 },
 
-  // ─── Poster Profile ───
-  posterRow: {
-    flexDirection: 'row', alignItems: 'center', gap: 6,
-    paddingHorizontal: 10, paddingTop: 10, paddingBottom: 2,
-  },
-  posterAvatar: { width: 22, height: 22, borderRadius: 11, backgroundColor: C.accent },
-  posterAvatarPlaceholder: {
-    width: 22, height: 22, borderRadius: 11, backgroundColor: C.accent,
-    alignItems: 'center', justifyContent: 'center',
-  },
-  posterName: { fontSize: 12, fontWeight: '600', color: C.text, maxWidth: 120 },
-  posterAge: { fontSize: 11, color: C.textLight },
-
-  // ─── Card (shared base) ───
+  // Card - compact layout with + button on right
   card: {
+    flexDirection: 'row',
+    alignItems: 'center',
     marginHorizontal: 10, marginVertical: 4,
     backgroundColor: C.surface, borderRadius: 12,
-    overflow: 'hidden',
-    position: 'relative',
+    paddingLeft: 10, paddingRight: 6, paddingVertical: 10,
   },
-  // Top-right overlay badge
-  typeBadgeOverlay: {
-    position: 'absolute', top: 8, right: 8, zIndex: 2,
-    paddingHorizontal: 10, paddingVertical: 4, borderRadius: 12,
-  },
-  typeBadgeText: { fontSize: 10, fontWeight: '700', color: '#FFF' },
-  // Card body (question + plus menu)
-  cardBody: {
-    flexDirection: 'row', alignItems: 'center',
-    paddingHorizontal: 10, paddingBottom: 8, gap: 8,
-  },
-  // Non-trending: 2 lines max
-  cardPrompt: { flex: 1, fontSize: 13, fontWeight: '600', color: C.text, lineHeight: 18 },
-  // Trending: full text, no truncation
-  cardPromptFull: { flex: 1, fontSize: 13, fontWeight: '600', color: C.text, lineHeight: 18 },
 
-  // ─── Trending footer ───
-  trendingFooter: {
-    flexDirection: 'row', alignItems: 'center', gap: 4,
-    paddingHorizontal: 10, paddingBottom: 8,
+  // Card content (left side, takes most space)
+  cardContent: {
+    flex: 1,
+    paddingRight: 8,
   },
-  trendingFooterText: { fontSize: 11, color: C.textLight },
 
-  // ─── Inline Plus Menu ───
-  inlineMenuWrap: { flexDirection: 'row', alignItems: 'center', position: 'relative' },
-  inlineOptions: {
-    position: 'absolute', right: 42, top: -4,
-    flexDirection: 'row', alignItems: 'center', gap: 4,
+  // Header Row
+  cardHeader: {
+    flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
+    marginBottom: 6,
   },
-  inlineIcon: {
-    width: 32, height: 32, borderRadius: 16,
-    backgroundColor: C.accent, alignItems: 'center', justifyContent: 'center',
-  },
-  plusBtn: {
-    width: 34, height: 34, borderRadius: 17,
-    backgroundColor: C.primary, alignItems: 'center', justifyContent: 'center',
-  },
-  plusBtnDisabled: { backgroundColor: C.accent },
-  plusBtnOpen: { backgroundColor: C.textLight },
 
-  // ─── Previews (non-trending only) ───
-  previewsArea: { paddingHorizontal: 10, paddingBottom: 6, gap: 4 },
-  previewRow: { flexDirection: 'row', alignItems: 'center', gap: 6 },
-  previewAvatar: { width: 18, height: 18, borderRadius: 9, backgroundColor: C.accent },
-  previewAvatarPlaceholder: {
-    width: 18, height: 18, borderRadius: 9, backgroundColor: C.accent,
+  // Owner Identity (LEFT side)
+  ownerIdentity: {
+    flexDirection: 'row', alignItems: 'center', gap: 6, flex: 1,
+  },
+  ownerPhoto: {
+    width: 26, height: 26, borderRadius: 13, backgroundColor: C.accent,
+  },
+  ownerPhotoPlaceholder: {
+    width: 26, height: 26, borderRadius: 13, backgroundColor: C.accent,
     alignItems: 'center', justifyContent: 'center',
   },
-  previewName: { fontSize: 11, fontWeight: '600', color: C.text },
-  previewText: { flex: 1, fontSize: 11, color: C.textLight, lineHeight: 15 },
-  previewMediaTag: { flexDirection: 'row', alignItems: 'center', gap: 2 },
-  previewMediaText: { fontSize: 10, color: C.textLight },
+  ownerInfo: {
+    flexDirection: 'row', alignItems: 'center', gap: 4, flex: 1,
+  },
+  ownerName: {
+    fontSize: 12, fontWeight: '600', color: C.text,
+  },
 
-  // ─── More ───
-  moreRow: { paddingVertical: 6, paddingHorizontal: 10 },
-  moreText: { fontSize: 11, fontWeight: '600', color: C.primary },
+  // Type pill (RIGHT side)
+  typePill: {
+    flexDirection: 'row', alignItems: 'center', gap: 3,
+    paddingHorizontal: 7, paddingVertical: 3, borderRadius: 8,
+  },
+  typePillText: { fontSize: 9, fontWeight: '700', color: '#FFF' },
 
+  // Prompt text
+  promptText: {
+    fontSize: 14, fontWeight: '500', color: C.text, lineHeight: 19,
+    marginBottom: 6,
+  },
+
+  // Comment preview section
+  previewSection: {
+    gap: 3, marginBottom: 4,
+  },
+  commentRow: {
+    flexDirection: 'row', alignItems: 'center', gap: 5,
+  },
+  commentAvatar: {
+    width: 16, height: 16, borderRadius: 8, backgroundColor: C.accent,
+    alignItems: 'center', justifyContent: 'center',
+  },
+  commentText: {
+    flex: 1, fontSize: 11, color: C.text, lineHeight: 14,
+  },
+  commentName: {
+    fontWeight: '600', color: C.text,
+  },
+  commentSnippet: {
+    color: C.textLight,
+  },
+  commentMedia: {
+    color: C.primary, fontWeight: '500',
+  },
+
+  // Card footer (+N more)
+  cardFooter: {
+    flexDirection: 'row', alignItems: 'center',
+    marginTop: 2,
+  },
+  moreCountLabel: {
+    fontSize: 12, fontWeight: '700', color: C.primary,
+  },
+
+  // Big + button on right side of card
+  addButton: {
+    width: 38, height: 38, borderRadius: 19,
+    backgroundColor: C.primary,
+    alignItems: 'center', justifyContent: 'center',
+    marginLeft: 4,
+  },
+
+  // Empty state
+  emptyState: {
+    flex: 1, alignItems: 'center', justifyContent: 'center', padding: 32, gap: 12,
+  },
+  emptyTitle: { fontSize: 18, fontWeight: '600', color: C.text },
+  emptySubtitle: { fontSize: 14, color: C.textLight, textAlign: 'center' },
+  createFirstBtn: {
+    flexDirection: 'row', alignItems: 'center', gap: 6,
+    backgroundColor: C.primary, paddingHorizontal: 16, paddingVertical: 10, borderRadius: 20,
+    marginTop: 8,
+  },
+  createFirstBtnText: { fontSize: 14, fontWeight: '600', color: '#FFF' },
+
+  // FAB
+  fab: {
+    position: 'absolute',
+    right: 16,
+    bottom: 24,
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    backgroundColor: C.primary,
+    justifyContent: 'center',
+    alignItems: 'center',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.25,
+    shadowRadius: 8,
+    elevation: 6,
+  },
 });
