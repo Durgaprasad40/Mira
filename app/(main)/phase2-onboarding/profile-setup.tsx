@@ -13,7 +13,7 @@
  * All Edit buttons → navigate to profile-edit (Step 2.5)
  * Blur consistency: uses blurMyPhoto from store
  */
-import React, { useState, useMemo, useCallback } from 'react';
+import React, { useState, useMemo, useCallback, useRef } from 'react';
 import {
   View,
   Text,
@@ -122,6 +122,9 @@ export default function Phase2Review() {
   // Preview state
   const [previewIndex, setPreviewIndex] = useState<number | null>(null);
 
+  // Navigation guard: prevent double-tap on complete
+  const isCompletingRef = useRef(false);
+
   // Computed values
   const photoCount = selectedPhotoUrls.length;
 
@@ -165,6 +168,8 @@ export default function Phase2Review() {
   // Handle completion
   const handleComplete = useCallback(() => {
     if (!canComplete) return;
+    if (isCompletingRef.current) return; // Prevent double-tap
+    isCompletingRef.current = true;
 
     // Call completeSetup - this sets isSetupComplete + phase2OnboardingCompleted permanently
     completeSetup();

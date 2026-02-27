@@ -13,7 +13,7 @@
  * - Desire input
  * - Photo editing tools (replace/delete/main/blur)
  */
-import React, { useState, useCallback, useMemo, useEffect } from 'react';
+import React, { useState, useCallback, useMemo, useEffect, useRef } from 'react';
 import {
   View,
   Text,
@@ -73,8 +73,13 @@ export default function Phase2PhotoSelect() {
   const phase2PhotosConfirmed = usePrivateProfileStore((s) => s.phase2PhotosConfirmed);
   const _hasHydrated = usePrivateProfileStore((s) => s._hasHydrated);
 
+  // Single-fire redirect guard
+  const didRedirectRef = useRef(false);
+
   useEffect(() => {
+    if (didRedirectRef.current) return;
     if (_hasHydrated && phase2PhotosConfirmed) {
+      didRedirectRef.current = true;
       // Already confirmed, redirect to profile-edit
       router.replace('/(main)/phase2-onboarding/profile-edit' as any);
     }

@@ -213,6 +213,7 @@ export default function PrivateLayout() {
     if (!onboardingComplete) {
       didRedirectRef.current = true;
       requestAnimationFrame(() => {
+        if (!mountedRef.current) return; // Guard against unmount during frame delay
         router.replace('/(main)/phase2-onboarding' as any);
       });
     }

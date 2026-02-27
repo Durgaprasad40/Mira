@@ -7,7 +7,7 @@
  *
  * 18+ check already done by PrivateConsentGate in _layout.tsx
  */
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import {
   View,
   Text,
@@ -233,11 +233,16 @@ export default function Phase2OnboardingTerms() {
   const [screenshotChecked, setScreenshotChecked] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
 
+  // Navigation guard: prevent double-tap on X button
+  const isExitingRef = useRef(false);
+
   const setAcceptedTermsAt = usePrivateProfileStore((s) => s.setAcceptedTermsAt);
   const importPhase1Data = usePrivateProfileStore((s) => s.importPhase1Data);
 
   // Handle X/Cancel button - explicit exit from Phase-2 onboarding
   const handleExitOnboarding = () => {
+    if (isExitingRef.current) return; // Prevent double-tap
+    isExitingRef.current = true;
     if (__DEV__) {
       console.log("[P2 EXIT] pressed X -> routing to Phase-1 Discover");
     }
