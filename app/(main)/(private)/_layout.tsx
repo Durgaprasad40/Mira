@@ -38,6 +38,8 @@ export default function PrivateLayout() {
   const insets = useSafeAreaInsets();
   const ageConfirmed18Plus = useIncognitoStore((s) => s.ageConfirmed18Plus);
   const acceptPrivateTerms = useIncognitoStore((s) => s.acceptPrivateTerms);
+  // H-001/C-001 FIX: Wait for incognito store hydration before checking consent
+  const incognitoHydrated = useIncognitoStore((s) => s._hasHydrated);
   const userId = useAuthStore((s) => s.userId);
 
   // Get the parent (main) stack navigator — beforeRemove fires here
@@ -183,7 +185,17 @@ export default function PrivateLayout() {
     !isDemoMode && userId ? { userId: userId as any } : 'skip'
   );
 
-  // Consent gate
+  // H-001/C-001 FIX: Wait for incognito store hydration before checking consent
+  // Prevents showing consent gate to already-consented users on cold start
+  if (!incognitoHydrated) {
+    return (
+      <View style={[styles.container, { paddingTop: insets.top, alignItems: 'center', justifyContent: 'center' }]}>
+        <ActivityIndicator size="large" color={C.primary} />
+      </View>
+    );
+  }
+
+  // Consent gate (only checked AFTER hydration)
   if (!ageConfirmed18Plus) {
     return <PrivateConsentGate onAccept={acceptPrivateTerms} />;
   }

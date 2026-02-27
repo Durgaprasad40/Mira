@@ -13,6 +13,10 @@ interface IncognitoState {
   ageConfirmedAt: number | null;
   acceptPrivateTerms: () => void;
   resetPrivateTerms: () => void;
+
+  // H-001/C-001 FIX: Hydration tracking to prevent reading stale defaults
+  _hasHydrated: boolean;
+  setHasHydrated: (hydrated: boolean) => void;
 }
 
 export const useIncognitoStore = create<IncognitoState>()(
@@ -28,6 +32,10 @@ export const useIncognitoStore = create<IncognitoState>()(
         set({ ageConfirmed18Plus: true, ageConfirmedAt: Date.now() }),
       resetPrivateTerms: () =>
         set({ ageConfirmed18Plus: false, ageConfirmedAt: null }),
+
+      // H-001/C-001 FIX: Hydration state
+      _hasHydrated: false,
+      setHasHydrated: (hydrated) => set({ _hasHydrated: hydrated }),
     }),
     {
       name: 'incognito-store',
@@ -35,7 +43,16 @@ export const useIncognitoStore = create<IncognitoState>()(
       partialize: (state) => ({
         ageConfirmed18Plus: state.ageConfirmed18Plus,
         ageConfirmedAt: state.ageConfirmedAt,
+        // NOTE: _hasHydrated is NOT persisted - it's runtime-only
       }),
+      // H-001/C-001 FIX: Set hydrated flag after rehydration (success or error)
+      onRehydrateStorage: () => (state, error) => {
+        // Always mark hydrated, even on error, to avoid permanent soft-lock
+        state?.setHasHydrated(true);
+        if (__DEV__ && error) {
+          console.warn('[incognitoStore] Rehydration error:', error);
+        }
+      },
     },
   ),
 );
