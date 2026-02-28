@@ -103,6 +103,9 @@ export function UnifiedAnswerComposer({
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const autoStopTriggeredRef = useRef(false);
 
+  // Extract prompt type for stable dependency (avoids fragile optional chaining in dep array)
+  const promptType = prompt?.type ?? null;
+
   // Reset state when modal opens
   useEffect(() => {
     if (visible) {
@@ -117,7 +120,7 @@ export function UnifiedAnswerComposer({
       setFullscreenMedia(null);
       setShowMediaCamera(false);
       console.log('[T/D COMPOSER] open', {
-        mode: prompt?.type,
+        mode: promptType,
         hasExistingAnswer: !!initialText || !!initialAttachment,
         attachmentKind: initialAttachment?.kind ?? 'none',
         identityMode: existingIdentityMode ?? 'anonymous',
@@ -125,7 +128,7 @@ export function UnifiedAnswerComposer({
         hasText: !!(initialText && initialText.length > 0),
       });
     }
-  }, [visible, initialText, initialAttachment, existingIdentityMode, prompt?.type]);
+  }, [visible, initialText, initialAttachment, existingIdentityMode, promptType]);
 
   // Cleanup on unmount
   useEffect(() => {
