@@ -79,6 +79,9 @@ export default function PromptThreadScreen() {
   const setReaction = useMutation(api.truthDare.setAnswerReaction);
   const reportAnswer = useMutation(api.truthDare.reportAnswer);
   const deleteAnswer = useMutation(api.truthDare.deleteMyAnswer);
+  // Secure media APIs (for future viewer implementation)
+  const claimAnswerMediaView = useMutation(api.truthDare.claimAnswerMediaView);
+  const finalizeAnswerMediaView = useMutation(api.truthDare.finalizeAnswerMediaView);
 
   const isLoading = threadData === undefined;
   const prompt = threadData?.prompt;
