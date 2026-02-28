@@ -119,7 +119,7 @@ export default function PromptThreadScreen() {
   const [galleryMedia, setGalleryMedia] = useState<{
     uri: string;
     type: 'photo' | 'video';
-    durationSec?: number;
+    durationMs?: number;
   } | null>(null);
   const [isSubmittingMedia, setIsSubmittingMedia] = useState(false);
 
@@ -452,13 +452,14 @@ export default function PromptThreadScreen() {
 
       const asset = result.assets[0];
       const mediaType = asset.type === 'video' ? 'video' : 'photo';
-      const durationSec = asset.duration ? Math.round(asset.duration / 1000) : undefined;
+      // asset.duration is in milliseconds - store as durationMs for consistency
+      const durationMs = asset.duration ? Math.round(asset.duration) : undefined;
 
       // Set gallery media state to show privacy sheet
       setGalleryMedia({
         uri: asset.uri,
         type: mediaType,
-        durationSec,
+        durationMs,
       });
     } catch (error) {
       Alert.alert('Error', 'Failed to open gallery. Please try again.');
@@ -487,7 +488,8 @@ export default function PromptThreadScreen() {
         userId: currentUserId,
         mediaStorageId: storageId,
         mediaMime: galleryMedia.type === 'video' ? 'video/mp4' : 'image/jpeg',
-        durationSec: galleryMedia.durationSec,
+        // Convert durationMs to durationSec for API (backend expects seconds)
+        durationSec: galleryMedia.durationMs ? Math.ceil(galleryMedia.durationMs / 1000) : undefined,
         identityMode,
         isAnonymous: isAnon,
         visibility: 'public',
