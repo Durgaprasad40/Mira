@@ -284,7 +284,11 @@ export function UnifiedAnswerComposer({
         isFrontCamera: false, // Gallery picks are not from front camera
       });
       setMediaRemoved(false);
-      const uriPrefix = asset.uri.substring(0, Math.min(20, asset.uri.indexOf('/', 8) + 1)) || asset.uri.substring(0, 15);
+      // Extract URI prefix for logging (handle indexOf returning -1)
+      const slashIdx = asset.uri.indexOf('/', 8);
+      const uriPrefix = slashIdx === -1
+        ? asset.uri.substring(0, Math.min(15, asset.uri.length))
+        : asset.uri.substring(0, Math.min(20, slashIdx + 1));
       console.log('[T/D COMPOSER] gallery_pick', {
         kind: isVideo ? 'video' : 'photo',
         uriPrefix,
