@@ -855,10 +855,25 @@ export default defineSchema({
     // One-time view gating fields (for both owner_only and public visibility)
     viewMode: v.optional(v.union(v.literal('tap'), v.literal('hold'))),
     viewDurationSec: v.optional(v.number()), // 1-60 seconds for one-time view
+    // Secure media lifecycle: set when media is first claimed for viewing
+    mediaViewedAt: v.optional(v.number()),
+    // Secure media: set when prompt owner completes viewing (triggers deletion for ALL)
+    promptOwnerViewedAt: v.optional(v.number()),
+    // Camera metadata: true if captured from front camera (for mirroring correction)
+    isFrontCamera: v.optional(v.boolean()),
   })
     .index('by_prompt', ['promptId'])
     .index('by_user', ['userId'])
     .index('by_prompt_user', ['promptId', 'userId']),
+
+  // Truth & Dare per-user view tracking (for one-time gating before owner views)
+  todAnswerViews: defineTable({
+    answerId: v.string(),
+    viewerUserId: v.string(),
+    viewedAt: v.number(),
+  })
+    .index('by_answer', ['answerId'])
+    .index('by_answer_viewer', ['answerId', 'viewerUserId']),
 
   // Truth & Dare Answer Likes (legacy, kept for migration)
   todAnswerLikes: defineTable({

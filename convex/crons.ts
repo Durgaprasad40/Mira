@@ -17,4 +17,12 @@ crons.daily(
   internal.verification.cleanupOldVerificationPhotos
 );
 
+// ToD: Cleanup expired Truth/Dare data every 15 minutes
+// Cascade deletes expired prompts, answers, likes, connect requests, and private media
+crons.interval(
+  'cleanup-expired-tod-data',
+  { minutes: 15 },
+  internal.truthDare.cleanupExpiredTodData
+);
+
 export default crons;
