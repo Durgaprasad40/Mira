@@ -18,6 +18,7 @@ import { uploadMediaToConvex } from '@/lib/uploadUtils';
 import { getTimeAgo } from '@/lib/utils';
 import { useAuthStore } from '@/stores/authStore';
 import { usePrivateProfileStore } from '@/stores/privateProfileStore';
+import { useDemoStore } from '@/stores/demoStore';
 import type { TodPrompt, TodProfileVisibility } from '@/types';
 
 const C = INCOGNITO_COLORS;
@@ -45,7 +46,23 @@ export default function PromptThreadScreen() {
   }>();
   const { promptId, autoOpenComposer } = params;
   const userId = useAuthStore((s) => s.userId);
-  const currentUserId = userId || 'demo_user_1';
+  const demoUserId = useDemoStore((s) => s.currentDemoUserId);
+
+  // Resolve currentUserId: authStore userId → demoStore currentDemoUserId
+  const currentUserId = useMemo(() => {
+    if (userId) {
+      console.log(`[T/D] resolvedUserId source=auth valuePrefix=${userId.substring(0, 12)}...`);
+      return userId;
+    }
+    if (demoUserId) {
+      console.log(`[T/D] resolvedUserId source=demoStore valuePrefix=${demoUserId.substring(0, 12)}...`);
+      return demoUserId;
+    }
+    // Fallback: generate stable ID (should rarely happen)
+    const fallbackId = `demo_fallback_${Date.now()}`;
+    console.warn(`[T/D] resolvedUserId source=fallback (no auth or demoStore userId) valuePrefix=${fallbackId.substring(0, 12)}...`);
+    return fallbackId;
+  }, [userId, demoUserId]);
 
   // Get profile data for author identity snapshot
   const p2DisplayName = usePrivateProfileStore((s) => s.displayName);
