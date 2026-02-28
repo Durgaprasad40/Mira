@@ -36,9 +36,27 @@ function generatePhotoFilename(): string {
   return `photo_${timestamp}_${random}.jpg`;
 }
 
+/**
+ * Check if a URI is a valid persistent photo URI (not a cache URI).
+ * Returns true only if:
+ * - Starts with file://
+ * - Does NOT contain /cache/ or /Cache/
+ * - Contains /Documents/ or the known PHOTOS_DIR path
+ */
+function isValidPersistentUri(uri: string): boolean {
+  if (!uri || typeof uri !== 'string') return false;
+  if (!uri.startsWith('file://')) return false;
+  // Reject cache URIs (case-insensitive check)
+  if (uri.toLowerCase().includes('/cache/')) return false;
+  // Must be in Documents or our known photos dir
+  const isInDocuments = uri.includes('/Documents/') || uri.includes('/files/');
+  const isInPhotosDir = uri.includes('mira/photos/');
+  return isInDocuments || isInPhotosDir;
+}
+
 // Copy cache URI to persistent storage
-// Returns the persistent URI, or falls back to original if copy fails
-async function persistPhoto(cacheUri: string): Promise<string> {
+// Returns the persistent URI on success, or null on failure (NEVER returns cache URI)
+async function persistPhoto(cacheUri: string): Promise<string | null> {
   try {
     await ensurePhotosDir();
     const filename = generatePhotoFilename();
@@ -49,14 +67,22 @@ async function persistPhoto(cacheUri: string): Promise<string> {
       to: persistentUri,
     });
 
+    // Validate the result before returning
+    if (!isValidPersistentUri(persistentUri)) {
+      console.error('[PHOTO] persistPhoto: result URI failed validation:', persistentUri);
+      return null;
+    }
+
     if (__DEV__) {
       console.log('[PHOTO] persisted:', { from: cacheUri.slice(-40), to: persistentUri });
     }
 
     return persistentUri;
   } catch (error) {
-    console.error('[PHOTO] Failed to persist photo, using cache URI:', error);
-    return cacheUri;
+    // CRITICAL: Return null on failure, NOT the cache URI
+    // Returning cache URI would cause the photo to be wiped on next app start
+    console.error('[PHOTO] Failed to persist photo:', error);
+    return null;
   }
 }
 
@@ -147,23 +173,41 @@ export default function PhotoUploadScreen() {
     // ImageManipulator cache URIs are cleared on app restart
     const persistentUri = await persistPhoto(cacheUri);
 
-    // Update local preview immediately for instant feedback
-    setPreviewUri(persistentUri);
+    // FIX: If persist failed, show error and do NOT save to stores
+    // This prevents cache URIs from being saved and later wiped by migration
+    if (!persistentUri) {
+      Alert.alert(
+        'Photo Save Failed',
+        'We couldn\'t save this photo permanently. Please try again.',
+        [{ text: 'OK' }]
+      );
+      console.error('[PHOTO] processAndSetPhoto: persistPhoto returned null, not saving');
+      return;
+    }
 
-    // Set first photo slot only (preserves existing photos at other slots)
-    setPhotoAtIndex(0, persistentUri);
+    // Double-check the URI is valid before saving (belt + suspenders)
+    if (!isValidPersistentUri(persistentUri)) {
+      Alert.alert(
+        'Photo Save Failed',
+        'The saved photo path is invalid. Please try again.',
+        [{ text: 'OK' }]
+      );
+      console.error('[PHOTO] processAndSetPhoto: URI failed validation:', persistentUri);
+      return;
+    }
 
-    // DEBUG: Log final stored URI - must start with documentDirectory, NOT /cache/
+    // DEBUG: Log final stored URI validation result
     if (__DEV__) {
-      const isValidPersistent = persistentUri.includes('/Documents/') || persistentUri.includes('/files/');
-      const isStaleCache = persistentUri.includes('/cache/ImageManipulator/') || persistentUri.includes('/Cache/');
       console.log(`[PHOTO] STORED URI CHECK:`, {
         source,
         uri: persistentUri,
-        isValidPersistent,
-        isStaleCache: isStaleCache ? 'WARNING: STILL CACHE!' : 'OK',
+        isValid: true,
       });
     }
+
+    // Only save to stores after validation passes
+    setPreviewUri(persistentUri);
+    setPhotoAtIndex(0, persistentUri);
   };
 
   const pickImage = async () => {
