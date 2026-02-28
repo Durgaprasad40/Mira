@@ -138,6 +138,12 @@ export default function PromptThreadScreen() {
 
   const listRef = useRef<FlatList>(null);
 
+  // Ref to always have latest answers for callbacks (avoids stale closure)
+  const answersRef = useRef(answers);
+  useEffect(() => {
+    answersRef.current = answers;
+  }, [answers]);
+
   // Auto-open composer if requested from feed
   useEffect(() => {
     if (autoOpenComposer === 'new' && !myAnswer) {
@@ -159,8 +165,8 @@ export default function PromptThreadScreen() {
     }
     setEmojiPickerAnswerId(null);
 
-    // Find the answer to get additional context
-    const answer = answers.find((a) => a._id === answerId);
+    // Find the answer using ref to get latest data (avoids stale closure)
+    const answer = answersRef.current.find((a) => a._id === answerId);
     const answerIdPrefix = answerId.substring(0, 8);
 
     console.log('[T/D REACTION] tap', {
@@ -186,7 +192,7 @@ export default function PromptThreadScreen() {
         Alert.alert('Slow down', 'Please wait a moment before reacting again.');
       }
     }
-  }, [userId, setReaction, answers]);
+  }, [userId, setReaction]);
 
   // Handle report
   const handleReport = useCallback(async (answerId: string, authorId: string) => {
