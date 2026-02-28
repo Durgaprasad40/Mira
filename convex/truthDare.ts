@@ -1,5 +1,6 @@
 import { mutation, query, internalMutation } from './_generated/server';
 import { v } from 'convex/values';
+import { Id } from './_generated/dataModel';
 
 // 24-hour auto-delete rule (same as Confessions)
 const TWENTY_FOUR_HOURS_MS = 24 * 60 * 60 * 1000;
@@ -9,6 +10,7 @@ const RATE_LIMITS = {
   answer: { max: 10, windowMs: 60 * 1000 }, // 10 answers per minute
   reaction: { max: 30, windowMs: 60 * 1000 }, // 30 reactions per minute
   report: { max: 10, windowMs: 24 * 60 * 60 * 1000 }, // 10 reports per day
+  claim_media: { max: 20, windowMs: 60 * 1000 }, // 20 media claims per minute
 };
 
 // Report threshold for hiding
@@ -110,10 +112,21 @@ export const submitAnswer = mutation({
     durationSec: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
+    // Auth guard: require authenticated user
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) {
+      throw new Error("Unauthorized");
+    }
+    const userId = identity.subject;
+    // Validate args match identity
+    if (args.userId && args.userId !== userId) {
+      throw new Error("Unauthorized");
+    }
+
     // Enforce one answer per user per prompt
     const existing = await ctx.db
       .query('todAnswers')
-      .withIndex('by_prompt_user', (q) => q.eq('promptId', args.promptId).eq('userId', args.userId))
+      .withIndex('by_prompt_user', (q) => q.eq('promptId', args.promptId).eq('userId', userId))
       .first();
     if (existing) {
       throw new Error('You already posted for this prompt.');
@@ -121,7 +134,7 @@ export const submitAnswer = mutation({
 
     const answerId = await ctx.db.insert('todAnswers', {
       promptId: args.promptId,
-      userId: args.userId,
+      userId,
       type: args.type,
       text: args.text,
       mediaUrl: args.mediaUrl,
@@ -134,7 +147,7 @@ export const submitAnswer = mutation({
     // Increment answer count on prompt
     const prompt = await ctx.db
       .query('todPrompts')
-      .filter((q) => q.eq(q.field('_id'), args.promptId as any))
+      .filter((q) => q.eq(q.field('_id'), args.promptId as Id<'todPrompts'>))
       .first();
     if (prompt) {
       await ctx.db.patch(prompt._id, {
@@ -153,7 +166,18 @@ export const likeAnswer = mutation({
     answerId: v.string(),
     likedByUserId: v.string(),
   },
-  handler: async (ctx, { answerId, likedByUserId }) => {
+  handler: async (ctx, { answerId, likedByUserId: argsLikedByUserId }) => {
+    // Auth guard: require authenticated user
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) {
+      throw new Error("Unauthorized");
+    }
+    const likedByUserId = identity.subject;
+    // Validate args match identity
+    if (argsLikedByUserId && argsLikedByUserId !== likedByUserId) {
+      throw new Error("Unauthorized");
+    }
+
     // Check if already liked
     const existing = await ctx.db
       .query('todAnswerLikes')
@@ -170,7 +194,7 @@ export const likeAnswer = mutation({
     // Increment like count on answer
     const answer = await ctx.db
       .query('todAnswers')
-      .filter((q) => q.eq(q.field('_id'), answerId as any))
+      .filter((q) => q.eq(q.field('_id'), answerId as Id<'todAnswers'>))
       .first();
     if (answer) {
       await ctx.db.patch(answer._id, { likeCount: answer.likeCount + 1 });
@@ -178,7 +202,7 @@ export const likeAnswer = mutation({
       // Get the prompt to find owner
       const prompt = await ctx.db
         .query('todPrompts')
-        .filter((q) => q.eq(q.field('_id'), answer.promptId as any))
+        .filter((q) => q.eq(q.field('_id'), answer.promptId as Id<'todPrompts'>))
         .first();
 
       // Create connect request for prompt owner
@@ -204,7 +228,18 @@ export const unlikeAnswer = mutation({
     answerId: v.string(),
     likedByUserId: v.string(),
   },
-  handler: async (ctx, { answerId, likedByUserId }) => {
+  handler: async (ctx, { answerId, likedByUserId: argsLikedByUserId }) => {
+    // Auth guard: require authenticated user
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) {
+      throw new Error("Unauthorized");
+    }
+    const likedByUserId = identity.subject;
+    // Validate args match identity
+    if (argsLikedByUserId && argsLikedByUserId !== likedByUserId) {
+      throw new Error("Unauthorized");
+    }
+
     const existing = await ctx.db
       .query('todAnswerLikes')
       .withIndex('by_answer_user', (q) => q.eq('answerId', answerId).eq('likedByUserId', likedByUserId))
@@ -213,7 +248,7 @@ export const unlikeAnswer = mutation({
       await ctx.db.delete(existing._id);
       const answer = await ctx.db
         .query('todAnswers')
-        .filter((q) => q.eq(q.field('_id'), answerId as any))
+        .filter((q) => q.eq(q.field('_id'), answerId as Id<'todAnswers'>))
         .first();
       if (answer && answer.likeCount > 0) {
         await ctx.db.patch(answer._id, { likeCount: answer.likeCount - 1 });
@@ -305,7 +340,7 @@ export const cleanupExpiredPrompts = mutation({
       // Delete all answers for this prompt
       const answers = await ctx.db
         .query('todAnswers')
-        .withIndex('by_prompt', (q) => q.eq('promptId', prompt._id as any))
+        .withIndex('by_prompt', (q) => q.eq('promptId', prompt._id as string))
         .collect();
 
       for (const answer of answers) {
@@ -316,7 +351,7 @@ export const cleanupExpiredPrompts = mutation({
         // Delete likes for this answer
         const likes = await ctx.db
           .query('todAnswerLikes')
-          .withIndex('by_answer', (q) => q.eq('answerId', answer._id as any))
+          .withIndex('by_answer', (q) => q.eq('answerId', answer._id as string))
           .collect();
         for (const like of likes) {
           await ctx.db.delete(like._id);
@@ -324,7 +359,7 @@ export const cleanupExpiredPrompts = mutation({
         // Delete connect requests for this answer
         const connects = await ctx.db
           .query('todConnectRequests')
-          .filter((q) => q.eq(q.field('answerId'), answer._id as any))
+          .filter((q) => q.eq(q.field('answerId'), answer._id as string))
           .collect();
         for (const cr of connects) {
           await ctx.db.delete(cr._id);
@@ -345,6 +380,10 @@ export const cleanupExpiredPrompts = mutation({
 export const generateUploadUrl = mutation({
   args: {},
   handler: async (ctx) => {
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) {
+      throw new Error("Unauthorized");
+    }
     return await ctx.storage.generateUploadUrl();
   },
 });
@@ -376,7 +415,7 @@ export const submitPrivateMediaResponse = mutation({
     // Validate prompt exists
     const prompt = await ctx.db
       .query('todPrompts')
-      .filter((q) => q.eq(q.field('_id'), args.promptId as any))
+      .filter((q) => q.eq(q.field('_id'), args.promptId as Id<'todPrompts'>))
       .first();
     if (!prompt) {
       throw new Error('Prompt not found');
@@ -436,7 +475,7 @@ export const getPrivateMediaForOwner = query({
     // Get the prompt to verify ownership
     const prompt = await ctx.db
       .query('todPrompts')
-      .filter((q) => q.eq(q.field('_id'), promptId as any))
+      .filter((q) => q.eq(q.field('_id'), promptId as Id<'todPrompts'>))
       .first();
 
     if (!prompt) return [];
@@ -600,7 +639,7 @@ export const sendPrivateMediaConnect = mutation({
     // Create a connect request in todConnectRequests
     await ctx.db.insert('todConnectRequests', {
       promptId: item.promptId,
-      answerId: item._id as any, // using privateMediaId as reference
+      answerId: item._id as string, // using privateMediaId as reference
       fromUserId: fromUserId, // prompt owner
       toUserId: item.fromUserId, // responder
       status: 'pending',
@@ -726,7 +765,7 @@ export const cleanupExpiredTodData = internalMutation({
       const expires = prompt.expiresAt ?? prompt.createdAt + TWENTY_FOUR_HOURS_MS;
       if (expires > now) continue; // Not expired
 
-      const promptIdStr = prompt._id as any;
+      const promptIdStr = prompt._id as string;
 
       // 1) Delete all todPrivateMedia for this prompt
       const privateMedia = await ctx.db
@@ -756,7 +795,7 @@ export const cleanupExpiredTodData = internalMutation({
         // 2a) Delete all likes for this answer
         const likes = await ctx.db
           .query('todAnswerLikes')
-          .withIndex('by_answer', (q) => q.eq('answerId', answer._id as any))
+          .withIndex('by_answer', (q) => q.eq('answerId', answer._id as string))
           .collect();
         for (const like of likes) {
           await ctx.db.delete(like._id);
@@ -1080,7 +1119,7 @@ export const getPromptThread = query({
     // Get prompt
     const prompt = await ctx.db
       .query('todPrompts')
-      .filter((q) => q.eq(q.field('_id'), promptId as any))
+      .filter((q) => q.eq(q.field('_id'), promptId as Id<'todPrompts'>))
       .first();
 
     if (!prompt) return null;
@@ -1235,7 +1274,7 @@ export const getPromptThread = query({
 async function checkRateLimit(
   ctx: any,
   userId: string,
-  actionType: 'answer' | 'reaction' | 'report'
+  actionType: 'answer' | 'reaction' | 'report' | 'claim_media'
 ): Promise<{ allowed: boolean; remaining: number }> {
   const now = Date.now();
   const limit = RATE_LIMITS[actionType];
@@ -1305,10 +1344,21 @@ export const createOrEditAnswer = mutation({
     photoBlurMode: v.optional(v.union(v.literal('none'), v.literal('blur'))),
   },
   handler: async (ctx, args) => {
+    // Auth guard: require authenticated user
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) {
+      throw new Error("Unauthorized");
+    }
+    const userId = identity.subject;
+    // Validate args match identity
+    if (args.userId && args.userId !== userId) {
+      throw new Error("Unauthorized");
+    }
+
     // Validate prompt exists and not expired
     const prompt = await ctx.db
       .query('todPrompts')
-      .filter((q) => q.eq(q.field('_id'), args.promptId as any))
+      .filter((q) => q.eq(q.field('_id'), args.promptId as Id<'todPrompts'>))
       .first();
 
     if (!prompt) {
@@ -1322,7 +1372,7 @@ export const createOrEditAnswer = mutation({
     }
 
     // Check rate limit
-    const rateCheck = await checkRateLimit(ctx, args.userId, 'answer');
+    const rateCheck = await checkRateLimit(ctx, userId, 'answer');
     if (!rateCheck.allowed) {
       throw new Error('Rate limit exceeded. Please wait a moment before posting again.');
     }
@@ -1331,7 +1381,7 @@ export const createOrEditAnswer = mutation({
     const existing = await ctx.db
       .query('todAnswers')
       .withIndex('by_prompt_user', (q) =>
-        q.eq('promptId', args.promptId).eq('userId', args.userId)
+        q.eq('promptId', args.promptId).eq('userId', userId)
       )
       .first();
 
@@ -1384,7 +1434,7 @@ export const createOrEditAnswer = mutation({
       // CREATE new answer
       const answerId = await ctx.db.insert('todAnswers', {
         promptId: args.promptId,
-        userId: args.userId,
+        userId,
         type: args.type,
         text: args.text,
         mediaStorageId: args.mediaStorageId,
@@ -1427,11 +1477,22 @@ export const setAnswerReaction = mutation({
     userId: v.string(),
     emoji: v.string(), // pass empty string to remove reaction
   },
-  handler: async (ctx, { answerId, userId, emoji }) => {
+  handler: async (ctx, { answerId, userId: argsUserId, emoji }) => {
+    // Auth guard: require authenticated user
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) {
+      throw new Error("Unauthorized");
+    }
+    const userId = identity.subject;
+    // Validate args match identity
+    if (argsUserId && argsUserId !== userId) {
+      throw new Error("Unauthorized");
+    }
+
     // Validate answer exists
     const answer = await ctx.db
       .query('todAnswers')
-      .filter((q) => q.eq(q.field('_id'), answerId as any))
+      .filter((q) => q.eq(q.field('_id'), answerId as Id<'todAnswers'>))
       .first();
 
     if (!answer) {
@@ -1503,11 +1564,22 @@ export const reportAnswer = mutation({
     reporterId: v.string(),
     reason: v.optional(v.string()),
   },
-  handler: async (ctx, { answerId, reporterId, reason }) => {
+  handler: async (ctx, { answerId, reporterId: argsReporterId, reason }) => {
+    // Auth guard: require authenticated user
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) {
+      throw new Error("Unauthorized");
+    }
+    const reporterId = identity.subject;
+    // Validate args match identity
+    if (argsReporterId && argsReporterId !== reporterId) {
+      throw new Error("Unauthorized");
+    }
+
     // Validate answer exists
     const answer = await ctx.db
       .query('todAnswers')
-      .filter((q) => q.eq(q.field('_id'), answerId as any))
+      .filter((q) => q.eq(q.field('_id'), answerId as Id<'todAnswers'>))
       .first();
 
     if (!answer) {
@@ -1588,10 +1660,21 @@ export const deleteMyAnswer = mutation({
     answerId: v.string(),
     userId: v.string(),
   },
-  handler: async (ctx, { answerId, userId }) => {
+  handler: async (ctx, { answerId, userId: argsUserId }) => {
+    // Auth guard: require authenticated user
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) {
+      throw new Error("Unauthorized");
+    }
+    const userId = identity.subject;
+    // Validate args match identity
+    if (argsUserId && argsUserId !== userId) {
+      throw new Error("Unauthorized");
+    }
+
     const answer = await ctx.db
       .query('todAnswers')
-      .filter((q) => q.eq(q.field('_id'), answerId as any))
+      .filter((q) => q.eq(q.field('_id'), answerId as Id<'todAnswers'>))
       .first();
 
     if (!answer) {
@@ -1627,10 +1710,19 @@ export const deleteMyAnswer = mutation({
       await ctx.db.delete(r._id);
     }
 
+    // Delete all view records for this answer (cleanup todAnswerViews)
+    const views = await ctx.db
+      .query('todAnswerViews')
+      .withIndex('by_answer', (q) => q.eq('answerId', answerId))
+      .collect();
+    for (const v of views) {
+      await ctx.db.delete(v._id);
+    }
+
     // Decrement prompt answer count
     const prompt = await ctx.db
       .query('todPrompts')
-      .filter((q) => q.eq(q.field('_id'), answer.promptId as any))
+      .filter((q) => q.eq(q.field('_id'), answer.promptId as Id<'todPrompts'>))
       .first();
     if (prompt && prompt.answerCount > 0) {
       await ctx.db.patch(prompt._id, {
@@ -1643,5 +1735,249 @@ export const deleteMyAnswer = mutation({
     await ctx.db.delete(answer._id);
 
     return { success: true };
+  },
+});
+
+// ============================================================
+// SECURE ANSWER MEDIA VIEWING APIs
+// ============================================================
+
+/**
+ * Claim viewing rights for an answer's secure media.
+ * - For 'owner_only' visibility: only prompt owner can view
+ * - For 'public' visibility: anyone can view, but only once
+ * Enforces one-time viewing via todAnswerViews tracking.
+ */
+export const claimAnswerMediaView = mutation({
+  args: {
+    answerId: v.string(),
+    viewerId: v.string(),
+  },
+  handler: async (ctx, { answerId, viewerId: argsViewerId }) => {
+    // Auth guard: require authenticated user
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) {
+      throw new Error("Unauthorized");
+    }
+    const viewerId = identity.subject;
+    // Validate args match identity
+    if (argsViewerId && argsViewerId !== viewerId) {
+      throw new Error("Unauthorized");
+    }
+
+    // Rate limit check
+    const rateCheck = await checkRateLimit(ctx, viewerId, 'claim_media');
+    if (!rateCheck.allowed) {
+      throw new Error('Rate limit exceeded. Please wait a moment.');
+    }
+
+    // Get the answer
+    const answer = await ctx.db
+      .query('todAnswers')
+      .filter((q) => q.eq(q.field('_id'), answerId as Id<'todAnswers'>))
+      .first();
+
+    if (!answer) {
+      return { status: 'no_media' as const };
+    }
+
+    // Must have media
+    if (!answer.mediaStorageId) {
+      return { status: 'no_media' as const };
+    }
+
+    // Check if media was already deleted (prompt owner viewed it)
+    if (answer.promptOwnerViewedAt) {
+      return { status: 'already_deleted' as const };
+    }
+
+    // Get the prompt to check ownership
+    const prompt = await ctx.db
+      .query('todPrompts')
+      .filter((q) => q.eq(q.field('_id'), answer.promptId as Id<'todPrompts'>))
+      .first();
+
+    if (!prompt) {
+      return { status: 'no_media' as const };
+    }
+
+    const isPromptOwner = prompt.ownerUserId === viewerId;
+    const isAnswerAuthor = answer.userId === viewerId;
+
+    // Authorization check based on visibility
+    if (answer.visibility === 'owner_only') {
+      // Only prompt owner can view owner_only media
+      if (!isPromptOwner) {
+        return { status: 'not_authorized' as const };
+      }
+    }
+
+    // Determine role for frontend
+    let role: 'owner' | 'sender' | 'viewer';
+    if (isPromptOwner) {
+      role = 'owner';
+    } else if (isAnswerAuthor) {
+      role = 'sender';
+    } else {
+      role = 'viewer';
+    }
+
+    // Check if already viewed (one-time enforcement)
+    // Answer author can always re-view their own media
+    if (!isAnswerAuthor) {
+      const existingView = await ctx.db
+        .query('todAnswerViews')
+        .withIndex('by_answer_viewer', (q) =>
+          q.eq('answerId', answerId).eq('viewerUserId', viewerId)
+        )
+        .first();
+
+      if (existingView) {
+        return { status: 'already_viewed' as const };
+      }
+    }
+
+    // Record the view (for non-authors)
+    if (!isAnswerAuthor) {
+      await ctx.db.insert('todAnswerViews', {
+        answerId,
+        viewerUserId: viewerId,
+        viewedAt: Date.now(),
+      });
+    }
+
+    // Mark first claim time if not set
+    if (!answer.mediaViewedAt) {
+      await ctx.db.patch(answer._id, {
+        mediaViewedAt: Date.now(),
+      });
+    }
+
+    // Generate fresh URL via storage
+    const url = await ctx.storage.getUrl(answer.mediaStorageId);
+    if (!url) {
+      return { status: 'no_media' as const };
+    }
+
+    return {
+      status: 'ok' as const,
+      url,
+      mediaType: answer.type as 'photo' | 'video',
+      viewMode: (answer.viewMode ?? 'tap') as 'tap' | 'hold',
+      durationSec: answer.viewDurationSec ?? 10,
+      role,
+      isFrontCamera: answer.isFrontCamera ?? false,
+    };
+  },
+});
+
+/**
+ * Finalize answer media view.
+ * If prompt owner is viewing, marks media as viewed and deletes storage.
+ */
+export const finalizeAnswerMediaView = mutation({
+  args: {
+    answerId: v.string(),
+    viewerId: v.string(),
+  },
+  handler: async (ctx, { answerId, viewerId: argsViewerId }) => {
+    // Auth guard: require authenticated user
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) {
+      throw new Error("Unauthorized");
+    }
+    const viewerId = identity.subject;
+    // Validate args match identity (option b: ignore args, use identity)
+    if (argsViewerId && argsViewerId !== viewerId) {
+      throw new Error("Unauthorized");
+    }
+
+    // Rate limit
+    const rateCheck = await checkRateLimit(ctx, viewerId, 'claim_media');
+    if (!rateCheck.allowed) {
+      throw new Error('Rate limit exceeded. Please wait a moment.');
+    }
+
+    // Get the answer
+    const answer = await ctx.db
+      .query('todAnswers')
+      .filter((q) => q.eq(q.field('_id'), answerId as Id<'todAnswers'>))
+      .first();
+
+    if (!answer) {
+      return { status: 'not_found' as const };
+    }
+
+    // Get the prompt to check ownership
+    const prompt = await ctx.db
+      .query('todPrompts')
+      .filter((q) => q.eq(q.field('_id'), answer.promptId as Id<'todPrompts'>))
+      .first();
+
+    if (!prompt) {
+      return { status: 'not_found' as const };
+    }
+
+    const isPromptOwner = prompt.ownerUserId === viewerId;
+
+    // If prompt owner finalized viewing, delete media for everyone
+    if (isPromptOwner && answer.mediaStorageId && !answer.promptOwnerViewedAt) {
+      // Delete storage file
+      try {
+        await ctx.storage.delete(answer.mediaStorageId);
+      } catch {
+        // Already deleted
+      }
+
+      // Mark as viewed by owner (this locks it for everyone)
+      await ctx.db.patch(answer._id, {
+        promptOwnerViewedAt: Date.now(),
+        mediaStorageId: undefined,
+        mediaUrl: undefined,
+      });
+    }
+
+    return { status: 'ok' as const };
+  },
+});
+
+/**
+ * Get URL for voice message playback.
+ * Voice messages are NOT one-time secure - they can be replayed.
+ */
+export const getVoiceUrl = query({
+  args: {
+    answerId: v.string(),
+  },
+  handler: async (ctx, { answerId }) => {
+    // Get the answer
+    const answer = await ctx.db
+      .query('todAnswers')
+      .filter((q) => q.eq(q.field('_id'), answerId as Id<'todAnswers'>))
+      .first();
+
+    if (!answer) {
+      return { status: 'not_found' as const };
+    }
+
+    // Must be voice type
+    if (answer.type !== 'voice') {
+      return { status: 'not_voice' as const };
+    }
+
+    // Try mediaUrl first (may already be set)
+    if (answer.mediaUrl) {
+      return { status: 'ok' as const, url: answer.mediaUrl };
+    }
+
+    // Generate from storageId
+    if (answer.mediaStorageId) {
+      const url = await ctx.storage.getUrl(answer.mediaStorageId);
+      if (url) {
+        return { status: 'ok' as const, url };
+      }
+    }
+
+    return { status: 'no_media' as const };
   },
 });
