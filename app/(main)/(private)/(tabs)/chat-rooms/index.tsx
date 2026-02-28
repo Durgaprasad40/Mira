@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useMemo } from 'react';
+import React, { useState, useCallback, useMemo, useEffect, useRef } from 'react';
 import {
   View,
   Text,
@@ -15,18 +15,18 @@ import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { useQuery } from 'convex/react';
 import { api } from '@/convex/_generated/api';
+import { Id } from '@/convex/_generated/dataModel';
 import { INCOGNITO_COLORS } from '@/lib/constants';
 import { isDemoMode } from '@/hooks/useConvex';
 import {
   DEMO_CHAT_ROOMS,
-  DEMO_CHAT_ROOM_MESSAGES,
   DEMO_JOINED_ROOMS,
   DemoChatRoom,
-  getDemoMessagesForRoom,
 } from '@/lib/demoData';
 import { useChatRoomSessionStore } from '@/stores/chatRoomSessionStore';
-import { useDemoChatRoomStore } from '@/stores/demoChatRoomStore';
 import { useAuthStore } from '@/stores/authStore';
+import { useDemoDmStore, computeUnreadDmCountsByRoom } from '@/stores/demoDmStore';
+import { usePreferredChatRoomStore } from '@/stores/preferredChatRoomStore';
 
 const C = INCOGNITO_COLORS;
 
@@ -119,12 +119,45 @@ export default function ChatRoomsScreen() {
   const lastVisitedAt = useChatRoomSessionStore((s) => s.lastVisitedAt);
   const markRoomVisited = useChatRoomSessionStore((s) => s.markRoomVisited);
 
-  // Demo chat room messages for unread calculation
-  const demoRoomMessages = useDemoChatRoomStore((s) => s.rooms);
-
   // Current user ID for filtering out own messages
   const userId = useAuthStore((s) => s.userId);
   const currentUserId = userId || 'demo_user_1';
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // PREFERRED ROOM REDIRECT LOGIC
+  // If user has a preferred room, auto-redirect to it (skip homepage)
+  // ─────────────────────────────────────────────────────────────────────────────
+  const preferredRoomId = usePreferredChatRoomStore((s) => s.preferredRoomId);
+  const preferredHasHydrated = usePreferredChatRoomStore((s) => s._hasHydrated);
+  const hasRedirectedRef = useRef(false);
+
+  // Convex query for preferred room (live mode only)
+  const convexPreferredRoom = useQuery(
+    api.users.getPreferredChatRoom,
+    isDemoMode || !userId ? 'skip' : { userId: userId as Id<'users'> }
+  );
+
+  // Determine effective preferred room ID
+  const effectivePreferredRoomId = isDemoMode
+    ? preferredRoomId
+    : convexPreferredRoom?.preferredChatRoomId ?? null;
+
+  // Wait for hydration before redirecting
+  const canRedirect = isDemoMode ? preferredHasHydrated : convexPreferredRoom !== undefined;
+
+  // Auto-redirect to preferred room on mount
+  useEffect(() => {
+    if (!canRedirect || hasRedirectedRef.current) return;
+    if (effectivePreferredRoomId) {
+      hasRedirectedRef.current = true;
+      // Use replace to avoid adding homepage to stack
+      router.replace(`/(main)/(private)/(tabs)/chat-rooms/${effectivePreferredRoomId}` as any);
+    }
+  }, [canRedirect, effectivePreferredRoomId, router]);
+
+  // Phase-2: Get DM store state for per-room unread counts
+  const dmConversations = useDemoDmStore((s) => s.conversations);
+  const dmMeta = useDemoDmStore((s) => s.meta);
 
   // Convex query for live mode (skipped in demo mode)
   const convexRooms = useQuery(
@@ -135,33 +168,23 @@ export default function ChatRoomsScreen() {
   // P2 CR-010: Track loading state for Convex mode
   const isConvexLoading = !isDemoMode && convexRooms === undefined;
 
-  // Calculate unread counts per room
-  // P2 Performance: Only compute in demo mode; Convex handles unread server-side
+  // Preferred room redirect: show loading while checking
+  // If we have a preferred room and haven't redirected yet, show loading
+  const isWaitingForRedirect = !canRedirect || (effectivePreferredRoomId && !hasRedirectedRef.current);
+
+  // Phase-2: Calculate DM unread counts per room (NOT group messages)
+  // Badge shows private DM unread count for that room, not group messages
   const unreadCounts = useMemo(() => {
     // Skip computation entirely in non-demo mode
     if (!isDemoMode) return {};
 
-    const counts: Record<string, number> = {};
-    // Demo mode: count incoming messages after lastVisitedAt
-    // Iterate over ALL rooms from DEMO_CHAT_ROOMS (not just rooms with stored messages)
-    DEMO_CHAT_ROOMS.forEach((room) => {
-      const roomId = room.id;
-      // Priority: store > DEMO_CHAT_ROOM_MESSAGES > getDemoMessagesForRoom fallback
-      const messages = demoRoomMessages[roomId]
-        ?? DEMO_CHAT_ROOM_MESSAGES[roomId]
-        ?? getDemoMessagesForRoom(roomId);
-      const lastVisit = lastVisitedAt[roomId] ?? 0;
-      // Filter: incoming messages (not from current user, not system) after last visit
-      const unread = messages.filter((m) =>
-        m.createdAt > lastVisit &&
-        m.senderId !== currentUserId &&
-        m.senderId !== '' &&
-        m.type !== 'system'
-      ).length;
-      counts[roomId] = unread;
-    });
-    return counts;
-  }, [demoRoomMessages, lastVisitedAt, currentUserId]);
+    // Use the helper to compute per-room DM unread counts
+    const { byRoomId } = computeUnreadDmCountsByRoom(
+      { conversations: dmConversations, meta: dmMeta },
+      currentUserId
+    );
+    return byRoomId;
+  }, [dmConversations, dmMeta, currentUserId]);
 
   // Unified rooms list: demo or Convex
   // Filter out "English" room - users can chat in English inside Global
@@ -300,8 +323,8 @@ export default function ChatRoomsScreen() {
   const generalRooms = rooms.filter((r) => r.category === 'general');
   const languageRooms = rooms.filter((r) => r.category === 'language');
 
-  // P2 CR-010: Show loading indicator while Convex loads
-  if (isConvexLoading) {
+  // P2 CR-010: Show loading indicator while Convex loads OR while waiting for redirect
+  if (isConvexLoading || isWaitingForRedirect) {
     return (
       <View style={[styles.container, { paddingTop: insets.top }]}>
         <View style={styles.header}>
@@ -309,7 +332,7 @@ export default function ChatRoomsScreen() {
         </View>
         <View style={styles.loadingContainer}>
           <ActivityIndicator size="large" color={C.primary} />
-          <Text style={styles.loadingText}>Loading rooms...</Text>
+          <Text style={styles.loadingText}>Loading...</Text>
         </View>
       </View>
     );

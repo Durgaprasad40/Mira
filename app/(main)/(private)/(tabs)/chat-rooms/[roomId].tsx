@@ -49,7 +49,6 @@ import MessageActionsSheet from '@/components/chatroom/MessageActionsSheet';
 import UserProfilePopup from '@/components/chatroom/UserProfilePopup';
 import ViewProfileModal from '@/components/chatroom/ViewProfileModal';
 import ReportUserModal, { ReportReason } from '@/components/chatroom/ReportUserModal';
-import PrivateChatView from '@/components/chatroom/PrivateChatView';
 import AttachmentPopup from '@/components/chatroom/AttachmentPopup';
 import DoodleCanvas from '@/components/chatroom/DoodleCanvas';
 import VideoPlayerModal from '@/components/chatroom/VideoPlayerModal';
@@ -57,6 +56,8 @@ import ImagePreviewModal from '@/components/chatroom/ImagePreviewModal';
 import ActiveUsersStrip from '@/components/chatroom/ActiveUsersStrip';
 import { useDemoChatRoomStore } from '@/stores/demoChatRoomStore';
 import { useChatRoomSessionStore } from '@/stores/chatRoomSessionStore';
+import { useChatRoomDmStore } from '@/stores/chatRoomDmStore';
+import { usePreferredChatRoomStore } from '@/stores/preferredChatRoomStore';
 
 const C = INCOGNITO_COLORS;
 const MUTE_STORAGE_KEY = (roomId: string) => `@muted_room_${roomId}`;
@@ -180,6 +181,9 @@ export default function ChatRoomScreen() {
   const incrementCoins = useChatRoomSessionStore((s) => s.incrementCoins);
   const userCoinsFromStore = useChatRoomSessionStore((s) => s.coins);
 
+  // DM navigation store - for proper stack-based navigation
+  const setActiveDm = useChatRoomDmStore((s) => s.setActiveDm);
+
   // Demo mode: use local room data
   const demoRoom = roomIdStr ? DEMO_CHAT_ROOMS.find((r) => r.id === roomIdStr) : undefined;
 
@@ -198,9 +202,25 @@ export default function ChatRoomScreen() {
   // Convex mutations
   const sendMessageMutation = useMutation(api.chatRooms.sendMessage);
   const joinRoomMutation = useMutation(api.chatRooms.joinRoom);
+  const closeRoomMutation = useMutation(api.chatRooms.closeRoom);
+
+  // Phase-2: Query user's penalty status in this room
+  const userPenalty = useQuery(
+    api.chatRooms.getUserPenalty,
+    shouldSkipConvex || !authUserId
+      ? 'skip'
+      : { roomId: roomIdStr as Id<'chatRooms'>, userId: authUserId as Id<'users'> }
+  );
 
   // Unified room object
   const room = isDemoMode ? demoRoom : convexRoom;
+
+  // Phase-2: Check if current user is the room creator
+  const isRoomCreator = !isDemoMode && convexRoom?.createdBy === authUserId;
+  // Phase-2: Check if room can be closed (has expiresAt, meaning not permanent)
+  const canCloseRoom = isRoomCreator && convexRoom?.expiresAt;
+  // Phase-2: Check if user is in read-only mode
+  const isReadOnly = !isDemoMode && userPenalty !== null && userPenalty !== undefined;
 
   // ─────────────────────────────────────────────────────────────────────────
   // MOUNTED GUARD
@@ -212,7 +232,15 @@ export default function ChatRoomScreen() {
   }, []);
 
   // ─────────────────────────────────────────────────────────────────────────
-  // ENTER ROOM SESSION
+  // PREFERRED ROOM STORE (for auto-redirect on next visit)
+  // ─────────────────────────────────────────────────────────────────────────
+  const setPreferredRoom = usePreferredChatRoomStore((s) => s.setPreferredRoom);
+  const clearPreferredRoom = usePreferredChatRoomStore((s) => s.clearPreferredRoom);
+  const setPreferredRoomMutation = useMutation(api.users.setPreferredChatRoom);
+  const clearPreferredRoomMutation = useMutation(api.users.clearPreferredChatRoom);
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // ENTER ROOM SESSION + SAVE AS PREFERRED
   // ─────────────────────────────────────────────────────────────────────────
   useEffect(() => {
     if (roomIdStr) {
@@ -224,8 +252,21 @@ export default function ChatRoomScreen() {
         profilePicture: DEMO_CURRENT_USER.avatar ?? '',
       };
       enterRoom(roomIdStr, identity);
+
+      // Save as preferred room (for auto-redirect on next visit)
+      if (isDemoMode) {
+        setPreferredRoom(roomIdStr);
+      } else if (authUserId && hasValidRoomId) {
+        // Convex mode: save to server (fire-and-forget)
+        setPreferredRoomMutation({
+          userId: authUserId as Id<'users'>,
+          roomId: roomIdStr as Id<'chatRooms'>,
+        }).catch(() => {
+          // Ignore errors - preferred room is a nice-to-have
+        });
+      }
     }
-  }, [roomIdStr, enterRoom, authUserId]);
+  }, [roomIdStr, enterRoom, authUserId, hasValidRoomId, setPreferredRoom, setPreferredRoomMutation]);
 
   // ─────────────────────────────────────────────────────────────────────────
   // ANDROID BACK BUTTON → Go back to chat-rooms list (within tab stack)
@@ -388,7 +429,6 @@ export default function ChatRoomScreen() {
   const [selectedUser, setSelectedUser] = useState<DemoOnlineUser | null>(null);
   const [viewProfileUser, setViewProfileUser] = useState<DemoOnlineUser | null>(null);
   const [reportTargetUser, setReportTargetUser] = useState<DemoOnlineUser | null>(null);
-  const [directChatDM, setDirectChatDM] = useState<DemoDM | null>(null);
 
   const [videoPlayerUri, setVideoPlayerUri] = useState('');
   const [imagePreviewUri, setImagePreviewUri] = useState('');
@@ -442,8 +482,46 @@ export default function ChatRoomScreen() {
   const handleLeaveRoom = useCallback(() => {
     closeOverlay();
     exitRoom();
+
+    // Clear preferred room so user sees homepage next time
+    if (isDemoMode) {
+      clearPreferredRoom();
+    } else if (authUserId) {
+      clearPreferredRoomMutation({ userId: authUserId as Id<'users'> }).catch(() => {
+        // Ignore errors - clearing preference is best-effort
+      });
+    }
+
     router.replace('/(main)/(private)/(tabs)/chat-rooms');
-  }, [closeOverlay, exitRoom, router]);
+  }, [closeOverlay, exitRoom, router, authUserId, clearPreferredRoom, clearPreferredRoomMutation]);
+
+  // Phase-2: Close room handler (creator only)
+  const handleCloseRoom = useCallback(() => {
+    if (!canCloseRoom || !authUserId || !roomIdStr) return;
+
+    Alert.alert(
+      'Close Room',
+      'Close room? This deletes the room and all messages permanently.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Close Room',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              await closeRoomMutation({
+                roomId: roomIdStr as Id<'chatRooms'>,
+                userId: authUserId as Id<'users'>,
+              });
+              router.replace('/(main)/(private)/(tabs)/chat-rooms');
+            } catch (err: any) {
+              Alert.alert('Error', err.message || 'Failed to close room');
+            }
+          },
+        },
+      ]
+    );
+  }, [canCloseRoom, authUserId, roomIdStr, closeRoomMutation, router]);
 
   // ─────────────────────────────────────────────────────────────────────────
   // RELOAD HANDLER
@@ -657,7 +735,7 @@ export default function ChatRoomScreen() {
   }, [selectedUser]);
 
   // ─────────────────────────────────────────────────────────────────────────
-  // PRIVATE MESSAGE
+  // PRIVATE MESSAGE - Navigate to DM route (stack-based for proper back gesture)
   // ─────────────────────────────────────────────────────────────────────────
   const handlePrivateMessage = useCallback((userId: string) => {
     let existingDM = dms.find((dm) => dm.peerId === userId);
@@ -677,10 +755,13 @@ export default function ChatRoomScreen() {
       setDMs((prev) => [newDM, ...prev]);
       existingDM = newDM;
     }
-    setDirectChatDM(existingDM);
+    // Set DM in store before navigation
+    setActiveDm(existingDM, roomIdStr!);
     setSelectedUser(null);
     setOverlay('none');
-  }, [dms, selectedUser]);
+    // Navigate to DM route - this keeps chat room on stack for back gesture
+    router.push(`/(main)/(private)/(tabs)/chat-rooms/dm/${existingDM.id}` as any);
+  }, [dms, selectedUser, roomIdStr, setActiveDm, router]);
 
   // ─────────────────────────────────────────────────────────────────────────
   // REPORT
@@ -732,13 +813,6 @@ export default function ChatRoomScreen() {
     },
     []
   );
-
-  // ─────────────────────────────────────────────────────────────────────────
-  // CLOSE DIRECT CHAT
-  // ─────────────────────────────────────────────────────────────────────────
-  const handleCloseDirectChat = useCallback(() => {
-    setDirectChatDM(null);
-  }, []);
 
   // ─────────────────────────────────────────────────────────────────────────
   // RENDER MESSAGE ITEM (reuses existing components)
@@ -843,17 +917,6 @@ export default function ChatRoomScreen() {
     );
   }
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // DIRECT CHAT OVERLAY
-  // ─────────────────────────────────────────────────────────────────────────
-  if (directChatDM) {
-    return (
-      <View style={styles.container}>
-        <PrivateChatView dm={directChatDM} onBack={handleCloseDirectChat} topInset={insets.top} />
-      </View>
-    );
-  }
-
   const roomName = (room as any)?.name ?? 'Chat Room';
 
   // ═══════════════════════════════════════════════════════════════════════
@@ -873,6 +936,8 @@ export default function ChatRoomScreen() {
         profileAvatar={DEMO_CURRENT_USER.avatar}
         unreadInbox={unreadDMs}
         unseenNotifications={unseenNotifications}
+        showCloseButton={!!canCloseRoom}
+        onClosePress={handleCloseRoom}
       />
 
       {/* ─── ACTIVE USERS STRIP ─── */}
@@ -930,13 +995,21 @@ export default function ChatRoomScreen() {
             style={[styles.composerWrapper, { paddingBottom: Platform.OS === 'ios' ? insets.bottom : 0 }]}
             onLayout={(e) => setComposerHeight(e.nativeEvent.layout.height)}
           >
-            <ChatComposer
-              value={inputText}
-              onChangeText={setInputText}
-              onSend={handleSend}
-              onPlusPress={() => setOverlay('attachment')}
-              onPanelChange={handlePanelChange}
-            />
+            {/* Phase-2: Show read-only notice if user has penalty */}
+            {isReadOnly ? (
+              <View style={styles.readOnlyNotice}>
+                <Ionicons name="lock-closed" size={16} color={C.textLight} />
+                <Text style={styles.readOnlyText}>Read-only (24h)</Text>
+              </View>
+            ) : (
+              <ChatComposer
+                value={inputText}
+                onChangeText={setInputText}
+                onSend={handleSend}
+                onPlusPress={() => setOverlay('attachment')}
+                onPanelChange={handlePanelChange}
+              />
+            )}
           </View>
         </View>
       </KeyboardAvoidingView>
@@ -951,8 +1024,11 @@ export default function ChatRoomScreen() {
         dms={dms}
         onOpenChat={(dm) => {
           handleMarkDMRead(dm.id);
-          setDirectChatDM(dm);
           closeOverlay();
+          // Set DM in store before navigation
+          setActiveDm(dm, roomIdStr!);
+          // Navigate to DM route - keeps chat room on stack for back gesture
+          router.push(`/(main)/(private)/(tabs)/chat-rooms/dm/${dm.id}` as any);
         }}
         onHideDM={handleHideDM}
       />
@@ -1118,5 +1194,22 @@ const styles = StyleSheet.create({
     fontSize: 13,
     color: C.textLight,
     opacity: 0.7,
+  },
+  // Phase-2: Read-only notice styles
+  readOnlyNotice: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 14,
+    paddingHorizontal: 16,
+    gap: 8,
+    backgroundColor: C.surface,
+    borderTopWidth: 1,
+    borderTopColor: C.accent,
+  },
+  readOnlyText: {
+    fontSize: 14,
+    color: C.textLight,
+    fontWeight: '500',
   },
 });

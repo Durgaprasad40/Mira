@@ -1266,3 +1266,63 @@ export const checkIsAdmin = query({
     return { isAdmin: user?.isAdmin === true };
   },
 });
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PREFERRED CHAT ROOM
+// Auto-opens the user's preferred room when entering the Chat Rooms tab.
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Get the user's preferred chat room ID.
+ */
+export const getPreferredChatRoom = query({
+  args: {
+    userId: v.id("users"),
+  },
+  handler: async (ctx, args) => {
+    const user = await ctx.db.get(args.userId);
+    return { preferredChatRoomId: user?.preferredChatRoomId ?? null };
+  },
+});
+
+/**
+ * Set the user's preferred chat room.
+ * Called when user enters a chat room (auto-saved as preferred).
+ */
+export const setPreferredChatRoom = mutation({
+  args: {
+    userId: v.id("users"),
+    roomId: v.id("chatRooms"),
+  },
+  handler: async (ctx, args) => {
+    const user = await ctx.db.get(args.userId);
+    if (!user) {
+      throw new Error("User not found");
+    }
+    // Verify room exists
+    const room = await ctx.db.get(args.roomId);
+    if (!room) {
+      throw new Error("Room not found");
+    }
+    await ctx.db.patch(args.userId, { preferredChatRoomId: args.roomId });
+    return { success: true };
+  },
+});
+
+/**
+ * Clear the user's preferred chat room.
+ * Called when user explicitly leaves the room via "Leave Room" action.
+ */
+export const clearPreferredChatRoom = mutation({
+  args: {
+    userId: v.id("users"),
+  },
+  handler: async (ctx, args) => {
+    const user = await ctx.db.get(args.userId);
+    if (!user) {
+      throw new Error("User not found");
+    }
+    await ctx.db.patch(args.userId, { preferredChatRoomId: undefined });
+    return { success: true };
+  },
+});

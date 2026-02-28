@@ -166,6 +166,9 @@ export default defineSchema({
     isDiscoveryPaused: v.optional(v.boolean()),
     discoveryPausedUntil: v.optional(v.number()),
 
+    // Chat Rooms: Preferred room (auto-opens on tab entry)
+    preferredChatRoomId: v.optional(v.id('chatRooms')),
+
     // Usage Stats
     likesRemaining: v.number(),
     superLikesRemaining: v.number(),
@@ -353,10 +356,13 @@ export default defineSchema({
     lastMessageAt: v.optional(v.number()),
     createdAt: v.number(),
     expiresAt: v.optional(v.number()), // Only set for confession-based threads (24h after creation)
+    // Phase-2: Room this DM originated from (for per-room unread badge)
+    sourceRoomId: v.optional(v.id('chatRooms')),
   })
     .index('by_match', ['matchId'])
     .index('by_confession', ['confessionId'])
-    .index('by_last_message', ['lastMessageAt']),
+    .index('by_last_message', ['lastMessageAt'])
+    .index('by_source_room', ['sourceRoomId']),
 
   // Messages table
   messages: defineTable({
@@ -817,6 +823,7 @@ export default defineSchema({
     expiresAt: v.optional(v.number()),
     // Owner profile snapshot (immutable at creation time)
     isAnonymous: v.optional(v.boolean()), // true = hide photo/name, show only age+gender
+    photoBlurMode: v.optional(v.union(v.literal('none'), v.literal('blur'))), // 'blur' = show blurred photo
     ownerName: v.optional(v.string()),
     ownerPhotoUrl: v.optional(v.string()),
     ownerAge: v.optional(v.number()),
@@ -830,17 +837,21 @@ export default defineSchema({
   todAnswers: defineTable({
     promptId: v.string(),
     userId: v.string(),
+    // Type indicates primary content: 'text' if text-only, media type if has media
     type: v.union(v.literal('text'), v.literal('photo'), v.literal('video'), v.literal('voice')),
     text: v.optional(v.string()),
     mediaUrl: v.optional(v.string()),
     mediaStorageId: v.optional(v.id('_storage')),
+    mediaMime: v.optional(v.string()), // MIME type for media
     durationSec: v.optional(v.number()),
     likeCount: v.number(), // legacy, kept for compatibility
     createdAt: v.number(),
     editedAt: v.optional(v.number()), // timestamp when answer was last edited
     visibility: v.optional(v.union(v.literal('owner_only'), v.literal('public'))),
     isDemo: v.optional(v.boolean()),
-    isAnonymous: v.optional(v.boolean()),
+    // Identity mode: anonymous (default), no_photo, profile
+    identityMode: v.optional(v.union(v.literal('anonymous'), v.literal('no_photo'), v.literal('profile'))),
+    isAnonymous: v.optional(v.boolean()), // legacy, derived from identityMode
     userGender: v.optional(v.string()),
     profileVisibility: v.optional(v.union(v.literal('blurred'), v.literal('clear'))),
     // Author identity snapshot (stored at creation/edit time)
@@ -1053,10 +1064,13 @@ export default defineSchema({
     memberCount: v.number(),
     createdBy: v.optional(v.id('users')), // Room creator
     isDemoRoom: v.optional(v.boolean()), // Demo mode flag
+    // Phase-2: 24h room lifecycle
+    expiresAt: v.optional(v.number()), // createdAt + 24h; undefined for legacy public rooms
   })
     .index('by_slug', ['slug'])
     .index('by_last_message', ['lastMessageAt'])
-    .index('by_category', ['category']),
+    .index('by_category', ['category'])
+    .index('by_expires', ['expiresAt']),
 
   // Chat Room Members table
   chatRoomMembers: defineTable({
@@ -1085,6 +1099,19 @@ export default defineSchema({
     .index('by_room', ['roomId'])
     .index('by_room_created', ['roomId', 'createdAt'])
     .index('by_room_clientId', ['roomId', 'clientId']), // For idempotency check
+
+  // Chat Room Penalties table (Phase-2: kicked users read-only for 24h)
+  chatRoomPenalties: defineTable({
+    roomId: v.id('chatRooms'),
+    userId: v.id('users'),
+    type: v.literal('readOnly'), // Only readOnly for now; extensible later
+    kickedAt: v.number(),
+    expiresAt: v.number(), // kickedAt + 24h
+  })
+    .index('by_room', ['roomId']) // For listing all penalties in a room
+    .index('by_room_user', ['roomId', 'userId']) // For single-user penalty lookup
+    .index('by_user', ['userId'])
+    .index('by_expires', ['expiresAt']),
 
   // Filter Presets table
   filterPresets: defineTable({
