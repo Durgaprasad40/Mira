@@ -63,6 +63,25 @@ const MUTE_STORAGE_KEY = (roomId: string) => `@muted_room_${roomId}`;
 const EMPTY_MESSAGES: DemoChatMessage[] = [];
 
 // ═══════════════════════════════════════════════════════════════════════════
+// VALIDATION HELPERS (P0 fixes)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Lightweight check if a string looks like a valid Convex ID.
+ * Convex IDs are base64-like strings (alphanumeric + some symbols).
+ * This prevents crash from casting invalid strings as Id<'chatRooms'>.
+ */
+function isValidConvexId(id: string | undefined): id is string {
+  if (!id || typeof id !== 'string') return false;
+  // Convex IDs are typically 20+ chars, alphanumeric with some special chars
+  // Reject obviously invalid: empty, too short, or containing path chars
+  if (id.length < 10) return false;
+  if (id.includes('/') || id.includes('\\')) return false;
+  // Basic format check: should be mostly alphanumeric
+  return /^[a-zA-Z0-9_-]+$/.test(id);
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // HELPERS
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -141,6 +160,15 @@ export default function ChatRoomScreen() {
   const insets = useSafeAreaInsets();
 
   // ─────────────────────────────────────────────────────────────────────────
+  // P0 FIX: Normalize and validate roomId before any usage
+  // ─────────────────────────────────────────────────────────────────────────
+  // Normalize: useLocalSearchParams can return string | string[] | undefined
+  const roomIdStr = typeof roomId === 'string' ? roomId : Array.isArray(roomId) ? roomId[0] : undefined;
+  // For demo mode: any non-empty string is valid (demo rooms use simple IDs like "room_global")
+  // For Convex mode: must pass isValidConvexId check
+  const hasValidRoomId = !!roomIdStr && (isDemoMode || isValidConvexId(roomIdStr));
+
+  // ─────────────────────────────────────────────────────────────────────────
   // AUTH & SESSION
   // ─────────────────────────────────────────────────────────────────────────
   const authUserId = useAuthStore((s) => s.userId);
@@ -151,16 +179,18 @@ export default function ChatRoomScreen() {
   const userCoinsFromStore = useChatRoomSessionStore((s) => s.coins);
 
   // Demo mode: use local room data
-  const demoRoom = DEMO_CHAT_ROOMS.find((r) => r.id === roomId);
+  const demoRoom = roomIdStr ? DEMO_CHAT_ROOMS.find((r) => r.id === roomIdStr) : undefined;
 
-  // Convex queries (skipped in demo mode)
+  // Convex queries (skipped in demo mode OR if roomId is invalid)
+  // P0 FIX CR-002: Skip Convex queries if roomId is not a valid Convex ID format
+  const shouldSkipConvex = isDemoMode || !hasValidRoomId;
   const convexRoom = useQuery(
     api.chatRooms.getRoom,
-    isDemoMode ? 'skip' : { roomId: roomId as Id<'chatRooms'> }
+    shouldSkipConvex ? 'skip' : { roomId: roomIdStr as Id<'chatRooms'> }
   );
   const convexMessagesResult = useQuery(
     api.chatRooms.listMessages,
-    isDemoMode ? 'skip' : { roomId: roomId as Id<'chatRooms'>, limit: 50 }
+    shouldSkipConvex ? 'skip' : { roomId: roomIdStr as Id<'chatRooms'>, limit: 50 }
   );
 
   // Convex mutations
@@ -183,7 +213,7 @@ export default function ChatRoomScreen() {
   // ENTER ROOM SESSION
   // ─────────────────────────────────────────────────────────────────────────
   useEffect(() => {
-    if (roomId) {
+    if (roomIdStr) {
       const identity = {
         userId: isDemoMode ? DEMO_CURRENT_USER.id : (authUserId ?? 'unknown'),
         name: DEMO_CURRENT_USER.username,
@@ -191,9 +221,9 @@ export default function ChatRoomScreen() {
         gender: DEMO_CURRENT_USER.gender ?? 'Unknown',
         profilePicture: DEMO_CURRENT_USER.avatar ?? '',
       };
-      enterRoom(roomId, identity);
+      enterRoom(roomIdStr, identity);
     }
-  }, [roomId, enterRoom, authUserId]);
+  }, [roomIdStr, enterRoom, authUserId]);
 
   // ─────────────────────────────────────────────────────────────────────────
   // ANDROID BACK BUTTON → Go back to chat-rooms list (within tab stack)
@@ -258,7 +288,7 @@ export default function ChatRoomScreen() {
   const seedRoom = useDemoChatRoomStore((s) => s.seedRoom);
   const addStoreMessage = useDemoChatRoomStore((s) => s.addMessage);
   const setStoreMessages = useDemoChatRoomStore((s) => s.setMessages);
-  const demoMessages = useDemoChatRoomStore((s) => (roomId ? s.rooms[roomId] ?? EMPTY_MESSAGES : EMPTY_MESSAGES));
+  const demoMessages = useDemoChatRoomStore((s) => (roomIdStr ? s.rooms[roomIdStr] ?? EMPTY_MESSAGES : EMPTY_MESSAGES));
 
   const [pendingMessages, setPendingMessages] = useState<DemoChatMessage[]>([]);
 
@@ -301,28 +331,28 @@ export default function ChatRoomScreen() {
 
   // Seed demo room on mount
   useEffect(() => {
-    if (!isDemoMode || !roomId) return;
-    const base = getDemoMessagesForRoom(roomId);
+    if (!isDemoMode || !roomIdStr) return;
+    const base = getDemoMessagesForRoom(roomIdStr);
     const joinMsg: DemoChatMessage = {
       id: `sys_join_${DEMO_CURRENT_USER.id}_${Date.now()}`,
-      roomId,
+      roomId: roomIdStr,
       senderId: 'system',
       senderName: 'System',
       type: 'system',
       text: `${DEMO_CURRENT_USER.username} joined the room`,
       createdAt: Date.now(),
     };
-    seedRoom(roomId, [...base, joinMsg]);
-  }, [roomId, seedRoom]);
+    seedRoom(roomIdStr, [...base, joinMsg]);
+  }, [roomIdStr, seedRoom]);
 
-  // Auto-join Convex room
+  // Auto-join Convex room (skip if invalid ID)
   useEffect(() => {
-    if (isDemoMode || !roomId || !authUserId) return;
+    if (isDemoMode || !hasValidRoomId || !authUserId) return;
     joinRoomMutation({
-      roomId: roomId as Id<'chatRooms'>,
+      roomId: roomIdStr as Id<'chatRooms'>,
       userId: authUserId as Id<'users'>,
     }).catch(() => {});
-  }, [roomId, authUserId, joinRoomMutation]);
+  }, [roomIdStr, hasValidRoomId, authUserId, joinRoomMutation]);
 
   // ─────────────────────────────────────────────────────────────────────────
   // INPUT STATE
@@ -362,11 +392,11 @@ export default function ChatRoomScreen() {
   const [mutedUserIds, setMutedUserIds] = useState<Set<string>>(new Set());
 
   useEffect(() => {
-    if (!roomId) return;
-    AsyncStorage.getItem(MUTE_STORAGE_KEY(roomId)).then((val) => {
+    if (!roomIdStr) return;
+    AsyncStorage.getItem(MUTE_STORAGE_KEY(roomIdStr)).then((val) => {
       if (isMountedRef.current && val === 'true') setIsRoomMuted(true);
     });
-  }, [roomId]);
+  }, [roomIdStr]);
 
   const handleToggleMuteUser = useCallback((userId: string) => {
     setMutedUserIds((prev) => {
@@ -377,18 +407,20 @@ export default function ChatRoomScreen() {
   }, []);
 
   // Auto-clear join messages after 1 minute
+  // P0 FIX: Check isMountedRef before state update to prevent unmounted warning
   useEffect(() => {
-    if (!roomId) return;
-    const currentMsgs = useDemoChatRoomStore.getState().rooms[roomId] ?? [];
+    if (!roomIdStr) return;
+    const currentMsgs = useDemoChatRoomStore.getState().rooms[roomIdStr] ?? [];
     if (!currentMsgs.some((m) => m.id.startsWith('sys_join_'))) return;
 
     const timer = setTimeout(() => {
-      const latest = useDemoChatRoomStore.getState().rooms[roomId] ?? [];
-      setStoreMessages(roomId, latest.filter((m) => !m.id.startsWith('sys_join_')));
+      if (!isMountedRef.current) return; // P0 FIX: guard against unmounted update
+      const latest = useDemoChatRoomStore.getState().rooms[roomIdStr] ?? [];
+      setStoreMessages(roomIdStr, latest.filter((m) => !m.id.startsWith('sys_join_')));
     }, 60000);
 
     return () => clearTimeout(timer);
-  }, [roomId, setStoreMessages]);
+  }, [roomIdStr, setStoreMessages]);
 
   // ─────────────────────────────────────────────────────────────────────────
   // NAVIGATION HANDLERS
@@ -409,13 +441,13 @@ export default function ChatRoomScreen() {
   // RELOAD HANDLER
   // ─────────────────────────────────────────────────────────────────────────
   const handleReload = useCallback(() => {
-    if (!roomId) return;
-    const baseMessages = getDemoMessagesForRoom(roomId);
-    const currentMessages = useDemoChatRoomStore.getState().rooms[roomId] ?? [];
+    if (!roomIdStr) return;
+    const baseMessages = getDemoMessagesForRoom(roomIdStr);
+    const currentMessages = useDemoChatRoomStore.getState().rooms[roomIdStr] ?? [];
     const baseIds = new Set(baseMessages.map((m) => m.id));
     const userSent = currentMessages.filter((m) => !baseIds.has(m.id) && !m.id.startsWith('sys_join_'));
     const merged = [...baseMessages, ...userSent].sort((a, b) => a.createdAt - b.createdAt);
-    setStoreMessages(roomId, merged);
+    setStoreMessages(roomIdStr, merged);
 
     setDMs((prev) =>
       prev.map((dm) => {
@@ -429,36 +461,36 @@ export default function ChatRoomScreen() {
       const seenIds = new Set(prev.filter((a) => a.seen).map((a) => a.id));
       return DEMO_ANNOUNCEMENTS.map((a) => ({ ...a, seen: seenIds.has(a.id) ? true : a.seen }));
     });
-  }, [roomId, setStoreMessages]);
+  }, [roomIdStr, setStoreMessages]);
 
   // ─────────────────────────────────────────────────────────────────────────
   // SEND MESSAGE
   // ─────────────────────────────────────────────────────────────────────────
   const handleSend = useCallback(async () => {
     const trimmed = inputText.trim();
-    if (!trimmed || !roomId) return;
+    if (!trimmed || !roomIdStr) return;
 
     if (isDemoMode) {
       const newMessage: DemoChatMessage = {
         id: `cm_me_${Date.now()}`,
-        roomId,
+        roomId: roomIdStr,
         senderId: DEMO_CURRENT_USER.id,
         senderName: DEMO_CURRENT_USER.username,
         type: 'text',
         text: trimmed,
         createdAt: Date.now(),
       };
-      addStoreMessage(roomId, newMessage);
+      addStoreMessage(roomIdStr, newMessage);
       setInputText('');
       incrementCoins();
     } else {
-      if (!authUserId) return;
+      if (!authUserId || !hasValidRoomId) return;
       const clientId = generateUUID();
       const now = Date.now();
 
       const pendingMsg: DemoChatMessage = {
         id: `pending_${clientId}`,
-        roomId,
+        roomId: roomIdStr,
         senderId: authUserId,
         senderName: 'You',
         type: 'text',
@@ -470,7 +502,7 @@ export default function ChatRoomScreen() {
 
       try {
         await sendMessageMutation({
-          roomId: roomId as Id<'chatRooms'>,
+          roomId: roomIdStr as Id<'chatRooms'>,
           senderId: authUserId as Id<'users'>,
           text: trimmed,
           clientId,
@@ -482,7 +514,7 @@ export default function ChatRoomScreen() {
         throw err; // Re-throw so ChatComposer can catch and show feedback
       }
     }
-  }, [inputText, roomId, addStoreMessage, authUserId, sendMessageMutation, incrementCoins]);
+  }, [inputText, roomIdStr, hasValidRoomId, addStoreMessage, authUserId, sendMessageMutation, incrementCoins]);
 
   const handlePanelChange = useCallback((_panel: ComposerPanel) => {}, []);
 
@@ -491,13 +523,13 @@ export default function ChatRoomScreen() {
   // ─────────────────────────────────────────────────────────────────────────
   const handleSendMedia = useCallback(
     async (uri: string, mediaType: 'image' | 'video') => {
-      if (!roomId) return;
+      if (!roomIdStr) return;
       const labelMap = { image: 'Photo', video: 'Video' };
 
       if (isDemoMode) {
         const newMessage: DemoChatMessage = {
           id: `cm_me_${Date.now()}`,
-          roomId,
+          roomId: roomIdStr,
           senderId: DEMO_CURRENT_USER.id,
           senderName: DEMO_CURRENT_USER.username,
           type: mediaType,
@@ -505,14 +537,14 @@ export default function ChatRoomScreen() {
           mediaUrl: uri,
           createdAt: Date.now(),
         };
-        addStoreMessage(roomId, newMessage);
+        addStoreMessage(roomIdStr, newMessage);
         incrementCoins();
       } else {
-        if (!authUserId) return;
+        if (!authUserId || !hasValidRoomId) return;
         const clientId = generateUUID();
         try {
           await sendMessageMutation({
-            roomId: roomId as Id<'chatRooms'>,
+            roomId: roomIdStr as Id<'chatRooms'>,
             senderId: authUserId as Id<'users'>,
             imageUrl: uri,
             clientId,
@@ -523,7 +555,7 @@ export default function ChatRoomScreen() {
         }
       }
     },
-    [roomId, addStoreMessage, authUserId, sendMessageMutation, incrementCoins]
+    [roomIdStr, hasValidRoomId, addStoreMessage, authUserId, sendMessageMutation, incrementCoins]
   );
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -731,6 +763,33 @@ export default function ChatRoomScreen() {
   );
 
   const keyExtractor = useCallback((item: ListItem) => item.id, []);
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // P0 FIX: INVALID ROOM ID FALLBACK (CR-001, CR-002)
+  // ─────────────────────────────────────────────────────────────────────────
+  if (!roomIdStr) {
+    return (
+      <View style={[styles.container, { paddingTop: insets.top }]}>
+        <ChatRoomsHeader title="Invalid Room" hideLeftButton topInset={insets.top} />
+        <View style={styles.notFound}>
+          <Ionicons name="alert-circle-outline" size={48} color={C.textLight} />
+          <Text style={styles.notFoundText}>Room ID is missing</Text>
+        </View>
+      </View>
+    );
+  }
+
+  if (!isDemoMode && !isValidConvexId(roomIdStr)) {
+    return (
+      <View style={[styles.container, { paddingTop: insets.top }]}>
+        <ChatRoomsHeader title="Invalid Room" hideLeftButton topInset={insets.top} />
+        <View style={styles.notFound}>
+          <Ionicons name="alert-circle-outline" size={48} color={C.textLight} />
+          <Text style={styles.notFoundText}>Invalid Room ID</Text>
+        </View>
+      </View>
+    );
+  }
 
   // ─────────────────────────────────────────────────────────────────────────
   // NOT FOUND
@@ -949,7 +1008,7 @@ export default function ChatRoomScreen() {
         onClose={() => { closeOverlay(); setReportTargetUser(null); }}
         reportedUserId={reportTargetUser?.id || ''}
         reportedUserName={reportTargetUser?.username || ''}
-        roomId={roomId}
+        roomId={roomIdStr}
         onSubmit={handleSubmitReport}
       />
     </View>
