@@ -101,6 +101,7 @@ export function UnifiedAnswerComposer({
   const recordingRef = useRef<Audio.Recording | null>(null);
   const soundRef = useRef<Audio.Sound | null>(null);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const autoStopTriggeredRef = useRef(false);
 
   // Reset state when modal opens
   useEffect(() => {
@@ -141,17 +142,12 @@ export function UnifiedAnswerComposer({
     };
   }, []);
 
-  // Recording timer
+  // Recording timer - just increment, no side effects
   useEffect(() => {
     if (isRecording) {
+      autoStopTriggeredRef.current = false; // Reset guard when recording starts
       intervalRef.current = setInterval(() => {
-        setRecordSeconds((s) => {
-          if (s >= MAX_AUDIO_SEC - 1) {
-            stopRecording();
-            return MAX_AUDIO_SEC;
-          }
-          return s + 1;
-        });
+        setRecordSeconds((s) => s + 1);
       }, 1000);
     } else {
       if (intervalRef.current) {
@@ -163,6 +159,14 @@ export function UnifiedAnswerComposer({
       if (intervalRef.current) clearInterval(intervalRef.current);
     };
   }, [isRecording]);
+
+  // Auto-stop at max duration - separate effect to avoid side effects in state setter
+  useEffect(() => {
+    if (isRecording && recordSeconds >= MAX_AUDIO_SEC && !autoStopTriggeredRef.current) {
+      autoStopTriggeredRef.current = true;
+      stopRecording();
+    }
+  }, [isRecording, recordSeconds]);
 
   const startRecording = async () => {
     try {
