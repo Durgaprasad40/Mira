@@ -816,8 +816,21 @@ export default function ChatRoomScreen() {
   }
 
   // ─────────────────────────────────────────────────────────────────────────
-  // NOT FOUND
+  // P2 CR-009: LOADING vs NOT FOUND
+  // In Convex mode: undefined = loading, null = not found
   // ─────────────────────────────────────────────────────────────────────────
+  if (!isDemoMode && convexRoom === undefined) {
+    // Still loading from Convex - show loading state, not "not found"
+    return (
+      <View style={[styles.container, { paddingTop: insets.top }]}>
+        <ChatRoomsHeader title="Loading..." hideLeftButton topInset={insets.top} />
+        <View style={styles.notFound}>
+          <Text style={styles.notFoundText}>Loading room...</Text>
+        </View>
+      </View>
+    );
+  }
+
   if (!room) {
     return (
       <View style={[styles.container, { paddingTop: insets.top }]}>
@@ -904,6 +917,11 @@ export default function ChatRoomScreen() {
               keyboardDismissMode="interactive"
               onScroll={handleScroll}
               scrollEventThrottle={16}
+              // P2 Performance: FlatList tuning props
+              initialNumToRender={15}
+              maxToRenderPerBatch={10}
+              windowSize={10}
+              removeClippedSubviews={Platform.OS === 'android'}
             />
           )}
 

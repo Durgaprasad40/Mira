@@ -8,6 +8,7 @@ import {
   RefreshControl,
   Image,
   ImageSourcePropType,
+  ActivityIndicator,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
@@ -131,29 +132,34 @@ export default function ChatRoomsScreen() {
     isDemoMode ? 'skip' : {}
   );
 
+  // P2 CR-010: Track loading state for Convex mode
+  const isConvexLoading = !isDemoMode && convexRooms === undefined;
+
   // Calculate unread counts per room
+  // P2 Performance: Only compute in demo mode; Convex handles unread server-side
   const unreadCounts = useMemo(() => {
+    // Skip computation entirely in non-demo mode
+    if (!isDemoMode) return {};
+
     const counts: Record<string, number> = {};
-    if (isDemoMode) {
-      // Demo mode: count incoming messages after lastVisitedAt
-      // Iterate over ALL rooms from DEMO_CHAT_ROOMS (not just rooms with stored messages)
-      DEMO_CHAT_ROOMS.forEach((room) => {
-        const roomId = room.id;
-        // Priority: store > DEMO_CHAT_ROOM_MESSAGES > getDemoMessagesForRoom fallback
-        const messages = demoRoomMessages[roomId]
-          ?? DEMO_CHAT_ROOM_MESSAGES[roomId]
-          ?? getDemoMessagesForRoom(roomId);
-        const lastVisit = lastVisitedAt[roomId] ?? 0;
-        // Filter: incoming messages (not from current user, not system) after last visit
-        const unread = messages.filter((m) =>
-          m.createdAt > lastVisit &&
-          m.senderId !== currentUserId &&
-          m.senderId !== '' &&
-          m.type !== 'system'
-        ).length;
-        counts[roomId] = unread;
-      });
-    }
+    // Demo mode: count incoming messages after lastVisitedAt
+    // Iterate over ALL rooms from DEMO_CHAT_ROOMS (not just rooms with stored messages)
+    DEMO_CHAT_ROOMS.forEach((room) => {
+      const roomId = room.id;
+      // Priority: store > DEMO_CHAT_ROOM_MESSAGES > getDemoMessagesForRoom fallback
+      const messages = demoRoomMessages[roomId]
+        ?? DEMO_CHAT_ROOM_MESSAGES[roomId]
+        ?? getDemoMessagesForRoom(roomId);
+      const lastVisit = lastVisitedAt[roomId] ?? 0;
+      // Filter: incoming messages (not from current user, not system) after last visit
+      const unread = messages.filter((m) =>
+        m.createdAt > lastVisit &&
+        m.senderId !== currentUserId &&
+        m.senderId !== '' &&
+        m.type !== 'system'
+      ).length;
+      counts[roomId] = unread;
+    });
     return counts;
   }, [demoRoomMessages, lastVisitedAt, currentUserId]);
 
@@ -293,6 +299,21 @@ export default function ChatRoomsScreen() {
 
   const generalRooms = rooms.filter((r) => r.category === 'general');
   const languageRooms = rooms.filter((r) => r.category === 'language');
+
+  // P2 CR-010: Show loading indicator while Convex loads
+  if (isConvexLoading) {
+    return (
+      <View style={[styles.container, { paddingTop: insets.top }]}>
+        <View style={styles.header}>
+          <Text style={styles.headerTitle}>Chat Rooms</Text>
+        </View>
+        <View style={styles.loadingContainer}>
+          <ActivityIndicator size="large" color={C.primary} />
+          <Text style={styles.loadingText}>Loading rooms...</Text>
+        </View>
+      </View>
+    );
+  }
 
   return (
     <View style={[styles.container, { paddingTop: insets.top }]}>
@@ -481,5 +502,16 @@ const styles = StyleSheet.create({
     fontSize: 15,
     fontWeight: '600',
     color: C.primary,
+  },
+  // P2 CR-010: Loading state styles
+  loadingContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    gap: 12,
+  },
+  loadingText: {
+    fontSize: 14,
+    color: C.textLight,
   },
 });
