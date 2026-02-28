@@ -14,6 +14,9 @@ interface DemoChatRoomState {
   /** roomId → ordered message array */
   rooms: Record<string, DemoChatMessage[]>;
 
+  /** P1 CR-004: Hydration flag to prevent race conditions */
+  _hasHydrated: boolean;
+
   /**
    * Seed a room with initial messages if it hasn't been seeded yet.
    * Calling this multiple times is safe — it only writes if the key
@@ -32,6 +35,7 @@ export const useDemoChatRoomStore = create<DemoChatRoomState>()(
   persist(
     (set, get) => ({
       rooms: {},
+      _hasHydrated: false,
 
       seedRoom: (roomId, seed) => {
         if (get().rooms[roomId]) return;
@@ -60,6 +64,12 @@ export const useDemoChatRoomStore = create<DemoChatRoomState>()(
     {
       name: 'demo-chatroom-storage',
       storage: createJSONStorage(() => AsyncStorage),
+      // P1 CR-004: Set hydration flag when rehydration completes
+      onRehydrateStorage: () => (state) => {
+        if (state) {
+          useDemoChatRoomStore.setState({ _hasHydrated: true });
+        }
+      },
     },
   ),
 );

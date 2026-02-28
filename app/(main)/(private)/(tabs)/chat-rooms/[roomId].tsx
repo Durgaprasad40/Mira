@@ -118,13 +118,15 @@ type ListItem =
   | { type: 'message'; id: string; message: DemoChatMessage };
 
 // Build list items with date separators (normal order, NOT reversed)
+// P1 CR-006: Use index in date separator ID to avoid key collisions
 function buildListItems(messages: DemoChatMessage[]): ListItem[] {
   const items: ListItem[] = [];
   let lastDateLabel = '';
+  let dateIndex = 0;
   for (const msg of messages) {
     const label = formatDateLabel(msg.createdAt);
     if (label !== lastDateLabel) {
-      items.push({ type: 'date', id: `date_${msg.createdAt}`, label });
+      items.push({ type: 'date', id: `date_${dateIndex++}_${msg.createdAt}`, label });
       lastDateLabel = label;
     }
     items.push({ type: 'message', id: msg.id, message: msg });
@@ -289,6 +291,8 @@ export default function ChatRoomScreen() {
   const addStoreMessage = useDemoChatRoomStore((s) => s.addMessage);
   const setStoreMessages = useDemoChatRoomStore((s) => s.setMessages);
   const demoMessages = useDemoChatRoomStore((s) => (roomIdStr ? s.rooms[roomIdStr] ?? EMPTY_MESSAGES : EMPTY_MESSAGES));
+  // P1 CR-004: Track hydration state to prevent seeding before store is ready
+  const storeHasHydrated = useDemoChatRoomStore((s) => s._hasHydrated);
 
   const [pendingMessages, setPendingMessages] = useState<DemoChatMessage[]>([]);
 
@@ -330,8 +334,10 @@ export default function ChatRoomScreen() {
   }, [messages.length, scrollToBottom]);
 
   // Seed demo room on mount
+  // P1 CR-004: Wait for store hydration before seeding to prevent race conditions
+  // P1 CR-005: Sort messages after merging to ensure correct order
   useEffect(() => {
-    if (!isDemoMode || !roomIdStr) return;
+    if (!isDemoMode || !roomIdStr || !storeHasHydrated) return;
     const base = getDemoMessagesForRoom(roomIdStr);
     const joinMsg: DemoChatMessage = {
       id: `sys_join_${DEMO_CURRENT_USER.id}_${Date.now()}`,
@@ -342,8 +348,10 @@ export default function ChatRoomScreen() {
       text: `${DEMO_CURRENT_USER.username} joined the room`,
       createdAt: Date.now(),
     };
-    seedRoom(roomIdStr, [...base, joinMsg]);
-  }, [roomIdStr, seedRoom]);
+    // Sort by createdAt to ensure correct ordering regardless of merge order
+    const sorted = [...base, joinMsg].sort((a, b) => a.createdAt - b.createdAt);
+    seedRoom(roomIdStr, sorted);
+  }, [roomIdStr, seedRoom, storeHasHydrated]);
 
   // Auto-join Convex room (skip if invalid ID)
   useEffect(() => {
@@ -465,6 +473,7 @@ export default function ChatRoomScreen() {
 
   // ─────────────────────────────────────────────────────────────────────────
   // SEND MESSAGE
+  // P1 CR-003: Use try/finally to guarantee pending message cleanup
   // ─────────────────────────────────────────────────────────────────────────
   const handleSend = useCallback(async () => {
     const trimmed = inputText.trim();
@@ -487,9 +496,10 @@ export default function ChatRoomScreen() {
       if (!authUserId || !hasValidRoomId) return;
       const clientId = generateUUID();
       const now = Date.now();
+      const pendingId = `pending_${clientId}`;
 
       const pendingMsg: DemoChatMessage = {
-        id: `pending_${clientId}`,
+        id: pendingId,
         roomId: roomIdStr,
         senderId: authUserId,
         senderName: 'You',
@@ -500,6 +510,7 @@ export default function ChatRoomScreen() {
       setPendingMessages((prev) => [...prev, pendingMsg]);
       setInputText('');
 
+      let success = false;
       try {
         await sendMessageMutation({
           roomId: roomIdStr as Id<'chatRooms'>,
@@ -507,11 +518,13 @@ export default function ChatRoomScreen() {
           text: trimmed,
           clientId,
         });
-        setPendingMessages((prev) => prev.filter((m) => m.id !== `pending_${clientId}`));
+        success = true;
+      } finally {
+        // P1 CR-003: Always remove pending message, regardless of success/failure
+        setPendingMessages((prev) => prev.filter((m) => m.id !== pendingId));
+      }
+      if (success) {
         incrementCoins();
-      } catch (err: any) {
-        setPendingMessages((prev) => prev.filter((m) => m.id !== `pending_${clientId}`));
-        throw err; // Re-throw so ChatComposer can catch and show feedback
       }
     }
   }, [inputText, roomIdStr, hasValidRoomId, addStoreMessage, authUserId, sendMessageMutation, incrementCoins]);
@@ -677,8 +690,10 @@ export default function ChatRoomScreen() {
     setOverlay('report');
   }, [selectedUser]);
 
+  // P1 CR-007: Robust AsyncStorage JSON.parse handling
   const handleSubmitReport = useCallback(
     (data: { reportedUserId: string; reason: ReportReason; details?: string; roomId?: string }) => {
+      const REPORTS_KEY = '@chat_room_reports';
       const reportEntry = {
         reporterId: DEMO_CURRENT_USER.id,
         reportedUserId: data.reportedUserId,
@@ -688,18 +703,27 @@ export default function ChatRoomScreen() {
         createdAt: Date.now(),
       };
 
-      AsyncStorage.getItem('@chat_room_reports')
+      AsyncStorage.getItem(REPORTS_KEY)
         .then((raw) => {
-          try {
-            const reports = raw ? JSON.parse(raw) : [];
-            reports.push(reportEntry);
-            AsyncStorage.setItem('@chat_room_reports', JSON.stringify(reports));
-          } catch {
-            AsyncStorage.setItem('@chat_room_reports', JSON.stringify([reportEntry]));
+          let reports: unknown[] = [];
+          if (raw) {
+            try {
+              const parsed = JSON.parse(raw);
+              // P1 CR-007: Validate parsed data is an array
+              reports = Array.isArray(parsed) ? parsed : [];
+            } catch {
+              // P1 CR-007: Clear corrupted storage key and start fresh
+              console.warn('[ChatRoom] Corrupted reports storage, resetting');
+              AsyncStorage.removeItem(REPORTS_KEY).catch(() => {});
+              reports = [];
+            }
           }
+          reports.push(reportEntry);
+          AsyncStorage.setItem(REPORTS_KEY, JSON.stringify(reports)).catch(() => {});
         })
         .catch(() => {
-          // ignore storage read failure; do not crash
+          // Storage read failure; try to save just this report
+          AsyncStorage.setItem(REPORTS_KEY, JSON.stringify([reportEntry])).catch(() => {});
         });
 
       setOverlay('none');
