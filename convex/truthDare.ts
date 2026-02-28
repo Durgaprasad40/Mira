@@ -112,10 +112,21 @@ export const submitAnswer = mutation({
     durationSec: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
+    // Auth guard: require authenticated user
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) {
+      throw new Error("Unauthorized");
+    }
+    const userId = identity.subject;
+    // Validate args match identity
+    if (args.userId && args.userId !== userId) {
+      throw new Error("Unauthorized");
+    }
+
     // Enforce one answer per user per prompt
     const existing = await ctx.db
       .query('todAnswers')
-      .withIndex('by_prompt_user', (q) => q.eq('promptId', args.promptId).eq('userId', args.userId))
+      .withIndex('by_prompt_user', (q) => q.eq('promptId', args.promptId).eq('userId', userId))
       .first();
     if (existing) {
       throw new Error('You already posted for this prompt.');
@@ -123,7 +134,7 @@ export const submitAnswer = mutation({
 
     const answerId = await ctx.db.insert('todAnswers', {
       promptId: args.promptId,
-      userId: args.userId,
+      userId,
       type: args.type,
       text: args.text,
       mediaUrl: args.mediaUrl,
@@ -155,7 +166,18 @@ export const likeAnswer = mutation({
     answerId: v.string(),
     likedByUserId: v.string(),
   },
-  handler: async (ctx, { answerId, likedByUserId }) => {
+  handler: async (ctx, { answerId, likedByUserId: argsLikedByUserId }) => {
+    // Auth guard: require authenticated user
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) {
+      throw new Error("Unauthorized");
+    }
+    const likedByUserId = identity.subject;
+    // Validate args match identity
+    if (argsLikedByUserId && argsLikedByUserId !== likedByUserId) {
+      throw new Error("Unauthorized");
+    }
+
     // Check if already liked
     const existing = await ctx.db
       .query('todAnswerLikes')
@@ -206,7 +228,18 @@ export const unlikeAnswer = mutation({
     answerId: v.string(),
     likedByUserId: v.string(),
   },
-  handler: async (ctx, { answerId, likedByUserId }) => {
+  handler: async (ctx, { answerId, likedByUserId: argsLikedByUserId }) => {
+    // Auth guard: require authenticated user
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) {
+      throw new Error("Unauthorized");
+    }
+    const likedByUserId = identity.subject;
+    // Validate args match identity
+    if (argsLikedByUserId && argsLikedByUserId !== likedByUserId) {
+      throw new Error("Unauthorized");
+    }
+
     const existing = await ctx.db
       .query('todAnswerLikes')
       .withIndex('by_answer_user', (q) => q.eq('answerId', answerId).eq('likedByUserId', likedByUserId))
@@ -1311,6 +1344,17 @@ export const createOrEditAnswer = mutation({
     photoBlurMode: v.optional(v.union(v.literal('none'), v.literal('blur'))),
   },
   handler: async (ctx, args) => {
+    // Auth guard: require authenticated user
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) {
+      throw new Error("Unauthorized");
+    }
+    const userId = identity.subject;
+    // Validate args match identity
+    if (args.userId && args.userId !== userId) {
+      throw new Error("Unauthorized");
+    }
+
     // Validate prompt exists and not expired
     const prompt = await ctx.db
       .query('todPrompts')
@@ -1328,7 +1372,7 @@ export const createOrEditAnswer = mutation({
     }
 
     // Check rate limit
-    const rateCheck = await checkRateLimit(ctx, args.userId, 'answer');
+    const rateCheck = await checkRateLimit(ctx, userId, 'answer');
     if (!rateCheck.allowed) {
       throw new Error('Rate limit exceeded. Please wait a moment before posting again.');
     }
@@ -1337,7 +1381,7 @@ export const createOrEditAnswer = mutation({
     const existing = await ctx.db
       .query('todAnswers')
       .withIndex('by_prompt_user', (q) =>
-        q.eq('promptId', args.promptId).eq('userId', args.userId)
+        q.eq('promptId', args.promptId).eq('userId', userId)
       )
       .first();
 
@@ -1390,7 +1434,7 @@ export const createOrEditAnswer = mutation({
       // CREATE new answer
       const answerId = await ctx.db.insert('todAnswers', {
         promptId: args.promptId,
-        userId: args.userId,
+        userId,
         type: args.type,
         text: args.text,
         mediaStorageId: args.mediaStorageId,
@@ -1433,7 +1477,18 @@ export const setAnswerReaction = mutation({
     userId: v.string(),
     emoji: v.string(), // pass empty string to remove reaction
   },
-  handler: async (ctx, { answerId, userId, emoji }) => {
+  handler: async (ctx, { answerId, userId: argsUserId, emoji }) => {
+    // Auth guard: require authenticated user
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) {
+      throw new Error("Unauthorized");
+    }
+    const userId = identity.subject;
+    // Validate args match identity
+    if (argsUserId && argsUserId !== userId) {
+      throw new Error("Unauthorized");
+    }
+
     // Validate answer exists
     const answer = await ctx.db
       .query('todAnswers')
@@ -1509,7 +1564,18 @@ export const reportAnswer = mutation({
     reporterId: v.string(),
     reason: v.optional(v.string()),
   },
-  handler: async (ctx, { answerId, reporterId, reason }) => {
+  handler: async (ctx, { answerId, reporterId: argsReporterId, reason }) => {
+    // Auth guard: require authenticated user
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) {
+      throw new Error("Unauthorized");
+    }
+    const reporterId = identity.subject;
+    // Validate args match identity
+    if (argsReporterId && argsReporterId !== reporterId) {
+      throw new Error("Unauthorized");
+    }
+
     // Validate answer exists
     const answer = await ctx.db
       .query('todAnswers')
@@ -1594,7 +1660,18 @@ export const deleteMyAnswer = mutation({
     answerId: v.string(),
     userId: v.string(),
   },
-  handler: async (ctx, { answerId, userId }) => {
+  handler: async (ctx, { answerId, userId: argsUserId }) => {
+    // Auth guard: require authenticated user
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) {
+      throw new Error("Unauthorized");
+    }
+    const userId = identity.subject;
+    // Validate args match identity
+    if (argsUserId && argsUserId !== userId) {
+      throw new Error("Unauthorized");
+    }
+
     const answer = await ctx.db
       .query('todAnswers')
       .filter((q) => q.eq(q.field('_id'), answerId as Id<'todAnswers'>))
@@ -1676,7 +1753,18 @@ export const claimAnswerMediaView = mutation({
     answerId: v.string(),
     viewerId: v.string(),
   },
-  handler: async (ctx, { answerId, viewerId }) => {
+  handler: async (ctx, { answerId, viewerId: argsViewerId }) => {
+    // Auth guard: require authenticated user
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) {
+      throw new Error("Unauthorized");
+    }
+    const viewerId = identity.subject;
+    // Validate args match identity
+    if (argsViewerId && argsViewerId !== viewerId) {
+      throw new Error("Unauthorized");
+    }
+
     // Rate limit check
     const rateCheck = await checkRateLimit(ctx, viewerId, 'claim_media');
     if (!rateCheck.allowed) {
@@ -1792,7 +1880,24 @@ export const finalizeAnswerMediaView = mutation({
     answerId: v.string(),
     viewerId: v.string(),
   },
-  handler: async (ctx, { answerId, viewerId }) => {
+  handler: async (ctx, { answerId, viewerId: argsViewerId }) => {
+    // Auth guard: require authenticated user
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) {
+      throw new Error("Unauthorized");
+    }
+    const viewerId = identity.subject;
+    // Validate args match identity (option b: ignore args, use identity)
+    if (argsViewerId && argsViewerId !== viewerId) {
+      throw new Error("Unauthorized");
+    }
+
+    // Rate limit
+    const rateCheck = await checkRateLimit(ctx, viewerId, 'claim_media');
+    if (!rateCheck.allowed) {
+      throw new Error('Rate limit exceeded. Please wait a moment.');
+    }
+
     // Get the answer
     const answer = await ctx.db
       .query('todAnswers')
