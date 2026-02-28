@@ -11,10 +11,10 @@ import { Ionicons } from '@expo/vector-icons';
 import { useQuery, useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { INCOGNITO_COLORS } from '@/lib/constants';
-import { TextComposerModal } from '@/components/truthdare/TextComposerModal';
-import { VoiceComposer } from '@/components/truthdare/VoiceComposer';
+import { UnifiedAnswerComposer, IdentityMode, Attachment } from '@/components/truthdare/UnifiedAnswerComposer';
+import { TodVoicePlayer } from '@/components/truthdare/TodVoicePlayer';
 import { CameraPhotoSheet, CameraPhotoOptions } from '@/components/chat/CameraPhotoSheet';
-import { uploadPhotoToConvex } from '@/lib/uploadUtils';
+import { uploadMediaToConvex } from '@/lib/uploadUtils';
 import { getTimeAgo } from '@/lib/utils';
 import { useAuthStore } from '@/stores/authStore';
 import { usePrivateProfileStore } from '@/stores/privateProfileStore';
@@ -67,6 +67,7 @@ export default function PromptThreadScreen() {
     };
   }, [p2DisplayName, p2Age, p2Gender, p2PhotoUrls]);
 
+
   // Fetch thread data from Convex
   const threadData = useQuery(
     api.truthDare.getPromptThread,
@@ -75,7 +76,7 @@ export default function PromptThreadScreen() {
 
   // Mutations
   const createOrEditAnswer = useMutation(api.truthDare.createOrEditAnswer);
-  const generateUploadUrl = useMutation(api.photos.generateUploadUrl);
+  const generateUploadUrl = useMutation(api.truthDare.generateUploadUrl);
   const setReaction = useMutation(api.truthDare.setAnswerReaction);
   const reportAnswer = useMutation(api.truthDare.reportAnswer);
   const deleteAnswer = useMutation(api.truthDare.deleteMyAnswer);
@@ -93,14 +94,11 @@ export default function PromptThreadScreen() {
     return answers.find((a) => a.isOwnAnswer);
   }, [answers]);
 
-  // Composer state
-  const [showTextComposer, setShowTextComposer] = useState(false);
-  const [showVoiceComposer, setShowVoiceComposer] = useState(false);
-  const [showAnswerMenu, setShowAnswerMenu] = useState(false);
-  // Inline + menu for editing own comment
-  const [showInlineMenu, setShowInlineMenu] = useState(false);
+  // Composer state - unified composer for text + optional media
+  const [showUnifiedComposer, setShowUnifiedComposer] = useState(false);
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
-  // Gallery media state for privacy sheet
+  // Gallery media state for privacy sheet (camera flow)
   const [galleryMedia, setGalleryMedia] = useState<{
     uri: string;
     type: 'photo' | 'video';
@@ -111,15 +109,24 @@ export default function PromptThreadScreen() {
   // Emoji picker state (per answer)
   const [emojiPickerAnswerId, setEmojiPickerAnswerId] = useState<string | null>(null);
 
+  // Media viewer state for tap-to-view
+  const [viewingMedia, setViewingMedia] = useState<{
+    answerId: string;
+    mediaUrl: string;
+    mediaType: 'photo' | 'video';
+    isOwnAnswer: boolean;
+    hasViewed?: boolean;
+    isFrontCamera?: boolean;
+  } | null>(null);
+
   const listRef = useRef<FlatList>(null);
 
   // Auto-open composer if requested from feed
   useEffect(() => {
     if (autoOpenComposer === 'new' && !myAnswer) {
-      setShowAnswerMenu(true);
+      setShowUnifiedComposer(true);
     } else if (autoOpenComposer === 'edit' && myAnswer) {
-      // For now, show text composer for editing - could expand later
-      setShowTextComposer(true);
+      setShowUnifiedComposer(true);
     }
   }, [autoOpenComposer, myAnswer]);
 
@@ -129,16 +136,40 @@ export default function PromptThreadScreen() {
 
   // Handle emoji reaction
   const handleReact = useCallback(async (answerId: string, emoji: string) => {
-    if (!userId) return;
+    if (!userId) {
+      console.log('[T/D REACTION] skip - no userId');
+      return;
+    }
     setEmojiPickerAnswerId(null);
+
+    // Find the answer to get additional context
+    const answer = answers.find((a) => a._id === answerId);
+    const answerIdPrefix = answerId.substring(0, 8);
+
+    console.log('[T/D REACTION] tap', {
+      answerIdPrefix,
+      emoji: emoji || '(remove)',
+      currentCount: answer?.totalReactionCount ?? 0,
+      isOwnAnswer: answer?.isOwnAnswer ?? false,
+      hasAuth: !!userId,
+    });
+
     try {
-      await setReaction({ answerId, userId, emoji });
+      const result = await setReaction({ answerId, userId, emoji });
+      // Handle server returning ok: false (no throw, graceful fail)
+      if (result && typeof result === 'object' && 'ok' in result && !result.ok) {
+        console.warn('[T/D REACTION] failed', { reason: (result as any).reason });
+      } else {
+        console.log('[T/D REACTION] success', { action: (result as any)?.action });
+      }
     } catch (error: any) {
+      // Graceful handling - don't crash UI
+      console.warn('[T/D REACTION] error', { message: error?.message?.substring(0, 50) });
       if (error.message?.includes('Rate limit')) {
         Alert.alert('Slow down', 'Please wait a moment before reacting again.');
       }
     }
-  }, [userId, setReaction]);
+  }, [userId, setReaction, answers]);
 
   // Handle report
   const handleReport = useCallback(async (answerId: string, authorId: string) => {
@@ -202,52 +233,180 @@ export default function PromptThreadScreen() {
     );
   }, [userId, deleteAnswer]);
 
-  // Text submit handler - actually calls createOrEditAnswer mutation
-  const handleTextSubmit = useCallback(async (text: string, isAnonymous?: boolean, profileVisibility?: TodProfileVisibility) => {
-    if (!promptId || !currentUserId) return;
+  // Handle tap-to-view for media content
+  const handleViewMedia = useCallback(async (answer: typeof answers[0]) => {
+    if (!answer.mediaUrl || (answer.type !== 'photo' && answer.type !== 'video')) return;
 
-    setShowTextComposer(false);
+    const isOwner = answer.isOwnAnswer;
+    const hasAlreadyViewed = answer.hasViewedMedia;
 
-    // IMPORTANT: Default to NOT anonymous (show profile) if not specified
-    const isAnon = isAnonymous ?? false;
-    // Map profileVisibility to photoBlurMode
-    const photoBlurMode = profileVisibility === 'blurred' ? 'blur' : 'none';
+    // Owner can always view their own media
+    if (isOwner) {
+      setViewingMedia({
+        answerId: answer._id,
+        mediaUrl: answer.mediaUrl,
+        mediaType: answer.type as 'photo' | 'video',
+        isOwnAnswer: true,
+        isFrontCamera: answer.isFrontCamera,
+      });
+      return;
+    }
+
+    // Non-owner: check if already viewed (one-time view)
+    if (hasAlreadyViewed) {
+      Alert.alert('Already Viewed', 'This media can only be viewed once.');
+      return;
+    }
 
     try {
+      // Claim the view before showing
+      await claimAnswerMediaView({
+        answerId: answer._id,
+        viewerId: currentUserId,
+      });
+
+      // Show the media
+      setViewingMedia({
+        answerId: answer._id,
+        mediaUrl: answer.mediaUrl,
+        mediaType: answer.type as 'photo' | 'video',
+        isOwnAnswer: false,
+        hasViewed: false,
+        isFrontCamera: answer.isFrontCamera,
+      });
+    } catch (error: any) {
+      console.error('[T/D] Claim media view failed:', error);
+      if (error.message?.includes('already viewed')) {
+        Alert.alert('Already Viewed', 'This media can only be viewed once.');
+      } else {
+        Alert.alert('Error', 'Failed to view media. Please try again.');
+      }
+    }
+  }, [currentUserId, claimAnswerMediaView]);
+
+  // Handle closing the media viewer
+  const handleCloseMediaViewer = useCallback(async () => {
+    if (viewingMedia && !viewingMedia.isOwnAnswer && !viewingMedia.hasViewed) {
+      // Finalize the view for non-owners
+      try {
+        await finalizeAnswerMediaView({
+          answerId: viewingMedia.answerId,
+          viewerId: currentUserId,
+        });
+        console.log('[T/D] Media view finalized');
+      } catch (error) {
+        console.error('[T/D] Finalize media view failed:', error);
+      }
+    }
+    setViewingMedia(null);
+  }, [viewingMedia, currentUserId, finalizeAnswerMediaView]);
+
+  // Unified submit handler - handles text + optional media attachment
+  // Uses MERGE behavior: only sends fields that changed
+  const handleUnifiedSubmit = useCallback(async (params: {
+    text: string;
+    attachment: Attachment | null;
+    removeMedia?: boolean;
+    identityMode: IdentityMode;
+    mediaVisibility?: 'private' | 'public';
+  }) => {
+    if (!promptId || !currentUserId) return;
+
+    setIsSubmitting(true);
+
+    try {
+      const { text, attachment, removeMedia, identityMode, mediaVisibility } = params;
+
+      console.log('[T/D BEHAVIOR] submit_pipeline_start', {
+        hasText: !!text.trim(),
+        hasAttachment: !!attachment,
+        attachmentKind: attachment?.kind ?? 'none',
+        removeMedia: !!removeMedia,
+        identityMode,
+        mediaVisibility: mediaVisibility ?? 'public',
+      });
+
+      const isAnon = identityMode === 'anonymous';
+      const isNoPhoto = identityMode === 'no_photo';
+      const photoBlurMode = isNoPhoto ? 'blur' : 'none';
+
+      // Upload media if new attachment provided
+      let mediaStorageId: string | undefined;
+      let mediaMime: string | undefined;
+      let durationSec: number | undefined;
+      let isFrontCamera: boolean | undefined;
+
+      if (attachment) {
+        // Check if this is a remote URL (already uploaded media from existing answer)
+        // Remote URLs start with http:// or https:// and should NOT be re-uploaded
+        const isRemoteUrl = attachment.uri.startsWith('http://') || attachment.uri.startsWith('https://');
+
+        if (isRemoteUrl) {
+          // Media is already in storage - don't upload, don't change mediaStorageId
+          console.log('[T/D UPLOAD] skip - remote URL (existing media)');
+        } else {
+          // Local file - upload to Convex storage
+          isFrontCamera = attachment.isFrontCamera;
+          mediaMime = attachment.mime;
+
+          const mediaType = attachment.kind === 'audio' ? 'audio' : attachment.kind;
+          console.log('[T/D UPLOAD] start', { type: mediaType, isFrontCamera });
+
+          try {
+            mediaStorageId = await uploadMediaToConvex(attachment.uri, generateUploadUrl, mediaType);
+            const storageIdPrefix = mediaStorageId?.substring(0, 8) ?? 'none';
+            console.log('[T/D UPLOAD] success', { storageIdPrefix });
+          } catch (uploadError: any) {
+            console.error('[T/D UPLOAD] failed', { error: uploadError?.message?.substring(0, 50) });
+            throw uploadError;
+          }
+
+          if (attachment.durationMs) {
+            durationSec = Math.ceil(attachment.durationMs / 1000);
+          }
+        }
+      }
+
+      // Create or edit the answer with MERGE behavior
+      // Only send fields that are explicitly provided
+      console.log('[T/D BEHAVIOR] createOrEditAnswer start', { identityMode, visibility: mediaVisibility === 'private' ? 'owner_only' : 'public' });
       await createOrEditAnswer({
         promptId,
         userId: currentUserId,
-        type: 'text',
-        text: text.trim(),
+        // Text - send if provided (even empty string is valid to clear)
+        text: text.trim() || undefined,
+        // Media - only send if new attachment or removeMedia
+        mediaStorageId: mediaStorageId as any,
+        mediaMime,
+        durationSec,
+        removeMedia,
+        // Identity - only used on first creation
+        identityMode,
         isAnonymous: isAnon,
-        visibility: 'public',
-        // Author identity snapshot (only included if not anonymous)
+        visibility: mediaVisibility === 'private' ? 'owner_only' : 'public',
+        viewMode: attachment ? 'tap' : undefined, // One-time tap to view for media
+        // Author identity based on choice
         authorName: isAnon ? undefined : authorProfile.name,
-        authorPhotoUrl: isAnon ? undefined : authorProfile.photoUrl,
-        authorAge: authorProfile.age, // Always include age
-        authorGender: authorProfile.gender, // Always include gender
-        photoBlurMode: isAnon ? undefined : (photoBlurMode as 'none' | 'blur'),
+        authorPhotoUrl: isAnon || isNoPhoto ? undefined : authorProfile.photoUrl,
+        authorAge: isAnon ? undefined : authorProfile.age,
+        authorGender: isAnon ? undefined : authorProfile.gender,
+        photoBlurMode: photoBlurMode as 'none' | 'blur',
+        isFrontCamera,
       });
-      // Convex query auto-refreshes, comment will appear automatically
+
+      console.log('[T/D BEHAVIOR] createOrEditAnswer success');
+      setShowUnifiedComposer(false);
       scrollToEnd();
     } catch (error: any) {
+      console.error('[T/D BEHAVIOR] submit_pipeline_failed', { error: error?.message?.substring(0, 50) });
       Alert.alert('Error', error.message || 'Failed to post comment. Please try again.');
+    } finally {
+      setIsSubmitting(false);
     }
-  }, [promptId, currentUserId, createOrEditAnswer, authorProfile]);
+  }, [promptId, currentUserId, generateUploadUrl, createOrEditAnswer, authorProfile]);
 
-  // Voice submit handler - actually calls createOrEditAnswer mutation
-  const handleVoiceSubmit = useCallback(async (durationSec: number, isAnonymous?: boolean, _profileVisibility?: TodProfileVisibility) => {
-    if (!promptId || !currentUserId) return;
-
-    setShowVoiceComposer(false);
-
-    // Voice requires mediaStorageId - for now show not implemented
-    // In production, VoiceComposer would upload the audio and pass mediaStorageId
-    Alert.alert('Voice Comments', 'Voice upload coming soon. Use text for now.');
-  }, [promptId, currentUserId]);
-
+  // These functions are kept for camera-composer route compatibility
   const openCamera = () => {
-    setShowAnswerMenu(false);
     router.push({
       pathname: '/(main)/camera-composer' as any,
       params: { promptId: promptId!, promptType: prompt?.type },
@@ -256,8 +415,6 @@ export default function PromptThreadScreen() {
 
   // Gallery picker - pick photo/video from library, then show privacy sheet
   const openGallery = useCallback(async () => {
-    setShowAnswerMenu(false);
-
     try {
       const result = await ImagePicker.launchImageLibraryAsync({
         mediaTypes: ['images', 'videos'],
@@ -296,22 +453,23 @@ export default function PromptThreadScreen() {
 
     try {
       // Upload media to Convex storage
-      const storageId = await uploadPhotoToConvex(imageUri, generateUploadUrl);
+      const storageId = await uploadMediaToConvex(imageUri, generateUploadUrl, galleryMedia.type);
 
-      // Create media comment via mutation (anonymous by default for media)
+      // Default to anonymous for this legacy flow
+      const identityMode: IdentityMode = 'anonymous';
+      const isAnon = true;
+
       await createOrEditAnswer({
         promptId,
         userId: currentUserId,
-        type: galleryMedia.type,
         mediaStorageId: storageId,
+        mediaMime: galleryMedia.type === 'video' ? 'video/mp4' : 'image/jpeg',
         durationSec: galleryMedia.durationSec,
-        isAnonymous: true, // Default to anonymous for media comments
+        identityMode,
+        isAnonymous: isAnon,
         visibility: 'public',
         viewMode: options.viewingMode,
         viewDurationSec: options.timer > 0 ? options.timer : undefined,
-        // Author identity (always include age/gender even for anonymous)
-        authorAge: authorProfile.age,
-        authorGender: authorProfile.gender,
       });
 
       // Clear gallery media state and close sheet
@@ -322,7 +480,7 @@ export default function PromptThreadScreen() {
     } finally {
       setIsSubmittingMedia(false);
     }
-  }, [promptId, currentUserId, galleryMedia, generateUploadUrl, createOrEditAnswer, authorProfile]);
+  }, [promptId, currentUserId, galleryMedia, generateUploadUrl, createOrEditAnswer]);
 
   // Handle gallery media cancel
   const handleGalleryMediaCancel = useCallback(() => {
@@ -381,16 +539,15 @@ export default function PromptThreadScreen() {
       <View style={styles.answerCard}>
         {/* Header */}
         <View style={styles.answerHeader}>
-          {/* Avatar: Anonymous icon OR photo (possibly blurred) OR placeholder */}
+          {/* Avatar: Anonymous icon OR photo (if public) OR placeholder (no_photo/blur) */}
           {isAnon ? (
             <View style={styles.answerAvatarAnon}>
               <Ionicons name="eye-off" size={16} color={C.textLight} />
             </View>
-          ) : authorPhotoUrl ? (
+          ) : authorPhotoUrl && photoBlurMode !== 'blur' ? (
             <Image
               source={{ uri: authorPhotoUrl }}
               style={styles.answerAvatar}
-              blurRadius={photoBlurMode === 'blur' ? 15 : 0}
             />
           ) : (
             <View style={styles.answerAvatarPlaceholder}>
@@ -421,41 +578,50 @@ export default function PromptThreadScreen() {
           </View>
         </View>
 
-        {/* Content */}
-        {item.type === 'text' && item.text && (
+        {/* Content: ALWAYS show text first (if exists), then media below */}
+        {item.text && item.text.trim().length > 0 && (
           <Text style={styles.answerText}>{item.text}</Text>
         )}
 
-        {item.type === 'voice' && (
-          <View style={styles.voiceRow}>
-            <Ionicons name="play-circle" size={32} color={C.primary} />
-            <View style={styles.voiceWaveform}>
-              {Array.from({ length: 16 }).map((_, i) => (
-                <View key={i} style={[styles.voiceBar, { height: 4 + (i % 4) * 6 }]} />
-              ))}
-            </View>
-            <Text style={styles.voiceDuration}>{item.durationSec}s</Text>
-          </View>
+        {/* Voice media */}
+        {item.type === 'voice' && item.mediaUrl && (
+          <TodVoicePlayer
+            answerId={item._id}
+            audioUrl={item.mediaUrl}
+            durationSec={item.durationSec || 0}
+          />
         )}
 
-        {(item.type === 'photo' || item.type === 'video') && (
-          <View style={styles.mediaContainer}>
-            <View style={styles.mediaBadge}>
+        {/* Photo/Video media */}
+        {(item.type === 'photo' || item.type === 'video') && item.mediaUrl && (
+          <TouchableOpacity
+            style={styles.mediaContainer}
+            onPress={() => handleViewMedia(item)}
+            activeOpacity={0.7}
+          >
+            <View style={[
+              styles.mediaBadge,
+              item.hasViewedMedia && !isOwnAnswer && styles.mediaBadgeViewed,
+            ]}>
               <Ionicons
                 name={item.type === 'video' ? 'videocam' : 'image'}
                 size={20}
-                color={C.primary}
+                color={item.hasViewedMedia && !isOwnAnswer ? C.textLight : C.primary}
               />
-              <Text style={styles.mediaBadgeText}>
+              <Text style={[
+                styles.mediaBadgeText,
+                item.hasViewedMedia && !isOwnAnswer && styles.mediaBadgeTextViewed,
+              ]}>
                 {item.type === 'video' ? 'Video' : 'Photo'}
               </Text>
-              {item.viewMode && (
-                <Text style={styles.mediaViewMode}>
-                  {item.viewMode === 'hold' ? 'Hold to view' : 'Tap to view'}
-                </Text>
-              )}
+              <Text style={[
+                styles.mediaViewMode,
+                item.hasViewedMedia && !isOwnAnswer && { color: C.textLight },
+              ]}>
+                {item.hasViewedMedia && !isOwnAnswer ? 'Viewed' : 'Tap to view'}
+              </Text>
             </View>
-          </View>
+          </TouchableOpacity>
         )}
 
         {/* Actions: Reactions + Inline Edit + Delete */}
@@ -496,15 +662,15 @@ export default function PromptThreadScreen() {
             </TouchableOpacity>
           </View>
 
-          {/* Own comment: Inline + button + Delete */}
+          {/* Own comment: Edit + button + Delete */}
           {isOwnAnswer ? (
             <View style={styles.ownCommentActions}>
-              {/* Inline + button for editing/replacing */}
+              {/* Direct edit button - opens composer immediately */}
               <TouchableOpacity
                 style={styles.inlineAddBtn}
-                onPress={() => setShowInlineMenu(!showInlineMenu)}
+                onPress={() => setShowUnifiedComposer(true)}
               >
-                <Ionicons name={showInlineMenu ? 'close' : 'add'} size={24} color={C.primary} />
+                <Ionicons name="add" size={24} color={C.primary} />
               </TouchableOpacity>
               {/* Delete button */}
               <TouchableOpacity
@@ -529,39 +695,6 @@ export default function PromptThreadScreen() {
           )}
         </View>
 
-        {/* Inline menu for editing (own comment only) */}
-        {isOwnAnswer && showInlineMenu && (
-          <View style={styles.inlineMenuOverlay}>
-            <TouchableOpacity
-              style={styles.inlineMenuItem}
-              onPress={() => { setShowInlineMenu(false); setShowTextComposer(true); }}
-            >
-              <Ionicons name="create-outline" size={18} color="#6C5CE7" />
-              <Text style={styles.inlineMenuText}>Text</Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={styles.inlineMenuItem}
-              onPress={() => { setShowInlineMenu(false); setShowVoiceComposer(true); }}
-            >
-              <Ionicons name="mic-outline" size={18} color="#FF9800" />
-              <Text style={styles.inlineMenuText}>Voice</Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={styles.inlineMenuItem}
-              onPress={() => { setShowInlineMenu(false); openCamera(); }}
-            >
-              <Ionicons name="camera-outline" size={18} color="#E94560" />
-              <Text style={styles.inlineMenuText}>Camera</Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={styles.inlineMenuItem}
-              onPress={() => { setShowInlineMenu(false); openGallery(); }}
-            >
-              <Ionicons name="images-outline" size={18} color="#00B894" />
-              <Text style={styles.inlineMenuText}>Gallery</Text>
-            </TouchableOpacity>
-          </View>
-        )}
 
         {/* Emoji picker overlay */}
         {showEmojiPicker && (
@@ -726,45 +859,23 @@ export default function PromptThreadScreen() {
         }
       />
 
-      {/* FAB (only if not expired and hasn't commented) */}
+      {/* FAB (only if not expired and hasn't commented) - opens unified composer */}
       {!isExpired && !myAnswer && (
         <View style={[styles.commentFab, { bottom: Math.max(insets.bottom, 12) + 8 }]}>
-          {showAnswerMenu && (
-            <View style={styles.fabOptions}>
-              <TouchableOpacity
-                style={styles.fabIcon}
-                onPress={() => { setShowAnswerMenu(false); setShowTextComposer(true); }}
-              >
-                <Ionicons name="create-outline" size={20} color="#6C5CE7" />
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={styles.fabIcon}
-                onPress={() => { setShowAnswerMenu(false); setShowVoiceComposer(true); }}
-              >
-                <Ionicons name="mic-outline" size={20} color="#FF9800" />
-              </TouchableOpacity>
-              <TouchableOpacity style={styles.fabIcon} onPress={openCamera}>
-                <Ionicons name="camera-outline" size={20} color="#E94560" />
-              </TouchableOpacity>
-              <TouchableOpacity style={styles.fabIcon} onPress={openGallery}>
-                <Ionicons name="images-outline" size={20} color="#00B894" />
-              </TouchableOpacity>
-            </View>
-          )}
           <TouchableOpacity
-            style={[styles.fabBtn, showAnswerMenu && styles.fabBtnOpen]}
-            onPress={() => setShowAnswerMenu(!showAnswerMenu)}
+            style={styles.fabBtn}
+            onPress={() => setShowUnifiedComposer(true)}
             activeOpacity={0.8}
           >
-            <Ionicons name={showAnswerMenu ? 'close' : 'add'} size={26} color="#FFF" />
+            <Ionicons name="add" size={26} color="#FFF" />
           </TouchableOpacity>
         </View>
       )}
 
 
-      {/* Composers */}
-      <TextComposerModal
-        visible={showTextComposer}
+      {/* Unified Answer Composer - text + optional media */}
+      <UnifiedAnswerComposer
+        visible={showUnifiedComposer}
         prompt={{
           id: prompt._id as unknown as string,
           type: prompt.type,
@@ -777,24 +888,16 @@ export default function PromptThreadScreen() {
           expiresAt: prompt.expiresAt,
         }}
         initialText={myAnswer?.text || ''}
-        onClose={() => setShowTextComposer(false)}
-        onSubmit={handleTextSubmit}
-      />
-      <VoiceComposer
-        visible={showVoiceComposer}
-        prompt={{
-          id: prompt._id as unknown as string,
-          type: prompt.type,
-          text: prompt.text,
-          isTrending: prompt.isTrending,
-          ownerUserId: prompt.ownerUserId,
-          answerCount: prompt.answerCount,
-          activeCount: 0,
-          createdAt: prompt.createdAt,
-          expiresAt: prompt.expiresAt,
-        }}
-        onClose={() => setShowVoiceComposer(false)}
-        onSubmit={handleVoiceSubmit}
+        initialAttachment={myAnswer?.mediaUrl ? {
+          kind: myAnswer.type === 'voice' ? 'audio' : (myAnswer.type === 'video' ? 'video' : 'photo'),
+          uri: myAnswer.mediaUrl,
+          durationMs: myAnswer.durationSec ? myAnswer.durationSec * 1000 : undefined,
+        } as Attachment : null}
+        existingIdentityMode={myAnswer?.identityMode as IdentityMode | undefined}
+        isNewAnswer={!myAnswer}
+        onClose={() => setShowUnifiedComposer(false)}
+        onSubmit={handleUnifiedSubmit}
+        isSubmitting={isSubmitting}
       />
 
       {/* Gallery Media Privacy Sheet - same as camera flow */}
@@ -813,6 +916,57 @@ export default function PromptThreadScreen() {
           <Text style={styles.uploadingText}>Posting media...</Text>
         </View>
       )}
+
+      {/* Media Viewer Modal - Tap to view */}
+      <Modal
+        visible={!!viewingMedia}
+        transparent
+        animationType="fade"
+        onRequestClose={handleCloseMediaViewer}
+      >
+        <View style={styles.mediaViewerOverlay}>
+          <TouchableOpacity
+            style={styles.mediaViewerClose}
+            onPress={handleCloseMediaViewer}
+          >
+            <Ionicons name="close" size={28} color="#FFF" />
+          </TouchableOpacity>
+
+          {viewingMedia?.mediaType === 'photo' && (
+            <Image
+              source={{ uri: viewingMedia.mediaUrl }}
+              style={[
+                styles.mediaViewerImage,
+                viewingMedia.isFrontCamera && styles.unmirrorMedia,
+              ]}
+              contentFit="contain"
+            />
+          )}
+
+          {viewingMedia?.mediaType === 'video' && (
+            <Video
+              source={{ uri: viewingMedia.mediaUrl }}
+              style={[
+                styles.mediaViewerVideo,
+                viewingMedia.isFrontCamera && styles.unmirrorMedia,
+              ]}
+              resizeMode={ResizeMode.CONTAIN}
+              shouldPlay
+              useNativeControls
+              isLooping={false}
+            />
+          )}
+
+          {!viewingMedia?.isOwnAnswer && (
+            <View style={styles.mediaViewerHint}>
+              <Ionicons name="eye-outline" size={14} color="#FFF" />
+              <Text style={styles.mediaViewerHintText}>
+                One-time view — this will disappear when you close
+              </Text>
+            </View>
+          )}
+        </View>
+      </Modal>
     </View>
   );
 }
@@ -1093,5 +1247,62 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: '#FFF',
     fontWeight: '600',
+  },
+
+  // Media badge viewed state
+  mediaBadgeViewed: {
+    backgroundColor: C.surface + '80',
+    borderWidth: 1,
+    borderColor: C.textLight + '30',
+  },
+  mediaBadgeTextViewed: {
+    color: C.textLight,
+  },
+
+  // Media viewer modal
+  mediaViewerOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.95)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  mediaViewerClose: {
+    position: 'absolute',
+    top: 50,
+    right: 20,
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: 'rgba(255,255,255,0.2)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 10,
+  },
+  mediaViewerImage: {
+    width: '100%',
+    height: '80%',
+  },
+  mediaViewerVideo: {
+    width: '100%',
+    height: '80%',
+  },
+  unmirrorMedia: {
+    transform: [{ scaleX: -1 }],
+  },
+  mediaViewerHint: {
+    position: 'absolute',
+    bottom: 50,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    backgroundColor: 'rgba(0,0,0,0.6)',
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    borderRadius: 20,
+  },
+  mediaViewerHintText: {
+    fontSize: 13,
+    color: '#FFF',
+    fontWeight: '500',
   },
 });

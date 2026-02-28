@@ -69,15 +69,28 @@ export const createPrompt = mutation({
     text: v.string(),
     ownerUserId: v.string(),
     isAnonymous: v.optional(v.boolean()),
+    photoBlurMode: v.optional(v.union(v.literal('none'), v.literal('blur'))),
     // Owner profile snapshot (for feed display)
     ownerName: v.optional(v.string()),
     ownerPhotoUrl: v.optional(v.string()),
+    // NEW: Accept storage ID for uploaded photos (resolves to HTTPS URL server-side)
+    ownerPhotoStorageId: v.optional(v.id('_storage')),
     ownerAge: v.optional(v.number()),
     ownerGender: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
     const now = Date.now();
     const expiresAt = now + TWENTY_FOUR_HOURS_MS;
+
+    // Resolve photo URL from storage ID if provided (ensures HTTPS URL)
+    let resolvedPhotoUrl = args.ownerPhotoUrl;
+    if (args.ownerPhotoStorageId) {
+      const storageUrl = await ctx.storage.getUrl(args.ownerPhotoStorageId);
+      if (storageUrl) {
+        resolvedPhotoUrl = storageUrl;
+        console.log(`[T/D] Resolved photo storageId to URL: ${storageUrl.substring(0, 60)}...`);
+      }
+    }
 
     const promptId = await ctx.db.insert('todPrompts', {
       type: args.type,
@@ -88,13 +101,18 @@ export const createPrompt = mutation({
       activeCount: 0,
       createdAt: now,
       expiresAt,
-      // Owner profile snapshot (default false = show profile)
-      isAnonymous: args.isAnonymous ?? false,
+      // Owner profile snapshot (default anonymous)
+      isAnonymous: args.isAnonymous ?? true,
+      photoBlurMode: args.photoBlurMode ?? 'none',
       ownerName: args.ownerName,
-      ownerPhotoUrl: args.ownerPhotoUrl,
+      ownerPhotoUrl: resolvedPhotoUrl,
       ownerAge: args.ownerAge,
       ownerGender: args.ownerGender,
     });
+
+    // Debug log for post creation
+    const urlPrefix = resolvedPhotoUrl ? (resolvedPhotoUrl.startsWith('https://') ? 'https' : resolvedPhotoUrl.startsWith('http://') ? 'http' : 'other') : 'none';
+    console.log(`[T/D] Created prompt: id=${promptId}, type=${args.type}, isAnon=${args.isAnonymous ?? true}, photoBlurMode=${args.photoBlurMode ?? 'none'}, photoUrlPrefix=${urlPrefix}`);
 
     return { promptId, expiresAt };
   },
@@ -376,14 +394,30 @@ export const cleanupExpiredPrompts = mutation({
   },
 });
 
+/**
+ * Check if DEMO_MODE is enabled via Convex environment variable.
+ * Set DEMO_MODE=true in Convex dashboard environment for local dev/testing.
+ */
+function isDemoModeEnabled(): boolean {
+  const val = process.env.DEMO_MODE;
+  return val === "1" || val === "true" || val === "TRUE";
+}
+
 // Generate upload URL for media
 export const generateUploadUrl = mutation({
   args: {},
   handler: async (ctx) => {
     const identity = await ctx.auth.getUserIdentity();
-    if (!identity) {
+    const hasAuth = !!identity;
+    const demoMode = isDemoModeEnabled();
+
+    // Allow if authenticated OR if DEMO_MODE is enabled; otherwise deny
+    if (!hasAuth && !demoMode) {
+      console.log(`[T/D] generateUploadUrl denied auth=false demoMode=false`);
       throw new Error("Unauthorized");
     }
+
+    console.log(`[T/D] generateUploadUrl allowed auth=${hasAuth} demoMode=${demoMode}`);
     return await ctx.storage.generateUploadUrl();
   },
 });
@@ -1209,6 +1243,18 @@ export const getPromptThread = query({
           hasReported = !!report;
         }
 
+        // Check if viewer has viewed this media (one-time view tracking)
+        let hasViewedMedia = false;
+        if (viewerUserId && viewerUserId !== answer.userId && answer.mediaUrl) {
+          const viewRecord = await ctx.db
+            .query('todAnswerViews')
+            .withIndex('by_answer_viewer', (q) =>
+              q.eq('answerId', answerId).eq('viewerUserId', viewerUserId)
+            )
+            .first();
+          hasViewedMedia = viewRecord?.viewedAt !== undefined;
+        }
+
         return {
           _id: answer._id,
           promptId: answer.promptId,
@@ -1230,12 +1276,15 @@ export const getPromptThread = query({
           isHiddenForOthers: (answer.reportCount ?? 0) >= REPORT_HIDE_THRESHOLD,
           isOwnAnswer: viewerUserId === answer.userId,
           hasReported,
+          hasViewedMedia,
           // Author identity snapshot
           authorName: answer.authorName,
           authorPhotoUrl: answer.authorPhotoUrl,
           authorAge: answer.authorAge,
           authorGender: answer.authorGender,
           photoBlurMode: answer.photoBlurMode,
+          identityMode: answer.identityMode,
+          isFrontCamera: answer.isFrontCamera ?? false,
         };
       })
     );
@@ -1322,16 +1371,27 @@ async function checkRateLimit(
 
 /**
  * Create or edit an answer (one per user per prompt).
- * Enforces: one attachment max, rate limiting.
+ * MERGE behavior: updates only provided fields, preserves existing text/media.
+ * - If text provided, updates text
+ * - If media provided, updates media (replaces any existing)
+ * - If removeMedia=true, removes media only
+ * - identityMode is set ONLY on first creation, reused for all edits
  */
 export const createOrEditAnswer = mutation({
   args: {
     promptId: v.string(),
     userId: v.string(),
-    type: v.union(v.literal('text'), v.literal('photo'), v.literal('video'), v.literal('voice')),
+    // Optional: if provided, update text
     text: v.optional(v.string()),
+    // Optional: if provided, set/replace media
     mediaStorageId: v.optional(v.id('_storage')),
+    mediaMime: v.optional(v.string()),
     durationSec: v.optional(v.number()),
+    // Optional: if true, remove media (but keep text)
+    removeMedia: v.optional(v.boolean()),
+    // Identity mode (only used on first creation)
+    identityMode: v.optional(v.union(v.literal('anonymous'), v.literal('no_photo'), v.literal('profile'))),
+    // Legacy fields for backwards compatibility
     isAnonymous: v.optional(v.boolean()),
     visibility: v.optional(v.union(v.literal('owner_only'), v.literal('public'))),
     viewMode: v.optional(v.union(v.literal('tap'), v.literal('hold'))),
@@ -1342,16 +1402,27 @@ export const createOrEditAnswer = mutation({
     authorAge: v.optional(v.number()),
     authorGender: v.optional(v.string()),
     photoBlurMode: v.optional(v.union(v.literal('none'), v.literal('blur'))),
+    // Camera metadata: true if captured from front camera (for mirroring correction in UI)
+    isFrontCamera: v.optional(v.boolean()),
+    // Legacy type field - computed from content
+    type: v.optional(v.union(v.literal('text'), v.literal('photo'), v.literal('video'), v.literal('voice'))),
   },
   handler: async (ctx, args) => {
-    // Auth guard: require authenticated user
+    // Auth guard: allow if authenticated OR in demo mode
     const identity = await ctx.auth.getUserIdentity();
-    if (!identity) {
+    const hasAuth = !!identity;
+    const demoMode = isDemoModeEnabled();
+
+    if (!hasAuth && !demoMode) {
+      console.log(`[T/D] createOrEditAnswer denied auth=false demoMode=false`);
       throw new Error("Unauthorized");
     }
-    const userId = identity.subject;
-    // Validate args match identity
-    if (args.userId && args.userId !== userId) {
+
+    // Use identity subject if authenticated, otherwise use provided userId
+    const userId = identity?.subject ?? args.userId;
+
+    // Validate args match identity (only if authenticated)
+    if (hasAuth && args.userId && args.userId !== identity.subject) {
       throw new Error("Unauthorized");
     }
 
@@ -1385,16 +1456,6 @@ export const createOrEditAnswer = mutation({
       )
       .first();
 
-    // If type is text, require text content
-    if (args.type === 'text' && (!args.text || args.text.trim().length === 0)) {
-      throw new Error('Text answer requires content');
-    }
-
-    // If type is media, require mediaStorageId
-    if ((args.type === 'photo' || args.type === 'video' || args.type === 'voice') && !args.mediaStorageId) {
-      throw new Error('Media answer requires attachment');
-    }
-
     // Generate media URL if storage ID provided
     let mediaUrl: string | undefined;
     if (args.mediaStorageId) {
@@ -1402,58 +1463,135 @@ export const createOrEditAnswer = mutation({
     }
 
     if (existing) {
-      // EDIT existing answer
-      // Delete old media if replacing with new
-      if (existing.mediaStorageId && args.mediaStorageId && existing.mediaStorageId !== args.mediaStorageId) {
-        try {
-          await ctx.storage.delete(existing.mediaStorageId);
-        } catch { /* already deleted */ }
-      }
+      // EDIT existing answer - MERGE updates
+      // Build patch object with only changed fields
+      const patch: Record<string, any> = { editedAt: now };
 
-      await ctx.db.patch(existing._id, {
-        type: args.type,
-        text: args.text,
-        mediaStorageId: args.mediaStorageId,
-        mediaUrl,
-        durationSec: args.durationSec,
-        isAnonymous: args.isAnonymous,
-        visibility: args.visibility ?? 'public',
-        viewMode: args.viewMode,
-        viewDurationSec: args.viewDurationSec,
-        editedAt: now,
-        // Author identity snapshot
-        authorName: args.authorName,
-        authorPhotoUrl: args.authorPhotoUrl,
-        authorAge: args.authorAge,
-        authorGender: args.authorGender,
-        photoBlurMode: args.photoBlurMode,
+      console.log(`[T/D] EDIT existing answer`, {
+        existingText: existing.text,
+        argsText: args.text,
+        argsMediaStorageId: !!args.mediaStorageId,
+        removeMedia: args.removeMedia,
       });
 
+      // Text: update if provided, otherwise keep existing
+      if (args.text !== undefined) {
+        patch.text = args.text.trim() || undefined;
+        console.log(`[T/D] text updated to: ${patch.text}`);
+      } else {
+        console.log(`[T/D] text preserved: ${existing.text}`);
+      }
+
+      // Media: handle remove, replace, or keep
+      if (args.removeMedia) {
+        // Remove media only
+        if (existing.mediaStorageId) {
+          try {
+            await ctx.storage.delete(existing.mediaStorageId);
+          } catch { /* already deleted */ }
+        }
+        patch.mediaStorageId = undefined;
+        patch.mediaUrl = undefined;
+        patch.mediaMime = undefined;
+        patch.durationSec = undefined;
+        patch.isFrontCamera = undefined;
+        console.log(`[T/D] media removed from answer`);
+      } else if (args.mediaStorageId) {
+        // Replace media
+        if (existing.mediaStorageId && existing.mediaStorageId !== args.mediaStorageId) {
+          try {
+            await ctx.storage.delete(existing.mediaStorageId);
+          } catch { /* already deleted */ }
+        }
+        patch.mediaStorageId = args.mediaStorageId;
+        patch.mediaUrl = mediaUrl;
+        patch.mediaMime = args.mediaMime;
+        patch.durationSec = args.durationSec;
+        patch.isFrontCamera = args.isFrontCamera;
+        console.log(`[T/D] media replaced, storageId=${args.mediaStorageId}`);
+      }
+      // else: keep existing media unchanged
+
+      // Determine type based on final content
+      const finalText = patch.text !== undefined ? patch.text : existing.text;
+      const finalMedia = patch.mediaStorageId !== undefined ? patch.mediaStorageId : existing.mediaStorageId;
+      const finalMime = patch.mediaMime !== undefined ? patch.mediaMime : existing.mediaMime;
+
+      // Compute type from content
+      let type: 'text' | 'photo' | 'video' | 'voice' = 'text';
+      if (finalMedia) {
+        if (finalMime?.startsWith('audio/')) type = 'voice';
+        else if (finalMime?.startsWith('video/')) type = 'video';
+        else if (finalMime?.startsWith('image/')) type = 'photo';
+        else if (args.type) type = args.type; // fallback to provided type
+      }
+      patch.type = type;
+
+      // Identity: KEEP existing identityMode (do not change on edit)
+      // Only update author snapshot if explicitly provided
+      if (args.authorName !== undefined) patch.authorName = args.authorName;
+      if (args.authorPhotoUrl !== undefined) patch.authorPhotoUrl = args.authorPhotoUrl;
+      if (args.authorAge !== undefined) patch.authorAge = args.authorAge;
+      if (args.authorGender !== undefined) patch.authorGender = args.authorGender;
+
+      // View mode for media
+      if (finalMedia) {
+        patch.viewMode = args.viewMode ?? existing.viewMode ?? 'tap';
+      }
+
+      console.log(`[T/D] identityMode reused=${existing.identityMode ?? 'anonymous'}`);
+
+      await ctx.db.patch(existing._id, patch);
       return { answerId: existing._id, isEdit: true };
     } else {
       // CREATE new answer
+      // Require at least text or media
+      const hasText = args.text && args.text.trim().length > 0;
+      const hasMedia = !!args.mediaStorageId;
+
+      if (!hasText && !hasMedia) {
+        throw new Error('Answer requires text or media');
+      }
+
+      // Determine identity mode (default to anonymous)
+      const identityMode = args.identityMode ?? 'anonymous';
+      const isAnon = identityMode === 'anonymous';
+      const isNoPhoto = identityMode === 'no_photo';
+
+      // Compute type
+      let type: 'text' | 'photo' | 'video' | 'voice' = 'text';
+      if (hasMedia) {
+        if (args.mediaMime?.startsWith('audio/')) type = 'voice';
+        else if (args.mediaMime?.startsWith('video/')) type = 'video';
+        else if (args.mediaMime?.startsWith('image/')) type = 'photo';
+        else if (args.type) type = args.type;
+      }
+
       const answerId = await ctx.db.insert('todAnswers', {
         promptId: args.promptId,
         userId,
-        type: args.type,
-        text: args.text,
+        type,
+        text: hasText ? args.text!.trim() : undefined,
         mediaStorageId: args.mediaStorageId,
         mediaUrl,
+        mediaMime: args.mediaMime,
         durationSec: args.durationSec,
         likeCount: 0,
         createdAt: now,
-        isAnonymous: args.isAnonymous,
+        identityMode,
+        isAnonymous: isAnon,
         visibility: args.visibility ?? 'public',
-        viewMode: args.viewMode,
+        viewMode: hasMedia ? (args.viewMode ?? 'tap') : undefined,
         viewDurationSec: args.viewDurationSec,
         totalReactionCount: 0,
         reportCount: 0,
-        // Author identity snapshot
-        authorName: args.authorName,
-        authorPhotoUrl: args.authorPhotoUrl,
-        authorAge: args.authorAge,
-        authorGender: args.authorGender,
-        photoBlurMode: args.photoBlurMode,
+        // Author identity snapshot (cleared for anonymous, photo cleared for no_photo)
+        authorName: isAnon ? undefined : args.authorName,
+        authorPhotoUrl: isAnon || isNoPhoto ? undefined : args.authorPhotoUrl,
+        authorAge: isAnon ? undefined : args.authorAge,
+        authorGender: isAnon ? undefined : args.authorGender,
+        photoBlurMode: isNoPhoto ? 'blur' : 'none',
+        isFrontCamera: args.isFrontCamera,
       });
 
       // Increment answer count on prompt
@@ -1462,6 +1600,7 @@ export const createOrEditAnswer = mutation({
         activeCount: prompt.activeCount + 1,
       });
 
+      console.log(`[T/D] answer created, identityMode=${identityMode}`);
       return { answerId, isEdit: false };
     }
   },
@@ -1478,16 +1617,24 @@ export const setAnswerReaction = mutation({
     emoji: v.string(), // pass empty string to remove reaction
   },
   handler: async (ctx, { answerId, userId: argsUserId, emoji }) => {
-    // Auth guard: require authenticated user
+    // Auth guard: allow if authenticated OR in demo mode
     const identity = await ctx.auth.getUserIdentity();
-    if (!identity) {
-      throw new Error("Unauthorized");
+    const hasAuth = !!identity;
+    const demoMode = isDemoModeEnabled();
+
+    if (!hasAuth && !demoMode) {
+      console.log(`[T/D] setAnswerReaction denied auth=false demoMode=false`);
+      return { ok: false, reason: 'unauthenticated' };
     }
-    const userId = identity.subject;
-    // Validate args match identity
-    if (argsUserId && argsUserId !== userId) {
-      throw new Error("Unauthorized");
+
+    // Determine acting user: use identity if available, else use argsUserId in demo mode
+    const userId = identity?.subject ?? argsUserId;
+    if (!userId) {
+      console.log(`[T/D] setAnswerReaction no userId available`);
+      return { ok: false, reason: 'no_user_id' };
     }
+
+    console.log(`[T/D] setAnswerReaction allowed auth=${hasAuth} demoMode=${demoMode} userId=${userId}`);
 
     // Validate answer exists
     const answer = await ctx.db
@@ -1523,7 +1670,7 @@ export const setAnswerReaction = mutation({
         const newCount = Math.max(0, (answer.totalReactionCount ?? 0) - 1);
         await ctx.db.patch(answer._id, { totalReactionCount: newCount });
       }
-      return { action: 'removed' };
+      return { ok: true, action: 'removed' };
     }
 
     if (existing) {
@@ -1533,9 +1680,9 @@ export const setAnswerReaction = mutation({
           emoji,
           updatedAt: now,
         });
-        return { action: 'changed', oldEmoji: existing.emoji, newEmoji: emoji };
+        return { ok: true, action: 'changed', oldEmoji: existing.emoji, newEmoji: emoji };
       }
-      return { action: 'unchanged' };
+      return { ok: true, action: 'unchanged' };
     } else {
       // Create new reaction
       await ctx.db.insert('todAnswerReactions', {
@@ -1548,7 +1695,7 @@ export const setAnswerReaction = mutation({
       await ctx.db.patch(answer._id, {
         totalReactionCount: (answer.totalReactionCount ?? 0) + 1,
       });
-      return { action: 'added', emoji };
+      return { ok: true, action: 'added', emoji };
     }
   },
 });
@@ -1661,14 +1808,21 @@ export const deleteMyAnswer = mutation({
     userId: v.string(),
   },
   handler: async (ctx, { answerId, userId: argsUserId }) => {
-    // Auth guard: require authenticated user
+    // Auth guard: allow if authenticated OR in demo mode
     const identity = await ctx.auth.getUserIdentity();
-    if (!identity) {
+    const hasAuth = !!identity;
+    const demoMode = isDemoModeEnabled();
+
+    if (!hasAuth && !demoMode) {
+      console.log(`[T/D] deleteMyAnswer denied auth=false demoMode=false`);
       throw new Error("Unauthorized");
     }
-    const userId = identity.subject;
-    // Validate args match identity
-    if (argsUserId && argsUserId !== userId) {
+
+    // Use identity subject if authenticated, otherwise use provided userId
+    const userId = identity?.subject ?? argsUserId;
+
+    // Validate args match identity (only if authenticated)
+    if (hasAuth && argsUserId && argsUserId !== identity.subject) {
       throw new Error("Unauthorized");
     }
 
@@ -1684,6 +1838,8 @@ export const deleteMyAnswer = mutation({
     if (answer.userId !== userId) {
       throw new Error('You can only delete your own answers');
     }
+
+    console.log(`[T/D] deleteMyAnswer allowed for answerId=${answerId}`);
 
     // Delete media if exists
     if (answer.mediaStorageId) {
@@ -1754,14 +1910,21 @@ export const claimAnswerMediaView = mutation({
     viewerId: v.string(),
   },
   handler: async (ctx, { answerId, viewerId: argsViewerId }) => {
-    // Auth guard: require authenticated user
+    // Auth guard: allow if authenticated OR in demo mode
     const identity = await ctx.auth.getUserIdentity();
-    if (!identity) {
+    const hasAuth = !!identity;
+    const demoMode = isDemoModeEnabled();
+
+    if (!hasAuth && !demoMode) {
+      console.log(`[T/D] claimAnswerMediaView denied auth=false demoMode=false`);
       throw new Error("Unauthorized");
     }
-    const viewerId = identity.subject;
-    // Validate args match identity
-    if (argsViewerId && argsViewerId !== viewerId) {
+
+    // Use identity subject if authenticated, otherwise use provided viewerId
+    const viewerId = identity?.subject ?? argsViewerId;
+
+    // Validate args match identity (only if authenticated)
+    if (hasAuth && argsViewerId && argsViewerId !== identity.subject) {
       throw new Error("Unauthorized");
     }
 
@@ -1844,6 +2007,9 @@ export const claimAnswerMediaView = mutation({
         viewerUserId: viewerId,
         viewedAt: Date.now(),
       });
+      console.log(`[T/D] mediaViewed allowed=true viewerId=${viewerId} answerId=${answerId}`);
+    } else {
+      console.log(`[T/D] mediaViewed allowed=true (owner) answerId=${answerId}`);
     }
 
     // Mark first claim time if not set
@@ -1881,14 +2047,20 @@ export const finalizeAnswerMediaView = mutation({
     viewerId: v.string(),
   },
   handler: async (ctx, { answerId, viewerId: argsViewerId }) => {
-    // Auth guard: require authenticated user
+    // Auth guard: allow if authenticated OR in demo mode
     const identity = await ctx.auth.getUserIdentity();
-    if (!identity) {
+    const hasAuth = !!identity;
+    const demoMode = isDemoModeEnabled();
+
+    if (!hasAuth && !demoMode) {
       throw new Error("Unauthorized");
     }
-    const viewerId = identity.subject;
-    // Validate args match identity (option b: ignore args, use identity)
-    if (argsViewerId && argsViewerId !== viewerId) {
+
+    // Use identity subject if authenticated, otherwise use provided viewerId
+    const viewerId = identity?.subject ?? argsViewerId;
+
+    // Validate args match identity (only if authenticated)
+    if (hasAuth && argsViewerId && argsViewerId !== identity.subject) {
       throw new Error("Unauthorized");
     }
 
