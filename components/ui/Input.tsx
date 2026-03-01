@@ -20,6 +20,15 @@ interface InputProps extends TextInputProps {
   rightIcon?: keyof typeof Ionicons.glyphMap;
   onRightIconPress?: () => void;
   containerStyle?: ViewStyle;
+  /**
+   * HARD BLOCK: Allow auth autofill for this input.
+   * Default is FALSE - Google Password Manager is completely blocked.
+   * Set to TRUE **ONLY** for:
+   *   - Onboarding email input
+   *   - Login email input
+   * DO NOT use anywhere else.
+   */
+  allowAuthAutofill?: boolean;
 }
 
 export interface InputRef {
@@ -36,6 +45,8 @@ export const Input = forwardRef<InputRef, InputProps>(({
   onRightIconPress,
   containerStyle,
   secureTextEntry,
+  allowAuthAutofill = false,
+  keyboardType,
   ...props
 }, ref) => {
   const [isFocused, setIsFocused] = useState(false);
@@ -87,6 +98,12 @@ export const Input = forwardRef<InputRef, InputProps>(({
             onBlur={() => setIsFocused(false)}
             secureTextEntry={isPassword && !showPassword}
             {...props}
+            // HARD BLOCK: Autofill settings applied AFTER props spread to override any passed values
+            // Only auth screens (onboarding email, login email) may use allowAuthAutofill={true}
+            autoComplete={allowAuthAutofill ? 'email' : 'off'}
+            textContentType={allowAuthAutofill ? 'emailAddress' : 'none'}
+            importantForAutofill={allowAuthAutofill ? 'yes' : 'noExcludeDescendants'}
+            keyboardType={allowAuthAutofill ? 'email-address' : (keyboardType === 'email-address' ? 'default' : keyboardType)}
           />
 
           {isPassword && (

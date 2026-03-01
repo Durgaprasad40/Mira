@@ -107,9 +107,8 @@ export default function LoginScreen() {
               setError("");
             }}
             placeholder="you@example.com"
-            keyboardType="email-address"
             autoCapitalize="none"
-            autoComplete="email"
+            allowAuthAutofill={true}
           />
         </View>
 

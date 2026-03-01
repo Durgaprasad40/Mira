@@ -166,9 +166,8 @@ export default function PasswordScreen() {
             }
           }}
           placeholder="you@example.com"
-          keyboardType="email-address"
           autoCapitalize="none"
-          autoComplete="email"
+          allowAuthAutofill={true}
           editable={!emailVerified}
         />
         {errors.email && <Text style={styles.error}>{errors.email}</Text>}
