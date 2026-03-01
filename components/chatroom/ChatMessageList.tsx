@@ -1,4 +1,4 @@
-import React, { useRef, useEffect, useCallback, useState, forwardRef, useImperativeHandle } from 'react';
+import React, { useRef, useEffect, useCallback, useState, forwardRef, useImperativeHandle, useMemo } from 'react';
 import { View, Text, TouchableOpacity, StyleSheet } from 'react-native';
 import { FlashList, type FlashListRef } from '@shopify/flash-list';
 import { Ionicons } from '@expo/vector-icons';
@@ -83,6 +83,8 @@ const ChatMessageList = forwardRef<ChatMessageListHandle, ChatMessageListProps>(
   const [isAtBottom, setIsAtBottom] = useState(true);
   const [newMessageCount, setNewMessageCount] = useState(0);
   const prevLengthRef = useRef(messages.length);
+  const initialScrollTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const newMessageScrollTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useImperativeHandle(ref, () => ({
     scrollToEnd: (animated = true) => {
@@ -101,25 +103,39 @@ const ChatMessageList = forwardRef<ChatMessageListHandle, ChatMessageListProps>(
     }
   }, []);
 
+  // Initial scroll to bottom with cleanup
   useEffect(() => {
     if (messages.length > 0) {
-      setTimeout(() => {
+      initialScrollTimeoutRef.current = setTimeout(() => {
         listRef.current?.scrollToEnd({ animated: false });
       }, 150);
     }
+    return () => {
+      if (initialScrollTimeoutRef.current) {
+        clearTimeout(initialScrollTimeoutRef.current);
+        initialScrollTimeoutRef.current = null;
+      }
+    };
   }, []);
 
+  // Handle new messages with cleanup
   useEffect(() => {
     const diff = messages.length - prevLengthRef.current;
     if (diff > 0 && !isAtBottom) {
       setNewMessageCount((prev) => prev + diff);
     }
     if (diff > 0 && isAtBottom) {
-      setTimeout(() => {
+      newMessageScrollTimeoutRef.current = setTimeout(() => {
         listRef.current?.scrollToEnd({ animated: true });
       }, 50);
     }
     prevLengthRef.current = messages.length;
+    return () => {
+      if (newMessageScrollTimeoutRef.current) {
+        clearTimeout(newMessageScrollTimeoutRef.current);
+        newMessageScrollTimeoutRef.current = null;
+      }
+    };
   }, [messages.length, isAtBottom]);
 
   const handleJumpToBottom = useCallback(() => {
@@ -127,7 +143,8 @@ const ChatMessageList = forwardRef<ChatMessageListHandle, ChatMessageListProps>(
     setNewMessageCount(0);
   }, []);
 
-  const listItems = buildListItems(messages);
+  // M2: Memoize listItems computation
+  const listItems = useMemo(() => buildListItems(messages), [messages]);
 
   const renderItem = useCallback(
     ({ item }: { item: ListItem }) => {

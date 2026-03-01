@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   View,
   Text,
@@ -11,6 +11,7 @@ import {
 import { Ionicons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
 import { INCOGNITO_COLORS } from '@/lib/constants';
+import ChatRoomCamera, { ChatRoomMediaResult } from './ChatRoomCamera';
 
 const C = INCOGNITO_COLORS;
 
@@ -34,53 +35,51 @@ export default function AttachmentPopup({
   onVideoSelected,
   onDoodlePress,
 }: AttachmentPopupProps) {
-  const requestCameraPermission = async () => {
-    const { status } = await ImagePicker.requestCameraPermissionsAsync();
-    if (status !== 'granted') {
-      Alert.alert(
-        'Camera Permission',
-        'Camera access is needed. Please enable it in Settings.',
-        [{ text: 'OK' }]
-      );
-      return false;
-    }
-    return true;
-  };
+  // Camera state - managed independently of popup visibility
+  const [showCamera, setShowCamera] = useState(false);
 
-  const handleCameraPhoto = async () => {
-    onClose();
+  // Open camera directly with permission check
+  const handleCameraPress = useCallback(async () => {
     try {
-      if (!(await requestCameraPermission())) return;
-      const result = await ImagePicker.launchCameraAsync({
-        mediaTypes: ['images'],
-        quality: 0.8,
-        allowsEditing: false,
-      });
-      if (!result.canceled && result.assets?.[0]?.uri) {
-        onImageCaptured(result.assets[0].uri);
+      // Request camera permission first
+      const { status } = await ImagePicker.requestCameraPermissionsAsync();
+      if (status !== 'granted') {
+        Alert.alert(
+          'Camera Permission',
+          'Camera access is required to take photos and videos. Please enable it in Settings.',
+          [{ text: 'OK' }]
+        );
+        return;
       }
-    } catch {
+
+      // Close popup first
+      onClose();
+
+      // Brief delay to let modal animation complete
+      await new Promise(resolve => setTimeout(resolve, 200));
+
+      // Open camera
+      setShowCamera(true);
+    } catch (error) {
+      console.error('[AttachmentPopup] Camera open error:', error);
       Alert.alert('Error', 'Could not open camera. Please try again.');
     }
-  };
+  }, [onClose]);
 
-  const handleCameraVideo = async () => {
-    onClose();
-    try {
-      if (!(await requestCameraPermission())) return;
-      const result = await ImagePicker.launchCameraAsync({
-        mediaTypes: ['videos'],
-        allowsEditing: false,
-        videoMaxDuration: MAX_VIDEO_DURATION_SECONDS,
-        videoQuality: 1,
-      });
-      if (!result.canceled && result.assets?.[0]?.uri) {
-        onVideoSelected(result.assets[0].uri);
-      }
-    } catch {
-      Alert.alert('Error', 'Could not open camera. Please try again.');
+  // Handle media captured from camera
+  const handleMediaCaptured = useCallback((result: ChatRoomMediaResult) => {
+    setShowCamera(false);
+    if (result.type === 'image') {
+      onImageCaptured(result.uri);
+    } else {
+      onVideoSelected(result.uri);
     }
-  };
+  }, [onImageCaptured, onVideoSelected]);
+
+  // Close camera
+  const handleCameraClose = useCallback(() => {
+    setShowCamera(false);
+  }, []);
 
   const handleGallery = async () => {
     onClose();
@@ -127,57 +126,58 @@ export default function AttachmentPopup({
     onDoodlePress();
   };
 
-  if (!visible) return null;
-
   return (
-    <Modal
-      visible={visible}
-      transparent
-      animationType="fade"
-      onRequestClose={onClose}
-    >
-      <TouchableOpacity
-        style={styles.overlay}
-        activeOpacity={1}
-        onPress={onClose}
+    <>
+      {/* Attachment Menu */}
+      <Modal
+        visible={visible}
+        transparent
+        animationType="fade"
+        onRequestClose={onClose}
       >
-        <View style={styles.popup}>
-          <ScrollView
-            horizontal
-            showsHorizontalScrollIndicator={false}
-            contentContainerStyle={styles.scrollContent}
-          >
-            <TouchableOpacity style={styles.option} onPress={handleCameraPhoto} activeOpacity={0.7}>
-              <View style={[styles.iconCircle, { backgroundColor: 'rgba(76,175,80,0.15)' }]}>
-                <Ionicons name="camera" size={24} color="#4CAF50" />
-              </View>
-              <Text style={styles.optionText}>Photo</Text>
-            </TouchableOpacity>
+        <TouchableOpacity
+          style={styles.overlay}
+          activeOpacity={1}
+          onPress={onClose}
+        >
+          <View style={styles.popup}>
+            <ScrollView
+              horizontal
+              showsHorizontalScrollIndicator={false}
+              contentContainerStyle={styles.scrollContent}
+            >
+              <TouchableOpacity style={styles.option} onPress={handleCameraPress} activeOpacity={0.7}>
+                <View style={[styles.iconCircle, { backgroundColor: 'rgba(76,175,80,0.15)' }]}>
+                  <Ionicons name="camera" size={24} color="#4CAF50" />
+                </View>
+                <Text style={styles.optionText}>Camera</Text>
+              </TouchableOpacity>
 
-            <TouchableOpacity style={styles.option} onPress={handleCameraVideo} activeOpacity={0.7}>
-              <View style={[styles.iconCircle, { backgroundColor: 'rgba(233,69,96,0.15)' }]}>
-                <Ionicons name="videocam" size={24} color="#E94560" />
-              </View>
-              <Text style={styles.optionText}>Record</Text>
-            </TouchableOpacity>
+              <TouchableOpacity style={styles.option} onPress={handleGallery} activeOpacity={0.7}>
+                <View style={[styles.iconCircle, { backgroundColor: 'rgba(33,150,243,0.15)' }]}>
+                  <Ionicons name="image" size={24} color="#2196F3" />
+                </View>
+                <Text style={styles.optionText}>Gallery</Text>
+              </TouchableOpacity>
 
-            <TouchableOpacity style={styles.option} onPress={handleGallery} activeOpacity={0.7}>
-              <View style={[styles.iconCircle, { backgroundColor: 'rgba(33,150,243,0.15)' }]}>
-                <Ionicons name="image" size={24} color="#2196F3" />
-              </View>
-              <Text style={styles.optionText}>Gallery</Text>
-            </TouchableOpacity>
+              <TouchableOpacity style={styles.option} onPress={handleDoodle} activeOpacity={0.7}>
+                <View style={[styles.iconCircle, { backgroundColor: 'rgba(255,152,0,0.15)' }]}>
+                  <Ionicons name="brush" size={24} color="#FF9800" />
+                </View>
+                <Text style={styles.optionText}>Doodle</Text>
+              </TouchableOpacity>
+            </ScrollView>
+          </View>
+        </TouchableOpacity>
+      </Modal>
 
-            <TouchableOpacity style={styles.option} onPress={handleDoodle} activeOpacity={0.7}>
-              <View style={[styles.iconCircle, { backgroundColor: 'rgba(255,152,0,0.15)' }]}>
-                <Ionicons name="brush" size={24} color="#FF9800" />
-              </View>
-              <Text style={styles.optionText}>Doodle</Text>
-            </TouchableOpacity>
-          </ScrollView>
-        </View>
-      </TouchableOpacity>
-    </Modal>
+      {/* In-App Camera */}
+      <ChatRoomCamera
+        visible={showCamera}
+        onClose={handleCameraClose}
+        onMediaCaptured={handleMediaCaptured}
+      />
+    </>
   );
 }
 

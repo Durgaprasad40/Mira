@@ -7,7 +7,7 @@
  * - Solid dark background, isolated from chat UI
  * - No download/save/share options
  */
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import {
   View,
   Text,
@@ -18,6 +18,8 @@ import {
   Platform,
   ToastAndroid,
   StatusBar,
+  PanResponder,
+  PanResponderInstance,
 } from 'react-native';
 import { Image } from 'expo-image';
 import { useVideoPlayer, VideoView, VideoPlayer } from 'expo-video';
@@ -31,7 +33,10 @@ interface SecureMediaViewerProps {
   type: 'image' | 'video';
   /** Controlled hold state - media is visible while true */
   isHolding: boolean;
+  /** Called when touch ends on viewer surface (finger lifted) */
   onClose: () => void;
+  /** Called when touch starts directly on viewer surface */
+  onHoldStart?: () => void;
 }
 
 /**
@@ -55,13 +60,58 @@ export default function SecureMediaViewer({
   type,
   isHolding,
   onClose,
+  onHoldStart,
 }: SecureMediaViewerProps) {
   const [screenshotBlocked, setScreenshotBlocked] = useState(false);
   const screenshotTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Video player (only initialized for video type)
+  // Cleanup screenshot timeout on unmount to prevent setState after unmount
+  useEffect(() => {
+    return () => {
+      if (screenshotTimeoutRef.current) {
+        clearTimeout(screenshotTimeoutRef.current);
+        screenshotTimeoutRef.current = null;
+      }
+    };
+  }, []);
+
+  // Use refs for callbacks to avoid recreating PanResponder
+  const onCloseRef = useRef(onClose);
+  const onHoldStartRef = useRef(onHoldStart);
+  onCloseRef.current = onClose;
+  onHoldStartRef.current = onHoldStart;
+
+  // PanResponder for the full-screen viewer surface
+  // This handles the case where finger moves onto viewer or user touches viewer directly
+  const viewerPanResponder: PanResponderInstance = useMemo(() => PanResponder.create({
+    // Capture touch events on the viewer surface
+    onStartShouldSetPanResponder: () => true,
+    onMoveShouldSetPanResponder: () => false,
+
+    // Touch started on viewer surface
+    onPanResponderGrant: () => {
+      onHoldStartRef.current?.();
+    },
+
+    // Touch ended (finger lifted) - close the viewer
+    onPanResponderRelease: () => {
+      onCloseRef.current?.();
+    },
+
+    // Touch interrupted - also close
+    onPanResponderTerminate: () => {
+      onCloseRef.current?.();
+    },
+
+    // Don't release on movement - key for hold-to-view
+    onPanResponderTerminationRequest: () => false,
+  }), []);
+
+  // Video player (only initialized for video type with valid URI)
+  // Pass null instead of empty string to avoid unexpected behavior
+  const videoSource = type === 'video' && mediaUri ? mediaUri : null;
   const player = useVideoPlayer(
-    type === 'video' ? mediaUri : '',
+    videoSource,
     (p) => {
       p.loop = true;
     }
@@ -170,8 +220,8 @@ export default function SecureMediaViewer({
           <Ionicons name="close" size={28} color="#FFFFFF" />
         </Pressable>
 
-        {/* Media display area (hold controlled by parent) */}
-        <View style={styles.mediaArea}>
+        {/* Media display area with PanResponder for hold-to-view */}
+        <View style={styles.mediaArea} {...viewerPanResponder.panHandlers}>
           {type === 'image' ? (
             <Image
               source={{ uri: mediaUri }}

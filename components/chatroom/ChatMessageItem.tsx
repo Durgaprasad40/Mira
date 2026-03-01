@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useCallback } from 'react';
 import { View, Text, TouchableOpacity, StyleSheet } from 'react-native';
 import { Image } from 'expo-image';
 import { Ionicons } from '@expo/vector-icons';
@@ -50,6 +50,17 @@ function ChatMessageItem({
   const isMedia = (messageType === 'image' || messageType === 'video' || messageType === 'doodle') && mediaUrl;
   const isSecureMedia = messageType === 'image' || messageType === 'video';
 
+  // Memoize hold callbacks to prevent re-renders (only for secure media)
+  const handleHoldStart = useCallback(() => {
+    if (isSecureMedia && mediaUrl) {
+      onMediaHoldStart?.(messageId, mediaUrl, messageType as 'image' | 'video');
+    }
+  }, [messageId, mediaUrl, messageType, isSecureMedia, onMediaHoldStart]);
+
+  const handleHoldEnd = useCallback(() => {
+    onMediaHoldEnd?.();
+  }, [onMediaHoldEnd]);
+
   // Dense layout: Avatar on LEFT for others, RIGHT for me
   // Small name above bubble for others only, no timestamps
   return (
@@ -79,8 +90,8 @@ function ChatMessageItem({
               messageId={messageId}
               mediaUrl={mediaUrl!}
               type={messageType as 'image' | 'video' | 'doodle'}
-              onHoldStart={isSecureMedia ? () => onMediaHoldStart?.(messageId, mediaUrl!, messageType as 'image' | 'video') : undefined}
-              onHoldEnd={isSecureMedia ? onMediaHoldEnd : undefined}
+              onHoldStart={isSecureMedia ? handleHoldStart : undefined}
+              onHoldEnd={isSecureMedia ? handleHoldEnd : undefined}
             />
           </View>
         ) : (

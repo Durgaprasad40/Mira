@@ -1,10 +1,11 @@
-import React, { useCallback, useRef } from 'react';
+import React, { useCallback, useRef, useMemo, useEffect } from 'react';
 import {
   View,
   Text,
   StyleSheet,
   Pressable,
-  GestureResponderEvent,
+  PanResponder,
+  PanResponderInstance,
 } from 'react-native';
 import { Image } from 'expo-image';
 import { Ionicons } from '@expo/vector-icons';
@@ -43,6 +44,16 @@ export default function MediaMessage({
   viewOnce = false,
 }: MediaMessageProps) {
   const markViewedTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Cleanup timeout on unmount to prevent state updates after unmount
+  useEffect(() => {
+    return () => {
+      if (markViewedTimeoutRef.current) {
+        clearTimeout(markViewedTimeoutRef.current);
+        markViewedTimeoutRef.current = null;
+      }
+    };
+  }, []);
 
   // Secure mode: only when messageId is provided (chat rooms)
   const isSecureMode = !!messageId;
@@ -99,40 +110,74 @@ export default function MediaMessage({
     );
   }
 
-  // Secure mode handlers - IMMEDIATE open/close
-  const handlePressIn = useCallback((_e: GestureResponderEvent) => {
-    // Immediately open full-screen viewer
-    onHoldStart?.();
+  // PanResponder for secure media - handles hold without releasing on finger movement
+  // We use refs to access latest values without recreating PanResponder
+  const onHoldStartRef = useRef(onHoldStart);
+  const onHoldEndRef = useRef(onHoldEnd);
+  const hasBeenViewedRef = useRef(hasBeenViewed);
+  const messageIdRef = useRef(messageId);
+  const viewOnceRef = useRef(viewOnce);
+  const markViewedRef = useRef(markViewed);
+  const markConsumedRef = useRef(markConsumed);
 
-    // After 300ms of holding, mark as "viewed" (hides hint on future views)
-    markViewedTimeoutRef.current = setTimeout(() => {
-      if (!hasBeenViewed && messageId) {
-        markViewed(messageId);
+  // Keep refs updated
+  onHoldStartRef.current = onHoldStart;
+  onHoldEndRef.current = onHoldEnd;
+  hasBeenViewedRef.current = hasBeenViewed;
+  messageIdRef.current = messageId;
+  viewOnceRef.current = viewOnce;
+  markViewedRef.current = markViewed;
+  markConsumedRef.current = markConsumed;
+
+  const panResponder: PanResponderInstance = useMemo(() => PanResponder.create({
+    // Always become responder on touch start
+    onStartShouldSetPanResponder: () => true,
+    onMoveShouldSetPanResponder: () => false,
+
+    // Touch started - open viewer
+    onPanResponderGrant: () => {
+      // Immediately open full-screen viewer
+      onHoldStartRef.current?.();
+
+      // After 300ms of holding, mark as "viewed"
+      markViewedTimeoutRef.current = setTimeout(() => {
+        const msgId = messageIdRef.current;
+        if (!hasBeenViewedRef.current && msgId) {
+          markViewedRef.current(msgId);
+        }
+        // For view-once, mark as consumed after viewing
+        if (viewOnceRef.current && msgId) {
+          markConsumedRef.current(msgId);
+        }
+      }, 300);
+    },
+
+    // Touch ended (finger lifted) - close viewer
+    onPanResponderRelease: () => {
+      // Cancel "mark as viewed" timeout if released too quickly
+      if (markViewedTimeoutRef.current) {
+        clearTimeout(markViewedTimeoutRef.current);
+        markViewedTimeoutRef.current = null;
       }
-      // For view-once, mark as consumed after viewing
-      if (viewOnce && messageId) {
-        markConsumed(messageId);
+      // Immediately close viewer
+      onHoldEndRef.current?.();
+    },
+
+    // Touch interrupted (e.g., another gesture took over) - close viewer
+    onPanResponderTerminate: () => {
+      if (markViewedTimeoutRef.current) {
+        clearTimeout(markViewedTimeoutRef.current);
+        markViewedTimeoutRef.current = null;
       }
-    }, 300);
-  }, [messageId, hasBeenViewed, markViewed, viewOnce, markConsumed, onHoldStart]);
+      onHoldEndRef.current?.();
+    },
 
-  const handlePressOut = useCallback(() => {
-    // Cancel "mark as viewed" timeout if released too quickly
-    if (markViewedTimeoutRef.current) {
-      clearTimeout(markViewedTimeoutRef.current);
-      markViewedTimeoutRef.current = null;
-    }
-
-    // Immediately close viewer
-    onHoldEnd?.();
-  }, [onHoldEnd]);
+    // Don't release responder on move - this is key to fixing the issue
+    onPanResponderTerminationRequest: () => false,
+  }), []);
 
   return (
-    <Pressable
-      style={styles.container}
-      onPressIn={handlePressIn}
-      onPressOut={handlePressOut}
-    >
+    <View style={styles.container} {...panResponder.panHandlers}>
       {/* Media thumbnail - always blurred in chat list */}
       <Image
         source={{ uri: mediaUrl }}
@@ -155,7 +200,7 @@ export default function MediaMessage({
 
       {/* Blur overlay */}
       <View style={styles.blurOverlay} />
-    </Pressable>
+    </View>
   );
 }
 

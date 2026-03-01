@@ -6,8 +6,10 @@ import { internal } from './_generated/api';
 // 24 hours in milliseconds
 const ROOM_LIFETIME_MS = 24 * 60 * 60 * 1000;
 const PENALTY_DURATION_MS = 24 * 60 * 60 * 1000;
-// Max messages per room before auto-cleanup
-const MAX_MESSAGES_PER_ROOM = 1000;
+// Message retention constants
+const MAX_MESSAGES_PER_ROOM = 1000; // Trigger cleanup when exceeded
+const TARGET_AFTER_TRIM = 900;      // Target count after cleanup
+const BATCH_DELETE_SIZE = 200;      // Delete in batches for efficiency
 
 const DEFAULT_ROOMS = [
   { name: 'Global', slug: 'global', category: 'general' as const },
@@ -229,7 +231,7 @@ export const sendMessage = mutation({
     senderId: v.id('users'),
     text: v.optional(v.string()),
     imageUrl: v.optional(v.string()),
-    mediaType: v.optional(v.union(v.literal('image'), v.literal('doodle'))), // For distinguishing doodles from images
+    mediaType: v.optional(v.union(v.literal('image'), v.literal('video'), v.literal('doodle'))), // For distinguishing media types
     clientId: v.optional(v.string()), // For deduplication
   },
   handler: async (ctx, { roomId, senderId, text, imageUrl, mediaType, clientId }) => {
@@ -322,43 +324,73 @@ export const sendMessage = mutation({
     // 6. Update member's lastMessageAt for rate limiting tracking
     await ctx.db.patch(membership._id, { lastMessageAt: now });
 
-    // 7. Auto-cleanup: Keep only most recent 1000 messages per room
-    // Use denormalized messageCount for efficiency (avoids loading all messages)
-    let currentCount = room.messageCount;
+    // 7. Auto-cleanup: Trim to TARGET_AFTER_TRIM (900) when exceeding MAX (1000)
+    // RACE-SAFE: Query actual oldest messages to determine count and what to delete
+    // Query up to MAX + buffer to detect if cleanup is needed
+    const probeMessages = await ctx.db
+      .query('chatRoomMessages')
+      .withIndex('by_room_created', (q) => q.eq('roomId', roomId))
+      .order('asc')
+      .take(MAX_MESSAGES_PER_ROOM + 1);
 
-    // Migration path: if messageCount is undefined, compute it once
-    if (currentCount === undefined) {
-      const allMsgs = await ctx.db
-        .query('chatRoomMessages')
-        .withIndex('by_room_created', (q) => q.eq('roomId', roomId))
-        .collect();
-      currentCount = allMsgs.length;
-    } else {
-      // Increment for the newly inserted message
-      currentCount += 1;
-    }
+    const needsCleanup = probeMessages.length > MAX_MESSAGES_PER_ROOM;
 
-    // Check if we exceed the cap
-    if (currentCount > MAX_MESSAGES_PER_ROOM) {
-      const excess = currentCount - MAX_MESSAGES_PER_ROOM;
+    if (needsCleanup) {
+      // Cleanup triggered: trim down to TARGET_AFTER_TRIM (900)
+      // Use batch deletion loop to handle large overages efficiently
+      let deletedCount = 0;
+      let continueDeleting = true;
 
-      // Query only the oldest `excess` messages (ordered by _creationTime asc)
-      const oldestMessages = await ctx.db
-        .query('chatRoomMessages')
-        .withIndex('by_room_created', (q) => q.eq('roomId', roomId))
-        .order('asc')
-        .take(excess);
+      while (continueDeleting) {
+        // Fetch a batch of oldest messages
+        const batch = await ctx.db
+          .query('chatRoomMessages')
+          .withIndex('by_room_created', (q) => q.eq('roomId', roomId))
+          .order('asc')
+          .take(BATCH_DELETE_SIZE);
 
-      // Delete oldest messages in batches
-      for (const msg of oldestMessages) {
-        await ctx.db.delete(msg._id);
+        // Stop if we've trimmed enough (remaining <= TARGET)
+        // We need to know current count: fetch one more to check
+        const checkCount = await ctx.db
+          .query('chatRoomMessages')
+          .withIndex('by_room_created', (q) => q.eq('roomId', roomId))
+          .order('asc')
+          .take(TARGET_AFTER_TRIM + 1);
+
+        if (checkCount.length <= TARGET_AFTER_TRIM) {
+          // Already at or below target
+          continueDeleting = false;
+          break;
+        }
+
+        // Calculate how many to delete from this batch
+        const currentCount = checkCount.length; // At least TARGET+1
+        const toDelete = Math.min(batch.length, currentCount - TARGET_AFTER_TRIM);
+
+        if (toDelete <= 0) {
+          continueDeleting = false;
+          break;
+        }
+
+        // Delete oldest messages from batch (never delete just-inserted message)
+        for (let i = 0; i < toDelete && i < batch.length; i++) {
+          const msg = batch[i];
+          if (msg._id === messageId) continue; // Safety: never delete our new message
+          await ctx.db.delete(msg._id);
+          deletedCount++;
+        }
+
+        // Safety: prevent infinite loop if something goes wrong
+        if (deletedCount > MAX_MESSAGES_PER_ROOM) {
+          break;
+        }
       }
 
-      // Update room with capped count
-      await ctx.db.patch(roomId, { messageCount: MAX_MESSAGES_PER_ROOM });
+      // Update room with target count
+      await ctx.db.patch(roomId, { messageCount: TARGET_AFTER_TRIM });
     } else {
-      // Update room with new count
-      await ctx.db.patch(roomId, { messageCount: currentCount });
+      // No cleanup needed, update messageCount to actual
+      await ctx.db.patch(roomId, { messageCount: probeMessages.length });
     }
 
     return messageId;

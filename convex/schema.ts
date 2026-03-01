@@ -1089,7 +1089,7 @@ export default defineSchema({
   chatRoomMessages: defineTable({
     roomId: v.id('chatRooms'),
     senderId: v.id('users'),
-    type: v.union(v.literal('text'), v.literal('image'), v.literal('doodle'), v.literal('system')),
+    type: v.union(v.literal('text'), v.literal('image'), v.literal('video'), v.literal('doodle'), v.literal('system')),
     text: v.optional(v.string()),
     imageUrl: v.optional(v.string()),
     createdAt: v.number(),

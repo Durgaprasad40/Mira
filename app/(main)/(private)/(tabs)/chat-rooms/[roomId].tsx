@@ -663,7 +663,7 @@ export default function ChatRoomScreen() {
             roomId: roomIdStr as Id<'chatRooms'>,
             senderId: authUserId as Id<'users'>,
             imageUrl: uri,
-            mediaType: mediaType === 'doodle' ? 'doodle' : 'image',
+            mediaType: mediaType,
             clientId,
           });
           incrementCoins();
@@ -686,6 +686,11 @@ export default function ChatRoomScreen() {
   const handleMediaHoldEnd = useCallback(() => {
     // Immediately close viewer
     setSecureMediaState({ visible: false, isHolding: false, uri: '', type: 'image' });
+  }, []);
+
+  // Called when user touches the viewer surface directly (to enable hold-to-view on viewer)
+  const handleViewerHoldStart = useCallback(() => {
+    setSecureMediaState((prev) => ({ ...prev, isHolding: true }));
   }, []);
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -1137,6 +1142,7 @@ export default function ChatRoomScreen() {
         mediaUri={secureMediaState.uri}
         type={secureMediaState.type}
         onClose={handleMediaHoldEnd}
+        onHoldStart={handleViewerHoldStart}
       />
 
       <ReportUserModal
