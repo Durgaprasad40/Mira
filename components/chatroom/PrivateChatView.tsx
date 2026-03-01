@@ -25,6 +25,7 @@ import AttachmentPopup from './AttachmentPopup';
 import DoodleCanvas from './DoodleCanvas';
 import VideoPlayerModal from './VideoPlayerModal';
 import ImagePreviewModal from './ImagePreviewModal';
+import SecureMediaViewer from './SecureMediaViewer';
 import { formatTime, shouldShowTimestamp } from '@/utils/chatTime';
 
 const C = INCOGNITO_COLORS;
@@ -66,6 +67,11 @@ export default function PrivateChatView({ dm, onBack, topInset = 0, isModal = fa
   const [doodleVisible, setDoodleVisible] = useState(false);
   const [videoPlayerUri, setVideoPlayerUri] = useState('');
   const [imagePreviewUri, setImagePreviewUri] = useState('');
+
+  // Secure media viewer state (hold-to-view for video)
+  const [secureMediaUri, setSecureMediaUri] = useState('');
+  const [secureMediaType, setSecureMediaType] = useState<'image' | 'video'>('image');
+  const [isHoldingSecureMedia, setIsHoldingSecureMedia] = useState(false);
 
   // Android modal keyboard fix: track keyboard height manually
   const [kbHeight, setKbHeight] = useState(0);
@@ -164,12 +170,38 @@ export default function PrivateChatView({ dm, onBack, topInset = 0, isModal = fa
   );
 
 
-  const handleMediaPress = useCallback((mediaUrl: string, type: 'image' | 'video') => {
-    if (type === 'video') {
-      setVideoPlayerUri(mediaUrl);
-    } else {
-      setImagePreviewUri(mediaUrl);
+  // Ref for cleanup of setTimeout to avoid setState after unmount
+  const secureMediaTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      if (secureMediaTimeoutRef.current) {
+        clearTimeout(secureMediaTimeoutRef.current);
+        secureMediaTimeoutRef.current = null;
+      }
+    };
+  }, []);
+
+  // Secure media hold handlers (for BOTH image and video - DM matches GROUP style)
+  const handleSecureMediaHoldStart = useCallback((mediaUrl: string, type: 'image' | 'video') => {
+    if (__DEV__) console.log('[SECURE] dm_media hold_start', { type });
+    setSecureMediaUri(mediaUrl);
+    setSecureMediaType(type);
+    setIsHoldingSecureMedia(true);
+  }, []);
+
+  const handleSecureMediaHoldEnd = useCallback(() => {
+    if (__DEV__) console.log('[SECURE] dm_media hold_end');
+    setIsHoldingSecureMedia(false);
+    // Keep URI set so viewer can fade out gracefully, then clear
+    if (secureMediaTimeoutRef.current) {
+      clearTimeout(secureMediaTimeoutRef.current);
     }
+    secureMediaTimeoutRef.current = setTimeout(() => {
+      setSecureMediaUri('');
+      secureMediaTimeoutRef.current = null;
+    }, 100);
   }, []);
 
   // Pre-compute showTimestamp for each message to avoid messages dependency in renderItem
@@ -193,16 +225,26 @@ export default function PrivateChatView({ dm, onBack, topInset = 0, isModal = fa
       const isMedia = (item.type === 'image' || item.type === 'video') && item.mediaUrl;
       const showTime = item.showTimestamp;
 
+      // DM media uses secure mode for BOTH image and video (matches GROUP style)
+      // - Small blurred preview with "Hold to view"
+      // - Hold to reveal, release to lock
+      // - No tap-to-fullscreen
+      const mediaProps = isMedia
+        ? {
+            messageId: item.id, // Enable secure mode (blurred + hold-to-view)
+            mediaUrl: item.mediaUrl!,
+            type: item.type as 'image' | 'video',
+            onHoldStart: () => handleSecureMediaHoldStart(item.mediaUrl!, item.type as 'image' | 'video'),
+            onHoldEnd: handleSecureMediaHoldEnd,
+          }
+        : null;
+
       if (isMe) {
         return (
           <View style={styles.rowMe}>
             <View style={styles.bubbleMe}>
-              {isMedia ? (
-                <MediaMessage
-                  mediaUrl={item.mediaUrl!}
-                  type={item.type as 'image' | 'video'}
-                  onPress={() => handleMediaPress(item.mediaUrl!, item.type as 'image' | 'video')}
-                />
+              {mediaProps ? (
+                <MediaMessage {...mediaProps} />
               ) : (
                 <Text style={styles.bubbleMeText}>{item.text}</Text>
               )}
@@ -222,12 +264,8 @@ export default function PrivateChatView({ dm, onBack, topInset = 0, isModal = fa
             </View>
           )}
           <View style={styles.bubbleOther}>
-            {isMedia ? (
-              <MediaMessage
-                mediaUrl={item.mediaUrl!}
-                type={item.type as 'image' | 'video'}
-                onPress={() => handleMediaPress(item.mediaUrl!, item.type as 'image' | 'video')}
-              />
+            {mediaProps ? (
+              <MediaMessage {...mediaProps} />
             ) : (
               <Text style={styles.bubbleOtherText}>{item.text}</Text>
             )}
@@ -236,7 +274,7 @@ export default function PrivateChatView({ dm, onBack, topInset = 0, isModal = fa
         </View>
       );
     },
-    [dm.peerAvatar, handleMediaPress]
+    [dm.peerAvatar, handleSecureMediaHoldStart, handleSecureMediaHoldEnd]
   );
 
   return (
@@ -382,6 +420,16 @@ export default function PrivateChatView({ dm, onBack, topInset = 0, isModal = fa
         visible={!!imagePreviewUri}
         imageUri={imagePreviewUri}
         onClose={() => setImagePreviewUri('')}
+      />
+
+      {/* Secure media viewer (hold-to-view for video) */}
+      <SecureMediaViewer
+        visible={!!secureMediaUri}
+        mediaUri={secureMediaUri}
+        type={secureMediaType}
+        isHolding={isHoldingSecureMedia}
+        onClose={handleSecureMediaHoldEnd}
+        onHoldStart={() => setIsHoldingSecureMedia(true)}
       />
     </View>
   );

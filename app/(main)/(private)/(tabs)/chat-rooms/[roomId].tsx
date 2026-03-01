@@ -767,6 +767,7 @@ export default function ChatRoomScreen() {
   // AVATAR PRESS
   // ─────────────────────────────────────────────────────────────────────────
   const handleAvatarPress = useCallback((senderId: string) => {
+    if (__DEV__) console.log('[TAP] avatar pressed', { senderId, t: Date.now() });
     const onlineUser = DEMO_ONLINE_USERS.find((u) => u.id === senderId);
     if (onlineUser) {
       setSelectedUser(onlineUser);
@@ -780,12 +781,14 @@ export default function ChatRoomScreen() {
       });
     }
     setOverlay('userProfile');
+    if (__DEV__) console.log('[TAP] avatar overlay set', { t: Date.now() });
   }, [messages]);
 
   // ─────────────────────────────────────────────────────────────────────────
   // ONLINE USER PRESS
   // ─────────────────────────────────────────────────────────────────────────
   const handleOnlineUserPress = useCallback((user: DemoOnlineUser) => {
+    if (__DEV__) console.log('[TAP] online user pressed', { id: user.id, t: Date.now() });
     setSelectedUser(user);
     setOverlay('userProfile');
   }, []);

@@ -10,7 +10,10 @@ import {
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { INCOGNITO_COLORS } from '@/lib/constants';
-import { DemoOnlineUser } from '@/lib/demoData';
+import { DemoOnlineUser, DEMO_CURRENT_USER } from '@/lib/demoData';
+import { isDemoMode } from '@/hooks/useConvex';
+import { useAuthStore } from '@/stores/authStore';
+import { useChatRoomProfileStore } from '@/stores/chatRoomProfileStore';
 
 const C = INCOGNITO_COLORS;
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
@@ -29,13 +32,23 @@ export default function ViewProfileModal({
   user,
 }: ViewProfileModalProps) {
   const [bioExpanded, setBioExpanded] = useState(false);
+  const authUserId = useAuthStore((s) => s.userId);
+  const storeBio = useChatRoomProfileStore((s) => s.bio);
 
   if (!visible || !user) return null;
 
-  const hasBio = !!user.chatBio?.trim();
-  const bioText = hasBio ? user.chatBio!.trim() : 'No bio yet';
+  // Determine if viewing current user's profile
+  const currentUserId = isDemoMode ? DEMO_CURRENT_USER.id : authUserId;
+  const isCurrentUser = user.id === currentUserId;
+
+  // Use store bio for current user, user.chatBio for others
+  const rawBio = isCurrentUser ? storeBio : user.chatBio;
+  const hasBio = !!rawBio?.trim();
+  const bioText = hasBio ? rawBio!.trim() : 'No bio yet';
   // Show "Read more" if bio exceeds ~3 lines (~120 chars)
   const needsReadMore = hasBio && bioText.length > 120;
+
+  if (__DEV__) console.log('[PROFILE] bio_source', { isCurrentUser, source: isCurrentUser ? 'store' : 'user', length: bioText.length });
 
   return (
     <Modal

@@ -1,8 +1,9 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   View,
   Text,
   TouchableOpacity,
+  Pressable,
   Animated,
   StyleSheet,
   Dimensions,
@@ -37,21 +38,61 @@ export default function UserProfilePopup({
   isMuted = false,
 }: UserProfilePopupProps) {
   const translateY = useRef(new Animated.Value(SCREEN_HEIGHT)).current;
+  // Backdrop only active after open animation finishes (prevents opening touch from closing)
+  const [backdropActive, setBackdropActive] = useState(false);
+  const visibleRef = useRef(visible);
+  visibleRef.current = visible;
 
+  // Log once when popup opens (not on every render)
   useEffect(() => {
-    Animated.spring(translateY, {
-      toValue: visible ? 0 : SCREEN_HEIGHT,
-      useNativeDriver: true,
-      tension: 65,
-      friction: 11,
-    }).start();
+    if (visible && user) {
+      if (__DEV__) console.log('[NAV] open_profile_popup', { userId: user.id, username: user.username });
+    }
+  }, [visible, user?.id]);
+
+  // Animation + backdrop activation
+  useEffect(() => {
+    if (visible) {
+      setBackdropActive(false);
+      if (__DEV__) console.log('[POPUP] opened visible=true backdropActive=false');
+      Animated.spring(translateY, {
+        toValue: 0,
+        useNativeDriver: true,
+        tension: 65,
+        friction: 11,
+      }).start(({ finished }) => {
+        // Only activate backdrop if animation finished AND popup still visible
+        if (finished && visibleRef.current) {
+          setBackdropActive(true);
+          if (__DEV__) console.log('[POPUP] backdropActive=true');
+        }
+      });
+    } else {
+      setBackdropActive(false);
+      Animated.spring(translateY, {
+        toValue: SCREEN_HEIGHT,
+        useNativeDriver: true,
+        tension: 65,
+        friction: 11,
+      }).start();
+    }
   }, [visible]);
 
   if (!visible || !user) return null;
 
   return (
     <View style={styles.overlay}>
-      <TouchableOpacity style={styles.backdrop} onPress={onClose} activeOpacity={1} />
+      {/* Backdrop: only responds to taps after animation finishes */}
+      <Pressable
+        style={styles.backdrop}
+        onPress={() => {
+          if (__DEV__) console.log('[POPUP] backdrop press', { backdropActive });
+          if (backdropActive) {
+            if (__DEV__) console.log('[POPUP] onClose called reason=backdrop');
+            onClose();
+          }
+        }}
+      />
       <Animated.View style={[styles.sheet, { transform: [{ translateY }] }]}>
         <View style={styles.handle} />
 
@@ -97,8 +138,9 @@ export default function UserProfilePopup({
           <TouchableOpacity
             style={styles.actionButton}
             onPress={() => {
+              if (__DEV__) console.log('[POPUP] view_profile pressed', { userId: user.id });
+              // Don't call onClose - parent changes overlay which hides this popup
               onViewProfile?.(user.id);
-              onClose();
             }}
           >
             <Ionicons name="eye-outline" size={20} color={C.text} />
@@ -136,8 +178,9 @@ export default function UserProfilePopup({
           <TouchableOpacity
             style={styles.actionButton}
             onPress={() => {
+              if (__DEV__) console.log('[REPORT] open', { userId: user.id });
+              // Don't call onClose - parent changes overlay which hides this popup
               onReport?.(user.id);
-              onClose();
             }}
           >
             <Ionicons name="flag-outline" size={20} color={C.primary} />
@@ -145,7 +188,13 @@ export default function UserProfilePopup({
           </TouchableOpacity>
         </View>
 
-        <TouchableOpacity style={styles.closeButton} onPress={onClose}>
+        <TouchableOpacity
+          style={styles.closeButton}
+          onPress={() => {
+            if (__DEV__) console.log('[POPUP] onClose called reason=button');
+            onClose();
+          }}
+        >
           <Text style={styles.closeText}>Close</Text>
         </TouchableOpacity>
       </Animated.View>

@@ -32,6 +32,9 @@ const PHASE2_TAB_ROOTS = new Set([
   'rooms',
 ]);
 
+// PERF: Track mount time for latency measurement
+let _privateLayoutMountTime = 0;
+
 export default function PrivateLayout() {
   const router = useRouter();
   const pathname = usePathname();
@@ -42,6 +45,12 @@ export default function PrivateLayout() {
   // H-001/C-001 FIX: Wait for incognito store hydration before checking consent
   const incognitoHydrated = useIncognitoStore((s) => s._hasHydrated);
   const userId = useAuthStore((s) => s.userId);
+
+  // PERF: Log mount time
+  useEffect(() => {
+    _privateLayoutMountTime = Date.now();
+    if (__DEV__) console.log('[PERF] PrivateLayout mounted', { t: _privateLayoutMountTime });
+  }, []);
 
   // Get the parent (main) stack navigator — beforeRemove fires here
   // when this screen is about to be popped from the (main) stack.

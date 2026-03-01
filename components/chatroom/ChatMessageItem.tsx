@@ -1,5 +1,5 @@
 import React, { useCallback } from 'react';
-import { View, Text, TouchableOpacity, StyleSheet } from 'react-native';
+import { View, Text, TouchableOpacity, Pressable, StyleSheet } from 'react-native';
 import { Image } from 'expo-image';
 import { Ionicons } from '@expo/vector-icons';
 import { INCOGNITO_COLORS } from '@/lib/constants';
@@ -70,8 +70,15 @@ function ChatMessageItem({
       activeOpacity={0.8}
       delayLongPress={400}
     >
-      {/* Avatar */}
-      <TouchableOpacity onPress={onAvatarPress} activeOpacity={0.7}>
+      {/* Avatar - use Pressable for better nested touch handling */}
+      <Pressable
+        onPress={(e) => {
+          e.stopPropagation?.();
+          if (__DEV__) console.log('[TAP] ChatMessageItem avatar onPress fired');
+          onAvatarPress?.();
+        }}
+        style={({ pressed }) => [{ opacity: pressed ? 0.7 : 1 }]}
+      >
         {senderAvatar ? (
           <Image source={{ uri: senderAvatar }} style={styles.avatar} />
         ) : (
@@ -79,7 +86,7 @@ function ChatMessageItem({
             <Ionicons name="person" size={14} color={isMe ? '#FFFFFF' : C.textLight} />
           </View>
         )}
-      </TouchableOpacity>
+      </Pressable>
 
       {/* Content: Bubble with name inside for others */}
       <View style={[styles.content, isMe && styles.contentMe]}>

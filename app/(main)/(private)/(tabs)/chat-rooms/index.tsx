@@ -131,6 +131,7 @@ export default function ChatRoomsScreen() {
   // If no preferred room → show homepage.
   // ─────────────────────────────────────────────────────────────────────────────
   const [checkingPreferred, setCheckingPreferred] = useState(true);
+  const [isRedirecting, setIsRedirecting] = useState(false);
   const preferredRoomId = usePreferredChatRoomStore((s) => s.preferredRoomId);
   const preferredHasHydrated = usePreferredChatRoomStore((s) => s._hasHydrated);
   const hasRedirectedRef = useRef(false);
@@ -173,11 +174,14 @@ export default function ChatRoomsScreen() {
 
     // Has preferred room → redirect immediately
     if (effectivePreferredRoomId) {
+      if (__DEV__) console.log('[ChatRooms] Initial redirect to', effectivePreferredRoomId);
       hasRedirectedRef.current = true;
+      setIsRedirecting(true);
 
       // P2 STABILITY: Safety timeout - if navigation doesn't complete within 2s, clear spinner
       redirectTimeoutRef.current = setTimeout(() => {
         setCheckingPreferred(false);
+        setIsRedirecting(false);
       }, 2000);
 
       try {
@@ -188,6 +192,7 @@ export default function ChatRoomsScreen() {
           console.warn('[ChatRooms] Preferred room redirect failed:', err);
         }
         setCheckingPreferred(false);
+        setIsRedirecting(false);
         if (redirectTimeoutRef.current) {
           clearTimeout(redirectTimeoutRef.current);
           redirectTimeoutRef.current = null;
@@ -211,14 +216,25 @@ export default function ChatRoomsScreen() {
   }, []);
 
   // Also check on screen focus (returning to tab after navigating away)
+  // Allow redirect every time screen focuses if preferredRoom exists
   useFocusEffect(
     useCallback(() => {
-      // Reset redirect flag on focus so we can redirect again if needed
-      // (e.g., user was in a room, left, and came back to tab)
-      if (!isPreferredLoading && effectivePreferredRoomId && !hasRedirectedRef.current) {
-        hasRedirectedRef.current = true;
-        router.replace(`/(main)/(private)/(tabs)/chat-rooms/${effectivePreferredRoomId}` as any);
-      }
+      // Skip if still loading or no preferred room
+      if (isPreferredLoading || !effectivePreferredRoomId) return;
+
+      // Skip if already redirected in this mount cycle (useLayoutEffect handled it)
+      if (hasRedirectedRef.current) return;
+
+      if (__DEV__) console.log('[ChatRooms] Focus redirect to', effectivePreferredRoomId);
+      hasRedirectedRef.current = true;
+      setIsRedirecting(true);
+      router.replace(`/(main)/(private)/(tabs)/chat-rooms/${effectivePreferredRoomId}` as any);
+
+      // Cleanup: reset flag when screen loses focus so we can redirect again next time
+      return () => {
+        hasRedirectedRef.current = false;
+        setIsRedirecting(false);
+      };
     }, [isPreferredLoading, effectivePreferredRoomId, router])
   );
 
@@ -281,13 +297,16 @@ export default function ChatRoomsScreen() {
 
   const handleOpenRoom = useCallback(
     (roomId: string) => {
+      if (__DEV__) console.log('[TAP] room pressed', { roomId, t: Date.now() });
+      // Navigate FIRST (instant) - defer other work
+      router.push(`/(main)/(private)/(tabs)/chat-rooms/${roomId}` as any);
+      if (__DEV__) console.log('[NAV] room push scheduled', { t: Date.now() });
+      // Defer non-critical state updates
       if (isDemoMode && !joinedRooms[roomId]) {
         setJoinedRooms((prev) => ({ ...prev, [roomId]: true }));
       }
       // Mark room as visited to clear unread badge
       markRoomVisited(roomId);
-      // Navigate within the tab stack to keep tab bar visible
-      router.push(`/(main)/(private)/(tabs)/chat-rooms/${roomId}` as any);
     },
     [router, joinedRooms, markRoomVisited]
   );
@@ -387,10 +406,23 @@ export default function ChatRoomsScreen() {
   const languageRooms = rooms.filter((r) => r.category === 'language');
 
   // ─────────────────────────────────────────────────────────────────────────────
-  // RENDER GATING: Show loading while checking preferred room
-  // This prevents the homepage from flashing before redirect
+  // RENDER GATING: Show loading while redirecting or checking preferred room
+  // This prevents flash of list UI when auto-navigating to last room
   // ─────────────────────────────────────────────────────────────────────────────
-  if (checkingPreferred || isConvexLoading) {
+
+  // Gate 1: If actively redirecting, show blank screen (prevents flash)
+  if (isRedirecting) {
+    return (
+      <View style={[styles.container, { paddingTop: insets.top }]}>
+        <View style={styles.loadingContainer}>
+          <ActivityIndicator size="large" color={C.primary} />
+        </View>
+      </View>
+    );
+  }
+
+  // Gate 2: Convex mode - wait for data to load
+  if (!isDemoMode && (checkingPreferred || isConvexLoading)) {
     return (
       <View style={[styles.container, { paddingTop: insets.top }]}>
         <View style={styles.header}>

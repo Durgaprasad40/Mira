@@ -18,8 +18,11 @@ interface ChatRoomProfileState {
   /** Avatar URI for chat rooms (null = use default) */
   avatarUri: string | null;
 
+  /** Bio text for chat rooms (null = no bio) */
+  bio: string | null;
+
   /** Update the chat room profile */
-  setProfile: (data: { displayName?: string; avatarUri?: string | null }) => void;
+  setProfile: (data: { displayName?: string; avatarUri?: string | null; bio?: string | null }) => void;
 
   /** Clear the chat room profile (reset to defaults) */
   clearProfile: () => void;
@@ -34,17 +37,19 @@ export const useChatRoomProfileStore = create<ChatRoomProfileState>()(
     (set) => ({
       displayName: null,
       avatarUri: null,
+      bio: null,
       _hasHydrated: false,
 
       setProfile: (data) => {
         set((state) => ({
           displayName: data.displayName !== undefined ? data.displayName : state.displayName,
           avatarUri: data.avatarUri !== undefined ? data.avatarUri : state.avatarUri,
+          bio: data.bio !== undefined ? data.bio : state.bio,
         }));
       },
 
       clearProfile: () => {
-        set({ displayName: null, avatarUri: null });
+        set({ displayName: null, avatarUri: null, bio: null });
       },
 
       setHasHydrated: (hydrated) => {

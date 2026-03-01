@@ -16,6 +16,7 @@ import { INCOGNITO_COLORS } from '@/lib/constants';
 import { useChatRoomProfileStore } from '@/stores/chatRoomProfileStore';
 
 const C = INCOGNITO_COLORS;
+const BIO_MAX_LENGTH = 250;
 
 interface ProfilePopoverProps {
   visible: boolean;
@@ -47,12 +48,13 @@ export default function ProfilePopover({
   onLeaveRoom,
 }: ProfilePopoverProps) {
   // Persisted profile store
-  const { setProfile: persistProfile } = useChatRoomProfileStore();
+  const { setProfile: persistProfile, bio: persistedBio } = useChatRoomProfileStore();
 
   // Edit Profile modal state
   const [editModalVisible, setEditModalVisible] = useState(false);
   const [editName, setEditName] = useState(username);
   const [editAvatar, setEditAvatar] = useState(avatar);
+  const [editBio, setEditBio] = useState(persistedBio ?? '');
   const [isSaving, setIsSaving] = useState(false);
 
   // Reset edit state when popover opens
@@ -60,8 +62,9 @@ export default function ProfilePopover({
     if (visible) {
       setEditName(username);
       setEditAvatar(avatar);
+      setEditBio(persistedBio ?? '');
     }
-  }, [visible, username, avatar]);
+  }, [visible, username, avatar, persistedBio]);
 
   const handleOpenEditProfile = () => {
     setEditModalVisible(true);
@@ -71,6 +74,7 @@ export default function ProfilePopover({
     setEditModalVisible(false);
     setEditName(username);
     setEditAvatar(avatar);
+    setEditBio(persistedBio ?? '');
   };
 
   const handlePickImage = async (source: 'camera' | 'gallery') => {
@@ -117,12 +121,16 @@ export default function ProfilePopover({
       return;
     }
 
+    const trimmedBio = editBio.trim();
+    if (__DEV__) console.log('[PROFILE] bio_saved', { length: trimmedBio.length });
+
     setIsSaving(true);
 
     // Persist to local store (AsyncStorage)
     persistProfile({
       displayName: trimmedName,
       avatarUri: editAvatar ?? null,
+      bio: trimmedBio || null,
     });
 
     // Notify parent about the update
@@ -285,6 +293,26 @@ export default function ProfilePopover({
                 importantForAutofill="noExcludeDescendants"
               />
               <Text style={styles.editInputHint}>{editName.length}/20 characters</Text>
+            </View>
+
+            {/* Bio input */}
+            <View style={styles.editInputSection}>
+              <Text style={styles.editInputLabel}>Bio</Text>
+              <TextInput
+                style={[styles.editInput, styles.editBioInput]}
+                value={editBio}
+                onChangeText={(text) => setEditBio(text.slice(0, BIO_MAX_LENGTH))}
+                placeholder="Tell others about yourself..."
+                placeholderTextColor={C.textLight}
+                maxLength={BIO_MAX_LENGTH}
+                multiline
+                numberOfLines={3}
+                textAlignVertical="top"
+                autoComplete="off"
+                textContentType="none"
+                importantForAutofill="noExcludeDescendants"
+              />
+              <Text style={styles.editInputHint}>{editBio.length}/{BIO_MAX_LENGTH}</Text>
             </View>
 
             {/* Action buttons */}
@@ -512,6 +540,10 @@ const styles = StyleSheet.create({
     color: C.text,
     borderWidth: 1,
     borderColor: C.accent,
+  },
+  editBioInput: {
+    minHeight: 80,
+    paddingTop: 12,
   },
   editInputHint: {
     fontSize: 11,

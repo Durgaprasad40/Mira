@@ -3,6 +3,7 @@ import {
   View,
   Text,
   TouchableOpacity,
+  Pressable,
   Animated,
   StyleSheet,
   Dimensions,
@@ -86,10 +87,14 @@ export default function OnlineUsersPanel({
   const onlineCount = users.filter((u) => u.isOnline).length;
 
   const renderUser = ({ item }: { item: OnlineUserWithPenalty }) => (
-    <TouchableOpacity
-      style={styles.userRow}
-      onPress={() => onUserPress?.(item)}
-      activeOpacity={0.7}
+    <Pressable
+      style={({ pressed }) => [styles.userRow, pressed && { opacity: 0.7 }]}
+      onPress={(e) => {
+        e.stopPropagation?.();
+        if (__DEV__) console.log('[TAP] active_member press fired', { id: item.id, t: Date.now() });
+        onUserPress?.(item);
+      }}
+      hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
     >
       {item.avatar ? (
         <View style={styles.avatarContainer}>
@@ -118,7 +123,7 @@ export default function OnlineUsersPanel({
       ) : !item.isOnline ? (
         <Text style={styles.offlineLabel}>Offline</Text>
       ) : null}
-    </TouchableOpacity>
+    </Pressable>
   );
 
   const renderSectionHeader = ({ section }: { section: SectionData }) => (
