@@ -1,7 +1,7 @@
-import React, { useCallback, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useState, useRef } from 'react';
 import {
   View, Text, StyleSheet, FlatList, TouchableOpacity,
-  RefreshControl, ActivityIndicator,
+  RefreshControl,
 } from 'react-native';
 import { Image } from 'expo-image';
 import { useRouter } from 'expo-router';
@@ -12,7 +12,87 @@ import { api } from '@/convex/_generated/api';
 import { INCOGNITO_COLORS } from '@/lib/constants';
 import { useAuthStore } from '@/stores/authStore';
 
+// Module-level cache for instant load across tab switches
+let _cachedPromptsData: any[] = [];
+let _cachedTrendingData: { trendingDarePrompt: any; trendingTruthPrompt: any } | null = null;
+let _hasEverLoaded = false;
+
+// Timing for diagnostics
+let _tabOpenTime = 0;
+
+/** Prewarm the T/D cache with data (called from Private layout mount) */
+export function prewarmTodCache(prompts: any[] | undefined, trending: any | undefined) {
+  if (prompts !== undefined && prompts.length > 0 && !_hasEverLoaded) {
+    _cachedPromptsData = prompts;
+    _hasEverLoaded = true;
+    console.log(`[T/D PREWARM] cached ${prompts.length} prompts`);
+  }
+  if (trending !== undefined && !_cachedTrendingData) {
+    _cachedTrendingData = trending;
+  }
+}
+
+/** Get URL prefix for diagnostics */
+function getUrlPrefix(url?: string): string {
+  if (!url) return 'none';
+  if (url.startsWith('https://')) return 'https';
+  if (url.startsWith('http://')) return 'http';
+  if (url.startsWith('file://')) return 'file';
+  if (url.startsWith('convex://')) return 'convex';
+  return 'unknown';
+}
+
+/** Check if URL is valid for display:
+ * - Accept https/http always
+ * - Accept file:// if NOT from unstable cache (ImagePicker cache)
+ * - Reject content:// (not directly displayable)
+ */
+function isValidPhotoUrl(url?: string): boolean {
+  if (!url) return false;
+  // Accept remote URLs always
+  if (url.startsWith('http://') || url.startsWith('https://')) return true;
+  // Accept file:// if not from unstable cache
+  if (url.startsWith('file://')) {
+    // Reject unstable ImagePicker cache paths
+    if (url.includes('/cache/ImagePicker/') || url.includes('/Cache/ImagePicker/')) {
+      return false;
+    }
+    return true;
+  }
+  return false;
+}
+
 const C = INCOGNITO_COLORS;
+
+/* ─── Owner Photo (simple, no blur) ─── */
+function OwnerPhoto({ uri, promptId }: { uri: string; promptId: string }) {
+  return (
+    <Image
+      source={{ uri }}
+      style={styles.ownerPhoto}
+      onError={() => {
+        console.log(`[T/D PHOTO ERROR] id=${promptId} uriPrefix=${getUrlPrefix(uri)}`);
+      }}
+    />
+  );
+}
+
+/**
+ * Determine if photo should be shown:
+ * - visibility="public" AND valid photo url => show photo
+ * - visibility="anonymous" OR "no_photo" => no photo
+ * - Legacy: photoBlurMode="blur" => treat as no_photo (hide photo)
+ */
+function shouldShowPhoto(prompt: { isAnonymous?: boolean; photoBlurMode?: string; ownerPhotoUrl?: string }): boolean {
+  // Anonymous => no photo
+  if (prompt.isAnonymous) return false;
+  // Legacy blur mode => treat as no_photo
+  if (prompt.photoBlurMode === 'blur') return false;
+  // Must have valid photo URL
+  if (!prompt.ownerPhotoUrl) return false;
+  if (!isValidPhotoUrl(prompt.ownerPhotoUrl)) return false;
+  return true;
+}
 
 // Gender icon helper
 function getGenderIcon(gender?: string): keyof typeof Ionicons.glyphMap {
@@ -21,6 +101,24 @@ function getGenderIcon(gender?: string): keyof typeof Ionicons.glyphMap {
   if (g === 'male') return 'male';
   if (g === 'female') return 'female';
   return 'male-female';
+}
+
+/* ─── Skeleton Card (placeholder while loading) ─── */
+function SkeletonCard() {
+  return (
+    <View style={styles.skeletonCard}>
+      <View style={styles.skeletonContent}>
+        <View style={styles.skeletonHeader}>
+          <View style={styles.skeletonAvatar} />
+          <View style={styles.skeletonName} />
+          <View style={styles.skeletonPill} />
+        </View>
+        <View style={styles.skeletonText} />
+        <View style={styles.skeletonTextShort} />
+      </View>
+      <View style={styles.skeletonButton} />
+    </View>
+  );
 }
 
 /* ─── Compact Comment Preview Row ─── */
@@ -57,6 +155,7 @@ type TrendingPromptData = {
   expiresAt: number;
   answerCount: number;
   isAnonymous?: boolean;
+  photoBlurMode?: 'none' | 'blur';
   ownerName?: string;
   ownerPhotoUrl?: string;
   ownerAge?: number;
@@ -76,6 +175,7 @@ function TrendingCard({
   const isTruth = prompt.type === 'truth';
   const isAnon = prompt.isAnonymous ?? true;
   const answerCount = prompt.answerCount ?? 0;
+  const showPhoto = shouldShowPhoto(prompt);
 
   return (
     <TouchableOpacity style={styles.card} onPress={onOpenThread} activeOpacity={0.7}>
@@ -85,8 +185,8 @@ function TrendingCard({
         <View style={styles.cardHeader}>
           {/* LEFT: Owner Identity */}
           <View style={styles.ownerIdentity}>
-            {!isAnon && prompt.ownerPhotoUrl ? (
-              <Image source={{ uri: prompt.ownerPhotoUrl }} style={styles.ownerPhoto} />
+            {showPhoto ? (
+              <OwnerPhoto uri={prompt.ownerPhotoUrl!} promptId={String(prompt._id)} />
             ) : (
               <View style={styles.ownerPhotoPlaceholder}>
                 <Ionicons name={isAnon ? 'eye-off' : 'person'} size={12} color={C.textLight} />
@@ -148,6 +248,7 @@ function PromptCard({
     hasAnswered: boolean;
     myAnswerId: string | null;
     isAnonymous?: boolean;
+    photoBlurMode?: 'none' | 'blur';
     ownerName?: string;
     ownerPhotoUrl?: string;
     ownerAge?: number;
@@ -161,6 +262,7 @@ function PromptCard({
   const isAnon = prompt.isAnonymous ?? true;
   const answerCount = prompt.totalAnswers ?? prompt.answerCount ?? 0;
   const previewCount = prompt.top2Answers?.length ?? 0;
+  const showPhoto = shouldShowPhoto(prompt);
 
   return (
     <TouchableOpacity style={styles.card} onPress={onOpenThread} activeOpacity={0.7}>
@@ -170,8 +272,8 @@ function PromptCard({
         <View style={styles.cardHeader}>
           {/* LEFT: Owner Identity */}
           <View style={styles.ownerIdentity}>
-            {!isAnon && prompt.ownerPhotoUrl ? (
-              <Image source={{ uri: prompt.ownerPhotoUrl }} style={styles.ownerPhoto} />
+            {showPhoto ? (
+              <OwnerPhoto uri={prompt.ownerPhotoUrl!} promptId={String(prompt._id)} />
             ) : (
               <View style={styles.ownerPhotoPlaceholder}>
                 <Ionicons name={isAnon ? 'eye-off' : 'person'} size={12} color={C.textLight} />
@@ -230,20 +332,69 @@ export default function TruthOrDareScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const [refreshKey, setRefreshKey] = useState(0);
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const firstRenderRef = useRef(true);
+  const dataReceivedRef = useRef(false);
+
+  // DIAGNOSTIC: Log when tab opens
+  useEffect(() => {
+    _tabOpenTime = Date.now();
+    console.log(`[T/D REPORT] open_start=${_tabOpenTime}`);
+    return () => { _tabOpenTime = 0; };
+  }, []);
+
+  // DIAGNOSTIC: Log first render timing
+  useEffect(() => {
+    if (firstRenderRef.current) {
+      firstRenderRef.current = false;
+      const renderMs = _tabOpenTime > 0 ? Date.now() - _tabOpenTime : 0;
+      console.log(`[T/D REPORT] first_render_ms=${renderMs}`);
+    }
+  }, []);
 
   const userId = useAuthStore((s) => s.userId);
 
   // Get trending prompts (1 Dare + 1 Truth)
-  const trendingData = useQuery(api.truthDare.getTrendingTruthAndDare);
+  const trendingDataQuery = useQuery(api.truthDare.getTrendingTruthAndDare);
 
   // Get all prompts (sorted by engagement)
-  const promptsData = useQuery(
+  const promptsDataQuery = useQuery(
     api.truthDare.listActivePromptsWithTop2Answers,
     { viewerUserId: userId ?? undefined }
   );
 
-  const isLoading = promptsData === undefined || trendingData === undefined;
-  const prompts = promptsData ?? [];
+  // Update cache when data arrives + log diagnostics
+  useEffect(() => {
+    if (promptsDataQuery !== undefined) {
+      _cachedPromptsData = promptsDataQuery;
+      _hasEverLoaded = true;
+      setIsRefreshing(false);
+
+      // DIAGNOSTIC: Log first data received timing
+      if (!dataReceivedRef.current) {
+        dataReceivedRef.current = true;
+        const dataMs = _tabOpenTime > 0 ? Date.now() - _tabOpenTime : 0;
+        console.log(`[T/D REPORT] first_data_ms=${dataMs}`);
+        console.log(`[T/D REPORT] feed_count=${promptsDataQuery.length}`);
+
+        // Log latest 3 prompts details
+        promptsDataQuery.slice(0, 3).forEach((p: any, idx: number) => {
+          const visibility = p.isAnonymous ? 'anonymous' : (p.photoBlurMode === 'blur' ? 'blurred' : 'everyone');
+          console.log(`[T/D REPORT] item${idx + 1} id=${String(p._id).slice(-6)} visibility=${visibility} hasName=${!!p.ownerName} hasPhoto=${!!p.ownerPhotoUrl} photoPrefix=${getUrlPrefix(p.ownerPhotoUrl)} blurMode=${p.photoBlurMode || 'none'}`);
+        });
+      }
+    }
+  }, [promptsDataQuery]);
+
+  useEffect(() => {
+    if (trendingDataQuery !== undefined) {
+      _cachedTrendingData = trendingDataQuery;
+    }
+  }, [trendingDataQuery]);
+
+  // Use cached data ALWAYS for instant render - never block on query loading
+  const prompts = promptsDataQuery ?? _cachedPromptsData;
+  const trendingData = trendingDataQuery ?? _cachedTrendingData;
 
   // Get trending prompt IDs to exclude from normal list
   const trendingIds = useMemo(() => {
@@ -263,6 +414,7 @@ export default function TruthOrDareScreen() {
   }, [prompts, trendingIds]);
 
   const onRefresh = useCallback(() => {
+    setIsRefreshing(true);
     setRefreshKey((k: number) => k + 1);
   }, []);
 
@@ -342,16 +494,31 @@ export default function TruthOrDareScreen() {
     return `prompt_${item.prompt._id}`;
   };
 
-  if (isLoading) {
+  // Check if we're in initial loading state (no data yet, cache empty)
+  const isInitialLoading = promptsDataQuery === undefined && prompts.length === 0;
+
+  // Show skeleton cards while first load is happening
+  if (isInitialLoading) {
     return (
-      <View style={[styles.container, styles.centered, { paddingTop: insets.top }]}>
-        <ActivityIndicator size="large" color={C.primary} />
-        <Text style={styles.loadingText}>Loading...</Text>
+      <View style={[styles.container, { paddingTop: insets.top }]}>
+        <View style={styles.header}>
+          <Ionicons name="flame" size={16} color={C.primary} />
+          <Text style={styles.headerTitle}>Truth or Dare</Text>
+        </View>
+        <View style={styles.listContent}>
+          <SkeletonCard />
+          <SkeletonCard />
+          <SkeletonCard />
+        </View>
+        <TouchableOpacity style={styles.fab} onPress={openCreateTod} activeOpacity={0.85}>
+          <Ionicons name="add" size={24} color="#FFF" />
+        </TouchableOpacity>
       </View>
     );
   }
 
-  if (prompts.length === 0) {
+  // Empty state only after data has loaded and is actually empty
+  if (prompts.length === 0 && promptsDataQuery !== undefined) {
     return (
       <View style={[styles.container, { paddingTop: insets.top }]}>
         <View style={styles.header}>
@@ -385,7 +552,7 @@ export default function TruthOrDareScreen() {
         contentContainerStyle={styles.listContent}
         refreshControl={
           <RefreshControl
-            refreshing={false}
+            refreshing={isRefreshing}
             onRefresh={onRefresh}
             tintColor={C.primary}
           />
@@ -405,8 +572,6 @@ export default function TruthOrDareScreen() {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: C.background },
-  centered: { justifyContent: 'center', alignItems: 'center' },
-  loadingText: { marginTop: 12, fontSize: 14, color: C.textLight },
 
   header: {
     flexDirection: 'row', alignItems: 'center', gap: 6,
@@ -545,5 +710,73 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.25,
     shadowRadius: 8,
     elevation: 6,
+  },
+
+  // Skeleton cards (loading placeholders)
+  skeletonCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginHorizontal: 10,
+    marginVertical: 4,
+    backgroundColor: C.surface,
+    borderRadius: 12,
+    paddingLeft: 10,
+    paddingRight: 6,
+    paddingVertical: 10,
+  },
+  skeletonContent: {
+    flex: 1,
+    paddingRight: 8,
+  },
+  skeletonHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  skeletonAvatar: {
+    width: 26,
+    height: 26,
+    borderRadius: 13,
+    backgroundColor: C.accent,
+    opacity: 0.5,
+  },
+  skeletonName: {
+    width: 80,
+    height: 12,
+    borderRadius: 6,
+    backgroundColor: C.accent,
+    marginLeft: 8,
+    opacity: 0.5,
+  },
+  skeletonPill: {
+    width: 50,
+    height: 18,
+    borderRadius: 9,
+    backgroundColor: C.accent,
+    marginLeft: 'auto',
+    opacity: 0.5,
+  },
+  skeletonText: {
+    width: '100%',
+    height: 14,
+    borderRadius: 7,
+    backgroundColor: C.accent,
+    marginBottom: 6,
+    opacity: 0.4,
+  },
+  skeletonTextShort: {
+    width: '60%',
+    height: 14,
+    borderRadius: 7,
+    backgroundColor: C.accent,
+    opacity: 0.3,
+  },
+  skeletonButton: {
+    width: 38,
+    height: 38,
+    borderRadius: 19,
+    backgroundColor: C.accent,
+    marginLeft: 4,
+    opacity: 0.5,
   },
 });

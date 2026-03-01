@@ -1,7 +1,20 @@
 import { v } from 'convex/values';
-import { mutation, query } from './_generated/server';
+import { mutation, query, QueryCtx, MutationCtx } from './_generated/server';
 import { Id } from './_generated/dataModel';
 import { softMaskText } from './softMask';
+
+// Phase-2: Helper to check if user has any active chatRoom readOnly penalty
+async function hasActiveChatRoomPenalty(
+  ctx: QueryCtx | MutationCtx,
+  userId: Id<'users'>
+): Promise<boolean> {
+  const now = Date.now();
+  const penalties = await ctx.db
+    .query('chatRoomPenalties')
+    .withIndex('by_user', (q) => q.eq('userId', userId))
+    .collect();
+  return penalties.some((p) => p.expiresAt > now);
+}
 
 // Send a message
 export const sendMessage = mutation({
@@ -18,6 +31,11 @@ export const sendMessage = mutation({
   handler: async (ctx, args) => {
     const { conversationId, senderId, type, content, imageStorageId, templateId, clientMessageId } = args;
     const now = Date.now();
+
+    // Phase-2: Block DMs if user has active chatRoom readOnly penalty
+    if (await hasActiveChatRoomPenalty(ctx, senderId)) {
+      throw new Error('You are in read-only mode (24h)');
+    }
 
     // BUGFIX #3: Check for duplicate message (idempotency for retries)
     if (clientMessageId) {
@@ -174,6 +192,11 @@ export const sendPreMatchMessage = mutation({
   handler: async (ctx, args) => {
     const { fromUserId, toUserId, content, templateId, clientMessageId } = args;
     const now = Date.now();
+
+    // Phase-2: Block DMs if user has active chatRoom readOnly penalty
+    if (await hasActiveChatRoomPenalty(ctx, fromUserId)) {
+      throw new Error('You are in read-only mode (24h)');
+    }
 
     const fromUser = await ctx.db.get(fromUserId);
     if (!fromUser) throw new Error('User not found');
@@ -652,5 +675,105 @@ export const getUnreadCount = query({
     }
 
     return totalUnread;
+  },
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PHASE-2: Per-Room DM Unread Counts (for Chat Rooms badges)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Get unread DM counts grouped by sourceRoomId.
+ * Used for:
+ * - Chat Rooms list: badge per room card
+ * - Chat Rooms tab: count of rooms with unread DMs
+ */
+export const getUnreadDmCountsByRoom = query({
+  args: {
+    userId: v.id('users'),
+  },
+  handler: async (ctx, { userId }) => {
+    // Get all conversations where user is a participant
+    const allConversations = await ctx.db
+      .query('conversations')
+      .collect();
+
+    const userConversations = allConversations.filter(
+      (c) => c.participants.includes(userId) && c.sourceRoomId
+    );
+
+    const byRoomId: Record<string, number> = {};
+
+    for (const conversation of userConversations) {
+      // Count unread messages RECEIVED by this user (not sent by them)
+      const unreadMessages = await ctx.db
+        .query('messages')
+        .withIndex('by_conversation', (q) =>
+          q.eq('conversationId', conversation._id)
+        )
+        .filter((q) =>
+          q.and(
+            q.neq(q.field('senderId'), userId),
+            q.eq(q.field('readAt'), undefined)
+          )
+        )
+        .collect();
+
+      const unreadCount = unreadMessages.length;
+      if (unreadCount > 0 && conversation.sourceRoomId) {
+        const roomIdStr = conversation.sourceRoomId;
+        byRoomId[roomIdStr] = (byRoomId[roomIdStr] || 0) + unreadCount;
+      }
+    }
+
+    const roomsWithUnread = Object.keys(byRoomId).length;
+
+    return {
+      byRoomId,
+      roomsWithUnread,
+    };
+  },
+});
+
+/**
+ * Mark all unread RECEIVED messages in a conversation as read.
+ * Called when user opens a DM screen.
+ */
+export const markDmConversationRead = mutation({
+  args: {
+    conversationId: v.id('conversations'),
+    userId: v.id('users'),
+  },
+  handler: async (ctx, { conversationId, userId }) => {
+    const now = Date.now();
+
+    const conversation = await ctx.db.get(conversationId);
+    if (!conversation) return { success: false, count: 0 };
+
+    // Verify user is a participant
+    if (!conversation.participants.includes(userId)) {
+      return { success: false, count: 0 };
+    }
+
+    // Get all unread messages RECEIVED by this user (not sent by them)
+    const unreadMessages = await ctx.db
+      .query('messages')
+      .withIndex('by_conversation', (q) =>
+        q.eq('conversationId', conversationId)
+      )
+      .filter((q) =>
+        q.and(
+          q.neq(q.field('senderId'), userId),
+          q.eq(q.field('readAt'), undefined)
+        )
+      )
+      .collect();
+
+    // Mark each as read
+    for (const message of unreadMessages) {
+      await ctx.db.patch(message._id, { readAt: now });
+    }
+
+    return { success: true, count: unreadMessages.length };
   },
 });

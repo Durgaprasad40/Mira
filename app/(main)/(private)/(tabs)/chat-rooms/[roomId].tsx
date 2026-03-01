@@ -14,6 +14,7 @@ import {
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useLocalSearchParams, useRouter } from 'expo-router';
+import { useNavigation } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
 import { useQuery, useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
@@ -51,13 +52,13 @@ import ViewProfileModal from '@/components/chatroom/ViewProfileModal';
 import ReportUserModal, { ReportReason } from '@/components/chatroom/ReportUserModal';
 import AttachmentPopup from '@/components/chatroom/AttachmentPopup';
 import DoodleCanvas from '@/components/chatroom/DoodleCanvas';
-import VideoPlayerModal from '@/components/chatroom/VideoPlayerModal';
-import ImagePreviewModal from '@/components/chatroom/ImagePreviewModal';
+import SecureMediaViewer from '@/components/chatroom/SecureMediaViewer';
 import ActiveUsersStrip from '@/components/chatroom/ActiveUsersStrip';
 import { useDemoChatRoomStore } from '@/stores/demoChatRoomStore';
 import { useChatRoomSessionStore } from '@/stores/chatRoomSessionStore';
 import { useChatRoomDmStore } from '@/stores/chatRoomDmStore';
 import { usePreferredChatRoomStore } from '@/stores/preferredChatRoomStore';
+import { useChatRoomProfileStore } from '@/stores/chatRoomProfileStore';
 
 const C = INCOGNITO_COLORS;
 const MUTE_STORAGE_KEY = (roomId: string) => `@muted_room_${roomId}`;
@@ -177,9 +178,12 @@ export default function ChatRoomScreen() {
   const authUserId = useAuthStore((s) => s.userId);
   const enterRoom = useChatRoomSessionStore((s) => s.enterRoom);
   const exitRoom = useChatRoomSessionStore((s) => s.exitRoom);
-  const exitToHome = useChatRoomSessionStore((s) => s.exitToHome);
   const incrementCoins = useChatRoomSessionStore((s) => s.incrementCoins);
   const userCoinsFromStore = useChatRoomSessionStore((s) => s.coins);
+
+  // Persisted chat room profile (name/avatar)
+  const persistedDisplayName = useChatRoomProfileStore((s) => s.displayName);
+  const persistedAvatarUri = useChatRoomProfileStore((s) => s.avatarUri);
 
   // DM navigation store - for proper stack-based navigation
   const setActiveDm = useChatRoomDmStore((s) => s.setActiveDm);
@@ -244,12 +248,13 @@ export default function ChatRoomScreen() {
   // ─────────────────────────────────────────────────────────────────────────
   useEffect(() => {
     if (roomIdStr) {
+      // Use persisted profile if available, otherwise fall back to demo defaults
       const identity = {
         userId: isDemoMode ? DEMO_CURRENT_USER.id : (authUserId ?? 'unknown'),
-        name: DEMO_CURRENT_USER.username,
+        name: persistedDisplayName ?? DEMO_CURRENT_USER.username,
         age: DEMO_CURRENT_USER.age ?? 25,
         gender: DEMO_CURRENT_USER.gender ?? 'Unknown',
-        profilePicture: DEMO_CURRENT_USER.avatar ?? '',
+        profilePicture: persistedAvatarUri ?? DEMO_CURRENT_USER.avatar ?? '',
       };
       enterRoom(roomIdStr, identity);
 
@@ -266,21 +271,42 @@ export default function ChatRoomScreen() {
         });
       }
     }
-  }, [roomIdStr, enterRoom, authUserId, hasValidRoomId, setPreferredRoom, setPreferredRoomMutation]);
+  }, [roomIdStr, enterRoom, authUserId, hasValidRoomId, setPreferredRoom, setPreferredRoomMutation, persistedDisplayName, persistedAvatarUri]);
 
   // ─────────────────────────────────────────────────────────────────────────
-  // ANDROID BACK BUTTON → Go back to chat-rooms list (within tab stack)
+  // PHASE-2 BACK NAVIGATION: Go to Desire Land (not chat-rooms list)
+  // This prevents the "loading" flash when backing out of auto-opened room.
+  // Policy: Any Phase-2 screen → back → Desire Land → back → Phase-1 Discover
   // ─────────────────────────────────────────────────────────────────────────
+  const navigation = useNavigation();
+  const PHASE2_HOME_ROUTE = '/(main)/(private)/(tabs)/desire-land';
+
+  // Android hardware back → go to Desire Land
   useEffect(() => {
     if (Platform.OS !== 'android') return;
     const onBackPress = () => {
-      // Navigate back to the list screen within the same tab
-      router.back();
+      router.replace(PHASE2_HOME_ROUTE);
       return true;
     };
     const subscription = BackHandler.addEventListener('hardwareBackPress', onBackPress);
     return () => subscription.remove();
   }, [router]);
+
+  // iOS swipe-back / header back → go to Desire Land
+  useEffect(() => {
+    const unsubscribe = navigation.addListener('beforeRemove', (e: any) => {
+      // Only intercept GO_BACK and POP actions (not NAVIGATE, REPLACE, etc.)
+      const actionType = e.data?.action?.type;
+      if (actionType !== 'GO_BACK' && actionType !== 'POP') return;
+
+      // Prevent default back behavior
+      e.preventDefault();
+
+      // Navigate to Desire Land instead
+      router.replace(PHASE2_HOME_ROUTE);
+    });
+    return unsubscribe;
+  }, [navigation, router]);
 
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -430,8 +456,13 @@ export default function ChatRoomScreen() {
   const [viewProfileUser, setViewProfileUser] = useState<DemoOnlineUser | null>(null);
   const [reportTargetUser, setReportTargetUser] = useState<DemoOnlineUser | null>(null);
 
-  const [videoPlayerUri, setVideoPlayerUri] = useState('');
-  const [imagePreviewUri, setImagePreviewUri] = useState('');
+  // Secure media viewer state (hold-to-view)
+  const [secureMediaState, setSecureMediaState] = useState<{
+    visible: boolean;
+    isHolding: boolean;
+    uri: string;
+    type: 'image' | 'video';
+  }>({ visible: false, isHolding: false, uri: '', type: 'image' });
 
   // ─────────────────────────────────────────────────────────────────────────
   // MUTE STATE
@@ -473,12 +504,6 @@ export default function ChatRoomScreen() {
   // ─────────────────────────────────────────────────────────────────────────
   // NAVIGATION HANDLERS
   // ─────────────────────────────────────────────────────────────────────────
-  const handleExitToHome = useCallback(() => {
-    closeOverlay();
-    exitToHome();
-    router.replace('/(main)/(private)/(tabs)/chat-rooms');
-  }, [closeOverlay, exitToHome, router]);
-
   const handleLeaveRoom = useCallback(() => {
     closeOverlay();
     exitRoom();
@@ -562,7 +587,7 @@ export default function ChatRoomScreen() {
         id: `cm_me_${Date.now()}`,
         roomId: roomIdStr,
         senderId: DEMO_CURRENT_USER.id,
-        senderName: DEMO_CURRENT_USER.username,
+        senderName: persistedDisplayName ?? DEMO_CURRENT_USER.username,
         type: 'text',
         text: trimmed,
         createdAt: Date.now(),
@@ -605,7 +630,7 @@ export default function ChatRoomScreen() {
         incrementCoins();
       }
     }
-  }, [inputText, roomIdStr, hasValidRoomId, addStoreMessage, authUserId, sendMessageMutation, incrementCoins]);
+  }, [inputText, roomIdStr, hasValidRoomId, addStoreMessage, authUserId, sendMessageMutation, incrementCoins, persistedDisplayName]);
 
   const handlePanelChange = useCallback((_panel: ComposerPanel) => {}, []);
 
@@ -613,16 +638,16 @@ export default function ChatRoomScreen() {
   // SEND MEDIA
   // ─────────────────────────────────────────────────────────────────────────
   const handleSendMedia = useCallback(
-    async (uri: string, mediaType: 'image' | 'video') => {
+    async (uri: string, mediaType: 'image' | 'video' | 'doodle') => {
       if (!roomIdStr) return;
-      const labelMap = { image: 'Photo', video: 'Video' };
+      const labelMap = { image: 'Photo', video: 'Video', doodle: 'Doodle' };
 
       if (isDemoMode) {
         const newMessage: DemoChatMessage = {
           id: `cm_me_${Date.now()}`,
           roomId: roomIdStr,
           senderId: DEMO_CURRENT_USER.id,
-          senderName: DEMO_CURRENT_USER.username,
+          senderName: persistedDisplayName ?? DEMO_CURRENT_USER.username,
           type: mediaType,
           text: `[${labelMap[mediaType]}]`,
           mediaUrl: uri,
@@ -638,6 +663,7 @@ export default function ChatRoomScreen() {
             roomId: roomIdStr as Id<'chatRooms'>,
             senderId: authUserId as Id<'users'>,
             imageUrl: uri,
+            mediaType: mediaType === 'doodle' ? 'doodle' : 'image',
             clientId,
           });
           incrementCoins();
@@ -646,18 +672,20 @@ export default function ChatRoomScreen() {
         }
       }
     },
-    [roomIdStr, hasValidRoomId, addStoreMessage, authUserId, sendMessageMutation, incrementCoins]
+    [roomIdStr, hasValidRoomId, addStoreMessage, authUserId, sendMessageMutation, incrementCoins, persistedDisplayName]
   );
 
   // ─────────────────────────────────────────────────────────────────────────
-  // MEDIA PRESS
+  // MEDIA HOLD (Secure hold-to-view - immediate open/close)
   // ─────────────────────────────────────────────────────────────────────────
-  const handleMediaPress = useCallback((mediaUrl: string, type: 'image' | 'video') => {
-    if (type === 'video') {
-      setVideoPlayerUri(mediaUrl);
-    } else {
-      setImagePreviewUri(mediaUrl);
-    }
+  const handleMediaHoldStart = useCallback((_messageId: string, mediaUrl: string, type: 'image' | 'video') => {
+    // Immediately open viewer with holding=true
+    setSecureMediaState({ visible: true, isHolding: true, uri: mediaUrl, type });
+  }, []);
+
+  const handleMediaHoldEnd = useCallback(() => {
+    // Immediately close viewer
+    setSecureMediaState({ visible: false, isHolding: false, uri: '', type: 'image' });
   }, []);
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -819,14 +847,9 @@ export default function ChatRoomScreen() {
   // ─────────────────────────────────────────────────────────────────────────
   const renderItem = useCallback(
     ({ item }: { item: ListItem }) => {
+      // Hide date separators - return null for date items
       if (item.type === 'date') {
-        return (
-          <View style={styles.dateSeparator}>
-            <View style={styles.dateLine} />
-            <Text style={styles.dateLabel}>{item.label}</Text>
-            <View style={styles.dateLine} />
-          </View>
-        );
+        return null;
       }
 
       const msg = item.message;
@@ -841,6 +864,7 @@ export default function ChatRoomScreen() {
 
       return (
         <ChatMessageItem
+          messageId={msg.id}
           senderName={msg.senderName}
           senderId={msg.senderId}
           senderAvatar={msg.senderAvatar}
@@ -853,11 +877,12 @@ export default function ChatRoomScreen() {
           onLongPress={() => handleMessageLongPress(msg)}
           onAvatarPress={() => handleAvatarPress(msg.senderId)}
           onNamePress={() => handleAvatarPress(msg.senderId)}
-          onMediaPress={handleMediaPress}
+          onMediaHoldStart={handleMediaHoldStart}
+          onMediaHoldEnd={handleMediaHoldEnd}
         />
       );
     },
-    [mutedUserIds, authUserId, handleMessageLongPress, handleAvatarPress, handleMediaPress]
+    [mutedUserIds, authUserId, handleMessageLongPress, handleAvatarPress, handleMediaHoldStart, handleMediaHoldEnd]
   );
 
   const keyExtractor = useCallback((item: ListItem) => item.id, []);
@@ -933,7 +958,7 @@ export default function ChatRoomScreen() {
         onInboxPress={() => setOverlay('messages')}
         onNotificationsPress={() => setOverlay('notifications')}
         onProfilePress={() => setOverlay('profile')}
-        profileAvatar={DEMO_CURRENT_USER.avatar}
+        profileAvatar={persistedAvatarUri ?? DEMO_CURRENT_USER.avatar}
         unreadInbox={unreadDMs}
         unseenNotifications={unseenNotifications}
         showCloseButton={!!canCloseRoom}
@@ -941,14 +966,11 @@ export default function ChatRoomScreen() {
       />
 
       {/* ─── ACTIVE USERS STRIP ─── */}
+      {/* Tapping anywhere on the strip opens the full members list */}
       <ActiveUsersStrip
         users={DEMO_ONLINE_USERS.map((u) => ({ id: u.id, avatar: u.avatar, isOnline: u.isOnline }))}
         theme="dark"
-        onUserPress={(userId) => {
-          const user = DEMO_ONLINE_USERS.find((u) => u.id === userId);
-          if (user) handleOnlineUserPress(user);
-        }}
-        onMorePress={() => setOverlay('onlineUsers')}
+        onPress={() => setOverlay('onlineUsers')}
       />
 
       {/* ─── KEYBOARD AVOIDING VIEW ─── */}
@@ -973,8 +995,8 @@ export default function ChatRoomScreen() {
               contentContainerStyle={{
                 flexGrow: 1,
                 justifyContent: 'flex-end',
-                paddingHorizontal: 12,
-                paddingTop: 8,
+                paddingHorizontal: 6,
+                paddingTop: 4,
                 paddingBottom: composerHeight,
               }}
               showsVerticalScrollIndicator={false}
@@ -1051,13 +1073,12 @@ export default function ChatRoomScreen() {
       <ProfilePopover
         visible={overlay === 'profile'}
         onClose={closeOverlay}
-        username={DEMO_CURRENT_USER.username}
-        avatar={DEMO_CURRENT_USER.avatar}
+        username={persistedDisplayName ?? DEMO_CURRENT_USER.username}
+        avatar={persistedAvatarUri ?? DEMO_CURRENT_USER.avatar}
         isActive={true}
         coins={userCoins}
         age={DEMO_CURRENT_USER.age ?? 25}
         gender={DEMO_CURRENT_USER.gender ?? 'Unknown'}
-        onExitToHome={handleExitToHome}
         onLeaveRoom={handleLeaveRoom}
       />
 
@@ -1106,19 +1127,16 @@ export default function ChatRoomScreen() {
       <DoodleCanvas
         visible={overlay === 'doodle'}
         onClose={closeOverlay}
-        onSend={(uri) => handleSendMedia(uri, 'image')}
+        onSend={(uri) => handleSendMedia(uri, 'doodle')}
       />
 
-      <VideoPlayerModal
-        visible={!!videoPlayerUri}
-        videoUri={videoPlayerUri}
-        onClose={() => setVideoPlayerUri('')}
-      />
-
-      <ImagePreviewModal
-        visible={!!imagePreviewUri}
-        imageUri={imagePreviewUri}
-        onClose={() => setImagePreviewUri('')}
+      {/* Secure Media Viewer (hold-to-view for images and videos) */}
+      <SecureMediaViewer
+        visible={secureMediaState.visible}
+        isHolding={secureMediaState.isHolding}
+        mediaUri={secureMediaState.uri}
+        type={secureMediaState.type}
+        onClose={handleMediaHoldEnd}
       />
 
       <ReportUserModal

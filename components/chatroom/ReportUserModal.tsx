@@ -139,6 +139,9 @@ export default function ReportUserModal({
                   multiline
                   numberOfLines={3}
                   textAlignVertical="top"
+                  autoComplete="off"
+                  importantForAutofill="no"
+                  textContentType="none"
                 />
               </View>
             )}

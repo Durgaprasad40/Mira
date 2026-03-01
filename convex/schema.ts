@@ -1062,6 +1062,7 @@ export default defineSchema({
     lastMessageAt: v.optional(v.number()),
     lastMessageText: v.optional(v.string()),
     memberCount: v.number(),
+    messageCount: v.optional(v.number()), // Denormalized count for efficient 1000-cap enforcement
     createdBy: v.optional(v.id('users')), // Room creator
     isDemoRoom: v.optional(v.boolean()), // Demo mode flag
     // Phase-2: 24h room lifecycle
@@ -1088,7 +1089,7 @@ export default defineSchema({
   chatRoomMessages: defineTable({
     roomId: v.id('chatRooms'),
     senderId: v.id('users'),
-    type: v.union(v.literal('text'), v.literal('image'), v.literal('system')),
+    type: v.union(v.literal('text'), v.literal('image'), v.literal('doodle'), v.literal('system')),
     text: v.optional(v.string()),
     imageUrl: v.optional(v.string()),
     createdAt: v.number(),

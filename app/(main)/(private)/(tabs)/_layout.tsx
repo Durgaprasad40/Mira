@@ -2,6 +2,9 @@ import { Tabs } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { INCOGNITO_COLORS } from '@/lib/constants';
 import { usePrivateChatStore } from '@/stores/privateChatStore';
+import { useDemoDmStore, computeUnreadDmCountsByRoom } from '@/stores/demoDmStore';
+import { useAuthStore } from '@/stores/authStore';
+import { isDemoMode } from '@/hooks/useConvex';
 
 const C = INCOGNITO_COLORS;
 
@@ -17,6 +20,17 @@ export default function PrivateTabsLayout() {
   // Calculate total unread count for Messages tab badge
   const conversations = usePrivateChatStore((s) => s.conversations);
   const totalUnread = conversations.reduce((sum, c) => sum + (c.unreadCount || 0), 0);
+
+  // Phase-2: Calculate rooms-with-unread count for Chat Rooms tab badge
+  const dmConversations = useDemoDmStore((s) => s.conversations);
+  const dmMeta = useDemoDmStore((s) => s.meta);
+  const authUserId = useAuthStore((s) => s.userId);
+  const currentUserId = authUserId || 'demo_user_1';
+
+  // Compute rooms with unread DMs (demo mode only for now)
+  const roomsWithUnread = isDemoMode
+    ? computeUnreadDmCountsByRoom({ conversations: dmConversations, meta: dmMeta }, currentUserId).roomsWithUnread
+    : 0;
 
   return (
     <Tabs
@@ -61,6 +75,14 @@ export default function PrivateTabsLayout() {
           tabBarIcon: ({ color, size }) => (
             <Ionicons name="chatbubbles" size={size} color={color} />
           ),
+          // Phase-2: Show count of rooms with unread DMs (not total messages)
+          tabBarBadge: roomsWithUnread > 0 ? roomsWithUnread : undefined,
+          tabBarBadgeStyle: {
+            backgroundColor: C.primary,
+            fontSize: 10,
+            minWidth: 18,
+            height: 18,
+          },
         }}
       />
       <Tabs.Screen

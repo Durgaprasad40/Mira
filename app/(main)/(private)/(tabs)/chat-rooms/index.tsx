@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useMemo, useEffect, useRef } from 'react';
+import React, { useState, useCallback, useMemo, useEffect, useLayoutEffect, useRef } from 'react';
 import {
   View,
   Text,
@@ -12,6 +12,7 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
+import { useFocusEffect } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
 import { useQuery } from 'convex/react';
 import { api } from '@/convex/_generated/api';
@@ -124,9 +125,12 @@ export default function ChatRoomsScreen() {
   const currentUserId = userId || 'demo_user_1';
 
   // ─────────────────────────────────────────────────────────────────────────────
-  // PREFERRED ROOM REDIRECT LOGIC
-  // If user has a preferred room, auto-redirect to it (skip homepage)
+  // PREFERRED ROOM REDIRECT LOGIC (zero-flash)
+  // Gate UI render until we know if user has a preferred room.
+  // If preferred room exists → redirect immediately, never show homepage.
+  // If no preferred room → show homepage.
   // ─────────────────────────────────────────────────────────────────────────────
+  const [checkingPreferred, setCheckingPreferred] = useState(true);
   const preferredRoomId = usePreferredChatRoomStore((s) => s.preferredRoomId);
   const preferredHasHydrated = usePreferredChatRoomStore((s) => s._hasHydrated);
   const hasRedirectedRef = useRef(false);
@@ -137,23 +141,50 @@ export default function ChatRoomsScreen() {
     isDemoMode || !userId ? 'skip' : { userId: userId as Id<'users'> }
   );
 
-  // Determine effective preferred room ID
+  // Determine if we're still loading preferred room data
+  const isPreferredLoading = isDemoMode
+    ? !preferredHasHydrated
+    : convexPreferredRoom === undefined;
+
+  // Determine effective preferred room ID (only valid after loading complete)
   const effectivePreferredRoomId = isDemoMode
     ? preferredRoomId
     : convexPreferredRoom?.preferredChatRoomId ?? null;
 
-  // Wait for hydration before redirecting
-  const canRedirect = isDemoMode ? preferredHasHydrated : convexPreferredRoom !== undefined;
+  // Use useLayoutEffect for redirect to happen before paint
+  useLayoutEffect(() => {
+    // Still loading → keep checkingPreferred true
+    if (isPreferredLoading) return;
 
-  // Auto-redirect to preferred room on mount
-  useEffect(() => {
-    if (!canRedirect || hasRedirectedRef.current) return;
+    // Already redirected in this session → don't redirect again
+    if (hasRedirectedRef.current) {
+      setCheckingPreferred(false);
+      return;
+    }
+
+    // Has preferred room → redirect immediately
     if (effectivePreferredRoomId) {
       hasRedirectedRef.current = true;
-      // Use replace to avoid adding homepage to stack
       router.replace(`/(main)/(private)/(tabs)/chat-rooms/${effectivePreferredRoomId}` as any);
+      // Keep checkingPreferred true so we don't flash homepage during redirect
+      return;
     }
-  }, [canRedirect, effectivePreferredRoomId, router]);
+
+    // No preferred room → show homepage
+    setCheckingPreferred(false);
+  }, [isPreferredLoading, effectivePreferredRoomId, router]);
+
+  // Also check on screen focus (returning to tab after navigating away)
+  useFocusEffect(
+    useCallback(() => {
+      // Reset redirect flag on focus so we can redirect again if needed
+      // (e.g., user was in a room, left, and came back to tab)
+      if (!isPreferredLoading && effectivePreferredRoomId && !hasRedirectedRef.current) {
+        hasRedirectedRef.current = true;
+        router.replace(`/(main)/(private)/(tabs)/chat-rooms/${effectivePreferredRoomId}` as any);
+      }
+    }, [isPreferredLoading, effectivePreferredRoomId, router])
+  );
 
   // Phase-2: Get DM store state for per-room unread counts
   const dmConversations = useDemoDmStore((s) => s.conversations);
@@ -167,10 +198,6 @@ export default function ChatRoomsScreen() {
 
   // P2 CR-010: Track loading state for Convex mode
   const isConvexLoading = !isDemoMode && convexRooms === undefined;
-
-  // Preferred room redirect: show loading while checking
-  // If we have a preferred room and haven't redirected yet, show loading
-  const isWaitingForRedirect = !canRedirect || (effectivePreferredRoomId && !hasRedirectedRef.current);
 
   // Phase-2: Calculate DM unread counts per room (NOT group messages)
   // Badge shows private DM unread count for that room, not group messages
@@ -323,8 +350,11 @@ export default function ChatRoomsScreen() {
   const generalRooms = rooms.filter((r) => r.category === 'general');
   const languageRooms = rooms.filter((r) => r.category === 'language');
 
-  // P2 CR-010: Show loading indicator while Convex loads OR while waiting for redirect
-  if (isConvexLoading || isWaitingForRedirect) {
+  // ─────────────────────────────────────────────────────────────────────────────
+  // RENDER GATING: Show loading while checking preferred room
+  // This prevents the homepage from flashing before redirect
+  // ─────────────────────────────────────────────────────────────────────────────
+  if (checkingPreferred || isConvexLoading) {
     return (
       <View style={[styles.container, { paddingTop: insets.top }]}>
         <View style={styles.header}>
@@ -332,7 +362,6 @@ export default function ChatRoomsScreen() {
         </View>
         <View style={styles.loadingContainer}>
           <ActivityIndicator size="large" color={C.primary} />
-          <Text style={styles.loadingText}>Loading...</Text>
         </View>
       </View>
     );

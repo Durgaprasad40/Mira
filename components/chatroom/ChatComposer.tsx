@@ -97,6 +97,9 @@ export default function ChatComposer({
           onFocus={() => {
             onInputFocus?.();
           }}
+          autoComplete="off"
+          importantForAutofill="no"
+          textContentType="none"
         />
       </View>
 

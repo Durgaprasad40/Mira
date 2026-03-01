@@ -72,6 +72,10 @@ interface ChatRoomsHeaderProps {
   showCreateButton?: boolean;
   /** Called when create button pressed */
   onCreatePress?: () => void;
+  /** Phase-2: Show close room button (only for room creator) */
+  showCloseButton?: boolean;
+  /** Phase-2: Called when close room button pressed */
+  onClosePress?: () => void;
 }
 
 export default function ChatRoomsHeader({
@@ -89,6 +93,8 @@ export default function ChatRoomsHeader({
   topInset = 0,
   showCreateButton = false,
   onCreatePress,
+  showCloseButton = false,
+  onClosePress,
 }: ChatRoomsHeaderProps) {
   const spinAnim = useRef(new Animated.Value(0)).current;
   const isSpinning = useRef(false);
@@ -144,6 +150,17 @@ export default function ChatRoomsHeader({
 
       {/* Right: Action icons */}
       <View style={styles.rightIcons}>
+        {/* Phase-2: Close room button (only for creator) */}
+        {showCloseButton && (
+          <TouchableOpacity
+            onPress={onClosePress}
+            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+            style={styles.iconWrapper}
+          >
+            <Ionicons name="close-circle-outline" size={24} color={HEADER_TEXT_COLOR} />
+          </TouchableOpacity>
+        )}
+
         {/* Create room button (optional) */}
         {showCreateButton && (
           <TouchableOpacity

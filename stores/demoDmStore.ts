@@ -49,6 +49,8 @@ export interface DemoConversationMeta {
   isPreMatch: boolean;
   isConfessionChat?: boolean; // True if created from confession (tagged user liked)
   expiresAt?: number; // Only set for confession-based threads (24h after creation)
+  /** Phase-2: Room this DM originated from (for per-room unread badge) */
+  sourceRoomId?: string;
 }
 
 interface DemoDmState {
@@ -127,6 +129,38 @@ export function computeUnreadConversationCount(
     if (hasUnread) count++;
   }
   return count;
+}
+
+/**
+ * Phase-2: Compute DM unread counts grouped by sourceRoomId.
+ * Returns: { byRoomId: Record<roomId, unreadCount>, roomsWithUnread: number }
+ */
+export function computeUnreadDmCountsByRoom(
+  state: Pick<DemoDmState, 'conversations' | 'meta'>,
+  currentUserId: string,
+): { byRoomId: Record<string, number>; roomsWithUnread: number } {
+  const byRoomId: Record<string, number> = {};
+
+  for (const [convId, msgs] of Object.entries(state.conversations)) {
+    if (!msgs || msgs.length === 0) continue;
+
+    // Get sourceRoomId from meta
+    const meta = state.meta[convId];
+    const sourceRoomId = meta?.sourceRoomId;
+    if (!sourceRoomId) continue; // Skip DMs without sourceRoomId
+
+    // Count unread incoming messages
+    const unreadCount = msgs.filter(
+      (m) => m.senderId !== currentUserId && !m.readAt,
+    ).length;
+
+    if (unreadCount > 0) {
+      byRoomId[sourceRoomId] = (byRoomId[sourceRoomId] || 0) + unreadCount;
+    }
+  }
+
+  const roomsWithUnread = Object.keys(byRoomId).length;
+  return { byRoomId, roomsWithUnread };
 }
 
 export const useDemoDmStore = create<DemoDmState>()(

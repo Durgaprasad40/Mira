@@ -161,15 +161,14 @@ export function ChatTodOverlay({
 
   /**
    * Handle voice answer submission from VoiceComposer.
-   * VoiceComposer calls onSubmit(durationSec, isAnonymous, profileVisibility)
-   * We don't have a real audio URI in demo mode - using duration as placeholder
+   * VoiceComposer calls onSubmitAudio(audioUri, durationMs, isAnonymous, profileVisibility)
    */
   const handleSubmitVoiceAnswer = useCallback(
-    (durationSec: number, _isAnonymous?: boolean, _profileVisibility?: TodProfileVisibility) => {
+    (audioUri: string, durationMs: number, _isAnonymous: boolean, _profileVisibility: TodProfileVisibility) => {
       const meta: TodAnswerMeta = {
         type: 'voice',
-        mediaUri: `demo_voice_${Date.now()}`, // Placeholder URI for demo
-        durationSec,
+        mediaUri: audioUri,
+        durationSec: Math.ceil(durationMs / 1000),
       };
       submitAnswer(conversationId, meta);
       setShowVoiceRecorder(false);
@@ -606,7 +605,7 @@ export function ChatTodOverlay({
         visible={showVoiceRecorder}
         prompt={fakeTodPrompt}
         onClose={() => setShowVoiceRecorder(false)}
-        onSubmit={handleSubmitVoiceAnswer}
+        onSubmitAudio={handleSubmitVoiceAnswer}
       />
     </View>
   );

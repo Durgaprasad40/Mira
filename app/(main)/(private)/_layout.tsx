@@ -12,6 +12,7 @@ import { useIncognitoStore } from '@/stores/incognitoStore';
 import { usePrivateProfileStore } from '@/stores/privateProfileStore';
 import { PrivateConsentGate } from '@/components/private/PrivateConsentGate';
 import { setPhase2Active } from '@/hooks/useNotifications';
+import { prewarmTodCache } from './(tabs)/truth-or-dare';
 
 const C = INCOGNITO_COLORS;
 
@@ -180,6 +181,20 @@ export default function PrivateLayout() {
     api.privateProfiles.getByUserId,
     !isDemoMode && userId ? { userId: userId as any } : 'skip'
   );
+
+  // PREWARM: Start T/D queries early so data is cached when user opens T/D tab
+  const prewarmPromptsData = useQuery(
+    api.truthDare.listActivePromptsWithTop2Answers,
+    { viewerUserId: userId ?? undefined }
+  );
+  const prewarmTrendingData = useQuery(api.truthDare.getTrendingTruthAndDare);
+
+  // Push data into module-level cache as soon as it arrives
+  useEffect(() => {
+    if (prewarmPromptsData !== undefined || prewarmTrendingData !== undefined) {
+      prewarmTodCache(prewarmPromptsData, prewarmTrendingData);
+    }
+  }, [prewarmPromptsData, prewarmTrendingData]);
 
   // H-001/C-001 FIX: Wait for incognito store hydration before checking consent
   // Prevents showing consent gate to already-consented users on cold start

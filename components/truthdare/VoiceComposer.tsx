@@ -1,35 +1,78 @@
-import React, { useState, useRef, useEffect } from 'react';
-import { View, Text, StyleSheet, TouchableOpacity, Modal, Animated, Switch } from 'react-native';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
+import { View, Text, StyleSheet, TouchableOpacity, Modal, Animated, Alert, ActivityIndicator } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
+import { Audio } from 'expo-av';
 import { INCOGNITO_COLORS } from '@/lib/constants';
+import { useTodIdentityStore, TodIdentityChoice } from '@/stores/todIdentityStore';
 import type { TodPrompt, TodProfileVisibility } from '@/types';
 
 const C = INCOGNITO_COLORS;
-const MAX_DURATION = 60; // seconds
+const MAX_DURATION_SEC = 60; // 60 seconds max
 
 interface VoiceComposerProps {
   visible: boolean;
   prompt: TodPrompt | null;
   onClose: () => void;
-  onSubmit: (durationSec: number, isAnonymous?: boolean, profileVisibility?: TodProfileVisibility) => void;
+  /** Called with audioUri and durationMs when user confirms posting */
+  onSubmitAudio: (audioUri: string, durationMs: number, isAnonymous: boolean, profileVisibility: TodProfileVisibility) => void;
+  /** Optional: if true, show uploading state */
+  isUploading?: boolean;
 }
 
-export function VoiceComposer({ visible, prompt, onClose, onSubmit }: VoiceComposerProps) {
+// Map store choice to internal identity mode
+type IdentityMode = 'anonymous' | 'no_photo' | 'show_profile';
+
+function storeChoiceToMode(choice: TodIdentityChoice): IdentityMode {
+  if (choice === 'public') return 'show_profile';
+  return choice;
+}
+
+function modeToStoreChoice(mode: IdentityMode): TodIdentityChoice {
+  if (mode === 'show_profile') return 'public';
+  return mode;
+}
+
+export function VoiceComposer({ visible, prompt, onClose, onSubmitAudio, isUploading }: VoiceComposerProps) {
   const [isRecording, setIsRecording] = useState(false);
   const [hasRecording, setHasRecording] = useState(false);
   const [seconds, setSeconds] = useState(0);
-  const [isAnonymous, setIsAnonymous] = useState(false);
-  const [profileVisibility, setProfileVisibility] = useState<TodProfileVisibility>('blurred');
+  const [audioUri, setAudioUri] = useState<string | null>(null);
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [identityMode, setIdentityMode] = useState<IdentityMode>('anonymous');
+
+  const recordingRef = useRef<Audio.Recording | null>(null);
+  const soundRef = useRef<Audio.Sound | null>(null);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const pulseAnim = useRef(new Animated.Value(1)).current;
 
+  // Get store functions
+  const getChoice = useTodIdentityStore((s) => s.getChoice);
+  const setChoice = useTodIdentityStore((s) => s.setChoice);
+
+  // Check if identity is already stored for this thread
+  const promptId = prompt?.id;
+  const storedChoice = promptId ? getChoice(promptId) : undefined;
+  const hasStoredChoice = storedChoice !== undefined;
+
+  // Reset state when modal opens
+  useEffect(() => {
+    if (visible && promptId) {
+      if (storedChoice) {
+        setIdentityMode(storeChoiceToMode(storedChoice));
+      } else {
+        setIdentityMode('anonymous');
+      }
+    }
+  }, [visible, promptId, storedChoice]);
+
+  // Recording timer effect
   useEffect(() => {
     if (isRecording) {
       intervalRef.current = setInterval(() => {
         setSeconds((s) => {
-          if (s >= MAX_DURATION - 1) {
+          if (s >= MAX_DURATION_SEC - 1) {
             stopRecording();
-            return MAX_DURATION;
+            return MAX_DURATION_SEC;
           }
           return s + 1;
         });
@@ -49,34 +92,147 @@ export function VoiceComposer({ visible, prompt, onClose, onSubmit }: VoiceCompo
     };
   }, [isRecording]);
 
-  const startRecording = () => {
-    setSeconds(0);
-    setIsRecording(true);
-    setHasRecording(false);
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      if (recordingRef.current) {
+        recordingRef.current.stopAndUnloadAsync().catch(() => {});
+      }
+      if (soundRef.current) {
+        soundRef.current.unloadAsync().catch(() => {});
+      }
+    };
+  }, []);
+
+  const startRecording = async () => {
+    try {
+      // Request permission
+      const { status } = await Audio.requestPermissionsAsync();
+      if (status !== 'granted') {
+        Alert.alert('Permission Required', 'Please allow microphone access to record voice messages.');
+        return;
+      }
+
+      // Configure audio mode for recording
+      await Audio.setAudioModeAsync({
+        allowsRecordingIOS: true,
+        playsInSilentModeIOS: true,
+      });
+
+      // Create and start recording
+      const { recording } = await Audio.Recording.createAsync(
+        Audio.RecordingOptionsPresets.HIGH_QUALITY
+      );
+
+      recordingRef.current = recording;
+      setIsRecording(true);
+      setHasRecording(false);
+      setAudioUri(null);
+      setSeconds(0);
+    } catch (error) {
+      console.error('[VoiceComposer] Start recording error:', error);
+      Alert.alert('Error', 'Failed to start recording. Please try again.');
+    }
   };
 
-  const stopRecording = () => {
-    setIsRecording(false);
-    setHasRecording(true);
+  const stopRecording = async () => {
+    if (!recordingRef.current) return;
+
+    try {
+      await recordingRef.current.stopAndUnloadAsync();
+      const uri = recordingRef.current.getURI();
+      recordingRef.current = null;
+
+      setIsRecording(false);
+
+      if (uri) {
+        setAudioUri(uri);
+        setHasRecording(true);
+        console.log('[VoiceComposer] Recording saved to:', uri);
+      }
+    } catch (error) {
+      console.error('[VoiceComposer] Stop recording error:', error);
+      setIsRecording(false);
+    }
   };
 
-  const handleClose = () => {
+  const playPreview = async () => {
+    if (!audioUri) return;
+
+    try {
+      // Stop if already playing
+      if (soundRef.current) {
+        await soundRef.current.unloadAsync();
+        soundRef.current = null;
+        setIsPlaying(false);
+        return;
+      }
+
+      // Configure audio mode for playback
+      await Audio.setAudioModeAsync({
+        allowsRecordingIOS: false,
+        playsInSilentModeIOS: true,
+      });
+
+      const { sound } = await Audio.Sound.createAsync(
+        { uri: audioUri },
+        { shouldPlay: true },
+        (status) => {
+          if (status.isLoaded && status.didJustFinish) {
+            setIsPlaying(false);
+            soundRef.current?.unloadAsync();
+            soundRef.current = null;
+          }
+        }
+      );
+
+      soundRef.current = sound;
+      setIsPlaying(true);
+    } catch (error) {
+      console.error('[VoiceComposer] Playback error:', error);
+      setIsPlaying(false);
+    }
+  };
+
+  const handleClose = useCallback(() => {
+    // Stop any ongoing recording/playback
+    if (recordingRef.current) {
+      recordingRef.current.stopAndUnloadAsync().catch(() => {});
+      recordingRef.current = null;
+    }
+    if (soundRef.current) {
+      soundRef.current.unloadAsync().catch(() => {});
+      soundRef.current = null;
+    }
+    if (intervalRef.current) {
+      clearInterval(intervalRef.current);
+      intervalRef.current = null;
+    }
+
     setIsRecording(false);
     setHasRecording(false);
+    setAudioUri(null);
     setSeconds(0);
-    setIsAnonymous(false);
-    setProfileVisibility('blurred');
+    setIsPlaying(false);
     onClose();
-  };
+  }, [onClose]);
 
-  const handleSubmit = () => {
-    onSubmit(seconds, isAnonymous, isAnonymous ? profileVisibility : 'clear');
-    setIsRecording(false);
-    setHasRecording(false);
-    setSeconds(0);
-    setIsAnonymous(false);
-    setProfileVisibility('blurred');
-  };
+  const handleSubmit = useCallback(() => {
+    if (!audioUri || !promptId) return;
+
+    // Save the identity choice for this thread
+    const choice = modeToStoreChoice(identityMode);
+    setChoice(promptId, choice);
+
+    // Map identity mode to isAnonymous and profileVisibility
+    const isAnonymous = identityMode === 'anonymous';
+    const profileVisibility: TodProfileVisibility = identityMode === 'no_photo' ? 'blurred' : 'clear';
+
+    // Convert seconds to milliseconds
+    const durationMs = seconds * 1000;
+
+    onSubmitAudio(audioUri, durationMs, isAnonymous, profileVisibility);
+  }, [audioUri, promptId, identityMode, seconds, setChoice, onSubmitAudio]);
 
   const formatTime = (s: number) => {
     const m = Math.floor(s / 60);
@@ -99,7 +255,7 @@ export function VoiceComposer({ visible, prompt, onClose, onSubmit }: VoiceCompo
 
           <Text style={styles.promptText} numberOfLines={2}>{prompt.text}</Text>
 
-          {/* Waveform placeholder */}
+          {/* Waveform area */}
           <View style={styles.waveformArea}>
             {isRecording && (
               <View style={styles.waveformBars}>
@@ -110,7 +266,7 @@ export function VoiceComposer({ visible, prompt, onClose, onSubmit }: VoiceCompo
                       styles.waveBar,
                       {
                         height: 8 + Math.random() * 32,
-                        transform: [{ scaleY: isRecording ? pulseAnim : 1 }],
+                        transform: [{ scaleY: pulseAnim }],
                       },
                     ]}
                   />
@@ -118,11 +274,9 @@ export function VoiceComposer({ visible, prompt, onClose, onSubmit }: VoiceCompo
               </View>
             )}
             {!isRecording && hasRecording && (
-              <View style={styles.waveformBars}>
-                {Array.from({ length: 20 }).map((_, i) => (
-                  <View key={i} style={[styles.waveBar, { height: 8 + (i % 5) * 8, opacity: 0.5 }]} />
-                ))}
-              </View>
+              <TouchableOpacity onPress={playPreview} style={styles.previewPlayBtn}>
+                <Ionicons name={isPlaying ? 'pause-circle' : 'play-circle'} size={64} color={C.primary} />
+              </TouchableOpacity>
             )}
             {!isRecording && !hasRecording && (
               <Ionicons name="mic-outline" size={48} color={C.textLight} />
@@ -130,57 +284,65 @@ export function VoiceComposer({ visible, prompt, onClose, onSubmit }: VoiceCompo
           </View>
 
           <Text style={styles.timer}>{formatTime(seconds)}</Text>
-          <Text style={styles.maxLabel}>Max {MAX_DURATION}s</Text>
+          <Text style={styles.maxLabel}>Max {MAX_DURATION_SEC}s</Text>
 
-          {/* Anonymous toggle — Truth & Dare */}
-          <View style={styles.anonRow}>
-            <Ionicons name="eye-off-outline" size={16} color={isAnonymous ? C.primary : C.textLight} />
-            <Text style={[styles.anonLabel, isAnonymous && { color: C.primary }]}>Answer anonymously</Text>
-            <Switch
-              value={isAnonymous}
-              onValueChange={setIsAnonymous}
-              trackColor={{ false: C.accent, true: C.primary + '60' }}
-              thumbColor={isAnonymous ? C.primary : C.textLight}
-            />
-          </View>
-
-          {/* Profile visibility picker — shown when anonymous */}
-          {isAnonymous && (
-            <View style={styles.visibilitySection}>
-              <View style={styles.visibilityHeader}>
-                <Ionicons name="lock-closed-outline" size={14} color={C.textLight} />
-                <Text style={styles.visibilityLabel}>Profile visibility</Text>
+          {/* Identity Mode Picker - only show if no stored choice */}
+          {!hasStoredChoice && (
+            <View style={styles.identitySection}>
+              <View style={styles.identityHeader}>
+                <Ionicons name="person-outline" size={14} color={C.textLight} />
+                <Text style={styles.identityTitle}>Your identity</Text>
               </View>
-              <View style={styles.visibilityOptions}>
+              <View style={styles.identityOptions}>
+                {/* Option 1: Anonymous (DEFAULT) */}
                 <TouchableOpacity
-                  style={[styles.visibilityOption, profileVisibility === 'blurred' && styles.visibilityOptionActive]}
-                  onPress={() => setProfileVisibility('blurred')}
+                  style={[styles.identityOption, identityMode === 'anonymous' && styles.identityOptionActive]}
+                  onPress={() => setIdentityMode('anonymous')}
                 >
                   <View style={styles.radioOuter}>
-                    {profileVisibility === 'blurred' && <View style={styles.radioInner} />}
+                    {identityMode === 'anonymous' && <View style={styles.radioInner} />}
                   </View>
-                  <Text style={[styles.visibilityOptionText, profileVisibility === 'blurred' && { color: C.primary }]}>
-                    Blurred profile
+                  <Ionicons name="eye-off" size={16} color={identityMode === 'anonymous' ? C.primary : C.textLight} />
+                  <Text style={[styles.identityOptionText, identityMode === 'anonymous' && { color: C.primary }]}>
+                    Anonymous
                   </Text>
                   <View style={styles.recommendedBadge}>
-                    <Text style={styles.recommendedBadgeText}>Recommended</Text>
+                    <Text style={styles.recommendedBadgeText}>Default</Text>
                   </View>
                 </TouchableOpacity>
+
+                {/* Option 2: No photo */}
                 <TouchableOpacity
-                  style={[styles.visibilityOption, profileVisibility === 'clear' && styles.visibilityOptionActive]}
-                  onPress={() => setProfileVisibility('clear')}
+                  style={[styles.identityOption, identityMode === 'no_photo' && styles.identityOptionActive]}
+                  onPress={() => setIdentityMode('no_photo')}
                 >
                   <View style={styles.radioOuter}>
-                    {profileVisibility === 'clear' && <View style={styles.radioInner} />}
+                    {identityMode === 'no_photo' && <View style={styles.radioInner} />}
                   </View>
-                  <Text style={[styles.visibilityOptionText, profileVisibility === 'clear' && { color: C.primary }]}>
-                    Show profile clearly
+                  <Ionicons name="person-outline" size={16} color={identityMode === 'no_photo' ? C.primary : C.textLight} />
+                  <Text style={[styles.identityOptionText, identityMode === 'no_photo' && { color: C.primary }]}>
+                    No photo
+                  </Text>
+                </TouchableOpacity>
+
+                {/* Option 3: Show profile */}
+                <TouchableOpacity
+                  style={[styles.identityOption, identityMode === 'show_profile' && styles.identityOptionActive]}
+                  onPress={() => setIdentityMode('show_profile')}
+                >
+                  <View style={styles.radioOuter}>
+                    {identityMode === 'show_profile' && <View style={styles.radioInner} />}
+                  </View>
+                  <Ionicons name="person" size={16} color={identityMode === 'show_profile' ? C.primary : C.textLight} />
+                  <Text style={[styles.identityOptionText, identityMode === 'show_profile' && { color: C.primary }]}>
+                    Show profile
                   </Text>
                 </TouchableOpacity>
               </View>
             </View>
           )}
 
+          {/* Controls */}
           <View style={styles.controls}>
             {!isRecording && !hasRecording && (
               <TouchableOpacity style={styles.recordBtn} onPress={startRecording}>
@@ -198,13 +360,31 @@ export function VoiceComposer({ visible, prompt, onClose, onSubmit }: VoiceCompo
                   <Ionicons name="refresh" size={20} color={C.text} />
                   <Text style={styles.retryText}>Redo</Text>
                 </TouchableOpacity>
-                <TouchableOpacity style={styles.postBtn} onPress={handleSubmit}>
-                  <Ionicons name="send" size={18} color="#FFF" />
-                  <Text style={styles.postText}>Post</Text>
+                <TouchableOpacity
+                  style={[styles.postBtn, isUploading && styles.postBtnDisabled]}
+                  onPress={handleSubmit}
+                  disabled={isUploading}
+                >
+                  {isUploading ? (
+                    <ActivityIndicator size="small" color="#FFF" />
+                  ) : (
+                    <>
+                      <Ionicons name="send" size={18} color="#FFF" />
+                      <Text style={styles.postText}>Post</Text>
+                    </>
+                  )}
                 </TouchableOpacity>
               </View>
             )}
           </View>
+
+          {/* One-time view info */}
+          {hasRecording && (
+            <View style={styles.viewModeInfo}>
+              <Ionicons name="eye-outline" size={14} color={C.textLight} />
+              <Text style={styles.viewModeText}>Tap to view</Text>
+            </View>
+          )}
         </View>
       </View>
     </Modal>
@@ -224,33 +404,29 @@ const styles = StyleSheet.create({
   title: { fontSize: 17, fontWeight: '700', color: C.text },
   promptText: { fontSize: 13, color: C.textLight, textAlign: 'center', marginBottom: 20 },
   waveformArea: {
-    height: 60, justifyContent: 'center', alignItems: 'center', marginBottom: 12,
+    height: 80, justifyContent: 'center', alignItems: 'center', marginBottom: 12,
   },
   waveformBars: { flexDirection: 'row', alignItems: 'center', gap: 3, height: 48 },
   waveBar: { width: 3, borderRadius: 1.5, backgroundColor: C.primary },
+  previewPlayBtn: { padding: 8 },
   timer: { fontSize: 32, fontWeight: '700', color: C.text, marginBottom: 4 },
-  maxLabel: { fontSize: 11, color: C.textLight, marginBottom: 20 },
-  anonRow: {
-    flexDirection: 'row', alignItems: 'center', gap: 8,
-    width: '100%', marginBottom: 8, paddingHorizontal: 4,
-  },
-  anonLabel: { flex: 1, fontSize: 13, color: C.textLight, fontWeight: '500' },
-  // Profile visibility
-  visibilitySection: {
+  maxLabel: { fontSize: 11, color: C.textLight, marginBottom: 16 },
+  // Identity picker
+  identitySection: {
     backgroundColor: C.surface, borderRadius: 10,
-    padding: 12, marginBottom: 12, width: '100%',
+    padding: 12, marginBottom: 16, width: '100%',
   },
-  visibilityHeader: {
+  identityHeader: {
     flexDirection: 'row', alignItems: 'center', gap: 6, marginBottom: 10,
   },
-  visibilityLabel: { fontSize: 12, fontWeight: '600', color: C.textLight, textTransform: 'uppercase', letterSpacing: 0.3 },
-  visibilityOptions: { gap: 6 },
-  visibilityOption: {
+  identityTitle: { fontSize: 12, fontWeight: '600', color: C.textLight, textTransform: 'uppercase', letterSpacing: 0.3 },
+  identityOptions: { gap: 6 },
+  identityOption: {
     flexDirection: 'row', alignItems: 'center', gap: 10,
     paddingVertical: 8, paddingHorizontal: 8, borderRadius: 8,
   },
-  visibilityOptionActive: { backgroundColor: C.primary + '10' },
-  visibilityOptionText: { fontSize: 13, color: C.text, fontWeight: '500' },
+  identityOptionActive: { backgroundColor: C.primary + '10' },
+  identityOptionText: { flex: 1, fontSize: 13, color: C.text, fontWeight: '500' },
   radioOuter: {
     width: 18, height: 18, borderRadius: 9,
     borderWidth: 2, borderColor: C.textLight,
@@ -261,7 +437,7 @@ const styles = StyleSheet.create({
     backgroundColor: C.primary + '20', paddingHorizontal: 6, paddingVertical: 2, borderRadius: 6,
   },
   recommendedBadgeText: { fontSize: 9, fontWeight: '700', color: C.primary },
-  controls: { alignItems: 'center' },
+  controls: { alignItems: 'center', marginBottom: 12 },
   recordBtn: {
     width: 72, height: 72, borderRadius: 36, borderWidth: 3, borderColor: C.primary,
     alignItems: 'center', justifyContent: 'center',
@@ -281,6 +457,13 @@ const styles = StyleSheet.create({
   postBtn: {
     flexDirection: 'row', alignItems: 'center', gap: 6,
     backgroundColor: C.primary, paddingHorizontal: 24, paddingVertical: 10, borderRadius: 20,
+    minWidth: 90, justifyContent: 'center',
   },
+  postBtnDisabled: { opacity: 0.6 },
   postText: { fontSize: 14, fontWeight: '600', color: '#FFF' },
+  viewModeInfo: {
+    flexDirection: 'row', alignItems: 'center', gap: 6,
+    paddingVertical: 8, paddingHorizontal: 12, backgroundColor: C.surface, borderRadius: 8,
+  },
+  viewModeText: { fontSize: 12, color: C.textLight },
 });

@@ -424,6 +424,9 @@ export function UnifiedAnswerComposer({
               onChangeText={setText}
               multiline
               maxLength={MAX_TEXT_CHARS}
+              autoComplete="off"
+              textContentType="none"
+              importantForAutofill="noExcludeDescendants"
             />
             <Text style={styles.charCount}>{text.length}/{MAX_TEXT_CHARS}</Text>
 

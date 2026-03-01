@@ -606,6 +606,9 @@ export default function PrivateChatScreen() {
                 blurOnSubmit={false}
                 maxLength={1000}
                 editable={!isRecording}
+                autoComplete="off"
+                textContentType="none"
+                importantForAutofill="noExcludeDescendants"
               />
               {/* Camera button for secure photos */}
               {!isRecording && (

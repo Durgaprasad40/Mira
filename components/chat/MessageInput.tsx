@@ -319,6 +319,9 @@ export function MessageInput({
           blurOnSubmit={false}
           maxLength={isDemoMode || canSendCustom ? undefined : 150}
           editable={!disabled && !isRecording && (isDemoMode || canSendCustom || !isPreMatch)}
+          autoComplete="off"
+          textContentType="none"
+          importantForAutofill="noExcludeDescendants"
         />
 
         {!isRecording && (

@@ -202,11 +202,11 @@ export default function RoomChatScreen() {
         </View>
       </View>
 
-      {/* Active users */}
+      {/* Active users - tap to show full list */}
       <ActiveUsersStrip
         users={DEMO_ONLINE_USERS.map((u) => ({ id: u.id, avatar: u.avatar, isOnline: u.isOnline }))}
         theme="dark"
-        onUserPress={(userId) => Alert.alert('User', userId)}
+        onPress={() => Alert.alert('Members', 'Full members list would open here')}
       />
 
       {/* Hint */}
@@ -259,6 +259,9 @@ export default function RoomChatScreen() {
           textAlignVertical="top"
           blurOnSubmit={false}
           maxLength={500}
+          autoComplete="off"
+          textContentType="none"
+          importantForAutofill="noExcludeDescendants"
         />
         <TouchableOpacity
           style={[styles.sendButton, !text.trim() && styles.sendButtonDisabled]}

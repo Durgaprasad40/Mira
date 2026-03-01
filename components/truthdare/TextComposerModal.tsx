@@ -1,10 +1,11 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity, Modal, TextInput,
-  KeyboardAvoidingView, Platform, Switch,
+  KeyboardAvoidingView, Platform,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { INCOGNITO_COLORS } from '@/lib/constants';
+import { useTodIdentityStore, TodIdentityChoice } from '@/stores/todIdentityStore';
 import type { TodPrompt, TodProfileVisibility } from '@/types';
 
 const C = INCOGNITO_COLORS;
@@ -19,35 +20,62 @@ interface TextComposerModalProps {
   onSubmit: (text: string, isAnonymous?: boolean, profileVisibility?: TodProfileVisibility) => void;
 }
 
-// Identity mode: 'show_profile' | 'blur_photo' | 'anonymous'
-type IdentityMode = 'show_profile' | 'blur_photo' | 'anonymous';
+// Map store choice to internal identity mode
+type IdentityMode = 'anonymous' | 'no_photo' | 'show_profile';
+
+function storeChoiceToMode(choice: TodIdentityChoice): IdentityMode {
+  if (choice === 'public') return 'show_profile';
+  return choice; // 'anonymous' | 'no_photo'
+}
+
+function modeToStoreChoice(mode: IdentityMode): TodIdentityChoice {
+  if (mode === 'show_profile') return 'public';
+  return mode; // 'anonymous' | 'no_photo'
+}
 
 export function TextComposerModal({ visible, prompt, initialText, onClose, onSubmit }: TextComposerModalProps) {
   const [text, setText] = useState(initialText || '');
-  const [identityMode, setIdentityMode] = useState<IdentityMode>('show_profile');
+  const [identityMode, setIdentityMode] = useState<IdentityMode>('anonymous');
+
+  // Get store functions
+  const getChoice = useTodIdentityStore((s) => s.getChoice);
+  const setChoice = useTodIdentityStore((s) => s.setChoice);
+
+  // Check if identity is already stored for this thread
+  const promptId = prompt?.id;
+  const storedChoice = promptId ? getChoice(promptId) : undefined;
+  const hasStoredChoice = storedChoice !== undefined;
 
   // Reset state when modal opens
-  React.useEffect(() => {
-    if (visible) {
+  useEffect(() => {
+    if (visible && promptId) {
       setText(initialText || '');
-      // Reset to default: show profile (NOT anonymous)
-      setIdentityMode('show_profile');
+      // Use stored choice if available, otherwise default to anonymous
+      if (storedChoice) {
+        setIdentityMode(storeChoiceToMode(storedChoice));
+      } else {
+        setIdentityMode('anonymous');
+      }
     }
-  }, [visible, initialText]);
+  }, [visible, initialText, promptId, storedChoice]);
 
   const handleSubmit = () => {
-    if (text.trim().length < 3) return;
+    if (text.trim().length < 3 || !promptId) return;
+
+    // Save the identity choice for this thread
+    const choice = modeToStoreChoice(identityMode);
+    setChoice(promptId, choice);
+
     // Map identity mode to isAnonymous and profileVisibility
     const isAnonymous = identityMode === 'anonymous';
-    const profileVisibility: TodProfileVisibility = identityMode === 'blur_photo' ? 'blurred' : 'clear';
+    // no_photo maps to 'blurred' for backend compatibility (photoBlurMode='blur')
+    const profileVisibility: TodProfileVisibility = identityMode === 'no_photo' ? 'blurred' : 'clear';
     onSubmit(text.trim(), isAnonymous, profileVisibility);
     setText('');
-    setIdentityMode('show_profile');
   };
 
   const handleClose = () => {
     setText('');
-    setIdentityMode('show_profile');
     onClose();
   };
 
@@ -77,61 +105,66 @@ export function TextComposerModal({ visible, prompt, initialText, onClose, onSub
             multiline
             maxLength={MAX_CHARS}
             autoFocus
+            autoComplete="off"
+            textContentType="none"
+            importantForAutofill="noExcludeDescendants"
           />
 
-          {/* Identity Mode Picker - 3 clear options */}
-          <View style={styles.identitySection}>
-            <View style={styles.identityHeader}>
-              <Ionicons name="person-outline" size={14} color={C.textLight} />
-              <Text style={styles.identityTitle}>Your identity</Text>
-            </View>
-            <View style={styles.identityOptions}>
-              {/* Option 1: Show profile (default) */}
-              <TouchableOpacity
-                style={[styles.identityOption, identityMode === 'show_profile' && styles.identityOptionActive]}
-                onPress={() => setIdentityMode('show_profile')}
-              >
-                <View style={styles.radioOuter}>
-                  {identityMode === 'show_profile' && <View style={styles.radioInner} />}
-                </View>
-                <Ionicons name="person" size={16} color={identityMode === 'show_profile' ? C.primary : C.textLight} />
-                <Text style={[styles.identityOptionText, identityMode === 'show_profile' && { color: C.primary }]}>
-                  Show profile
-                </Text>
-                <View style={styles.recommendedBadge}>
-                  <Text style={styles.recommendedText}>Default</Text>
-                </View>
-              </TouchableOpacity>
+          {/* Identity Mode Picker - only show if no stored choice for this thread */}
+          {!hasStoredChoice && (
+            <View style={styles.identitySection}>
+              <View style={styles.identityHeader}>
+                <Ionicons name="person-outline" size={14} color={C.textLight} />
+                <Text style={styles.identityTitle}>Your identity</Text>
+              </View>
+              <View style={styles.identityOptions}>
+                {/* Option 1: Anonymous (DEFAULT) */}
+                <TouchableOpacity
+                  style={[styles.identityOption, identityMode === 'anonymous' && styles.identityOptionActive]}
+                  onPress={() => setIdentityMode('anonymous')}
+                >
+                  <View style={styles.radioOuter}>
+                    {identityMode === 'anonymous' && <View style={styles.radioInner} />}
+                  </View>
+                  <Ionicons name="eye-off" size={16} color={identityMode === 'anonymous' ? C.primary : C.textLight} />
+                  <Text style={[styles.identityOptionText, identityMode === 'anonymous' && { color: C.primary }]}>
+                    Anonymous
+                  </Text>
+                  <View style={styles.recommendedBadge}>
+                    <Text style={styles.recommendedText}>Default</Text>
+                  </View>
+                </TouchableOpacity>
 
-              {/* Option 2: Blur photo */}
-              <TouchableOpacity
-                style={[styles.identityOption, identityMode === 'blur_photo' && styles.identityOptionActive]}
-                onPress={() => setIdentityMode('blur_photo')}
-              >
-                <View style={styles.radioOuter}>
-                  {identityMode === 'blur_photo' && <View style={styles.radioInner} />}
-                </View>
-                <Ionicons name="eye-outline" size={16} color={identityMode === 'blur_photo' ? C.primary : C.textLight} />
-                <Text style={[styles.identityOptionText, identityMode === 'blur_photo' && { color: C.primary }]}>
-                  Blur photo
-                </Text>
-              </TouchableOpacity>
+                {/* Option 2: No photo */}
+                <TouchableOpacity
+                  style={[styles.identityOption, identityMode === 'no_photo' && styles.identityOptionActive]}
+                  onPress={() => setIdentityMode('no_photo')}
+                >
+                  <View style={styles.radioOuter}>
+                    {identityMode === 'no_photo' && <View style={styles.radioInner} />}
+                  </View>
+                  <Ionicons name="person-outline" size={16} color={identityMode === 'no_photo' ? C.primary : C.textLight} />
+                  <Text style={[styles.identityOptionText, identityMode === 'no_photo' && { color: C.primary }]}>
+                    No photo
+                  </Text>
+                </TouchableOpacity>
 
-              {/* Option 3: Anonymous */}
-              <TouchableOpacity
-                style={[styles.identityOption, identityMode === 'anonymous' && styles.identityOptionActive]}
-                onPress={() => setIdentityMode('anonymous')}
-              >
-                <View style={styles.radioOuter}>
-                  {identityMode === 'anonymous' && <View style={styles.radioInner} />}
-                </View>
-                <Ionicons name="eye-off" size={16} color={identityMode === 'anonymous' ? C.primary : C.textLight} />
-                <Text style={[styles.identityOptionText, identityMode === 'anonymous' && { color: C.primary }]}>
-                  Anonymous
-                </Text>
-              </TouchableOpacity>
+                {/* Option 3: Show profile */}
+                <TouchableOpacity
+                  style={[styles.identityOption, identityMode === 'show_profile' && styles.identityOptionActive]}
+                  onPress={() => setIdentityMode('show_profile')}
+                >
+                  <View style={styles.radioOuter}>
+                    {identityMode === 'show_profile' && <View style={styles.radioInner} />}
+                  </View>
+                  <Ionicons name="person" size={16} color={identityMode === 'show_profile' ? C.primary : C.textLight} />
+                  <Text style={[styles.identityOptionText, identityMode === 'show_profile' && { color: C.primary }]}>
+                    Show profile
+                  </Text>
+                </TouchableOpacity>
+              </View>
             </View>
-          </View>
+          )}
 
           <View style={styles.footer}>
             <Text style={styles.charCount}>{text.length}/{MAX_CHARS}</Text>

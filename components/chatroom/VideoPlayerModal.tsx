@@ -1,4 +1,4 @@
-import React, { useEffect } from 'react';
+import React, { useEffect, useRef } from 'react';
 import {
   View,
   Text,
@@ -7,11 +7,29 @@ import {
   StyleSheet,
   ActivityIndicator,
 } from 'react-native';
-import { useVideoPlayer, VideoView } from 'expo-video';
+import { useVideoPlayer, VideoView, VideoPlayer } from 'expo-video';
 import { Ionicons } from '@expo/vector-icons';
 import { INCOGNITO_COLORS } from '@/lib/constants';
 
 const C = INCOGNITO_COLORS;
+
+/**
+ * BUGFIX: Safe pause helper to avoid crashes when:
+ * 1. player is an integer (type mismatch from stale closure)
+ * 2. player has already been released/unmounted
+ */
+function safePause(player: VideoPlayer | null | undefined): void {
+  if (!player) return;
+  // Guard: ensure player is a real object with a pause function
+  if (typeof player !== 'object' || typeof (player as any).pause !== 'function') {
+    return;
+  }
+  try {
+    player.pause();
+  } catch {
+    // Ignore errors from already-released shared objects
+  }
+}
 
 interface VideoPlayerModalProps {
   visible: boolean;
@@ -25,17 +43,21 @@ export default function VideoPlayerModal({ visible, videoUri, onClose }: VideoPl
     p.play();
   });
 
-  // CR-4: Cleanup video on close/unmount
+  // BUGFIX: Track player in ref to avoid stale closure in cleanup
+  const playerRef = useRef<VideoPlayer | null>(null);
   useEffect(() => {
-    if (!visible && player) {
-      player.pause();
+    playerRef.current = player ?? null;
+  }, [player]);
+
+  // CR-4: Cleanup video on close/unmount (using safePause)
+  useEffect(() => {
+    if (!visible) {
+      safePause(playerRef.current);
     }
     return () => {
-      if (player) {
-        player.pause();
-      }
+      safePause(playerRef.current);
     };
-  }, [visible, player]);
+  }, [visible]);
 
   if (!visible || !videoUri) return null;
 

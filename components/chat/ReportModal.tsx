@@ -148,6 +148,9 @@ export function ReportModal({
               onChangeText={setDescription}
               multiline
               maxLength={500}
+              autoComplete="off"
+              textContentType="none"
+              importantForAutofill="noExcludeDescendants"
             />
           )}
 

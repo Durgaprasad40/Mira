@@ -59,7 +59,8 @@ interface ChatMessageListProps {
   mutedUserIds?: Set<string>;
   onMessageLongPress?: (message: DemoChatMessage) => void;
   onAvatarPress?: (senderId: string) => void;
-  onMediaPress?: (mediaUrl: string, type: 'image' | 'video') => void;
+  onMediaHoldStart?: (messageId: string, mediaUrl: string, type: 'image' | 'video') => void;
+  onMediaHoldEnd?: () => void;
   /** Extra bottom padding on the list content (e.g. composerHeight + safeArea) */
   contentPaddingBottom?: number;
 }
@@ -74,7 +75,8 @@ const ChatMessageList = forwardRef<ChatMessageListHandle, ChatMessageListProps>(
   mutedUserIds,
   onMessageLongPress,
   onAvatarPress,
-  onMediaPress,
+  onMediaHoldStart,
+  onMediaHoldEnd,
   contentPaddingBottom = 0,
 }, ref) {
   const listRef = useRef<FlashListRef<ListItem>>(null);
@@ -152,22 +154,24 @@ const ChatMessageList = forwardRef<ChatMessageListHandle, ChatMessageListProps>(
       return (
         <ChatMessageItem
           senderName={msg.senderName}
+          messageId={msg.id}
           senderId={msg.senderId}
           senderAvatar={msg.senderAvatar}
           text={msg.text || ''}
           timestamp={msg.createdAt}
           isMe={isMe}
           dimmed={isMuted}
-          messageType={(msg.type || 'text') as 'text' | 'image' | 'video'}
+          messageType={(msg.type || 'text') as 'text' | 'image' | 'video' | 'doodle'}
           mediaUrl={msg.mediaUrl}
           onLongPress={() => onMessageLongPress?.(msg)}
           onAvatarPress={() => onAvatarPress?.(msg.senderId)}
           onNamePress={() => onAvatarPress?.(msg.senderId)}
-          onMediaPress={onMediaPress}
+          onMediaHoldStart={onMediaHoldStart}
+          onMediaHoldEnd={onMediaHoldEnd}
         />
       );
     },
-    [currentUserId, mutedUserIds, onMessageLongPress, onAvatarPress, onMediaPress]
+    [currentUserId, mutedUserIds, onMessageLongPress, onAvatarPress, onMediaHoldStart, onMediaHoldEnd]
   );
 
   const keyExtractor = useCallback((item: ListItem) => item.id, []);

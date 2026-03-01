@@ -2789,7 +2789,7 @@ export interface DemoChatMessage {
   senderId: string;
   senderName: string;
   senderAvatar?: string;
-  type: 'text' | 'image' | 'video' | 'system';
+  type: 'text' | 'image' | 'video' | 'doodle' | 'system';
   text?: string;
   mediaUrl?: string;
   createdAt: number;
@@ -2897,6 +2897,8 @@ export interface DemoDM {
   visible: boolean;
   /** When true, thread is hidden until a new incoming message arrives */
   hiddenUntilNextMessage: boolean;
+  /** Phase-2: Room this DM originated from (for per-room unread badge) */
+  sourceRoomId?: string;
 }
 
 export interface DemoPrivateMessage {
@@ -2921,6 +2923,7 @@ export const DEMO_DM_INBOX: DemoDM[] = [
     unreadCount: 2,
     visible: true,
     hiddenUntilNextMessage: false,
+    sourceRoomId: 'cr_global', // From Global room
   },
   {
     id: 'dm_2',
@@ -2932,6 +2935,7 @@ export const DEMO_DM_INBOX: DemoDM[] = [
     unreadCount: 1,
     visible: true,
     hiddenUntilNextMessage: false,
+    sourceRoomId: 'cr_telugu', // From Telugu room
   },
   {
     id: 'dm_3',
@@ -2943,6 +2947,7 @@ export const DEMO_DM_INBOX: DemoDM[] = [
     unreadCount: 0,
     visible: true,
     hiddenUntilNextMessage: false,
+    sourceRoomId: 'cr_hindi', // From Hindi room (no unread)
   },
   {
     id: 'dm_hidden_1',

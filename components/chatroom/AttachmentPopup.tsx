@@ -14,6 +14,9 @@ import { INCOGNITO_COLORS } from '@/lib/constants';
 
 const C = INCOGNITO_COLORS;
 
+// Max video duration for chat rooms (30 seconds)
+const MAX_VIDEO_DURATION_SECONDS = 30;
+
 interface AttachmentPopupProps {
   visible: boolean;
   onClose: () => void;
@@ -68,7 +71,7 @@ export default function AttachmentPopup({
       const result = await ImagePicker.launchCameraAsync({
         mediaTypes: ['videos'],
         allowsEditing: false,
-        videoMaxDuration: 60,
+        videoMaxDuration: MAX_VIDEO_DURATION_SECONDS,
         videoQuality: 1,
       });
       if (!result.canceled && result.assets?.[0]?.uri) {
@@ -95,11 +98,20 @@ export default function AttachmentPopup({
         mediaTypes: ['images', 'videos'],
         quality: 0.8,
         allowsEditing: false,
-        videoMaxDuration: 60,
       });
       if (!result.canceled && result.assets?.[0]) {
         const asset = result.assets[0];
         if (asset.type === 'video') {
+          // Check video duration (duration is in milliseconds)
+          const durationSeconds = (asset.duration ?? 0) / 1000;
+          if (durationSeconds > MAX_VIDEO_DURATION_SECONDS) {
+            Alert.alert(
+              'Video Too Long',
+              'Only 30 seconds video is allowed',
+              [{ text: 'OK' }]
+            );
+            return;
+          }
           onVideoSelected(asset.uri);
         } else {
           onGalleryImage(asset.uri);

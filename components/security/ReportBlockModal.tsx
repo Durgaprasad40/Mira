@@ -227,6 +227,9 @@ export function ReportBlockModal({
         multiline
         maxLength={300}
         autoFocus
+        autoComplete="off"
+        textContentType="none"
+        importantForAutofill="noExcludeDescendants"
       />
       <View style={styles.otherButtons}>
         <TouchableOpacity style={styles.otherCancelBtn} onPress={handleOtherCancel}>

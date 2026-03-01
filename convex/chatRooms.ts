@@ -1,6 +1,13 @@
-import { mutation, query } from './_generated/server';
+import { mutation, query, internalMutation } from './_generated/server';
 import { v } from 'convex/values';
 import { softMaskText } from './softMask';
+import { internal } from './_generated/api';
+
+// 24 hours in milliseconds
+const ROOM_LIFETIME_MS = 24 * 60 * 60 * 1000;
+const PENALTY_DURATION_MS = 24 * 60 * 60 * 1000;
+// Max messages per room before auto-cleanup
+const MAX_MESSAGES_PER_ROOM = 1000;
 
 const DEFAULT_ROOMS = [
   { name: 'Global', slug: 'global', category: 'general' as const },
@@ -42,11 +49,13 @@ export const ensureDefaultRooms = mutation({
 });
 
 // List rooms, optionally filtered by category, sorted by most recent activity
+// Phase-2: Filters out expired rooms (expiresAt < now)
 export const listRooms = query({
   args: {
     category: v.optional(v.union(v.literal('language'), v.literal('general'))),
   },
   handler: async (ctx, { category }) => {
+    const now = Date.now();
     let rooms;
     if (category) {
       rooms = await ctx.db
@@ -56,6 +65,8 @@ export const listRooms = query({
     } else {
       rooms = await ctx.db.query('chatRooms').collect();
     }
+    // Phase-2: Filter out expired rooms
+    rooms = rooms.filter((r) => !r.expiresAt || r.expiresAt > now);
     // Sort: rooms with recent messages first, then by name
     rooms.sort((a, b) => {
       const aTime = a.lastMessageAt ?? 0;
@@ -79,10 +90,17 @@ export const getRoomBySlug = query({
 });
 
 // Get a single room by ID
+// Phase-2: Returns null if room is expired
 export const getRoom = query({
   args: { roomId: v.id('chatRooms') },
   handler: async (ctx, { roomId }) => {
-    return await ctx.db.get(roomId);
+    const room = await ctx.db.get(roomId);
+    if (!room) return null;
+    // Phase-2: Check if room has expired
+    if (room.expiresAt && room.expiresAt <= Date.now()) {
+      return null; // Treat expired room as not found
+    }
+    return room;
   },
 });
 
@@ -204,15 +222,26 @@ export const leaveRoom = mutation({
 
 // Send a message to a room (must be a member)
 // Includes idempotency via clientId and rate limiting (10 messages/minute/user/room)
+// Phase-2: Denies if user has active readOnly penalty
 export const sendMessage = mutation({
   args: {
     roomId: v.id('chatRooms'),
     senderId: v.id('users'),
     text: v.optional(v.string()),
     imageUrl: v.optional(v.string()),
+    mediaType: v.optional(v.union(v.literal('image'), v.literal('doodle'))), // For distinguishing doodles from images
     clientId: v.optional(v.string()), // For deduplication
   },
-  handler: async (ctx, { roomId, senderId, text, imageUrl, clientId }) => {
+  handler: async (ctx, { roomId, senderId, text, imageUrl, mediaType, clientId }) => {
+    // 0. Phase-2: Check room exists and not expired
+    const room = await ctx.db.get(roomId);
+    if (!room) {
+      throw new Error('Room not found');
+    }
+    if (room.expiresAt && room.expiresAt <= Date.now()) {
+      throw new Error('Room has expired');
+    }
+
     // 1. Idempotency check via clientId
     if (clientId) {
       const existing = await ctx.db
@@ -237,8 +266,20 @@ export const sendMessage = mutation({
       throw new Error('Must join the room before sending messages');
     }
 
+    // 2b. Phase-2: Check for active readOnly penalty
+    const now = Date.now();
+    const penalty = await ctx.db
+      .query('chatRoomPenalties')
+      .withIndex('by_room_user', (q) =>
+        q.eq('roomId', roomId).eq('userId', senderId)
+      )
+      .first();
+    if (penalty && penalty.expiresAt > now) {
+      throw new Error('You are in read-only mode for this room');
+    }
+
     // 3. Rate limiting: max 10 messages per minute per user per room
-    const oneMinuteAgo = Date.now() - 60000;
+    const oneMinuteAgo = now - 60000;
     const recentMessages = await ctx.db
       .query('chatRoomMessages')
       .withIndex('by_room_created', (q) => q.eq('roomId', roomId))
@@ -254,8 +295,8 @@ export const sendMessage = mutation({
       throw new Error('Rate limit exceeded: max 10 messages per minute');
     }
 
-    const type = imageUrl ? 'image' : 'text';
-    const now = Date.now();
+    // Determine message type: use explicit mediaType if provided, otherwise infer from imageUrl
+    const type = imageUrl ? (mediaType ?? 'image') : 'text';
 
     // Soft-mask sensitive words in text messages
     const maskedText = text ? softMaskText(text) : undefined;
@@ -281,11 +322,51 @@ export const sendMessage = mutation({
     // 6. Update member's lastMessageAt for rate limiting tracking
     await ctx.db.patch(membership._id, { lastMessageAt: now });
 
+    // 7. Auto-cleanup: Keep only most recent 1000 messages per room
+    // Use denormalized messageCount for efficiency (avoids loading all messages)
+    let currentCount = room.messageCount;
+
+    // Migration path: if messageCount is undefined, compute it once
+    if (currentCount === undefined) {
+      const allMsgs = await ctx.db
+        .query('chatRoomMessages')
+        .withIndex('by_room_created', (q) => q.eq('roomId', roomId))
+        .collect();
+      currentCount = allMsgs.length;
+    } else {
+      // Increment for the newly inserted message
+      currentCount += 1;
+    }
+
+    // Check if we exceed the cap
+    if (currentCount > MAX_MESSAGES_PER_ROOM) {
+      const excess = currentCount - MAX_MESSAGES_PER_ROOM;
+
+      // Query only the oldest `excess` messages (ordered by _creationTime asc)
+      const oldestMessages = await ctx.db
+        .query('chatRoomMessages')
+        .withIndex('by_room_created', (q) => q.eq('roomId', roomId))
+        .order('asc')
+        .take(excess);
+
+      // Delete oldest messages in batches
+      for (const msg of oldestMessages) {
+        await ctx.db.delete(msg._id);
+      }
+
+      // Update room with capped count
+      await ctx.db.patch(roomId, { messageCount: MAX_MESSAGES_PER_ROOM });
+    } else {
+      // Update room with new count
+      await ctx.db.patch(roomId, { messageCount: currentCount });
+    }
+
     return messageId;
   },
 });
 
 // Create a new chat room
+// Phase-2: Sets expiresAt to createdAt + 24h (private rooms only)
 export const createRoom = mutation({
   args: {
     name: v.string(),
@@ -307,23 +388,26 @@ export const createRoom = mutation({
       .first();
 
     const finalSlug = existing ? `${slug}-${Date.now()}` : slug;
+    const now = Date.now();
 
+    // Phase-2: All user-created rooms are private and expire after 24h
     const roomId = await ctx.db.insert('chatRooms', {
       name,
       slug: finalSlug,
       category: category ?? 'general',
-      isPublic: true,
-      createdAt: Date.now(),
+      isPublic: false, // Phase-2: Private rooms only
+      createdAt: now,
       memberCount: 1,
       createdBy,
       isDemoRoom,
+      expiresAt: now + ROOM_LIFETIME_MS, // Phase-2: 24h expiration
     });
 
     // Auto-join creator as owner
     await ctx.db.insert('chatRoomMembers', {
       roomId,
       userId: createdBy,
-      joinedAt: Date.now(),
+      joinedAt: now,
       role: 'owner',
     });
 
@@ -359,11 +443,13 @@ export const reportMessage = mutation({
 });
 
 // Get rooms where user is a member
+// Phase-2: Filters out expired rooms
 export const getRoomsForUser = query({
   args: {
     userId: v.id('users'),
   },
   handler: async (ctx, { userId }) => {
+    const now = Date.now();
     // Get all memberships for this user
     const memberships = await ctx.db
       .query('chatRoomMembers')
@@ -375,6 +461,8 @@ export const getRoomsForUser = query({
       memberships.map(async (membership) => {
         const room = await ctx.db.get(membership.roomId);
         if (!room) return null;
+        // Phase-2: Filter out expired rooms
+        if (room.expiresAt && room.expiresAt <= now) return null;
         return {
           ...room,
           role: membership.role,
@@ -392,5 +480,294 @@ export const getRoomsForUser = query({
         if (bTime !== aTime) return bTime - aTime;
         return a.name.localeCompare(b.name);
       });
+  },
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PHASE-2: Penalty Query Functions
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Get user's penalty status in a room
+export const getUserPenalty = query({
+  args: {
+    roomId: v.id('chatRooms'),
+    userId: v.id('users'),
+  },
+  handler: async (ctx, { roomId, userId }) => {
+    const penalty = await ctx.db
+      .query('chatRoomPenalties')
+      .withIndex('by_room_user', (q) =>
+        q.eq('roomId', roomId).eq('userId', userId)
+      )
+      .first();
+
+    if (!penalty) return null;
+
+    const now = Date.now();
+    if (penalty.expiresAt <= now) {
+      return null; // Penalty expired
+    }
+
+    return {
+      type: penalty.type,
+      expiresAt: penalty.expiresAt,
+      remainingMs: penalty.expiresAt - now,
+    };
+  },
+});
+
+// Check if user has any active readOnly penalty (for blocking DMs from Chat Rooms)
+export const hasAnyActivePenalty = query({
+  args: {
+    userId: v.id('users'),
+  },
+  handler: async (ctx, { userId }) => {
+    const now = Date.now();
+    const penalties = await ctx.db
+      .query('chatRoomPenalties')
+      .withIndex('by_user', (q) => q.eq('userId', userId))
+      .collect();
+
+    return penalties.some((p) => p.expiresAt > now);
+  },
+});
+
+// List members with penalty status
+export const listMembersWithPenalties = query({
+  args: { roomId: v.id('chatRooms') },
+  handler: async (ctx, { roomId }) => {
+    const now = Date.now();
+    const members = await ctx.db
+      .query('chatRoomMembers')
+      .withIndex('by_room', (q) => q.eq('roomId', roomId))
+      .collect();
+
+    // Get all penalties for this room using by_room index
+    const penalties = await ctx.db
+      .query('chatRoomPenalties')
+      .withIndex('by_room', (q) => q.eq('roomId', roomId))
+      .collect();
+
+    const penaltyMap = new Map(
+      penalties
+        .filter((p) => p.expiresAt > now)
+        .map((p) => [p.userId, p])
+    );
+
+    return members.map((m) => ({
+      ...m,
+      penalty: penaltyMap.get(m.userId)
+        ? { type: 'readOnly' as const, expiresAt: penaltyMap.get(m.userId)!.expiresAt }
+        : null,
+    }));
+  },
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PHASE-2: Room Lifecycle Mutations
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Close room (creator only) - deletes room and all messages
+// Does NOT allow closing permanent/global rooms (those without expiresAt)
+export const closeRoom = mutation({
+  args: {
+    roomId: v.id('chatRooms'),
+    userId: v.id('users'),
+  },
+  handler: async (ctx, { roomId, userId }) => {
+    const room = await ctx.db.get(roomId);
+    if (!room) {
+      throw new Error('Room not found');
+    }
+
+    // Prevent closing permanent/global rooms (no expiresAt means permanent)
+    if (!room.expiresAt) {
+      throw new Error('Cannot close permanent rooms');
+    }
+
+    // Only creator can close the room
+    if (room.createdBy !== userId) {
+      throw new Error('Only the room creator can close this room');
+    }
+
+    // Delete all messages (using by_room_created index, query by roomId only)
+    const messages = await ctx.db
+      .query('chatRoomMessages')
+      .withIndex('by_room_created', (q) => q.eq('roomId', roomId))
+      .collect();
+
+    for (const msg of messages) {
+      await ctx.db.delete(msg._id);
+    }
+
+    // Delete all members
+    const members = await ctx.db
+      .query('chatRoomMembers')
+      .withIndex('by_room', (q) => q.eq('roomId', roomId))
+      .collect();
+
+    for (const member of members) {
+      await ctx.db.delete(member._id);
+    }
+
+    // Delete all penalties for this room
+    const penalties = await ctx.db
+      .query('chatRoomPenalties')
+      .withIndex('by_room', (q) => q.eq('roomId', roomId))
+      .collect();
+
+    for (const penalty of penalties) {
+      await ctx.db.delete(penalty._id);
+    }
+
+    // Delete the room
+    await ctx.db.delete(roomId);
+
+    return { success: true };
+  },
+});
+
+// Kick user from room (creates readOnly penalty for 24h)
+// Only room creator/owner can kick
+export const kickUser = mutation({
+  args: {
+    roomId: v.id('chatRooms'),
+    kickerId: v.id('users'),
+    targetUserId: v.id('users'),
+  },
+  handler: async (ctx, { roomId, kickerId, targetUserId }) => {
+    const room = await ctx.db.get(roomId);
+    if (!room) {
+      throw new Error('Room not found');
+    }
+
+    // Check if kicker is the owner
+    const kickerMembership = await ctx.db
+      .query('chatRoomMembers')
+      .withIndex('by_room_user', (q) =>
+        q.eq('roomId', roomId).eq('userId', kickerId)
+      )
+      .first();
+
+    if (!kickerMembership || kickerMembership.role !== 'owner') {
+      throw new Error('Only room owner can kick users');
+    }
+
+    // Cannot kick yourself
+    if (kickerId === targetUserId) {
+      throw new Error('Cannot kick yourself');
+    }
+
+    const now = Date.now();
+
+    // Create or update penalty record
+    const existingPenalty = await ctx.db
+      .query('chatRoomPenalties')
+      .withIndex('by_room_user', (q) =>
+        q.eq('roomId', roomId).eq('userId', targetUserId)
+      )
+      .first();
+
+    if (existingPenalty) {
+      // Update existing penalty with new expiration
+      await ctx.db.patch(existingPenalty._id, {
+        kickedAt: now,
+        expiresAt: now + PENALTY_DURATION_MS,
+      });
+    } else {
+      // Create new penalty
+      await ctx.db.insert('chatRoomPenalties', {
+        roomId,
+        userId: targetUserId,
+        type: 'readOnly',
+        kickedAt: now,
+        expiresAt: now + PENALTY_DURATION_MS,
+      });
+    }
+
+    return { success: true };
+  },
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PHASE-2: Internal Cleanup Functions (called by cron)
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Internal: Cleanup expired rooms (called by cron job)
+// Only deletes rooms with expiresAt set (private rooms), never permanent rooms
+export const cleanupExpiredRooms = internalMutation({
+  args: {},
+  handler: async (ctx) => {
+    const now = Date.now();
+
+    // Find expired rooms (those with expiresAt <= now)
+    const expiredRooms = await ctx.db
+      .query('chatRooms')
+      .withIndex('by_expires')
+      .filter((q) =>
+        q.and(
+          q.neq(q.field('expiresAt'), undefined),
+          q.lte(q.field('expiresAt'), now)
+        )
+      )
+      .take(50); // Process in batches
+
+    for (const room of expiredRooms) {
+      // Delete messages (using by_room_created index)
+      const messages = await ctx.db
+        .query('chatRoomMessages')
+        .withIndex('by_room_created', (q) => q.eq('roomId', room._id))
+        .collect();
+
+      for (const msg of messages) {
+        await ctx.db.delete(msg._id);
+      }
+
+      // Delete members
+      const members = await ctx.db
+        .query('chatRoomMembers')
+        .withIndex('by_room', (q) => q.eq('roomId', room._id))
+        .collect();
+
+      for (const member of members) {
+        await ctx.db.delete(member._id);
+      }
+
+      // Delete penalties
+      const penalties = await ctx.db
+        .query('chatRoomPenalties')
+        .withIndex('by_room', (q) => q.eq('roomId', room._id))
+        .collect();
+
+      for (const penalty of penalties) {
+        await ctx.db.delete(penalty._id);
+      }
+
+      // Delete the room
+      await ctx.db.delete(room._id);
+    }
+
+    return { deletedCount: expiredRooms.length };
+  },
+});
+
+// Internal: Cleanup expired penalties (called by cron job)
+export const cleanupExpiredPenalties = internalMutation({
+  args: {},
+  handler: async (ctx) => {
+    const now = Date.now();
+
+    // Find all expired penalties
+    const expiredPenalties = await ctx.db
+      .query('chatRoomPenalties')
+      .withIndex('by_expires')
+      .filter((q) => q.lte(q.field('expiresAt'), now))
+      .take(100); // Process in batches
+
+    for (const penalty of expiredPenalties) {
+      await ctx.db.delete(penalty._id);
+    }
+
+    return { deletedCount: expiredPenalties.length };
   },
 });

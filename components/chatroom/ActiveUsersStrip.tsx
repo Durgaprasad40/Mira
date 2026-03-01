@@ -2,8 +2,7 @@ import React from 'react';
 import {
   View,
   Text,
-  ScrollView,
-  TouchableOpacity,
+  Pressable,
   StyleSheet,
   StyleProp,
   ViewStyle,
@@ -20,8 +19,8 @@ interface ActiveUser {
 
 interface ActiveUsersStripProps {
   users: ActiveUser[];
-  onUserPress?: (userId: string) => void;
-  onMorePress?: () => void;
+  /** Called when the entire strip is pressed (opens members list) */
+  onPress?: () => void;
   theme?: 'light' | 'dark';
 }
 
@@ -29,8 +28,7 @@ const MAX_VISIBLE = 6;
 
 export default function ActiveUsersStrip({
   users,
-  onUserPress,
-  onMorePress,
+  onPress,
   theme = 'light',
 }: ActiveUsersStripProps) {
   const C = theme === 'dark' ? INCOGNITO_COLORS : COLORS as any;
@@ -42,22 +40,20 @@ export default function ActiveUsersStrip({
   const extraCount = onlineUsers.length - MAX_VISIBLE;
 
   return (
-    <View style={[styles.container, { borderBottomColor: theme === 'dark' ? C.surface : C.border }]}>
+    <Pressable
+      onPress={onPress}
+      style={({ pressed }) => [
+        styles.container,
+        { borderBottomColor: theme === 'dark' ? C.surface : C.border },
+        pressed && styles.pressed,
+      ]}
+    >
       <Text style={[styles.label, { color: theme === 'dark' ? C.textLight : C.textMuted }]}>
-        Active now
+        Active members
       </Text>
-      <ScrollView
-        horizontal
-        showsHorizontalScrollIndicator={false}
-        contentContainerStyle={styles.scrollContent}
-      >
+      <View style={styles.avatarsRow}>
         {visible.map((user) => (
-          <TouchableOpacity
-            key={user.id}
-            activeOpacity={0.7}
-            onPress={() => onUserPress?.(user.id)}
-            style={styles.avatarWrapper}
-          >
+          <View key={user.id} style={styles.avatarWrapper}>
             {user.avatar ? (
               <Image
                 source={{ uri: user.avatar }}
@@ -70,19 +66,15 @@ export default function ActiveUsersStrip({
               </View>
             )}
             <View style={styles.onlineDot} />
-          </TouchableOpacity>
+          </View>
         ))}
         {extraCount > 0 && (
-          <TouchableOpacity
-            activeOpacity={0.7}
-            onPress={onMorePress}
-            style={[styles.moreCircle, { backgroundColor: theme === 'dark' ? C.accent : C.backgroundDark }]}
-          >
+          <View style={[styles.moreCircle, { backgroundColor: theme === 'dark' ? C.accent : C.backgroundDark }]}>
             <Text style={[styles.moreText, { color: C.textLight }]}>+{extraCount}</Text>
-          </TouchableOpacity>
+          </View>
         )}
-      </ScrollView>
-    </View>
+      </View>
+    </Pressable>
   );
 }
 
@@ -94,11 +86,15 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     borderBottomWidth: StyleSheet.hairlineWidth,
   },
+  pressed: {
+    opacity: 0.7,
+  },
   label: {
     fontSize: 11,
     marginRight: 8,
   },
-  scrollContent: {
+  avatarsRow: {
+    flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
   },

@@ -30,16 +30,21 @@ function formatLastSeen(timestamp?: number): string {
   return `Last seen: ${days} day${days > 1 ? 's' : ''} ago`;
 }
 
+// Phase-2: Extended user type with optional penalty
+interface OnlineUserWithPenalty extends DemoOnlineUser {
+  penalty?: { type: 'readOnly'; expiresAt: number } | null;
+}
+
 interface OnlineUsersPanelProps {
   visible: boolean;
   onClose: () => void;
-  users: DemoOnlineUser[];
-  onUserPress?: (user: DemoOnlineUser) => void;
+  users: OnlineUserWithPenalty[];
+  onUserPress?: (user: OnlineUserWithPenalty) => void;
 }
 
 type SectionData = {
   title: string;
-  data: DemoOnlineUser[];
+  data: OnlineUserWithPenalty[];
 };
 
 export default function OnlineUsersPanel({
@@ -80,7 +85,7 @@ export default function OnlineUsersPanel({
 
   const onlineCount = users.filter((u) => u.isOnline).length;
 
-  const renderUser = ({ item }: { item: DemoOnlineUser }) => (
+  const renderUser = ({ item }: { item: OnlineUserWithPenalty }) => (
     <TouchableOpacity
       style={styles.userRow}
       onPress={() => onUserPress?.(item)}
@@ -105,9 +110,14 @@ export default function OnlineUsersPanel({
           <Text style={styles.lastSeen}>{formatLastSeen(item.lastSeen)}</Text>
         )}
       </View>
-      {!item.isOnline && (
+      {/* Phase-2: Show Read-only badge if user has penalty */}
+      {item.penalty ? (
+        <View style={styles.readOnlyBadge}>
+          <Text style={styles.readOnlyBadgeText}>Read-only</Text>
+        </View>
+      ) : !item.isOnline ? (
         <Text style={styles.offlineLabel}>Offline</Text>
-      )}
+      ) : null}
     </TouchableOpacity>
   );
 
@@ -149,6 +159,10 @@ export default function OnlineUsersPanel({
             value={searchQuery}
             onChangeText={setSearchQuery}
             autoCapitalize="none"
+            autoComplete="off"
+            autoCorrect={false}
+            importantForAutofill="no"
+            textContentType="none"
           />
           {searchQuery.length > 0 && (
             <TouchableOpacity onPress={() => setSearchQuery('')}>
@@ -322,5 +336,17 @@ const styles = StyleSheet.create({
   emptyText: {
     fontSize: 13,
     color: C.textLight,
+  },
+  // Phase-2: Read-only badge styles
+  readOnlyBadge: {
+    backgroundColor: 'rgba(255, 152, 0, 0.15)',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 10,
+  },
+  readOnlyBadgeText: {
+    fontSize: 10,
+    fontWeight: '600',
+    color: '#FF9800',
   },
 });

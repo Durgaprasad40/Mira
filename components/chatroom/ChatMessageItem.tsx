@@ -4,11 +4,12 @@ import { Image } from 'expo-image';
 import { Ionicons } from '@expo/vector-icons';
 import { INCOGNITO_COLORS } from '@/lib/constants';
 import MediaMessage from '@/components/chat/MediaMessage';
-import { formatSmartTimestamp } from '@/utils/chatTime';
 
 const C = INCOGNITO_COLORS;
 
 interface ChatMessageItemProps {
+  /** Unique message ID (required for media view tracking) */
+  messageId: string;
   senderName: string;
   senderId: string;
   senderAvatar?: string;
@@ -20,21 +21,22 @@ interface ChatMessageItemProps {
   onNamePress?: () => void;
   dimmed?: boolean;
   /** Message type for media rendering */
-  messageType?: 'text' | 'image' | 'video';
-  /** Media URL for image/video messages */
+  messageType?: 'text' | 'image' | 'video' | 'doodle';
+  /** Media URL for image/video/doodle messages */
   mediaUrl?: string;
-  /** Called when user taps a media bubble (image for preview, video for playback) */
-  onMediaPress?: (mediaUrl: string, type: 'image' | 'video') => void;
+  /** Called when user starts holding media (opens viewer) - only for image/video */
+  onMediaHoldStart?: (messageId: string, mediaUrl: string, type: 'image' | 'video') => void;
+  /** Called when user releases hold (closes viewer) */
+  onMediaHoldEnd?: () => void;
   /** Whether to show the timestamp (for grouping). Defaults to true. */
   showTimestamp?: boolean;
 }
 
 function ChatMessageItem({
+  messageId,
   senderName,
-  senderId,
   senderAvatar,
   text,
-  timestamp,
   isMe = false,
   onLongPress,
   onAvatarPress,
@@ -42,14 +44,14 @@ function ChatMessageItem({
   dimmed = false,
   messageType = 'text',
   mediaUrl,
-  onMediaPress,
-  showTimestamp = true,
+  onMediaHoldStart,
+  onMediaHoldEnd,
 }: ChatMessageItemProps) {
-  const isMedia = (messageType === 'image' || messageType === 'video') && mediaUrl;
+  const isMedia = (messageType === 'image' || messageType === 'video' || messageType === 'doodle') && mediaUrl;
+  const isSecureMedia = messageType === 'image' || messageType === 'video';
 
-  // Layout: Avatar + Name/Time/Message
-  // Others: avatar left, content right (row)
-  // Me: avatar right, content left (row-reverse), aligned to right edge
+  // Dense layout: Avatar on LEFT for others, RIGHT for me
+  // Small name above bubble for others only, no timestamps
   return (
     <TouchableOpacity
       style={[styles.container, isMe && styles.containerMe, dimmed && styles.dimmed]}
@@ -63,36 +65,34 @@ function ChatMessageItem({
           <Image source={{ uri: senderAvatar }} style={styles.avatar} />
         ) : (
           <View style={[styles.avatarPlaceholder, isMe && styles.avatarPlaceholderMe]}>
-            <Ionicons name="person" size={16} color={isMe ? '#FFFFFF' : C.textLight} />
+            <Ionicons name="person" size={14} color={isMe ? '#FFFFFF' : C.textLight} />
           </View>
         )}
       </TouchableOpacity>
 
-      {/* Content: Name + Time (row 1), Message (row 2) */}
-      <View style={styles.content}>
-        {/* Row 1: Name (bold) + Time (right) */}
-        <View style={styles.headerRow}>
-          <TouchableOpacity onPress={onNamePress} activeOpacity={0.7}>
-            <Text style={[styles.senderName, isMe && styles.senderNameMe]}>
-              {isMe ? 'You' : senderName}
-            </Text>
-          </TouchableOpacity>
-          {showTimestamp && (
-            <Text style={styles.timeLabel}>{formatSmartTimestamp(timestamp)}</Text>
-          )}
-        </View>
-
-        {/* Row 2: Message text or media */}
+      {/* Content: Bubble with name inside for others */}
+      <View style={[styles.content, isMe && styles.contentMe]}>
+        {/* Message bubble */}
         {isMedia ? (
           <View style={styles.mediaContainer}>
             <MediaMessage
+              messageId={messageId}
               mediaUrl={mediaUrl!}
-              type={messageType as 'image' | 'video'}
-              onPress={() => onMediaPress?.(mediaUrl!, messageType as 'image' | 'video')}
+              type={messageType as 'image' | 'video' | 'doodle'}
+              onHoldStart={isSecureMedia ? () => onMediaHoldStart?.(messageId, mediaUrl!, messageType as 'image' | 'video') : undefined}
+              onHoldEnd={isSecureMedia ? onMediaHoldEnd : undefined}
             />
           </View>
         ) : (
-          <Text style={styles.messageText}>{text}</Text>
+          <View style={[styles.bubble, isMe ? styles.bubbleMe : styles.bubbleOther]}>
+            {/* Name inside bubble - only for other users */}
+            {!isMe && (
+              <TouchableOpacity onPress={onNamePress} activeOpacity={0.7}>
+                <Text style={styles.senderName}>{senderName}</Text>
+              </TouchableOpacity>
+            )}
+            <Text style={[styles.messageText, isMe && styles.messageTextMe]}>{text}</Text>
+          </View>
         )}
       </View>
     </TouchableOpacity>
@@ -102,31 +102,30 @@ function ChatMessageItem({
 export default React.memo(ChatMessageItem);
 
 const styles = StyleSheet.create({
-  // ── Message row with MEDIUM spacing ──
+  // ── Dense message row ──
   container: {
     flexDirection: 'row',
-    alignItems: 'flex-start',
-    paddingHorizontal: 14,
-    paddingVertical: 8,
-    gap: 12,
+    alignItems: 'flex-end',
+    paddingHorizontal: 4,
+    paddingVertical: 3,
+    gap: 6,
   },
   containerMe: {
     flexDirection: 'row-reverse',
-    alignSelf: 'flex-end',
   },
   dimmed: {
     opacity: 0.3,
   },
-  // ── Avatar: slightly larger for better visibility ──
+  // ── Avatar: compact size ──
   avatar: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
+    width: 34,
+    height: 34,
+    borderRadius: 17,
   },
   avatarPlaceholder: {
-    width: 40,
-    height: 40,
-    borderRadius: 20,
+    width: 34,
+    height: 34,
+    borderRadius: 17,
     backgroundColor: C.accent,
     alignItems: 'center',
     justifyContent: 'center',
@@ -136,36 +135,45 @@ const styles = StyleSheet.create({
   },
   // ── Content area ──
   content: {
-    flex: 1,
-    gap: 4,
+    maxWidth: '75%',
+    gap: 2,
   },
-  // ── Header row: Name (bold, left) + Time (right) ──
-  headerRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
+  contentMe: {
+    alignItems: 'flex-end',
   },
+  // ── Sender name (inside bubble, others only) ──
   senderName: {
-    fontSize: 14,
-    fontWeight: '700',
+    fontSize: 11,
+    fontWeight: '600',
     color: C.primary,
+    marginBottom: 2,
   },
-  senderNameMe: {
-    color: '#6B5CE7',
+  // ── Message bubble ──
+  bubble: {
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 16,
   },
-  timeLabel: {
-    fontSize: 12,
-    color: C.textLight,
+  bubbleOther: {
+    backgroundColor: C.surface,
+    borderBottomLeftRadius: 4,
+  },
+  bubbleMe: {
+    backgroundColor: C.primary,
+    borderBottomRightRadius: 4,
   },
   // ── Message text ──
   messageText: {
-    fontSize: 15,
-    lineHeight: 20,
+    fontSize: 13,
+    lineHeight: 18,
     color: C.text,
   },
-  // ── Media container ──
+  messageTextMe: {
+    color: '#FFFFFF',
+  },
+  // ── Media container (small thumbnails) ──
   mediaContainer: {
-    marginTop: 4,
-    maxWidth: '85%',
+    borderRadius: 8,
+    overflow: 'hidden',
   },
 });
