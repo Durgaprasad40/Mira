@@ -22,7 +22,7 @@ import {
   PanResponderInstance,
 } from 'react-native';
 import { Image } from 'expo-image';
-import { useVideoPlayer, VideoView, VideoPlayer } from 'expo-video';
+import { useVideoPlayer, VideoView } from 'expo-video';
 import { Ionicons } from '@expo/vector-icons';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
@@ -40,18 +40,57 @@ interface SecureMediaViewerProps {
 }
 
 /**
- * Safe pause helper to avoid crashes from stale player references
+ * Separate video player component to ensure useVideoPlayer is called with stable URI.
+ * Only mounted when type === 'video', preventing hook call with null/changing sources.
  */
-function safePause(player: VideoPlayer | null | undefined): void {
-  if (!player) return;
-  if (typeof player !== 'object' || typeof (player as any).pause !== 'function') {
-    return;
-  }
-  try {
-    player.pause();
-  } catch {
-    // Ignore errors from already-released shared objects
-  }
+interface SecureVideoPlayerProps {
+  mediaUri: string;
+  isPlaying: boolean;
+  visible: boolean;
+}
+
+function SecureVideoPlayer({ mediaUri, isPlaying, visible }: SecureVideoPlayerProps) {
+  // Player created once with stable URI - never null or empty
+  const player = useVideoPlayer(mediaUri, (p) => {
+    p.loop = true;
+  });
+
+  // Control playback based on hold state
+  useEffect(() => {
+    if (!player) return;
+
+    try {
+      if (isPlaying && visible) {
+        player.play();
+      } else {
+        player.pause();
+      }
+    } catch {
+      // Ignore errors from released player during unmount race
+    }
+  }, [isPlaying, visible, player]);
+
+  // Pause on unmount
+  useEffect(() => {
+    return () => {
+      try {
+        player?.pause();
+      } catch {
+        // Ignore
+      }
+    };
+  }, [player]);
+
+  if (!player) return null;
+
+  return (
+    <VideoView
+      player={player}
+      style={[styles.video, !isPlaying && styles.videoHidden]}
+      contentFit="contain"
+      nativeControls={false}
+    />
+  );
 }
 
 export default function SecureMediaViewer({
@@ -107,46 +146,12 @@ export default function SecureMediaViewer({
     onPanResponderTerminationRequest: () => false,
   }), []);
 
-  // Video player (only initialized for video type with valid URI)
-  // Pass null instead of empty string to avoid unexpected behavior
-  const videoSource = type === 'video' && mediaUri ? mediaUri : null;
-  const player = useVideoPlayer(
-    videoSource,
-    (p) => {
-      p.loop = true;
-    }
-  );
-  const playerRef = useRef<VideoPlayer | null>(null);
-
-  useEffect(() => {
-    playerRef.current = player ?? null;
-  }, [player]);
-
-  // Cleanup video on close/unmount
+  // Reset screenshot blocked when viewer closes
   useEffect(() => {
     if (!visible) {
-      safePause(playerRef.current);
       setScreenshotBlocked(false);
     }
-    return () => {
-      safePause(playerRef.current);
-    };
   }, [visible]);
-
-  // Control video playback based on hold state
-  useEffect(() => {
-    if (type !== 'video' || !player) return;
-
-    if (isHolding && visible && !screenshotBlocked) {
-      try {
-        player.play();
-      } catch {
-        // Ignore
-      }
-    } else {
-      safePause(player);
-    }
-  }, [isHolding, visible, screenshotBlocked, type, player]);
 
   // Android screenshot detection
   useEffect(() => {
@@ -231,17 +236,12 @@ export default function SecureMediaViewer({
             />
           ) : (
             <View style={styles.videoContainer}>
-              {player && (
-                <VideoView
-                  player={player}
-                  style={[
-                    styles.video,
-                    !showMedia && styles.videoHidden,
-                  ]}
-                  contentFit="contain"
-                  nativeControls={false}
-                />
-              )}
+              {/* Video player mounted only for video type with stable URI */}
+              <SecureVideoPlayer
+                mediaUri={mediaUri}
+                isPlaying={showMedia}
+                visible={visible}
+              />
               {/* Blur overlay for video */}
               {!showMedia && (
                 <View style={styles.videoBlurOverlay}>

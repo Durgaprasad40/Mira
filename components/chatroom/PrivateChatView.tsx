@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useRef, useEffect } from 'react';
+import React, { useState, useCallback, useRef, useEffect, useMemo } from 'react';
 import {
   View,
   Text,
@@ -8,6 +8,7 @@ import {
   Keyboard,
   KeyboardAvoidingView,
   Platform,
+  SafeAreaView,
 } from 'react-native';
 import { Image } from 'expo-image';
 import { Ionicons } from '@expo/vector-icons';
@@ -48,9 +49,13 @@ interface PrivateChatViewProps {
   dm: DemoDM;
   onBack: () => void;
   topInset?: number;
+  /** When true, rendered inside a modal sheet - adjusts layout accordingly */
+  isModal?: boolean;
+  /** When true (and isModal), keyboard is currently visible - parent handles positioning */
+  keyboardVisible?: boolean;
 }
 
-export default function PrivateChatView({ dm, onBack, topInset = 0 }: PrivateChatViewProps) {
+export default function PrivateChatView({ dm, onBack, topInset = 0, isModal = false, keyboardVisible = false }: PrivateChatViewProps) {
   const flatListRef = useRef<FlatList>(null);
   const [headerHeight, setHeaderHeight] = useState(0);
   const [messages, setMessages] = useState<DemoPrivateMessage[]>(
@@ -149,12 +154,26 @@ export default function PrivateChatView({ dm, onBack, topInset = 0 }: PrivateCha
     }
   }, []);
 
+  // Pre-compute showTimestamp for each message to avoid messages dependency in renderItem
+  type EnrichedMessage = DemoPrivateMessage & { showTimestamp: boolean };
+  const enrichedMessages = useMemo<EnrichedMessage[]>(() => {
+    return messages.map((msg, index) => {
+      const prevMessage = index > 0 ? messages[index - 1] : undefined;
+      return {
+        ...msg,
+        showTimestamp: shouldShowTimestamp(msg.createdAt, prevMessage?.createdAt),
+      };
+    });
+  }, [messages]);
+
+  // Stable keyExtractor
+  const keyExtractor = useCallback((item: EnrichedMessage) => item.id, []);
+
   const renderMessage = useCallback(
-    ({ item, index }: { item: DemoPrivateMessage; index: number }) => {
+    ({ item }: { item: EnrichedMessage }) => {
       const isMe = item.senderId === DEMO_CURRENT_USER.id;
       const isMedia = (item.type === 'image' || item.type === 'video') && item.mediaUrl;
-      const prevMessage = index > 0 ? messages[index - 1] : undefined;
-      const showTime = shouldShowTimestamp(item.createdAt, prevMessage?.createdAt);
+      const showTime = item.showTimestamp;
 
       if (isMe) {
         return (
@@ -199,7 +218,7 @@ export default function PrivateChatView({ dm, onBack, topInset = 0 }: PrivateCha
         </View>
       );
     },
-    [dm.peerAvatar, handleMediaPress, messages]
+    [dm.peerAvatar, handleMediaPress]
   );
 
   return (
@@ -226,45 +245,95 @@ export default function PrivateChatView({ dm, onBack, topInset = 0 }: PrivateCha
         <View style={{ flex: 1 }} />
       </View>
 
-      <KeyboardAvoidingView
-        style={{ flex: 1 }}
-        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-        keyboardVerticalOffset={headerHeight}
-      >
-        {/* Messages */}
-        <FlatList
-          ref={flatListRef}
-          data={messages}
-          keyExtractor={(item) => item.id}
-          renderItem={renderMessage}
-          contentContainerStyle={{
-            flexGrow: 1,
-            justifyContent: 'flex-end' as const,
-            paddingTop: 6,
-            paddingBottom: 0,
-          }}
-          onContentSizeChange={handleContentSizeChange}
-          onScroll={handleScroll}
-          scrollEventThrottle={16}
-          showsVerticalScrollIndicator={false}
-          keyboardShouldPersistTaps="handled"
-          keyboardDismissMode="interactive"
-          ListEmptyComponent={
-            <View style={styles.emptyContainer}>
-              <Ionicons name="chatbubble-outline" size={40} color={C.textLight} />
-              <Text style={styles.emptyText}>Start a conversation</Text>
-            </View>
-          }
-        />
+      {/* Content area - Modal: simple flex layout, Android handles resize */}
+      {isModal ? (
+        // Modal mode: NO KAV, NO keyboard listeners
+        // Android softwareKeyboardLayoutMode="resize" handles everything
+        <View style={styles.modalContent}>
+          {/* Messages area - flex:1, auto-resizes when keyboard opens */}
+          <FlatList
+            ref={flatListRef}
+            style={styles.messagesList}
+            data={enrichedMessages}
+            keyExtractor={keyExtractor}
+            renderItem={renderMessage}
+            contentContainerStyle={{
+              flexGrow: 1,
+              justifyContent: 'flex-end' as const,
+              paddingHorizontal: 12,
+              paddingTop: 6,
+              paddingBottom: 10,
+            }}
+            onContentSizeChange={handleContentSizeChange}
+            onScroll={handleScroll}
+            scrollEventThrottle={16}
+            showsVerticalScrollIndicator={false}
+            keyboardShouldPersistTaps="handled"
+            removeClippedSubviews={Platform.OS === 'android'}
+            maxToRenderPerBatch={10}
+            windowSize={10}
+            initialNumToRender={15}
+            ListEmptyComponent={
+              <View style={styles.emptyContainer}>
+                <Ionicons name="chatbubble-outline" size={40} color={C.textLight} />
+                <Text style={styles.emptyText}>Start a conversation</Text>
+              </View>
+            }
+          />
 
-        {/* Composer — pushed up by KAV */}
-        <ChatComposer
-          value={inputText}
-          onChangeText={setInputText}
-          onSend={handleSend}
-          onPlusPress={() => setAttachmentVisible(true)}
-        />
-      </KeyboardAvoidingView>
+          {/* Input wrapper - with bottom padding for gesture bar */}
+          <View style={styles.inputWrapper}>
+            <ChatComposer
+              value={inputText}
+              onChangeText={setInputText}
+              onSend={handleSend}
+              onPlusPress={() => setAttachmentVisible(true)}
+            />
+          </View>
+        </View>
+      ) : (
+        // Non-modal: use internal KeyboardAvoidingView
+        <KeyboardAvoidingView
+          style={{ flex: 1 }}
+          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+          keyboardVerticalOffset={headerHeight}
+        >
+          <FlatList
+            ref={flatListRef}
+            data={enrichedMessages}
+            keyExtractor={keyExtractor}
+            renderItem={renderMessage}
+            contentContainerStyle={{
+              flexGrow: 1,
+              justifyContent: 'flex-end' as const,
+              paddingTop: 6,
+              paddingBottom: 0,
+            }}
+            onContentSizeChange={handleContentSizeChange}
+            onScroll={handleScroll}
+            scrollEventThrottle={16}
+            showsVerticalScrollIndicator={false}
+            keyboardShouldPersistTaps="handled"
+            keyboardDismissMode="interactive"
+            removeClippedSubviews={Platform.OS === 'android'}
+            maxToRenderPerBatch={10}
+            windowSize={10}
+            initialNumToRender={15}
+            ListEmptyComponent={
+              <View style={styles.emptyContainer}>
+                <Ionicons name="chatbubble-outline" size={40} color={C.textLight} />
+                <Text style={styles.emptyText}>Start a conversation</Text>
+              </View>
+            }
+          />
+          <ChatComposer
+            value={inputText}
+            onChangeText={setInputText}
+            onSend={handleSend}
+            onPlusPress={() => setAttachmentVisible(true)}
+          />
+        </KeyboardAvoidingView>
+      )}
 
       {/* Attachment popup */}
       <AttachmentPopup
@@ -303,6 +372,21 @@ export default function PrivateChatView({ dm, onBack, topInset = 0 }: PrivateCha
 const styles = StyleSheet.create({
   container: {
     flex: 1,
+    backgroundColor: C.background,
+  },
+  // ── Modal mode styles (fullscreen, Android handles keyboard) ──
+  modalContent: {
+    flex: 1,
+  },
+  messagesList: {
+    flex: 1,
+  },
+  inputWrapper: {
+    paddingHorizontal: 0,
+    paddingTop: 0,
+    paddingBottom: Platform.OS === 'android' ? 16 : 8, // Extra padding for gesture bar
+    borderTopWidth: 1,
+    borderTopColor: C.accent,
     backgroundColor: C.background,
   },
   header: {

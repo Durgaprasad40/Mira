@@ -6,6 +6,47 @@ import { Stack, useRouter, useSegments } from "expo-router";
 // on Android before activity is ready. This is non-critical (screen may sleep during dev).
 if (__DEV__) {
   LogBox.ignoreLogs(["Unable to activate keep awake"]);
+
+  // Catch synchronous errors via ErrorUtils
+  const originalHandler = (global as any).ErrorUtils?.getGlobalHandler?.();
+  if ((global as any).ErrorUtils?.setGlobalHandler) {
+    (global as any).ErrorUtils.setGlobalHandler((error: Error, isFatal?: boolean) => {
+      // Suppress keep-awake errors (non-fatal, dev-only)
+      if (error?.message?.includes("Unable to activate keep awake")) {
+        console.warn("[KeepAwake] Activation failed (non-critical in dev mode)");
+        return;
+      }
+      // Forward all other errors to original handler
+      if (originalHandler) {
+        originalHandler(error, isFatal);
+      }
+    });
+  }
+
+  // Catch unhandled promise rejections (for async keep-awake activation)
+  // React Native uses 'promise/setimmediate/rejection-tracking' internally
+  try {
+    const rejectionTracking = require('promise/setimmediate/rejection-tracking');
+    rejectionTracking.enable({
+      allRejections: true,
+      onUnhandled: (id: number, error: Error) => {
+        if (error?.message?.includes("Unable to activate keep awake")) {
+          console.warn("[KeepAwake] Async activation failed (non-critical in dev mode)");
+          return; // Suppress - do not forward
+        }
+        // Forward other rejections to default handling
+        const handler = (global as any).ErrorUtils?.getGlobalHandler?.();
+        if (handler) {
+          handler(error, false);
+        }
+      },
+      onHandled: () => {
+        // Rejection was handled later - do nothing
+      },
+    });
+  } catch {
+    // rejection-tracking not available - rely on ErrorUtils handler above
+  }
 }
 import { ConvexProvider, useMutation, useQuery } from "convex/react";
 import { convex, isDemoMode } from "@/hooks/useConvex";
