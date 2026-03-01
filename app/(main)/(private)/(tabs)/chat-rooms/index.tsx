@@ -152,7 +152,16 @@ export default function ChatRoomsScreen() {
     : convexPreferredRoom?.preferredChatRoomId ?? null;
 
   // Use useLayoutEffect for redirect to happen before paint
+  // P2 STABILITY: Add safety timeout to prevent infinite spinner if navigation fails
+  const redirectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   useLayoutEffect(() => {
+    // Clear any existing safety timeout
+    if (redirectTimeoutRef.current) {
+      clearTimeout(redirectTimeoutRef.current);
+      redirectTimeoutRef.current = null;
+    }
+
     // Still loading → keep checkingPreferred true
     if (isPreferredLoading) return;
 
@@ -165,14 +174,41 @@ export default function ChatRoomsScreen() {
     // Has preferred room → redirect immediately
     if (effectivePreferredRoomId) {
       hasRedirectedRef.current = true;
-      router.replace(`/(main)/(private)/(tabs)/chat-rooms/${effectivePreferredRoomId}` as any);
-      // Keep checkingPreferred true so we don't flash homepage during redirect
+
+      // P2 STABILITY: Safety timeout - if navigation doesn't complete within 2s, clear spinner
+      redirectTimeoutRef.current = setTimeout(() => {
+        setCheckingPreferred(false);
+      }, 2000);
+
+      try {
+        router.replace(`/(main)/(private)/(tabs)/chat-rooms/${effectivePreferredRoomId}` as any);
+      } catch (err) {
+        // P2 STABILITY: Navigation failed - clear spinner immediately
+        if (__DEV__) {
+          console.warn('[ChatRooms] Preferred room redirect failed:', err);
+        }
+        setCheckingPreferred(false);
+        if (redirectTimeoutRef.current) {
+          clearTimeout(redirectTimeoutRef.current);
+          redirectTimeoutRef.current = null;
+        }
+      }
       return;
     }
 
     // No preferred room → show homepage
     setCheckingPreferred(false);
   }, [isPreferredLoading, effectivePreferredRoomId, router]);
+
+  // Cleanup safety timeout on unmount
+  useEffect(() => {
+    return () => {
+      if (redirectTimeoutRef.current) {
+        clearTimeout(redirectTimeoutRef.current);
+        redirectTimeoutRef.current = null;
+      }
+    };
+  }, []);
 
   // Also check on screen focus (returning to tab after navigating away)
   useFocusEffect(

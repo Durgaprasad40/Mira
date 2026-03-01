@@ -10,6 +10,7 @@ import {
   BackHandler,
   InteractionManager,
   FlatList,
+  Modal,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -59,6 +60,7 @@ import { useChatRoomSessionStore } from '@/stores/chatRoomSessionStore';
 import { useChatRoomDmStore } from '@/stores/chatRoomDmStore';
 import { usePreferredChatRoomStore } from '@/stores/preferredChatRoomStore';
 import { useChatRoomProfileStore } from '@/stores/chatRoomProfileStore';
+import PrivateChatView from '@/components/chatroom/PrivateChatView';
 
 const C = INCOGNITO_COLORS;
 const MUTE_STORAGE_KEY = (roomId: string) => `@muted_room_${roomId}`;
@@ -185,8 +187,12 @@ export default function ChatRoomScreen() {
   const persistedDisplayName = useChatRoomProfileStore((s) => s.displayName);
   const persistedAvatarUri = useChatRoomProfileStore((s) => s.avatarUri);
 
-  // DM navigation store - for proper stack-based navigation
+  // DM store - for Modal-based private chat (no navigation, just state)
+  const activeDm = useChatRoomDmStore((s) => s.activeDm);
   const setActiveDm = useChatRoomDmStore((s) => s.setActiveDm);
+  const clearActiveDm = useChatRoomDmStore((s) => s.clearActiveDm);
+  // Track if Private Chat DM modal is open (hides chat room composer)
+  const isPrivateChatOpen = activeDm !== null;
 
   // Demo mode: use local room data
   const demoRoom = roomIdStr ? DEMO_CHAT_ROOMS.find((r) => r.id === roomIdStr) : undefined;
@@ -403,8 +409,33 @@ export default function ChatRoomScreen() {
   // Seed demo room on mount
   // P1 CR-004: Wait for store hydration before seeding to prevent race conditions
   // P1 CR-005: Sort messages after merging to ensure correct order
+  // P2 STABILITY: Add hydration fallback timeout (3 seconds) if AsyncStorage fails
+  const hydrationFallbackTriggeredRef = useRef(false);
+  const [hydrationFallback, setHydrationFallback] = useState(false);
+
   useEffect(() => {
-    if (!isDemoMode || !roomIdStr || !storeHasHydrated) return;
+    if (!isDemoMode || !roomIdStr) return;
+    if (storeHasHydrated || hydrationFallbackTriggeredRef.current) return;
+
+    // P2 STABILITY: If hydration takes longer than 3 seconds, allow seeding anyway
+    const fallbackTimer = setTimeout(() => {
+      if (!useDemoChatRoomStore.getState()._hasHydrated) {
+        if (__DEV__) {
+          console.warn('[ChatRoom] Store hydration timeout - proceeding with demo seeding');
+        }
+        hydrationFallbackTriggeredRef.current = true;
+        setHydrationFallback(true);
+      }
+    }, 3000);
+
+    return () => clearTimeout(fallbackTimer);
+  }, [roomIdStr, storeHasHydrated]);
+
+  useEffect(() => {
+    if (!isDemoMode || !roomIdStr) return;
+    // P2 STABILITY: Proceed if hydrated OR fallback triggered
+    if (!storeHasHydrated && !hydrationFallback) return;
+
     const base = getDemoMessagesForRoom(roomIdStr);
     const joinMsg: DemoChatMessage = {
       id: `sys_join_${DEMO_CURRENT_USER.id}_${Date.now()}`,
@@ -418,7 +449,7 @@ export default function ChatRoomScreen() {
     // Sort by createdAt to ensure correct ordering regardless of merge order
     const sorted = [...base, joinMsg].sort((a, b) => a.createdAt - b.createdAt);
     seedRoom(roomIdStr, sorted);
-  }, [roomIdStr, seedRoom, storeHasHydrated]);
+  }, [roomIdStr, seedRoom, storeHasHydrated, hydrationFallback]);
 
   // Auto-join Convex room (skip if invalid ID)
   useEffect(() => {
@@ -768,7 +799,7 @@ export default function ChatRoomScreen() {
   }, [selectedUser]);
 
   // ─────────────────────────────────────────────────────────────────────────
-  // PRIVATE MESSAGE - Navigate to DM route (stack-based for proper back gesture)
+  // PRIVATE MESSAGE - Opens Modal (no navigation, just state)
   // ─────────────────────────────────────────────────────────────────────────
   const handlePrivateMessage = useCallback((userId: string) => {
     let existingDM = dms.find((dm) => dm.peerId === userId);
@@ -788,13 +819,12 @@ export default function ChatRoomScreen() {
       setDMs((prev) => [newDM, ...prev]);
       existingDM = newDM;
     }
-    // Set DM in store before navigation
+    // Set DM in store - Modal will open automatically
     setActiveDm(existingDM, roomIdStr!);
     setSelectedUser(null);
     setOverlay('none');
-    // Navigate to DM route - this keeps chat room on stack for back gesture
-    router.push(`/(main)/(private)/(tabs)/chat-rooms/dm/${existingDM.id}` as any);
-  }, [dms, selectedUser, roomIdStr, setActiveDm, router]);
+    // NO navigation - Modal renders based on activeDm state
+  }, [dms, selectedUser, roomIdStr, setActiveDm]);
 
   // ─────────────────────────────────────────────────────────────────────────
   // REPORT
@@ -1002,7 +1032,7 @@ export default function ChatRoomScreen() {
                 justifyContent: 'flex-end',
                 paddingHorizontal: 6,
                 paddingTop: 4,
-                paddingBottom: composerHeight,
+                paddingBottom: isPrivateChatOpen ? 0 : composerHeight,
               }}
               showsVerticalScrollIndicator={false}
               keyboardShouldPersistTaps="handled"
@@ -1017,27 +1047,29 @@ export default function ChatRoomScreen() {
             />
           )}
 
-          {/* ─── COMPOSER ─── */}
-          <View
-            style={[styles.composerWrapper, { paddingBottom: Platform.OS === 'ios' ? insets.bottom : 0 }]}
-            onLayout={(e) => setComposerHeight(e.nativeEvent.layout.height)}
-          >
-            {/* Phase-2: Show read-only notice if user has penalty */}
-            {isReadOnly ? (
-              <View style={styles.readOnlyNotice}>
-                <Ionicons name="lock-closed" size={16} color={C.textLight} />
-                <Text style={styles.readOnlyText}>Read-only (24h)</Text>
-              </View>
-            ) : (
-              <ChatComposer
-                value={inputText}
-                onChangeText={setInputText}
-                onSend={handleSend}
-                onPlusPress={() => setOverlay('attachment')}
-                onPanelChange={handlePanelChange}
-              />
-            )}
-          </View>
+          {/* ─── COMPOSER ─── Hidden when Private Chat sheet is open */}
+          {!isPrivateChatOpen && (
+            <View
+              style={[styles.composerWrapper, { paddingBottom: Platform.OS === 'ios' ? insets.bottom : 0 }]}
+              onLayout={(e) => setComposerHeight(e.nativeEvent.layout.height)}
+            >
+              {/* Phase-2: Show read-only notice if user has penalty */}
+              {isReadOnly ? (
+                <View style={styles.readOnlyNotice}>
+                  <Ionicons name="lock-closed" size={16} color={C.textLight} />
+                  <Text style={styles.readOnlyText}>Read-only (24h)</Text>
+                </View>
+              ) : (
+                <ChatComposer
+                  value={inputText}
+                  onChangeText={setInputText}
+                  onSend={handleSend}
+                  onPlusPress={() => setOverlay('attachment')}
+                  onPanelChange={handlePanelChange}
+                />
+              )}
+            </View>
+          )}
         </View>
       </KeyboardAvoidingView>
 
@@ -1052,10 +1084,8 @@ export default function ChatRoomScreen() {
         onOpenChat={(dm) => {
           handleMarkDMRead(dm.id);
           closeOverlay();
-          // Set DM in store before navigation
+          // Set DM in store - Modal will open automatically (no navigation)
           setActiveDm(dm, roomIdStr!);
-          // Navigate to DM route - keeps chat room on stack for back gesture
-          router.push(`/(main)/(private)/(tabs)/chat-rooms/dm/${dm.id}` as any);
         }}
         onHideDM={handleHideDM}
       />
@@ -1153,6 +1183,28 @@ export default function ChatRoomScreen() {
         roomId={roomIdStr}
         onSubmit={handleSubmitReport}
       />
+
+      {/* ═══════════════════════════════════════════════════════════════════ */}
+      {/* PRIVATE CHAT MODAL - FULLSCREEN, Android handles keyboard resize  */}
+      {/* No KeyboardAvoidingView, no manual height logic                   */}
+      {/* ═══════════════════════════════════════════════════════════════════ */}
+      <Modal
+        visible={isPrivateChatOpen}
+        animationType="slide"
+        transparent={false}
+        onRequestClose={clearActiveDm}
+      >
+        {/* Private Chat View - fullscreen with safe area */}
+        {activeDm && (
+          <PrivateChatView
+            dm={activeDm}
+            onBack={clearActiveDm}
+            topInset={insets.top}
+            isModal={true}
+            keyboardVisible={false}
+          />
+        )}
+      </Modal>
     </View>
   );
 }
