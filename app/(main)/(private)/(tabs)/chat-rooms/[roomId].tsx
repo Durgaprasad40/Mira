@@ -457,7 +457,9 @@ export default function ChatRoomScreen() {
     joinRoomMutation({
       roomId: roomIdStr as Id<'chatRooms'>,
       userId: authUserId as Id<'users'>,
-    }).catch(() => {});
+    }).catch((err) => {
+      if (__DEV__) console.warn('[ChatRooms] joinRoom failed:', err);
+    });
   }, [roomIdStr, hasValidRoomId, authUserId, joinRoomMutation]);
 
   // ─────────────────────────────────────────────────────────────────────────

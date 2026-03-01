@@ -43,6 +43,13 @@ export default function UserProfilePopup({
   const visibleRef = useRef(visible);
   visibleRef.current = visible;
 
+  // P1-CRASH-002: Guard against setState after unmount
+  const isMountedRef = useRef(true);
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => { isMountedRef.current = false; };
+  }, []);
+
   // Log once when popup opens (not on every render)
   useEffect(() => {
     if (visible && user) {
@@ -61,8 +68,8 @@ export default function UserProfilePopup({
         tension: 65,
         friction: 11,
       }).start(({ finished }) => {
-        // Only activate backdrop if animation finished AND popup still visible
-        if (finished && visibleRef.current) {
+        // Only activate backdrop if animation finished AND popup still visible AND mounted
+        if (finished && visibleRef.current && isMountedRef.current) {
           setBackdropActive(true);
           if (__DEV__) console.log('[POPUP] backdropActive=true');
         }
