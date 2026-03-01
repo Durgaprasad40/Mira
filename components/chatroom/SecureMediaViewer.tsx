@@ -27,6 +27,17 @@ import { Ionicons } from '@expo/vector-icons';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 
+// CR-001: Validate URI before creating video player
+function isValidMediaUri(uri: string | undefined | null): boolean {
+  if (!uri || typeof uri !== 'string') return false;
+  return (
+    uri.startsWith('http://') ||
+    uri.startsWith('https://') ||
+    uri.startsWith('file://') ||
+    uri.startsWith('content://')
+  );
+}
+
 interface SecureMediaViewerProps {
   visible: boolean;
   mediaUri: string;
@@ -49,8 +60,11 @@ interface SecureVideoPlayerProps {
   visible: boolean;
 }
 
-function SecureVideoPlayer({ mediaUri, isPlaying, visible }: SecureVideoPlayerProps) {
-  // Player created once with stable URI - never null or empty
+/**
+ * CR-001: Inner component that contains the useVideoPlayer hook.
+ * Only rendered when URI is valid (via wrapper).
+ */
+function SecureVideoPlayerInner({ mediaUri, isPlaying, visible }: SecureVideoPlayerProps) {
   const player = useVideoPlayer(mediaUri, (p) => {
     p.loop = true;
   });
@@ -91,6 +105,17 @@ function SecureVideoPlayer({ mediaUri, isPlaying, visible }: SecureVideoPlayerPr
       nativeControls={false}
     />
   );
+}
+
+/**
+ * CR-001: Wrapper that validates URI before rendering inner component.
+ * Prevents useVideoPlayer from being called with invalid URI.
+ */
+function SecureVideoPlayer({ mediaUri, isPlaying, visible }: SecureVideoPlayerProps) {
+  if (!isValidMediaUri(mediaUri)) {
+    return null;
+  }
+  return <SecureVideoPlayerInner mediaUri={mediaUri} isPlaying={isPlaying} visible={visible} />;
 }
 
 export default function SecureMediaViewer({
