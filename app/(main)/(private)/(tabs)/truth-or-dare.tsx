@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState, useRef } from 'react';
 import {
   View, Text, StyleSheet, FlatList, TouchableOpacity,
-  RefreshControl,
+  RefreshControl, Platform,
 } from 'react-native';
 import { Image } from 'expo-image';
 import { useRouter } from 'expo-router';
@@ -163,7 +163,7 @@ type TrendingPromptData = {
 };
 
 /* ─── Trending Card (compact, no previews, "X answers" only) ─── */
-function TrendingCard({
+const TrendingCard = React.memo(function TrendingCard({
   prompt,
   onOpenThread,
   onAddComment,
@@ -229,10 +229,10 @@ function TrendingCard({
       </TouchableOpacity>
     </TouchableOpacity>
   );
-}
+});
 
 /* ─── Prompt Card (with comment previews) ─── */
-function PromptCard({
+const PromptCard = React.memo(function PromptCard({
   prompt,
   onOpenThread,
   onAddComment,
@@ -325,7 +325,7 @@ function PromptCard({
       </TouchableOpacity>
     </TouchableOpacity>
   );
-}
+});
 
 /* ─── Main Screen ─── */
 export default function TruthOrDareScreen() {
@@ -462,7 +462,7 @@ export default function TruthOrDareScreen() {
     return items;
   }, [trendingData, normalPrompts]);
 
-  const renderItem = ({ item }: { item: FeedItem }) => {
+  const renderItem = useCallback(({ item }: { item: FeedItem }) => {
     if (item.type === 'section') {
       return <Text style={styles.sectionLabel}>{item.label}</Text>;
     }
@@ -486,13 +486,13 @@ export default function TruthOrDareScreen() {
         onAddComment={() => openThreadForComment(promptId)}
       />
     );
-  };
+  }, [openThread, openThreadForComment]);
 
-  const getKey = (item: FeedItem, idx: number) => {
+  const getKey = useCallback((item: FeedItem, idx: number) => {
     if (item.type === 'section') return `section_${idx}`;
     if (item.type === 'trending') return `trending_${item.prompt._id}`;
     return `prompt_${item.prompt._id}`;
-  };
+  }, []);
 
   // Check if we're in initial loading state (no data yet, cache empty)
   const isInitialLoading = promptsDataQuery === undefined && prompts.length === 0;
@@ -557,6 +557,12 @@ export default function TruthOrDareScreen() {
             tintColor={C.primary}
           />
         }
+        // Performance props
+        initialNumToRender={8}
+        maxToRenderPerBatch={6}
+        updateCellsBatchingPeriod={50}
+        windowSize={5}
+        removeClippedSubviews={Platform.OS === 'android'}
       />
 
       <TouchableOpacity

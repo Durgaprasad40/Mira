@@ -1041,8 +1041,9 @@ export default function ChatRoomScreen() {
               scrollEventThrottle={16}
               // P2 Performance: FlatList tuning props
               initialNumToRender={15}
-              maxToRenderPerBatch={10}
-              windowSize={10}
+              maxToRenderPerBatch={8}
+              updateCellsBatchingPeriod={50}
+              windowSize={7}
               removeClippedSubviews={Platform.OS === 'android'}
             />
           )}

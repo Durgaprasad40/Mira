@@ -59,7 +59,7 @@ export default function VideoPlayerModal({ visible, videoUri, onClose }: VideoPl
     };
   }, [visible]);
 
-  if (!visible || !videoUri) return null;
+  if (!visible || !videoUri || !player) return null;
 
   return (
     <Modal visible={visible} animationType="fade" onRequestClose={onClose}>

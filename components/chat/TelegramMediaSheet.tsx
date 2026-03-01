@@ -1223,6 +1223,9 @@ export function TelegramMediaSheet({
       }
     };
 
+    // Guard: never render VideoView with null/released player
+    if (!player) return null;
+
     return (
       <Pressable style={styles.videoPreviewContainer} onPress={togglePlayback}>
         <VideoView

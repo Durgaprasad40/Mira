@@ -321,7 +321,7 @@ export default function PrivateChatScreen() {
     );
   }
 
-  const renderMessage = ({ item }: { item: IncognitoMessage }) => {
+  const renderMessage = useCallback(({ item }: { item: IncognitoMessage }) => {
     const isOwn = item.senderId === 'me';
     const isSystem = item.senderId === 'system';
     const isTodEvent = item.senderId === 'tod';
@@ -490,7 +490,7 @@ export default function PrivateChatScreen() {
         </View>
       </View>
     );
-  };
+  }, [conversation?.participantPhotoUrl, now, handleDeleteVoiceMessage]);
 
   return (
     <View style={styles.container}>

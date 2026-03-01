@@ -131,6 +131,9 @@ function SecureVideoPlayer({ uri, elapsedMs }: SecureVideoPlayerProps) {
     }
   };
 
+  // Guard: never render VideoView with null/released player
+  if (!player) return null;
+
   return (
     <Pressable style={StyleSheet.absoluteFill} onPress={togglePlayback}>
       <VideoView
