@@ -67,6 +67,9 @@ export default function PrivateChatView({ dm, onBack, topInset = 0, isModal = fa
   const [videoPlayerUri, setVideoPlayerUri] = useState('');
   const [imagePreviewUri, setImagePreviewUri] = useState('');
 
+  // Android modal keyboard fix: track keyboard height manually
+  const [kbHeight, setKbHeight] = useState(0);
+
   const isNearBottomRef = useRef(true);
 
   useEffect(() => {
@@ -76,6 +79,21 @@ export default function PrivateChatView({ dm, onBack, topInset = 0, isModal = fa
       }, 100);
     }
   }, []);
+
+  // Android modal: track keyboard height for composer positioning
+  useEffect(() => {
+    if (Platform.OS !== 'android' || !isModal) return;
+    const showSub = Keyboard.addListener('keyboardDidShow', (e) => {
+      setKbHeight(e.endCoordinates.height);
+    });
+    const hideSub = Keyboard.addListener('keyboardDidHide', () => {
+      setKbHeight(0);
+    });
+    return () => {
+      showSub.remove();
+      hideSub.remove();
+    };
+  }, [isModal]);
 
   // Scroll to end when keyboard opens (WhatsApp behavior)
   useEffect(() => {
@@ -281,8 +299,8 @@ export default function PrivateChatView({ dm, onBack, topInset = 0, isModal = fa
             }
           />
 
-          {/* Input wrapper - with bottom padding for gesture bar */}
-          <View style={styles.inputWrapper}>
+          {/* Input wrapper - with bottom padding for gesture bar + keyboard */}
+          <View style={[styles.inputWrapper, kbHeight > 0 && { marginBottom: kbHeight }]}>
             <ChatComposer
               value={inputText}
               onChangeText={setInputText}
