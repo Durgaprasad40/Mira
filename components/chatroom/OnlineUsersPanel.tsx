@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef, useMemo } from 'react';
+import React, { useEffect, useRef, useMemo } from 'react';
 import {
   View,
   Text,
@@ -9,7 +9,6 @@ import {
   Dimensions,
   Image,
   SectionList,
-  TextInput,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { INCOGNITO_COLORS } from '@/lib/constants';
@@ -18,6 +17,10 @@ import { DemoOnlineUser } from '@/lib/demoData';
 const C = INCOGNITO_COLORS;
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 const PANEL_WIDTH = SCREEN_WIDTH * 0.78;
+
+// Time constants for online/offline grouping
+const GRACE_PERIOD_MS = 2 * 60 * 1000; // 2 minutes grace
+const OFFLINE_MAX_AGE_MS = 3 * 60 * 60 * 1000; // 3 hours max
 
 function formatLastSeen(timestamp?: number): string {
   if (!timestamp) return 'Last seen: a while ago';
@@ -48,6 +51,11 @@ type SectionData = {
   data: OnlineUserWithPenalty[];
 };
 
+// Helper: Get display name for sorting (null-safe)
+function getDisplayName(user: OnlineUserWithPenalty): string {
+  return (user.username || '').toLowerCase();
+}
+
 export default function OnlineUsersPanel({
   visible,
   onClose,
@@ -55,7 +63,6 @@ export default function OnlineUsersPanel({
   onUserPress,
 }: OnlineUsersPanelProps) {
   const translateX = useRef(new Animated.Value(SCREEN_WIDTH)).current;
-  const [searchQuery, setSearchQuery] = useState('');
 
   useEffect(() => {
     Animated.spring(translateX, {
@@ -64,27 +71,46 @@ export default function OnlineUsersPanel({
       tension: 65,
       friction: 11,
     }).start();
-    if (!visible) {
-      setSearchQuery('');
-    }
   }, [visible]);
 
   const sections = useMemo((): SectionData[] => {
-    const q = searchQuery.trim().toLowerCase();
-    const filtered = q
-      ? users.filter((u) => u.username.toLowerCase().includes(q))
-      : users;
+    const now = Date.now();
 
-    const online = filtered.filter((u) => u.isOnline);
-    const offline = filtered.filter((u) => !u.isOnline);
+    // Online: currently online OR last seen within grace period
+    const online = users
+      .filter((u) => {
+        if (u.isOnline) return true;
+        if (u.lastSeen && now - u.lastSeen <= GRACE_PERIOD_MS) return true;
+        return false;
+      })
+      .sort((a, b) => getDisplayName(a).localeCompare(getDisplayName(b)));
+
+    // Offline: not online, outside grace period, but within max age
+    const offline = users
+      .filter((u) => {
+        if (u.isOnline) return false;
+        if (u.lastSeen && now - u.lastSeen <= GRACE_PERIOD_MS) return false;
+        // Must have lastSeen within max age
+        if (!u.lastSeen) return false;
+        return now - u.lastSeen <= OFFLINE_MAX_AGE_MS;
+      })
+      .sort((a, b) => (b.lastSeen || 0) - (a.lastSeen || 0));
 
     const result: SectionData[] = [];
     if (online.length > 0) result.push({ title: 'Online', data: online });
     if (offline.length > 0) result.push({ title: 'Offline', data: offline });
     return result;
-  }, [users, searchQuery]);
+  }, [users]);
 
-  const onlineCount = users.filter((u) => u.isOnline).length;
+  // Count includes grace-period users
+  const onlineCount = useMemo(() => {
+    const now = Date.now();
+    return users.filter((u) => {
+      if (u.isOnline) return true;
+      if (u.lastSeen && now - u.lastSeen <= GRACE_PERIOD_MS) return true;
+      return false;
+    }).length;
+  }, [users]);
 
   const renderUser = ({ item }: { item: OnlineUserWithPenalty }) => (
     <Pressable
@@ -154,28 +180,6 @@ export default function OnlineUsersPanel({
           </TouchableOpacity>
         </View>
 
-        {/* Search bar */}
-        <View style={styles.searchBar}>
-          <Ionicons name="search" size={16} color={C.textLight} />
-          <TextInput
-            style={styles.searchInput}
-            placeholder="Search users…"
-            placeholderTextColor={C.textLight}
-            value={searchQuery}
-            onChangeText={setSearchQuery}
-            autoCapitalize="none"
-            autoComplete="off"
-            autoCorrect={false}
-            importantForAutofill="no"
-            textContentType="none"
-          />
-          {searchQuery.length > 0 && (
-            <TouchableOpacity onPress={() => setSearchQuery('')}>
-              <Ionicons name="close-circle" size={16} color={C.textLight} />
-            </TouchableOpacity>
-          )}
-        </View>
-
         {/* User list with sections */}
         <SectionList
           sections={sections}
@@ -232,25 +236,6 @@ const styles = StyleSheet.create({
   },
   closeIcon: {
     padding: 4,
-  },
-  searchBar: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: C.background,
-    marginHorizontal: 12,
-    marginTop: 10,
-    marginBottom: 6,
-    borderRadius: 10,
-    paddingHorizontal: 10,
-    gap: 6,
-    borderWidth: 1,
-    borderColor: C.accent,
-  },
-  searchInput: {
-    flex: 1,
-    fontSize: 14,
-    color: C.text,
-    paddingVertical: 8,
   },
   sectionHeader: {
     flexDirection: 'row',

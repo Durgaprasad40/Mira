@@ -899,13 +899,17 @@ export default function ChatRoomScreen() {
 
       const isMuted = mutedUserIds.has(msg.senderId);
       const isMe = (isDemoMode ? DEMO_CURRENT_USER.id : authUserId) === msg.senderId;
+      // Use current user's avatar for outgoing messages (self)
+      const avatarUri = isMe
+        ? (persistedAvatarUri ?? DEMO_CURRENT_USER.avatar)
+        : msg.senderAvatar;
 
       return (
         <ChatMessageItem
           messageId={msg.id}
           senderName={msg.senderName}
           senderId={msg.senderId}
-          senderAvatar={msg.senderAvatar}
+          senderAvatar={avatarUri}
           text={msg.text || ''}
           timestamp={msg.createdAt}
           isMe={isMe}
@@ -920,7 +924,7 @@ export default function ChatRoomScreen() {
         />
       );
     },
-    [mutedUserIds, authUserId, handleMessageLongPress, handleAvatarPress, handleMediaHoldStart, handleMediaHoldEnd]
+    [mutedUserIds, authUserId, persistedAvatarUri, handleMessageLongPress, handleAvatarPress, handleMediaHoldStart, handleMediaHoldEnd]
   );
 
   const keyExtractor = useCallback((item: ListItem) => item.id, []);
