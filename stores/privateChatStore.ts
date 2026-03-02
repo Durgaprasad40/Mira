@@ -79,10 +79,6 @@ interface PrivateChatState {
 
   // Auto-cleanup: Remove messages past their deleteAt timestamp
   pruneDeletedMessages: () => void;
-
-  // Pending camera capture (for custom camera screen)
-  pendingCapture: { uri: string; type: 'photo' | 'video' } | null;
-  setPendingCapture: (capture: { uri: string; type: 'photo' | 'video' } | null) => void;
 }
 
 // BUGFIX #45: Module-level timeout ID for cancellable prune
@@ -398,10 +394,6 @@ export const usePrivateChatStore = create<PrivateChatState>()(
 
       return { messages: prunedMessages };
     }),
-
-  // Pending camera capture (not persisted)
-  pendingCapture: null,
-  setPendingCapture: (capture) => set({ pendingCapture: capture }),
     }),
     {
       name: 'mira-private-chat-store',

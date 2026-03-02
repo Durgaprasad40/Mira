@@ -17,7 +17,7 @@ import {
 } from 'react-native';
 import { Image } from 'expo-image';
 import { FlashList, type FlashListRef } from '@shopify/flash-list';
-import { useLocalSearchParams, useRouter, useFocusEffect } from 'expo-router';
+import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
@@ -88,8 +88,6 @@ export default function PrivateChatScreen() {
   const deleteMessage = usePrivateChatStore((s) => s.deleteMessage);
   const blockUser = usePrivateChatStore((s) => s.blockUser);
   const pruneDeletedMessages = usePrivateChatStore((s) => s.pruneDeletedMessages);
-  const pendingCapture = usePrivateChatStore((s) => s.pendingCapture);
-  const setPendingCapture = usePrivateChatStore((s) => s.setPendingCapture);
 
   const conversation = conversations.find((c) => c.id === id);
   const messages = id ? storeMessages[id] || [] : [];
@@ -178,18 +176,6 @@ export default function PrivateChatScreen() {
   const [showCameraSheet, setShowCameraSheet] = useState(false);
   const [pickedImageUri, setPickedImageUri] = useState<string | null>(null);
   const [pendingMediaType, setPendingMediaType] = useState<'photo' | 'video'>('photo');
-
-  // Consume pendingCapture from custom camera screen on focus
-  useFocusEffect(
-    useCallback(() => {
-      if (pendingCapture) {
-        setPickedImageUri(pendingCapture.uri);
-        setPendingMediaType(pendingCapture.type);
-        setShowCameraSheet(true);
-        setPendingCapture(null);
-      }
-    }, [pendingCapture, setPendingCapture])
-  );
 
   // Secure photo viewer state
   const [viewingMessageId, setViewingMessageId] = useState<string | null>(null);
@@ -301,12 +287,58 @@ export default function PrivateChatScreen() {
     setShowCameraSheet(true);
   }, [conversation]);
 
-  // Camera capture: navigate to custom camera screen (Photo/Video toggle)
+  // Camera capture: show Photo/Video chooser (explicit selection, not system mode)
   const handleCameraCapture = useCallback(() => {
     if (!conversation) return;
     setShowAttachMenu(false);
-    router.push('/(main)/incognito-camera');
-  }, [conversation, router]);
+
+    Alert.alert(
+      'Camera',
+      'What would you like to capture?',
+      [
+        {
+          text: 'Photo',
+          onPress: async () => {
+            const { status } = await ImagePicker.requestCameraPermissionsAsync();
+            if (status !== 'granted') {
+              Alert.alert('Permission Required', 'Camera access is needed to take photos.');
+              return;
+            }
+            const result = await ImagePicker.launchCameraAsync({
+              mediaTypes: ['images'],
+              quality: 1,
+              allowsEditing: false,
+            });
+            if (result.canceled || !result.assets?.[0]?.uri) return;
+            setPickedImageUri(result.assets[0].uri);
+            setPendingMediaType('photo');
+            setShowCameraSheet(true);
+          },
+        },
+        {
+          text: 'Video',
+          onPress: async () => {
+            const { status } = await ImagePicker.requestCameraPermissionsAsync();
+            if (status !== 'granted') {
+              Alert.alert('Permission Required', 'Camera access is needed to record videos.');
+              return;
+            }
+            const result = await ImagePicker.launchCameraAsync({
+              mediaTypes: ['videos'],
+              quality: 1,
+              allowsEditing: false,
+            });
+            if (result.canceled || !result.assets?.[0]?.uri) return;
+            setPickedImageUri(result.assets[0].uri);
+            setPendingMediaType('video');
+            setShowCameraSheet(true);
+          },
+        },
+        { text: 'Cancel', style: 'cancel' },
+      ],
+      { cancelable: true }
+    );
+  }, [conversation]);
 
   // Voice recording from + menu
   const handleVoiceFromMenu = useCallback(() => {
