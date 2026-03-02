@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import {
-  View, Text, StyleSheet, TouchableOpacity, Alert, ActivityIndicator,
+  View, Text, StyleSheet, TouchableOpacity, Alert, ActivityIndicator, Platform,
 } from 'react-native';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import * as ImagePicker from 'expo-image-picker';
@@ -62,7 +62,11 @@ export default function CameraComposerScreen() {
     if (!cameraRef.current || isCapturing) return;
     setIsCapturing(true);
     try {
-      const photo = await cameraRef.current.takePictureAsync({ quality: 0.8 });
+      // mirror: false ensures photo is NOT mirrored (correct orientation)
+      const photo = await cameraRef.current.takePictureAsync({
+        quality: 0.8,
+        mirror: false,
+      });
       if (photo?.uri) {
         setCapturedUri(photo.uri);
         setCapturedType('photo');
@@ -88,7 +92,13 @@ export default function CameraComposerScreen() {
       });
     }, 1000);
     try {
-      const video = await cameraRef.current.recordAsync({ maxDuration: MAX_VIDEO_SEC });
+      // iOS mirrors front camera videos by default; mirror: true reverses this
+      // Android: mirror: false ensures not mirrored (already default)
+      const shouldReverseMirror = facing === 'front' && Platform.OS === 'ios';
+      const video = await cameraRef.current.recordAsync({
+        maxDuration: MAX_VIDEO_SEC,
+        mirror: shouldReverseMirror,
+      });
       if (video?.uri) {
         setCapturedUri(video.uri);
         setCapturedType('video');
@@ -294,6 +304,7 @@ export default function CameraComposerScreen() {
             style={styles.camera}
             facing={facing}
             mode={captureMode === 'video' ? 'video' : 'picture'}
+            mirror={false}
           />
 
           {captureMode === 'video' && isRecordingVideo && (
