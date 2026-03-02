@@ -69,21 +69,28 @@ export function ProtectedMediaBubble({
   const watermark = mediaInfo?.watermarkEnabled ?? protectedMedia?.watermark ?? false;
   const isExpired = mediaInfo?.isExpired ?? isExpiredProp ?? false;
 
-  // Live countdown state
+  // Live countdown state — must match Phase2ProtectedMediaViewer exactly
   const [remainingSec, setRemainingSec] = useState<number | null>(null);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const prevRemainingSec = useRef<number | null>(null);
 
-  // Calculate remaining time from wall-clock
+  // Calculate remaining time from wall-clock (same logic as viewer)
   useEffect(() => {
     if (isExpired || !timerEndsAt) {
       setRemainingSec(null);
+      prevRemainingSec.current = null;
       return;
     }
 
     const updateRemaining = () => {
       const now = Date.now();
       const remaining = Math.max(0, Math.ceil((timerEndsAt - now) / 1000));
-      setRemainingSec(remaining);
+
+      // Only update state when value changes (reduces rerenders, matches viewer)
+      if (remaining !== prevRemainingSec.current) {
+        prevRemainingSec.current = remaining;
+        setRemainingSec(remaining);
+      }
 
       // Check if expired
       if (remaining <= 0 && onExpire) {
@@ -95,8 +102,8 @@ export function ProtectedMediaBubble({
     // Initial update
     updateRemaining();
 
-    // Update every 250ms for smooth countdown
-    intervalRef.current = setInterval(updateRemaining, 250);
+    // Update every 100ms to match viewer interval exactly
+    intervalRef.current = setInterval(updateRemaining, 100);
 
     return () => {
       if (intervalRef.current) {
@@ -197,6 +204,14 @@ export function ProtectedMediaBubble({
         </View>
       )}
 
+      {/* Timer badge (bottom-left) - matches viewer countdown exactly */}
+      {timerLabel && (
+        <View style={styles.timerBadge}>
+          <Ionicons name="time-outline" size={10} color="#FFFFFF" />
+          <Text style={styles.timerText}>{timerLabel}</Text>
+        </View>
+      )}
+
       {/* Hold/Tap to view hint - centered */}
       <View style={styles.hintOverlay}>
         <Text style={styles.hintText}>
@@ -243,6 +258,23 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(0,0,0,0.6)',
     alignItems: 'center',
     justifyContent: 'center',
+  },
+  timerBadge: {
+    position: 'absolute',
+    bottom: 4,
+    left: 4,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 2,
+    backgroundColor: 'rgba(0,0,0,0.6)',
+    paddingHorizontal: 5,
+    paddingVertical: 2,
+    borderRadius: 8,
+  },
+  timerText: {
+    fontSize: 10,
+    color: '#FFFFFF',
+    fontWeight: '600',
   },
   hintOverlay: {
     ...StyleSheet.absoluteFillObject,
