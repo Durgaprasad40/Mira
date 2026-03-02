@@ -47,6 +47,7 @@ export function VoiceMessageBubble({
 }: VoiceMessageBubbleProps) {
   const [isPlaying, setIsPlaying] = useState(false);
   const [playbackPosition, setPlaybackPosition] = useState(0);
+  const [isUnavailable, setIsUnavailable] = useState(false);
   const soundRef = useRef<Audio.Sound | null>(null);
   const isMountedRef = useRef(true);
 
@@ -152,6 +153,7 @@ export function VoiceMessageBubble({
         currentPlayingId = null;
       }
       setIsPlaying(false);
+      setIsUnavailable(true); // P1 FIX: Mark as unavailable when audio fails to load
     }
   }, [isPlaying, audioUri, messageId]);
 
@@ -212,21 +214,22 @@ export function VoiceMessageBubble({
     <TouchableOpacity
       style={[
         styles.container,
-        { backgroundColor: C.bubbleBg },
+        { backgroundColor: C.bubbleBg, opacity: isUnavailable ? 0.6 : 1 },
         isOwn ? styles.containerOwn : styles.containerOther,
       ]}
-      onPress={handlePlayPause}
+      onPress={isUnavailable ? undefined : handlePlayPause}
       onLongPress={handleLongPress}
       delayLongPress={400}
-      activeOpacity={0.8}
+      activeOpacity={isUnavailable ? 1 : 0.8}
+      disabled={isUnavailable}
     >
       <View style={styles.content}>
         {/* Play/Pause button */}
         <View style={[styles.playButton, { backgroundColor: C.accent + '30' }]}>
           <Ionicons
-            name={isPlaying ? 'pause' : 'play'}
+            name={isUnavailable ? 'alert-circle' : isPlaying ? 'pause' : 'play'}
             size={20}
-            color={C.accent}
+            color={isUnavailable ? C.textLight : C.accent}
           />
         </View>
 
@@ -241,7 +244,7 @@ export function VoiceMessageBubble({
             />
           </View>
           <Text style={[styles.duration, { color: C.textLight }]}>
-            {isPlaying ? formatDuration(playbackPosition) : formatDuration(durationMs)}
+            {isUnavailable ? 'Unavailable' : isPlaying ? formatDuration(playbackPosition) : formatDuration(durationMs)}
           </Text>
         </View>
 

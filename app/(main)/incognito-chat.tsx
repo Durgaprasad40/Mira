@@ -490,7 +490,7 @@ export default function PrivateChatScreen() {
         </View>
       </View>
     );
-  }, [conversation?.participantPhotoUrl, now, handleDeleteVoiceMessage]);
+  }, [conversation?.participantPhotoUrl, handleDeleteVoiceMessage]);
 
   return (
     <View style={styles.container}>
@@ -545,6 +545,7 @@ export default function PrivateChatScreen() {
           <FlashList
             ref={flatListRef}
             data={messages}
+            extraData={now}
             keyExtractor={(item) => item.id}
             renderItem={renderMessage}
             ListEmptyComponent={

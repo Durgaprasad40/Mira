@@ -406,14 +406,32 @@ export const usePrivateChatStore = create<PrivateChatState>()(
           clearTimeout(_pruneTimeoutId);
           _pruneTimeoutId = null;
         }
-        return (state) => {
-          if (state) {
-            // Delay slightly to ensure store is fully initialized
-            _pruneTimeoutId = setTimeout(() => {
-              state.pruneDeletedMessages();
-              _pruneTimeoutId = null;
-            }, 100);
+        return (state, error) => {
+          if (error || !state) return;
+
+          // P1 FIX: Mark protected media with localUri as expired (URIs are non-durable)
+          const messages = state.messages;
+          let changed = false;
+          const updatedMessages: Record<string, IncognitoMessage[]> = {};
+          for (const [convId, msgs] of Object.entries(messages)) {
+            updatedMessages[convId] = msgs.map((m) => {
+              if (m.protectedMedia?.localUri && !m.isExpired) {
+                changed = true;
+                const { localUri: _, ...restMedia } = m.protectedMedia;
+                return { ...m, isExpired: true, protectedMedia: restMedia as typeof m.protectedMedia };
+              }
+              return m;
+            });
           }
+          if (changed) {
+            usePrivateChatStore.setState({ messages: updatedMessages });
+          }
+
+          // Delay slightly to ensure store is fully initialized
+          _pruneTimeoutId = setTimeout(() => {
+            state.pruneDeletedMessages();
+            _pruneTimeoutId = null;
+          }, 100);
         };
       },
     }
