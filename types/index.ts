@@ -611,6 +611,7 @@ export interface IncognitoMessage {
     screenshotAllowed: boolean;
     viewOnce: boolean;
     watermark: boolean;
+    isMirrored?: boolean; // True if captured with front camera (needs render-time flip)
   };
   viewedAt?: number;
   timerEndsAt?: number;

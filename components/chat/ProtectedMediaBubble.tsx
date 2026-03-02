@@ -28,6 +28,7 @@ interface ProtectedMediaBubbleProps {
     screenshotAllowed: boolean;
     viewOnce: boolean;
     watermark: boolean;
+    isMirrored?: boolean;
   };
   timerEndsAt?: number;  // Wall-clock timestamp when timer expires
   isExpired?: boolean;
@@ -176,6 +177,7 @@ export function ProtectedMediaBubble({
   const localUri = protectedMedia?.localUri;
   const isVideo = protectedMedia?.mediaType === 'video';
   const canBlur = localUri ? !isContentUri(localUri) : true;
+  const isMirrored = protectedMedia?.isMirrored === true;
 
   return (
     <Pressable
@@ -191,7 +193,7 @@ export function ProtectedMediaBubble({
       {localUri && (
         <Image
           source={{ uri: localUri }}
-          style={styles.thumbnail}
+          style={[styles.thumbnail, isMirrored && styles.mirrored]}
           contentFit="cover"
           blurRadius={canBlur ? 25 : 0}
         />
@@ -240,6 +242,9 @@ const styles = StyleSheet.create({
   thumbnail: {
     width: '100%',
     height: '100%',
+  },
+  mirrored: {
+    transform: [{ scaleX: -1 }],
   },
   blurOverlay: {
     ...StyleSheet.absoluteFillObject,

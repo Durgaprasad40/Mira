@@ -177,6 +177,7 @@ export default function PrivateChatScreen() {
   const [showCameraSheet, setShowCameraSheet] = useState(false);
   const [pickedImageUri, setPickedImageUri] = useState<string | null>(null);
   const [pendingMediaType, setPendingMediaType] = useState<'photo' | 'video'>('photo');
+  const [pendingIsMirrored, setPendingIsMirrored] = useState(false);
 
   // Secure photo viewer state
   const [viewingMessageId, setViewingMessageId] = useState<string | null>(null);
@@ -222,6 +223,7 @@ export default function PrivateChatScreen() {
           if (data.uri && data.type) {
             setPickedImageUri(data.uri);
             setPendingMediaType(data.type);
+            setPendingIsMirrored(data.isMirrored === true);
             setShowCameraSheet(true);
           }
         } catch {
@@ -332,7 +334,9 @@ export default function PrivateChatScreen() {
     setShowCameraSheet(false);
     setPickedImageUri(null);
     const isVideo = pendingMediaType === 'video';
+    const isMirrored = pendingIsMirrored;
     setPendingMediaType('photo'); // Reset for next time
+    setPendingIsMirrored(false); // Reset for next time
 
     if (!id) return;
 
@@ -354,15 +358,16 @@ export default function PrivateChatScreen() {
         screenshotAllowed: false,
         viewOnce: options.timer === 0,
         watermark: false,
+        isMirrored, // For render-time flip correction
       },
     };
 
     addMessage(id, newMsg);
 
     if (__DEV__) {
-      console.log('[Phase2Chat] Sent secure media:', { type: pendingMediaType, timer: options.timer, viewingMode: options.viewingMode });
+      console.log('[Phase2Chat] Sent secure media:', { type: pendingMediaType, timer: options.timer, viewingMode: options.viewingMode, isMirrored });
     }
-  }, [id, addMessage, pendingMediaType]);
+  }, [id, addMessage, pendingMediaType, pendingIsMirrored]);
 
   if (!conversation) {
     return (

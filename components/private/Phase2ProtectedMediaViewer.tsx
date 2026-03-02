@@ -204,6 +204,7 @@ export function Phase2ProtectedMediaViewer({
   const isHoldMode = viewingMode === 'hold';
   const mediaUri = message?.protectedMedia?.localUri;
   const isVideo = message?.protectedMedia?.mediaType === 'video';
+  const isMirrored = message?.protectedMedia?.isMirrored === true;
   const expiresDurationMs = message?.protectedMedia?.expiresDurationMs ?? (timerSeconds * 1000);
 
   // ONCE view detection: timer === 0 means view once then expire
@@ -429,7 +430,7 @@ export function Phase2ProtectedMediaViewer({
       <View style={styles.container}>
         {/* Media layer - fullscreen (photo or video) */}
         {mediaUri && !mediaLoadError ? (
-          <View style={StyleSheet.absoluteFill}>
+          <View style={[StyleSheet.absoluteFill, isMirrored && styles.mirrored]}>
             {isVideo ? (
               <SecureVideoPlayer uri={mediaUri} elapsedMs={elapsedMs} />
             ) : (
@@ -442,7 +443,7 @@ export function Phase2ProtectedMediaViewer({
             )}
             {/* Corner countdown badge - only UI for timer */}
             {hasActiveTimer && (
-              <View style={[styles.cornerBadge, { top: insets.top + 16 }]}>
+              <View style={[styles.cornerBadge, { top: insets.top + 16 }, isMirrored && styles.mirroredBadge]}>
                 <Text style={styles.cornerBadgeText}>{timeLeft}</Text>
               </View>
             )}
@@ -524,6 +525,12 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: '700',
     color: C.text,
+  },
+  mirrored: {
+    transform: [{ scaleX: -1 }],
+  },
+  mirroredBadge: {
+    transform: [{ scaleX: -1 }], // Counter-flip to keep text readable
   },
   expiredContainer: {
     flex: 1,

@@ -1,6 +1,6 @@
 import React, { useState, useRef, useEffect } from 'react';
 import {
-  View, Text, StyleSheet, TouchableOpacity, Alert, ActivityIndicator, Platform,
+  View, Text, StyleSheet, TouchableOpacity, Alert, ActivityIndicator,
 } from 'react-native';
 import { CameraView, useCameraPermissions } from 'expo-camera';
 import * as ImagePicker from 'expo-image-picker';
@@ -47,6 +47,7 @@ export default function CameraComposerScreen() {
   const [videoSeconds, setVideoSeconds] = useState(0);
   const [capturedUri, setCapturedUri] = useState<string | null>(null);
   const [capturedType, setCapturedType] = useState<'photo' | 'video'>('photo');
+  const [capturedFacing, setCapturedFacing] = useState<'front' | 'back'>('front'); // Track camera used at capture
   const [isCapturing, setIsCapturing] = useState(false);
   const [mediaVisibility, setMediaVisibility] = useState<TodMediaVisibility>('owner_only');
   const cameraRef = useRef<CameraView>(null);
@@ -62,14 +63,12 @@ export default function CameraComposerScreen() {
     if (!cameraRef.current || isCapturing) return;
     setIsCapturing(true);
     try {
-      // mirror: false ensures photo is NOT mirrored (correct orientation)
-      const photo = await cameraRef.current.takePictureAsync({
-        quality: 0.8,
-        mirror: false,
-      });
+      // Don't use mirror prop here - we'll fix at render time for reliability
+      const photo = await cameraRef.current.takePictureAsync({ quality: 0.8 });
       if (photo?.uri) {
         setCapturedUri(photo.uri);
         setCapturedType('photo');
+        setCapturedFacing(facing); // Track which camera was used
       }
     } catch {
       Alert.alert('Error', 'Failed to take photo');
@@ -82,6 +81,8 @@ export default function CameraComposerScreen() {
     if (!cameraRef.current || isRecordingVideo) return;
     setIsRecordingVideo(true);
     setVideoSeconds(0);
+    // Track which camera we're recording with BEFORE starting
+    const recordingFacing = facing;
     videoTimerRef.current = setInterval(() => {
       setVideoSeconds((s) => {
         if (s >= MAX_VIDEO_SEC - 1) {
@@ -92,16 +93,12 @@ export default function CameraComposerScreen() {
       });
     }, 1000);
     try {
-      // iOS mirrors front camera videos by default; mirror: true reverses this
-      // Android: mirror: false ensures not mirrored (already default)
-      const shouldReverseMirror = facing === 'front' && Platform.OS === 'ios';
-      const video = await cameraRef.current.recordAsync({
-        maxDuration: MAX_VIDEO_SEC,
-        mirror: shouldReverseMirror,
-      });
+      // Don't use mirror prop here - we'll fix at render time for reliability
+      const video = await cameraRef.current.recordAsync({ maxDuration: MAX_VIDEO_SEC });
       if (video?.uri) {
         setCapturedUri(video.uri);
         setCapturedType('video');
+        setCapturedFacing(recordingFacing); // Track which camera was used
       }
     } catch {
       // Recording stopped
@@ -133,6 +130,7 @@ export default function CameraComposerScreen() {
       }
       setCapturedUri(asset.uri);
       setCapturedType(isVideo ? 'video' : 'photo');
+      setCapturedFacing('back'); // Gallery media is not from front camera
       if (isVideo && asset.duration) {
         setVideoSeconds(Math.round(asset.duration / 1000));
       }
@@ -172,6 +170,7 @@ export default function CameraComposerScreen() {
         promptId: params.promptId,
         durationSec: capturedType === 'video' ? videoSeconds : undefined,
         visibility: isSecureCapture ? undefined : mediaVisibility,
+        isMirrored: capturedFacing === 'front', // Front camera media needs render-time flip
       }));
       router.back();
     } catch {
@@ -304,7 +303,6 @@ export default function CameraComposerScreen() {
             style={styles.camera}
             facing={facing}
             mode={captureMode === 'video' ? 'video' : 'picture'}
-            mirror={false}
           />
 
           {captureMode === 'video' && isRecordingVideo && (
