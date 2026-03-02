@@ -287,30 +287,57 @@ export default function PrivateChatScreen() {
     setShowCameraSheet(true);
   }, [conversation]);
 
-  // Camera capture for secure photos/videos (Phase-1 style: from + menu)
-  const handleCameraCapture = useCallback(async () => {
+  // Camera capture: show Photo/Video chooser (explicit selection, not system mode)
+  const handleCameraCapture = useCallback(() => {
     if (!conversation) return;
     setShowAttachMenu(false);
 
-    const { status } = await ImagePicker.requestCameraPermissionsAsync();
-    if (status !== 'granted') {
-      Alert.alert('Permission Required', 'Camera access is needed to take photos/videos.');
-      return;
-    }
-
-    const result = await ImagePicker.launchCameraAsync({
-      mediaTypes: ['images', 'videos'],
-      quality: 1,
-      allowsEditing: false,
-    });
-
-    if (result.canceled || !result.assets?.[0]?.uri) return;
-
-    const asset = result.assets[0];
-    const isVideo = asset.type === 'video';
-    setPickedImageUri(asset.uri);
-    setPendingMediaType(isVideo ? 'video' : 'photo');
-    setShowCameraSheet(true);
+    Alert.alert(
+      'Camera',
+      'What would you like to capture?',
+      [
+        {
+          text: 'Photo',
+          onPress: async () => {
+            const { status } = await ImagePicker.requestCameraPermissionsAsync();
+            if (status !== 'granted') {
+              Alert.alert('Permission Required', 'Camera access is needed to take photos.');
+              return;
+            }
+            const result = await ImagePicker.launchCameraAsync({
+              mediaTypes: ['images'],
+              quality: 1,
+              allowsEditing: false,
+            });
+            if (result.canceled || !result.assets?.[0]?.uri) return;
+            setPickedImageUri(result.assets[0].uri);
+            setPendingMediaType('photo');
+            setShowCameraSheet(true);
+          },
+        },
+        {
+          text: 'Video',
+          onPress: async () => {
+            const { status } = await ImagePicker.requestCameraPermissionsAsync();
+            if (status !== 'granted') {
+              Alert.alert('Permission Required', 'Camera access is needed to record videos.');
+              return;
+            }
+            const result = await ImagePicker.launchCameraAsync({
+              mediaTypes: ['videos'],
+              quality: 1,
+              allowsEditing: false,
+            });
+            if (result.canceled || !result.assets?.[0]?.uri) return;
+            setPickedImageUri(result.assets[0].uri);
+            setPendingMediaType('video');
+            setShowCameraSheet(true);
+          },
+        },
+        { text: 'Cancel', style: 'cancel' },
+      ],
+      { cancelable: true }
+    );
   }, [conversation]);
 
   // Voice recording from + menu
@@ -627,7 +654,7 @@ export default function PrivateChatScreen() {
 
           {/* ─── COMPOSER (Phase-1 style: + menu with Camera/Gallery/Voice) ─── */}
           <View
-            style={[styles.composerWrapper, { paddingBottom: Platform.OS === 'ios' ? insets.bottom : 0 }]}
+            style={[styles.composerWrapper, { paddingBottom: (Platform.OS === 'ios' ? insets.bottom : 0) + 8 }]}
             onLayout={(e) => setComposerHeight(e.nativeEvent.layout.height)}
           >
             <View style={styles.inputBar}>

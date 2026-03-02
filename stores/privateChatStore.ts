@@ -360,7 +360,7 @@ export const usePrivateChatStore = create<PrivateChatState>()(
       return { messages: { ...s.messages, [conversationId]: updated } };
     }),
 
-  // Auto-cleanup: Remove messages past their deleteAt timestamp
+  // Auto-cleanup: Remove messages past deleteAt OR expired for 60s+
   pruneDeletedMessages: () =>
     set((s) => {
       const now = Date.now();
@@ -369,9 +369,15 @@ export const usePrivateChatStore = create<PrivateChatState>()(
       const prunedMessages: Record<string, IncognitoMessage[]> = {};
       for (const [convId, msgs] of Object.entries(s.messages)) {
         const filtered = msgs.filter((m) => {
+          // Check deleteAt timestamp
           if (m.deleteAt && m.deleteAt <= now) {
             changed = true;
-            return false; // Remove this message
+            return false;
+          }
+          // Fallback: expired secure media after 60s (robust removal)
+          if (m.isExpired && m.expiredAt && (now - m.expiredAt) >= 60_000) {
+            changed = true;
+            return false;
           }
           return true;
         });
