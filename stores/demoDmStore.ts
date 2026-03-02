@@ -132,8 +132,14 @@ export function computeUnreadConversationCount(
 }
 
 /**
- * Phase-2: Compute DM unread counts grouped by sourceRoomId.
- * Returns: { byRoomId: Record<roomId, unreadCount>, roomsWithUnread: number }
+ * Phase-2: Compute DISTINCT SENDER counts grouped by sourceRoomId.
+ * Returns: { byRoomId: Record<roomId, distinctSenderCount>, roomsWithUnread: number }
+ *
+ * Rules:
+ * - Counts DISTINCT people who have sent unseen messages, NOT message count
+ * - Same person sends 5 messages → counts as 1
+ * - Two different people each send messages → counts as 2
+ * - Once a conversation is marked read, that sender no longer counts
  */
 export function computeUnreadDmCountsByRoom(
   state: Pick<DemoDmState, 'conversations' | 'meta'>,
@@ -149,13 +155,14 @@ export function computeUnreadDmCountsByRoom(
     const sourceRoomId = meta?.sourceRoomId;
     if (!sourceRoomId) continue; // Skip DMs without sourceRoomId
 
-    // Count unread incoming messages
-    const unreadCount = msgs.filter(
+    // Check if this conversation has ANY unread incoming message
+    const hasUnread = msgs.some(
       (m) => m.senderId !== currentUserId && !m.readAt,
-    ).length;
+    );
 
-    if (unreadCount > 0) {
-      byRoomId[sourceRoomId] = (byRoomId[sourceRoomId] || 0) + unreadCount;
+    // If has unread, count as 1 distinct sender for this room
+    if (hasUnread) {
+      byRoomId[sourceRoomId] = (byRoomId[sourceRoomId] || 0) + 1;
     }
   }
 

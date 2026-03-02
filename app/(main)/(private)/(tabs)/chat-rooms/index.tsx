@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useMemo, useEffect, useLayoutEffect, useRef } from 'react';
+import React, { useState, useCallback, useMemo, useEffect, useRef } from 'react';
 import {
   View,
   Text,
@@ -11,7 +11,7 @@ import {
   ActivityIndicator,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { useRouter } from 'expo-router';
+import { useRouter, useRootNavigationState } from 'expo-router';
 import { useFocusEffect } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
 import { useQuery } from 'convex/react';
@@ -116,6 +116,13 @@ export default function ChatRoomsScreen() {
   const [refreshing, setRefreshing] = useState(false);
   const [joinedRooms, setJoinedRooms] = useState(DEMO_JOINED_ROOMS);
 
+  // Navigation readiness check - prevent "navigate before mounting Root Layout" warning
+  const rootNavState = useRootNavigationState();
+  const isNavigationReady = !!rootNavState?.key;
+
+  // Track if user manually navigated (tapped a room) - skip preferred redirect if so
+  const userNavigatedRef = useRef(false);
+
   // P2-AUD-005: Ref for refresh timeout cleanup
   const refreshTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -155,15 +162,18 @@ export default function ChatRoomsScreen() {
     ? preferredRoomId
     : convexPreferredRoom?.preferredChatRoomId ?? null;
 
-  // Use useLayoutEffect for redirect to happen before paint
+  // Use useEffect (not useLayoutEffect) to avoid "navigate before mounting Root Layout"
   // P2 STABILITY: Add safety timeout to prevent infinite spinner if navigation fails
   const redirectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  useLayoutEffect(() => {
-    // Clear any existing safety timeout
-    if (redirectTimeoutRef.current) {
-      clearTimeout(redirectTimeoutRef.current);
-      redirectTimeoutRef.current = null;
+  useEffect(() => {
+    // Wait for navigation to be ready before any redirect
+    if (!isNavigationReady) return;
+
+    // User manually tapped a room → skip preferred redirect
+    if (userNavigatedRef.current) {
+      setCheckingPreferred(false);
+      return;
     }
 
     // Still loading → keep checkingPreferred true
@@ -175,7 +185,7 @@ export default function ChatRoomsScreen() {
       return;
     }
 
-    // Has preferred room → redirect immediately
+    // Has preferred room → redirect
     if (effectivePreferredRoomId) {
       if (__DEV__) console.log('[ChatRooms] Initial redirect to', effectivePreferredRoomId);
       hasRedirectedRef.current = true;
@@ -187,26 +197,13 @@ export default function ChatRoomsScreen() {
         setIsRedirecting(false);
       }, 2000);
 
-      try {
-        router.replace(`/(main)/(private)/(tabs)/chat-rooms/${effectivePreferredRoomId}` as any);
-      } catch (err) {
-        // P2 STABILITY: Navigation failed - clear spinner immediately
-        if (__DEV__) {
-          console.warn('[ChatRooms] Preferred room redirect failed:', err);
-        }
-        setCheckingPreferred(false);
-        setIsRedirecting(false);
-        if (redirectTimeoutRef.current) {
-          clearTimeout(redirectTimeoutRef.current);
-          redirectTimeoutRef.current = null;
-        }
-      }
+      router.replace(`/(main)/(private)/(tabs)/chat-rooms/${effectivePreferredRoomId}` as any);
       return;
     }
 
     // No preferred room → show homepage
     setCheckingPreferred(false);
-  }, [isPreferredLoading, effectivePreferredRoomId, router]);
+  }, [isNavigationReady, isPreferredLoading, effectivePreferredRoomId, router]);
 
   // Cleanup timeouts on unmount
   useEffect(() => {
@@ -230,7 +227,7 @@ export default function ChatRoomsScreen() {
       // Skip if still loading or no preferred room
       if (isPreferredLoading || !effectivePreferredRoomId) return;
 
-      // Skip if already redirected in this mount cycle (useLayoutEffect handled it)
+      // Skip if already redirected in this mount cycle (useEffect handled it)
       if (hasRedirectedRef.current) return;
 
       if (__DEV__) console.log('[ChatRooms] Focus redirect to', effectivePreferredRoomId);
@@ -260,18 +257,14 @@ export default function ChatRoomsScreen() {
   const isConvexLoading = !isDemoMode && convexRooms === undefined;
 
   // Phase-2: Calculate DM unread counts per room (NOT group messages)
-  // Badge shows private DM unread count for that room, not group messages
-  const unreadCounts = useMemo(() => {
-    // Skip computation entirely in non-demo mode
-    if (!isDemoMode) return {};
-
-    // Use the helper to compute per-room DM unread counts
-    const { byRoomId } = computeUnreadDmCountsByRoom(
-      { conversations: dmConversations, meta: dmMeta },
-      currentUserId
-    );
-    return byRoomId;
-  }, [dmConversations, dmMeta, currentUserId]);
+  // Badge shows DISTINCT SENDERS with unseen DMs from that room
+  // Computed directly (not memoized) to ensure re-render on store changes
+  const unreadCounts = isDemoMode
+    ? computeUnreadDmCountsByRoom(
+        { conversations: dmConversations, meta: dmMeta },
+        currentUserId
+      ).byRoomId
+    : {};
 
   // Unified rooms list: demo or Convex
   // Filter out "English" room - users can chat in English inside Global
@@ -312,6 +305,13 @@ export default function ChatRoomsScreen() {
   const handleOpenRoom = useCallback(
     (roomId: string) => {
       if (__DEV__) console.log('[TAP] room pressed', { roomId, t: Date.now() });
+      // Mark user navigated to cancel any pending preferred room redirect
+      userNavigatedRef.current = true;
+      // Clear any pending redirect timeout
+      if (redirectTimeoutRef.current) {
+        clearTimeout(redirectTimeoutRef.current);
+        redirectTimeoutRef.current = null;
+      }
       // Navigate FIRST (instant) - defer other work
       router.push(`/(main)/(private)/(tabs)/chat-rooms/${roomId}` as any);
       if (__DEV__) console.log('[NAV] room push scheduled', { t: Date.now() });

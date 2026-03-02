@@ -402,9 +402,11 @@ export default function ChatRoomScreen() {
   // INITIAL SCROLL (debounced stabilized scroll)
   // Messages load in phases after hydration/seeding, so we debounce to wait
   // for "stabilization" before scrolling to bottom.
+  // Hide FlatList until scroll is ready to avoid visible mid→bottom jump.
   // ─────────────────────────────────────────────────────────────────────────
   const hasInitialScrolled = useRef(false);
   const initialScrollDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [initialScrollReady, setInitialScrollReady] = useState(false);
 
   // Cleanup debounce timeout on unmount
   useEffect(() => {
@@ -435,6 +437,8 @@ export default function ChatRoomScreen() {
       InteractionManager.runAfterInteractions(() => {
         requestAnimationFrame(() => {
           scrollToBottom(false);
+          // Mark scroll ready so FlatList becomes visible
+          setInitialScrollReady(true);
         });
       });
     }, 200);
@@ -1093,6 +1097,10 @@ export default function ChatRoomScreen() {
               data={listItems}
               keyExtractor={keyExtractor}
               renderItem={renderItem}
+              style={{
+                // Hide list until initial scroll is ready to avoid mid→bottom jump
+                opacity: initialScrollReady || messages.length === 0 ? 1 : 0,
+              }}
               contentContainerStyle={{
                 flexGrow: 1,
                 justifyContent: 'flex-end',
