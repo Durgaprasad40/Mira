@@ -1,15 +1,19 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { View, Text, StyleSheet, Pressable, Dimensions } from 'react-native';
+import { View, Text, StyleSheet, Pressable } from 'react-native';
+import { Image } from 'expo-image';
 import { Ionicons } from '@expo/vector-icons';
-import { LinearGradient } from 'expo-linear-gradient';
 import { useQuery } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { COLORS } from '@/lib/constants';
 import { log } from '@/utils/logger';
 
-const SCREEN_WIDTH = Dimensions.get('window').width;
-const BUBBLE_WIDTH = Math.floor(SCREEN_WIDTH * 0.28); // ~28% of screen width
+// Phase-1 tile sizing (matches MediaMessage.tsx)
+const THUMB_WIDTH = 100;
+const THUMB_HEIGHT = 75;
 const AUTO_REMOVE_DELAY = 60_000; // 60 seconds after expiry
+
+// Check if URI is a local content:// URI (Android gallery) which doesn't work well with blur
+const isContentUri = (uri: string) => uri?.startsWith('content://');
 
 interface ProtectedMediaBubbleProps {
   messageId: string;
@@ -17,6 +21,8 @@ interface ProtectedMediaBubbleProps {
   userId?: string;
   // Phase-1 demo mode props
   protectedMedia?: {
+    localUri?: string;
+    mediaType?: 'photo' | 'video';
     timer: number;
     viewingMode: 'tap' | 'hold';
     screenshotAllowed: boolean;
@@ -159,94 +165,95 @@ export function ProtectedMediaBubble({
     }
   };
 
+  // Phase-1 style: Blurred tile matching MediaMessage.tsx exactly
+  const localUri = protectedMedia?.localUri;
+  const isVideo = protectedMedia?.mediaType === 'video';
+  const canBlur = localUri ? !isContentUri(localUri) : true;
+
   return (
     <Pressable
       onPressIn={handlePressIn}
       onPressOut={handlePressOut}
       onPress={handlePress}
       style={({ pressed }) => [
-        styles.pressable,
+        styles.container,
         pressed && !isHoldMode && styles.pressed,
       ]}
     >
-      <LinearGradient
-        colors={['#2C2C3A', '#1E1E2E']}
-        style={styles.container}
-      >
-        {/* Icon */}
-        <Ionicons name="shield-checkmark" size={20} color={COLORS.primary} />
+      {/* Blurred thumbnail image */}
+      {localUri && (
+        <Image
+          source={{ uri: localUri }}
+          style={styles.thumbnail}
+          contentFit="cover"
+          blurRadius={canBlur ? 25 : 0}
+        />
+      )}
 
-        {/* Timer badge (live countdown or initial) */}
-        {timerLabel && (
-          <View style={[styles.timerBadge, hasActiveTimer && styles.timerActive]}>
-            <Ionicons name="timer-outline" size={10} color={COLORS.white} />
-            <Text style={styles.timerText}>{timerLabel}</Text>
-          </View>
-        )}
+      {/* Video indicator (top-right badge) */}
+      {isVideo && (
+        <View style={styles.videoIndicator}>
+          <Ionicons name="play" size={14} color="#FFFFFF" />
+        </View>
+      )}
 
-        {/* Once badge */}
-        {viewOnce && !timerLabel && (
-          <View style={styles.onceBadge}>
-            <Text style={styles.onceText}>1x</Text>
-          </View>
-        )}
-
-        {/* Hint */}
-        <Text style={styles.hint}>
-          {isHoldMode ? 'Hold' : 'Tap'}
+      {/* Hold/Tap to view hint - centered */}
+      <View style={styles.hintOverlay}>
+        <Text style={styles.hintText}>
+          {isHoldMode ? 'Hold to view' : 'Tap to view'}
         </Text>
-      </LinearGradient>
+      </View>
+
+      {/* Semi-transparent overlay */}
+      <View style={[styles.blurOverlay, !canBlur && styles.darkOverlay]} />
     </Pressable>
   );
 }
 
+// Phase-1 styles matching MediaMessage.tsx exactly
 const styles = StyleSheet.create({
-  pressable: {
-    borderRadius: 10,
+  container: {
+    width: THUMB_WIDTH,
+    height: THUMB_HEIGHT,
+    borderRadius: 8,
     overflow: 'hidden',
+    backgroundColor: '#1E1E2E',
   },
   pressed: {
     opacity: 0.7,
   },
-  container: {
-    width: BUBBLE_WIDTH,
-    height: BUBBLE_WIDTH, // Square aspect ratio
-    borderRadius: 10,
+  thumbnail: {
+    width: '100%',
+    height: '100%',
+  },
+  blurOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: 'rgba(30, 30, 46, 0.4)',
+  },
+  darkOverlay: {
+    backgroundColor: 'rgba(30, 30, 46, 0.7)',
+  },
+  videoIndicator: {
+    position: 'absolute',
+    top: 4,
+    right: 4,
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    backgroundColor: 'rgba(0,0,0,0.6)',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 4,
   },
-  timerBadge: {
-    flexDirection: 'row',
+  hintOverlay: {
+    ...StyleSheet.absoluteFillObject,
     alignItems: 'center',
-    gap: 3,
-    backgroundColor: 'rgba(255,255,255,0.15)',
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    borderRadius: 8,
+    justifyContent: 'center',
   },
-  timerActive: {
-    backgroundColor: COLORS.primary,
-  },
-  timerText: {
-    fontSize: 11,
-    fontWeight: '700',
-    color: COLORS.white,
-  },
-  onceBadge: {
-    backgroundColor: 'rgba(255,255,255,0.15)',
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    borderRadius: 8,
-  },
-  onceText: {
+  hintText: {
     fontSize: 10,
-    fontWeight: '600',
-    color: COLORS.white,
-  },
-  hint: {
-    fontSize: 10,
-    color: 'rgba(255,255,255,0.5)',
+    color: 'rgba(255,255,255,0.4)',
+    fontWeight: '500',
+    textAlign: 'center',
   },
   expiredPill: {
     flexDirection: 'row',

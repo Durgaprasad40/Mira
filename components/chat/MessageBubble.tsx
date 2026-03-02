@@ -23,6 +23,8 @@ interface MessageBubbleProps {
     videoDurationMs?: number;
     isProtected?: boolean;
     protectedMedia?: {
+      localUri?: string;
+      mediaType?: 'photo' | 'video';
       timer: number;
       viewingMode?: 'tap' | 'hold';
       screenshotAllowed: boolean;
