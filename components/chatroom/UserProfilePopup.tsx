@@ -126,8 +126,9 @@ export default function UserProfilePopup({
                   styles.statusLabel,
                   { color: user.isOnline ? '#00B894' : C.textLight },
                 ]}
+                numberOfLines={1}
               >
-                {user.isOnline ? 'Online' : 'Offline'}
+                {(user as any).bio ?? (user as any).about ?? (user as any).profileBio ?? (user as any).chatBio ?? '—'}
               </Text>
             </View>
             {(user.age || user.gender) && (

@@ -2,6 +2,7 @@ import { mutation, query, internalMutation } from './_generated/server';
 import { v } from 'convex/values';
 import { softMaskText } from './softMask';
 import { internal } from './_generated/api';
+import { asUserId } from './id';
 
 // 24 hours in milliseconds
 const ROOM_LIFETIME_MS = 24 * 60 * 60 * 1000;
@@ -10,6 +11,16 @@ const PENALTY_DURATION_MS = 24 * 60 * 60 * 1000;
 const MAX_MESSAGES_PER_ROOM = 1000; // Trigger cleanup when exceeded
 const TARGET_AFTER_TRIM = 900;      // Target count after cleanup
 const BATCH_DELETE_SIZE = 200;      // Delete in batches for efficiency
+
+// Generate a random 6-character alphanumeric join code
+function generateJoinCode(): string {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'; // No O/0, I/1 for clarity
+  let code = '';
+  for (let i = 0; i < 6; i++) {
+    code += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return code;
+}
 
 const DEFAULT_ROOMS = [
   { name: 'Global', slug: 'global', category: 'general' as const },
@@ -444,6 +455,236 @@ export const createRoom = mutation({
     });
 
     return roomId;
+  },
+});
+
+// Phase-2: Create a private room with join code (costs 1 coin)
+export const createPrivateRoom = mutation({
+  args: {
+    name: v.string(),
+  },
+  handler: async (ctx, { name }) => {
+    // 1. Auth guard
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) {
+      throw new Error('Unauthorized');
+    }
+    const createdBy = asUserId(identity.subject);
+    if (!createdBy) {
+      throw new Error('Invalid user identity');
+    }
+
+    // 2. Check wallet balance
+    const user = await ctx.db.get(createdBy);
+    if (!user) {
+      throw new Error('User not found');
+    }
+    const currentCoins = user.walletCoins ?? 0;
+    if (currentCoins < 1) {
+      throw new Error('Insufficient coins. You need at least 1 coin to create a private room.');
+    }
+
+    // 3. Generate unique join code (max 10 retries)
+    let joinCode = generateJoinCode();
+    let retries = 0;
+    const MAX_RETRIES = 10;
+    while (retries < MAX_RETRIES) {
+      const codeExists = await ctx.db
+        .query('chatRooms')
+        .withIndex('by_join_code', (q) => q.eq('joinCode', joinCode))
+        .first();
+      if (!codeExists) break;
+      joinCode = generateJoinCode();
+      retries++;
+    }
+    if (retries >= MAX_RETRIES) {
+      throw new Error('Failed to generate unique join code. Please try again.');
+    }
+
+    // 4. Generate slug from name
+    const slug = name
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-|-$/g, '');
+    const existing = await ctx.db
+      .query('chatRooms')
+      .withIndex('by_slug', (q) => q.eq('slug', slug))
+      .first();
+    const finalSlug = existing ? `${slug}-${Date.now()}` : slug;
+
+    const now = Date.now();
+
+    // 5. Insert private room with joinCode and 24h expiration
+    const roomId = await ctx.db.insert('chatRooms', {
+      name,
+      slug: finalSlug,
+      category: 'general',
+      isPublic: false,
+      createdAt: now,
+      memberCount: 1,
+      createdBy,
+      expiresAt: now + ROOM_LIFETIME_MS,
+      joinCode,
+    });
+
+    // 6. Add creator as owner
+    await ctx.db.insert('chatRoomMembers', {
+      roomId,
+      userId: createdBy,
+      joinedAt: now,
+      role: 'owner',
+    });
+
+    // 7. Deduct 1 coin AFTER successful room creation
+    await ctx.db.patch(createdBy, {
+      walletCoins: currentCoins - 1,
+    });
+
+    return { roomId, joinCode };
+  },
+});
+
+// Phase-2: Join a room by join code
+export const joinRoomByCode = mutation({
+  args: {
+    joinCode: v.string(),
+  },
+  handler: async (ctx, { joinCode }) => {
+    // 1. Auth guard
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) {
+      throw new Error('Unauthorized');
+    }
+    const userId = asUserId(identity.subject);
+    if (!userId) {
+      throw new Error('Invalid user identity');
+    }
+
+    // 2. Normalize code to uppercase
+    const normalizedCode = joinCode.toUpperCase().trim();
+
+    // 3. Find room by join code
+    const room = await ctx.db
+      .query('chatRooms')
+      .withIndex('by_join_code', (q) => q.eq('joinCode', normalizedCode))
+      .first();
+
+    if (!room) {
+      throw new Error('Invalid join code. Room not found.');
+    }
+
+    // 4. Check if room is expired
+    const now = Date.now();
+    if (room.expiresAt && room.expiresAt <= now) {
+      throw new Error('This room has expired.');
+    }
+
+    // 5. Check if already a member
+    const existing = await ctx.db
+      .query('chatRoomMembers')
+      .withIndex('by_room_user', (q) => q.eq('roomId', room._id).eq('userId', userId))
+      .first();
+    if (existing) {
+      return { roomId: room._id, alreadyMember: true };
+    }
+
+    // 6. Join as member (skip memberCount update to avoid race)
+    await ctx.db.insert('chatRoomMembers', {
+      roomId: room._id,
+      userId,
+      joinedAt: now,
+      role: 'member',
+    });
+
+    return { roomId: room._id, alreadyMember: false };
+  },
+});
+
+// Phase-2: Get room by join code (for preview before joining)
+export const getRoomByJoinCode = query({
+  args: { joinCode: v.string() },
+  handler: async (ctx, { joinCode }) => {
+    const normalizedCode = joinCode.toUpperCase().trim();
+    const room = await ctx.db
+      .query('chatRooms')
+      .withIndex('by_join_code', (q) => q.eq('joinCode', normalizedCode))
+      .first();
+
+    if (!room) return null;
+
+    // Check if expired
+    const now = Date.now();
+    if (room.expiresAt && room.expiresAt <= now) {
+      return null;
+    }
+
+    return {
+      _id: room._id,
+      name: room.name,
+      memberCount: room.memberCount,
+      createdAt: room.createdAt,
+      expiresAt: room.expiresAt,
+    };
+  },
+});
+
+// Phase-2: Get private rooms where current user is owner or member (auth-based)
+export const getMyPrivateRooms = query({
+  args: {},
+  handler: async (ctx) => {
+    // Auth guard
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) {
+      return [];
+    }
+    const userId = asUserId(identity.subject);
+    if (!userId) {
+      return [];
+    }
+
+    const now = Date.now();
+
+    // Get all memberships for this user
+    const memberships = await ctx.db
+      .query('chatRoomMembers')
+      .withIndex('by_user', (q) => q.eq('userId', userId))
+      .collect();
+
+    // Fetch room details for each membership
+    const rooms = await Promise.all(
+      memberships.map(async (membership) => {
+        const room = await ctx.db.get(membership.roomId);
+        if (!room) return null;
+        // Filter out public rooms (only private)
+        if (room.isPublic) return null;
+        // Filter out expired rooms
+        if (room.expiresAt && room.expiresAt <= now) return null;
+        return {
+          _id: room._id,
+          name: room.name,
+          slug: room.slug,
+          category: room.category,
+          isPublic: room.isPublic,
+          memberCount: room.memberCount,
+          lastMessageAt: room.lastMessageAt,
+          lastMessageText: room.lastMessageText,
+          createdAt: room.createdAt,
+          expiresAt: room.expiresAt,
+          joinCode: room.joinCode,
+          role: membership.role,
+        };
+      })
+    );
+
+    // Filter nulls and sort by lastMessageAt
+    return rooms
+      .filter((room): room is NonNullable<typeof room> => room !== null)
+      .sort((a, b) => {
+        const aTime = a.lastMessageAt ?? 0;
+        const bTime = b.lastMessageAt ?? 0;
+        if (bTime !== aTime) return bTime - aTime;
+        return a.name.localeCompare(b.name);
+      });
   },
 });
 

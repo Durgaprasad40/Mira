@@ -176,6 +176,9 @@ export default defineSchema({
     rewindsRemaining: v.number(),
     boostsRemaining: v.number(),
 
+    // Wallet (coins for private room creation, etc.)
+    walletCoins: v.optional(v.number()),
+
     // Reset Timestamps
     likesResetAt: v.number(),
     superLikesResetAt: v.number(),
@@ -1067,11 +1070,14 @@ export default defineSchema({
     isDemoRoom: v.optional(v.boolean()), // Demo mode flag
     // Phase-2: 24h room lifecycle
     expiresAt: v.optional(v.number()), // createdAt + 24h; undefined for legacy public rooms
+    // Phase-2: Private rooms with join code
+    joinCode: v.optional(v.string()), // 6-char alphanumeric code for private rooms
   })
     .index('by_slug', ['slug'])
     .index('by_last_message', ['lastMessageAt'])
     .index('by_category', ['category'])
-    .index('by_expires', ['expiresAt']),
+    .index('by_expires', ['expiresAt'])
+    .index('by_join_code', ['joinCode']),
 
   // Chat Room Members table
   chatRoomMembers: defineTable({

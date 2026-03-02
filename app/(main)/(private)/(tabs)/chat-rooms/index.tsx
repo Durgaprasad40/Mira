@@ -9,12 +9,14 @@ import {
   Image,
   ImageSourcePropType,
   ActivityIndicator,
+  TextInput,
+  Alert,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter, useRootNavigationState } from 'expo-router';
 import { useFocusEffect } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
-import { useQuery } from 'convex/react';
+import { useQuery, useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { Id } from '@/convex/_generated/dataModel';
 import { INCOGNITO_COLORS } from '@/lib/constants';
@@ -115,6 +117,13 @@ export default function ChatRoomsScreen() {
   const insets = useSafeAreaInsets();
   const [refreshing, setRefreshing] = useState(false);
   const [joinedRooms, setJoinedRooms] = useState(DEMO_JOINED_ROOMS);
+
+  // Phase-2: Private rooms state
+  const [joinCode, setJoinCode] = useState('');
+  const [isJoining, setIsJoining] = useState(false);
+  const [isCreating, setIsCreating] = useState(false);
+  const [showCreateInput, setShowCreateInput] = useState(false);
+  const [newRoomName, setNewRoomName] = useState('');
 
   // Navigation readiness check - prevent "navigate before mounting Root Layout" warning
   const rootNavState = useRootNavigationState();
@@ -253,6 +262,30 @@ export default function ChatRoomsScreen() {
     isDemoMode ? 'skip' : {}
   );
 
+  // Phase-2: Query for user's private rooms (auth-based, no userId param)
+  const myPrivateRooms = useQuery(
+    api.chatRooms.getMyPrivateRooms,
+    isDemoMode ? 'skip' : {}
+  );
+
+  // Phase-2: Mutations for private rooms
+  const joinRoomByCodeMut = useMutation(api.chatRooms.joinRoomByCode);
+  const createPrivateRoomMut = useMutation(api.chatRooms.createPrivateRoom);
+
+  // Filter private rooms into ChatRoom format
+  const privateRooms: ChatRoom[] = useMemo(() => {
+    if (isDemoMode || !myPrivateRooms) return [];
+    return myPrivateRooms.map((r) => ({
+      id: r._id,
+      name: r.name,
+      slug: r.slug,
+      category: r.category,
+      memberCount: r.memberCount,
+      lastMessageText: r.lastMessageText,
+      iconKey: r.slug,
+    }));
+  }, [isDemoMode, myPrivateRooms]);
+
   // P2 CR-010: Track loading state for Convex mode
   const isConvexLoading = !isDemoMode && convexRooms === undefined;
 
@@ -328,6 +361,50 @@ export default function ChatRoomsScreen() {
   const handleCreateRoom = useCallback(() => {
     router.push('/(main)/create-room' as any);
   }, [router]);
+
+  // Phase-2: Handle join by code
+  const handleJoinByCode = useCallback(async () => {
+    if (!joinCode.trim() || isJoining) return;
+    setIsJoining(true);
+    try {
+      const result = await joinRoomByCodeMut({ joinCode: joinCode.trim() });
+      setJoinCode('');
+      if (result.alreadyMember) {
+        Alert.alert('Already a Member', 'You are already a member of this room.');
+      }
+      // Navigate to the room
+      router.push(`/(main)/(private)/(tabs)/chat-rooms/${result.roomId}` as any);
+    } catch (error: any) {
+      Alert.alert('Error', error.message || 'Failed to join room');
+    } finally {
+      setIsJoining(false);
+    }
+  }, [joinCode, isJoining, joinRoomByCodeMut, router]);
+
+  // Phase-2: Handle create private room
+  const handleCreatePrivateRoom = useCallback(async () => {
+    if (!newRoomName.trim() || isCreating) return;
+    setIsCreating(true);
+    try {
+      const result = await createPrivateRoomMut({ name: newRoomName.trim() });
+      setNewRoomName('');
+      setShowCreateInput(false);
+      Alert.alert(
+        'Room Created',
+        `Your room code is: ${result.joinCode}\n\nShare this code with friends to invite them!`,
+        [
+          {
+            text: 'Go to Room',
+            onPress: () => router.push(`/(main)/(private)/(tabs)/chat-rooms/${result.roomId}` as any),
+          },
+        ]
+      );
+    } catch (error: any) {
+      Alert.alert('Error', error.message || 'Failed to create room');
+    } finally {
+      setIsCreating(false);
+    }
+  }, [newRoomName, isCreating, createPrivateRoomMut, router]);
 
   const renderRoom = useCallback(
     ({ item }: { item: ChatRoom }) => {
@@ -461,6 +538,91 @@ export default function ChatRoomsScreen() {
         renderItem={null}
         ListHeaderComponent={
           <>
+            {/* Phase-2: Private Rooms Section */}
+            {!isDemoMode && (
+              <>
+                <Text style={styles.sectionTitle}>Private Rooms</Text>
+
+                {/* Join by Code Input */}
+                <View style={styles.joinCodeRow}>
+                  <TextInput
+                    style={styles.joinCodeInput}
+                    placeholder="Enter room code..."
+                    placeholderTextColor={C.textLight}
+                    value={joinCode}
+                    onChangeText={setJoinCode}
+                    autoCapitalize="characters"
+                    maxLength={6}
+                  />
+                  <TouchableOpacity
+                    style={[styles.joinCodeButton, (!joinCode.trim() || isJoining) && styles.joinCodeButtonDisabled]}
+                    onPress={handleJoinByCode}
+                    disabled={!joinCode.trim() || isJoining}
+                  >
+                    {isJoining ? (
+                      <ActivityIndicator size="small" color="#FFF" />
+                    ) : (
+                      <Text style={styles.joinCodeButtonText}>Join</Text>
+                    )}
+                  </TouchableOpacity>
+                </View>
+
+                {/* Private Rooms List */}
+                {privateRooms.length > 0 ? (
+                  privateRooms.map((room) => (
+                    <React.Fragment key={room.id}>
+                      {renderRoom({ item: room })}
+                    </React.Fragment>
+                  ))
+                ) : (
+                  <View style={styles.emptyPrivateRooms}>
+                    <Ionicons name="lock-closed-outline" size={24} color={C.textLight} />
+                    <Text style={styles.emptyPrivateText}>No private rooms yet</Text>
+                  </View>
+                )}
+
+                {/* Create Private Room */}
+                {showCreateInput ? (
+                  <View style={styles.createRoomRow}>
+                    <TextInput
+                      style={styles.createRoomInput}
+                      placeholder="Room name..."
+                      placeholderTextColor={C.textLight}
+                      value={newRoomName}
+                      onChangeText={setNewRoomName}
+                      maxLength={30}
+                      autoFocus
+                    />
+                    <TouchableOpacity
+                      style={[styles.createRoomButton, (!newRoomName.trim() || isCreating) && styles.joinCodeButtonDisabled]}
+                      onPress={handleCreatePrivateRoom}
+                      disabled={!newRoomName.trim() || isCreating}
+                    >
+                      {isCreating ? (
+                        <ActivityIndicator size="small" color="#FFF" />
+                      ) : (
+                        <Ionicons name="checkmark" size={20} color="#FFF" />
+                      )}
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={styles.createRoomCancel}
+                      onPress={() => { setShowCreateInput(false); setNewRoomName(''); }}
+                    >
+                      <Ionicons name="close" size={20} color={C.textLight} />
+                    </TouchableOpacity>
+                  </View>
+                ) : (
+                  <TouchableOpacity
+                    style={styles.createPrivateButton}
+                    onPress={() => setShowCreateInput(true)}
+                  >
+                    <Ionicons name="add-circle-outline" size={18} color={C.primary} />
+                    <Text style={styles.createPrivateText}>Create Private Room (1 coin)</Text>
+                  </TouchableOpacity>
+                )}
+              </>
+            )}
+
             <Text style={styles.sectionTitle}>General</Text>
             {generalRooms.map((room) => (
               <React.Fragment key={room.id}>
@@ -647,5 +809,100 @@ const styles = StyleSheet.create({
   loadingText: {
     fontSize: 14,
     color: C.textLight,
+  },
+  // Phase-2: Private rooms styles
+  joinCodeRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginHorizontal: 12,
+    marginBottom: 12,
+    gap: 8,
+  },
+  joinCodeInput: {
+    flex: 1,
+    height: 44,
+    backgroundColor: C.surface,
+    borderRadius: 10,
+    paddingHorizontal: 14,
+    fontSize: 15,
+    color: C.text,
+    letterSpacing: 2,
+  },
+  joinCodeButton: {
+    height: 44,
+    paddingHorizontal: 20,
+    backgroundColor: C.primary,
+    borderRadius: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  joinCodeButtonDisabled: {
+    opacity: 0.5,
+  },
+  joinCodeButtonText: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: '#FFF',
+  },
+  emptyPrivateRooms: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    paddingVertical: 24,
+    marginHorizontal: 12,
+    backgroundColor: C.surface,
+    borderRadius: 12,
+    marginBottom: 8,
+  },
+  emptyPrivateText: {
+    fontSize: 14,
+    color: C.textLight,
+  },
+  createPrivateButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    paddingVertical: 12,
+    marginHorizontal: 12,
+    marginBottom: 16,
+  },
+  createPrivateText: {
+    fontSize: 14,
+    fontWeight: '500',
+    color: C.primary,
+  },
+  createRoomRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginHorizontal: 12,
+    marginBottom: 16,
+    gap: 8,
+  },
+  createRoomInput: {
+    flex: 1,
+    height: 44,
+    backgroundColor: C.surface,
+    borderRadius: 10,
+    paddingHorizontal: 14,
+    fontSize: 15,
+    color: C.text,
+  },
+  createRoomButton: {
+    width: 44,
+    height: 44,
+    backgroundColor: C.primary,
+    borderRadius: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  createRoomCancel: {
+    width: 44,
+    height: 44,
+    backgroundColor: C.surface,
+    borderRadius: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
   },
 });
