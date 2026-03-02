@@ -116,6 +116,9 @@ export default function ChatRoomsScreen() {
   const [refreshing, setRefreshing] = useState(false);
   const [joinedRooms, setJoinedRooms] = useState(DEMO_JOINED_ROOMS);
 
+  // P2-AUD-005: Ref for refresh timeout cleanup
+  const refreshTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   // Session store for lastVisitedAt tracking
   const lastVisitedAt = useChatRoomSessionStore((s) => s.lastVisitedAt);
   const markRoomVisited = useChatRoomSessionStore((s) => s.markRoomVisited);
@@ -205,12 +208,17 @@ export default function ChatRoomsScreen() {
     setCheckingPreferred(false);
   }, [isPreferredLoading, effectivePreferredRoomId, router]);
 
-  // Cleanup safety timeout on unmount
+  // Cleanup timeouts on unmount
   useEffect(() => {
     return () => {
       if (redirectTimeoutRef.current) {
         clearTimeout(redirectTimeoutRef.current);
         redirectTimeoutRef.current = null;
+      }
+      // P2-AUD-005: Clear refresh timeout
+      if (refreshTimeoutRef.current) {
+        clearTimeout(refreshTimeoutRef.current);
+        refreshTimeoutRef.current = null;
       }
     };
   }, []);
@@ -267,32 +275,38 @@ export default function ChatRoomsScreen() {
 
   // Unified rooms list: demo or Convex
   // Filter out "English" room - users can chat in English inside Global
-  const rooms: ChatRoom[] = (isDemoMode
-    ? DEMO_CHAT_ROOMS.map((r) => ({
-        id: r.id,
-        name: r.name,
-        slug: r.slug,
-        category: r.category,
-        memberCount: r.memberCount,
-        lastMessageText: r.lastMessageText,
-        iconKey: r.slug, // Use slug as iconKey for demo rooms
-      }))
-    : (convexRooms ?? []).map((r) => ({
-        id: r._id,
-        name: r.name,
-        slug: r.slug,
-        category: r.category,
-        memberCount: r.memberCount,
-        lastMessageText: r.lastMessageText,
-        iconKey: r.slug, // Use slug as iconKey fallback
-        // iconUrl: r.iconUrl, // Enable when schema supports it
-      }))
-  ).filter((r) => r.name.toLowerCase() !== 'english');
+  // P2-AUD-006: Memoize to prevent re-computation on every render
+  const rooms: ChatRoom[] = useMemo(
+    () =>
+      (isDemoMode
+        ? DEMO_CHAT_ROOMS.map((r) => ({
+            id: r.id,
+            name: r.name,
+            slug: r.slug,
+            category: r.category,
+            memberCount: r.memberCount,
+            lastMessageText: r.lastMessageText,
+            iconKey: r.slug, // Use slug as iconKey for demo rooms
+          }))
+        : (convexRooms ?? []).map((r) => ({
+            id: r._id,
+            name: r.name,
+            slug: r.slug,
+            category: r.category,
+            memberCount: r.memberCount,
+            lastMessageText: r.lastMessageText,
+            iconKey: r.slug, // Use slug as iconKey fallback
+            // iconUrl: r.iconUrl, // Enable when schema supports it
+          }))
+      ).filter((r) => r.name.toLowerCase() !== 'english'),
+    [isDemoMode, convexRooms]
+  );
 
   const onRefresh = useCallback(() => {
     setRefreshing(true);
     // In live mode, Convex auto-refreshes. For demo mode, simulate delay.
-    setTimeout(() => setRefreshing(false), 800);
+    // P2-AUD-005: Track timeout in ref for cleanup
+    refreshTimeoutRef.current = setTimeout(() => setRefreshing(false), 800);
   }, []);
 
   const handleOpenRoom = useCallback(

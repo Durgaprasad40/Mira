@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   View,
   Text,
@@ -56,6 +56,19 @@ export default function ProfilePopover({
   const [editAvatar, setEditAvatar] = useState(avatar);
   const [editBio, setEditBio] = useState(persistedBio ?? '');
   const [isSaving, setIsSaving] = useState(false);
+
+  // P2-AUD-004: Ref for save timeout cleanup
+  const saveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      if (saveTimeoutRef.current) {
+        clearTimeout(saveTimeoutRef.current);
+        saveTimeoutRef.current = null;
+      }
+    };
+  }, []);
 
   // Reset edit state when popover opens
   useEffect(() => {
@@ -134,7 +147,7 @@ export default function ProfilePopover({
     });
 
     // Notify parent about the update
-    setTimeout(() => {
+    saveTimeoutRef.current = setTimeout(() => {
       onProfileUpdate?.({
         username: trimmedName !== username ? trimmedName : undefined,
         avatar: editAvatar !== avatar ? editAvatar : undefined,

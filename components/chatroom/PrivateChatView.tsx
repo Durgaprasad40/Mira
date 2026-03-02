@@ -78,9 +78,13 @@ export default function PrivateChatView({ dm, onBack, topInset = 0, isModal = fa
 
   const isNearBottomRef = useRef(true);
 
+  // P2-AUD-001/002/003: Refs for scroll-related timeouts to enable cleanup
+  const initialScrollTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const sendScrollTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
   useEffect(() => {
     if (messages.length > 0) {
-      setTimeout(() => {
+      initialScrollTimeoutRef.current = setTimeout(() => {
         flatListRef.current?.scrollToEnd({ animated: false });
       }, 100);
     }
@@ -143,7 +147,7 @@ export default function PrivateChatView({ dm, onBack, topInset = 0, isModal = fa
 
     setMessages((prev) => [...prev, newMsg]);
     setInputText('');
-    setTimeout(() => {
+    sendScrollTimeoutRef.current = setTimeout(() => {
       flatListRef.current?.scrollToEnd({ animated: true });
     }, 50);
   }, [inputText, dm.id]);
@@ -162,7 +166,7 @@ export default function PrivateChatView({ dm, onBack, topInset = 0, isModal = fa
         createdAt: Date.now(),
       };
       setMessages((prev) => [...prev, newMsg]);
-      setTimeout(() => {
+      sendScrollTimeoutRef.current = setTimeout(() => {
         flatListRef.current?.scrollToEnd({ animated: true });
       }, 50);
     },
@@ -176,6 +180,14 @@ export default function PrivateChatView({ dm, onBack, topInset = 0, isModal = fa
   // Cleanup on unmount
   useEffect(() => {
     return () => {
+      if (initialScrollTimeoutRef.current) {
+        clearTimeout(initialScrollTimeoutRef.current);
+        initialScrollTimeoutRef.current = null;
+      }
+      if (sendScrollTimeoutRef.current) {
+        clearTimeout(sendScrollTimeoutRef.current);
+        sendScrollTimeoutRef.current = null;
+      }
       if (secureMediaTimeoutRef.current) {
         clearTimeout(secureMediaTimeoutRef.current);
         secureMediaTimeoutRef.current = null;
