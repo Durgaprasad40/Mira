@@ -3,6 +3,7 @@ import { v } from 'convex/values';
 import { softMaskText } from './softMask';
 import { internal } from './_generated/api';
 import { asUserId } from './id';
+import { hashPassword, verifyPassword, encryptPassword, decryptPassword } from './cryptoUtils';
 
 // 24 hours in milliseconds
 const ROOM_LIFETIME_MS = 24 * 60 * 60 * 1000;
@@ -458,12 +459,13 @@ export const createRoom = mutation({
   },
 });
 
-// Phase-2: Create a private room with join code (costs 1 coin)
+// Phase-2: Create a private room with optional password protection (costs 1 coin)
 export const createPrivateRoom = mutation({
   args: {
     name: v.string(),
+    password: v.optional(v.string()),
   },
-  handler: async (ctx, { name }) => {
+  handler: async (ctx, { name, password }) => {
     // 1. Auth guard
     const identity = await ctx.auth.getUserIdentity();
     if (!identity) {
@@ -484,7 +486,7 @@ export const createPrivateRoom = mutation({
       throw new Error('Insufficient coins. You need at least 1 coin to create a private room.');
     }
 
-    // 3. Generate unique join code (max 10 retries)
+    // 4. Generate unique join code (max 10 retries)
     let joinCode = generateJoinCode();
     let retries = 0;
     const MAX_RETRIES = 10;
@@ -501,7 +503,15 @@ export const createPrivateRoom = mutation({
       throw new Error('Failed to generate unique join code. Please try again.');
     }
 
-    // 4. Generate slug from name
+    // 5. Hash and encrypt password (only if provided)
+    let passwordHash: string | undefined;
+    let passwordEncrypted: string | undefined;
+    if (password && password.length > 0) {
+      passwordHash = await hashPassword(password);
+      passwordEncrypted = await encryptPassword(password);
+    }
+
+    // 6. Generate slug from name
     const slug = name
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, '-')
@@ -514,7 +524,7 @@ export const createPrivateRoom = mutation({
 
     const now = Date.now();
 
-    // 5. Insert private room with joinCode and 24h expiration
+    // 7. Insert private room with optional password and 24h expiration
     const roomId = await ctx.db.insert('chatRooms', {
       name,
       slug: finalSlug,
@@ -525,9 +535,11 @@ export const createPrivateRoom = mutation({
       createdBy,
       expiresAt: now + ROOM_LIFETIME_MS,
       joinCode,
+      ...(passwordHash && { passwordHash }),
+      ...(passwordEncrypted && { passwordEncrypted }),
     });
 
-    // 6. Add creator as owner
+    // 8. Add creator as owner
     await ctx.db.insert('chatRoomMembers', {
       roomId,
       userId: createdBy,
@@ -535,7 +547,7 @@ export const createPrivateRoom = mutation({
       role: 'owner',
     });
 
-    // 7. Deduct 1 coin AFTER successful room creation
+    // 9. Deduct 1 coin AFTER successful room creation
     await ctx.db.patch(createdBy, {
       walletCoins: currentCoins - 1,
     });
@@ -1042,5 +1054,546 @@ export const cleanupExpiredPenalties = internalMutation({
     }
 
     return { deletedCount: expiredPenalties.length };
+  },
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PHASE-2: Private Rooms - Password + Admin Approval
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Get all visible private rooms (for listing to everyone)
+// Returns basic info only - no password data
+export const getVisiblePrivateRooms = query({
+  args: {},
+  handler: async (ctx) => {
+    const now = Date.now();
+
+    // Get all non-expired private rooms
+    const privateRooms = await ctx.db
+      .query('chatRooms')
+      .withIndex('by_public', (q) => q.eq('isPublic', false))
+      .collect();
+
+    // Filter out expired rooms and map to safe response
+    return privateRooms
+      .filter((room) => !room.expiresAt || room.expiresAt > now)
+      .map((room) => ({
+        _id: room._id,
+        name: room.name,
+        slug: room.slug,
+        memberCount: room.memberCount,
+        createdAt: room.createdAt,
+        expiresAt: room.expiresAt,
+        // Don't expose: passwordHash, passwordEncrypted, joinCode
+      }))
+      .sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0));
+  },
+});
+
+// Check user's access status for a private room
+export const checkRoomAccess = query({
+  args: { roomId: v.id('chatRooms') },
+  handler: async (ctx, { roomId }) => {
+    // Auth guard
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) {
+      return { status: 'unauthenticated' as const };
+    }
+    const userId = asUserId(identity.subject);
+    if (!userId) {
+      return { status: 'unauthenticated' as const };
+    }
+
+    const room = await ctx.db.get(roomId);
+    if (!room) {
+      return { status: 'not_found' as const };
+    }
+
+    // Public rooms: always accessible
+    if (room.isPublic) {
+      return { status: 'member' as const, role: 'member' as const };
+    }
+
+    // Check if expired
+    const now = Date.now();
+    if (room.expiresAt && room.expiresAt <= now) {
+      return { status: 'expired' as const };
+    }
+
+    // Check if banned
+    const ban = await ctx.db
+      .query('chatRoomBans')
+      .withIndex('by_room_user', (q) => q.eq('roomId', roomId).eq('userId', userId))
+      .first();
+    if (ban) {
+      return { status: 'banned' as const };
+    }
+
+    // Check if member
+    const membership = await ctx.db
+      .query('chatRoomMembers')
+      .withIndex('by_room_user', (q) => q.eq('roomId', roomId).eq('userId', userId))
+      .first();
+    if (membership) {
+      return { status: 'member' as const, role: membership.role ?? 'member' };
+    }
+
+    // Check join request status
+    const request = await ctx.db
+      .query('chatRoomJoinRequests')
+      .withIndex('by_room_user', (q) => q.eq('roomId', roomId).eq('userId', userId))
+      .first();
+    if (request) {
+      if (request.status === 'pending') {
+        return { status: 'pending' as const };
+      }
+      if (request.status === 'rejected') {
+        return { status: 'rejected' as const };
+      }
+      // approved but not member - shouldn't happen, but handle it
+      if (request.status === 'approved') {
+        return { status: 'approved_pending_entry' as const };
+      }
+    }
+
+    // Not a member, no request
+    return { status: 'none' as const };
+  },
+});
+
+// Request to join a private room (requires correct password)
+export const requestJoinPrivateRoom = mutation({
+  args: {
+    roomId: v.id('chatRooms'),
+    password: v.string(),
+  },
+  handler: async (ctx, { roomId, password }) => {
+    // 1. Auth guard
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) {
+      throw new Error('Unauthorized');
+    }
+    const userId = asUserId(identity.subject);
+    if (!userId) {
+      throw new Error('Invalid user identity');
+    }
+
+    // 2. Get room
+    const room = await ctx.db.get(roomId);
+    if (!room) {
+      throw new Error('Room not found');
+    }
+
+    // 3. Check if public room (no password needed)
+    if (room.isPublic) {
+      throw new Error('This is a public room. No password required.');
+    }
+
+    // 4. Check if expired
+    const now = Date.now();
+    if (room.expiresAt && room.expiresAt <= now) {
+      throw new Error('This room has expired.');
+    }
+
+    // 5. Check if banned
+    const ban = await ctx.db
+      .query('chatRoomBans')
+      .withIndex('by_room_user', (q) => q.eq('roomId', roomId).eq('userId', userId))
+      .first();
+    if (ban) {
+      throw new Error('You are banned from this room.');
+    }
+
+    // 6. Check if already a member
+    const existingMember = await ctx.db
+      .query('chatRoomMembers')
+      .withIndex('by_room_user', (q) => q.eq('roomId', roomId).eq('userId', userId))
+      .first();
+    if (existingMember) {
+      return { status: 'member' as const };
+    }
+
+    // 7. Verify password
+    if (!room.passwordHash) {
+      throw new Error('Room has no password configured.');
+    }
+    const passwordValid = await verifyPassword(password, room.passwordHash);
+    if (!passwordValid) {
+      throw new Error('Incorrect password.');
+    }
+
+    // 8. Check existing request
+    const existingRequest = await ctx.db
+      .query('chatRoomJoinRequests')
+      .withIndex('by_room_user', (q) => q.eq('roomId', roomId).eq('userId', userId))
+      .first();
+
+    if (existingRequest) {
+      if (existingRequest.status === 'pending') {
+        return { status: 'pending' as const };
+      }
+      if (existingRequest.status === 'rejected') {
+        throw new Error('Your request was rejected by the room owner.');
+      }
+      if (existingRequest.status === 'approved') {
+        // Approved but not member yet - add them now
+        await ctx.db.insert('chatRoomMembers', {
+          roomId,
+          userId,
+          joinedAt: now,
+          role: 'member',
+        });
+        await ctx.db.patch(roomId, { memberCount: room.memberCount + 1 });
+        return { status: 'member' as const };
+      }
+    }
+
+    // 9. Create new pending request
+    await ctx.db.insert('chatRoomJoinRequests', {
+      roomId,
+      userId,
+      status: 'pending',
+      createdAt: now,
+    });
+
+    return { status: 'pending' as const };
+  },
+});
+
+// List pending join requests for a room (owner only)
+export const listJoinRequests = query({
+  args: { roomId: v.id('chatRooms') },
+  handler: async (ctx, { roomId }) => {
+    // Auth guard
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) {
+      return [];
+    }
+    const userId = asUserId(identity.subject);
+    if (!userId) {
+      return [];
+    }
+
+    // Check if owner
+    const room = await ctx.db.get(roomId);
+    if (!room || room.createdBy !== userId) {
+      return [];
+    }
+
+    // Get pending requests
+    const requests = await ctx.db
+      .query('chatRoomJoinRequests')
+      .withIndex('by_room_status', (q) => q.eq('roomId', roomId).eq('status', 'pending'))
+      .collect();
+
+    // Fetch user info for each request
+    const requestsWithUsers = await Promise.all(
+      requests.map(async (req) => {
+        const user = await ctx.db.get(req.userId);
+        return {
+          _id: req._id,
+          userId: req.userId,
+          createdAt: req.createdAt,
+          userName: user?.name ?? 'Unknown',
+          userAvatar: user?.displayPrimaryPhotoUrl ?? null,
+        };
+      })
+    );
+
+    return requestsWithUsers;
+  },
+});
+
+// Get count of pending requests (owner only, for badge)
+export const getPendingRequestCount = query({
+  args: { roomId: v.id('chatRooms') },
+  handler: async (ctx, { roomId }) => {
+    // Auth guard
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) {
+      return 0;
+    }
+    const userId = asUserId(identity.subject);
+    if (!userId) {
+      return 0;
+    }
+
+    // Check if owner
+    const room = await ctx.db.get(roomId);
+    if (!room || room.createdBy !== userId) {
+      return 0;
+    }
+
+    const requests = await ctx.db
+      .query('chatRoomJoinRequests')
+      .withIndex('by_room_status', (q) => q.eq('roomId', roomId).eq('status', 'pending'))
+      .collect();
+
+    return requests.length;
+  },
+});
+
+// Approve a join request (owner only)
+export const approveJoinRequest = mutation({
+  args: {
+    roomId: v.id('chatRooms'),
+    targetUserId: v.id('users'),
+  },
+  handler: async (ctx, { roomId, targetUserId }) => {
+    // 1. Auth guard
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) {
+      throw new Error('Unauthorized');
+    }
+    const userId = asUserId(identity.subject);
+    if (!userId) {
+      throw new Error('Invalid user identity');
+    }
+
+    // 2. Check if owner
+    const room = await ctx.db.get(roomId);
+    if (!room) {
+      throw new Error('Room not found');
+    }
+    if (room.createdBy !== userId) {
+      throw new Error('Only room owner can approve requests');
+    }
+
+    // 3. Check if target is banned
+    const ban = await ctx.db
+      .query('chatRoomBans')
+      .withIndex('by_room_user', (q) => q.eq('roomId', roomId).eq('userId', targetUserId))
+      .first();
+    if (ban) {
+      throw new Error('User is banned from this room');
+    }
+
+    // 4. Find and update request
+    const request = await ctx.db
+      .query('chatRoomJoinRequests')
+      .withIndex('by_room_user', (q) => q.eq('roomId', roomId).eq('userId', targetUserId))
+      .first();
+    if (!request) {
+      throw new Error('Join request not found');
+    }
+
+    const now = Date.now();
+    await ctx.db.patch(request._id, {
+      status: 'approved',
+      updatedAt: now,
+    });
+
+    // 5. Add to members if not already
+    const existingMember = await ctx.db
+      .query('chatRoomMembers')
+      .withIndex('by_room_user', (q) => q.eq('roomId', roomId).eq('userId', targetUserId))
+      .first();
+    if (!existingMember) {
+      await ctx.db.insert('chatRoomMembers', {
+        roomId,
+        userId: targetUserId,
+        joinedAt: now,
+        role: 'member',
+      });
+      await ctx.db.patch(roomId, { memberCount: room.memberCount + 1 });
+    }
+
+    return { success: true };
+  },
+});
+
+// Reject a join request (owner only)
+export const rejectJoinRequest = mutation({
+  args: {
+    roomId: v.id('chatRooms'),
+    targetUserId: v.id('users'),
+  },
+  handler: async (ctx, { roomId, targetUserId }) => {
+    // 1. Auth guard
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) {
+      throw new Error('Unauthorized');
+    }
+    const userId = asUserId(identity.subject);
+    if (!userId) {
+      throw new Error('Invalid user identity');
+    }
+
+    // 2. Check if owner
+    const room = await ctx.db.get(roomId);
+    if (!room) {
+      throw new Error('Room not found');
+    }
+    if (room.createdBy !== userId) {
+      throw new Error('Only room owner can reject requests');
+    }
+
+    // 3. Find and update request
+    const request = await ctx.db
+      .query('chatRoomJoinRequests')
+      .withIndex('by_room_user', (q) => q.eq('roomId', roomId).eq('userId', targetUserId))
+      .first();
+    if (!request) {
+      throw new Error('Join request not found');
+    }
+
+    await ctx.db.patch(request._id, {
+      status: 'rejected',
+      updatedAt: Date.now(),
+    });
+
+    return { success: true };
+  },
+});
+
+// Kick and ban a member (owner only)
+export const kickAndBanMember = mutation({
+  args: {
+    roomId: v.id('chatRooms'),
+    targetUserId: v.id('users'),
+  },
+  handler: async (ctx, { roomId, targetUserId }) => {
+    // 1. Auth guard
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) {
+      throw new Error('Unauthorized');
+    }
+    const userId = asUserId(identity.subject);
+    if (!userId) {
+      throw new Error('Invalid user identity');
+    }
+
+    // 2. Check if owner
+    const room = await ctx.db.get(roomId);
+    if (!room) {
+      throw new Error('Room not found');
+    }
+    if (room.createdBy !== userId) {
+      throw new Error('Only room owner can kick members');
+    }
+
+    // 3. Cannot kick yourself
+    if (targetUserId === userId) {
+      throw new Error('Cannot kick yourself');
+    }
+
+    const now = Date.now();
+
+    // 4. Remove from members
+    const membership = await ctx.db
+      .query('chatRoomMembers')
+      .withIndex('by_room_user', (q) => q.eq('roomId', roomId).eq('userId', targetUserId))
+      .first();
+    if (membership) {
+      await ctx.db.delete(membership._id);
+      await ctx.db.patch(roomId, { memberCount: Math.max(0, room.memberCount - 1) });
+    }
+
+    // 5. Add to bans
+    const existingBan = await ctx.db
+      .query('chatRoomBans')
+      .withIndex('by_room_user', (q) => q.eq('roomId', roomId).eq('userId', targetUserId))
+      .first();
+    if (!existingBan) {
+      await ctx.db.insert('chatRoomBans', {
+        roomId,
+        userId: targetUserId,
+        bannedAt: now,
+        bannedBy: userId,
+      });
+    }
+
+    // 6. Update any existing request to rejected
+    const request = await ctx.db
+      .query('chatRoomJoinRequests')
+      .withIndex('by_room_user', (q) => q.eq('roomId', roomId).eq('userId', targetUserId))
+      .first();
+    if (request) {
+      await ctx.db.patch(request._id, {
+        status: 'rejected',
+        updatedAt: now,
+      });
+    }
+
+    return { success: true };
+  },
+});
+
+// Get room password (owner only, returns decrypted)
+export const getRoomPassword = query({
+  args: { roomId: v.id('chatRooms') },
+  handler: async (ctx, { roomId }) => {
+    // Auth guard
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) {
+      throw new Error('Unauthorized');
+    }
+    const userId = asUserId(identity.subject);
+    if (!userId) {
+      throw new Error('Invalid user identity');
+    }
+
+    // Get room
+    const room = await ctx.db.get(roomId);
+    if (!room) {
+      throw new Error('Room not found');
+    }
+
+    // Check if owner
+    if (room.createdBy !== userId) {
+      throw new Error('Only room owner can view password');
+    }
+
+    // Decrypt and return password
+    if (!room.passwordEncrypted) {
+      return { password: null };
+    }
+
+    const password = await decryptPassword(room.passwordEncrypted);
+    return { password };
+  },
+});
+
+// Check if user is room owner (for UI gating)
+export const isRoomOwner = query({
+  args: { roomId: v.id('chatRooms') },
+  handler: async (ctx, { roomId }) => {
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) {
+      return false;
+    }
+    const userId = asUserId(identity.subject);
+    if (!userId) {
+      return false;
+    }
+
+    const room = await ctx.db.get(roomId);
+    if (!room) {
+      return false;
+    }
+
+    return room.createdBy === userId;
+  },
+});
+
+// Get room info including whether it's private (for UI)
+export const getRoomInfo = query({
+  args: { roomId: v.id('chatRooms') },
+  handler: async (ctx, { roomId }) => {
+    const room = await ctx.db.get(roomId);
+    if (!room) {
+      return null;
+    }
+
+    return {
+      _id: room._id,
+      name: room.name,
+      slug: room.slug,
+      isPublic: room.isPublic,
+      memberCount: room.memberCount,
+      createdAt: room.createdAt,
+      expiresAt: room.expiresAt,
+      createdBy: room.createdBy,
+    };
   },
 });

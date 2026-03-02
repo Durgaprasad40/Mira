@@ -1072,12 +1072,16 @@ export default defineSchema({
     expiresAt: v.optional(v.number()), // createdAt + 24h; undefined for legacy public rooms
     // Phase-2: Private rooms with join code
     joinCode: v.optional(v.string()), // 6-char alphanumeric code for private rooms
+    // Phase-2: Password protection for private rooms
+    passwordHash: v.optional(v.string()), // SHA-256 hash for verification
+    passwordEncrypted: v.optional(v.string()), // AES-256-GCM encrypted password (owner can view)
   })
     .index('by_slug', ['slug'])
     .index('by_last_message', ['lastMessageAt'])
     .index('by_category', ['category'])
     .index('by_expires', ['expiresAt'])
-    .index('by_join_code', ['joinCode']),
+    .index('by_join_code', ['joinCode'])
+    .index('by_public', ['isPublic']),
 
   // Chat Room Members table
   chatRoomMembers: defineTable({
@@ -1119,6 +1123,28 @@ export default defineSchema({
     .index('by_room_user', ['roomId', 'userId']) // For single-user penalty lookup
     .index('by_user', ['userId'])
     .index('by_expires', ['expiresAt']),
+
+  // Chat Room Join Requests table (Phase-2: password + admin approval)
+  chatRoomJoinRequests: defineTable({
+    roomId: v.id('chatRooms'),
+    userId: v.id('users'),
+    status: v.union(v.literal('pending'), v.literal('approved'), v.literal('rejected')),
+    createdAt: v.number(),
+    updatedAt: v.optional(v.number()),
+  })
+    .index('by_room_status', ['roomId', 'status'])
+    .index('by_room_user', ['roomId', 'userId'])
+    .index('by_user_status', ['userId', 'status']),
+
+  // Chat Room Bans table (Phase-2: kicked/banned users cannot rejoin)
+  chatRoomBans: defineTable({
+    roomId: v.id('chatRooms'),
+    userId: v.id('users'),
+    bannedAt: v.number(),
+    bannedBy: v.id('users'), // owner who banned
+  })
+    .index('by_room_user', ['roomId', 'userId'])
+    .index('by_user', ['userId']),
 
   // Filter Presets table
   filterPresets: defineTable({

@@ -19,6 +19,7 @@ import type * as contentModeration from "../contentModeration.js";
 import type * as conversations from "../conversations.js";
 import type * as crons from "../crons.js";
 import type * as crossedPaths from "../crossedPaths.js";
+import type * as cryptoUtils from "../cryptoUtils.js";
 import type * as dares from "../dares.js";
 import type * as devReset from "../devReset.js";
 import type * as deviceFingerprint from "../deviceFingerprint.js";
@@ -70,6 +71,7 @@ declare const fullApi: ApiFromModules<{
   conversations: typeof conversations;
   crons: typeof crons;
   crossedPaths: typeof crossedPaths;
+  cryptoUtils: typeof cryptoUtils;
   dares: typeof dares;
   devReset: typeof devReset;
   deviceFingerprint: typeof deviceFingerprint;

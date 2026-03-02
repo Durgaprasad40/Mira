@@ -124,6 +124,8 @@ export default function ChatRoomsScreen() {
   const [isCreating, setIsCreating] = useState(false);
   const [showCreateInput, setShowCreateInput] = useState(false);
   const [newRoomName, setNewRoomName] = useState('');
+  const [newRoomPassword, setNewRoomPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
 
   // Navigation readiness check - prevent "navigate before mounting Root Layout" warning
   const rootNavState = useRootNavigationState();
@@ -384,14 +386,35 @@ export default function ChatRoomsScreen() {
   // Phase-2: Handle create private room
   const handleCreatePrivateRoom = useCallback(async () => {
     if (!newRoomName.trim() || isCreating) return;
+
+    // Validate password if provided (min 4 chars)
+    const pwd = newRoomPassword.trim();
+    if (pwd.length > 0 && pwd.length < 4) {
+      Alert.alert('Invalid Password', 'Password must be at least 4 characters.');
+      return;
+    }
+
     setIsCreating(true);
     try {
-      const result = await createPrivateRoomMut({ name: newRoomName.trim() });
+      // Only send password if provided
+      const args: { name: string; password?: string } = { name: newRoomName.trim() };
+      if (pwd.length > 0) {
+        args.password = pwd;
+      }
+      const result = await createPrivateRoomMut(args);
+
+      // Clear inputs on success
       setNewRoomName('');
+      setNewRoomPassword('');
+      setShowPassword(false);
       setShowCreateInput(false);
+
+      const hasPassword = pwd.length > 0;
       Alert.alert(
         'Room Created',
-        `Your room code is: ${result.joinCode}\n\nShare this code with friends to invite them!`,
+        hasPassword
+          ? `Your room is password-protected.\n\nRoom code: ${result.joinCode}\nPassword: ${pwd}\n\nShare these with friends to invite them!`
+          : `Your room code is: ${result.joinCode}\n\nShare this code with friends to invite them!`,
         [
           {
             text: 'Go to Room',
@@ -400,11 +423,12 @@ export default function ChatRoomsScreen() {
         ]
       );
     } catch (error: any) {
+      // Keep inputs on error so user can edit
       Alert.alert('Error', error.message || 'Failed to create room');
     } finally {
       setIsCreating(false);
     }
-  }, [newRoomName, isCreating, createPrivateRoomMut, router]);
+  }, [newRoomName, newRoomPassword, isCreating, createPrivateRoomMut, router]);
 
   const renderRoom = useCallback(
     ({ item }: { item: ChatRoom }) => {
@@ -583,33 +607,56 @@ export default function ChatRoomsScreen() {
 
                 {/* Create Private Room */}
                 {showCreateInput ? (
-                  <View style={styles.createRoomRow}>
-                    <TextInput
-                      style={styles.createRoomInput}
-                      placeholder="Room name..."
-                      placeholderTextColor={C.textLight}
-                      value={newRoomName}
-                      onChangeText={setNewRoomName}
-                      maxLength={30}
-                      autoFocus
-                    />
-                    <TouchableOpacity
-                      style={[styles.createRoomButton, (!newRoomName.trim() || isCreating) && styles.joinCodeButtonDisabled]}
-                      onPress={handleCreatePrivateRoom}
-                      disabled={!newRoomName.trim() || isCreating}
-                    >
-                      {isCreating ? (
-                        <ActivityIndicator size="small" color="#FFF" />
-                      ) : (
-                        <Ionicons name="checkmark" size={20} color="#FFF" />
-                      )}
-                    </TouchableOpacity>
-                    <TouchableOpacity
-                      style={styles.createRoomCancel}
-                      onPress={() => { setShowCreateInput(false); setNewRoomName(''); }}
-                    >
-                      <Ionicons name="close" size={20} color={C.textLight} />
-                    </TouchableOpacity>
+                  <View style={styles.createRoomContainer}>
+                    <View style={styles.createRoomRow}>
+                      <TextInput
+                        style={styles.createRoomInput}
+                        placeholder="Room name..."
+                        placeholderTextColor={C.textLight}
+                        value={newRoomName}
+                        onChangeText={setNewRoomName}
+                        maxLength={30}
+                        autoFocus
+                      />
+                    </View>
+                    <View style={styles.createRoomRow}>
+                      <TextInput
+                        style={styles.createRoomInput}
+                        placeholder="Password (optional)"
+                        placeholderTextColor={C.textLight}
+                        value={newRoomPassword}
+                        onChangeText={setNewRoomPassword}
+                        secureTextEntry={!showPassword}
+                        autoCapitalize="none"
+                        autoCorrect={false}
+                        maxLength={32}
+                      />
+                      <TouchableOpacity
+                        style={styles.showPasswordButton}
+                        onPress={() => setShowPassword(!showPassword)}
+                      >
+                        <Ionicons name={showPassword ? 'eye-off' : 'eye'} size={18} color={C.textLight} />
+                      </TouchableOpacity>
+                    </View>
+                    <View style={styles.createRoomActions}>
+                      <TouchableOpacity
+                        style={[styles.createRoomSubmit, (!newRoomName.trim() || isCreating) && styles.joinCodeButtonDisabled]}
+                        onPress={handleCreatePrivateRoom}
+                        disabled={!newRoomName.trim() || isCreating}
+                      >
+                        {isCreating ? (
+                          <ActivityIndicator size="small" color="#FFF" />
+                        ) : (
+                          <Text style={styles.createRoomSubmitText}>Create Room</Text>
+                        )}
+                      </TouchableOpacity>
+                      <TouchableOpacity
+                        style={styles.createRoomCancelBtn}
+                        onPress={() => { setShowCreateInput(false); setNewRoomName(''); setNewRoomPassword(''); setShowPassword(false); }}
+                      >
+                        <Text style={styles.createRoomCancelText}>Cancel</Text>
+                      </TouchableOpacity>
+                    </View>
                   </View>
                 ) : (
                   <TouchableOpacity
@@ -876,14 +923,13 @@ const styles = StyleSheet.create({
   createRoomRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginHorizontal: 12,
-    marginBottom: 16,
+    marginBottom: 8,
     gap: 8,
   },
   createRoomInput: {
     flex: 1,
     height: 44,
-    backgroundColor: C.surface,
+    backgroundColor: C.accent,
     borderRadius: 10,
     paddingHorizontal: 14,
     fontSize: 15,
@@ -904,5 +950,49 @@ const styles = StyleSheet.create({
     borderRadius: 10,
     alignItems: 'center',
     justifyContent: 'center',
+  },
+  // Phase-2: Create room with password styles
+  createRoomContainer: {
+    marginHorizontal: 12,
+    marginBottom: 16,
+    backgroundColor: C.surface,
+    borderRadius: 12,
+    padding: 12,
+  },
+  showPasswordButton: {
+    width: 40,
+    height: 44,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  createRoomActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginTop: 4,
+  },
+  createRoomSubmit: {
+    flex: 1,
+    height: 44,
+    backgroundColor: C.primary,
+    borderRadius: 10,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  createRoomSubmitText: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: '#FFF',
+  },
+  createRoomCancelBtn: {
+    paddingHorizontal: 16,
+    height: 44,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  createRoomCancelText: {
+    fontSize: 14,
+    fontWeight: '500',
+    color: C.textLight,
   },
 });
