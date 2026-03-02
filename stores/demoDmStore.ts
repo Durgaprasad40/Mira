@@ -194,18 +194,39 @@ export const useDemoDmStore = create<DemoDmState>()(
         })),
 
       addMessage: (id, msg) => {
-        // DEBUG: Log message send for persistence verification
-        const currentCount = get().conversations[id]?.length ?? 0;
-        log.info('[DM]', 'message added', {
-          conversationId: id,
-          messageCount: currentCount + 1,
+        // Phase-2 Fix C: Message cap at 1000 per conversation
+        const MESSAGE_CAP = 1000;
+
+        set((s) => {
+          const existing = s.conversations[id] ?? [];
+          let updated = [...existing, msg];
+
+          // Enforce cap: if > 1000, trim oldest messages
+          if (updated.length > MESSAGE_CAP) {
+            const trimCount = updated.length - MESSAGE_CAP;
+            updated = updated.slice(trimCount);
+            if (__DEV__) {
+              log.info('[DM]', 'message cap enforced', {
+                conversationId: id,
+                trimmed: trimCount,
+                newLength: updated.length,
+              });
+            }
+          }
+
+          // DEBUG: Log message send for persistence verification
+          log.info('[DM]', 'message added', {
+            conversationId: id,
+            messageCount: updated.length,
+          });
+
+          return {
+            conversations: {
+              ...s.conversations,
+              [id]: updated,
+            },
+          };
         });
-        set((s) => ({
-          conversations: {
-            ...s.conversations,
-            [id]: [...(s.conversations[id] ?? []), msg],
-          },
-        }));
       },
 
       setDraft: (id, text) =>

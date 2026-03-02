@@ -121,6 +121,9 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
   // auto-scroll on new messages when they are already reading the latest.
   const isNearBottomRef = useRef(true);
   const prevMessageCountRef = useRef(0);
+  // Phase-2 Fix A: Track initial load for auto-scroll to bottom on open
+  const hasInitiallyScrolledRef = useRef(false);
+  const contentHeightRef = useRef(0);
 
   const onScroll = useCallback((e: NativeSyntheticEvent<NativeScrollEvent>) => {
     const { layoutMeasurement, contentOffset, contentSize } = e.nativeEvent;
@@ -358,6 +361,39 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
       requestAnimationFrame(doScroll);
     }
   }, []);
+
+  // Phase-2 Fix A: Reset initial scroll flag when conversation changes
+  useEffect(() => {
+    hasInitiallyScrolledRef.current = false;
+    contentHeightRef.current = 0;
+    prevMessageCountRef.current = 0;
+  }, [conversationId]);
+
+  // Phase-2 Fix A: Handle content size changes for initial scroll
+  const onContentSizeChange = useCallback((w: number, h: number) => {
+    const prevHeight = contentHeightRef.current;
+    contentHeightRef.current = h;
+
+    // Initial scroll: scroll to bottom when content first renders with messages
+    if (!hasInitiallyScrolledRef.current && h > 0 && (messages?.length ?? 0) > 0) {
+      hasInitiallyScrolledRef.current = true;
+      // Use setTimeout(0) + requestAnimationFrame for reliable post-render scroll
+      setTimeout(() => {
+        requestAnimationFrame(() => {
+          if (mountedRef.current) {
+            scrollToBottom(false); // No animation for initial scroll
+          }
+        });
+      }, 0);
+      return;
+    }
+
+    // After initial scroll: only auto-scroll if user is near bottom
+    // This prevents yanking scroll when user is reading old messages
+    if (hasInitiallyScrolledRef.current && h > prevHeight && isNearBottomRef.current) {
+      scrollToBottom(true);
+    }
+  }, [messages?.length, scrollToBottom]);
 
   // B6 fix: Auto-scroll when new messages arrive AND (user is near bottom OR message is from current user)
   // 6-4: Removed redundant `messages` from deps — only need `messages?.length` since
@@ -870,6 +906,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
           scrollEventThrottle={16}
           keyboardShouldPersistTaps="handled"
           keyboardDismissMode="interactive"
+          onContentSizeChange={onContentSizeChange}
         />
           {/* ─── COMPOSER (matches locked chat-rooms pattern) ─── */}
           <View

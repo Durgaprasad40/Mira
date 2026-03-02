@@ -409,23 +409,11 @@ export const usePrivateChatStore = create<PrivateChatState>()(
         return (state, error) => {
           if (error || !state) return;
 
-          // P1 FIX: Mark protected media with localUri as expired (URIs are non-durable)
-          const messages = state.messages;
-          let changed = false;
-          const updatedMessages: Record<string, IncognitoMessage[]> = {};
-          for (const [convId, msgs] of Object.entries(messages)) {
-            updatedMessages[convId] = msgs.map((m) => {
-              if (m.protectedMedia?.localUri && !m.isExpired) {
-                changed = true;
-                const { localUri: _, ...restMedia } = m.protectedMedia;
-                return { ...m, isExpired: true, protectedMedia: restMedia as typeof m.protectedMedia };
-              }
-              return m;
-            });
-          }
-          if (changed) {
-            usePrivateChatStore.setState({ messages: updatedMessages });
-          }
+          // Phase-2 Fix B: DO NOT aggressively expire protected media on rehydration.
+          // file:// URIs from camera roll often persist after app restart.
+          // Let the viewer handle load failures gracefully instead of preemptively
+          // marking everything as expired. Only truly expired media (timer ended)
+          // should show as expired.
 
           // Delay slightly to ensure store is fully initialized
           _pruneTimeoutId = setTimeout(() => {

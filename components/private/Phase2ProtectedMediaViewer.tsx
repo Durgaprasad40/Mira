@@ -168,6 +168,8 @@ export function Phase2ProtectedMediaViewer({
 }: Phase2ProtectedMediaViewerProps) {
   const insets = useSafeAreaInsets();
   const [timeLeft, setTimeLeft] = useState<number | null>(null);
+  // Phase-2 Fix B: Track media load state for graceful error handling
+  const [mediaLoadError, setMediaLoadError] = useState(false);
 
   // Subscribe to LIVE message from Zustand store
   const message = usePrivateChatStore((s) => {
@@ -327,6 +329,7 @@ export function Phase2ProtectedMediaViewer({
       hasExpiredRef.current = false;
       prevTimeLeftRef.current = null; // Reset for next open
       setTimeLeft(null);
+      setMediaLoadError(false); // Phase-2 Fix B: Reset error state
       clearTimer();
     }
   }, [visible, isOnce, isHoldMode, conversationId, messageId, clearTimer, markSecurePhotoExpired]);
@@ -425,7 +428,7 @@ export function Phase2ProtectedMediaViewer({
       <StatusBar hidden />
       <View style={styles.container}>
         {/* Media layer - fullscreen (photo or video) */}
-        {mediaUri ? (
+        {mediaUri && !mediaLoadError ? (
           <View style={StyleSheet.absoluteFill}>
             {isVideo ? (
               <SecureVideoPlayer uri={mediaUri} elapsedMs={elapsedMs} />
@@ -434,6 +437,7 @@ export function Phase2ProtectedMediaViewer({
                 source={{ uri: mediaUri }}
                 style={StyleSheet.absoluteFill}
                 contentFit="contain"
+                onError={() => setMediaLoadError(true)}
               />
             )}
             {/* Corner countdown badge - only UI for timer */}
@@ -442,6 +446,13 @@ export function Phase2ProtectedMediaViewer({
                 <Text style={styles.cornerBadgeText}>{timeLeft}</Text>
               </View>
             )}
+          </View>
+        ) : mediaLoadError ? (
+          // Phase-2 Fix B: Graceful "unavailable" state when URI is stale
+          <View style={styles.placeholder}>
+            <Ionicons name="alert-circle-outline" size={64} color={C.textLight} />
+            <Text style={styles.placeholderText}>Media unavailable</Text>
+            <Text style={styles.placeholderSubtext}>The file may have been deleted from your device</Text>
           </View>
         ) : (
           <View style={styles.placeholder}>
@@ -546,6 +557,14 @@ const styles = StyleSheet.create({
     fontSize: 18,
     fontWeight: '600',
     color: C.textLight,
+  },
+  placeholderSubtext: {
+    fontSize: 13,
+    color: C.textLight,
+    opacity: 0.7,
+    textAlign: 'center',
+    paddingHorizontal: 32,
+    marginTop: 8,
   },
   footer: {
     position: 'absolute',
