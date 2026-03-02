@@ -12,6 +12,8 @@ import {
   NativeScrollEvent,
   Alert,
   InteractionManager,
+  Modal,
+  Pressable,
 } from 'react-native';
 import { Image } from 'expo-image';
 import { FlashList, type FlashListRef } from '@shopify/flash-list';
@@ -67,6 +69,8 @@ export default function PrivateChatScreen() {
 
   // ─── Composer height tracking (matches locked chat-rooms pattern) ───
   const [composerHeight, setComposerHeight] = useState(56);
+  // Phase-1 style: + menu state
+  const [showAttachMenu, setShowAttachMenu] = useState(false);
 
   // Near-bottom tracking for smart auto-scroll
   const isNearBottomRef = useRef(true);
@@ -171,6 +175,7 @@ export default function PrivateChatScreen() {
   // Camera/gallery state for secure photos
   const [showCameraSheet, setShowCameraSheet] = useState(false);
   const [pickedImageUri, setPickedImageUri] = useState<string | null>(null);
+  const [pendingMediaType, setPendingMediaType] = useState<'photo' | 'video'>('photo');
 
   // Secure photo viewer state
   const [viewingMessageId, setViewingMessageId] = useState<string | null>(null);
@@ -255,13 +260,19 @@ export default function PrivateChatScreen() {
     router.back();
   };
 
-  // Gallery picker for secure photos
-  const handleSendImage = useCallback(async () => {
+  // Gallery picker for secure photos/videos (Phase-1 style: from + menu)
+  const handleGalleryPick = useCallback(async () => {
     if (!conversation) return;
+    setShowAttachMenu(false);
 
-    // Open gallery picker directly (no camera)
+    const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
+    if (status !== 'granted') {
+      Alert.alert('Permission Required', 'Photo library access is needed to select media.');
+      return;
+    }
+
     const result = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: 'images',
+      mediaTypes: ['images', 'videos'],
       quality: 1,
       allowsEditing: false,
       selectionLimit: 1,
@@ -269,30 +280,67 @@ export default function PrivateChatScreen() {
 
     if (result.canceled || !result.assets?.[0]?.uri) return;
 
-    // Store picked image and show secure options sheet
-    setPickedImageUri(result.assets[0].uri);
+    const asset = result.assets[0];
+    const isVideo = asset.type === 'video';
+    setPickedImageUri(asset.uri);
+    setPendingMediaType(isVideo ? 'video' : 'photo');
     setShowCameraSheet(true);
   }, [conversation]);
 
-  // Handle secure photo confirmation from CameraPhotoSheet
+  // Camera capture for secure photos/videos (Phase-1 style: from + menu)
+  const handleCameraCapture = useCallback(async () => {
+    if (!conversation) return;
+    setShowAttachMenu(false);
+
+    const { status } = await ImagePicker.requestCameraPermissionsAsync();
+    if (status !== 'granted') {
+      Alert.alert('Permission Required', 'Camera access is needed to take photos/videos.');
+      return;
+    }
+
+    const result = await ImagePicker.launchCameraAsync({
+      mediaTypes: ['images', 'videos'],
+      quality: 1,
+      allowsEditing: false,
+    });
+
+    if (result.canceled || !result.assets?.[0]?.uri) return;
+
+    const asset = result.assets[0];
+    const isVideo = asset.type === 'video';
+    setPickedImageUri(asset.uri);
+    setPendingMediaType(isVideo ? 'video' : 'photo');
+    setShowCameraSheet(true);
+  }, [conversation]);
+
+  // Voice recording from + menu
+  const handleVoiceFromMenu = useCallback(() => {
+    setShowAttachMenu(false);
+    toggleRecording();
+  }, [toggleRecording]);
+
+  // Handle secure photo/video confirmation from CameraPhotoSheet
   const handleCameraPhotoConfirm = useCallback((imageUri: string, options: CameraPhotoOptions) => {
     setShowCameraSheet(false);
     setPickedImageUri(null);
+    const isVideo = pendingMediaType === 'video';
+    setPendingMediaType('photo'); // Reset for next time
 
     if (!id) return;
 
-    // Create secure photo message for Phase-2 chat
+    // Create secure photo/video message for Phase-2 chat
     const newMsg: IncognitoMessage = {
-      id: `im_photo_${Date.now()}`,
+      id: `im_${isVideo ? 'video' : 'photo'}_${Date.now()}`,
       conversationId: id,
       senderId: 'me',
-      content: '📷 Secure Photo',
+      content: isVideo ? '🎬 Secure Video' : '📷 Secure Photo',
       createdAt: Date.now(),
       isRead: false,
       // Add protected media metadata
       isProtected: true,
       protectedMedia: {
         localUri: imageUri,
+        mediaType: isVideo ? 'video' : 'photo',
         timer: options.timer,
         viewingMode: options.viewingMode,
         screenshotAllowed: false,
@@ -304,9 +352,9 @@ export default function PrivateChatScreen() {
     addMessage(id, newMsg);
 
     if (__DEV__) {
-      console.log('[Phase2Chat] Sent secure photo:', { timer: options.timer, viewingMode: options.viewingMode });
+      console.log('[Phase2Chat] Sent secure media:', { type: pendingMediaType, timer: options.timer, viewingMode: options.viewingMode });
     }
-  }, [id, addMessage]);
+  }, [id, addMessage, pendingMediaType]);
 
   if (!conversation) {
     return (
@@ -577,23 +625,28 @@ export default function PrivateChatScreen() {
             </View>
           )}
 
-          {/* ─── COMPOSER (matches locked chat-rooms pattern) ─── */}
+          {/* ─── COMPOSER (Phase-1 style: + menu with Camera/Gallery/Voice) ─── */}
           <View
             style={[styles.composerWrapper, { paddingBottom: Platform.OS === 'ios' ? insets.bottom : 0 }]}
             onLayout={(e) => setComposerHeight(e.nativeEvent.layout.height)}
           >
             <View style={styles.inputBar}>
-              {/* Mic button - LEFT side of TextInput */}
-              <TouchableOpacity
-                style={[styles.micButton, isRecording && styles.micButtonRecording]}
-                onPress={toggleRecording}
-              >
-                <Ionicons
-                  name={isRecording ? 'stop' : 'mic'}
-                  size={22}
-                  color={isRecording ? '#FF4444' : C.primary}
-                />
-              </TouchableOpacity>
+              {/* + Button with popup menu - LEFT side of TextInput */}
+              {!isRecording ? (
+                <TouchableOpacity
+                  style={styles.attachButton}
+                  onPress={() => setShowAttachMenu(true)}
+                >
+                  <Ionicons name="add" size={26} color={C.primary} />
+                </TouchableOpacity>
+              ) : (
+                <TouchableOpacity
+                  style={[styles.attachButton, styles.stopButton]}
+                  onPress={toggleRecording}
+                >
+                  <Ionicons name="stop" size={22} color="#FF4444" />
+                </TouchableOpacity>
+              )}
 
               <TextInput
                 style={[styles.textInput, isRecording && styles.textInputRecording]}
@@ -611,12 +664,7 @@ export default function PrivateChatScreen() {
                 textContentType="none"
                 importantForAutofill="noExcludeDescendants"
               />
-              {/* Camera button for secure photos */}
-              {!isRecording && (
-                <TouchableOpacity style={styles.cameraButton} onPress={handleSendImage}>
-                  <Ionicons name="camera" size={22} color={C.primary} />
-                </TouchableOpacity>
-              )}
+
               {!isRecording && (
                 <TouchableOpacity
                   style={[styles.sendButton, !text.trim() && styles.sendButtonDisabled]}
@@ -628,6 +676,39 @@ export default function PrivateChatScreen() {
               )}
             </View>
           </View>
+
+          {/* + Menu Modal */}
+          <Modal
+            visible={showAttachMenu}
+            transparent
+            animationType="fade"
+            onRequestClose={() => setShowAttachMenu(false)}
+          >
+            <Pressable style={styles.menuOverlay} onPress={() => setShowAttachMenu(false)}>
+              <View style={styles.menuContainer}>
+                <TouchableOpacity style={styles.menuItem} onPress={handleCameraCapture}>
+                  <View style={[styles.menuIcon, { backgroundColor: C.primary }]}>
+                    <Ionicons name="camera" size={20} color="#FFFFFF" />
+                  </View>
+                  <Text style={styles.menuText}>Camera</Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity style={styles.menuItem} onPress={handleGalleryPick}>
+                  <View style={[styles.menuIcon, { backgroundColor: '#9B59B6' }]}>
+                    <Ionicons name="images" size={20} color="#FFFFFF" />
+                  </View>
+                  <Text style={styles.menuText}>Gallery</Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity style={styles.menuItem} onPress={handleVoiceFromMenu}>
+                  <View style={[styles.menuIcon, { backgroundColor: '#E67E22' }]}>
+                    <Ionicons name="mic" size={20} color="#FFFFFF" />
+                  </View>
+                  <Text style={styles.menuText}>Voice</Text>
+                </TouchableOpacity>
+              </View>
+            </Pressable>
+          </Modal>
         </View>
       </KeyboardAvoidingView>
 
@@ -651,14 +732,16 @@ export default function PrivateChatScreen() {
         onSendResultMessage={handleSendTodResult}
       />
 
-      {/* Camera Photo Sheet (gallery picker -> secure options) */}
+      {/* Camera Photo Sheet (gallery/camera picker -> secure options) */}
       <CameraPhotoSheet
         visible={showCameraSheet}
         imageUri={pickedImageUri}
+        mediaType={pendingMediaType}
         onConfirm={handleCameraPhotoConfirm}
         onCancel={() => {
           setShowCameraSheet(false);
           setPickedImageUri(null);
+          setPendingMediaType('photo');
         }}
       />
 
@@ -858,16 +941,54 @@ const styles = StyleSheet.create({
     flexDirection: 'row', alignItems: 'flex-end', paddingHorizontal: 12, paddingVertical: 8,
     borderTopWidth: 1, borderTopColor: C.surface, gap: 8,
   },
-  micButton: {
-    padding: 8,
+  attachButton: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: C.surface,
     alignItems: 'center' as const,
     justifyContent: 'center' as const,
-    minWidth: 40,
-    minHeight: 40,
   },
-  micButtonRecording: {
+  stopButton: {
     backgroundColor: '#FF444420',
-    borderRadius: 20,
+  },
+  menuOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.3)',
+    justifyContent: 'flex-end' as const,
+  },
+  menuContainer: {
+    position: 'absolute' as const,
+    left: 16,
+    bottom: 80,
+    backgroundColor: C.surface,
+    borderRadius: 12,
+    paddingVertical: 8,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.25,
+    shadowRadius: 8,
+    elevation: 8,
+  },
+  menuItem: {
+    flexDirection: 'row' as const,
+    alignItems: 'center' as const,
+    paddingVertical: 10,
+    paddingHorizontal: 16,
+    minWidth: 140,
+  },
+  menuIcon: {
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    alignItems: 'center' as const,
+    justifyContent: 'center' as const,
+    marginRight: 12,
+  },
+  menuText: {
+    fontSize: 15,
+    color: C.text,
+    fontWeight: '500' as const,
   },
   textInput: {
     flex: 1, backgroundColor: C.surface, borderRadius: 20, paddingHorizontal: 16,
