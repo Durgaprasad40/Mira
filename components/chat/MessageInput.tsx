@@ -429,9 +429,9 @@ const styles = StyleSheet.create({
   inputContainer: {
     flexDirection: 'row',
     alignItems: 'flex-end',
-    paddingHorizontal: 8,
-    paddingTop: 8,
-    paddingBottom: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    gap: 8,
   },
   attachButtonWrapper: {
     position: 'relative',
@@ -443,7 +443,6 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.backgroundDark,
     alignItems: 'center',
     justifyContent: 'center',
-    marginRight: 8,
   },
   menuOverlay: {
     flex: 1,
@@ -501,11 +500,10 @@ const styles = StyleSheet.create({
     borderRadius: 20,
     paddingHorizontal: 16,
     paddingVertical: 10,
-    fontSize: 15,
+    fontSize: 14,
     color: COLORS.text,
     minHeight: 40,
     maxHeight: 100,
-    marginRight: 8,
   },
   inputDisabled: {
     opacity: 0.5,
