@@ -15,6 +15,9 @@ import { useMediaViewStore } from '@/stores/mediaViewStore';
 const THUMB_WIDTH = 100;
 const THUMB_HEIGHT = 75;
 
+// Check if URI is a local content:// URI (Android gallery) which doesn't work well with blur
+const isContentUri = (uri: string) => uri.startsWith('content://');
+
 interface MediaMessageProps {
   /**
    * Unique message ID for tracking view state.
@@ -176,14 +179,18 @@ export default function MediaMessage({
     onPanResponderTerminationRequest: () => false,
   }), []);
 
+  // For content:// URIs (Android gallery), skip blur as expo-image can't render them properly with blur
+  // Instead show a semi-transparent overlay with the image visible underneath
+  const canBlur = !isContentUri(mediaUrl);
+
   return (
     <View style={styles.container} {...panResponder.panHandlers}>
-      {/* Media thumbnail - always blurred in chat list */}
+      {/* Media thumbnail - blur only if URI supports it */}
       <Image
         source={{ uri: mediaUrl }}
         style={styles.thumbnail}
         contentFit="cover"
-        blurRadius={25}
+        blurRadius={canBlur ? 25 : 0}
       />
 
       {/* Video indicator (always visible) */}
@@ -193,13 +200,13 @@ export default function MediaMessage({
         </View>
       )}
 
-      {/* Hold to view hint - always visible on blurred thumbnails */}
+      {/* Hold to view hint - always visible on thumbnails */}
       <View style={styles.hintOverlay}>
         <Text style={styles.hintText}>Hold to view</Text>
       </View>
 
-      {/* Blur overlay */}
-      <View style={styles.blurOverlay} />
+      {/* Semi-transparent overlay (darker for non-blurred to maintain privacy) */}
+      <View style={[styles.blurOverlay, !canBlur && styles.darkOverlay]} />
     </View>
   );
 }
@@ -223,6 +230,9 @@ const styles = StyleSheet.create({
   blurOverlay: {
     ...StyleSheet.absoluteFillObject,
     backgroundColor: 'rgba(30, 30, 46, 0.4)',
+  },
+  darkOverlay: {
+    backgroundColor: 'rgba(30, 30, 46, 0.7)', // Darker overlay for non-blurred images to maintain privacy
   },
   videoIndicator: {
     position: 'absolute',

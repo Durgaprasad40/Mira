@@ -15,28 +15,28 @@ import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
-import { Id } from '@/convex/_generated/dataModel';
-import { isDemoMode } from '@/hooks/useConvex';
 import { useAuthStore } from '@/stores/authStore';
+import { isDemoMode } from '@/config/demo';
 import { INCOGNITO_COLORS } from '@/lib/constants';
 
 const C = INCOGNITO_COLORS;
 
-type Category = 'general' | 'language';
-
 export default function CreateRoomScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
-  const authUserId = useAuthStore((s) => s.userId);
+  const userId = useAuthStore((s) => s.userId);
 
   const [roomName, setRoomName] = useState('');
-  const [category, setCategory] = useState<Category>('general');
+  const [password, setPassword] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
-  const createRoomMutation = useMutation(api.chatRooms.createRoom);
+  const createPrivateRoomMut = useMutation(api.chatRooms.createPrivateRoom);
 
   const handleCreate = useCallback(async () => {
     const trimmedName = roomName.trim();
+    const trimmedPassword = password.trim();
+
     if (!trimmedName) {
       Alert.alert('Error', 'Please enter a room name');
       return;
@@ -52,35 +52,37 @@ export default function CreateRoomScreen() {
       return;
     }
 
-    if (isDemoMode) {
-      // Demo mode: just show success and go back
-      Alert.alert('Success', `Room "${trimmedName}" created!`, [
-        { text: 'OK', onPress: () => router.back() },
-      ]);
+    if (!trimmedPassword) {
+      Alert.alert('Error', 'Please enter a password');
       return;
     }
 
-    if (!authUserId) {
-      Alert.alert('Error', 'You must be logged in to create a room');
+    if (trimmedPassword.length < 4) {
+      Alert.alert('Error', 'Password must be at least 4 characters');
+      return;
+    }
+
+    if (!userId) {
+      Alert.alert('Sign in required', 'Please sign in to create a private room.');
       return;
     }
 
     setIsSubmitting(true);
     try {
-      const roomId = await createRoomMutation({
+      const result = await createPrivateRoomMut({
         name: trimmedName,
-        createdBy: authUserId as Id<'users'>,
-        category,
+        password: trimmedPassword,
+        ...(isDemoMode && { isDemo: true, demoUserId: userId }),
       });
 
-      // Navigate to the new room (within Phase-2 tabs to keep tab bar)
-      router.replace(`/(main)/(private)/(tabs)/chat-rooms/${roomId}` as any);
+      // Navigate to the new room
+      router.replace(`/(main)/(private)/(tabs)/chat-rooms/${result.roomId}` as any);
     } catch (err: any) {
       Alert.alert('Error', err.message || 'Failed to create room');
     } finally {
       setIsSubmitting(false);
     }
-  }, [roomName, category, authUserId, createRoomMutation, router]);
+  }, [roomName, password, userId, createPrivateRoomMut, router]);
 
   return (
     <View style={[styles.container, { paddingTop: insets.top }]}>
@@ -110,53 +112,34 @@ export default function CreateRoomScreen() {
         />
         <Text style={styles.charCount}>{roomName.length}/50</Text>
 
-        {/* Category Selection */}
-        <Text style={styles.label}>Category</Text>
-        <View style={styles.categoryRow}>
+        {/* Password Input */}
+        <Text style={styles.label}>Password</Text>
+        <View style={styles.passwordRow}>
+          <TextInput
+            style={styles.passwordInput}
+            placeholder="Enter password (min 4 chars)..."
+            placeholderTextColor={C.textLight}
+            value={password}
+            onChangeText={setPassword}
+            secureTextEntry={!showPassword}
+            autoCapitalize="none"
+            autoCorrect={false}
+            maxLength={32}
+          />
           <TouchableOpacity
-            style={[
-              styles.categoryBtn,
-              category === 'general' && styles.categoryBtnActive,
-            ]}
-            onPress={() => setCategory('general')}
+            style={styles.eyeBtn}
+            onPress={() => setShowPassword(!showPassword)}
           >
             <Ionicons
-              name="globe"
+              name={showPassword ? 'eye-off' : 'eye'}
               size={20}
-              color={category === 'general' ? '#FFFFFF' : C.textLight}
+              color={C.textLight}
             />
-            <Text
-              style={[
-                styles.categoryText,
-                category === 'general' && styles.categoryTextActive,
-              ]}
-            >
-              General
-            </Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            style={[
-              styles.categoryBtn,
-              category === 'language' && styles.categoryBtnActive,
-            ]}
-            onPress={() => setCategory('language')}
-          >
-            <Ionicons
-              name="language"
-              size={20}
-              color={category === 'language' ? '#FFFFFF' : C.textLight}
-            />
-            <Text
-              style={[
-                styles.categoryText,
-                category === 'language' && styles.categoryTextActive,
-              ]}
-            >
-              Language
-            </Text>
           </TouchableOpacity>
         </View>
+
+        {/* Coin cost note */}
+        <Text style={styles.coinNote}>Creating a private room costs 1 coin.</Text>
 
         {/* Submit Button */}
         <TouchableOpacity
@@ -224,33 +207,30 @@ const styles = StyleSheet.create({
     textAlign: 'right',
     marginTop: 4,
   },
-  categoryRow: {
-    flexDirection: 'row',
-    gap: 12,
-  },
-  categoryBtn: {
-    flex: 1,
+  passwordRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    justifyContent: 'center',
-    gap: 8,
     backgroundColor: C.surface,
     borderRadius: 12,
+    borderWidth: 1,
+    borderColor: C.surface,
+  },
+  passwordInput: {
+    flex: 1,
+    paddingHorizontal: 16,
     paddingVertical: 14,
-    borderWidth: 2,
-    borderColor: 'transparent',
+    fontSize: 16,
+    color: C.text,
   },
-  categoryBtnActive: {
-    backgroundColor: C.primary,
-    borderColor: C.primary,
+  eyeBtn: {
+    paddingHorizontal: 14,
+    paddingVertical: 14,
   },
-  categoryText: {
-    fontSize: 14,
-    fontWeight: '600',
+  coinNote: {
+    fontSize: 13,
     color: C.textLight,
-  },
-  categoryTextActive: {
-    color: '#FFFFFF',
+    textAlign: 'center',
+    marginTop: 20,
   },
   createBtn: {
     backgroundColor: C.primary,

@@ -33,6 +33,14 @@ interface ProfilePopoverProps {
   onProfileUpdate?: (data: { username?: string; avatar?: string }) => void;
   /** Called when user wants to leave the room completely (session cleared) */
   onLeaveRoom?: () => void;
+  /** Phase-2: Is this a private room (changes menu behavior) */
+  isPrivateRoom?: boolean;
+  /** Phase-2: Is current user the room owner */
+  isRoomOwner?: boolean;
+  /** Phase-2: Room password (only shown to owner, null for non-owners) */
+  roomPassword?: string | null;
+  /** Phase-2: Called when owner wants to end/delete the room */
+  onEndRoom?: () => void;
 }
 
 export default function ProfilePopover({
@@ -46,6 +54,10 @@ export default function ProfilePopover({
   gender,
   onProfileUpdate,
   onLeaveRoom,
+  isPrivateRoom = false,
+  isRoomOwner = false,
+  roomPassword,
+  onEndRoom,
 }: ProfilePopoverProps) {
   // Persisted profile store
   const { setProfile: persistProfile, bio: persistedBio } = useChatRoomProfileStore();
@@ -212,6 +224,15 @@ export default function ProfilePopover({
                     <Text style={styles.identityValue}>{gender}</Text>
                   </View>
                 )}
+                {/* Phase-2: Room Password (private rooms only) */}
+                {isPrivateRoom && (
+                  <View style={styles.identityRow}>
+                    <Text style={styles.identityLabel}>Room Password</Text>
+                    <Text style={styles.identityValue}>
+                      {isRoomOwner && roomPassword ? roomPassword : '••••••'}
+                    </Text>
+                  </View>
+                )}
               </View>
             )}
 
@@ -225,18 +246,20 @@ export default function ProfilePopover({
               <Text style={styles.menuValue}>{coins}</Text>
             </TouchableOpacity>
 
-            {/* Profile */}
-            <TouchableOpacity
-              style={styles.menuItem}
-              activeOpacity={0.7}
-              onPress={handleOpenEditProfile}
-            >
-              <Ionicons name="create-outline" size={18} color={C.text} />
-              <Text style={styles.menuLabel}>Profile</Text>
-              <Ionicons name="chevron-forward" size={16} color={C.textLight} />
-            </TouchableOpacity>
+            {/* Profile (hidden for private rooms) */}
+            {!isPrivateRoom && (
+              <TouchableOpacity
+                style={styles.menuItem}
+                activeOpacity={0.7}
+                onPress={handleOpenEditProfile}
+              >
+                <Ionicons name="create-outline" size={18} color={C.text} />
+                <Text style={styles.menuLabel}>Profile</Text>
+                <Ionicons name="chevron-forward" size={16} color={C.textLight} />
+              </TouchableOpacity>
+            )}
 
-            {/* Leave Room button (clears session) */}
+            {/* Leave Room button */}
             <TouchableOpacity
               style={[styles.menuItem, styles.leaveRoomItem]}
               activeOpacity={0.7}
@@ -248,6 +271,21 @@ export default function ProfilePopover({
               <Ionicons name="log-out-outline" size={18} color="#FF4757" />
               <Text style={[styles.menuLabel, styles.leaveRoomText]}>Leave Room</Text>
             </TouchableOpacity>
+
+            {/* End Room (private rooms, owner only) */}
+            {isPrivateRoom && isRoomOwner && (
+              <TouchableOpacity
+                style={styles.menuItem}
+                activeOpacity={0.7}
+                onPress={() => {
+                  onClose();
+                  onEndRoom?.();
+                }}
+              >
+                <Ionicons name="trash-outline" size={18} color="#FF4757" />
+                <Text style={[styles.menuLabel, styles.leaveRoomText]}>End Room</Text>
+              </TouchableOpacity>
+            )}
           </View>
         </TouchableOpacity>
       </Modal>

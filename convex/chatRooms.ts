@@ -39,6 +39,96 @@ const DEFAULT_ROOMS = [
   { name: 'English', slug: 'english', category: 'language' as const },
 ];
 
+// ═══════════════════════════════════════════════════════════════════════════
+// DEMO MODE HELPER: Resolve userId from auth or demo args
+// ═══════════════════════════════════════════════════════════════════════════
+import { Id } from './_generated/dataModel';
+import { QueryCtx, MutationCtx } from './_generated/server';
+import { api } from './_generated/api';
+
+// ═══════════════════════════════════════════════════════════════════════════
+// HELPER: Delete room and all related data (messages, members, penalties)
+// Used by closeRoom, resetMyPrivateRooms, deleteExpiredRoom, cleanupExpiredRooms
+// ═══════════════════════════════════════════════════════════════════════════
+async function deleteRoomFully(ctx: MutationCtx, roomId: Id<'chatRooms'>): Promise<void> {
+  // Delete all messages
+  const messages = await ctx.db
+    .query('chatRoomMessages')
+    .withIndex('by_room_created', (q) => q.eq('roomId', roomId))
+    .collect();
+  for (const msg of messages) {
+    await ctx.db.delete(msg._id);
+  }
+
+  // Delete all members
+  const members = await ctx.db
+    .query('chatRoomMembers')
+    .withIndex('by_room', (q) => q.eq('roomId', roomId))
+    .collect();
+  for (const member of members) {
+    await ctx.db.delete(member._id);
+  }
+
+  // Delete all penalties
+  const penalties = await ctx.db
+    .query('chatRoomPenalties')
+    .withIndex('by_room', (q) => q.eq('roomId', roomId))
+    .collect();
+  for (const penalty of penalties) {
+    await ctx.db.delete(penalty._id);
+  }
+
+  // Delete the room itself
+  await ctx.db.delete(roomId);
+}
+
+type DemoArgs = {
+  isDemo?: boolean;
+  demoUserId?: string;
+};
+
+async function resolveUserId(
+  ctx: QueryCtx | MutationCtx,
+  args: DemoArgs
+): Promise<Id<'users'>> {
+  // Try authenticated user first
+  const identity = await ctx.auth.getUserIdentity();
+  if (identity) {
+    const userId = asUserId(identity.subject);
+    if (userId) return userId;
+  }
+
+  // Fall back to demo mode
+  if (args.isDemo === true && args.demoUserId && args.demoUserId.length > 0) {
+    const demoUser = await ctx.db
+      .query('users')
+      .withIndex('by_demo_user_id', (q) => q.eq('demoUserId', args.demoUserId))
+      .unique();
+    if (!demoUser) {
+      throw new Error('Demo user not seeded: missing users row for demoUserId=' + args.demoUserId);
+    }
+    return demoUser._id;
+  }
+
+  throw new Error('Unauthorized');
+}
+
+// Query to get effective userId (for client-side owner detection)
+export const getEffectiveUserId = query({
+  args: {
+    isDemo: v.optional(v.boolean()),
+    demoUserId: v.optional(v.string()),
+  },
+  handler: async (ctx, args) => {
+    try {
+      const userId = await resolveUserId(ctx, args);
+      return { userId };
+    } catch {
+      return { userId: null };
+    }
+  },
+});
+
 // Idempotent: ensures all default rooms exist
 export const ensureDefaultRooms = mutation({
   args: {},
@@ -464,26 +554,49 @@ export const createPrivateRoom = mutation({
   args: {
     name: v.string(),
     password: v.optional(v.string()),
+    isDemo: v.optional(v.boolean()),
+    demoUserId: v.optional(v.string()),
   },
-  handler: async (ctx, { name, password }) => {
-    // 1. Auth guard
+  handler: async (ctx, { name, password, isDemo, demoUserId }) => {
+    // 1. Auth guard - allow demo mode bypass
     const identity = await ctx.auth.getUserIdentity();
-    if (!identity) {
+    let createdBy: ReturnType<typeof asUserId>;
+    let isDemoUser = false;
+
+    if (identity) {
+      // Real authenticated user
+      const realId = asUserId(identity.subject);
+      if (!realId) {
+        throw new Error('Invalid user identity');
+      }
+      createdBy = realId;
+    } else if (isDemo === true && demoUserId && demoUserId.length > 0) {
+      // Demo mode - require existing demo user in users table
+      isDemoUser = true;
+      const demoUser = await ctx.db
+        .query('users')
+        .withIndex('by_demo_user_id', (q) => q.eq('demoUserId', demoUserId))
+        .unique();
+
+      if (!demoUser) {
+        throw new Error('Demo user not seeded: missing users row for demoUserId=' + demoUserId);
+      }
+      createdBy = demoUser._id;
+    } else {
       throw new Error('Unauthorized');
     }
-    const createdBy = asUserId(identity.subject);
-    if (!createdBy) {
-      throw new Error('Invalid user identity');
-    }
 
-    // 2. Check wallet balance
-    const user = await ctx.db.get(createdBy);
-    if (!user) {
-      throw new Error('User not found');
-    }
-    const currentCoins = user.walletCoins ?? 0;
-    if (currentCoins < 1) {
-      throw new Error('Insufficient coins. You need at least 1 coin to create a private room.');
+    // 2. Check wallet balance (skip for demo users)
+    let currentCoins = 0;
+    if (!isDemoUser) {
+      const user = await ctx.db.get(createdBy);
+      if (!user) {
+        throw new Error('User not found');
+      }
+      currentCoins = user.walletCoins ?? 0;
+      if (currentCoins < 1) {
+        throw new Error('Insufficient coins. You need at least 1 coin to create a private room.');
+      }
     }
 
     // 4. Generate unique join code (max 10 retries)
@@ -547,10 +660,16 @@ export const createPrivateRoom = mutation({
       role: 'owner',
     });
 
-    // 9. Deduct 1 coin AFTER successful room creation
-    await ctx.db.patch(createdBy, {
-      walletCoins: currentCoins - 1,
-    });
+    // 9. Deduct 1 coin AFTER successful room creation (skip for demo users)
+    if (!isDemoUser) {
+      await ctx.db.patch(createdBy, {
+        walletCoins: currentCoins - 1,
+      });
+    }
+
+    // 10. Schedule auto-deletion when room expires
+    const expiresAt = now + ROOM_LIFETIME_MS;
+    await ctx.scheduler.runAt(expiresAt, internal.chatRooms.deleteExpiredRoom, { roomId });
 
     return { roomId, joinCode };
   },
@@ -640,17 +759,19 @@ export const getRoomByJoinCode = query({
   },
 });
 
-// Phase-2: Get private rooms where current user is owner or member (auth-based)
+// Phase-2: Get private rooms where current user is owner or member
+// Supports demo mode via optional isDemo/demoUserId args
 export const getMyPrivateRooms = query({
-  args: {},
-  handler: async (ctx) => {
-    // Auth guard
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) {
-      return [];
-    }
-    const userId = asUserId(identity.subject);
-    if (!userId) {
+  args: {
+    isDemo: v.optional(v.boolean()),
+    demoUserId: v.optional(v.string()),
+  },
+  handler: async (ctx, args) => {
+    // Resolve userId (auth or demo)
+    let userId: Id<'users'>;
+    try {
+      userId = await resolveUserId(ctx, args);
+    } catch {
       return [];
     }
 
@@ -683,6 +804,7 @@ export const getMyPrivateRooms = query({
           createdAt: room.createdAt,
           expiresAt: room.expiresAt,
           joinCode: room.joinCode,
+          createdBy: room.createdBy,
           role: membership.role,
         };
       })
@@ -852,14 +974,27 @@ export const listMembersWithPenalties = query({
 // PHASE-2: Room Lifecycle Mutations
 // ═══════════════════════════════════════════════════════════════════════════
 
-// Close room (creator only) - deletes room and all messages
+// Close/End room (creator only) - deletes room and all messages
 // Does NOT allow closing permanent/global rooms (those without expiresAt)
+// Supports demo mode via optional isDemo/demoUserId args
 export const closeRoom = mutation({
   args: {
     roomId: v.id('chatRooms'),
-    userId: v.id('users'),
+    userId: v.optional(v.id('users')), // Legacy: kept for backward compat
+    isDemo: v.optional(v.boolean()),
+    demoUserId: v.optional(v.string()),
   },
-  handler: async (ctx, { roomId, userId }) => {
+  handler: async (ctx, args) => {
+    const { roomId } = args;
+
+    // Resolve userId: use provided userId OR resolve via auth/demo
+    let userId: Id<'users'>;
+    if (args.userId) {
+      userId = args.userId;
+    } else {
+      userId = await resolveUserId(ctx, args);
+    }
+
     const room = await ctx.db.get(roomId);
     if (!room) {
       throw new Error('Room not found');
@@ -875,40 +1010,37 @@ export const closeRoom = mutation({
       throw new Error('Only the room creator can close this room');
     }
 
-    // Delete all messages (using by_room_created index, query by roomId only)
-    const messages = await ctx.db
-      .query('chatRoomMessages')
-      .withIndex('by_room_created', (q) => q.eq('roomId', roomId))
-      .collect();
-
-    for (const msg of messages) {
-      await ctx.db.delete(msg._id);
-    }
-
-    // Delete all members
-    const members = await ctx.db
-      .query('chatRoomMembers')
-      .withIndex('by_room', (q) => q.eq('roomId', roomId))
-      .collect();
-
-    for (const member of members) {
-      await ctx.db.delete(member._id);
-    }
-
-    // Delete all penalties for this room
-    const penalties = await ctx.db
-      .query('chatRoomPenalties')
-      .withIndex('by_room', (q) => q.eq('roomId', roomId))
-      .collect();
-
-    for (const penalty of penalties) {
-      await ctx.db.delete(penalty._id);
-    }
-
-    // Delete the room
-    await ctx.db.delete(roomId);
+    // Delete room and all related data
+    await deleteRoomFully(ctx, roomId);
 
     return { success: true };
+  },
+});
+
+// Reset/delete all private rooms created by user (demo mode support)
+export const resetMyPrivateRooms = mutation({
+  args: {
+    isDemo: v.optional(v.boolean()),
+    demoUserId: v.optional(v.string()),
+  },
+  handler: async (ctx, args) => {
+    // Resolve userId (auth or demo)
+    const userId = await resolveUserId(ctx, args);
+
+    // Find all private rooms created by this user (has joinCode = private)
+    const allRooms = await ctx.db.query('chatRooms').collect();
+    const myPrivateRooms = allRooms.filter(
+      (room) => room.joinCode && room.createdBy === userId
+    );
+
+    let deletedCount = 0;
+
+    for (const room of myPrivateRooms) {
+      await deleteRoomFully(ctx, room._id);
+      deletedCount++;
+    }
+
+    return { deletedRooms: deletedCount };
   },
 });
 
@@ -975,10 +1107,41 @@ export const kickUser = mutation({
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
-// PHASE-2: Internal Cleanup Functions (called by cron)
+// PHASE-2: Internal Cleanup Functions (called by cron or scheduler)
 // ═══════════════════════════════════════════════════════════════════════════
 
-// Internal: Cleanup expired rooms (called by cron job)
+// Internal: Delete a specific expired room (called by scheduler when room expires)
+// This is scheduled at room creation time for precise expiration
+export const deleteExpiredRoom = internalMutation({
+  args: {
+    roomId: v.id('chatRooms'),
+  },
+  handler: async (ctx, { roomId }) => {
+    const room = await ctx.db.get(roomId);
+
+    // Room already deleted or doesn't exist
+    if (!room) {
+      return { deleted: false, reason: 'not_found' };
+    }
+
+    // Don't delete permanent rooms (no expiresAt)
+    if (!room.expiresAt) {
+      return { deleted: false, reason: 'permanent' };
+    }
+
+    // Don't delete if not yet expired (safety check)
+    if (room.expiresAt > Date.now()) {
+      return { deleted: false, reason: 'not_expired' };
+    }
+
+    // Delete the room and all related data
+    await deleteRoomFully(ctx, roomId);
+
+    return { deleted: true };
+  },
+});
+
+// Internal: Cleanup expired rooms (called by cron job as safety net)
 // Only deletes rooms with expiresAt set (private rooms), never permanent rooms
 export const cleanupExpiredRooms = internalMutation({
   args: {},
@@ -998,38 +1161,7 @@ export const cleanupExpiredRooms = internalMutation({
       .take(50); // Process in batches
 
     for (const room of expiredRooms) {
-      // Delete messages (using by_room_created index)
-      const messages = await ctx.db
-        .query('chatRoomMessages')
-        .withIndex('by_room_created', (q) => q.eq('roomId', room._id))
-        .collect();
-
-      for (const msg of messages) {
-        await ctx.db.delete(msg._id);
-      }
-
-      // Delete members
-      const members = await ctx.db
-        .query('chatRoomMembers')
-        .withIndex('by_room', (q) => q.eq('roomId', room._id))
-        .collect();
-
-      for (const member of members) {
-        await ctx.db.delete(member._id);
-      }
-
-      // Delete penalties
-      const penalties = await ctx.db
-        .query('chatRoomPenalties')
-        .withIndex('by_room', (q) => q.eq('roomId', room._id))
-        .collect();
-
-      for (const penalty of penalties) {
-        await ctx.db.delete(penalty._id);
-      }
-
-      // Delete the room
-      await ctx.db.delete(room._id);
+      await deleteRoomFully(ctx, room._id);
     }
 
     return { deletedCount: expiredRooms.length };
@@ -1520,18 +1652,18 @@ export const kickAndBanMember = mutation({
 });
 
 // Get room password (owner only, returns decrypted)
+// Supports demo mode via optional isDemo/demoUserId args
 export const getRoomPassword = query({
-  args: { roomId: v.id('chatRooms') },
-  handler: async (ctx, { roomId }) => {
-    // Auth guard
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) {
-      throw new Error('Unauthorized');
-    }
-    const userId = asUserId(identity.subject);
-    if (!userId) {
-      throw new Error('Invalid user identity');
-    }
+  args: {
+    roomId: v.id('chatRooms'),
+    isDemo: v.optional(v.boolean()),
+    demoUserId: v.optional(v.string()),
+  },
+  handler: async (ctx, args) => {
+    const { roomId } = args;
+
+    // Resolve userId (auth or demo)
+    const userId = await resolveUserId(ctx, args);
 
     // Get room
     const room = await ctx.db.get(roomId);
@@ -1595,5 +1727,58 @@ export const getRoomInfo = query({
       expiresAt: room.expiresAt,
       createdBy: room.createdBy,
     };
+  },
+});
+
+// Seed demo user for testing (run once via: npx convex run chatRooms:seedDemoUser)
+export const seedDemoUser = mutation({
+  args: {},
+  handler: async (ctx) => {
+    const demoUserId = 'demo_manmohan_gmain_com';
+
+    // Check if already exists
+    const existing = await ctx.db
+      .query('users')
+      .withIndex('by_demo_user_id', (q) => q.eq('demoUserId', demoUserId))
+      .unique();
+
+    if (existing) {
+      return { status: 'already_exists', id: existing._id };
+    }
+
+    const now = Date.now();
+    const id = await ctx.db.insert('users', {
+      name: 'Demo User',
+      dateOfBirth: '1990-01-01',
+      gender: 'other',
+      bio: 'Demo user for testing',
+      isVerified: false,
+      demoUserId: demoUserId,
+      lookingFor: ['other'],
+      relationshipIntent: ['figuring_out'],
+      activities: [],
+      minAge: 18,
+      maxAge: 99,
+      maxDistance: 100,
+      subscriptionTier: 'free',
+      incognitoMode: false,
+      likesRemaining: 100,
+      superLikesRemaining: 5,
+      messagesRemaining: 100,
+      rewindsRemaining: 5,
+      boostsRemaining: 1,
+      walletCoins: 100,
+      likesResetAt: now,
+      superLikesResetAt: now,
+      messagesResetAt: now,
+      lastActive: now,
+      createdAt: now,
+      onboardingCompleted: true,
+      notificationsEnabled: false,
+      isActive: true,
+      isBanned: false,
+    });
+
+    return { status: 'created', id };
   },
 });

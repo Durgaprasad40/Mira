@@ -155,6 +155,7 @@ export default function ChatRoomsScreen() {
   const [isRedirecting, setIsRedirecting] = useState(false);
   const preferredRoomId = usePreferredChatRoomStore((s) => s.preferredRoomId);
   const preferredHasHydrated = usePreferredChatRoomStore((s) => s._hasHydrated);
+  const clearPreferredRoom = usePreferredChatRoomStore((s) => s.clearPreferredRoom);
   const hasRedirectedRef = useRef(false);
 
   // Convex query for preferred room (live mode only)
@@ -173,6 +174,27 @@ export default function ChatRoomsScreen() {
     ? preferredRoomId
     : convexPreferredRoom?.preferredChatRoomId ?? null;
 
+  // Validate preferred room exists before redirecting (prevents stale room redirect)
+  const preferredRoomValidation = useQuery(
+    api.chatRooms.getRoom,
+    effectivePreferredRoomId && !isDemoMode
+      ? { roomId: effectivePreferredRoomId as Id<'chatRooms'> }
+      : 'skip'
+  );
+
+  // For demo mode, check if room exists in demo data
+  const isDemoRoomValid = isDemoMode && effectivePreferredRoomId
+    ? DEMO_CHAT_ROOMS.some((r) => r.id === effectivePreferredRoomId)
+    : true;
+
+  // Room is valid if: (1) demo mode and room in demo list, or (2) convex mode and room exists
+  const isPreferredRoomValid = isDemoMode
+    ? isDemoRoomValid
+    : preferredRoomValidation !== null;
+
+  // Still loading validation if convex query is undefined (not yet resolved)
+  const isValidationLoading = !isDemoMode && effectivePreferredRoomId && preferredRoomValidation === undefined;
+
   // Use useEffect (not useLayoutEffect) to avoid "navigate before mounting Root Layout"
   // P2 STABILITY: Add safety timeout to prevent infinite spinner if navigation fails
   const redirectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -187,7 +209,7 @@ export default function ChatRoomsScreen() {
       return;
     }
 
-    // Still loading → keep checkingPreferred true
+    // Still loading preferred room data → keep checkingPreferred true
     if (isPreferredLoading) return;
 
     // Already redirected in this session → don't redirect again
@@ -196,8 +218,20 @@ export default function ChatRoomsScreen() {
       return;
     }
 
-    // Has preferred room → redirect
+    // Has preferred room → validate before redirect
     if (effectivePreferredRoomId) {
+      // Still validating if room exists → wait
+      if (isValidationLoading) return;
+
+      // Room does NOT exist (stale ID) → clear and skip redirect
+      if (!isPreferredRoomValid) {
+        if (__DEV__) console.log('[ChatRooms] Skipping redirect; stale roomId cleared', effectivePreferredRoomId);
+        clearPreferredRoom();
+        setCheckingPreferred(false);
+        return;
+      }
+
+      // Room exists → redirect
       if (__DEV__) console.log('[ChatRooms] Initial redirect to', effectivePreferredRoomId);
       hasRedirectedRef.current = true;
       setIsRedirecting(true);
@@ -214,7 +248,7 @@ export default function ChatRoomsScreen() {
 
     // No preferred room → show homepage
     setCheckingPreferred(false);
-  }, [isNavigationReady, isPreferredLoading, effectivePreferredRoomId, router]);
+  }, [isNavigationReady, isPreferredLoading, effectivePreferredRoomId, isValidationLoading, isPreferredRoomValid, clearPreferredRoom, router]);
 
   // Cleanup timeouts on unmount
   useEffect(() => {
@@ -241,6 +275,16 @@ export default function ChatRoomsScreen() {
       // Skip if already redirected in this mount cycle (useEffect handled it)
       if (hasRedirectedRef.current) return;
 
+      // Skip if still validating room existence
+      if (isValidationLoading) return;
+
+      // Room does NOT exist (stale ID) → clear and skip redirect
+      if (!isPreferredRoomValid) {
+        if (__DEV__) console.log('[ChatRooms] Focus: stale roomId cleared', effectivePreferredRoomId);
+        clearPreferredRoom();
+        return;
+      }
+
       if (__DEV__) console.log('[ChatRooms] Focus redirect to', effectivePreferredRoomId);
       hasRedirectedRef.current = true;
       setIsRedirecting(true);
@@ -251,7 +295,7 @@ export default function ChatRoomsScreen() {
         hasRedirectedRef.current = false;
         setIsRedirecting(false);
       };
-    }, [isPreferredLoading, effectivePreferredRoomId, router])
+    }, [isPreferredLoading, effectivePreferredRoomId, isValidationLoading, isPreferredRoomValid, clearPreferredRoom, router])
   );
 
   // Phase-2: Get DM store state for per-room unread counts
@@ -264,19 +308,24 @@ export default function ChatRoomsScreen() {
     isDemoMode ? 'skip' : {}
   );
 
-  // Phase-2: Query for user's private rooms (auth-based, no userId param)
+  // Phase-2: Query for user's private rooms
+  // In demo mode: pass demo args to resolve userId
   const myPrivateRooms = useQuery(
     api.chatRooms.getMyPrivateRooms,
-    isDemoMode ? 'skip' : {}
+    isDemoMode && userId
+      ? { isDemo: true, demoUserId: userId }
+      : {}
   );
 
   // Phase-2: Mutations for private rooms
   const joinRoomByCodeMut = useMutation(api.chatRooms.joinRoomByCode);
   const createPrivateRoomMut = useMutation(api.chatRooms.createPrivateRoom);
+  const resetMyPrivateRoomsMut = useMutation(api.chatRooms.resetMyPrivateRooms);
 
   // Filter private rooms into ChatRoom format
+  // Phase-2 FIX: Include private rooms in demo mode too (for rooms created by demo user)
   const privateRooms: ChatRoom[] = useMemo(() => {
-    if (isDemoMode || !myPrivateRooms) return [];
+    if (!myPrivateRooms) return [];
     return myPrivateRooms.map((r) => ({
       id: r._id,
       name: r.name,
@@ -286,7 +335,7 @@ export default function ChatRoomsScreen() {
       lastMessageText: r.lastMessageText,
       iconKey: r.slug,
     }));
-  }, [isDemoMode, myPrivateRooms]);
+  }, [myPrivateRooms]);
 
   // P2 CR-010: Track loading state for Convex mode
   const isConvexLoading = !isDemoMode && convexRooms === undefined;
@@ -347,9 +396,21 @@ export default function ChatRoomsScreen() {
         clearTimeout(redirectTimeoutRef.current);
         redirectTimeoutRef.current = null;
       }
-      // Navigate FIRST (instant) - defer other work
-      router.push(`/(main)/(private)/(tabs)/chat-rooms/${roomId}` as any);
-      if (__DEV__) console.log('[NAV] room push scheduled', { t: Date.now() });
+
+      // ISSUE B: Find room to get name and private status for instant render
+      // Check in rooms (general/language) first, then privateRooms
+      const foundRoom = rooms.find((r) => r.id === roomId);
+      const foundPrivateRoom = privateRooms.find((r) => r.id === roomId);
+      const roomName = foundRoom?.name ?? foundPrivateRoom?.name ?? '';
+      // Private rooms are in privateRooms array (or from myPrivateRooms query which has joinCode)
+      const isPrivate = !!foundPrivateRoom ? '1' : '0';
+
+      // Navigate FIRST (instant) with route params for instant render
+      router.push({
+        pathname: `/(main)/(private)/(tabs)/chat-rooms/${roomId}`,
+        params: { roomName, isPrivate },
+      } as any);
+      if (__DEV__) console.log('[NAV] room push scheduled', { roomName, isPrivate, t: Date.now() });
       // Defer non-critical state updates
       if (isDemoMode && !joinedRooms[roomId]) {
         setJoinedRooms((prev) => ({ ...prev, [roomId]: true }));
@@ -357,7 +418,7 @@ export default function ChatRoomsScreen() {
       // Mark room as visited to clear unread badge
       markRoomVisited(roomId);
     },
-    [router, joinedRooms, markRoomVisited]
+    [router, joinedRooms, markRoomVisited, rooms, privateRooms]
   );
 
   const handleCreateRoom = useCallback(() => {
@@ -374,14 +435,48 @@ export default function ChatRoomsScreen() {
       if (result.alreadyMember) {
         Alert.alert('Already a Member', 'You are already a member of this room.');
       }
-      // Navigate to the room
-      router.push(`/(main)/(private)/(tabs)/chat-rooms/${result.roomId}` as any);
+      // ISSUE B: Navigate with route params for instant render (private room)
+      router.push({
+        pathname: `/(main)/(private)/(tabs)/chat-rooms/${result.roomId}`,
+        params: { roomName: '', isPrivate: '1' },
+      } as any);
     } catch (error: any) {
       Alert.alert('Error', error.message || 'Failed to join room');
     } finally {
       setIsJoining(false);
     }
   }, [joinCode, isJoining, joinRoomByCodeMut, router]);
+
+  // Phase-2: Handle reset private rooms (demo mode only)
+  const handleResetPrivateRooms = useCallback(async () => {
+    if (!isDemoMode) return;
+
+    Alert.alert(
+      'Reset Private Rooms',
+      'This will delete ALL your private rooms and their messages. This action cannot be undone.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Reset All',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              const result = await resetMyPrivateRoomsMut({
+                isDemo: true,
+                demoUserId: userId || '',
+              });
+              Alert.alert(
+                'Rooms Deleted',
+                `Successfully deleted ${result.deletedRooms} private room${result.deletedRooms === 1 ? '' : 's'}.`
+              );
+            } catch (error: any) {
+              Alert.alert('Error', error.message || 'Failed to reset rooms');
+            }
+          },
+        },
+      ]
+    );
+  }, [resetMyPrivateRoomsMut, userId]);
 
   // Phase-2: Handle create private room
   const handleCreatePrivateRoom = useCallback(async () => {
@@ -410,6 +505,7 @@ export default function ChatRoomsScreen() {
       setShowCreateInput(false);
 
       const hasPassword = pwd.length > 0;
+      // ISSUE B: Navigate with route params for instant render (use args.name which was captured before clearing)
       Alert.alert(
         'Room Created',
         hasPassword
@@ -418,7 +514,10 @@ export default function ChatRoomsScreen() {
         [
           {
             text: 'Go to Room',
-            onPress: () => router.push(`/(main)/(private)/(tabs)/chat-rooms/${result.roomId}` as any),
+            onPress: () => router.push({
+              pathname: `/(main)/(private)/(tabs)/chat-rooms/${result.roomId}`,
+              params: { roomName: args.name, isPrivate: '1' },
+            } as any),
           },
         ]
       );
@@ -562,114 +661,7 @@ export default function ChatRoomsScreen() {
         renderItem={null}
         ListHeaderComponent={
           <>
-            {/* Phase-2: Private Rooms Section */}
-            {!isDemoMode && (
-              <>
-                <Text style={styles.sectionTitle}>Private Rooms</Text>
-
-                {/* Join by Code Input */}
-                <View style={styles.joinCodeRow}>
-                  <TextInput
-                    style={styles.joinCodeInput}
-                    placeholder="Enter room code..."
-                    placeholderTextColor={C.textLight}
-                    value={joinCode}
-                    onChangeText={setJoinCode}
-                    autoCapitalize="characters"
-                    maxLength={6}
-                  />
-                  <TouchableOpacity
-                    style={[styles.joinCodeButton, (!joinCode.trim() || isJoining) && styles.joinCodeButtonDisabled]}
-                    onPress={handleJoinByCode}
-                    disabled={!joinCode.trim() || isJoining}
-                  >
-                    {isJoining ? (
-                      <ActivityIndicator size="small" color="#FFF" />
-                    ) : (
-                      <Text style={styles.joinCodeButtonText}>Join</Text>
-                    )}
-                  </TouchableOpacity>
-                </View>
-
-                {/* Private Rooms List */}
-                {privateRooms.length > 0 ? (
-                  privateRooms.map((room) => (
-                    <React.Fragment key={room.id}>
-                      {renderRoom({ item: room })}
-                    </React.Fragment>
-                  ))
-                ) : (
-                  <View style={styles.emptyPrivateRooms}>
-                    <Ionicons name="lock-closed-outline" size={24} color={C.textLight} />
-                    <Text style={styles.emptyPrivateText}>No private rooms yet</Text>
-                  </View>
-                )}
-
-                {/* Create Private Room */}
-                {showCreateInput ? (
-                  <View style={styles.createRoomContainer}>
-                    <View style={styles.createRoomRow}>
-                      <TextInput
-                        style={styles.createRoomInput}
-                        placeholder="Room name..."
-                        placeholderTextColor={C.textLight}
-                        value={newRoomName}
-                        onChangeText={setNewRoomName}
-                        maxLength={30}
-                        autoFocus
-                      />
-                    </View>
-                    <View style={styles.createRoomRow}>
-                      <TextInput
-                        style={styles.createRoomInput}
-                        placeholder="Password (optional)"
-                        placeholderTextColor={C.textLight}
-                        value={newRoomPassword}
-                        onChangeText={setNewRoomPassword}
-                        secureTextEntry={!showPassword}
-                        autoCapitalize="none"
-                        autoCorrect={false}
-                        maxLength={32}
-                      />
-                      <TouchableOpacity
-                        style={styles.showPasswordButton}
-                        onPress={() => setShowPassword(!showPassword)}
-                      >
-                        <Ionicons name={showPassword ? 'eye-off' : 'eye'} size={18} color={C.textLight} />
-                      </TouchableOpacity>
-                    </View>
-                    <View style={styles.createRoomActions}>
-                      <TouchableOpacity
-                        style={[styles.createRoomSubmit, (!newRoomName.trim() || isCreating) && styles.joinCodeButtonDisabled]}
-                        onPress={handleCreatePrivateRoom}
-                        disabled={!newRoomName.trim() || isCreating}
-                      >
-                        {isCreating ? (
-                          <ActivityIndicator size="small" color="#FFF" />
-                        ) : (
-                          <Text style={styles.createRoomSubmitText}>Create Room</Text>
-                        )}
-                      </TouchableOpacity>
-                      <TouchableOpacity
-                        style={styles.createRoomCancelBtn}
-                        onPress={() => { setShowCreateInput(false); setNewRoomName(''); setNewRoomPassword(''); setShowPassword(false); }}
-                      >
-                        <Text style={styles.createRoomCancelText}>Cancel</Text>
-                      </TouchableOpacity>
-                    </View>
-                  </View>
-                ) : (
-                  <TouchableOpacity
-                    style={styles.createPrivateButton}
-                    onPress={() => setShowCreateInput(true)}
-                  >
-                    <Ionicons name="add-circle-outline" size={18} color={C.primary} />
-                    <Text style={styles.createPrivateText}>Create Private Room (1 coin)</Text>
-                  </TouchableOpacity>
-                )}
-              </>
-            )}
-
+            {/* Section 1: General */}
             <Text style={styles.sectionTitle}>General</Text>
             {generalRooms.map((room) => (
               <React.Fragment key={room.id}>
@@ -677,31 +669,84 @@ export default function ChatRoomsScreen() {
               </React.Fragment>
             ))}
 
+            {/* Section 2: Languages */}
             <Text style={styles.sectionTitle}>Languages</Text>
             {languageRooms.map((room) => (
               <React.Fragment key={room.id}>
                 {renderRoom({ item: room })}
               </React.Fragment>
             ))}
+
+            {/* Section 3: Create Private Room CTA */}
+            <View style={styles.createPrivateSection}>
+              <TouchableOpacity
+                style={styles.addRoomButton}
+                onPress={handleCreateRoom}
+                activeOpacity={0.7}
+              >
+                <View style={styles.addRoomIcon}>
+                  <Ionicons name="lock-closed" size={22} color={C.primary} />
+                </View>
+                <Text style={styles.addRoomText}>Create Private Room</Text>
+                <Ionicons name="chevron-forward" size={16} color={C.textLight} />
+              </TouchableOpacity>
+            </View>
+
+            {/* Section 4: Private Rooms - show if any private rooms exist */}
+            {privateRooms.length > 0 && (
+              <>
+                {/* Private Rooms header with optional Reset button (demo mode only) */}
+                <View style={styles.privateRoomsSectionHeader}>
+                  <Text style={styles.sectionTitle}>Private Rooms</Text>
+                  {isDemoMode && (
+                    <TouchableOpacity
+                      style={styles.resetPrivateRoomsButton}
+                      onPress={handleResetPrivateRooms}
+                      hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                    >
+                      <Ionicons name="trash-outline" size={14} color={C.textLight} />
+                      <Text style={styles.resetPrivateRoomsText}>Reset</Text>
+                    </TouchableOpacity>
+                  )}
+                </View>
+
+                {/* Join by Code Input (only in live mode) */}
+                {!isDemoMode && (
+                  <View style={styles.joinCodeRow}>
+                    <TextInput
+                      style={styles.joinCodeInput}
+                      placeholder="Enter room code..."
+                      placeholderTextColor={C.textLight}
+                      value={joinCode}
+                      onChangeText={setJoinCode}
+                      autoCapitalize="characters"
+                      maxLength={6}
+                    />
+                    <TouchableOpacity
+                      style={[styles.joinCodeButton, (!joinCode.trim() || isJoining) && styles.joinCodeButtonDisabled]}
+                      onPress={handleJoinByCode}
+                      disabled={!joinCode.trim() || isJoining}
+                    >
+                      {isJoining ? (
+                        <ActivityIndicator size="small" color="#FFF" />
+                      ) : (
+                        <Text style={styles.joinCodeButtonText}>Join</Text>
+                      )}
+                    </TouchableOpacity>
+                  </View>
+                )}
+
+                {/* Private Rooms List */}
+                {privateRooms.map((room) => (
+                  <React.Fragment key={room.id}>
+                    {renderRoom({ item: room })}
+                  </React.Fragment>
+                ))}
+              </>
+            )}
           </>
         }
-        ListFooterComponent={
-          <View style={styles.footerSection}>
-            {/* Add a Room button */}
-            <TouchableOpacity
-              style={styles.addRoomButton}
-              onPress={handleCreateRoom}
-              activeOpacity={0.7}
-            >
-              <View style={styles.addRoomIcon}>
-                <Ionicons name="add" size={24} color={C.primary} />
-              </View>
-              <Text style={styles.addRoomText}>Add a Room</Text>
-              <Ionicons name="chevron-forward" size={16} color={C.textLight} />
-            </TouchableOpacity>
-            {/* TODO (Phase later): Require coins/tokens to create a room. */}
-          </View>
-        }
+        ListFooterComponent={<View style={styles.footerSpacer} />}
         contentContainerStyle={styles.listContent}
         refreshControl={
           <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={C.primary} />
@@ -819,6 +864,34 @@ const styles = StyleSheet.create({
   footerSection: {
     paddingTop: 16,
     paddingHorizontal: 12,
+  },
+  footerSpacer: {
+    height: 24,
+  },
+  createPrivateSection: {
+    paddingTop: 16,
+    paddingHorizontal: 12,
+    paddingBottom: 4,
+  },
+  privateRoomsSectionHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingRight: 14,
+  },
+  resetPrivateRoomsButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingVertical: 4,
+    paddingHorizontal: 8,
+    borderRadius: 6,
+    backgroundColor: C.surface,
+  },
+  resetPrivateRoomsText: {
+    fontSize: 12,
+    fontWeight: '500',
+    color: C.textLight,
   },
   addRoomButton: {
     flexDirection: 'row',

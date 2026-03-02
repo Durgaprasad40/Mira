@@ -4,13 +4,12 @@ import {
   View,
   Text,
   Alert,
-  Keyboard,
   KeyboardAvoidingView,
   Platform,
   BackHandler,
-  InteractionManager,
   FlatList,
   Modal,
+  TouchableOpacity,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import AsyncStorage from '@react-native-async-storage/async-storage';
@@ -162,7 +161,12 @@ type Overlay =
 // ═══════════════════════════════════════════════════════════════════════════
 
 export default function ChatRoomScreen() {
-  const { roomId } = useLocalSearchParams<{ roomId: string }>();
+  // ISSUE B: Read route params for instant render fallback
+  const { roomId, roomName: routeRoomName, isPrivate: routeIsPrivate } = useLocalSearchParams<{
+    roomId: string;
+    roomName?: string;
+    isPrivate?: string;
+  }>();
   const router = useRouter();
   const insets = useSafeAreaInsets();
 
@@ -195,12 +199,16 @@ export default function ChatRoomScreen() {
   // Track if Private Chat DM modal is open (hides chat room composer)
   const isPrivateChatOpen = activeDm !== null;
 
-  // Demo mode: use local room data
+  // Demo mode: first try local room data
   const demoRoom = roomIdStr ? DEMO_CHAT_ROOMS.find((r) => r.id === roomIdStr) : undefined;
 
-  // Convex queries (skipped in demo mode OR if roomId is invalid)
-  // P0 FIX CR-002: Skip Convex queries if roomId is not a valid Convex ID format
-  const shouldSkipConvex = isDemoMode || !hasValidRoomId;
+  // Phase-2 FIX: In demo mode, if room not found in DEMO_CHAT_ROOMS but roomId looks like
+  // a valid Convex ID, query Convex (for private rooms created in demo mode)
+  const shouldQueryConvexInDemo = isDemoMode && !demoRoom && isValidConvexId(roomIdStr);
+
+  // Convex queries: skip if (demo mode AND found in demo data) OR invalid roomId
+  // Query Convex if: (1) not demo mode, or (2) demo mode but room not in demo list
+  const shouldSkipConvex = (isDemoMode && !!demoRoom) || !hasValidRoomId;
   const convexRoom = useQuery(
     api.chatRooms.getRoom,
     shouldSkipConvex ? 'skip' : { roomId: roomIdStr as Id<'chatRooms'> }
@@ -215,23 +223,83 @@ export default function ChatRoomScreen() {
   const joinRoomMutation = useMutation(api.chatRooms.joinRoom);
   const closeRoomMutation = useMutation(api.chatRooms.closeRoom);
 
+  // Skip queries that require userId in demo mode (no real user identity)
+  const shouldSkipUserIdQueries = isDemoMode || !authUserId;
+
   // Phase-2: Query user's penalty status in this room
   const userPenalty = useQuery(
     api.chatRooms.getUserPenalty,
-    shouldSkipConvex || !authUserId
+    shouldSkipConvex || shouldSkipUserIdQueries
       ? 'skip'
       : { roomId: roomIdStr as Id<'chatRooms'>, userId: authUserId as Id<'users'> }
   );
 
-  // Unified room object
-  const room = isDemoMode ? demoRoom : convexRoom;
+  // Unified room object: prefer demoRoom if found, else use convexRoom
+  const room = demoRoom ?? convexRoom;
 
-  // Phase-2: Check if current user is the room creator
-  const isRoomCreator = !isDemoMode && convexRoom?.createdBy === authUserId;
+  // Phase-2: Determine if this is a private room (for hiding inbox/notifications)
+  // Private rooms have a joinCode field
+  // ISSUE B: Use route param as fallback for instant render
+  const isPrivateRoom = convexRoom?.joinCode
+    ? true
+    : routeIsPrivate === '1';
+
+  // Phase-2: Get effective userId (for demo mode owner detection)
+  const effectiveUserIdQuery = useQuery(
+    api.chatRooms.getEffectiveUserId,
+    isDemoMode && authUserId
+      ? { isDemo: true, demoUserId: authUserId }
+      : {}
+  );
+  const effectiveUserId = effectiveUserIdQuery?.userId ?? null;
+
+  // Phase-2: Check if current user is the room creator (use effectiveUserId for demo mode)
+  const isRoomCreator = effectiveUserId
+    ? convexRoom?.createdBy === effectiveUserId
+    : convexRoom?.createdBy === authUserId;
   // Phase-2: Check if room can be closed (has expiresAt, meaning not permanent)
   const canCloseRoom = isRoomCreator && convexRoom?.expiresAt;
   // Phase-2: Check if user is in read-only mode
-  const isReadOnly = !isDemoMode && userPenalty !== null && userPenalty !== undefined;
+  const isReadOnly = userPenalty !== null && userPenalty !== undefined;
+
+  // Phase-2: Query room password (owner only, for display in profile menu)
+  // Pass demo args for demo mode
+  const roomPasswordQuery = useQuery(
+    api.chatRooms.getRoomPassword,
+    isPrivateRoom && isRoomCreator && hasValidRoomId
+      ? {
+          roomId: roomIdStr as Id<'chatRooms'>,
+          ...(isDemoMode && authUserId ? { isDemo: true, demoUserId: authUserId } : {}),
+        }
+      : 'skip'
+  );
+  const roomPassword = roomPasswordQuery?.password ?? null;
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // COUNTDOWN TIMER (for expiring rooms)
+  // ─────────────────────────────────────────────────────────────────────────
+  const [nowMs, setNowMs] = useState(Date.now());
+  const expiresAt = convexRoom?.expiresAt;
+
+  useEffect(() => {
+    if (!expiresAt) return;
+    const interval = setInterval(() => {
+      setNowMs(Date.now());
+    }, 1000);
+    return () => clearInterval(interval);
+  }, [expiresAt]);
+
+  // Format remaining time as HH:MM:SS
+  const countdownText = useMemo(() => {
+    if (!expiresAt) return null;
+    const remainingMs = Math.max(0, expiresAt - nowMs);
+    if (remainingMs <= 0) return '00:00:00';
+    const totalSeconds = Math.floor(remainingMs / 1000);
+    const hours = Math.floor(totalSeconds / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const seconds = totalSeconds % 60;
+    return `${String(hours).padStart(2, '0')}:${String(minutes).padStart(2, '0')}:${String(seconds).padStart(2, '0')}`;
+  }, [expiresAt, nowMs]);
 
   // ─────────────────────────────────────────────────────────────────────────
   // MOUNTED GUARD
@@ -327,36 +395,13 @@ export default function ChatRoomScreen() {
   const SCROLL_THRESHOLD = 120;
 
   // ─────────────────────────────────────────────────────────────────────────
-  // SCROLL TO BOTTOM HELPER (with Android timing fix)
+  // SCROLL TRACKING (for inverted list, "near bottom" is near top of offset)
   // ─────────────────────────────────────────────────────────────────────────
-  const scrollToBottom = useCallback((animated = true) => {
-    const run = () => listRef.current?.scrollToEnd({ animated });
-    if (Platform.OS === 'android') {
-      InteractionManager.runAfterInteractions(() => setTimeout(run, 120));
-    } else {
-      requestAnimationFrame(run);
-    }
-  }, []);
-
-  // Track scroll position to determine if user is near bottom
   const handleScroll = useCallback((event: any) => {
-    const { contentOffset, contentSize, layoutMeasurement } = event.nativeEvent;
-    const distanceFromBottom = contentSize.height - (contentOffset.y + layoutMeasurement.height);
-    isNearBottomRef.current = distanceFromBottom < SCROLL_THRESHOLD;
+    const { contentOffset } = event.nativeEvent;
+    // In inverted list, offset near 0 means we're at the "bottom" (latest messages)
+    isNearBottomRef.current = contentOffset.y < SCROLL_THRESHOLD;
   }, []);
-
-  // ─────────────────────────────────────────────────────────────────────────
-  // KEYBOARD LISTENERS (scroll on open)
-  // ─────────────────────────────────────────────────────────────────────────
-  useEffect(() => {
-    const showEvent = Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow';
-    const sub = Keyboard.addListener(showEvent, () => {
-      if (isNearBottomRef.current) {
-        scrollToBottom(true);
-      }
-    });
-    return () => sub.remove();
-  }, [scrollToBottom]);
 
   // ─────────────────────────────────────────────────────────────────────────
   // MESSAGES (Demo store or Convex)
@@ -386,77 +431,15 @@ export default function ChatRoomScreen() {
     return [...converted, ...pendingMessages];
   }, [isDemoMode, demoMessages, convexMessagesResult, pendingMessages]);
 
-  // Build list items (normal order)
-  const listItems = useMemo(() => buildListItems(messages), [messages]);
-
-  // Scroll to bottom when message count increases (only if user is near bottom)
-  const prevMessageCount = useRef(messages.length);
-  useEffect(() => {
-    if (messages.length > prevMessageCount.current && isNearBottomRef.current) {
-      scrollToBottom(true);
-    }
-    prevMessageCount.current = messages.length;
-  }, [messages.length, scrollToBottom]);
-
   // ─────────────────────────────────────────────────────────────────────────
-  // INITIAL SCROLL (debounced stabilized scroll)
-  // Messages load in phases after hydration/seeding, so we debounce to wait
-  // for "stabilization" before scrolling to bottom.
-  // Hide FlatList until scroll is ready to avoid visible mid→bottom jump.
+  // INVERTED FLATLIST: Build list items in reverse order (newest first)
+  // This ensures the list always opens at the latest message without scrolling
   // ─────────────────────────────────────────────────────────────────────────
-  const hasInitialScrolled = useRef(false);
-  const initialScrollDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const [initialScrollReady, setInitialScrollReady] = useState(false);
-
-  // Cleanup debounce timeout on unmount
-  useEffect(() => {
-    return () => {
-      if (initialScrollDebounceRef.current) {
-        clearTimeout(initialScrollDebounceRef.current);
-        initialScrollDebounceRef.current = null;
-      }
-    };
-  }, []);
-
-  // Schedule initial scroll - resets debounce timer on each call
-  const scheduleInitialScroll = useCallback(() => {
-    if (hasInitialScrolled.current) return;
-    if (messages.length === 0) return;
-
-    // Clear previous timer
-    if (initialScrollDebounceRef.current) {
-      clearTimeout(initialScrollDebounceRef.current);
-    }
-
-    // Schedule scroll after 200ms of no changes
-    initialScrollDebounceRef.current = setTimeout(() => {
-      if (hasInitialScrolled.current) return;
-      hasInitialScrolled.current = true;
-
-      // Use InteractionManager for reliable timing after layout/JS interactions
-      InteractionManager.runAfterInteractions(() => {
-        requestAnimationFrame(() => {
-          scrollToBottom(false);
-          // Mark scroll ready so FlatList becomes visible
-          setInitialScrollReady(true);
-        });
-      });
-    }, 200);
-  }, [messages.length, scrollToBottom]);
-
-  // Trigger debounce scheduler when messages.length changes (during initial load)
-  useEffect(() => {
-    if (!hasInitialScrolled.current && messages.length > 0) {
-      scheduleInitialScroll();
-    }
-  }, [messages.length, scheduleInitialScroll]);
-
-  // Also trigger from onContentSizeChange for layout-driven updates
-  const handleInitialContentSizeChange = useCallback(() => {
-    if (!hasInitialScrolled.current && messages.length > 0) {
-      scheduleInitialScroll();
-    }
-  }, [messages.length, scheduleInitialScroll]);
+  const invertedListItems = useMemo(() => {
+    // Build items in normal order, then reverse for inverted FlatList
+    const items = buildListItems(messages);
+    return items.slice().reverse();
+  }, [messages]);
 
   // Seed demo room on mount
   // P1 CR-004: Wait for store hydration before seeding to prevent race conditions
@@ -589,6 +572,8 @@ export default function ChatRoomScreen() {
   // ─────────────────────────────────────────────────────────────────────────
   // NAVIGATION HANDLERS
   // ─────────────────────────────────────────────────────────────────────────
+
+  // Standard leave (public rooms): clears session and preferred room
   const handleLeaveRoom = useCallback(() => {
     closeOverlay();
     exitRoom();
@@ -604,6 +589,48 @@ export default function ChatRoomScreen() {
 
     router.replace('/(main)/(private)/(tabs)/chat-rooms');
   }, [closeOverlay, exitRoom, router, authUserId, clearPreferredRoom, clearPreferredRoomMutation]);
+
+  // Phase-2: Private room leave - just navigate back, don't clear membership or preferred
+  const handleLeavePrivateRoom = useCallback(() => {
+    closeOverlay();
+    router.replace('/(main)/(private)/(tabs)/chat-rooms');
+  }, [closeOverlay, router]);
+
+  // Phase-2: End room handler (private room owner only) - deletes room permanently
+  const handleEndRoom = useCallback(() => {
+    if (!isRoomCreator || !authUserId || !roomIdStr) return;
+
+    Alert.alert(
+      'End Room',
+      'Are you sure? This will permanently delete the room and all messages. This cannot be undone.',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'End Room',
+          style: 'destructive',
+          onPress: async () => {
+            try {
+              // Use demo args in demo mode, userId in live mode
+              await closeRoomMutation({
+                roomId: roomIdStr as Id<'chatRooms'>,
+                ...(isDemoMode
+                  ? { isDemo: true, demoUserId: authUserId }
+                  : { userId: authUserId as Id<'users'> }),
+              });
+              // Clear preferred room to avoid stale redirect
+              clearPreferredRoom();
+              if (!isDemoMode && authUserId) {
+                clearPreferredRoomMutation({ userId: authUserId as Id<'users'> }).catch(() => {});
+              }
+              router.replace('/(main)/(private)/(tabs)/chat-rooms');
+            } catch (err: any) {
+              Alert.alert('Error', err.message || 'Failed to end room');
+            }
+          },
+        },
+      ]
+    );
+  }, [isRoomCreator, authUserId, roomIdStr, closeRoomMutation, router, clearPreferredRoom, clearPreferredRoomMutation]);
 
   // Phase-2: Close room handler (creator only)
   const handleCloseRoom = useCallback(() => {
@@ -1020,34 +1047,40 @@ export default function ChatRoomScreen() {
   }
 
   // ─────────────────────────────────────────────────────────────────────────
-  // P2 CR-009: LOADING vs NOT FOUND
-  // In Convex mode: undefined = loading, null = not found
+  // P2 CR-009: NOT FOUND CHECK
+  // In Convex mode: undefined = loading (render UI with fallbacks), null = not found
+  // ISSUE B: Don't block render - use route params as fallback for instant display
   // ─────────────────────────────────────────────────────────────────────────
-  if (!isDemoMode && convexRoom === undefined) {
-    // Still loading from Convex - show loading state, not "not found"
-    return (
-      <View style={[styles.container, { paddingTop: insets.top }]}>
-        <ChatRoomsHeader title="Loading..." hideLeftButton topInset={insets.top} />
-        <View style={styles.notFound}>
-          <Text style={styles.notFoundText}>Loading room...</Text>
-        </View>
-      </View>
-    );
-  }
+  // Only show "not found" if convexRoom is explicitly null (not undefined/loading)
+  const isRoomNotFound = !isDemoMode && convexRoom === null;
 
-  if (!room) {
+  if (isRoomNotFound) {
+    const handleBackToRooms = () => {
+      // Clear stale preferred room so user doesn't get stuck in a loop
+      if (isDemoMode) {
+        clearPreferredRoom();
+      } else if (authUserId) {
+        clearPreferredRoomMutation({ userId: authUserId as Id<'users'> }).catch(() => {});
+      }
+      router.replace('/(main)/(private)/(tabs)/chat-rooms');
+    };
+
     return (
       <View style={[styles.container, { paddingTop: insets.top }]}>
         <ChatRoomsHeader title="Room Not Found" hideLeftButton topInset={insets.top} />
         <View style={styles.notFound}>
           <Ionicons name="alert-circle-outline" size={48} color={C.textLight} />
           <Text style={styles.notFoundText}>Room not found</Text>
+          <TouchableOpacity style={styles.backToRoomsBtn} onPress={handleBackToRooms}>
+            <Text style={styles.backToRoomsBtnText}>Back to Chat Rooms</Text>
+          </TouchableOpacity>
         </View>
       </View>
     );
   }
 
-  const roomName = (room as any)?.name ?? 'Chat Room';
+  // ISSUE B: Use route param as fallback for instant render
+  const roomName = (room as any)?.name ?? routeRoomName ?? 'Chat Room';
 
   // ═══════════════════════════════════════════════════════════════════════
   // RENDER - KAV + FlatList + flexGrow + justifyContent:flex-end
@@ -1057,6 +1090,7 @@ export default function ChatRoomScreen() {
       {/* ─── HEADER ─── */}
       <ChatRoomsHeader
         title={roomName}
+        subtitle={countdownText ?? undefined}
         hideLeftButton
         topInset={insets.top}
         onRefreshPress={handleReload}
@@ -1068,6 +1102,7 @@ export default function ChatRoomScreen() {
         unseenNotifications={unseenNotifications}
         showCloseButton={!!canCloseRoom}
         onClosePress={handleCloseRoom}
+        hideInboxAndNotifications={isPrivateRoom}
       />
 
       {/* ─── ACTIVE USERS STRIP ─── */}
@@ -1094,26 +1129,22 @@ export default function ChatRoomScreen() {
           ) : (
             <FlatList
               ref={listRef}
-              data={listItems}
+              data={invertedListItems}
               keyExtractor={keyExtractor}
               renderItem={renderItem}
-              style={{
-                // Hide list until initial scroll is ready to avoid mid→bottom jump
-                opacity: initialScrollReady || messages.length === 0 ? 1 : 0,
-              }}
+              inverted={true}
               contentContainerStyle={{
                 flexGrow: 1,
-                justifyContent: 'flex-end',
                 paddingHorizontal: 6,
-                paddingTop: 4,
-                paddingBottom: isPrivateChatOpen ? 0 : composerHeight,
+                paddingTop: isPrivateChatOpen ? 0 : composerHeight,
+                paddingBottom: 4,
               }}
               showsVerticalScrollIndicator={false}
               keyboardShouldPersistTaps="handled"
               keyboardDismissMode="interactive"
               onScroll={handleScroll}
-              onContentSizeChange={handleInitialContentSizeChange}
               scrollEventThrottle={16}
+              maintainVisibleContentPosition={{ minIndexForVisible: 0 }}
               // P2 Performance: FlatList tuning props
               initialNumToRender={15}
               maxToRenderPerBatch={8}
@@ -1190,7 +1221,11 @@ export default function ChatRoomScreen() {
         coins={userCoins}
         age={DEMO_CURRENT_USER.age ?? 25}
         gender={DEMO_CURRENT_USER.gender ?? 'Unknown'}
-        onLeaveRoom={handleLeaveRoom}
+        onLeaveRoom={isPrivateRoom ? handleLeavePrivateRoom : handleLeaveRoom}
+        isPrivateRoom={isPrivateRoom}
+        isRoomOwner={isRoomCreator}
+        roomPassword={roomPassword}
+        onEndRoom={handleEndRoom}
       />
 
       <OnlineUsersPanel
@@ -1313,6 +1348,18 @@ const styles = StyleSheet.create({
     fontSize: 16,
     fontWeight: '600',
     color: C.textLight,
+  },
+  backToRoomsBtn: {
+    marginTop: 16,
+    paddingHorizontal: 24,
+    paddingVertical: 12,
+    backgroundColor: C.primary,
+    borderRadius: 8,
+  },
+  backToRoomsBtnText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#FFFFFF',
   },
   dateSeparator: {
     flexDirection: 'row',

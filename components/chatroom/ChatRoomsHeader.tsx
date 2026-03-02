@@ -46,6 +46,8 @@ function BadgeIcon({ name, count, onPress }: BadgeIconProps) {
 interface ChatRoomsHeaderProps {
   /** Title to display (e.g., "Chat Rooms" or room name) */
   title?: string;
+  /** Subtitle to display below title (e.g., countdown timer) */
+  subtitle?: string;
   /** Show back arrow instead of menu */
   showBackButton?: boolean;
   /** Hide the left button entirely (no menu or back icon) */
@@ -76,10 +78,13 @@ interface ChatRoomsHeaderProps {
   showCloseButton?: boolean;
   /** Phase-2: Called when close room button pressed */
   onClosePress?: () => void;
+  /** Phase-2: Hide inbox and notifications icons (for private rooms) */
+  hideInboxAndNotifications?: boolean;
 }
 
 export default function ChatRoomsHeader({
   title = 'Chat Rooms',
+  subtitle,
   showBackButton = false,
   hideLeftButton = false,
   onMenuPress,
@@ -95,6 +100,7 @@ export default function ChatRoomsHeader({
   onCreatePress,
   showCloseButton = false,
   onClosePress,
+  hideInboxAndNotifications = false,
 }: ChatRoomsHeaderProps) {
   const spinAnim = useRef(new Animated.Value(0)).current;
   const isSpinning = useRef(false);
@@ -141,25 +147,21 @@ export default function ChatRoomsHeader({
         </TouchableOpacity>
       )}
 
-      {/* Center: Title */}
+      {/* Center: Title + optional subtitle */}
       <View style={styles.titleContainer}>
         <Text style={styles.title} numberOfLines={1}>
           {title}
         </Text>
+        {subtitle && (
+          <Text style={styles.subtitle} numberOfLines={1}>
+            {subtitle}
+          </Text>
+        )}
       </View>
 
       {/* Right: Action icons */}
       <View style={styles.rightIcons}>
-        {/* Phase-2: Close room button (only for creator) */}
-        {showCloseButton && (
-          <TouchableOpacity
-            onPress={onClosePress}
-            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-            style={styles.iconWrapper}
-          >
-            <Ionicons name="close-circle-outline" size={24} color={HEADER_TEXT_COLOR} />
-          </TouchableOpacity>
-        )}
+        {/* Phase-2: Close room button removed from header - End Room is in profile menu */}
 
         {/* Create room button (optional) */}
         {showCreateButton && (
@@ -183,19 +185,23 @@ export default function ChatRoomsHeader({
           </Animated.View>
         </TouchableOpacity>
 
-        {/* Inbox/Mail */}
-        <BadgeIcon
-          name="mail-outline"
-          count={unreadInbox}
-          onPress={onInboxPress}
-        />
+        {/* Inbox/Mail (hidden for private rooms) */}
+        {!hideInboxAndNotifications && (
+          <BadgeIcon
+            name="mail-outline"
+            count={unreadInbox}
+            onPress={onInboxPress}
+          />
+        )}
 
-        {/* Notifications bell */}
-        <BadgeIcon
-          name="notifications-outline"
-          count={unseenNotifications}
-          onPress={onNotificationsPress}
-        />
+        {/* Notifications bell (hidden for private rooms) */}
+        {!hideInboxAndNotifications && (
+          <BadgeIcon
+            name="notifications-outline"
+            count={unseenNotifications}
+            onPress={onNotificationsPress}
+          />
+        )}
 
         {/* Profile avatar */}
         <TouchableOpacity onPress={onProfilePress}>
@@ -230,6 +236,12 @@ const styles = StyleSheet.create({
     fontSize: 20,
     fontWeight: '700',
     color: HEADER_TEXT_COLOR,
+  },
+  subtitle: {
+    fontSize: 12,
+    fontWeight: '500',
+    color: 'rgba(255,255,255,0.7)',
+    marginTop: 2,
   },
   rightIcons: {
     flexDirection: 'row',

@@ -25,11 +25,11 @@ crons.interval(
   internal.truthDare.cleanupExpiredTodData
 );
 
-// Phase-2 Chat Rooms: Cleanup expired rooms every 15 minutes
+// Phase-2 Chat Rooms: Cleanup expired rooms every 10 minutes (safety net for scheduler)
 // Deletes rooms past their 24h expiresAt, along with all messages/members/penalties
 crons.interval(
   'cleanup-expired-chat-rooms',
-  { minutes: 15 },
+  { minutes: 10 },
   internal.chatRooms.cleanupExpiredRooms
 );
 

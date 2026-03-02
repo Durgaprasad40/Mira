@@ -283,6 +283,9 @@ export default defineSchema({
 
     // Admin access (set manually for authorized users)
     isAdmin: v.optional(v.boolean()),
+
+    // Demo mode: identifier for demo users (e.g. "demo_manmohan_gmain_com")
+    demoUserId: v.optional(v.string()),
   })
     .index('by_email', ['email'])
     .index('by_phone', ['phone'])
@@ -291,7 +294,8 @@ export default defineSchema({
     .index('by_gender', ['gender'])
     .index('by_last_active', ['lastActive'])
     .index('by_boosted', ['boostedUntil'])
-    .index('by_verification_status', ['verificationStatus']),
+    .index('by_verification_status', ['verificationStatus'])
+    .index('by_demo_user_id', ['demoUserId']),
 
   // Photos table
   photos: defineTable({
