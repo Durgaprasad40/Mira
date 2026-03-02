@@ -418,7 +418,10 @@ export default function ChatRoomScreen() {
   const messages: DemoChatMessage[] = useMemo(() => {
     if (isDemoMode) return demoMessages;
     const convexMsgs = convexMessagesResult?.messages ?? [];
-    const converted: DemoChatMessage[] = convexMsgs.map((m) => ({
+    // P1 FIX: Filter out server messages whose clientId matches a pending message (dedup)
+    const pendingClientIds = new Set(pendingMessages.map((m) => m.id.replace('pending_', '')));
+    const deduped = convexMsgs.filter((m) => !m.clientId || !pendingClientIds.has(m.clientId));
+    const converted: DemoChatMessage[] = deduped.map((m) => ({
       id: m._id,
       roomId: m.roomId,
       senderId: m.senderId,
@@ -446,6 +449,7 @@ export default function ChatRoomScreen() {
   // P1 CR-005: Sort messages after merging to ensure correct order
   // P2 STABILITY: Add hydration fallback timeout (3 seconds) if AsyncStorage fails
   const hydrationFallbackTriggeredRef = useRef(false);
+  const seedAttemptedRef = useRef(false);
   const [hydrationFallback, setHydrationFallback] = useState(false);
 
   useEffect(() => {
@@ -470,6 +474,9 @@ export default function ChatRoomScreen() {
     if (!isDemoMode || !roomIdStr) return;
     // P2 STABILITY: Proceed if hydrated OR fallback triggered
     if (!storeHasHydrated && !hydrationFallback) return;
+    // P1 FIX: Atomic guard to prevent double-seeding
+    if (seedAttemptedRef.current) return;
+    seedAttemptedRef.current = true;
 
     const base = getDemoMessagesForRoom(roomIdStr);
     const joinMsg: DemoChatMessage = {

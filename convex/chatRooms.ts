@@ -478,8 +478,12 @@ export const sendMessage = mutation({
         for (let i = 0; i < toDelete && i < batch.length; i++) {
           const msg = batch[i];
           if (msg._id === messageId) continue; // Safety: never delete our new message
-          await ctx.db.delete(msg._id);
-          deletedCount++;
+          try {
+            await ctx.db.delete(msg._id);
+            deletedCount++;
+          } catch {
+            // Silently ignore if already deleted by concurrent request
+          }
         }
 
         // Safety: prevent infinite loop if something goes wrong
