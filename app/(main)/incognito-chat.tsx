@@ -17,8 +17,9 @@ import {
 } from 'react-native';
 import { Image } from 'expo-image';
 import { FlashList, type FlashListRef } from '@shopify/flash-list';
-import { useLocalSearchParams, useRouter } from 'expo-router';
+import { useLocalSearchParams, useRouter, useFocusEffect } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Ionicons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
 import { INCOGNITO_COLORS } from '@/lib/constants';
@@ -206,6 +207,31 @@ export default function PrivateChatScreen() {
     }
   }, [id, addMessage]);
 
+  // Check for captured media from camera-composer when screen regains focus
+  useFocusEffect(
+    useCallback(() => {
+      const checkCapturedMedia = async () => {
+        if (!id) return;
+        const key = `secure_capture_media_${id}`;
+        const stored = await AsyncStorage.getItem(key);
+        if (!stored) return;
+
+        await AsyncStorage.removeItem(key);
+        try {
+          const data = JSON.parse(stored);
+          if (data.uri && data.type) {
+            setPickedImageUri(data.uri);
+            setPendingMediaType(data.type);
+            setShowCameraSheet(true);
+          }
+        } catch {
+          // Ignore parse errors
+        }
+      };
+      checkCapturedMedia();
+    }, [id])
+  );
+
   // Auto-scroll only when new messages arrive AND user is near bottom
   useEffect(() => {
     const count = messages.length;
@@ -287,58 +313,13 @@ export default function PrivateChatScreen() {
     setShowCameraSheet(true);
   }, [conversation]);
 
-  // Camera capture: show Photo/Video chooser (explicit selection, not system mode)
+  // Camera capture: navigate directly to camera screen in PHOTO mode (no Alert prompt)
   const handleCameraCapture = useCallback(() => {
     if (!conversation) return;
     setShowAttachMenu(false);
-
-    Alert.alert(
-      'Camera',
-      'What would you like to capture?',
-      [
-        {
-          text: 'Photo',
-          onPress: async () => {
-            const { status } = await ImagePicker.requestCameraPermissionsAsync();
-            if (status !== 'granted') {
-              Alert.alert('Permission Required', 'Camera access is needed to take photos.');
-              return;
-            }
-            const result = await ImagePicker.launchCameraAsync({
-              mediaTypes: ['images'],
-              quality: 1,
-              allowsEditing: false,
-            });
-            if (result.canceled || !result.assets?.[0]?.uri) return;
-            setPickedImageUri(result.assets[0].uri);
-            setPendingMediaType('photo');
-            setShowCameraSheet(true);
-          },
-        },
-        {
-          text: 'Video',
-          onPress: async () => {
-            const { status } = await ImagePicker.requestCameraPermissionsAsync();
-            if (status !== 'granted') {
-              Alert.alert('Permission Required', 'Camera access is needed to record videos.');
-              return;
-            }
-            const result = await ImagePicker.launchCameraAsync({
-              mediaTypes: ['videos'],
-              quality: 1,
-              allowsEditing: false,
-            });
-            if (result.canceled || !result.assets?.[0]?.uri) return;
-            setPickedImageUri(result.assets[0].uri);
-            setPendingMediaType('video');
-            setShowCameraSheet(true);
-          },
-        },
-        { text: 'Cancel', style: 'cancel' },
-      ],
-      { cancelable: true }
-    );
-  }, [conversation]);
+    // Navigate to camera-composer in secure capture mode (default: photo)
+    router.push(`/(main)/camera-composer?mode=secure_capture&conversationId=${id}` as any);
+  }, [conversation, id, router]);
 
   // Voice recording from + menu
   const handleVoiceFromMenu = useCallback(() => {

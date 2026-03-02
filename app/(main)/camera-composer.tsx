@@ -14,7 +14,8 @@ import { INCOGNITO_COLORS } from '@/lib/constants';
 import type { TodMediaVisibility } from '@/types';
 
 const C = INCOGNITO_COLORS;
-const MAX_VIDEO_SEC = 60;
+const MAX_VIDEO_SEC_TOD = 60;
+const MAX_VIDEO_SEC_SECURE = 30;
 
 export default function CameraComposerScreen() {
   const router = useRouter();
@@ -24,10 +25,15 @@ export default function CameraComposerScreen() {
     promptId?: string;
     promptType?: string;
     todConversationId?: string; // For in-chat T&D answers
+    conversationId?: string; // For secure capture in private DMs
   }>();
 
   // Check if this is an in-chat T&D answer (mandatory game)
   const isTodAnswer = params.mode === 'tod_answer' && params.todConversationId;
+  // Check if this is secure capture mode from private DM
+  const isSecureCapture = params.mode === 'secure_capture' && params.conversationId;
+  // Use 30s limit for secure capture, 60s for T&D
+  const MAX_VIDEO_SEC = isSecureCapture ? MAX_VIDEO_SEC_SECURE : MAX_VIDEO_SEC_TOD;
 
   // Support both: explicit mode from old callers, or switchable mode (default)
   const [captureMode, setCaptureMode] = useState<'photo' | 'video'>(
@@ -127,7 +133,8 @@ export default function CameraComposerScreen() {
     if (!capturedUri) return;
     try {
       // Copy media to permanent document directory so URI survives navigation
-      const mediaDir = new Directory(Paths.document, 'tod_media');
+      const dirName = isSecureCapture ? 'secure_media' : 'tod_media';
+      const mediaDir = new Directory(Paths.document, dirName);
       if (!mediaDir.exists) {
         mediaDir.create();
       }
@@ -138,10 +145,15 @@ export default function CameraComposerScreen() {
       sourceFile.copy(destFile);
       const permanentUri = destFile.uri;
 
-      // Use conversation-specific key for in-chat T&D, generic key for public T&D
-      const storageKey = isTodAnswer
-        ? `tod_camera_answer_${params.todConversationId}`
-        : 'tod_captured_media';
+      // Determine storage key based on mode
+      let storageKey: string;
+      if (isSecureCapture) {
+        storageKey = `secure_capture_media_${params.conversationId}`;
+      } else if (isTodAnswer) {
+        storageKey = `tod_camera_answer_${params.todConversationId}`;
+      } else {
+        storageKey = 'tod_captured_media';
+      }
 
       await AsyncStorage.setItem(storageKey, JSON.stringify({
         uri: permanentUri,
@@ -149,7 +161,7 @@ export default function CameraComposerScreen() {
         mediaUri: permanentUri, // Alias for ChatTodOverlay compatibility
         promptId: params.promptId,
         durationSec: capturedType === 'video' ? videoSeconds : undefined,
-        visibility: mediaVisibility,
+        visibility: isSecureCapture ? undefined : mediaVisibility,
       }));
       router.back();
     } catch {
@@ -203,34 +215,36 @@ export default function CameraComposerScreen() {
           )}
         </View>
 
-        {/* Visibility selector */}
-        <View style={styles.visibilitySection}>
-          <Text style={styles.visibilityLabel}>Who can view this?</Text>
-          <View style={styles.visibilityOptions}>
-            <TouchableOpacity
-              style={[styles.visibilityOption, mediaVisibility === 'owner_only' && styles.visibilityOptionActive]}
-              onPress={() => setMediaVisibility('owner_only')}
-            >
-              <View style={[styles.radioOuter, mediaVisibility === 'owner_only' && styles.radioOuterActive]}>
-                {mediaVisibility === 'owner_only' && <View style={styles.radioInner} />}
-              </View>
-              <Text style={[styles.visibilityOptionText, mediaVisibility === 'owner_only' && styles.visibilityOptionTextActive]}>
-                Only question owner
-              </Text>
-            </TouchableOpacity>
-            <TouchableOpacity
-              style={[styles.visibilityOption, mediaVisibility === 'public' && styles.visibilityOptionActive]}
-              onPress={() => setMediaVisibility('public')}
-            >
-              <View style={[styles.radioOuter, mediaVisibility === 'public' && styles.radioOuterActive]}>
-                {mediaVisibility === 'public' && <View style={styles.radioInner} />}
-              </View>
-              <Text style={[styles.visibilityOptionText, mediaVisibility === 'public' && styles.visibilityOptionTextActive]}>
-                Anyone can view
-              </Text>
-            </TouchableOpacity>
+        {/* Visibility selector - only for T&D, not secure capture */}
+        {!isSecureCapture && (
+          <View style={styles.visibilitySection}>
+            <Text style={styles.visibilityLabel}>Who can view this?</Text>
+            <View style={styles.visibilityOptions}>
+              <TouchableOpacity
+                style={[styles.visibilityOption, mediaVisibility === 'owner_only' && styles.visibilityOptionActive]}
+                onPress={() => setMediaVisibility('owner_only')}
+              >
+                <View style={[styles.radioOuter, mediaVisibility === 'owner_only' && styles.radioOuterActive]}>
+                  {mediaVisibility === 'owner_only' && <View style={styles.radioInner} />}
+                </View>
+                <Text style={[styles.visibilityOptionText, mediaVisibility === 'owner_only' && styles.visibilityOptionTextActive]}>
+                  Only question owner
+                </Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.visibilityOption, mediaVisibility === 'public' && styles.visibilityOptionActive]}
+                onPress={() => setMediaVisibility('public')}
+              >
+                <View style={[styles.radioOuter, mediaVisibility === 'public' && styles.radioOuterActive]}>
+                  {mediaVisibility === 'public' && <View style={styles.radioInner} />}
+                </View>
+                <Text style={[styles.visibilityOptionText, mediaVisibility === 'public' && styles.visibilityOptionTextActive]}>
+                  Anyone can view
+                </Text>
+              </TouchableOpacity>
+            </View>
           </View>
-        </View>
+        )}
 
         <View style={styles.previewActions}>
           <TouchableOpacity style={styles.retakeBtn} onPress={handleRetake}>
@@ -239,7 +253,7 @@ export default function CameraComposerScreen() {
           </TouchableOpacity>
           <TouchableOpacity style={styles.submitBtn} onPress={handleSubmit}>
             <Ionicons name="send" size={18} color="#FFF" />
-            <Text style={styles.submitBtnText}>Post</Text>
+            <Text style={styles.submitBtnText}>{isSecureCapture ? 'Use' : 'Post'}</Text>
           </TouchableOpacity>
         </View>
       </View>
