@@ -37,8 +37,9 @@ function getContentTypeFromUri(uri: string, mediaType?: 'photo' | 'video' | 'aud
 /**
  * Ensure file exists at a stable path. Copies if necessary.
  * Returns the path to read from (may be different from input).
+ * Exported for use in demo mode chatroom media persistence.
  */
-async function ensureStableFile(uri: string, mediaType?: 'photo' | 'video' | 'audio'): Promise<string> {
+export async function ensureStableFile(uri: string, mediaType?: 'photo' | 'video' | 'audio'): Promise<string> {
   const uriPrefix = uri.substring(0, Math.min(50, uri.length));
 
   // Check if file exists

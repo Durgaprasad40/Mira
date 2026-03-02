@@ -127,6 +127,7 @@ export default function SecureMediaViewer({
   onHoldStart,
 }: SecureMediaViewerProps) {
   const [screenshotBlocked, setScreenshotBlocked] = useState(false);
+  const [mediaLoadError, setMediaLoadError] = useState(false);
   const screenshotTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Cleanup screenshot timeout on unmount to prevent setState after unmount
@@ -171,12 +172,18 @@ export default function SecureMediaViewer({
     onPanResponderTerminationRequest: () => false,
   }), []);
 
-  // Reset screenshot blocked when viewer closes
+  // Reset states when viewer closes or mediaUri changes
   useEffect(() => {
     if (!visible) {
       setScreenshotBlocked(false);
+      setMediaLoadError(false);
     }
   }, [visible]);
+
+  // Reset error state when mediaUri changes
+  useEffect(() => {
+    setMediaLoadError(false);
+  }, [mediaUri]);
 
   // Android screenshot detection
   useEffect(() => {
@@ -253,12 +260,20 @@ export default function SecureMediaViewer({
         {/* Media display area with PanResponder for hold-to-view */}
         <View style={styles.mediaArea} {...viewerPanResponder.panHandlers}>
           {type === 'image' ? (
-            <Image
-              source={{ uri: mediaUri }}
-              style={styles.media}
-              contentFit="contain"
-              blurRadius={showMedia ? 0 : 50}
-            />
+            mediaLoadError ? (
+              <View style={styles.errorOverlay}>
+                <Ionicons name="image-outline" size={48} color="rgba(255,255,255,0.4)" />
+                <Text style={styles.errorText}>Media unavailable</Text>
+              </View>
+            ) : (
+              <Image
+                source={{ uri: mediaUri }}
+                style={styles.media}
+                contentFit="contain"
+                blurRadius={showMedia ? 0 : 50}
+                onError={() => setMediaLoadError(true)}
+              />
+            )
           ) : (
             <View style={styles.videoContainer}>
               {/* Video player mounted only for video type with stable URI */}
@@ -370,5 +385,18 @@ const styles = StyleSheet.create({
     fontSize: 16,
     color: 'rgba(255,255,255,0.6)',
     fontWeight: '600',
+  },
+  errorOverlay: {
+    width: SCREEN_WIDTH,
+    height: SCREEN_HEIGHT * 0.8,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: '#1a1a1a',
+  },
+  errorText: {
+    marginTop: 12,
+    fontSize: 16,
+    color: 'rgba(255,255,255,0.5)',
+    fontWeight: '500',
   },
 });

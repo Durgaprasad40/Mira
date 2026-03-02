@@ -61,6 +61,7 @@ import { useChatRoomDmStore } from '@/stores/chatRoomDmStore';
 import { usePreferredChatRoomStore } from '@/stores/preferredChatRoomStore';
 import { useChatRoomProfileStore } from '@/stores/chatRoomProfileStore';
 import PrivateChatView from '@/components/chatroom/PrivateChatView';
+import { ensureStableFile } from '@/lib/uploadUtils';
 
 const C = INCOGNITO_COLORS;
 const MUTE_STORAGE_KEY = (roomId: string) => `@muted_room_${roomId}`;
@@ -397,14 +398,61 @@ export default function ChatRoomScreen() {
     prevMessageCount.current = messages.length;
   }, [messages.length, scrollToBottom]);
 
-  // Initial scroll on first load
+  // ─────────────────────────────────────────────────────────────────────────
+  // INITIAL SCROLL (debounced stabilized scroll)
+  // Messages load in phases after hydration/seeding, so we debounce to wait
+  // for "stabilization" before scrolling to bottom.
+  // ─────────────────────────────────────────────────────────────────────────
   const hasInitialScrolled = useRef(false);
+  const initialScrollDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Cleanup debounce timeout on unmount
+  useEffect(() => {
+    return () => {
+      if (initialScrollDebounceRef.current) {
+        clearTimeout(initialScrollDebounceRef.current);
+        initialScrollDebounceRef.current = null;
+      }
+    };
+  }, []);
+
+  // Schedule initial scroll - resets debounce timer on each call
+  const scheduleInitialScroll = useCallback(() => {
+    if (hasInitialScrolled.current) return;
+    if (messages.length === 0) return;
+
+    // Clear previous timer
+    if (initialScrollDebounceRef.current) {
+      clearTimeout(initialScrollDebounceRef.current);
+    }
+
+    // Schedule scroll after 200ms of no changes
+    initialScrollDebounceRef.current = setTimeout(() => {
+      if (hasInitialScrolled.current) return;
+      hasInitialScrolled.current = true;
+
+      // Use InteractionManager for reliable timing after layout/JS interactions
+      InteractionManager.runAfterInteractions(() => {
+        requestAnimationFrame(() => {
+          scrollToBottom(false);
+        });
+      });
+    }, 200);
+  }, [messages.length, scrollToBottom]);
+
+  // Trigger debounce scheduler when messages.length changes (during initial load)
   useEffect(() => {
     if (!hasInitialScrolled.current && messages.length > 0) {
-      hasInitialScrolled.current = true;
-      scrollToBottom(false);
+      scheduleInitialScroll();
     }
-  }, [messages.length, scrollToBottom]);
+  }, [messages.length, scheduleInitialScroll]);
+
+  // Also trigger from onContentSizeChange for layout-driven updates
+  const handleInitialContentSizeChange = useCallback(() => {
+    if (!hasInitialScrolled.current && messages.length > 0) {
+      scheduleInitialScroll();
+    }
+  }, [messages.length, scheduleInitialScroll]);
 
   // Seed demo room on mount
   // P1 CR-004: Wait for store hydration before seeding to prevent race conditions
@@ -676,6 +724,15 @@ export default function ChatRoomScreen() {
       const labelMap = { image: 'Photo', video: 'Video', doodle: 'Doodle' };
 
       if (isDemoMode) {
+        // Copy media to persistent location so it survives app restart
+        let persistentUri = uri;
+        try {
+          const mediaTypeHint = mediaType === 'video' ? 'video' : 'photo';
+          persistentUri = await ensureStableFile(uri, mediaTypeHint);
+        } catch (err) {
+          console.warn('[ChatRoom] Failed to persist media, using original URI:', err);
+        }
+
         const newMessage: DemoChatMessage = {
           id: `cm_me_${Date.now()}`,
           roomId: roomIdStr,
@@ -683,7 +740,7 @@ export default function ChatRoomScreen() {
           senderName: persistedDisplayName ?? DEMO_CURRENT_USER.username,
           type: mediaType,
           text: `[${labelMap[mediaType]}]`,
-          mediaUrl: uri,
+          mediaUrl: persistentUri,
           createdAt: Date.now(),
         };
         addStoreMessage(roomIdStr, newMessage);
@@ -1047,6 +1104,7 @@ export default function ChatRoomScreen() {
               keyboardShouldPersistTaps="handled"
               keyboardDismissMode="interactive"
               onScroll={handleScroll}
+              onContentSizeChange={handleInitialContentSizeChange}
               scrollEventThrottle={16}
               // P2 Performance: FlatList tuning props
               initialNumToRender={15}
