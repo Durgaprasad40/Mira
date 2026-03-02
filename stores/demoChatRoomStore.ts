@@ -48,10 +48,12 @@ export const useDemoChatRoomStore = create<DemoChatRoomState>()(
         set((s) => {
           const current = s.rooms[roomId] ?? [];
           const next = [...current, msg];
+          // RETENTION: Match backend behavior — at 1000 messages, trim to 900 (delete 100 oldest)
+          // If overshoot (e.g., 1005), still trim to 900. This matches convex/chatRooms.ts logic.
           return {
             rooms: {
               ...s.rooms,
-              [roomId]: next.length > 1000 ? next.slice(next.length - 1000) : next,
+              [roomId]: next.length >= 1000 ? next.slice(next.length - 900) : next,
             },
           };
         }),

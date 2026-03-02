@@ -1103,9 +1103,10 @@ export default defineSchema({
   chatRoomMessages: defineTable({
     roomId: v.id('chatRooms'),
     senderId: v.id('users'),
-    type: v.union(v.literal('text'), v.literal('image'), v.literal('video'), v.literal('doodle'), v.literal('system')),
+    type: v.union(v.literal('text'), v.literal('image'), v.literal('video'), v.literal('doodle'), v.literal('system'), v.literal('audio')),
     text: v.optional(v.string()),
     imageUrl: v.optional(v.string()),
+    audioUrl: v.optional(v.string()), // For audio/voice messages
     createdAt: v.number(),
     clientId: v.optional(v.string()), // For deduplication
     status: v.optional(v.union(v.literal('pending'), v.literal('sent'), v.literal('failed'))), // Message status
