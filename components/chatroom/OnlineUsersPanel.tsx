@@ -53,7 +53,7 @@ type SectionData = {
 
 // Helper: Get display name for sorting (null-safe)
 function getDisplayName(user: OnlineUserWithPenalty): string {
-  return (user.username || '').toLowerCase();
+  return (user.username || user.id || '').toLowerCase();
 }
 
 export default function OnlineUsersPanel({
@@ -136,7 +136,7 @@ export default function OnlineUsersPanel({
         </View>
       )}
       <View style={styles.userInfo}>
-        <Text style={styles.userName}>{item.username}</Text>
+        <Text style={styles.userName}>{item.username || item.id || 'Unknown'}</Text>
         {!item.isOnline && (
           <Text style={styles.lastSeen}>{formatLastSeen(item.lastSeen)}</Text>
         )}
