@@ -162,16 +162,16 @@ export default function PrivateLayout() {
   const exitToHome = () => {
     if (isExitingRef.current) return;
     isExitingRef.current = true;
-    // B3-MEDIUM FIX: Wrap navigation in try/finally to prevent permanent lock on error
+    // B3-MEDIUM FIX: Wrap navigation in try/catch/finally to prevent permanent lock on error
     try {
       // FIX: Use replace() instead of back() to exit in ONE action
       // back() caused double-swipe because of stacked route entries
       router.replace(PHASE1_DISCOVER_ROUTE);
+    } catch (error) {
+      if (__DEV__) console.error('[PrivateLayout] exitToHome navigation failed:', error);
     } finally {
-      // Reset ref after navigation attempt (success or failure) to prevent permanent lock
-      setTimeout(() => {
-        isExitingRef.current = false;
-      }, 500);
+      // B3.1 FIX: Reset ref immediately (not timer-based) to prevent permanent lock
+      isExitingRef.current = false;
     }
   };
 
