@@ -134,6 +134,9 @@ export default function ChatRoomsScreen() {
   // Track if user manually navigated (tapped a room) - skip preferred redirect if so
   const userNavigatedRef = useRef(false);
 
+  // M-006/M-007 FIX: Track mount state to prevent setState after unmount
+  const mountedRef = useRef(true);
+
   // P2-AUD-005: Ref for refresh timeout cleanup
   const refreshTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
@@ -195,69 +198,24 @@ export default function ChatRoomsScreen() {
   // Still loading validation if convex query is undefined (not yet resolved)
   const isValidationLoading = !isDemoMode && effectivePreferredRoomId && preferredRoomValidation === undefined;
 
-  // Use useEffect (not useLayoutEffect) to avoid "navigate before mounting Root Layout"
-  // P2 STABILITY: Add safety timeout to prevent infinite spinner if navigation fails
-  const redirectTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // CRITICAL FIX M-001: Removed duplicate useEffect redirect logic
+  // All redirects now handled by useFocusEffect below to prevent
+  // "child already has a parent" Android crashes from concurrent navigation
 
+  // Simple loading state management - set checkingPreferred to false once data loads
   useEffect(() => {
-    // Wait for navigation to be ready before any redirect
-    if (!isNavigationReady) return;
-
-    // User manually tapped a room → skip preferred redirect
-    if (userNavigatedRef.current) {
+    if (!isPreferredLoading) {
       setCheckingPreferred(false);
-      return;
     }
+  }, [isPreferredLoading]);
 
-    // Still loading preferred room data → keep checkingPreferred true
-    if (isPreferredLoading) return;
-
-    // Already redirected in this session → don't redirect again
-    if (hasRedirectedRef.current) {
-      setCheckingPreferred(false);
-      return;
-    }
-
-    // Has preferred room → validate before redirect
-    if (effectivePreferredRoomId) {
-      // Still validating if room exists → wait
-      if (isValidationLoading) return;
-
-      // Room does NOT exist (stale ID) → clear and skip redirect
-      if (!isPreferredRoomValid) {
-        if (__DEV__) console.log('[ChatRooms] Skipping redirect; stale roomId cleared', effectivePreferredRoomId);
-        clearPreferredRoom();
-        setCheckingPreferred(false);
-        return;
-      }
-
-      // Room exists → redirect
-      if (__DEV__) console.log('[ChatRooms] Initial redirect to', effectivePreferredRoomId);
-      hasRedirectedRef.current = true;
-      setIsRedirecting(true);
-
-      // P2 STABILITY: Safety timeout - if navigation doesn't complete within 2s, clear spinner
-      redirectTimeoutRef.current = setTimeout(() => {
-        setCheckingPreferred(false);
-        setIsRedirecting(false);
-      }, 2000);
-
-      router.replace(`/(main)/(private)/(tabs)/chat-rooms/${effectivePreferredRoomId}` as any);
-      return;
-    }
-
-    // No preferred room → show homepage
-    setCheckingPreferred(false);
-  }, [isNavigationReady, isPreferredLoading, effectivePreferredRoomId, isValidationLoading, isPreferredRoomValid, clearPreferredRoom, router]);
-
-  // Cleanup timeouts on unmount
+  // M-006/M-007 FIX: Cleanup timeouts and mark unmounted on unmount
   useEffect(() => {
     return () => {
-      if (redirectTimeoutRef.current) {
-        clearTimeout(redirectTimeoutRef.current);
-        redirectTimeoutRef.current = null;
-      }
-      // P2-AUD-005: Clear refresh timeout
+      // Mark component unmounted to prevent setState after unmount
+      mountedRef.current = false;
+
+      // Clear all timeouts
       if (refreshTimeoutRef.current) {
         clearTimeout(refreshTimeoutRef.current);
         refreshTimeoutRef.current = null;
@@ -265,14 +223,17 @@ export default function ChatRoomsScreen() {
     };
   }, []);
 
-  // Also check on screen focus (returning to tab after navigating away)
-  // Allow redirect every time screen focuses if preferredRoom exists
+  // M-002/M-003 FIX: Preferred room redirect with navigation guards
+  // Redirect fires ONCE per component mount when preferred room exists
   useFocusEffect(
     useCallback(() => {
+      // M-002 FIX: Wait for navigation to be ready before router.replace
+      if (!isNavigationReady) return;
+
       // Skip if still loading or no preferred room
       if (isPreferredLoading || !effectivePreferredRoomId) return;
 
-      // Skip if already redirected in this mount cycle (useEffect handled it)
+      // Skip if already redirected in this mount cycle
       if (hasRedirectedRef.current) return;
 
       // Skip if still validating room existence
@@ -290,12 +251,13 @@ export default function ChatRoomsScreen() {
       setIsRedirecting(true);
       router.replace(`/(main)/(private)/(tabs)/chat-rooms/${effectivePreferredRoomId}` as any);
 
-      // Cleanup: reset flag when screen loses focus so we can redirect again next time
+      // M-003 FIX: Only reset isRedirecting in cleanup, NOT hasRedirectedRef
+      // This prevents infinite redirect loop when user navigates back to index
+      // Redirect will only fire ONCE per component mount, not every screen focus
       return () => {
-        hasRedirectedRef.current = false;
         setIsRedirecting(false);
       };
-    }, [isPreferredLoading, effectivePreferredRoomId, isValidationLoading, isPreferredRoomValid, clearPreferredRoom, router])
+    }, [isNavigationReady, isPreferredLoading, effectivePreferredRoomId, isValidationLoading, isPreferredRoomValid, clearPreferredRoom, router])
   );
 
   // Phase-2: Get DM store state for per-room unread counts
@@ -383,7 +345,12 @@ export default function ChatRoomsScreen() {
     setRefreshing(true);
     // In live mode, Convex auto-refreshes. For demo mode, simulate delay.
     // P2-AUD-005: Track timeout in ref for cleanup
-    refreshTimeoutRef.current = setTimeout(() => setRefreshing(false), 800);
+    refreshTimeoutRef.current = setTimeout(() => {
+      // M-006 FIX: Guard setState after unmount
+      if (mountedRef.current) {
+        setRefreshing(false);
+      }
+    }, 800);
   }, []);
 
   const handleOpenRoom = useCallback(
@@ -391,11 +358,6 @@ export default function ChatRoomsScreen() {
       if (__DEV__) console.log('[TAP] room pressed', { roomId, t: Date.now() });
       // Mark user navigated to cancel any pending preferred room redirect
       userNavigatedRef.current = true;
-      // Clear any pending redirect timeout
-      if (redirectTimeoutRef.current) {
-        clearTimeout(redirectTimeoutRef.current);
-        redirectTimeoutRef.current = null;
-      }
 
       // ISSUE B: Find room to get name and private status for instant render
       // Check in rooms (general/language) first, then privateRooms

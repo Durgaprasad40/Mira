@@ -90,6 +90,9 @@ export default function PrivateDataRecoveryScreen() {
   }, [effectiveRecoverUntil]);
 
   const handleRecover = async () => {
+    // M-005 FIX: Prevent multiple simultaneous recovery attempts (double-tap guard)
+    if (isRecovering) return;
+
     if (expired) {
       Alert.alert(
         'Recovery Window Expired',
@@ -98,6 +101,9 @@ export default function PrivateDataRecoveryScreen() {
       );
       return;
     }
+
+    // M-005 FIX: Set recovering state before any async work (biometric auth)
+    setIsRecovering(true);
 
     // Step 1: Authenticate user with biometric or device PIN
     try {
@@ -108,6 +114,7 @@ export default function PrivateDataRecoveryScreen() {
           'Device Authentication Not Available',
           'This device does not support biometric or device PIN authentication.'
         );
+        setIsRecovering(false);
         return;
       }
 
@@ -119,6 +126,7 @@ export default function PrivateDataRecoveryScreen() {
 
       // If authentication failed or user cancelled, do nothing
       if (!authResult.success) {
+        setIsRecovering(false);
         return;
       }
 
@@ -126,6 +134,7 @@ export default function PrivateDataRecoveryScreen() {
     } catch (error) {
       console.error('Authentication error:', error);
       Alert.alert('Error', 'Device authentication failed. Please try again.');
+      setIsRecovering(false);
       return;
     }
 
@@ -134,7 +143,11 @@ export default function PrivateDataRecoveryScreen() {
       'Recover Private Data',
       'Your private profile will be restored exactly as it was before deletion.',
       [
-        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Cancel',
+          style: 'cancel',
+          onPress: () => setIsRecovering(false), // M-005 FIX: Reset state on cancel
+        },
         {
           text: 'Recover',
           onPress: async () => {
@@ -273,9 +286,20 @@ export default function PrivateDataRecoveryScreen() {
               Your private data is currently hidden. You can recover all your photos, messages, and settings until the deadline above.
             </Text>
 
-            <TouchableOpacity style={styles.recoverButton} onPress={handleRecover} activeOpacity={0.8}>
-              <Ionicons name="refresh-outline" size={20} color="#FFF" />
-              <Text style={styles.recoverButtonText}>Recover Private Data</Text>
+            <TouchableOpacity
+              style={[styles.recoverButton, isRecovering && styles.recoverButtonDisabled]}
+              onPress={handleRecover}
+              activeOpacity={0.8}
+              disabled={isRecovering}
+            >
+              {isRecovering ? (
+                <ActivityIndicator size="small" color="#FFF" />
+              ) : (
+                <Ionicons name="refresh-outline" size={20} color="#FFF" />
+              )}
+              <Text style={styles.recoverButtonText}>
+                {isRecovering ? 'Authenticating...' : 'Recover Private Data'}
+              </Text>
             </TouchableOpacity>
           </>
         )}
@@ -386,6 +410,9 @@ const styles = StyleSheet.create({
     paddingHorizontal: 32,
     borderRadius: 12,
     width: '100%',
+  },
+  recoverButtonDisabled: {
+    opacity: 0.6,
   },
   recoverButtonText: {
     fontSize: 16,

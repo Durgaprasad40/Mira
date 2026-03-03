@@ -27,6 +27,7 @@ export default function AccountScreen() {
 
   const { userId } = useAuthStore();
   const initiatePrivateDataDeletion = usePrivateProfileStore((s) => s.initiatePrivateDataDeletion);
+  const recoverPrivateData = usePrivateProfileStore((s) => s.recoverPrivateData);
 
   const initiateDeletionMutation = useMutation(api.privateDeletion.initiatePrivateDeletion);
 
@@ -61,12 +62,18 @@ export default function AccountScreen() {
                 return;
               }
 
-              // Update local store immediately for UI responsiveness
+              // Update local store immediately for UI responsiveness (optimistic)
               initiatePrivateDataDeletion();
 
-              // Call server-side mutation (skip in demo mode)
+              // M-004 FIX: Server mutation with rollback on failure
               if (!isDemoMode && userId) {
-                await initiateDeletionMutation({ userId: stringToUserId(userId) });
+                try {
+                  await initiateDeletionMutation({ userId: stringToUserId(userId) });
+                } catch (serverError) {
+                  // M-004 FIX: Rollback optimistic update to keep local+server consistent
+                  recoverPrivateData();
+                  throw serverError; // Re-throw to outer catch for error alert
+                }
               }
 
               Alert.alert(

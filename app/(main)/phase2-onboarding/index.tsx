@@ -236,6 +236,14 @@ export default function Phase2OnboardingTerms() {
   // Navigation guard: prevent double-tap on X button
   const isExitingRef = useRef(false);
 
+  // O-001 FIX: Track mount state to prevent setState after unmount
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
   const setAcceptedTermsAt = usePrivateProfileStore((s) => s.setAcceptedTermsAt);
   const importPhase1Data = usePrivateProfileStore((s) => s.importPhase1Data);
 
@@ -318,7 +326,10 @@ export default function Phase2OnboardingTerms() {
       if (!canonicalProfile) {
         console.error("[P2 IMPORT] FATAL: No current profile found");
         Alert.alert("Error", "No profile found. Please complete Phase-1 setup first.");
-        setIsProcessing(false);
+        // O-001 FIX: Guard setState after unmount
+        if (mountedRef.current) {
+          setIsProcessing(false);
+        }
         return;
       }
 
@@ -383,7 +394,10 @@ export default function Phase2OnboardingTerms() {
     } catch (err) {
       if (__DEV__) console.error("[Phase2Onboarding] Error:", err);
     } finally {
-      setIsProcessing(false);
+      // O-001 FIX: Guard setState after unmount
+      if (mountedRef.current) {
+        setIsProcessing(false);
+      }
     }
   };
 

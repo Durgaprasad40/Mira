@@ -63,12 +63,6 @@ export default function PrivateTabsLayout() {
         }}
       />
       <Tabs.Screen
-        name="confess"
-        options={{
-          href: null,
-        }}
-      />
-      <Tabs.Screen
         name="chat-rooms"
         options={{
           title: 'Chat Rooms',
@@ -83,12 +77,6 @@ export default function PrivateTabsLayout() {
             minWidth: 18,
             height: 18,
           },
-        }}
-      />
-      <Tabs.Screen
-        name="rooms"
-        options={{
-          href: null,
         }}
       />
       <Tabs.Screen
