@@ -35,9 +35,13 @@ import { Ionicons } from '@expo/vector-icons';
 import { BlurView } from 'expo-blur';
 import { Paths, File as ExpoFile, Directory } from 'expo-file-system';
 import * as ImagePicker from 'expo-image-picker';
+import { useQuery } from 'convex/react';
+import { api } from '@/convex/_generated/api';
+import { stringToUserId } from '@/convex/helpers';
 import { INCOGNITO_COLORS } from '@/lib/constants';
 import { PRIVATE_INTENT_CATEGORIES } from '@/lib/privateConstants';
 import { usePrivateProfileStore } from '@/stores/privateProfileStore';
+import { useAuthStore } from '@/stores/authStore';
 import { isDemoMode } from '@/hooks/useConvex';
 import { getDemoCurrentUser } from '@/lib/demoData';
 
@@ -141,6 +145,13 @@ export default function PrivateProfileScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
 
+  // Auth
+  const { userId } = useAuthStore();
+
+  // NOTE: Recovery gating now happens at Phase-1 "Private" entry point only.
+  // This screen no longer auto-redirects to recovery - user must exit Phase-2
+  // and re-enter via Phase-1 Private button to see recovery screen.
+
   // Phase-2 store data
   const selectedPhotoUrls = usePrivateProfileStore((s) => s.selectedPhotoUrls);
   const displayName = usePrivateProfileStore((s) => s.displayName);
@@ -151,6 +162,27 @@ export default function PrivateProfileScreen() {
   const setSelectedPhotos = usePrivateProfileStore((s) => s.setSelectedPhotos);
   const setBlurMyPhoto = usePrivateProfileStore((s) => s.setBlurMyPhoto);
   const resetPhase2 = usePrivateProfileStore((s) => s.resetPhase2);
+
+  // PHASE 1 Settings
+  const defaultPhotoVisibility = usePrivateProfileStore((s) => s.defaultPhotoVisibility);
+  const allowUnblurRequests = usePrivateProfileStore((s) => s.allowUnblurRequests);
+  const defaultSecureMediaTimer = usePrivateProfileStore((s) => s.defaultSecureMediaTimer);
+  const defaultSecureMediaViewingMode = usePrivateProfileStore((s) => s.defaultSecureMediaViewingMode);
+  const communicationStyle = usePrivateProfileStore((s) => s.communicationStyle);
+  const desirelandVisibility = usePrivateProfileStore((s) => s.desirelandVisibility);
+  const ageVisibility = usePrivateProfileStore((s) => s.ageVisibility);
+  const whoCanMessageMe = usePrivateProfileStore((s) => s.whoCanMessageMe);
+  const safeMode = usePrivateProfileStore((s) => s.safeMode);
+
+  const setDefaultPhotoVisibility = usePrivateProfileStore((s) => s.setDefaultPhotoVisibility);
+  const setAllowUnblurRequests = usePrivateProfileStore((s) => s.setAllowUnblurRequests);
+  const setDefaultSecureMediaTimer = usePrivateProfileStore((s) => s.setDefaultSecureMediaTimer);
+  const setDefaultSecureMediaViewingMode = usePrivateProfileStore((s) => s.setDefaultSecureMediaViewingMode);
+  const setCommunicationStyle = usePrivateProfileStore((s) => s.setCommunicationStyle);
+  const setDesirelandVisibility = usePrivateProfileStore((s) => s.setDesirelandVisibility);
+  const setAgeVisibility = usePrivateProfileStore((s) => s.setAgeVisibility);
+  const setWhoCanMessageMe = usePrivateProfileStore((s) => s.setWhoCanMessageMe);
+  const setSafeMode = usePrivateProfileStore((s) => s.setSafeMode);
 
   // Local UI state
   const [previewAsOthers, setPreviewAsOthers] = useState(false);
@@ -668,11 +700,11 @@ export default function PrivateProfileScreen() {
           </Text>
         </View>
 
-        {/* Connection Vibe */}
+        {/* Communication Style (Bio) */}
         {privateBio && privateBio.trim().length > 0 && (
           <View style={styles.section}>
             <View style={styles.sectionHeader}>
-              <Text style={styles.sectionTitle}>Connection Vibe</Text>
+              <Text style={styles.sectionTitle}>Communication Style</Text>
               <TouchableOpacity onPress={handleEditProfile} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
                 <Text style={styles.editLink}>Edit</Text>
               </TouchableOpacity>
@@ -700,46 +732,37 @@ export default function PrivateProfileScreen() {
           </View>
         )}
 
-        {/* Settings Shortcuts */}
+        {/* Settings Menu */}
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Settings</Text>
 
-          <TouchableOpacity style={styles.settingsRow} activeOpacity={0.7}>
-            <View style={styles.settingsRowLeft}>
-              <Ionicons name="diamond-outline" size={20} color={C.primary} />
-              <View>
-                <Text style={styles.settingsRowLabel}>Subscription</Text>
-                <Text style={styles.settingsRowValue}>Free Plan</Text>
-              </View>
-            </View>
-            <Ionicons name="chevron-forward" size={20} color={C.textLight} />
-          </TouchableOpacity>
-
-          <TouchableOpacity style={styles.settingsRow} activeOpacity={0.7}>
-            <View style={styles.settingsRowLeft}>
-              <Ionicons name="shield-checkmark-outline" size={20} color={C.primary} />
-              <View>
-                <Text style={styles.settingsRowLabel}>Privacy Settings</Text>
-                <Text style={styles.settingsRowValue}>Manage who can see you</Text>
-              </View>
-            </View>
+          <TouchableOpacity
+            style={styles.menuRow}
+            onPress={() => router.push('/(main)/(private)/settings/photo-media-privacy' as any)}
+            activeOpacity={0.7}
+          >
+            <Ionicons name="images-outline" size={22} color={C.text} />
+            <Text style={styles.menuText}>Photo & Media Privacy</Text>
             <Ionicons name="chevron-forward" size={20} color={C.textLight} />
           </TouchableOpacity>
 
           <TouchableOpacity
-            style={[styles.settingsRow, styles.settingsRowDanger]}
-            onPress={handleResetPhase2}
+            style={styles.menuRow}
+            onPress={() => router.push('/(main)/(private)/settings/safety' as any)}
             activeOpacity={0.7}
           >
-            <View style={styles.settingsRowLeft}>
-              <Ionicons name="refresh-outline" size={20} color="#FF6B6B" />
-              <View>
-                <Text style={[styles.settingsRowLabel, styles.settingsRowLabelDanger]}>
-                  Reset Private Profile
-                </Text>
-                <Text style={styles.settingsRowValue}>Start over with a fresh setup</Text>
-              </View>
-            </View>
+            <Ionicons name="shield-checkmark-outline" size={22} color={C.text} />
+            <Text style={styles.menuText}>Safety</Text>
+            <Ionicons name="chevron-forward" size={20} color={C.textLight} />
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={styles.menuRow}
+            onPress={() => router.push('/(main)/(private)/settings/account' as any)}
+            activeOpacity={0.7}
+          >
+            <Ionicons name="person-outline" size={22} color={C.text} />
+            <Text style={styles.menuText}>Account</Text>
             <Ionicons name="chevron-forward" size={20} color={C.textLight} />
           </TouchableOpacity>
         </View>
@@ -751,16 +774,6 @@ export default function PrivateProfileScreen() {
             This profile is separate from your main profile and only visible inside Private Mode.
           </Text>
         </View>
-
-        {/* Back to Main App */}
-        <TouchableOpacity
-          style={styles.backToMainBtn}
-          onPress={() => router.replace('/(main)/(tabs)/home' as any)}
-          activeOpacity={0.7}
-        >
-          <Ionicons name="arrow-back" size={18} color={C.textLight} />
-          <Text style={styles.backToMainText}>Back to Main App</Text>
-        </TouchableOpacity>
       </ScrollView>
 
       {/* Full-screen Photo Viewer Modal */}
@@ -1174,6 +1187,55 @@ const styles = StyleSheet.create({
     color: '#FF6B6B',
   },
 
+  // PHASE 1 Inline Settings Styles
+  settingCard: {
+    backgroundColor: C.surface,
+    borderRadius: 12,
+    padding: 14,
+    marginTop: 8,
+  },
+  settingLabel: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: C.text,
+    marginBottom: 10,
+  },
+  settingRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+  },
+  settingHint: {
+    fontSize: 12,
+    color: C.textLight,
+    marginTop: 8,
+  },
+  segmentedControl: {
+    flexDirection: 'row',
+    backgroundColor: C.accent,
+    borderRadius: 8,
+    padding: 2,
+  },
+  segmentBtn: {
+    flex: 1,
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderRadius: 6,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  segmentBtnActive: {
+    backgroundColor: C.primary,
+  },
+  segmentText: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: C.textLight,
+  },
+  segmentTextActive: {
+    color: '#FFFFFF',
+  },
+
   // Privacy Note
   privacyNote: {
     flexDirection: 'row',
@@ -1292,5 +1354,24 @@ const styles = StyleSheet.create({
     fontSize: 13,
     color: C.primary,
     fontWeight: '500',
+  },
+
+  // Menu Row Styles
+  menuRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: C.surface,
+    paddingVertical: 16,
+    paddingHorizontal: 14,
+    borderRadius: 12,
+    marginBottom: 10,
+  },
+  menuText: {
+    flex: 1,
+    fontSize: 15,
+    fontWeight: '600',
+    color: C.text,
+    marginLeft: 12,
   },
 });

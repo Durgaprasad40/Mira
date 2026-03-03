@@ -1232,4 +1232,17 @@ export default defineSchema({
     .index('by_target_createdAt', ['targetUserId', 'createdAt'])
     .index('by_action_createdAt', ['action', 'createdAt'])
     .index('by_createdAt', ['createdAt']),  // For "latest logs" without filters
+
+  // Private Profile Deletion States (30-day soft delete)
+  privateDeletionStates: defineTable({
+    userId: v.id('users'),
+    status: v.union(v.literal('active'), v.literal('pending_deletion')),
+    deletedAt: v.optional(v.number()),
+    recoverUntil: v.optional(v.number()),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index('by_userId', ['userId'])
+    .index('by_status', ['status'])
+    .index('by_recoverUntil', ['recoverUntil']),
 });

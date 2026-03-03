@@ -1,11 +1,13 @@
 import { v } from 'convex/values';
 import { query } from './_generated/server';
+import { isPrivateDataDeleted } from './privateDeletion';
 
 // Get private discovery profiles (blurred photos only)
 // Filters out:
 // - The requesting user
 // - Incomplete profiles
 // - Blocked users (in BOTH directions - shared across phases)
+// - Users with pending deletion
 export const getProfiles = query({
   args: {
     userId: v.id('users'),
@@ -33,15 +35,24 @@ export const getProfiles = query({
       .withIndex('by_enabled', (q) => q.eq('isPrivateEnabled', true))
       .collect();
 
+    // Get all deletion states to filter out pending deletions
+    const deletionStates = await ctx.db
+      .query('privateDeletionStates')
+      .withIndex('by_status', (q) => q.eq('status', 'pending_deletion'))
+      .collect();
+    const deletedUserIds = new Set(deletionStates.map((d) => d.userId as string));
+
     // Filter out:
     // - The requesting user
     // - Incomplete profiles
     // - Blocked users (either direction)
+    // - Users with pending deletion
     const filtered = profiles.filter(
       (p) =>
         p.userId !== args.userId &&
         p.isSetupComplete &&
-        !blockedUserIds.has(p.userId as string)
+        !blockedUserIds.has(p.userId as string) &&
+        !deletedUserIds.has(p.userId as string)
     );
 
     const limit = args.limit ?? 50;

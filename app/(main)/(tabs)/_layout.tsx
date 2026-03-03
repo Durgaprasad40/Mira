@@ -3,6 +3,7 @@ import { Tabs, useRouter } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import { useQuery } from "convex/react";
 import { api } from "@/convex/_generated/api";
+import { stringToUserId } from "@/convex/helpers";
 import { COLORS } from "@/lib/constants";
 import { isDemoMode } from "@/hooks/useConvex";
 import { useAuthStore } from "@/stores/authStore";
@@ -86,10 +87,17 @@ export default function MainTabsLayout() {
 
   const taggedBadgeCount = isDemoMode ? demoTaggedCount : (convexTaggedCount || 0);
 
+  // Query deletion state for Private tab entry gating (non-demo mode)
+  const privateDeletionState = useQuery(
+    api.privateDeletion.getPrivateDeletionState,
+    !isDemoMode && userId ? { userId: stringToUserId(userId) } : 'skip'
+  );
+
   // Private tab state - check if Phase-2 onboarding is complete
   // MUST match the same logic used in PrivateLayout to avoid redirect flash
   const phase2OnboardingCompleted = usePrivateProfileStore((s) => s.phase2OnboardingCompleted);
   const privateStoreHydrated = usePrivateProfileStore((s) => s._hasHydrated);
+  const localDeletionStatus = usePrivateProfileStore((s) => s.deletionStatus);
   // N-001/C-004 FIX: Permanent guard to prevent duplicate router.replace calls
   // Only resets on component remount (not timeout-based)
   const didRouteToPrivateRef = useRef(false);
@@ -114,8 +122,18 @@ export default function MainTabsLayout() {
     }
     didRouteToPrivateRef.current = true;
 
-    // Navigate based on onboarding completion (same check as PrivateLayout)
-    if (phase2OnboardingCompleted) {
+    // Determine effective deletion status (server in non-demo, local in demo)
+    const effectiveDeletionStatus = isDemoMode
+      ? localDeletionStatus
+      : (privateDeletionState?.status ?? localDeletionStatus);
+
+    // Check deletion state FIRST - if pending, go to recovery screen
+    if (effectiveDeletionStatus === 'pending_deletion') {
+      if (__DEV__) console.log('[PRIVATE TAP] pressed -> Recovery (deletion pending)');
+      router.replace('/(main)/private-recovery' as any);
+    }
+    // Otherwise, navigate based on onboarding completion
+    else if (phase2OnboardingCompleted) {
       if (__DEV__) console.log('[PRIVATE TAP] pressed -> Phase-2 tabs');
       router.replace('/(main)/(private)/(tabs)' as any);
     } else {

@@ -1,10 +1,17 @@
 import { v } from 'convex/values';
 import { mutation, query } from './_generated/server';
+import { isPrivateDataDeleted } from './privateDeletion';
 
 // Get private profile by user ID
 export const getByUserId = query({
   args: { userId: v.id('users') },
   handler: async (ctx, args) => {
+    // Check if private data is in pending_deletion state
+    const isDeleted = await isPrivateDataDeleted(ctx, args.userId);
+    if (isDeleted) {
+      return null; // Return null if data is pending deletion
+    }
+
     const profile = await ctx.db
       .query('userPrivateProfiles')
       .withIndex('by_user', (q) => q.eq('userId', args.userId))
@@ -39,6 +46,12 @@ export const upsert = mutation({
     isVerified: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
+    // Check if private data is in pending_deletion state
+    const isDeleted = await isPrivateDataDeleted(ctx, args.userId);
+    if (isDeleted) {
+      throw new Error('Cannot update profile while deletion is pending');
+    }
+
     const existing = await ctx.db
       .query('userPrivateProfiles')
       .withIndex('by_user', (q) => q.eq('userId', args.userId))
@@ -76,6 +89,12 @@ export const updateFields = mutation({
     isSetupComplete: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
+    // Check if private data is in pending_deletion state
+    const isDeleted = await isPrivateDataDeleted(ctx, args.userId);
+    if (isDeleted) {
+      throw new Error('Cannot update profile while deletion is pending');
+    }
+
     const existing = await ctx.db
       .query('userPrivateProfiles')
       .withIndex('by_user', (q) => q.eq('userId', args.userId))

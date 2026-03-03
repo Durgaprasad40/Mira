@@ -103,6 +103,28 @@ interface PrivateProfileState {
   // Navigation lock: prevents duplicate router.replace calls in PrivateEntryGuard
   privateEntryNavLock: boolean;
 
+  // PHASE 1 Settings — Photo & Media Privacy
+  defaultPhotoVisibility: 'public' | 'blurred' | 'private';
+  allowUnblurRequests: boolean;
+  defaultSecureMediaTimer: 0 | 10 | 30;
+  defaultSecureMediaViewingMode: 'tap' | 'hold';
+
+  // PHASE 1 Settings — Communication Style (renamed from Connection Vibe)
+  communicationStyle: 'text-first' | 'voice-friendly' | 'meet-oriented' | null;
+
+  // PHASE 1 Settings — Discoverability
+  desirelandVisibility: 'active' | 'paused' | 'hidden';
+  ageVisibility: 'exact' | 'range' | 'hide';
+
+  // PHASE 1 Settings — Safety
+  whoCanMessageMe: 'everyone' | 'matches' | 'verified';
+  safeMode: boolean;
+
+  // Deletion State (30-day soft delete)
+  deletionStatus: 'active' | 'pending_deletion' | 'deleted';
+  deletedAt: number | null; // Timestamp when deletion was initiated
+  recoverUntil: number | null; // Timestamp = deletedAt + 30 days
+
   // Actions — wizard navigation
   setCurrentStep: (step: number) => void;
 
@@ -151,6 +173,21 @@ interface PrivateProfileState {
   completeSetup: () => void;
   setPhase2PhotosConfirmed: (confirmed: boolean) => void;
   setPrivateEntryNavLock: (locked: boolean) => void;
+
+  // PHASE 1 Settings Actions
+  setDefaultPhotoVisibility: (visibility: 'public' | 'blurred' | 'private') => void;
+  setAllowUnblurRequests: (allow: boolean) => void;
+  setDefaultSecureMediaTimer: (timer: 0 | 10 | 30) => void;
+  setDefaultSecureMediaViewingMode: (mode: 'tap' | 'hold') => void;
+  setCommunicationStyle: (style: 'text-first' | 'voice-friendly' | 'meet-oriented' | null) => void;
+  setDesirelandVisibility: (visibility: 'active' | 'paused' | 'hidden') => void;
+  setAgeVisibility: (visibility: 'exact' | 'range' | 'hide') => void;
+  setWhoCanMessageMe: (who: 'everyone' | 'matches' | 'verified') => void;
+  setSafeMode: (enabled: boolean) => void;
+
+  // Deletion Actions
+  initiatePrivateDataDeletion: () => void;
+  recoverPrivateData: () => void;
 }
 
 const initialWizardState = {
@@ -190,6 +227,20 @@ const initialWizardState = {
   phase1PhotoSlots: createEmptyPhotoSlots(),
   phase2PhotosConfirmed: false, // True after Step-2 photo selection
   privateEntryNavLock: false, // Navigation lock for PrivateEntryGuard
+  // PHASE 1 Settings — Defaults
+  defaultPhotoVisibility: 'blurred' as const,
+  allowUnblurRequests: true,
+  defaultSecureMediaTimer: 30 as const,
+  defaultSecureMediaViewingMode: 'tap' as const,
+  communicationStyle: null as 'text-first' | 'voice-friendly' | 'meet-oriented' | null,
+  desirelandVisibility: 'active' as const,
+  ageVisibility: 'exact' as const,
+  whoCanMessageMe: 'everyone' as const,
+  safeMode: false,
+  // Deletion state defaults
+  deletionStatus: 'active' as const,
+  deletedAt: null,
+  recoverUntil: null,
 };
 
 export const usePrivateProfileStore = create<PrivateProfileState>()(
@@ -360,6 +411,33 @@ export const usePrivateProfileStore = create<PrivateProfileState>()(
       }),
       setPhase2PhotosConfirmed: (confirmed) => set({ phase2PhotosConfirmed: confirmed }),
       setPrivateEntryNavLock: (locked) => set({ privateEntryNavLock: locked }),
+
+      // PHASE 1 Settings Actions — Implementations
+      setDefaultPhotoVisibility: (visibility) => set({ defaultPhotoVisibility: visibility }),
+      setAllowUnblurRequests: (allow) => set({ allowUnblurRequests: allow }),
+      setDefaultSecureMediaTimer: (timer) => set({ defaultSecureMediaTimer: timer }),
+      setDefaultSecureMediaViewingMode: (mode) => set({ defaultSecureMediaViewingMode: mode }),
+      setCommunicationStyle: (style) => set({ communicationStyle: style }),
+      setDesirelandVisibility: (visibility) => set({ desirelandVisibility: visibility }),
+      setAgeVisibility: (visibility) => set({ ageVisibility: visibility }),
+      setWhoCanMessageMe: (who) => set({ whoCanMessageMe: who }),
+      setSafeMode: (enabled) => set({ safeMode: enabled }),
+
+      // Deletion actions
+      initiatePrivateDataDeletion: () => {
+        const now = Date.now();
+        const thirtyDaysMs = 30 * 24 * 60 * 60 * 1000;
+        set({
+          deletionStatus: 'pending_deletion',
+          deletedAt: now,
+          recoverUntil: now + thirtyDaysMs,
+        });
+      },
+      recoverPrivateData: () => set({
+        deletionStatus: 'active',
+        deletedAt: null,
+        recoverUntil: null,
+      }),
     }),
     {
       name: 'private-profile-store',
@@ -403,6 +481,20 @@ export const usePrivateProfileStore = create<PrivateProfileState>()(
         // Legacy
         profile: state.profile,
         isSetup: state.isSetup,
+        // PHASE 1 Settings
+        defaultPhotoVisibility: state.defaultPhotoVisibility,
+        allowUnblurRequests: state.allowUnblurRequests,
+        defaultSecureMediaTimer: state.defaultSecureMediaTimer,
+        defaultSecureMediaViewingMode: state.defaultSecureMediaViewingMode,
+        communicationStyle: state.communicationStyle,
+        desirelandVisibility: state.desirelandVisibility,
+        ageVisibility: state.ageVisibility,
+        whoCanMessageMe: state.whoCanMessageMe,
+        safeMode: state.safeMode,
+        // Deletion state
+        deletionStatus: state.deletionStatus,
+        deletedAt: state.deletedAt,
+        recoverUntil: state.recoverUntil,
       }),
       onRehydrateStorage: () => (state) => {
         state?.setHasHydrated(true);
