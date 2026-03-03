@@ -71,6 +71,8 @@ export default function PrivateLayout() {
   // B1 FIX: Track phantom "/" normalization state to show loading UI
   const [isNormalizingRoot, setIsNormalizingRoot] = useState(false);
   const normalizationTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // B3.4 FIX: Track if we've already normalized to prevent redundant triggers
+  const didNormalizeRef = useRef(false);
 
   // B1.1 FIX: Add router readiness check
   const rootNavState = useRootNavigationState();
@@ -102,6 +104,10 @@ export default function PrivateLayout() {
 
     const segmentStrings = segments as string[];
     if (pathname === '/' && segmentStrings.includes('(private)')) {
+      // B3.4 FIX: Skip if we've already normalized (prevent redundant triggers)
+      if (didNormalizeRef.current) return;
+      didNormalizeRef.current = true;
+
       setIsNormalizingRoot(true);
 
       // B1.1 FIX: Timeout fallback - escape to Phase-1 if normalization fails (2s)
@@ -357,12 +363,18 @@ export default function PrivateLayout() {
   // B1.1 FIX: Conditional rendering moved to END after ALL hooks
   // H-001/C-001 FIX: Wait for incognito store hydration before checking consent
   // Prevents showing consent gate to already-consented users on cold start
-  if (!incognitoHydrated || !hasHydrated || isNormalizingRoot) {
+  if (!incognitoHydrated || !hasHydrated) {
     return (
       <View style={[styles.container, { paddingTop: insets.top, alignItems: 'center', justifyContent: 'center' }]}>
         <ActivityIndicator size="large" color={C.primary} />
       </View>
     );
+  }
+
+  // B3.4 FIX: For phantom "/" normalization, render null (no spinner flash)
+  // This reduces the visible loading flash during Phase-2 entry
+  if (isNormalizingRoot) {
+    return null;
   }
 
   // B1.1 FIX: Consent gate (checked after spinner check above)
