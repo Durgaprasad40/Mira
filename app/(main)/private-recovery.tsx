@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, Alert, ActivityIndicator } from 'react-native';
 import { useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -36,6 +36,14 @@ export default function PrivateDataRecoveryScreen() {
   const [daysRemaining, setDaysRemaining] = useState(0);
   const [expired, setExpired] = useState(false);
   const [isRecovering, setIsRecovering] = useState(false);
+
+  // B3-MEDIUM FIX: Prevent setState-after-unmount
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   // Determine effective deletion state (server in non-demo, local in demo)
   const effectiveDeletionStatus = isDemoMode ? localDeletionStatus : (serverDeletionState?.status ?? localDeletionStatus);
@@ -114,19 +122,33 @@ export default function PrivateDataRecoveryScreen() {
           'Device Authentication Not Available',
           'This device does not support biometric or device PIN authentication.'
         );
-        setIsRecovering(false);
+        if (mountedRef.current) setIsRecovering(false);
         return;
       }
 
-      const authResult = await LocalAuthentication.authenticateAsync({
+      // B3-MEDIUM FIX: Wrap authentication with 30s timeout to prevent infinite hang
+      const authPromise = LocalAuthentication.authenticateAsync({
         promptMessage: 'Authenticate to recover your private data',
         fallbackLabel: 'Use device PIN',
         cancelLabel: 'Cancel',
       });
 
+      const timeoutPromise = new Promise<{ success: false; error: string }>((resolve) =>
+        setTimeout(() => resolve({ success: false, error: 'timeout' }), 30000)
+      );
+
+      const authResult = await Promise.race([authPromise, timeoutPromise]);
+
+      // Handle timeout
+      if ('error' in authResult && authResult.error === 'timeout') {
+        Alert.alert('Authentication Timed Out', 'Authentication timed out. Please try again.');
+        if (mountedRef.current) setIsRecovering(false);
+        return;
+      }
+
       // If authentication failed or user cancelled, do nothing
       if (!authResult.success) {
-        setIsRecovering(false);
+        if (mountedRef.current) setIsRecovering(false);
         return;
       }
 
@@ -134,7 +156,7 @@ export default function PrivateDataRecoveryScreen() {
     } catch (error) {
       console.error('Authentication error:', error);
       Alert.alert('Error', 'Device authentication failed. Please try again.');
-      setIsRecovering(false);
+      if (mountedRef.current) setIsRecovering(false);
       return;
     }
 
@@ -146,7 +168,9 @@ export default function PrivateDataRecoveryScreen() {
         {
           text: 'Cancel',
           style: 'cancel',
-          onPress: () => setIsRecovering(false), // M-005 FIX: Reset state on cancel
+          onPress: () => {
+            if (mountedRef.current) setIsRecovering(false);
+          },
         },
         {
           text: 'Recover',
@@ -155,7 +179,7 @@ export default function PrivateDataRecoveryScreen() {
             if (isRecovering) return;
 
             try {
-              setIsRecovering(true);
+              if (mountedRef.current) setIsRecovering(true);
 
               // CRITICAL: Verify userId exists before proceeding (non-demo mode)
               if (!isDemoMode && !userId) {
@@ -185,7 +209,7 @@ export default function PrivateDataRecoveryScreen() {
               console.error('Error recovering data:', error);
               Alert.alert('Error', 'Failed to recover data. Please try again.');
             } finally {
-              setIsRecovering(false);
+              if (mountedRef.current) setIsRecovering(false);
             }
           },
         },

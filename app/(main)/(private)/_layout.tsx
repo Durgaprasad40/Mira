@@ -162,9 +162,17 @@ export default function PrivateLayout() {
   const exitToHome = () => {
     if (isExitingRef.current) return;
     isExitingRef.current = true;
-    // FIX: Use replace() instead of back() to exit in ONE action
-    // back() caused double-swipe because of stacked route entries
-    router.replace(PHASE1_DISCOVER_ROUTE);
+    // B3-MEDIUM FIX: Wrap navigation in try/finally to prevent permanent lock on error
+    try {
+      // FIX: Use replace() instead of back() to exit in ONE action
+      // back() caused double-swipe because of stacked route entries
+      router.replace(PHASE1_DISCOVER_ROUTE);
+    } finally {
+      // Reset ref after navigation attempt (success or failure) to prevent permanent lock
+      setTimeout(() => {
+        isExitingRef.current = false;
+      }, 500);
+    }
   };
 
   // 1) Intercept any navigation that would remove Private from the stack
@@ -296,10 +304,6 @@ export default function PrivateLayout() {
       });
     }
   }, [onboardingComplete, hasHydrated, router]);
-
-  // B1.1 FIX: ALL hooks must be called before any conditional returns
-  // Compute blocking spinner condition as a boolean
-  const shouldShowBlockingSpinner = !incognitoHydrated || !hasHydrated || isNormalizingRoot;
 
   // B1.1 FIX: Conditional rendering moved to END after ALL hooks
   // H-001/C-001 FIX: Wait for incognito store hydration before checking consent
