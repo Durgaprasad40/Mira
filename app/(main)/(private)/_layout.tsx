@@ -1,4 +1,4 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, BackHandler, Platform } from 'react-native';
 import { Stack, useRouter, useNavigation, usePathname, useSegments } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -45,6 +45,8 @@ export default function PrivateLayout() {
   // H-001/C-001 FIX: Wait for incognito store hydration before checking consent
   const incognitoHydrated = useIncognitoStore((s) => s._hasHydrated);
   const userId = useAuthStore((s) => s.userId);
+  // B1 FIX: Need hasHydrated early for phantom "/" normalization effect
+  const hasHydrated = usePrivateProfileStore((s) => s._hasHydrated);
 
   // PERF: Log mount time
   useEffect(() => {
@@ -65,6 +67,10 @@ export default function PrivateLayout() {
   const didRedirectRef = useRef(false);
   const mountedRef = useRef(false);
 
+  // B1 FIX: Track phantom "/" normalization state to show loading UI
+  const [isNormalizingRoot, setIsNormalizingRoot] = useState(false);
+  const normalizationTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
 
   // CRASH FIX: Track mount lifecycle
   useEffect(() => {
@@ -77,15 +83,48 @@ export default function PrivateLayout() {
   // 🚨 CRITICAL: Collapse phantom "/" route inside Phase-2
   // Expo Router creates an implicit "/" entry before the real Phase-2 home.
   // This causes double back gestures. Normalize immediately to desire-land.
+  // B1 FIX: Added hydration check, try/catch, and timeout fallback for safety
   useEffect(() => {
+    // B1 FIX: Wait for hydration before normalizing to prevent blank screen
+    if (!hasHydrated) return;
     if (!mountedRef.current) return;
+
     const segmentStrings = segments as string[];
     if (pathname === '/' && segmentStrings.includes('(private)')) {
+      setIsNormalizingRoot(true);
+
+      // B1 FIX: Timeout fallback - escape to Phase-1 if normalization fails (2s)
+      normalizationTimeoutRef.current = setTimeout(() => {
+        if (__DEV__) console.warn('[PrivateLayout] Phantom root normalization timeout - exiting to Phase-1');
+        setIsNormalizingRoot(false);
+        router.replace(PHASE1_DISCOVER_ROUTE);
+      }, 2000);
+
       requestAnimationFrame(() => {
-        router.replace(PHASE2_HOME_ROUTE);
+        // B1 FIX: Try/catch for safe navigation
+        try {
+          router.replace(PHASE2_HOME_ROUTE);
+          setIsNormalizingRoot(false);
+          if (normalizationTimeoutRef.current) {
+            clearTimeout(normalizationTimeoutRef.current);
+            normalizationTimeoutRef.current = null;
+          }
+        } catch (error) {
+          if (__DEV__) console.error('[PrivateLayout] Phantom root normalization failed:', error);
+          setIsNormalizingRoot(false);
+          // Timeout will handle fallback navigation
+        }
       });
     }
-  }, [pathname, segments, router]);
+
+    // B1 FIX: Cleanup timeout on unmount
+    return () => {
+      if (normalizationTimeoutRef.current) {
+        clearTimeout(normalizationTimeoutRef.current);
+        normalizationTimeoutRef.current = null;
+      }
+    };
+  }, [pathname, segments, router, hasHydrated]);
 
   // Phase 2 isolation: Set module-level flag to block Phase 1-only notifications
   useEffect(() => {
@@ -181,7 +220,7 @@ export default function PrivateLayout() {
 
   const isSetupComplete = usePrivateProfileStore((s) => s.isSetupComplete);
   const phase2OnboardingCompleted = usePrivateProfileStore((s) => s.phase2OnboardingCompleted);
-  const hasHydrated = usePrivateProfileStore((s) => s._hasHydrated);
+  // B1 FIX: hasHydrated moved to top of component (line 49) for use in normalization effect
 
   // NOTE: Nav lock reset is handled ONLY by explicit exit actions (X button in onboarding)
   // No automatic segment-based or focus-based reset here to prevent double-entry bugs
@@ -222,6 +261,15 @@ export default function PrivateLayout() {
 
   // Wait for store hydration
   if (!hasHydrated) {
+    return (
+      <View style={[styles.container, { paddingTop: insets.top, alignItems: 'center', justifyContent: 'center' }]}>
+        <ActivityIndicator size="large" color={C.primary} />
+      </View>
+    );
+  }
+
+  // B1 FIX: Show loading while normalizing phantom "/" route
+  if (isNormalizingRoot) {
     return (
       <View style={[styles.container, { paddingTop: insets.top, alignItems: 'center', justifyContent: 'center' }]}>
         <ActivityIndicator size="large" color={C.primary} />
