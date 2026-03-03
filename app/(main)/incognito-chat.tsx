@@ -30,6 +30,7 @@ import { BottleSpinGame } from '@/components/chat/BottleSpinGame';
 import { CameraPhotoSheet, type CameraPhotoOptions } from '@/components/chat/CameraPhotoSheet';
 import { ReportModal } from '@/components/private/ReportModal';
 import { Phase2ProtectedMediaViewer } from '@/components/private/Phase2ProtectedMediaViewer';
+import { calculateProtectedMediaCountdown } from '@/utils/protectedMediaCountdown';
 import { DEMO_INCOGNITO_PROFILES } from '@/lib/demoData';
 import { useDemoStore } from '@/stores/demoStore';
 import { trackEvent } from '@/lib/analytics';
@@ -437,12 +438,15 @@ export default function PrivateChatScreen() {
       const isHoldMode = item.protectedMedia?.viewingMode === 'hold';
       const originalTimer = item.protectedMedia?.timer ?? 0;
 
-      // GOAL A: Live countdown - show remaining time if timer started, else static
+      // GOAL A: Live countdown - use shared helper to match viewer exactly
       const timerStarted = !!item.timerEndsAt;
-      const remainingSec = timerStarted
-        ? Math.max(0, Math.ceil((item.timerEndsAt! - now) / 1000))
-        : originalTimer;
-      const timerLabel = originalTimer === 0 ? 'View once' : `${remainingSec}s`;
+      const countdown = timerStarted
+        ? calculateProtectedMediaCountdown(item.timerEndsAt)
+        : null;
+
+      // Format: View once OR remaining time (matches viewer M:SS format)
+      const remainingSec = countdown ? countdown.remainingSeconds : originalTimer;
+      const timerLabel = originalTimer === 0 ? 'View once' : (countdown ? countdown.label : `${originalTimer}s`);
       const timerActive = timerStarted && remainingSec > 0;
 
       // Handlers for tap vs hold mode

@@ -30,6 +30,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { INCOGNITO_COLORS } from '@/lib/constants';
 import { usePrivateChatStore } from '@/stores/privateChatStore';
+import { calculateProtectedMediaCountdown } from '@/utils/protectedMediaCountdown';
 
 interface Phase2ProtectedMediaViewerProps {
   visible: boolean;
@@ -168,6 +169,7 @@ export function Phase2ProtectedMediaViewer({
 }: Phase2ProtectedMediaViewerProps) {
   const insets = useSafeAreaInsets();
   const [timeLeft, setTimeLeft] = useState<number | null>(null);
+  const [timerLabel, setTimerLabel] = useState<string>('');
   // Phase-2 Fix B: Track media load state for graceful error handling
   const [mediaLoadError, setMediaLoadError] = useState(false);
 
@@ -330,6 +332,7 @@ export function Phase2ProtectedMediaViewer({
       hasExpiredRef.current = false;
       prevTimeLeftRef.current = null; // Reset for next open
       setTimeLeft(null);
+      setTimerLabel('');
       setMediaLoadError(false); // Phase-2 Fix B: Reset error state
       clearTimer();
     }
@@ -353,6 +356,7 @@ export function Phase2ProtectedMediaViewer({
     // Already expired from store
     if (message.isExpired) {
       setTimeLeft(0);
+      setTimerLabel('0:00');
       return;
     }
 
@@ -360,25 +364,27 @@ export function Phase2ProtectedMediaViewer({
     if (!message.timerEndsAt) {
       if (timerSeconds === 0) {
         setTimeLeft(null);
+        setTimerLabel('');
       }
       return;
     }
 
-    // Timer is set - start countdown using the ref
+    // Timer is set - start countdown using the ref and shared helper
     const updateTimeLeft = () => {
       const endTime = timerEndsAtRef.current;
       if (!endTime) return;
 
-      const now = Date.now();
-      const remaining = Math.max(0, Math.ceil((endTime - now) / 1000));
+      // Use shared countdown calculation
+      const countdown = calculateProtectedMediaCountdown(endTime);
 
       // Stability fix: only update state when displayed value changes (reduces rerenders)
-      if (remaining !== prevTimeLeftRef.current) {
-        prevTimeLeftRef.current = remaining;
-        setTimeLeft(remaining);
+      if (countdown.remainingSeconds !== prevTimeLeftRef.current) {
+        prevTimeLeftRef.current = countdown.remainingSeconds;
+        setTimeLeft(countdown.remainingSeconds);
+        setTimerLabel(countdown.label);
       }
 
-      if (remaining <= 0 && !hasExpiredRef.current) {
+      if (countdown.expired && !hasExpiredRef.current) {
         hasExpiredRef.current = true;
         clearTimer();
         markSecurePhotoExpired(conversationId, messageId);
@@ -444,7 +450,7 @@ export function Phase2ProtectedMediaViewer({
             {/* Corner countdown badge - only UI for timer */}
             {hasActiveTimer && (
               <View style={[styles.cornerBadge, { top: insets.top + 16 }, isMirrored && styles.mirroredBadge]}>
-                <Text style={styles.cornerBadgeText}>{timeLeft}</Text>
+                <Text style={styles.cornerBadgeText}>{timerLabel}</Text>
               </View>
             )}
           </View>

@@ -6,6 +6,7 @@ import { useQuery } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { COLORS } from '@/lib/constants';
 import { log } from '@/utils/logger';
+import { calculateProtectedMediaCountdown } from '@/utils/protectedMediaCountdown';
 
 // Phase-1 tile sizing (matches MediaMessage.tsx)
 const THUMB_WIDTH = 100;
@@ -70,31 +71,34 @@ export function ProtectedMediaBubble({
   const watermark = mediaInfo?.watermarkEnabled ?? protectedMedia?.watermark ?? false;
   const isExpired = mediaInfo?.isExpired ?? isExpiredProp ?? false;
 
-  // Live countdown state — must match Phase2ProtectedMediaViewer exactly
+  // Live countdown state — uses shared helper to match Phase2ProtectedMediaViewer exactly
   const [remainingSec, setRemainingSec] = useState<number | null>(null);
+  const [timerLabel, setTimerLabel] = useState<string>('');
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const prevRemainingSec = useRef<number | null>(null);
 
-  // Calculate remaining time from wall-clock (same logic as viewer)
+  // Calculate remaining time from wall-clock using shared countdown helper
   useEffect(() => {
     if (isExpired || !timerEndsAt) {
       setRemainingSec(null);
+      setTimerLabel('');
       prevRemainingSec.current = null;
       return;
     }
 
     const updateRemaining = () => {
-      const now = Date.now();
-      const remaining = Math.max(0, Math.ceil((timerEndsAt - now) / 1000));
+      // Use shared countdown calculation (matches viewer exactly)
+      const countdown = calculateProtectedMediaCountdown(timerEndsAt);
 
       // Only update state when value changes (reduces rerenders, matches viewer)
-      if (remaining !== prevRemainingSec.current) {
-        prevRemainingSec.current = remaining;
-        setRemainingSec(remaining);
+      if (countdown.remainingSeconds !== prevRemainingSec.current) {
+        prevRemainingSec.current = countdown.remainingSeconds;
+        setRemainingSec(countdown.remainingSeconds);
+        setTimerLabel(countdown.label);
       }
 
       // Check if expired
-      if (remaining <= 0 && onExpire) {
+      if (countdown.expired && onExpire) {
         log.info('[SECURE_BUBBLE]', 'timer expired', { messageId });
         onExpire();
       }
@@ -103,8 +107,8 @@ export function ProtectedMediaBubble({
     // Initial update
     updateRemaining();
 
-    // Update every 100ms to match viewer interval exactly
-    intervalRef.current = setInterval(updateRemaining, 100);
+    // Update every 1000ms (1s) - sufficient for seconds-based countdown in list view
+    intervalRef.current = setInterval(updateRemaining, 1000);
 
     return () => {
       if (intervalRef.current) {
@@ -144,13 +148,9 @@ export function ProtectedMediaBubble({
     );
   }
 
-  // Determine timer display
+  // Determine timer display using shared countdown formatting
   const hasActiveTimer = remainingSec !== null && remainingSec > 0;
-  const timerLabel = hasActiveTimer
-    ? `${remainingSec}s`
-    : timerSeconds > 0
-    ? `${timerSeconds}s`
-    : null;
+  const displayTimerLabel = hasActiveTimer ? timerLabel : null;
 
   // Handle press events based on mode
   const handlePressIn = () => {
@@ -207,10 +207,10 @@ export function ProtectedMediaBubble({
       )}
 
       {/* Timer badge (bottom-left) - matches viewer countdown exactly */}
-      {timerLabel && (
+      {displayTimerLabel && (
         <View style={styles.timerBadge}>
           <Ionicons name="time-outline" size={10} color="#FFFFFF" />
-          <Text style={styles.timerText}>{timerLabel}</Text>
+          <Text style={styles.timerText}>{displayTimerLabel}</Text>
         </View>
       )}
 

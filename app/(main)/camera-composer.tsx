@@ -215,7 +215,14 @@ export default function CameraComposerScreen() {
           <View style={{ width: 24 }} />
         </View>
         <View style={styles.previewArea}>
-          <Image source={{ uri: capturedUri }} style={styles.previewImage} contentFit="contain" />
+          <Image
+            source={{ uri: capturedUri }}
+            style={[
+              styles.previewImage,
+              capturedFacing === 'front' && { transform: [{ scaleX: -1 }] },
+            ]}
+            contentFit="contain"
+          />
           {capturedType === 'video' && (
             <View style={styles.videoDurationBadge}>
               <Ionicons name="videocam" size={14} color="#FFF" />
