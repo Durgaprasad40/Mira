@@ -58,6 +58,7 @@ export default function PrivateLayout() {
   // when this screen is about to be popped from the (main) stack.
   const navigation = useNavigation();
   const isExitingRef = useRef(false);
+  const exitResetTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Back navigation guards (Android only)
   const lastBackAtRef = useRef(0);
@@ -79,6 +80,11 @@ export default function PrivateLayout() {
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
+      // B3.2 FIX: Clear exit reset timeout on unmount
+      if (exitResetTimeoutRef.current) {
+        clearTimeout(exitResetTimeoutRef.current);
+        exitResetTimeoutRef.current = null;
+      }
     };
   }, []);
 
@@ -162,17 +168,31 @@ export default function PrivateLayout() {
   const exitToHome = () => {
     if (isExitingRef.current) return;
     isExitingRef.current = true;
-    // B3-MEDIUM FIX: Wrap navigation in try/catch/finally to prevent permanent lock on error
+
+    // B3.2 FIX: Clear any existing timeout before starting new one
+    if (exitResetTimeoutRef.current) {
+      clearTimeout(exitResetTimeoutRef.current);
+      exitResetTimeoutRef.current = null;
+    }
+
+    // B3-MEDIUM FIX: Wrap navigation in try/catch to prevent permanent lock on error
     try {
       // FIX: Use replace() instead of back() to exit in ONE action
       // back() caused double-swipe because of stacked route entries
       router.replace(PHASE1_DISCOVER_ROUTE);
     } catch (error) {
       if (__DEV__) console.error('[PrivateLayout] exitToHome navigation failed:', error);
-    } finally {
-      // B3.1 FIX: Reset ref immediately (not timer-based) to prevent permanent lock
+      // On error, reset immediately so user can retry
       isExitingRef.current = false;
+      return;
     }
+
+    // B3.2 FIX: Failsafe timeout - reset ref after 2s if we haven't exited yet
+    exitResetTimeoutRef.current = setTimeout(() => {
+      if (__DEV__) console.warn('[PrivateLayout] Exit timeout - resetting guard');
+      isExitingRef.current = false;
+      exitResetTimeoutRef.current = null;
+    }, 2000);
   };
 
   // 1) Intercept any navigation that would remove Private from the stack
@@ -186,6 +206,24 @@ export default function PrivateLayout() {
     });
     return unsub;
   }, [navigation, router]);
+
+  // B3.2 FIX: Reset exit guard ONLY after we've actually left Private layout
+  // This prevents beforeRemove loop while keeping failsafe timeout
+  useEffect(() => {
+    const segmentStrings = segments as string[];
+    const isInPrivate = segmentStrings.includes('(private)');
+
+    // If we're exiting and we've successfully left Private, reset the guard
+    if (isExitingRef.current && !isInPrivate) {
+      if (__DEV__) console.log('[PrivateLayout] Successfully exited - resetting guard');
+      isExitingRef.current = false;
+      // Clear the failsafe timeout since we exited successfully
+      if (exitResetTimeoutRef.current) {
+        clearTimeout(exitResetTimeoutRef.current);
+        exitResetTimeoutRef.current = null;
+      }
+    }
+  }, [segments]);
 
   // 2) Android hardware back — Phase-2 Tab-to-Tab Back Controller
   //    ONLY intercepts back on Phase-2 TAB ROOT screens.
