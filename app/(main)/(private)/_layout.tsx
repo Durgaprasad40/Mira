@@ -201,11 +201,22 @@ export default function PrivateLayout() {
   useEffect(() => {
     const unsub = navigation.addListener('beforeRemove', (e: any) => {
       if (isExitingRef.current) return; // prevent loop
+
+      // B3.3 FIX: Ignore internal phantom root normalization navigation
+      // Allow the router.replace(PHASE2_HOME_ROUTE) to proceed without interception
+      if (isNormalizingRoot) return;
+
+      // B3.3 FIX: Also check for phantom root pathname directly (belt-and-suspenders)
+      const segmentStrings = segments as string[];
+      if (pathname === '/' && segmentStrings.includes('(private)')) {
+        return; // Allow normalization navigation
+      }
+
       e.preventDefault();
       exitToHome();
     });
     return unsub;
-  }, [navigation, router]);
+  }, [navigation, router, isNormalizingRoot, pathname, segments]);
 
   // B3.2 FIX: Reset exit guard ONLY after we've actually left Private layout
   // This prevents beforeRemove loop while keeping failsafe timeout
