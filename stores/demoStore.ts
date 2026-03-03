@@ -1247,39 +1247,32 @@ export const useDemoStore = create<DemoState>()(
             }
           }
 
-          // MIGRATION: Clear stale cache URIs AND demo/Unsplash URLs from user photos
-          // User photos must ONLY be real user-selected photos from persistent local storage
-          // Remove: ImageManipulator cache URIs, Unsplash URLs, any remote demo faces
-          if (state.demoProfiles) {
-            let clearedCount = 0;
-            const clearedProfiles: Record<string, DemoUserProfile> = {};
+          // ❌ CRITICAL PRODUCTION FIX - DO NOT DELETE PROFILE PHOTOS DURING HYDRATION
+          // Previous migration code DELETED user photos on every app restart - REMOVED FOR DATA SAFETY
+          // Photos are now stored in Convex backend as source of truth
+          // Local file:// URIs are kept for backward compatibility and preview
+          // Missing files are flagged at render time, not deleted from state
+          //
+          // REMOVED destructive filter (lines 1250-1283) that caused CRITICAL DATA LOSS:
+          // - Was deleting photos on every app restart/hydration
+          // - Did NOT check FileSystem.getInfoAsync() - only validated URI format
+          // - Caused permanent photo loss when iOS/Android cleaned documentDirectory
+          //
+          // DO NOT RE-ENABLE THIS CODE WITHOUT EXPLICIT APPROVAL
+          if (state.demoProfiles && __DEV__) {
+            // SAFE logging only - NO mutations
+            let potentialIssues = 0;
             for (const [userId, profile] of Object.entries(state.demoProfiles)) {
               if (profile.photos && profile.photos.length > 0) {
-                // Filter out: stale cache URIs, Unsplash URLs, any remote URLs (user photos must be local)
-                const cleanedPhotos = profile.photos.filter((p) => {
-                  if (!p.url) return false;
-                  // Remove stale cache URIs
-                  if (p.url.includes('/cache/ImageManipulator/') || p.url.includes('/Cache/')) return false;
-                  // Remove Unsplash/demo photos - user photos should never be remote URLs
-                  if (p.url.includes('unsplash.com')) return false;
-                  // Keep only local file:// URIs (persistent storage)
-                  return p.url.startsWith('file://');
-                });
-                if (cleanedPhotos.length !== profile.photos.length) {
-                  clearedProfiles[userId] = {
-                    ...profile,
-                    photos: cleanedPhotos,
-                  };
-                  clearedCount += profile.photos.length - cleanedPhotos.length;
+                for (const photo of profile.photos) {
+                  if (photo.url && (photo.url.includes('/cache/') || photo.url.includes('unsplash.com'))) {
+                    potentialIssues++;
+                  }
                 }
               }
             }
-            if (clearedCount > 0) {
-              useDemoStore.setState({
-                demoProfiles: { ...state.demoProfiles, ...clearedProfiles },
-              });
-              log.once('user-photo-migration', '[DEMO]', 'cleared invalid user photos', { count: clearedCount });
-              console.warn('[MIGRATION] Cleared stale/demo photo URIs. User must re-add photos.');
+            if (potentialIssues > 0) {
+              console.warn(`[DEMO PHOTOS] Found ${potentialIssues} photos with cache/remote URIs - NOT deleting (flagged for re-upload)`);
             }
           }
 

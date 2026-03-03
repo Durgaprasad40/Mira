@@ -17,6 +17,8 @@ import { api } from '@/convex/_generated/api';
 import { Id } from '@/convex/_generated/dataModel';
 import { isDemoMode, convex } from '@/hooks/useConvex';
 import { OnboardingProgressHeader } from '@/components/OnboardingProgressHeader';
+import { checkPhotoExists, getPhotoFileState, type PhotoFileState } from '@/lib/photoFileGuard';
+import { uploadPhotoToBackend } from '@/services/photoSync';
 
 // Persistent photos directory - files here survive app restarts
 const PHOTOS_DIR = FileSystem.documentDirectory + 'mira/photos/';
@@ -106,6 +108,9 @@ export default function PhotoUploadScreen() {
   // SAFETY: Don't initialize from photos[0] - it may be stale from previous user
   const [previewUri, setPreviewUri] = useState<string | null>(null);
 
+  // TASK 2: File existence guard - track if displayed photo file exists
+  const [photoFileState, setPhotoFileState] = useState<PhotoFileState>('empty');
+
   // CRITICAL: Skip this screen if user is already verified - redirect immediately
   const didSkipRef = React.useRef(false);
   React.useEffect(() => {
@@ -139,6 +144,26 @@ export default function PhotoUploadScreen() {
     console.log(`[PHOTO_GATE] referenceSet=${referenceSet} previewUri=${!!previewUri} photos[0]=${!!photos[0]} userId=${userId}`);
   }, [previewUri, photos, userId]);
 
+  // TASK 2: Check file existence when displayUri changes
+  // This runs proactively BEFORE rendering to detect missing files
+  // CRITICAL: We only FLAG missing files - we NEVER delete the URI from AsyncStorage
+  React.useEffect(() => {
+    const currentUri = previewUri || photos[0];
+
+    async function checkFileState() {
+      const state = await getPhotoFileState(currentUri);
+      setPhotoFileState(state);
+
+      if (state === 'missing' && __DEV__) {
+        console.warn('[PHOTO_GUARD] Verification photo file missing - user needs to re-upload');
+      } else if (state === 'invalid' && __DEV__) {
+        console.warn('[PHOTO_GUARD] Verification photo has invalid URI (cache/remote) - user should re-upload');
+      }
+    }
+
+    checkFileState();
+  }, [previewUri, photos]);
+
   const requestPermissions = async () => {
     const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
     if (status !== 'granted') {
@@ -147,6 +172,12 @@ export default function PhotoUploadScreen() {
     }
     return true;
   };
+
+  // ════════════════════════════════════════════════════════════════════════
+  // PHASE-1 PROFILE PHOTOS ARE BACKEND-OWNED. LOCAL FILES ARE CACHE ONLY.
+  // ════════════════════════════════════════════════════════════════════════
+  // HARD LOCK: Verification photo MUST be uploaded to Convex immediately
+  // ════════════════════════════════════════════════════════════════════════
 
   const processAndSetPhoto = async (asset: ImagePicker.ImagePickerAsset, source: 'gallery' | 'camera') => {
     // Check minimum size
@@ -169,12 +200,10 @@ export default function PhotoUploadScreen() {
       cacheUri = manipResult.uri;
     }
 
-    // CRITICAL: Copy to persistent storage so photo survives app relaunch
-    // ImageManipulator cache URIs are cleared on app restart
+    // HARD LOCK: Copy to local cache for immediate preview ONLY
+    // This is NOT permanent storage - Convex backend is source of truth
     const persistentUri = await persistPhoto(cacheUri);
 
-    // FIX: If persist failed, show error and do NOT save to stores
-    // This prevents cache URIs from being saved and later wiped by migration
     if (!persistentUri) {
       Alert.alert(
         'Photo Save Failed',
@@ -185,7 +214,6 @@ export default function PhotoUploadScreen() {
       return;
     }
 
-    // Double-check the URI is valid before saving (belt + suspenders)
     if (!isValidPersistentUri(persistentUri)) {
       Alert.alert(
         'Photo Save Failed',
@@ -196,16 +224,44 @@ export default function PhotoUploadScreen() {
       return;
     }
 
-    // DEBUG: Log final stored URI validation result
+    // CRITICAL: Upload to Convex backend IMMEDIATELY (REQUIRED by HARD LOCK)
+    // Verification photo upload moved HERE from handleNext() to enforce immediate backend storage
+    if (!isDemoMode && userId) {
+      if (__DEV__) console.log('[PHOTO_LOCK] Uploading verification photo to Convex backend...');
+
+      const uploadResult = await uploadPhotoToBackend(
+        userId,
+        persistentUri,
+        true, // isPrimary (verification photo is always primary)
+        0 // slot 0
+      );
+
+      if (!uploadResult.success) {
+        Alert.alert(
+          'Upload Failed',
+          'Failed to upload photo to server. Please try again.',
+          [{ text: 'OK' }]
+        );
+        console.error('[PHOTO_LOCK] Verification photo upload failed:', uploadResult.message);
+        return;
+      }
+
+      if (__DEV__) {
+        console.log(`[PHOTO_LOCK] ✅ Verification photo uploaded to Convex: storageId=${uploadResult.storageId}`);
+      }
+    }
+
+    // DEBUG: Log cache URI
     if (__DEV__) {
-      console.log(`[PHOTO] STORED URI CHECK:`, {
+      console.log(`[PHOTO] CACHE URI (verification):`, {
         source,
         uri: persistentUri,
         isValid: true,
+        note: 'LOCAL CACHE ONLY - Convex backend is source of truth',
       });
     }
 
-    // Only save to stores after validation passes
+    // Store local URI as cache ONLY (NOT source of truth)
     setPreviewUri(persistentUri);
     setPhotoAtIndex(0, persistentUri);
   };
@@ -392,7 +448,7 @@ export default function PhotoUploadScreen() {
         </Text>
 
         <View style={styles.photoContainer}>
-          {displayUri ? (
+          {displayUri && photoFileState === 'exists' ? (
             <View style={styles.photoPreview}>
               <Image
                 source={{ uri: displayUri }}
@@ -404,6 +460,12 @@ export default function PhotoUploadScreen() {
               <View style={styles.photoCheckmark}>
                 <Ionicons name="checkmark-circle" size={28} color={COLORS.success} />
               </View>
+            </View>
+          ) : displayUri && (photoFileState === 'missing' || photoFileState === 'invalid') ? (
+            <View style={styles.placeholder}>
+              <Ionicons name="alert-circle" size={64} color={COLORS.error} />
+              <Text style={styles.placeholderText}>Photo file missing</Text>
+              <Text style={styles.missingHint}>Please upload a new photo</Text>
             </View>
           ) : (
             <View style={styles.placeholder}>
@@ -555,6 +617,12 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: COLORS.textLight,
     marginTop: 8,
+  },
+  missingHint: {
+    fontSize: 12,
+    color: COLORS.error,
+    marginTop: 4,
+    textAlign: 'center',
   },
   actions: {
     gap: 10,

@@ -62,6 +62,7 @@ import { useBootStore } from "@/stores/bootStore";
 import { BootScreen } from "@/components/BootScreen";
 import { collectDeviceFingerprint } from "@/lib/deviceFingerprint";
 import { markTiming } from "@/utils/startupTiming";
+import { autoSyncPhotosOnStartup } from "@/services/photoSync";
 
 function DemoBanner() {
   return null;
@@ -264,6 +265,44 @@ function SessionValidator() {
   return null;
 }
 
+/**
+ * TASK 3: Photo sync manager - Auto-sync photos from backend on app startup
+ *
+ * BACKEND-FIRST STORAGE:
+ * - Convex backend is the SOURCE OF TRUTH for profile photos
+ * - On app startup (after hydration), sync photos FROM backend TO local stores
+ * - Downloads missing files to local cache
+ * - ONE-WAY sync: backend → local (never local → backend)
+ *
+ * SAFETY:
+ * - READ-ONLY: Only reads from backend, writes to local cache
+ * - Does NOT upload or modify backend data
+ * - Runs AFTER hydration completes
+ */
+function PhotoSyncManager() {
+  const userId = useAuthStore((s) => s.userId);
+  const authHydrated = useAuthStore((s) => s._hasHydrated);
+  const onboardingHydrated = useOnboardingStore((s) => s._hasHydrated);
+  const demoHydrated = useDemoStore((s) => s._hasHydrated);
+  const hasSyncedRef = useRef(false);
+
+  useEffect(() => {
+    // Wait for all stores to hydrate
+    if (!authHydrated || !onboardingHydrated || !demoHydrated) return;
+
+    // Only sync once
+    if (hasSyncedRef.current) return;
+    hasSyncedRef.current = true;
+
+    // Run auto-sync
+    if (userId) {
+      autoSyncPhotosOnStartup(userId);
+    }
+  }, [userId, authHydrated, onboardingHydrated, demoHydrated]);
+
+  return null;
+}
+
 function DeviceFingerprintCollector() {
   const userId = useAuthStore((s) => s.userId);
   const registerFingerprint = useMutation(api.deviceFingerprint.registerDeviceFingerprint);
@@ -300,6 +339,7 @@ export default function RootLayout() {
           <BootStateTracker />
           <BootScreenWrapper />
           <SessionValidator />
+          <PhotoSyncManager />
           <DeviceFingerprintCollector />
           <Stack screenOptions={{ headerShown: false }}>
             <Stack.Screen name="index" />

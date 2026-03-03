@@ -26,6 +26,8 @@ import { useAuthStore } from '@/stores/authStore';
 import { isDemoMode } from '@/hooks/useConvex';
 import { Ionicons } from '@expo/vector-icons';
 import { OnboardingProgressHeader } from '@/components/OnboardingProgressHeader';
+import { checkPhotoExists, getPhotoFileState, type PhotoFileState } from '@/lib/photoFileGuard';
+import { uploadPhotoToBackend } from '@/services/photoSync';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 
@@ -162,6 +164,9 @@ export default function AdditionalPhotosScreen() {
   // Per-slot error state to fallback to Add Photo placeholder when image fails
   const [slotError, setSlotError] = useState<boolean[]>(Array(TOTAL_SLOTS).fill(false));
 
+  // TASK 2: File existence state - track which photo files actually exist on filesystem
+  const [slotFileState, setSlotFileState] = useState<PhotoFileState[]>(Array(TOTAL_SLOTS).fill('empty'));
+
   const bumpSlot = (i: number) => {
     setSlotNonce((prev) => {
       const next = prev.slice();
@@ -178,11 +183,44 @@ export default function AdditionalPhotosScreen() {
     });
   };
 
+  // TASK 2: Proactively check file existence for all photo slots
+  // This runs when photos array changes to detect missing files BEFORE rendering
+  // CRITICAL: We only FLAG missing files - we NEVER delete URIs from AsyncStorage
+  React.useEffect(() => {
+    async function checkAllPhotos() {
+      const states = await Promise.all(
+        photos.map((uri) => getPhotoFileState(uri))
+      );
+      setSlotFileState(states);
+
+      // DEV: Log missing photos for monitoring
+      if (__DEV__) {
+        const missingCount = states.filter((s) => s === 'missing').length;
+        const invalidCount = states.filter((s) => s === 'invalid').length;
+        if (missingCount > 0 || invalidCount > 0) {
+          console.warn(
+            `[PHOTO_GUARD] Found ${missingCount} missing + ${invalidCount} invalid photo files (URIs preserved in storage)`
+          );
+        }
+      }
+    }
+
+    checkAllPhotos();
+  }, [photos]);
+
   // Count valid photos (treat null/undefined/'' as empty)
   const photoCount = photos.filter((p) => typeof p === 'string' && p.length > 0).length;
 
   // Find first empty slot index
   const firstEmptyIndex = photos.findIndex((p) => !(typeof p === 'string' && p.length > 0));
+
+  // ════════════════════════════════════════════════════════════════════════
+  // PHASE-1 PROFILE PHOTOS ARE BACKEND-OWNED. LOCAL FILES ARE CACHE ONLY.
+  // ════════════════════════════════════════════════════════════════════════
+  // HARD LOCK: All Phase-1 profile photos MUST be uploaded to Convex backend
+  // immediately when user selects them. Convex storage is the ONLY source of
+  // truth. Local file:// URIs are CACHE ONLY for offline preview.
+  // ════════════════════════════════════════════════════════════════════════
 
   // Pick image for a specific slot index with optional crop (4:6 aspect)
   const pickImageForIndex = async (targetIndex: number) => {
@@ -212,29 +250,73 @@ export default function AdditionalPhotosScreen() {
           );
           const cacheUri = normalized?.uri ?? uri;
 
-          // CRITICAL: Copy to persistent storage so photo survives app relaunch
-          // ImageManipulator cache URIs are cleared on app restart
+          // HARD LOCK: Copy to local cache for immediate preview ONLY
+          // This is NOT permanent storage - Convex backend is source of truth
           const persistentUri = await persistPhoto(cacheUri);
 
+          // CRITICAL: Upload to Convex backend IMMEDIATELY (REQUIRED by HARD LOCK)
+          // Local URI is cache only - Convex storageId is the source of truth
+          if (!isDemoMode && userId) {
+            if (__DEV__) console.log(`[PHOTO_LOCK] Uploading slot ${targetIndex} to Convex backend...`);
+
+            const uploadResult = await uploadPhotoToBackend(
+              userId,
+              persistentUri,
+              targetIndex === 0, // isPrimary
+              targetIndex
+            );
+
+            if (!uploadResult.success) {
+              Alert.alert(
+                'Upload Failed',
+                'Failed to upload photo to server. Please try again.',
+                [{ text: 'OK' }]
+              );
+              console.error('[PHOTO_LOCK] Backend upload failed:', uploadResult.message);
+              return;
+            }
+
+            if (__DEV__) {
+              console.log(`[PHOTO_LOCK] ✅ Photo uploaded to Convex: storageId=${uploadResult.storageId}`);
+            }
+          }
+
+          // Store local URI as cache ONLY (NOT source of truth)
           setPhotoAtIndex(targetIndex, persistentUri);
           markSlotError(targetIndex, false);
           bumpSlot(targetIndex);
 
-          // DEBUG: Log final stored URI - must start with documentDirectory, NOT /cache/
+          // DEBUG: Log final stored URI
           if (__DEV__) {
             const isValidPersistent = persistentUri.includes('/Documents/') || persistentUri.includes('/files/');
             const isStaleCache = persistentUri.includes('/cache/ImageManipulator/') || persistentUri.includes('/Cache/');
-            console.log(`[PHOTO] STORED URI CHECK (slot ${targetIndex}):`, {
+            console.log(`[PHOTO] CACHE URI (slot ${targetIndex}):`, {
               source: 'gallery',
               uri: persistentUri,
               isValidPersistent,
               isStaleCache: isStaleCache ? 'WARNING: STILL CACHE!' : 'OK',
+              note: 'LOCAL CACHE ONLY - Convex backend is source of truth',
             });
           }
         } catch (e) {
           console.log('[AdditionalPhotos] normalize failed, trying to persist original uri', uri, e);
           // Still try to persist the original URI
           const persistentUri = await persistPhoto(uri);
+
+          // HARD LOCK: Upload to Convex even on normalize failure
+          if (!isDemoMode && userId) {
+            const uploadResult = await uploadPhotoToBackend(
+              userId,
+              persistentUri,
+              targetIndex === 0,
+              targetIndex
+            );
+            if (!uploadResult.success) {
+              Alert.alert('Upload Failed', 'Please try again.');
+              return;
+            }
+          }
+
           setPhotoAtIndex(targetIndex, persistentUri);
           markSlotError(targetIndex, false);
           bumpSlot(targetIndex);
@@ -252,6 +334,7 @@ export default function AdditionalPhotosScreen() {
   };
 
   // Take photo with camera for a specific slot
+  // HARD LOCK: Camera photos MUST be uploaded to Convex immediately (same as gallery)
   const takePhotoForIndex = async (targetIndex: number) => {
     const { status } = await ImagePicker.requestCameraPermissionsAsync();
     if (status !== 'granted') {
@@ -276,29 +359,61 @@ export default function AdditionalPhotosScreen() {
           );
           const cacheUri = normalized?.uri ?? uri;
 
-          // CRITICAL: Copy to persistent storage so photo survives app relaunch
-          // ImageManipulator cache URIs are cleared on app restart
+          // HARD LOCK: Copy to local cache for immediate preview ONLY
           const persistentUri = await persistPhoto(cacheUri);
 
+          // CRITICAL: Upload to Convex backend IMMEDIATELY (REQUIRED by HARD LOCK)
+          if (!isDemoMode && userId) {
+            if (__DEV__) console.log(`[PHOTO_LOCK] Uploading camera photo slot ${targetIndex} to Convex...`);
+
+            const uploadResult = await uploadPhotoToBackend(
+              userId,
+              persistentUri,
+              targetIndex === 0,
+              targetIndex
+            );
+
+            if (!uploadResult.success) {
+              Alert.alert('Upload Failed', 'Failed to upload photo to server. Please try again.');
+              console.error('[PHOTO_LOCK] Camera photo upload failed:', uploadResult.message);
+              return;
+            }
+
+            if (__DEV__) {
+              console.log(`[PHOTO_LOCK] ✅ Camera photo uploaded: storageId=${uploadResult.storageId}`);
+            }
+          }
+
+          // Store local URI as cache ONLY
           setPhotoAtIndex(targetIndex, persistentUri);
           markSlotError(targetIndex, false);
           bumpSlot(targetIndex);
 
-          // DEBUG: Log final stored URI - must start with documentDirectory, NOT /cache/
+          // DEBUG: Log cache URI
           if (__DEV__) {
             const isValidPersistent = persistentUri.includes('/Documents/') || persistentUri.includes('/files/');
             const isStaleCache = persistentUri.includes('/cache/ImageManipulator/') || persistentUri.includes('/Cache/');
-            console.log(`[PHOTO] STORED URI CHECK (slot ${targetIndex}):`, {
+            console.log(`[PHOTO] CACHE URI (slot ${targetIndex}):`, {
               source: 'camera',
               uri: persistentUri,
               isValidPersistent,
               isStaleCache: isStaleCache ? 'WARNING: STILL CACHE!' : 'OK',
+              note: 'LOCAL CACHE ONLY - Convex backend is source of truth',
             });
           }
         } catch (e) {
           console.log('[AdditionalPhotos] normalize failed, trying to persist original uri', uri, e);
-          // Still try to persist the original URI
           const persistentUri = await persistPhoto(uri);
+
+          // HARD LOCK: Upload even on error
+          if (!isDemoMode && userId) {
+            const uploadResult = await uploadPhotoToBackend(userId, persistentUri, targetIndex === 0, targetIndex);
+            if (!uploadResult.success) {
+              Alert.alert('Upload Failed', 'Please try again.');
+              return;
+            }
+          }
+
           setPhotoAtIndex(targetIndex, persistentUri);
           markSlotError(targetIndex, false);
           bumpSlot(targetIndex);
@@ -476,8 +591,11 @@ export default function AdditionalPhotosScreen() {
     // Start from index 1 (skip primary photo which is shown in circle)
     for (let i = 1; i <= GRID_SLOTS; i++) {
       const photo = photos[i];
+      const fileState = slotFileState[i] || 'empty';
       const hasPhoto = typeof photo === 'string' && photo.length > 0;
-      const showPhoto = hasPhoto && !slotError[i];
+      // TASK 2: Only show photo if file actually exists (not just URI stored)
+      const showPhoto = hasPhoto && fileState === 'exists' && !slotError[i];
+      const isMissing = hasPhoto && (fileState === 'missing' || fileState === 'invalid');
 
       // Determine press behavior
       const handlePress = showPhoto
@@ -493,8 +611,10 @@ export default function AdditionalPhotosScreen() {
         >
           {/* BASE LAYER: Always render placeholder */}
           <View style={styles.placeholderContent}>
-            <Ionicons name="add" size={22} color={COLORS.textLight} />
-            <Text style={styles.addPhotoText}>Add</Text>
+            <Ionicons name={isMissing ? "alert-circle" : "add"} size={22} color={isMissing ? COLORS.error : COLORS.textLight} />
+            <Text style={[styles.addPhotoText, isMissing && { color: COLORS.error }]}>
+              {isMissing ? "Re-upload" : "Add"}
+            </Text>
           </View>
 
           {/* OVERLAY LAYER: Render image on top if we have a valid photo */}
@@ -555,7 +675,10 @@ export default function AdditionalPhotosScreen() {
   ];
 
   const primaryPhoto = photos[0];
+  const primaryFileState = slotFileState[0] || 'empty';
   const hasPrimaryPhoto = typeof primaryPhoto === 'string' && primaryPhoto.length > 0;
+  const primaryPhotoExists = hasPrimaryPhoto && primaryFileState === 'exists';
+  const primaryPhotoMissing = hasPrimaryPhoto && (primaryFileState === 'missing' || primaryFileState === 'invalid');
 
   return (
     <SafeAreaView style={styles.safeArea} edges={['top', 'left', 'right']}>
@@ -572,13 +695,19 @@ export default function AdditionalPhotosScreen() {
             onPress={handlePrimaryPhotoPress}
             activeOpacity={0.8}
           >
-            {hasPrimaryPhoto && !slotError[0] ? (
+            {primaryPhotoExists && !slotError[0] ? (
               <Image
                 source={{ uri: primaryPhoto }}
                 style={styles.primaryImage}
                 contentFit="cover"
                 blurRadius={displayPhotoVariant === 'blurred' ? 15 : 0}
               />
+            ) : primaryPhotoMissing ? (
+              <View style={styles.primaryPlaceholder}>
+                <Ionicons name="alert-circle" size={32} color={COLORS.error} />
+                <Text style={[styles.primaryAddText, { color: COLORS.error }]}>File Missing</Text>
+                <Text style={styles.primaryMissingHint}>Tap to re-upload</Text>
+              </View>
             ) : (
               <View style={styles.primaryPlaceholder}>
                 <Ionicons name="add" size={32} color={COLORS.primary} />
@@ -827,6 +956,11 @@ const styles = StyleSheet.create({
     color: COLORS.primary,
     marginTop: 4,
     fontWeight: '500',
+  },
+  primaryMissingHint: {
+    fontSize: 9,
+    color: COLORS.textLight,
+    marginTop: 2,
   },
   primaryLabel: {
     fontSize: 12,

@@ -17,32 +17,33 @@ import {
   PhotoSlots9,
   createEmptyPhotoSlots,
 } from "@/types";
+import { logPhotoRemoved, logPhotosCleared } from "@/lib/photoSafety";
 
 // Display photo privacy variant
 export type DisplayPhotoVariant = 'original' | 'blurred' | 'cartoon';
 
 /**
- * Check if a URI is a valid persistent photo URI.
- * Only accepts local file:// URIs that are NOT in cache directories.
- * Rejects: cache URIs, Unsplash URLs, any http/https URLs.
+ * ❌ DEPRECATED - DO NOT USE FOR HYDRATION
+ * This function was DELETING user photos during app restart.
+ * Kept for reference only - not called during hydration anymore.
  */
-function isValidPhotoUri(uri: string | null | undefined): boolean {
+function isValidPhotoUri_DEPRECATED(uri: string | null | undefined): boolean {
   if (!uri || typeof uri !== 'string' || uri.length === 0) return false;
-  // Must be a local file:// URI
   if (!uri.startsWith('file://')) return false;
-  // Reject cache URIs (they disappear on app restart)
   if (uri.includes('/cache/') || uri.includes('/Cache/') || uri.includes('ImageManipulator')) return false;
-  // Reject any Unsplash/demo URLs (should never happen for file://, but extra safety)
   if (uri.includes('unsplash.com')) return false;
   return true;
 }
 
 /**
- * Normalize photos array to exactly 9 slots (PhotoSlots9).
+ * ✅ PRODUCTION-SAFE: Normalize photos array to exactly 9 slots WITHOUT DELETING data
  * - Missing/undefined input => 9 nulls
  * - string[] (old data) => copy into slots, fill remaining with null
- * - Filter out invalid URIs (cache, Unsplash, non-file://)
+ * - ⚠️ KEEPS ALL URIs (even cache/remote) - deletion is NEVER safe during hydration
  * - Ensure final is always length 9
+ *
+ * CRITICAL: This function MUST NOT delete any photo URIs during hydration.
+ * Missing files are flagged at render time via FileSystem.getInfoAsync(), not here.
  */
 function normalizePhotos(input: unknown): PhotoSlots9 {
   const result: PhotoSlots9 = createEmptyPhotoSlots();
@@ -52,13 +53,14 @@ function normalizePhotos(input: unknown): PhotoSlots9 {
     return result;
   }
 
-  // Copy valid URIs into their slots (preserving index)
+  // ✅ PRODUCTION FIX: Copy ALL URIs without filtering
+  // Previous code used isValidPhotoUri() which DELETED photos - removed for data safety
   for (let i = 0; i < Math.min(input.length, 9); i++) {
     const item = input[i];
-    if (isValidPhotoUri(item)) {
+    // Keep any non-empty string URI (validation happens at render time, not hydration)
+    if (item && typeof item === 'string' && item.length > 0) {
       result[i] = item;
     }
-    // Invalid URIs become null (slot preserved but empty)
   }
 
   return result;
@@ -89,8 +91,18 @@ interface OnboardingState {
   gender: Gender | null;
   lgbtqSelf: LgbtqOption[]; // "What am I?" - identity, optional, max 2
   lgbtqPreference: LgbtqOption[]; // "What I need?" - dating preference, optional, max 2
-  photos: PhotoSlots9;
-  verificationPhotoUri: string | null;
+
+  // ════════════════════════════════════════════════════════════════════════
+  // PHASE-1 PROFILE PHOTOS ARE BACKEND-OWNED. LOCAL FILES ARE CACHE ONLY.
+  // ════════════════════════════════════════════════════════════════════════
+  // HARD LOCK: photos array stores LOCAL CACHE URIs ONLY (not source of truth)
+  // - Convex backend (photos table with storageId) is the ONLY source of truth
+  // - These local URIs are for offline preview and performance only
+  // - Missing local files are re-downloaded from Convex
+  // - NEVER delete photos based on local file existence checks
+  // ════════════════════════════════════════════════════════════════════════
+  photos: PhotoSlots9; // LOCAL CACHE ONLY - Convex backend is source of truth
+  verificationPhotoUri: string | null; // LOCAL CACHE ONLY - Convex backend is source of truth
   displayPhotoVariant: DisplayPhotoVariant; // Privacy option: original, blurred, or cartoon
   bio: string;
   profilePrompts: { question: string; answer: string }[];
@@ -260,25 +272,32 @@ export const useOnboardingStore = create<OnboardingState>()(
         return true;
       },
 
+      // ════════════════════════════════════════════════════════════════════════
+      // HARD LOCK: Photo mutations store LOCAL CACHE URIs ONLY
+      // Convex backend upload happens BEFORE these mutations are called
+      // ════════════════════════════════════════════════════════════════════════
+
       // Add photo to first available empty slot
+      // CACHE ONLY: Backend upload must happen BEFORE calling this
       addPhoto: (uri) =>
         set((state) => {
           const newPhotos: PhotoSlots9 = [...state.photos] as PhotoSlots9;
           const emptyIndex = newPhotos.findIndex((p) => p === null || p === '');
           if (emptyIndex !== -1) {
             newPhotos[emptyIndex] = uri;
-            if (__DEV__) console.log(`[P1] addPhoto slot ${emptyIndex} ->`, uri.slice(-40));
+            if (__DEV__) console.log(`[P1] addPhoto slot ${emptyIndex} -> CACHE:`, uri.slice(-40));
           }
           return { photos: newPhotos };
         }),
 
       // Set photo at specific slot index (no shifting, fixed slots)
+      // CACHE ONLY: Backend upload must happen BEFORE calling this
       setPhotoAtIndex: (index, uri) =>
         set((state) => {
           if (index < 0 || index >= 9) return state;
           const newPhotos: PhotoSlots9 = [...state.photos] as PhotoSlots9;
           newPhotos[index] = uri;
-          if (__DEV__) console.log(`[P1] set slot ${index} ->`, uri.slice(-40));
+          if (__DEV__) console.log(`[P1] set slot ${index} -> CACHE:`, uri.slice(-40));
           return { photos: newPhotos };
         }),
 
@@ -288,6 +307,10 @@ export const useOnboardingStore = create<OnboardingState>()(
           if (index < 0 || index >= 9) return state;
           const newPhotos: PhotoSlots9 = [...state.photos] as PhotoSlots9;
           newPhotos[index] = null;
+
+          // TASK 5: Safety logging - user-initiated removal
+          logPhotoRemoved(index, 'user_tap_remove_button');
+
           if (__DEV__) console.log(`[P1] clear slot ${index}`);
           return { photos: newPhotos };
         }),
@@ -377,11 +400,26 @@ export const useOnboardingStore = create<OnboardingState>()(
 
       setMaxDistance: (maxDistance) => set({ maxDistance }),
 
-      reset: () => set(initialState),
+      reset: () => {
+        const currentPhotos = useOnboardingStore.getState().photos;
+        const photoCount = currentPhotos.filter((p) => p !== null && p !== '').length;
+
+        // TASK 5: Safety logging - reset/logout clear
+        logPhotosCleared(photoCount, 'reset');
+
+        return set(initialState);
+      },
 
       // DEV: Clear all photos for re-selection (used after stale cache migration)
       clearAllPhotos: () => {
         if (__DEV__) console.log('[onboardingStore] clearAllPhotos called');
+
+        const currentPhotos = useOnboardingStore.getState().photos;
+        const photoCount = currentPhotos.filter((p) => p !== null && p !== '').length;
+
+        // TASK 5: Safety logging - DEV-only clear
+        logPhotosCleared(photoCount, 'dev_clear_all');
+
         set({
           photos: createEmptyPhotoSlots(),
           verificationPhotoUri: null,
@@ -400,20 +438,18 @@ export const useOnboardingStore = create<OnboardingState>()(
           const hydrationTime = Date.now() - ONBOARDING_STORE_LOAD_TIME;
           console.log(`[HYDRATION] onboardingStore: ${hydrationTime}ms`);
         }
-        // Normalize photos array from persisted data
-        // normalizePhotos handles: old string[] format, filtering invalid URIs, ensuring length 9
+        // ✅ PRODUCTION-SAFE: Normalize photos array WITHOUT deleting data
+        // normalizePhotos NOW keeps all URIs - only ensures length 9 and type safety
+        // DO NOT DELETE PROFILE PHOTOS DURING HYDRATION - CRITICAL DATA SAFETY
         if (state) {
           const rawPhotos = state.photos;
           const normalized = normalizePhotos(rawPhotos);
 
-          // Log migration if photos were cleared
+          // Safe logging (no deletion) - flag potential issues for monitoring only
           const rawCount = Array.isArray(rawPhotos) ? rawPhotos.filter(Boolean).length : 0;
           const normalizedCount = normalized.filter(Boolean).length;
-          if (rawCount > 0 && normalizedCount < rawCount) {
-            if (__DEV__) {
-              console.warn('[MIGRATION] Cleared invalid photo URIs. User must re-add photos.');
-              console.log('[onboardingStore] Photo migration:', { before: rawCount, after: normalizedCount });
-            }
+          if (__DEV__ && rawCount !== normalizedCount) {
+            console.log('[onboardingStore] Photo array normalized:', { before: rawCount, after: normalizedCount });
           }
 
           useOnboardingStore.setState({ photos: normalized });
