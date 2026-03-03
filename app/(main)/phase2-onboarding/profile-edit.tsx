@@ -306,8 +306,10 @@ export default function Phase2ProfileEdit() {
     const photoUrls = photoSlots.filter((uri): uri is string => uri !== null);
     setSelectedPhotos([], photoUrls);
 
-    // Navigate to review (Step 3)
-    router.push('/(main)/phase2-onboarding/profile-setup' as any);
+    // B2-HIGH FIX: Delay navigation after keyboard dismiss to prevent Android crash
+    setTimeout(() => {
+      router.push('/(main)/phase2-onboarding/profile-setup' as any);
+    }, 150);
     // NOTE: Don't reset isProcessing/ref - component will unmount after navigation
   }, [canContinue, isProcessing, photoSlots, setSelectedPhotos, router]);
 

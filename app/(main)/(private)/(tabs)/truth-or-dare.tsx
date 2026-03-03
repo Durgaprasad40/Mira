@@ -336,6 +336,21 @@ export default function TruthOrDareScreen() {
   const firstRenderRef = useRef(true);
   const dataReceivedRef = useRef(false);
 
+  // B2-HIGH FIX: Prevent stuck spinner and setState-after-unmount
+  const mountedRef = useRef(true);
+  const refreshTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // B2-HIGH FIX: Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      mountedRef.current = false;
+      if (refreshTimeoutRef.current) {
+        clearTimeout(refreshTimeoutRef.current);
+        refreshTimeoutRef.current = null;
+      }
+    };
+  }, []);
+
   // DIAGNOSTIC: Log when tab opens
   useEffect(() => {
     _tabOpenTime = Date.now();
@@ -368,7 +383,14 @@ export default function TruthOrDareScreen() {
     if (promptsDataQuery !== undefined) {
       _cachedPromptsData = promptsDataQuery;
       _hasEverLoaded = true;
-      setIsRefreshing(false);
+      // B2-HIGH FIX: Guard setState and clear timeout when data arrives
+      if (mountedRef.current) {
+        setIsRefreshing(false);
+        if (refreshTimeoutRef.current) {
+          clearTimeout(refreshTimeoutRef.current);
+          refreshTimeoutRef.current = null;
+        }
+      }
 
       // DIAGNOSTIC: Log first data received timing
       if (!dataReceivedRef.current) {
@@ -416,6 +438,16 @@ export default function TruthOrDareScreen() {
   const onRefresh = useCallback(() => {
     setIsRefreshing(true);
     setRefreshKey((k: number) => k + 1);
+
+    // B2-HIGH FIX: Timeout fallback to prevent stuck spinner (10s)
+    if (refreshTimeoutRef.current) {
+      clearTimeout(refreshTimeoutRef.current);
+    }
+    refreshTimeoutRef.current = setTimeout(() => {
+      if (mountedRef.current) {
+        setIsRefreshing(false);
+      }
+    }, 10000);
   }, []);
 
   const openThread = useCallback((promptId: string) => {

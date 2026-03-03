@@ -161,6 +161,9 @@ type Overlay =
 // ═══════════════════════════════════════════════════════════════════════════
 
 export default function ChatRoomScreen() {
+  // B2-HIGH FIX: Prevent setState-after-unmount
+  const mountedRef = useRef(true);
+
   // ISSUE B: Read route params for instant render fallback
   const { roomId, roomName: routeRoomName, isPrivate: routeIsPrivate } = useLocalSearchParams<{
     roomId: string;
@@ -275,6 +278,13 @@ export default function ChatRoomScreen() {
   );
   const roomPassword = roomPasswordQuery?.password ?? null;
 
+  // B2-HIGH FIX: Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
   // ─────────────────────────────────────────────────────────────────────────
   // COUNTDOWN TIMER (for expiring rooms)
   // ─────────────────────────────────────────────────────────────────────────
@@ -284,7 +294,8 @@ export default function ChatRoomScreen() {
   useEffect(() => {
     if (!expiresAt) return;
     const interval = setInterval(() => {
-      setNowMs(Date.now());
+      // B2-HIGH FIX: Guard setState after async
+      if (mountedRef.current) setNowMs(Date.now());
     }, 1000);
     return () => clearInterval(interval);
   }, [expiresAt]);
@@ -463,7 +474,8 @@ export default function ChatRoomScreen() {
           console.warn('[ChatRoom] Store hydration timeout - proceeding with demo seeding');
         }
         hydrationFallbackTriggeredRef.current = true;
-        setHydrationFallback(true);
+        // B2-HIGH FIX: Guard setState after async
+        if (mountedRef.current) setHydrationFallback(true);
       }
     }, 3000);
 
@@ -743,10 +755,14 @@ export default function ChatRoomScreen() {
         success = true;
       } finally {
         // P1 CR-003: Always remove pending message, regardless of success/failure
-        setPendingMessages((prev) => prev.filter((m) => m.id !== pendingId));
+        // B2-HIGH FIX: Guard setState after async
+        if (mountedRef.current) {
+          setPendingMessages((prev) => prev.filter((m) => m.id !== pendingId));
+        }
       }
       if (success) {
-        incrementCoins();
+        // B2-HIGH FIX: Guard setState after async
+        if (mountedRef.current) incrementCoins();
       }
     }
   }, [inputText, roomIdStr, hasValidRoomId, addStoreMessage, authUserId, sendMessageMutation, incrementCoins, persistedDisplayName]);
@@ -781,8 +797,11 @@ export default function ChatRoomScreen() {
           mediaUrl: persistentUri,
           createdAt: Date.now(),
         };
-        addStoreMessage(roomIdStr, newMessage);
-        incrementCoins();
+        // B2-HIGH FIX: Guard setState after async (ensureStableFile)
+        if (mountedRef.current) {
+          addStoreMessage(roomIdStr, newMessage);
+          incrementCoins();
+        }
       } else {
         if (!authUserId || !hasValidRoomId) return;
         const clientId = generateUUID();
@@ -794,7 +813,8 @@ export default function ChatRoomScreen() {
             mediaType: mediaType,
             clientId,
           });
-          incrementCoins();
+          // B2-HIGH FIX: Guard setState after async
+          if (mountedRef.current) incrementCoins();
         } catch (err: any) {
           Alert.alert('Error', err.message || 'Failed to send media');
         }
