@@ -1,6 +1,6 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, BackHandler, Platform } from 'react-native';
-import { Stack, useRouter, useNavigation, usePathname, useSegments } from 'expo-router';
+import { Stack, useRouter, useNavigation, usePathname, useSegments, useRootNavigationState } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { useQuery } from 'convex/react';
@@ -71,6 +71,8 @@ export default function PrivateLayout() {
   const [isNormalizingRoot, setIsNormalizingRoot] = useState(false);
   const normalizationTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // B1.1 FIX: Add router readiness check
+  const rootNavState = useRootNavigationState();
 
   // CRASH FIX: Track mount lifecycle
   useEffect(() => {
@@ -84,23 +86,48 @@ export default function PrivateLayout() {
   // Expo Router creates an implicit "/" entry before the real Phase-2 home.
   // This causes double back gestures. Normalize immediately to desire-land.
   // B1 FIX: Added hydration check, try/catch, and timeout fallback for safety
+  // B1.1 FIX: Added router readiness check to prevent "navigate before root layout" error
   useEffect(() => {
     // B1 FIX: Wait for hydration before normalizing to prevent blank screen
     if (!hasHydrated) return;
     if (!mountedRef.current) return;
+    // B1.1 FIX: Wait for router to be ready before navigating
+    if (!rootNavState?.key) return;
 
     const segmentStrings = segments as string[];
     if (pathname === '/' && segmentStrings.includes('(private)')) {
       setIsNormalizingRoot(true);
 
-      // B1 FIX: Timeout fallback - escape to Phase-1 if normalization fails (2s)
+      // B1.1 FIX: Timeout fallback - escape to Phase-1 if normalization fails (2s)
+      // Uses safer setTimeout for navigation with router readiness check
       normalizationTimeoutRef.current = setTimeout(() => {
+        if (!mountedRef.current) return;
+        // B1.1 FIX: Check router readiness in fallback too
+        if (!rootNavState?.key) {
+          if (__DEV__) console.warn('[PrivateLayout] Timeout fallback: router not ready, retrying...');
+          // Retry once after brief delay
+          setTimeout(() => {
+            if (rootNavState?.key) {
+              setIsNormalizingRoot(false);
+              router.replace(PHASE1_DISCOVER_ROUTE);
+            }
+          }, 250);
+          return;
+        }
         if (__DEV__) console.warn('[PrivateLayout] Phantom root normalization timeout - exiting to Phase-1');
         setIsNormalizingRoot(false);
         router.replace(PHASE1_DISCOVER_ROUTE);
       }, 2000);
 
-      requestAnimationFrame(() => {
+      // B1.1 FIX: Use setTimeout instead of requestAnimationFrame for safer scheduling
+      setTimeout(() => {
+        if (!mountedRef.current) return;
+        // B1.1 FIX: Double-check router readiness before navigating
+        if (!rootNavState?.key) {
+          if (__DEV__) console.warn('[PrivateLayout] Router not ready for normalization');
+          return;
+        }
+
         // B1 FIX: Try/catch for safe navigation
         try {
           router.replace(PHASE2_HOME_ROUTE);
@@ -114,7 +141,7 @@ export default function PrivateLayout() {
           setIsNormalizingRoot(false);
           // Timeout will handle fallback navigation
         }
-      });
+      }, 0);
     }
 
     // B1 FIX: Cleanup timeout on unmount
@@ -124,7 +151,7 @@ export default function PrivateLayout() {
         normalizationTimeoutRef.current = null;
       }
     };
-  }, [pathname, segments, router, hasHydrated]);
+  }, [pathname, segments, router, hasHydrated, rootNavState]);
 
   // Phase 2 isolation: Set module-level flag to block Phase 1-only notifications
   useEffect(() => {
@@ -218,6 +245,7 @@ export default function PrivateLayout() {
     return () => handler.remove();
   }, [router, pathname, segments]);
 
+  // B1.1 FIX: Move ALL hooks before any conditional returns to fix "Rendered fewer hooks" error
   const isSetupComplete = usePrivateProfileStore((s) => s.isSetupComplete);
   const phase2OnboardingCompleted = usePrivateProfileStore((s) => s.phase2OnboardingCompleted);
   // B1 FIX: hasHydrated moved to top of component (line 49) for use in normalization effect
@@ -244,39 +272,7 @@ export default function PrivateLayout() {
     }
   }, [prewarmPromptsData, prewarmTrendingData]);
 
-  // H-001/C-001 FIX: Wait for incognito store hydration before checking consent
-  // Prevents showing consent gate to already-consented users on cold start
-  if (!incognitoHydrated) {
-    return (
-      <View style={[styles.container, { paddingTop: insets.top, alignItems: 'center', justifyContent: 'center' }]}>
-        <ActivityIndicator size="large" color={C.primary} />
-      </View>
-    );
-  }
-
-  // Consent gate (only checked AFTER hydration)
-  if (!ageConfirmed18Plus) {
-    return <PrivateConsentGate onAccept={acceptPrivateTerms} />;
-  }
-
-  // Wait for store hydration
-  if (!hasHydrated) {
-    return (
-      <View style={[styles.container, { paddingTop: insets.top, alignItems: 'center', justifyContent: 'center' }]}>
-        <ActivityIndicator size="large" color={C.primary} />
-      </View>
-    );
-  }
-
-  // B1 FIX: Show loading while normalizing phantom "/" route
-  if (isNormalizingRoot) {
-    return (
-      <View style={[styles.container, { paddingTop: insets.top, alignItems: 'center', justifyContent: 'center' }]}>
-        <ActivityIndicator size="large" color={C.primary} />
-      </View>
-    );
-  }
-
+  // B1.1 FIX: Compute onboarding state BEFORE any returns (was after early returns before)
   // Check if Phase-2 onboarding has been completed (permanent flag)
   // This runs ONE TIME ONLY - after completion, onboarding never shows again
   // P2-002 FIX: Use OR logic so local completion is respected even if Convex hasn't synced yet
@@ -301,19 +297,30 @@ export default function PrivateLayout() {
     }
   }, [onboardingComplete, hasHydrated, router]);
 
-  // FLASH FIX: Render null while redirecting to avoid visual flash
-  // The tab press handler routes directly to onboarding, so this is just a safety net
-  if (!onboardingComplete) {
-    return null;
-  }
+  // B1.1 FIX: ALL hooks must be called before any conditional returns
+  // Compute blocking spinner condition as a boolean
+  const shouldShowBlockingSpinner = !incognitoHydrated || !hasHydrated || isNormalizingRoot;
 
-  // Show loading only while waiting for hydration (onboarding already complete)
-  if (!hasHydrated) {
+  // B1.1 FIX: Conditional rendering moved to END after ALL hooks
+  // H-001/C-001 FIX: Wait for incognito store hydration before checking consent
+  // Prevents showing consent gate to already-consented users on cold start
+  if (!incognitoHydrated || !hasHydrated || isNormalizingRoot) {
     return (
       <View style={[styles.container, { paddingTop: insets.top, alignItems: 'center', justifyContent: 'center' }]}>
         <ActivityIndicator size="large" color={C.primary} />
       </View>
     );
+  }
+
+  // B1.1 FIX: Consent gate (checked after spinner check above)
+  if (!ageConfirmed18Plus) {
+    return <PrivateConsentGate onAccept={acceptPrivateTerms} />;
+  }
+
+  // B1.1 FIX: FLASH FIX - Render null while redirecting to avoid visual flash
+  // The tab press handler routes directly to onboarding, so this is just a safety net
+  if (!onboardingComplete) {
+    return null;
   }
 
   return (
