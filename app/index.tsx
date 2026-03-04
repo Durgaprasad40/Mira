@@ -7,10 +7,13 @@ import { useAuthStore } from "@/stores/authStore";
 import { useBootStore } from "@/stores/bootStore";
 import { getBootCache } from "@/stores/bootCache";
 import { getAuthBootCache, type AuthBootCacheData } from "@/stores/authBootCache";
-import { isDemoMode } from "@/hooks/useConvex";
+import { isDemoMode, convex } from "@/hooks/useConvex";
+import { api } from "@/convex/_generated/api";
+import type { Id } from "@/convex/_generated/dataModel";
 import { View, ActivityIndicator, StyleSheet, Text } from "react-native";
 import { COLORS } from "@/lib/constants";
 import { markTiming, markDuration } from "@/utils/startupTiming";
+import { decideNextOnboardingRoute } from "@/lib/onboardingRouting";
 
 // Boot action types for pure computation (no side effects in useMemo)
 type BootAction =
@@ -40,6 +43,11 @@ export default function Index() {
     currentDemoUserId: string | null;
     demoOnboardingComplete: Record<string, boolean>;
   } | null>(null);
+
+  // Convex validation state (for live mode with token)
+  const [convexValidated, setConvexValidated] = useState(false);
+  const [convexOnboardingCompleted, setConvexOnboardingCompleted] = useState(false);
+  const convexValidationStarted = useRef(false);
 
   // Track if we've already started loading (to measure duration once)
   const cacheLoadStarted = useRef(false);
@@ -73,6 +81,107 @@ export default function Index() {
     loadCaches();
   }, []);
 
+  // CONVEX VALIDATION: Validate token and fetch onboardingCompleted from backend
+  // FAST_PATH: If cached onboardingCompleted=true, route immediately and validate in background
+  useEffect(() => {
+    // Skip if demo mode or no token or already validated
+    if (isDemoMode || !authBootCacheData || convexValidationStarted.current) return;
+
+    const token = authBootCacheData.token;
+    const userId = authBootCacheData.userId;
+    const hasValidToken = typeof token === 'string' && token.trim().length > 0;
+    const cachedOnboardingCompleted = authBootCacheData.onboardingCompleted === true;
+
+    if (!hasValidToken || !userId) {
+      // No token - skip validation
+      setConvexValidated(true);
+      return;
+    }
+
+    // FAST_PATH: If cached onboardingCompleted=true, allow immediate routing
+    // Validation will happen in background
+    if (cachedOnboardingCompleted) {
+      if (__DEV__) {
+        console.log('[AUTH_BOOT] FAST_PATH: cached onboardingCompleted=true, allowing immediate route to home');
+      }
+      setConvexOnboardingCompleted(true);
+      setConvexValidated(true);
+    }
+
+    // Start validation (even if FAST_PATH, validate in background)
+    convexValidationStarted.current = true;
+
+    if (__DEV__) {
+      console.log('[AUTH_BOOT] Validating session via Convex' + (cachedOnboardingCompleted ? ' (background)' : '') + ', userId:', userId.substring(0, 10) + '...');
+    }
+
+    const validateSession = async () => {
+      const timeout = 5000; // 5 second timeout
+      const timeoutPromise = new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('Validation timeout')), timeout)
+      );
+
+      try {
+        const statusPromise = convex.query(api.users.getOnboardingStatus, {
+          userId: userId as Id<'users'>,
+        });
+
+        const status = await Promise.race([statusPromise, timeoutPromise]) as any;
+
+        if (status) {
+          const backendOnboardingCompleted = status.onboardingCompleted ?? false;
+
+          if (__DEV__) {
+            console.log('[AUTH_BOOT] Validation complete, onboardingCompleted:', backendOnboardingCompleted);
+          }
+
+          // FAST_PATH validation check: if cached said true but backend says false, clear cache and redirect
+          if (cachedOnboardingCompleted && !backendOnboardingCompleted) {
+            if (__DEV__) {
+              console.warn('[AUTH_BOOT] FAST_PATH validation failed: backend says onboarding incomplete, clearing cache and routing to welcome');
+            }
+            const { clearAuthBootCache } = require('@/stores/authBootCache');
+            await clearAuthBootCache();
+            useAuthStore.getState().logout();
+            router.replace("/(auth)/welcome");
+            return;
+          }
+
+          // Update state with validated data
+          setConvexOnboardingCompleted(backendOnboardingCompleted);
+          if (!cachedOnboardingCompleted) {
+            // Only update validation state if not FAST_PATH (FAST_PATH already set it)
+            setConvexValidated(true);
+          }
+
+          // Update authStore with real onboarding status
+          useAuthStore.getState().setAuth(userId, token, backendOnboardingCompleted);
+        }
+      } catch (error) {
+        console.error('[AUTH_BOOT] Validation failed:', error);
+
+        // FAST_PATH validation failure: keep cached session (network error, will retry next boot)
+        if (cachedOnboardingCompleted) {
+          if (__DEV__) {
+            console.warn('[AUTH_BOOT] FAST_PATH validation failed (network) -> keeping cached session, will retry next boot');
+          }
+          // Keep user on home, keep SecureStore values, don't redirect
+          return;
+        }
+
+        // Non-FAST_PATH: allow boot but treat as not completed
+        setConvexValidated(true);
+        setConvexOnboardingCompleted(false);
+
+        if (__DEV__) {
+          console.warn('[AUTH_BOOT] Validation failed, falling back to welcome (user can retry)');
+        }
+      }
+    };
+
+    validateSession();
+  }, [authBootCacheData, router]);
+
   // For demo mode: use bootCache (fast) for routing
   // For live mode: use authBootCache (fast) for routing
   const currentDemoUserId = bootCacheData?.currentDemoUserId ?? null;
@@ -83,10 +192,15 @@ export default function Index() {
   // bootCache: ~10-50ms vs demoStore hydration: ~100-200ms
   const bootCachesReady = authBootCacheData && (!isDemoMode || bootCacheData);
 
+  // For live mode with token, also wait for Convex validation
+  const hasToken = authBootCacheData?.token && authBootCacheData.token.trim().length > 0;
+  const needsConvexValidation = !isDemoMode && hasToken;
+  const bootReady = bootCachesReady && (!needsConvexValidation || convexValidated);
+
   // PURE computation of boot action - NO side effects (logout, setState, etc.)
   // Side effects are handled in useEffect below
   const bootAction: BootAction = useMemo(() => {
-    if (!bootCachesReady || !authBootCacheData) {
+    if (!bootReady || !authBootCacheData) {
       return { type: "LOADING" };
     }
 
@@ -105,25 +219,34 @@ export default function Index() {
       return { type: "ROUTE_WELCOME", route: "/(auth)/welcome" };
     }
 
-    // ── Live mode: standard auth flow using authBootCache ──
+    // ── Live mode: standard auth flow using authBootCache + Convex validation ──
     const token = authBootCacheData.token;
     const hasValidToken = typeof token === 'string' && token.trim().length > 0;
 
     if (hasValidToken) {
-      // Onboarding complete → home
-      if (authBootCacheData.onboardingCompleted) {
+      // Use Convex-validated onboarding status (source of truth)
+      if (convexOnboardingCompleted) {
+        if (__DEV__) {
+          console.log('[AUTH_BOOT] Route decision: onboarding completed → Phase-1');
+        }
         return { type: "ROUTE_HOME", route: "/(main)/(tabs)/home" };
       }
 
       // ONBOARDING INCOMPLETE: Route to welcome to continue onboarding
       // SAFETY: Don't force logout - SessionValidator will handle truly invalid sessions
       // Forcing logout here would clear photos and break onboarding progress
+      if (__DEV__) {
+        console.log('[AUTH_BOOT] Route decision: onboarding incomplete → welcome');
+      }
       return { type: "ROUTE_WELCOME", route: "/(auth)/welcome" };
     }
 
     // No valid token → show welcome screen
+    if (__DEV__) {
+      console.log('[AUTH_BOOT] Route decision: no token → welcome');
+    }
     return { type: "ROUTE_WELCOME", route: "/(auth)/welcome" };
-  }, [bootCachesReady, authBootCacheData, currentDemoUserId, demoOnboardingComplete]);
+  }, [bootReady, authBootCacheData, currentDemoUserId, demoOnboardingComplete, convexOnboardingCompleted]);
 
   // Derive route for use in render (null if loading)
   const routeDestination = bootAction.type === "LOADING" ? null : bootAction.route;

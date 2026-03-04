@@ -73,17 +73,19 @@ async function downloadPhotoFromConvex(url: string, filename: string): Promise<s
  *
  * This is the CORE of backend-first storage:
  * - Fetch photos from Convex (source of truth)
- * - Download any missing files to local cache
+ * - Download any missing files to local cache (optional, can be skipped)
  * - Update local stores with Convex data
  * - ONE-WAY sync: backend → local (never local → backend)
  *
  * @param userId - The user ID to sync photos for
  * @param forceRedownload - If true, re-download all photos even if cached
+ * @param skipDownload - If true, skip downloading to local filesystem (onboarding uses backend URLs directly)
  * @returns Promise<{ success: boolean; photosCount: number; message?: string }>
  */
 export async function syncPhotosFromBackend(
   userId: string,
-  forceRedownload: boolean = false
+  forceRedownload: boolean = false,
+  skipDownload: boolean = false
 ): Promise<{ success: boolean; photosCount: number; message?: string }> {
   // Skip sync in demo mode - demo users don't have backend photos
   if (isDemoMode) {
@@ -114,7 +116,19 @@ export async function syncPhotosFromBackend(
     // Sort photos by order
     const sortedPhotos = [...backendPhotos].sort((a, b) => a.order - b.order);
 
-    // Download photos to local cache
+    // ONBOARDING OPTIMIZATION: Skip download if caller only needs backend URLs
+    if (skipDownload) {
+      if (__DEV__) {
+        console.log('[PHOTO_SYNC] skipDownload=true, using backend URLs directly (no filesystem cache)');
+      }
+      return {
+        success: true,
+        photosCount: backendPhotos.length,
+        message: `Synced ${backendPhotos.length} photos (backend URLs only, no download)`,
+      };
+    }
+
+    // Download photos to local cache (for non-onboarding areas)
     const localUris: (string | null)[] = [];
     for (const photo of sortedPhotos) {
       // Generate stable filename from storageId

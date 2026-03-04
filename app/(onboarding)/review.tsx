@@ -4,11 +4,11 @@ import {
   Text,
   StyleSheet,
   ScrollView,
-  Image,
   TouchableOpacity,
   Alert,
   Platform,
 } from "react-native";
+import { Image } from "expo-image";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useRouter } from "expo-router";
 import {
@@ -34,6 +34,7 @@ import { Id } from "@/convex/_generated/dataModel";
 import { isDemoMode } from "@/hooks/useConvex";
 import { useDemoStore } from "@/stores/demoStore";
 import { OnboardingProgressHeader } from "@/components/OnboardingProgressHeader";
+import { saveAuthBootCache } from "@/stores/authBootCache";
 
 /**
  * Parse "YYYY-MM-DD" string to local Date object.
@@ -92,6 +93,12 @@ export default function ReviewScreen() {
     !isDemoMode && userId ? { userId } : 'skip'
   );
 
+  // PERFORMANCE FIX: Query backend photos directly for instant display (no local download)
+  const backendPhotos = useQuery(
+    api.photos.getUserPhotos,
+    !isDemoMode && userId ? { userId: userId as Id<'users'> } : 'skip'
+  );
+
   // Fallback to backend data if store is empty
   const displayName = name || onboardingStatus?.basicInfo?.name || demoProfile?.name || "Not set";
   const displayNickname = nickname || onboardingStatus?.basicInfo?.nickname || demoProfile?.handle || "—";
@@ -115,6 +122,24 @@ export default function ReviewScreen() {
       });
     }
   }, [name, nickname, dateOfBirth, gender, onboardingStatus, displayName, displayNickname, displayDateOfBirth, displayGender]);
+
+  // PERFORMANCE LOG: Track photo rendering speed
+  React.useEffect(() => {
+    if (__DEV__) {
+      const timestamp = new Date().toISOString();
+      if (backendPhotos === undefined) {
+        console.log('[REVIEW_PHOTOS] ⏳ Loading backend photos...', { timestamp });
+      } else if (backendPhotos.length === 0) {
+        console.log('[REVIEW_PHOTOS] ✓ Backend returned 0 photos (first paint ready)', { timestamp });
+      } else {
+        console.log('[REVIEW_PHOTOS] ✓ Backend photos loaded - rendering immediately', {
+          timestamp,
+          count: backendPhotos.length,
+          urls: backendPhotos.map(p => p.url?.substring(0, 50) + '...'),
+        });
+      }
+    }
+  }, [backendPhotos]);
 
   // CRITICAL: Check demoProfile.faceVerificationPassed for demo mode (persisted across logout)
   // BUG FIX: Also accept faceVerificationPending (manual review) as valid to proceed
@@ -341,6 +366,14 @@ export default function ReviewScreen() {
       await completeOnboarding(onboardingData);
 
       setOnboardingCompleted(true);
+
+      // Persist onboardingCompleted flag to SecureStore for fast-path boot
+      // This is the true final completion point (after successful mutation)
+      const authState = useAuthStore.getState();
+      if (authState.token && authState.userId) {
+        await saveAuthBootCache(authState.token, authState.userId, { onboardingCompleted: true });
+      }
+
       setStep("tutorial");
       router.push("/(onboarding)/tutorial" as any);
     } catch (error: any) {
@@ -359,8 +392,22 @@ export default function ReviewScreen() {
     router.push(`/(onboarding)/${step}?editFromReview=true` as any);
   };
 
-  // Filter valid photos for display
-  const validPhotos = photos.filter((uri): uri is string => uri !== null && uri !== '');
+  // PERFORMANCE FIX: Use backend photos directly (instant display, no download wait)
+  // In demo mode, fall back to local photos from store
+  const validPhotos = React.useMemo(() => {
+    if (isDemoMode) {
+      // Demo mode: use local photos from store
+      return photos.filter((uri): uri is string => uri !== null && uri !== '');
+    }
+    // Live mode: use backend photos (sorted by order)
+    if (!backendPhotos || backendPhotos.length === 0) {
+      return [];
+    }
+    return [...backendPhotos]
+      .sort((a, b) => a.order - b.order)
+      .map(photo => photo.url)
+      .filter((url): url is string => !!url);
+  }, [backendPhotos, photos]);
 
   // Helper to get label from options array
   const getLabel = (options: { value: string; label: string }[], value: string | null) => {
@@ -393,7 +440,13 @@ export default function ReviewScreen() {
           >
             {validPhotos.map((uri, index) => (
               <View key={index} style={styles.photoWrapper}>
-                <Image source={{ uri }} style={styles.photoThumbnail} />
+                <Image
+                  source={{ uri }}
+                  style={styles.photoThumbnail}
+                  cachePolicy="memory"
+                  contentFit="cover"
+                  transition={200}
+                />
                 {index === 0 && displayPhotoVariant !== 'original' && (
                   <View style={styles.variantBadge}>
                     <Text style={styles.variantBadgeText}>

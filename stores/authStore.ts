@@ -109,6 +109,10 @@ export const useAuthStore = create<AuthState>()((set) => ({
     const { useVerificationStore } = require('@/stores/verificationStore');
     useVerificationStore.getState().resetVerification();
 
+    // Clear persisted auth token from SecureStore
+    const { clearAuthBootCache } = require('@/stores/authBootCache');
+    clearAuthBootCache(); // Fire and forget (async but non-blocking)
+
     set({
       isAuthenticated: false,
       userId: null,

@@ -26,6 +26,9 @@ import { Ionicons } from '@expo/vector-icons';
 import { verifyFace, type CapturedFrame, type FaceMatchStatus, type FaceMatchReasonCode } from '@/services/faceVerification';
 import { isDemoMode } from '@/hooks/useConvex';
 import { OnboardingProgressHeader } from '@/components/OnboardingProgressHeader';
+import { useQuery } from 'convex/react';
+import { api } from '@/convex/_generated/api';
+import type { Id } from '@/convex/_generated/dataModel';
 
 // =============================================================================
 // Constants
@@ -55,6 +58,12 @@ export default function FaceVerificationScreen() {
   const { userId, faceVerificationPassed, faceVerificationPending, setFaceVerificationPassed, setFaceVerificationPending } = useAuthStore();
   const demoProfile = useDemoStore((s) => isDemoMode && userId ? s.demoProfiles[userId] : null);
   const router = useRouter();
+
+  // Query backend onboarding status for reference photo check (source of truth)
+  const onboardingStatus = useQuery(
+    api.users.getOnboardingStatus,
+    !isDemoMode && userId ? { userId: userId as Id<'users'> } : 'skip'
+  );
 
   // Screen focus and app state tracking
   const isFocused = useIsFocused();
@@ -115,29 +124,31 @@ export default function FaceVerificationScreen() {
   const storeHydrated = useOnboardingStore((s) => s._hasHydrated);
 
   useEffect(() => {
-    const referencePhotoPresent = !!(photos && photos.length > 0 && photos[0]);
+    // Use backend data as source of truth for reference photo check
+    const referencePhotoExists = onboardingStatus?.referencePhotoExists ?? false;
+    const backendDataLoaded = onboardingStatus !== undefined;
+
     console.log('[FaceDebug] ========================================');
     console.log('[FaceDebug] Face Verification screen check');
     console.log('[FaceDebug] userId:', userId);
-    console.log('[FaceDebug] storeHydrated:', storeHydrated);
-    console.log('[FaceDebug] profilePhotos:', photos.length);
-    console.log(`[FaceDebug] referencePhotoPresent=${referencePhotoPresent}`);
+    console.log('[FaceDebug] backendDataLoaded:', backendDataLoaded);
+    console.log('[FaceDebug] referencePhotoExists (backend):', referencePhotoExists);
     console.log('[FaceDebug] ========================================');
 
-    // GATE CHECK: Wait for store hydration before blocking user
-    // This prevents false positives when photos haven't loaded yet
-    if (!storeHydrated) {
-      console.log('[FaceDebug] Store not hydrated yet, waiting...');
+    // GATE CHECK: Wait for backend data to load before blocking user
+    // This prevents false positives when backend query hasn't loaded yet
+    if (!backendDataLoaded) {
+      console.log('[FaceDebug] Backend data not loaded yet, waiting...');
       return;
     }
 
-    // If photos are present, clear the alert flag (in case user returns after uploading)
-    if (referencePhotoPresent) {
+    // If reference photo exists in backend, clear the alert flag (in case user returns after uploading)
+    if (referencePhotoExists) {
       didShowNoPhotoAlertRef.current = false;
       return;
     }
 
-    // No reference photo AND store is hydrated - show alert (but only once)
+    // No reference photo in backend AND data is loaded - show alert (but only once)
     if (!didShowNoPhotoAlertRef.current) {
       didShowNoPhotoAlertRef.current = true;
       console.log('[ONB] route_decision: NO_REFERENCE_PHOTO - redirecting to photo-upload');
@@ -153,7 +164,7 @@ export default function FaceVerificationScreen() {
         }]
       );
     }
-  }, [storeHydrated, photos, setStep, router]);
+  }, [onboardingStatus, userId, setStep, router]);
 
   // Log mount/unmount separately (no deps needed)
   useEffect(() => {

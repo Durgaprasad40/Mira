@@ -108,6 +108,12 @@ export default function AdditionalPhotosScreen() {
     !isDemoMode && userId ? { userId: userId as Id<'users'> } : 'skip'
   );
 
+  // Query onboarding status for reference photo existence check (source of truth)
+  const onboardingStatus = useQuery(
+    api.users.getOnboardingStatus,
+    !isDemoMode && userId ? { userId: userId as Id<'users'> } : 'skip'
+  );
+
   // Backend mutations
   const deletePhotoMutation = useMutation(api.photos.deletePhoto);
 
@@ -116,6 +122,88 @@ export default function AdditionalPhotosScreen() {
     api.photos.getUserPhotos,
     !isDemoMode && userId ? { userId: userId as Id<'users'> } : 'skip'
   );
+
+  // Sync backend photos to backendUrlByIndex when they load
+  useEffect(() => {
+    if (backendPhotos !== undefined) {
+      setBackendLoadedOnce(true);
+
+      // Map backend photos to slots by order
+      const newBackendUrls = Array(TOTAL_SLOTS).fill(null);
+      backendPhotos.forEach((photo) => {
+        if (photo.order >= 0 && photo.order < TOTAL_SLOTS && photo.url) {
+          newBackendUrls[photo.order] = photo.url;
+        }
+      });
+      setBackendUrlByIndex(newBackendUrls);
+
+      if (__DEV__) {
+        console.log('[PHOTO_BACKEND] Synced backend photos:', {
+          count: backendPhotos.length,
+          slots: newBackendUrls.map((url, i) => url ? `[${i}]:✓` : `[${i}]:✗`).join(' '),
+        });
+      }
+    }
+  }, [backendPhotos]);
+
+  // PERFORMANCE: Prefetch backend photos for Review screen (memory-only, non-blocking)
+  // Deduplicate: Track prefetched URLs to avoid redundant work
+  const prefetchedUrls = React.useRef<Set<string>>(new Set());
+
+  useEffect(() => {
+    if (!isDemoMode && backendPhotos && backendPhotos.length > 0) {
+      // Filter out already-prefetched URLs
+      const urlsToPrefetch = backendPhotos
+        .filter(photo => photo.url && !prefetchedUrls.current.has(photo.url))
+        .map(photo => photo.url!);
+
+      // DEV LOG: Show prefetch state for debugging
+      if (__DEV__) {
+        console.log('[PHOTO_PREFETCH] Prefetch check:', {
+          backendPhotosTotal: backendPhotos.length,
+          alreadyPrefetched: prefetchedUrls.current.size,
+          newUrlsToPrefetch: urlsToPrefetch.length,
+        });
+      }
+
+      if (urlsToPrefetch.length > 0) {
+        if (__DEV__) {
+          console.log('[PHOTO_PREFETCH] Starting prefetch for Review screen:', {
+            count: urlsToPrefetch.length,
+            urls: urlsToPrefetch.map(url => url.substring(0, 50) + '...'),
+          });
+        }
+
+        // Mark as prefetched immediately to prevent duplicate work
+        urlsToPrefetch.forEach(url => prefetchedUrls.current.add(url));
+
+        // Prefetch with concurrency limit = 3 (non-blocking)
+        const prefetchWithLimit = async () => {
+          const limit = 3;
+          for (let i = 0; i < urlsToPrefetch.length; i += limit) {
+            const batch = urlsToPrefetch.slice(i, i + limit);
+            await Promise.all(
+              batch.map(url =>
+                Image.prefetch(url).catch(err => {
+                  if (__DEV__) console.warn('[PHOTO_PREFETCH] Failed to prefetch:', url, err);
+                  // Remove from set so we can retry later
+                  prefetchedUrls.current.delete(url);
+                })
+              )
+            );
+          }
+        };
+
+        prefetchWithLimit().then(() => {
+          if (__DEV__) {
+            console.log('[PHOTO_PREFETCH] ✓ Prefetch complete - Review photos will load instantly');
+          }
+        });
+      } else if (__DEV__) {
+        console.log('[PHOTO_PREFETCH] All backend photos already prefetched (cached in memory)');
+      }
+    }
+  }, [backendPhotos]);
 
   // CENTRAL EDIT HUB: Detect if editing from Review screen
   const isEditFromReview = params.editFromReview === 'true';
@@ -193,14 +281,14 @@ export default function AdditionalPhotosScreen() {
     didSyncPhotos.current = true;
 
     if (__DEV__) {
-      console.log('[PHOTOS] Syncing photos from backend on mount...');
+      console.log('[PHOTOS] Syncing photos from backend on mount (skipDownload=true for onboarding)...');
     }
 
-    syncPhotosFromBackend(userId, false)
+    syncPhotosFromBackend(userId, false, true) // skipDownload=true for onboarding
       .then((result) => {
         if (result.success) {
           if (__DEV__) {
-            console.log(`[PHOTOS] Sync complete: ${result.photosCount} photos loaded from backend`);
+            console.log(`[PHOTOS] Sync complete: ${result.photosCount} photos (backend URLs only)`);
           }
         } else {
           console.warn('[PHOTOS] Sync failed:', result.message);
@@ -223,6 +311,15 @@ export default function AdditionalPhotosScreen() {
   // Upload state tracking: 'idle' | 'uploading' | 'uploaded' | 'failed'
   type UploadState = 'idle' | 'uploading' | 'uploaded' | 'failed';
   const [uploadStateByIndex, setUploadStateByIndex] = useState<Record<number, UploadState>>({});
+
+  // Preview URIs: Show selected photos instantly before upload completes (in-memory only)
+  const [slotPreviewUriByIndex, setSlotPreviewUriByIndex] = useState<(string | null)[]>(Array(TOTAL_SLOTS).fill(null));
+
+  // Backend URLs: Track just-uploaded photo URLs from Convex (in-memory, refreshed from backend query)
+  const [backendUrlByIndex, setBackendUrlByIndex] = useState<(string | null)[]>(Array(TOTAL_SLOTS).fill(null));
+
+  // Track if backend photos have loaded at least once (prevents flicker on empty result during uploads)
+  const [backendLoadedOnce, setBackendLoadedOnce] = useState(false);
 
   const bumpSlot = (i: number) => {
     setSlotNonce((prev) => {
@@ -272,11 +369,15 @@ export default function AdditionalPhotosScreen() {
     checkAllPhotos();
   }, [photos]);
 
-  // Count valid photos (treat null/undefined/'' as empty)
-  const photoCount = photos.filter((p) => typeof p === 'string' && p.length > 0).length;
+  // Count valid photos from backend + any in-flight uploads/previews
+  const backendPhotoCount = backendPhotos?.length ?? 0;
+  const pendingPreviewCount = slotPreviewUriByIndex.filter(uri => uri !== null).length;
+  const photoCount = backendPhotoCount + pendingPreviewCount;
 
-  // Find first empty slot index
-  const firstEmptyIndex = photos.findIndex((p) => !(typeof p === 'string' && p.length > 0));
+  // Find first empty slot index (check backend URLs + previews)
+  const firstEmptyIndex = Array.from({ length: TOTAL_SLOTS }, (_, i) => i).find(
+    i => !backendUrlByIndex[i] && !slotPreviewUriByIndex[i]
+  ) ?? TOTAL_SLOTS;
 
   // ════════════════════════════════════════════════════════════════════════
   // PHASE-1 PROFILE PHOTOS ARE BACKEND-OWNED. LOCAL FILES ARE CACHE ONLY.
@@ -327,20 +428,23 @@ export default function AdditionalPhotosScreen() {
           );
           const cacheUri = normalized?.uri ?? uri;
 
-          // HARD LOCK: Copy to local cache for immediate preview ONLY
-          // This is NOT permanent storage - Convex backend is source of truth
-          const persistentUri = await persistPhoto(cacheUri);
+          // Set preview URI immediately for instant grid display (in-memory only, no local storage)
+          setSlotPreviewUriByIndex((prev) => {
+            const next = [...prev];
+            next[targetIndex] = cacheUri;
+            return next;
+          });
+          markSlotError(targetIndex, false);
 
-          // CRITICAL: Upload to Convex backend IMMEDIATELY (REQUIRED by HARD LOCK)
-          // Local URI is cache only - Convex storageId is the source of truth
+          // Upload to Convex backend IMMEDIATELY (backend is ONLY source of truth)
           if (!isDemoMode && userId) {
-            if (__DEV__) console.log(`[PHOTO_LOCK] Uploading slot ${targetIndex} to Convex backend...`);
+            if (__DEV__) console.log(`[PHOTO_ONBOARDING] Uploading slot ${targetIndex} to Convex (no local storage)...`);
 
             setUploadState(targetIndex, 'uploading');
 
             const uploadResult = await uploadPhotoToBackend(
               userId,
-              persistentUri,
+              cacheUri, // Upload directly from cache, no local copy
               targetIndex === 0, // isPrimary
               targetIndex
             );
@@ -352,44 +456,43 @@ export default function AdditionalPhotosScreen() {
                 'Failed to upload photo to server. Please try again.',
                 [{ text: 'OK' }]
               );
-              console.error('[PHOTO_LOCK] Backend upload failed:', uploadResult.message);
+              console.error('[PHOTO_ONBOARDING] Backend upload failed:', uploadResult.message);
               return;
             }
 
             setUploadState(targetIndex, 'uploaded');
+
+            // Clear preview - backend will provide URL via query
+            setSlotPreviewUriByIndex((prev) => {
+              const next = [...prev];
+              next[targetIndex] = null;
+              return next;
+            });
+
             if (__DEV__) {
-              console.log(`[PHOTO_LOCK] ✅ Photo uploaded to Convex: storageId=${uploadResult.storageId}`);
+              console.log(`[PHOTO_ONBOARDING] ✅ Photo uploaded to Convex: storageId=${uploadResult.storageId}, no local storage`);
             }
           }
 
-          // Store local URI as cache ONLY (NOT source of truth)
-          setPhotoAtIndex(targetIndex, persistentUri);
-          markSlotError(targetIndex, false);
+          // Bump slot to refresh image component
           bumpSlot(targetIndex);
-
-          // DEBUG: Log final stored URI
-          if (__DEV__) {
-            const isValidPersistent = persistentUri.includes('/Documents/') || persistentUri.includes('/files/');
-            const isStaleCache = persistentUri.includes('/cache/ImageManipulator/') || persistentUri.includes('/Cache/');
-            console.log(`[PHOTO] CACHE URI (slot ${targetIndex}):`, {
-              source: 'gallery',
-              uri: persistentUri,
-              isValidPersistent,
-              isStaleCache: isStaleCache ? 'WARNING: STILL CACHE!' : 'OK',
-              note: 'LOCAL CACHE ONLY - Convex backend is source of truth',
-            });
-          }
         } catch (e) {
-          console.log('[AdditionalPhotos] normalize failed, trying to persist original uri', uri, e);
-          // Still try to persist the original URI
-          const persistentUri = await persistPhoto(uri);
+          console.log('[AdditionalPhotos] normalize failed, using original uri', uri, e);
 
-          // HARD LOCK: Upload to Convex even on normalize failure
+          // Set preview URI immediately (in-memory only)
+          setSlotPreviewUriByIndex((prev) => {
+            const next = [...prev];
+            next[targetIndex] = uri;
+            return next;
+          });
+          markSlotError(targetIndex, false);
+
+          // Upload to Convex even on normalize failure (no local storage)
           if (!isDemoMode && userId) {
             setUploadState(targetIndex, 'uploading');
             const uploadResult = await uploadPhotoToBackend(
               userId,
-              persistentUri,
+              uri, // Upload directly, no local copy
               targetIndex === 0,
               targetIndex
             );
@@ -399,10 +502,15 @@ export default function AdditionalPhotosScreen() {
               return;
             }
             setUploadState(targetIndex, 'uploaded');
+
+            // Clear preview after upload
+            setSlotPreviewUriByIndex((prev) => {
+              const next = [...prev];
+              next[targetIndex] = null;
+              return next;
+            });
           }
 
-          setPhotoAtIndex(targetIndex, persistentUri);
-          markSlotError(targetIndex, false);
           bumpSlot(targetIndex);
         }
 
@@ -443,18 +551,23 @@ export default function AdditionalPhotosScreen() {
           );
           const cacheUri = normalized?.uri ?? uri;
 
-          // HARD LOCK: Copy to local cache for immediate preview ONLY
-          const persistentUri = await persistPhoto(cacheUri);
+          // Set preview URI immediately for instant grid display (in-memory only, no local storage)
+          setSlotPreviewUriByIndex((prev) => {
+            const next = [...prev];
+            next[targetIndex] = cacheUri;
+            return next;
+          });
+          markSlotError(targetIndex, false);
 
-          // CRITICAL: Upload to Convex backend IMMEDIATELY (REQUIRED by HARD LOCK)
+          // Upload to Convex backend IMMEDIATELY (backend is ONLY source of truth)
           if (!isDemoMode && userId) {
-            if (__DEV__) console.log(`[PHOTO_LOCK] Uploading camera photo slot ${targetIndex} to Convex...`);
+            if (__DEV__) console.log(`[PHOTO_ONBOARDING] Uploading camera photo slot ${targetIndex} to Convex (no local storage)...`);
 
             setUploadState(targetIndex, 'uploading');
 
             const uploadResult = await uploadPhotoToBackend(
               userId,
-              persistentUri,
+              cacheUri, // Upload directly from cache, no local copy
               targetIndex === 0,
               targetIndex
             );
@@ -462,51 +575,56 @@ export default function AdditionalPhotosScreen() {
             if (!uploadResult.success) {
               setUploadState(targetIndex, 'failed');
               Alert.alert('Upload Failed', 'Failed to upload photo to server. Please try again.');
-              console.error('[PHOTO_LOCK] Camera photo upload failed:', uploadResult.message);
+              console.error('[PHOTO_ONBOARDING] Camera photo upload failed:', uploadResult.message);
               return;
             }
 
             setUploadState(targetIndex, 'uploaded');
+
+            // Clear preview - backend will provide URL via query
+            setSlotPreviewUriByIndex((prev) => {
+              const next = [...prev];
+              next[targetIndex] = null;
+              return next;
+            });
+
             if (__DEV__) {
-              console.log(`[PHOTO_LOCK] ✅ Camera photo uploaded: storageId=${uploadResult.storageId}`);
+              console.log(`[PHOTO_ONBOARDING] ✅ Camera photo uploaded: storageId=${uploadResult.storageId}, no local storage`);
             }
           }
 
-          // Store local URI as cache ONLY
-          setPhotoAtIndex(targetIndex, persistentUri);
-          markSlotError(targetIndex, false);
+          // Bump slot to refresh image component
           bumpSlot(targetIndex);
-
-          // DEBUG: Log cache URI
-          if (__DEV__) {
-            const isValidPersistent = persistentUri.includes('/Documents/') || persistentUri.includes('/files/');
-            const isStaleCache = persistentUri.includes('/cache/ImageManipulator/') || persistentUri.includes('/Cache/');
-            console.log(`[PHOTO] CACHE URI (slot ${targetIndex}):`, {
-              source: 'camera',
-              uri: persistentUri,
-              isValidPersistent,
-              isStaleCache: isStaleCache ? 'WARNING: STILL CACHE!' : 'OK',
-              note: 'LOCAL CACHE ONLY - Convex backend is source of truth',
-            });
-          }
         } catch (e) {
-          console.log('[AdditionalPhotos] normalize failed, trying to persist original uri', uri, e);
-          const persistentUri = await persistPhoto(uri);
+          console.log('[AdditionalPhotos] normalize failed, using original uri', uri, e);
 
-          // HARD LOCK: Upload even on error
+          // Set preview URI immediately (in-memory only)
+          setSlotPreviewUriByIndex((prev) => {
+            const next = [...prev];
+            next[targetIndex] = uri;
+            return next;
+          });
+          markSlotError(targetIndex, false);
+
+          // Upload even on error (no local storage)
           if (!isDemoMode && userId) {
             setUploadState(targetIndex, 'uploading');
-            const uploadResult = await uploadPhotoToBackend(userId, persistentUri, targetIndex === 0, targetIndex);
+            const uploadResult = await uploadPhotoToBackend(userId, uri, targetIndex === 0, targetIndex);
             if (!uploadResult.success) {
               setUploadState(targetIndex, 'failed');
               Alert.alert('Upload Failed', 'Please try again.');
               return;
             }
             setUploadState(targetIndex, 'uploaded');
+
+            // Clear preview after upload
+            setSlotPreviewUriByIndex((prev) => {
+              const next = [...prev];
+              next[targetIndex] = null;
+              return next;
+            });
           }
 
-          setPhotoAtIndex(targetIndex, persistentUri);
-          markSlotError(targetIndex, false);
           bumpSlot(targetIndex);
         }
 
@@ -620,9 +738,9 @@ export default function AdditionalPhotosScreen() {
 
                     // Sync photos from backend to refresh UI
                     if (__DEV__) {
-                      console.log('[PHOTOS_UI] Syncing photos after deletion...');
+                      console.log('[PHOTOS_UI] Syncing photos after deletion (skipDownload=true for onboarding)...');
                     }
-                    await syncPhotosFromBackend(userId, false);
+                    await syncPhotosFromBackend(userId, false, true); // skipDownload=true for onboarding
 
                     if (__DEV__) {
                       console.log('[PHOTOS_UI] removeSuccess', { index: indexToRemove });
@@ -810,9 +928,9 @@ export default function AdditionalPhotosScreen() {
   const renderPhotoGrid = () => {
     const grid = [];
 
-    // Count filled additional slots (indices 1-8)
-    const filledAdditionalSlots = photos.slice(1, GRID_SLOTS + 1).filter(
-      (p) => typeof p === 'string' && p.length > 0
+    // Count filled additional slots (indices 1-8) from backend + previews
+    const filledAdditionalSlots = Array.from({ length: GRID_SLOTS }, (_, i) => i + 1).filter(
+      i => backendUrlByIndex[i] || slotPreviewUriByIndex[i]
     ).length;
 
     // Log max check
@@ -829,12 +947,13 @@ export default function AdditionalPhotosScreen() {
 
     // Start from index 1 (skip primary photo which is shown in circle)
     for (let i = 1; i <= GRID_SLOTS; i++) {
-      const photo = photos[i];
-      const fileState = slotFileState[i] || 'empty';
-      const hasPhoto = typeof photo === 'string' && photo.length > 0;
-      // TASK 2: Only show photo if file actually exists (not just URI stored)
-      const showPhoto = hasPhoto && fileState === 'exists' && !slotError[i];
-      const isMissing = hasPhoto && (fileState === 'missing' || fileState === 'invalid');
+      const backendUrl = backendUrlByIndex[i]; // Backend URL from Convex (source of truth)
+      const previewUri = slotPreviewUriByIndex[i]; // Temporary preview during upload
+      const uriToShow = previewUri ?? backendUrl; // Prefer preview (instant), fallback to backend
+      const hasUri = typeof uriToShow === 'string' && uriToShow.length > 0;
+      // Show photo if we have preview OR backend URL
+      const showPhoto = hasUri && !slotError[i];
+      const isMissing = false; // No file state check needed - backend URLs are always valid
 
       // Upload state for this slot
       const uploadState = uploadStateByIndex[i] || 'idle';
@@ -868,12 +987,12 @@ export default function AdditionalPhotosScreen() {
             <>
               {(() => {
                 const nonce = slotNonce[i] ?? 0;
-                const renderKey = `${photo}::${nonce}`;
+                const renderKey = `${uriToShow}::${nonce}`;
                 return (
                   <Image
                     key={renderKey}
                     recyclingKey={renderKey}
-                    source={{ uri: photo }}
+                    source={{ uri: uriToShow }}
                     cachePolicy="memory-disk"
                     style={[StyleSheet.absoluteFillObject, styles.photoImage]}
                     contentFit="cover"
@@ -941,26 +1060,30 @@ export default function AdditionalPhotosScreen() {
     },
   ];
 
-  // BUG FIX: Primary photo source priority:
-  // 1) Normal photo in photos[0] (if user explicitly uploaded one), else
-  // 2) Verification reference photo (from face verification), else
-  // 3) Empty placeholder
+  // Primary photo source priority:
+  // 1) Normal photo from backend (slot 0), else
+  // 2) Temporary preview during upload, else
+  // 3) Verification reference photo (from face verification), else
+  // 4) Empty placeholder
   const referencePhotoUrl = userQuery?.verificationReferencePhotoUrl || verificationReferencePrimary?.url || '';
   const hasReferencePhotoUrl = referencePhotoUrl.length > 0;
   const hasReferencePhotoId = !!verificationReferencePrimary || !!userQuery?.verificationReferencePhotoId;
-  // Only consider reference photo valid if we have a URL to display
-  const hasReferencePhoto = hasReferencePhotoUrl;
+  // Use backend onboarding status as source of truth for reference photo existence
+  const referencePhotoExistsBackend = onboardingStatus?.referencePhotoExists ?? false;
+  // Consider reference photo valid if backend says it exists OR we have a URL to display
+  const hasReferencePhoto = referencePhotoExistsBackend || hasReferencePhotoUrl;
 
-  const normalPrimaryPhoto = photos[0];
-  const normalPrimaryFileState = slotFileState[0] || 'empty';
+  const normalPrimaryBackendUrl = backendUrlByIndex[0]; // Backend URL for slot 0
+  const normalPrimaryPreview = slotPreviewUriByIndex[0]; // Temporary preview during upload
+  const normalPrimaryPhoto = normalPrimaryPreview ?? normalPrimaryBackendUrl; // Prefer preview, fallback to backend
   const hasNormalPrimary = typeof normalPrimaryPhoto === 'string' && normalPrimaryPhoto.length > 0;
-  const normalPrimaryExists = hasNormalPrimary && normalPrimaryFileState === 'exists';
+  const normalPrimaryExists = hasNormalPrimary; // Backend URLs are always valid
 
   // Determine which photo to use as primary
   const primaryPhoto = hasNormalPrimary ? normalPrimaryPhoto : (hasReferencePhoto ? referencePhotoUrl : null);
   const hasPrimaryPhoto = hasNormalPrimary || hasReferencePhoto;
   const primaryPhotoExists = normalPrimaryExists || hasReferencePhoto;
-  const primaryPhotoMissing = hasNormalPrimary && (normalPrimaryFileState === 'missing' || normalPrimaryFileState === 'invalid');
+  const primaryPhotoMissing = false; // No file state check needed for backend URLs
   const primarySource = hasNormalPrimary ? 'normal' : (hasReferencePhoto ? 'reference' : 'none');
 
   // Upload state for primary photo (only relevant for normal photos)
@@ -1190,9 +1313,9 @@ export default function AdditionalPhotosScreen() {
           </TouchableOpacity>
 
           {/* Photo display */}
-          {viewerIndex !== null && photos[viewerIndex] && (
+          {viewerIndex !== null && (backendUrlByIndex[viewerIndex] || slotPreviewUriByIndex[viewerIndex]) && (
             <Image
-              source={{ uri: photos[viewerIndex]! }}
+              source={{ uri: (slotPreviewUriByIndex[viewerIndex] ?? backendUrlByIndex[viewerIndex])! }}
               style={styles.viewerImage}
               contentFit="contain"
             />

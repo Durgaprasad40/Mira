@@ -4,7 +4,7 @@
  */
 
 import { RefObject } from 'react';
-import { ScrollView, TextInput } from 'react-native';
+import { ScrollView, TextInput, findNodeHandle, UIManager } from 'react-native';
 
 /**
  * Validation rule function - returns error message if invalid, undefined if valid
@@ -90,37 +90,40 @@ export function scrollToFirstInvalid<T extends string>(
 
   // Try to scroll to the field
   try {
-    // SAFETY: Check if measureLayout is available on the ref
-    if (typeof fieldRef.current.measureLayout !== 'function') {
-      // Ref doesn't support measureLayout - scroll to top as fallback
+    // SAFETY: Get native node handles for both field and scroll container
+    const fieldNode = findNodeHandle(fieldRef.current);
+    const innerViewNode = scrollRef.current.getInnerViewNode?.();
+    const innerNode = findNodeHandle(innerViewNode);
+
+    // If we can't get both native handles, fall back to scrolling to top
+    if (fieldNode == null || innerNode == null) {
+      if (__DEV__) {
+        console.warn('[SCROLL_TO_INVALID] Could not get native node handles, scrolling to top');
+      }
       scrollRef.current?.scrollTo({ y: 0, animated: true });
       return;
     }
 
-    // SAFETY: Check if getInnerViewNode is available and returns a valid node
-    if (typeof scrollRef.current.getInnerViewNode !== 'function') {
-      scrollRef.current?.scrollTo({ y: 0, animated: true });
-      return;
-    }
-
-    const innerViewNode = scrollRef.current.getInnerViewNode();
-    if (!innerViewNode) {
-      scrollRef.current?.scrollTo({ y: 0, animated: true });
-      return;
-    }
-
-    fieldRef.current.measureLayout(
-      innerViewNode,
-      (_x: number, y: number) => {
-        scrollRef.current?.scrollTo({ y: Math.max(0, y - offsetY), animated: true });
-      },
+    // Use UIManager.measureLayout for safe measurement even with custom components
+    UIManager.measureLayout(
+      fieldNode,
+      innerNode,
       () => {
         // measureLayout failed, try scrollTo 0 as fallback
+        if (__DEV__) {
+          console.warn('[SCROLL_TO_INVALID] measureLayout failed, scrolling to top');
+        }
         scrollRef.current?.scrollTo({ y: 0, animated: true });
+      },
+      (_x: number, y: number) => {
+        scrollRef.current?.scrollTo({ y: Math.max(0, y - offsetY), animated: true });
       }
     );
-  } catch {
+  } catch (error) {
     // Fallback: scroll to top
+    if (__DEV__) {
+      console.warn('[SCROLL_TO_INVALID] Exception during scroll:', error);
+    }
     scrollRef.current?.scrollTo({ y: 0, animated: true });
   }
 }

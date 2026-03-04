@@ -204,6 +204,10 @@ export default function PhoneEntryScreen() {
         // Store auth credentials
         setAuth(result.userId, result.token, result.onboardingCompleted || false);
 
+        // Persist auth token after confirmed phone login success
+        const { saveAuthBootCache } = require('@/stores/authBootCache');
+        await saveAuthBootCache(result.token, result.userId);
+
         // Navigate based on onboarding status
         if (result.onboardingCompleted) {
           router.replace('/(main)/(tabs)/home');

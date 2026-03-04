@@ -74,6 +74,10 @@ export default function LoginScreen() {
           result.onboardingCompleted || false,
         );
 
+        // Persist auth token after confirmed login success
+        const { saveAuthBootCache } = require('@/stores/authBootCache');
+        await saveAuthBootCache(result.token, result.userId);
+
         if (result.onboardingCompleted) {
           router.replace("/(main)/(tabs)/home");
         } else {

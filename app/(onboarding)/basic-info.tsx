@@ -610,6 +610,11 @@ export default function BasicInfoScreen() {
 
       if (result.success && result.userId && result.token) {
         setAuth(result.userId, result.token, false);
+
+        // Persist auth token after confirmed signup success
+        const { saveAuthBootCache } = require('@/stores/authBootCache');
+        await saveAuthBootCache(result.token, result.userId);
+
         setStep("consent");
         router.push("/(onboarding)/consent" as any);
       }

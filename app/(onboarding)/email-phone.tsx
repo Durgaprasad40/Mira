@@ -65,6 +65,11 @@ export default function EmailPhoneScreen() {
           router.push('/(onboarding)/basic-info' as any);
         } else if (result.token && result.userId) {
           setAuth(result.userId as string, result.token, result.onboardingCompleted || false);
+
+          // Persist auth token after confirmed email/phone success
+          const { saveAuthBootCache } = require('@/stores/authBootCache');
+          await saveAuthBootCache(result.token, result.userId as string);
+
           if (result.onboardingCompleted) {
             router.replace('/(main)/(tabs)/home' as any);
           } else {
