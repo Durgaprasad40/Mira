@@ -98,14 +98,16 @@ export default function Index() {
       return;
     }
 
-    // FAST_PATH: If cached onboardingCompleted=true, allow immediate routing
-    // Validation will happen in background
+    // STABILITY FIX (2026-03-04): FAST_PATH with validation gate
+    // If cached onboardingCompleted=true, trust it optimistically BUT wait for validation
+    // This prevents "route to home then forced logout" race condition
+    // User sees loading for 1-2s (validation time) instead of instant home + potential kickout
     if (cachedOnboardingCompleted) {
       if (__DEV__) {
-        console.log('[AUTH_BOOT] FAST_PATH: cached onboardingCompleted=true, allowing immediate route to home');
+        console.log('[AUTH_BOOT] FAST_PATH: cached onboardingCompleted=true, optimistically trusting cache');
       }
       setConvexOnboardingCompleted(true);
-      setConvexValidated(true);
+      // Do NOT set convexValidated=true here - wait for validation to complete
     }
 
     // Start validation (even if FAST_PATH, validate in background)
@@ -179,7 +181,17 @@ export default function Index() {
       }
     };
 
-    validateSession();
+    // STABILITY FIX (2026-03-04): Handle promise rejection to prevent unhandled errors
+    validateSession().catch((error) => {
+      console.error('[AUTH_BOOT] Unhandled validation error:', error);
+      // Fail-safe: if validation crashes, treat as validation complete but incomplete onboarding
+      if (!cachedOnboardingCompleted) {
+        setConvexValidated(true);
+        setConvexOnboardingCompleted(false);
+      }
+      // If FAST_PATH (cachedOnboardingCompleted=true), user already routed to home
+      // Keep them there, error is logged, will retry next boot
+    });
   }, [authBootCacheData, router]);
 
   // For demo mode: use bootCache (fast) for routing

@@ -1,3 +1,12 @@
+/**
+ * LOCKED (Onboarding Page Lock)
+ * Page: app/(auth)/welcome.tsx
+ * Policy:
+ * - NO feature changes
+ * - ONLY stability/bug fixes allowed IF Durga Prasad explicitly requests
+ * - Do not change UX/flows without explicit unlock
+ * Date locked: 2026-03-04
+ */
 import { View, Text, StyleSheet, ActivityIndicator } from "react-native";
 import { Button } from "@/components/ui";
 import { useRouter, Redirect } from "expo-router";

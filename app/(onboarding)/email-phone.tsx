@@ -1,3 +1,12 @@
+/**
+ * LOCKED (Onboarding Page Lock)
+ * Page: app/(onboarding)/email-phone.tsx
+ * Policy:
+ * - NO feature changes
+ * - ONLY stability/bug fixes allowed IF Durga Prasad explicitly requests
+ * - Do not change UX/flows without explicit unlock
+ * Date locked: 2026-03-04
+ */
 import React, { useState } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, Platform, Alert } from 'react-native';
 import { useRouter } from 'expo-router';
@@ -59,6 +68,11 @@ export default function EmailPhoneScreen() {
             : undefined,
         });
 
+        // STABILITY FIX (2026-03-04): Validate mutation success before routing
+        if (!result) {
+          throw new Error('No response from server');
+        }
+
         if (result.isNewUser) {
           Alert.alert('Welcome!', 'Please complete your profile setup.');
           setStep('basic_info');
@@ -76,6 +90,9 @@ export default function EmailPhoneScreen() {
             setStep('basic_info');
             router.push('/(onboarding)/basic-info' as any);
           }
+        } else {
+          // STABILITY FIX (2026-03-04): Handle unexpected response format
+          throw new Error('Invalid response from server - missing required fields');
         }
       } catch (backendError: any) {
         console.error('[AppleAuth] Backend error:', backendError.message);

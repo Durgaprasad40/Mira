@@ -1,3 +1,12 @@
+/**
+ * LOCKED (Onboarding Page Lock)
+ * Page: app/(onboarding)/profile-details/education-religion.tsx
+ * Policy:
+ * - NO feature changes
+ * - ONLY stability/bug fixes allowed IF Durga Prasad explicitly requests
+ * - Do not change UX/flows without explicit unlock
+ * Date locked: 2026-03-04
+ */
 import React, { useEffect } from "react";
 import {
   View,

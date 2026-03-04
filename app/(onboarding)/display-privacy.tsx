@@ -1,3 +1,12 @@
+/**
+ * LOCKED (Onboarding Page Lock)
+ * Page: app/(onboarding)/display-privacy.tsx
+ * Policy:
+ * - NO feature changes
+ * - ONLY stability/bug fixes allowed IF Durga Prasad explicitly requests
+ * - Do not change UX/flows without explicit unlock
+ * Date locked: 2026-03-04
+ */
 import React, { useState, useEffect } from 'react';
 import {
   View,

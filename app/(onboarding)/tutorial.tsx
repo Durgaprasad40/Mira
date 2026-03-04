@@ -1,3 +1,12 @@
+/**
+ * LOCKED (Onboarding Page Lock)
+ * Page: app/(onboarding)/tutorial.tsx
+ * Policy:
+ * - NO feature changes
+ * - ONLY stability/bug fixes allowed IF Durga Prasad explicitly requests
+ * - Do not change UX/flows without explicit unlock
+ * Date locked: 2026-03-04
+ */
 import React, { useState } from "react";
 import { View, Text, StyleSheet } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";

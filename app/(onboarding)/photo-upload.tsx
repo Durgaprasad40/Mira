@@ -1,4 +1,13 @@
-import React, { useState } from 'react';
+/**
+ * LOCKED (Onboarding Page Lock)
+ * Page: app/(onboarding)/photo-upload.tsx
+ * Policy:
+ * - NO feature changes
+ * - ONLY stability/bug fixes allowed IF Durga Prasad explicitly requests
+ * - Do not change UX/flows without explicit unlock
+ * Date locked: 2026-03-04
+ */
+import React, { useState, useRef } from 'react';
 import { View, Text, StyleSheet, Alert, ScrollView } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { Image } from 'expo-image';
@@ -94,6 +103,8 @@ export default function PhotoUploadScreen() {
   const demoProfile = useDemoStore((s) => isDemoMode && userId ? s.demoProfiles[userId] : null);
   const router = useRouter();
   const [isUploading, setIsUploading] = useState(false);
+  // STABILITY FIX (2026-03-04): Single-flight guard to prevent concurrent uploads
+  const uploadInProgressRef = useRef(false);
 
   // CRITICAL: Check if user is already verified (persisted in demoProfile for demo mode)
   const isAlreadyVerified = isDemoMode
@@ -304,6 +315,21 @@ export default function PhotoUploadScreen() {
   };
 
   const handleNext = async () => {
+    // STABILITY FIX (2026-03-04): Prevent concurrent uploads with single-flight guard
+    if (uploadInProgressRef.current) {
+      console.log('[PHOTO_GATE] BLOCKED: Upload already in progress');
+      return;
+    }
+    uploadInProgressRef.current = true;
+
+    // STABILITY FIX (2026-03-04): Validate userId BEFORE checking photo to fail fast
+    if (!userId) {
+      console.log('[PHOTO_GATE] BLOCKED: No userId');
+      Alert.alert('Error', 'Please log in first.');
+      uploadInProgressRef.current = false;
+      return;
+    }
+
     const currentPhoto = previewUri || photos[0];
     if (!currentPhoto) {
       console.log('[PHOTO_GATE] BLOCKED: No photo uploaded');
@@ -312,12 +338,7 @@ export default function PhotoUploadScreen() {
         'Please upload a clear photo of yourself with your face visible. This is required for verification.',
         [{ text: 'OK' }]
       );
-      return;
-    }
-
-    if (!userId) {
-      console.log('[PHOTO_GATE] BLOCKED: No userId');
-      Alert.alert('Error', 'Please log in first.');
+      uploadInProgressRef.current = false;
       return;
     }
 
@@ -339,6 +360,7 @@ export default function PhotoUploadScreen() {
 
       setStep('face_verification');
       router.push('/(onboarding)/face-verification' as any);
+      uploadInProgressRef.current = false; // STABILITY FIX (2026-03-04): Reset guard before return
       return;
     }
 
@@ -411,6 +433,7 @@ export default function PhotoUploadScreen() {
       Alert.alert('Upload Failed', error.message || 'Please try again.');
     } finally {
       setIsUploading(false);
+      uploadInProgressRef.current = false; // STABILITY FIX (2026-03-04): Reset guard in finally
     }
   };
 

@@ -1,3 +1,12 @@
+/**
+ * LOCKED (Onboarding Page Lock)
+ * Page: app/(onboarding)/basic-info.tsx
+ * Policy:
+ * - NO feature changes
+ * - ONLY stability/bug fixes allowed IF Durga Prasad explicitly requests
+ * - Do not change UX/flows without explicit unlock
+ * Date locked: 2026-03-04
+ */
 import React, { useState, useEffect, useCallback, useRef } from "react";
 import {
   View,
@@ -164,6 +173,18 @@ export default function BasicInfoScreen() {
       }
     };
   }, []);
+
+  // STABILITY FIX (2026-03-04): Cancel pending checks when mode changes to prevent stale updates
+  useEffect(() => {
+    // Clear any pending nickname availability check when demo mode changes
+    if (availabilityTimeoutRef.current) {
+      clearTimeout(availabilityTimeoutRef.current);
+      availabilityTimeoutRef.current = null;
+    }
+    // Reset availability state to prevent stale results from different mode
+    setIsCheckingAvailability(false);
+    setIsNicknameAvailable(null);
+  }, [isDemoMode]);
 
   // Load existing data into display state OR detect recovery mode
   useEffect(() => {
@@ -611,9 +632,20 @@ export default function BasicInfoScreen() {
       if (result.success && result.userId && result.token) {
         setAuth(result.userId, result.token, false);
 
-        // Persist auth token after confirmed signup success
-        const { saveAuthBootCache } = require('@/stores/authBootCache');
-        await saveAuthBootCache(result.token, result.userId);
+        // STABILITY FIX (2026-03-04): Wrap token persistence in try-catch to prevent navigation on failure
+        try {
+          const { saveAuthBootCache } = require('@/stores/authBootCache');
+          await saveAuthBootCache(result.token, result.userId);
+        } catch (persistError: any) {
+          console.error('[BASIC_INFO] Failed to persist auth token:', persistError);
+          Alert.alert(
+            'Error',
+            'Failed to save login session. Please try again.',
+            [{ text: 'OK' }]
+          );
+          setIsSubmitting(false);
+          return; // DO NOT navigate if token persistence fails
+        }
 
         setStep("consent");
         router.push("/(onboarding)/consent" as any);

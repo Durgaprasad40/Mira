@@ -1,3 +1,12 @@
+/**
+ * LOCKED (Onboarding Page Lock)
+ * Page: app/(onboarding)/face-verification.tsx
+ * Policy:
+ * - NO feature changes
+ * - ONLY stability/bug fixes allowed IF Durga Prasad explicitly requests
+ * - Do not change UX/flows without explicit unlock
+ * Date locked: 2026-03-04
+ */
 import React, { useState, useRef, useEffect, useCallback } from 'react';
 import {
   View,
@@ -90,13 +99,24 @@ export default function FaceVerificationScreen() {
 
   // CRITICAL: Skip verification entirely if already verified or pending - redirect immediately
   const didSkipRef = useRef(false);
+  // STABILITY FIX (2026-03-04): Add cleanup to prevent setState on unmounted component
   useEffect(() => {
+    let isMounted = true;
+
     if (isAlreadyVerified && !didSkipRef.current) {
       didSkipRef.current = true;
       console.log('[FaceDebug] face verification completed (passed or pending) -> skip capture -> additional-photos');
-      setStep('additional_photos');
-      router.replace('/(onboarding)/additional-photos' as any);
+
+      // Only call setState/navigate if still mounted
+      if (isMounted) {
+        setStep('additional_photos');
+        router.replace('/(onboarding)/additional-photos' as any);
+      }
     }
+
+    return () => {
+      isMounted = false; // Cleanup: prevent state updates if unmounted
+    };
   }, [isAlreadyVerified, setStep, router]);
   const [capturedFrames, setCapturedFrames] = useState<CapturedFrame[]>([]);
   const [framesCaptured, setFramesCaptured] = useState(0);
@@ -123,7 +143,10 @@ export default function FaceVerificationScreen() {
   // Get hydration state to avoid checking before store is ready
   const storeHydrated = useOnboardingStore((s) => s._hasHydrated);
 
+  // STABILITY FIX (2026-03-04): Add cleanup to prevent setState on unmounted component
   useEffect(() => {
+    let isMounted = true;
+
     // Use backend data as source of truth for reference photo check
     const referencePhotoExists = onboardingStatus?.referencePhotoExists ?? false;
     const backendDataLoaded = onboardingStatus !== undefined;
@@ -158,12 +181,19 @@ export default function FaceVerificationScreen() {
         [{
           text: 'Upload Photo',
           onPress: () => {
-            setStep('photo_upload');
-            router.replace('/(onboarding)/photo-upload' as any);
+            // Only navigate if component still mounted
+            if (isMounted) {
+              setStep('photo_upload');
+              router.replace('/(onboarding)/photo-upload' as any);
+            }
           }
         }]
       );
     }
+
+    return () => {
+      isMounted = false; // Cleanup: prevent state updates if unmounted
+    };
   }, [onboardingStatus, userId, setStep, router]);
 
   // Log mount/unmount separately (no deps needed)
