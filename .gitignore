@@ -42,3 +42,4 @@ yarn-error.*
 
 # Temporarily ignore untracked Convex file to prevent api.d.ts regeneration
 convex/verificationProviders.ts
+*.backup
