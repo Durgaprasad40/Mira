@@ -1,16 +1,12 @@
 /**
- * photoBlurStore — Persisted store for per-photo blur settings.
+ * photoBlurStore — In-memory store for per-photo blur settings.
  *
- * Stores blur preferences keyed by userId so they persist across:
- * - Navigation (leaving/returning to Edit Profile)
- * - App restarts
- * - Logout/login (per-account)
+ * STORAGE POLICY: NO local persistence. Convex is ONLY source of truth.
+ * Store is in-memory only. Any required rehydration must come from Convex queries/mutations.
  *
- * Uses AsyncStorage via zustand persist.
+ * Stores blur preferences keyed by userId in memory only.
  */
 import { create } from 'zustand';
-import { persist, createJSONStorage } from 'zustand/middleware';
-import AsyncStorage from '@react-native-async-storage/async-storage';
 
 interface UserBlurSettings {
   blurEnabled: boolean;
@@ -41,113 +37,94 @@ const DEFAULT_SETTINGS: UserBlurSettings = {
 // Stable empty object reference to avoid creating new {} on every call
 const EMPTY_BLURRED_PHOTOS: Record<number, boolean> = {};
 
-export const usePhotoBlurStore = create<PhotoBlurState>()(
-  persist(
-    (set, get) => ({
-      userSettings: {},
-      _hasHydrated: false,
+export const usePhotoBlurStore = create<PhotoBlurState>()((set, get) => ({
+  userSettings: {},
+  _hasHydrated: true, // Always ready - no AsyncStorage
 
-      setHasHydrated: (state) => set({ _hasHydrated: state }),
+  setHasHydrated: (state) => set({ _hasHydrated: true }), // No-op
 
-      getBlurEnabled: (userId) => {
-        if (!userId) return false;
-        return get().userSettings[userId]?.blurEnabled ?? false;
+  getBlurEnabled: (userId) => {
+    if (!userId) return false;
+    return get().userSettings[userId]?.blurEnabled ?? false;
+  },
+
+  getBlurredPhotos: (userId) => {
+    if (!userId) return EMPTY_BLURRED_PHOTOS;
+    return get().userSettings[userId]?.blurredPhotos ?? EMPTY_BLURRED_PHOTOS;
+  },
+
+  setBlurEnabled: (userId, enabled) => {
+    if (!userId) return;
+    set((state) => ({
+      userSettings: {
+        ...state.userSettings,
+        [userId]: {
+          ...DEFAULT_SETTINGS,
+          ...state.userSettings[userId],
+          blurEnabled: enabled,
+        },
       },
+    }));
+  },
 
-      getBlurredPhotos: (userId) => {
-        if (!userId) return EMPTY_BLURRED_PHOTOS;
-        return get().userSettings[userId]?.blurredPhotos ?? EMPTY_BLURRED_PHOTOS;
+  setBlurredPhotos: (userId, blurredPhotos) => {
+    if (!userId) return;
+    set((state) => ({
+      userSettings: {
+        ...state.userSettings,
+        [userId]: {
+          ...DEFAULT_SETTINGS,
+          ...state.userSettings[userId],
+          blurredPhotos,
+        },
       },
+    }));
+  },
 
-      setBlurEnabled: (userId, enabled) => {
-        if (!userId) return;
-        set((state) => ({
-          userSettings: {
-            ...state.userSettings,
-            [userId]: {
-              ...DEFAULT_SETTINGS,
-              ...state.userSettings[userId],
-              blurEnabled: enabled,
+  togglePhotoBlur: (userId, photoIndex) => {
+    if (!userId) return;
+    set((state) => {
+      const currentSettings = state.userSettings[userId] ?? DEFAULT_SETTINGS;
+      const currentBlurred = currentSettings.blurredPhotos[photoIndex] ?? false;
+      return {
+        userSettings: {
+          ...state.userSettings,
+          [userId]: {
+            ...currentSettings,
+            blurredPhotos: {
+              ...currentSettings.blurredPhotos,
+              [photoIndex]: !currentBlurred,
             },
           },
-        }));
-      },
+        },
+      };
+    });
+  },
 
-      setBlurredPhotos: (userId, blurredPhotos) => {
-        if (!userId) return;
-        set((state) => ({
-          userSettings: {
-            ...state.userSettings,
-            [userId]: {
-              ...DEFAULT_SETTINGS,
-              ...state.userSettings[userId],
-              blurredPhotos,
-            },
-          },
-        }));
-      },
+  // Remove blur state for indices >= validPhotoCount (when photos are deleted)
+  cleanupBlurredPhotos: (userId, validPhotoCount) => {
+    if (!userId) return;
+    set((state) => {
+      const currentSettings = state.userSettings[userId];
+      if (!currentSettings) return state;
 
-      togglePhotoBlur: (userId, photoIndex) => {
-        if (!userId) return;
-        set((state) => {
-          const currentSettings = state.userSettings[userId] ?? DEFAULT_SETTINGS;
-          const currentBlurred = currentSettings.blurredPhotos[photoIndex] ?? false;
-          return {
-            userSettings: {
-              ...state.userSettings,
-              [userId]: {
-                ...currentSettings,
-                blurredPhotos: {
-                  ...currentSettings.blurredPhotos,
-                  [photoIndex]: !currentBlurred,
-                },
-              },
-            },
-          };
-        });
-      },
-
-      // Remove blur state for indices >= validPhotoCount (when photos are deleted)
-      cleanupBlurredPhotos: (userId, validPhotoCount) => {
-        if (!userId) return;
-        set((state) => {
-          const currentSettings = state.userSettings[userId];
-          if (!currentSettings) return state;
-
-          const cleanedBlurredPhotos: Record<number, boolean> = {};
-          for (const [key, value] of Object.entries(currentSettings.blurredPhotos)) {
-            const index = parseInt(key, 10);
-            if (index < validPhotoCount) {
-              cleanedBlurredPhotos[index] = value;
-            }
-          }
-
-          return {
-            userSettings: {
-              ...state.userSettings,
-              [userId]: {
-                ...currentSettings,
-                blurredPhotos: cleanedBlurredPhotos,
-              },
-            },
-          };
-        });
-      },
-    }),
-    {
-      name: 'mira-photo-blur-store',
-      storage: createJSONStorage(() => AsyncStorage),
-      onRehydrateStorage: () => (state) => {
-        state?.setHasHydrated(true);
-        if (__DEV__) {
-          console.log('[photoBlurStore] Hydrated', {
-            userCount: Object.keys(state?.userSettings ?? {}).length,
-          });
+      const cleanedBlurredPhotos: Record<number, boolean> = {};
+      for (const [key, value] of Object.entries(currentSettings.blurredPhotos)) {
+        const index = parseInt(key, 10);
+        if (index < validPhotoCount) {
+          cleanedBlurredPhotos[index] = value;
         }
-      },
-      partialize: (state) => ({
-        userSettings: state.userSettings,
-      }),
-    }
-  )
-);
+      }
+
+      return {
+        userSettings: {
+          ...state.userSettings,
+          [userId]: {
+            ...currentSettings,
+            blurredPhotos: cleanedBlurredPhotos,
+          },
+        },
+      };
+    });
+  },
+}));

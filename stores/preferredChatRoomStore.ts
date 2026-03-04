@@ -1,6 +1,9 @@
 /**
  * Preferred Chat Room Store
  *
+ * STORAGE POLICY: NO local persistence. Convex is ONLY source of truth.
+ * All data is ephemeral (in-memory only) and rehydrates from Convex on app boot.
+ *
  * Stores the user's preferred chat room ID so they automatically
  * open that room when entering the Chat Rooms tab.
  *
@@ -11,11 +14,9 @@
  * - Leave Room: Clear preferred room → show homepage again
  *
  * This store is used for both demo and Convex modes.
- * In Convex mode, this is a local cache that syncs with the server.
+ * In Convex mode, this is an ephemeral cache that must sync with the server.
  */
 import { create } from 'zustand';
-import { persist, createJSONStorage } from 'zustand/middleware';
-import AsyncStorage from '@react-native-async-storage/async-storage';
 
 interface PreferredChatRoomState {
   /** The user's preferred chat room ID (null if none selected) */
@@ -27,35 +28,24 @@ interface PreferredChatRoomState {
   /** Clear the preferred chat room (called on "Leave Room") */
   clearPreferredRoom: () => void;
 
-  /** Hydration flag for async storage */
+  /** Hydration flag (always true - no AsyncStorage) */
   _hasHydrated: boolean;
   setHasHydrated: (hydrated: boolean) => void;
 }
 
-export const usePreferredChatRoomStore = create<PreferredChatRoomState>()(
-  persist(
-    (set) => ({
-      preferredRoomId: null,
-      _hasHydrated: false,
+export const usePreferredChatRoomStore = create<PreferredChatRoomState>()((set) => ({
+  preferredRoomId: null,
+  _hasHydrated: true, // Always ready - no AsyncStorage
 
-      setPreferredRoom: (roomId) => {
-        set({ preferredRoomId: roomId });
-      },
+  setPreferredRoom: (roomId) => {
+    set({ preferredRoomId: roomId });
+  },
 
-      clearPreferredRoom: () => {
-        set({ preferredRoomId: null });
-      },
+  clearPreferredRoom: () => {
+    set({ preferredRoomId: null });
+  },
 
-      setHasHydrated: (hydrated) => {
-        set({ _hasHydrated: hydrated });
-      },
-    }),
-    {
-      name: 'preferred-chatroom-storage',
-      storage: createJSONStorage(() => AsyncStorage),
-      onRehydrateStorage: () => (state) => {
-        state?.setHasHydrated(true);
-      },
-    }
-  )
-);
+  setHasHydrated: (hydrated) => {
+    set({ _hasHydrated: true }); // No-op
+  },
+}));

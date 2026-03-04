@@ -1,14 +1,22 @@
 import { v } from 'convex/values';
 import { mutation, query } from './_generated/server';
 import { Id } from './_generated/dataModel';
+import { resolveUserIdByAuthId, ensureUserByAuthId } from './helpers';
 
 // Get user's subscription status
 export const getSubscriptionStatus = query({
   args: {
-    userId: v.id('users'),
+    userId: v.union(v.id('users'), v.string()), // Accept both Convex ID and authUserId string
   },
   handler: async (ctx, args) => {
-    const user = await ctx.db.get(args.userId);
+    // Map authUserId -> Convex Id<"users"> (QUERY: read-only, no creation)
+    const userId = await resolveUserIdByAuthId(ctx, args.userId as string);
+    if (!userId) {
+      console.log('[getSubscriptionStatus] User not found for authUserId:', args.userId);
+      return null;
+    }
+
+    const user = await ctx.db.get(userId);
     if (!user) return null;
 
     const now = Date.now();
@@ -32,7 +40,7 @@ export const getSubscriptionStatus = query({
     // Get active subscription record
     const activeSubscription = await ctx.db
       .query('subscriptionRecords')
-      .withIndex('by_user', (q) => q.eq('userId', args.userId))
+      .withIndex('by_user', (q) => q.eq('userId', userId))
       .filter((q) =>
         q.and(
           q.eq(q.field('isActive'), true),

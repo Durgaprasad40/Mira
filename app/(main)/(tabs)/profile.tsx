@@ -51,10 +51,19 @@ export default function ProfileScreen() {
   const token = useAuthStore((s) => s.token);
   const logout = useAuthStore((s) => s.logout);
 
+  // PERF: Track screen focus time for photo load measurement
+  const focusTimeRef = React.useRef(0);
+  const hasLoggedPhotoLoad = React.useRef(false);
+
   // FIX C: Force re-render when navigating back from Edit Profile
   const [refreshKey, setRefreshKey] = useState(0);
   useFocusEffect(
     useCallback(() => {
+      // PERF: Mark focus time for instrumentation
+      if (__DEV__) {
+        focusTimeRef.current = Date.now();
+        hasLoggedPhotoLoad.current = false;
+      }
       // Increment key to force re-read of demoStore/convex data
       setRefreshKey((k) => k + 1);
     }, [])
@@ -69,6 +78,12 @@ export default function ProfileScreen() {
   const convexUser = useQuery(
     api.users.getCurrentUser,
     !isDemoMode && userId ? { userId: userId as any } : 'skip'
+  );
+
+  // CRITICAL DEBUG: In demo mode, still check if Convex has photos for this userId
+  const convexPhotosDebug = useQuery(
+    api.users.getCurrentUser,
+    isDemoMode && userId ? { userId: userId as any } : 'skip'
   );
 
   const subscriptionStatus = useQuery(
@@ -148,7 +163,29 @@ export default function ProfileScreen() {
       : null;
 
   // FIX C: Get main photo (index 0 after reorder)
-  const mainPhotoUrl = currentUser?.photos?.[0]?.url || null;
+  // PERF: Memoize main photo URL to prevent re-creating source object
+  const mainPhotoUrl = React.useMemo(
+    () => currentUser?.photos?.[0]?.url || null,
+    [currentUser?.photos]
+  );
+
+  // PERF: Prefetch top photos after hydration
+  React.useEffect(() => {
+    const photos = currentUser?.photos;
+    if (photos && photos.length > 0) {
+      const topPhotos = photos.slice(0, Math.min(6, photos.length));
+      topPhotos.forEach((photo) => {
+        if (photo.url) {
+          Image.prefetch(photo.url).catch(() => {
+            // Silently ignore prefetch errors
+          });
+        }
+      });
+      if (__DEV__) {
+        console.log('[PERF ProfileTab] Prefetching', topPhotos.length, 'photos');
+      }
+    }
+  }, [currentUser?.photos]);
 
   // Blur status: detect from existing field names only (no new fields added)
   const blurEnabled = Boolean(
@@ -171,7 +208,41 @@ export default function ProfileScreen() {
       main: !!mainPhotoUrl,
       refreshKey,
       hydrated: demoHydrated,
+      // CRITICAL DEBUG: Show auth state
+      isDemoMode,
+      authUserId: userId,
+      demoUserId: currentDemoUserId,
     });
+
+    // CRITICAL: If in demo mode, warn that Convex photos are being ignored
+    if (isDemoMode) {
+      console.warn('[ProfileTab] ⚠️ DEMO MODE ACTIVE - Reading photos from demoStore (local), NOT Convex backend!');
+      console.warn('[ProfileTab] ⚠️ Phase-1 photos uploaded to Convex will NOT be visible in demo mode.');
+      console.warn('[ProfileTab] ⚠️ To see Convex photos, set EXPO_PUBLIC_DEMO_MODE=false in .env.local');
+
+      // DEBUG: Check if Convex actually has photos for this user
+      if (convexPhotosDebug) {
+        const convexPhotoCount = convexPhotosDebug.photos?.length ?? 0;
+        const convexPhotoIds = convexPhotosDebug.photos?.map((p: any) => ({
+          id: p._id,
+          storageId: p.storageId,
+          order: p.order,
+        })) ?? [];
+
+        console.log('[ProfileTab] 🔍 Convex backend CHECK:', {
+          userId,
+          convexPhotoCount,
+          convexPhotoIds,
+          displayUrl: convexPhotosDebug.displayPrimaryPhotoUrl,
+          verificationPhotoId: convexPhotosDebug.verificationReferencePhotoId,
+        });
+
+        if (convexPhotoCount > 0) {
+          console.error('[ProfileTab] ❌ FOUND CONVEX PHOTOS BUT NOT DISPLAYING THEM!');
+          console.error('[ProfileTab] ❌ This is WHY Phase-1 photos are missing - demo mode ignores Convex backend.');
+        }
+      }
+    }
   }
 
   // 3A1-2: Logout clears client + server + onboarding
@@ -256,7 +327,20 @@ export default function ProfileScreen() {
       <View style={styles.profileSection}>
         {/* Main photo - always clear for owner */}
         {mainPhotoUrl ? (
-          <Image source={{ uri: mainPhotoUrl }} style={styles.avatar} contentFit="cover" />
+          <Image
+            source={{ uri: mainPhotoUrl }}
+            style={styles.avatar}
+            contentFit="cover"
+            transition={200}
+            onLoadEnd={() => {
+              // PERF: Log photo load time once per focus
+              if (__DEV__ && !hasLoggedPhotoLoad.current && focusTimeRef.current > 0) {
+                const loadTime = Date.now() - focusTimeRef.current;
+                console.log('[PERF ProfileTab] Main photo loaded:', { loadTimeMs: loadTime });
+                hasLoggedPhotoLoad.current = true;
+              }
+            }}
+          />
         ) : (
           <Avatar size={100} />
         )}
@@ -295,6 +379,7 @@ export default function ProfileScreen() {
               style={styles.previewThumbnail}
               contentFit="cover"
               blurRadius={blurEnabled ? 20 : 0}
+              transition={100}
             />
             <Text style={styles.previewLabel}>
               {blurEnabled ? 'Others see this (blurred)' : 'Others see this (clear)'}

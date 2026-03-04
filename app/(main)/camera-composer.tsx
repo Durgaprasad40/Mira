@@ -9,9 +9,9 @@ import { Image } from 'expo-image';
 import { useRouter, useLocalSearchParams } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import { INCOGNITO_COLORS } from '@/lib/constants';
 import type { TodMediaVisibility } from '@/types';
+import { setHandoff } from '@/lib/memoryHandoff';
 
 const C = INCOGNITO_COLORS;
 const MAX_VIDEO_SEC_TOD = 60;
@@ -163,7 +163,8 @@ export default function CameraComposerScreen() {
         storageKey = 'tod_captured_media';
       }
 
-      await AsyncStorage.setItem(storageKey, JSON.stringify({
+      // Store in memory for handoff to receiving screen (no persistence)
+      setHandoff(storageKey, {
         uri: permanentUri,
         type: capturedType,
         mediaUri: permanentUri, // Alias for ChatTodOverlay compatibility
@@ -171,7 +172,7 @@ export default function CameraComposerScreen() {
         durationSec: capturedType === 'video' ? videoSeconds : undefined,
         visibility: isSecureCapture ? undefined : mediaVisibility,
         isMirrored: capturedFacing === 'front', // Front camera media needs render-time flip
-      }));
+      });
       router.back();
     } catch {
       Alert.alert('Error', 'Failed to save media. Please try again.');

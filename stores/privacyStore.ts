@@ -1,15 +1,12 @@
 /**
- * privacyStore — Persisted store for user privacy settings.
+ * privacyStore — In-memory store for user privacy settings.
  *
- * Stores privacy toggles that persist across app restarts:
- * - hideFromDiscover: Hide profile from Discover feed
- * - hideAge: Hide age on profile
- * - hideDistance: Hide distance from other users
- * - disableReadReceipts: Don't send read receipts to others
+ * STORAGE POLICY ENFORCEMENT:
+ * NO local persistence. Privacy settings are user information.
+ * All privacy settings must be rehydrated from Convex on app boot.
+ * Convex is the ONLY source of truth.
  */
 import { create } from 'zustand';
-import { persist, createJSONStorage } from 'zustand/middleware';
-import AsyncStorage from '@react-native-async-storage/async-storage';
 
 interface PrivacyState {
   // Privacy settings (all default to false = normal app behavior)
@@ -18,7 +15,7 @@ interface PrivacyState {
   hideDistance: boolean;
   disableReadReceipts: boolean;
 
-  // Hydration
+  // Hydration (always true - no AsyncStorage)
   _hasHydrated: boolean;
 
   // Actions
@@ -32,51 +29,26 @@ interface PrivacyState {
   resetPrivacy: () => void;
 }
 
-export const usePrivacyStore = create<PrivacyState>()(
-  persist(
-    (set) => ({
+export const usePrivacyStore = create<PrivacyState>()((set) => ({
+  hideFromDiscover: false,
+  hideAge: false,
+  hideDistance: false,
+  disableReadReceipts: false,
+  _hasHydrated: true,
+
+  setHasHydrated: (state) => set({ _hasHydrated: true }),
+
+  setHideFromDiscover: (value) => set({ hideFromDiscover: value }),
+  setHideAge: (value) => set({ hideAge: value }),
+  setHideDistance: (value) => set({ hideDistance: value }),
+  setDisableReadReceipts: (value) => set({ disableReadReceipts: value }),
+
+  // Reset
+  resetPrivacy: () =>
+    set({
       hideFromDiscover: false,
       hideAge: false,
       hideDistance: false,
       disableReadReceipts: false,
-      _hasHydrated: false,
-
-      setHasHydrated: (state) => set({ _hasHydrated: state }),
-
-      setHideFromDiscover: (value) => set({ hideFromDiscover: value }),
-      setHideAge: (value) => set({ hideAge: value }),
-      setHideDistance: (value) => set({ hideDistance: value }),
-      setDisableReadReceipts: (value) => set({ disableReadReceipts: value }),
-
-      // Reset
-      resetPrivacy: () =>
-        set({
-          hideFromDiscover: false,
-          hideAge: false,
-          hideDistance: false,
-          disableReadReceipts: false,
-        }),
     }),
-    {
-      name: 'mira-privacy-store',
-      storage: createJSONStorage(() => AsyncStorage),
-      onRehydrateStorage: () => (state) => {
-        state?.setHasHydrated(true);
-        if (__DEV__) {
-          console.log('[privacyStore] Hydrated', {
-            hideFromDiscover: state?.hideFromDiscover,
-            hideAge: state?.hideAge,
-            hideDistance: state?.hideDistance,
-            disableReadReceipts: state?.disableReadReceipts,
-          });
-        }
-      },
-      partialize: (state) => ({
-        hideFromDiscover: state.hideFromDiscover,
-        hideAge: state.hideAge,
-        hideDistance: state.hideDistance,
-        disableReadReceipts: state.disableReadReceipts,
-      }),
-    }
-  )
-);
+}));

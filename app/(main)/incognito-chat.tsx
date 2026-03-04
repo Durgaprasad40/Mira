@@ -19,8 +19,8 @@ import { Image } from 'expo-image';
 import { FlashList, type FlashListRef } from '@shopify/flash-list';
 import { useLocalSearchParams, useRouter, useFocusEffect } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import { Ionicons } from '@expo/vector-icons';
+import { popHandoff } from '@/lib/memoryHandoff';
 import * as ImagePicker from 'expo-image-picker';
 import { INCOGNITO_COLORS } from '@/lib/constants';
 import { PRIVATE_INTENT_CATEGORIES } from '@/lib/privateConstants';
@@ -212,16 +212,15 @@ export default function PrivateChatScreen() {
   // Check for captured media from camera-composer when screen regains focus
   useFocusEffect(
     useCallback(() => {
-      const checkCapturedMedia = async () => {
+      const checkCapturedMedia = () => {
         if (!id) return;
         const key = `secure_capture_media_${id}`;
-        const stored = await AsyncStorage.getItem(key);
-        if (!stored) return;
+        // Pop from memory (get and delete atomically, no persistence)
+        const data = popHandoff<{ uri: string; type: string; isMirrored?: boolean }>(key);
+        if (!data) return;
 
-        await AsyncStorage.removeItem(key);
         try {
-          const data = JSON.parse(stored);
-          if (data.uri && data.type) {
+          if (data.uri && data.type && (data.type === 'photo' || data.type === 'video')) {
             setPickedImageUri(data.uri);
             setPendingMediaType(data.type);
             setPendingIsMirrored(data.isMirrored === true);

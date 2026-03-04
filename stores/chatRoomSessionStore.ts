@@ -1,3 +1,6 @@
+// STORAGE POLICY: NO local persistence. Convex is ONLY source of truth.
+// All data is ephemeral (in-memory only) and rehydrates from Convex on app boot.
+
 /**
  * Chat Room Session Store
  *
@@ -17,8 +20,6 @@
  * - Coins are tracked in this store (chatroom-safe)
  */
 import { create } from 'zustand';
-import { persist, createJSONStorage } from 'zustand/middleware';
-import AsyncStorage from '@react-native-async-storage/async-storage';
 
 export interface ChatRoomIdentity {
   userId: string;
@@ -66,88 +67,75 @@ interface ChatRoomSessionState {
   incrementCoins: () => void;
 }
 
-export const useChatRoomSessionStore = create<ChatRoomSessionState>()(
-  persist(
-    (set, get) => ({
+export const useChatRoomSessionStore = create<ChatRoomSessionState>()((set, get) => ({
+  isInChatRoom: false,
+  activeRoomId: null,
+  identity: null,
+  lastVisitedAt: {},
+  coins: 0,
+
+  enterRoom: (roomId, identity) => {
+    const now = Date.now();
+    set((state) => ({
+      isInChatRoom: true,
+      activeRoomId: roomId,
+      identity,
+      lastVisitedAt: {
+        ...state.lastVisitedAt,
+        [roomId]: now,
+      },
+    }));
+  },
+
+  exitToHome: () => {
+    // Keep session active (isInChatRoom, activeRoomId, identity remain)
+    // User can return to the same room
+    // This is just a navigation hint - actual navigation done by caller
+  },
+
+  exitRoom: () => {
+    const { activeRoomId } = get();
+    const now = Date.now();
+    set((state) => ({
       isInChatRoom: false,
       activeRoomId: null,
       identity: null,
-      lastVisitedAt: {},
-      coins: 0,
+      // Update lastVisitedAt for the room being left
+      lastVisitedAt: activeRoomId
+        ? { ...state.lastVisitedAt, [activeRoomId]: now }
+        : state.lastVisitedAt,
+    }));
+  },
 
-      enterRoom: (roomId, identity) => {
-        const now = Date.now();
-        set((state) => ({
-          isInChatRoom: true,
-          activeRoomId: roomId,
-          identity,
-          lastVisitedAt: {
-            ...state.lastVisitedAt,
-            [roomId]: now,
-          },
-        }));
-      },
-
-      exitToHome: () => {
-        // Keep session active (isInChatRoom, activeRoomId, identity remain)
-        // User can return to the same room
-        // This is just a navigation hint - actual navigation done by caller
-      },
-
-      exitRoom: () => {
-        const { activeRoomId } = get();
-        const now = Date.now();
-        set((state) => ({
-          isInChatRoom: false,
-          activeRoomId: null,
-          identity: null,
-          // Update lastVisitedAt for the room being left
-          lastVisitedAt: activeRoomId
-            ? { ...state.lastVisitedAt, [activeRoomId]: now }
-            : state.lastVisitedAt,
-        }));
-      },
-
-      updateProfilePicture: (url) => {
-        const { identity } = get();
-        if (identity) {
-          set({
-            identity: {
-              ...identity,
-              profilePicture: url,
-            },
-          });
-        }
-      },
-
-      markRoomVisited: (roomId) => {
-        const now = Date.now();
-        set((state) => ({
-          lastVisitedAt: {
-            ...state.lastVisitedAt,
-            [roomId]: now,
-          },
-        }));
-      },
-
-      getLastVisitedAt: (roomId) => {
-        return get().lastVisitedAt[roomId] ?? 0;
-      },
-
-      incrementCoins: () => {
-        set((state) => ({
-          coins: state.coins + 1,
-        }));
-      },
-    }),
-    {
-      name: 'chatroom-session-storage',
-      storage: createJSONStorage(() => AsyncStorage),
-      // Only persist these fields (not the session state)
-      partialize: (state) => ({
-        lastVisitedAt: state.lastVisitedAt,
-        coins: state.coins,
-      }),
+  updateProfilePicture: (url) => {
+    const { identity } = get();
+    if (identity) {
+      set({
+        identity: {
+          ...identity,
+          profilePicture: url,
+        },
+      });
     }
-  )
-);
+  },
+
+  markRoomVisited: (roomId) => {
+    const now = Date.now();
+    set((state) => ({
+      lastVisitedAt: {
+        ...state.lastVisitedAt,
+        [roomId]: now,
+      },
+    }));
+  },
+
+  getLastVisitedAt: (roomId) => {
+    return get().lastVisitedAt[roomId] ?? 0;
+  },
+
+  incrementCoins: () => {
+    set((state) => ({
+      coins: state.coins + 1,
+    }));
+  },
+}));

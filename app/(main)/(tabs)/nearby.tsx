@@ -14,7 +14,6 @@ import {
   Linking,
   Platform,
 } from 'react-native';
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useBottomTabBarHeight } from '@react-navigation/bottom-tabs';
 import MapView, { Marker, Region } from 'react-native-maps';
@@ -232,7 +231,6 @@ const LOCATION_TIMEOUT_MS = 15000; // 15 seconds - show error if no location obt
 const FAB_SIZE = 52; // Size of the floating action button
 const FAB_EDGE_MARGIN = 16; // Margin from screen edges (left/right snap positions)
 const FAB_SAFE_PADDING = 12; // Extra padding from safe area boundaries
-const FAB_STORAGE_KEY = 'nearby_fab_position'; // AsyncStorage key for FAB position
 const TOAST_DURATION_MS = 2000; // Duration to show cooldown toast
 
 export default function NearbyScreen() {
@@ -477,26 +475,10 @@ export default function NearbyScreen() {
     y: Math.max(fabMinY, fabMaxY),
   };
   const fabPosition = useRef(new Animated.ValueXY(defaultFabPosition)).current;
-  const [fabLoaded, setFabLoaded] = useState(false);
+  const [fabLoaded, setFabLoaded] = useState(true); // FAB is now always loaded (no AsyncStorage)
 
-  // Load saved FAB position from AsyncStorage (with bounds validation)
-  useEffect(() => {
-    (async () => {
-      try {
-        const saved = await AsyncStorage.getItem(FAB_STORAGE_KEY);
-        if (saved) {
-          const { x, y } = JSON.parse(saved);
-          // Validate and clamp the position within safe bounds
-          const clampedX = Math.max(fabMinX, Math.min(x, fabMaxX));
-          const clampedY = Math.max(fabMinY, Math.min(y, fabMaxY));
-          fabPosition.setValue({ x: clampedX, y: clampedY });
-        }
-      } catch {
-        // Ignore errors, use default position
-      }
-      setFabLoaded(true);
-    })();
-  }, [fabMinX, fabMaxX, fabMinY, fabMaxY, tabBarHeight]);
+  // FAB position is now session-only UI state - no persistence needed
+  // User can drag it around during the session, but it resets to default on next launch
 
   // 6-3: Recalculate FAB bounds on orientation/dimension change and clamp position
   useEffect(() => {
@@ -511,21 +493,11 @@ export default function NearbyScreen() {
     const clampedX = Math.max(fabMinX, Math.min(currentX, fabMaxX));
     const clampedY = Math.max(fabMinY, Math.min(currentY, fabMaxY));
 
-    // If position changed due to clamping, update and save
+    // If position changed due to clamping, update (session-only, no save)
     if (clampedX !== currentX || clampedY !== currentY) {
       fabPosition.setValue({ x: clampedX, y: clampedY });
-      saveFabPosition(clampedX, clampedY);
     }
   }, [fabLoaded, fabMinX, fabMaxX, fabMinY, fabMaxY, screenWidth, screenHeight, insets.top, tabBarHeight]);
-
-  // Save FAB position to AsyncStorage
-  const saveFabPosition = useCallback(async (x: number, y: number) => {
-    try {
-      await AsyncStorage.setItem(FAB_STORAGE_KEY, JSON.stringify({ x, y }));
-    } catch {
-      // Ignore save errors
-    }
-  }, []);
 
   // Snap FAB to nearest edge (left or right) with safe area clamping
   const snapToEdge = useCallback((currentX: number, currentY: number) => {
@@ -540,10 +512,9 @@ export default function NearbyScreen() {
       useNativeDriver: false,
       friction: 7,
       tension: 40,
-    }).start(() => {
-      saveFabPosition(targetX, targetY);
-    });
-  }, [screenWidth, fabMinX, fabMaxX, fabMinY, fabMaxY, fabPosition, saveFabPosition]);
+    }).start();
+    // FAB position is now session-only - no save needed
+  }, [screenWidth, fabMinX, fabMaxX, fabMinY, fabMaxY, fabPosition]);
 
   // PanResponder for dragging the FAB
   const panResponder = useMemo(() => {

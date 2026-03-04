@@ -10,10 +10,10 @@ import {
   Alert,
   TextInput,
   Switch,
-  Image,
   Dimensions,
   Modal,
 } from 'react-native';
+import { Image } from 'expo-image';
 import { useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useQuery, useMutation } from 'convex/react';
@@ -69,6 +69,11 @@ export default function EditProfileScreen() {
 
   // Ref for bio TextInput to enable tap-anywhere-to-focus
   const bioInputRef = useRef<TextInput>(null);
+
+  // PERF: Track photo grid load time
+  const gridRenderTimeRef = useRef(0);
+  const loadedPhotosRef = useRef<Set<number>>(new Set());
+  const hasLoggedGridLoad = useRef(false);
 
   const currentUserQuery = useQuery(
     api.users.getCurrentUser,
@@ -195,7 +200,16 @@ export default function EditProfileScreen() {
         profileId: canonicalProfile?.userId ?? currentUserId,
         userId: userId,
         nonNullSlots,
+        isDemoMode,
+        source: isDemoMode ? 'demoStore' : 'convex',
       });
+
+      // CRITICAL: Warn if in demo mode
+      if (isDemoMode) {
+        console.warn('[EditProfile] ⚠️ DEMO MODE ACTIVE - Using demoStore (local), NOT Convex backend!');
+        console.warn('[EditProfile] ⚠️ Photos uploaded to Convex will NOT be saved to demoStore.');
+        console.warn('[EditProfile] ⚠️ Set EXPO_PUBLIC_DEMO_MODE=false in .env.local to use Convex.');
+      }
 
       setPhotoSlots(initSlots);
     }
@@ -214,6 +228,21 @@ export default function EditProfileScreen() {
 
   const validPhotoCount = validPhotoEntries.length;
 
+  // PERF: Prefetch top photos after slots change
+  useEffect(() => {
+    if (validPhotoEntries.length > 0) {
+      const topPhotos = validPhotoEntries.slice(0, Math.min(6, validPhotoEntries.length));
+      topPhotos.forEach((entry) => {
+        Image.prefetch(entry.url).catch(() => {
+          // Silently ignore prefetch errors
+        });
+      });
+      if (__DEV__) {
+        console.log('[PERF EditProfile] Prefetching', topPhotos.length, 'photos');
+      }
+    }
+  }, [validPhotoEntries]);
+
   // Cleanup blur state when photos are removed
   useEffect(() => {
     if (effectiveUserId && validPhotoCount > 0) {
@@ -221,9 +250,35 @@ export default function EditProfileScreen() {
     }
   }, [validPhotoCount, effectiveUserId]);
 
+  // PERF: Track grid render start time
+  useEffect(() => {
+    if (__DEV__ && validPhotoCount > 0) {
+      gridRenderTimeRef.current = Date.now();
+      loadedPhotosRef.current = new Set();
+      hasLoggedGridLoad.current = false;
+    }
+  }, [validPhotoCount]);
+
   const handleImageError = useCallback((slotIndex: number) => {
     setFailedSlots((prev) => new Set(prev).add(slotIndex));
   }, []);
+
+  // PERF: Log when all visible photos have loaded
+  const handlePhotoLoad = useCallback((slotIndex: number) => {
+    if (__DEV__ && gridRenderTimeRef.current > 0) {
+      loadedPhotosRef.current.add(slotIndex);
+
+      // Log once all photos are loaded
+      if (!hasLoggedGridLoad.current && loadedPhotosRef.current.size === validPhotoCount) {
+        const loadTime = Date.now() - gridRenderTimeRef.current;
+        console.log('[PERF EditProfile] Photo grid loaded:', {
+          photoCount: validPhotoCount,
+          loadTimeMs: loadTime,
+        });
+        hasLoggedGridLoad.current = true;
+      }
+    }
+  }, [validPhotoCount]);
 
   const handleUploadPhoto = async (slotIndex: number) => {
     // SLOT-BASED: Check if slot already has a photo (replacing) or is empty (adding)
@@ -339,8 +394,11 @@ export default function EditProfileScreen() {
             <Image
               source={{ uri: url }}
               style={styles.photoImage}
+              contentFit="cover"
               blurRadius={isPhotoBlurred ? 10 : 0}
+              transition={200}
               onError={() => handleImageError(slotIndex)}
+              onLoadEnd={() => handlePhotoLoad(slotIndex)}
             />
           </Pressable>
           {/* Per-photo blur toggle - only show when blur mode enabled and not a cartoon */}
@@ -603,7 +661,8 @@ export default function EditProfileScreen() {
               <Image
                 source={{ uri: previewPhoto.url }}
                 style={styles.previewImage}
-                resizeMode="contain"
+                contentFit="contain"
+                transition={200}
               />
             )}
           </View>

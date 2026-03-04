@@ -22,6 +22,8 @@ import { useDemoStore } from '@/stores/demoStore';
 import { useAuthStore } from '@/stores/authStore';
 // FIX: Import faceVerificationPassed to skip verification if already passed
 import { isDemoMode } from '@/hooks/useConvex';
+import { useMutation } from 'convex/react';
+import { api } from '@/convex/_generated/api';
 import type { Gender, ActivityFilter, RelationshipIntent } from '@/types';
 import { OnboardingProgressHeader } from '@/components/OnboardingProgressHeader';
 
@@ -65,6 +67,7 @@ export default function PreferencesScreen() {
   const demoProfile = useDemoStore((s) =>
     isDemoMode && userId ? s.demoProfiles[userId] : null
   );
+  const upsertDraft = useMutation(api.users.upsertOnboardingDraft);
   const router = useRouter();
   const params = useLocalSearchParams<{ editFromReview?: string }>();
 
@@ -346,6 +349,28 @@ export default function PreferencesScreen() {
       dataToSave.maxDistance = finalDistance;
       demoStore.saveDemoProfile(userId, dataToSave);
       console.log(`[PREFERENCES] saved: lookingFor=${lookingFor.length}, intent=${relationshipIntent.length}, activities=${activities.length}, lgbtqPref=${lgbtqPreference.length}, age=${finalMin}-${finalMax}, dist=${finalDistance}`);
+    }
+
+    // LIVE MODE: Persist to Convex onboarding draft
+    if (!isDemoMode && userId) {
+      const preferences: Record<string, any> = {};
+      if (lookingFor.length > 0) preferences.lookingFor = lookingFor;
+      if (relationshipIntent.length > 0) preferences.relationshipIntent = relationshipIntent;
+      if (activities.length > 0) preferences.activities = activities;
+      preferences.minAge = finalMin;
+      preferences.maxAge = finalMax;
+      preferences.maxDistance = finalDistance;
+
+      upsertDraft({
+        userId,
+        patch: {
+          preferences,
+          progress: { lastStepKey: 'preferences' },
+        },
+      }).catch((error) => {
+        if (__DEV__) console.error('[PREFERENCES] Failed to save draft:', error);
+      });
+      if (__DEV__) console.log(`[ONB_DRAFT] Saved preferences: lookingFor=${lookingFor.length}, intent=${relationshipIntent.length}, activities=${activities.length}, age=${finalMin}-${finalMax}, dist=${finalDistance}`);
     }
 
     // CENTRAL EDIT HUB: Return to Review if editing from there

@@ -8,13 +8,12 @@
  * hardcoded demo data still appears but new messages the user sends
  * are never lost.
  */
+/**
+ * STORAGE POLICY: NO local persistence. Convex is ONLY source of truth.
+ * Store is in-memory only. Any required rehydration must come from Convex queries/mutations.
+ */
 import { create } from 'zustand';
-import { persist, createJSONStorage } from 'zustand/middleware';
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import { log } from '@/utils/logger';
-
-// Hydration timing: capture when store module loads
-const DM_STORE_LOAD_TIME = Date.now();
 
 export interface DemoDmMessage {
   _id: string;
@@ -170,205 +169,152 @@ export function computeUnreadDmCountsByRoom(
   return { byRoomId, roomsWithUnread };
 }
 
-export const useDemoDmStore = create<DemoDmState>()(
-  persist(
-    (set, get) => ({
-      conversations: {},
-      meta: {},
-      drafts: {},
-      _hasHydrated: false,
+export const useDemoDmStore = create<DemoDmState>()((set, get) => ({
+  conversations: {},
+  meta: {},
+  drafts: {},
+  _hasHydrated: true,
 
-      setHasHydrated: (state) => set({ _hasHydrated: state }),
+  setHasHydrated: (state) => set({ _hasHydrated: true }), // No-op
 
-      seedConversation: (id, seed) => {
-        // Only seed once — existing data takes precedence
-        if (get().conversations[id]) return;
-        set((s) => ({
-          conversations: { ...s.conversations, [id]: seed },
-        }));
-      },
+  seedConversation: (id, seed) => {
+    // Only seed once — existing data takes precedence
+    if (get().conversations[id]) return;
+    set((s) => ({
+      conversations: { ...s.conversations, [id]: seed },
+    }));
+  },
 
-      setMeta: (id, m) =>
-        set((s) => ({
-          meta: { ...s.meta, [id]: m },
-        })),
+  setMeta: (id, m) =>
+    set((s) => ({
+      meta: { ...s.meta, [id]: m },
+    })),
 
-      addMessage: (id, msg) => {
-        // Phase-2 Fix C: Message cap at 1000 per conversation
-        const MESSAGE_CAP = 1000;
+  addMessage: (id, msg) => {
+    // Phase-2 Fix C: Message cap at 1000 per conversation
+    const MESSAGE_CAP = 1000;
 
-        set((s) => {
-          const existing = s.conversations[id] ?? [];
-          let updated = [...existing, msg];
+    set((s) => {
+      const existing = s.conversations[id] ?? [];
+      let updated = [...existing, msg];
 
-          // Enforce cap: if > 1000, trim oldest messages
-          if (updated.length > MESSAGE_CAP) {
-            const trimCount = updated.length - MESSAGE_CAP;
-            updated = updated.slice(trimCount);
-            if (__DEV__) {
-              log.info('[DM]', 'message cap enforced', {
-                conversationId: id,
-                trimmed: trimCount,
-                newLength: updated.length,
-              });
-            }
-          }
-
-          // DEBUG: Log message send for persistence verification
-          log.info('[DM]', 'message added', {
+      // Enforce cap: if > 1000, trim oldest messages
+      if (updated.length > MESSAGE_CAP) {
+        const trimCount = updated.length - MESSAGE_CAP;
+        updated = updated.slice(trimCount);
+        if (__DEV__) {
+          log.info('[DM]', 'message cap enforced', {
             conversationId: id,
-            messageCount: updated.length,
+            trimmed: trimCount,
+            newLength: updated.length,
           });
-
-          return {
-            conversations: {
-              ...s.conversations,
-              [id]: updated,
-            },
-          };
-        });
-      },
-
-      setDraft: (id, text) =>
-        set((s) => ({
-          drafts: { ...s.drafts, [id]: text },
-        })),
-
-      clearDraft: (id) =>
-        set((s) => {
-          const { [id]: _, ...rest } = s.drafts;
-          return { drafts: rest };
-        }),
-
-      markConversationRead: (id, currentUserId) =>
-        set((s) => {
-          const msgs = s.conversations[id];
-          if (!msgs) return {};
-          const now = Date.now();
-          const updated = msgs.map((m) =>
-            m.senderId !== currentUserId && !m.readAt
-              ? { ...m, readAt: now }
-              : m,
-          );
-          return { conversations: { ...s.conversations, [id]: updated } };
-        }),
-
-      deleteMessage: (conversationId, messageId) =>
-        set((s) => {
-          const msgs = s.conversations[conversationId];
-          if (!msgs) return s;
-          const filtered = msgs.filter((m) => m._id !== messageId);
-          return { conversations: { ...s.conversations, [conversationId]: filtered } };
-        }),
-
-      deleteConversation: (id) =>
-        set((s) => {
-          const { [id]: _c, ...restConvos } = s.conversations;
-          const { [id]: _m, ...restMeta } = s.meta;
-          const { [id]: _d, ...restDrafts } = s.drafts;
-          return { conversations: restConvos, meta: restMeta, drafts: restDrafts };
-        }),
-
-      deleteConversations: (ids) =>
-        set((s) => {
-          if (ids.length === 0) return s;
-          const idsSet = new Set(ids);
-          const conversations: Record<string, DemoDmMessage[]> = {};
-          const meta: Record<string, DemoConversationMeta> = {};
-          const drafts: Record<string, string> = {};
-          for (const key of Object.keys(s.conversations)) {
-            if (!idsSet.has(key)) conversations[key] = s.conversations[key];
-          }
-          for (const key of Object.keys(s.meta)) {
-            if (!idsSet.has(key)) meta[key] = s.meta[key];
-          }
-          for (const key of Object.keys(s.drafts)) {
-            if (!idsSet.has(key)) drafts[key] = s.drafts[key];
-          }
-          return { conversations, meta, drafts };
-        }),
-
-      cleanupExpiredThreads: (expiredThreadIds) => {
-        if (expiredThreadIds.length === 0) return;
-        // Use deleteConversations for the actual cleanup
-        get().deleteConversations(expiredThreadIds);
-      },
-
-      markSecurePhotoExpired: (conversationId, messageId) =>
-        set((s) => {
-          const msgs = s.conversations[conversationId];
-          if (!msgs) return s;
-          const now = Date.now();
-          const updated = msgs.map((m) =>
-            m._id === messageId && !m.isExpired
-              ? { ...m, isExpired: true, expiredAt: now }
-              : m
-          );
-          return { conversations: { ...s.conversations, [conversationId]: updated } };
-        }),
-
-      syncTimerEndsAt: (conversationId, messageId, timerEndsAt) =>
-        set((s) => {
-          const msgs = s.conversations[conversationId];
-          if (!msgs) return s;
-          const updated = msgs.map((m) =>
-            m._id === messageId && !m.timerEndsAt
-              ? { ...m, timerEndsAt }
-              : m
-          );
-          return { conversations: { ...s.conversations, [conversationId]: updated } };
-        }),
-
-      reset: () => set({ conversations: {}, meta: {}, drafts: {} }),
-    }),
-    {
-      name: 'demo-dm-storage',
-      storage: createJSONStorage(() => AsyncStorage),
-      onRehydrateStorage: () => (state, error) => {
-        const hydrationTime = Date.now() - DM_STORE_LOAD_TIME;
-        if (error) {
-          log.error('[DM]', 'rehydration error', error);
         }
-        if (state) {
-          // DEBUG: Log conversation/message counts on hydrate for persistence verification
-          const convoIds = Object.keys(state.conversations);
-          const totalMessages = convoIds.reduce(
-            (sum, id) => sum + (state.conversations[id]?.length ?? 0),
-            0
-          );
-          log.info('[DM]', 'hydrated from storage', {
-            conversations: convoIds.length,
-            totalMessages,
-          });
-          if (__DEV__) {
-            console.log(`[HYDRATION] demoDmStore: ${hydrationTime}ms (convos=${convoIds.length}, messages=${totalMessages})`);
-          }
-          state.setHasHydrated(true);
-        }
-      },
-    },
-  ),
-);
-
-// CR-3: Hydration timeout fallback (matches authStore/demoStore/blockStore pattern)
-const HYDRATION_TIMEOUT_MS = 5000;
-let _dmHydrationTimeoutId: ReturnType<typeof setTimeout> | null = null;
-
-function setupDmHydrationTimeout() {
-  // Clear any existing timeout (hot reload safety)
-  if (_dmHydrationTimeoutId !== null) {
-    clearTimeout(_dmHydrationTimeoutId);
-  }
-  _dmHydrationTimeoutId = setTimeout(() => {
-    if (!useDemoDmStore.getState()._hasHydrated) {
-      if (__DEV__) {
-        console.warn('[demoDmStore] Hydration timeout — forcing hydrated state');
       }
-      useDemoDmStore.getState().setHasHydrated(true);
-    }
-    _dmHydrationTimeoutId = null;
-  }, HYDRATION_TIMEOUT_MS);
-}
 
-// CR-3 fix: hydration timeout fallback — if AsyncStorage blocks, force hydration after timeout
-setupDmHydrationTimeout();
+      // DEBUG: Log message send for persistence verification
+      log.info('[DM]', 'message added', {
+        conversationId: id,
+        messageCount: updated.length,
+      });
+
+      return {
+        conversations: {
+          ...s.conversations,
+          [id]: updated,
+        },
+      };
+    });
+  },
+
+  setDraft: (id, text) =>
+    set((s) => ({
+      drafts: { ...s.drafts, [id]: text },
+    })),
+
+  clearDraft: (id) =>
+    set((s) => {
+      const { [id]: _, ...rest } = s.drafts;
+      return { drafts: rest };
+    }),
+
+  markConversationRead: (id, currentUserId) =>
+    set((s) => {
+      const msgs = s.conversations[id];
+      if (!msgs) return {};
+      const now = Date.now();
+      const updated = msgs.map((m) =>
+        m.senderId !== currentUserId && !m.readAt
+          ? { ...m, readAt: now }
+          : m,
+      );
+      return { conversations: { ...s.conversations, [id]: updated } };
+    }),
+
+  deleteMessage: (conversationId, messageId) =>
+    set((s) => {
+      const msgs = s.conversations[conversationId];
+      if (!msgs) return s;
+      const filtered = msgs.filter((m) => m._id !== messageId);
+      return { conversations: { ...s.conversations, [conversationId]: filtered } };
+    }),
+
+  deleteConversation: (id) =>
+    set((s) => {
+      const { [id]: _c, ...restConvos } = s.conversations;
+      const { [id]: _m, ...restMeta } = s.meta;
+      const { [id]: _d, ...restDrafts } = s.drafts;
+      return { conversations: restConvos, meta: restMeta, drafts: restDrafts };
+    }),
+
+  deleteConversations: (ids) =>
+    set((s) => {
+      if (ids.length === 0) return s;
+      const idsSet = new Set(ids);
+      const conversations: Record<string, DemoDmMessage[]> = {};
+      const meta: Record<string, DemoConversationMeta> = {};
+      const drafts: Record<string, string> = {};
+      for (const key of Object.keys(s.conversations)) {
+        if (!idsSet.has(key)) conversations[key] = s.conversations[key];
+      }
+      for (const key of Object.keys(s.meta)) {
+        if (!idsSet.has(key)) meta[key] = s.meta[key];
+      }
+      for (const key of Object.keys(s.drafts)) {
+        if (!idsSet.has(key)) drafts[key] = s.drafts[key];
+      }
+      return { conversations, meta, drafts };
+    }),
+
+  cleanupExpiredThreads: (expiredThreadIds) => {
+    if (expiredThreadIds.length === 0) return;
+    // Use deleteConversations for the actual cleanup
+    get().deleteConversations(expiredThreadIds);
+  },
+
+  markSecurePhotoExpired: (conversationId, messageId) =>
+    set((s) => {
+      const msgs = s.conversations[conversationId];
+      if (!msgs) return s;
+      const now = Date.now();
+      const updated = msgs.map((m) =>
+        m._id === messageId && !m.isExpired
+          ? { ...m, isExpired: true, expiredAt: now }
+          : m
+      );
+      return { conversations: { ...s.conversations, [conversationId]: updated } };
+    }),
+
+  syncTimerEndsAt: (conversationId, messageId, timerEndsAt) =>
+    set((s) => {
+      const msgs = s.conversations[conversationId];
+      if (!msgs) return s;
+      const updated = msgs.map((m) =>
+        m._id === messageId && !m.timerEndsAt
+          ? { ...m, timerEndsAt }
+          : m
+      );
+      return { conversations: { ...s.conversations, [conversationId]: updated } };
+    }),
+
+  reset: () => set({ conversations: {}, meta: {}, drafts: {} }),
+}));

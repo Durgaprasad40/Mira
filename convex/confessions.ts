@@ -1,5 +1,7 @@
 import { mutation, query } from './_generated/server';
 import { v } from 'convex/values';
+import { Id } from './_generated/dataModel';
+import { resolveUserIdByAuthId, ensureUserByAuthId } from './helpers';
 
 // Phone number & email patterns for server-side validation
 const PHONE_PATTERN = /\b\d{10,}\b|\b\d{3}[-.\s]?\d{3}[-.\s]?\d{4}\b/;
@@ -11,7 +13,7 @@ const CONFESSION_EXPIRY_MS = 24 * 60 * 60 * 1000;
 // Create a new confession
 export const createConfession = mutation({
   args: {
-    userId: v.id('users'),
+    userId: v.union(v.id('users'), v.string()),
     text: v.string(),
     isAnonymous: v.boolean(),
     mood: v.union(v.literal('romantic'), v.literal('spicy'), v.literal('emotional'), v.literal('funny')),
@@ -19,9 +21,18 @@ export const createConfession = mutation({
     imageUrl: v.optional(v.string()),
     authorName: v.optional(v.string()),
     authorPhotoUrl: v.optional(v.string()),
-    taggedUserId: v.optional(v.id('users')), // User being confessed to
+    taggedUserId: v.optional(v.union(v.id('users'), v.string())), // User being confessed to
   },
   handler: async (ctx, args) => {
+    // Map authUserId -> Convex Id<"users"> (MUTATION: can create)
+    const userId = await ensureUserByAuthId(ctx, args.userId as string);
+
+    // Map taggedUserId if provided (MUTATION: can create)
+    let taggedUserId: Id<'users'> | undefined;
+    if (args.taggedUserId) {
+      taggedUserId = await ensureUserByAuthId(ctx, args.taggedUserId as string);
+    }
+
     const trimmed = args.text.trim();
     if (trimmed.length < 10) {
       throw new Error('Confession must be at least 10 characters.');
@@ -34,11 +45,11 @@ export const createConfession = mutation({
     }
 
     // If taggedUserId provided, verify the current user has liked them
-    if (args.taggedUserId) {
+    if (taggedUserId) {
       const likeRecord = await ctx.db
         .query('likes')
         .withIndex('by_from_to', (q) =>
-          q.eq('fromUserId', args.userId).eq('toUserId', args.taggedUserId!)
+          q.eq('fromUserId', userId).eq('toUserId', taggedUserId!)
         )
         .filter((q) =>
           q.or(
@@ -56,7 +67,7 @@ export const createConfession = mutation({
 
     const now = Date.now();
     const confessionId = await ctx.db.insert('confessions', {
-      userId: args.userId,
+      userId: userId,
       text: trimmed,
       isAnonymous: args.isAnonymous,
       mood: args.mood,
@@ -69,15 +80,15 @@ export const createConfession = mutation({
       voiceReplyCount: 0,
       createdAt: now,
       expiresAt: now + CONFESSION_EXPIRY_MS,
-      taggedUserId: args.taggedUserId,
+      taggedUserId: taggedUserId,
     });
 
     // If tagged, create notification for the tagged user
-    if (args.taggedUserId) {
+    if (taggedUserId) {
       await ctx.db.insert('confessionNotifications', {
-        userId: args.taggedUserId,
+        userId: taggedUserId,
         confessionId,
-        fromUserId: args.userId,
+        fromUserId: userId,
         type: 'TAGGED_CONFESSION',
         seen: false,
         createdAt: now,
@@ -206,7 +217,7 @@ export const getConfession = query({
 export const createReply = mutation({
   args: {
     confessionId: v.id('confessions'),
-    userId: v.id('users'),
+    userId: v.union(v.id('users'), v.string()),
     text: v.string(),
     isAnonymous: v.boolean(),
     type: v.optional(v.union(v.literal('text'), v.literal('voice'))),
@@ -214,6 +225,9 @@ export const createReply = mutation({
     voiceDurationSec: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
+    // Map authUserId -> Convex Id<"users"> (MUTATION: can create)
+    const userId = await ensureUserByAuthId(ctx, args.userId as string);
+
     const replyType = args.type || 'text';
 
     if (replyType === 'text') {
@@ -231,7 +245,7 @@ export const createReply = mutation({
 
     const replyId = await ctx.db.insert('confessionReplies', {
       confessionId: args.confessionId,
-      userId: args.userId,
+      userId: userId,
       text: args.text.trim(),
       isAnonymous: args.isAnonymous,
       type: replyType,
@@ -258,12 +272,15 @@ export const createReply = mutation({
 export const deleteReply = mutation({
   args: {
     replyId: v.id('confessionReplies'),
-    userId: v.id('users'),
+    userId: v.union(v.id('users'), v.string()),
   },
   handler: async (ctx, args) => {
+    // Map authUserId -> Convex Id<"users"> (MUTATION: can create)
+    const userId = await ensureUserByAuthId(ctx, args.userId as string);
+
     const reply = await ctx.db.get(args.replyId);
     if (!reply) throw new Error('Reply not found.');
-    if (reply.userId !== args.userId) throw new Error('You can only delete your own replies.');
+    if (reply.userId !== userId) throw new Error('You can only delete your own replies.');
 
     await ctx.db.delete(args.replyId);
 
@@ -301,15 +318,18 @@ export const getReplies = query({
 export const toggleReaction = mutation({
   args: {
     confessionId: v.id('confessions'),
-    userId: v.id('users'),
+    userId: v.union(v.id('users'), v.string()),
     type: v.string(), // any emoji string
   },
   handler: async (ctx, args) => {
+    // Map authUserId -> Convex Id<"users"> (MUTATION: can create)
+    const userId = await ensureUserByAuthId(ctx, args.userId as string);
+
     // Find existing reaction from this user on this confession
     const existing = await ctx.db
       .query('confessionReactions')
       .withIndex('by_confession_user', (q) =>
-        q.eq('confessionId', args.confessionId).eq('userId', args.userId)
+        q.eq('confessionId', args.confessionId).eq('userId', userId)
       )
       .first();
 
@@ -336,7 +356,7 @@ export const toggleReaction = mutation({
       // No existing → add new
       await ctx.db.insert('confessionReactions', {
         confessionId: args.confessionId,
-        userId: args.userId,
+        userId: userId,
         type: args.type,
         createdAt: Date.now(),
       });
@@ -346,7 +366,7 @@ export const toggleReaction = mutation({
 
       // SPECIAL: If tagged user likes a tagged confession, create/find a DM thread
       let chatUnlocked = false;
-      if (confession.taggedUserId && args.userId === confession.taggedUserId) {
+      if (confession.taggedUserId && userId === confession.taggedUserId) {
         // Check if conversation already exists for this confession (idempotency)
         const existingConvo = await ctx.db
           .query('conversations')
@@ -400,13 +420,20 @@ export const getReactionCounts = query({
 export const getUserReaction = query({
   args: {
     confessionId: v.id('confessions'),
-    userId: v.id('users'),
+    userId: v.union(v.id('users'), v.string()),
   },
-  handler: async (ctx, { confessionId, userId }) => {
+  handler: async (ctx, args) => {
+    // Map authUserId -> Convex Id<"users"> (QUERY: read-only, no creation)
+    const userId = await resolveUserIdByAuthId(ctx, args.userId as string);
+    if (!userId) {
+      console.log('[getUserReaction] User not found for authUserId:', args.userId);
+      return null;
+    }
+
     const existing = await ctx.db
       .query('confessionReactions')
       .withIndex('by_confession_user', (q) =>
-        q.eq('confessionId', confessionId).eq('userId', userId)
+        q.eq('confessionId', args.confessionId).eq('userId', userId)
       )
       .first();
     return existing ? existing.type : null;
@@ -415,8 +442,15 @@ export const getUserReaction = query({
 
 // Get user's own confessions (all, including expired, with isExpired flag)
 export const getMyConfessions = query({
-  args: { userId: v.id('users') },
-  handler: async (ctx, { userId }) => {
+  args: { userId: v.union(v.id('users'), v.string()) },
+  handler: async (ctx, args) => {
+    // Map authUserId -> Convex Id<"users"> (QUERY: read-only, no creation)
+    const userId = await resolveUserIdByAuthId(ctx, args.userId as string);
+    if (!userId) {
+      console.log('[getMyConfessions] User not found for authUserId:', args.userId);
+      return [];
+    }
+
     const now = Date.now();
     const confessions = await ctx.db
       .query('confessions')
@@ -436,13 +470,16 @@ export const getMyConfessions = query({
 export const reportConfession = mutation({
   args: {
     confessionId: v.id('confessions'),
-    reporterId: v.id('users'),
+    reporterId: v.union(v.id('users'), v.string()),
     reason: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
+    // Map authUserId -> Convex Id<"users"> (MUTATION: can create)
+    const reporterId = await ensureUserByAuthId(ctx, args.reporterId as string);
+
     await ctx.db.insert('confessionReports', {
       confessionId: args.confessionId,
-      reporterId: args.reporterId,
+      reporterId: reporterId,
       reason: args.reason,
       createdAt: Date.now(),
     });
@@ -454,8 +491,15 @@ export const reportConfession = mutation({
 
 // Get badge count of unseen tagged confessions for a user
 export const getTaggedConfessionBadgeCount = query({
-  args: { userId: v.id('users') },
-  handler: async (ctx, { userId }) => {
+  args: { userId: v.union(v.id('users'), v.string()) },
+  handler: async (ctx, args) => {
+    // Map authUserId -> Convex Id<"users"> (QUERY: read-only, no creation)
+    const userId = await resolveUserIdByAuthId(ctx, args.userId as string);
+    if (!userId) {
+      console.log('[getTaggedConfessionBadgeCount] User not found for authUserId:', args.userId);
+      return 0;
+    }
+
     const notifications = await ctx.db
       .query('confessionNotifications')
       .withIndex('by_user_seen', (q) => q.eq('userId', userId).eq('seen', false))
@@ -466,8 +510,15 @@ export const getTaggedConfessionBadgeCount = query({
 
 // List tagged confessions for a user (privacy-safe: only for the tagged user's view)
 export const listTaggedConfessionsForUser = query({
-  args: { userId: v.id('users') },
-  handler: async (ctx, { userId }) => {
+  args: { userId: v.union(v.id('users'), v.string()) },
+  handler: async (ctx, args) => {
+    // Map authUserId -> Convex Id<"users"> (QUERY: read-only, no creation)
+    const userId = await resolveUserIdByAuthId(ctx, args.userId as string);
+    if (!userId) {
+      console.log('[listTaggedConfessionsForUser] User not found for authUserId:', args.userId);
+      return [];
+    }
+
     const now = Date.now();
 
     // Get notifications for this user (limit 50)
@@ -506,11 +557,13 @@ export const listTaggedConfessionsForUser = query({
 // Mark tagged confession notifications as seen
 export const markTaggedConfessionsSeen = mutation({
   args: {
-    userId: v.id('users'),
+    userId: v.union(v.id('users'), v.string()),
     notificationIds: v.optional(v.array(v.id('confessionNotifications'))),
   },
   handler: async (ctx, args) => {
-    const { userId, notificationIds } = args;
+    // Map authUserId -> Convex Id<"users"> (MUTATION: can create)
+    const userId = await ensureUserByAuthId(ctx, args.userId as string);
+    const { notificationIds } = args;
 
     if (notificationIds && notificationIds.length > 0) {
       // Mark specific notifications as seen

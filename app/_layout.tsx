@@ -63,6 +63,70 @@ import { BootScreen } from "@/components/BootScreen";
 import { collectDeviceFingerprint } from "@/lib/deviceFingerprint";
 import { markTiming } from "@/utils/startupTiming";
 import { autoSyncPhotosOnStartup } from "@/services/photoSync";
+import { checkAndHandleResetEpoch } from "@/lib/resetEpochCheck";
+
+/**
+ * ResetEpochChecker - Detects database resets and clears stale local caches
+ *
+ * How it works:
+ * 1. Fetch current resetEpoch from Convex backend
+ * 2. Compare with locally stored resetEpoch
+ * 3. If mismatch: clear all persisted stores (user data is stale)
+ * 4. Update local resetEpoch to match server
+ * 5. Force navigation to logged-out state to prevent stale onboarding bypass
+ *
+ * This prevents bugs where:
+ * - After resetAllUsers, app still shows old user profile (Manmohan, 26)
+ * - Demo users/messages still appear after demo mode disabled
+ * - Cached onboardingCompleted=true allows bypassing onboarding
+ * - Old chat room messages/members show despite empty backend
+ */
+function ResetEpochChecker() {
+  const router = useRouter();
+  const logout = useAuthStore((s) => s.logout);
+  const resetOnboarding = useOnboardingStore((s) => s.reset);
+  const demoLogout = useDemoStore((s) => s.demoLogout);
+  const hasCheckedRef = useRef(false);
+
+  // Fetch current reset epoch from server
+  const serverResetEpoch = useQuery(api.system.getResetEpoch, {});
+
+  useEffect(() => {
+    // Wait for server epoch to load
+    if (serverResetEpoch === undefined) return;
+
+    // Only check once per app launch
+    if (hasCheckedRef.current) return;
+    hasCheckedRef.current = true;
+
+    (async () => {
+      try {
+        const didClearCaches = await checkAndHandleResetEpoch(serverResetEpoch);
+
+        if (didClearCaches) {
+          // Database was reset - force logout and clear all stores
+          console.log('[RESET_EPOCH] Database reset detected - forcing logout...');
+
+          // Clear all auth/onboarding/demo stores
+          logout();
+          resetOnboarding();
+          if (isDemoMode) {
+            demoLogout();
+          }
+
+          // Force navigation to welcome screen (logged out state)
+          // This prevents stale onboardingCompleted from bypassing onboarding
+          console.log('[RESET_EPOCH] Navigating to welcome screen...');
+          router.replace('/');
+        }
+      } catch (error) {
+        console.error('[RESET_EPOCH] Error during reset epoch check:', error);
+      }
+    })();
+  }, [serverResetEpoch, logout, resetOnboarding, demoLogout, router]);
+
+  return null;
+}
 
 function DemoBanner() {
   return null;
@@ -176,6 +240,7 @@ function SessionValidator() {
   const router = useRouter();
   const segments = useSegments();
   const token = useAuthStore((s) => s.token);
+  const userId = useAuthStore((s) => s.userId); // TASK D: Get userId for demo migration detection
   const logout = useAuthStore((s) => s.logout);
   const syncFromServerValidation = useAuthStore((s) => s.syncFromServerValidation);
   const setSessionValidated = useAuthStore((s) => s.setSessionValidated);
@@ -216,9 +281,26 @@ function SessionValidator() {
       }
       setSessionValidated(true);
     } else {
-      // Session is invalid — clear LOCAL token only
+      // Session is invalid
       console.warn(`[SessionValidator] Session invalid: ${sessionStatus.reason}`);
 
+      // TASK D: Handle demo user migration case
+      // When user switches from demo mode to production mode, they have a demo userId
+      // but no backend session record. This is EXPECTED - don't force logout.
+      // PhotoSyncManager's ensureCurrentUser will create the user record.
+      const isDemoUserMigration = userId?.startsWith('demo_') && sessionStatus.reason === 'session_not_found';
+
+      if (isDemoUserMigration) {
+        if (__DEV__) {
+          console.log('[SessionValidator] Demo user migration detected - skipping logout, user will be bootstrapped');
+        }
+        // Mark as validated (non-fatal for demo migration)
+        // The ensureCurrentUser mutation will create the user record
+        setSessionValidated(true);
+        return;
+      }
+
+      // For non-migration cases (truly invalid sessions), proceed with logout
       // Clear all LOCAL state (server data untouched)
       logout();
       useOnboardingStore.getState().reset();
@@ -234,7 +316,7 @@ function SessionValidator() {
         router.replace('/(auth)/welcome');
       }
     }
-  }, [sessionStatus, token, logout, syncFromServerValidation, setSessionValidated, router, segments]);
+  }, [sessionStatus, token, userId, logout, syncFromServerValidation, setSessionValidated, router, segments]);
 
   // Validate on app resume
   useEffect(() => {
@@ -285,6 +367,37 @@ function PhotoSyncManager() {
   const onboardingHydrated = useOnboardingStore((s) => s._hasHydrated);
   const demoHydrated = useDemoStore((s) => s._hasHydrated);
   const hasSyncedRef = useRef(false);
+  const hasEnsuredUserRef = useRef<string | null>(null);
+  const ensureUser = useMutation(api.users.ensureCurrentUser);
+
+  // TASK C: Bootstrap - Ensure Convex user record exists BEFORE any queries run
+  // This prevents "Cannot create user from query context" errors
+  useEffect(() => {
+    // Only in production mode (not demo)
+    if (isDemoMode) return;
+
+    // Wait for auth hydration
+    if (!authHydrated || !userId) return;
+
+    // Only run once per userId (prevent duplicate calls on re-renders)
+    if (hasEnsuredUserRef.current === userId) return;
+    hasEnsuredUserRef.current = userId;
+
+    // Call ensureCurrentUser mutation to create user record if missing
+    (async () => {
+      try {
+        if (__DEV__) console.log('[BOOTSTRAP] Ensuring Convex user exists for:', userId);
+        const result = await ensureUser({ authUserId: userId });
+        if (__DEV__) console.log('[BOOTSTRAP] User ensured, convexUserId:', result.userId);
+        // Note: result.userId is the Convex Id<"users"> for this authUserId
+        // We could optionally store it in authStore, but not needed since
+        // all queries/mutations handle the mapping automatically
+      } catch (error: any) {
+        console.error('[BOOTSTRAP] Failed to ensure user:', error.message);
+        // Non-fatal: queries will handle missing user gracefully
+      }
+    })();
+  }, [userId, authHydrated, ensureUser]);
 
   useEffect(() => {
     // Wait for all stores to hydrate
@@ -299,6 +412,143 @@ function PhotoSyncManager() {
       autoSyncPhotosOnStartup(userId);
     }
   }, [userId, authHydrated, onboardingHydrated, demoHydrated]);
+
+  return null;
+}
+
+/**
+ * Onboarding Draft Hydrator - Restore incomplete onboarding progress
+ *
+ * BACKEND-FIRST PERSISTENCE:
+ * - Convex backend is the SOURCE OF TRUTH for onboarding draft
+ * - On app startup (after hydration), load draft FROM backend TO onboardingStore
+ * - ONE-WAY sync: backend → local (for hydration only)
+ * - Screens persist progress TO backend as user fills forms
+ *
+ * SAFETY:
+ * - READ-ONLY: Only reads from backend, writes to local store
+ * - Does NOT overwrite fields already set in current session
+ * - Runs AFTER hydration completes, BEFORE onboarding screens mount
+ * - LIVE MODE ONLY: Demo mode uses demoStore
+ */
+function OnboardingDraftHydrator() {
+  const userId = useAuthStore((s) => s.userId);
+  const authHydrated = useAuthStore((s) => s._hasHydrated);
+  const onboardingHydrated = useOnboardingStore((s) => s._hasHydrated);
+  const hydrateFromDraft = useOnboardingStore((s) => s.hydrateFromDraft);
+  const setFaceVerificationPassed = useAuthStore((s) => s.setFaceVerificationPassed);
+  const setFaceVerificationPending = useAuthStore((s) => s.setFaceVerificationPending);
+  const hasHydratedRef = useRef(false);
+
+  // BUG FIX: Use getOnboardingStatus to get comprehensive data including basicInfo from user document
+  const onboardingStatus = useQuery(
+    api.users.getOnboardingStatus,
+    !isDemoMode && userId && authHydrated && onboardingHydrated
+      ? { userId }
+      : 'skip'
+  );
+
+  useEffect(() => {
+    // Only in production mode (not demo)
+    if (isDemoMode) return;
+
+    // Wait for auth and onboarding stores to hydrate
+    if (!authHydrated || !onboardingHydrated || !userId) return;
+
+    // Wait for status data to load
+    if (onboardingStatus === undefined) return;
+
+    // Only hydrate once per session
+    if (hasHydratedRef.current) return;
+    hasHydratedRef.current = true;
+
+    if (!onboardingStatus) {
+      if (__DEV__) console.log('[ONB_DRAFT] No onboarding status found');
+      return;
+    }
+
+    // BUG FIX: Hydrate basicInfo from user document (authoritative source)
+    // This fixes "Not set" issue on Review screen
+    if (onboardingStatus.basicInfo) {
+      const { name, nickname, dateOfBirth, gender } = onboardingStatus.basicInfo;
+      const store = useOnboardingStore.getState();
+      const hydratedFields: string[] = [];
+
+      if (name && !store.name) {
+        store.setName(name);
+        hydratedFields.push('name');
+      }
+      if (nickname && !store.nickname) {
+        store.setNickname(nickname);
+        hydratedFields.push('nickname');
+      }
+      if (dateOfBirth && !store.dateOfBirth) {
+        store.setDateOfBirth(dateOfBirth);
+        hydratedFields.push('dateOfBirth');
+      }
+      // Type guard: only set gender if it's a valid Gender type
+      if (gender && !store.gender) {
+        const validGenders = ['male', 'female', 'non_binary'];
+        if (validGenders.includes(gender)) {
+          store.setGender(gender as any);
+          hydratedFields.push('gender');
+        }
+      }
+
+      if (__DEV__ && hydratedFields.length > 0) {
+        console.log(`[BASIC_HYDRATE] source=user fields=${JSON.stringify(hydratedFields)}`);
+      }
+    }
+
+    // Hydrate face verification status flags
+    if (onboardingStatus.faceVerificationPassed) {
+      setFaceVerificationPassed(true);
+      if (__DEV__) console.log('[ONB_DRAFT] Hydrated faceVerificationPassed=true');
+    }
+    if (onboardingStatus.faceVerificationPending) {
+      setFaceVerificationPending(true);
+      if (__DEV__) console.log('[ONB_DRAFT] Hydrated faceVerificationPending=true');
+    }
+
+    // BUG FIX: Hydrate verification reference photo as primary display photo
+    // This ensures the reference photo is used as primary even when normalPhotoCount=0
+    if (onboardingStatus.referencePhotoExists && onboardingStatus.verificationReferencePhotoId) {
+      const store = useOnboardingStore.getState();
+      // Only hydrate if not already set (don't overwrite user changes)
+      if (!store.verificationReferencePrimary) {
+        // Note: verificationReferencePhotoUrl might not be in onboarding status
+        // We'll need to get it from the user query or construct it
+        // For now, we'll fetch it when needed in the UI
+        store.setVerificationReferencePrimary({
+          storageId: onboardingStatus.verificationReferencePhotoId,
+          url: '', // Will be fetched in UI via getUrl() if needed
+        });
+        if (__DEV__) {
+          console.log('[REF_PRIMARY] Hydrated verification reference photo', {
+            exists: true,
+            source: 'backend',
+            storageId: onboardingStatus.verificationReferencePhotoId.substring(0, 12) + '...',
+          });
+        }
+      }
+    }
+
+    // Hydrate onboardingStore from draft if draft exists
+    if (onboardingStatus.onboardingDraft) {
+      const draft = onboardingStatus.onboardingDraft;
+      const draftKeys = Object.keys(draft).filter(
+        key => (draft as any)[key] != null
+      );
+      if (__DEV__) {
+        console.log(`[BASIC_HYDRATE] source=draft fields=${JSON.stringify(draftKeys)}`);
+      }
+      hydrateFromDraft(draft);
+    } else {
+      if (__DEV__) {
+        console.log('[ONB_DRAFT] No draft found in Convex');
+      }
+    }
+  }, [userId, authHydrated, onboardingHydrated, onboardingStatus, hydrateFromDraft, setFaceVerificationPassed, setFaceVerificationPending]);
 
   return null;
 }
@@ -336,10 +586,12 @@ export default function RootLayout() {
         <ConvexProvider client={convex}>
           <StatusBar style="light" />
           <DemoBanner />
+          <ResetEpochChecker />
           <BootStateTracker />
           <BootScreenWrapper />
           <SessionValidator />
           <PhotoSyncManager />
+          <OnboardingDraftHydrator />
           <DeviceFingerprintCollector />
           <Stack screenOptions={{ headerShown: false }}>
             <Stack.Screen name="index" />

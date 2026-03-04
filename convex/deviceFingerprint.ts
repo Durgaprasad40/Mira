@@ -1,10 +1,12 @@
 import { v } from "convex/values";
 import { mutation } from "./_generated/server";
+import { Id } from "./_generated/dataModel";
+import { resolveUserIdByAuthId, ensureUserByAuthId } from "./helpers";
 
 // Register device fingerprint and check for multi-account
 export const registerDeviceFingerprint = mutation({
   args: {
-    userId: v.id("users"),
+    userId: v.union(v.id("users"), v.string()), // Accept both Convex ID and authUserId string
     deviceId: v.string(),
     platform: v.string(),
     osVersion: v.string(),
@@ -13,7 +15,11 @@ export const registerDeviceFingerprint = mutation({
     deviceModel: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const { userId, deviceId, platform, osVersion, appVersion, installId, deviceModel } = args;
+    const { deviceId, platform, osVersion, appVersion, installId, deviceModel } = args;
+
+    // Map authUserId -> Convex Id<"users"> (MUTATION: can create)
+    const userId = await ensureUserByAuthId(ctx, args.userId as string);
+
     const now = Date.now();
 
     // Check if this user already has a fingerprint
@@ -139,12 +145,15 @@ export const registerDeviceFingerprint = mutation({
 // Update device last seen
 export const updateDeviceLastSeen = mutation({
   args: {
-    userId: v.id("users"),
+    userId: v.union(v.id("users"), v.string()), // Accept both Convex ID and authUserId string
   },
   handler: async (ctx, args) => {
+    // Map authUserId -> Convex Id<"users"> (MUTATION: can create)
+    const userId = await ensureUserByAuthId(ctx, args.userId as string);
+
     const fingerprint = await ctx.db
       .query("deviceFingerprints")
-      .withIndex("by_user", (q) => q.eq("userId", args.userId))
+      .withIndex("by_user", (q) => q.eq("userId", userId))
       .first();
 
     if (fingerprint) {

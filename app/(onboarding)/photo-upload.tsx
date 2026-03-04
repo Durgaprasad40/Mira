@@ -12,13 +12,13 @@ import { useOnboardingStore } from '@/stores/onboardingStore';
 import { useAuthStore } from '@/stores/authStore';
 import { useDemoStore } from '@/stores/demoStore';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
-import { useMutation } from 'convex/react';
+import { useMutation, useQuery } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { Id } from '@/convex/_generated/dataModel';
 import { isDemoMode, convex } from '@/hooks/useConvex';
 import { OnboardingProgressHeader } from '@/components/OnboardingProgressHeader';
 import { checkPhotoExists, getPhotoFileState, type PhotoFileState } from '@/lib/photoFileGuard';
-import { uploadPhotoToBackend } from '@/services/photoSync';
+import { decideNextOnboardingRoute, logOnboardingStatus } from '@/lib/onboardingRouting';
 
 // Persistent photos directory - files here survive app restarts
 const PHOTOS_DIR = FileSystem.documentDirectory + 'mira/photos/';
@@ -104,6 +104,12 @@ export default function PhotoUploadScreen() {
   const generateUploadUrl = useMutation(api.photos.generateUploadUrl);
   const uploadVerificationReferencePhoto = useMutation(api.photos.uploadVerificationReferencePhoto);
 
+  // BUG FIX: Query onboarding status to check if reference photo already exists
+  const onboardingStatus = useQuery(
+    api.users.getOnboardingStatus,
+    !isDemoMode && userId ? { userId } : 'skip'
+  );
+
   // Local state for immediate preview update
   // SAFETY: Don't initialize from photos[0] - it may be stale from previous user
   const [previewUri, setPreviewUri] = useState<string | null>(null);
@@ -111,16 +117,43 @@ export default function PhotoUploadScreen() {
   // TASK 2: File existence guard - track if displayed photo file exists
   const [photoFileState, setPhotoFileState] = useState<PhotoFileState>('empty');
 
-  // CRITICAL: Skip this screen if user is already verified - redirect immediately
+  // BUG FIX: Skip this screen if reference photo already exists OR user is already verified
   const didSkipRef = React.useRef(false);
   React.useEffect(() => {
-    if (isAlreadyVerified && !didSkipRef.current) {
+    // Demo mode: skip if verified
+    if (isDemoMode && isAlreadyVerified && !didSkipRef.current) {
       didSkipRef.current = true;
-      console.log('[PHOTO_GATE] facePassed=true -> skip photo-upload -> additional-photos');
-      setStep('additional_photos');
-      router.replace('/(onboarding)/additional-photos' as any);
+      console.log('[REF_PHOTO] Demo mode: verified -> skip to face-verification');
+      setStep('face_verification');
+      router.replace('/(onboarding)/face-verification' as any);
+      return;
     }
-  }, [isAlreadyVerified, setStep, router]);
+
+    // Live mode: skip if reference photo already exists
+    // CRITICAL: Wait for onboardingStatus to load (not undefined)
+    if (!isDemoMode && onboardingStatus !== undefined) {
+      if (onboardingStatus && onboardingStatus.referencePhotoExists && !didSkipRef.current) {
+        didSkipRef.current = true;
+        console.log('[REF_PHOTO] skip_upload_already_exists=true');
+
+        // Log current status for debugging
+        logOnboardingStatus(onboardingStatus, 'photo-upload-skip');
+
+        // Use centralized routing helper
+        const nextRoute = decideNextOnboardingRoute(onboardingStatus);
+        console.log(`[ONB_ROUTE] Skipping to: ${nextRoute}`);
+
+        // Update store step based on route
+        if (nextRoute.includes('face-verification')) {
+          setStep('face_verification');
+        } else if (nextRoute.includes('additional-photos')) {
+          setStep('additional_photos');
+        }
+
+        router.replace(nextRoute as any);
+      }
+    }
+  }, [isDemoMode, isAlreadyVerified, onboardingStatus, setStep, router]);
 
   // SAFETY GUARD: Only clear photos if user is NEW (never verified) AND photos exist
   // Do NOT clear if user is already verified - they should keep their photos
@@ -224,41 +257,11 @@ export default function PhotoUploadScreen() {
       return;
     }
 
-    // CRITICAL: Upload to Convex backend IMMEDIATELY (REQUIRED by HARD LOCK)
-    // Verification photo upload moved HERE from handleNext() to enforce immediate backend storage
-    if (!isDemoMode && userId) {
-      if (__DEV__) console.log('[PHOTO_LOCK] Uploading verification photo to Convex backend...');
-
-      const uploadResult = await uploadPhotoToBackend(
-        userId,
-        persistentUri,
-        true, // isPrimary (verification photo is always primary)
-        0 // slot 0
-      );
-
-      if (!uploadResult.success) {
-        Alert.alert(
-          'Upload Failed',
-          'Failed to upload photo to server. Please try again.',
-          [{ text: 'OK' }]
-        );
-        console.error('[PHOTO_LOCK] Verification photo upload failed:', uploadResult.message);
-        return;
-      }
-
-      if (__DEV__) {
-        console.log(`[PHOTO_LOCK] ✅ Verification photo uploaded to Convex: storageId=${uploadResult.storageId}`);
-      }
-    }
-
-    // DEBUG: Log cache URI
+    // BUG FIX: Upload moved to handleNext() to use correct mutation
+    // Photo will be uploaded to Convex when user clicks Continue
+    // This ensures we use uploadVerificationReferencePhoto (NOT addPhoto)
     if (__DEV__) {
-      console.log(`[PHOTO] CACHE URI (verification):`, {
-        source,
-        uri: persistentUri,
-        isValid: true,
-        note: 'LOCAL CACHE ONLY - Convex backend is source of truth',
-      });
+      console.log('[PHOTO_GATE] Photo cached locally. Will upload to Convex on Continue.');
     }
 
     // Store local URI as cache ONLY (NOT source of truth)
@@ -370,7 +373,9 @@ export default function PhotoUploadScreen() {
       console.log(`[PHOTO_GATE] Uploaded to storage, storageId=${storageId}`);
 
       // Step 2: Call the mutation to set verification reference photo
-      console.log('[PHOTO_GATE] Calling uploadVerificationReferencePhoto mutation...');
+      // BUG FIX: Use uploadVerificationReferencePhoto (NOT addPhoto)
+      // This mutation does NOT count towards the 9-photo limit
+      console.log('[PHOTO_GATE] uploading verification reference photo using uploadVerificationReferencePhoto (NOT addPhoto)');
       const result = await uploadVerificationReferencePhoto({
         userId: userId as Id<'users'>,
         storageId,
@@ -437,6 +442,18 @@ export default function PhotoUploadScreen() {
       ]
     );
   };
+
+  // LOADING STATE: Wait for onboardingStatus in live mode to prevent race conditions
+  if (!isDemoMode && onboardingStatus === undefined) {
+    return (
+      <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
+        <OnboardingProgressHeader />
+        <View style={styles.content}>
+          <Text style={styles.loadingText}>Loading...</Text>
+        </View>
+      </SafeAreaView>
+    );
+  }
 
   return (
     <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
@@ -693,5 +710,11 @@ const styles = StyleSheet.create({
   footer: {
     marginTop: 8,
     paddingTop: 12,
+  },
+  loadingText: {
+    fontSize: 16,
+    color: COLORS.textLight,
+    textAlign: 'center',
+    marginTop: 40,
   },
 });

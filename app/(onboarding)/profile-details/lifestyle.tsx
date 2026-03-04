@@ -23,6 +23,8 @@ import { useOnboardingStore } from "@/stores/onboardingStore";
 import { useDemoStore } from "@/stores/demoStore";
 import { useAuthStore } from "@/stores/authStore";
 import { isDemoMode } from "@/hooks/useConvex";
+import { useMutation } from "convex/react";
+import { api } from "@/convex/_generated/api";
 import { ExerciseStatus, PetType, InsectType } from "@/types";
 import { OnboardingProgressHeader } from "@/components/OnboardingProgressHeader";
 
@@ -47,6 +49,7 @@ export default function ProfileDetailsLifestyleScreen() {
   const demoProfile = useDemoStore((s) =>
     isDemoMode && userId ? s.demoProfiles[userId] : null
   );
+  const upsertDraft = useMutation(api.users.upsertOnboardingDraft);
   const router = useRouter();
   const params = useLocalSearchParams<{ editFromReview?: string }>();
 
@@ -99,6 +102,30 @@ export default function ProfileDetailsLifestyleScreen() {
       if (Object.keys(dataToSave).length > 0) {
         demoStore.saveDemoProfile(userId, dataToSave);
         console.log(`[LIFESTYLE] saved: ${JSON.stringify(dataToSave)}`);
+      }
+    }
+
+    // LIVE MODE: Persist to Convex onboarding draft
+    if (!isDemoMode && userId) {
+      const lifestyle: Record<string, any> = {};
+      if (smoking) lifestyle.smoking = smoking;
+      if (drinking) lifestyle.drinking = drinking;
+      if (kids) lifestyle.kids = kids;
+      if (exercise) lifestyle.exercise = exercise;
+      if (pets.length > 0) lifestyle.pets = pets;
+      if (insect) lifestyle.insect = insect;
+
+      if (Object.keys(lifestyle).length > 0) {
+        upsertDraft({
+          userId,
+          patch: {
+            lifestyle,
+            progress: { lastStepKey: 'profile-details/lifestyle' },
+          },
+        }).catch((error) => {
+          if (__DEV__) console.error('[LIFESTYLE] Failed to save draft:', error);
+        });
+        if (__DEV__) console.log(`[ONB_DRAFT] Saved lifestyle: ${JSON.stringify(lifestyle)}`);
       }
     }
 

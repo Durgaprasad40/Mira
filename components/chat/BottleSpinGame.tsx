@@ -4,7 +4,7 @@
  * Features:
  * - Animated bottle that spins and lands on either user
  * - Shows both users' names with "Your turn" / "Their turn" highlight
- * - Per-chat, per-user skip quota with 24h rolling reset
+ * - Per-chat, per-user skip quota with daily UTC reset
  * - Sends result message to chat when spin completes
  * - Haptic feedback on spin end
  * - No prompts/questions - users pick their own
@@ -19,19 +19,20 @@ import {
   Animated,
   Easing,
 } from 'react-native';
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import * as Haptics from 'expo-haptics';
 import { Ionicons } from '@expo/vector-icons';
+import { useQuery, useMutation } from 'convex/react';
+import { api } from '@/convex/_generated/api';
 import { COLORS } from '@/lib/constants';
 
-// Skip state storage key prefix
-const SKIP_STORAGE_KEY_PREFIX = 'truthdare_skips_';
+// Skip tracking now uses Convex-backed persistence (userGameLimits table)
 const TWENTY_FOUR_HOURS_MS = 24 * 60 * 60 * 1000;
 const MAX_SKIPS = 3;
 
-interface SkipState {
-  skipsRemaining: number;
-  nextResetAt: number; // timestamp when skips reset to MAX_SKIPS
+// Generate windowKey for daily UTC buckets (e.g., "2024-01-15")
+function getWindowKey(): string {
+  const now = new Date();
+  return `${now.getUTCFullYear()}-${String(now.getUTCMonth() + 1).padStart(2, '0')}-${String(now.getUTCDate()).padStart(2, '0')}`;
 }
 
 interface BottleSpinGameProps {
@@ -48,11 +49,6 @@ interface BottleSpinGameProps {
 type GameResult = 'truth' | 'dare' | null;
 type SelectedUser = 'current' | 'other' | null;
 
-// Generate storage key for this chat+user combination
-function getSkipStorageKey(conversationId: string, userId: string): string {
-  return `${SKIP_STORAGE_KEY_PREFIX}${conversationId}_${userId}`;
-}
-
 export function BottleSpinGame({
   visible,
   onClose,
@@ -65,9 +61,7 @@ export function BottleSpinGame({
   const [isSpinning, setIsSpinning] = useState(false);
   const [selectedUser, setSelectedUser] = useState<SelectedUser>(null);
   const [gameResult, setGameResult] = useState<GameResult>(null);
-  const [skipsRemaining, setSkipsRemaining] = useState(MAX_SKIPS);
   const [hasSpun, setHasSpun] = useState(false);
-  const [skipStateLoaded, setSkipStateLoaded] = useState(false);
 
   // Track if we've already sent the result message for current spin
   const resultMessageSentRef = useRef(false);
@@ -75,77 +69,33 @@ export function BottleSpinGame({
   const spinAnim = useRef(new Animated.Value(0)).current;
   const currentRotation = useRef(0);
 
-  // Load skip state from AsyncStorage on mount or when conversation changes
-  useEffect(() => {
-    if (!visible || !conversationId || !userId) return;
+  // Convex-backed skip tracking
+  const windowKey = getWindowKey();
+  const skipDataQuery = useQuery(
+    api.games.getBottleSpinSkips,
+    visible && conversationId && userId
+      ? { convoId: conversationId, windowKey }
+      : 'skip'
+  );
+  const incrementSkipMutation = useMutation(api.games.incrementBottleSpinSkip);
 
-    const loadSkipState = async () => {
-      try {
-        const key = getSkipStorageKey(conversationId, userId);
-        const stored = await AsyncStorage.getItem(key);
-        const now = Date.now();
+  // Calculate skips remaining from Convex data
+  const skipCount = skipDataQuery?.skipCount ?? 0;
+  const skipsRemaining = Math.max(0, MAX_SKIPS - skipCount);
 
-        if (stored) {
-          const state: SkipState = JSON.parse(stored);
-
-          // Check if 24h window has passed - reset if so
-          if (now >= state.nextResetAt) {
-            // Reset skips
-            const newState: SkipState = {
-              skipsRemaining: MAX_SKIPS,
-              nextResetAt: now + TWENTY_FOUR_HOURS_MS,
-            };
-            await AsyncStorage.setItem(key, JSON.stringify(newState));
-            setSkipsRemaining(MAX_SKIPS);
-          } else {
-            setSkipsRemaining(state.skipsRemaining);
-          }
-        } else {
-          // First time - initialize with max skips
-          const newState: SkipState = {
-            skipsRemaining: MAX_SKIPS,
-            nextResetAt: now + TWENTY_FOUR_HOURS_MS,
-          };
-          await AsyncStorage.setItem(key, JSON.stringify(newState));
-          setSkipsRemaining(MAX_SKIPS);
-        }
-      } catch {
-        // On error, default to max skips
-        setSkipsRemaining(MAX_SKIPS);
-      }
-      setSkipStateLoaded(true);
-    };
-
-    loadSkipState();
-  }, [visible, conversationId, userId]);
-
-  // Save skip state to AsyncStorage
-  const saveSkipState = useCallback(async (newSkipsRemaining: number) => {
+  // Increment skip count in Convex when user skips
+  const incrementSkipCount = useCallback(async () => {
     if (!conversationId || !userId) return;
-
     try {
-      const key = getSkipStorageKey(conversationId, userId);
-      const stored = await AsyncStorage.getItem(key);
-      const now = Date.now();
-
-      let nextResetAt = now + TWENTY_FOUR_HOURS_MS;
-      if (stored) {
-        const state: SkipState = JSON.parse(stored);
-        // Keep existing reset time if still valid
-        if (state.nextResetAt > now) {
-          nextResetAt = state.nextResetAt;
-        }
-      }
-
-      const newState: SkipState = {
-        skipsRemaining: newSkipsRemaining,
-        nextResetAt,
-      };
-      await AsyncStorage.setItem(key, JSON.stringify(newState));
-    } catch {
-      // Silent fail - skip state won't persist but game continues
+      await incrementSkipMutation({
+        convoId: conversationId,
+        windowKey,
+        delta: 1,
+      });
+    } catch (error) {
+      console.error('[BOTTLE_SPIN] Failed to increment skip count:', error);
     }
-  }, [conversationId, userId]);
+  }, [conversationId, userId, windowKey, incrementSkipMutation]);
 
   const resetGame = useCallback(() => {
     setSelectedUser(null);
@@ -212,11 +162,9 @@ export function BottleSpinGame({
 
   const handleSkip = useCallback(() => {
     if (skipsRemaining <= 0) return;
-    const newSkips = skipsRemaining - 1;
-    setSkipsRemaining(newSkips);
-    saveSkipState(newSkips);
+    incrementSkipCount();
     resetGame();
-  }, [skipsRemaining, saveSkipState, resetGame]);
+  }, [skipsRemaining, incrementSkipCount, resetGame]);
 
   const handleRotateAgain = useCallback(() => {
     spinAnim.setValue(currentRotation.current);
@@ -390,8 +338,8 @@ export function BottleSpinGame({
             )}
           </View>
 
-          {/* Skips counter - always visible */}
-          {skipStateLoaded && (
+          {/* Skips counter - always visible (show when Convex data loaded) */}
+          {skipDataQuery !== undefined && (
             <View style={styles.skipsCounter}>
               <View style={styles.skipsIndicator}>
                 {[...Array(MAX_SKIPS)].map((_, i) => (
@@ -405,7 +353,7 @@ export function BottleSpinGame({
                 ))}
               </View>
               <Text style={styles.skipsText}>
-                Skips: {skipsRemaining}/{MAX_SKIPS} (resets in 24h)
+                Skips: {skipsRemaining}/{MAX_SKIPS} (resets daily UTC)
               </Text>
             </View>
           )}

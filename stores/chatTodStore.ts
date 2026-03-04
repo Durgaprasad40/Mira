@@ -21,10 +21,12 @@
  * - Local only for now (Zustand + AsyncStorage)
  * - Convex integration later (1:1 schema mirror)
  */
+/**
+ * STORAGE POLICY: NO local persistence. Convex is ONLY source of truth.
+ * Store is in-memory only. Any required rehydration must come from Convex queries/mutations.
+ */
 
 import { create } from 'zustand';
-import { createJSONStorage, persist } from 'zustand/middleware';
-import AsyncStorage from '@react-native-async-storage/async-storage';
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -196,363 +198,349 @@ interface ChatTodStore {
 
 // ─── Store Implementation ────────────────────────────────────────────────────
 
-export const useChatTodStore = create<ChatTodStore>()(
-  persist(
-    (set, get) => ({
-      games: {},
-      _hasHydrated: false,
-      setHasHydrated: (hydrated) => set({ _hasHydrated: hydrated }),
+export const useChatTodStore = create<ChatTodStore>()((set, get) => ({
+  games: {},
+  _hasHydrated: true,
+  setHasHydrated: (hydrated) => set({ _hasHydrated: true }), // No-op
 
-      // ─── Core Actions ───
+  // ─── Core Actions ───
 
-      initGame: (conversationId, userIds) => {
-        set((state) => {
-          // Don't reinitialize if game exists and is unlocked
-          const existing = state.games[conversationId];
-          if (existing?.isMandatoryComplete) {
-            return state; // Chat already unlocked, keep state
-          }
+  initGame: (conversationId, userIds) => {
+    set((state) => {
+      // Don't reinitialize if game exists and is unlocked
+      const existing = state.games[conversationId];
+      if (existing?.isMandatoryComplete) {
+        return state; // Chat already unlocked, keep state
+      }
 
-          // Create new game or reset existing
-          return {
-            games: {
-              ...state.games,
-              [conversationId]: createInitialGameState(conversationId, userIds),
-            },
-          };
-        });
+      // Create new game or reset existing
+      return {
+        games: {
+          ...state.games,
+          [conversationId]: createInitialGameState(conversationId, userIds),
+        },
+      };
+    });
 
-        if (__DEV__) {
-          console.log('[ChatTodStore] initGame:', { conversationId, userIds });
-        }
-      },
-
-      spinBottle: (conversationId) => {
-        set((state) => {
-          const game = state.games[conversationId];
-          if (!game) return state;
-
-          // Can only spin from idle or round_complete
-          if (game.roundPhase !== 'idle' && game.roundPhase !== 'round_complete') {
-            if (__DEV__) {
-              console.warn('[ChatTodStore] Cannot spin: wrong phase', game.roundPhase);
-            }
-            return state;
-          }
-
-          return {
-            games: {
-              ...state.games,
-              [conversationId]: {
-                ...game,
-                roundPhase: 'spinning',
-                currentRound: game.currentRound + 1,
-                // Clear previous round data
-                chooserUserId: null,
-                responderUserId: null,
-                promptType: null,
-                promptText: null,
-                lastAnswer: null,
-              },
-            },
-          };
-        });
-
-        if (__DEV__) {
-          console.log('[ChatTodStore] spinBottle:', { conversationId });
-        }
-      },
-
-      completeSpinAnimation: (conversationId) => {
-        set((state) => {
-          const game = state.games[conversationId];
-          if (!game || game.roundPhase !== 'spinning') return state;
-
-          // Randomly select chooser
-          const randomIndex = Math.random() < 0.5 ? 0 : 1;
-          const chooserId = game.userIds[randomIndex];
-          const responderId = game.userIds[1 - randomIndex];
-
-          return {
-            games: {
-              ...state.games,
-              [conversationId]: {
-                ...game,
-                roundPhase: 'choosing',
-                chooserUserId: chooserId,
-                responderUserId: responderId,
-              },
-            },
-          };
-        });
-
-        if (__DEV__) {
-          const game = get().games[conversationId];
-          console.log('[ChatTodStore] completeSpinAnimation:', {
-            conversationId,
-            chooser: game?.chooserUserId,
-          });
-        }
-      },
-
-      chooseTruthOrDare: (conversationId, type) => {
-        set((state) => {
-          const game = state.games[conversationId];
-          if (!game || game.roundPhase !== 'choosing') return state;
-
-          return {
-            games: {
-              ...state.games,
-              [conversationId]: {
-                ...game,
-                roundPhase: 'writing',
-                promptType: type,
-              },
-            },
-          };
-        });
-
-        if (__DEV__) {
-          console.log('[ChatTodStore] chooseTruthOrDare:', { conversationId, type });
-        }
-      },
-
-      setPrompt: (conversationId, text) => {
-        set((state) => {
-          const game = state.games[conversationId];
-          if (!game || game.roundPhase !== 'writing') return state;
-
-          return {
-            games: {
-              ...state.games,
-              [conversationId]: {
-                ...game,
-                roundPhase: 'answering',
-                promptText: text.trim(),
-              },
-            },
-          };
-        });
-
-        if (__DEV__) {
-          console.log('[ChatTodStore] setPrompt:', { conversationId, textLength: text.length });
-        }
-      },
-
-      submitAnswer: (conversationId, answerMeta) => {
-        set((state) => {
-          const game = state.games[conversationId];
-          if (!game || game.roundPhase !== 'answering') return state;
-
-          // Record the round in history
-          const roundRecord: TodRoundRecord = {
-            round: game.currentRound,
-            chooserUserId: game.chooserUserId!,
-            responderUserId: game.responderUserId!,
-            promptType: game.promptType!,
-            promptText: game.promptText!,
-            answer: answerMeta,
-            completedAt: Date.now(),
-          };
-
-          return {
-            games: {
-              ...state.games,
-              [conversationId]: {
-                ...game,
-                roundPhase: 'round_complete',
-                lastAnswer: answerMeta,
-                roundHistory: [...game.roundHistory, roundRecord],
-              },
-            },
-          };
-        });
-
-        if (__DEV__) {
-          console.log('[ChatTodStore] submitAnswer:', { conversationId, type: answerMeta.type });
-        }
-      },
-
-      useSkip: (conversationId, userId) => {
-        const game = get().games[conversationId];
-        if (!game) return false;
-
-        const remaining = game.skipsRemaining[userId] ?? 0;
-        if (remaining <= 0) {
-          if (__DEV__) {
-            console.log('[ChatTodStore] useSkip: no skips remaining', { conversationId, userId });
-          }
-          return false;
-        }
-
-        set((state) => {
-          const currentGame = state.games[conversationId];
-          if (!currentGame) return state;
-
-          const newSkips = {
-            ...currentGame.skipsRemaining,
-            [userId]: (currentGame.skipsRemaining[userId] ?? 0) - 1,
-          };
-
-          // Determine next phase after skip
-          let nextPhase = currentGame.roundPhase;
-          let newChooser = currentGame.chooserUserId;
-          let newResponder = currentGame.responderUserId;
-
-          if (currentGame.roundPhase === 'choosing') {
-            // Skipping choice: swap roles, other user becomes chooser
-            newChooser = currentGame.responderUserId;
-            newResponder = currentGame.chooserUserId;
-          } else if (currentGame.roundPhase === 'answering') {
-            // Skipping answer: round ends, back to spin
-            nextPhase = 'idle';
-            newChooser = null;
-            newResponder = null;
-          }
-
-          return {
-            games: {
-              ...state.games,
-              [conversationId]: {
-                ...currentGame,
-                skipsRemaining: newSkips,
-                roundPhase: nextPhase,
-                chooserUserId: newChooser,
-                responderUserId: newResponder,
-              },
-            },
-          };
-        });
-
-        if (__DEV__) {
-          console.log('[ChatTodStore] useSkip:', {
-            conversationId,
-            userId,
-            remaining: remaining - 1,
-          });
-        }
-
-        return true;
-      },
-
-      completeMandatoryRound: (conversationId) => {
-        set((state) => {
-          const game = state.games[conversationId];
-          if (!game) return state;
-
-          // Can only complete from round_complete phase
-          if (game.roundPhase !== 'round_complete') {
-            if (__DEV__) {
-              console.warn('[ChatTodStore] Cannot complete: wrong phase', game.roundPhase);
-            }
-            return state;
-          }
-
-          return {
-            games: {
-              ...state.games,
-              [conversationId]: {
-                ...game,
-                roundPhase: 'unlocked',
-                isMandatoryComplete: true,
-              },
-            },
-          };
-        });
-
-        if (__DEV__) {
-          console.log('[ChatTodStore] completeMandatoryRound:', { conversationId });
-        }
-      },
-
-      resetGame: (conversationId) => {
-        set((state) => {
-          const game = state.games[conversationId];
-          if (!game) return state;
-
-          return {
-            games: {
-              ...state.games,
-              [conversationId]: createInitialGameState(conversationId, game.userIds),
-            },
-          };
-        });
-
-        if (__DEV__) {
-          console.log('[ChatTodStore] resetGame:', { conversationId });
-        }
-      },
-
-      // ─── Selectors ───
-
-      getGame: (conversationId) => {
-        return get().games[conversationId] ?? null;
-      },
-
-      canSkip: (conversationId, userId) => {
-        const game = get().games[conversationId];
-        if (!game) return false;
-        return (game.skipsRemaining[userId] ?? 0) > 0;
-      },
-
-      isMyTurn: (conversationId) => {
-        const game = get().games[conversationId];
-        if (!game) return false;
-
-        switch (game.roundPhase) {
-          case 'idle':
-          case 'spinning':
-            return true; // Either can spin
-          case 'choosing':
-          case 'writing':
-            return game.chooserUserId === CURRENT_USER_ID;
-          case 'answering':
-            return game.responderUserId === CURRENT_USER_ID;
-          case 'round_complete':
-            return true; // Either can continue/unlock
-          case 'unlocked':
-            return false; // Game over
-          default:
-            return false;
-        }
-      },
-
-      getMyAction: (conversationId) => {
-        const game = get().games[conversationId];
-        if (!game) return 'done';
-
-        switch (game.roundPhase) {
-          case 'idle':
-            return 'spin';
-          case 'spinning':
-            return 'wait'; // Animation playing
-          case 'choosing':
-            return game.chooserUserId === CURRENT_USER_ID ? 'choose' : 'wait';
-          case 'writing':
-            return game.chooserUserId === CURRENT_USER_ID ? 'write' : 'wait';
-          case 'answering':
-            return game.responderUserId === CURRENT_USER_ID ? 'answer' : 'wait';
-          case 'round_complete':
-            return 'done'; // Can unlock or continue
-          case 'unlocked':
-            return 'done';
-          default:
-            return 'done';
-        }
-      },
-    }),
-    {
-      name: 'chat-tod-store',
-      storage: createJSONStorage(() => AsyncStorage),
-      partialize: (state) => ({
-        games: state.games,
-      }),
-      onRehydrateStorage: () => (state) => {
-        state?.setHasHydrated(true);
-      },
+    if (__DEV__) {
+      console.log('[ChatTodStore] initGame:', { conversationId, userIds });
     }
-  )
-);
+  },
+
+  spinBottle: (conversationId) => {
+    set((state) => {
+      const game = state.games[conversationId];
+      if (!game) return state;
+
+      // Can only spin from idle or round_complete
+      if (game.roundPhase !== 'idle' && game.roundPhase !== 'round_complete') {
+        if (__DEV__) {
+          console.warn('[ChatTodStore] Cannot spin: wrong phase', game.roundPhase);
+        }
+        return state;
+      }
+
+      return {
+        games: {
+          ...state.games,
+          [conversationId]: {
+            ...game,
+            roundPhase: 'spinning',
+            currentRound: game.currentRound + 1,
+            // Clear previous round data
+            chooserUserId: null,
+            responderUserId: null,
+            promptType: null,
+            promptText: null,
+            lastAnswer: null,
+          },
+        },
+      };
+    });
+
+    if (__DEV__) {
+      console.log('[ChatTodStore] spinBottle:', { conversationId });
+    }
+  },
+
+  completeSpinAnimation: (conversationId) => {
+    set((state) => {
+      const game = state.games[conversationId];
+      if (!game || game.roundPhase !== 'spinning') return state;
+
+      // Randomly select chooser
+      const randomIndex = Math.random() < 0.5 ? 0 : 1;
+      const chooserId = game.userIds[randomIndex];
+      const responderId = game.userIds[1 - randomIndex];
+
+      return {
+        games: {
+          ...state.games,
+          [conversationId]: {
+            ...game,
+            roundPhase: 'choosing',
+            chooserUserId: chooserId,
+            responderUserId: responderId,
+          },
+        },
+      };
+    });
+
+    if (__DEV__) {
+      const game = get().games[conversationId];
+      console.log('[ChatTodStore] completeSpinAnimation:', {
+        conversationId,
+        chooser: game?.chooserUserId,
+      });
+    }
+  },
+
+  chooseTruthOrDare: (conversationId, type) => {
+    set((state) => {
+      const game = state.games[conversationId];
+      if (!game || game.roundPhase !== 'choosing') return state;
+
+      return {
+        games: {
+          ...state.games,
+          [conversationId]: {
+            ...game,
+            roundPhase: 'writing',
+            promptType: type,
+          },
+        },
+      };
+    });
+
+    if (__DEV__) {
+      console.log('[ChatTodStore] chooseTruthOrDare:', { conversationId, type });
+    }
+  },
+
+  setPrompt: (conversationId, text) => {
+    set((state) => {
+      const game = state.games[conversationId];
+      if (!game || game.roundPhase !== 'writing') return state;
+
+      return {
+        games: {
+          ...state.games,
+          [conversationId]: {
+            ...game,
+            roundPhase: 'answering',
+            promptText: text.trim(),
+          },
+        },
+      };
+    });
+
+    if (__DEV__) {
+      console.log('[ChatTodStore] setPrompt:', { conversationId, textLength: text.length });
+    }
+  },
+
+  submitAnswer: (conversationId, answerMeta) => {
+    set((state) => {
+      const game = state.games[conversationId];
+      if (!game || game.roundPhase !== 'answering') return state;
+
+      // Record the round in history
+      const roundRecord: TodRoundRecord = {
+        round: game.currentRound,
+        chooserUserId: game.chooserUserId!,
+        responderUserId: game.responderUserId!,
+        promptType: game.promptType!,
+        promptText: game.promptText!,
+        answer: answerMeta,
+        completedAt: Date.now(),
+      };
+
+      return {
+        games: {
+          ...state.games,
+          [conversationId]: {
+            ...game,
+            roundPhase: 'round_complete',
+            lastAnswer: answerMeta,
+            roundHistory: [...game.roundHistory, roundRecord],
+          },
+        },
+      };
+    });
+
+    if (__DEV__) {
+      console.log('[ChatTodStore] submitAnswer:', { conversationId, type: answerMeta.type });
+    }
+  },
+
+  useSkip: (conversationId, userId) => {
+    const game = get().games[conversationId];
+    if (!game) return false;
+
+    const remaining = game.skipsRemaining[userId] ?? 0;
+    if (remaining <= 0) {
+      if (__DEV__) {
+        console.log('[ChatTodStore] useSkip: no skips remaining', { conversationId, userId });
+      }
+      return false;
+    }
+
+    set((state) => {
+      const currentGame = state.games[conversationId];
+      if (!currentGame) return state;
+
+      const newSkips = {
+        ...currentGame.skipsRemaining,
+        [userId]: (currentGame.skipsRemaining[userId] ?? 0) - 1,
+      };
+
+      // Determine next phase after skip
+      let nextPhase = currentGame.roundPhase;
+      let newChooser = currentGame.chooserUserId;
+      let newResponder = currentGame.responderUserId;
+
+      if (currentGame.roundPhase === 'choosing') {
+        // Skipping choice: swap roles, other user becomes chooser
+        newChooser = currentGame.responderUserId;
+        newResponder = currentGame.chooserUserId;
+      } else if (currentGame.roundPhase === 'answering') {
+        // Skipping answer: round ends, back to spin
+        nextPhase = 'idle';
+        newChooser = null;
+        newResponder = null;
+      }
+
+      return {
+        games: {
+          ...state.games,
+          [conversationId]: {
+            ...currentGame,
+            skipsRemaining: newSkips,
+            roundPhase: nextPhase,
+            chooserUserId: newChooser,
+            responderUserId: newResponder,
+          },
+        },
+      };
+    });
+
+    if (__DEV__) {
+      console.log('[ChatTodStore] useSkip:', {
+        conversationId,
+        userId,
+        remaining: remaining - 1,
+      });
+    }
+
+    return true;
+  },
+
+  completeMandatoryRound: (conversationId) => {
+    set((state) => {
+      const game = state.games[conversationId];
+      if (!game) return state;
+
+      // Can only complete from round_complete phase
+      if (game.roundPhase !== 'round_complete') {
+        if (__DEV__) {
+          console.warn('[ChatTodStore] Cannot complete: wrong phase', game.roundPhase);
+        }
+        return state;
+      }
+
+      return {
+        games: {
+          ...state.games,
+          [conversationId]: {
+            ...game,
+            roundPhase: 'unlocked',
+            isMandatoryComplete: true,
+          },
+        },
+      };
+    });
+
+    if (__DEV__) {
+      console.log('[ChatTodStore] completeMandatoryRound:', { conversationId });
+    }
+  },
+
+  resetGame: (conversationId) => {
+    set((state) => {
+      const game = state.games[conversationId];
+      if (!game) return state;
+
+      return {
+        games: {
+          ...state.games,
+          [conversationId]: createInitialGameState(conversationId, game.userIds),
+        },
+      };
+    });
+
+    if (__DEV__) {
+      console.log('[ChatTodStore] resetGame:', { conversationId });
+    }
+  },
+
+  // ─── Selectors ───
+
+  getGame: (conversationId) => {
+    return get().games[conversationId] ?? null;
+  },
+
+  canSkip: (conversationId, userId) => {
+    const game = get().games[conversationId];
+    if (!game) return false;
+    return (game.skipsRemaining[userId] ?? 0) > 0;
+  },
+
+  isMyTurn: (conversationId) => {
+    const game = get().games[conversationId];
+    if (!game) return false;
+
+    switch (game.roundPhase) {
+      case 'idle':
+      case 'spinning':
+        return true; // Either can spin
+      case 'choosing':
+      case 'writing':
+        return game.chooserUserId === CURRENT_USER_ID;
+      case 'answering':
+        return game.responderUserId === CURRENT_USER_ID;
+      case 'round_complete':
+        return true; // Either can continue/unlock
+      case 'unlocked':
+        return false; // Game over
+      default:
+        return false;
+    }
+  },
+
+  getMyAction: (conversationId) => {
+    const game = get().games[conversationId];
+    if (!game) return 'done';
+
+    switch (game.roundPhase) {
+      case 'idle':
+        return 'spin';
+      case 'spinning':
+        return 'wait'; // Animation playing
+      case 'choosing':
+        return game.chooserUserId === CURRENT_USER_ID ? 'choose' : 'wait';
+      case 'writing':
+        return game.chooserUserId === CURRENT_USER_ID ? 'write' : 'wait';
+      case 'answering':
+        return game.responderUserId === CURRENT_USER_ID ? 'answer' : 'wait';
+      case 'round_complete':
+        return 'done'; // Can unlock or continue
+      case 'unlocked':
+        return 'done';
+      default:
+        return 'done';
+    }
+  },
+}));
 
 // ─── Selector Hooks (for cleaner component usage) ────────────────────────────
 

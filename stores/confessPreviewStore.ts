@@ -1,16 +1,15 @@
 /**
  * confessPreviewStore — Tracks one-time profile preview usage for confession receivers
  *
+ * STORAGE POLICY: NO local persistence. Convex is ONLY source of truth.
+ * Store is in-memory only. Any required rehydration must come from Convex queries/mutations.
+ *
  * When a user is tagged in a confession, they can view the confessor's profile ONCE.
- * This store persists the "previewUsed" state to ensure it survives app restarts.
+ * This store tracks the "previewUsed" state in memory only.
  *
  * Key format: `${confessionId}_${receiverId}` → ensures each receiver gets one preview per confession
  */
 import { create } from 'zustand';
-import { persist, createJSONStorage } from 'zustand/middleware';
-import AsyncStorage from '@react-native-async-storage/async-storage';
-
-const HYDRATION_TIMEOUT_MS = 3000;
 
 interface ConfessPreviewState {
   // Map of previewKey → boolean (true = preview has been used)
@@ -34,51 +33,28 @@ const getPreviewKey = (confessionId: string, receiverId: string): string => {
   return `${confessionId}_${receiverId}`;
 };
 
-export const useConfessPreviewStore = create<ConfessPreviewState>()(
-  persist(
-    (set, get) => ({
-      usedPreviews: {},
+export const useConfessPreviewStore = create<ConfessPreviewState>()((set, get) => ({
+  usedPreviews: {},
 
-      _hasHydrated: false,
-      setHasHydrated: (state) => set({ _hasHydrated: state }),
+  _hasHydrated: true, // Always ready - no AsyncStorage
+  setHasHydrated: (state) => set({ _hasHydrated: true }), // No-op
 
-      isPreviewUsed: (confessionId: string, receiverId: string) => {
-        const key = getPreviewKey(confessionId, receiverId);
-        return !!get().usedPreviews[key];
+  isPreviewUsed: (confessionId: string, receiverId: string) => {
+    const key = getPreviewKey(confessionId, receiverId);
+    return !!get().usedPreviews[key];
+  },
+
+  markPreviewUsed: (confessionId: string, receiverId: string) => {
+    const key = getPreviewKey(confessionId, receiverId);
+    set((state) => ({
+      usedPreviews: {
+        ...state.usedPreviews,
+        [key]: true,
       },
+    }));
+  },
 
-      markPreviewUsed: (confessionId: string, receiverId: string) => {
-        const key = getPreviewKey(confessionId, receiverId);
-        set((state) => ({
-          usedPreviews: {
-            ...state.usedPreviews,
-            [key]: true,
-          },
-        }));
-      },
-
-      resetAllPreviews: () => {
-        set({ usedPreviews: {} });
-      },
-    }),
-    {
-      name: 'confess-preview-store',
-      storage: createJSONStorage(() => AsyncStorage),
-      onRehydrateStorage: () => (state, error) => {
-        if (error) console.warn('[confessPreviewStore] Rehydration error:', error);
-        if (state) state.setHasHydrated(true);
-      },
-    }
-  )
-);
-
-// Hydration timeout fallback
-let _confessPreviewHydrationTimeoutId: ReturnType<typeof setTimeout> | null = null;
-if (_confessPreviewHydrationTimeoutId !== null) clearTimeout(_confessPreviewHydrationTimeoutId);
-_confessPreviewHydrationTimeoutId = setTimeout(() => {
-  if (!useConfessPreviewStore.getState()._hasHydrated) {
-    console.warn('[HYDRATION] confessPreviewStore timed out, continuing');
-    useConfessPreviewStore.getState().setHasHydrated(true);
-  }
-  _confessPreviewHydrationTimeoutId = null;
-}, HYDRATION_TIMEOUT_MS);
+  resetAllPreviews: () => {
+    set({ usedPreviews: {} });
+  },
+}));

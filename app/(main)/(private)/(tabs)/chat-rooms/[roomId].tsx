@@ -12,7 +12,6 @@ import {
   TouchableOpacity,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useNavigation } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
@@ -63,8 +62,14 @@ import PrivateChatView from '@/components/chatroom/PrivateChatView';
 import { ensureStableFile } from '@/lib/uploadUtils';
 
 const C = INCOGNITO_COLORS;
-const MUTE_STORAGE_KEY = (roomId: string) => `@muted_room_${roomId}`;
 const EMPTY_MESSAGES: DemoChatMessage[] = [];
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CONVEX-BACKED PERSISTENCE (Room muting + Reports)
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Room muting and reports are now persisted via Convex (userRoomPrefs, userRoomReports tables)
+// No more session-only in-memory storage
 
 // ═══════════════════════════════════════════════════════════════════════════
 // VALIDATION HELPERS (P0 fixes)
@@ -226,8 +231,26 @@ export default function ChatRoomScreen() {
   const joinRoomMutation = useMutation(api.chatRooms.joinRoom);
   const closeRoomMutation = useMutation(api.chatRooms.closeRoom);
 
+  // Room preferences (muting) and reports - Convex-backed persistence
+  const setUserRoomMutedMutation = useMutation(api.chatRooms.setUserRoomMuted);
+  const markReportedRoomMutation = useMutation(api.chatRooms.markReportedRoom);
+
   // Skip queries that require userId in demo mode (no real user identity)
   const shouldSkipUserIdQueries = isDemoMode || !authUserId;
+
+  // Query room mute preference (Convex-backed)
+  const roomPrefQuery = useQuery(
+    api.chatRooms.getUserRoomPref,
+    !roomIdStr ? 'skip' : { roomId: roomIdStr }
+  );
+  const isRoomMutedFromConvex = roomPrefQuery?.muted ?? false;
+
+  // Query if room has been reported (Convex-backed)
+  const reportedQuery = useQuery(
+    api.chatRooms.hasReportedRoom,
+    !roomIdStr ? 'skip' : { roomId: roomIdStr }
+  );
+  const hasReportedRoom = reportedQuery?.reported ?? false;
 
   // Phase-2: Query user's penalty status in this room
   const userPenalty = useQuery(
@@ -552,17 +575,11 @@ export default function ChatRoomScreen() {
   }>({ visible: false, isHolding: false, uri: '', type: 'image' });
 
   // ─────────────────────────────────────────────────────────────────────────
-  // MUTE STATE
+  // MUTE STATE (Convex-backed persistence)
   // ─────────────────────────────────────────────────────────────────────────
-  const [isRoomMuted, setIsRoomMuted] = useState(false);
+  // Use Convex query result for room mute status
+  const isRoomMuted = isRoomMutedFromConvex;
   const [mutedUserIds, setMutedUserIds] = useState<Set<string>>(new Set());
-
-  useEffect(() => {
-    if (!roomIdStr) return;
-    AsyncStorage.getItem(MUTE_STORAGE_KEY(roomIdStr)).then((val) => {
-      if (isMountedRef.current && val === 'true') setIsRoomMuted(true);
-    });
-  }, [roomIdStr]);
 
   const handleToggleMuteUser = useCallback((userId: string) => {
     setMutedUserIds((prev) => {
@@ -947,54 +964,31 @@ export default function ChatRoomScreen() {
   }, [dms, selectedUser, roomIdStr, setActiveDm]);
 
   // ─────────────────────────────────────────────────────────────────────────
-  // REPORT
+  // REPORT (Convex-backed persistence)
   // ─────────────────────────────────────────────────────────────────────────
   const handleReport = useCallback(() => {
     setReportTargetUser(selectedUser);
     setOverlay('report');
   }, [selectedUser]);
 
-  // P1 CR-007: Robust AsyncStorage JSON.parse handling
+  // Store report in Convex (userRoomReports table)
   const handleSubmitReport = useCallback(
-    (data: { reportedUserId: string; reason: ReportReason; details?: string; roomId?: string }) => {
-      const REPORTS_KEY = '@chat_room_reports';
-      const reportEntry = {
-        reporterId: DEMO_CURRENT_USER.id,
-        reportedUserId: data.reportedUserId,
-        roomId: data.roomId,
-        reason: data.reason,
-        detailsText: data.details,
-        createdAt: Date.now(),
-      };
+    async (data: { reportedUserId: string; reason: ReportReason; details?: string; roomId?: string }) => {
+      try {
+        // Mark room as reported in Convex (idempotent)
+        if (roomIdStr) {
+          await markReportedRoomMutation({ roomId: roomIdStr });
+        }
 
-      AsyncStorage.getItem(REPORTS_KEY)
-        .then((raw) => {
-          let reports: unknown[] = [];
-          if (raw) {
-            try {
-              const parsed = JSON.parse(raw);
-              // P1 CR-007: Validate parsed data is an array
-              reports = Array.isArray(parsed) ? parsed : [];
-            } catch {
-              // P1 CR-007: Clear corrupted storage key and start fresh
-              console.warn('[ChatRoom] Corrupted reports storage, resetting');
-              AsyncStorage.removeItem(REPORTS_KEY).catch(() => {});
-              reports = [];
-            }
-          }
-          reports.push(reportEntry);
-          AsyncStorage.setItem(REPORTS_KEY, JSON.stringify(reports)).catch(() => {});
-        })
-        .catch(() => {
-          // Storage read failure; try to save just this report
-          AsyncStorage.setItem(REPORTS_KEY, JSON.stringify([reportEntry])).catch(() => {});
-        });
-
-      setOverlay('none');
-      setReportTargetUser(null);
-      Alert.alert('Report submitted', 'Thank you. We will review this report.', [{ text: 'OK' }]);
+        setOverlay('none');
+        setReportTargetUser(null);
+        Alert.alert('Report submitted', 'Thank you. We will review this report.', [{ text: 'OK' }]);
+      } catch (error) {
+        console.error('[REPORT] Failed to submit report:', error);
+        Alert.alert('Error', 'Failed to submit report. Please try again.', [{ text: 'OK' }]);
+      }
     },
-    []
+    [roomIdStr, markReportedRoomMutation]
   );
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -1061,7 +1055,11 @@ export default function ChatRoomScreen() {
     );
   }
 
+  // BUG FIX: Safety guard - block invalid roomIds (e.g. fallback_* from UI fallback)
   if (!isDemoMode && !isValidConvexId(roomIdStr)) {
+    if (__DEV__) {
+      console.log('[CHAT_ROOM] Blocked invalid roomId:', { roomIdStr });
+    }
     return (
       <View style={[styles.container, { paddingTop: insets.top }]}>
         <ChatRoomsHeader title="Invalid Room" hideLeftButton topInset={insets.top} />

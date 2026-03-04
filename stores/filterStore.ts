@@ -1,6 +1,7 @@
+// STORAGE POLICY: NO local persistence. Convex is ONLY source of truth.
+// All data is ephemeral (in-memory only) and rehydrates from Convex on app boot.
+
 import { create } from 'zustand';
-import { persist, createJSONStorage } from 'zustand/middleware';
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import {
   Gender,
   Orientation,
@@ -80,17 +81,15 @@ const initialState: FilterState = {
   privateIntentKeys: [], // Phase-2: multi-select intents (1-5)
 };
 
-export const useFilterStore = create<FilterStoreState>()(
-  persist(
-    (set, get) => ({
-      ...initialState,
-      _hasHydrated: false,
-      lookingFor: initialState.gender,
-      filterVersion: 0,
+export const useFilterStore = create<FilterStoreState>()((set, get) => ({
+  ...initialState,
+  _hasHydrated: true, // Always ready - no AsyncStorage
+  lookingFor: initialState.gender,
+  filterVersion: 0,
 
-      setHasHydrated: (state) => set({ _hasHydrated: state }),
+  setHasHydrated: (state) => set({ _hasHydrated: true }), // No-op
 
-      incrementFilterVersion: () => set((state) => ({ filterVersion: state.filterVersion + 1 })),
+  incrementFilterVersion: () => set((state) => ({ filterVersion: state.filterVersion + 1 })),
 
   setLookingFor: (genders) => set({ gender: genders, lookingFor: genders }),
 
@@ -164,31 +163,4 @@ export const useFilterStore = create<FilterStoreState>()(
     set((state) => ({
       orientation: state.orientation === orientation ? null : orientation,
     })),
-    }),
-    {
-      name: 'filter-storage',
-      storage: createJSONStorage(() => AsyncStorage),
-      // Persist all filter values except transient state
-      partialize: (state) => ({
-        gender: state.gender,
-        orientation: state.orientation,
-        minAge: state.minAge,
-        maxAge: state.maxAge,
-        maxDistance: state.maxDistance,
-        relationshipIntent: state.relationshipIntent,
-        activities: state.activities,
-        sortBy: state.sortBy,
-        privateIntentKeys: state.privateIntentKeys,
-      }),
-      onRehydrateStorage: () => (state, error) => {
-        if (error) {
-          console.error('[filterStore] Rehydration error:', error);
-        }
-        if (__DEV__) {
-          console.log('[filterStore] Hydrated:', state ? 'success' : 'empty');
-        }
-        state?.setHasHydrated(true);
-      },
-    },
-  ),
-);
+}));

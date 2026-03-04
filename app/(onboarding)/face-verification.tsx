@@ -6,9 +6,11 @@ import {
   Alert,
   Linking,
   ActivityIndicator,
+  AppState,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
+import { useIsFocused } from '@react-navigation/native';
 import {
   Camera,
   useCameraDevice,
@@ -50,31 +52,39 @@ type VerificationState =
 
 export default function FaceVerificationScreen() {
   const { photos, setStep } = useOnboardingStore();
-  const { userId, faceVerificationPassed, setFaceVerificationPassed, setFaceVerificationPending } = useAuthStore();
+  const { userId, faceVerificationPassed, faceVerificationPending, setFaceVerificationPassed, setFaceVerificationPending } = useAuthStore();
   const demoProfile = useDemoStore((s) => isDemoMode && userId ? s.demoProfiles[userId] : null);
   const router = useRouter();
 
+  // Screen focus and app state tracking
+  const isFocused = useIsFocused();
+  const [appState, setAppState] = useState(AppState.currentState);
+
   // CRITICAL: Check demoProfile.faceVerificationPassed for demo mode (persisted across logout)
+  // Also check faceVerificationPending - if pending, user has already completed verification step
   const isAlreadyVerified = isDemoMode
-    ? !!(demoProfile?.faceVerificationPassed || faceVerificationPassed)
-    : faceVerificationPassed;
+    ? !!(demoProfile?.faceVerificationPassed || demoProfile?.faceVerificationPending || faceVerificationPassed || faceVerificationPending)
+    : (faceVerificationPassed || faceVerificationPending);
 
   // Camera
   const device = useCameraDevice('front');
   const { hasPermission, requestPermission } = useCameraPermission();
   const cameraRef = useRef<Camera>(null);
 
+  // Camera active state - controlled by multiple conditions
+  const [cameraActive, setCameraActive] = useState(false);
+
   // State - initialize to 'success' if already verified (prevents re-verification on back)
   const [verificationState, setVerificationState] = useState<VerificationState>(
     isAlreadyVerified ? 'success' : 'waiting'
   );
 
-  // CRITICAL: Skip verification entirely if already verified - redirect immediately
+  // CRITICAL: Skip verification entirely if already verified or pending - redirect immediately
   const didSkipRef = useRef(false);
   useEffect(() => {
     if (isAlreadyVerified && !didSkipRef.current) {
       didSkipRef.current = true;
-      console.log('[FaceDebug] facePassed=true -> skip capture -> additional-photos');
+      console.log('[FaceDebug] face verification completed (passed or pending) -> skip capture -> additional-photos');
       setStep('additional_photos');
       router.replace('/(onboarding)/additional-photos' as any);
     }
@@ -167,6 +177,76 @@ export default function FaceVerificationScreen() {
       });
     }
   }, [hasPermission, requestPermission]);
+
+  // =============================================================================
+  // AppState listener - deactivate camera when app goes to background
+  // =============================================================================
+
+  useEffect(() => {
+    const subscription = AppState.addEventListener('change', (nextAppState) => {
+      setAppState(nextAppState);
+      if (__DEV__) {
+        console.log('[FaceDebug] AppState changed:', nextAppState);
+      }
+    });
+
+    return () => {
+      subscription.remove();
+    };
+  }, []);
+
+  // =============================================================================
+  // Camera activation control - only activate when ALL conditions are met
+  // =============================================================================
+
+  useEffect(() => {
+    // Check if camera should be active
+    const isAppActive = appState === 'active';
+    const needsCamera = verificationState === 'waiting' || verificationState === 'capturing';
+    const allConditionsMet = isFocused && isAppActive && !!device && hasPermission === true && needsCamera;
+
+    if (__DEV__) {
+      console.log('[FaceDebug] cameraActive conditions:', {
+        isFocused,
+        isAppActive,
+        hasDevice: !!device,
+        hasPermission,
+        needsCamera,
+        shouldActivate: allConditionsMet,
+      });
+    }
+
+    // Debounce activation to prevent race conditions
+    const activationTimer = setTimeout(() => {
+      if (allConditionsMet && !cameraActive) {
+        if (__DEV__) {
+          console.log('[FaceDebug] cameraActive true (all conditions met)');
+        }
+        setCameraActive(true);
+      } else if (!allConditionsMet && cameraActive) {
+        if (__DEV__) {
+          console.log('[FaceDebug] cameraActive false (condition failed)');
+        }
+        setCameraActive(false);
+      }
+    }, 150); // 150ms debounce
+
+    return () => {
+      clearTimeout(activationTimer);
+    };
+  }, [isFocused, appState, device, hasPermission, verificationState, cameraActive]);
+
+  // Deactivate camera immediately on unmount
+  useEffect(() => {
+    return () => {
+      if (cameraActive) {
+        if (__DEV__) {
+          console.log('[FaceDebug] cameraActive false (unmounting)');
+        }
+        setCameraActive(false);
+      }
+    };
+  }, [cameraActive]);
 
   const handleOpenSettings = useCallback(async () => {
     try {
@@ -267,6 +347,15 @@ export default function FaceVerificationScreen() {
           console.log('[FaceMatch] PENDING - Manual review required');
           setVerificationState('pending');
           setErrorMessage(result.message);
+          // CRITICAL: Set pending flag immediately so user can proceed through onboarding
+          // Manual review is asynchronous - users must be allowed to continue while review is pending
+          setFaceVerificationPending(true);
+          console.log('[FaceMatch] Set faceVerificationPending=true (allows onboarding continuation)');
+          // DEMO MODE: Also persist to demoProfile so it survives logout/relaunch
+          if (isDemoMode && userId) {
+            useDemoStore.getState().saveDemoProfile(userId, { faceVerificationPending: true });
+            console.log('[FaceMatch] saved faceVerificationPending=true to demoProfile');
+          }
           break;
 
         case 'FAIL':
@@ -421,7 +510,7 @@ export default function FaceVerificationScreen() {
       case 'success':
         return isDemoMode ? 'Verified (Demo Mode)' : 'Your identity has been verified!';
       case 'pending':
-        return 'Profile submitted for manual review';
+        return 'Your profile is under verification. You can continue while we review your selfie.';
       case 'failed':
         return 'Selfie capture failed';
       default:
@@ -444,13 +533,21 @@ export default function FaceVerificationScreen() {
         <View style={styles.cameraContainer}>
           {verificationState !== 'success' && verificationState !== 'failed' && verificationState !== 'pending' ? (
             <>
-              <Camera
-                ref={cameraRef}
-                style={styles.camera}
-                device={device}
-                isActive={verificationState === 'waiting' || verificationState === 'capturing'}
-                photo={true}
-              />
+              {/* Only render Camera when all conditions are met and cameraActive is true */}
+              {cameraActive && device && hasPermission ? (
+                <Camera
+                  ref={cameraRef}
+                  style={styles.camera}
+                  device={device}
+                  isActive={cameraActive}
+                  photo={true}
+                />
+              ) : (
+                <View style={styles.cameraPlaceholder}>
+                  <ActivityIndicator size="large" color={COLORS.primary} />
+                  <Text style={styles.placeholderText}>Preparing camera...</Text>
+                </View>
+              )}
               {/* Overlay with circular guide */}
               <View style={styles.overlay} pointerEvents="none">
                 <Animated.View style={[styles.faceGuide, circleColor]} />
@@ -483,9 +580,9 @@ export default function FaceVerificationScreen() {
               {verificationState === 'pending' && (
                 <>
                   <Ionicons name="time-outline" size={80} color={COLORS.warning || '#FFA500'} />
-                  <Text style={styles.resultText}>Profile Under Review</Text>
+                  <Text style={styles.resultText}>Verification Pending</Text>
                   <Text style={styles.errorText}>
-                    Your selfie has been submitted.{'\n'}Our team will verify your identity shortly.
+                    Your profile is under verification.{'\n'}You can continue using the app while we review your selfie.
                   </Text>
                 </>
               )}
@@ -560,7 +657,7 @@ export default function FaceVerificationScreen() {
             <>
               <View style={styles.pendingInfo}>
                 <Text style={styles.pendingInfoText}>
-                  Your profile will show a "Pending" badge until verification is complete. You can continue setting up your profile now.
+                  Manual review may take a few minutes or hours. You can continue setting up your profile and using the app while we verify your identity.
                 </Text>
               </View>
               <Button
@@ -640,6 +737,17 @@ const styles = StyleSheet.create({
   },
   camera: {
     flex: 1,
+  },
+  cameraPlaceholder: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: COLORS.backgroundDark,
+  },
+  placeholderText: {
+    color: COLORS.textLight,
+    fontSize: 14,
+    marginTop: 12,
   },
   overlay: {
     position: 'absolute',

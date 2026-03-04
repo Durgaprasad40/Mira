@@ -1,8 +1,9 @@
 import { Redirect } from 'expo-router';
 
 export default function OnboardingIndex() {
-  // Route directly to email-phone (auth method selection)
-  // The ONLY welcome screen is app/(auth)/welcome.tsx
-  return <Redirect href="/(onboarding)/email-phone" />;
+  // NEVER auto-navigate from this screen
+  // Users should only reach onboarding screens by explicit button press from welcome screen
+  // If somehow navigated here directly, redirect back to welcome
+  return <Redirect href="/(auth)/welcome" />;
 }
 

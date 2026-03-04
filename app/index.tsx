@@ -106,7 +106,8 @@ export default function Index() {
     }
 
     // ── Live mode: standard auth flow using authBootCache ──
-    const hasValidToken = typeof authBootCacheData.token === 'string' && authBootCacheData.token.trim().length > 0;
+    const token = authBootCacheData.token;
+    const hasValidToken = typeof token === 'string' && token.trim().length > 0;
 
     if (hasValidToken) {
       // Onboarding complete → home
@@ -114,8 +115,10 @@ export default function Index() {
         return { type: "ROUTE_HOME", route: "/(main)/(tabs)/home" };
       }
 
-      // ONBOARDING INCOMPLETE: Always route to welcome on cold start (logout first)
-      return { type: "FORCE_WELCOME_ONBOARDING_INCOMPLETE", route: "/(auth)/welcome" };
+      // ONBOARDING INCOMPLETE: Route to welcome to continue onboarding
+      // SAFETY: Don't force logout - SessionValidator will handle truly invalid sessions
+      // Forcing logout here would clear photos and break onboarding progress
+      return { type: "ROUTE_WELCOME", route: "/(auth)/welcome" };
     }
 
     // No valid token → show welcome screen
@@ -147,7 +150,8 @@ export default function Index() {
     if (__DEV__) {
       const facePassed = authBootCacheData?.faceVerificationPassed;
       const onbComplete = authBootCacheData?.onboardingCompleted;
-      const hasToken = typeof authBootCacheData?.token === 'string' && authBootCacheData.token.trim().length > 0;
+      const token2 = authBootCacheData?.token;
+      const hasToken = typeof token2 === 'string' && token2.trim().length > 0;
       console.log(`[ONB] boot_decision facePassed=${facePassed} onboardingCompleted=${onbComplete} hasToken=${hasToken} action=${bootAction.type}`);
       console.log(`[ONB] route_decision routeDestination=${routeDestination}`);
     }

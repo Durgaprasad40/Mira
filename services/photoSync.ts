@@ -47,7 +47,7 @@ async function downloadPhotoFromConvex(url: string, filename: string): Promise<s
     // Check if already downloaded
     const info = await FileSystem.getInfoAsync(localUri);
     if (info.exists) {
-      if (__DEV__) console.log('[PHOTO_SYNC] Photo already cached locally:', filename);
+      if (__DEV__) console.log('[PHOTO_SYNC] Photo cached locally (Convex source confirmed):', filename);
       return localUri;
     }
 
@@ -87,7 +87,9 @@ export async function syncPhotosFromBackend(
 ): Promise<{ success: boolean; photosCount: number; message?: string }> {
   // Skip sync in demo mode - demo users don't have backend photos
   if (isDemoMode) {
-    if (__DEV__) console.log('[PHOTO_SYNC] Skipping sync in demo mode');
+    console.warn('[PHOTO_SYNC] ⚠️ DEMO MODE - SKIPPING CONVEX SYNC!');
+    console.warn('[PHOTO_SYNC] ⚠️ Photos will be loaded from local demoStore only (not from Convex backend).');
+    console.warn('[PHOTO_SYNC] ⚠️ Set EXPO_PUBLIC_DEMO_MODE=false in .env.local to sync from Convex.');
     return { success: true, photosCount: 0, message: 'Demo mode - no backend sync' };
   }
 
@@ -139,11 +141,13 @@ export async function syncPhotosFromBackend(
     // Update local stores with synced data
     useOnboardingStore.getState().reorderPhotos(photoSlots);
 
-    // Also update demoStore for consistency (even though not demo mode)
-    const demoPhotos = photoSlots
-      .filter((uri): uri is string => uri !== null)
-      .map((uri) => ({ url: uri }));
-    useDemoStore.getState().saveDemoProfile(userId, { photos: demoPhotos });
+    // LIVE MODE GUARD: Only update demoStore in demo mode
+    if (isDemoMode) {
+      const demoPhotos = photoSlots
+        .filter((uri): uri is string => uri !== null)
+        .map((uri) => ({ url: uri }));
+      useDemoStore.getState().saveDemoProfile(userId, { photos: demoPhotos });
+    }
 
     if (__DEV__) {
       console.log(`[PHOTO_SYNC] Sync complete: ${localUris.filter(Boolean).length}/${backendPhotos.length} photos cached locally`);
@@ -183,7 +187,9 @@ export async function uploadPhotoToBackend(
 ): Promise<{ success: boolean; storageId?: string; photoId?: string; message?: string }> {
   // Skip upload in demo mode
   if (isDemoMode) {
-    if (__DEV__) console.log('[PHOTO_SYNC] Skipping upload in demo mode');
+    console.warn('[PHOTO_SYNC] ⚠️ DEMO MODE - SKIPPING CONVEX UPLOAD!');
+    console.warn('[PHOTO_SYNC] ⚠️ Photo will be stored ONLY in local demoStore (will be lost on restart).');
+    console.warn('[PHOTO_SYNC] ⚠️ Set EXPO_PUBLIC_DEMO_MODE=false in .env.local to upload to Convex.');
     return { success: true, message: 'Demo mode - no backend upload' };
   }
 

@@ -13,8 +13,12 @@ import { usePrivateProfileStore } from '@/stores/privateProfileStore';
 import { PrivateConsentGate } from '@/components/private/PrivateConsentGate';
 import { setPhase2Active } from '@/hooks/useNotifications';
 import { prewarmTodCache } from './(tabs)/truth-or-dare';
+import { decideNextOnboardingRoute } from '@/lib/onboardingRouting';
 
 const C = INCOGNITO_COLORS;
+
+// Minimum photos required for Phase-2 access
+const MIN_PHOTOS_REQUIRED = 2;
 
 // Phase-2 Back Navigation Constants
 const PHASE2_HOME_ROUTE = '/(main)/(private)/(tabs)/desire-land';
@@ -321,6 +325,12 @@ export default function PrivateLayout() {
     !isDemoMode && userId ? { userId: userId as any } : 'skip'
   );
 
+  // PHASE-1 GUARD: Query Phase-1 onboarding status to block Phase-2 access if incomplete
+  const phase1OnboardingStatus = useQuery(
+    api.users.getOnboardingStatus,
+    !isDemoMode && userId ? { userId: userId as any } : 'skip'
+  );
+
   // PREWARM: Start T/D queries early so data is cached when user opens T/D tab
   const prewarmPromptsData = useQuery(
     api.truthDare.listActivePromptsWithTop2Answers,
@@ -343,6 +353,45 @@ export default function PrivateLayout() {
   const onboardingComplete = isDemoMode
     ? phase2OnboardingCompleted
     : (phase2OnboardingCompleted || convexPrivateProfile?.isSetupComplete === true);
+
+  // PHASE-1 GUARD: Redirect to Phase-1 onboarding if incomplete
+  // This check happens BEFORE Phase-2 onboarding check
+  useEffect(() => {
+    if (!mountedRef.current) return;
+    if (didRedirectRef.current) return;
+    if (!hasHydrated) return;
+    if (isDemoMode) return; // Skip guard in demo mode
+    if (!phase1OnboardingStatus) return; // Wait for query to load
+
+    // Check Phase-1 onboarding requirements
+    // Allow 'verified' OR 'pending' (users can proceed while manual review is pending)
+    const isPhase1Complete =
+      phase1OnboardingStatus.onboardingCompleted === true &&
+      (
+        phase1OnboardingStatus.faceVerificationStatus === 'verified' ||
+        phase1OnboardingStatus.faceVerificationStatus === 'pending'
+      ) &&
+      phase1OnboardingStatus.normalPhotoCount >= MIN_PHOTOS_REQUIRED;
+
+    if (__DEV__) {
+      console.log('[PRIVATE_GUARD]', {
+        onboardingCompleted: phase1OnboardingStatus.onboardingCompleted,
+        faceStatus: phase1OnboardingStatus.faceVerificationStatus,
+        normalPhotoCount: phase1OnboardingStatus.normalPhotoCount,
+        action: isPhase1Complete ? 'allow_private' : 'redirect_to_onboarding',
+      });
+    }
+
+    if (!isPhase1Complete) {
+      didRedirectRef.current = true;
+      // Redirect to appropriate onboarding step
+      const nextRoute = decideNextOnboardingRoute(phase1OnboardingStatus);
+      requestAnimationFrame(() => {
+        if (!mountedRef.current) return;
+        router.replace(nextRoute as any);
+      });
+    }
+  }, [phase1OnboardingStatus, hasHydrated, router]);
 
   // CRASH FIX: Single-pass redirect with proper lifecycle checks
   // Uses requestAnimationFrame to ensure previous screen is fully unmounted

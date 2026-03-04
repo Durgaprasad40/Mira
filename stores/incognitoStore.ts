@@ -1,6 +1,7 @@
+// STORAGE POLICY: NO local persistence. Convex is ONLY source of truth.
+// All data is ephemeral (in-memory only) and rehydrates from Convex on app boot.
+
 import { create } from 'zustand';
-import { createJSONStorage, persist } from 'zustand/middleware';
-import AsyncStorage from '@react-native-async-storage/async-storage';
 
 interface IncognitoState {
   isActive: boolean;
@@ -19,40 +20,18 @@ interface IncognitoState {
   setHasHydrated: (hydrated: boolean) => void;
 }
 
-export const useIncognitoStore = create<IncognitoState>()(
-  persist(
-    (set) => ({
-      isActive: false,
-      setActive: (active) => set({ isActive: active }),
-      toggle: () => set((state) => ({ isActive: !state.isActive })),
+export const useIncognitoStore = create<IncognitoState>()((set) => ({
+  isActive: false,
+  setActive: (active) => set({ isActive: active }),
+  toggle: () => set((state) => ({ isActive: !state.isActive })),
 
-      ageConfirmed18Plus: false,
-      ageConfirmedAt: null,
-      acceptPrivateTerms: () =>
-        set({ ageConfirmed18Plus: true, ageConfirmedAt: Date.now() }),
-      resetPrivateTerms: () =>
-        set({ ageConfirmed18Plus: false, ageConfirmedAt: null }),
+  ageConfirmed18Plus: false,
+  ageConfirmedAt: null,
+  acceptPrivateTerms: () =>
+    set({ ageConfirmed18Plus: true, ageConfirmedAt: Date.now() }),
+  resetPrivateTerms: () =>
+    set({ ageConfirmed18Plus: false, ageConfirmedAt: null }),
 
-      // H-001/C-001 FIX: Hydration state
-      _hasHydrated: false,
-      setHasHydrated: (hydrated) => set({ _hasHydrated: hydrated }),
-    }),
-    {
-      name: 'incognito-store',
-      storage: createJSONStorage(() => AsyncStorage),
-      partialize: (state) => ({
-        ageConfirmed18Plus: state.ageConfirmed18Plus,
-        ageConfirmedAt: state.ageConfirmedAt,
-        // NOTE: _hasHydrated is NOT persisted - it's runtime-only
-      }),
-      // H-001/C-001 FIX: Set hydrated flag after rehydration (success or error)
-      onRehydrateStorage: () => (state, error) => {
-        // Always mark hydrated, even on error, to avoid permanent soft-lock
-        state?.setHasHydrated(true);
-        if (__DEV__ && error) {
-          console.warn('[incognitoStore] Rehydration error:', error);
-        }
-      },
-    },
-  ),
-);
+  _hasHydrated: true, // Always ready - no AsyncStorage
+  setHasHydrated: (hydrated) => set({ _hasHydrated: true }), // No-op
+}));

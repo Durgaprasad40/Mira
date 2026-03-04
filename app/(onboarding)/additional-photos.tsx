@@ -27,12 +27,17 @@ import { isDemoMode } from '@/hooks/useConvex';
 import { Ionicons } from '@expo/vector-icons';
 import { OnboardingProgressHeader } from '@/components/OnboardingProgressHeader';
 import { checkPhotoExists, getPhotoFileState, type PhotoFileState } from '@/lib/photoFileGuard';
-import { uploadPhotoToBackend } from '@/services/photoSync';
+import { uploadPhotoToBackend, syncPhotosFromBackend } from '@/services/photoSync';
+import { useMutation, useQuery } from 'convex/react';
+import { api } from '@/convex/_generated/api';
+import { Id } from '@/convex/_generated/dataModel';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 
 // Total 9 photos: 1 primary (circle) + 8 additional (grid)
+// MUST match backend limit in convex/photos.ts (MAX 9 photos)
 const TOTAL_SLOTS = 9;
+const MAX_PHOTOS = 9; // Backend enforces maximum 9 photos
 const GRID_SLOTS = 8; // Additional photos grid slots (indices 1-8)
 const MIN_PHOTOS_REQUIRED = 2; // Must have at least 2 photos to continue
 
@@ -88,7 +93,7 @@ async function persistPhoto(cacheUri: string): Promise<string> {
 }
 
 export default function AdditionalPhotosScreen() {
-  const { photos, setPhotoAtIndex, removePhoto, setStep, displayPhotoVariant, setDisplayPhotoVariant, bio, setBio, clearAllPhotos } = useOnboardingStore();
+  const { photos, setPhotoAtIndex, removePhoto, setStep, displayPhotoVariant, setDisplayPhotoVariant, bio, setBio, clearAllPhotos, verificationReferencePrimary } = useOnboardingStore();
   const { userId } = useAuthStore();
   const demoHydrated = useDemoStore((s) => s._hasHydrated);
   const demoProfile = useDemoStore((s) =>
@@ -97,8 +102,30 @@ export default function AdditionalPhotosScreen() {
   const router = useRouter();
   const params = useLocalSearchParams<{ editFromReview?: string }>();
 
+  // BUG FIX: Query backend to get reference photo URL if we only have storageId
+  const userQuery = useQuery(
+    api.users.getCurrentUser,
+    !isDemoMode && userId ? { userId: userId as Id<'users'> } : 'skip'
+  );
+
+  // Backend mutations
+  const deletePhotoMutation = useMutation(api.photos.deletePhoto);
+
+  // Query backend photos for deletion (get photoIds)
+  const backendPhotos = useQuery(
+    api.photos.getUserPhotos,
+    !isDemoMode && userId ? { userId: userId as Id<'users'> } : 'skip'
+  );
+
   // CENTRAL EDIT HUB: Detect if editing from Review screen
   const isEditFromReview = params.editFromReview === 'true';
+
+  // Debug log: Photo limit
+  React.useEffect(() => {
+    if (__DEV__) {
+      console.log('[PHOTO_LIMIT] MAX_PHOTOS', MAX_PHOTOS);
+    }
+  }, []);
 
   // Full-screen viewer state
   const [viewerOpen, setViewerOpen] = useState(false);
@@ -158,6 +185,32 @@ export default function AdditionalPhotosScreen() {
     console.log('[PHOTOS] prefilled bio from demoProfile');
   }, [demoHydrated, demoProfile, bio, bioDirty, setBio]);
 
+  // LIVE MODE: Sync photos from backend on mount to ensure local store is up-to-date
+  // This ensures photos uploaded in earlier screens are available here
+  const didSyncPhotos = React.useRef(false);
+  useEffect(() => {
+    if (didSyncPhotos.current || isDemoMode || !userId) return;
+    didSyncPhotos.current = true;
+
+    if (__DEV__) {
+      console.log('[PHOTOS] Syncing photos from backend on mount...');
+    }
+
+    syncPhotosFromBackend(userId, false)
+      .then((result) => {
+        if (result.success) {
+          if (__DEV__) {
+            console.log(`[PHOTOS] Sync complete: ${result.photosCount} photos loaded from backend`);
+          }
+        } else {
+          console.warn('[PHOTOS] Sync failed:', result.message);
+        }
+      })
+      .catch((error) => {
+        console.error('[PHOTOS] Sync error:', error);
+      });
+  }, [userId]);
+
   // Per-slot render nonce to force re-render on photo change
   const [slotNonce, setSlotNonce] = useState<number[]>(Array(TOTAL_SLOTS).fill(0));
 
@@ -166,6 +219,10 @@ export default function AdditionalPhotosScreen() {
 
   // TASK 2: File existence state - track which photo files actually exist on filesystem
   const [slotFileState, setSlotFileState] = useState<PhotoFileState[]>(Array(TOTAL_SLOTS).fill('empty'));
+
+  // Upload state tracking: 'idle' | 'uploading' | 'uploaded' | 'failed'
+  type UploadState = 'idle' | 'uploading' | 'uploaded' | 'failed';
+  const [uploadStateByIndex, setUploadStateByIndex] = useState<Record<number, UploadState>>({});
 
   const bumpSlot = (i: number) => {
     setSlotNonce((prev) => {
@@ -181,6 +238,13 @@ export default function AdditionalPhotosScreen() {
       next[i] = v;
       return next;
     });
+  };
+
+  const setUploadState = (index: number, state: UploadState) => {
+    setUploadStateByIndex((prev) => ({ ...prev, [index]: state }));
+    if (__DEV__) {
+      console.log('[PHOTO_UPLOAD] slotStatus update', { index, state });
+    }
   };
 
   // TASK 2: Proactively check file existence for all photo slots
@@ -230,6 +294,19 @@ export default function AdditionalPhotosScreen() {
       return;
     }
 
+    // GATE: Check if we've reached the maximum photo limit
+    // Allow replacement of existing photos, but not adding beyond limit
+    const hasPhotoAtIndex = typeof photos[targetIndex] === 'string' && photos[targetIndex]!.length > 0;
+    if (!hasPhotoAtIndex && photoCount >= MAX_PHOTOS) {
+      Alert.alert(
+        'Maximum Photos Reached',
+        `You can upload up to ${MAX_PHOTOS} photos. Remove a photo first to add a new one.`,
+        [{ text: 'OK' }]
+      );
+      console.warn(`[PHOTO_GATE] Photo limit reached: ${photoCount}/${MAX_PHOTOS}`);
+      return;
+    }
+
     const result = await ImagePicker.launchImageLibraryAsync({
       mediaTypes: ['images' as const],
       allowsEditing: true, // Show crop screen
@@ -259,6 +336,8 @@ export default function AdditionalPhotosScreen() {
           if (!isDemoMode && userId) {
             if (__DEV__) console.log(`[PHOTO_LOCK] Uploading slot ${targetIndex} to Convex backend...`);
 
+            setUploadState(targetIndex, 'uploading');
+
             const uploadResult = await uploadPhotoToBackend(
               userId,
               persistentUri,
@@ -267,6 +346,7 @@ export default function AdditionalPhotosScreen() {
             );
 
             if (!uploadResult.success) {
+              setUploadState(targetIndex, 'failed');
               Alert.alert(
                 'Upload Failed',
                 'Failed to upload photo to server. Please try again.',
@@ -276,6 +356,7 @@ export default function AdditionalPhotosScreen() {
               return;
             }
 
+            setUploadState(targetIndex, 'uploaded');
             if (__DEV__) {
               console.log(`[PHOTO_LOCK] ✅ Photo uploaded to Convex: storageId=${uploadResult.storageId}`);
             }
@@ -305,6 +386,7 @@ export default function AdditionalPhotosScreen() {
 
           // HARD LOCK: Upload to Convex even on normalize failure
           if (!isDemoMode && userId) {
+            setUploadState(targetIndex, 'uploading');
             const uploadResult = await uploadPhotoToBackend(
               userId,
               persistentUri,
@@ -312,9 +394,11 @@ export default function AdditionalPhotosScreen() {
               targetIndex
             );
             if (!uploadResult.success) {
+              setUploadState(targetIndex, 'failed');
               Alert.alert('Upload Failed', 'Please try again.');
               return;
             }
+            setUploadState(targetIndex, 'uploaded');
           }
 
           setPhotoAtIndex(targetIndex, persistentUri);
@@ -366,6 +450,8 @@ export default function AdditionalPhotosScreen() {
           if (!isDemoMode && userId) {
             if (__DEV__) console.log(`[PHOTO_LOCK] Uploading camera photo slot ${targetIndex} to Convex...`);
 
+            setUploadState(targetIndex, 'uploading');
+
             const uploadResult = await uploadPhotoToBackend(
               userId,
               persistentUri,
@@ -374,11 +460,13 @@ export default function AdditionalPhotosScreen() {
             );
 
             if (!uploadResult.success) {
+              setUploadState(targetIndex, 'failed');
               Alert.alert('Upload Failed', 'Failed to upload photo to server. Please try again.');
               console.error('[PHOTO_LOCK] Camera photo upload failed:', uploadResult.message);
               return;
             }
 
+            setUploadState(targetIndex, 'uploaded');
             if (__DEV__) {
               console.log(`[PHOTO_LOCK] ✅ Camera photo uploaded: storageId=${uploadResult.storageId}`);
             }
@@ -407,11 +495,14 @@ export default function AdditionalPhotosScreen() {
 
           // HARD LOCK: Upload even on error
           if (!isDemoMode && userId) {
+            setUploadState(targetIndex, 'uploading');
             const uploadResult = await uploadPhotoToBackend(userId, persistentUri, targetIndex === 0, targetIndex);
             if (!uploadResult.success) {
+              setUploadState(targetIndex, 'failed');
               Alert.alert('Upload Failed', 'Please try again.');
               return;
             }
+            setUploadState(targetIndex, 'uploaded');
           }
 
           setPhotoAtIndex(targetIndex, persistentUri);
@@ -469,7 +560,7 @@ export default function AdditionalPhotosScreen() {
     }
   };
 
-  // Handle tap on a photo tile (for grid slots 1-6)
+  // Handle tap on a photo tile (for grid slots 1-8)
   const handlePhotoPress = (index: number) => {
     const photo = photos[index];
     if (typeof photo === 'string' && photo.length > 0) {
@@ -493,6 +584,12 @@ export default function AdditionalPhotosScreen() {
   // Handle remove from viewer
   const handleRemove = () => {
     if (viewerIndex !== null) {
+      const indexToRemove = viewerIndex;
+
+      if (__DEV__) {
+        console.log('[PHOTOS_UI] removePressed', { index: indexToRemove });
+      }
+
       Alert.alert(
         'Remove Photo?',
         'Are you sure you want to remove this photo?',
@@ -501,10 +598,50 @@ export default function AdditionalPhotosScreen() {
           {
             text: 'Remove',
             style: 'destructive',
-            onPress: () => {
-              removePhoto(viewerIndex);
-              setViewerOpen(false);
-              setViewerIndex(null);
+            onPress: async () => {
+              try {
+                // Remove from backend if not in demo mode
+                if (!isDemoMode && userId && backendPhotos) {
+                  // Find the backend photo at this order/index
+                  const photoToDelete = backendPhotos.find((p) => p.order === indexToRemove);
+
+                  if (photoToDelete) {
+                    if (__DEV__) {
+                      console.log('[PHOTOS_UI] Deleting photo from backend:', {
+                        photoId: photoToDelete._id,
+                        order: indexToRemove,
+                      });
+                    }
+
+                    await deletePhotoMutation({
+                      userId: userId as Id<'users'>,
+                      photoId: photoToDelete._id,
+                    });
+
+                    // Sync photos from backend to refresh UI
+                    if (__DEV__) {
+                      console.log('[PHOTOS_UI] Syncing photos after deletion...');
+                    }
+                    await syncPhotosFromBackend(userId, false);
+
+                    if (__DEV__) {
+                      console.log('[PHOTOS_UI] removeSuccess', { index: indexToRemove });
+                    }
+                  } else {
+                    console.warn('[PHOTOS_UI] Photo not found in backend at index:', indexToRemove);
+                  }
+                }
+
+                // Remove from local store (demo mode or as fallback)
+                removePhoto(indexToRemove);
+
+                // Close viewer
+                setViewerOpen(false);
+                setViewerIndex(null);
+              } catch (error) {
+                console.error('[PHOTOS_UI] Remove failed:', error);
+                Alert.alert('Error', 'Failed to remove photo. Please try again.');
+              }
             },
           },
         ]
@@ -543,10 +680,91 @@ export default function AdditionalPhotosScreen() {
   };
 
   const handleNext = () => {
+    // Check upload state gates
+    const uploadingCount = Object.values(uploadStateByIndex).filter(state => state === 'uploading').length;
+    const failedCount = Object.values(uploadStateByIndex).filter(state => state === 'failed').length;
+
+    if (__DEV__) {
+      console.log('[PHOTO_UPLOAD] stateGate', { uploadingCount, failedCount });
+    }
+
+    // Gate 1: Uploading in progress
+    if (!isDemoMode && uploadingCount > 0) {
+      Alert.alert(
+        'Uploading Photos',
+        'Still uploading photos to server. Please wait...',
+        [{ text: 'OK' }]
+      );
+      return;
+    }
+
+    // Gate 2: Failed uploads
+    if (!isDemoMode && failedCount > 0) {
+      Alert.alert(
+        'Upload Failed',
+        'Some photos failed to upload. Tap them to retry.',
+        [{ text: 'OK' }]
+      );
+      return;
+    }
+
+    // Gate 3: Backend truth check - ensure backend count matches local count
+    if (!isDemoMode && backendPhotos !== undefined) {
+      const localFilledCount = photos.filter(p => typeof p === 'string' && p.length > 0).length;
+      const backendNormalCount = backendPhotos.length;
+
+      if (__DEV__) {
+        console.log('[PHOTO_UPLOAD] backendGate', { localFilledCount, backendNormalCount });
+      }
+
+      if (backendNormalCount < localFilledCount) {
+        Alert.alert(
+          'Syncing Photos',
+          'Still syncing uploads. Please wait a moment.',
+          [{ text: 'OK' }]
+        );
+        return;
+      }
+    }
+
+    // DEBUG: Log state before validation
+    if (__DEV__) {
+      console.log('[PHOTO_GATE] Continue pressed', {
+        photoCount,
+        photos: photos.map((p, i) => `[${i}]: ${p ? 'exists' : 'null'}`),
+        MIN_PHOTOS_REQUIRED,
+      });
+    }
+
     // Gate: minimum 2 photos required
-    if (photoCount < MIN_PHOTOS_REQUIRED) {
+    // BUG FIX: Account for reference photo in effective count (matches backend logic)
+    // effectivePhotoCount = normal photos + reference photo (if exists)
+    const effectivePhotoCount = photoCount + (hasReferencePhoto ? 1 : 0);
+
+    if (effectivePhotoCount < MIN_PHOTOS_REQUIRED) {
+      console.warn(`[PHOTO_GATE] Blocked: effectivePhotoCount=${effectivePhotoCount} < MIN_PHOTOS_REQUIRED=${MIN_PHOTOS_REQUIRED}`);
+      console.warn('[PHOTO_GATE] Photo breakdown:', { normalPhotoCount: photoCount, hasReferencePhoto, effectivePhotoCount });
       setShowPhotoWarning(true);
       return;
+    }
+
+    // BUG FIX: Log when reference photo allows bypass of "Photo Required" warning
+    if (hasReferencePhoto && photoCount < MIN_PHOTOS_REQUIRED) {
+      if (__DEV__) {
+        console.log('[PHOTO_REQUIRED_BLOCKED] referenceExists=true, bypassing normal photo requirement', {
+          normalPhotoCount: photoCount,
+          hasReferencePhoto,
+          effectivePhotoCount,
+          note: 'Reference photo counts toward MIN_PHOTOS_REQUIRED',
+        });
+      }
+    }
+
+    if (__DEV__) {
+      console.log(`[PHOTO_GATE] Passed: effectivePhotoCount=${effectivePhotoCount} >= MIN_PHOTOS_REQUIRED=${MIN_PHOTOS_REQUIRED}`, {
+        normalPhotos: photoCount,
+        referencePhoto: hasReferencePhoto ? 1 : 0,
+      });
     }
 
     // Gate: bio is mandatory
@@ -579,14 +797,35 @@ export default function AdditionalPhotosScreen() {
     }
 
     // Skip bio screen - go directly to permissions
-    if (__DEV__) console.log('[ONB] additional-photos → permissions (continue)');
+    // CRITICAL: Navigation MUST happen unconditionally after validation passes
+    if (__DEV__) {
+      console.log('[PHOTO_GATE] All validations passed. Navigating to permissions...');
+      console.log('[ONB] additional-photos → permissions (continue)');
+    }
     setStep('permissions');
     router.push('/(onboarding)/permissions');
   };
 
-  // Render additional photos grid (indices 1-6 only, primary is shown separately)
+  // Render additional photos grid (indices 1-8 only, primary is shown separately)
   const renderPhotoGrid = () => {
     const grid = [];
+
+    // Count filled additional slots (indices 1-8)
+    const filledAdditionalSlots = photos.slice(1, GRID_SLOTS + 1).filter(
+      (p) => typeof p === 'string' && p.length > 0
+    ).length;
+
+    // Log max check
+    if (__DEV__) {
+      console.log('[PHOTOS_UI] maxCheck', {
+        normalPhotoCount: photoCount,
+        atMax: photoCount >= MAX_PHOTOS,
+      });
+      console.log('[PHOTOS_UI] render additional slots', {
+        filled: filledAdditionalSlots,
+        totalAdditionalSlots: GRID_SLOTS,
+      });
+    }
 
     // Start from index 1 (skip primary photo which is shown in circle)
     for (let i = 1; i <= GRID_SLOTS; i++) {
@@ -597,8 +836,15 @@ export default function AdditionalPhotosScreen() {
       const showPhoto = hasPhoto && fileState === 'exists' && !slotError[i];
       const isMissing = hasPhoto && (fileState === 'missing' || fileState === 'invalid');
 
-      // Determine press behavior
-      const handlePress = showPhoto
+      // Upload state for this slot
+      const uploadState = uploadStateByIndex[i] || 'idle';
+      const isUploading = uploadState === 'uploading';
+      const isFailed = uploadState === 'failed';
+
+      // Determine press behavior - allow retry on failed
+      const handlePress = isFailed
+        ? () => pickImageForIndex(i) // Retry upload
+        : showPhoto
         ? () => handlePhotoPress(i)
         : () => pickImageForIndex(i);
 
@@ -640,6 +886,27 @@ export default function AdditionalPhotosScreen() {
                   />
                 );
               })()}
+
+              {/* Upload State Overlay */}
+              {(isUploading || isFailed) && (
+                <View style={styles.uploadStateOverlay}>
+                  <View style={styles.uploadStateContent}>
+                    {isUploading && (
+                      <>
+                        <Ionicons name="cloud-upload" size={16} color={COLORS.white} />
+                        <Text style={styles.uploadStateText}>Uploading...</Text>
+                      </>
+                    )}
+                    {isFailed && (
+                      <>
+                        <Ionicons name="alert-circle" size={16} color={COLORS.error} />
+                        <Text style={styles.uploadStateTextFailed}>Failed • Tap to retry</Text>
+                      </>
+                    )}
+                  </View>
+                </View>
+              )}
+
               <View style={styles.photoOverlay}>
                 <Ionicons name="expand-outline" size={14} color={COLORS.white} />
               </View>
@@ -674,11 +941,44 @@ export default function AdditionalPhotosScreen() {
     },
   ];
 
-  const primaryPhoto = photos[0];
-  const primaryFileState = slotFileState[0] || 'empty';
-  const hasPrimaryPhoto = typeof primaryPhoto === 'string' && primaryPhoto.length > 0;
-  const primaryPhotoExists = hasPrimaryPhoto && primaryFileState === 'exists';
-  const primaryPhotoMissing = hasPrimaryPhoto && (primaryFileState === 'missing' || primaryFileState === 'invalid');
+  // BUG FIX: Primary photo source priority:
+  // 1) Normal photo in photos[0] (if user explicitly uploaded one), else
+  // 2) Verification reference photo (from face verification), else
+  // 3) Empty placeholder
+  const referencePhotoUrl = userQuery?.verificationReferencePhotoUrl || verificationReferencePrimary?.url || '';
+  const hasReferencePhotoUrl = referencePhotoUrl.length > 0;
+  const hasReferencePhotoId = !!verificationReferencePrimary || !!userQuery?.verificationReferencePhotoId;
+  // Only consider reference photo valid if we have a URL to display
+  const hasReferencePhoto = hasReferencePhotoUrl;
+
+  const normalPrimaryPhoto = photos[0];
+  const normalPrimaryFileState = slotFileState[0] || 'empty';
+  const hasNormalPrimary = typeof normalPrimaryPhoto === 'string' && normalPrimaryPhoto.length > 0;
+  const normalPrimaryExists = hasNormalPrimary && normalPrimaryFileState === 'exists';
+
+  // Determine which photo to use as primary
+  const primaryPhoto = hasNormalPrimary ? normalPrimaryPhoto : (hasReferencePhoto ? referencePhotoUrl : null);
+  const hasPrimaryPhoto = hasNormalPrimary || hasReferencePhoto;
+  const primaryPhotoExists = normalPrimaryExists || hasReferencePhoto;
+  const primaryPhotoMissing = hasNormalPrimary && (normalPrimaryFileState === 'missing' || normalPrimaryFileState === 'invalid');
+  const primarySource = hasNormalPrimary ? 'normal' : (hasReferencePhoto ? 'reference' : 'none');
+
+  // Upload state for primary photo (only relevant for normal photos)
+  const primaryUploadState = uploadStateByIndex[0] || 'idle';
+  const primaryIsUploading = primaryUploadState === 'uploading';
+  const primaryIsFailed = primaryUploadState === 'failed';
+
+  // Log primary photo source for debugging
+  React.useEffect(() => {
+    if (__DEV__) {
+      console.log('[PHOTO_UI_PRIMARY]', {
+        source: primarySource,
+        hasNormalPrimary,
+        hasReferencePhoto,
+        primaryPhotoExists,
+      });
+    }
+  }, [primarySource, hasNormalPrimary, hasReferencePhoto, primaryPhotoExists]);
 
   return (
     <SafeAreaView style={styles.safeArea} edges={['top', 'left', 'right']}>
@@ -686,22 +986,43 @@ export default function AdditionalPhotosScreen() {
       <ScrollView style={styles.scrollView} contentContainerStyle={styles.scrollContent}>
         {/* Header */}
         <Text style={styles.title}>Your Photos</Text>
-        <Text style={styles.subtitle}>Add up to {TOTAL_SLOTS} photos to show more of yourself.</Text>
+        <Text style={styles.subtitle}>Add up to {MAX_PHOTOS} photos to show more of yourself.</Text>
 
         {/* Primary Photo Circle */}
         <View style={styles.primarySection}>
           <TouchableOpacity
             style={styles.primaryCircle}
-            onPress={handlePrimaryPhotoPress}
+            onPress={primaryIsFailed ? () => pickImageForIndex(0) : handlePrimaryPhotoPress}
             activeOpacity={0.8}
           >
             {primaryPhotoExists && !slotError[0] ? (
-              <Image
-                source={{ uri: primaryPhoto }}
-                style={styles.primaryImage}
-                contentFit="cover"
-                blurRadius={displayPhotoVariant === 'blurred' ? 15 : 0}
-              />
+              <>
+                <Image
+                  source={{ uri: primaryPhoto ?? undefined }}
+                  style={styles.primaryImage}
+                  contentFit="cover"
+                  blurRadius={displayPhotoVariant === 'blurred' ? 15 : 0}
+                />
+                {/* Upload State Overlay for Primary Photo */}
+                {(primaryIsUploading || primaryIsFailed) && (
+                  <View style={[styles.uploadStateOverlay, styles.primaryUploadOverlay]}>
+                    <View style={styles.uploadStateContent}>
+                      {primaryIsUploading && (
+                        <>
+                          <Ionicons name="cloud-upload" size={20} color={COLORS.white} />
+                          <Text style={styles.uploadStateText}>Uploading...</Text>
+                        </>
+                      )}
+                      {primaryIsFailed && (
+                        <>
+                          <Ionicons name="alert-circle" size={20} color={COLORS.error} />
+                          <Text style={styles.uploadStateTextFailed}>Failed • Tap to retry</Text>
+                        </>
+                      )}
+                    </View>
+                  </View>
+                )}
+              </>
             ) : primaryPhotoMissing ? (
               <View style={styles.primaryPlaceholder}>
                 <Ionicons name="alert-circle" size={32} color={COLORS.error} />
@@ -822,6 +1143,15 @@ export default function AdditionalPhotosScreen() {
         {/* Additional Photos Grid */}
         <View style={styles.gridSection}>
           <Text style={styles.sectionTitle}>Additional Photos</Text>
+          {photoCount >= MAX_PHOTOS ? (
+            <Text style={styles.photoHelperTextMax}>
+              Maximum reached ({photoCount}/{MAX_PHOTOS}). Remove one to add.
+            </Text>
+          ) : (
+            <Text style={styles.photoHelperText}>
+              You can add up to {MAX_PHOTOS} photos (1 primary + {GRID_SLOTS} additional).
+            </Text>
+          )}
           <View style={styles.photoGrid}>{renderPhotoGrid()}</View>
         </View>
 
@@ -1073,6 +1403,19 @@ const styles = StyleSheet.create({
   gridSection: {
     marginBottom: 16,
   },
+  photoHelperText: {
+    fontSize: 11,
+    color: COLORS.textLight,
+    marginBottom: 8,
+    lineHeight: 14,
+  },
+  photoHelperTextMax: {
+    fontSize: 11,
+    color: COLORS.error,
+    marginBottom: 8,
+    lineHeight: 14,
+    fontWeight: '500',
+  },
   photoGrid: {
     flexDirection: 'row',
     flexWrap: 'wrap',
@@ -1092,6 +1435,35 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(0,0,0,0.5)',
     borderRadius: 6,
     padding: 2,
+  },
+  uploadStateOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: 'rgba(0,0,0,0.75)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  uploadStateContent: {
+    alignItems: 'center',
+    gap: 4,
+  },
+  uploadStateText: {
+    fontSize: 10,
+    color: COLORS.white,
+    fontWeight: '600',
+    textAlign: 'center',
+  },
+  uploadStateTextFailed: {
+    fontSize: 10,
+    color: COLORS.error,
+    fontWeight: '600',
+    textAlign: 'center',
+  },
+  primaryUploadOverlay: {
+    borderRadius: PRIMARY_CIRCLE_SIZE / 2,
   },
   addPhotoButton: {
     borderWidth: 1.5,

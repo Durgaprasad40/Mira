@@ -1,6 +1,4 @@
 import { create } from "zustand";
-import { persist, createJSONStorage } from "zustand/middleware";
-import AsyncStorage from "@react-native-async-storage/async-storage";
 import {
   OnboardingStep,
   Gender,
@@ -18,6 +16,13 @@ import {
   createEmptyPhotoSlots,
 } from "@/types";
 import { logPhotoRemoved, logPhotosCleared } from "@/lib/photoSafety";
+
+// STORAGE POLICY ENFORCEMENT:
+// This store contains ALL user onboarding data (email, phone, password, profile, photos, preferences).
+// Per strict requirement: NO local persistence of user information.
+// All onboarding state is ephemeral (in-memory only) and must be rehydrated from Convex on app boot.
+// Convex is the ONLY source of truth.
+// Photos: Local file URIs are temporary upload buffers only. UI renders from Convex storage URLs.
 
 // Display photo privacy variant
 export type DisplayPhotoVariant = 'original' | 'blurred' | 'cartoon';
@@ -66,9 +71,6 @@ function normalizePhotos(input: unknown): PhotoSlots9 {
   return result;
 }
 
-// OB-1: Hydration timing for timeout fallback
-const ONBOARDING_STORE_LOAD_TIME = Date.now();
-
 // LGBTQ identity options (max 2 selections)
 export type LgbtqOption = 'gay' | 'lesbian' | 'bisexual' | 'transgender' | 'prefer_not_to_say';
 
@@ -103,6 +105,15 @@ interface OnboardingState {
   // ════════════════════════════════════════════════════════════════════════
   photos: PhotoSlots9; // LOCAL CACHE ONLY - Convex backend is source of truth
   verificationPhotoUri: string | null; // LOCAL CACHE ONLY - Convex backend is source of truth
+
+  // BUG FIX: Reference photo as primary display photo
+  // This is separate from photos[0] to prevent normal photo sync from clearing it
+  // When referencePhotoExists=true, this becomes the primary photo displayed in the big circle
+  verificationReferencePrimary: {
+    storageId: string;
+    url: string;
+  } | null;
+
   displayPhotoVariant: DisplayPhotoVariant; // Privacy option: original, blurred, or cartoon
   bio: string;
   profilePrompts: { question: string; answer: string }[];
@@ -145,6 +156,7 @@ interface OnboardingState {
   removePhoto: (index: number) => void;
   reorderPhotos: (photos: PhotoSlots9) => void;
   setVerificationPhoto: (uri: string | null) => void;
+  setVerificationReferencePrimary: (data: { storageId: string; url: string } | null) => void;
   setDisplayPhotoVariant: (variant: DisplayPhotoVariant) => void;
   setBio: (bio: string) => void;
   setProfilePrompts: (prompts: { question: string; answer: string }[]) => void;
@@ -174,6 +186,7 @@ interface OnboardingState {
   setMaxDistance: (distance: number) => void;
   reset: () => void;
   clearAllPhotos: () => void; // DEV: Clear all photos for re-selection
+  hydrateFromDraft: (draft: any) => void; // Hydrate from Convex onboarding draft
 
   // OB-1: Hydration state for startup safety
   _hasHydrated: boolean;
@@ -193,6 +206,7 @@ const initialState = {
   lgbtqPreference: [] as LgbtqOption[],
   photos: createEmptyPhotoSlots(),
   verificationPhotoUri: null,
+  verificationReferencePrimary: null,
   displayPhotoVariant: 'original' as DisplayPhotoVariant,
   bio: "",
   profilePrompts: [],
@@ -218,13 +232,15 @@ const initialState = {
   maxDistance: 50,
 };
 
-export const useOnboardingStore = create<OnboardingState>()(
-  persist(
-    (set) => ({
-      ...initialState,
-      _hasHydrated: false,
+// NO PERSISTENCE: This is an in-memory store only.
+// Onboarding data is rehydrated from Convex queries on app boot.
+export const useOnboardingStore = create<OnboardingState>()((set) => ({
+  ...initialState,
+  // Always true since there's no async hydration from AsyncStorage
+  _hasHydrated: true,
 
-      setHasHydrated: (state) => set({ _hasHydrated: state }),
+  // No-op for compatibility
+  setHasHydrated: (state) => set({ _hasHydrated: true }),
 
       setStep: (step) => set({ currentStep: step }),
 
@@ -319,6 +335,17 @@ export const useOnboardingStore = create<OnboardingState>()(
 
       setVerificationPhoto: (uri) => set({ verificationPhotoUri: uri }),
 
+      setVerificationReferencePrimary: (data) => {
+        if (__DEV__) {
+          console.log('[REF_PRIMARY] Setting verification reference primary:', {
+            exists: !!data,
+            hasUrl: !!data?.url,
+            hasStorageId: !!data?.storageId,
+          });
+        }
+        set({ verificationReferencePrimary: data });
+      },
+
       setDisplayPhotoVariant: (displayPhotoVariant) => set({ displayPhotoVariant }),
 
       setBio: (bio) => set({ bio }),
@@ -400,6 +427,117 @@ export const useOnboardingStore = create<OnboardingState>()(
 
       setMaxDistance: (maxDistance) => set({ maxDistance }),
 
+      /**
+       * Hydrate from Convex onboarding draft (live mode only).
+       * Called on app startup to restore incomplete onboarding progress.
+       * Does NOT overwrite fields already set in current session.
+       */
+      hydrateFromDraft: (draft) => {
+        if (!draft) return;
+
+        const state = useOnboardingStore.getState();
+        const updates: Partial<OnboardingState> = {};
+
+        // Basic Info
+        if (draft.basicInfo) {
+          if (draft.basicInfo.name && !state.name) {
+            updates.name = draft.basicInfo.name;
+          }
+          if (draft.basicInfo.handle && !state.nickname) {
+            updates.nickname = draft.basicInfo.handle;
+          }
+          if (draft.basicInfo.dateOfBirth && !state.dateOfBirth) {
+            updates.dateOfBirth = draft.basicInfo.dateOfBirth;
+          }
+          if (draft.basicInfo.gender && !state.gender) {
+            updates.gender = draft.basicInfo.gender;
+          }
+        }
+
+        // Profile Details
+        if (draft.profileDetails) {
+          if (draft.profileDetails.height !== undefined && !state.height) {
+            updates.height = draft.profileDetails.height;
+          }
+          if (draft.profileDetails.weight !== undefined && !state.weight) {
+            updates.weight = draft.profileDetails.weight;
+          }
+          if (draft.profileDetails.jobTitle && !state.jobTitle) {
+            updates.jobTitle = draft.profileDetails.jobTitle;
+          }
+          if (draft.profileDetails.company && !state.company) {
+            updates.company = draft.profileDetails.company;
+          }
+          if (draft.profileDetails.school && !state.school) {
+            updates.school = draft.profileDetails.school;
+          }
+          if (draft.profileDetails.education && !state.education) {
+            updates.education = draft.profileDetails.education;
+          }
+          if (draft.profileDetails.bio && !state.bio) {
+            updates.bio = draft.profileDetails.bio;
+          }
+          if (draft.profileDetails.profilePrompts && state.profilePrompts.length === 0) {
+            updates.profilePrompts = draft.profileDetails.profilePrompts;
+          }
+        }
+
+        // Lifestyle
+        if (draft.lifestyle) {
+          if (draft.lifestyle.smoking && !state.smoking) {
+            updates.smoking = draft.lifestyle.smoking;
+          }
+          if (draft.lifestyle.drinking && !state.drinking) {
+            updates.drinking = draft.lifestyle.drinking;
+          }
+          if (draft.lifestyle.exercise && !state.exercise) {
+            updates.exercise = draft.lifestyle.exercise;
+          }
+          if (draft.lifestyle.pets && state.pets.length === 0) {
+            updates.pets = draft.lifestyle.pets;
+          }
+          if (draft.lifestyle.insect && !state.insect) {
+            updates.insect = draft.lifestyle.insect;
+          }
+          if (draft.lifestyle.kids && !state.kids) {
+            updates.kids = draft.lifestyle.kids;
+          }
+          if (draft.lifestyle.religion && !state.religion) {
+            updates.religion = draft.lifestyle.religion;
+          }
+        }
+
+        // Preferences
+        if (draft.preferences) {
+          if (draft.preferences.lookingFor && state.lookingFor.length === 0) {
+            updates.lookingFor = draft.preferences.lookingFor;
+          }
+          if (draft.preferences.relationshipIntent && state.relationshipIntent.length === 0) {
+            updates.relationshipIntent = draft.preferences.relationshipIntent;
+          }
+          if (draft.preferences.activities && state.activities.length === 0) {
+            updates.activities = draft.preferences.activities;
+          }
+          if (draft.preferences.minAge !== undefined && state.minAge === 18) {
+            updates.minAge = draft.preferences.minAge;
+          }
+          if (draft.preferences.maxAge !== undefined && state.maxAge === 50) {
+            updates.maxAge = draft.preferences.maxAge;
+          }
+          if (draft.preferences.maxDistance !== undefined && state.maxDistance === 50) {
+            updates.maxDistance = draft.preferences.maxDistance;
+          }
+        }
+
+        // Apply updates if any
+        if (Object.keys(updates).length > 0) {
+          if (__DEV__) {
+            console.log('[ONB_DRAFT] Hydrated from Convex draft:', Object.keys(updates));
+          }
+          set(updates);
+        }
+      },
+
       reset: () => {
         const currentPhotos = useOnboardingStore.getState().photos;
         const photoCount = currentPhotos.filter((p) => p !== null && p !== '').length;
@@ -425,60 +563,6 @@ export const useOnboardingStore = create<OnboardingState>()(
           verificationPhotoUri: null,
         });
       },
-    }),
-    {
-      name: "onboarding-storage",
-      storage: createJSONStorage(() => AsyncStorage),
-      // OB-1: Set hydration flag when store rehydrates from AsyncStorage
-      onRehydrateStorage: () => (state, error) => {
-        if (error) {
-          console.error('[onboardingStore] Rehydration error:', error);
-        }
-        if (__DEV__) {
-          const hydrationTime = Date.now() - ONBOARDING_STORE_LOAD_TIME;
-          console.log(`[HYDRATION] onboardingStore: ${hydrationTime}ms`);
-        }
-        // ✅ PRODUCTION-SAFE: Normalize photos array WITHOUT deleting data
-        // normalizePhotos NOW keeps all URIs - only ensures length 9 and type safety
-        // DO NOT DELETE PROFILE PHOTOS DURING HYDRATION - CRITICAL DATA SAFETY
-        if (state) {
-          const rawPhotos = state.photos;
-          const normalized = normalizePhotos(rawPhotos);
+}));
 
-          // Safe logging (no deletion) - flag potential issues for monitoring only
-          const rawCount = Array.isArray(rawPhotos) ? rawPhotos.filter(Boolean).length : 0;
-          const normalizedCount = normalized.filter(Boolean).length;
-          if (__DEV__ && rawCount !== normalizedCount) {
-            console.log('[onboardingStore] Photo array normalized:', { before: rawCount, after: normalizedCount });
-          }
-
-          useOnboardingStore.setState({ photos: normalized });
-        }
-        state?.setHasHydrated(true);
-      },
-    },
-  ),
-);
-
-// OB-1: Hydration timeout fallback (matches authStore/demoStore/blockStore pattern)
-const HYDRATION_TIMEOUT_MS = 5000;
-let _onboardingHydrationTimeoutId: ReturnType<typeof setTimeout> | null = null;
-
-function setupOnboardingHydrationTimeout() {
-  // Clear any existing timeout (hot reload safety)
-  if (_onboardingHydrationTimeoutId !== null) {
-    clearTimeout(_onboardingHydrationTimeoutId);
-  }
-  _onboardingHydrationTimeoutId = setTimeout(() => {
-    if (!useOnboardingStore.getState()._hasHydrated) {
-      if (__DEV__) {
-        console.warn('[onboardingStore] Hydration timeout — forcing hydrated state');
-      }
-      useOnboardingStore.getState().setHasHydrated(true);
-    }
-    _onboardingHydrationTimeoutId = null;
-  }, HYDRATION_TIMEOUT_MS);
-}
-
-// OB-1 fix: hydration timeout fallback — if AsyncStorage blocks, force hydration after timeout
-setupOnboardingHydrationTimeout();
+// No hydration timeout needed - store is always immediately ready

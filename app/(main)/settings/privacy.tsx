@@ -4,11 +4,7 @@ import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { COLORS } from '@/lib/constants';
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import { usePrivacyStore } from '@/stores/privacyStore';
-
-// Key for tracking if user has seen the hide-from-discover warning
-const HIDE_DISCOVER_WARNING_KEY = 'mira:privacy:hideDiscoverWarningShown';
 
 export default function PrivacySettingsScreen() {
   const router = useRouter();
@@ -24,45 +20,35 @@ export default function PrivacySettingsScreen() {
   const setHideDistance = usePrivacyStore((s) => s.setHideDistance);
   const setDisableReadReceipts = usePrivacyStore((s) => s.setDisableReadReceipts);
 
-  // Track if warning has been shown this session (to avoid checking storage every toggle)
+  // Track if warning has been shown this session (session-only, no persistence needed)
   const [warningShownThisSession, setWarningShownThisSession] = useState(false);
 
-  // Handle "Hide from Discover" toggle with one-time warning
-  const handleHideFromDiscoverChange = useCallback(async (newValue: boolean) => {
+  // Handle "Hide from Discover" toggle with one-time warning (session-only)
+  const handleHideFromDiscoverChange = useCallback((newValue: boolean) => {
     if (newValue && !warningShownThisSession) {
-      // Check if user has ever seen the warning
-      try {
-        const hasSeenWarning = await AsyncStorage.getItem(HIDE_DISCOVER_WARNING_KEY);
-        if (!hasSeenWarning) {
-          // Show one-time warning
-          Alert.alert(
-            'Hide from Discover',
-            'While hidden from Discover, you won\'t get new matches. Existing matches can still chat with you.',
-            [
-              {
-                text: 'Cancel',
-                style: 'cancel',
-              },
-              {
-                text: 'I Understand',
-                onPress: async () => {
-                  // Mark warning as shown permanently
-                  await AsyncStorage.setItem(HIDE_DISCOVER_WARNING_KEY, 'true');
-                  setWarningShownThisSession(true);
-                  setHideFromDiscover(true);
-                },
-              },
-            ]
-          );
-          return; // Don't toggle yet, wait for user confirmation
-        }
-      } catch (error) {
-        // If storage fails, still allow the toggle
-        if (__DEV__) console.log('[Privacy] Failed to check warning status:', error);
-      }
+      // Show one-time warning (session-scoped, no AsyncStorage needed)
+      Alert.alert(
+        'Hide from Discover',
+        'While hidden from Discover, you won\'t get new matches. Existing matches can still chat with you.',
+        [
+          {
+            text: 'Cancel',
+            style: 'cancel',
+          },
+          {
+            text: 'I Understand',
+            onPress: () => {
+              // Mark warning as shown for this session only
+              setWarningShownThisSession(true);
+              setHideFromDiscover(true);
+            },
+          },
+        ]
+      );
+      return; // Don't toggle yet, wait for user confirmation
     }
     setHideFromDiscover(newValue);
-  }, [warningShownThisSession]);
+  }, [warningShownThisSession, setHideFromDiscover]);
 
   return (
     <SafeAreaView style={styles.container} edges={['top']}>

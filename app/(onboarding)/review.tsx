@@ -26,7 +26,7 @@ import {
 } from "@/lib/constants";
 import { Button } from "@/components/ui";
 import { useOnboardingStore, LGBTQ_OPTIONS } from "@/stores/onboardingStore";
-import { useMutation } from "convex/react";
+import { useMutation, useQuery } from "convex/react";
 import { api } from "@/convex/_generated/api";
 import { useAuthStore } from "@/stores/authStore";
 import { Ionicons } from "@expo/vector-icons";
@@ -83,28 +83,62 @@ export default function ReviewScreen() {
     setStep,
   } = useOnboardingStore();
   const router = useRouter();
-  const { userId, setOnboardingCompleted, faceVerificationPassed } = useAuthStore();
+  const { userId, setOnboardingCompleted, faceVerificationPassed, faceVerificationPending } = useAuthStore();
   const demoProfile = useDemoStore((s) => isDemoMode && userId ? s.demoProfiles[userId] : null);
 
+  // BUG FIX: Always query backend status as authoritative source + fallback
+  const onboardingStatus = useQuery(
+    api.users.getOnboardingStatus,
+    !isDemoMode && userId ? { userId } : 'skip'
+  );
+
+  // Fallback to backend data if store is empty
+  const displayName = name || onboardingStatus?.basicInfo?.name || demoProfile?.name || "Not set";
+  const displayNickname = nickname || onboardingStatus?.basicInfo?.nickname || demoProfile?.handle || "—";
+  const displayDateOfBirth = dateOfBirth || onboardingStatus?.basicInfo?.dateOfBirth || demoProfile?.dateOfBirth || "";
+  const displayGender = gender || onboardingStatus?.basicInfo?.gender || demoProfile?.gender || "";
+
+  // BUG FIX: Log data source for debugging
+  React.useEffect(() => {
+    if (__DEV__) {
+      console.log('[REVIEW] basic info values:', {
+        displayName,
+        displayNickname,
+        displayDateOfBirth,
+        displayGender,
+      });
+      console.log('[REVIEW] basic info sources:', {
+        name: name ? 'store' : (onboardingStatus?.basicInfo?.name ? 'backend' : 'none'),
+        nickname: nickname ? 'store' : (onboardingStatus?.basicInfo?.nickname ? 'backend' : 'none'),
+        dateOfBirth: dateOfBirth ? 'store' : (onboardingStatus?.basicInfo?.dateOfBirth ? 'backend' : 'none'),
+        gender: gender ? 'store' : (onboardingStatus?.basicInfo?.gender ? 'backend' : 'none'),
+      });
+    }
+  }, [name, nickname, dateOfBirth, gender, onboardingStatus, displayName, displayNickname, displayDateOfBirth, displayGender]);
+
   // CRITICAL: Check demoProfile.faceVerificationPassed for demo mode (persisted across logout)
+  // BUG FIX: Also accept faceVerificationPending (manual review) as valid to proceed
   const isVerified = isDemoMode
-    ? !!(demoProfile?.faceVerificationPassed || faceVerificationPassed)
-    : faceVerificationPassed;
+    ? !!(demoProfile?.faceVerificationPassed || faceVerificationPassed || faceVerificationPending)
+    : (faceVerificationPassed || faceVerificationPending);
 
   // CHECKPOINT GATE: Block access if face verification not completed
   React.useEffect(() => {
     if (isVerified) {
-      console.log("[REVIEW_GATE] verified=true -> allow");
+      if (__DEV__) {
+        console.log("[REVIEW_GATE] verified=true (passed or pending) -> allow");
+        console.log("[REVIEW_GATE] faceVerificationPassed:", faceVerificationPassed);
+        console.log("[REVIEW_GATE] faceVerificationPending:", faceVerificationPending);
+      }
       return;
     }
-    console.log("[REVIEW_GATE] verified=false -> block");
+    if (__DEV__) console.log("[REVIEW_GATE] verified=false -> redirect to face-verification");
     router.replace("/(onboarding)/face-verification" as any);
-  }, [isVerified, router]);
+  }, [isVerified, router, faceVerificationPassed, faceVerificationPending]);
   const [isSubmitting, setIsSubmitting] = React.useState(false);
   const [uploadProgress, setUploadProgress] = React.useState("");
 
   const completeOnboarding = useMutation(api.users.completeOnboarding);
-  const generateUploadUrl = useMutation(api.photos.generateUploadUrl);
 
   const calculateAge = (dob: string) => {
     const birthDate = parseDOBString(dob); // Use local parsing, not UTC
@@ -120,53 +154,15 @@ export default function ReviewScreen() {
     return age;
   };
 
-  // OB-9: Upload a single photo to Convex storage with retry logic
-  const MAX_UPLOAD_RETRIES = 2;
-
-  const uploadPhoto = async (uri: string): Promise<Id<"_storage"> | null> => {
-    let lastError: Error | null = null;
-
-    for (let attempt = 0; attempt <= MAX_UPLOAD_RETRIES; attempt++) {
-      try {
-        // Get upload URL from Convex
-        const uploadUrl = await generateUploadUrl();
-
-        // Fetch the image as blob
-        const response = await fetch(uri);
-        const blob = await response.blob();
-
-        // Upload to Convex storage
-        const uploadResponse = await fetch(uploadUrl, {
-          method: "POST",
-          headers: {
-            "Content-Type": blob.type || "image/jpeg",
-          },
-          body: blob,
-        });
-
-        if (!uploadResponse.ok) {
-          throw new Error(`Upload failed with status ${uploadResponse.status}`);
-        }
-
-        const result = await uploadResponse.json();
-        return result.storageId as Id<"_storage">;
-      } catch (error: any) {
-        lastError = error;
-        console.error(`Photo upload attempt ${attempt + 1} failed:`, error);
-        // Only retry if not the last attempt
-        if (attempt < MAX_UPLOAD_RETRIES) {
-          // Small delay before retry (exponential backoff)
-          await new Promise((resolve) => setTimeout(resolve, 1000 * (attempt + 1)));
-        }
-      }
+  const handleComplete = async () => {
+    if (__DEV__) {
+      console.log("[REVIEW] handleComplete called");
+      console.log("[REVIEW] userId:", userId);
+      console.log("[REVIEW] isSubmitting:", isSubmitting);
+      console.log("[REVIEW] faceVerificationPassed:", faceVerificationPassed);
+      console.log("[REVIEW] faceVerificationPending:", faceVerificationPending);
     }
 
-    // All retries failed
-    console.error("Photo upload failed after all retries:", lastError);
-    return null;
-  };
-
-  const handleComplete = async () => {
     if (!userId) {
       Alert.alert("Error", "User not authenticated");
       return;
@@ -227,66 +223,45 @@ export default function ReviewScreen() {
         return;
       }
 
-      // Live mode: upload photos + complete onboarding via Convex
-      const photoStorageIds: Id<"_storage">[] = [];
-      let failedUploads = 0;
-
-      // Filter out null slots for upload
-      const photosToUpload = photos.filter((p): p is string => p !== null && p !== '');
-
-      if (photosToUpload.length > 0) {
-        setUploadProgress("Uploading photos...");
-        for (let i = 0; i < photosToUpload.length; i++) {
-          setUploadProgress(`Uploading photo ${i + 1} of ${photosToUpload.length}...`);
-          const storageId = await uploadPhoto(photosToUpload[i]);
-          if (storageId) {
-            photoStorageIds.push(storageId);
-          } else {
-            failedUploads++;
-          }
-        }
-      }
-
-      // OB-9 fix: If any photos failed to upload, alert user and allow retry
-      if (failedUploads > 0) {
-        const uploadedCount = photoStorageIds.length;
-        const totalCount = photosToUpload.length;
-
-        // At least one photo is required for a profile
-        if (uploadedCount === 0) {
-          Alert.alert(
-            "Upload Failed",
-            "We couldn't upload your photos. Please check your internet connection and try again.",
-            [{ text: "OK" }]
-          );
-          return;
-        }
-
-        // Some photos uploaded but not all - let user decide
-        const proceed = await new Promise<boolean>((resolve) => {
-          Alert.alert(
-            "Some Photos Failed",
-            `${uploadedCount} of ${totalCount} photos uploaded successfully. Continue with uploaded photos or try again?`,
-            [
-              { text: "Try Again", onPress: () => resolve(false) },
-              { text: "Continue", onPress: () => resolve(true) },
-            ]
-          );
-        });
-
-        if (!proceed) {
-          return;
-        }
+      // Live mode: Photos are already uploaded in additional-photos screen
+      // Just get their storageIds from backend query
+      if (__DEV__) {
+        console.log('[REVIEW] pendingUploads', 0); // No uploads happen here
       }
 
       setUploadProgress("Saving profile...");
+
+      // BUG FIX: Build gender from reliable source with fallbacks
+      // Priority: 1) onboardingStore, 2) backend user.gender, 3) onboardingDraft
+      const payloadGender = gender || onboardingStatus?.basicInfo?.gender || '';
+
+      // CRITICAL: Block submission if gender is still missing
+      if (!payloadGender) {
+        console.error('[REVIEW_SUBMIT] ❌ BLOCKED: gender is null/empty', {
+          storeGender: gender,
+          backendGender: onboardingStatus?.basicInfo?.gender,
+          displayGender,
+        });
+        Alert.alert(
+          'Missing Information',
+          'Gender information is required. Please go back and complete your basic info.',
+          [{ text: 'OK' }]
+        );
+        setIsSubmitting(false);
+        return;
+      }
+
+      if (__DEV__) {
+        console.log('[REVIEW_SUBMIT] Payload gender:', payloadGender);
+        console.log('[REVIEW_SUBMIT] Gender source:', gender ? 'store' : 'backend');
+      }
 
       // Prepare onboarding data
       const onboardingData: any = {
         userId: userId as Id<"users">,
         name,
         dateOfBirth,
-        gender,
+        gender: payloadGender,
         bio,
         height: height || undefined,
         weight: weight || undefined,
@@ -308,8 +283,7 @@ export default function ReviewScreen() {
         minAge,
         maxAge,
         maxDistance,
-        photoStorageIds:
-          photoStorageIds.length > 0 ? photoStorageIds : undefined,
+        // photoStorageIds omitted - photos already uploaded in additional-photos screen
       };
 
       // Remove undefined values
@@ -318,6 +292,50 @@ export default function ReviewScreen() {
           delete onboardingData[key];
         }
       });
+
+      // Sanitize activities array before submission to prevent validation errors
+      if (onboardingData.activities && Array.isArray(onboardingData.activities)) {
+        const ALLOWED_ACTIVITIES = [
+          "coffee", "date_night", "sports", "movies", "free_tonight", "foodie",
+          "gym_partner", "concerts", "travel", "outdoors", "art_culture", "gaming",
+          "nightlife", "brunch", "study_date", "this_weekend", "beach_pool",
+          "road_trip", "photography", "volunteering"
+        ];
+
+        const before = [...onboardingData.activities];
+
+        // Transform and filter activities
+        const sanitized = onboardingData.activities
+          .map((activity: string) => {
+            // Map late_night_talks to nightlife
+            if (activity === "late_night_talks") return "nightlife";
+            return activity;
+          })
+          .filter((activity: string) => ALLOWED_ACTIVITIES.includes(activity));
+
+        // Deduplicate
+        const after = [...new Set(sanitized)];
+
+        onboardingData.activities = after;
+
+        if (__DEV__) {
+          console.log('[ONB_SANITIZE] activities before/after', { before, after });
+        }
+      }
+
+      // Debug log before mutation to verify all required fields
+      if (__DEV__) {
+        console.log('[REVIEW_SUBMIT] Final payload:', {
+          userId: onboardingData.userId,
+          name: onboardingData.name,
+          dateOfBirth: onboardingData.dateOfBirth,
+          gender: onboardingData.gender,
+          bio: onboardingData.bio?.substring(0, 50),
+          hasHeight: !!onboardingData.height,
+          hasWeight: !!onboardingData.weight,
+          activitiesCount: onboardingData.activities?.length || 0,
+        });
+      }
 
       // Submit all onboarding data to backend
       await completeOnboarding(onboardingData);
@@ -401,22 +419,22 @@ export default function ReviewScreen() {
         </View>
         <View style={styles.infoRow}>
           <Text style={styles.infoLabel}>Name:</Text>
-          <Text style={styles.infoValue}>{name || demoProfile?.name || "Not set"}</Text>
+          <Text style={styles.infoValue}>{displayName}</Text>
         </View>
         <View style={styles.infoRow}>
           <Text style={styles.infoLabel}>User ID:</Text>
-          <Text style={styles.infoValue}>@{nickname || demoProfile?.handle || "—"}</Text>
+          <Text style={styles.infoValue}>@{displayNickname}</Text>
         </View>
         <View style={styles.infoRow}>
           <Text style={styles.infoLabel}>Age:</Text>
           <Text style={styles.infoValue}>
-            {(dateOfBirth || demoProfile?.dateOfBirth) ? calculateAge(dateOfBirth || demoProfile?.dateOfBirth || "") : "N/A"}
+            {displayDateOfBirth ? calculateAge(displayDateOfBirth) : "N/A"}
           </Text>
         </View>
         <View style={styles.infoRow}>
           <Text style={styles.infoLabel}>Gender:</Text>
           <Text style={styles.infoValue}>
-            {(gender || demoProfile?.gender) ? GENDER_OPTIONS.find((g) => g.value === (gender || demoProfile?.gender))?.label : "Not set"}
+            {displayGender ? GENDER_OPTIONS.find((g) => g.value === displayGender)?.label : "Not set"}
           </Text>
         </View>
         <View style={styles.infoRow}>

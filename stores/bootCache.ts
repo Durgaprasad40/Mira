@@ -1,87 +1,48 @@
 /**
  * bootCache - Fast minimal data read for routing decisions
  *
- * Reads only the essential data needed for routing directly from AsyncStorage,
- * bypassing the full Zustand hydration which includes heavy data like profiles,
- * matches, crossedPaths, etc.
+ * STORAGE POLICY ENFORCEMENT:
+ * NO local persistence. Demo mode data is NOT persisted locally.
+ * Returns default empty state immediately.
  *
- * SAFETY:
- * - READ-ONLY: Never writes to AsyncStorage
- * - Does NOT modify any stores or user data
- * - Just provides fast access to minimal boot state
+ * Kept for compatibility with existing routing code, but no longer reads AsyncStorage.
  */
-import AsyncStorage from '@react-native-async-storage/async-storage';
 
 interface BootCacheData {
-  currentDemoUserId: string | null;
-  demoOnboardingComplete: Record<string, boolean>;
+  currentDemoUserId: null;
+  demoOnboardingComplete: Record<string, never>;
 }
 
-let _bootCache: BootCacheData | null = null;
-let _bootCachePromise: Promise<BootCacheData> | null = null;
+const DEFAULT_BOOT_CACHE: BootCacheData = {
+  currentDemoUserId: null,
+  demoOnboardingComplete: {},
+};
 
 /**
- * Read minimal boot data from AsyncStorage (fast, ~10-50ms)
- * Caches result so subsequent calls are instant.
+ * Returns default empty state immediately.
+ * No AsyncStorage read.
  */
 export async function getBootCache(): Promise<BootCacheData> {
-  // Return cached result if available
-  if (_bootCache) return _bootCache;
-
-  // Return pending promise if already loading
-  if (_bootCachePromise) return _bootCachePromise;
-
-  // Start loading
-  _bootCachePromise = (async () => {
-    const startTime = Date.now();
-    try {
-      const raw = await AsyncStorage.getItem('demo-store');
-      if (raw) {
-        const parsed = JSON.parse(raw);
-        const state = parsed?.state;
-        _bootCache = {
-          currentDemoUserId: state?.currentDemoUserId ?? null,
-          demoOnboardingComplete: state?.demoOnboardingComplete ?? {},
-        };
-      } else {
-        _bootCache = {
-          currentDemoUserId: null,
-          demoOnboardingComplete: {},
-        };
-      }
-    } catch {
-      _bootCache = {
-        currentDemoUserId: null,
-        demoOnboardingComplete: {},
-      };
-    }
-    if (__DEV__) {
-      console.log(`[HYDRATION] bootCache: ${Date.now() - startTime}ms`);
-    }
-    return _bootCache;
-  })();
-
-  return _bootCachePromise;
+  return { ...DEFAULT_BOOT_CACHE };
 }
 
 /**
- * Synchronous access to boot cache (returns null if not yet loaded)
+ * Synchronous access - always returns default state
  */
-export function getBootCacheSync(): BootCacheData | null {
-  return _bootCache;
+export function getBootCacheSync(): BootCacheData {
+  return { ...DEFAULT_BOOT_CACHE };
 }
 
 /**
- * Check if boot cache has been loaded
+ * Always ready since no async loading
  */
 export function isBootCacheReady(): boolean {
-  return _bootCache !== null;
+  return true;
 }
 
 /**
- * Clear boot cache (call on logout to prevent stale routing)
+ * No-op for compatibility
  */
 export function clearBootCache(): void {
-  _bootCache = null;
-  _bootCachePromise = null;
+  // No-op - no cache to clear
 }

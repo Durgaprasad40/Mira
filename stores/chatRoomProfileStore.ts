@@ -1,15 +1,15 @@
+// STORAGE POLICY: NO local persistence. Convex is ONLY source of truth.
+// All data is ephemeral (in-memory only) and rehydrates from Convex on app boot.
+
 /**
  * Chat Room Profile Store
  *
- * Stores the user's chat room identity (display name and avatar)
- * that persists across app sessions.
+ * Stores the user's chat room identity (display name and avatar).
  *
  * This identity is separate from the main dating profile and only
  * applies within chat rooms.
  */
 import { create } from 'zustand';
-import { persist, createJSONStorage } from 'zustand/middleware';
-import AsyncStorage from '@react-native-async-storage/async-storage';
 
 interface ChatRoomProfileState {
   /** Display name for chat rooms (null = use default) */
@@ -32,36 +32,25 @@ interface ChatRoomProfileState {
   setHasHydrated: (hydrated: boolean) => void;
 }
 
-export const useChatRoomProfileStore = create<ChatRoomProfileState>()(
-  persist(
-    (set) => ({
-      displayName: null,
-      avatarUri: null,
-      bio: null,
-      _hasHydrated: false,
+export const useChatRoomProfileStore = create<ChatRoomProfileState>()((set) => ({
+  displayName: null,
+  avatarUri: null,
+  bio: null,
+  _hasHydrated: true, // Always ready - no AsyncStorage
 
-      setProfile: (data) => {
-        set((state) => ({
-          displayName: data.displayName !== undefined ? data.displayName : state.displayName,
-          avatarUri: data.avatarUri !== undefined ? data.avatarUri : state.avatarUri,
-          bio: data.bio !== undefined ? data.bio : state.bio,
-        }));
-      },
+  setProfile: (data) => {
+    set((state) => ({
+      displayName: data.displayName !== undefined ? data.displayName : state.displayName,
+      avatarUri: data.avatarUri !== undefined ? data.avatarUri : state.avatarUri,
+      bio: data.bio !== undefined ? data.bio : state.bio,
+    }));
+  },
 
-      clearProfile: () => {
-        set({ displayName: null, avatarUri: null, bio: null });
-      },
+  clearProfile: () => {
+    set({ displayName: null, avatarUri: null, bio: null });
+  },
 
-      setHasHydrated: (hydrated) => {
-        set({ _hasHydrated: hydrated });
-      },
-    }),
-    {
-      name: 'chatroom-profile-storage',
-      storage: createJSONStorage(() => AsyncStorage),
-      onRehydrateStorage: () => (state) => {
-        state?.setHasHydrated(true);
-      },
-    }
-  )
-);
+  setHasHydrated: (hydrated) => {
+    set({ _hasHydrated: true }); // No-op
+  },
+}));

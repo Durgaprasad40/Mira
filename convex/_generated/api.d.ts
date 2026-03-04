@@ -8,6 +8,7 @@
  * @module
  */
 
+import type * as admin from "../admin.js";
 import type * as adminLog from "../adminLog.js";
 import type * as auth from "../auth.js";
 import type * as behaviorDetection from "../behaviorDetection.js";
@@ -28,6 +29,7 @@ import type * as emailActions from "../emailActions.js";
 import type * as events from "../events.js";
 import type * as faceVerification from "../faceVerification.js";
 import type * as filterPresets from "../filterPresets.js";
+import type * as games from "../games.js";
 import type * as helpers from "../helpers.js";
 import type * as id from "../id.js";
 import type * as likes from "../likes.js";
@@ -48,6 +50,7 @@ import type * as smartSuggestions from "../smartSuggestions.js";
 import type * as softMask from "../softMask.js";
 import type * as subscriptions from "../subscriptions.js";
 import type * as surveys from "../surveys.js";
+import type * as system from "../system.js";
 import type * as trustScore from "../trustScore.js";
 import type * as truthDare from "../truthDare.js";
 import type * as users from "../users.js";
@@ -62,6 +65,7 @@ import type {
 } from "convex/server";
 
 declare const fullApi: ApiFromModules<{
+  admin: typeof admin;
   adminLog: typeof adminLog;
   auth: typeof auth;
   behaviorDetection: typeof behaviorDetection;
@@ -82,6 +86,7 @@ declare const fullApi: ApiFromModules<{
   events: typeof events;
   faceVerification: typeof faceVerification;
   filterPresets: typeof filterPresets;
+  games: typeof games;
   helpers: typeof helpers;
   id: typeof id;
   likes: typeof likes;
@@ -102,6 +107,7 @@ declare const fullApi: ApiFromModules<{
   softMask: typeof softMask;
   subscriptions: typeof subscriptions;
   surveys: typeof surveys;
+  system: typeof system;
   trustScore: typeof trustScore;
   truthDare: typeof truthDare;
   users: typeof users;

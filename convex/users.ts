@@ -2,26 +2,47 @@ import { v } from "convex/values";
 import { mutation, query } from "./_generated/server";
 import { Id } from "./_generated/dataModel";
 import { logAdminAction } from "./adminLog";
+import { resolveUserIdByAuthId, ensureUserByAuthId } from "./helpers";
 
 // Get current user profile
 export const getCurrentUser = query({
   args: {
-    userId: v.id("users"),
+    userId: v.union(v.id("users"), v.string()), // Accept both Convex ID and authUserId string
   },
   handler: async (ctx, args) => {
-    const user = await ctx.db.get(args.userId);
+    // Map authUserId -> Convex Id<"users"> (READ-ONLY, no creation)
+    const convexUserId = await resolveUserIdByAuthId(ctx, args.userId as string);
+    if (!convexUserId) {
+      console.log("[getCurrentUser] User not found for authUserId:", args.userId);
+      return null;
+    }
+
+    const user = await ctx.db.get(convexUserId);
     if (!user) return null;
 
     // Get user's photos
     const photos = await ctx.db
       .query("photos")
-      .withIndex("by_user_order", (q) => q.eq("userId", args.userId))
+      .withIndex("by_user_order", (q) => q.eq("userId", convexUserId))
       .collect();
 
     return {
       ...user,
       photos: photos.sort((a, b) => a.order - b.order),
     };
+  },
+});
+
+// Bootstrap: Ensure user record exists for authUserId
+// Call this mutation once after auth hydration to guarantee Convex user exists
+// before any queries run. This prevents "Cannot create user from query context" errors.
+export const ensureCurrentUser = mutation({
+  args: {
+    authUserId: v.string(), // Auth identifier (can be demo ID or production ID)
+  },
+  handler: async (ctx, args) => {
+    const userId = await ensureUserByAuthId(ctx, args.authUserId);
+    return { success: true, userId };
   },
 });
 
@@ -1324,5 +1345,159 @@ export const clearPreferredChatRoom = mutation({
     }
     await ctx.db.patch(args.userId, { preferredChatRoomId: undefined });
     return { success: true };
+  },
+});
+
+/**
+ * Get onboarding draft for a user (live mode only).
+ * Loads saved onboarding progress from backend for hydration on app startup.
+ *
+ * QUERY: Read-only, uses resolveUserIdByAuthId.
+ */
+export const getOnboardingDraft = query({
+  args: {
+    userId: v.union(v.id("users"), v.string()),
+  },
+  handler: async (ctx, args) => {
+    // QUERY: read-only, no creation
+    const userId = await resolveUserIdByAuthId(ctx, args.userId as string);
+    if (!userId) {
+      console.log('[getOnboardingDraft] User not found for authUserId:', args.userId);
+      return null;
+    }
+
+    const user = await ctx.db.get(userId);
+    if (!user) {
+      return null;
+    }
+
+    return {
+      onboardingDraft: user.onboardingDraft ?? null,
+    };
+  },
+});
+
+/**
+ * Upsert onboarding draft - save partial onboarding progress (live mode only).
+ * Called as user fills each onboarding screen to persist their progress.
+ *
+ * MUTATION: Can create user, uses ensureUserByAuthId.
+ */
+export const upsertOnboardingDraft = mutation({
+  args: {
+    userId: v.union(v.id("users"), v.string()),
+    patch: v.any(), // Accepts partial draft updates
+  },
+  handler: async (ctx, args) => {
+    // MUTATION: can create
+    const userId = await ensureUserByAuthId(ctx, args.userId as string);
+
+    const user = await ctx.db.get(userId);
+    if (!user) {
+      throw new Error("User not found after ensureUserByAuthId");
+    }
+
+    // Deep merge patch into existing onboardingDraft
+    const existingDraft = user.onboardingDraft || {};
+    const mergedDraft = {
+      ...existingDraft,
+      basicInfo: args.patch.basicInfo
+        ? { ...existingDraft.basicInfo, ...args.patch.basicInfo }
+        : existingDraft.basicInfo,
+      profileDetails: args.patch.profileDetails
+        ? { ...existingDraft.profileDetails, ...args.patch.profileDetails }
+        : existingDraft.profileDetails,
+      lifestyle: args.patch.lifestyle
+        ? { ...existingDraft.lifestyle, ...args.patch.lifestyle }
+        : existingDraft.lifestyle,
+      preferences: args.patch.preferences
+        ? { ...existingDraft.preferences, ...args.patch.preferences }
+        : existingDraft.preferences,
+      progress: {
+        lastStepKey: args.patch.progress?.lastStepKey ?? existingDraft.progress?.lastStepKey,
+        lastUpdatedAt: Date.now(),
+      },
+    };
+
+    await ctx.db.patch(userId, {
+      onboardingDraft: mergedDraft,
+    });
+
+    return { success: true };
+  },
+});
+
+/**
+ * Get comprehensive onboarding status for hydration and routing decisions.
+ * Returns all data needed to hydrate stores and determine next onboarding step.
+ */
+export const getOnboardingStatus = query({
+  args: {
+    userId: v.union(v.id('users'), v.string()),
+  },
+  handler: async (ctx, args) => {
+    const userId = await resolveUserIdByAuthId(ctx, args.userId as string);
+
+    if (!userId) {
+      console.log('[ONB_STATUS] User not found');
+      return null;
+    }
+
+    const user = await ctx.db.get(userId);
+    if (!user) {
+      return null;
+    }
+
+    // Count normal profile photos (exclude verification_reference)
+    const normalPhotos = await ctx.db
+      .query('photos')
+      .withIndex('by_user', (q) => q.eq('userId', userId))
+      .filter((q) => q.neq(q.field('photoType'), 'verification_reference'))
+      .collect();
+
+    // Get basic info from user document (authoritative) or draft (fallback)
+    const basicInfo = {
+      name: user.name || user.onboardingDraft?.basicInfo?.name || null,
+      nickname: user.handle || user.onboardingDraft?.basicInfo?.handle || null, // BUG FIX: schema uses 'handle' field
+      dateOfBirth: user.dateOfBirth || user.onboardingDraft?.basicInfo?.dateOfBirth || null,
+      gender: user.gender || user.onboardingDraft?.basicInfo?.gender || null,
+    };
+
+    // Calculate effective photo count: normal photos + reference photo (if exists)
+    // MIN_PHOTOS_REQUIRED = 2, so if user has 1 reference + 1 normal, that's enough
+    const effectivePhotoCount = normalPhotos.length + (user.verificationReferencePhotoId ? 1 : 0);
+
+    const status = {
+      // Basic info
+      basicInfo,
+      basicInfoComplete: !!(basicInfo.name && basicInfo.dateOfBirth && basicInfo.gender),
+
+      // Verification status
+      referencePhotoExists: !!user.verificationReferencePhotoId,
+      verificationReferencePhotoId: user.verificationReferencePhotoId || null,
+      faceVerificationStatus: user.faceVerificationStatus || 'unverified',
+      faceVerificationPassed: user.faceVerificationStatus === 'verified',
+      faceVerificationPending: user.faceVerificationStatus === 'pending',
+
+      // Photos (BUG FIX: count reference photo as primary display photo)
+      normalPhotoCount: normalPhotos.length,
+      hasMinPhotos: effectivePhotoCount >= 2,
+
+      // Onboarding state
+      onboardingCompleted: user.onboardingCompleted || false,
+      onboardingDraft: user.onboardingDraft || null,
+    };
+
+    console.log('[ONB_STATUS]', JSON.stringify({
+      userId: userId.substring(0, 8),
+      basicInfoPresent: status.basicInfoComplete,
+      referencePhotoExists: status.referencePhotoExists,
+      faceStatus: status.faceVerificationStatus,
+      normalPhotoCount: status.normalPhotoCount,
+      effectivePhotoCount,
+      hasMinPhotos: status.hasMinPhotos,
+    }));
+
+    return status;
   },
 });

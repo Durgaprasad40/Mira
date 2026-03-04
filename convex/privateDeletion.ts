@@ -1,7 +1,7 @@
 import { v } from "convex/values";
 import { mutation, query, QueryCtx } from "./_generated/server";
 import { Id } from "./_generated/dataModel";
-import { userIdToString } from "./helpers";
+import { userIdToString, resolveUserIdByAuthId } from "./helpers";
 
 const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
 
@@ -25,12 +25,23 @@ export async function isPrivateDataDeleted(
 // Get private deletion state for a user
 export const getPrivateDeletionState = query({
   args: {
-    userId: v.id("users"),
+    userId: v.union(v.id("users"), v.string()), // Accept both Convex ID and authUserId string
   },
   handler: async (ctx, args) => {
+    // Map authUserId -> Convex Id<"users"> (QUERY: read-only, no creation)
+    const userId = await resolveUserIdByAuthId(ctx, args.userId as string);
+    if (!userId) {
+      console.log('[getPrivateDeletionState] User not found for authUserId:', args.userId);
+      return {
+        status: 'active' as const,
+        deletedAt: null,
+        recoverUntil: null,
+      };
+    }
+
     const deletionState = await ctx.db
       .query("privateDeletionStates")
-      .withIndex("by_userId", (q) => q.eq("userId", args.userId))
+      .withIndex("by_userId", (q) => q.eq("userId", userId))
       .first();
 
     if (!deletionState) {

@@ -1,6 +1,7 @@
 import { v } from 'convex/values';
 import { mutation, query, action } from './_generated/server';
 import { Id } from './_generated/dataModel';
+import { resolveUserIdByAuthId, ensureUserByAuthId } from './helpers';
 
 // ---------------------------------------------------------------------------
 // 8A: Photo Upload Validation Constants
@@ -61,7 +62,7 @@ export const validatePhotoUpload = query({
 // Add photo to user profile
 export const addPhoto = mutation({
   args: {
-    userId: v.id('users'),
+    userId: v.union(v.id('users'), v.string()), // Accept both Convex ID and authUserId string
     storageId: v.id('_storage'),
     isPrimary: v.boolean(),
     hasFace: v.boolean(),
@@ -73,7 +74,10 @@ export const addPhoto = mutation({
     isNsfwDetected: v.optional(v.boolean()), // Client-side NSFW detection result
   },
   handler: async (ctx, args) => {
-    const { userId, storageId, isPrimary, hasFace, width, height, fileSize, mimeType, isNsfwDetected } = args;
+    const { storageId, isPrimary, hasFace, width, height, fileSize, mimeType, isNsfwDetected } = args;
+
+    // Map authUserId -> Convex Id<"users"> (MUTATION: can create)
+    const userId = await ensureUserByAuthId(ctx, args.userId as string);
 
     // BUGFIX #67: Validate storage ID exists before proceeding
     // Get the URL for the uploaded file - this validates storageId exists
@@ -106,14 +110,16 @@ export const addPhoto = mutation({
       throw new Error('Photo must be JPEG, PNG, WebP, or HEIC format');
     }
 
-    // Get current photos count
+    // Get current photos count (exclude verification_reference photos)
+    // BUG FIX: Verification photos should NOT count towards the 9-photo limit
     const existingPhotos = await ctx.db
       .query('photos')
       .withIndex('by_user', (q) => q.eq('userId', userId))
+      .filter((q) => q.neq(q.field('photoType'), 'verification_reference'))
       .collect();
 
-    if (existingPhotos.length >= 6) {
-      throw new Error('Maximum 6 photos allowed');
+    if (existingPhotos.length >= 9) {
+      throw new Error('Maximum 9 photos allowed');
     }
 
     // If this is primary, update other photos
@@ -254,18 +260,28 @@ export const reorderPhotos = mutation({
   },
 });
 
-// Get user photos
+// Get user photos (excludes verification_reference photos)
 export const getUserPhotos = query({
   args: {
-    userId: v.id('users'),
+    userId: v.union(v.id('users'), v.string()), // Accept both Convex ID and authUserId string
   },
   handler: async (ctx, args) => {
+    // Map authUserId -> Convex Id<"users"> (QUERY: read-only, no creation)
+    const convexUserId = await resolveUserIdByAuthId(ctx, args.userId as string);
+    if (!convexUserId) {
+      console.log('[getUserPhotos] User not found for authUserId:', args.userId);
+      return [];
+    }
+
     const photos = await ctx.db
       .query('photos')
-      .withIndex('by_user_order', (q) => q.eq('userId', args.userId))
+      .withIndex('by_user_order', (q) => q.eq('userId', convexUserId))
       .collect();
 
-    return photos.sort((a, b) => a.order - b.order);
+    // BUG FIX: Filter out verification_reference photos (those are private, not for profile display)
+    const normalPhotos = photos.filter(photo => photo.photoType !== 'verification_reference');
+
+    return normalPhotos.sort((a, b) => a.order - b.order);
   },
 });
 
@@ -351,7 +367,7 @@ export const saveVerificationPhoto = mutation({
  */
 export const uploadVerificationReferencePhoto = mutation({
   args: {
-    userId: v.id('users'),
+    userId: v.union(v.id('users'), v.string()), // Accept both Convex ID and authUserId string
     storageId: v.id('_storage'),
     hasFace: v.boolean(),           // Client-side face detection result
     faceCount: v.optional(v.number()), // Number of faces detected
@@ -361,7 +377,10 @@ export const uploadVerificationReferencePhoto = mutation({
     mimeType: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const { userId, storageId, hasFace, faceCount, width, height, fileSize, mimeType } = args;
+    const { storageId, hasFace, faceCount, width, height, fileSize, mimeType } = args;
+
+    // Map authUserId -> Convex Id<"users"> (MUTATION: can create)
+    const userId = await ensureUserByAuthId(ctx, args.userId as string);
 
     console.log(`[PHOTO_GATE] start user=${userId}`);
 
@@ -424,6 +443,27 @@ export const uploadVerificationReferencePhoto = mutation({
     }
 
     console.log(`[PHOTO_GATE] faces=1 pass=true`);
+
+    // BUG FIX: Clean up ALL existing verification_reference photos (handles duplicates from past bugs)
+    // Replace behavior: delete all old verification photos, keep only the new one
+    const existingVerificationPhotos = await ctx.db
+      .query('photos')
+      .withIndex('by_user_type', (q) => q.eq('userId', userId).eq('photoType', 'verification_reference'))
+      .collect();
+
+    const isReplacing = existingVerificationPhotos.length > 0;
+    console.log(`[PHOTO_GATE] uploadVerificationReferencePhoto: replacing existing reference photo?`, isReplacing);
+
+    if (existingVerificationPhotos.length > 0) {
+      console.log(`[PHOTO_GATE] Found ${existingVerificationPhotos.length} existing verification photos (cleaning up duplicates)`);
+
+      // Delete ALL old verification photo records
+      for (const oldPhoto of existingVerificationPhotos) {
+        await ctx.db.delete(oldPhoto._id);
+        console.log(`[PHOTO_GATE] Deleted old verification photo: ${oldPhoto._id}`);
+      }
+      // Note: We don't delete the storage files as they may still be referenced elsewhere
+    }
 
     // Create the photo record as verification_reference type
     const photoId = await ctx.db.insert('photos', {
@@ -658,6 +698,56 @@ export const getPhotoGateStatus = query({
       verificationReferencePhotoUrl: user.verificationReferencePhotoUrl || null,
       displayPrimaryPhotoId: user.displayPrimaryPhotoId || null,
       faceVerificationStatus: user.faceVerificationStatus || 'unverified',
+    };
+  },
+});
+
+/**
+ * DEV ONLY: Delete all photos for a user
+ * Used for testing/development to clean up extra photos
+ * ⚠️ DO NOT USE IN PRODUCTION - this deletes ALL photos
+ */
+export const deleteAllPhotosForUser = mutation({
+  args: {
+    userId: v.union(v.id('users'), v.string()),
+  },
+  handler: async (ctx, args) => {
+    // Resolve userId (handle both Convex ID and auth ID)
+    const userId = await resolveUserIdByAuthId(ctx, args.userId as string);
+
+    if (!userId) {
+      throw new Error('User not found');
+    }
+
+    // Get all photos for this user
+    const photos = await ctx.db
+      .query('photos')
+      .withIndex('by_user', (q) => q.eq('userId', userId))
+      .collect();
+
+    console.log(`[DEV_CLEANUP] Deleting ${photos.length} photos for user ${userId}`);
+
+    // Delete all photos
+    let deletedCount = 0;
+    for (const photo of photos) {
+      await ctx.db.delete(photo._id);
+      deletedCount++;
+    }
+
+    // Clear photo-related fields in user record
+    await ctx.db.patch(userId, {
+      verificationReferencePhotoId: undefined,
+      verificationReferencePhotoUrl: undefined,
+      displayPrimaryPhotoId: undefined,
+      faceVerificationSelfieId: undefined,
+    });
+
+    console.log(`[DEV_CLEANUP] Deleted ${deletedCount} photos and cleared user photo fields`);
+
+    return {
+      success: true,
+      deletedCount,
+      message: `Deleted ${deletedCount} photos`,
     };
   },
 });

@@ -2,6 +2,7 @@ import { v } from 'convex/values';
 import { mutation, query, QueryCtx, MutationCtx } from './_generated/server';
 import { Id } from './_generated/dataModel';
 import { softMaskText } from './softMask';
+import { resolveUserIdByAuthId } from './helpers';
 
 // Phase-2: Helper to check if user has any active chatRoom readOnly penalty
 async function hasActiveChatRoomPenalty(
@@ -643,10 +644,15 @@ export const canSendMessage = query({
 
 export const getUnreadCount = query({
   args: {
-    userId: v.id('users'),
+    userId: v.union(v.id('users'), v.string()), // Accept both Convex ID and authUserId string
   },
   handler: async (ctx, args) => {
-    const { userId } = args;
+    // Map authUserId -> Convex Id<"users"> (QUERY: read-only, no creation)
+    const userId = await resolveUserIdByAuthId(ctx, args.userId as string);
+    if (!userId) {
+      console.log('[getUnreadCount] User not found for authUserId:', args.userId);
+      return 0;
+    }
 
     // Get all conversations
     const allConversations = await ctx.db

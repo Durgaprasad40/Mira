@@ -33,8 +33,8 @@ import {
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import { INCOGNITO_COLORS } from '@/lib/constants';
+import { popHandoff } from '@/lib/memoryHandoff';
 import {
   useChatTodStore,
   useGameState,
@@ -199,20 +199,17 @@ export function ChatTodOverlay({
   /**
    * Poll for camera answer return.
    * When user comes back from camera-composer with a T&D answer,
-   * it saves to AsyncStorage with key 'tod_camera_answer_{conversationId}'
+   * it stores in memory with key 'tod_camera_answer_{conversationId}'
    */
   useEffect(() => {
     if (game?.roundPhase !== 'answering') return;
 
-    const checkForCameraAnswer = async () => {
+    const checkForCameraAnswer = () => {
       try {
         const key = `tod_camera_answer_${conversationId}`;
-        const raw = await AsyncStorage.getItem(key);
-        if (raw) {
-          const data = JSON.parse(raw) as { type: 'photo' | 'video'; mediaUri: string; durationSec?: number };
-          // Clear immediately to prevent re-processing
-          await AsyncStorage.removeItem(key);
-
+        // Pop from memory (get and delete atomically, no persistence)
+        const data = popHandoff<{ type: 'photo' | 'video'; mediaUri: string; durationSec?: number }>(key);
+        if (data) {
           const meta: TodAnswerMeta = {
             type: data.type,
             mediaUri: data.mediaUri,

@@ -152,8 +152,40 @@ export const ensureDefaultRooms = mutation({
   },
 });
 
+// Internal mutation: seeds default rooms (called by listRooms auto-seed)
+// Idempotent: safe to run multiple times, no duplicates
+export const seedDefaultRoomsInternal = internalMutation({
+  args: {},
+  handler: async (ctx) => {
+    let seededCount = 0;
+    for (const room of DEFAULT_ROOMS) {
+      const existing = await ctx.db
+        .query('chatRooms')
+        .withIndex('by_slug', (q) => q.eq('slug', room.slug))
+        .first();
+      if (!existing) {
+        await ctx.db.insert('chatRooms', {
+          name: room.name,
+          slug: room.slug,
+          category: room.category,
+          isPublic: true,
+          createdAt: Date.now(),
+          memberCount: 0,
+        });
+        seededCount++;
+      }
+    }
+    if (process.env.NODE_ENV === 'development') {
+      console.log('[CHAT_ROOMS] Auto-seed completed:', { seededCount, total: DEFAULT_ROOMS.length });
+    }
+    return { seededCount };
+  },
+});
+
 // List rooms, optionally filtered by category, sorted by most recent activity
 // Phase-2: Filters out expired rooms (expiresAt < now)
+// Note: Returns empty array if no rooms exist - UI handles with FALLBACK_PUBLIC_ROOMS
+// To seed rooms: run `npx convex run chatRooms:ensureDefaultRooms` or use seedDefaultRoomsInternal cron
 export const listRooms = query({
   args: {
     category: v.optional(v.union(v.literal('language'), v.literal('general'))),
@@ -1700,6 +1732,145 @@ export const getRoomInfo = query({
       expiresAt: room.expiresAt,
       createdBy: room.createdBy,
     };
+  },
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// USER ROOM PREFERENCES: Muting + Reports (Convex-backed persistence)
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Get user's room preference (muted status)
+export const getUserRoomPref = query({
+  args: {
+    roomId: v.string(),
+  },
+  handler: async (ctx, { roomId }) => {
+    // Auth guard
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) {
+      return { muted: false };
+    }
+    const userId = asUserId(identity.subject);
+    if (!userId) {
+      return { muted: false };
+    }
+
+    // Look up preference
+    const pref = await ctx.db
+      .query('userRoomPrefs')
+      .withIndex('by_user_room', (q) => q.eq('userId', userId).eq('roomId', roomId))
+      .first();
+
+    return { muted: pref?.muted ?? false };
+  },
+});
+
+// Set user's room muted status
+export const setUserRoomMuted = mutation({
+  args: {
+    roomId: v.string(),
+    muted: v.boolean(),
+  },
+  handler: async (ctx, { roomId, muted }) => {
+    // Auth guard
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) {
+      throw new Error('Unauthorized');
+    }
+    const userId = asUserId(identity.subject);
+    if (!userId) {
+      throw new Error('Invalid user identity');
+    }
+
+    const now = Date.now();
+
+    // Check if preference exists
+    const existing = await ctx.db
+      .query('userRoomPrefs')
+      .withIndex('by_user_room', (q) => q.eq('userId', userId).eq('roomId', roomId))
+      .first();
+
+    if (existing) {
+      // Update existing preference
+      await ctx.db.patch(existing._id, {
+        muted,
+        updatedAt: now,
+      });
+    } else {
+      // Create new preference
+      await ctx.db.insert('userRoomPrefs', {
+        userId,
+        roomId,
+        muted,
+        updatedAt: now,
+      });
+    }
+
+    return { success: true };
+  },
+});
+
+// Check if user has reported a room
+export const hasReportedRoom = query({
+  args: {
+    roomId: v.string(),
+  },
+  handler: async (ctx, { roomId }) => {
+    // Auth guard
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) {
+      return { reported: false };
+    }
+    const userId = asUserId(identity.subject);
+    if (!userId) {
+      return { reported: false };
+    }
+
+    // Look up report
+    const report = await ctx.db
+      .query('userRoomReports')
+      .withIndex('by_user_room', (q) => q.eq('userId', userId).eq('roomId', roomId))
+      .first();
+
+    return { reported: !!report };
+  },
+});
+
+// Mark a room as reported (idempotent)
+export const markReportedRoom = mutation({
+  args: {
+    roomId: v.string(),
+  },
+  handler: async (ctx, { roomId }) => {
+    // Auth guard
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) {
+      throw new Error('Unauthorized');
+    }
+    const userId = asUserId(identity.subject);
+    if (!userId) {
+      throw new Error('Invalid user identity');
+    }
+
+    // Check if already reported
+    const existing = await ctx.db
+      .query('userRoomReports')
+      .withIndex('by_user_room', (q) => q.eq('userId', userId).eq('roomId', roomId))
+      .first();
+
+    if (existing) {
+      // Already reported - idempotent
+      return { success: true, alreadyReported: true };
+    }
+
+    // Create new report record
+    await ctx.db.insert('userRoomReports', {
+      userId,
+      roomId,
+      createdAt: Date.now(),
+    });
+
+    return { success: true, alreadyReported: false };
   },
 });
 

@@ -1,6 +1,10 @@
+/**
+ * discoverStore — In-memory store for daily like limits and random match gating.
+ *
+ * STORAGE POLICY: NO local persistence. Convex is ONLY source of truth.
+ * Store is in-memory only. Any required rehydration must come from Convex queries/mutations.
+ */
 import { create } from "zustand";
-import { persist, createJSONStorage } from "zustand/middleware";
-import AsyncStorage from "@react-native-async-storage/async-storage";
 import { isDemoMode } from "@/hooks/useConvex";
 
 const DAILY_LIKE_LIMIT = 25;
@@ -51,142 +55,126 @@ interface DiscoverState {
   maybeTriggerRandomMatch: () => boolean;
 }
 
-export const useDiscoverStore = create<DiscoverState>()(
-  persist(
-    (set, get) => ({
-      likesUsedToday: 0,
-      standOutsUsedToday: 0,
-      lastResetDate: getTodayDateString(),
+export const useDiscoverStore = create<DiscoverState>()((set, get) => ({
+  likesUsedToday: 0,
+  standOutsUsedToday: 0,
+  lastResetDate: getTodayDateString(),
 
-      // Random match control state defaults (F2-A)
-      hasUserShownIntent: false,
-      swipeCount: 0,
-      profileViewCount: 0,
-      lastRandomMatchAt: null,
-      randomMatchShownThisSession: false,
+  // Random match control state defaults (F2-A)
+  hasUserShownIntent: false,
+  swipeCount: 0,
+  profileViewCount: 0,
+  lastRandomMatchAt: null,
+  randomMatchShownThisSession: false,
 
-      likesRemaining: () => {
-        if (isDemoMode) return 999;
-        const state = get();
-        return Math.max(0, DAILY_LIKE_LIMIT - state.likesUsedToday);
-      },
+  likesRemaining: () => {
+    if (isDemoMode) return 999;
+    const state = get();
+    return Math.max(0, DAILY_LIKE_LIMIT - state.likesUsedToday);
+  },
 
-      standOutsRemaining: () => {
-        if (isDemoMode) return 99;
-        const state = get();
-        return Math.max(0, DAILY_STANDOUT_LIMIT - state.standOutsUsedToday);
-      },
+  standOutsRemaining: () => {
+    if (isDemoMode) return 99;
+    const state = get();
+    return Math.max(0, DAILY_STANDOUT_LIMIT - state.standOutsUsedToday);
+  },
 
-      hasReachedLikeLimit: () => {
-        if (isDemoMode) return false;
-        return get().likesUsedToday >= DAILY_LIKE_LIMIT;
-      },
+  hasReachedLikeLimit: () => {
+    if (isDemoMode) return false;
+    return get().likesUsedToday >= DAILY_LIKE_LIMIT;
+  },
 
-      hasReachedStandOutLimit: () => {
-        if (isDemoMode) return false;
-        return get().standOutsUsedToday >= DAILY_STANDOUT_LIMIT;
-      },
+  hasReachedStandOutLimit: () => {
+    if (isDemoMode) return false;
+    return get().standOutsUsedToday >= DAILY_STANDOUT_LIMIT;
+  },
 
-      incrementLikes: () => {
-        set((state) => ({ likesUsedToday: state.likesUsedToday + 1 }));
-      },
+  incrementLikes: () => {
+    set((state) => ({ likesUsedToday: state.likesUsedToday + 1 }));
+  },
 
-      incrementStandOuts: () => {
-        set((state) => ({ standOutsUsedToday: state.standOutsUsedToday + 1 }));
-      },
+  incrementStandOuts: () => {
+    set((state) => ({ standOutsUsedToday: state.standOutsUsedToday + 1 }));
+  },
 
-      checkAndResetIfNewDay: () => {
-        const today = getTodayDateString();
-        if (get().lastResetDate !== today) {
-          set({
-            likesUsedToday: 0,
-            standOutsUsedToday: 0,
-            lastResetDate: today,
-          });
-        }
-      },
+  checkAndResetIfNewDay: () => {
+    const today = getTodayDateString();
+    if (get().lastResetDate !== today) {
+      set({
+        likesUsedToday: 0,
+        standOutsUsedToday: 0,
+        lastResetDate: today,
+      });
+    }
+  },
 
-      // Random match control actions (F2-A)
-      markIntent: () => {
-        set((s) => (s.hasUserShownIntent ? s : { hasUserShownIntent: true }));
-      },
+  // Random match control actions (F2-A)
+  markIntent: () => {
+    set((s) => (s.hasUserShownIntent ? s : { hasUserShownIntent: true }));
+  },
 
-      incSwipe: () => {
-        const { swipeCount, hasUserShownIntent } = get();
-        const newCount = swipeCount + 1;
-        const newIntent = hasUserShownIntent || newCount >= 1;
-        set({ swipeCount: newCount, hasUserShownIntent: newIntent });
-        if (__DEV__) console.log('[F2-A] incSwipe:', newCount, 'intent:', newIntent);
-      },
+  incSwipe: () => {
+    const { swipeCount, hasUserShownIntent } = get();
+    const newCount = swipeCount + 1;
+    const newIntent = hasUserShownIntent || newCount >= 1;
+    set({ swipeCount: newCount, hasUserShownIntent: newIntent });
+    if (__DEV__) console.log('[F2-A] incSwipe:', newCount, 'intent:', newIntent);
+  },
 
-      incProfileView: () => {
-        const { profileViewCount, hasUserShownIntent } = get();
-        const newCount = profileViewCount + 1;
-        const newIntent = hasUserShownIntent || newCount >= 3;
-        set({ profileViewCount: newCount, hasUserShownIntent: newIntent });
-        if (__DEV__) console.log('[F2-A] incProfileView:', newCount, 'intent:', newIntent);
-      },
+  incProfileView: () => {
+    const { profileViewCount, hasUserShownIntent } = get();
+    const newCount = profileViewCount + 1;
+    const newIntent = hasUserShownIntent || newCount >= 3;
+    set({ profileViewCount: newCount, hasUserShownIntent: newIntent });
+    if (__DEV__) console.log('[F2-A] incProfileView:', newCount, 'intent:', newIntent);
+  },
 
-      setLastRandomMatchAt: (ts: number) => {
-        set({ lastRandomMatchAt: ts });
-      },
+  setLastRandomMatchAt: (ts: number) => {
+    set({ lastRandomMatchAt: ts });
+  },
 
-      setRandomMatchShownThisSession: (v: boolean) => {
-        set({ randomMatchShownThisSession: v });
-      },
+  setRandomMatchShownThisSession: (v: boolean) => {
+    set({ randomMatchShownThisSession: v });
+  },
 
-      resetRandomMatchSessionFlags: () => {
-        set({ randomMatchShownThisSession: false });
-      },
+  resetRandomMatchSessionFlags: () => {
+    set({ randomMatchShownThisSession: false });
+  },
 
-      // F2-B/F2-C: Discover-only entry point for random match popup with gating logic
-      // IMPORTANT: This function must ONLY be called from DiscoverCardStack.
-      maybeTriggerRandomMatch: () => {
-        const { hasUserShownIntent, randomMatchShownThisSession, lastRandomMatchAt } = get();
-        const now = Date.now();
+  // F2-B/F2-C: Discover-only entry point for random match popup with gating logic
+  // IMPORTANT: This function must ONLY be called from DiscoverCardStack.
+  maybeTriggerRandomMatch: () => {
+    const { hasUserShownIntent, randomMatchShownThisSession, lastRandomMatchAt } = get();
+    const now = Date.now();
 
-        // Gate 1: User must have shown intent (swiped or viewed profiles)
-        if (!hasUserShownIntent) {
-          if (__DEV__) console.log('[F2-C] random match blocked: no intent');
-          return false;
-        }
+    // Gate 1: User must have shown intent (swiped or viewed profiles)
+    if (!hasUserShownIntent) {
+      if (__DEV__) console.log('[F2-C] random match blocked: no intent');
+      return false;
+    }
 
-        // Gate 2: Only one random match per session
-        if (randomMatchShownThisSession) {
-          if (__DEV__) console.log('[F2-C] random match blocked: session limit');
-          return false;
-        }
+    // Gate 2: Only one random match per session
+    if (randomMatchShownThisSession) {
+      if (__DEV__) console.log('[F2-C] random match blocked: session limit');
+      return false;
+    }
 
-        // Gate 3: Cooldown - 24 hours since last random match
-        if (lastRandomMatchAt !== null && (now - lastRandomMatchAt) < RANDOM_MATCH_COOLDOWN_MS) {
-          if (__DEV__) console.log('[F2-C] random match blocked: cooldown');
-          return false;
-        }
+    // Gate 3: Cooldown - 24 hours since last random match
+    if (lastRandomMatchAt !== null && (now - lastRandomMatchAt) < RANDOM_MATCH_COOLDOWN_MS) {
+      if (__DEV__) console.log('[F2-C] random match blocked: cooldown');
+      return false;
+    }
 
-        // Gate 4: Probability roll (10% chance)
-        const roll = Math.random();
-        if (roll >= RANDOM_MATCH_PROB) {
-          if (__DEV__) console.log('[F2-C] random match blocked: prob', roll.toFixed(3));
-          return false;
-        }
+    // Gate 4: Probability roll (10% chance)
+    const roll = Math.random();
+    if (roll >= RANDOM_MATCH_PROB) {
+      if (__DEV__) console.log('[F2-C] random match blocked: prob', roll.toFixed(3));
+      return false;
+    }
 
-        // All gates passed - TRIGGER random match (atomic update)
-        if (__DEV__) console.log('[F2-C] random match TRIGGERED');
-        set((s) => ({ ...s, randomMatchShownThisSession: true, lastRandomMatchAt: now }));
-        return true;
-      },
-    }),
-    {
-      name: "discover-limits-storage",
-      storage: createJSONStorage(() => AsyncStorage),
-      partialize: (state) => ({
-        likesUsedToday: state.likesUsedToday,
-        standOutsUsedToday: state.standOutsUsedToday,
-        lastResetDate: state.lastResetDate,
-        // Persist random match control state (F2-A)
-        // Note: randomMatchShownThisSession is NOT persisted (session-only)
-        lastRandomMatchAt: state.lastRandomMatchAt,
-      }),
-    },
-  ),
-);
+    // All gates passed - TRIGGER random match (atomic update)
+    if (__DEV__) console.log('[F2-C] random match TRIGGERED');
+    set((s) => ({ ...s, randomMatchShownThisSession: true, lastRandomMatchAt: now }));
+    return true;
+  },
+}));

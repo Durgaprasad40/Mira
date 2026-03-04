@@ -20,15 +20,8 @@ import { useQuery, useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { Id } from '@/convex/_generated/dataModel';
 import { INCOGNITO_COLORS } from '@/lib/constants';
-import { isDemoMode } from '@/hooks/useConvex';
-import {
-  DEMO_CHAT_ROOMS,
-  DEMO_JOINED_ROOMS,
-  DemoChatRoom,
-} from '@/lib/demoData';
 import { useChatRoomSessionStore } from '@/stores/chatRoomSessionStore';
 import { useAuthStore } from '@/stores/authStore';
-import { useDemoDmStore, computeUnreadDmCountsByRoom } from '@/stores/demoDmStore';
 import { usePreferredChatRoomStore } from '@/stores/preferredChatRoomStore';
 
 const C = INCOGNITO_COLORS;
@@ -99,7 +92,22 @@ const ROOM_FALLBACK_COLORS: Record<string, string> = {
   urdu: '#607D8B',
 };
 
-// Unified room type for both demo and Convex modes
+// ─────────────────────────────────────────────────────────────────────────────
+// FALLBACK PUBLIC ROOMS - Always available even if backend returns empty
+// Used as safety net for fresh deployments or when backend is seeding
+// ─────────────────────────────────────────────────────────────────────────────
+const FALLBACK_PUBLIC_ROOMS = [
+  { id: 'fallback_global', name: 'Global', slug: 'global', category: 'general' as const, memberCount: 0 },
+  { id: 'fallback_hindi', name: 'Hindi', slug: 'hindi', category: 'language' as const, memberCount: 0 },
+  { id: 'fallback_telugu', name: 'Telugu', slug: 'telugu', category: 'language' as const, memberCount: 0 },
+  { id: 'fallback_tamil', name: 'Tamil', slug: 'tamil', category: 'language' as const, memberCount: 0 },
+  { id: 'fallback_malayalam', name: 'Malayalam', slug: 'malayalam', category: 'language' as const, memberCount: 0 },
+  { id: 'fallback_bengali', name: 'Bengali', slug: 'bengali', category: 'language' as const, memberCount: 0 },
+  { id: 'fallback_gujarati', name: 'Gujarati', slug: 'gujarati', category: 'language' as const, memberCount: 0 },
+  { id: 'fallback_marathi', name: 'Marathi', slug: 'marathi', category: 'language' as const, memberCount: 0 },
+];
+
+// Unified room type for Convex backend
 interface ChatRoom {
   id: string;
   name: string;
@@ -116,7 +124,6 @@ export default function ChatRoomsScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const [refreshing, setRefreshing] = useState(false);
-  const [joinedRooms, setJoinedRooms] = useState(DEMO_JOINED_ROOMS);
 
   // Phase-2: Private rooms state
   const [joinCode, setJoinCode] = useState('');
@@ -140,13 +147,16 @@ export default function ChatRoomsScreen() {
   // P2-AUD-005: Ref for refresh timeout cleanup
   const refreshTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // BUG FIX: Auto-seeding state for empty backend rooms
+  const [isSeedingRooms, setIsSeedingRooms] = useState(false);
+  const seedingAttemptedRef = useRef(false);
+
   // Session store for lastVisitedAt tracking
   const lastVisitedAt = useChatRoomSessionStore((s) => s.lastVisitedAt);
   const markRoomVisited = useChatRoomSessionStore((s) => s.markRoomVisited);
 
   // Current user ID for filtering out own messages
   const userId = useAuthStore((s) => s.userId);
-  const currentUserId = userId || 'demo_user_1';
 
   // ─────────────────────────────────────────────────────────────────────────────
   // PREFERRED ROOM REDIRECT LOGIC (zero-flash)
@@ -156,47 +166,34 @@ export default function ChatRoomsScreen() {
   // ─────────────────────────────────────────────────────────────────────────────
   const [checkingPreferred, setCheckingPreferred] = useState(true);
   const [isRedirecting, setIsRedirecting] = useState(false);
-  const preferredRoomId = usePreferredChatRoomStore((s) => s.preferredRoomId);
-  const preferredHasHydrated = usePreferredChatRoomStore((s) => s._hasHydrated);
   const clearPreferredRoom = usePreferredChatRoomStore((s) => s.clearPreferredRoom);
   const hasRedirectedRef = useRef(false);
 
-  // Convex query for preferred room (live mode only)
+  // Convex query for preferred room
   const convexPreferredRoom = useQuery(
     api.users.getPreferredChatRoom,
-    isDemoMode || !userId ? 'skip' : { userId: userId as Id<'users'> }
+    userId ? { userId: userId as Id<'users'> } : 'skip'
   );
 
-  // Determine if we're still loading preferred room data
-  const isPreferredLoading = isDemoMode
-    ? !preferredHasHydrated
-    : convexPreferredRoom === undefined;
+  // Determine if we're still loading preferred room data (always use Convex)
+  const isPreferredLoading = convexPreferredRoom === undefined;
 
   // Determine effective preferred room ID (only valid after loading complete)
-  const effectivePreferredRoomId = isDemoMode
-    ? preferredRoomId
-    : convexPreferredRoom?.preferredChatRoomId ?? null;
+  const effectivePreferredRoomId = convexPreferredRoom?.preferredChatRoomId ?? null;
 
   // Validate preferred room exists before redirecting (prevents stale room redirect)
   const preferredRoomValidation = useQuery(
     api.chatRooms.getRoom,
-    effectivePreferredRoomId && !isDemoMode
+    effectivePreferredRoomId
       ? { roomId: effectivePreferredRoomId as Id<'chatRooms'> }
       : 'skip'
   );
 
-  // For demo mode, check if room exists in demo data
-  const isDemoRoomValid = isDemoMode && effectivePreferredRoomId
-    ? DEMO_CHAT_ROOMS.some((r) => r.id === effectivePreferredRoomId)
-    : true;
-
-  // Room is valid if: (1) demo mode and room in demo list, or (2) convex mode and room exists
-  const isPreferredRoomValid = isDemoMode
-    ? isDemoRoomValid
-    : preferredRoomValidation !== null;
+  // Room is valid if exists in Convex backend
+  const isPreferredRoomValid = preferredRoomValidation !== null;
 
   // Still loading validation if convex query is undefined (not yet resolved)
-  const isValidationLoading = !isDemoMode && effectivePreferredRoomId && preferredRoomValidation === undefined;
+  const isValidationLoading = effectivePreferredRoomId && preferredRoomValidation === undefined;
 
   // CRITICAL FIX M-001: Removed duplicate useEffect redirect logic
   // All redirects now handled by useFocusEffect below to prevent
@@ -260,32 +257,57 @@ export default function ChatRoomsScreen() {
     }, [isNavigationReady, isPreferredLoading, effectivePreferredRoomId, isValidationLoading, isPreferredRoomValid, clearPreferredRoom, router])
   );
 
-  // Phase-2: Get DM store state for per-room unread counts
-  const dmConversations = useDemoDmStore((s) => s.conversations);
-  const dmMeta = useDemoDmStore((s) => s.meta);
-
-  // Convex query for live mode (skipped in demo mode)
-  const convexRooms = useQuery(
-    api.chatRooms.listRooms,
-    isDemoMode ? 'skip' : {}
-  );
+  // Convex query for public rooms
+  const convexRooms = useQuery(api.chatRooms.listRooms, {});
 
   // Phase-2: Query for user's private rooms
-  // In demo mode: pass demo args to resolve userId
-  const myPrivateRooms = useQuery(
-    api.chatRooms.getMyPrivateRooms,
-    isDemoMode && userId
-      ? { isDemo: true, demoUserId: userId }
-      : {}
-  );
+  const myPrivateRooms = useQuery(api.chatRooms.getMyPrivateRooms, {});
 
   // Phase-2: Mutations for private rooms
   const joinRoomByCodeMut = useMutation(api.chatRooms.joinRoomByCode);
   const createPrivateRoomMut = useMutation(api.chatRooms.createPrivateRoom);
   const resetMyPrivateRoomsMut = useMutation(api.chatRooms.resetMyPrivateRooms);
 
+  // BUG FIX: Mutation to seed default public rooms
+  const ensureDefaultRoomsMut = useMutation(api.chatRooms.ensureDefaultRooms);
+
+  // Auto-seed default public rooms if backend returns empty
+  // This ensures rooms always exist and have real Convex IDs (prevents fallback_* navigation crash)
+  useEffect(() => {
+    // Skip if already seeding, already attempted, or still loading
+    if (isSeedingRooms || seedingAttemptedRef.current || convexRooms === undefined) {
+      return;
+    }
+
+    // If backend returns empty array, seed default rooms
+    if (Array.isArray(convexRooms) && convexRooms.length === 0) {
+      if (__DEV__) {
+        console.log('[CHAT_ROOMS] Auto-seed started: backend empty, seeding default rooms');
+      }
+
+      seedingAttemptedRef.current = true;
+      setIsSeedingRooms(true);
+
+      ensureDefaultRoomsMut({})
+        .then(() => {
+          if (__DEV__) {
+            console.log('[CHAT_ROOMS] Auto-seed completed successfully');
+          }
+          // Convex will auto-refresh the query, no manual refetch needed
+          if (mountedRef.current) {
+            setIsSeedingRooms(false);
+          }
+        })
+        .catch((error) => {
+          console.error('[CHAT_ROOMS] Auto-seed failed:', error);
+          if (mountedRef.current) {
+            setIsSeedingRooms(false);
+          }
+        });
+    }
+  }, [convexRooms, isSeedingRooms, ensureDefaultRoomsMut]);
+
   // Filter private rooms into ChatRoom format
-  // Phase-2 FIX: Include private rooms in demo mode too (for rooms created by demo user)
   const privateRooms: ChatRoom[] = useMemo(() => {
     if (!myPrivateRooms) return [];
     return myPrivateRooms.map((r) => ({
@@ -299,51 +321,49 @@ export default function ChatRoomsScreen() {
     }));
   }, [myPrivateRooms]);
 
-  // P2 CR-010: Track loading state for Convex mode
-  const isConvexLoading = !isDemoMode && convexRooms === undefined;
+  // Track loading state for Convex queries
+  const isConvexLoading = convexRooms === undefined;
 
   // Phase-2: Calculate DM unread counts per room (NOT group messages)
   // Badge shows DISTINCT SENDERS with unseen DMs from that room
-  // Computed directly (not memoized) to ensure re-render on store changes
-  const unreadCounts = isDemoMode
-    ? computeUnreadDmCountsByRoom(
-        { conversations: dmConversations, meta: dmMeta },
-        currentUserId
-      ).byRoomId
-    : {};
+  // Note: This feature is currently disabled (returns empty object)
+  // TODO: Implement with Convex backend when DM feature is enabled
+  const unreadCounts: Record<string, number> = {};
 
-  // Unified rooms list: demo or Convex
+  // Rooms list from Convex backend
   // Filter out "English" room - users can chat in English inside Global
   // P2-AUD-006: Memoize to prevent re-computation on every render
-  const rooms: ChatRoom[] = useMemo(
-    () =>
-      (isDemoMode
-        ? DEMO_CHAT_ROOMS.map((r) => ({
-            id: r.id,
-            name: r.name,
-            slug: r.slug,
-            category: r.category,
-            memberCount: r.memberCount,
-            lastMessageText: r.lastMessageText,
-            iconKey: r.slug, // Use slug as iconKey for demo rooms
-          }))
-        : (convexRooms ?? []).map((r) => ({
-            id: r._id,
-            name: r.name,
-            slug: r.slug,
-            category: r.category,
-            memberCount: r.memberCount,
-            lastMessageText: r.lastMessageText,
-            iconKey: r.slug, // Use slug as iconKey fallback
-            // iconUrl: r.iconUrl, // Enable when schema supports it
-          }))
-      ).filter((r) => r.name.toLowerCase() !== 'english'),
-    [isDemoMode, convexRooms]
-  );
+  // Use fallback if backend returns empty (ensures public rooms always show while seeding)
+  const rooms: ChatRoom[] = useMemo(() => {
+    // Always use backend rooms
+    const backendRooms = (convexRooms ?? []).map((r) => ({
+      id: r._id,
+      name: r.name,
+      slug: r.slug,
+      category: r.category,
+      memberCount: r.memberCount,
+      lastMessageText: r.lastMessageText,
+      iconKey: r.slug,
+    })).filter((r) => r.name.toLowerCase() !== 'english');
+
+    // If backend returns empty, use fallback to ensure UI never shows empty
+    // Fallback rooms displayed but tapping is disabled (see handleOpenRoom)
+    if (backendRooms.length === 0) {
+      if (__DEV__) {
+        console.log('[CHAT_ROOMS] source=fallback count=' + FALLBACK_PUBLIC_ROOMS.length + ' (backend empty, seeding=' + isSeedingRooms + ')');
+      }
+      return FALLBACK_PUBLIC_ROOMS;
+    }
+
+    if (__DEV__) {
+      console.log('[CHAT_ROOMS] source=backend count=' + backendRooms.length);
+    }
+    return backendRooms;
+  }, [convexRooms, isSeedingRooms]);
 
   const onRefresh = useCallback(() => {
     setRefreshing(true);
-    // In live mode, Convex auto-refreshes. For demo mode, simulate delay.
+    // Convex auto-refreshes queries - this just provides UI feedback
     // P2-AUD-005: Track timeout in ref for cleanup
     refreshTimeoutRef.current = setTimeout(() => {
       // M-006 FIX: Guard setState after unmount
@@ -356,6 +376,23 @@ export default function ChatRoomsScreen() {
   const handleOpenRoom = useCallback(
     (roomId: string) => {
       if (__DEV__) console.log('[TAP] room pressed', { roomId, t: Date.now() });
+
+      // BUG FIX: Prevent navigation with fallback IDs (not real Convex IDs)
+      // Fallback IDs crash when passed to Convex mutations/queries
+      if (roomId.startsWith('fallback_')) {
+        if (__DEV__) {
+          console.log('[CHAT_ROOMS] Blocked navigation: fallback ID detected', { roomId, isSeedingRooms });
+        }
+        Alert.alert(
+          'Syncing Rooms',
+          isSeedingRooms
+            ? 'Setting up chat rooms... Please wait a moment and try again.'
+            : 'Chat rooms are being set up. Please try again in a moment.',
+          [{ text: 'OK' }]
+        );
+        return;
+      }
+
       // Mark user navigated to cancel any pending preferred room redirect
       userNavigatedRef.current = true;
 
@@ -373,14 +410,10 @@ export default function ChatRoomsScreen() {
         params: { roomName, isPrivate },
       } as any);
       if (__DEV__) console.log('[NAV] room push scheduled', { roomName, isPrivate, t: Date.now() });
-      // Defer non-critical state updates
-      if (isDemoMode && !joinedRooms[roomId]) {
-        setJoinedRooms((prev) => ({ ...prev, [roomId]: true }));
-      }
       // Mark room as visited to clear unread badge
       markRoomVisited(roomId);
     },
-    [router, joinedRooms, markRoomVisited, rooms, privateRooms]
+    [router, markRoomVisited, rooms, privateRooms, isSeedingRooms]
   );
 
   const handleCreateRoom = useCallback(() => {
@@ -408,37 +441,6 @@ export default function ChatRoomsScreen() {
       setIsJoining(false);
     }
   }, [joinCode, isJoining, joinRoomByCodeMut, router]);
-
-  // Phase-2: Handle reset private rooms (demo mode only)
-  const handleResetPrivateRooms = useCallback(async () => {
-    if (!isDemoMode) return;
-
-    Alert.alert(
-      'Reset Private Rooms',
-      'This will delete ALL your private rooms and their messages. This action cannot be undone.',
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Reset All',
-          style: 'destructive',
-          onPress: async () => {
-            try {
-              const result = await resetMyPrivateRoomsMut({
-                isDemo: true,
-                demoUserId: userId || '',
-              });
-              Alert.alert(
-                'Rooms Deleted',
-                `Successfully deleted ${result.deletedRooms} private room${result.deletedRooms === 1 ? '' : 's'}.`
-              );
-            } catch (error: any) {
-              Alert.alert('Error', error.message || 'Failed to reset rooms');
-            }
-          },
-        },
-      ]
-    );
-  }, [resetMyPrivateRoomsMut, userId]);
 
   // Phase-2: Handle create private room
   const handleCreatePrivateRoom = useCallback(async () => {
@@ -597,8 +599,8 @@ export default function ChatRoomsScreen() {
     );
   }
 
-  // Gate 2: Convex mode - wait for data to load
-  if (!isDemoMode && (checkingPreferred || isConvexLoading)) {
+  // Gate: Wait for Convex data to load
+  if (checkingPreferred || isConvexLoading) {
     return (
       <View style={[styles.container, { paddingTop: insets.top }]}>
         <View style={styles.header}>
@@ -657,23 +659,13 @@ export default function ChatRoomsScreen() {
             {/* Section 4: Private Rooms - show if any private rooms exist */}
             {privateRooms.length > 0 && (
               <>
-                {/* Private Rooms header with optional Reset button (demo mode only) */}
+                {/* Private Rooms header */}
                 <View style={styles.privateRoomsSectionHeader}>
                   <Text style={styles.sectionTitle}>Private Rooms</Text>
-                  {isDemoMode && (
-                    <TouchableOpacity
-                      style={styles.resetPrivateRoomsButton}
-                      onPress={handleResetPrivateRooms}
-                      hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-                    >
-                      <Ionicons name="trash-outline" size={14} color={C.textLight} />
-                      <Text style={styles.resetPrivateRoomsText}>Reset</Text>
-                    </TouchableOpacity>
-                  )}
                 </View>
 
-                {/* Join by Code Input (only in live mode) */}
-                {!isDemoMode && (
+                {/* Join by Code Input */}
+                {(
                   <View style={styles.joinCodeRow}>
                     <TextInput
                       style={styles.joinCodeInput}

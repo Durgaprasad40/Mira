@@ -33,24 +33,20 @@ export default function WelcomeScreen() {
     );
   }
 
-  // Demo mode: if already logged in, redirect
-  if (isDemoMode && currentDemoUserId) {
-    if (demoOnboardingComplete[currentDemoUserId]) {
-      return <Redirect href={"/(main)/(tabs)/home" as any} />;
-    }
-    return <Redirect href={"/(onboarding)" as any} />;
+  // Demo mode: if already logged in and onboarding complete, redirect to home
+  if (isDemoMode && currentDemoUserId && demoOnboardingComplete[currentDemoUserId]) {
+    return <Redirect href={"/(main)/(tabs)/home" as any} />;
   }
 
-  // Use Redirect component instead of useEffect navigation
-  // STRICT: Only redirect if we have BOTH isAuthenticated AND a valid token
-  // This prevents stale isAuthenticated=true with missing token from skipping welcome
-  if (!isDemoMode && isAuthenticated && hasValidToken) {
-    if (__DEV__) console.log(`[WELCOME] redirect: onboardingCompleted=${onboardingCompleted}`);
-    if (onboardingCompleted) {
-      return <Redirect href="/(main)/(tabs)/home" />;
-    }
-    return <Redirect href="/(onboarding)" />;
+  // Live mode: ONLY redirect to home if authenticated AND onboarding completed
+  // NEVER auto-redirect for incomplete onboarding - always show welcome screen
+  if (!isDemoMode && isAuthenticated && hasValidToken && onboardingCompleted) {
+    if (__DEV__) console.log(`[WELCOME] Onboarding complete, redirecting to home`);
+    return <Redirect href="/(main)/(tabs)/home" />;
   }
+
+  // For all other cases (not authenticated, or authenticated but onboarding incomplete):
+  // Stay on welcome screen and let user choose action via buttons
 
   return (
     <LinearGradient

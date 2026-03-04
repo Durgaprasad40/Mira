@@ -15,6 +15,8 @@ import { useOnboardingStore } from "@/stores/onboardingStore";
 import { useDemoStore } from "@/stores/demoStore";
 import { useAuthStore } from "@/stores/authStore";
 import { isDemoMode } from "@/hooks/useConvex";
+import { useMutation } from "convex/react";
+import { api } from "@/convex/_generated/api";
 import { OnboardingProgressHeader } from "@/components/OnboardingProgressHeader";
 import { EducationLevel, Religion } from "@/types";
 
@@ -43,6 +45,7 @@ export default function ProfileDetailsBasicScreen() {
   const demoProfile = useDemoStore((s) =>
     isDemoMode && userId ? s.demoProfiles[userId] : null
   );
+  const upsertDraft = useMutation(api.users.upsertOnboardingDraft);
   const router = useRouter();
   const params = useLocalSearchParams<{ editFromReview?: string }>();
 
@@ -121,6 +124,34 @@ export default function ProfileDetailsBasicScreen() {
       if (Object.keys(dataToSave).length > 0) {
         demoStore.saveDemoProfile(userId, dataToSave);
         console.log(`[PROFILE-DETAILS] saved: ${JSON.stringify(dataToSave)}`);
+      }
+    }
+
+    // LIVE MODE: Persist to Convex onboarding draft
+    if (!isDemoMode && userId) {
+      const profileDetails: Record<string, any> = {};
+      if (height != null) profileDetails.height = height;
+      if (weight != null) profileDetails.weight = weight;
+      if (jobTitle) profileDetails.jobTitle = jobTitle;
+      if (company) profileDetails.company = company;
+      if (school) profileDetails.school = school;
+      if (education) profileDetails.education = education;
+      // Clear educationOther when education is not "other"
+      if (education === 'other' && educationOther.trim()) {
+        profileDetails.educationOther = educationOther.trim();
+      }
+
+      if (Object.keys(profileDetails).length > 0) {
+        upsertDraft({
+          userId,
+          patch: {
+            profileDetails,
+            progress: { lastStepKey: 'profile-details/basic' },
+          },
+        }).catch((error) => {
+          if (__DEV__) console.error('[PROFILE-DETAILS] Failed to save draft:', error);
+        });
+        if (__DEV__) console.log(`[ONB_DRAFT] Saved profile-details: ${JSON.stringify(profileDetails)}`);
       }
     }
 

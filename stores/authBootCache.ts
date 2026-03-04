@@ -1,16 +1,12 @@
 /**
  * authBootCache - Fast minimal auth data read for routing decisions
  *
- * Reads only the essential auth data needed for routing directly from AsyncStorage,
- * bypassing the full Zustand hydration middleware overhead.
+ * STORAGE POLICY ENFORCEMENT:
+ * NO local persistence. This now returns default empty state immediately.
+ * Auth state must be rehydrated from Convex on app boot.
  *
- * SAFETY:
- * - READ-ONLY: Never writes to AsyncStorage
- * - Does NOT modify any stores or user data
- * - Just provides fast access to minimal auth boot state
- * - Never stores or exposes passwords
+ * Kept for compatibility with existing routing code, but no longer reads AsyncStorage.
  */
-import AsyncStorage from '@react-native-async-storage/async-storage';
 
 export interface AuthBootCacheData {
   isAuthenticated: boolean;
@@ -21,10 +17,7 @@ export interface AuthBootCacheData {
   faceVerificationPending: boolean;
 }
 
-let _authBootCache: AuthBootCacheData | null = null;
-let _authBootCachePromise: Promise<AuthBootCacheData> | null = null;
-
-// Default state when no persisted data exists
+// Default state - always unauthenticated on fresh app launch
 const DEFAULT_AUTH_BOOT: AuthBootCacheData = {
   isAuthenticated: false,
   userId: null,
@@ -35,70 +28,30 @@ const DEFAULT_AUTH_BOOT: AuthBootCacheData = {
 };
 
 /**
- * Read minimal auth data from AsyncStorage (fast, ~10-50ms)
- * Caches result so subsequent calls are instant.
+ * Returns default unauthenticated state immediately.
+ * No AsyncStorage read - routing must wait for Convex hydration.
  */
 export async function getAuthBootCache(): Promise<AuthBootCacheData> {
-  // Return cached result if available
-  if (_authBootCache) return _authBootCache;
-
-  // Return pending promise if already loading
-  if (_authBootCachePromise) return _authBootCachePromise;
-
-  // Start loading
-  _authBootCachePromise = (async () => {
-    const startTime = Date.now();
-    try {
-      const raw = await AsyncStorage.getItem('auth-storage');
-      if (__DEV__) {
-        // Log payload size for debugging slow hydration
-        const payloadSize = raw?.length ?? 0;
-        console.log(`[HYDRATION] auth-storage payload: ${payloadSize} bytes`);
-      }
-      if (raw) {
-        const parsed = JSON.parse(raw);
-        const state = parsed?.state;
-        _authBootCache = {
-          isAuthenticated: state?.isAuthenticated ?? false,
-          userId: state?.userId ?? null,
-          token: state?.token ?? null,
-          onboardingCompleted: state?.onboardingCompleted ?? false,
-          faceVerificationPassed: state?.faceVerificationPassed ?? false,
-          faceVerificationPending: state?.faceVerificationPending ?? false,
-        };
-      } else {
-        _authBootCache = { ...DEFAULT_AUTH_BOOT };
-      }
-    } catch {
-      _authBootCache = { ...DEFAULT_AUTH_BOOT };
-    }
-    if (__DEV__) {
-      console.log(`[HYDRATION] authBootCache: ${Date.now() - startTime}ms`);
-    }
-    return _authBootCache;
-  })();
-
-  return _authBootCachePromise;
+  return { ...DEFAULT_AUTH_BOOT };
 }
 
 /**
- * Synchronous access to auth boot cache (returns null if not yet loaded)
+ * Synchronous access - always returns default state
  */
-export function getAuthBootCacheSync(): AuthBootCacheData | null {
-  return _authBootCache;
+export function getAuthBootCacheSync(): AuthBootCacheData {
+  return { ...DEFAULT_AUTH_BOOT };
 }
 
 /**
- * Check if auth boot cache has been loaded
+ * Always ready since no async loading
  */
 export function isAuthBootCacheReady(): boolean {
-  return _authBootCache !== null;
+  return true;
 }
 
 /**
- * Clear auth boot cache (call on logout to prevent stale routing)
+ * No-op for compatibility
  */
 export function clearAuthBootCache(): void {
-  _authBootCache = null;
-  _authBootCachePromise = null;
+  // No-op - no cache to clear
 }

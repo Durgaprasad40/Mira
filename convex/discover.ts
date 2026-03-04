@@ -1,6 +1,7 @@
 import { v } from 'convex/values';
 import { query } from './_generated/server';
 import { Id } from './_generated/dataModel';
+import { resolveUserIdByAuthId, ensureUserByAuthId } from './helpers';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -230,7 +231,7 @@ function rankScore(
 
 export const getDiscoverProfiles = query({
   args: {
-    userId: v.id('users'),
+    userId: v.union(v.id('users'), v.string()), // Accept both Convex ID and authUserId string
     sortBy: v.optional(v.union(
       v.literal('recommended'),
       v.literal('distance'),
@@ -244,8 +245,15 @@ export const getDiscoverProfiles = query({
     filterVersion: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
-    const { userId, sortBy = 'recommended', limit = 20, offset = 0 } = args;
+    const { sortBy = 'recommended', limit = 20, offset = 0 } = args;
     // filterVersion intentionally unused — it's only to bust query cache
+
+    // Map authUserId -> Convex Id<"users"> (QUERY: read-only, no creation)
+    const userId = await resolveUserIdByAuthId(ctx, args.userId as string);
+    if (!userId) {
+      console.log('[getDiscoverProfiles] User not found for authUserId:', args.userId);
+      return [];
+    }
 
     const currentUser = await ctx.db.get(userId);
     if (!currentUser) return [];

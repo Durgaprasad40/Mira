@@ -203,6 +203,99 @@ export default defineSchema({
     onboardingCompleted: v.boolean(),
     onboardingStep: v.optional(v.string()),
 
+    // Onboarding Draft (persistent storage for incomplete onboarding)
+    onboardingDraft: v.optional(v.object({
+      // Basic Info
+      basicInfo: v.optional(v.object({
+        name: v.optional(v.string()),
+        handle: v.optional(v.string()),
+        dateOfBirth: v.optional(v.string()),
+        gender: v.optional(v.union(v.literal('male'), v.literal('female'), v.literal('non_binary'), v.literal('lesbian'), v.literal('other'))),
+      })),
+      // Profile Details
+      profileDetails: v.optional(v.object({
+        height: v.optional(v.number()),
+        weight: v.optional(v.number()),
+        jobTitle: v.optional(v.string()),
+        company: v.optional(v.string()),
+        school: v.optional(v.string()),
+        education: v.optional(v.union(
+          v.literal('high_school'),
+          v.literal('some_college'),
+          v.literal('bachelors'),
+          v.literal('masters'),
+          v.literal('doctorate'),
+          v.literal('trade_school'),
+          v.literal('other')
+        )),
+        bio: v.optional(v.string()),
+        profilePrompts: v.optional(v.array(v.object({
+          question: v.string(),
+          answer: v.string(),
+        }))),
+      })),
+      // Lifestyle
+      lifestyle: v.optional(v.object({
+        smoking: v.optional(v.union(v.literal('never'), v.literal('sometimes'), v.literal('regularly'), v.literal('trying_to_quit'))),
+        drinking: v.optional(v.union(v.literal('never'), v.literal('socially'), v.literal('regularly'), v.literal('sober'))),
+        exercise: v.optional(v.union(v.literal('never'), v.literal('sometimes'), v.literal('regularly'), v.literal('daily'))),
+        pets: v.optional(v.array(v.union(
+          v.literal('dog'), v.literal('cat'), v.literal('bird'), v.literal('fish'), v.literal('rabbit'),
+          v.literal('hamster'), v.literal('guinea_pig'), v.literal('turtle'), v.literal('parrot'), v.literal('pigeon'),
+          v.literal('chicken'), v.literal('duck'), v.literal('goat'), v.literal('cow'), v.literal('horse'),
+          v.literal('snake'), v.literal('lizard'), v.literal('frog'), v.literal('other'), v.literal('none'),
+          v.literal('want_pets'), v.literal('allergic')
+        ))),
+        insect: v.optional(v.union(v.literal('mosquito'), v.literal('bee'), v.literal('butterfly'), v.literal('ant'), v.literal('cockroach'))),
+        kids: v.optional(v.union(
+          v.literal('have_and_want_more'),
+          v.literal('have_and_dont_want_more'),
+          v.literal('dont_have_and_want'),
+          v.literal('dont_have_and_dont_want'),
+          v.literal('not_sure')
+        )),
+        religion: v.optional(v.union(
+          v.literal('christian'), v.literal('muslim'), v.literal('hindu'), v.literal('buddhist'),
+          v.literal('jewish'), v.literal('sikh'), v.literal('atheist'), v.literal('agnostic'),
+          v.literal('spiritual'), v.literal('other'), v.literal('prefer_not_to_say')
+        )),
+      })),
+      // Preferences
+      preferences: v.optional(v.object({
+        lookingFor: v.optional(v.array(v.union(v.literal('male'), v.literal('female'), v.literal('non_binary'), v.literal('lesbian'), v.literal('other')))),
+        relationshipIntent: v.optional(v.array(v.union(
+          v.literal('long_term'), v.literal('short_term'), v.literal('fwb'), v.literal('figuring_out'),
+          v.literal('short_to_long'), v.literal('long_to_short'), v.literal('new_friends'), v.literal('open_to_anything')
+        ))),
+        activities: v.optional(v.array(v.union(
+          // Original 20 activities
+          v.literal('coffee'), v.literal('date_night'), v.literal('sports'), v.literal('movies'), v.literal('free_tonight'),
+          v.literal('foodie'), v.literal('gym_partner'), v.literal('concerts'), v.literal('travel'), v.literal('outdoors'),
+          v.literal('art_culture'), v.literal('gaming'), v.literal('nightlife'), v.literal('brunch'), v.literal('study_date'),
+          v.literal('this_weekend'), v.literal('beach_pool'), v.literal('road_trip'), v.literal('photography'), v.literal('volunteering'),
+          // Additional 50 activities (matching frontend ACTIVITY_FILTERS)
+          v.literal('late_night_talks'), v.literal('street_food'), v.literal('home_cooking'), v.literal('baking'), v.literal('healthy_eating'),
+          v.literal('weekend_getaways'), v.literal('long_drives'), v.literal('city_exploring'), v.literal('beach_vibes'), v.literal('mountain_views'),
+          v.literal('nature_walks'), v.literal('sunset_views'), v.literal('hiking'), v.literal('camping'), v.literal('stargazing'),
+          v.literal('gardening'), v.literal('gym'), v.literal('yoga'), v.literal('running'), v.literal('cycling'),
+          v.literal('meditation'), v.literal('pilates'), v.literal('music_lover'), v.literal('live_concerts'), v.literal('singing'),
+          v.literal('podcasts'), v.literal('binge_watching'), v.literal('thrillers'), v.literal('documentaries'), v.literal('anime'),
+          v.literal('k_dramas'), v.literal('board_games'), v.literal('chess'), v.literal('escape_rooms'), v.literal('drawing'),
+          v.literal('painting'), v.literal('writing'), v.literal('journaling'), v.literal('diy_projects'), v.literal('reading'),
+          v.literal('personal_growth'), v.literal('learning_new_skills'), v.literal('mindfulness'), v.literal('tech_enthusiast'), v.literal('startups'),
+          v.literal('coding'), v.literal('community_service'), v.literal('sustainability'), v.literal('plant_parenting')
+        ))),
+        minAge: v.optional(v.number()),
+        maxAge: v.optional(v.number()),
+        maxDistance: v.optional(v.number()),
+      })),
+      // Progress tracking
+      progress: v.optional(v.object({
+        lastStepKey: v.optional(v.string()),
+        lastUpdatedAt: v.optional(v.number()),
+      })),
+    })),
+
     // 8C: Consent timestamp (required before permissions/photo upload)
     consentAcceptedAt: v.optional(v.number()),
 
@@ -1245,4 +1338,43 @@ export default defineSchema({
     .index('by_userId', ['userId'])
     .index('by_status', ['status'])
     .index('by_recoverUntil', ['recoverUntil']),
+
+  // System Configuration (key-value store for global settings)
+  systemConfig: defineTable({
+    key: v.string(),  // e.g., "resetEpoch", "maintenanceMode", etc.
+    value: v.any(),   // Flexible value (number, string, boolean, object)
+    updatedAt: v.number(),
+  })
+    .index('by_key', ['key']),
+
+  // User Room Preferences (muting chat rooms)
+  userRoomPrefs: defineTable({
+    userId: v.id('users'),
+    roomId: v.string(),  // Can be chat room ID or conversation ID
+    muted: v.boolean(),
+    updatedAt: v.number(),
+  })
+    .index('by_user', ['userId'])
+    .index('by_user_room', ['userId', 'roomId']),
+
+  // User Room Reports (track which rooms user has reported)
+  userRoomReports: defineTable({
+    userId: v.id('users'),
+    roomId: v.string(),
+    createdAt: v.number(),
+  })
+    .index('by_user', ['userId'])
+    .index('by_user_room', ['userId', 'roomId']),
+
+  // User Game Limits (track game-specific limits like bottle spin skips)
+  userGameLimits: defineTable({
+    userId: v.id('users'),
+    game: v.literal('bottleSpin'),
+    convoId: v.string(),
+    windowKey: v.string(),  // Time window key (e.g., "2024-01-15" for daily limits)
+    skipCount: v.number(),
+    updatedAt: v.number(),
+  })
+    .index('by_user', ['userId'])
+    .index('by_user_game_convo', ['userId', 'game', 'convoId', 'windowKey']),
 });

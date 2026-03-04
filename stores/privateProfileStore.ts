@@ -1,6 +1,8 @@
+/**
+ * STORAGE POLICY: NO local persistence. Convex is ONLY source of truth.
+ * Store is in-memory only. Any required rehydration must come from Convex queries/mutations.
+ */
 import { create } from 'zustand';
-import { createJSONStorage, persist } from 'zustand/middleware';
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import type { PrivateIntentKey, PrivateDesireTag, PrivateBoundary, DesireCategory, PhotoSlots9 } from '@/types';
 import { createEmptyPhotoSlots } from '@/types';
 
@@ -243,265 +245,200 @@ const initialWizardState = {
   recoverUntil: null,
 };
 
-export const usePrivateProfileStore = create<PrivateProfileState>()(
-  persist(
-    (set) => ({
-      // Legacy profile fields
-      profile: {
-        username: 'Anonymous_User',
-        bio: '',
-        desireCategories: [],
-        blurPhoto: true,
-      },
-      isSetup: false,
-      setProfile: (updates) =>
-        set((state) => ({ profile: { ...state.profile, ...updates } })),
-      markSetup: () => set({ isSetup: true }),
+export const usePrivateProfileStore = create<PrivateProfileState>()((set) => ({
+  // Legacy profile fields
+  profile: {
+    username: 'Anonymous_User',
+    bio: '',
+    desireCategories: [],
+    blurPhoto: true,
+  },
+  isSetup: false,
+  setProfile: (updates) =>
+    set((state) => ({ profile: { ...state.profile, ...updates } })),
+  markSetup: () => set({ isSetup: true }),
 
-      // Wizard state
-      ...initialWizardState,
-      _hasHydrated: false,
+  // Wizard state
+  ...initialWizardState,
+  _hasHydrated: true,
 
-      // Actions
-      setCurrentStep: (step) => set({ currentStep: step }),
-      setSelectedPhotos: (ids, urls) => set({ selectedPhotoIds: ids, selectedPhotoUrls: urls }),
-      setBlurredPhotoLocalUris: (uris) => set({ blurredPhotoLocalUris: uris }),
-      setBlurredStorageIds: (ids) => set({ blurredStorageIds: ids }),
-      setBlurredPhotoUrls: (urls) => set({ blurredPhotoUrls: urls }),
-      setIntentKeys: (keys) => set({ intentKeys: keys }),
-      setDesireTags: (tags) => set({ desireTags: tags }),
-      setBoundaries: (boundaries) => set({ boundaries }),
-      setPrivateBio: (bio) => set({ privateBio: bio }),
-      setConsentAgreed: (agreed) => set({ consentAgreed: agreed }),
-      setProfileInfo: (info) => set(info),
-      // Individual profile field setters
-      setGender: (gender) => set({ gender }),
-      setHeight: (height) => set({ height }),
-      setSmoking: (smoking) => set({ smoking }),
-      setDrinking: (drinking) => set({ drinking }),
-      setEducation: (education) => set({ education }),
-      setReligion: (religion) => set({ religion }),
-      setIsSetupComplete: (complete) => set({ isSetupComplete: complete }),
-      setConvexProfileId: (id) => set({ convexProfileId: id }),
-      resetWizard: () => set(initialWizardState),
-      resetPhase2: () => set((state) => ({
-        // Reset all wizard state EXCEPT permanent onboarding flag
-        ...initialWizardState,
-        // PRESERVE permanent flag - onboarding never shows again once completed
-        phase2OnboardingCompleted: state.phase2OnboardingCompleted,
-        // Reset photos confirmed flag
-        phase2PhotosConfirmed: false,
-        // Also reset legacy profile fields
-        profile: {
-          username: 'Anonymous_User',
-          bio: '',
-          desireCategories: [],
-          blurPhoto: true,
-        },
-        isSetup: false,
-      })),
-      setHasHydrated: (hydrated) => set({ _hasHydrated: hydrated }),
-
-      // Phase-2 setup actions
-      setAcceptedTermsAt: (timestamp) => set({ acceptedTermsAt: timestamp }),
-      setBlurMyPhoto: (blur) => set({ blurMyPhoto: blur }),
-      setPhotoBlurSlots: (slots) => set({ photoBlurSlots: slots }),
-      togglePhotoBlurSlot: (slotIndex) => set((state) => {
-        const next = [...state.photoBlurSlots];
-        next[slotIndex] = !next[slotIndex];
-        return { photoBlurSlots: next };
-      }),
-      importPhase1Data: (data) => {
-        const startTime = __DEV__ ? Date.now() : 0;
-        if (__DEV__) console.log('[P2 IMPORT] start');
-
-        // GUARD: Check if we have any photos to process
-        const hasPhotoSlots = data.photoSlots && data.photoSlots.some((s) => s !== null);
-        const hasLegacyPhotos = data.photos && data.photos.length > 0;
-
-        // If no photos at all, do minimal import (just basic profile info)
-        if (!hasPhotoSlots && !hasLegacyPhotos) {
-          if (__DEV__) {
-            console.log('[P2 IMPORT] skip heavy work: no photos');
-          }
-          // Minimal state update - no photo processing
-          set({
-            displayName: data.name || '',
-            gender: data.gender || '',
-            phase1PhotoSlots: createEmptyPhotoSlots(),
-          });
-          if (__DEV__) {
-            console.log(`[P2 IMPORT] end (duration=${Date.now() - startTime}ms, minimal)`);
-          }
-          return;
-        }
-
-        // Calculate age from DOB using local parsing (not UTC)
-        let age = 0;
-        if (data.dateOfBirth) {
-          const dob = parseDOBString(data.dateOfBirth);
-          const today = new Date();
-          age = today.getFullYear() - dob.getFullYear();
-          const monthDiff = today.getMonth() - dob.getMonth();
-          if (monthDiff < 0 || (monthDiff === 0 && today.getDate() < dob.getDate())) {
-            age--;
-          }
-        }
-
-        // Convert maxDistance from miles to km (Phase-1 stores in miles)
-        const maxDistanceKm = data.maxDistance ? Math.round(data.maxDistance * 1.60934) : 50;
-
-        // SLOT-PRESERVING: Use photoSlots if available, otherwise convert from legacy photos array
-        let photoSlots: PhotoSlots9;
-        if (data.photoSlots) {
-          // Use the slot-based array directly
-          photoSlots = data.photoSlots;
-        } else {
-          // Legacy: convert photos array to slots (loses slot info, places in order)
-          photoSlots = createEmptyPhotoSlots();
-          data.photos.forEach((p, idx) => {
-            if (idx < 9 && p.url) {
-              photoSlots[idx] = p.url;
-            }
-          });
-        }
-
-        // DEBUG: Log what we're storing
-        if (__DEV__) {
-          const nonNullIndices = photoSlots
-            .map((uri, idx) => (uri ? idx : -1))
-            .filter((idx) => idx >= 0);
-          console.log('[privateProfileStore] importPhase1Data:', {
-            photoSlotsProvided: !!data.photoSlots,
-            nonNullSlots: nonNullIndices,
-            firstUri: photoSlots.find(Boolean)?.slice(-40) || 'none',
-          });
-        }
-
-        set({
-          // Store Phase-1 photo slots (9 slots, preserving positions)
-          phase1PhotoSlots: photoSlots,
-          // Import profile info
-          displayName: data.name || '',
-          age,
-          city: data.city || '',
-          gender: data.gender || '',
-          // Import hobbies from activities
-          hobbies: data.activities || [],
-          // Import verification status
-          isVerified: data.isVerified || false,
-          // Extended fields for info preview
-          height: data.height ?? null,
-          smoking: data.smoking ?? null,
-          drinking: data.drinking ?? null,
-          kids: data.kids ?? null,
-          education: data.education ?? null,
-          religion: data.religion ?? null,
-          maxDistanceKm,
-        });
-
-        if (__DEV__) {
-          console.log(`[P2 IMPORT] end (duration=${Date.now() - startTime}ms)`);
-        }
-      },
-      completeSetup: () => set({
-        isSetupComplete: true,
-        phase2OnboardingCompleted: true, // Permanent flag - never shows onboarding again
-        phase2SetupVersion: CURRENT_PHASE2_SETUP_VERSION,
-      }),
-      setPhase2PhotosConfirmed: (confirmed) => set({ phase2PhotosConfirmed: confirmed }),
-      setPrivateEntryNavLock: (locked) => set({ privateEntryNavLock: locked }),
-
-      // PHASE 1 Settings Actions — Implementations
-      setDefaultPhotoVisibility: (visibility) => set({ defaultPhotoVisibility: visibility }),
-      setAllowUnblurRequests: (allow) => set({ allowUnblurRequests: allow }),
-      setDefaultSecureMediaTimer: (timer) => set({ defaultSecureMediaTimer: timer }),
-      setDefaultSecureMediaViewingMode: (mode) => set({ defaultSecureMediaViewingMode: mode }),
-      setCommunicationStyle: (style) => set({ communicationStyle: style }),
-      setDesirelandVisibility: (visibility) => set({ desirelandVisibility: visibility }),
-      setAgeVisibility: (visibility) => set({ ageVisibility: visibility }),
-      setWhoCanMessageMe: (who) => set({ whoCanMessageMe: who }),
-      setSafeMode: (enabled) => set({ safeMode: enabled }),
-
-      // Deletion actions
-      initiatePrivateDataDeletion: () => {
-        const now = Date.now();
-        const thirtyDaysMs = 30 * 24 * 60 * 60 * 1000;
-        set({
-          deletionStatus: 'pending_deletion',
-          deletedAt: now,
-          recoverUntil: now + thirtyDaysMs,
-        });
-      },
-      recoverPrivateData: () => set({
-        deletionStatus: 'active',
-        deletedAt: null,
-        recoverUntil: null,
-      }),
-    }),
-    {
-      name: 'private-profile-store',
-      storage: createJSONStorage(() => AsyncStorage),
-      partialize: (state) => ({
-        currentStep: state.currentStep,
-        selectedPhotoIds: state.selectedPhotoIds,
-        selectedPhotoUrls: state.selectedPhotoUrls,
-        blurredStorageIds: state.blurredStorageIds,
-        blurredPhotoUrls: state.blurredPhotoUrls,
-        intentKeys: state.intentKeys,
-        desireTags: state.desireTags,
-        boundaries: state.boundaries,
-        privateBio: state.privateBio,
-        consentAgreed: state.consentAgreed,
-        displayName: state.displayName,
-        age: state.age,
-        city: state.city,
-        gender: state.gender,
-        hobbies: state.hobbies,
-        isVerified: state.isVerified,
-        // Extended imported fields
-        height: state.height,
-        smoking: state.smoking,
-        drinking: state.drinking,
-        kids: state.kids,
-        education: state.education,
-        religion: state.religion,
-        maxDistanceKm: state.maxDistanceKm,
-        isSetupComplete: state.isSetupComplete,
-        phase2OnboardingCompleted: state.phase2OnboardingCompleted, // Permanent flag
-        convexProfileId: state.convexProfileId,
-        // Phase-2 setup tracking
-        acceptedTermsAt: state.acceptedTermsAt,
-        phase2SetupVersion: state.phase2SetupVersion,
-        blurMyPhoto: state.blurMyPhoto,
-        photoBlurSlots: state.photoBlurSlots,
-        phase2PhotosConfirmed: state.phase2PhotosConfirmed,
-        // NOTE: phase1PhotoSlots intentionally NOT persisted
-        // It's re-imported from onboardingStore each session to avoid stale data
-        // Legacy
-        profile: state.profile,
-        isSetup: state.isSetup,
-        // PHASE 1 Settings
-        defaultPhotoVisibility: state.defaultPhotoVisibility,
-        allowUnblurRequests: state.allowUnblurRequests,
-        defaultSecureMediaTimer: state.defaultSecureMediaTimer,
-        defaultSecureMediaViewingMode: state.defaultSecureMediaViewingMode,
-        communicationStyle: state.communicationStyle,
-        desirelandVisibility: state.desirelandVisibility,
-        ageVisibility: state.ageVisibility,
-        whoCanMessageMe: state.whoCanMessageMe,
-        safeMode: state.safeMode,
-        // Deletion state
-        deletionStatus: state.deletionStatus,
-        deletedAt: state.deletedAt,
-        recoverUntil: state.recoverUntil,
-      }),
-      onRehydrateStorage: () => (state) => {
-        state?.setHasHydrated(true);
-      },
+  // Actions
+  setCurrentStep: (step) => set({ currentStep: step }),
+  setSelectedPhotos: (ids, urls) => set({ selectedPhotoIds: ids, selectedPhotoUrls: urls }),
+  setBlurredPhotoLocalUris: (uris) => set({ blurredPhotoLocalUris: uris }),
+  setBlurredStorageIds: (ids) => set({ blurredStorageIds: ids }),
+  setBlurredPhotoUrls: (urls) => set({ blurredPhotoUrls: urls }),
+  setIntentKeys: (keys) => set({ intentKeys: keys }),
+  setDesireTags: (tags) => set({ desireTags: tags }),
+  setBoundaries: (boundaries) => set({ boundaries }),
+  setPrivateBio: (bio) => set({ privateBio: bio }),
+  setConsentAgreed: (agreed) => set({ consentAgreed: agreed }),
+  setProfileInfo: (info) => set(info),
+  // Individual profile field setters
+  setGender: (gender) => set({ gender }),
+  setHeight: (height) => set({ height }),
+  setSmoking: (smoking) => set({ smoking }),
+  setDrinking: (drinking) => set({ drinking }),
+  setEducation: (education) => set({ education }),
+  setReligion: (religion) => set({ religion }),
+  setIsSetupComplete: (complete) => set({ isSetupComplete: complete }),
+  setConvexProfileId: (id) => set({ convexProfileId: id }),
+  resetWizard: () => set(initialWizardState),
+  resetPhase2: () => set((state) => ({
+    // Reset all wizard state EXCEPT permanent onboarding flag
+    ...initialWizardState,
+    // PRESERVE permanent flag - onboarding never shows again once completed
+    phase2OnboardingCompleted: state.phase2OnboardingCompleted,
+    // Reset photos confirmed flag
+    phase2PhotosConfirmed: false,
+    // Also reset legacy profile fields
+    profile: {
+      username: 'Anonymous_User',
+      bio: '',
+      desireCategories: [],
+      blurPhoto: true,
     },
-  ),
-);
+    isSetup: false,
+  })),
+  setHasHydrated: (hydrated) => set({ _hasHydrated: true }), // No-op
+
+  // Phase-2 setup actions
+  setAcceptedTermsAt: (timestamp) => set({ acceptedTermsAt: timestamp }),
+  setBlurMyPhoto: (blur) => set({ blurMyPhoto: blur }),
+  setPhotoBlurSlots: (slots) => set({ photoBlurSlots: slots }),
+  togglePhotoBlurSlot: (slotIndex) => set((state) => {
+    const next = [...state.photoBlurSlots];
+    next[slotIndex] = !next[slotIndex];
+    return { photoBlurSlots: next };
+  }),
+  importPhase1Data: (data) => {
+    const startTime = __DEV__ ? Date.now() : 0;
+    if (__DEV__) console.log('[P2 IMPORT] start');
+
+    // GUARD: Check if we have any photos to process
+    const hasPhotoSlots = data.photoSlots && data.photoSlots.some((s) => s !== null);
+    const hasLegacyPhotos = data.photos && data.photos.length > 0;
+
+    // If no photos at all, do minimal import (just basic profile info)
+    if (!hasPhotoSlots && !hasLegacyPhotos) {
+      if (__DEV__) {
+        console.log('[P2 IMPORT] skip heavy work: no photos');
+      }
+      // Minimal state update - no photo processing
+      set({
+        displayName: data.name || '',
+        gender: data.gender || '',
+        phase1PhotoSlots: createEmptyPhotoSlots(),
+      });
+      if (__DEV__) {
+        console.log(`[P2 IMPORT] end (duration=${Date.now() - startTime}ms, minimal)`);
+      }
+      return;
+    }
+
+    // Calculate age from DOB using local parsing (not UTC)
+    let age = 0;
+    if (data.dateOfBirth) {
+      const dob = parseDOBString(data.dateOfBirth);
+      const today = new Date();
+      age = today.getFullYear() - dob.getFullYear();
+      const monthDiff = today.getMonth() - dob.getMonth();
+      if (monthDiff < 0 || (monthDiff === 0 && today.getDate() < dob.getDate())) {
+        age--;
+      }
+    }
+
+    // Convert maxDistance from miles to km (Phase-1 stores in miles)
+    const maxDistanceKm = data.maxDistance ? Math.round(data.maxDistance * 1.60934) : 50;
+
+    // SLOT-PRESERVING: Use photoSlots if available, otherwise convert from legacy photos array
+    let photoSlots: PhotoSlots9;
+    if (data.photoSlots) {
+      // Use the slot-based array directly
+      photoSlots = data.photoSlots;
+    } else {
+      // Legacy: convert photos array to slots (loses slot info, places in order)
+      photoSlots = createEmptyPhotoSlots();
+      data.photos.forEach((p, idx) => {
+        if (idx < 9 && p.url) {
+          photoSlots[idx] = p.url;
+        }
+      });
+    }
+
+    // DEBUG: Log what we're storing
+    if (__DEV__) {
+      const nonNullIndices = photoSlots
+        .map((uri, idx) => (uri ? idx : -1))
+        .filter((idx) => idx >= 0);
+      console.log('[privateProfileStore] importPhase1Data:', {
+        photoSlotsProvided: !!data.photoSlots,
+        nonNullSlots: nonNullIndices,
+        firstUri: photoSlots.find(Boolean)?.slice(-40) || 'none',
+      });
+    }
+
+    set({
+      // Store Phase-1 photo slots (9 slots, preserving positions)
+      phase1PhotoSlots: photoSlots,
+      // Import profile info
+      displayName: data.name || '',
+      age,
+      city: data.city || '',
+      gender: data.gender || '',
+      // Import hobbies from activities
+      hobbies: data.activities || [],
+      // Import verification status
+      isVerified: data.isVerified || false,
+      // Extended fields for info preview
+      height: data.height ?? null,
+      smoking: data.smoking ?? null,
+      drinking: data.drinking ?? null,
+      kids: data.kids ?? null,
+      education: data.education ?? null,
+      religion: data.religion ?? null,
+      maxDistanceKm,
+    });
+
+    if (__DEV__) {
+      console.log(`[P2 IMPORT] end (duration=${Date.now() - startTime}ms)`);
+    }
+  },
+  completeSetup: () => set({
+    isSetupComplete: true,
+    phase2OnboardingCompleted: true, // Permanent flag - never shows onboarding again
+    phase2SetupVersion: CURRENT_PHASE2_SETUP_VERSION,
+  }),
+  setPhase2PhotosConfirmed: (confirmed) => set({ phase2PhotosConfirmed: confirmed }),
+  setPrivateEntryNavLock: (locked) => set({ privateEntryNavLock: locked }),
+
+  // PHASE 1 Settings Actions — Implementations
+  setDefaultPhotoVisibility: (visibility) => set({ defaultPhotoVisibility: visibility }),
+  setAllowUnblurRequests: (allow) => set({ allowUnblurRequests: allow }),
+  setDefaultSecureMediaTimer: (timer) => set({ defaultSecureMediaTimer: timer }),
+  setDefaultSecureMediaViewingMode: (mode) => set({ defaultSecureMediaViewingMode: mode }),
+  setCommunicationStyle: (style) => set({ communicationStyle: style }),
+  setDesirelandVisibility: (visibility) => set({ desirelandVisibility: visibility }),
+  setAgeVisibility: (visibility) => set({ ageVisibility: visibility }),
+  setWhoCanMessageMe: (who) => set({ whoCanMessageMe: who }),
+  setSafeMode: (enabled) => set({ safeMode: enabled }),
+
+  // Deletion actions
+  initiatePrivateDataDeletion: () => {
+    const now = Date.now();
+    const thirtyDaysMs = 30 * 24 * 60 * 60 * 1000;
+    set({
+      deletionStatus: 'pending_deletion',
+      deletedAt: now,
+      recoverUntil: now + thirtyDaysMs,
+    });
+  },
+  recoverPrivateData: () => set({
+    deletionStatus: 'active',
+    deletedAt: null,
+    recoverUntil: null,
+  }),
+}));
 
 // Helper to validate photo URLs
 function isValidPhotoUrl(url: unknown): url is string {

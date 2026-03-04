@@ -1,6 +1,7 @@
 import { v } from 'convex/values';
 import { mutation, query, internalMutation } from './_generated/server';
 import { Id } from './_generated/dataModel';
+import { resolveUserIdByAuthId } from './helpers';
 
 // 4-2: Notification TTL (24 hours in milliseconds)
 const NOTIFICATION_TTL_MS = 24 * 60 * 60 * 1000;
@@ -9,12 +10,20 @@ const NOTIFICATION_TTL_MS = 24 * 60 * 60 * 1000;
 // 4-3: Filters out expired notifications server-side to prevent render race
 export const getNotifications = query({
   args: {
-    userId: v.id('users'),
+    userId: v.union(v.id('users'), v.string()), // Accept both Convex ID and authUserId string
     limit: v.optional(v.number()),
     unreadOnly: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
-    const { userId, limit = 50, unreadOnly = false } = args;
+    const { limit = 50, unreadOnly = false } = args;
+
+    // Map authUserId -> Convex Id<"users"> (QUERY: read-only, no creation)
+    const userId = await resolveUserIdByAuthId(ctx, args.userId as string);
+    if (!userId) {
+      console.log('[getNotifications] User not found for authUserId:', args.userId);
+      return [];
+    }
+
     const now = Date.now();
 
     let queryBuilder = ctx.db
@@ -41,13 +50,20 @@ export const getNotifications = query({
 // 4-3: Filters out expired notifications server-side
 export const getUnreadCount = query({
   args: {
-    userId: v.id('users'),
+    userId: v.union(v.id('users'), v.string()), // Accept both Convex ID and authUserId string
   },
   handler: async (ctx, args) => {
+    // Map authUserId -> Convex Id<"users"> (QUERY: read-only, no creation)
+    const userId = await resolveUserIdByAuthId(ctx, args.userId as string);
+    if (!userId) {
+      console.log('[getUnreadCount] User not found for authUserId:', args.userId);
+      return 0;
+    }
+
     const now = Date.now();
     const notifications = await ctx.db
       .query('notifications')
-      .withIndex('by_user', (q) => q.eq('userId', args.userId))
+      .withIndex('by_user', (q) => q.eq('userId', userId))
       .filter((q) =>
         q.and(
           q.eq(q.field('readAt'), undefined),

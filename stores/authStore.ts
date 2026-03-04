@@ -1,14 +1,13 @@
 import { create } from "zustand";
-import { persist, createJSONStorage } from "zustand/middleware";
-import AsyncStorage from "@react-native-async-storage/async-storage";
 import { markTiming } from "@/utils/startupTiming";
 import { useOnboardingStore } from "@/stores/onboardingStore";
-import { clearAuthBootCache } from "@/stores/authBootCache";
-import { clearBootCache } from "@/stores/bootCache";
 import { isDemoMode } from "@/hooks/useConvex";
 
-// Hydration timing: capture when store module loads
-const AUTH_STORE_LOAD_TIME = Date.now();
+// STORAGE POLICY ENFORCEMENT:
+// This store contains user authentication state (userId, token, onboarding flags).
+// Per strict requirement: NO local persistence of user information.
+// All auth state is ephemeral (in-memory only) and must be rehydrated from Convex on app boot.
+// Convex is the ONLY source of truth.
 
 interface AuthState {
   isAuthenticated: boolean;
@@ -49,159 +48,100 @@ interface AuthState {
   setSessionValidated: (validated: boolean, error?: string | null) => void;
 }
 
-// C8 fix: hydration timeout constant
-const HYDRATION_TIMEOUT_MS = 5000;
+// NO PERSISTENCE: This is an in-memory store only.
+// Auth state is rehydrated from Convex queries on app boot.
+export const useAuthStore = create<AuthState>()((set) => ({
+  isAuthenticated: false,
+  userId: null,
+  token: null,
+  isLoading: false,
+  error: null,
+  onboardingCompleted: false,
+  faceVerificationPassed: false,
+  faceVerificationPending: false,
+  // Always true since there's no async hydration from AsyncStorage
+  _hasHydrated: true,
+  _sessionValidated: false,
+  _sessionValidationError: null,
 
-export const useAuthStore = create<AuthState>()(
-  persist(
-    (set) => ({
+  setAuth: (userId, token, onboardingCompleted) =>
+    set({
+      isAuthenticated: true,
+      userId,
+      token,
+      error: null,
+      onboardingCompleted,
+      // Reset validation state on new auth
+      _sessionValidated: false,
+      _sessionValidationError: null,
+    }),
+
+  setLoading: (isLoading) => set({ isLoading }),
+
+  setError: (error) => set({ error, isLoading: false }),
+
+  setOnboardingCompleted: (completed) =>
+    set({ onboardingCompleted: completed }),
+
+  setFaceVerificationPassed: (passed) =>
+    set({ faceVerificationPassed: passed }),
+
+  setFaceVerificationPending: (pending) =>
+    set({ faceVerificationPending: pending }),
+
+  // Logout clears LOCAL state ONLY — server data is untouched
+  // This follows the "Logout ≠ Delete" principle
+  logout: () => {
+    // Reset onboarding store to prevent photo/data leakage between users
+    useOnboardingStore.getState().reset();
+
+    // BUG B FIX: Clear demo session to prevent stale currentDemoUserId
+    // causing welcome.tsx to redirect to onboarding instead of showing welcome
+    if (isDemoMode) {
+      // Use dynamic require to avoid circular dependency
+      const { useDemoStore } = require('@/stores/demoStore');
+      useDemoStore.getState().demoLogout();
+      if (__DEV__) console.log('[AUTH] logout: called demoLogout()');
+    }
+    if (__DEV__) console.log('[AUTH] logout: cleared onboardingStore');
+
+    // Reset verification store to prevent badge leakage between accounts
+    const { useVerificationStore } = require('@/stores/verificationStore');
+    useVerificationStore.getState().resetVerification();
+
+    set({
       isAuthenticated: false,
       userId: null,
       token: null,
-      isLoading: false,
       error: null,
       onboardingCompleted: false,
       faceVerificationPassed: false,
       faceVerificationPending: false,
-      _hasHydrated: false,
       _sessionValidated: false,
       _sessionValidationError: null,
+    });
+  },
 
-      setAuth: (userId, token, onboardingCompleted) =>
-        set({
-          isAuthenticated: true,
-          userId,
-          token,
-          error: null,
-          onboardingCompleted,
-          // Reset validation state on new auth
-          _sessionValidated: false,
-          _sessionValidationError: null,
-        }),
+  // No-op for compatibility - always hydrated since no AsyncStorage
+  setHasHydrated: (state) => set({ _hasHydrated: true }),
 
-      setLoading: (isLoading) => set({ isLoading }),
+  // Sync local state from server validation result
+  // SAFETY: This only UPDATES local state from server truth
+  // It NEVER modifies server data (read-only sync)
+  syncFromServerValidation: (userInfo) =>
+    set((state) => ({
+      // Only update onboardingCompleted if server says it's true
+      // NEVER reset to false — prevents onboarding reset
+      onboardingCompleted: userInfo.onboardingCompleted || state.onboardingCompleted,
+    })),
 
-      setError: (error) => set({ error, isLoading: false }),
-
-      setOnboardingCompleted: (completed) =>
-        set({ onboardingCompleted: completed }),
-
-      setFaceVerificationPassed: (passed) =>
-        set({ faceVerificationPassed: passed }),
-
-      setFaceVerificationPending: (pending) =>
-        set({ faceVerificationPending: pending }),
-
-      // Logout clears LOCAL state ONLY — server data is untouched
-      // This follows the "Logout ≠ Delete" principle
-      logout: () => {
-        // Reset onboarding store to prevent photo/data leakage between users
-        useOnboardingStore.getState().reset();
-        // Clear boot caches to prevent stale routing on next boot
-        clearAuthBootCache();
-        clearBootCache();
-        // BUG B FIX: Clear demo session to prevent stale currentDemoUserId
-        // causing welcome.tsx to redirect to onboarding instead of showing welcome
-        if (isDemoMode) {
-          // Use dynamic require to avoid circular dependency
-          const { useDemoStore } = require('@/stores/demoStore');
-          useDemoStore.getState().demoLogout();
-          if (__DEV__) console.log('[AUTH] logout: called demoLogout()');
-        }
-        if (__DEV__) console.log('[AUTH] logout: cleared onboardingStore');
-        if (__DEV__) console.log('[BOOT_CACHE] cleared boot caches on logout');
-
-        // Reset verification store to prevent badge leakage between accounts
-        const { useVerificationStore } = require('@/stores/verificationStore');
-        useVerificationStore.getState().resetVerification();
-
-        set({
-          isAuthenticated: false,
-          userId: null,
-          token: null,
-          error: null,
-          onboardingCompleted: false,
-          faceVerificationPassed: false,
-          faceVerificationPending: false,
-          _sessionValidated: false,
-          _sessionValidationError: null,
-        });
-      },
-
-      setHasHydrated: (state) => set({ _hasHydrated: state }),
-
-      // Sync local state from server validation result
-      // SAFETY: This only UPDATES local state from server truth
-      // It NEVER modifies server data (read-only sync)
-      syncFromServerValidation: (userInfo) =>
-        set((state) => ({
-          // Only update onboardingCompleted if server says it's true
-          // NEVER reset to false — prevents onboarding reset
-          onboardingCompleted: userInfo.onboardingCompleted || state.onboardingCompleted,
-        })),
-
-      // Mark session validation complete (success or failure)
-      setSessionValidated: (validated, error = null) =>
-        set({
-          _sessionValidated: true,
-          _sessionValidationError: validated ? null : error,
-        }),
+  // Mark session validation complete (success or failure)
+  setSessionValidated: (validated, error = null) =>
+    set({
+      _sessionValidated: true,
+      _sessionValidationError: validated ? null : error,
     }),
-    {
-      name: "auth-storage",
-      storage: createJSONStorage(() => AsyncStorage),
-      onRehydrateStorage: () => (state, error) => {
-        const hydrationTime = Date.now() - AUTH_STORE_LOAD_TIME;
-        // C9 fix: log rehydration errors
-        if (error) {
-          console.error('[authStore] Rehydration error:', error);
-        }
-        if (__DEV__) {
-          console.log(`[HYDRATION] authStore: ${hydrationTime}ms`);
-        }
-        // RACE FIX: Clear fallback timeout BEFORE setting hydrated state
-        // This ensures the timeout callback won't fire after successful hydration
-        clearAuthHydrationTimeout();
-        state?.setHasHydrated(true);
-        // Milestone B: authStore hydration complete
-        markTiming('auth_hydrated');
-      },
-    },
-  ),
-);
+}));
 
-// BUGFIX #14: Store timeout ID to prevent multiple timers on hot reload
-let _authHydrationTimeoutId: ReturnType<typeof setTimeout> | null = null;
-
-/**
- * RACE FIX: Clear the hydration timeout.
- * Called when hydration completes successfully (to cancel the fallback)
- * and on hot reload (to prevent stale timers).
- */
-function clearAuthHydrationTimeout() {
-  if (_authHydrationTimeoutId !== null) {
-    clearTimeout(_authHydrationTimeoutId);
-    _authHydrationTimeoutId = null;
-  }
-}
-
-function setupAuthHydrationTimeout() {
-  // Clear any existing timeout (hot reload safety)
-  clearAuthHydrationTimeout();
-
-  _authHydrationTimeoutId = setTimeout(() => {
-    // RACE FIX: Double-check hydration state before forcing
-    // This prevents overwriting if hydration completed between timer start and fire
-    if (!useAuthStore.getState()._hasHydrated) {
-      console.warn('[authStore] Hydration timeout — forcing hydrated state');
-      useAuthStore.getState().setHasHydrated(true);
-    }
-    _authHydrationTimeoutId = null;
-  }, HYDRATION_TIMEOUT_MS);
-}
-
-// C8 fix: hydration timeout fallback — if AsyncStorage blocks, force hydration after timeout
-setupAuthHydrationTimeout();
-
-// Export for use in onRehydrateStorage callback
-export { clearAuthHydrationTimeout };
+// Milestone B: authStore ready (no async hydration needed)
+markTiming('auth_hydrated');

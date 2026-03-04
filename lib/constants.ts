@@ -427,4 +427,5 @@ export const INCOGNITO_COLORS = {
   text: '#E0E0E0',
   textLight: '#9E9E9E',
   primary: '#E94560',
+  border: '#2D3748',
 };

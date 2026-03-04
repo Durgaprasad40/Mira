@@ -1,6 +1,8 @@
+/**
+ * STORAGE POLICY: NO local persistence. Convex is ONLY source of truth.
+ * Store is in-memory only. Any required rehydration must come from Convex queries/mutations.
+ */
 import { create } from 'zustand';
-import { persist, createJSONStorage } from 'zustand/middleware';
-import AsyncStorage from '@react-native-async-storage/async-storage';
 import { useBlockStore } from './blockStore';
 import type { IncognitoConversation, IncognitoMessage } from '@/types';
 // NOTE: Phase-2 no longer seeds demo conversations/messages.
@@ -81,9 +83,6 @@ interface PrivateChatState {
   pruneDeletedMessages: () => void;
 }
 
-// BUGFIX #45: Module-level timeout ID for cancellable prune
-let _pruneTimeoutId: ReturnType<typeof setTimeout> | null = null;
-
 // Group demo messages by conversationId
 function groupMessages(msgs: IncognitoMessage[]): Record<string, IncognitoMessage[]> {
   const grouped: Record<string, IncognitoMessage[]> = {};
@@ -123,9 +122,7 @@ const DEMO_PENDING_DARES: PendingDare[] = [
   },
 ];
 
-export const usePrivateChatStore = create<PrivateChatState>()(
-  persist(
-    (set, get) => ({
+export const usePrivateChatStore = create<PrivateChatState>()((set, get) => ({
   unlockedUsers: [],
   isUnlocked: (userId) => get().unlockedUsers.some((u) => u.id === userId),
 
@@ -394,43 +391,7 @@ export const usePrivateChatStore = create<PrivateChatState>()(
 
       return { messages: prunedMessages };
     }),
-    }),
-    {
-      name: 'mira-private-chat-store',
-      storage: createJSONStorage(() => AsyncStorage),
-      partialize: (state) => ({
-        unlockedUsers: state.unlockedUsers,
-        conversations: state.conversations,
-        messages: state.messages,
-        pendingDares: state.pendingDares,
-        sentDares: state.sentDares,
-      }),
-      // BUGFIX #45: Store timeout ID to clear on re-init/hot reload
-      onRehydrateStorage: () => {
-        // Clear any previous timeout
-        if (_pruneTimeoutId !== null) {
-          clearTimeout(_pruneTimeoutId);
-          _pruneTimeoutId = null;
-        }
-        return (state, error) => {
-          if (error || !state) return;
-
-          // Phase-2 Fix B: DO NOT aggressively expire protected media on rehydration.
-          // file:// URIs from camera roll often persist after app restart.
-          // Let the viewer handle load failures gracefully instead of preemptively
-          // marking everything as expired. Only truly expired media (timer ended)
-          // should show as expired.
-
-          // Delay slightly to ensure store is fully initialized
-          _pruneTimeoutId = setTimeout(() => {
-            state.pruneDeletedMessages();
-            _pruneTimeoutId = null;
-          }, 100);
-        };
-      },
-    }
-  )
-);
+}));
 
 /**
  * DEV ONLY: Full Phase 2 "Start Fresh" reset for testing.
