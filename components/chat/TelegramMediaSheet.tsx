@@ -737,7 +737,7 @@ export function TelegramMediaSheet({
           'Camera and gallery permissions are required. Please enable them in Settings.',
           [
             { text: 'Cancel', style: 'cancel' },
-            { text: 'Open Settings', onPress: () => { try { Linking.openSettings(); } catch {} } },
+            { text: 'Open Settings', onPress: () => { void Linking.openSettings().catch(() => {}); } },
           ]
         );
         if (mountedRef.current) {
