@@ -40,15 +40,22 @@ import { PhotoSlots9, createEmptyPhotoSlots } from "@/types";
 const PHASE1_PHOTOS_DIR = "mira/phase1Photos/";
 
 /**
- * Check if a URI is a valid persistent photo URI.
- * Only accepts local file:// URIs that are NOT in cache directories.
+ * Check if a URI is a valid photo URI.
+ * Accepts:
+ * - Local file:// URIs (NOT in cache directories)
+ * - Remote https:// URLs (from Convex storage)
  */
 function isValidPhotoUri(uri: string | null | undefined): boolean {
   if (!uri || typeof uri !== 'string' || uri.length === 0) return false;
-  if (!uri.startsWith('file://')) return false;
-  if (uri.includes('/cache/') || uri.includes('/Cache/') || uri.includes('ImageManipulator')) return false;
-  if (uri.includes('unsplash.com')) return false;
-  return true;
+  // Accept https:// URLs (Convex storage, etc.)
+  if (uri.startsWith('https://')) return true;
+  // Accept file:// URIs but reject cache/temp directories
+  if (uri.startsWith('file://')) {
+    if (uri.includes('/cache/') || uri.includes('/Cache/') || uri.includes('ImageManipulator')) return false;
+    if (uri.includes('unsplash.com')) return false;
+    return true;
+  }
+  return false;
 }
 
 /**
@@ -216,10 +223,11 @@ export default function Phase2OnboardingTerms() {
   const pathname = usePathname();
   const insets = useSafeAreaInsets();
 
-  // Log mount for debugging
+  // Log mount for debugging - show isDemoMode for verification
   useEffect(() => {
     if (__DEV__) {
       console.log(`[P2] step1 MOUNTED pathname=${pathname}`);
+      console.log(`[P2] isDemoMode=${isDemoMode} env=${process.env.EXPO_PUBLIC_DEMO_MODE}`);
     }
     return () => {
       if (__DEV__) {
@@ -264,6 +272,13 @@ export default function Phase2OnboardingTerms() {
   // Query Phase-1 profile from Convex (the real source of truth after onboarding)
   const convexUser = useQuery(
     api.users.getCurrentUser,
+    !isDemoMode && userId ? { userId: userId as any } : 'skip'
+  );
+
+  // Query Phase-1 photos from Convex photos table (live mode only)
+  // Photos are stored separately from users - must query photos table directly
+  const convexPhotos = useQuery(
+    api.photos.getUserPhotos,
     !isDemoMode && userId ? { userId: userId as any } : 'skip'
   );
 
@@ -317,14 +332,48 @@ export default function Phase2OnboardingTerms() {
       const phase1User = isDemoMode ? demoUser : convexUser;
 
       // ============================================================
-      // SINGLE SOURCE OF TRUTH: Use getCurrentProfile() for import
-      // This ensures Phase-2 sees the same profile as Edit Profile
+      // SINGLE SOURCE OF TRUTH: Use mode-appropriate profile source
+      // Demo mode: demoStore.getCurrentProfile()
+      // Live mode: convexUser from Convex query
       // ============================================================
-      const canonicalProfile = useDemoStore.getState().getCurrentProfile();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      let canonicalProfile: any = null;
+
+      // Track source for logging
+      let profileSource = 'unknown';
+
+      if (isDemoMode) {
+        // Demo mode: Use demoStore as single source of truth
+        canonicalProfile = useDemoStore.getState().getCurrentProfile();
+        profileSource = 'demoStore.currentProfile';
+      } else if (convexUser) {
+        // Live mode: Use Convex user + photos table as single source of truth
+        // Photos are stored separately in photos table, NOT on user object
+        const livePhotos: { url: string }[] = Array.isArray(convexPhotos)
+          ? convexPhotos.map((p: { url: string }) => ({ url: p.url }))
+          : [];
+
+        canonicalProfile = {
+          userId: convexUser._id as string,
+          name: convexUser.name,
+          dateOfBirth: convexUser.dateOfBirth,
+          gender: convexUser.gender,
+          activities: convexUser.activities,
+          maxDistance: convexUser.maxDistance,
+          height: convexUser.height,
+          smoking: convexUser.smoking,
+          drinking: convexUser.drinking,
+          kids: convexUser.kids,
+          education: convexUser.education,
+          religion: convexUser.religion,
+          photos: livePhotos,
+        };
+        profileSource = 'live:convexUser+photosQuery';
+      }
 
       // FATAL: If no profile exists, block progression
       if (!canonicalProfile) {
-        console.error("[P2 IMPORT] FATAL: No current profile found");
+        console.error("[P2 IMPORT] FATAL: No current profile found", { isDemoMode, hasConvexUser: !!convexUser });
         Alert.alert("Error", "No profile found. Please complete Phase-1 setup first.");
         // O-001 FIX: Guard setState after unmount
         if (mountedRef.current) {
@@ -337,12 +386,12 @@ export default function Phase2OnboardingTerms() {
       let phase1PhotoSlots: PhotoSlots9 = createEmptyPhotoSlots();
 
       // Use photoSlots from canonical profile (single source of truth)
-      if (canonicalProfile.photoSlots && canonicalProfile.photoSlots.some((s) => s !== null)) {
+      if (canonicalProfile.photoSlots && canonicalProfile.photoSlots.some((s: string | null) => s !== null)) {
         phase1PhotoSlots = [...canonicalProfile.photoSlots] as PhotoSlots9;
       }
       // Fallback: Convert flat photos array to slots
       else if (canonicalProfile.photos && canonicalProfile.photos.length > 0) {
-        canonicalProfile.photos.forEach((p, idx) => {
+        canonicalProfile.photos.forEach((p: { url: string }, idx: number) => {
           if (idx < 9 && p.url) phase1PhotoSlots[idx] = p.url;
         });
       }
@@ -364,7 +413,8 @@ export default function Phase2OnboardingTerms() {
           profileId,
           name: canonicalProfile.name,
           nonNullSlots,
-          source: "demoStore.currentProfile",
+          photosFromQuery: Array.isArray(convexPhotos) ? convexPhotos.length : 0,
+          source: profileSource,
         });
       }
 

@@ -529,10 +529,17 @@ export const useDemoStore = create<DemoState>()((set, get) => ({
   // SINGLE SOURCE OF TRUTH: Get the canonical current user profile
   // HARD ASSERTIONS: No silent failures - log errors for debugging
   getCurrentProfile: () => {
+    // STABILITY FIX: In live mode, return null quietly (no error log)
+    // This function is demo-only; live mode should use Convex queries instead
+    const isDemoMode = process.env.EXPO_PUBLIC_DEMO_MODE === 'true';
+    if (!isDemoMode) {
+      return null;
+    }
+
     const state = get();
     const { currentDemoUserId, demoProfiles } = state;
 
-    // HARD ASSERTION: currentDemoUserId must be set
+    // HARD ASSERTION: currentDemoUserId must be set (demo mode only)
     if (!currentDemoUserId) {
       const authUserId = useAuthStore.getState().userId;
       console.error('[DemoStore] getCurrentProfile FAILED: currentDemoUserId is null', {

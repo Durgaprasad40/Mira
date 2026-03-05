@@ -35,6 +35,7 @@ import {
   PHASE2_MIN_PHOTOS,
 } from '@/stores/privateProfileStore';
 import { useDemoStore } from '@/stores/demoStore';
+import { isDemoMode } from '@/hooks/useConvex';
 
 const C = INCOGNITO_COLORS;
 const GRID_SLOTS = 9;
@@ -148,22 +149,49 @@ export default function Phase2PhotoSelect() {
     }
   }, [_hasHydrated, phase2PhotosConfirmed, photosValidated, hasValidPhotos, router]);
 
-  // Source: Phase-1 photos
+  // Source: Phase-1 photos - use correct store based on mode
+  // Demo mode: demoStore.getCurrentProfile().photoSlots
+  // Live mode: privateProfileStore.phase1PhotoSlots (imported from Convex)
   const demoProfiles = useDemoStore((s) => s.demoProfiles);
   const currentDemoUserId = useDemoStore((s) => s.currentDemoUserId);
   const getCurrentProfile = useDemoStore((s) => s.getCurrentProfile);
 
-  const phase1PhotoSlots = useMemo(() => {
-    const profile = getCurrentProfile();
-    const slots = profile?.photoSlots || createEmptySlots();
-    return slots;
-  }, [getCurrentProfile, demoProfiles, currentDemoUserId]);
+  // Live mode: Read from privateProfileStore where index.tsx imported the photos
+  const privateStorePhotoSlots = usePrivateProfileStore((s) => s.phase1PhotoSlots);
+  const privateStoreDisplayName = usePrivateProfileStore((s) => s.displayName);
+  const privateStoreAge = usePrivateProfileStore((s) => s.age);
+  const privateStoreGender = usePrivateProfileStore((s) => s.gender);
 
-  // Profile info from Phase-1
-  const phase1Profile = useMemo(() => getCurrentProfile(), [getCurrentProfile, demoProfiles, currentDemoUserId]);
-  const displayName = phase1Profile?.name || 'Anonymous';
-  const age = phase1Profile?.dateOfBirth ? calculateAgeFromDob(phase1Profile.dateOfBirth) : 0;
-  const gender = phase1Profile?.gender || '';
+  const phase1PhotoSlots = useMemo(() => {
+    if (isDemoMode) {
+      // Demo mode: Use demoStore
+      const profile = getCurrentProfile();
+      const slots = profile?.photoSlots || createEmptySlots();
+      if (__DEV__) {
+        console.log('[P2 PhotoSelect] source=demoStore, slots:', slots.filter(Boolean).length);
+      }
+      return slots;
+    } else {
+      // Live mode: Use privateProfileStore (imported from Convex in index.tsx)
+      if (__DEV__) {
+        const first2 = privateStorePhotoSlots.filter(Boolean).slice(0, 2);
+        console.log('[P2 PhotoSelect] source=privateProfileStore, slots:', privateStorePhotoSlots.filter(Boolean).length);
+        console.log('[P2 PhotoSelect] first 2 stored URLs:', first2);
+      }
+      return privateStorePhotoSlots;
+    }
+  }, [isDemoMode, getCurrentProfile, demoProfiles, currentDemoUserId, privateStorePhotoSlots]);
+
+  // Profile info from Phase-1 (mode-aware)
+  const displayName = isDemoMode
+    ? (getCurrentProfile()?.name || 'Anonymous')
+    : (privateStoreDisplayName || 'Anonymous');
+  const age = isDemoMode
+    ? (getCurrentProfile()?.dateOfBirth ? calculateAgeFromDob(getCurrentProfile()?.dateOfBirth) : 0)
+    : (privateStoreAge || 0);
+  const gender = isDemoMode
+    ? (getCurrentProfile()?.gender || '')
+    : (privateStoreGender || '');
 
   // Store actions
   const setSelectedPhotos = usePrivateProfileStore((s) => s.setSelectedPhotos);
