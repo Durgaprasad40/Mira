@@ -940,6 +940,14 @@ export const completeOnboarding = mutation({
     if (pets !== undefined) cleanUpdates.pets = pets;
     if (insect !== undefined) cleanUpdates.insect = insect;
 
+    // DEFENSIVE SANITIZATION: Filter out invalid relationshipIntent values
+    // This prevents schema validation errors from UI-only values like single_parent, just_18
+    if (cleanUpdates.relationshipIntent) {
+      cleanUpdates.relationshipIntent = sanitizeRelationshipIntent(
+        cleanUpdates.relationshipIntent as string[]
+      );
+    }
+
     // Mark onboarding as completed
     cleanUpdates.onboardingCompleted = true;
     cleanUpdates.onboardingStep = undefined;

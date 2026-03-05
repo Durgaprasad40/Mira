@@ -58,6 +58,22 @@ function parseDOBString(dobString: string): Date {
   return new Date(y, m - 1, d, 12, 0, 0);
 }
 
+// STABILITY FIX: Schema-safe relationship intent values (excludes UI-only values)
+const ALLOWED_RELATIONSHIP_INTENTS = new Set([
+  'long_term', 'short_term', 'fwb', 'figuring_out',
+  'short_to_long', 'long_to_short', 'new_friends', 'open_to_anything'
+]);
+
+// Sanitize relationshipIntent to only include schema-valid values
+function sanitizeRelationshipIntent(arr: string[]): string[] {
+  const sanitized = arr.filter(v => ALLOWED_RELATIONSHIP_INTENTS.has(v));
+  if (__DEV__ && sanitized.length !== arr.length) {
+    const removed = arr.filter(v => !ALLOWED_RELATIONSHIP_INTENTS.has(v));
+    console.warn('[REVIEW] Removed invalid relationshipIntent values:', removed);
+  }
+  return sanitized;
+}
+
 export default function ReviewScreen() {
   const {
     name,
@@ -233,7 +249,7 @@ export default function ReviewScreen() {
           company,
           school,
           lookingFor: lookingFor as string[],
-          relationshipIntent: relationshipIntent as string[],
+          relationshipIntent: sanitizeRelationshipIntent(relationshipIntent as string[]),
           activities: activities as string[],
           profilePrompts,
           minAge,
@@ -311,8 +327,11 @@ export default function ReviewScreen() {
         company: company || undefined,
         school: school || undefined,
         lookingFor: lookingFor.length > 0 ? lookingFor : undefined,
-        relationshipIntent:
-          relationshipIntent.length > 0 ? relationshipIntent : undefined,
+        // STABILITY FIX: Sanitize relationshipIntent before sending to Convex
+        relationshipIntent: (() => {
+          const sanitized = sanitizeRelationshipIntent(relationshipIntent as string[]);
+          return sanitized.length > 0 ? sanitized : undefined;
+        })(),
         activities: activities.length > 0 ? activities : undefined,
         minAge,
         maxAge,
