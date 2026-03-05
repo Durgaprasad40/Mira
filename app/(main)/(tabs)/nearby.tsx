@@ -219,6 +219,15 @@ const BOTTOM_SHEET_HEIGHT = 200;
 const FIXED_RADIUS_METERS = 1000; // 1km
 const FIXED_RADIUS_KM = 1; // 1km for distance rules
 
+// ---------------------------------------------------------------------------
+// HYBRID NEARBY FEED CONFIG — configurable defaults
+// ---------------------------------------------------------------------------
+const RADIUS_PRESETS_METERS = [200, 500, 1000] as const;
+const DEFAULT_RADIUS_METERS = 1000;
+const CROSSED_DELAY_MS = 10 * 60 * 1000; // 10 minutes — crossed paths visible after this delay
+const CROSSED_WINDOW_MS = 24 * 60 * 60 * 1000; // 24 hours — crossed paths expire after this
+const MIX_LIVE_RATIO = 0.8; // 80% live nearby, 20% crossed paths (fallback to 100% crossed if live empty)
+
 // Extract demo "nearby" profiles that have lat/lng.
 // Fallback: used when demoStore hasn't seeded yet.
 const NEARBY_DEMO_PROFILES = (DEMO_PROFILES as any[]).filter(
@@ -587,6 +596,21 @@ export default function NearbyScreen() {
     !isDemoMode && userId ? { userId: userId as any } : 'skip',
   );
 
+  // Hybrid Feed: Delayed crossed path entries (live mode only)
+  const delayedCrossedEntries = useQuery(
+    api.crossedPaths.getDelayedCrossedPathEntries,
+    !isDemoMode && userId && bestLocation
+      ? {
+          userId: userId as any,
+          delayMs: CROSSED_DELAY_MS,
+          windowMs: CROSSED_WINDOW_MS,
+          radiusMeters: DEFAULT_RADIUS_METERS,
+          myLat: bestLocation.latitude,
+          myLng: bestLocation.longitude,
+        }
+      : 'skip',
+  );
+
   // ------------------------------------------------------------------
   // Cooldown timer: update remaining time every second when active
   // ------------------------------------------------------------------
@@ -833,6 +857,87 @@ export default function NearbyScreen() {
         };
       }));
   }, [demoStoreProfiles, blockedUserIds, userLat, userLng, userId, convexNearby, sessionSalt, zoomBucket]);
+
+  // ------------------------------------------------------------------
+  // Hybrid Feed: Convert crossed path entries to NearbyProfile format
+  // NOTE: Currently for DEV logging only. UI still uses nearbyProfiles.
+  // ------------------------------------------------------------------
+  const crossedPathProfiles: NearbyProfile[] = useMemo(() => {
+    const now = Date.now();
+    const viewerId = userId ?? 'demo_viewer';
+
+    if (isDemoMode) {
+      // Demo mode: filter demoCrossedPaths by delay/window
+      return demoCrossedPaths
+        .filter((cp) => {
+          if (now - cp.crossedAt < CROSSED_DELAY_MS) return false;
+          if (now - cp.crossedAt > CROSSED_WINDOW_MS) return false;
+          if (blockedUserIds.includes(cp.otherUserId)) return false;
+          if (userId && cp.otherUserId === userId) return false;
+          if (cp.hidden) return false;
+          if (!isValidMapCoordinate(cp.latitude, cp.longitude)) return false;
+          return true;
+        })
+        .map((cp) => {
+          const { lat, lng } = applyClientFuzz(
+            cp.latitude, cp.longitude, viewerId, cp.otherUserId, sessionSalt, zoomBucket,
+          );
+          return {
+            _id: cp.otherUserId,
+            name: cp.name,
+            age: cp.age,
+            latitude: lat,
+            longitude: lng,
+            lastSeenArea: cp.areaName,
+            lastLocationUpdatedAt: cp.crossedAt,
+            photoUrl: cp.photoUrl,
+            isVerified: false,
+            freshness: 'solid' as const,
+          };
+        });
+    }
+
+    // Live mode: use Convex query, resolve from convexNearby cache
+    if (!delayedCrossedEntries || !convexNearby) return [];
+    const nearbyUserMap = new Map(convexNearby.map((u) => [u.id, u]));
+
+    return delayedCrossedEntries
+      .filter((entry) => {
+        if (!nearbyUserMap.has(entry.otherUserId)) return false;
+        if (blockedUserIds.includes(entry.otherUserId)) return false;
+        if (!isValidMapCoordinate(entry.crossedLatApprox, entry.crossedLngApprox)) return false;
+        return true;
+      })
+      .map((entry) => {
+        const user = nearbyUserMap.get(entry.otherUserId)!;
+        const { lat, lng } = applyClientFuzz(
+          entry.crossedLatApprox!, entry.crossedLngApprox!, viewerId, entry.otherUserId, sessionSalt, zoomBucket,
+        );
+        return {
+          _id: entry.otherUserId,
+          name: user.name,
+          age: user.age,
+          latitude: lat,
+          longitude: lng,
+          lastSeenArea: entry.areaName,
+          lastLocationUpdatedAt: entry.createdAt,
+          photoUrl: user.photoUrl ?? undefined,
+          isVerified: user.isVerified,
+          freshness: 'solid' as const,
+        };
+      });
+  }, [isDemoMode, demoCrossedPaths, delayedCrossedEntries, convexNearby, blockedUserIds, userId, sessionSalt, zoomBucket]);
+
+  // DEV: Log hybrid feed counts (no UI changes yet)
+  useEffect(() => {
+    if (__DEV__) {
+      log.info('[HYBRID_FEED]', 'Feed counts', {
+        nearbyProfiles: nearbyProfiles.length,
+        crossedPathProfiles: crossedPathProfiles.length,
+        delayedCrossedEntries: delayedCrossedEntries?.length ?? 0,
+      });
+    }
+  }, [nearbyProfiles.length, crossedPathProfiles.length, delayedCrossedEntries]);
 
   // ------------------------------------------------------------------
   // DEBUG: Log marker counts for OOM debugging

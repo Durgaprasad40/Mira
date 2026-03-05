@@ -789,6 +789,95 @@ export const cleanupExpiredHistory = mutation({
 });
 
 // ---------------------------------------------------------------------------
+// getDelayedCrossedPathEntries — Lightweight Hybrid Nearby Feed query
+// Returns ONLY crossed path history entries (NO user/photo joins).
+// Filtering: delay + window + optional radius.
+// Client handles user/photo resolution separately to avoid N+1.
+// ---------------------------------------------------------------------------
+
+export const getDelayedCrossedPathEntries = query({
+  args: {
+    userId: v.id('users'),
+    delayMs: v.optional(v.number()),   // Default: 10 minutes (600_000)
+    windowMs: v.optional(v.number()),  // Default: 72 hours (259_200_000)
+    radiusMeters: v.optional(v.number()), // Optional: filter by distance
+    myLat: v.optional(v.number()),
+    myLng: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    const {
+      userId,
+      delayMs = 10 * 60 * 1000,         // 10 minutes
+      windowMs = 72 * 60 * 60 * 1000,   // 72 hours
+      radiusMeters,
+      myLat,
+      myLng,
+    } = args;
+    const now = Date.now();
+
+    // Time bounds: entries must be past delay but within window
+    const visibleAfter = now - windowMs;   // oldest allowed
+    const visibleBefore = now - delayMs;   // most recent allowed (past delay)
+
+    // Query both sides of the relationship
+    const asUser1 = await ctx.db
+      .query('crossPathHistory')
+      .withIndex('by_user1', (q) => q.eq('user1Id', userId))
+      .collect();
+
+    const asUser2 = await ctx.db
+      .query('crossPathHistory')
+      .withIndex('by_user2', (q) => q.eq('user2Id', userId))
+      .collect();
+
+    // Merge and filter
+    const filtered = [...asUser1, ...asUser2].filter((entry) => {
+      // Time window check
+      if (entry.createdAt < visibleAfter) return false;
+      if (entry.createdAt > visibleBefore) return false;
+
+      // Hidden flag check
+      const isUser1 = entry.user1Id === userId;
+      if (isUser1 && entry.hiddenByUser1) return false;
+      if (!isUser1 && entry.hiddenByUser2) return false;
+
+      // Optional radius filter
+      if (
+        radiusMeters != null &&
+        myLat != null &&
+        myLng != null &&
+        entry.crossedLatApprox != null &&
+        entry.crossedLngApprox != null
+      ) {
+        const distance = calculateDistanceMeters(
+          myLat,
+          myLng,
+          entry.crossedLatApprox,
+          entry.crossedLngApprox,
+        );
+        if (distance > radiusMeters) return false;
+      }
+
+      return true;
+    });
+
+    // Sort newest first
+    filtered.sort((a, b) => b.createdAt - a.createdAt);
+
+    // Return minimal entry data — NO user/photo joins
+    return filtered.map((entry) => ({
+      id: entry._id,
+      otherUserId: entry.user1Id === userId ? entry.user2Id : entry.user1Id,
+      createdAt: entry.createdAt,
+      crossedLatApprox: entry.crossedLatApprox ?? null,
+      crossedLngApprox: entry.crossedLngApprox ?? null,
+      areaName: entry.areaName,
+      reasonTags: entry.reasonTags ?? [],
+    }));
+  },
+});
+
+// ---------------------------------------------------------------------------
 // getCrossedPaths — existing unlock-based list
 // ---------------------------------------------------------------------------
 
