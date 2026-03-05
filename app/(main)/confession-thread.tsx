@@ -284,9 +284,11 @@ export default function ConfessionThreadScreen() {
     ]);
   }, [confessionId, reportConfession, reportMutation, currentUserId, router]);
 
-  const handleCopyText = useCallback(async () => {
+  const handleCopyText = useCallback(() => {
     if (!confession) return;
-    await Clipboard.setStringAsync(confession.text);
+    void Clipboard.setStringAsync(confession.text).catch(() => {
+      // STABILITY: Clipboard can fail on some devices
+    });
   }, [confession]);
 
   const handleMenu = useCallback(() => {
