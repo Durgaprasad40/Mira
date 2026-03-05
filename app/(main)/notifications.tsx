@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import {
   View,
   Text,
@@ -25,6 +25,8 @@ export default function NotificationsScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const [refreshing, setRefreshing] = useState(false);
+  // STABILITY: Track refresh timeout for cleanup on unmount
+  const refreshTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // ── Single source of truth — same hook the bell badge uses ──
   const { notifications, unseenCount, markAllSeen, markRead, cleanupExpiredNotifications } = useNotifications();
@@ -40,9 +42,26 @@ export default function NotificationsScreen() {
     cleanupExpiredNotifications();
   }, [cleanupExpiredNotifications]);
 
+  // STABILITY: Cleanup refresh timeout on unmount to prevent setState after unmount
+  useEffect(() => {
+    return () => {
+      if (refreshTimeoutRef.current) {
+        clearTimeout(refreshTimeoutRef.current);
+        refreshTimeoutRef.current = null;
+      }
+    };
+  }, []);
+
   const onRefresh = async () => {
+    // STABILITY: Clear any existing timeout before starting new refresh
+    if (refreshTimeoutRef.current) {
+      clearTimeout(refreshTimeoutRef.current);
+    }
     setRefreshing(true);
-    setTimeout(() => setRefreshing(false), 1000);
+    refreshTimeoutRef.current = setTimeout(() => {
+      setRefreshing(false);
+      refreshTimeoutRef.current = null;
+    }, 1000);
   };
 
   const groupNotifications = (notifs: AppNotification[]): NotificationGroup[] => {
