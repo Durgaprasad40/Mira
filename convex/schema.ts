@@ -379,6 +379,10 @@ export default defineSchema({
 
     // Demo mode: identifier for demo users (e.g. "demo_manmohan_gmain_com")
     demoUserId: v.optional(v.string()),
+
+    // Duplicate user detection: points to the primary user if this is a duplicate
+    // Set when race condition creates multiple users with same demoUserId
+    duplicateOf: v.optional(v.id('users')),
   })
     .index('by_email', ['email'])
     .index('by_phone', ['phone'])
