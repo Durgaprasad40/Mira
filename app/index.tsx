@@ -52,6 +52,38 @@ export default function Index() {
   // Track if we've already started loading (to measure duration once)
   const cacheLoadStarted = useRef(false);
 
+  // [BOOT_FIX] Watchdog timer to prevent infinite loading
+  // If boot hasn't completed after 12s, force a safe navigation
+  const watchdogFired = useRef(false);
+  useEffect(() => {
+    const WATCHDOG_TIMEOUT = 12000; // 12 seconds
+
+    const watchdogTimer = setTimeout(() => {
+      // Check if boot completed (routeSignaled means we made a decision)
+      if (routeSignaled.current || watchdogFired.current) return;
+      watchdogFired.current = true;
+
+      console.warn('[BOOT_FIX] Watchdog fired after 12s - forcing safe navigation');
+
+      // Check cached data to decide where to route
+      const cachedOnboarding = authBootCacheData?.onboardingCompleted === true;
+      const hasToken = authBootCacheData?.token && authBootCacheData.token.trim().length > 0;
+
+      if (hasToken && cachedOnboarding) {
+        console.log('[BOOT_FIX] Watchdog: token + cached onboarding=true → home');
+        setConvexValidated(true);
+        setConvexOnboardingCompleted(true);
+        router.replace("/(main)/(tabs)/home");
+      } else {
+        console.log('[BOOT_FIX] Watchdog: no valid session → welcome');
+        setConvexValidated(true);
+        router.replace("/(auth)/welcome");
+      }
+    }, WATCHDOG_TIMEOUT);
+
+    return () => clearTimeout(watchdogTimer);
+  }, [authBootCacheData, router]);
+
   useEffect(() => {
     // Only load once, measure duration
     if (cacheLoadStarted.current) return;
@@ -98,16 +130,16 @@ export default function Index() {
       return;
     }
 
-    // STABILITY FIX (2026-03-04): FAST_PATH with validation gate
-    // If cached onboardingCompleted=true, trust it optimistically BUT wait for validation
-    // This prevents "route to home then forced logout" race condition
-    // User sees loading for 1-2s (validation time) instead of instant home + potential kickout
+    // STABILITY FIX (2026-03-05): FAST_PATH - route immediately, validate in background
+    // If cached onboardingCompleted=true, route to home IMMEDIATELY (no loading spinner)
+    // Validation runs in background - if it fails, user stays on home (will retry next boot)
+    // This prevents infinite loading if validation hangs or times out
     if (cachedOnboardingCompleted) {
       if (__DEV__) {
-        console.log('[AUTH_BOOT] FAST_PATH: cached onboardingCompleted=true, optimistically trusting cache');
+        console.log('[AUTH_BOOT] FAST_PATH: cached onboardingCompleted=true, routing immediately');
       }
       setConvexOnboardingCompleted(true);
-      // Do NOT set convexValidated=true here - wait for validation to complete
+      setConvexValidated(true); // [BOOT_FIX] Unblock boot immediately for FAST_PATH
     }
 
     // Start validation (even if FAST_PATH, validate in background)
