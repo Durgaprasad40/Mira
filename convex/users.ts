@@ -4,6 +4,23 @@ import { Id } from "./_generated/dataModel";
 import { logAdminAction } from "./adminLog";
 import { resolveUserIdByAuthId, ensureUserByAuthId } from "./helpers";
 
+// ALLOWED_RELATIONSHIP_INTENTS: Schema-safe values (excludes UI-only values like single_parent, just_18)
+const ALLOWED_RELATIONSHIP_INTENTS = new Set([
+  'long_term', 'short_term', 'fwb', 'figuring_out',
+  'short_to_long', 'long_to_short', 'new_friends', 'open_to_anything'
+]);
+
+// Sanitize relationshipIntent to only include schema-valid values
+function sanitizeRelationshipIntent(intent: string[] | undefined): string[] | undefined {
+  if (!intent || !Array.isArray(intent)) return intent;
+  const sanitized = intent.filter(v => ALLOWED_RELATIONSHIP_INTENTS.has(v));
+  const removed = intent.filter(v => !ALLOWED_RELATIONSHIP_INTENTS.has(v));
+  if (removed.length > 0) {
+    console.warn('[SANITIZE] Removed invalid relationshipIntent values:', removed);
+  }
+  return sanitized.length > 0 ? sanitized : undefined;
+}
+
 // Get current user profile
 export const getCurrentUser = query({
   args: {
@@ -1418,6 +1435,14 @@ export const upsertOnboardingDraft = mutation({
         lastUpdatedAt: Date.now(),
       },
     };
+
+    // DEFENSIVE SANITIZATION: Filter out invalid relationshipIntent values before saving
+    // This prevents schema validation errors from UI-only values like single_parent, just_18
+    if (mergedDraft.preferences?.relationshipIntent) {
+      mergedDraft.preferences.relationshipIntent = sanitizeRelationshipIntent(
+        mergedDraft.preferences.relationshipIntent
+      );
+    }
 
     await ctx.db.patch(userId, {
       onboardingDraft: mergedDraft,
