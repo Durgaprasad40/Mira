@@ -28,7 +28,7 @@ import { useDemoStore } from "@/stores/demoStore";
 
 export default function LoginScreen() {
   const router = useRouter();
-  const { setAuth } = useAuthStore();
+  const { setAuth, userId, token, logout } = useAuthStore();
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -101,6 +101,17 @@ export default function LoginScreen() {
     }
   };
 
+  // STABILITY FIX: Force logout before starting new account creation
+  // This prevents session/token leakage when user switches accounts
+  const handleSignUp = () => {
+    // Check if there's an existing session (userId or token)
+    if (userId || token) {
+      if (__DEV__) console.log('[AUTH] Sign up pressed with existing session -> forcing logout before new signup');
+      logout();
+    }
+    router.push("/(onboarding)");
+  };
+
   return (
     <ScrollView style={styles.container} contentContainerStyle={styles.content}>
       <TouchableOpacity style={styles.backButton} onPress={() => router.back()}>
@@ -156,7 +167,7 @@ export default function LoginScreen() {
 
       <View style={styles.footer}>
         <Text style={styles.footerText}>Don't have an account? </Text>
-        <TouchableOpacity onPress={() => router.push("/(onboarding)")}>
+        <TouchableOpacity onPress={handleSignUp}>
           <Text style={styles.signupLink}>Sign up</Text>
         </TouchableOpacity>
       </View>

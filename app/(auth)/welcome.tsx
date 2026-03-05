@@ -19,7 +19,7 @@ import { useDemoStore } from "@/stores/demoStore";
 
 export default function WelcomeScreen() {
   const router = useRouter();
-  const { isAuthenticated, onboardingCompleted, token } = useAuthStore();
+  const { isAuthenticated, onboardingCompleted, token, userId, logout } = useAuthStore();
   const currentDemoUserId = useDemoStore((s) => s.currentDemoUserId);
   const demoOnboardingComplete = useDemoStore((s) => s.demoOnboardingComplete);
   const demoStoreHydrated = useDemoStore((s) => s._hasHydrated);
@@ -57,6 +57,17 @@ export default function WelcomeScreen() {
   // For all other cases (not authenticated, or authenticated but onboarding incomplete):
   // Stay on welcome screen and let user choose action via buttons
 
+  // STABILITY FIX: Force logout before starting new account creation
+  // This prevents session/token leakage when user switches accounts
+  const handleCreateAccount = () => {
+    // Check if there's an existing session (userId or token)
+    if (userId || token) {
+      if (__DEV__) console.log('[AUTH] Create Account pressed with existing session -> forcing logout before new signup');
+      logout();
+    }
+    router.push("/(onboarding)/email-phone");
+  };
+
   return (
     <LinearGradient
       colors={[COLORS.primary, COLORS.secondary]}
@@ -90,7 +101,7 @@ export default function WelcomeScreen() {
         <Button
           title="Create Account"
           variant="outline"
-          onPress={() => router.push("/(onboarding)/email-phone")}
+          onPress={handleCreateAccount}
           fullWidth
           style={{
             backgroundColor: '#00000000',
