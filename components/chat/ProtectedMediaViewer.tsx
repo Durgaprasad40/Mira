@@ -157,23 +157,38 @@ export function ProtectedMediaViewer({
     handleClose();
   }, [messageId, userId, markExpired, handleClose]);
 
-  // Countdown timer - sets up interval when timer starts
-  // 5-1: Check mountedRef before setState to prevent memory leaks
+  // STABILITY FIX: C-5 - Fix timer infinite loop by using proper dependency pattern
+  // Compute stable boolean outside effect to avoid expression in dependency array
+  const shouldRunTimer = timeLeft !== null && timeLeft > 0;
+
   useEffect(() => {
-    // 6-3: Skip if no timer or timer already at 0 (handled by separate effect below)
-    if (timeLeft === null || timeLeft <= 0) {
+    // Clear any existing interval first to ensure only ONE interval exists
+    if (timerRef.current) {
+      clearInterval(timerRef.current);
+      timerRef.current = null;
+    }
+
+    // Only start interval when we have a valid positive timer value
+    if (!shouldRunTimer) {
       return;
     }
 
     timerRef.current = setInterval(() => {
-      // 5-1: Guard against setState after unmount
+      // Guard against setState after unmount
       if (!mountedRef.current) {
-        if (timerRef.current) clearInterval(timerRef.current);
+        if (timerRef.current) {
+          clearInterval(timerRef.current);
+          timerRef.current = null;
+        }
         return;
       }
       setTimeLeft((prev) => {
         if (prev === null || prev <= 1) {
-          if (timerRef.current) clearInterval(timerRef.current);
+          // Clear interval when timer reaches 0
+          if (timerRef.current) {
+            clearInterval(timerRef.current);
+            timerRef.current = null;
+          }
           return 0;
         }
         return prev - 1;
@@ -186,9 +201,7 @@ export function ProtectedMediaViewer({
         timerRef.current = null;
       }
     };
-  // 6-3: Changed from [timeLeft !== null] to proper check - only re-run when timeLeft transitions
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [timeLeft === null || timeLeft <= 0]);
+  }, [shouldRunTimer]);
 
   // 6-3: Separate effect to handle timer expiry (fixes bug where timer hitting 0 never called handleExpire)
   useEffect(() => {

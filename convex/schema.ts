@@ -106,6 +106,9 @@ export default defineSchema({
       v.literal('cartoon')     // AI-generated cartoon/avatar version
     )),
 
+    // STABILITY FIX: C-10 - Denormalized primary photo URL to avoid N+1 queries
+    primaryPhotoUrl: v.optional(v.string()),
+
     // Location (live device location - private)
     latitude: v.optional(v.number()),
     longitude: v.optional(v.number()),

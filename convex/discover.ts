@@ -507,7 +507,11 @@ export const getExploreProfiles = query({
     const effectiveMaxDistance = maxDistance ?? currentUser.maxDistance;
 
     const allUsers = await ctx.db.query('users').collect();
-    const candidates = [];
+
+    // STABILITY FIX: C-9 - Two-pass approach to eliminate N+1 photo queries
+    // First pass: filter candidates, collect user objects with computed values
+    type FilteredUser = { user: typeof allUsers[0]; userAge: number; distance: number | undefined };
+    const filteredUsers: FilteredUser[] = [];
 
     for (const user of allUsers) {
       if (user._id === userId) continue;
@@ -523,12 +527,14 @@ export const getExploreProfiles = query({
       const userAge = calculateAge(user.dateOfBirth);
       if (userAge < effectiveMinAge || userAge > effectiveMaxAge) continue;
 
+      let distance: number | undefined;
       if (currentUser.latitude && currentUser.longitude && user.latitude && user.longitude) {
         const dist = calculateDistance(
           currentUser.latitude, currentUser.longitude,
           user.latitude, user.longitude,
         );
         if (!isDistanceAllowed(dist, effectiveMaxDistance)) continue;
+        distance = dist;
       }
 
       if (relationshipIntent && relationshipIntent.length > 0) {
@@ -575,20 +581,31 @@ export const getExploreProfiles = query({
         .first();
       if (reverseBlocked) continue;
 
-      const photos = await ctx.db
-        .query('photos')
-        .withIndex('by_user_order', (q) => q.eq('userId', user._id))
-        .collect();
+      filteredUsers.push({ user, userAge, distance });
+    }
 
-      let distance: number | undefined;
-      if (currentUser.latitude && currentUser.longitude && user.latitude && user.longitude) {
-        distance = calculateDistance(
-          currentUser.latitude, currentUser.longitude,
-          user.latitude, user.longitude,
-        );
+    // STABILITY FIX: C-9 - Batch fetch photos with chunked concurrency (avoids N+1)
+    const CHUNK_SIZE = 20;
+    const photosByUser = new Map<string, any[]>();
+    for (let i = 0; i < filteredUsers.length; i += CHUNK_SIZE) {
+      const chunk = filteredUsers.slice(i, i + CHUNK_SIZE);
+      const chunkPhotos = await Promise.all(
+        chunk.map((f) =>
+          ctx.db
+            .query('photos')
+            .withIndex('by_user_order', (q) => q.eq('userId', f.user._id))
+            .collect()
+        )
+      );
+      for (let j = 0; j < chunk.length; j++) {
+        photosByUser.set(chunk[j].user._id as string, chunkPhotos[j]);
       }
+    }
 
-      candidates.push({
+    // Second pass: build candidates with photos from the map
+    const candidates = filteredUsers.map(({ user, userAge, distance }) => {
+      const photos = photosByUser.get(user._id as string) ?? [];
+      return {
         id: user._id,
         name: user.name,
         age: userAge,
@@ -602,11 +619,11 @@ export const getExploreProfiles = query({
         relationshipIntent: user.relationshipIntent,
         activities: user.activities,
         profilePrompts: user.profilePrompts,
-        photos: photos.sort((a, b) => a.order - b.order),
+        photos, // Already sorted by order via by_user_order index
         photoBlurred: user.photoBlurred === true,
-        photoCount: photos.filter((p) => !p.isNsfw).length,
-      });
-    }
+        photoCount: photos.filter((p: any) => !p.isNsfw).length,
+      };
+    });
 
     // Sort: interests sort uses shared activities, filtered categories use relevance,
     // default falls back to the simple 4-signal score.

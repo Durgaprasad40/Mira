@@ -176,6 +176,8 @@ export const addPhoto = mutation({
             verificationStatus: 'pending_auto',
           });
         }
+        // STABILITY FIX: C-10 - Keep primaryPhotoUrl in sync
+        await ctx.db.patch(userId, { primaryPhotoUrl: url });
       }
     }
 
@@ -227,6 +229,14 @@ export const deletePhoto = mutation({
       await ctx.db.patch(remainingPhotos[i]._id, updates);
     }
 
+    // STABILITY FIX: C-10 - Keep primaryPhotoUrl in sync with isPrimary
+    const primaryPhoto = await ctx.db
+      .query('photos')
+      .withIndex('by_user', (q) => q.eq('userId', userId))
+      .filter((q) => q.eq(q.field('isPrimary'), true))
+      .first();
+    await ctx.db.patch(userId, { primaryPhotoUrl: primaryPhoto?.url });
+
     return { success: true };
   },
 });
@@ -255,6 +265,14 @@ export const reorderPhotos = mutation({
         isPrimary: i === 0,
       });
     }
+
+    // STABILITY FIX: C-10 - Keep primaryPhotoUrl in sync with isPrimary
+    const primaryPhoto = await ctx.db
+      .query('photos')
+      .withIndex('by_user', (q) => q.eq('userId', userId))
+      .filter((q) => q.eq(q.field('isPrimary'), true))
+      .first();
+    await ctx.db.patch(userId, { primaryPhotoUrl: primaryPhoto?.url });
 
     return { success: true };
   },
@@ -311,6 +329,9 @@ export const setPrimaryPhoto = mutation({
         isPrimary: p._id === photoId,
       });
     }
+
+    // STABILITY FIX: C-10 - Keep primaryPhotoUrl in sync
+    await ctx.db.patch(userId, { primaryPhotoUrl: photo.url });
 
     return { success: true };
   },
@@ -490,6 +511,8 @@ export const uploadVerificationReferencePhoto = mutation({
       displayPrimaryPhotoId: storageId,
       displayPrimaryPhotoUrl: url,
       displayPrimaryPhotoVariant: 'original',
+      // STABILITY FIX: C-10 - Keep primaryPhotoUrl in sync
+      primaryPhotoUrl: url,
       // Set verification status to pending
       faceVerificationStatus: 'unverified',
       verificationStatus: 'pending_auto',
@@ -545,6 +568,8 @@ export const setDisplayPhotoVariant = mutation({
         displayPrimaryPhotoId: user.verificationReferencePhotoId,
         displayPrimaryPhotoUrl: user.verificationReferencePhotoUrl,
         displayPrimaryPhotoVariant: 'original',
+        // STABILITY FIX: C-10 - Keep primaryPhotoUrl in sync
+        primaryPhotoUrl: user.verificationReferencePhotoUrl,
       });
     } else {
       // For blurred/cartoon, need the processed version
@@ -583,6 +608,8 @@ export const setDisplayPhotoVariant = mutation({
         displayPrimaryPhotoId: processedStorageId,
         displayPrimaryPhotoUrl: url,
         displayPrimaryPhotoVariant: variant,
+        // STABILITY FIX: C-10 - Keep primaryPhotoUrl in sync
+        primaryPhotoUrl: url,
       });
     }
 

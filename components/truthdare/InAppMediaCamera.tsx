@@ -56,6 +56,16 @@ export function InAppMediaCamera({
 
   const cameraRef = useRef<CameraView>(null);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // STABILITY FIX: C-6 - Track mounted state to prevent setState after unmount
+  const mountedRef = useRef(true);
+
+  // STABILITY FIX: C-6 - Track mounted state
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   // Reset state when modal opens
   useEffect(() => {
@@ -81,6 +91,14 @@ export function InAppMediaCamera({
   useEffect(() => {
     if (isRecording) {
       timerRef.current = setInterval(() => {
+        // STABILITY FIX: C-6 - Guard setState in interval callback
+        if (!mountedRef.current) {
+          if (timerRef.current) {
+            clearInterval(timerRef.current);
+            timerRef.current = null;
+          }
+          return;
+        }
         setRecordSeconds((s) => {
           if (s >= MAX_VIDEO_DURATION_SEC - 1) {
             stopVideoRecording();
@@ -121,6 +139,9 @@ export function InAppMediaCamera({
         skipProcessing: false,
       });
 
+      // STABILITY FIX: C-6 - Guard setState after async operation
+      if (!mountedRef.current) return;
+
       if (photo?.uri) {
         setCapturedUri(photo.uri);
         setCapturedKind('photo');
@@ -130,7 +151,10 @@ export function InAppMediaCamera({
     } catch (error) {
       console.error('[InAppMediaCamera] Photo capture error:', error);
     } finally {
-      setIsProcessing(false);
+      // STABILITY FIX: C-6 - Guard setState in finally block
+      if (mountedRef.current) {
+        setIsProcessing(false);
+      }
     }
   }, [facing, isProcessing]);
 
@@ -145,6 +169,9 @@ export function InAppMediaCamera({
         maxDuration: MAX_VIDEO_DURATION_SEC,
       });
 
+      // STABILITY FIX: C-6 - Guard setState after async operation
+      if (!mountedRef.current) return;
+
       // This runs after recording stops
       if (video?.uri) {
         setCapturedUri(video.uri);
@@ -156,7 +183,10 @@ export function InAppMediaCamera({
     } catch (error) {
       console.error('[InAppMediaCamera] Video recording error:', error);
     } finally {
-      setIsRecording(false);
+      // STABILITY FIX: C-6 - Guard setState in finally block
+      if (mountedRef.current) {
+        setIsRecording(false);
+      }
     }
   }, [facing, isRecording, isProcessing, recordSeconds]);
 
@@ -171,9 +201,15 @@ export function InAppMediaCamera({
       // The recordAsync promise will resolve with the video
     } catch (error) {
       console.error('[InAppMediaCamera] Stop recording error:', error);
-      setIsRecording(false);
+      // STABILITY FIX: C-6 - Guard setState after async operation
+      if (mountedRef.current) {
+        setIsRecording(false);
+      }
     } finally {
-      setIsProcessing(false);
+      // STABILITY FIX: C-6 - Guard setState in finally block
+      if (mountedRef.current) {
+        setIsProcessing(false);
+      }
     }
   }, [isRecording, recordSeconds]);
 

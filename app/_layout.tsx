@@ -247,6 +247,16 @@ function SessionValidator() {
   const appStateRef = useRef<AppStateStatus>(AppState.currentState);
   const isValidatingRef = useRef(false);
   const hasInitialValidation = useRef(false);
+  // STABILITY FIX: C-16 - Track mounted state to prevent navigation/setState after unmount
+  const mountedRef = useRef(true);
+
+  // STABILITY FIX: C-16 - Track mounted state
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   // Use Convex query to validate session with FULL checks
   // validateSessionFull checks: expiry, revocation, user status, deletedAt
@@ -270,6 +280,9 @@ function SessionValidator() {
     hasInitialValidation.current = true;
 
     if (sessionStatus.valid) {
+      // STABILITY FIX: C-16 - Guard state operations after unmount
+      if (!mountedRef.current) return;
+
       // Session is valid — sync onboarding state from server
       // SAFETY: This only updates LOCAL state, never modifies server
       if (sessionStatus.userInfo) {
@@ -299,6 +312,9 @@ function SessionValidator() {
         setSessionValidated(true);
         return;
       }
+
+      // STABILITY FIX: C-16 - Guard navigation and state operations after unmount
+      if (!mountedRef.current) return;
 
       // For non-migration cases (truly invalid sessions), proceed with logout
       // Clear all LOCAL state (server data untouched)

@@ -31,6 +31,58 @@ export default function Index() {
   const didForceWelcome = useRef(false);
   const didForceLogout = useRef(false); // Guard for logout side effect
 
+  // STABILITY FIX: C-1, C-2 - Single navigation guard to prevent double-routing
+  const hasNavigatedRef = useRef(false);
+  const watchdogTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const mountedRef = useRef(true);
+
+  // STABILITY FIX: C-1, C-2 - Track mounted state
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      // Clear watchdog on unmount
+      if (watchdogTimerRef.current) {
+        clearTimeout(watchdogTimerRef.current);
+        watchdogTimerRef.current = null;
+      }
+    };
+  }, []);
+
+  // STABILITY FIX: C-1, C-2 - Safe navigation helper that prevents double-routing
+  const safeReplace = (nextRoute: string, reason: string) => {
+    // Guard: only navigate once
+    if (hasNavigatedRef.current) {
+      if (__DEV__) {
+        console.log(`[BOOT] safeReplace BLOCKED (already navigated): ${reason} → ${nextRoute}`);
+      }
+      return false;
+    }
+    // Guard: don't navigate if unmounted
+    if (!mountedRef.current) {
+      if (__DEV__) {
+        console.log(`[BOOT] safeReplace BLOCKED (unmounted): ${reason} → ${nextRoute}`);
+      }
+      return false;
+    }
+
+    // Mark as navigated BEFORE calling replace
+    hasNavigatedRef.current = true;
+
+    // Clear watchdog timer since we're navigating
+    if (watchdogTimerRef.current) {
+      clearTimeout(watchdogTimerRef.current);
+      watchdogTimerRef.current = null;
+    }
+
+    if (__DEV__) {
+      console.log(`[BOOT] safeReplace: ${reason} → ${nextRoute}`);
+    }
+
+    router.replace(nextRoute as any);
+    return true;
+  };
+
   // FAST PATH: use boot caches instead of waiting for full Zustand hydration
   // Boot caches read only minimal data (~100 bytes) directly from AsyncStorage
   // vs ~50KB+ for full stores with all matches, profiles, etc.
@@ -52,13 +104,19 @@ export default function Index() {
   // Track if we've already started loading (to measure duration once)
   const cacheLoadStarted = useRef(false);
 
-  // [BOOT_FIX] Watchdog timer to prevent infinite loading
+  // STABILITY FIX: C-1 - Watchdog timer to prevent infinite loading
   // If boot hasn't completed after 12s, force a safe navigation
+  // Uses watchdogTimerRef and safeReplace to prevent double-routing
   const watchdogFired = useRef(false);
   useEffect(() => {
     const WATCHDOG_TIMEOUT = 12000; // 12 seconds
 
-    const watchdogTimer = setTimeout(() => {
+    // Clear any existing watchdog timer
+    if (watchdogTimerRef.current) {
+      clearTimeout(watchdogTimerRef.current);
+    }
+
+    watchdogTimerRef.current = setTimeout(() => {
       // Check if boot completed (routeSignaled means we made a decision)
       if (routeSignaled.current || watchdogFired.current) return;
       watchdogFired.current = true;
@@ -73,16 +131,21 @@ export default function Index() {
         console.log('[BOOT_FIX] Watchdog: token + cached onboarding=true → home');
         setConvexValidated(true);
         setConvexOnboardingCompleted(true);
-        router.replace("/(main)/(tabs)/home");
+        safeReplace("/(main)/(tabs)/home", "watchdog (token+onboarding)");
       } else {
         console.log('[BOOT_FIX] Watchdog: no valid session → welcome');
         setConvexValidated(true);
-        router.replace("/(auth)/welcome");
+        safeReplace("/(auth)/welcome", "watchdog (no session)");
       }
     }, WATCHDOG_TIMEOUT);
 
-    return () => clearTimeout(watchdogTimer);
-  }, [authBootCacheData, router]);
+    return () => {
+      if (watchdogTimerRef.current) {
+        clearTimeout(watchdogTimerRef.current);
+        watchdogTimerRef.current = null;
+      }
+    };
+  }, [authBootCacheData]);
 
   useEffect(() => {
     // Only load once, measure duration
@@ -169,7 +232,7 @@ export default function Index() {
             console.log('[AUTH_BOOT] Validation complete, onboardingCompleted:', backendOnboardingCompleted);
           }
 
-          // FAST_PATH validation check: if cached said true but backend says false, clear cache and redirect
+          // STABILITY FIX: C-2 - FAST_PATH validation check: if cached said true but backend says false, clear cache and redirect
           if (cachedOnboardingCompleted && !backendOnboardingCompleted) {
             if (__DEV__) {
               console.warn('[AUTH_BOOT] FAST_PATH validation failed: backend says onboarding incomplete, clearing cache and routing to welcome');
@@ -177,7 +240,7 @@ export default function Index() {
             const { clearAuthBootCache } = require('@/stores/authBootCache');
             await clearAuthBootCache();
             useAuthStore.getState().logout();
-            router.replace("/(auth)/welcome");
+            safeReplace("/(auth)/welcome", "FAST_PATH validation failed");
             return;
           }
 
@@ -295,8 +358,9 @@ export default function Index() {
   // Derive route for use in render (null if loading)
   const routeDestination = bootAction.type === "LOADING" ? null : bootAction.route;
 
-  // SIDE EFFECT: Handle FORCE_WELCOME_ONBOARDING_INCOMPLETE
+  // STABILITY FIX: C-1, C-2 - SIDE EFFECT: Handle FORCE_WELCOME_ONBOARDING_INCOMPLETE
   // Logout and route to welcome when onboarding is not completed
+  // Uses safeReplace to prevent double-routing
   useEffect(() => {
     if (bootAction.type !== "FORCE_WELCOME_ONBOARDING_INCOMPLETE") return;
     if (didForceLogout.current) return; // Guard: only run once
@@ -304,8 +368,8 @@ export default function Index() {
 
     if (__DEV__) console.log('[ONB] boot_decision action=FORCE_WELCOME_ONBOARDING_INCOMPLETE → logout + welcome');
     useAuthStore.getState().logout();
-    router.replace("/(auth)/welcome");
-  }, [bootAction, router]);
+    safeReplace("/(auth)/welcome", "FORCE_WELCOME_ONBOARDING_INCOMPLETE");
+  }, [bootAction]);
 
   // Side effects: signal route decision, restore demo auth, mark timing
   // This runs in the commit phase AFTER render, avoiding setState-during-render
@@ -340,8 +404,9 @@ export default function Index() {
     markTiming('route_decision');
   }, [routeDestination, setRouteDecisionMade, currentDemoUserId, demoOnboardingComplete, bootAction, authBootCacheData]);
 
-  // IMPERATIVE NAVIGATION for unauthenticated users → welcome screen
-  // Uses router.replace() to OVERRIDE any restored navigation state from Expo Go
+  // STABILITY FIX: C-1, C-2 - IMPERATIVE NAVIGATION for unauthenticated users → welcome screen
+  // Uses safeReplace to OVERRIDE any restored navigation state from Expo Go
+  // and to prevent double-routing
   // Skip if FORCE_WELCOME_ONBOARDING_INCOMPLETE already handled navigation
   useEffect(() => {
     if (!routeDestination || didForceWelcome.current) return;
@@ -349,10 +414,9 @@ export default function Index() {
 
     if (routeDestination === "/(auth)/welcome") {
       didForceWelcome.current = true;
-      if (__DEV__) console.log("[BOOT] forced welcome replace");
-      router.replace("/(auth)/welcome");
+      safeReplace("/(auth)/welcome", "imperative welcome");
     }
-  }, [routeDestination, router, bootAction]);
+  }, [routeDestination, bootAction]);
 
   // Loading state: boot caches not yet ready
   if (!routeDestination) {

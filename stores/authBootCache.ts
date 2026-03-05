@@ -101,7 +101,22 @@ export async function saveAuthBootCache(
       }
     }
   } catch (error) {
+    // STABILITY FIX: C-3 - SecureStore save failure must not leave partial cache
+    if (__DEV__) {
+      console.warn('[AUTH_BOOT_CACHE] SecureStore save failed - cleaning up partial state:', error);
+    }
     console.error('[AUTH_BOOT] Failed to save to SecureStore:', error);
+    // Clean up any partial cache to prevent ghost login sessions
+    try {
+      await SecureStore.deleteItemAsync(TOKEN_KEY);
+      await SecureStore.deleteItemAsync(USER_ID_KEY);
+      if (opts?.onboardingCompleted !== undefined) {
+        await SecureStore.deleteItemAsync(ONBOARDING_COMPLETED_KEY);
+        await SecureStore.deleteItemAsync(ONBOARDING_UPDATED_AT_KEY);
+      }
+    } catch {
+      // Cleanup failed - nothing more we can do
+    }
   }
 }
 

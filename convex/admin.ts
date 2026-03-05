@@ -1155,3 +1155,103 @@ export const cleanupDemoUsers = internalMutation({
     };
   },
 });
+
+/**
+ * Backfill primaryPhotoUrl for existing users
+ *
+ * STABILITY FIX: C-10 - Populates the denormalized primaryPhotoUrl field
+ * for users who don't have it set yet.
+ *
+ * Safety features:
+ * - Processes max 50 users per run to avoid timeouts
+ * - Skips users that already have primaryPhotoUrl set
+ * - Idempotent: can be run multiple times safely
+ *
+ * Usage:
+ *   npx convex run admin:backfillPrimaryPhotoUrl
+ *
+ * Run multiple times until processedCount returns 0.
+ */
+export const backfillPrimaryPhotoUrl = internalMutation({
+  args: {},
+  handler: async (ctx) => {
+    const BATCH_LIMIT = 50;
+
+    console.log('='.repeat(80));
+    console.log('BACKFILL: primaryPhotoUrl');
+    console.log(`Processing up to ${BATCH_LIMIT} users per run`);
+    console.log('='.repeat(80));
+
+    // Query all users, filter to those missing primaryPhotoUrl
+    const allUsers = await ctx.db.query('users').collect();
+    const usersToBackfill = allUsers.filter((u) => !u.primaryPhotoUrl);
+
+    console.log(`[DISCOVERY] Total users: ${allUsers.length}`);
+    console.log(`[DISCOVERY] Users missing primaryPhotoUrl: ${usersToBackfill.length}`);
+
+    if (usersToBackfill.length === 0) {
+      console.log('\n[RESULT] All users already have primaryPhotoUrl. Backfill complete.');
+      return {
+        totalUsers: allUsers.length,
+        processedCount: 0,
+        remainingCount: 0,
+        status: 'complete',
+      };
+    }
+
+    // Process up to BATCH_LIMIT users
+    const batch = usersToBackfill.slice(0, BATCH_LIMIT);
+    let updatedCount = 0;
+    let skippedCount = 0;
+
+    console.log(`\n[PROCESSING] Backfilling ${batch.length} users...`);
+
+    for (const user of batch) {
+      // Find primary photo for this user
+      const primaryPhoto = await ctx.db
+        .query('photos')
+        .withIndex('by_user', (q) => q.eq('userId', user._id))
+        .filter((q) => q.eq(q.field('isPrimary'), true))
+        .first();
+
+      if (primaryPhoto) {
+        await ctx.db.patch(user._id, { primaryPhotoUrl: primaryPhoto.url });
+        updatedCount++;
+        if (updatedCount <= 5) {
+          console.log(`  - Updated: ${user.name} (${user._id})`);
+        }
+      } else {
+        // No primary photo found, skip
+        skippedCount++;
+      }
+    }
+
+    if (updatedCount > 5) {
+      console.log(`  ... and ${updatedCount - 5} more`);
+    }
+
+    const remainingCount = usersToBackfill.length - batch.length;
+
+    console.log('\n' + '='.repeat(80));
+    console.log('BACKFILL BATCH COMPLETE');
+    console.log('='.repeat(80));
+    console.log(`Updated: ${updatedCount}`);
+    console.log(`Skipped (no primary photo): ${skippedCount}`);
+    console.log(`Remaining: ${remainingCount}`);
+
+    if (remainingCount > 0) {
+      console.log('\nRun this mutation again to process remaining users.');
+    } else {
+      console.log('\nAll users processed. Backfill complete.');
+    }
+
+    return {
+      totalUsers: allUsers.length,
+      processedCount: batch.length,
+      updatedCount,
+      skippedCount,
+      remainingCount,
+      status: remainingCount > 0 ? 'in_progress' : 'complete',
+    };
+  },
+});

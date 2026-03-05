@@ -51,6 +51,16 @@ export default function ChatRoomCamera({
 
   const cameraRef = useRef<CameraView>(null);
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // STABILITY FIX: C-7 - Track mounted state to prevent setState after unmount
+  const mountedRef = useRef(true);
+
+  // STABILITY FIX: C-7 - Track mounted state
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   // Reset state when modal opens
   useEffect(() => {
@@ -75,6 +85,14 @@ export default function ChatRoomCamera({
   useEffect(() => {
     if (isRecording) {
       timerRef.current = setInterval(() => {
+        // STABILITY FIX: C-7 - Guard setState in interval callback
+        if (!mountedRef.current) {
+          if (timerRef.current) {
+            clearInterval(timerRef.current);
+            timerRef.current = null;
+          }
+          return;
+        }
         setRecordSeconds((s) => {
           if (s >= MAX_VIDEO_DURATION_SEC - 1) {
             stopVideoRecording();
@@ -112,6 +130,8 @@ export default function ChatRoomCamera({
         quality: 0.85,
         skipProcessing: false,
       });
+      // STABILITY FIX: C-7 - Guard setState after async operation
+      if (!mountedRef.current) return;
       if (photo?.uri) {
         setCapturedUri(photo.uri);
         setCapturedKind('photo');
@@ -120,7 +140,10 @@ export default function ChatRoomCamera({
     } catch (error) {
       console.error('[ChatRoomCamera] Photo capture error:', error);
     } finally {
-      setIsProcessing(false);
+      // STABILITY FIX: C-7 - Guard setState in finally block
+      if (mountedRef.current) {
+        setIsProcessing(false);
+      }
     }
   }, [facing, isProcessing]);
 
@@ -132,6 +155,8 @@ export default function ChatRoomCamera({
       const video = await cameraRef.current.recordAsync({
         maxDuration: MAX_VIDEO_DURATION_SEC,
       });
+      // STABILITY FIX: C-7 - Guard setState after async operation
+      if (!mountedRef.current) return;
       if (video?.uri) {
         setCapturedUri(video.uri);
         setCapturedKind('video');
@@ -140,7 +165,10 @@ export default function ChatRoomCamera({
     } catch (error) {
       console.error('[ChatRoomCamera] Video recording error:', error);
     } finally {
-      setIsRecording(false);
+      // STABILITY FIX: C-7 - Guard setState in finally block
+      if (mountedRef.current) {
+        setIsRecording(false);
+      }
     }
   }, [facing, isRecording, isProcessing]);
 
@@ -151,9 +179,15 @@ export default function ChatRoomCamera({
       await cameraRef.current.stopRecording();
     } catch (error) {
       console.error('[ChatRoomCamera] Stop recording error:', error);
-      setIsRecording(false);
+      // STABILITY FIX: C-7 - Guard setState after async operation
+      if (mountedRef.current) {
+        setIsRecording(false);
+      }
     } finally {
-      setIsProcessing(false);
+      // STABILITY FIX: C-7 - Guard setState in finally block
+      if (mountedRef.current) {
+        setIsProcessing(false);
+      }
     }
   }, [isRecording]);
 
@@ -192,12 +226,19 @@ export default function ChatRoomCamera({
           [{ flip: ImageManipulator.FlipType.Horizontal }],
           { compress: 0.85, format: ImageManipulator.SaveFormat.JPEG }
         );
+        // STABILITY FIX: C-7 - Guard callback after async operation
+        if (!mountedRef.current) return;
         onMediaCaptured({ uri: corrected.uri, type: 'image' });
       } catch (error) {
         console.error('[ChatRoomCamera] Flip error, using original:', error);
+        // STABILITY FIX: C-7 - Guard callback after async error
+        if (!mountedRef.current) return;
         onMediaCaptured({ uri: capturedUri, type: 'image' });
       } finally {
-        setIsProcessing(false);
+        // STABILITY FIX: C-7 - Guard setState in finally block
+        if (mountedRef.current) {
+          setIsProcessing(false);
+        }
       }
     } else {
       onMediaCaptured({

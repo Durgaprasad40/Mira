@@ -597,13 +597,7 @@ export const getNearbyUsers = query({
       // Freshness: solid (1-3 days) or faded (3-6 days)
       const freshness: 'solid' | 'faded' = age <= SOLID_WINDOW_MS ? 'solid' : 'faded';
 
-      // Get primary photo
-      const photo = await ctx.db
-        .query('photos')
-        .withIndex('by_user', (q) => q.eq('userId', user._id))
-        .filter((q) => q.eq(q.field('isPrimary'), true))
-        .first();
-
+      // STABILITY FIX: C-10 - Use denormalized primaryPhotoUrl instead of N+1 query
       // Return raw published coordinates — client applies fuzz + anti-zoom shifting
       // hideDistance controls fuzz radius: true = 200-400m, false = 20-100m
       results.push({
@@ -613,7 +607,7 @@ export const getNearbyUsers = query({
         publishedLat: user.publishedLat!,
         publishedLng: user.publishedLng!,
         freshness,
-        photoUrl: photo?.url ?? null,
+        photoUrl: user.primaryPhotoUrl ?? null,
         isVerified: user.isVerified,
         hideDistance: user.hideDistance ?? false,
       });
