@@ -12,13 +12,24 @@ function generateUUID(): string {
   });
 }
 
+// STABILITY: Session-stable fallback if AsyncStorage fails
+let sessionFallbackId: string | null = null;
+
 export async function getOrCreateInstallId(): Promise<string> {
-  let installId = await AsyncStorage.getItem(INSTALL_ID_KEY);
-  if (!installId) {
-    installId = generateUUID();
-    await AsyncStorage.setItem(INSTALL_ID_KEY, installId);
+  try {
+    let installId = await AsyncStorage.getItem(INSTALL_ID_KEY);
+    if (!installId) {
+      installId = generateUUID();
+      await AsyncStorage.setItem(INSTALL_ID_KEY, installId);
+    }
+    return installId;
+  } catch {
+    // AsyncStorage failed - return session-stable fallback
+    if (!sessionFallbackId) {
+      sessionFallbackId = generateUUID();
+    }
+    return sessionFallbackId;
   }
-  return installId;
 }
 
 export interface DeviceFingerprintData {
