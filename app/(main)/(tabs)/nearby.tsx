@@ -64,6 +64,14 @@ interface NearbyProfile {
   freshness: 'solid' | 'faded';
 }
 
+/** STABILITY: Explicit location UI states for Nearby */
+type LocationUIState =
+  | 'checking'
+  | 'permission_required'
+  | 'denied_needs_settings'
+  | 'error'
+  | 'ready';
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -254,6 +262,7 @@ export default function NearbyScreen() {
   const refreshLocation = useLocationStore((s) => s.refreshLocation);
   const startLocationTracking = useLocationStore((s) => s.startLocationTracking);
   const locationError = useLocationStore((s) => s.error);
+  const isTracking = useLocationStore((s) => s.isTracking);
 
   // Extract coordinates from best available location
   const latitude = bestLocation?.latitude ?? null;
@@ -371,6 +380,15 @@ export default function NearbyScreen() {
   // If we have any location (lastKnown or current), show map immediately
   const hasLocation = bestLocation != null;
   const permissionDenied = permissionStatus === 'denied';
+
+  // STABILITY: Compute explicit location UI state
+  const locationUIState: LocationUIState = useMemo(() => {
+    if (permissionStatus === 'unknown' && !hasLocation) return 'checking';
+    if (permissionDenied && !hasLocation) return 'denied_needs_settings';
+    if (locationError && !hasLocation) return 'error';
+    return 'ready';
+  }, [permissionStatus, permissionDenied, hasLocation, locationError]);
+
   const hasAnimatedToLocation = useRef(false);
   const hasCenteredOnBestLocation = useRef(false);
 
@@ -965,7 +983,7 @@ export default function NearbyScreen() {
     // Reset timeout state so we can try again
     setLocationTimedOut(false);
 
-    if (permissionDenied) {
+    if (locationUIState === 'denied_needs_settings') {
       // Permission was denied — open system settings
       // STABILITY: Guard async call to prevent unhandled rejection
       void Linking.openSettings().catch(() => {});
@@ -974,10 +992,23 @@ export default function NearbyScreen() {
       startLocationTracking();
       refreshLocation();
     }
-  }, [permissionDenied, startLocationTracking, refreshLocation]);
+  }, [locationUIState, startLocationTracking, refreshLocation]);
+
+  // STABILITY: Show loading state while checking permissions
+  if (locationUIState === 'checking') {
+    return (
+      <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
+        <View style={styles.permissionOverlay}>
+          <ActivityIndicator size="large" color={COLORS.primary} />
+          <Text style={styles.permissionTitle}>Loading location…</Text>
+        </View>
+      </SafeAreaView>
+    );
+  }
 
   // LOC-FIX: Unified error state - permission denied, location error, or timeout
-  if (showLocationError && !hasLocation) {
+  // STABILITY: Now driven by locationUIState + locationTimedOut fallback
+  if ((locationUIState === 'denied_needs_settings' || locationUIState === 'error' || locationTimedOut) && !hasLocation) {
     return (
       <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
         <View style={styles.permissionOverlay}>
