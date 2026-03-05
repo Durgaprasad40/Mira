@@ -64,8 +64,16 @@ export const useAuthStore = create<AuthState>()((set) => ({
   _sessionValidated: false,
   _sessionValidationError: null,
 
-  setAuth: (userId, token, onboardingCompleted) =>
-    set({
+  setAuth: (userId, token, onboardingCompleted) => {
+    // STABILITY FIX: Reset onboardingStore when switching to a different user
+    // This prevents data leakage between accounts (e.g., name/DOB from previous user)
+    const currentUserId = useAuthStore.getState().userId;
+    if (currentUserId && currentUserId !== userId) {
+      if (__DEV__) console.log('[AUTH] setAuth: userId changed, resetting onboardingStore');
+      useOnboardingStore.getState().reset();
+    }
+
+    return set({
       isAuthenticated: true,
       userId,
       token,
@@ -74,7 +82,8 @@ export const useAuthStore = create<AuthState>()((set) => ({
       // Reset validation state on new auth
       _sessionValidated: false,
       _sessionValidationError: null,
-    }),
+    });
+  },
 
   setLoading: (isLoading) => set({ isLoading }),
 

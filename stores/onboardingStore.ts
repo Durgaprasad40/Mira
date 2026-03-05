@@ -430,103 +430,57 @@ export const useOnboardingStore = create<OnboardingState>()((set) => ({
       /**
        * Hydrate from Convex onboarding draft (live mode only).
        * Called on app startup to restore incomplete onboarding progress.
-       * Does NOT overwrite fields already set in current session.
+       * STABILITY FIX: Now resets to initialState first, then applies draft.
+       * This ensures Convex is the source of truth and prevents data leakage.
        */
       hydrateFromDraft: (draft) => {
+        // STABILITY FIX: Always reset to initial state first to prevent data leakage
+        // between accounts. Convex draft is the ONLY source of truth.
+        set({ ...initialState, _hasHydrated: true });
+
         if (!draft) return;
 
-        const state = useOnboardingStore.getState();
         const updates: Partial<OnboardingState> = {};
 
-        // Basic Info
+        // Basic Info - directly apply from draft (state is now reset)
         if (draft.basicInfo) {
-          if (draft.basicInfo.name && !state.name) {
-            updates.name = draft.basicInfo.name;
-          }
-          if (draft.basicInfo.handle && !state.nickname) {
-            updates.nickname = draft.basicInfo.handle;
-          }
-          if (draft.basicInfo.dateOfBirth && !state.dateOfBirth) {
-            updates.dateOfBirth = draft.basicInfo.dateOfBirth;
-          }
-          if (draft.basicInfo.gender && !state.gender) {
-            updates.gender = draft.basicInfo.gender;
-          }
+          if (draft.basicInfo.name) updates.name = draft.basicInfo.name;
+          if (draft.basicInfo.handle) updates.nickname = draft.basicInfo.handle;
+          if (draft.basicInfo.dateOfBirth) updates.dateOfBirth = draft.basicInfo.dateOfBirth;
+          if (draft.basicInfo.gender) updates.gender = draft.basicInfo.gender;
         }
 
         // Profile Details
         if (draft.profileDetails) {
-          if (draft.profileDetails.height !== undefined && !state.height) {
-            updates.height = draft.profileDetails.height;
-          }
-          if (draft.profileDetails.weight !== undefined && !state.weight) {
-            updates.weight = draft.profileDetails.weight;
-          }
-          if (draft.profileDetails.jobTitle && !state.jobTitle) {
-            updates.jobTitle = draft.profileDetails.jobTitle;
-          }
-          if (draft.profileDetails.company && !state.company) {
-            updates.company = draft.profileDetails.company;
-          }
-          if (draft.profileDetails.school && !state.school) {
-            updates.school = draft.profileDetails.school;
-          }
-          if (draft.profileDetails.education && !state.education) {
-            updates.education = draft.profileDetails.education;
-          }
-          if (draft.profileDetails.bio && !state.bio) {
-            updates.bio = draft.profileDetails.bio;
-          }
-          if (draft.profileDetails.profilePrompts && state.profilePrompts.length === 0) {
-            updates.profilePrompts = draft.profileDetails.profilePrompts;
-          }
+          if (draft.profileDetails.height !== undefined) updates.height = draft.profileDetails.height;
+          if (draft.profileDetails.weight !== undefined) updates.weight = draft.profileDetails.weight;
+          if (draft.profileDetails.jobTitle) updates.jobTitle = draft.profileDetails.jobTitle;
+          if (draft.profileDetails.company) updates.company = draft.profileDetails.company;
+          if (draft.profileDetails.school) updates.school = draft.profileDetails.school;
+          if (draft.profileDetails.education) updates.education = draft.profileDetails.education;
+          if (draft.profileDetails.bio) updates.bio = draft.profileDetails.bio;
+          if (draft.profileDetails.profilePrompts) updates.profilePrompts = draft.profileDetails.profilePrompts;
         }
 
         // Lifestyle
         if (draft.lifestyle) {
-          if (draft.lifestyle.smoking && !state.smoking) {
-            updates.smoking = draft.lifestyle.smoking;
-          }
-          if (draft.lifestyle.drinking && !state.drinking) {
-            updates.drinking = draft.lifestyle.drinking;
-          }
-          if (draft.lifestyle.exercise && !state.exercise) {
-            updates.exercise = draft.lifestyle.exercise;
-          }
-          if (draft.lifestyle.pets && state.pets.length === 0) {
-            updates.pets = draft.lifestyle.pets;
-          }
-          if (draft.lifestyle.insect && !state.insect) {
-            updates.insect = draft.lifestyle.insect;
-          }
-          if (draft.lifestyle.kids && !state.kids) {
-            updates.kids = draft.lifestyle.kids;
-          }
-          if (draft.lifestyle.religion && !state.religion) {
-            updates.religion = draft.lifestyle.religion;
-          }
+          if (draft.lifestyle.smoking) updates.smoking = draft.lifestyle.smoking;
+          if (draft.lifestyle.drinking) updates.drinking = draft.lifestyle.drinking;
+          if (draft.lifestyle.exercise) updates.exercise = draft.lifestyle.exercise;
+          if (draft.lifestyle.pets) updates.pets = draft.lifestyle.pets;
+          if (draft.lifestyle.insect) updates.insect = draft.lifestyle.insect;
+          if (draft.lifestyle.kids) updates.kids = draft.lifestyle.kids;
+          if (draft.lifestyle.religion) updates.religion = draft.lifestyle.religion;
         }
 
         // Preferences
         if (draft.preferences) {
-          if (draft.preferences.lookingFor && state.lookingFor.length === 0) {
-            updates.lookingFor = draft.preferences.lookingFor;
-          }
-          if (draft.preferences.relationshipIntent && state.relationshipIntent.length === 0) {
-            updates.relationshipIntent = draft.preferences.relationshipIntent;
-          }
-          if (draft.preferences.activities && state.activities.length === 0) {
-            updates.activities = draft.preferences.activities;
-          }
-          if (draft.preferences.minAge !== undefined && state.minAge === 18) {
-            updates.minAge = draft.preferences.minAge;
-          }
-          if (draft.preferences.maxAge !== undefined && state.maxAge === 50) {
-            updates.maxAge = draft.preferences.maxAge;
-          }
-          if (draft.preferences.maxDistance !== undefined && state.maxDistance === 50) {
-            updates.maxDistance = draft.preferences.maxDistance;
-          }
+          if (draft.preferences.lookingFor) updates.lookingFor = draft.preferences.lookingFor;
+          if (draft.preferences.relationshipIntent) updates.relationshipIntent = draft.preferences.relationshipIntent;
+          if (draft.preferences.activities) updates.activities = draft.preferences.activities;
+          if (draft.preferences.minAge !== undefined) updates.minAge = draft.preferences.minAge;
+          if (draft.preferences.maxAge !== undefined) updates.maxAge = draft.preferences.maxAge;
+          if (draft.preferences.maxDistance !== undefined) updates.maxDistance = draft.preferences.maxDistance;
         }
 
         // Apply updates if any
