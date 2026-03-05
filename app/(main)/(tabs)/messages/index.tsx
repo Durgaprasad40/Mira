@@ -210,26 +210,18 @@ export default function MessagesScreen() {
     }, [activeView])
   );
 
+  // HIGH #1 FIX: Memoize Convex query args to prevent re-subscriptions
+  // Creating new object references on every render causes Convex to re-subscribe
+  const convexQueryArgs = useMemo(
+    () => (!isDemoMode && convexUserId ? { userId: convexUserId } : 'skip' as const),
+    [convexUserId]
+  );
+
   // Convex queries (skipped in demo mode)
-  const convexConversations = useQuery(
-    api.messages.getConversations,
-    !isDemoMode && convexUserId ? { userId: convexUserId } : 'skip'
-  );
-
-  const convexUnreadCount = useQuery(
-    api.messages.getUnreadCount,
-    !isDemoMode && convexUserId ? { userId: convexUserId } : 'skip'
-  );
-
-  const convexCurrentUser = useQuery(
-    api.users.getCurrentUser,
-    !isDemoMode && convexUserId ? { userId: convexUserId } : 'skip'
-  );
-
-  const convexLikesReceived = useQuery(
-    api.likes.getLikesReceived,
-    !isDemoMode && convexUserId ? { userId: convexUserId } : 'skip'
-  );
+  const convexConversations = useQuery(api.messages.getConversations, convexQueryArgs);
+  const convexUnreadCount = useQuery(api.messages.getUnreadCount, convexQueryArgs);
+  const convexCurrentUser = useQuery(api.users.getCurrentUser, convexQueryArgs);
+  const convexLikesReceived = useQuery(api.likes.getLikesReceived, convexQueryArgs);
 
   // Demo DM store for thread model
   const demoMeta = useDemoDmStore((s) => s.meta);
