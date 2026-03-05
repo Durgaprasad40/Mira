@@ -967,7 +967,8 @@ export default function NearbyScreen() {
 
     if (permissionDenied) {
       // Permission was denied — open system settings
-      Linking.openSettings();
+      // STABILITY: Guard async call to prevent unhandled rejection
+      void Linking.openSettings().catch(() => {});
     } else {
       // Try to get location again (permission not explicitly denied, may be services OFF)
       startLocationTracking();
