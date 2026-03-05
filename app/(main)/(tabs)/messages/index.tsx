@@ -45,6 +45,7 @@ import {
   type ProcessedThread,
 } from '@/lib/threadsIntegrity';
 import { log } from '@/utils/logger';
+import { useScreenTrace } from '@/lib/devTrace';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 const CARD_WIDTH = (SCREEN_WIDTH - 48) / 2;
@@ -74,6 +75,7 @@ function isRecentLike(createdAt: number): boolean {
 }
 
 export default function MessagesScreen() {
+  useScreenTrace("MESSAGES");
   const router = useRouter();
   const { focus, profileId, source } = useLocalSearchParams<{
     focus?: string;

@@ -25,8 +25,10 @@ import { Button } from "@/components/ui";
 import { useOnboardingStore } from "@/stores/onboardingStore";
 import { Ionicons } from "@expo/vector-icons";
 import { OnboardingProgressHeader } from "@/components/OnboardingProgressHeader";
+import { useScreenTrace } from "@/lib/devTrace";
 
 export default function PermissionsScreen() {
+  useScreenTrace("ONB_PERMISSIONS");
   const { setStep } = useOnboardingStore();
   const router = useRouter();
   const [locationGranted, setLocationGranted] = useState(false);

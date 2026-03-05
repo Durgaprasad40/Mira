@@ -36,6 +36,7 @@ import { useQuery } from "convex/react";
 import { api } from "@/convex/_generated/api";
 import { Ionicons } from "@expo/vector-icons";
 import { validateRequired, scrollToFirstInvalid, ValidationRule } from "@/lib/onboardingValidation";
+import { useScreenTrace } from "@/lib/devTrace";
 
 // =============================================================================
 // DOB Date Helpers - Avoid UTC conversion bugs
@@ -66,6 +67,7 @@ function formatDOBToString(date: Date): string {
 }
 
 export default function BasicInfoScreen() {
+  useScreenTrace("ONB_BASIC_INFO");
   const {
     name,
     dateOfBirth,

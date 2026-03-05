@@ -19,8 +19,10 @@ import { useAuthStore } from '@/stores/authStore';
 import { isDemoMode } from '@/hooks/useConvex';
 import { validateRequired, scrollToFirstInvalid, createRules } from '@/lib/onboardingValidation';
 import { OnboardingProgressHeader } from '@/components/OnboardingProgressHeader';
+import { useScreenTrace } from '@/lib/devTrace';
 
 export default function BioScreen() {
+  useScreenTrace("ONB_BIO");
   const { bio, setBio, setStep } = useOnboardingStore();
   const { userId } = useAuthStore();
   const demoHydrated = useDemoStore((s) => s._hasHydrated);

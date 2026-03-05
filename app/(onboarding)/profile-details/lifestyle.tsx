@@ -36,8 +36,10 @@ import { useMutation } from "convex/react";
 import { api } from "@/convex/_generated/api";
 import { ExerciseStatus, PetType, InsectType } from "@/types";
 import { OnboardingProgressHeader } from "@/components/OnboardingProgressHeader";
+import { useScreenTrace } from "@/lib/devTrace";
 
 export default function ProfileDetailsLifestyleScreen() {
+  useScreenTrace("ONB_PROFILE_LIFESTYLE");
   const {
     smoking,
     drinking,

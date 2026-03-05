@@ -68,8 +68,14 @@ export async function getAuthBootCache(): Promise<AuthBootCacheData> {
       console.log('[AUTH_BOOT] No token in SecureStore, returning default state');
     }
     return { ...DEFAULT_AUTH_BOOT };
-  } catch (error) {
-    console.error('[AUTH_BOOT] Failed to read from SecureStore:', error);
+  } catch (error: any) {
+    // M-4: Differentiate SecureStore errors for better diagnostics
+    const msg = error?.message || String(error);
+    if (msg.includes('quota') || msg.includes('storage') || msg.includes('full')) {
+      console.error('[AUTH_BOOT] SecureStore QUOTA/STORAGE error (read):', msg);
+    } else {
+      console.error('[AUTH_BOOT] Failed to read from SecureStore:', error);
+    }
     return { ...DEFAULT_AUTH_BOOT };
   }
 }
@@ -100,12 +106,19 @@ export async function saveAuthBootCache(
         console.log('[AUTH_BOOT] Saved token to SecureStore, userId:', userId.substring(0, 10) + '...');
       }
     }
-  } catch (error) {
+  } catch (error: any) {
     // STABILITY FIX: C-3 - SecureStore save failure must not leave partial cache
+    // M-4: Differentiate SecureStore quota/storage errors
+    const msg = error?.message || String(error);
+    const isQuotaError = msg.includes('quota') || msg.includes('storage') || msg.includes('full');
+    if (isQuotaError) {
+      console.error('[AUTH_BOOT] SecureStore QUOTA/STORAGE error (save):', msg);
+    } else {
+      console.error('[AUTH_BOOT] Failed to save to SecureStore:', error);
+    }
     if (__DEV__) {
       console.warn('[AUTH_BOOT_CACHE] SecureStore save failed - cleaning up partial state:', error);
     }
-    console.error('[AUTH_BOOT] Failed to save to SecureStore:', error);
     // Clean up any partial cache to prevent ghost login sessions
     try {
       await SecureStore.deleteItemAsync(TOKEN_KEY);
@@ -133,8 +146,14 @@ export async function clearAuthBootCache(): Promise<void> {
     if (__DEV__) {
       console.log('[AUTH_BOOT] Cleared token + onboardingCompleted from SecureStore');
     }
-  } catch (error) {
-    console.error('[AUTH_BOOT] Failed to clear SecureStore:', error);
+  } catch (error: any) {
+    // M-4: Differentiate SecureStore quota/storage errors
+    const msg = error?.message || String(error);
+    if (msg.includes('quota') || msg.includes('storage') || msg.includes('full')) {
+      console.error('[AUTH_BOOT] SecureStore QUOTA/STORAGE error (clear):', msg);
+    } else {
+      console.error('[AUTH_BOOT] Failed to clear SecureStore:', error);
+    }
   }
 }
 

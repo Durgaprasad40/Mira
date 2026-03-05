@@ -47,8 +47,11 @@ export default function MainTabsLayout() {
     });
   }, [router]);
   const userId = useAuthStore((s) => s.userId);
-  const currentUserId = userId || 'demo_user_1';
-  const convexUserId = asUserId(currentUserId);
+  // BUGFIX: In live mode, never use demo_user_1 fallback for Convex queries
+  // Demo mode: use demo_user_1 fallback for UI consistency
+  // Live mode: use actual userId or undefined (queries will skip if falsy)
+  const currentUserId = isDemoMode ? (userId || 'demo_user_1') : (userId || undefined);
+  const convexUserId = currentUserId ? asUserId(currentUserId) : undefined;
 
   // BUGFIX #27: Use same unread logic for badge as messages list
   // Demo mode: use processThreadsIntegrity for consistency
@@ -98,9 +101,20 @@ export default function MainTabsLayout() {
     !isDemoMode && userId ? { userId: stringToUserId(userId) } : 'skip'
   );
 
+  // STABILITY FIX: Query users.phase2OnboardingCompleted for durable routing decision
+  // This ensures onboarding doesn't show again after force-quit/restart
+  const userOnboardingStatus = useQuery(
+    api.users.getOnboardingStatus,
+    !isDemoMode && convexUserId ? { userId: convexUserId } : 'skip'
+  );
+
   // Private tab state - check if Phase-2 onboarding is complete
   // MUST match the same logic used in PrivateLayout to avoid redirect flash
-  const phase2OnboardingCompleted = usePrivateProfileStore((s) => s.phase2OnboardingCompleted);
+  // STABILITY FIX: Now checks both local store AND backend flag
+  const localPhase2OnboardingCompleted = usePrivateProfileStore((s) => s.phase2OnboardingCompleted);
+  const phase2OnboardingCompleted = isDemoMode
+    ? localPhase2OnboardingCompleted
+    : (localPhase2OnboardingCompleted || userOnboardingStatus?.phase2OnboardingCompleted === true);
   const privateStoreHydrated = usePrivateProfileStore((s) => s._hasHydrated);
   const localDeletionStatus = usePrivateProfileStore((s) => s.deletionStatus);
   // N-001/C-004 FIX: Permanent guard to prevent duplicate router.replace calls

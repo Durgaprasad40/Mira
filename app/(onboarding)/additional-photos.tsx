@@ -40,6 +40,7 @@ import { uploadPhotoToBackend, syncPhotosFromBackend } from '@/services/photoSyn
 import { useMutation, useQuery } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { Id } from '@/convex/_generated/dataModel';
+import { useScreenTrace } from '@/lib/devTrace';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 
@@ -102,6 +103,7 @@ async function persistPhoto(cacheUri: string): Promise<string> {
 }
 
 export default function AdditionalPhotosScreen() {
+  useScreenTrace("ONB_ADDITIONAL_PHOTOS");
   const { photos, setPhotoAtIndex, removePhoto, setStep, displayPhotoVariant, setDisplayPhotoVariant, bio, setBio, clearAllPhotos, verificationReferencePrimary } = useOnboardingStore();
   const { userId } = useAuthStore();
   const demoHydrated = useDemoStore((s) => s._hasHydrated);

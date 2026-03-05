@@ -243,24 +243,41 @@ export async function uploadPhotoToBackend(
       console.log(`[PHOTO_SYNC] Photo uploaded to storage: ${storageId}`);
     }
 
-    // Step 4: Add photo to photos table
-    const addPhotoResult = await convex.mutation(api.photos.addPhoto, {
-      userId: userId as Id<'users'>,
-      storageId,
-      isPrimary,
-      hasFace: true, // Assume all profile photos have faces (verification happens separately)
-    });
-
-    if (__DEV__) {
-      console.log(`[PHOTO_SYNC] Photo added to database: ${addPhotoResult.photoId}`);
+    // H-1: Track pending upload (best-effort, non-fatal)
+    try {
+      await convex.mutation(api.photos.trackPendingUpload, { userId, storageId });
+    } catch (e) {
+      console.warn('[PHOTO_SYNC] H-1: trackPendingUpload failed (non-fatal):', e);
     }
 
-    return {
-      success: true,
-      storageId,
-      photoId: addPhotoResult.photoId,
-      message: 'Photo uploaded successfully',
-    };
+    // Step 4: Add photo to photos table
+    try {
+      const addPhotoResult = await convex.mutation(api.photos.addPhoto, {
+        userId,
+        storageId,
+        isPrimary,
+        hasFace: true, // Assume all profile photos have faces (verification happens separately)
+      });
+
+      if (__DEV__) {
+        console.log(`[PHOTO_SYNC] Photo added to database: ${addPhotoResult.photoId}`);
+      }
+
+      return {
+        success: true,
+        storageId,
+        photoId: addPhotoResult.photoId,
+        message: 'Photo uploaded successfully',
+      };
+    } catch (addPhotoError: any) {
+      // H-1: Cleanup orphaned storage (best-effort)
+      try {
+        await convex.mutation(api.photos.cleanupPendingUpload, { userId, storageId });
+      } catch (e) {
+        console.warn('[PHOTO_SYNC] H-1: cleanupPendingUpload failed (non-fatal):', e);
+      }
+      throw addPhotoError;
+    }
   } catch (error: any) {
     console.error('[PHOTO_SYNC] Upload failed:', error);
     return {

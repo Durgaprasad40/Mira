@@ -27,6 +27,7 @@ import { isDemoMode } from '@/hooks/useConvex';
 import { useDemoStore } from '@/stores/demoStore';
 import { useOnboardingStore } from '@/stores/onboardingStore';
 import { getDemoCurrentUser } from '@/lib/demoData';
+import { useScreenTrace } from '@/lib/devTrace';
 
 /**
  * Calculate age from DOB string ("YYYY-MM-DD").
@@ -51,6 +52,7 @@ function calculateAge(dob: string | undefined | null): number | null {
 }
 
 export default function ProfileScreen() {
+  useScreenTrace("PROFILE");
   const router = useRouter();
   const userId = useAuthStore((s) => s.userId);
   const token = useAuthStore((s) => s.token);

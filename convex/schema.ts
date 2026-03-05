@@ -206,6 +206,16 @@ export default defineSchema({
     onboardingCompleted: v.boolean(),
     onboardingStep: v.optional(v.string()),
 
+    // Phase-2 Onboarding (Private Mode)
+    // Once true, user never sees Phase-2 onboarding again
+    phase2OnboardingCompleted: v.optional(v.boolean()),
+    phase2OnboardingCompletedAt: v.optional(v.number()),
+
+    // Private Mode Welcome/Guidelines Confirmation (18+ consent gate)
+    // Once true, user skips the consent screen on subsequent visits
+    privateWelcomeConfirmed: v.optional(v.boolean()),
+    privateWelcomeConfirmedAt: v.optional(v.number()),
+
     // Onboarding Draft (persistent storage for incomplete onboarding)
     onboardingDraft: v.optional(v.object({
       // Basic Info
@@ -1388,4 +1398,15 @@ export default defineSchema({
   })
     .index('by_user', ['userId'])
     .index('by_user_game_convo', ['userId', 'game', 'convoId', 'windowKey']),
+
+  // H-1: Track pending uploads to prevent orphaned storage blobs
+  // Records created after upload, deleted when addPhoto succeeds or cleanup runs
+  pendingUploads: defineTable({
+    storageId: v.id('_storage'),
+    userId: v.id('users'),
+    createdAt: v.number(),
+  })
+    .index('by_storage', ['storageId'])
+    .index('by_user', ['userId'])
+    .index('by_createdAt', ['createdAt']),
 });

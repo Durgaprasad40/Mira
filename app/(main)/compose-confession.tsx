@@ -37,7 +37,8 @@ export default function ComposeConfessionScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const { userId } = useAuthStore();
-  const currentUserId = userId || 'demo_user_1';
+  // BUGFIX: In live mode, never use demo_user_1 fallback for Convex mutations
+  const currentUserId = isDemoMode ? (userId || 'demo_user_1') : (userId || undefined);
 
   const addConfession = useConfessionStore((s) => s.addConfession);
   const setTimedReveal = useConfessionStore((s) => s.setTimedReveal);
@@ -84,6 +85,12 @@ export default function ComposeConfessionScreen() {
     }
     setIsSubmitting(true);
 
+    // Guard: require valid userId
+    if (!currentUserId) {
+      setIsSubmitting(false);
+      return;
+    }
+
     const confessionId = `conf_new_${Date.now()}`;
     const finalTarget = confessToSomeone ? targetUserId : undefined;
 
@@ -126,8 +133,8 @@ export default function ComposeConfessionScreen() {
       });
     }
 
-    // Sync to backend
-    if (!isDemoMode) {
+    // Sync to backend (only if we have a valid userId)
+    if (!isDemoMode && currentUserId) {
       createConfessionMutation({
         userId: currentUserId as any,
         text: trimmed,

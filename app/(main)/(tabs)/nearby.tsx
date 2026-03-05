@@ -45,6 +45,7 @@ import { isWithinAllowedDistance } from '@/lib/distanceRules';
 import { logDebugEvent } from '@/lib/debugEventLogger';
 import { log } from '@/utils/logger';
 import { markTiming } from '@/utils/startupTiming';
+import { useScreenTrace } from '@/lib/devTrace';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -251,6 +252,7 @@ const FAB_SAFE_PADDING = 12; // Extra padding from safe area boundaries
 const TOAST_DURATION_MS = 2000; // Duration to show cooldown toast
 
 export default function NearbyScreen() {
+  useScreenTrace("NEARBY");
   const router = useRouter();
   const insets = useSafeAreaInsets();
   // Check if we arrived from tapping a notification — if so, skip creating new notification

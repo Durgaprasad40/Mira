@@ -20,8 +20,10 @@ import { api } from '@/convex/_generated/api';
 import { isDemoMode } from '@/hooks/useConvex';
 import { useDemoStore } from '@/stores/demoStore';
 import { OnboardingProgressHeader } from '@/components/OnboardingProgressHeader';
+import { useScreenTrace } from '@/lib/devTrace';
 
 export default function PasswordScreen() {
+  useScreenTrace("ONB_PASSWORD");
   const { email, setEmail, password, setPassword, setStep } = useOnboardingStore();
   const router = useRouter();
 

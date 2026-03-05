@@ -26,6 +26,7 @@ import { api } from "@/convex/_generated/api";
 import { useAuthStore } from "@/stores/authStore";
 import { useDemoStore } from "@/stores/demoStore";
 import { OnboardingProgressHeader } from "@/components/OnboardingProgressHeader";
+import { useScreenTrace } from "@/lib/devTrace";
 
 // ============================================================================
 // DEV MODE: Skip OTP entirely – auto-redirect to password step
@@ -34,6 +35,7 @@ import { OnboardingProgressHeader } from "@/components/OnboardingProgressHeader"
 const SKIP_OTP_IN_DEV = __DEV__;
 
 export default function OTPScreen() {
+  useScreenTrace("ONB_OTP");
   const { email, phone, setStep } = useOnboardingStore();
   const router = useRouter();
   const { setAuth } = useAuthStore();

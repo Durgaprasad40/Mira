@@ -1,16 +1,61 @@
-import { useEffect, useRef } from "react";
+import React, { useEffect, useRef, useCallback, Component, ReactNode } from "react";
 import { View } from "react-native";
-import { Stack, useRootNavigationState, useRouter, useSegments } from "expo-router";
+import { Stack, useRootNavigationState, useRouter, useSegments, router as globalRouter } from "expo-router";
 import { useQuery } from "convex/react";
 import { api } from "@/convex/_generated/api";
 import { useAuthStore } from "@/stores/authStore";
 import { isDemoMode } from "@/hooks/useConvex";
 import { computeEnforcementLevel } from "@/lib/securityEnforcement";
 import { ToastHost } from "@/components/ui/Toast";
+import { useRouteTrace } from "@/lib/devTrace";
+
+// H-3: Minimal auth error detection
+function isAuthError(msg: string): boolean {
+  if (!msg) return false;
+  const l = msg.toLowerCase();
+  return l.includes('unauthenticated') || l.includes('unauthorized') ||
+         l.includes('token expired') || l.includes('session expired');
+}
+
+// H-3: Auth Error Boundary - redirect on auth errors, rethrow others
+class AuthErrorBoundary extends Component<{ children: ReactNode }, { error: Error | null }> {
+  state = { error: null as Error | null };
+
+  static getDerivedStateFromError(error: Error) {
+    return { error };
+  }
+
+  componentDidCatch(error: Error) {
+    if (isAuthError(error?.message || '')) {
+      useAuthStore.getState().logout();
+      globalRouter.replace('/(auth)/welcome');
+    }
+  }
+
+  render() {
+    if (this.state.error) {
+      if (isAuthError(this.state.error.message || '')) {
+        return null;
+      }
+      throw this.state.error;
+    }
+    return this.props.children;
+  }
+}
 
 export default function MainLayout() {
   const userId = useAuthStore((s) => s.userId);
+  const token = useAuthStore((s) => s.token);
+  const onboardingCompleted = useAuthStore((s) => s.onboardingCompleted);
   const didRedirect = useRef(false);
+
+  // DEV-only route change logging
+  useRouteTrace("P1_MAIN", useCallback(() => ({
+    userId: userId?.substring(0, 8) ?? null,
+    hasToken: !!token,
+    onboardingCompleted: !!onboardingCompleted,
+    isDemoMode,
+  }), [userId, token, onboardingCompleted]));
 
   // ── Navigation hooks ──
   // useRouter() returns a new object on every navigation state change.
@@ -60,6 +105,7 @@ export default function MainLayout() {
   }, [needsVerification, rootNavState?.key, segmentsKey]);
 
   return (
+    <AuthErrorBoundary>
     <View style={{ flex: 1 }}>
     <Stack screenOptions={{ headerShown: false }}>
       <Stack.Screen name="(tabs)" />
@@ -123,5 +169,6 @@ export default function MainLayout() {
     </Stack>
     <ToastHost />
     </View>
+    </AuthErrorBoundary>
   );
 }

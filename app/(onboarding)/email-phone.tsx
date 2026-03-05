@@ -19,10 +19,12 @@ import { api } from '@/convex/_generated/api';
 import { useOnboardingStore } from '@/stores/onboardingStore';
 import { useAuthStore } from '@/stores/authStore';
 import { OnboardingProgressHeader } from '@/components/OnboardingProgressHeader';
+import { useScreenTrace } from '@/lib/devTrace';
 
 type AuthMethod = 'email' | 'phone' | 'apple' | 'google';
 
 export default function EmailPhoneScreen() {
+  useScreenTrace("ONB_EMAIL_PHONE");
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const [isLoading, setIsLoading] = useState(false);

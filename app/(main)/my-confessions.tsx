@@ -23,14 +23,15 @@ import ConfessionCard from '@/components/confessions/ConfessionCard';
 export default function MyConfessionsScreen() {
   const router = useRouter();
   const userId = useAuthStore((s) => s.userId);
-  const currentUserId = userId || 'demo_user_1';
+  // BUGFIX: In live mode, never use demo_user_1 fallback for Convex queries
+  const currentUserId = isDemoMode ? (userId || 'demo_user_1') : (userId || undefined);
 
   // Demo store
   const demoConfessions = useConfessionStore((s) => s.confessions);
   const userReactions = useConfessionStore((s) => s.userReactions);
 
   // Convex query (only when not in demo mode)
-  const convexUserId = asUserId(currentUserId);
+  const convexUserId = currentUserId ? asUserId(currentUserId) : undefined;
   const convexMyConfessions = useQuery(
     api.confessions.getMyConfessions,
     !isDemoMode && convexUserId ? { userId: convexUserId } : 'skip'

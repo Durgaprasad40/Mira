@@ -607,6 +607,10 @@ export const useDemoStore = create<DemoState>()((set, get) => ({
   },
 
   seed: () => {
+    // STABILITY FIX: M-2 - Do not seed in live mode (prevents retry loop in production)
+    const isDemoMode = process.env.EXPO_PUBLIC_DEMO_MODE === 'true';
+    if (!isDemoMode) return;
+
     const state = get();
 
     // CRITICAL: Do not seed before hydration completes
@@ -906,10 +910,19 @@ export const useDemoStore = create<DemoState>()((set, get) => ({
 
   getVisibleCrossedPaths: () => {
     const now = Date.now();
+    const current = get().crossedPaths;
+
+    // M-3: Prune expired entries from store to prevent indefinite growth
+    const expired = current.filter((cp) => cp.expiresAt && cp.expiresAt < now);
+    if (expired.length > 0) {
+      set((s) => ({
+        crossedPaths: s.crossedPaths.filter((cp) => !cp.expiresAt || cp.expiresAt >= now),
+      }));
+    }
+
+    // Return visible (not hidden, not expired)
     return get().crossedPaths.filter((cp) => {
-      // Filter out hidden entries
       if (cp.hidden) return false;
-      // Filter out expired entries (30 days)
       if (cp.expiresAt && cp.expiresAt < now) return false;
       return true;
     });

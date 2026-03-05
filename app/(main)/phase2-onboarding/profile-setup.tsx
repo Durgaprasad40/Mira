@@ -28,6 +28,8 @@ import { useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { Image } from 'expo-image';
+import { useMutation } from 'convex/react';
+import { api } from '@/convex/_generated/api';
 import { INCOGNITO_COLORS } from '@/lib/constants';
 import { PRIVATE_INTENT_CATEGORIES } from '@/lib/privateConstants';
 import { useShallow } from 'zustand/react/shallow';
@@ -43,6 +45,7 @@ import {
   PHASE2_DESIRE_MIN_LENGTH,
   PHASE2_DESIRE_MAX_LENGTH,
 } from '@/stores/privateProfileStore';
+import { useScreenTrace } from '@/lib/devTrace';
 import {
   GENDER_OPTIONS,
   SMOKING_OPTIONS,
@@ -51,11 +54,14 @@ import {
   RELIGION_OPTIONS,
 } from '@/lib/constants';
 import { useDemoStore } from '@/stores/demoStore';
+import { useAuthStore } from '@/stores/authStore';
+import { isDemoMode } from '@/hooks/useConvex';
 
 const C = INCOGNITO_COLORS;
 const screenWidth = Dimensions.get('window').width;
 
 export default function Phase2Review() {
+  useScreenTrace("P2_ONB_REVIEW");
   const router = useRouter();
   const insets = useSafeAreaInsets();
 
@@ -85,6 +91,14 @@ export default function Phase2Review() {
 
   // Store actions
   const completeSetup = usePrivateProfileStore((s) => s.completeSetup);
+
+  // Auth for Convex mutation
+  const userId = useAuthStore((s) => s.userId);
+  const setPhase2CompletedMutation = useMutation(api.users.setPhase2OnboardingCompleted);
+  const upsertPrivateProfileMutation = useMutation(api.privateProfiles.upsertByAuthId);
+
+  // Get age from store (calculated from DOB during onboarding)
+  const storeAge = usePrivateProfileStore((s) => s.age);
 
   // Validation
   const canContinueDesire = usePrivateProfileStore(selectCanContinueDesire);
@@ -177,8 +191,51 @@ export default function Phase2Review() {
     if (isCompletingRef.current) return; // Prevent double-tap
     isCompletingRef.current = true;
 
-    // Call completeSetup - this sets isSetupComplete + phase2OnboardingCompleted permanently
+    // Call completeSetup - this sets isSetupComplete + phase2OnboardingCompleted in local store
     completeSetup();
+
+    // STABILITY FIX: Persist Phase-2 data to Convex (durable across restarts)
+    if (!isDemoMode && userId) {
+      // 1. Set phase2 onboarding completed flag
+      setPhase2CompletedMutation({ userId: userId as any })
+        .then((result) => {
+          if (__DEV__) {
+            console.log('[Phase2Review] Convex phase2OnboardingCompleted set:', result);
+          }
+        })
+        .catch((err) => {
+          console.warn('[Phase2Review] Failed to persist phase2OnboardingCompleted to Convex:', err);
+        });
+
+      // 2. Persist the full private profile data
+      // IMPORTANT: Only store backend URLs (https), not local file:// URIs
+      const backendPhotoUrls = selectedPhotoUrls.filter(
+        (url) => typeof url === 'string' && url.startsWith('http')
+      );
+
+      upsertPrivateProfileMutation({
+        authUserId: userId,
+        displayName: displayName || 'User',
+        age: storeAge || 0,
+        gender: gender || '',
+        privateBio: privateBio.trim(),
+        privateIntentKeys: intentKeys,
+        privatePhotoUrls: backendPhotoUrls,
+        isSetupComplete: true,
+      })
+        .then((result) => {
+          if (__DEV__) {
+            console.log('[Phase2Review] Convex privateProfile upserted:', result, {
+              photoCount: backendPhotoUrls.length,
+              intentCount: intentKeys.length,
+            });
+          }
+        })
+        .catch((err) => {
+          // Best effort - log but don't crash
+          console.warn('[Phase2Review] Failed to persist privateProfile to Convex:', err);
+        });
+    }
 
     if (__DEV__) {
       console.log('[Phase2Review] Setup complete:', {
@@ -190,7 +247,11 @@ export default function Phase2Review() {
 
     // Navigate to Phase-2 private tabs
     router.replace('/(main)/(private)/(tabs)' as any);
-  }, [canComplete, completeSetup, intentKeys.length, privateBio, photoCount, router]);
+  }, [
+    canComplete, completeSetup, intentKeys, privateBio, photoCount, router,
+    userId, setPhase2CompletedMutation, upsertPrivateProfileMutation,
+    selectedPhotoUrls, displayName, storeAge, gender
+  ]);
 
   return (
     <View style={[styles.container, { paddingTop: insets.top }]}>

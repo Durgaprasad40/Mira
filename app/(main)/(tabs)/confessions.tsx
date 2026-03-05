@@ -69,16 +69,19 @@ import {
   computeConfessionBadgeCount,
   type TaggedConfessionItem,
 } from '@/lib/confessionsIntegrity';
+import { useScreenTrace } from '@/lib/devTrace';
 
 const { height: SCREEN_HEIGHT } = Dimensions.get('window');
 
 // TaggedConfessionItem is now imported from confessionsIntegrity.ts
 
 export default function ConfessionsScreen() {
+  useScreenTrace("CONFESSIONS");
   const router = useRouter();
   const { openTagged } = useLocalSearchParams<{ openTagged?: string }>();
   const userId = useAuthStore((s) => s.userId);
-  const currentUserId = userId || 'demo_user_1';
+  // BUGFIX: In live mode, never use demo_user_1 fallback for Convex queries
+  const currentUserId = isDemoMode ? (userId || 'demo_user_1') : (userId || undefined);
 
   // Individual selectors to avoid full re-render on any store change
   const demoConfessions = useConfessionStore((s) => s.confessions);
@@ -151,7 +154,7 @@ export default function ConfessionsScreen() {
   const [duplicateCandidates, setDuplicateCandidates] = useState<{ id: string; name: string; avatarUrl: string | null; age?: number; disambiguator: string }[]>([]);
 
   // Query liked users for tagging candidates
-  const convexUserId = asUserId(currentUserId);
+  const convexUserId = currentUserId ? asUserId(currentUserId) : undefined;
   const likedUsersQuery = useQuery(
     api.likes.getLikedUsers,
     !isDemoMode && convexUserId ? { userId: convexUserId } : 'skip'
@@ -293,9 +296,9 @@ export default function ConfessionsScreen() {
         reactionCount: c.reactionCount,
       }));
     }
-    // Demo mode: use helper with seen tracking
+    // Demo mode: use helper with seen tracking (currentUserId guaranteed in demo mode)
     const seenSet = new Set(seenTaggedConfessionIds);
-    return buildDemoTaggedConfessions(demoConfessions, currentUserId, seenSet);
+    return buildDemoTaggedConfessions(demoConfessions, currentUserId!, seenSet);
   }, [isDemoMode, convexTaggedConfessions, demoConfessions, currentUserId, seenTaggedConfessionIds]);
 
   // Process all confession state through the integrity module
@@ -520,7 +523,7 @@ export default function ConfessionsScreen() {
         notifyReaction(confessionId);
         return;
       }
-      const convexUserId = asUserId(currentUserId);
+      const convexUserId = currentUserId ? asUserId(currentUserId) : undefined;
       // BUGFIX #24: Don't call demoToggleReaction in Convex mode - causes duplicate state updates
       if (!convexUserId) return; // no valid user id — skip mutation
       toggleReactionMutation({
@@ -606,6 +609,12 @@ export default function ConfessionsScreen() {
 
     setComposerSubmitting(true);
 
+    // Guard: require valid userId
+    if (!currentUserId) {
+      setComposerSubmitting(false);
+      return;
+    }
+
     const confessionId = `conf_new_${Date.now()}`;
     addConfession({
       id: confessionId,
@@ -671,6 +680,9 @@ export default function ConfessionsScreen() {
 
   const handleReplyAnonymously = useCallback(
     (confessionId: string, confessionUserId: string) => {
+      // Guard: require valid userId for demo chat creation
+      if (!currentUserId) return;
+
       const existing = chats.find(
         (c) => c.confessionId === confessionId &&
           (c.initiatorId === currentUserId || c.responderId === currentUserId)
@@ -813,6 +825,9 @@ export default function ConfessionsScreen() {
   // Profile preview handlers (one-time preview for tagged confession receivers)
   const handleViewProfileRequest = useCallback(
     (confessionId: string, authorId: string) => {
+      // Guard: require valid userId
+      if (!currentUserId) return;
+
       // Check if already used
       if (isPreviewUsed(confessionId, currentUserId)) {
         Alert.alert('Already Viewed', 'You have already used your one-time profile preview for this confession.');
@@ -864,6 +879,9 @@ export default function ConfessionsScreen() {
   // Handle Connect button (tagged user only)
   const handleConnect = useCallback(
     (confessionId: string, authorName?: string) => {
+      // Guard: require valid userId
+      if (!currentUserId) return;
+
       const displayName = authorName || 'this person';
       const dialogMessage = `Connect with ${displayName} and start chatting in Messages?`;
 
@@ -1102,7 +1120,7 @@ export default function ConfessionsScreen() {
               authorName={(item as any).authorName}
               createdAt={item.createdAt}
               isTaggedForMe={isTaggedForMe}
-              previewUsed={isTaggedForMe ? isPreviewUsed(item.id, currentUserId) : undefined}
+              previewUsed={isTaggedForMe && currentUserId ? isPreviewUsed(item.id, currentUserId) : undefined}
               isConnected={isConfessionConnected(item.id)}
               taggedUserId={item.targetUserId}
               taggedUserName={(item as any).targetUserName}

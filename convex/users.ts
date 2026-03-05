@@ -1519,6 +1519,12 @@ export const getOnboardingStatus = query({
       // Onboarding state
       onboardingCompleted: user.onboardingCompleted || false,
       onboardingDraft: user.onboardingDraft || null,
+
+      // Phase-2 onboarding state (Private Mode)
+      phase2OnboardingCompleted: user.phase2OnboardingCompleted || false,
+
+      // Private welcome/guidelines confirmation (18+ consent gate)
+      privateWelcomeConfirmed: user.privateWelcomeConfirmed || false,
     };
 
     console.log('[ONB_STATUS]', JSON.stringify({
@@ -1532,5 +1538,83 @@ export const getOnboardingStatus = query({
     }));
 
     return status;
+  },
+});
+
+/**
+ * Set Phase-2 onboarding as completed for a user.
+ * This is a one-time operation - once set, onboarding never shows again.
+ * Called from profile-setup.tsx when user completes Phase-2 onboarding.
+ */
+export const setPhase2OnboardingCompleted = mutation({
+  args: {
+    userId: v.union(v.id('users'), v.string()),
+  },
+  handler: async (ctx, args) => {
+    const resolvedUserId = await resolveUserIdByAuthId(ctx, args.userId as string);
+    if (!resolvedUserId) {
+      console.warn('[P2_ONBOARD] setPhase2OnboardingCompleted: user not found');
+      return { success: false, error: 'user_not_found' };
+    }
+
+    const user = await ctx.db.get(resolvedUserId);
+    if (!user) {
+      console.warn('[P2_ONBOARD] setPhase2OnboardingCompleted: user document not found');
+      return { success: false, error: 'user_not_found' };
+    }
+
+    // Idempotent: skip if already completed
+    if (user.phase2OnboardingCompleted) {
+      console.log('[P2_ONBOARD] setPhase2OnboardingCompleted: already completed, skipping');
+      return { success: true, alreadyCompleted: true };
+    }
+
+    // Set the flag
+    await ctx.db.patch(resolvedUserId, {
+      phase2OnboardingCompleted: true,
+      phase2OnboardingCompletedAt: Date.now(),
+    });
+
+    console.log('[P2_ONBOARD] setPhase2OnboardingCompleted: success for user', resolvedUserId.substring(0, 8));
+    return { success: true };
+  },
+});
+
+/**
+ * Set Private welcome/guidelines as confirmed for a user (18+ consent gate).
+ * This is a one-time operation - once set, consent screen never shows again.
+ * Called from PrivateConsentGate when user confirms.
+ */
+export const setPrivateWelcomeConfirmed = mutation({
+  args: {
+    userId: v.union(v.id('users'), v.string()),
+  },
+  handler: async (ctx, args) => {
+    const resolvedUserId = await resolveUserIdByAuthId(ctx, args.userId as string);
+    if (!resolvedUserId) {
+      console.warn('[PRIVATE_WELCOME] setPrivateWelcomeConfirmed: user not found');
+      return { success: false, error: 'user_not_found' };
+    }
+
+    const user = await ctx.db.get(resolvedUserId);
+    if (!user) {
+      console.warn('[PRIVATE_WELCOME] setPrivateWelcomeConfirmed: user document not found');
+      return { success: false, error: 'user_not_found' };
+    }
+
+    // Idempotent: skip if already confirmed
+    if (user.privateWelcomeConfirmed) {
+      console.log('[PRIVATE_WELCOME] setPrivateWelcomeConfirmed: already confirmed, skipping');
+      return { success: true, alreadyConfirmed: true };
+    }
+
+    // Set the flag
+    await ctx.db.patch(resolvedUserId, {
+      privateWelcomeConfirmed: true,
+      privateWelcomeConfirmedAt: Date.now(),
+    });
+
+    console.log('[PRIVATE_WELCOME] setPrivateWelcomeConfirmed: success for user', resolvedUserId.substring(0, 8));
+    return { success: true };
   },
 });

@@ -54,7 +54,8 @@ export default function ConfessionThreadScreen() {
   const insets = useSafeAreaInsets();
   const { confessionId } = useLocalSearchParams<{ confessionId: string }>();
   const { userId } = useAuthStore();
-  const currentUserId = userId || 'demo_user_1';
+  // BUGFIX: In live mode, never use demo_user_1 fallback for Convex mutations
+  const currentUserId = isDemoMode ? (userId || 'demo_user_1') : (userId || undefined);
 
   // Individual selectors to avoid full re-render on any store change
   const confessions = useConfessionStore((s) => s.confessions);
@@ -153,6 +154,8 @@ export default function ConfessionThreadScreen() {
 
   const handleSendReply = useCallback(async () => {
     if (!replyText.trim() || !confessionId || sending) return;
+    // Guard: require valid userId
+    if (!currentUserId) return;
 
     const submittedText = replyText.trim();
     const newReply: ConfessionReply = {
@@ -172,7 +175,7 @@ export default function ConfessionThreadScreen() {
     setReplyText('');
     setSending(true);
 
-    if (!isDemoMode) {
+    if (!isDemoMode && currentUserId) {
       try {
         await createReplyMutation({
           confessionId: confessionId as any,
@@ -202,7 +205,7 @@ export default function ConfessionThreadScreen() {
         onPress: async () => {
           if (__DEV__) console.log('[CONFESS] handleDeleteReply: deleting reply', { confessionId, replyId: reply.id });
           deleteReplyFromStore(confessionId, reply.id);
-          if (!isDemoMode) {
+          if (!isDemoMode && currentUserId) {
             try {
               await deleteReplyMutation({
                 replyId: reply.id as any,
@@ -224,7 +227,7 @@ export default function ConfessionThreadScreen() {
       if (!confession) return;
       const emoji = emojiObj.emoji;
       toggleReaction(confession.id, emoji);
-      if (!isDemoMode) {
+      if (!isDemoMode && currentUserId) {
         toggleReactionMutation({
           confessionId: confession.id as any,
           userId: currentUserId as any,
@@ -238,7 +241,7 @@ export default function ConfessionThreadScreen() {
   );
 
   const handleReplyAnonymously = useCallback(() => {
-    if (!confession || !confessionId) return;
+    if (!confession || !confessionId || !currentUserId) return;
     const existing = chats.find(
       (c) => c.confessionId === confessionId &&
         (c.initiatorId === currentUserId || c.responderId === currentUserId)
@@ -272,7 +275,7 @@ export default function ConfessionThreadScreen() {
         style: 'destructive',
         onPress: () => {
           reportConfession(confessionId);
-          if (!isDemoMode) {
+          if (!isDemoMode && currentUserId) {
             reportMutation({
               confessionId: confessionId as any,
               reporterId: currentUserId as any,
@@ -385,7 +388,7 @@ export default function ConfessionThreadScreen() {
                   onReact={() => setShowReactionPicker(true)}
                   onToggleEmoji={(emoji) => {
                     toggleReaction(confession.id, emoji);
-                    if (!isDemoMode) {
+                    if (!isDemoMode && currentUserId) {
                       toggleReactionMutation({
                         confessionId: confession.id as any,
                         userId: currentUserId as any,

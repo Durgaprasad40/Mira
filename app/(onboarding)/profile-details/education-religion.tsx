@@ -28,8 +28,10 @@ import { useDemoStore } from "@/stores/demoStore";
 import { useAuthStore } from "@/stores/authStore";
 import { isDemoMode } from "@/hooks/useConvex";
 import { OnboardingProgressHeader } from "@/components/OnboardingProgressHeader";
+import { useScreenTrace } from "@/lib/devTrace";
 
 export default function ProfileDetailsEducationReligionScreen() {
+  useScreenTrace("ONB_EDUCATION_RELIGION");
   const {
     education,
     religion,

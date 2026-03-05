@@ -35,6 +35,7 @@ import { isDemoMode } from '@/hooks/useConvex';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { processPhotoVariant, PhotoVariant } from '@/services/photoPrivacy';
 import { OnboardingProgressHeader } from '@/components/OnboardingProgressHeader';
+import { useScreenTrace } from '@/lib/devTrace';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 
@@ -55,6 +56,7 @@ interface PrivacyOption {
 // =============================================================================
 
 export default function DisplayPrivacyScreen() {
+  useScreenTrace("ONB_DISPLAY_PRIVACY");
   const { photos, setPhotoAtIndex, setStep, setDisplayPhotoVariant } = useOnboardingStore();
   const { userId } = useAuthStore();
   const demoHydrated = useDemoStore((s) => s._hasHydrated);

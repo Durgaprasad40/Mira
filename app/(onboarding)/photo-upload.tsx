@@ -28,6 +28,7 @@ import { isDemoMode, convex } from '@/hooks/useConvex';
 import { OnboardingProgressHeader } from '@/components/OnboardingProgressHeader';
 import { checkPhotoExists, getPhotoFileState, type PhotoFileState } from '@/lib/photoFileGuard';
 import { decideNextOnboardingRoute, logOnboardingStatus } from '@/lib/onboardingRouting';
+import { useScreenTrace } from '@/lib/devTrace';
 
 // Persistent photos directory - files here survive app restarts
 const PHOTOS_DIR = FileSystem.documentDirectory + 'mira/photos/';
@@ -98,6 +99,7 @@ async function persistPhoto(cacheUri: string): Promise<string | null> {
 }
 
 export default function PhotoUploadScreen() {
+  useScreenTrace("ONB_PHOTO_UPLOAD");
   const { photos, setPhotoAtIndex, setStep, setVerificationPhoto, clearAllPhotos } = useOnboardingStore();
   const { userId, faceVerificationPassed } = useAuthStore();
   const demoProfile = useDemoStore((s) => isDemoMode && userId ? s.demoProfiles[userId] : null);

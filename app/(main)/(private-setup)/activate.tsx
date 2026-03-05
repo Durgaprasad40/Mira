@@ -14,6 +14,7 @@ import { useIncognitoStore } from '@/stores/incognitoStore';
 import { isDemoMode } from '@/hooks/useConvex';
 import { INCOGNITO_COLORS } from '@/lib/constants';
 import { PRIVATE_INTENT_CATEGORIES, PRIVATE_DESIRE_TAGS, PRIVATE_BOUNDARIES } from '@/lib/privateConstants';
+import { useScreenTrace } from '@/lib/devTrace';
 
 /** Parse "YYYY-MM-DD" to local Date (noon to avoid DST issues) */
 function parseDOBString(dobString: string): Date {
@@ -27,6 +28,7 @@ function parseDOBString(dobString: string): Date {
 const C = INCOGNITO_COLORS;
 
 export default function ActivateScreen() {
+  useScreenTrace("P2_SETUP_ACTIVATE");
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const { userId } = useAuthStore();

@@ -11,6 +11,7 @@ import { useQuery } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { INCOGNITO_COLORS } from '@/lib/constants';
 import { useAuthStore } from '@/stores/authStore';
+import { useScreenTrace } from '@/lib/devTrace';
 
 // Module-level cache for instant load across tab switches
 let _cachedPromptsData: any[] = [];
@@ -329,6 +330,7 @@ const PromptCard = React.memo(function PromptCard({
 
 /* ─── Main Screen ─── */
 export default function TruthOrDareScreen() {
+  useScreenTrace("P2_TRUTH_OR_DARE");
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const [refreshKey, setRefreshKey] = useState(0);

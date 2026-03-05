@@ -27,11 +27,13 @@ import { isDemoMode } from '@/hooks/useConvex';
 import { Ionicons } from '@expo/vector-icons';
 import { scrollToFirstInvalid } from '@/lib/onboardingValidation';
 import { OnboardingProgressHeader } from '@/components/OnboardingProgressHeader';
+import { useScreenTrace } from '@/lib/devTrace';
 
 const MAX_PROMPTS = 3;
 const MAX_ANSWER_LENGTH = 200;
 
 export default function PromptsScreen() {
+  useScreenTrace("ONB_PROMPTS");
   const { profilePrompts, setProfilePrompts, setStep } = useOnboardingStore();
   const { userId } = useAuthStore();
   const demoHydrated = useDemoStore((s) => s._hasHydrated);

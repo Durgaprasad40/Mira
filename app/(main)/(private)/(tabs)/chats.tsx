@@ -11,6 +11,7 @@ import { textForPublicSurface } from '@/lib/contentFilter';
 import { ReportModal } from '@/components/private/ReportModal';
 import { getTimeAgo } from '@/lib/utils';
 import { DEMO_INCOGNITO_PROFILES } from '@/lib/demoData';
+import { useScreenTrace } from '@/lib/devTrace';
 
 const C = INCOGNITO_COLORS;
 
@@ -33,6 +34,7 @@ const getIntentLabel = (participantId: string): string | null => {
 };
 
 export default function ChatsScreen() {
+  useScreenTrace("P2_CHATS");
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const conversations = usePrivateChatStore((s) => s.conversations);

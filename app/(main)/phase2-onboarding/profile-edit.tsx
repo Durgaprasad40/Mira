@@ -43,6 +43,7 @@ import {
   selectCanContinueDesire,
   selectIsProfileDetailsComplete,
 } from '@/stores/privateProfileStore';
+import { useScreenTrace } from '@/lib/devTrace';
 import {
   GENDER_OPTIONS,
   SMOKING_OPTIONS,
@@ -66,6 +67,7 @@ function createEmptySlots(): PhotoSlots9 {
 }
 
 export default function Phase2ProfileEdit() {
+  useScreenTrace("P2_ONB_PROFILE_EDIT");
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const desireInputRef = useRef<TextInput>(null);

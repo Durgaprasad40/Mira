@@ -12,7 +12,7 @@
  * - Owner always sees photos CLEAR by default
  * - "Preview as others" shows how others see it (blurred if enabled)
  * - No "Anonymous_User" or "Private Username" - uses real name
- * - Store-only (no Convex calls)
+ * - STABILITY FIX: Convex is source-of-truth for profile data after restart
  */
 import React, { useMemo, useCallback, useState, useEffect, useRef } from 'react';
 import { useFocusEffect } from 'expo-router';
@@ -44,6 +44,7 @@ import { usePrivateProfileStore } from '@/stores/privateProfileStore';
 import { useAuthStore } from '@/stores/authStore';
 import { isDemoMode } from '@/hooks/useConvex';
 import { getDemoCurrentUser } from '@/lib/demoData';
+import { useScreenTrace } from '@/lib/devTrace';
 
 /** Parse "YYYY-MM-DD" to local Date (noon to avoid DST issues) */
 function parseDOBString(dobString: string): Date {
@@ -142,26 +143,84 @@ function isValidPhotoUrl(url: unknown): url is string {
 }
 
 export default function PrivateProfileScreen() {
+  useScreenTrace("P2_PROFILE");
   const router = useRouter();
   const insets = useSafeAreaInsets();
 
   // Auth
   const { userId } = useAuthStore();
 
+  // STABILITY FIX: Query Convex for backend profile data (source of truth after restart)
+  const backendProfile = useQuery(
+    api.privateProfiles.getByAuthUserId,
+    !isDemoMode && userId ? { authUserId: userId } : 'skip'
+  );
+  const backendProfileLoaded = backendProfile !== undefined;
+
   // NOTE: Recovery gating now happens at Phase-1 "Private" entry point only.
   // This screen no longer auto-redirects to recovery - user must exit Phase-2
   // and re-enter via Phase-1 Private button to see recovery screen.
 
-  // Phase-2 store data
-  const selectedPhotoUrls = usePrivateProfileStore((s) => s.selectedPhotoUrls);
-  const displayName = usePrivateProfileStore((s) => s.displayName);
-  const age = usePrivateProfileStore((s) => s.age);
+  // Phase-2 store data (local fallback while backend loads / demo mode)
+  const localSelectedPhotoUrls = usePrivateProfileStore((s) => s.selectedPhotoUrls);
+  const localDisplayName = usePrivateProfileStore((s) => s.displayName);
+  const localAge = usePrivateProfileStore((s) => s.age);
   const blurMyPhoto = usePrivateProfileStore((s) => s.blurMyPhoto);
-  const intentKeys = usePrivateProfileStore((s) => s.intentKeys);
-  const privateBio = usePrivateProfileStore((s) => s.privateBio);
+  const localIntentKeys = usePrivateProfileStore((s) => s.intentKeys);
+  const localPrivateBio = usePrivateProfileStore((s) => s.privateBio);
   const setSelectedPhotos = usePrivateProfileStore((s) => s.setSelectedPhotos);
   const setBlurMyPhoto = usePrivateProfileStore((s) => s.setBlurMyPhoto);
   const resetPhase2 = usePrivateProfileStore((s) => s.resetPhase2);
+
+  // STABILITY FIX: Resolve data from backend (primary) or local store (fallback)
+  // In live mode: prefer backend data after it loads
+  // In demo mode: use local store only
+  const selectedPhotoUrls = useMemo(() => {
+    if (isDemoMode) return localSelectedPhotoUrls;
+    if (backendProfile?.privatePhotoUrls?.length) return backendProfile.privatePhotoUrls;
+    return localSelectedPhotoUrls;
+  }, [isDemoMode, backendProfile, localSelectedPhotoUrls]);
+
+  const displayName = useMemo(() => {
+    if (isDemoMode) return localDisplayName;
+    if (backendProfile?.displayName) return backendProfile.displayName;
+    return localDisplayName;
+  }, [isDemoMode, backendProfile, localDisplayName]);
+
+  const age = useMemo(() => {
+    if (isDemoMode) return localAge;
+    if (backendProfile?.age) return backendProfile.age;
+    return localAge;
+  }, [isDemoMode, backendProfile, localAge]);
+
+  const intentKeys = useMemo(() => {
+    if (isDemoMode) return localIntentKeys;
+    if (backendProfile?.privateIntentKeys?.length) return backendProfile.privateIntentKeys;
+    return localIntentKeys;
+  }, [isDemoMode, backendProfile, localIntentKeys]);
+
+  const privateBio = useMemo(() => {
+    if (isDemoMode) return localPrivateBio;
+    if (backendProfile?.privateBio) return backendProfile.privateBio;
+    return localPrivateBio;
+  }, [isDemoMode, backendProfile, localPrivateBio]);
+
+  // DEV logs to prove fix
+  useEffect(() => {
+    if (__DEV__) {
+      const source = isDemoMode ? 'demo_local' : (backendProfileLoaded && backendProfile ? 'backend' : 'fallback_local');
+      const fieldsPresent = [
+        displayName ? 'name' : null,
+        age > 0 ? 'age' : null,
+        selectedPhotoUrls.length > 0 ? 'photos' : null,
+        intentKeys.length > 0 ? 'intents' : null,
+        privateBio ? 'bio' : null,
+      ].filter(Boolean).length;
+      console.log('[P2_PROFILE] source=' + source + ', userId=' + (userId?.substring(0, 8) || 'none') + ', fieldsPresent=' + fieldsPresent);
+      console.log('[P2_PROFILE] backendProfileLoaded=' + backendProfileLoaded);
+      console.log('[P2_PROFILE] backendPhotos=' + (backendProfile?.privatePhotoUrls?.length || 0));
+    }
+  }, [isDemoMode, backendProfileLoaded, backendProfile, displayName, age, selectedPhotoUrls, intentKeys, privateBio, userId]);
 
   // PHASE 1 Settings
   const defaultPhotoVisibility = usePrivateProfileStore((s) => s.defaultPhotoVisibility);

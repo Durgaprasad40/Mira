@@ -38,6 +38,7 @@ import { OnboardingProgressHeader } from '@/components/OnboardingProgressHeader'
 import { useQuery } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import type { Id } from '@/convex/_generated/dataModel';
+import { useScreenTrace } from '@/lib/devTrace';
 
 // =============================================================================
 // Constants
@@ -63,6 +64,7 @@ type VerificationState =
 // =============================================================================
 
 export default function FaceVerificationScreen() {
+  useScreenTrace("ONB_FACE_VERIFICATION");
   const { photos, setStep } = useOnboardingStore();
   const { userId, faceVerificationPassed, faceVerificationPending, setFaceVerificationPassed, setFaceVerificationPending } = useAuthStore();
   const demoProfile = useDemoStore((s) => isDemoMode && userId ? s.demoProfiles[userId] : null);

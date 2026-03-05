@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, BackHandler, Platform } from 'react-native';
 import { Stack, useRouter, useNavigation, usePathname, useSegments, useRootNavigationState } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -14,6 +14,7 @@ import { PrivateConsentGate } from '@/components/private/PrivateConsentGate';
 import { setPhase2Active } from '@/hooks/useNotifications';
 import { prewarmTodCache } from './(tabs)/truth-or-dare';
 import { decideNextOnboardingRoute } from '@/lib/onboardingRouting';
+import { useRouteTrace } from '@/lib/devTrace';
 
 const C = INCOGNITO_COLORS;
 
@@ -350,9 +351,27 @@ export default function PrivateLayout() {
   // This runs ONE TIME ONLY - after completion, onboarding never shows again
   // P2-002 FIX: Use OR logic so local completion is respected even if Convex hasn't synced yet
   // This prevents re-triggering onboarding when server returns false due to sync lag
+  // STABILITY FIX: Now also checks users.phase2OnboardingCompleted from getOnboardingStatus
+  // Priority: local store (instant) || users table (durable) || privateProfile (legacy fallback)
   const onboardingComplete = isDemoMode
     ? phase2OnboardingCompleted
-    : (phase2OnboardingCompleted || convexPrivateProfile?.isSetupComplete === true);
+    : (
+        phase2OnboardingCompleted ||
+        phase1OnboardingStatus?.phase2OnboardingCompleted === true ||
+        convexPrivateProfile?.isSetupComplete === true
+      );
+
+  // DEV-only route change logging for Phase-2 Private area
+  useRouteTrace("P2_PRIVATE", useCallback(() => ({
+    userId: userId?.substring(0, 8) ?? null,
+    phase2OnboardingCompleted_local: !!phase2OnboardingCompleted,
+    phase2OnboardingCompleted_backend: phase1OnboardingStatus?.phase2OnboardingCompleted ?? null,
+    privateWelcomeConfirmed_backend: phase1OnboardingStatus?.privateWelcomeConfirmed ?? null,
+    faceStatus: phase1OnboardingStatus?.faceVerificationStatus ?? null,
+    normalPhotoCount: phase1OnboardingStatus?.normalPhotoCount ?? null,
+    onboardingComplete,
+    isDemoMode,
+  }), [userId, phase2OnboardingCompleted, phase1OnboardingStatus, onboardingComplete]));
 
   // PHASE-1 GUARD: Redirect to Phase-1 onboarding if incomplete
   // This check happens BEFORE Phase-2 onboarding check
@@ -427,7 +446,13 @@ export default function PrivateLayout() {
   }
 
   // B1.1 FIX: Consent gate (checked after spinner check above)
-  if (!ageConfirmed18Plus) {
+  // STABILITY FIX: Also check backend flag to skip after first confirm (survives force-quit)
+  // Priority: local store (instant) || backend flag (durable)
+  const welcomeConfirmed = isDemoMode
+    ? ageConfirmed18Plus
+    : (ageConfirmed18Plus || phase1OnboardingStatus?.privateWelcomeConfirmed === true);
+
+  if (!welcomeConfirmed) {
     return <PrivateConsentGate onAccept={acceptPrivateTerms} />;
   }
 

@@ -10,6 +10,7 @@ import { usePrivateProfileStore } from '@/stores/privateProfileStore';
 import { isDemoMode } from '@/hooks/useConvex';
 import { PhotoSelectionGrid } from '@/components/private/PhotoSelectionGrid';
 import { INCOGNITO_COLORS } from '@/lib/constants';
+import { useScreenTrace } from '@/lib/devTrace';
 
 const C = INCOGNITO_COLORS;
 
@@ -22,6 +23,7 @@ const DEMO_PHOTOS = [
 ];
 
 export default function SelectPhotosScreen() {
+  useScreenTrace("P2_SETUP_SELECT_PHOTOS");
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const { userId } = useAuthStore();

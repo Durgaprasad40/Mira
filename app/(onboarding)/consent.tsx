@@ -29,10 +29,12 @@ import { isDemoMode } from "@/hooks/useConvex";
 import { useDemoStore } from "@/stores/demoStore";
 import { Id } from "@/convex/_generated/dataModel";
 import { OnboardingProgressHeader } from "@/components/OnboardingProgressHeader";
+import { useScreenTrace } from "@/lib/devTrace";
 
 const PRIVACY_POLICY_URL = "https://mira.app/privacy"; // Placeholder
 
 export default function ConsentScreen() {
+  useScreenTrace("ONB_CONSENT");
   const { setStep } = useOnboardingStore();
   const { userId } = useAuthStore();
   const router = useRouter();

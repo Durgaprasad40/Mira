@@ -8,6 +8,7 @@ import { StyleSheet } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useFocusEffect, useRouter, useLocalSearchParams } from "expo-router";
 import { safePush } from "@/lib/safeRouter";
+import { useScreenTrace } from "@/lib/devTrace";
 
 import ExploreTileGrid from "@/components/explore/ExploreTileGrid";
 import { useExploreProfiles } from "@/components/explore/useExploreProfiles";
@@ -17,6 +18,7 @@ import {
 } from "@/components/explore/exploreCategories";
 
 export default function ExploreScreen() {
+  useScreenTrace("EXPLORE");
   const router = useRouter();
   const params = useLocalSearchParams();
   const [refreshing, setRefreshing] = useState(false);

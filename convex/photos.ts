@@ -181,6 +181,15 @@ export const addPhoto = mutation({
       }
     }
 
+    // H-1: Clean up pending upload record on success (if exists)
+    const pendingRecord = await ctx.db
+      .query('pendingUploads')
+      .withIndex('by_storage', (q) => q.eq('storageId', storageId))
+      .first();
+    if (pendingRecord) {
+      await ctx.db.delete(pendingRecord._id);
+    }
+
     return { success: true, photoId, url, requiresVerification: willBePrimary };
   },
 });
@@ -205,8 +214,8 @@ export const deletePhoto = mutation({
       .withIndex('by_user', (q) => q.eq('userId', userId))
       .collect();
 
-    if (photos.length <= 1) {
-      throw new Error('Must have at least one photo');
+    if (photos.length <= 2) {
+      throw new Error('Must have at least two photos');
     }
 
     // Delete from storage
@@ -229,12 +238,26 @@ export const deletePhoto = mutation({
       await ctx.db.patch(remainingPhotos[i]._id, updates);
     }
 
-    // STABILITY FIX: C-10 - Keep primaryPhotoUrl in sync with isPrimary
-    const primaryPhoto = await ctx.db
+    // STABILITY FIX: C-10 + H-2 - Keep primaryPhotoUrl in sync after delete
+    // Query for primary photo, fallback to first by order if none marked primary (defensive)
+    let primaryPhoto = await ctx.db
       .query('photos')
       .withIndex('by_user', (q) => q.eq('userId', userId))
       .filter((q) => q.eq(q.field('isPrimary'), true))
       .first();
+
+    // H-2: Defensive fallback - if no isPrimary found but photos exist, use first by order
+    if (!primaryPhoto) {
+      primaryPhoto = await ctx.db
+        .query('photos')
+        .withIndex('by_user_order', (q) => q.eq('userId', userId))
+        .first();
+      // If we found a photo, mark it as primary for consistency
+      if (primaryPhoto) {
+        await ctx.db.patch(primaryPhoto._id, { isPrimary: true });
+      }
+    }
+
     await ctx.db.patch(userId, { primaryPhotoUrl: primaryPhoto?.url });
 
     return { success: true };
@@ -520,6 +543,15 @@ export const uploadVerificationReferencePhoto = mutation({
 
     console.log(`[PHOTO_GATE] user updated verificationReferencePhotoId set=true`);
 
+    // H-1: Clean up pending upload record on success (if exists)
+    const pendingRecord = await ctx.db
+      .query('pendingUploads')
+      .withIndex('by_storage', (q) => q.eq('storageId', storageId))
+      .first();
+    if (pendingRecord) {
+      await ctx.db.delete(pendingRecord._id);
+    }
+
     return {
       success: true,
       photoId,
@@ -726,6 +758,170 @@ export const getPhotoGateStatus = query({
       displayPrimaryPhotoId: user.displayPrimaryPhotoId || null,
       faceVerificationStatus: user.faceVerificationStatus || 'unverified',
     };
+  },
+});
+
+// =============================================================================
+// H-1: Pending Upload Tracking (Orphan Storage Prevention)
+// =============================================================================
+
+/**
+ * Track a pending upload to prevent orphaned storage blobs.
+ * Call this AFTER storage upload succeeds but BEFORE calling addPhoto.
+ * If addPhoto fails, call cleanupPendingUpload to delete the blob.
+ */
+export const trackPendingUpload = mutation({
+  args: {
+    userId: v.string(), // authId string
+    storageId: v.id('_storage'),
+  },
+  handler: async (ctx, args) => {
+    // Resolve authId -> Convex userId
+    const resolvedUserId = await ensureUserByAuthId(ctx, args.userId);
+
+    // Check if pending record already exists for this storageId
+    const existing = await ctx.db
+      .query('pendingUploads')
+      .withIndex('by_storage', (q) => q.eq('storageId', args.storageId))
+      .first();
+
+    if (existing) {
+      // If exists and belongs to same user: idempotent success
+      if (existing.userId === resolvedUserId) {
+        return { success: true, pendingId: existing._id };
+      }
+      // If exists and belongs to different user: forbidden
+      throw new Error('Storage ID already claimed by another user');
+    }
+
+    // Create pending upload record
+    const pendingId = await ctx.db.insert('pendingUploads', {
+      storageId: args.storageId,
+      userId: resolvedUserId,
+      createdAt: Date.now(),
+    });
+
+    return { success: true, pendingId };
+  },
+});
+
+/**
+ * Clean up a pending upload by deleting both the storage blob and pending record.
+ * Call this if addPhoto fails after upload.
+ * Safety: Will NOT delete storage if a photo record already references it.
+ */
+export const cleanupPendingUpload = mutation({
+  args: {
+    userId: v.string(), // authId string
+    storageId: v.id('_storage'),
+  },
+  handler: async (ctx, args) => {
+    // Resolve authId -> Convex userId
+    const resolvedUserId = await ensureUserByAuthId(ctx, args.userId);
+
+    // Find the pending record
+    const pending = await ctx.db
+      .query('pendingUploads')
+      .withIndex('by_storage', (q) => q.eq('storageId', args.storageId))
+      .first();
+
+    if (!pending) {
+      // No pending record - may have already been cleaned up or addPhoto succeeded
+      return { success: true, deleted: false };
+    }
+
+    // Ownership check: must belong to the requesting user
+    if (pending.userId !== resolvedUserId) {
+      throw new Error('Not authorized to clean up this upload');
+    }
+
+    // Safety check: verify no photo is using this storageId
+    const photoUsingStorage = await ctx.db
+      .query('photos')
+      .filter((q) => q.eq(q.field('storageId'), args.storageId))
+      .first();
+
+    if (photoUsingStorage) {
+      // Photo exists - do NOT delete storage, just clean up pending record
+      await ctx.db.delete(pending._id);
+      return { success: true, deleted: false, reason: 'in_use' };
+    }
+
+    // No photo using this storage - safe to delete
+    try {
+      await ctx.storage.delete(args.storageId);
+    } catch (e) {
+      // Storage may already be deleted - log but continue
+      console.log('[H-1] Storage delete failed (may already be deleted):', e);
+    }
+
+    // Delete the pending record
+    await ctx.db.delete(pending._id);
+
+    return { success: true, deleted: true };
+  },
+});
+
+/**
+ * DEV ONLY: Clean up stale pending uploads (orphaned storage blobs).
+ * Should be run periodically (e.g., via cron) to clean up uploads where:
+ * - Upload succeeded but addPhoto was never called
+ * - User abandoned the upload flow
+ *
+ * Safety: Only runs in DEV mode (EXPO_PUBLIC_DEMO_MODE === 'true')
+ * Safety: Will NOT delete storage if a photo record already references it.
+ */
+export const cleanupStalePendingUploads = mutation({
+  args: {
+    maxAgeMs: v.optional(v.number()), // Default: 1 hour
+    limit: v.optional(v.number()), // Default: 50
+  },
+  handler: async (ctx, args) => {
+    // DEV-only safety gate
+    const isDemoMode = process.env.EXPO_PUBLIC_DEMO_MODE === 'true';
+    if (!isDemoMode) {
+      throw new Error('cleanupStalePendingUploads is only available in DEV mode');
+    }
+
+    const maxAge = args.maxAgeMs ?? 60 * 60 * 1000; // 1 hour default
+    const limit = args.limit ?? 50;
+    const cutoff = Date.now() - maxAge;
+
+    // Find stale pending uploads (limited batch)
+    const stalePending = await ctx.db
+      .query('pendingUploads')
+      .withIndex('by_createdAt')
+      .filter((q) => q.lt(q.field('createdAt'), cutoff))
+      .take(limit);
+
+    let deletedCount = 0;
+    let skippedCount = 0;
+
+    for (const pending of stalePending) {
+      // Safety check: verify no photo is using this storageId
+      const photoUsingStorage = await ctx.db
+        .query('photos')
+        .filter((q) => q.eq(q.field('storageId'), pending.storageId))
+        .first();
+
+      if (photoUsingStorage) {
+        // Photo exists - only delete pending record, NOT storage
+        await ctx.db.delete(pending._id);
+        skippedCount++;
+      } else {
+        // No photo using this storage - safe to delete both
+        try {
+          await ctx.storage.delete(pending.storageId);
+        } catch (e) {
+          console.log('[H-1] Stale storage delete failed:', pending.storageId, e);
+        }
+        await ctx.db.delete(pending._id);
+        deletedCount++;
+      }
+    }
+
+    console.log(`[H-1] Cleaned up ${deletedCount} stale pending uploads, skipped ${skippedCount} in-use`);
+    return { success: true, deletedCount, skippedCount };
   },
 });
 

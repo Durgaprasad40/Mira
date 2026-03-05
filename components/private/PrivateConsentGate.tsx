@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useCallback } from 'react';
 import {
   View,
   Text,
@@ -8,13 +8,42 @@ import {
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
+import { useMutation } from 'convex/react';
+import { api } from '@/convex/_generated/api';
 import { INCOGNITO_COLORS } from '@/lib/constants';
+import { useAuthStore } from '@/stores/authStore';
+import { isDemoMode } from '@/hooks/useConvex';
 
 const C = INCOGNITO_COLORS;
 
 export function PrivateConsentGate({ onAccept }: { onAccept: () => void }) {
   const insets = useSafeAreaInsets();
   const [agreed, setAgreed] = useState(false);
+
+  // Auth for Convex mutation
+  const userId = useAuthStore((s) => s.userId);
+  const setPrivateWelcomeConfirmedMutation = useMutation(api.users.setPrivateWelcomeConfirmed);
+
+  // Handle accept: call local callback + persist to Convex (best effort)
+  const handleAccept = useCallback(() => {
+    // Call local store update immediately
+    onAccept();
+
+    // STABILITY FIX: Persist to Convex (one-time, durable)
+    // This ensures consent screen won't show again after force-quit/restart
+    if (!isDemoMode && userId) {
+      setPrivateWelcomeConfirmedMutation({ userId: userId as any })
+        .then((result) => {
+          if (__DEV__) {
+            console.log('[PrivateConsentGate] Convex privateWelcomeConfirmed set:', result);
+          }
+        })
+        .catch((err) => {
+          // Best effort - log but don't crash. Local flag is already set.
+          console.warn('[PrivateConsentGate] Failed to persist privateWelcomeConfirmed to Convex:', err);
+        });
+    }
+  }, [onAccept, userId, setPrivateWelcomeConfirmedMutation]);
 
   return (
     <View style={[styles.container, { paddingTop: insets.top }]}>
@@ -76,7 +105,7 @@ export function PrivateConsentGate({ onAccept }: { onAccept: () => void }) {
 
         <TouchableOpacity
           style={[styles.consentAcceptBtn, !agreed && styles.consentAcceptBtnDisabled]}
-          onPress={agreed ? onAccept : undefined}
+          onPress={agreed ? handleAccept : undefined}
           disabled={!agreed}
         >
           <Text style={styles.consentAcceptBtnText}>Enter Private Mode</Text>

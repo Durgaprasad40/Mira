@@ -35,6 +35,7 @@ import { isDemoMode } from "@/hooks/useConvex";
 import { getDemoCurrentUser } from "@/lib/demoData";
 import { useDemoStore, photosToSlotsStable } from "@/stores/demoStore";
 import { PhotoSlots9, createEmptyPhotoSlots } from "@/types";
+import { useScreenTrace } from "@/lib/devTrace";
 
 // Persistent directory for Phase-1 photos imported into Phase-2
 const PHASE1_PHOTOS_DIR = "mira/phase1Photos/";
@@ -219,6 +220,7 @@ async function persistPhotoUris(uris: string[]): Promise<string[]> {
 const C = INCOGNITO_COLORS;
 
 export default function Phase2OnboardingTerms() {
+  useScreenTrace("P2_ONB_TERMS");
   const router = useRouter();
   const pathname = usePathname();
   const insets = useSafeAreaInsets();

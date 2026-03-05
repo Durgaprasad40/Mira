@@ -36,6 +36,7 @@ import {
 } from '@/stores/privateProfileStore';
 import { useDemoStore } from '@/stores/demoStore';
 import { isDemoMode } from '@/hooks/useConvex';
+import { useScreenTrace } from '@/lib/devTrace';
 
 const C = INCOGNITO_COLORS;
 const GRID_SLOTS = 9;
@@ -88,6 +89,7 @@ async function validatePhotoUri(uri: string): Promise<boolean> {
 }
 
 export default function Phase2PhotoSelect() {
+  useScreenTrace("P2_ONB_PHOTO_SELECT");
   const router = useRouter();
   const insets = useSafeAreaInsets();
 

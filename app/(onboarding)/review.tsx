@@ -44,6 +44,7 @@ import { isDemoMode } from "@/hooks/useConvex";
 import { useDemoStore } from "@/stores/demoStore";
 import { OnboardingProgressHeader } from "@/components/OnboardingProgressHeader";
 import { saveAuthBootCache } from "@/stores/authBootCache";
+import { useScreenTrace } from "@/lib/devTrace";
 
 /**
  * Parse "YYYY-MM-DD" string to local Date object.
@@ -75,6 +76,7 @@ function sanitizeRelationshipIntent(arr: string[]): string[] {
 }
 
 export default function ReviewScreen() {
+  useScreenTrace("ONB_REVIEW");
   const {
     name,
     nickname,

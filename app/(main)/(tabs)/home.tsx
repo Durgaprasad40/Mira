@@ -4,7 +4,9 @@
  * Nearby tab is the only Phase-1 tab currently unlocked.
  */
 import { DiscoverCardStack } from "@/components/screens/DiscoverCardStack";
+import { useScreenTrace } from "@/lib/devTrace";
 
 export default function HomeScreen() {
+  useScreenTrace("HOME");
   return <DiscoverCardStack />;
 }

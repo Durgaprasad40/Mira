@@ -28,6 +28,7 @@ import { useAuthStore } from '@/stores/authStore';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
+import { useScreenTrace } from '@/lib/devTrace';
 
 // Country list with flag emoji, name, and dial code
 const COUNTRIES = [
@@ -48,6 +49,7 @@ type Country = (typeof COUNTRIES)[number];
 type ScreenMode = 'enterPhone' | 'enterOtp';
 
 export default function PhoneEntryScreen() {
+  useScreenTrace("ONB_PHONE_ENTRY");
   const { setPhone, setStep } = useOnboardingStore();
   const { setAuth } = useAuthStore();
   const router = useRouter();

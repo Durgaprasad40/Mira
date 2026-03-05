@@ -28,8 +28,10 @@ import { useMutation } from "convex/react";
 import { api } from "@/convex/_generated/api";
 import { OnboardingProgressHeader } from "@/components/OnboardingProgressHeader";
 import { EducationLevel, Religion } from "@/types";
+import { useScreenTrace } from "@/lib/devTrace";
 
 export default function ProfileDetailsBasicScreen() {
+  useScreenTrace("ONB_PROFILE_DETAILS");
   const {
     height,
     weight,

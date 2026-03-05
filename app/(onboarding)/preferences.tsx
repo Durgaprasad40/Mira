@@ -35,6 +35,7 @@ import { useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import type { Gender, ActivityFilter, RelationshipIntent } from '@/types';
 import { OnboardingProgressHeader } from '@/components/OnboardingProgressHeader';
+import { useScreenTrace } from '@/lib/devTrace';
 
 // Age range constraints
 const MIN_AGE_LIMIT = 18;
@@ -66,6 +67,7 @@ function sanitizeRelationshipIntent(arr: string[]): string[] {
 }
 
 export default function PreferencesScreen() {
+  useScreenTrace("ONB_PREFERENCES");
   const {
     lookingFor,
     relationshipIntent,
