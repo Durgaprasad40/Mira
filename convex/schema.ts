@@ -380,6 +380,9 @@ export default defineSchema({
     // Demo mode: identifier for demo users (e.g. "demo_manmohan_gmain_com")
     demoUserId: v.optional(v.string()),
 
+    // Universal auth identity key (preferred over demoUserId for new lookups)
+    authUserId: v.optional(v.string()),
+
     // Duplicate user detection: points to the primary user if this is a duplicate
     // Set when race condition creates multiple users with same demoUserId
     duplicateOf: v.optional(v.id('users')),
@@ -392,7 +395,8 @@ export default defineSchema({
     .index('by_last_active', ['lastActive'])
     .index('by_boosted', ['boostedUntil'])
     .index('by_verification_status', ['verificationStatus'])
-    .index('by_demo_user_id', ['demoUserId']),
+    .index('by_demo_user_id', ['demoUserId'])
+    .index('by_auth_user_id', ['authUserId']),
 
   // Photos table
   photos: defineTable({
