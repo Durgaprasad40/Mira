@@ -219,8 +219,12 @@ export const deletePhoto = mutation({
     const { userId, photoId } = args;
 
     const photo = await ctx.db.get(photoId);
-    if (!photo || photo.userId !== userId) {
+    if (!photo) {
       throw new Error('Photo not found');
+    }
+    // SECURITY: Verify photo ownership before deletion
+    if (photo.userId !== userId) {
+      throw new Error('Unauthorized photo modification');
     }
 
     // Get all user photos
@@ -288,11 +292,14 @@ export const reorderPhotos = mutation({
   handler: async (ctx, args) => {
     const { userId, photoIds } = args;
 
-    // Verify all photos belong to user
+    // SECURITY: Verify all photos belong to user before reordering
     for (const photoId of photoIds) {
       const photo = await ctx.db.get(photoId);
-      if (!photo || photo.userId !== userId) {
-        throw new Error('Invalid photo');
+      if (!photo) {
+        throw new Error('Photo not found');
+      }
+      if (photo.userId !== userId) {
+        throw new Error('Unauthorized photo modification');
       }
     }
 
@@ -351,8 +358,12 @@ export const setPrimaryPhoto = mutation({
     const { userId, photoId } = args;
 
     const photo = await ctx.db.get(photoId);
-    if (!photo || photo.userId !== userId) {
+    if (!photo) {
       throw new Error('Photo not found');
+    }
+    // SECURITY: Verify photo ownership before setting primary
+    if (photo.userId !== userId) {
+      throw new Error('Unauthorized photo modification');
     }
 
     // Get all user photos

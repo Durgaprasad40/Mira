@@ -18,6 +18,7 @@ import { useDemoDmStore } from "@/stores/demoDmStore";
 import { useConfessionStore } from "@/stores/confessionStore";
 import { useLocationStore } from "@/stores/locationStore";
 import { usePrivateProfileStore } from "@/stores/privateProfileStore";
+import { useBootStore } from "@/stores/bootStore";
 import { asUserId } from "@/convex/id";
 import { AppErrorBoundary, registerErrorBoundaryNavigation } from "@/components/safety";
 import { processThreadsIntegrity } from "@/lib/threadsIntegrity";
@@ -120,6 +121,16 @@ export default function MainTabsLayout() {
   // N-001/C-004 FIX: Permanent guard to prevent duplicate router.replace calls
   // Only resets on component remount (not timeout-based)
   const didRouteToPrivateRef = useRef(false);
+
+  // STABILITY FIX: Boot readiness guard to prevent hydration race condition
+  // Ensures auth state, onboarding state, and route decision state are ready
+  // before any navigation decisions are made
+  const isBootReady = useBootStore((s) => s.isBootReady());
+
+  // Guard: prevent premature navigation if boot not ready
+  if (!isBootReady) {
+    return null;
+  }
 
   // Handle Private tab press - navigate on user tap only
   const handlePrivateTabPress = (e: any) => {
