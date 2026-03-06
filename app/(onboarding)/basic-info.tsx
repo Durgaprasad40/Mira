@@ -208,6 +208,20 @@ export default function BasicInfoScreen() {
       return; // Don't run confirm mode logic
     }
 
+    // BUG FIX: Handle editFromReview mode in LIVE mode (non-demo)
+    // This was missing - caused blank fields when editing from Review in live mode
+    if (isEditFromReview && !isDemoMode && existingUserData) {
+      console.log('[BASIC] editFromReview LIVE mode - pre-filling from existingUserData');
+      setDisplayName(existingUserData.name || "");
+      setDisplayDOB(existingUserData.dateOfBirth || "");
+      setDisplayGender((existingUserData.gender as Gender) || "");
+      setDisplayHandle(existingUserData.handle || "");
+      if (existingUserData.dateOfBirth) {
+        setSelectedDate(parseDOBString(existingUserData.dateOfBirth));
+      }
+      return; // Don't run confirm mode logic
+    }
+
     if (isConfirmMode && isDemoMode && demoHydrated) {
       if (demoProfile) {
         // Check if ALL basic fields are present (strict check)

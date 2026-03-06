@@ -680,23 +680,35 @@ export default function AdditionalPhotosScreen() {
   };
 
   // Handle tap on primary photo circle
+  // BUG FIX: Check backendUrlByIndex/slotPreviewUriByIndex (source of truth in live mode),
+  // not photos[] from local store which may be empty in live mode
   const handlePrimaryPhotoPress = () => {
-    const primaryPhoto = photos[0];
-    if (typeof primaryPhoto === 'string' && primaryPhoto.length > 0) {
-      // Photo exists - open full-screen viewer
+    const backendUrl = backendUrlByIndex[0];
+    const previewUri = slotPreviewUriByIndex[0];
+    const uriToShow = previewUri ?? backendUrl;
+    const hasPhoto = typeof uriToShow === 'string' && uriToShow.length > 0;
+
+    if (hasPhoto) {
+      // Photo exists - open full-screen viewer with Replace/Remove options
       setViewerIndex(0);
       setViewerOpen(true);
     } else {
-      // No photo - show action sheet
+      // No photo - show action sheet to add
       showPhotoActionSheet(0);
     }
   };
 
   // Handle tap on a photo tile (for grid slots 1-8)
+  // BUG FIX: Check backendUrlByIndex/slotPreviewUriByIndex (source of truth in live mode),
+  // not photos[] from local store which may be empty in live mode
   const handlePhotoPress = (index: number) => {
-    const photo = photos[index];
-    if (typeof photo === 'string' && photo.length > 0) {
-      // Photo exists - open full-screen viewer
+    const backendUrl = backendUrlByIndex[index];
+    const previewUri = slotPreviewUriByIndex[index];
+    const uriToShow = previewUri ?? backendUrl;
+    const hasPhoto = typeof uriToShow === 'string' && uriToShow.length > 0;
+
+    if (hasPhoto) {
+      // Photo exists - open full-screen viewer with Replace/Remove options
       setViewerIndex(index);
       setViewerOpen(true);
     } else {
@@ -1079,7 +1091,12 @@ export default function AdditionalPhotosScreen() {
   // 2) Temporary preview during upload, else
   // 3) Verification reference photo (from face verification), else
   // 4) Empty placeholder
-  const referencePhotoUrl = userQuery?.verificationReferencePhotoUrl || verificationReferencePrimary?.url || '';
+  // M7 FIX: Use onboardingStatus as primary source (consistent with face-verification.tsx)
+  // Fallback chain: onboardingStatus → userQuery → local transient → empty
+  const referencePhotoUrl = onboardingStatus?.verificationReferencePhotoUrl
+    || userQuery?.verificationReferencePhotoUrl
+    || verificationReferencePrimary?.url
+    || '';
   const hasReferencePhotoUrl = referencePhotoUrl.length > 0;
   const hasReferencePhotoId = !!verificationReferencePrimary || !!userQuery?.verificationReferencePhotoId;
   // Use backend onboarding status as source of truth for reference photo existence

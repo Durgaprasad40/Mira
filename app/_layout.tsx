@@ -240,6 +240,8 @@ function SessionValidator() {
   const router = useRouter();
   const segments = useSegments();
   const token = useAuthStore((s) => s.token);
+  // M2 FIX: Normalized token check - empty string and whitespace-only are invalid
+  const hasValidToken = typeof token === 'string' && token.trim().length > 0;
   const userId = useAuthStore((s) => s.userId); // TASK D: Get userId for demo migration detection
   const logout = useAuthStore((s) => s.logout);
   const syncFromServerValidation = useAuthStore((s) => s.syncFromServerValidation);
@@ -247,31 +249,44 @@ function SessionValidator() {
   const appStateRef = useRef<AppStateStatus>(AppState.currentState);
   const isValidatingRef = useRef(false);
   const hasInitialValidation = useRef(false);
+  // M1 FIX: State to force query re-subscription on app resume
+  const [sessionRefreshTrigger, setSessionRefreshTrigger] = useState(false);
+  // M1 FIX: Timer ref for cleanup of refresh re-enable
+  const refreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // STABILITY FIX: C-16 - Track mounted state to prevent navigation/setState after unmount
   const mountedRef = useRef(true);
 
   // STABILITY FIX: C-16 - Track mounted state
+  // M1 FIX: Clean up refresh timer on unmount
   useEffect(() => {
     mountedRef.current = true;
     return () => {
       mountedRef.current = false;
+      if (refreshTimerRef.current) {
+        clearTimeout(refreshTimerRef.current);
+      }
     };
   }, []);
 
   // Use Convex query to validate session with FULL checks
   // validateSessionFull checks: expiry, revocation, user status, deletedAt
+  // M2 FIX: Use hasValidToken to skip query for empty/whitespace tokens
+  // M1 FIX: sessionRefreshTrigger gates query to force re-subscription on app resume
   const sessionStatus = useQuery(
     api.auth.validateSessionFull,
-    !isDemoMode && token ? { token } : 'skip'
+    sessionRefreshTrigger ? 'skip' : (!isDemoMode && hasValidToken ? { token } : 'skip')
   );
 
   // Handle session validation result
   useEffect(() => {
-    if (isDemoMode || !token) {
-      // No token = mark as validated (nothing to validate)
-      if (!token) {
+    // M2 FIX: Use hasValidToken for early return; only mark validated if token is truly null
+    if (isDemoMode || !hasValidToken) {
+      // Only mark as validated if token is truly absent (null), not empty/whitespace
+      if (token === null) {
         setSessionValidated(true);
       }
+      // For empty/whitespace token: don't mark as validated, don't run query
+      // This leaves session in unvalidated state, which will prevent protected routes
       return;
     }
     if (sessionStatus === undefined) return; // Still loading
@@ -340,14 +355,28 @@ function SessionValidator() {
 
     const handleAppStateChange = (nextAppState: AppStateStatus) => {
       // If app was in background and is now active
+      // M2 FIX: Use hasValidToken to skip resume validation for empty/whitespace tokens
       if (
         appStateRef.current.match(/inactive|background/) &&
         nextAppState === 'active' &&
-        token &&
+        hasValidToken &&
         !isValidatingRef.current
       ) {
-        // The query will automatically re-fetch when app becomes active
-        // due to Convex's reactivity
+        // M1 FIX: Force query re-subscription by cycling through skip -> active
+        // Clear any pending re-enable timer
+        if (refreshTimerRef.current) {
+          clearTimeout(refreshTimerRef.current);
+        }
+        // Temporarily skip query
+        setSessionRefreshTrigger(true);
+        // Re-enable on next tick to force re-subscription
+        refreshTimerRef.current = setTimeout(() => {
+          if (mountedRef.current) {
+            setSessionRefreshTrigger(false);
+          }
+        }, 0);
+
+        // Debounce: prevent rapid repeated refresh triggers
         isValidatingRef.current = true;
         setTimeout(() => {
           isValidatingRef.current = false;

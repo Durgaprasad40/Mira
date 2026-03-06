@@ -7,7 +7,7 @@
  * - Do not change UX/flows without explicit unlock
  * Date locked: 2026-03-04
  */
-import React from "react";
+import React, { useState, useCallback } from "react";
 import {
   View,
   Text,
@@ -19,7 +19,7 @@ import {
 } from "react-native";
 import { Image } from "expo-image";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { useRouter } from "expo-router";
+import { useRouter, useFocusEffect } from "expo-router";
 import {
   COLORS,
   GENDER_OPTIONS,
@@ -77,6 +77,15 @@ function sanitizeRelationshipIntent(arr: string[]): string[] {
 
 export default function ReviewScreen() {
   useScreenTrace("ONB_REVIEW");
+
+  // M5 FIX: Force re-render when returning from Edit screens
+  const [refreshKey, setRefreshKey] = useState(0);
+  useFocusEffect(
+    useCallback(() => {
+      setRefreshKey((k) => k + 1);
+    }, [])
+  );
+
   const {
     name,
     nickname,
@@ -452,7 +461,7 @@ export default function ReviewScreen() {
   return (
     <SafeAreaView style={styles.safeArea} edges={["top"]}>
     <OnboardingProgressHeader />
-    <ScrollView style={styles.container} contentContainerStyle={styles.content}>
+    <ScrollView key={refreshKey} style={styles.container} contentContainerStyle={styles.content}>
       <Text style={styles.title}>Review Your Profile</Text>
       <Text style={styles.subtitle}>
         Make sure everything looks good before you start matching!
