@@ -117,6 +117,10 @@ export default function EditProfileScreen() {
   const [showBlurNotice, setShowBlurNotice] = useState(false);
   const [bio, setBio] = useState('');
   const [prompts, setPrompts] = useState<{ question: string; answer: string }[]>([]);
+
+  // Basic Info fields (firstName/lastName editable, others read-only)
+  const [firstName, setFirstName] = useState('');
+  const [lastName, setLastName] = useState('');
   const [showPromptPicker, setShowPromptPicker] = useState(false);
   const [height, setHeight] = useState('');
   const [smoking, setSmoking] = useState<string | null>(null);
@@ -157,6 +161,26 @@ export default function EditProfileScreen() {
       setJobTitle(currentUser.jobTitle || '');
       setCompany(currentUser.company || '');
       setSchool(currentUser.school || '');
+
+      // Initialize firstName/lastName from profile
+      // Priority: demoProfile firstName/lastName > parse from name
+      const canonicalForNames = isDemoMode
+        ? useDemoStore.getState().getCurrentProfile()
+        : null;
+      if (canonicalForNames?.firstName || canonicalForNames?.lastName) {
+        setFirstName(canonicalForNames.firstName || '');
+        setLastName(canonicalForNames.lastName || '');
+      } else if (currentUser.name) {
+        // Parse name into firstName/lastName
+        const parts = currentUser.name.trim().split(/\s+/);
+        if (parts.length === 1) {
+          setFirstName(parts[0]);
+          setLastName('');
+        } else {
+          setFirstName(parts[0]);
+          setLastName(parts.slice(1).join(' '));
+        }
+      }
       // Note: blurEnabled is now persisted in photoBlurStore, not initialized from server
 
       // SLOT-BASED: Initialize from getCurrentProfile() (SINGLE SOURCE OF TRUTH)
@@ -535,6 +559,13 @@ export default function EditProfileScreen() {
       // Prompts - always include (empty array is valid)
       patch.profilePrompts = filledPrompts;
 
+      // Basic Info - firstName/lastName (editable)
+      if (firstName && firstName.trim()) patch.firstName = firstName.trim();
+      if (lastName && lastName.trim()) patch.lastName = lastName.trim();
+      // Construct full name for backend compatibility
+      const fullName = `${firstName.trim()} ${lastName.trim()}`.trim();
+      if (fullName.length > 0) patch.name = fullName;
+
       // Bio/About - only include if non-empty
       if (bio && bio.trim()) patch.bio = bio.trim();
 
@@ -592,8 +623,12 @@ export default function EditProfileScreen() {
     }
 
     try {
+      // Construct full name from firstName/lastName
+      const fullName = `${firstName.trim()} ${lastName.trim()}`.trim();
+
       await updateProfile({
         userId: convexUserId,
+        name: fullName || undefined,
         bio: bio || undefined,
         height: height ? parseInt(height) : undefined,
         smoking: (smoking || undefined) as any,
@@ -721,6 +756,69 @@ export default function EditProfileScreen() {
         <TouchableOpacity onPress={() => router.back()}><Ionicons name="arrow-back" size={24} color={COLORS.text} /></TouchableOpacity>
         <Text style={styles.headerTitle}>Edit Profile</Text>
         <TouchableOpacity onPress={handleSave}><Text style={styles.saveButton}>Save</Text></TouchableOpacity>
+      </View>
+
+      {/* Basic Info Section - Identity fields (compact layout) */}
+      <View style={styles.section}>
+        <Text style={styles.sectionTitle}>Basic Info</Text>
+        {/* Row 1: First Name + Last Name side by side */}
+        <View style={styles.nameRow}>
+          <View style={styles.nameField}>
+            <Text style={styles.label}>First Name</Text>
+            <Input
+              placeholder="First"
+              value={firstName}
+              onChangeText={setFirstName}
+              maxLength={20}
+              autoCapitalize="words"
+            />
+          </View>
+          <View style={styles.nameField}>
+            <Text style={styles.label}>Last Name</Text>
+            <Input
+              placeholder="Last"
+              value={lastName}
+              onChangeText={setLastName}
+              maxLength={20}
+              autoCapitalize="words"
+            />
+          </View>
+        </View>
+        {/* Row 2: Nickname full width */}
+        <View style={styles.inputRow}>
+          <Text style={styles.label}>Nickname / User ID</Text>
+          <View style={styles.readOnlyField}>
+            <Text style={styles.readOnlyText}>@{currentUser?.handle || currentUser?.nickname || '—'}</Text>
+            <Ionicons name="lock-closed" size={14} color={COLORS.textMuted} />
+          </View>
+        </View>
+        {/* Row 3: Age + Gender compact side by side */}
+        <View style={styles.compactRow}>
+          <View style={styles.compactField}>
+            <Text style={styles.compactLabel}>Age</Text>
+            <View style={styles.compactValue}>
+              <Text style={styles.compactValueText}>
+                {currentUser?.dateOfBirth
+                  ? Math.floor((Date.now() - new Date(currentUser.dateOfBirth).getTime()) / (365.25 * 24 * 60 * 60 * 1000))
+                  : '—'}
+              </Text>
+              <Ionicons name="lock-closed" size={12} color={COLORS.textMuted} />
+            </View>
+          </View>
+          <View style={styles.compactField}>
+            <Text style={styles.compactLabel}>Gender</Text>
+            <View style={styles.compactValue}>
+              <Text style={styles.compactValueText}>
+                {currentUser?.gender === 'male' ? 'M' :
+                 currentUser?.gender === 'female' ? 'F' :
+                 currentUser?.gender === 'non_binary' ? 'NB' :
+                 currentUser?.gender ? currentUser.gender.charAt(0).toUpperCase() : '—'}
+              </Text>
+              <Ionicons name="lock-closed" size={12} color={COLORS.textMuted} />
+            </View>
+          </View>
+        </View>
+        <Text style={styles.readOnlyHint}>Nickname, Age, and Gender cannot be changed.</Text>
       </View>
 
       {/* Photo Grid - 9 slots */}
@@ -965,6 +1063,67 @@ const styles = StyleSheet.create({
   inputRow: { marginBottom: 20 },
   label: { fontSize: 14, fontWeight: '500', color: COLORS.text, marginBottom: 8 },
   numberInput: { width: 120 },
+  // Compact Basic Info layout styles
+  nameRow: {
+    flexDirection: 'row',
+    gap: 12,
+    marginBottom: 16,
+  },
+  nameField: {
+    flex: 1,
+  },
+  compactRow: {
+    flexDirection: 'row',
+    gap: 12,
+    marginBottom: 8,
+  },
+  compactField: {
+    flex: 1,
+  },
+  compactLabel: {
+    fontSize: 12,
+    fontWeight: '500',
+    color: COLORS.textLight,
+    marginBottom: 4,
+  },
+  compactValue: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    borderRadius: 8,
+    backgroundColor: COLORS.backgroundDark,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+  },
+  compactValueText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: COLORS.textMuted,
+  },
+  // Read-only field styles for locked Basic Info fields
+  readOnlyField: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 14,
+    paddingVertical: 14,
+    borderRadius: 10,
+    backgroundColor: COLORS.backgroundDark,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+  },
+  readOnlyText: {
+    fontSize: 15,
+    color: COLORS.textMuted,
+  },
+  readOnlyHint: {
+    fontSize: 11,
+    color: COLORS.textMuted,
+    fontStyle: 'italic',
+    marginTop: 4,
+  },
   optionsRow: { flexDirection: 'row', flexWrap: 'wrap', gap: 8 },
   optionChip: { paddingHorizontal: 16, paddingVertical: 8, borderRadius: 20, backgroundColor: COLORS.backgroundDark, borderWidth: 1, borderColor: COLORS.border },
   optionChipSelected: { backgroundColor: COLORS.primary, borderColor: COLORS.primary },
