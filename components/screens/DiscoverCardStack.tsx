@@ -877,35 +877,58 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
     };
 
     return (
-      <View style={[styles.center, dark && { backgroundColor: INCOGNITO_COLORS.background }]}>
-        <Text style={styles.emptyEmoji}>✨</Text>
-        <Text style={[styles.emptyTitle, dark && { color: INCOGNITO_COLORS.text }]}>No more profiles right now</Text>
-        <Text style={[styles.emptySubtitle, dark && { color: INCOGNITO_COLORS.textLight }]}>
-          {isDemoMode
-            ? "You may have swiped through the demo deck or your filters are strict."
-            : "Check back soon — we'll bring you more people as they join."}
-        </Text>
-        {isDemoMode && (
-          <>
-            <TouchableOpacity
-              style={[styles.resetButton, { marginTop: 24 }]}
-              onPress={handleResetDemoSwipes}
-            >
-              <Ionicons name="refresh" size={18} color="#FFFFFF" style={{ marginRight: 8 }} />
-              <Text style={styles.resetButtonText}>Reset Demo Swipes</Text>
+      <View style={[styles.container, dark && { backgroundColor: INCOGNITO_COLORS.background }]}>
+        {/* Header - always visible even when feed is empty */}
+        {!hideHeader && (
+          <View style={[styles.header, { paddingTop: insets.top, height: insets.top + HEADER_H }, dark && { backgroundColor: INCOGNITO_COLORS.background }]}>
+            <TouchableOpacity style={styles.headerBtn} onPress={() => router.push({ pathname: "/(main)/discovery-preferences", params: { mode: isPhase2 ? 'phase2' : 'phase1' } } as any)}>
+              <Ionicons name="options-outline" size={22} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
             </TouchableOpacity>
-            <TouchableOpacity
-              style={[styles.secondaryButton, { marginTop: 12 }]}
-              onPress={() => router.push({ pathname: "/(main)/discovery-preferences", params: { mode: 'phase1' } } as any)}
-            >
-              <Ionicons name="options-outline" size={18} color={C.primary} style={{ marginRight: 8 }} />
-              <Text style={[styles.secondaryButtonText, { color: C.primary }]}>Open Filters</Text>
-            </TouchableOpacity>
-            <Text style={[styles.tipText, dark && { color: INCOGNITO_COLORS.textLight }]}>
-              Tip: Set distance 200+ km and age 18–60 to see more.
-            </Text>
-          </>
+            <Text style={[styles.headerLogo, dark && { color: INCOGNITO_COLORS.primary }]}>mira</Text>
+            {!isPhase2 ? (
+              <TouchableOpacity style={styles.headerBtn} onPress={() => router.push("/(main)/notifications" as any)}>
+                <Ionicons name="notifications-outline" size={22} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
+                {unseenCount > 0 && (
+                  <View style={styles.bellBadge}>
+                    <Text style={styles.bellBadgeText}>{unseenCount > 9 ? "9+" : unseenCount}</Text>
+                  </View>
+                )}
+              </TouchableOpacity>
+            ) : (
+              <View style={styles.headerBtn} />
+            )}
+          </View>
         )}
+        <View style={[styles.center, { flex: 1 }]}>
+          <Text style={styles.emptyEmoji}>✨</Text>
+          <Text style={[styles.emptyTitle, dark && { color: INCOGNITO_COLORS.text }]}>No more profiles right now</Text>
+          <Text style={[styles.emptySubtitle, dark && { color: INCOGNITO_COLORS.textLight }]}>
+            {isDemoMode
+              ? "You may have swiped through the demo deck or your filters are strict."
+              : "Check back soon — we'll bring you more people as they join."}
+          </Text>
+          {isDemoMode && (
+            <>
+              <TouchableOpacity
+                style={[styles.resetButton, { marginTop: 24 }]}
+                onPress={handleResetDemoSwipes}
+              >
+                <Ionicons name="refresh" size={18} color="#FFFFFF" style={{ marginRight: 8 }} />
+                <Text style={styles.resetButtonText}>Reset Demo Swipes</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.secondaryButton, { marginTop: 12 }]}
+                onPress={() => router.push({ pathname: "/(main)/discovery-preferences", params: { mode: 'phase1' } } as any)}
+              >
+                <Ionicons name="options-outline" size={18} color={C.primary} style={{ marginRight: 8 }} />
+                <Text style={[styles.secondaryButtonText, { color: C.primary }]}>Open Filters</Text>
+              </TouchableOpacity>
+              <Text style={[styles.tipText, dark && { color: INCOGNITO_COLORS.textLight }]}>
+                Tip: Set distance 200+ km and age 18–60 to see more.
+              </Text>
+            </>
+          )}
+        </View>
       </View>
     );
   }
@@ -916,19 +939,31 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       .map(k => PRIVATE_INTENT_CATEGORIES.find((c) => c.key === k)?.label ?? k)
       .join(', ');
     return (
-      <View style={[styles.center, dark && { backgroundColor: INCOGNITO_COLORS.background }]}>
-        <Text style={styles.emptyEmoji}>🔍</Text>
-        <Text style={[styles.emptyTitle, dark && { color: INCOGNITO_COLORS.text }]}>No matching profiles</Text>
-        <Text style={[styles.emptySubtitle, dark && { color: INCOGNITO_COLORS.textLight }]}>
-          No profiles match "{filterLabels}". Try different intents or clear filters.
-        </Text>
-        <TouchableOpacity
-          style={[styles.resetButton, { marginTop: 24 }]}
-          onPress={() => setPrivateIntentKeys([])}
-        >
-          <Ionicons name="funnel-outline" size={18} color="#FFFFFF" style={{ marginRight: 8 }} />
-          <Text style={styles.resetButtonText}>Show All</Text>
-        </TouchableOpacity>
+      <View style={[styles.container, dark && { backgroundColor: INCOGNITO_COLORS.background }]}>
+        {/* Header - always visible even when feed is empty */}
+        {!hideHeader && (
+          <View style={[styles.header, { paddingTop: insets.top, height: insets.top + HEADER_H }, dark && { backgroundColor: INCOGNITO_COLORS.background }]}>
+            <TouchableOpacity style={styles.headerBtn} onPress={() => router.push({ pathname: "/(main)/discovery-preferences", params: { mode: isPhase2 ? 'phase2' : 'phase1' } } as any)}>
+              <Ionicons name="options-outline" size={22} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
+            </TouchableOpacity>
+            <Text style={[styles.headerLogo, dark && { color: INCOGNITO_COLORS.primary }]}>mira</Text>
+            <View style={styles.headerBtn} />
+          </View>
+        )}
+        <View style={[styles.center, { flex: 1 }]}>
+          <Text style={styles.emptyEmoji}>🔍</Text>
+          <Text style={[styles.emptyTitle, dark && { color: INCOGNITO_COLORS.text }]}>No matching profiles</Text>
+          <Text style={[styles.emptySubtitle, dark && { color: INCOGNITO_COLORS.textLight }]}>
+            No profiles match "{filterLabels}". Try different intents or clear filters.
+          </Text>
+          <TouchableOpacity
+            style={[styles.resetButton, { marginTop: 24 }]}
+            onPress={() => setPrivateIntentKeys([])}
+          >
+            <Ionicons name="funnel-outline" size={18} color="#FFFFFF" style={{ marginRight: 8 }} />
+            <Text style={styles.resetButtonText}>Show All</Text>
+          </TouchableOpacity>
+        </View>
       </View>
     );
   }
@@ -946,32 +981,55 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
     };
 
     return (
-      <View style={[styles.center, dark && { backgroundColor: INCOGNITO_COLORS.background }]}>
-        <Text style={styles.emptyEmoji}>🎉</Text>
-        <Text style={[styles.emptyTitle, dark && { color: INCOGNITO_COLORS.text }]}>No more profiles</Text>
-        <Text style={[styles.emptySubtitle, dark && { color: INCOGNITO_COLORS.textLight }]}>
-          {isDemoMode
-            ? "You've swiped through the demo deck. Reset to see everyone again!"
-            : "You've seen everyone available right now."}
-        </Text>
-        {isDemoMode && (
-          <>
-            <TouchableOpacity
-              style={[styles.resetButton, { marginTop: 24 }]}
-              onPress={handleResetDeck}
-            >
-              <Ionicons name="refresh" size={18} color="#FFFFFF" style={{ marginRight: 8 }} />
-              <Text style={styles.resetButtonText}>Reset Demo Deck</Text>
+      <View style={[styles.container, dark && { backgroundColor: INCOGNITO_COLORS.background }]}>
+        {/* Header - always visible even when feed is empty */}
+        {!hideHeader && (
+          <View style={[styles.header, { paddingTop: insets.top, height: insets.top + HEADER_H }, dark && { backgroundColor: INCOGNITO_COLORS.background }]}>
+            <TouchableOpacity style={styles.headerBtn} onPress={() => router.push({ pathname: "/(main)/discovery-preferences", params: { mode: isPhase2 ? 'phase2' : 'phase1' } } as any)}>
+              <Ionicons name="options-outline" size={22} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
             </TouchableOpacity>
-            <TouchableOpacity
-              style={[styles.secondaryButton, { marginTop: 12 }]}
-              onPress={() => router.push({ pathname: "/(main)/discovery-preferences", params: { mode: 'phase1' } } as any)}
-            >
-              <Ionicons name="options-outline" size={18} color={C.primary} style={{ marginRight: 8 }} />
-              <Text style={[styles.secondaryButtonText, { color: C.primary }]}>Open Filters</Text>
-            </TouchableOpacity>
-          </>
+            <Text style={[styles.headerLogo, dark && { color: INCOGNITO_COLORS.primary }]}>mira</Text>
+            {!isPhase2 ? (
+              <TouchableOpacity style={styles.headerBtn} onPress={() => router.push("/(main)/notifications" as any)}>
+                <Ionicons name="notifications-outline" size={22} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
+                {unseenCount > 0 && (
+                  <View style={styles.bellBadge}>
+                    <Text style={styles.bellBadgeText}>{unseenCount > 9 ? "9+" : unseenCount}</Text>
+                  </View>
+                )}
+              </TouchableOpacity>
+            ) : (
+              <View style={styles.headerBtn} />
+            )}
+          </View>
         )}
+        <View style={[styles.center, { flex: 1 }]}>
+          <Text style={styles.emptyEmoji}>🎉</Text>
+          <Text style={[styles.emptyTitle, dark && { color: INCOGNITO_COLORS.text }]}>No more profiles</Text>
+          <Text style={[styles.emptySubtitle, dark && { color: INCOGNITO_COLORS.textLight }]}>
+            {isDemoMode
+              ? "You've swiped through the demo deck. Reset to see everyone again!"
+              : "You've seen everyone available right now."}
+          </Text>
+          {isDemoMode && (
+            <>
+              <TouchableOpacity
+                style={[styles.resetButton, { marginTop: 24 }]}
+                onPress={handleResetDeck}
+              >
+                <Ionicons name="refresh" size={18} color="#FFFFFF" style={{ marginRight: 8 }} />
+                <Text style={styles.resetButtonText}>Reset Demo Deck</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.secondaryButton, { marginTop: 12 }]}
+                onPress={() => router.push({ pathname: "/(main)/discovery-preferences", params: { mode: 'phase1' } } as any)}
+              >
+                <Ionicons name="options-outline" size={18} color={C.primary} style={{ marginRight: 8 }} />
+                <Text style={[styles.secondaryButtonText, { color: C.primary }]}>Open Filters</Text>
+              </TouchableOpacity>
+            </>
+          )}
+        </View>
       </View>
     );
   }
