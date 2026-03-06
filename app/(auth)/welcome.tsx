@@ -52,17 +52,18 @@ export default function WelcomeScreen() {
     );
   }
 
-  // STABILITY FIX: Only redirect if:
-  // 1. User is actually on auth/welcome path (not already in main routes)
-  // 2. Haven't already redirected (single-fire guard)
-  // This prevents redirect spam when user is in /(main)/(tabs)/* or /(main)/(private)/*
+  // STABILITY FIX: If not on auth path, return null immediately (silent/inactive)
+  // This prevents any redirect logic or logging when user is in /(main)/* routes
+  // Expo Router may keep this component mounted in navigation stack
+  if (!isOnAuthPath) {
+    return null;
+  }
+
+  // From here: user IS on auth path - evaluate redirect logic
 
   // Demo mode: if already logged in and onboarding complete, redirect to home
   if (isDemoMode && currentDemoUserId && demoOnboardingComplete[currentDemoUserId]) {
-    if (!isOnAuthPath || didRedirectRef.current) {
-      // Already in main routes or already redirected - skip
-      return null;
-    }
+    if (didRedirectRef.current) return null; // Already redirected once
     didRedirectRef.current = true;
     return <Redirect href={"/(main)/(tabs)/home" as any} />;
   }
@@ -70,13 +71,7 @@ export default function WelcomeScreen() {
   // Live mode: ONLY redirect to home if authenticated AND onboarding completed
   // NEVER auto-redirect for incomplete onboarding - always show welcome screen
   if (!isDemoMode && isAuthenticated && hasValidToken && onboardingCompleted) {
-    if (!isOnAuthPath || didRedirectRef.current) {
-      // Already in main routes or already redirected - skip
-      if (__DEV__ && !didRedirectRef.current) {
-        console.log(`[WELCOME] Onboarding complete but already in main routes (${segments.join('/')}) - skipping redirect`);
-      }
-      return null;
-    }
+    if (didRedirectRef.current) return null; // Already redirected once
     didRedirectRef.current = true;
     if (__DEV__) console.log(`[WELCOME] Onboarding complete, redirecting to home`);
     return <Redirect href="/(main)/(tabs)/home" />;
