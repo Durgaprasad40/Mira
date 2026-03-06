@@ -7,9 +7,10 @@
  * - Do not change UX/flows without explicit unlock
  * Date locked: 2026-03-04
  */
+import { useRef } from "react";
 import { View, Text, StyleSheet, ActivityIndicator } from "react-native";
 import { Button } from "@/components/ui";
-import { useRouter, Redirect } from "expo-router";
+import { useRouter, Redirect, useSegments } from "expo-router";
 import { COLORS } from "@/lib/constants";
 import { useAuthStore } from "@/stores/authStore";
 import { Ionicons } from "@expo/vector-icons";
@@ -19,10 +20,19 @@ import { useDemoStore } from "@/stores/demoStore";
 
 export default function WelcomeScreen() {
   const router = useRouter();
+  const segments = useSegments();
   const { isAuthenticated, onboardingCompleted, token, userId, logout } = useAuthStore();
   const currentDemoUserId = useDemoStore((s) => s.currentDemoUserId);
   const demoOnboardingComplete = useDemoStore((s) => s.demoOnboardingComplete);
   const demoStoreHydrated = useDemoStore((s) => s._hasHydrated);
+
+  // STABILITY FIX: Single-fire guard to prevent repeated redirects
+  const didRedirectRef = useRef(false);
+
+  // STABILITY FIX: Only allow redirect if user is actually on auth/welcome path
+  // Prevents redirect spam when user is already in /(main)/* or other routes
+  // Expo Router may keep this component mounted in navigation stack
+  const isOnAuthPath = segments[0] === '(auth)' || !segments[0];
 
   // STRICT TOKEN CHECK: only consider authenticated if we have a valid token
   const hasValidToken = typeof token === 'string' && token.trim().length > 0;
@@ -42,14 +52,32 @@ export default function WelcomeScreen() {
     );
   }
 
+  // STABILITY FIX: Only redirect if:
+  // 1. User is actually on auth/welcome path (not already in main routes)
+  // 2. Haven't already redirected (single-fire guard)
+  // This prevents redirect spam when user is in /(main)/(tabs)/* or /(main)/(private)/*
+
   // Demo mode: if already logged in and onboarding complete, redirect to home
   if (isDemoMode && currentDemoUserId && demoOnboardingComplete[currentDemoUserId]) {
+    if (!isOnAuthPath || didRedirectRef.current) {
+      // Already in main routes or already redirected - skip
+      return null;
+    }
+    didRedirectRef.current = true;
     return <Redirect href={"/(main)/(tabs)/home" as any} />;
   }
 
   // Live mode: ONLY redirect to home if authenticated AND onboarding completed
   // NEVER auto-redirect for incomplete onboarding - always show welcome screen
   if (!isDemoMode && isAuthenticated && hasValidToken && onboardingCompleted) {
+    if (!isOnAuthPath || didRedirectRef.current) {
+      // Already in main routes or already redirected - skip
+      if (__DEV__ && !didRedirectRef.current) {
+        console.log(`[WELCOME] Onboarding complete but already in main routes (${segments.join('/')}) - skipping redirect`);
+      }
+      return null;
+    }
+    didRedirectRef.current = true;
     if (__DEV__) console.log(`[WELCOME] Onboarding complete, redirecting to home`);
     return <Redirect href="/(main)/(tabs)/home" />;
   }

@@ -191,13 +191,15 @@ export async function syncPhotosFromBackend(
  * @param localUri - The local file:// URI
  * @param isPrimary - Whether this is the primary photo
  * @param slotIndex - The slot index (0-8)
+ * @param token - Optional session token for auth validation
  * @returns Promise<{ success: boolean; storageId?: string; message?: string }>
  */
 export async function uploadPhotoToBackend(
   userId: string,
   localUri: string,
   isPrimary: boolean,
-  slotIndex: number
+  slotIndex: number,
+  token?: string
 ): Promise<{ success: boolean; storageId?: string; photoId?: string; message?: string }> {
   // Skip upload in demo mode
   if (isDemoMode) {
@@ -257,6 +259,7 @@ export async function uploadPhotoToBackend(
         storageId,
         isPrimary,
         hasFace: true, // Assume all profile photos have faces (verification happens separately)
+        token, // Pass session token for auth validation
       });
 
       if (__DEV__) {

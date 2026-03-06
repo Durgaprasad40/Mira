@@ -105,7 +105,7 @@ async function persistPhoto(cacheUri: string): Promise<string> {
 export default function AdditionalPhotosScreen() {
   useScreenTrace("ONB_ADDITIONAL_PHOTOS");
   const { photos, setPhotoAtIndex, removePhoto, setStep, displayPhotoVariant, setDisplayPhotoVariant, bio, setBio, clearAllPhotos, verificationReferencePrimary } = useOnboardingStore();
-  const { userId } = useAuthStore();
+  const { userId, token } = useAuthStore();
   const demoHydrated = useDemoStore((s) => s._hasHydrated);
   const demoProfile = useDemoStore((s) =>
     isDemoMode && userId ? s.demoProfiles[userId] : null
@@ -457,7 +457,8 @@ export default function AdditionalPhotosScreen() {
               userId,
               cacheUri, // Upload directly from cache, no local copy
               targetIndex === 0, // isPrimary
-              targetIndex
+              targetIndex,
+              token || undefined // Pass session token for auth
             );
 
             if (!uploadResult.success) {
@@ -505,7 +506,8 @@ export default function AdditionalPhotosScreen() {
               userId,
               uri, // Upload directly, no local copy
               targetIndex === 0,
-              targetIndex
+              targetIndex,
+              token || undefined // Pass session token for auth
             );
             if (!uploadResult.success) {
               setUploadState(targetIndex, 'failed');
@@ -580,7 +582,8 @@ export default function AdditionalPhotosScreen() {
               userId,
               cacheUri, // Upload directly from cache, no local copy
               targetIndex === 0,
-              targetIndex
+              targetIndex,
+              token || undefined // Pass session token for auth
             );
 
             if (!uploadResult.success) {
@@ -620,7 +623,7 @@ export default function AdditionalPhotosScreen() {
           // Upload even on error (no local storage)
           if (!isDemoMode && userId) {
             setUploadState(targetIndex, 'uploading');
-            const uploadResult = await uploadPhotoToBackend(userId, uri, targetIndex === 0, targetIndex);
+            const uploadResult = await uploadPhotoToBackend(userId, uri, targetIndex === 0, targetIndex, token || undefined);
             if (!uploadResult.success) {
               setUploadState(targetIndex, 'failed');
               Alert.alert('Upload Failed', 'Please try again.');
