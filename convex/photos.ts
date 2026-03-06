@@ -122,6 +122,15 @@ export const addPhoto = mutation({
       throw new Error('Maximum 9 photos allowed');
     }
 
+    // BUG FIX (2026-03-06): Check if verification_reference photo exists
+    // If it does, it occupies slot 0 and is the primary photo.
+    // Additional photos must NOT overwrite slot 0 or auto-become primary.
+    const verificationRefPhoto = await ctx.db
+      .query('photos')
+      .withIndex('by_user_type', (q) => q.eq('userId', userId).eq('photoType', 'verification_reference'))
+      .first();
+    const hasVerificationPrimary = verificationRefPhoto && verificationRefPhoto.isPrimary;
+
     // If this is primary, update other photos
     if (isPrimary) {
       for (const photo of existingPhotos) {
@@ -131,8 +140,14 @@ export const addPhoto = mutation({
       }
     }
 
-    const order = existingPhotos.length;
-    const isFirstPhoto = existingPhotos.length === 0;
+    // BUG FIX: If verification_reference exists at order 0, additional photos start at order 1+
+    // This prevents overwriting the primary/reference photo slot.
+    const orderOffset = verificationRefPhoto ? 1 : 0;
+    const order = orderOffset + existingPhotos.length;
+
+    // BUG FIX: If verification_reference is primary, this is NOT the "first photo"
+    // so it should NOT auto-become primary. Only explicit isPrimary=true should make it primary.
+    const isFirstPhoto = existingPhotos.length === 0 && !hasVerificationPrimary;
     const willBePrimary = isPrimary || isFirstPhoto;
 
     // 8C: Use client-reported NSFW detection

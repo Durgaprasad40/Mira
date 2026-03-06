@@ -167,41 +167,13 @@ export default function NotificationsScreen() {
         }
         break;
       case 'crossed_paths': {
-        // INVARIANT: A crossed_paths notification may exist IF AND ONLY IF a crossedPaths entry exists
-        // Validate the crossed path still exists before navigating to Nearby screen
-        const crossedUserId = notification.data?.otherUserId;
-
-        if (isDemoMode && crossedUserId) {
-          const crossedPathExists = demoCrossedPaths.some((cp) => cp.otherUserId === crossedUserId);
-
-          if (!crossedPathExists) {
-            // Crossed path no longer exists - this is an orphaned notification
-            log.warn('[BUG]', 'crossed_paths_notification_without_entry', { profileId: crossedUserId });
-
-            // Remove the orphaned notification to prevent future taps
-            removeCrossedPathNotificationsForUser(crossedUserId);
-
-            // Navigate to Nearby home instead of focusing on a specific profile
-            router.push({
-              pathname: '/(main)/(tabs)/nearby',
-              params: {
-                source: 'notification',
-                notificationId: notification._id,
-              },
-            } as any);
-            return;
-          }
-        }
-
-        // Crossed path exists - navigate to Nearby with focus on crossed_paths section
+        // FROZEN (2026-03-06): Nearby feature disabled for stability
+        // Redirect to home instead of nearby to prevent crashes
         router.push({
-          pathname: '/(main)/(tabs)/nearby',
+          pathname: '/(main)/(tabs)/home',
           params: {
-            focus: 'crossed_paths',
-            profileId: crossedUserId,
             source: 'notification',
             notificationId: notification._id,
-            dedupeKey: notification.dedupeKey,
           },
         } as any);
         break;

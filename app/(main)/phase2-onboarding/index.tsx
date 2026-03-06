@@ -272,17 +272,16 @@ export default function Phase2OnboardingTerms() {
   const userId = useAuthStore((s) => s.userId);
 
   // Query Phase-1 profile from Convex (the real source of truth after onboarding)
+  // NOTE: getCurrentUser already includes ALL photos (including verification_reference)
+  // via the photos table join - no separate photo query needed
   const convexUser = useQuery(
     api.users.getCurrentUser,
     !isDemoMode && userId ? { userId: userId as any } : 'skip'
   );
 
-  // Query Phase-1 photos from Convex photos table (live mode only)
-  // Photos are stored separately from users - must query photos table directly
-  const convexPhotos = useQuery(
-    api.photos.getUserPhotos,
-    !isDemoMode && userId ? { userId: userId as any } : 'skip'
-  );
+  // BUG FIX (2026-03-06): Removed separate getUserPhotos query
+  // getUserPhotos EXCLUDES verification_reference photos, causing Phase 2 to miss the primary photo
+  // convexUser.photos already includes ALL photos, so we use that instead
 
   // For demo mode, get demo user data
   const demoUser = isDemoMode ? getDemoCurrentUser() : null;
@@ -349,10 +348,14 @@ export default function Phase2OnboardingTerms() {
         canonicalProfile = useDemoStore.getState().getCurrentProfile();
         profileSource = 'demoStore.currentProfile';
       } else if (convexUser) {
-        // Live mode: Use Convex user + photos table as single source of truth
-        // Photos are stored separately in photos table, NOT on user object
-        const livePhotos: { url: string }[] = Array.isArray(convexPhotos)
-          ? convexPhotos.map((p: { url: string }) => ({ url: p.url }))
+        // Live mode: Use Convex user as single source of truth
+        // BUG FIX (2026-03-06): Use convexUser.photos which includes ALL photos
+        // (including verification_reference primary photo), not the separate
+        // getUserPhotos query which excludes verification_reference photos
+        const livePhotos: { url: string }[] = Array.isArray(convexUser.photos)
+          ? convexUser.photos
+              .sort((a: any, b: any) => (a.order ?? 0) - (b.order ?? 0))
+              .map((p: { url: string }) => ({ url: p.url }))
           : [];
 
         canonicalProfile = {
@@ -370,7 +373,7 @@ export default function Phase2OnboardingTerms() {
           religion: convexUser.religion,
           photos: livePhotos,
         };
-        profileSource = 'live:convexUser+photosQuery';
+        profileSource = 'live:convexUser.photos';
       }
 
       // FATAL: If no profile exists, block progression
@@ -415,7 +418,7 @@ export default function Phase2OnboardingTerms() {
           profileId,
           name: canonicalProfile.name,
           nonNullSlots,
-          photosFromQuery: Array.isArray(convexPhotos) ? convexPhotos.length : 0,
+          photosFromUser: Array.isArray(convexUser?.photos) ? convexUser.photos.length : 0,
           source: profileSource,
         });
       }

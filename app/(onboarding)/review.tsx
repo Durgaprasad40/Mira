@@ -120,11 +120,15 @@ export default function ReviewScreen() {
     !isDemoMode && userId ? { userId } : 'skip'
   );
 
-  // PERFORMANCE FIX: Query backend photos directly for instant display (no local download)
-  const backendPhotos = useQuery(
-    api.photos.getUserPhotos,
+  // BUG FIX (2026-03-06): Use getCurrentUser which includes ALL photos
+  // (including verification_reference primary photo), not getUserPhotos
+  // which excludes verification_reference photos
+  const currentUser = useQuery(
+    api.users.getCurrentUser,
     !isDemoMode && userId ? { userId: userId as Id<'users'> } : 'skip'
   );
+  // Extract photos from currentUser (includes verification_reference)
+  const backendPhotos = currentUser?.photos ?? [];
 
   // Fallback to backend data if store is empty
   const displayName = name || onboardingStatus?.basicInfo?.name || demoProfile?.name || "Not set";
@@ -154,19 +158,19 @@ export default function ReviewScreen() {
   React.useEffect(() => {
     if (__DEV__) {
       const timestamp = new Date().toISOString();
-      if (backendPhotos === undefined) {
-        console.log('[REVIEW_PHOTOS] ⏳ Loading backend photos...', { timestamp });
+      if (currentUser === undefined) {
+        console.log('[REVIEW_PHOTOS] ⏳ Loading user + photos...', { timestamp });
       } else if (backendPhotos.length === 0) {
-        console.log('[REVIEW_PHOTOS] ✓ Backend returned 0 photos (first paint ready)', { timestamp });
+        console.log('[REVIEW_PHOTOS] ✓ User loaded, 0 photos (first paint ready)', { timestamp });
       } else {
-        console.log('[REVIEW_PHOTOS] ✓ Backend photos loaded - rendering immediately', {
+        console.log('[REVIEW_PHOTOS] ✓ User + photos loaded - rendering immediately', {
           timestamp,
           count: backendPhotos.length,
-          urls: backendPhotos.map(p => p.url?.substring(0, 50) + '...'),
+          urls: backendPhotos.map((p: any) => p.url?.substring(0, 50) + '...'),
         });
       }
     }
-  }, [backendPhotos]);
+  }, [currentUser, backendPhotos]);
 
   // CRITICAL: Check demoProfile.faceVerificationPassed for demo mode (persisted across logout)
   // BUG FIX: Also accept faceVerificationPending (manual review) as valid to proceed

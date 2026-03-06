@@ -134,6 +134,25 @@ export const resetAllUsers = internalMutation({
       moderationQueue: 0,
       purchases: 0,
       subscriptionRecords: 0,
+      // Additional tables added for complete cleanup (2026-03-06)
+      dares: 0,
+      otpCodes: 0,
+      phoneOtps: 0,
+      adminLogs: 0,
+      todPrompts: 0,
+      todAnswers: 0,
+      todAnswerViews: 0,
+      todAnswerLikes: 0,
+      todAnswerReactions: 0,
+      todAnswerReports: 0,
+      todRateLimits: 0,
+      todConnectRequests: 0,
+      todPrivateMedia: 0,
+      userRoomPrefs: 0,
+      userRoomReports: 0,
+      userGameLimits: 0,
+      pendingUploads: 0,
+      chatRooms: 0,
     };
 
     console.log('[DELETION] Collecting all user-related records...');
@@ -529,6 +548,180 @@ export const resetAllUsers = internalMutation({
       }
     }
     console.log(`  - Processed filter presets: ${deletionStats.filterPresets}, ToD games: ${deletionStats.chatTodGames}, deletion states: ${deletionStats.privateDeletionStates}`);
+
+    // ============================================================================
+    // Additional tables added for complete cleanup (2026-03-06)
+    // ============================================================================
+
+    // Dares
+    const allDares = await ctx.db.query('dares').collect();
+    for (const dare of allDares) {
+      if (isUserToDelete(dare.fromUserId) || isUserToDelete(dare.toUserId)) {
+        await ctx.db.delete(dare._id);
+        deletionStats.dares++;
+      }
+    }
+    console.log(`  - Processed dares: ${deletionStats.dares}`);
+
+    // OTP codes (delete all - these are ephemeral and tied to users)
+    const allOtpCodes = await ctx.db.query('otpCodes').collect();
+    for (const otp of allOtpCodes) {
+      await ctx.db.delete(otp._id);
+      deletionStats.otpCodes++;
+    }
+    console.log(`  - Processed otpCodes: ${deletionStats.otpCodes}`);
+
+    // Phone OTPs (delete all - ephemeral)
+    const allPhoneOtps = await ctx.db.query('phoneOtps').collect();
+    for (const otp of allPhoneOtps) {
+      await ctx.db.delete(otp._id);
+      deletionStats.phoneOtps++;
+    }
+    console.log(`  - Processed phoneOtps: ${deletionStats.phoneOtps}`);
+
+    // Admin logs (delete all - tied to admin users being deleted)
+    const allAdminLogs = await ctx.db.query('adminLogs').collect();
+    for (const log of allAdminLogs) {
+      await ctx.db.delete(log._id);
+      deletionStats.adminLogs++;
+    }
+    console.log(`  - Processed adminLogs: ${deletionStats.adminLogs}`);
+
+    // ToD Prompts (uses string userId)
+    const allTodPrompts = await ctx.db.query('todPrompts').collect();
+    for (const prompt of allTodPrompts) {
+      // ownerUserId is string, check if it's in userIdStrings
+      if (userIdStrings.has(prompt.ownerUserId) || prompt.ownerUserId === 'system') {
+        await ctx.db.delete(prompt._id);
+        deletionStats.todPrompts++;
+      }
+    }
+    console.log(`  - Processed todPrompts: ${deletionStats.todPrompts}`);
+
+    // ToD Answers (uses string userId)
+    const allTodAnswers = await ctx.db.query('todAnswers').collect();
+    for (const answer of allTodAnswers) {
+      if (userIdStrings.has(answer.userId)) {
+        await ctx.db.delete(answer._id);
+        deletionStats.todAnswers++;
+      }
+    }
+    console.log(`  - Processed todAnswers: ${deletionStats.todAnswers}`);
+
+    // ToD Answer Views
+    const allTodAnswerViews = await ctx.db.query('todAnswerViews').collect();
+    for (const view of allTodAnswerViews) {
+      if (userIdStrings.has(view.viewerUserId)) {
+        await ctx.db.delete(view._id);
+        deletionStats.todAnswerViews++;
+      }
+    }
+
+    // ToD Answer Likes
+    const allTodAnswerLikes = await ctx.db.query('todAnswerLikes').collect();
+    for (const like of allTodAnswerLikes) {
+      if (userIdStrings.has(like.likedByUserId)) {
+        await ctx.db.delete(like._id);
+        deletionStats.todAnswerLikes++;
+      }
+    }
+
+    // ToD Answer Reactions
+    const allTodAnswerReactions = await ctx.db.query('todAnswerReactions').collect();
+    for (const reaction of allTodAnswerReactions) {
+      if (userIdStrings.has(reaction.userId)) {
+        await ctx.db.delete(reaction._id);
+        deletionStats.todAnswerReactions++;
+      }
+    }
+
+    // ToD Answer Reports
+    const allTodAnswerReports = await ctx.db.query('todAnswerReports').collect();
+    for (const report of allTodAnswerReports) {
+      if (userIdStrings.has(report.reporterId)) {
+        await ctx.db.delete(report._id);
+        deletionStats.todAnswerReports++;
+      }
+    }
+    console.log(`  - Processed todAnswerViews: ${deletionStats.todAnswerViews}, likes: ${deletionStats.todAnswerLikes}, reactions: ${deletionStats.todAnswerReactions}, reports: ${deletionStats.todAnswerReports}`);
+
+    // ToD Rate Limits
+    const allTodRateLimits = await ctx.db.query('todRateLimits').collect();
+    for (const limit of allTodRateLimits) {
+      if (userIdStrings.has(limit.userId)) {
+        await ctx.db.delete(limit._id);
+        deletionStats.todRateLimits++;
+      }
+    }
+
+    // ToD Connect Requests
+    const allTodConnectRequests = await ctx.db.query('todConnectRequests').collect();
+    for (const req of allTodConnectRequests) {
+      if (userIdStrings.has(req.fromUserId) || userIdStrings.has(req.toUserId)) {
+        await ctx.db.delete(req._id);
+        deletionStats.todConnectRequests++;
+      }
+    }
+
+    // ToD Private Media
+    const allTodPrivateMedia = await ctx.db.query('todPrivateMedia').collect();
+    for (const media of allTodPrivateMedia) {
+      if (userIdStrings.has(media.fromUserId) || userIdStrings.has(media.toUserId)) {
+        await ctx.db.delete(media._id);
+        deletionStats.todPrivateMedia++;
+      }
+    }
+    console.log(`  - Processed todRateLimits: ${deletionStats.todRateLimits}, connectRequests: ${deletionStats.todConnectRequests}, privateMedia: ${deletionStats.todPrivateMedia}`);
+
+    // User Room Prefs
+    const allUserRoomPrefs = await ctx.db.query('userRoomPrefs').collect();
+    for (const pref of allUserRoomPrefs) {
+      if (isUserToDelete(pref.userId)) {
+        await ctx.db.delete(pref._id);
+        deletionStats.userRoomPrefs++;
+      }
+    }
+
+    // User Room Reports
+    const allUserRoomReports = await ctx.db.query('userRoomReports').collect();
+    for (const report of allUserRoomReports) {
+      if (isUserToDelete(report.userId)) {
+        await ctx.db.delete(report._id);
+        deletionStats.userRoomReports++;
+      }
+    }
+
+    // User Game Limits
+    const allUserGameLimits = await ctx.db.query('userGameLimits').collect();
+    for (const limit of allUserGameLimits) {
+      if (isUserToDelete(limit.userId)) {
+        await ctx.db.delete(limit._id);
+        deletionStats.userGameLimits++;
+      }
+    }
+    console.log(`  - Processed userRoomPrefs: ${deletionStats.userRoomPrefs}, roomReports: ${deletionStats.userRoomReports}, gameLimits: ${deletionStats.userGameLimits}`);
+
+    // Pending Uploads
+    const allPendingUploads = await ctx.db.query('pendingUploads').collect();
+    for (const upload of allPendingUploads) {
+      if (isUserToDelete(upload.userId)) {
+        await ctx.db.delete(upload._id);
+        deletionStats.pendingUploads++;
+      }
+    }
+    console.log(`  - Processed pendingUploads: ${deletionStats.pendingUploads}`);
+
+    // Chat Rooms (delete user-created rooms, keep system rooms)
+    const allChatRooms = await ctx.db.query('chatRooms').collect();
+    for (const room of allChatRooms) {
+      // Delete rooms created by users being deleted, but keep public system rooms
+      if (room.createdBy && isUserToDelete(room.createdBy)) {
+        await ctx.db.delete(room._id);
+        deletionStats.chatRooms++;
+      }
+    }
+    console.log(`  - Processed chatRooms (user-created): ${deletionStats.chatRooms}`);
+    console.log(`  - PRESERVED: System chat rooms (Global, Hindi, Telugu, etc.)`);
 
     // Finally, delete the user records themselves
     for (const user of allUsers) {
