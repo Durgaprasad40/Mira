@@ -485,6 +485,17 @@ export default defineSchema({
     .index('by_last_message', ['lastMessageAt'])
     .index('by_source_room', ['sourceRoomId']),
 
+  // C1/C2/C3-REPAIR: Conversation participants junction table
+  // Enables efficient user-scoped conversation queries + denormalized unread counts
+  conversationParticipants: defineTable({
+    conversationId: v.id('conversations'),
+    userId: v.id('users'),
+    unreadCount: v.number(),
+  })
+    .index('by_user', ['userId'])
+    .index('by_conversation', ['conversationId'])
+    .index('by_user_conversation', ['userId', 'conversationId']),
+
   // Messages table
   messages: defineTable({
     conversationId: v.id('conversations'),
@@ -1409,4 +1420,16 @@ export default defineSchema({
     .index('by_storage', ['storageId'])
     .index('by_user', ['userId'])
     .index('by_createdAt', ['createdAt']),
+
+  // B2-FIX: Track failed storage deletions for retry
+  // Records created when ctx.storage.delete fails after DB photo deletion
+  // Cron job retries these periodically to clean up orphaned storage blobs
+  failedStorageDeletions: defineTable({
+    storageId: v.id('_storage'),
+    failedAt: v.number(),
+    retryCount: v.number(),
+    lastError: v.optional(v.string()),
+  })
+    .index('by_failedAt', ['failedAt'])
+    .index('by_storageId', ['storageId']),
 });

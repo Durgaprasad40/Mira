@@ -1,5 +1,5 @@
 import { v } from 'convex/values';
-import { mutation, query, action } from './_generated/server';
+import { mutation, query, action, internalMutation } from './_generated/server';
 import { Id } from './_generated/dataModel';
 import { resolveUserIdByAuthId, ensureUserByAuthId } from './helpers';
 
@@ -76,8 +76,21 @@ export const addPhoto = mutation({
   handler: async (ctx, args) => {
     const { storageId, isPrimary, hasFace, width, height, fileSize, mimeType, isNsfwDetected } = args;
 
+    // SECURITY FIX A2: Verify authenticated user matches target userId
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) {
+      throw new Error('Unauthorized: authentication required');
+    }
+    const authUserId = identity.subject;
+
     // Map authUserId -> Convex Id<"users"> (MUTATION: can create)
     const userId = await ensureUserByAuthId(ctx, args.userId as string);
+
+    // SECURITY: Verify the authenticated user is modifying their own profile
+    const authenticatedUserId = await ensureUserByAuthId(ctx, authUserId);
+    if (userId !== authenticatedUserId) {
+      throw new Error('Unauthorized: cannot add photos to another user\'s profile');
+    }
 
     // BUGFIX #67: Validate storage ID exists before proceeding
     // Get the URL for the uploaded file - this validates storageId exists
@@ -166,6 +179,26 @@ export const addPhoto = mutation({
       createdAt: Date.now(),
     });
 
+    // CONSISTENCY FIX B1: Ensure exactly one primary photo after insert
+    // Re-query and enforce single primary to handle concurrent race conditions
+    if (willBePrimary) {
+      const allPhotos = await ctx.db
+        .query('photos')
+        .withIndex('by_user', (q) => q.eq('userId', userId))
+        .collect();
+      const primaryPhotos = allPhotos.filter((p) => p.isPrimary);
+      if (primaryPhotos.length > 1) {
+        // Multiple primaries found - deterministically pick lowest order
+        primaryPhotos.sort((a, b) => a.order - b.order);
+        const keepPrimary = primaryPhotos[0];
+        for (let i = 1; i < primaryPhotos.length; i++) {
+          await ctx.db.patch(primaryPhotos[i]._id, { isPrimary: false });
+        }
+        // Ensure correct primaryPhotoUrl
+        await ctx.db.patch(userId, { primaryPhotoUrl: keepPrimary.url });
+      }
+    }
+
     // 8C: If NSFW detected, route to moderation queue for manual review
     if (flaggedNsfw) {
       await ctx.db.insert('moderationQueue', {
@@ -237,10 +270,11 @@ export const deletePhoto = mutation({
       throw new Error('Must have at least two photos');
     }
 
-    // Delete from storage
-    await ctx.storage.delete(photo.storageId);
-
-    // Delete from database
+    // CONSISTENCY FIX B2: Reorder operations for safer deletion
+    // 1. Delete from database FIRST (authoritative state)
+    // 2. Reorder remaining photos (maintain consistency)
+    // 3. Delete from storage LAST (best effort, orphan cleanup handles failures)
+    const storageIdToDelete = photo.storageId;
     await ctx.db.delete(photoId);
 
     // Reorder remaining photos
@@ -278,6 +312,43 @@ export const deletePhoto = mutation({
     }
 
     await ctx.db.patch(userId, { primaryPhotoUrl: primaryPhoto?.url });
+
+    // CONSISTENCY FIX B2: Delete from storage LAST (best effort)
+    // If this fails, DB is already consistent; failed deletion is queued for retry
+    try {
+      await ctx.storage.delete(storageIdToDelete);
+    } catch (storageError) {
+      // Log the failure
+      console.warn('[PHOTO_DELETE] Storage cleanup failed, queuing for retry:', storageError);
+
+      // B2-FIX: Track failed deletion for retry by cron
+      const errorString = storageError instanceof Error
+        ? storageError.message.slice(0, 500)
+        : String(storageError).slice(0, 500);
+
+      // Check if already queued (prevent duplicate spam)
+      const existing = await ctx.db
+        .query('failedStorageDeletions')
+        .withIndex('by_storageId', (q) => q.eq('storageId', storageIdToDelete))
+        .first();
+
+      if (existing) {
+        // Update existing record
+        await ctx.db.patch(existing._id, {
+          failedAt: Date.now(),
+          retryCount: existing.retryCount + 1,
+          lastError: errorString,
+        });
+      } else {
+        // Insert new record
+        await ctx.db.insert('failedStorageDeletions', {
+          storageId: storageIdToDelete,
+          failedAt: Date.now(),
+          retryCount: 0,
+          lastError: errorString,
+        });
+      }
+    }
 
     return { success: true };
   },
@@ -393,6 +464,37 @@ export const markPhotoNsfw = mutation({
     isNsfw: v.boolean(),
   },
   handler: async (ctx, args) => {
+    // SECURITY FIX A3: Require authentication and authorization
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) {
+      throw new Error('Unauthorized: authentication required');
+    }
+
+    // Get the photo to check ownership
+    const photo = await ctx.db.get(args.photoId);
+    if (!photo) {
+      throw new Error('Photo not found');
+    }
+
+    // Resolve authenticated user
+    const authUserId = identity.subject;
+    const authenticatedUser = await ctx.db
+      .query('users')
+      .withIndex('by_auth_user_id', (q) => q.eq('authUserId', authUserId))
+      .first();
+
+    if (!authenticatedUser) {
+      throw new Error('Unauthorized: user not found');
+    }
+
+    // Allow if: user is admin OR user owns the photo
+    const isAdmin = authenticatedUser.isAdmin === true;
+    const isOwner = photo.userId === authenticatedUser._id;
+
+    if (!isAdmin && !isOwner) {
+      throw new Error('Unauthorized: only photo owner or admin can mark NSFW status');
+    }
+
     await ctx.db.patch(args.photoId, { isNsfw: args.isNsfw });
     return { success: true };
   },
@@ -998,5 +1100,69 @@ export const deleteAllPhotosForUser = mutation({
       deletedCount,
       message: `Deleted ${deletedCount} photos`,
     };
+  },
+});
+
+// =============================================================================
+// B2-FIX: Retry Failed Storage Deletions
+// =============================================================================
+
+/**
+ * Internal mutation to retry failed storage deletions.
+ * Called by cron job to clean up orphaned storage blobs.
+ * Processes in bounded batches to avoid heavy work.
+ */
+export const retryFailedStorageDeletions = internalMutation({
+  args: {},
+  handler: async (ctx) => {
+    const batchSize = 20;
+    const maxRetries = 10;
+
+    // Get oldest failed deletions first (FIFO order)
+    const failedDeletions = await ctx.db
+      .query('failedStorageDeletions')
+      .withIndex('by_failedAt')
+      .take(batchSize);
+
+    let successCount = 0;
+    let failCount = 0;
+    let abandonedCount = 0;
+
+    for (const record of failedDeletions) {
+      // Check if we should abandon this record (too many retries)
+      if (record.retryCount >= maxRetries) {
+        console.warn(`[B2-RETRY] Abandoning storageId ${record.storageId} after ${record.retryCount} retries`);
+        await ctx.db.delete(record._id);
+        abandonedCount++;
+        continue;
+      }
+
+      try {
+        // Attempt to delete from storage
+        await ctx.storage.delete(record.storageId);
+
+        // Success - remove the queue record
+        await ctx.db.delete(record._id);
+        successCount++;
+      } catch (error) {
+        // Failed again - update retry count
+        const errorString = error instanceof Error
+          ? error.message.slice(0, 500)
+          : String(error).slice(0, 500);
+
+        await ctx.db.patch(record._id, {
+          failedAt: Date.now(),
+          retryCount: record.retryCount + 1,
+          lastError: errorString,
+        });
+        failCount++;
+      }
+    }
+
+    if (successCount > 0 || failCount > 0 || abandonedCount > 0) {
+      console.log(`[B2-RETRY] Processed ${failedDeletions.length} failed deletions: ${successCount} succeeded, ${failCount} failed, ${abandonedCount} abandoned`);
+    }
+
+    return { successCount, failCount, abandonedCount, processed: failedDeletions.length };
   },
 });

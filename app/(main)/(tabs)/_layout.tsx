@@ -121,11 +121,23 @@ export default function MainTabsLayout() {
   // N-001/C-004 FIX: Permanent guard to prevent duplicate router.replace calls
   // Only resets on component remount (not timeout-based)
   const didRouteToPrivateRef = useRef(false);
+  // E4: Track the private tab timeout for proper cleanup
+  const privateTabTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // STABILITY FIX: Boot readiness guard to prevent hydration race condition
   // Ensures auth state, onboarding state, and route decision state are ready
   // before any navigation decisions are made
   const isBootReady = useBootStore((s) => s.isBootReady());
+
+  // E4: Cleanup private tab timeout on unmount to prevent stale guard resets
+  useEffect(() => {
+    return () => {
+      if (privateTabTimeoutRef.current) {
+        clearTimeout(privateTabTimeoutRef.current);
+        privateTabTimeoutRef.current = null;
+      }
+    };
+  }, []);
 
   // Guard: prevent premature navigation if boot not ready
   if (!isBootReady) {
@@ -172,7 +184,14 @@ export default function MainTabsLayout() {
     }
 
     // N-001/C-004: Reset guard after navigation settles (allows future taps after returning)
-    setTimeout(() => { didRouteToPrivateRef.current = false; }, 1000);
+    // E4: Clear previous timeout before setting new one to prevent stale resets
+    if (privateTabTimeoutRef.current) {
+      clearTimeout(privateTabTimeoutRef.current);
+    }
+    privateTabTimeoutRef.current = setTimeout(() => {
+      didRouteToPrivateRef.current = false;
+      privateTabTimeoutRef.current = null;
+    }, 1000);
   };
 
   return (

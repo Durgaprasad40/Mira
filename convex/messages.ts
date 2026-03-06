@@ -1,5 +1,5 @@
 import { v } from 'convex/values';
-import { mutation, query, QueryCtx, MutationCtx } from './_generated/server';
+import { mutation, query, internalMutation, QueryCtx, MutationCtx } from './_generated/server';
 import { Id } from './_generated/dataModel';
 import { softMaskText } from './softMask';
 import { resolveUserIdByAuthId } from './helpers';
@@ -15,6 +15,81 @@ async function hasActiveChatRoomPenalty(
     .withIndex('by_user', (q) => q.eq('userId', userId))
     .collect();
   return penalties.some((p) => p.expiresAt > now);
+}
+
+// D1: Helper to check if either user has blocked the other
+// Returns true if blocked (should prevent messaging)
+async function isBlockedBidirectional(
+  ctx: QueryCtx | MutationCtx,
+  userId1: Id<'users'>,
+  userId2: Id<'users'>
+): Promise<boolean> {
+  // Check if userId1 blocked userId2
+  const block1 = await ctx.db
+    .query('blocks')
+    .withIndex('by_blocker_blocked', (q) =>
+      q.eq('blockerId', userId1).eq('blockedUserId', userId2)
+    )
+    .first();
+  if (block1) return true;
+
+  // Check if userId2 blocked userId1
+  const block2 = await ctx.db
+    .query('blocks')
+    .withIndex('by_blocker_blocked', (q) =>
+      q.eq('blockerId', userId2).eq('blockedUserId', userId1)
+    )
+    .first();
+  return !!block2;
+}
+
+// C1/C2/C3-REPAIR: Helper to compute unread count from source of truth (messages table)
+// Used for: race-safe updates, fallback when participant rows are missing, backfill
+async function computeUnreadCountFromMessages(
+  ctx: QueryCtx | MutationCtx,
+  conversationId: Id<'conversations'>,
+  userId: Id<'users'>
+): Promise<number> {
+  const unreadMessages = await ctx.db
+    .query('messages')
+    .withIndex('by_conversation', (q) => q.eq('conversationId', conversationId))
+    .filter((q) =>
+      q.and(
+        q.neq(q.field('senderId'), userId),
+        q.eq(q.field('readAt'), undefined)
+      )
+    )
+    .collect();
+  return unreadMessages.length;
+}
+
+// C1/C2/C3-REPAIR: Helper to upsert participant row with recomputed unread count
+// Avoids race conditions by always recomputing from source of truth
+async function upsertParticipantUnreadCount(
+  ctx: MutationCtx,
+  conversationId: Id<'conversations'>,
+  userId: Id<'users'>
+): Promise<void> {
+  const unreadCount = await computeUnreadCountFromMessages(ctx, conversationId, userId);
+
+  const existing = await ctx.db
+    .query('conversationParticipants')
+    .withIndex('by_user_conversation', (q) =>
+      q.eq('userId', userId).eq('conversationId', conversationId)
+    )
+    .first();
+
+  if (existing) {
+    if (existing.unreadCount !== unreadCount) {
+      await ctx.db.patch(existing._id, { unreadCount });
+    }
+  } else {
+    await ctx.db.insert('conversationParticipants', {
+      conversationId,
+      userId,
+      unreadCount,
+    });
+  }
 }
 
 // Send a message
@@ -58,6 +133,12 @@ export const sendMessage = mutation({
     // Verify sender is part of conversation
     if (!conversation.participants.includes(senderId)) {
       throw new Error('Not authorized');
+    }
+
+    // D1: Check if either user has blocked the other
+    const recipientId = conversation.participants.find((id) => id !== senderId);
+    if (recipientId && await isBlockedBidirectional(ctx, senderId, recipientId)) {
+      throw new Error('Cannot send message');
     }
 
     // Block sending to expired confession-based conversations
@@ -144,9 +225,17 @@ export const sendMessage = mutation({
       lastMessageAt: now,
     });
 
+    // C1/C2/C3-REPAIR: Update recipient's unreadCount via recomputation (race-safe)
+    // recipientId already defined from D1 blocking check above
+    if (recipientId) {
+      // Recompute from source of truth - avoids concurrent increment race conditions
+      await upsertParticipantUnreadCount(ctx, conversationId, recipientId);
+      // Also ensure sender has a row (will have 0 unread since they just sent)
+      await upsertParticipantUnreadCount(ctx, conversationId, senderId);
+    }
+
     // Create notification for recipient
     // 9-5: Add TTL and dedupe key for message notifications
-    const recipientId = conversation.participants.find((id) => id !== senderId);
     if (recipientId) {
       const dedupeKey = `message:${conversationId}:unread`;
       // Check for existing notification with same dedupe key
@@ -211,6 +300,11 @@ export const sendPreMatchMessage = mutation({
     const verificationStatus = fromUser.verificationStatus || 'unverified';
     if (verificationStatus !== 'verified') {
       throw new Error('Please complete profile verification before sending messages.');
+    }
+
+    // D1: Check if either user has blocked the other
+    if (await isBlockedBidirectional(ctx, fromUserId, toUserId)) {
+      throw new Error('Cannot send message');
     }
 
     // Check if already have a conversation
@@ -308,6 +402,11 @@ export const sendPreMatchMessage = mutation({
     await ctx.db.patch(conversation._id, {
       lastMessageAt: now,
     });
+
+    // C1/C2/C3-REPAIR: Update participant unreadCounts via recomputation (race-safe)
+    // Recompute from source of truth - avoids concurrent increment race conditions
+    await upsertParticipantUnreadCount(ctx, conversation._id, toUserId);
+    await upsertParticipantUnreadCount(ctx, conversation._id, fromUserId);
 
     // 9-5: Notify recipient with TTL and dedupe
     const dedupeKey = `message:${conversation._id}:unread`;
@@ -415,6 +514,10 @@ export const markAsRead = mutation({
     for (const message of unreadMessages) {
       await ctx.db.patch(message._id, { readAt: now });
     }
+
+    // C1/C2/C3-REPAIR: Update user's unreadCount via recomputation (race-safe)
+    // Recompute from source of truth - handles missing rows and concurrent races
+    await upsertParticipantUnreadCount(ctx, conversationId, userId);
 
     return { success: true, count: unreadMessages.length };
   },
@@ -654,30 +757,40 @@ export const getUnreadCount = query({
       return 0;
     }
 
-    // Get all conversations
+    // C1/C2-REPAIR: Hybrid approach - use denormalized counts where available,
+    // fall back to source-of-truth computation for conversations without participant rows.
+    // This ensures correct counts even before/during backfill.
+
+    // 1. Get all participant rows for this user (fast indexed query)
+    const participantRows = await ctx.db
+      .query('conversationParticipants')
+      .withIndex('by_user', (q) => q.eq('userId', userId))
+      .collect();
+
+    // Build set of conversation IDs that have participant rows
+    const coveredConversationIds = new Set(
+      participantRows.map((row) => row.conversationId as string)
+    );
+
+    // 2. Get all conversations where user is a participant
     const allConversations = await ctx.db
       .query('conversations')
       .collect();
-
     const userConversations = allConversations.filter((c) =>
       c.participants.includes(userId)
     );
 
-    let totalUnread = 0;
-    for (const conversation of userConversations) {
-      const unreadMessages = await ctx.db
-        .query('messages')
-        .withIndex('by_conversation', (q) =>
-          q.eq('conversationId', conversation._id)
-        )
-        .filter((q) =>
-          q.and(
-            q.neq(q.field('senderId'), userId),
-            q.eq(q.field('readAt'), undefined)
-          )
-        )
-        .collect();
-      totalUnread += unreadMessages.length;
+    // 3. Sum denormalized counts for covered conversations
+    let totalUnread = participantRows.reduce((sum, row) => sum + row.unreadCount, 0);
+
+    // 4. For conversations WITHOUT participant rows, compute from messages (fallback)
+    const uncoveredConversations = userConversations.filter(
+      (c) => !coveredConversationIds.has(c._id as string)
+    );
+
+    for (const conversation of uncoveredConversations) {
+      const count = await computeUnreadCountFromMessages(ctx, conversation._id, userId);
+      totalUnread += count;
     }
 
     return totalUnread;
@@ -699,35 +812,50 @@ export const getUnreadDmCountsByRoom = query({
     userId: v.id('users'),
   },
   handler: async (ctx, { userId }) => {
-    // Get all conversations where user is a participant
+    // C3-REPAIR: Hybrid approach - use denormalized counts where available,
+    // fall back to source-of-truth computation for conversations without participant rows.
+    // This ensures correct counts even before/during backfill.
+
+    // 1. Get all participant rows for this user (fast indexed query)
+    const participantRows = await ctx.db
+      .query('conversationParticipants')
+      .withIndex('by_user', (q) => q.eq('userId', userId))
+      .collect();
+
+    // Build set of conversation IDs that have participant rows
+    const coveredConversationIds = new Set(
+      participantRows.map((row) => row.conversationId as string)
+    );
+
+    // 2. Get all conversations where user is a participant AND has sourceRoomId
     const allConversations = await ctx.db
       .query('conversations')
       .collect();
-
-    const userConversations = allConversations.filter(
+    const userRoomConversations = allConversations.filter(
       (c) => c.participants.includes(userId) && c.sourceRoomId
     );
 
+    // 3. Build unread counts by room
     const byRoomId: Record<string, number> = {};
 
-    for (const conversation of userConversations) {
-      // Count unread messages RECEIVED by this user (not sent by them)
-      const unreadMessages = await ctx.db
-        .query('messages')
-        .withIndex('by_conversation', (q) =>
-          q.eq('conversationId', conversation._id)
-        )
-        .filter((q) =>
-          q.and(
-            q.neq(q.field('senderId'), userId),
-            q.eq(q.field('readAt'), undefined)
-          )
-        )
-        .collect();
+    for (const conversation of userRoomConversations) {
+      const roomIdStr = conversation.sourceRoomId as string;
 
-      const unreadCount = unreadMessages.length;
-      if (unreadCount > 0 && conversation.sourceRoomId) {
-        const roomIdStr = conversation.sourceRoomId;
+      // Check if we have a participant row for this conversation
+      const participantRow = participantRows.find(
+        (row) => (row.conversationId as string) === (conversation._id as string)
+      );
+
+      let unreadCount: number;
+      if (participantRow) {
+        // Use denormalized count
+        unreadCount = participantRow.unreadCount;
+      } else {
+        // Fallback: compute from messages
+        unreadCount = await computeUnreadCountFromMessages(ctx, conversation._id, userId);
+      }
+
+      if (unreadCount > 0) {
         byRoomId[roomIdStr] = (byRoomId[roomIdStr] || 0) + unreadCount;
       }
     }
@@ -780,6 +908,93 @@ export const markDmConversationRead = mutation({
       await ctx.db.patch(message._id, { readAt: now });
     }
 
+    // C1/C2/C3-REPAIR: Update user's unreadCount via recomputation (race-safe)
+    // Recompute from source of truth - handles missing rows and concurrent races
+    await upsertParticipantUnreadCount(ctx, conversationId, userId);
+
     return { success: true, count: unreadMessages.length };
+  },
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// C1/C2/C3-REPAIR: Backfill conversationParticipants for existing data
+// Run with cursor to iterate all conversations:
+//   npx convex run messages:backfillConversationParticipants
+//   npx convex run messages:backfillConversationParticipants '{"cursor": "<lastId>"}'
+// ═══════════════════════════════════════════════════════════════════════════
+
+export const backfillConversationParticipants = internalMutation({
+  args: {
+    batchSize: v.optional(v.number()),
+    cursor: v.optional(v.id('conversations')), // Last processed conversation ID
+  },
+  handler: async (ctx, args) => {
+    const batchSize = args.batchSize ?? 50;
+    const cursor = args.cursor;
+
+    // Get batch of conversations, starting after cursor if provided
+    // Use _creationTime ordering for stable pagination
+    let query = ctx.db
+      .query('conversations')
+      .order('asc'); // Oldest first for stable iteration
+
+    if (cursor) {
+      // Get the cursor conversation to find its _creationTime
+      const cursorDoc = await ctx.db.get(cursor);
+      if (cursorDoc) {
+        query = query.filter((q) =>
+          q.gt(q.field('_creationTime'), cursorDoc._creationTime)
+        );
+      }
+    }
+
+    const conversations = await query.take(batchSize);
+
+    let created = 0;
+    let updated = 0;
+    let lastId: Id<'conversations'> | null = null;
+
+    for (const conversation of conversations) {
+      lastId = conversation._id;
+
+      // For each participant, upsert their row with recomputed unread count
+      for (const participantId of conversation.participants) {
+        // Recompute from source of truth (same logic as upsertParticipantUnreadCount)
+        const unreadCount = await computeUnreadCountFromMessages(
+          ctx,
+          conversation._id,
+          participantId
+        );
+
+        const existing = await ctx.db
+          .query('conversationParticipants')
+          .withIndex('by_user_conversation', (q) =>
+            q.eq('userId', participantId).eq('conversationId', conversation._id)
+          )
+          .first();
+
+        if (existing) {
+          if (existing.unreadCount !== unreadCount) {
+            await ctx.db.patch(existing._id, { unreadCount });
+            updated++;
+          }
+        } else {
+          await ctx.db.insert('conversationParticipants', {
+            conversationId: conversation._id,
+            userId: participantId,
+            unreadCount,
+          });
+          created++;
+        }
+      }
+    }
+
+    return {
+      processed: conversations.length,
+      created,
+      updated,
+      hasMore: conversations.length === batchSize,
+      nextCursor: lastId, // Pass this as cursor to next invocation
+    };
   },
 });

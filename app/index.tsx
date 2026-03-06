@@ -442,7 +442,9 @@ export default function Index() {
   // After the first render that returns <Redirect>, all subsequent renders return null.
   // This prevents the focus-loop caused by expo-router's <Redirect> internally using
   // useFocusEffect with a new inline callback on every render.
-  if (didRedirect.current) {
+  // E5: Also check hasNavigatedRef to prevent double-navigation if safeReplace already ran
+  // (e.g., watchdog timer fired before Redirect rendered)
+  if (didRedirect.current || hasNavigatedRef.current) {
     return null;
   }
   didRedirect.current = true;

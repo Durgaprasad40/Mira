@@ -71,6 +71,12 @@ export const useAuthStore = create<AuthState>()((set) => ({
     if (currentUserId && currentUserId !== userId) {
       if (__DEV__) console.log('[AUTH] setAuth: userId changed, resetting onboardingStore');
       useOnboardingStore.getState().reset();
+
+      // SECURITY FIX A4: Reset private profile store on user switch
+      // Prevents Phase-2 private data leakage between accounts
+      const { usePrivateProfileStore } = require('@/stores/privateProfileStore');
+      usePrivateProfileStore.getState().resetPhase2();
+      if (__DEV__) console.log('[AUTH] setAuth: userId changed, resetting privateProfileStore');
     }
 
     return set({
@@ -103,6 +109,12 @@ export const useAuthStore = create<AuthState>()((set) => ({
   logout: () => {
     // Reset onboarding store to prevent photo/data leakage between users
     useOnboardingStore.getState().reset();
+
+    // SECURITY FIX A5: Reset private profile store on logout
+    // Prevents Phase-2 private data leakage after logout
+    const { usePrivateProfileStore } = require('@/stores/privateProfileStore');
+    usePrivateProfileStore.getState().resetPhase2();
+    if (__DEV__) console.log('[AUTH] logout: cleared privateProfileStore');
 
     // BUG B FIX: Clear demo session to prevent stale currentDemoUserId
     // causing welcome.tsx to redirect to onboarding instead of showing welcome

@@ -67,6 +67,11 @@ interface ConfessionThreads {
   [confessionId: string]: string; // conversationId
 }
 
+// CONSISTENCY FIX B4: Module-level guard to prevent concurrent thread creation race
+// This ensures that even if two toggleReaction calls pass the stale state check,
+// only one will proceed to create a thread
+const threadCreationInProgress = new Set<string>();
+
 // Rate limiting constants
 const CONFESSION_RATE_LIMIT = 5; // Max confessions per 24 hours
 const RATE_LIMIT_WINDOW_MS = 24 * 60 * 60 * 1000; // 24 hours in ms
@@ -324,67 +329,79 @@ export const useConfessionStore = create<ConfessionState>()((set, get) => ({
       userId === confession.targetUserId &&
       !state.confessionThreads[confessionId] // idempotency check
     ) {
-      // Create a confession-based thread
-      const convoId = `demo_convo_confession_${confessionId}`;
-      const matchId = `match_confession_${confessionId}`;
-      const dmStore = useDemoDmStore.getState();
-      const demoStore = useDemoStore.getState();
+      // CONSISTENCY FIX B4: Prevent concurrent thread creation race
+      // If another call is already creating a thread for this confession, skip
+      if (threadCreationInProgress.has(confessionId)) {
+        set({ userReactions: newUserReactions, confessions });
+        return { chatUnlocked: false };
+      }
+      threadCreationInProgress.add(confessionId);
 
-      const otherUserName = confession.isAnonymous
-        ? 'Anonymous Confessor'
-        : (confession.authorName || 'Someone');
+      try {
+        // Create a confession-based thread
+        const convoId = `demo_convo_confession_${confessionId}`;
+        const matchId = `match_confession_${confessionId}`;
+        const dmStore = useDemoDmStore.getState();
+        const demoStore = useDemoStore.getState();
 
-      // Seed conversation with initial system message so it shows in Messages
-      const now = Date.now();
-      const TWENTY_FOUR_HOURS = 24 * 60 * 60 * 1000;
-      dmStore.seedConversation(convoId, [{
-        _id: `sys_${confessionId}`,
-        content: `💌 You liked their confession: "${confession.text.slice(0, 50)}${confession.text.length > 50 ? '...' : ''}"`,
-        type: 'system',
-        senderId: 'system',
-        createdAt: now,
-      }]);
-      dmStore.setMeta(convoId, {
-        otherUser: {
-          id: confession.userId,
-          name: otherUserName,
-          lastActive: now,
-          isVerified: false,
-        },
-        isPreMatch: true,
-        isConfessionChat: true, // Confession-based thread
-        expiresAt: now + TWENTY_FOUR_HOURS, // Expires in 24h
-      });
+        const otherUserName = confession.isAnonymous
+          ? 'Anonymous Confessor'
+          : (confession.authorName || 'Someone');
 
-      // Add to matches so it appears in Messages list
-      const newMatch: DemoMatch = {
-        id: matchId,
-        conversationId: convoId,
-        otherUser: {
-          id: confession.userId,
-          name: otherUserName,
-          photoUrl: confession.authorPhotoUrl || '',
-          lastActive: now,
-          isVerified: false,
-        },
-        lastMessage: {
-          content: `💌 Confession thread`,
+        // Seed conversation with initial system message so it shows in Messages
+        const now = Date.now();
+        const TWENTY_FOUR_HOURS = 24 * 60 * 60 * 1000;
+        dmStore.seedConversation(convoId, [{
+          _id: `sys_${confessionId}`,
+          content: `💌 You liked their confession: "${confession.text.slice(0, 50)}${confession.text.length > 50 ? '...' : ''}"`,
           type: 'system',
           senderId: 'system',
           createdAt: now,
-        },
-        unreadCount: 0,
-        isPreMatch: true,
-      };
-      demoStore.addMatch(newMatch);
+        }]);
+        dmStore.setMeta(convoId, {
+          otherUser: {
+            id: confession.userId,
+            name: otherUserName,
+            lastActive: now,
+            isVerified: false,
+          },
+          isPreMatch: true,
+          isConfessionChat: true, // Confession-based thread
+          expiresAt: now + TWENTY_FOUR_HOURS, // Expires in 24h
+        });
 
-      // Track this thread to prevent duplicates
-      set({
-        userReactions: newUserReactions,
-        confessions,
-        confessionThreads: { ...state.confessionThreads, [confessionId]: convoId },
-      });
-      chatUnlocked = true;
+        // Add to matches so it appears in Messages list
+        const newMatch: DemoMatch = {
+          id: matchId,
+          conversationId: convoId,
+          otherUser: {
+            id: confession.userId,
+            name: otherUserName,
+            photoUrl: confession.authorPhotoUrl || '',
+            lastActive: now,
+            isVerified: false,
+          },
+          lastMessage: {
+            content: `💌 Confession thread`,
+            type: 'system',
+            senderId: 'system',
+            createdAt: now,
+          },
+          unreadCount: 0,
+          isPreMatch: true,
+        };
+        demoStore.addMatch(newMatch);
+
+        // Track this thread to prevent duplicates
+        set({
+          userReactions: newUserReactions,
+          confessions,
+          confessionThreads: { ...state.confessionThreads, [confessionId]: convoId },
+        });
+        chatUnlocked = true;
+      } finally {
+        threadCreationInProgress.delete(confessionId);
+      }
     } else {
       set({ userReactions: newUserReactions, confessions });
     }
@@ -683,21 +700,58 @@ export const useConfessionStore = create<ConfessionState>()((set, get) => ({
 
   deleteConfession: (confessionId) => {
     const state = get();
-    // Remove from confessions array
+
+    // CONSISTENCY FIX B5: Atomic deletion cascade
+    // Prepare all cleanup in one pass, then commit atomically
+
+    // 1. Remove from confessions array
     const confessions = state.confessions.filter((c) => c.id !== confessionId);
-    // Remove user reaction for this confession
+
+    // 2. Remove user reaction for this confession
     const userReactions = { ...state.userReactions };
     delete userReactions[confessionId];
-    // Remove confession thread if exists
+
+    // 3. Remove confession thread if exists
     const confessionThreads = { ...state.confessionThreads };
     const convoId = confessionThreads[confessionId];
     delete confessionThreads[confessionId];
-    // Update state
-    set({ confessions, userReactions, confessionThreads });
-    // Clean up related DM thread if it existed
+
+    // 4. Remove replies for this confession
+    const replies = { ...state.replies };
+    delete replies[confessionId];
+
+    // 5. Remove chats tied to this confession
+    const chats = state.chats.filter((c) => c.confessionId !== confessionId);
+
+    // 6. Remove from connectedConfessionIds if present
+    const connectedConfessionIds = state.connectedConfessionIds.filter(
+      (id) => id !== confessionId
+    );
+
+    // 7. Remove from seenTaggedConfessionIds if present (B5-minor fix)
+    const seenTaggedConfessionIds = state.seenTaggedConfessionIds.filter(
+      (id) => id !== confessionId
+    );
+
+    // 8. Atomic state update - all or nothing
+    set({
+      confessions,
+      userReactions,
+      confessionThreads,
+      replies,
+      chats,
+      connectedConfessionIds,
+      seenTaggedConfessionIds,
+    });
+
+    // 9. External cleanup (best effort, doesn't affect local state)
     if (convoId) {
-      const dmStore = useDemoDmStore.getState();
-      dmStore.deleteConversations([convoId]);
+      try {
+        const dmStore = useDemoDmStore.getState();
+        dmStore.deleteConversations([convoId]);
+      } catch (err) {
+        if (__DEV__) console.warn('[CONFESS] deleteConfession: DM cleanup failed:', err);
+      }
     }
   },
 

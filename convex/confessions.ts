@@ -336,13 +336,22 @@ export const toggleReaction = mutation({
     const confession = await ctx.db.get(args.confessionId);
     if (!confession) return { added: false, replaced: false, chatUnlocked: false };
 
+    // CONSISTENCY FIX B3: Helper to recompute reaction count from source of truth
+    const recomputeReactionCount = async () => {
+      const allReactions = await ctx.db
+        .query('confessionReactions')
+        .withIndex('by_confession', (q) => q.eq('confessionId', args.confessionId))
+        .collect();
+      return allReactions.length;
+    };
+
     if (existing) {
       if (existing.type === args.type) {
         // Same emoji → remove (toggle off)
         await ctx.db.delete(existing._id);
-        await ctx.db.patch(args.confessionId, {
-          reactionCount: Math.max(0, confession.reactionCount - 1),
-        });
+        // CONSISTENCY FIX B3: Recompute count from actual reactions to avoid race
+        const actualCount = await recomputeReactionCount();
+        await ctx.db.patch(args.confessionId, { reactionCount: actualCount });
         return { added: false, replaced: false, chatUnlocked: false };
       } else {
         // Different emoji → replace (count stays the same)
@@ -360,9 +369,9 @@ export const toggleReaction = mutation({
         type: args.type,
         createdAt: Date.now(),
       });
-      await ctx.db.patch(args.confessionId, {
-        reactionCount: confession.reactionCount + 1,
-      });
+      // CONSISTENCY FIX B3: Recompute count from actual reactions to avoid race
+      const actualCount = await recomputeReactionCount();
+      await ctx.db.patch(args.confessionId, { reactionCount: actualCount });
 
       // SPECIAL: If tagged user likes a tagged confession, create/find a DM thread
       let chatUnlocked = false;

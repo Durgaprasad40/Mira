@@ -1,6 +1,6 @@
 import { v } from 'convex/values';
 import { mutation, query } from './_generated/server';
-import { Id } from './_generated/dataModel';
+import { Doc, Id } from './_generated/dataModel';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -653,18 +653,43 @@ export const getCrossPathHistory = query({
       .sort((a, b) => b.createdAt - a.createdAt) // newest first
       .slice(0, MAX_HISTORY_ENTRIES);
 
+    // C4 FIX: Batch fetch users and photos instead of N+1 queries
+    // Collect unique other user IDs
+    const otherUserIds = [...new Set(
+      all.map((entry) => entry.user1Id === userId ? entry.user2Id : entry.user1Id)
+    )];
+
+    // Parallel fetch all users
+    const usersMap = new Map<string, Doc<'users'>>();
+    const userFetches = await Promise.all(
+      otherUserIds.map((id) => ctx.db.get(id))
+    );
+    otherUserIds.forEach((id, i) => {
+      const user = userFetches[i];
+      if (user) usersMap.set(id as string, user as Doc<'users'>);
+    });
+
+    // Parallel fetch all primary photos
+    const photosMap = new Map<string, string | null>();
+    const photoFetches = await Promise.all(
+      otherUserIds.map((id) =>
+        ctx.db
+          .query('photos')
+          .withIndex('by_user', (q) => q.eq('userId', id))
+          .filter((q) => q.eq(q.field('isPrimary'), true))
+          .first()
+      )
+    );
+    otherUserIds.forEach((id, i) => {
+      photosMap.set(id as string, photoFetches[i]?.url ?? null);
+    });
+
+    // Build results using pre-fetched data
     const results = [];
     for (const entry of all) {
       const otherUserId = entry.user1Id === userId ? entry.user2Id : entry.user1Id;
-      const otherUser = await ctx.db.get(otherUserId);
+      const otherUser = usersMap.get(otherUserId as string);
       if (!otherUser || !otherUser.isActive) continue;
-
-      // Get primary photo
-      const photo = await ctx.db
-        .query('photos')
-        .withIndex('by_user', (q) => q.eq('userId', otherUserId))
-        .filter((q) => q.eq(q.field('isPrimary'), true))
-        .first();
 
       // Format first reason for display
       const reasonTags = entry.reasonTags ?? [];
@@ -686,7 +711,7 @@ export const getCrossPathHistory = query({
         reasonText,
         createdAt: entry.createdAt,
         expiresAt: entry.expiresAt,
-        photoUrl: photo?.url ?? null,
+        photoUrl: photosMap.get(otherUserId as string),
         initial: otherUser.name.charAt(0),
         isVerified: otherUser.isVerified,
       });
@@ -901,18 +926,46 @@ export const getCrossedPaths = query({
       return b.lastCrossedAt - a.lastCrossedAt;
     });
 
+    const topCrossedPaths = allCrossedPaths.slice(0, limit);
+
+    // C5 FIX: Batch fetch users and photos instead of N+1 queries
+    // Collect unique other user IDs
+    const otherUserIds = [...new Set(
+      topCrossedPaths.map((cp) => cp.user1Id === userId ? cp.user2Id : cp.user1Id)
+    )];
+
+    // Parallel fetch all users
+    const usersMap = new Map<string, Doc<'users'>>();
+    const userFetches = await Promise.all(
+      otherUserIds.map((id) => ctx.db.get(id))
+    );
+    otherUserIds.forEach((id, i) => {
+      const user = userFetches[i];
+      if (user) usersMap.set(id as string, user as Doc<'users'>);
+    });
+
+    // Parallel fetch all primary photos
+    const photosMap = new Map<string, string | undefined>();
+    const photoFetches = await Promise.all(
+      otherUserIds.map((id) =>
+        ctx.db
+          .query('photos')
+          .withIndex('by_user', (q) => q.eq('userId', id))
+          .filter((q) => q.eq(q.field('isPrimary'), true))
+          .first()
+      )
+    );
+    otherUserIds.forEach((id, i) => {
+      photosMap.set(id as string, photoFetches[i]?.url);
+    });
+
+    // Build results using pre-fetched data
     const result = [];
-    for (const cp of allCrossedPaths.slice(0, limit)) {
+    for (const cp of topCrossedPaths) {
       const otherUserId = cp.user1Id === userId ? cp.user2Id : cp.user1Id;
-      const otherUser = await ctx.db.get(otherUserId);
+      const otherUser = usersMap.get(otherUserId as string);
 
       if (!otherUser || !otherUser.isActive) continue;
-
-      const photo = await ctx.db
-        .query('photos')
-        .withIndex('by_user', (q) => q.eq('userId', otherUserId))
-        .filter((q) => q.eq(q.field('isPrimary'), true))
-        .first();
 
       const isUnlocked = cp.unlockExpiresAt && cp.unlockExpiresAt > now;
       const unlockTimeRemaining = isUnlocked ? cp.unlockExpiresAt! - now : 0;
@@ -929,7 +982,7 @@ export const getCrossedPaths = query({
           id: otherUserId,
           name: otherUser.name,
           age: calculateAge(otherUser.dateOfBirth),
-          photoUrl: photo?.url,
+          photoUrl: photosMap.get(otherUserId as string),
           isVerified: otherUser.isVerified,
         },
       });

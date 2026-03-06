@@ -76,8 +76,12 @@ export default function PrivateLayout() {
   // B1 FIX: Track phantom "/" normalization state to show loading UI
   const [isNormalizingRoot, setIsNormalizingRoot] = useState(false);
   const normalizationTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // E2: Track retry timeout separately for cleanup
+  const retryTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   // B3.4 FIX: Track if we've already normalized to prevent redundant triggers
   const didNormalizeRef = useRef(false);
+  // E2: Single-fire navigation guard for normalization - prevents timeout races
+  const didNormalizeNavRef = useRef(false);
 
   // B1.1 FIX: Add router readiness check
   const rootNavState = useRootNavigationState();
@@ -117,14 +121,21 @@ export default function PrivateLayout() {
 
       // B1.1 FIX: Timeout fallback - escape to Phase-1 if normalization fails (2s)
       // Uses safer setTimeout for navigation with router readiness check
+      // E2: Uses didNormalizeNavRef to prevent multiple timeout navigations
       normalizationTimeoutRef.current = setTimeout(() => {
         if (!mountedRef.current) return;
+        // E2: Check if another path already navigated
+        if (didNormalizeNavRef.current) return;
         // B1.1 FIX: Check router readiness in fallback too
         if (!rootNavState?.key) {
           if (__DEV__) console.warn('[PrivateLayout] Timeout fallback: router not ready, retrying...');
           // Retry once after brief delay
-          setTimeout(() => {
+          retryTimeoutRef.current = setTimeout(() => {
+            if (!mountedRef.current) return;
+            // E2: Check if another path already navigated
+            if (didNormalizeNavRef.current) return;
             if (rootNavState?.key) {
+              didNormalizeNavRef.current = true;
               setIsNormalizingRoot(false);
               router.replace(PHASE1_DISCOVER_ROUTE);
             }
@@ -132,13 +143,17 @@ export default function PrivateLayout() {
           return;
         }
         if (__DEV__) console.warn('[PrivateLayout] Phantom root normalization timeout - exiting to Phase-1');
+        didNormalizeNavRef.current = true;
         setIsNormalizingRoot(false);
         router.replace(PHASE1_DISCOVER_ROUTE);
       }, 2000);
 
       // B1.1 FIX: Use setTimeout instead of requestAnimationFrame for safer scheduling
+      // E2: Uses didNormalizeNavRef to prevent races with timeout fallbacks
       setTimeout(() => {
         if (!mountedRef.current) return;
+        // E2: Check if another path already navigated
+        if (didNormalizeNavRef.current) return;
         // B1.1 FIX: Double-check router readiness before navigating
         if (!rootNavState?.key) {
           if (__DEV__) console.warn('[PrivateLayout] Router not ready for normalization');
@@ -147,14 +162,23 @@ export default function PrivateLayout() {
 
         // B1 FIX: Try/catch for safe navigation
         try {
+          // E2: Mark as navigated BEFORE calling replace
+          didNormalizeNavRef.current = true;
           router.replace(PHASE2_HOME_ROUTE);
           setIsNormalizingRoot(false);
+          // E2: Clear all normalization timeouts since we succeeded
           if (normalizationTimeoutRef.current) {
             clearTimeout(normalizationTimeoutRef.current);
             normalizationTimeoutRef.current = null;
           }
+          if (retryTimeoutRef.current) {
+            clearTimeout(retryTimeoutRef.current);
+            retryTimeoutRef.current = null;
+          }
         } catch (error) {
           if (__DEV__) console.error('[PrivateLayout] Phantom root normalization failed:', error);
+          // E2: Reset navigation guard on error so fallback can try
+          didNormalizeNavRef.current = false;
           setIsNormalizingRoot(false);
           // Timeout will handle fallback navigation
         }
@@ -162,10 +186,15 @@ export default function PrivateLayout() {
     }
 
     // B1 FIX: Cleanup timeout on unmount
+    // E2: Cleanup all normalization timeouts
     return () => {
       if (normalizationTimeoutRef.current) {
         clearTimeout(normalizationTimeoutRef.current);
         normalizationTimeoutRef.current = null;
+      }
+      if (retryTimeoutRef.current) {
+        clearTimeout(retryTimeoutRef.current);
+        retryTimeoutRef.current = null;
       }
     };
   }, [pathname, segments, router, hasHydrated, rootNavState]);

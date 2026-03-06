@@ -83,6 +83,20 @@ export default function MatchCelebrationScreen() {
   // Ref-based guard prevents double-press even if React hasn't re-rendered
   // yet (e.g. two rapid taps before `setSending(true)` takes effect).
   const sendingRef = useRef(false);
+  // E1: Single-fire navigation guard to prevent dismiss+push races
+  const hasNavigatedRef = useRef(false);
+  const navTimeoutRefs = useRef<ReturnType<typeof setTimeout>[]>([]);
+  const mountedRef = useRef(true);
+
+  // E1: Cleanup nav timeouts on unmount
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      navTimeoutRefs.current.forEach(clearTimeout);
+      navTimeoutRefs.current = [];
+    };
+  }, []);
 
   if (__DEV__) console.log(`[MatchCelebration] isDemo=${isDemo} match=${!!match} otherUser=${!!otherUser} currentUser=${!!currentUser}`);
 
@@ -217,16 +231,27 @@ export default function MatchCelebrationScreen() {
       // Clear the match celebration event.
       useDemoStore.getState().setNewMatchUserId(null);
 
+      // E1: Single-fire navigation guard
+      if (hasNavigatedRef.current) {
+        sendingRef.current = false;
+        return;
+      }
+      hasNavigatedRef.current = true;
+
       // Dismiss the celebration modal, push Messages list first, then chat.
       // Stack becomes: Messages list → Chat, so router.back() from chat
       // returns to the Messages list instead of Discover.
       router.dismiss();
-      setTimeout(() => {
+      const t1 = setTimeout(() => {
+        if (!mountedRef.current) return;
         router.push("/(main)/(tabs)/messages" as any);
-        setTimeout(() => {
+        const t2 = setTimeout(() => {
+          if (!mountedRef.current) return;
           router.push(`/(main)/(tabs)/messages/chat/${demoConversationId}?source=match` as any);
         }, 0);
+        navTimeoutRefs.current.push(t2);
       }, 0);
+      navTimeoutRefs.current.push(t1);
       sendingRef.current = false;
       return;
     }
@@ -263,15 +288,23 @@ export default function MatchCelebrationScreen() {
       // STEP C: Navigate LAST — dismiss the celebration modal, push Messages
       // list first, then chat. Stack becomes: Messages list → Chat, so
       // router.back() from chat returns to Messages, not Discover.
+      // E1: Single-fire navigation guard
+      if (hasNavigatedRef.current) return;
+      hasNavigatedRef.current = true;
+
       const target = `/(main)/(tabs)/messages/chat/${conversationIdFinal}?source=match`;
       if (__DEV__) console.log("[SayHi] navigating to", target);
       router.dismiss();
-      setTimeout(() => {
+      const t1 = setTimeout(() => {
+        if (!mountedRef.current) return;
         router.push("/(main)/(tabs)/messages" as any);
-        setTimeout(() => {
+        const t2 = setTimeout(() => {
+          if (!mountedRef.current) return;
           router.push(target as any);
         }, 0);
+        navTimeoutRefs.current.push(t2);
       }, 0);
+      navTimeoutRefs.current.push(t1);
     } catch (error: any) {
       if (__DEV__) console.error("[SayHi] error", error);
       Toast.show("Couldn\u2019t start chat. Please try again.");

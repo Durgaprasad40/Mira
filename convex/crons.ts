@@ -41,4 +41,12 @@ crons.hourly(
   internal.chatRooms.cleanupExpiredPenalties
 );
 
+// B2-FIX: Retry failed storage deletions every 30 minutes
+// Cleans up orphaned storage blobs from failed photo deletions
+crons.interval(
+  'retry-failed-storage-deletions',
+  { minutes: 30 },
+  internal.photos.retryFailedStorageDeletions
+);
+
 export default crons;

@@ -47,6 +47,21 @@ import { QueryCtx, MutationCtx } from './_generated/server';
 import { api } from './_generated/api';
 
 // ═══════════════════════════════════════════════════════════════════════════
+// CONSISTENCY FIX B6: Helper to recompute memberCount from source of truth
+// This prevents race conditions from stale read-modify-write patterns
+// ═══════════════════════════════════════════════════════════════════════════
+async function recomputeMemberCount(
+  ctx: MutationCtx,
+  roomId: Id<'chatRooms'>
+): Promise<number> {
+  const members = await ctx.db
+    .query('chatRoomMembers')
+    .withIndex('by_room', (q) => q.eq('roomId', roomId))
+    .collect();
+  return members.length;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // HELPER: Delete room and all related data (messages, members, penalties)
 // Used by closeRoom, resetMyPrivateRooms, deleteExpiredRoom, cleanupExpiredRooms
 // ═══════════════════════════════════════════════════════════════════════════
@@ -91,26 +106,17 @@ async function resolveUserId(
   ctx: QueryCtx | MutationCtx,
   args: DemoArgs
 ): Promise<Id<'users'>> {
-  // Try authenticated user first
+  // SECURITY FIX A1: Always require authenticated identity
+  // Demo mode is permanently disabled - never trust client-provided isDemo flag
   const identity = await ctx.auth.getUserIdentity();
   if (identity) {
     const userId = asUserId(identity.subject);
     if (userId) return userId;
   }
 
-  // Fall back to demo mode
-  if (args.isDemo === true && args.demoUserId && args.demoUserId.length > 0) {
-    const demoUser = await ctx.db
-      .query('users')
-      .withIndex('by_demo_user_id', (q) => q.eq('demoUserId', args.demoUserId))
-      .unique();
-    if (!demoUser) {
-      throw new Error('Demo user not seeded: missing users row for demoUserId=' + args.demoUserId);
-    }
-    return demoUser._id;
-  }
-
-  throw new Error('Unauthorized');
+  // SECURITY: Reject all unauthenticated requests
+  // Demo mode fallback removed - was a security bypass vector
+  throw new Error('Unauthorized: authentication required');
 }
 
 // Query to get effective userId (for client-side owner detection)
@@ -322,11 +328,9 @@ export const joinRoom = mutation({
       joinedAt: Date.now(),
     });
 
-    // Increment member count
-    const room = await ctx.db.get(roomId);
-    if (room) {
-      await ctx.db.patch(roomId, { memberCount: room.memberCount + 1 });
-    }
+    // CONSISTENCY FIX B6: Recompute memberCount from source of truth
+    const actualMemberCount = await recomputeMemberCount(ctx, roomId);
+    await ctx.db.patch(roomId, { memberCount: actualMemberCount });
 
     return memberId;
   },
@@ -347,12 +351,9 @@ export const leaveRoom = mutation({
 
     await ctx.db.delete(membership._id);
 
-    const room = await ctx.db.get(roomId);
-    if (room) {
-      await ctx.db.patch(roomId, {
-        memberCount: Math.max(0, room.memberCount - 1),
-      });
-    }
+    // CONSISTENCY FIX B6: Recompute memberCount from source of truth
+    const actualMemberCount = await recomputeMemberCount(ctx, roomId);
+    await ctx.db.patch(roomId, { memberCount: actualMemberCount });
   },
 });
 
@@ -1380,7 +1381,9 @@ export const requestJoinPrivateRoom = mutation({
           joinedAt: now,
           role: 'member',
         });
-        await ctx.db.patch(roomId, { memberCount: room.memberCount + 1 });
+        // CONSISTENCY FIX B6: Recompute memberCount from source of truth
+        const actualMemberCount = await recomputeMemberCount(ctx, roomId);
+        await ctx.db.patch(roomId, { memberCount: actualMemberCount });
         return { status: 'member' as const };
       }
     }
@@ -1532,7 +1535,9 @@ export const approveJoinRequest = mutation({
         joinedAt: now,
         role: 'member',
       });
-      await ctx.db.patch(roomId, { memberCount: room.memberCount + 1 });
+      // CONSISTENCY FIX B6: Recompute memberCount from source of truth
+      const actualMemberCount = await recomputeMemberCount(ctx, roomId);
+      await ctx.db.patch(roomId, { memberCount: actualMemberCount });
     }
 
     return { success: true };
@@ -1623,7 +1628,9 @@ export const kickAndBanMember = mutation({
       .first();
     if (membership) {
       await ctx.db.delete(membership._id);
-      await ctx.db.patch(roomId, { memberCount: Math.max(0, room.memberCount - 1) });
+      // CONSISTENCY FIX B6: Recompute memberCount from source of truth
+      const actualMemberCount = await recomputeMemberCount(ctx, roomId);
+      await ctx.db.patch(roomId, { memberCount: actualMemberCount });
     }
 
     // 5. Add to bans

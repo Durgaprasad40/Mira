@@ -18,8 +18,10 @@ function isAuthError(msg: string): boolean {
 }
 
 // H-3: Auth Error Boundary - redirect on auth errors, rethrow others
-class AuthErrorBoundary extends Component<{ children: ReactNode }, { error: Error | null }> {
-  state = { error: null as Error | null };
+// E3: Navigation is deferred to avoid sync navigation during lifecycle
+class AuthErrorBoundary extends Component<{ children: ReactNode }, { error: Error | null; didNavigate: boolean }> {
+  state = { error: null as Error | null, didNavigate: false };
+  private navTimeoutId: ReturnType<typeof setTimeout> | null = null;
 
   static getDerivedStateFromError(error: Error) {
     return { error };
@@ -27,8 +29,22 @@ class AuthErrorBoundary extends Component<{ children: ReactNode }, { error: Erro
 
   componentDidCatch(error: Error) {
     if (isAuthError(error?.message || '')) {
+      // E3: Defer navigation to next tick to avoid sync navigation during lifecycle
+      // Guard against double navigation with didNavigate state
+      if (this.state.didNavigate) return;
+      this.setState({ didNavigate: true });
       useAuthStore.getState().logout();
-      globalRouter.replace('/(auth)/welcome');
+      this.navTimeoutId = setTimeout(() => {
+        globalRouter.replace('/(auth)/welcome');
+      }, 0);
+    }
+  }
+
+  componentWillUnmount() {
+    // E3: Cleanup deferred navigation timeout
+    if (this.navTimeoutId) {
+      clearTimeout(this.navTimeoutId);
+      this.navTimeoutId = null;
     }
   }
 
