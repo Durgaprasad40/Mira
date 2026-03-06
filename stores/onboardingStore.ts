@@ -87,7 +87,8 @@ interface OnboardingState {
   email: string;
   phone: string;
   password: string;
-  name: string;
+  firstName: string;
+  lastName: string;
   nickname: string; // User ID / handle
   dateOfBirth: string;
   gender: Gender | null;
@@ -143,7 +144,8 @@ interface OnboardingState {
   setEmail: (email: string) => void;
   setPhone: (phone: string) => void;
   setPassword: (password: string) => void;
-  setName: (name: string) => void;
+  setFirstName: (firstName: string) => void;
+  setLastName: (lastName: string) => void;
   setNickname: (nickname: string) => void;
   setDateOfBirth: (dob: string) => void;
   setGender: (gender: Gender) => void;
@@ -198,7 +200,8 @@ const initialState = {
   email: "",
   phone: "",
   password: "",
-  name: "",
+  firstName: "",
+  lastName: "",
   nickname: "",
   dateOfBirth: "",
   gender: null,
@@ -250,7 +253,9 @@ export const useOnboardingStore = create<OnboardingState>()((set) => ({
 
       setPassword: (password) => set({ password }),
 
-      setName: (name) => set({ name }),
+      setFirstName: (firstName) => set({ firstName }),
+
+      setLastName: (lastName) => set({ lastName }),
 
       setNickname: (nickname) => set({ nickname }),
 
@@ -443,8 +448,18 @@ export const useOnboardingStore = create<OnboardingState>()((set) => ({
         const updates: Partial<OnboardingState> = {};
 
         // Basic Info - directly apply from draft (state is now reset)
+        // Parse backend 'name' into firstName/lastName for frontend display
         if (draft.basicInfo) {
-          if (draft.basicInfo.name) updates.name = draft.basicInfo.name;
+          if (draft.basicInfo.name) {
+            const parts = draft.basicInfo.name.trim().split(/\s+/);
+            if (parts.length === 1) {
+              updates.firstName = parts[0];
+              updates.lastName = '';
+            } else {
+              updates.firstName = parts[0];
+              updates.lastName = parts.slice(1).join(' ');
+            }
+          }
           if (draft.basicInfo.handle) updates.nickname = draft.basicInfo.handle;
           if (draft.basicInfo.dateOfBirth) updates.dateOfBirth = draft.basicInfo.dateOfBirth;
           if (draft.basicInfo.gender) updates.gender = draft.basicInfo.gender;

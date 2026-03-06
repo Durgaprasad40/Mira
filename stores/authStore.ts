@@ -36,7 +36,7 @@ interface AuthState {
   setOnboardingCompleted: (completed: boolean) => void;
   setFaceVerificationPassed: (passed: boolean) => void;
   setFaceVerificationPending: (pending: boolean) => void;
-  logout: () => void;
+  logout: () => Promise<void>;
   setHasHydrated: (state: boolean) => void;
   // Sync local state from server validation (READ-ONLY - updates local state only)
   syncFromServerValidation: (userInfo: {
@@ -106,7 +106,8 @@ export const useAuthStore = create<AuthState>()((set) => ({
 
   // Logout clears LOCAL state ONLY — server data is untouched
   // This follows the "Logout ≠ Delete" principle
-  logout: () => {
+  // C2 FIX: Made async - waits for SecureStore cleanup before resolving
+  logout: async () => {
     // Reset onboarding store to prevent photo/data leakage between users
     useOnboardingStore.getState().reset();
 
@@ -130,10 +131,7 @@ export const useAuthStore = create<AuthState>()((set) => ({
     const { useVerificationStore } = require('@/stores/verificationStore');
     useVerificationStore.getState().resetVerification();
 
-    // Clear persisted auth token from SecureStore
-    const { clearAuthBootCache } = require('@/stores/authBootCache');
-    clearAuthBootCache(); // Fire and forget (async but non-blocking)
-
+    // C2 FIX: Clear in-memory state FIRST (immediate effect for UI)
     set({
       isAuthenticated: false,
       userId: null,
@@ -145,6 +143,16 @@ export const useAuthStore = create<AuthState>()((set) => ({
       _sessionValidated: false,
       _sessionValidationError: null,
     });
+
+    // C2 FIX: Await SecureStore cleanup - logout does NOT resolve until this completes
+    // If cleanup fails, rethrow so callers know logout didn't fully complete
+    const { clearAuthBootCache } = require('@/stores/authBootCache');
+    try {
+      await clearAuthBootCache();
+    } catch (error) {
+      console.error('[AUTH] logout: SecureStore cleanup failed:', error);
+      throw error;
+    }
   },
 
   // No-op for compatibility - always hydrated since no AsyncStorage

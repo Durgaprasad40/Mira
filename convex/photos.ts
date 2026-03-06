@@ -193,10 +193,16 @@ export const addPhoto = mutation({
       }
     }
 
-    // BUG FIX: If verification_reference exists at order 0, additional photos start at order 1+
-    // This prevents overwriting the primary/reference photo slot.
-    const orderOffset = verificationRefPhoto ? 1 : 0;
-    const order = orderOffset + existingPhotos.length;
+    // M11 FIX: Use max(existing orders) + 1 for initial assignment (best-effort)
+    // Post-insert normalization below handles concurrent duplicate orders
+    let maxOrder = -1;
+    if (verificationRefPhoto) {
+      maxOrder = Math.max(maxOrder, verificationRefPhoto.order);
+    }
+    for (const photo of existingPhotos) {
+      maxOrder = Math.max(maxOrder, photo.order);
+    }
+    const order = maxOrder + 1;
 
     // BUG FIX: If verification_reference is primary, this is NOT the "first photo"
     // so it should NOT auto-become primary. Only explicit isPrimary=true should make it primary.
@@ -219,6 +225,33 @@ export const addPhoto = mutation({
       createdAt: Date.now(),
     });
 
+    // M11 FIX: Post-insert order normalization to resolve concurrent duplicate orders
+    // Deterministic sort ensures concurrent requests converge to same ordering
+    const allUserPhotos = await ctx.db
+      .query('photos')
+      .withIndex('by_user', (q) => q.eq('userId', userId))
+      .collect();
+
+    // Separate verification_reference (stays at order 0) from regular photos
+    const regularPhotos = allUserPhotos.filter(p => p.photoType !== 'verification_reference');
+    const hasVerificationRef = allUserPhotos.some(p => p.photoType === 'verification_reference');
+
+    // Sort deterministically: order ASC, createdAt ASC, _id ASC
+    regularPhotos.sort((a, b) => {
+      if (a.order !== b.order) return a.order - b.order;
+      if (a.createdAt !== b.createdAt) return a.createdAt - b.createdAt;
+      return a._id < b._id ? -1 : 1;
+    });
+
+    // Normalize to contiguous orders (1+ if verification_reference exists, else 0+)
+    const startOrder = hasVerificationRef ? 1 : 0;
+    for (let i = 0; i < regularPhotos.length; i++) {
+      const expectedOrder = startOrder + i;
+      if (regularPhotos[i].order !== expectedOrder) {
+        await ctx.db.patch(regularPhotos[i]._id, { order: expectedOrder });
+      }
+    }
+
     // CONSISTENCY FIX B1: Ensure exactly one primary photo after insert
     // Re-query and enforce single primary to handle concurrent race conditions
     if (willBePrimary) {
@@ -229,7 +262,8 @@ export const addPhoto = mutation({
       const primaryPhotos = allPhotos.filter((p) => p.isPrimary);
       if (primaryPhotos.length > 1) {
         // Multiple primaries found - deterministically pick lowest order
-        primaryPhotos.sort((a, b) => a.order - b.order);
+        // C6 FIX: Add createdAt tiebreaker for race condition when orders are equal
+        primaryPhotos.sort((a, b) => a.order - b.order || a.createdAt - b.createdAt);
         const keepPrimary = primaryPhotos[0];
         for (let i = 1; i < primaryPhotos.length; i++) {
           await ctx.db.patch(primaryPhotos[i]._id, { isPrimary: false });
@@ -255,6 +289,11 @@ export const addPhoto = mutation({
     // 8A: If this is the primary photo and user is not yet verified,
     // set verification status to pending_auto to trigger verification flow
     if (willBePrimary) {
+      // M10 FIX: Re-check if our photo is still primary after race reconciliation
+      // If we lost the race (another photo became primary), don't overwrite primaryPhotoUrl
+      const ourPhoto = await ctx.db.get(photoId);
+      const isStillPrimary = ourPhoto?.isPrimary ?? false;
+
       const user = await ctx.db.get(userId);
       if (user) {
         const currentStatus = user.verificationStatus || 'unverified';
@@ -264,8 +303,11 @@ export const addPhoto = mutation({
             verificationStatus: 'pending_auto',
           });
         }
-        // STABILITY FIX: C-10 - Keep primaryPhotoUrl in sync
-        await ctx.db.patch(userId, { primaryPhotoUrl: url });
+        // M10 FIX: Only update primaryPhotoUrl if our photo is still the primary
+        // If race reconciliation chose a different photo, that block already set the correct URL
+        if (isStillPrimary) {
+          await ctx.db.patch(userId, { primaryPhotoUrl: url });
+        }
       }
     }
 
@@ -603,6 +645,16 @@ export const uploadVerificationReferencePhoto = mutation({
       throw new Error('Invalid storage reference: file does not exist');
     }
 
+    // M13 FIX: Validate URL format before insert (same as addPhoto)
+    if (typeof url !== 'string' || url.trim().length === 0) {
+      console.log(`[PHOTO_GATE] FAIL: Empty URL`);
+      throw new Error('Invalid photo URL: URL cannot be empty');
+    }
+    if (!url.startsWith('http://') && !url.startsWith('https://')) {
+      console.log(`[PHOTO_GATE] FAIL: Invalid URL format`);
+      throw new Error('Invalid photo URL: must be a valid HTTP(S) URL');
+    }
+
     // Verify user exists and has accepted consent
     const user = await ctx.db.get(userId);
     if (!user) {
@@ -656,26 +708,9 @@ export const uploadVerificationReferencePhoto = mutation({
 
     console.log(`[PHOTO_GATE] faces=1 pass=true`);
 
-    // BUG FIX: Clean up ALL existing verification_reference photos (handles duplicates from past bugs)
-    // Replace behavior: delete all old verification photos, keep only the new one
-    const existingVerificationPhotos = await ctx.db
-      .query('photos')
-      .withIndex('by_user_type', (q) => q.eq('userId', userId).eq('photoType', 'verification_reference'))
-      .collect();
-
-    const isReplacing = existingVerificationPhotos.length > 0;
-    console.log(`[PHOTO_GATE] uploadVerificationReferencePhoto: replacing existing reference photo?`, isReplacing);
-
-    if (existingVerificationPhotos.length > 0) {
-      console.log(`[PHOTO_GATE] Found ${existingVerificationPhotos.length} existing verification photos (cleaning up duplicates)`);
-
-      // Delete ALL old verification photo records
-      for (const oldPhoto of existingVerificationPhotos) {
-        await ctx.db.delete(oldPhoto._id);
-        console.log(`[PHOTO_GATE] Deleted old verification photo: ${oldPhoto._id}`);
-      }
-      // Note: We don't delete the storage files as they may still be referenced elsewhere
-    }
+    // M9 FIX: Insert first, then reconcile with deterministic winner selection
+    // Old approach (delete-then-insert) had race: concurrent uploads could both delete then insert
+    // New approach: insert first, deterministically keep newest, update user to point to winner
 
     // Create the photo record as verification_reference type
     const photoId = await ctx.db.insert('photos', {
@@ -692,18 +727,45 @@ export const uploadVerificationReferencePhoto = mutation({
       photoType: 'verification_reference',
     });
 
-    console.log(`[PHOTO_GATE] stored verificationReferencePhotoId=${storageId}`);
+    // M9 FIX: Deterministic reconciliation - both concurrent requests agree on same winner
+    // Query all verification_reference photos, keep newest (by createdAt DESC, _id DESC as tiebreaker)
+    const allVerificationPhotos = await ctx.db
+      .query('photos')
+      .withIndex('by_user_type', (q) => q.eq('userId', userId).eq('photoType', 'verification_reference'))
+      .collect();
 
-    // Update user with verification reference photo
+    // Sort by createdAt DESC, then _id DESC (deterministic tiebreaker)
+    allVerificationPhotos.sort((a, b) => {
+      if (b.createdAt !== a.createdAt) return b.createdAt - a.createdAt;
+      return b._id > a._id ? 1 : -1;
+    });
+    const winner = allVerificationPhotos[0];
+
+    if (allVerificationPhotos.length > 1) {
+      console.log(`[PHOTO_GATE] M9: Found ${allVerificationPhotos.length} verification photos, keeping winner: ${winner._id}`);
+      // Delete all except the deterministic winner
+      for (const photo of allVerificationPhotos) {
+        if (photo._id !== winner._id) {
+          await ctx.db.delete(photo._id);
+          console.log(`[PHOTO_GATE] M9: Deleted duplicate verification photo: ${photo._id}`);
+        }
+      }
+      // Note: Storage files are NOT deleted - they may still be referenced elsewhere
+    }
+
+    console.log(`[PHOTO_GATE] stored verificationReferencePhotoId=${winner.storageId}`);
+
+    // M9 FIX: Update user with WINNER's data, not current request's data
+    // This ensures both concurrent requests point user to the same deterministic winner
     await ctx.db.patch(userId, {
-      verificationReferencePhotoId: storageId,
-      verificationReferencePhotoUrl: url,
+      verificationReferencePhotoId: winner.storageId,
+      verificationReferencePhotoUrl: winner.url,
       // Also set as display photo initially (original variant)
-      displayPrimaryPhotoId: storageId,
-      displayPrimaryPhotoUrl: url,
+      displayPrimaryPhotoId: winner.storageId,
+      displayPrimaryPhotoUrl: winner.url,
       displayPrimaryPhotoVariant: 'original',
       // STABILITY FIX: C-10 - Keep primaryPhotoUrl in sync
-      primaryPhotoUrl: url,
+      primaryPhotoUrl: winner.url,
       // Set verification status to pending
       faceVerificationStatus: 'unverified',
       verificationStatus: 'pending_auto',
@@ -780,6 +842,14 @@ export const setDisplayPhotoVariant = mutation({
       const url = await ctx.storage.getUrl(processedStorageId);
       if (!url) {
         throw new Error('Invalid processed photo storage reference');
+      }
+
+      // M13 FIX: Validate URL format before insert (same as addPhoto)
+      if (typeof url !== 'string' || url.trim().length === 0) {
+        throw new Error('Invalid photo URL: URL cannot be empty');
+      }
+      if (!url.startsWith('http://') && !url.startsWith('https://')) {
+        throw new Error('Invalid photo URL: must be a valid HTTP(S) URL');
       }
 
       // Create a new photo record for the variant

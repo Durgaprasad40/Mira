@@ -186,11 +186,11 @@ export default function PrivateChatScreen() {
   // ─── Truth-or-Dare game (same as Phase-1: BottleSpinGame) ───
   const [showTruthDareGame, setShowTruthDareGame] = useState(false);
 
-  // Handler for tapping header avatar/name to open profile
+  // C10 FIX: Disable profile navigation in incognito mode to prevent identity leak
+  // In incognito chat, tapping the header should NOT reveal the other user's profile
   const handleOpenProfile = useCallback(() => {
-    if (!conversation) return;
-    router.push(`/(main)/profile/${conversation.participantId}?mode=phase2` as any);
-  }, [conversation, router]);
+    // No-op: profile viewing disabled in incognito mode
+  }, []);
 
   // Phase-1 parity: send result message to chat when spin completes
   const handleSendTodResult = useCallback((message: string) => {

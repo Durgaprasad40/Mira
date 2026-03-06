@@ -180,7 +180,9 @@ export interface DemoAccount {
 
 /** The demo user's own profile — created via onboarding. */
 export interface DemoUserProfile {
-  name: string;
+  firstName?: string; // User's first name
+  lastName?: string; // User's last name
+  name: string; // Full name (firstName + lastName) for backward compatibility
   handle?: string; // User's nickname/username
   /** Canonical slot-based photo storage (9 slots, nulls allowed) */
   photoSlots?: PhotoSlots9;

@@ -94,7 +94,8 @@ const HASH_VERSION_PBKDF2 = 2;
 const CURRENT_HASH_VERSION = HASH_VERSION_PBKDF2;
 
 // PBKDF2 password hashing constants (OWASP 2024 recommendation)
-const PBKDF2_ITERATIONS = 100000;
+// C7 FIX: Increased iterations from 100,000 to 200,000 for stronger security
+const PBKDF2_ITERATIONS = 200000;
 const PBKDF2_SALT_BYTES = 32;  // 256-bit salt
 const PBKDF2_KEY_BYTES = 32;   // 256-bit derived key
 
@@ -442,6 +443,9 @@ export const registerWithEmail = mutation({
     const { email, password, name, handle, dateOfBirth, gender } = args;
     const now = Date.now();
 
+    // C8 FIX: Normalize email to lowercase to prevent case-based duplicates
+    const normalizedEmail = email.toLowerCase().trim();
+
     // Normalize handle: lowercase and trim
     const normalizedHandle = handle.toLowerCase().trim();
 
@@ -475,10 +479,10 @@ export const registerWithEmail = mutation({
       };
     }
 
-    // Check if user already exists by email
+    // C8 FIX: Check if user already exists by normalized email
     const existingByEmail = await ctx.db
       .query("users")
-      .withIndex("by_email", (q) => q.eq("email", email))
+      .withIndex("by_email", (q) => q.eq("email", normalizedEmail))
       .first();
 
     if (existingByEmail) {
@@ -498,9 +502,29 @@ export const registerWithEmail = mutation({
     const emailVerificationToken = generateEmailVerificationToken();
     const emailVerificationTokenHash = hashEmailToken(emailVerificationToken);
 
+    // C8 FIX: Final duplicate re-check immediately before insert to minimize race window
+    // Note: Convex does not provide atomic upsert with uniqueness constraint.
+    // This re-check minimizes but does not eliminate the race window.
+    // Residual risk: In extremely rare concurrent requests (sub-millisecond),
+    // duplicates may still occur. These should be detected at login time.
+    const finalDuplicateCheck = await ctx.db
+      .query("users")
+      .withIndex("by_email", (q) => q.eq("email", normalizedEmail))
+      .first();
+
+    if (finalDuplicateCheck) {
+      return {
+        success: false,
+        code: "USER_EXISTS" as const,
+        provider: finalDuplicateCheck.authProvider || "email",
+        message: "You already have an account. Please log in.",
+      };
+    }
+
     // Create user with secure PBKDF2 password hash
+    // C8 FIX: Use normalizedEmail for consistent storage
     const userId = await ctx.db.insert("users", {
-      email,
+      email: normalizedEmail,
       passwordHash: await hashPasswordPbkdf2(password),
       hashVersion: CURRENT_HASH_VERSION,
       authProvider: "email",
@@ -541,13 +565,14 @@ export const registerWithEmail = mutation({
     });
 
     // Send verification email via action (runs in Node.js for external API calls)
+    // C8 FIX: Use normalizedEmail for email sending
     await ctx.scheduler.runAfter(0, api.emailActions.sendVerificationEmail, {
       userId: userId as string,
-      email,
+      email: normalizedEmail,
       token: emailVerificationToken,
       userName: name,
     });
-    devLog(`[DEV] Email verification scheduled for ${email}`);
+    devLog(`[DEV] Email verification scheduled for ${normalizedEmail}`);
 
 
     // Create session

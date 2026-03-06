@@ -123,20 +123,12 @@ export default function Index() {
 
       console.warn('[BOOT_FIX] Watchdog fired after 12s - forcing safe navigation');
 
-      // Check cached data to decide where to route
-      const cachedOnboarding = authBootCacheData?.onboardingCompleted === true;
-      const hasToken = authBootCacheData?.token && authBootCacheData.token.trim().length > 0;
-
-      if (hasToken && cachedOnboarding) {
-        console.log('[BOOT_FIX] Watchdog: token + cached onboarding=true → home');
-        setConvexValidated(true);
-        setConvexOnboardingCompleted(true);
-        safeReplace("/(main)/(tabs)/home", "watchdog (token+onboarding)");
-      } else {
-        console.log('[BOOT_FIX] Watchdog: no valid session → welcome');
-        setConvexValidated(true);
-        safeReplace("/(auth)/welcome", "watchdog (no session)");
-      }
+      // C1 FIX: Watchdog must NOT route to home based on cached data alone
+      // If backend validation didn't complete in 12s, route to welcome as safe fallback
+      // User can re-authenticate; this prevents stale/invalid session from reaching home
+      console.log('[BOOT_FIX] Watchdog: backend validation timeout → welcome (safe fallback)');
+      setConvexValidated(true);
+      safeReplace("/(auth)/welcome", "watchdog (validation timeout)");
     }, WATCHDOG_TIMEOUT);
 
     return () => {
@@ -193,16 +185,11 @@ export default function Index() {
       return;
     }
 
-    // STABILITY FIX (2026-03-05): FAST_PATH - route immediately, validate in background
-    // If cached onboardingCompleted=true, route to home IMMEDIATELY (no loading spinner)
-    // Validation runs in background - if it fails, user stays on home (will retry next boot)
-    // This prevents infinite loading if validation hangs or times out
-    if (cachedOnboardingCompleted) {
-      if (__DEV__) {
-        console.log('[AUTH_BOOT] FAST_PATH: cached onboardingCompleted=true, routing immediately');
-      }
-      setConvexOnboardingCompleted(true);
-      setConvexValidated(true); // [BOOT_FIX] Unblock boot immediately for FAST_PATH
+    // C1 FIX: Do NOT route immediately based on cached onboardingCompleted
+    // Wait for backend validation to confirm session is valid before routing to home
+    // This prevents the race where user sees home briefly then gets logged out
+    if (cachedOnboardingCompleted && __DEV__) {
+      console.log('[AUTH_BOOT] Cached onboardingCompleted=true, waiting for backend validation');
     }
 
     // Start validation (even if FAST_PATH, validate in background)
@@ -244,12 +231,9 @@ export default function Index() {
             return;
           }
 
-          // Update state with validated data
+          // C1 FIX: Always set both state values after successful backend validation
           setConvexOnboardingCompleted(backendOnboardingCompleted);
-          if (!cachedOnboardingCompleted) {
-            // Only update validation state if not FAST_PATH (FAST_PATH already set it)
-            setConvexValidated(true);
-          }
+          setConvexValidated(true);
 
           // Update authStore with real onboarding status
           useAuthStore.getState().setAuth(userId, token, backendOnboardingCompleted);
@@ -257,35 +241,22 @@ export default function Index() {
       } catch (error) {
         console.error('[AUTH_BOOT] Validation failed:', error);
 
-        // FAST_PATH validation failure: keep cached session (network error, will retry next boot)
-        if (cachedOnboardingCompleted) {
-          if (__DEV__) {
-            console.warn('[AUTH_BOOT] FAST_PATH validation failed (network) -> keeping cached session, will retry next boot');
-          }
-          // Keep user on home, keep SecureStore values, don't redirect
-          return;
+        // C1 FIX: On network error, set state to trigger ROUTE_WELCOME via existing useEffect
+        // (lines 398-405 call safeReplace for all ROUTE_WELCOME cases)
+        if (__DEV__) {
+          console.warn('[AUTH_BOOT] Validation failed (network) -> will route to welcome');
         }
-
-        // Non-FAST_PATH: allow boot but treat as not completed
         setConvexValidated(true);
         setConvexOnboardingCompleted(false);
-
-        if (__DEV__) {
-          console.warn('[AUTH_BOOT] Validation failed, falling back to welcome (user can retry)');
-        }
       }
     };
 
     // STABILITY FIX (2026-03-04): Handle promise rejection to prevent unhandled errors
     validateSession().catch((error) => {
       console.error('[AUTH_BOOT] Unhandled validation error:', error);
-      // Fail-safe: if validation crashes, treat as validation complete but incomplete onboarding
-      if (!cachedOnboardingCompleted) {
-        setConvexValidated(true);
-        setConvexOnboardingCompleted(false);
-      }
-      // If FAST_PATH (cachedOnboardingCompleted=true), user already routed to home
-      // Keep them there, error is logged, will retry next boot
+      // C1 FIX: On crash, set state to trigger ROUTE_WELCOME
+      setConvexValidated(true);
+      setConvexOnboardingCompleted(false);
     });
   }, [authBootCacheData, router]);
 

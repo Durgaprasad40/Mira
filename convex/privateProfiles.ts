@@ -47,6 +47,15 @@ export const upsert = mutation({
     isVerified: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
+    // C9 FIX: Require authentication and verify ownership (pattern: truthDare.ts:1424-1426)
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) {
+      throw new Error('Unauthorized: authentication required');
+    }
+    if (args.userId !== identity.subject) {
+      throw new Error('Unauthorized: cannot modify another user profile');
+    }
+
     // Check if private data is in pending_deletion state
     const isDeleted = await isPrivateDataDeleted(ctx, args.userId);
     if (isDeleted) {

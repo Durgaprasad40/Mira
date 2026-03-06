@@ -59,6 +59,20 @@ function parseDOBString(dobString: string): Date {
   return new Date(y, m - 1, d, 12, 0, 0);
 }
 
+/**
+ * Parse backend full name into firstName/lastName for display
+ */
+function parseFullName(fullName: string): { firstName: string; lastName: string } {
+  const parts = fullName.trim().split(/\s+/);
+  if (parts.length === 1) {
+    return { firstName: parts[0], lastName: '' };
+  }
+  return {
+    firstName: parts[0],
+    lastName: parts.slice(1).join(' ')
+  };
+}
+
 // STABILITY FIX: Schema-safe relationship intent values (excludes UI-only values)
 const ALLOWED_RELATIONSHIP_INTENTS = new Set([
   'long_term', 'short_term', 'fwb', 'figuring_out',
@@ -87,7 +101,8 @@ export default function ReviewScreen() {
   );
 
   const {
-    name,
+    firstName,
+    lastName,
     nickname,
     dateOfBirth,
     gender,
@@ -140,7 +155,26 @@ export default function ReviewScreen() {
   const backendPhotos = currentUser?.photos ?? [];
 
   // Fallback to backend data if store is empty
-  const displayName = name || onboardingStatus?.basicInfo?.name || demoProfile?.name || "Not set";
+  // Parse backend name into firstName/lastName for display
+  const getDisplayNames = (): { firstName: string; lastName: string } => {
+    // Priority 1: Store values
+    if (firstName || lastName) {
+      return { firstName: firstName || '', lastName: lastName || '' };
+    }
+    // Priority 2: demoProfile values (demo mode)
+    if (demoProfile?.firstName || demoProfile?.lastName) {
+      return { firstName: demoProfile.firstName || '', lastName: demoProfile.lastName || '' };
+    }
+    // Priority 3: Parse from backend or demoProfile name
+    const backendName = onboardingStatus?.basicInfo?.name || demoProfile?.name || '';
+    if (backendName) {
+      return parseFullName(backendName);
+    }
+    return { firstName: '', lastName: '' };
+  };
+  const displayNames = getDisplayNames();
+  const displayFirstName = displayNames.firstName || "Not set";
+  const displayLastName = displayNames.lastName || "—";
   const displayNickname = nickname || onboardingStatus?.basicInfo?.nickname || demoProfile?.handle || "—";
   const displayDateOfBirth = dateOfBirth || onboardingStatus?.basicInfo?.dateOfBirth || demoProfile?.dateOfBirth || "";
   const displayGender = gender || onboardingStatus?.basicInfo?.gender || demoProfile?.gender || "";
@@ -149,19 +183,21 @@ export default function ReviewScreen() {
   React.useEffect(() => {
     if (__DEV__) {
       console.log('[REVIEW] basic info values:', {
-        displayName,
+        displayFirstName,
+        displayLastName,
         displayNickname,
         displayDateOfBirth,
         displayGender,
       });
       console.log('[REVIEW] basic info sources:', {
-        name: name ? 'store' : (onboardingStatus?.basicInfo?.name ? 'backend' : 'none'),
+        firstName: firstName ? 'store' : (demoProfile?.firstName ? 'demoProfile' : (onboardingStatus?.basicInfo?.name ? 'backend' : 'none')),
+        lastName: lastName ? 'store' : (demoProfile?.lastName ? 'demoProfile' : 'none'),
         nickname: nickname ? 'store' : (onboardingStatus?.basicInfo?.nickname ? 'backend' : 'none'),
         dateOfBirth: dateOfBirth ? 'store' : (onboardingStatus?.basicInfo?.dateOfBirth ? 'backend' : 'none'),
         gender: gender ? 'store' : (onboardingStatus?.basicInfo?.gender ? 'backend' : 'none'),
       });
     }
-  }, [name, nickname, dateOfBirth, gender, onboardingStatus, displayName, displayNickname, displayDateOfBirth, displayGender]);
+  }, [firstName, lastName, nickname, dateOfBirth, gender, onboardingStatus, demoProfile, displayFirstName, displayLastName, displayNickname, displayDateOfBirth, displayGender]);
 
   // PERFORMANCE LOG: Track photo rendering speed
   React.useEffect(() => {
@@ -273,7 +309,12 @@ export default function ReviewScreen() {
         };
 
         // Only include basic fields if they have values (don't overwrite with empty)
-        if (name && name.trim().length > 0) profileData.name = name.trim();
+        // Store firstName/lastName separately and construct name for backend compat
+        if (firstName && firstName.trim().length > 0) profileData.firstName = firstName.trim();
+        if (lastName && lastName.trim().length > 0) profileData.lastName = lastName.trim();
+        // Construct full name from firstName/lastName for backward compat
+        const fullName = `${(firstName || '').trim()} ${(lastName || '').trim()}`.trim();
+        if (fullName.length > 0) profileData.name = fullName;
         if (nickname && nickname.length > 0) profileData.handle = nickname;
         if (dateOfBirth && dateOfBirth.length > 0) profileData.dateOfBirth = dateOfBirth;
         if (gender) profileData.gender = gender;
@@ -322,9 +363,11 @@ export default function ReviewScreen() {
       }
 
       // Prepare onboarding data
+      // Construct full name from firstName/lastName for backend
+      const fullName = `${(firstName || '').trim()} ${(lastName || '').trim()}`.trim();
       const onboardingData: any = {
         userId: userId as Id<"users">,
-        name,
+        name: fullName,
         dateOfBirth,
         gender: payloadGender,
         bio,
@@ -514,8 +557,12 @@ export default function ReviewScreen() {
           </TouchableOpacity>
         </View>
         <View style={styles.infoRow}>
-          <Text style={styles.infoLabel}>Name:</Text>
-          <Text style={styles.infoValue}>{displayName}</Text>
+          <Text style={styles.infoLabel}>First Name:</Text>
+          <Text style={styles.infoValue}>{displayFirstName}</Text>
+        </View>
+        <View style={styles.infoRow}>
+          <Text style={styles.infoLabel}>Last Name:</Text>
+          <Text style={styles.infoValue}>{displayLastName}</Text>
         </View>
         <View style={styles.infoRow}>
           <Text style={styles.infoLabel}>User ID:</Text>

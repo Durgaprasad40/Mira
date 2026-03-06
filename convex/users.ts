@@ -1508,6 +1508,8 @@ export const getOnboardingStatus = query({
       // Verification status
       referencePhotoExists: !!user.verificationReferencePhotoId,
       verificationReferencePhotoId: user.verificationReferencePhotoId || null,
+      // C5 FIX: Include URL for face verification (persisted, survives app restart)
+      verificationReferencePhotoUrl: user.verificationReferencePhotoUrl || null,
       faceVerificationStatus: user.faceVerificationStatus || 'unverified',
       faceVerificationPassed: user.faceVerificationStatus === 'verified',
       faceVerificationPending: user.faceVerificationStatus === 'pending',

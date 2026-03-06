@@ -136,13 +136,17 @@ export async function saveAuthBootCache(
 /**
  * Clear auth token, userId, and onboardingCompleted from SecureStore.
  * Call on logout or when session validation fails.
+ * C2/C3 FIX: Uses Promise.all for parallel deletion (faster, more atomic)
  */
 export async function clearAuthBootCache(): Promise<void> {
   try {
-    await SecureStore.deleteItemAsync(TOKEN_KEY);
-    await SecureStore.deleteItemAsync(USER_ID_KEY);
-    await SecureStore.deleteItemAsync(ONBOARDING_COMPLETED_KEY);
-    await SecureStore.deleteItemAsync(ONBOARDING_UPDATED_AT_KEY);
+    // C2/C3 FIX: Delete all keys in parallel to reduce partial-state window
+    await Promise.all([
+      SecureStore.deleteItemAsync(TOKEN_KEY),
+      SecureStore.deleteItemAsync(USER_ID_KEY),
+      SecureStore.deleteItemAsync(ONBOARDING_COMPLETED_KEY),
+      SecureStore.deleteItemAsync(ONBOARDING_UPDATED_AT_KEY),
+    ]);
     if (__DEV__) {
       console.log('[AUTH_BOOT] Cleared token + onboardingCompleted from SecureStore');
     }
@@ -154,6 +158,8 @@ export async function clearAuthBootCache(): Promise<void> {
     } else {
       console.error('[AUTH_BOOT] Failed to clear SecureStore:', error);
     }
+    // C2/C3 FIX: Re-throw so caller knows cleanup failed
+    throw error;
   }
 }
 

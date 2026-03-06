@@ -519,9 +519,17 @@ function OnboardingDraftHydrator() {
       const store = useOnboardingStore.getState();
       const hydratedFields: string[] = [];
 
-      if (name && !store.name) {
-        store.setName(name);
-        hydratedFields.push('name');
+      // Parse backend 'name' into firstName/lastName
+      if (name && (!store.firstName && !store.lastName)) {
+        const parts = name.trim().split(/\s+/);
+        if (parts.length === 1) {
+          store.setFirstName(parts[0]);
+          store.setLastName('');
+        } else {
+          store.setFirstName(parts[0]);
+          store.setLastName(parts.slice(1).join(' '));
+        }
+        hydratedFields.push('firstName', 'lastName');
       }
       if (nickname && !store.nickname) {
         store.setNickname(nickname);

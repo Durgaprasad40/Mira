@@ -277,7 +277,12 @@ export async function uploadPhotoToBackend(
       try {
         await convex.mutation(api.photos.cleanupPendingUpload, { userId, storageId });
       } catch (e) {
-        console.warn('[PHOTO_SYNC] H-1: cleanupPendingUpload failed (non-fatal):', e);
+        // M12 FIX: Log with full detail for diagnosis, not just a warning
+        console.error('[PHOTO_SYNC] M12: ORPHANED STORAGE - cleanup failed');
+        console.error('[PHOTO_SYNC] M12: userId:', userId, 'storageId:', storageId);
+        console.error('[PHOTO_SYNC] M12: cleanup error:', e);
+        // Attach orphanedStorageId to error so outer catch can expose it
+        addPhotoError.orphanedStorageId = storageId;
       }
       throw addPhotoError;
     }
@@ -286,6 +291,8 @@ export async function uploadPhotoToBackend(
     return {
       success: false,
       message: error.message || 'Photo upload failed',
+      // M12 FIX: Include orphanedStorageId if cleanup failed, for diagnosis/retry
+      ...(error.orphanedStorageId ? { orphanedStorageId: error.orphanedStorageId } : {}),
     };
   }
 }
