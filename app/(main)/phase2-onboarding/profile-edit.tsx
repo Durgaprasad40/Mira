@@ -74,6 +74,16 @@ export default function Phase2ProfileEdit() {
 
   // P2-003 FIX: Ref guard to prevent double-tap navigation
   const isContinuingRef = useRef(false);
+  // STABILITY: Track mounted state for safe async state updates
+  const isMountedRef = useRef(true);
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+      // Reset guards on unmount to prevent stale state if component remounts
+      isContinuingRef.current = false;
+    };
+  }, []);
 
   // FIX #2: Reset loading state when screen regains focus (e.g., user navigates back)
   const [isProcessing, setIsProcessing] = useState(false);
@@ -304,15 +314,29 @@ export default function Phase2ProfileEdit() {
     setIsProcessing(true);
     Keyboard.dismiss();
 
-    // Save photos to store (convert slots to URL array)
-    const photoUrls = photoSlots.filter((uri): uri is string => uri !== null);
-    setSelectedPhotos([], photoUrls);
+    try {
+      // Save photos to store (convert slots to URL array)
+      const photoUrls = photoSlots.filter((uri): uri is string => uri !== null);
+      setSelectedPhotos([], photoUrls);
 
-    // B2-HIGH FIX: Delay navigation after keyboard dismiss to prevent Android crash
-    setTimeout(() => {
-      router.push('/(main)/phase2-onboarding/profile-setup' as any);
-    }, 150);
-    // NOTE: Don't reset isProcessing/ref - component will unmount after navigation
+      // B2-HIGH FIX: Delay navigation after keyboard dismiss to prevent Android crash
+      setTimeout(() => {
+        try {
+          router.push('/(main)/phase2-onboarding/profile-setup' as any);
+        } catch (navError) {
+          // STABILITY: Reset guards if navigation throws
+          isContinuingRef.current = false;
+          if (isMountedRef.current) setIsProcessing(false);
+          if (__DEV__) console.error('[profile-edit] navigation error:', navError);
+        }
+      }, 150);
+      // NOTE: Don't reset isProcessing/ref - component will unmount after navigation
+    } catch (e) {
+      // STABILITY: Reset guards if any error prevents navigation
+      isContinuingRef.current = false;
+      if (isMountedRef.current) setIsProcessing(false);
+      if (__DEV__) console.error('[profile-edit] handleContinue error:', e);
+    }
   }, [canContinue, isProcessing, photoSlots, setSelectedPhotos, router]);
 
   // Desire hint

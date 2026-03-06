@@ -489,6 +489,11 @@ export function useNotifications() {
       useDemoStore: { getState: () => { _hasHydrated: boolean; seeded: boolean; seed: () => void } };
     };
 
+    // STABILITY: Timeout guard - prevent infinite polling if hydration never completes
+    const POLL_INTERVAL_MS = 50;
+    const MAX_POLL_ATTEMPTS = 100; // 5 seconds max (100 * 50ms)
+    let pollAttempts = 0;
+
     const checkReady = () => {
       const state = useDemoStore.getState();
       if (state._hasHydrated) {
@@ -508,12 +513,26 @@ export function useNotifications() {
     // Check immediately
     if (checkReady()) return;
 
-    // Poll until ready (hydration + seed typically completes within a few frames)
+    // Poll until ready with timeout guard
     const interval = setInterval(() => {
+      pollAttempts++;
+
       if (checkReady()) {
         clearInterval(interval);
+        return;
       }
-    }, 50);
+
+      // STABILITY: Stop polling after timeout - proceed with empty notifications
+      if (pollAttempts >= MAX_POLL_ATTEMPTS) {
+        clearInterval(interval);
+        if (__DEV__) {
+          console.warn('[useNotifications] demoStore ready timeout - proceeding without seed');
+        }
+        if (isMountedRef.current) {
+          setDemoStoreReady(true); // Unblock UI even if seed didn't complete
+        }
+      }
+    }, POLL_INTERVAL_MS);
 
     return () => clearInterval(interval);
   }, []);

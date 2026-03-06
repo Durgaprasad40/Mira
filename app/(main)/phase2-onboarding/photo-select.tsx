@@ -25,7 +25,7 @@ import {
   ScrollView,
   Pressable,
 } from 'react-native';
-import { useRouter } from 'expo-router';
+import { useRouter, useFocusEffect } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import * as FileSystem from 'expo-file-system';
@@ -104,6 +104,26 @@ export default function Phase2PhotoSelect() {
 
   // P2-004 FIX: Ref guard to prevent double-tap navigation
   const isConfirmingRef = useRef(false);
+
+  // STABILITY: Track mounted state for safe async state updates
+  const isMountedRef = useRef(true);
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+      // Reset guards on unmount to prevent stale state if component remounts
+      isConfirmingRef.current = false;
+    };
+  }, []);
+
+  // STABILITY: Reset loading and nav guard when screen regains focus
+  const [isProcessing, setIsProcessing] = useState(false);
+  useFocusEffect(
+    useCallback(() => {
+      setIsProcessing(false);
+      isConfirmingRef.current = false;
+    }, [])
+  );
 
   // P2-DATA-004: Track validation state
   const [photosValidated, setPhotosValidated] = useState(false);
@@ -202,7 +222,7 @@ export default function Phase2PhotoSelect() {
   // Local state
   const [selectedSlots, setSelectedSlots] = useState<number[]>([]);
   const [failedSlots, setFailedSlots] = useState<number[]>([]);
-  const [isProcessing, setIsProcessing] = useState(false);
+  // Note: isProcessing moved above with useFocusEffect for stability
 
   // Computed values
   const validPhotoCount = phase1PhotoSlots.filter((uri, idx) => uri && !failedSlots.includes(idx)).length;
@@ -232,20 +252,27 @@ export default function Phase2PhotoSelect() {
 
     setIsProcessing(true);
 
-    // Collect selected photo URLs
-    const photoUrls: string[] = [];
-    for (const slotIndex of selectedSlots) {
-      const uri = phase1PhotoSlots[slotIndex];
-      if (uri) photoUrls.push(uri);
+    try {
+      // Collect selected photo URLs
+      const photoUrls: string[] = [];
+      for (const slotIndex of selectedSlots) {
+        const uri = phase1PhotoSlots[slotIndex];
+        if (uri) photoUrls.push(uri);
+      }
+
+      // Save to store
+      setSelectedPhotos([], photoUrls);
+      setPhase2PhotosConfirmed(true);
+
+      // Navigate to profile-edit (Step 2.5)
+      router.push('/(main)/phase2-onboarding/profile-edit' as any);
+      // NOTE: Don't reset isProcessing/ref - component will unmount after navigation
+    } catch (e) {
+      // STABILITY: Reset guards if any error prevents navigation
+      isConfirmingRef.current = false;
+      if (isMountedRef.current) setIsProcessing(false);
+      if (__DEV__) console.error('[photo-select] handleConfirmPhotos error:', e);
     }
-
-    // Save to store
-    setSelectedPhotos([], photoUrls);
-    setPhase2PhotosConfirmed(true);
-
-    // Navigate to profile-edit (Step 2.5)
-    router.push('/(main)/phase2-onboarding/profile-edit' as any);
-    // NOTE: Don't reset isProcessing/ref - component will unmount after navigation
   }, [selectedSlots, phase1PhotoSlots, isProcessing, setSelectedPhotos, setPhase2PhotosConfirmed, router]);
 
   // Show loading while checking hydration or validating photos (when confirmed)

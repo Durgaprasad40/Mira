@@ -3,8 +3,8 @@
  * Do NOT modify this file unless Durga Prasad explicitly unlocks it.
  * Nearby tab is the only Phase-1 tab currently unlocked.
  */
-import { useEffect, useRef, useMemo } from "react";
-import { Tabs, useRouter } from "expo-router";
+import { useEffect, useRef, useMemo, useCallback } from "react";
+import { Tabs, useRouter, useFocusEffect } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import { useQuery } from "convex/react";
 import { api } from "@/convex/_generated/api";
