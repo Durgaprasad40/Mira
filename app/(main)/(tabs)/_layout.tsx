@@ -232,13 +232,10 @@ export default function MainTabsLayout() {
             tabBarBadgeStyle: { backgroundColor: COLORS.primary, fontSize: 10 },
           }}
         />
-        {/* FROZEN: Nearby tab hidden for stability (2026-03-06) */}
-        {/* To restore: remove href: null below */}
         <Tabs.Screen
           name="nearby"
           options={{
             title: "Nearby",
-            href: null, // FROZEN: hides tab from tab bar
             tabBarIcon: ({ color, size }) => (
               <Ionicons name="location" size={size} color={color} />
             ),
