@@ -186,11 +186,12 @@ export const useLocationStore = create<LocationState>((set, get) => ({
       }
 
       // 3. Start watching position for live updates
+      // Battery-optimized: 100m distance, 30s time interval
       watchSubscription = await Location.watchPositionAsync(
         {
           accuracy: Location.Accuracy.Balanced,
-          distanceInterval: 50, // Update every 50 meters
-          timeInterval: 10000, // Or every 10 seconds
+          distanceInterval: 100, // Update every 100 meters (was 50)
+          timeInterval: 30000, // Or every 30 seconds (was 10)
         },
         (position) => {
           const coords: LocationCoords = {

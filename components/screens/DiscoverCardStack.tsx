@@ -40,6 +40,7 @@ import { ProfileNudge } from "@/components/ui/ProfileNudge";
 import { trackEvent } from "@/lib/analytics";
 import { Toast } from "@/components/ui/Toast";
 import { usePrivateChatStore } from "@/stores/privateChatStore";
+import { NotificationPopover } from "@/components/discover/NotificationPopover";
 import type { IncognitoConversation, ConnectionSource } from "@/types";
 
 import { markPhase2Matched } from "@/lib/phase2MatchSession";
@@ -112,6 +113,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   const userId = useAuthStore((s) => s.userId);
   const [index, setIndex] = useState(0);
   const [retryKey, setRetryKey] = useState(0); // For LoadingGuard retry
+  const [showNotificationPopover, setShowNotificationPopover] = useState(false);
 
   // Phase-2 only: Intent filters from store (syncs with Discovery Preferences)
   const { privateIntentKeys: intentFilters, togglePrivateIntentKey, setPrivateIntentKeys } = useFilterStore();
@@ -886,7 +888,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
             </TouchableOpacity>
             <Text style={[styles.headerLogo, dark && { color: INCOGNITO_COLORS.primary }]}>mira</Text>
             {!isPhase2 ? (
-              <TouchableOpacity style={styles.headerBtn} onPress={() => router.push("/(main)/notifications" as any)}>
+              <TouchableOpacity style={styles.headerBtn} onPress={() => setShowNotificationPopover(true)}>
                 <Ionicons name="notifications-outline" size={22} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
                 {unseenCount > 0 && (
                   <View style={styles.bellBadge}>
@@ -929,6 +931,12 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
             </>
           )}
         </View>
+        {/* Notification Popover */}
+        <NotificationPopover
+          visible={showNotificationPopover}
+          onClose={() => setShowNotificationPopover(false)}
+          anchorTop={insets.top + HEADER_H + 8}
+        />
       </View>
     );
   }
@@ -990,7 +998,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
             </TouchableOpacity>
             <Text style={[styles.headerLogo, dark && { color: INCOGNITO_COLORS.primary }]}>mira</Text>
             {!isPhase2 ? (
-              <TouchableOpacity style={styles.headerBtn} onPress={() => router.push("/(main)/notifications" as any)}>
+              <TouchableOpacity style={styles.headerBtn} onPress={() => setShowNotificationPopover(true)}>
                 <Ionicons name="notifications-outline" size={22} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
                 {unseenCount > 0 && (
                   <View style={styles.bellBadge}>
@@ -1030,6 +1038,12 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
             </>
           )}
         </View>
+        {/* Notification Popover */}
+        <NotificationPopover
+          visible={showNotificationPopover}
+          onClose={() => setShowNotificationPopover(false)}
+          anchorTop={insets.top + HEADER_H + 8}
+        />
       </View>
     );
   }
@@ -1046,7 +1060,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
           <Text style={[styles.headerLogo, dark && { color: INCOGNITO_COLORS.primary }]}>mira</Text>
           {/* Hide bell in Phase 2 — notifications are Phase 1 only */}
           {!isPhase2 ? (
-            <TouchableOpacity style={styles.headerBtn} onPress={() => router.push("/(main)/notifications" as any)}>
+            <TouchableOpacity style={styles.headerBtn} onPress={() => setShowNotificationPopover(true)}>
               <Ionicons name="notifications-outline" size={22} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
               {unseenCount > 0 && (
                 <View style={styles.bellBadge}>
@@ -1071,6 +1085,12 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
             <Text style={styles.limitButtonText}>Check who liked you</Text>
           </TouchableOpacity>
         </View>
+        {/* Notification Popover */}
+        <NotificationPopover
+          visible={showNotificationPopover}
+          onClose={() => setShowNotificationPopover(false)}
+          anchorTop={insets.top + HEADER_H + 8}
+        />
       </View>
     );
   }
@@ -1095,7 +1115,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
           <Text style={[styles.headerLogo, dark && { color: INCOGNITO_COLORS.primary }]}>mira</Text>
           {/* Hide bell in Phase 2 — notifications are Phase 1 only */}
           {!isPhase2 ? (
-            <TouchableOpacity style={styles.headerBtn} onPress={() => router.push("/(main)/notifications" as any)}>
+            <TouchableOpacity style={styles.headerBtn} onPress={() => setShowNotificationPopover(true)}>
               <Ionicons name="notifications-outline" size={22} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
               {unseenCount > 0 && (
                 <View style={styles.bellBadge}>
@@ -1206,6 +1226,12 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
         </TouchableOpacity>
       </View>
 
+      {/* Notification Popover */}
+      <NotificationPopover
+        visible={showNotificationPopover}
+        onClose={() => setShowNotificationPopover(false)}
+        anchorTop={insets.top + HEADER_H + 8}
+      />
     </View>
   );
 }

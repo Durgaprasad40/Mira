@@ -1,73 +1,71 @@
 /**
- * UserPinMarker — Blue teardrop map pin with profile photo.
+ * UserPinMarker — Premium profile pin marker for Nearby map.
  *
- * Design: Static PNG pin background with profile photo overlay in center circle.
- * This eliminates the layered View rendering that caused 1/4 quadrant clipping on Android.
+ * Design: View-based pink pin with circular photo and connected tail.
+ * All content fits INSIDE the root container bounds (no clipping on Android).
  *
- * Android Rendering Fixes (CRITICAL for proper snapshot):
- * 1. Root container has explicit width/height, transparent background
+ * Android Rendering Fixes:
+ * 1. Root container has explicit width/height (64x78)
  * 2. collapsable={false} prevents Android view flattening
  * 3. renderToHardwareTextureAndroid={true} for GPU rendering
- * 4. Static PNG background eliminates layered shape rendering issues
- * 5. tracksViewChanges stays TRUE until ALL loads complete:
- *    - root onLayout fired
- *    - pin PNG loaded
- *    - profile photo loaded OR errored
- * 6. Double requestAnimationFrame ensures snapshot happens AFTER paint
- * 7. NO overflow:hidden on root (only on inner photo circle)
- * 8. Marker anchor should be { x: 0.5, y: 1 } (bottom-center, tip at coordinate)
- * 9. refreshToken prop triggers re-snapshot when map zoom/pan ends
+ * 4. All content fits within stated bounds (no overflow clipping)
+ * 5. overflow: 'visible' on root container
+ *
+ * Usage in Marker:
+ *   <Marker anchor={{ x: 0.5, y: 1 }} tracksViewChanges={...}>
+ *     <UserPinMarker ... />
+ *   </Marker>
  */
-import React, { memo, useState, useRef, useCallback, useEffect } from 'react';
-import { View, Image, Text, StyleSheet, LayoutChangeEvent } from 'react-native';
+import React, { memo } from 'react';
+import { View, Image, Text, StyleSheet } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { COLORS } from '@/lib/constants';
-
-// Static PNG asset for pin background (eliminates layered View clipping)
-// React Native auto-selects @2x on high-density devices
-const PIN_BLUE_PNG = require('../../assets/map/pin_blue.png');
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
 export interface UserPinMarkerProps {
-  /** URL of the user's photo */
-  photoUrl: string;
-  /** User's display name */
+  /** URL of the user's photo (null shows placeholder) */
+  photoUrl: string | null;
+  /** User's display name (first char used for placeholder) */
   name: string;
-  /** Time string like "5m ago" */
-  timeLabel?: string;
-  /** Whether this marker is highlighted (focused) */
-  isHighlighted?: boolean;
-  /** Whether this marker has not been seen yet (shows tinted pin) */
-  isUnseen?: boolean;
-  /** Callback when marker is ready to freeze (all loads complete) */
-  onReady?: () => void;
-  /** Token that triggers re-snapshot when changed (for zoom/pan refresh) */
-  refreshToken?: number;
+  /** Whether user is verified (shows badge) */
+  isVerified?: boolean;
+  /** Whether marker should be faded (old location) */
+  faded?: boolean;
+  /** Callback when image finishes loading */
+  onImageLoad?: () => void;
 }
 
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
-// Pin colors
-const PIN_BLUE = '#4A90D9';
+// Root container: generous size to fit all content without clipping
+const ROOT_WIDTH = 64;
+const ROOT_HEIGHT = 78;
 
-// Marker dimensions (maintains PNG aspect ratio 256:320 = 0.8)
-const MARKER_WIDTH = 90;
-const MARKER_HEIGHT = 112;
+// Pin head (circular)
+const HEAD_SIZE = 48;
+const HEAD_RADIUS = 24;
 
-// Photo circle dimensions and position (calculated from PNG coordinates)
-// PNG: circle at (128, 112) with radius 78 in 256x320 viewBox
-// Scaled: center at (45, 39) with radius 27.4 in 90x112
-const PHOTO_CIRCLE_SIZE = 55;
-const PHOTO_CIRCLE_TOP = 12;  // (39 - 27) = 12
-const PHOTO_CIRCLE_LEFT = (MARKER_WIDTH - PHOTO_CIRCLE_SIZE) / 2; // centered horizontally
+// Photo ring (white border inside head)
+const RING_SIZE = 38;
+const RING_RADIUS = 19;
 
-// Label position (below the pin)
-const LABEL_TOP = 90; // just below pin tip
+// Photo
+const PHOTO_SIZE = 32;
+const PHOTO_RADIUS = 16;
+
+// Tail (CSS border triangle)
+const TAIL_WIDTH = 12; // borderLeftWidth + borderRightWidth
+const TAIL_HEIGHT = 20; // borderTopWidth
+
+// Colors
+const PIN_PINK = '#FF4B6E';
+const PIN_BORDER = '#E91E63';
+const PLACEHOLDER_BG = '#FFF0F3';
 
 // ---------------------------------------------------------------------------
 // Component
@@ -76,117 +74,47 @@ const LABEL_TOP = 90; // just below pin tip
 function UserPinMarkerComponent({
   photoUrl,
   name,
-  timeLabel,
-  isHighlighted = false,
-  isUnseen = false,
-  onReady,
-  refreshToken = 0,
+  isVerified = false,
+  faded = false,
+  onImageLoad,
 }: UserPinMarkerProps) {
-  // Track all load states
-  const [laidOut, setLaidOut] = useState(false);
-  const [pinImageLoaded, setPinImageLoaded] = useState(false);
-  const [photoLoaded, setPhotoLoaded] = useState(false);
-  const [photoError, setPhotoError] = useState(false);
-  const hasFiredReady = useRef(false);
-  const lastRefreshToken = useRef(refreshToken);
-
-  // Reset ready state when refreshToken changes (triggers re-snapshot)
-  useEffect(() => {
-    if (refreshToken !== lastRefreshToken.current) {
-      lastRefreshToken.current = refreshToken;
-      hasFiredReady.current = false;
-    }
-  }, [refreshToken]);
-
-  // Fire onReady using double requestAnimationFrame
-  const tryFireReady = useCallback(() => {
-    if (hasFiredReady.current) return;
-    hasFiredReady.current = true;
-
-    // Double requestAnimationFrame for Android paint safety
-    requestAnimationFrame(() => {
-      requestAnimationFrame(() => {
-        onReady?.();
-      });
-    });
-  }, [onReady]);
-
-  // Handle root layout complete
-  const handleLayout = useCallback((event: LayoutChangeEvent) => {
-    setLaidOut(true);
-  }, []);
-
-  // Handle pin PNG load
-  const handlePinLoad = useCallback(() => {
-    setPinImageLoaded(true);
-  }, []);
-
-  // Handle profile photo load success
-  const handlePhotoLoad = useCallback(() => {
-    setPhotoLoaded(true);
-  }, []);
-
-  // Handle profile photo load error
-  const handlePhotoError = useCallback(() => {
-    setPhotoError(true);
-    setPhotoLoaded(true); // Treat error as "done loading"
-  }, []);
-
-  // Check if ready to freeze: layout + pin PNG + (photo loaded OR errored)
-  const photoReady = photoLoaded || photoError || !photoUrl;
-  useEffect(() => {
-    if (laidOut && pinImageLoaded && photoReady && !hasFiredReady.current) {
-      tryFireReady();
-    }
-  }, [laidOut, pinImageLoaded, photoReady, tryFireReady, refreshToken]);
-
-  // Show placeholder icon if no photo or photo failed to load
-  const showPlaceholder = !photoUrl || photoError;
-
-  // Tint styles for highlighted/unseen states
-  const pinTintStyle = isUnseen
-    ? { tintColor: '#E85D75' }
-    : isHighlighted
-    ? { tintColor: COLORS.primary }
-    : undefined;
+  const initial = name?.charAt(0)?.toUpperCase() || '?';
 
   return (
-    // Root wrapper: explicit size, transparent bg, collapsable=false, NO overflow:hidden
     <View
-      style={styles.root}
-      onLayout={handleLayout}
+      style={[styles.root, faded && styles.faded]}
       collapsable={false}
       renderToHardwareTextureAndroid={true}
     >
-      {/* Pin background image (static PNG) */}
-      <Image
-        source={PIN_BLUE_PNG}
-        style={[styles.pinImage, pinTintStyle]}
-        resizeMode="contain"
-        onLoad={handlePinLoad}
-      />
+      {/* Pin head - circular container */}
+      <View style={styles.head} collapsable={false}>
+        {/* White photo ring */}
+        <View style={styles.photoRing}>
+          {photoUrl ? (
+            <Image
+              source={{ uri: photoUrl }}
+              style={styles.photo}
+              resizeMode="cover"
+              onLoad={onImageLoad}
+              onError={onImageLoad}
+            />
+          ) : (
+            <View style={styles.placeholder}>
+              <Text style={styles.initial}>{initial}</Text>
+            </View>
+          )}
+        </View>
 
-      {/* Photo circle overlay (positioned over the white center) */}
-      <View style={styles.photoCircle}>
-        {showPlaceholder ? (
-          // Person icon placeholder
-          <Ionicons name="person" size={28} color={PIN_BLUE} />
-        ) : (
-          <Image
-            source={{ uri: photoUrl }}
-            style={styles.photo}
-            resizeMode="cover"
-            onLoad={handlePhotoLoad}
-            onError={handlePhotoError}
-          />
+        {/* Verified badge */}
+        {isVerified && (
+          <View style={styles.verifiedBadge}>
+            <Ionicons name="checkmark-circle" size={14} color={COLORS.primary} />
+          </View>
         )}
       </View>
 
-      {/* Name label below pin */}
-      <View style={styles.labelContainer}>
-        <Text style={styles.nameText} numberOfLines={1}>{name}</Text>
-        {timeLabel && <Text style={styles.timeText}>{timeLabel}</Text>}
-      </View>
+      {/* Pin tail - CSS border triangle */}
+      <View style={styles.tail} collapsable={false} />
     </View>
   );
 }
@@ -196,74 +124,100 @@ function UserPinMarkerComponent({
 // ---------------------------------------------------------------------------
 
 const styles = StyleSheet.create({
-  // Root: explicit size, transparent bg, NO overflow:hidden
+  // Root container: fits head (48) + tail (20) - overlap (6) = 62px in 78px height
   root: {
-    width: MARKER_WIDTH,
-    height: MARKER_HEIGHT + 30, // Extra space for label
+    width: ROOT_WIDTH,
+    height: ROOT_HEIGHT,
     alignItems: 'center',
+    justifyContent: 'flex-start',
     backgroundColor: 'transparent',
+    overflow: 'visible',
   },
 
-  // Pin PNG background (fills marker area)
-  pinImage: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    width: MARKER_WIDTH,
-    height: MARKER_HEIGHT,
+  faded: {
+    opacity: 0.6,
   },
 
-  // Photo circle - positioned over the white center in the PNG
-  // overflow:hidden ONLY here for circular photo crop
-  photoCircle: {
-    position: 'absolute',
-    top: PHOTO_CIRCLE_TOP,
-    left: PHOTO_CIRCLE_LEFT,
-    width: PHOTO_CIRCLE_SIZE,
-    height: PHOTO_CIRCLE_SIZE,
-    borderRadius: PHOTO_CIRCLE_SIZE / 2,
-    backgroundColor: COLORS.white,
+  // Pin head: circular with border
+  head: {
+    width: HEAD_SIZE,
+    height: HEAD_SIZE,
+    borderRadius: HEAD_RADIUS,
+    backgroundColor: PIN_PINK,
     alignItems: 'center',
     justifyContent: 'center',
-    overflow: 'hidden', // Only here for circular crop
+    borderWidth: 3,
+    borderColor: PIN_BORDER,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.25,
+    shadowRadius: 4,
+    elevation: 6,
+  },
+
+  // White ring inside head
+  photoRing: {
+    width: RING_SIZE,
+    height: RING_SIZE,
+    borderRadius: RING_RADIUS,
+    backgroundColor: '#FFFFFF',
+    alignItems: 'center',
+    justifyContent: 'center',
+    overflow: 'hidden', // Clip photo to circle
   },
 
   // Profile photo
   photo: {
-    width: PHOTO_CIRCLE_SIZE,
-    height: PHOTO_CIRCLE_SIZE,
-    borderRadius: PHOTO_CIRCLE_SIZE / 2,
+    width: PHOTO_SIZE,
+    height: PHOTO_SIZE,
+    borderRadius: PHOTO_RADIUS,
   },
 
-  // Name label below pin
-  labelContainer: {
-    position: 'absolute',
-    top: LABEL_TOP,
-    backgroundColor: 'rgba(255, 255, 255, 0.95)',
-    paddingHorizontal: 8,
-    paddingVertical: 3,
-    borderRadius: 8,
+  // Placeholder when no photo
+  placeholder: {
+    width: PHOTO_SIZE,
+    height: PHOTO_SIZE,
+    borderRadius: PHOTO_RADIUS,
+    backgroundColor: PLACEHOLDER_BG,
     alignItems: 'center',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.15,
-    shadowRadius: 2,
-    elevation: 2,
-    maxWidth: MARKER_WIDTH + 10,
+    justifyContent: 'center',
   },
-  nameText: {
-    fontSize: 11,
-    fontWeight: '600',
-    color: COLORS.text,
+
+  // Initial letter in placeholder
+  initial: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: PIN_BORDER,
   },
-  timeText: {
-    fontSize: 9,
-    color: COLORS.textLight,
+
+  // Verified badge: positioned at bottom-right of head
+  verifiedBadge: {
+    position: 'absolute',
+    bottom: -1,
+    right: -1,
+    backgroundColor: '#FFFFFF',
+    borderRadius: 10,
+    padding: 1,
+    borderWidth: 1,
+    borderColor: '#E0E0E0',
+  },
+
+  // Pin tail: CSS border triangle, overlaps head slightly
+  tail: {
+    width: 0,
+    height: 0,
+    borderLeftWidth: TAIL_WIDTH / 2,
+    borderRightWidth: TAIL_WIDTH / 2,
+    borderTopWidth: TAIL_HEIGHT,
+    borderLeftColor: 'transparent',
+    borderRightColor: 'transparent',
+    borderTopColor: PIN_PINK,
+    marginTop: -6, // Overlap with head for connected look
   },
 });
 
 // ---------------------------------------------------------------------------
-// Export (memoized for performance)
+// Export (memoized)
 // ---------------------------------------------------------------------------
 
 export const UserPinMarker = memo(UserPinMarkerComponent);

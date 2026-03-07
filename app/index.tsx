@@ -8,6 +8,7 @@ import { useBootStore } from "@/stores/bootStore";
 import { getBootCache } from "@/stores/bootCache";
 import { getAuthBootCache, type AuthBootCacheData } from "@/stores/authBootCache";
 import { isDemoMode, convex } from "@/hooks/useConvex";
+import { skipDemoOnboarding } from "@/config/demo";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { View, ActivityIndicator, StyleSheet, Text } from "react-native";
@@ -284,6 +285,14 @@ export default function Index() {
 
     // ── Demo mode: email+password auth with full onboarding ──
     if (isDemoMode) {
+      // FAST PATH: Skip onboarding when skipDemoOnboarding is enabled (for testing)
+      if (skipDemoOnboarding) {
+        if (__DEV__) {
+          console.log('[AUTH_BOOT] Demo mode: skipDemoOnboarding=true → Phase-1');
+        }
+        return { type: "ROUTE_HOME", route: "/(main)/(tabs)/home" };
+      }
+
       if (currentDemoUserId) {
         const onbComplete = !!demoOnboardingComplete[currentDemoUserId];
 

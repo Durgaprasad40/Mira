@@ -18,8 +18,9 @@ import { Button, Input } from '@/components/ui';
 import { useFilterStore, kmToMiles, milesToKm } from '@/stores/filterStore';
 import { isDemoMode } from '@/hooks/useConvex';
 import { useAuthStore } from '@/stores/authStore';
-import { useMutation } from 'convex/react';
+import { useMutation, useQuery } from 'convex/react';
 import { api } from '@/convex/_generated/api';
+import { asUserId } from '@/convex/id';
 import type { Gender, Orientation } from '@/types';
 
 // Age and distance limits
@@ -50,6 +51,13 @@ export default function DiscoveryPreferencesScreen() {
   const isPhase2 = mode === 'phase2' || (mode === undefined && isInPrivateRoute);
 
   const { userId } = useAuthStore();
+  const convexUserId = userId ? asUserId(userId) : undefined;
+
+  // Fetch current user preferences from Convex (source of truth)
+  const currentUser = useQuery(
+    api.users.getCurrentUser,
+    convexUserId ? { userId: convexUserId } : 'skip'
+  );
 
   const {
     minAge,
@@ -154,17 +162,40 @@ export default function DiscoveryPreferencesScreen() {
   const [localMaxDistanceMiles, setLocalMaxDistanceMiles] = useState(initialDistanceMiles.toString());
   const [saving, setSaving] = useState(false);
 
-  // Sync local state when store hydrates (fixes stale defaults after app restart)
+  // Track if we've already hydrated from Convex (prevent re-runs)
+  const [hasHydratedFromConvex, setHasHydratedFromConvex] = useState(false);
+
+  // Hydrate filterStore and local state from Convex (source of truth)
+  // This runs ONCE when currentUser data arrives
   useEffect(() => {
-    if (_hasHydrated) {
-      setLocalMinAge(minAge.toString());
-      setLocalMaxAge(maxAge.toString());
-      setLocalMaxDistanceMiles(kmToMiles(maxDistance).toString());
-      if (__DEV__) {
-        console.log('[Prefs] Synced from hydrated store:', { minAge, maxAge, maxDistance, lookingFor, orientation, relationshipIntent });
-      }
+    if (!currentUser || hasHydratedFromConvex) return;
+
+    // Extract preferences from Convex user document
+    const serverMinAge = currentUser.minAge ?? MIN_AGE;
+    const serverMaxAge = currentUser.maxAge ?? MAX_AGE;
+    const serverMaxDistance = currentUser.maxDistance ?? 80; // Default 80km
+
+    // Update filterStore with server values
+    setMinAge(serverMinAge);
+    setMaxAge(serverMaxAge);
+    setMaxDistanceKm(serverMaxDistance);
+
+    // Update local input state
+    setLocalMinAge(serverMinAge.toString());
+    setLocalMaxAge(serverMaxAge.toString());
+    setLocalMaxDistanceMiles(kmToMiles(serverMaxDistance).toString());
+
+    // Mark as hydrated to prevent re-runs
+    setHasHydratedFromConvex(true);
+
+    if (__DEV__) {
+      console.log('[Prefs] Hydrated from Convex:', {
+        minAge: serverMinAge,
+        maxAge: serverMaxAge,
+        maxDistance: serverMaxDistance,
+      });
     }
-  }, [_hasHydrated]);
+  }, [currentUser, hasHydratedFromConvex, setMinAge, setMaxAge, setMaxDistanceKm]);
 
   // Keyboard avoidance insets
   const insets = useSafeAreaInsets();
