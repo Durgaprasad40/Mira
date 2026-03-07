@@ -1,17 +1,13 @@
 /**
- * Nearby Tab - Step 2: User Markers Implementation
+ * Nearby Tab - Full Implementation
  *
- * Scope:
+ * Features:
  * - Permission state UI (checking/denied/settings/ready)
  * - Safe current-location map render with coordinate validation
  * - Demo mode fallback
  * - Nearby user markers with privacy fuzzing
  * - Marker press → profile navigation
- *
- * NOT in scope (future steps):
- * - Crossed paths list
- * - Ranking/feed logic
- * - Clustering
+ * - Automatic clustering for dense areas
  */
 import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import {
@@ -27,6 +23,7 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useFocusEffect, useRouter } from 'expo-router';
 import MapView, { Region, Marker } from 'react-native-maps';
+import ClusteredMapView from 'react-native-map-clustering';
 import { Ionicons } from '@expo/vector-icons';
 import { useQuery, useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
@@ -555,7 +552,7 @@ export default function NearbyScreen() {
       </View>
 
       <View style={styles.mapContainer}>
-        <MapView
+        <ClusteredMapView
           style={styles.map}
           initialRegion={mapRegion}
           showsUserLocation={!isDemo}
@@ -563,6 +560,37 @@ export default function NearbyScreen() {
           showsCompass={false}
           rotateEnabled={false}
           pitchEnabled={false}
+          // Clustering configuration
+          clusterColor={COLORS.primary}
+          clusterTextColor="#fff"
+          clusterFontFamily="System"
+          radius={60} // Cluster markers within 60 pixels
+          minZoomLevel={0}
+          maxZoomLevel={20}
+          extent={512}
+          nodeSize={64}
+          // Custom cluster render
+          renderCluster={(cluster) => {
+            const { id, geometry, onPress, properties } = cluster;
+            const points = properties.point_count;
+            return (
+              <Marker
+                key={`cluster-${id}`}
+                coordinate={{
+                  latitude: geometry.coordinates[1],
+                  longitude: geometry.coordinates[0],
+                }}
+                onPress={onPress}
+                tracksViewChanges={false}
+              >
+                <View style={styles.clusterContainer}>
+                  <View style={styles.clusterCircle}>
+                    <Text style={styles.clusterText}>{points}</Text>
+                  </View>
+                </View>
+              </Marker>
+            );
+          }}
         >
           {/* Nearby user markers */}
           {processedNearbyUsers.map((user) => (
@@ -602,7 +630,7 @@ export default function NearbyScreen() {
               </View>
             </Marker>
           ))}
-        </MapView>
+        </ClusteredMapView>
 
         {/* Status overlay */}
         {processedNearbyUsers.length === 0 && (
@@ -796,5 +824,30 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: '600',
     color: COLORS.text,
+  },
+  // Cluster styles
+  clusterContainer: {
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  clusterCircle: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: COLORS.primary,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 3,
+    borderColor: '#fff',
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.2,
+    shadowRadius: 3,
+    elevation: 4,
+  },
+  clusterText: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#fff',
   },
 });

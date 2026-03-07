@@ -1,14 +1,20 @@
 import { v } from 'convex/values';
-import { mutation, query } from './_generated/server';
+import { mutation, query, internalMutation } from './_generated/server';
 import { Doc, Id } from './_generated/dataModel';
 
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
-const PROXIMITY_METERS = 1000; // 1km fixed radius
-const MIN_CROSSINGS_FOR_UNLOCK = 10;
-const UNLOCK_DURATION_MS = 48 * 60 * 60 * 1000; // 48 hours
+// Nearby map: 100m - 1km range (users closer than 100m are hidden for privacy)
+const NEARBY_MIN_METERS = 100;  // Minimum distance to show on map
+const NEARBY_MAX_METERS = 1000; // Maximum distance for nearby map
+
+// Crossed paths: 100m - 750m range
+const CROSSED_MIN_METERS = 100;  // Minimum distance to trigger crossing
+const CROSSED_MAX_METERS = 750;  // Maximum distance for crossed paths
+
+// Location update gate
 const LOCATION_UPDATE_INTERVAL_MS = 30 * 60 * 1000; // 30 minutes
 
 // Published location window (privacy: only update shared location once per 6 hours)
@@ -19,19 +25,25 @@ const SOLID_WINDOW_MS = 3 * 24 * 60 * 60 * 1000; // 1–3 days → solid marker
 const FADED_WINDOW_MS = 6 * 24 * 60 * 60 * 1000; // 3–6 days → faded marker
 // >6 days → hidden
 
-const NOTIFICATION_COOLDOWN_MS = 24 * 60 * 60 * 1000; // 24h per pair
-const HISTORY_EXPIRY_MS = 30 * 24 * 60 * 60 * 1000; // 30 days (persists across travel)
-const MAX_HISTORY_ENTRIES = 50; // Increased from 15 since crossed paths persist longer
+// Crossed paths history
+const HISTORY_EXPIRY_MS = 28 * 24 * 60 * 60 * 1000; // 4 weeks (28 days)
+const MAX_HISTORY_ENTRIES = 50;
 
-// Grid size for approximate location (privacy: round to ~500m)
-const LOCATION_GRID_METERS = 500;
+// Grid size for approximate crossing location (privacy: round to ~300m)
+const LOCATION_GRID_METERS = 300;
+
+// Delayed crossing: same area within 24 hours counts as crossing
+const DELAYED_CROSSING_WINDOW_MS = 24 * 60 * 60 * 1000; // 24 hours
+
+// Notification rate limiting
+const NOTIFICATION_COOLDOWN_MS = 60 * 60 * 1000; // 1 hour minimum between notifications per pair
+const MAX_NOTIFICATIONS_PER_HOUR = 3; // Maximum notifications per hour per user
 
 // ---------------------------------------------------------------------------
 // "Someone crossed you" alert constants
 // ---------------------------------------------------------------------------
 
-const CROSS_RADIUS_METERS = 1000;           // 1km
-const CROSS_COOLDOWN_MS = 6 * 60 * 60 * 1000;   // 6 hours between alerts
+const CROSS_COOLDOWN_MS = 60 * 60 * 1000;   // 1 hour between alerts (for faster feedback)
 const CROSS_DEDUPE_WINDOW_MS = 24 * 60 * 60 * 1000; // 24h per person (prevents same-person spam)
 const CROSS_EVENT_EXPIRY_MS = 7 * 24 * 60 * 60 * 1000; // 7 days (cleanup)
 
@@ -150,8 +162,8 @@ export const detectCrossedUsers = mutation({
         user.publishedLng,
       );
 
-      // Within 1km?
-      if (distance <= CROSS_RADIUS_METERS) {
+      // Within crossed paths range (100m - 750m)?
+      if (distance >= CROSSED_MIN_METERS && distance <= CROSSED_MAX_METERS) {
         candidates.push(user._id);
       }
     }
@@ -199,7 +211,7 @@ export const detectCrossedUsers = mutation({
 // cleanupExpiredCrossedEvents — call periodically to purge old entries
 // ---------------------------------------------------------------------------
 
-export const cleanupExpiredCrossedEvents = mutation({
+export const cleanupExpiredCrossedEvents = internalMutation({
   handler: async (ctx) => {
     const now = Date.now();
     const expired = await ctx.db
@@ -249,25 +261,51 @@ export const recordLocation = mutation({
       lastLocationUpdatedAt: now,
     });
 
-    // 9-6: Skip crossed-path computation if current user is not verified
+    // Skip crossed-path computation if current user is not verified
     const currentStatus = currentUser.verificationStatus || 'unverified';
     if (currentStatus !== 'verified') {
       return { success: true, nearbyCount: 0, skipped: true, reason: 'unverified' };
     }
 
-    // Find nearby users (within 1km, location updated within 6 days)
+    // Get current user's age for filtering
+    const myAge = calculateAge(currentUser.dateOfBirth);
+
+    // Get photo counts for profile completeness check
+    const photoCountsMap = new Map<string, number>();
+    const allPhotos = await ctx.db.query('photos').collect();
+    for (const photo of allPhotos) {
+      const count = photoCountsMap.get(photo.userId as string) || 0;
+      photoCountsMap.set(photo.userId as string, count + 1);
+    }
+
+    // Find nearby users (within 100m - 750m, location updated within 6 days)
     const allUsers = await ctx.db.query('users').collect();
-    const nearbyUsers = [];
+    const nearbyUsers: Array<typeof allUsers[0] & { distance: number }> = [];
 
     for (const user of allUsers) {
       if (user._id === userId) continue;
       if (!user.isActive) continue;
       if (!user.latitude || !user.longitude) continue;
 
-      // 9-6: Skip unverified users in crossed paths
+      // Verification gate: Only verified users
       const userStatus = user.verificationStatus || 'unverified';
       if (userStatus !== 'verified') continue;
 
+      // Incognito mode: Skip users who are hidden (but they can still BE detected for crossings)
+      // Note: Incognito users can still trigger crossings, they just don't appear on map
+      // This is intentional per spec: "Incognito: hidden from map, but crossed-path detection may still happen"
+
+      // Nearby visibility opt-out: Skip users who opted out of nearby
+      if (user.nearbyEnabled === false) continue;
+
+      // Profile completeness: At least 2 photos required
+      const photoCount = photoCountsMap.get(user._id as string) || 0;
+      if (photoCount < 2) continue;
+
+      // Basic info completeness
+      if (!user.name || !user.bio || !user.dateOfBirth) continue;
+
+      // Location freshness check
       const userLocationUpdatedAt = user.lastLocationUpdatedAt ?? user.lastActive;
       if (now - userLocationUpdatedAt > FADED_WINDOW_MS) continue;
 
@@ -278,14 +316,20 @@ export const recordLocation = mutation({
         user.longitude,
       );
 
-      if (distance <= PROXIMITY_METERS) {
-        nearbyUsers.push(user);
+      // Within crossed paths range (100m - 750m)?
+      if (distance >= CROSSED_MIN_METERS && distance <= CROSSED_MAX_METERS) {
+        nearbyUsers.push({ ...user, distance });
       }
     }
 
     // Record crossed paths + history
     for (const nearbyUser of nearbyUsers) {
-      // Check preferences match (gender eligibility)
+      // Age filtering (both directions)
+      const otherAge = calculateAge(nearbyUser.dateOfBirth);
+      if (myAge < nearbyUser.minAge || myAge > nearbyUser.maxAge) continue;
+      if (otherAge < currentUser.minAge || otherAge > currentUser.maxAge) continue;
+
+      // Gender/orientation preference match (both directions)
       if (!currentUser.lookingFor.includes(nearbyUser.gender)) continue;
       if (!nearbyUser.lookingFor.includes(currentUser.gender)) continue;
 
@@ -337,51 +381,17 @@ export const recordLocation = mutation({
         .first();
 
       if (crossedPath) {
-        // 24-hour cooldown per pair
+        // 1-hour cooldown per pair (faster notification for better UX)
         if (now - crossedPath.lastCrossedAt < NOTIFICATION_COOLDOWN_MS) continue;
 
         const newCount = crossedPath.count + 1;
         const updates: Record<string, unknown> = {
           count: newCount,
           lastCrossedAt: now,
+          // Store latest crossing location
+          crossingLatitude: latitude,
+          crossingLongitude: longitude,
         };
-
-        // Unlock threshold
-        if (newCount >= MIN_CROSSINGS_FOR_UNLOCK && !crossedPath.unlockExpiresAt) {
-          updates.unlockExpiresAt = now + UNLOCK_DURATION_MS;
-
-          // BUGFIX #28: Check notification cooldown before sending milestone notification
-          const canNotifyMilestone = !crossedPath.lastNotifiedAt ||
-            now - crossedPath.lastNotifiedAt >= NOTIFICATION_COOLDOWN_MS;
-
-          if (canNotifyMilestone) {
-            updates.lastNotifiedAt = now;
-
-            // Notification with reason
-            const reasonText = formatReasonForNotification(compatibility.reasonTags[0] ?? 'common');
-            await ctx.db.insert('notifications', {
-              userId: user1Id,
-              type: 'crossed_paths' as const,
-              title: 'Crossed Paths Milestone!',
-              body: `You've crossed paths ${newCount} times! ${reasonText}. Enjoy 48 hours of free messaging.`,
-              data: { userId: user2Id as string },
-              dedupeKey: `crossed_paths_milestone:${user1Id}:${user2Id}`,
-              createdAt: now,
-              expiresAt: now + 24 * 60 * 60 * 1000,
-            });
-
-            await ctx.db.insert('notifications', {
-              userId: user2Id,
-              type: 'crossed_paths' as const,
-              title: 'Crossed Paths Milestone!',
-              body: `You've crossed paths ${newCount} times! ${reasonText}. Enjoy 48 hours of free messaging.`,
-              data: { userId: user1Id as string },
-              dedupeKey: `crossed_paths_milestone:${user2Id}:${user1Id}`,
-              createdAt: now,
-              expiresAt: now + 24 * 60 * 60 * 1000,
-            });
-          }
-        }
 
         await ctx.db.patch(crossedPath._id, updates);
       } else {
@@ -470,7 +480,6 @@ export const recordLocation = mutation({
         }
       }
 
-      // BUGFIX #28: Use crossedPaths.lastNotifiedAt as single source of truth for notification cooldown
       // Re-fetch crossedPath to get latest state (may have been created/updated above)
       const currentCrossedPath = await ctx.db
         .query('crossedPaths')
@@ -486,35 +495,80 @@ export const recordLocation = mutation({
       );
 
       if (canNotify && currentCrossedPath) {
-        // BUGFIX #28: Update lastNotifiedAt FIRST to prevent race condition duplicates
+        // Rate limiting: Check if user has received too many notifications in the last hour
+        const recentNotificationsUser1 = await ctx.db
+          .query('notifications')
+          .withIndex('by_user', (q) => q.eq('userId', user1Id))
+          .filter((q) =>
+            q.and(
+              q.eq(q.field('type'), 'crossed_paths'),
+              q.gt(q.field('createdAt'), now - 60 * 60 * 1000)
+            )
+          )
+          .collect();
+
+        const recentNotificationsUser2 = await ctx.db
+          .query('notifications')
+          .withIndex('by_user', (q) => q.eq('userId', user2Id))
+          .filter((q) =>
+            q.and(
+              q.eq(q.field('type'), 'crossed_paths'),
+              q.gt(q.field('createdAt'), now - 60 * 60 * 1000)
+            )
+          )
+          .collect();
+
+        // Update lastNotifiedAt to prevent race condition duplicates
         await ctx.db.patch(currentCrossedPath._id, { lastNotifiedAt: now });
 
-        // Send notification to BOTH users with reason
+        // Generate dynamic notification text based on crossing count
+        const crossingCount = currentCrossedPath.count;
         const reasonText = formatReasonForNotification(compatibility.reasonTags[0] ?? 'common');
 
-        // Notification for user1
-        await ctx.db.insert('notifications', {
-          userId: user1Id,
-          type: 'crossed_paths' as const,
-          title: 'You crossed paths!',
-          body: reasonText,
-          data: { userId: user2Id as string },
-          dedupeKey: `crossed_paths:${user1Id}:${user2Id}`,
-          createdAt: now,
-          expiresAt: now + 24 * 60 * 60 * 1000,
-        });
+        // Dynamic title and body based on state
+        let title: string;
+        let body: string;
 
-        // Notification for user2
-        await ctx.db.insert('notifications', {
-          userId: user2Id,
-          type: 'crossed_paths' as const,
-          title: 'You crossed paths!',
-          body: reasonText,
-          data: { userId: user1Id as string },
-          dedupeKey: `crossed_paths:${user2Id}:${user1Id}`,
-          createdAt: now,
-          expiresAt: now + 24 * 60 * 60 * 1000,
-        });
+        if (crossingCount === 1) {
+          // First crossing
+          title = 'Someone crossed your path';
+          body = `${reasonText}`;
+        } else if (crossingCount < 5) {
+          // Early crossings
+          title = 'Someone interesting crossed your path';
+          body = `You've crossed paths ${crossingCount} times. ${reasonText}`;
+        } else {
+          // Frequent crossings - stronger suggestion
+          title = 'You keep crossing paths with someone';
+          body = `${crossingCount} times now! ${reasonText}. Maybe say hi?`;
+        }
+
+        // Only send notification if under rate limit (max 3/hour)
+        if (recentNotificationsUser1.length < MAX_NOTIFICATIONS_PER_HOUR) {
+          await ctx.db.insert('notifications', {
+            userId: user1Id,
+            type: 'crossed_paths' as const,
+            title,
+            body,
+            data: { userId: user2Id as string },
+            dedupeKey: `crossed_paths:${user1Id}:${user2Id}:${Math.floor(now / 60000)}`,
+            createdAt: now,
+            expiresAt: now + 24 * 60 * 60 * 1000,
+          });
+        }
+
+        if (recentNotificationsUser2.length < MAX_NOTIFICATIONS_PER_HOUR) {
+          await ctx.db.insert('notifications', {
+            userId: user2Id,
+            type: 'crossed_paths' as const,
+            title,
+            body,
+            data: { userId: user1Id as string },
+            dedupeKey: `crossed_paths:${user2Id}:${user1Id}:${Math.floor(now / 60000)}`,
+            createdAt: now,
+            expiresAt: now + 24 * 60 * 60 * 1000,
+          });
+        }
       }
 
       // Enforce max entries per user — trim oldest
@@ -537,11 +591,17 @@ export const getNearbyUsers = query({
     const currentUser = await ctx.db.get(userId);
     if (!currentUser) return [];
 
+    // Current user must be verified to see nearby users
+    if (currentUser.verificationStatus !== 'verified') return [];
+
     // Use current user's published location for distance checks
     // (they should have published when opening Nearby screen)
     const myLat = currentUser.publishedLat ?? currentUser.latitude;
     const myLng = currentUser.publishedLng ?? currentUser.longitude;
     if (!myLat || !myLng) return [];
+
+    // Get current user's age for filtering
+    const myAge = calculateAge(currentUser.dateOfBirth);
 
     const allUsers = await ctx.db.query('users').collect();
     const results = [];
@@ -560,58 +620,98 @@ export const getNearbyUsers = query({
       ...blocksIn.map((b) => b.blockerId as string),
     ]);
 
+    // Get photo counts for profile completeness check
+    const photoCountsMap = new Map<string, number>();
+    const allPhotos = await ctx.db.query('photos').collect();
+    for (const photo of allPhotos) {
+      const count = photoCountsMap.get(photo.userId as string) || 0;
+      photoCountsMap.set(photo.userId as string, count + 1);
+    }
+
     for (const user of allUsers) {
       if (user._id === userId) continue;
       if (!user.isActive) continue;
 
-      // 8A: Filter out unverified/rejected users from Nearby map
+      // Verification gate: Only verified users appear on map
       const verificationStatus = user.verificationStatus || 'unverified';
       if (verificationStatus !== 'verified') continue;
+
+      // Incognito mode: Hidden users don't appear on map
+      if (user.incognitoMode === true) continue;
+
+      // Nearby visibility opt-out: Respect user preference
+      if (user.nearbyEnabled === false) continue;
+
+      // Profile completeness: At least 2 photos required
+      const photoCount = photoCountsMap.get(user._id as string) || 0;
+      if (photoCount < 2) continue;
+
+      // Basic info completeness: Must have name, bio, and dateOfBirth
+      if (!user.name || !user.bio || !user.dateOfBirth) continue;
 
       // Use other user's PUBLISHED location (privacy: not their live GPS)
       // If they haven't published, they don't appear on the map
       if (!user.publishedLat || !user.publishedLng || !user.publishedAt) continue;
 
       // Freshness based on publishedAt (when they last shared their location)
-      const age = now - user.publishedAt;
+      const locationAge = now - user.publishedAt;
 
       // Hidden: published location is stale (>6 days old)
-      if (age > FADED_WINDOW_MS) continue;
+      if (locationAge > FADED_WINDOW_MS) continue;
 
-      // Distance check — 1km using published locations
+      // Distance check — 100m to 1km range (privacy: hide users too close)
       const distance = calculateDistanceMeters(
         myLat,
         myLng,
         user.publishedLat,
         user.publishedLng,
       );
-      if (distance > PROXIMITY_METERS) continue;
+      if (distance < NEARBY_MIN_METERS || distance > NEARBY_MAX_METERS) continue;
 
-      // Preference match
+      // Age filtering (both directions): User must be within each other's preferences
+      const otherAge = calculateAge(user.dateOfBirth);
+      // Am I within their age range?
+      if (myAge < user.minAge || myAge > user.maxAge) continue;
+      // Are they within my age range?
+      if (otherAge < currentUser.minAge || otherAge > currentUser.maxAge) continue;
+
+      // Gender/orientation preference match (both directions)
       if (!currentUser.lookingFor.includes(user.gender)) continue;
       if (!user.lookingFor.includes(currentUser.gender)) continue;
 
-      // Block check
+      // Block check (bidirectional)
       if (blockedIds.has(user._id as string)) continue;
 
       // Freshness: solid (1-3 days) or faded (3-6 days)
-      const freshness: 'solid' | 'faded' = age <= SOLID_WINDOW_MS ? 'solid' : 'faded';
+      const freshness: 'solid' | 'faded' = locationAge <= SOLID_WINDOW_MS ? 'solid' : 'faded';
 
-      // STABILITY FIX: C-10 - Use denormalized primaryPhotoUrl instead of N+1 query
       // Return raw published coordinates — client applies fuzz + anti-zoom shifting
-      // hideDistance controls fuzz radius: true = 200-400m, false = 20-100m
+      // hideDistance controls fuzz radius: true = 200-400m, false = 50-150m
       results.push({
         id: user._id,
         name: user.name,
-        age: calculateAge(user.dateOfBirth),
+        age: otherAge,
         publishedLat: user.publishedLat!,
         publishedLng: user.publishedLng!,
+        publishedAt: user.publishedAt,
+        distance,
         freshness,
         photoUrl: user.primaryPhotoUrl ?? null,
         isVerified: user.isVerified,
         hideDistance: user.hideDistance ?? false,
       });
     }
+
+    // Sort by recency first (most recently published), then by distance
+    results.sort((a, b) => {
+      // Primary: recency (newer first)
+      const recencyDiff = (b.publishedAt || 0) - (a.publishedAt || 0);
+      if (Math.abs(recencyDiff) > 60 * 60 * 1000) { // More than 1 hour difference
+        return recencyDiff;
+      }
+      // Secondary: distance (closer first)
+      return a.distance - b.distance;
+    });
 
     return results;
   },
@@ -628,6 +728,11 @@ export const getCrossPathHistory = query({
   handler: async (ctx, { userId }) => {
     const now = Date.now();
 
+    // Get current user for distance calculation
+    const currentUser = await ctx.db.get(userId);
+    const myLat = currentUser?.publishedLat ?? currentUser?.latitude;
+    const myLng = currentUser?.publishedLng ?? currentUser?.longitude;
+
     const asUser1 = await ctx.db
       .query('crossPathHistory')
       .withIndex('by_user1', (q) => q.eq('user1Id', userId))
@@ -640,7 +745,7 @@ export const getCrossPathHistory = query({
 
     const all = [...asUser1, ...asUser2]
       .filter((entry) => {
-        // Filter expired entries
+        // Filter expired entries (4 weeks)
         if (entry.expiresAt <= now) return false;
 
         // Filter hidden entries for this user
@@ -653,11 +758,24 @@ export const getCrossPathHistory = query({
       .sort((a, b) => b.createdAt - a.createdAt) // newest first
       .slice(0, MAX_HISTORY_ENTRIES);
 
-    // C4 FIX: Batch fetch users and photos instead of N+1 queries
     // Collect unique other user IDs
     const otherUserIds = [...new Set(
       all.map((entry) => entry.user1Id === userId ? entry.user2Id : entry.user1Id)
     )];
+
+    // Batch fetch crossing counts from crossedPaths table
+    const crossingCountsMap = new Map<string, number>();
+    for (const otherUserId of otherUserIds) {
+      const orderedUser1 = userId < otherUserId ? userId : otherUserId;
+      const orderedUser2 = userId < otherUserId ? otherUserId : userId;
+      const crossedPath = await ctx.db
+        .query('crossedPaths')
+        .withIndex('by_users', (q) =>
+          q.eq('user1Id', orderedUser1).eq('user2Id', orderedUser2),
+        )
+        .first();
+      crossingCountsMap.set(otherUserId as string, crossedPath?.count ?? 1);
+    }
 
     // Parallel fetch all users
     const usersMap = new Map<string, Doc<'users'>>();
@@ -691,24 +809,60 @@ export const getCrossPathHistory = query({
       const otherUser = usersMap.get(otherUserId as string);
       if (!otherUser || !otherUser.isActive) continue;
 
-      // Format first reason for display
+      const crossingCount = crossingCountsMap.get(otherUserId as string) || 1;
+
+      // Format reason for "why am I seeing this?" explanation
       const reasonTags = entry.reasonTags ?? [];
       const reasonText = reasonTags.length > 0
         ? formatReasonForNotification(reasonTags[0])
         : null;
+
+      // Build "why am I seeing this" explanation
+      let whyExplanation: string;
+      if (crossingCount > 1) {
+        whyExplanation = `You've crossed paths ${crossingCount} times in similar areas. ${reasonText || 'You have something in common.'}`;
+      } else {
+        whyExplanation = `You were in the same area within the last 24 hours. ${reasonText || 'You have something in common.'}`;
+      }
+
+      // Area name: Only reveal after repeated crossings (privacy)
+      const displayAreaName = crossingCount > 1 ? entry.areaName : 'Nearby area';
+
+      // Calculate distance range for display (Phase-2: no exact km)
+      let distanceRange: string | null = null;
+      if (myLat && myLng && entry.crossedLatApprox && entry.crossedLngApprox) {
+        const distanceMeters = calculateDistanceMeters(
+          myLat,
+          myLng,
+          entry.crossedLatApprox,
+          entry.crossedLngApprox,
+        );
+        distanceRange = formatDistanceRange(distanceMeters);
+      }
+
+      // Calculate relative time for display
+      const relativeTime = formatRelativeTime(entry.createdAt, now);
 
       results.push({
         id: entry._id,
         otherUserId,
         otherUserName: otherUser.name,
         otherUserAge: calculateAge(otherUser.dateOfBirth),
-        areaName: entry.areaName,
+        areaName: displayAreaName,
         // Approximate crossing location (not current location — persists across travel)
         crossedLatApprox: entry.crossedLatApprox,
         crossedLngApprox: entry.crossedLngApprox,
+        // Crossing count (for UI display)
+        crossingCount,
+        // Distance range (e.g., "4-5 km")
+        distanceRange,
+        // Relative time (e.g., "today", "yesterday", "3 days ago")
+        relativeTime,
         // Reason tags and formatted text
         reasonTags,
         reasonText,
+        // "Why am I seeing this?" explanation
+        whyExplanation,
         createdAt: entry.createdAt,
         expiresAt: entry.expiresAt,
         photoUrl: photosMap.get(otherUserId as string),
@@ -716,6 +870,12 @@ export const getCrossPathHistory = query({
         isVerified: otherUser.isVerified,
       });
     }
+
+    // Sort: crossing count (higher first), then recency
+    results.sort((a, b) => {
+      if (b.crossingCount !== a.crossingCount) return b.crossingCount - a.crossingCount;
+      return b.createdAt - a.createdAt;
+    });
 
     return results;
   },
@@ -790,7 +950,7 @@ export const deleteCrossedPath = mutation({
 // cleanupExpiredHistory — call periodically to purge old entries
 // ---------------------------------------------------------------------------
 
-export const cleanupExpiredHistory = mutation({
+export const cleanupExpiredHistory = internalMutation({
   handler: async (ctx) => {
     const now = Date.now();
     const expired = await ctx.db
@@ -897,7 +1057,8 @@ export const getDelayedCrossedPathEntries = query({
 });
 
 // ---------------------------------------------------------------------------
-// getCrossedPaths — existing unlock-based list
+// getCrossedPaths — crossed paths list (no unlock system)
+// Returns crossing counts and user info for display.
 // ---------------------------------------------------------------------------
 
 export const getCrossedPaths = query({
@@ -908,6 +1069,11 @@ export const getCrossedPaths = query({
   handler: async (ctx, args) => {
     const { userId, limit = 50 } = args;
     const now = Date.now();
+
+    // Get current user for distance calculation
+    const currentUser = await ctx.db.get(userId);
+    const myLat = currentUser?.publishedLat ?? currentUser?.latitude;
+    const myLng = currentUser?.publishedLng ?? currentUser?.longitude;
 
     const asUser1 = await ctx.db
       .query('crossedPaths')
@@ -921,6 +1087,7 @@ export const getCrossedPaths = query({
 
     const allCrossedPaths = [...asUser1, ...asUser2];
 
+    // Sort by count (descending) then recency
     allCrossedPaths.sort((a, b) => {
       if (b.count !== a.count) return b.count - a.count;
       return b.lastCrossedAt - a.lastCrossedAt;
@@ -928,7 +1095,6 @@ export const getCrossedPaths = query({
 
     const topCrossedPaths = allCrossedPaths.slice(0, limit);
 
-    // C5 FIX: Batch fetch users and photos instead of N+1 queries
     // Collect unique other user IDs
     const otherUserIds = [...new Set(
       topCrossedPaths.map((cp) => cp.user1Id === userId ? cp.user2Id : cp.user1Id)
@@ -967,17 +1133,27 @@ export const getCrossedPaths = query({
 
       if (!otherUser || !otherUser.isActive) continue;
 
-      const isUnlocked = cp.unlockExpiresAt && cp.unlockExpiresAt > now;
-      const unlockTimeRemaining = isUnlocked ? cp.unlockExpiresAt! - now : 0;
+      // Calculate distance range if we have location data
+      let distanceRange: string | null = null;
+      if (myLat && myLng && cp.crossingLatitude && cp.crossingLongitude) {
+        const distanceMeters = calculateDistanceMeters(
+          myLat,
+          myLng,
+          cp.crossingLatitude,
+          cp.crossingLongitude,
+        );
+        distanceRange = formatDistanceRange(distanceMeters);
+      }
+
+      // Calculate relative time
+      const relativeTime = formatRelativeTime(cp.lastCrossedAt, now);
 
       result.push({
         id: cp._id,
         count: cp.count,
         lastCrossedAt: cp.lastCrossedAt,
-        isUnlocked,
-        unlockExpiresAt: cp.unlockExpiresAt,
-        unlockTimeRemaining,
-        progressToUnlock: Math.min(cp.count / MIN_CROSSINGS_FOR_UNLOCK, 1),
+        relativeTime,
+        distanceRange,
         user: {
           id: otherUserId,
           name: otherUser.name,
@@ -993,17 +1169,16 @@ export const getCrossedPaths = query({
 });
 
 // ---------------------------------------------------------------------------
-// checkCrossedPathsUnlock
+// getCrossedPathCount — get crossing count between two users
 // ---------------------------------------------------------------------------
 
-export const checkCrossedPathsUnlock = query({
+export const getCrossedPathCount = query({
   args: {
     user1Id: v.id('users'),
     user2Id: v.id('users'),
   },
   handler: async (ctx, args) => {
     const { user1Id, user2Id } = args;
-    const now = Date.now();
 
     const orderedUser1 = user1Id < user2Id ? user1Id : user2Id;
     const orderedUser2 = user1Id < user2Id ? user2Id : user1Id;
@@ -1015,15 +1190,12 @@ export const checkCrossedPathsUnlock = query({
       )
       .first();
 
-    if (!crossedPath) return { isUnlocked: false, count: 0 };
-
-    const isUnlocked = crossedPath.unlockExpiresAt && crossedPath.unlockExpiresAt > now;
+    if (!crossedPath) return { count: 0, exists: false };
 
     return {
-      isUnlocked,
       count: crossedPath.count,
-      unlockExpiresAt: crossedPath.unlockExpiresAt,
-      unlockTimeRemaining: isUnlocked ? crossedPath.unlockExpiresAt! - now : 0,
+      exists: true,
+      lastCrossedAt: crossedPath.lastCrossedAt,
     };
   },
 });
@@ -1263,6 +1435,71 @@ function roundToGrid(lat: number, lng: number): { lat: number; lng: number } {
     lat: Math.round(lat / gridSize) * gridSize,
     lng: Math.round(lng / gridSize) * gridSize,
   };
+}
+
+/**
+ * Format distance in meters to a privacy-safe range string.
+ * Uses rounded ranges like "4-5 km", "9-10 km" to avoid exact distances.
+ */
+function formatDistanceRange(distanceMeters: number): string {
+  const distanceKm = distanceMeters / 1000;
+
+  if (distanceKm < 1) {
+    return 'Less than 1 km';
+  } else if (distanceKm < 2) {
+    return '1-2 km';
+  } else if (distanceKm < 3) {
+    return '2-3 km';
+  } else if (distanceKm < 5) {
+    return '3-5 km';
+  } else if (distanceKm < 7) {
+    return '5-7 km';
+  } else if (distanceKm < 10) {
+    return '7-10 km';
+  } else if (distanceKm < 15) {
+    return '10-15 km';
+  } else if (distanceKm < 20) {
+    return '15-20 km';
+  } else if (distanceKm < 30) {
+    return '20-30 km';
+  } else if (distanceKm < 50) {
+    return '30-50 km';
+  } else {
+    return '50+ km';
+  }
+}
+
+/**
+ * Format timestamp to a human-friendly relative time string.
+ * "just now", "today", "yesterday", "3 days ago", etc.
+ */
+function formatRelativeTime(timestamp: number, now: number): string {
+  const diffMs = now - timestamp;
+  const diffMinutes = Math.floor(diffMs / (60 * 1000));
+  const diffHours = Math.floor(diffMs / (60 * 60 * 1000));
+  const diffDays = Math.floor(diffMs / (24 * 60 * 60 * 1000));
+
+  if (diffMinutes < 5) {
+    return 'just now';
+  } else if (diffMinutes < 60) {
+    return `${diffMinutes} minutes ago`;
+  } else if (diffHours < 2) {
+    return 'about an hour ago';
+  } else if (diffHours < 24) {
+    return 'today';
+  } else if (diffDays === 1) {
+    return 'yesterday';
+  } else if (diffDays < 7) {
+    return `${diffDays} days ago`;
+  } else if (diffDays < 14) {
+    return 'about a week ago';
+  } else if (diffDays < 21) {
+    return '2 weeks ago';
+  } else if (diffDays < 28) {
+    return '3 weeks ago';
+  } else {
+    return 'about a month ago';
+  }
 }
 
 /**
