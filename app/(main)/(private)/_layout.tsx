@@ -450,6 +450,10 @@ export default function PrivateLayout() {
     if (!mountedRef.current) return;
     if (didRedirectRef.current) return;
     if (!hasHydrated) return; // Wait for hydration
+    // STABILITY FIX: Wait for backend query before checking onboardingComplete
+    // This prevents premature redirect when local store is false but backend is true
+    // (local store is in-memory only, so phase2OnboardingCompleted resets to false on app restart)
+    if (!isDemoMode && !phase1OnboardingStatus) return;
 
     if (!onboardingComplete) {
       didRedirectRef.current = true;
@@ -458,7 +462,7 @@ export default function PrivateLayout() {
         router.replace('/(main)/phase2-onboarding' as any);
       });
     }
-  }, [onboardingComplete, hasHydrated, router]);
+  }, [onboardingComplete, hasHydrated, router, phase1OnboardingStatus]);
 
   // B1.1 FIX: Conditional rendering moved to END after ALL hooks
   // H-001/C-001 FIX: Wait for incognito store hydration before checking consent
