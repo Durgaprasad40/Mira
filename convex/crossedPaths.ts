@@ -40,6 +40,19 @@ const NOTIFICATION_COOLDOWN_MS = 60 * 60 * 1000; // 1 hour minimum between notif
 const MAX_NOTIFICATIONS_PER_HOUR = 3; // Maximum notifications per hour per user
 
 // ---------------------------------------------------------------------------
+// GPS Jitter Protection Constants (server-side)
+// ---------------------------------------------------------------------------
+
+/** Maximum acceptable accuracy in meters for crossed-path detection */
+const MAX_ACCURACY_FOR_CROSSING_METERS = 80;
+
+/** Minimum movement in meters to trigger crossed-path detection */
+const MIN_MOVEMENT_FOR_CROSSING_METERS = 30;
+
+/** Maximum realistic speed in meters per second for sanity check (~200 km/h) */
+const MAX_SPEED_MPS = 55;
+
+// ---------------------------------------------------------------------------
 // "Someone crossed you" alert constants
 // ---------------------------------------------------------------------------
 
@@ -259,13 +272,51 @@ export const recordLocation = mutation({
     userId: v.id('users'),
     latitude: v.number(),
     longitude: v.number(),
+    accuracy: v.optional(v.number()), // GPS accuracy in meters (for jitter protection)
   },
   handler: async (ctx, args) => {
-    const { userId, latitude, longitude } = args;
+    const { userId, latitude, longitude, accuracy } = args;
     const now = Date.now();
 
     const currentUser = await ctx.db.get(userId);
     if (!currentUser) return { success: false };
+
+    // ---------------------------------------------------------------------------
+    // GPS JITTER PROTECTION (server-side)
+    // ---------------------------------------------------------------------------
+
+    // 1. Accuracy filter: reject low-accuracy points for crossed-path detection
+    const accuracyTooLow = accuracy !== undefined && accuracy > MAX_ACCURACY_FOR_CROSSING_METERS;
+
+    // 2. Speed sanity check: detect impossible jumps
+    let impossibleSpeed = false;
+    let movementTooSmall = false;
+
+    if (currentUser.latitude && currentUser.longitude && currentUser.lastLocationUpdatedAt) {
+      const distance = calculateDistanceMeters(
+        currentUser.latitude,
+        currentUser.longitude,
+        latitude,
+        longitude
+      );
+      const timeGapMs = now - currentUser.lastLocationUpdatedAt;
+
+      // Check for impossible speed (teleportation)
+      if (timeGapMs > 1000) { // At least 1 second gap
+        const speedMps = distance / (timeGapMs / 1000);
+        if (speedMps > MAX_SPEED_MPS) {
+          impossibleSpeed = true;
+        }
+      }
+
+      // Check for tiny movement (likely jitter, not real movement)
+      if (distance < MIN_MOVEMENT_FOR_CROSSING_METERS) {
+        movementTooSmall = true;
+      }
+    }
+
+    // Determine if we should skip crossed-path detection due to GPS quality issues
+    const skipCrossedPathsDueToGPS = accuracyTooLow || impossibleSpeed;
 
     // 30-minute gate: skip update if too recent
     if (
@@ -275,13 +326,35 @@ export const recordLocation = mutation({
       return { success: true, nearbyCount: 0, skipped: true };
     }
 
-    // Save location + timestamp
+    // Save location + timestamp (always save valid coordinates for map display)
+    // Even if GPS quality is low, we update location for the map; just skip crossed-path detection
     await ctx.db.patch(userId, {
       latitude,
       longitude,
       lastActive: now,
       lastLocationUpdatedAt: now,
     });
+
+    // Skip crossed-path detection if GPS quality is poor
+    if (skipCrossedPathsDueToGPS) {
+      return {
+        success: true,
+        nearbyCount: 0,
+        skipped: true,
+        reason: accuracyTooLow ? 'accuracy_too_low' : 'impossible_speed',
+      };
+    }
+
+    // Skip crossed-path detection if movement is too small (likely stationary jitter)
+    // But only if we had a previous location to compare against
+    if (movementTooSmall && currentUser.latitude && currentUser.longitude) {
+      return {
+        success: true,
+        nearbyCount: 0,
+        skipped: true,
+        reason: 'movement_too_small',
+      };
+    }
 
     // Skip crossed-path computation if current user is not verified
     const currentStatus = currentUser.verificationStatus || 'unverified';

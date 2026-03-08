@@ -17,6 +17,98 @@ import { log } from '@/utils/logger';
 import { markTiming } from '@/utils/startupTiming';
 
 // ---------------------------------------------------------------------------
+// GPS Jitter Protection Constants
+// ---------------------------------------------------------------------------
+
+/** Maximum acceptable accuracy in meters (reject points worse than this) */
+const MAX_ACCEPTABLE_ACCURACY_METERS = 80;
+
+/** Minimum movement in meters to consider as real movement (not jitter) */
+const MIN_MOVEMENT_METERS = 30;
+
+/** Maximum realistic speed in meters per second (~200 km/h for edge cases like trains) */
+const MAX_SPEED_METERS_PER_SEC = 55; // ~200 km/h
+
+/** Minimum time gap to consider for speed check (avoid division by tiny values) */
+const MIN_TIME_GAP_MS = 1000; // 1 second
+
+// ---------------------------------------------------------------------------
+// GPS Jitter Protection Helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Calculate distance between two coordinates in meters using Haversine formula.
+ */
+function calculateDistanceMeters(
+  lat1: number,
+  lon1: number,
+  lat2: number,
+  lon2: number
+): number {
+  const R = 6371000; // Earth radius in meters
+  const dLat = (lat2 - lat1) * (Math.PI / 180);
+  const dLon = (lon2 - lon1) * (Math.PI / 180);
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(lat1 * (Math.PI / 180)) *
+      Math.cos(lat2 * (Math.PI / 180)) *
+      Math.sin(dLon / 2) *
+      Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c;
+}
+
+/**
+ * Validate a new location point against the last accepted point.
+ * Returns { valid: true } if acceptable, or { valid: false, reason: string } if rejected.
+ */
+function validateLocationUpdate(
+  newCoords: LocationCoords,
+  lastAccepted: LocationCoords | null
+): { valid: true } | { valid: false; reason: string } {
+  // 1. Accuracy filter: reject low-accuracy points
+  if (newCoords.accuracy !== undefined && newCoords.accuracy > MAX_ACCEPTABLE_ACCURACY_METERS) {
+    return { valid: false, reason: `accuracy_too_low:${newCoords.accuracy?.toFixed(0)}m` };
+  }
+
+  // If no previous point, accept this one (with accuracy check above)
+  if (!lastAccepted) {
+    return { valid: true };
+  }
+
+  // 2. Timestamp ordering: reject points older than last accepted
+  if (newCoords.timestamp <= lastAccepted.timestamp) {
+    return { valid: false, reason: 'out_of_order_timestamp' };
+  }
+
+  // Calculate distance and time gap
+  const distance = calculateDistanceMeters(
+    lastAccepted.latitude,
+    lastAccepted.longitude,
+    newCoords.latitude,
+    newCoords.longitude
+  );
+  const timeGapMs = newCoords.timestamp - lastAccepted.timestamp;
+
+  // 3. Speed sanity check: reject impossible jumps
+  if (timeGapMs >= MIN_TIME_GAP_MS) {
+    const speedMps = distance / (timeGapMs / 1000);
+    if (speedMps > MAX_SPEED_METERS_PER_SEC) {
+      return {
+        valid: false,
+        reason: `impossible_speed:${(speedMps * 3.6).toFixed(0)}km/h`,
+      };
+    }
+  }
+
+  // 4. Minimum movement threshold: if movement is tiny, it might be jitter
+  // We still accept the point, but log it (the caller can decide to not trigger actions)
+  // Note: We accept tiny movements for map updates, but the server will filter for crossed paths
+
+  return { valid: true };
+}
+
+// ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
@@ -230,12 +322,25 @@ export const useLocationStore = create<LocationState>((set, get) => ({
             accuracy: position.coords.accuracy ?? undefined,
           };
 
-          // Validate coordinates
+          // Basic coordinate validation (NaN check)
           if (
             Number.isNaN(coords.latitude) ||
             Number.isNaN(coords.longitude)
           ) {
             log.warn('[LOCATION]', 'received invalid coordinates, ignoring');
+            return;
+          }
+
+          // GPS jitter protection: validate against last accepted point
+          const lastAccepted = get().currentLocation;
+          const validation = validateLocationUpdate(coords, lastAccepted);
+
+          if (!validation.valid) {
+            log.info('[LOCATION]', `rejected GPS point: ${validation.reason}`, {
+              lat: coords.latitude.toFixed(4),
+              lng: coords.longitude.toFixed(4),
+              accuracy: coords.accuracy?.toFixed(0),
+            });
             return;
           }
 
