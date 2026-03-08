@@ -613,6 +613,52 @@ export const toggleDiscoveryPause = mutation({
   },
 });
 
+// Toggle show last seen
+export const toggleShowLastSeen = mutation({
+  args: {
+    userId: v.id("users"),
+    enabled: v.boolean(),
+  },
+  handler: async (ctx, args) => {
+    const { userId, enabled } = args;
+
+    const user = await ctx.db.get(userId);
+    if (!user) throw new Error("User not found");
+
+    await ctx.db.patch(userId, { showLastSeen: enabled });
+    return { success: true };
+  },
+});
+
+// Update notification settings
+export const updateNotificationSettings = mutation({
+  args: {
+    userId: v.id("users"),
+    notificationsEnabled: v.optional(v.boolean()),
+    emailNotificationsEnabled: v.optional(v.boolean()),
+  },
+  handler: async (ctx, args) => {
+    const { userId, notificationsEnabled, emailNotificationsEnabled } = args;
+
+    const user = await ctx.db.get(userId);
+    if (!user) throw new Error("User not found");
+
+    const updates: Record<string, boolean> = {};
+    if (notificationsEnabled !== undefined) {
+      updates.notificationsEnabled = notificationsEnabled;
+    }
+    if (emailNotificationsEnabled !== undefined) {
+      updates.emailNotificationsEnabled = emailNotificationsEnabled;
+    }
+
+    if (Object.keys(updates).length > 0) {
+      await ctx.db.patch(userId, updates);
+    }
+
+    return { success: true };
+  },
+});
+
 // Complete onboarding step
 export const completeOnboardingStep = mutation({
   args: {

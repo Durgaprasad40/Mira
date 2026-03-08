@@ -354,6 +354,7 @@ export default defineSchema({
     // Push Notifications
     pushToken: v.optional(v.string()),
     notificationsEnabled: v.boolean(),
+    emailNotificationsEnabled: v.optional(v.boolean()), // Email notification preference
 
     // Account Status
     isActive: v.boolean(),

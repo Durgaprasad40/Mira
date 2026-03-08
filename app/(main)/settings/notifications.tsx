@@ -1,19 +1,59 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Switch } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
+import { useQuery, useMutation } from 'convex/react';
+import { api } from '@/convex/_generated/api';
 import { COLORS } from '@/lib/constants';
+import { isDemoMode } from '@/hooks/useConvex';
+import { useAuthStore } from '@/stores/authStore';
+import { Toast } from '@/components/ui/Toast';
 
 export default function NotificationsSettingsScreen() {
   const router = useRouter();
+  const { userId } = useAuthStore();
 
-  // Local state for toggles (demo-safe)
+  // Query current user notification settings (live mode only)
+  const currentUser = useQuery(
+    api.users.getCurrentUser,
+    !isDemoMode && userId ? { userId: userId as any } : 'skip'
+  );
+
+  // Mutation to update notification settings
+  const updateNotificationSettings = useMutation(api.users.updateNotificationSettings);
+
+  // Local state for toggles (synced with backend on load)
   const [pushEnabled, setPushEnabled] = useState(true);
   const [newMatches, setNewMatches] = useState(true);
   const [newMessages, setNewMessages] = useState(true);
   const [likesAndSuperLikes, setLikesAndSuperLikes] = useState(true);
   const [profileViews, setProfileViews] = useState(true);
+
+  // Hydrate state from backend when currentUser loads
+  useEffect(() => {
+    if (currentUser) {
+      // notificationsEnabled is the master toggle
+      setPushEnabled(currentUser.notificationsEnabled !== false);
+    }
+  }, [currentUser]);
+
+  // Handler for master push toggle
+  const handlePushToggle = async (enabled: boolean) => {
+    if (isDemoMode) {
+      setPushEnabled(enabled);
+      return;
+    }
+    if (!userId) return;
+
+    try {
+      await updateNotificationSettings({ userId: userId as any, notificationsEnabled: enabled });
+      setPushEnabled(enabled);
+    } catch {
+      Toast.show('Couldn\u2019t update notification settings. Please try again.');
+      setPushEnabled(!enabled);
+    }
+  };
 
   // Child toggles disabled when master push is off
   const childDisabled = !pushEnabled;
@@ -45,7 +85,7 @@ export default function NotificationsSettingsScreen() {
             </View>
             <Switch
               value={pushEnabled}
-              onValueChange={setPushEnabled}
+              onValueChange={handlePushToggle}
               trackColor={{ false: COLORS.border, true: COLORS.primary }}
               thumbColor={COLORS.white}
             />

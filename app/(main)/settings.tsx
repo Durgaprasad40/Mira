@@ -60,6 +60,7 @@ export default function SettingsScreen() {
   const toggleIncognito = useMutation(api.users.toggleIncognito);
   const toggleDiscoveryPause = useMutation(api.users.toggleDiscoveryPause);
   const togglePhotoBlurMut = isDemoMode ? null : useMutation(api.users.togglePhotoBlur);
+  const toggleShowLastSeenMut = useMutation(api.users.toggleShowLastSeen);
 
   const [incognitoEnabled, setIncognitoEnabled] = useState(currentUser?.incognitoMode || false);
   const [pauseEnabled, setPauseEnabled] = useState(false);
@@ -157,7 +158,20 @@ export default function SettingsScreen() {
   };
 
   const handleToggleLastSeen = async (show: boolean) => {
-    setShowLastSeenEnabled(show);
+    if (isDemoMode) {
+      // Demo mode: update local state only
+      setShowLastSeenEnabled(show);
+      return;
+    }
+    if (!userId) return;
+
+    try {
+      await toggleShowLastSeenMut({ userId: userId as any, enabled: show });
+      setShowLastSeenEnabled(show);
+    } catch {
+      Toast.show('Couldn\u2019t update this setting. Please try again.');
+      setShowLastSeenEnabled(!show);
+    }
   };
 
   const handleBlurToggle = (newValue: boolean) => {
@@ -342,11 +356,17 @@ export default function SettingsScreen() {
         <Text style={styles.sectionSubtitle}>
           Manage your notification preferences
         </Text>
-        <TouchableOpacity style={styles.menuItem}>
+        <TouchableOpacity
+          style={styles.menuItem}
+          onPress={() => router.push('/(main)/settings/notifications' as any)}
+        >
           <Text style={styles.menuText}>Push Notifications</Text>
           <Ionicons name="chevron-forward" size={20} color={COLORS.textLight} />
         </TouchableOpacity>
-        <TouchableOpacity style={styles.menuItem}>
+        <TouchableOpacity
+          style={styles.menuItem}
+          onPress={() => router.push('/(main)/settings/notifications' as any)}
+        >
           <Text style={styles.menuText}>Email Notifications</Text>
           <Ionicons name="chevron-forward" size={20} color={COLORS.textLight} />
         </TouchableOpacity>
