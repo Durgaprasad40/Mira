@@ -149,6 +149,7 @@ export default function EditProfileScreen() {
     if (currentUser && (!hasInitializedRef.current || lastUserIdRef.current !== currentUserId)) {
       hasInitializedRef.current = true;
       lastUserIdRef.current = currentUserId;
+      setTimedOut(false);
 
       setBio(currentUser.bio || '');
       setPrompts((currentUser as any)?.profilePrompts ?? []);

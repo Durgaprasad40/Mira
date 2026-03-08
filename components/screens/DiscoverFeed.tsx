@@ -173,6 +173,13 @@ export function DiscoverFeed({ mode = "main", theme = "light", onOpenProfile }: 
   // Animation values (React Native Animated)
   const pan = useRef(new Animated.ValueXY({ x: 0, y: 0 })).current;
 
+  // Mount guard to prevent state updates after unmount
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
+
   const currentProfile = profiles[currentIndex];
   const nextProfile = profiles[currentIndex + 1];
 
@@ -210,6 +217,7 @@ export function DiscoverFeed({ mode = "main", theme = "light", onOpenProfile }: 
           );
         }
 
+        if (!mountedRef.current) return;
         setCurrentIndex((prev) => prev + 1);
         return;
       }
@@ -223,6 +231,7 @@ export function DiscoverFeed({ mode = "main", theme = "light", onOpenProfile }: 
 
         lastSwipedProfile.current = currentProfile;
 
+        if (!mountedRef.current) return;
         if (result?.isMatch) {
           router.push(
             `/(main)/match-celebration?matchId=${result.matchId}&userId=${currentProfile.id}`,
@@ -231,6 +240,7 @@ export function DiscoverFeed({ mode = "main", theme = "light", onOpenProfile }: 
           setCurrentIndex((prev) => prev + 1);
         }
       } catch (error: any) {
+        if (!mountedRef.current) return;
         Alert.alert("Error", error.message || "Failed to swipe");
       }
     },

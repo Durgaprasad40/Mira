@@ -3,7 +3,7 @@ import {
   View,
   Text,
   StyleSheet,
-  FlatList,
+  SectionList,
   TouchableOpacity,
   RefreshControl,
 } from 'react-native';
@@ -16,9 +16,9 @@ import { useDemoStore } from '@/stores/demoStore';
 import { isDemoMode } from '@/hooks/useConvex';
 import { log } from '@/utils/logger';
 
-interface NotificationGroup {
+interface NotificationSection {
   title: string;
-  notifications: AppNotification[];
+  data: AppNotification[];
 }
 
 export default function NotificationsScreen() {
@@ -64,7 +64,7 @@ export default function NotificationsScreen() {
     }, 1000);
   };
 
-  const groupNotifications = (notifs: AppNotification[]): NotificationGroup[] => {
+  const groupNotifications = (notifs: AppNotification[]): NotificationSection[] => {
     if (!notifs || notifs.length === 0) return [];
 
     const now = Date.now();
@@ -72,27 +72,27 @@ export default function NotificationsScreen() {
     const yesterday = today - 24 * 60 * 60 * 1000;
     const thisWeek = today - 7 * 24 * 60 * 60 * 1000;
 
-    const groups: NotificationGroup[] = [
-      { title: 'Today', notifications: [] },
-      { title: 'Yesterday', notifications: [] },
-      { title: 'This Week', notifications: [] },
-      { title: 'Earlier', notifications: [] },
+    const sections: NotificationSection[] = [
+      { title: 'Today', data: [] },
+      { title: 'Yesterday', data: [] },
+      { title: 'This Week', data: [] },
+      { title: 'Earlier', data: [] },
     ];
 
     notifs.forEach((notif) => {
       const notifTime = notif.createdAt;
       if (notifTime >= today) {
-        groups[0].notifications.push(notif);
+        sections[0].data.push(notif);
       } else if (notifTime >= yesterday) {
-        groups[1].notifications.push(notif);
+        sections[1].data.push(notif);
       } else if (notifTime >= thisWeek) {
-        groups[2].notifications.push(notif);
+        sections[2].data.push(notif);
       } else {
-        groups[3].notifications.push(notif);
+        sections[3].data.push(notif);
       }
     });
 
-    return groups.filter((group) => group.notifications.length > 0);
+    return sections.filter((section) => section.data.length > 0);
   };
 
   // 4-4: Pass notificationId in navigation params so destination knows why it was opened
@@ -331,19 +331,13 @@ export default function NotificationsScreen() {
         </TouchableOpacity>
       </View>
 
-      <FlatList
-        data={groupedNotifications}
-        keyExtractor={(item, index) => `group-${index}`}
-        renderItem={({ item: group }) => (
-          <View>
-            <View style={styles.groupHeader}>
-              <Text style={styles.groupTitle}>{group.title}</Text>
-            </View>
-            {group.notifications.map((notif) => (
-              <View key={notif._id}>
-                {renderNotification({ item: notif })}
-              </View>
-            ))}
+      <SectionList
+        sections={groupedNotifications}
+        keyExtractor={(item) => item._id}
+        renderItem={renderNotification}
+        renderSectionHeader={({ section }) => (
+          <View style={styles.groupHeader}>
+            <Text style={styles.groupTitle}>{section.title}</Text>
           </View>
         )}
         ListEmptyComponent={
@@ -359,6 +353,7 @@ export default function NotificationsScreen() {
           <RefreshControl refreshing={refreshing} onRefresh={onRefresh} />
         }
         contentContainerStyle={styles.listContent}
+        stickySectionHeadersEnabled={false}
       />
     </View>
   );
