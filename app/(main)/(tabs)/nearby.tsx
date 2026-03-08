@@ -150,6 +150,10 @@ interface ProcessedNearbyUser extends NearbyUser {
 const DEFAULT_LATITUDE_DELTA = 0.02; // ~2km view
 const DEFAULT_LONGITUDE_DELTA = 0.02;
 
+// Rate limiting constants for crossed paths detection
+const DETECTION_MIN_MOVEMENT_METERS = 60; // Only scan if moved 60m+
+const DETECTION_MIN_INTERVAL_MS = 30000; // Only scan every 30s+
+
 // Privacy fuzzing constants
 const FUZZ_MIN_METERS = 50;  // Minimum offset
 const FUZZ_MAX_METERS = 150; // Maximum offset
@@ -165,6 +169,29 @@ const DEMO_LOCATION = {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * Calculate distance between two coordinates in meters using Haversine formula.
+ * Used for rate limiting crossed paths detection.
+ */
+function calculateDistanceMeters(
+  lat1: number,
+  lon1: number,
+  lat2: number,
+  lon2: number
+): number {
+  const R = 6371000; // Earth radius in meters
+  const dLat = (lat2 - lat1) * (Math.PI / 180);
+  const dLon = (lon2 - lon1) * (Math.PI / 180);
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(lat1 * (Math.PI / 180)) *
+      Math.cos(lat2 * (Math.PI / 180)) *
+      Math.sin(dLon / 2) *
+      Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c;
+}
 
 /**
  * Validate coordinates before passing to MapView.
@@ -350,6 +377,15 @@ export default function NearbyScreen() {
   // Track last published coords to avoid spam
   const lastPublishedRef = useRef<{ lat: number; lng: number } | null>(null);
 
+  // ---------------------------------------------------------------------------
+  // Crossed Paths Detection - recordLocation mutation with rate limiting
+  // ---------------------------------------------------------------------------
+  const recordLocationMutation = useMutation(api.crossedPaths.recordLocation);
+
+  // Rate limiting refs for crossed paths detection
+  const lastDetectionTimeRef = useRef<number>(0);
+  const lastDetectionLatLngRef = useRef<{ lat: number; lng: number } | null>(null);
+
   // Publish location when screen is ready and location is valid
   useEffect(() => {
     // Skip in demo mode
@@ -408,6 +444,66 @@ export default function NearbyScreen() {
         if (__DEV__) {
           console.log('[NEARBY] publishLocation success:', result);
         }
+
+        // -----------------------------------------------------------------------
+        // Crossed Paths Detection: Call recordLocation with rate limiting
+        // Only scan if: moved >= 60m AND >= 30s since last scan
+        // -----------------------------------------------------------------------
+        const now = Date.now();
+        const timeSinceLastDetection = now - lastDetectionTimeRef.current;
+        const lastDetectionPos = lastDetectionLatLngRef.current;
+
+        // Check time threshold (30 seconds minimum)
+        if (timeSinceLastDetection < DETECTION_MIN_INTERVAL_MS) {
+          if (__DEV__) {
+            console.log('[NEARBY] recordLocation skipped: too soon', {
+              elapsed: Math.round(timeSinceLastDetection / 1000) + 's',
+            });
+          }
+          return;
+        }
+
+        // Check movement threshold (60 meters minimum)
+        if (lastDetectionPos) {
+          const distanceMoved = calculateDistanceMeters(
+            lastDetectionPos.lat,
+            lastDetectionPos.lng,
+            lat,
+            lng
+          );
+          if (distanceMoved < DETECTION_MIN_MOVEMENT_METERS) {
+            if (__DEV__) {
+              console.log('[NEARBY] recordLocation skipped: not enough movement', {
+                moved: Math.round(distanceMoved) + 'm',
+                required: DETECTION_MIN_MOVEMENT_METERS + 'm',
+              });
+            }
+            return;
+          }
+        }
+
+        // Rate limits passed - trigger crossed paths detection
+        try {
+          await recordLocationMutation({
+            userId: convexUserId,
+            latitude: lat,
+            longitude: lng,
+            accuracy: bestLocation.accuracy,
+          });
+
+          // Update rate limiting refs on success
+          lastDetectionTimeRef.current = now;
+          lastDetectionLatLngRef.current = { lat, lng };
+
+          if (__DEV__) {
+            console.log('[NEARBY] recordLocation success - crossed paths scan triggered');
+          }
+        } catch (recordErr) {
+          // recordLocation failure should not affect publishLocation flow
+          if (__DEV__) {
+            console.warn('[NEARBY] recordLocation failed (non-critical):', recordErr);
+          }
+        }
       } catch (err) {
         // Guard: skip logging if unmounted
         if (!isMountedRef.current) return;
@@ -418,7 +514,7 @@ export default function NearbyScreen() {
         // Silently fail - don't crash the app
       }
     })();
-  }, [isDemo, convexUserId, locationUIState, bestLocation, publishLocationMutation]);
+  }, [isDemo, convexUserId, locationUIState, bestLocation, publishLocationMutation, recordLocationMutation]);
 
   // ---------------------------------------------------------------------------
   // Demo mode nearby users - placed around current location
