@@ -48,6 +48,21 @@ const CROSS_DEDUPE_WINDOW_MS = 24 * 60 * 60 * 1000; // 24h per person (prevents 
 const CROSS_EVENT_EXPIRY_MS = 7 * 24 * 60 * 60 * 1000; // 7 days (cleanup)
 
 // ---------------------------------------------------------------------------
+// Deterministic dedupeKey generation for crossed paths
+// Uses sorted user IDs to ensure A-B == B-A (symmetric)
+// ---------------------------------------------------------------------------
+
+/**
+ * Generate a deterministic dedupeKey for crossed paths notifications.
+ * Uses sorted user IDs to ensure symmetric detection (A crossing B == B crossing A).
+ * Format: `crossed_paths:${minUserId}:${maxUserId}`
+ */
+function makeCrossedPathsDedupeKey(userA: Id<'users'>, userB: Id<'users'>): string {
+  const sorted = [userA as string, userB as string].sort();
+  return `crossed_paths:${sorted[0]}:${sorted[1]}`;
+}
+
+// ---------------------------------------------------------------------------
 // publishLocation — updates published location (max once per 6 hours)
 // Called when Nearby screen is opened. Others see publishedLat/Lng, not live GPS.
 // ---------------------------------------------------------------------------
@@ -551,31 +566,82 @@ export const recordLocation = mutation({
           body = `${crossingCount} times now! ${reasonText}. Maybe say hi?`;
         }
 
-        // Only send notification if under rate limit (max 3/hour)
-        if (recentNotificationsUser1.length < MAX_NOTIFICATIONS_PER_HOUR) {
-          await ctx.db.insert('notifications', {
-            userId: user1Id,
-            type: 'crossed_paths' as const,
-            title,
-            body,
-            data: { userId: user2Id as string },
-            dedupeKey: `crossed_paths:${user1Id}:${user2Id}:${Math.floor(now / 60000)}`,
-            createdAt: now,
-            expiresAt: now + 24 * 60 * 60 * 1000,
-          });
+        // Generate deterministic dedupeKey using sorted user IDs (symmetric)
+        const pairDedupeKey = makeCrossedPathsDedupeKey(user1Id, user2Id);
+
+        // IDEMPOTENCY: Check for existing notification with same dedupeKey within cooldown window
+        // This prevents duplicate notifications even with concurrent updates
+        const existingNotifUser1 = await ctx.db
+          .query('notifications')
+          .withIndex('by_user_dedupe', (q) =>
+            q.eq('userId', user1Id).eq('dedupeKey', pairDedupeKey)
+          )
+          .first();
+
+        const existingNotifUser2 = await ctx.db
+          .query('notifications')
+          .withIndex('by_user_dedupe', (q) =>
+            q.eq('userId', user2Id).eq('dedupeKey', pairDedupeKey)
+          )
+          .first();
+
+        // Only send notification if:
+        // 1. Under rate limit (max 3/hour)
+        // 2. No existing notification with same dedupeKey within cooldown window
+        const shouldNotifyUser1 = recentNotificationsUser1.length < MAX_NOTIFICATIONS_PER_HOUR &&
+          (!existingNotifUser1 || now - existingNotifUser1.createdAt >= NOTIFICATION_COOLDOWN_MS);
+
+        const shouldNotifyUser2 = recentNotificationsUser2.length < MAX_NOTIFICATIONS_PER_HOUR &&
+          (!existingNotifUser2 || now - existingNotifUser2.createdAt >= NOTIFICATION_COOLDOWN_MS);
+
+        if (shouldNotifyUser1) {
+          // Upsert pattern: update existing or insert new
+          if (existingNotifUser1) {
+            await ctx.db.patch(existingNotifUser1._id, {
+              title,
+              body,
+              data: { userId: user2Id as string, pairKey: pairDedupeKey },
+              createdAt: now,
+              expiresAt: now + 24 * 60 * 60 * 1000,
+              readAt: undefined, // Reset read status on update
+            });
+          } else {
+            await ctx.db.insert('notifications', {
+              userId: user1Id,
+              type: 'crossed_paths' as const,
+              title,
+              body,
+              data: { userId: user2Id as string, pairKey: pairDedupeKey },
+              dedupeKey: pairDedupeKey,
+              createdAt: now,
+              expiresAt: now + 24 * 60 * 60 * 1000,
+            });
+          }
         }
 
-        if (recentNotificationsUser2.length < MAX_NOTIFICATIONS_PER_HOUR) {
-          await ctx.db.insert('notifications', {
-            userId: user2Id,
-            type: 'crossed_paths' as const,
-            title,
-            body,
-            data: { userId: user1Id as string },
-            dedupeKey: `crossed_paths:${user2Id}:${user1Id}:${Math.floor(now / 60000)}`,
-            createdAt: now,
-            expiresAt: now + 24 * 60 * 60 * 1000,
-          });
+        if (shouldNotifyUser2) {
+          // Upsert pattern: update existing or insert new
+          if (existingNotifUser2) {
+            await ctx.db.patch(existingNotifUser2._id, {
+              title,
+              body,
+              data: { userId: user1Id as string, pairKey: pairDedupeKey },
+              createdAt: now,
+              expiresAt: now + 24 * 60 * 60 * 1000,
+              readAt: undefined, // Reset read status on update
+            });
+          } else {
+            await ctx.db.insert('notifications', {
+              userId: user2Id,
+              type: 'crossed_paths' as const,
+              title,
+              body,
+              data: { userId: user1Id as string, pairKey: pairDedupeKey },
+              dedupeKey: pairDedupeKey,
+              createdAt: now,
+              expiresAt: now + 24 * 60 * 60 * 1000,
+            });
+          }
         }
       }
 

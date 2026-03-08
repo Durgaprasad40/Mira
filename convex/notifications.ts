@@ -198,7 +198,7 @@ export const createNotification = mutation({
 });
 
 // Compute dedupeKey from notification type and data (matches client-side logic)
-function computeDedupeKey(type: string, data?: { matchId?: string; conversationId?: string; userId?: string }): string {
+function computeDedupeKey(type: string, data?: { matchId?: string; conversationId?: string; userId?: string; pairKey?: string }): string {
   const userId = data?.userId;
   switch (type) {
     case 'match':
@@ -208,7 +208,8 @@ function computeDedupeKey(type: string, data?: { matchId?: string; conversationI
     case 'super_like':
       return `super_like:${userId ?? 'unknown'}`;
     case 'crossed_paths':
-      return `crossed_paths:${userId ?? 'unknown'}`;
+      // Use pairKey if available (deterministic sorted pair format), fallback to userId
+      return data?.pairKey ?? `crossed_paths:${userId ?? 'unknown'}`;
     default:
       return `${type}:unknown`;
   }

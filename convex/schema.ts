@@ -649,6 +649,7 @@ export default defineSchema({
       matchId: v.optional(v.string()),
       conversationId: v.optional(v.string()),
       userId: v.optional(v.string()),
+      pairKey: v.optional(v.string()), // Deterministic crossed paths pair key
     })),
     // 4-1: Deduplication key — same key = same logical event (upsert instead of insert)
     dedupeKey: v.optional(v.string()),
