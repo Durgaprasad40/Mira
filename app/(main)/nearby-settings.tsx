@@ -72,6 +72,7 @@ export default function NearbySettingsScreen() {
   // Initialize state from server data
   useEffect(() => {
     if (currentUser) {
+      setTimedOut(false);
       setNearbyEnabled(currentUser.nearbyEnabled !== false);
       setCrossedPathsEnabled(currentUser.crossedPathsEnabled !== false);
       setStrongPrivacyMode(currentUser.strongPrivacyMode === true);

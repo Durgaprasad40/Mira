@@ -353,6 +353,7 @@ export default function NearbyScreen() {
     }
 
     queryTimeoutRef.current = setTimeout(() => {
+      if (!isMountedRef.current) return;
       // Only set error if query is still pending
       if (nearbyUsersQuery === undefined && isQueryActive) {
         setQueryError('Unable to load nearby users. Please check your connection.');
@@ -483,6 +484,7 @@ export default function NearbyScreen() {
         }
 
         // Rate limits passed - trigger crossed paths detection
+        if (!isMountedRef.current) return;
         try {
           await recordLocationMutation({
             userId: convexUserId,
