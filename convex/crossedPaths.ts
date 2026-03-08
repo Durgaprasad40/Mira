@@ -801,6 +801,20 @@ export const getNearbyUsers = query({
       photoCountsMap.set(photo.userId as string, count + 1);
     }
 
+    // Pre-fetch all swipes from current user (for skip filtering - matches Discover behavior)
+    const mySwipes = await ctx.db
+      .query('likes')
+      .withIndex('by_from_user', (q) => q.eq('fromUserId', userId))
+      .collect();
+    // Build map: toUserId -> { action, createdAt }
+    const swipedUsersMap = new Map<string, { action: string; createdAt: number }>();
+    for (const swipe of mySwipes) {
+      swipedUsersMap.set(swipe.toUserId as string, {
+        action: swipe.action,
+        createdAt: swipe.createdAt,
+      });
+    }
+
     for (const user of allUsers) {
       if (user._id === userId) continue;
       if (!user.isActive) continue;
@@ -870,6 +884,15 @@ export const getNearbyUsers = query({
       // Block check (bidirectional)
       if (blockedIds.has(user._id as string)) continue;
 
+      // Skip filter: Same as Discover behavior (Rule 9)
+      // - likes/super_likes: skip forever (already shown interest)
+      // - passes: skip for 7 days, then can re-appear
+      const existingSwipe = swipedUsersMap.get(user._id as string);
+      if (existingSwipe) {
+        if (existingSwipe.action !== 'pass') continue; // Skip likes/super_likes
+        if (existingSwipe.createdAt > now - 7 * 24 * 60 * 60 * 1000) continue; // Skip recent passes
+      }
+
       // Freshness: solid (1-3 days) or faded (3-6 days)
       const freshness: 'solid' | 'faded' = locationAge <= SOLID_WINDOW_MS ? 'solid' : 'faded';
 
@@ -923,6 +946,19 @@ export const getCrossPathHistory = query({
     const myLat = currentUser?.publishedLat ?? currentUser?.latitude;
     const myLng = currentUser?.publishedLng ?? currentUser?.longitude;
 
+    // Pre-fetch swipes for skip filtering (matches Discover behavior per Rule 9)
+    const mySwipes = await ctx.db
+      .query('likes')
+      .withIndex('by_from_user', (q) => q.eq('fromUserId', userId))
+      .collect();
+    const swipedUsersMap = new Map<string, { action: string; createdAt: number }>();
+    for (const swipe of mySwipes) {
+      swipedUsersMap.set(swipe.toUserId as string, {
+        action: swipe.action,
+        createdAt: swipe.createdAt,
+      });
+    }
+
     const asUser1 = await ctx.db
       .query('crossPathHistory')
       .withIndex('by_user1', (q) => q.eq('user1Id', userId))
@@ -942,6 +978,14 @@ export const getCrossPathHistory = query({
         const isUser1 = entry.user1Id === userId;
         if (isUser1 && entry.hiddenByUser1) return false;
         if (!isUser1 && entry.hiddenByUser2) return false;
+
+        // Skip filter: Same as Discover behavior (Rule 9)
+        const otherUserId = isUser1 ? entry.user2Id : entry.user1Id;
+        const existingSwipe = swipedUsersMap.get(otherUserId as string);
+        if (existingSwipe) {
+          if (existingSwipe.action !== 'pass') return false; // Skip likes/super_likes
+          if (existingSwipe.createdAt > now - 7 * 24 * 60 * 60 * 1000) return false; // Skip recent passes
+        }
 
         return true;
       })
