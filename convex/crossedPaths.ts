@@ -25,9 +25,12 @@ const SOLID_WINDOW_MS = 3 * 24 * 60 * 60 * 1000; // 1–3 days → solid marker
 const FADED_WINDOW_MS = 6 * 24 * 60 * 60 * 1000; // 3–6 days → faded marker
 // >6 days → hidden
 
+// Map visibility freshness window (Rule 4: only show users who published within 10 minutes)
+const MAP_VISIBILITY_WINDOW_MS = 10 * 60 * 1000; // 10 minutes
+
 // Crossed paths history
 const HISTORY_EXPIRY_MS = 28 * 24 * 60 * 60 * 1000; // 4 weeks (28 days)
-const MAX_HISTORY_ENTRIES = 50;
+const MAX_HISTORY_ENTRIES = 15; // Max crossed paths list entries
 
 // Grid size for approximate crossing location (privacy: round to ~300m)
 const LOCATION_GRID_METERS = 300;
@@ -48,12 +51,12 @@ const SHARED_PLACES_MIN_VISITS = 2;
 // Maximum shared places to return (keep it minimal)
 const SHARED_PLACES_MAX_RESULTS = 3;
 
-// Delayed crossing: same area within 24 hours counts as crossing
-const DELAYED_CROSSING_WINDOW_MS = 24 * 60 * 60 * 1000; // 24 hours
+// Delayed crossing: same area within 10 minutes counts as crossing
+const DELAYED_CROSSING_WINDOW_MS = 10 * 60 * 1000; // 10 minutes
 
 // Notification rate limiting
 const NOTIFICATION_COOLDOWN_MS = 60 * 60 * 1000; // 1 hour minimum between notifications per pair
-const MAX_NOTIFICATIONS_PER_HOUR = 3; // Maximum notifications per hour per user
+const MAX_NOTIFICATIONS_PER_DAY = 3; // Maximum notifications per day per user
 
 // ---------------------------------------------------------------------------
 // GPS Jitter Protection Constants (server-side)
@@ -614,14 +617,14 @@ export const recordLocation = mutation({
       );
 
       if (canNotify && currentCrossedPath) {
-        // Rate limiting: Check if user has received too many notifications in the last hour
+        // Rate limiting: Check if user has received too many notifications in the last 24 hours
         const recentNotificationsUser1 = await ctx.db
           .query('notifications')
           .withIndex('by_user', (q) => q.eq('userId', user1Id))
           .filter((q) =>
             q.and(
               q.eq(q.field('type'), 'crossed_paths'),
-              q.gt(q.field('createdAt'), now - 60 * 60 * 1000)
+              q.gt(q.field('createdAt'), now - 24 * 60 * 60 * 1000)
             )
           )
           .collect();
@@ -632,7 +635,7 @@ export const recordLocation = mutation({
           .filter((q) =>
             q.and(
               q.eq(q.field('type'), 'crossed_paths'),
-              q.gt(q.field('createdAt'), now - 60 * 60 * 1000)
+              q.gt(q.field('createdAt'), now - 24 * 60 * 60 * 1000)
             )
           )
           .collect();
@@ -684,10 +687,10 @@ export const recordLocation = mutation({
         // Only send notification if:
         // 1. Under rate limit (max 3/hour)
         // 2. No existing notification with same dedupeKey within cooldown window
-        const shouldNotifyUser1 = recentNotificationsUser1.length < MAX_NOTIFICATIONS_PER_HOUR &&
+        const shouldNotifyUser1 = recentNotificationsUser1.length < MAX_NOTIFICATIONS_PER_DAY &&
           (!existingNotifUser1 || now - existingNotifUser1.createdAt >= NOTIFICATION_COOLDOWN_MS);
 
-        const shouldNotifyUser2 = recentNotificationsUser2.length < MAX_NOTIFICATIONS_PER_HOUR &&
+        const shouldNotifyUser2 = recentNotificationsUser2.length < MAX_NOTIFICATIONS_PER_DAY &&
           (!existingNotifUser2 || now - existingNotifUser2.createdAt >= NOTIFICATION_COOLDOWN_MS);
 
         if (shouldNotifyUser1) {
@@ -841,8 +844,8 @@ export const getNearbyUsers = query({
       // Freshness based on publishedAt (when they last shared their location)
       const locationAge = now - user.publishedAt;
 
-      // Hidden: published location is stale (>6 days old)
-      if (locationAge > FADED_WINDOW_MS) continue;
+      // Hidden: published location is stale (>10 minutes old per Rule 4)
+      if (locationAge > MAP_VISIBILITY_WINDOW_MS) continue;
 
       // Distance check — 100m to 1km range (privacy: hide users too close)
       const distance = calculateDistanceMeters(
@@ -1254,7 +1257,7 @@ export const getCrossedPaths = query({
     limit: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
-    const { userId, limit = 50 } = args;
+    const { userId, limit = 15 } = args;
     const now = Date.now();
 
     // Get current user for distance calculation
@@ -1274,10 +1277,24 @@ export const getCrossedPaths = query({
 
     const allCrossedPaths = [...asUser1, ...asUser2];
 
-    // Sort by count (descending) then recency
+    // Sort by recency first (most recent), then distance second (closer first)
     allCrossedPaths.sort((a, b) => {
-      if (b.count !== a.count) return b.count - a.count;
-      return b.lastCrossedAt - a.lastCrossedAt;
+      // Primary: recency (most recent first)
+      const recencyDiff = b.lastCrossedAt - a.lastCrossedAt;
+      if (Math.abs(recencyDiff) > 60 * 60 * 1000) { // More than 1 hour difference
+        return recencyDiff;
+      }
+      // Secondary: distance (closer first) if we have location data
+      if (myLat && myLng) {
+        const distA = a.crossingLatitude && a.crossingLongitude
+          ? calculateDistanceMeters(myLat, myLng, a.crossingLatitude, a.crossingLongitude)
+          : Infinity;
+        const distB = b.crossingLatitude && b.crossingLongitude
+          ? calculateDistanceMeters(myLat, myLng, b.crossingLatitude, b.crossingLongitude)
+          : Infinity;
+        return distA - distB;
+      }
+      return recencyDiff;
     });
 
     const topCrossedPaths = allCrossedPaths.slice(0, limit);
