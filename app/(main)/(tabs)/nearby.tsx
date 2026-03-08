@@ -377,6 +377,8 @@ export default function NearbyScreen() {
 
   // Track last published coords to avoid spam
   const lastPublishedRef = useRef<{ lat: number; lng: number } | null>(null);
+  // Guard to prevent concurrent publish calls during initial mount/focus
+  const isPublishingRef = useRef(false);
 
   // ---------------------------------------------------------------------------
   // Crossed Paths Detection - recordLocation mutation with rate limiting
@@ -412,6 +414,12 @@ export default function NearbyScreen() {
       return;
     }
 
+    // Skip if already publishing (prevents duplicate calls during initial mount/focus)
+    if (isPublishingRef.current) {
+      if (__DEV__) console.log('[NEARBY] publishLocation skipped: already in progress');
+      return;
+    }
+
     const lat = bestLocation.latitude;
     const lng = bestLocation.longitude;
 
@@ -426,6 +434,9 @@ export default function NearbyScreen() {
         return;
       }
     }
+
+    // Mark as publishing to prevent concurrent calls
+    isPublishingRef.current = true;
 
     // Publish location (with mount guard)
     (async () => {
@@ -514,6 +525,9 @@ export default function NearbyScreen() {
           console.error('[NEARBY] publishLocation failed:', err);
         }
         // Silently fail - don't crash the app
+      } finally {
+        // Always reset publishing flag to allow future calls
+        isPublishingRef.current = false;
       }
     })();
   }, [isDemo, convexUserId, locationUIState, bestLocation, publishLocationMutation, recordLocationMutation]);

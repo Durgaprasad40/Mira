@@ -404,11 +404,14 @@ export default function PrivateLayout() {
 
   // PHASE-1 GUARD: Redirect to Phase-1 onboarding if incomplete
   // This check happens BEFORE Phase-2 onboarding check
+  // STABILITY FIX: Skip guard entirely if Phase-2 is already complete
+  // Users who completed Phase-2 should not be bounced due to Phase-1 state changes
   useEffect(() => {
     if (!mountedRef.current) return;
     if (didRedirectRef.current) return;
     if (!hasHydrated) return;
     if (isDemoMode) return; // Skip guard in demo mode
+    if (onboardingComplete) return; // Skip if Phase-2 already complete
     if (!phase1OnboardingStatus) return; // Wait for query to load
 
     // Check Phase-1 onboarding requirements
@@ -439,7 +442,7 @@ export default function PrivateLayout() {
         router.replace(nextRoute as any);
       });
     }
-  }, [phase1OnboardingStatus, hasHydrated, router]);
+  }, [phase1OnboardingStatus, hasHydrated, router, onboardingComplete]);
 
   // CRASH FIX: Single-pass redirect with proper lifecycle checks
   // Uses requestAnimationFrame to ensure previous screen is fully unmounted
