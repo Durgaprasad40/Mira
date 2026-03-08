@@ -229,25 +229,6 @@ export default function PrivacySettingsScreen() {
           </View>
         </View>
 
-        {/* Account Actions */}
-        <View style={styles.section}>
-          <Text style={styles.sectionTitle}>Account</Text>
-
-          <TouchableOpacity
-            style={styles.menuRow}
-            onPress={() => router.push('/(main)/settings/account' as any)}
-            activeOpacity={0.7}
-          >
-            <View style={styles.menuRowLeft}>
-              <Ionicons name="trash-outline" size={22} color={COLORS.error} />
-              <View style={styles.menuRowInfo}>
-                <Text style={[styles.menuRowTitle, { color: COLORS.error }]}>Delete account</Text>
-                <Text style={styles.menuRowSubtitle}>Permanently remove your account and data</Text>
-              </View>
-            </View>
-            <Ionicons name="chevron-forward" size={20} color={COLORS.textLight} />
-          </TouchableOpacity>
-        </View>
       </ScrollView>
     </SafeAreaView>
   );
@@ -310,31 +291,5 @@ const styles = StyleSheet.create({
     fontSize: 13,
     color: COLORS.textMuted,
     lineHeight: 18,
-  },
-  // Menu rows (for navigation items)
-  menuRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    paddingVertical: 14,
-  },
-  menuRowLeft: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    flex: 1,
-    gap: 14,
-  },
-  menuRowInfo: {
-    flex: 1,
-  },
-  menuRowTitle: {
-    fontSize: 16,
-    fontWeight: '500',
-    color: COLORS.text,
-    marginBottom: 2,
-  },
-  menuRowSubtitle: {
-    fontSize: 13,
-    color: COLORS.textMuted,
   },
 });

@@ -807,7 +807,7 @@ export default function PrivateProfileScreen() {
 
           <TouchableOpacity
             style={styles.menuRow}
-            onPress={() => router.push('/(main)/(private)/settings/safety' as any)}
+            onPress={() => router.push('/(main)/(private)/settings/private-safety' as any)}
             activeOpacity={0.7}
           >
             <Ionicons name="shield-checkmark-outline" size={22} color={C.text} />
@@ -817,7 +817,7 @@ export default function PrivateProfileScreen() {
 
           <TouchableOpacity
             style={styles.menuRow}
-            onPress={() => router.push('/(main)/(private)/settings/account' as any)}
+            onPress={() => router.push('/(main)/(private)/settings/private-account' as any)}
             activeOpacity={0.7}
           >
             <Ionicons name="person-outline" size={22} color={C.text} />

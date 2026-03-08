@@ -12,6 +12,7 @@ import {
   TouchableOpacity,
   Platform,
   Alert,
+  Modal,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter, useFocusEffect } from 'expo-router';
@@ -20,7 +21,7 @@ import { useQuery, useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { useAuthStore } from '@/stores/authStore';
 import { COLORS } from '@/lib/constants';
-import { Avatar, Button } from '@/components/ui';
+import { Avatar } from '@/components/ui';
 import { Ionicons } from '@expo/vector-icons';
 import { Image } from 'expo-image';
 import { isDemoMode } from '@/hooks/useConvex';
@@ -206,6 +207,9 @@ export default function ProfileScreen() {
   // Preview toggle state (UI only, doesn't change settings)
   const [previewBlur, setPreviewBlur] = useState(false);
 
+  // Full-screen photo preview state
+  const [showPhotoPreview, setShowPhotoPreview] = useState(false);
+
   if (__DEV__) {
     const source = isDemoMode ? 'demoStore' : 'convex';
     const count = currentUser?.photos?.length ?? 0;
@@ -332,22 +336,27 @@ export default function ProfileScreen() {
       </View>
 
       <View style={styles.profileSection}>
-        {/* Main photo - always clear for owner */}
+        {/* Main photo - always clear for owner, tappable for full-screen view */}
         {mainPhotoUrl ? (
-          <Image
-            source={{ uri: mainPhotoUrl }}
-            style={styles.avatar}
-            contentFit="cover"
-            transition={200}
-            onLoadEnd={() => {
-              // PERF: Log photo load time once per focus
-              if (__DEV__ && !hasLoggedPhotoLoad.current && focusTimeRef.current > 0) {
-                const loadTime = Date.now() - focusTimeRef.current;
-                console.log('[PERF ProfileTab] Main photo loaded:', { loadTimeMs: loadTime });
-                hasLoggedPhotoLoad.current = true;
-              }
-            }}
-          />
+          <TouchableOpacity
+            activeOpacity={0.9}
+            onPress={() => setShowPhotoPreview(true)}
+          >
+            <Image
+              source={{ uri: mainPhotoUrl }}
+              style={styles.avatar}
+              contentFit="cover"
+              transition={200}
+              onLoadEnd={() => {
+                // PERF: Log photo load time once per focus
+                if (__DEV__ && !hasLoggedPhotoLoad.current && focusTimeRef.current > 0) {
+                  const loadTime = Date.now() - focusTimeRef.current;
+                  console.log('[PERF ProfileTab] Main photo loaded:', { loadTimeMs: loadTime });
+                  hasLoggedPhotoLoad.current = true;
+                }
+              }}
+            />
+          </TouchableOpacity>
         ) : (
           <Avatar size={100} />
         )}
@@ -410,6 +419,7 @@ export default function ProfileScreen() {
 {/* HIDDEN: Subscription UI temporarily removed per product rules */}
 
       <View style={styles.menuSection}>
+        {/* 1. Edit Profile */}
         <TouchableOpacity
           style={styles.menuItem}
           onPress={() => safePush(router, '/(main)/edit-profile', 'profile->editMenu')}
@@ -419,41 +429,73 @@ export default function ProfileScreen() {
           <Ionicons name="chevron-forward" size={20} color={COLORS.textLight} />
         </TouchableOpacity>
 
-{/* HIDDEN: Subscription menu item temporarily removed per product rules */}
-
+        {/* 2. Privacy */}
         <TouchableOpacity
           style={styles.menuItem}
-          onPress={() => safePush(router, '/(main)/settings', 'profile->privacy')}
+          onPress={() => safePush(router, '/(main)/settings/privacy', 'profile->privacy')}
         >
           <Ionicons name="lock-closed-outline" size={24} color={COLORS.text} />
           <Text style={styles.menuText}>Privacy</Text>
           <Ionicons name="chevron-forward" size={20} color={COLORS.textLight} />
         </TouchableOpacity>
 
+        {/* 3. Notifications */}
         <TouchableOpacity
           style={styles.menuItem}
-          onPress={() => safePush(router, '/(main)/settings', 'profile->notifications')}
+          onPress={() => safePush(router, '/(main)/settings/notifications', 'profile->notifications')}
         >
           <Ionicons name="notifications-outline" size={24} color={COLORS.text} />
           <Text style={styles.menuText}>Notifications</Text>
           <Ionicons name="chevron-forward" size={20} color={COLORS.textLight} />
         </TouchableOpacity>
 
+        {/* 4. Nearby Settings */}
         <TouchableOpacity
           style={styles.menuItem}
-          onPress={() => safePush(router, '/(main)/settings', 'profile->safety')}
+          onPress={() => safePush(router, '/(main)/nearby-settings', 'profile->nearby')}
+        >
+          <Ionicons name="location-outline" size={24} color={COLORS.text} />
+          <Text style={styles.menuText}>Nearby Settings</Text>
+          <Ionicons name="chevron-forward" size={20} color={COLORS.textLight} />
+        </TouchableOpacity>
+
+        {/* 5. Safety */}
+        <TouchableOpacity
+          style={styles.menuItem}
+          onPress={() => safePush(router, '/(main)/settings/safety', 'profile->safety')}
         >
           <Ionicons name="shield-checkmark-outline" size={24} color={COLORS.text} />
           <Text style={styles.menuText}>Safety</Text>
           <Ionicons name="chevron-forward" size={20} color={COLORS.textLight} />
         </TouchableOpacity>
 
+        {/* 6. Account */}
         <TouchableOpacity
           style={styles.menuItem}
-          onPress={() => safePush(router, '/(main)/settings', 'profile->account')}
+          onPress={() => safePush(router, '/(main)/settings/account', 'profile->account')}
         >
           <Ionicons name="person-outline" size={24} color={COLORS.text} />
           <Text style={styles.menuText}>Account</Text>
+          <Ionicons name="chevron-forward" size={20} color={COLORS.textLight} />
+        </TouchableOpacity>
+
+        {/* 7. Help & FAQ */}
+        <TouchableOpacity
+          style={styles.menuItem}
+          onPress={() => safePush(router, '/(main)/settings/help', 'profile->help')}
+        >
+          <Ionicons name="help-circle-outline" size={24} color={COLORS.text} />
+          <Text style={styles.menuText}>Help & FAQ</Text>
+          <Ionicons name="chevron-forward" size={20} color={COLORS.textLight} />
+        </TouchableOpacity>
+
+        {/* 8. Log Out */}
+        <TouchableOpacity
+          style={styles.menuItem}
+          onPress={handleLogout}
+        >
+          <Ionicons name="log-out-outline" size={24} color={COLORS.text} />
+          <Text style={styles.menuText}>Log Out</Text>
           <Ionicons name="chevron-forward" size={20} color={COLORS.textLight} />
         </TouchableOpacity>
 
@@ -479,13 +521,43 @@ export default function ProfileScreen() {
         )}
       </View>
 
+      {/* 9. Deactivate Account - destructive action at bottom */}
       <View style={styles.footer}>
-        <Button title="Logout" variant="outline" onPress={handleLogout} />
         <TouchableOpacity onPress={handleDeactivate} style={styles.deactivateButton}>
           <Text style={styles.deactivateText}>Deactivate Account</Text>
         </TouchableOpacity>
       </View>
     </ScrollView>
+
+      {/* Full-screen photo preview modal */}
+      <Modal
+        visible={showPhotoPreview}
+        animationType="fade"
+        statusBarTranslucent
+        onRequestClose={() => setShowPhotoPreview(false)}
+      >
+        <View style={styles.photoPreviewContainer}>
+          <TouchableOpacity
+            style={styles.photoPreviewCloseArea}
+            activeOpacity={1}
+            onPress={() => setShowPhotoPreview(false)}
+          >
+            {mainPhotoUrl && (
+              <Image
+                source={{ uri: mainPhotoUrl }}
+                style={styles.photoPreviewImage}
+                contentFit="contain"
+              />
+            )}
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={styles.photoPreviewCloseButton}
+            onPress={() => setShowPhotoPreview(false)}
+          >
+            <Ionicons name="close" size={28} color={COLORS.white} />
+          </TouchableOpacity>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -683,5 +755,33 @@ const styles = StyleSheet.create({
     fontSize: 10,
     color: COLORS.textMuted,
     fontStyle: 'italic',
+  },
+  // Full-screen photo preview
+  photoPreviewContainer: {
+    flex: 1,
+    backgroundColor: '#000',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  photoPreviewCloseArea: {
+    flex: 1,
+    width: '100%',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  photoPreviewImage: {
+    width: '100%',
+    height: '100%',
+  },
+  photoPreviewCloseButton: {
+    position: 'absolute',
+    top: 50,
+    right: 20,
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    justifyContent: 'center',
+    alignItems: 'center',
   },
 });

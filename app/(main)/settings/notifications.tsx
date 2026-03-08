@@ -144,6 +144,9 @@ export default function NotificationsSettingsScreen() {
               thumbColor={COLORS.white}
             />
           </View>
+          <Text style={styles.pushExplanation}>
+            Push notifications are alerts sent to your phone even when the app is closed. Turn this off to stop all notifications.
+          </Text>
         </View>
 
         {/* Notification Types */}
@@ -303,6 +306,12 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     color: COLORS.text,
     marginBottom: 2,
+  },
+  pushExplanation: {
+    fontSize: 13,
+    color: COLORS.textMuted,
+    lineHeight: 18,
+    marginTop: 12,
   },
   // Child toggle rows
   toggleRow: {

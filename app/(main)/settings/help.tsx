@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Alert } from 'react-native';
+import { View, Text, StyleSheet, ScrollView, TouchableOpacity } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
@@ -59,37 +59,7 @@ export default function HelpSupportScreen() {
     setExpandedTopic(expandedTopic === topicKey ? null : topicKey);
   };
 
-  const handleChatSupport = () => {
-    Alert.alert(
-      'Support Chat',
-      'Live chat support is coming soon. In the meantime, try our Quick Help section above!',
-      [{ text: 'OK' }]
-    );
-  };
-
-  const handleEmailSupport = () => {
-    Alert.alert(
-      'Email Support',
-      'Email support is coming soon. You\'ll be able to reach us at support@mira.app',
-      [{ text: 'OK' }]
-    );
-  };
-
-  const handlePrivacyPolicy = () => {
-    Alert.alert(
-      'Privacy Policy',
-      'Privacy Policy document is coming soon.',
-      [{ text: 'OK' }]
-    );
-  };
-
-  const handleTermsOfService = () => {
-    Alert.alert(
-      'Terms of Service',
-      'Terms of Service document is coming soon.',
-      [{ text: 'OK' }]
-    );
-  };
+  // Contact/Legal handlers removed for beta - sections hidden
 
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
@@ -221,47 +191,7 @@ export default function HelpSupportScreen() {
           )}
         </View>
 
-        {/* Contact Section */}
-        <View style={styles.section}>
-          <Text style={styles.sectionTitle}>Contact Us</Text>
-
-          <TouchableOpacity style={styles.contactButton} onPress={handleChatSupport} activeOpacity={0.8}>
-            <Ionicons name="chatbubbles" size={20} color={COLORS.white} />
-            <Text style={styles.contactButtonText}>Chat with Support</Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity style={styles.menuRow} onPress={handleEmailSupport} activeOpacity={0.7}>
-            <View style={styles.menuRowLeft}>
-              <Ionicons name="mail-outline" size={22} color={COLORS.text} />
-              <View style={styles.menuRowInfo}>
-                <Text style={styles.menuRowTitle}>Email us</Text>
-                <Text style={styles.menuRowSubtitle}>support@mira.app</Text>
-              </View>
-            </View>
-            <Ionicons name="chevron-forward" size={20} color={COLORS.textLight} />
-          </TouchableOpacity>
-        </View>
-
-        {/* Legal Section */}
-        <View style={styles.section}>
-          <Text style={styles.sectionTitle}>Legal</Text>
-
-          <TouchableOpacity style={styles.menuRow} onPress={handlePrivacyPolicy} activeOpacity={0.7}>
-            <View style={styles.menuRowLeft}>
-              <Ionicons name="lock-closed-outline" size={22} color={COLORS.text} />
-              <Text style={styles.menuRowTitle}>Privacy Policy</Text>
-            </View>
-            <Ionicons name="chevron-forward" size={20} color={COLORS.textLight} />
-          </TouchableOpacity>
-
-          <TouchableOpacity style={styles.menuRow} onPress={handleTermsOfService} activeOpacity={0.7}>
-            <View style={styles.menuRowLeft}>
-              <Ionicons name="document-text-outline" size={22} color={COLORS.text} />
-              <Text style={styles.menuRowTitle}>Terms of Service</Text>
-            </View>
-            <Ionicons name="chevron-forward" size={20} color={COLORS.textLight} />
-          </TouchableOpacity>
-        </View>
+        {/* Contact and Legal sections hidden for beta - coming soon */}
 
         {/* App Version */}
         <View style={styles.versionSection}>

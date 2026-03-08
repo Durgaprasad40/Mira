@@ -42,6 +42,15 @@ const SAFETY_TIPS = {
 export default function SafetySettingsScreen() {
   const router = useRouter();
 
+  // Safe back navigation - ensures return to Profile tab
+  const handleGoBack = useCallback(() => {
+    if (router.canGoBack()) {
+      router.back();
+    } else {
+      router.replace('/(main)/(tabs)/profile' as any);
+    }
+  }, [router]);
+
   // Verification store
   const faceStatus = useVerificationStore((s) => s.faceStatus);
   const kycStatus = useVerificationStore((s) => s.kycStatus);
@@ -197,7 +206,7 @@ export default function SafetySettingsScreen() {
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
       <View style={styles.header}>
-        <TouchableOpacity onPress={() => router.back()} hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}>
+        <TouchableOpacity onPress={handleGoBack} hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}>
           <Ionicons name="arrow-back" size={24} color={COLORS.text} />
         </TouchableOpacity>
         <Text style={styles.headerTitle}>Safety</Text>
