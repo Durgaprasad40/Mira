@@ -67,15 +67,18 @@ export default function DiscoveryPreferencesScreen() {
     orientation,
     relationshipIntent,
     privateIntentKeys,
+    sortBy,
     setMinAge,
     setMaxAge,
     setMaxDistanceKm,
     setGender,
+    setOrientation,
     toggleOrientation,
     toggleRelationshipIntent,
     togglePrivateIntentKey,
     setRelationshipIntent,
     setPrivateIntentKeys,
+    setSortBy,
     incrementFilterVersion,
     _hasHydrated,
   } = useFilterStore();
@@ -174,11 +177,27 @@ export default function DiscoveryPreferencesScreen() {
     const serverMinAge = currentUser.minAge ?? MIN_AGE;
     const serverMaxAge = currentUser.maxAge ?? MAX_AGE;
     const serverMaxDistance = currentUser.maxDistance ?? 80; // Default 80km
+    const serverLookingFor = currentUser.lookingFor ?? [];
+    const serverRelationshipIntent = currentUser.relationshipIntent ?? [];
+    const serverOrientation = currentUser.orientation ?? null;
+    const serverSortBy = (currentUser as any).sortBy ?? 'recommended';
 
     // Update filterStore with server values
     setMinAge(serverMinAge);
     setMaxAge(serverMaxAge);
     setMaxDistanceKm(serverMaxDistance);
+
+    // Hydrate lookingFor (gender), relationshipIntent, orientation, and sortBy
+    if (serverLookingFor.length > 0) {
+      setGender(serverLookingFor as Gender[]);
+    }
+    if (serverRelationshipIntent.length > 0) {
+      setRelationshipIntent(serverRelationshipIntent as any[]);
+    }
+    // Set orientation directly (don't use toggle, which would toggle OFF if same value)
+    setOrientation(serverOrientation as Orientation | null);
+    // Hydrate sortBy
+    setSortBy(serverSortBy);
 
     // Update local input state
     setLocalMinAge(serverMinAge.toString());
@@ -193,9 +212,13 @@ export default function DiscoveryPreferencesScreen() {
         minAge: serverMinAge,
         maxAge: serverMaxAge,
         maxDistance: serverMaxDistance,
+        lookingFor: serverLookingFor,
+        relationshipIntent: serverRelationshipIntent,
+        orientation: serverOrientation,
+        sortBy: serverSortBy,
       });
     }
-  }, [currentUser, hasHydratedFromConvex, setMinAge, setMaxAge, setMaxDistanceKm]);
+  }, [currentUser, hasHydratedFromConvex, setMinAge, setMaxAge, setMaxDistanceKm, setGender, setRelationshipIntent, setOrientation, setSortBy]);
 
   // Keyboard avoidance insets
   const insets = useSafeAreaInsets();
@@ -259,6 +282,10 @@ export default function DiscoveryPreferencesScreen() {
           minAge: parsedMinAge,
           maxAge: parsedMaxAge,
           maxDistance: parsedDistanceKm,
+          lookingFor: lookingFor,
+          relationshipIntent: relationshipIntent as any[],
+          orientation: orientation,
+          sortBy: sortBy,
         });
       }
 

@@ -366,6 +366,39 @@ export const updatePreferences = mutation({
         ),
       ),
     ),
+    relationshipIntent: v.optional(
+      v.array(
+        v.union(
+          v.literal("long_term"),
+          v.literal("short_term"),
+          v.literal("fwb"),
+          v.literal("figuring_out"),
+          v.literal("short_to_long"),
+          v.literal("long_to_short"),
+          v.literal("new_friends"),
+          v.literal("open_to_anything"),
+        ),
+      ),
+    ),
+    orientation: v.optional(
+      v.union(
+        v.literal("straight"),
+        v.literal("gay"),
+        v.literal("lesbian"),
+        v.literal("bisexual"),
+        v.literal("prefer_not_to_say"),
+        v.null(),
+      ),
+    ),
+    sortBy: v.optional(
+      v.union(
+        v.literal("recommended"),
+        v.literal("newest"),
+        v.literal("distance"),
+        v.literal("age"),
+        v.literal("recently_active"),
+      ),
+    ),
     minAge: v.optional(v.number()),
     maxAge: v.optional(v.number()),
     maxDistance: v.optional(v.number()),
@@ -463,6 +496,91 @@ export const toggleIncognito = mutation({
     }
 
     await ctx.db.patch(userId, { incognitoMode: enabled });
+    return { success: true };
+  },
+});
+
+// ---------------------------------------------------------------------------
+// Nearby Settings
+// ---------------------------------------------------------------------------
+
+/**
+ * Update nearby settings (visibility, privacy, crossed paths).
+ * All fields are optional - only provided fields will be updated.
+ */
+export const updateNearbySettings = mutation({
+  args: {
+    userId: v.id("users"),
+    nearbyEnabled: v.optional(v.boolean()),
+    crossedPathsEnabled: v.optional(v.boolean()),
+    hideDistance: v.optional(v.boolean()),
+    strongPrivacyMode: v.optional(v.boolean()),
+    incognitoMode: v.optional(v.boolean()),
+    nearbyVisibilityMode: v.optional(
+      v.union(
+        v.literal("always"),
+        v.literal("app_open"),
+        v.literal("recent")
+      )
+    ),
+  },
+  handler: async (ctx, args) => {
+    const { userId, incognitoMode, ...updates } = args;
+
+    const user = await ctx.db.get(userId);
+    if (!user) throw new Error("User not found");
+
+    // Check premium access for incognito mode (premium-only, no gender-based access)
+    if (incognitoMode !== undefined) {
+      const isPremium = user.subscriptionTier === "premium";
+      if (!isPremium && incognitoMode) {
+        throw new Error("Premium required for Incognito Nearby");
+      }
+      (updates as Record<string, unknown>).incognitoMode = incognitoMode;
+    }
+
+    // Filter out undefined values
+    const cleanUpdates: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(updates)) {
+      if (value !== undefined) {
+        cleanUpdates[key] = value;
+      }
+    }
+
+    if (Object.keys(cleanUpdates).length > 0) {
+      await ctx.db.patch(userId, cleanUpdates);
+    }
+
+    return { success: true };
+  },
+});
+
+/**
+ * Pause nearby visibility for 24 hours.
+ */
+export const pauseNearby = mutation({
+  args: {
+    userId: v.id("users"),
+    paused: v.boolean(),
+  },
+  handler: async (ctx, args) => {
+    const { userId, paused } = args;
+
+    const user = await ctx.db.get(userId);
+    if (!user) throw new Error("User not found");
+
+    if (paused) {
+      // Pause for 24 hours
+      await ctx.db.patch(userId, {
+        nearbyPausedUntil: Date.now() + 24 * 60 * 60 * 1000,
+      });
+    } else {
+      // Clear pause
+      await ctx.db.patch(userId, {
+        nearbyPausedUntil: undefined,
+      });
+    }
+
     return { success: true };
   },
 });

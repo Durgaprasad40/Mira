@@ -118,8 +118,8 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   // Phase-2 only: Intent filters from store (syncs with Discovery Preferences)
   const { privateIntentKeys: intentFilters, togglePrivateIntentKey, setPrivateIntentKeys } = useFilterStore();
 
-  // P1-7 fix: Phase-1 filter preferences (age, gender, distance)
-  const { minAge, maxAge, maxDistance, gender: genderFilter } = useFilterStore();
+  // P1-7 fix: Phase-1 filter preferences (age, gender, distance, sortBy)
+  const { minAge, maxAge, maxDistance, gender: genderFilter, sortBy } = useFilterStore();
 
   // Daily limits — individual selectors to avoid full re-render on AsyncStorage hydration
   const likesRemaining = useDiscoverStore((s) => s.likesRemaining);
@@ -228,10 +228,10 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   const discoverArgs = useMemo(
     () =>
       !isDemoMode && convexUserId && !skipInternalQuery
-        ? { userId: convexUserId, sortBy: "recommended" as any, limit: 20 }
+        ? { userId: convexUserId, sortBy: (sortBy || "recommended") as any, limit: 20 }
         : "skip" as const,
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [convexUserId, skipInternalQuery, retryKey],
+    [convexUserId, skipInternalQuery, retryKey, sortBy],
   );
   const convexProfiles = useQuery(api.discover.getDiscoverProfiles, discoverArgs);
   const profilesSafe = convexProfiles ?? EMPTY_ARRAY;

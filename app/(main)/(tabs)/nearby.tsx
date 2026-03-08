@@ -133,6 +133,7 @@ interface NearbyUser {
   freshness: 'solid' | 'faded';
   photoUrl: string | null;
   isVerified: boolean;
+  strongPrivacyMode: boolean;
   hideDistance: boolean;
 }
 
@@ -152,8 +153,8 @@ const DEFAULT_LONGITUDE_DELTA = 0.02;
 // Privacy fuzzing constants
 const FUZZ_MIN_METERS = 50;  // Minimum offset
 const FUZZ_MAX_METERS = 150; // Maximum offset
-const HIDE_DISTANCE_FUZZ_MIN = 200; // Larger offset for users with hideDistance
-const HIDE_DISTANCE_FUZZ_MAX = 400;
+const STRONG_PRIVACY_FUZZ_MIN = 200; // Larger offset for users with strongPrivacyMode
+const STRONG_PRIVACY_FUZZ_MAX = 400;
 
 // Demo fallback location (Mumbai)
 const DEMO_LOCATION = {
@@ -202,20 +203,20 @@ function simpleHash(str: string): number {
 function applyPrivacyFuzz(
   lat: number,
   lng: number,
-  oderId: string,
+  otherId: string,
   viewerId: string,
   sessionSalt: number,
-  hideDistance: boolean,
+  strongPrivacyMode: boolean,
 ): { lat: number; lng: number } {
   // Deterministic seed
-  const seed = simpleHash(`${viewerId}:${oderId}:${sessionSalt}`);
+  const seed = simpleHash(`${viewerId}:${otherId}:${sessionSalt}`);
 
   // Random angle (0-360 degrees)
   const angle = ((seed % 36000) / 100) * (Math.PI / 180);
 
-  // Random radius based on hideDistance preference
-  const minMeters = hideDistance ? HIDE_DISTANCE_FUZZ_MIN : FUZZ_MIN_METERS;
-  const maxMeters = hideDistance ? HIDE_DISTANCE_FUZZ_MAX : FUZZ_MAX_METERS;
+  // Random radius based on strongPrivacyMode preference
+  const minMeters = strongPrivacyMode ? STRONG_PRIVACY_FUZZ_MIN : FUZZ_MIN_METERS;
+  const maxMeters = strongPrivacyMode ? STRONG_PRIVACY_FUZZ_MAX : FUZZ_MAX_METERS;
   const radiusMeters = minMeters + (seed % (maxMeters - minMeters + 1));
 
   // Earth radius in meters
@@ -452,6 +453,7 @@ export default function NearbyScreen() {
         freshness: 'solid' as const,
         photoUrl: profile.photos?.[0]?.url ?? null,
         isVerified: profile.isVerified ?? false,
+        strongPrivacyMode: false,
         hideDistance: false,
       };
     });
@@ -486,14 +488,14 @@ export default function NearbyScreen() {
         return true;
       })
       .map((user) => {
-        // Apply privacy fuzzing
+        // Apply privacy fuzzing (use strongPrivacyMode for larger fuzz radius)
         const fuzzed = applyPrivacyFuzz(
           user.publishedLat,
           user.publishedLng,
           user.id,
           viewerId,
           sessionSalt,
-          user.hideDistance,
+          user.strongPrivacyMode,
         );
 
         return {

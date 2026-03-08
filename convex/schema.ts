@@ -156,6 +156,20 @@ export default defineSchema({
     minAge: v.number(),
     maxAge: v.number(),
     maxDistance: v.number(),
+    orientation: v.optional(v.union(
+      v.literal('straight'),
+      v.literal('gay'),
+      v.literal('lesbian'),
+      v.literal('bisexual'),
+      v.literal('prefer_not_to_say')
+    )),
+    sortBy: v.optional(v.union(
+      v.literal('recommended'),
+      v.literal('newest'),
+      v.literal('distance'),
+      v.literal('age'),
+      v.literal('recently_active')
+    )),
 
     // Subscription
     subscriptionTier: v.union(v.literal('free'), v.literal('basic'), v.literal('premium')),
@@ -194,6 +208,13 @@ export default defineSchema({
     lastActive: v.number(),
     lastLocationUpdatedAt: v.optional(v.number()),   // timestamp of last location save (30-min gate)
     nearbyEnabled: v.optional(v.boolean()),           // user opt-in toggle (default true)
+    crossedPathsEnabled: v.optional(v.boolean()),     // participate in crossed paths detection (default true)
+    nearbyPausedUntil: v.optional(v.number()),        // pause nearby visibility until timestamp
+    nearbyVisibilityMode: v.optional(v.union(         // time-based visibility mode
+      v.literal('always'),          // Always visible (default)
+      v.literal('app_open'),        // Only while using app
+      v.literal('recent')           // Visible for 30 min after app use
+    )),
     createdAt: v.number(),
 
     // Profile Prompts (icebreakers)
@@ -314,7 +335,8 @@ export default defineSchema({
 
     // Privacy
     showLastSeen: v.optional(v.boolean()),
-    hideDistance: v.optional(v.boolean()),        // true = larger fuzz on Nearby map (200-400m vs 20-100m)
+    hideDistance: v.optional(v.boolean()),         // true = don't show distance info to others
+    strongPrivacyMode: v.optional(v.boolean()),    // true = larger fuzz on Nearby map (200-400m vs 50-150m)
 
     // Photo Blur (user-controlled privacy)
     photoBlurred: v.optional(v.boolean()),       // true = photo shown blurred in Discover/profile

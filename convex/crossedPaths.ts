@@ -267,6 +267,11 @@ export const recordLocation = mutation({
       return { success: true, nearbyCount: 0, skipped: true, reason: 'unverified' };
     }
 
+    // Skip crossed-path computation if current user has disabled crossed paths
+    if (currentUser.crossedPathsEnabled === false) {
+      return { success: true, nearbyCount: 0, skipped: true, reason: 'crossed_paths_disabled' };
+    }
+
     // Get current user's age for filtering
     const myAge = calculateAge(currentUser.dateOfBirth);
 
@@ -297,6 +302,9 @@ export const recordLocation = mutation({
 
       // Nearby visibility opt-out: Skip users who opted out of nearby
       if (user.nearbyEnabled === false) continue;
+
+      // Crossed paths opt-out: Skip users who disabled crossed paths
+      if (user.crossedPathsEnabled === false) continue;
 
       // Profile completeness: At least 2 photos required
       const photoCount = photoCountsMap.get(user._id as string) || 0;
@@ -642,6 +650,21 @@ export const getNearbyUsers = query({
       // Nearby visibility opt-out: Respect user preference
       if (user.nearbyEnabled === false) continue;
 
+      // Nearby pause: User has temporarily hidden from Nearby
+      if (user.nearbyPausedUntil && user.nearbyPausedUntil > now) continue;
+
+      // Time-based visibility mode
+      if (user.nearbyVisibilityMode === 'app_open') {
+        // Only visible while using app: hide if inactive for > 5 min
+        const inactiveThreshold = 5 * 60 * 1000; // 5 minutes
+        if (now - user.lastActive > inactiveThreshold) continue;
+      } else if (user.nearbyVisibilityMode === 'recent') {
+        // Visible for 30 min after app use
+        const recentThreshold = 30 * 60 * 1000; // 30 minutes
+        if (now - user.lastActive > recentThreshold) continue;
+      }
+      // 'always' mode: no additional filtering needed
+
       // Profile completeness: At least 2 photos required
       const photoCount = photoCountsMap.get(user._id as string) || 0;
       if (photoCount < 2) continue;
@@ -686,7 +709,8 @@ export const getNearbyUsers = query({
       const freshness: 'solid' | 'faded' = locationAge <= SOLID_WINDOW_MS ? 'solid' : 'faded';
 
       // Return raw published coordinates — client applies fuzz + anti-zoom shifting
-      // hideDistance controls fuzz radius: true = 200-400m, false = 50-150m
+      // strongPrivacyMode controls fuzz radius: true = 200-400m, false = 50-150m
+      // hideDistance controls whether to show distance info
       results.push({
         id: user._id,
         name: user.name,
@@ -698,6 +722,7 @@ export const getNearbyUsers = query({
         freshness,
         photoUrl: user.primaryPhotoUrl ?? null,
         isVerified: user.isVerified,
+        strongPrivacyMode: user.strongPrivacyMode ?? false,
         hideDistance: user.hideDistance ?? false,
       });
     }
