@@ -42,6 +42,7 @@ export function ReportBlockModal({
   const [otherReason, setOtherReason] = useState("");
 
   const blockMutation = useMutation(api.users.blockUser);
+  const reportMutation = useMutation(api.users.reportUser);
 
   // Track action with standard payload
   const logAction = (action: ActionType, reason?: string) => {
@@ -115,25 +116,71 @@ export function ReportBlockModal({
     }
   };
 
-  // Report: just log for now
-  const handleReport = () => {
+  // Report: submit to backend
+  const handleReport = async () => {
     logAction('report');
-    Toast.show("Report submitted");
-    resetAndClose();
+    if (isDemoMode) {
+      Toast.show("Report submitted");
+      resetAndClose();
+      return;
+    }
+
+    try {
+      await reportMutation({
+        reporterId: currentUserId as any,
+        reportedUserId: reportedUserId as any,
+        reason: 'inappropriate_photos',
+      });
+      Toast.show("Report submitted");
+      resetAndClose();
+    } catch (error: any) {
+      Alert.alert("Error", error.message || "Failed to submit report.");
+    }
   };
 
-  // Spam: just log for now
-  const handleSpam = () => {
+  // Spam: submit to backend
+  const handleSpam = async () => {
     logAction('spam');
-    Toast.show("Marked as spam");
-    resetAndClose();
+    if (isDemoMode) {
+      Toast.show("Marked as spam");
+      resetAndClose();
+      return;
+    }
+
+    try {
+      await reportMutation({
+        reporterId: currentUserId as any,
+        reportedUserId: reportedUserId as any,
+        reason: 'spam',
+      });
+      Toast.show("Marked as spam");
+      resetAndClose();
+    } catch (error: any) {
+      Alert.alert("Error", error.message || "Failed to submit report.");
+    }
   };
 
-  // Scam: just log for now
-  const handleScam = () => {
+  // Scam: submit to backend (maps to 'other' with description)
+  const handleScam = async () => {
     logAction('scam');
-    Toast.show("Reported as scam");
-    resetAndClose();
+    if (isDemoMode) {
+      Toast.show("Reported as scam");
+      resetAndClose();
+      return;
+    }
+
+    try {
+      await reportMutation({
+        reporterId: currentUserId as any,
+        reportedUserId: reportedUserId as any,
+        reason: 'other',
+        description: 'Scam/fraudulent behavior',
+      });
+      Toast.show("Reported as scam");
+      resetAndClose();
+    } catch (error: any) {
+      Alert.alert("Error", error.message || "Failed to submit report.");
+    }
   };
 
   // Other: open text input modal
@@ -142,15 +189,32 @@ export function ReportBlockModal({
   };
 
   // Submit Other reason
-  const handleOtherSubmit = () => {
+  const handleOtherSubmit = async () => {
     const trimmed = otherReason.trim();
     if (!trimmed) {
       Alert.alert("Required", "Please enter a reason");
       return;
     }
     logAction('other', trimmed);
-    Toast.show("Feedback submitted");
-    resetAndClose();
+
+    if (isDemoMode) {
+      Toast.show("Feedback submitted");
+      resetAndClose();
+      return;
+    }
+
+    try {
+      await reportMutation({
+        reporterId: currentUserId as any,
+        reportedUserId: reportedUserId as any,
+        reason: 'other',
+        description: trimmed,
+      });
+      Toast.show("Feedback submitted");
+      resetAndClose();
+    } catch (error: any) {
+      Alert.alert("Error", error.message || "Failed to submit report.");
+    }
   };
 
   const handleOtherCancel = () => {

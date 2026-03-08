@@ -613,6 +613,40 @@ export const getConversations = query({
       .map((c) => c.participants.find((id) => id !== userId))
       .filter((id): id is Id<'users'> => id !== undefined);
 
+    // SAFETY FIX: Batch-check blocks in both directions for all other users
+    const [blockedByMe, blockedMe] = await Promise.all([
+      // Users I have blocked
+      Promise.all(
+        otherUserIds.map((otherId) =>
+          ctx.db
+            .query('blocks')
+            .withIndex('by_blocker_blocked', (q) =>
+              q.eq('blockerId', userId).eq('blockedUserId', otherId)
+            )
+            .first()
+        )
+      ),
+      // Users who have blocked me
+      Promise.all(
+        otherUserIds.map((otherId) =>
+          ctx.db
+            .query('blocks')
+            .withIndex('by_blocker_blocked', (q) =>
+              q.eq('blockerId', otherId).eq('blockedUserId', userId)
+            )
+            .first()
+        )
+      ),
+    ]);
+
+    // Build set of blocked user IDs (either direction)
+    const blockedUserIds = new Set<string>();
+    otherUserIds.forEach((otherId, i) => {
+      if (blockedByMe[i] || blockedMe[i]) {
+        blockedUserIds.add(otherId as string);
+      }
+    });
+
     // Parallel batch: users, photos, last messages, and unread counts
     const [users, photos, lastMessages, unreadCounts] = await Promise.all([
       // Batch fetch all other users
@@ -668,6 +702,9 @@ export const getConversations = query({
       const conversation = userConversations[i];
       const otherUserId = conversation.participants.find((id) => id !== userId);
       if (!otherUserId) continue;
+
+      // SAFETY FIX: Skip conversations with blocked users (either direction)
+      if (blockedUserIds.has(otherUserId as string)) continue;
 
       const otherUser = userMap.get(otherUserId);
       if (!otherUser || !otherUser.isActive) continue;
