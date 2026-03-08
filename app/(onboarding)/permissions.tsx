@@ -32,7 +32,8 @@ export default function PermissionsScreen() {
   const { setStep } = useOnboardingStore();
   const router = useRouter();
   const [locationGranted, setLocationGranted] = useState(false);
-  const [notificationsGranted, setNotificationsGranted] = useState(false);
+  // Notification permission state: 'pending' | 'granted' | 'denied' | 'unavailable'
+  const [notificationStatus, setNotificationStatus] = useState<'pending' | 'granted' | 'denied' | 'unavailable'>('pending');
 
   const requestLocation = async () => {
     try {
@@ -57,11 +58,12 @@ export default function PermissionsScreen() {
   };
 
   const requestNotifications = () => {
-    // expo-notifications not installed - show fallback message
+    // expo-notifications is not installed in this build
+    // PRIVACY FIX: Don't fake permission as granted - be honest about the limitation
     Alert.alert(
       "Notifications",
-      "Notifications permission is not available in this build yet. You can enable notifications later in your device settings.",
-      [{ text: "OK", onPress: () => setNotificationsGranted(true) }]
+      "Push notifications are not available in this beta build. You'll be able to enable notifications in a future update.",
+      [{ text: "OK", onPress: () => setNotificationStatus('unavailable') }]
     );
   };
 
@@ -117,10 +119,15 @@ export default function PermissionsScreen() {
           </View>
         </View>
         <Button
-          title={notificationsGranted ? "Granted ✓" : "Enable Notifications"}
-          variant={notificationsGranted ? "outline" : "primary"}
+          title={
+            notificationStatus === 'granted' ? "Granted ✓" :
+            notificationStatus === 'unavailable' ? "Not Available" :
+            notificationStatus === 'denied' ? "Denied" :
+            "Enable Notifications"
+          }
+          variant={notificationStatus === 'pending' ? "primary" : "outline"}
           onPress={requestNotifications}
-          disabled={notificationsGranted}
+          disabled={notificationStatus !== 'pending'}
           style={styles.permissionButton}
         />
       </View>

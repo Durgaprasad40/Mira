@@ -108,7 +108,8 @@ function ResetEpochChecker() {
           console.log('[RESET_EPOCH] Database reset detected - forcing logout...');
 
           // Clear all auth/onboarding/demo stores
-          logout();
+          // STABILITY FIX: Await logout to ensure cleanup completes before navigation
+          await logout();
           resetOnboarding();
           if (isDemoMode) {
             demoLogout();
@@ -334,20 +335,26 @@ function SessionValidator() {
       if (!mountedRef.current) return;
 
       // For non-migration cases (truly invalid sessions), proceed with logout
-      // Clear all LOCAL state (server data untouched)
-      logout();
-      useOnboardingStore.getState().reset();
-      if (isDemoMode) {
-        useDemoStore.getState().demoLogout();
-      }
+      // STABILITY FIX: Wrap in async IIFE to properly await logout before navigation
+      (async () => {
+        // Clear all LOCAL state (server data untouched)
+        await logout();
+        useOnboardingStore.getState().reset();
+        if (isDemoMode) {
+          useDemoStore.getState().demoLogout();
+        }
 
-      setSessionValidated(false, sessionStatus.reason);
+        // Guard: check mounted again after async operation
+        if (!mountedRef.current) return;
 
-      // Navigate to login (only if currently in main/protected area)
-      const inProtectedRoute = segments[0] === '(main)';
-      if (inProtectedRoute) {
-        router.replace('/(auth)/welcome');
-      }
+        setSessionValidated(false, sessionStatus.reason);
+
+        // Navigate to login (only if currently in main/protected area)
+        const inProtectedRoute = segments[0] === '(main)';
+        if (inProtectedRoute) {
+          router.replace('/(auth)/welcome');
+        }
+      })();
     }
   }, [sessionStatus, token, userId, logout, syncFromServerValidation, setSessionValidated, router, segments]);
 

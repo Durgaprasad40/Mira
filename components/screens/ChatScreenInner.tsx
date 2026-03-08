@@ -766,6 +766,18 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
     );
   }
 
+  // CRASH FIX: Guard against missing otherUser data
+  // Even when activeConversation exists, otherUser might be undefined or partially loaded
+  const otherUser = activeConversation.otherUser;
+  if (!otherUser || !otherUser.name) {
+    return (
+      <View style={styles.loadingContainer}>
+        <ActivityIndicator size="large" color={COLORS.primary} />
+        <Text style={styles.loadingText}>Loading chat...</Text>
+      </View>
+    );
+  }
+
   const canSendCustom = isDemo
     ? true
     : currentUser

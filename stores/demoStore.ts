@@ -408,20 +408,40 @@ export const useDemoStore = create<DemoState>()((set, get) => ({
   },
 
   demoLogout: () => {
-    // C7 fix: clear session data on logout while preserving accounts
-    // PRIVACY FIX: Reset demo DM messages on logout to prevent User B seeing User A's history
+    // PRIVACY FIX: Full session reset on logout to prevent User B seeing User A's data
+    // This is critical when different users share the same device in demo mode
     useDemoNotifStore.getState().reset();
     useDemoDmStore.getState().reset();
     useBlockStore.getState().clearBlocks();
 
-    // Reset session-scoped state but preserve persistent user data
-    // DM-FIX: matches, likes, swipedProfileIds are NOT reset — they persist across logout/login
-    // This ensures DM conversations remain visible (since Messages screen uses matches)
+    // Reset confession store to prevent confession/reply data leakage
+    // Lazy require to break cycle: demoStore <-> confessionStore
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { useConfessionStore } = require('@/stores/confessionStore') as {
+      useConfessionStore: {
+        getState: () => { reset?: () => void; seedConfessions: () => void };
+        setState: (state: { seeded: boolean; confessions: any[]; myReplies: any[]; confessionThreads: Record<string, string> }) => void;
+      };
+    };
+    // Reset confession state: clear confessions, replies, and thread mappings
+    useConfessionStore.setState({
+      seeded: false,
+      confessions: [],
+      myReplies: [],
+      confessionThreads: {},
+    });
+
+    // PRIVACY FIX: Reset ALL session-scoped data including matches/likes/swipes
+    // Previous behavior preserved these, but that allows User B to see User A's:
+    // - Matches (who User A matched with)
+    // - Likes (who liked User A)
+    // - Swipe history (who User A swiped on)
+    // All of this is privacy-sensitive and must be reset on logout
     set({
       currentDemoUserId: null,
-      // matches: preserved — user-created matches persist
-      // likes: preserved — incoming likes persist
-      // swipedProfileIds: preserved — swipe history persists
+      matches: JSON.parse(JSON.stringify(DEMO_MATCHES)) as DemoMatch[], // Reset to fresh demo matches
+      likes: JSON.parse(JSON.stringify(DEMO_LIKES)) as DemoLike[], // Reset to fresh demo likes
+      swipedProfileIds: [], // Clear swipe history completely
       crossedPaths: [], // Session-scoped — re-seeded with live GPS on Nearby screen
       profiles: withValidPhotos(JSON.parse(JSON.stringify(DEMO_PROFILES)) as DemoProfile[]),
       reportedUserIds: [],

@@ -131,6 +131,22 @@ export const useAuthStore = create<AuthState>()((set) => ({
     const { useVerificationStore } = require('@/stores/verificationStore');
     useVerificationStore.getState().resetVerification();
 
+    // PRIVACY FIX: Reset confession store to prevent confession/reply data leakage
+    // This ensures User A's confessions don't appear for User B after logout
+    const { useConfessionStore } = require('@/stores/confessionStore');
+    if (useConfessionStore.getState().reset) {
+      useConfessionStore.getState().reset();
+    } else {
+      // Fallback: manually reset key confession state
+      useConfessionStore.setState({
+        seeded: false,
+        confessions: [],
+        myReplies: [],
+        confessionThreads: {},
+      });
+    }
+    if (__DEV__) console.log('[AUTH] logout: cleared confessionStore');
+
     // C2 FIX: Clear in-memory state FIRST (immediate effect for UI)
     set({
       isAuthenticated: false,
