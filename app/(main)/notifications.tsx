@@ -123,7 +123,13 @@ export default function NotificationsScreen() {
         // Validate the like still exists before navigating to Likes screen
         const likeUserId = notification.data?.otherUserId;
 
-        if (isDemoMode && likeUserId) {
+        // Guard: Prevent crash if likeUserId is missing
+        if (!likeUserId) {
+          console.warn('[Notifications] like notification missing otherUserId, skipping navigation');
+          break;
+        }
+
+        if (isDemoMode) {
           const likeExists = demoLikes.some((l) => l.userId === likeUserId);
 
           if (!likeExists) {

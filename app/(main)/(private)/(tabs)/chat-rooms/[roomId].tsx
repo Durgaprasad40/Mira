@@ -656,7 +656,9 @@ export default function ChatRoomScreen() {
               // Clear preferred room to avoid stale redirect
               clearPreferredRoom();
               if (!isDemoMode && authUserId) {
-                clearPreferredRoomMutation({ userId: authUserId as Id<'users'> }).catch(() => {});
+                clearPreferredRoomMutation({ userId: authUserId as Id<'users'> }).catch((err) => {
+                  console.error('[ChatRoom] clearPreferredRoomMutation failed:', err);
+                });
               }
               router.replace('/(main)/(private)/(tabs)/chat-rooms');
             } catch (err: any) {
@@ -1085,7 +1087,9 @@ export default function ChatRoomScreen() {
       if (isDemoMode) {
         clearPreferredRoom();
       } else if (authUserId) {
-        clearPreferredRoomMutation({ userId: authUserId as Id<'users'> }).catch(() => {});
+        clearPreferredRoomMutation({ userId: authUserId as Id<'users'> }).catch((err) => {
+          console.error('[ChatRoom] clearPreferredRoomMutation failed:', err);
+        });
       }
       router.replace('/(main)/(private)/(tabs)/chat-rooms');
     };

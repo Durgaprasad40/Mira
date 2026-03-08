@@ -430,9 +430,10 @@ export default function PromptThreadScreen() {
 
   // These functions are kept for camera-composer route compatibility
   const openCamera = () => {
+    if (!promptId) return;
     router.push({
       pathname: '/(main)/camera-composer' as any,
-      params: { promptId: promptId!, promptType: prompt?.type },
+      params: { promptId, promptType: prompt?.type },
     });
   };
 

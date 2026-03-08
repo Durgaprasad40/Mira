@@ -1007,7 +1007,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
         visible={showReportBlock}
         onClose={() => setShowReportBlock(false)}
         reportedUserId={(activeConversation as any).otherUser?.id || ''}
-        reportedUserName={activeConversation.otherUser.name}
+        reportedUserName={activeConversation.otherUser?.name || ''}
         currentUserId={userId || getDemoUserId()}
         conversationId={conversationId}
         onBlockSuccess={() => router.back()}

@@ -20,6 +20,7 @@ import { safePush } from '@/lib/safeRouter';
 import { COLORS } from '@/lib/constants';
 import { useConfessionStore } from '@/stores/confessionStore';
 import { useAuthStore } from '@/stores/authStore';
+import { isDemoMode } from '@/hooks/useConvex';
 import { MutualRevealStatus } from '@/types';
 import { logDebugEvent } from '@/lib/debugEventLogger';
 import { formatTime, shouldShowTimestamp } from '@/utils/chatTime';
@@ -64,7 +65,7 @@ export default function ConfessionChatScreen() {
   const insets = useSafeAreaInsets();
   const { chatId } = useLocalSearchParams<{ chatId: string }>();
   const { userId } = useAuthStore();
-  const currentUserId = userId || 'demo_user_1';
+  const currentUserId = isDemoMode ? (userId || 'demo_user_1') : userId;
 
   const chats = useConfessionStore((s) => s.chats);
   const confessions = useConfessionStore((s) => s.confessions);

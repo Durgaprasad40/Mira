@@ -184,6 +184,8 @@ let _hasMarkedBootHidden = false;
 
 function BootScreenWrapper() {
   const routeDecisionMade = useBootStore((s) => s.routeDecisionMade);
+  const authHydrated = useBootStore((s) => s.authHydrated);
+  const demoHydrated = useBootStore((s) => s.demoHydrated);
   const reset = useBootStore((s) => s.reset);
   const [, forceUpdate] = useState(0);
   const timerStarted = useRef(false);
@@ -205,8 +207,8 @@ function BootScreenWrapper() {
     return () => clearTimeout(timer);
   }, [minTimeElapsed, elapsedMs]);
 
-  // Hide when: minimum time passed OR route decision made (whichever comes first)
-  const isReady = minTimeElapsed || routeDecisionMade;
+  // Hide when: minimum time passed AND hydration complete (safety timeout in bootStore guarantees resolution)
+  const isReady = (minTimeElapsed || routeDecisionMade) && authHydrated && demoHydrated;
 
   // Mark boot_hidden timing milestone once (module-level guard)
   if (isReady && !_hasMarkedBootHidden) {
