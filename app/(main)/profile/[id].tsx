@@ -74,6 +74,14 @@ export default function ViewProfileScreen() {
       : 'skip'
   );
 
+  // Shared Places query (Phase-1 only, not for demo mode)
+  const sharedPlaces = useQuery(
+    api.crossedPaths.getSharedPlaces,
+    !isDemoMode && !isPhase2 && userId && currentUserId
+      ? { viewerId: currentUserId as any, profileUserId: userId as any }
+      : 'skip'
+  );
+
   // Phase-2: Use privateDiscover.getProfileByUserId
   const convexPhase2Profile = useQuery(
     api.privateDiscover.getProfileByUserId,
@@ -559,6 +567,21 @@ export default function ViewProfileScreen() {
           );
         })()}
 
+        {/* Common Places - Phase-1 only, privacy-safe shared locations */}
+        {!isPhase2 && sharedPlaces && sharedPlaces.length > 0 && (
+          <View style={styles.section}>
+            <Text style={styles.sectionTitle}>Common Places</Text>
+            <View style={styles.chips}>
+              {sharedPlaces.map((place: { id: string; label: string }) => (
+                <View key={place.id} style={styles.commonPlaceChip}>
+                  <Ionicons name="location-outline" size={14} color={COLORS.secondary} />
+                  <Text style={styles.commonPlaceText}>{place.label}</Text>
+                </View>
+              ))}
+            </View>
+          </View>
+        )}
+
         {/* Interests - Both phases (Phase-2 shows above in different section) */}
         {!isPhase2 && profile.activities && profile.activities.length > 0 && (
           <View style={styles.section}>
@@ -840,6 +863,25 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: COLORS.secondary,
     fontWeight: '600',
+  },
+  // Common Places chip styles (privacy-safe shared locations)
+  commonPlaceChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    backgroundColor: COLORS.secondary + '15',
+    borderWidth: 1,
+    borderColor: COLORS.secondary + '30',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 16,
+    marginRight: 8,
+    marginBottom: 8,
+  },
+  commonPlaceText: {
+    fontSize: 14,
+    color: COLORS.secondary,
+    fontWeight: '500',
   },
   intentChip: {
     backgroundColor: COLORS.primary + '15',

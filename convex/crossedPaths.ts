@@ -32,6 +32,22 @@ const MAX_HISTORY_ENTRIES = 50;
 // Grid size for approximate crossing location (privacy: round to ~300m)
 const LOCATION_GRID_METERS = 300;
 
+// ---------------------------------------------------------------------------
+// Shared Places Constants (Phase-1)
+// ---------------------------------------------------------------------------
+
+// Coarse grid for shared places (~1km clusters to prevent exact location exposure)
+const SHARED_PLACES_GRID_METERS = 1000;
+
+// Time window for shared places detection (14 days)
+const SHARED_PLACES_WINDOW_MS = 14 * 24 * 60 * 60 * 1000;
+
+// Minimum visits from each user to count as "shared place" (prevents noise)
+const SHARED_PLACES_MIN_VISITS = 2;
+
+// Maximum shared places to return (keep it minimal)
+const SHARED_PLACES_MAX_RESULTS = 3;
+
 // Delayed crossing: same area within 24 hours counts as crossing
 const DELAYED_CROSSING_WINDOW_MS = 24 * 60 * 60 * 1000; // 24 hours
 
@@ -1395,6 +1411,120 @@ export const getCrossedPathsCount = query({
 });
 
 // ---------------------------------------------------------------------------
+// getSharedPlaces — Privacy-safe shared places detection (Phase-1)
+// ---------------------------------------------------------------------------
+/**
+ * Get shared places between two users based on their location history.
+ *
+ * PRIVACY PROTECTIONS:
+ * - Uses coarse 1km grid clustering (no exact locations)
+ * - Returns generic labels only (no venue names or addresses)
+ * - No timestamps exposed
+ * - Minimum visit threshold to filter noise
+ * - Max 3 results to prevent profiling
+ * - Only recent history (14 days)
+ */
+export const getSharedPlaces = query({
+  args: {
+    viewerId: v.id('users'),    // Current user viewing the profile
+    profileUserId: v.id('users'), // User whose profile is being viewed
+  },
+  handler: async (ctx, args) => {
+    const { viewerId, profileUserId } = args;
+
+    // Don't show shared places for self
+    if (viewerId === profileUserId) {
+      return [];
+    }
+
+    const now = Date.now();
+    const windowStart = now - SHARED_PLACES_WINDOW_MS;
+
+    // Query history entries for both users
+    // Using crossPathHistory which has approximate coordinates
+    const [viewerAsUser1, viewerAsUser2, profileAsUser1, profileAsUser2] = await Promise.all([
+      // Viewer's crossings where they were user1
+      ctx.db
+        .query('crossPathHistory')
+        .withIndex('by_user1', (q) => q.eq('user1Id', viewerId))
+        .filter((q) => q.gte(q.field('createdAt'), windowStart))
+        .collect(),
+      // Viewer's crossings where they were user2
+      ctx.db
+        .query('crossPathHistory')
+        .withIndex('by_user2', (q) => q.eq('user2Id', viewerId))
+        .filter((q) => q.gte(q.field('createdAt'), windowStart))
+        .collect(),
+      // Profile user's crossings where they were user1
+      ctx.db
+        .query('crossPathHistory')
+        .withIndex('by_user1', (q) => q.eq('user1Id', profileUserId))
+        .filter((q) => q.gte(q.field('createdAt'), windowStart))
+        .collect(),
+      // Profile user's crossings where they were user2
+      ctx.db
+        .query('crossPathHistory')
+        .withIndex('by_user2', (q) => q.eq('user2Id', profileUserId))
+        .filter((q) => q.gte(q.field('createdAt'), windowStart))
+        .collect(),
+    ]);
+
+    // Combine entries for each user
+    const viewerEntries = [...viewerAsUser1, ...viewerAsUser2];
+    const profileEntries = [...profileAsUser1, ...profileAsUser2];
+
+    // Build place key maps for each user
+    // Map: placeKey -> count of entries in that area
+    const viewerPlaces = new Map<string, number>();
+    const profilePlaces = new Map<string, number>();
+
+    for (const entry of viewerEntries) {
+      if (entry.crossedLatApprox != null && entry.crossedLngApprox != null) {
+        const key = generatePlaceKey(entry.crossedLatApprox, entry.crossedLngApprox);
+        viewerPlaces.set(key, (viewerPlaces.get(key) || 0) + 1);
+      }
+    }
+
+    for (const entry of profileEntries) {
+      if (entry.crossedLatApprox != null && entry.crossedLngApprox != null) {
+        const key = generatePlaceKey(entry.crossedLatApprox, entry.crossedLngApprox);
+        profilePlaces.set(key, (profilePlaces.get(key) || 0) + 1);
+      }
+    }
+
+    // Find overlapping place keys where both users have minimum visits
+    const sharedPlaces: { label: string; placeKey: string }[] = [];
+
+    for (const [placeKey, viewerCount] of viewerPlaces) {
+      const profileCount = profilePlaces.get(placeKey);
+
+      // Both users must have visited this place
+      if (
+        profileCount &&
+        viewerCount >= SHARED_PLACES_MIN_VISITS &&
+        profileCount >= SHARED_PLACES_MIN_VISITS
+      ) {
+        sharedPlaces.push({
+          placeKey,
+          label: getPlaceLabel(placeKey, sharedPlaces.length),
+        });
+
+        // Limit results
+        if (sharedPlaces.length >= SHARED_PLACES_MAX_RESULTS) {
+          break;
+        }
+      }
+    }
+
+    // Return only labels (no coordinates, no counts, no timestamps)
+    return sharedPlaces.map((p, idx) => ({
+      id: `shared_place_${idx}`,
+      label: p.label,
+    }));
+  },
+});
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
@@ -1606,6 +1736,48 @@ function roundToGrid(lat: number, lng: number): { lat: number; lng: number } {
     lat: Math.round(lat / gridSize) * gridSize,
     lng: Math.round(lng / gridSize) * gridSize,
   };
+}
+
+/**
+ * Generate a coarse place key for shared places clustering.
+ * Uses ~1km grid to prevent exact location exposure.
+ * Returns a string key like "lat:12.34_lng:56.78" for map-based grouping.
+ */
+function generatePlaceKey(lat: number, lng: number): string {
+  // 1 degree latitude ≈ 111km, so 1km ≈ 0.009 degrees
+  const gridSize = SHARED_PLACES_GRID_METERS / 111000;
+  const roundedLat = Math.round(lat / gridSize) * gridSize;
+  const roundedLng = Math.round(lng / gridSize) * gridSize;
+  // Use fixed precision to ensure consistent keys
+  return `lat:${roundedLat.toFixed(3)}_lng:${roundedLng.toFixed(3)}`;
+}
+
+/**
+ * Generic place labels for Phase-1 (no venue API).
+ * Returns privacy-safe area descriptions.
+ */
+const GENERIC_PLACE_LABELS = [
+  'Shared place nearby',
+  'Common area',
+  'Frequent spot',
+  'Visited area',
+  'Nearby location',
+];
+
+/**
+ * Get a deterministic but varied place label based on place key.
+ * Uses the key hash to pick a label, ensuring same place = same label.
+ */
+function getPlaceLabel(placeKey: string, index: number): string {
+  // Simple hash to pick a label deterministically
+  let hash = 0;
+  for (let i = 0; i < placeKey.length; i++) {
+    hash = ((hash << 5) - hash) + placeKey.charCodeAt(i);
+    hash |= 0;
+  }
+  // Add index to vary labels for multiple places
+  const labelIndex = Math.abs(hash + index) % GENERIC_PLACE_LABELS.length;
+  return GENERIC_PLACE_LABELS[labelIndex];
 }
 
 /**
