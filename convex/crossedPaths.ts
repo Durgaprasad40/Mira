@@ -50,16 +50,23 @@ const CROSS_EVENT_EXPIRY_MS = 7 * 24 * 60 * 60 * 1000; // 7 days (cleanup)
 // ---------------------------------------------------------------------------
 // Deterministic dedupeKey generation for crossed paths
 // Uses sorted user IDs to ensure A-B == B-A (symmetric)
+// Includes 1-hour time bucket to allow new crossings in future hours
 // ---------------------------------------------------------------------------
 
 /**
  * Generate a deterministic dedupeKey for crossed paths notifications.
  * Uses sorted user IDs to ensure symmetric detection (A crossing B == B crossing A).
- * Format: `crossed_paths:${minUserId}:${maxUserId}`
+ * Includes 1-hour time bucket to:
+ * - Prevent duplicate notifications within the same hour
+ * - Allow new notifications in future hours for repeat crossings
+ *
+ * Format: `crossed_paths:${minUserId}:${maxUserId}:${hourBucket}`
  */
-function makeCrossedPathsDedupeKey(userA: Id<'users'>, userB: Id<'users'>): string {
+function makeCrossedPathsDedupeKey(userA: Id<'users'>, userB: Id<'users'>, now: number): string {
   const sorted = [userA as string, userB as string].sort();
-  return `crossed_paths:${sorted[0]}:${sorted[1]}`;
+  // 1-hour time bucket (milliseconds -> hours)
+  const bucket = Math.floor(now / (60 * 60 * 1000));
+  return `crossed_paths:${sorted[0]}:${sorted[1]}:${bucket}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -566,8 +573,8 @@ export const recordLocation = mutation({
           body = `${crossingCount} times now! ${reasonText}. Maybe say hi?`;
         }
 
-        // Generate deterministic dedupeKey using sorted user IDs (symmetric)
-        const pairDedupeKey = makeCrossedPathsDedupeKey(user1Id, user2Id);
+        // Generate deterministic dedupeKey using sorted user IDs + time bucket (symmetric)
+        const pairDedupeKey = makeCrossedPathsDedupeKey(user1Id, user2Id, now);
 
         // IDEMPOTENCY: Check for existing notification with same dedupeKey within cooldown window
         // This prevents duplicate notifications even with concurrent updates
