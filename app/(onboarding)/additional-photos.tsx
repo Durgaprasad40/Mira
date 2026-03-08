@@ -829,7 +829,17 @@ export default function AdditionalPhotosScreen() {
     const failedCount = Object.values(uploadStateByIndex).filter(state => state === 'failed').length;
 
     if (__DEV__) {
-      console.log('[PHOTO_UPLOAD] stateGate', { uploadingCount, failedCount });
+      console.log('[PHOTO_UPLOAD] stateGate', { uploadingCount, failedCount, backendPhotosLoaded: backendPhotos !== undefined });
+    }
+
+    // Gate 0: Backend photos not yet loaded (prevent bypass by clicking Continue before sync)
+    if (!isDemoMode && backendPhotos === undefined) {
+      Alert.alert(
+        'Loading Photos',
+        'Still loading your photos. Please wait a moment...',
+        [{ text: 'OK' }]
+      );
+      return;
     }
 
     // Gate 1: Uploading in progress

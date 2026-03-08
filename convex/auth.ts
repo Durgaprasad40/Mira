@@ -438,9 +438,16 @@ export const registerWithEmail = mutation({
       v.literal("lesbian"),
       v.literal("other"),
     ),
+    lgbtqSelf: v.optional(v.array(v.union(
+      v.literal('gay'),
+      v.literal('lesbian'),
+      v.literal('bisexual'),
+      v.literal('transgender'),
+      v.literal('prefer_not_to_say')
+    ))), // LGBTQ identity (optional)
   },
   handler: async (ctx, args) => {
-    const { email, password, name, handle, dateOfBirth, gender } = args;
+    const { email, password, name, handle, dateOfBirth, gender, lgbtqSelf } = args;
     const now = Date.now();
 
     // C8 FIX: Normalize email to lowercase to prevent case-based duplicates
@@ -532,6 +539,7 @@ export const registerWithEmail = mutation({
       handle: normalizedHandle, // Store the normalized handle
       dateOfBirth,
       gender,
+      lgbtqSelf: lgbtqSelf ?? [], // LGBTQ identity (optional, max 2)
       bio: "",
       isVerified: false,
       // 8B: Email starts unverified

@@ -335,9 +335,12 @@ export const getLikesReceived = query({
     const user = await ctx.db.get(userId);
     if (!user) return [];
 
-    // TODO: Subscription restrictions disabled for testing mode.
-    // All users can see who liked them during testing.
-    const canSee = true;
+    // Determine if user can see who liked them:
+    // - Premium/Basic subscribers can see
+    // - Female users on free tier can see (free-tier benefit)
+    const isPaid = user.subscriptionTier === 'premium' || user.subscriptionTier === 'basic';
+    const isFemale = user.gender === 'female';
+    const canSee = isPaid || isFemale;
 
     const likes = await ctx.db
       .query('likes')

@@ -783,6 +783,7 @@ export default function BasicInfoScreen() {
         handle: nickname,
         dateOfBirth,
         gender: gender!, // Validated above - gender is not null here
+        lgbtqSelf: lgbtqSelf.length > 0 ? lgbtqSelf : undefined, // LGBTQ identity (optional)
       });
 
       // If result is null, USER_EXISTS was handled (Alert shown, routing done)

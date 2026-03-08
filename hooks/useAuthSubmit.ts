@@ -101,6 +101,7 @@ export function useAuthSubmit() {
       handle: string; // Required unique nickname
       dateOfBirth: string;
       gender: "male" | "female" | "non_binary" | "lesbian" | "other";
+      lgbtqSelf?: ("gay" | "lesbian" | "bisexual" | "transgender" | "prefer_not_to_say")[]; // LGBTQ identity (optional)
     }): Promise<{
       success: boolean;
       userId?: string;

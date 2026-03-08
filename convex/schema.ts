@@ -16,6 +16,13 @@ export default defineSchema({
     handle: v.optional(v.string()), // Unique user ID / nickname (e.g., @johndoe)
     dateOfBirth: v.string(),
     gender: v.union(v.literal('male'), v.literal('female'), v.literal('non_binary'), v.literal('lesbian'), v.literal('other')),
+    lgbtqSelf: v.optional(v.array(v.union(
+      v.literal('gay'),
+      v.literal('lesbian'),
+      v.literal('bisexual'),
+      v.literal('transgender'),
+      v.literal('prefer_not_to_say')
+    ))), // LGBTQ identity (optional, max 2)
 
     // Profile
     bio: v.string(),
