@@ -271,3 +271,39 @@ export async function ensureUserByAuthId(
   console.log(`[ensureUserByAuthId] Created user: ${newUserId} for authUserId: ${authUserId}`);
   return newUserId;
 }
+
+/**
+ * Validate session token and return the authenticated user ID.
+ * Uses session table to verify token is valid, not expired, and not revoked.
+ *
+ * @param ctx - Convex mutation context
+ * @param token - Session token to validate
+ * @returns userId if valid, null if invalid/expired/revoked
+ */
+export async function validateSessionToken(
+  ctx: MutationCtx,
+  token: string
+): Promise<Id<"users"> | null> {
+  const now = Date.now();
+
+  const session = await ctx.db
+    .query('sessions')
+    .withIndex('by_token', (q) => q.eq('token', token))
+    .first();
+
+  if (!session) return null;
+  if (session.expiresAt < now) return null;
+  if (session.revokedAt) return null;
+
+  const user = await ctx.db.get(session.userId);
+  if (!user) return null;
+  if (!user.isActive) return null;
+  if (user.deletedAt) return null;
+
+  // Check mass session revocation
+  if (user.sessionsRevokedAt && session.createdAt < user.sessionsRevokedAt) {
+    return null;
+  }
+
+  return session.userId;
+}

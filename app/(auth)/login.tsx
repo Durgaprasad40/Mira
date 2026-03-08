@@ -103,11 +103,11 @@ export default function LoginScreen() {
 
   // STABILITY FIX: Force logout before starting new account creation
   // This prevents session/token leakage when user switches accounts
-  const handleSignUp = () => {
+  const handleSignUp = async () => {
     // Check if there's an existing session (userId or token)
     if (userId || token) {
       if (__DEV__) console.log('[AUTH] Sign up pressed with existing session -> forcing logout before new signup');
-      logout();
+      await logout();
     }
     router.push("/(onboarding)");
   };

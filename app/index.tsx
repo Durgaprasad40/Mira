@@ -233,6 +233,8 @@ export default function Index() {
           }
 
           // C1 FIX: Always set both state values after successful backend validation
+          // Guard: don't set state if component unmounted
+          if (!mountedRef.current) return;
           setConvexOnboardingCompleted(backendOnboardingCompleted);
           setConvexValidated(true);
 
@@ -247,6 +249,8 @@ export default function Index() {
         if (__DEV__) {
           console.warn('[AUTH_BOOT] Validation failed (network) -> will route to welcome');
         }
+        // Guard: don't set state if component unmounted
+        if (!mountedRef.current) return;
         setConvexValidated(true);
         setConvexOnboardingCompleted(false);
       }
@@ -256,6 +260,8 @@ export default function Index() {
     validateSession().catch((error) => {
       console.error('[AUTH_BOOT] Unhandled validation error:', error);
       // C1 FIX: On crash, set state to trigger ROUTE_WELCOME
+      // Guard: don't set state if component unmounted
+      if (!mountedRef.current) return;
       setConvexValidated(true);
       setConvexOnboardingCompleted(false);
     });

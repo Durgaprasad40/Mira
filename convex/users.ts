@@ -2,7 +2,7 @@ import { v } from "convex/values";
 import { mutation, query } from "./_generated/server";
 import { Id } from "./_generated/dataModel";
 import { logAdminAction } from "./adminLog";
-import { resolveUserIdByAuthId, ensureUserByAuthId } from "./helpers";
+import { resolveUserIdByAuthId, ensureUserByAuthId, validateSessionToken } from "./helpers";
 
 // ALLOWED_RELATIONSHIP_INTENTS: Schema-safe values (excludes UI-only values like single_parent, just_18)
 const ALLOWED_RELATIONSHIP_INTENTS = new Set([
@@ -520,6 +520,7 @@ export const toggleIncognito = mutation({
 export const updateNearbySettings = mutation({
   args: {
     userId: v.id("users"),
+    token: v.optional(v.string()), // Session token for auth validation
     nearbyEnabled: v.optional(v.boolean()),
     crossedPathsEnabled: v.optional(v.boolean()),
     hideDistance: v.optional(v.boolean()),
@@ -534,7 +535,18 @@ export const updateNearbySettings = mutation({
     ),
   },
   handler: async (ctx, args) => {
-    const { userId, incognitoMode, ...updates } = args;
+    const { userId, token, incognitoMode, ...updates } = args;
+
+    // Auth validation: if token provided, verify it matches the userId
+    if (token) {
+      const authenticatedUserId = await validateSessionToken(ctx, token);
+      if (!authenticatedUserId) {
+        throw new Error("Unauthorized: invalid or expired session");
+      }
+      if (authenticatedUserId !== userId) {
+        throw new Error("Unauthorized: cannot modify another user's settings");
+      }
+    }
 
     const user = await ctx.db.get(userId);
     if (!user) throw new Error("User not found");
@@ -598,10 +610,22 @@ export const pauseNearby = mutation({
 export const toggleDiscoveryPause = mutation({
   args: {
     userId: v.id("users"),
+    token: v.optional(v.string()), // Session token for auth validation
     paused: v.boolean(),
   },
   handler: async (ctx, args) => {
-    const { userId, paused } = args;
+    const { userId, token, paused } = args;
+
+    // Auth validation: if token provided, verify it matches the userId
+    if (token) {
+      const authenticatedUserId = await validateSessionToken(ctx, token);
+      if (!authenticatedUserId) {
+        throw new Error("Unauthorized: invalid or expired session");
+      }
+      if (authenticatedUserId !== userId) {
+        throw new Error("Unauthorized: cannot modify another user's settings");
+      }
+    }
 
     const user = await ctx.db.get(userId);
     if (!user) throw new Error("User not found");
@@ -635,6 +659,44 @@ export const toggleShowLastSeen = mutation({
     if (!user) throw new Error("User not found");
 
     await ctx.db.patch(userId, { showLastSeen: enabled });
+    return { success: true };
+  },
+});
+
+// Update privacy settings (hideAge, disableReadReceipts)
+export const updatePrivacySettings = mutation({
+  args: {
+    userId: v.id("users"),
+    token: v.optional(v.string()), // Session token for auth validation
+    hideAge: v.optional(v.boolean()),
+    disableReadReceipts: v.optional(v.boolean()),
+  },
+  handler: async (ctx, args) => {
+    const { userId, token, hideAge, disableReadReceipts } = args;
+
+    // Auth validation: if token provided, verify it matches the userId
+    if (token) {
+      const authenticatedUserId = await validateSessionToken(ctx, token);
+      if (!authenticatedUserId) {
+        throw new Error("Unauthorized: invalid or expired session");
+      }
+      if (authenticatedUserId !== userId) {
+        throw new Error("Unauthorized: cannot modify another user's settings");
+      }
+    }
+
+    const user = await ctx.db.get(userId);
+    if (!user) throw new Error("User not found");
+
+    // Build update object with only provided fields
+    const updates: Record<string, boolean> = {};
+    if (hideAge !== undefined) updates.hideAge = hideAge;
+    if (disableReadReceipts !== undefined) updates.disableReadReceipts = disableReadReceipts;
+
+    if (Object.keys(updates).length > 0) {
+      await ctx.db.patch(userId, updates);
+    }
+
     return { success: true };
   },
 });

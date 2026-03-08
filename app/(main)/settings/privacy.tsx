@@ -1,13 +1,30 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect } from 'react';
 import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Switch, Alert } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
+import { useQuery, useMutation } from 'convex/react';
+import { api } from '@/convex/_generated/api';
 import { COLORS } from '@/lib/constants';
 import { usePrivacyStore } from '@/stores/privacyStore';
+import { useAuthStore } from '@/stores/authStore';
+import { isDemoMode } from '@/hooks/useConvex';
+import { Toast } from '@/components/ui/Toast';
 
 export default function PrivacySettingsScreen() {
   const router = useRouter();
+  const { userId, token } = useAuthStore();
+
+  // Query current user privacy settings (live mode only)
+  const currentUser = useQuery(
+    api.users.getCurrentUser,
+    !isDemoMode && userId ? { userId: userId as any } : 'skip'
+  );
+
+  // Mutations for backend sync
+  const toggleDiscoveryPause = useMutation(api.users.toggleDiscoveryPause);
+  const updateNearbySettings = useMutation(api.users.updateNearbySettings);
+  const updatePrivacySettings = useMutation(api.users.updatePrivacySettings);
 
   // Privacy toggles from persisted store
   const hideFromDiscover = usePrivacyStore((s) => s.hideFromDiscover);
@@ -20,11 +37,46 @@ export default function PrivacySettingsScreen() {
   const setHideDistance = usePrivacyStore((s) => s.setHideDistance);
   const setDisableReadReceipts = usePrivacyStore((s) => s.setDisableReadReceipts);
 
+  // Hydrate local state from backend on load (live mode only)
+  useEffect(() => {
+    if (currentUser) {
+      // Sync hideFromDiscover from isDiscoveryPaused
+      if (currentUser.isDiscoveryPaused !== undefined) {
+        setHideFromDiscover(currentUser.isDiscoveryPaused);
+      }
+      // Sync hideDistance
+      if (currentUser.hideDistance !== undefined) {
+        setHideDistance(currentUser.hideDistance);
+      }
+      // Sync hideAge
+      if (currentUser.hideAge !== undefined) {
+        setHideAge(currentUser.hideAge);
+      }
+      // Sync disableReadReceipts
+      if (currentUser.disableReadReceipts !== undefined) {
+        setDisableReadReceipts(currentUser.disableReadReceipts);
+      }
+    }
+  }, [currentUser]);
+
   // Track if warning has been shown this session (session-only, no persistence needed)
   const [warningShownThisSession, setWarningShownThisSession] = useState(false);
 
   // Handle "Hide from Discover" toggle with one-time warning (session-only)
-  const handleHideFromDiscoverChange = useCallback((newValue: boolean) => {
+  const handleHideFromDiscoverChange = useCallback(async (newValue: boolean) => {
+    const applyChange = async () => {
+      setHideFromDiscover(newValue);
+      // Sync to backend in live mode
+      if (!isDemoMode && userId && currentUser?._id) {
+        try {
+          await toggleDiscoveryPause({ userId: currentUser._id, token: token ?? undefined, paused: newValue });
+        } catch {
+          Toast.show("Couldn't update setting. Please try again.");
+          setHideFromDiscover(!newValue); // Revert on error
+        }
+      }
+    };
+
     if (newValue && !warningShownThisSession) {
       // Show one-time warning (session-scoped, no AsyncStorage needed)
       Alert.alert(
@@ -40,15 +92,57 @@ export default function PrivacySettingsScreen() {
             onPress: () => {
               // Mark warning as shown for this session only
               setWarningShownThisSession(true);
-              setHideFromDiscover(true);
+              applyChange();
             },
           },
         ]
       );
       return; // Don't toggle yet, wait for user confirmation
     }
-    setHideFromDiscover(newValue);
-  }, [warningShownThisSession, setHideFromDiscover]);
+    applyChange();
+  }, [warningShownThisSession, setHideFromDiscover, userId, currentUser, toggleDiscoveryPause, token]);
+
+  // Handle "Hide Distance" toggle with backend sync
+  const handleHideDistanceChange = useCallback(async (newValue: boolean) => {
+    setHideDistance(newValue);
+    // Sync to backend in live mode
+    if (!isDemoMode && userId && currentUser?._id) {
+      try {
+        await updateNearbySettings({ userId: currentUser._id, token: token ?? undefined, hideDistance: newValue });
+      } catch {
+        Toast.show("Couldn't update setting. Please try again.");
+        setHideDistance(!newValue); // Revert on error
+      }
+    }
+  }, [setHideDistance, userId, currentUser, updateNearbySettings, token]);
+
+  // Handle "Hide Age" toggle with backend sync
+  const handleHideAgeChange = useCallback(async (newValue: boolean) => {
+    setHideAge(newValue);
+    // Sync to backend in live mode
+    if (!isDemoMode && userId && currentUser?._id) {
+      try {
+        await updatePrivacySettings({ userId: currentUser._id, token: token ?? undefined, hideAge: newValue });
+      } catch {
+        Toast.show("Couldn't update setting. Please try again.");
+        setHideAge(!newValue); // Revert on error
+      }
+    }
+  }, [setHideAge, userId, currentUser, updatePrivacySettings, token]);
+
+  // Handle "Disable Read Receipts" toggle with backend sync
+  const handleDisableReadReceiptsChange = useCallback(async (newValue: boolean) => {
+    setDisableReadReceipts(newValue);
+    // Sync to backend in live mode
+    if (!isDemoMode && userId && currentUser?._id) {
+      try {
+        await updatePrivacySettings({ userId: currentUser._id, token: token ?? undefined, disableReadReceipts: newValue });
+      } catch {
+        Toast.show("Couldn't update setting. Please try again.");
+        setDisableReadReceipts(!newValue); // Revert on error
+      }
+    }
+  }, [setDisableReadReceipts, userId, currentUser, updatePrivacySettings, token]);
 
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
@@ -91,7 +185,7 @@ export default function PrivacySettingsScreen() {
             </View>
             <Switch
               value={hideAge}
-              onValueChange={setHideAge}
+              onValueChange={handleHideAgeChange}
               trackColor={{ false: COLORS.border, true: COLORS.primary }}
               thumbColor={COLORS.white}
             />
@@ -107,7 +201,7 @@ export default function PrivacySettingsScreen() {
             </View>
             <Switch
               value={hideDistance}
-              onValueChange={setHideDistance}
+              onValueChange={handleHideDistanceChange}
               trackColor={{ false: COLORS.border, true: COLORS.primary }}
               thumbColor={COLORS.white}
             />
@@ -128,7 +222,7 @@ export default function PrivacySettingsScreen() {
             </View>
             <Switch
               value={disableReadReceipts}
-              onValueChange={setDisableReadReceipts}
+              onValueChange={handleDisableReadReceiptsChange}
               trackColor={{ false: COLORS.border, true: COLORS.primary }}
               thumbColor={COLORS.white}
             />

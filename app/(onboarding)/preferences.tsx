@@ -386,6 +386,8 @@ export default function PreferencesScreen() {
       const sanitizedIntent = sanitizeRelationshipIntent(relationshipIntent);
       if (sanitizedIntent.length > 0) preferences.relationshipIntent = sanitizedIntent;
       if (activities.length > 0) preferences.activities = activities;
+      // LGBTQ Preference is optional - only save if user selected any
+      if (lgbtqPreference.length > 0) preferences.lgbtqPreference = lgbtqPreference;
       preferences.minAge = finalMin;
       preferences.maxAge = finalMax;
       preferences.maxDistance = finalDistance;

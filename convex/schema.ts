@@ -348,6 +348,8 @@ export default defineSchema({
     // Privacy
     showLastSeen: v.optional(v.boolean()),
     hideDistance: v.optional(v.boolean()),         // true = don't show distance info to others
+    hideAge: v.optional(v.boolean()),              // true = don't show age on profile
+    disableReadReceipts: v.optional(v.boolean()), // true = others can't see when user read messages
     strongPrivacyMode: v.optional(v.boolean()),    // true = larger fuzz on Nearby map (200-400m vs 50-150m)
 
     // Photo Blur (user-controlled privacy)

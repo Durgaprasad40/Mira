@@ -223,6 +223,8 @@ export interface DemoUserProfile {
   faceVerificationPassed?: boolean;
   // Face verification pending manual review flag (persists across logout/relaunch)
   faceVerificationPending?: boolean;
+  // Display photo variant (original, blurred, cartoon)
+  displayPhotoVariant?: 'original' | 'blurred' | 'cartoon';
 }
 
 interface DemoState {
