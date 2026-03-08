@@ -52,10 +52,6 @@ import {
   ActivityIndicator,
   Linking,
   Platform,
-  PanResponder,
-  Animated,
-  Dimensions,
-  Alert,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useFocusEffect, useRouter } from 'expo-router';
@@ -120,6 +116,8 @@ type LocationUIState =
   | 'checking'
   | 'permission_required'
   | 'denied_needs_settings'
+  | 'restricted'           // iOS parental controls
+  | 'services_disabled'    // System-wide location off
   | 'error'
   | 'ready';
 
@@ -274,9 +272,16 @@ export default function NearbyScreen() {
   // UI state
   const [locationUIState, setLocationUIState] = useState<LocationUIState>('checking');
   const [queryError, setQueryError] = useState<string | null>(null);
+  const [isRetrying, setIsRetrying] = useState(false);
 
-  // Track which marker images have loaded (for Android stability)
-  const [loadedMarkers, setLoadedMarkers] = useState<Set<string>>(new Set());
+  // Mount guard for async operations
+  const isMountedRef = useRef(true);
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
 
   // ---------------------------------------------------------------------------
   // Query nearby users (live mode only)
@@ -290,25 +295,50 @@ export default function NearbyScreen() {
   const isQueryActive = !isDemo && convexUserId !== undefined;
   const isQueryLoading = isQueryActive && nearbyUsersQuery === undefined;
 
-  // Reset query error when query succeeds
+  // Ref to track query timeout (prevents race condition)
+  const queryTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Clear timeout when query succeeds or on unmount
   useEffect(() => {
-    if (nearbyUsersQuery !== undefined && queryError) {
-      setQueryError(null);
+    if (nearbyUsersQuery !== undefined) {
+      // Query succeeded - clear any pending timeout
+      if (queryTimeoutRef.current) {
+        clearTimeout(queryTimeoutRef.current);
+        queryTimeoutRef.current = null;
+      }
+      // Clear error if previously set
+      if (queryError) {
+        setQueryError(null);
+      }
     }
   }, [nearbyUsersQuery, queryError]);
 
   // Set timeout for query loading (30 seconds)
   useEffect(() => {
-    if (!isQueryLoading) return;
+    if (!isQueryLoading) {
+      return;
+    }
 
-    const timeout = setTimeout(() => {
+    // Clear any existing timeout
+    if (queryTimeoutRef.current) {
+      clearTimeout(queryTimeoutRef.current);
+    }
+
+    queryTimeoutRef.current = setTimeout(() => {
+      // Only set error if query is still pending
       if (nearbyUsersQuery === undefined && isQueryActive) {
         setQueryError('Unable to load nearby users. Please check your connection.');
         log.warn('[NEARBY]', 'query timeout - no data after 30s');
       }
+      queryTimeoutRef.current = null;
     }, 30000);
 
-    return () => clearTimeout(timeout);
+    return () => {
+      if (queryTimeoutRef.current) {
+        clearTimeout(queryTimeoutRef.current);
+        queryTimeoutRef.current = null;
+      }
+    };
   }, [isQueryLoading, isQueryActive, nearbyUsersQuery]);
 
   // ---------------------------------------------------------------------------
@@ -359,7 +389,7 @@ export default function NearbyScreen() {
       }
     }
 
-    // Publish location
+    // Publish location (with mount guard)
     (async () => {
       try {
         const result = await publishLocationMutation({
@@ -368,6 +398,9 @@ export default function NearbyScreen() {
           longitude: lng,
         });
 
+        // Guard: skip state updates if unmounted
+        if (!isMountedRef.current) return;
+
         // Update last published ref
         lastPublishedRef.current = { lat, lng };
 
@@ -375,6 +408,9 @@ export default function NearbyScreen() {
           console.log('[NEARBY] publishLocation success:', result);
         }
       } catch (err) {
+        // Guard: skip logging if unmounted
+        if (!isMountedRef.current) return;
+
         if (__DEV__) {
           console.error('[NEARBY] publishLocation failed:', err);
         }
@@ -499,57 +535,11 @@ export default function NearbyScreen() {
     return sorted.slice(0, 30);
   }, [processedNearbyUsers]);
 
-  // ---------------------------------------------------------------------------
-  // TEMPORARY: Test markers for Nearby testing (remove after testing)
-  // Only shown when no real users exist AND we have a valid location
-  // ---------------------------------------------------------------------------
-  const testNearbyUsers: ProcessedNearbyUser[] = useMemo(() => {
-    // Only generate test markers if no real users and we have location
-    if (visibleUsers.length > 0) return [];
-    if (!bestLocation || !isValidMapCoordinate(bestLocation.latitude, bestLocation.longitude)) {
-      return [];
-    }
-
-    const baseLat = bestLocation.latitude;
-    const baseLng = bestLocation.longitude;
-
-    // Test marker offsets (~100-200m from user)
-    // 0.001 degrees ≈ 111 meters
-    const testOffsets = [
-      { latOff: +0.001, lngOff: +0.001, id: 'test_user_1', name: 'Test User 1', distance: 120 },
-      { latOff: -0.001, lngOff: +0.001, id: 'test_user_2', name: 'Test User 2', distance: 150 },
-      { latOff: +0.001, lngOff: -0.001, id: 'test_user_3', name: 'Test User 3', distance: 180 },
-    ];
-
-    if (__DEV__) {
-      console.log('[NEARBY] Generating test markers at:', { baseLat, baseLng });
-    }
-
-    return testOffsets.map((offset) => ({
-      id: offset.id,
-      name: offset.name,
-      age: 25,
-      publishedLat: baseLat + offset.latOff,
-      publishedLng: baseLng + offset.lngOff,
-      publishedAt: Date.now(),
-      distance: offset.distance,
-      freshness: 'solid' as const,
-      photoUrl: null,
-      isVerified: true,
-      hideDistance: false,
-      // For test markers, fuzzed coords = published coords (no fuzzing needed)
-      fuzzedLat: baseLat + offset.latOff,
-      fuzzedLng: baseLng + offset.lngOff,
-    }));
-  }, [visibleUsers.length, bestLocation]);
-
-  // Combine real users with test markers (real users take priority)
-  const mapUsers = useMemo(() => {
-    return visibleUsers.length > 0 ? visibleUsers : testNearbyUsers;
-  }, [visibleUsers, testNearbyUsers]);
+  // Alias for rendering (visibleUsers are the processed, sorted, limited markers)
+  const mapUsers = visibleUsers;
 
   // ---------------------------------------------------------------------------
-  // Marker press handler - opens full profile OR shows alert for test markers
+  // Marker press handler - opens full profile
   // ---------------------------------------------------------------------------
   const handleMarkerPress = useCallback((user: ProcessedNearbyUser) => {
     if (!user?.id) {
@@ -557,57 +547,9 @@ export default function NearbyScreen() {
       return;
     }
 
-    // TEMPORARY: Test markers show alert instead of navigating (prevents crash)
-    if (user.id.startsWith('test_user_')) {
-      log.info('[NEARBY]', 'test marker tapped', { id: user.id, name: user.name });
-      Alert.alert(
-        'Test Marker',
-        'This is a temporary test marker for Nearby testing.\n\nReal users will open their full profile.',
-        [{ text: 'OK' }]
-      );
-      return;
-    }
-
-    // Real users: navigate to full profile
     log.info('[NEARBY]', 'marker tapped, opening profile', { id: user.id, name: user.name });
     safePush(router, `/(main)/profile/${user.id}` as any, 'nearby->profile');
   }, [router]);
-
-  // ---------------------------------------------------------------------------
-  // Marker image load handler - stops tracksViewChanges after image loads
-  // ---------------------------------------------------------------------------
-  const handleMarkerImageLoad = useCallback((userId: string) => {
-    setLoadedMarkers((prev) => {
-      if (prev.has(userId)) return prev; // Already loaded, no update needed
-      const next = new Set(prev);
-      next.add(userId);
-      return next;
-    });
-  }, []);
-
-  // Mark markers without photos as "loaded" immediately (no image to wait for)
-  // This includes test markers which always have photoUrl = null
-  useEffect(() => {
-    const usersWithoutPhotos = mapUsers.filter((u) => !u.photoUrl);
-    if (usersWithoutPhotos.length === 0) return;
-
-    // Use setTimeout to ensure this runs after initial render
-    const timer = setTimeout(() => {
-      setLoadedMarkers((prev) => {
-        const next = new Set(prev);
-        let changed = false;
-        for (const user of usersWithoutPhotos) {
-          if (!next.has(user.id)) {
-            next.add(user.id);
-            changed = true;
-          }
-        }
-        return changed ? next : prev;
-      });
-    }, 100); // Small delay to let initial render complete
-
-    return () => clearTimeout(timer);
-  }, [mapUsers]);
 
   // ---------------------------------------------------------------------------
   // Map control handlers
@@ -635,70 +577,6 @@ export default function NearbyScreen() {
       console.warn('[NEARBY] No valid location for recenter');
     }
   }, [bestLocation]);
-
-  // ---------------------------------------------------------------------------
-  // TEMPORARY: Draggable recenter button (remove after testing)
-  // ---------------------------------------------------------------------------
-  const { width: screenWidth, height: screenHeight } = Dimensions.get('window');
-  const BUTTON_SIZE = 44;
-  const BUTTON_MARGIN = 16;
-
-  // Initial position: bottom-right corner
-  const buttonPosition = useRef(new Animated.ValueXY({
-    x: screenWidth - BUTTON_SIZE - BUTTON_MARGIN,
-    y: screenHeight - BUTTON_SIZE - BUTTON_MARGIN - 150, // Account for tab bar + header
-  })).current;
-
-  // Track if button was dragged (to differentiate tap vs drag)
-  const isDragging = useRef(false);
-
-  const panResponder = useMemo(() => PanResponder.create({
-    onStartShouldSetPanResponder: () => true,
-    onMoveShouldSetPanResponder: (_, gestureState) => {
-      // Only start drag if moved more than 5px
-      return Math.abs(gestureState.dx) > 5 || Math.abs(gestureState.dy) > 5;
-    },
-    onPanResponderGrant: () => {
-      isDragging.current = false;
-      // Extract current position
-      buttonPosition.extractOffset();
-    },
-    onPanResponderMove: (_, gestureState) => {
-      // Only mark as dragging if moved more than 5px (same threshold as onMoveShouldSetPanResponder)
-      if (Math.abs(gestureState.dx) > 5 || Math.abs(gestureState.dy) > 5) {
-        isDragging.current = true;
-      }
-      // Update position during drag
-      buttonPosition.setValue({ x: gestureState.dx, y: gestureState.dy });
-    },
-    onPanResponderRelease: (_, gestureState) => {
-      // Flatten offset into base value
-      buttonPosition.flattenOffset();
-
-      // Get current position
-      const currentX = (buttonPosition.x as any)._value;
-      const currentY = (buttonPosition.y as any)._value;
-
-      // Clamp to screen bounds
-      const clampedX = Math.max(BUTTON_MARGIN, Math.min(currentX, screenWidth - BUTTON_SIZE - BUTTON_MARGIN));
-      const clampedY = Math.max(BUTTON_MARGIN, Math.min(currentY, screenHeight - BUTTON_SIZE - BUTTON_MARGIN - 100));
-
-      // Animate to clamped position if out of bounds
-      if (currentX !== clampedX || currentY !== clampedY) {
-        Animated.spring(buttonPosition, {
-          toValue: { x: clampedX, y: clampedY },
-          useNativeDriver: false,
-          friction: 7,
-        }).start();
-      }
-
-      // If it was a tap (not a drag), trigger recenter
-      if (!isDragging.current) {
-        handleRecenterToMyLocation();
-      }
-    },
-  }), [buttonPosition, screenWidth, screenHeight, handleRecenterToMyLocation]);
-
 
   // ---------------------------------------------------------------------------
   // Permission flow on focus - start/stop GPS tracking
@@ -729,6 +607,16 @@ export default function NearbyScreen() {
     // Check permission status
     if (permissionStatus === 'unknown') {
       setLocationUIState('checking');
+      return;
+    }
+
+    if (permissionStatus === 'services_disabled') {
+      setLocationUIState('services_disabled');
+      return;
+    }
+
+    if (permissionStatus === 'restricted') {
+      setLocationUIState('restricted');
       return;
     }
 
@@ -797,9 +685,19 @@ export default function NearbyScreen() {
   // Retry query handler
   // ---------------------------------------------------------------------------
   const handleRetryQuery = useCallback(() => {
+    // Clear error and show loading feedback
     setQueryError(null);
-    // Force re-fetch by re-triggering location tracking
+    setIsRetrying(true);
+
+    // Re-trigger location tracking which will re-run query
     startLocationTracking();
+
+    // Clear retry state after a delay (query will auto-resolve via Convex)
+    setTimeout(() => {
+      if (isMountedRef.current) {
+        setIsRetrying(false);
+      }
+    }, 2000);
   }, [startLocationTracking]);
 
   // ---------------------------------------------------------------------------
@@ -856,6 +754,49 @@ export default function NearbyScreen() {
           <Text style={styles.title}>Location Access Denied</Text>
           <Text style={styles.subtitle}>
             Please enable location access in your device settings to see people nearby.
+          </Text>
+          <TouchableOpacity style={styles.primaryButton} onPress={openSettings}>
+            <Text style={styles.primaryButtonText}>Open Settings</Text>
+          </TouchableOpacity>
+        </View>
+      </SafeAreaView>
+    );
+  }
+
+  // ---------------------------------------------------------------------------
+  // Render: Restricted (iOS parental controls)
+  // ---------------------------------------------------------------------------
+  if (locationUIState === 'restricted') {
+    return (
+      <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
+        <View style={styles.header}>
+          <Text style={styles.headerTitle}>Nearby</Text>
+        </View>
+        <View style={styles.centered}>
+          <Ionicons name="lock-closed-outline" size={64} color={COLORS.textLight} />
+          <Text style={styles.title}>Location Restricted</Text>
+          <Text style={styles.subtitle}>
+            Location access is restricted on this device, possibly due to parental controls or device management. Contact your device administrator for help.
+          </Text>
+        </View>
+      </SafeAreaView>
+    );
+  }
+
+  // ---------------------------------------------------------------------------
+  // Render: Location Services Disabled (system-wide)
+  // ---------------------------------------------------------------------------
+  if (locationUIState === 'services_disabled') {
+    return (
+      <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
+        <View style={styles.header}>
+          <Text style={styles.headerTitle}>Nearby</Text>
+        </View>
+        <View style={styles.centered}>
+          <Ionicons name="location-outline" size={64} color={COLORS.textLight} />
+          <Text style={styles.title}>Location Services Off</Text>
+          <Text style={styles.subtitle}>
+            Please enable Location Services in your device settings to see people nearby.
           </Text>
           <TouchableOpacity style={styles.primaryButton} onPress={openSettings}>
             <Text style={styles.primaryButtonText}>Open Settings</Text>
@@ -987,7 +928,6 @@ export default function NearbyScreen() {
             const coords = geometry?.coordinates;
             const lat = coords?.[1];
             const lng = coords?.[0];
-            const clusterId = properties?.cluster_id;
             const pointCount = properties?.point_count ?? 2;
 
             // Safety: validate coordinates
@@ -1030,8 +970,7 @@ export default function NearbyScreen() {
            *
            * BEHAVIOR:
            * - Individual marker tap → handleMarkerPress(user)
-           * - Test markers → show Alert (temporary)
-           * - Real users → navigate to Discover-style profile
+           * - Navigate to Discover-style profile
            *
            * DO NOT:
            * - Replace with View-based markers
@@ -1052,8 +991,20 @@ export default function NearbyScreen() {
           ))}
         </ClusteredMapView>
 
-        {/* Status overlay - only shown when no users AND no test markers */}
-        {mapUsers.length === 0 && (
+        {/* Query loading indicator - shown while fetching nearby users */}
+        {(isQueryLoading || isRetrying) && !isDemo && (
+          <View style={styles.loadingOverlay}>
+            <View style={styles.loadingCard}>
+              <ActivityIndicator size="small" color={COLORS.primary} />
+              <Text style={styles.loadingText}>
+                {isRetrying ? 'Retrying...' : 'Finding people nearby...'}
+              </Text>
+            </View>
+          </View>
+        )}
+
+        {/* Empty state overlay - only shown when ready with no users and NOT loading */}
+        {locationUIState === 'ready' && mapUsers.length === 0 && !isDemo && !isQueryLoading && !isRetrying && (
           <View style={styles.emptyOverlay}>
             <View style={styles.emptyCard}>
               <Ionicons name="people-outline" size={24} color={COLORS.textLight} />
@@ -1064,27 +1015,15 @@ export default function NearbyScreen() {
           </View>
         )}
 
-
-        {/* My location button - DRAGGABLE (temporary for testing) */}
+        {/* My location button (static, tap-once recenter) */}
         {permissionStatus === 'granted' && bestLocation && (
-          <Animated.View
-            style={[
-              styles.draggableLocationButton,
-              { transform: buttonPosition.getTranslateTransform() },
-            ]}
-            {...panResponder.panHandlers}
+          <TouchableOpacity
+            style={styles.myLocationButton}
+            onPress={handleRecenterToMyLocation}
+            activeOpacity={0.8}
           >
-            <View style={styles.myLocationButtonInner}>
-              <Ionicons name="locate" size={22} color={COLORS.primary} />
-            </View>
-          </Animated.View>
-        )}
-
-        {/* Test mode indicator */}
-        {testNearbyUsers.length > 0 && (
-          <View style={styles.testBadge}>
-            <Text style={styles.testBadgeText}>TEST MARKERS</Text>
-          </View>
+            <Ionicons name="locate" size={22} color={COLORS.primary} />
+          </TouchableOpacity>
         )}
       </View>
     </SafeAreaView>
@@ -1176,6 +1115,31 @@ const styles = StyleSheet.create({
   // NOTE: Cluster markers use image={pinPink} for Android reliability.
   // Custom View-based cluster styles removed - they were unreliable on Android.
   // Overlay styles
+  loadingOverlay: {
+    position: 'absolute',
+    top: 16,
+    left: 16,
+    right: 16,
+    alignItems: 'center',
+  },
+  loadingCard: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(255, 255, 255, 0.95)',
+    paddingHorizontal: 16,
+    paddingVertical: 10,
+    borderRadius: 20,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 3,
+    gap: 8,
+  },
+  loadingText: {
+    fontSize: 13,
+    color: COLORS.textLight,
+  },
   emptyOverlay: {
     position: 'absolute',
     bottom: 24,
@@ -1201,7 +1165,7 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: COLORS.textLight,
   },
-  // My location button (static - kept for reference)
+  // My location button (static, tap-once recenter)
   myLocationButton: {
     position: 'absolute',
     bottom: 24,
@@ -1217,42 +1181,5 @@ const styles = StyleSheet.create({
     shadowOpacity: 0.15,
     shadowRadius: 4,
     elevation: 4,
-  },
-  // TEMPORARY: Draggable location button (remove after testing)
-  draggableLocationButton: {
-    position: 'absolute',
-    top: 0,
-    left: 0,
-    width: 44,
-    height: 44,
-  },
-  myLocationButtonInner: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
-    backgroundColor: '#fff',
-    alignItems: 'center',
-    justifyContent: 'center',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.15,
-    shadowRadius: 4,
-    elevation: 4,
-  },
-  // TEMPORARY: Test marker badge (remove after testing)
-  testBadge: {
-    position: 'absolute',
-    top: 16,
-    alignSelf: 'center',
-    backgroundColor: '#FF6B6B',
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 16,
-  },
-  testBadgeText: {
-    fontSize: 11,
-    fontWeight: '700',
-    color: '#fff',
-    letterSpacing: 0.5,
   },
 });

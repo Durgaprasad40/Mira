@@ -20,7 +20,7 @@ import { markTiming } from '@/utils/startupTiming';
 // Types
 // ---------------------------------------------------------------------------
 
-export type PermissionStatus = 'unknown' | 'granted' | 'denied';
+export type PermissionStatus = 'unknown' | 'granted' | 'denied' | 'restricted' | 'services_disabled';
 
 export interface LocationCoords {
   latitude: number;
@@ -144,12 +144,41 @@ export const useLocationStore = create<LocationState>((set, get) => ({
     markTiming('location_start');
 
     try {
+      // 0. Check if location services are enabled system-wide
+      const servicesEnabled = await Location.hasServicesEnabledAsync();
+      if (!servicesEnabled) {
+        set({
+          permissionStatus: 'services_disabled',
+          isTracking: false,
+          error: 'Location services are disabled on this device',
+        });
+        log.warn('[LOCATION]', 'location services disabled');
+        return;
+      }
+
       // 1. Check/request permission
       let { status } = await Location.getForegroundPermissionsAsync();
 
       if (status !== 'granted') {
         const result = await Location.requestForegroundPermissionsAsync();
         status = result.status;
+      }
+
+      // Handle iOS restricted status (parental controls)
+      if (status === 'denied') {
+        // Check if it's actually restricted (iOS-specific)
+        const { ios } = await Location.getForegroundPermissionsAsync();
+        const isRestricted = ios?.scope === 'none';
+
+        set({
+          permissionStatus: isRestricted ? 'restricted' : 'denied',
+          isTracking: false,
+          error: isRestricted
+            ? 'Location access is restricted on this device'
+            : 'Location permission denied',
+        });
+        log.warn('[LOCATION]', isRestricted ? 'permission restricted' : 'permission denied');
+        return;
       }
 
       if (status !== 'granted') {
