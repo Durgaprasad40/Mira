@@ -643,6 +643,12 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
                 releaseSwipeLock(deferredSwipeId);
                 return;
               }
+              // CRASH FIX: Guard against stale swipedProfile in deferred callback
+              if (!swipedProfile?.id) {
+                releaseSwipeLock(deferredSwipeId);
+                navigatingRef.current = false;
+                return;
+              }
               try {
                 trackEvent({ name: 'match_created', matchId, otherUserId: swipedProfile.id });
                 router.push(`/(main)/match-celebration?matchId=${matchId}&userId=${swipedProfile.id}` as any);
@@ -687,6 +693,12 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
           InteractionManager.runAfterInteractions(() => {
             if (!mountedRef.current || !isFocusedRef.current) {
               releaseSwipeLock(deferredSwipeId);
+              return;
+            }
+            // CRASH FIX: Guard against stale swipedProfile/result in deferred callback
+            if (!swipedProfile?.id || !result?.matchId) {
+              releaseSwipeLock(deferredSwipeId);
+              navigatingRef.current = false;
               return;
             }
             try {

@@ -227,7 +227,7 @@ export default function Index() {
             }
             const { clearAuthBootCache } = require('@/stores/authBootCache');
             await clearAuthBootCache();
-            useAuthStore.getState().logout();
+            await useAuthStore.getState().logout();
             safeReplace("/(auth)/welcome", "FAST_PATH validation failed");
             return;
           }
@@ -347,8 +347,11 @@ export default function Index() {
     didForceLogout.current = true;
 
     if (__DEV__) console.log('[ONB] boot_decision action=FORCE_WELCOME_ONBOARDING_INCOMPLETE → logout + welcome');
-    useAuthStore.getState().logout();
-    safeReplace("/(auth)/welcome", "FORCE_WELCOME_ONBOARDING_INCOMPLETE");
+    // CRASH FIX: Await async logout before navigation to prevent race condition
+    (async () => {
+      await useAuthStore.getState().logout();
+      safeReplace("/(auth)/welcome", "FORCE_WELCOME_ONBOARDING_INCOMPLETE");
+    })();
   }, [bootAction]);
 
   // Side effects: signal route decision, restore demo auth, mark timing

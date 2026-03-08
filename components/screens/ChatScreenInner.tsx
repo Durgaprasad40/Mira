@@ -648,7 +648,16 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
         body: blob,
       });
 
-      const { storageId } = await uploadResponse.json();
+      // CRASH FIX: Validate upload response before accessing storageId
+      if (!uploadResponse.ok) {
+        throw new Error(`Upload failed: ${uploadResponse.status}`);
+      }
+
+      const uploadResult = await uploadResponse.json();
+      if (!uploadResult?.storageId) {
+        throw new Error('Upload succeeded but no storageId returned');
+      }
+      const { storageId } = uploadResult;
 
       // 3. Send protected image message with Phase-1 options mapped to Convex format
       await sendProtectedImage({
