@@ -462,7 +462,7 @@ export default function TruthOrDareScreen() {
 
   // Open thread for adding comment (same as opening thread, composer auto-shows)
   const openThreadForComment = useCallback((promptId: string) => {
-    router.push({ pathname: '/(main)/prompt-thread' as any, params: { promptId, autoOpenComposer: 'true' } });
+    router.push({ pathname: '/(main)/prompt-thread' as any, params: { promptId, autoOpenComposer: 'new' } });
   }, [router]);
 
   type FeedItem =

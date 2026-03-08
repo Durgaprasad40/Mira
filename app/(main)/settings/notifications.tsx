@@ -226,16 +226,15 @@ export default function NotificationsSettingsScreen() {
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Schedule</Text>
 
-          <TouchableOpacity style={styles.menuRow} activeOpacity={0.7}>
+          <View style={[styles.menuRow, { opacity: 0.5 }]}>
             <View style={styles.menuRowLeft}>
-              <Ionicons name="moon-outline" size={22} color={COLORS.text} />
+              <Ionicons name="moon-outline" size={22} color={COLORS.textMuted} />
               <View style={styles.menuRowInfo}>
-                <Text style={styles.menuRowTitle}>Quiet hours</Text>
+                <Text style={[styles.menuRowTitle, { color: COLORS.textMuted }]}>Quiet hours</Text>
                 <Text style={styles.menuRowSubtitle}>Coming soon</Text>
               </View>
             </View>
-            <Ionicons name="chevron-forward" size={20} color={COLORS.textLight} />
-          </TouchableOpacity>
+          </View>
         </View>
       </ScrollView>
     </SafeAreaView>

@@ -409,9 +409,9 @@ export const useDemoStore = create<DemoState>()((set, get) => ({
 
   demoLogout: () => {
     // C7 fix: clear session data on logout while preserving accounts
-    // NOTE: demoDmStore is NOT reset here — DM messages persist across logout/login
-    // Only explicit "Reset Demo Data" (via reset()) should wipe demo messages
+    // PRIVACY FIX: Reset demo DM messages on logout to prevent User B seeing User A's history
     useDemoNotifStore.getState().reset();
+    useDemoDmStore.getState().reset();
     useBlockStore.getState().clearBlocks();
 
     // Reset session-scoped state but preserve persistent user data

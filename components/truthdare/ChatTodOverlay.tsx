@@ -450,7 +450,7 @@ export function ChatTodOverlay({
                   <View style={styles.answerTypeRow}>
                     <TouchableOpacity
                       style={styles.answerTypeButton}
-                      onPress={() => {}}
+                      onPress={() => setShowVoiceRecorder(false)}
                       activeOpacity={0.7}
                     >
                       <Ionicons name="create-outline" size={24} color={C.primary} />
