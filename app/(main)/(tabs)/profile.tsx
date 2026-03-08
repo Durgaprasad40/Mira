@@ -407,31 +407,7 @@ export default function ProfileScreen() {
         {currentUser.bio && <Text style={styles.bio}>{currentUser.bio}</Text>}
       </View>
 
-      {subscriptionStatus && currentUser.gender === 'male' && (
-        <View style={styles.statsCard}>
-          <Text style={styles.statsTitle}>Subscription</Text>
-          <View style={styles.statsRow}>
-            <Text style={styles.statsLabel}>Tier:</Text>
-            <Text style={styles.statsValue}>
-              {subscriptionStatus.tier.charAt(0).toUpperCase() + subscriptionStatus.tier.slice(1)}
-            </Text>
-          </View>
-          {subscriptionStatus.isSubscribed && subscriptionStatus.expiresAt && (
-            <View style={styles.statsRow}>
-              <Text style={styles.statsLabel}>Expires:</Text>
-              <Text style={styles.statsValue}>
-                {new Date(subscriptionStatus.expiresAt).toLocaleDateString()}
-              </Text>
-            </View>
-          )}
-          <Button
-            title="Manage Subscription"
-            variant="outline"
-            onPress={() => safePush(router, '/(main)/subscription', 'profile->subscription')}
-            style={styles.subscriptionButton}
-          />
-        </View>
-      )}
+{/* HIDDEN: Subscription UI temporarily removed per product rules */}
 
       <View style={styles.menuSection}>
         <TouchableOpacity
@@ -443,14 +419,7 @@ export default function ProfileScreen() {
           <Ionicons name="chevron-forward" size={20} color={COLORS.textLight} />
         </TouchableOpacity>
 
-        <TouchableOpacity
-          style={styles.menuItem}
-          onPress={() => safePush(router, '/(main)/subscription', 'profile->subscriptionMenu')}
-        >
-          <Ionicons name="diamond-outline" size={24} color={COLORS.text} />
-          <Text style={styles.menuText}>Subscription</Text>
-          <Ionicons name="chevron-forward" size={20} color={COLORS.textLight} />
-        </TouchableOpacity>
+{/* HIDDEN: Subscription menu item temporarily removed per product rules */}
 
         <TouchableOpacity
           style={styles.menuItem}

@@ -9,6 +9,7 @@ import {
   Switch,
   Alert,
   Modal,
+  Linking,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
@@ -26,6 +27,13 @@ import { useDemoDmStore } from '@/stores/demoDmStore';
 import { useDemoNotifStore } from '@/hooks/useNotifications';
 import { getProfileCompleteness, NUDGE_MESSAGES } from '@/lib/profileCompleteness';
 import { ProfileNudge } from '@/components/ui/ProfileNudge';
+
+// Legal and support URLs (placeholder - replace with actual URLs when available)
+const LEGAL_URLS = {
+  privacyPolicy: 'https://mira.app/privacy',
+  termsOfService: 'https://mira.app/terms',
+  helpSupport: 'mailto:support@mira.app',
+};
 
 export default function SettingsScreen() {
   const router = useRouter();
@@ -401,15 +409,24 @@ export default function SettingsScreen() {
           <Text style={styles.menuText}>Edit Profile</Text>
           <Ionicons name="chevron-forward" size={20} color={COLORS.textLight} />
         </TouchableOpacity>
-        <TouchableOpacity style={styles.menuItem}>
+        <TouchableOpacity
+          style={styles.menuItem}
+          onPress={() => Linking.openURL(LEGAL_URLS.privacyPolicy)}
+        >
           <Text style={styles.menuText}>Privacy Policy</Text>
           <Ionicons name="chevron-forward" size={20} color={COLORS.textLight} />
         </TouchableOpacity>
-        <TouchableOpacity style={styles.menuItem}>
+        <TouchableOpacity
+          style={styles.menuItem}
+          onPress={() => Linking.openURL(LEGAL_URLS.termsOfService)}
+        >
           <Text style={styles.menuText}>Terms of Service</Text>
           <Ionicons name="chevron-forward" size={20} color={COLORS.textLight} />
         </TouchableOpacity>
-        <TouchableOpacity style={styles.menuItem}>
+        <TouchableOpacity
+          style={styles.menuItem}
+          onPress={() => Linking.openURL(LEGAL_URLS.helpSupport)}
+        >
           <Text style={styles.menuText}>Help & Support</Text>
           <Ionicons name="chevron-forward" size={20} color={COLORS.textLight} />
         </TouchableOpacity>

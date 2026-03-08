@@ -475,6 +475,7 @@ export const useOnboardingStore = create<OnboardingState>()((set) => ({
           if (draft.profileDetails.education) updates.education = draft.profileDetails.education;
           if (draft.profileDetails.bio) updates.bio = draft.profileDetails.bio;
           if (draft.profileDetails.profilePrompts) updates.profilePrompts = draft.profileDetails.profilePrompts;
+          if (draft.profileDetails.displayPhotoVariant) updates.displayPhotoVariant = draft.profileDetails.displayPhotoVariant;
         }
 
         // Lifestyle

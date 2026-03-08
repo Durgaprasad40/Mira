@@ -189,6 +189,15 @@ export const updateProfile = mutation({
     name: v.optional(v.string()),
     bio: v.optional(v.string()),
     height: v.optional(v.number()),
+    weight: v.optional(v.number()),
+    exercise: v.optional(
+      v.union(
+        v.literal("never"),
+        v.literal("sometimes"),
+        v.literal("regularly"),
+        v.literal("daily"),
+      ),
+    ),
     smoking: v.optional(
       v.union(
         v.literal("never"),
@@ -636,9 +645,22 @@ export const updateNotificationSettings = mutation({
     userId: v.id("users"),
     notificationsEnabled: v.optional(v.boolean()),
     emailNotificationsEnabled: v.optional(v.boolean()),
+    // Notification type preferences
+    notifyNewMatches: v.optional(v.boolean()),
+    notifyNewMessages: v.optional(v.boolean()),
+    notifyLikesAndSuperLikes: v.optional(v.boolean()),
+    notifyProfileViews: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
-    const { userId, notificationsEnabled, emailNotificationsEnabled } = args;
+    const {
+      userId,
+      notificationsEnabled,
+      emailNotificationsEnabled,
+      notifyNewMatches,
+      notifyNewMessages,
+      notifyLikesAndSuperLikes,
+      notifyProfileViews,
+    } = args;
 
     const user = await ctx.db.get(userId);
     if (!user) throw new Error("User not found");
@@ -649,6 +671,18 @@ export const updateNotificationSettings = mutation({
     }
     if (emailNotificationsEnabled !== undefined) {
       updates.emailNotificationsEnabled = emailNotificationsEnabled;
+    }
+    if (notifyNewMatches !== undefined) {
+      updates.notifyNewMatches = notifyNewMatches;
+    }
+    if (notifyNewMessages !== undefined) {
+      updates.notifyNewMessages = notifyNewMessages;
+    }
+    if (notifyLikesAndSuperLikes !== undefined) {
+      updates.notifyLikesAndSuperLikes = notifyLikesAndSuperLikes;
+    }
+    if (notifyProfileViews !== undefined) {
+      updates.notifyProfileViews = notifyProfileViews;
     }
 
     if (Object.keys(updates).length > 0) {
@@ -731,6 +765,11 @@ export const blockUser = mutation({
   handler: async (ctx, args) => {
     const { blockerId, blockedUserId } = args;
 
+    // Prevent self-blocking
+    if (blockerId === blockedUserId) {
+      return { success: false, error: 'cannot_block_self' };
+    }
+
     // Check if already blocked
     const existing = await ctx.db
       .query("blocks")
@@ -793,6 +832,11 @@ export const reportUser = mutation({
   handler: async (ctx, args) => {
     const { reporterId, reportedUserId, reason, description } = args;
     const now = Date.now();
+
+    // Prevent self-reporting
+    if (reporterId === reportedUserId) {
+      return { success: false, error: 'cannot_report_self' };
+    }
 
     await ctx.db.insert("reports", {
       reporterId,

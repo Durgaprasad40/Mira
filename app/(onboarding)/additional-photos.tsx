@@ -127,6 +127,25 @@ export default function AdditionalPhotosScreen() {
 
   // Backend mutations
   const deletePhotoMutation = useMutation(api.photos.deletePhoto);
+  const upsertDraft = useMutation(api.users.upsertOnboardingDraft);
+
+  // Wrapper to persist displayPhotoVariant to backend
+  const handleSetDisplayPhotoVariant = (variant: DisplayPhotoVariant) => {
+    setDisplayPhotoVariant(variant);
+    // Persist to backend in live mode
+    if (!isDemoMode && userId) {
+      upsertDraft({
+        userId: userId as any,
+        patch: {
+          profileDetails: { displayPhotoVariant: variant },
+          progress: { lastStepKey: 'additional_photos' },
+        },
+      }).catch((error) => {
+        if (__DEV__) console.error('[PHOTOS] Failed to save displayPhotoVariant:', error);
+      });
+      if (__DEV__) console.log(`[ONB_DRAFT] Saved displayPhotoVariant: ${variant}`);
+    }
+  };
 
   // Query backend photos for deletion (get photoIds)
   const backendPhotos = useQuery(
@@ -1273,7 +1292,7 @@ export default function AdditionalPhotosScreen() {
                   isSelected && styles.privacyOptionSelected,
                   isDisabled && styles.privacyOptionDisabled,
                 ]}
-                onPress={() => !isDisabled && setDisplayPhotoVariant(option.id)}
+                onPress={() => !isDisabled && handleSetDisplayPhotoVariant(option.id)}
                 disabled={isDisabled}
               >
                 <View style={[styles.privacyIcon, isSelected && styles.privacyIconSelected]}>

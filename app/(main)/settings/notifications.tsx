@@ -35,6 +35,11 @@ export default function NotificationsSettingsScreen() {
     if (currentUser) {
       // notificationsEnabled is the master toggle
       setPushEnabled(currentUser.notificationsEnabled !== false);
+      // Child notification type preferences (default to true if undefined)
+      setNewMatches(currentUser.notifyNewMatches !== false);
+      setNewMessages(currentUser.notifyNewMessages !== false);
+      setLikesAndSuperLikes(currentUser.notifyLikesAndSuperLikes !== false);
+      setProfileViews(currentUser.notifyProfileViews !== false);
     }
   }, [currentUser]);
 
@@ -52,6 +57,55 @@ export default function NotificationsSettingsScreen() {
     } catch {
       Toast.show('Couldn\u2019t update notification settings. Please try again.');
       setPushEnabled(!enabled);
+    }
+  };
+
+  // Handlers for child notification toggles
+  const handleNewMatchesToggle = async (enabled: boolean) => {
+    if (isDemoMode) { setNewMatches(enabled); return; }
+    if (!userId) return;
+    try {
+      await updateNotificationSettings({ userId: userId as any, notifyNewMatches: enabled });
+      setNewMatches(enabled);
+    } catch {
+      Toast.show('Couldn\u2019t update setting. Please try again.');
+      setNewMatches(!enabled);
+    }
+  };
+
+  const handleNewMessagesToggle = async (enabled: boolean) => {
+    if (isDemoMode) { setNewMessages(enabled); return; }
+    if (!userId) return;
+    try {
+      await updateNotificationSettings({ userId: userId as any, notifyNewMessages: enabled });
+      setNewMessages(enabled);
+    } catch {
+      Toast.show('Couldn\u2019t update setting. Please try again.');
+      setNewMessages(!enabled);
+    }
+  };
+
+  const handleLikesToggle = async (enabled: boolean) => {
+    if (isDemoMode) { setLikesAndSuperLikes(enabled); return; }
+    if (!userId) return;
+    try {
+      await updateNotificationSettings({ userId: userId as any, notifyLikesAndSuperLikes: enabled });
+      setLikesAndSuperLikes(enabled);
+    } catch {
+      Toast.show('Couldn\u2019t update setting. Please try again.');
+      setLikesAndSuperLikes(!enabled);
+    }
+  };
+
+  const handleProfileViewsToggle = async (enabled: boolean) => {
+    if (isDemoMode) { setProfileViews(enabled); return; }
+    if (!userId) return;
+    try {
+      await updateNotificationSettings({ userId: userId as any, notifyProfileViews: enabled });
+      setProfileViews(enabled);
+    } catch {
+      Toast.show('Couldn\u2019t update setting. Please try again.');
+      setProfileViews(!enabled);
     }
   };
 
@@ -106,7 +160,7 @@ export default function NotificationsSettingsScreen() {
             </View>
             <Switch
               value={newMatches}
-              onValueChange={setNewMatches}
+              onValueChange={handleNewMatchesToggle}
               disabled={childDisabled}
               trackColor={{ false: COLORS.border, true: COLORS.primary }}
               thumbColor={COLORS.white}
@@ -123,7 +177,7 @@ export default function NotificationsSettingsScreen() {
             </View>
             <Switch
               value={newMessages}
-              onValueChange={setNewMessages}
+              onValueChange={handleNewMessagesToggle}
               disabled={childDisabled}
               trackColor={{ false: COLORS.border, true: COLORS.primary }}
               thumbColor={COLORS.white}
@@ -140,7 +194,7 @@ export default function NotificationsSettingsScreen() {
             </View>
             <Switch
               value={likesAndSuperLikes}
-              onValueChange={setLikesAndSuperLikes}
+              onValueChange={handleLikesToggle}
               disabled={childDisabled}
               trackColor={{ false: COLORS.border, true: COLORS.primary }}
               thumbColor={COLORS.white}
@@ -157,7 +211,7 @@ export default function NotificationsSettingsScreen() {
             </View>
             <Switch
               value={profileViews}
-              onValueChange={setProfileViews}
+              onValueChange={handleProfileViewsToggle}
               disabled={childDisabled}
               trackColor={{ false: COLORS.border, true: COLORS.primary }}
               thumbColor={COLORS.white}

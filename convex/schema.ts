@@ -274,6 +274,11 @@ export default defineSchema({
           question: v.string(),
           answer: v.string(),
         }))),
+        displayPhotoVariant: v.optional(v.union(
+          v.literal('original'),
+          v.literal('blurred'),
+          v.literal('cartoon')
+        )),
       })),
       // Lifestyle
       lifestyle: v.optional(v.object({
@@ -355,6 +360,11 @@ export default defineSchema({
     pushToken: v.optional(v.string()),
     notificationsEnabled: v.boolean(),
     emailNotificationsEnabled: v.optional(v.boolean()), // Email notification preference
+    // Notification type preferences
+    notifyNewMatches: v.optional(v.boolean()),
+    notifyNewMessages: v.optional(v.boolean()),
+    notifyLikesAndSuperLikes: v.optional(v.boolean()),
+    notifyProfileViews: v.optional(v.boolean()),
 
     // Account Status
     isActive: v.boolean(),

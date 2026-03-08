@@ -141,6 +141,8 @@ export default function ComposeConfessionScreen() {
         isAnonymous,
         mood: 'emotional' as any,
         visibility: 'global' as any,
+        // Include tagged user if confessing to someone
+        ...(finalTarget ? { taggedUserId: finalTarget as any } : {}),
       }).catch((error: any) => {
         Alert.alert('Error', error.message || 'Failed to post confession');
       });
