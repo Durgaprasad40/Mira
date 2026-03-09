@@ -190,6 +190,23 @@ interface PrivateProfileState {
   // Deletion Actions
   initiatePrivateDataDeletion: () => void;
   recoverPrivateData: () => void;
+
+  // ST-001 FIX: Hydrate store from Convex on app restart
+  hydrateFromConvex: (convexProfile: {
+    _id: string;
+    displayName: string;
+    age: number;
+    gender: string;
+    city?: string;
+    privateBio?: string;
+    privateIntentKeys: string[];
+    privateDesireTagKeys?: string[];
+    privateBoundaries?: string[];
+    privatePhotoUrls: string[];
+    isSetupComplete: boolean;
+    hobbies?: string[];
+    isVerified?: boolean;
+  } | null) => void;
 }
 
 const initialWizardState = {
@@ -438,6 +455,53 @@ export const usePrivateProfileStore = create<PrivateProfileState>()((set) => ({
     deletedAt: null,
     recoverUntil: null,
   }),
+
+  // ST-001 FIX: Hydrate store from Convex profile on app restart
+  // This ensures Phase-2 profile state survives app restarts
+  hydrateFromConvex: (convexProfile) => {
+    if (!convexProfile) {
+      // No profile exists - keep default state, onboarding will show
+      return;
+    }
+
+    if (__DEV__) {
+      console.log('[privateProfileStore] hydrateFromConvex:', {
+        profileId: convexProfile._id,
+        displayName: convexProfile.displayName,
+        isSetupComplete: convexProfile.isSetupComplete,
+      });
+    }
+
+    // Hydrate store with Convex profile data
+    set({
+      // Profile info
+      displayName: convexProfile.displayName || '',
+      age: convexProfile.age || 0,
+      gender: convexProfile.gender || '',
+      city: convexProfile.city || '',
+      privateBio: convexProfile.privateBio || '',
+
+      // Categories (cast to expected types - Convex stores as string[])
+      intentKeys: (convexProfile.privateIntentKeys || []) as any,
+      desireTags: (convexProfile.privateDesireTagKeys || []) as any,
+      boundaries: (convexProfile.privateBoundaries || []) as any,
+
+      // Photos
+      selectedPhotoUrls: convexProfile.privatePhotoUrls || [],
+
+      // Imported fields
+      hobbies: convexProfile.hobbies || [],
+      isVerified: convexProfile.isVerified || false,
+
+      // Completion flags
+      isSetupComplete: convexProfile.isSetupComplete,
+      phase2OnboardingCompleted: convexProfile.isSetupComplete, // If profile exists & setup complete, onboarding is done
+      convexProfileId: convexProfile._id,
+
+      // Mark as hydrated
+      _hasHydrated: true,
+    });
+  },
 }));
 
 // Helper to validate photo URLs

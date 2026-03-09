@@ -375,6 +375,18 @@ export default function PrivateLayout() {
     }
   }, [prewarmPromptsData, prewarmTrendingData]);
 
+  // ST-001 FIX: Hydrate privateProfileStore from Convex on app restart
+  // This ensures Phase-2 profile state survives app restarts
+  const hydrateFromConvex = usePrivateProfileStore((s) => s.hydrateFromConvex);
+  useEffect(() => {
+    // Skip in demo mode (uses local demo data)
+    if (isDemoMode) return;
+    // Wait for query to complete (undefined = loading, null = no profile)
+    if (convexPrivateProfile === undefined) return;
+    // Hydrate store with Convex profile (or null if no profile)
+    hydrateFromConvex(convexPrivateProfile);
+  }, [convexPrivateProfile, hydrateFromConvex]);
+
   // B1.1 FIX: Compute onboarding state BEFORE any returns (was after early returns before)
   // Check if Phase-2 onboarding has been completed (permanent flag)
   // This runs ONE TIME ONLY - after completion, onboarding never shows again
