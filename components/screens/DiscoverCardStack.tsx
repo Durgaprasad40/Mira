@@ -844,6 +844,18 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
     if (!standOutResult || !currentRef.current) return;
     if (!mountedRef.current || !isFocusedRef.current) return;
     if (swipeLockRef.current) return;
+
+    // CORRECTNESS FIX: Validate that standOutResult.profileId matches current profile
+    // This prevents sending the message to a different profile if the deck changed
+    if (standOutResult.profileId !== currentRef.current.id) {
+      if (__DEV__) console.log('[StandOut] Profile mismatch - clearing stale result', {
+        resultId: standOutResult.profileId,
+        currentId: currentRef.current.id,
+      });
+      useInteractionStore.getState().setStandOutResult(null);
+      return;
+    }
+
     useInteractionStore.getState().setStandOutResult(null);
     const msg = standOutResult.message;
 
