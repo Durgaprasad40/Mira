@@ -274,6 +274,7 @@ export default function ConfessionsScreen() {
   const toggleReactionMutation = useMutation(api.confessions.toggleReaction);
   const reportConfessionMutation = useMutation(api.confessions.reportConfession);
   const markTaggedSeenMutation = useMutation(api.confessions.markTaggedConfessionsSeen);
+  const getOrCreateForConfessionMutation = useMutation(api.confessions.getOrCreateForConfession);
 
   // ══════════════════════════════════════════════════════════════════════════
   // INTEGRITY MODULE — Single source of truth for confession state
@@ -679,10 +680,36 @@ export default function ConfessionsScreen() {
   );
 
   const handleReplyAnonymously = useCallback(
-    (confessionId: string, confessionUserId: string) => {
-      // Guard: require valid userId for demo chat creation
+    async (confessionId: string, confessionUserId: string) => {
+      // Guard: require valid userId
       if (!currentUserId) return;
 
+      // Real mode: Use Convex conversation and route to Messages chat
+      if (!isDemoMode) {
+        try {
+          const convexId = asUserId(currentUserId);
+          if (!convexId) return;
+
+          const result = await getOrCreateForConfessionMutation({
+            confessionId: confessionId as any,
+            userId: convexId,
+          });
+
+          // Route to Messages chat with confession source
+          safePush(
+            router,
+            `/(main)/(tabs)/messages/chat/${result.conversationId}?source=confession` as any,
+            'confessions->messagesChat'
+          );
+          notifyReply(confessionId);
+        } catch (error) {
+          if (__DEV__) console.error('[CONFESS] Failed to create confession chat:', error);
+          Alert.alert('Error', 'Could not start chat. Please try again.');
+        }
+        return;
+      }
+
+      // Demo mode: Use local confessionStore (existing behavior)
       const existing = chats.find(
         (c) => c.confessionId === confessionId &&
           (c.initiatorId === currentUserId || c.responderId === currentUserId)
@@ -707,7 +734,7 @@ export default function ConfessionsScreen() {
       safePush(router, `/(main)/confession-chat?chatId=${newChat.id}` as any, 'confessions->newChat');
       notifyReply(confessionId);
     },
-    [chats, currentUserId, addChat, notifyReply, router]
+    [chats, currentUserId, addChat, notifyReply, router, isDemoMode, getOrCreateForConfessionMutation]
   );
 
   // Handle Report/Block menu for a confession

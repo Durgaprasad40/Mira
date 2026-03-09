@@ -597,3 +597,72 @@ export const markTaggedConfessionsSeen = mutation({
     return { success: true };
   },
 });
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Get or create a conversation for an anonymous confession reply
+// This unifies confession chats with the Messages system
+// ═══════════════════════════════════════════════════════════════════════════
+export const getOrCreateForConfession = mutation({
+  args: {
+    confessionId: v.id('confessions'),
+    userId: v.union(v.id('users'), v.string()),
+  },
+  handler: async (ctx, args) => {
+    // Map authUserId -> Convex Id<"users">
+    const userId = await ensureUserByAuthId(ctx, args.userId as string);
+
+    // Get the confession to find the author
+    const confession = await ctx.db.get(args.confessionId);
+    if (!confession) {
+      throw new Error('Confession not found');
+    }
+
+    const authorId = confession.userId;
+
+    // Prevent self-chat
+    if (userId === authorId) {
+      throw new Error('Cannot start a chat with yourself');
+    }
+
+    // Look for existing conversation for this confession between these users
+    const existingConversations = await ctx.db
+      .query('conversations')
+      .withIndex('by_confession', (q) => q.eq('confessionId', args.confessionId))
+      .collect();
+
+    // Find one where both users are participants
+    const existingConvo = existingConversations.find(
+      (c) => c.participants.includes(userId) && c.participants.includes(authorId)
+    );
+
+    if (existingConvo) {
+      return { conversationId: existingConvo._id, isNew: false };
+    }
+
+    // Create new conversation
+    const now = Date.now();
+    const TWENTY_FOUR_HOURS = 24 * 60 * 60 * 1000;
+    const conversationId = await ctx.db.insert('conversations', {
+      confessionId: args.confessionId,
+      participants: [userId, authorId],
+      isPreMatch: true,
+      createdAt: now,
+      lastMessageAt: now,
+      expiresAt: now + TWENTY_FOUR_HOURS,
+    });
+
+    // Create participant junction rows for efficient queries
+    await ctx.db.insert('conversationParticipants', {
+      conversationId,
+      userId,
+      unreadCount: 0,
+    });
+    await ctx.db.insert('conversationParticipants', {
+      conversationId,
+      userId: authorId,
+      unreadCount: 0,
+    });
+
+    return { conversationId, isNew: true };
+  },
+});
