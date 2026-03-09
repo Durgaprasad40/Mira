@@ -124,10 +124,11 @@ export function MessageInput({
       return;
     }
 
-    if (!isDemoMode && isPreMatch && messagesRemaining <= 0) {
-      Alert.alert('No Messages Left', 'You have no messages remaining this week. Upgrade to get more!');
-      return;
-    }
+    // Message limit enforcement removed — no weekly limit for now (until subscriptions added)
+    // if (!isDemoMode && isPreMatch && messagesRemaining <= 0) {
+    //   Alert.alert('No Messages Left', 'You have no messages remaining this week. Upgrade to get more!');
+    //   return;
+    // }
 
     const trimmed = text.trim();
     handleTextChange('');
@@ -216,14 +217,7 @@ export function MessageInput({
         </View>
       )}
 
-      {!isDemoMode && isPreMatch && messagesRemaining > 0 && !isRecording && (
-        <View style={styles.quotaBanner}>
-          <Ionicons name="information-circle" size={16} color={COLORS.warning} />
-          <Text style={styles.quotaText}>
-            {messagesRemaining} {messagesRemaining === 1 ? 'message' : 'messages'} remaining this week
-          </Text>
-        </View>
-      )}
+      {/* Message limit banner removed — no weekly limit for now (until subscriptions added) */}
 
       {/* Demo typing indicator (simulates other user typing) */}
       {otherTyping && !isRecording && (

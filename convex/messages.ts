@@ -160,49 +160,20 @@ export const sendMessage = mutation({
       throw new Error('Please complete profile verification before sending messages.');
     }
 
-    // Check message limits for pre-match conversations (men only)
-    if (conversation.isPreMatch && sender.gender === 'male') {
-      // Reset weekly messages if needed
-      if (now >= sender.messagesResetAt) {
-        let newMessages = 0;
-        if (sender.subscriptionTier === 'basic') newMessages = 10;
-        else if (sender.subscriptionTier === 'premium') newMessages = 999999;
-        else if (sender.trialEndsAt && now < sender.trialEndsAt) newMessages = 5;
-
-        await ctx.db.patch(senderId, {
-          messagesRemaining: newMessages,
-          messagesResetAt: now + 7 * 24 * 60 * 60 * 1000,
-        });
-        sender.messagesRemaining = newMessages;
-      }
-
-      if (sender.messagesRemaining <= 0) {
-        throw new Error('No messages remaining this week');
-      }
-
-      // Check custom message length
-      if (type === 'text' && sender.subscriptionTier !== 'premium') {
-        const maxLength = sender.subscriptionTier === 'basic' ? 150 : 0;
-        if (sender.subscriptionTier === 'free') {
-          throw new Error('Upgrade to send custom messages');
-        }
-        if (content.length > maxLength) {
-          throw new Error(`Message too long. Maximum ${maxLength} characters`);
-        }
-      }
-
-      // BUGFIX #3: Atomic check-and-decrement to prevent race condition bypass
-      // Re-read sender to get fresh messagesRemaining value before decrementing
-      const freshSender = await ctx.db.get(senderId);
-      if (!freshSender || freshSender.messagesRemaining <= 0) {
-        throw new Error('No messages remaining this week');
-      }
-
-      // Decrement message count using fresh value
-      await ctx.db.patch(senderId, {
-        messagesRemaining: freshSender.messagesRemaining - 1,
-      });
-    }
+    // ═══════════════════════════════════════════════════════════════════════════
+    // MESSAGE LIMIT ENFORCEMENT DISABLED — No weekly limit for now
+    // Re-enable when subscriptions are implemented
+    // ═══════════════════════════════════════════════════════════════════════════
+    // if (conversation.isPreMatch && sender.gender === 'male') {
+    //   // Reset weekly messages if needed
+    //   if (now >= sender.messagesResetAt) { ... }
+    //   if (sender.messagesRemaining <= 0) {
+    //     throw new Error('No messages remaining this week');
+    //   }
+    //   // Check custom message length
+    //   // Decrement message count
+    // }
+    // ═══════════════════════════════════════════════════════════════════════════
 
     // Soft-mask sensitive words in Face 1 text messages
     const maskedContent = type === 'text' ? softMaskText(content) : content;
@@ -351,38 +322,19 @@ export const sendPreMatchMessage = mutation({
       }
     }
 
-    // Send the message using the main send function logic
-    // Check limits for men
-    if (fromUser.gender === 'male') {
-      if (now >= fromUser.messagesResetAt) {
-        let newMessages = 0;
-        if (fromUser.subscriptionTier === 'basic') newMessages = 10;
-        else if (fromUser.subscriptionTier === 'premium') newMessages = 999999;
-        else if (fromUser.trialEndsAt && now < fromUser.trialEndsAt) newMessages = 5;
-
-        await ctx.db.patch(fromUserId, {
-          messagesRemaining: newMessages,
-          messagesResetAt: now + 7 * 24 * 60 * 60 * 1000,
-        });
-        fromUser.messagesRemaining = newMessages;
-      }
-
-      if (fromUser.messagesRemaining <= 0) {
-        throw new Error('No messages remaining this week');
-      }
-
-      // BUGFIX #3: Atomic check-and-decrement to prevent race condition bypass
-      // Re-read user to get fresh messagesRemaining value before decrementing
-      const freshFromUser = await ctx.db.get(fromUserId);
-      if (!freshFromUser || freshFromUser.messagesRemaining <= 0) {
-        throw new Error('No messages remaining this week');
-      }
-
-      // Decrement message count using fresh value
-      await ctx.db.patch(fromUserId, {
-        messagesRemaining: freshFromUser.messagesRemaining - 1,
-      });
-    }
+    // ═══════════════════════════════════════════════════════════════════════════
+    // MESSAGE LIMIT ENFORCEMENT DISABLED — No weekly limit for now
+    // Re-enable when subscriptions are implemented
+    // ═══════════════════════════════════════════════════════════════════════════
+    // if (fromUser.gender === 'male') {
+    //   // Reset weekly messages if needed
+    //   if (now >= fromUser.messagesResetAt) { ... }
+    //   if (fromUser.messagesRemaining <= 0) {
+    //     throw new Error('No messages remaining this week');
+    //   }
+    //   // Decrement message count
+    // }
+    // ═══════════════════════════════════════════════════════════════════════════
 
     // Soft-mask sensitive words in Face 1 text messages
     const msgType = templateId ? 'template' : 'text';

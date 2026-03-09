@@ -567,47 +567,8 @@ export default function MessagesScreen() {
     );
   };
 
+  // Message limit UI removed — no weekly limit for now (until subscriptions added)
   const renderQuotaBanner = () => {
-    if (isDemoMode) return null;
-    if (!currentUser || currentUser.gender === 'female') return null;
-    if (currentUser.messagesRemaining === undefined) return null;
-
-    const messagesRemaining = currentUser.messagesRemaining || 0;
-    const resetDate = currentUser.messagesResetAt
-      ? new Date(currentUser.messagesResetAt)
-      : null;
-
-    if (messagesRemaining <= 0 && resetDate) {
-      return (
-        <View style={styles.quotaBanner}>
-          <Ionicons name="information-circle" size={20} color={COLORS.warning} />
-          <View style={styles.quotaContent}>
-            <Text style={styles.quotaTitle}>No messages remaining</Text>
-            <Text style={styles.quotaSubtitle}>
-              Resets {resetDate.toLocaleDateString()}
-            </Text>
-          </View>
-          <TouchableOpacity
-            style={styles.upgradeButton}
-            onPress={() => safePush(router, '/(main)/subscription', 'messages->upgrade')}
-          >
-            <Text style={styles.upgradeButtonText}>Upgrade</Text>
-          </TouchableOpacity>
-        </View>
-      );
-    }
-
-    if (messagesRemaining > 0) {
-      return (
-        <View style={[styles.quotaBanner, styles.quotaBannerActive]}>
-          <Ionicons name="chatbubbles" size={20} color={COLORS.primary} />
-          <Text style={styles.quotaText}>
-            {messagesRemaining} {messagesRemaining === 1 ? 'message' : 'messages'} remaining this week
-          </Text>
-        </View>
-      );
-    }
-
     return null;
   };
 
