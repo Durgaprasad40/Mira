@@ -332,18 +332,27 @@ export default function ConfessionCard({
 
       {/* Footer */}
       <View style={styles.footer}>
-        <TouchableOpacity
-          style={styles.footerButton}
-          onPress={(e) => {
-            e.stopPropagation?.();
-            onReplyAnonymously?.();
-          }}
-          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-        >
-          <Ionicons name="chatbubble-outline" size={14} color={COLORS.textMuted} />
-          <Text style={styles.footerCount}>{replyCount}</Text>
-          <Text style={styles.footerLabel}>{replyCount === 1 ? 'Reply' : 'Replies'}</Text>
-        </TouchableOpacity>
+        {/* For own confessions: show non-tappable reply count, let taps bubble to card */}
+        {authorId && viewerId && authorId === viewerId ? (
+          <View style={styles.footerButton} pointerEvents="none">
+            <Ionicons name="chatbubble-outline" size={14} color={COLORS.textMuted} />
+            <Text style={styles.footerCount}>{replyCount}</Text>
+            <Text style={styles.footerLabel}>{replyCount === 1 ? 'Reply' : 'Replies'}</Text>
+          </View>
+        ) : (
+          <TouchableOpacity
+            style={styles.footerButton}
+            onPress={(e) => {
+              e.stopPropagation?.();
+              onReplyAnonymously?.();
+            }}
+            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+          >
+            <Ionicons name="chatbubble-outline" size={14} color={COLORS.textMuted} />
+            <Text style={styles.footerCount}>{replyCount}</Text>
+            <Text style={styles.footerLabel}>{replyCount === 1 ? 'Reply' : 'Replies'}</Text>
+          </TouchableOpacity>
+        )}
       </View>
     </TouchableOpacity>
   );

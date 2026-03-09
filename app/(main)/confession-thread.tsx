@@ -247,6 +247,12 @@ export default function ConfessionThreadScreen() {
   const handleReplyAnonymously = useCallback(async () => {
     if (!confession || !confessionId || !currentUserId) return;
 
+    // Defensive guard: prevent self-chat
+    if (confession.userId === currentUserId) {
+      if (__DEV__) console.warn('[CONFESS] Blocked self-chat attempt');
+      return;
+    }
+
     // Real mode: Use Convex conversation and route to Messages chat
     if (!isDemoMode) {
       try {
@@ -466,16 +472,22 @@ export default function ConfessionThreadScreen() {
                 />
               </View>
 
-              {/* Anonymous Reply Button */}
-              <TouchableOpacity style={styles.anonReplyButton} onPress={handleReplyAnonymously}>
-                <Ionicons name="chatbubble-ellipses-outline" size={18} color={COLORS.primary} />
-                <Text style={styles.anonReplyText}>Reply Anonymously</Text>
-              </TouchableOpacity>
+              {/* Anonymous Reply Button - hidden for own confessions */}
+              {confession.userId !== currentUserId && (
+                <TouchableOpacity style={styles.anonReplyButton} onPress={handleReplyAnonymously}>
+                  <Ionicons name="chatbubble-ellipses-outline" size={18} color={COLORS.primary} />
+                  <Text style={styles.anonReplyText}>Reply Anonymously</Text>
+                </TouchableOpacity>
+              )}
 
               {/* Divider */}
               <View style={styles.divider} />
               <Text style={styles.repliesHeader}>
-                {replies.length > 0 ? `${replies.length} ${replies.length === 1 ? 'Reply' : 'Replies'}` : 'No replies yet. Be the first!'}
+                {replies.length > 0
+                  ? `${replies.length} ${replies.length === 1 ? 'Reply' : 'Replies'}`
+                  : confession.userId === currentUserId
+                    ? 'No replies yet'
+                    : 'No replies yet. Be the first!'}
               </Text>
             </View>
           }

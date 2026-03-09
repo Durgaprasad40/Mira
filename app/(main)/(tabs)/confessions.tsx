@@ -755,6 +755,12 @@ export default function ConfessionsScreen() {
       // Guard: require valid userId
       if (!currentUserId) return;
 
+      // Defensive guard: prevent self-chat
+      if (confessionUserId === currentUserId) {
+        if (__DEV__) console.warn('[CONFESS] Blocked self-chat attempt');
+        return;
+      }
+
       // Real mode: Use Convex conversation and route to Messages chat
       if (!isDemoMode) {
         try {
