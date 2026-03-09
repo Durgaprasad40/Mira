@@ -180,6 +180,9 @@ export function DiscoverFeed({ mode = "main", theme = "light", onOpenProfile }: 
     return () => { mountedRef.current = false; };
   }, []);
 
+  // SAFETY FIX: Swipe lock to prevent race conditions during animation/mutation
+  const swipeLockRef = useRef(false);
+
   const currentProfile = profiles[currentIndex];
   const nextProfile = profiles[currentIndex + 1];
 
@@ -196,7 +199,13 @@ export function DiscoverFeed({ mode = "main", theme = "light", onOpenProfile }: 
 
   const handleSwipe = useCallback(
     async (direction: "left" | "right" | "up") => {
+      // SAFETY FIX: Check swipe lock to prevent race conditions
+      if (swipeLockRef.current) return;
       if (!currentProfile) return;
+      if (!mountedRef.current) return;
+
+      // Acquire swipe lock
+      swipeLockRef.current = true;
 
       const action =
         direction === "left"
@@ -209,29 +218,51 @@ export function DiscoverFeed({ mode = "main", theme = "light", onOpenProfile }: 
         // Demo mode - just move to next profile
         lastSwipedProfile.current = currentProfile;
 
-        if (direction === "right" && Math.random() > 0.7) {
-          // 30% chance of match in demo mode
-          Alert.alert(
-            "\u{1F389} It's a Match!",
-            `You and ${currentProfile.name} liked each other!`,
-          );
+        // SAFETY FIX: 20% match chance (realistic) and navigate to match-celebration
+        if (direction === "right" && Math.random() < 0.2) {
+          // Simulate match with proper navigation instead of Alert
+          useDemoStore.getState().simulateMatch(currentProfile.id);
+          const matchId = `match_${currentProfile.id}`;
+          if (mountedRef.current) {
+            router.push(
+              `/(main)/match-celebration?matchId=${matchId}&userId=${currentProfile.id}`,
+            );
+          }
+          swipeLockRef.current = false;
+          return;
         }
 
-        if (!mountedRef.current) return;
+        if (!mountedRef.current) {
+          swipeLockRef.current = false;
+          return;
+        }
         setCurrentIndex((prev) => prev + 1);
+        swipeLockRef.current = false;
         return;
       }
 
       try {
-        const result = await swipeMutation({
-          fromUserId: userId as any,
-          toUserId: currentProfile.id as any,
-          action: action as any,
-        });
+        // SAFETY FIX: Add timeout protection (6s) to prevent stuck swipe lock
+        const SWIPE_TIMEOUT_MS = 6000;
+        const timeoutPromise = new Promise<null>((_, reject) =>
+          setTimeout(() => reject(new Error("Swipe timed out")), SWIPE_TIMEOUT_MS)
+        );
+
+        const result = await Promise.race([
+          swipeMutation({
+            fromUserId: userId as any,
+            toUserId: currentProfile.id as any,
+            action: action as any,
+          }),
+          timeoutPromise,
+        ]);
 
         lastSwipedProfile.current = currentProfile;
 
-        if (!mountedRef.current) return;
+        if (!mountedRef.current) {
+          swipeLockRef.current = false;
+          return;
+        }
         if (result?.isMatch) {
           router.push(
             `/(main)/match-celebration?matchId=${result.matchId}&userId=${currentProfile.id}`,
@@ -240,8 +271,13 @@ export function DiscoverFeed({ mode = "main", theme = "light", onOpenProfile }: 
           setCurrentIndex((prev) => prev + 1);
         }
       } catch (error: any) {
-        if (!mountedRef.current) return;
+        if (!mountedRef.current) {
+          swipeLockRef.current = false;
+          return;
+        }
         Alert.alert("Error", error.message || "Failed to swipe");
+      } finally {
+        swipeLockRef.current = false;
       }
     },
     [currentProfile, userId, swipeMutation],
@@ -249,6 +285,9 @@ export function DiscoverFeed({ mode = "main", theme = "light", onOpenProfile }: 
 
   const animateSwipe = useCallback(
     (direction: "left" | "right" | "up") => {
+      // SAFETY FIX: Don't start animation if swipe already in progress
+      if (swipeLockRef.current) return;
+
       const targetX =
         direction === "left"
           ? -SCREEN_WIDTH * 1.5
@@ -287,11 +326,13 @@ export function DiscoverFeed({ mode = "main", theme = "light", onOpenProfile }: 
     () =>
       PanResponder.create({
         onStartShouldSetPanResponder: () => false,
+        // SAFETY FIX: Block gesture when swipe is locked
         onMoveShouldSetPanResponder: (_, gestureState) =>
-          Math.abs(gestureState.dx) > 5 || Math.abs(gestureState.dy) > 5,
+          !swipeLockRef.current && (Math.abs(gestureState.dx) > 5 || Math.abs(gestureState.dy) > 5),
         onMoveShouldSetPanResponderCapture: (_, gestureState) =>
-          Math.abs(gestureState.dx) > 5 || Math.abs(gestureState.dy) > 5,
+          !swipeLockRef.current && (Math.abs(gestureState.dx) > 5 || Math.abs(gestureState.dy) > 5),
         onPanResponderMove: (_, gestureState) => {
+          if (swipeLockRef.current) return;
           pan.setValue({ x: gestureState.dx, y: gestureState.dy });
 
           let nextDirection: "left" | "right" | "up" | null = null;
@@ -303,6 +344,8 @@ export function DiscoverFeed({ mode = "main", theme = "light", onOpenProfile }: 
           setOverlayOpacity(Math.min(Math.abs(gestureState.dx) / 100, 1));
         },
         onPanResponderRelease: async (_, gestureState) => {
+          if (swipeLockRef.current) return;
+
           if (gestureState.dx < -SWIPE_THRESHOLD_X) {
             await Haptics.notificationAsync(
               Haptics.NotificationFeedbackType.Success,

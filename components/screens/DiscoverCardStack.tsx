@@ -46,8 +46,8 @@ import type { IncognitoConversation, ConnectionSource } from "@/types";
 import { markPhase2Matched } from "@/lib/phase2MatchSession";
 import { log } from "@/utils/logger";
 
-// DEV-only match rate for demo mode (80% for fast testing, 30% for prod)
-const DEMO_MATCH_RATE = __DEV__ ? 0.8 : 0.3;
+// Demo mode match rate (20% for realistic testing)
+const DEMO_MATCH_RATE = 0.2;
 
 /** Create Phase 2 private conversation for match. Returns true if new, false if duplicate. */
 function handlePhase2Match(profile: { id: string; name: string; age?: number; photoUrl?: string }): boolean {
@@ -611,7 +611,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
           // 3B-1: Record swipe to prevent profile from reappearing
           demo.recordSwipe(swipedProfile.id);
 
-          // Match probability: DEMO_MATCH_RATE (50% in DEV, 30% in prod)
+          // Match probability: DEMO_MATCH_RATE (20% for realistic testing)
           const shouldMatch = direction === "right" && Math.random() < DEMO_MATCH_RATE;
 
           if (shouldMatch) {

@@ -506,7 +506,65 @@ export const getExploreProfiles = query({
     const effectiveMaxAge = maxAge ?? currentUser.maxAge;
     const effectiveMaxDistance = maxDistance ?? currentUser.maxDistance;
 
-    const allUsers = await ctx.db.query('users').collect();
+    // PERF FIX: Pre-fetch all swipes, matches, blocks upfront (converts O(4*N) queries to O(4))
+    // Same efficient pattern as getDiscoverProfiles
+    const now = Date.now();
+    const passExpiry = now - 7 * 24 * 60 * 60 * 1000;
+
+    const [
+      allUsers,
+      mySwipes,
+      matchesAsUser1,
+      matchesAsUser2,
+      blocksICreated,
+      blocksAgainstMe,
+    ] = await Promise.all([
+      ctx.db.query('users').collect(),
+      // All my swipes (likes/passes)
+      ctx.db
+        .query('likes')
+        .withIndex('by_from_user', (q) => q.eq('fromUserId', userId))
+        .collect(),
+      // Matches where I'm user1
+      ctx.db
+        .query('matches')
+        .withIndex('by_user1', (q) => q.eq('user1Id', userId))
+        .filter((q) => q.eq(q.field('isActive'), true))
+        .collect(),
+      // Matches where I'm user2
+      ctx.db
+        .query('matches')
+        .withIndex('by_user2', (q) => q.eq('user2Id', userId))
+        .filter((q) => q.eq(q.field('isActive'), true))
+        .collect(),
+      // Blocks I created
+      ctx.db
+        .query('blocks')
+        .withIndex('by_blocker', (q) => q.eq('blockerId', userId))
+        .collect(),
+      // Blocks against me
+      ctx.db
+        .query('blocks')
+        .withIndex('by_blocked', (q) => q.eq('blockedUserId', userId))
+        .collect(),
+    ]);
+
+    // Build Maps/Sets for O(1) lookups
+    // Swiped users: exclude likes/superlikes, and recent passes (within 7 days)
+    const swipedUserIds = new Set<string>();
+    for (const swipe of mySwipes) {
+      // Skip expired passes (can re-show after 7 days)
+      if (swipe.action === 'pass' && swipe.createdAt < passExpiry) continue;
+      swipedUserIds.add(swipe.toUserId as string);
+    }
+
+    const matchedUserIds = new Set<string>();
+    for (const m of matchesAsUser1) matchedUserIds.add(m.user2Id as string);
+    for (const m of matchesAsUser2) matchedUserIds.add(m.user1Id as string);
+
+    const blockedUserIds = new Set<string>();
+    for (const b of blocksICreated) blockedUserIds.add(b.blockedUserId as string);
+    for (const b of blocksAgainstMe) blockedUserIds.add(b.blockerId as string);
 
     // STABILITY FIX: C-9 - Two-pass approach to eliminate N+1 photo queries
     // First pass: filter candidates, collect user objects with computed values
@@ -545,41 +603,10 @@ export const getExploreProfiles = query({
         if (!activities.some((a) => user.activities.includes(a))) continue;
       }
 
-      // BUGFIX #17: Exclude users I already swiped on (likes/superlikes, passes within 7 days)
-      const existingLike = await ctx.db
-        .query('likes')
-        .withIndex('by_from_to', (q) => q.eq('fromUserId', userId).eq('toUserId', user._id))
-        .first();
-
-      if (existingLike) {
-        if (existingLike.action !== 'pass') continue;
-        if (existingLike.createdAt > Date.now() - 7 * 24 * 60 * 60 * 1000) continue;
-      }
-
-      // BUGFIX #17: Exclude users I'm already matched with
-      const orderedUser1 = userId < user._id ? userId : user._id;
-      const orderedUser2 = userId < user._id ? user._id : userId;
-      const existingMatch = await ctx.db
-        .query('matches')
-        .withIndex('by_users', (q) =>
-          q.eq('user1Id', orderedUser1).eq('user2Id', orderedUser2)
-        )
-        .first();
-
-      if (existingMatch && existingMatch.isActive) continue;
-
-      const blocked = await ctx.db
-        .query('blocks')
-        .withIndex('by_blocker_blocked', (q) => q.eq('blockerId', userId).eq('blockedUserId', user._id))
-        .first();
-      if (blocked) continue;
-
-      // 9-8: Check reverse block (candidate blocked current user)
-      const reverseBlocked = await ctx.db
-        .query('blocks')
-        .withIndex('by_blocker_blocked', (q) => q.eq('blockerId', user._id).eq('blockedUserId', userId))
-        .first();
-      if (reverseBlocked) continue;
+      // PERF FIX: O(1) Set lookups instead of per-user database queries
+      if (swipedUserIds.has(user._id as string)) continue;
+      if (matchedUserIds.has(user._id as string)) continue;
+      if (blockedUserIds.has(user._id as string)) continue;
 
       filteredUsers.push({ user, userAge, distance });
     }
