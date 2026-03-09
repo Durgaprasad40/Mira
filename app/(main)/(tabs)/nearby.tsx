@@ -166,6 +166,11 @@ const DEMO_LOCATION = {
   longitude: DEMO_USER.longitude,
 };
 
+// Module-level session salt for stable privacy fuzzing across Nearby remounts.
+// Generated once per app session (module load), not per component mount.
+// Combined with viewerId + otherId for deterministic per-user fuzzing.
+const MODULE_SESSION_SALT = Date.now();
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -275,9 +280,6 @@ export default function NearbyScreen() {
   const router = useRouter();
   const isDemo = isDemoMode;
 
-  // Session salt for stable fuzzing (generated once per component mount)
-  const sessionSaltRef = useRef(Date.now());
-
   // Map ref for programmatic control (any type for clustering library compatibility)
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const mapRef = useRef<any>(null);
@@ -326,6 +328,12 @@ export default function NearbyScreen() {
   // Ref to track query timeout (prevents race condition)
   const queryTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // Auto-retry refs (conservative: max 2 attempts, 5s delay)
+  const autoRetryCountRef = useRef(0);
+  const autoRetryTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const AUTO_RETRY_MAX = 2;
+  const AUTO_RETRY_DELAY_MS = 5000;
+
   // Clear timeout when query succeeds or on unmount
   useEffect(() => {
     if (nearbyUsersQuery !== undefined) {
@@ -334,6 +342,13 @@ export default function NearbyScreen() {
         clearTimeout(queryTimeoutRef.current);
         queryTimeoutRef.current = null;
       }
+      // Clear any pending auto-retry
+      if (autoRetryTimeoutRef.current) {
+        clearTimeout(autoRetryTimeoutRef.current);
+        autoRetryTimeoutRef.current = null;
+      }
+      // Reset auto-retry counter on success
+      autoRetryCountRef.current = 0;
       // Clear error if previously set
       if (queryError) {
         setQueryError(null);
@@ -369,6 +384,65 @@ export default function NearbyScreen() {
       }
     };
   }, [isQueryLoading, isQueryActive, nearbyUsersQuery]);
+
+  // ---------------------------------------------------------------------------
+  // Auto-retry on query error (conservative: max 2 attempts, 5s delay)
+  // ---------------------------------------------------------------------------
+  useEffect(() => {
+    // Only auto-retry if there's an error and we haven't exceeded max attempts
+    if (!queryError) {
+      return;
+    }
+
+    // Check if we've exceeded max auto-retry attempts
+    if (autoRetryCountRef.current >= AUTO_RETRY_MAX) {
+      if (__DEV__) {
+        console.log('[NEARBY] auto-retry limit reached, waiting for manual retry');
+      }
+      return;
+    }
+
+    // Clear any existing auto-retry timer (prevents duplicates)
+    if (autoRetryTimeoutRef.current) {
+      clearTimeout(autoRetryTimeoutRef.current);
+    }
+
+    // Schedule auto-retry
+    autoRetryTimeoutRef.current = setTimeout(() => {
+      if (!isMountedRef.current) return;
+
+      // Double-check we still have an error and haven't exceeded limit
+      if (queryError && autoRetryCountRef.current < AUTO_RETRY_MAX) {
+        autoRetryCountRef.current += 1;
+        if (__DEV__) {
+          console.log('[NEARBY] auto-retry attempt', autoRetryCountRef.current, 'of', AUTO_RETRY_MAX);
+        }
+        log.info('[NEARBY]', 'auto-retry attempt', { attempt: autoRetryCountRef.current, max: AUTO_RETRY_MAX });
+
+        // Clear error and trigger retry (same as manual retry)
+        setQueryError(null);
+        setIsRetrying(true);
+        startLocationTracking();
+
+        // Clear retry feedback after delay
+        setTimeout(() => {
+          if (isMountedRef.current) {
+            setIsRetrying(false);
+          }
+        }, 2000);
+      }
+
+      autoRetryTimeoutRef.current = null;
+    }, AUTO_RETRY_DELAY_MS);
+
+    // Cleanup on unmount or when error clears
+    return () => {
+      if (autoRetryTimeoutRef.current) {
+        clearTimeout(autoRetryTimeoutRef.current);
+        autoRetryTimeoutRef.current = null;
+      }
+    };
+  }, [queryError, startLocationTracking]);
 
   // ---------------------------------------------------------------------------
   // Publish location mutation (live mode only)
@@ -580,7 +654,6 @@ export default function NearbyScreen() {
       : (nearbyUsersQuery ?? []);
 
     const viewerId = userId || 'anonymous';
-    const sessionSalt = sessionSaltRef.current;
     let validCount = 0;
     let skippedCount = 0;
 
@@ -606,7 +679,7 @@ export default function NearbyScreen() {
           user.publishedLng,
           user.id,
           viewerId,
-          sessionSalt,
+          MODULE_SESSION_SALT,
           user.strongPrivacyMode,
         );
 
@@ -651,6 +724,17 @@ export default function NearbyScreen() {
 
   // Alias for rendering (visibleUsers are the processed, sorted, limited markers)
   const mapUsers = visibleUsers;
+
+  // ---------------------------------------------------------------------------
+  // Navigation handlers for header buttons
+  // ---------------------------------------------------------------------------
+  const handleOpenCrossedPaths = useCallback(() => {
+    safePush(router, '/(main)/crossed-paths' as any, 'nearby->crossed-paths');
+  }, [router]);
+
+  const handleOpenNearbySettings = useCallback(() => {
+    safePush(router, '/(main)/nearby-settings' as any, 'nearby->nearby-settings');
+  }, [router]);
 
   // ---------------------------------------------------------------------------
   // Marker press handler - opens full profile
@@ -796,9 +880,18 @@ export default function NearbyScreen() {
   }, []);
 
   // ---------------------------------------------------------------------------
-  // Retry query handler
+  // Retry query handler (manual)
   // ---------------------------------------------------------------------------
   const handleRetryQuery = useCallback(() => {
+    // Clear any pending auto-retry timer
+    if (autoRetryTimeoutRef.current) {
+      clearTimeout(autoRetryTimeoutRef.current);
+      autoRetryTimeoutRef.current = null;
+    }
+
+    // Reset auto-retry counter (user gets fresh attempts after manual retry)
+    autoRetryCountRef.current = 0;
+
     // Clear error and show loading feedback
     setQueryError(null);
     setIsRetrying(true);
@@ -821,7 +914,13 @@ export default function NearbyScreen() {
     return (
       <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
         <View style={styles.header}>
+          <TouchableOpacity onPress={handleOpenCrossedPaths} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+            <Ionicons name="footsteps-outline" size={22} color={COLORS.text} />
+          </TouchableOpacity>
           <Text style={styles.headerTitle}>Nearby</Text>
+          <TouchableOpacity onPress={handleOpenNearbySettings} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+            <Ionicons name="settings-outline" size={22} color={COLORS.text} />
+          </TouchableOpacity>
         </View>
         <View style={styles.centered}>
           <ActivityIndicator size="large" color={COLORS.primary} />
@@ -838,7 +937,13 @@ export default function NearbyScreen() {
     return (
       <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
         <View style={styles.header}>
+          <TouchableOpacity onPress={handleOpenCrossedPaths} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+            <Ionicons name="footsteps-outline" size={22} color={COLORS.text} />
+          </TouchableOpacity>
           <Text style={styles.headerTitle}>Nearby</Text>
+          <TouchableOpacity onPress={handleOpenNearbySettings} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+            <Ionicons name="settings-outline" size={22} color={COLORS.text} />
+          </TouchableOpacity>
         </View>
         <View style={styles.centered}>
           <Ionicons name="location-outline" size={64} color={COLORS.textLight} />
@@ -861,7 +966,13 @@ export default function NearbyScreen() {
     return (
       <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
         <View style={styles.header}>
+          <TouchableOpacity onPress={handleOpenCrossedPaths} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+            <Ionicons name="footsteps-outline" size={22} color={COLORS.text} />
+          </TouchableOpacity>
           <Text style={styles.headerTitle}>Nearby</Text>
+          <TouchableOpacity onPress={handleOpenNearbySettings} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+            <Ionicons name="settings-outline" size={22} color={COLORS.text} />
+          </TouchableOpacity>
         </View>
         <View style={styles.centered}>
           <Ionicons name="navigate-circle-outline" size={64} color={COLORS.textLight} />
@@ -884,7 +995,13 @@ export default function NearbyScreen() {
     return (
       <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
         <View style={styles.header}>
+          <TouchableOpacity onPress={handleOpenCrossedPaths} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+            <Ionicons name="footsteps-outline" size={22} color={COLORS.text} />
+          </TouchableOpacity>
           <Text style={styles.headerTitle}>Nearby</Text>
+          <TouchableOpacity onPress={handleOpenNearbySettings} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+            <Ionicons name="settings-outline" size={22} color={COLORS.text} />
+          </TouchableOpacity>
         </View>
         <View style={styles.centered}>
           <Ionicons name="lock-closed-outline" size={64} color={COLORS.textLight} />
@@ -904,7 +1021,13 @@ export default function NearbyScreen() {
     return (
       <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
         <View style={styles.header}>
+          <TouchableOpacity onPress={handleOpenCrossedPaths} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+            <Ionicons name="footsteps-outline" size={22} color={COLORS.text} />
+          </TouchableOpacity>
           <Text style={styles.headerTitle}>Nearby</Text>
+          <TouchableOpacity onPress={handleOpenNearbySettings} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+            <Ionicons name="settings-outline" size={22} color={COLORS.text} />
+          </TouchableOpacity>
         </View>
         <View style={styles.centered}>
           <Ionicons name="location-outline" size={64} color={COLORS.textLight} />
@@ -927,7 +1050,13 @@ export default function NearbyScreen() {
     return (
       <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
         <View style={styles.header}>
+          <TouchableOpacity onPress={handleOpenCrossedPaths} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+            <Ionicons name="footsteps-outline" size={22} color={COLORS.text} />
+          </TouchableOpacity>
           <Text style={styles.headerTitle}>Nearby</Text>
+          <TouchableOpacity onPress={handleOpenNearbySettings} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+            <Ionicons name="settings-outline" size={22} color={COLORS.text} />
+          </TouchableOpacity>
         </View>
         <View style={styles.centered}>
           <Ionicons name="warning-outline" size={64} color={COLORS.warning} />
@@ -950,7 +1079,13 @@ export default function NearbyScreen() {
     return (
       <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
         <View style={styles.header}>
+          <TouchableOpacity onPress={handleOpenCrossedPaths} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+            <Ionicons name="footsteps-outline" size={22} color={COLORS.text} />
+          </TouchableOpacity>
           <Text style={styles.headerTitle}>Nearby</Text>
+          <TouchableOpacity onPress={handleOpenNearbySettings} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+            <Ionicons name="settings-outline" size={22} color={COLORS.text} />
+          </TouchableOpacity>
         </View>
         <View style={styles.centered}>
           <Ionicons name="cloud-offline-outline" size={64} color={COLORS.warning} />
@@ -974,7 +1109,13 @@ export default function NearbyScreen() {
     return (
       <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
         <View style={styles.header}>
+          <TouchableOpacity onPress={handleOpenCrossedPaths} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+            <Ionicons name="footsteps-outline" size={22} color={COLORS.text} />
+          </TouchableOpacity>
           <Text style={styles.headerTitle}>Nearby</Text>
+          <TouchableOpacity onPress={handleOpenNearbySettings} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+            <Ionicons name="settings-outline" size={22} color={COLORS.text} />
+          </TouchableOpacity>
         </View>
         <View style={styles.centered}>
           <ActivityIndicator size="large" color={COLORS.primary} />
@@ -987,13 +1128,15 @@ export default function NearbyScreen() {
   return (
     <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
       <View style={styles.header}>
-        {/* Left spacer for centering */}
-        <View style={styles.headerSpacer} />
+        <TouchableOpacity onPress={handleOpenCrossedPaths} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+          <Ionicons name="footsteps-outline" size={22} color={COLORS.text} />
+        </TouchableOpacity>
 
         <Text style={styles.headerTitle}>Nearby</Text>
 
-        {/* Right spacer for centering */}
-        <View style={styles.headerSpacer} />
+        <TouchableOpacity onPress={handleOpenNearbySettings} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+          <Ionicons name="settings-outline" size={22} color={COLORS.text} />
+        </TouchableOpacity>
 
         {isDemo && (
           <View style={styles.demoBadge}>
@@ -1121,10 +1264,21 @@ export default function NearbyScreen() {
         {locationUIState === 'ready' && mapUsers.length === 0 && !isDemo && !isQueryLoading && !isRetrying && (
           <View style={styles.emptyOverlay}>
             <View style={styles.emptyCard}>
-              <Ionicons name="people-outline" size={24} color={COLORS.textLight} />
-              <Text style={styles.emptyText}>
-                No one nearby right now
+              <Ionicons name="people-outline" size={32} color={COLORS.textLight} />
+              <Text style={styles.emptyTitle}>No one nearby right now</Text>
+              <Text style={styles.emptySubtitle}>
+                Check back later or see who crossed your path
               </Text>
+              <View style={styles.emptyActions}>
+                <TouchableOpacity style={styles.emptyActionButton} onPress={handleOpenCrossedPaths}>
+                  <Ionicons name="footsteps-outline" size={16} color={COLORS.primary} />
+                  <Text style={styles.emptyActionText}>Crossed Paths</Text>
+                </TouchableOpacity>
+                <TouchableOpacity style={styles.emptyActionButton} onPress={handleOpenNearbySettings}>
+                  <Ionicons name="settings-outline" size={16} color={COLORS.primary} />
+                  <Text style={styles.emptyActionText}>Settings</Text>
+                </TouchableOpacity>
+              </View>
             </View>
           </View>
         )}
@@ -1262,22 +1416,49 @@ const styles = StyleSheet.create({
     alignItems: 'center',
   },
   emptyCard: {
-    flexDirection: 'row',
+    flexDirection: 'column',
     alignItems: 'center',
-    backgroundColor: 'rgba(255, 255, 255, 0.95)',
-    paddingHorizontal: 20,
-    paddingVertical: 12,
-    borderRadius: 12,
+    backgroundColor: 'rgba(255, 255, 255, 0.97)',
+    paddingHorizontal: 24,
+    paddingVertical: 20,
+    borderRadius: 16,
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.1,
-    shadowRadius: 4,
-    elevation: 3,
-    gap: 10,
+    shadowOpacity: 0.12,
+    shadowRadius: 6,
+    elevation: 4,
   },
-  emptyText: {
-    fontSize: 14,
+  emptyTitle: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: COLORS.text,
+    marginTop: 10,
+    textAlign: 'center',
+  },
+  emptySubtitle: {
+    fontSize: 13,
     color: COLORS.textLight,
+    textAlign: 'center',
+    marginTop: 4,
+  },
+  emptyActions: {
+    flexDirection: 'row',
+    marginTop: 16,
+    gap: 12,
+  },
+  emptyActionButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 20,
+    backgroundColor: `${COLORS.primary}15`,
+    gap: 6,
+  },
+  emptyActionText: {
+    fontSize: 13,
+    fontWeight: '500',
+    color: COLORS.primary,
   },
   // My location button (static, tap-once recenter)
   myLocationButton: {
