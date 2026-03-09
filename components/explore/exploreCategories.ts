@@ -212,7 +212,7 @@ const RIGHT_NOW_TILES: ExploreCategory[] = [
     icon: "🌙",
     color: TILE_COLORS.indigo,
     kind: "relationship",
-    predicate: (p) => p?.freeTonight === true,
+    predicate: (p) => p?.activities?.includes('free_tonight'),
   },
 ];
 
