@@ -29,6 +29,8 @@ interface ProfilePopoverProps {
   age?: number;
   /** Gender (read-only in chat room context) */
   gender?: string;
+  /** Bio (read-only, from Convex-backed profile) */
+  bio?: string;
   /** Called when user updates their chat room identity */
   onProfileUpdate?: (data: { username?: string; avatar?: string }) => void;
   /** Called when user wants to leave the room completely (session cleared) */
@@ -52,6 +54,7 @@ export default function ProfilePopover({
   coins,
   age,
   gender,
+  bio,
   onProfileUpdate,
   onLeaveRoom,
   isPrivateRoom = false,
@@ -210,7 +213,7 @@ export default function ProfilePopover({
             </View>
 
             {/* Identity info (read-only) */}
-            {(age || gender) && (
+            {(age || gender || bio) && (
               <View style={styles.identitySection}>
                 {age && (
                   <View style={styles.identityRow}>
@@ -222,6 +225,13 @@ export default function ProfilePopover({
                   <View style={styles.identityRow}>
                     <Text style={styles.identityLabel}>Gender</Text>
                     <Text style={styles.identityValue}>{gender}</Text>
+                  </View>
+                )}
+                {/* Bio (below gender) */}
+                {bio && (
+                  <View style={styles.identityRow}>
+                    <Text style={styles.identityLabel}>Bio</Text>
+                    <Text style={[styles.identityValue, styles.bioText]} numberOfLines={3}>{bio}</Text>
                   </View>
                 )}
                 {/* Phase-2: Room Password (private rooms only) */}
@@ -494,6 +504,11 @@ const styles = StyleSheet.create({
     fontSize: 12,
     fontWeight: '600',
     color: C.text,
+  },
+  bioText: {
+    flex: 1,
+    fontWeight: '400',
+    fontStyle: 'italic',
   },
   // Leave Room button (danger)
   leaveRoomItem: {

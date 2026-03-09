@@ -58,6 +58,8 @@ import { useChatRoomSessionStore } from '@/stores/chatRoomSessionStore';
 import { useChatRoomDmStore } from '@/stores/chatRoomDmStore';
 import { usePreferredChatRoomStore } from '@/stores/preferredChatRoomStore';
 import { useChatRoomProfileStore } from '@/stores/chatRoomProfileStore';
+// DATA-SOURCE FIX: Import privateProfileStore for real user identity (age, gender, name)
+import { usePrivateProfileStore } from '@/stores/privateProfileStore';
 import PrivateChatView from '@/components/chatroom/PrivateChatView';
 import { ensureStableFile } from '@/lib/uploadUtils';
 
@@ -200,6 +202,13 @@ export default function ChatRoomScreen() {
   const persistedDisplayName = useChatRoomProfileStore((s) => s.displayName);
   const persistedAvatarUri = useChatRoomProfileStore((s) => s.avatarUri);
 
+  // DATA-SOURCE FIX: Get real user identity from privateProfileStore (Convex-backed)
+  const realDisplayName = usePrivateProfileStore((s) => s.displayName);
+  const realAge = usePrivateProfileStore((s) => s.age);
+  const realGender = usePrivateProfileStore((s) => s.gender);
+  const realPhotoUrls = usePrivateProfileStore((s) => s.selectedPhotoUrls);
+  const realBio = usePrivateProfileStore((s) => s.privateBio);
+
   // DM store - for Modal-based private chat (no navigation, just state)
   const activeDm = useChatRoomDmStore((s) => s.activeDm);
   const setActiveDm = useChatRoomDmStore((s) => s.setActiveDm);
@@ -258,6 +267,12 @@ export default function ChatRoomScreen() {
     shouldSkipConvex || shouldSkipUserIdQueries
       ? 'skip'
       : { roomId: roomIdStr as Id<'chatRooms'>, userId: authUserId as Id<'users'> }
+  );
+
+  // MEMBER-DATA FIX: Query real room members with profile data from Convex
+  const convexMembersWithProfiles = useQuery(
+    api.chatRooms.listMembersWithProfiles,
+    shouldSkipConvex ? 'skip' : { roomId: roomIdStr as Id<'chatRooms'> }
   );
 
   // Unified room object: prefer demoRoom if found, else use convexRoom
@@ -361,9 +376,12 @@ export default function ChatRoomScreen() {
 
   // ─────────────────────────────────────────────────────────────────────────
   // PREFERRED ROOM STORE (for auto-redirect on next visit)
+  // MEMBERSHIP LIFECYCLE: setCurrentRoom tracks which room user is viewing
   // ─────────────────────────────────────────────────────────────────────────
   const setPreferredRoom = usePreferredChatRoomStore((s) => s.setPreferredRoom);
   const clearPreferredRoom = usePreferredChatRoomStore((s) => s.clearPreferredRoom);
+  const setCurrentRoom = usePreferredChatRoomStore((s) => s.setCurrentRoom);
+  const setHasRedirectedInSession = usePreferredChatRoomStore((s) => s.setHasRedirectedInSession);
   const setPreferredRoomMutation = useMutation(api.users.setPreferredChatRoom);
   const clearPreferredRoomMutation = useMutation(api.users.clearPreferredChatRoom);
 
@@ -372,14 +390,22 @@ export default function ChatRoomScreen() {
   // ─────────────────────────────────────────────────────────────────────────
   useEffect(() => {
     if (roomIdStr) {
-      // Use persisted profile if available, otherwise fall back to demo defaults
-      const identity = {
-        userId: isDemoMode ? DEMO_CURRENT_USER.id : (authUserId ?? 'unknown'),
-        name: persistedDisplayName ?? DEMO_CURRENT_USER.username,
-        age: DEMO_CURRENT_USER.age ?? 25,
-        gender: DEMO_CURRENT_USER.gender ?? 'Unknown',
-        profilePicture: persistedAvatarUri ?? DEMO_CURRENT_USER.avatar ?? '',
-      };
+      // DATA-SOURCE FIX: Use real profile data in non-demo mode, demo data only in demo mode
+      const identity = isDemoMode
+        ? {
+            userId: DEMO_CURRENT_USER.id,
+            name: persistedDisplayName ?? DEMO_CURRENT_USER.username,
+            age: DEMO_CURRENT_USER.age ?? 25,
+            gender: DEMO_CURRENT_USER.gender ?? 'Unknown',
+            profilePicture: persistedAvatarUri ?? DEMO_CURRENT_USER.avatar ?? '',
+          }
+        : {
+            userId: authUserId ?? 'unknown',
+            name: persistedDisplayName ?? realDisplayName ?? 'User',
+            age: realAge ?? 0,
+            gender: realGender ?? '',
+            profilePicture: persistedAvatarUri ?? '',
+          };
       enterRoom(roomIdStr, identity);
 
       // Save as preferred room (for auto-redirect on next visit)
@@ -395,7 +421,7 @@ export default function ChatRoomScreen() {
         });
       }
     }
-  }, [roomIdStr, enterRoom, authUserId, hasValidRoomId, setPreferredRoom, setPreferredRoomMutation, persistedDisplayName, persistedAvatarUri]);
+  }, [roomIdStr, enterRoom, authUserId, hasValidRoomId, setPreferredRoom, setPreferredRoomMutation, persistedDisplayName, persistedAvatarUri, realDisplayName, realAge, realGender]);
 
   // ─────────────────────────────────────────────────────────────────────────
   // PHASE-2 BACK NAVIGATION: Go to Desire Land (not chat-rooms list)
@@ -555,30 +581,65 @@ export default function ChatRoomScreen() {
   }, [roomIdStr, seedRoom, storeHasHydrated]);
 
   // Auto-join Convex room (skip if invalid ID)
+  // MEMBERSHIP LIFECYCLE: Also track currentRoomId for leave-on-homepage logic
   useEffect(() => {
     if (isDemoMode || !hasValidRoomId || !authUserId) return;
+
+    // Track that user is currently viewing this room
+    setCurrentRoom(roomIdStr);
+
     joinRoomMutation({
       roomId: roomIdStr as Id<'chatRooms'>,
       userId: authUserId as Id<'users'>,
-    }).catch((err) => {
-      if (__DEV__) console.warn('[ChatRooms] joinRoom failed:', err);
+    }).catch(() => {
+      // Ignore errors - join is best-effort
     });
-  }, [roomIdStr, hasValidRoomId, authUserId, joinRoomMutation]);
+  }, [roomIdStr, hasValidRoomId, authUserId, joinRoomMutation, setCurrentRoom]);
 
   // ─────────────────────────────────────────────────────────────────────────
   // INPUT STATE
   // ─────────────────────────────────────────────────────────────────────────
   const [inputText, setInputText] = useState('');
-  const userCoins = userCoinsFromStore > 0 ? userCoinsFromStore : DEMO_CURRENT_USER.coins;
+  // DATA-SOURCE FIX: Only use demo coins in demo mode, otherwise use real store value (even if 0)
+  const userCoins = isDemoMode
+    ? (userCoinsFromStore > 0 ? userCoinsFromStore : DEMO_CURRENT_USER.coins)
+    : userCoinsFromStore;
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // MEMBER-DATA FIX: Transform Convex member data for UI components
+  // In demo mode: use DEMO_ONLINE_USERS
+  // In real mode: use Convex-backed member data with profiles
+  // ─────────────────────────────────────────────────────────────────────────
+  const roomMembers: DemoOnlineUser[] = useMemo(() => {
+    if (isDemoMode) {
+      return DEMO_ONLINE_USERS;
+    }
+    // Real mode: transform Convex data to DemoOnlineUser shape
+    if (!convexMembersWithProfiles) {
+      return []; // Still loading or no members
+    }
+    return convexMembersWithProfiles.map((m) => ({
+      id: m.id,
+      username: m.displayName,
+      avatar: m.avatar,
+      isOnline: m.isOnline,
+      gender: m.gender as 'male' | 'female' | undefined,
+      age: m.age,
+      chatBio: m.bio,
+      // MEMBER-STRIP FIX: Provide lastSeen for OnlineUsersPanel categorization
+      lastSeen: m.lastActive,
+    }));
+  }, [convexMembersWithProfiles]);
 
   // ─────────────────────────────────────────────────────────────────────────
   // DM / FRIEND REQUESTS / NOTIFICATIONS STATE
+  // DATA-SOURCE FIX: Only use demo data in demo mode, empty arrays in real mode
   // ─────────────────────────────────────────────────────────────────────────
-  const [dms, setDMs] = useState<DemoDM[]>(DEMO_DM_INBOX);
+  const [dms, setDMs] = useState<DemoDM[]>(isDemoMode ? DEMO_DM_INBOX : []);
   const unreadDMs = dms.filter((dm) => dm.visible && !dm.hiddenUntilNextMessage && dm.unreadCount > 0).length;
 
-  const [friendRequests, setFriendRequests] = useState<DemoFriendRequest[]>(DEMO_FRIEND_REQUESTS);
-  const [announcements, setAnnouncements] = useState<DemoAnnouncement[]>(DEMO_ANNOUNCEMENTS);
+  const [friendRequests, setFriendRequests] = useState<DemoFriendRequest[]>(isDemoMode ? DEMO_FRIEND_REQUESTS : []);
+  const [announcements, setAnnouncements] = useState<DemoAnnouncement[]>(isDemoMode ? DEMO_ANNOUNCEMENTS : []);
   const unseenNotifications = announcements.filter((a) => !a.seen).length;
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -640,6 +701,9 @@ export default function ChatRoomScreen() {
     closeOverlay();
     exitRoom();
 
+    // Set hasRedirectedInSession before navigation to prevent redirect race
+    setHasRedirectedInSession(true);
+
     // Clear preferred room so user sees homepage next time
     if (isDemoMode) {
       clearPreferredRoom();
@@ -650,13 +714,14 @@ export default function ChatRoomScreen() {
     }
 
     router.replace('/(main)/(private)/(tabs)/chat-rooms');
-  }, [closeOverlay, exitRoom, router, authUserId, clearPreferredRoom, clearPreferredRoomMutation]);
+  }, [closeOverlay, exitRoom, router, authUserId, clearPreferredRoom, clearPreferredRoomMutation, setHasRedirectedInSession]);
 
   // Phase-2: Private room leave - just navigate back, don't clear membership or preferred
   const handleLeavePrivateRoom = useCallback(() => {
     closeOverlay();
+    setHasRedirectedInSession(true);
     router.replace('/(main)/(private)/(tabs)/chat-rooms');
-  }, [closeOverlay, router]);
+  }, [closeOverlay, router, setHasRedirectedInSession]);
 
   // Phase-2: End room handler (private room owner only) - deletes room permanently
   const handleEndRoom = useCallback(() => {
@@ -682,10 +747,9 @@ export default function ChatRoomScreen() {
               // Clear preferred room to avoid stale redirect
               clearPreferredRoom();
               if (!isDemoMode && authUserId) {
-                clearPreferredRoomMutation({ userId: authUserId as Id<'users'> }).catch((err) => {
-                  console.error('[ChatRoom] clearPreferredRoomMutation failed:', err);
-                });
+                clearPreferredRoomMutation({ userId: authUserId as Id<'users'> }).catch(() => {});
               }
+              setHasRedirectedInSession(true);
               router.replace('/(main)/(private)/(tabs)/chat-rooms');
             } catch (err: any) {
               Alert.alert('Error', err.message || 'Failed to end room');
@@ -694,7 +758,7 @@ export default function ChatRoomScreen() {
         },
       ]
     );
-  }, [isRoomCreator, authUserId, roomIdStr, closeRoomMutation, router, clearPreferredRoom, clearPreferredRoomMutation]);
+  }, [isRoomCreator, authUserId, roomIdStr, closeRoomMutation, router, clearPreferredRoom, clearPreferredRoomMutation, setHasRedirectedInSession]);
 
   // Phase-2: Close room handler (creator only)
   const handleCloseRoom = useCallback(() => {
@@ -714,6 +778,7 @@ export default function ChatRoomScreen() {
                 roomId: roomIdStr as Id<'chatRooms'>,
                 userId: authUserId as Id<'users'>,
               });
+              setHasRedirectedInSession(true);
               router.replace('/(main)/(private)/(tabs)/chat-rooms');
             } catch (err: any) {
               Alert.alert('Error', err.message || 'Failed to close room');
@@ -722,13 +787,13 @@ export default function ChatRoomScreen() {
         },
       ]
     );
-  }, [canCloseRoom, authUserId, roomIdStr, closeRoomMutation, router]);
+  }, [canCloseRoom, authUserId, roomIdStr, closeRoomMutation, router, setHasRedirectedInSession]);
 
   // ─────────────────────────────────────────────────────────────────────────
-  // RELOAD HANDLER
+  // RELOAD HANDLER (demo mode only - resets demo state)
   // ─────────────────────────────────────────────────────────────────────────
   const handleReload = useCallback(() => {
-    if (!roomIdStr) return;
+    if (!isDemoMode || !roomIdStr) return;
     const baseMessages = getDemoMessagesForRoom(roomIdStr);
     const currentMessages = useDemoChatRoomStore.getState().rooms[roomIdStr] ?? [];
     const baseIds = new Set(baseMessages.map((m) => m.id));
@@ -928,12 +993,15 @@ export default function ChatRoomScreen() {
   // ─────────────────────────────────────────────────────────────────────────
   // AVATAR PRESS
   // ─────────────────────────────────────────────────────────────────────────
+  // MEMBER-DATA FIX: Use roomMembers (unified source for both demo and real mode)
   const handleAvatarPress = useCallback((senderId: string) => {
     if (__DEV__) console.log('[TAP] avatar pressed', { senderId, t: Date.now() });
-    const onlineUser = DEMO_ONLINE_USERS.find((u) => u.id === senderId);
-    if (onlineUser) {
-      setSelectedUser(onlineUser);
+    // Look up user in roomMembers (Convex-backed in real mode, demo in demo mode)
+    const memberUser = roomMembers.find((u) => u.id === senderId);
+    if (memberUser) {
+      setSelectedUser(memberUser);
     } else {
+      // Fallback for users not in member list (e.g., system messages or left members)
       const msg = messages.find((m) => m.senderId === senderId);
       setSelectedUser({
         id: senderId,
@@ -944,7 +1012,7 @@ export default function ChatRoomScreen() {
     }
     setOverlay('userProfile');
     if (__DEV__) console.log('[TAP] avatar overlay set', { t: Date.now() });
-  }, [messages]);
+  }, [messages, roomMembers]);
 
   // ─────────────────────────────────────────────────────────────────────────
   // ONLINE USER PRESS
@@ -1038,9 +1106,10 @@ export default function ChatRoomScreen() {
 
       const isMuted = mutedUserIds.has(msg.senderId);
       const isMe = (isDemoMode ? DEMO_CURRENT_USER.id : authUserId) === msg.senderId;
-      // Use current user's avatar for outgoing messages (self)
+      // DATA-SOURCE FIX: Use current user's avatar for outgoing messages (self)
+      // Only fall back to demo avatar in demo mode
       const avatarUri = isMe
-        ? (persistedAvatarUri ?? DEMO_CURRENT_USER.avatar)
+        ? (isDemoMode ? (persistedAvatarUri ?? DEMO_CURRENT_USER.avatar) : (persistedAvatarUri ?? ''))
         : msg.senderAvatar;
 
       return (
@@ -1152,7 +1221,7 @@ export default function ChatRoomScreen() {
         onInboxPress={() => setOverlay('messages')}
         onNotificationsPress={() => setOverlay('notifications')}
         onProfilePress={() => setOverlay('profile')}
-        profileAvatar={persistedAvatarUri ?? DEMO_CURRENT_USER.avatar}
+        profileAvatar={isDemoMode ? (persistedAvatarUri ?? DEMO_CURRENT_USER.avatar) : (persistedAvatarUri ?? realPhotoUrls?.[0] ?? '')}
         unreadInbox={unreadDMs}
         unseenNotifications={unseenNotifications}
         showCloseButton={!!canCloseRoom}
@@ -1161,9 +1230,9 @@ export default function ChatRoomScreen() {
       />
 
       {/* ─── ACTIVE USERS STRIP ─── */}
-      {/* Tapping anywhere on the strip opens the full members list */}
+      {/* MEMBER-DATA FIX: Use roomMembers (Convex-backed in real mode, demo in demo mode) */}
       <ActiveUsersStrip
-        users={DEMO_ONLINE_USERS.map((u) => ({ id: u.id, avatar: u.avatar, isOnline: u.isOnline }))}
+        users={roomMembers.map((u) => ({ id: u.id, avatar: u.avatar, isOnline: u.isOnline }))}
         theme="dark"
         onPress={() => setOverlay('onlineUsers')}
       />
@@ -1267,15 +1336,21 @@ export default function ChatRoomScreen() {
         onMarkAllSeen={handleMarkAllNotificationsSeen}
       />
 
+      {/* DATA-SOURCE FIX: Use real profile data in non-demo mode */}
       <ProfilePopover
         visible={overlay === 'profile'}
         onClose={closeOverlay}
-        username={persistedDisplayName ?? DEMO_CURRENT_USER.username}
-        avatar={persistedAvatarUri ?? DEMO_CURRENT_USER.avatar}
+        username={isDemoMode
+          ? (persistedDisplayName ?? DEMO_CURRENT_USER.username)
+          : (persistedDisplayName ?? realDisplayName ?? 'User')}
+        avatar={isDemoMode
+          ? (persistedAvatarUri ?? DEMO_CURRENT_USER.avatar)
+          : (persistedAvatarUri ?? realPhotoUrls?.[0] ?? '')}
         isActive={true}
         coins={userCoins}
-        age={DEMO_CURRENT_USER.age ?? 25}
-        gender={DEMO_CURRENT_USER.gender ?? 'Unknown'}
+        age={isDemoMode ? (DEMO_CURRENT_USER.age ?? 25) : (realAge ?? 0)}
+        gender={isDemoMode ? (DEMO_CURRENT_USER.gender ?? 'Unknown') : (realGender ?? '')}
+        bio={isDemoMode ? undefined : (realBio || undefined)}
         onLeaveRoom={isPrivateRoom ? handleLeavePrivateRoom : handleLeaveRoom}
         isPrivateRoom={isPrivateRoom}
         isRoomOwner={isRoomCreator}
@@ -1283,10 +1358,11 @@ export default function ChatRoomScreen() {
         onEndRoom={handleEndRoom}
       />
 
+      {/* MEMBER-DATA FIX: Use roomMembers (Convex-backed in real mode) */}
       <OnlineUsersPanel
         visible={overlay === 'onlineUsers'}
         onClose={closeOverlay}
-        users={DEMO_ONLINE_USERS}
+        users={roomMembers}
         onUserPress={handleOnlineUserPress}
       />
 

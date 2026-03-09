@@ -32,12 +32,13 @@ export default function ActiveUsersStrip({
   theme = 'light',
 }: ActiveUsersStripProps) {
   const C = theme === 'dark' ? INCOGNITO_COLORS : COLORS as any;
-  const onlineUsers = users.filter((u) => u.isOnline);
 
-  if (onlineUsers.length === 0) return null;
+  // MEMBER-STRIP FIX: Show all room members, not just online ones
+  // Being "in the room" means they're active members
+  if (users.length === 0) return null;
 
-  const visible = onlineUsers.slice(0, MAX_VISIBLE);
-  const extraCount = onlineUsers.length - MAX_VISIBLE;
+  const visible = users.slice(0, MAX_VISIBLE);
+  const extraCount = users.length - MAX_VISIBLE;
 
   return (
     <Pressable
@@ -65,7 +66,8 @@ export default function ActiveUsersStrip({
                 <Ionicons name="person" size={14} color={C.textLight} />
               </View>
             )}
-            <View style={styles.onlineDot} />
+            {/* MEMBER-STRIP FIX: Only show online dot for recently active users */}
+            {user.isOnline && <View style={styles.onlineDot} />}
           </View>
         ))}
         {extraCount > 0 && (

@@ -167,7 +167,12 @@ export default function ChatRoomsScreen() {
   const [checkingPreferred, setCheckingPreferred] = useState(true);
   const [isRedirecting, setIsRedirecting] = useState(false);
   const clearPreferredRoom = usePreferredChatRoomStore((s) => s.clearPreferredRoom);
-  const hasRedirectedRef = useRef(false);
+  // NAV-TRAP FIX: Use session-level flag instead of ref (persists across remounts)
+  const hasRedirectedInSession = usePreferredChatRoomStore((s) => s.hasRedirectedInSession);
+  const setHasRedirectedInSession = usePreferredChatRoomStore((s) => s.setHasRedirectedInSession);
+  // MEMBERSHIP LIFECYCLE: Track current room for leave-on-homepage logic
+  const currentRoomId = usePreferredChatRoomStore((s) => s.currentRoomId);
+  const setCurrentRoom = usePreferredChatRoomStore((s) => s.setCurrentRoom);
 
   // Convex query for preferred room
   const convexPreferredRoom = useQuery(
@@ -221,7 +226,8 @@ export default function ChatRoomsScreen() {
   }, []);
 
   // M-002/M-003 FIX: Preferred room redirect with navigation guards
-  // Redirect fires ONCE per component mount when preferred room exists
+  // NAV-TRAP FIX: Redirect fires ONCE per SESSION (not per mount) to prevent
+  // navigation trap when user backs out of a room
   useFocusEffect(
     useCallback(() => {
       // M-002 FIX: Wait for navigation to be ready before router.replace
@@ -230,8 +236,11 @@ export default function ChatRoomsScreen() {
       // Skip if still loading or no preferred room
       if (isPreferredLoading || !effectivePreferredRoomId) return;
 
-      // Skip if already redirected in this mount cycle
-      if (hasRedirectedRef.current) return;
+      // Read hasRedirectedInSession from store at focus time to ensure current value
+      const storeHasRedirected = usePreferredChatRoomStore.getState().hasRedirectedInSession;
+
+      // NAV-TRAP FIX: Skip if already redirected in this SESSION (persists across remounts)
+      if (storeHasRedirected) return;
 
       // Skip if still validating room existence
       if (isValidationLoading) return;
@@ -244,13 +253,12 @@ export default function ChatRoomsScreen() {
       }
 
       if (__DEV__) console.log('[ChatRooms] Focus redirect to', effectivePreferredRoomId);
-      hasRedirectedRef.current = true;
+      // NAV-TRAP FIX: Set session-level flag (persists across remounts, resets on app restart)
+      usePreferredChatRoomStore.getState().setHasRedirectedInSession(true);
       setIsRedirecting(true);
       router.replace(`/(main)/(private)/(tabs)/chat-rooms/${effectivePreferredRoomId}` as any);
 
-      // M-003 FIX: Only reset isRedirecting in cleanup, NOT hasRedirectedRef
-      // This prevents infinite redirect loop when user navigates back to index
-      // Redirect will only fire ONCE per component mount, not every screen focus
+      // M-003 FIX: Only reset isRedirecting in cleanup
       return () => {
         setIsRedirecting(false);
       };
@@ -267,6 +275,38 @@ export default function ChatRoomsScreen() {
   const joinRoomByCodeMut = useMutation(api.chatRooms.joinRoomByCode);
   const createPrivateRoomMut = useMutation(api.chatRooms.createPrivateRoom);
   const resetMyPrivateRoomsMut = useMutation(api.chatRooms.resetMyPrivateRooms);
+  // MEMBERSHIP LIFECYCLE: Leave room mutation for when user returns to homepage
+  const leaveRoomMut = useMutation(api.chatRooms.leaveRoom);
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // MEMBERSHIP LIFECYCLE: Leave room when returning to homepage
+  // When user navigates back to this homepage from a room, remove them from that room.
+  // This does NOT trigger when switching to other tabs (homepage doesn't focus).
+  // ─────────────────────────────────────────────────────────────────────────────
+  useFocusEffect(
+    useCallback(() => {
+      // Read currentRoomId directly from Zustand store at focus time to ensure
+      // we get the CURRENT value even if the homepage didn't re-render yet
+      const storeState = usePreferredChatRoomStore.getState();
+      const currentRoomIdFromStore = storeState.currentRoomId;
+
+      if (!currentRoomIdFromStore || !userId) return;
+
+      // Set hasRedirectedInSession to prevent redirect effect from reopening same room
+      storeState.setHasRedirectedInSession(true);
+
+      // Call leaveRoom mutation to remove user from the room
+      leaveRoomMut({
+        roomId: currentRoomIdFromStore as Id<'chatRooms'>,
+        userId: userId as Id<'users'>,
+      }).catch(() => {
+        // Ignore errors - leave is best-effort
+      });
+
+      // Clear the tracking immediately
+      storeState.setCurrentRoom(null);
+    }, [currentRoomId, userId, leaveRoomMut])
+  );
 
   // BUG FIX: Mutation to seed default public rooms
   const ensureDefaultRoomsMut = useMutation(api.chatRooms.ensureDefaultRooms);

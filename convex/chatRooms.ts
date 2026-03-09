@@ -209,14 +209,30 @@ export const listRooms = query({
     }
     // Phase-2: Filter out expired rooms
     rooms = rooms.filter((r) => !r.expiresAt || r.expiresAt > now);
+
+    // MEMBER-COUNT-SYNC FIX: Compute live member counts from chatRoomMembers table
+    // This ensures homepage count matches in-room panel (same source of truth)
+    const roomsWithLiveCounts = await Promise.all(
+      rooms.map(async (room) => {
+        const members = await ctx.db
+          .query('chatRoomMembers')
+          .withIndex('by_room', (q) => q.eq('roomId', room._id))
+          .collect();
+        return {
+          ...room,
+          memberCount: members.length,
+        };
+      })
+    );
+
     // Sort: rooms with recent messages first, then by name
-    rooms.sort((a, b) => {
+    roomsWithLiveCounts.sort((a, b) => {
       const aTime = a.lastMessageAt ?? 0;
       const bTime = b.lastMessageAt ?? 0;
       if (bTime !== aTime) return bTime - aTime;
       return a.name.localeCompare(b.name);
     });
-    return rooms;
+    return roomsWithLiveCounts;
   },
 });
 
@@ -293,6 +309,73 @@ export const listMembers = query({
   },
 });
 
+// List members of a room WITH profile data (for UI display)
+// Returns displayName, avatar, age, gender for each member
+// PERFORMANCE: Limited to 50 members to prevent slow queries in large rooms
+// PRESENCE RULES:
+//   - Online: lastActive within 2 minutes
+//   - Offline: lastActive between 2 min and 3 hours
+//   - Hidden: lastActive older than 3 hours (not returned)
+const ONLINE_THRESHOLD_MS = 2 * 60 * 1000; // 2 minutes = Online
+const VISIBILITY_MAX_AGE_MS = 3 * 60 * 60 * 1000; // 3 hours = max visibility window
+const MAX_MEMBERS_TO_FETCH = 50;
+
+export const listMembersWithProfiles = query({
+  args: { roomId: v.id('chatRooms') },
+  handler: async (ctx, { roomId }) => {
+    const now = Date.now();
+
+    // Limit to MAX_MEMBERS_TO_FETCH to prevent performance issues
+    const members = await ctx.db
+      .query('chatRoomMembers')
+      .withIndex('by_room', (q) => q.eq('roomId', roomId))
+      .take(MAX_MEMBERS_TO_FETCH);
+
+    // Fetch private profiles and user activity for all members
+    const membersWithProfiles = await Promise.all(
+      members.map(async (member) => {
+        const [profile, user] = await Promise.all([
+          ctx.db
+            .query('userPrivateProfiles')
+            .withIndex('by_user', (q) => q.eq('userId', member.userId))
+            .first(),
+          ctx.db.get(member.userId),
+        ]);
+
+        // Determine "recently active" status from users.lastActive
+        // Use joinedAt as fallback for users who just joined but have no lastActive yet
+        const lastActive = user?.lastActive ?? member.joinedAt;
+        const timeSinceActive = now - lastActive;
+
+        // PRESENCE-FILTER FIX: Skip members older than 3 hours (not visible anywhere)
+        if (timeSinceActive > VISIBILITY_MAX_AGE_MS) {
+          return null;
+        }
+
+        const isOnline = timeSinceActive <= ONLINE_THRESHOLD_MS;
+
+        return {
+          id: member.userId,
+          displayName: profile?.displayName ?? 'User',
+          avatar: profile?.privatePhotoUrls?.[0] ?? undefined,
+          age: profile?.age ?? 0,
+          gender: profile?.gender ?? '',
+          bio: profile?.privateBio ?? undefined,
+          joinedAt: member.joinedAt,
+          role: member.role ?? 'member',
+          // PRESENCE STATUS: Online if within 2 min, Offline if within 3 hours
+          isOnline,
+          // For "last seen" display in panel
+          lastActive,
+        };
+      })
+    );
+
+    // PRESENCE-FILTER FIX: Remove null entries (members older than 3 hours)
+    return membersWithProfiles.filter((m): m is NonNullable<typeof m> => m !== null);
+  },
+});
+
 // Check if a user is a member of a room
 export const isMember = query({
   args: {
@@ -315,6 +398,11 @@ export const joinRoom = mutation({
     userId: v.id('users'),
   },
   handler: async (ctx, { roomId, userId }) => {
+    const now = Date.now();
+
+    // MEMBER-STRIP FIX: Always update lastActive so user appears online in room
+    await ctx.db.patch(userId, { lastActive: now });
+
     // Check if already a member
     const existing = await ctx.db
       .query('chatRoomMembers')
@@ -325,7 +413,7 @@ export const joinRoom = mutation({
     const memberId = await ctx.db.insert('chatRoomMembers', {
       roomId,
       userId,
-      joinedAt: Date.now(),
+      joinedAt: now,
     });
 
     // CONSISTENCY FIX B6: Recompute memberCount from source of truth
@@ -337,21 +425,25 @@ export const joinRoom = mutation({
 });
 
 // Leave a room
+// Safety: Deletes ALL matching membership rows (handles duplicates) and is fully idempotent
 export const leaveRoom = mutation({
   args: {
     roomId: v.id('chatRooms'),
     userId: v.id('users'),
   },
   handler: async (ctx, { roomId, userId }) => {
-    const membership = await ctx.db
+    // Collect ALL matching membership rows (handles edge case of duplicates)
+    const memberships = await ctx.db
       .query('chatRoomMembers')
       .withIndex('by_room_user', (q) => q.eq('roomId', roomId).eq('userId', userId))
-      .first();
-    if (!membership) return;
+      .collect();
 
-    await ctx.db.delete(membership._id);
+    // Delete ALL matching rows (idempotent - OK if none exist)
+    for (const membership of memberships) {
+      await ctx.db.delete(membership._id);
+    }
 
-    // CONSISTENCY FIX B6: Recompute memberCount from source of truth
+    // CONSISTENCY FIX B6: Always recompute memberCount from source of truth
     const actualMemberCount = await recomputeMemberCount(ctx, roomId);
     await ctx.db.patch(roomId, { memberCount: actualMemberCount });
   },
@@ -755,10 +847,16 @@ export const getRoomByJoinCode = query({
       return null;
     }
 
+    // MEMBER-COUNT-SYNC FIX: Compute live member count from chatRoomMembers table
+    const members = await ctx.db
+      .query('chatRoomMembers')
+      .withIndex('by_room', (q) => q.eq('roomId', room._id))
+      .collect();
+
     return {
       _id: room._id,
       name: room.name,
-      memberCount: room.memberCount,
+      memberCount: members.length,
       createdAt: room.createdAt,
       expiresAt: room.expiresAt,
     };
@@ -798,13 +896,20 @@ export const getMyPrivateRooms = query({
         if (room.isPublic) return null;
         // Filter out expired rooms
         if (room.expiresAt && room.expiresAt <= now) return null;
+
+        // MEMBER-COUNT-SYNC FIX: Compute live member count from chatRoomMembers table
+        const roomMembers = await ctx.db
+          .query('chatRoomMembers')
+          .withIndex('by_room', (q) => q.eq('roomId', room._id))
+          .collect();
+
         return {
           _id: room._id,
           name: room.name,
           slug: room.slug,
           category: room.category,
           isPublic: room.isPublic,
-          memberCount: room.memberCount,
+          memberCount: roomMembers.length,
           lastMessageAt: room.lastMessageAt,
           lastMessageText: room.lastMessageText,
           createdAt: room.createdAt,
@@ -1931,5 +2036,88 @@ export const seedDemoUser = mutation({
     });
 
     return { status: 'created', id };
+  },
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ADMIN: Diagnose room membership data by slug
+// Run via: npx convex run chatRooms:diagnoseRoomBySlug '{"slug":"bengali"}'
+// ═══════════════════════════════════════════════════════════════════════════
+export const diagnoseRoomBySlug = query({
+  args: { slug: v.string() },
+  handler: async (ctx, { slug }) => {
+    const room = await ctx.db
+      .query('chatRooms')
+      .withIndex('by_slug', (q) => q.eq('slug', slug))
+      .first();
+
+    if (!room) {
+      return { error: `Room not found: ${slug}`, room: null, members: [] };
+    }
+
+    const members = await ctx.db
+      .query('chatRoomMembers')
+      .withIndex('by_room', (q) => q.eq('roomId', room._id))
+      .collect();
+
+    const membersWithDetails = await Promise.all(
+      members.map(async (member) => {
+        const user = await ctx.db.get(member.userId);
+        return {
+          odabirnemId: member._id.toString(),
+          odabirnemUserId: member.userId.toString(),
+          joinedAt: member.joinedAt,
+          role: member.role,
+          userName: user?.name ?? 'UNKNOWN',
+        };
+      })
+    );
+
+    return {
+      room: {
+        id: room._id.toString(),
+        name: room.name,
+        slug: room.slug,
+        memberCount: room.memberCount,
+        isPublic: room.isPublic,
+      },
+      members: membersWithDetails,
+      actualMemberCount: members.length,
+    };
+  },
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ADMIN: Clear all memberships for a room by slug (for stale data cleanup)
+// Run via: npx convex run chatRooms:clearRoomMemberships '{"slug":"bengali"}'
+// ═══════════════════════════════════════════════════════════════════════════
+export const clearRoomMemberships = mutation({
+  args: { slug: v.string() },
+  handler: async (ctx, { slug }) => {
+    const room = await ctx.db
+      .query('chatRooms')
+      .withIndex('by_slug', (q) => q.eq('slug', slug))
+      .first();
+
+    if (!room) {
+      return { error: `Room not found: ${slug}`, deletedCount: 0 };
+    }
+
+    const members = await ctx.db
+      .query('chatRoomMembers')
+      .withIndex('by_room', (q) => q.eq('roomId', room._id))
+      .collect();
+
+    for (const member of members) {
+      await ctx.db.delete(member._id);
+    }
+
+    await ctx.db.patch(room._id, { memberCount: 0 });
+
+    return {
+      roomId: room._id.toString(),
+      roomName: room.name,
+      deletedCount: members.length,
+    };
   },
 });
