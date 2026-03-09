@@ -31,6 +31,7 @@ import { LoadingGuard } from '@/components/safety';
 import { Ionicons } from '@expo/vector-icons';
 import { useQuery, useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
+import type { Id } from '@/convex/_generated/dataModel';
 import EmojiPicker from 'rn-emoji-keyboard';
 import * as Haptics from 'expo-haptics';
 
@@ -586,7 +587,7 @@ export default function ConfessionsScreen() {
       // BUGFIX #24: Don't call demoToggleReaction in Convex mode - causes duplicate state updates
       if (!convexUserId) return; // no valid user id — skip mutation
       toggleReactionMutation({
-        confessionId: confessionId as any,
+        confessionId: confessionId as Id<'confessions'>,
         userId: convexUserId,
         type: emoji,
       }).then((result) => {
@@ -714,12 +715,12 @@ export default function ConfessionsScreen() {
     // Sync to backend
     if (!isDemoMode) {
       createConfessionMutation({
-        userId: currentUserId as any,
+        userId: currentUserId as Id<'users'>,
         text: trimmed,
         isAnonymous: composerAnonymous,
-        mood: 'emotional' as any,
-        visibility: 'global' as any,
-        taggedUserId: taggedUser?.id as any,
+        mood: 'emotional',
+        visibility: 'global',
+        taggedUserId: taggedUser?.id as Id<'users'> | undefined,
         // Include author identity for non-anonymous confessions
         ...(authorInfo.authorName ? { authorName: authorInfo.authorName } : {}),
         ...(authorInfo.authorPhotoUrl ? { authorPhotoUrl: authorInfo.authorPhotoUrl } : {}),
@@ -741,7 +742,7 @@ export default function ConfessionsScreen() {
     setComposerText('');
     setTagInput('');
     setTaggedUser(null);
-  }, [canSubmitComposer, composerText, composerAnonymous, currentUserId, addConfession, createConfessionMutation, taggedUser, canPostConfession, tagInput, recordConfessionTimestamp, convexCurrentUser, demoMyProfile]);
+  }, [canSubmitComposer, composerText, composerAnonymous, currentUserId, addConfession, createConfessionMutation, taggedUser, canPostConfession, tagInput, recordConfessionTimestamp, convexCurrentUser, demoMyProfile, getAuthorInfo]);
 
   const handleComposerEmojiSelected = useCallback((emojiObj: any) => {
     setComposerText((prev) => prev + emojiObj.emoji);
@@ -779,7 +780,7 @@ export default function ConfessionsScreen() {
           if (!convexId) return;
 
           const result = await getOrCreateForConfessionMutation({
-            confessionId: confessionId as any,
+            confessionId: confessionId as Id<'confessions'>,
             userId: convexId,
           });
 
@@ -843,7 +844,7 @@ export default function ConfessionsScreen() {
           const convexUserId = asUserId(currentUserId);
           if (convexUserId) {
             reportConfessionMutation({
-              confessionId: confessionId as any,
+              confessionId: confessionId as Id<'confessions'>,
               reporterId: convexUserId,
               reason,
             }).catch(() => {});
@@ -1108,8 +1109,8 @@ export default function ConfessionsScreen() {
               // Delete from backend (soft delete)
               if (!isDemoMode && currentUserId) {
                 deleteConfessionMutation({
-                  confessionId: confessionId as any,
-                  userId: currentUserId as any,
+                  confessionId: confessionId as Id<'confessions'>,
+                  userId: currentUserId as Id<'users'>,
                 }).catch((err) => {
                   if (__DEV__) console.warn('[CONFESS] Backend delete failed:', err);
                 });
@@ -1135,8 +1136,8 @@ export default function ConfessionsScreen() {
                 // Delete from backend (soft delete)
                 if (!isDemoMode && currentUserId) {
                   deleteConfessionMutation({
-                    confessionId: confessionId as any,
-                    userId: currentUserId as any,
+                    confessionId: confessionId as Id<'confessions'>,
+                    userId: currentUserId as Id<'users'>,
                   }).catch((err) => {
                     if (__DEV__) console.warn('[CONFESS] Backend delete failed:', err);
                   });

@@ -121,7 +121,7 @@ export default function ConfessionThreadScreen() {
   const effectiveUserId = useMemo(() => {
     if (isDemoMode) return currentUserId;
     return convexCurrentUser?._id ?? undefined;
-  }, [currentUserId, convexCurrentUser]);
+  }, [currentUserId, convexCurrentUser, isDemoMode]);
 
   // ──────────────────────────────────────────────────────────────────────────
   // DERIVED STATE: Confession data

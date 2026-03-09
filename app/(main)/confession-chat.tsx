@@ -65,7 +65,7 @@ export default function ConfessionChatScreen() {
   const insets = useSafeAreaInsets();
   const { chatId } = useLocalSearchParams<{ chatId: string }>();
   const { userId } = useAuthStore();
-  const currentUserId = isDemoMode ? (userId || 'demo_user_1') : userId;
+  const currentUserId = isDemoMode ? (userId || 'demo_user_1') : (userId ?? null);
 
   const chats = useConfessionStore((s) => s.chats);
   const confessions = useConfessionStore((s) => s.confessions);

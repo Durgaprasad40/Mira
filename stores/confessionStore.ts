@@ -341,8 +341,13 @@ export const useConfessionStore = create<ConfessionState>()((set, get) => ({
         // Create a confession-based thread
         const convoId = `demo_convo_confession_${confessionId}`;
         const matchId = `match_confession_${confessionId}`;
-        const dmStore = useDemoDmStore.getState();
-        const demoStore = useDemoStore.getState();
+        const dmStore = useDemoDmStore?.getState?.();
+        const demoStore = useDemoStore?.getState?.();
+        if (!dmStore || !demoStore) {
+          if (__DEV__) console.warn('[CONFESS] toggleReaction: stores not ready');
+          set({ userReactions: newUserReactions, confessions });
+          return { chatUnlocked: false };
+        }
 
         const otherUserName = confession.isAnonymous
           ? 'Anonymous Confessor'
@@ -643,7 +648,7 @@ export const useConfessionStore = create<ConfessionState>()((set, get) => ({
       ),
     }));
     // Clean up related DM threads via demoDmStore
-    const dmStore = useDemoDmStore.getState();
+    const dmStore = useDemoDmStore?.getState?.();
     const confessionThreads = get().confessionThreads;
     const conversationIdsToDelete: string[] = [];
     for (const expiredId of expiredIds) {
@@ -652,7 +657,7 @@ export const useConfessionStore = create<ConfessionState>()((set, get) => ({
         conversationIdsToDelete.push(convoId);
       }
     }
-    if (conversationIdsToDelete.length > 0) {
+    if (conversationIdsToDelete.length > 0 && dmStore) {
       dmStore.deleteConversations(conversationIdsToDelete);
     }
     // Clean up thread tracking
@@ -694,8 +699,10 @@ export const useConfessionStore = create<ConfessionState>()((set, get) => ({
       return { confessionThreads: newThreads };
     });
     // Also delete from DM store
-    const dmStore = useDemoDmStore.getState();
-    dmStore.deleteConversations(conversationIds);
+    const dmStore = useDemoDmStore?.getState?.();
+    if (dmStore) {
+      dmStore.deleteConversations(conversationIds);
+    }
   },
 
   deleteConfession: (confessionId) => {
@@ -747,8 +754,8 @@ export const useConfessionStore = create<ConfessionState>()((set, get) => ({
     // 9. External cleanup (best effort, doesn't affect local state)
     if (convoId) {
       try {
-        const dmStore = useDemoDmStore.getState();
-        dmStore.deleteConversations([convoId]);
+        const dmStore = useDemoDmStore?.getState?.();
+        dmStore?.deleteConversations([convoId]);
       } catch (err) {
         if (__DEV__) console.warn('[CONFESS] deleteConfession: DM cleanup failed:', err);
       }
@@ -775,8 +782,12 @@ export const useConfessionStore = create<ConfessionState>()((set, get) => ({
 
     // Create a conversation thread in the DM store
     const convoId = `demo_convo_connect_${confessionId}`;
-    const dmStore = useDemoDmStore.getState();
-    const demoStore = useDemoStore.getState();
+    const dmStore = useDemoDmStore?.getState?.();
+    const demoStore = useDemoStore?.getState?.();
+    if (!dmStore || !demoStore) {
+      if (__DEV__) console.warn('[CONFESS] connectToConfession: stores not ready');
+      return false;
+    }
     const now = Date.now();
     const TWENTY_FOUR_HOURS = 24 * 60 * 60 * 1000;
 
@@ -861,8 +872,12 @@ export const useConfessionStore = create<ConfessionState>()((set, get) => ({
     const confession = state.confessions.find((c) => c.id === confessionId);
     if (!confession) return;
 
-    const dmStore = useDemoDmStore.getState();
-    const demoStore = useDemoStore.getState();
+    const dmStore = useDemoDmStore?.getState?.();
+    const demoStore = useDemoStore?.getState?.();
+    if (!dmStore || !demoStore) {
+      if (__DEV__) console.warn('[CONFESS] createRevealMatch: stores not ready');
+      return;
+    }
     const now = Date.now();
 
     // Determine the other user's display name
@@ -1018,7 +1033,7 @@ export const useConfessionStore = create<ConfessionState>()((set, get) => ({
     const newConfessions = state.confessions.filter((c) => !expiredOtherUserIds.includes(c.id));
 
     // 4) Clean up related DM threads via demoDmStore
-    const dmStore = useDemoDmStore.getState();
+    const dmStore = useDemoDmStore?.getState?.();
     const conversationIdsToDelete: string[] = [];
     for (const expiredId of expiredConfessionIds) {
       const convoId = state.confessionThreads[expiredId];
@@ -1026,7 +1041,7 @@ export const useConfessionStore = create<ConfessionState>()((set, get) => ({
         conversationIdsToDelete.push(convoId);
       }
     }
-    if (conversationIdsToDelete.length > 0) {
+    if (conversationIdsToDelete.length > 0 && dmStore) {
       dmStore.deleteConversations(conversationIdsToDelete);
     }
 
