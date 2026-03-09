@@ -2,20 +2,43 @@ import { useEffect, useRef, useState } from "react";
 import { AppState, AppStateStatus, LogBox } from "react-native";
 import { Stack, useRouter, useSegments } from "expo-router";
 
+// P0-1 STABILITY FIX: Import Sentry for crash reporting
+import { initSentry, captureException, setUserContext, clearUserContext } from "@/lib/sentry";
+
+// Initialize Sentry FIRST, before any other code runs
+// This ensures we catch errors during app initialization
+initSentry();
+
 // Suppress known dev-mode warning: Expo's withDevTools calls useKeepAwake() which can fail
 // on Android before activity is ready. This is non-critical (screen may sleep during dev).
 if (__DEV__) {
   LogBox.ignoreLogs(["Unable to activate keep awake"]);
+}
 
+// P0-1 STABILITY FIX: Global error handlers with Sentry integration
+// Set up ONCE at module load, before React renders
+(() => {
   // Catch synchronous errors via ErrorUtils
   const originalHandler = (global as any).ErrorUtils?.getGlobalHandler?.();
   if ((global as any).ErrorUtils?.setGlobalHandler) {
     (global as any).ErrorUtils.setGlobalHandler((error: Error, isFatal?: boolean) => {
       // Suppress keep-awake errors (non-fatal, dev-only)
       if (error?.message?.includes("Unable to activate keep awake")) {
-        console.warn("[KeepAwake] Activation failed (non-critical in dev mode)");
+        if (__DEV__) {
+          console.warn("[KeepAwake] Activation failed (non-critical in dev mode)");
+        }
         return;
       }
+
+      // P0-1: Send to Sentry before forwarding to original handler
+      captureException(error, {
+        tags: {
+          type: 'global_error',
+          fatal: String(isFatal ?? false),
+        },
+        level: isFatal ? 'fatal' : 'error',
+      });
+
       // Forward all other errors to original handler
       if (originalHandler) {
         originalHandler(error, isFatal);
@@ -23,7 +46,7 @@ if (__DEV__) {
     });
   }
 
-  // Catch unhandled promise rejections (for async keep-awake activation)
+  // Catch unhandled promise rejections
   // React Native uses 'promise/setimmediate/rejection-tracking' internally
   try {
     const rejectionTracking = require('promise/setimmediate/rejection-tracking');
@@ -31,9 +54,21 @@ if (__DEV__) {
       allRejections: true,
       onUnhandled: (id: number, error: Error) => {
         if (error?.message?.includes("Unable to activate keep awake")) {
-          console.warn("[KeepAwake] Async activation failed (non-critical in dev mode)");
+          if (__DEV__) {
+            console.warn("[KeepAwake] Async activation failed (non-critical in dev mode)");
+          }
           return; // Suppress - do not forward
         }
+
+        // P0-1: Send unhandled promise rejections to Sentry
+        captureException(error, {
+          tags: {
+            type: 'unhandled_promise_rejection',
+            rejectionId: String(id),
+          },
+          level: 'error',
+        });
+
         // Forward other rejections to default handling
         const handler = (global as any).ErrorUtils?.getGlobalHandler?.();
         if (handler) {
@@ -47,7 +82,7 @@ if (__DEV__) {
   } catch {
     // rejection-tracking not available - rely on ErrorUtils handler above
   }
-}
+})()
 import { ConvexProvider, useMutation, useQuery } from "convex/react";
 import { convex, isDemoMode } from "@/hooks/useConvex";
 
@@ -311,6 +346,13 @@ function SessionValidator() {
         });
       }
       setSessionValidated(true);
+
+      // P0-1 STABILITY FIX: Attach user context to Sentry for error attribution
+      if (userId) {
+        setUserContext(userId, {
+          onboardingCompleted: sessionStatus.userInfo?.onboardingCompleted,
+        });
+      }
     } else {
       // Session is invalid
       console.warn(`[SessionValidator] Session invalid: ${sessionStatus.reason}`);
@@ -337,6 +379,9 @@ function SessionValidator() {
       // For non-migration cases (truly invalid sessions), proceed with logout
       // STABILITY FIX: Wrap in async IIFE to properly await logout before navigation
       (async () => {
+        // P0-1 STABILITY FIX: Clear Sentry user context on logout
+        clearUserContext();
+
         // Clear all LOCAL state (server data untouched)
         await logout();
         useOnboardingStore.getState().reset();

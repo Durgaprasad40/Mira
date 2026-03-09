@@ -45,7 +45,9 @@ export async function getAuthBootCache(): Promise<AuthBootCacheData> {
     const onboardingCompletedStr = await SecureStore.getItemAsync(ONBOARDING_COMPLETED_KEY);
     const updatedAtStr = await SecureStore.getItemAsync(ONBOARDING_UPDATED_AT_KEY);
 
-    if (token && userId) {
+    // P0-3 STABILITY FIX: Validate token is non-empty/non-whitespace
+    // Empty or whitespace-only tokens can create ghost sessions
+    if (token && token.trim() && userId && userId.trim()) {
       const onboardingCompleted = onboardingCompletedStr === '1';
       const onboardingCompletedUpdatedAt = updatedAtStr ? parseInt(updatedAtStr, 10) : undefined;
 

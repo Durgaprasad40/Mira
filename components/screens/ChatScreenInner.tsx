@@ -465,6 +465,11 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
     isSendingRef.current = true;
     if (mountedRef.current) setIsSending(true);
     if (__DEV__) console.log('[STABILITY][ChatSend] starting async send');
+
+    // P0-2 STABILITY FIX: Generate clientMessageId for idempotency on retry
+    // Prevents duplicate messages if network fails and user retries
+    const clientMessageId = `msg_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
+
     try {
       if (activeConversation.isPreMatch) {
         await sendPreMatchMessage({
@@ -472,6 +477,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
           toUserId: (activeConversation as any).otherUser.id as any,
           content: text,
           templateId: type === 'template' ? 'custom' : undefined,
+          clientMessageId,
         });
       } else {
         await sendMessage({
@@ -479,6 +485,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
           senderId: userId as any,
           type: 'text',
           content: text,
+          clientMessageId,
         });
       }
       // B5 fix: clear draft after successful send in Convex mode

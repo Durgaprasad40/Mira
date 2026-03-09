@@ -8,6 +8,7 @@ import {
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { COLORS } from '@/lib/constants';
+import { captureException } from '@/lib/sentry';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -62,8 +63,18 @@ export class AppErrorBoundary extends Component<Props, State> {
     console.error(`${context} Caught error:`, error);
     console.error(`${context} Component stack:`, errorInfo.componentStack);
 
-    // In production, you could send this to a crash reporting service
-    // e.g., Sentry, Bugsnag, etc.
+    // P0-1 STABILITY FIX: Send to Sentry for production crash reporting
+    captureException(error, {
+      tags: {
+        errorBoundary: name || 'AppErrorBoundary',
+        type: 'react_error_boundary',
+      },
+      extra: {
+        componentStack: errorInfo.componentStack,
+        boundaryName: name,
+      },
+      level: 'error',
+    });
   }
 
   handleReset = () => {
