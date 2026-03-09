@@ -44,8 +44,12 @@ import { Toast } from "@/components/ui/Toast";
 import { usePrivateChatStore } from "@/stores/privateChatStore";
 import { NotificationPopover } from "@/components/discover/NotificationPopover";
 import type { IncognitoConversation, ConnectionSource } from "@/types";
+import type { Id } from "@/convex/_generated/dataModel";
 
 import { markPhase2Matched } from "@/lib/phase2MatchSession";
+
+// Type for swipe actions
+type SwipeAction = 'like' | 'pass' | 'super_like';
 import { log } from "@/utils/logger";
 
 // Demo mode match rate (20% for realistic testing)
@@ -359,12 +363,16 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
     hasHydrated: s._hasHydrated,           // FIX: track hydration for safe seeding
   })));
   const blockedUserIds = useBlockStore((s) => s.blockedUserIds);
-  // Derive excluded IDs as a Set for O(1) lookup in filters.
-  // 3B-1: Deps now include swipedCount so excludedSet updates after each swipe
+  // R1 FIX: Derive excluded IDs with stable dependencies.
+  // Use blockedUserIds.length as a primitive trigger instead of array reference.
+  // For demo mode, call getExcludedUserIds() inside the memo body — the function
+  // itself is stable (from useShallow), and we trigger recalc via matchCount/swipedCount.
   const excludedSet = useMemo(() => {
     if (!isDemoMode) return new Set(blockedUserIds);
+    // demo.getExcludedUserIds() reads current state inside the function
     return new Set(demo.getExcludedUserIds());
-  }, [blockedUserIds, demo.matchCount, demo.swipedCount, demo.getExcludedUserIds]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [blockedUserIds.length, demo.matchCount, demo.swipedCount]);
   // FIX: Only seed after hydration completes to prevent overwriting persisted data
   useEffect(() => { if (isDemoMode && demo.hasHydrated) demo.seed(); }, [demo.seed, demo.hasHydrated]);
 
@@ -822,7 +830,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
         }
 
         if (!convexUserId) { releaseSwipeLock(activeSwipeId); return; }
-        const action = direction === "left" ? "pass" : direction === "up" ? "super_like" : "like";
+        const action: SwipeAction = direction === "left" ? "pass" : direction === "up" ? "super_like" : "like";
         // B5 fix: wrap mutation in Promise.race with 6s timeout to prevent stuck swipe lock
         const SWIPE_TIMEOUT_MS = 6000;
         const timeoutPromise = new Promise<null>((_, reject) =>
@@ -831,8 +839,8 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
         const result = await Promise.race([
           swipeMutation({
             fromUserId: convexUserId,
-            toUserId: swipedProfile.id as any,
-            action: action as any,
+            toUserId: swipedProfile.id as Id<'users'>,
+            action,
             message: message,
           }),
           timeoutPromise,

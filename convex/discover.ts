@@ -512,6 +512,13 @@ export const getExploreProfiles = query({
     const now = Date.now();
     const passExpiry = now - 7 * 24 * 60 * 60 * 1000;
 
+    // P1/R3 FIX: Adaptive buffer sizing instead of full table scan
+    // Base multiplier with adjustment for filter strictness
+    const hasStrictFilters = (relationshipIntent && relationshipIntent.length > 0) ||
+                              (activities && activities.length > 0);
+    const bufferMultiplier = hasStrictFilters ? 20 : 10; // Higher buffer for stricter filters
+    const fetchLimit = Math.max((offset + limit) * bufferMultiplier, 200); // Min 200 candidates
+
     const [
       allUsers,
       mySwipes,
@@ -520,7 +527,10 @@ export const getExploreProfiles = query({
       blocksICreated,
       blocksAgainstMe,
     ] = await Promise.all([
-      ctx.db.query('users').collect(),
+      // P1 FIX: Use take() with verified users index instead of full collect()
+      ctx.db.query('users')
+        .withIndex('by_verification_status', (q) => q.eq('verificationStatus', 'verified'))
+        .take(fetchLimit),
       // All my swipes (likes/passes)
       ctx.db
         .query('likes')
@@ -576,10 +586,7 @@ export const getExploreProfiles = query({
       if (user._id === userId) continue;
       if (!user.isActive || user.isBanned) continue;
       if (isUserPaused(user)) continue;
-
-      // 8A: Filter out unverified/rejected users from Explore
-      const verificationStatus = user.verificationStatus || 'unverified';
-      if (verificationStatus !== 'verified') continue;
+      // Note: verification check removed - already filtered by index (by_verification_status)
 
       if (!effectiveGender.includes(user.gender)) continue;
 

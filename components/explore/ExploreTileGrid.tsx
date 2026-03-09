@@ -9,6 +9,7 @@ import {
   Dimensions,
 } from "react-native";
 import { LinearGradient } from "expo-linear-gradient";
+import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import {
   RELATIONSHIP_CATEGORIES,
@@ -98,6 +99,10 @@ function adjustColorBrightness(hex: string, percent: number): string {
   return `#${((1 << 24) | (R << 16) | (G << 8) | B).toString(16).slice(1)}`;
 }
 
+// Base bottom padding + tab bar clearance
+const BASE_BOTTOM_PADDING = 20;
+const TAB_BAR_HEIGHT = 60;
+
 export default function ExploreTileGrid({
   profiles,
   selectedCategory,
@@ -105,6 +110,10 @@ export default function ExploreTileGrid({
   refreshing = false,
   onRefresh,
 }: Props) {
+  const insets = useSafeAreaInsets();
+  // Dynamic bottom spacing: safe area inset + tab bar + base padding
+  const bottomSpacing = insets.bottom + TAB_BAR_HEIGHT + BASE_BOTTOM_PADDING;
+
   // Compute counts for all categories
   const categoryCounts = useMemo(() => {
     const counts: Record<string, number> = {};
@@ -177,8 +186,8 @@ export default function ExploreTileGrid({
         {INTEREST_CATEGORIES.map(renderTile)}
       </View>
 
-      {/* Bottom spacing */}
-      <View style={styles.bottomSpacer} />
+      {/* Bottom spacing - dynamic based on safe area and tab bar */}
+      <View style={{ height: bottomSpacing }} />
     </ScrollView>
   );
 }
@@ -281,7 +290,5 @@ const styles = StyleSheet.create({
   countTextDisabled: {
     color: "#555",
   },
-  bottomSpacer: {
-    height: 100,
-  },
+  // bottomSpacer removed - now using dynamic height based on safe area insets
 });

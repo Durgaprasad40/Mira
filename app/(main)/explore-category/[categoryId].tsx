@@ -1,4 +1,4 @@
-import React, { useMemo, useEffect } from 'react';
+import React, { useMemo } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -25,10 +25,6 @@ export default function ExploreCategoryScreen() {
     () => profiles.filter(cat?.predicate ?? (() => false)),
     [profiles, cat],
   );
-
-  useEffect(() => {
-    if (__DEV__) console.log("[ExploreCategory]", categoryId, "matches", items.length);
-  }, [categoryId, items.length]);
 
   return (
     <View style={styles.container}>

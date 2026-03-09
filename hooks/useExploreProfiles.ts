@@ -1,6 +1,7 @@
 import { useMemo } from 'react';
 import { useQuery } from 'convex/react';
 import { api } from '@/convex/_generated/api';
+import type { Id } from '@/convex/_generated/dataModel';
 import { useAuthStore } from '@/stores/authStore';
 import { isDemoMode } from '@/hooks/useConvex';
 import { DEMO_PROFILES } from '@/lib/demoData';
@@ -39,7 +40,7 @@ export function useExploreProfiles(): any[] {
 
   const queryArgs = useMemo(() => {
     if (isDemoMode || !userId) return 'skip' as const;
-    return { userId: userId as any };
+    return { userId: userId as Id<'users'> };
   }, [userId]);
 
   const result = useQuery(api.discover.getExploreProfiles, queryArgs);
