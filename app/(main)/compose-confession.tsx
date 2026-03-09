@@ -23,8 +23,10 @@ import { useConfessionStore } from '@/stores/confessionStore';
 import { useAuthStore } from '@/stores/authStore';
 import { useInteractionStore } from '@/stores/interactionStore';
 import { isDemoMode } from '@/hooks/useConvex';
-import { useMutation } from 'convex/react';
+import { useMutation, useQuery } from 'convex/react';
 import { api } from '@/convex/_generated/api';
+import { useDemoStore } from '@/stores/demoStore';
+import { asUserId } from '@/convex/id';
 import { logDebugEvent } from '@/lib/debugEventLogger';
 
 const TIMED_OPTIONS: { value: TimedRevealOption; label: string }[] = [
@@ -43,6 +45,55 @@ export default function ComposeConfessionScreen() {
   const addConfession = useConfessionStore((s) => s.addConfession);
   const setTimedReveal = useConfessionStore((s) => s.setTimedReveal);
   const createConfessionMutation = useMutation(api.confessions.createConfession);
+
+  // Get current user profile for non-anonymous confessions
+  const demoCurrentUserId = useDemoStore((s) => s.currentDemoUserId);
+  const demoProfiles = useDemoStore((s) => s.demoProfiles);
+  const demoMyProfile = demoCurrentUserId ? demoProfiles[demoCurrentUserId] : null;
+  const convexQueryArgs = !isDemoMode && currentUserId ? { userId: asUserId(currentUserId) ?? currentUserId } : 'skip';
+  const convexCurrentUser = useQuery(api.users.getCurrentUser, convexQueryArgs);
+
+  // Helper to compute age from dateOfBirth string (YYYY-MM-DD or similar)
+  const computeAge = (dateOfBirth: string | undefined): number | undefined => {
+    if (!dateOfBirth) return undefined;
+    const birthDate = new Date(dateOfBirth);
+    if (isNaN(birthDate.getTime())) return undefined;
+    const today = new Date();
+    let age = today.getFullYear() - birthDate.getFullYear();
+    const monthDiff = today.getMonth() - birthDate.getMonth();
+    if (monthDiff < 0 || (monthDiff === 0 && today.getDate() < birthDate.getDate())) {
+      age--;
+    }
+    return age > 0 && age < 120 ? age : undefined;
+  };
+
+  // Extract author info for non-anonymous confessions
+  const getAuthorInfo = (): { authorName?: string; authorPhotoUrl?: string; authorAge?: number; authorGender?: string } => {
+    if (isDemoMode && demoMyProfile) {
+      const result = {
+        authorName: demoMyProfile.name,
+        authorPhotoUrl: demoMyProfile.photos?.[0]?.url,
+        authorAge: (demoMyProfile as any).age,
+        authorGender: (demoMyProfile as any).gender,
+      };
+      if (__DEV__) console.log('[COMPOSE] getAuthorInfo DEMO:', result);
+      return result;
+    }
+    if (!isDemoMode && convexCurrentUser) {
+      const primaryPhoto = convexCurrentUser.photos?.find((p: any) => p.isPrimary) || convexCurrentUser.photos?.[0];
+      const userAny = convexCurrentUser as any;
+      const result = {
+        authorName: userAny.firstName || userAny.name,
+        authorPhotoUrl: primaryPhoto?.url,
+        authorAge: computeAge(userAny.dateOfBirth),
+        authorGender: userAny.gender,
+      };
+      if (__DEV__) console.log('[COMPOSE] getAuthorInfo REAL:', { result, convexCurrentUser, primaryPhoto });
+      return result;
+    }
+    if (__DEV__) console.log('[COMPOSE] getAuthorInfo EMPTY - isDemoMode:', isDemoMode, 'convexCurrentUser:', convexCurrentUser);
+    return {};
+  };
 
   const [text, setText] = useState('');
   const [isAnonymous, setIsAnonymous] = useState(true);
@@ -94,6 +145,22 @@ export default function ComposeConfessionScreen() {
     const confessionId = `conf_new_${Date.now()}`;
     const finalTarget = confessToSomeone ? targetUserId : undefined;
 
+    // Get author info for non-anonymous confessions
+    const authorInfo = !isAnonymous ? getAuthorInfo() : {};
+
+    if (__DEV__) console.log('[COMPOSE] handleSubmit - isAnonymous:', isAnonymous, 'authorInfo:', authorInfo);
+
+    // Safety guard: prevent posting non-anonymous without profile data
+    if (!isAnonymous && !authorInfo.authorName) {
+      setIsSubmitting(false);
+      Alert.alert(
+        'Profile Not Ready',
+        'Your profile is still loading. Please wait a moment and try again, or post anonymously.',
+        [{ text: 'OK' }]
+      );
+      return;
+    }
+
     addConfession({
       id: confessionId,
       userId: currentUserId,
@@ -108,6 +175,11 @@ export default function ComposeConfessionScreen() {
       reactionCount: 0,
       createdAt: Date.now(),
       revealPolicy: revealPolicy || 'never',
+      // Include author identity for non-anonymous confessions
+      ...(authorInfo.authorName ? { authorName: authorInfo.authorName } : {}),
+      ...(authorInfo.authorPhotoUrl ? { authorPhotoUrl: authorInfo.authorPhotoUrl } : {}),
+      ...(authorInfo.authorAge ? { authorAge: authorInfo.authorAge } : {}),
+      ...(authorInfo.authorGender ? { authorGender: authorInfo.authorGender } : {}),
     });
 
     // Debug event logging
@@ -135,7 +207,7 @@ export default function ComposeConfessionScreen() {
 
     // Sync to backend (only if we have a valid userId)
     if (!isDemoMode && currentUserId) {
-      createConfessionMutation({
+      const mutationPayload = {
         userId: currentUserId as any,
         text: trimmed,
         isAnonymous,
@@ -143,7 +215,14 @@ export default function ComposeConfessionScreen() {
         visibility: 'global' as any,
         // Include tagged user if confessing to someone
         ...(finalTarget ? { taggedUserId: finalTarget as any } : {}),
-      }).catch((error: any) => {
+        // Include author identity for non-anonymous confessions
+        ...(authorInfo.authorName ? { authorName: authorInfo.authorName } : {}),
+        ...(authorInfo.authorPhotoUrl ? { authorPhotoUrl: authorInfo.authorPhotoUrl } : {}),
+        ...(authorInfo.authorAge ? { authorAge: authorInfo.authorAge } : {}),
+        ...(authorInfo.authorGender ? { authorGender: authorInfo.authorGender } : {}),
+      };
+      if (__DEV__) console.log('[COMPOSE] mutation payload:', mutationPayload);
+      createConfessionMutation(mutationPayload).catch((error: any) => {
         Alert.alert('Error', error.message || 'Failed to post confession');
       });
     }

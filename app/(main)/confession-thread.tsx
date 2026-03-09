@@ -9,6 +9,7 @@ import {
   KeyboardAvoidingView,
   Platform,
   Alert,
+  ActionSheetIOS,
   LayoutChangeEvent,
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -295,26 +296,60 @@ export default function ConfessionThreadScreen() {
     router.push(`/(main)/confession-chat?chatId=${newChat.id}` as any);
   }, [confession, confessionId, chats, currentUserId, addChat, router, getOrCreateForConfessionMutation]);
 
+  const showReportReasonPicker = useCallback((confId: string) => {
+    const reportReasons = [
+      { key: 'spam', label: 'Spam' },
+      { key: 'harassment', label: 'Harassment' },
+      { key: 'hate', label: 'Hate Speech' },
+      { key: 'sexual', label: 'Sexual/Inappropriate' },
+      { key: 'other', label: 'Other' },
+    ] as const;
+
+    const submitReport = (reason: 'spam' | 'harassment' | 'hate' | 'sexual' | 'other') => {
+      reportConfession(confId);
+      if (!isDemoMode && currentUserId) {
+        reportMutation({
+          confessionId: confId as any,
+          reporterId: currentUserId as any,
+          reason,
+        }).catch(console.error);
+      }
+      router.back();
+    };
+
+    if (Platform.OS === 'ios') {
+      ActionSheetIOS.showActionSheetWithOptions(
+        {
+          title: 'Why are you reporting this?',
+          options: [...reportReasons.map((r) => r.label), 'Cancel'],
+          cancelButtonIndex: reportReasons.length,
+          destructiveButtonIndex: -1,
+        },
+        (buttonIndex) => {
+          if (buttonIndex < reportReasons.length) {
+            submitReport(reportReasons[buttonIndex].key);
+          }
+        }
+      );
+    } else {
+      Alert.alert(
+        'Report Confession',
+        'Why are you reporting this?',
+        [
+          ...reportReasons.map((r) => ({
+            text: r.label,
+            onPress: () => submitReport(r.key),
+          })),
+          { text: 'Cancel', style: 'cancel' as const },
+        ]
+      );
+    }
+  }, [reportConfession, reportMutation, currentUserId, router]);
+
   const handleReport = useCallback(() => {
     if (!confessionId) return;
-    Alert.alert('Report Confession', 'Are you sure?', [
-      { text: 'Cancel', style: 'cancel' },
-      {
-        text: 'Report',
-        style: 'destructive',
-        onPress: () => {
-          reportConfession(confessionId);
-          if (!isDemoMode && currentUserId) {
-            reportMutation({
-              confessionId: confessionId as any,
-              reporterId: currentUserId as any,
-            }).catch(console.error);
-          }
-          router.back();
-        },
-      },
-    ]);
-  }, [confessionId, reportConfession, reportMutation, currentUserId, router]);
+    showReportReasonPicker(confessionId);
+  }, [confessionId, showReportReasonPicker]);
 
   const handleCopyText = useCallback(() => {
     if (!confession) return;

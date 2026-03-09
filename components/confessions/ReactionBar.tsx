@@ -1,7 +1,10 @@
-import React from 'react';
-import { View, Text, TouchableOpacity, StyleSheet } from 'react-native';
+import React, { useState } from 'react';
+import { View, Text, TouchableOpacity, StyleSheet, Modal } from 'react-native';
 import { COLORS } from '@/lib/constants';
 import { isProbablyEmoji } from '@/lib/utils';
+
+// Standard reaction emojis for confessions
+export const CONFESSION_EMOJIS = ['👍', '❤️', '😂', '😮', '😢'];
 
 export interface EmojiCount {
   emoji: string;
@@ -12,7 +15,7 @@ interface ReactionBarProps {
   topEmojis: EmojiCount[];
   userEmoji: string | null;
   reactionCount: number;
-  /** Opens the emoji picker (for the add button) */
+  /** Opens the emoji picker (for the add button) - fallback if onToggleEmoji not provided */
   onReact: () => void;
   /** Directly toggle a specific emoji as the user's reaction */
   onToggleEmoji?: (emoji: string) => void;
@@ -28,11 +31,21 @@ export default function ReactionBar({
   onToggleEmoji,
   size = 'compact',
 }: ReactionBarProps) {
+  const [showQuickPicker, setShowQuickPicker] = useState(false);
   const s = size === 'regular' ? regularOverrides : null;
 
   const validEmojis = topEmojis.filter((e) => isProbablyEmoji(e.emoji));
   const visibleCount = validEmojis.reduce((sum, e) => sum + e.count, 0);
   const remaining = reactionCount - visibleCount;
+
+  const handleQuickSelect = (emoji: string) => {
+    setShowQuickPicker(false);
+    if (onToggleEmoji) {
+      onToggleEmoji(emoji);
+    } else {
+      onReact();
+    }
+  };
 
   return (
     <View style={styles.row}>
@@ -73,7 +86,7 @@ export default function ReactionBar({
           s?.addButton,
           userEmoji ? styles.addButtonActive : null,
         ]}
-        onPress={onReact}
+        onPress={() => setShowQuickPicker(true)}
         hitSlop={{ top: 6, bottom: 6, left: 4, right: 4 }}
       >
         {userEmoji ? (
@@ -81,9 +94,41 @@ export default function ReactionBar({
             {userEmoji}
           </Text>
         ) : (
-          <Text style={[styles.addButtonIcon, s?.addButtonIcon]}>🙂</Text>
+          <Text style={[styles.addButtonIcon, s?.addButtonIcon]}>👍</Text>
         )}
       </TouchableOpacity>
+
+      {/* Quick Emoji Picker Modal */}
+      <Modal
+        visible={showQuickPicker}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setShowQuickPicker(false)}
+      >
+        <TouchableOpacity
+          style={styles.quickPickerOverlay}
+          activeOpacity={1}
+          onPress={() => setShowQuickPicker(false)}
+        >
+          <View style={styles.quickPickerContainer}>
+            {CONFESSION_EMOJIS.map((emoji) => {
+              const isSelected = userEmoji === emoji;
+              return (
+                <TouchableOpacity
+                  key={emoji}
+                  style={[
+                    styles.quickPickerEmoji,
+                    isSelected && styles.quickPickerEmojiSelected,
+                  ]}
+                  onPress={() => handleQuickSelect(emoji)}
+                >
+                  <Text style={styles.quickPickerEmojiText}>{emoji}</Text>
+                </TouchableOpacity>
+              );
+            })}
+          </View>
+        </TouchableOpacity>
+      </Modal>
     </View>
   );
 }
@@ -152,6 +197,43 @@ const styles = StyleSheet.create({
   },
   addButtonIcon: {
     fontSize: 15,
+  },
+
+  // Quick emoji picker modal
+  quickPickerOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.3)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  quickPickerContainer: {
+    flexDirection: 'row',
+    backgroundColor: COLORS.white,
+    borderRadius: 24,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    gap: 4,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.15,
+    shadowRadius: 12,
+    elevation: 8,
+  },
+  quickPickerEmoji: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    justifyContent: 'center',
+    alignItems: 'center',
+    backgroundColor: COLORS.backgroundDark,
+  },
+  quickPickerEmojiSelected: {
+    backgroundColor: 'rgba(255,107,107,0.2)',
+    borderWidth: 2,
+    borderColor: COLORS.primary,
+  },
+  quickPickerEmojiText: {
+    fontSize: 24,
   },
 });
 

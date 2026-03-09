@@ -1167,17 +1167,42 @@ export default defineSchema({
     imageUrl: v.optional(v.string()),
     authorName: v.optional(v.string()),
     authorPhotoUrl: v.optional(v.string()),
+    authorAge: v.optional(v.number()),
+    authorGender: v.optional(v.string()),
     replyCount: v.number(),
     reactionCount: v.number(),
     voiceReplyCount: v.optional(v.number()),
     createdAt: v.number(),
     expiresAt: v.optional(v.number()), // 24h after createdAt; undefined = never expires (legacy)
     taggedUserId: v.optional(v.id('users')), // User being confessed to (must be someone current user has liked)
+    // Soft delete support
+    isDeleted: v.optional(v.boolean()),
+    deletedAt: v.optional(v.number()),
   })
     .index('by_created', ['createdAt'])
     .index('by_user', ['userId'])
     .index('by_expires', ['expiresAt'])
     .index('by_tagged_user', ['taggedUserId']),
+
+  // Confession Reports table (for moderation)
+  confessionReports: defineTable({
+    confessionId: v.id('confessions'),
+    reporterId: v.id('users'),
+    reportedUserId: v.id('users'),
+    reason: v.union(
+      v.literal('spam'),
+      v.literal('harassment'),
+      v.literal('hate'),
+      v.literal('sexual'),
+      v.literal('other')
+    ),
+    description: v.optional(v.string()),
+    status: v.union(v.literal('pending'), v.literal('reviewed'), v.literal('actioned')),
+    createdAt: v.number(),
+  })
+    .index('by_confession', ['confessionId'])
+    .index('by_reporter', ['reporterId'])
+    .index('by_status', ['status']),
 
   // Confession Replies table
   confessionReplies: defineTable({
@@ -1203,16 +1228,6 @@ export default defineSchema({
     .index('by_confession', ['confessionId'])
     .index('by_user', ['userId'])
     .index('by_confession_user', ['confessionId', 'userId']),
-
-  // Confession Reports table
-  confessionReports: defineTable({
-    confessionId: v.id('confessions'),
-    reporterId: v.id('users'),
-    reason: v.optional(v.string()),
-    createdAt: v.number(),
-  })
-    .index('by_confession', ['confessionId'])
-    .index('by_reporter', ['reporterId']),
 
   // Confession Notifications table (for tagged confessions)
   confessionNotifications: defineTable({
