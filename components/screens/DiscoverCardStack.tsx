@@ -11,6 +11,7 @@ import {
   InteractionManager,
   ScrollView,
   Modal,
+  Easing,
 } from "react-native";
 import { LoadingGuard } from "@/components/safety";
 import { useShallow } from "zustand/react/shallow";
@@ -88,6 +89,143 @@ const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get("window");
 
 const EMPTY_ARRAY: any[] = [];
 
+// ── Star-burst animation for super-like ──
+const STAR_COUNT = 8;
+const STAR_COLORS = ['#FFD700', '#FFA500', '#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FFEAA7', '#DDA0DD'];
+
+interface StarBurstAnimationProps {
+  visible: boolean;
+  onComplete: () => void;
+}
+
+function StarBurstAnimation({ visible, onComplete }: StarBurstAnimationProps) {
+  const animations = useRef(
+    Array.from({ length: STAR_COUNT }, () => ({
+      scale: new Animated.Value(0),
+      opacity: new Animated.Value(1),
+      translateX: new Animated.Value(0),
+      translateY: new Animated.Value(0),
+    }))
+  ).current;
+
+  useEffect(() => {
+    if (!visible) return;
+
+    // Reset all animations
+    animations.forEach((anim) => {
+      anim.scale.setValue(0);
+      anim.opacity.setValue(1);
+      anim.translateX.setValue(0);
+      anim.translateY.setValue(0);
+    });
+
+    // Create staggered star burst
+    const starAnimations = animations.map((anim, i) => {
+      const angle = (i / STAR_COUNT) * 2 * Math.PI;
+      const distance = 80 + Math.random() * 40; // Random distance 80-120
+      const targetX = Math.cos(angle) * distance;
+      const targetY = Math.sin(angle) * distance;
+
+      return Animated.sequence([
+        Animated.delay(i * 30), // Stagger each star
+        Animated.parallel([
+          Animated.timing(anim.scale, {
+            toValue: 1,
+            duration: 150,
+            easing: Easing.out(Easing.back(2)),
+            useNativeDriver: true,
+          }),
+          Animated.timing(anim.translateX, {
+            toValue: targetX,
+            duration: 500,
+            easing: Easing.out(Easing.cubic),
+            useNativeDriver: true,
+          }),
+          Animated.timing(anim.translateY, {
+            toValue: targetY,
+            duration: 500,
+            easing: Easing.out(Easing.cubic),
+            useNativeDriver: true,
+          }),
+          Animated.sequence([
+            Animated.delay(200),
+            Animated.timing(anim.opacity, {
+              toValue: 0,
+              duration: 300,
+              useNativeDriver: true,
+            }),
+          ]),
+        ]),
+      ]);
+    });
+
+    Animated.parallel(starAnimations).start(() => {
+      onComplete();
+    });
+  }, [visible, animations, onComplete]);
+
+  if (!visible) return null;
+
+  return (
+    <View style={starBurstStyles.container} pointerEvents="none">
+      {animations.map((anim, i) => (
+        <Animated.View
+          key={i}
+          style={[
+            starBurstStyles.star,
+            {
+              backgroundColor: STAR_COLORS[i % STAR_COLORS.length],
+              opacity: anim.opacity,
+              transform: [
+                { translateX: anim.translateX },
+                { translateY: anim.translateY },
+                { scale: anim.scale },
+                { rotate: `${(i * 45)}deg` },
+              ],
+            },
+          ]}
+        >
+          <Ionicons name="star" size={24} color={STAR_COLORS[i % STAR_COLORS.length]} />
+        </Animated.View>
+      ))}
+      {/* Center star pulse */}
+      <Animated.View
+        style={[
+          starBurstStyles.centerStar,
+          {
+            opacity: animations[0].opacity,
+            transform: [{ scale: animations[0].scale }],
+          },
+        ]}
+      >
+        <Ionicons name="star" size={48} color="#FFD700" />
+      </Animated.View>
+    </View>
+  );
+}
+
+const starBurstStyles = StyleSheet.create({
+  container: {
+    ...StyleSheet.absoluteFillObject,
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 100,
+  },
+  star: {
+    position: 'absolute',
+    width: 24,
+    height: 24,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'transparent',
+  },
+  centerStar: {
+    position: 'absolute',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+});
+
 const HEADER_H = 44;
 
 export interface DiscoverCardStackProps {
@@ -119,6 +257,10 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   // Random Match popup state (F2-D)
   const [showRandomMatchPopup, setShowRandomMatchPopup] = useState(false);
   const randomMatchPopupShownRef = useRef(false); // Anti-spam: one popup per component lifecycle
+
+  // Super-like star-burst animation state
+  const [showSuperLikeAnimation, setShowSuperLikeAnimation] = useState(false);
+  const clearSuperLikeAnimation = useCallback(() => setShowSuperLikeAnimation(false), []);
 
   // Phase-2 only: Intent filters from store (syncs with Discovery Preferences)
   const { privateIntentKeys: intentFilters, togglePrivateIntentKey, setPrivateIntentKeys } = useFilterStore();
@@ -862,6 +1004,9 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
     // ★ RACE FIX: Acquire swipe lock and capture unique ID for this stand-out lifecycle
     const swipeId = acquireSwipeLock();
 
+    // ★ Trigger star-burst animation for super-like
+    setShowSuperLikeAnimation(true);
+
     // Animate the card out (up direction)
     const currentPan = getActivePan();
     const targetY = -SCREEN_HEIGHT * 1.5;
@@ -1221,6 +1366,9 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
             <SwipeOverlay direction={overlayDirection} opacity={overlayOpacityAnim} />
           </Animated.View>
         )}
+
+        {/* Super-like star-burst animation */}
+        <StarBurstAnimation visible={showSuperLikeAnimation} onComplete={clearSuperLikeAnimation} />
       </View>
 
       {/* 3-Button Action Bar */}
