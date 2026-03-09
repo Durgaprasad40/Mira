@@ -99,6 +99,15 @@ export const updateFields = mutation({
     isSetupComplete: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
+    // BE-001 SECURITY FIX: Require authentication and verify ownership
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) {
+      throw new Error('Unauthorized: authentication required');
+    }
+    if (args.userId !== identity.subject) {
+      throw new Error('Unauthorized: cannot modify another user profile');
+    }
+
     // Check if private data is in pending_deletion state
     const isDeleted = await isPrivateDataDeleted(ctx, args.userId);
     if (isDeleted) {
@@ -136,6 +145,15 @@ export const updateBlurredPhotos = mutation({
     privatePhotoUrls: v.array(v.string()),
   },
   handler: async (ctx, args) => {
+    // BE-002 SECURITY FIX: Require authentication and verify ownership
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) {
+      throw new Error('Unauthorized: authentication required');
+    }
+    if (args.userId !== identity.subject) {
+      throw new Error('Unauthorized: cannot modify another user photos');
+    }
+
     const existing = await ctx.db
       .query('userPrivateProfiles')
       .withIndex('by_user', (q) => q.eq('userId', args.userId))
@@ -159,6 +177,15 @@ export const updateBlurredPhotos = mutation({
 export const deleteProfile = mutation({
   args: { userId: v.id('users') },
   handler: async (ctx, args) => {
+    // BE-003 SECURITY FIX: Require authentication and verify ownership
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) {
+      throw new Error('Unauthorized: authentication required');
+    }
+    if (args.userId !== identity.subject) {
+      throw new Error('Unauthorized: cannot delete another user profile');
+    }
+
     const existing = await ctx.db
       .query('userPrivateProfiles')
       .withIndex('by_user', (q) => q.eq('userId', args.userId))
