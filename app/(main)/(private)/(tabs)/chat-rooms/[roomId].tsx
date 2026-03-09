@@ -310,17 +310,32 @@ export default function ChatRoomScreen() {
 
   // ─────────────────────────────────────────────────────────────────────────
   // COUNTDOWN TIMER (for expiring rooms)
+  // ST-003 FIX: Use ref to ensure only one interval exists at a time
   // ─────────────────────────────────────────────────────────────────────────
   const [nowMs, setNowMs] = useState(Date.now());
   const expiresAt = convexRoom?.expiresAt;
+  const countdownIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   useEffect(() => {
+    // ST-003 FIX: Always clear previous interval before creating new one
+    if (countdownIntervalRef.current) {
+      clearInterval(countdownIntervalRef.current);
+      countdownIntervalRef.current = null;
+    }
+
     if (!expiresAt) return;
-    const interval = setInterval(() => {
-      // B2-HIGH FIX: Guard setState after async
+
+    countdownIntervalRef.current = setInterval(() => {
       if (mountedRef.current) setNowMs(Date.now());
     }, 1000);
-    return () => clearInterval(interval);
+
+    // ST-003 FIX: Guaranteed cleanup on unmount or expiresAt change
+    return () => {
+      if (countdownIntervalRef.current) {
+        clearInterval(countdownIntervalRef.current);
+        countdownIntervalRef.current = null;
+      }
+    };
   }, [expiresAt]);
 
   // Format remaining time as HH:MM:SS
@@ -481,52 +496,63 @@ export default function ChatRoomScreen() {
   // Seed demo room on mount
   // P1 CR-004: Wait for store hydration before seeding to prevent race conditions
   // P1 CR-005: Sort messages after merging to ensure correct order
-  // P2 STABILITY: Add hydration fallback timeout (3 seconds) if AsyncStorage fails
-  const hydrationFallbackTriggeredRef = useRef(false);
+  // CR-002 FIX: Single ref-based guard with deterministic fallback path
   const seedAttemptedRef = useRef(false);
-  const [hydrationFallback, setHydrationFallback] = useState(false);
+  const hydrationFallbackTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     if (!isDemoMode || !roomIdStr) return;
-    if (storeHasHydrated || hydrationFallbackTriggeredRef.current) return;
+    // CR-002 FIX: Single guard prevents all double-seeding
+    if (seedAttemptedRef.current) return;
 
-    // P2 STABILITY: If hydration takes longer than 3 seconds, allow seeding anyway
-    const fallbackTimer = setTimeout(() => {
-      if (!useDemoChatRoomStore.getState()._hasHydrated) {
-        if (__DEV__) {
-          console.warn('[ChatRoom] Store hydration timeout - proceeding with demo seeding');
-        }
-        hydrationFallbackTriggeredRef.current = true;
-        // B2-HIGH FIX: Guard setState after async
-        if (mountedRef.current) setHydrationFallback(true);
+    // Check if already hydrated - seed immediately
+    if (storeHasHydrated) {
+      seedAttemptedRef.current = true;
+      const base = getDemoMessagesForRoom(roomIdStr);
+      const joinMsg: DemoChatMessage = {
+        id: `sys_join_${DEMO_CURRENT_USER.id}_${Date.now()}`,
+        roomId: roomIdStr,
+        senderId: 'system',
+        senderName: 'System',
+        type: 'system',
+        text: `${DEMO_CURRENT_USER.username} joined the room`,
+        createdAt: Date.now(),
+      };
+      const sorted = [...base, joinMsg].sort((a, b) => a.createdAt - b.createdAt);
+      seedRoom(roomIdStr, sorted);
+      return;
+    }
+
+    // CR-002 FIX: Single fallback timeout - only runs if not hydrated
+    hydrationFallbackTimerRef.current = setTimeout(() => {
+      if (!mountedRef.current) return;
+      if (seedAttemptedRef.current) return; // Already seeded via hydration path
+      if (__DEV__) {
+        console.warn('[ChatRoom] Store hydration timeout - proceeding with demo seeding');
       }
+      seedAttemptedRef.current = true;
+      const base = getDemoMessagesForRoom(roomIdStr);
+      const joinMsg: DemoChatMessage = {
+        id: `sys_join_${DEMO_CURRENT_USER.id}_${Date.now()}`,
+        roomId: roomIdStr,
+        senderId: 'system',
+        senderName: 'System',
+        type: 'system',
+        text: `${DEMO_CURRENT_USER.username} joined the room`,
+        createdAt: Date.now(),
+      };
+      const sorted = [...base, joinMsg].sort((a, b) => a.createdAt - b.createdAt);
+      seedRoom(roomIdStr, sorted);
     }, 3000);
 
-    return () => clearTimeout(fallbackTimer);
-  }, [roomIdStr, storeHasHydrated]);
-
-  useEffect(() => {
-    if (!isDemoMode || !roomIdStr) return;
-    // P2 STABILITY: Proceed if hydrated OR fallback triggered
-    if (!storeHasHydrated && !hydrationFallback) return;
-    // P1 FIX: Atomic guard to prevent double-seeding
-    if (seedAttemptedRef.current) return;
-    seedAttemptedRef.current = true;
-
-    const base = getDemoMessagesForRoom(roomIdStr);
-    const joinMsg: DemoChatMessage = {
-      id: `sys_join_${DEMO_CURRENT_USER.id}_${Date.now()}`,
-      roomId: roomIdStr,
-      senderId: 'system',
-      senderName: 'System',
-      type: 'system',
-      text: `${DEMO_CURRENT_USER.username} joined the room`,
-      createdAt: Date.now(),
+    // CR-002 FIX: Guaranteed cleanup
+    return () => {
+      if (hydrationFallbackTimerRef.current) {
+        clearTimeout(hydrationFallbackTimerRef.current);
+        hydrationFallbackTimerRef.current = null;
+      }
     };
-    // Sort by createdAt to ensure correct ordering regardless of merge order
-    const sorted = [...base, joinMsg].sort((a, b) => a.createdAt - b.createdAt);
-    seedRoom(roomIdStr, sorted);
-  }, [roomIdStr, seedRoom, storeHasHydrated, hydrationFallback]);
+  }, [roomIdStr, seedRoom, storeHasHydrated]);
 
   // Auto-join Convex room (skip if invalid ID)
   useEffect(() => {
