@@ -125,6 +125,17 @@ export default function ConfessionsScreen() {
   const convexUserQueryArgs = !isDemoMode && currentUserId ? { userId: asUserId(currentUserId) ?? currentUserId } : 'skip';
   const convexCurrentUser = useQuery(api.users.getCurrentUser, convexUserQueryArgs);
 
+  // The effective Convex user ID for ownership checks:
+  // - Live mode: use convexCurrentUser._id (Convex internal ID)
+  // - Demo mode: use currentUserId (string ID from store)
+  const effectiveUserId = useMemo(() => {
+    if (isDemoMode) {
+      return currentUserId;
+    }
+    // In live mode, use the resolved Convex user ID
+    return convexCurrentUser?._id ?? undefined;
+  }, [isDemoMode, currentUserId, convexCurrentUser]);
+
   // Helper to compute age from dateOfBirth string (YYYY-MM-DD or similar)
   const computeAge = (dateOfBirth: string | undefined): number | undefined => {
     if (!dateOfBirth) return undefined;
@@ -1288,7 +1299,7 @@ export default function ConfessionsScreen() {
               taggedUserId={item.targetUserId}
               taggedUserName={(item as any).targetUserName}
               authorId={item.userId}
-              viewerId={currentUserId}
+              viewerId={effectiveUserId}
               onPress={() => handleOpenThread(item.id)}
               onReact={() => handleOpenEmojiPicker(item.id)}
               onToggleEmoji={(emoji) => toggleReaction(item.id, emoji)}

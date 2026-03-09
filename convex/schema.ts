@@ -1213,6 +1213,7 @@ export default defineSchema({
     type: v.optional(v.union(v.literal('text'), v.literal('voice'))),
     voiceUrl: v.optional(v.string()),
     voiceDurationSec: v.optional(v.number()),
+    parentReplyId: v.optional(v.id('confessionReplies')), // For reply-to-reply (OP responding to anonymous reply)
     createdAt: v.number(),
   })
     .index('by_confession', ['confessionId'])

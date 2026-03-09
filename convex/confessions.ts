@@ -237,6 +237,7 @@ export const createReply = mutation({
     type: v.optional(v.union(v.literal('text'), v.literal('voice'))),
     voiceUrl: v.optional(v.string()),
     voiceDurationSec: v.optional(v.number()),
+    parentReplyId: v.optional(v.id('confessionReplies')), // For OP reply-to-reply
   },
   handler: async (ctx, args) => {
     // Map authUserId -> Convex Id<"users"> (MUTATION: can create)
@@ -265,6 +266,7 @@ export const createReply = mutation({
       type: replyType,
       voiceUrl: args.voiceUrl,
       voiceDurationSec: args.voiceDurationSec,
+      parentReplyId: args.parentReplyId,
       createdAt: Date.now(),
     });
 
