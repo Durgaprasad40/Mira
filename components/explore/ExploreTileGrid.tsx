@@ -43,7 +43,8 @@ const ExploreTile = memo(function ExploreTile({
   isSelected: boolean;
   onPress: () => void;
 }) {
-  const isDisabled = count === 0;
+  // Visual-only: dim tiles with zero profiles but still allow navigation
+  const isEmpty = count === 0;
 
   // Generate gradient colors from the category color
   const baseColor = category.color;
@@ -52,33 +53,32 @@ const ExploreTile = memo(function ExploreTile({
 
   return (
     <Pressable
-      disabled={isDisabled}
       onPress={onPress}
       style={({ pressed }) => [
         styles.tileWrapper,
         isSelected && styles.tileSelected,
-        pressed && !isDisabled && styles.tilePressed,
+        pressed && styles.tilePressed,
       ]}
     >
       <LinearGradient
-        colors={isDisabled ? ["#2a2a2a", "#1a1a1a"] : [lighterColor, baseColor, darkerColor]}
+        colors={isEmpty ? ["#2a2a2a", "#1a1a1a"] : [lighterColor, baseColor, darkerColor]}
         start={{ x: 0, y: 0 }}
         end={{ x: 1, y: 1 }}
         style={[
           styles.tile,
-          isDisabled && styles.tileDisabled,
+          isEmpty && styles.tileDisabled,
         ]}
       >
         <View style={styles.tileContent}>
           <Text style={styles.tileIcon}>{category.icon}</Text>
           <Text
-            style={[styles.tileLabel, isDisabled && styles.tileLabelDisabled]}
+            style={[styles.tileLabel, isEmpty && styles.tileLabelDisabled]}
             numberOfLines={2}
           >
             {category.label}
           </Text>
-          <View style={[styles.countBadge, isDisabled && styles.countBadgeDisabled]}>
-            <Text style={[styles.countText, isDisabled && styles.countTextDisabled]}>
+          <View style={[styles.countBadge, isEmpty && styles.countBadgeDisabled]}>
+            <Text style={[styles.countText, isEmpty && styles.countTextDisabled]}>
               {count}
             </Text>
           </View>
@@ -125,7 +125,8 @@ export default function ExploreTileGrid({
         count={count}
         isSelected={isSelected}
         onPress={() => {
-          if (count > 0 && onCategoryPress) {
+          // Always navigate - category detail handles empty state
+          if (onCategoryPress) {
             onCategoryPress(category);
           }
         }}
