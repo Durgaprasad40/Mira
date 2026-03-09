@@ -10,6 +10,7 @@ import {
   TouchableOpacity,
   InteractionManager,
   ScrollView,
+  Modal,
 } from "react-native";
 import { LoadingGuard } from "@/components/safety";
 import { useShallow } from "zustand/react/shallow";
@@ -114,6 +115,10 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   const [index, setIndex] = useState(0);
   const [retryKey, setRetryKey] = useState(0); // For LoadingGuard retry
   const [showNotificationPopover, setShowNotificationPopover] = useState(false);
+
+  // Random Match popup state (F2-D)
+  const [showRandomMatchPopup, setShowRandomMatchPopup] = useState(false);
+  const randomMatchPopupShownRef = useRef(false); // Anti-spam: one popup per component lifecycle
 
   // Phase-2 only: Intent filters from store (syncs with Discovery Preferences)
   const { privateIntentKeys: intentFilters, togglePrivateIntentKey, setPrivateIntentKeys } = useFilterStore();
@@ -594,12 +599,21 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       // F2-A: Track swipe for random match control
       incSwipe();
 
-      // F2-D: Check if random match popup should trigger (Discover-only entry point)
-      const shouldTriggerRandomMatch = maybeTriggerRandomMatch();
-      if (shouldTriggerRandomMatch) {
-        // F2-D: Gate returned true - no existing popup handler function exists in this file.
-        // Match logic is inline (simulateMatch + router.push). Future: extract handler or add UI.
-        if (__DEV__) console.log('[F2-D] Gate returned true but no existing match popup handler found');
+      // F2-D: Random match popup trigger (Option C: only on positive interaction)
+      // Only trigger on like (right) or super_like (up), NOT on pass (left)
+      if ((direction === "right" || direction === "up") && !randomMatchPopupShownRef.current) {
+        const shouldTriggerRandomMatch = maybeTriggerRandomMatch();
+        if (shouldTriggerRandomMatch && mountedRef.current && isFocusedRef.current) {
+          // Anti-spam: mark as shown in this component lifecycle
+          randomMatchPopupShownRef.current = true;
+          // Defer popup slightly to let swipe animation complete
+          setTimeout(() => {
+            if (mountedRef.current && isFocusedRef.current) {
+              setShowRandomMatchPopup(true);
+              if (__DEV__) console.log('[F2-D] Random match popup shown');
+            }
+          }, 400);
+        }
       }
 
       // Increment daily counters
@@ -1244,6 +1258,54 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
         onClose={() => setShowNotificationPopover(false)}
         anchorTop={insets.top + HEADER_H + 8}
       />
+
+      {/* Random Match Popup (F2-D) */}
+      <Modal
+        visible={showRandomMatchPopup}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setShowRandomMatchPopup(false)}
+      >
+        <View style={styles.randomMatchOverlay}>
+          <View style={styles.randomMatchPopup}>
+            {/* Sparkle icon */}
+            <View style={styles.randomMatchIconWrap}>
+              <Ionicons name="sparkles" size={48} color={COLORS.primary} />
+            </View>
+
+            {/* Title */}
+            <Text style={styles.randomMatchTitle}>Someone&apos;s interested!</Text>
+
+            {/* Subtitle */}
+            <Text style={styles.randomMatchSubtitle}>
+              A match is waiting for you. Would you like to see who liked you?
+            </Text>
+
+            {/* Primary CTA */}
+            <TouchableOpacity
+              style={styles.randomMatchCta}
+              onPress={() => {
+                setShowRandomMatchPopup(false);
+                // Navigate to likes screen to see who liked them
+                router.push("/(main)/likes" as any);
+              }}
+              activeOpacity={0.8}
+            >
+              <Ionicons name="heart" size={20} color={COLORS.white} style={{ marginRight: 8 }} />
+              <Text style={styles.randomMatchCtaText}>See Who Liked Me</Text>
+            </TouchableOpacity>
+
+            {/* Dismiss */}
+            <TouchableOpacity
+              style={styles.randomMatchDismiss}
+              onPress={() => setShowRandomMatchPopup(false)}
+              activeOpacity={0.7}
+            >
+              <Text style={styles.randomMatchDismissText}>Maybe later</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }
@@ -1461,4 +1523,78 @@ const styles = StyleSheet.create({
     lineHeight: 18,
   },
 
+  // Random Match Popup (F2-D)
+  randomMatchOverlay: {
+    flex: 1,
+    backgroundColor: "rgba(0, 0, 0, 0.6)",
+    justifyContent: "center",
+    alignItems: "center",
+    padding: 24,
+  },
+  randomMatchPopup: {
+    backgroundColor: COLORS.white,
+    borderRadius: 24,
+    padding: 32,
+    alignItems: "center",
+    width: "100%",
+    maxWidth: 340,
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.25,
+    shadowRadius: 24,
+    elevation: 12,
+  },
+  randomMatchIconWrap: {
+    width: 88,
+    height: 88,
+    borderRadius: 44,
+    backgroundColor: `${COLORS.primary}15`,
+    alignItems: "center",
+    justifyContent: "center",
+    marginBottom: 20,
+  },
+  randomMatchTitle: {
+    fontSize: 24,
+    fontWeight: "700",
+    color: COLORS.text,
+    marginBottom: 12,
+    textAlign: "center",
+  },
+  randomMatchSubtitle: {
+    fontSize: 16,
+    color: COLORS.textLight,
+    textAlign: "center",
+    lineHeight: 24,
+    marginBottom: 28,
+  },
+  randomMatchCta: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: COLORS.primary,
+    paddingHorizontal: 32,
+    paddingVertical: 16,
+    borderRadius: 28,
+    width: "100%",
+    shadowColor: COLORS.primary,
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+    elevation: 4,
+  },
+  randomMatchCtaText: {
+    fontSize: 17,
+    fontWeight: "700",
+    color: COLORS.white,
+  },
+  randomMatchDismiss: {
+    marginTop: 16,
+    paddingVertical: 12,
+    paddingHorizontal: 24,
+  },
+  randomMatchDismissText: {
+    fontSize: 15,
+    fontWeight: "500",
+    color: COLORS.textLight,
+  },
 });
