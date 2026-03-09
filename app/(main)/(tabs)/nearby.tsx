@@ -171,6 +171,10 @@ const DEMO_LOCATION = {
 // Combined with viewerId + otherId for deterministic per-user fuzzing.
 const MODULE_SESSION_SALT = Date.now();
 
+// Module-level flag: has empty state been shown this app session?
+// Resets only on full app restart (module reload).
+let hasShownEmptyStateThisSession = false;
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -303,6 +307,7 @@ export default function NearbyScreen() {
   const [locationUIState, setLocationUIState] = useState<LocationUIState>('checking');
   const [queryError, setQueryError] = useState<string | null>(null);
   const [isRetrying, setIsRetrying] = useState(false);
+  const [showEmptyState, setShowEmptyState] = useState(false);
 
   // Mount guard for async operations
   const isMountedRef = useRef(true);
@@ -333,6 +338,10 @@ export default function NearbyScreen() {
   const autoRetryTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const AUTO_RETRY_MAX = 2;
   const AUTO_RETRY_DELAY_MS = 5000;
+
+  // Empty state auto-dismiss timer ref
+  const emptyStateTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const EMPTY_STATE_DISMISS_MS = 3000;
 
   // Clear timeout when query succeeds or on unmount
   useEffect(() => {
@@ -724,6 +733,48 @@ export default function NearbyScreen() {
 
   // Alias for rendering (visibleUsers are the processed, sorted, limited markers)
   const mapUsers = visibleUsers;
+
+  // ---------------------------------------------------------------------------
+  // Empty state: show once per app session, auto-dismiss after 3 seconds
+  // ---------------------------------------------------------------------------
+  const isEmptyStateCondition = locationUIState === 'ready' && mapUsers.length === 0 && !isDemo && !isQueryLoading && !isRetrying;
+
+  useEffect(() => {
+    // If conditions for empty state are not met, hide and clear timer
+    if (!isEmptyStateCondition) {
+      setShowEmptyState(false);
+      if (emptyStateTimerRef.current) {
+        clearTimeout(emptyStateTimerRef.current);
+        emptyStateTimerRef.current = null;
+      }
+      return;
+    }
+
+    // If already shown this session, don't show again
+    if (hasShownEmptyStateThisSession) {
+      return;
+    }
+
+    // Show empty state and mark as shown this session
+    hasShownEmptyStateThisSession = true;
+    setShowEmptyState(true);
+
+    // Auto-dismiss after 3 seconds
+    emptyStateTimerRef.current = setTimeout(() => {
+      if (isMountedRef.current) {
+        setShowEmptyState(false);
+      }
+      emptyStateTimerRef.current = null;
+    }, EMPTY_STATE_DISMISS_MS);
+
+    // Cleanup on unmount
+    return () => {
+      if (emptyStateTimerRef.current) {
+        clearTimeout(emptyStateTimerRef.current);
+        emptyStateTimerRef.current = null;
+      }
+    };
+  }, [isEmptyStateCondition]);
 
   // ---------------------------------------------------------------------------
   // Navigation handlers for header buttons
@@ -1260,8 +1311,8 @@ export default function NearbyScreen() {
           </View>
         )}
 
-        {/* Empty state overlay - only shown when ready with no users and NOT loading */}
-        {locationUIState === 'ready' && mapUsers.length === 0 && !isDemo && !isQueryLoading && !isRetrying && (
+        {/* Empty state overlay - shown once per app session, auto-dismisses after 3s */}
+        {showEmptyState && (
           <View style={styles.emptyOverlay}>
             <View style={styles.emptyCard}>
               <Ionicons name="people-outline" size={32} color={COLORS.textLight} />

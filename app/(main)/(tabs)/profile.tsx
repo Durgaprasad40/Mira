@@ -449,17 +449,7 @@ export default function ProfileScreen() {
           <Ionicons name="chevron-forward" size={20} color={COLORS.textLight} />
         </TouchableOpacity>
 
-        {/* 4. Nearby Settings */}
-        <TouchableOpacity
-          style={styles.menuItem}
-          onPress={() => safePush(router, '/(main)/nearby-settings', 'profile->nearby')}
-        >
-          <Ionicons name="location-outline" size={24} color={COLORS.text} />
-          <Text style={styles.menuText}>Nearby Settings</Text>
-          <Ionicons name="chevron-forward" size={20} color={COLORS.textLight} />
-        </TouchableOpacity>
-
-        {/* 5. Safety */}
+        {/* 4. Safety */}
         <TouchableOpacity
           style={styles.menuItem}
           onPress={() => safePush(router, '/(main)/settings/safety', 'profile->safety')}
@@ -469,7 +459,7 @@ export default function ProfileScreen() {
           <Ionicons name="chevron-forward" size={20} color={COLORS.textLight} />
         </TouchableOpacity>
 
-        {/* 6. Account */}
+        {/* 5. Account */}
         <TouchableOpacity
           style={styles.menuItem}
           onPress={() => safePush(router, '/(main)/settings/account', 'profile->account')}
@@ -479,7 +469,7 @@ export default function ProfileScreen() {
           <Ionicons name="chevron-forward" size={20} color={COLORS.textLight} />
         </TouchableOpacity>
 
-        {/* 7. Help & FAQ */}
+        {/* 6. Help & FAQ */}
         <TouchableOpacity
           style={styles.menuItem}
           onPress={() => safePush(router, '/(main)/settings/help', 'profile->help')}
@@ -489,7 +479,7 @@ export default function ProfileScreen() {
           <Ionicons name="chevron-forward" size={20} color={COLORS.textLight} />
         </TouchableOpacity>
 
-        {/* 8. Log Out */}
+        {/* 7. Log Out */}
         <TouchableOpacity
           style={styles.menuItem}
           onPress={handleLogout}
@@ -521,7 +511,7 @@ export default function ProfileScreen() {
         )}
       </View>
 
-      {/* 9. Deactivate Account - destructive action at bottom */}
+      {/* 8. Deactivate Account - destructive action at bottom */}
       <View style={styles.footer}>
         <TouchableOpacity onPress={handleDeactivate} style={styles.deactivateButton}>
           <Text style={styles.deactivateText}>Deactivate Account</Text>
