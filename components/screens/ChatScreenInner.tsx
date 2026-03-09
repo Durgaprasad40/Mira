@@ -44,7 +44,7 @@ import { VoiceMessageBubble } from '@/components/chat/VoiceMessageBubble';
 import { useDemoStore } from '@/stores/demoStore';
 import { useBlockStore } from '@/stores/blockStore';
 import { useDemoNotifStore } from '@/hooks/useNotifications';
-import { Toast } from '@/components/ui/Toast';
+// Toast import removed — using Alert.alert for guaranteed error visibility
 import { logDebugEvent } from '@/lib/debugEventLogger';
 import {
   isUserBlocked,
@@ -484,7 +484,10 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
       // B5 fix: clear draft after successful send in Convex mode
       if (conversationId) clearDemoDraft(conversationId);
     } catch (error: any) {
-      if (mountedRef.current) Toast.show(error.message || 'Failed to send — tap send to retry');
+      // Use Alert.alert instead of Toast for guaranteed visibility (Toast requires ToastHost to be mounted)
+      if (mountedRef.current) {
+        Alert.alert('Send Failed', error.message || 'Message could not be sent. Your text has been restored — tap send to retry.');
+      }
       throw error; // Re-throw so MessageInput can restore text for retry
     } finally {
       isSendingRef.current = false;
