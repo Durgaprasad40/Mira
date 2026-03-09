@@ -386,7 +386,7 @@ export const toggleReaction = mutation({
           // Create new conversation between author and tagged user
           const now = Date.now();
           const TWENTY_FOUR_HOURS = 24 * 60 * 60 * 1000;
-          await ctx.db.insert('conversations', {
+          const conversationId = await ctx.db.insert('conversations', {
             confessionId: args.confessionId,
             participants: [confession.userId, confession.taggedUserId],
             isPreMatch: true, // Confession-based threads are pre-match
@@ -394,6 +394,19 @@ export const toggleReaction = mutation({
             lastMessageAt: now,
             expiresAt: now + TWENTY_FOUR_HOURS, // Confession chats expire in 24h
           });
+
+          // Create participant junction rows for efficient Messages queries
+          await ctx.db.insert('conversationParticipants', {
+            conversationId,
+            userId: confession.userId,
+            unreadCount: 0,
+          });
+          await ctx.db.insert('conversationParticipants', {
+            conversationId,
+            userId: confession.taggedUserId,
+            unreadCount: 0,
+          });
+
           chatUnlocked = true;
         }
       }

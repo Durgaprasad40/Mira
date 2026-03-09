@@ -28,6 +28,8 @@ import { useConfessionStore } from '@/stores/confessionStore';
 import { useDemoStore } from '@/stores/demoStore';
 import { useBlockStore } from '@/stores/blockStore';
 import { isDemoMode } from '@/hooks/useConvex';
+import { asUserId } from '@/convex/id';
+import { safePush } from '@/lib/safeRouter';
 import { shouldBlockConfessionOpen } from '@/lib/confessionsIntegrity';
 import { logDebugEvent } from '@/lib/debugEventLogger';
 
@@ -151,6 +153,7 @@ export default function ConfessionThreadScreen() {
   const deleteReplyMutation = useMutation(api.confessions.deleteReply);
   const reportMutation = useMutation(api.confessions.reportConfession);
   const toggleReactionMutation = useMutation(api.confessions.toggleReaction);
+  const getOrCreateForConfessionMutation = useMutation(api.confessions.getOrCreateForConfession);
 
   const handleSendReply = useCallback(async () => {
     if (!replyText.trim() || !confessionId || sending) return;
@@ -240,8 +243,34 @@ export default function ConfessionThreadScreen() {
     [confession, toggleReaction, toggleReactionMutation, currentUserId]
   );
 
-  const handleReplyAnonymously = useCallback(() => {
+  const handleReplyAnonymously = useCallback(async () => {
     if (!confession || !confessionId || !currentUserId) return;
+
+    // Real mode: Use Convex conversation and route to Messages chat
+    if (!isDemoMode) {
+      try {
+        const convexId = asUserId(currentUserId);
+        if (!convexId) return;
+
+        const result = await getOrCreateForConfessionMutation({
+          confessionId: confessionId as any,
+          userId: convexId,
+        });
+
+        // Route to Messages chat with confession source
+        safePush(
+          router,
+          `/(main)/(tabs)/messages/chat/${result.conversationId}?source=confession` as any,
+          'confessionThread->messagesChat'
+        );
+      } catch (error) {
+        if (__DEV__) console.error('[CONFESS] Failed to create confession chat:', error);
+        Alert.alert('Error', 'Could not start chat. Please try again.');
+      }
+      return;
+    }
+
+    // Demo mode: Use local confessionStore (existing behavior)
     const existing = chats.find(
       (c) => c.confessionId === confessionId &&
         (c.initiatorId === currentUserId || c.responderId === currentUserId)
@@ -264,7 +293,7 @@ export default function ConfessionThreadScreen() {
     };
     addChat(newChat);
     router.push(`/(main)/confession-chat?chatId=${newChat.id}` as any);
-  }, [confession, confessionId, chats, currentUserId, addChat, router]);
+  }, [confession, confessionId, chats, currentUserId, addChat, router, getOrCreateForConfessionMutation]);
 
   const handleReport = useCallback(() => {
     if (!confessionId) return;
