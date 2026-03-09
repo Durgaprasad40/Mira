@@ -851,6 +851,9 @@ export const getNearbyUsers = query({
       // Basic info completeness: Must have name, bio, and dateOfBirth
       if (!user.name || !user.bio || !user.dateOfBirth) continue;
 
+      // P0 FIX: Require valid primary photo URL to prevent broken marker outcomes
+      if (!user.primaryPhotoUrl) continue;
+
       // Use other user's PUBLISHED location (privacy: not their live GPS)
       // If they haven't published, they don't appear on the map
       if (!user.publishedLat || !user.publishedLng || !user.publishedAt) continue;
@@ -1042,6 +1045,13 @@ export const getCrossPathHistory = query({
       const otherUserId = entry.user1Id === userId ? entry.user2Id : entry.user1Id;
       const otherUser = usersMap.get(otherUserId as string);
       if (!otherUser || !otherUser.isActive) continue;
+
+      // P0 FIX: Privacy filtering - hide users who disabled/paused Nearby
+      if (otherUser.nearbyEnabled === false) continue;
+      if (otherUser.nearbyPausedUntil && otherUser.nearbyPausedUntil > now) continue;
+
+      // P0 FIX: Require valid primary photo URL
+      if (!otherUser.primaryPhotoUrl) continue;
 
       const crossingCount = crossingCountsMap.get(otherUserId as string) || 1;
 
@@ -1380,6 +1390,13 @@ export const getCrossedPaths = query({
       const otherUser = usersMap.get(otherUserId as string);
 
       if (!otherUser || !otherUser.isActive) continue;
+
+      // P0 FIX: Privacy filtering - hide users who disabled/paused Nearby
+      if (otherUser.nearbyEnabled === false) continue;
+      if (otherUser.nearbyPausedUntil && otherUser.nearbyPausedUntil > now) continue;
+
+      // P0 FIX: Require valid primary photo URL
+      if (!otherUser.primaryPhotoUrl) continue;
 
       // Calculate distance range if we have location data
       let distanceRange: string | null = null;
