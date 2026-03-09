@@ -75,13 +75,10 @@ export default function PrivateLayout() {
 
   // B1 FIX: Track phantom "/" normalization state to show loading UI
   const [isNormalizingRoot, setIsNormalizingRoot] = useState(false);
+  // PA-001 FIX: Single timeout ref for fallback (removed retryTimeoutRef to eliminate race)
   const normalizationTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // E2: Track retry timeout separately for cleanup
-  const retryTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // B3.4 FIX: Track if we've already normalized to prevent redundant triggers
+  // PA-001 FIX: Single navigation guard - tracks both trigger AND completion
   const didNormalizeRef = useRef(false);
-  // E2: Single-fire navigation guard for normalization - prevents timeout races
-  const didNormalizeNavRef = useRef(false);
 
   // B1.1 FIX: Add router readiness check
   const rootNavState = useRootNavigationState();
@@ -102,99 +99,50 @@ export default function PrivateLayout() {
   // 🚨 CRITICAL: Collapse phantom "/" route inside Phase-2
   // Expo Router creates an implicit "/" entry before the real Phase-2 home.
   // This causes double back gestures. Normalize immediately to desire-land.
-  // B1 FIX: Added hydration check, try/catch, and timeout fallback for safety
-  // B1.1 FIX: Added router readiness check to prevent "navigate before root layout" error
+  // PA-001 FIX: Simplified to single deterministic path - eliminates race conditions
   useEffect(() => {
-    // B1 FIX: Wait for hydration before normalizing to prevent blank screen
+    // Wait for all preconditions before normalizing
     if (!hasHydrated) return;
     if (!mountedRef.current) return;
-    // B1.1 FIX: Wait for router to be ready before navigating
     if (!rootNavState?.key) return;
 
     const segmentStrings = segments as string[];
-    if (pathname === '/' && segmentStrings.includes('(private)')) {
-      // B3.4 FIX: Skip if we've already normalized (prevent redundant triggers)
-      if (didNormalizeRef.current) return;
-      didNormalizeRef.current = true;
+    const isPhantomRoot = pathname === '/' && segmentStrings.includes('(private)');
+    if (!isPhantomRoot) return;
 
-      setIsNormalizingRoot(true);
+    // PA-001 FIX: Single guard prevents all redundant triggers
+    if (didNormalizeRef.current) return;
+    didNormalizeRef.current = true;
+    setIsNormalizingRoot(true);
 
-      // B1.1 FIX: Timeout fallback - escape to Phase-1 if normalization fails (2s)
-      // Uses safer setTimeout for navigation with router readiness check
-      // E2: Uses didNormalizeNavRef to prevent multiple timeout navigations
-      normalizationTimeoutRef.current = setTimeout(() => {
-        if (!mountedRef.current) return;
-        // E2: Check if another path already navigated
-        if (didNormalizeNavRef.current) return;
-        // B1.1 FIX: Check router readiness in fallback too
-        if (!rootNavState?.key) {
-          if (__DEV__) console.warn('[PrivateLayout] Timeout fallback: router not ready, retrying...');
-          // Retry once after brief delay
-          retryTimeoutRef.current = setTimeout(() => {
-            if (!mountedRef.current) return;
-            // E2: Check if another path already navigated
-            if (didNormalizeNavRef.current) return;
-            if (rootNavState?.key) {
-              didNormalizeNavRef.current = true;
-              setIsNormalizingRoot(false);
-              router.replace(PHASE1_DISCOVER_ROUTE);
-            }
-          }, 250);
-          return;
-        }
-        if (__DEV__) console.warn('[PrivateLayout] Phantom root normalization timeout - exiting to Phase-1');
-        didNormalizeNavRef.current = true;
-        setIsNormalizingRoot(false);
-        router.replace(PHASE1_DISCOVER_ROUTE);
-      }, 2000);
-
-      // B1.1 FIX: Use setTimeout instead of requestAnimationFrame for safer scheduling
-      // E2: Uses didNormalizeNavRef to prevent races with timeout fallbacks
-      setTimeout(() => {
-        if (!mountedRef.current) return;
-        // E2: Check if another path already navigated
-        if (didNormalizeNavRef.current) return;
-        // B1.1 FIX: Double-check router readiness before navigating
-        if (!rootNavState?.key) {
-          if (__DEV__) console.warn('[PrivateLayout] Router not ready for normalization');
-          return;
-        }
-
-        // B1 FIX: Try/catch for safe navigation
-        try {
-          // E2: Mark as navigated BEFORE calling replace
-          didNormalizeNavRef.current = true;
-          router.replace(PHASE2_HOME_ROUTE);
-          setIsNormalizingRoot(false);
-          // E2: Clear all normalization timeouts since we succeeded
-          if (normalizationTimeoutRef.current) {
-            clearTimeout(normalizationTimeoutRef.current);
-            normalizationTimeoutRef.current = null;
-          }
-          if (retryTimeoutRef.current) {
-            clearTimeout(retryTimeoutRef.current);
-            retryTimeoutRef.current = null;
-          }
-        } catch (error) {
-          if (__DEV__) console.error('[PrivateLayout] Phantom root normalization failed:', error);
-          // E2: Reset navigation guard on error so fallback can try
-          didNormalizeNavRef.current = false;
-          setIsNormalizingRoot(false);
-          // Timeout will handle fallback navigation
-        }
-      }, 0);
+    // PA-001 FIX: Attempt immediate navigation (synchronous within effect)
+    try {
+      router.replace(PHASE2_HOME_ROUTE);
+      setIsNormalizingRoot(false);
+      if (__DEV__) console.log('[PrivateLayout] Phantom "/" normalized to Phase-2 home');
+      return; // Success - no fallback needed
+    } catch (error) {
+      if (__DEV__) console.error('[PrivateLayout] Immediate normalization failed:', error);
+      // Fall through to timeout fallback
     }
 
-    // B1 FIX: Cleanup timeout on unmount
-    // E2: Cleanup all normalization timeouts
+    // PA-001 FIX: Single fallback timeout (2s) - only runs if immediate navigation threw
+    normalizationTimeoutRef.current = setTimeout(() => {
+      if (!mountedRef.current) return;
+      setIsNormalizingRoot(false);
+      if (__DEV__) console.warn('[PrivateLayout] Normalization fallback - exiting to Phase-1');
+      try {
+        router.replace(PHASE1_DISCOVER_ROUTE);
+      } catch (fallbackError) {
+        if (__DEV__) console.error('[PrivateLayout] Fallback navigation failed:', fallbackError);
+      }
+    }, 2000);
+
+    // PA-001 FIX: Guaranteed cleanup on unmount
     return () => {
       if (normalizationTimeoutRef.current) {
         clearTimeout(normalizationTimeoutRef.current);
         normalizationTimeoutRef.current = null;
-      }
-      if (retryTimeoutRef.current) {
-        clearTimeout(retryTimeoutRef.current);
-        retryTimeoutRef.current = null;
       }
     };
   }, [pathname, segments, router, hasHydrated, rootNavState]);
