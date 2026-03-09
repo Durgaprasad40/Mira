@@ -43,7 +43,7 @@
  * - Advanced subscription/privacy rules
  * - Freshness ring indicators
  */
-import React, { useState, useEffect, useCallback, useMemo, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, useRef, Component, ReactNode } from 'react';
 import {
   View,
   Text,
@@ -68,6 +68,85 @@ import { COLORS } from '@/lib/constants';
 import { isDemoMode } from '@/hooks/useConvex';
 import { DEMO_USER, DEMO_PROFILES } from '@/lib/demoData';
 import { log } from '@/utils/logger';
+
+// ---------------------------------------------------------------------------
+// STABILITY FIX S4: Error boundary for map crash containment
+// ---------------------------------------------------------------------------
+interface MapErrorBoundaryState {
+  hasError: boolean;
+}
+
+class MapErrorBoundary extends Component<
+  { children: ReactNode; onRetry?: () => void },
+  MapErrorBoundaryState
+> {
+  state: MapErrorBoundaryState = { hasError: false };
+
+  static getDerivedStateFromError(): MapErrorBoundaryState {
+    return { hasError: true };
+  }
+
+  componentDidCatch(error: Error, errorInfo: React.ErrorInfo) {
+    log.error('[Nearby] Map render error caught by boundary:', String(error), String(errorInfo?.componentStack || ''));
+  }
+
+  handleRetry = () => {
+    this.setState({ hasError: false });
+    this.props.onRetry?.();
+  };
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <View style={mapErrorStyles.container}>
+          <Ionicons name="map-outline" size={48} color={COLORS.textLight} />
+          <Text style={mapErrorStyles.title}>Map unavailable</Text>
+          <Text style={mapErrorStyles.subtitle}>
+            Something went wrong loading the map
+          </Text>
+          <TouchableOpacity style={mapErrorStyles.retryButton} onPress={this.handleRetry}>
+            <Text style={mapErrorStyles.retryText}>Try Again</Text>
+          </TouchableOpacity>
+        </View>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+const mapErrorStyles = StyleSheet.create({
+  container: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 32,
+    backgroundColor: COLORS.background,
+  },
+  title: {
+    fontSize: 18,
+    fontWeight: '600',
+    color: COLORS.text,
+    marginTop: 16,
+  },
+  subtitle: {
+    fontSize: 14,
+    color: COLORS.textLight,
+    textAlign: 'center',
+    marginTop: 8,
+  },
+  retryButton: {
+    marginTop: 20,
+    backgroundColor: COLORS.primary,
+    paddingHorizontal: 24,
+    paddingVertical: 12,
+    borderRadius: 20,
+  },
+  retryText: {
+    color: '#fff',
+    fontSize: 15,
+    fontWeight: '600',
+  },
+});
 
 // PNG marker for Android stability (relative path for reliable loading)
 const pinPink = require('../../../assets/map/pin_pink.png');
@@ -166,10 +245,33 @@ const DEMO_LOCATION = {
   longitude: DEMO_USER.longitude,
 };
 
+// ---------------------------------------------------------------------------
+// STABILITY FIX P1: Cryptographically secure session salt
+// ---------------------------------------------------------------------------
 // Module-level session salt for stable privacy fuzzing across Nearby remounts.
 // Generated once per app session (module load), not per component mount.
 // Combined with viewerId + otherId for deterministic per-user fuzzing.
-const MODULE_SESSION_SALT = Date.now();
+//
+// FIX: Use crypto API for unpredictable salt instead of Date.now()
+// This prevents reverse-engineering of fuzz offsets.
+// ---------------------------------------------------------------------------
+function generateSecureSessionSalt(): number {
+  try {
+    // Use Web Crypto API (available in Hermes/React Native)
+    const array = new Uint32Array(2);
+    if (typeof crypto !== 'undefined' && crypto.getRandomValues) {
+      crypto.getRandomValues(array);
+      // Combine two 32-bit values into a larger number
+      return array[0] * 0x100000000 + array[1];
+    }
+  } catch {
+    // Fallback silently
+  }
+  // Fallback: combine Math.random with high-resolution time for entropy
+  return Math.floor(Math.random() * Number.MAX_SAFE_INTEGER) ^ Date.now();
+}
+
+const MODULE_SESSION_SALT = generateSecureSessionSalt();
 
 // Module-level flag: has empty state been shown this app session?
 // Resets only on full app restart (module reload).
@@ -1196,6 +1298,8 @@ export default function NearbyScreen() {
         )}
       </View>
 
+      {/* STABILITY FIX S4: Error boundary around map for crash containment */}
+      <MapErrorBoundary>
       <View style={styles.mapContainer}>
         <ClusteredMapView
           ref={mapRef}
@@ -1231,43 +1335,55 @@ export default function NearbyScreen() {
           animationEnabled={false}
           superClusterRef={superClusterRef}
           // CLUSTER MARKER RENDERER - Image-based with numbered count for Android reliability
+          // STABILITY FIX S5: Wrapped in try-catch for crash containment
           renderCluster={(cluster) => {
-            const { id, geometry, properties, onPress } = cluster;
-            const coords = geometry?.coordinates;
-            const lat = coords?.[1];
-            const lng = coords?.[0];
-            const pointCount = properties?.point_count ?? 2;
+            try {
+              const { id, geometry, properties, onPress } = cluster;
+              const coords = geometry?.coordinates;
+              const lat = coords?.[1];
+              const lng = coords?.[0];
+              const pointCount = properties?.point_count ?? 2;
 
-            // Safety: validate coordinates
-            if (!isValidMapCoordinate(lat, lng)) {
+              // Safety: validate coordinates
+              if (!isValidMapCoordinate(lat, lng)) {
+                return null;
+              }
+
+              // Select cluster image based on count
+              const clusterImage = getClusterImage(pointCount);
+
+              return (
+                <Marker
+                  key={`cluster-${id}`}
+                  coordinate={{ latitude: lat, longitude: lng }}
+                  anchor={{ x: 0.5, y: 1 }}
+                  onPress={() => {
+                    try {
+                      // Zoom into cluster area to reveal individual markers
+                      if (mapRef.current) {
+                        const region = {
+                          latitude: lat,
+                          longitude: lng,
+                          latitudeDelta: 0.01,
+                          longitudeDelta: 0.01,
+                        };
+                        mapRef.current.animateToRegion(region, 300);
+                      }
+                      if (onPress) onPress();
+                    } catch (e) {
+                      // Silently handle cluster tap errors
+                      log.warn('[Nearby] Cluster tap error:', String(e));
+                    }
+                  }}
+                  // CRITICAL: Use image prop with numbered cluster for Android reliability
+                  image={clusterImage}
+                />
+              );
+            } catch (e) {
+              // STABILITY FIX S5: Graceful fallback on render error
+              log.warn('[Nearby] Cluster render error:', String(e));
               return null;
             }
-
-            // Select cluster image based on count
-            const clusterImage = getClusterImage(pointCount);
-
-            return (
-              <Marker
-                key={`cluster-${id}`}
-                coordinate={{ latitude: lat, longitude: lng }}
-                anchor={{ x: 0.5, y: 1 }}
-                onPress={() => {
-                  // Zoom into cluster area to reveal individual markers
-                  if (mapRef.current) {
-                    const region = {
-                      latitude: lat,
-                      longitude: lng,
-                      latitudeDelta: 0.01,
-                      longitudeDelta: 0.01,
-                    };
-                    mapRef.current.animateToRegion(region, 300);
-                  }
-                  if (onPress) onPress();
-                }}
-                // CRITICAL: Use image prop with numbered cluster for Android reliability
-                image={clusterImage}
-              />
-            );
           }}
         >
           {/* ================================================================
@@ -1285,18 +1401,25 @@ export default function NearbyScreen() {
            * - Change the image prop approach
            * - Modify anchor position
            * ================================================================ */}
-          {mapUsers.map((user) => (
-            <Marker
-              key={user.id}
-              coordinate={{
-                latitude: user.fuzzedLat,
-                longitude: user.fuzzedLng,
-              }}
-              anchor={{ x: 0.5, y: 1 }}
-              onPress={() => handleMarkerPress(user)}
-              image={pinPink}
-            />
-          ))}
+          {/* STABILITY FIX S4: Safe marker rendering with validation */}
+          {mapUsers.map((user) => {
+            // Skip invalid markers silently
+            if (!isValidMapCoordinate(user.fuzzedLat, user.fuzzedLng)) {
+              return null;
+            }
+            return (
+              <Marker
+                key={user.id}
+                coordinate={{
+                  latitude: user.fuzzedLat,
+                  longitude: user.fuzzedLng,
+                }}
+                anchor={{ x: 0.5, y: 1 }}
+                onPress={() => handleMarkerPress(user)}
+                image={pinPink}
+              />
+            );
+          })}
         </ClusteredMapView>
 
         {/* Query loading indicator - shown while fetching nearby users */}
@@ -1345,6 +1468,7 @@ export default function NearbyScreen() {
           </TouchableOpacity>
         )}
       </View>
+      </MapErrorBoundary>
     </SafeAreaView>
   );
 }
@@ -1367,9 +1491,7 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1,
     borderBottomColor: COLORS.border,
   },
-  headerSpacer: {
-    width: 40,
-  },
+  // CLEANUP: headerSpacer removed - unused
   headerTitle: {
     fontSize: 20,
     fontWeight: '600',

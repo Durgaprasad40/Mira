@@ -3,6 +3,90 @@ import { mutation, query, internalMutation } from './_generated/server';
 import { Doc, Id } from './_generated/dataModel';
 
 // ---------------------------------------------------------------------------
+// STABILITY FIX S1/S2/S3: Pre-fetch helpers to avoid full table scans
+// ---------------------------------------------------------------------------
+
+/**
+ * Pre-fetch all blocks for a user (both directions) in a single pass.
+ * Returns a Set for O(1) lookup.
+ * STABILITY FIX S6/C2: Eliminates N+1 block queries inside loops.
+ */
+async function prefetchBlockedUserIds(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  ctx: any,
+  userId: Id<'users'>
+): Promise<Set<string>> {
+  const [blocksOut, blocksIn] = await Promise.all([
+    ctx.db
+      .query('blocks')
+      .withIndex('by_blocker', (q: any) => q.eq('blockerId', userId))
+      .collect(),
+    ctx.db
+      .query('blocks')
+      .withIndex('by_blocked', (q: any) => q.eq('blockedUserId', userId))
+      .collect(),
+  ]);
+
+  return new Set([
+    ...blocksOut.map((b: Doc<'blocks'>) => b.blockedUserId as string),
+    ...blocksIn.map((b: Doc<'blocks'>) => b.blockerId as string),
+  ]);
+}
+
+/**
+ * Pre-fetch photo counts for all users in a single pass.
+ * Returns a Map for O(1) lookup.
+ * STABILITY FIX: Avoids fetching all photos; uses index-based query.
+ */
+async function prefetchPhotoCounts(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  ctx: any,
+  userIds: string[]
+): Promise<Map<string, number>> {
+  const counts = new Map<string, number>();
+
+  // Batch fetch photos for specific users using the by_user index
+  const photoPromises = userIds.map((uid) =>
+    ctx.db
+      .query('photos')
+      .withIndex('by_user', (q: any) => q.eq('userId', uid))
+      .collect()
+  );
+
+  const photoResults = await Promise.all(photoPromises);
+
+  userIds.forEach((uid, i) => {
+    counts.set(uid, photoResults[i].length);
+  });
+
+  return counts;
+}
+
+/**
+ * Pre-fetch swipes from a user in a single query.
+ * Returns a Map for O(1) lookup.
+ */
+async function prefetchSwipes(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  ctx: any,
+  userId: Id<'users'>
+): Promise<Map<string, { action: string; createdAt: number }>> {
+  const swipes = await ctx.db
+    .query('likes')
+    .withIndex('by_from_user', (q: any) => q.eq('fromUserId', userId))
+    .collect();
+
+  const map = new Map<string, { action: string; createdAt: number }>();
+  for (const swipe of swipes) {
+    map.set(swipe.toUserId as string, {
+      action: swipe.action,
+      createdAt: swipe.createdAt,
+    });
+  }
+  return map;
+}
+
+// ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
@@ -148,6 +232,8 @@ export const publishLocation = mutation({
 // detectCrossedUsers — privacy-safe "Someone crossed you" alert
 // Uses PUBLISHED locations only (not live GPS).
 // Returns { triggered: true } if alert should be shown, never reveals identity.
+// STABILITY FIX S2: Uses indexed query instead of full table scan
+// STABILITY FIX S6: Pre-fetches blocks before loop
 // ---------------------------------------------------------------------------
 
 export const detectCrossedUsers = mutation({
@@ -177,31 +263,24 @@ export const detectCrossedUsers = mutation({
       return { triggered: false, reason: 'cooldown' };
     }
 
-    // 3) Find nearby users using PUBLISHED coords only
-    const allUsers = await ctx.db.query('users').collect();
+    // STABILITY FIX S2: Use indexed query for verified users only
+    // Crossed paths detection only applies to verified users
+    const verifiedUsers = await ctx.db
+      .query('users')
+      .withIndex('by_verification_status', (q) => q.eq('verificationStatus', 'verified'))
+      .collect();
 
-    // Get blocks for current user (both directions)
-    const blocksOut = await ctx.db
-      .query('blocks')
-      .withIndex('by_blocker', (q) => q.eq('blockerId', userId))
-      .collect();
-    const blocksIn = await ctx.db
-      .query('blocks')
-      .withIndex('by_blocked', (q) => q.eq('blockedUserId', userId))
-      .collect();
-    const blockedIds = new Set([
-      ...blocksOut.map((b) => b.blockedUserId as string),
-      ...blocksIn.map((b) => b.blockerId as string),
-    ]);
+    // STABILITY FIX S6: Pre-fetch blocks before loop
+    const blockedIds = await prefetchBlockedUserIds(ctx, userId);
 
     const candidates: Id<'users'>[] = [];
 
-    for (const user of allUsers) {
+    for (const user of verifiedUsers) {
       // Skip self
       if (user._id === userId) continue;
       // Skip inactive
       if (!user.isActive) continue;
-      // Skip blocked
+      // Skip blocked (using pre-fetched set)
       if (blockedIds.has(user._id as string)) continue;
       // Skip if no published location
       if (!user.publishedLat || !user.publishedLng || !user.publishedAt) continue;
@@ -223,19 +302,25 @@ export const detectCrossedUsers = mutation({
     }
 
     // 4) Dedupe — filter out people we've already alerted about recently
+    // Batch fetch existing events for all candidates to avoid N+1
     const validCandidates: Id<'users'>[] = [];
 
-    for (const otherUserId of candidates) {
-      const existingEvent = await ctx.db
+    // Pre-fetch existing events for candidates
+    const eventPromises = candidates.map((otherUserId) =>
+      ctx.db
         .query('crossedEvents')
         .withIndex('by_user_other', (q) =>
           q.eq('userId', userId).eq('otherUserId', otherUserId),
         )
-        .first();
+        .first()
+    );
+    const existingEvents = await Promise.all(eventPromises);
 
+    for (let i = 0; i < candidates.length; i++) {
+      const existingEvent = existingEvents[i];
       // If no existing event, or existing event is older than dedupe window, allow
       if (!existingEvent || now - existingEvent.createdAt >= CROSS_DEDUPE_WINDOW_MS) {
-        validCandidates.push(otherUserId);
+        validCandidates.push(candidates[i]);
       }
     }
 
@@ -284,6 +369,8 @@ export const cleanupExpiredCrossedEvents = internalMutation({
 
 // ---------------------------------------------------------------------------
 // recordLocation — called when user opens app / becomes active
+// STABILITY FIX S3: Uses indexed query instead of full table scan
+// STABILITY FIX S6/C2: Pre-fetches blocks before loop (eliminates N+1)
 // ---------------------------------------------------------------------------
 
 export const recordLocation = mutation({
@@ -389,26 +476,24 @@ export const recordLocation = mutation({
     // Get current user's age for filtering
     const myAge = calculateAge(currentUser.dateOfBirth);
 
-    // Get photo counts for profile completeness check
-    const photoCountsMap = new Map<string, number>();
-    const allPhotos = await ctx.db.query('photos').collect();
-    for (const photo of allPhotos) {
-      const count = photoCountsMap.get(photo.userId as string) || 0;
-      photoCountsMap.set(photo.userId as string, count + 1);
-    }
+    // STABILITY FIX S3: Use indexed query for verified users only
+    const verifiedUsers = await ctx.db
+      .query('users')
+      .withIndex('by_verification_status', (q) => q.eq('verificationStatus', 'verified'))
+      .collect();
 
-    // Find nearby users (within 100m - 750m, location updated within 6 days)
-    const allUsers = await ctx.db.query('users').collect();
-    const nearbyUsers: Array<typeof allUsers[0] & { distance: number }> = [];
+    // STABILITY FIX S6/C2: Pre-fetch blocks before loop
+    const blockedIds = await prefetchBlockedUserIds(ctx, userId);
 
-    for (const user of allUsers) {
+    // First pass: collect candidate user IDs that pass basic filters
+    const candidateUserIds: string[] = [];
+    type UserWithDistance = (typeof verifiedUsers)[0] & { distance: number };
+    const candidateUsers: UserWithDistance[] = [];
+
+    for (const user of verifiedUsers) {
       if (user._id === userId) continue;
       if (!user.isActive) continue;
       if (!user.latitude || !user.longitude) continue;
-
-      // Verification gate: Only verified users
-      const userStatus = user.verificationStatus || 'unverified';
-      if (userStatus !== 'verified') continue;
 
       // Incognito mode: Skip users who are hidden (but they can still BE detected for crossings)
       // Note: Incognito users can still trigger crossings, they just don't appear on map
@@ -419,10 +504,6 @@ export const recordLocation = mutation({
 
       // Crossed paths opt-out: Skip users who disabled crossed paths
       if (user.crossedPathsEnabled === false) continue;
-
-      // Profile completeness: At least 2 photos required
-      const photoCount = photoCountsMap.get(user._id as string) || 0;
-      if (photoCount < 2) continue;
 
       // Basic info completeness
       if (!user.name || !user.bio || !user.dateOfBirth) continue;
@@ -440,8 +521,20 @@ export const recordLocation = mutation({
 
       // Within crossed paths range (100m - 750m)?
       if (distance >= CROSSED_MIN_METERS && distance <= CROSSED_MAX_METERS) {
-        nearbyUsers.push({ ...user, distance });
+        candidateUserIds.push(user._id as string);
+        candidateUsers.push({ ...user, distance });
       }
+    }
+
+    // STABILITY FIX: Fetch photo counts only for candidates (not all users)
+    const photoCountsMap = await prefetchPhotoCounts(ctx, candidateUserIds);
+
+    // Second pass: filter by photo count
+    const nearbyUsers: UserWithDistance[] = [];
+    for (const user of candidateUsers) {
+      const photoCount = photoCountsMap.get(user._id as string) || 0;
+      if (photoCount < 2) continue;
+      nearbyUsers.push(user);
     }
 
     // Record crossed paths + history
@@ -455,22 +548,8 @@ export const recordLocation = mutation({
       if (!currentUser.lookingFor.includes(nearbyUser.gender)) continue;
       if (!nearbyUser.lookingFor.includes(currentUser.gender)) continue;
 
-      // Check if blocked (either direction)
-      const blocked = await ctx.db
-        .query('blocks')
-        .withIndex('by_blocker_blocked', (q) =>
-          q.eq('blockerId', userId).eq('blockedUserId', nearbyUser._id),
-        )
-        .first();
-      if (blocked) continue;
-
-      const reverseBlocked = await ctx.db
-        .query('blocks')
-        .withIndex('by_blocker_blocked', (q) =>
-          q.eq('blockerId', nearbyUser._id).eq('blockedUserId', userId),
-        )
-        .first();
-      if (reverseBlocked) continue;
+      // STABILITY FIX S6/C2: Check if blocked using pre-fetched set (O(1) lookup)
+      if (blockedIds.has(nearbyUser._id as string)) continue;
 
       // --- COMPATIBILITY GATE: At least ONE common element required ---
       const compatibility = computeCompatibility(
@@ -754,6 +833,8 @@ export const recordLocation = mutation({
 
 // ---------------------------------------------------------------------------
 // getNearbyUsers — map markers with jittered coords & freshness
+// STABILITY FIX S1: Uses indexed query instead of full table scan
+// STABILITY FIX S6: Pre-fetches blocks before loop (eliminates N+1)
 // ---------------------------------------------------------------------------
 
 export const getNearbyUsers = query({
@@ -776,52 +857,26 @@ export const getNearbyUsers = query({
     // Get current user's age for filtering
     const myAge = calculateAge(currentUser.dateOfBirth);
 
-    const allUsers = await ctx.db.query('users').collect();
-    const results = [];
+    // STABILITY FIX S1: Use indexed query for verified users only
+    // This avoids iterating through ALL users in the database
+    const verifiedUsers = await ctx.db
+      .query('users')
+      .withIndex('by_verification_status', (q) => q.eq('verificationStatus', 'verified'))
+      .collect();
 
-    // Get blocks for current user (both directions)
-    const blocksOut = await ctx.db
-      .query('blocks')
-      .withIndex('by_blocker', (q) => q.eq('blockerId', userId))
-      .collect();
-    const blocksIn = await ctx.db
-      .query('blocks')
-      .withIndex('by_blocked', (q) => q.eq('blockedUserId', userId))
-      .collect();
-    const blockedIds = new Set([
-      ...blocksOut.map((b) => b.blockedUserId as string),
-      ...blocksIn.map((b) => b.blockerId as string),
+    // STABILITY FIX S6/C2: Pre-fetch blocks and swipes before loop
+    const [blockedIds, swipedUsersMap] = await Promise.all([
+      prefetchBlockedUserIds(ctx, userId),
+      prefetchSwipes(ctx, userId),
     ]);
 
-    // Get photo counts for profile completeness check
-    const photoCountsMap = new Map<string, number>();
-    const allPhotos = await ctx.db.query('photos').collect();
-    for (const photo of allPhotos) {
-      const count = photoCountsMap.get(photo.userId as string) || 0;
-      photoCountsMap.set(photo.userId as string, count + 1);
-    }
+    // First pass: collect candidate user IDs that pass basic filters
+    const candidateUserIds: string[] = [];
+    const candidateUsers: typeof verifiedUsers = [];
 
-    // Pre-fetch all swipes from current user (for skip filtering - matches Discover behavior)
-    const mySwipes = await ctx.db
-      .query('likes')
-      .withIndex('by_from_user', (q) => q.eq('fromUserId', userId))
-      .collect();
-    // Build map: toUserId -> { action, createdAt }
-    const swipedUsersMap = new Map<string, { action: string; createdAt: number }>();
-    for (const swipe of mySwipes) {
-      swipedUsersMap.set(swipe.toUserId as string, {
-        action: swipe.action,
-        createdAt: swipe.createdAt,
-      });
-    }
-
-    for (const user of allUsers) {
+    for (const user of verifiedUsers) {
       if (user._id === userId) continue;
       if (!user.isActive) continue;
-
-      // Verification gate: Only verified users appear on map
-      const verificationStatus = user.verificationStatus || 'unverified';
-      if (verificationStatus !== 'verified') continue;
 
       // Incognito mode: Hidden users don't appear on map
       if (user.incognitoMode === true) continue;
@@ -834,37 +889,26 @@ export const getNearbyUsers = query({
 
       // Time-based visibility mode
       if (user.nearbyVisibilityMode === 'app_open') {
-        // Only visible while using app: hide if inactive for > 5 min
-        const inactiveThreshold = 5 * 60 * 1000; // 5 minutes
+        const inactiveThreshold = 5 * 60 * 1000;
         if (now - user.lastActive > inactiveThreshold) continue;
       } else if (user.nearbyVisibilityMode === 'recent') {
-        // Visible for 30 min after app use
-        const recentThreshold = 30 * 60 * 1000; // 30 minutes
+        const recentThreshold = 30 * 60 * 1000;
         if (now - user.lastActive > recentThreshold) continue;
       }
-      // 'always' mode: no additional filtering needed
 
-      // Profile completeness: At least 2 photos required
-      const photoCount = photoCountsMap.get(user._id as string) || 0;
-      if (photoCount < 2) continue;
-
-      // Basic info completeness: Must have name, bio, and dateOfBirth
+      // Basic info completeness
       if (!user.name || !user.bio || !user.dateOfBirth) continue;
 
-      // P0 FIX: Require valid primary photo URL to prevent broken marker outcomes
+      // P0 FIX: Require valid primary photo URL
       if (!user.primaryPhotoUrl) continue;
 
-      // Use other user's PUBLISHED location (privacy: not their live GPS)
-      // If they haven't published, they don't appear on the map
+      // Must have published location
       if (!user.publishedLat || !user.publishedLng || !user.publishedAt) continue;
 
-      // Freshness based on publishedAt (when they last shared their location)
-      const locationAge = now - user.publishedAt;
+      // Freshness: published location must be within 10 minutes
+      if (now - user.publishedAt > MAP_VISIBILITY_WINDOW_MS) continue;
 
-      // Hidden: published location is stale (>10 minutes old per Rule 4)
-      if (locationAge > MAP_VISIBILITY_WINDOW_MS) continue;
-
-      // Distance check — 100m to 1km range (privacy: hide users too close)
+      // Distance check — 100m to 1km range
       const distance = calculateDistanceMeters(
         myLat,
         myLng,
@@ -873,39 +917,52 @@ export const getNearbyUsers = query({
       );
       if (distance < NEARBY_MIN_METERS || distance > NEARBY_MAX_METERS) continue;
 
-      // Age filtering (both directions): User must be within each other's preferences
+      // Age filtering (both directions)
       const otherAge = calculateAge(user.dateOfBirth);
-      // Am I within their age range?
       if (myAge < user.minAge || myAge > user.maxAge) continue;
-      // Are they within my age range?
       if (otherAge < currentUser.minAge || otherAge > currentUser.maxAge) continue;
 
       // Gender/orientation preference match (both directions)
       if (!currentUser.lookingFor.includes(user.gender)) continue;
       if (!user.lookingFor.includes(currentUser.gender)) continue;
 
-      // Block check (bidirectional)
+      // Block check (using pre-fetched set)
       if (blockedIds.has(user._id as string)) continue;
 
-      // Skip filter: Same as Discover behavior (Rule 9)
-      // - likes/super_likes: skip forever (already shown interest)
-      // - passes: skip for 7 days, then can re-appear
+      // Skip filter (using pre-fetched map)
       const existingSwipe = swipedUsersMap.get(user._id as string);
       if (existingSwipe) {
-        if (existingSwipe.action !== 'pass') continue; // Skip likes/super_likes
-        if (existingSwipe.createdAt > now - 7 * 24 * 60 * 60 * 1000) continue; // Skip recent passes
+        if (existingSwipe.action !== 'pass') continue;
+        if (existingSwipe.createdAt > now - 7 * 24 * 60 * 60 * 1000) continue;
       }
 
-      // Freshness: solid (1-3 days) or faded (3-6 days)
-      const freshness: 'solid' | 'faded' = locationAge <= SOLID_WINDOW_MS ? 'solid' : 'faded';
+      candidateUserIds.push(user._id as string);
+      candidateUsers.push(user);
+    }
 
-      // Return raw published coordinates — client applies fuzz + anti-zoom shifting
-      // strongPrivacyMode controls fuzz radius: true = 200-400m, false = 50-150m
-      // hideDistance controls whether to show distance info
+    // STABILITY FIX: Fetch photo counts only for candidates (not all users)
+    const photoCountsMap = await prefetchPhotoCounts(ctx, candidateUserIds);
+
+    // Second pass: filter by photo count and build results
+    const results = [];
+    for (let i = 0; i < candidateUsers.length; i++) {
+      const user = candidateUsers[i];
+      const photoCount = photoCountsMap.get(user._id as string) || 0;
+      if (photoCount < 2) continue;
+
+      const locationAge = now - user.publishedAt!;
+      const freshness: 'solid' | 'faded' = locationAge <= SOLID_WINDOW_MS ? 'solid' : 'faded';
+      const distance = calculateDistanceMeters(
+        myLat,
+        myLng,
+        user.publishedLat!,
+        user.publishedLng!,
+      );
+
       results.push({
         id: user._id,
         name: user.name,
-        age: otherAge,
+        age: calculateAge(user.dateOfBirth),
         publishedLat: user.publishedLat!,
         publishedLng: user.publishedLng!,
         publishedAt: user.publishedAt,
@@ -918,14 +975,12 @@ export const getNearbyUsers = query({
       });
     }
 
-    // Sort by recency first (most recently published), then by distance
+    // Sort by recency first, then by distance
     results.sort((a, b) => {
-      // Primary: recency (newer first)
       const recencyDiff = (b.publishedAt || 0) - (a.publishedAt || 0);
-      if (Math.abs(recencyDiff) > 60 * 60 * 1000) { // More than 1 hour difference
+      if (Math.abs(recencyDiff) > 60 * 60 * 1000) {
         return recencyDiff;
       }
-      // Secondary: distance (closer first)
       return a.distance - b.distance;
     });
 
