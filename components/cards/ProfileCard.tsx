@@ -50,6 +50,8 @@ export interface ProfileCardProps {
   relationshipIntent?: string[];
   /** Phase-1 only: Activities/interests keys */
   activities?: string[];
+  /** True if user has incognito mode enabled (shows badge) */
+  isIncognito?: boolean;
   // Legacy props for non-Discover usage (explore grid etc.)
   user?: any;
   onPress?: () => void;
@@ -75,6 +77,7 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
   lookingFor,
   relationshipIntent,
   activities,
+  isIncognito,
   onPress,
 }) => {
   const dark = theme === 'dark';
@@ -233,6 +236,13 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
                 style={[styles.bar, i === photoIndex && styles.barActive]}
               />
             ))}
+          </View>
+        )}
+
+        {/* Incognito badge (top-right) */}
+        {isIncognito && (
+          <View style={styles.incognitoBadge} pointerEvents="none">
+            <Ionicons name="eye-off" size={14} color={COLORS.white} />
           </View>
         )}
 
@@ -619,5 +629,16 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: '600',
     color: COLORS.white,
+  },
+
+  // Incognito badge (top-right of photo)
+  incognitoBadge: {
+    position: 'absolute',
+    top: 48, // Below photo indicator bars
+    right: 12,
+    backgroundColor: 'rgba(0, 0, 0, 0.6)',
+    borderRadius: 12,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
   },
 });

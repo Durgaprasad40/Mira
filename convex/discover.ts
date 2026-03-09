@@ -435,6 +435,7 @@ export const getDiscoverProfiles = query({
         isBoosted: !!(user.boostedUntil && user.boostedUntil > Date.now()),
         theyLikedMe,
         photoCount: nonNsfwPhotos.length,
+        isIncognito: user.incognitoMode === true,
       });
     }
 
@@ -649,6 +650,7 @@ export const getExploreProfiles = query({
         photos, // Already sorted by order via by_user_order index
         photoBlurred: user.photoBlurred === true,
         photoCount: photos.filter((p: any) => !p.isNsfw).length,
+        isIncognito: user.incognitoMode === true,
       };
     });
 

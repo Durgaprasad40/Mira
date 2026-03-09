@@ -1195,6 +1195,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
               profilePrompt={next.profilePrompts?.[0]}
               theme={isPhase2 ? "dark" : "light"}
               privateIntentKeys={next.privateIntentKeys ?? (next as any).intentKeys ?? (next.privateIntentKey ? [next.privateIntentKey] : [])}
+              isIncognito={next.isIncognito}
             />
           </Animated.View>
         )}
@@ -1215,6 +1216,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
               onOpenProfile={openProfileCb}
               theme={isPhase2 ? "dark" : "light"}
               privateIntentKeys={current.privateIntentKeys ?? (current as any).intentKeys ?? (current.privateIntentKey ? [current.privateIntentKey] : [])}
+              isIncognito={current.isIncognito}
             />
             <SwipeOverlay direction={overlayDirection} opacity={overlayOpacityAnim} />
           </Animated.View>
