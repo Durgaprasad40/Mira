@@ -186,19 +186,21 @@ export default function ChatRoomsScreen() {
   // Determine effective preferred room ID (only valid after loading complete)
   const effectivePreferredRoomId = convexPreferredRoom?.preferredChatRoomId ?? null;
 
-  // Validate preferred room exists before redirecting (prevents stale room redirect)
-  const preferredRoomValidation = useQuery(
-    api.chatRooms.getRoom,
+  // Validate preferred room access before redirecting (prevents stale/unauthorized room redirect)
+  // Uses checkRoomAccess which returns status object without throwing (unlike getRoom)
+  const preferredRoomAccess = useQuery(
+    api.chatRooms.checkRoomAccess,
     effectivePreferredRoomId
       ? { roomId: effectivePreferredRoomId as Id<'chatRooms'> }
       : 'skip'
   );
 
-  // Room is valid if exists in Convex backend
-  const isPreferredRoomValid = preferredRoomValidation !== null;
+  // Room is valid for redirect if user is a member (has access)
+  // Invalid statuses: not_found, expired, banned, none, unauthenticated, pending, rejected
+  const isPreferredRoomValid = preferredRoomAccess?.status === 'member';
 
   // Still loading validation if convex query is undefined (not yet resolved)
-  const isValidationLoading = effectivePreferredRoomId && preferredRoomValidation === undefined;
+  const isValidationLoading = effectivePreferredRoomId && preferredRoomAccess === undefined;
 
   // CRITICAL FIX M-001: Removed duplicate useEffect redirect logic
   // All redirects now handled by useFocusEffect below to prevent

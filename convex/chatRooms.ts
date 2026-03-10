@@ -1,4 +1,4 @@
-import { mutation, query, internalMutation } from './_generated/server';
+import { mutation, query, internalMutation, internalQuery } from './_generated/server';
 import { v } from 'convex/values';
 import { softMaskText } from './softMask';
 import { internal } from './_generated/api';
@@ -119,6 +119,122 @@ async function resolveUserId(
   throw new Error('Unauthorized: authentication required');
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// SECURITY AUTHORIZATION HELPERS (Phase-2 Audit Fix)
+// Read vs Send access separation:
+// - Read Access: view room, messages, members (blocked by bans, not penalties)
+// - Send Access: send messages/media (blocked by bans AND send-blocking penalties)
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Penalty types that block sending (but allow reading)
+const SEND_BLOCKING_PENALTY_TYPES = ['readOnly', 'muted', 'send_blocked'] as const;
+
+/**
+ * Requires authenticated user identity.
+ * Returns the userId or throws an error.
+ */
+async function requireAuthenticatedUser(ctx: QueryCtx | MutationCtx): Promise<Id<'users'>> {
+  const identity = await ctx.auth.getUserIdentity();
+  if (!identity) {
+    throw new Error('Unauthorized: authentication required');
+  }
+  const userId = asUserId(identity.subject);
+  if (!userId) {
+    throw new Error('Unauthorized: invalid user identity');
+  }
+  return userId;
+}
+
+/**
+ * Requires valid room membership for READ access.
+ *
+ * Checks (in order):
+ * 1. Authenticated user
+ * 2. Room exists
+ * 3. Room not expired
+ * 4. User is NOT banned (chatRoomBans)
+ * 5. User IS a current member (chatRoomMembers)
+ *
+ * Does NOT check penalties - penalties only block sending, not reading.
+ *
+ * @returns { userId, room, membership } if authorized
+ * @throws Error if not authorized
+ */
+async function requireRoomReadAccess(
+  ctx: QueryCtx | MutationCtx,
+  roomId: Id<'chatRooms'>
+): Promise<{ userId: Id<'users'>; room: any; membership: any }> {
+  // 1. Require authenticated user
+  const userId = await requireAuthenticatedUser(ctx);
+
+  // 2. Check room exists
+  const room = await ctx.db.get(roomId);
+  if (!room) {
+    throw new Error('Room not found');
+  }
+
+  // 3. Check room is not expired
+  const now = Date.now();
+  if (room.expiresAt && room.expiresAt <= now) {
+    throw new Error('Room has expired');
+  }
+
+  // 4. Check user is not banned from this room
+  const ban = await ctx.db
+    .query('chatRoomBans')
+    .withIndex('by_room_user', (q) => q.eq('roomId', roomId).eq('userId', userId))
+    .first();
+  if (ban) {
+    throw new Error('Access denied: you are banned from this room');
+  }
+
+  // 5. Check user has active membership
+  const membership = await ctx.db
+    .query('chatRoomMembers')
+    .withIndex('by_room_user', (q) => q.eq('roomId', roomId).eq('userId', userId))
+    .first();
+  if (!membership) {
+    throw new Error('Access denied: you must join this room first');
+  }
+
+  return { userId, room, membership };
+}
+
+/**
+ * Requires valid room membership for SEND access.
+ *
+ * Checks:
+ * 1. All of requireRoomReadAccess
+ * 2. User has no active send-blocking penalty (readOnly, muted, send_blocked)
+ *
+ * @returns { userId, room, membership } if authorized
+ * @throws Error if not authorized
+ */
+async function requireRoomSendAccess(
+  ctx: QueryCtx | MutationCtx,
+  roomId: Id<'chatRooms'>
+): Promise<{ userId: Id<'users'>; room: any; membership: any }> {
+  // 1. Check read access first (auth, room exists, not expired, not banned, is member)
+  const { userId, room, membership } = await requireRoomReadAccess(ctx, roomId);
+
+  // 2. Check user has no active send-blocking penalty
+  const now = Date.now();
+  const penalty = await ctx.db
+    .query('chatRoomPenalties')
+    .withIndex('by_room_user', (q) => q.eq('roomId', roomId).eq('userId', userId))
+    .first();
+
+  if (penalty && penalty.expiresAt > now) {
+    // Only block if penalty type is a send-blocking type
+    const penaltyType = penalty.type as string;
+    if (SEND_BLOCKING_PENALTY_TYPES.includes(penaltyType as any)) {
+      throw new Error('You are restricted from sending messages in this room');
+    }
+  }
+
+  return { userId, room, membership };
+}
+
 // Query to get effective userId (for client-side owner detection)
 export const getEffectiveUserId = query({
   args: {
@@ -237,13 +353,43 @@ export const listRooms = query({
 });
 
 // Get a single room by slug
+// SECURITY: Public rooms return minimal public info; private rooms require membership
 export const getRoomBySlug = query({
   args: { slug: v.string() },
   handler: async (ctx, { slug }) => {
-    return await ctx.db
+    const room = await ctx.db
       .query('chatRooms')
       .withIndex('by_slug', (q) => q.eq('slug', slug))
       .first();
+
+    if (!room) return null;
+
+    // Check if room is expired
+    if (room.expiresAt && room.expiresAt <= Date.now()) {
+      return null;
+    }
+
+    // For public rooms, return minimal public info without auth
+    if (room.isPublic) {
+      return {
+        _id: room._id,
+        name: room.name,
+        slug: room.slug,
+        category: room.category,
+        isPublic: room.isPublic,
+        memberCount: room.memberCount,
+        lastMessageAt: room.lastMessageAt,
+      };
+    }
+
+    // For private rooms, require read access
+    try {
+      await requireRoomReadAccess(ctx, room._id);
+      return room;
+    } catch {
+      // User doesn't have access to this private room
+      return null;
+    }
   },
 });
 
@@ -252,12 +398,8 @@ export const getRoomBySlug = query({
 export const getRoom = query({
   args: { roomId: v.id('chatRooms') },
   handler: async (ctx, { roomId }) => {
-    const room = await ctx.db.get(roomId);
-    if (!room) return null;
-    // Phase-2: Check if room has expired
-    if (room.expiresAt && room.expiresAt <= Date.now()) {
-      return null; // Treat expired room as not found
-    }
+    // SECURITY: Require read access (auth + membership + not banned)
+    const { room } = await requireRoomReadAccess(ctx, roomId);
     return room;
   },
 });
@@ -270,6 +412,9 @@ export const listMessages = query({
     before: v.optional(v.number()), // Cursor for pagination (load older messages)
   },
   handler: async (ctx, { roomId, limit = 50, before }) => {
+    // SECURITY: Require read access (auth + membership + not banned)
+    await requireRoomReadAccess(ctx, roomId);
+
     let query = ctx.db
       .query('chatRoomMessages')
       .withIndex('by_room_created', (q) => q.eq('roomId', roomId));
@@ -302,6 +447,9 @@ export const listMessages = query({
 export const listMembers = query({
   args: { roomId: v.id('chatRooms') },
   handler: async (ctx, { roomId }) => {
+    // SECURITY: Require read access (auth + membership + not banned)
+    await requireRoomReadAccess(ctx, roomId);
+
     return await ctx.db
       .query('chatRoomMembers')
       .withIndex('by_room', (q) => q.eq('roomId', roomId))
@@ -323,6 +471,9 @@ const MAX_MEMBERS_TO_FETCH = 50;
 export const listMembersWithProfiles = query({
   args: { roomId: v.id('chatRooms') },
   handler: async (ctx, { roomId }) => {
+    // SECURITY: Require read access (auth + membership + not banned)
+    await requireRoomReadAccess(ctx, roomId);
+
     const now = Date.now();
 
     // Limit to MAX_MEMBERS_TO_FETCH to prevent performance issues
@@ -451,7 +602,7 @@ export const leaveRoom = mutation({
 
 // Send a message to a room (must be a member)
 // Includes idempotency via clientId and rate limiting (10 messages/minute/user/room)
-// Phase-2: Denies if user has active readOnly penalty
+// SECURITY: Requires send access (auth + membership + not banned + no send-blocking penalty)
 export const sendMessage = mutation({
   args: {
     roomId: v.id('chatRooms'),
@@ -463,13 +614,12 @@ export const sendMessage = mutation({
     clientId: v.optional(v.string()), // For deduplication
   },
   handler: async (ctx, { roomId, senderId, text, imageUrl, audioUrl, mediaType, clientId }) => {
-    // 0. Phase-2: Check room exists and not expired
-    const room = await ctx.db.get(roomId);
-    if (!room) {
-      throw new Error('Room not found');
-    }
-    if (room.expiresAt && room.expiresAt <= Date.now()) {
-      throw new Error('Room has expired');
+    // 0. SECURITY: Require send access (auth + membership + not banned + no send-blocking penalty)
+    const { userId, room, membership } = await requireRoomSendAccess(ctx, roomId);
+
+    // SECURITY: Verify authenticated user matches senderId parameter
+    if (userId !== senderId) {
+      throw new Error('Unauthorized: cannot send messages as another user');
     }
 
     // 1. Idempotency check via clientId
@@ -485,30 +635,8 @@ export const sendMessage = mutation({
       }
     }
 
-    // 2. Verify membership
-    const membership = await ctx.db
-      .query('chatRoomMembers')
-      .withIndex('by_room_user', (q) =>
-        q.eq('roomId', roomId).eq('userId', senderId)
-      )
-      .first();
-    if (!membership) {
-      throw new Error('Must join the room before sending messages');
-    }
-
-    // 2b. Phase-2: Check for active readOnly penalty
+    // 2. Rate limiting: max 10 messages per minute per user per room
     const now = Date.now();
-    const penalty = await ctx.db
-      .query('chatRoomPenalties')
-      .withIndex('by_room_user', (q) =>
-        q.eq('roomId', roomId).eq('userId', senderId)
-      )
-      .first();
-    if (penalty && penalty.expiresAt > now) {
-      throw new Error('You are in read-only mode for this room');
-    }
-
-    // 3. Rate limiting: max 10 messages per minute per user per room
     const oneMinuteAgo = now - 60000;
     const recentMessages = await ctx.db
       .query('chatRoomMessages')
@@ -960,15 +1088,17 @@ export const reportMessage = mutation({
   },
 });
 
-// Get rooms where user is a member
+// Get rooms where authenticated user is a member
 // Phase-2: Filters out expired rooms
+// SECURITY: Only returns caller's own room memberships (no arbitrary userId lookup)
 export const getRoomsForUser = query({
-  args: {
-    userId: v.id('users'),
-  },
-  handler: async (ctx, { userId }) => {
+  args: {},
+  handler: async (ctx) => {
+    // SECURITY: Require authenticated user - only return caller's own rooms
+    const userId = await requireAuthenticatedUser(ctx);
     const now = Date.now();
-    // Get all memberships for this user
+
+    // Get all memberships for authenticated user
     const memberships = await ctx.db
       .query('chatRoomMembers')
       .withIndex('by_user', (q) => q.eq('userId', userId))
@@ -1005,13 +1135,26 @@ export const getRoomsForUser = query({
 // PHASE-2: Penalty Query Functions
 // ═══════════════════════════════════════════════════════════════════════════
 
-// Get user's penalty status in a room
+// Get authenticated user's own penalty status in a room
+// SECURITY: Only returns caller's own penalty, not arbitrary user lookup
 export const getUserPenalty = query({
   args: {
     roomId: v.id('chatRooms'),
-    userId: v.id('users'),
   },
-  handler: async (ctx, { roomId, userId }) => {
+  handler: async (ctx, { roomId }) => {
+    // SECURITY: Require authenticated user (but NOT full read access,
+    // since penalized users should still be able to check their penalty status)
+    const userId = await requireAuthenticatedUser(ctx);
+
+    // Check room exists and is not expired
+    const room = await ctx.db.get(roomId);
+    if (!room) {
+      throw new Error('Room not found');
+    }
+    if (room.expiresAt && room.expiresAt <= Date.now()) {
+      throw new Error('Room has expired');
+    }
+
     const penalty = await ctx.db
       .query('chatRoomPenalties')
       .withIndex('by_room_user', (q) =>
@@ -1054,6 +1197,9 @@ export const hasAnyActivePenalty = query({
 export const listMembersWithPenalties = query({
   args: { roomId: v.id('chatRooms') },
   handler: async (ctx, { roomId }) => {
+    // SECURITY: Require read access (auth + membership + not banned)
+    await requireRoomReadAccess(ctx, roomId);
+
     const now = Date.now();
     const members = await ctx.db
       .query('chatRoomMembers')
@@ -1304,34 +1450,10 @@ export const cleanupExpiredPenalties = internalMutation({
 // PHASE-2: Private Rooms - Password + Admin Approval
 // ═══════════════════════════════════════════════════════════════════════════
 
-// Get all visible private rooms (for listing to everyone)
-// Returns basic info only - no password data
-export const getVisiblePrivateRooms = query({
-  args: {},
-  handler: async (ctx) => {
-    const now = Date.now();
-
-    // Get all non-expired private rooms
-    const privateRooms = await ctx.db
-      .query('chatRooms')
-      .withIndex('by_public', (q) => q.eq('isPublic', false))
-      .collect();
-
-    // Filter out expired rooms and map to safe response
-    return privateRooms
-      .filter((room) => !room.expiresAt || room.expiresAt > now)
-      .map((room) => ({
-        _id: room._id,
-        name: room.name,
-        slug: room.slug,
-        memberCount: room.memberCount,
-        createdAt: room.createdAt,
-        expiresAt: room.expiresAt,
-        // Don't expose: passwordHash, passwordEncrypted, joinCode
-      }))
-      .sort((a, b) => (b.createdAt ?? 0) - (a.createdAt ?? 0));
-  },
-});
+// REMOVED: getVisiblePrivateRooms
+// Security fix: This function exposed all private room names/slugs without authentication.
+// Use getMyPrivateRooms for authenticated access to user's own private rooms,
+// or joinRoomByCode/getRoomByJoinCode for code-based discovery.
 
 // Check user's access status for a private room
 export const checkRoomAccess = query({
@@ -1826,13 +1948,12 @@ export const isRoomOwner = query({
 });
 
 // Get room info including whether it's private (for UI)
+// SECURITY: Requires read access (auth + membership + not banned)
 export const getRoomInfo = query({
   args: { roomId: v.id('chatRooms') },
   handler: async (ctx, { roomId }) => {
-    const room = await ctx.db.get(roomId);
-    if (!room) {
-      return null;
-    }
+    // SECURITY: Require read access
+    const { room } = await requireRoomReadAccess(ctx, roomId);
 
     return {
       _id: room._id,
@@ -2040,10 +2161,11 @@ export const seedDemoUser = mutation({
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
-// ADMIN: Diagnose room membership data by slug
+// ADMIN: Diagnose room membership data by slug (INTERNAL ONLY)
 // Run via: npx convex run chatRooms:diagnoseRoomBySlug '{"slug":"bengali"}'
+// SECURITY: internalQuery - not accessible from client API
 // ═══════════════════════════════════════════════════════════════════════════
-export const diagnoseRoomBySlug = query({
+export const diagnoseRoomBySlug = internalQuery({
   args: { slug: v.string() },
   handler: async (ctx, { slug }) => {
     const room = await ctx.db

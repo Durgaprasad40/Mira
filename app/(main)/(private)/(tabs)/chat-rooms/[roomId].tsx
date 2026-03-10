@@ -223,9 +223,10 @@ export default function ChatRoomScreen() {
   // a valid Convex ID, query Convex (for private rooms created in demo mode)
   const shouldQueryConvexInDemo = isDemoMode && !demoRoom && isValidConvexId(roomIdStr);
 
-  // Convex queries: skip if (demo mode AND found in demo data) OR invalid roomId
+  // Convex queries: skip if (demo mode AND found in demo data) OR invalid roomId OR auth missing
   // Query Convex if: (1) not demo mode, or (2) demo mode but room not in demo list
-  const shouldSkipConvex = (isDemoMode && !!demoRoom) || !hasValidRoomId;
+  // LOGOUT-RACE FIX: Also skip when auth is missing to prevent "Unauthorized" errors during logout
+  const shouldSkipConvex = (isDemoMode && !!demoRoom) || !hasValidRoomId || (!isDemoMode && !authUserId);
   const convexRoom = useQuery(
     api.chatRooms.getRoom,
     shouldSkipConvex ? 'skip' : { roomId: roomIdStr as Id<'chatRooms'> }
@@ -248,25 +249,26 @@ export default function ChatRoomScreen() {
   const shouldSkipUserIdQueries = isDemoMode || !authUserId;
 
   // Query room mute preference (Convex-backed)
+  // LOGOUT-RACE FIX: Skip when auth is missing to prevent errors during logout
   const roomPrefQuery = useQuery(
     api.chatRooms.getUserRoomPref,
-    !roomIdStr ? 'skip' : { roomId: roomIdStr }
+    shouldSkipConvex ? 'skip' : { roomId: roomIdStr }
   );
   const isRoomMutedFromConvex = roomPrefQuery?.muted ?? false;
 
   // Query if room has been reported (Convex-backed)
+  // LOGOUT-RACE FIX: Skip when auth is missing to prevent errors during logout
   const reportedQuery = useQuery(
     api.chatRooms.hasReportedRoom,
-    !roomIdStr ? 'skip' : { roomId: roomIdStr }
+    shouldSkipConvex ? 'skip' : { roomId: roomIdStr }
   );
   const hasReportedRoom = reportedQuery?.reported ?? false;
 
   // Phase-2: Query user's penalty status in this room
+  // SECURITY: getUserPenalty now uses authenticated user server-side (no userId param)
   const userPenalty = useQuery(
     api.chatRooms.getUserPenalty,
-    shouldSkipConvex || shouldSkipUserIdQueries
-      ? 'skip'
-      : { roomId: roomIdStr as Id<'chatRooms'>, userId: authUserId as Id<'users'> }
+    shouldSkipConvex ? 'skip' : { roomId: roomIdStr as Id<'chatRooms'> }
   );
 
   // MEMBER-DATA FIX: Query real room members with profile data from Convex
@@ -322,6 +324,18 @@ export default function ChatRoomScreen() {
       mountedRef.current = false;
     };
   }, []);
+
+  // LOGOUT-RACE FIX: Navigate away when auth is lost while screen is mounted
+  // This prevents protected queries from erroring during logout transition
+  useEffect(() => {
+    // Only applies in non-demo mode when auth is lost
+    if (isDemoMode) return;
+    if (authUserId) return; // Auth still present, nothing to do
+
+    // Auth is missing - user logged out while viewing this screen
+    // Navigate to a safe route (phase-2 home which doesn't require room auth)
+    router.replace('/(main)/(private)/(tabs)/desire-land');
+  }, [authUserId, router]);
 
   // ─────────────────────────────────────────────────────────────────────────
   // COUNTDOWN TIMER (for expiring rooms)
@@ -580,6 +594,10 @@ export default function ChatRoomScreen() {
     };
   }, [roomIdStr, seedRoom, storeHasHydrated]);
 
+  // SECURITY: Track join attempt status for access denied detection
+  const [joinAttempted, setJoinAttempted] = useState(false);
+  const [joinFailed, setJoinFailed] = useState(false);
+
   // Auto-join Convex room (skip if invalid ID)
   // MEMBERSHIP LIFECYCLE: Also track currentRoomId for leave-on-homepage logic
   useEffect(() => {
@@ -591,9 +609,21 @@ export default function ChatRoomScreen() {
     joinRoomMutation({
       roomId: roomIdStr as Id<'chatRooms'>,
       userId: authUserId as Id<'users'>,
-    }).catch(() => {
-      // Ignore errors - join is best-effort
-    });
+    })
+      .then(() => {
+        // Join succeeded - user now has membership
+        if (isMountedRef.current) {
+          setJoinAttempted(true);
+          setJoinFailed(false);
+        }
+      })
+      .catch(() => {
+        // Join failed - banned, room not found, or other error
+        if (isMountedRef.current) {
+          setJoinAttempted(true);
+          setJoinFailed(true);
+        }
+      });
   }, [roomIdStr, hasValidRoomId, authUserId, joinRoomMutation, setCurrentRoom]);
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -1169,14 +1199,16 @@ export default function ChatRoomScreen() {
   }
 
   // ─────────────────────────────────────────────────────────────────────────
-  // P2 CR-009: NOT FOUND CHECK
-  // In Convex mode: undefined = loading (render UI with fallbacks), null = not found
-  // ISSUE B: Don't block render - use route params as fallback for instant display
+  // P2 CR-009: NOT FOUND / ACCESS DENIED CHECK
+  // - convexRoom === null → room doesn't exist or expired
+  // - joinAttempted && joinFailed → user banned or cannot access
+  // SECURITY: Show error screen and navigate back safely
   // ─────────────────────────────────────────────────────────────────────────
-  // Only show "not found" if convexRoom is explicitly null (not undefined/loading)
   const isRoomNotFound = !isDemoMode && convexRoom === null;
+  // SECURITY: Access denied if join was attempted but failed
+  const isAccessDenied = !isDemoMode && joinAttempted && joinFailed;
 
-  if (isRoomNotFound) {
+  if (isRoomNotFound || isAccessDenied) {
     const handleBackToRooms = () => {
       // Clear stale preferred room so user doesn't get stuck in a loop
       if (isDemoMode) {
@@ -1189,12 +1221,18 @@ export default function ChatRoomScreen() {
       router.replace('/(main)/(private)/(tabs)/chat-rooms');
     };
 
+    // Determine error title and message
+    const errorTitle = isAccessDenied ? 'Access Denied' : 'Room Not Found';
+    const errorMessage = isAccessDenied
+      ? 'You do not have access to this room'
+      : 'Room not found';
+
     return (
       <View style={[styles.container, { paddingTop: insets.top }]}>
-        <ChatRoomsHeader title="Room Not Found" hideLeftButton topInset={insets.top} />
+        <ChatRoomsHeader title={errorTitle} hideLeftButton topInset={insets.top} />
         <View style={styles.notFound}>
           <Ionicons name="alert-circle-outline" size={48} color={C.textLight} />
-          <Text style={styles.notFoundText}>Room not found</Text>
+          <Text style={styles.notFoundText}>{errorMessage}</Text>
           <TouchableOpacity style={styles.backToRoomsBtn} onPress={handleBackToRooms}>
             <Text style={styles.backToRoomsBtnText}>Back to Chat Rooms</Text>
           </TouchableOpacity>
