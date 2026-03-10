@@ -104,11 +104,12 @@ export function ProtectedMediaViewer({
     }
 
     // 5-2: If view-once, expire on close (only once)
+    // MSG-006 FIX: Use authUserId for server-side verification
     if (mediaData?.viewOnce && !hasExpired.current) {
       hasExpired.current = true;
       markExpired({
         messageId: messageId as any,
-        userId: userId as any,
+        authUserId: userId,
       });
     }
 
@@ -130,9 +131,10 @@ export function ProtectedMediaViewer({
       setMediaUrl(mediaData.url);
       hasMarkedViewed.current = true;
 
+      // MSG-006 FIX: Use authUserId for server-side verification
       markViewed({
         messageId: messageId as any,
-        userId: userId as any,
+        authUserId: userId,
       });
 
       // Start timer if applicable
@@ -147,12 +149,13 @@ export function ProtectedMediaViewer({
   }, [visible, mediaData, handleClose, markViewed, messageId, userId]);
 
   // 6-2: handleExpire now includes handleClose in deps (no stale closure)
+  // MSG-006 FIX: Use authUserId for server-side verification
   const handleExpire = useCallback(() => {
     if (hasExpired.current) return; // Already expired
     hasExpired.current = true;
     markExpired({
       messageId: messageId as any,
-      userId: userId as any,
+      authUserId: userId,
     });
     handleClose();
   }, [messageId, userId, markExpired, handleClose]);

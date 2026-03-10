@@ -328,9 +328,10 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
       } else if (userId) {
         // Convex mode: prefix with hidden marker (stripped by MessageBubble)
         const markedMessage = `[SYSTEM:truthdare]${message}`;
+        // MSG-001 FIX: Use authUserId for server-side verification
         await sendMessage({
           conversationId: conversationId as any,
-          senderId: userId as any,
+          authUserId: userId,
           content: markedMessage,
           type: 'text',
         });
@@ -347,7 +348,8 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
       markDemoRead(conversationId, getDemoUserId());
       markNotifReadForConvo(conversationId);
     } else if (!isDemo && conversationId && userId) {
-      markAsRead({ conversationId: conversationId as any, userId: userId as any });
+      // MSG-004 FIX: Use authUserId for server-side verification
+      markAsRead({ conversationId: conversationId as any, authUserId: userId });
     }
   }, [conversationId, userId, isDemo, markDemoRead, markNotifReadForConvo]);
 
@@ -472,17 +474,19 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
 
     try {
       if (activeConversation.isPreMatch) {
+        // MSG-002 FIX: Use authUserId for server-side verification
         await sendPreMatchMessage({
-          fromUserId: userId as any,
+          authUserId: userId,
           toUserId: (activeConversation as any).otherUser.id as any,
           content: text,
           templateId: type === 'template' ? 'custom' : undefined,
           clientMessageId,
         });
       } else {
+        // MSG-001 FIX: Use authUserId for server-side verification
         await sendMessage({
           conversationId: conversationId as any,
-          senderId: userId as any,
+          authUserId: userId,
           type: 'text',
           content: text,
           clientMessageId,
@@ -670,9 +674,10 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
       const { storageId } = uploadResult;
 
       // 3. Send protected image message with Phase-1 options mapped to Convex format
+      // MSG-003 FIX: Use authUserId for server-side verification
       await sendProtectedImage({
         conversationId: conversationId as any,
-        senderId: userId as any,
+        authUserId: userId,
         imageStorageId: storageId,
         timer: options.timer,
         screenshotAllowed: false, // Phase-1 default: no screenshots

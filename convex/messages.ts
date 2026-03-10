@@ -93,10 +93,11 @@ async function upsertParticipantUnreadCount(
 }
 
 // Send a message
+// MSG-001 FIX: Auth hardening - verify caller identity server-side
 export const sendMessage = mutation({
   args: {
     conversationId: v.id('conversations'),
-    senderId: v.id('users'),
+    authUserId: v.string(), // MSG-001: Auth verification required
     type: v.union(v.literal('text'), v.literal('image'), v.literal('video'), v.literal('template'), v.literal('dare')),
     content: v.string(),
     imageStorageId: v.optional(v.id('_storage')),
@@ -105,8 +106,17 @@ export const sendMessage = mutation({
     clientMessageId: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const { conversationId, senderId, type, content, imageStorageId, templateId, clientMessageId } = args;
+    const { conversationId, authUserId, type, content, imageStorageId, templateId, clientMessageId } = args;
     const now = Date.now();
+
+    // MSG-001 FIX: Verify caller identity via session-based auth
+    if (!authUserId || authUserId.trim().length === 0) {
+      throw new Error('Unauthorized: authentication required');
+    }
+    const senderId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!senderId) {
+      throw new Error('Unauthorized: user not found');
+    }
 
     // Phase-2: Block DMs if user has active chatRoom readOnly penalty
     if (await hasActiveChatRoomPenalty(ctx, senderId)) {
@@ -241,9 +251,10 @@ export const sendMessage = mutation({
 });
 
 // Send pre-match message (uses template or limited text)
+// MSG-002 FIX: Auth hardening - verify caller identity server-side
 export const sendPreMatchMessage = mutation({
   args: {
-    fromUserId: v.id('users'),
+    authUserId: v.string(), // MSG-002: Auth verification required
     toUserId: v.id('users'),
     content: v.string(),
     templateId: v.optional(v.string()),
@@ -251,8 +262,17 @@ export const sendPreMatchMessage = mutation({
     clientMessageId: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const { fromUserId, toUserId, content, templateId, clientMessageId } = args;
+    const { authUserId, toUserId, content, templateId, clientMessageId } = args;
     const now = Date.now();
+
+    // MSG-002 FIX: Verify caller identity via session-based auth
+    if (!authUserId || authUserId.trim().length === 0) {
+      throw new Error('Unauthorized: authentication required');
+    }
+    const fromUserId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!fromUserId) {
+      throw new Error('Unauthorized: user not found');
+    }
 
     // Phase-2: Block DMs if user has active chatRoom readOnly penalty
     if (await hasActiveChatRoomPenalty(ctx, fromUserId)) {
@@ -435,14 +455,24 @@ export const getMessages = query({
 });
 
 // Mark messages as read
+// MSG-004 FIX: Auth hardening - verify caller identity server-side
 export const markAsRead = mutation({
   args: {
     conversationId: v.id('conversations'),
-    userId: v.id('users'),
+    authUserId: v.string(), // MSG-004: Auth verification required
   },
   handler: async (ctx, args) => {
-    const { conversationId, userId } = args;
+    const { conversationId, authUserId } = args;
     const now = Date.now();
+
+    // MSG-004 FIX: Verify caller identity via session-based auth
+    if (!authUserId || authUserId.trim().length === 0) {
+      return; // Silent return for mark-as-read (non-critical)
+    }
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      return; // Silent return for mark-as-read (non-critical)
+    }
 
     const conversation = await ctx.db.get(conversationId);
     if (!conversation) return;
@@ -861,14 +891,24 @@ export const getUnreadDmCountsByRoom = query({
 /**
  * Mark all unread RECEIVED messages in a conversation as read.
  * Called when user opens a DM screen.
+ * MSG-004 FIX: Auth hardening - verify caller identity server-side
  */
 export const markDmConversationRead = mutation({
   args: {
     conversationId: v.id('conversations'),
-    userId: v.id('users'),
+    authUserId: v.string(), // MSG-004: Auth verification required
   },
-  handler: async (ctx, { conversationId, userId }) => {
+  handler: async (ctx, { conversationId, authUserId }) => {
     const now = Date.now();
+
+    // MSG-004 FIX: Verify caller identity via session-based auth
+    if (!authUserId || authUserId.trim().length === 0) {
+      return { success: false, count: 0 };
+    }
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      return { success: false, count: 0 };
+    }
 
     const conversation = await ctx.db.get(conversationId);
     if (!conversation) return { success: false, count: 0 };

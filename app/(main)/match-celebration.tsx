@@ -267,18 +267,20 @@ export default function MatchCelebrationScreen() {
       // STEP A: Ensure a conversation row exists for this match.
       // Idempotent — safe to retry if the previous attempt crashed mid-flow.
       // Returns the conversationId needed for Step B.
+      // MSG-005 FIX: Use authUserId for server-side verification
       const { conversationId: conversationIdFinal } = await ensureConversation({
         matchId: matchIdValue,
-        userId: viewerId,
+        authUserId: viewerId,
       });
       if (__DEV__) console.log("[SayHi] conversationId(after)", conversationIdFinal);
 
       // STEP B: Send the mandatory first message ("Hi 👋").
       // Must happen BEFORE navigation — otherwise the chat screen opens empty
       // and the message appears with a visible delay.
+      // MSG-001 FIX: Use authUserId for server-side verification
       await sendMessageMut({
         conversationId: conversationIdFinal,
-        senderId: viewerId,
+        authUserId: viewerId,
         type: "text",
         content: "Hi 👋",
       });
