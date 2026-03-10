@@ -111,6 +111,8 @@ export default function PromptThreadScreen() {
   // Secure media APIs (for future viewer implementation)
   const claimAnswerMediaView = useMutation(api.truthDare.claimAnswerMediaView);
   const finalizeAnswerMediaView = useMutation(api.truthDare.finalizeAnswerMediaView);
+  // T&D Connect
+  const sendConnectRequest = useMutation(api.truthDare.sendTodConnectRequest);
 
   const isLoading = threadData === undefined;
   const prompt = threadData?.prompt;
@@ -154,6 +156,13 @@ export default function PromptThreadScreen() {
     hasViewed?: boolean;
     isFrontCamera?: boolean;
   } | null>(null);
+
+  // T&D Connect state - tracks which answers have pending/sent connect requests
+  const [connectSentFor, setConnectSentFor] = useState<Set<string>>(new Set());
+  const [connectSending, setConnectSending] = useState<string | null>(null);
+
+  // Check if current user is the prompt owner
+  const isPromptOwner = prompt?.ownerUserId === currentUserId;
 
   const listRef = useRef<FlatList>(null);
 
@@ -312,6 +321,31 @@ export default function PromptThreadScreen() {
       ]
     );
   }, [userId, deleteAnswer]);
+
+  // Handle send T&D connect request (prompt owner → answer author)
+  const handleSendConnect = useCallback(async (answerId: string) => {
+    if (!userId || !promptId) return;
+
+    setConnectSending(answerId);
+    try {
+      const result = await sendConnectRequest({
+        promptId,
+        answerId,
+        authUserId: userId,
+      });
+
+      if (result.success) {
+        setConnectSentFor((prev) => new Set(prev).add(answerId));
+        Alert.alert('Connect Sent', 'Your connect request has been sent!');
+      } else {
+        Alert.alert('Cannot Connect', result.reason || 'Failed to send connect request.');
+      }
+    } catch (error) {
+      Alert.alert('Error', 'Failed to send connect request. Please try again.');
+    } finally {
+      setConnectSending(null);
+    }
+  }, [userId, promptId, sendConnectRequest]);
 
   // Handle tap-to-view for media content
   const handleViewMedia = useCallback(async (answer: typeof answers[0]) => {
@@ -770,17 +804,46 @@ export default function PromptThreadScreen() {
                 <Ionicons name="trash-outline" size={16} color={C.textLight} />
               </TouchableOpacity>
             </View>
-          ) : !hasReported ? (
-            <TouchableOpacity
-              style={styles.reportBtn}
-              onPress={() => handleReport(item._id, item.userId)}
-            >
-              <Ionicons name="flag-outline" size={16} color={C.textLight} />
-            </TouchableOpacity>
           ) : (
-            <View style={styles.reportedBadge}>
-              <Ionicons name="flag" size={12} color={C.textLight} />
-              <Text style={styles.reportedText}>Reported</Text>
+            <View style={styles.otherCommentActions}>
+              {/* Connect button: only for prompt owner on non-anonymous answers */}
+              {isPromptOwner && !isAnon && !connectSentFor.has(item._id) && (
+                <TouchableOpacity
+                  style={styles.connectBtn}
+                  onPress={() => handleSendConnect(item._id)}
+                  disabled={connectSending === item._id}
+                >
+                  {connectSending === item._id ? (
+                    <ActivityIndicator size="small" color={C.primary} />
+                  ) : (
+                    <>
+                      <Ionicons name="chatbubble-outline" size={14} color={C.primary} />
+                      <Text style={styles.connectBtnText}>Connect</Text>
+                    </>
+                  )}
+                </TouchableOpacity>
+              )}
+              {/* Connect sent indicator */}
+              {isPromptOwner && connectSentFor.has(item._id) && (
+                <View style={styles.connectSentBadge}>
+                  <Ionicons name="checkmark-circle" size={12} color={C.textLight} />
+                  <Text style={styles.connectSentText}>Sent</Text>
+                </View>
+              )}
+              {/* Report button */}
+              {!hasReported ? (
+                <TouchableOpacity
+                  style={styles.reportBtn}
+                  onPress={() => handleReport(item._id, item.userId)}
+                >
+                  <Ionicons name="flag-outline" size={16} color={C.textLight} />
+                </TouchableOpacity>
+              ) : (
+                <View style={styles.reportedBadge}>
+                  <Ionicons name="flag" size={12} color={C.textLight} />
+                  <Text style={styles.reportedText}>Reported</Text>
+                </View>
+              )}
             </View>
           )}
         </View>
@@ -1343,6 +1406,21 @@ const styles = StyleSheet.create({
     backgroundColor: C.surface, paddingHorizontal: 8, paddingVertical: 4, borderRadius: 8,
   },
   reportedText: { fontSize: 10, color: C.textLight },
+
+  // Other comment actions (connect + report)
+  otherCommentActions: {
+    flexDirection: 'row', alignItems: 'center', gap: 8,
+  },
+  connectBtn: {
+    flexDirection: 'row', alignItems: 'center', gap: 4,
+    backgroundColor: `${C.primary}20`, paddingHorizontal: 10, paddingVertical: 5, borderRadius: 12,
+  },
+  connectBtnText: { fontSize: 11, fontWeight: '600', color: C.primary },
+  connectSentBadge: {
+    flexDirection: 'row', alignItems: 'center', gap: 4,
+    backgroundColor: C.surface, paddingHorizontal: 8, paddingVertical: 4, borderRadius: 8,
+  },
+  connectSentText: { fontSize: 10, color: C.textLight },
 
   // Emoji picker
   emojiPickerOverlay: {

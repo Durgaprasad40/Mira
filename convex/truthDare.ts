@@ -287,52 +287,337 @@ export const unlikeAnswer = mutation({
   },
 });
 
-// Get pending connect requests for prompt owner
+// Get pending connect requests for current user (as recipient)
+// Returns enriched data with sender profile for UI display
 export const getPendingConnectRequests = query({
-  args: { userId: v.string() },
-  handler: async (ctx, { userId }) => {
-    return await ctx.db
+  args: { authUserId: v.string() },
+  handler: async (ctx, { authUserId }) => {
+    if (!authUserId) return [];
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) return [];
+
+    const requests = await ctx.db
       .query('todConnectRequests')
       .withIndex('by_to_user', (q) => q.eq('toUserId', userId))
       .filter((q) => q.eq(q.field('status'), 'pending'))
       .order('desc')
       .collect();
+
+    // Enrich with sender profile and prompt data
+    const enriched = await Promise.all(
+      requests.map(async (req) => {
+        // Get sender profile from users table
+        const sender = await ctx.db
+          .query('users')
+          .withIndex('by_auth_user_id', (q) => q.eq('authUserId', req.fromUserId))
+          .first();
+
+        // Get prompt for context
+        const prompt = await ctx.db
+          .query('todPrompts')
+          .filter((q) => q.eq(q.field('_id'), req.promptId as Id<'todPrompts'>))
+          .first();
+
+        // Calculate age from dateOfBirth
+        let senderAge: number | null = null;
+        if (sender?.dateOfBirth) {
+          const birthDate = new Date(sender.dateOfBirth);
+          const today = new Date();
+          senderAge = today.getFullYear() - birthDate.getFullYear();
+          const monthDiff = today.getMonth() - birthDate.getMonth();
+          if (monthDiff < 0 || (monthDiff === 0 && today.getDate() < birthDate.getDate())) {
+            senderAge--;
+          }
+        }
+
+        return {
+          _id: req._id,
+          promptId: req.promptId,
+          answerId: req.answerId,
+          fromUserId: req.fromUserId,
+          createdAt: req.createdAt,
+          // Sender profile snapshot
+          senderName: sender?.name ?? 'Someone',
+          senderPhotoUrl: sender?.primaryPhotoUrl ?? null,
+          senderAge,
+          senderGender: sender?.gender ?? null,
+          // Prompt context
+          promptType: prompt?.type ?? 'truth',
+          promptText: prompt?.text ?? '',
+        };
+      })
+    );
+
+    return enriched;
+  },
+});
+
+// Send a T&D connect request (prompt owner → answer author)
+export const sendTodConnectRequest = mutation({
+  args: {
+    promptId: v.string(),
+    answerId: v.string(),
+    authUserId: v.string(),
+  },
+  handler: async (ctx, { promptId, answerId, authUserId }) => {
+    if (!authUserId) {
+      throw new Error('Unauthorized: authentication required');
+    }
+    const fromUserId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!fromUserId) {
+      throw new Error('Unauthorized: user not found');
+    }
+
+    // Get prompt to verify ownership
+    const prompt = await ctx.db
+      .query('todPrompts')
+      .filter((q) => q.eq(q.field('_id'), promptId as Id<'todPrompts'>))
+      .first();
+    if (!prompt) {
+      return { success: false, reason: 'Prompt not found' };
+    }
+    if (prompt.ownerUserId !== fromUserId) {
+      return { success: false, reason: 'Only prompt owner can send connect' };
+    }
+
+    // Get answer to find recipient
+    const answer = await ctx.db
+      .query('todAnswers')
+      .filter((q) => q.eq(q.field('_id'), answerId as Id<'todAnswers'>))
+      .first();
+    if (!answer) {
+      return { success: false, reason: 'Answer not found' };
+    }
+
+    const toUserId = answer.userId;
+
+    // Cannot connect to self
+    if (toUserId === fromUserId) {
+      return { success: false, reason: 'Cannot connect to yourself' };
+    }
+
+    // Check for existing pending/connected request for this user pair
+    const existing = await ctx.db
+      .query('todConnectRequests')
+      .withIndex('by_from_to', (q) => q.eq('fromUserId', fromUserId).eq('toUserId', toUserId))
+      .filter((q) =>
+        q.or(
+          q.eq(q.field('status'), 'pending'),
+          q.eq(q.field('status'), 'connected')
+        )
+      )
+      .first();
+
+    if (existing) {
+      return { success: false, reason: 'Request already exists' };
+    }
+
+    // Create connect request
+    await ctx.db.insert('todConnectRequests', {
+      promptId,
+      answerId,
+      fromUserId,
+      toUserId,
+      status: 'pending',
+      createdAt: Date.now(),
+    });
+
+    return { success: true };
   },
 });
 
 // Respond to connect request (Connect or Remove)
-// TOD-005 FIX: Auth hardening - verify caller is the intended recipient
+// Creates conversation in EXISTING conversations table for both users
 export const respondToConnect = mutation({
   args: {
     requestId: v.id('todConnectRequests'),
     action: v.union(v.literal('connect'), v.literal('remove')),
-    authUserId: v.string(), // TOD-005: Auth verification required
+    authUserId: v.string(),
   },
   handler: async (ctx, { requestId, action, authUserId }) => {
-    // TOD-005 FIX: Verify caller identity
     if (!authUserId || authUserId.trim().length === 0) {
       throw new Error('Unauthorized: authentication required');
     }
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
-    if (!userId) {
+    const recipientDbId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!recipientDbId) {
       throw new Error('Unauthorized: user not found');
     }
 
     const request = await ctx.db.get(requestId);
-    if (!request || request.status !== 'pending') return;
+    if (!request || request.status !== 'pending') {
+      return { success: false, reason: 'Request not found or already processed' };
+    }
 
-    // TOD-005 FIX: Only the intended recipient can respond
-    if (request.toUserId !== userId) {
+    // Only the intended recipient can respond
+    if (request.toUserId !== recipientDbId) {
       throw new Error('Unauthorized: only the request recipient can respond');
     }
 
     if (action === 'connect') {
       await ctx.db.patch(requestId, { status: 'connected' });
-      // Create a conversation between the two users
-      // (reuses existing conversations table with source tracking)
+
+      // Resolve sender to Id<'users'>
+      const senderDbId = await resolveUserIdByAuthId(ctx, request.fromUserId);
+      if (!senderDbId) {
+        return { success: false, reason: 'Sender user not found' };
+      }
+
+      // Get sender profile for response
+      const sender = await ctx.db.get(senderDbId as Id<'users'>);
+
+      // Get recipient profile for response
+      const recipient = await ctx.db.get(recipientDbId as Id<'users'>);
+
+      // Calculate ages
+      const calculateAge = (dob: string | undefined): number | null => {
+        if (!dob) return null;
+        const birthDate = new Date(dob);
+        const today = new Date();
+        let age = today.getFullYear() - birthDate.getFullYear();
+        const monthDiff = today.getMonth() - birthDate.getMonth();
+        if (monthDiff < 0 || (monthDiff === 0 && today.getDate() < birthDate.getDate())) {
+          age--;
+        }
+        return age;
+      };
+
+      const senderAge = calculateAge(sender?.dateOfBirth);
+      const recipientAge = calculateAge(recipient?.dateOfBirth);
+
+      // Order participants for consistent deduplication (lower ID first)
+      const participantIds = [senderDbId as Id<'users'>, recipientDbId as Id<'users'>].sort();
+
+      // Check if conversation already exists for this user pair
+      // Query conversationParticipants to find shared conversations
+      const senderParticipations = await ctx.db
+        .query('conversationParticipants')
+        .withIndex('by_user', (q) => q.eq('userId', senderDbId as Id<'users'>))
+        .collect();
+
+      let existingConversationId: Id<'conversations'> | null = null;
+
+      for (const sp of senderParticipations) {
+        // Check if recipient is also in this conversation
+        const recipientInConvo = await ctx.db
+          .query('conversationParticipants')
+          .withIndex('by_user_conversation', (q) =>
+            q.eq('userId', recipientDbId as Id<'users'>).eq('conversationId', sp.conversationId)
+          )
+          .first();
+
+        if (recipientInConvo) {
+          existingConversationId = sp.conversationId;
+          break;
+        }
+      }
+
+      const now = Date.now();
+      let conversationId: Id<'conversations'>;
+
+      if (existingConversationId) {
+        // Reuse existing conversation
+        conversationId = existingConversationId;
+        // Update lastMessageAt
+        await ctx.db.patch(conversationId, { lastMessageAt: now });
+      } else {
+        // Create new conversation in EXISTING conversations table
+        conversationId = await ctx.db.insert('conversations', {
+          participants: participantIds,
+          isPreMatch: false,
+          connectionSource: 'tod',
+          createdAt: now,
+          lastMessageAt: now,
+        });
+
+        // Create conversationParticipants for BOTH users
+        await ctx.db.insert('conversationParticipants', {
+          conversationId,
+          userId: senderDbId as Id<'users'>,
+          unreadCount: 1, // Sender will see the system message as unread
+        });
+
+        await ctx.db.insert('conversationParticipants', {
+          conversationId,
+          userId: recipientDbId as Id<'users'>,
+          unreadCount: 0, // Recipient is accepting, they'll see it immediately
+        });
+
+        // Create initial system message
+        await ctx.db.insert('messages', {
+          conversationId,
+          senderId: recipientDbId as Id<'users'>, // System message attributed to recipient
+          type: 'system',
+          content: 'T&D connection accepted! Say hi!',
+          createdAt: now,
+        });
+      }
+
+      return {
+        success: true,
+        action: 'connected' as const,
+        conversationId: conversationId as string,
+        // Sender profile (for recipient's display)
+        senderUserId: request.fromUserId,
+        senderDbId: senderDbId as string,
+        senderName: sender?.name ?? 'Someone',
+        senderPhotoUrl: sender?.primaryPhotoUrl ?? null,
+        senderAge,
+        senderGender: sender?.gender ?? null,
+        // Recipient profile (for sender's display when they query)
+        recipientUserId: authUserId,
+        recipientDbId: recipientDbId as string,
+        recipientName: recipient?.name ?? 'Someone',
+        recipientPhotoUrl: recipient?.primaryPhotoUrl ?? null,
+        recipientAge,
+        recipientGender: recipient?.gender ?? null,
+      };
     } else {
       await ctx.db.patch(requestId, { status: 'removed' });
+      return { success: true, action: 'removed' as const };
     }
+  },
+});
+
+// Check if a connect request exists between prompt owner and answer author
+export const checkTodConnectStatus = query({
+  args: {
+    promptId: v.string(),
+    answerId: v.string(),
+    authUserId: v.string(),
+  },
+  handler: async (ctx, { promptId, answerId, authUserId }) => {
+    if (!authUserId) return { status: 'none' as const };
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) return { status: 'none' as const };
+
+    // Get the answer to find the other user
+    const answer = await ctx.db
+      .query('todAnswers')
+      .filter((q) => q.eq(q.field('_id'), answerId as Id<'todAnswers'>))
+      .first();
+    if (!answer) return { status: 'none' as const };
+
+    // Check for request from current user to answer author
+    const requestSent = await ctx.db
+      .query('todConnectRequests')
+      .withIndex('by_from_to', (q) => q.eq('fromUserId', userId).eq('toUserId', answer.userId))
+      .first();
+
+    if (requestSent) {
+      return { status: requestSent.status };
+    }
+
+    // Check for request from answer author to current user
+    const requestReceived = await ctx.db
+      .query('todConnectRequests')
+      .withIndex('by_from_to', (q) => q.eq('fromUserId', answer.userId).eq('toUserId', userId))
+      .first();
+
+    if (requestReceived) {
+      return { status: requestReceived.status };
+    }
+
+    return { status: 'none' as const };
   },
 });
 
@@ -2197,5 +2482,90 @@ export const getVoiceUrl = query({
     }
 
     return { status: 'no_media' as const };
+  },
+});
+
+// ============================================================
+// USER CONVERSATIONS QUERY (for Messages tab integration)
+// ============================================================
+
+/**
+ * Get all conversations for a user from the EXISTING conversations table.
+ * Returns conversations with participant info for display.
+ * Used by chats.tsx to rehydrate from backend.
+ */
+export const getUserConversations = query({
+  args: { authUserId: v.string() },
+  handler: async (ctx, { authUserId }) => {
+    if (!authUserId) return [];
+
+    // Resolve auth user ID to Convex user ID
+    const userDbId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userDbId) return [];
+
+    // Get all conversation participations for this user
+    const participations = await ctx.db
+      .query('conversationParticipants')
+      .withIndex('by_user', (q) => q.eq('userId', userDbId as Id<'users'>))
+      .collect();
+
+    if (participations.length === 0) return [];
+
+    // Fetch conversation details and other participant info
+    const results = await Promise.all(
+      participations.map(async (p) => {
+        const conversation = await ctx.db.get(p.conversationId);
+        if (!conversation) return null;
+
+        // Find the other participant
+        const otherParticipantId = conversation.participants.find(
+          (pid) => pid !== userDbId
+        );
+        if (!otherParticipantId) return null;
+
+        // Get other participant's profile
+        const otherUser = await ctx.db.get(otherParticipantId);
+        if (!otherUser) return null;
+
+        // Calculate age
+        let otherAge: number | null = null;
+        if (otherUser.dateOfBirth) {
+          const birthDate = new Date(otherUser.dateOfBirth);
+          const today = new Date();
+          otherAge = today.getFullYear() - birthDate.getFullYear();
+          const monthDiff = today.getMonth() - birthDate.getMonth();
+          if (monthDiff < 0 || (monthDiff === 0 && today.getDate() < birthDate.getDate())) {
+            otherAge--;
+          }
+        }
+
+        // Get last message for preview
+        const lastMessage = await ctx.db
+          .query('messages')
+          .withIndex('by_conversation_created', (q) => q.eq('conversationId', p.conversationId))
+          .order('desc')
+          .first();
+
+        return {
+          id: conversation._id,
+          participantId: otherParticipantId,
+          participantAuthId: otherUser.authUserId ?? null,
+          participantName: otherUser.name,
+          participantPhotoUrl: otherUser.primaryPhotoUrl ?? null,
+          participantAge: otherAge,
+          participantGender: otherUser.gender ?? null,
+          connectionSource: conversation.connectionSource ?? 'match',
+          lastMessage: lastMessage?.content ?? null,
+          lastMessageAt: conversation.lastMessageAt ?? conversation.createdAt,
+          unreadCount: p.unreadCount,
+          createdAt: conversation.createdAt,
+        };
+      })
+    );
+
+    // Filter out nulls and sort by last message time
+    return results
+      .filter((r): r is NonNullable<typeof r> => r !== null)
+      .sort((a, b) => (b.lastMessageAt ?? 0) - (a.lastMessageAt ?? 0));
   },
 });

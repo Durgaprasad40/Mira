@@ -521,11 +521,20 @@ export default defineSchema({
     expiresAt: v.optional(v.number()), // Only set for confession-based threads (24h after creation)
     // Phase-2: Room this DM originated from (for per-room unread badge)
     sourceRoomId: v.optional(v.id('chatRooms')),
+    // Connection source for Phase-2 T&D/Room/Desire handoffs
+    connectionSource: v.optional(v.union(
+      v.literal('match'),
+      v.literal('confession'),
+      v.literal('tod'),
+      v.literal('room'),
+      v.literal('desire')
+    )),
   })
     .index('by_match', ['matchId'])
     .index('by_confession', ['confessionId'])
     .index('by_last_message', ['lastMessageAt'])
-    .index('by_source_room', ['sourceRoomId']),
+    .index('by_source_room', ['sourceRoomId'])
+    .index('by_connection_source', ['connectionSource']),
 
   // C1/C2/C3-REPAIR: Conversation participants junction table
   // Enables efficient user-scoped conversation queries + denormalized unread counts

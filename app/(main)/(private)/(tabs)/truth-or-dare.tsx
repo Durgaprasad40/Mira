@@ -226,10 +226,10 @@ const TrendingCard = React.memo(function TrendingCard({
         {/* Prompt text */}
         <Text style={styles.promptText} numberOfLines={3}>{prompt.text}</Text>
 
-        {/* Footer: +N more */}
-        <View style={styles.cardFooter}>
-          <Text style={styles.moreCountLabel}>+{answerCount} more</Text>
-        </View>
+        {/* Answer count */}
+        <Text style={styles.answerCountText}>
+          {answerCount === 1 ? '1 answer' : `${answerCount} answers`}
+        </Text>
       </View>
 
       {/* Big + button on right side */}
@@ -322,10 +322,10 @@ const PromptCard = React.memo(function PromptCard({
           </View>
         )}
 
-        {/* Footer: +N more */}
-        <View style={styles.cardFooter}>
-          <Text style={styles.moreCountLabel}>+{answerCount} more</Text>
-        </View>
+        {/* Answer count */}
+        <Text style={styles.answerCountText}>
+          {answerCount === 1 ? '1 answer' : `${answerCount} answers`}
+        </Text>
       </View>
 
       {/* Big + button on right side */}
@@ -716,13 +716,9 @@ const styles = StyleSheet.create({
     color: C.primary, fontWeight: '500',
   },
 
-  // Card footer (+N more)
-  cardFooter: {
-    flexDirection: 'row', alignItems: 'center',
-    marginTop: 2,
-  },
-  moreCountLabel: {
-    fontSize: 12, fontWeight: '700', color: C.primary,
+  // Answer count text
+  answerCountText: {
+    fontSize: 11, color: C.textLight, marginTop: 4,
   },
 
   // Big + button on right side of card
