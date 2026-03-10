@@ -102,6 +102,8 @@ export function UnifiedAnswerComposer({
   const soundRef = useRef<Audio.Sound | null>(null);
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const autoStopTriggeredRef = useRef(false);
+  // M-007 FIX: Track latest recordSeconds to avoid stale closure
+  const recordSecondsRef = useRef(0);
 
   // Extract prompt type for stable dependency (avoids fragile optional chaining in dep array)
   const promptType = prompt?.type ?? null;
@@ -149,8 +151,13 @@ export function UnifiedAnswerComposer({
   useEffect(() => {
     if (isRecording) {
       autoStopTriggeredRef.current = false; // Reset guard when recording starts
+      recordSecondsRef.current = 0; // M-007 FIX: Reset ref when recording starts
       intervalRef.current = setInterval(() => {
-        setRecordSeconds((s) => s + 1);
+        setRecordSeconds((s) => {
+          const newVal = s + 1;
+          recordSecondsRef.current = newVal; // M-007 FIX: Keep ref in sync
+          return newVal;
+        });
       }, 1000);
     } else {
       if (intervalRef.current) {
@@ -207,15 +214,17 @@ export function UnifiedAnswerComposer({
 
       setIsRecording(false);
 
-      if (uri && recordSeconds > 0) {
+      // M-007 FIX: Use ref for latest duration to avoid stale closure
+      const finalSeconds = recordSecondsRef.current;
+      if (uri && finalSeconds > 0) {
         setAttachment({
           kind: 'audio',
           uri,
           mime: 'audio/mp4',
-          durationMs: recordSeconds * 1000,
+          durationMs: finalSeconds * 1000,
         });
         setMediaRemoved(false);
-        console.log(`[T/D Composer] Voice recorded: ${recordSeconds}s`);
+        console.log(`[T/D Composer] Voice recorded: ${finalSeconds}s`);
       }
     } catch (error) {
       console.error('[T/D Composer] Stop recording error:', error);
@@ -358,7 +367,8 @@ export function UnifiedAnswerComposer({
 
   const handleSubmit = useCallback(async () => {
     // Validate: text is MANDATORY, media is optional
-    const hasText = text.trim().length >= 1;
+    const trimmedText = text.trim();
+    const hasText = trimmedText.length >= 1;
     const hasAttachment = !!attachment;
 
     // Only pass mediaVisibility for photo/video attachments
@@ -378,8 +388,10 @@ export function UnifiedAnswerComposer({
       return;
     }
 
+    // M-008 FIX: Consistent payload shape - text is always non-empty string
+    // (guaranteed by validation above), never undefined or empty string
     await onSubmit({
-      text: text.trim(),
+      text: trimmedText,
       attachment,
       removeMedia: mediaRemoved && !attachment,
       identityMode,

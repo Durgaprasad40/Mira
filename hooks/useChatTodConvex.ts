@@ -64,17 +64,19 @@ interface UseChatTodConvexReturn {
   completeMandatoryRound: () => Promise<void>;
 }
 
-const CURRENT_USER_ID = 'me';
+// C-003 FIX: Default to 'me' for demo mode, but real mode should pass actual userId
+const DEFAULT_DEMO_USER_ID = 'me';
 
 // ─── Hook ────────────────────────────────────────────────────────────────────
 
 export function useChatTodConvex(
   conversationId: string,
-  currentUserId: string = CURRENT_USER_ID
+  currentUserId: string = DEFAULT_DEMO_USER_ID
 ): UseChatTodConvexReturn {
   // ─── Zustand (Demo Mode) ───
   const zustandGame = useGameState(conversationId);
-  const zustandSkips = useMySkipsRemaining(conversationId);
+  // C-003 FIX: Pass currentUserId to get correct skips for user
+  const zustandSkips = useMySkipsRemaining(conversationId, currentUserId);
   const zustandActions = useChatTodStore((s) => ({
     initGame: s.initGame,
     spinBottle: s.spinBottle,
@@ -193,7 +195,8 @@ export function useChatTodConvex(
   const completeSpinAnimation = useCallback(
     async (winnerId: string) => {
       if (isDemoMode) {
-        zustandActions.completeSpinAnimation(conversationId);
+        // C-001 FIX: Pass winnerId to sync with animation
+        zustandActions.completeSpinAnimation(conversationId, winnerId);
         return;
       }
       // TOD-009 FIX: Use authUserId for server-side verification

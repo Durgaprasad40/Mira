@@ -14,12 +14,24 @@ import { useAuthStore } from '@/stores/authStore';
 import { useScreenTrace } from '@/lib/devTrace';
 
 // Module-level cache for instant load across tab switches
+// M-001 FIX: Track cache for HMR cleanup
 let _cachedPromptsData: any[] = [];
 let _cachedTrendingData: { trendingDarePrompt: any; trendingTruthPrompt: any } | null = null;
 let _hasEverLoaded = false;
 
 // Timing for diagnostics
 let _tabOpenTime = 0;
+
+// M-001 FIX: Reset cache on HMR to prevent stale data in development
+if (__DEV__ && typeof module !== 'undefined' && (module as any).hot) {
+  (module as any).hot.accept(() => {
+    _cachedPromptsData = [];
+    _cachedTrendingData = null;
+    _hasEverLoaded = false;
+    _tabOpenTime = 0;
+    console.log('[T/D HMR] Cache cleared on hot reload');
+  });
+}
 
 /** Prewarm the T/D cache with data (called from Private layout mount) */
 export function prewarmTodCache(prompts: any[] | undefined, trending: any | undefined) {

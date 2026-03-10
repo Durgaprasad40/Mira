@@ -48,6 +48,7 @@ export default function PromptThreadScreen() {
   const userId = useAuthStore((s) => s.userId);
   const demoUserId = useDemoStore((s) => s.currentDemoUserId);
 
+  // C-002 FIX: Stable fallback ID constant (outside useMemo to avoid re-creation)
   // Resolve currentUserId: authStore userId → demoStore currentDemoUserId
   const currentUserId = useMemo(() => {
     if (userId) {
@@ -58,10 +59,10 @@ export default function PromptThreadScreen() {
       console.log(`[T/D] resolvedUserId source=demoStore valuePrefix=${demoUserId.substring(0, 12)}...`);
       return demoUserId;
     }
-    // Fallback: generate stable ID (should rarely happen)
-    const fallbackId = `demo_fallback_${Date.now()}`;
-    console.warn(`[T/D] resolvedUserId source=fallback (no auth or demoStore userId) valuePrefix=${fallbackId.substring(0, 12)}...`);
-    return fallbackId;
+    // C-002 FIX: Use stable constant fallback instead of Date.now()
+    // This prevents render loops when auth state is missing
+    console.warn(`[T/D] resolvedUserId source=fallback (no auth or demoStore userId)`);
+    return 'demo_fallback_user';
   }, [userId, demoUserId]);
 
   // Get profile data for author identity snapshot
@@ -138,6 +139,22 @@ export default function PromptThreadScreen() {
 
   const listRef = useRef<FlatList>(null);
 
+  // M-003 FIX: Track scroll timeout for cleanup
+  const scrollTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const isMountedRef = useRef(true);
+
+  // M-003 FIX: Cleanup on unmount
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+      if (scrollTimeoutRef.current) {
+        clearTimeout(scrollTimeoutRef.current);
+        scrollTimeoutRef.current = null;
+      }
+    };
+  }, []);
+
   // Ref to always have latest answers for callbacks (avoids stale closure)
   const answersRef = useRef(answers);
   useEffect(() => {
@@ -153,8 +170,18 @@ export default function PromptThreadScreen() {
     }
   }, [autoOpenComposer, myAnswer]);
 
+  // M-003 FIX: Safe scroll with cleanup support
   const scrollToEnd = () => {
-    setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), 200);
+    // Clear any pending scroll timeout
+    if (scrollTimeoutRef.current) {
+      clearTimeout(scrollTimeoutRef.current);
+    }
+    scrollTimeoutRef.current = setTimeout(() => {
+      if (isMountedRef.current && listRef.current) {
+        listRef.current.scrollToEnd({ animated: true });
+      }
+      scrollTimeoutRef.current = null;
+    }, 200);
   };
 
   // Handle emoji reaction
@@ -319,6 +346,13 @@ export default function PromptThreadScreen() {
         console.log('[T/D] Media view finalized');
       } catch (error) {
         console.error('[T/D] Finalize media view failed:', error);
+        // M-002 FIX: Add non-disruptive user feedback on failure
+        // This informs the user but doesn't block the flow
+        Alert.alert(
+          'View Not Recorded',
+          'Your view may not have been recorded. The media may still be viewable.',
+          [{ text: 'OK', style: 'default' }]
+        );
       }
     }
     setViewingMedia(null);
