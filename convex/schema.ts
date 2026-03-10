@@ -1007,6 +1007,14 @@ export default defineSchema({
     activeCount: v.number(),
     createdAt: v.number(),
     expiresAt: v.optional(v.number()),
+    // Prompt category (optional, defaults to 'random' at read time)
+    category: v.optional(v.union(
+      v.literal('spicy'),
+      v.literal('deep'),
+      v.literal('funny'),
+      v.literal('wholesome'),
+      v.literal('random')
+    )),
     // Owner profile snapshot (immutable at creation time)
     isAnonymous: v.optional(v.boolean()), // true = hide photo/name, show only age+gender
     photoBlurMode: v.optional(v.union(v.literal('none'), v.literal('blur'))), // 'blur' = show blurred photo

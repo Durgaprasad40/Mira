@@ -816,6 +816,11 @@ export default function PromptThreadScreen() {
 
   const isTruth = prompt.type === 'truth';
   const timeLeft = formatTimeLeft(prompt.expiresAt ?? Date.now() + 24 * 60 * 60 * 1000);
+  const category = (prompt as any).category ?? 'random';
+  const showCategoryBadge = category !== 'random';
+  const categoryEmoji: Record<string, string> = {
+    spicy: '🌶️', deep: '🧠', funny: '😂', wholesome: '💖', random: '🎲',
+  };
 
   // Helper for gender icon
   const getGenderIcon = (gender: string | undefined): string => {
@@ -844,6 +849,11 @@ export default function PromptThreadScreen() {
         <View style={[styles.headerBadge, { backgroundColor: isTruth ? '#6C5CE7' : '#E17055' }]}>
           <Text style={styles.headerBadgeText}>{isTruth ? 'TRUTH' : 'DARE'}</Text>
         </View>
+        {showCategoryBadge && (
+          <View style={styles.categoryBadge}>
+            <Text style={styles.categoryBadgeText}>{categoryEmoji[category]}</Text>
+          </View>
+        )}
         <Text style={styles.headerTitle}>Thread</Text>
         <View style={{ flex: 1 }} />
         <View style={styles.timeLeftBadge}>
@@ -1043,6 +1053,8 @@ const styles = StyleSheet.create({
   },
   headerBadge: { paddingHorizontal: 8, paddingVertical: 3, borderRadius: 8 },
   headerBadgeText: { fontSize: 9, fontWeight: '700', color: '#FFF' },
+  categoryBadge: { paddingHorizontal: 4, paddingVertical: 2, borderRadius: 6, backgroundColor: C.surface },
+  categoryBadgeText: { fontSize: 12 },
   headerTitle: { fontSize: 17, fontWeight: '700', color: C.text },
   timeLeftBadge: { flexDirection: 'row', alignItems: 'center', gap: 4 },
   timeLeftText: { fontSize: 12, color: C.textLight },

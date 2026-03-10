@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useMemo, useState, useRef } from 'react';
 import {
   View, Text, StyleSheet, FlatList, TouchableOpacity,
-  RefreshControl, Platform,
+  RefreshControl, Platform, ScrollView,
 } from 'react-native';
 import { Image } from 'expo-image';
 import { useRouter } from 'expo-router';
@@ -12,6 +12,7 @@ import { api } from '@/convex/_generated/api';
 import { INCOGNITO_COLORS } from '@/lib/constants';
 import { useAuthStore } from '@/stores/authStore';
 import { useScreenTrace } from '@/lib/devTrace';
+import type { TodCategory } from '@/types';
 
 // Module-level cache for instant load across tab switches
 // M-001 FIX: Track cache for HMR cleanup
@@ -76,6 +77,16 @@ function isValidPhotoUrl(url?: string): boolean {
 }
 
 const C = INCOGNITO_COLORS;
+
+// Category filter options (frontend-only 'all' + 5 real categories)
+const CATEGORY_FILTERS: { key: TodCategory | 'all'; label: string; emoji: string | null }[] = [
+  { key: 'all', label: 'All', emoji: null },
+  { key: 'spicy', label: 'Spicy', emoji: '🌶️' },
+  { key: 'deep', label: 'Deep', emoji: '🧠' },
+  { key: 'funny', label: 'Funny', emoji: '😂' },
+  { key: 'wholesome', label: 'Wholesome', emoji: '💖' },
+  { key: 'random', label: 'Random', emoji: '🎲' },
+];
 
 /* ─── Owner Photo (simple, no blur) ─── */
 function OwnerPhoto({ uri, promptId }: { uri: string; promptId: string }) {
@@ -159,6 +170,15 @@ function CommentPreviewRow({ answer }: { answer: any }) {
   );
 }
 
+/* ─── Category Badge Helper ─── */
+const CATEGORY_EMOJI: Record<string, string> = {
+  spicy: '🌶️',
+  deep: '🧠',
+  funny: '😂',
+  wholesome: '💖',
+  random: '🎲',
+};
+
 /* ─── Trending Prompt Data Type ─── */
 type TrendingPromptData = {
   _id: any;
@@ -173,6 +193,7 @@ type TrendingPromptData = {
   ownerPhotoUrl?: string;
   ownerAge?: number;
   ownerGender?: string;
+  category?: string;
 };
 
 /* ─── Trending Card (compact, no previews, "X answers" only) ─── */
@@ -189,12 +210,14 @@ const TrendingCard = React.memo(function TrendingCard({
   const isAnon = prompt.isAnonymous ?? true;
   const answerCount = prompt.answerCount ?? 0;
   const showPhoto = shouldShowPhoto(prompt);
+  const category = (prompt as any).category ?? 'random';
+  const showCategoryBadge = category !== 'random';
 
   return (
     <TouchableOpacity style={styles.card} onPress={onOpenThread} activeOpacity={0.7}>
       {/* Card content wrapper */}
       <View style={styles.cardContent}>
-        {/* Header Row: LEFT = Identity, RIGHT = Type pill */}
+        {/* Header Row: LEFT = Identity, RIGHT = Type pill + Category badge */}
         <View style={styles.cardHeader}>
           {/* LEFT: Owner Identity */}
           <View style={styles.ownerIdentity}>
@@ -216,10 +239,17 @@ const TrendingCard = React.memo(function TrendingCard({
             </View>
           </View>
 
-          {/* RIGHT: Type pill */}
-          <View style={[styles.typePill, { backgroundColor: isTruth ? '#6C5CE7' : '#E17055' }]}>
-            <Ionicons name={isTruth ? 'help-circle' : 'flash'} size={10} color="#FFF" />
-            <Text style={styles.typePillText}>{isTruth ? 'Truth' : 'Dare'}</Text>
+          {/* RIGHT: Type pill + Category badge */}
+          <View style={styles.pillsRow}>
+            <View style={[styles.typePill, { backgroundColor: isTruth ? '#6C5CE7' : '#E17055' }]}>
+              <Ionicons name={isTruth ? 'help-circle' : 'flash'} size={10} color="#FFF" />
+              <Text style={styles.typePillText}>{isTruth ? 'Truth' : 'Dare'}</Text>
+            </View>
+            {showCategoryBadge && (
+              <View style={styles.categoryBadge}>
+                <Text style={styles.categoryBadgeText}>{CATEGORY_EMOJI[category]}</Text>
+              </View>
+            )}
           </View>
         </View>
 
@@ -267,6 +297,7 @@ const PromptCard = React.memo(function PromptCard({
     ownerAge?: number;
     ownerGender?: string;
     answerCount?: number;
+    category?: string;
   };
   onOpenThread: () => void;
   onAddComment: () => void;
@@ -276,12 +307,14 @@ const PromptCard = React.memo(function PromptCard({
   const answerCount = prompt.totalAnswers ?? prompt.answerCount ?? 0;
   const previewCount = prompt.top2Answers?.length ?? 0;
   const showPhoto = shouldShowPhoto(prompt);
+  const category = prompt.category ?? 'random';
+  const showCategoryBadge = category !== 'random';
 
   return (
     <TouchableOpacity style={styles.card} onPress={onOpenThread} activeOpacity={0.7}>
       {/* Card content wrapper */}
       <View style={styles.cardContent}>
-        {/* Header Row: LEFT = Identity, RIGHT = Type pill */}
+        {/* Header Row: LEFT = Identity, RIGHT = Type pill + Category badge */}
         <View style={styles.cardHeader}>
           {/* LEFT: Owner Identity */}
           <View style={styles.ownerIdentity}>
@@ -303,10 +336,17 @@ const PromptCard = React.memo(function PromptCard({
             </View>
           </View>
 
-          {/* RIGHT: Type pill */}
-          <View style={[styles.typePill, { backgroundColor: isTruth ? '#6C5CE7' : '#E17055' }]}>
-            <Ionicons name={isTruth ? 'help-circle' : 'flash'} size={10} color="#FFF" />
-            <Text style={styles.typePillText}>{isTruth ? 'Truth' : 'Dare'}</Text>
+          {/* RIGHT: Type pill + Category badge */}
+          <View style={styles.pillsRow}>
+            <View style={[styles.typePill, { backgroundColor: isTruth ? '#6C5CE7' : '#E17055' }]}>
+              <Ionicons name={isTruth ? 'help-circle' : 'flash'} size={10} color="#FFF" />
+              <Text style={styles.typePillText}>{isTruth ? 'Truth' : 'Dare'}</Text>
+            </View>
+            {showCategoryBadge && (
+              <View style={styles.categoryBadge}>
+                <Text style={styles.categoryBadgeText}>{CATEGORY_EMOJI[category]}</Text>
+              </View>
+            )}
           </View>
         </View>
 
@@ -347,6 +387,7 @@ export default function TruthOrDareScreen() {
   const insets = useSafeAreaInsets();
   const [refreshKey, setRefreshKey] = useState(0);
   const [isRefreshing, setIsRefreshing] = useState(false);
+  const [selectedCategory, setSelectedCategory] = useState<TodCategory | 'all'>('all');
   const firstRenderRef = useRef(true);
   const dataReceivedRef = useRef(false);
 
@@ -386,10 +427,14 @@ export default function TruthOrDareScreen() {
   // Get trending prompts (1 Dare + 1 Truth)
   const trendingDataQuery = useQuery(api.truthDare.getTrendingTruthAndDare);
 
-  // Get all prompts (sorted by engagement)
+  // Get all prompts (sorted by engagement), with optional category filter
   const promptsDataQuery = useQuery(
     api.truthDare.listActivePromptsWithTop2Answers,
-    { viewerUserId: userId ?? undefined }
+    {
+      viewerUserId: userId ?? undefined,
+      // Only pass category if not 'all' (frontend-only value)
+      category: selectedCategory === 'all' ? undefined : selectedCategory,
+    }
   );
 
   // Update cache when data arrives + log diagnostics
@@ -591,6 +636,26 @@ export default function TruthOrDareScreen() {
         <Text style={styles.headerTitle}>Truth or Dare</Text>
       </View>
 
+      {/* Category Filter Chips */}
+      <ScrollView
+        horizontal
+        showsHorizontalScrollIndicator={false}
+        contentContainerStyle={styles.filterBar}
+      >
+        {CATEGORY_FILTERS.map((cat) => (
+          <TouchableOpacity
+            key={cat.key}
+            style={[styles.filterChip, selectedCategory === cat.key && styles.filterChipActive]}
+            onPress={() => setSelectedCategory(cat.key)}
+          >
+            {cat.emoji && <Text style={styles.filterEmoji}>{cat.emoji}</Text>}
+            <Text style={[styles.filterChipText, selectedCategory === cat.key && styles.filterChipTextActive]}>
+              {cat.label}
+            </Text>
+          </TouchableOpacity>
+        ))}
+      </ScrollView>
+
       <FlatList
         data={feedData}
         keyExtractor={getKey}
@@ -631,6 +696,28 @@ const styles = StyleSheet.create({
     borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: C.surface,
   },
   headerTitle: { fontSize: 16, fontWeight: '700', color: C.text },
+
+  // Filter bar
+  filterBar: {
+    paddingHorizontal: 10, paddingVertical: 8, gap: 8,
+  },
+  filterChip: {
+    flexDirection: 'row', alignItems: 'center', gap: 4,
+    paddingHorizontal: 12, paddingVertical: 6, borderRadius: 16,
+    backgroundColor: C.surface,
+  },
+  filterChipActive: {
+    backgroundColor: C.primary,
+  },
+  filterEmoji: {
+    fontSize: 12,
+  },
+  filterChipText: {
+    fontSize: 12, fontWeight: '600', color: C.textLight,
+  },
+  filterChipTextActive: {
+    color: '#FFFFFF',
+  },
 
   sectionLabel: {
     fontSize: 11, fontWeight: '700', color: C.textLight,
@@ -679,12 +766,24 @@ const styles = StyleSheet.create({
     fontSize: 12, fontWeight: '600', color: C.text,
   },
 
+  // Pills row (type + category)
+  pillsRow: {
+    flexDirection: 'row', alignItems: 'center', gap: 4,
+  },
+
   // Type pill (RIGHT side)
   typePill: {
     flexDirection: 'row', alignItems: 'center', gap: 3,
     paddingHorizontal: 7, paddingVertical: 3, borderRadius: 8,
   },
   typePillText: { fontSize: 9, fontWeight: '700', color: '#FFF' },
+
+  // Category badge (subtle, hidden when 'random')
+  categoryBadge: {
+    paddingHorizontal: 4, paddingVertical: 2, borderRadius: 6,
+    backgroundColor: C.surface,
+  },
+  categoryBadgeText: { fontSize: 10 },
 
   // Prompt text
   promptText: {

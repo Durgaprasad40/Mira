@@ -20,6 +20,7 @@ import { useAuthStore } from '@/stores/authStore';
 import { useDemoStore } from '@/stores/demoStore';
 import { usePrivateProfileStore } from '@/stores/privateProfileStore';
 import * as FileSystem from 'expo-file-system/legacy';
+import type { TodCategory } from '@/types';
 
 /** Check if URL is a valid remote URL (http/https) */
 function isRemoteUrl(url: string | undefined | null): boolean {
@@ -62,6 +63,7 @@ export default function CreateTodScreen() {
   const [postType, setPostType] = useState<PostType>('truth');
   const [content, setContent] = useState('');
   const [visibility, setVisibility] = useState<VisibilityMode>('anonymous');
+  const [category, setCategory] = useState<TodCategory>('random');
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   // Get user data from canonical sources
@@ -216,8 +218,9 @@ export default function CreateTodScreen() {
           authUserId: effectiveUserId,
           isAnonymous: true,
           photoBlurMode: 'none',
+          category,
         });
-        console.log(`[T/D REPORT] created visibility=anonymous`);
+        console.log(`[T/D REPORT] created visibility=anonymous category=${category}`);
       } else if (visibility === 'no_photo') {
         // Without photo: identity visible, NO photo
         await createPrompt({
@@ -226,12 +229,13 @@ export default function CreateTodScreen() {
           authUserId: effectiveUserId,
           isAnonymous: false,
           photoBlurMode: 'none',
+          category,
           ownerName: ownerIdentity.name,
           ownerAge: ownerIdentity.age,
           ownerGender: ownerIdentity.gender,
           // NO ownerPhotoUrl - explicitly omit
         });
-        console.log(`[T/D REPORT] created visibility=no_photo`);
+        console.log(`[T/D REPORT] created visibility=no_photo category=${category}`);
       } else {
         // Everyone (public): identity + photo
         const photoResult = await resolveBestPhoto(ownerIdentity.photoCandidates || []);
@@ -242,12 +246,13 @@ export default function CreateTodScreen() {
           authUserId: effectiveUserId,
           isAnonymous: false,
           photoBlurMode: 'none',
+          category,
           ownerName: ownerIdentity.name,
           ownerAge: ownerIdentity.age,
           ownerGender: ownerIdentity.gender,
           ownerPhotoUrl: photoResult.url,
         });
-        console.log(`[T/D REPORT] created visibility=public photoType=${photoResult.type}`);
+        console.log(`[T/D REPORT] created visibility=public category=${category} photoType=${photoResult.type}`);
       }
 
       router.back();
@@ -291,6 +296,31 @@ export default function CreateTodScreen() {
           <Ionicons name="flash" size={20} color={postType === 'dare' ? '#FFFFFF' : C.textLight} />
           <Text style={[styles.typeLabel, postType === 'dare' && styles.typeLabelActive]}>Dare</Text>
         </TouchableOpacity>
+      </View>
+
+      {/* Category Selector */}
+      <View style={styles.categoryContainer}>
+        <Text style={styles.categoryLabel}>Category</Text>
+        <View style={styles.categoryChips}>
+          {([
+            { key: 'spicy', emoji: '🌶️', label: 'Spicy' },
+            { key: 'deep', emoji: '🧠', label: 'Deep' },
+            { key: 'funny', emoji: '😂', label: 'Funny' },
+            { key: 'wholesome', emoji: '💖', label: 'Wholesome' },
+            { key: 'random', emoji: '🎲', label: 'Random' },
+          ] as const).map((cat) => (
+            <TouchableOpacity
+              key={cat.key}
+              style={[styles.categoryChip, category === cat.key && styles.categoryChipActive]}
+              onPress={() => setCategory(cat.key)}
+            >
+              <Text style={styles.categoryEmoji}>{cat.emoji}</Text>
+              <Text style={[styles.categoryChipText, category === cat.key && styles.categoryChipTextActive]}>
+                {cat.label}
+              </Text>
+            </TouchableOpacity>
+          ))}
+        </View>
       </View>
 
       {/* Input */}
@@ -414,6 +444,34 @@ const styles = StyleSheet.create({
   typeOptionDareActive: { backgroundColor: '#E17055', borderColor: '#E17055' },
   typeLabel: { fontSize: 15, fontWeight: '600', color: C.textLight },
   typeLabelActive: { color: '#FFFFFF' },
+
+  // Category selector
+  categoryContainer: {
+    paddingHorizontal: 16, paddingBottom: 8,
+  },
+  categoryLabel: {
+    fontSize: 14, fontWeight: '600', color: C.text, marginBottom: 8,
+  },
+  categoryChips: {
+    flexDirection: 'row', flexWrap: 'wrap', gap: 8,
+  },
+  categoryChip: {
+    flexDirection: 'row', alignItems: 'center', gap: 4,
+    paddingHorizontal: 12, paddingVertical: 8, borderRadius: 16,
+    backgroundColor: C.surface,
+  },
+  categoryChipActive: {
+    backgroundColor: C.primary,
+  },
+  categoryEmoji: {
+    fontSize: 14,
+  },
+  categoryChipText: {
+    fontSize: 12, fontWeight: '600', color: C.textLight,
+  },
+  categoryChipTextActive: {
+    color: '#FFFFFF',
+  },
 
   inputContainer: {
     paddingHorizontal: 16, paddingVertical: 8,
