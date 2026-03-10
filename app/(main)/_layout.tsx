@@ -9,16 +9,27 @@ import { computeEnforcementLevel } from "@/lib/securityEnforcement";
 import { ToastHost } from "@/components/ui/Toast";
 import { useRouteTrace } from "@/lib/devTrace";
 
-// H-3: Minimal auth error detection
-function isAuthError(msg: string): boolean {
+// H-3: Session invalidation detection (NARROWED - does NOT match resource-level auth errors)
+// Only triggers logout for TRUE session invalidation, not room/resource access denials
+// Examples that SHOULD trigger logout: "token expired", "session expired", "invalid session"
+// Examples that should NOT: "Unauthorized: authentication required", "Access denied", "banned"
+function isSessionInvalidationError(msg: string): boolean {
   if (!msg) return false;
   const l = msg.toLowerCase();
-  return l.includes('unauthenticated') || l.includes('unauthorized') ||
-         l.includes('token expired') || l.includes('session expired');
+  // Only match explicit session/token invalidation phrases
+  // DO NOT match generic "unauthorized" or "unauthenticated" - those come from resource access denials
+  return l.includes('token expired') ||
+         l.includes('session expired') ||
+         l.includes('invalid token') ||
+         l.includes('session invalid') ||
+         l.includes('session has expired') ||
+         l.includes('token has expired') ||
+         l.includes('auth token invalid');
 }
 
-// H-3: Auth Error Boundary - redirect on auth errors, rethrow others
+// H-3: Session Invalidation Error Boundary - logout ONLY on true session expiry
 // E3: Navigation is deferred to avoid sync navigation during lifecycle
+// SECURITY FIX: Does NOT trigger logout for resource-level auth errors (room access denied, etc.)
 class AuthErrorBoundary extends Component<{ children: ReactNode }, { error: Error | null; didNavigate: boolean }> {
   state = { error: null as Error | null, didNavigate: false };
   private navTimeoutId: ReturnType<typeof setTimeout> | null = null;
@@ -28,11 +39,15 @@ class AuthErrorBoundary extends Component<{ children: ReactNode }, { error: Erro
   }
 
   componentDidCatch(error: Error) {
-    if (isAuthError(error?.message || '')) {
+    // SECURITY FIX: Only logout for true session invalidation (token/session expired)
+    // Resource-level errors ("Access denied", "Unauthorized: authentication required") are NOT handled here
+    // Those should be handled locally by the screen that threw them
+    if (isSessionInvalidationError(error?.message || '')) {
       // E3: Defer navigation to next tick to avoid sync navigation during lifecycle
       // Guard against double navigation with didNavigate state
       if (this.state.didNavigate) return;
       this.setState({ didNavigate: true });
+      if (__DEV__) console.log('[AuthErrorBoundary] Session invalidation detected, logging out:', error?.message);
       useAuthStore.getState().logout();
       this.navTimeoutId = setTimeout(() => {
         globalRouter.replace('/(auth)/welcome');
@@ -50,9 +65,11 @@ class AuthErrorBoundary extends Component<{ children: ReactNode }, { error: Erro
 
   render() {
     if (this.state.error) {
-      if (isAuthError(this.state.error.message || '')) {
+      if (isSessionInvalidationError(this.state.error.message || '')) {
         return null;
       }
+      // SECURITY FIX: Re-throw non-session errors so they propagate to the screen
+      // This allows screens to handle their own access-denied errors
       throw this.state.error;
     }
     return this.props.children;

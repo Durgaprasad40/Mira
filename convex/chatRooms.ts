@@ -4,6 +4,7 @@ import { softMaskText } from './softMask';
 import { internal } from './_generated/api';
 import { asUserId } from './id';
 import { hashPassword, verifyPassword, encryptPassword, decryptPassword } from './cryptoUtils';
+import { resolveUserIdByAuthId } from './helpers';
 
 // 24 hours in milliseconds
 const ROOM_LIFETIME_MS = 24 * 60 * 60 * 1000;
@@ -22,6 +23,37 @@ function generateJoinCode(): string {
   }
   return code;
 }
+
+// ═══════════════════════════════════════════════════════════════════════════
+// MEDIA UPLOAD: Generate pre-signed upload URL for chat room media
+// CR-009 FIX: Enables cloud storage upload for images/audio/video
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Generate a pre-signed upload URL for chat room media.
+ * Called by frontend before uploading image/audio/video files.
+ * Returns a short-lived URL that can be used with HTTP POST to upload.
+ */
+export const generateUploadUrl = mutation({
+  args: {},
+  handler: async (ctx) => {
+    return await ctx.storage.generateUploadUrl();
+  },
+});
+
+/**
+ * Get public URL for a storage ID.
+ * Used to resolve storage IDs to URLs after upload.
+ */
+export const getStorageUrl = query({
+  args: {
+    storageId: v.id('_storage'),
+  },
+  handler: async (ctx, { storageId }) => {
+    const url = await ctx.storage.getUrl(storageId);
+    return { url };
+  },
+});
 
 const DEFAULT_ROOMS = [
   { name: 'Global', slug: 'global', category: 'general' as const },
@@ -104,19 +136,22 @@ type DemoArgs = {
 
 async function resolveUserId(
   ctx: QueryCtx | MutationCtx,
-  args: DemoArgs
+  args: DemoArgs & { authUserId?: string }
 ): Promise<Id<'users'>> {
-  // SECURITY FIX A1: Always require authenticated identity
-  // Demo mode is permanently disabled - never trust client-provided isDemo flag
-  const identity = await ctx.auth.getUserIdentity();
-  if (identity) {
-    const userId = asUserId(identity.subject);
-    if (userId) return userId;
+  // SECURITY FIX: Use app's custom session-based auth pattern
+  // Convex-native auth (ctx.auth.getUserIdentity) is not configured in this app
+  const authId = args.authUserId || args.demoUserId;
+
+  if (!authId || authId.trim().length === 0) {
+    throw new Error('Unauthorized: authentication required');
   }
 
-  // SECURITY: Reject all unauthenticated requests
-  // Demo mode fallback removed - was a security bypass vector
-  throw new Error('Unauthorized: authentication required');
+  const userId = await resolveUserIdByAuthId(ctx, authId);
+  if (!userId) {
+    throw new Error('Unauthorized: user not found');
+  }
+
+  return userId;
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -129,19 +164,163 @@ async function resolveUserId(
 // Penalty types that block sending (but allow reading)
 const SEND_BLOCKING_PENALTY_TYPES = ['readOnly', 'muted', 'send_blocked'] as const;
 
+// ═══════════════════════════════════════════════════════════════════════════
+// ROLE SYSTEM: Permission hierarchy and helpers
+// Role levels: owner (3) > admin (2) > member (1)
+// ═══════════════════════════════════════════════════════════════════════════
+
+type MemberRole = 'owner' | 'admin' | 'member';
+
+// BACKWARD COMPAT: 'mod' is legacy alias for 'admin' (existing DB records may have 'mod')
+// Migration to 'admin' can happen later; this ensures existing mods retain permissions
+const ROLE_LEVEL: Record<string, number> = {
+  owner: 3,
+  admin: 2,
+  mod: 2,     // Legacy alias for admin - DO NOT REMOVE until migration complete
+  member: 1,
+};
+
+/**
+ * Get numeric role level for comparison.
+ * Treats undefined/null as 'member' for backward compatibility.
+ */
+function getRoleLevel(role: string | undefined | null): number {
+  if (!role) return ROLE_LEVEL.member;
+  return ROLE_LEVEL[role as MemberRole] ?? ROLE_LEVEL.member;
+}
+
+/**
+ * Check if actor can kick target based on role hierarchy.
+ * - Owners can kick anyone except themselves
+ * - Admins can kick members only (not other admins or owners)
+ * - Members cannot kick anyone
+ */
+function canKickUser(actorRole: string | undefined, targetRole: string | undefined): boolean {
+  const actorLevel = getRoleLevel(actorRole);
+  const targetLevel = getRoleLevel(targetRole);
+
+  // Must be at least admin to kick
+  if (actorLevel < ROLE_LEVEL.admin) return false;
+
+  // Owner can kick anyone (except themselves, checked separately)
+  if (actorLevel === ROLE_LEVEL.owner) return true;
+
+  // Admin can only kick members (lower level)
+  return actorLevel > targetLevel;
+}
+
+/**
+ * Check if actor can delete target's message based on role hierarchy.
+ * - Owners can delete any message
+ * - Admins can delete member messages (not owner messages)
+ * - Members can only delete their own messages
+ */
+function canDeleteMessage(actorRole: string | undefined, messageOwnerRole: string | undefined, isOwnMessage: boolean): boolean {
+  // Anyone can delete their own messages
+  if (isOwnMessage) return true;
+
+  const actorLevel = getRoleLevel(actorRole);
+  const ownerLevel = getRoleLevel(messageOwnerRole);
+
+  // Must be at least admin to delete others' messages
+  if (actorLevel < ROLE_LEVEL.admin) return false;
+
+  // Owner can delete any message
+  if (actorLevel === ROLE_LEVEL.owner) return true;
+
+  // Admin can delete messages from lower roles only
+  return actorLevel > ownerLevel;
+}
+
+/**
+ * Check if actor can promote/demote target.
+ * Only owners can promote/demote.
+ */
+function canManageRoles(actorRole: string | undefined): boolean {
+  return getRoleLevel(actorRole) === ROLE_LEVEL.owner;
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PLATFORM ADMIN: Moderation authority for public/system rooms
+// Public rooms are platform-owned (no createdBy), moderated by platform admins.
+// Private rooms are creator-owned, moderated by owner/admin hierarchy.
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Check if a room is platform-owned (public room without a creator).
+ * Platform-owned rooms are moderated by platform admins, not room owners.
+ */
+function isPlatformOwnedRoom(room: { isPublic: boolean; createdBy?: Id<'users'> | null }): boolean {
+  return room.isPublic === true && !room.createdBy;
+}
+
+/**
+ * Check if actor can kick target in a specific room context.
+ * - Private rooms: Uses role hierarchy (owner > admin > member)
+ * - Public/platform rooms: Platform admins (user.isAdmin) can kick anyone
+ */
+function canKickInRoom(
+  actorRole: string | undefined,
+  targetRole: string | undefined,
+  isPlatformAdmin: boolean,
+  isPlatformRoom: boolean
+): boolean {
+  // Platform admins can kick anyone in platform-owned rooms
+  if (isPlatformRoom && isPlatformAdmin) {
+    return true;
+  }
+
+  // Otherwise use standard role hierarchy
+  return canKickUser(actorRole, targetRole);
+}
+
+/**
+ * Check if actor can delete target's message in a specific room context.
+ * - Private rooms: Uses role hierarchy (owner > admin > member)
+ * - Public/platform rooms: Platform admins (user.isAdmin) can delete any message
+ */
+function canDeleteInRoom(
+  actorRole: string | undefined,
+  messageOwnerRole: string | undefined,
+  isOwnMessage: boolean,
+  isPlatformAdmin: boolean,
+  isPlatformRoom: boolean
+): boolean {
+  // Anyone can delete their own messages
+  if (isOwnMessage) return true;
+
+  // Platform admins can delete any message in platform-owned rooms
+  if (isPlatformRoom && isPlatformAdmin) {
+    return true;
+  }
+
+  // Otherwise use standard role hierarchy
+  return canDeleteMessage(actorRole, messageOwnerRole, isOwnMessage);
+}
+
 /**
  * Requires authenticated user identity.
- * Returns the userId or throws an error.
+ * Uses the app's custom session-based auth pattern (resolveUserIdByAuthId).
+ *
+ * @param ctx - Convex query/mutation context
+ * @param authUserId - Auth identifier from frontend (validated server-side)
+ * @returns The resolved Convex userId
+ * @throws Error if authUserId is invalid or user not found
  */
-async function requireAuthenticatedUser(ctx: QueryCtx | MutationCtx): Promise<Id<'users'>> {
-  const identity = await ctx.auth.getUserIdentity();
-  if (!identity) {
+async function requireAuthenticatedUser(
+  ctx: QueryCtx | MutationCtx,
+  authUserId: string | undefined
+): Promise<Id<'users'>> {
+  if (!authUserId || authUserId.trim().length === 0) {
     throw new Error('Unauthorized: authentication required');
   }
-  const userId = asUserId(identity.subject);
+
+  // Use the app's standard auth resolution pattern
+  const userId = await resolveUserIdByAuthId(ctx, authUserId);
   if (!userId) {
-    throw new Error('Unauthorized: invalid user identity');
+    throw new Error('Unauthorized: user not found');
   }
+
   return userId;
 }
 
@@ -149,7 +328,7 @@ async function requireAuthenticatedUser(ctx: QueryCtx | MutationCtx): Promise<Id
  * Requires valid room membership for READ access.
  *
  * Checks (in order):
- * 1. Authenticated user
+ * 1. Authenticated user (via resolveUserIdByAuthId)
  * 2. Room exists
  * 3. Room not expired
  * 4. User is NOT banned (chatRoomBans)
@@ -157,15 +336,19 @@ async function requireAuthenticatedUser(ctx: QueryCtx | MutationCtx): Promise<Id
  *
  * Does NOT check penalties - penalties only block sending, not reading.
  *
+ * @param ctx - Convex query/mutation context
+ * @param roomId - Room to check access for
+ * @param authUserId - Auth identifier from frontend (validated server-side)
  * @returns { userId, room, membership } if authorized
  * @throws Error if not authorized
  */
 async function requireRoomReadAccess(
   ctx: QueryCtx | MutationCtx,
-  roomId: Id<'chatRooms'>
+  roomId: Id<'chatRooms'>,
+  authUserId: string | undefined
 ): Promise<{ userId: Id<'users'>; room: any; membership: any }> {
-  // 1. Require authenticated user
-  const userId = await requireAuthenticatedUser(ctx);
+  // 1. Require authenticated user (uses resolveUserIdByAuthId)
+  const userId = await requireAuthenticatedUser(ctx, authUserId);
 
   // 2. Check room exists
   const room = await ctx.db.get(roomId);
@@ -207,15 +390,19 @@ async function requireRoomReadAccess(
  * 1. All of requireRoomReadAccess
  * 2. User has no active send-blocking penalty (readOnly, muted, send_blocked)
  *
+ * @param ctx - Convex query/mutation context
+ * @param roomId - Room to check access for
+ * @param authUserId - Auth identifier from frontend (validated server-side)
  * @returns { userId, room, membership } if authorized
  * @throws Error if not authorized
  */
 async function requireRoomSendAccess(
   ctx: QueryCtx | MutationCtx,
-  roomId: Id<'chatRooms'>
+  roomId: Id<'chatRooms'>,
+  authUserId: string | undefined
 ): Promise<{ userId: Id<'users'>; room: any; membership: any }> {
   // 1. Check read access first (auth, room exists, not expired, not banned, is member)
-  const { userId, room, membership } = await requireRoomReadAccess(ctx, roomId);
+  const { userId, room, membership } = await requireRoomReadAccess(ctx, roomId, authUserId);
 
   // 2. Check user has no active send-blocking penalty
   const now = Date.now();
@@ -325,6 +512,9 @@ export const listRooms = query({
     }
     // Phase-2: Filter out expired rooms
     rooms = rooms.filter((r) => !r.expiresAt || r.expiresAt > now);
+    // ISSUE-2 FIX: Filter to only PUBLIC rooms for homepage general/language lists
+    // Private rooms should only appear in getMyPrivateRooms query results
+    rooms = rooms.filter((r) => r.isPublic === true);
 
     // MEMBER-COUNT-SYNC FIX: Compute live member counts from chatRoomMembers table
     // This ensures homepage count matches in-room panel (same source of truth)
@@ -355,8 +545,11 @@ export const listRooms = query({
 // Get a single room by slug
 // SECURITY: Public rooms return minimal public info; private rooms require membership
 export const getRoomBySlug = query({
-  args: { slug: v.string() },
-  handler: async (ctx, { slug }) => {
+  args: {
+    slug: v.string(),
+    authUserId: v.optional(v.string()),
+  },
+  handler: async (ctx, { slug, authUserId }) => {
     const room = await ctx.db
       .query('chatRooms')
       .withIndex('by_slug', (q) => q.eq('slug', slug))
@@ -382,9 +575,9 @@ export const getRoomBySlug = query({
       };
     }
 
-    // For private rooms, require read access
+    // For private rooms, require read access (authUserId required)
     try {
-      await requireRoomReadAccess(ctx, room._id);
+      await requireRoomReadAccess(ctx, room._id, authUserId);
       return room;
     } catch {
       // User doesn't have access to this private room
@@ -396,10 +589,13 @@ export const getRoomBySlug = query({
 // Get a single room by ID
 // Phase-2: Returns null if room is expired
 export const getRoom = query({
-  args: { roomId: v.id('chatRooms') },
-  handler: async (ctx, { roomId }) => {
+  args: {
+    roomId: v.id('chatRooms'),
+    authUserId: v.string(),
+  },
+  handler: async (ctx, { roomId, authUserId }) => {
     // SECURITY: Require read access (auth + membership + not banned)
-    const { room } = await requireRoomReadAccess(ctx, roomId);
+    const { room } = await requireRoomReadAccess(ctx, roomId, authUserId);
     return room;
   },
 });
@@ -408,12 +604,13 @@ export const getRoom = query({
 export const listMessages = query({
   args: {
     roomId: v.id('chatRooms'),
+    authUserId: v.string(),
     limit: v.optional(v.number()),
     before: v.optional(v.number()), // Cursor for pagination (load older messages)
   },
-  handler: async (ctx, { roomId, limit = 50, before }) => {
+  handler: async (ctx, { roomId, authUserId, limit = 50, before }) => {
     // SECURITY: Require read access (auth + membership + not banned)
-    await requireRoomReadAccess(ctx, roomId);
+    await requireRoomReadAccess(ctx, roomId, authUserId);
 
     let query = ctx.db
       .query('chatRoomMessages')
@@ -445,10 +642,13 @@ export const listMessages = query({
 
 // List members of a room
 export const listMembers = query({
-  args: { roomId: v.id('chatRooms') },
-  handler: async (ctx, { roomId }) => {
+  args: {
+    roomId: v.id('chatRooms'),
+    authUserId: v.string(),
+  },
+  handler: async (ctx, { roomId, authUserId }) => {
     // SECURITY: Require read access (auth + membership + not banned)
-    await requireRoomReadAccess(ctx, roomId);
+    await requireRoomReadAccess(ctx, roomId, authUserId);
 
     return await ctx.db
       .query('chatRoomMembers')
@@ -469,10 +669,13 @@ const VISIBILITY_MAX_AGE_MS = 3 * 60 * 60 * 1000; // 3 hours = max visibility wi
 const MAX_MEMBERS_TO_FETCH = 50;
 
 export const listMembersWithProfiles = query({
-  args: { roomId: v.id('chatRooms') },
-  handler: async (ctx, { roomId }) => {
+  args: {
+    roomId: v.id('chatRooms'),
+    authUserId: v.string(),
+  },
+  handler: async (ctx, { roomId, authUserId }) => {
     // SECURITY: Require read access (auth + membership + not banned)
-    await requireRoomReadAccess(ctx, roomId);
+    await requireRoomReadAccess(ctx, roomId, authUserId);
 
     const now = Date.now();
 
@@ -543,18 +746,37 @@ export const isMember = query({
 });
 
 // Join a room
+// CR-010 FIX: Auth hardening - verify caller identity and check bans before joining
 export const joinRoom = mutation({
   args: {
     roomId: v.id('chatRooms'),
-    userId: v.id('users'),
+    authUserId: v.string(), // CR-010: Auth verification required
   },
-  handler: async (ctx, { roomId, userId }) => {
+  handler: async (ctx, { roomId, authUserId }) => {
+    // CR-010 FIX: Verify caller identity via session-based auth
+    if (!authUserId || authUserId.trim().length === 0) {
+      throw new Error('Unauthorized: authentication required');
+    }
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      throw new Error('Unauthorized: user not found');
+    }
+
+    // CR-010 FIX: Check if user is banned from this room BEFORE allowing join
+    const ban = await ctx.db
+      .query('chatRoomBans')
+      .withIndex('by_room_user', (q) => q.eq('roomId', roomId).eq('userId', userId))
+      .first();
+    if (ban) {
+      throw new Error('Access denied: you are banned from this room');
+    }
+
     const now = Date.now();
 
     // MEMBER-STRIP FIX: Always update lastActive so user appears online in room
     await ctx.db.patch(userId, { lastActive: now });
 
-    // Check if already a member
+    // Check if already a member (idempotent)
     const existing = await ctx.db
       .query('chatRoomMembers')
       .withIndex('by_room_user', (q) => q.eq('roomId', roomId).eq('userId', userId))
@@ -565,6 +787,7 @@ export const joinRoom = mutation({
       roomId,
       userId,
       joinedAt: now,
+      role: 'member', // ROLE SYSTEM: Default role for public room joins
     });
 
     // CONSISTENCY FIX B6: Recompute memberCount from source of truth
@@ -577,12 +800,22 @@ export const joinRoom = mutation({
 
 // Leave a room
 // Safety: Deletes ALL matching membership rows (handles duplicates) and is fully idempotent
+// CR-011 FIX: Auth hardening - verify caller can only leave for themselves
 export const leaveRoom = mutation({
   args: {
     roomId: v.id('chatRooms'),
-    userId: v.id('users'),
+    authUserId: v.string(), // CR-011: Auth verification required
   },
-  handler: async (ctx, { roomId, userId }) => {
+  handler: async (ctx, { roomId, authUserId }) => {
+    // CR-011 FIX: Verify caller identity via session-based auth
+    if (!authUserId || authUserId.trim().length === 0) {
+      throw new Error('Unauthorized: authentication required');
+    }
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      throw new Error('Unauthorized: user not found');
+    }
+
     // Collect ALL matching membership rows (handles edge case of duplicates)
     const memberships = await ctx.db
       .query('chatRoomMembers')
@@ -594,6 +827,13 @@ export const leaveRoom = mutation({
       await ctx.db.delete(membership._id);
     }
 
+    // RACE CONDITION FIX: Room may have been deleted by closeRoom before we get here
+    const room = await ctx.db.get(roomId);
+    if (!room) {
+      // Room was ended/deleted - nothing to update, return safely
+      return;
+    }
+
     // CONSISTENCY FIX B6: Always recompute memberCount from source of truth
     const actualMemberCount = await recomputeMemberCount(ctx, roomId);
     await ctx.db.patch(roomId, { memberCount: actualMemberCount });
@@ -603,19 +843,24 @@ export const leaveRoom = mutation({
 // Send a message to a room (must be a member)
 // Includes idempotency via clientId and rate limiting (10 messages/minute/user/room)
 // SECURITY: Requires send access (auth + membership + not banned + no send-blocking penalty)
+// CR-009 FIX: Accepts storage IDs for media and resolves to URLs server-side
 export const sendMessage = mutation({
   args: {
     roomId: v.id('chatRooms'),
+    authUserId: v.string(),
     senderId: v.id('users'),
     text: v.optional(v.string()),
+    // CR-009 FIX: Accept either URL (demo mode/legacy) or storage ID (real upload)
     imageUrl: v.optional(v.string()),
-    audioUrl: v.optional(v.string()), // For audio messages
-    mediaType: v.optional(v.union(v.literal('image'), v.literal('video'), v.literal('doodle'), v.literal('audio'))), // For distinguishing media types
-    clientId: v.optional(v.string()), // For deduplication
+    audioUrl: v.optional(v.string()),
+    imageStorageId: v.optional(v.id('_storage')), // CR-009: For uploaded images
+    audioStorageId: v.optional(v.id('_storage')), // CR-009: For uploaded audio
+    mediaType: v.optional(v.union(v.literal('image'), v.literal('video'), v.literal('doodle'), v.literal('audio'))),
+    clientId: v.optional(v.string()),
   },
-  handler: async (ctx, { roomId, senderId, text, imageUrl, audioUrl, mediaType, clientId }) => {
+  handler: async (ctx, { roomId, authUserId, senderId, text, imageUrl, audioUrl, imageStorageId, audioStorageId, mediaType, clientId }) => {
     // 0. SECURITY: Require send access (auth + membership + not banned + no send-blocking penalty)
-    const { userId, room, membership } = await requireRoomSendAccess(ctx, roomId);
+    const { userId, room, membership } = await requireRoomSendAccess(ctx, roomId, authUserId);
 
     // SECURITY: Verify authenticated user matches senderId parameter
     if (userId !== senderId) {
@@ -653,20 +898,41 @@ export const sendMessage = mutation({
       throw new Error('Rate limit exceeded: max 10 messages per minute');
     }
 
+    // CR-009 FIX: Resolve storage IDs to URLs (for real uploads)
+    // Priority: storageId > direct URL (storageId is preferred for real mode)
+    let resolvedImageUrl = imageUrl;
+    let resolvedAudioUrl = audioUrl;
+
+    if (imageStorageId) {
+      const url = await ctx.storage.getUrl(imageStorageId);
+      if (!url) {
+        throw new Error('Invalid image storage reference');
+      }
+      resolvedImageUrl = url;
+    }
+
+    if (audioStorageId) {
+      const url = await ctx.storage.getUrl(audioStorageId);
+      if (!url) {
+        throw new Error('Invalid audio storage reference');
+      }
+      resolvedAudioUrl = url;
+    }
+
     // Determine message type: use explicit mediaType if provided, otherwise infer from media URLs
-    const type = audioUrl ? 'audio' : imageUrl ? (mediaType ?? 'image') : 'text';
+    const type = resolvedAudioUrl ? 'audio' : resolvedImageUrl ? (mediaType ?? 'image') : 'text';
 
     // Soft-mask sensitive words in text messages
     const maskedText = text ? softMaskText(text) : undefined;
 
-    // 4. Insert message
+    // 4. Insert message with resolved URLs
     const messageId = await ctx.db.insert('chatRoomMessages', {
       roomId,
       senderId,
       type,
       text: maskedText,
-      imageUrl: imageUrl ?? undefined,
-      audioUrl: audioUrl ?? undefined,
+      imageUrl: resolvedImageUrl ?? undefined,
+      audioUrl: resolvedAudioUrl ?? undefined,
       createdAt: now,
       clientId,
       status: 'sent',
@@ -675,13 +941,21 @@ export const sendMessage = mutation({
     // 5. Update room's last message info
     await ctx.db.patch(roomId, {
       lastMessageAt: now,
-      lastMessageText: maskedText ?? (audioUrl ? '[Audio]' : imageUrl ? '[Image]' : ''),
+      lastMessageText: maskedText ?? (resolvedAudioUrl ? '[Audio]' : resolvedImageUrl ? '[Image]' : ''),
     });
 
     // 6. Update member's lastMessageAt for rate limiting tracking
     await ctx.db.patch(membership._id, { lastMessageAt: now });
 
-    // 7. DETERMINISTIC RETENTION: Delete exactly (newCount - 900) oldest when >= 1000
+    // 7. REWARD: Add +1 coin to sender's wallet for successful message send
+    // This only fires for NEW messages (dedup returns early at line 670)
+    const senderUser = await ctx.db.get(senderId);
+    if (senderUser) {
+      const currentCoins = senderUser.walletCoins ?? 0;
+      await ctx.db.patch(senderId, { walletCoins: currentCoins + 1 });
+    }
+
+    // 8. DETERMINISTIC RETENTION: Delete exactly (newCount - 900) oldest when >= 1000
     // Uses room.messageCount as primary counter for efficiency
     const newCount = (room.messageCount ?? 0) + 1;
 
@@ -725,92 +999,108 @@ export const sendMessage = mutation({
   },
 });
 
-// Create a new chat room
-// Phase-2: Sets expiresAt to createdAt + 24h (private rooms only)
-export const createRoom = mutation({
+// Delete a message (soft-delete via deletedAt timestamp)
+// ROLE SYSTEM: Private rooms use owner/admin hierarchy; public rooms allow platform admins
+export const deleteMessage = mutation({
   args: {
-    name: v.string(),
-    createdBy: v.id('users'),
-    category: v.optional(v.union(v.literal('language'), v.literal('general'))),
-    isDemoRoom: v.optional(v.boolean()),
+    roomId: v.id('chatRooms'),
+    messageId: v.id('chatRoomMessages'),
+    authUserId: v.string(),
   },
-  handler: async (ctx, { name, createdBy, category, isDemoRoom }) => {
-    // Generate slug from name
-    const slug = name
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, '-')
-      .replace(/^-|-$/g, '');
+  handler: async (ctx, { roomId, messageId, authUserId }) => {
+    // 1. Verify auth
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      throw new Error('Unauthorized: user not found');
+    }
 
-    // Check if slug already exists
-    const existing = await ctx.db
-      .query('chatRooms')
-      .withIndex('by_slug', (q) => q.eq('slug', slug))
+    // 2. Get the message
+    const message = await ctx.db.get(messageId);
+    if (!message) {
+      // Already deleted - idempotent
+      return { success: true };
+    }
+
+    // 3. Verify message belongs to this room
+    if (message.roomId !== roomId) {
+      throw new Error('Unauthorized: message does not belong to this room');
+    }
+
+    // 4. Get the room
+    const room = await ctx.db.get(roomId);
+    if (!room) {
+      throw new Error('Room not found');
+    }
+
+    // 5. Get actor's user record (for platform admin check)
+    const actorUser = await ctx.db.get(userId);
+    if (!actorUser) {
+      throw new Error('User not found');
+    }
+    const isPlatformAdmin = actorUser.isAdmin === true;
+    const isPlatformRoom = isPlatformOwnedRoom(room);
+
+    // 6. Get actor's membership and role
+    const actorMembership = await ctx.db
+      .query('chatRoomMembers')
+      .withIndex('by_room_user', (q) => q.eq('roomId', roomId).eq('userId', userId))
       .first();
 
-    const finalSlug = existing ? `${slug}-${Date.now()}` : slug;
-    const now = Date.now();
+    if (!actorMembership) {
+      throw new Error('You are not a member of this room');
+    }
 
-    // Phase-2: All user-created rooms are private and expire after 24h
-    const roomId = await ctx.db.insert('chatRooms', {
-      name,
-      slug: finalSlug,
-      category: category ?? 'general',
-      isPublic: false, // Phase-2: Private rooms only
-      createdAt: now,
-      memberCount: 1,
-      createdBy,
-      isDemoRoom,
-      expiresAt: now + ROOM_LIFETIME_MS, // Phase-2: 24h expiration
-    });
+    // 7. Check if this is the user's own message
+    const isOwnMessage = message.senderId === userId;
 
-    // Auto-join creator as owner
-    await ctx.db.insert('chatRoomMembers', {
-      roomId,
-      userId: createdBy,
-      joinedAt: now,
-      role: 'owner',
-    });
+    // 8. Get message sender's role (for permission check)
+    let messageOwnerRole: string | undefined = 'member';
+    if (!isOwnMessage) {
+      const senderMembership = await ctx.db
+        .query('chatRoomMembers')
+        .withIndex('by_room_user', (q) => q.eq('roomId', roomId).eq('userId', message.senderId))
+        .first();
+      messageOwnerRole = senderMembership?.role;
+    }
 
-    return roomId;
+    // 9. ROLE SYSTEM: Check permission using role hierarchy + platform admin for public rooms
+    if (!canDeleteInRoom(actorMembership.role, messageOwnerRole, isOwnMessage, isPlatformAdmin, isPlatformRoom)) {
+      throw new Error('Unauthorized: you do not have permission to delete this message');
+    }
+
+    // 10. Soft-delete by setting deletedAt timestamp
+    await ctx.db.patch(messageId, { deletedAt: Date.now() });
+
+    return { success: true };
   },
 });
+
+// CR-015: createRoom mutation REMOVED (was unused legacy code)
+// Use createPrivateRoom for actual room creation (properly auth-hardened with coin cost)
 
 // Phase-2: Create a private room with optional password protection (costs 1 coin)
 export const createPrivateRoom = mutation({
   args: {
     name: v.string(),
     password: v.optional(v.string()),
+    authUserId: v.string(),
     isDemo: v.optional(v.boolean()),
     demoUserId: v.optional(v.string()),
   },
-  handler: async (ctx, { name, password, isDemo, demoUserId }) => {
-    // 1. Auth guard - allow demo mode bypass
-    const identity = await ctx.auth.getUserIdentity();
-    let createdBy: ReturnType<typeof asUserId>;
-    let isDemoUser = false;
-
-    if (identity) {
-      // Real authenticated user
-      const realId = asUserId(identity.subject);
-      if (!realId) {
-        throw new Error('Invalid user identity');
-      }
-      createdBy = realId;
-    } else if (isDemo === true && demoUserId && demoUserId.length > 0) {
-      // Demo mode - require existing demo user in users table
-      isDemoUser = true;
-      const demoUser = await ctx.db
-        .query('users')
-        .withIndex('by_demo_user_id', (q) => q.eq('demoUserId', demoUserId))
-        .unique();
-
-      if (!demoUser) {
-        throw new Error('Demo user not seeded: missing users row for demoUserId=' + demoUserId);
-      }
-      createdBy = demoUser._id;
-    } else {
-      throw new Error('Unauthorized');
+  handler: async (ctx, { name, password, authUserId, isDemo, demoUserId }) => {
+    // 1. Auth guard - use app's custom session-based auth
+    const authId = authUserId || demoUserId;
+    if (!authId || authId.trim().length === 0) {
+      throw new Error('Unauthorized: authentication required');
     }
+
+    const createdBy = await resolveUserIdByAuthId(ctx, authId);
+    if (!createdBy) {
+      throw new Error('Unauthorized: user not found');
+    }
+
+    // Check if demo user (for coin bypass)
+    const isDemoUser = isDemo === true && !!demoUserId;
 
     // 2. Check wallet balance (skip for demo users)
     let currentCoins = 0;
@@ -905,16 +1195,16 @@ export const createPrivateRoom = mutation({
 export const joinRoomByCode = mutation({
   args: {
     joinCode: v.string(),
+    authUserId: v.string(),
   },
-  handler: async (ctx, { joinCode }) => {
-    // 1. Auth guard
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) {
-      throw new Error('Unauthorized');
+  handler: async (ctx, { joinCode, authUserId }) => {
+    // 1. Auth guard - use app's custom session-based auth
+    if (!authUserId || authUserId.trim().length === 0) {
+      throw new Error('Unauthorized: authentication required');
     }
-    const userId = asUserId(identity.subject);
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
     if (!userId) {
-      throw new Error('Invalid user identity');
+      throw new Error('Unauthorized: user not found');
     }
 
     // 2. Normalize code to uppercase
@@ -945,13 +1235,17 @@ export const joinRoomByCode = mutation({
       return { roomId: room._id, alreadyMember: true };
     }
 
-    // 6. Join as member (skip memberCount update to avoid race)
+    // 6. Join as member
     await ctx.db.insert('chatRoomMembers', {
       roomId: room._id,
       userId,
       joinedAt: now,
       role: 'member',
     });
+
+    // M-003 FIX: Recompute memberCount from source of truth (consistent with joinRoom)
+    const actualMemberCount = await recomputeMemberCount(ctx, room._id);
+    await ctx.db.patch(room._id, { memberCount: actualMemberCount });
 
     return { roomId: room._id, alreadyMember: false };
   },
@@ -995,19 +1289,33 @@ export const getRoomByJoinCode = query({
 // Supports demo mode via optional isDemo/demoUserId args
 export const getMyPrivateRooms = query({
   args: {
+    authUserId: v.optional(v.string()), // Real mode: user's auth ID
     isDemo: v.optional(v.boolean()),
     demoUserId: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
     // Resolve userId (auth or demo)
+    // AUTH FIX: Use authUserId for real mode, demoUserId for demo mode
+    const authId = args.authUserId || args.demoUserId;
+    if (!authId) {
+      return [];
+    }
+
     let userId: Id<'users'>;
     try {
-      userId = await resolveUserId(ctx, args);
+      const resolved = await resolveUserIdByAuthId(ctx, authId);
+      if (!resolved) return [];
+      userId = resolved;
     } catch {
       return [];
     }
 
     const now = Date.now();
+
+    // LEAVE-VS-END FIX: Private rooms should appear if user is:
+    // 1. A current member, OR
+    // 2. The creator (even if they left their own room)
+    // This ensures "Leave Room" doesn't make created rooms disappear.
 
     // Get all memberships for this user
     const memberships = await ctx.db
@@ -1015,10 +1323,48 @@ export const getMyPrivateRooms = query({
       .withIndex('by_user', (q) => q.eq('userId', userId))
       .collect();
 
-    // Fetch room details for each membership
+    const memberRoomIds = new Set(memberships.map((m) => m.roomId.toString()));
+
+    // Also get rooms created by this user (even if no membership)
+    const createdRooms = await ctx.db
+      .query('chatRooms')
+      .withIndex('by_creator', (q) => q.eq('createdBy', userId))
+      .collect();
+
+    // Build a map of roomId -> membership for role lookup
+    const membershipByRoom = new Map(
+      memberships.map((m) => [m.roomId.toString(), m])
+    );
+
+    // Combine: rooms from memberships + rooms created by user (deduplicated)
+    const allRoomIds = new Set<string>();
+    const roomsToProcess: { roomId: Id<'chatRooms'>; membership?: typeof memberships[0] }[] = [];
+
+    // Add rooms from memberships
+    for (const membership of memberships) {
+      const roomIdStr = membership.roomId.toString();
+      if (!allRoomIds.has(roomIdStr)) {
+        allRoomIds.add(roomIdStr);
+        roomsToProcess.push({ roomId: membership.roomId, membership });
+      }
+    }
+
+    // Add created rooms (may not have membership if user left)
+    for (const room of createdRooms) {
+      const roomIdStr = room._id.toString();
+      if (!allRoomIds.has(roomIdStr)) {
+        allRoomIds.add(roomIdStr);
+        roomsToProcess.push({
+          roomId: room._id,
+          membership: membershipByRoom.get(roomIdStr),
+        });
+      }
+    }
+
+    // Fetch room details
     const rooms = await Promise.all(
-      memberships.map(async (membership) => {
-        const room = await ctx.db.get(membership.roomId);
+      roomsToProcess.map(async ({ roomId, membership }) => {
+        const room = await ctx.db.get(roomId);
         if (!room) return null;
         // Filter out public rooms (only private)
         if (room.isPublic) return null;
@@ -1030,6 +1376,9 @@ export const getMyPrivateRooms = query({
           .query('chatRoomMembers')
           .withIndex('by_room', (q) => q.eq('roomId', room._id))
           .collect();
+
+        // Determine if current user is a member
+        const isMember = memberRoomIds.has(room._id.toString());
 
         return {
           _id: room._id,
@@ -1044,7 +1393,8 @@ export const getMyPrivateRooms = query({
           expiresAt: room.expiresAt,
           joinCode: room.joinCode,
           createdBy: room.createdBy,
-          role: membership.role,
+          role: membership?.role ?? (room.createdBy === userId ? 'owner' : 'member'),
+          isMember, // Whether user currently has membership (for UI hints)
         };
       })
     );
@@ -1062,16 +1412,31 @@ export const getMyPrivateRooms = query({
 });
 
 // Report a message in a chat room
+// CR-012 FIX: Auth hardening - derive reporterId from auth, don't trust client
 export const reportMessage = mutation({
   args: {
     messageId: v.id('chatRoomMessages'),
-    reporterId: v.id('users'),
+    authUserId: v.string(), // CR-012: Auth verification required
     reason: v.string(),
   },
-  handler: async (ctx, { messageId, reporterId, reason }) => {
+  handler: async (ctx, { messageId, authUserId, reason }) => {
+    // CR-012 FIX: Derive reporterId from authenticated user
+    if (!authUserId || authUserId.trim().length === 0) {
+      throw new Error('Unauthorized: authentication required');
+    }
+    const reporterId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!reporterId) {
+      throw new Error('Unauthorized: user not found');
+    }
+
     const message = await ctx.db.get(messageId);
     if (!message) {
       throw new Error('Message not found');
+    }
+
+    // Prevent self-reports
+    if (reporterId === message.senderId) {
+      throw new Error('Cannot report your own message');
     }
 
     // Store report in existing reports table
@@ -1092,10 +1457,19 @@ export const reportMessage = mutation({
 // Phase-2: Filters out expired rooms
 // SECURITY: Only returns caller's own room memberships (no arbitrary userId lookup)
 export const getRoomsForUser = query({
-  args: {},
-  handler: async (ctx) => {
+  args: {
+    authUserId: v.optional(v.string()),
+  },
+  handler: async (ctx, { authUserId }) => {
     // SECURITY: Require authenticated user - only return caller's own rooms
-    const userId = await requireAuthenticatedUser(ctx);
+    // Return empty array if not authenticated (graceful degradation)
+    if (!authUserId || authUserId.trim().length === 0) {
+      return [];
+    }
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      return [];
+    }
     const now = Date.now();
 
     // Get all memberships for authenticated user
@@ -1140,11 +1514,12 @@ export const getRoomsForUser = query({
 export const getUserPenalty = query({
   args: {
     roomId: v.id('chatRooms'),
+    authUserId: v.string(),
   },
-  handler: async (ctx, { roomId }) => {
+  handler: async (ctx, { roomId, authUserId }) => {
     // SECURITY: Require authenticated user (but NOT full read access,
     // since penalized users should still be able to check their penalty status)
-    const userId = await requireAuthenticatedUser(ctx);
+    const userId = await requireAuthenticatedUser(ctx, authUserId);
 
     // Check room exists and is not expired
     const room = await ctx.db.get(roomId);
@@ -1195,10 +1570,13 @@ export const hasAnyActivePenalty = query({
 
 // List members with penalty status
 export const listMembersWithPenalties = query({
-  args: { roomId: v.id('chatRooms') },
-  handler: async (ctx, { roomId }) => {
+  args: {
+    roomId: v.id('chatRooms'),
+    authUserId: v.string(),
+  },
+  handler: async (ctx, { roomId, authUserId }) => {
     // SECURITY: Require read access (auth + membership + not banned)
-    await requireRoomReadAccess(ctx, roomId);
+    await requireRoomReadAccess(ctx, roomId, authUserId);
 
     const now = Date.now();
     const members = await ctx.db
@@ -1233,23 +1611,20 @@ export const listMembersWithPenalties = query({
 
 // Close/End room (creator only) - deletes room and all messages
 // Does NOT allow closing permanent/global rooms (those without expiresAt)
-// Supports demo mode via optional isDemo/demoUserId args
+// CR-016 FIX: Auth hardening - verify caller identity, don't trust client userId
 export const closeRoom = mutation({
   args: {
     roomId: v.id('chatRooms'),
-    userId: v.optional(v.id('users')), // Legacy: kept for backward compat
-    isDemo: v.optional(v.boolean()),
-    demoUserId: v.optional(v.string()),
+    authUserId: v.string(), // CR-016: Auth verification required
   },
-  handler: async (ctx, args) => {
-    const { roomId } = args;
-
-    // Resolve userId: use provided userId OR resolve via auth/demo
-    let userId: Id<'users'>;
-    if (args.userId) {
-      userId = args.userId;
-    } else {
-      userId = await resolveUserId(ctx, args);
+  handler: async (ctx, { roomId, authUserId }) => {
+    // CR-016 FIX: Verify caller identity via session-based auth
+    if (!authUserId || authUserId.trim().length === 0) {
+      throw new Error('Unauthorized: authentication required');
+    }
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      throw new Error('Unauthorized: user not found');
     }
 
     const room = await ctx.db.get(roomId);
@@ -1301,65 +1676,180 @@ export const resetMyPrivateRooms = mutation({
   },
 });
 
-// Kick user from room (creates readOnly penalty for 24h)
-// Only room creator/owner can kick
-export const kickUser = mutation({
+// CR-013: kickUser mutation REMOVED (was unused legacy code)
+// Use kickAndBanMember for actual kick+ban functionality (properly auth-hardened)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ROLE SYSTEM: Promote/Demote member mutations
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Promote a member to admin (owner only)
+export const promoteMember = mutation({
   args: {
     roomId: v.id('chatRooms'),
-    kickerId: v.id('users'),
     targetUserId: v.id('users'),
+    authUserId: v.string(),
   },
-  handler: async (ctx, { roomId, kickerId, targetUserId }) => {
+  handler: async (ctx, { roomId, targetUserId, authUserId }) => {
+    // 1. Auth guard
+    if (!authUserId || authUserId.trim().length === 0) {
+      throw new Error('Unauthorized: authentication required');
+    }
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      throw new Error('Unauthorized: user not found');
+    }
+
+    // 2. Get room
     const room = await ctx.db.get(roomId);
     if (!room) {
       throw new Error('Room not found');
     }
 
-    // Check if kicker is the owner
-    const kickerMembership = await ctx.db
+    // 3. Cannot promote yourself
+    if (userId === targetUserId) {
+      throw new Error('Cannot change your own role');
+    }
+
+    // 4. Get actor's membership and verify owner
+    const actorMembership = await ctx.db
       .query('chatRoomMembers')
-      .withIndex('by_room_user', (q) =>
-        q.eq('roomId', roomId).eq('userId', kickerId)
-      )
+      .withIndex('by_room_user', (q) => q.eq('roomId', roomId).eq('userId', userId))
       .first();
 
-    if (!kickerMembership || kickerMembership.role !== 'owner') {
-      throw new Error('Only room owner can kick users');
+    if (!actorMembership || !canManageRoles(actorMembership.role)) {
+      throw new Error('Only room owner can promote members');
     }
 
-    // Cannot kick yourself
-    if (kickerId === targetUserId) {
-      throw new Error('Cannot kick yourself');
-    }
-
-    const now = Date.now();
-
-    // Create or update penalty record
-    const existingPenalty = await ctx.db
-      .query('chatRoomPenalties')
-      .withIndex('by_room_user', (q) =>
-        q.eq('roomId', roomId).eq('userId', targetUserId)
-      )
+    // 5. Get target membership
+    const targetMembership = await ctx.db
+      .query('chatRoomMembers')
+      .withIndex('by_room_user', (q) => q.eq('roomId', roomId).eq('userId', targetUserId))
       .first();
 
-    if (existingPenalty) {
-      // Update existing penalty with new expiration
-      await ctx.db.patch(existingPenalty._id, {
-        kickedAt: now,
-        expiresAt: now + PENALTY_DURATION_MS,
-      });
-    } else {
-      // Create new penalty
-      await ctx.db.insert('chatRoomPenalties', {
-        roomId,
-        userId: targetUserId,
-        type: 'readOnly',
-        kickedAt: now,
-        expiresAt: now + PENALTY_DURATION_MS,
-      });
+    if (!targetMembership) {
+      throw new Error('Target user is not a member of this room');
     }
 
-    return { success: true };
+    // 6. Check current role
+    if (targetMembership.role === 'owner') {
+      throw new Error('Cannot change owner role');
+    }
+    if (targetMembership.role === 'admin') {
+      throw new Error('User is already an admin');
+    }
+
+    // 7. Promote to admin
+    await ctx.db.patch(targetMembership._id, { role: 'admin' });
+
+    return { success: true, newRole: 'admin' };
+  },
+});
+
+// Demote an admin to member (owner only)
+export const demoteMember = mutation({
+  args: {
+    roomId: v.id('chatRooms'),
+    targetUserId: v.id('users'),
+    authUserId: v.string(),
+  },
+  handler: async (ctx, { roomId, targetUserId, authUserId }) => {
+    // 1. Auth guard
+    if (!authUserId || authUserId.trim().length === 0) {
+      throw new Error('Unauthorized: authentication required');
+    }
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      throw new Error('Unauthorized: user not found');
+    }
+
+    // 2. Get room
+    const room = await ctx.db.get(roomId);
+    if (!room) {
+      throw new Error('Room not found');
+    }
+
+    // 3. Cannot demote yourself
+    if (userId === targetUserId) {
+      throw new Error('Cannot change your own role');
+    }
+
+    // 4. Get actor's membership and verify owner
+    const actorMembership = await ctx.db
+      .query('chatRoomMembers')
+      .withIndex('by_room_user', (q) => q.eq('roomId', roomId).eq('userId', userId))
+      .first();
+
+    if (!actorMembership || !canManageRoles(actorMembership.role)) {
+      throw new Error('Only room owner can demote admins');
+    }
+
+    // 5. Get target membership
+    const targetMembership = await ctx.db
+      .query('chatRoomMembers')
+      .withIndex('by_room_user', (q) => q.eq('roomId', roomId).eq('userId', targetUserId))
+      .first();
+
+    if (!targetMembership) {
+      throw new Error('Target user is not a member of this room');
+    }
+
+    // 6. Check current role
+    if (targetMembership.role === 'owner') {
+      throw new Error('Cannot change owner role');
+    }
+    if (targetMembership.role === 'member') {
+      throw new Error('User is already a member');
+    }
+
+    // 7. Demote to member
+    await ctx.db.patch(targetMembership._id, { role: 'member' });
+
+    return { success: true, newRole: 'member' };
+  },
+});
+
+// Get member's role in a room (for UI display)
+// Returns membership role + platform admin info for public room moderation UI
+export const getMemberRole = query({
+  args: {
+    roomId: v.id('chatRooms'),
+    authUserId: v.string(),
+  },
+  handler: async (ctx, { roomId, authUserId }) => {
+    // Auth guard
+    if (!authUserId || authUserId.trim().length === 0) {
+      return { role: null, canModerate: false };
+    }
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      return { role: null, canModerate: false };
+    }
+
+    // Get room to check if platform-owned
+    const room = await ctx.db.get(roomId);
+    const isPlatformRoom = room ? isPlatformOwnedRoom(room) : false;
+
+    // Get user to check platform admin status
+    const user = await ctx.db.get(userId);
+    const isPlatformAdmin = user?.isAdmin === true;
+
+    // Get membership role
+    const membership = await ctx.db
+      .query('chatRoomMembers')
+      .withIndex('by_room_user', (q) => q.eq('roomId', roomId).eq('userId', userId))
+      .first();
+
+    const role = membership?.role ?? null;
+
+    // canModerate = true if user can delete others' messages / kick users
+    // - In platform rooms: platform admins can moderate
+    // - In private rooms: owners and admins can moderate (using getRoleLevel for backward compat with 'mod')
+    const canModerate = isPlatformRoom
+      ? isPlatformAdmin
+      : getRoleLevel(role) >= ROLE_LEVEL.admin;
+
+    return { role, canModerate };
   },
 });
 
@@ -1457,14 +1947,16 @@ export const cleanupExpiredPenalties = internalMutation({
 
 // Check user's access status for a private room
 export const checkRoomAccess = query({
-  args: { roomId: v.id('chatRooms') },
-  handler: async (ctx, { roomId }) => {
-    // Auth guard
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) {
+  args: {
+    roomId: v.id('chatRooms'),
+    authUserId: v.optional(v.string()),
+  },
+  handler: async (ctx, { roomId, authUserId }) => {
+    // Auth guard - use app's custom auth pattern
+    if (!authUserId || authUserId.trim().length === 0) {
       return { status: 'unauthenticated' as const };
     }
-    const userId = asUserId(identity.subject);
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
     if (!userId) {
       return { status: 'unauthenticated' as const };
     }
@@ -1531,16 +2023,16 @@ export const requestJoinPrivateRoom = mutation({
   args: {
     roomId: v.id('chatRooms'),
     password: v.string(),
+    authUserId: v.string(),
   },
-  handler: async (ctx, { roomId, password }) => {
-    // 1. Auth guard
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) {
-      throw new Error('Unauthorized');
+  handler: async (ctx, { roomId, password, authUserId }) => {
+    // 1. Auth guard - use app's custom session-based auth
+    if (!authUserId || authUserId.trim().length === 0) {
+      throw new Error('Unauthorized: authentication required');
     }
-    const userId = asUserId(identity.subject);
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
     if (!userId) {
-      throw new Error('Invalid user identity');
+      throw new Error('Unauthorized: user not found');
     }
 
     // 2. Get room
@@ -1629,14 +2121,16 @@ export const requestJoinPrivateRoom = mutation({
 
 // List pending join requests for a room (owner only)
 export const listJoinRequests = query({
-  args: { roomId: v.id('chatRooms') },
-  handler: async (ctx, { roomId }) => {
-    // Auth guard
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) {
+  args: {
+    roomId: v.id('chatRooms'),
+    authUserId: v.optional(v.string()),
+  },
+  handler: async (ctx, { roomId, authUserId }) => {
+    // Auth guard - use app's custom session-based auth
+    if (!authUserId || authUserId.trim().length === 0) {
       return [];
     }
-    const userId = asUserId(identity.subject);
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
     if (!userId) {
       return [];
     }
@@ -1673,14 +2167,16 @@ export const listJoinRequests = query({
 
 // Get count of pending requests (owner only, for badge)
 export const getPendingRequestCount = query({
-  args: { roomId: v.id('chatRooms') },
-  handler: async (ctx, { roomId }) => {
-    // Auth guard
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) {
+  args: {
+    roomId: v.id('chatRooms'),
+    authUserId: v.optional(v.string()),
+  },
+  handler: async (ctx, { roomId, authUserId }) => {
+    // Auth guard - use app's custom session-based auth
+    if (!authUserId || authUserId.trim().length === 0) {
       return 0;
     }
-    const userId = asUserId(identity.subject);
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
     if (!userId) {
       return 0;
     }
@@ -1705,16 +2201,16 @@ export const approveJoinRequest = mutation({
   args: {
     roomId: v.id('chatRooms'),
     targetUserId: v.id('users'),
+    authUserId: v.string(),
   },
-  handler: async (ctx, { roomId, targetUserId }) => {
-    // 1. Auth guard
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) {
-      throw new Error('Unauthorized');
+  handler: async (ctx, { roomId, targetUserId, authUserId }) => {
+    // 1. Auth guard - use app's custom session-based auth
+    if (!authUserId || authUserId.trim().length === 0) {
+      throw new Error('Unauthorized: authentication required');
     }
-    const userId = asUserId(identity.subject);
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
     if (!userId) {
-      throw new Error('Invalid user identity');
+      throw new Error('Unauthorized: user not found');
     }
 
     // 2. Check if owner
@@ -1776,16 +2272,16 @@ export const rejectJoinRequest = mutation({
   args: {
     roomId: v.id('chatRooms'),
     targetUserId: v.id('users'),
+    authUserId: v.string(),
   },
-  handler: async (ctx, { roomId, targetUserId }) => {
-    // 1. Auth guard
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) {
-      throw new Error('Unauthorized');
+  handler: async (ctx, { roomId, targetUserId, authUserId }) => {
+    // 1. Auth guard - use app's custom session-based auth
+    if (!authUserId || authUserId.trim().length === 0) {
+      throw new Error('Unauthorized: authentication required');
     }
-    const userId = asUserId(identity.subject);
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
     if (!userId) {
-      throw new Error('Invalid user identity');
+      throw new Error('Unauthorized: user not found');
     }
 
     // 2. Check if owner
@@ -1820,16 +2316,16 @@ export const kickAndBanMember = mutation({
   args: {
     roomId: v.id('chatRooms'),
     targetUserId: v.id('users'),
+    authUserId: v.string(),
   },
-  handler: async (ctx, { roomId, targetUserId }) => {
-    // 1. Auth guard
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) {
-      throw new Error('Unauthorized');
+  handler: async (ctx, { roomId, targetUserId, authUserId }) => {
+    // 1. Auth guard - use app's custom session-based auth
+    if (!authUserId || authUserId.trim().length === 0) {
+      throw new Error('Unauthorized: authentication required');
     }
-    const userId = asUserId(identity.subject);
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
     if (!userId) {
-      throw new Error('Invalid user identity');
+      throw new Error('Unauthorized: user not found');
     }
 
     // 2. Check if owner
@@ -1891,18 +2387,29 @@ export const kickAndBanMember = mutation({
 });
 
 // Get room password (owner only, returns decrypted)
+// AUTH-FIX: Uses custom session-based auth pattern (authUserId required for non-demo mode)
 // Supports demo mode via optional isDemo/demoUserId args
 export const getRoomPassword = query({
   args: {
     roomId: v.id('chatRooms'),
+    authUserId: v.optional(v.string()), // AUTH-FIX: Added for non-demo mode
     isDemo: v.optional(v.boolean()),
     demoUserId: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const { roomId } = args;
+    const { roomId, authUserId, isDemo, demoUserId } = args;
 
-    // Resolve userId (auth or demo)
-    const userId = await resolveUserId(ctx, args);
+    // AUTH-FIX: Use custom session-based auth pattern
+    // In demo mode: use demoUserId; in real mode: use authUserId
+    const authId = isDemo ? demoUserId : authUserId;
+    if (!authId || authId.trim().length === 0) {
+      throw new Error('Unauthorized: authentication required');
+    }
+
+    const userId = await resolveUserIdByAuthId(ctx, authId);
+    if (!userId) {
+      throw new Error('Unauthorized: user not found');
+    }
 
     // Get room
     const room = await ctx.db.get(roomId);
@@ -1910,7 +2417,7 @@ export const getRoomPassword = query({
       throw new Error('Room not found');
     }
 
-    // Check if owner
+    // SECURITY: Check if owner (password only visible to room creator)
     if (room.createdBy !== userId) {
       throw new Error('Only room owner can view password');
     }
@@ -1927,13 +2434,16 @@ export const getRoomPassword = query({
 
 // Check if user is room owner (for UI gating)
 export const isRoomOwner = query({
-  args: { roomId: v.id('chatRooms') },
-  handler: async (ctx, { roomId }) => {
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) {
+  args: {
+    roomId: v.id('chatRooms'),
+    authUserId: v.optional(v.string()),
+  },
+  handler: async (ctx, { roomId, authUserId }) => {
+    // Auth guard - use app's custom session-based auth
+    if (!authUserId || authUserId.trim().length === 0) {
       return false;
     }
-    const userId = asUserId(identity.subject);
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
     if (!userId) {
       return false;
     }
@@ -1950,10 +2460,13 @@ export const isRoomOwner = query({
 // Get room info including whether it's private (for UI)
 // SECURITY: Requires read access (auth + membership + not banned)
 export const getRoomInfo = query({
-  args: { roomId: v.id('chatRooms') },
-  handler: async (ctx, { roomId }) => {
+  args: {
+    roomId: v.id('chatRooms'),
+    authUserId: v.string(),
+  },
+  handler: async (ctx, { roomId, authUserId }) => {
     // SECURITY: Require read access
-    const { room } = await requireRoomReadAccess(ctx, roomId);
+    const { room } = await requireRoomReadAccess(ctx, roomId, authUserId);
 
     return {
       _id: room._id,
@@ -1976,14 +2489,14 @@ export const getRoomInfo = query({
 export const getUserRoomPref = query({
   args: {
     roomId: v.string(),
+    authUserId: v.optional(v.string()),
   },
-  handler: async (ctx, { roomId }) => {
-    // Auth guard
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) {
+  handler: async (ctx, { roomId, authUserId }) => {
+    // Auth guard - use app's custom session-based auth
+    if (!authUserId || authUserId.trim().length === 0) {
       return { muted: false };
     }
-    const userId = asUserId(identity.subject);
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
     if (!userId) {
       return { muted: false };
     }
@@ -2003,16 +2516,16 @@ export const setUserRoomMuted = mutation({
   args: {
     roomId: v.string(),
     muted: v.boolean(),
+    authUserId: v.string(),
   },
-  handler: async (ctx, { roomId, muted }) => {
-    // Auth guard
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) {
-      throw new Error('Unauthorized');
+  handler: async (ctx, { roomId, muted, authUserId }) => {
+    // Auth guard - use app's custom session-based auth
+    if (!authUserId || authUserId.trim().length === 0) {
+      throw new Error('Unauthorized: authentication required');
     }
-    const userId = asUserId(identity.subject);
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
     if (!userId) {
-      throw new Error('Invalid user identity');
+      throw new Error('Unauthorized: user not found');
     }
 
     const now = Date.now();
@@ -2047,14 +2560,14 @@ export const setUserRoomMuted = mutation({
 export const hasReportedRoom = query({
   args: {
     roomId: v.string(),
+    authUserId: v.optional(v.string()),
   },
-  handler: async (ctx, { roomId }) => {
-    // Auth guard
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) {
+  handler: async (ctx, { roomId, authUserId }) => {
+    // Auth guard - use app's custom session-based auth
+    if (!authUserId || authUserId.trim().length === 0) {
       return { reported: false };
     }
-    const userId = asUserId(identity.subject);
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
     if (!userId) {
       return { reported: false };
     }
@@ -2073,16 +2586,16 @@ export const hasReportedRoom = query({
 export const markReportedRoom = mutation({
   args: {
     roomId: v.string(),
+    authUserId: v.string(),
   },
-  handler: async (ctx, { roomId }) => {
-    // Auth guard
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) {
-      throw new Error('Unauthorized');
+  handler: async (ctx, { roomId, authUserId }) => {
+    // Auth guard - use app's custom session-based auth
+    if (!authUserId || authUserId.trim().length === 0) {
+      throw new Error('Unauthorized: authentication required');
     }
-    const userId = asUserId(identity.subject);
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
     if (!userId) {
-      throw new Error('Invalid user identity');
+      throw new Error('Unauthorized: user not found');
     }
 
     // Check if already reported
@@ -2104,6 +2617,83 @@ export const markReportedRoom = mutation({
     });
 
     return { success: true, alreadyReported: false };
+  },
+});
+
+// Submit a detailed report for a user in a chat room
+// SECURITY: Reporter identity is derived from authenticated session, not client input
+export const submitChatRoomReport = mutation({
+  args: {
+    authUserId: v.string(),
+    reportedUserId: v.string(),
+    roomId: v.optional(v.string()),
+    reason: v.union(
+      // Original reasons
+      v.literal('fake_profile'),
+      v.literal('inappropriate_photos'),
+      v.literal('harassment'),
+      v.literal('spam'),
+      v.literal('underage'),
+      v.literal('other'),
+      // Chat room reasons
+      v.literal('hate_speech'),
+      v.literal('sexual_content'),
+      v.literal('nudity'),
+      v.literal('violent_threats'),
+      v.literal('impersonation'),
+      v.literal('selling')
+    ),
+    details: v.optional(v.string()),
+  },
+  handler: async (ctx, { authUserId, reportedUserId, roomId, reason, details }) => {
+    // 1. SECURITY: Authenticate the reporter
+    if (!authUserId || authUserId.trim().length === 0) {
+      throw new Error('Unauthorized: authentication required');
+    }
+    const reporterId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!reporterId) {
+      throw new Error('Unauthorized: user not found');
+    }
+
+    // 2. Resolve reported user ID
+    const reportedId = await resolveUserIdByAuthId(ctx, reportedUserId);
+    if (!reportedId) {
+      throw new Error('Reported user not found');
+    }
+
+    // 3. Prevent self-reports
+    if (reporterId === reportedId) {
+      throw new Error('Cannot report yourself');
+    }
+
+    // 4. Create the report record in the reports table
+    const reportId = await ctx.db.insert('reports', {
+      reporterId,
+      reportedUserId: reportedId,
+      reason,
+      description: details ?? undefined,
+      status: 'pending',
+      createdAt: Date.now(),
+      roomId: roomId ?? undefined,
+    });
+
+    // 5. Also mark the room as reported (for quick lookups)
+    if (roomId) {
+      const existingRoomReport = await ctx.db
+        .query('userRoomReports')
+        .withIndex('by_user_room', (q) => q.eq('userId', reporterId).eq('roomId', roomId))
+        .first();
+
+      if (!existingRoomReport) {
+        await ctx.db.insert('userRoomReports', {
+          userId: reporterId,
+          roomId,
+          createdAt: Date.now(),
+        });
+      }
+    }
+
+    return { success: true, reportId };
   },
 });
 
@@ -2157,6 +2747,25 @@ export const seedDemoUser = mutation({
     });
 
     return { status: 'created', id };
+  },
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// GET USER WALLET COINS
+// Returns the current user's wallet coin balance for real-time UI display.
+// The balance is updated atomically when messages are sent (see sendMessage).
+// ═══════════════════════════════════════════════════════════════════════════
+export const getUserWalletCoins = query({
+  args: {
+    authUserId: v.string(),
+  },
+  handler: async (ctx, { authUserId }) => {
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      return { walletCoins: 0 };
+    }
+    const user = await ctx.db.get(userId);
+    return { walletCoins: user?.walletCoins ?? 0 };
   },
 });
 

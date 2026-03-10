@@ -1604,23 +1604,29 @@ export const getPreferredChatRoom = query({
 /**
  * Set the user's preferred chat room.
  * Called when user enters a chat room (auto-saved as preferred).
+ * CR-017 FIX: Auth hardening - verify caller identity, don't trust client userId
  */
 export const setPreferredChatRoom = mutation({
   args: {
-    userId: v.id("users"),
+    authUserId: v.string(), // CR-017: Auth verification required
     roomId: v.id("chatRooms"),
   },
-  handler: async (ctx, args) => {
-    const user = await ctx.db.get(args.userId);
-    if (!user) {
-      throw new Error("User not found");
+  handler: async (ctx, { authUserId, roomId }) => {
+    // CR-017 FIX: Verify caller identity via session-based auth
+    if (!authUserId || authUserId.trim().length === 0) {
+      throw new Error("Unauthorized: authentication required");
     }
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      throw new Error("Unauthorized: user not found");
+    }
+
     // Verify room exists
-    const room = await ctx.db.get(args.roomId);
+    const room = await ctx.db.get(roomId);
     if (!room) {
       throw new Error("Room not found");
     }
-    await ctx.db.patch(args.userId, { preferredChatRoomId: args.roomId });
+    await ctx.db.patch(userId, { preferredChatRoomId: roomId });
     return { success: true };
   },
 });
@@ -1628,17 +1634,23 @@ export const setPreferredChatRoom = mutation({
 /**
  * Clear the user's preferred chat room.
  * Called when user explicitly leaves the room via "Leave Room" action.
+ * CR-017 FIX: Auth hardening - verify caller identity, don't trust client userId
  */
 export const clearPreferredChatRoom = mutation({
   args: {
-    userId: v.id("users"),
+    authUserId: v.string(), // CR-017: Auth verification required
   },
-  handler: async (ctx, args) => {
-    const user = await ctx.db.get(args.userId);
-    if (!user) {
-      throw new Error("User not found");
+  handler: async (ctx, { authUserId }) => {
+    // CR-017 FIX: Verify caller identity via session-based auth
+    if (!authUserId || authUserId.trim().length === 0) {
+      throw new Error("Unauthorized: authentication required");
     }
-    await ctx.db.patch(args.userId, { preferredChatRoomId: undefined });
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      throw new Error("Unauthorized: user not found");
+    }
+
+    await ctx.db.patch(userId, { preferredChatRoomId: undefined });
     return { success: true };
   },
 });

@@ -58,10 +58,11 @@ import { useChatRoomSessionStore } from '@/stores/chatRoomSessionStore';
 import { useChatRoomDmStore } from '@/stores/chatRoomDmStore';
 import { usePreferredChatRoomStore } from '@/stores/preferredChatRoomStore';
 import { useChatRoomProfileStore } from '@/stores/chatRoomProfileStore';
+import { useVoiceRecorder, VoiceRecorderResult } from '@/hooks/useVoiceRecorder';
 // DATA-SOURCE FIX: Import privateProfileStore for real user identity (age, gender, name)
 import { usePrivateProfileStore } from '@/stores/privateProfileStore';
 import PrivateChatView from '@/components/chatroom/PrivateChatView';
-import { ensureStableFile } from '@/lib/uploadUtils';
+import { ensureStableFile, uploadMediaToConvex } from '@/lib/uploadUtils';
 
 const C = INCOGNITO_COLORS;
 const EMPTY_MESSAGES: DemoChatMessage[] = [];
@@ -198,9 +199,10 @@ export default function ChatRoomScreen() {
   const incrementCoins = useChatRoomSessionStore((s) => s.incrementCoins);
   const userCoinsFromStore = useChatRoomSessionStore((s) => s.coins);
 
-  // Persisted chat room profile (name/avatar)
+  // Persisted chat room profile (name/avatar/bio - separate from main profile)
   const persistedDisplayName = useChatRoomProfileStore((s) => s.displayName);
   const persistedAvatarUri = useChatRoomProfileStore((s) => s.avatarUri);
+  const persistedBio = useChatRoomProfileStore((s) => s.bio);
 
   // DATA-SOURCE FIX: Get real user identity from privateProfileStore (Convex-backed)
   const realDisplayName = usePrivateProfileStore((s) => s.displayName);
@@ -227,54 +229,77 @@ export default function ChatRoomScreen() {
   // Query Convex if: (1) not demo mode, or (2) demo mode but room not in demo list
   // LOGOUT-RACE FIX: Also skip when auth is missing to prevent "Unauthorized" errors during logout
   const shouldSkipConvex = (isDemoMode && !!demoRoom) || !hasValidRoomId || (!isDemoMode && !authUserId);
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // MEMBERSHIP GATE: Check access status BEFORE running protected queries
+  // This query is lightweight and doesn't require membership - it CHECKS membership.
+  // Protected queries will only run once membership is confirmed (either existing or after join).
+  // ─────────────────────────────────────────────────────────────────────────
+  const accessStatusQuery = useQuery(
+    api.chatRooms.checkRoomAccess,
+    shouldSkipConvex ? 'skip' : { roomId: roomIdStr as Id<'chatRooms'>, authUserId: authUserId! }
+  );
+  // Membership confirmed when checkRoomAccess returns 'member' status
+  const hasMemberAccess = accessStatusQuery?.status === 'member';
+
+  // Protected queries require membership - skip until access confirmed
+  // This prevents "must join first" errors during the join race condition
+  const shouldSkipProtectedQueries = shouldSkipConvex || !hasMemberAccess;
+
   const convexRoom = useQuery(
     api.chatRooms.getRoom,
-    shouldSkipConvex ? 'skip' : { roomId: roomIdStr as Id<'chatRooms'> }
+    shouldSkipProtectedQueries ? 'skip' : { roomId: roomIdStr as Id<'chatRooms'>, authUserId: authUserId! }
   );
   const convexMessagesResult = useQuery(
     api.chatRooms.listMessages,
-    shouldSkipConvex ? 'skip' : { roomId: roomIdStr as Id<'chatRooms'>, limit: 50 }
+    shouldSkipProtectedQueries ? 'skip' : { roomId: roomIdStr as Id<'chatRooms'>, authUserId: authUserId!, limit: 50 }
   );
 
   // Convex mutations
   const sendMessageMutation = useMutation(api.chatRooms.sendMessage);
+  const generateUploadUrlMutation = useMutation(api.chatRooms.generateUploadUrl); // CR-009: For media upload
   const joinRoomMutation = useMutation(api.chatRooms.joinRoom);
   const closeRoomMutation = useMutation(api.chatRooms.closeRoom);
+  const deleteMessageMutation = useMutation(api.chatRooms.deleteMessage);
 
   // Room preferences (muting) and reports - Convex-backed persistence
   const setUserRoomMutedMutation = useMutation(api.chatRooms.setUserRoomMuted);
   const markReportedRoomMutation = useMutation(api.chatRooms.markReportedRoom);
+  const submitChatRoomReportMutation = useMutation(api.chatRooms.submitChatRoomReport);
 
   // Skip queries that require userId in demo mode (no real user identity)
   const shouldSkipUserIdQueries = isDemoMode || !authUserId;
 
   // Query room mute preference (Convex-backed)
   // LOGOUT-RACE FIX: Skip when auth is missing to prevent errors during logout
+  // NOTE: This query uses optional auth so it's OK to run before membership confirmed
   const roomPrefQuery = useQuery(
     api.chatRooms.getUserRoomPref,
-    shouldSkipConvex ? 'skip' : { roomId: roomIdStr }
+    shouldSkipConvex ? 'skip' : { roomId: roomIdStr!, authUserId: authUserId ?? undefined }
   );
   const isRoomMutedFromConvex = roomPrefQuery?.muted ?? false;
 
   // Query if room has been reported (Convex-backed)
   // LOGOUT-RACE FIX: Skip when auth is missing to prevent errors during logout
+  // NOTE: This query uses optional auth so it's OK to run before membership confirmed
   const reportedQuery = useQuery(
     api.chatRooms.hasReportedRoom,
-    shouldSkipConvex ? 'skip' : { roomId: roomIdStr }
+    shouldSkipConvex ? 'skip' : { roomId: roomIdStr!, authUserId: authUserId ?? undefined }
   );
   const hasReportedRoom = reportedQuery?.reported ?? false;
 
   // Phase-2: Query user's penalty status in this room
-  // SECURITY: getUserPenalty now uses authenticated user server-side (no userId param)
+  // SECURITY: getUserPenalty requires membership - use protected skip
   const userPenalty = useQuery(
     api.chatRooms.getUserPenalty,
-    shouldSkipConvex ? 'skip' : { roomId: roomIdStr as Id<'chatRooms'> }
+    shouldSkipProtectedQueries ? 'skip' : { roomId: roomIdStr as Id<'chatRooms'>, authUserId: authUserId! }
   );
 
   // MEMBER-DATA FIX: Query real room members with profile data from Convex
+  // Requires membership - use protected skip
   const convexMembersWithProfiles = useQuery(
     api.chatRooms.listMembersWithProfiles,
-    shouldSkipConvex ? 'skip' : { roomId: roomIdStr as Id<'chatRooms'> }
+    shouldSkipProtectedQueries ? 'skip' : { roomId: roomIdStr as Id<'chatRooms'>, authUserId: authUserId! }
   );
 
   // Unified room object: prefer demoRoom if found, else use convexRoom
@@ -300,23 +325,48 @@ export default function ChatRoomScreen() {
   const isRoomCreator = effectiveUserId
     ? convexRoom?.createdBy === effectiveUserId
     : convexRoom?.createdBy === authUserId;
+
+  // ROLE SYSTEM: Query current user's role and moderation capability
+  const memberRoleQuery = useQuery(
+    api.chatRooms.getMemberRole,
+    hasValidRoomId && authUserId
+      ? { roomId: roomIdStr as Id<'chatRooms'>, authUserId }
+      : 'skip'
+  );
+  // canModerate: true if user can delete others' messages / kick users
+  // - In public/platform rooms: platform admins can moderate
+  // - In private rooms: owners and admins can moderate
+  // Default to true for room creator (for UI responsiveness before query loads)
+  const canModerate: boolean = memberRoleQuery?.canModerate ?? isRoomCreator;
+
   // Phase-2: Check if room can be closed (has expiresAt, meaning not permanent)
   const canCloseRoom = isRoomCreator && convexRoom?.expiresAt;
-  // Phase-2: Check if user is in read-only mode
-  const isReadOnly = userPenalty !== null && userPenalty !== undefined;
+  // Phase-2: Check if user has an active send-blocking penalty (muted, readOnly, send_blocked)
+  // L-002 FIX: Renamed from isReadOnly to hasSendPenalty for clarity
+  const hasSendPenalty = userPenalty !== null && userPenalty !== undefined;
 
   // Phase-2: Query room password (owner only, for display in profile menu)
-  // Pass demo args for demo mode
+  // AUTH-FIX: Pass authUserId for custom session-based auth in non-demo mode
   const roomPasswordQuery = useQuery(
     api.chatRooms.getRoomPassword,
-    isPrivateRoom && isRoomCreator && hasValidRoomId
+    isPrivateRoom && isRoomCreator && hasValidRoomId && authUserId
       ? {
           roomId: roomIdStr as Id<'chatRooms'>,
-          ...(isDemoMode && authUserId ? { isDemo: true, demoUserId: authUserId } : {}),
+          ...(isDemoMode
+            ? { isDemo: true, demoUserId: authUserId }
+            : { authUserId }), // AUTH-FIX: Pass authUserId in non-demo mode
         }
       : 'skip'
   );
   const roomPassword = roomPasswordQuery?.password ?? null;
+
+  // WALLET-FIX: Query user's wallet coins from Convex (source of truth in real mode)
+  // This reactive query auto-updates when walletCoins changes in backend
+  const walletCoinsQuery = useQuery(
+    api.chatRooms.getUserWalletCoins,
+    !isDemoMode && authUserId ? { authUserId } : 'skip'
+  );
+  const convexWalletCoins = walletCoinsQuery?.walletCoins ?? 0;
 
   // B2-HIGH FIX: Cleanup on unmount
   useEffect(() => {
@@ -380,13 +430,8 @@ export default function ChatRoomScreen() {
   }, [expiresAt, nowMs]);
 
   // ─────────────────────────────────────────────────────────────────────────
-  // MOUNTED GUARD
+  // MOUNTED GUARD (M-002 FIX: Removed duplicate - using mountedRef from line 172)
   // ─────────────────────────────────────────────────────────────────────────
-  const isMountedRef = useRef(true);
-  useEffect(() => {
-    isMountedRef.current = true;
-    return () => { isMountedRef.current = false; };
-  }, []);
 
   // ─────────────────────────────────────────────────────────────────────────
   // PREFERRED ROOM STORE (for auto-redirect on next visit)
@@ -427,8 +472,9 @@ export default function ChatRoomScreen() {
         setPreferredRoom(roomIdStr);
       } else if (authUserId && hasValidRoomId) {
         // Convex mode: save to server (fire-and-forget)
+        // CR-017 FIX: Use authUserId for server-side verification
         setPreferredRoomMutation({
-          userId: authUserId as Id<'users'>,
+          authUserId: authUserId,
           roomId: roomIdStr as Id<'chatRooms'>,
         }).catch(() => {
           // Ignore errors - preferred room is a nice-to-have
@@ -515,9 +561,10 @@ export default function ChatRoomScreen() {
       roomId: m.roomId,
       senderId: m.senderId,
       senderName: 'User',
-      type: m.type as 'text' | 'image' | 'system',
+      type: m.type as DemoChatMessage['type'],
       text: m.text,
       mediaUrl: m.imageUrl,
+      audioUrl: m.audioUrl,
       createdAt: m.createdAt,
     }));
     return [...converted, ...pendingMessages];
@@ -608,18 +655,18 @@ export default function ChatRoomScreen() {
 
     joinRoomMutation({
       roomId: roomIdStr as Id<'chatRooms'>,
-      userId: authUserId as Id<'users'>,
+      authUserId: authUserId!, // CR-010: Pass auth for server-side verification
     })
       .then(() => {
         // Join succeeded - user now has membership
-        if (isMountedRef.current) {
+        if (mountedRef.current) {
           setJoinAttempted(true);
           setJoinFailed(false);
         }
       })
       .catch(() => {
         // Join failed - banned, room not found, or other error
-        if (isMountedRef.current) {
+        if (mountedRef.current) {
           setJoinAttempted(true);
           setJoinFailed(true);
         }
@@ -630,10 +677,11 @@ export default function ChatRoomScreen() {
   // INPUT STATE
   // ─────────────────────────────────────────────────────────────────────────
   const [inputText, setInputText] = useState('');
-  // DATA-SOURCE FIX: Only use demo coins in demo mode, otherwise use real store value (even if 0)
+  // WALLET-FIX: In real mode, use Convex walletCoins (source of truth, auto-updates reactively)
+  // In demo mode, use session store coins (no backend persistence)
   const userCoins = isDemoMode
     ? (userCoinsFromStore > 0 ? userCoinsFromStore : DEMO_CURRENT_USER.coins)
-    : userCoinsFromStore;
+    : convexWalletCoins;
 
   // ─────────────────────────────────────────────────────────────────────────
   // MEMBER-DATA FIX: Transform Convex member data for UI components
@@ -679,6 +727,8 @@ export default function ChatRoomScreen() {
   const closeOverlay = useCallback(() => setOverlay('none'), []);
 
   const [selectedMessage, setSelectedMessage] = useState<DemoChatMessage | null>(null);
+  // Position for anchored message actions popup
+  const [messageActionPosition, setMessageActionPosition] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
   const [selectedUser, setSelectedUser] = useState<DemoOnlineUser | null>(null);
   const [viewProfileUser, setViewProfileUser] = useState<DemoOnlineUser | null>(null);
   const [reportTargetUser, setReportTargetUser] = useState<DemoOnlineUser | null>(null);
@@ -707,14 +757,15 @@ export default function ChatRoomScreen() {
   }, []);
 
   // Auto-clear join messages after 1 minute
-  // P0 FIX: Check isMountedRef before state update to prevent unmounted warning
+  // P0 FIX: Check mountedRef before state update to prevent unmounted warning
+  // M-002 FIX: Consolidated to single mountedRef (was isMountedRef)
   useEffect(() => {
     if (!roomIdStr) return;
     const currentMsgs = useDemoChatRoomStore.getState().rooms[roomIdStr] ?? [];
     if (!currentMsgs.some((m) => m.id.startsWith('sys_join_'))) return;
 
     const timer = setTimeout(() => {
-      if (!isMountedRef.current) return; // P0 FIX: guard against unmounted update
+      if (!mountedRef.current) return; // P0 FIX: guard against unmounted update
       const latest = useDemoChatRoomStore.getState().rooms[roomIdStr] ?? [];
       setStoreMessages(roomIdStr, latest.filter((m) => !m.id.startsWith('sys_join_')));
     }, 60000);
@@ -738,7 +789,8 @@ export default function ChatRoomScreen() {
     if (isDemoMode) {
       clearPreferredRoom();
     } else if (authUserId) {
-      clearPreferredRoomMutation({ userId: authUserId as Id<'users'> }).catch(() => {
+      // CR-017 FIX: Use authUserId for server-side verification
+      clearPreferredRoomMutation({ authUserId }).catch(() => {
         // Ignore errors - clearing preference is best-effort
       });
     }
@@ -767,17 +819,16 @@ export default function ChatRoomScreen() {
           style: 'destructive',
           onPress: async () => {
             try {
-              // Use demo args in demo mode, userId in live mode
+              // CR-016 FIX: Pass authUserId for server-side verification
               await closeRoomMutation({
                 roomId: roomIdStr as Id<'chatRooms'>,
-                ...(isDemoMode
-                  ? { isDemo: true, demoUserId: authUserId }
-                  : { userId: authUserId as Id<'users'> }),
+                authUserId: authUserId!,
               });
               // Clear preferred room to avoid stale redirect
               clearPreferredRoom();
               if (!isDemoMode && authUserId) {
-                clearPreferredRoomMutation({ userId: authUserId as Id<'users'> }).catch(() => {});
+                // CR-017 FIX: Use authUserId for server-side verification
+                clearPreferredRoomMutation({ authUserId }).catch(() => {});
               }
               setHasRedirectedInSession(true);
               router.replace('/(main)/(private)/(tabs)/chat-rooms');
@@ -804,9 +855,10 @@ export default function ChatRoomScreen() {
           style: 'destructive',
           onPress: async () => {
             try {
+              // CR-016 FIX: Pass authUserId for server-side verification
               await closeRoomMutation({
                 roomId: roomIdStr as Id<'chatRooms'>,
-                userId: authUserId as Id<'users'>,
+                authUserId: authUserId!,
               });
               setHasRedirectedInSession(true);
               router.replace('/(main)/(private)/(tabs)/chat-rooms');
@@ -865,6 +917,7 @@ export default function ChatRoomScreen() {
       };
       addStoreMessage(roomIdStr, newMessage);
       setInputText('');
+      // Demo mode: local coin increment (no backend)
       incrementCoins();
     } else {
       if (!authUserId || !hasValidRoomId) return;
@@ -884,15 +937,16 @@ export default function ChatRoomScreen() {
       setPendingMessages((prev) => [...prev, pendingMsg]);
       setInputText('');
 
-      let success = false;
+      // WALLET-FIX: Coin increment is handled atomically in Convex mutation
+      // UI reads from reactive getUserWalletCoins query (auto-updates)
       try {
         await sendMessageMutation({
           roomId: roomIdStr as Id<'chatRooms'>,
+          authUserId: authUserId!,
           senderId: authUserId as Id<'users'>,
           text: trimmed,
           clientId,
         });
-        success = true;
       } finally {
         // P1 CR-003: Always remove pending message, regardless of success/failure
         // B2-HIGH FIX: Guard setState after async
@@ -900,17 +954,13 @@ export default function ChatRoomScreen() {
           setPendingMessages((prev) => prev.filter((m) => m.id !== pendingId));
         }
       }
-      if (success) {
-        // B2-HIGH FIX: Guard setState after async
-        if (mountedRef.current) incrementCoins();
-      }
     }
-  }, [inputText, roomIdStr, hasValidRoomId, addStoreMessage, authUserId, sendMessageMutation, incrementCoins, persistedDisplayName]);
+  }, [inputText, roomIdStr, hasValidRoomId, addStoreMessage, authUserId, sendMessageMutation, persistedDisplayName]);
 
   const handlePanelChange = useCallback((_panel: ComposerPanel) => {}, []);
 
   // ─────────────────────────────────────────────────────────────────────────
-  // SEND MEDIA
+  // SEND MEDIA (CR-009 FIX: Upload to cloud storage before sending)
   // ─────────────────────────────────────────────────────────────────────────
   const handleSendMedia = useCallback(
     async (uri: string, mediaType: 'image' | 'video' | 'doodle') => {
@@ -918,7 +968,7 @@ export default function ChatRoomScreen() {
       const labelMap = { image: 'Photo', video: 'Video', doodle: 'Doodle' };
 
       if (isDemoMode) {
-        // Copy media to persistent location so it survives app restart
+        // Demo mode: Copy media to persistent location so it survives app restart
         let persistentUri = uri;
         try {
           const mediaTypeHint = mediaType === 'video' ? 'video' : 'photo';
@@ -940,28 +990,94 @@ export default function ChatRoomScreen() {
         // B2-HIGH FIX: Guard setState after async (ensureStableFile)
         if (mountedRef.current) {
           addStoreMessage(roomIdStr, newMessage);
-          incrementCoins();
         }
       } else {
+        // CR-009 FIX: Real mode - upload to cloud storage first, then send with storage ID
         if (!authUserId || !hasValidRoomId) return;
         const clientId = generateUUID();
+
         try {
+          // Step 1: Upload media to Convex storage
+          const uploadHint = mediaType === 'video' ? 'video' : 'photo';
+          const storageId = await uploadMediaToConvex(
+            uri,
+            generateUploadUrlMutation,
+            uploadHint
+          );
+
+          // Step 2: Send message with storage ID (backend resolves to URL)
           await sendMessageMutation({
             roomId: roomIdStr as Id<'chatRooms'>,
+            authUserId: authUserId!,
             senderId: authUserId as Id<'users'>,
-            imageUrl: uri,
+            imageStorageId: storageId, // CR-009: Pass storage ID, not local URI
             mediaType: mediaType,
             clientId,
           });
-          // B2-HIGH FIX: Guard setState after async
-          if (mountedRef.current) incrementCoins();
         } catch (err: any) {
-          Alert.alert('Error', err.message || 'Failed to send media');
+          console.error('[ChatRoom] Media upload/send failed:', err);
+          Alert.alert('Error', err.message || 'Failed to send media. Please try again.');
         }
       }
     },
-    [roomIdStr, hasValidRoomId, addStoreMessage, authUserId, sendMessageMutation, incrementCoins, persistedDisplayName]
+    [roomIdStr, hasValidRoomId, addStoreMessage, authUserId, sendMessageMutation, generateUploadUrlMutation, persistedDisplayName]
   );
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // VOICE RECORDING (CR-009 FIX: Upload to cloud storage before sending)
+  // Wires up the mic button in ChatComposer to record and send voice messages
+  // ─────────────────────────────────────────────────────────────────────────
+  const handleVoiceRecordingComplete = useCallback(
+    async (result: VoiceRecorderResult) => {
+      if (!roomIdStr || !result.audioUri) return;
+
+      if (isDemoMode) {
+        // Demo mode: add voice message to local store (local URI OK for demo)
+        const newMessage: DemoChatMessage = {
+          id: `cm_voice_${Date.now()}`,
+          roomId: roomIdStr,
+          senderId: DEMO_CURRENT_USER.id,
+          senderName: persistedDisplayName ?? DEMO_CURRENT_USER.username,
+          type: 'audio',
+          audioUrl: result.audioUri,
+          createdAt: Date.now(),
+        };
+        addStoreMessage(roomIdStr, newMessage);
+        incrementCoins();
+      } else {
+        // CR-009 FIX: Real mode - upload to cloud storage first, then send with storage ID
+        if (!authUserId || !hasValidRoomId) return;
+        const clientId = generateUUID();
+
+        try {
+          // Step 1: Upload audio to Convex storage
+          const storageId = await uploadMediaToConvex(
+            result.audioUri,
+            generateUploadUrlMutation,
+            'audio'
+          );
+
+          // Step 2: Send message with storage ID (backend resolves to URL)
+          await sendMessageMutation({
+            roomId: roomIdStr as Id<'chatRooms'>,
+            authUserId: authUserId!,
+            senderId: authUserId as Id<'users'>,
+            audioStorageId: storageId, // CR-009: Pass storage ID, not local URI
+            clientId,
+          });
+        } catch (err: any) {
+          console.error('[ChatRoom] Audio upload/send failed:', err);
+          Alert.alert('Error', err.message || 'Failed to send voice message. Please try again.');
+        }
+      }
+    },
+    [roomIdStr, hasValidRoomId, addStoreMessage, authUserId, sendMessageMutation, generateUploadUrlMutation, persistedDisplayName, incrementCoins]
+  );
+
+  const { toggleRecording, isRecording, elapsedMs } = useVoiceRecorder({
+    onRecordingComplete: handleVoiceRecordingComplete,
+    onError: (msg) => Alert.alert('Recording Error', msg),
+  });
 
   // ─────────────────────────────────────────────────────────────────────────
   // MEDIA HOLD (Secure hold-to-view - immediate open/close)
@@ -1013,10 +1129,11 @@ export default function ChatRoomScreen() {
   }, []);
 
   // ─────────────────────────────────────────────────────────────────────────
-  // MESSAGE LONG PRESS
+  // MESSAGE LONG PRESS - captures position for anchored popup
   // ─────────────────────────────────────────────────────────────────────────
-  const handleMessageLongPress = useCallback((message: DemoChatMessage) => {
+  const handleMessageLongPress = useCallback((message: DemoChatMessage, pageX: number, pageY: number) => {
     setSelectedMessage(message);
+    setMessageActionPosition({ x: pageX, y: pageY });
     setOverlay('messageActions');
   }, []);
 
@@ -1024,34 +1141,58 @@ export default function ChatRoomScreen() {
   // AVATAR PRESS
   // ─────────────────────────────────────────────────────────────────────────
   // MEMBER-DATA FIX: Use roomMembers (unified source for both demo and real mode)
+  // SELF-PROFILE FIX: If tapping own avatar, open photo viewer directly (no action popup)
   const handleAvatarPress = useCallback((senderId: string) => {
     if (__DEV__) console.log('[TAP] avatar pressed', { senderId, t: Date.now() });
+
+    // SELF-PROFILE FIX: Check if this is the current user's own avatar
+    const currentUserId = isDemoMode ? DEMO_CURRENT_USER.id : authUserId;
+    const isSelf = senderId === currentUserId;
+
     // Look up user in roomMembers (Convex-backed in real mode, demo in demo mode)
     const memberUser = roomMembers.find((u) => u.id === senderId);
-    if (memberUser) {
-      setSelectedUser(memberUser);
+    const userToShow = memberUser ?? {
+      id: senderId,
+      username: messages.find((m) => m.senderId === senderId)?.senderName || 'Unknown',
+      avatar: messages.find((m) => m.senderId === senderId)?.senderAvatar,
+      isOnline: false,
+    };
+
+    if (isSelf) {
+      // SELF-PROFILE FIX: Open photo viewer directly, skip action popup
+      setViewProfileUser(userToShow);
+      setOverlay('viewProfile');
+      if (__DEV__) console.log('[TAP] self-avatar → viewProfile (no actions)', { t: Date.now() });
     } else {
-      // Fallback for users not in member list (e.g., system messages or left members)
-      const msg = messages.find((m) => m.senderId === senderId);
-      setSelectedUser({
-        id: senderId,
-        username: msg?.senderName || 'Unknown',
-        avatar: msg?.senderAvatar,
-        isOnline: false,
-      });
+      // Other user: show action popup (View Profile, Private Message, Mute, Report)
+      setSelectedUser(userToShow);
+      setOverlay('userProfile');
+      if (__DEV__) console.log('[TAP] other-avatar → userProfile popup', { t: Date.now() });
     }
-    setOverlay('userProfile');
-    if (__DEV__) console.log('[TAP] avatar overlay set', { t: Date.now() });
-  }, [messages, roomMembers]);
+  }, [messages, roomMembers, authUserId]);
 
   // ─────────────────────────────────────────────────────────────────────────
   // ONLINE USER PRESS
   // ─────────────────────────────────────────────────────────────────────────
+  // SELF-PROFILE FIX: If tapping own user in online panel, open photo viewer directly
   const handleOnlineUserPress = useCallback((user: DemoOnlineUser) => {
     if (__DEV__) console.log('[TAP] online user pressed', { id: user.id, t: Date.now() });
-    setSelectedUser(user);
-    setOverlay('userProfile');
-  }, []);
+
+    // SELF-PROFILE FIX: Check if this is the current user
+    const currentUserId = isDemoMode ? DEMO_CURRENT_USER.id : authUserId;
+    const isSelf = user.id === currentUserId;
+
+    if (isSelf) {
+      // SELF-PROFILE FIX: Open photo viewer directly, skip action popup
+      setViewProfileUser(user);
+      setOverlay('viewProfile');
+      if (__DEV__) console.log('[TAP] self-online → viewProfile (no actions)', { t: Date.now() });
+    } else {
+      // Other user: show action popup
+      setSelectedUser(user);
+      setOverlay('userProfile');
+    }
+  }, [authUserId]);
 
   // ─────────────────────────────────────────────────────────────────────────
   // VIEW PROFILE
@@ -1097,25 +1238,106 @@ export default function ChatRoomScreen() {
     setOverlay('report');
   }, [selectedUser]);
 
-  // Store report in Convex (userRoomReports table)
+  // Store report in Convex (reports table with full details)
   const handleSubmitReport = useCallback(
     async (data: { reportedUserId: string; reason: ReportReason; details?: string; roomId?: string }) => {
+      if (!authUserId) {
+        Alert.alert('Error', 'You must be signed in to submit a report.', [{ text: 'OK' }]);
+        return;
+      }
+
       try {
-        // Mark room as reported in Convex (idempotent)
-        if (roomIdStr) {
-          await markReportedRoomMutation({ roomId: roomIdStr });
-        }
+        // Submit detailed report to Convex (persists all report details)
+        await submitChatRoomReportMutation({
+          authUserId,
+          reportedUserId: data.reportedUserId,
+          roomId: roomIdStr ?? undefined,
+          reason: data.reason,
+          details: data.details,
+        });
 
         setOverlay('none');
         setReportTargetUser(null);
         Alert.alert('Report submitted', 'Thank you. We will review this report.', [{ text: 'OK' }]);
-      } catch (error) {
+      } catch (error: any) {
         console.error('[REPORT] Failed to submit report:', error);
-        Alert.alert('Error', 'Failed to submit report. Please try again.', [{ text: 'OK' }]);
+        Alert.alert('Error', error.message || 'Failed to submit report. Please try again.', [{ text: 'OK' }]);
       }
     },
-    [roomIdStr, markReportedRoomMutation]
+    [roomIdStr, authUserId, submitChatRoomReportMutation]
   );
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // MESSAGE ACTION: DELETE (with confirmation)
+  // ─────────────────────────────────────────────────────────────────────────
+  const handleDeleteMessage = useCallback(() => {
+    if (!selectedMessage || !roomIdStr) return;
+
+    // Show confirmation dialog before deleting
+    Alert.alert(
+      'Delete message?',
+      'This action cannot be undone.',
+      [
+        {
+          text: 'Cancel',
+          style: 'cancel',
+          onPress: () => {
+            setSelectedMessage(null);
+            setOverlay('none');
+          },
+        },
+        {
+          text: 'Delete',
+          style: 'destructive',
+          onPress: async () => {
+            // Demo mode: remove from local store
+            if (isDemoMode) {
+              const currentMessages = useDemoChatRoomStore.getState().rooms[roomIdStr] ?? [];
+              setStoreMessages(roomIdStr, currentMessages.filter((m) => m.id !== selectedMessage.id));
+              setSelectedMessage(null);
+              setOverlay('none');
+              return;
+            }
+
+            // Real mode: call Convex mutation
+            if (!authUserId) return;
+            try {
+              await deleteMessageMutation({
+                roomId: roomIdStr as Id<'chatRooms'>,
+                messageId: selectedMessage.id as Id<'chatRoomMessages'>,
+                authUserId,
+              });
+              setSelectedMessage(null);
+              setOverlay('none');
+            } catch (err: any) {
+              Alert.alert('Error', err.message || 'Failed to delete message');
+            }
+          },
+        },
+      ]
+    );
+  }, [selectedMessage, roomIdStr, authUserId, deleteMessageMutation, setStoreMessages]);
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // MESSAGE ACTION: REPORT (for message, not user)
+  // ─────────────────────────────────────────────────────────────────────────
+  const handleReportMessage = useCallback(() => {
+    if (!selectedMessage) return;
+    // Find the user who sent the message to open report modal
+    const senderUser = roomMembers.find((u) => u.id === selectedMessage.senderId);
+    if (senderUser) {
+      setReportTargetUser(senderUser);
+    } else {
+      // Fallback for users not in member list
+      setReportTargetUser({
+        id: selectedMessage.senderId,
+        username: selectedMessage.senderName || 'Unknown',
+        isOnline: false,
+      });
+    }
+    setSelectedMessage(null);
+    setOverlay('report');
+  }, [selectedMessage, roomMembers]);
 
   // ─────────────────────────────────────────────────────────────────────────
   // RENDER MESSAGE ITEM (reuses existing components)
@@ -1137,9 +1359,10 @@ export default function ChatRoomScreen() {
       const isMuted = mutedUserIds.has(msg.senderId);
       const isMe = (isDemoMode ? DEMO_CURRENT_USER.id : authUserId) === msg.senderId;
       // DATA-SOURCE FIX: Use current user's avatar for outgoing messages (self)
-      // Only fall back to demo avatar in demo mode
+      // Fallback chain: persistedAvatarUri → realPhotoUrls[0] (Convex profile) → empty
+      // This matches the same source used in ProfilePopover and other places
       const avatarUri = isMe
-        ? (isDemoMode ? (persistedAvatarUri ?? DEMO_CURRENT_USER.avatar) : (persistedAvatarUri ?? ''))
+        ? (isDemoMode ? (persistedAvatarUri ?? DEMO_CURRENT_USER.avatar) : (persistedAvatarUri ?? realPhotoUrls?.[0] ?? ''))
         : msg.senderAvatar;
 
       return (
@@ -1152,9 +1375,10 @@ export default function ChatRoomScreen() {
           timestamp={msg.createdAt}
           isMe={isMe}
           dimmed={isMuted}
-          messageType={(msg.type || 'text') as 'text' | 'image' | 'video'}
+          messageType={(msg.type || 'text') as 'text' | 'image' | 'video' | 'audio'}
           mediaUrl={msg.mediaUrl}
-          onLongPress={() => handleMessageLongPress(msg)}
+          audioUrl={msg.audioUrl}
+          onLongPress={(pageX, pageY) => handleMessageLongPress(msg, pageX, pageY)}
           onAvatarPress={() => handleAvatarPress(msg.senderId)}
           onNamePress={() => handleAvatarPress(msg.senderId)}
           onMediaHoldStart={handleMediaHoldStart}
@@ -1162,7 +1386,7 @@ export default function ChatRoomScreen() {
         />
       );
     },
-    [mutedUserIds, authUserId, persistedAvatarUri, handleMessageLongPress, handleAvatarPress, handleMediaHoldStart, handleMediaHoldEnd]
+    [mutedUserIds, authUserId, persistedAvatarUri, realPhotoUrls, handleMessageLongPress, handleAvatarPress, handleMediaHoldStart, handleMediaHoldEnd]
   );
 
   const keyExtractor = useCallback((item: ListItem) => item.id, []);
@@ -1214,7 +1438,8 @@ export default function ChatRoomScreen() {
       if (isDemoMode) {
         clearPreferredRoom();
       } else if (authUserId) {
-        clearPreferredRoomMutation({ userId: authUserId as Id<'users'> }).catch((err) => {
+        // CR-017 FIX: Use authUserId for server-side verification
+        clearPreferredRoomMutation({ authUserId }).catch((err) => {
           console.error('[ChatRoom] clearPreferredRoomMutation failed:', err);
         });
       }
@@ -1322,8 +1547,8 @@ export default function ChatRoomScreen() {
               style={[styles.composerWrapper, { paddingBottom: Platform.OS === 'ios' ? insets.bottom : 0 }]}
               onLayout={(e) => setComposerHeight(e.nativeEvent.layout.height)}
             >
-              {/* Phase-2: Show read-only notice if user has penalty */}
-              {isReadOnly ? (
+              {/* Phase-2: Show send-blocked notice if user has penalty */}
+              {hasSendPenalty ? (
                 <View style={styles.readOnlyNotice}>
                   <Ionicons name="lock-closed" size={16} color={C.textLight} />
                   <Text style={styles.readOnlyText}>Read-only (24h)</Text>
@@ -1334,7 +1559,10 @@ export default function ChatRoomScreen() {
                   onChangeText={setInputText}
                   onSend={handleSend}
                   onPlusPress={() => setOverlay('attachment')}
+                  onMicPress={toggleRecording}
                   onPanelChange={handlePanelChange}
+                  isRecording={isRecording}
+                  elapsedMs={elapsedMs}
                 />
               )}
             </View>
@@ -1388,7 +1616,7 @@ export default function ChatRoomScreen() {
         coins={userCoins}
         age={isDemoMode ? (DEMO_CURRENT_USER.age ?? 25) : (realAge ?? 0)}
         gender={isDemoMode ? (DEMO_CURRENT_USER.gender ?? 'Unknown') : (realGender ?? '')}
-        bio={isDemoMode ? undefined : (realBio || undefined)}
+        bio={isDemoMode ? undefined : (persistedBio || undefined)}
         onLeaveRoom={isPrivateRoom ? handleLeavePrivateRoom : handleLeaveRoom}
         isPrivateRoom={isPrivateRoom}
         isRoomOwner={isRoomCreator}
@@ -1407,10 +1635,12 @@ export default function ChatRoomScreen() {
       <MessageActionsSheet
         visible={overlay === 'messageActions'}
         onClose={() => { closeOverlay(); setSelectedMessage(null); }}
-        messageText={selectedMessage?.text || ''}
-        senderName={selectedMessage?.senderName || ''}
-        onReply={() => { closeOverlay(); setSelectedMessage(null); }}
-        onReport={() => { closeOverlay(); setSelectedMessage(null); }}
+        pressX={messageActionPosition.x}
+        pressY={messageActionPosition.y}
+        isOwnMessage={selectedMessage ? (isDemoMode ? DEMO_CURRENT_USER.id : authUserId) === selectedMessage.senderId : false}
+        canModerate={canModerate}
+        onDelete={handleDeleteMessage}
+        onReport={handleReportMessage}
       />
 
       <UserProfilePopup

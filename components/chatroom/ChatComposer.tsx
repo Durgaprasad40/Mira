@@ -1,6 +1,7 @@
 import React, { useRef, useState, useCallback } from 'react';
 import {
   View,
+  Text,
   TextInput,
   TouchableOpacity,
   StyleSheet,
@@ -28,6 +29,18 @@ interface ChatComposerProps {
   onMicPress?: () => void;
   onInputFocus?: () => void;
   onPanelChange?: (panel: ComposerPanel) => void;
+  /** Whether voice recording is active */
+  isRecording?: boolean;
+  /** Elapsed recording time in milliseconds */
+  elapsedMs?: number;
+}
+
+/** Format milliseconds as M:SS */
+function formatElapsed(ms: number): string {
+  const totalSeconds = Math.floor(ms / 1000);
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes}:${seconds.toString().padStart(2, '0')}`;
 }
 
 export default function ChatComposer({
@@ -37,6 +50,8 @@ export default function ChatComposer({
   onPlusPress,
   onMicPress,
   onInputFocus,
+  isRecording = false,
+  elapsedMs = 0,
 }: ChatComposerProps) {
   const inputRef = useRef<TextInput>(null);
   const hasText = value.trim().length > 0;
@@ -103,10 +118,20 @@ export default function ChatComposer({
         />
       </View>
 
-      {/* Voice */}
-      <TouchableOpacity onPress={onMicPress} style={styles.iconBtn}>
-        <Ionicons name="mic" size={22} color={C.textLight} />
-      </TouchableOpacity>
+      {/* Voice - show prominent recording state when active */}
+      {isRecording ? (
+        <TouchableOpacity onPress={onMicPress} style={styles.recordingBtn}>
+          <View style={styles.recordingPulse}>
+            <View style={styles.recordingIndicator} />
+          </View>
+          <Text style={styles.recordingTimer}>{formatElapsed(elapsedMs)}</Text>
+          <Text style={styles.recordingHint}>Tap to send</Text>
+        </TouchableOpacity>
+      ) : (
+        <TouchableOpacity onPress={onMicPress} style={styles.iconBtn}>
+          <Ionicons name="mic" size={22} color={C.textLight} />
+        </TouchableOpacity>
+      )}
 
       {/* Send (visible when there is text) */}
       {hasText && (
@@ -142,6 +167,40 @@ const styles = StyleSheet.create({
     height: 36,
     alignItems: 'center',
     justifyContent: 'center',
+  },
+  recordingBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(255, 59, 48, 0.15)',
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 18,
+    gap: 6,
+  },
+  recordingPulse: {
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    backgroundColor: 'rgba(255, 59, 48, 0.3)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  recordingIndicator: {
+    width: 12,
+    height: 12,
+    borderRadius: 6,
+    backgroundColor: '#FF3B30',
+  },
+  recordingTimer: {
+    fontSize: 14,
+    fontWeight: '700',
+    color: '#FF3B30',
+    minWidth: 36,
+  },
+  recordingHint: {
+    fontSize: 11,
+    color: '#FF3B30',
+    opacity: 0.8,
   },
   inputRow: {
     flex: 1,

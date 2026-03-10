@@ -118,6 +118,8 @@ interface ChatRoom {
   // Icon support (admin-set, optional)
   iconKey?: string;   // Maps to ROOM_ICON_CONFIG or local asset
   iconUrl?: string;   // Remote image URL (takes priority over iconKey)
+  // Private room flag for compact rendering
+  isPrivate?: boolean;
 }
 
 export default function ChatRoomsScreen() {
@@ -190,8 +192,8 @@ export default function ChatRoomsScreen() {
   // Uses checkRoomAccess which returns status object without throwing (unlike getRoom)
   const preferredRoomAccess = useQuery(
     api.chatRooms.checkRoomAccess,
-    effectivePreferredRoomId
-      ? { roomId: effectivePreferredRoomId as Id<'chatRooms'> }
+    effectivePreferredRoomId && userId
+      ? { roomId: effectivePreferredRoomId as Id<'chatRooms'>, authUserId: userId }
       : 'skip'
   );
 
@@ -271,7 +273,11 @@ export default function ChatRoomsScreen() {
   const convexRooms = useQuery(api.chatRooms.listRooms, {});
 
   // Phase-2: Query for user's private rooms
-  const myPrivateRooms = useQuery(api.chatRooms.getMyPrivateRooms, {});
+  // AUTH FIX: Pass authUserId so query can authenticate in real mode
+  const myPrivateRooms = useQuery(
+    api.chatRooms.getMyPrivateRooms,
+    userId ? { authUserId: userId } : 'skip'
+  );
 
   // Phase-2: Mutations for private rooms
   const joinRoomByCodeMut = useMutation(api.chatRooms.joinRoomByCode);
@@ -298,9 +304,10 @@ export default function ChatRoomsScreen() {
       storeState.setHasRedirectedInSession(true);
 
       // Call leaveRoom mutation to remove user from the room
+      // CR-011: Pass authUserId for server-side verification
       leaveRoomMut({
         roomId: currentRoomIdFromStore as Id<'chatRooms'>,
-        userId: userId as Id<'users'>,
+        authUserId: userId!,
       }).catch(() => {
         // Ignore errors - leave is best-effort
       });
@@ -350,6 +357,7 @@ export default function ChatRoomsScreen() {
   }, [convexRooms, isSeedingRooms, ensureDefaultRoomsMut]);
 
   // Filter private rooms into ChatRoom format
+  // ISSUE 2 FIX: Mark as private so renderRoom skips message preview
   const privateRooms: ChatRoom[] = useMemo(() => {
     if (!myPrivateRooms) return [];
     return myPrivateRooms.map((r) => ({
@@ -358,8 +366,8 @@ export default function ChatRoomsScreen() {
       slug: r.slug,
       category: r.category,
       memberCount: r.memberCount,
-      lastMessageText: r.lastMessageText,
       iconKey: r.slug,
+      isPrivate: true, // Flag for compact rendering
     }));
   }, [myPrivateRooms]);
 
@@ -467,7 +475,7 @@ export default function ChatRoomsScreen() {
     if (!joinCode.trim() || isJoining) return;
     setIsJoining(true);
     try {
-      const result = await joinRoomByCodeMut({ joinCode: joinCode.trim() });
+      const result = await joinRoomByCodeMut({ joinCode: joinCode.trim(), authUserId: userId! });
       setJoinCode('');
       if (result.alreadyMember) {
         Alert.alert('Already a Member', 'You are already a member of this room.');
@@ -498,7 +506,10 @@ export default function ChatRoomsScreen() {
     setIsCreating(true);
     try {
       // Only send password if provided
-      const args: { name: string; password?: string } = { name: newRoomName.trim() };
+      const args: { name: string; password?: string; authUserId: string } = {
+        name: newRoomName.trim(),
+        authUserId: userId!,
+      };
       if (pwd.length > 0) {
         args.password = pwd;
       }
@@ -585,9 +596,12 @@ export default function ChatRoomsScreen() {
         );
       };
 
+      // ISSUE 2 & 3 FIX: Private rooms use compact layout without message preview
+      const isPrivateRoom = item.isPrivate === true;
+
       return (
         <TouchableOpacity
-          style={styles.roomCard}
+          style={[styles.roomCard, isPrivateRoom && styles.privateRoomCard]}
           onPress={() => handleOpenRoom(item.id)}
           activeOpacity={0.7}
         >
@@ -595,6 +609,9 @@ export default function ChatRoomsScreen() {
 
           <View style={styles.roomInfo}>
             <View style={styles.roomNameRow}>
+              {isPrivateRoom && (
+                <Ionicons name="lock-closed" size={12} color={C.textLight} style={{ marginRight: 4 }} />
+              )}
               <Text style={styles.roomName}>{item.name}</Text>
               {unreadCount > 0 && (
                 <View style={styles.unreadBadge}>
@@ -602,12 +619,15 @@ export default function ChatRoomsScreen() {
                 </View>
               )}
             </View>
-            {item.lastMessageText ? (
-              <Text style={styles.roomPreview} numberOfLines={1}>
-                {item.lastMessageText}
-              </Text>
-            ) : (
-              <Text style={styles.roomPreviewEmpty}>No messages yet</Text>
+            {/* ISSUE 2 FIX: Skip message preview for private rooms */}
+            {!isPrivateRoom && (
+              item.lastMessageText ? (
+                <Text style={styles.roomPreview} numberOfLines={1}>
+                  {item.lastMessageText}
+                </Text>
+              ) : (
+                <Text style={styles.roomPreviewEmpty}>No messages yet</Text>
+              )
             )}
             <View style={styles.roomMeta}>
               <Ionicons name="people" size={11} color={C.textLight} />
@@ -699,38 +719,13 @@ export default function ChatRoomsScreen() {
             </View>
 
             {/* Section 4: Private Rooms - show if any private rooms exist */}
+            {/* ISSUE 1 FIX: Removed join-code input UI - tapping room card handles entry */}
             {privateRooms.length > 0 && (
               <>
                 {/* Private Rooms header */}
                 <View style={styles.privateRoomsSectionHeader}>
                   <Text style={styles.sectionTitle}>Private Rooms</Text>
                 </View>
-
-                {/* Join by Code Input */}
-                {(
-                  <View style={styles.joinCodeRow}>
-                    <TextInput
-                      style={styles.joinCodeInput}
-                      placeholder="Enter room code..."
-                      placeholderTextColor={C.textLight}
-                      value={joinCode}
-                      onChangeText={setJoinCode}
-                      autoCapitalize="characters"
-                      maxLength={6}
-                    />
-                    <TouchableOpacity
-                      style={[styles.joinCodeButton, (!joinCode.trim() || isJoining) && styles.joinCodeButtonDisabled]}
-                      onPress={handleJoinByCode}
-                      disabled={!joinCode.trim() || isJoining}
-                    >
-                      {isJoining ? (
-                        <ActivityIndicator size="small" color="#FFF" />
-                      ) : (
-                        <Text style={styles.joinCodeButtonText}>Join</Text>
-                      )}
-                    </TouchableOpacity>
-                  </View>
-                )}
 
                 {/* Private Rooms List */}
                 {privateRooms.map((room) => (
@@ -792,6 +787,11 @@ const styles = StyleSheet.create({
     paddingHorizontal: 14,
     paddingVertical: 12,
     gap: 12,
+  },
+  // ISSUE 3 FIX: Compact private room card style
+  privateRoomCard: {
+    paddingVertical: 8,
+    marginBottom: 6,
   },
   roomIcon: {
     width: 44,

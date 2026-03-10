@@ -72,6 +72,7 @@ export default function CreateRoomScreen() {
       const result = await createPrivateRoomMut({
         name: trimmedName,
         password: trimmedPassword,
+        authUserId: userId!,
       });
 
       // Navigate to the new room

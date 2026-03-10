@@ -2,15 +2,24 @@ import React, { Component, ReactNode } from 'react';
 import { Stack, router as globalRouter } from 'expo-router';
 import { useAuthStore } from '@/stores/authStore';
 
-// M-1: Minimal auth error detection (same as H-3)
-function isAuthError(msg: string): boolean {
+// M-1: Session invalidation detection (NARROWED - does NOT match resource-level auth errors)
+// Only triggers logout for TRUE session invalidation, not room/resource access denials
+function isSessionInvalidationError(msg: string): boolean {
   if (!msg) return false;
   const l = msg.toLowerCase();
-  return l.includes('unauthenticated') || l.includes('unauthorized') ||
-         l.includes('token expired') || l.includes('session expired');
+  // Only match explicit session/token invalidation phrases
+  // DO NOT match generic "unauthorized" or "unauthenticated" - those come from resource access denials
+  return l.includes('token expired') ||
+         l.includes('session expired') ||
+         l.includes('invalid token') ||
+         l.includes('session invalid') ||
+         l.includes('session has expired') ||
+         l.includes('token has expired') ||
+         l.includes('auth token invalid');
 }
 
-// M-1: Auth Error Boundary for Phase-2 onboarding
+// M-1: Session Invalidation Error Boundary for Phase-2 onboarding
+// SECURITY FIX: Does NOT trigger logout for resource-level auth errors
 class Phase2ErrorBoundary extends Component<{ children: ReactNode }, { error: Error | null }> {
   state = { error: null as Error | null };
 
@@ -19,7 +28,9 @@ class Phase2ErrorBoundary extends Component<{ children: ReactNode }, { error: Er
   }
 
   componentDidCatch(error: Error) {
-    if (isAuthError(error?.message || '')) {
+    // SECURITY FIX: Only logout for true session invalidation (token/session expired)
+    if (isSessionInvalidationError(error?.message || '')) {
+      if (__DEV__) console.log('[Phase2ErrorBoundary] Session invalidation detected, logging out:', error?.message);
       useAuthStore.getState().logout();
       globalRouter.replace('/(auth)/welcome');
     }
@@ -27,9 +38,10 @@ class Phase2ErrorBoundary extends Component<{ children: ReactNode }, { error: Er
 
   render() {
     if (this.state.error) {
-      if (isAuthError(this.state.error.message || '')) {
+      if (isSessionInvalidationError(this.state.error.message || '')) {
         return null;
       }
+      // Re-throw non-session errors so they propagate to the screen
       throw this.state.error;
     }
     return this.props.children;

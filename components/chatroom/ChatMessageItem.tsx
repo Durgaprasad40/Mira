@@ -1,7 +1,8 @@
-import React, { useCallback } from 'react';
-import { View, Text, TouchableOpacity, Pressable, StyleSheet } from 'react-native';
+import React, { useCallback, useState, useRef, useEffect } from 'react';
+import { View, Text, TouchableOpacity, Pressable, StyleSheet, ActivityIndicator, GestureResponderEvent } from 'react-native';
 import { Image } from 'expo-image';
 import { Ionicons } from '@expo/vector-icons';
+import { Audio } from 'expo-av';
 import { INCOGNITO_COLORS } from '@/lib/constants';
 import MediaMessage from '@/components/chat/MediaMessage';
 
@@ -16,14 +17,17 @@ interface ChatMessageItemProps {
   text: string;
   timestamp: number;
   isMe?: boolean;
-  onLongPress?: () => void;
+  /** Called on long-press with position for anchored popup */
+  onLongPress?: (pageX: number, pageY: number) => void;
   onAvatarPress?: () => void;
   onNamePress?: () => void;
   dimmed?: boolean;
   /** Message type for media rendering */
-  messageType?: 'text' | 'image' | 'video' | 'doodle';
+  messageType?: 'text' | 'image' | 'video' | 'doodle' | 'audio';
   /** Media URL for image/video/doodle messages */
   mediaUrl?: string;
+  /** Audio URL for audio messages */
+  audioUrl?: string;
   /** Called when user starts holding media (opens viewer) - only for image/video */
   onMediaHoldStart?: (messageId: string, mediaUrl: string, type: 'image' | 'video') => void;
   /** Called when user releases hold (closes viewer) */
@@ -44,11 +48,71 @@ function ChatMessageItem({
   dimmed = false,
   messageType = 'text',
   mediaUrl,
+  audioUrl,
   onMediaHoldStart,
   onMediaHoldEnd,
 }: ChatMessageItemProps) {
   const isMedia = (messageType === 'image' || messageType === 'video' || messageType === 'doodle') && mediaUrl;
   const isSecureMedia = messageType === 'image' || messageType === 'video';
+  const isAudio = messageType === 'audio' && audioUrl;
+
+  // Audio playback state
+  const [isPlaying, setIsPlaying] = useState(false);
+  const [isLoading, setIsLoading] = useState(false);
+  const soundRef = useRef<Audio.Sound | null>(null);
+
+  // Cleanup sound on unmount
+  useEffect(() => {
+    return () => {
+      if (soundRef.current) {
+        soundRef.current.unloadAsync().catch(() => {});
+      }
+    };
+  }, []);
+
+  // Handle audio play/pause
+  const handleAudioPress = useCallback(async () => {
+    if (!audioUrl) return;
+
+    try {
+      if (isPlaying && soundRef.current) {
+        // Pause
+        await soundRef.current.pauseAsync();
+        setIsPlaying(false);
+        return;
+      }
+
+      if (soundRef.current) {
+        // Resume
+        await soundRef.current.playAsync();
+        setIsPlaying(true);
+        return;
+      }
+
+      // Load and play
+      setIsLoading(true);
+      await Audio.setAudioModeAsync({
+        allowsRecordingIOS: false,
+        playsInSilentModeIOS: true,
+      });
+      const { sound } = await Audio.Sound.createAsync(
+        { uri: audioUrl },
+        { shouldPlay: true },
+        (status) => {
+          if (status.isLoaded && status.didJustFinish) {
+            setIsPlaying(false);
+          }
+        }
+      );
+      soundRef.current = sound;
+      setIsPlaying(true);
+      setIsLoading(false);
+    } catch (error) {
+      console.error('[AudioPlayback] Error:', error);
+      setIsLoading(false);
+      setIsPlaying(false);
+    }
+  }, [audioUrl, isPlaying]);
 
   // Memoize hold callbacks to prevent re-renders (only for secure media)
   const handleHoldStart = useCallback(() => {
@@ -61,12 +125,18 @@ function ChatMessageItem({
     onMediaHoldEnd?.();
   }, [onMediaHoldEnd]);
 
+  // Handle long press with position for anchored popup
+  const handleLongPress = useCallback((event: GestureResponderEvent) => {
+    const { pageX, pageY } = event.nativeEvent;
+    onLongPress?.(pageX, pageY);
+  }, [onLongPress]);
+
   // Dense layout: Avatar on LEFT for others, RIGHT for me
   // Small name above bubble for others only, no timestamps
   return (
     <TouchableOpacity
       style={[styles.container, isMe && styles.containerMe, dimmed && styles.dimmed]}
-      onLongPress={onLongPress}
+      onLongPress={handleLongPress}
       activeOpacity={0.8}
       delayLongPress={400}
     >
@@ -101,6 +171,52 @@ function ChatMessageItem({
               onHoldEnd={isSecureMedia ? handleHoldEnd : undefined}
             />
           </View>
+        ) : isAudio ? (
+          <TouchableOpacity
+            onPress={handleAudioPress}
+            activeOpacity={0.7}
+            style={[styles.bubble, styles.audioBubble, isMe ? styles.bubbleMe : styles.bubbleOther]}
+          >
+            {/* Name inside bubble - only for other users */}
+            {!isMe && (
+              <TouchableOpacity onPress={onNamePress} activeOpacity={0.7}>
+                <Text style={styles.senderName}>{senderName}</Text>
+              </TouchableOpacity>
+            )}
+            {/* Audio message with play button */}
+            <View style={styles.audioRow}>
+              {isLoading ? (
+                <ActivityIndicator size="small" color={isMe ? '#FFFFFF' : C.primary} />
+              ) : (
+                <View style={[styles.playButton, isMe && styles.playButtonMe]}>
+                  <Ionicons
+                    name={isPlaying ? 'pause' : 'play'}
+                    size={18}
+                    color={isMe ? C.primary : '#FFFFFF'}
+                  />
+                </View>
+              )}
+              <View style={styles.audioWaveform}>
+                {/* Simple waveform visualization - static heights */}
+                {[6, 10, 14, 8, 16, 12, 10, 6].map((h, i) => (
+                  <View
+                    key={i}
+                    style={[
+                      styles.waveformBar,
+                      { height: h },
+                      isMe ? styles.waveformBarMe : styles.waveformBarOther,
+                      isPlaying && styles.waveformBarPlaying,
+                    ]}
+                  />
+                ))}
+              </View>
+              <Ionicons
+                name="mic"
+                size={14}
+                color={isMe ? 'rgba(255,255,255,0.7)' : C.textLight}
+              />
+            </View>
+          </TouchableOpacity>
         ) : (
           <View style={[styles.bubble, isMe ? styles.bubbleMe : styles.bubbleOther]}>
             {/* Name inside bubble - only for other users */}
@@ -193,5 +309,46 @@ const styles = StyleSheet.create({
   mediaContainer: {
     borderRadius: 8,
     overflow: 'hidden',
+  },
+  // ── Audio message ──
+  audioBubble: {
+    minWidth: 160,
+  },
+  audioRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  playButton: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: C.primary,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  playButtonMe: {
+    backgroundColor: '#FFFFFF',
+  },
+  audioWaveform: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 2,
+    height: 24,
+  },
+  waveformBar: {
+    width: 3,
+    borderRadius: 1.5,
+    backgroundColor: C.textLight,
+  },
+  waveformBarMe: {
+    backgroundColor: 'rgba(255,255,255,0.6)',
+  },
+  waveformBarOther: {
+    backgroundColor: C.textLight,
+  },
+  waveformBarPlaying: {
+    backgroundColor: C.primary,
   },
 });

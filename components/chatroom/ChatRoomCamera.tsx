@@ -8,7 +8,7 @@ import {
   View, Text, StyleSheet, TouchableOpacity, Modal, ActivityIndicator,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { CameraView, CameraType, useCameraPermissions } from 'expo-camera';
+import { CameraView, CameraType, useCameraPermissions, useMicrophonePermissions } from 'expo-camera';
 import { Image } from 'expo-image';
 import { Video, ResizeMode } from 'expo-av';
 import { Ionicons } from '@expo/vector-icons';
@@ -37,9 +37,12 @@ export default function ChatRoomCamera({
   onMediaCaptured,
 }: ChatRoomCameraProps) {
   const insets = useSafeAreaInsets();
-  const [permission, requestPermission] = useCameraPermissions();
+  const [cameraPermission, requestCameraPermission] = useCameraPermissions();
+  const [micPermission, requestMicPermission] = useMicrophonePermissions();
 
   const [mode, setMode] = useState<CaptureMode>('photo');
+  // Track if microphone permission was denied (to show user-facing message)
+  const [micPermissionDenied, setMicPermissionDenied] = useState(false);
   const [facing, setFacing] = useState<CameraType>('back');
   const [isRecording, setIsRecording] = useState(false);
   const [recordSeconds, setRecordSeconds] = useState(0);
@@ -72,6 +75,7 @@ export default function ChatRoomCamera({
       setIsProcessing(false);
       setCapturedUri(null);
       setCapturedKind(null);
+      setMicPermissionDenied(false);
     }
     return () => {
       if (timerRef.current) {
@@ -112,11 +116,38 @@ export default function ChatRoomCamera({
     };
   }, [isRecording]);
 
+  // Request camera permission when modal opens (required for both photo and video)
   useEffect(() => {
-    if (visible && permission && !permission.granted) {
-      requestPermission();
+    if (visible && cameraPermission && !cameraPermission.granted) {
+      requestCameraPermission();
     }
-  }, [visible, permission, requestPermission]);
+  }, [visible, cameraPermission, requestCameraPermission]);
+
+  // VIDEO PERMISSION FIX: Handle mode switch to video - proactively request microphone permission
+  const handleModeSwitch = useCallback(async (newMode: CaptureMode) => {
+    if (isRecording) return; // Don't switch modes while recording
+
+    if (newMode === 'video') {
+      // Check/request microphone permission when switching to video mode
+      if (!micPermission?.granted) {
+        const result = await requestMicPermission();
+        if (!result.granted) {
+          // Don't block mode switch, but track denial for UI feedback
+          if (mountedRef.current) {
+            setMicPermissionDenied(true);
+          }
+        } else {
+          if (mountedRef.current) {
+            setMicPermissionDenied(false);
+          }
+        }
+      }
+    }
+
+    if (mountedRef.current) {
+      setMode(newMode);
+    }
+  }, [isRecording, micPermission, requestMicPermission]);
 
   const toggleFacing = useCallback(() => {
     setFacing((prev) => (prev === 'back' ? 'front' : 'back'));
@@ -149,6 +180,24 @@ export default function ChatRoomCamera({
 
   const startVideoRecording = useCallback(async () => {
     if (!cameraRef.current || isRecording || isProcessing) return;
+
+    // VIDEO PERMISSION FIX: Check/request microphone permission before recording
+    if (!micPermission?.granted) {
+      const result = await requestMicPermission();
+      if (!result.granted) {
+        // Permission denied - show user-facing feedback, don't crash
+        if (mountedRef.current) {
+          setMicPermissionDenied(true);
+        }
+        console.warn('[ChatRoomCamera] Microphone permission denied - cannot record video');
+        return; // Exit early, don't attempt recording
+      } else {
+        if (mountedRef.current) {
+          setMicPermissionDenied(false);
+        }
+      }
+    }
+
     try {
       setIsRecording(true);
       setRecordSeconds(0);
@@ -170,7 +219,7 @@ export default function ChatRoomCamera({
         setIsRecording(false);
       }
     }
-  }, [facing, isRecording, isProcessing]);
+  }, [facing, isRecording, isProcessing, micPermission, requestMicPermission]);
 
   const stopVideoRecording = useCallback(async () => {
     if (!cameraRef.current || !isRecording) return;
@@ -265,7 +314,7 @@ export default function ChatRoomCamera({
 
   if (!visible) return null;
 
-  if (!permission) {
+  if (!cameraPermission) {
     return (
       <Modal visible={visible} transparent animationType="fade">
         <View style={styles.container}>
@@ -275,7 +324,7 @@ export default function ChatRoomCamera({
     );
   }
 
-  if (!permission.granted) {
+  if (!cameraPermission.granted) {
     return (
       <Modal visible={visible} transparent animationType="fade">
         <View style={styles.container}>
@@ -284,7 +333,7 @@ export default function ChatRoomCamera({
             <Text style={styles.permissionText}>
               Camera permission is required to take photos and videos.
             </Text>
-            <TouchableOpacity style={styles.permissionBtn} onPress={requestPermission}>
+            <TouchableOpacity style={styles.permissionBtn} onPress={requestCameraPermission}>
               <Text style={styles.permissionBtnText}>Grant Permission</Text>
             </TouchableOpacity>
             <TouchableOpacity style={styles.cancelBtn} onPress={onClose}>
@@ -401,7 +450,7 @@ export default function ChatRoomCamera({
           <View style={styles.modeToggle}>
             <TouchableOpacity
               style={[styles.modeBtn, mode === 'photo' && styles.modeBtnActive]}
-              onPress={() => !isRecording && setMode('photo')}
+              onPress={() => handleModeSwitch('photo')}
               disabled={isRecording}
             >
               <Text style={[styles.modeBtnText, mode === 'photo' && styles.modeBtnTextActive]}>
@@ -410,7 +459,7 @@ export default function ChatRoomCamera({
             </TouchableOpacity>
             <TouchableOpacity
               style={[styles.modeBtn, mode === 'video' && styles.modeBtnActive]}
-              onPress={() => !isRecording && setMode('video')}
+              onPress={() => handleModeSwitch('video')}
               disabled={isRecording}
             >
               <Text style={[styles.modeBtnText, mode === 'video' && styles.modeBtnTextActive]}>
@@ -418,6 +467,19 @@ export default function ChatRoomCamera({
               </Text>
             </TouchableOpacity>
           </View>
+
+          {/* VIDEO PERMISSION FIX: Show microphone permission denied message */}
+          {mode === 'video' && micPermissionDenied && (
+            <View style={styles.micPermissionWarning}>
+              <Ionicons name="mic-off" size={16} color="#FFA726" />
+              <Text style={styles.micPermissionText}>
+                Microphone access needed for video
+              </Text>
+              <TouchableOpacity onPress={requestMicPermission}>
+                <Text style={styles.micPermissionRetry}>Grant</Text>
+              </TouchableOpacity>
+            </View>
+          )}
 
           {/* Capture row */}
           <View style={styles.captureRow}>
@@ -453,7 +515,9 @@ export default function ChatRoomCamera({
               ? 'Tap to capture'
               : isRecording
                 ? 'Tap to stop'
-                : 'Tap to record (30s max)'}
+                : micPermissionDenied
+                  ? 'Grant microphone access to record'
+                  : 'Tap to record (30s max)'}
           </Text>
         </View>
       </View>
@@ -609,6 +673,31 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: 'rgba(255,255,255,0.7)',
     fontWeight: '500',
+  },
+  // VIDEO PERMISSION FIX: Microphone permission warning styles
+  micPermissionWarning: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(255, 167, 38, 0.2)',
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 8,
+    gap: 8,
+  },
+  micPermissionText: {
+    fontSize: 13,
+    color: '#FFA726',
+    fontWeight: '500',
+    flex: 1,
+  },
+  micPermissionRetry: {
+    fontSize: 13,
+    color: '#FFF',
+    fontWeight: '600',
+    backgroundColor: '#FFA726',
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 4,
   },
   previewContainer: {
     flex: 1,

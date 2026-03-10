@@ -1,13 +1,18 @@
-// STORAGE POLICY: NO local persistence. Convex is ONLY source of truth.
-// All data is ephemeral (in-memory only) and rehydrates from Convex on app boot.
-
 /**
  * Chat Room Profile Store
  *
- * Stores the user's chat room identity (display name and avatar).
+ * STORAGE: In-memory only (session-scoped). Data is lost on app restart.
+ * No persistence to AsyncStorage or Convex.
+ *
+ * Stores the user's chat room identity:
+ * - displayName: Custom name for chat rooms (null = use default from main profile)
+ * - avatarUri: Custom avatar for chat rooms (null = use default from main profile)
+ * - bio: Custom bio for chat rooms (null = no bio)
  *
  * This identity is separate from the main dating profile and only
- * applies within chat rooms.
+ * applies within chat rooms for the current session.
+ *
+ * L-001 FIX: Updated comment to accurately reflect session-only storage.
  */
 import { create } from 'zustand';
 

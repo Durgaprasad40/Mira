@@ -756,20 +756,31 @@ export default defineSchema({
     reporterId: v.id('users'),
     reportedUserId: v.id('users'),
     reason: v.union(
+      // Original reasons
       v.literal('fake_profile'),
       v.literal('inappropriate_photos'),
       v.literal('harassment'),
       v.literal('spam'),
       v.literal('underage'),
-      v.literal('other')
+      v.literal('other'),
+      // Chat room reasons
+      v.literal('hate_speech'),
+      v.literal('sexual_content'),
+      v.literal('nudity'),
+      v.literal('violent_threats'),
+      v.literal('impersonation'),
+      v.literal('selling')
     ),
     description: v.optional(v.string()),
     status: v.union(v.literal('pending'), v.literal('reviewed'), v.literal('resolved')),
     reviewedAt: v.optional(v.number()),
     createdAt: v.number(),
+    // Optional: chat room context for in-room reports
+    roomId: v.optional(v.string()),
   })
     .index('by_reported_user', ['reportedUserId'])
-    .index('by_status', ['status']),
+    .index('by_status', ['status'])
+    .index('by_room', ['roomId']),
 
   // Blocks table
   blocks: defineTable({
@@ -1269,14 +1280,19 @@ export default defineSchema({
     .index('by_category', ['category'])
     .index('by_expires', ['expiresAt'])
     .index('by_join_code', ['joinCode'])
-    .index('by_public', ['isPublic']),
+    .index('by_public', ['isPublic'])
+    .index('by_creator', ['createdBy']), // LEAVE-VS-END FIX: Index for finding rooms by creator
 
   // Chat Room Members table
   chatRoomMembers: defineTable({
     roomId: v.id('chatRooms'),
     userId: v.id('users'),
     joinedAt: v.number(),
-    role: v.optional(v.union(v.literal('owner'), v.literal('mod'), v.literal('member'))), // Member role
+    // Role hierarchy: owner > admin > member
+    // - owner: full control (delete room, kick anyone, delete any msg, promote/demote)
+    // - admin: moderate (kick members, delete member msgs)
+    // - member: basic (send messages, view room)
+    role: v.union(v.literal('owner'), v.literal('admin'), v.literal('member')),
     lastMessageAt: v.optional(v.number()), // For rate limiting
   })
     .index('by_room', ['roomId'])

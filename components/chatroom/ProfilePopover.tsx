@@ -9,6 +9,9 @@ import {
   TextInput,
   Alert,
   ActivityIndicator,
+  KeyboardAvoidingView,
+  Platform,
+  ScrollView,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
@@ -307,97 +310,107 @@ export default function ProfilePopover({
         animationType="slide"
         onRequestClose={handleCloseEditProfile}
       >
-        <View style={styles.editModalOverlay}>
+        <KeyboardAvoidingView
+          style={styles.editModalOverlay}
+          behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+          keyboardVerticalOffset={0}
+        >
           <View style={styles.editModalSheet}>
             <View style={styles.editModalHandle} />
 
-            <Text style={styles.editModalTitle}>Edit Profile</Text>
-            <Text style={styles.editModalSubtitle}>Update your chat room identity</Text>
+            <ScrollView
+              showsVerticalScrollIndicator={false}
+              keyboardShouldPersistTaps="handled"
+              contentContainerStyle={styles.editModalScrollContent}
+            >
+              <Text style={styles.editModalTitle}>Edit Profile</Text>
+              <Text style={styles.editModalSubtitle}>Update your chat room identity</Text>
 
-            {/* Avatar picker */}
-            <View style={styles.editAvatarSection}>
-              <TouchableOpacity
-                style={styles.editAvatarContainer}
-                onPress={() => {
-                  Alert.alert('Change Photo', 'Choose a source', [
-                    { text: 'Cancel', style: 'cancel' },
-                    { text: 'Gallery', onPress: () => handlePickImage('gallery') },
-                    { text: 'Camera', onPress: () => handlePickImage('camera') },
-                  ]);
-                }}
-              >
-                {editAvatar ? (
-                  <Image source={{ uri: editAvatar }} style={styles.editAvatar} />
-                ) : (
-                  <View style={styles.editAvatarPlaceholder}>
-                    <Ionicons name="person" size={32} color={C.textLight} />
+              {/* Avatar picker */}
+              <View style={styles.editAvatarSection}>
+                <TouchableOpacity
+                  style={styles.editAvatarContainer}
+                  onPress={() => {
+                    Alert.alert('Change Photo', 'Choose a source', [
+                      { text: 'Cancel', style: 'cancel' },
+                      { text: 'Gallery', onPress: () => handlePickImage('gallery') },
+                      { text: 'Camera', onPress: () => handlePickImage('camera') },
+                    ]);
+                  }}
+                >
+                  {editAvatar ? (
+                    <Image source={{ uri: editAvatar }} style={styles.editAvatar} />
+                  ) : (
+                    <View style={styles.editAvatarPlaceholder}>
+                      <Ionicons name="person" size={32} color={C.textLight} />
+                    </View>
+                  )}
+                  <View style={styles.editAvatarBadge}>
+                    <Ionicons name="camera" size={14} color="#FFFFFF" />
                   </View>
-                )}
-                <View style={styles.editAvatarBadge}>
-                  <Ionicons name="camera" size={14} color="#FFFFFF" />
-                </View>
-              </TouchableOpacity>
-            </View>
+                </TouchableOpacity>
+              </View>
 
-            {/* Name input */}
-            <View style={styles.editInputSection}>
-              <Text style={styles.editInputLabel}>Display Name</Text>
-              <TextInput
-                style={styles.editInput}
-                value={editName}
-                onChangeText={setEditName}
-                placeholder="Enter display name"
-                placeholderTextColor={C.textLight}
-                maxLength={20}
-                autoComplete="off"
-                textContentType="none"
-                importantForAutofill="noExcludeDescendants"
-              />
-              <Text style={styles.editInputHint}>{editName.length}/20 characters</Text>
-            </View>
+              {/* Name input */}
+              <View style={styles.editInputSection}>
+                <Text style={styles.editInputLabel}>Display Name</Text>
+                <TextInput
+                  style={styles.editInput}
+                  value={editName}
+                  onChangeText={setEditName}
+                  placeholder="Enter display name"
+                  placeholderTextColor={C.textLight}
+                  maxLength={20}
+                  autoComplete="off"
+                  textContentType="none"
+                  importantForAutofill="noExcludeDescendants"
+                />
+                <Text style={styles.editInputHint}>{editName.length}/20 characters</Text>
+              </View>
 
-            {/* Bio input */}
-            <View style={styles.editInputSection}>
-              <Text style={styles.editInputLabel}>Bio</Text>
-              <TextInput
-                style={[styles.editInput, styles.editBioInput]}
-                value={editBio}
-                onChangeText={(text) => setEditBio(text.slice(0, BIO_MAX_LENGTH))}
-                placeholder="Tell others about yourself..."
-                placeholderTextColor={C.textLight}
-                maxLength={BIO_MAX_LENGTH}
-                multiline
-                numberOfLines={3}
-                textAlignVertical="top"
-                autoComplete="off"
-                textContentType="none"
-                importantForAutofill="noExcludeDescendants"
-              />
-              <Text style={styles.editInputHint}>{editBio.length}/{BIO_MAX_LENGTH}</Text>
-            </View>
+              {/* Bio input */}
+              <View style={styles.editInputSection}>
+                <Text style={styles.editInputLabel}>Bio</Text>
+                <TextInput
+                  style={[styles.editInput, styles.editBioInput]}
+                  value={editBio}
+                  onChangeText={(text) => setEditBio(text.slice(0, BIO_MAX_LENGTH))}
+                  placeholder="Tell others about yourself..."
+                  placeholderTextColor={C.textLight}
+                  maxLength={BIO_MAX_LENGTH}
+                  multiline
+                  numberOfLines={3}
+                  textAlignVertical="top"
+                  autoComplete="off"
+                  textContentType="none"
+                  importantForAutofill="noExcludeDescendants"
+                />
+                <Text style={styles.editInputHint}>{editBio.length}/{BIO_MAX_LENGTH}</Text>
+              </View>
 
-            {/* Action buttons */}
-            <View style={styles.editActions}>
-              <TouchableOpacity
-                style={styles.editCancelBtn}
-                onPress={handleCloseEditProfile}
-              >
-                <Text style={styles.editCancelText}>Cancel</Text>
-              </TouchableOpacity>
-              <TouchableOpacity
-                style={[styles.editSaveBtn, isSaving && styles.editSaveBtnDisabled]}
-                onPress={handleSaveProfile}
-                disabled={isSaving}
-              >
-                {isSaving ? (
-                  <ActivityIndicator size="small" color="#FFFFFF" />
-                ) : (
-                  <Text style={styles.editSaveText}>Save</Text>
-                )}
-              </TouchableOpacity>
-            </View>
+              {/* Action buttons */}
+              <View style={styles.editActions}>
+                <TouchableOpacity
+                  style={styles.editCancelBtn}
+                  onPress={handleCloseEditProfile}
+                >
+                  <Text style={styles.editCancelText}>Cancel</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[styles.editSaveBtn, isSaving && styles.editSaveBtnDisabled]}
+                  onPress={handleSaveProfile}
+                  disabled={isSaving}
+                >
+                  {isSaving ? (
+                    <ActivityIndicator size="small" color="#FFFFFF" />
+                  ) : (
+                    <Text style={styles.editSaveText}>Save</Text>
+                  )}
+                </TouchableOpacity>
+              </View>
+            </ScrollView>
           </View>
-        </View>
+        </KeyboardAvoidingView>
       </Modal>
     </>
   );
@@ -509,6 +522,8 @@ const styles = StyleSheet.create({
     flex: 1,
     fontWeight: '400',
     fontStyle: 'italic',
+    marginLeft: 12,
+    textAlign: 'right',
   },
   // Leave Room button (danger)
   leaveRoomItem: {
@@ -533,6 +548,10 @@ const styles = StyleSheet.create({
     paddingHorizontal: 24,
     paddingTop: 12,
     paddingBottom: 40,
+    maxHeight: '90%',
+  },
+  editModalScrollContent: {
+    flexGrow: 1,
   },
   editModalHandle: {
     width: 36,
