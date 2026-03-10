@@ -38,7 +38,6 @@ import type * as matches from "../matches.js";
 import type * as media from "../media.js";
 import type * as messageTemplates from "../messageTemplates.js";
 import type * as messages from "../messages.js";
-import type * as migrations_removeTodCategory from "../migrations/removeTodCategory.js";
 import type * as notifications from "../notifications.js";
 import type * as permissions from "../permissions.js";
 import type * as photos from "../photos.js";
@@ -96,7 +95,6 @@ declare const fullApi: ApiFromModules<{
   media: typeof media;
   messageTemplates: typeof messageTemplates;
   messages: typeof messages;
-  "migrations/removeTodCategory": typeof migrations_removeTodCategory;
   notifications: typeof notifications;
   permissions: typeof permissions;
   photos: typeof photos;
