@@ -1773,9 +1773,21 @@ export const reportAnswer = mutation({
   args: {
     answerId: v.string(),
     reporterId: v.string(),
+    // Structured report reason (required)
+    reasonCode: v.union(
+      v.literal('harassment'),
+      v.literal('sexual'),
+      v.literal('spam'),
+      v.literal('hate'),
+      v.literal('violence'),
+      v.literal('other')
+    ),
+    // Optional additional details
+    reasonText: v.optional(v.string()),
+    // Legacy field for backwards compatibility (deprecated)
     reason: v.optional(v.string()),
   },
-  handler: async (ctx, { answerId, reporterId: argsReporterId, reason }) => {
+  handler: async (ctx, { answerId, reporterId: argsReporterId, reasonCode, reasonText, reason }) => {
     // Auth guard: require authenticated user
     const identity = await ctx.auth.getUserIdentity();
     if (!identity) {
@@ -1820,11 +1832,13 @@ export const reportAnswer = mutation({
       throw new Error('You have reached your daily report limit');
     }
 
-    // Create report
+    // Create report with structured reason
     await ctx.db.insert('todAnswerReports', {
       answerId,
       reporterId,
-      reason,
+      reasonCode,
+      reasonText,
+      reason, // Legacy field for backwards compatibility
       createdAt: Date.now(),
     });
 

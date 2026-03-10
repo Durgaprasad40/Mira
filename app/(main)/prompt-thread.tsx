@@ -1,6 +1,6 @@
 import React, { useState, useCallback, useEffect, useRef, useMemo } from 'react';
 import {
-  View, Text, StyleSheet, FlatList, TouchableOpacity, Alert, ActivityIndicator, Modal,
+  View, Text, StyleSheet, FlatList, TouchableOpacity, Alert, ActivityIndicator, Modal, TextInput,
 } from 'react-native';
 import { Image } from 'expo-image';
 import { Video, ResizeMode } from 'expo-av';
@@ -19,12 +19,22 @@ import { getTimeAgo } from '@/lib/utils';
 import { useAuthStore } from '@/stores/authStore';
 import { usePrivateProfileStore } from '@/stores/privateProfileStore';
 import { useDemoStore } from '@/stores/demoStore';
-import type { TodPrompt, TodProfileVisibility } from '@/types';
+import type { TodPrompt, TodProfileVisibility, TodReportReason } from '@/types';
 
 const C = INCOGNITO_COLORS;
 
 // Available emoji reactions
 const REACTION_EMOJIS = ['😂', '🔥', '😍', '👏', '😮', '💀'];
+
+// Report reason options
+const REPORT_REASONS: { code: TodReportReason; label: string; icon: string }[] = [
+  { code: 'harassment', label: 'Harassment', icon: '🚫' },
+  { code: 'sexual', label: 'Sexual Content', icon: '🔞' },
+  { code: 'spam', label: 'Spam', icon: '📢' },
+  { code: 'hate', label: 'Hate Speech', icon: '💢' },
+  { code: 'violence', label: 'Violence', icon: '⚠️' },
+  { code: 'other', label: 'Other', icon: '📝' },
+];
 
 // Time remaining helper
 function formatTimeLeft(expiresAt: number): string {
@@ -127,6 +137,14 @@ export default function PromptThreadScreen() {
   // Emoji picker state (per answer)
   const [emojiPickerAnswerId, setEmojiPickerAnswerId] = useState<string | null>(null);
 
+  // Report modal state
+  const [reportModalVisible, setReportModalVisible] = useState(false);
+  const [reportingAnswerId, setReportingAnswerId] = useState<string | null>(null);
+  const [reportingAuthorId, setReportingAuthorId] = useState<string | null>(null);
+  const [selectedReportReason, setSelectedReportReason] = useState<TodReportReason | null>(null);
+  const [reportReasonText, setReportReasonText] = useState('');
+  const [isSubmittingReport, setIsSubmittingReport] = useState(false);
+
   // Media viewer state for tap-to-view
   const [viewingMedia, setViewingMedia] = useState<{
     answerId: string;
@@ -221,43 +239,55 @@ export default function PromptThreadScreen() {
     }
   }, [userId, setReaction]);
 
-  // Handle report
-  const handleReport = useCallback(async (answerId: string, authorId: string) => {
+  // Open report modal
+  const handleReport = useCallback((answerId: string, authorId: string) => {
     if (!userId || userId === authorId) return;
+    setReportingAnswerId(answerId);
+    setReportingAuthorId(authorId);
+    setSelectedReportReason(null);
+    setReportReasonText('');
+    setReportModalVisible(true);
+  }, [userId]);
 
-    Alert.alert(
-      'Report Comment',
-      'Are you sure you want to report this comment as inappropriate?',
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Report',
-          style: 'destructive',
-          onPress: async () => {
-            try {
-              const result = await reportAnswer({
-                answerId,
-                reporterId: userId,
-              });
-              if (result.isNowHidden) {
-                Alert.alert('Reported', 'This comment has been hidden due to multiple reports.');
-              } else {
-                Alert.alert('Reported', 'Thank you for your report. We will review it.');
-              }
-            } catch (error: any) {
-              if (error.message?.includes('already reported')) {
-                Alert.alert('Already Reported', 'You have already reported this comment.');
-              } else if (error.message?.includes('daily report limit')) {
-                Alert.alert('Limit Reached', 'You have reached your daily report limit.');
-              } else {
-                Alert.alert('Error', 'Failed to report. Please try again.');
-              }
-            }
-          },
-        },
-      ]
-    );
-  }, [userId, reportAnswer]);
+  // Submit report with selected reason
+  const submitReport = useCallback(async () => {
+    if (!userId || !reportingAnswerId || !selectedReportReason) return;
+
+    setIsSubmittingReport(true);
+    try {
+      const result = await reportAnswer({
+        answerId: reportingAnswerId,
+        reporterId: userId,
+        reasonCode: selectedReportReason,
+        reasonText: reportReasonText.trim() || undefined,
+      });
+      setReportModalVisible(false);
+      if (result.isNowHidden) {
+        Alert.alert('Reported', 'This comment has been hidden due to multiple reports.');
+      } else {
+        Alert.alert('Reported', 'Thank you for your report. We will review it.');
+      }
+    } catch (error: any) {
+      if (error.message?.includes('already reported')) {
+        Alert.alert('Already Reported', 'You have already reported this comment.');
+      } else if (error.message?.includes('daily report limit')) {
+        Alert.alert('Limit Reached', 'You have reached your daily report limit.');
+      } else {
+        Alert.alert('Error', 'Failed to report. Please try again.');
+      }
+    } finally {
+      setIsSubmittingReport(false);
+    }
+  }, [userId, reportingAnswerId, selectedReportReason, reportReasonText, reportAnswer]);
+
+  // Close report modal
+  const closeReportModal = useCallback(() => {
+    setReportModalVisible(false);
+    setReportingAnswerId(null);
+    setReportingAuthorId(null);
+    setSelectedReportReason(null);
+    setReportReasonText('');
+  }, []);
 
   // Handle delete own comment
   const handleDeleteAnswer = useCallback(async (answerId: string) => {
@@ -1037,6 +1067,86 @@ export default function PromptThreadScreen() {
           )}
         </View>
       </Modal>
+
+      {/* Report Reason Modal */}
+      <Modal
+        visible={reportModalVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={closeReportModal}
+      >
+        <View style={styles.reportModalOverlay}>
+          <View style={styles.reportModalContent}>
+            <View style={styles.reportModalHeader}>
+              <Text style={styles.reportModalTitle}>Report Comment</Text>
+              <TouchableOpacity onPress={closeReportModal}>
+                <Ionicons name="close" size={24} color={C.text} />
+              </TouchableOpacity>
+            </View>
+
+            <Text style={styles.reportModalSubtitle}>
+              Why are you reporting this comment?
+            </Text>
+
+            {/* Reason selection */}
+            <View style={styles.reportReasonList}>
+              {REPORT_REASONS.map((reason) => (
+                <TouchableOpacity
+                  key={reason.code}
+                  style={[
+                    styles.reportReasonItem,
+                    selectedReportReason === reason.code && styles.reportReasonItemSelected,
+                  ]}
+                  onPress={() => setSelectedReportReason(reason.code)}
+                >
+                  <Text style={styles.reportReasonIcon}>{reason.icon}</Text>
+                  <Text style={[
+                    styles.reportReasonLabel,
+                    selectedReportReason === reason.code && styles.reportReasonLabelSelected,
+                  ]}>
+                    {reason.label}
+                  </Text>
+                  {selectedReportReason === reason.code && (
+                    <Ionicons name="checkmark-circle" size={20} color={C.primary} />
+                  )}
+                </TouchableOpacity>
+              ))}
+            </View>
+
+            {/* Optional additional details (shown after reason selected) */}
+            {selectedReportReason && (
+              <View style={styles.reportTextContainer}>
+                <Text style={styles.reportTextLabel}>Additional details (optional)</Text>
+                <TextInput
+                  style={styles.reportTextInput}
+                  placeholder="Add more context..."
+                  placeholderTextColor={C.textLight}
+                  value={reportReasonText}
+                  onChangeText={setReportReasonText}
+                  multiline
+                  maxLength={500}
+                />
+              </View>
+            )}
+
+            {/* Submit button */}
+            <TouchableOpacity
+              style={[
+                styles.reportSubmitButton,
+                !selectedReportReason && styles.reportSubmitButtonDisabled,
+              ]}
+              onPress={submitReport}
+              disabled={!selectedReportReason || isSubmittingReport}
+            >
+              {isSubmittingReport ? (
+                <ActivityIndicator size="small" color="#FFF" />
+              ) : (
+                <Text style={styles.reportSubmitButtonText}>Submit Report</Text>
+              )}
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }
@@ -1376,5 +1486,98 @@ const styles = StyleSheet.create({
     fontSize: 13,
     color: '#FFF',
     fontWeight: '500',
+  },
+
+  // Report modal styles
+  reportModalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.6)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 20,
+  },
+  reportModalContent: {
+    backgroundColor: C.background,
+    borderRadius: 16,
+    padding: 20,
+    width: '100%',
+    maxWidth: 400,
+  },
+  reportModalHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  reportModalTitle: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: C.text,
+  },
+  reportModalSubtitle: {
+    fontSize: 14,
+    color: C.textLight,
+    marginBottom: 16,
+  },
+  reportReasonList: {
+    gap: 8,
+  },
+  reportReasonItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    padding: 12,
+    borderRadius: 10,
+    backgroundColor: C.surface,
+  },
+  reportReasonItemSelected: {
+    backgroundColor: C.primary + '20',
+    borderWidth: 1,
+    borderColor: C.primary,
+  },
+  reportReasonIcon: {
+    fontSize: 18,
+  },
+  reportReasonLabel: {
+    flex: 1,
+    fontSize: 15,
+    fontWeight: '500',
+    color: C.text,
+  },
+  reportReasonLabelSelected: {
+    color: C.primary,
+  },
+  reportTextContainer: {
+    marginTop: 16,
+  },
+  reportTextLabel: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: C.text,
+    marginBottom: 8,
+  },
+  reportTextInput: {
+    backgroundColor: C.surface,
+    borderRadius: 10,
+    padding: 12,
+    fontSize: 14,
+    color: C.text,
+    minHeight: 80,
+    textAlignVertical: 'top',
+  },
+  reportSubmitButton: {
+    marginTop: 20,
+    backgroundColor: '#E74C3C',
+    borderRadius: 10,
+    padding: 14,
+    alignItems: 'center',
+  },
+  reportSubmitButtonDisabled: {
+    backgroundColor: C.surface,
+  },
+  reportSubmitButtonText: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: '#FFF',
   },
 });

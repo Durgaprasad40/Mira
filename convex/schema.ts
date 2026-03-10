@@ -1106,6 +1106,18 @@ export default defineSchema({
   todAnswerReports: defineTable({
     answerId: v.string(),
     reporterId: v.string(),
+    // Structured report reason (required for new reports)
+    reasonCode: v.optional(v.union(
+      v.literal('harassment'),
+      v.literal('sexual'),
+      v.literal('spam'),
+      v.literal('hate'),
+      v.literal('violence'),
+      v.literal('other')
+    )),
+    // Optional additional details (renamed from reason for clarity)
+    reasonText: v.optional(v.string()),
+    // Legacy field for backwards compatibility with old reports
     reason: v.optional(v.string()),
     createdAt: v.number(),
   })

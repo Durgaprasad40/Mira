@@ -515,6 +515,9 @@ export type TodUserState = "answered" | "skipped" | "could_not_answer";
 // Truth & Dare Prompt Categories
 export type TodCategory = 'spicy' | 'deep' | 'funny' | 'wholesome' | 'random';
 
+// Truth & Dare Report Reasons
+export type TodReportReason = 'harassment' | 'sexual' | 'spam' | 'hate' | 'violence' | 'other';
+
 // Truth & Dare Trending System Types
 export type TodAnswerType = "text" | "photo" | "video" | "voice";
 export type TodConnectStatus = "pending" | "connected" | "removed";
