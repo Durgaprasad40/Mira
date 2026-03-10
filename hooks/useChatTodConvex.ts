@@ -165,11 +165,13 @@ export function useChatTodConvex(
         zustandActions.initGame(conversationId, userIds);
         return;
       }
+      // TOD-009 FIX: Use authUserId for server-side verification
       await initGameMutation({
         conversationId,
         participant1Id: userIds[0],
         participant2Id: userIds[1],
         callerId: currentUserId,
+        authUserId: currentUserId,
       });
     },
     [conversationId, currentUserId, zustandActions, initGameMutation]
@@ -180,9 +182,11 @@ export function useChatTodConvex(
       zustandActions.spinBottle(conversationId);
       return;
     }
+    // TOD-009 FIX: Use authUserId for server-side verification
     await spinBottleMutation({
       conversationId,
       callerId: currentUserId,
+      authUserId: currentUserId,
     });
   }, [conversationId, currentUserId, zustandActions, spinBottleMutation]);
 
@@ -192,10 +196,12 @@ export function useChatTodConvex(
         zustandActions.completeSpinAnimation(conversationId);
         return;
       }
+      // TOD-009 FIX: Use authUserId for server-side verification
       await completeSpinMutation({
         conversationId,
         callerId: currentUserId,
         winnerId,
+        authUserId: currentUserId,
       });
     },
     [conversationId, currentUserId, zustandActions, completeSpinMutation]
@@ -207,10 +213,12 @@ export function useChatTodConvex(
         zustandActions.chooseTruthOrDare(conversationId, type);
         return;
       }
+      // TOD-009 FIX: Use authUserId for server-side verification
       await chooseMutation({
         conversationId,
         callerId: currentUserId,
         promptType: type,
+        authUserId: currentUserId,
       });
     },
     [conversationId, currentUserId, zustandActions, chooseMutation]
@@ -222,10 +230,12 @@ export function useChatTodConvex(
         zustandActions.setPrompt(conversationId, text);
         return;
       }
+      // TOD-009 FIX: Use authUserId for server-side verification
       await setPromptMutation({
         conversationId,
         callerId: currentUserId,
         promptText: text,
+        authUserId: currentUserId,
       });
     },
     [conversationId, currentUserId, zustandActions, setPromptMutation]
@@ -237,6 +247,7 @@ export function useChatTodConvex(
         zustandActions.submitAnswer(conversationId, meta);
         return;
       }
+      // TOD-009 FIX: Use authUserId for server-side verification
       await submitAnswerMutation({
         conversationId,
         callerId: currentUserId,
@@ -244,6 +255,7 @@ export function useChatTodConvex(
         answerText: meta.text,
         answerMediaUri: meta.mediaUri,
         answerDurationSec: meta.durationSec,
+        authUserId: currentUserId,
       });
     },
     [conversationId, currentUserId, zustandActions, submitAnswerMutation]
@@ -254,9 +266,11 @@ export function useChatTodConvex(
       return zustandActions.useSkip(conversationId, currentUserId);
     }
     try {
+      // TOD-009 FIX: Use authUserId for server-side verification
       await useSkipMutation({
         conversationId,
         callerId: currentUserId,
+        authUserId: currentUserId,
       });
       return true;
     } catch {
@@ -269,9 +283,11 @@ export function useChatTodConvex(
       zustandActions.completeMandatoryRound(conversationId);
       return;
     }
+    // TOD-009 FIX: Use authUserId for server-side verification
     await completeMandatoryMutation({
       conversationId,
       callerId: currentUserId,
+      authUserId: currentUserId,
     });
   }, [conversationId, currentUserId, zustandActions, completeMandatoryMutation]);
 

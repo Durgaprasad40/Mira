@@ -1,16 +1,27 @@
 import { v } from 'convex/values';
 import { mutation, query } from './_generated/server';
 import { Id } from './_generated/dataModel';
+import { resolveUserIdByAuthId } from './helpers';
 
 // Send a dare to a user (Truth or Dare feature)
+// TOD-002 FIX: Auth hardening - verify caller identity server-side
 export const sendDare = mutation({
   args: {
-    fromUserId: v.id('users'),
+    authUserId: v.string(), // TOD-002: Auth verification required
     toUserId: v.id('users'),
     content: v.string(),
   },
   handler: async (ctx, args) => {
-    const { fromUserId, toUserId, content } = args;
+    // TOD-002 FIX: Verify caller identity
+    const { authUserId, toUserId, content } = args;
+    if (!authUserId || authUserId.trim().length === 0) {
+      throw new Error('Unauthorized: authentication required');
+    }
+    const fromUserId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!fromUserId) {
+      throw new Error('Unauthorized: user not found');
+    }
+
     const now = Date.now();
 
     const fromUser = await ctx.db.get(fromUserId);
@@ -117,18 +128,33 @@ export const getDaresSent = query({
 });
 
 // Accept a dare (reveals identities and creates match)
+// TOD-002 FIX: Auth hardening - verify caller is the dare recipient
 export const acceptDare = mutation({
   args: {
     dareId: v.id('dares'),
-    userId: v.id('users'),
+    authUserId: v.string(), // TOD-002: Auth verification required
   },
   handler: async (ctx, args) => {
-    const { dareId, userId } = args;
+    // TOD-002 FIX: Verify caller identity
+    const { dareId, authUserId } = args;
+    if (!authUserId || authUserId.trim().length === 0) {
+      throw new Error('Unauthorized: authentication required');
+    }
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      throw new Error('Unauthorized: user not found');
+    }
+
     const now = Date.now();
 
     const dare = await ctx.db.get(dareId);
-    if (!dare || dare.toUserId !== userId) {
+    if (!dare) {
       throw new Error('Dare not found');
+    }
+
+    // TOD-002 FIX: Verify caller is the dare recipient
+    if (dare.toUserId !== userId) {
+      throw new Error('Unauthorized: only the dare recipient can accept');
     }
 
     if (dare.isAccepted !== undefined) {
@@ -201,17 +227,31 @@ export const acceptDare = mutation({
 });
 
 // Decline a dare
+// TOD-002 FIX: Auth hardening - verify caller is the dare recipient
 export const declineDare = mutation({
   args: {
     dareId: v.id('dares'),
-    userId: v.id('users'),
+    authUserId: v.string(), // TOD-002: Auth verification required
   },
   handler: async (ctx, args) => {
-    const { dareId, userId } = args;
+    // TOD-002 FIX: Verify caller identity
+    const { dareId, authUserId } = args;
+    if (!authUserId || authUserId.trim().length === 0) {
+      throw new Error('Unauthorized: authentication required');
+    }
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      throw new Error('Unauthorized: user not found');
+    }
 
     const dare = await ctx.db.get(dareId);
-    if (!dare || dare.toUserId !== userId) {
+    if (!dare) {
       throw new Error('Dare not found');
+    }
+
+    // TOD-002 FIX: Verify caller is the dare recipient
+    if (dare.toUserId !== userId) {
+      throw new Error('Unauthorized: only the dare recipient can decline');
     }
 
     if (dare.isAccepted !== undefined) {

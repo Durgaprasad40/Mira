@@ -1,6 +1,7 @@
 import { mutation, query, internalMutation } from './_generated/server';
 import { v } from 'convex/values';
 import { Id } from './_generated/dataModel';
+import { resolveUserIdByAuthId } from './helpers';
 
 // 24-hour auto-delete rule (same as Confessions)
 const TWENTY_FOUR_HOURS_MS = 24 * 60 * 60 * 1000;
@@ -63,11 +64,12 @@ export const hasUserAnswered = query({
 });
 
 // Create a new Truth or Dare prompt
+// TOD-001 FIX: Auth hardening - verify caller identity server-side
 export const createPrompt = mutation({
   args: {
     type: v.union(v.literal('truth'), v.literal('dare')),
     text: v.string(),
-    ownerUserId: v.string(),
+    authUserId: v.string(), // TOD-001: Auth verification required
     isAnonymous: v.optional(v.boolean()),
     photoBlurMode: v.optional(v.union(v.literal('none'), v.literal('blur'))),
     // Owner profile snapshot (for feed display)
@@ -79,6 +81,16 @@ export const createPrompt = mutation({
     ownerGender: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
+    // TOD-001 FIX: Verify caller identity
+    const { authUserId } = args;
+    if (!authUserId || authUserId.trim().length === 0) {
+      throw new Error('Unauthorized: authentication required');
+    }
+    const ownerUserId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!ownerUserId) {
+      throw new Error('Unauthorized: user not found');
+    }
+
     const now = Date.now();
     const expiresAt = now + TWENTY_FOUR_HOURS_MS;
 
@@ -96,7 +108,7 @@ export const createPrompt = mutation({
       type: args.type,
       text: args.text,
       isTrending: false, // User-created prompts are never trending
-      ownerUserId: args.ownerUserId,
+      ownerUserId, // TOD-001: Use resolved userId from authUserId
       answerCount: 0,
       activeCount: 0,
       createdAt: now,
@@ -289,14 +301,30 @@ export const getPendingConnectRequests = query({
 });
 
 // Respond to connect request (Connect or Remove)
+// TOD-005 FIX: Auth hardening - verify caller is the intended recipient
 export const respondToConnect = mutation({
   args: {
     requestId: v.id('todConnectRequests'),
     action: v.union(v.literal('connect'), v.literal('remove')),
+    authUserId: v.string(), // TOD-005: Auth verification required
   },
-  handler: async (ctx, { requestId, action }) => {
+  handler: async (ctx, { requestId, action, authUserId }) => {
+    // TOD-005 FIX: Verify caller identity
+    if (!authUserId || authUserId.trim().length === 0) {
+      throw new Error('Unauthorized: authentication required');
+    }
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      throw new Error('Unauthorized: user not found');
+    }
+
     const request = await ctx.db.get(requestId);
     if (!request || request.status !== 'pending') return;
+
+    // TOD-005 FIX: Only the intended recipient can respond
+    if (request.toUserId !== userId) {
+      throw new Error('Unauthorized: only the request recipient can respond');
+    }
 
     if (action === 'connect') {
       await ctx.db.patch(requestId, { status: 'connected' });
@@ -309,7 +337,8 @@ export const respondToConnect = mutation({
 });
 
 // Seed default trending prompts (call once)
-export const seedTrendingPrompts = mutation({
+// TOD-007 FIX: Converted to internal mutation - not exposed to clients
+export const seedTrendingPrompts = internalMutation({
   args: {},
   handler: async (ctx) => {
     const existing = await ctx.db
@@ -344,7 +373,8 @@ export const seedTrendingPrompts = mutation({
 });
 
 // Cleanup expired prompts and their answers + media
-export const cleanupExpiredPrompts = mutation({
+// TOD-010 FIX: Converted to internal mutation - only callable by cron/scheduler
+export const cleanupExpiredPrompts = internalMutation({
   args: {},
   handler: async (ctx) => {
     const now = Date.now();

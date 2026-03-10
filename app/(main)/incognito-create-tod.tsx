@@ -202,12 +202,13 @@ export default function CreateTodScreen() {
     setIsSubmitting(true);
 
     try {
+      // TOD-001 FIX: Use authUserId for server-side verification
       if (visibility === 'anonymous') {
         // Anonymous: no identity, no photo
         await createPrompt({
           type: postType,
           text: content.trim(),
-          ownerUserId: userId || `anon_${Date.now()}`,
+          authUserId: userId || `anon_${Date.now()}`,
           isAnonymous: true,
           photoBlurMode: 'none',
         });
@@ -217,7 +218,7 @@ export default function CreateTodScreen() {
         await createPrompt({
           type: postType,
           text: content.trim(),
-          ownerUserId: userId || `anon_${Date.now()}`,
+          authUserId: userId || `anon_${Date.now()}`,
           isAnonymous: false,
           photoBlurMode: 'none',
           ownerName: ownerIdentity.name,
@@ -233,7 +234,7 @@ export default function CreateTodScreen() {
         await createPrompt({
           type: postType,
           text: content.trim(),
-          ownerUserId: userId || `anon_${Date.now()}`,
+          authUserId: userId || `anon_${Date.now()}`,
           isAnonymous: false,
           photoBlurMode: 'none',
           ownerName: ownerIdentity.name,
