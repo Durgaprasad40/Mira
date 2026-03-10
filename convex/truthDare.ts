@@ -72,14 +72,6 @@ export const createPrompt = mutation({
     authUserId: v.string(), // TOD-001: Auth verification required
     isAnonymous: v.optional(v.boolean()),
     photoBlurMode: v.optional(v.union(v.literal('none'), v.literal('blur'))),
-    // Prompt category (defaults to 'random' if not provided)
-    category: v.optional(v.union(
-      v.literal('spicy'),
-      v.literal('deep'),
-      v.literal('funny'),
-      v.literal('wholesome'),
-      v.literal('random')
-    )),
     // Owner profile snapshot (for feed display)
     ownerName: v.optional(v.string()),
     ownerPhotoUrl: v.optional(v.string()),
@@ -112,9 +104,6 @@ export const createPrompt = mutation({
       }
     }
 
-    // Default category to 'random' if not provided
-    const category = args.category ?? 'random';
-
     const promptId = await ctx.db.insert('todPrompts', {
       type: args.type,
       text: args.text,
@@ -124,7 +113,6 @@ export const createPrompt = mutation({
       activeCount: 0,
       createdAt: now,
       expiresAt,
-      category,
       // Owner profile snapshot (default anonymous)
       isAnonymous: args.isAnonymous ?? true,
       photoBlurMode: args.photoBlurMode ?? 'none',
@@ -136,7 +124,7 @@ export const createPrompt = mutation({
 
     // Debug log for post creation
     const urlPrefix = resolvedPhotoUrl ? (resolvedPhotoUrl.startsWith('https://') ? 'https' : resolvedPhotoUrl.startsWith('http://') ? 'http' : 'other') : 'none';
-    console.log(`[T/D] Created prompt: id=${promptId}, type=${args.type}, category=${category}, isAnon=${args.isAnonymous ?? true}, photoBlurMode=${args.photoBlurMode ?? 'none'}, photoUrlPrefix=${urlPrefix}`);
+    console.log(`[T/D] Created prompt: id=${promptId}, type=${args.type}, isAnon=${args.isAnonymous ?? true}, photoBlurMode=${args.photoBlurMode ?? 'none'}, photoUrlPrefix=${urlPrefix}`);
 
     return { promptId, expiresAt };
   },
@@ -945,34 +933,18 @@ export const cleanupExpiredTodData = internalMutation({
 export const listActivePromptsWithTop2Answers = query({
   args: {
     viewerUserId: v.optional(v.string()),
-    // Optional category filter (only 5 real categories, not 'all')
-    category: v.optional(v.union(
-      v.literal('spicy'),
-      v.literal('deep'),
-      v.literal('funny'),
-      v.literal('wholesome'),
-      v.literal('random')
-    )),
   },
-  handler: async (ctx, { viewerUserId, category }) => {
+  handler: async (ctx, { viewerUserId }) => {
     const now = Date.now();
 
     // Get all prompts
     const allPrompts = await ctx.db.query('todPrompts').collect();
 
     // Filter to active (not expired)
-    let activePrompts = allPrompts.filter((p) => {
+    const activePrompts = allPrompts.filter((p) => {
       const expires = p.expiresAt ?? p.createdAt + TWENTY_FOUR_HOURS_MS;
       return expires > now;
     });
-
-    // Filter by category if provided (normalize missing category to 'random')
-    if (category) {
-      activePrompts = activePrompts.filter((p) => {
-        const promptCategory = p.category ?? 'random';
-        return promptCategory === category;
-      });
-    }
 
     // Compute totalReactionCount for each prompt (sum of all answer reactions)
     const promptReactionCounts: Record<string, number> = {};
@@ -1101,8 +1073,6 @@ export const listActivePromptsWithTop2Answers = query({
           ownerPhotoUrl: prompt.ownerPhotoUrl,
           ownerAge: prompt.ownerAge,
           ownerGender: prompt.ownerGender,
-          // Category (normalized to 'random' for existing prompts without category)
-          category: prompt.category ?? 'random',
           // Engagement metrics
           totalReactionCount: promptReactionCounts[promptIdStr] ?? 0,
           // Answers and viewer state
@@ -1190,8 +1160,6 @@ export const getTrendingTruthAndDare = query({
         ownerPhotoUrl: prompt.ownerPhotoUrl,
         ownerAge: prompt.ownerAge,
         ownerGender: prompt.ownerGender,
-        // Category (normalized to 'random' for existing prompts without category)
-        category: prompt.category ?? 'random',
         // Engagement metrics
         totalReactionCount: promptReactionCounts[promptId] ?? 0,
       };

@@ -512,9 +512,6 @@ export interface TodResponse {
 
 export type TodUserState = "answered" | "skipped" | "could_not_answer";
 
-// Truth & Dare Prompt Categories
-export type TodCategory = 'spicy' | 'deep' | 'funny' | 'wholesome' | 'random';
-
 // Truth & Dare Report Reasons
 export type TodReportReason = 'harassment' | 'sexual' | 'spam' | 'hate' | 'violence' | 'other';
 
