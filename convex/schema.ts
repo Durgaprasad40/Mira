@@ -168,7 +168,8 @@ export default defineSchema({
       v.literal('gay'),
       v.literal('lesbian'),
       v.literal('bisexual'),
-      v.literal('prefer_not_to_say')
+      v.literal('prefer_not_to_say'),
+      v.null()
     )),
     sortBy: v.optional(v.union(
       v.literal('recommended'),
@@ -788,6 +789,7 @@ export default defineSchema({
     roomId: v.optional(v.string()),
   })
     .index('by_reported_user', ['reportedUserId'])
+    .index('by_reporter', ['reporterId'])
     .index('by_status', ['status'])
     .index('by_room', ['roomId']),
 
@@ -800,6 +802,60 @@ export default defineSchema({
     .index('by_blocker', ['blockerId'])
     .index('by_blocked', ['blockedUserId'])
     .index('by_blocker_blocked', ['blockerId', 'blockedUserId']),
+
+  // Support requests table (Phase-2 Safety escalation)
+  supportRequests: defineTable({
+    userId: v.id('users'),
+    category: v.union(
+      v.literal('scam_extortion'),
+      v.literal('non_consensual_sharing'),
+      v.literal('physical_safety'),
+      v.literal('harassment_stalking'),
+      v.literal('other_safety')
+    ),
+    description: v.string(),
+    status: v.union(
+      v.literal('submitted'),
+      v.literal('in_review'),
+      v.literal('resolved'),
+      v.literal('closed')
+    ),
+    // Optional context
+    relatedUserId: v.optional(v.id('users')),
+    relatedReportId: v.optional(v.id('reports')),
+    // Timestamps
+    createdAt: v.number(),
+    updatedAt: v.optional(v.number()),
+    resolvedAt: v.optional(v.number()),
+    // Latest message timestamp for sorting (updated on each message)
+    lastMessageAt: v.optional(v.number()),
+  })
+    .index('by_user', ['userId'])
+    .index('by_status', ['status']),
+
+  // Support messages table (Phase-2 Safety thread messages)
+  supportMessages: defineTable({
+    supportRequestId: v.id('supportRequests'),
+    senderType: v.union(v.literal('user'), v.literal('admin')),
+    senderUserId: v.optional(v.id('users')), // For user messages; admin may be null
+    text: v.optional(v.string()),
+    attachmentType: v.optional(
+      v.union(v.literal('image'), v.literal('video'), v.literal('audio'))
+    ),
+    attachmentStorageId: v.optional(v.id('_storage')),
+    createdAt: v.number(),
+  })
+    .index('by_support_request', ['supportRequestId'])
+    .index('by_request_created', ['supportRequestId', 'createdAt']),
+
+  // Support conversation snapshots (captures last 20 messages for moderation context)
+  supportConversationSnapshots: defineTable({
+    supportRequestId: v.id('supportRequests'),
+    senderUserId: v.id('users'),
+    messageText: v.optional(v.string()),
+    attachmentType: v.optional(v.string()),
+    createdAt: v.number(),
+  }).index('by_support_request', ['supportRequestId']),
 
   // OTP table for verification
   otpCodes: defineTable({
@@ -988,6 +1044,13 @@ export default defineSchema({
     // Phase-1 imported fields (read-only after import, stored in Phase-2 for isolation)
     hobbies: v.optional(v.array(v.string())),
     isVerified: v.optional(v.boolean()),
+    // Phase-2 profile details (editable)
+    height: v.optional(v.number()),
+    weight: v.optional(v.number()),
+    smoking: v.optional(v.string()),
+    drinking: v.optional(v.string()),
+    education: v.optional(v.string()),
+    religion: v.optional(v.string()),
     createdAt: v.number(),
     updatedAt: v.number(),
   })

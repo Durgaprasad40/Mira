@@ -80,6 +80,7 @@ interface PrivateProfileState {
   isVerified: boolean;    // Imported from Phase-1 verification status
   // Extended imported fields (read-only, editable later in settings)
   height: number | null;
+  weight: number | null;
   smoking: string | null;
   drinking: string | null;
   kids: string | null;
@@ -93,6 +94,9 @@ interface PrivateProfileState {
   phase2OnboardingCompleted: boolean;
   convexProfileId: string | null;
   _hasHydrated: boolean;
+
+  // Profile visibility (Pause Profile feature)
+  isPrivateEnabled: boolean; // true = visible in Desire Land, false = paused/hidden
 
   // Phase-2 setup tracking
   acceptedTermsAt: number | null;
@@ -150,6 +154,7 @@ interface PrivateProfileState {
   // Actions — individual profile field setters (for Phase-2 editing)
   setGender: (gender: string) => void;
   setHeight: (height: number | null) => void;
+  setWeight: (weight: number | null) => void;
   setSmoking: (smoking: string | null) => void;
   setDrinking: (drinking: string | null) => void;
   setEducation: (education: string | null) => void;
@@ -187,6 +192,9 @@ interface PrivateProfileState {
   setWhoCanMessageMe: (who: 'everyone' | 'matches' | 'verified') => void;
   setSafeMode: (enabled: boolean) => void;
 
+  // Profile Visibility Actions (Pause Profile)
+  setIsPrivateEnabled: (enabled: boolean) => void;
+
   // Deletion Actions
   initiatePrivateDataDeletion: () => void;
   recoverPrivateData: () => void;
@@ -206,6 +214,15 @@ interface PrivateProfileState {
     isSetupComplete: boolean;
     hobbies?: string[];
     isVerified?: boolean;
+    // Profile details fields
+    height?: number | null;
+    weight?: number | null;
+    smoking?: string | null;
+    drinking?: string | null;
+    education?: string | null;
+    religion?: string | null;
+    // Profile visibility
+    isPrivateEnabled?: boolean;
   } | null) => void;
 }
 
@@ -229,6 +246,7 @@ const initialWizardState = {
   isVerified: false,
   // Extended imported fields
   height: null as number | null,
+  weight: null as number | null,
   smoking: null as string | null,
   drinking: null as string | null,
   kids: null as string | null,
@@ -238,6 +256,7 @@ const initialWizardState = {
   isSetupComplete: false,
   phase2OnboardingCompleted: false, // Permanent - never reset
   convexProfileId: null as string | null,
+  isPrivateEnabled: true, // Default: visible in Desire Land
   // Phase-2 setup tracking
   acceptedTermsAt: null as number | null,
   phase2SetupVersion: null as number | null,
@@ -294,6 +313,7 @@ export const usePrivateProfileStore = create<PrivateProfileState>()((set) => ({
   // Individual profile field setters
   setGender: (gender) => set({ gender }),
   setHeight: (height) => set({ height }),
+  setWeight: (weight) => set({ weight }),
   setSmoking: (smoking) => set({ smoking }),
   setDrinking: (drinking) => set({ drinking }),
   setEducation: (education) => set({ education }),
@@ -440,6 +460,9 @@ export const usePrivateProfileStore = create<PrivateProfileState>()((set) => ({
   setWhoCanMessageMe: (who) => set({ whoCanMessageMe: who }),
   setSafeMode: (enabled) => set({ safeMode: enabled }),
 
+  // Profile Visibility (Pause Profile)
+  setIsPrivateEnabled: (enabled) => set({ isPrivateEnabled: enabled }),
+
   // Deletion actions
   initiatePrivateDataDeletion: () => {
     const now = Date.now();
@@ -469,10 +492,14 @@ export const usePrivateProfileStore = create<PrivateProfileState>()((set) => ({
         profileId: convexProfile._id,
         displayName: convexProfile.displayName,
         isSetupComplete: convexProfile.isSetupComplete,
+        convexPhotoCount: convexProfile.privatePhotoUrls?.length || 0,
+        height: convexProfile.height,
+        weight: convexProfile.weight,
       });
     }
 
     // Hydrate store with Convex profile data
+    // ALWAYS hydrate from Convex - this is the source of truth after restart
     set({
       // Profile info
       displayName: convexProfile.displayName || '',
@@ -486,8 +513,17 @@ export const usePrivateProfileStore = create<PrivateProfileState>()((set) => ({
       desireTags: (convexProfile.privateDesireTagKeys || []) as any,
       boundaries: (convexProfile.privateBoundaries || []) as any,
 
-      // Photos
+      // HYDRATION FIX: Always set photos from Convex after restart
+      // This is the source of truth - don't preserve stale local state
       selectedPhotoUrls: convexProfile.privatePhotoUrls || [],
+
+      // Profile details - hydrate from Convex
+      height: convexProfile.height ?? null,
+      weight: convexProfile.weight ?? null,
+      smoking: convexProfile.smoking ?? null,
+      drinking: convexProfile.drinking ?? null,
+      education: convexProfile.education ?? null,
+      religion: convexProfile.religion ?? null,
 
       // Imported fields
       hobbies: convexProfile.hobbies || [],
@@ -498,9 +534,18 @@ export const usePrivateProfileStore = create<PrivateProfileState>()((set) => ({
       phase2OnboardingCompleted: convexProfile.isSetupComplete, // If profile exists & setup complete, onboarding is done
       convexProfileId: convexProfile._id,
 
+      // Profile visibility (Pause Profile)
+      isPrivateEnabled: convexProfile.isPrivateEnabled ?? true, // Default to visible if undefined
+
       // Mark as hydrated
       _hasHydrated: true,
     });
+
+    if (__DEV__) {
+      console.log('[privateProfileStore] hydrateFromConvex complete:', {
+        photoCount: convexProfile.privatePhotoUrls?.length || 0,
+      });
+    }
   },
 }));
 

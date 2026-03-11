@@ -1902,3 +1902,91 @@ export const setPrivateWelcomeConfirmed = mutation({
     return { success: true };
   },
 });
+
+// ============================================================================
+// PHASE-2 SAFETY + TRUST QUERIES
+// ============================================================================
+
+/**
+ * Get list of users blocked by the current user.
+ * Returns basic info for display in Blocked Users settings screen.
+ * Auth-safe: uses authUserId parameter instead of ctx.auth.
+ */
+export const getMyBlockedUsers = query({
+  args: {
+    authUserId: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const resolvedUserId = await resolveUserIdByAuthId(ctx, args.authUserId);
+    if (!resolvedUserId) {
+      return { success: false, error: 'user_not_found', blockedUsers: [] };
+    }
+
+    // Get all blocks where this user is the blocker
+    const blocks = await ctx.db
+      .query('blocks')
+      .withIndex('by_blocker', (q) => q.eq('blockerId', resolvedUserId))
+      .collect();
+
+    // Fetch basic info for each blocked user
+    const blockedUsers = await Promise.all(
+      blocks.map(async (block) => {
+        const user = await ctx.db.get(block.blockedUserId);
+        if (!user) return null;
+        return {
+          blockId: block._id,
+          blockedUserId: block.blockedUserId,
+          displayName: user.name || 'Unknown',
+          blockedAt: block.createdAt,
+        };
+      })
+    );
+
+    return {
+      success: true,
+      blockedUsers: blockedUsers.filter(Boolean),
+    };
+  },
+});
+
+/**
+ * Get reports submitted by the current user (last 30 days).
+ * Does NOT expose any info about who reported the current user.
+ * Auth-safe: uses authUserId parameter instead of ctx.auth.
+ */
+export const getMyReports = query({
+  args: {
+    authUserId: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const resolvedUserId = await resolveUserIdByAuthId(ctx, args.authUserId);
+    if (!resolvedUserId) {
+      return { success: false, error: 'user_not_found', reports: [] };
+    }
+
+    // 30-day window
+    const thirtyDaysAgo = Date.now() - 30 * 24 * 60 * 60 * 1000;
+
+    // Get reports where this user is the reporter
+    const reports = await ctx.db
+      .query('reports')
+      .withIndex('by_reporter', (q) => q.eq('reporterId', resolvedUserId))
+      .filter((q) => q.gte(q.field('createdAt'), thirtyDaysAgo))
+      .order('desc')
+      .collect();
+
+    // Map to safe output (no reportedUserId info for privacy)
+    const safeReports = reports.map((report) => ({
+      reportId: report._id,
+      reason: report.reason,
+      status: report.status,
+      createdAt: report.createdAt,
+      hasDescription: !!report.description,
+    }));
+
+    return {
+      success: true,
+      reports: safeReports,
+    };
+  },
+});

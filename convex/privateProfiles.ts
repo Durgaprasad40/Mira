@@ -97,6 +97,15 @@ export const updateFields = mutation({
     privateBio: v.optional(v.string()),
     revealPolicy: v.optional(v.union(v.literal('mutual_only'), v.literal('request_based'))),
     isSetupComplete: v.optional(v.boolean()),
+    // Profile details
+    height: v.optional(v.union(v.number(), v.null())),
+    weight: v.optional(v.union(v.number(), v.null())),
+    smoking: v.optional(v.union(v.string(), v.null())),
+    drinking: v.optional(v.union(v.string(), v.null())),
+    education: v.optional(v.union(v.string(), v.null())),
+    religion: v.optional(v.union(v.string(), v.null())),
+    // Photos
+    privatePhotoUrls: v.optional(v.array(v.string())),
   },
   handler: async (ctx, args) => {
     // BE-001 SECURITY FIX: Require authentication and verify ownership
@@ -203,6 +212,67 @@ export const deleteProfile = mutation({
     }
 
     await ctx.db.delete(existing._id);
+    return { success: true };
+  },
+});
+
+/**
+ * Update specific fields on private profile by auth user ID.
+ * Uses the same auth-safe pattern as upsertByAuthId (no ctx.auth.getUserIdentity).
+ * Used by Phase-2 profile for photo sync and field updates.
+ */
+export const updateFieldsByAuthId = mutation({
+  args: {
+    authUserId: v.string(),
+    // Photos
+    privatePhotoUrls: v.optional(v.array(v.string())),
+    // Profile details
+    height: v.optional(v.union(v.number(), v.null())),
+    weight: v.optional(v.union(v.number(), v.null())),
+    smoking: v.optional(v.union(v.string(), v.null())),
+    drinking: v.optional(v.union(v.string(), v.null())),
+    education: v.optional(v.union(v.string(), v.null())),
+    religion: v.optional(v.union(v.string(), v.null())),
+    // Other optional fields
+    privateBio: v.optional(v.string()),
+    privateIntentKeys: v.optional(v.array(v.string())),
+    isPrivateEnabled: v.optional(v.boolean()),
+  },
+  handler: async (ctx, args) => {
+    const userId = await resolveUserIdByAuthId(ctx, args.authUserId);
+    if (!userId) {
+      console.warn('[PRIVATE_PROFILE] updateFieldsByAuthId: user not found');
+      return { success: false, error: 'user_not_found' };
+    }
+
+    // Check if private data is in pending_deletion state
+    const isDeleted = await isPrivateDataDeleted(ctx, userId);
+    if (isDeleted) {
+      console.warn('[PRIVATE_PROFILE] updateFieldsByAuthId: deletion pending');
+      return { success: false, error: 'deletion_pending' };
+    }
+
+    const existing = await ctx.db
+      .query('userPrivateProfiles')
+      .withIndex('by_user', (q) => q.eq('userId', userId))
+      .first();
+
+    if (!existing) {
+      console.warn('[PRIVATE_PROFILE] updateFieldsByAuthId: profile not found');
+      return { success: false, error: 'profile_not_found' };
+    }
+
+    // Build clean updates (only defined values)
+    const { authUserId, ...updates } = args;
+    const cleanUpdates: Record<string, unknown> = { updatedAt: Date.now() };
+    for (const [key, value] of Object.entries(updates)) {
+      if (value !== undefined) {
+        cleanUpdates[key] = value;
+      }
+    }
+
+    await ctx.db.patch(existing._id, cleanUpdates);
+    console.log('[PRIVATE_PROFILE] updateFieldsByAuthId: success');
     return { success: true };
   },
 });

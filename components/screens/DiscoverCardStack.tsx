@@ -849,6 +849,22 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
         // Guard: check mounted/focused before navigating on match
         if (!mountedRef.current || !isFocusedRef.current) return;
         if (result?.isMatch && !navigatingRef.current) {
+          // DL-001 FIX: Phase-2 matches stay on Desire Land, no navigation
+          if (isPhase2) {
+            const isNewMatch = handlePhase2Match({
+              id: swipedProfile.id,
+              name: swipedProfile.name,
+              age: swipedProfile.age,
+              photoUrl: swipedProfile.photos?.[0]?.url,
+            });
+            if (isNewMatch) {
+              trackEvent({ name: 'match_created', otherUserId: swipedProfile.id });
+            }
+            releaseSwipeLock(activeSwipeId);
+            return;
+          }
+
+          // Phase-1: Navigate to match-celebration
           navigatingRef.current = true;
           // B6 fix: wrap navigation in try/catch and reset navigatingRef on failure
           // 3B-4: Defer swipe lock release until after navigation initiated

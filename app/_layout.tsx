@@ -13,6 +13,20 @@ initSentry();
 // on Android before activity is ready. This is non-critical (screen may sleep during dev).
 if (__DEV__) {
   LogBox.ignoreLogs(["Unable to activate keep awake"]);
+
+  // Also patch console.error to suppress keep-awake messages at the console level
+  // This catches errors that appear before ErrorUtils handlers are invoked
+  const originalConsoleError = console.error;
+  console.error = (...args: any[]) => {
+    const message = args[0]?.toString?.() || '';
+    if (message.includes('Unable to activate keep awake') ||
+        message.includes('keep awake') ||
+        message.includes('keepAwake')) {
+      // Silently suppress - this is expected during lifecycle transitions
+      return;
+    }
+    originalConsoleError.apply(console, args);
+  };
 }
 
 // P0-1 STABILITY FIX: Global error handlers with Sentry integration

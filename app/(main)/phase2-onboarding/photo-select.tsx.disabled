@@ -180,10 +180,12 @@ export default function Phase2PhotoSelect() {
 
   // Live mode: Read from privateProfileStore where index.tsx imported the photos
   const privateStorePhotoSlots = usePrivateProfileStore((s) => s.phase1PhotoSlots);
+  const privateStoreSelectedPhotoUrls = usePrivateProfileStore((s) => s.selectedPhotoUrls);
   const privateStoreDisplayName = usePrivateProfileStore((s) => s.displayName);
   const privateStoreAge = usePrivateProfileStore((s) => s.age);
   const privateStoreGender = usePrivateProfileStore((s) => s.gender);
 
+  // FIX: Photo source priority - use selectedPhotoUrls as fallback if phase1PhotoSlots is empty
   const phase1PhotoSlots = useMemo(() => {
     if (isDemoMode) {
       // Demo mode: Use demoStore
@@ -194,15 +196,43 @@ export default function Phase2PhotoSelect() {
       }
       return slots;
     } else {
-      // Live mode: Use privateProfileStore (imported from Convex in index.tsx)
+      // Live mode: Priority order:
+      // 1. phase1PhotoSlots (if has photos)
+      // 2. selectedPhotoUrls (already selected Phase-2 photos)
+      // 3. Empty slots
+      const phase1Count = privateStorePhotoSlots.filter(Boolean).length;
+      const selectedCount = privateStoreSelectedPhotoUrls.filter(Boolean).length;
+
       if (__DEV__) {
-        const first2 = privateStorePhotoSlots.filter(Boolean).slice(0, 2);
-        console.log('[P2 PhotoSelect] source=privateProfileStore, slots:', privateStorePhotoSlots.filter(Boolean).length);
-        console.log('[P2 PhotoSelect] first 2 stored URLs:', first2);
+        console.log('[P2 PhotoSelect] phase1PhotoSlots:', phase1Count);
+        console.log('[P2 PhotoSelect] selectedPhotoUrls:', selectedCount);
       }
-      return privateStorePhotoSlots;
+
+      if (phase1Count > 0) {
+        // Use Phase-1 imported photos
+        if (__DEV__) {
+          console.log('[P2 PhotoSelect] using phase1PhotoSlots');
+        }
+        return privateStorePhotoSlots;
+      } else if (selectedCount > 0) {
+        // Fallback: Convert selectedPhotoUrls to slot format
+        const slots = createEmptySlots();
+        privateStoreSelectedPhotoUrls.forEach((url, idx) => {
+          if (url && idx < 9) slots[idx] = url;
+        });
+        if (__DEV__) {
+          console.log('[P2 PhotoSelect] using selectedPhotoUrls as fallback, slots:', slots.filter(Boolean).length);
+        }
+        return slots;
+      }
+
+      // No photos available
+      if (__DEV__) {
+        console.log('[P2 PhotoSelect] no photos found');
+      }
+      return createEmptySlots();
     }
-  }, [isDemoMode, getCurrentProfile, demoProfiles, currentDemoUserId, privateStorePhotoSlots]);
+  }, [isDemoMode, getCurrentProfile, demoProfiles, currentDemoUserId, privateStorePhotoSlots, privateStoreSelectedPhotoUrls]);
 
   // Profile info from Phase-1 (mode-aware)
   const displayName = isDemoMode

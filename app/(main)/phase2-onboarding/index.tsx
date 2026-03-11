@@ -256,6 +256,7 @@ export default function Phase2OnboardingTerms() {
 
   const setAcceptedTermsAt = usePrivateProfileStore((s) => s.setAcceptedTermsAt);
   const importPhase1Data = usePrivateProfileStore((s) => s.importPhase1Data);
+  const setSelectedPhotos = usePrivateProfileStore((s) => s.setSelectedPhotos);
 
   // Handle X/Cancel button - explicit exit from Phase-2 onboarding
   const handleExitOnboarding = () => {
@@ -441,11 +442,16 @@ export default function Phase2OnboardingTerms() {
       };
 
       // FIX P2-DATA-001: Import data BEFORE navigation to prevent race condition
-      // photo-select reads from store immediately on mount, so data must be ready first
       importPhase1Data(phase1Data);
 
-      // Navigate after data is ready
-      router.push("/(main)/phase2-onboarding/photo-select" as any);
+      // Auto-select Phase-1 photos for Phase-2 (photo selection now happens on profile screen)
+      const phase1PhotoUrls = validatedSlots.filter(Boolean) as string[];
+      if (phase1PhotoUrls.length > 0) {
+        setSelectedPhotos([], phase1PhotoUrls);
+      }
+
+      // Navigate directly to profile-edit (skip photo-select screen - photos managed on profile)
+      router.push("/(main)/phase2-onboarding/profile-edit" as any);
     } catch (err) {
       if (__DEV__) console.error("[Phase2Onboarding] Error:", err);
     } finally {

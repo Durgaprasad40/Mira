@@ -58,6 +58,18 @@ export const generateUploadUrl = mutation({
 });
 
 /**
+ * Get the URL for a storage ID.
+ * Used by Phase-2 private profile to get permanent URLs after upload.
+ */
+export const getStorageUrl = mutation({
+  args: { storageId: v.id('_storage') },
+  handler: async (ctx, args) => {
+    const url = await ctx.storage.getUrl(args.storageId);
+    return url;
+  },
+});
+
+/**
  * 8A: Validate photo before upload.
  * Call this before uploading to check size/type constraints.
  */

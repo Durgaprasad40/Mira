@@ -38,6 +38,11 @@ export const swipe = mutation({
     const { fromUserId, toUserId, action, message } = args;
     const now = Date.now();
 
+    // P2-003 FIX: Prevent self-swiping
+    if (fromUserId === toUserId) {
+      throw new Error('Cannot swipe on yourself');
+    }
+
     const fromUser = await ctx.db.get(fromUserId);
     if (!fromUser) throw new Error('User not found');
 

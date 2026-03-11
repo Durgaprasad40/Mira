@@ -123,6 +123,11 @@ export const sendMessage = mutation({
       throw new Error('You are in read-only mode (24h)');
     }
 
+    // P2-006 FIX: Enforce message length limit (5000 characters max)
+    if (content.length > 5000) {
+      throw new Error('Message too long');
+    }
+
     // BUGFIX #3: Check for duplicate message (idempotency for retries)
     if (clientMessageId) {
       const existing = await ctx.db
@@ -154,6 +159,22 @@ export const sendMessage = mutation({
     // Block sending to expired confession-based conversations
     if (conversation.confessionId && conversation.expiresAt && conversation.expiresAt <= now) {
       throw new Error('This chat has expired');
+    }
+
+    // P2-007 FIX: Rate limiting for 1:1 messages (10 messages per minute per sender per conversation)
+    const oneMinuteAgo = now - 60000;
+    const recentMessages = await ctx.db
+      .query('messages')
+      .withIndex('by_conversation_created', (q) => q.eq('conversationId', conversationId))
+      .filter((q) =>
+        q.and(
+          q.eq(q.field('senderId'), senderId),
+          q.gt(q.field('createdAt'), oneMinuteAgo)
+        )
+      )
+      .take(10);
+    if (recentMessages.length >= 10) {
+      throw new Error('You are sending messages too quickly');
     }
 
     const sender = await ctx.db.get(senderId);
