@@ -197,11 +197,16 @@ export default function Index() {
     // Start validation (even if FAST_PATH, validate in background)
     convexValidationStarted.current = true;
 
+    // H5 FIX: Capture start time to detect logout during async validation
+    // Defined at effect scope so it's accessible in both validateSession and .catch() handler
+    const validationStartTime = Date.now();
+
     if (__DEV__) {
       console.log('[AUTH_BOOT] Validating session via Convex' + (cachedOnboardingCompleted ? ' (background)' : '') + ', userId:', userId.substring(0, 10) + '...');
     }
 
     const validateSession = async () => {
+
       const timeout = 5000; // 5 second timeout
       const timeoutPromise = new Promise((_, reject) =>
         setTimeout(() => reject(new Error('Validation timeout')), timeout)
@@ -245,6 +250,13 @@ export default function Index() {
             watchdogTimerRef.current = null;
           }
 
+          // H5 FIX: Check if logout occurred during async validation
+          // If so, do NOT restore auth state - user has logged out
+          if (useAuthStore.getState()._logoutTimestamp > validationStartTime) {
+            if (__DEV__) console.log('[AUTH_BOOT] Skipping setAuth - logout occurred during validation');
+            return;
+          }
+
           // Update authStore with real onboarding status
           useAuthStore.getState().setAuth(userId, token, backendOnboardingCompleted);
         } else {
@@ -270,6 +282,11 @@ export default function Index() {
         // If cached=true, route to home - SessionValidator will catch invalid sessions
         // If cached=false, route to onboarding - user needs to complete it anyway
         if (cachedOnboardingCompleted) {
+          // H5 FIX: Check if logout occurred during async validation
+          if (useAuthStore.getState()._logoutTimestamp > validationStartTime) {
+            if (__DEV__) console.log('[AUTH_BOOT] Skipping setAuth (catch) - logout occurred during validation');
+            return;
+          }
           if (__DEV__) {
             console.warn('[AUTH_BOOT] Validation failed, trusting cached onboardingCompleted=true -> home');
           }
@@ -300,6 +317,11 @@ export default function Index() {
 
       // H3 FIX: Trust cached onboardingCompleted on unhandled error (same as catch block above)
       if (cachedOnboardingCompleted) {
+        // H5 FIX: Check if logout occurred during async validation
+        if (useAuthStore.getState()._logoutTimestamp > validationStartTime) {
+          if (__DEV__) console.log('[AUTH_BOOT] Skipping setAuth (unhandled) - logout occurred during validation');
+          return;
+        }
         if (__DEV__) {
           console.warn('[AUTH_BOOT] Unhandled error, trusting cached onboardingCompleted=true -> home');
         }
@@ -435,9 +457,16 @@ export default function Index() {
 
     // Restore demo auth session if needed (covers app restart)
     // Skip if we're forcing logout (onboarding not completed)
-    if (isDemoMode && currentDemoUserId && !useAuthStore.getState().isAuthenticated && bootAction.type !== "FORCE_WELCOME_ONBOARDING_INCOMPLETE") {
-      const onbComplete = !!demoOnboardingComplete[currentDemoUserId];
-      useAuthStore.getState().setAuth(currentDemoUserId, 'demo_token', onbComplete);
+    // H5 FIX: Also skip if a recent logout occurred (prevents restore after demo logout)
+    const authState = useAuthStore.getState();
+    if (isDemoMode && currentDemoUserId && !authState.isAuthenticated && bootAction.type !== "FORCE_WELCOME_ONBOARDING_INCOMPLETE") {
+      // H5 FIX: Check if logout occurred recently (within last 5 seconds)
+      if (authState._logoutTimestamp > Date.now() - 5000) {
+        if (__DEV__) console.log('[BOOT] Skipping demo auth restore - recent logout detected');
+      } else {
+        const onbComplete = !!demoOnboardingComplete[currentDemoUserId];
+        useAuthStore.getState().setAuth(currentDemoUserId, 'demo_token', onbComplete);
+      }
     }
 
     // Signal to BootScreen that routing decision has been made
