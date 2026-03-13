@@ -354,9 +354,13 @@ export default function ConfessionsScreen() {
         reactionCount: c.reactionCount,
       }));
     }
-    // Demo mode: use helper with seen tracking (currentUserId guaranteed in demo mode)
+    // Demo mode: use helper with seen tracking
+    if (!currentUserId) {
+      // Guard: return empty array until currentUserId is hydrated
+      return [];
+    }
     const seenSet = new Set(seenTaggedConfessionIds);
-    return buildDemoTaggedConfessions(demoConfessions, currentUserId!, seenSet);
+    return buildDemoTaggedConfessions(demoConfessions, currentUserId, seenSet);
   }, [isDemoMode, convexTaggedConfessions, demoConfessions, currentUserId, seenTaggedConfessionIds]);
 
   // Process all confession state through the integrity module
