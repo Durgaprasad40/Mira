@@ -1051,6 +1051,18 @@ export default defineSchema({
     drinking: v.optional(v.string()),
     education: v.optional(v.string()),
     religion: v.optional(v.string()),
+    // Phase-2 Onboarding Step 3: Prompt answers
+    promptAnswers: v.optional(v.array(v.object({
+      promptId: v.string(),
+      question: v.string(),
+      answer: v.string(),
+    }))),
+    // Phase-2 Preference Strength (ranking signal)
+    preferenceStrength: v.optional(v.object({
+      smoking: v.union(v.literal('not_important'), v.literal('slight_preference'), v.literal('important'), v.literal('deal_breaker')),
+      drinking: v.union(v.literal('not_important'), v.literal('slight_preference'), v.literal('important'), v.literal('deal_breaker')),
+      intent: v.union(v.literal('not_important'), v.literal('prefer_similar'), v.literal('important'), v.literal('must_match_exactly')),
+    })),
     createdAt: v.number(),
     updatedAt: v.number(),
   })

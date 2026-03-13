@@ -1903,6 +1903,77 @@ export const setPrivateWelcomeConfirmed = mutation({
   },
 });
 
+/**
+ * DEV ONLY: Reset Phase-2 onboarding for a user.
+ * This allows re-testing Phase-2 onboarding by clearing all completion flags
+ * and deleting the private profile.
+ *
+ * SAFETY: Does NOT touch Phase-1 data, auth, or main profile.
+ *
+ * What this resets:
+ * - users.phase2OnboardingCompleted → false
+ * - users.phase2OnboardingCompletedAt → undefined
+ * - users.privateWelcomeConfirmed → false (optional, for full reset)
+ * - userPrivateProfiles record → DELETED
+ * - privateDeletionStates record → DELETED (if exists)
+ */
+export const resetPhase2Onboarding = mutation({
+  args: {
+    userId: v.union(v.id('users'), v.string()),
+  },
+  handler: async (ctx, args) => {
+    const resolvedUserId = await resolveUserIdByAuthId(ctx, args.userId as string);
+    if (!resolvedUserId) {
+      console.warn('[P2_RESET] resetPhase2Onboarding: user not found');
+      return { success: false, error: 'user_not_found' };
+    }
+
+    const user = await ctx.db.get(resolvedUserId);
+    if (!user) {
+      console.warn('[P2_RESET] resetPhase2Onboarding: user document not found');
+      return { success: false, error: 'user_not_found' };
+    }
+
+    console.log('[P2_RESET] Starting Phase-2 reset for user:', resolvedUserId.substring(0, 8));
+
+    // 1. Clear Phase-2 completion flags on user record
+    await ctx.db.patch(resolvedUserId, {
+      phase2OnboardingCompleted: false,
+      phase2OnboardingCompletedAt: undefined,
+      privateWelcomeConfirmed: false,
+      privateWelcomeConfirmedAt: undefined,
+    });
+    console.log('[P2_RESET] Cleared phase2OnboardingCompleted flag');
+
+    // 2. Delete userPrivateProfiles record (if exists)
+    const privateProfile = await ctx.db
+      .query('userPrivateProfiles')
+      .withIndex('by_user', (q) => q.eq('userId', resolvedUserId))
+      .first();
+
+    if (privateProfile) {
+      await ctx.db.delete(privateProfile._id);
+      console.log('[P2_RESET] Deleted userPrivateProfiles record');
+    } else {
+      console.log('[P2_RESET] No userPrivateProfiles record found');
+    }
+
+    // 3. Delete privateDeletionStates record (if exists)
+    const deletionState = await ctx.db
+      .query('privateDeletionStates')
+      .withIndex('by_userId', (q) => q.eq('userId', resolvedUserId))
+      .first();
+
+    if (deletionState) {
+      await ctx.db.delete(deletionState._id);
+      console.log('[P2_RESET] Deleted privateDeletionStates record');
+    }
+
+    console.log('[P2_RESET] Phase-2 reset complete for user:', resolvedUserId.substring(0, 8));
+    return { success: true };
+  },
+});
+
 // ============================================================================
 // PHASE-2 SAFETY + TRUST QUERIES
 // ============================================================================

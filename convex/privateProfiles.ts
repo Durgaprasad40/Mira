@@ -237,6 +237,12 @@ export const updateFieldsByAuthId = mutation({
     privateBio: v.optional(v.string()),
     privateIntentKeys: v.optional(v.array(v.string())),
     isPrivateEnabled: v.optional(v.boolean()),
+    // Phase-2 Onboarding Step 3: Prompt answers
+    promptAnswers: v.optional(v.array(v.object({
+      promptId: v.string(),
+      question: v.string(),
+      answer: v.string(),
+    }))),
   },
   handler: async (ctx, args) => {
     const userId = await resolveUserIdByAuthId(ctx, args.authUserId);
@@ -331,6 +337,25 @@ export const upsertByAuthId = mutation({
     isSetupComplete: v.optional(v.boolean()),
     hobbies: v.optional(v.array(v.string())),
     isVerified: v.optional(v.boolean()),
+    // Profile details (imported from Phase-1)
+    height: v.optional(v.union(v.number(), v.null())),
+    weight: v.optional(v.union(v.number(), v.null())),
+    smoking: v.optional(v.union(v.string(), v.null())),
+    drinking: v.optional(v.union(v.string(), v.null())),
+    education: v.optional(v.union(v.string(), v.null())),
+    religion: v.optional(v.union(v.string(), v.null())),
+    // Phase-2 Onboarding Step 3: Prompt answers
+    promptAnswers: v.optional(v.array(v.object({
+      promptId: v.string(),
+      question: v.string(),
+      answer: v.string(),
+    }))),
+    // Phase-2 Preference Strength (ranking signal)
+    preferenceStrength: v.optional(v.object({
+      smoking: v.union(v.literal('not_important'), v.literal('slight_preference'), v.literal('important'), v.literal('deal_breaker')),
+      drinking: v.union(v.literal('not_important'), v.literal('slight_preference'), v.literal('important'), v.literal('deal_breaker')),
+      intent: v.union(v.literal('not_important'), v.literal('prefer_similar'), v.literal('important'), v.literal('must_match_exactly')),
+    })),
   },
   handler: async (ctx, args) => {
     const userId = await resolveUserIdByAuthId(ctx, args.authUserId);
@@ -374,7 +399,35 @@ export const upsertByAuthId = mutation({
       isSetupComplete: args.isSetupComplete ?? true,
       hobbies: args.hobbies ?? [],
       isVerified: args.isVerified ?? false,
+      // Phase-2 Onboarding Step 3: Prompt answers
+      promptAnswers: args.promptAnswers ?? [],
     };
+
+    // Profile details (imported from Phase-1) - only include if defined
+    // Schema uses v.optional(), not v.union with null, so we omit undefined/null values
+    if (args.height !== undefined && args.height !== null) {
+      (profileData as any).height = args.height;
+    }
+    if (args.weight !== undefined && args.weight !== null) {
+      (profileData as any).weight = args.weight;
+    }
+    if (args.smoking !== undefined && args.smoking !== null) {
+      (profileData as any).smoking = args.smoking;
+    }
+    if (args.drinking !== undefined && args.drinking !== null) {
+      (profileData as any).drinking = args.drinking;
+    }
+    if (args.education !== undefined && args.education !== null) {
+      (profileData as any).education = args.education;
+    }
+    if (args.religion !== undefined && args.religion !== null) {
+      (profileData as any).religion = args.religion;
+    }
+
+    // Preference Strength - only include if provided (fully complete object)
+    if (args.preferenceStrength) {
+      (profileData as any).preferenceStrength = args.preferenceStrength;
+    }
 
     if (existing) {
       await ctx.db.patch(existing._id, {
