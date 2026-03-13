@@ -24,10 +24,12 @@ interface Props {
   reportedUserName: string;
   currentUserId: string;
   conversationId?: string;
+  matchId?: string; // For unmatch functionality
   onBlockSuccess?: () => void;
+  onUnmatchSuccess?: () => void;
 }
 
-type ActionType = 'uncrush' | 'block' | 'report' | 'spam' | 'scam' | 'other';
+type ActionType = 'unmatch' | 'uncrush' | 'block' | 'report' | 'spam' | 'scam' | 'other';
 
 export function ReportBlockModal({
   visible,
@@ -36,13 +38,16 @@ export function ReportBlockModal({
   reportedUserName,
   currentUserId,
   conversationId,
+  matchId,
   onBlockSuccess,
+  onUnmatchSuccess,
 }: Props) {
   const [showOtherInput, setShowOtherInput] = useState(false);
   const [otherReason, setOtherReason] = useState("");
 
   const blockMutation = useMutation(api.users.blockUser);
   const reportMutation = useMutation(api.users.reportUser);
+  const unmatchMutation = useMutation(api.matches.unmatch);
 
   // Track action with standard payload
   const logAction = (action: ActionType, reason?: string) => {
@@ -68,6 +73,51 @@ export function ReportBlockModal({
     setShowOtherInput(false);
     setOtherReason("");
     onClose();
+  };
+
+  // Unmatch: confirm dialog then remove match (separate from block)
+  const handleUnmatch = () => {
+    Alert.alert(
+      "Unmatch?",
+      `This will remove your match and close the conversation. ${reportedUserName} will no longer appear in your matches.`,
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Unmatch",
+          style: "destructive",
+          onPress: async () => {
+            logAction('unmatch');
+            if (isDemoMode) {
+              // Demo mode: remove match and conversation
+              useDemoStore.getState().removeMatch(reportedUserId);
+              Toast.show(`Unmatched with ${reportedUserName}`);
+              resetAndClose();
+              onUnmatchSuccess?.();
+              return;
+            }
+
+            // Convex mode: call unmatch mutation
+            if (!matchId) {
+              Alert.alert("Error", "Cannot unmatch: match information not available.");
+              return;
+            }
+
+            try {
+              // AUTH FIX: Pass authUserId for server-side resolution
+              await unmatchMutation({
+                matchId: matchId as any,
+                authUserId: currentUserId,
+              });
+              Toast.show(`Unmatched with ${reportedUserName}`);
+              resetAndClose();
+              onUnmatchSuccess?.();
+            } catch (error: any) {
+              Alert.alert("Error", error.message || "Failed to unmatch.");
+            }
+          },
+        },
+      ]
+    );
   };
 
   // Uncrush: confirm dialog then remove like
@@ -225,6 +275,17 @@ export function ReportBlockModal({
   // Main action sheet
   const renderMain = () => (
     <View style={styles.content}>
+      {/* Unmatch - only show if there's a matchId (matched users) */}
+      {matchId && (
+        <>
+          <TouchableOpacity style={styles.actionRow} onPress={handleUnmatch}>
+            <Ionicons name="close-circle-outline" size={20} color={COLORS.textLight} />
+            <Text style={styles.actionText}>Unmatch</Text>
+          </TouchableOpacity>
+          <View style={styles.divider} />
+        </>
+      )}
+
       {/* Uncrush */}
       <TouchableOpacity style={styles.actionRow} onPress={handleUncrush}>
         <Ionicons name="heart-dislike-outline" size={20} color={COLORS.textLight} />

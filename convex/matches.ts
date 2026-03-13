@@ -1,6 +1,7 @@
 import { v } from 'convex/values';
 import { mutation, query } from './_generated/server';
 import { Id } from './_generated/dataModel';
+import { resolveUserIdByAuthId } from './helpers';
 
 // Get all matches for a user
 // FIX: Excludes blocked users (bidirectional)
@@ -240,13 +241,20 @@ export const getMatch = query({
 });
 
 // Unmatch
+// AUTH FIX: Use authUserId + server-side resolution to prevent client spoofing
 export const unmatch = mutation({
   args: {
     matchId: v.id('matches'),
-    userId: v.id('users'),
+    authUserId: v.string(), // Auth ID from client, resolved server-side
   },
   handler: async (ctx, args) => {
-    const { matchId, userId } = args;
+    const { matchId, authUserId } = args;
+
+    // Resolve auth ID to actual user ID server-side (prevents spoofing)
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      throw new Error('User not found');
+    }
 
     const match = await ctx.db.get(matchId);
     if (!match) throw new Error('Match not found');

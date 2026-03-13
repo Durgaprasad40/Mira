@@ -1043,7 +1043,16 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
         reportedUserName={activeConversation.otherUser?.name || ''}
         currentUserId={userId || getDemoUserId()}
         conversationId={conversationId}
+        // matchId: For Convex mode, use conversation.matchId. For demo mode, derive from conversation if it's a match.
+        matchId={
+          isDemo
+            ? (!activeConversation.isPreMatch && !activeConversation.isConfessionChat
+                ? `demo_match_${(activeConversation as any).otherUser?.id}`
+                : undefined)
+            : (conversation as any)?.matchId
+        }
         onBlockSuccess={() => router.back()}
+        onUnmatchSuccess={() => router.back()}
       />
 
       {/* Truth/Dare Bottle Spin Game */}

@@ -311,6 +311,10 @@ interface DemoState {
   reportUser: (userId: string, reason: string, description?: string) => void;
   unblockUser: (userId: string) => void;
   clearSafety: () => void;
+
+  // Match management
+  /** Remove a match without blocking the user (unmatch feature) */
+  removeMatch: (otherUserId: string) => void;
 }
 
 /**
@@ -1172,6 +1176,34 @@ export const useDemoStore = create<DemoState>()((set, get) => ({
     // Delegate to shared blockStore (single source of truth)
     useBlockStore.getState().clearBlocks();
     set({ reportedUserIds: [], reports: [] });
+  },
+
+  // ── Match management ──
+  // Unmatch without blocking: removes match and conversation but keeps user visible elsewhere
+
+  removeMatch: (otherUserId) => {
+    // Remove match from demoStore
+    set((s) => ({
+      matches: s.matches.filter((m) => m.otherUser?.id !== otherUserId),
+    }));
+
+    // Remove conversation from DM store
+    const dmState = useDemoDmStore.getState();
+    const meta = dmState.meta;
+    for (const convoId of Object.keys(meta)) {
+      const convoMeta = meta[convoId];
+      const metaOtherId = convoMeta?.otherUser?.id
+        || (convoMeta?.otherUser as any)?._id
+        || (convoMeta as any)?.otherUserId;
+      if (metaOtherId === otherUserId) {
+        dmState.deleteConversation(convoId);
+        break; // Only one conversation per match
+      }
+    }
+
+    if (__DEV__) {
+      console.log('[DemoStore] removeMatch', { otherUserId });
+    }
   },
 }));
 
