@@ -66,6 +66,9 @@ export function BottleSpinGame({
   // Track if we've already sent the result message for current spin
   const resultMessageSentRef = useRef(false);
 
+  // Stale callback guard: increments on reset, animation checks before applying
+  const spinSessionRef = useRef(0);
+
   const spinAnim = useRef(new Animated.Value(0)).current;
   const currentRotation = useRef(0);
 
@@ -98,10 +101,14 @@ export function BottleSpinGame({
   }, [conversationId, userId, windowKey, incrementSkipMutation]);
 
   const resetGame = useCallback(() => {
+    // Increment session to invalidate any in-flight animation callbacks
+    spinSessionRef.current += 1;
+    setIsSpinning(false);
     setSelectedUser(null);
     setGameResult(null);
     setHasSpun(false);
     resultMessageSentRef.current = false;
+    spinAnim.stopAnimation();
     spinAnim.setValue(0);
     currentRotation.current = 0;
   }, [spinAnim]);
@@ -119,6 +126,9 @@ export function BottleSpinGame({
     setGameResult(null);
     resultMessageSentRef.current = false;
 
+    // Capture session at start to detect stale callbacks
+    const spinSession = spinSessionRef.current;
+
     // Random number of full rotations (3-6) plus random final position
     const fullRotations = 3 + Math.floor(Math.random() * 4);
     const randomUser = Math.random() < 0.5 ? 'current' : 'other';
@@ -135,6 +145,11 @@ export function BottleSpinGame({
       easing: Easing.out(Easing.cubic),
       useNativeDriver: true,
     }).start(() => {
+      // Stale callback guard: ignore if session changed (game was reset)
+      if (spinSessionRef.current !== spinSession) {
+        return;
+      }
+
       currentRotation.current = totalRotation % 360;
       setIsSpinning(false);
       setSelectedUser(randomUser);

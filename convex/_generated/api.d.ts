@@ -40,6 +40,7 @@ import type * as messageTemplates from "../messageTemplates.js";
 import type * as messages from "../messages.js";
 import type * as notifications from "../notifications.js";
 import type * as permissions from "../permissions.js";
+import type * as phase2Ranking from "../phase2Ranking.js";
 import type * as photos from "../photos.js";
 import type * as privateDeletion from "../privateDeletion.js";
 import type * as privateDiscover from "../privateDiscover.js";
@@ -98,6 +99,7 @@ declare const fullApi: ApiFromModules<{
   messages: typeof messages;
   notifications: typeof notifications;
   permissions: typeof permissions;
+  phase2Ranking: typeof phase2Ranking;
   photos: typeof photos;
   privateDeletion: typeof privateDeletion;
   privateDiscover: typeof privateDiscover;

@@ -39,6 +39,12 @@ export function useVoiceRecorder({
   const startTimeRef = useRef<number>(0);
   const isProcessingRef = useRef(false);
 
+  // STABILITY FIX: Track mount state to prevent setState after unmount
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    return () => { mountedRef.current = false; };
+  }, []);
+
   // Track focus to auto-send when navigating away
   const isFocused = useIsFocused();
   const wasFocusedRef = useRef(isFocused);
@@ -61,8 +67,11 @@ export function useVoiceRecorder({
       const uri = recordingRef.current.getURI();
       recordingRef.current = null;
 
-      setState('idle');
-      setElapsedMs(0);
+      // STABILITY FIX: Guard setState after async
+      if (mountedRef.current) {
+        setState('idle');
+        setElapsedMs(0);
+      }
       isProcessingRef.current = false;
 
       if (!uri) {
@@ -77,8 +86,11 @@ export function useVoiceRecorder({
     } catch (error) {
       console.error('[VoiceRecorder] Stop error:', error);
       recordingRef.current = null;
-      setState('idle');
-      setElapsedMs(0);
+      // STABILITY FIX: Guard setState after async
+      if (mountedRef.current) {
+        setState('idle');
+        setElapsedMs(0);
+      }
       isProcessingRef.current = false;
       return null;
     }
@@ -121,6 +133,13 @@ export function useVoiceRecorder({
         Audio.RecordingOptionsPresets.HIGH_QUALITY
       );
 
+      // STABILITY FIX: Guard setState after async
+      if (!mountedRef.current) {
+        // Component unmounted during recording setup - clean up and exit
+        await recording.stopAndUnloadAsync().catch(() => {});
+        return;
+      }
+
       recordingRef.current = recording;
       startTimeRef.current = Date.now();
       setState('recording');
@@ -128,6 +147,8 @@ export function useVoiceRecorder({
 
       // Start elapsed timer
       timerRef.current = setInterval(() => {
+        // STABILITY FIX: Guard interval setState
+        if (!mountedRef.current) return;
         const elapsed = Date.now() - startTimeRef.current;
         setElapsedMs(elapsed);
 
@@ -139,7 +160,10 @@ export function useVoiceRecorder({
     } catch (error) {
       console.error('[VoiceRecorder] Start error:', error);
       onError?.('Recording failed, try again');
-      setState('idle');
+      // STABILITY FIX: Guard setState in catch
+      if (mountedRef.current) {
+        setState('idle');
+      }
     }
   }, [state, stopAndSend, onError]);
 

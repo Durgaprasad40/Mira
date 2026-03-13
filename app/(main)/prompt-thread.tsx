@@ -117,7 +117,26 @@ export default function PromptThreadScreen() {
   const isLoading = threadData === undefined;
   const prompt = threadData?.prompt;
   const answers = threadData?.answers ?? [];
-  const isExpired = threadData?.isExpired ?? false;
+
+  // Force re-render when expiry time passes (so isExpired updates in real-time)
+  const [, forceUpdate] = useState(0);
+  useEffect(() => {
+    if (!prompt?.expiresAt || threadData?.isExpired) return;
+    const msUntilExpiry = prompt.expiresAt - Date.now();
+    if (msUntilExpiry <= 0) return; // Already expired
+    // Schedule re-render when expiry time is reached
+    const timer = setTimeout(() => forceUpdate((n) => n + 1), msUntilExpiry + 100);
+    return () => clearTimeout(timer);
+  }, [prompt?.expiresAt, threadData?.isExpired]);
+
+  // Compute expiration locally to catch real-time expiry (server flag is a snapshot)
+  const isExpired = useMemo(() => {
+    // If server already says expired, trust it
+    if (threadData?.isExpired) return true;
+    // Otherwise check locally against expiresAt
+    if (!prompt?.expiresAt) return false;
+    return Date.now() >= prompt.expiresAt;
+  }, [threadData?.isExpired, prompt?.expiresAt]);
 
   // Find user's own answer
   const myAnswer = useMemo(() => {
@@ -127,6 +146,13 @@ export default function PromptThreadScreen() {
   // Composer state - unified composer for text + optional media
   const [showUnifiedComposer, setShowUnifiedComposer] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
+
+  // Close composer if prompt expires while it's open
+  useEffect(() => {
+    if (isExpired && showUnifiedComposer) {
+      setShowUnifiedComposer(false);
+    }
+  }, [isExpired, showUnifiedComposer]);
 
   // Gallery media state for privacy sheet (camera flow)
   const [galleryMedia, setGalleryMedia] = useState<{
@@ -188,6 +214,9 @@ export default function PromptThreadScreen() {
     answersRef.current = answers;
   }, [answers]);
 
+  // Ref to track pending reactions (prevents double-tap race condition)
+  const pendingReactionsRef = useRef<Set<string>>(new Set());
+
   // Auto-open composer if requested from feed
   useEffect(() => {
     if (autoOpenComposer === 'new' && !myAnswer) {
@@ -217,6 +246,14 @@ export default function PromptThreadScreen() {
       console.log('[T/D REACTION] skip - no userId');
       return;
     }
+
+    // Prevent double-tap race condition
+    if (pendingReactionsRef.current.has(answerId)) {
+      console.log('[T/D REACTION] skip - already pending');
+      return;
+    }
+    pendingReactionsRef.current.add(answerId);
+
     setEmojiPickerAnswerId(null);
 
     // Find the answer using ref to get latest data (avoids stale closure)
@@ -245,6 +282,8 @@ export default function PromptThreadScreen() {
       if (error.message?.includes('Rate limit')) {
         Alert.alert('Slow down', 'Please wait a moment before reacting again.');
       }
+    } finally {
+      pendingReactionsRef.current.delete(answerId);
     }
   }, [userId, setReaction]);
 
@@ -807,7 +846,7 @@ export default function PromptThreadScreen() {
           ) : (
             <View style={styles.otherCommentActions}>
               {/* Connect button: only for prompt owner on non-anonymous answers */}
-              {isPromptOwner && !isAnon && !connectSentFor.has(item._id) && (
+              {isPromptOwner && !isAnon && !item.hasSentConnect && !connectSentFor.has(item._id) && (
                 <TouchableOpacity
                   style={styles.connectBtn}
                   onPress={() => handleSendConnect(item._id)}
@@ -824,7 +863,7 @@ export default function PromptThreadScreen() {
                 </TouchableOpacity>
               )}
               {/* Connect sent indicator */}
-              {isPromptOwner && connectSentFor.has(item._id) && (
+              {isPromptOwner && (item.hasSentConnect || connectSentFor.has(item._id)) && (
                 <View style={styles.connectSentBadge}>
                   <Ionicons name="checkmark-circle" size={12} color={C.textLight} />
                   <Text style={styles.connectSentText}>Sent</Text>

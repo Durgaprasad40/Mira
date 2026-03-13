@@ -1,6 +1,7 @@
 import { mutation, query, internalMutation } from './_generated/server';
 import { v } from 'convex/values';
 import { Id } from './_generated/dataModel';
+import { internal } from './_generated/api';
 import { resolveUserIdByAuthId } from './helpers';
 
 // 24-hour auto-delete rule (same as Confessions)
@@ -1572,6 +1573,24 @@ export const getPromptThread = query({
           hasViewedMedia = viewRecord?.viewedAt !== undefined;
         }
 
+        // Check if viewer (as prompt owner) has sent a connect request for this answer
+        let hasSentConnect = false;
+        if (viewerUserId && viewerUserId !== answer.userId) {
+          const connectReq = await ctx.db
+            .query('todConnectRequests')
+            .withIndex('by_from_to', (q) =>
+              q.eq('fromUserId', viewerUserId).eq('toUserId', answer.userId)
+            )
+            .filter((q) =>
+              q.or(
+                q.eq(q.field('status'), 'pending'),
+                q.eq(q.field('status'), 'connected')
+              )
+            )
+            .first();
+          hasSentConnect = !!connectReq;
+        }
+
         return {
           _id: answer._id,
           promptId: answer.promptId,
@@ -1594,6 +1613,7 @@ export const getPromptThread = query({
           isOwnAnswer: viewerUserId === answer.userId,
           hasReported,
           hasViewedMedia,
+          hasSentConnect,
           // Author identity snapshot
           authorName: answer.authorName,
           authorPhotoUrl: answer.authorPhotoUrl,
@@ -1859,6 +1879,10 @@ export const createOrEditAnswer = mutation({
       console.log(`[T/D] identityMode reused=${existing.identityMode ?? 'anonymous'}`);
 
       await ctx.db.patch(existing._id, patch);
+
+      // Record Phase-2 activity for ranking freshness (throttled to 1 update/hour)
+      await ctx.runMutation(internal.phase2Ranking.recordPhase2Activity, {});
+
       return { answerId: existing._id, isEdit: true };
     } else {
       // CREATE new answer
@@ -1916,6 +1940,9 @@ export const createOrEditAnswer = mutation({
         answerCount: prompt.answerCount + 1,
         activeCount: prompt.activeCount + 1,
       });
+
+      // Record Phase-2 activity for ranking freshness (throttled to 1 update/hour)
+      await ctx.runMutation(internal.phase2Ranking.recordPhase2Activity, {});
 
       console.log(`[T/D] answer created, identityMode=${identityMode}`);
       return { answerId, isEdit: false };

@@ -230,8 +230,15 @@ export default function PrivateProfileScreen() {
     return localIntentKeys;
   }, [isDemoMode, backendProfile, localIntentKeys]);
 
+  // STABILITY FIX: Prioritize local store for immediate feedback after edit
+  // (matches photos pattern - local first, backend fallback)
   const privateBio = useMemo(() => {
     if (isDemoMode) return localPrivateBio;
+    // Use local store if it has a value (includes data from recent edits)
+    if (localPrivateBio && localPrivateBio.trim().length > 0) {
+      return localPrivateBio;
+    }
+    // Fallback to backend if local is empty (e.g., first load before hydration)
     if (backendProfile?.privateBio) return backendProfile.privateBio;
     return localPrivateBio;
   }, [isDemoMode, backendProfile, localPrivateBio]);
@@ -286,6 +293,14 @@ export default function PrivateProfileScreen() {
   // Track last checked photos to avoid redundant checks
   const lastCheckedRef = useRef<string>('');
 
+  // STABILITY FIX: Track mount state to prevent setState after unmount
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
   /**
    * Check for missing photo files (only file:// URIs that passed validation)
    * Runs on focus and when photos array changes
@@ -304,7 +319,10 @@ export default function PrivateProfileScreen() {
     );
 
     if (fileUris.length === 0) {
-      setMissingPhotos(new Set());
+      // UNMOUNT-GUARD: Check mounted before setState
+      if (mountedRef.current) {
+        setMissingPhotos(new Set());
+      }
       return;
     }
 
@@ -321,7 +339,10 @@ export default function PrivateProfileScreen() {
       }
     }
 
-    setMissingPhotos(missing);
+    // UNMOUNT-GUARD: Check mounted before setState after async file checks
+    if (mountedRef.current) {
+      setMissingPhotos(missing);
+    }
 
     // Single summary log in DEV only
     if (__DEV__ && (missing.size > 0 || fileUris.length > 0)) {
@@ -569,7 +590,10 @@ export default function PrivateProfileScreen() {
       const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
       if (status !== 'granted') {
         Alert.alert('Permission Required', 'Please grant photo library access to add photos.');
-        setAddingSlotIndex(null);
+        // UNMOUNT-GUARD: Check mounted before setState after async
+        if (mountedRef.current) {
+          setAddingSlotIndex(null);
+        }
         return;
       }
 
@@ -581,7 +605,10 @@ export default function PrivateProfileScreen() {
       });
 
       if (result.canceled || !result.assets || result.assets.length === 0) {
-        setAddingSlotIndex(null);
+        // UNMOUNT-GUARD: Check mounted before setState after async
+        if (mountedRef.current) {
+          setAddingSlotIndex(null);
+        }
         return;
       }
 
@@ -621,6 +648,9 @@ export default function PrivateProfileScreen() {
         // Demo mode or no user - use local storage
         backendUrl = await copyToPermamentStorage(asset.uri, Date.now());
       }
+
+      // UNMOUNT-GUARD: Check mounted before setState after long async chain
+      if (!mountedRef.current) return;
 
       if (backendUrl) {
         // FIX: Read current store state directly to ensure we have latest photos
@@ -672,7 +702,10 @@ export default function PrivateProfileScreen() {
       }
       Alert.alert('Error', 'Failed to add photo. Please try again.');
     } finally {
-      setAddingSlotIndex(null);
+      // UNMOUNT-GUARD: Check mounted before setState in finally
+      if (mountedRef.current) {
+        setAddingSlotIndex(null);
+      }
     }
   };
 

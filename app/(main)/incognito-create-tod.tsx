@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useRef } from 'react';
 import {
   View,
   Text,
@@ -139,6 +139,9 @@ export default function CreateTodScreen() {
   const maxLength = 280;
   const canSubmit = content.trim().length >= 10 && !isSubmitting;
 
+  // Synchronous lock to prevent double-tap race condition
+  const isSubmittingRef = useRef(false);
+
   /**
    * Resolve best photo URL from candidates:
    * 1. Prefer https URLs (always valid)
@@ -202,7 +205,9 @@ export default function CreateTodScreen() {
   }
 
   const handleSubmit = async () => {
-    if (!canSubmit) return;
+    // Synchronous guard: prevent double-tap race condition
+    if (!canSubmit || isSubmittingRef.current) return;
+    isSubmittingRef.current = true;
 
     setIsSubmitting(true);
 
@@ -253,6 +258,7 @@ export default function CreateTodScreen() {
       router.back();
     } catch (error) {
       console.error('[T/D UI] Post failed:', error);
+      isSubmittingRef.current = false;
       setIsSubmitting(false);
       Alert.alert('Error', 'Failed to create your post. Please try again.');
     }

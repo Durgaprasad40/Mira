@@ -171,6 +171,8 @@ type Overlay =
 export default function ChatRoomScreen() {
   // B2-HIGH FIX: Prevent setState-after-unmount
   const mountedRef = useRef(true);
+  // Synchronous guard against double-tap send (React state is async and race-prone)
+  const isSendingRef = useRef(false);
 
   // ISSUE B: Read route params for instant render fallback
   const { roomId, roomName: routeRoomName, isPrivate: routeIsPrivate } = useLocalSearchParams<{
@@ -904,6 +906,9 @@ export default function ChatRoomScreen() {
   const handleSend = useCallback(async () => {
     const trimmed = inputText.trim();
     if (!trimmed || !roomIdStr) return;
+    // Synchronous double-tap guard (ChatComposer's isSending state is async)
+    if (isSendingRef.current) return;
+    isSendingRef.current = true;
 
     if (isDemoMode) {
       const newMessage: DemoChatMessage = {
@@ -919,11 +924,16 @@ export default function ChatRoomScreen() {
       setInputText('');
       // Demo mode: local coin increment (no backend)
       incrementCoins();
+      isSendingRef.current = false;
     } else {
-      if (!authUserId || !hasValidRoomId) return;
+      if (!authUserId || !hasValidRoomId) {
+        isSendingRef.current = false;
+        return;
+      }
       const clientId = generateUUID();
       const now = Date.now();
       const pendingId = `pending_${clientId}`;
+      const textToRestore = trimmed; // Save text before clearing for retry on failure
 
       const pendingMsg: DemoChatMessage = {
         id: pendingId,
@@ -947,12 +957,19 @@ export default function ChatRoomScreen() {
           text: trimmed,
           clientId,
         });
-      } finally {
-        // P1 CR-003: Always remove pending message, regardless of success/failure
-        // B2-HIGH FIX: Guard setState after async
+        // Success: remove pending message (real message arrives via subscription)
         if (mountedRef.current) {
           setPendingMessages((prev) => prev.filter((m) => m.id !== pendingId));
         }
+      } catch (error: any) {
+        // STABILITY FIX: On failure, restore text and show error alert
+        if (mountedRef.current) {
+          setPendingMessages((prev) => prev.filter((m) => m.id !== pendingId));
+          setInputText(textToRestore);
+        }
+        Alert.alert('Send Failed', error?.message || 'Message could not be sent. Please try again.');
+      } finally {
+        isSendingRef.current = false;
       }
     }
   }, [inputText, roomIdStr, hasValidRoomId, addStoreMessage, authUserId, sendMessageMutation, persistedDisplayName]);
@@ -1256,8 +1273,11 @@ export default function ChatRoomScreen() {
           details: data.details,
         });
 
-        setOverlay('none');
-        setReportTargetUser(null);
+        // UNMOUNT-GUARD: Check mounted before setState after async
+        if (mountedRef.current) {
+          setOverlay('none');
+          setReportTargetUser(null);
+        }
         Alert.alert('Report submitted', 'Thank you. We will review this report.', [{ text: 'OK' }]);
       } catch (error: any) {
         console.error('[REPORT] Failed to submit report:', error);
@@ -1294,8 +1314,11 @@ export default function ChatRoomScreen() {
             if (isDemoMode) {
               const currentMessages = useDemoChatRoomStore.getState().rooms[roomIdStr] ?? [];
               setStoreMessages(roomIdStr, currentMessages.filter((m) => m.id !== selectedMessage.id));
-              setSelectedMessage(null);
-              setOverlay('none');
+              // UNMOUNT-GUARD: Check mounted before setState after store update
+              if (mountedRef.current) {
+                setSelectedMessage(null);
+                setOverlay('none');
+              }
               return;
             }
 
@@ -1307,8 +1330,11 @@ export default function ChatRoomScreen() {
                 messageId: selectedMessage.id as Id<'chatRoomMessages'>,
                 authUserId,
               });
-              setSelectedMessage(null);
-              setOverlay('none');
+              // UNMOUNT-GUARD: Check mounted before setState after async
+              if (mountedRef.current) {
+                setSelectedMessage(null);
+                setOverlay('none');
+              }
             } catch (err: any) {
               Alert.alert('Error', err.message || 'Failed to delete message');
             }

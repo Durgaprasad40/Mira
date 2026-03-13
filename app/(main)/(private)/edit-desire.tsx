@@ -4,7 +4,7 @@
  * Allows editing the desire/bio text for the private profile.
  * This is a standalone edit screen within Phase-2 (no onboarding navigation).
  */
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   View,
   Text,
@@ -45,20 +45,48 @@ export default function EditDesireScreen() {
   const [desireText, setDesireText] = useState(currentBio || '');
   const [isSaving, setIsSaving] = useState(false);
 
+  // Track mount status to prevent state updates after unmount
+  const isMountedRef = useRef(true);
+  useEffect(() => {
+    return () => { isMountedRef.current = false; };
+  }, []);
+
+  // Synchronous guard against double-tap (React state is async and race-prone)
+  const isSavingRef = useRef(false);
+
   // Validation
   const charCount = desireText.trim().length;
   const isValid = charCount >= PHASE2_DESIRE_MIN_LENGTH && charCount <= PHASE2_DESIRE_MAX_LENGTH;
   const remainingMin = Math.max(0, PHASE2_DESIRE_MIN_LENGTH - charCount);
 
+  // Check for unsaved changes
+  const hasChanges = desireText.trim() !== (currentBio || '').trim();
+
+  // Handle close with unsaved changes warning
+  const handleClose = () => {
+    if (hasChanges) {
+      Alert.alert(
+        'Discard Changes?',
+        'You have unsaved changes. Are you sure you want to discard them?',
+        [
+          { text: 'Keep Editing', style: 'cancel' },
+          { text: 'Discard', style: 'destructive', onPress: () => router.back() },
+        ]
+      );
+    } else {
+      router.back();
+    }
+  };
+
   const handleSave = async () => {
     if (!isValid || isSaving) return;
+    if (isSavingRef.current) return; // Synchronous double-tap guard
+    isSavingRef.current = true;
 
     setIsSaving(true);
     try {
-      // Update local store immediately
-      setPrivateBio(desireText.trim());
-
-      // Sync to backend (if not demo mode) - auth-safe mutation
+      // Sync to backend FIRST (if not demo mode) - auth-safe mutation
+      // Only update local store after backend succeeds to avoid stale optimistic state
       if (!isDemoMode && userId) {
         const result = await updateFields({
           authUserId: userId,
@@ -69,15 +97,22 @@ export default function EditDesireScreen() {
         }
       }
 
+      // Update local store AFTER backend success
+      setPrivateBio(desireText.trim());
+
       // Navigate back
       router.back();
     } catch (error) {
       if (__DEV__) {
         console.error('[EditDesire] Save error:', error);
       }
+      // No rollback needed - local store was never updated
       Alert.alert('Error', 'Failed to save. Please try again.');
     } finally {
-      setIsSaving(false);
+      isSavingRef.current = false;
+      if (isMountedRef.current) {
+        setIsSaving(false);
+      }
     }
   };
 
@@ -90,7 +125,7 @@ export default function EditDesireScreen() {
       {/* Header */}
       <View style={styles.header}>
         <TouchableOpacity
-          onPress={() => router.back()}
+          onPress={handleClose}
           hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
         >
           <Ionicons name="close" size={24} color={C.text} />

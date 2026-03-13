@@ -9,7 +9,7 @@
  * Editable fields: height, weight, smoking, drinking, education, religion
  * Locked fields (read-only): name, age, gender, User ID
  */
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   View,
   Text,
@@ -129,6 +129,15 @@ export default function EditProfileDetailsScreen() {
   const [religion, setLocalReligion] = useState(storeReligion);
   const [isSaving, setIsSaving] = useState(false);
 
+  // Track mount status to prevent state updates after unmount
+  const isMountedRef = useRef(true);
+  useEffect(() => {
+    return () => { isMountedRef.current = false; };
+  }, []);
+
+  // Synchronous guard against double-tap (React state is async and race-prone)
+  const isSavingRef = useRef(false);
+
   // Parse height/weight for comparison and validation
   const parsedHeight = heightText.trim() === '' ? null : parseInt(heightText, 10);
   const parsedWeight = weightText.trim() === '' ? null : parseInt(weightText, 10);
@@ -143,6 +152,22 @@ export default function EditProfileDetailsScreen() {
     drinking !== storeDrinking ||
     education !== storeEducation ||
     religion !== storeReligion;
+
+  // Handle close with unsaved changes warning
+  const handleClose = () => {
+    if (hasChanges) {
+      Alert.alert(
+        'Discard Changes?',
+        'You have unsaved changes. Are you sure you want to discard them?',
+        [
+          { text: 'Keep Editing', style: 'cancel' },
+          { text: 'Discard', style: 'destructive', onPress: () => router.back() },
+        ]
+      );
+    } else {
+      router.back();
+    }
+  };
 
   const handleSave = async () => {
     if (!hasChanges || isSaving) return;
@@ -159,9 +184,30 @@ export default function EditProfileDetailsScreen() {
       return;
     }
 
+    // Synchronous double-tap guard (after validation to avoid blocking on validation failure)
+    if (isSavingRef.current) return;
+    isSavingRef.current = true;
+
     setIsSaving(true);
     try {
-      // Update local store
+      // Sync to Convex backend FIRST (auth-safe mutation)
+      // Only update local store after backend succeeds to avoid stale optimistic state
+      if (!isDemoMode && userId) {
+        const result = await updatePrivateProfile({
+          authUserId: userId,
+          height: parsedHeight,
+          weight: parsedWeight,
+          smoking: smoking,
+          drinking: drinking,
+          education: education,
+          religion: religion,
+        });
+        if (__DEV__ && result.success) {
+          console.log('[EditProfileDetails] Synced to Convex');
+        }
+      }
+
+      // Update local store AFTER backend success
       setHeight(parsedHeight);
       setWeight(parsedWeight);
       setSmoking(smoking);
@@ -169,37 +215,18 @@ export default function EditProfileDetailsScreen() {
       setEducation(education);
       setReligion(religion);
 
-      // Sync to Convex backend (auth-safe mutation)
-      if (!isDemoMode && userId) {
-        try {
-          const result = await updatePrivateProfile({
-            authUserId: userId,
-            height: parsedHeight,
-            weight: parsedWeight,
-            smoking: smoking,
-            drinking: drinking,
-            education: education,
-            religion: religion,
-          });
-          if (__DEV__ && result.success) {
-            console.log('[EditProfileDetails] Synced to Convex');
-          }
-        } catch (syncError) {
-          if (__DEV__) {
-            console.error('[EditProfileDetails] Backend sync failed:', syncError);
-          }
-          // Local store is already updated, continue
-        }
-      }
-
       router.back();
     } catch (error) {
       if (__DEV__) {
         console.error('[EditProfileDetails] Save error:', error);
       }
+      // No rollback needed - local store was never updated
       Alert.alert('Error', 'Failed to save. Please try again.');
     } finally {
-      setIsSaving(false);
+      isSavingRef.current = false;
+      if (isMountedRef.current) {
+        setIsSaving(false);
+      }
     }
   };
 
@@ -235,7 +262,7 @@ export default function EditProfileDetailsScreen() {
       {/* Header */}
       <View style={styles.header}>
         <TouchableOpacity
-          onPress={() => router.back()}
+          onPress={handleClose}
           hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
         >
           <Ionicons name="close" size={24} color={C.text} />

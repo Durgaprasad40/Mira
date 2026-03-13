@@ -143,6 +143,9 @@ export default function ChatRoomsScreen() {
   // Track if user manually navigated (tapped a room) - skip preferred redirect if so
   const userNavigatedRef = useRef(false);
 
+  // NAV-RACE FIX: Synchronous guard to prevent double-tap duplicate navigation
+  const isNavigatingToRoomRef = useRef(false);
+
   // M-006/M-007 FIX: Track mount state to prevent setState after unmount
   const mountedRef = useRef(true);
 
@@ -427,6 +430,12 @@ export default function ChatRoomsScreen() {
     (roomId: string) => {
       if (__DEV__) console.log('[TAP] room pressed', { roomId, t: Date.now() });
 
+      // NAV-RACE FIX: Prevent double-tap duplicate navigation (synchronous guard)
+      if (isNavigatingToRoomRef.current) {
+        if (__DEV__) console.log('[TAP] blocked - navigation in progress');
+        return;
+      }
+
       // BUG FIX: Prevent navigation with fallback IDs (not real Convex IDs)
       // Fallback IDs crash when passed to Convex mutations/queries
       if (roomId.startsWith('fallback_')) {
@@ -442,6 +451,9 @@ export default function ChatRoomsScreen() {
         );
         return;
       }
+
+      // NAV-RACE FIX: Set synchronous lock before navigation
+      isNavigatingToRoomRef.current = true;
 
       // Mark user navigated to cancel any pending preferred room redirect
       userNavigatedRef.current = true;
@@ -462,6 +474,11 @@ export default function ChatRoomsScreen() {
       if (__DEV__) console.log('[NAV] room push scheduled', { roomName, isPrivate, t: Date.now() });
       // Mark room as visited to clear unread badge
       markRoomVisited(roomId);
+
+      // NAV-RACE FIX: Reset lock after navigation settles (allows future navigations)
+      setTimeout(() => {
+        isNavigatingToRoomRef.current = false;
+      }, 500);
     },
     [router, markRoomVisited, rooms, privateRooms, isSeedingRooms]
   );
@@ -476,6 +493,8 @@ export default function ChatRoomsScreen() {
     setIsJoining(true);
     try {
       const result = await joinRoomByCodeMut({ joinCode: joinCode.trim(), authUserId: userId! });
+      // UNMOUNT-GUARD: Check mounted before setState after async
+      if (!mountedRef.current) return;
       setJoinCode('');
       if (result.alreadyMember) {
         Alert.alert('Already a Member', 'You are already a member of this room.');
@@ -488,7 +507,10 @@ export default function ChatRoomsScreen() {
     } catch (error: any) {
       Alert.alert('Error', error.message || 'Failed to join room');
     } finally {
-      setIsJoining(false);
+      // UNMOUNT-GUARD: Check mounted before setState in finally
+      if (mountedRef.current) {
+        setIsJoining(false);
+      }
     }
   }, [joinCode, isJoining, joinRoomByCodeMut, router]);
 
@@ -514,6 +536,9 @@ export default function ChatRoomsScreen() {
         args.password = pwd;
       }
       const result = await createPrivateRoomMut(args);
+
+      // UNMOUNT-GUARD: Check mounted before setState after async
+      if (!mountedRef.current) return;
 
       // Clear inputs on success
       setNewRoomName('');
@@ -542,7 +567,10 @@ export default function ChatRoomsScreen() {
       // Keep inputs on error so user can edit
       Alert.alert('Error', error.message || 'Failed to create room');
     } finally {
-      setIsCreating(false);
+      // UNMOUNT-GUARD: Check mounted before setState in finally
+      if (mountedRef.current) {
+        setIsCreating(false);
+      }
     }
   }, [newRoomName, newRoomPassword, isCreating, createPrivateRoomMut, router]);
 
