@@ -239,6 +239,12 @@ export default function Index() {
           setConvexOnboardingCompleted(backendOnboardingCompleted);
           setConvexValidated(true);
 
+          // C2 FIX: Clear watchdog timer - validation completed successfully
+          if (watchdogTimerRef.current) {
+            clearTimeout(watchdogTimerRef.current);
+            watchdogTimerRef.current = null;
+          }
+
           // Update authStore with real onboarding status
           useAuthStore.getState().setAuth(userId, token, backendOnboardingCompleted);
         }
@@ -254,6 +260,12 @@ export default function Index() {
         if (!mountedRef.current) return;
         setConvexValidated(true);
         setConvexOnboardingCompleted(false);
+
+        // C2 FIX: Clear watchdog timer - validation completed (with error)
+        if (watchdogTimerRef.current) {
+          clearTimeout(watchdogTimerRef.current);
+          watchdogTimerRef.current = null;
+        }
       }
     };
 
@@ -265,6 +277,12 @@ export default function Index() {
       if (!mountedRef.current) return;
       setConvexValidated(true);
       setConvexOnboardingCompleted(false);
+
+      // C2 FIX: Clear watchdog timer - validation completed (with crash)
+      if (watchdogTimerRef.current) {
+        clearTimeout(watchdogTimerRef.current);
+        watchdogTimerRef.current = null;
+      }
     });
   }, [authBootCacheData, router]);
 
