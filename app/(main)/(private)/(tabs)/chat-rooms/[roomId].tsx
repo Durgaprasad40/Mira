@@ -1273,8 +1273,11 @@ export default function ChatRoomScreen() {
           details: data.details,
         });
 
-        setOverlay('none');
-        setReportTargetUser(null);
+        // UNMOUNT-GUARD: Check mounted before setState after async
+        if (mountedRef.current) {
+          setOverlay('none');
+          setReportTargetUser(null);
+        }
         Alert.alert('Report submitted', 'Thank you. We will review this report.', [{ text: 'OK' }]);
       } catch (error: any) {
         console.error('[REPORT] Failed to submit report:', error);
@@ -1311,8 +1314,11 @@ export default function ChatRoomScreen() {
             if (isDemoMode) {
               const currentMessages = useDemoChatRoomStore.getState().rooms[roomIdStr] ?? [];
               setStoreMessages(roomIdStr, currentMessages.filter((m) => m.id !== selectedMessage.id));
-              setSelectedMessage(null);
-              setOverlay('none');
+              // UNMOUNT-GUARD: Check mounted before setState after store update
+              if (mountedRef.current) {
+                setSelectedMessage(null);
+                setOverlay('none');
+              }
               return;
             }
 
@@ -1324,8 +1330,11 @@ export default function ChatRoomScreen() {
                 messageId: selectedMessage.id as Id<'chatRoomMessages'>,
                 authUserId,
               });
-              setSelectedMessage(null);
-              setOverlay('none');
+              // UNMOUNT-GUARD: Check mounted before setState after async
+              if (mountedRef.current) {
+                setSelectedMessage(null);
+                setOverlay('none');
+              }
             } catch (err: any) {
               Alert.alert('Error', err.message || 'Failed to delete message');
             }
