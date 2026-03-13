@@ -153,6 +153,22 @@ export default function EditProfileDetailsScreen() {
     education !== storeEducation ||
     religion !== storeReligion;
 
+  // Handle close with unsaved changes warning
+  const handleClose = () => {
+    if (hasChanges) {
+      Alert.alert(
+        'Discard Changes?',
+        'You have unsaved changes. Are you sure you want to discard them?',
+        [
+          { text: 'Keep Editing', style: 'cancel' },
+          { text: 'Discard', style: 'destructive', onPress: () => router.back() },
+        ]
+      );
+    } else {
+      router.back();
+    }
+  };
+
   const handleSave = async () => {
     if (!hasChanges || isSaving) return;
 
@@ -251,7 +267,7 @@ export default function EditProfileDetailsScreen() {
       {/* Header */}
       <View style={styles.header}>
         <TouchableOpacity
-          onPress={() => router.back()}
+          onPress={handleClose}
           hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
         >
           <Ionicons name="close" size={24} color={C.text} />
