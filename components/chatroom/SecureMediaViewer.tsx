@@ -61,17 +61,59 @@ interface SecureVideoPlayerProps {
 }
 
 /**
- * CR-001: Inner component that contains the useVideoPlayer hook.
- * Only rendered when URI is valid (via wrapper).
+ * CR-003: Safe Video Player with deferred release pattern.
+ *
+ * This component ensures the VideoView is ALWAYS removed from the render tree
+ * BEFORE the player object is released. This prevents the "shared object already
+ * released" crash that occurs when the native SurfaceVideoView tries to access
+ * a released player.
+ *
+ * Key safety mechanisms:
+ * 1. showVideoView state - controls when VideoView renders (independent of player)
+ * 2. mountedRef - tracks component lifecycle for safe async operations
+ * 3. playerSessionRef - tracks which player instance is current
+ * 4. Deferred cleanup - hides VideoView first, then allows unmount on next frame
  */
 function SecureVideoPlayerInner({ mediaUri, isPlaying, visible }: SecureVideoPlayerProps) {
+  // CR-003: State to control VideoView rendering independently of player lifecycle
+  const [showVideoView, setShowVideoView] = useState(true);
+
+  // CR-003: Track component mount state for safe async operations
+  const mountedRef = useRef(true);
+
+  // CR-003: Track current player session to detect stale callbacks
+  const playerSessionRef = useRef(0);
+
+  // CR-003: Track if we're in the process of releasing (prevents double operations)
+  const isReleasingRef = useRef(false);
+
   const player = useVideoPlayer(mediaUri, (p) => {
     p.loop = true;
   });
 
+  // CR-003: Track mounted state
+  useEffect(() => {
+    mountedRef.current = true;
+    playerSessionRef.current += 1;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
+  // CR-003: When visibility changes, handle VideoView detachment FIRST
+  useEffect(() => {
+    if (!visible && showVideoView) {
+      // Step 1: Hide VideoView immediately (removes from render tree)
+      setShowVideoView(false);
+    } else if (visible && !showVideoView && player) {
+      // Re-show VideoView when becoming visible again (if player exists)
+      setShowVideoView(true);
+    }
+  }, [visible, showVideoView, player]);
+
   // Control playback based on hold state
   useEffect(() => {
-    if (!player) return;
+    if (!player || !mountedRef.current) return;
 
     try {
       if (isPlaying && visible) {
@@ -84,21 +126,31 @@ function SecureVideoPlayerInner({ mediaUri, isPlaying, visible }: SecureVideoPla
     }
   }, [isPlaying, visible, player]);
 
-  // Pause on unmount
+  // CR-003: Safe cleanup - pause player before unmount
   useEffect(() => {
+    const currentSession = playerSessionRef.current;
+
     return () => {
+      // Only cleanup if this is still the current session
+      if (currentSession !== playerSessionRef.current) return;
+      if (isReleasingRef.current) return;
+
+      isReleasingRef.current = true;
+
       try {
         player?.pause();
       } catch {
-        // Ignore
+        // Ignore - player may already be released
       }
     };
   }, [player]);
 
-  // CR-002: Guard against rendering VideoView with released player.
-  // When visible=false, return null BEFORE unmount to ensure native view
-  // is removed from hierarchy before player is released.
-  if (!player || !visible) return null;
+  // CR-003: Guard against rendering VideoView with released/invalid player
+  // Multiple conditions to ensure safety:
+  // 1. player must exist
+  // 2. visible must be true (prop from parent)
+  // 3. showVideoView must be true (internal state for deferred release)
+  if (!player || !visible || !showVideoView) return null;
 
   return (
     <VideoView
@@ -115,10 +167,35 @@ function SecureVideoPlayerInner({ mediaUri, isPlaying, visible }: SecureVideoPla
  * Prevents useVideoPlayer from being called with invalid URI.
  */
 function SecureVideoPlayer({ mediaUri, isPlaying, visible }: SecureVideoPlayerProps) {
-  if (!isValidMediaUri(mediaUri)) {
+  // CR-003: Track previous URI to detect changes
+  const prevUriRef = useRef(mediaUri);
+  const [stableUri, setStableUri] = useState(mediaUri);
+
+  // CR-003: When URI changes, we need to handle the transition safely
+  useEffect(() => {
+    if (mediaUri !== prevUriRef.current) {
+      // URI changed - update stable URI which will cause inner component remount
+      prevUriRef.current = mediaUri;
+      if (isValidMediaUri(mediaUri)) {
+        setStableUri(mediaUri);
+      }
+    }
+  }, [mediaUri]);
+
+  if (!isValidMediaUri(stableUri)) {
     return null;
   }
-  return <SecureVideoPlayerInner mediaUri={mediaUri} isPlaying={isPlaying} visible={visible} />;
+
+  // CR-003: Key on stableUri to force remount when URI changes
+  // This ensures old player is fully cleaned up before new one is created
+  return (
+    <SecureVideoPlayerInner
+      key={stableUri}
+      mediaUri={stableUri}
+      isPlaying={isPlaying}
+      visible={visible}
+    />
+  );
 }
 
 export default function SecureMediaViewer({
