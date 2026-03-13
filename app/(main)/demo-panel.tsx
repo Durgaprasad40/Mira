@@ -157,9 +157,10 @@ export default function DemoPanelScreen() {
       {
         text: 'Reset',
         style: 'destructive',
-        onPress: () => {
+        onPress: async () => {
           reset();
-          useAuthStore.getState().logout();
+          // H5 FIX: Await async logout to ensure SecureStore is cleared before navigation
+          await useAuthStore.getState().logout();
           router.replace('/' as any);
         },
       },

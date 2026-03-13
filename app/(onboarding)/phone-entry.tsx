@@ -207,8 +207,19 @@ export default function PhoneEntryScreen() {
     setError('');
     setIsLoading(true);
 
+    // H5 FIX: Capture logout timestamp before async operation
+    // Used to detect if logout happened during the mutation
+    const logoutTimestampBefore = useAuthStore.getState()._logoutTimestamp;
+
     try {
       const result = await verifyPhoneOtp({ phone: fullPhone, code: otpCode });
+
+      // H5 FIX: Check if logout happened during mutation
+      const logoutTimestampAfter = useAuthStore.getState()._logoutTimestamp;
+      if (logoutTimestampAfter !== logoutTimestampBefore) {
+        if (__DEV__) console.log('[AUTH] Logout detected during phone verification - ignoring result');
+        return;
+      }
 
       if (result.success && result.userId && result.token) {
         if (__DEV__) console.log("[AUTH] login success, onboardingCompleted =", result.onboardingCompleted);

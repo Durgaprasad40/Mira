@@ -31,8 +31,11 @@ class Phase2ErrorBoundary extends Component<{ children: ReactNode }, { error: Er
     // SECURITY FIX: Only logout for true session invalidation (token/session expired)
     if (isSessionInvalidationError(error?.message || '')) {
       if (__DEV__) console.log('[Phase2ErrorBoundary] Session invalidation detected, logging out:', error?.message);
-      useAuthStore.getState().logout();
-      globalRouter.replace('/(auth)/welcome');
+      // H5 FIX: Wrap in async IIFE to await logout before navigation
+      (async () => {
+        await useAuthStore.getState().logout();
+        globalRouter.replace('/(auth)/welcome');
+      })();
     }
   }
 

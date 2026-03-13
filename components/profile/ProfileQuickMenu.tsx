@@ -44,12 +44,13 @@ export function ProfileQuickMenu({ visible, onClose }: ProfileQuickMenuProps) {
         {
           text: 'Log Out',
           style: 'destructive',
-          onPress: () => {
+          onPress: async () => {
             if (isDemoMode) {
               useDemoStore.getState().demoLogout();
             }
             useOnboardingStore.getState().reset();
-            logout();
+            // H5 FIX: Await async logout to ensure SecureStore is cleared before navigation
+            await logout();
             safeReplace(router, '/(auth)/welcome', 'quickmenu->logout');
           },
         },

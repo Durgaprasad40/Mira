@@ -776,6 +776,10 @@ export default function BasicInfoScreen() {
       // Live mode: register via Convex using central auth hook
       // Construct full name from firstName + lastName for backend
       const fullName = `${firstName.trim()} ${lastName.trim()}`.trim();
+
+      // H5 FIX: Capture logout timestamp before async operation
+      const logoutTimestampBefore = useAuthStore.getState()._logoutTimestamp;
+
       const result = await submitEmailRegistration({
         email,
         password,
@@ -785,6 +789,13 @@ export default function BasicInfoScreen() {
         gender: gender!, // Validated above - gender is not null here
         lgbtqSelf: lgbtqSelf.length > 0 ? lgbtqSelf : undefined, // LGBTQ identity (optional)
       });
+
+      // H5 FIX: Check if logout happened during mutation
+      const logoutTimestampAfter = useAuthStore.getState()._logoutTimestamp;
+      if (logoutTimestampAfter !== logoutTimestampBefore) {
+        if (__DEV__) console.log('[AUTH] Logout detected during registration - ignoring result');
+        return;
+      }
 
       // If result is null, USER_EXISTS was handled (Alert shown, routing done)
       // Stop execution immediately - do NOT continue onboarding

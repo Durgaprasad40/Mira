@@ -73,8 +73,18 @@ export default function LoginScreen() {
     setIsLoading(true);
     setError("");
 
+    // H5 FIX: Capture logout timestamp before async operation
+    const logoutTimestampBefore = useAuthStore.getState()._logoutTimestamp;
+
     try {
       const result = await loginWithEmail({ email, password });
+
+      // H5 FIX: Check if logout happened during mutation
+      const logoutTimestampAfter = useAuthStore.getState()._logoutTimestamp;
+      if (logoutTimestampAfter !== logoutTimestampBefore) {
+        if (__DEV__) console.log('[AUTH] Logout detected during login - ignoring result');
+        return;
+      }
 
       if (result.success && result.userId && result.token) {
         setAuth(

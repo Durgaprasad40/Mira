@@ -24,6 +24,9 @@ interface AuthState {
   // Hydration status for initial session validation
   _sessionValidated: boolean;
   _sessionValidationError: string | null;
+  // H5 FIX: Track logout timestamp to detect logout during async operations
+  // Used to prevent race condition where in-flight auth mutation re-saves token after logout
+  _logoutTimestamp: number;
 
   // Actions
   setAuth: (
@@ -63,6 +66,8 @@ export const useAuthStore = create<AuthState>()((set) => ({
   _hasHydrated: true,
   _sessionValidated: false,
   _sessionValidationError: null,
+  // H5 FIX: Track logout timestamp (0 = never logged out)
+  _logoutTimestamp: 0,
 
   setAuth: (userId, token, onboardingCompleted) => {
     // STABILITY FIX: Reset onboardingStore when switching to a different user
@@ -131,6 +136,7 @@ export const useAuthStore = create<AuthState>()((set) => ({
 
     // STEP 2: Clear in-memory auth state (now safe since SecureStore is cleared)
     // This makes isAuthenticated=false, triggering UI updates
+    // H5 FIX: Set _logoutTimestamp to detect logout during async operations
     set({
       isAuthenticated: false,
       userId: null,
@@ -141,6 +147,7 @@ export const useAuthStore = create<AuthState>()((set) => ({
       faceVerificationPending: false,
       _sessionValidated: false,
       _sessionValidationError: null,
+      _logoutTimestamp: Date.now(),
     });
     if (__DEV__) console.log('[AUTH] logout: cleared in-memory auth state (step 2)');
 

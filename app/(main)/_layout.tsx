@@ -48,10 +48,13 @@ class AuthErrorBoundary extends Component<{ children: ReactNode }, { error: Erro
       if (this.state.didNavigate) return;
       this.setState({ didNavigate: true });
       if (__DEV__) console.log('[AuthErrorBoundary] Session invalidation detected, logging out:', error?.message);
-      useAuthStore.getState().logout();
-      this.navTimeoutId = setTimeout(() => {
-        globalRouter.replace('/(auth)/welcome');
-      }, 0);
+      // H5 FIX: Wrap in async IIFE to await logout before navigation
+      (async () => {
+        await useAuthStore.getState().logout();
+        this.navTimeoutId = setTimeout(() => {
+          globalRouter.replace('/(auth)/welcome');
+        }, 0);
+      })();
     }
   }
 

@@ -263,13 +263,14 @@ export default function ProfileScreen() {
       {
         text: 'Logout',
         style: 'destructive',
-        onPress: () => {
+        onPress: async () => {
           // Clear local state FIRST for crash safety
           if (isDemoMode) {
             useDemoStore.getState().demoLogout();
           }
           useOnboardingStore.getState().reset();
-          logout();
+          // H5 FIX: Await async logout to ensure SecureStore is cleared before navigation
+          await logout();
           safeReplace(router, '/(auth)/welcome', 'profile->logout');
 
           // Server logout in background (best-effort)
@@ -302,7 +303,8 @@ export default function ProfileScreen() {
               }
               // 3A1-2: Also clear onboarding store on deactivate
               useOnboardingStore.getState().reset();
-              logout();
+              // H5 FIX: Await async logout to ensure SecureStore is cleared before navigation
+              await logout();
               safeReplace(router, '/(auth)/welcome', 'profile->deactivate');
             } catch (error: any) {
               Alert.alert('Error', error.message || 'Failed to deactivate account');

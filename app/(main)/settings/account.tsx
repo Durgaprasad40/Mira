@@ -43,12 +43,13 @@ export default function AccountSettingsScreen() {
         {
           text: 'Log Out',
           style: 'destructive',
-          onPress: () => {
+          onPress: async () => {
             if (isDemoMode) {
               useDemoStore.getState().demoLogout();
             }
             useOnboardingStore.getState().reset();
-            logout();
+            // H5 FIX: Await async logout to ensure SecureStore is cleared before navigation
+            await logout();
             safeReplace(router, '/(auth)/welcome', 'account->logout');
           },
         },
@@ -73,13 +74,14 @@ export default function AccountSettingsScreen() {
         {
           text: 'Delete',
           style: 'destructive',
-          onPress: () => {
+          onPress: async () => {
             // Log out immediately (UI only - actual deletion not implemented)
             if (isDemoMode) {
               useDemoStore.getState().demoLogout();
             }
             useOnboardingStore.getState().reset();
-            logout();
+            // H5 FIX: Await async logout to ensure SecureStore is cleared before navigation
+            await logout();
             safeReplace(router, '/(auth)/welcome', 'account->delete');
           },
         },

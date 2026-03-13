@@ -141,10 +141,11 @@ export function DevDebugBanner({ defaultExpanded = false }: DevDebugBannerProps)
         {
           text: "Reset",
           style: "destructive",
-          onPress: () => {
+          onPress: async () => {
             try {
               // 1. Clear auth state (token, userId, onboardingCompleted)
-              logout();
+              // H5 FIX: Await async logout to ensure SecureStore is cleared before navigation
+              await logout();
 
               // 2. Reset onboarding store to initial state
               resetOnboardingStore();

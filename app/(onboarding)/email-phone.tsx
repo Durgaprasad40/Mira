@@ -60,6 +60,9 @@ export default function EmailPhoneScreen() {
 
       console.log('[AppleAuth] Success, token prefix:', credential.identityToken.substring(0, 20) + '...');
 
+      // H5 FIX: Capture logout timestamp before async operation
+      const logoutTimestampBefore = useAuthStore.getState()._logoutTimestamp;
+
       try {
         const result = await socialAuth({
           provider: 'apple',
@@ -69,6 +72,13 @@ export default function EmailPhoneScreen() {
             ? `${credential.fullName.givenName} ${credential.fullName.familyName || ''}`.trim()
             : undefined,
         });
+
+        // H5 FIX: Check if logout happened during mutation
+        const logoutTimestampAfter = useAuthStore.getState()._logoutTimestamp;
+        if (logoutTimestampAfter !== logoutTimestampBefore) {
+          if (__DEV__) console.log('[AUTH] Logout detected during Apple auth - ignoring result');
+          return;
+        }
 
         // STABILITY FIX (2026-03-04): Validate mutation success before routing
         if (!result) {
