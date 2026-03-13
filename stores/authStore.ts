@@ -107,47 +107,85 @@ export const useAuthStore = create<AuthState>()((set) => ({
   // Logout clears LOCAL state ONLY — server data is untouched
   // This follows the "Logout ≠ Delete" principle
   // C2 FIX: Made async - waits for SecureStore cleanup before resolving
+  // C8 FIX: All resets wrapped in try-catch to prevent cascade failure
   logout: async () => {
-    // Reset onboarding store to prevent photo/data leakage between users
-    useOnboardingStore.getState().reset();
+    // ═══════════════════════════════════════════════════════════════════════
+    // SAFE LOGOUT CASCADE - Each reset is wrapped to prevent cascade failure
+    // ═══════════════════════════════════════════════════════════════════════
 
-    // SECURITY FIX A5: Reset private profile store on logout
-    // Prevents Phase-2 private data leakage after logout
-    const { usePrivateProfileStore } = require('@/stores/privateProfileStore');
-    usePrivateProfileStore.getState().resetPhase2();
-    if (__DEV__) console.log('[AUTH] logout: cleared privateProfileStore');
-
-    // BUG B FIX: Clear demo session to prevent stale currentDemoUserId
-    // causing welcome.tsx to redirect to onboarding instead of showing welcome
-    if (isDemoMode) {
-      // Use dynamic require to avoid circular dependency
-      const { useDemoStore } = require('@/stores/demoStore');
-      useDemoStore.getState().demoLogout();
-      if (__DEV__) console.log('[AUTH] logout: called demoLogout()');
+    // 1. Reset onboarding store
+    try {
+      useOnboardingStore.getState()?.reset?.();
+      if (__DEV__) console.log('[AUTH] logout: cleared onboardingStore');
+    } catch (error) {
+      console.warn('[AUTH] logout: failed to reset onboardingStore', error);
     }
-    if (__DEV__) console.log('[AUTH] logout: cleared onboardingStore');
 
-    // Reset verification store to prevent badge leakage between accounts
-    const { useVerificationStore } = require('@/stores/verificationStore');
-    useVerificationStore.getState().resetVerification();
+    // 2. Reset private profile store (Phase-2 private data)
+    try {
+      const { usePrivateProfileStore } = require('@/stores/privateProfileStore');
+      usePrivateProfileStore.getState()?.resetPhase2?.();
+      if (__DEV__) console.log('[AUTH] logout: cleared privateProfileStore');
+    } catch (error) {
+      console.warn('[AUTH] logout: failed to reset privateProfileStore', error);
+    }
 
-    // PRIVACY FIX: Reset confession store to prevent confession/reply data leakage
-    // This ensures User A's confessions don't appear for User B after logout
-    const { useConfessionStore } = require('@/stores/confessionStore');
-    if (useConfessionStore.getState().reset) {
-      useConfessionStore.getState().reset();
-    } else {
-      // Fallback: manually reset key confession state
-      useConfessionStore.setState({
-        seeded: false,
-        confessions: [],
-        myReplies: [],
-        confessionThreads: {},
+    // 3. Reset private chat store (Phase-2 conversations, messages, unlocked users)
+    try {
+      const { usePrivateChatStore } = require('@/stores/privateChatStore');
+      usePrivateChatStore.setState({
+        conversations: [],
+        messages: {},
+        unlockedUsers: [],
+        pendingDares: [],
+        sentDares: [],
       });
+      if (__DEV__) console.log('[AUTH] logout: cleared privateChatStore');
+    } catch (error) {
+      console.warn('[AUTH] logout: failed to reset privateChatStore', error);
     }
-    if (__DEV__) console.log('[AUTH] logout: cleared confessionStore');
 
-    // C2 FIX: Clear in-memory state FIRST (immediate effect for UI)
+    // 4. Clear demo session (only in demo mode)
+    if (isDemoMode) {
+      try {
+        const { useDemoStore } = require('@/stores/demoStore');
+        useDemoStore.getState()?.demoLogout?.();
+        if (__DEV__) console.log('[AUTH] logout: called demoLogout()');
+      } catch (error) {
+        console.warn('[AUTH] logout: failed to call demoLogout', error);
+      }
+    }
+
+    // 5. Reset verification store
+    try {
+      const { useVerificationStore } = require('@/stores/verificationStore');
+      useVerificationStore.getState()?.resetVerification?.();
+      if (__DEV__) console.log('[AUTH] logout: cleared verificationStore');
+    } catch (error) {
+      console.warn('[AUTH] logout: failed to reset verificationStore', error);
+    }
+
+    // 6. Reset confession store
+    try {
+      const { useConfessionStore } = require('@/stores/confessionStore');
+      const confessionState = useConfessionStore.getState();
+      if (confessionState?.reset) {
+        confessionState.reset();
+      } else {
+        // Fallback: manually reset key confession state
+        useConfessionStore.setState({
+          seeded: false,
+          confessions: [],
+          myReplies: [],
+          confessionThreads: {},
+        });
+      }
+      if (__DEV__) console.log('[AUTH] logout: cleared confessionStore');
+    } catch (error) {
+      console.warn('[AUTH] logout: failed to reset confessionStore', error);
+    }
+
+    // 7. Clear in-memory auth state (immediate effect for UI)
     set({
       isAuthenticated: false,
       userId: null,
@@ -160,11 +198,12 @@ export const useAuthStore = create<AuthState>()((set) => ({
       _sessionValidationError: null,
     });
 
-    // C2 FIX: Await SecureStore cleanup - logout does NOT resolve until this completes
+    // 8. Await SecureStore cleanup - logout does NOT resolve until this completes
     // If cleanup fails, rethrow so callers know logout didn't fully complete
-    const { clearAuthBootCache } = require('@/stores/authBootCache');
     try {
+      const { clearAuthBootCache } = require('@/stores/authBootCache');
       await clearAuthBootCache();
+      if (__DEV__) console.log('[AUTH] logout: cleared SecureStore');
     } catch (error) {
       console.error('[AUTH] logout: SecureStore cleanup failed:', error);
       throw error;
