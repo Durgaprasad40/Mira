@@ -3,6 +3,7 @@ import { mutation, query } from "./_generated/server";
 import { Id } from "./_generated/dataModel";
 import { api } from "./_generated/api";
 import { logAdminAction } from "./adminLog";
+import { resolveUserIdByAuthId } from "./helpers";
 
 // ============================================================================
 // Crypto helpers (Convex-compatible, no Node.js dependencies)
@@ -1773,12 +1774,18 @@ export const checkIdentityExists = query({
  */
 export const softDeleteAccount = mutation({
   args: {
-    userId: v.id("users"),
+    authUserId: v.string(), // Auth ID from client, resolved server-side
     reason: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const { userId, reason } = args;
+    const { authUserId, reason } = args;
     const now = Date.now();
+
+    // Resolve auth ID to actual user ID server-side (prevents spoofing)
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      throw new Error("User not found");
+    }
 
     const user = await ctx.db.get(userId);
     if (!user) {

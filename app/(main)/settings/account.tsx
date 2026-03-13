@@ -11,6 +11,8 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
+import { useMutation } from 'convex/react';
+import { api } from '@/convex/_generated/api';
 import { COLORS } from '@/lib/constants';
 import { useAuthStore } from '@/stores/authStore';
 import { useDemoStore } from '@/stores/demoStore';
@@ -21,6 +23,8 @@ import { safeReplace } from '@/lib/safeRouter';
 export default function AccountSettingsScreen() {
   const router = useRouter();
   const logout = useAuthStore((s) => s.logout);
+  const authUserId = useAuthStore((s) => s.userId);
+  const softDeleteMutation = useMutation(api.auth.softDeleteAccount);
 
   // Safe back navigation - ensures return to Profile tab
   const handleGoBack = useCallback(() => {
@@ -68,21 +72,41 @@ export default function AccountSettingsScreen() {
     // Step 2: Final confirmation alert
     Alert.alert(
       'Are you sure?',
-      'This will schedule your account for deletion.',
+      'This will schedule your account for deletion. You can recover it within 30 days by logging in again.',
       [
         { text: 'Cancel', style: 'cancel' },
         {
           text: 'Delete',
           style: 'destructive',
           onPress: async () => {
-            // Log out immediately (UI only - actual deletion not implemented)
-            if (isDemoMode) {
-              useDemoStore.getState().demoLogout();
+            try {
+              // Demo mode: just log out
+              if (isDemoMode) {
+                useDemoStore.getState().demoLogout();
+                useOnboardingStore.getState().reset();
+                await logout();
+                safeReplace(router, '/(auth)/welcome', 'account->delete');
+                return;
+              }
+
+              // Real mode: call soft delete mutation before logging out
+              if (!authUserId) {
+                Alert.alert('Error', 'Unable to delete account. Please try logging out and back in.');
+                return;
+              }
+
+              await softDeleteMutation({
+                authUserId,
+                reason: 'User requested account deletion',
+              });
+
+              // Clear local state and log out
+              useOnboardingStore.getState().reset();
+              await logout();
+              safeReplace(router, '/(auth)/welcome', 'account->delete');
+            } catch (error: any) {
+              Alert.alert('Error', error.message || 'Failed to delete account. Please try again.');
             }
-            useOnboardingStore.getState().reset();
-            // H5 FIX: Await async logout to ensure SecureStore is cleared before navigation
-            await logout();
-            safeReplace(router, '/(auth)/welcome', 'account->delete');
           },
         },
       ]
