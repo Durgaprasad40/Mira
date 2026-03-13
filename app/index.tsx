@@ -251,15 +251,26 @@ export default function Index() {
       } catch (error) {
         console.error('[AUTH_BOOT] Validation failed:', error);
 
-        // C1 FIX: On network error, set state to trigger ROUTE_WELCOME via existing useEffect
-        // (lines 398-405 call safeReplace for all ROUTE_WELCOME cases)
-        if (__DEV__) {
-          console.warn('[AUTH_BOOT] Validation failed (network) -> will route to welcome');
-        }
         // Guard: don't set state if component unmounted
         if (!mountedRef.current) return;
-        setConvexValidated(true);
-        setConvexOnboardingCompleted(false);
+
+        // H3 FIX: Trust cached onboardingCompleted on network/validation failure
+        // If cached=true, route to home - SessionValidator will catch invalid sessions
+        // If cached=false, route to onboarding - user needs to complete it anyway
+        if (cachedOnboardingCompleted) {
+          if (__DEV__) {
+            console.warn('[AUTH_BOOT] Validation failed, trusting cached onboardingCompleted=true -> home');
+          }
+          setConvexOnboardingCompleted(true);
+          setConvexValidated(true);
+          useAuthStore.getState().setAuth(userId, token, true);
+        } else {
+          if (__DEV__) {
+            console.warn('[AUTH_BOOT] Validation failed, cached onboardingCompleted=false -> onboarding');
+          }
+          setConvexValidated(true);
+          setConvexOnboardingCompleted(false);
+        }
 
         // C2 FIX: Clear watchdog timer - validation completed (with error)
         if (watchdogTimerRef.current) {
@@ -272,11 +283,24 @@ export default function Index() {
     // STABILITY FIX (2026-03-04): Handle promise rejection to prevent unhandled errors
     validateSession().catch((error) => {
       console.error('[AUTH_BOOT] Unhandled validation error:', error);
-      // C1 FIX: On crash, set state to trigger ROUTE_WELCOME
       // Guard: don't set state if component unmounted
       if (!mountedRef.current) return;
-      setConvexValidated(true);
-      setConvexOnboardingCompleted(false);
+
+      // H3 FIX: Trust cached onboardingCompleted on unhandled error (same as catch block above)
+      if (cachedOnboardingCompleted) {
+        if (__DEV__) {
+          console.warn('[AUTH_BOOT] Unhandled error, trusting cached onboardingCompleted=true -> home');
+        }
+        setConvexOnboardingCompleted(true);
+        setConvexValidated(true);
+        useAuthStore.getState().setAuth(userId, token, true);
+      } else {
+        if (__DEV__) {
+          console.warn('[AUTH_BOOT] Unhandled error, cached onboardingCompleted=false -> onboarding');
+        }
+        setConvexValidated(true);
+        setConvexOnboardingCompleted(false);
+      }
 
       // C2 FIX: Clear watchdog timer - validation completed (with crash)
       if (watchdogTimerRef.current) {
