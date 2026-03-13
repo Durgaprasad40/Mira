@@ -247,6 +247,18 @@ export default function Index() {
 
           // Update authStore with real onboarding status
           useAuthStore.getState().setAuth(userId, token, backendOnboardingCompleted);
+        } else {
+          // H4 FIX: Handle null status (user not found in database)
+          // This can happen if user was deleted, token is stale, or userId is corrupted
+          // Clear the stale session and route to welcome immediately (don't wait for 12s watchdog)
+          if (__DEV__) {
+            console.warn('[AUTH_BOOT] User not found (null status), clearing stale session');
+          }
+          const { clearAuthBootCache } = require('@/stores/authBootCache');
+          await clearAuthBootCache();
+          await useAuthStore.getState().logout();
+          safeReplace("/(auth)/welcome", "user not found (null status)");
+          return;
         }
       } catch (error) {
         console.error('[AUTH_BOOT] Validation failed:', error);
