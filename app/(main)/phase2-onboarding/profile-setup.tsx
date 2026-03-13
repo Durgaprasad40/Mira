@@ -1,5 +1,5 @@
 /**
- * Phase 2 Onboarding - Step 3: Review
+ * Phase 2 Onboarding - Step 4: Review
  *
  * Layout order (top to bottom):
  * A) Title: "Review your profile"
@@ -7,10 +7,11 @@
  * C) Desire section (text display + Edit)
  * D) Profile Details (Name, DOB, Gender, Height, etc.)
  * E) Looking For section (tags + Edit)
+ * E2) Prompts section (answered prompts from Step 3 + Edit)
  * F) Info note + validation/continue button
  *
  * Photos: tap → full-screen preview (with blur if enabled)
- * All Edit buttons → navigate to profile-edit (Step 2.5)
+ * All Edit buttons → navigate to profile-edit (Step 2) or prompts (Step 3)
  * Blur consistency: uses blurMyPhoto from store
  */
 import React, { useState, useMemo, useCallback, useRef } from 'react';
@@ -31,7 +32,7 @@ import { Image } from 'expo-image';
 import { useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { INCOGNITO_COLORS } from '@/lib/constants';
-import { PRIVATE_INTENT_CATEGORIES } from '@/lib/privateConstants';
+import { PRIVATE_INTENT_CATEGORIES, PREFERENCE_STRENGTH_OPTIONS, INTENT_MATCH_OPTIONS } from '@/lib/privateConstants';
 import { useShallow } from 'zustand/react/shallow';
 import {
   usePrivateProfileStore,
@@ -82,12 +83,17 @@ export default function Phase2Review() {
   const privateBio = usePrivateProfileStore((s) => s.privateBio);
   const gender = usePrivateProfileStore((s) => s.gender);
   const height = usePrivateProfileStore((s) => s.height);
+  const weight = usePrivateProfileStore((s) => s.weight);
   const smoking = usePrivateProfileStore((s) => s.smoking);
   const drinking = usePrivateProfileStore((s) => s.drinking);
   const education = usePrivateProfileStore((s) => s.education);
   const religion = usePrivateProfileStore((s) => s.religion);
   // FIX #1: Use per-slot blur state from store (persisted from edit screen)
   const photoBlurSlots = usePrivateProfileStore((s) => s.photoBlurSlots);
+  // Phase-2 Step 3: Prompt answers
+  const promptAnswers = usePrivateProfileStore((s) => s.promptAnswers);
+  // Phase-2 Preference Strength
+  const preferenceStrength = usePrivateProfileStore((s) => s.preferenceStrength);
 
   // Store actions
   const completeSetup = usePrivateProfileStore((s) => s.completeSetup);
@@ -185,6 +191,11 @@ export default function Phase2Review() {
     router.push('/(main)/phase2-onboarding/looking-for-edit' as any);
   }, [router]);
 
+  // Handler for editing prompts (Step 3)
+  const handleEditPrompts = useCallback(() => {
+    router.push('/(main)/phase2-onboarding/prompts' as any);
+  }, [router]);
+
   // Handle completion
   const handleComplete = useCallback(() => {
     if (!canComplete) return;
@@ -222,6 +233,29 @@ export default function Phase2Review() {
         privateIntentKeys: intentKeys,
         privatePhotoUrls: backendPhotoUrls,
         isSetupComplete: true,
+        // Profile details (imported from Phase-1)
+        height: height ?? null,
+        weight: weight ?? null,
+        smoking: smoking ?? null,
+        drinking: drinking ?? null,
+        education: education ?? null,
+        religion: religion ?? null,
+        // Phase-2 Step 3: Persist prompt answers to backend
+        promptAnswers: promptAnswers.map((p) => ({
+          promptId: p.promptId,
+          question: p.question,
+          answer: p.answer,
+        })),
+        // Phase-2 Preference Strength (only if complete)
+        ...(preferenceStrength.smoking && preferenceStrength.drinking && preferenceStrength.intent
+          ? {
+              preferenceStrength: {
+                smoking: preferenceStrength.smoking,
+                drinking: preferenceStrength.drinking,
+                intent: preferenceStrength.intent,
+              },
+            }
+          : {}),
       })
         .then((result) => {
           if (__DEV__) {
@@ -250,7 +284,8 @@ export default function Phase2Review() {
   }, [
     canComplete, completeSetup, intentKeys, privateBio, photoCount, router,
     userId, setPhase2CompletedMutation, upsertPrivateProfileMutation,
-    selectedPhotoUrls, displayName, storeAge, gender
+    selectedPhotoUrls, displayName, storeAge, gender, promptAnswers,
+    height, weight, smoking, drinking, education, religion, preferenceStrength
   ]);
 
   return (
@@ -264,7 +299,7 @@ export default function Phase2Review() {
           <Ionicons name="arrow-back" size={24} color={C.text} />
         </TouchableOpacity>
         <Text style={styles.headerTitle}>Review & Desire</Text>
-        <Text style={styles.stepLabel}>Step 3 of 3</Text>
+        <Text style={styles.stepLabel}>Step 4 of 4</Text>
       </View>
 
       <ScrollView
@@ -380,6 +415,12 @@ export default function Phase2Review() {
               </Text>
             </View>
             <View style={styles.infoRow}>
+              <Text style={styles.infoLabel}>Weight</Text>
+              <Text style={styles.infoValue}>
+                {weight && weight > 0 ? `${weight} kg` : 'Not set'}
+              </Text>
+            </View>
+            <View style={styles.infoRow}>
               <Text style={[styles.infoLabel, !smoking && styles.infoLabelMissing]}>Smoking</Text>
               <Text style={[styles.infoValue, !smoking && styles.infoValueMissing]}>
                 {getOptionLabel(SMOKING_OPTIONS, smoking) || 'Not set'}
@@ -430,6 +471,62 @@ export default function Phase2Review() {
             <Text style={styles.emptyText}>No intents selected</Text>
           )}
         </View>
+
+        {/* === SECTION E2: Prompts (answered from Step 3) === */}
+        {promptAnswers.length > 0 && (
+          <View style={styles.section}>
+            <View style={styles.sectionHeader}>
+              <Text style={styles.sectionTitle}>Your Answers</Text>
+              <TouchableOpacity style={styles.editBtn} onPress={handleEditPrompts}>
+                <Ionicons name="pencil" size={14} color={C.primary} />
+                <Text style={styles.editBtnText}>Edit</Text>
+              </TouchableOpacity>
+            </View>
+
+            <View style={styles.promptsContainer}>
+              {promptAnswers.map((pa) => (
+                <View key={pa.promptId} style={styles.promptAnswerCard}>
+                  <Text style={styles.promptQuestion}>{pa.question}</Text>
+                  <Text style={styles.promptAnswer}>{pa.answer}</Text>
+                </View>
+              ))}
+            </View>
+          </View>
+        )}
+
+        {/* === SECTION E3: Preference Strength === */}
+        {preferenceStrength.smoking && preferenceStrength.drinking && preferenceStrength.intent && (
+          <View style={styles.section}>
+            <View style={styles.sectionHeader}>
+              <Text style={styles.sectionTitle}>Preference Strength</Text>
+              <TouchableOpacity style={styles.editBtn} onPress={handleEditPrompts}>
+                <Ionicons name="pencil" size={14} color={C.primary} />
+                <Text style={styles.editBtnText}>Edit</Text>
+              </TouchableOpacity>
+            </View>
+
+            <View style={styles.infoCard}>
+              <View style={styles.infoRow}>
+                <Text style={styles.infoLabel}>Smoking compatibility</Text>
+                <Text style={styles.infoValue}>
+                  {PREFERENCE_STRENGTH_OPTIONS.find((o) => o.value === preferenceStrength.smoking)?.label || preferenceStrength.smoking}
+                </Text>
+              </View>
+              <View style={styles.infoRow}>
+                <Text style={styles.infoLabel}>Drinking compatibility</Text>
+                <Text style={styles.infoValue}>
+                  {PREFERENCE_STRENGTH_OPTIONS.find((o) => o.value === preferenceStrength.drinking)?.label || preferenceStrength.drinking}
+                </Text>
+              </View>
+              <View style={[styles.infoRow, styles.infoRowLast]}>
+                <Text style={styles.infoLabel}>Intent compatibility</Text>
+                <Text style={styles.infoValue}>
+                  {INTENT_MATCH_OPTIONS.find((o) => o.value === preferenceStrength.intent)?.label || preferenceStrength.intent}
+                </Text>
+              </View>
+            </View>
+          </View>
+        )}
 
         {/* === SECTION F: Info Note === */}
         <View style={styles.infoNote}>
@@ -682,6 +779,30 @@ const styles = StyleSheet.create({
     fontSize: 13,
     color: C.textLight,
     fontStyle: 'italic',
+  },
+
+  // Prompts section (Step 3 answers)
+  promptsContainer: {
+    gap: 12,
+  },
+  promptAnswerCard: {
+    backgroundColor: C.surface,
+    borderRadius: 12,
+    padding: 14,
+    borderLeftWidth: 3,
+    borderLeftColor: C.primary,
+  },
+  promptQuestion: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: C.textLight,
+    marginBottom: 6,
+    lineHeight: 18,
+  },
+  promptAnswer: {
+    fontSize: 15,
+    color: C.text,
+    lineHeight: 21,
   },
 
   // Desire Display (read-only)

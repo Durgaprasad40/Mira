@@ -123,6 +123,7 @@ export default function EditProfileScreen() {
   const [lastName, setLastName] = useState('');
   const [showPromptPicker, setShowPromptPicker] = useState(false);
   const [height, setHeight] = useState('');
+  const [weight, setWeight] = useState('');
   const [smoking, setSmoking] = useState<string | null>(null);
   const [drinking, setDrinking] = useState<string | null>(null);
   const [kids, setKids] = useState<string | null>(null);
@@ -154,6 +155,7 @@ export default function EditProfileScreen() {
       setBio(currentUser.bio || '');
       setPrompts((currentUser as any)?.profilePrompts ?? []);
       setHeight(currentUser.height?.toString() || '');
+      setWeight(currentUser.weight?.toString() || '');
       setSmoking(currentUser.smoking || null);
       setDrinking(currentUser.drinking || null);
       setKids(currentUser.kids || null);
@@ -572,6 +574,7 @@ export default function EditProfileScreen() {
 
       // Basic info - only include if set
       if (height && height.trim()) patch.height = parseInt(height);
+      if (weight && weight.trim()) patch.weight = parseInt(weight);
       if (education) patch.education = education;
       if (religion) patch.religion = religion;
       if (jobTitle && jobTitle.trim()) patch.jobTitle = jobTitle.trim();
@@ -632,6 +635,7 @@ export default function EditProfileScreen() {
         name: fullName || undefined,
         bio: bio || undefined,
         height: height ? parseInt(height) : undefined,
+        weight: weight ? parseInt(weight) : undefined,
         smoking: (smoking || undefined) as any,
         drinking: (drinking || undefined) as any,
         kids: (kids || undefined) as any,
@@ -903,6 +907,7 @@ export default function EditProfileScreen() {
       <View style={styles.section}>
         <Text style={styles.sectionTitle}>Basic Info</Text>
         <View style={styles.inputRow}><Text style={styles.label}>Height (cm)</Text><Input placeholder="Height" value={height} onChangeText={setHeight} keyboardType="numeric" style={styles.numberInput} /></View>
+        <View style={styles.inputRow}><Text style={styles.label}>Weight (kg)</Text><Input placeholder="Weight" value={weight} onChangeText={setWeight} keyboardType="numeric" style={styles.numberInput} /></View>
         <View style={styles.inputRow}><Text style={styles.label}>Job Title</Text><Input placeholder="Job title" value={jobTitle} onChangeText={setJobTitle} /></View>
         <View style={styles.inputRow}><Text style={styles.label}>Company</Text><Input placeholder="Company name" value={company} onChangeText={setCompany} /></View>
         <View style={styles.inputRow}><Text style={styles.label}>School</Text><Input placeholder="School/University" value={school} onChangeText={setSchool} /></View>

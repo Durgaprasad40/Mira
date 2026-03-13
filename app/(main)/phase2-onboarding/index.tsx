@@ -434,6 +434,7 @@ export default function Phase2OnboardingTerms() {
         activities: canonicalProfile.activities || phase1User?.activities || [],
         maxDistance: canonicalProfile.maxDistance || phase1User?.maxDistance || 50,
         height: canonicalProfile.height ?? phase1User?.height ?? null,
+        weight: canonicalProfile.weight ?? phase1User?.weight ?? null,
         smoking: canonicalProfile.smoking ?? phase1User?.smoking ?? null,
         drinking: canonicalProfile.drinking ?? phase1User?.drinking ?? null,
         kids: canonicalProfile.kids ?? phase1User?.kids ?? null,
@@ -472,7 +473,7 @@ export default function Phase2OnboardingTerms() {
         >
           <Ionicons name="close" size={22} color={C.textLight} />
         </TouchableOpacity>
-        <Text style={styles.stepIndicator}>Step 1 of 3</Text>
+        <Text style={styles.stepIndicator}>Step 1 of 4</Text>
       </View>
 
       <ScrollView
