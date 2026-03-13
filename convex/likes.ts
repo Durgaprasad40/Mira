@@ -420,14 +420,19 @@ export const getLikesReceived = query({
 });
 
 // Get like count
+// OPTIMIZATION: Uses batch queries instead of N+1 pattern
+// FIX: Excludes blocked users (bidirectional)
 export const getLikeCount = query({
   args: {
     userId: v.id('users'),
   },
   handler: async (ctx, args) => {
+    const { userId } = args;
+
+    // 1. Get all likes received (like or super_like)
     const likes = await ctx.db
       .query('likes')
-      .withIndex('by_to_user', (q) => q.eq('toUserId', args.userId))
+      .withIndex('by_to_user', (q) => q.eq('toUserId', userId))
       .filter((q) =>
         q.or(
           q.eq(q.field('action'), 'like'),
@@ -436,17 +441,39 @@ export const getLikeCount = query({
       )
       .collect();
 
-    // Filter out already swiped
+    if (likes.length === 0) return 0;
+
+    // 2. Batch fetch: users I've already swiped on (OPTIMIZATION: replaces N+1 pattern)
+    const mySwipes = await ctx.db
+      .query('likes')
+      .withIndex('by_from_user', (q) => q.eq('fromUserId', userId))
+      .collect();
+    const alreadySwipedSet = new Set(mySwipes.map((s) => s.toUserId));
+
+    // 3. Batch fetch: users I've blocked (FIX: exclude blocked users)
+    const myBlocks = await ctx.db
+      .query('blocks')
+      .withIndex('by_blocker', (q) => q.eq('blockerId', userId))
+      .collect();
+    const blockedByMeSet = new Set(myBlocks.map((b) => b.blockedUserId));
+
+    // 4. Batch fetch: users who blocked me (FIX: exclude users who blocked me)
+    const blocksOnMe = await ctx.db
+      .query('blocks')
+      .withIndex('by_blocked', (q) => q.eq('blockedUserId', userId))
+      .collect();
+    const blockedMeSet = new Set(blocksOnMe.map((b) => b.blockerId));
+
+    // 5. Count likes excluding swiped and blocked users
     let count = 0;
     for (const like of likes) {
-      const alreadySwiped = await ctx.db
-        .query('likes')
-        .withIndex('by_from_to', (q) =>
-          q.eq('fromUserId', args.userId).eq('toUserId', like.fromUserId)
-        )
-        .first();
-
-      if (!alreadySwiped) count++;
+      const fromUserId = like.fromUserId;
+      // Exclude if already swiped
+      if (alreadySwipedSet.has(fromUserId)) continue;
+      // Exclude if blocked (either direction)
+      if (blockedByMeSet.has(fromUserId)) continue;
+      if (blockedMeSet.has(fromUserId)) continue;
+      count++;
     }
 
     return count;
