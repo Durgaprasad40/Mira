@@ -22,6 +22,10 @@ interface MessageInputProps {
   initialText?: string;
   /** Called when the input text changes (for persisting drafts). */
   onTextChange?: (text: string) => void;
+  /** Called when user starts/stops typing (for production typing indicators). */
+  onTypingChange?: (isTyping: boolean) => void;
+  /** Whether the OTHER user is typing (passed from parent in production mode). */
+  otherUserTyping?: boolean;
 }
 
 export function MessageInput({
@@ -38,6 +42,8 @@ export function MessageInput({
   recipientName = '',
   initialText = '',
   onTextChange,
+  onTypingChange,
+  otherUserTyping = false,
 }: MessageInputProps) {
   const [text, setText] = useState(initialText);
   const [showTemplates, setShowTemplates] = useState(false);
@@ -79,25 +85,44 @@ export function MessageInput({
       setShowAttachMenu(false);
     }
 
-    // Demo typing indicator logic (simulates other user typing)
     // Clear any existing timers
     if (showTypingTimerRef.current) clearTimeout(showTypingTimerRef.current);
     if (hideTypingTimerRef.current) clearTimeout(hideTypingTimerRef.current);
 
-    if (value.trim().length > 0) {
-      // User started typing - show "other typing" after 600ms
-      if (!otherTyping) {
-        showTypingTimerRef.current = setTimeout(() => {
-          setOtherTyping(true);
-        }, 600);
+    const hasText = value.trim().length > 0;
+
+    // Production mode: notify parent of typing state change
+    if (!isDemoMode && onTypingChange) {
+      if (hasText) {
+        // User is typing - notify immediately
+        onTypingChange(true);
+        // Stop typing after 2s of inactivity
+        hideTypingTimerRef.current = setTimeout(() => {
+          onTypingChange(false);
+        }, 2000);
+      } else {
+        // User cleared input - stop typing
+        onTypingChange(false);
       }
-      // Reset hide timer - hide after 1200ms of inactivity
-      hideTypingTimerRef.current = setTimeout(() => {
+    }
+
+    // Demo mode: simulate other user typing (fake indicator)
+    if (isDemoMode) {
+      if (hasText) {
+        // User started typing - show "other typing" after 600ms
+        if (!otherTyping) {
+          showTypingTimerRef.current = setTimeout(() => {
+            setOtherTyping(true);
+          }, 600);
+        }
+        // Reset hide timer - hide after 1200ms of inactivity
+        hideTypingTimerRef.current = setTimeout(() => {
+          setOtherTyping(false);
+        }, 1200);
+      } else {
+        // Input is empty - hide typing indicator immediately
         setOtherTyping(false);
-      }, 1200);
-    } else {
-      // Input is empty - hide typing indicator immediately
-      setOtherTyping(false);
+      }
     }
   };
 
@@ -219,8 +244,8 @@ export function MessageInput({
 
       {/* Message limit banner removed — no weekly limit for now (until subscriptions added) */}
 
-      {/* Demo typing indicator (simulates other user typing) */}
-      {otherTyping && !isRecording && (
+      {/* Typing indicator - uses otherUserTyping prop in production, local state in demo */}
+      {(isDemoMode ? otherTyping : otherUserTyping) && !isRecording && (
         <View style={styles.typingBanner}>
           <Text style={styles.typingText}>Typing…</Text>
         </View>

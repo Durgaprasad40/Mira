@@ -1055,3 +1055,94 @@ export const backfillConversationParticipants = internalMutation({
     };
   },
 });
+
+// ═══════════════════════════════════════════════════════════════════════════
+// TYPING INDICATORS
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Set typing status for a user in a conversation.
+ * Called when user starts/stops typing.
+ * Uses upsert pattern to avoid creating duplicate rows.
+ */
+export const setTypingStatus = mutation({
+  args: {
+    conversationId: v.id('conversations'),
+    authUserId: v.string(),
+    isTyping: v.boolean(),
+  },
+  handler: async (ctx, args) => {
+    const { conversationId, authUserId, isTyping } = args;
+    const now = Date.now();
+
+    // Resolve auth ID to user ID
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) return;
+
+    // Verify user is part of conversation
+    const conversation = await ctx.db.get(conversationId);
+    if (!conversation || !conversation.participants.includes(userId)) {
+      return;
+    }
+
+    // Upsert typing status
+    const existing = await ctx.db
+      .query('typingStatus')
+      .withIndex('by_user_conversation', (q) =>
+        q.eq('userId', userId).eq('conversationId', conversationId)
+      )
+      .first();
+
+    if (existing) {
+      await ctx.db.patch(existing._id, { isTyping, updatedAt: now });
+    } else {
+      await ctx.db.insert('typingStatus', {
+        conversationId,
+        userId,
+        isTyping,
+        updatedAt: now,
+      });
+    }
+  },
+});
+
+/**
+ * Get typing status for the other participant in a conversation.
+ * Returns isTyping: true if the other user is actively typing (updated within last 5s).
+ */
+export const getTypingStatus = query({
+  args: {
+    conversationId: v.id('conversations'),
+    userId: v.id('users'),
+  },
+  handler: async (ctx, args) => {
+    const { conversationId, userId } = args;
+    const now = Date.now();
+    const TYPING_TIMEOUT = 5000; // 5 seconds
+
+    // Get conversation to find the other participant
+    const conversation = await ctx.db.get(conversationId);
+    if (!conversation || !conversation.participants.includes(userId)) {
+      return { isTyping: false };
+    }
+
+    const otherUserId = conversation.participants.find((id) => id !== userId);
+    if (!otherUserId) return { isTyping: false };
+
+    // Get other user's typing status
+    const typingStatus = await ctx.db
+      .query('typingStatus')
+      .withIndex('by_user_conversation', (q) =>
+        q.eq('userId', otherUserId).eq('conversationId', conversationId)
+      )
+      .first();
+
+    if (!typingStatus) return { isTyping: false };
+
+    // Check if typing status is stale (older than 5 seconds)
+    const isStale = now - typingStatus.updatedAt > TYPING_TIMEOUT;
+    return {
+      isTyping: typingStatus.isTyping && !isStale,
+    };
+  },
+});

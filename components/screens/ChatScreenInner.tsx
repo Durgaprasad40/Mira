@@ -241,6 +241,13 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
     !isDemo && userId ? { userId: userId as any } : 'skip'
   );
 
+  // Typing indicator query - polls every 2s for other user's typing status
+  const typingStatus = useQuery(
+    api.messages.getTypingStatus,
+    !isDemo && conversationId && userId ? { conversationId: conversationId as any, userId: userId as any } : 'skip'
+  );
+  const otherUserTyping = typingStatus?.isTyping ?? false;
+
   const messages = isDemo ? demoMessageList : convexMessages;
 
   // Demo conversation metadata comes from demoDmStore.meta, seeded by
@@ -294,6 +301,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
   const sendPreMatchMessage = useMutation(api.messages.sendPreMatchMessage);
   const generateUploadUrl = useMutation(api.photos.generateUploadUrl);
   const sendProtectedImage = useMutation(api.protectedMedia.sendProtectedImage);
+  const setTypingStatus = useMutation(api.messages.setTypingStatus);
 
   const [isSending, setIsSending] = useState(false);
   const isSendingRef = useRef(false);
@@ -438,6 +446,32 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
     }
   }, [conversationId, setDemoDraft, clearDemoDraft]);
 
+  // Typing indicator handler - notify backend when user starts/stops typing
+  const handleTypingChange = useCallback((isTyping: boolean) => {
+    if (isDemo || !conversationId || !userId) return;
+    // Fire and forget - don't block UI for typing status updates
+    setTypingStatus({
+      conversationId: conversationId as any,
+      authUserId: userId,
+      isTyping,
+    }).catch(() => {
+      // Silently ignore typing status errors
+    });
+  }, [isDemo, conversationId, userId, setTypingStatus]);
+
+  // Clear typing status when leaving the chat
+  useEffect(() => {
+    return () => {
+      if (!isDemo && conversationId && userId) {
+        setTypingStatus({
+          conversationId: conversationId as any,
+          authUserId: userId,
+          isTyping: false,
+        }).catch(() => {});
+      }
+    };
+  }, [isDemo, conversationId, userId, setTypingStatus]);
+
   const handleSend = async (text: string, type: 'text' | 'template' = 'text') => {
     if (!activeConversation) return;
     if (isSendingRef.current) return;
@@ -466,6 +500,8 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
     if (!userId) return;
     isSendingRef.current = true;
     if (mountedRef.current) setIsSending(true);
+    // Clear typing status when sending a message
+    handleTypingChange(false);
     if (__DEV__) console.log('[STABILITY][ChatSend] starting async send');
 
     // P0-2 STABILITY FIX: Generate clientMessageId for idempotency on retry
@@ -972,6 +1008,8 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
                 recipientName={activeConversation.otherUser.name}
                 initialText={demoDraft ?? ''}
                 onTextChange={handleDraftChange}
+                onTypingChange={handleTypingChange}
+                otherUserTyping={otherUserTyping}
               />
             </View>
           </View>
