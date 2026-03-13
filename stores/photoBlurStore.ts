@@ -1,10 +1,14 @@
 /**
- * photoBlurStore — In-memory store for per-photo blur settings.
+ * photoBlurStore — In-memory cache for photo blur settings.
  *
- * STORAGE POLICY: NO local persistence. Convex is ONLY source of truth.
- * Store is in-memory only. Any required rehydration must come from Convex queries/mutations.
+ * STORAGE POLICY:
+ * - blurEnabled: Convex `users.photoBlurred` is source of truth.
+ *   Must be hydrated from Convex on component mount (edit-profile.tsx does this).
+ * - blurredPhotos: Per-photo granular blur, LOCAL ONLY (not persisted to Convex).
+ *   Resets on app restart. Used for preview before save.
  *
- * Stores blur preferences keyed by userId in memory only.
+ * The global blur toggle (blurEnabled) syncs to Convex via togglePhotoBlur mutation.
+ * The per-photo blur (blurredPhotos) is UI-only state.
  */
 import { create } from 'zustand';
 
