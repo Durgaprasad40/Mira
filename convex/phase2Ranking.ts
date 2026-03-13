@@ -85,19 +85,15 @@ export const recordPhase2Activity = internalMutation({
 // ═══════════════════════════════════════════════════════════════════════════
 
 /**
- * Count total prompts answered across all Phase-2 prompt sections.
- * Sections: intimacyPrompts, boundaryPrompts, fantasyPrompts
+ * Count total prompts answered in Phase-2 profile.
+ * Uses the real schema field: promptAnswers
  */
 function countAllPromptsAnswered(profile: any): number {
-  let count = 0;
-  const sections = ['intimacyPrompts', 'boundaryPrompts', 'fantasyPrompts'];
-  for (const section of sections) {
-    const prompts = profile[section];
-    if (Array.isArray(prompts)) {
-      count += prompts.filter((p: any) => p.answer?.trim().length > 0).length;
-    }
+  const prompts = profile.promptAnswers;
+  if (Array.isArray(prompts)) {
+    return prompts.filter((p: any) => p.answer?.trim().length > 0).length;
   }
-  return count;
+  return 0;
 }
 
 /**
