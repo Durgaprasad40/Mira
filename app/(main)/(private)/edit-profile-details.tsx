@@ -135,6 +135,9 @@ export default function EditProfileDetailsScreen() {
     return () => { isMountedRef.current = false; };
   }, []);
 
+  // Synchronous guard against double-tap (React state is async and race-prone)
+  const isSavingRef = useRef(false);
+
   // Parse height/weight for comparison and validation
   const parsedHeight = heightText.trim() === '' ? null : parseInt(heightText, 10);
   const parsedWeight = weightText.trim() === '' ? null : parseInt(weightText, 10);
@@ -164,6 +167,10 @@ export default function EditProfileDetailsScreen() {
       Alert.alert('Invalid Weight', `Weight must be between ${WEIGHT_MIN} and ${WEIGHT_MAX} kg.`);
       return;
     }
+
+    // Synchronous double-tap guard (after validation to avoid blocking on validation failure)
+    if (isSavingRef.current) return;
+    isSavingRef.current = true;
 
     setIsSaving(true);
     try {
@@ -205,6 +212,7 @@ export default function EditProfileDetailsScreen() {
       }
       Alert.alert('Error', 'Failed to save. Please try again.');
     } finally {
+      isSavingRef.current = false;
       if (isMountedRef.current) {
         setIsSaving(false);
       }

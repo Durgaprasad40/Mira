@@ -51,6 +51,9 @@ export default function EditDesireScreen() {
     return () => { isMountedRef.current = false; };
   }, []);
 
+  // Synchronous guard against double-tap (React state is async and race-prone)
+  const isSavingRef = useRef(false);
+
   // Validation
   const charCount = desireText.trim().length;
   const isValid = charCount >= PHASE2_DESIRE_MIN_LENGTH && charCount <= PHASE2_DESIRE_MAX_LENGTH;
@@ -58,6 +61,8 @@ export default function EditDesireScreen() {
 
   const handleSave = async () => {
     if (!isValid || isSaving) return;
+    if (isSavingRef.current) return; // Synchronous double-tap guard
+    isSavingRef.current = true;
 
     setIsSaving(true);
     try {
@@ -83,6 +88,7 @@ export default function EditDesireScreen() {
       }
       Alert.alert('Error', 'Failed to save. Please try again.');
     } finally {
+      isSavingRef.current = false;
       if (isMountedRef.current) {
         setIsSaving(false);
       }
