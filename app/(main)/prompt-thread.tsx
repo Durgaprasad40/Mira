@@ -214,6 +214,9 @@ export default function PromptThreadScreen() {
     answersRef.current = answers;
   }, [answers]);
 
+  // Ref to track pending reactions (prevents double-tap race condition)
+  const pendingReactionsRef = useRef<Set<string>>(new Set());
+
   // Auto-open composer if requested from feed
   useEffect(() => {
     if (autoOpenComposer === 'new' && !myAnswer) {
@@ -243,6 +246,14 @@ export default function PromptThreadScreen() {
       console.log('[T/D REACTION] skip - no userId');
       return;
     }
+
+    // Prevent double-tap race condition
+    if (pendingReactionsRef.current.has(answerId)) {
+      console.log('[T/D REACTION] skip - already pending');
+      return;
+    }
+    pendingReactionsRef.current.add(answerId);
+
     setEmojiPickerAnswerId(null);
 
     // Find the answer using ref to get latest data (avoids stale closure)
@@ -271,6 +282,8 @@ export default function PromptThreadScreen() {
       if (error.message?.includes('Rate limit')) {
         Alert.alert('Slow down', 'Please wait a moment before reacting again.');
       }
+    } finally {
+      pendingReactionsRef.current.delete(answerId);
     }
   }, [userId, setReaction]);
 
