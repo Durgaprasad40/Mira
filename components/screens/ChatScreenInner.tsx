@@ -903,7 +903,10 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
                 createdAt: item.createdAt,
                 readAt: item.readAt,
                 isProtected: item.isProtected ?? false,
-                protectedMedia: item.protectedMedia,
+                // L3 FIX: Force viewingMode='tap' in production (hold mode only works in demo)
+                protectedMedia: !isDemo && item.protectedMedia
+                  ? { ...item.protectedMedia, viewingMode: 'tap' as const }
+                  : item.protectedMedia,
                 isExpired: item.isExpired,
                 timerEndsAt: item.timerEndsAt,
                 expiredAt: item.expiredAt,
@@ -917,10 +920,12 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
               otherUserName={activeConversation.otherUser.name}
               currentUserId={(isDemo ? getDemoUserId() : userId) || undefined}
               onProtectedMediaPress={handleProtectedMediaPress}
-              onProtectedMediaHoldStart={handleProtectedMediaHoldStart}
-              onProtectedMediaHoldEnd={handleProtectedMediaHoldEnd}
+              // L3 FIX: Hold handlers only work in demo mode
+              onProtectedMediaHoldStart={isDemo ? handleProtectedMediaHoldStart : undefined}
+              onProtectedMediaHoldEnd={isDemo ? handleProtectedMediaHoldEnd : undefined}
               onProtectedMediaExpire={handleProtectedMediaExpire}
-              onVoiceDelete={handleVoiceDelete}
+              // L2 FIX: Voice delete only works in demo mode
+              onVoiceDelete={isDemo ? handleVoiceDelete : undefined}
             />
           )}
           ListEmptyComponent={
@@ -952,11 +957,12 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
             {/* ANDROID FIX: Apply bottom inset on both platforms.
                 useSafeAreaInsets() returns correct values for Android gesture nav. */}
             <View style={{ paddingBottom: insets.bottom }}>
+              {/* L2 FIX: Voice messages only work in demo mode - hide from production UI */}
               <MessageInput
                 onSend={handleSend}
                 onSendCamera={handleSendCamera}
                 onSendGallery={handleSendGallery}
-                onSendVoice={handleSendVoice}
+                onSendVoice={isDemo ? handleSendVoice : undefined}
                 onSendDare={activeConversation.isPreMatch ? handleSendDare : undefined}
                 disabled={isSending || isExpiredChat}
                 isPreMatch={activeConversation.isPreMatch}
