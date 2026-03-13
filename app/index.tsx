@@ -21,6 +21,7 @@ type BootAction =
   | { type: "LOADING" }
   | { type: "FORCE_WELCOME_ONBOARDING_INCOMPLETE"; route: "/(auth)/welcome" }
   | { type: "ROUTE_WELCOME"; route: "/(auth)/welcome" }
+  | { type: "ROUTE_ONBOARDING"; route: "/(onboarding)/basic-info" }
   | { type: "ROUTE_HOME"; route: "/(main)/(tabs)/home" };
 
 export default function Index() {
@@ -325,13 +326,13 @@ export default function Index() {
         return { type: "ROUTE_HOME", route: "/(main)/(tabs)/home" };
       }
 
-      // ONBOARDING INCOMPLETE: Route to welcome to continue onboarding
+      // ONBOARDING INCOMPLETE: Route directly to onboarding (not welcome/auth)
+      // User is authenticated with valid token, just needs to complete onboarding
       // SAFETY: Don't force logout - SessionValidator will handle truly invalid sessions
-      // Forcing logout here would clear photos and break onboarding progress
       if (__DEV__) {
-        console.log('[AUTH_BOOT] Route decision: onboarding incomplete → welcome');
+        console.log('[AUTH_BOOT] Route decision: authenticated but onboarding incomplete → onboarding');
       }
-      return { type: "ROUTE_WELCOME", route: "/(auth)/welcome" };
+      return { type: "ROUTE_ONBOARDING", route: "/(onboarding)/basic-info" };
     }
 
     // No valid token → show welcome screen
@@ -366,13 +367,12 @@ export default function Index() {
     if (!routeDestination || routeSignaled.current) return;
     routeSignaled.current = true;
 
-    // Log boot decision for debugging (with reference photo info from onboarding store if available)
+    // Log boot decision for debugging
     if (__DEV__) {
-      const facePassed = authBootCacheData?.faceVerificationPassed;
-      const onbComplete = authBootCacheData?.onboardingCompleted;
+      const onbComplete = convexOnboardingCompleted;
       const token2 = authBootCacheData?.token;
       const hasToken = typeof token2 === 'string' && token2.trim().length > 0;
-      console.log(`[ONB] boot_decision facePassed=${facePassed} onboardingCompleted=${onbComplete} hasToken=${hasToken} action=${bootAction.type}`);
+      console.log(`[ONB] boot_decision onboardingCompleted=${onbComplete} hasToken=${hasToken} action=${bootAction.type}`);
       console.log(`[ONB] route_decision routeDestination=${routeDestination}`);
     }
 
@@ -405,6 +405,12 @@ export default function Index() {
       didForceWelcome.current = true;
       safeReplace("/(auth)/welcome", "imperative welcome");
     }
+
+    // IMPERATIVE NAVIGATION for authenticated users with incomplete onboarding → onboarding
+    if (routeDestination === "/(onboarding)/basic-info") {
+      didForceWelcome.current = true; // Reuse guard to prevent double-navigation
+      safeReplace("/(onboarding)/basic-info", "imperative onboarding");
+    }
   }, [routeDestination, bootAction]);
 
   // Loading state: boot caches not yet ready
@@ -424,6 +430,11 @@ export default function Index() {
 
   // For unauthenticated → welcome: imperative navigation handles it, return null
   if (routeDestination === "/(auth)/welcome") {
+    return null;
+  }
+
+  // For authenticated but incomplete → onboarding: imperative navigation handles it, return null
+  if (routeDestination === "/(onboarding)/basic-info") {
     return null;
   }
 

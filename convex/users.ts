@@ -1813,6 +1813,9 @@ export const getOnboardingStatus = query({
 
     console.log('[ONB_STATUS]', JSON.stringify({
       userId: userId.substring(0, 8),
+      onboardingCompleted: status.onboardingCompleted,
+      phase2OnboardingCompleted: status.phase2OnboardingCompleted,
+      privateWelcomeConfirmed: status.privateWelcomeConfirmed,
       basicInfoPresent: status.basicInfoComplete,
       referencePhotoExists: status.referencePhotoExists,
       faceStatus: status.faceVerificationStatus,
@@ -1975,6 +1978,155 @@ export const resetPhase2Onboarding = mutation({
 });
 
 // ============================================================================
+// DEV ONLY: WIPE TEST USER DATA
+// ============================================================================
+
+/**
+ * DEV ONLY: Completely wipe all data for the current test user.
+ * This allows starting fresh with a clean slate for testing onboarding.
+ *
+ * WHAT THIS DELETES:
+ * - The user document itself
+ * - All photos (metadata - storage files remain for cleanup separately)
+ * - All likes sent/received
+ * - All matches
+ * - All conversations and messages
+ * - All notifications
+ * - All sessions
+ * - All private profiles
+ * - All other user-linked records
+ *
+ * AFTER WIPE:
+ * - User must clear local stores and logout
+ * - On next login, a completely fresh user will be created
+ * - No stale data will survive
+ */
+export const devWipeMyTestUserData = mutation({
+  args: {
+    userId: v.union(v.id('users'), v.string()),
+  },
+  handler: async (ctx, args) => {
+    // Safety: Refuse in production (check for common prod indicators)
+    const convexUrl = process.env.CONVEX_URL || '';
+    if (convexUrl.includes('prod') || convexUrl.includes('production')) {
+      console.error('[DEV_WIPE] REFUSED: Production environment detected');
+      return { success: false, error: 'production_blocked' };
+    }
+
+    console.log('[DEV_WIPE] === STARTING USER DATA WIPE ===');
+    console.log('[DEV_WIPE] Input userId:', args.userId);
+
+    const resolvedUserId = await resolveUserIdByAuthId(ctx, args.userId as string);
+    if (!resolvedUserId) {
+      console.log('[DEV_WIPE] User not found');
+      return { success: false, error: 'user_not_found' };
+    }
+
+    const user = await ctx.db.get(resolvedUserId);
+    if (!user) {
+      console.log('[DEV_WIPE] User document not found');
+      return { success: false, error: 'user_not_found' };
+    }
+
+    console.log('[DEV_WIPE] Wiping data for user:', user.name, '(', resolvedUserId.substring(0, 8), ')');
+
+    const deletedCounts: Record<string, number> = {};
+
+    // Helper to delete records from a table
+    const deleteFromTable = async (
+      tableName: string,
+      indexName: string,
+      fieldName: string,
+      fieldValue: Id<'users'>
+    ) => {
+      const records = await ctx.db
+        .query(tableName as any)
+        .withIndex(indexName as any, (q: any) => q.eq(fieldName, fieldValue))
+        .collect();
+
+      for (const record of records) {
+        await ctx.db.delete(record._id);
+      }
+
+      deletedCounts[tableName] = (deletedCounts[tableName] || 0) + records.length;
+    };
+
+    // 1. Delete photos
+    await deleteFromTable('photos', 'by_user', 'userId', resolvedUserId);
+
+    // 2. Delete likes (sent and received)
+    const likesSent = await ctx.db
+      .query('likes')
+      .withIndex('by_from_user', (q) => q.eq('fromUserId', resolvedUserId))
+      .collect();
+    for (const like of likesSent) await ctx.db.delete(like._id);
+    deletedCounts['likes_sent'] = likesSent.length;
+
+    const likesReceived = await ctx.db
+      .query('likes')
+      .withIndex('by_to_user', (q) => q.eq('toUserId', resolvedUserId))
+      .collect();
+    for (const like of likesReceived) await ctx.db.delete(like._id);
+    deletedCounts['likes_received'] = likesReceived.length;
+
+    // 3. Delete matches (where user is either user1 or user2)
+    const matches1 = await ctx.db
+      .query('matches')
+      .withIndex('by_user1', (q) => q.eq('user1Id', resolvedUserId))
+      .collect();
+    for (const match of matches1) await ctx.db.delete(match._id);
+
+    const matches2 = await ctx.db
+      .query('matches')
+      .withIndex('by_user2', (q) => q.eq('user2Id', resolvedUserId))
+      .collect();
+    for (const match of matches2) await ctx.db.delete(match._id);
+    deletedCounts['matches'] = matches1.length + matches2.length;
+
+    // 4. Delete conversation participants and related data
+    await deleteFromTable('conversationParticipants', 'by_user', 'userId', resolvedUserId);
+
+    // 5. Delete notifications
+    await deleteFromTable('notifications', 'by_user', 'userId', resolvedUserId);
+
+    // 6. Delete sessions
+    await deleteFromTable('sessions', 'by_user', 'userId', resolvedUserId);
+
+    // 7. Delete private profiles
+    await deleteFromTable('userPrivateProfiles', 'by_user', 'userId', resolvedUserId);
+
+    // 8. Delete private deletion states
+    await deleteFromTable('privateDeletionStates', 'by_userId', 'userId', resolvedUserId);
+
+    // 9. Delete verification sessions
+    await deleteFromTable('verificationSessions', 'by_user', 'userId', resolvedUserId);
+
+    // 10. Delete filter presets
+    await deleteFromTable('filterPresets', 'by_user', 'userId', resolvedUserId);
+
+    // 11. Delete behavior flags
+    await deleteFromTable('behaviorFlags', 'by_user', 'userId', resolvedUserId);
+
+    // 12. Delete device fingerprints
+    await deleteFromTable('deviceFingerprints', 'by_user', 'userId', resolvedUserId);
+
+    // 13. Finally, delete the user document itself
+    await ctx.db.delete(resolvedUserId);
+    deletedCounts['users'] = 1;
+
+    console.log('[DEV_WIPE] Deletion counts:', JSON.stringify(deletedCounts));
+    console.log('[DEV_WIPE] === USER DATA WIPE COMPLETE ===');
+
+    return {
+      success: true,
+      deletedUserId: resolvedUserId,
+      deletedCounts,
+      message: 'User data wiped. Clear local stores and logout to complete.',
+    };
+  },
+});
+
+// ============================================================================
 // PHASE-2 SAFETY + TRUST QUERIES
 // ============================================================================
 
@@ -2058,6 +2210,170 @@ export const getMyReports = query({
     return {
       success: true,
       reports: safeReports,
+    };
+  },
+});
+
+// ============================================================================
+// DEV ONLY: WIPE ALL USER DATA (NUCLEAR OPTION)
+// ============================================================================
+
+/**
+ * DEV ONLY: Wipe ALL user data from ALL user-related tables.
+ * This is the "nuclear option" for completely resetting the database for testing.
+ *
+ * WHAT THIS DELETES (ALL RECORDS FROM):
+ * - users
+ * - photos
+ * - likes
+ * - matches
+ * - conversationParticipants
+ * - messages
+ * - notifications
+ * - crossedPaths
+ * - crossPathHistory
+ * - userPrivateProfiles
+ * - privateDeletionStates
+ * - reports
+ * - blocks
+ * - sessions
+ * - verificationSessions
+ * - deviceFingerprints
+ * - behaviorFlags
+ * - userStrikes
+ * - revealRequests
+ * - todAnswers
+ * - todConnectRequests
+ * - todPrivateMedia
+ * - confessions
+ * - confessionReplies
+ * - confessionReactions
+ * - confessionNotifications
+ * - chatRoomMembers
+ * - filterPresets
+ * - supportRequests
+ * - purchases
+ * - subscriptionRecords
+ *
+ * HOW TO RUN FROM CONVEX DASHBOARD:
+ * 1. Go to your Convex dashboard
+ * 2. Navigate to Functions → users → devWipeAllUserData
+ * 3. Click "Run" (no arguments needed)
+ * 4. Check the logs for deletion report
+ *
+ * AFTER WIPE:
+ * - All app data is gone
+ * - All users must re-authenticate
+ * - Fresh start for testing
+ */
+export const devWipeAllUserData = mutation({
+  args: {},
+  handler: async (ctx) => {
+    // Safety: Refuse in production (check for common prod indicators)
+    const convexUrl = process.env.CONVEX_URL || '';
+    if (convexUrl.includes('prod') || convexUrl.includes('production')) {
+      console.error('[DEV_WIPE_ALL] REFUSED: Production environment detected');
+      return { success: false, error: 'production_blocked' };
+    }
+
+    console.log('[DEV_WIPE_ALL] ════════════════════════════════════════════');
+    console.log('[DEV_WIPE_ALL] === STARTING FULL DATABASE WIPE ===');
+    console.log('[DEV_WIPE_ALL] ════════════════════════════════════════════');
+
+    const deletedCounts: Record<string, number> = {};
+
+    // Helper to delete ALL records from a table
+    const wipeTable = async (tableName: string) => {
+      try {
+        const records = await ctx.db.query(tableName as any).collect();
+        for (const record of records) {
+          await ctx.db.delete(record._id);
+        }
+        deletedCounts[tableName] = records.length;
+        if (records.length > 0) {
+          console.log(`[DEV_WIPE_ALL] Deleted ${records.length} records from ${tableName}`);
+        }
+      } catch (error) {
+        console.warn(`[DEV_WIPE_ALL] Could not wipe ${tableName}:`, error);
+        deletedCounts[tableName] = 0;
+      }
+    };
+
+    // Wipe all user-related tables (order matters - delete dependent records first)
+
+    // 1. Messages and conversations
+    await wipeTable('messages');
+    await wipeTable('conversationParticipants');
+
+    // 2. Social interactions
+    await wipeTable('likes');
+    await wipeTable('matches');
+    await wipeTable('blocks');
+    await wipeTable('reports');
+
+    // 3. Location features
+    await wipeTable('crossedPaths');
+    await wipeTable('crossPathHistory');
+
+    // 4. Notifications
+    await wipeTable('notifications');
+
+    // 5. Truth or Dare
+    await wipeTable('todAnswers');
+    await wipeTable('todConnectRequests');
+    await wipeTable('todPrivateMedia');
+
+    // 6. Confessions
+    await wipeTable('confessions');
+    await wipeTable('confessionReplies');
+    await wipeTable('confessionReactions');
+    await wipeTable('confessionNotifications');
+
+    // 7. Reveal requests
+    await wipeTable('revealRequests');
+
+    // 8. Chat rooms
+    await wipeTable('chatRoomMembers');
+
+    // 9. Verification and security
+    await wipeTable('verificationSessions');
+    await wipeTable('deviceFingerprints');
+    await wipeTable('behaviorFlags');
+    await wipeTable('userStrikes');
+    await wipeTable('sessions');
+
+    // 10. Private profiles
+    await wipeTable('userPrivateProfiles');
+    await wipeTable('privateDeletionStates');
+
+    // 11. Settings and preferences
+    await wipeTable('filterPresets');
+
+    // 12. Support and purchases
+    await wipeTable('supportRequests');
+    await wipeTable('purchases');
+    await wipeTable('subscriptionRecords');
+
+    // 13. Photos (metadata - storage files remain)
+    await wipeTable('photos');
+
+    // 14. Finally, delete all users
+    await wipeTable('users');
+
+    // Calculate total
+    const totalDeleted = Object.values(deletedCounts).reduce((sum, count) => sum + count, 0);
+
+    console.log('[DEV_WIPE_ALL] ════════════════════════════════════════════');
+    console.log('[DEV_WIPE_ALL] === FULL DATABASE WIPE COMPLETE ===');
+    console.log('[DEV_WIPE_ALL] Total records deleted:', totalDeleted);
+    console.log('[DEV_WIPE_ALL] Deletion report:', JSON.stringify(deletedCounts, null, 2));
+    console.log('[DEV_WIPE_ALL] ════════════════════════════════════════════');
+
+    return {
+      success: true,
+      totalDeleted,
+      deletedCounts,
+      message: 'All user data wiped. All users must re-authenticate.',
     };
   },
 });
