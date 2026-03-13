@@ -1,16 +1,97 @@
-import { useEffect, useRef } from "react";
+import React, { useEffect, useRef, useCallback, Component, ReactNode } from "react";
 import { View } from "react-native";
-import { Stack, useRootNavigationState, useRouter, useSegments } from "expo-router";
+import { Stack, useRootNavigationState, useRouter, useSegments, router as globalRouter } from "expo-router";
 import { useQuery } from "convex/react";
 import { api } from "@/convex/_generated/api";
 import { useAuthStore } from "@/stores/authStore";
 import { isDemoMode } from "@/hooks/useConvex";
 import { computeEnforcementLevel } from "@/lib/securityEnforcement";
 import { ToastHost } from "@/components/ui/Toast";
+import { useRouteTrace } from "@/lib/devTrace";
+
+// H-3: Session invalidation detection (NARROWED - does NOT match resource-level auth errors)
+// Only triggers logout for TRUE session invalidation, not room/resource access denials
+// Examples that SHOULD trigger logout: "token expired", "session expired", "invalid session"
+// Examples that should NOT: "Unauthorized: authentication required", "Access denied", "banned"
+function isSessionInvalidationError(msg: string): boolean {
+  if (!msg) return false;
+  const l = msg.toLowerCase();
+  // Only match explicit session/token invalidation phrases
+  // DO NOT match generic "unauthorized" or "unauthenticated" - those come from resource access denials
+  return l.includes('token expired') ||
+         l.includes('session expired') ||
+         l.includes('invalid token') ||
+         l.includes('session invalid') ||
+         l.includes('session has expired') ||
+         l.includes('token has expired') ||
+         l.includes('auth token invalid');
+}
+
+// H-3: Session Invalidation Error Boundary - logout ONLY on true session expiry
+// E3: Navigation is deferred to avoid sync navigation during lifecycle
+// SECURITY FIX: Does NOT trigger logout for resource-level auth errors (room access denied, etc.)
+class AuthErrorBoundary extends Component<{ children: ReactNode }, { error: Error | null; didNavigate: boolean }> {
+  state = { error: null as Error | null, didNavigate: false };
+  private navTimeoutId: ReturnType<typeof setTimeout> | null = null;
+
+  static getDerivedStateFromError(error: Error) {
+    return { error };
+  }
+
+  componentDidCatch(error: Error) {
+    // SECURITY FIX: Only logout for true session invalidation (token/session expired)
+    // Resource-level errors ("Access denied", "Unauthorized: authentication required") are NOT handled here
+    // Those should be handled locally by the screen that threw them
+    if (isSessionInvalidationError(error?.message || '')) {
+      // E3: Defer navigation to next tick to avoid sync navigation during lifecycle
+      // Guard against double navigation with didNavigate state
+      if (this.state.didNavigate) return;
+      this.setState({ didNavigate: true });
+      if (__DEV__) console.log('[AuthErrorBoundary] Session invalidation detected, logging out:', error?.message);
+      // H5 FIX: Wrap in async IIFE to await logout before navigation
+      (async () => {
+        await useAuthStore.getState().logout();
+        this.navTimeoutId = setTimeout(() => {
+          globalRouter.replace('/(auth)/welcome');
+        }, 0);
+      })();
+    }
+  }
+
+  componentWillUnmount() {
+    // E3: Cleanup deferred navigation timeout
+    if (this.navTimeoutId) {
+      clearTimeout(this.navTimeoutId);
+      this.navTimeoutId = null;
+    }
+  }
+
+  render() {
+    if (this.state.error) {
+      if (isSessionInvalidationError(this.state.error.message || '')) {
+        return null;
+      }
+      // SECURITY FIX: Re-throw non-session errors so they propagate to the screen
+      // This allows screens to handle their own access-denied errors
+      throw this.state.error;
+    }
+    return this.props.children;
+  }
+}
 
 export default function MainLayout() {
   const userId = useAuthStore((s) => s.userId);
+  const token = useAuthStore((s) => s.token);
+  const onboardingCompleted = useAuthStore((s) => s.onboardingCompleted);
   const didRedirect = useRef(false);
+
+  // DEV-only route change logging
+  useRouteTrace("P1_MAIN", useCallback(() => ({
+    userId: userId?.substring(0, 8) ?? null,
+    hasToken: !!token,
+    onboardingCompleted: !!onboardingCompleted,
+    isDemoMode,
+  }), [userId, token, onboardingCompleted]));
 
   // ── Navigation hooks ──
   // useRouter() returns a new object on every navigation state change.
@@ -60,6 +141,7 @@ export default function MainLayout() {
   }, [needsVerification, rootNavState?.key, segmentsKey]);
 
   return (
+    <AuthErrorBoundary>
     <View style={{ flex: 1 }}>
     <Stack screenOptions={{ headerShown: false }}>
       <Stack.Screen name="(tabs)" />
@@ -123,5 +205,6 @@ export default function MainLayout() {
     </Stack>
     <ToastHost />
     </View>
+    </AuthErrorBoundary>
   );
 }

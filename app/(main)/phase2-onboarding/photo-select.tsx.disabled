@@ -25,7 +25,7 @@ import {
   ScrollView,
   Pressable,
 } from 'react-native';
-import { useRouter } from 'expo-router';
+import { useRouter, useFocusEffect } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import * as FileSystem from 'expo-file-system';
@@ -35,6 +35,8 @@ import {
   PHASE2_MIN_PHOTOS,
 } from '@/stores/privateProfileStore';
 import { useDemoStore } from '@/stores/demoStore';
+import { isDemoMode } from '@/hooks/useConvex';
+import { useScreenTrace } from '@/lib/devTrace';
 
 const C = INCOGNITO_COLORS;
 const GRID_SLOTS = 9;
@@ -87,6 +89,7 @@ async function validatePhotoUri(uri: string): Promise<boolean> {
 }
 
 export default function Phase2PhotoSelect() {
+  useScreenTrace("P2_ONB_PHOTO_SELECT");
   const router = useRouter();
   const insets = useSafeAreaInsets();
 
@@ -101,6 +104,26 @@ export default function Phase2PhotoSelect() {
 
   // P2-004 FIX: Ref guard to prevent double-tap navigation
   const isConfirmingRef = useRef(false);
+
+  // STABILITY: Track mounted state for safe async state updates
+  const isMountedRef = useRef(true);
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+      // Reset guards on unmount to prevent stale state if component remounts
+      isConfirmingRef.current = false;
+    };
+  }, []);
+
+  // STABILITY: Reset loading and nav guard when screen regains focus
+  const [isProcessing, setIsProcessing] = useState(false);
+  useFocusEffect(
+    useCallback(() => {
+      setIsProcessing(false);
+      isConfirmingRef.current = false;
+    }, [])
+  );
 
   // P2-DATA-004: Track validation state
   const [photosValidated, setPhotosValidated] = useState(false);
@@ -148,22 +171,79 @@ export default function Phase2PhotoSelect() {
     }
   }, [_hasHydrated, phase2PhotosConfirmed, photosValidated, hasValidPhotos, router]);
 
-  // Source: Phase-1 photos
+  // Source: Phase-1 photos - use correct store based on mode
+  // Demo mode: demoStore.getCurrentProfile().photoSlots
+  // Live mode: privateProfileStore.phase1PhotoSlots (imported from Convex)
   const demoProfiles = useDemoStore((s) => s.demoProfiles);
   const currentDemoUserId = useDemoStore((s) => s.currentDemoUserId);
   const getCurrentProfile = useDemoStore((s) => s.getCurrentProfile);
 
-  const phase1PhotoSlots = useMemo(() => {
-    const profile = getCurrentProfile();
-    const slots = profile?.photoSlots || createEmptySlots();
-    return slots;
-  }, [getCurrentProfile, demoProfiles, currentDemoUserId]);
+  // Live mode: Read from privateProfileStore where index.tsx imported the photos
+  const privateStorePhotoSlots = usePrivateProfileStore((s) => s.phase1PhotoSlots);
+  const privateStoreSelectedPhotoUrls = usePrivateProfileStore((s) => s.selectedPhotoUrls);
+  const privateStoreDisplayName = usePrivateProfileStore((s) => s.displayName);
+  const privateStoreAge = usePrivateProfileStore((s) => s.age);
+  const privateStoreGender = usePrivateProfileStore((s) => s.gender);
 
-  // Profile info from Phase-1
-  const phase1Profile = useMemo(() => getCurrentProfile(), [getCurrentProfile, demoProfiles, currentDemoUserId]);
-  const displayName = phase1Profile?.name || 'Anonymous';
-  const age = phase1Profile?.dateOfBirth ? calculateAgeFromDob(phase1Profile.dateOfBirth) : 0;
-  const gender = phase1Profile?.gender || '';
+  // FIX: Photo source priority - use selectedPhotoUrls as fallback if phase1PhotoSlots is empty
+  const phase1PhotoSlots = useMemo(() => {
+    if (isDemoMode) {
+      // Demo mode: Use demoStore
+      const profile = getCurrentProfile();
+      const slots = profile?.photoSlots || createEmptySlots();
+      if (__DEV__) {
+        console.log('[P2 PhotoSelect] source=demoStore, slots:', slots.filter(Boolean).length);
+      }
+      return slots;
+    } else {
+      // Live mode: Priority order:
+      // 1. phase1PhotoSlots (if has photos)
+      // 2. selectedPhotoUrls (already selected Phase-2 photos)
+      // 3. Empty slots
+      const phase1Count = privateStorePhotoSlots.filter(Boolean).length;
+      const selectedCount = privateStoreSelectedPhotoUrls.filter(Boolean).length;
+
+      if (__DEV__) {
+        console.log('[P2 PhotoSelect] phase1PhotoSlots:', phase1Count);
+        console.log('[P2 PhotoSelect] selectedPhotoUrls:', selectedCount);
+      }
+
+      if (phase1Count > 0) {
+        // Use Phase-1 imported photos
+        if (__DEV__) {
+          console.log('[P2 PhotoSelect] using phase1PhotoSlots');
+        }
+        return privateStorePhotoSlots;
+      } else if (selectedCount > 0) {
+        // Fallback: Convert selectedPhotoUrls to slot format
+        const slots = createEmptySlots();
+        privateStoreSelectedPhotoUrls.forEach((url, idx) => {
+          if (url && idx < 9) slots[idx] = url;
+        });
+        if (__DEV__) {
+          console.log('[P2 PhotoSelect] using selectedPhotoUrls as fallback, slots:', slots.filter(Boolean).length);
+        }
+        return slots;
+      }
+
+      // No photos available
+      if (__DEV__) {
+        console.log('[P2 PhotoSelect] no photos found');
+      }
+      return createEmptySlots();
+    }
+  }, [isDemoMode, getCurrentProfile, demoProfiles, currentDemoUserId, privateStorePhotoSlots, privateStoreSelectedPhotoUrls]);
+
+  // Profile info from Phase-1 (mode-aware)
+  const displayName = isDemoMode
+    ? (getCurrentProfile()?.name || 'Anonymous')
+    : (privateStoreDisplayName || 'Anonymous');
+  const age = isDemoMode
+    ? (getCurrentProfile()?.dateOfBirth ? calculateAgeFromDob(getCurrentProfile()?.dateOfBirth) : 0)
+    : (privateStoreAge || 0);
+  const gender = isDemoMode
+    ? (getCurrentProfile()?.gender || '')
+    : (privateStoreGender || '');
 
   // Store actions
   const setSelectedPhotos = usePrivateProfileStore((s) => s.setSelectedPhotos);
@@ -172,7 +252,7 @@ export default function Phase2PhotoSelect() {
   // Local state
   const [selectedSlots, setSelectedSlots] = useState<number[]>([]);
   const [failedSlots, setFailedSlots] = useState<number[]>([]);
-  const [isProcessing, setIsProcessing] = useState(false);
+  // Note: isProcessing moved above with useFocusEffect for stability
 
   // Computed values
   const validPhotoCount = phase1PhotoSlots.filter((uri, idx) => uri && !failedSlots.includes(idx)).length;
@@ -202,20 +282,27 @@ export default function Phase2PhotoSelect() {
 
     setIsProcessing(true);
 
-    // Collect selected photo URLs
-    const photoUrls: string[] = [];
-    for (const slotIndex of selectedSlots) {
-      const uri = phase1PhotoSlots[slotIndex];
-      if (uri) photoUrls.push(uri);
+    try {
+      // Collect selected photo URLs
+      const photoUrls: string[] = [];
+      for (const slotIndex of selectedSlots) {
+        const uri = phase1PhotoSlots[slotIndex];
+        if (uri) photoUrls.push(uri);
+      }
+
+      // Save to store
+      setSelectedPhotos([], photoUrls);
+      setPhase2PhotosConfirmed(true);
+
+      // Navigate to profile-edit (Step 2.5)
+      router.push('/(main)/phase2-onboarding/profile-edit' as any);
+      // NOTE: Don't reset isProcessing/ref - component will unmount after navigation
+    } catch (e) {
+      // STABILITY: Reset guards if any error prevents navigation
+      isConfirmingRef.current = false;
+      if (isMountedRef.current) setIsProcessing(false);
+      if (__DEV__) console.error('[photo-select] handleConfirmPhotos error:', e);
     }
-
-    // Save to store
-    setSelectedPhotos([], photoUrls);
-    setPhase2PhotosConfirmed(true);
-
-    // Navigate to profile-edit (Step 2.5)
-    router.push('/(main)/phase2-onboarding/profile-edit' as any);
-    // NOTE: Don't reset isProcessing/ref - component will unmount after navigation
   }, [selectedSlots, phase1PhotoSlots, isProcessing, setSelectedPhotos, setPhase2PhotosConfirmed, router]);
 
   // Show loading while checking hydration or validating photos (when confirmed)

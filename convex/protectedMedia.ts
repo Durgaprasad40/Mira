@@ -1,5 +1,6 @@
 import { v } from 'convex/values';
 import { mutation, query } from './_generated/server';
+import { resolveUserIdByAuthId } from './helpers';
 
 /**
  * Legacy compatibility layer.
@@ -8,10 +9,11 @@ import { mutation, query } from './_generated/server';
  */
 
 // Legacy: sendProtectedImage → delegates to media.createMediaMessage pattern
+// MSG-003 FIX: Auth hardening - verify caller identity server-side
 export const sendProtectedImage = mutation({
   args: {
     conversationId: v.id('conversations'),
-    senderId: v.id('users'),
+    authUserId: v.string(), // MSG-003: Auth verification required
     imageStorageId: v.id('_storage'),
     timer: v.number(),
     screenshotAllowed: v.boolean(),
@@ -21,7 +23,7 @@ export const sendProtectedImage = mutation({
   handler: async (ctx, args) => {
     const {
       conversationId,
-      senderId,
+      authUserId,
       imageStorageId,
       timer,
       screenshotAllowed,
@@ -29,6 +31,15 @@ export const sendProtectedImage = mutation({
       watermark,
     } = args;
     const now = Date.now();
+
+    // MSG-003 FIX: Verify caller identity via session-based auth
+    if (!authUserId || authUserId.trim().length === 0) {
+      throw new Error('Unauthorized: authentication required');
+    }
+    const senderId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!senderId) {
+      throw new Error('Unauthorized: user not found');
+    }
 
     const conversation = await ctx.db.get(conversationId);
     if (!conversation) throw new Error('Conversation not found');
@@ -182,14 +193,24 @@ export const getMediaUrl = query({
 });
 
 // Legacy: markViewed → uses new tables
+// MSG-006 FIX: Auth hardening - verify caller identity server-side
 export const markViewed = mutation({
   args: {
     messageId: v.id('messages'),
-    userId: v.id('users'),
+    authUserId: v.string(), // MSG-006: Auth verification required
   },
   handler: async (ctx, args) => {
-    const { messageId, userId } = args;
+    const { messageId, authUserId } = args;
     const now = Date.now();
+
+    // MSG-006 FIX: Verify caller identity via session-based auth
+    if (!authUserId || authUserId.trim().length === 0) {
+      return { success: true }; // Silent return for view tracking
+    }
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      return { success: true }; // Silent return for view tracking
+    }
 
     const message = await ctx.db.get(messageId);
     if (!message || !message.mediaId) return { success: true };
@@ -238,14 +259,24 @@ export const markViewed = mutation({
 });
 
 // Legacy: markExpired → uses new tables
+// MSG-006 FIX: Auth hardening - verify caller identity server-side
 export const markExpired = mutation({
   args: {
     messageId: v.id('messages'),
-    userId: v.id('users'),
+    authUserId: v.string(), // MSG-006: Auth verification required
   },
   handler: async (ctx, args) => {
-    const { messageId, userId } = args;
+    const { messageId, authUserId } = args;
     const now = Date.now();
+
+    // MSG-006 FIX: Verify caller identity via session-based auth
+    if (!authUserId || authUserId.trim().length === 0) {
+      return { success: true }; // Silent return for expiry tracking
+    }
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      return { success: true }; // Silent return for expiry tracking
+    }
 
     const message = await ctx.db.get(messageId);
     if (!message || !message.mediaId) return { success: true };

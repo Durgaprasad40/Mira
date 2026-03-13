@@ -24,6 +24,8 @@ import {
   Alert,
   TextInput,
   Keyboard,
+  KeyboardAvoidingView,
+  Platform,
 } from 'react-native';
 import { useRouter, useFocusEffect } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -43,6 +45,7 @@ import {
   selectCanContinueDesire,
   selectIsProfileDetailsComplete,
 } from '@/stores/privateProfileStore';
+import { useScreenTrace } from '@/lib/devTrace';
 import {
   GENDER_OPTIONS,
   SMOKING_OPTIONS,
@@ -66,12 +69,23 @@ function createEmptySlots(): PhotoSlots9 {
 }
 
 export default function Phase2ProfileEdit() {
+  useScreenTrace("P2_ONB_PROFILE_EDIT");
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const desireInputRef = useRef<TextInput>(null);
 
   // P2-003 FIX: Ref guard to prevent double-tap navigation
   const isContinuingRef = useRef(false);
+  // STABILITY: Track mounted state for safe async state updates
+  const isMountedRef = useRef(true);
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+      // Reset guards on unmount to prevent stale state if component remounts
+      isContinuingRef.current = false;
+    };
+  }, []);
 
   // FIX #2: Reset loading state when screen regains focus (e.g., user navigates back)
   const [isProcessing, setIsProcessing] = useState(false);
@@ -89,6 +103,7 @@ export default function Phase2ProfileEdit() {
   const privateBio = usePrivateProfileStore((s) => s.privateBio);
   const gender = usePrivateProfileStore((s) => s.gender);
   const height = usePrivateProfileStore((s) => s.height);
+  const weight = usePrivateProfileStore((s) => s.weight);
   const smoking = usePrivateProfileStore((s) => s.smoking);
   const drinking = usePrivateProfileStore((s) => s.drinking);
   const education = usePrivateProfileStore((s) => s.education);
@@ -100,6 +115,7 @@ export default function Phase2ProfileEdit() {
   const setPrivateBio = usePrivateProfileStore((s) => s.setPrivateBio);
   const setGender = usePrivateProfileStore((s) => s.setGender);
   const setHeight = usePrivateProfileStore((s) => s.setHeight);
+  const setWeight = usePrivateProfileStore((s) => s.setWeight);
   const setSmoking = usePrivateProfileStore((s) => s.setSmoking);
   const setDrinking = usePrivateProfileStore((s) => s.setDrinking);
   const setEducation = usePrivateProfileStore((s) => s.setEducation);
@@ -141,8 +157,22 @@ export default function Phase2ProfileEdit() {
   const [previewSlot, setPreviewSlot] = useState<number | null>(null);
   // Note: isProcessing moved above with useFocusEffect for FIX #2
 
-  // Local state for height input
+  // Local state for height/weight input
   const [heightInput, setHeightInput] = useState<string>(height ? height.toString() : '');
+  const [weightInput, setWeightInput] = useState<string>(weight ? weight.toString() : '');
+
+  // Sync store values to local input state when they arrive after mount (e.g., from importPhase1Data)
+  useEffect(() => {
+    if (height && height > 0 && heightInput === '') {
+      setHeightInput(height.toString());
+    }
+  }, [height, heightInput]);
+
+  useEffect(() => {
+    if (weight && weight > 0 && weightInput === '') {
+      setWeightInput(weight.toString());
+    }
+  }, [weight, weightInput]);
 
   // Computed values
   const photoCount = useMemo(() => photoSlots.filter((uri) => uri !== null).length, [photoSlots]);
@@ -302,15 +332,29 @@ export default function Phase2ProfileEdit() {
     setIsProcessing(true);
     Keyboard.dismiss();
 
-    // Save photos to store (convert slots to URL array)
-    const photoUrls = photoSlots.filter((uri): uri is string => uri !== null);
-    setSelectedPhotos([], photoUrls);
+    try {
+      // Save photos to store (convert slots to URL array)
+      const photoUrls = photoSlots.filter((uri): uri is string => uri !== null);
+      setSelectedPhotos([], photoUrls);
 
-    // B2-HIGH FIX: Delay navigation after keyboard dismiss to prevent Android crash
-    setTimeout(() => {
-      router.push('/(main)/phase2-onboarding/profile-setup' as any);
-    }, 150);
-    // NOTE: Don't reset isProcessing/ref - component will unmount after navigation
+      // B2-HIGH FIX: Delay navigation after keyboard dismiss to prevent Android crash
+      setTimeout(() => {
+        try {
+          router.push('/(main)/phase2-onboarding/prompts' as any);
+        } catch (navError) {
+          // STABILITY: Reset guards if navigation throws
+          isContinuingRef.current = false;
+          if (isMountedRef.current) setIsProcessing(false);
+          if (__DEV__) console.error('[profile-edit] navigation error:', navError);
+        }
+      }, 150);
+      // NOTE: Don't reset isProcessing/ref - component will unmount after navigation
+    } catch (e) {
+      // STABILITY: Reset guards if any error prevents navigation
+      isContinuingRef.current = false;
+      if (isMountedRef.current) setIsProcessing(false);
+      if (__DEV__) console.error('[profile-edit] handleContinue error:', e);
+    }
   }, [canContinue, isProcessing, photoSlots, setSelectedPhotos, router]);
 
   // Desire hint
@@ -335,9 +379,14 @@ export default function Phase2ProfileEdit() {
           <Ionicons name="arrow-back" size={24} color={C.text} />
         </TouchableOpacity>
         <Text style={styles.headerTitle}>Edit Profile</Text>
-        <Text style={styles.stepLabel}>Step 2 of 3</Text>
+        <Text style={styles.stepLabel}>Step 2 of 4</Text>
       </View>
 
+      <KeyboardAvoidingView
+        style={styles.keyboardAvoidingView}
+        behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+        keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 20}
+      >
       <ScrollView style={styles.scrollView} showsVerticalScrollIndicator={false} keyboardShouldPersistTaps="handled">
         {/* Section A: Photos */}
         <View style={styles.section}>
@@ -479,6 +528,27 @@ export default function Phase2ProfileEdit() {
             </View>
           </View>
 
+          {/* Weight */}
+          <View style={styles.detailField}>
+            <Text style={styles.detailLabel}>Weight (kg)</Text>
+            <View style={styles.heightInputRow}>
+              <TextInput
+                style={styles.heightInput}
+                value={weightInput}
+                onChangeText={(text) => {
+                  setWeightInput(text);
+                  const num = parseInt(text, 10);
+                  setWeight(isNaN(num) || num <= 0 ? null : num);
+                }}
+                placeholder="e.g. 70"
+                placeholderTextColor={C.textLight}
+                keyboardType="numeric"
+                maxLength={3}
+              />
+              <Text style={styles.heightUnit}>kg</Text>
+            </View>
+          </View>
+
           {/* Smoking */}
           <View style={styles.detailField}>
             <Text style={styles.detailLabel}>Smoking {!smoking && <Text style={styles.requiredStar}>*</Text>}</Text>
@@ -590,6 +660,7 @@ export default function Phase2ProfileEdit() {
 
         <View style={{ height: 120 }} />
       </ScrollView>
+      </KeyboardAvoidingView>
 
       {/* Bottom Bar */}
       <View style={[styles.bottomBar, { paddingBottom: Math.max(insets.bottom, 16) + 12 }]}>
@@ -668,6 +739,7 @@ export default function Phase2ProfileEdit() {
 
 const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: C.background },
+  keyboardAvoidingView: { flex: 1 },
   scrollView: { flex: 1 },
   header: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',

@@ -37,21 +37,26 @@ export default function DemoProfileScreen() {
   const [photos, setPhotos] = useState<string[]>([]);
 
   const handlePickPhoto = async () => {
-    const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
-    if (!perm.granted) {
-      Alert.alert('Permission Required', 'Please allow access to your photos to add a profile picture.');
-      return;
-    }
+    try {
+      const perm = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (!perm.granted) {
+        Alert.alert('Permission Required', 'Please allow access to your photos to add a profile picture.');
+        return;
+      }
 
-    const result = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ['images' as const],
-      allowsEditing: true,
-      aspect: [3, 4],
-      quality: 0.8,
-    });
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ['images' as const],
+        allowsEditing: true,
+        aspect: [3, 4],
+        quality: 0.8,
+      });
 
-    if (!result.canceled && result.assets[0]) {
-      setPhotos((prev) => [...prev, result.assets[0].uri]);
+      if (!result.canceled && result.assets[0]) {
+        setPhotos((prev) => [...prev, result.assets[0].uri]);
+      }
+    } catch {
+      // STABILITY: ImagePicker can fail on various devices
+      Alert.alert('Error', 'Could not open photo picker. Please try again.');
     }
   };
 
@@ -70,6 +75,9 @@ export default function DemoProfileScreen() {
       return;
     }
 
+    // H7 FIX: Capture auth version before any auth operation
+    const capturedAuthVersion = useAuthStore.getState().authVersion;
+
     // Save profile to demoStore (persisted)
     saveDemoProfile(DEMO_USER_ID, {
       name: trimmedName,
@@ -78,7 +86,7 @@ export default function DemoProfileScreen() {
     });
 
     // Set auth so the app treats us as authenticated
-    setAuth(DEMO_USER_ID, 'demo_token', true);
+    setAuth(DEMO_USER_ID, 'demo_token', true, capturedAuthVersion);
 
     // Clear stale data from any previous demo session, then seed fresh
     useDemoDmStore.setState({ conversations: {}, meta: {}, drafts: {} });

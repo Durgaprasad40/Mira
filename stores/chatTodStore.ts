@@ -31,7 +31,8 @@ import { create } from 'zustand';
 // ─── Constants ───────────────────────────────────────────────────────────────
 
 const INITIAL_SKIPS = 3;
-const CURRENT_USER_ID = 'me'; // Demo mode: current user is always 'me'
+// C-003 FIX: Removed hardcoded CURRENT_USER_ID
+// In demo mode, the caller should pass the actual user ID or 'me'
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -133,8 +134,9 @@ interface ChatTodStore {
   /**
    * Complete the spin animation and set the chooser.
    * Called after spin animation finishes.
+   * @param winnerId - The pre-determined winner ID from the spin animation
    */
-  completeSpinAnimation: (conversationId: string) => void;
+  completeSpinAnimation: (conversationId: string, winnerId: string) => void;
 
   /**
    * Chooser selects Truth or Dare.
@@ -187,21 +189,25 @@ interface ChatTodStore {
 
   /**
    * Check if it's the current user's turn to act.
+   * C-003 FIX: Added userId parameter
    */
-  isMyTurn: (conversationId: string) => boolean;
+  isMyTurn: (conversationId: string, userId: string) => boolean;
 
   /**
    * Get the action required from current user.
+   * C-003 FIX: Added userId parameter
    */
-  getMyAction: (conversationId: string) => 'spin' | 'choose' | 'write' | 'answer' | 'wait' | 'done';
+  getMyAction: (conversationId: string, userId: string) => 'spin' | 'choose' | 'write' | 'answer' | 'wait' | 'done';
 }
 
 // ─── Store Implementation ────────────────────────────────────────────────────
 
 export const useChatTodStore = create<ChatTodStore>()((set, get) => ({
   games: {},
+  // M-009 FIX: Store has no persistence (Convex is source of truth), so it starts hydrated.
+  // The flag is kept for API compatibility with persistence patterns.
   _hasHydrated: true,
-  setHasHydrated: (hydrated) => set({ _hasHydrated: true }), // No-op
+  setHasHydrated: (hydrated) => set({ _hasHydrated: hydrated }),
 
   // ─── Core Actions ───
 
@@ -263,15 +269,16 @@ export const useChatTodStore = create<ChatTodStore>()((set, get) => ({
     }
   },
 
-  completeSpinAnimation: (conversationId) => {
+  completeSpinAnimation: (conversationId, winnerId) => {
     set((state) => {
       const game = state.games[conversationId];
       if (!game || game.roundPhase !== 'spinning') return state;
 
-      // Randomly select chooser
-      const randomIndex = Math.random() < 0.5 ? 0 : 1;
-      const chooserId = game.userIds[randomIndex];
-      const responderId = game.userIds[1 - randomIndex];
+      // C-001 FIX: Use the passed winnerId instead of randomly selecting
+      // The winnerId is pre-determined by the caller (overlay) for animation sync
+      const chooserIndex = game.userIds.indexOf(winnerId);
+      const chooserId = chooserIndex >= 0 ? winnerId : game.userIds[0];
+      const responderId = game.userIds[chooserIndex >= 0 ? (1 - chooserIndex) : 1];
 
       return {
         games: {
@@ -291,6 +298,7 @@ export const useChatTodStore = create<ChatTodStore>()((set, get) => ({
       console.log('[ChatTodStore] completeSpinAnimation:', {
         conversationId,
         chooser: game?.chooserUserId,
+        passedWinnerId: winnerId,
       });
     }
   },
@@ -495,7 +503,8 @@ export const useChatTodStore = create<ChatTodStore>()((set, get) => ({
     return (game.skipsRemaining[userId] ?? 0) > 0;
   },
 
-  isMyTurn: (conversationId) => {
+  // C-003 FIX: Accept userId parameter instead of using hardcoded CURRENT_USER_ID
+  isMyTurn: (conversationId, userId) => {
     const game = get().games[conversationId];
     if (!game) return false;
 
@@ -505,9 +514,9 @@ export const useChatTodStore = create<ChatTodStore>()((set, get) => ({
         return true; // Either can spin
       case 'choosing':
       case 'writing':
-        return game.chooserUserId === CURRENT_USER_ID;
+        return game.chooserUserId === userId;
       case 'answering':
-        return game.responderUserId === CURRENT_USER_ID;
+        return game.responderUserId === userId;
       case 'round_complete':
         return true; // Either can continue/unlock
       case 'unlocked':
@@ -517,7 +526,8 @@ export const useChatTodStore = create<ChatTodStore>()((set, get) => ({
     }
   },
 
-  getMyAction: (conversationId) => {
+  // C-003 FIX: Accept userId parameter instead of using hardcoded CURRENT_USER_ID
+  getMyAction: (conversationId, userId) => {
     const game = get().games[conversationId];
     if (!game) return 'done';
 
@@ -527,11 +537,11 @@ export const useChatTodStore = create<ChatTodStore>()((set, get) => ({
       case 'spinning':
         return 'wait'; // Animation playing
       case 'choosing':
-        return game.chooserUserId === CURRENT_USER_ID ? 'choose' : 'wait';
+        return game.chooserUserId === userId ? 'choose' : 'wait';
       case 'writing':
-        return game.chooserUserId === CURRENT_USER_ID ? 'write' : 'wait';
+        return game.chooserUserId === userId ? 'write' : 'wait';
       case 'answering':
-        return game.responderUserId === CURRENT_USER_ID ? 'answer' : 'wait';
+        return game.responderUserId === userId ? 'answer' : 'wait';
       case 'round_complete':
         return 'done'; // Can unlock or continue
       case 'unlocked':
@@ -566,10 +576,11 @@ export const useRoundPhase = (conversationId: string): TodRoundPhase => {
 };
 
 /**
- * Get skips remaining for current user.
+ * Get skips remaining for a specific user.
+ * C-003 FIX: Added userId parameter (defaults to 'me' for demo mode compat)
  */
-export const useMySkipsRemaining = (conversationId: string): number => {
+export const useMySkipsRemaining = (conversationId: string, userId: string = 'me'): number => {
   return useChatTodStore(
-    (s) => s.games[conversationId]?.skipsRemaining[CURRENT_USER_ID] ?? INITIAL_SKIPS
+    (s) => s.games[conversationId]?.skipsRemaining[userId] ?? INITIAL_SKIPS
   );
 };

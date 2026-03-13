@@ -7,7 +7,7 @@
  * - Do not change UX/flows without explicit unlock
  * Date locked: 2026-03-04
  */
-import React, { useState } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, Platform, Alert } from 'react-native';
 import { useRouter } from 'expo-router';
 import { COLORS } from '@/lib/constants';
@@ -19,15 +19,25 @@ import { api } from '@/convex/_generated/api';
 import { useOnboardingStore } from '@/stores/onboardingStore';
 import { useAuthStore } from '@/stores/authStore';
 import { OnboardingProgressHeader } from '@/components/OnboardingProgressHeader';
+import { useScreenTrace } from '@/lib/devTrace';
 
 type AuthMethod = 'email' | 'phone' | 'apple' | 'google';
 
 export default function EmailPhoneScreen() {
+  useScreenTrace("ONB_EMAIL_PHONE");
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const [isLoading, setIsLoading] = useState(false);
   const { setStep } = useOnboardingStore();
   const { setAuth } = useAuthStore();
+
+  // H8 FIX: Track mounted state to prevent setAuth after unmount
+  // Prevents auth restoration when user navigates away during async auth
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
 
   // Convex mutations
   const socialAuth = useMutation(api.auth.socialAuth);
@@ -58,6 +68,9 @@ export default function EmailPhoneScreen() {
 
       console.log('[AppleAuth] Success, token prefix:', credential.identityToken.substring(0, 20) + '...');
 
+      // H7 FIX: Capture auth version before async operation
+      const capturedAuthVersion = useAuthStore.getState().authVersion;
+
       try {
         const result = await socialAuth({
           provider: 'apple',
@@ -67,6 +80,19 @@ export default function EmailPhoneScreen() {
             ? `${credential.fullName.givenName} ${credential.fullName.familyName || ''}`.trim()
             : undefined,
         });
+
+        // H7 FIX: Check if logout happened during mutation (version changed)
+        if (useAuthStore.getState().authVersion !== capturedAuthVersion) {
+          if (__DEV__) console.log('[AUTH] Logout detected during Apple auth - ignoring result');
+          return;
+        }
+
+        // H8 FIX: Check if component unmounted during async auth
+        // Prevents auth restoration when user navigates away
+        if (!mountedRef.current) {
+          if (__DEV__) console.log('[AUTH] Component unmounted during Apple auth - ignoring result');
+          return;
+        }
 
         // STABILITY FIX (2026-03-04): Validate mutation success before routing
         if (!result) {
@@ -78,7 +104,7 @@ export default function EmailPhoneScreen() {
           setStep('basic_info');
           router.push('/(onboarding)/basic-info' as any);
         } else if (result.token && result.userId) {
-          setAuth(result.userId as string, result.token, result.onboardingCompleted || false);
+          setAuth(result.userId as string, result.token, result.onboardingCompleted || false, capturedAuthVersion);
 
           // Persist auth token after confirmed email/phone success
           const { saveAuthBootCache } = require('@/stores/authBootCache');

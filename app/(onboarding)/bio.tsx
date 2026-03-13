@@ -17,12 +17,17 @@ import { useOnboardingStore } from '@/stores/onboardingStore';
 import { useDemoStore } from '@/stores/demoStore';
 import { useAuthStore } from '@/stores/authStore';
 import { isDemoMode } from '@/hooks/useConvex';
+import { useMutation } from 'convex/react';
+import { api } from '@/convex/_generated/api';
 import { validateRequired, scrollToFirstInvalid, createRules } from '@/lib/onboardingValidation';
 import { OnboardingProgressHeader } from '@/components/OnboardingProgressHeader';
+import { useScreenTrace } from '@/lib/devTrace';
 
 export default function BioScreen() {
+  useScreenTrace("ONB_BIO");
   const { bio, setBio, setStep } = useOnboardingStore();
   const { userId } = useAuthStore();
+  const upsertDraft = useMutation(api.users.upsertOnboardingDraft);
   const demoHydrated = useDemoStore((s) => s._hasHydrated);
   const demoProfile = useDemoStore((s) =>
     isDemoMode && userId ? s.demoProfiles[userId] : null
@@ -72,6 +77,20 @@ export default function BioScreen() {
       const demoStore = useDemoStore.getState();
       demoStore.saveDemoProfile(userId, { bio: bio.trim() });
       console.log(`[BIO] saved bio (${bio.trim().length} chars)`);
+    }
+
+    // LIVE MODE: Persist bio to onboarding draft in Convex
+    if (!isDemoMode && userId && bio.trim()) {
+      upsertDraft({
+        userId: userId as any,
+        patch: {
+          profileDetails: { bio: bio.trim() },
+          progress: { lastStepKey: 'bio' },
+        },
+      }).catch((error) => {
+        if (__DEV__) console.error('[BIO] Failed to save draft:', error);
+      });
+      if (__DEV__) console.log(`[ONB_DRAFT] Saved bio: ${bio.trim().length} chars`);
     }
 
     // TODO: Profanity filter check

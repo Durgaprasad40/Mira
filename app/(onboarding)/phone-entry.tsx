@@ -28,6 +28,7 @@ import { useAuthStore } from '@/stores/authStore';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
+import { useScreenTrace } from '@/lib/devTrace';
 
 // Country list with flag emoji, name, and dial code
 const COUNTRIES = [
@@ -48,6 +49,7 @@ type Country = (typeof COUNTRIES)[number];
 type ScreenMode = 'enterPhone' | 'enterOtp';
 
 export default function PhoneEntryScreen() {
+  useScreenTrace("ONB_PHONE_ENTRY");
   const { setPhone, setStep } = useOnboardingStore();
   const { setAuth } = useAuthStore();
   const router = useRouter();
@@ -79,6 +81,13 @@ export default function PhoneEntryScreen() {
 
   // OTP input ref
   const otpInputRef = useRef<TextInput>(null);
+
+  // H8 FIX: Track mounted state to prevent setAuth after unmount
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
 
   // Countdown timer for resend
   useEffect(() => {
@@ -205,13 +214,29 @@ export default function PhoneEntryScreen() {
     setError('');
     setIsLoading(true);
 
+    // H7 FIX: Capture auth version before async operation
+    // Used to detect if logout happened during the mutation
+    const capturedAuthVersion = useAuthStore.getState().authVersion;
+
     try {
       const result = await verifyPhoneOtp({ phone: fullPhone, code: otpCode });
+
+      // H7 FIX: Check if logout happened during mutation (version changed)
+      if (useAuthStore.getState().authVersion !== capturedAuthVersion) {
+        if (__DEV__) console.log('[AUTH] Logout detected during phone verification - ignoring result');
+        return;
+      }
+
+      // H8 FIX: Check if component unmounted during async verification
+      if (!mountedRef.current) {
+        if (__DEV__) console.log('[AUTH] Component unmounted during phone verification - ignoring result');
+        return;
+      }
 
       if (result.success && result.userId && result.token) {
         if (__DEV__) console.log("[AUTH] login success, onboardingCompleted =", result.onboardingCompleted);
         // Store auth credentials
-        setAuth(result.userId, result.token, result.onboardingCompleted || false);
+        setAuth(result.userId, result.token, result.onboardingCompleted || false, capturedAuthVersion);
 
         // Persist auth token after confirmed phone login success
         const { saveAuthBootCache } = require('@/stores/authBootCache');

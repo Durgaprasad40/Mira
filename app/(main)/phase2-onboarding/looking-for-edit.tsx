@@ -23,10 +23,12 @@ import {
   PHASE2_MIN_INTENTS,
   PHASE2_MAX_INTENTS,
 } from '@/stores/privateProfileStore';
+import { useScreenTrace } from '@/lib/devTrace';
 
 const C = INCOGNITO_COLORS;
 
 export default function LookingForEdit() {
+  useScreenTrace("P2_ONB_LOOKING_FOR");
   const router = useRouter();
   const insets = useSafeAreaInsets();
 

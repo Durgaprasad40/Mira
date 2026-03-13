@@ -180,7 +180,9 @@ export interface DemoAccount {
 
 /** The demo user's own profile — created via onboarding. */
 export interface DemoUserProfile {
-  name: string;
+  firstName?: string; // User's first name
+  lastName?: string; // User's last name
+  name: string; // Full name (firstName + lastName) for backward compatibility
   handle?: string; // User's nickname/username
   /** Canonical slot-based photo storage (9 slots, nulls allowed) */
   photoSlots?: PhotoSlots9;
@@ -221,6 +223,8 @@ export interface DemoUserProfile {
   faceVerificationPassed?: boolean;
   // Face verification pending manual review flag (persists across logout/relaunch)
   faceVerificationPending?: boolean;
+  // Display photo variant (original, blurred, cartoon)
+  displayPhotoVariant?: 'original' | 'blurred' | 'cartoon';
 }
 
 interface DemoState {
@@ -404,20 +408,40 @@ export const useDemoStore = create<DemoState>()((set, get) => ({
   },
 
   demoLogout: () => {
-    // C7 fix: clear session data on logout while preserving accounts
-    // NOTE: demoDmStore is NOT reset here — DM messages persist across logout/login
-    // Only explicit "Reset Demo Data" (via reset()) should wipe demo messages
+    // PRIVACY FIX: Full session reset on logout to prevent User B seeing User A's data
+    // This is critical when different users share the same device in demo mode
     useDemoNotifStore.getState().reset();
+    useDemoDmStore.getState().reset();
     useBlockStore.getState().clearBlocks();
 
-    // Reset session-scoped state but preserve persistent user data
-    // DM-FIX: matches, likes, swipedProfileIds are NOT reset — they persist across logout/login
-    // This ensures DM conversations remain visible (since Messages screen uses matches)
+    // Reset confession store to prevent confession/reply data leakage
+    // Lazy require to break cycle: demoStore <-> confessionStore
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { useConfessionStore } = require('@/stores/confessionStore') as {
+      useConfessionStore: {
+        getState: () => { reset?: () => void; seedConfessions: () => void };
+        setState: (state: { seeded: boolean; confessions: any[]; myReplies: any[]; confessionThreads: Record<string, string> }) => void;
+      };
+    };
+    // Reset confession state: clear confessions, replies, and thread mappings
+    useConfessionStore.setState({
+      seeded: false,
+      confessions: [],
+      myReplies: [],
+      confessionThreads: {},
+    });
+
+    // PRIVACY FIX: Reset ALL session-scoped data including matches/likes/swipes
+    // Previous behavior preserved these, but that allows User B to see User A's:
+    // - Matches (who User A matched with)
+    // - Likes (who liked User A)
+    // - Swipe history (who User A swiped on)
+    // All of this is privacy-sensitive and must be reset on logout
     set({
       currentDemoUserId: null,
-      // matches: preserved — user-created matches persist
-      // likes: preserved — incoming likes persist
-      // swipedProfileIds: preserved — swipe history persists
+      matches: JSON.parse(JSON.stringify(DEMO_MATCHES)) as DemoMatch[], // Reset to fresh demo matches
+      likes: JSON.parse(JSON.stringify(DEMO_LIKES)) as DemoLike[], // Reset to fresh demo likes
+      swipedProfileIds: [], // Clear swipe history completely
       crossedPaths: [], // Session-scoped — re-seeded with live GPS on Nearby screen
       profiles: withValidPhotos(JSON.parse(JSON.stringify(DEMO_PROFILES)) as DemoProfile[]),
       reportedUserIds: [],
@@ -529,10 +553,17 @@ export const useDemoStore = create<DemoState>()((set, get) => ({
   // SINGLE SOURCE OF TRUTH: Get the canonical current user profile
   // HARD ASSERTIONS: No silent failures - log errors for debugging
   getCurrentProfile: () => {
+    // STABILITY FIX: In live mode, return null quietly (no error log)
+    // This function is demo-only; live mode should use Convex queries instead
+    const isDemoMode = process.env.EXPO_PUBLIC_DEMO_MODE === 'true';
+    if (!isDemoMode) {
+      return null;
+    }
+
     const state = get();
     const { currentDemoUserId, demoProfiles } = state;
 
-    // HARD ASSERTION: currentDemoUserId must be set
+    // HARD ASSERTION: currentDemoUserId must be set (demo mode only)
     if (!currentDemoUserId) {
       const authUserId = useAuthStore.getState().userId;
       console.error('[DemoStore] getCurrentProfile FAILED: currentDemoUserId is null', {
@@ -600,6 +631,10 @@ export const useDemoStore = create<DemoState>()((set, get) => ({
   },
 
   seed: () => {
+    // STABILITY FIX: M-2 - Do not seed in live mode (prevents retry loop in production)
+    const isDemoMode = process.env.EXPO_PUBLIC_DEMO_MODE === 'true';
+    if (!isDemoMode) return;
+
     const state = get();
 
     // CRITICAL: Do not seed before hydration completes
@@ -899,10 +934,19 @@ export const useDemoStore = create<DemoState>()((set, get) => ({
 
   getVisibleCrossedPaths: () => {
     const now = Date.now();
+    const current = get().crossedPaths;
+
+    // M-3: Prune expired entries from store to prevent indefinite growth
+    const expired = current.filter((cp) => cp.expiresAt && cp.expiresAt < now);
+    if (expired.length > 0) {
+      set((s) => ({
+        crossedPaths: s.crossedPaths.filter((cp) => !cp.expiresAt || cp.expiresAt >= now),
+      }));
+    }
+
+    // Return visible (not hidden, not expired)
     return get().crossedPaths.filter((cp) => {
-      // Filter out hidden entries
       if (cp.hidden) return false;
-      // Filter out expired entries (30 days)
       if (cp.expiresAt && cp.expiresAt < now) return false;
       return true;
     });

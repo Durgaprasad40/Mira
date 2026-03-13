@@ -12,11 +12,13 @@ import { PRIVATE_INTENT_CATEGORIES } from '@/lib/privateConstants';
 import { DesireTagPicker } from '@/components/private/DesireTagPicker';
 import { BoundaryChecklist } from '@/components/private/BoundaryChecklist';
 import { filterContent, getFilterMessage } from '@/lib/contentFilter';
+import { useScreenTrace } from '@/lib/devTrace';
 
 const C = INCOGNITO_COLORS;
 const BIO_MAX = 200;
 
 export default function CategoriesScreen() {
+  useScreenTrace("P2_SETUP_CATEGORIES");
   const router = useRouter();
   const insets = useSafeAreaInsets();
 

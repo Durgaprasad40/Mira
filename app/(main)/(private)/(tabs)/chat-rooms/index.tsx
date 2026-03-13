@@ -118,6 +118,8 @@ interface ChatRoom {
   // Icon support (admin-set, optional)
   iconKey?: string;   // Maps to ROOM_ICON_CONFIG or local asset
   iconUrl?: string;   // Remote image URL (takes priority over iconKey)
+  // Private room flag for compact rendering
+  isPrivate?: boolean;
 }
 
 export default function ChatRoomsScreen() {
@@ -167,7 +169,12 @@ export default function ChatRoomsScreen() {
   const [checkingPreferred, setCheckingPreferred] = useState(true);
   const [isRedirecting, setIsRedirecting] = useState(false);
   const clearPreferredRoom = usePreferredChatRoomStore((s) => s.clearPreferredRoom);
-  const hasRedirectedRef = useRef(false);
+  // NAV-TRAP FIX: Use session-level flag instead of ref (persists across remounts)
+  const hasRedirectedInSession = usePreferredChatRoomStore((s) => s.hasRedirectedInSession);
+  const setHasRedirectedInSession = usePreferredChatRoomStore((s) => s.setHasRedirectedInSession);
+  // MEMBERSHIP LIFECYCLE: Track current room for leave-on-homepage logic
+  const currentRoomId = usePreferredChatRoomStore((s) => s.currentRoomId);
+  const setCurrentRoom = usePreferredChatRoomStore((s) => s.setCurrentRoom);
 
   // Convex query for preferred room
   const convexPreferredRoom = useQuery(
@@ -181,19 +188,21 @@ export default function ChatRoomsScreen() {
   // Determine effective preferred room ID (only valid after loading complete)
   const effectivePreferredRoomId = convexPreferredRoom?.preferredChatRoomId ?? null;
 
-  // Validate preferred room exists before redirecting (prevents stale room redirect)
-  const preferredRoomValidation = useQuery(
-    api.chatRooms.getRoom,
-    effectivePreferredRoomId
-      ? { roomId: effectivePreferredRoomId as Id<'chatRooms'> }
+  // Validate preferred room access before redirecting (prevents stale/unauthorized room redirect)
+  // Uses checkRoomAccess which returns status object without throwing (unlike getRoom)
+  const preferredRoomAccess = useQuery(
+    api.chatRooms.checkRoomAccess,
+    effectivePreferredRoomId && userId
+      ? { roomId: effectivePreferredRoomId as Id<'chatRooms'>, authUserId: userId }
       : 'skip'
   );
 
-  // Room is valid if exists in Convex backend
-  const isPreferredRoomValid = preferredRoomValidation !== null;
+  // Room is valid for redirect if user is a member (has access)
+  // Invalid statuses: not_found, expired, banned, none, unauthenticated, pending, rejected
+  const isPreferredRoomValid = preferredRoomAccess?.status === 'member';
 
   // Still loading validation if convex query is undefined (not yet resolved)
-  const isValidationLoading = effectivePreferredRoomId && preferredRoomValidation === undefined;
+  const isValidationLoading = effectivePreferredRoomId && preferredRoomAccess === undefined;
 
   // CRITICAL FIX M-001: Removed duplicate useEffect redirect logic
   // All redirects now handled by useFocusEffect below to prevent
@@ -221,7 +230,8 @@ export default function ChatRoomsScreen() {
   }, []);
 
   // M-002/M-003 FIX: Preferred room redirect with navigation guards
-  // Redirect fires ONCE per component mount when preferred room exists
+  // NAV-TRAP FIX: Redirect fires ONCE per SESSION (not per mount) to prevent
+  // navigation trap when user backs out of a room
   useFocusEffect(
     useCallback(() => {
       // M-002 FIX: Wait for navigation to be ready before router.replace
@@ -230,8 +240,11 @@ export default function ChatRoomsScreen() {
       // Skip if still loading or no preferred room
       if (isPreferredLoading || !effectivePreferredRoomId) return;
 
-      // Skip if already redirected in this mount cycle
-      if (hasRedirectedRef.current) return;
+      // Read hasRedirectedInSession from store at focus time to ensure current value
+      const storeHasRedirected = usePreferredChatRoomStore.getState().hasRedirectedInSession;
+
+      // NAV-TRAP FIX: Skip if already redirected in this SESSION (persists across remounts)
+      if (storeHasRedirected) return;
 
       // Skip if still validating room existence
       if (isValidationLoading) return;
@@ -244,13 +257,12 @@ export default function ChatRoomsScreen() {
       }
 
       if (__DEV__) console.log('[ChatRooms] Focus redirect to', effectivePreferredRoomId);
-      hasRedirectedRef.current = true;
+      // NAV-TRAP FIX: Set session-level flag (persists across remounts, resets on app restart)
+      usePreferredChatRoomStore.getState().setHasRedirectedInSession(true);
       setIsRedirecting(true);
       router.replace(`/(main)/(private)/(tabs)/chat-rooms/${effectivePreferredRoomId}` as any);
 
-      // M-003 FIX: Only reset isRedirecting in cleanup, NOT hasRedirectedRef
-      // This prevents infinite redirect loop when user navigates back to index
-      // Redirect will only fire ONCE per component mount, not every screen focus
+      // M-003 FIX: Only reset isRedirecting in cleanup
       return () => {
         setIsRedirecting(false);
       };
@@ -261,12 +273,49 @@ export default function ChatRoomsScreen() {
   const convexRooms = useQuery(api.chatRooms.listRooms, {});
 
   // Phase-2: Query for user's private rooms
-  const myPrivateRooms = useQuery(api.chatRooms.getMyPrivateRooms, {});
+  // AUTH FIX: Pass authUserId so query can authenticate in real mode
+  const myPrivateRooms = useQuery(
+    api.chatRooms.getMyPrivateRooms,
+    userId ? { authUserId: userId } : 'skip'
+  );
 
   // Phase-2: Mutations for private rooms
   const joinRoomByCodeMut = useMutation(api.chatRooms.joinRoomByCode);
   const createPrivateRoomMut = useMutation(api.chatRooms.createPrivateRoom);
   const resetMyPrivateRoomsMut = useMutation(api.chatRooms.resetMyPrivateRooms);
+  // MEMBERSHIP LIFECYCLE: Leave room mutation for when user returns to homepage
+  const leaveRoomMut = useMutation(api.chatRooms.leaveRoom);
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // MEMBERSHIP LIFECYCLE: Leave room when returning to homepage
+  // When user navigates back to this homepage from a room, remove them from that room.
+  // This does NOT trigger when switching to other tabs (homepage doesn't focus).
+  // ─────────────────────────────────────────────────────────────────────────────
+  useFocusEffect(
+    useCallback(() => {
+      // Read currentRoomId directly from Zustand store at focus time to ensure
+      // we get the CURRENT value even if the homepage didn't re-render yet
+      const storeState = usePreferredChatRoomStore.getState();
+      const currentRoomIdFromStore = storeState.currentRoomId;
+
+      if (!currentRoomIdFromStore || !userId) return;
+
+      // Set hasRedirectedInSession to prevent redirect effect from reopening same room
+      storeState.setHasRedirectedInSession(true);
+
+      // Call leaveRoom mutation to remove user from the room
+      // CR-011: Pass authUserId for server-side verification
+      leaveRoomMut({
+        roomId: currentRoomIdFromStore as Id<'chatRooms'>,
+        authUserId: userId!,
+      }).catch(() => {
+        // Ignore errors - leave is best-effort
+      });
+
+      // Clear the tracking immediately
+      storeState.setCurrentRoom(null);
+    }, [currentRoomId, userId, leaveRoomMut])
+  );
 
   // BUG FIX: Mutation to seed default public rooms
   const ensureDefaultRoomsMut = useMutation(api.chatRooms.ensureDefaultRooms);
@@ -308,6 +357,7 @@ export default function ChatRoomsScreen() {
   }, [convexRooms, isSeedingRooms, ensureDefaultRoomsMut]);
 
   // Filter private rooms into ChatRoom format
+  // ISSUE 2 FIX: Mark as private so renderRoom skips message preview
   const privateRooms: ChatRoom[] = useMemo(() => {
     if (!myPrivateRooms) return [];
     return myPrivateRooms.map((r) => ({
@@ -316,8 +366,8 @@ export default function ChatRoomsScreen() {
       slug: r.slug,
       category: r.category,
       memberCount: r.memberCount,
-      lastMessageText: r.lastMessageText,
       iconKey: r.slug,
+      isPrivate: true, // Flag for compact rendering
     }));
   }, [myPrivateRooms]);
 
@@ -425,7 +475,7 @@ export default function ChatRoomsScreen() {
     if (!joinCode.trim() || isJoining) return;
     setIsJoining(true);
     try {
-      const result = await joinRoomByCodeMut({ joinCode: joinCode.trim() });
+      const result = await joinRoomByCodeMut({ joinCode: joinCode.trim(), authUserId: userId! });
       setJoinCode('');
       if (result.alreadyMember) {
         Alert.alert('Already a Member', 'You are already a member of this room.');
@@ -456,7 +506,10 @@ export default function ChatRoomsScreen() {
     setIsCreating(true);
     try {
       // Only send password if provided
-      const args: { name: string; password?: string } = { name: newRoomName.trim() };
+      const args: { name: string; password?: string; authUserId: string } = {
+        name: newRoomName.trim(),
+        authUserId: userId!,
+      };
       if (pwd.length > 0) {
         args.password = pwd;
       }
@@ -543,9 +596,12 @@ export default function ChatRoomsScreen() {
         );
       };
 
+      // ISSUE 2 & 3 FIX: Private rooms use compact layout without message preview
+      const isPrivateRoom = item.isPrivate === true;
+
       return (
         <TouchableOpacity
-          style={styles.roomCard}
+          style={[styles.roomCard, isPrivateRoom && styles.privateRoomCard]}
           onPress={() => handleOpenRoom(item.id)}
           activeOpacity={0.7}
         >
@@ -553,6 +609,9 @@ export default function ChatRoomsScreen() {
 
           <View style={styles.roomInfo}>
             <View style={styles.roomNameRow}>
+              {isPrivateRoom && (
+                <Ionicons name="lock-closed" size={12} color={C.textLight} style={{ marginRight: 4 }} />
+              )}
               <Text style={styles.roomName}>{item.name}</Text>
               {unreadCount > 0 && (
                 <View style={styles.unreadBadge}>
@@ -560,12 +619,15 @@ export default function ChatRoomsScreen() {
                 </View>
               )}
             </View>
-            {item.lastMessageText ? (
-              <Text style={styles.roomPreview} numberOfLines={1}>
-                {item.lastMessageText}
-              </Text>
-            ) : (
-              <Text style={styles.roomPreviewEmpty}>No messages yet</Text>
+            {/* ISSUE 2 FIX: Skip message preview for private rooms */}
+            {!isPrivateRoom && (
+              item.lastMessageText ? (
+                <Text style={styles.roomPreview} numberOfLines={1}>
+                  {item.lastMessageText}
+                </Text>
+              ) : (
+                <Text style={styles.roomPreviewEmpty}>No messages yet</Text>
+              )
             )}
             <View style={styles.roomMeta}>
               <Ionicons name="people" size={11} color={C.textLight} />
@@ -657,38 +719,13 @@ export default function ChatRoomsScreen() {
             </View>
 
             {/* Section 4: Private Rooms - show if any private rooms exist */}
+            {/* ISSUE 1 FIX: Removed join-code input UI - tapping room card handles entry */}
             {privateRooms.length > 0 && (
               <>
                 {/* Private Rooms header */}
                 <View style={styles.privateRoomsSectionHeader}>
                   <Text style={styles.sectionTitle}>Private Rooms</Text>
                 </View>
-
-                {/* Join by Code Input */}
-                {(
-                  <View style={styles.joinCodeRow}>
-                    <TextInput
-                      style={styles.joinCodeInput}
-                      placeholder="Enter room code..."
-                      placeholderTextColor={C.textLight}
-                      value={joinCode}
-                      onChangeText={setJoinCode}
-                      autoCapitalize="characters"
-                      maxLength={6}
-                    />
-                    <TouchableOpacity
-                      style={[styles.joinCodeButton, (!joinCode.trim() || isJoining) && styles.joinCodeButtonDisabled]}
-                      onPress={handleJoinByCode}
-                      disabled={!joinCode.trim() || isJoining}
-                    >
-                      {isJoining ? (
-                        <ActivityIndicator size="small" color="#FFF" />
-                      ) : (
-                        <Text style={styles.joinCodeButtonText}>Join</Text>
-                      )}
-                    </TouchableOpacity>
-                  </View>
-                )}
 
                 {/* Private Rooms List */}
                 {privateRooms.map((room) => (
@@ -750,6 +787,11 @@ const styles = StyleSheet.create({
     paddingHorizontal: 14,
     paddingVertical: 12,
     gap: 12,
+  },
+  // ISSUE 3 FIX: Compact private room card style
+  privateRoomCard: {
+    paddingVertical: 8,
+    marginBottom: 6,
   },
   roomIcon: {
     width: 44,

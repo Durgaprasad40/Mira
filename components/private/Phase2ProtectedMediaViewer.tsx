@@ -31,6 +31,8 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { INCOGNITO_COLORS } from '@/lib/constants';
 import { usePrivateChatStore } from '@/stores/privateChatStore';
 import { calculateProtectedMediaCountdown } from '@/utils/protectedMediaCountdown';
+import { useScreenProtection } from '@/hooks/useScreenProtection';
+import { useScreenshotDetection } from '@/hooks/useScreenshotDetection';
 
 interface Phase2ProtectedMediaViewerProps {
   visible: boolean;
@@ -172,6 +174,20 @@ export function Phase2ProtectedMediaViewer({
   const [timerLabel, setTimerLabel] = useState<string>('');
   // Phase-2 Fix B: Track media load state for graceful error handling
   const [mediaLoadError, setMediaLoadError] = useState(false);
+
+  // SAFETY FIX: Screen protection (Android FLAG_SECURE) — blocks screenshots/recording
+  useScreenProtection(visible);
+
+  // SAFETY FIX: Screenshot detection — logs attempts on both platforms
+  useScreenshotDetection({
+    enabled: visible,
+    onScreenshot: () => {
+      // Log screenshot attempt for security audit
+      if (__DEV__) {
+        console.log('[SECURITY] Screenshot detected on protected media:', messageId);
+      }
+    },
+  });
 
   // Subscribe to LIVE message from Zustand store
   const message = usePrivateChatStore((s) => {

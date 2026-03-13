@@ -1,7 +1,45 @@
 import { v } from 'convex/values';
-import { mutation, query, action } from './_generated/server';
+import { mutation, query, action, internalMutation, MutationCtx } from './_generated/server';
 import { Id } from './_generated/dataModel';
 import { resolveUserIdByAuthId, ensureUserByAuthId } from './helpers';
+
+// ---------------------------------------------------------------------------
+// Session-based Auth Helper (matches app's custom auth system)
+// ---------------------------------------------------------------------------
+
+/**
+ * Validate session token and return the authenticated user ID.
+ * Uses the same session validation logic as auth.validateSessionFull.
+ *
+ * @returns userId if valid, null if invalid/expired/revoked
+ */
+async function validateSessionToken(
+  ctx: MutationCtx,
+  token: string
+): Promise<Id<'users'> | null> {
+  const now = Date.now();
+
+  const session = await ctx.db
+    .query('sessions')
+    .withIndex('by_token', (q) => q.eq('token', token))
+    .first();
+
+  if (!session) return null;
+  if (session.expiresAt < now) return null;
+  if (session.revokedAt) return null;
+
+  const user = await ctx.db.get(session.userId);
+  if (!user) return null;
+  if (!user.isActive) return null;
+  if (user.deletedAt) return null;
+
+  // Check mass session revocation
+  if (user.sessionsRevokedAt && session.createdAt < user.sessionsRevokedAt) {
+    return null;
+  }
+
+  return session.userId;
+}
 
 // ---------------------------------------------------------------------------
 // 8A: Photo Upload Validation Constants
@@ -16,6 +54,18 @@ export const generateUploadUrl = mutation({
   args: {},
   handler: async (ctx) => {
     return await ctx.storage.generateUploadUrl();
+  },
+});
+
+/**
+ * Get the URL for a storage ID.
+ * Used by Phase-2 private profile to get permanent URLs after upload.
+ */
+export const getStorageUrl = mutation({
+  args: { storageId: v.id('_storage') },
+  handler: async (ctx, args) => {
+    const url = await ctx.storage.getUrl(args.storageId);
+    return url;
   },
 });
 
@@ -72,12 +122,27 @@ export const addPhoto = mutation({
     fileSize: v.optional(v.number()),
     mimeType: v.optional(v.string()),
     isNsfwDetected: v.optional(v.boolean()), // Client-side NSFW detection result
+    // SECURITY FIX: Session token for auth validation (custom auth system)
+    token: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const { storageId, isPrimary, hasFace, width, height, fileSize, mimeType, isNsfwDetected } = args;
+    const { storageId, isPrimary, hasFace, width, height, fileSize, mimeType, isNsfwDetected, token } = args;
 
     // Map authUserId -> Convex Id<"users"> (MUTATION: can create)
     const userId = await ensureUserByAuthId(ctx, args.userId as string);
+
+    // SECURITY FIX: Validate session token (replaces broken ctx.auth.getUserIdentity)
+    // This app uses custom session/token auth, not Convex built-in auth
+    if (token) {
+      const authenticatedUserId = await validateSessionToken(ctx, token);
+      if (!authenticatedUserId) {
+        throw new Error('Unauthorized: invalid or expired session');
+      }
+      // Verify the authenticated user is modifying their own profile
+      if (authenticatedUserId !== userId) {
+        throw new Error('Unauthorized: cannot add photos to another user\'s profile');
+      }
+    }
 
     // BUGFIX #67: Validate storage ID exists before proceeding
     // Get the URL for the uploaded file - this validates storageId exists
@@ -122,6 +187,15 @@ export const addPhoto = mutation({
       throw new Error('Maximum 9 photos allowed');
     }
 
+    // BUG FIX (2026-03-06): Check if verification_reference photo exists
+    // If it does, it occupies slot 0 and is the primary photo.
+    // Additional photos must NOT overwrite slot 0 or auto-become primary.
+    const verificationRefPhoto = await ctx.db
+      .query('photos')
+      .withIndex('by_user_type', (q) => q.eq('userId', userId).eq('photoType', 'verification_reference'))
+      .first();
+    const hasVerificationPrimary = verificationRefPhoto && verificationRefPhoto.isPrimary;
+
     // If this is primary, update other photos
     if (isPrimary) {
       for (const photo of existingPhotos) {
@@ -131,8 +205,20 @@ export const addPhoto = mutation({
       }
     }
 
-    const order = existingPhotos.length;
-    const isFirstPhoto = existingPhotos.length === 0;
+    // M11 FIX: Use max(existing orders) + 1 for initial assignment (best-effort)
+    // Post-insert normalization below handles concurrent duplicate orders
+    let maxOrder = -1;
+    if (verificationRefPhoto) {
+      maxOrder = Math.max(maxOrder, verificationRefPhoto.order);
+    }
+    for (const photo of existingPhotos) {
+      maxOrder = Math.max(maxOrder, photo.order);
+    }
+    const order = maxOrder + 1;
+
+    // BUG FIX: If verification_reference is primary, this is NOT the "first photo"
+    // so it should NOT auto-become primary. Only explicit isPrimary=true should make it primary.
+    const isFirstPhoto = existingPhotos.length === 0 && !hasVerificationPrimary;
     const willBePrimary = isPrimary || isFirstPhoto;
 
     // 8C: Use client-reported NSFW detection
@@ -151,6 +237,54 @@ export const addPhoto = mutation({
       createdAt: Date.now(),
     });
 
+    // M11 FIX: Post-insert order normalization to resolve concurrent duplicate orders
+    // Deterministic sort ensures concurrent requests converge to same ordering
+    const allUserPhotos = await ctx.db
+      .query('photos')
+      .withIndex('by_user', (q) => q.eq('userId', userId))
+      .collect();
+
+    // Separate verification_reference (stays at order 0) from regular photos
+    const regularPhotos = allUserPhotos.filter(p => p.photoType !== 'verification_reference');
+    const hasVerificationRef = allUserPhotos.some(p => p.photoType === 'verification_reference');
+
+    // Sort deterministically: order ASC, createdAt ASC, _id ASC
+    regularPhotos.sort((a, b) => {
+      if (a.order !== b.order) return a.order - b.order;
+      if (a.createdAt !== b.createdAt) return a.createdAt - b.createdAt;
+      return a._id < b._id ? -1 : 1;
+    });
+
+    // Normalize to contiguous orders (1+ if verification_reference exists, else 0+)
+    const startOrder = hasVerificationRef ? 1 : 0;
+    for (let i = 0; i < regularPhotos.length; i++) {
+      const expectedOrder = startOrder + i;
+      if (regularPhotos[i].order !== expectedOrder) {
+        await ctx.db.patch(regularPhotos[i]._id, { order: expectedOrder });
+      }
+    }
+
+    // CONSISTENCY FIX B1: Ensure exactly one primary photo after insert
+    // Re-query and enforce single primary to handle concurrent race conditions
+    if (willBePrimary) {
+      const allPhotos = await ctx.db
+        .query('photos')
+        .withIndex('by_user', (q) => q.eq('userId', userId))
+        .collect();
+      const primaryPhotos = allPhotos.filter((p) => p.isPrimary);
+      if (primaryPhotos.length > 1) {
+        // Multiple primaries found - deterministically pick lowest order
+        // C6 FIX: Add createdAt tiebreaker for race condition when orders are equal
+        primaryPhotos.sort((a, b) => a.order - b.order || a.createdAt - b.createdAt);
+        const keepPrimary = primaryPhotos[0];
+        for (let i = 1; i < primaryPhotos.length; i++) {
+          await ctx.db.patch(primaryPhotos[i]._id, { isPrimary: false });
+        }
+        // Ensure correct primaryPhotoUrl
+        await ctx.db.patch(userId, { primaryPhotoUrl: keepPrimary.url });
+      }
+    }
+
     // 8C: If NSFW detected, route to moderation queue for manual review
     if (flaggedNsfw) {
       await ctx.db.insert('moderationQueue', {
@@ -167,6 +301,11 @@ export const addPhoto = mutation({
     // 8A: If this is the primary photo and user is not yet verified,
     // set verification status to pending_auto to trigger verification flow
     if (willBePrimary) {
+      // M10 FIX: Re-check if our photo is still primary after race reconciliation
+      // If we lost the race (another photo became primary), don't overwrite primaryPhotoUrl
+      const ourPhoto = await ctx.db.get(photoId);
+      const isStillPrimary = ourPhoto?.isPrimary ?? false;
+
       const user = await ctx.db.get(userId);
       if (user) {
         const currentStatus = user.verificationStatus || 'unverified';
@@ -176,7 +315,21 @@ export const addPhoto = mutation({
             verificationStatus: 'pending_auto',
           });
         }
+        // M10 FIX: Only update primaryPhotoUrl if our photo is still the primary
+        // If race reconciliation chose a different photo, that block already set the correct URL
+        if (isStillPrimary) {
+          await ctx.db.patch(userId, { primaryPhotoUrl: url });
+        }
       }
+    }
+
+    // H-1: Clean up pending upload record on success (if exists)
+    const pendingRecord = await ctx.db
+      .query('pendingUploads')
+      .withIndex('by_storage', (q) => q.eq('storageId', storageId))
+      .first();
+    if (pendingRecord) {
+      await ctx.db.delete(pendingRecord._id);
     }
 
     return { success: true, photoId, url, requiresVerification: willBePrimary };
@@ -193,8 +346,12 @@ export const deletePhoto = mutation({
     const { userId, photoId } = args;
 
     const photo = await ctx.db.get(photoId);
-    if (!photo || photo.userId !== userId) {
+    if (!photo) {
       throw new Error('Photo not found');
+    }
+    // SECURITY: Verify photo ownership before deletion
+    if (photo.userId !== userId) {
+      throw new Error('Unauthorized photo modification');
     }
 
     // Get all user photos
@@ -203,14 +360,15 @@ export const deletePhoto = mutation({
       .withIndex('by_user', (q) => q.eq('userId', userId))
       .collect();
 
-    if (photos.length <= 1) {
-      throw new Error('Must have at least one photo');
+    if (photos.length <= 2) {
+      throw new Error('Must have at least two photos');
     }
 
-    // Delete from storage
-    await ctx.storage.delete(photo.storageId);
-
-    // Delete from database
+    // CONSISTENCY FIX B2: Reorder operations for safer deletion
+    // 1. Delete from database FIRST (authoritative state)
+    // 2. Reorder remaining photos (maintain consistency)
+    // 3. Delete from storage LAST (best effort, orphan cleanup handles failures)
+    const storageIdToDelete = photo.storageId;
     await ctx.db.delete(photoId);
 
     // Reorder remaining photos
@@ -227,6 +385,65 @@ export const deletePhoto = mutation({
       await ctx.db.patch(remainingPhotos[i]._id, updates);
     }
 
+    // STABILITY FIX: C-10 + H-2 - Keep primaryPhotoUrl in sync after delete
+    // Query for primary photo, fallback to first by order if none marked primary (defensive)
+    let primaryPhoto = await ctx.db
+      .query('photos')
+      .withIndex('by_user', (q) => q.eq('userId', userId))
+      .filter((q) => q.eq(q.field('isPrimary'), true))
+      .first();
+
+    // H-2: Defensive fallback - if no isPrimary found but photos exist, use first by order
+    if (!primaryPhoto) {
+      primaryPhoto = await ctx.db
+        .query('photos')
+        .withIndex('by_user_order', (q) => q.eq('userId', userId))
+        .first();
+      // If we found a photo, mark it as primary for consistency
+      if (primaryPhoto) {
+        await ctx.db.patch(primaryPhoto._id, { isPrimary: true });
+      }
+    }
+
+    await ctx.db.patch(userId, { primaryPhotoUrl: primaryPhoto?.url });
+
+    // CONSISTENCY FIX B2: Delete from storage LAST (best effort)
+    // If this fails, DB is already consistent; failed deletion is queued for retry
+    try {
+      await ctx.storage.delete(storageIdToDelete);
+    } catch (storageError) {
+      // Log the failure
+      console.warn('[PHOTO_DELETE] Storage cleanup failed, queuing for retry:', storageError);
+
+      // B2-FIX: Track failed deletion for retry by cron
+      const errorString = storageError instanceof Error
+        ? storageError.message.slice(0, 500)
+        : String(storageError).slice(0, 500);
+
+      // Check if already queued (prevent duplicate spam)
+      const existing = await ctx.db
+        .query('failedStorageDeletions')
+        .withIndex('by_storageId', (q) => q.eq('storageId', storageIdToDelete))
+        .first();
+
+      if (existing) {
+        // Update existing record
+        await ctx.db.patch(existing._id, {
+          failedAt: Date.now(),
+          retryCount: existing.retryCount + 1,
+          lastError: errorString,
+        });
+      } else {
+        // Insert new record
+        await ctx.db.insert('failedStorageDeletions', {
+          storageId: storageIdToDelete,
+          failedAt: Date.now(),
+          retryCount: 0,
+          lastError: errorString,
+        });
+      }
+    }
+
     return { success: true };
   },
 });
@@ -240,11 +457,14 @@ export const reorderPhotos = mutation({
   handler: async (ctx, args) => {
     const { userId, photoIds } = args;
 
-    // Verify all photos belong to user
+    // SECURITY: Verify all photos belong to user before reordering
     for (const photoId of photoIds) {
       const photo = await ctx.db.get(photoId);
-      if (!photo || photo.userId !== userId) {
-        throw new Error('Invalid photo');
+      if (!photo) {
+        throw new Error('Photo not found');
+      }
+      if (photo.userId !== userId) {
+        throw new Error('Unauthorized photo modification');
       }
     }
 
@@ -255,6 +475,14 @@ export const reorderPhotos = mutation({
         isPrimary: i === 0,
       });
     }
+
+    // STABILITY FIX: C-10 - Keep primaryPhotoUrl in sync with isPrimary
+    const primaryPhoto = await ctx.db
+      .query('photos')
+      .withIndex('by_user', (q) => q.eq('userId', userId))
+      .filter((q) => q.eq(q.field('isPrimary'), true))
+      .first();
+    await ctx.db.patch(userId, { primaryPhotoUrl: primaryPhoto?.url });
 
     return { success: true };
   },
@@ -295,8 +523,12 @@ export const setPrimaryPhoto = mutation({
     const { userId, photoId } = args;
 
     const photo = await ctx.db.get(photoId);
-    if (!photo || photo.userId !== userId) {
+    if (!photo) {
       throw new Error('Photo not found');
+    }
+    // SECURITY: Verify photo ownership before setting primary
+    if (photo.userId !== userId) {
+      throw new Error('Unauthorized photo modification');
     }
 
     // Get all user photos
@@ -312,6 +544,9 @@ export const setPrimaryPhoto = mutation({
       });
     }
 
+    // STABILITY FIX: C-10 - Keep primaryPhotoUrl in sync
+    await ctx.db.patch(userId, { primaryPhotoUrl: photo.url });
+
     return { success: true };
   },
 });
@@ -323,6 +558,37 @@ export const markPhotoNsfw = mutation({
     isNsfw: v.boolean(),
   },
   handler: async (ctx, args) => {
+    // SECURITY FIX A3: Require authentication and authorization
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) {
+      throw new Error('Unauthorized: authentication required');
+    }
+
+    // Get the photo to check ownership
+    const photo = await ctx.db.get(args.photoId);
+    if (!photo) {
+      throw new Error('Photo not found');
+    }
+
+    // Resolve authenticated user
+    const authUserId = identity.subject;
+    const authenticatedUser = await ctx.db
+      .query('users')
+      .withIndex('by_auth_user_id', (q) => q.eq('authUserId', authUserId))
+      .first();
+
+    if (!authenticatedUser) {
+      throw new Error('Unauthorized: user not found');
+    }
+
+    // Allow if: user is admin OR user owns the photo
+    const isAdmin = authenticatedUser.isAdmin === true;
+    const isOwner = photo.userId === authenticatedUser._id;
+
+    if (!isAdmin && !isOwner) {
+      throw new Error('Unauthorized: only photo owner or admin can mark NSFW status');
+    }
+
     await ctx.db.patch(args.photoId, { isNsfw: args.isNsfw });
     return { success: true };
   },
@@ -391,6 +657,16 @@ export const uploadVerificationReferencePhoto = mutation({
       throw new Error('Invalid storage reference: file does not exist');
     }
 
+    // M13 FIX: Validate URL format before insert (same as addPhoto)
+    if (typeof url !== 'string' || url.trim().length === 0) {
+      console.log(`[PHOTO_GATE] FAIL: Empty URL`);
+      throw new Error('Invalid photo URL: URL cannot be empty');
+    }
+    if (!url.startsWith('http://') && !url.startsWith('https://')) {
+      console.log(`[PHOTO_GATE] FAIL: Invalid URL format`);
+      throw new Error('Invalid photo URL: must be a valid HTTP(S) URL');
+    }
+
     // Verify user exists and has accepted consent
     const user = await ctx.db.get(userId);
     if (!user) {
@@ -444,26 +720,9 @@ export const uploadVerificationReferencePhoto = mutation({
 
     console.log(`[PHOTO_GATE] faces=1 pass=true`);
 
-    // BUG FIX: Clean up ALL existing verification_reference photos (handles duplicates from past bugs)
-    // Replace behavior: delete all old verification photos, keep only the new one
-    const existingVerificationPhotos = await ctx.db
-      .query('photos')
-      .withIndex('by_user_type', (q) => q.eq('userId', userId).eq('photoType', 'verification_reference'))
-      .collect();
-
-    const isReplacing = existingVerificationPhotos.length > 0;
-    console.log(`[PHOTO_GATE] uploadVerificationReferencePhoto: replacing existing reference photo?`, isReplacing);
-
-    if (existingVerificationPhotos.length > 0) {
-      console.log(`[PHOTO_GATE] Found ${existingVerificationPhotos.length} existing verification photos (cleaning up duplicates)`);
-
-      // Delete ALL old verification photo records
-      for (const oldPhoto of existingVerificationPhotos) {
-        await ctx.db.delete(oldPhoto._id);
-        console.log(`[PHOTO_GATE] Deleted old verification photo: ${oldPhoto._id}`);
-      }
-      // Note: We don't delete the storage files as they may still be referenced elsewhere
-    }
+    // M9 FIX: Insert first, then reconcile with deterministic winner selection
+    // Old approach (delete-then-insert) had race: concurrent uploads could both delete then insert
+    // New approach: insert first, deterministically keep newest, update user to point to winner
 
     // Create the photo record as verification_reference type
     const photoId = await ctx.db.insert('photos', {
@@ -480,22 +739,60 @@ export const uploadVerificationReferencePhoto = mutation({
       photoType: 'verification_reference',
     });
 
-    console.log(`[PHOTO_GATE] stored verificationReferencePhotoId=${storageId}`);
+    // M9 FIX: Deterministic reconciliation - both concurrent requests agree on same winner
+    // Query all verification_reference photos, keep newest (by createdAt DESC, _id DESC as tiebreaker)
+    const allVerificationPhotos = await ctx.db
+      .query('photos')
+      .withIndex('by_user_type', (q) => q.eq('userId', userId).eq('photoType', 'verification_reference'))
+      .collect();
 
-    // Update user with verification reference photo
+    // Sort by createdAt DESC, then _id DESC (deterministic tiebreaker)
+    allVerificationPhotos.sort((a, b) => {
+      if (b.createdAt !== a.createdAt) return b.createdAt - a.createdAt;
+      return b._id > a._id ? 1 : -1;
+    });
+    const winner = allVerificationPhotos[0];
+
+    if (allVerificationPhotos.length > 1) {
+      console.log(`[PHOTO_GATE] M9: Found ${allVerificationPhotos.length} verification photos, keeping winner: ${winner._id}`);
+      // Delete all except the deterministic winner
+      for (const photo of allVerificationPhotos) {
+        if (photo._id !== winner._id) {
+          await ctx.db.delete(photo._id);
+          console.log(`[PHOTO_GATE] M9: Deleted duplicate verification photo: ${photo._id}`);
+        }
+      }
+      // Note: Storage files are NOT deleted - they may still be referenced elsewhere
+    }
+
+    console.log(`[PHOTO_GATE] stored verificationReferencePhotoId=${winner.storageId}`);
+
+    // M9 FIX: Update user with WINNER's data, not current request's data
+    // This ensures both concurrent requests point user to the same deterministic winner
     await ctx.db.patch(userId, {
-      verificationReferencePhotoId: storageId,
-      verificationReferencePhotoUrl: url,
+      verificationReferencePhotoId: winner.storageId,
+      verificationReferencePhotoUrl: winner.url,
       // Also set as display photo initially (original variant)
-      displayPrimaryPhotoId: storageId,
-      displayPrimaryPhotoUrl: url,
+      displayPrimaryPhotoId: winner.storageId,
+      displayPrimaryPhotoUrl: winner.url,
       displayPrimaryPhotoVariant: 'original',
+      // STABILITY FIX: C-10 - Keep primaryPhotoUrl in sync
+      primaryPhotoUrl: winner.url,
       // Set verification status to pending
       faceVerificationStatus: 'unverified',
       verificationStatus: 'pending_auto',
     });
 
     console.log(`[PHOTO_GATE] user updated verificationReferencePhotoId set=true`);
+
+    // H-1: Clean up pending upload record on success (if exists)
+    const pendingRecord = await ctx.db
+      .query('pendingUploads')
+      .withIndex('by_storage', (q) => q.eq('storageId', storageId))
+      .first();
+    if (pendingRecord) {
+      await ctx.db.delete(pendingRecord._id);
+    }
 
     return {
       success: true,
@@ -545,6 +842,8 @@ export const setDisplayPhotoVariant = mutation({
         displayPrimaryPhotoId: user.verificationReferencePhotoId,
         displayPrimaryPhotoUrl: user.verificationReferencePhotoUrl,
         displayPrimaryPhotoVariant: 'original',
+        // STABILITY FIX: C-10 - Keep primaryPhotoUrl in sync
+        primaryPhotoUrl: user.verificationReferencePhotoUrl,
       });
     } else {
       // For blurred/cartoon, need the processed version
@@ -555,6 +854,14 @@ export const setDisplayPhotoVariant = mutation({
       const url = await ctx.storage.getUrl(processedStorageId);
       if (!url) {
         throw new Error('Invalid processed photo storage reference');
+      }
+
+      // M13 FIX: Validate URL format before insert (same as addPhoto)
+      if (typeof url !== 'string' || url.trim().length === 0) {
+        throw new Error('Invalid photo URL: URL cannot be empty');
+      }
+      if (!url.startsWith('http://') && !url.startsWith('https://')) {
+        throw new Error('Invalid photo URL: must be a valid HTTP(S) URL');
       }
 
       // Create a new photo record for the variant
@@ -583,6 +890,8 @@ export const setDisplayPhotoVariant = mutation({
         displayPrimaryPhotoId: processedStorageId,
         displayPrimaryPhotoUrl: url,
         displayPrimaryPhotoVariant: variant,
+        // STABILITY FIX: C-10 - Keep primaryPhotoUrl in sync
+        primaryPhotoUrl: url,
       });
     }
 
@@ -702,6 +1011,170 @@ export const getPhotoGateStatus = query({
   },
 });
 
+// =============================================================================
+// H-1: Pending Upload Tracking (Orphan Storage Prevention)
+// =============================================================================
+
+/**
+ * Track a pending upload to prevent orphaned storage blobs.
+ * Call this AFTER storage upload succeeds but BEFORE calling addPhoto.
+ * If addPhoto fails, call cleanupPendingUpload to delete the blob.
+ */
+export const trackPendingUpload = mutation({
+  args: {
+    userId: v.string(), // authId string
+    storageId: v.id('_storage'),
+  },
+  handler: async (ctx, args) => {
+    // Resolve authId -> Convex userId
+    const resolvedUserId = await ensureUserByAuthId(ctx, args.userId);
+
+    // Check if pending record already exists for this storageId
+    const existing = await ctx.db
+      .query('pendingUploads')
+      .withIndex('by_storage', (q) => q.eq('storageId', args.storageId))
+      .first();
+
+    if (existing) {
+      // If exists and belongs to same user: idempotent success
+      if (existing.userId === resolvedUserId) {
+        return { success: true, pendingId: existing._id };
+      }
+      // If exists and belongs to different user: forbidden
+      throw new Error('Storage ID already claimed by another user');
+    }
+
+    // Create pending upload record
+    const pendingId = await ctx.db.insert('pendingUploads', {
+      storageId: args.storageId,
+      userId: resolvedUserId,
+      createdAt: Date.now(),
+    });
+
+    return { success: true, pendingId };
+  },
+});
+
+/**
+ * Clean up a pending upload by deleting both the storage blob and pending record.
+ * Call this if addPhoto fails after upload.
+ * Safety: Will NOT delete storage if a photo record already references it.
+ */
+export const cleanupPendingUpload = mutation({
+  args: {
+    userId: v.string(), // authId string
+    storageId: v.id('_storage'),
+  },
+  handler: async (ctx, args) => {
+    // Resolve authId -> Convex userId
+    const resolvedUserId = await ensureUserByAuthId(ctx, args.userId);
+
+    // Find the pending record
+    const pending = await ctx.db
+      .query('pendingUploads')
+      .withIndex('by_storage', (q) => q.eq('storageId', args.storageId))
+      .first();
+
+    if (!pending) {
+      // No pending record - may have already been cleaned up or addPhoto succeeded
+      return { success: true, deleted: false };
+    }
+
+    // Ownership check: must belong to the requesting user
+    if (pending.userId !== resolvedUserId) {
+      throw new Error('Not authorized to clean up this upload');
+    }
+
+    // Safety check: verify no photo is using this storageId
+    const photoUsingStorage = await ctx.db
+      .query('photos')
+      .filter((q) => q.eq(q.field('storageId'), args.storageId))
+      .first();
+
+    if (photoUsingStorage) {
+      // Photo exists - do NOT delete storage, just clean up pending record
+      await ctx.db.delete(pending._id);
+      return { success: true, deleted: false, reason: 'in_use' };
+    }
+
+    // No photo using this storage - safe to delete
+    try {
+      await ctx.storage.delete(args.storageId);
+    } catch (e) {
+      // Storage may already be deleted - log but continue
+      console.log('[H-1] Storage delete failed (may already be deleted):', e);
+    }
+
+    // Delete the pending record
+    await ctx.db.delete(pending._id);
+
+    return { success: true, deleted: true };
+  },
+});
+
+/**
+ * DEV ONLY: Clean up stale pending uploads (orphaned storage blobs).
+ * Should be run periodically (e.g., via cron) to clean up uploads where:
+ * - Upload succeeded but addPhoto was never called
+ * - User abandoned the upload flow
+ *
+ * Safety: Only runs in DEV mode (EXPO_PUBLIC_DEMO_MODE === 'true')
+ * Safety: Will NOT delete storage if a photo record already references it.
+ */
+export const cleanupStalePendingUploads = mutation({
+  args: {
+    maxAgeMs: v.optional(v.number()), // Default: 1 hour
+    limit: v.optional(v.number()), // Default: 50
+  },
+  handler: async (ctx, args) => {
+    // DEV-only safety gate
+    const isDemoMode = process.env.EXPO_PUBLIC_DEMO_MODE === 'true';
+    if (!isDemoMode) {
+      throw new Error('cleanupStalePendingUploads is only available in DEV mode');
+    }
+
+    const maxAge = args.maxAgeMs ?? 60 * 60 * 1000; // 1 hour default
+    const limit = args.limit ?? 50;
+    const cutoff = Date.now() - maxAge;
+
+    // Find stale pending uploads (limited batch)
+    const stalePending = await ctx.db
+      .query('pendingUploads')
+      .withIndex('by_createdAt')
+      .filter((q) => q.lt(q.field('createdAt'), cutoff))
+      .take(limit);
+
+    let deletedCount = 0;
+    let skippedCount = 0;
+
+    for (const pending of stalePending) {
+      // Safety check: verify no photo is using this storageId
+      const photoUsingStorage = await ctx.db
+        .query('photos')
+        .filter((q) => q.eq(q.field('storageId'), pending.storageId))
+        .first();
+
+      if (photoUsingStorage) {
+        // Photo exists - only delete pending record, NOT storage
+        await ctx.db.delete(pending._id);
+        skippedCount++;
+      } else {
+        // No photo using this storage - safe to delete both
+        try {
+          await ctx.storage.delete(pending.storageId);
+        } catch (e) {
+          console.log('[H-1] Stale storage delete failed:', pending.storageId, e);
+        }
+        await ctx.db.delete(pending._id);
+        deletedCount++;
+      }
+    }
+
+    console.log(`[H-1] Cleaned up ${deletedCount} stale pending uploads, skipped ${skippedCount} in-use`);
+    return { success: true, deletedCount, skippedCount };
+  },
+});
+
 /**
  * DEV ONLY: Delete all photos for a user
  * Used for testing/development to clean up extra photos
@@ -749,5 +1222,69 @@ export const deleteAllPhotosForUser = mutation({
       deletedCount,
       message: `Deleted ${deletedCount} photos`,
     };
+  },
+});
+
+// =============================================================================
+// B2-FIX: Retry Failed Storage Deletions
+// =============================================================================
+
+/**
+ * Internal mutation to retry failed storage deletions.
+ * Called by cron job to clean up orphaned storage blobs.
+ * Processes in bounded batches to avoid heavy work.
+ */
+export const retryFailedStorageDeletions = internalMutation({
+  args: {},
+  handler: async (ctx) => {
+    const batchSize = 20;
+    const maxRetries = 10;
+
+    // Get oldest failed deletions first (FIFO order)
+    const failedDeletions = await ctx.db
+      .query('failedStorageDeletions')
+      .withIndex('by_failedAt')
+      .take(batchSize);
+
+    let successCount = 0;
+    let failCount = 0;
+    let abandonedCount = 0;
+
+    for (const record of failedDeletions) {
+      // Check if we should abandon this record (too many retries)
+      if (record.retryCount >= maxRetries) {
+        console.warn(`[B2-RETRY] Abandoning storageId ${record.storageId} after ${record.retryCount} retries`);
+        await ctx.db.delete(record._id);
+        abandonedCount++;
+        continue;
+      }
+
+      try {
+        // Attempt to delete from storage
+        await ctx.storage.delete(record.storageId);
+
+        // Success - remove the queue record
+        await ctx.db.delete(record._id);
+        successCount++;
+      } catch (error) {
+        // Failed again - update retry count
+        const errorString = error instanceof Error
+          ? error.message.slice(0, 500)
+          : String(error).slice(0, 500);
+
+        await ctx.db.patch(record._id, {
+          failedAt: Date.now(),
+          retryCount: record.retryCount + 1,
+          lastError: errorString,
+        });
+        failCount++;
+      }
+    }
+
+    if (successCount > 0 || failCount > 0 || abandonedCount > 0) {
+      console.log(`[B2-RETRY] Processed ${failedDeletions.length} failed deletions: ${successCount} succeeded, ${failCount} failed, ${abandonedCount} abandoned`);
+    }
+
+    return { successCount, failCount, abandonedCount, processed: failedDeletions.length };
   },
 });

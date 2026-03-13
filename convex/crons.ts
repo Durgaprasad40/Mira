@@ -41,4 +41,28 @@ crons.hourly(
   internal.chatRooms.cleanupExpiredPenalties
 );
 
+// B2-FIX: Retry failed storage deletions every 30 minutes
+// Cleans up orphaned storage blobs from failed photo deletions
+crons.interval(
+  'retry-failed-storage-deletions',
+  { minutes: 30 },
+  internal.photos.retryFailedStorageDeletions
+);
+
+// Nearby/Crossed Paths: Cleanup expired crossed path history every 6 hours
+// Removes history entries past their 4-week expiration
+crons.interval(
+  'cleanup-expired-crossed-path-history',
+  { hours: 6 },
+  internal.crossedPaths.cleanupExpiredHistory
+);
+
+// Nearby/Crossed Paths: Cleanup expired crossed events every hour
+// Removes crossed events past their 7-day expiration
+crons.hourly(
+  'cleanup-expired-crossed-events',
+  { minuteUTC: 15 },
+  internal.crossedPaths.cleanupExpiredCrossedEvents
+);
+
 export default crons;

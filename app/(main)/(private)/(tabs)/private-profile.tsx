@@ -12,7 +12,7 @@
  * - Owner always sees photos CLEAR by default
  * - "Preview as others" shows how others see it (blurred if enabled)
  * - No "Anonymous_User" or "Private Username" - uses real name
- * - Store-only (no Convex calls)
+ * - STABILITY FIX: Convex is source-of-truth for profile data after restart
  */
 import React, { useMemo, useCallback, useState, useEffect, useRef } from 'react';
 import { useFocusEffect } from 'expo-router';
@@ -32,18 +32,19 @@ import {
 import { useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
-import { BlurView } from 'expo-blur';
 import { Paths, File as ExpoFile, Directory } from 'expo-file-system';
 import * as ImagePicker from 'expo-image-picker';
-import { useQuery } from 'convex/react';
+import { useQuery, useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { stringToUserId } from '@/convex/helpers';
+import { uploadPhotoToConvex } from '@/lib/uploadUtils';
 import { INCOGNITO_COLORS } from '@/lib/constants';
 import { PRIVATE_INTENT_CATEGORIES } from '@/lib/privateConstants';
 import { usePrivateProfileStore } from '@/stores/privateProfileStore';
 import { useAuthStore } from '@/stores/authStore';
 import { isDemoMode } from '@/hooks/useConvex';
 import { getDemoCurrentUser } from '@/lib/demoData';
+import { useScreenTrace } from '@/lib/devTrace';
 
 /** Parse "YYYY-MM-DD" to local Date (noon to avoid DST issues) */
 function parseDOBString(dobString: string): Date {
@@ -142,26 +143,115 @@ function isValidPhotoUrl(url: unknown): url is string {
 }
 
 export default function PrivateProfileScreen() {
+  useScreenTrace("P2_PROFILE");
   const router = useRouter();
   const insets = useSafeAreaInsets();
 
   // Auth
   const { userId } = useAuthStore();
 
+  // STABILITY FIX: Query Convex for backend profile data (source of truth after restart)
+  const backendProfile = useQuery(
+    api.privateProfiles.getByAuthUserId,
+    !isDemoMode && userId ? { authUserId: userId } : 'skip'
+  );
+  const backendProfileLoaded = backendProfile !== undefined;
+
+  // Mutations for photo upload to Convex backend
+  const generateUploadUrl = useMutation(api.photos.generateUploadUrl);
+  const getStorageUrl = useMutation(api.photos.getStorageUrl);
+  // Use auth-safe mutation (doesn't require ctx.auth.getUserIdentity)
+  const updatePrivateProfile = useMutation(api.privateProfiles.updateFieldsByAuthId);
+
   // NOTE: Recovery gating now happens at Phase-1 "Private" entry point only.
   // This screen no longer auto-redirects to recovery - user must exit Phase-2
   // and re-enter via Phase-1 Private button to see recovery screen.
 
-  // Phase-2 store data
-  const selectedPhotoUrls = usePrivateProfileStore((s) => s.selectedPhotoUrls);
-  const displayName = usePrivateProfileStore((s) => s.displayName);
-  const age = usePrivateProfileStore((s) => s.age);
+  // Phase-2 store data (local fallback while backend loads / demo mode)
+  const localSelectedPhotoUrls = usePrivateProfileStore((s) => s.selectedPhotoUrls);
+  const localDisplayName = usePrivateProfileStore((s) => s.displayName);
+  const localAge = usePrivateProfileStore((s) => s.age);
   const blurMyPhoto = usePrivateProfileStore((s) => s.blurMyPhoto);
-  const intentKeys = usePrivateProfileStore((s) => s.intentKeys);
-  const privateBio = usePrivateProfileStore((s) => s.privateBio);
+  const localIntentKeys = usePrivateProfileStore((s) => s.intentKeys);
+  const localPrivateBio = usePrivateProfileStore((s) => s.privateBio);
   const setSelectedPhotos = usePrivateProfileStore((s) => s.setSelectedPhotos);
   const setBlurMyPhoto = usePrivateProfileStore((s) => s.setBlurMyPhoto);
   const resetPhase2 = usePrivateProfileStore((s) => s.resetPhase2);
+
+  // Profile details from store
+  const storeHeight = usePrivateProfileStore((s) => s.height);
+  const storeWeight = usePrivateProfileStore((s) => s.weight);
+  const storeSmoking = usePrivateProfileStore((s) => s.smoking);
+  const storeDrinking = usePrivateProfileStore((s) => s.drinking);
+  const storeEducation = usePrivateProfileStore((s) => s.education);
+  const storeReligion = usePrivateProfileStore((s) => s.religion);
+
+  // STABILITY FIX: Resolve data from backend (primary) or local store (fallback)
+  // After app restart, hydration populates localSelectedPhotoUrls from Convex.
+  // Priority: local store (includes hydrated data) -> backend direct -> empty
+  const selectedPhotoUrls = useMemo(() => {
+    if (isDemoMode) return localSelectedPhotoUrls;
+
+    // After hydration, local store has photos from Convex
+    // If local store has valid photos, use them (immediate UI feedback)
+    if (localSelectedPhotoUrls.length > 0) {
+      if (__DEV__) {
+        console.log('[P2_PROFILE] Using local store photos:', localSelectedPhotoUrls.length);
+      }
+      return localSelectedPhotoUrls;
+    }
+
+    // Fallback: use backend directly if store hasn't hydrated yet
+    if (backendProfile?.privatePhotoUrls?.length) {
+      if (__DEV__) {
+        console.log('[P2_PROFILE] Using backend photos directly:', backendProfile.privatePhotoUrls.length);
+      }
+      return backendProfile.privatePhotoUrls;
+    }
+
+    return localSelectedPhotoUrls;
+  }, [isDemoMode, backendProfile, localSelectedPhotoUrls]);
+
+  const displayName = useMemo(() => {
+    if (isDemoMode) return localDisplayName;
+    if (backendProfile?.displayName) return backendProfile.displayName;
+    return localDisplayName;
+  }, [isDemoMode, backendProfile, localDisplayName]);
+
+  const age = useMemo(() => {
+    if (isDemoMode) return localAge;
+    if (backendProfile?.age) return backendProfile.age;
+    return localAge;
+  }, [isDemoMode, backendProfile, localAge]);
+
+  const intentKeys = useMemo(() => {
+    if (isDemoMode) return localIntentKeys;
+    if (backendProfile?.privateIntentKeys?.length) return backendProfile.privateIntentKeys;
+    return localIntentKeys;
+  }, [isDemoMode, backendProfile, localIntentKeys]);
+
+  const privateBio = useMemo(() => {
+    if (isDemoMode) return localPrivateBio;
+    if (backendProfile?.privateBio) return backendProfile.privateBio;
+    return localPrivateBio;
+  }, [isDemoMode, backendProfile, localPrivateBio]);
+
+  // DEV logs to prove fix
+  useEffect(() => {
+    if (__DEV__) {
+      const source = isDemoMode ? 'demo_local' : (backendProfileLoaded && backendProfile ? 'backend' : 'fallback_local');
+      const fieldsPresent = [
+        displayName ? 'name' : null,
+        age > 0 ? 'age' : null,
+        selectedPhotoUrls.length > 0 ? 'photos' : null,
+        intentKeys.length > 0 ? 'intents' : null,
+        privateBio ? 'bio' : null,
+      ].filter(Boolean).length;
+      console.log('[P2_PROFILE] source=' + source + ', userId=' + (userId?.substring(0, 8) || 'none') + ', fieldsPresent=' + fieldsPresent);
+      console.log('[P2_PROFILE] backendProfileLoaded=' + backendProfileLoaded);
+      console.log('[P2_PROFILE] backendPhotos=' + (backendProfile?.privatePhotoUrls?.length || 0));
+    }
+  }, [isDemoMode, backendProfileLoaded, backendProfile, displayName, age, selectedPhotoUrls, intentKeys, privateBio, userId]);
 
   // PHASE 1 Settings
   const defaultPhotoVisibility = usePrivateProfileStore((s) => s.defaultPhotoVisibility);
@@ -183,13 +273,15 @@ export default function PrivateProfileScreen() {
   const setAgeVisibility = usePrivateProfileStore((s) => s.setAgeVisibility);
   const setWhoCanMessageMe = usePrivateProfileStore((s) => s.setWhoCanMessageMe);
   const setSafeMode = usePrivateProfileStore((s) => s.setSafeMode);
+  const isPrivateEnabled = usePrivateProfileStore((s) => s.isPrivateEnabled);
 
   // Local UI state
   const [previewAsOthers, setPreviewAsOthers] = useState(false);
   const [viewerVisible, setViewerVisible] = useState(false);
   const [viewerPhotoIndex, setViewerPhotoIndex] = useState(0);
   const [missingPhotos, setMissingPhotos] = useState<Set<string>>(new Set());
-  const [isAddingPhotos, setIsAddingPhotos] = useState(false);
+  // FIX: Track which specific slot is loading (null = none)
+  const [addingSlotIndex, setAddingSlotIndex] = useState<number | null>(null);
 
   // Track last checked photos to avoid redundant checks
   const lastCheckedRef = useRef<string>('');
@@ -298,8 +390,15 @@ export default function PrivateProfileScreen() {
   }, [selectedPhotoUrls]);
 
   const mainPhoto = validPhotos[0] || null;
-  const gridPhotos = validPhotos.slice(1);
-  const canAddMore = validPhotos.length < 9;
+
+  // Create 9-slot array for rendering full grid
+  const photoSlots = useMemo(() => {
+    const slots: (string | null)[] = [null, null, null, null, null, null, null, null, null];
+    validPhotos.forEach((url, idx) => {
+      if (idx < 9) slots[idx] = url;
+    });
+    return slots;
+  }, [validPhotos]);
 
   // Get intent labels for display
   const intentLabels = useMemo(() => {
@@ -324,10 +423,10 @@ export default function PrivateProfileScreen() {
   };
 
   /**
-   * Set a photo as main (move to index 0)
+   * Set a photo as main (move to index 0) and sync to backend
    */
   const handleSetAsMain = useCallback(
-    (index: number) => {
+    async (index: number) => {
       if (index === 0 || index >= validPhotos.length) return;
 
       const newOrder = [...validPhotos];
@@ -336,142 +435,259 @@ export default function PrivateProfileScreen() {
 
       setSelectedPhotos([], newOrder);
 
+      // Sync reorder to backend (auth-safe mutation)
+      if (!isDemoMode && userId) {
+        try {
+          const result = await updatePrivateProfile({
+            authUserId: userId,
+            privatePhotoUrls: newOrder,
+          });
+          if (__DEV__ && result.success) {
+            console.log('[PrivateProfile] Backend photo sync success count:', newOrder.length);
+          }
+        } catch (syncError) {
+          if (__DEV__) {
+            console.error('[PrivateProfile] Backend sync failed:', syncError);
+          }
+        }
+      }
+
       if (__DEV__) {
         console.log('[PrivateProfile] Set photo as main:', { index });
       }
     },
-    [validPhotos, setSelectedPhotos]
+    [validPhotos, setSelectedPhotos, isDemoMode, userId, updatePrivateProfile]
   );
 
   /**
-   * Remove a photo
+   * Remove a photo and sync to backend
    */
   const handleRemovePhoto = useCallback(
-    (index: number) => {
+    async (index: number) => {
       if (index < 0 || index >= validPhotos.length) return;
 
       const newPhotos = validPhotos.filter((_, i) => i !== index);
       setSelectedPhotos([], newPhotos);
 
+      // Sync removal to Convex backend (auth-safe mutation)
+      if (!isDemoMode && userId) {
+        try {
+          const result = await updatePrivateProfile({
+            authUserId: userId,
+            privatePhotoUrls: newPhotos,
+          });
+          if (__DEV__ && result.success) {
+            console.log('[PrivateProfile] Backend photo sync success count:', newPhotos.length);
+          }
+        } catch (syncError) {
+          if (__DEV__) {
+            console.error('[PrivateProfile] Backend sync failed:', syncError);
+          }
+        }
+      }
+
       if (__DEV__) {
         console.log('[PrivateProfile] Removed photo:', { index, remaining: newPhotos.length });
       }
     },
-    [validPhotos, setSelectedPhotos]
+    [validPhotos, setSelectedPhotos, isDemoMode, userId, updatePrivateProfile]
   );
 
   /**
-   * Move photo up in order
+   * Move photo up in order and sync to backend
    */
   const handleMoveUp = useCallback(
-    (index: number) => {
+    async (index: number) => {
       if (index <= 0 || index >= validPhotos.length) return;
 
       const newOrder = [...validPhotos];
       [newOrder[index - 1], newOrder[index]] = [newOrder[index], newOrder[index - 1]];
       setSelectedPhotos([], newOrder);
+
+      // Sync reorder to backend (auth-safe mutation)
+      if (!isDemoMode && userId) {
+        try {
+          const result = await updatePrivateProfile({
+            authUserId: userId,
+            privatePhotoUrls: newOrder,
+          });
+          if (__DEV__ && result.success) {
+            console.log('[PrivateProfile] Backend photo sync success count:', newOrder.length);
+          }
+        } catch (syncError) {
+          if (__DEV__) {
+            console.error('[PrivateProfile] Backend sync failed:', syncError);
+          }
+        }
+      }
     },
-    [validPhotos, setSelectedPhotos]
+    [validPhotos, setSelectedPhotos, isDemoMode, userId, updatePrivateProfile]
   );
 
   /**
-   * Move photo down in order
+   * Move photo down in order and sync to backend
    */
   const handleMoveDown = useCallback(
-    (index: number) => {
+    async (index: number) => {
       if (index < 0 || index >= validPhotos.length - 1) return;
 
       const newOrder = [...validPhotos];
       [newOrder[index], newOrder[index + 1]] = [newOrder[index + 1], newOrder[index]];
       setSelectedPhotos([], newOrder);
+
+      // Sync reorder to backend (auth-safe mutation)
+      if (!isDemoMode && userId) {
+        try {
+          const result = await updatePrivateProfile({
+            authUserId: userId,
+            privatePhotoUrls: newOrder,
+          });
+          if (__DEV__ && result.success) {
+            console.log('[PrivateProfile] Backend photo sync success count:', newOrder.length);
+          }
+        } catch (syncError) {
+          if (__DEV__) {
+            console.error('[PrivateProfile] Backend sync failed:', syncError);
+          }
+        }
+      }
     },
-    [validPhotos, setSelectedPhotos]
+    [validPhotos, setSelectedPhotos, isDemoMode, userId, updatePrivateProfile]
   );
 
   /**
-   * Quick add photos directly from gallery (no onboarding flow)
-   * Opens ImagePicker, copies to permanent storage, updates store
+   * Add photo to a specific slot index
+   * Opens ImagePicker, uploads to Convex storage, updates store and backend
    */
-  const handleQuickAddPhotos = async () => {
-    // Check if we can add more photos
-    if (validPhotos.length >= MAX_PHOTOS) {
-      Alert.alert('Maximum Photos', `You can have up to ${MAX_PHOTOS} photos.`);
-      return;
-    }
-
-    if (isAddingPhotos) return;
-    setIsAddingPhotos(true);
+  const handleAddPhotoToSlot = async (slotIndex: number) => {
+    // FIX: Use slot-specific loading state
+    if (addingSlotIndex !== null) return;
+    setAddingSlotIndex(slotIndex);
 
     try {
       // Request permission
       const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
       if (status !== 'granted') {
         Alert.alert('Permission Required', 'Please grant photo library access to add photos.');
-        setIsAddingPhotos(false);
+        setAddingSlotIndex(null);
         return;
       }
 
-      // Calculate how many photos can still be added
-      const slotsAvailable = MAX_PHOTOS - validPhotos.length;
-
-      // Launch gallery
+      // Launch gallery for single photo selection
       const result = await ImagePicker.launchImageLibraryAsync({
         mediaTypes: 'images',
-        allowsMultipleSelection: true,
-        selectionLimit: slotsAvailable,
+        allowsMultipleSelection: false,
         quality: 0.8,
       });
 
       if (result.canceled || !result.assets || result.assets.length === 0) {
-        setIsAddingPhotos(false);
+        setAddingSlotIndex(null);
         return;
       }
 
-      // Copy each selected photo to permanent storage
-      const newPermanentUris: string[] = [];
-      for (let i = 0; i < result.assets.length; i++) {
-        const asset = result.assets[i];
-        const permanentUri = await copyToPermamentStorage(asset.uri, Date.now() + i);
-        if (permanentUri) {
-          newPermanentUris.push(permanentUri);
+      const asset = result.assets[0];
+
+      // PERSISTENCE FIX: Upload to Convex storage (not local file system)
+      // This ensures photos persist across app restarts/force quit
+      let backendUrl: string | null = null;
+
+      if (!isDemoMode && userId) {
+        try {
+          if (__DEV__) {
+            console.log('[PrivateProfile] Uploading photo to Convex storage...');
+          }
+
+          // Upload photo to Convex storage
+          const storageId = await uploadPhotoToConvex(asset.uri, generateUploadUrl);
+
+          // Get the permanent URL from storage ID using Convex API
+          const permanentUrl = await getStorageUrl({ storageId });
+          if (!permanentUrl) {
+            throw new Error('Failed to get URL for uploaded photo');
+          }
+          backendUrl = permanentUrl;
+
+          if (__DEV__) {
+            console.log('[PrivateProfile] Photo uploaded to Convex, url:', backendUrl);
+          }
+        } catch (uploadError) {
+          if (__DEV__) {
+            console.error('[PrivateProfile] Convex upload failed:', uploadError);
+          }
+          // Fall back to local storage for demo/offline mode
+          backendUrl = await copyToPermamentStorage(asset.uri, Date.now());
         }
+      } else {
+        // Demo mode or no user - use local storage
+        backendUrl = await copyToPermamentStorage(asset.uri, Date.now());
       }
 
-      if (newPermanentUris.length > 0) {
-        // Append to existing photos
-        const updatedPhotos = [...validPhotos, ...newPermanentUris].slice(0, MAX_PHOTOS);
-        setSelectedPhotos([], updatedPhotos);
+      if (backendUrl) {
+        // FIX: Read current store state directly to ensure we have latest photos
+        const currentPhotos = usePrivateProfileStore.getState().selectedPhotoUrls.filter(isValidPhotoUrl);
+        const newPhotos = [...currentPhotos];
+
+        // If slot index is beyond current length, add new photo at end
+        if (slotIndex >= newPhotos.length) {
+          newPhotos.push(backendUrl);
+        } else {
+          // Replace photo at slot index
+          newPhotos[slotIndex] = backendUrl;
+        }
+
+        const finalPhotos = newPhotos.slice(0, MAX_PHOTOS);
+
+        // Update local store - this triggers re-render
+        setSelectedPhotos([], finalPhotos);
+
+        // PERSISTENCE FIX: Also sync to Convex backend (auth-safe mutation)
+        if (!isDemoMode && userId) {
+          try {
+            const result = await updatePrivateProfile({
+              authUserId: userId,
+              privatePhotoUrls: finalPhotos,
+            });
+            if (__DEV__ && result.success) {
+              console.log('[PrivateProfile] Backend photo sync success count:', finalPhotos.length);
+            }
+          } catch (syncError) {
+            if (__DEV__) {
+              console.error('[PrivateProfile] Backend sync failed:', syncError);
+            }
+            // Local store is still updated, so user sees the photo
+            // Backend sync can be retried later
+          }
+        }
 
         // Reset the check ref so existence check runs again
         lastCheckedRef.current = '';
 
         if (__DEV__) {
-          console.log('[PrivateProfile] Added', newPermanentUris.length, 'photos');
+          console.log('[PrivateProfile] Added photo to slot', slotIndex, 'total:', finalPhotos.length);
         }
       }
     } catch (error) {
       if (__DEV__) {
-        console.error('[PrivateProfile] Quick add error:', error);
+        console.error('[PrivateProfile] Add photo error:', error);
       }
-      Alert.alert('Error', 'Failed to add photos. Please try again.');
+      Alert.alert('Error', 'Failed to add photo. Please try again.');
     } finally {
-      setIsAddingPhotos(false);
+      setAddingSlotIndex(null);
     }
   };
 
   /**
-   * Navigate to full photo edit screen (onboarding flow)
-   * Only used for "Edit All" which needs the full grid UI
+   * Navigate to desire edit screen (Phase-2 internal)
    */
-  const handleEditAllPhotos = () => {
-    router.push('/(main)/phase2-onboarding/photo-select' as any);
+  const handleEditDesire = () => {
+    router.push('/(main)/(private)/edit-desire' as any);
   };
 
   /**
-   * Navigate to profile edit screen
+   * Navigate to profile details edit screen (Phase-2 internal)
    */
-  const handleEditProfile = () => {
-    router.push('/(main)/phase2-onboarding/profile-setup' as any);
+  const handleEditProfileDetails = () => {
+    router.push('/(main)/(private)/edit-profile-details' as any);
   };
 
   /**
@@ -509,10 +725,8 @@ export default function PrivateProfileScreen() {
         <Image
           source={{ uri }}
           style={styles.gridPhotoImage}
+          blurRadius={shouldShowBlur ? 35 : 0}
         />
-        {shouldShowBlur && (
-          <BlurView intensity={80} tint="dark" style={styles.gridPhotoBlur} />
-        )}
       </TouchableOpacity>
     );
   };
@@ -523,7 +737,7 @@ export default function PrivateProfileScreen() {
       <View style={styles.header}>
         <Ionicons name="person-circle" size={24} color={C.primary} />
         <Text style={styles.headerTitle}>My Private Profile</Text>
-        <TouchableOpacity onPress={handleEditProfile} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+        <TouchableOpacity onPress={handleEditProfileDetails} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
           <Ionicons name="settings-outline" size={22} color={C.text} />
         </TouchableOpacity>
       </View>
@@ -545,10 +759,8 @@ export default function PrivateProfileScreen() {
                 <Image
                   source={{ uri: mainPhoto }}
                   style={styles.mainPhotoImage}
+                  blurRadius={shouldShowBlur ? 35 : 0}
                 />
-                {shouldShowBlur && (
-                  <BlurView intensity={80} tint="dark" style={styles.mainPhotoBlur} />
-                )}
               </View>
               {/* Tap hint badge */}
               <View style={styles.tapHint}>
@@ -556,7 +768,7 @@ export default function PrivateProfileScreen() {
               </View>
             </TouchableOpacity>
           ) : (
-            <TouchableOpacity style={styles.mainPhotoEmpty} onPress={handleQuickAddPhotos}>
+            <TouchableOpacity style={styles.mainPhotoEmpty} onPress={() => handleAddPhotoToSlot(0)}>
               <Ionicons name="camera-outline" size={40} color={C.textLight} />
             </TouchableOpacity>
           )}
@@ -608,91 +820,107 @@ export default function PrivateProfileScreen() {
 
         {/* Missing Photos Warning (includes cache URIs that can't persist) */}
         {(missingPhotos.size > 0 || cacheUriCount > 0) && (
-          <TouchableOpacity
-            style={styles.warningBanner}
-            onPress={handleQuickAddPhotos}
-            activeOpacity={0.8}
-          >
+          <View style={styles.warningBanner}>
             <Ionicons name="warning-outline" size={20} color="#FF9500" />
             <View style={styles.warningContent}>
               <Text style={styles.warningTitle}>
                 {missingPhotos.size + cacheUriCount} photo{(missingPhotos.size + cacheUriCount) > 1 ? 's' : ''} need re-adding
               </Text>
-              <Text style={styles.warningText}>Tap to select photos that will persist</Text>
+              <Text style={styles.warningText}>Use the photo grid below to add photos</Text>
             </View>
-            <Ionicons name="chevron-forward" size={20} color={C.textLight} />
-          </TouchableOpacity>
+          </View>
         )}
 
-        {/* Photo Grid */}
+        {/* Photo Grid - Full 9 Slots */}
         <View style={styles.section}>
           <View style={styles.sectionHeader}>
             <Text style={styles.sectionTitle}>Photos ({validPhotos.length}/9)</Text>
-            <TouchableOpacity onPress={handleEditAllPhotos} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
-              <Text style={styles.editLink}>Edit All</Text>
-            </TouchableOpacity>
           </View>
 
           <View style={styles.photoGrid}>
-            {/* Grid photos */}
-            {gridPhotos.map((uri, idx) => {
-              const actualIndex = idx + 1; // +1 because main photo is index 0
-              return (
-                <View key={`grid-${idx}-${uri.slice(-20)}`} style={styles.gridSlot}>
-                  {renderGridPhoto(uri, actualIndex, () => openViewer(actualIndex))}
+            {/* Render all 9 slots */}
+            {photoSlots.map((uri, slotIndex) => {
+              const hasPhoto = !!uri;
+              const isMain = slotIndex === 0 && hasPhoto;
 
-                  {/* Photo controls */}
-                  <View style={styles.gridControls}>
-                    <TouchableOpacity
-                      style={styles.gridControlBtn}
-                      onPress={() => handleSetAsMain(actualIndex)}
-                    >
-                      <Ionicons name="star" size={12} color="#FFD700" />
-                    </TouchableOpacity>
-                    {actualIndex > 1 && (
-                      <TouchableOpacity
-                        style={styles.gridControlBtn}
-                        onPress={() => handleMoveUp(actualIndex)}
-                      >
-                        <Ionicons name="chevron-up" size={12} color={C.text} />
-                      </TouchableOpacity>
+              if (hasPhoto) {
+                // Filled slot - show photo with controls
+                return (
+                  <View key={`slot-${slotIndex}`} style={styles.gridSlot}>
+                    {renderGridPhoto(uri, slotIndex, () => openViewer(slotIndex))}
+
+                    {/* Main photo badge */}
+                    {isMain && (
+                      <View style={styles.mainBadge}>
+                        <Ionicons name="star" size={10} color="#FFD700" />
+                        <Text style={styles.mainBadgeText}>Main</Text>
+                      </View>
                     )}
-                    {actualIndex < validPhotos.length - 1 && (
+
+                    {/* Photo controls */}
+                    <View style={styles.gridControls}>
+                      {/* Set as main (only for non-main photos) */}
+                      {!isMain && (
+                        <TouchableOpacity
+                          style={styles.gridControlBtn}
+                          onPress={() => handleSetAsMain(slotIndex)}
+                        >
+                          <Ionicons name="star" size={12} color="#FFD700" />
+                        </TouchableOpacity>
+                      )}
+                      {/* Move up (only if not first) */}
+                      {slotIndex > 0 && (
+                        <TouchableOpacity
+                          style={styles.gridControlBtn}
+                          onPress={() => handleMoveUp(slotIndex)}
+                        >
+                          <Ionicons name="chevron-up" size={12} color={C.text} />
+                        </TouchableOpacity>
+                      )}
+                      {/* Move down (only if not last photo) */}
+                      {slotIndex < validPhotos.length - 1 && (
+                        <TouchableOpacity
+                          style={styles.gridControlBtn}
+                          onPress={() => handleMoveDown(slotIndex)}
+                        >
+                          <Ionicons name="chevron-down" size={12} color={C.text} />
+                        </TouchableOpacity>
+                      )}
+                      {/* Remove */}
                       <TouchableOpacity
-                        style={styles.gridControlBtn}
-                        onPress={() => handleMoveDown(actualIndex)}
+                        style={[styles.gridControlBtn, styles.gridControlBtnDanger]}
+                        onPress={() => handleRemovePhoto(slotIndex)}
                       >
-                        <Ionicons name="chevron-down" size={12} color={C.text} />
+                        <Ionicons name="close" size={12} color="#FF6B6B" />
                       </TouchableOpacity>
-                    )}
-                    <TouchableOpacity
-                      style={[styles.gridControlBtn, styles.gridControlBtnDanger]}
-                      onPress={() => handleRemovePhoto(actualIndex)}
-                    >
-                      <Ionicons name="close" size={12} color="#FF6B6B" />
-                    </TouchableOpacity>
+                    </View>
                   </View>
-                </View>
+                );
+              }
+
+              // Empty slot - show add button
+              const isThisSlotLoading = addingSlotIndex === slotIndex;
+              return (
+                <TouchableOpacity
+                  key={`slot-${slotIndex}`}
+                  style={[
+                    styles.addPhotoSlot,
+                    isThisSlotLoading && styles.addPhotoSlotDisabled,
+                  ]}
+                  onPress={() => handleAddPhotoToSlot(slotIndex)}
+                  disabled={addingSlotIndex !== null}
+                >
+                  {isThisSlotLoading ? (
+                    <ActivityIndicator size="small" color={C.primary} />
+                  ) : (
+                    <>
+                      <Ionicons name="add" size={28} color={C.primary} />
+                      <Text style={styles.addPhotoText}>Add</Text>
+                    </>
+                  )}
+                </TouchableOpacity>
               );
             })}
-
-            {/* Add photo slot */}
-            {canAddMore && (
-              <TouchableOpacity
-                style={[styles.addPhotoSlot, isAddingPhotos && styles.addPhotoSlotDisabled]}
-                onPress={handleQuickAddPhotos}
-                disabled={isAddingPhotos}
-              >
-                {isAddingPhotos ? (
-                  <ActivityIndicator size="small" color={C.primary} />
-                ) : (
-                  <>
-                    <Ionicons name="add" size={28} color={C.primary} />
-                    <Text style={styles.addPhotoText}>Add</Text>
-                  </>
-                )}
-              </TouchableOpacity>
-            )}
           </View>
 
           <Text style={styles.photoGridHint}>
@@ -700,41 +928,107 @@ export default function PrivateProfileScreen() {
           </Text>
         </View>
 
-        {/* Communication Style (Bio) */}
-        {privateBio && privateBio.trim().length > 0 && (
-          <View style={styles.section}>
-            <View style={styles.sectionHeader}>
-              <Text style={styles.sectionTitle}>Communication Style</Text>
-              <TouchableOpacity onPress={handleEditProfile} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
-                <Text style={styles.editLink}>Edit</Text>
-              </TouchableOpacity>
-            </View>
+        {/* Desire Section */}
+        <View style={styles.section}>
+          <View style={styles.sectionHeader}>
+            <Text style={styles.sectionTitle}>Desire</Text>
+            <TouchableOpacity onPress={handleEditDesire} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+              <Text style={styles.editLink}>Edit</Text>
+            </TouchableOpacity>
+          </View>
+          {privateBio && privateBio.trim().length > 0 ? (
             <Text style={styles.bioText}>{privateBio}</Text>
-          </View>
-        )}
+          ) : (
+            <Text style={styles.emptyText}>Tap Edit to add your desire...</Text>
+          )}
+        </View>
 
-        {/* Looking For Tags */}
-        {intentLabels.length > 0 && (
-          <View style={styles.section}>
-            <View style={styles.sectionHeader}>
-              <Text style={styles.sectionTitle}>Looking For</Text>
-              <TouchableOpacity onPress={handleEditProfile} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
-                <Text style={styles.editLink}>Edit</Text>
-              </TouchableOpacity>
-            </View>
-            <View style={styles.tagGrid}>
-              {intentLabels.map((label, i) => (
-                <View key={`tag-${i}`} style={styles.tag}>
-                  <Text style={styles.tagText}>{label}</Text>
-                </View>
-              ))}
-            </View>
+        {/* Profile Details Section */}
+        <View style={styles.section}>
+          <View style={styles.sectionHeader}>
+            <Text style={styles.sectionTitle}>Profile Details</Text>
+            <TouchableOpacity onPress={handleEditProfileDetails} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+              <Text style={styles.editLink}>Edit</Text>
+            </TouchableOpacity>
           </View>
-        )}
+          <View style={styles.detailsCard}>
+            {/* Body row */}
+            <View style={styles.detailsRow}>
+              {storeHeight && (
+                <View style={styles.detailItem}>
+                  <Text style={styles.detailLabel}>Height</Text>
+                  <Text style={styles.detailValue}>{storeHeight} cm</Text>
+                </View>
+              )}
+              {storeWeight && (
+                <View style={styles.detailItem}>
+                  <Text style={styles.detailLabel}>Weight</Text>
+                  <Text style={styles.detailValue}>{storeWeight} kg</Text>
+                </View>
+              )}
+            </View>
+            {/* Lifestyle row */}
+            <View style={styles.detailsRow}>
+              {storeSmoking && (
+                <View style={styles.detailItem}>
+                  <Text style={styles.detailLabel}>Smoking</Text>
+                  <Text style={styles.detailValue}>{storeSmoking === 'never' ? 'Non-smoker' : storeSmoking}</Text>
+                </View>
+              )}
+              {storeDrinking && (
+                <View style={styles.detailItem}>
+                  <Text style={styles.detailLabel}>Drinking</Text>
+                  <Text style={styles.detailValue}>{storeDrinking === 'socially' ? 'Social drinker' : storeDrinking}</Text>
+                </View>
+              )}
+            </View>
+            {/* Background row */}
+            <View style={styles.detailsRow}>
+              {storeEducation && (
+                <View style={styles.detailItem}>
+                  <Text style={styles.detailLabel}>Education</Text>
+                  <Text style={styles.detailValue}>
+                    {storeEducation === 'bachelors' ? "Bachelor's" :
+                     storeEducation === 'masters' ? "Master's" :
+                     storeEducation === 'high_school' ? 'High School' :
+                     storeEducation === 'some_college' ? 'Some College' :
+                     storeEducation === 'trade_school' ? 'Trade School' :
+                     storeEducation}
+                  </Text>
+                </View>
+              )}
+              {storeReligion && (
+                <View style={styles.detailItem}>
+                  <Text style={styles.detailLabel}>Religion</Text>
+                  <Text style={styles.detailValue}>{storeReligion.charAt(0).toUpperCase() + storeReligion.slice(1)}</Text>
+                </View>
+              )}
+            </View>
+            {/* Empty state */}
+            {!storeHeight && !storeWeight && !storeSmoking && !storeDrinking && !storeEducation && !storeReligion && (
+              <Text style={styles.detailsHint}>Tap Edit to add your details</Text>
+            )}
+          </View>
+        </View>
 
         {/* Settings Menu */}
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Settings</Text>
+
+          <TouchableOpacity
+            style={styles.menuRow}
+            onPress={() => router.push('/(main)/(private)/settings/profile-visibility' as any)}
+            activeOpacity={0.7}
+          >
+            <Ionicons name={isPrivateEnabled ? 'eye-outline' : 'eye-off-outline'} size={22} color={C.text} />
+            <Text style={styles.menuText}>Profile Visibility</Text>
+            <View style={styles.menuRowRight}>
+              <Text style={[styles.menuBadge, !isPrivateEnabled && styles.menuBadgePaused]}>
+                {isPrivateEnabled ? 'Active' : 'Paused'}
+              </Text>
+              <Ionicons name="chevron-forward" size={20} color={C.textLight} />
+            </View>
+          </TouchableOpacity>
 
           <TouchableOpacity
             style={styles.menuRow}
@@ -748,7 +1042,7 @@ export default function PrivateProfileScreen() {
 
           <TouchableOpacity
             style={styles.menuRow}
-            onPress={() => router.push('/(main)/(private)/settings/safety' as any)}
+            onPress={() => router.push('/(main)/(private)/settings/private-safety' as any)}
             activeOpacity={0.7}
           >
             <Ionicons name="shield-checkmark-outline" size={22} color={C.text} />
@@ -758,7 +1052,7 @@ export default function PrivateProfileScreen() {
 
           <TouchableOpacity
             style={styles.menuRow}
-            onPress={() => router.push('/(main)/(private)/settings/account' as any)}
+            onPress={() => router.push('/(main)/(private)/settings/private-account' as any)}
             activeOpacity={0.7}
           >
             <Ionicons name="person-outline" size={22} color={C.text} />
@@ -800,10 +1094,8 @@ export default function PrivateProfileScreen() {
                 source={{ uri: validPhotos[viewerPhotoIndex] }}
                 style={styles.viewerPhoto}
                 resizeMode="contain"
+                blurRadius={shouldShowBlur ? 35 : 0}
               />
-              {shouldShowBlur && (
-                <BlurView intensity={80} tint="dark" style={StyleSheet.absoluteFill} />
-              )}
             </View>
           )}
 
@@ -1102,6 +1394,23 @@ const styles = StyleSheet.create({
   gridControlBtnDanger: {
     backgroundColor: 'rgba(255,107,107,0.3)',
   },
+  mainBadge: {
+    position: 'absolute',
+    top: 4,
+    left: 4,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 3,
+    backgroundColor: 'rgba(0,0,0,0.7)',
+    paddingHorizontal: 6,
+    paddingVertical: 3,
+    borderRadius: 8,
+  },
+  mainBadgeText: {
+    fontSize: 9,
+    fontWeight: '600',
+    color: '#FFFFFF',
+  },
   addPhotoSlot: {
     width: PHOTO_SIZE,
     height: PHOTO_SIZE * 1.25,
@@ -1134,6 +1443,42 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: C.text,
     lineHeight: 22,
+  },
+  emptyText: {
+    fontSize: 14,
+    color: C.textLight,
+    fontStyle: 'italic',
+  },
+  detailsHint: {
+    fontSize: 13,
+    color: C.textLight,
+  },
+  detailsCard: {
+    backgroundColor: C.surface,
+    borderRadius: 12,
+    padding: 12,
+  },
+  detailsRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 16,
+    marginBottom: 8,
+  },
+  detailItem: {
+    minWidth: 100,
+    flex: 1,
+  },
+  detailLabel: {
+    fontSize: 12,
+    color: C.textLight,
+    fontWeight: '500',
+    marginBottom: 2,
+  },
+  detailValue: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: C.text,
+    textTransform: 'capitalize',
   },
 
   // Tags
@@ -1373,5 +1718,23 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     color: C.text,
     marginLeft: 12,
+  },
+  menuRowRight: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  menuBadge: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#10B981',
+    backgroundColor: 'rgba(16, 185, 129, 0.15)',
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 6,
+  },
+  menuBadgePaused: {
+    color: '#F59E0B',
+    backgroundColor: 'rgba(245, 158, 11, 0.15)',
   },
 });

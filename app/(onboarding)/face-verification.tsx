@@ -38,6 +38,7 @@ import { OnboardingProgressHeader } from '@/components/OnboardingProgressHeader'
 import { useQuery } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import type { Id } from '@/convex/_generated/dataModel';
+import { useScreenTrace } from '@/lib/devTrace';
 
 // =============================================================================
 // Constants
@@ -63,16 +64,64 @@ type VerificationState =
 // =============================================================================
 
 export default function FaceVerificationScreen() {
+  useScreenTrace("ONB_FACE_VERIFICATION");
   const { photos, setStep } = useOnboardingStore();
   const { userId, faceVerificationPassed, faceVerificationPending, setFaceVerificationPassed, setFaceVerificationPending } = useAuthStore();
   const demoProfile = useDemoStore((s) => isDemoMode && userId ? s.demoProfiles[userId] : null);
   const router = useRouter();
 
+  // M6 FIX: queryEnabled allows retry by toggling the query subscription
+  const [queryEnabled, setQueryEnabled] = useState(true);
+
   // Query backend onboarding status for reference photo check (source of truth)
+  // M6 FIX: Include queryEnabled in skip condition to allow forced re-subscription
   const onboardingStatus = useQuery(
     api.users.getOnboardingStatus,
-    !isDemoMode && userId ? { userId: userId as Id<'users'> } : 'skip'
+    !isDemoMode && userId && queryEnabled ? { userId: userId as Id<'users'> } : 'skip'
   );
+
+  // M6 FIX: Track loading timeout to prevent infinite loading state
+  const [backendLoadTimedOut, setBackendLoadTimedOut] = useState(false);
+
+  // M6 FIX: Ref to track re-enable timer for cleanup on unmount
+  const backendRetryTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // M6 FIX: Cleanup re-enable timer on unmount
+  useEffect(() => {
+    return () => {
+      if (backendRetryTimerRef.current) {
+        clearTimeout(backendRetryTimerRef.current);
+      }
+    };
+  }, []);
+
+  // M6 FIX: Retry handler - toggles queryEnabled to force fresh Convex subscription
+  const handleBackendRetry = useCallback(() => {
+    if (backendRetryTimerRef.current) {
+      clearTimeout(backendRetryTimerRef.current);
+    }
+    setBackendLoadTimedOut(false);
+    setQueryEnabled(false);
+    backendRetryTimerRef.current = setTimeout(() => {
+      setQueryEnabled(true);
+      backendRetryTimerRef.current = null;
+    }, 50);
+  }, []);
+
+  // M6 FIX: Set timeout after 8s of loading to show retry UI
+  useEffect(() => {
+    if (!isDemoMode && queryEnabled && onboardingStatus === undefined) {
+      const timer = setTimeout(() => {
+        setBackendLoadTimedOut(true);
+        console.warn('[FACE_VERIFY] M6: Backend load timeout after 8s');
+      }, 8000);
+      return () => clearTimeout(timer);
+    }
+    // Reset timeout flag if query resolves OR during retry (queryEnabled=false)
+    if (onboardingStatus !== undefined || !queryEnabled) {
+      setBackendLoadTimedOut(false);
+    }
+  }, [isDemoMode, queryEnabled, onboardingStatus]);
 
   // Screen focus and app state tracking
   const isFocused = useIsFocused();
@@ -277,17 +326,15 @@ export default function FaceVerificationScreen() {
     };
   }, [isFocused, appState, device, hasPermission, verificationState, cameraActive]);
 
-  // Deactivate camera immediately on unmount
+  // M8 FIX: Simplified camera cleanup - removed setState that caused React warning
+  // Camera resources are released automatically when Camera component unmounts
   useEffect(() => {
     return () => {
-      if (cameraActive) {
-        if (__DEV__) {
-          console.log('[FaceDebug] cameraActive false (unmounting)');
-        }
-        setCameraActive(false);
+      if (__DEV__) {
+        console.log('[FaceDebug] camera cleanup on unmount');
       }
     };
-  }, [cameraActive]);
+  }, []);
 
   const handleOpenSettings = useCallback(async () => {
     try {
@@ -355,9 +402,12 @@ export default function FaceVerificationScreen() {
     try {
       // SECURITY: Face comparison happens on the server, not the client
       // The server compares the selfie against the user's uploaded profile photo
+      // C5 FIX: Prefer backend URL (persisted) over local photos[0] (transient)
+      // This ensures verification works after app restart when local store is empty
+      const referencePhotoUrl = onboardingStatus?.verificationReferencePhotoUrl || photos[0] || '';
       const result = await verifyFace({
         userId: userId || 'unknown',
-        profilePhotoUri: photos[0] || '',
+        profilePhotoUri: referencePhotoUrl,
         frames,
       });
 
@@ -478,6 +528,37 @@ export default function FaceVerificationScreen() {
     setStep('additional_photos');
     router.push('/(onboarding)/additional-photos' as any);
   }, [setFaceVerificationPending, setStep, router]);
+
+  // =============================================================================
+  // Render: M6 FIX - Backend loading with timeout fallback
+  // =============================================================================
+
+  if (!isDemoMode && onboardingStatus === undefined) {
+    return (
+      <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
+        <OnboardingProgressHeader />
+        <View style={styles.centered}>
+          {backendLoadTimedOut ? (
+            <>
+              <Ionicons name="cloud-offline-outline" size={48} color={COLORS.textLight} />
+              <Text style={styles.loadingText}>Unable to load profile data</Text>
+              <Button
+                title="Try Again"
+                variant="outline"
+                onPress={handleBackendRetry}
+                style={{ marginTop: 16 }}
+              />
+            </>
+          ) : (
+            <>
+              <ActivityIndicator size="large" color={COLORS.primary} />
+              <Text style={styles.loadingText}>Loading...</Text>
+            </>
+          )}
+        </View>
+      </SafeAreaView>
+    );
+  }
 
   // =============================================================================
   // Render: Permission not determined

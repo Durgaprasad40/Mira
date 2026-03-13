@@ -5,6 +5,7 @@
 import { create } from 'zustand';
 import type { PrivateIntentKey, PrivateDesireTag, PrivateBoundary, DesireCategory, PhotoSlots9 } from '@/types';
 import { createEmptyPhotoSlots } from '@/types';
+import type { Phase2PromptAnswer, PreferenceStrength, PreferenceStrengthValue, IntentMatchValue } from '@/lib/privateConstants';
 
 /** Parse "YYYY-MM-DD" to local Date (noon to avoid DST issues) */
 function parseDOBString(dobString: string): Date {
@@ -35,6 +36,7 @@ export interface Phase1ProfileData {
   isVerified?: boolean;
   // Extended fields for Phase-2 onboarding info preview
   height?: number | null;
+  weight?: number | null;
   smoking?: string | null;
   drinking?: string | null;
   kids?: string | null;
@@ -80,6 +82,7 @@ interface PrivateProfileState {
   isVerified: boolean;    // Imported from Phase-1 verification status
   // Extended imported fields (read-only, editable later in settings)
   height: number | null;
+  weight: number | null;
   smoking: string | null;
   drinking: string | null;
   kids: string | null;
@@ -94,6 +97,9 @@ interface PrivateProfileState {
   convexProfileId: string | null;
   _hasHydrated: boolean;
 
+  // Profile visibility (Pause Profile feature)
+  isPrivateEnabled: boolean; // true = visible in Desire Land, false = paused/hidden
+
   // Phase-2 setup tracking
   acceptedTermsAt: number | null;
   phase2SetupVersion: number | null;
@@ -101,6 +107,12 @@ interface PrivateProfileState {
   photoBlurSlots: boolean[];  // Per-slot blur state (9 slots, true=blurred)
   phase1PhotoSlots: PhotoSlots9;  // Slot-preserving photos from Phase-1 (9 slots)
   phase2PhotosConfirmed: boolean; // True after initial photo selection in Step-2
+
+  // Phase-2 Onboarding Step 3: Prompt answers
+  promptAnswers: Phase2PromptAnswer[]; // Answered prompts from Step 3
+
+  // Phase-2 Preference Strength (ranking signal)
+  preferenceStrength: PreferenceStrength;
 
   // Navigation lock: prevents duplicate router.replace calls in PrivateEntryGuard
   privateEntryNavLock: boolean;
@@ -150,6 +162,7 @@ interface PrivateProfileState {
   // Actions — individual profile field setters (for Phase-2 editing)
   setGender: (gender: string) => void;
   setHeight: (height: number | null) => void;
+  setWeight: (weight: number | null) => void;
   setSmoking: (smoking: string | null) => void;
   setDrinking: (drinking: string | null) => void;
   setEducation: (education: string | null) => void;
@@ -162,6 +175,7 @@ interface PrivateProfileState {
   // Actions — reset
   resetWizard: () => void;
   resetPhase2: () => void; // Full Phase-2 profile reset (clears everything)
+  resetPhase2ForTesting: () => void; // DEV ONLY: Full reset including completion flag
 
   // Hydration
   setHasHydrated: (hydrated: boolean) => void;
@@ -176,6 +190,14 @@ interface PrivateProfileState {
   setPhase2PhotosConfirmed: (confirmed: boolean) => void;
   setPrivateEntryNavLock: (locked: boolean) => void;
 
+  // Phase-2 Onboarding Step 3: Prompt answer actions
+  setPromptAnswer: (promptId: string, question: string, answer: string) => void;
+  setPromptAnswers: (answers: Phase2PromptAnswer[]) => void;
+  removePromptAnswer: (promptId: string) => void;
+
+  // Phase-2 Preference Strength action
+  setPreferenceStrength: (field: keyof PreferenceStrength, value: PreferenceStrengthValue | IntentMatchValue) => void;
+
   // PHASE 1 Settings Actions
   setDefaultPhotoVisibility: (visibility: 'public' | 'blurred' | 'private') => void;
   setAllowUnblurRequests: (allow: boolean) => void;
@@ -187,9 +209,42 @@ interface PrivateProfileState {
   setWhoCanMessageMe: (who: 'everyone' | 'matches' | 'verified') => void;
   setSafeMode: (enabled: boolean) => void;
 
+  // Profile Visibility Actions (Pause Profile)
+  setIsPrivateEnabled: (enabled: boolean) => void;
+
   // Deletion Actions
   initiatePrivateDataDeletion: () => void;
   recoverPrivateData: () => void;
+
+  // ST-001 FIX: Hydrate store from Convex on app restart
+  hydrateFromConvex: (convexProfile: {
+    _id: string;
+    displayName: string;
+    age: number;
+    gender: string;
+    city?: string;
+    privateBio?: string;
+    privateIntentKeys: string[];
+    privateDesireTagKeys?: string[];
+    privateBoundaries?: string[];
+    privatePhotoUrls: string[];
+    isSetupComplete: boolean;
+    hobbies?: string[];
+    isVerified?: boolean;
+    // Profile details fields
+    height?: number | null;
+    weight?: number | null;
+    smoking?: string | null;
+    drinking?: string | null;
+    education?: string | null;
+    religion?: string | null;
+    // Profile visibility
+    isPrivateEnabled?: boolean;
+    // Phase-2 Onboarding Step 3 prompt answers
+    promptAnswers?: Phase2PromptAnswer[];
+    // Phase-2 Preference Strength
+    preferenceStrength?: PreferenceStrength;
+  } | null) => void;
 }
 
 const initialWizardState = {
@@ -212,6 +267,7 @@ const initialWizardState = {
   isVerified: false,
   // Extended imported fields
   height: null as number | null,
+  weight: null as number | null,
   smoking: null as string | null,
   drinking: null as string | null,
   kids: null as string | null,
@@ -221,6 +277,7 @@ const initialWizardState = {
   isSetupComplete: false,
   phase2OnboardingCompleted: false, // Permanent - never reset
   convexProfileId: null as string | null,
+  isPrivateEnabled: true, // Default: visible in Desire Land
   // Phase-2 setup tracking
   acceptedTermsAt: null as number | null,
   phase2SetupVersion: null as number | null,
@@ -228,6 +285,8 @@ const initialWizardState = {
   photoBlurSlots: [true, true, true, true, true, true, true, true, true] as boolean[], // Per-slot blur (default all blurred)
   phase1PhotoSlots: createEmptyPhotoSlots(),
   phase2PhotosConfirmed: false, // True after Step-2 photo selection
+  promptAnswers: [] as Phase2PromptAnswer[], // Phase-2 Step 3 prompt answers
+  preferenceStrength: { smoking: null, drinking: null, intent: null } as PreferenceStrength,
   privateEntryNavLock: false, // Navigation lock for PrivateEntryGuard
   // PHASE 1 Settings — Defaults
   defaultPhotoVisibility: 'blurred' as const,
@@ -277,6 +336,7 @@ export const usePrivateProfileStore = create<PrivateProfileState>()((set) => ({
   // Individual profile field setters
   setGender: (gender) => set({ gender }),
   setHeight: (height) => set({ height }),
+  setWeight: (weight) => set({ weight }),
   setSmoking: (smoking) => set({ smoking }),
   setDrinking: (drinking) => set({ drinking }),
   setEducation: (education) => set({ education }),
@@ -291,6 +351,27 @@ export const usePrivateProfileStore = create<PrivateProfileState>()((set) => ({
     phase2OnboardingCompleted: state.phase2OnboardingCompleted,
     // Reset photos confirmed flag
     phase2PhotosConfirmed: false,
+    // Also reset legacy profile fields
+    profile: {
+      username: 'Anonymous_User',
+      bio: '',
+      desireCategories: [],
+      blurPhoto: true,
+    },
+    isSetup: false,
+  })),
+  // DEV ONLY: Full reset including completion flag (for testing onboarding)
+  resetPhase2ForTesting: () => set(() => ({
+    // Reset ALL wizard state INCLUDING completion flag
+    ...initialWizardState,
+    // ALSO reset completion flag so onboarding shows again
+    phase2OnboardingCompleted: false,
+    isSetupComplete: false,
+    phase2PhotosConfirmed: false,
+    convexProfileId: null,
+    acceptedTermsAt: null,
+    phase2SetupVersion: null,
+    promptAnswers: [],
     // Also reset legacy profile fields
     profile: {
       username: 'Anonymous_User',
@@ -392,6 +473,7 @@ export const usePrivateProfileStore = create<PrivateProfileState>()((set) => ({
       isVerified: data.isVerified || false,
       // Extended fields for info preview
       height: data.height ?? null,
+      weight: data.weight ?? null,
       smoking: data.smoking ?? null,
       drinking: data.drinking ?? null,
       kids: data.kids ?? null,
@@ -412,6 +494,27 @@ export const usePrivateProfileStore = create<PrivateProfileState>()((set) => ({
   setPhase2PhotosConfirmed: (confirmed) => set({ phase2PhotosConfirmed: confirmed }),
   setPrivateEntryNavLock: (locked) => set({ privateEntryNavLock: locked }),
 
+  // Phase-2 Onboarding Step 3: Prompt answer actions
+  setPromptAnswer: (promptId, question, answer) => set((state) => {
+    // Replace existing answer for this promptId, or add new
+    const existing = state.promptAnswers.findIndex((a) => a.promptId === promptId);
+    if (existing >= 0) {
+      const updated = [...state.promptAnswers];
+      updated[existing] = { promptId, question, answer };
+      return { promptAnswers: updated };
+    }
+    return { promptAnswers: [...state.promptAnswers, { promptId, question, answer }] };
+  }),
+  setPromptAnswers: (answers) => set({ promptAnswers: answers }),
+  removePromptAnswer: (promptId) => set((state) => ({
+    promptAnswers: state.promptAnswers.filter((a) => a.promptId !== promptId),
+  })),
+
+  // Phase-2 Preference Strength action
+  setPreferenceStrength: (field, value) => set((state) => ({
+    preferenceStrength: { ...state.preferenceStrength, [field]: value },
+  })),
+
   // PHASE 1 Settings Actions — Implementations
   setDefaultPhotoVisibility: (visibility) => set({ defaultPhotoVisibility: visibility }),
   setAllowUnblurRequests: (allow) => set({ allowUnblurRequests: allow }),
@@ -422,6 +525,9 @@ export const usePrivateProfileStore = create<PrivateProfileState>()((set) => ({
   setAgeVisibility: (visibility) => set({ ageVisibility: visibility }),
   setWhoCanMessageMe: (who) => set({ whoCanMessageMe: who }),
   setSafeMode: (enabled) => set({ safeMode: enabled }),
+
+  // Profile Visibility (Pause Profile)
+  setIsPrivateEnabled: (enabled) => set({ isPrivateEnabled: enabled }),
 
   // Deletion actions
   initiatePrivateDataDeletion: () => {
@@ -438,6 +544,83 @@ export const usePrivateProfileStore = create<PrivateProfileState>()((set) => ({
     deletedAt: null,
     recoverUntil: null,
   }),
+
+  // ST-001 FIX: Hydrate store from Convex profile on app restart
+  // This ensures Phase-2 profile state survives app restarts
+  hydrateFromConvex: (convexProfile) => {
+    if (!convexProfile) {
+      // No profile exists - keep default state, onboarding will show
+      return;
+    }
+
+    if (__DEV__) {
+      console.log('[privateProfileStore] hydrateFromConvex:', {
+        profileId: convexProfile._id,
+        displayName: convexProfile.displayName,
+        isSetupComplete: convexProfile.isSetupComplete,
+        convexPhotoCount: convexProfile.privatePhotoUrls?.length || 0,
+        height: convexProfile.height,
+        weight: convexProfile.weight,
+      });
+    }
+
+    // Hydrate store with Convex profile data
+    // ALWAYS hydrate from Convex - this is the source of truth after restart
+    set({
+      // Profile info
+      displayName: convexProfile.displayName || '',
+      age: convexProfile.age || 0,
+      gender: convexProfile.gender || '',
+      city: convexProfile.city || '',
+      privateBio: convexProfile.privateBio || '',
+
+      // Categories (cast to expected types - Convex stores as string[])
+      intentKeys: (convexProfile.privateIntentKeys || []) as any,
+      desireTags: (convexProfile.privateDesireTagKeys || []) as any,
+      boundaries: (convexProfile.privateBoundaries || []) as any,
+
+      // HYDRATION FIX: Always set photos from Convex after restart
+      // This is the source of truth - don't preserve stale local state
+      selectedPhotoUrls: convexProfile.privatePhotoUrls || [],
+
+      // Profile details - hydrate from Convex
+      height: convexProfile.height ?? null,
+      weight: convexProfile.weight ?? null,
+      smoking: convexProfile.smoking ?? null,
+      drinking: convexProfile.drinking ?? null,
+      education: convexProfile.education ?? null,
+      religion: convexProfile.religion ?? null,
+
+      // Imported fields
+      hobbies: convexProfile.hobbies || [],
+      isVerified: convexProfile.isVerified || false,
+
+      // Completion flags
+      isSetupComplete: convexProfile.isSetupComplete,
+      phase2OnboardingCompleted: convexProfile.isSetupComplete, // If profile exists & setup complete, onboarding is done
+      convexProfileId: convexProfile._id,
+
+      // Profile visibility (Pause Profile)
+      isPrivateEnabled: convexProfile.isPrivateEnabled ?? true, // Default to visible if undefined
+
+      // Phase-2 Onboarding Step 3 prompt answers
+      promptAnswers: convexProfile.promptAnswers || [],
+
+      // Phase-2 Preference Strength
+      preferenceStrength: convexProfile.preferenceStrength || { smoking: null, drinking: null, intent: null },
+
+      // Mark as hydrated
+      _hasHydrated: true,
+    });
+
+    if (__DEV__) {
+      console.log('[privateProfileStore] hydrateFromConvex complete:', {
+        photoCount: convexProfile.privatePhotoUrls?.length || 0,
+        promptAnswerCount: convexProfile.promptAnswers?.length || 0,
+        hasPreferenceStrength: !!convexProfile.preferenceStrength,
+      });
+    }
+  },
 }));
 
 // Helper to validate photo URLs

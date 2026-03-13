@@ -2789,9 +2789,10 @@ export interface DemoChatMessage {
   senderId: string;
   senderName: string;
   senderAvatar?: string;
-  type: 'text' | 'image' | 'video' | 'doodle' | 'system';
+  type: 'text' | 'image' | 'video' | 'doodle' | 'audio' | 'system';
   text?: string;
   mediaUrl?: string;
+  audioUrl?: string;
   createdAt: number;
 }
 

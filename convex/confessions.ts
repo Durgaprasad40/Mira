@@ -21,6 +21,8 @@ export const createConfession = mutation({
     imageUrl: v.optional(v.string()),
     authorName: v.optional(v.string()),
     authorPhotoUrl: v.optional(v.string()),
+    authorAge: v.optional(v.number()),
+    authorGender: v.optional(v.string()),
     taggedUserId: v.optional(v.union(v.id('users'), v.string())), // User being confessed to
   },
   handler: async (ctx, args) => {
@@ -75,6 +77,8 @@ export const createConfession = mutation({
       imageUrl: args.imageUrl,
       authorName: args.isAnonymous ? undefined : args.authorName,
       authorPhotoUrl: args.isAnonymous ? undefined : args.authorPhotoUrl,
+      authorAge: args.isAnonymous ? undefined : args.authorAge,
+      authorGender: args.isAnonymous ? undefined : args.authorGender,
       replyCount: 0,
       reactionCount: 0,
       voiceReplyCount: 0,
@@ -113,9 +117,9 @@ export const listConfessions = query({
       .order('desc')
       .collect();
 
-    // Filter out expired confessions (expiresAt <= now, or undefined = legacy, include)
+    // Filter out expired and deleted confessions
     const confessions = allConfessions.filter(
-      (c) => c.expiresAt === undefined || c.expiresAt > now
+      (c) => (c.expiresAt === undefined || c.expiresAt > now) && !c.isDeleted
     );
 
     // Attach 2 reply previews per confession
@@ -158,9 +162,17 @@ export const listConfessions = query({
     );
 
     if (sortBy === 'trending') {
+      // Improved trending scoring with time decay
+      // Replies are strongest signal (weight 5), reactions medium (weight 2)
+      // Time decay reduces score for older confessions
       withPreviews.sort((a, b) => {
-        const scoreA = a.replyCount * 2 + a.reactionCount;
-        const scoreB = b.replyCount * 2 + b.reactionCount;
+        const hoursSinceA = (now - a.createdAt) / (1000 * 60 * 60);
+        const hoursSinceB = (now - b.createdAt) / (1000 * 60 * 60);
+
+        // Score formula: (replies * 5 + reactions * 2) / (hours + 2)
+        // The +2 prevents division by zero and gives new posts a baseline
+        const scoreA = (a.replyCount * 5 + a.reactionCount * 2) / (hoursSinceA + 2);
+        const scoreB = (b.replyCount * 5 + b.reactionCount * 2) / (hoursSinceB + 2);
         return scoreB - scoreA;
       });
     }
@@ -183,17 +195,19 @@ export const getTrendingConfessions = query({
       .order('desc')
       .collect();
 
-    // Filter to last 48h AND not expired
+    // Filter to last 48h AND not expired AND not deleted
     const recent = confessions.filter(
-      (c) => c.createdAt > cutoff && (c.expiresAt === undefined || c.expiresAt > now)
+      (c) => c.createdAt > cutoff && (c.expiresAt === undefined || c.expiresAt > now) && !c.isDeleted
     );
 
-    // Time-decay scoring: score = ((reactionCount * 3) + (commentCount * 4) + (voiceReplyCount * 4)) / (hoursSinceCreated + 2)
+    // Improved trending scoring with consistent weights
+    // Replies are strongest signal (weight 5), reactions medium (weight 2)
+    // Voice replies get additional bonus (+1 each)
     const scored = recent.map((c) => {
       const hoursSince = (now - c.createdAt) / (1000 * 60 * 60);
       const voiceReplies = c.voiceReplyCount || 0;
       const score =
-        (c.reactionCount * 3 + c.replyCount * 4 + voiceReplies * 4) /
+        (c.replyCount * 5 + c.reactionCount * 2 + voiceReplies * 1) /
         (hoursSince + 2);
       return { ...c, trendingScore: score };
     });
@@ -223,6 +237,7 @@ export const createReply = mutation({
     type: v.optional(v.union(v.literal('text'), v.literal('voice'))),
     voiceUrl: v.optional(v.string()),
     voiceDurationSec: v.optional(v.number()),
+    parentReplyId: v.optional(v.id('confessionReplies')), // For OP reply-to-reply
   },
   handler: async (ctx, args) => {
     // Map authUserId -> Convex Id<"users"> (MUTATION: can create)
@@ -251,6 +266,7 @@ export const createReply = mutation({
       type: replyType,
       voiceUrl: args.voiceUrl,
       voiceDurationSec: args.voiceDurationSec,
+      parentReplyId: args.parentReplyId,
       createdAt: Date.now(),
     });
 
@@ -336,13 +352,22 @@ export const toggleReaction = mutation({
     const confession = await ctx.db.get(args.confessionId);
     if (!confession) return { added: false, replaced: false, chatUnlocked: false };
 
+    // CONSISTENCY FIX B3: Helper to recompute reaction count from source of truth
+    const recomputeReactionCount = async () => {
+      const allReactions = await ctx.db
+        .query('confessionReactions')
+        .withIndex('by_confession', (q) => q.eq('confessionId', args.confessionId))
+        .collect();
+      return allReactions.length;
+    };
+
     if (existing) {
       if (existing.type === args.type) {
         // Same emoji → remove (toggle off)
         await ctx.db.delete(existing._id);
-        await ctx.db.patch(args.confessionId, {
-          reactionCount: Math.max(0, confession.reactionCount - 1),
-        });
+        // CONSISTENCY FIX B3: Recompute count from actual reactions to avoid race
+        const actualCount = await recomputeReactionCount();
+        await ctx.db.patch(args.confessionId, { reactionCount: actualCount });
         return { added: false, replaced: false, chatUnlocked: false };
       } else {
         // Different emoji → replace (count stays the same)
@@ -360,9 +385,9 @@ export const toggleReaction = mutation({
         type: args.type,
         createdAt: Date.now(),
       });
-      await ctx.db.patch(args.confessionId, {
-        reactionCount: confession.reactionCount + 1,
-      });
+      // CONSISTENCY FIX B3: Recompute count from actual reactions to avoid race
+      const actualCount = await recomputeReactionCount();
+      await ctx.db.patch(args.confessionId, { reactionCount: actualCount });
 
       // SPECIAL: If tagged user likes a tagged confession, create/find a DM thread
       let chatUnlocked = false;
@@ -377,7 +402,7 @@ export const toggleReaction = mutation({
           // Create new conversation between author and tagged user
           const now = Date.now();
           const TWENTY_FOUR_HOURS = 24 * 60 * 60 * 1000;
-          await ctx.db.insert('conversations', {
+          const conversationId = await ctx.db.insert('conversations', {
             confessionId: args.confessionId,
             participants: [confession.userId, confession.taggedUserId],
             isPreMatch: true, // Confession-based threads are pre-match
@@ -385,6 +410,19 @@ export const toggleReaction = mutation({
             lastMessageAt: now,
             expiresAt: now + TWENTY_FOUR_HOURS, // Confession chats expire in 24h
           });
+
+          // Create participant junction rows for efficient Messages queries
+          await ctx.db.insert('conversationParticipants', {
+            conversationId,
+            userId: confession.userId,
+            unreadCount: 0,
+          });
+          await ctx.db.insert('conversationParticipants', {
+            conversationId,
+            userId: confession.taggedUserId,
+            unreadCount: 0,
+          });
+
           chatUnlocked = true;
         }
       }
@@ -467,23 +505,57 @@ export const getMyConfessions = query({
 });
 
 // Report a confession
+// Creates a record in confessionReports for moderation review
 export const reportConfession = mutation({
   args: {
     confessionId: v.id('confessions'),
     reporterId: v.union(v.id('users'), v.string()),
-    reason: v.optional(v.string()),
+    reason: v.union(
+      v.literal('spam'),
+      v.literal('harassment'),
+      v.literal('hate'),
+      v.literal('sexual'),
+      v.literal('other')
+    ),
+    description: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    // Map authUserId -> Convex Id<"users"> (MUTATION: can create)
+    // Map authUserId -> Convex Id<"users">
     const reporterId = await ensureUserByAuthId(ctx, args.reporterId as string);
 
+    const confession = await ctx.db.get(args.confessionId);
+    if (!confession) {
+      throw new Error('Confession not found.');
+    }
+
+    // Check if already reported by this user
+    const existingReport = await ctx.db
+      .query('confessionReports')
+      .filter((q) =>
+        q.and(
+          q.eq(q.field('confessionId'), args.confessionId),
+          q.eq(q.field('reporterId'), reporterId)
+        )
+      )
+      .first();
+
+    if (existingReport) {
+      // Already reported - just return success (idempotent)
+      return { success: true, alreadyReported: true };
+    }
+
+    // Create report record
     await ctx.db.insert('confessionReports', {
       confessionId: args.confessionId,
       reporterId: reporterId,
+      reportedUserId: confession.userId,
       reason: args.reason,
+      description: args.description,
+      status: 'pending',
       createdAt: Date.now(),
     });
-    return { success: true };
+
+    return { success: true, alreadyReported: false };
   },
 });
 
@@ -584,6 +656,105 @@ export const markTaggedConfessionsSeen = mutation({
         await ctx.db.patch(notif._id, { seen: true });
       }
     }
+
+    return { success: true };
+  },
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Get or create a conversation for an anonymous confession reply
+// This unifies confession chats with the Messages system
+// ═══════════════════════════════════════════════════════════════════════════
+export const getOrCreateForConfession = mutation({
+  args: {
+    confessionId: v.id('confessions'),
+    userId: v.union(v.id('users'), v.string()),
+  },
+  handler: async (ctx, args) => {
+    // Map authUserId -> Convex Id<"users">
+    const userId = await ensureUserByAuthId(ctx, args.userId as string);
+
+    // Get the confession to find the author
+    const confession = await ctx.db.get(args.confessionId);
+    if (!confession) {
+      throw new Error('Confession not found');
+    }
+
+    const authorId = confession.userId;
+
+    // Prevent self-chat
+    if (userId === authorId) {
+      throw new Error('Cannot start a chat with yourself');
+    }
+
+    // Look for existing conversation for this confession between these users
+    const existingConversations = await ctx.db
+      .query('conversations')
+      .withIndex('by_confession', (q) => q.eq('confessionId', args.confessionId))
+      .collect();
+
+    // Find one where both users are participants
+    const existingConvo = existingConversations.find(
+      (c) => c.participants.includes(userId) && c.participants.includes(authorId)
+    );
+
+    if (existingConvo) {
+      return { conversationId: existingConvo._id, isNew: false };
+    }
+
+    // Create new conversation
+    const now = Date.now();
+    const TWENTY_FOUR_HOURS = 24 * 60 * 60 * 1000;
+    const conversationId = await ctx.db.insert('conversations', {
+      confessionId: args.confessionId,
+      participants: [userId, authorId],
+      isPreMatch: true,
+      createdAt: now,
+      lastMessageAt: now,
+      expiresAt: now + TWENTY_FOUR_HOURS,
+    });
+
+    // Create participant junction rows for efficient queries
+    await ctx.db.insert('conversationParticipants', {
+      conversationId,
+      userId,
+      unreadCount: 0,
+    });
+    await ctx.db.insert('conversationParticipants', {
+      conversationId,
+      userId: authorId,
+      unreadCount: 0,
+    });
+
+    return { conversationId, isNew: true };
+  },
+});
+
+// Delete own confession (soft delete via isDeleted flag)
+// Only the author can delete their own confession
+export const deleteConfession = mutation({
+  args: {
+    confessionId: v.id('confessions'),
+    userId: v.union(v.id('users'), v.string()),
+  },
+  handler: async (ctx, args) => {
+    // Map authUserId -> Convex Id<"users">
+    const userId = await ensureUserByAuthId(ctx, args.userId as string);
+
+    const confession = await ctx.db.get(args.confessionId);
+    if (!confession) {
+      throw new Error('Confession not found.');
+    }
+    if (confession.userId !== userId) {
+      throw new Error('You can only delete your own confessions.');
+    }
+
+    // Soft delete: mark as deleted rather than hard delete
+    // This preserves referential integrity with replies, reactions, conversations
+    await ctx.db.patch(args.confessionId, {
+      isDeleted: true,
+      deletedAt: Date.now(),
+    });
 
     return { success: true };
   },

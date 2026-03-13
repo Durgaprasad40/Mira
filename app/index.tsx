@@ -1,329 +1,312 @@
-import { useRef, useEffect, useState, useMemo } from "react";
+import { useRef, useEffect, useState } from "react";
 import { Redirect, useRouter } from "expo-router";
 import type { Href } from "expo-router";
+import { View, ActivityIndicator, StyleSheet, Text } from "react-native";
 
-const H = (p: string) => p as unknown as Href;
 import { useAuthStore } from "@/stores/authStore";
 import { useBootStore } from "@/stores/bootStore";
 import { getBootCache } from "@/stores/bootCache";
-import { getAuthBootCache, type AuthBootCacheData } from "@/stores/authBootCache";
+import { getAuthBootCache, clearAuthBootCache, type AuthBootCacheData } from "@/stores/authBootCache";
 import { isDemoMode, convex } from "@/hooks/useConvex";
+import { skipDemoOnboarding } from "@/config/demo";
 import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
-import { View, ActivityIndicator, StyleSheet, Text } from "react-native";
 import { COLORS } from "@/lib/constants";
 import { markTiming, markDuration } from "@/utils/startupTiming";
-import { decideNextOnboardingRoute } from "@/lib/onboardingRouting";
 
-// Boot action types for pure computation (no side effects in useMemo)
-type BootAction =
-  | { type: "LOADING" }
-  | { type: "FORCE_WELCOME_ONBOARDING_INCOMPLETE"; route: "/(auth)/welcome" }
-  | { type: "ROUTE_WELCOME"; route: "/(auth)/welcome" }
-  | { type: "ROUTE_HOME"; route: "/(main)/(tabs)/home" };
+// =============================================================================
+// BOOT STATE MACHINE
+// =============================================================================
+//
+// States:
+//   LOADING       - Reading persisted auth from SecureStore
+//   NO_AUTH       - No valid persisted auth → route to welcome
+//   VALIDATING    - Have persisted auth, validating with backend
+//   VALID_HOME    - Validation success + onboarding complete → route to home
+//   VALID_ONBOARD - Validation success + onboarding incomplete → route to onboarding
+//   INVALID       - Validation failed → route to welcome
+//   DEMO_HOME     - Demo mode + onboarding complete → route to home
+//   DEMO_WELCOME  - Demo mode + no user or incomplete → route to welcome
+//
+// Rules:
+//   - Read persisted auth ONCE
+//   - Validate with backend ONCE (if auth exists)
+//   - Capture authVersion before validation, check before applying
+//   - If logoutInProgress, do not apply auth
+//   - After routing decision, do not re-route
+// =============================================================================
+
+type BootState =
+  | "LOADING"
+  | "NO_AUTH"
+  | "VALIDATING"
+  | "VALID_HOME"
+  | "VALID_ONBOARD"
+  | "INVALID"
+  | "DEMO_HOME"
+  | "DEMO_WELCOME";
+
+const H = (p: string) => p as unknown as Href;
 
 export default function Index() {
-  // We no longer wait for full authStore hydration - use boot caches for fast routing
-  const setRouteDecisionMade = useBootStore((s) => s.setRouteDecisionMade);
   const router = useRouter();
-  const didRedirect = useRef(false);
-  const routeSignaled = useRef(false);
-  const didForceWelcome = useRef(false);
-  const didForceLogout = useRef(false); // Guard for logout side effect
+  const setRouteDecisionMade = useBootStore((s) => s.setRouteDecisionMade);
 
-  // FAST PATH: use boot caches instead of waiting for full Zustand hydration
-  // Boot caches read only minimal data (~100 bytes) directly from AsyncStorage
-  // vs ~50KB+ for full stores with all matches, profiles, etc.
+  // ==========================================================================
+  // STATE
+  // ==========================================================================
 
-  // Auth boot cache (for live mode routing)
-  const [authBootCacheData, setAuthBootCacheData] = useState<AuthBootCacheData | null>(null);
-
-  // Demo boot cache (for demo mode routing)
-  const [bootCacheData, setBootCacheData] = useState<{
+  const [bootState, setBootState] = useState<BootState>("LOADING");
+  const [authCache, setAuthCache] = useState<AuthBootCacheData | null>(null);
+  const [demoCache, setDemoCache] = useState<{
     currentDemoUserId: string | null;
     demoOnboardingComplete: Record<string, boolean>;
   } | null>(null);
 
-  // Convex validation state (for live mode with token)
-  const [convexValidated, setConvexValidated] = useState(false);
-  const [convexOnboardingCompleted, setConvexOnboardingCompleted] = useState(false);
-  const convexValidationStarted = useRef(false);
+  // ==========================================================================
+  // GUARDS
+  // ==========================================================================
 
-  // Track if we've already started loading (to measure duration once)
-  const cacheLoadStarted = useRef(false);
+  const hasNavigated = useRef(false);
+  const hasLoadedCache = useRef(false);
+  const hasValidated = useRef(false);
+  const mounted = useRef(true);
+
+  // Cleanup on unmount
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
+
+  // ==========================================================================
+  // STEP 1: Load persisted auth from SecureStore (ONCE)
+  // ==========================================================================
 
   useEffect(() => {
-    // Only load once, measure duration
-    if (cacheLoadStarted.current) return;
-    cacheLoadStarted.current = true;
+    if (hasLoadedCache.current) return;
+    hasLoadedCache.current = true;
 
-    const t0 = Date.now();
+    // CRITICAL FIX: If logout just completed (authVersion > 0), don't load cached auth
+    // This prevents index.tsx from restoring auth when it remounts after logout
+    const currentAuthState = useAuthStore.getState();
+    if (currentAuthState.authVersion > 0 && !currentAuthState.token) {
+      if (__DEV__) console.log('[BOOT] Post-logout remount detected (authVersion > 0, no token), skipping cache load');
+      setBootState(isDemoMode ? "DEMO_WELCOME" : "NO_AUTH");
+      return;
+    }
 
-    // Load caches in parallel, measure total duration
     const loadCaches = async () => {
-      // Always load auth cache
-      const authPromise = getAuthBootCache();
+      const t0 = Date.now();
 
-      // Load demo cache only in demo mode
-      const demoPromise = isDemoMode ? getBootCache() : Promise.resolve(null);
+      const [authData, demoData] = await Promise.all([
+        getAuthBootCache(),
+        isDemoMode ? getBootCache() : Promise.resolve(null),
+      ]);
 
-      const [authData, demoData] = await Promise.all([authPromise, demoPromise]);
+      markDuration("boot_caches", Date.now() - t0);
 
-      const duration = Date.now() - t0;
-      markDuration('boot_caches', duration);
+      if (!mounted.current) return;
 
-      setAuthBootCacheData(authData);
-      if (demoData) {
-        setBootCacheData(demoData);
+      setAuthCache(authData);
+      if (demoData) setDemoCache(demoData);
+
+      // Determine next state based on cached auth
+      if (isDemoMode) {
+        // Demo mode decision
+        if (skipDemoOnboarding) {
+          setBootState("DEMO_HOME");
+        } else if (demoData?.currentDemoUserId) {
+          const onbComplete = !!demoData.demoOnboardingComplete[demoData.currentDemoUserId];
+          setBootState(onbComplete ? "DEMO_HOME" : "DEMO_WELCOME");
+        } else {
+          setBootState("DEMO_WELCOME");
+        }
+      } else {
+        // Live mode decision
+        const hasValidToken = authData.token && authData.token.trim().length > 0;
+        if (hasValidToken && authData.userId) {
+          setBootState("VALIDATING");
+        } else {
+          setBootState("NO_AUTH");
+        }
       }
     };
 
     loadCaches();
   }, []);
 
-  // CONVEX VALIDATION: Validate token and fetch onboardingCompleted from backend
-  // FAST_PATH: If cached onboardingCompleted=true, route immediately and validate in background
+  // ==========================================================================
+  // STEP 2: Validate with backend (ONCE, only if VALIDATING)
+  // ==========================================================================
+
   useEffect(() => {
-    // Skip if demo mode or no token or already validated
-    if (isDemoMode || !authBootCacheData || convexValidationStarted.current) return;
+    if (bootState !== "VALIDATING" || hasValidated.current || !authCache) return;
+    hasValidated.current = true;
 
-    const token = authBootCacheData.token;
-    const userId = authBootCacheData.userId;
-    const hasValidToken = typeof token === 'string' && token.trim().length > 0;
-    const cachedOnboardingCompleted = authBootCacheData.onboardingCompleted === true;
-
-    if (!hasValidToken || !userId) {
-      // No token - skip validation
-      setConvexValidated(true);
+    const { token, userId } = authCache;
+    if (!token || !userId) {
+      setBootState("NO_AUTH");
       return;
     }
 
-    // STABILITY FIX (2026-03-04): FAST_PATH with validation gate
-    // If cached onboardingCompleted=true, trust it optimistically BUT wait for validation
-    // This prevents "route to home then forced logout" race condition
-    // User sees loading for 1-2s (validation time) instead of instant home + potential kickout
-    if (cachedOnboardingCompleted) {
-      if (__DEV__) {
-        console.log('[AUTH_BOOT] FAST_PATH: cached onboardingCompleted=true, optimistically trusting cache');
-      }
-      setConvexOnboardingCompleted(true);
-      // Do NOT set convexValidated=true here - wait for validation to complete
+    // CRITICAL FIX: Double-check we're not in post-logout state
+    // If authVersion > 0 and no current token, logout happened - don't validate stale cache
+    const currentAuthState = useAuthStore.getState();
+    if (currentAuthState.authVersion > 0 && !currentAuthState.token) {
+      if (__DEV__) console.log('[BOOT] Post-logout state detected in validation, aborting');
+      setBootState("NO_AUTH");
+      return;
     }
 
-    // Start validation (even if FAST_PATH, validate in background)
-    convexValidationStarted.current = true;
+    // Capture authVersion BEFORE async operation
+    const capturedAuthVersion = currentAuthState.authVersion;
 
     if (__DEV__) {
-      console.log('[AUTH_BOOT] Validating session via Convex' + (cachedOnboardingCompleted ? ' (background)' : '') + ', userId:', userId.substring(0, 10) + '...');
+      console.log(`[BOOT] Validating session, userId=${userId.substring(0, 10)}..., authVersion=${capturedAuthVersion}`);
     }
 
-    const validateSession = async () => {
-      const timeout = 5000; // 5 second timeout
-      const timeoutPromise = new Promise((_, reject) =>
-        setTimeout(() => reject(new Error('Validation timeout')), timeout)
-      );
+    const validate = async () => {
+      const TIMEOUT = 8000; // 8 second timeout
 
       try {
+        const timeoutPromise = new Promise((_, reject) =>
+          setTimeout(() => reject(new Error("Validation timeout")), TIMEOUT)
+        );
+
         const statusPromise = convex.query(api.users.getOnboardingStatus, {
-          userId: userId as Id<'users'>,
+          userId: userId as Id<"users">,
         });
 
-        const status = await Promise.race([statusPromise, timeoutPromise]) as any;
+        const status = (await Promise.race([statusPromise, timeoutPromise])) as any;
 
-        if (status) {
-          const backendOnboardingCompleted = status.onboardingCompleted ?? false;
+        if (!mounted.current) return;
 
-          if (__DEV__) {
-            console.log('[AUTH_BOOT] Validation complete, onboardingCompleted:', backendOnboardingCompleted);
-          }
-
-          // FAST_PATH validation check: if cached said true but backend says false, clear cache and redirect
-          if (cachedOnboardingCompleted && !backendOnboardingCompleted) {
-            if (__DEV__) {
-              console.warn('[AUTH_BOOT] FAST_PATH validation failed: backend says onboarding incomplete, clearing cache and routing to welcome');
-            }
-            const { clearAuthBootCache } = require('@/stores/authBootCache');
-            await clearAuthBootCache();
-            useAuthStore.getState().logout();
-            router.replace("/(auth)/welcome");
-            return;
-          }
-
-          // Update state with validated data
-          setConvexOnboardingCompleted(backendOnboardingCompleted);
-          if (!cachedOnboardingCompleted) {
-            // Only update validation state if not FAST_PATH (FAST_PATH already set it)
-            setConvexValidated(true);
-          }
-
-          // Update authStore with real onboarding status
-          useAuthStore.getState().setAuth(userId, token, backendOnboardingCompleted);
+        // Check if logout happened during validation
+        const currentState = useAuthStore.getState();
+        if (currentState.logoutInProgress) {
+          if (__DEV__) console.log("[BOOT] Logout in progress, ignoring validation result");
+          setBootState("INVALID");
+          return;
         }
-      } catch (error) {
-        console.error('[AUTH_BOOT] Validation failed:', error);
-
-        // FAST_PATH validation failure: keep cached session (network error, will retry next boot)
-        if (cachedOnboardingCompleted) {
-          if (__DEV__) {
-            console.warn('[AUTH_BOOT] FAST_PATH validation failed (network) -> keeping cached session, will retry next boot');
-          }
-          // Keep user on home, keep SecureStore values, don't redirect
+        if (currentState.authVersion !== capturedAuthVersion) {
+          if (__DEV__) console.log(`[BOOT] authVersion changed (${capturedAuthVersion} -> ${currentState.authVersion}), ignoring validation result`);
+          setBootState("INVALID");
           return;
         }
 
-        // Non-FAST_PATH: allow boot but treat as not completed
-        setConvexValidated(true);
-        setConvexOnboardingCompleted(false);
+        if (!status) {
+          // User not found in database - clear stale auth
+          if (__DEV__) console.log("[BOOT] User not found (null status), clearing auth");
+          await clearAuthBootCache();
+          setBootState("INVALID");
+          return;
+        }
 
+        const backendOnboardingCompleted = status.onboardingCompleted ?? false;
         if (__DEV__) {
-          console.warn('[AUTH_BOOT] Validation failed, falling back to welcome (user can retry)');
+          console.log(`[BOOT] Validation success, onboardingCompleted=${backendOnboardingCompleted}`);
+        }
+
+        // Apply auth to store (setAuthenticatedSession will reject if logout or version mismatch)
+        const accepted = useAuthStore.getState().setAuthenticatedSession(
+          userId,
+          token,
+          backendOnboardingCompleted,
+          capturedAuthVersion
+        );
+
+        if (!accepted) {
+          if (__DEV__) console.log("[BOOT] setAuthenticatedSession rejected (logout in progress)");
+          setBootState("INVALID");
+          return;
+        }
+
+        // Route based on onboarding status
+        setBootState(backendOnboardingCompleted ? "VALID_HOME" : "VALID_ONBOARD");
+
+      } catch (error) {
+        console.error("[BOOT] Validation failed:", error);
+        if (!mounted.current) return;
+
+        // On validation failure, trust cached onboardingCompleted if available
+        const cachedOnbComplete = authCache.onboardingCompleted === true;
+
+        // Check logout state again
+        const currentState = useAuthStore.getState();
+        if (currentState.logoutInProgress || currentState.authVersion !== capturedAuthVersion) {
+          if (__DEV__) console.log("[BOOT] Logout during validation error handling, routing to welcome");
+          setBootState("INVALID");
+          return;
+        }
+
+        if (cachedOnbComplete) {
+          // Trust cache for completed users (SessionValidator will catch truly invalid sessions)
+          const accepted = useAuthStore.getState().setAuthenticatedSession(userId, token, true, capturedAuthVersion);
+          if (accepted) {
+            if (__DEV__) console.log("[BOOT] Validation failed, trusting cached onboardingCompleted=true");
+            setBootState("VALID_HOME");
+          } else {
+            setBootState("INVALID");
+          }
+        } else {
+          // No cached completion - route to welcome
+          if (__DEV__) console.log("[BOOT] Validation failed, no cached completion, routing to welcome");
+          setBootState("INVALID");
         }
       }
     };
 
-    // STABILITY FIX (2026-03-04): Handle promise rejection to prevent unhandled errors
-    validateSession().catch((error) => {
-      console.error('[AUTH_BOOT] Unhandled validation error:', error);
-      // Fail-safe: if validation crashes, treat as validation complete but incomplete onboarding
-      if (!cachedOnboardingCompleted) {
-        setConvexValidated(true);
-        setConvexOnboardingCompleted(false);
-      }
-      // If FAST_PATH (cachedOnboardingCompleted=true), user already routed to home
-      // Keep them there, error is logged, will retry next boot
-    });
-  }, [authBootCacheData, router]);
+    validate();
+  }, [bootState, authCache]);
 
-  // For demo mode: use bootCache (fast) for routing
-  // For live mode: use authBootCache (fast) for routing
-  const currentDemoUserId = bootCacheData?.currentDemoUserId ?? null;
-  const demoOnboardingComplete = bootCacheData?.demoOnboardingComplete ?? {};
+  // ==========================================================================
+  // STEP 3: Execute navigation based on final state (ONCE)
+  // ==========================================================================
 
-  // Wait for boot caches only - NOT full store hydration
-  // authBootCache: ~10-50ms vs authStore hydration: ~900ms
-  // bootCache: ~10-50ms vs demoStore hydration: ~100-200ms
-  const bootCachesReady = authBootCacheData && (!isDemoMode || bootCacheData);
-
-  // For live mode with token, also wait for Convex validation
-  const hasToken = authBootCacheData?.token && authBootCacheData.token.trim().length > 0;
-  const needsConvexValidation = !isDemoMode && hasToken;
-  const bootReady = bootCachesReady && (!needsConvexValidation || convexValidated);
-
-  // PURE computation of boot action - NO side effects (logout, setState, etc.)
-  // Side effects are handled in useEffect below
-  const bootAction: BootAction = useMemo(() => {
-    if (!bootReady || !authBootCacheData) {
-      return { type: "LOADING" };
-    }
-
-    // ── Demo mode: email+password auth with full onboarding ──
-    if (isDemoMode) {
-      if (currentDemoUserId) {
-        const onbComplete = !!demoOnboardingComplete[currentDemoUserId];
-
-        if (onbComplete) {
-          return { type: "ROUTE_HOME", route: "/(main)/(tabs)/home" };
-        }
-
-        // ONBOARDING INCOMPLETE: Always route to welcome on cold start (logout first)
-        return { type: "FORCE_WELCOME_ONBOARDING_INCOMPLETE", route: "/(auth)/welcome" };
-      }
-      return { type: "ROUTE_WELCOME", route: "/(auth)/welcome" };
-    }
-
-    // ── Live mode: standard auth flow using authBootCache + Convex validation ──
-    const token = authBootCacheData.token;
-    const hasValidToken = typeof token === 'string' && token.trim().length > 0;
-
-    if (hasValidToken) {
-      // Use Convex-validated onboarding status (source of truth)
-      if (convexOnboardingCompleted) {
-        if (__DEV__) {
-          console.log('[AUTH_BOOT] Route decision: onboarding completed → Phase-1');
-        }
-        return { type: "ROUTE_HOME", route: "/(main)/(tabs)/home" };
-      }
-
-      // ONBOARDING INCOMPLETE: Route to welcome to continue onboarding
-      // SAFETY: Don't force logout - SessionValidator will handle truly invalid sessions
-      // Forcing logout here would clear photos and break onboarding progress
-      if (__DEV__) {
-        console.log('[AUTH_BOOT] Route decision: onboarding incomplete → welcome');
-      }
-      return { type: "ROUTE_WELCOME", route: "/(auth)/welcome" };
-    }
-
-    // No valid token → show welcome screen
-    if (__DEV__) {
-      console.log('[AUTH_BOOT] Route decision: no token → welcome');
-    }
-    return { type: "ROUTE_WELCOME", route: "/(auth)/welcome" };
-  }, [bootReady, authBootCacheData, currentDemoUserId, demoOnboardingComplete, convexOnboardingCompleted]);
-
-  // Derive route for use in render (null if loading)
-  const routeDestination = bootAction.type === "LOADING" ? null : bootAction.route;
-
-  // SIDE EFFECT: Handle FORCE_WELCOME_ONBOARDING_INCOMPLETE
-  // Logout and route to welcome when onboarding is not completed
   useEffect(() => {
-    if (bootAction.type !== "FORCE_WELCOME_ONBOARDING_INCOMPLETE") return;
-    if (didForceLogout.current) return; // Guard: only run once
-    didForceLogout.current = true;
+    // Only navigate from terminal states
+    const terminalStates: BootState[] = [
+      "NO_AUTH", "VALID_HOME", "VALID_ONBOARD", "INVALID", "DEMO_HOME", "DEMO_WELCOME"
+    ];
+    if (!terminalStates.includes(bootState)) return;
+    if (hasNavigated.current) return;
+    hasNavigated.current = true;
 
-    if (__DEV__) console.log('[ONB] boot_decision action=FORCE_WELCOME_ONBOARDING_INCOMPLETE → logout + welcome');
-    useAuthStore.getState().logout();
-    router.replace("/(auth)/welcome");
-  }, [bootAction, router]);
-
-  // Side effects: signal route decision, restore demo auth, mark timing
-  // This runs in the commit phase AFTER render, avoiding setState-during-render
-  useEffect(() => {
-    if (!routeDestination || routeSignaled.current) return;
-    routeSignaled.current = true;
-
-    // Log boot decision for debugging (with reference photo info from onboarding store if available)
-    if (__DEV__) {
-      const facePassed = authBootCacheData?.faceVerificationPassed;
-      const onbComplete = authBootCacheData?.onboardingCompleted;
-      const token2 = authBootCacheData?.token;
-      const hasToken = typeof token2 === 'string' && token2.trim().length > 0;
-      console.log(`[ONB] boot_decision facePassed=${facePassed} onboardingCompleted=${onbComplete} hasToken=${hasToken} action=${bootAction.type}`);
-      console.log(`[ONB] route_decision routeDestination=${routeDestination}`);
-    }
-
-    // Mark timing: boot caches are ready and route computed
-    markTiming('boot_caches_ready');
-
-    // Restore demo auth session if needed (covers app restart)
-    // Skip if we're forcing logout (onboarding not completed)
-    if (isDemoMode && currentDemoUserId && !useAuthStore.getState().isAuthenticated && bootAction.type !== "FORCE_WELCOME_ONBOARDING_INCOMPLETE") {
-      const onbComplete = !!demoOnboardingComplete[currentDemoUserId];
-      useAuthStore.getState().setAuth(currentDemoUserId, 'demo_token', onbComplete);
-    }
-
-    // Signal to BootScreen that routing decision has been made
+    // Mark timing
+    markTiming("boot_caches_ready");
+    markTiming("route_decision");
     setRouteDecisionMade(true);
 
-    // Milestone D: route decision made
-    markTiming('route_decision');
-  }, [routeDestination, setRouteDecisionMade, currentDemoUserId, demoOnboardingComplete, bootAction, authBootCacheData]);
-
-  // IMPERATIVE NAVIGATION for unauthenticated users → welcome screen
-  // Uses router.replace() to OVERRIDE any restored navigation state from Expo Go
-  // Skip if FORCE_WELCOME_ONBOARDING_INCOMPLETE already handled navigation
-  useEffect(() => {
-    if (!routeDestination || didForceWelcome.current) return;
-    if (bootAction.type === "FORCE_WELCOME_ONBOARDING_INCOMPLETE") return; // Already handled above
-
-    if (routeDestination === "/(auth)/welcome") {
-      didForceWelcome.current = true;
-      if (__DEV__) console.log("[BOOT] forced welcome replace");
-      router.replace("/(auth)/welcome");
+    // Demo mode: restore auth if needed
+    if (isDemoMode && demoCache?.currentDemoUserId && bootState === "DEMO_HOME") {
+      const authState = useAuthStore.getState();
+      if (!authState.getIsAuthenticated() && authState.authVersion === 0) {
+        const onbComplete = !!demoCache.demoOnboardingComplete[demoCache.currentDemoUserId];
+        useAuthStore.getState().setAuthenticatedSession(
+          demoCache.currentDemoUserId,
+          "demo_token",
+          onbComplete,
+          0 // Cold start - authVersion is 0
+        );
+      }
     }
-  }, [routeDestination, router, bootAction]);
 
-  // Loading state: boot caches not yet ready
-  if (!routeDestination) {
+    // Navigate based on state
+    const route = getRouteForState(bootState);
+    if (__DEV__) {
+      console.log(`[BOOT] Final state=${bootState}, navigating to ${route}`);
+    }
+
+    // Use replace for all routes to prevent back navigation to boot screen
+    router.replace(route as any);
+  }, [bootState, router, setRouteDecisionMade, demoCache]);
+
+  // ==========================================================================
+  // RENDER
+  // ==========================================================================
+
+  // Show loading while in LOADING or VALIDATING state
+  if (bootState === "LOADING" || bootState === "VALIDATING") {
     return (
       <View style={styles.loadingContainer}>
         <ActivityIndicator size="large" color={COLORS.primary} />
@@ -332,26 +315,27 @@ export default function Index() {
     );
   }
 
-  // FORCE_WELCOME_ONBOARDING_INCOMPLETE: useEffect handles logout + navigation, render nothing
-  if (bootAction.type === "FORCE_WELCOME_ONBOARDING_INCOMPLETE") {
-    return null;
-  }
+  // For all other states, return null - navigation is handled imperatively
+  return null;
+}
 
-  // For unauthenticated → welcome: imperative navigation handles it, return null
-  if (routeDestination === "/(auth)/welcome") {
-    return null;
-  }
+// =============================================================================
+// HELPERS
+// =============================================================================
 
-  // Guard: render <Redirect> exactly once for authenticated users.
-  // After the first render that returns <Redirect>, all subsequent renders return null.
-  // This prevents the focus-loop caused by expo-router's <Redirect> internally using
-  // useFocusEffect with a new inline callback on every render.
-  if (didRedirect.current) {
-    return null;
+function getRouteForState(state: BootState): string {
+  switch (state) {
+    case "VALID_HOME":
+    case "DEMO_HOME":
+      return "/(main)/(tabs)/home";
+    case "VALID_ONBOARD":
+      return "/(onboarding)/basic-info";
+    case "NO_AUTH":
+    case "INVALID":
+    case "DEMO_WELCOME":
+    default:
+      return "/(auth)/welcome";
   }
-  didRedirect.current = true;
-
-  return <Redirect href={H(routeDestination)} />;
 }
 
 const styles = StyleSheet.create({

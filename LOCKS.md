@@ -203,3 +203,37 @@ Each onboarding page with a one-line summary of why it is considered stable.
 
 - **Tutorial**
   Locked: No progress bar, layout stable, button text visible.
+
+---
+
+## PHASE-1 TAB LOCKS (2026-03-05)
+
+This section defines which Phase-1 tabs are LOCKED vs UNLOCKED.
+
+### UNLOCKED TABS
+
+| Tab | File | Status |
+|-----|------|--------|
+| **Nearby** | `app/(main)/(tabs)/nearby.tsx` | **UNLOCKED** — Active development allowed |
+
+### LOCKED TABS
+
+| Tab | Primary Files | Status |
+|-----|---------------|--------|
+| Tab Layout | `app/(main)/(tabs)/_layout.tsx` | LOCKED |
+| Discover/Home | `app/(main)/(tabs)/home.tsx` | LOCKED |
+| Explore | `app/(main)/(tabs)/explore.tsx` | LOCKED |
+| Confessions | `app/(main)/(tabs)/confessions.tsx` | LOCKED (see Confessions Feature section) |
+| Messages | `app/(main)/(tabs)/messages/**` | LOCKED |
+| Profile | `app/(main)/(tabs)/profile.tsx` | LOCKED (see Profile Tab section) |
+
+### Rules
+
+- **LOCKED tabs**: No changes allowed unless Durga Prasad explicitly unlocks.
+- **UNLOCKED tabs**: Development, bug fixes, and improvements are allowed.
+- **Phase-1 Private area** (`app/(main)/(private)/**`): Already LOCKED — see existing rules.
+- Each locked file contains a header comment block indicating its lock status.
+
+### How to Request Unlock
+
+To unlock a specific tab, Durga Prasad must explicitly state: "UNLOCK [tab name]" or "UNLOCK [file path]".

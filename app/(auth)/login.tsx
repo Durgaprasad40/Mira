@@ -7,7 +7,7 @@
  * - Do not change UX/flows without explicit unlock
  * Date locked: 2026-03-04
  */
-import React, { useState } from "react";
+import React, { useState, useRef, useEffect } from "react";
 import {
   View,
   Text,
@@ -28,12 +28,19 @@ import { useDemoStore } from "@/stores/demoStore";
 
 export default function LoginScreen() {
   const router = useRouter();
-  const { setAuth } = useAuthStore();
+  const { setAuth, userId, token, logout } = useAuthStore();
 
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState("");
+
+  // H8 FIX: Track mounted state to prevent setAuth after unmount
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
 
   const loginWithEmail = useMutation(api.auth.loginWithEmail);
 
@@ -44,9 +51,11 @@ export default function LoginScreen() {
       if (!password) { setError("Please enter your password"); return; }
       setIsLoading(true);
       setError("");
+      // H7 FIX: Capture auth version before demo sign-in
+      const capturedAuthVersion = useAuthStore.getState().authVersion;
       try {
         const { userId, onboardingComplete } = useDemoStore.getState().demoSignIn(email, password);
-        setAuth(userId, "demo_token", onboardingComplete);
+        setAuth(userId, "demo_token", onboardingComplete, capturedAuthVersion);
         if (onboardingComplete) {
           router.replace("/(main)/(tabs)/home");
         } else {
@@ -73,14 +82,30 @@ export default function LoginScreen() {
     setIsLoading(true);
     setError("");
 
+    // H7 FIX: Capture auth version before async operation
+    const capturedAuthVersion = useAuthStore.getState().authVersion;
+
     try {
       const result = await loginWithEmail({ email, password });
+
+      // H7 FIX: Check if logout happened during mutation (version changed)
+      if (useAuthStore.getState().authVersion !== capturedAuthVersion) {
+        if (__DEV__) console.log('[AUTH] Logout detected during login - ignoring result');
+        return;
+      }
+
+      // H8 FIX: Check if component unmounted during async login
+      if (!mountedRef.current) {
+        if (__DEV__) console.log('[AUTH] Component unmounted during login - ignoring result');
+        return;
+      }
 
       if (result.success && result.userId && result.token) {
         setAuth(
           result.userId,
           result.token,
           result.onboardingCompleted || false,
+          capturedAuthVersion,
         );
 
         // Persist auth token after confirmed login success
@@ -99,6 +124,17 @@ export default function LoginScreen() {
     } finally {
       setIsLoading(false);
     }
+  };
+
+  // STABILITY FIX: Force logout before starting new account creation
+  // This prevents session/token leakage when user switches accounts
+  const handleSignUp = async () => {
+    // Check if there's an existing session (userId or token)
+    if (userId || token) {
+      if (__DEV__) console.log('[AUTH] Sign up pressed with existing session -> forcing logout before new signup');
+      await logout();
+    }
+    router.push("/(onboarding)");
   };
 
   return (
@@ -156,7 +192,7 @@ export default function LoginScreen() {
 
       <View style={styles.footer}>
         <Text style={styles.footerText}>Don't have an account? </Text>
-        <TouchableOpacity onPress={() => router.push("/(onboarding)")}>
+        <TouchableOpacity onPress={handleSignUp}>
           <Text style={styles.signupLink}>Sign up</Text>
         </TouchableOpacity>
       </View>

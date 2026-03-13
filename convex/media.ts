@@ -105,6 +105,12 @@ export const openMedia = query({
     // Soft-deleted
     if (media.deletedAt) return { error: 'deleted' };
 
+    // SAFETY FIX: Verify user is a participant in the conversation
+    const conversation = await ctx.db.get(media.chatId);
+    if (!conversation || !conversation.participants.includes(userId)) {
+      return { error: 'not_authorized' };
+    }
+
     // Owner can always view their own media
     if (media.ownerId === userId) {
       const url = await ctx.storage.getUrl(media.objectKey);

@@ -1,56 +1,84 @@
-import React, { useEffect, useRef } from 'react';
+import React from 'react';
 import {
   View,
   Text,
   TouchableOpacity,
-  Animated,
   StyleSheet,
   Dimensions,
+  Modal,
 } from 'react-native';
-import * as Clipboard from 'expo-clipboard';
 import { Ionicons } from '@expo/vector-icons';
 import { INCOGNITO_COLORS } from '@/lib/constants';
 
 const C = INCOGNITO_COLORS;
-const { height: SCREEN_HEIGHT } = Dimensions.get('window');
+const { height: SCREEN_HEIGHT, width: SCREEN_WIDTH } = Dimensions.get('window');
+
+// Popup dimensions for positioning calculations
+const POPUP_WIDTH = 140;
+const POPUP_HEIGHT = 88; // 2 actions × 44px each (Delete + Report)
+const POPUP_MARGIN = 12;
 
 interface MessageActionsSheetProps {
   visible: boolean;
   onClose: () => void;
-  messageText: string;
-  senderName: string;
-  onReply?: () => void;
+  /** Y position of the pressed message (from top of screen) */
+  pressY: number;
+  /** X position of the pressed message */
+  pressX: number;
+  /** Whether the message is from the current user (for delete permission display) */
+  isOwnMessage: boolean;
+  /** Whether user can moderate (delete others' messages) - from server getMemberRole.canModerate */
+  canModerate: boolean;
+  onDelete?: () => void;
   onReport?: () => void;
 }
 
 export default function MessageActionsSheet({
   visible,
   onClose,
-  messageText,
-  senderName,
-  onReply,
+  pressY,
+  pressX,
+  isOwnMessage,
+  canModerate,
+  onDelete,
   onReport,
 }: MessageActionsSheetProps) {
-  const translateY = useRef(new Animated.Value(SCREEN_HEIGHT)).current;
-
-  useEffect(() => {
-    Animated.spring(translateY, {
-      toValue: visible ? 0 : SCREEN_HEIGHT,
-      useNativeDriver: true,
-      tension: 65,
-      friction: 11,
-    }).start();
-  }, [visible]);
-
   if (!visible) return null;
 
-  const handleCopy = async () => {
-    await Clipboard.setStringAsync(messageText);
-    onClose();
-  };
+  // ROLE SYSTEM: Determine if delete should be shown
+  // - Anyone can delete their own messages
+  // - Moderators (owners/admins in private rooms, platform admins in public rooms) can delete others'
+  const canDelete = isOwnMessage || canModerate;
 
-  const handleReply = () => {
-    onReply?.();
+  // Dynamic height based on available actions
+  const actionCount = (canDelete ? 1 : 0) + 1; // Delete (conditional) + Report
+  const dynamicHeight = actionCount * 44 + 8; // 44px per action + padding
+
+  // Calculate popup position - prefer above the message, shift if near edges
+  let popupTop = pressY - dynamicHeight - 10; // 10px gap above finger
+  let popupLeft = pressX - POPUP_WIDTH / 2;
+
+  // If too close to top, show below instead
+  if (popupTop < POPUP_MARGIN + 80) {
+    // 80px for status bar + header
+    popupTop = pressY + 20; // 20px below finger
+  }
+
+  // If too close to bottom, shift up
+  if (popupTop + dynamicHeight > SCREEN_HEIGHT - POPUP_MARGIN) {
+    popupTop = SCREEN_HEIGHT - dynamicHeight - POPUP_MARGIN;
+  }
+
+  // Keep within horizontal bounds
+  if (popupLeft < POPUP_MARGIN) {
+    popupLeft = POPUP_MARGIN;
+  }
+  if (popupLeft + POPUP_WIDTH > SCREEN_WIDTH - POPUP_MARGIN) {
+    popupLeft = SCREEN_WIDTH - POPUP_WIDTH - POPUP_MARGIN;
+  }
+
+  const handleDelete = () => {
+    onDelete?.();
     onClose();
   };
 
@@ -60,111 +88,63 @@ export default function MessageActionsSheet({
   };
 
   return (
-    <View style={styles.overlay}>
-      <TouchableOpacity style={styles.backdrop} onPress={onClose} activeOpacity={1} />
-      <Animated.View style={[styles.sheet, { transform: [{ translateY }] }]}>
-        <View style={styles.handle} />
+    <Modal transparent visible={visible} animationType="fade" onRequestClose={onClose}>
+      {/* Backdrop - tap to close */}
+      <TouchableOpacity
+        style={styles.backdrop}
+        onPress={onClose}
+        activeOpacity={1}
+      />
 
-        {/* Message preview */}
-        <View style={styles.preview}>
-          <Text style={styles.previewSender}>{senderName}</Text>
-          <Text style={styles.previewText} numberOfLines={2}>
-            {messageText}
-          </Text>
-        </View>
+      {/* Compact popup menu */}
+      <View style={[styles.popup, { top: popupTop, left: popupLeft }]}>
+        {/* Delete action - only if user can delete */}
+        {canDelete && (
+          <TouchableOpacity style={styles.action} onPress={handleDelete}>
+            <Ionicons name="trash-outline" size={18} color="#FF6B6B" />
+            <Text style={[styles.actionText, { color: '#FF6B6B' }]}>Delete</Text>
+          </TouchableOpacity>
+        )}
 
-        {/* Actions */}
-        <TouchableOpacity style={styles.action} onPress={handleCopy}>
-          <Ionicons name="copy-outline" size={20} color={C.text} />
-          <Text style={styles.actionText}>Copy</Text>
-        </TouchableOpacity>
-
-        <TouchableOpacity style={styles.action} onPress={handleReply}>
-          <Ionicons name="arrow-undo-outline" size={20} color={C.text} />
-          <Text style={styles.actionText}>Reply</Text>
-        </TouchableOpacity>
-
+        {/* Report action */}
         <TouchableOpacity style={styles.action} onPress={handleReport}>
-          <Ionicons name="flag-outline" size={20} color={C.primary} />
+          <Ionicons name="flag-outline" size={18} color={C.primary} />
           <Text style={[styles.actionText, { color: C.primary }]}>Report</Text>
         </TouchableOpacity>
-
-        <TouchableOpacity style={styles.cancelButton} onPress={onClose}>
-          <Text style={styles.cancelText}>Cancel</Text>
-        </TouchableOpacity>
-      </Animated.View>
-    </View>
+      </View>
+    </Modal>
   );
 }
 
 const styles = StyleSheet.create({
-  overlay: {
-    ...StyleSheet.absoluteFillObject,
-    justifyContent: 'flex-end',
-    zIndex: 150,
-  },
   backdrop: {
     ...StyleSheet.absoluteFillObject,
-    backgroundColor: 'rgba(0,0,0,0.5)',
+    backgroundColor: 'rgba(0,0,0,0.3)',
   },
-  sheet: {
+  popup: {
+    position: 'absolute',
+    width: POPUP_WIDTH,
     backgroundColor: C.surface,
-    borderTopLeftRadius: 20,
-    borderTopRightRadius: 20,
-    paddingHorizontal: 24,
-    paddingBottom: 40,
-    paddingTop: 12,
-  },
-  handle: {
-    width: 36,
-    height: 4,
-    borderRadius: 2,
-    backgroundColor: C.accent,
-    alignSelf: 'center',
-    marginBottom: 16,
-  },
-  preview: {
-    backgroundColor: C.background,
-    borderRadius: 10,
-    padding: 12,
-    marginBottom: 16,
-  },
-  previewSender: {
-    fontSize: 12,
-    fontWeight: '700',
-    color: C.primary,
-    marginBottom: 4,
-  },
-  previewText: {
-    fontSize: 14,
-    color: C.text,
-    lineHeight: 19,
+    borderRadius: 12,
+    paddingVertical: 4,
+    // Shadow for iOS
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.25,
+    shadowRadius: 8,
+    // Shadow for Android
+    elevation: 8,
   },
   action: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 14,
-    paddingVertical: 14,
-    paddingHorizontal: 4,
-    borderBottomWidth: 1,
-    borderBottomColor: C.accent,
+    gap: 10,
+    paddingVertical: 12,
+    paddingHorizontal: 14,
   },
   actionText: {
-    fontSize: 15,
-    fontWeight: '500',
-    color: C.text,
-  },
-  cancelButton: {
-    alignSelf: 'center',
-    paddingVertical: 12,
-    paddingHorizontal: 32,
-    borderRadius: 20,
-    backgroundColor: C.accent,
-    marginTop: 16,
-  },
-  cancelText: {
     fontSize: 14,
-    fontWeight: '600',
+    fontWeight: '500',
     color: C.text,
   },
 });

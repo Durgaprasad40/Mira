@@ -28,6 +28,7 @@ import { isDemoMode, convex } from '@/hooks/useConvex';
 import { OnboardingProgressHeader } from '@/components/OnboardingProgressHeader';
 import { checkPhotoExists, getPhotoFileState, type PhotoFileState } from '@/lib/photoFileGuard';
 import { decideNextOnboardingRoute, logOnboardingStatus } from '@/lib/onboardingRouting';
+import { useScreenTrace } from '@/lib/devTrace';
 
 // Persistent photos directory - files here survive app restarts
 const PHOTOS_DIR = FileSystem.documentDirectory + 'mira/photos/';
@@ -98,6 +99,7 @@ async function persistPhoto(cacheUri: string): Promise<string | null> {
 }
 
 export default function PhotoUploadScreen() {
+  useScreenTrace("ONB_PHOTO_UPLOAD");
   const { photos, setPhotoAtIndex, setStep, setVerificationPhoto, clearAllPhotos } = useOnboardingStore();
   const { userId, faceVerificationPassed } = useAuthStore();
   const demoProfile = useDemoStore((s) => isDemoMode && userId ? s.demoProfiles[userId] : null);
@@ -115,15 +117,65 @@ export default function PhotoUploadScreen() {
   const generateUploadUrl = useMutation(api.photos.generateUploadUrl);
   const uploadVerificationReferencePhoto = useMutation(api.photos.uploadVerificationReferencePhoto);
 
+  // C4 FIX: queryEnabled allows retry by toggling the query subscription
+  const [queryEnabled, setQueryEnabled] = useState(true);
+
   // BUG FIX: Query onboarding status to check if reference photo already exists
+  // C4 FIX: Include queryEnabled in skip condition to allow forced re-subscription
   const onboardingStatus = useQuery(
     api.users.getOnboardingStatus,
-    !isDemoMode && userId ? { userId } : 'skip'
+    !isDemoMode && userId && queryEnabled ? { userId } : 'skip'
   );
 
   // Local state for immediate preview update
   // SAFETY: Don't initialize from photos[0] - it may be stale from previous user
   const [previewUri, setPreviewUri] = useState<string | null>(null);
+
+  // C4 FIX: Track loading timeout to prevent infinite loading state
+  const [loadingTimedOut, setLoadingTimedOut] = useState(false);
+
+  // C4 FIX: Ref to track re-enable timer for cleanup on unmount
+  const retryTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // C4 FIX: Cleanup re-enable timer on unmount
+  React.useEffect(() => {
+    return () => {
+      if (retryTimerRef.current) {
+        clearTimeout(retryTimerRef.current);
+      }
+    };
+  }, []);
+
+  // C4 FIX: Retry handler - toggles queryEnabled to force fresh Convex subscription
+  const handleLoadingRetry = React.useCallback(() => {
+    // Clear any existing retry timer
+    if (retryTimerRef.current) {
+      clearTimeout(retryTimerRef.current);
+    }
+    setLoadingTimedOut(false);
+    setQueryEnabled(false);
+    // Re-enable after brief delay to force Convex to create new subscription
+    retryTimerRef.current = setTimeout(() => {
+      setQueryEnabled(true);
+      retryTimerRef.current = null;
+    }, 50);
+  }, []);
+
+  // C4 FIX: Set timeout after 8s of loading to show retry UI
+  // Only start timer when queryEnabled is true and query is still loading
+  React.useEffect(() => {
+    if (!isDemoMode && queryEnabled && onboardingStatus === undefined) {
+      const timer = setTimeout(() => {
+        setLoadingTimedOut(true);
+        console.warn('[PHOTO_UPLOAD] C4: Loading timeout after 8s');
+      }, 8000);
+      return () => clearTimeout(timer);
+    }
+    // Reset timeout flag if query resolves OR during retry (queryEnabled=false)
+    if (onboardingStatus !== undefined || !queryEnabled) {
+      setLoadingTimedOut(false);
+    }
+  }, [isDemoMode, queryEnabled, onboardingStatus]);
 
   // TASK 2: File existence guard - track if displayed photo file exists
   const [photoFileState, setPhotoFileState] = useState<PhotoFileState>('empty');
@@ -467,12 +519,26 @@ export default function PhotoUploadScreen() {
   };
 
   // LOADING STATE: Wait for onboardingStatus in live mode to prevent race conditions
+  // C4 FIX: Show retry UI after timeout instead of infinite loading
   if (!isDemoMode && onboardingStatus === undefined) {
     return (
       <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
         <OnboardingProgressHeader />
         <View style={styles.content}>
-          <Text style={styles.loadingText}>Loading...</Text>
+          {loadingTimedOut ? (
+            <View style={styles.loadingFallback}>
+              <Ionicons name="cloud-offline-outline" size={48} color={COLORS.textLight} />
+              <Text style={styles.loadingText}>Unable to load profile data</Text>
+              <Button
+                title="Try Again"
+                variant="outline"
+                onPress={handleLoadingRetry}
+                style={{ marginTop: 16 }}
+              />
+            </View>
+          ) : (
+            <Text style={styles.loadingText}>Loading...</Text>
+          )}
         </View>
       </SafeAreaView>
     );
@@ -739,5 +805,11 @@ const styles = StyleSheet.create({
     color: COLORS.textLight,
     textAlign: 'center',
     marginTop: 40,
+  },
+  // C4 FIX: Fallback UI container for timeout state
+  loadingFallback: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingTop: 40,
   },
 });

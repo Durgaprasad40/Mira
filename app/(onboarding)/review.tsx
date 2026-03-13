@@ -7,7 +7,7 @@
  * - Do not change UX/flows without explicit unlock
  * Date locked: 2026-03-04
  */
-import React from "react";
+import React, { useState, useCallback, useRef, useEffect } from "react";
 import {
   View,
   Text,
@@ -19,7 +19,7 @@ import {
 } from "react-native";
 import { Image } from "expo-image";
 import { SafeAreaView } from "react-native-safe-area-context";
-import { useRouter } from "expo-router";
+import { useRouter, useFocusEffect } from "expo-router";
 import {
   COLORS,
   GENDER_OPTIONS,
@@ -44,6 +44,7 @@ import { isDemoMode } from "@/hooks/useConvex";
 import { useDemoStore } from "@/stores/demoStore";
 import { OnboardingProgressHeader } from "@/components/OnboardingProgressHeader";
 import { saveAuthBootCache } from "@/stores/authBootCache";
+import { useScreenTrace } from "@/lib/devTrace";
 
 /**
  * Parse "YYYY-MM-DD" string to local Date object.
@@ -58,9 +59,50 @@ function parseDOBString(dobString: string): Date {
   return new Date(y, m - 1, d, 12, 0, 0);
 }
 
+/**
+ * Parse backend full name into firstName/lastName for display
+ */
+function parseFullName(fullName: string): { firstName: string; lastName: string } {
+  const parts = fullName.trim().split(/\s+/);
+  if (parts.length === 1) {
+    return { firstName: parts[0], lastName: '' };
+  }
+  return {
+    firstName: parts[0],
+    lastName: parts.slice(1).join(' ')
+  };
+}
+
+// STABILITY FIX: Schema-safe relationship intent values (excludes UI-only values)
+const ALLOWED_RELATIONSHIP_INTENTS = new Set([
+  'long_term', 'short_term', 'fwb', 'figuring_out',
+  'short_to_long', 'long_to_short', 'new_friends', 'open_to_anything'
+]);
+
+// Sanitize relationshipIntent to only include schema-valid values
+function sanitizeRelationshipIntent(arr: string[]): string[] {
+  const sanitized = arr.filter(v => ALLOWED_RELATIONSHIP_INTENTS.has(v));
+  if (__DEV__ && sanitized.length !== arr.length) {
+    const removed = arr.filter(v => !ALLOWED_RELATIONSHIP_INTENTS.has(v));
+    console.warn('[REVIEW] Removed invalid relationshipIntent values:', removed);
+  }
+  return sanitized;
+}
+
 export default function ReviewScreen() {
+  useScreenTrace("ONB_REVIEW");
+
+  // M5 FIX: Force re-render when returning from Edit screens
+  const [refreshKey, setRefreshKey] = useState(0);
+  useFocusEffect(
+    useCallback(() => {
+      setRefreshKey((k) => k + 1);
+    }, [])
+  );
+
   const {
-    name,
+    firstName,
+    lastName,
     nickname,
     dateOfBirth,
     gender,
@@ -96,20 +138,50 @@ export default function ReviewScreen() {
   const { userId, setOnboardingCompleted, faceVerificationPassed, faceVerificationPending } = useAuthStore();
   const demoProfile = useDemoStore((s) => isDemoMode && userId ? s.demoProfiles[userId] : null);
 
+  // H8 FIX: Track mounted state to prevent setAuth after unmount
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
+
   // BUG FIX: Always query backend status as authoritative source + fallback
   const onboardingStatus = useQuery(
     api.users.getOnboardingStatus,
     !isDemoMode && userId ? { userId } : 'skip'
   );
 
-  // PERFORMANCE FIX: Query backend photos directly for instant display (no local download)
-  const backendPhotos = useQuery(
-    api.photos.getUserPhotos,
+  // BUG FIX (2026-03-06): Use getCurrentUser which includes ALL photos
+  // (including verification_reference primary photo), not getUserPhotos
+  // which excludes verification_reference photos
+  const currentUser = useQuery(
+    api.users.getCurrentUser,
     !isDemoMode && userId ? { userId: userId as Id<'users'> } : 'skip'
   );
+  // Extract photos from currentUser (includes verification_reference)
+  const backendPhotos = currentUser?.photos ?? [];
 
   // Fallback to backend data if store is empty
-  const displayName = name || onboardingStatus?.basicInfo?.name || demoProfile?.name || "Not set";
+  // Parse backend name into firstName/lastName for display
+  const getDisplayNames = (): { firstName: string; lastName: string } => {
+    // Priority 1: Store values
+    if (firstName || lastName) {
+      return { firstName: firstName || '', lastName: lastName || '' };
+    }
+    // Priority 2: demoProfile values (demo mode)
+    if (demoProfile?.firstName || demoProfile?.lastName) {
+      return { firstName: demoProfile.firstName || '', lastName: demoProfile.lastName || '' };
+    }
+    // Priority 3: Parse from backend or demoProfile name
+    const backendName = onboardingStatus?.basicInfo?.name || demoProfile?.name || '';
+    if (backendName) {
+      return parseFullName(backendName);
+    }
+    return { firstName: '', lastName: '' };
+  };
+  const displayNames = getDisplayNames();
+  const displayFirstName = displayNames.firstName || "Not set";
+  const displayLastName = displayNames.lastName || "—";
   const displayNickname = nickname || onboardingStatus?.basicInfo?.nickname || demoProfile?.handle || "—";
   const displayDateOfBirth = dateOfBirth || onboardingStatus?.basicInfo?.dateOfBirth || demoProfile?.dateOfBirth || "";
   const displayGender = gender || onboardingStatus?.basicInfo?.gender || demoProfile?.gender || "";
@@ -118,37 +190,39 @@ export default function ReviewScreen() {
   React.useEffect(() => {
     if (__DEV__) {
       console.log('[REVIEW] basic info values:', {
-        displayName,
+        displayFirstName,
+        displayLastName,
         displayNickname,
         displayDateOfBirth,
         displayGender,
       });
       console.log('[REVIEW] basic info sources:', {
-        name: name ? 'store' : (onboardingStatus?.basicInfo?.name ? 'backend' : 'none'),
+        firstName: firstName ? 'store' : (demoProfile?.firstName ? 'demoProfile' : (onboardingStatus?.basicInfo?.name ? 'backend' : 'none')),
+        lastName: lastName ? 'store' : (demoProfile?.lastName ? 'demoProfile' : 'none'),
         nickname: nickname ? 'store' : (onboardingStatus?.basicInfo?.nickname ? 'backend' : 'none'),
         dateOfBirth: dateOfBirth ? 'store' : (onboardingStatus?.basicInfo?.dateOfBirth ? 'backend' : 'none'),
         gender: gender ? 'store' : (onboardingStatus?.basicInfo?.gender ? 'backend' : 'none'),
       });
     }
-  }, [name, nickname, dateOfBirth, gender, onboardingStatus, displayName, displayNickname, displayDateOfBirth, displayGender]);
+  }, [firstName, lastName, nickname, dateOfBirth, gender, onboardingStatus, demoProfile, displayFirstName, displayLastName, displayNickname, displayDateOfBirth, displayGender]);
 
   // PERFORMANCE LOG: Track photo rendering speed
   React.useEffect(() => {
     if (__DEV__) {
       const timestamp = new Date().toISOString();
-      if (backendPhotos === undefined) {
-        console.log('[REVIEW_PHOTOS] ⏳ Loading backend photos...', { timestamp });
+      if (currentUser === undefined) {
+        console.log('[REVIEW_PHOTOS] ⏳ Loading user + photos...', { timestamp });
       } else if (backendPhotos.length === 0) {
-        console.log('[REVIEW_PHOTOS] ✓ Backend returned 0 photos (first paint ready)', { timestamp });
+        console.log('[REVIEW_PHOTOS] ✓ User loaded, 0 photos (first paint ready)', { timestamp });
       } else {
-        console.log('[REVIEW_PHOTOS] ✓ Backend photos loaded - rendering immediately', {
+        console.log('[REVIEW_PHOTOS] ✓ User + photos loaded - rendering immediately', {
           timestamp,
           count: backendPhotos.length,
-          urls: backendPhotos.map(p => p.url?.substring(0, 50) + '...'),
+          urls: backendPhotos.map((p: any) => p.url?.substring(0, 50) + '...'),
         });
       }
     }
-  }, [backendPhotos]);
+  }, [currentUser, backendPhotos]);
 
   // CRITICAL: Check demoProfile.faceVerificationPassed for demo mode (persisted across logout)
   // BUG FIX: Also accept faceVerificationPending (manual review) as valid to proceed
@@ -233,7 +307,7 @@ export default function ReviewScreen() {
           company,
           school,
           lookingFor: lookingFor as string[],
-          relationshipIntent: relationshipIntent as string[],
+          relationshipIntent: sanitizeRelationshipIntent(relationshipIntent as string[]),
           activities: activities as string[],
           profilePrompts,
           minAge,
@@ -242,7 +316,12 @@ export default function ReviewScreen() {
         };
 
         // Only include basic fields if they have values (don't overwrite with empty)
-        if (name && name.trim().length > 0) profileData.name = name.trim();
+        // Store firstName/lastName separately and construct name for backend compat
+        if (firstName && firstName.trim().length > 0) profileData.firstName = firstName.trim();
+        if (lastName && lastName.trim().length > 0) profileData.lastName = lastName.trim();
+        // Construct full name from firstName/lastName for backward compat
+        const fullName = `${(firstName || '').trim()} ${(lastName || '').trim()}`.trim();
+        if (fullName.length > 0) profileData.name = fullName;
         if (nickname && nickname.length > 0) profileData.handle = nickname;
         if (dateOfBirth && dateOfBirth.length > 0) profileData.dateOfBirth = dateOfBirth;
         if (gender) profileData.gender = gender;
@@ -291,9 +370,11 @@ export default function ReviewScreen() {
       }
 
       // Prepare onboarding data
+      // Construct full name from firstName/lastName for backend
+      const fullName = `${(firstName || '').trim()} ${(lastName || '').trim()}`.trim();
       const onboardingData: any = {
         userId: userId as Id<"users">,
-        name,
+        name: fullName,
         dateOfBirth,
         gender: payloadGender,
         bio,
@@ -311,8 +392,11 @@ export default function ReviewScreen() {
         company: company || undefined,
         school: school || undefined,
         lookingFor: lookingFor.length > 0 ? lookingFor : undefined,
-        relationshipIntent:
-          relationshipIntent.length > 0 ? relationshipIntent : undefined,
+        // STABILITY FIX: Sanitize relationshipIntent before sending to Convex
+        relationshipIntent: (() => {
+          const sanitized = sanitizeRelationshipIntent(relationshipIntent as string[]);
+          return sanitized.length > 0 ? sanitized : undefined;
+        })(),
         activities: activities.length > 0 ? activities : undefined,
         minAge,
         maxAge,
@@ -371,8 +455,23 @@ export default function ReviewScreen() {
         });
       }
 
+      // H7 FIX: Capture auth version before async operation
+      const capturedAuthVersion = useAuthStore.getState().authVersion;
+
       // Submit all onboarding data to backend
       await completeOnboarding(onboardingData);
+
+      // H7 FIX: Check if logout happened during mutation (version changed)
+      if (useAuthStore.getState().authVersion !== capturedAuthVersion) {
+        if (__DEV__) console.log('[AUTH] Logout detected during onboarding completion - ignoring result');
+        return;
+      }
+
+      // H8 FIX: Check if component unmounted during async onboarding
+      if (!mountedRef.current) {
+        if (__DEV__) console.log('[AUTH] Component unmounted during onboarding completion - ignoring result');
+        return;
+      }
 
       setOnboardingCompleted(true);
 
@@ -427,7 +526,7 @@ export default function ReviewScreen() {
   return (
     <SafeAreaView style={styles.safeArea} edges={["top"]}>
     <OnboardingProgressHeader />
-    <ScrollView style={styles.container} contentContainerStyle={styles.content}>
+    <ScrollView key={refreshKey} style={styles.container} contentContainerStyle={styles.content}>
       <Text style={styles.title}>Review Your Profile</Text>
       <Text style={styles.subtitle}>
         Make sure everything looks good before you start matching!
@@ -480,8 +579,12 @@ export default function ReviewScreen() {
           </TouchableOpacity>
         </View>
         <View style={styles.infoRow}>
-          <Text style={styles.infoLabel}>Name:</Text>
-          <Text style={styles.infoValue}>{displayName}</Text>
+          <Text style={styles.infoLabel}>First Name:</Text>
+          <Text style={styles.infoValue}>{displayFirstName}</Text>
+        </View>
+        <View style={styles.infoRow}>
+          <Text style={styles.infoLabel}>Last Name:</Text>
+          <Text style={styles.infoValue}>{displayLastName}</Text>
         </View>
         <View style={styles.infoRow}>
           <Text style={styles.infoLabel}>User ID:</Text>

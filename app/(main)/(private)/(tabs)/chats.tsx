@@ -1,16 +1,20 @@
-import React, { useState, useEffect, useMemo } from 'react';
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, FlatList } from 'react-native';
+import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import { View, Text, StyleSheet, ScrollView, TouchableOpacity, FlatList, Alert, ActivityIndicator } from 'react-native';
 import { Image } from 'expo-image';
 import { useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
+import { useQuery, useMutation } from 'convex/react';
+import { api } from '@/convex/_generated/api';
 import { INCOGNITO_COLORS, COLORS } from '@/lib/constants';
 import { PRIVATE_INTENT_CATEGORIES } from '@/lib/privateConstants';
 import { usePrivateChatStore } from '@/stores/privateChatStore';
+import { useAuthStore } from '@/stores/authStore';
 import { textForPublicSurface } from '@/lib/contentFilter';
 import { ReportModal } from '@/components/private/ReportModal';
 import { getTimeAgo } from '@/lib/utils';
 import { DEMO_INCOGNITO_PROFILES } from '@/lib/demoData';
+import { useScreenTrace } from '@/lib/devTrace';
 
 const C = INCOGNITO_COLORS;
 
@@ -33,13 +37,71 @@ const getIntentLabel = (participantId: string): string | null => {
 };
 
 export default function ChatsScreen() {
+  useScreenTrace("P2_CHATS");
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const conversations = usePrivateChatStore((s) => s.conversations);
   const messages = usePrivateChatStore((s) => s.messages);
   const blockUser = usePrivateChatStore((s) => s.blockUser);
+  const createConversation = usePrivateChatStore((s) => s.createConversation);
+  const unlockUser = usePrivateChatStore((s) => s.unlockUser);
   const pruneDeletedMessages = usePrivateChatStore((s) => s.pruneDeletedMessages);
   const [reportTarget, setReportTarget] = useState<{ id: string; name: string } | null>(null);
+
+  // Auth for T&D connect
+  const currentUserId = useAuthStore((s) => s.userId);
+
+  // T&D Pending Connect Requests
+  const pendingRequests = useQuery(
+    api.truthDare.getPendingConnectRequests,
+    currentUserId ? { authUserId: currentUserId } : 'skip'
+  );
+  const respondToConnect = useMutation(api.truthDare.respondToConnect);
+  const [respondingTo, setRespondingTo] = useState<string | null>(null);
+
+  // Backend conversations (source of truth) from EXISTING conversations table
+  const backendConversations = useQuery(
+    api.truthDare.getUserConversations,
+    currentUserId ? { authUserId: currentUserId } : 'skip'
+  );
+
+  // Rehydrate local store from backend conversations on mount/update
+  useEffect(() => {
+    if (!backendConversations || backendConversations.length === 0) return;
+
+    // Sync backend conversations to local store
+    backendConversations.forEach((bc) => {
+      // Use backend conversation ID to check for existing
+      const existingLocal = conversations.find((c) => c.id === bc.id);
+      if (!existingLocal) {
+        // Only sync Phase-2 connections (tod, room, desire)
+        const source = bc.connectionSource as string;
+        if (source === 'tod' || source === 'room' || source === 'desire') {
+          // Unlock the user
+          unlockUser({
+            id: bc.participantAuthId || bc.participantId,
+            username: bc.participantName,
+            photoUrl: bc.participantPhotoUrl || '',
+            age: bc.participantAge || 0,
+            source: source as 'tod' | 'room',
+            unlockedAt: bc.createdAt,
+          });
+          // Create local conversation with backend ID
+          createConversation({
+            id: bc.id,
+            participantId: bc.participantAuthId || bc.participantId,
+            participantName: bc.participantName,
+            participantAge: bc.participantAge || 0,
+            participantPhotoUrl: bc.participantPhotoUrl || '',
+            lastMessage: bc.lastMessage || 'Say hi!',
+            lastMessageAt: bc.lastMessageAt,
+            unreadCount: bc.unreadCount,
+            connectionSource: source as 'tod' | 'room' | 'desire' | 'friend',
+          });
+        }
+      }
+    });
+  }, [backendConversations, conversations, unlockUser, createConversation]);
 
   // Auto-cleanup: Prune expired messages when entering Phase-2 messages tab
   useEffect(() => {
@@ -52,6 +114,79 @@ export default function ChatsScreen() {
       console.log('[Phase2Messages] conversations=', conversations.length, conversations.map(c => c.id));
     }
   }, [conversations]);
+
+  // Handle accept T&D connect request
+  const handleAcceptConnect = useCallback(async (requestId: string) => {
+    if (!currentUserId) return;
+
+    setRespondingTo(requestId);
+    try {
+      const result = await respondToConnect({
+        requestId: requestId as any,
+        action: 'connect',
+        authUserId: currentUserId,
+      });
+
+      if (result?.success && result.action === 'connected') {
+        // Backend created the conversation - use the backend conversation ID
+        const backendConvoId = result.conversationId;
+
+        // Check if conversation already exists in local store
+        const existingConvo = conversations.find((c) => c.id === backendConvoId);
+        if (!existingConvo) {
+          // Unlock user
+          unlockUser({
+            id: result.senderUserId!,
+            username: result.senderName || 'Someone',
+            photoUrl: result.senderPhotoUrl || '',
+            age: result.senderAge || 0,
+            source: 'tod',
+            unlockedAt: Date.now(),
+          });
+
+          // Create local conversation with backend ID
+          createConversation({
+            id: backendConvoId!,
+            participantId: result.senderUserId!,
+            participantName: result.senderName || 'Someone',
+            participantAge: result.senderAge || 0,
+            participantPhotoUrl: result.senderPhotoUrl || '',
+            lastMessage: 'T&D connection accepted! Say hi!',
+            lastMessageAt: Date.now(),
+            unreadCount: 0,
+            connectionSource: 'tod',
+          });
+        }
+
+        // Navigate to chat using backend conversation ID
+        router.push(`/(main)/incognito-chat?id=${backendConvoId}` as any);
+      } else {
+        Alert.alert('Error', result?.reason || 'Failed to accept connection.');
+      }
+    } catch (error) {
+      Alert.alert('Error', 'Failed to accept connection. Please try again.');
+    } finally {
+      setRespondingTo(null);
+    }
+  }, [currentUserId, respondToConnect, conversations, unlockUser, createConversation, router]);
+
+  // Handle reject T&D connect request
+  const handleRejectConnect = useCallback(async (requestId: string) => {
+    if (!currentUserId) return;
+
+    setRespondingTo(requestId);
+    try {
+      await respondToConnect({
+        requestId: requestId as any,
+        action: 'remove',
+        authUserId: currentUserId,
+      });
+    } catch (error) {
+      Alert.alert('Error', 'Failed to decline connection. Please try again.');
+    } finally {
+      setRespondingTo(null);
+    }
+  }, [currentUserId, respondToConnect]);
 
   // Separate conversations into "new matches" (no messages) and "message threads" (has messages)
   const { newMatches, messageThreads } = useMemo(() => {
@@ -74,6 +209,77 @@ export default function ChatsScreen() {
 
     return { newMatches: newM, messageThreads: threads };
   }, [conversations, messages]);
+
+  // Render T&D Pending Connect Requests
+  const renderPendingConnectRequests = () => {
+    if (!pendingRequests || pendingRequests.length === 0) return null;
+
+    return (
+      <View style={styles.pendingRequestsSection}>
+        <View style={styles.sectionHeader}>
+          <Ionicons name="flame" size={18} color={C.primary} />
+          <Text style={styles.sectionTitle}>T&D Connect Requests</Text>
+          <View style={styles.countBadge}>
+            <Text style={styles.countBadgeText}>{pendingRequests.length}</Text>
+          </View>
+        </View>
+        {pendingRequests.map((req) => {
+          const isResponding = respondingTo === req._id;
+          return (
+            <View key={req._id} style={styles.pendingRequestCard}>
+              <View style={styles.pendingRequestHeader}>
+                {req.senderPhotoUrl ? (
+                  <Image source={{ uri: req.senderPhotoUrl }} style={styles.pendingAvatar} blurRadius={8} />
+                ) : (
+                  <View style={[styles.pendingAvatar, styles.pendingAvatarPlaceholder]}>
+                    <Ionicons name="person" size={20} color={C.textLight} />
+                  </View>
+                )}
+                <View style={styles.pendingInfo}>
+                  <Text style={styles.pendingName}>
+                    {req.senderName}{req.senderAge ? `, ${req.senderAge}` : ''}
+                  </Text>
+                  <Text style={styles.pendingContext} numberOfLines={1}>
+                    wants to connect from a {req.promptType}
+                  </Text>
+                </View>
+              </View>
+              <Text style={styles.pendingPromptPreview} numberOfLines={2}>
+                "{req.promptText}"
+              </Text>
+              <View style={styles.pendingActions}>
+                <TouchableOpacity
+                  style={styles.pendingRejectBtn}
+                  onPress={() => handleRejectConnect(req._id)}
+                  disabled={isResponding}
+                >
+                  {isResponding ? (
+                    <ActivityIndicator size="small" color={C.textLight} />
+                  ) : (
+                    <Text style={styles.pendingRejectText}>Decline</Text>
+                  )}
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={styles.pendingAcceptBtn}
+                  onPress={() => handleAcceptConnect(req._id)}
+                  disabled={isResponding}
+                >
+                  {isResponding ? (
+                    <ActivityIndicator size="small" color="#FFF" />
+                  ) : (
+                    <>
+                      <Ionicons name="chatbubble" size={14} color="#FFF" />
+                      <Text style={styles.pendingAcceptText}>Accept</Text>
+                    </>
+                  )}
+                </TouchableOpacity>
+              </View>
+            </View>
+          );
+        })}
+      </View>
+    );
+  };
 
   // New Matches row - Phase-2 style (blurred avatars, tap → profile preview)
   const renderNewMatchesRow = () => {
@@ -146,6 +352,9 @@ export default function ChatsScreen() {
       </View>
 
       <ScrollView style={{ flex: 1 }} contentContainerStyle={styles.listContent}>
+        {/* T&D Pending Connect Requests */}
+        {renderPendingConnectRequests()}
+
         {/* New Matches Row */}
         {renderNewMatchesRow()}
 
@@ -250,6 +459,84 @@ const styles = StyleSheet.create({
   emptyContainer: { alignItems: 'center', justifyContent: 'center', padding: 40, marginTop: 60 },
   emptyTitle: { fontSize: 18, fontWeight: '600', color: C.text, marginTop: 16, marginBottom: 8 },
   emptySubtitle: { fontSize: 13, color: C.textLight, textAlign: 'center' },
+
+  // ── T&D Pending Connect Requests ──
+  pendingRequestsSection: {
+    marginTop: 16,
+    marginBottom: 8,
+    paddingHorizontal: 16,
+  },
+  pendingRequestCard: {
+    backgroundColor: C.surface,
+    borderRadius: 12,
+    padding: 12,
+    marginBottom: 8,
+  },
+  pendingRequestHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  pendingAvatar: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+  },
+  pendingAvatarPlaceholder: {
+    backgroundColor: C.background,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  pendingInfo: {
+    marginLeft: 10,
+    flex: 1,
+  },
+  pendingName: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: C.text,
+  },
+  pendingContext: {
+    fontSize: 12,
+    color: C.textLight,
+    marginTop: 2,
+  },
+  pendingPromptPreview: {
+    fontSize: 12,
+    fontStyle: 'italic',
+    color: C.textLight,
+    marginBottom: 10,
+  },
+  pendingActions: {
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    gap: 10,
+  },
+  pendingRejectBtn: {
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderRadius: 16,
+    backgroundColor: C.background,
+  },
+  pendingRejectText: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: C.textLight,
+  },
+  pendingAcceptBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderRadius: 16,
+    backgroundColor: C.primary,
+  },
+  pendingAcceptText: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: '#FFF',
+  },
 
   // ── New Matches Section ──
   newMatchesSection: {

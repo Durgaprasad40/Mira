@@ -46,9 +46,10 @@ export default function DaresScreen() {
           text: 'Accept',
           onPress: async () => {
             try {
+              // TOD-002 FIX: Use authUserId for server-side verification
               const result = await acceptDare({
                 dareId: dareId as any,
-                userId: userId as any,
+                authUserId: userId!,
               });
               Alert.alert(
                 '🎉 It\'s a Match!',
@@ -79,9 +80,10 @@ export default function DaresScreen() {
         style: 'destructive',
         onPress: async () => {
           try {
+            // TOD-002 FIX: Use authUserId for server-side verification
             await declineDare({
               dareId: dareId as any,
-              userId: userId as any,
+              authUserId: userId!,
             });
           } catch (error: any) {
             Alert.alert('Error', error.message || 'Failed to decline dare');

@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, BackHandler, Platform } from 'react-native';
 import { Stack, useRouter, useNavigation, usePathname, useSegments, useRootNavigationState } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -14,6 +14,7 @@ import { PrivateConsentGate } from '@/components/private/PrivateConsentGate';
 import { setPhase2Active } from '@/hooks/useNotifications';
 import { prewarmTodCache } from './(tabs)/truth-or-dare';
 import { decideNextOnboardingRoute } from '@/lib/onboardingRouting';
+import { useRouteTrace } from '@/lib/devTrace';
 
 const C = INCOGNITO_COLORS;
 
@@ -74,8 +75,9 @@ export default function PrivateLayout() {
 
   // B1 FIX: Track phantom "/" normalization state to show loading UI
   const [isNormalizingRoot, setIsNormalizingRoot] = useState(false);
+  // PA-001 FIX: Single timeout ref for fallback (removed retryTimeoutRef to eliminate race)
   const normalizationTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // B3.4 FIX: Track if we've already normalized to prevent redundant triggers
+  // PA-001 FIX: Single navigation guard - tracks both trigger AND completion
   const didNormalizeRef = useRef(false);
 
   // B1.1 FIX: Add router readiness check
@@ -97,70 +99,46 @@ export default function PrivateLayout() {
   // 🚨 CRITICAL: Collapse phantom "/" route inside Phase-2
   // Expo Router creates an implicit "/" entry before the real Phase-2 home.
   // This causes double back gestures. Normalize immediately to desire-land.
-  // B1 FIX: Added hydration check, try/catch, and timeout fallback for safety
-  // B1.1 FIX: Added router readiness check to prevent "navigate before root layout" error
+  // PA-001 FIX: Simplified to single deterministic path - eliminates race conditions
   useEffect(() => {
-    // B1 FIX: Wait for hydration before normalizing to prevent blank screen
+    // Wait for all preconditions before normalizing
     if (!hasHydrated) return;
     if (!mountedRef.current) return;
-    // B1.1 FIX: Wait for router to be ready before navigating
     if (!rootNavState?.key) return;
 
     const segmentStrings = segments as string[];
-    if (pathname === '/' && segmentStrings.includes('(private)')) {
-      // B3.4 FIX: Skip if we've already normalized (prevent redundant triggers)
-      if (didNormalizeRef.current) return;
-      didNormalizeRef.current = true;
+    const isPhantomRoot = pathname === '/' && segmentStrings.includes('(private)');
+    if (!isPhantomRoot) return;
 
-      setIsNormalizingRoot(true);
+    // PA-001 FIX: Single guard prevents all redundant triggers
+    if (didNormalizeRef.current) return;
+    didNormalizeRef.current = true;
+    setIsNormalizingRoot(true);
 
-      // B1.1 FIX: Timeout fallback - escape to Phase-1 if normalization fails (2s)
-      // Uses safer setTimeout for navigation with router readiness check
-      normalizationTimeoutRef.current = setTimeout(() => {
-        if (!mountedRef.current) return;
-        // B1.1 FIX: Check router readiness in fallback too
-        if (!rootNavState?.key) {
-          if (__DEV__) console.warn('[PrivateLayout] Timeout fallback: router not ready, retrying...');
-          // Retry once after brief delay
-          setTimeout(() => {
-            if (rootNavState?.key) {
-              setIsNormalizingRoot(false);
-              router.replace(PHASE1_DISCOVER_ROUTE);
-            }
-          }, 250);
-          return;
-        }
-        if (__DEV__) console.warn('[PrivateLayout] Phantom root normalization timeout - exiting to Phase-1');
-        setIsNormalizingRoot(false);
-        router.replace(PHASE1_DISCOVER_ROUTE);
-      }, 2000);
-
-      // B1.1 FIX: Use setTimeout instead of requestAnimationFrame for safer scheduling
-      setTimeout(() => {
-        if (!mountedRef.current) return;
-        // B1.1 FIX: Double-check router readiness before navigating
-        if (!rootNavState?.key) {
-          if (__DEV__) console.warn('[PrivateLayout] Router not ready for normalization');
-          return;
-        }
-
-        // B1 FIX: Try/catch for safe navigation
-        try {
-          router.replace(PHASE2_HOME_ROUTE);
-          setIsNormalizingRoot(false);
-          if (normalizationTimeoutRef.current) {
-            clearTimeout(normalizationTimeoutRef.current);
-            normalizationTimeoutRef.current = null;
-          }
-        } catch (error) {
-          if (__DEV__) console.error('[PrivateLayout] Phantom root normalization failed:', error);
-          setIsNormalizingRoot(false);
-          // Timeout will handle fallback navigation
-        }
-      }, 0);
+    // PA-001 FIX: Attempt immediate navigation (synchronous within effect)
+    try {
+      router.replace(PHASE2_HOME_ROUTE);
+      setIsNormalizingRoot(false);
+      if (__DEV__) console.log('[PrivateLayout] Phantom "/" normalized to Phase-2 home');
+      return; // Success - no fallback needed
+    } catch (error) {
+      if (__DEV__) console.error('[PrivateLayout] Immediate normalization failed:', error);
+      // Fall through to timeout fallback
     }
 
-    // B1 FIX: Cleanup timeout on unmount
+    // PA-001 FIX: Single fallback timeout (2s) - only runs if immediate navigation threw
+    normalizationTimeoutRef.current = setTimeout(() => {
+      if (!mountedRef.current) return;
+      setIsNormalizingRoot(false);
+      if (__DEV__) console.warn('[PrivateLayout] Normalization fallback - exiting to Phase-1');
+      try {
+        router.replace(PHASE1_DISCOVER_ROUTE);
+      } catch (fallbackError) {
+        if (__DEV__) console.error('[PrivateLayout] Fallback navigation failed:', fallbackError);
+      }
+    }, 2000);
+
+    // PA-001 FIX: Guaranteed cleanup on unmount
     return () => {
       if (normalizationTimeoutRef.current) {
         clearTimeout(normalizationTimeoutRef.current);
@@ -345,22 +323,55 @@ export default function PrivateLayout() {
     }
   }, [prewarmPromptsData, prewarmTrendingData]);
 
+  // ST-001 FIX: Hydrate privateProfileStore from Convex on app restart
+  // This ensures Phase-2 profile state survives app restarts
+  const hydrateFromConvex = usePrivateProfileStore((s) => s.hydrateFromConvex);
+  useEffect(() => {
+    // Skip in demo mode (uses local demo data)
+    if (isDemoMode) return;
+    // Wait for query to complete (undefined = loading, null = no profile)
+    if (convexPrivateProfile === undefined) return;
+    // Hydrate store with Convex profile (or null if no profile)
+    hydrateFromConvex(convexPrivateProfile);
+  }, [convexPrivateProfile, hydrateFromConvex]);
+
   // B1.1 FIX: Compute onboarding state BEFORE any returns (was after early returns before)
   // Check if Phase-2 onboarding has been completed (permanent flag)
   // This runs ONE TIME ONLY - after completion, onboarding never shows again
   // P2-002 FIX: Use OR logic so local completion is respected even if Convex hasn't synced yet
   // This prevents re-triggering onboarding when server returns false due to sync lag
+  // STABILITY FIX: Now also checks users.phase2OnboardingCompleted from getOnboardingStatus
+  // Priority: local store (instant) || users table (durable) || privateProfile (legacy fallback)
   const onboardingComplete = isDemoMode
     ? phase2OnboardingCompleted
-    : (phase2OnboardingCompleted || convexPrivateProfile?.isSetupComplete === true);
+    : (
+        phase2OnboardingCompleted ||
+        phase1OnboardingStatus?.phase2OnboardingCompleted === true ||
+        convexPrivateProfile?.isSetupComplete === true
+      );
+
+  // DEV-only route change logging for Phase-2 Private area
+  useRouteTrace("P2_PRIVATE", useCallback(() => ({
+    userId: userId?.substring(0, 8) ?? null,
+    phase2OnboardingCompleted_local: !!phase2OnboardingCompleted,
+    phase2OnboardingCompleted_backend: phase1OnboardingStatus?.phase2OnboardingCompleted ?? null,
+    privateWelcomeConfirmed_backend: phase1OnboardingStatus?.privateWelcomeConfirmed ?? null,
+    faceStatus: phase1OnboardingStatus?.faceVerificationStatus ?? null,
+    normalPhotoCount: phase1OnboardingStatus?.normalPhotoCount ?? null,
+    onboardingComplete,
+    isDemoMode,
+  }), [userId, phase2OnboardingCompleted, phase1OnboardingStatus, onboardingComplete]));
 
   // PHASE-1 GUARD: Redirect to Phase-1 onboarding if incomplete
   // This check happens BEFORE Phase-2 onboarding check
+  // STABILITY FIX: Skip guard entirely if Phase-2 is already complete
+  // Users who completed Phase-2 should not be bounced due to Phase-1 state changes
   useEffect(() => {
     if (!mountedRef.current) return;
     if (didRedirectRef.current) return;
     if (!hasHydrated) return;
     if (isDemoMode) return; // Skip guard in demo mode
+    if (onboardingComplete) return; // Skip if Phase-2 already complete
     if (!phase1OnboardingStatus) return; // Wait for query to load
 
     // Check Phase-1 onboarding requirements
@@ -391,7 +402,7 @@ export default function PrivateLayout() {
         router.replace(nextRoute as any);
       });
     }
-  }, [phase1OnboardingStatus, hasHydrated, router]);
+  }, [phase1OnboardingStatus, hasHydrated, router, onboardingComplete]);
 
   // CRASH FIX: Single-pass redirect with proper lifecycle checks
   // Uses requestAnimationFrame to ensure previous screen is fully unmounted
@@ -399,6 +410,10 @@ export default function PrivateLayout() {
     if (!mountedRef.current) return;
     if (didRedirectRef.current) return;
     if (!hasHydrated) return; // Wait for hydration
+    // STABILITY FIX: Wait for backend query before checking onboardingComplete
+    // This prevents premature redirect when local store is false but backend is true
+    // (local store is in-memory only, so phase2OnboardingCompleted resets to false on app restart)
+    if (!isDemoMode && !phase1OnboardingStatus) return;
 
     if (!onboardingComplete) {
       didRedirectRef.current = true;
@@ -407,7 +422,7 @@ export default function PrivateLayout() {
         router.replace('/(main)/phase2-onboarding' as any);
       });
     }
-  }, [onboardingComplete, hasHydrated, router]);
+  }, [onboardingComplete, hasHydrated, router, phase1OnboardingStatus]);
 
   // B1.1 FIX: Conditional rendering moved to END after ALL hooks
   // H-001/C-001 FIX: Wait for incognito store hydration before checking consent
@@ -427,7 +442,13 @@ export default function PrivateLayout() {
   }
 
   // B1.1 FIX: Consent gate (checked after spinner check above)
-  if (!ageConfirmed18Plus) {
+  // STABILITY FIX: Also check backend flag to skip after first confirm (survives force-quit)
+  // Priority: local store (instant) || backend flag (durable)
+  const welcomeConfirmed = isDemoMode
+    ? ageConfirmed18Plus
+    : (ageConfirmed18Plus || phase1OnboardingStatus?.privateWelcomeConfirmed === true);
+
+  if (!welcomeConfirmed) {
     return <PrivateConsentGate onAccept={acceptPrivateTerms} />;
   }
 
@@ -440,6 +461,8 @@ export default function PrivateLayout() {
   return (
     <Stack screenOptions={{ headerShown: false }}>
       <Stack.Screen name="(tabs)" />
+      <Stack.Screen name="edit-desire" options={{ presentation: 'modal' }} />
+      <Stack.Screen name="edit-profile-details" options={{ presentation: 'modal' }} />
     </Stack>
   );
 }

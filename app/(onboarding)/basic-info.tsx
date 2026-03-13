@@ -36,6 +36,7 @@ import { useQuery } from "convex/react";
 import { api } from "@/convex/_generated/api";
 import { Ionicons } from "@expo/vector-icons";
 import { validateRequired, scrollToFirstInvalid, ValidationRule } from "@/lib/onboardingValidation";
+import { useScreenTrace } from "@/lib/devTrace";
 
 // =============================================================================
 // DOB Date Helpers - Avoid UTC conversion bugs
@@ -65,16 +66,31 @@ function formatDOBToString(date: Date): string {
   return `${y}-${m}-${d}`;
 }
 
+// Parse backend full name into firstName/lastName
+function parseFullName(fullName: string): { firstName: string; lastName: string } {
+  const parts = fullName.trim().split(/\s+/);
+  if (parts.length === 1) {
+    return { firstName: parts[0], lastName: '' };
+  }
+  return {
+    firstName: parts[0],
+    lastName: parts.slice(1).join(' ')
+  };
+}
+
 export default function BasicInfoScreen() {
+  useScreenTrace("ONB_BASIC_INFO");
   const {
-    name,
+    firstName,
+    lastName,
     dateOfBirth,
     gender,
     lgbtqSelf,
     email,
     password,
     nickname,
-    setName,
+    setFirstName,
+    setLastName,
     setDateOfBirth,
     setGender,
     setNickname,
@@ -111,17 +127,24 @@ export default function BasicInfoScreen() {
 
   // Refs for scroll-to-invalid behavior
   const scrollRef = useRef<ScrollView>(null);
-  const nameFieldRef = useRef<View>(null);
   const nicknameFieldRef = useRef<View>(null);
   const dobFieldRef = useRef<View>(null);
   const genderFieldRef = useRef<View>(null);
 
   // Read-only mode state for displaying existing user data
-  const [displayName, setDisplayName] = useState("");
+  const [displayFirstName, setDisplayFirstName] = useState("");
+  const [displayLastName, setDisplayLastName] = useState("");
   const [displayDOB, setDisplayDOB] = useState("");
   const [displayGender, setDisplayGender] = useState<Gender | "">("");
   const [displayHandle, setDisplayHandle] = useState("");
   const [lgbtqError, setLgbtqError] = useState("");
+
+  // Refs for scroll-to-invalid behavior (additional refs for first/last name)
+  const firstNameFieldRef = useRef<View>(null);
+  const lastNameFieldRef = useRef<View>(null);
+
+  // Guard ref to prevent re-prefilling firstName/lastName after user starts editing in editFromReview mode
+  const hasPrefilledEditFromReviewRef = useRef(false);
 
   // Nickname availability state (for new users)
   const [isCheckingAvailability, setIsCheckingAvailability] = useState(false);
@@ -155,11 +178,14 @@ export default function BasicInfoScreen() {
     console.log(`[BASIC]   demoProfile exists=${!!profile}`);
     if (profile) {
       console.log(`[BASIC]   demoProfile.name=${profile.name || '(empty)'}`);
+      console.log(`[BASIC]   demoProfile.firstName=${profile.firstName || '(empty)'}`);
+      console.log(`[BASIC]   demoProfile.lastName=${profile.lastName || '(empty)'}`);
       console.log(`[BASIC]   demoProfile.handle=${profile.handle || '(empty)'}`);
       console.log(`[BASIC]   demoProfile.dateOfBirth=${profile.dateOfBirth || '(empty)'}`);
       console.log(`[BASIC]   demoProfile.gender=${profile.gender || '(empty)'}`);
     }
-    console.log(`[BASIC]   onboardingStore.name=${name || '(empty)'}`);
+    console.log(`[BASIC]   onboardingStore.firstName=${firstName || '(empty)'}`);
+    console.log(`[BASIC]   onboardingStore.lastName=${lastName || '(empty)'}`);
     console.log(`[BASIC]   onboardingStore.nickname=${nickname || '(empty)'}`);
     console.log(`[BASIC]   onboardingStore.dateOfBirth=${dateOfBirth || '(empty)'}`);
     console.log(`[BASIC]   onboardingStore.gender=${gender || '(empty)'}`);
@@ -189,9 +215,29 @@ export default function BasicInfoScreen() {
   // Load existing data into display state OR detect recovery mode
   useEffect(() => {
     // Handle editFromReview mode: pre-fill all fields from demoProfile
+    // CRITICAL: Only prefill ONCE on entry, then let user freely edit firstName/lastName
     if (isEditFromReview && isDemoMode && demoHydrated && demoProfile) {
-      console.log('[BASIC] editFromReview mode - pre-filling from demoProfile');
-      setDisplayName(demoProfile.name || "");
+      // Guard: Only prefill once per editFromReview session
+      if (hasPrefilledEditFromReviewRef.current) {
+        return; // Already prefilled, don't overwrite user edits
+      }
+      hasPrefilledEditFromReviewRef.current = true;
+      console.log('[BASIC] editFromReview mode - pre-filling ONCE from demoProfile');
+      // Parse name into firstName/lastName or use stored firstName/lastName
+      if (demoProfile.firstName || demoProfile.lastName) {
+        setDisplayFirstName(demoProfile.firstName || "");
+        setDisplayLastName(demoProfile.lastName || "");
+        // Populate the editable store fields for firstName/lastName
+        setFirstName(demoProfile.firstName || "");
+        setLastName(demoProfile.lastName || "");
+      } else if (demoProfile.name) {
+        const parsed = parseFullName(demoProfile.name);
+        setDisplayFirstName(parsed.firstName);
+        setDisplayLastName(parsed.lastName);
+        // Populate the editable store fields for firstName/lastName
+        setFirstName(parsed.firstName);
+        setLastName(parsed.lastName);
+      }
       setDisplayDOB(demoProfile.dateOfBirth || "");
       setDisplayGender((demoProfile.gender as Gender) || "");
       setDisplayHandle(demoProfile.handle || "");
@@ -206,10 +252,41 @@ export default function BasicInfoScreen() {
       return; // Don't run confirm mode logic
     }
 
+    // BUG FIX: Handle editFromReview mode in LIVE mode (non-demo)
+    // CRITICAL: Only prefill ONCE on entry, then let user freely edit firstName/lastName
+    if (isEditFromReview && !isDemoMode && existingUserData) {
+      // Guard: Only prefill once per editFromReview session
+      if (hasPrefilledEditFromReviewRef.current) {
+        return; // Already prefilled, don't overwrite user edits
+      }
+      hasPrefilledEditFromReviewRef.current = true;
+      console.log('[BASIC] editFromReview LIVE mode - pre-filling ONCE from existingUserData');
+      // Parse name into firstName/lastName
+      if (existingUserData.name) {
+        const parsed = parseFullName(existingUserData.name);
+        setDisplayFirstName(parsed.firstName);
+        setDisplayLastName(parsed.lastName);
+        // Populate the editable store fields for firstName/lastName
+        setFirstName(parsed.firstName);
+        setLastName(parsed.lastName);
+      }
+      setDisplayDOB(existingUserData.dateOfBirth || "");
+      setDisplayGender((existingUserData.gender as Gender) || "");
+      setDisplayHandle(existingUserData.handle || "");
+      if (existingUserData.dateOfBirth) {
+        setSelectedDate(parseDOBString(existingUserData.dateOfBirth));
+      }
+      return; // Don't run confirm mode logic
+    }
+
     if (isConfirmMode && isDemoMode && demoHydrated) {
       if (demoProfile) {
         // Check if ALL basic fields are present (strict check)
-        const hasName = !!demoProfile.name && demoProfile.name.trim().length > 0;
+        // Support both old `name` field and new firstName/lastName fields
+        const hasFirstName = !!demoProfile.firstName && demoProfile.firstName.trim().length > 0;
+        const hasLastName = !!demoProfile.lastName && demoProfile.lastName.trim().length > 0;
+        const hasLegacyName = !!demoProfile.name && demoProfile.name.trim().length > 0;
+        const hasName = (hasFirstName) || hasLegacyName; // firstName required, lastName optional
         const hasHandle = !!demoProfile.handle && demoProfile.handle.trim().length > 0;
         const hasDOB = !!demoProfile.dateOfBirth && demoProfile.dateOfBirth.length > 0;
         const hasGender = !!demoProfile.gender && demoProfile.gender.length > 0;
@@ -220,7 +297,15 @@ export default function BasicInfoScreen() {
         if (hasAllFields) {
           // ALL fields present → normal confirm mode (read-only)
           setIsRecoveryMode(false);
-          setDisplayName(demoProfile.name!);
+          // Parse name into firstName/lastName
+          if (hasFirstName) {
+            setDisplayFirstName(demoProfile.firstName!);
+            setDisplayLastName(demoProfile.lastName || "");
+          } else if (hasLegacyName) {
+            const parsed = parseFullName(demoProfile.name!);
+            setDisplayFirstName(parsed.firstName);
+            setDisplayLastName(parsed.lastName);
+          }
           setDisplayDOB(demoProfile.dateOfBirth!);
           setDisplayGender(demoProfile.gender as Gender);
           setDisplayHandle(demoProfile.handle!);
@@ -239,9 +324,19 @@ export default function BasicInfoScreen() {
           console.log('[BASIC] → recovery mode (some fields missing)');
 
           // Pre-populate onboardingStore from demoProfile's existing data
-          if (hasName && !name) {
-            setName(demoProfile.name!);
-            console.log(`[BASIC] pre-populated name="${demoProfile.name}" from demoProfile`);
+          if (hasFirstName && !firstName) {
+            setFirstName(demoProfile.firstName!);
+            console.log(`[BASIC] pre-populated firstName="${demoProfile.firstName}" from demoProfile`);
+          }
+          if (hasLastName && !lastName) {
+            setLastName(demoProfile.lastName!);
+            console.log(`[BASIC] pre-populated lastName="${demoProfile.lastName}" from demoProfile`);
+          }
+          if (!hasFirstName && hasLegacyName && !firstName) {
+            const parsed = parseFullName(demoProfile.name!);
+            setFirstName(parsed.firstName);
+            setLastName(parsed.lastName);
+            console.log(`[BASIC] pre-populated firstName/lastName from legacy name="${demoProfile.name}"`);
           }
           if (hasHandle && !nickname) {
             setNickname(demoProfile.handle!);
@@ -268,8 +363,12 @@ export default function BasicInfoScreen() {
         console.log('[BASIC] → recovery mode (no demoProfile exists)');
       }
     } else if (isConfirmMode && !isDemoMode && existingUserData) {
-      // Live mode: use query result
-      setDisplayName(existingUserData.name || "");
+      // Live mode: use query result - parse name into firstName/lastName
+      if (existingUserData.name) {
+        const parsed = parseFullName(existingUserData.name);
+        setDisplayFirstName(parsed.firstName);
+        setDisplayLastName(parsed.lastName);
+      }
       setDisplayDOB(existingUserData.dateOfBirth || "");
       setDisplayGender((existingUserData.gender as Gender) || "");
       setDisplayHandle(existingUserData.handle || "");
@@ -389,16 +488,29 @@ export default function BasicInfoScreen() {
 
   // Validation rules for all required fields
   const validationRules: Record<string, ValidationRule> = {
-    name: (value: string) => {
-      if (!value || value.trim().length < VALIDATION.NAME_MIN_LENGTH) {
-        return `Name must be at least ${VALIDATION.NAME_MIN_LENGTH} characters`;
+    firstName: (value: string) => {
+      if (!value || value.trim().length < VALIDATION.FIRST_NAME_MIN_LENGTH) {
+        return `First name must be at least ${VALIDATION.FIRST_NAME_MIN_LENGTH} character`;
       }
-      if (value.length > VALIDATION.NAME_MAX_LENGTH) {
-        return `Name must be no more than ${VALIDATION.NAME_MAX_LENGTH} characters`;
+      if (value.length > VALIDATION.FIRST_NAME_MAX_LENGTH) {
+        return `First name must be no more than ${VALIDATION.FIRST_NAME_MAX_LENGTH} characters`;
       }
-      // Allow letters, spaces, dots, underscores, hyphens, apostrophes
-      if (!/^[a-zA-Z\s.\-_']+$/.test(value)) {
-        return "Name can only contain letters, spaces, dots, hyphens, underscores, and apostrophes";
+      // Allow letters, spaces, hyphens, apostrophes
+      if (!/^[a-zA-Z\s\-']+$/.test(value)) {
+        return "First name can only contain letters, spaces, hyphens, and apostrophes";
+      }
+      return undefined;
+    },
+    lastName: (value: string) => {
+      if (!value || value.trim().length < VALIDATION.LAST_NAME_MIN_LENGTH) {
+        return `Last name must be at least ${VALIDATION.LAST_NAME_MIN_LENGTH} character`;
+      }
+      if (value.length > VALIDATION.LAST_NAME_MAX_LENGTH) {
+        return `Last name must be no more than ${VALIDATION.LAST_NAME_MAX_LENGTH} characters`;
+      }
+      // Allow letters, spaces, hyphens, apostrophes
+      if (!/^[a-zA-Z\s\-']+$/.test(value)) {
+        return "Last name can only contain letters, spaces, hyphens, and apostrophes";
       }
       return undefined;
     },
@@ -433,18 +545,55 @@ export default function BasicInfoScreen() {
 
   // Handle Continue in READ-ONLY mode (existing user OR edit from Review)
   const handleReadOnlyContinue = () => {
-    // LGBTQ Self is always editable - save any changes before continuing
+    // In editFromReview mode, firstName/lastName are editable - validate before saving
+    if (isEditFromReview) {
+      // Validate firstName and lastName
+      const result = validateRequired(
+        { firstName, lastName },
+        {
+          firstName: validationRules.firstName,
+          lastName: validationRules.lastName,
+        }
+      );
+
+      if (!result.ok) {
+        setErrors(result.errors as Record<string, string>);
+        setShowTopError(true);
+        const fieldRefs = {
+          firstName: firstNameFieldRef,
+          lastName: lastNameFieldRef,
+        };
+        scrollToFirstInvalid(scrollRef, fieldRefs, result.firstInvalidKey as string);
+        return;
+      }
+
+      // Clear errors
+      setErrors({});
+      setShowTopError(false);
+
+      // Save changes (demo mode)
+      if (isDemoMode && userId) {
+        // Construct full name for backend compat
+        const fullName = `${firstName.trim()} ${lastName.trim()}`.trim();
+        useDemoStore.getState().saveDemoProfile(userId, {
+          firstName: firstName.trim(),
+          lastName: lastName.trim(),
+          name: fullName,
+          lgbtqSelf,
+        });
+        console.log(`[BASIC] saved firstName/lastName and lgbtqSelf`);
+      }
+
+      if (__DEV__) console.log("[ONB] basic_info editFromReview → back to review");
+      router.replace("/(onboarding)/review" as any);
+      return;
+    }
+
+    // Regular read-only mode (confirm mode)
     if (isDemoMode && userId) {
       // Only save lgbtqSelf (don't touch other fields)
       useDemoStore.getState().saveDemoProfile(userId, { lgbtqSelf });
       console.log(`[BASIC] saved lgbtqSelf: ${JSON.stringify(lgbtqSelf)}`);
-    }
-
-    // If editing from Review, go back to Review (not through onboarding flow)
-    if (isEditFromReview) {
-      if (__DEV__) console.log("[ONB] basic_info editFromReview → back to review");
-      router.replace("/(onboarding)/review" as any);
-      return;
     }
 
     if (__DEV__) console.log("[ONB] basic_info_confirm readOnly=true → continue_to_consent");
@@ -456,7 +605,7 @@ export default function BasicInfoScreen() {
   const handleRecoveryContinue = () => {
     // Run validation using the helper
     const result = validateRequired(
-      { name, nickname, dateOfBirth, gender },
+      { firstName, lastName, nickname, dateOfBirth, gender },
       validationRules
     );
 
@@ -465,7 +614,8 @@ export default function BasicInfoScreen() {
       setShowTopError(true);
       // Scroll to first invalid field
       const fieldRefs = {
-        name: nameFieldRef,
+        firstName: firstNameFieldRef,
+        lastName: lastNameFieldRef,
         nickname: nicknameFieldRef,
         dateOfBirth: dobFieldRef,
         gender: genderFieldRef,
@@ -485,7 +635,12 @@ export default function BasicInfoScreen() {
       const dataToSave: Record<string, string | string[]> = {};
 
       // Only include non-empty values
-      if (name && name.trim().length > 0) dataToSave.name = name.trim();
+      // Store firstName/lastName separately and construct name for backend compat
+      if (firstName && firstName.trim().length > 0) dataToSave.firstName = firstName.trim();
+      if (lastName && lastName.trim().length > 0) dataToSave.lastName = lastName.trim();
+      // Construct full name for backend compatibility
+      const fullName = `${firstName.trim()} ${lastName.trim()}`.trim();
+      if (fullName.length > 0) dataToSave.name = fullName;
       if (nickname && nickname.length > 0) dataToSave.handle = nickname;
       if (dateOfBirth && dateOfBirth.length > 0) dataToSave.dateOfBirth = dateOfBirth;
       if (gender) dataToSave.gender = gender;
@@ -512,7 +667,7 @@ export default function BasicInfoScreen() {
   const handleNextWithConfirmation = () => {
     // Run validation using the helper
     const result = validateRequired(
-      { name, nickname, dateOfBirth, gender },
+      { firstName, lastName, nickname, dateOfBirth, gender },
       validationRules
     );
 
@@ -521,7 +676,8 @@ export default function BasicInfoScreen() {
       setShowTopError(true);
       // Scroll to first invalid field
       const fieldRefs = {
-        name: nameFieldRef,
+        firstName: firstNameFieldRef,
+        lastName: lastNameFieldRef,
         nickname: nicknameFieldRef,
         dateOfBirth: dobFieldRef,
         gender: genderFieldRef,
@@ -555,6 +711,9 @@ export default function BasicInfoScreen() {
     // Close modal
     setShowConfirmModal(false);
 
+    // H7 FIX: Capture auth version at start of handleNext (before any async/branching)
+    const capturedAuthVersion = useAuthStore.getState().authVersion;
+
     // Create user account
     setIsSubmitting(true);
     try {
@@ -570,7 +729,7 @@ export default function BasicInfoScreen() {
             try {
               const result = demoStore.demoSignIn(email, password);
               newUserId = result.userId;
-              setAuth(newUserId, "demo_token", result.onboardingComplete);
+              setAuth(newUserId, "demo_token", result.onboardingComplete, capturedAuthVersion);
               if (result.onboardingComplete) {
                 router.replace("/(main)/(tabs)/home");
                 return;
@@ -589,8 +748,12 @@ export default function BasicInfoScreen() {
         }
         // BUG A FIX: Save basic info to demoProfiles immediately so it's available
         // if user logs out and back in before completing full onboarding
+        // Construct full name for backend compatibility
+        const fullName = `${firstName.trim()} ${lastName.trim()}`.trim();
         const dataToSave: Record<string, any> = {
-          name: name.trim(),
+          firstName: firstName.trim(),
+          lastName: lastName.trim(),
+          name: fullName, // Backend compat
           handle: nickname,
           dateOfBirth,
           gender: gender ?? undefined,
@@ -607,21 +770,39 @@ export default function BasicInfoScreen() {
         console.log('[BASIC] ════════════════════════════════════════');
 
         demoStore.saveDemoProfile(newUserId, dataToSave);
-        setAuth(newUserId, "demo_token", false);
+        setAuth(newUserId, "demo_token", false, capturedAuthVersion);
         setStep("consent");
         router.push("/(onboarding)/consent" as any);
         return;
       }
 
       // Live mode: register via Convex using central auth hook
+      // Construct full name from firstName + lastName for backend
+      const fullName = `${firstName.trim()} ${lastName.trim()}`.trim();
+
+      // H7 FIX: capturedAuthVersion already captured at start of handleNext
+
       const result = await submitEmailRegistration({
         email,
         password,
-        name,
+        name: fullName,
         handle: nickname,
         dateOfBirth,
         gender: gender!, // Validated above - gender is not null here
+        lgbtqSelf: lgbtqSelf.length > 0 ? lgbtqSelf : undefined, // LGBTQ identity (optional)
       });
+
+      // H7 FIX: Check if logout happened during mutation (version changed)
+      if (useAuthStore.getState().authVersion !== capturedAuthVersion) {
+        if (__DEV__) console.log('[AUTH] Logout detected during registration - ignoring result');
+        return;
+      }
+
+      // H8 FIX: Check if component unmounted during async registration
+      if (!isMountedRef.current) {
+        if (__DEV__) console.log('[AUTH] Component unmounted during registration - ignoring result');
+        return;
+      }
 
       // If result is null, USER_EXISTS was handled (Alert shown, routing done)
       // Stop execution immediately - do NOT continue onboarding
@@ -630,7 +811,7 @@ export default function BasicInfoScreen() {
       }
 
       if (result.success && result.userId && result.token) {
-        setAuth(result.userId, result.token, false);
+        setAuth(result.userId, result.token, false, capturedAuthVersion);
 
         // STABILITY FIX (2026-03-04): Wrap token persistence in try-catch to prevent navigation on failure
         try {
@@ -669,9 +850,19 @@ export default function BasicInfoScreen() {
   };
 
   // Values to display (read-only uses fetched data, edit uses store)
-  const currentName = isReadOnly ? displayName : name;
+  // CRITICAL: In editFromReview mode, firstName/lastName must use store values (editable)
+  const currentFirstName = (isReadOnly && !isEditFromReview) ? displayFirstName : firstName;
+  const currentLastName = (isReadOnly && !isEditFromReview) ? displayLastName : lastName;
   const currentDOB = isReadOnly ? displayDOB : dateOfBirth;
   const currentGender = isReadOnly ? displayGender : gender;
+
+  // NEW EDIT RESTRICTION LOGIC:
+  // In editFromReview mode: firstName/lastName are EDITABLE, others are LOCKED
+  // In other modes (initial onboarding): ALL fields editable
+  const isFieldLocked = (field: string): boolean => {
+    if (!isEditFromReview) return false;
+    return ['nickname', 'dateOfBirth', 'gender'].includes(field);
+  };
 
   // Loading state for read-only mode
   if (isReadOnly) {
@@ -718,35 +909,58 @@ export default function BasicInfoScreen() {
           : "This information will be shown on your profile."}
       </Text>
 
-      {/* Name field */}
-      <View ref={nameFieldRef} style={styles.field}>
+      {/* First Name field - always editable in editFromReview mode */}
+      <View ref={firstNameFieldRef} style={styles.field}>
         <Input
-          label="Name"
-          value={currentName}
-          onChangeText={isReadOnly ? undefined : (text) => {
-            setName(text);
-            clearFieldError("name");
+          label="First Name"
+          value={currentFirstName}
+          onChangeText={(isReadOnly && !isEditFromReview) ? undefined : (text) => {
+            setFirstName(text);
+            clearFieldError("firstName");
           }}
           placeholder="Your first name"
           autoCapitalize="words"
-          maxLength={VALIDATION.NAME_MAX_LENGTH}
-          editable={!isReadOnly}
-          style={[isReadOnly ? styles.disabledInput : undefined, errors.name ? styles.inputError : undefined]}
+          maxLength={VALIDATION.FIRST_NAME_MAX_LENGTH}
+          editable={!isReadOnly || isEditFromReview}
+          style={[(isReadOnly && !isEditFromReview) ? styles.disabledInput : undefined, errors.firstName ? styles.inputError : undefined]}
         />
-        {!isReadOnly && (
+        {(!isReadOnly || isEditFromReview) && (
           <Text style={styles.hint}>
-            {name.length}/{VALIDATION.NAME_MAX_LENGTH} characters
+            {firstName.length}/{VALIDATION.FIRST_NAME_MAX_LENGTH} characters
           </Text>
         )}
-        {errors.name ? <Text style={styles.fieldError}>{errors.name}</Text> : null}
+        {errors.firstName ? <Text style={styles.fieldError}>{errors.firstName}</Text> : null}
       </View>
 
-      {/* Nickname (User ID) field */}
+      {/* Last Name field - always editable in editFromReview mode */}
+      <View ref={lastNameFieldRef} style={styles.field}>
+        <Input
+          label="Last Name"
+          value={currentLastName}
+          onChangeText={(isReadOnly && !isEditFromReview) ? undefined : (text) => {
+            setLastName(text);
+            clearFieldError("lastName");
+          }}
+          placeholder="Your last name"
+          autoCapitalize="words"
+          maxLength={VALIDATION.LAST_NAME_MAX_LENGTH}
+          editable={!isReadOnly || isEditFromReview}
+          style={[(isReadOnly && !isEditFromReview) ? styles.disabledInput : undefined, errors.lastName ? styles.inputError : undefined]}
+        />
+        {(!isReadOnly || isEditFromReview) && (
+          <Text style={styles.hint}>
+            {lastName.length}/{VALIDATION.LAST_NAME_MAX_LENGTH} characters
+          </Text>
+        )}
+        {errors.lastName ? <Text style={styles.fieldError}>{errors.lastName}</Text> : null}
+      </View>
+
+      {/* Nickname (User ID) field - LOCKED in editFromReview mode */}
       <View ref={nicknameFieldRef} style={styles.field}>
         <Input
           label="Nickname (User ID)"
           value={isReadOnly ? (displayHandle || "—") : nickname}
-          onChangeText={isReadOnly ? undefined : (text) => {
+          onChangeText={(isReadOnly || isFieldLocked('nickname')) ? undefined : (text) => {
             // Only allow alphanumeric and underscores, lowercase
             const sanitized = text.toLowerCase().replace(/[^a-z0-9_]/g, '');
             setNickname(sanitized);
@@ -758,11 +972,11 @@ export default function BasicInfoScreen() {
           autoCapitalize="none"
           autoCorrect={false}
           maxLength={20}
-          editable={!isReadOnly}
-          style={[isReadOnly ? styles.disabledInput : undefined, errors.nickname ? styles.inputError : undefined]}
+          editable={!isReadOnly && !isFieldLocked('nickname')}
+          style={[(isReadOnly || isFieldLocked('nickname')) ? styles.disabledInput : undefined, errors.nickname ? styles.inputError : undefined]}
         />
         {/* Availability indicator (only for new users) */}
-        {!isReadOnly && nickname.length >= 3 && (
+        {!isReadOnly && !isFieldLocked('nickname') && nickname.length >= 3 && (
           <View style={styles.availabilityRow}>
             {isCheckingAvailability ? (
               <>
@@ -782,33 +996,39 @@ export default function BasicInfoScreen() {
             ) : null}
           </View>
         )}
-        {!isReadOnly && (
+        {!isReadOnly && !isFieldLocked('nickname') && (
           <Text style={styles.hint}>
             Letters, numbers, and underscores only. {nickname.length}/20
           </Text>
         )}
+        {isFieldLocked('nickname') && (
+          <Text style={styles.lockedHint}>This field cannot be changed after initial setup</Text>
+        )}
         {errors.nickname ? <Text style={styles.fieldError}>{errors.nickname}</Text> : null}
       </View>
 
-      {/* Date of Birth field */}
+      {/* Date of Birth field - LOCKED in editFromReview mode */}
       <View ref={dobFieldRef} style={styles.field}>
         <Text style={styles.label}>Date of Birth</Text>
         <Button
           title={currentDOB ? formatDate(currentDOB) : "Select your date of birth"}
           variant="outline"
-          onPress={() => !isReadOnly && setShowDatePicker(true)}
-          style={{ ...styles.dateButton, ...(isReadOnly ? styles.disabledButton : {}), ...(errors.dateOfBirth ? styles.buttonError : {}) }}
-          disabled={isReadOnly}
+          onPress={() => !isReadOnly && !isFieldLocked('dateOfBirth') && setShowDatePicker(true)}
+          style={{ ...styles.dateButton, ...((isReadOnly || isFieldLocked('dateOfBirth')) ? styles.disabledButton : {}), ...(errors.dateOfBirth ? styles.buttonError : {}) }}
+          disabled={isReadOnly || isFieldLocked('dateOfBirth')}
         />
         {currentDOB && (
           <Text style={styles.ageText}>
             Age: {calculateAge(currentDOB)} years old
           </Text>
         )}
+        {isFieldLocked('dateOfBirth') && (
+          <Text style={styles.lockedHint}>This field cannot be changed after initial setup</Text>
+        )}
         {errors.dateOfBirth ? <Text style={styles.fieldError}>{errors.dateOfBirth}</Text> : null}
       </View>
 
-      {showDatePicker && !isReadOnly && (
+      {showDatePicker && !isReadOnly && !isFieldLocked('dateOfBirth') && (
         <DateTimePicker
           value={selectedDate}
           mode="date"
@@ -819,7 +1039,7 @@ export default function BasicInfoScreen() {
         />
       )}
 
-      {/* Gender field */}
+      {/* Gender field - LOCKED in editFromReview mode */}
       <View ref={genderFieldRef} style={styles.field}>
         <Text style={styles.label}>I am a</Text>
         <View style={[styles.genderContainer, errors.gender ? styles.genderContainerError : undefined]}>
@@ -829,14 +1049,14 @@ export default function BasicInfoScreen() {
               style={[
                 styles.genderOption,
                 currentGender === option.value && styles.genderOptionSelected,
-                isReadOnly && styles.disabledGenderOption,
+                (isReadOnly || isFieldLocked('gender')) && styles.disabledGenderOption,
               ]}
-              onPress={isReadOnly ? undefined : () => {
+              onPress={(isReadOnly || isFieldLocked('gender')) ? undefined : () => {
                 setGender(option.value as Gender);
                 clearFieldError("gender");
               }}
-              disabled={isReadOnly}
-              activeOpacity={isReadOnly ? 1 : 0.7}
+              disabled={isReadOnly || isFieldLocked('gender')}
+              activeOpacity={(isReadOnly || isFieldLocked('gender')) ? 1 : 0.7}
             >
               <Text
                 style={[
@@ -849,6 +1069,9 @@ export default function BasicInfoScreen() {
             </TouchableOpacity>
           ))}
         </View>
+        {isFieldLocked('gender') && (
+          <Text style={styles.lockedHint}>This field cannot be changed after initial setup</Text>
+        )}
         {errors.gender ? <Text style={styles.fieldError}>{errors.gender}</Text> : null}
       </View>
 
@@ -932,9 +1155,9 @@ export default function BasicInfoScreen() {
       >
         <View style={styles.modalOverlay}>
           <View style={styles.modalContent}>
-            <Text style={styles.modalTitle}>Basic info is fixed</Text>
+            <Text style={styles.modalTitle}>Review your information</Text>
             <Text style={styles.modalMessage}>
-              Your Name, User ID, Date of Birth and Gender can't be changed later. Please make sure they are correct.
+              Your Nickname, Date of Birth and Gender can't be changed later. First and Last Name can be edited anytime. Please make sure everything is correct.
             </Text>
             <View style={styles.modalButtons}>
               <TouchableOpacity
@@ -1005,6 +1228,12 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: COLORS.textLight,
     marginTop: 4,
+  },
+  lockedHint: {
+    fontSize: 12,
+    color: COLORS.textMuted,
+    marginTop: 4,
+    fontStyle: 'italic',
   },
   availabilityRow: {
     flexDirection: "row",

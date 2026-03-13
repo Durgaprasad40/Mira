@@ -20,8 +20,10 @@ import { LinearGradient } from "expo-linear-gradient";
 import { isDemoMode } from "@/hooks/useConvex";
 import { useDemoStore } from "@/stores/demoStore";
 import { useDemoDmStore } from "@/stores/demoDmStore";
+import { useScreenTrace } from "@/lib/devTrace";
 
 export default function TutorialScreen() {
+  useScreenTrace("ONB_TUTORIAL");
   const router = useRouter();
   const { reset } = useOnboardingStore();
   const { setOnboardingCompleted } = useAuthStore();

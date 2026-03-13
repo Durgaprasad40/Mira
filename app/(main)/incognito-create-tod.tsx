@@ -67,6 +67,11 @@ export default function CreateTodScreen() {
   // Get user data from canonical sources
   const userId = useAuthStore((s) => s.userId);
 
+  // M-010 FIX: Generate stable session-scoped fallback ID once
+  // This ensures all anonymous operations use the same ID within a session
+  const stableAnonId = useMemo(() => `anon_session_${Date.now()}`, []);
+  const effectiveUserId = userId || stableAnonId;
+
   // Source 1: demoStore - select STABLE primitives
   const currentDemoUserId = useDemoStore((s) => s.currentDemoUserId);
   const demoProfiles = useDemoStore((s) => s.demoProfiles);
@@ -202,12 +207,13 @@ export default function CreateTodScreen() {
     setIsSubmitting(true);
 
     try {
+      // TOD-001 FIX: Use authUserId for server-side verification
       if (visibility === 'anonymous') {
         // Anonymous: no identity, no photo
         await createPrompt({
           type: postType,
           text: content.trim(),
-          ownerUserId: userId || `anon_${Date.now()}`,
+          authUserId: effectiveUserId,
           isAnonymous: true,
           photoBlurMode: 'none',
         });
@@ -217,7 +223,7 @@ export default function CreateTodScreen() {
         await createPrompt({
           type: postType,
           text: content.trim(),
-          ownerUserId: userId || `anon_${Date.now()}`,
+          authUserId: effectiveUserId,
           isAnonymous: false,
           photoBlurMode: 'none',
           ownerName: ownerIdentity.name,
@@ -233,7 +239,7 @@ export default function CreateTodScreen() {
         await createPrompt({
           type: postType,
           text: content.trim(),
-          ownerUserId: userId || `anon_${Date.now()}`,
+          authUserId: effectiveUserId,
           isAnonymous: false,
           photoBlurMode: 'none',
           ownerName: ownerIdentity.name,

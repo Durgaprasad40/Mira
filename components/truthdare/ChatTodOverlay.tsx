@@ -46,7 +46,7 @@ import { VoiceComposer } from './VoiceComposer';
 import type { TodPrompt, TodProfileVisibility } from '@/types';
 
 const C = INCOGNITO_COLORS;
-const CURRENT_USER_ID = 'me';
+// C-003 FIX: Removed hardcoded CURRENT_USER_ID - now derived from props
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -65,6 +65,8 @@ export interface ChatTodOverlayProps {
   onUnlock: () => void;
   /** Called when user wants to answer with camera (navigate to camera-composer) */
   onOpenCamera: () => void;
+  /** C-003 FIX: Current user ID for real mode (optional, defaults to users[0].id) */
+  currentUserId?: string;
 }
 
 // ─── Component ───────────────────────────────────────────────────────────────
@@ -74,12 +76,17 @@ export function ChatTodOverlay({
   users,
   onUnlock,
   onOpenCamera,
+  currentUserId: propCurrentUserId,
 }: ChatTodOverlayProps) {
   const insets = useSafeAreaInsets();
 
+  // C-003 FIX: Use prop or default to first user (current user by convention)
+  const currentUserId = propCurrentUserId ?? users[0].id;
+
   // Store state
   const game = useGameState(conversationId);
-  const mySkipsRemaining = useMySkipsRemaining(conversationId);
+  // C-003 FIX: Pass currentUserId to get correct skips count
+  const mySkipsRemaining = useMySkipsRemaining(conversationId, currentUserId);
 
   // Store actions
   const initGame = useChatTodStore((s) => s.initGame);
@@ -126,7 +133,8 @@ export function ChatTodOverlay({
 
   const handleSpinEnd = useCallback(
     (winnerId: string) => {
-      completeSpinAnimation(conversationId);
+      // C-001 FIX: Pass the winnerId to sync with animation
+      completeSpinAnimation(conversationId, winnerId);
     },
     [conversationId, completeSpinAnimation]
   );
@@ -140,8 +148,9 @@ export function ChatTodOverlay({
   }, [conversationId, chooseTruthOrDare]);
 
   const handleSkipChoosing = useCallback(() => {
-    useSkip(conversationId, CURRENT_USER_ID);
-  }, [conversationId, useSkip]);
+    // C-003 FIX: Use actual currentUserId
+    useSkip(conversationId, currentUserId);
+  }, [conversationId, currentUserId, useSkip]);
 
   const handleSubmitPrompt = useCallback(() => {
     if (promptText.trim().length < 5) return;
@@ -235,8 +244,9 @@ export function ChatTodOverlay({
   }, [game?.roundPhase, conversationId, submitAnswer]);
 
   const handleSkipAnswering = useCallback(() => {
-    useSkip(conversationId, CURRENT_USER_ID);
-  }, [conversationId, useSkip]);
+    // C-003 FIX: Use actual currentUserId
+    useSkip(conversationId, currentUserId);
+  }, [conversationId, currentUserId, useSkip]);
 
   const handleUnlockChat = useCallback(() => {
     completeMandatoryRound(conversationId);
@@ -258,9 +268,10 @@ export function ChatTodOverlay({
     return null;
   }
 
-  const isMyTurnToChoose = game.chooserUserId === CURRENT_USER_ID;
-  const isMyTurnToAnswer = game.responderUserId === CURRENT_USER_ID;
-  const otherUser = users.find((u) => u.id !== CURRENT_USER_ID) || users[1];
+  // C-003 FIX: Use actual currentUserId for turn checks
+  const isMyTurnToChoose = game.chooserUserId === currentUserId;
+  const isMyTurnToAnswer = game.responderUserId === currentUserId;
+  const otherUser = users.find((u) => u.id !== currentUserId) || users[1];
 
   return (
     <View style={[styles.overlay, { paddingTop: insets.top, paddingBottom: insets.bottom }]}>
@@ -450,7 +461,7 @@ export function ChatTodOverlay({
                   <View style={styles.answerTypeRow}>
                     <TouchableOpacity
                       style={styles.answerTypeButton}
-                      onPress={() => {}}
+                      onPress={() => setShowVoiceRecorder(false)}
                       activeOpacity={0.7}
                     >
                       <Ionicons name="create-outline" size={24} color={C.primary} />

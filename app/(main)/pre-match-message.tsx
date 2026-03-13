@@ -84,8 +84,9 @@ export default function PreMatchMessageScreen() {
 
     setSending(true);
     try {
+      // MSG-002 FIX: Use authUserId for server-side verification
       await sendPreMatchMessage({
-        fromUserId: userId as any,
+        authUserId: userId!,
         toUserId: targetUserId as any,
         content: message,
         templateId: selectedTemplate || undefined,

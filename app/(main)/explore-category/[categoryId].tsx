@@ -1,4 +1,4 @@
-import React, { useMemo, useEffect } from 'react';
+import React, { useMemo } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity } from 'react-native';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -26,10 +26,6 @@ export default function ExploreCategoryScreen() {
     [profiles, cat],
   );
 
-  useEffect(() => {
-    if (__DEV__) console.log("[ExploreCategory]", categoryId, "matches", items.length);
-  }, [categoryId, items.length]);
-
   return (
     <View style={styles.container}>
       {/* Custom header over the card stack */}
@@ -47,11 +43,18 @@ export default function ExploreCategoryScreen() {
         <DiscoverCardStack externalProfiles={items} hideHeader />
       ) : (
         <View style={styles.emptyState}>
-          <Text style={styles.emptyEmoji}>✨</Text>
-          <Text style={styles.emptyTitle}>You're all caught up</Text>
+          <Text style={styles.emptyEmoji}>🔍</Text>
+          <Text style={styles.emptyTitle}>No profiles yet</Text>
           <Text style={styles.emptySubtitle}>
-            Check back soon — we'll bring you more people as they join.
+            No one matches this category right now. Check back later or explore other categories.
           </Text>
+          <TouchableOpacity
+            style={styles.emptyBackButton}
+            onPress={() => router.back()}
+          >
+            <Ionicons name="arrow-back" size={18} color={COLORS.white} />
+            <Text style={styles.emptyBackText}>Back to Explore</Text>
+          </TouchableOpacity>
         </View>
       )}
     </View>
@@ -100,5 +103,20 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     lineHeight: 22,
     paddingHorizontal: 16,
+  },
+  emptyBackButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: COLORS.primary,
+    paddingHorizontal: 20,
+    paddingVertical: 12,
+    borderRadius: 24,
+    marginTop: 24,
+    gap: 8,
+  },
+  emptyBackText: {
+    color: COLORS.white,
+    fontSize: 15,
+    fontWeight: '600',
   },
 });

@@ -118,7 +118,6 @@ export const useDiscoverStore = create<DiscoverState>()((set, get) => ({
     const newCount = swipeCount + 1;
     const newIntent = hasUserShownIntent || newCount >= 1;
     set({ swipeCount: newCount, hasUserShownIntent: newIntent });
-    if (__DEV__) console.log('[F2-A] incSwipe:', newCount, 'intent:', newIntent);
   },
 
   incProfileView: () => {
@@ -126,7 +125,6 @@ export const useDiscoverStore = create<DiscoverState>()((set, get) => ({
     const newCount = profileViewCount + 1;
     const newIntent = hasUserShownIntent || newCount >= 3;
     set({ profileViewCount: newCount, hasUserShownIntent: newIntent });
-    if (__DEV__) console.log('[F2-A] incProfileView:', newCount, 'intent:', newIntent);
   },
 
   setLastRandomMatchAt: (ts: number) => {

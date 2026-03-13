@@ -2,7 +2,24 @@ import { v } from "convex/values";
 import { mutation, query } from "./_generated/server";
 import { Id } from "./_generated/dataModel";
 import { logAdminAction } from "./adminLog";
-import { resolveUserIdByAuthId, ensureUserByAuthId } from "./helpers";
+import { resolveUserIdByAuthId, ensureUserByAuthId, validateSessionToken } from "./helpers";
+
+// ALLOWED_RELATIONSHIP_INTENTS: Schema-safe values (excludes UI-only values like single_parent, just_18)
+const ALLOWED_RELATIONSHIP_INTENTS = new Set([
+  'long_term', 'short_term', 'fwb', 'figuring_out',
+  'short_to_long', 'long_to_short', 'new_friends', 'open_to_anything'
+]);
+
+// Sanitize relationshipIntent to only include schema-valid values
+function sanitizeRelationshipIntent(intent: string[] | undefined): string[] | undefined {
+  if (!intent || !Array.isArray(intent)) return intent;
+  const sanitized = intent.filter(v => ALLOWED_RELATIONSHIP_INTENTS.has(v));
+  const removed = intent.filter(v => !ALLOWED_RELATIONSHIP_INTENTS.has(v));
+  if (removed.length > 0) {
+    console.warn('[SANITIZE] Removed invalid relationshipIntent values:', removed);
+  }
+  return sanitized.length > 0 ? sanitized : undefined;
+}
 
 // Get current user profile
 export const getCurrentUser = query({
@@ -172,6 +189,15 @@ export const updateProfile = mutation({
     name: v.optional(v.string()),
     bio: v.optional(v.string()),
     height: v.optional(v.number()),
+    weight: v.optional(v.number()),
+    exercise: v.optional(
+      v.union(
+        v.literal("never"),
+        v.literal("sometimes"),
+        v.literal("regularly"),
+        v.literal("daily"),
+      ),
+    ),
     smoking: v.optional(
       v.union(
         v.literal("never"),
@@ -349,6 +375,39 @@ export const updatePreferences = mutation({
         ),
       ),
     ),
+    relationshipIntent: v.optional(
+      v.array(
+        v.union(
+          v.literal("long_term"),
+          v.literal("short_term"),
+          v.literal("fwb"),
+          v.literal("figuring_out"),
+          v.literal("short_to_long"),
+          v.literal("long_to_short"),
+          v.literal("new_friends"),
+          v.literal("open_to_anything"),
+        ),
+      ),
+    ),
+    orientation: v.optional(
+      v.union(
+        v.literal("straight"),
+        v.literal("gay"),
+        v.literal("lesbian"),
+        v.literal("bisexual"),
+        v.literal("prefer_not_to_say"),
+        v.null(),
+      ),
+    ),
+    sortBy: v.optional(
+      v.union(
+        v.literal("recommended"),
+        v.literal("newest"),
+        v.literal("distance"),
+        v.literal("age"),
+        v.literal("recently_active"),
+      ),
+    ),
     minAge: v.optional(v.number()),
     maxAge: v.optional(v.number()),
     maxDistance: v.optional(v.number()),
@@ -450,14 +509,123 @@ export const toggleIncognito = mutation({
   },
 });
 
-// Toggle discovery pause
-export const toggleDiscoveryPause = mutation({
+// ---------------------------------------------------------------------------
+// Nearby Settings
+// ---------------------------------------------------------------------------
+
+/**
+ * Update nearby settings (visibility, privacy, crossed paths).
+ * All fields are optional - only provided fields will be updated.
+ */
+export const updateNearbySettings = mutation({
+  args: {
+    userId: v.id("users"),
+    token: v.optional(v.string()), // Session token for auth validation
+    nearbyEnabled: v.optional(v.boolean()),
+    crossedPathsEnabled: v.optional(v.boolean()),
+    hideDistance: v.optional(v.boolean()),
+    strongPrivacyMode: v.optional(v.boolean()),
+    incognitoMode: v.optional(v.boolean()),
+    nearbyVisibilityMode: v.optional(
+      v.union(
+        v.literal("always"),
+        v.literal("app_open"),
+        v.literal("recent")
+      )
+    ),
+  },
+  handler: async (ctx, args) => {
+    const { userId, token, incognitoMode, ...updates } = args;
+
+    // Auth validation: if token provided, verify it matches the userId
+    if (token) {
+      const authenticatedUserId = await validateSessionToken(ctx, token);
+      if (!authenticatedUserId) {
+        throw new Error("Unauthorized: invalid or expired session");
+      }
+      if (authenticatedUserId !== userId) {
+        throw new Error("Unauthorized: cannot modify another user's settings");
+      }
+    }
+
+    const user = await ctx.db.get(userId);
+    if (!user) throw new Error("User not found");
+
+    // Check premium access for incognito mode (premium-only, no gender-based access)
+    if (incognitoMode !== undefined) {
+      const isPremium = user.subscriptionTier === "premium";
+      if (!isPremium && incognitoMode) {
+        throw new Error("Premium required for Incognito Nearby");
+      }
+      (updates as Record<string, unknown>).incognitoMode = incognitoMode;
+    }
+
+    // Filter out undefined values
+    const cleanUpdates: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(updates)) {
+      if (value !== undefined) {
+        cleanUpdates[key] = value;
+      }
+    }
+
+    if (Object.keys(cleanUpdates).length > 0) {
+      await ctx.db.patch(userId, cleanUpdates);
+    }
+
+    return { success: true };
+  },
+});
+
+/**
+ * Pause nearby visibility for 24 hours.
+ */
+export const pauseNearby = mutation({
   args: {
     userId: v.id("users"),
     paused: v.boolean(),
   },
   handler: async (ctx, args) => {
     const { userId, paused } = args;
+
+    const user = await ctx.db.get(userId);
+    if (!user) throw new Error("User not found");
+
+    if (paused) {
+      // Pause for 24 hours
+      await ctx.db.patch(userId, {
+        nearbyPausedUntil: Date.now() + 24 * 60 * 60 * 1000,
+      });
+    } else {
+      // Clear pause
+      await ctx.db.patch(userId, {
+        nearbyPausedUntil: undefined,
+      });
+    }
+
+    return { success: true };
+  },
+});
+
+// Toggle discovery pause
+export const toggleDiscoveryPause = mutation({
+  args: {
+    userId: v.id("users"),
+    token: v.optional(v.string()), // Session token for auth validation
+    paused: v.boolean(),
+  },
+  handler: async (ctx, args) => {
+    const { userId, token, paused } = args;
+
+    // Auth validation: if token provided, verify it matches the userId
+    if (token) {
+      const authenticatedUserId = await validateSessionToken(ctx, token);
+      if (!authenticatedUserId) {
+        throw new Error("Unauthorized: invalid or expired session");
+      }
+      if (authenticatedUserId !== userId) {
+        throw new Error("Unauthorized: cannot modify another user's settings");
+      }
+    }
 
     const user = await ctx.db.get(userId);
     if (!user) throw new Error("User not found");
@@ -472,6 +640,115 @@ export const toggleDiscoveryPause = mutation({
         isDiscoveryPaused: false,
         discoveryPausedUntil: undefined,
       });
+    }
+
+    return { success: true };
+  },
+});
+
+// Toggle show last seen
+export const toggleShowLastSeen = mutation({
+  args: {
+    userId: v.id("users"),
+    enabled: v.boolean(),
+  },
+  handler: async (ctx, args) => {
+    const { userId, enabled } = args;
+
+    const user = await ctx.db.get(userId);
+    if (!user) throw new Error("User not found");
+
+    await ctx.db.patch(userId, { showLastSeen: enabled });
+    return { success: true };
+  },
+});
+
+// Update privacy settings (hideAge, disableReadReceipts)
+export const updatePrivacySettings = mutation({
+  args: {
+    userId: v.id("users"),
+    token: v.optional(v.string()), // Session token for auth validation
+    hideAge: v.optional(v.boolean()),
+    disableReadReceipts: v.optional(v.boolean()),
+  },
+  handler: async (ctx, args) => {
+    const { userId, token, hideAge, disableReadReceipts } = args;
+
+    // Auth validation: if token provided, verify it matches the userId
+    if (token) {
+      const authenticatedUserId = await validateSessionToken(ctx, token);
+      if (!authenticatedUserId) {
+        throw new Error("Unauthorized: invalid or expired session");
+      }
+      if (authenticatedUserId !== userId) {
+        throw new Error("Unauthorized: cannot modify another user's settings");
+      }
+    }
+
+    const user = await ctx.db.get(userId);
+    if (!user) throw new Error("User not found");
+
+    // Build update object with only provided fields
+    const updates: Record<string, boolean> = {};
+    if (hideAge !== undefined) updates.hideAge = hideAge;
+    if (disableReadReceipts !== undefined) updates.disableReadReceipts = disableReadReceipts;
+
+    if (Object.keys(updates).length > 0) {
+      await ctx.db.patch(userId, updates);
+    }
+
+    return { success: true };
+  },
+});
+
+// Update notification settings
+export const updateNotificationSettings = mutation({
+  args: {
+    userId: v.id("users"),
+    notificationsEnabled: v.optional(v.boolean()),
+    emailNotificationsEnabled: v.optional(v.boolean()),
+    // Notification type preferences
+    notifyNewMatches: v.optional(v.boolean()),
+    notifyNewMessages: v.optional(v.boolean()),
+    notifyLikesAndSuperLikes: v.optional(v.boolean()),
+    notifyProfileViews: v.optional(v.boolean()),
+  },
+  handler: async (ctx, args) => {
+    const {
+      userId,
+      notificationsEnabled,
+      emailNotificationsEnabled,
+      notifyNewMatches,
+      notifyNewMessages,
+      notifyLikesAndSuperLikes,
+      notifyProfileViews,
+    } = args;
+
+    const user = await ctx.db.get(userId);
+    if (!user) throw new Error("User not found");
+
+    const updates: Record<string, boolean> = {};
+    if (notificationsEnabled !== undefined) {
+      updates.notificationsEnabled = notificationsEnabled;
+    }
+    if (emailNotificationsEnabled !== undefined) {
+      updates.emailNotificationsEnabled = emailNotificationsEnabled;
+    }
+    if (notifyNewMatches !== undefined) {
+      updates.notifyNewMatches = notifyNewMatches;
+    }
+    if (notifyNewMessages !== undefined) {
+      updates.notifyNewMessages = notifyNewMessages;
+    }
+    if (notifyLikesAndSuperLikes !== undefined) {
+      updates.notifyLikesAndSuperLikes = notifyLikesAndSuperLikes;
+    }
+    if (notifyProfileViews !== undefined) {
+      updates.notifyProfileViews = notifyProfileViews;
+    }
+
+    if (Object.keys(updates).length > 0) {
+      await ctx.db.patch(userId, updates);
     }
 
     return { success: true };
@@ -550,6 +827,11 @@ export const blockUser = mutation({
   handler: async (ctx, args) => {
     const { blockerId, blockedUserId } = args;
 
+    // Prevent self-blocking
+    if (blockerId === blockedUserId) {
+      return { success: false, error: 'cannot_block_self' };
+    }
+
     // Check if already blocked
     const existing = await ctx.db
       .query("blocks")
@@ -612,6 +894,11 @@ export const reportUser = mutation({
   handler: async (ctx, args) => {
     const { reporterId, reportedUserId, reason, description } = args;
     const now = Date.now();
+
+    // Prevent self-reporting
+    if (reporterId === reportedUserId) {
+      return { success: false, error: 'cannot_report_self' };
+    }
 
     await ctx.db.insert("reports", {
       reporterId,
@@ -922,6 +1209,14 @@ export const completeOnboarding = mutation({
     // Add pets and insect to cleanUpdates
     if (pets !== undefined) cleanUpdates.pets = pets;
     if (insect !== undefined) cleanUpdates.insect = insect;
+
+    // DEFENSIVE SANITIZATION: Filter out invalid relationshipIntent values
+    // This prevents schema validation errors from UI-only values like single_parent, just_18
+    if (cleanUpdates.relationshipIntent) {
+      cleanUpdates.relationshipIntent = sanitizeRelationshipIntent(
+        cleanUpdates.relationshipIntent as string[]
+      );
+    }
 
     // Mark onboarding as completed
     cleanUpdates.onboardingCompleted = true;
@@ -1309,23 +1604,29 @@ export const getPreferredChatRoom = query({
 /**
  * Set the user's preferred chat room.
  * Called when user enters a chat room (auto-saved as preferred).
+ * CR-017 FIX: Auth hardening - verify caller identity, don't trust client userId
  */
 export const setPreferredChatRoom = mutation({
   args: {
-    userId: v.id("users"),
+    authUserId: v.string(), // CR-017: Auth verification required
     roomId: v.id("chatRooms"),
   },
-  handler: async (ctx, args) => {
-    const user = await ctx.db.get(args.userId);
-    if (!user) {
-      throw new Error("User not found");
+  handler: async (ctx, { authUserId, roomId }) => {
+    // CR-017 FIX: Verify caller identity via session-based auth
+    if (!authUserId || authUserId.trim().length === 0) {
+      throw new Error("Unauthorized: authentication required");
     }
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      throw new Error("Unauthorized: user not found");
+    }
+
     // Verify room exists
-    const room = await ctx.db.get(args.roomId);
+    const room = await ctx.db.get(roomId);
     if (!room) {
       throw new Error("Room not found");
     }
-    await ctx.db.patch(args.userId, { preferredChatRoomId: args.roomId });
+    await ctx.db.patch(userId, { preferredChatRoomId: roomId });
     return { success: true };
   },
 });
@@ -1333,17 +1634,23 @@ export const setPreferredChatRoom = mutation({
 /**
  * Clear the user's preferred chat room.
  * Called when user explicitly leaves the room via "Leave Room" action.
+ * CR-017 FIX: Auth hardening - verify caller identity, don't trust client userId
  */
 export const clearPreferredChatRoom = mutation({
   args: {
-    userId: v.id("users"),
+    authUserId: v.string(), // CR-017: Auth verification required
   },
-  handler: async (ctx, args) => {
-    const user = await ctx.db.get(args.userId);
-    if (!user) {
-      throw new Error("User not found");
+  handler: async (ctx, { authUserId }) => {
+    // CR-017 FIX: Verify caller identity via session-based auth
+    if (!authUserId || authUserId.trim().length === 0) {
+      throw new Error("Unauthorized: authentication required");
     }
-    await ctx.db.patch(args.userId, { preferredChatRoomId: undefined });
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      throw new Error("Unauthorized: user not found");
+    }
+
+    await ctx.db.patch(userId, { preferredChatRoomId: undefined });
     return { success: true };
   },
 });
@@ -1419,6 +1726,14 @@ export const upsertOnboardingDraft = mutation({
       },
     };
 
+    // DEFENSIVE SANITIZATION: Filter out invalid relationshipIntent values before saving
+    // This prevents schema validation errors from UI-only values like single_parent, just_18
+    if (mergedDraft.preferences?.relationshipIntent) {
+      mergedDraft.preferences.relationshipIntent = sanitizeRelationshipIntent(
+        mergedDraft.preferences.relationshipIntent
+      );
+    }
+
     await ctx.db.patch(userId, {
       onboardingDraft: mergedDraft,
     });
@@ -1475,6 +1790,8 @@ export const getOnboardingStatus = query({
       // Verification status
       referencePhotoExists: !!user.verificationReferencePhotoId,
       verificationReferencePhotoId: user.verificationReferencePhotoId || null,
+      // C5 FIX: Include URL for face verification (persisted, survives app restart)
+      verificationReferencePhotoUrl: user.verificationReferencePhotoUrl || null,
       faceVerificationStatus: user.faceVerificationStatus || 'unverified',
       faceVerificationPassed: user.faceVerificationStatus === 'verified',
       faceVerificationPending: user.faceVerificationStatus === 'pending',
@@ -1486,10 +1803,19 @@ export const getOnboardingStatus = query({
       // Onboarding state
       onboardingCompleted: user.onboardingCompleted || false,
       onboardingDraft: user.onboardingDraft || null,
+
+      // Phase-2 onboarding state (Private Mode)
+      phase2OnboardingCompleted: user.phase2OnboardingCompleted || false,
+
+      // Private welcome/guidelines confirmation (18+ consent gate)
+      privateWelcomeConfirmed: user.privateWelcomeConfirmed || false,
     };
 
     console.log('[ONB_STATUS]', JSON.stringify({
       userId: userId.substring(0, 8),
+      onboardingCompleted: status.onboardingCompleted,
+      phase2OnboardingCompleted: status.phase2OnboardingCompleted,
+      privateWelcomeConfirmed: status.privateWelcomeConfirmed,
       basicInfoPresent: status.basicInfoComplete,
       referencePhotoExists: status.referencePhotoExists,
       faceStatus: status.faceVerificationStatus,
@@ -1499,5 +1825,551 @@ export const getOnboardingStatus = query({
     }));
 
     return status;
+  },
+});
+
+/**
+ * Set Phase-2 onboarding as completed for a user.
+ * This is a one-time operation - once set, onboarding never shows again.
+ * Called from profile-setup.tsx when user completes Phase-2 onboarding.
+ */
+export const setPhase2OnboardingCompleted = mutation({
+  args: {
+    userId: v.union(v.id('users'), v.string()),
+  },
+  handler: async (ctx, args) => {
+    const resolvedUserId = await resolveUserIdByAuthId(ctx, args.userId as string);
+    if (!resolvedUserId) {
+      console.warn('[P2_ONBOARD] setPhase2OnboardingCompleted: user not found');
+      return { success: false, error: 'user_not_found' };
+    }
+
+    const user = await ctx.db.get(resolvedUserId);
+    if (!user) {
+      console.warn('[P2_ONBOARD] setPhase2OnboardingCompleted: user document not found');
+      return { success: false, error: 'user_not_found' };
+    }
+
+    // Idempotent: skip if already completed
+    if (user.phase2OnboardingCompleted) {
+      console.log('[P2_ONBOARD] setPhase2OnboardingCompleted: already completed, skipping');
+      return { success: true, alreadyCompleted: true };
+    }
+
+    // Set the flag
+    await ctx.db.patch(resolvedUserId, {
+      phase2OnboardingCompleted: true,
+      phase2OnboardingCompletedAt: Date.now(),
+    });
+
+    console.log('[P2_ONBOARD] setPhase2OnboardingCompleted: success for user', resolvedUserId.substring(0, 8));
+    return { success: true };
+  },
+});
+
+/**
+ * Set Private welcome/guidelines as confirmed for a user (18+ consent gate).
+ * This is a one-time operation - once set, consent screen never shows again.
+ * Called from PrivateConsentGate when user confirms.
+ */
+export const setPrivateWelcomeConfirmed = mutation({
+  args: {
+    userId: v.union(v.id('users'), v.string()),
+  },
+  handler: async (ctx, args) => {
+    const resolvedUserId = await resolveUserIdByAuthId(ctx, args.userId as string);
+    if (!resolvedUserId) {
+      console.warn('[PRIVATE_WELCOME] setPrivateWelcomeConfirmed: user not found');
+      return { success: false, error: 'user_not_found' };
+    }
+
+    const user = await ctx.db.get(resolvedUserId);
+    if (!user) {
+      console.warn('[PRIVATE_WELCOME] setPrivateWelcomeConfirmed: user document not found');
+      return { success: false, error: 'user_not_found' };
+    }
+
+    // Idempotent: skip if already confirmed
+    if (user.privateWelcomeConfirmed) {
+      console.log('[PRIVATE_WELCOME] setPrivateWelcomeConfirmed: already confirmed, skipping');
+      return { success: true, alreadyConfirmed: true };
+    }
+
+    // Set the flag
+    await ctx.db.patch(resolvedUserId, {
+      privateWelcomeConfirmed: true,
+      privateWelcomeConfirmedAt: Date.now(),
+    });
+
+    console.log('[PRIVATE_WELCOME] setPrivateWelcomeConfirmed: success for user', resolvedUserId.substring(0, 8));
+    return { success: true };
+  },
+});
+
+/**
+ * DEV ONLY: Reset Phase-2 onboarding for a user.
+ * This allows re-testing Phase-2 onboarding by clearing all completion flags
+ * and deleting the private profile.
+ *
+ * SAFETY: Does NOT touch Phase-1 data, auth, or main profile.
+ *
+ * What this resets:
+ * - users.phase2OnboardingCompleted → false
+ * - users.phase2OnboardingCompletedAt → undefined
+ * - users.privateWelcomeConfirmed → false (optional, for full reset)
+ * - userPrivateProfiles record → DELETED
+ * - privateDeletionStates record → DELETED (if exists)
+ */
+export const resetPhase2Onboarding = mutation({
+  args: {
+    userId: v.union(v.id('users'), v.string()),
+  },
+  handler: async (ctx, args) => {
+    const resolvedUserId = await resolveUserIdByAuthId(ctx, args.userId as string);
+    if (!resolvedUserId) {
+      console.warn('[P2_RESET] resetPhase2Onboarding: user not found');
+      return { success: false, error: 'user_not_found' };
+    }
+
+    const user = await ctx.db.get(resolvedUserId);
+    if (!user) {
+      console.warn('[P2_RESET] resetPhase2Onboarding: user document not found');
+      return { success: false, error: 'user_not_found' };
+    }
+
+    console.log('[P2_RESET] Starting Phase-2 reset for user:', resolvedUserId.substring(0, 8));
+
+    // 1. Clear Phase-2 completion flags on user record
+    await ctx.db.patch(resolvedUserId, {
+      phase2OnboardingCompleted: false,
+      phase2OnboardingCompletedAt: undefined,
+      privateWelcomeConfirmed: false,
+      privateWelcomeConfirmedAt: undefined,
+    });
+    console.log('[P2_RESET] Cleared phase2OnboardingCompleted flag');
+
+    // 2. Delete userPrivateProfiles record (if exists)
+    const privateProfile = await ctx.db
+      .query('userPrivateProfiles')
+      .withIndex('by_user', (q) => q.eq('userId', resolvedUserId))
+      .first();
+
+    if (privateProfile) {
+      await ctx.db.delete(privateProfile._id);
+      console.log('[P2_RESET] Deleted userPrivateProfiles record');
+    } else {
+      console.log('[P2_RESET] No userPrivateProfiles record found');
+    }
+
+    // 3. Delete privateDeletionStates record (if exists)
+    const deletionState = await ctx.db
+      .query('privateDeletionStates')
+      .withIndex('by_userId', (q) => q.eq('userId', resolvedUserId))
+      .first();
+
+    if (deletionState) {
+      await ctx.db.delete(deletionState._id);
+      console.log('[P2_RESET] Deleted privateDeletionStates record');
+    }
+
+    console.log('[P2_RESET] Phase-2 reset complete for user:', resolvedUserId.substring(0, 8));
+    return { success: true };
+  },
+});
+
+// ============================================================================
+// DEV ONLY: WIPE TEST USER DATA
+// ============================================================================
+
+/**
+ * DEV ONLY: Completely wipe all data for the current test user.
+ * This allows starting fresh with a clean slate for testing onboarding.
+ *
+ * WHAT THIS DELETES:
+ * - The user document itself
+ * - All photos (metadata - storage files remain for cleanup separately)
+ * - All likes sent/received
+ * - All matches
+ * - All conversations and messages
+ * - All notifications
+ * - All sessions
+ * - All private profiles
+ * - All other user-linked records
+ *
+ * AFTER WIPE:
+ * - User must clear local stores and logout
+ * - On next login, a completely fresh user will be created
+ * - No stale data will survive
+ */
+export const devWipeMyTestUserData = mutation({
+  args: {
+    userId: v.union(v.id('users'), v.string()),
+  },
+  handler: async (ctx, args) => {
+    // STRICT PRODUCTION GUARD: Only allow in development environment
+    if (process.env.NODE_ENV !== 'development') {
+      throw new Error('devWipeMyTestUserData is disabled in production');
+    }
+
+    console.log('[DEV_WIPE] === STARTING USER DATA WIPE ===');
+    console.log('[DEV_WIPE] Input userId:', args.userId);
+
+    const resolvedUserId = await resolveUserIdByAuthId(ctx, args.userId as string);
+    if (!resolvedUserId) {
+      console.log('[DEV_WIPE] User not found');
+      return { success: false, error: 'user_not_found' };
+    }
+
+    const user = await ctx.db.get(resolvedUserId);
+    if (!user) {
+      console.log('[DEV_WIPE] User document not found');
+      return { success: false, error: 'user_not_found' };
+    }
+
+    console.log('[DEV_WIPE] Wiping data for user:', user.name, '(', resolvedUserId.substring(0, 8), ')');
+
+    const deletedCounts: Record<string, number> = {};
+
+    // Helper to delete records from a table
+    const deleteFromTable = async (
+      tableName: string,
+      indexName: string,
+      fieldName: string,
+      fieldValue: Id<'users'>
+    ) => {
+      const records = await ctx.db
+        .query(tableName as any)
+        .withIndex(indexName as any, (q: any) => q.eq(fieldName, fieldValue))
+        .collect();
+
+      for (const record of records) {
+        await ctx.db.delete(record._id);
+      }
+
+      deletedCounts[tableName] = (deletedCounts[tableName] || 0) + records.length;
+    };
+
+    // 1. Delete photos
+    await deleteFromTable('photos', 'by_user', 'userId', resolvedUserId);
+
+    // 2. Delete likes (sent and received)
+    const likesSent = await ctx.db
+      .query('likes')
+      .withIndex('by_from_user', (q) => q.eq('fromUserId', resolvedUserId))
+      .collect();
+    for (const like of likesSent) await ctx.db.delete(like._id);
+    deletedCounts['likes_sent'] = likesSent.length;
+
+    const likesReceived = await ctx.db
+      .query('likes')
+      .withIndex('by_to_user', (q) => q.eq('toUserId', resolvedUserId))
+      .collect();
+    for (const like of likesReceived) await ctx.db.delete(like._id);
+    deletedCounts['likes_received'] = likesReceived.length;
+
+    // 3. Delete matches (where user is either user1 or user2)
+    const matches1 = await ctx.db
+      .query('matches')
+      .withIndex('by_user1', (q) => q.eq('user1Id', resolvedUserId))
+      .collect();
+    for (const match of matches1) await ctx.db.delete(match._id);
+
+    const matches2 = await ctx.db
+      .query('matches')
+      .withIndex('by_user2', (q) => q.eq('user2Id', resolvedUserId))
+      .collect();
+    for (const match of matches2) await ctx.db.delete(match._id);
+    deletedCounts['matches'] = matches1.length + matches2.length;
+
+    // 4. Delete conversation participants and related data
+    await deleteFromTable('conversationParticipants', 'by_user', 'userId', resolvedUserId);
+
+    // 5. Delete notifications
+    await deleteFromTable('notifications', 'by_user', 'userId', resolvedUserId);
+
+    // 6. Delete sessions
+    await deleteFromTable('sessions', 'by_user', 'userId', resolvedUserId);
+
+    // 7. Delete private profiles
+    await deleteFromTable('userPrivateProfiles', 'by_user', 'userId', resolvedUserId);
+
+    // 8. Delete private deletion states
+    await deleteFromTable('privateDeletionStates', 'by_userId', 'userId', resolvedUserId);
+
+    // 9. Delete verification sessions
+    await deleteFromTable('verificationSessions', 'by_user', 'userId', resolvedUserId);
+
+    // 10. Delete filter presets
+    await deleteFromTable('filterPresets', 'by_user', 'userId', resolvedUserId);
+
+    // 11. Delete behavior flags
+    await deleteFromTable('behaviorFlags', 'by_user', 'userId', resolvedUserId);
+
+    // 12. Delete device fingerprints
+    await deleteFromTable('deviceFingerprints', 'by_user', 'userId', resolvedUserId);
+
+    // 13. Finally, delete the user document itself
+    await ctx.db.delete(resolvedUserId);
+    deletedCounts['users'] = 1;
+
+    console.log('[DEV_WIPE] Deletion counts:', JSON.stringify(deletedCounts));
+    console.log('[DEV_WIPE] === USER DATA WIPE COMPLETE ===');
+
+    return {
+      success: true,
+      deletedUserId: resolvedUserId,
+      deletedCounts,
+      message: 'User data wiped. Clear local stores and logout to complete.',
+    };
+  },
+});
+
+// ============================================================================
+// PHASE-2 SAFETY + TRUST QUERIES
+// ============================================================================
+
+/**
+ * Get list of users blocked by the current user.
+ * Returns basic info for display in Blocked Users settings screen.
+ * Auth-safe: uses authUserId parameter instead of ctx.auth.
+ */
+export const getMyBlockedUsers = query({
+  args: {
+    authUserId: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const resolvedUserId = await resolveUserIdByAuthId(ctx, args.authUserId);
+    if (!resolvedUserId) {
+      return { success: false, error: 'user_not_found', blockedUsers: [] };
+    }
+
+    // Get all blocks where this user is the blocker
+    const blocks = await ctx.db
+      .query('blocks')
+      .withIndex('by_blocker', (q) => q.eq('blockerId', resolvedUserId))
+      .collect();
+
+    // Fetch basic info for each blocked user
+    const blockedUsers = await Promise.all(
+      blocks.map(async (block) => {
+        const user = await ctx.db.get(block.blockedUserId);
+        if (!user) return null;
+        return {
+          blockId: block._id,
+          blockedUserId: block.blockedUserId,
+          displayName: user.name || 'Unknown',
+          blockedAt: block.createdAt,
+        };
+      })
+    );
+
+    return {
+      success: true,
+      blockedUsers: blockedUsers.filter(Boolean),
+    };
+  },
+});
+
+/**
+ * Get reports submitted by the current user (last 30 days).
+ * Does NOT expose any info about who reported the current user.
+ * Auth-safe: uses authUserId parameter instead of ctx.auth.
+ */
+export const getMyReports = query({
+  args: {
+    authUserId: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const resolvedUserId = await resolveUserIdByAuthId(ctx, args.authUserId);
+    if (!resolvedUserId) {
+      return { success: false, error: 'user_not_found', reports: [] };
+    }
+
+    // 30-day window
+    const thirtyDaysAgo = Date.now() - 30 * 24 * 60 * 60 * 1000;
+
+    // Get reports where this user is the reporter
+    const reports = await ctx.db
+      .query('reports')
+      .withIndex('by_reporter', (q) => q.eq('reporterId', resolvedUserId))
+      .filter((q) => q.gte(q.field('createdAt'), thirtyDaysAgo))
+      .order('desc')
+      .collect();
+
+    // Map to safe output (no reportedUserId info for privacy)
+    const safeReports = reports.map((report) => ({
+      reportId: report._id,
+      reason: report.reason,
+      status: report.status,
+      createdAt: report.createdAt,
+      hasDescription: !!report.description,
+    }));
+
+    return {
+      success: true,
+      reports: safeReports,
+    };
+  },
+});
+
+// ============================================================================
+// DEV ONLY: WIPE ALL USER DATA (NUCLEAR OPTION)
+// ============================================================================
+
+/**
+ * DEV ONLY: Wipe ALL user data from ALL user-related tables.
+ * This is the "nuclear option" for completely resetting the database for testing.
+ *
+ * WHAT THIS DELETES (ALL RECORDS FROM):
+ * - users
+ * - photos
+ * - likes
+ * - matches
+ * - conversationParticipants
+ * - messages
+ * - notifications
+ * - crossedPaths
+ * - crossPathHistory
+ * - userPrivateProfiles
+ * - privateDeletionStates
+ * - reports
+ * - blocks
+ * - sessions
+ * - verificationSessions
+ * - deviceFingerprints
+ * - behaviorFlags
+ * - userStrikes
+ * - revealRequests
+ * - todAnswers
+ * - todConnectRequests
+ * - todPrivateMedia
+ * - confessions
+ * - confessionReplies
+ * - confessionReactions
+ * - confessionNotifications
+ * - chatRoomMembers
+ * - filterPresets
+ * - supportRequests
+ * - purchases
+ * - subscriptionRecords
+ *
+ * HOW TO RUN FROM CONVEX DASHBOARD:
+ * 1. Go to your Convex dashboard
+ * 2. Navigate to Functions → users → devWipeAllUserData
+ * 3. Click "Run" (no arguments needed)
+ * 4. Check the logs for deletion report
+ *
+ * AFTER WIPE:
+ * - All app data is gone
+ * - All users must re-authenticate
+ * - Fresh start for testing
+ */
+export const devWipeAllUserData = mutation({
+  args: {},
+  handler: async (ctx) => {
+    // STRICT PRODUCTION GUARD: Only allow in development environment
+    if (process.env.NODE_ENV !== 'development') {
+      throw new Error('devWipeAllUserData is disabled in production');
+    }
+
+    console.log('[DEV_WIPE_ALL] ════════════════════════════════════════════');
+    console.log('[DEV_WIPE_ALL] === STARTING FULL DATABASE WIPE ===');
+    console.log('[DEV_WIPE_ALL] ════════════════════════════════════════════');
+
+    const deletedCounts: Record<string, number> = {};
+
+    // Helper to delete ALL records from a table
+    const wipeTable = async (tableName: string) => {
+      try {
+        const records = await ctx.db.query(tableName as any).collect();
+        for (const record of records) {
+          await ctx.db.delete(record._id);
+        }
+        deletedCounts[tableName] = records.length;
+        if (records.length > 0) {
+          console.log(`[DEV_WIPE_ALL] Deleted ${records.length} records from ${tableName}`);
+        }
+      } catch (error) {
+        console.warn(`[DEV_WIPE_ALL] Could not wipe ${tableName}:`, error);
+        deletedCounts[tableName] = 0;
+      }
+    };
+
+    // Wipe all user-related tables (order matters - delete dependent records first)
+
+    // 1. Messages and conversations
+    await wipeTable('messages');
+    await wipeTable('conversationParticipants');
+
+    // 2. Social interactions
+    await wipeTable('likes');
+    await wipeTable('matches');
+    await wipeTable('blocks');
+    await wipeTable('reports');
+
+    // 3. Location features
+    await wipeTable('crossedPaths');
+    await wipeTable('crossPathHistory');
+
+    // 4. Notifications
+    await wipeTable('notifications');
+
+    // 5. Truth or Dare
+    await wipeTable('todAnswers');
+    await wipeTable('todConnectRequests');
+    await wipeTable('todPrivateMedia');
+
+    // 6. Confessions
+    await wipeTable('confessions');
+    await wipeTable('confessionReplies');
+    await wipeTable('confessionReactions');
+    await wipeTable('confessionNotifications');
+
+    // 7. Reveal requests
+    await wipeTable('revealRequests');
+
+    // 8. Chat rooms
+    await wipeTable('chatRoomMembers');
+
+    // 9. Verification and security
+    await wipeTable('verificationSessions');
+    await wipeTable('deviceFingerprints');
+    await wipeTable('behaviorFlags');
+    await wipeTable('userStrikes');
+    await wipeTable('sessions');
+
+    // 10. Private profiles
+    await wipeTable('userPrivateProfiles');
+    await wipeTable('privateDeletionStates');
+
+    // 11. Settings and preferences
+    await wipeTable('filterPresets');
+
+    // 12. Support and purchases
+    await wipeTable('supportRequests');
+    await wipeTable('purchases');
+    await wipeTable('subscriptionRecords');
+
+    // 13. Photos (metadata - storage files remain)
+    await wipeTable('photos');
+
+    // 14. Finally, delete all users
+    await wipeTable('users');
+
+    // Calculate total
+    const totalDeleted = Object.values(deletedCounts).reduce((sum, count) => sum + count, 0);
+
+    console.log('[DEV_WIPE_ALL] ════════════════════════════════════════════');
+    console.log('[DEV_WIPE_ALL] === FULL DATABASE WIPE COMPLETE ===');
+    console.log('[DEV_WIPE_ALL] Total records deleted:', totalDeleted);
+    console.log('[DEV_WIPE_ALL] Deletion report:', JSON.stringify(deletedCounts, null, 2));
+    console.log('[DEV_WIPE_ALL] ════════════════════════════════════════════');
+
+    return {
+      success: true,
+      totalDeleted,
+      deletedCounts,
+      message: 'All user data wiped. All users must re-authenticate.',
+    };
   },
 });

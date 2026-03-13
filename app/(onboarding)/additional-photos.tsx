@@ -40,6 +40,7 @@ import { uploadPhotoToBackend, syncPhotosFromBackend } from '@/services/photoSyn
 import { useMutation, useQuery } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { Id } from '@/convex/_generated/dataModel';
+import { useScreenTrace } from '@/lib/devTrace';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 
@@ -102,8 +103,9 @@ async function persistPhoto(cacheUri: string): Promise<string> {
 }
 
 export default function AdditionalPhotosScreen() {
+  useScreenTrace("ONB_ADDITIONAL_PHOTOS");
   const { photos, setPhotoAtIndex, removePhoto, setStep, displayPhotoVariant, setDisplayPhotoVariant, bio, setBio, clearAllPhotos, verificationReferencePrimary } = useOnboardingStore();
-  const { userId } = useAuthStore();
+  const { userId, token } = useAuthStore();
   const demoHydrated = useDemoStore((s) => s._hasHydrated);
   const demoProfile = useDemoStore((s) =>
     isDemoMode && userId ? s.demoProfiles[userId] : null
@@ -125,6 +127,25 @@ export default function AdditionalPhotosScreen() {
 
   // Backend mutations
   const deletePhotoMutation = useMutation(api.photos.deletePhoto);
+  const upsertDraft = useMutation(api.users.upsertOnboardingDraft);
+
+  // Wrapper to persist displayPhotoVariant to backend
+  const handleSetDisplayPhotoVariant = (variant: DisplayPhotoVariant) => {
+    setDisplayPhotoVariant(variant);
+    // Persist to backend in live mode
+    if (!isDemoMode && userId) {
+      upsertDraft({
+        userId: userId as any,
+        patch: {
+          profileDetails: { displayPhotoVariant: variant },
+          progress: { lastStepKey: 'additional_photos' },
+        },
+      }).catch((error) => {
+        if (__DEV__) console.error('[PHOTOS] Failed to save displayPhotoVariant:', error);
+      });
+      if (__DEV__) console.log(`[ONB_DRAFT] Saved displayPhotoVariant: ${variant}`);
+    }
+  };
 
   // Query backend photos for deletion (get photoIds)
   const backendPhotos = useQuery(
@@ -455,7 +476,8 @@ export default function AdditionalPhotosScreen() {
               userId,
               cacheUri, // Upload directly from cache, no local copy
               targetIndex === 0, // isPrimary
-              targetIndex
+              targetIndex,
+              token || undefined // Pass session token for auth
             );
 
             if (!uploadResult.success) {
@@ -503,7 +525,8 @@ export default function AdditionalPhotosScreen() {
               userId,
               uri, // Upload directly, no local copy
               targetIndex === 0,
-              targetIndex
+              targetIndex,
+              token || undefined // Pass session token for auth
             );
             if (!uploadResult.success) {
               setUploadState(targetIndex, 'failed');
@@ -578,7 +601,8 @@ export default function AdditionalPhotosScreen() {
               userId,
               cacheUri, // Upload directly from cache, no local copy
               targetIndex === 0,
-              targetIndex
+              targetIndex,
+              token || undefined // Pass session token for auth
             );
 
             if (!uploadResult.success) {
@@ -618,7 +642,7 @@ export default function AdditionalPhotosScreen() {
           // Upload even on error (no local storage)
           if (!isDemoMode && userId) {
             setUploadState(targetIndex, 'uploading');
-            const uploadResult = await uploadPhotoToBackend(userId, uri, targetIndex === 0, targetIndex);
+            const uploadResult = await uploadPhotoToBackend(userId, uri, targetIndex === 0, targetIndex, token || undefined);
             if (!uploadResult.success) {
               setUploadState(targetIndex, 'failed');
               Alert.alert('Upload Failed', 'Please try again.');
@@ -675,23 +699,35 @@ export default function AdditionalPhotosScreen() {
   };
 
   // Handle tap on primary photo circle
+  // BUG FIX: Check backendUrlByIndex/slotPreviewUriByIndex (source of truth in live mode),
+  // not photos[] from local store which may be empty in live mode
   const handlePrimaryPhotoPress = () => {
-    const primaryPhoto = photos[0];
-    if (typeof primaryPhoto === 'string' && primaryPhoto.length > 0) {
-      // Photo exists - open full-screen viewer
+    const backendUrl = backendUrlByIndex[0];
+    const previewUri = slotPreviewUriByIndex[0];
+    const uriToShow = previewUri ?? backendUrl;
+    const hasPhoto = typeof uriToShow === 'string' && uriToShow.length > 0;
+
+    if (hasPhoto) {
+      // Photo exists - open full-screen viewer with Replace/Remove options
       setViewerIndex(0);
       setViewerOpen(true);
     } else {
-      // No photo - show action sheet
+      // No photo - show action sheet to add
       showPhotoActionSheet(0);
     }
   };
 
   // Handle tap on a photo tile (for grid slots 1-8)
+  // BUG FIX: Check backendUrlByIndex/slotPreviewUriByIndex (source of truth in live mode),
+  // not photos[] from local store which may be empty in live mode
   const handlePhotoPress = (index: number) => {
-    const photo = photos[index];
-    if (typeof photo === 'string' && photo.length > 0) {
-      // Photo exists - open full-screen viewer
+    const backendUrl = backendUrlByIndex[index];
+    const previewUri = slotPreviewUriByIndex[index];
+    const uriToShow = previewUri ?? backendUrl;
+    const hasPhoto = typeof uriToShow === 'string' && uriToShow.length > 0;
+
+    if (hasPhoto) {
+      // Photo exists - open full-screen viewer with Replace/Remove options
       setViewerIndex(index);
       setViewerOpen(true);
     } else {
@@ -812,7 +848,17 @@ export default function AdditionalPhotosScreen() {
     const failedCount = Object.values(uploadStateByIndex).filter(state => state === 'failed').length;
 
     if (__DEV__) {
-      console.log('[PHOTO_UPLOAD] stateGate', { uploadingCount, failedCount });
+      console.log('[PHOTO_UPLOAD] stateGate', { uploadingCount, failedCount, backendPhotosLoaded: backendPhotos !== undefined });
+    }
+
+    // Gate 0: Backend photos not yet loaded (prevent bypass by clicking Continue before sync)
+    if (!isDemoMode && backendPhotos === undefined) {
+      Alert.alert(
+        'Loading Photos',
+        'Still loading your photos. Please wait a moment...',
+        [{ text: 'OK' }]
+      );
+      return;
     }
 
     // Gate 1: Uploading in progress
@@ -1074,7 +1120,12 @@ export default function AdditionalPhotosScreen() {
   // 2) Temporary preview during upload, else
   // 3) Verification reference photo (from face verification), else
   // 4) Empty placeholder
-  const referencePhotoUrl = userQuery?.verificationReferencePhotoUrl || verificationReferencePrimary?.url || '';
+  // M7 FIX: Use onboardingStatus as primary source (consistent with face-verification.tsx)
+  // Fallback chain: onboardingStatus → userQuery → local transient → empty
+  const referencePhotoUrl = onboardingStatus?.verificationReferencePhotoUrl
+    || userQuery?.verificationReferencePhotoUrl
+    || verificationReferencePrimary?.url
+    || '';
   const hasReferencePhotoUrl = referencePhotoUrl.length > 0;
   const hasReferencePhotoId = !!verificationReferencePrimary || !!userQuery?.verificationReferencePhotoId;
   // Use backend onboarding status as source of truth for reference photo existence
@@ -1241,7 +1292,7 @@ export default function AdditionalPhotosScreen() {
                   isSelected && styles.privacyOptionSelected,
                   isDisabled && styles.privacyOptionDisabled,
                 ]}
-                onPress={() => !isDisabled && setDisplayPhotoVariant(option.id)}
+                onPress={() => !isDisabled && handleSetDisplayPhotoVariant(option.id)}
                 disabled={isDisabled}
               >
                 <View style={[styles.privacyIcon, isSelected && styles.privacyIconSelected]}>

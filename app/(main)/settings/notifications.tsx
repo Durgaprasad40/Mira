@@ -1,19 +1,113 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Switch } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
+import { useQuery, useMutation } from 'convex/react';
+import { api } from '@/convex/_generated/api';
 import { COLORS } from '@/lib/constants';
+import { isDemoMode } from '@/hooks/useConvex';
+import { useAuthStore } from '@/stores/authStore';
+import { Toast } from '@/components/ui/Toast';
 
 export default function NotificationsSettingsScreen() {
   const router = useRouter();
+  const { userId } = useAuthStore();
 
-  // Local state for toggles (demo-safe)
+  // Query current user notification settings (live mode only)
+  const currentUser = useQuery(
+    api.users.getCurrentUser,
+    !isDemoMode && userId ? { userId: userId as any } : 'skip'
+  );
+
+  // Mutation to update notification settings
+  const updateNotificationSettings = useMutation(api.users.updateNotificationSettings);
+
+  // Local state for toggles (synced with backend on load)
   const [pushEnabled, setPushEnabled] = useState(true);
   const [newMatches, setNewMatches] = useState(true);
   const [newMessages, setNewMessages] = useState(true);
   const [likesAndSuperLikes, setLikesAndSuperLikes] = useState(true);
   const [profileViews, setProfileViews] = useState(true);
+
+  // Hydrate state from backend when currentUser loads
+  useEffect(() => {
+    if (currentUser) {
+      // notificationsEnabled is the master toggle
+      setPushEnabled(currentUser.notificationsEnabled !== false);
+      // Child notification type preferences (default to true if undefined)
+      setNewMatches(currentUser.notifyNewMatches !== false);
+      setNewMessages(currentUser.notifyNewMessages !== false);
+      setLikesAndSuperLikes(currentUser.notifyLikesAndSuperLikes !== false);
+      setProfileViews(currentUser.notifyProfileViews !== false);
+    }
+  }, [currentUser]);
+
+  // Handler for master push toggle
+  const handlePushToggle = async (enabled: boolean) => {
+    if (isDemoMode) {
+      setPushEnabled(enabled);
+      return;
+    }
+    if (!userId) return;
+
+    try {
+      await updateNotificationSettings({ userId: userId as any, notificationsEnabled: enabled });
+      setPushEnabled(enabled);
+    } catch {
+      Toast.show('Couldn\u2019t update notification settings. Please try again.');
+      setPushEnabled(!enabled);
+    }
+  };
+
+  // Handlers for child notification toggles
+  const handleNewMatchesToggle = async (enabled: boolean) => {
+    if (isDemoMode) { setNewMatches(enabled); return; }
+    if (!userId) return;
+    try {
+      await updateNotificationSettings({ userId: userId as any, notifyNewMatches: enabled });
+      setNewMatches(enabled);
+    } catch {
+      Toast.show('Couldn\u2019t update setting. Please try again.');
+      setNewMatches(!enabled);
+    }
+  };
+
+  const handleNewMessagesToggle = async (enabled: boolean) => {
+    if (isDemoMode) { setNewMessages(enabled); return; }
+    if (!userId) return;
+    try {
+      await updateNotificationSettings({ userId: userId as any, notifyNewMessages: enabled });
+      setNewMessages(enabled);
+    } catch {
+      Toast.show('Couldn\u2019t update setting. Please try again.');
+      setNewMessages(!enabled);
+    }
+  };
+
+  const handleLikesToggle = async (enabled: boolean) => {
+    if (isDemoMode) { setLikesAndSuperLikes(enabled); return; }
+    if (!userId) return;
+    try {
+      await updateNotificationSettings({ userId: userId as any, notifyLikesAndSuperLikes: enabled });
+      setLikesAndSuperLikes(enabled);
+    } catch {
+      Toast.show('Couldn\u2019t update setting. Please try again.');
+      setLikesAndSuperLikes(!enabled);
+    }
+  };
+
+  const handleProfileViewsToggle = async (enabled: boolean) => {
+    if (isDemoMode) { setProfileViews(enabled); return; }
+    if (!userId) return;
+    try {
+      await updateNotificationSettings({ userId: userId as any, notifyProfileViews: enabled });
+      setProfileViews(enabled);
+    } catch {
+      Toast.show('Couldn\u2019t update setting. Please try again.');
+      setProfileViews(!enabled);
+    }
+  };
 
   // Child toggles disabled when master push is off
   const childDisabled = !pushEnabled;
@@ -45,11 +139,14 @@ export default function NotificationsSettingsScreen() {
             </View>
             <Switch
               value={pushEnabled}
-              onValueChange={setPushEnabled}
+              onValueChange={handlePushToggle}
               trackColor={{ false: COLORS.border, true: COLORS.primary }}
               thumbColor={COLORS.white}
             />
           </View>
+          <Text style={styles.pushExplanation}>
+            Push notifications are alerts sent to your phone even when the app is closed. Turn this off to stop all notifications.
+          </Text>
         </View>
 
         {/* Notification Types */}
@@ -66,7 +163,7 @@ export default function NotificationsSettingsScreen() {
             </View>
             <Switch
               value={newMatches}
-              onValueChange={setNewMatches}
+              onValueChange={handleNewMatchesToggle}
               disabled={childDisabled}
               trackColor={{ false: COLORS.border, true: COLORS.primary }}
               thumbColor={COLORS.white}
@@ -83,7 +180,7 @@ export default function NotificationsSettingsScreen() {
             </View>
             <Switch
               value={newMessages}
-              onValueChange={setNewMessages}
+              onValueChange={handleNewMessagesToggle}
               disabled={childDisabled}
               trackColor={{ false: COLORS.border, true: COLORS.primary }}
               thumbColor={COLORS.white}
@@ -100,7 +197,7 @@ export default function NotificationsSettingsScreen() {
             </View>
             <Switch
               value={likesAndSuperLikes}
-              onValueChange={setLikesAndSuperLikes}
+              onValueChange={handleLikesToggle}
               disabled={childDisabled}
               trackColor={{ false: COLORS.border, true: COLORS.primary }}
               thumbColor={COLORS.white}
@@ -117,7 +214,7 @@ export default function NotificationsSettingsScreen() {
             </View>
             <Switch
               value={profileViews}
-              onValueChange={setProfileViews}
+              onValueChange={handleProfileViewsToggle}
               disabled={childDisabled}
               trackColor={{ false: COLORS.border, true: COLORS.primary }}
               thumbColor={COLORS.white}
@@ -129,16 +226,15 @@ export default function NotificationsSettingsScreen() {
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Schedule</Text>
 
-          <TouchableOpacity style={styles.menuRow} activeOpacity={0.7}>
+          <View style={[styles.menuRow, { opacity: 0.5 }]}>
             <View style={styles.menuRowLeft}>
-              <Ionicons name="moon-outline" size={22} color={COLORS.text} />
+              <Ionicons name="moon-outline" size={22} color={COLORS.textMuted} />
               <View style={styles.menuRowInfo}>
-                <Text style={styles.menuRowTitle}>Quiet hours</Text>
+                <Text style={[styles.menuRowTitle, { color: COLORS.textMuted }]}>Quiet hours</Text>
                 <Text style={styles.menuRowSubtitle}>Coming soon</Text>
               </View>
             </View>
-            <Ionicons name="chevron-forward" size={20} color={COLORS.textLight} />
-          </TouchableOpacity>
+          </View>
         </View>
       </ScrollView>
     </SafeAreaView>
@@ -209,6 +305,12 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     color: COLORS.text,
     marginBottom: 2,
+  },
+  pushExplanation: {
+    fontSize: 13,
+    color: COLORS.textMuted,
+    lineHeight: 18,
+    marginTop: 12,
   },
   // Child toggle rows
   toggleRow: {

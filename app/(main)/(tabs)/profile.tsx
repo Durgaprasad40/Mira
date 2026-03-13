@@ -1,3 +1,8 @@
+/*
+ * LOCKED (PHASE-1 TAB)
+ * Do NOT modify this file unless Durga Prasad explicitly unlocks it.
+ * Nearby tab is the only Phase-1 tab currently unlocked.
+ */
 import React, { useState, useCallback } from 'react';
 import {
   View,
@@ -7,6 +12,7 @@ import {
   TouchableOpacity,
   Platform,
   Alert,
+  Modal,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter, useFocusEffect } from 'expo-router';
@@ -15,13 +21,14 @@ import { useQuery, useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { useAuthStore } from '@/stores/authStore';
 import { COLORS } from '@/lib/constants';
-import { Avatar, Button } from '@/components/ui';
+import { Avatar } from '@/components/ui';
 import { Ionicons } from '@expo/vector-icons';
 import { Image } from 'expo-image';
 import { isDemoMode } from '@/hooks/useConvex';
 import { useDemoStore } from '@/stores/demoStore';
 import { useOnboardingStore } from '@/stores/onboardingStore';
 import { getDemoCurrentUser } from '@/lib/demoData';
+import { useScreenTrace } from '@/lib/devTrace';
 
 /**
  * Calculate age from DOB string ("YYYY-MM-DD").
@@ -46,6 +53,7 @@ function calculateAge(dob: string | undefined | null): number | null {
 }
 
 export default function ProfileScreen() {
+  useScreenTrace("PROFILE");
   const router = useRouter();
   const userId = useAuthStore((s) => s.userId);
   const token = useAuthStore((s) => s.token);
@@ -199,6 +207,9 @@ export default function ProfileScreen() {
   // Preview toggle state (UI only, doesn't change settings)
   const [previewBlur, setPreviewBlur] = useState(false);
 
+  // Full-screen photo preview state
+  const [showPhotoPreview, setShowPhotoPreview] = useState(false);
+
   if (__DEV__) {
     const source = isDemoMode ? 'demoStore' : 'convex';
     const count = currentUser?.photos?.length ?? 0;
@@ -252,13 +263,14 @@ export default function ProfileScreen() {
       {
         text: 'Logout',
         style: 'destructive',
-        onPress: () => {
+        onPress: async () => {
           // Clear local state FIRST for crash safety
           if (isDemoMode) {
             useDemoStore.getState().demoLogout();
           }
           useOnboardingStore.getState().reset();
-          logout();
+          // H5 FIX: Await async logout to ensure SecureStore is cleared before navigation
+          await logout();
           safeReplace(router, '/(auth)/welcome', 'profile->logout');
 
           // Server logout in background (best-effort)
@@ -291,7 +303,8 @@ export default function ProfileScreen() {
               }
               // 3A1-2: Also clear onboarding store on deactivate
               useOnboardingStore.getState().reset();
-              logout();
+              // H5 FIX: Await async logout to ensure SecureStore is cleared before navigation
+              await logout();
               safeReplace(router, '/(auth)/welcome', 'profile->deactivate');
             } catch (error: any) {
               Alert.alert('Error', error.message || 'Failed to deactivate account');
@@ -325,22 +338,27 @@ export default function ProfileScreen() {
       </View>
 
       <View style={styles.profileSection}>
-        {/* Main photo - always clear for owner */}
+        {/* Main photo - always clear for owner, tappable for full-screen view */}
         {mainPhotoUrl ? (
-          <Image
-            source={{ uri: mainPhotoUrl }}
-            style={styles.avatar}
-            contentFit="cover"
-            transition={200}
-            onLoadEnd={() => {
-              // PERF: Log photo load time once per focus
-              if (__DEV__ && !hasLoggedPhotoLoad.current && focusTimeRef.current > 0) {
-                const loadTime = Date.now() - focusTimeRef.current;
-                console.log('[PERF ProfileTab] Main photo loaded:', { loadTimeMs: loadTime });
-                hasLoggedPhotoLoad.current = true;
-              }
-            }}
-          />
+          <TouchableOpacity
+            activeOpacity={0.9}
+            onPress={() => setShowPhotoPreview(true)}
+          >
+            <Image
+              source={{ uri: mainPhotoUrl }}
+              style={styles.avatar}
+              contentFit="cover"
+              transition={200}
+              onLoadEnd={() => {
+                // PERF: Log photo load time once per focus
+                if (__DEV__ && !hasLoggedPhotoLoad.current && focusTimeRef.current > 0) {
+                  const loadTime = Date.now() - focusTimeRef.current;
+                  console.log('[PERF ProfileTab] Main photo loaded:', { loadTimeMs: loadTime });
+                  hasLoggedPhotoLoad.current = true;
+                }
+              }}
+            />
+          </TouchableOpacity>
         ) : (
           <Avatar size={100} />
         )}
@@ -400,33 +418,10 @@ export default function ProfileScreen() {
         {currentUser.bio && <Text style={styles.bio}>{currentUser.bio}</Text>}
       </View>
 
-      {subscriptionStatus && currentUser.gender === 'male' && (
-        <View style={styles.statsCard}>
-          <Text style={styles.statsTitle}>Subscription</Text>
-          <View style={styles.statsRow}>
-            <Text style={styles.statsLabel}>Tier:</Text>
-            <Text style={styles.statsValue}>
-              {subscriptionStatus.tier.charAt(0).toUpperCase() + subscriptionStatus.tier.slice(1)}
-            </Text>
-          </View>
-          {subscriptionStatus.isSubscribed && subscriptionStatus.expiresAt && (
-            <View style={styles.statsRow}>
-              <Text style={styles.statsLabel}>Expires:</Text>
-              <Text style={styles.statsValue}>
-                {new Date(subscriptionStatus.expiresAt).toLocaleDateString()}
-              </Text>
-            </View>
-          )}
-          <Button
-            title="Manage Subscription"
-            variant="outline"
-            onPress={() => safePush(router, '/(main)/subscription', 'profile->subscription')}
-            style={styles.subscriptionButton}
-          />
-        </View>
-      )}
+{/* HIDDEN: Subscription UI temporarily removed per product rules */}
 
       <View style={styles.menuSection}>
+        {/* 1. Edit Profile */}
         <TouchableOpacity
           style={styles.menuItem}
           onPress={() => safePush(router, '/(main)/edit-profile', 'profile->editMenu')}
@@ -436,48 +431,63 @@ export default function ProfileScreen() {
           <Ionicons name="chevron-forward" size={20} color={COLORS.textLight} />
         </TouchableOpacity>
 
+        {/* 2. Privacy */}
         <TouchableOpacity
           style={styles.menuItem}
-          onPress={() => safePush(router, '/(main)/subscription', 'profile->subscriptionMenu')}
-        >
-          <Ionicons name="diamond-outline" size={24} color={COLORS.text} />
-          <Text style={styles.menuText}>Subscription</Text>
-          <Ionicons name="chevron-forward" size={20} color={COLORS.textLight} />
-        </TouchableOpacity>
-
-        <TouchableOpacity
-          style={styles.menuItem}
-          onPress={() => safePush(router, '/(main)/settings', 'profile->privacy')}
+          onPress={() => safePush(router, '/(main)/settings/privacy', 'profile->privacy')}
         >
           <Ionicons name="lock-closed-outline" size={24} color={COLORS.text} />
           <Text style={styles.menuText}>Privacy</Text>
           <Ionicons name="chevron-forward" size={20} color={COLORS.textLight} />
         </TouchableOpacity>
 
+        {/* 3. Notifications */}
         <TouchableOpacity
           style={styles.menuItem}
-          onPress={() => safePush(router, '/(main)/settings', 'profile->notifications')}
+          onPress={() => safePush(router, '/(main)/settings/notifications', 'profile->notifications')}
         >
           <Ionicons name="notifications-outline" size={24} color={COLORS.text} />
           <Text style={styles.menuText}>Notifications</Text>
           <Ionicons name="chevron-forward" size={20} color={COLORS.textLight} />
         </TouchableOpacity>
 
+        {/* 4. Safety */}
         <TouchableOpacity
           style={styles.menuItem}
-          onPress={() => safePush(router, '/(main)/settings', 'profile->safety')}
+          onPress={() => safePush(router, '/(main)/settings/safety', 'profile->safety')}
         >
           <Ionicons name="shield-checkmark-outline" size={24} color={COLORS.text} />
           <Text style={styles.menuText}>Safety</Text>
           <Ionicons name="chevron-forward" size={20} color={COLORS.textLight} />
         </TouchableOpacity>
 
+        {/* 5. Account */}
         <TouchableOpacity
           style={styles.menuItem}
-          onPress={() => safePush(router, '/(main)/settings', 'profile->account')}
+          onPress={() => safePush(router, '/(main)/settings/account', 'profile->account')}
         >
           <Ionicons name="person-outline" size={24} color={COLORS.text} />
           <Text style={styles.menuText}>Account</Text>
+          <Ionicons name="chevron-forward" size={20} color={COLORS.textLight} />
+        </TouchableOpacity>
+
+        {/* 6. Help & FAQ */}
+        <TouchableOpacity
+          style={styles.menuItem}
+          onPress={() => safePush(router, '/(main)/settings/help', 'profile->help')}
+        >
+          <Ionicons name="help-circle-outline" size={24} color={COLORS.text} />
+          <Text style={styles.menuText}>Help & FAQ</Text>
+          <Ionicons name="chevron-forward" size={20} color={COLORS.textLight} />
+        </TouchableOpacity>
+
+        {/* 7. Log Out */}
+        <TouchableOpacity
+          style={styles.menuItem}
+          onPress={handleLogout}
+        >
+          <Ionicons name="log-out-outline" size={24} color={COLORS.text} />
+          <Text style={styles.menuText}>Log Out</Text>
           <Ionicons name="chevron-forward" size={20} color={COLORS.textLight} />
         </TouchableOpacity>
 
@@ -503,13 +513,43 @@ export default function ProfileScreen() {
         )}
       </View>
 
+      {/* 8. Deactivate Account - destructive action at bottom */}
       <View style={styles.footer}>
-        <Button title="Logout" variant="outline" onPress={handleLogout} />
         <TouchableOpacity onPress={handleDeactivate} style={styles.deactivateButton}>
           <Text style={styles.deactivateText}>Deactivate Account</Text>
         </TouchableOpacity>
       </View>
     </ScrollView>
+
+      {/* Full-screen photo preview modal */}
+      <Modal
+        visible={showPhotoPreview}
+        animationType="fade"
+        statusBarTranslucent
+        onRequestClose={() => setShowPhotoPreview(false)}
+      >
+        <View style={styles.photoPreviewContainer}>
+          <TouchableOpacity
+            style={styles.photoPreviewCloseArea}
+            activeOpacity={1}
+            onPress={() => setShowPhotoPreview(false)}
+          >
+            {mainPhotoUrl && (
+              <Image
+                source={{ uri: mainPhotoUrl }}
+                style={styles.photoPreviewImage}
+                contentFit="contain"
+              />
+            )}
+          </TouchableOpacity>
+          <TouchableOpacity
+            style={styles.photoPreviewCloseButton}
+            onPress={() => setShowPhotoPreview(false)}
+          >
+            <Ionicons name="close" size={28} color={COLORS.white} />
+          </TouchableOpacity>
+        </View>
+      </Modal>
     </SafeAreaView>
   );
 }
@@ -707,5 +747,33 @@ const styles = StyleSheet.create({
     fontSize: 10,
     color: COLORS.textMuted,
     fontStyle: 'italic',
+  },
+  // Full-screen photo preview
+  photoPreviewContainer: {
+    flex: 1,
+    backgroundColor: '#000',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  photoPreviewCloseArea: {
+    flex: 1,
+    width: '100%',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  photoPreviewImage: {
+    width: '100%',
+    height: '100%',
+  },
+  photoPreviewCloseButton: {
+    position: 'absolute',
+    top: 50,
+    right: 20,
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    justifyContent: 'center',
+    alignItems: 'center',
   },
 });

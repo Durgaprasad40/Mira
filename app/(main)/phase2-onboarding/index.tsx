@@ -35,20 +35,28 @@ import { isDemoMode } from "@/hooks/useConvex";
 import { getDemoCurrentUser } from "@/lib/demoData";
 import { useDemoStore, photosToSlotsStable } from "@/stores/demoStore";
 import { PhotoSlots9, createEmptyPhotoSlots } from "@/types";
+import { useScreenTrace } from "@/lib/devTrace";
 
 // Persistent directory for Phase-1 photos imported into Phase-2
 const PHASE1_PHOTOS_DIR = "mira/phase1Photos/";
 
 /**
- * Check if a URI is a valid persistent photo URI.
- * Only accepts local file:// URIs that are NOT in cache directories.
+ * Check if a URI is a valid photo URI.
+ * Accepts:
+ * - Local file:// URIs (NOT in cache directories)
+ * - Remote https:// URLs (from Convex storage)
  */
 function isValidPhotoUri(uri: string | null | undefined): boolean {
   if (!uri || typeof uri !== 'string' || uri.length === 0) return false;
-  if (!uri.startsWith('file://')) return false;
-  if (uri.includes('/cache/') || uri.includes('/Cache/') || uri.includes('ImageManipulator')) return false;
-  if (uri.includes('unsplash.com')) return false;
-  return true;
+  // Accept https:// URLs (Convex storage, etc.)
+  if (uri.startsWith('https://')) return true;
+  // Accept file:// URIs but reject cache/temp directories
+  if (uri.startsWith('file://')) {
+    if (uri.includes('/cache/') || uri.includes('/Cache/') || uri.includes('ImageManipulator')) return false;
+    if (uri.includes('unsplash.com')) return false;
+    return true;
+  }
+  return false;
 }
 
 /**
@@ -212,14 +220,16 @@ async function persistPhotoUris(uris: string[]): Promise<string[]> {
 const C = INCOGNITO_COLORS;
 
 export default function Phase2OnboardingTerms() {
+  useScreenTrace("P2_ONB_TERMS");
   const router = useRouter();
   const pathname = usePathname();
   const insets = useSafeAreaInsets();
 
-  // Log mount for debugging
+  // Log mount for debugging - show isDemoMode for verification
   useEffect(() => {
     if (__DEV__) {
       console.log(`[P2] step1 MOUNTED pathname=${pathname}`);
+      console.log(`[P2] isDemoMode=${isDemoMode} env=${process.env.EXPO_PUBLIC_DEMO_MODE}`);
     }
     return () => {
       if (__DEV__) {
@@ -246,6 +256,7 @@ export default function Phase2OnboardingTerms() {
 
   const setAcceptedTermsAt = usePrivateProfileStore((s) => s.setAcceptedTermsAt);
   const importPhase1Data = usePrivateProfileStore((s) => s.importPhase1Data);
+  const setSelectedPhotos = usePrivateProfileStore((s) => s.setSelectedPhotos);
 
   // Handle X/Cancel button - explicit exit from Phase-2 onboarding
   const handleExitOnboarding = () => {
@@ -262,10 +273,16 @@ export default function Phase2OnboardingTerms() {
   const userId = useAuthStore((s) => s.userId);
 
   // Query Phase-1 profile from Convex (the real source of truth after onboarding)
+  // NOTE: getCurrentUser already includes ALL photos (including verification_reference)
+  // via the photos table join - no separate photo query needed
   const convexUser = useQuery(
     api.users.getCurrentUser,
     !isDemoMode && userId ? { userId: userId as any } : 'skip'
   );
+
+  // BUG FIX (2026-03-06): Removed separate getUserPhotos query
+  // getUserPhotos EXCLUDES verification_reference photos, causing Phase 2 to miss the primary photo
+  // convexUser.photos already includes ALL photos, so we use that instead
 
   // For demo mode, get demo user data
   const demoUser = isDemoMode ? getDemoCurrentUser() : null;
@@ -317,14 +334,52 @@ export default function Phase2OnboardingTerms() {
       const phase1User = isDemoMode ? demoUser : convexUser;
 
       // ============================================================
-      // SINGLE SOURCE OF TRUTH: Use getCurrentProfile() for import
-      // This ensures Phase-2 sees the same profile as Edit Profile
+      // SINGLE SOURCE OF TRUTH: Use mode-appropriate profile source
+      // Demo mode: demoStore.getCurrentProfile()
+      // Live mode: convexUser from Convex query
       // ============================================================
-      const canonicalProfile = useDemoStore.getState().getCurrentProfile();
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      let canonicalProfile: any = null;
+
+      // Track source for logging
+      let profileSource = 'unknown';
+
+      if (isDemoMode) {
+        // Demo mode: Use demoStore as single source of truth
+        canonicalProfile = useDemoStore.getState().getCurrentProfile();
+        profileSource = 'demoStore.currentProfile';
+      } else if (convexUser) {
+        // Live mode: Use Convex user as single source of truth
+        // BUG FIX (2026-03-06): Use convexUser.photos which includes ALL photos
+        // (including verification_reference primary photo), not the separate
+        // getUserPhotos query which excludes verification_reference photos
+        const livePhotos: { url: string }[] = Array.isArray(convexUser.photos)
+          ? convexUser.photos
+              .sort((a: any, b: any) => (a.order ?? 0) - (b.order ?? 0))
+              .map((p: { url: string }) => ({ url: p.url }))
+          : [];
+
+        canonicalProfile = {
+          userId: convexUser._id as string,
+          name: convexUser.name,
+          dateOfBirth: convexUser.dateOfBirth,
+          gender: convexUser.gender,
+          activities: convexUser.activities,
+          maxDistance: convexUser.maxDistance,
+          height: convexUser.height,
+          smoking: convexUser.smoking,
+          drinking: convexUser.drinking,
+          kids: convexUser.kids,
+          education: convexUser.education,
+          religion: convexUser.religion,
+          photos: livePhotos,
+        };
+        profileSource = 'live:convexUser.photos';
+      }
 
       // FATAL: If no profile exists, block progression
       if (!canonicalProfile) {
-        console.error("[P2 IMPORT] FATAL: No current profile found");
+        console.error("[P2 IMPORT] FATAL: No current profile found", { isDemoMode, hasConvexUser: !!convexUser });
         Alert.alert("Error", "No profile found. Please complete Phase-1 setup first.");
         // O-001 FIX: Guard setState after unmount
         if (mountedRef.current) {
@@ -337,12 +392,12 @@ export default function Phase2OnboardingTerms() {
       let phase1PhotoSlots: PhotoSlots9 = createEmptyPhotoSlots();
 
       // Use photoSlots from canonical profile (single source of truth)
-      if (canonicalProfile.photoSlots && canonicalProfile.photoSlots.some((s) => s !== null)) {
+      if (canonicalProfile.photoSlots && canonicalProfile.photoSlots.some((s: string | null) => s !== null)) {
         phase1PhotoSlots = [...canonicalProfile.photoSlots] as PhotoSlots9;
       }
       // Fallback: Convert flat photos array to slots
       else if (canonicalProfile.photos && canonicalProfile.photos.length > 0) {
-        canonicalProfile.photos.forEach((p, idx) => {
+        canonicalProfile.photos.forEach((p: { url: string }, idx: number) => {
           if (idx < 9 && p.url) phase1PhotoSlots[idx] = p.url;
         });
       }
@@ -364,7 +419,8 @@ export default function Phase2OnboardingTerms() {
           profileId,
           name: canonicalProfile.name,
           nonNullSlots,
-          source: "demoStore.currentProfile",
+          photosFromUser: Array.isArray(convexUser?.photos) ? convexUser.photos.length : 0,
+          source: profileSource,
         });
       }
 
@@ -378,6 +434,7 @@ export default function Phase2OnboardingTerms() {
         activities: canonicalProfile.activities || phase1User?.activities || [],
         maxDistance: canonicalProfile.maxDistance || phase1User?.maxDistance || 50,
         height: canonicalProfile.height ?? phase1User?.height ?? null,
+        weight: canonicalProfile.weight ?? phase1User?.weight ?? null,
         smoking: canonicalProfile.smoking ?? phase1User?.smoking ?? null,
         drinking: canonicalProfile.drinking ?? phase1User?.drinking ?? null,
         kids: canonicalProfile.kids ?? phase1User?.kids ?? null,
@@ -386,11 +443,16 @@ export default function Phase2OnboardingTerms() {
       };
 
       // FIX P2-DATA-001: Import data BEFORE navigation to prevent race condition
-      // photo-select reads from store immediately on mount, so data must be ready first
       importPhase1Data(phase1Data);
 
-      // Navigate after data is ready
-      router.push("/(main)/phase2-onboarding/photo-select" as any);
+      // Auto-select Phase-1 photos for Phase-2 (photo selection now happens on profile screen)
+      const phase1PhotoUrls = validatedSlots.filter(Boolean) as string[];
+      if (phase1PhotoUrls.length > 0) {
+        setSelectedPhotos([], phase1PhotoUrls);
+      }
+
+      // Navigate directly to profile-edit (skip photo-select screen - photos managed on profile)
+      router.push("/(main)/phase2-onboarding/profile-edit" as any);
     } catch (err) {
       if (__DEV__) console.error("[Phase2Onboarding] Error:", err);
     } finally {
@@ -411,7 +473,7 @@ export default function Phase2OnboardingTerms() {
         >
           <Ionicons name="close" size={22} color={C.textLight} />
         </TouchableOpacity>
-        <Text style={styles.stepIndicator}>Step 1 of 3</Text>
+        <Text style={styles.stepIndicator}>Step 1 of 4</Text>
       </View>
 
       <ScrollView

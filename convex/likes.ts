@@ -1,6 +1,30 @@
 import { v } from 'convex/values';
-import { mutation, query } from './_generated/server';
+import { mutation, query, MutationCtx } from './_generated/server';
 import { Id } from './_generated/dataModel';
+
+// D1-REPAIR: Helper to check if either user has blocked the other
+// Returns true if blocked (should prevent messaging)
+async function isBlockedBidirectional(
+  ctx: MutationCtx,
+  userId1: Id<'users'>,
+  userId2: Id<'users'>
+): Promise<boolean> {
+  const block1 = await ctx.db
+    .query('blocks')
+    .withIndex('by_blocker_blocked', (q) =>
+      q.eq('blockerId', userId1).eq('blockedUserId', userId2)
+    )
+    .first();
+  if (block1) return true;
+
+  const block2 = await ctx.db
+    .query('blocks')
+    .withIndex('by_blocker_blocked', (q) =>
+      q.eq('blockerId', userId2).eq('blockedUserId', userId1)
+    )
+    .first();
+  return !!block2;
+}
 
 // Like, pass, or super like a user
 export const swipe = mutation({
@@ -13,6 +37,11 @@ export const swipe = mutation({
   handler: async (ctx, args) => {
     const { fromUserId, toUserId, action, message } = args;
     const now = Date.now();
+
+    // P2-003 FIX: Prevent self-swiping
+    if (fromUserId === toUserId) {
+      throw new Error('Cannot swipe on yourself');
+    }
 
     const fromUser = await ctx.db.get(fromUserId);
     if (!fromUser) throw new Error('User not found');
@@ -105,6 +134,11 @@ export const swipe = mutation({
         throw new Error('Message is required for text action');
       }
 
+      // D1-REPAIR: Check if either user has blocked the other
+      if (await isBlockedBidirectional(ctx, fromUserId, toUserId)) {
+        throw new Error('Cannot send message');
+      }
+
       // Create a pre-match conversation for the direct message
       const conversationId = await ctx.db.insert('conversations', {
         participants: [fromUserId, toUserId],
@@ -123,13 +157,16 @@ export const swipe = mutation({
       });
 
       // Notify the receiver
+      // D3: Add dedupeKey and expiresAt for consistency with messages.ts notifications
       await ctx.db.insert('notifications', {
         userId: toUserId,
         type: 'message',
         title: 'New Direct Message!',
         body: `${fromUser.name} sent you a message`,
-        data: { conversationId: conversationId },
+        data: { conversationId: conversationId, userId: fromUserId },
+        dedupeKey: `message:${conversationId}:unread`,
         createdAt: now,
+        expiresAt: now + 24 * 60 * 60 * 1000,
       });
 
       return { success: true, isMatch: false };
@@ -182,6 +219,7 @@ export const swipe = mutation({
         });
 
         // Create notifications for both users
+        // D5: Add dedupeKey and expiresAt for match notifications
         const toUser = await ctx.db.get(toUserId);
         await ctx.db.insert('notifications', {
           userId: fromUserId,
@@ -189,7 +227,9 @@ export const swipe = mutation({
           title: 'New Match!',
           body: `You matched with ${toUser?.name || 'someone'}!`,
           data: { matchId: matchId },
+          dedupeKey: `match:${matchId}`,
           createdAt: now,
+          expiresAt: now + 24 * 60 * 60 * 1000,
         });
 
         await ctx.db.insert('notifications', {
@@ -198,7 +238,9 @@ export const swipe = mutation({
           title: 'New Match!',
           body: `You matched with ${fromUser.name}!`,
           data: { matchId: matchId },
+          dedupeKey: `match:${matchId}`,
           createdAt: now,
+          expiresAt: now + 24 * 60 * 60 * 1000,
         });
 
         return { success: true, isMatch: true, matchId };
@@ -206,6 +248,7 @@ export const swipe = mutation({
     }
 
     // Send notification for super like
+    // D5: Add dedupeKey and expiresAt for super_like notifications
     if (action === 'super_like') {
       await ctx.db.insert('notifications', {
         userId: toUserId,
@@ -213,7 +256,9 @@ export const swipe = mutation({
         title: 'You got a Super Like!',
         body: 'Someone super liked you!',
         data: { userId: fromUserId },
+        dedupeKey: `super_like:${fromUserId}`,
         createdAt: now,
+        expiresAt: now + 24 * 60 * 60 * 1000,
       });
     }
 
@@ -295,9 +340,12 @@ export const getLikesReceived = query({
     const user = await ctx.db.get(userId);
     if (!user) return [];
 
-    // TODO: Subscription restrictions disabled for testing mode.
-    // All users can see who liked them during testing.
-    const canSee = true;
+    // Determine if user can see who liked them:
+    // - Premium/Basic subscribers can see
+    // - Female users on free tier can see (free-tier benefit)
+    const isPaid = user.subscriptionTier === 'premium' || user.subscriptionTier === 'basic';
+    const isFemale = user.gender === 'female';
+    const canSee = isPaid || isFemale;
 
     const likes = await ctx.db
       .query('likes')

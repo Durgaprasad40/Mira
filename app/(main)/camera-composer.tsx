@@ -116,24 +116,29 @@ export default function CameraComposerScreen() {
 
   const handlePickFromGallery = async () => {
     // Allow both photos and videos from gallery
-    const result = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ['images', 'videos'],
-      quality: 0.8,
-      videoMaxDuration: MAX_VIDEO_SEC,
-    });
-    if (!result.canceled && result.assets[0]) {
-      const asset = result.assets[0];
-      const isVideo = asset.type === 'video';
-      if (isVideo && asset.duration && asset.duration > MAX_VIDEO_SEC * 1000) {
-        Alert.alert('Too Long', `Video must be ${MAX_VIDEO_SEC} seconds or less.`);
-        return;
+    try {
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ['images', 'videos'],
+        quality: 0.8,
+        videoMaxDuration: MAX_VIDEO_SEC,
+      });
+      if (!result.canceled && result.assets[0]) {
+        const asset = result.assets[0];
+        const isVideo = asset.type === 'video';
+        if (isVideo && asset.duration && asset.duration > MAX_VIDEO_SEC * 1000) {
+          Alert.alert('Too Long', `Video must be ${MAX_VIDEO_SEC} seconds or less.`);
+          return;
+        }
+        setCapturedUri(asset.uri);
+        setCapturedType(isVideo ? 'video' : 'photo');
+        setCapturedFacing('back'); // Gallery media is not from front camera
+        if (isVideo && asset.duration) {
+          setVideoSeconds(Math.round(asset.duration / 1000));
+        }
       }
-      setCapturedUri(asset.uri);
-      setCapturedType(isVideo ? 'video' : 'photo');
-      setCapturedFacing('back'); // Gallery media is not from front camera
-      if (isVideo && asset.duration) {
-        setVideoSeconds(Math.round(asset.duration / 1000));
-      }
+    } catch {
+      // STABILITY: ImagePicker can fail on various devices
+      Alert.alert('Error', 'Could not open photo picker. Please try again.');
     }
   };
 

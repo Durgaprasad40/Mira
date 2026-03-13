@@ -662,11 +662,10 @@ export function TelegramMediaSheet({
 
   // DEV BUILD: Open settings for limited access
   const handleOpenSettings = () => {
-    try {
-      Linking.openSettings();
-    } catch {
-      // Ignore errors
-    }
+    // STABILITY: Linking.openSettings() is async - use .catch() instead of try/catch
+    void Linking.openSettings().catch(() => {
+      // Ignore errors - non-critical
+    });
   };
 
   // DEV BUILD: Handle "Grant Permissions" button - REQUEST permissions here
@@ -738,7 +737,7 @@ export function TelegramMediaSheet({
           'Camera and gallery permissions are required. Please enable them in Settings.',
           [
             { text: 'Cancel', style: 'cancel' },
-            { text: 'Open Settings', onPress: () => { try { Linking.openSettings(); } catch {} } },
+            { text: 'Open Settings', onPress: () => { void Linking.openSettings().catch(() => {}); } },
           ]
         );
         if (mountedRef.current) {

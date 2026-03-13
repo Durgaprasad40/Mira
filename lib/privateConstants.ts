@@ -64,3 +64,130 @@ export const PRIVATE_BOUNDARIES = [
 export type PrivateIntentKey = typeof PRIVATE_INTENT_CATEGORIES[number]['key'];
 export type PrivateDesireTagKey = typeof PRIVATE_DESIRE_TAGS[number]['key'];
 export type PrivateBoundaryKey = typeof PRIVATE_BOUNDARIES[number]['key'];
+
+// ============================================================
+// Phase-2 Onboarding Prompts (Step 3)
+// ============================================================
+
+// Section 1: Multiple Choice Prompts (1-3)
+export const PHASE2_SECTION1_PROMPTS = [
+  {
+    id: 'prompt_1',
+    question: 'What matters most to you when meeting someone new?',
+    options: [
+      'Emotional connection',
+      'Physical attraction',
+      'Shared values and life goals',
+      'Fun and adventure together',
+      'Intellectual conversations',
+    ],
+  },
+  {
+    id: 'prompt_2',
+    question: 'What type of relationship are you currently looking for?',
+    options: [
+      'A serious long-term relationship',
+      'Something casual and fun',
+      'Open to anything that feels right',
+      'Friendship first, then see where it goes',
+      'Just exploring and meeting people',
+    ],
+  },
+  {
+    id: 'prompt_3',
+    question: 'Which kind of personality attracts you the most?',
+    options: [
+      'Kind and emotionally supportive',
+      'Confident and ambitious',
+      'Funny and playful',
+      'Calm and mature',
+      'Adventurous and spontaneous',
+    ],
+  },
+] as const;
+
+// Section 2: Text Input Prompts (4-6)
+export const PHASE2_SECTION2_PROMPTS = [
+  {
+    id: 'prompt_4',
+    question: 'What does your ideal relationship look like?',
+  },
+  {
+    id: 'prompt_5',
+    question: 'What kind of connection are you hoping to build here?',
+  },
+  {
+    id: 'prompt_6',
+    question: 'What is one thing you value deeply in a partner?',
+  },
+] as const;
+
+// Section 3: Text Input Prompts (7-9)
+export const PHASE2_SECTION3_PROMPTS = [
+  {
+    id: 'prompt_7',
+    question: 'What makes you different from most people?',
+  },
+  {
+    id: 'prompt_8',
+    question: 'What are you most passionate about in life right now?',
+  },
+  {
+    id: 'prompt_9',
+    question: 'What kind of people do you enjoy spending time with the most?',
+  },
+] as const;
+
+// All prompts combined for easy lookup
+export const PHASE2_ALL_PROMPTS = [
+  ...PHASE2_SECTION1_PROMPTS,
+  ...PHASE2_SECTION2_PROMPTS,
+  ...PHASE2_SECTION3_PROMPTS,
+] as const;
+
+// Type for prompt answer
+export interface Phase2PromptAnswer {
+  promptId: string;
+  question: string;
+  answer: string; // Selected option for Section 1, typed text for Section 2/3
+}
+
+// Validation constants
+export const PHASE2_PROMPT_MIN_TEXT_LENGTH = 10; // Minimum characters for text answers
+export const PHASE2_PROMPT_MAX_TEXT_LENGTH = 200; // Maximum characters for text answers
+
+// ============================================================
+// Phase-2 Preference Strength (Ranking Signal)
+// ============================================================
+
+export type PreferenceStrengthValue =
+  | 'not_important'
+  | 'slight_preference'
+  | 'important'
+  | 'deal_breaker';
+
+export type IntentMatchValue =
+  | 'not_important'
+  | 'prefer_similar'
+  | 'important'
+  | 'must_match_exactly';
+
+export interface PreferenceStrength {
+  smoking: PreferenceStrengthValue | null;
+  drinking: PreferenceStrengthValue | null;
+  intent: IntentMatchValue | null;
+}
+
+export const PREFERENCE_STRENGTH_OPTIONS: readonly { value: PreferenceStrengthValue; label: string }[] = [
+  { value: 'not_important', label: 'Not important' },
+  { value: 'slight_preference', label: 'Slight preference' },
+  { value: 'important', label: 'Important' },
+  { value: 'deal_breaker', label: 'Deal breaker' },
+] as const;
+
+export const INTENT_MATCH_OPTIONS: readonly { value: IntentMatchValue; label: string }[] = [
+  { value: 'not_important', label: 'Not important' },
+  { value: 'prefer_similar', label: 'Prefer similar' },
+  { value: 'important', label: 'Important' },
+  { value: 'must_match_exactly', label: 'Must match exactly' },
+] as const;

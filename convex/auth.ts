@@ -90,7 +90,14 @@ function devLog(message: string): void {
 // ============================================================================
 
 const HASH_VERSION_LEGACY = 1;
-const CURRENT_HASH_VERSION = HASH_VERSION_LEGACY;
+const HASH_VERSION_PBKDF2 = 2;
+const CURRENT_HASH_VERSION = HASH_VERSION_PBKDF2;
+
+// PBKDF2 password hashing constants (OWASP 2024 recommendation)
+// C7 FIX: Increased iterations from 100,000 to 200,000 for stronger security
+const PBKDF2_ITERATIONS = 200000;
+const PBKDF2_SALT_BYTES = 32;  // 256-bit salt
+const PBKDF2_KEY_BYTES = 32;   // 256-bit derived key
 
 /**
  * Password hash function (Convex-compatible).
@@ -155,17 +162,127 @@ function verifyPasswordSecure(password: string, storedHash: string): boolean {
 }
 
 /**
- * Verify password with format detection.
- * Supports both legacy (unsalted) and salted formats.
+ * Convert Uint8Array to hex string.
  */
-function verifyPasswordVersioned(
+function uint8ToHex(bytes: Uint8Array): string {
+  return Array.from(bytes)
+    .map((b) => b.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+/**
+ * Convert hex string to Uint8Array.
+ */
+function hexToUint8(hex: string): Uint8Array {
+  const bytes = new Uint8Array(hex.length / 2);
+  for (let i = 0; i < hex.length; i += 2) {
+    bytes[i / 2] = parseInt(hex.substr(i, 2), 16);
+  }
+  return bytes;
+}
+
+/**
+ * PBKDF2 password hashing using Web Crypto API.
+ * Format: pbkdf2$<iterations>$<salt_hex>$<hash_hex>
+ */
+async function hashPasswordPbkdf2(password: string): Promise<string> {
+  // Generate cryptographically secure random salt
+  const salt = crypto.getRandomValues(new Uint8Array(PBKDF2_SALT_BYTES));
+
+  // Import password as key material
+  const encoder = new TextEncoder();
+  const keyMaterial = await crypto.subtle.importKey(
+    "raw",
+    encoder.encode(password),
+    "PBKDF2",
+    false,
+    ["deriveBits"]
+  );
+
+  // Derive key using PBKDF2
+  const derivedBits = await crypto.subtle.deriveBits(
+    {
+      name: "PBKDF2",
+      salt: salt.buffer as ArrayBuffer,
+      iterations: PBKDF2_ITERATIONS,
+      hash: "SHA-256",
+    },
+    keyMaterial,
+    PBKDF2_KEY_BYTES * 8 // bits
+  );
+
+  const hash = new Uint8Array(derivedBits);
+  return `pbkdf2$${PBKDF2_ITERATIONS}$${uint8ToHex(salt)}$${uint8ToHex(hash)}`;
+}
+
+/**
+ * Verify PBKDF2 password hash.
+ * Uses constant-time comparison to prevent timing attacks.
+ */
+async function verifyPasswordPbkdf2(password: string, storedHash: string): Promise<boolean> {
+  try {
+    const parts = storedHash.split("$");
+    if (parts.length !== 4 || parts[0] !== "pbkdf2") {
+      return false;
+    }
+
+    const iterations = parseInt(parts[1], 10);
+    const salt = hexToUint8(parts[2]);
+    const expectedHash = parts[3];
+
+    if (isNaN(iterations) || iterations < 1) {
+      return false;
+    }
+
+    // Import password as key material
+    const encoder = new TextEncoder();
+    const keyMaterial = await crypto.subtle.importKey(
+      "raw",
+      encoder.encode(password),
+      "PBKDF2",
+      false,
+      ["deriveBits"]
+    );
+
+    // Derive key using same parameters
+    const derivedBits = await crypto.subtle.deriveBits(
+      {
+        name: "PBKDF2",
+        salt: salt.buffer as ArrayBuffer,
+        iterations: iterations,
+        hash: "SHA-256",
+      },
+      keyMaterial,
+      PBKDF2_KEY_BYTES * 8
+    );
+
+    const actualHash = uint8ToHex(new Uint8Array(derivedBits));
+    return constantTimeCompare(expectedHash, actualHash);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Verify password with format detection.
+ * Supports legacy (unsalted), salted, and PBKDF2 formats.
+ * Flags older formats for rehash to PBKDF2.
+ */
+async function verifyPasswordVersioned(
   password: string,
   storedHash: string,
   _hashVersion: number | undefined
-): { valid: boolean; needsRehash: boolean } {
-  // Check for salted format first
+): Promise<{ valid: boolean; needsRehash: boolean }> {
+  // Check for PBKDF2 format first (most secure, no rehash needed)
+  if (storedHash.startsWith("pbkdf2$")) {
+    const valid = await verifyPasswordPbkdf2(password, storedHash);
+    return { valid, needsRehash: false };
+  }
+
+  // Check for salted format — verify and flag for rehash to PBKDF2
   if (storedHash.startsWith("salted$")) {
-    return { valid: verifyPasswordSecure(password, storedHash), needsRehash: false };
+    const valid = verifyPasswordSecure(password, storedHash);
+    return { valid, needsRehash: valid }; // Rehash to PBKDF2 if correct
   }
 
   // Legacy hash — verify and flag for rehash
@@ -321,10 +438,20 @@ export const registerWithEmail = mutation({
       v.literal("lesbian"),
       v.literal("other"),
     ),
+    lgbtqSelf: v.optional(v.array(v.union(
+      v.literal('gay'),
+      v.literal('lesbian'),
+      v.literal('bisexual'),
+      v.literal('transgender'),
+      v.literal('prefer_not_to_say')
+    ))), // LGBTQ identity (optional)
   },
   handler: async (ctx, args) => {
-    const { email, password, name, handle, dateOfBirth, gender } = args;
+    const { email, password, name, handle, dateOfBirth, gender, lgbtqSelf } = args;
     const now = Date.now();
+
+    // C8 FIX: Normalize email to lowercase to prevent case-based duplicates
+    const normalizedEmail = email.toLowerCase().trim();
 
     // Normalize handle: lowercase and trim
     const normalizedHandle = handle.toLowerCase().trim();
@@ -359,10 +486,10 @@ export const registerWithEmail = mutation({
       };
     }
 
-    // Check if user already exists by email
+    // C8 FIX: Check if user already exists by normalized email
     const existingByEmail = await ctx.db
       .query("users")
-      .withIndex("by_email", (q) => q.eq("email", email))
+      .withIndex("by_email", (q) => q.eq("email", normalizedEmail))
       .first();
 
     if (existingByEmail) {
@@ -382,16 +509,37 @@ export const registerWithEmail = mutation({
     const emailVerificationToken = generateEmailVerificationToken();
     const emailVerificationTokenHash = hashEmailToken(emailVerificationToken);
 
-    // Create user with secure password hash
+    // C8 FIX: Final duplicate re-check immediately before insert to minimize race window
+    // Note: Convex does not provide atomic upsert with uniqueness constraint.
+    // This re-check minimizes but does not eliminate the race window.
+    // Residual risk: In extremely rare concurrent requests (sub-millisecond),
+    // duplicates may still occur. These should be detected at login time.
+    const finalDuplicateCheck = await ctx.db
+      .query("users")
+      .withIndex("by_email", (q) => q.eq("email", normalizedEmail))
+      .first();
+
+    if (finalDuplicateCheck) {
+      return {
+        success: false,
+        code: "USER_EXISTS" as const,
+        provider: finalDuplicateCheck.authProvider || "email",
+        message: "You already have an account. Please log in.",
+      };
+    }
+
+    // Create user with secure PBKDF2 password hash
+    // C8 FIX: Use normalizedEmail for consistent storage
     const userId = await ctx.db.insert("users", {
-      email,
-      passwordHash: hashPasswordSecure(password),
+      email: normalizedEmail,
+      passwordHash: await hashPasswordPbkdf2(password),
       hashVersion: CURRENT_HASH_VERSION,
       authProvider: "email",
       name,
       handle: normalizedHandle, // Store the normalized handle
       dateOfBirth,
       gender,
+      lgbtqSelf: lgbtqSelf ?? [], // LGBTQ identity (optional, max 2)
       bio: "",
       isVerified: false,
       // 8B: Email starts unverified
@@ -425,13 +573,14 @@ export const registerWithEmail = mutation({
     });
 
     // Send verification email via action (runs in Node.js for external API calls)
+    // C8 FIX: Use normalizedEmail for email sending
     await ctx.scheduler.runAfter(0, api.emailActions.sendVerificationEmail, {
       userId: userId as string,
-      email,
+      email: normalizedEmail,
       token: emailVerificationToken,
       userName: name,
     });
-    devLog(`[DEV] Email verification scheduled for ${email}`);
+    devLog(`[DEV] Email verification scheduled for ${normalizedEmail}`);
 
 
     // Create session
@@ -496,7 +645,7 @@ export const loginWithEmail = mutation({
       throw new Error("Invalid email or password");
     }
 
-    const { valid, needsRehash } = verifyPasswordVersioned(
+    const { valid, needsRehash } = await verifyPasswordVersioned(
       password,
       user.passwordHash,
       user.hashVersion
@@ -522,9 +671,9 @@ export const loginWithEmail = mutation({
       lastLoginAttemptAt: undefined,
     };
 
-    // 3A2: Transparently migrate legacy hash to scrypt on successful login
+    // 3A2: Transparently migrate legacy hash to PBKDF2 on successful login
     if (needsRehash) {
-      updateData.passwordHash = hashPasswordSecure(password);
+      updateData.passwordHash = await hashPasswordPbkdf2(password);
       updateData.hashVersion = CURRENT_HASH_VERSION;
     }
 

@@ -21,6 +21,8 @@ export interface ProfileData {
   privateIntentKey?: string;
   /** Phase-2 only: Private intent category keys (multi-select, 1-5) */
   privateIntentKeys?: string[];
+  /** True if user has incognito mode enabled */
+  isIncognito?: boolean;
 }
 
 const EMPTY_PHOTOS: { url: string }[] = [];
@@ -62,6 +64,8 @@ export function toProfileData(p: any): ProfileData {
     // Phase-2 only: preserve intent keys (array preferred, single for backward compat)
     privateIntentKeys: p.privateIntentKeys ?? p.intentKeys ?? (p.privateIntentKey ? [p.privateIntentKey] : undefined),
     privateIntentKey: p.privateIntentKey ?? (p.privateIntentKeys?.[0] || p.intentKeys?.[0]),
+    // Incognito mode indicator
+    isIncognito: p.isIncognito === true || p.incognitoMode === true,
   };
 
   if (__DEV__ && rawPhotos.length === 0) {

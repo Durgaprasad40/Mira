@@ -13,7 +13,11 @@ import Constants from "expo-constants";
 import { useOnboardingStore } from "@/stores/onboardingStore";
 import { useDemoStore } from "@/stores/demoStore";
 import { useAuthStore } from "@/stores/authStore";
+import { usePrivateProfileStore } from "@/stores/privateProfileStore";
+import { clearAuthBootCache } from "@/stores/authBootCache";
 import { isDemoMode } from "@/hooks/useConvex";
+import { useMutation } from "convex/react";
+import { api } from "@/convex/_generated/api";
 
 // =============================================================================
 // Ring Buffer for Console Logs
@@ -96,10 +100,15 @@ export function DevDebugBanner({ defaultExpanded = false }: DevDebugBannerProps)
   const [info] = useState(getDebugInfo);
   const router = useRouter();
 
-  // Store hooks for reset functionality
+  // Store hooks for reset/wipe functionality
   const resetOnboardingStore = useOnboardingStore((s) => s.reset);
   const currentDemoUserId = useDemoStore((s) => s.currentDemoUserId);
   const logout = useAuthStore((s) => s.logout);
+  const userId = useAuthStore((s) => s.userId);
+  const resetPhase2 = usePrivateProfileStore((s) => s.resetPhase2);
+
+  // Convex mutation for DEV wipe
+  const devWipeMutation = useMutation(api.users.devWipeMyTestUserData);
 
   // Refresh logs periodically when expanded
   useEffect(() => {
@@ -132,10 +141,11 @@ export function DevDebugBanner({ defaultExpanded = false }: DevDebugBannerProps)
         {
           text: "Reset",
           style: "destructive",
-          onPress: () => {
+          onPress: async () => {
             try {
               // 1. Clear auth state (token, userId, onboardingCompleted)
-              logout();
+              // H5 FIX: Await async logout to ensure SecureStore is cleared before navigation
+              await logout();
 
               // 2. Reset onboarding store to initial state
               resetOnboardingStore();
@@ -166,6 +176,90 @@ export function DevDebugBanner({ defaultExpanded = false }: DevDebugBannerProps)
       ]
     );
   }, [logout, resetOnboardingStore, currentDemoUserId, router]);
+
+  /**
+   * DEV ONLY: Wipe ALL test user data.
+   * This completely removes the user from the database and clears all local state.
+   * After wipe, the user must re-authenticate and will get a fresh user record.
+   */
+  const handleWipeTestUserData = useCallback(async () => {
+    if (!__DEV__) return;
+    if (!userId) {
+      Alert.alert("Error", "No authenticated user to wipe.");
+      return;
+    }
+
+    Alert.alert(
+      "🧹 Wipe Test User Data",
+      "This will PERMANENTLY DELETE all your app data:\n\n" +
+        "• User profile\n" +
+        "• Photos\n" +
+        "• Matches & likes\n" +
+        "• Messages\n" +
+        "• Private profile\n" +
+        "• All other data\n\n" +
+        "You will need to sign in again with a fresh account.\n\n" +
+        "Continue?",
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Wipe Everything",
+          style: "destructive",
+          onPress: async () => {
+            try {
+              console.log("[DEV_WIPE] Starting wipe for userId:", userId);
+
+              // 1. Call backend to delete all user data
+              const result = await devWipeMutation({ userId });
+              console.log("[DEV_WIPE] Backend result:", JSON.stringify(result));
+
+              if (!result.success) {
+                console.error("[DEV_WIPE] Backend wipe failed:", result.error);
+                Alert.alert("Error", `Wipe failed: ${result.error}`);
+                return;
+              }
+
+              console.log("[DEV_WIPE] Backend wipe complete, clearing local state...");
+
+              // 2. Clear all local stores
+              resetOnboardingStore();
+              resetPhase2();
+              console.log("[DEV_WIPE] Local stores reset");
+
+              // 3. Clear SecureStore (auth cache)
+              await clearAuthBootCache();
+              console.log("[DEV_WIPE] SecureStore cleared");
+
+              // 4. Logout (clears authStore)
+              await logout();
+              console.log("[DEV_WIPE] Logged out");
+
+              // 5. In demo mode, clear demo state
+              if (isDemoMode) {
+                useDemoStore.getState().clearAll();
+                console.log("[DEV_WIPE] Demo store cleared");
+              }
+
+              console.log("[DEV_WIPE] === WIPE COMPLETE ===");
+              Alert.alert(
+                "Wipe Complete",
+                "All user data has been deleted. You will be redirected to the welcome screen.",
+                [
+                  {
+                    text: "OK",
+                    onPress: () => router.replace("/(auth)/welcome"),
+                  },
+                ]
+              );
+            } catch (error) {
+              console.error("[DEV_WIPE] Error:", error);
+              Alert.alert("Error", "Wipe failed. See console for details.");
+            }
+          },
+        },
+      ]
+    );
+  }, [userId, devWipeMutation, resetOnboardingStore, resetPhase2, logout, router]);
 
   return (
     <View style={styles.container}>
@@ -200,6 +294,13 @@ export function DevDebugBanner({ defaultExpanded = false }: DevDebugBannerProps)
             {__DEV__ && isDemoMode && (
               <Pressable style={styles.resetButton} onPress={handleResetOnboarding}>
                 <Text style={styles.resetButtonText}>🔄 Reset Local Session</Text>
+              </Pressable>
+            )}
+
+            {/* Wipe Test User Data Button - DEV only, works in LIVE mode */}
+            {__DEV__ && !isDemoMode && (
+              <Pressable style={styles.wipeButton} onPress={handleWipeTestUserData}>
+                <Text style={styles.resetButtonText}>🧹 Wipe My Test User Data</Text>
               </Pressable>
             )}
           </View>
@@ -336,6 +437,14 @@ const styles = StyleSheet.create({
     color: "#fff",
     fontSize: 11,
     fontWeight: "700",
+  },
+  wipeButton: {
+    backgroundColor: "#a00",
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderRadius: 6,
+    marginTop: 10,
+    alignSelf: "flex-start",
   },
 });
 

@@ -113,6 +113,50 @@ export default function SafetyScreen() {
           </View>
         </View>
 
+        {/* Trust & Safety */}
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>Trust & Safety</Text>
+
+          {/* Blocked Users */}
+          <TouchableOpacity
+            style={styles.navRow}
+            onPress={() => router.push('/(main)/(private)/settings/blocked-users')}
+            activeOpacity={0.7}
+          >
+            <View style={styles.navRowLeft}>
+              <Ionicons name="ban-outline" size={22} color={C.text} />
+              <Text style={styles.navRowTitle}>Blocked Users</Text>
+            </View>
+            <Ionicons name="chevron-forward" size={20} color={C.textLight} />
+          </TouchableOpacity>
+
+          {/* My Reports */}
+          <TouchableOpacity
+            style={styles.navRow}
+            onPress={() => router.push('/(main)/(private)/settings/my-reports')}
+            activeOpacity={0.7}
+          >
+            <View style={styles.navRowLeft}>
+              <Ionicons name="flag-outline" size={22} color={C.text} />
+              <Text style={styles.navRowTitle}>My Reports</Text>
+            </View>
+            <Ionicons name="chevron-forward" size={20} color={C.textLight} />
+          </TouchableOpacity>
+
+          {/* Safety Support */}
+          <TouchableOpacity
+            style={[styles.navRow, styles.navRowLast]}
+            onPress={() => router.push('/(main)/(private)/settings/safety-support')}
+            activeOpacity={0.7}
+          >
+            <View style={styles.navRowLeft}>
+              <Ionicons name="heart-outline" size={22} color={C.text} />
+              <Text style={styles.navRowTitle}>Safety Support</Text>
+            </View>
+            <Ionicons name="chevron-forward" size={20} color={C.textLight} />
+          </TouchableOpacity>
+        </View>
+
         {/* Safety Tips */}
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Safety Tips</Text>
@@ -321,5 +365,26 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: C.text,
     lineHeight: 20,
+  },
+  navRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: 14,
+    borderBottomWidth: 1,
+    borderBottomColor: C.border,
+  },
+  navRowLast: {
+    borderBottomWidth: 0,
+  },
+  navRowLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 14,
+  },
+  navRowTitle: {
+    fontSize: 16,
+    fontWeight: '500',
+    color: C.text,
   },
 });

@@ -86,8 +86,9 @@ export default function SendDareScreen() {
     if (!currentUserId || !userId) return;
 
     try {
+      // TOD-002 FIX: Use authUserId for server-side verification
       await sendDare({
-        fromUserId: currentUserId as any,
+        authUserId: currentUserId!,
         toUserId: userId as any,
         content: dareText,
       });

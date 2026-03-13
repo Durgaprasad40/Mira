@@ -1,3 +1,8 @@
+/*
+ * LOCKED (PHASE-1 TAB)
+ * Do NOT modify this file unless Durga Prasad explicitly unlocks it.
+ * Nearby tab is the only Phase-1 tab currently unlocked.
+ */
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import {
   View,
@@ -40,6 +45,7 @@ import {
   type ProcessedThread,
 } from '@/lib/threadsIntegrity';
 import { log } from '@/utils/logger';
+import { useScreenTrace } from '@/lib/devTrace';
 
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 const CARD_WIDTH = (SCREEN_WIDTH - 48) / 2;
@@ -69,6 +75,7 @@ function isRecentLike(createdAt: number): boolean {
 }
 
 export default function MessagesScreen() {
+  useScreenTrace("MESSAGES");
   const router = useRouter();
   const { focus, profileId, source } = useLocalSearchParams<{
     focus?: string;
@@ -210,26 +217,18 @@ export default function MessagesScreen() {
     }, [activeView])
   );
 
+  // HIGH #1 FIX: Memoize Convex query args to prevent re-subscriptions
+  // Creating new object references on every render causes Convex to re-subscribe
+  const convexQueryArgs = useMemo(
+    () => (!isDemoMode && convexUserId ? { userId: convexUserId } : 'skip' as const),
+    [convexUserId]
+  );
+
   // Convex queries (skipped in demo mode)
-  const convexConversations = useQuery(
-    api.messages.getConversations,
-    !isDemoMode && convexUserId ? { userId: convexUserId } : 'skip'
-  );
-
-  const convexUnreadCount = useQuery(
-    api.messages.getUnreadCount,
-    !isDemoMode && convexUserId ? { userId: convexUserId } : 'skip'
-  );
-
-  const convexCurrentUser = useQuery(
-    api.users.getCurrentUser,
-    !isDemoMode && convexUserId ? { userId: convexUserId } : 'skip'
-  );
-
-  const convexLikesReceived = useQuery(
-    api.likes.getLikesReceived,
-    !isDemoMode && convexUserId ? { userId: convexUserId } : 'skip'
-  );
+  const convexConversations = useQuery(api.messages.getConversations, convexQueryArgs);
+  const convexUnreadCount = useQuery(api.messages.getUnreadCount, convexQueryArgs);
+  const convexCurrentUser = useQuery(api.users.getCurrentUser, convexQueryArgs);
+  const convexLikesReceived = useQuery(api.likes.getLikesReceived, convexQueryArgs);
 
   // Demo DM store for thread model
   const demoMeta = useDemoDmStore((s) => s.meta);
@@ -568,47 +567,8 @@ export default function MessagesScreen() {
     );
   };
 
+  // Message limit UI removed — no weekly limit for now (until subscriptions added)
   const renderQuotaBanner = () => {
-    if (isDemoMode) return null;
-    if (!currentUser || currentUser.gender === 'female') return null;
-    if (currentUser.messagesRemaining === undefined) return null;
-
-    const messagesRemaining = currentUser.messagesRemaining || 0;
-    const resetDate = currentUser.messagesResetAt
-      ? new Date(currentUser.messagesResetAt)
-      : null;
-
-    if (messagesRemaining <= 0 && resetDate) {
-      return (
-        <View style={styles.quotaBanner}>
-          <Ionicons name="information-circle" size={20} color={COLORS.warning} />
-          <View style={styles.quotaContent}>
-            <Text style={styles.quotaTitle}>No messages remaining</Text>
-            <Text style={styles.quotaSubtitle}>
-              Resets {resetDate.toLocaleDateString()}
-            </Text>
-          </View>
-          <TouchableOpacity
-            style={styles.upgradeButton}
-            onPress={() => safePush(router, '/(main)/subscription', 'messages->upgrade')}
-          >
-            <Text style={styles.upgradeButtonText}>Upgrade</Text>
-          </TouchableOpacity>
-        </View>
-      );
-    }
-
-    if (messagesRemaining > 0) {
-      return (
-        <View style={[styles.quotaBanner, styles.quotaBannerActive]}>
-          <Ionicons name="chatbubbles" size={20} color={COLORS.primary} />
-          <Text style={styles.quotaText}>
-            {messagesRemaining} {messagesRemaining === 1 ? 'message' : 'messages'} remaining this week
-          </Text>
-        </View>
-      );
-    }
-
     return null;
   };
 

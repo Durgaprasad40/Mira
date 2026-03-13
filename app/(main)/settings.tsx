@@ -9,6 +9,7 @@ import {
   Switch,
   Alert,
   Modal,
+  Linking,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
@@ -26,6 +27,13 @@ import { useDemoDmStore } from '@/stores/demoDmStore';
 import { useDemoNotifStore } from '@/hooks/useNotifications';
 import { getProfileCompleteness, NUDGE_MESSAGES } from '@/lib/profileCompleteness';
 import { ProfileNudge } from '@/components/ui/ProfileNudge';
+
+// Legal and support URLs (placeholder - replace with actual URLs when available)
+const LEGAL_URLS = {
+  privacyPolicy: 'https://mira.app/privacy',
+  termsOfService: 'https://mira.app/terms',
+  helpSupport: 'mailto:support@mira.app',
+};
 
 export default function SettingsScreen() {
   const router = useRouter();
@@ -60,6 +68,7 @@ export default function SettingsScreen() {
   const toggleIncognito = useMutation(api.users.toggleIncognito);
   const toggleDiscoveryPause = useMutation(api.users.toggleDiscoveryPause);
   const togglePhotoBlurMut = isDemoMode ? null : useMutation(api.users.togglePhotoBlur);
+  const toggleShowLastSeenMut = useMutation(api.users.toggleShowLastSeen);
 
   const [incognitoEnabled, setIncognitoEnabled] = useState(currentUser?.incognitoMode || false);
   const [pauseEnabled, setPauseEnabled] = useState(false);
@@ -157,7 +166,20 @@ export default function SettingsScreen() {
   };
 
   const handleToggleLastSeen = async (show: boolean) => {
-    setShowLastSeenEnabled(show);
+    if (isDemoMode) {
+      // Demo mode: update local state only
+      setShowLastSeenEnabled(show);
+      return;
+    }
+    if (!userId) return;
+
+    try {
+      await toggleShowLastSeenMut({ userId: userId as any, enabled: show });
+      setShowLastSeenEnabled(show);
+    } catch {
+      Toast.show('Couldn\u2019t update this setting. Please try again.');
+      setShowLastSeenEnabled(!show);
+    }
   };
 
   const handleBlurToggle = (newValue: boolean) => {
@@ -326,15 +348,33 @@ export default function SettingsScreen() {
       </View>
 
       <View style={styles.section}>
+        <Text style={styles.sectionTitle}>Nearby</Text>
+        <TouchableOpacity
+          style={styles.menuItem}
+          onPress={() => router.push('/(main)/nearby-settings' as any)}
+        >
+          <Ionicons name="location-outline" size={20} color={COLORS.text} style={{ marginRight: 10 }} />
+          <Text style={[styles.menuText, { flex: 1 }]}>Nearby Settings</Text>
+          <Ionicons name="chevron-forward" size={20} color={COLORS.textLight} />
+        </TouchableOpacity>
+      </View>
+
+      <View style={styles.section}>
         <Text style={styles.sectionTitle}>Notifications</Text>
         <Text style={styles.sectionSubtitle}>
           Manage your notification preferences
         </Text>
-        <TouchableOpacity style={styles.menuItem}>
+        <TouchableOpacity
+          style={styles.menuItem}
+          onPress={() => router.push('/(main)/settings/notifications' as any)}
+        >
           <Text style={styles.menuText}>Push Notifications</Text>
           <Ionicons name="chevron-forward" size={20} color={COLORS.textLight} />
         </TouchableOpacity>
-        <TouchableOpacity style={styles.menuItem}>
+        <TouchableOpacity
+          style={styles.menuItem}
+          onPress={() => router.push('/(main)/settings/notifications' as any)}
+        >
           <Text style={styles.menuText}>Email Notifications</Text>
           <Ionicons name="chevron-forward" size={20} color={COLORS.textLight} />
         </TouchableOpacity>
@@ -369,15 +409,24 @@ export default function SettingsScreen() {
           <Text style={styles.menuText}>Edit Profile</Text>
           <Ionicons name="chevron-forward" size={20} color={COLORS.textLight} />
         </TouchableOpacity>
-        <TouchableOpacity style={styles.menuItem}>
+        <TouchableOpacity
+          style={styles.menuItem}
+          onPress={() => Linking.openURL(LEGAL_URLS.privacyPolicy)}
+        >
           <Text style={styles.menuText}>Privacy Policy</Text>
           <Ionicons name="chevron-forward" size={20} color={COLORS.textLight} />
         </TouchableOpacity>
-        <TouchableOpacity style={styles.menuItem}>
+        <TouchableOpacity
+          style={styles.menuItem}
+          onPress={() => Linking.openURL(LEGAL_URLS.termsOfService)}
+        >
           <Text style={styles.menuText}>Terms of Service</Text>
           <Ionicons name="chevron-forward" size={20} color={COLORS.textLight} />
         </TouchableOpacity>
-        <TouchableOpacity style={styles.menuItem}>
+        <TouchableOpacity
+          style={styles.menuItem}
+          onPress={() => Linking.openURL(LEGAL_URLS.helpSupport)}
+        >
           <Text style={styles.menuText}>Help & Support</Text>
           <Ionicons name="chevron-forward" size={20} color={COLORS.textLight} />
         </TouchableOpacity>

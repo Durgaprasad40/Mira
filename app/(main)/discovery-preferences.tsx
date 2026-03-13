@@ -18,8 +18,9 @@ import { Button, Input } from '@/components/ui';
 import { useFilterStore, kmToMiles, milesToKm } from '@/stores/filterStore';
 import { isDemoMode } from '@/hooks/useConvex';
 import { useAuthStore } from '@/stores/authStore';
-import { useMutation } from 'convex/react';
+import { useMutation, useQuery } from 'convex/react';
 import { api } from '@/convex/_generated/api';
+import { asUserId } from '@/convex/id';
 import type { Gender, Orientation } from '@/types';
 
 // Age and distance limits
@@ -50,6 +51,13 @@ export default function DiscoveryPreferencesScreen() {
   const isPhase2 = mode === 'phase2' || (mode === undefined && isInPrivateRoute);
 
   const { userId } = useAuthStore();
+  const convexUserId = userId ? asUserId(userId) : undefined;
+
+  // Fetch current user preferences from Convex (source of truth)
+  const currentUser = useQuery(
+    api.users.getCurrentUser,
+    convexUserId ? { userId: convexUserId } : 'skip'
+  );
 
   const {
     minAge,
@@ -59,15 +67,18 @@ export default function DiscoveryPreferencesScreen() {
     orientation,
     relationshipIntent,
     privateIntentKeys,
+    sortBy,
     setMinAge,
     setMaxAge,
     setMaxDistanceKm,
     setGender,
+    setOrientation,
     toggleOrientation,
     toggleRelationshipIntent,
     togglePrivateIntentKey,
     setRelationshipIntent,
     setPrivateIntentKeys,
+    setSortBy,
     incrementFilterVersion,
     _hasHydrated,
   } = useFilterStore();
@@ -154,17 +165,60 @@ export default function DiscoveryPreferencesScreen() {
   const [localMaxDistanceMiles, setLocalMaxDistanceMiles] = useState(initialDistanceMiles.toString());
   const [saving, setSaving] = useState(false);
 
-  // Sync local state when store hydrates (fixes stale defaults after app restart)
+  // Track if we've already hydrated from Convex (prevent re-runs)
+  const [hasHydratedFromConvex, setHasHydratedFromConvex] = useState(false);
+
+  // Hydrate filterStore and local state from Convex (source of truth)
+  // This runs ONCE when currentUser data arrives
   useEffect(() => {
-    if (_hasHydrated) {
-      setLocalMinAge(minAge.toString());
-      setLocalMaxAge(maxAge.toString());
-      setLocalMaxDistanceMiles(kmToMiles(maxDistance).toString());
-      if (__DEV__) {
-        console.log('[Prefs] Synced from hydrated store:', { minAge, maxAge, maxDistance, lookingFor, orientation, relationshipIntent });
-      }
+    if (!currentUser || hasHydratedFromConvex) return;
+
+    // Extract preferences from Convex user document
+    const serverMinAge = currentUser.minAge ?? MIN_AGE;
+    const serverMaxAge = currentUser.maxAge ?? MAX_AGE;
+    const serverMaxDistance = currentUser.maxDistance ?? 80; // Default 80km
+    const serverLookingFor = currentUser.lookingFor ?? [];
+    const serverRelationshipIntent = currentUser.relationshipIntent ?? [];
+    const serverOrientation = currentUser.orientation ?? null;
+    const serverSortBy = (currentUser as any).sortBy ?? 'recommended';
+
+    // Update filterStore with server values
+    setMinAge(serverMinAge);
+    setMaxAge(serverMaxAge);
+    setMaxDistanceKm(serverMaxDistance);
+
+    // Hydrate lookingFor (gender), relationshipIntent, orientation, and sortBy
+    if (serverLookingFor.length > 0) {
+      setGender(serverLookingFor as Gender[]);
     }
-  }, [_hasHydrated]);
+    if (serverRelationshipIntent.length > 0) {
+      setRelationshipIntent(serverRelationshipIntent as any[]);
+    }
+    // Set orientation directly (don't use toggle, which would toggle OFF if same value)
+    setOrientation(serverOrientation as Orientation | null);
+    // Hydrate sortBy
+    setSortBy(serverSortBy);
+
+    // Update local input state
+    setLocalMinAge(serverMinAge.toString());
+    setLocalMaxAge(serverMaxAge.toString());
+    setLocalMaxDistanceMiles(kmToMiles(serverMaxDistance).toString());
+
+    // Mark as hydrated to prevent re-runs
+    setHasHydratedFromConvex(true);
+
+    if (__DEV__) {
+      console.log('[Prefs] Hydrated from Convex:', {
+        minAge: serverMinAge,
+        maxAge: serverMaxAge,
+        maxDistance: serverMaxDistance,
+        lookingFor: serverLookingFor,
+        relationshipIntent: serverRelationshipIntent,
+        orientation: serverOrientation,
+        sortBy: serverSortBy,
+      });
+    }
+  }, [currentUser, hasHydratedFromConvex, setMinAge, setMaxAge, setMaxDistanceKm, setGender, setRelationshipIntent, setOrientation, setSortBy]);
 
   // Keyboard avoidance insets
   const insets = useSafeAreaInsets();
@@ -228,6 +282,10 @@ export default function DiscoveryPreferencesScreen() {
           minAge: parsedMinAge,
           maxAge: parsedMaxAge,
           maxDistance: parsedDistanceKm,
+          lookingFor: lookingFor,
+          relationshipIntent: relationshipIntent as any[],
+          orientation: orientation,
+          sortBy: sortBy,
         });
       }
 

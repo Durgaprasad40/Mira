@@ -6,15 +6,20 @@ import {
   Modal,
   TouchableOpacity,
   ScrollView,
+  Alert,
 } from 'react-native';
 import { useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Avatar } from '@/components/ui';
 import { useAuthStore, useSubscriptionStore } from '@/stores';
+import { useDemoStore } from '@/stores/demoStore';
+import { useOnboardingStore } from '@/stores/onboardingStore';
 import { useQuery } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { COLORS } from '@/lib/constants';
 import { Ionicons } from '@expo/vector-icons';
+import { isDemoMode } from '@/hooks/useConvex';
+import { safeReplace } from '@/lib/safeRouter';
 
 interface ProfileQuickMenuProps {
   visible: boolean;
@@ -24,9 +29,34 @@ interface ProfileQuickMenuProps {
 export function ProfileQuickMenu({ visible, onClose }: ProfileQuickMenuProps) {
   const router = useRouter();
   const insets = useSafeAreaInsets();
-  const { userId } = useAuthStore();
+  const { userId, logout } = useAuthStore();
   const { tier } = useSubscriptionStore();
   const isPremium = tier === 'premium';
+
+  // Logout handler matching settings/account.tsx behavior
+  const handleLogout = () => {
+    onClose();
+    Alert.alert(
+      'Log Out',
+      'Are you sure you want to log out?',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Log Out',
+          style: 'destructive',
+          onPress: async () => {
+            if (isDemoMode) {
+              useDemoStore.getState().demoLogout();
+            }
+            useOnboardingStore.getState().reset();
+            // H5 FIX: Await async logout to ensure SecureStore is cleared before navigation
+            await logout();
+            safeReplace(router, '/(auth)/welcome', 'quickmenu->logout');
+          },
+        },
+      ]
+    );
+  };
 
   const currentUser = useQuery(
     api.users.getCurrentUser,
@@ -82,7 +112,7 @@ export function ProfileQuickMenu({ visible, onClose }: ProfileQuickMenuProps) {
       icon: 'help-circle-outline',
       onPress: () => {
         onClose();
-        // TODO: Navigate to help screen
+        router.push('/(main)/settings/help' as any);
       },
     },
     {
@@ -90,10 +120,7 @@ export function ProfileQuickMenu({ visible, onClose }: ProfileQuickMenuProps) {
       label: 'Log Out',
       icon: 'log-out-outline',
       color: COLORS.error,
-      onPress: () => {
-        onClose();
-        // TODO: Handle logout
-      },
+      onPress: handleLogout,
     },
   ];
 

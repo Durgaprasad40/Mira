@@ -7,9 +7,10 @@
  * - Do not change UX/flows without explicit unlock
  * Date locked: 2026-03-04
  */
+import { useRef } from "react";
 import { View, Text, StyleSheet, ActivityIndicator } from "react-native";
 import { Button } from "@/components/ui";
-import { useRouter, Redirect } from "expo-router";
+import { useRouter, Redirect, useSegments } from "expo-router";
 import { COLORS } from "@/lib/constants";
 import { useAuthStore } from "@/stores/authStore";
 import { Ionicons } from "@expo/vector-icons";
@@ -17,18 +18,55 @@ import { LinearGradient } from "expo-linear-gradient";
 import { isDemoMode } from "@/hooks/useConvex";
 import { useDemoStore } from "@/stores/demoStore";
 
+// =============================================================================
+// WELCOME SCREEN - Auth Entry Point
+// =============================================================================
+//
+// REDIRECT RULES (ALL must be true to redirect to home):
+// 1. isAuthenticated === true (token && userId && !logoutInProgress)
+// 2. token exists and is non-empty
+// 3. userId exists
+// 4. onboardingCompleted === true
+// 5. logoutInProgress === false
+//
+// If ANY condition fails, stay on welcome screen.
+// This prevents ghost redirects after logout.
+// =============================================================================
+
 export default function WelcomeScreen() {
   const router = useRouter();
-  const { isAuthenticated, onboardingCompleted, token } = useAuthStore();
+  const segments = useSegments();
+
+  // Subscribe to auth state
+  const token = useAuthStore((s) => s.token);
+  const userId = useAuthStore((s) => s.userId);
+  const onboardingCompleted = useAuthStore((s) => s.onboardingCompleted);
+  const logoutInProgress = useAuthStore((s) => s.logoutInProgress);
+  const isAuthenticated = useAuthStore((s) => s.isAuthenticated);
+
+  // Demo mode state
   const currentDemoUserId = useDemoStore((s) => s.currentDemoUserId);
   const demoOnboardingComplete = useDemoStore((s) => s.demoOnboardingComplete);
   const demoStoreHydrated = useDemoStore((s) => s._hasHydrated);
 
-  // STRICT TOKEN CHECK: only consider authenticated if we have a valid token
-  const hasValidToken = typeof token === 'string' && token.trim().length > 0;
+  // Single-fire guard to prevent repeated redirects
+  const didRedirectRef = useRef(false);
 
-  // OB-6 fix: Wait for demoStore to hydrate before making redirect decisions
-  // This prevents incorrect redirects during startup when store values are stale/default
+  // ==========================================================================
+  // GUARD: Only process redirect logic if on auth path
+  // ==========================================================================
+
+  const isOnAuthPath = segments[0] === "(auth)" || !segments[0];
+
+  // If not on auth path, return null (component is mounted but inactive)
+  if (!isOnAuthPath) {
+    return null;
+  }
+
+  // ==========================================================================
+  // GUARD: Wait for demo store hydration in demo mode
+  // ==========================================================================
+
   if (isDemoMode && !demoStoreHydrated) {
     return (
       <LinearGradient
@@ -42,20 +80,74 @@ export default function WelcomeScreen() {
     );
   }
 
-  // Demo mode: if already logged in and onboarding complete, redirect to home
+  // ==========================================================================
+  // REDIRECT LOGIC - Demo Mode
+  // ==========================================================================
+
   if (isDemoMode && currentDemoUserId && demoOnboardingComplete[currentDemoUserId]) {
+    if (didRedirectRef.current) return null;
+    didRedirectRef.current = true;
     return <Redirect href={"/(main)/(tabs)/home" as any} />;
   }
 
-  // Live mode: ONLY redirect to home if authenticated AND onboarding completed
-  // NEVER auto-redirect for incomplete onboarding - always show welcome screen
-  if (!isDemoMode && isAuthenticated && hasValidToken && onboardingCompleted) {
-    if (__DEV__) console.log(`[WELCOME] Onboarding complete, redirecting to home`);
+  // ==========================================================================
+  // REDIRECT LOGIC - Live Mode
+  // ==========================================================================
+  //
+  // STRICT CONDITIONS - ALL must be true:
+  // 1. isAuthenticated (legacy flag for compatibility)
+  // 2. token exists and non-empty
+  // 3. userId exists
+  // 4. onboardingCompleted is true
+  // 5. logoutInProgress is FALSE
+  //
+  // This prevents the ghost login bug where:
+  // - User logs out
+  // - Stale async operation restores auth state
+  // - Welcome sees isAuthenticated=true and redirects to home
+  //
+  // With logoutInProgress check:
+  // - beginLogout() sets logoutInProgress=true
+  // - Welcome sees logoutInProgress=true → stays on welcome
+  // - finishLogout() clears auth state
+  // - Welcome sees isAuthenticated=false → stays on welcome
+  // ==========================================================================
+
+  const hasValidToken = typeof token === "string" && token.trim().length > 0;
+
+  const shouldRedirectToHome =
+    !isDemoMode &&
+    isAuthenticated &&
+    hasValidToken &&
+    userId !== null &&
+    onboardingCompleted === true &&
+    logoutInProgress === false;
+
+  if (shouldRedirectToHome) {
+    if (didRedirectRef.current) return null;
+    didRedirectRef.current = true;
+
+    if (__DEV__) {
+      console.log("[WELCOME] All conditions met, redirecting to home");
+    }
+
     return <Redirect href="/(main)/(tabs)/home" />;
   }
 
-  // For all other cases (not authenticated, or authenticated but onboarding incomplete):
-  // Stay on welcome screen and let user choose action via buttons
+  // ==========================================================================
+  // STAY ON WELCOME - Show buttons
+  // ==========================================================================
+
+  const handleCreateAccount = async () => {
+    // Force logout if there's any existing session (prevents token leakage)
+    if (userId || token) {
+      if (__DEV__) {
+        console.log("[WELCOME] Existing session detected, forcing logout before signup");
+      }
+      await useAuthStore.getState().logout();
+    }
+    router.push("/(onboarding)/email-phone");
+  };
 
   return (
     <LinearGradient
@@ -90,10 +182,10 @@ export default function WelcomeScreen() {
         <Button
           title="Create Account"
           variant="outline"
-          onPress={() => router.push("/(onboarding)/email-phone")}
+          onPress={handleCreateAccount}
           fullWidth
           style={{
-            backgroundColor: '#00000000',
+            backgroundColor: "#00000000",
             borderWidth: 2,
             borderColor: COLORS.white,
             elevation: 0,
@@ -101,7 +193,7 @@ export default function WelcomeScreen() {
           }}
           textStyle={{
             color: COLORS.white,
-            fontWeight: '600',
+            fontWeight: "600",
           }}
         />
         <Button
@@ -110,7 +202,7 @@ export default function WelcomeScreen() {
           onPress={() => router.push("/(auth)/login")}
           fullWidth
           style={{
-            backgroundColor: '#00000000',
+            backgroundColor: "#00000000",
             borderWidth: 2,
             borderColor: COLORS.white,
             elevation: 0,
@@ -118,7 +210,7 @@ export default function WelcomeScreen() {
           }}
           textStyle={{
             color: COLORS.white,
-            fontWeight: '600',
+            fontWeight: "600",
           }}
         />
         <Text style={styles.terms}>

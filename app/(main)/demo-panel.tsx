@@ -157,10 +157,12 @@ export default function DemoPanelScreen() {
       {
         text: 'Reset',
         style: 'destructive',
-        onPress: () => {
+        onPress: async () => {
           reset();
-          useAuthStore.getState().logout();
-          router.replace('/' as any);
+          // H5 FIX: Await async logout to ensure SecureStore is cleared before navigation
+          await useAuthStore.getState().logout();
+          // FIX: Navigate directly to welcome, not "/" which remounts index.tsx
+          router.replace('/(auth)/welcome' as any);
         },
       },
     ]);

@@ -1,5 +1,10 @@
-import { useEffect, useRef, useMemo } from "react";
-import { Tabs, useRouter } from "expo-router";
+/*
+ * LOCKED (PHASE-1 TAB)
+ * Do NOT modify this file unless Durga Prasad explicitly unlocks it.
+ * Nearby tab is the only Phase-1 tab currently unlocked.
+ */
+import { useEffect, useRef, useMemo, useCallback } from "react";
+import { Tabs, useRouter, useFocusEffect } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import { useQuery } from "convex/react";
 import { api } from "@/convex/_generated/api";
@@ -13,6 +18,7 @@ import { useDemoDmStore } from "@/stores/demoDmStore";
 import { useConfessionStore } from "@/stores/confessionStore";
 import { useLocationStore } from "@/stores/locationStore";
 import { usePrivateProfileStore } from "@/stores/privateProfileStore";
+import { useBootStore } from "@/stores/bootStore";
 import { asUserId } from "@/convex/id";
 import { AppErrorBoundary, registerErrorBoundaryNavigation } from "@/components/safety";
 import { processThreadsIntegrity } from "@/lib/threadsIntegrity";
@@ -42,8 +48,11 @@ export default function MainTabsLayout() {
     });
   }, [router]);
   const userId = useAuthStore((s) => s.userId);
-  const currentUserId = userId || 'demo_user_1';
-  const convexUserId = asUserId(currentUserId);
+  // BUGFIX: In live mode, never use demo_user_1 fallback for Convex queries
+  // Demo mode: use demo_user_1 fallback for UI consistency
+  // Live mode: use actual userId or undefined (queries will skip if falsy)
+  const currentUserId = isDemoMode ? (userId || 'demo_user_1') : (userId || undefined);
+  const convexUserId = currentUserId ? asUserId(currentUserId) : undefined;
 
   // BUGFIX #27: Use same unread logic for badge as messages list
   // Demo mode: use processThreadsIntegrity for consistency
@@ -93,14 +102,47 @@ export default function MainTabsLayout() {
     !isDemoMode && userId ? { userId: stringToUserId(userId) } : 'skip'
   );
 
+  // STABILITY FIX: Query users.phase2OnboardingCompleted for durable routing decision
+  // This ensures onboarding doesn't show again after force-quit/restart
+  const userOnboardingStatus = useQuery(
+    api.users.getOnboardingStatus,
+    !isDemoMode && convexUserId ? { userId: convexUserId } : 'skip'
+  );
+
   // Private tab state - check if Phase-2 onboarding is complete
   // MUST match the same logic used in PrivateLayout to avoid redirect flash
-  const phase2OnboardingCompleted = usePrivateProfileStore((s) => s.phase2OnboardingCompleted);
+  // STABILITY FIX: Now checks both local store AND backend flag
+  const localPhase2OnboardingCompleted = usePrivateProfileStore((s) => s.phase2OnboardingCompleted);
+  const phase2OnboardingCompleted = isDemoMode
+    ? localPhase2OnboardingCompleted
+    : (localPhase2OnboardingCompleted || userOnboardingStatus?.phase2OnboardingCompleted === true);
   const privateStoreHydrated = usePrivateProfileStore((s) => s._hasHydrated);
   const localDeletionStatus = usePrivateProfileStore((s) => s.deletionStatus);
   // N-001/C-004 FIX: Permanent guard to prevent duplicate router.replace calls
   // Only resets on component remount (not timeout-based)
   const didRouteToPrivateRef = useRef(false);
+  // E4: Track the private tab timeout for proper cleanup
+  const privateTabTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // STABILITY FIX: Boot readiness guard to prevent hydration race condition
+  // Ensures auth state, onboarding state, and route decision state are ready
+  // before any navigation decisions are made
+  const isBootReady = useBootStore((s) => s.isBootReady());
+
+  // E4: Cleanup private tab timeout on unmount to prevent stale guard resets
+  useEffect(() => {
+    return () => {
+      if (privateTabTimeoutRef.current) {
+        clearTimeout(privateTabTimeoutRef.current);
+        privateTabTimeoutRef.current = null;
+      }
+    };
+  }, []);
+
+  // Guard: prevent premature navigation if boot not ready
+  if (!isBootReady) {
+    return null;
+  }
 
   // Handle Private tab press - navigate on user tap only
   const handlePrivateTabPress = (e: any) => {
@@ -142,7 +184,14 @@ export default function MainTabsLayout() {
     }
 
     // N-001/C-004: Reset guard after navigation settles (allows future taps after returning)
-    setTimeout(() => { didRouteToPrivateRef.current = false; }, 1000);
+    // E4: Clear previous timeout before setting new one to prevent stale resets
+    if (privateTabTimeoutRef.current) {
+      clearTimeout(privateTabTimeoutRef.current);
+    }
+    privateTabTimeoutRef.current = setTimeout(() => {
+      didRouteToPrivateRef.current = false;
+      privateTabTimeoutRef.current = null;
+    }, 1000);
   };
 
   return (

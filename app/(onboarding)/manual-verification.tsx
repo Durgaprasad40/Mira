@@ -15,8 +15,10 @@ import { COLORS } from '@/lib/constants';
 import { Button } from '@/components/ui';
 import { useOnboardingStore } from '@/stores/onboardingStore';
 import { Ionicons } from '@expo/vector-icons';
+import { useScreenTrace } from '@/lib/devTrace';
 
 export default function ManualVerificationScreen() {
+  useScreenTrace("ONB_MANUAL_VERIFICATION");
   const { setStep } = useOnboardingStore();
   const router = useRouter();
   const [isSubmitting, setIsSubmitting] = useState(false);

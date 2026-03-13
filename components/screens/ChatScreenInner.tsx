@@ -44,7 +44,7 @@ import { VoiceMessageBubble } from '@/components/chat/VoiceMessageBubble';
 import { useDemoStore } from '@/stores/demoStore';
 import { useBlockStore } from '@/stores/blockStore';
 import { useDemoNotifStore } from '@/hooks/useNotifications';
-import { Toast } from '@/components/ui/Toast';
+// Toast import removed — using Alert.alert for guaranteed error visibility
 import { logDebugEvent } from '@/lib/debugEventLogger';
 import {
   isUserBlocked,
@@ -328,9 +328,10 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
       } else if (userId) {
         // Convex mode: prefix with hidden marker (stripped by MessageBubble)
         const markedMessage = `[SYSTEM:truthdare]${message}`;
+        // MSG-001 FIX: Use authUserId for server-side verification
         await sendMessage({
           conversationId: conversationId as any,
-          senderId: userId as any,
+          authUserId: userId,
           content: markedMessage,
           type: 'text',
         });
@@ -347,7 +348,8 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
       markDemoRead(conversationId, getDemoUserId());
       markNotifReadForConvo(conversationId);
     } else if (!isDemo && conversationId && userId) {
-      markAsRead({ conversationId: conversationId as any, userId: userId as any });
+      // MSG-004 FIX: Use authUserId for server-side verification
+      markAsRead({ conversationId: conversationId as any, authUserId: userId });
     }
   }, [conversationId, userId, isDemo, markDemoRead, markNotifReadForConvo]);
 
@@ -465,26 +467,38 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
     isSendingRef.current = true;
     if (mountedRef.current) setIsSending(true);
     if (__DEV__) console.log('[STABILITY][ChatSend] starting async send');
+
+    // P0-2 STABILITY FIX: Generate clientMessageId for idempotency on retry
+    // Prevents duplicate messages if network fails and user retries
+    const clientMessageId = `msg_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
+
     try {
       if (activeConversation.isPreMatch) {
+        // MSG-002 FIX: Use authUserId for server-side verification
         await sendPreMatchMessage({
-          fromUserId: userId as any,
+          authUserId: userId,
           toUserId: (activeConversation as any).otherUser.id as any,
           content: text,
           templateId: type === 'template' ? 'custom' : undefined,
+          clientMessageId,
         });
       } else {
+        // MSG-001 FIX: Use authUserId for server-side verification
         await sendMessage({
           conversationId: conversationId as any,
-          senderId: userId as any,
+          authUserId: userId,
           type: 'text',
           content: text,
+          clientMessageId,
         });
       }
       // B5 fix: clear draft after successful send in Convex mode
       if (conversationId) clearDemoDraft(conversationId);
     } catch (error: any) {
-      if (mountedRef.current) Toast.show(error.message || 'Failed to send — tap send to retry');
+      // Use Alert.alert instead of Toast for guaranteed visibility (Toast requires ToastHost to be mounted)
+      if (mountedRef.current) {
+        Alert.alert('Send Failed', error.message || 'Message could not be sent. Your text has been restored — tap send to retry.');
+      }
       throw error; // Re-throw so MessageInput can restore text for retry
     } finally {
       isSendingRef.current = false;
@@ -648,12 +662,22 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
         body: blob,
       });
 
-      const { storageId } = await uploadResponse.json();
+      // CRASH FIX: Validate upload response before accessing storageId
+      if (!uploadResponse.ok) {
+        throw new Error(`Upload failed: ${uploadResponse.status}`);
+      }
+
+      const uploadResult = await uploadResponse.json();
+      if (!uploadResult?.storageId) {
+        throw new Error('Upload succeeded but no storageId returned');
+      }
+      const { storageId } = uploadResult;
 
       // 3. Send protected image message with Phase-1 options mapped to Convex format
+      // MSG-003 FIX: Use authUserId for server-side verification
       await sendProtectedImage({
         conversationId: conversationId as any,
-        senderId: userId as any,
+        authUserId: userId,
         imageStorageId: storageId,
         timer: options.timer,
         screenshotAllowed: false, // Phase-1 default: no screenshots
@@ -753,6 +777,18 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
             </TouchableOpacity>
           </>
         )}
+      </View>
+    );
+  }
+
+  // CRASH FIX: Guard against missing otherUser data
+  // Even when activeConversation exists, otherUser might be undefined or partially loaded
+  const otherUser = activeConversation.otherUser;
+  if (!otherUser || !otherUser.name) {
+    return (
+      <View style={styles.loadingContainer}>
+        <ActivityIndicator size="large" color={COLORS.primary} />
+        <Text style={styles.loadingText}>Loading chat...</Text>
       </View>
     );
   }
@@ -998,7 +1034,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
         visible={showReportBlock}
         onClose={() => setShowReportBlock(false)}
         reportedUserId={(activeConversation as any).otherUser?.id || ''}
-        reportedUserName={activeConversation.otherUser.name}
+        reportedUserName={activeConversation.otherUser?.name || ''}
         currentUserId={userId || getDemoUserId()}
         conversationId={conversationId}
         onBlockSuccess={() => router.back()}

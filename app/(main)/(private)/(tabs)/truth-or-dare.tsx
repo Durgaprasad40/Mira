@@ -11,14 +11,27 @@ import { useQuery } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { INCOGNITO_COLORS } from '@/lib/constants';
 import { useAuthStore } from '@/stores/authStore';
+import { useScreenTrace } from '@/lib/devTrace';
 
 // Module-level cache for instant load across tab switches
+// M-001 FIX: Track cache for HMR cleanup
 let _cachedPromptsData: any[] = [];
 let _cachedTrendingData: { trendingDarePrompt: any; trendingTruthPrompt: any } | null = null;
 let _hasEverLoaded = false;
 
 // Timing for diagnostics
 let _tabOpenTime = 0;
+
+// M-001 FIX: Reset cache on HMR to prevent stale data in development
+if (__DEV__ && typeof module !== 'undefined' && (module as any).hot) {
+  (module as any).hot.accept(() => {
+    _cachedPromptsData = [];
+    _cachedTrendingData = null;
+    _hasEverLoaded = false;
+    _tabOpenTime = 0;
+    console.log('[T/D HMR] Cache cleared on hot reload');
+  });
+}
 
 /** Prewarm the T/D cache with data (called from Private layout mount) */
 export function prewarmTodCache(prompts: any[] | undefined, trending: any | undefined) {
@@ -213,10 +226,10 @@ const TrendingCard = React.memo(function TrendingCard({
         {/* Prompt text */}
         <Text style={styles.promptText} numberOfLines={3}>{prompt.text}</Text>
 
-        {/* Footer: +N more */}
-        <View style={styles.cardFooter}>
-          <Text style={styles.moreCountLabel}>+{answerCount} more</Text>
-        </View>
+        {/* Answer count */}
+        <Text style={styles.answerCountText}>
+          {answerCount === 1 ? '1 answer' : `${answerCount} answers`}
+        </Text>
       </View>
 
       {/* Big + button on right side */}
@@ -309,10 +322,10 @@ const PromptCard = React.memo(function PromptCard({
           </View>
         )}
 
-        {/* Footer: +N more */}
-        <View style={styles.cardFooter}>
-          <Text style={styles.moreCountLabel}>+{answerCount} more</Text>
-        </View>
+        {/* Answer count */}
+        <Text style={styles.answerCountText}>
+          {answerCount === 1 ? '1 answer' : `${answerCount} answers`}
+        </Text>
       </View>
 
       {/* Big + button on right side */}
@@ -329,6 +342,7 @@ const PromptCard = React.memo(function PromptCard({
 
 /* ─── Main Screen ─── */
 export default function TruthOrDareScreen() {
+  useScreenTrace("P2_TRUTH_OR_DARE");
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const [refreshKey, setRefreshKey] = useState(0);
@@ -460,7 +474,7 @@ export default function TruthOrDareScreen() {
 
   // Open thread for adding comment (same as opening thread, composer auto-shows)
   const openThreadForComment = useCallback((promptId: string) => {
-    router.push({ pathname: '/(main)/prompt-thread' as any, params: { promptId, autoOpenComposer: 'true' } });
+    router.push({ pathname: '/(main)/prompt-thread' as any, params: { promptId, autoOpenComposer: 'new' } });
   }, [router]);
 
   type FeedItem =
@@ -702,13 +716,9 @@ const styles = StyleSheet.create({
     color: C.primary, fontWeight: '500',
   },
 
-  // Card footer (+N more)
-  cardFooter: {
-    flexDirection: 'row', alignItems: 'center',
-    marginTop: 2,
-  },
-  moreCountLabel: {
-    fontSize: 12, fontWeight: '700', color: C.primary,
+  // Answer count text
+  answerCountText: {
+    fontSize: 11, color: C.textLight, marginTop: 4,
   },
 
   // Big + button on right side of card

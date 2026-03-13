@@ -107,8 +107,8 @@ export default function QADebugLogScreen() {
     return header + body;
   }, [events]);
 
-  const handleCopyAll = useCallback(async () => {
-    await Clipboard.setStringAsync(formatLogForExport());
+  const handleCopyAll = useCallback(() => {
+    void Clipboard.setStringAsync(formatLogForExport()).catch(() => {});
     Alert.alert('Copied', 'All events copied to clipboard');
   }, [formatLogForExport]);
 

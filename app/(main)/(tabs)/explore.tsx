@@ -1,8 +1,14 @@
+/*
+ * LOCKED (PHASE-1 TAB)
+ * Do NOT modify this file unless Durga Prasad explicitly unlocks it.
+ * Nearby tab is the only Phase-1 tab currently unlocked.
+ */
 import { useCallback, useMemo, useState, useRef } from "react";
 import { StyleSheet } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useFocusEffect, useRouter, useLocalSearchParams } from "expo-router";
 import { safePush } from "@/lib/safeRouter";
+import { useScreenTrace } from "@/lib/devTrace";
 
 import ExploreTileGrid from "@/components/explore/ExploreTileGrid";
 import { useExploreProfiles } from "@/components/explore/useExploreProfiles";
@@ -12,6 +18,7 @@ import {
 } from "@/components/explore/exploreCategories";
 
 export default function ExploreScreen() {
+  useScreenTrace("EXPLORE");
   const router = useRouter();
   const params = useLocalSearchParams();
   const [refreshing, setRefreshing] = useState(false);

@@ -1,6 +1,7 @@
 import { v } from 'convex/values';
 import { mutation, query } from './_generated/server';
 import { isPrivateDataDeleted } from './privateDeletion';
+import { resolveUserIdByAuthId } from './helpers';
 
 // Get private profile by user ID
 export const getByUserId = query({
@@ -46,6 +47,15 @@ export const upsert = mutation({
     isVerified: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
+    // C9 FIX: Require authentication and verify ownership (pattern: truthDare.ts:1424-1426)
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) {
+      throw new Error('Unauthorized: authentication required');
+    }
+    if (args.userId !== identity.subject) {
+      throw new Error('Unauthorized: cannot modify another user profile');
+    }
+
     // Check if private data is in pending_deletion state
     const isDeleted = await isPrivateDataDeleted(ctx, args.userId);
     if (isDeleted) {
@@ -87,8 +97,26 @@ export const updateFields = mutation({
     privateBio: v.optional(v.string()),
     revealPolicy: v.optional(v.union(v.literal('mutual_only'), v.literal('request_based'))),
     isSetupComplete: v.optional(v.boolean()),
+    // Profile details
+    height: v.optional(v.union(v.number(), v.null())),
+    weight: v.optional(v.union(v.number(), v.null())),
+    smoking: v.optional(v.union(v.string(), v.null())),
+    drinking: v.optional(v.union(v.string(), v.null())),
+    education: v.optional(v.union(v.string(), v.null())),
+    religion: v.optional(v.union(v.string(), v.null())),
+    // Photos
+    privatePhotoUrls: v.optional(v.array(v.string())),
   },
   handler: async (ctx, args) => {
+    // BE-001 SECURITY FIX: Require authentication and verify ownership
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) {
+      throw new Error('Unauthorized: authentication required');
+    }
+    if (args.userId !== identity.subject) {
+      throw new Error('Unauthorized: cannot modify another user profile');
+    }
+
     // Check if private data is in pending_deletion state
     const isDeleted = await isPrivateDataDeleted(ctx, args.userId);
     if (isDeleted) {
@@ -126,6 +154,15 @@ export const updateBlurredPhotos = mutation({
     privatePhotoUrls: v.array(v.string()),
   },
   handler: async (ctx, args) => {
+    // BE-002 SECURITY FIX: Require authentication and verify ownership
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) {
+      throw new Error('Unauthorized: authentication required');
+    }
+    if (args.userId !== identity.subject) {
+      throw new Error('Unauthorized: cannot modify another user photos');
+    }
+
     const existing = await ctx.db
       .query('userPrivateProfiles')
       .withIndex('by_user', (q) => q.eq('userId', args.userId))
@@ -149,6 +186,15 @@ export const updateBlurredPhotos = mutation({
 export const deleteProfile = mutation({
   args: { userId: v.id('users') },
   handler: async (ctx, args) => {
+    // BE-003 SECURITY FIX: Require authentication and verify ownership
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) {
+      throw new Error('Unauthorized: authentication required');
+    }
+    if (args.userId !== identity.subject) {
+      throw new Error('Unauthorized: cannot delete another user profile');
+    }
+
     const existing = await ctx.db
       .query('userPrivateProfiles')
       .withIndex('by_user', (q) => q.eq('userId', args.userId))
@@ -167,5 +213,237 @@ export const deleteProfile = mutation({
 
     await ctx.db.delete(existing._id);
     return { success: true };
+  },
+});
+
+/**
+ * Update specific fields on private profile by auth user ID.
+ * Uses the same auth-safe pattern as upsertByAuthId (no ctx.auth.getUserIdentity).
+ * Used by Phase-2 profile for photo sync and field updates.
+ */
+export const updateFieldsByAuthId = mutation({
+  args: {
+    authUserId: v.string(),
+    // Photos
+    privatePhotoUrls: v.optional(v.array(v.string())),
+    // Profile details
+    height: v.optional(v.union(v.number(), v.null())),
+    weight: v.optional(v.union(v.number(), v.null())),
+    smoking: v.optional(v.union(v.string(), v.null())),
+    drinking: v.optional(v.union(v.string(), v.null())),
+    education: v.optional(v.union(v.string(), v.null())),
+    religion: v.optional(v.union(v.string(), v.null())),
+    // Other optional fields
+    privateBio: v.optional(v.string()),
+    privateIntentKeys: v.optional(v.array(v.string())),
+    isPrivateEnabled: v.optional(v.boolean()),
+    // Phase-2 Onboarding Step 3: Prompt answers
+    promptAnswers: v.optional(v.array(v.object({
+      promptId: v.string(),
+      question: v.string(),
+      answer: v.string(),
+    }))),
+  },
+  handler: async (ctx, args) => {
+    const userId = await resolveUserIdByAuthId(ctx, args.authUserId);
+    if (!userId) {
+      console.warn('[PRIVATE_PROFILE] updateFieldsByAuthId: user not found');
+      return { success: false, error: 'user_not_found' };
+    }
+
+    // Check if private data is in pending_deletion state
+    const isDeleted = await isPrivateDataDeleted(ctx, userId);
+    if (isDeleted) {
+      console.warn('[PRIVATE_PROFILE] updateFieldsByAuthId: deletion pending');
+      return { success: false, error: 'deletion_pending' };
+    }
+
+    const existing = await ctx.db
+      .query('userPrivateProfiles')
+      .withIndex('by_user', (q) => q.eq('userId', userId))
+      .first();
+
+    if (!existing) {
+      console.warn('[PRIVATE_PROFILE] updateFieldsByAuthId: profile not found');
+      return { success: false, error: 'profile_not_found' };
+    }
+
+    // Build clean updates (only defined values)
+    const { authUserId, ...updates } = args;
+    const cleanUpdates: Record<string, unknown> = { updatedAt: Date.now() };
+    for (const [key, value] of Object.entries(updates)) {
+      if (value !== undefined) {
+        cleanUpdates[key] = value;
+      }
+    }
+
+    await ctx.db.patch(existing._id, cleanUpdates);
+    console.log('[PRIVATE_PROFILE] updateFieldsByAuthId: success');
+    return { success: true };
+  },
+});
+
+/**
+ * Get private profile by auth user ID (string).
+ * Resolves auth ID to Convex user ID internally.
+ * Used by Phase-2 Profile tab to load backend data.
+ */
+export const getByAuthUserId = query({
+  args: { authUserId: v.string() },
+  handler: async (ctx, args) => {
+    const userId = await resolveUserIdByAuthId(ctx, args.authUserId);
+    if (!userId) {
+      return null;
+    }
+
+    // Check if private data is in pending_deletion state
+    const isDeleted = await isPrivateDataDeleted(ctx, userId);
+    if (isDeleted) {
+      return null;
+    }
+
+    const profile = await ctx.db
+      .query('userPrivateProfiles')
+      .withIndex('by_user', (q) => q.eq('userId', userId))
+      .first();
+    return profile;
+  },
+});
+
+/**
+ * Upsert private profile by auth user ID.
+ * Called from Phase-2 onboarding completion to persist profile to Convex.
+ * IMPORTANT: Only stores backend URLs, not local file URIs.
+ */
+export const upsertByAuthId = mutation({
+  args: {
+    authUserId: v.string(),
+    displayName: v.string(),
+    age: v.number(),
+    gender: v.string(),
+    privateBio: v.optional(v.string()),
+    privateIntentKeys: v.array(v.string()),
+    privatePhotoUrls: v.array(v.string()),
+    city: v.optional(v.string()),
+    // Optional fields with defaults
+    isPrivateEnabled: v.optional(v.boolean()),
+    ageConfirmed18Plus: v.optional(v.boolean()),
+    ageConfirmedAt: v.optional(v.number()),
+    privatePhotosBlurred: v.optional(v.array(v.id('_storage'))),
+    privatePhotoBlurLevel: v.optional(v.number()),
+    privateDesireTagKeys: v.optional(v.array(v.string())),
+    privateBoundaries: v.optional(v.array(v.string())),
+    revealPolicy: v.optional(v.union(v.literal('mutual_only'), v.literal('request_based'))),
+    isSetupComplete: v.optional(v.boolean()),
+    hobbies: v.optional(v.array(v.string())),
+    isVerified: v.optional(v.boolean()),
+    // Profile details (imported from Phase-1)
+    height: v.optional(v.union(v.number(), v.null())),
+    weight: v.optional(v.union(v.number(), v.null())),
+    smoking: v.optional(v.union(v.string(), v.null())),
+    drinking: v.optional(v.union(v.string(), v.null())),
+    education: v.optional(v.union(v.string(), v.null())),
+    religion: v.optional(v.union(v.string(), v.null())),
+    // Phase-2 Onboarding Step 3: Prompt answers
+    promptAnswers: v.optional(v.array(v.object({
+      promptId: v.string(),
+      question: v.string(),
+      answer: v.string(),
+    }))),
+    // Phase-2 Preference Strength (ranking signal)
+    preferenceStrength: v.optional(v.object({
+      smoking: v.union(v.literal('not_important'), v.literal('slight_preference'), v.literal('important'), v.literal('deal_breaker')),
+      drinking: v.union(v.literal('not_important'), v.literal('slight_preference'), v.literal('important'), v.literal('deal_breaker')),
+      intent: v.union(v.literal('not_important'), v.literal('prefer_similar'), v.literal('important'), v.literal('must_match_exactly')),
+    })),
+  },
+  handler: async (ctx, args) => {
+    const userId = await resolveUserIdByAuthId(ctx, args.authUserId);
+    if (!userId) {
+      console.warn('[PRIVATE_PROFILE] upsertByAuthId: user not found for authId');
+      return { success: false, error: 'user_not_found' };
+    }
+
+    // Check if private data is in pending_deletion state
+    const isDeleted = await isPrivateDataDeleted(ctx, userId);
+    if (isDeleted) {
+      console.warn('[PRIVATE_PROFILE] upsertByAuthId: cannot update while deletion pending');
+      return { success: false, error: 'deletion_pending' };
+    }
+
+    const existing = await ctx.db
+      .query('userPrivateProfiles')
+      .withIndex('by_user', (q) => q.eq('userId', userId))
+      .first();
+
+    const now = Date.now();
+
+    // Build profile data with defaults
+    const profileData = {
+      userId,
+      displayName: args.displayName,
+      age: args.age,
+      gender: args.gender,
+      privateBio: args.privateBio || '',
+      privateIntentKeys: args.privateIntentKeys,
+      privatePhotoUrls: args.privatePhotoUrls,
+      city: args.city || '',
+      isPrivateEnabled: args.isPrivateEnabled ?? true,
+      ageConfirmed18Plus: args.ageConfirmed18Plus ?? true,
+      ageConfirmedAt: args.ageConfirmedAt ?? now,
+      privatePhotosBlurred: args.privatePhotosBlurred ?? [],
+      privatePhotoBlurLevel: args.privatePhotoBlurLevel ?? 0,
+      privateDesireTagKeys: args.privateDesireTagKeys ?? [],
+      privateBoundaries: args.privateBoundaries ?? [],
+      revealPolicy: args.revealPolicy ?? 'mutual_only',
+      isSetupComplete: args.isSetupComplete ?? true,
+      hobbies: args.hobbies ?? [],
+      isVerified: args.isVerified ?? false,
+      // Phase-2 Onboarding Step 3: Prompt answers
+      promptAnswers: args.promptAnswers ?? [],
+    };
+
+    // Profile details (imported from Phase-1) - only include if defined
+    // Schema uses v.optional(), not v.union with null, so we omit undefined/null values
+    if (args.height !== undefined && args.height !== null) {
+      (profileData as any).height = args.height;
+    }
+    if (args.weight !== undefined && args.weight !== null) {
+      (profileData as any).weight = args.weight;
+    }
+    if (args.smoking !== undefined && args.smoking !== null) {
+      (profileData as any).smoking = args.smoking;
+    }
+    if (args.drinking !== undefined && args.drinking !== null) {
+      (profileData as any).drinking = args.drinking;
+    }
+    if (args.education !== undefined && args.education !== null) {
+      (profileData as any).education = args.education;
+    }
+    if (args.religion !== undefined && args.religion !== null) {
+      (profileData as any).religion = args.religion;
+    }
+
+    // Preference Strength - only include if provided (fully complete object)
+    if (args.preferenceStrength) {
+      (profileData as any).preferenceStrength = args.preferenceStrength;
+    }
+
+    if (existing) {
+      await ctx.db.patch(existing._id, {
+        ...profileData,
+        updatedAt: now,
+      });
+      console.log('[PRIVATE_PROFILE] upsertByAuthId: updated existing profile');
+      return { success: true, profileId: existing._id };
+    }
+
+    const profileId = await ctx.db.insert('userPrivateProfiles', {
+      ...profileData,
+      createdAt: now,
+      updatedAt: now,
+    });
+    console.log('[PRIVATE_PROFILE] upsertByAuthId: created new profile');
+    return { success: true, profileId };
   },
 });

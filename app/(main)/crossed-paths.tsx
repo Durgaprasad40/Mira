@@ -1,47 +1,115 @@
-import React from 'react';
+/**
+ * Crossed Paths Screen - Phase 2 Implementation
+ *
+ * Features:
+ * - Lists users who have crossed paths with the current user
+ * - Shows distance ranges (e.g., "4-5 km") instead of exact distances
+ * - Shows relative time (e.g., "today", "yesterday") instead of exact timestamps
+ * - Shows crossing count for repeated crossings
+ * - "Why am I seeing this?" explanation
+ * - Navigation to profile on tap
+ * - Hide/delete crossed path entries
+ * - Demo mode with sample data
+ */
+import React, { useCallback, useState, useMemo } from 'react';
 import {
   View,
   Text,
   StyleSheet,
-  FlatList,
   TouchableOpacity,
-  Platform,
+  FlatList,
+  Image,
+  ActivityIndicator,
+  RefreshControl,
+  Alert,
 } from 'react-native';
+import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
-import { useQuery } from 'convex/react';
+import { Ionicons } from '@expo/vector-icons';
+import { useQuery, useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { useAuthStore } from '@/stores/authStore';
+import { asUserId } from '@/convex/id';
+import { safePush } from '@/lib/safeRouter';
 import { COLORS } from '@/lib/constants';
-import { Ionicons } from '@expo/vector-icons';
 import { isDemoMode } from '@/hooks/useConvex';
+import { DEMO_PROFILES } from '@/lib/demoData';
+import { Id } from '@/convex/_generated/dataModel';
 
 // ---------------------------------------------------------------------------
-// Helpers
+// Types
 // ---------------------------------------------------------------------------
 
-/** Format a timestamp to a relative time string like "2 days ago". */
-function formatTimeAgo(timestamp: number): string {
-  const diff = Date.now() - timestamp;
-  const minutes = Math.floor(diff / 60000);
-  const hours = Math.floor(minutes / 60);
-  const days = Math.floor(hours / 24);
-
-  if (days > 0) return `${days} day${days > 1 ? 's' : ''} ago`;
-  if (hours > 0) return `${hours} hour${hours > 1 ? 's' : ''} ago`;
-  if (minutes > 0) return `${minutes} min ago`;
-  return 'Just now';
+interface CrossedPathItem {
+  id: string;
+  otherUserId: string;
+  otherUserName: string;
+  otherUserAge: number;
+  areaName: string;
+  crossingCount: number;
+  distanceRange: string | null;
+  relativeTime: string;
+  reasonTags: string[];
+  reasonText: string | null;
+  whyExplanation: string;
+  photoUrl: string | null | undefined;
+  initial: string;
+  isVerified: boolean;
 }
 
 // ---------------------------------------------------------------------------
-// Demo data (used when in demo mode)
+// Demo Data
 // ---------------------------------------------------------------------------
 
-const DEMO_HISTORY = [
-  { id: '1', initial: 'A', areaName: 'Near Powai', createdAt: Date.now() - 2 * 24 * 60 * 60 * 1000 },
-  { id: '2', initial: 'S', areaName: 'Near Vikhroli', createdAt: Date.now() - 3 * 24 * 60 * 60 * 1000 },
-  { id: '3', initial: 'H', areaName: 'Near Sion West', createdAt: Date.now() - 5 * 24 * 60 * 60 * 1000 },
-  { id: '4', initial: 'J', areaName: 'Near Matunga East', createdAt: Date.now() - 1 * 24 * 60 * 60 * 1000 },
-  { id: '5', initial: 'R', areaName: 'Near Andheri East', createdAt: Date.now() - 4 * 24 * 60 * 60 * 1000 },
+const DEMO_CROSSED_PATHS: CrossedPathItem[] = [
+  {
+    id: 'demo_cp_1',
+    otherUserId: 'demo_profile_1',
+    otherUserName: DEMO_PROFILES[0]?.name ?? 'Priya',
+    otherUserAge: DEMO_PROFILES[0]?.age ?? 25,
+    areaName: 'Near Bandra West',
+    crossingCount: 3,
+    distanceRange: '2-3 km',
+    relativeTime: 'today',
+    reasonTags: ['interest:coffee', 'lookingFor:long_term'],
+    reasonText: 'You both enjoy coffee',
+    whyExplanation: "You've crossed paths 3 times in similar areas. You both enjoy coffee.",
+    photoUrl: DEMO_PROFILES[0]?.photos?.[0]?.url ?? null,
+    initial: 'P',
+    isVerified: true,
+  },
+  {
+    id: 'demo_cp_2',
+    otherUserId: 'demo_profile_2',
+    otherUserName: DEMO_PROFILES[1]?.name ?? 'Ananya',
+    otherUserAge: DEMO_PROFILES[1]?.age ?? 23,
+    areaName: 'Nearby area',
+    crossingCount: 1,
+    distanceRange: '1-2 km',
+    relativeTime: 'yesterday',
+    reasonTags: ['interest:movies'],
+    reasonText: 'You both enjoy movies',
+    whyExplanation: 'You were in the same area within the last 24 hours. You both enjoy movies.',
+    photoUrl: DEMO_PROFILES[1]?.photos?.[0]?.url ?? null,
+    initial: 'A',
+    isVerified: true,
+  },
+  {
+    id: 'demo_cp_3',
+    otherUserId: 'demo_profile_3',
+    otherUserName: DEMO_PROFILES[2]?.name ?? 'Meera',
+    otherUserAge: DEMO_PROFILES[2]?.age ?? 27,
+    areaName: 'Near Koramangala',
+    crossingCount: 5,
+    distanceRange: '3-5 km',
+    relativeTime: '2 days ago',
+    reasonTags: ['lookingFor:long_term'],
+    reasonText: "You're both looking for something long-term",
+    whyExplanation: "You've crossed paths 5 times in similar areas. You're both looking for something long-term.",
+    photoUrl: DEMO_PROFILES[2]?.photos?.[0]?.url ?? null,
+    initial: 'M',
+    isVerified: true,
+  },
 ];
 
 // ---------------------------------------------------------------------------
@@ -50,67 +118,330 @@ const DEMO_HISTORY = [
 
 export default function CrossedPathsScreen() {
   const router = useRouter();
-  const { userId } = useAuthStore();
+  const isDemo = isDemoMode;
 
-  const convexHistory = useQuery(
+  // Auth store
+  const userId = useAuthStore((s) => s.userId);
+  const convexUserId = userId ? asUserId(userId) : undefined;
+
+  // Local state
+  const [isRefreshing, setIsRefreshing] = useState(false);
+  const [hiddenDemoIds, setHiddenDemoIds] = useState<Set<string>>(new Set());
+
+  // Query crossed paths history (live mode only)
+  const crossedPathsQuery = useQuery(
     api.crossedPaths.getCrossPathHistory,
-    !isDemoMode && userId ? { userId: userId as any } : 'skip',
+    !isDemo && convexUserId ? { userId: convexUserId } : 'skip'
   );
 
-  const history = isDemoMode
-    ? DEMO_HISTORY
-    : (convexHistory ?? []).map((entry) => ({
-        id: entry.id,
-        initial: entry.initial,
-        areaName: entry.areaName,
-        createdAt: entry.createdAt,
-      }));
+  // Mutations for hide/delete (live mode only)
+  const hideCrossedPathMutation = useMutation(api.crossedPaths.hideCrossedPath);
+  const deleteCrossedPathMutation = useMutation(api.crossedPaths.deleteCrossedPath);
 
+  // Loading state
+  const isLoading = !isDemo && crossedPathsQuery === undefined;
+
+  // Combine demo and live data
+  const crossedPaths: CrossedPathItem[] = useMemo(() => {
+    if (isDemo) {
+      // Filter out hidden demo items
+      return DEMO_CROSSED_PATHS.filter((item) => !hiddenDemoIds.has(item.id));
+    }
+    return crossedPathsQuery ?? [];
+  }, [isDemo, crossedPathsQuery, hiddenDemoIds]);
+
+  // ---------------------------------------------------------------------------
+  // Refresh handler
+  // ---------------------------------------------------------------------------
+  const handleRefresh = useCallback(async () => {
+    if (isDemo) {
+      // Demo mode: simulate refresh
+      setIsRefreshing(true);
+      await new Promise((resolve) => setTimeout(resolve, 500));
+      setIsRefreshing(false);
+      return;
+    }
+
+    // Live mode: Convex queries auto-refresh, but we show the indicator briefly
+    setIsRefreshing(true);
+    // Give time for the query to potentially re-fetch
+    await new Promise((resolve) => setTimeout(resolve, 800));
+    setIsRefreshing(false);
+  }, [isDemo]);
+
+  // ---------------------------------------------------------------------------
+  // Navigation handlers
+  // ---------------------------------------------------------------------------
+  const handleBack = useCallback(() => {
+    router.back();
+  }, [router]);
+
+  const handleProfilePress = useCallback((profileId: string) => {
+    safePush(router, `/(main)/profile/${profileId}` as any, 'crossed-paths->profile');
+  }, [router]);
+
+  // ---------------------------------------------------------------------------
+  // Hide/Delete handlers
+  // ---------------------------------------------------------------------------
+  const handleHidePress = useCallback((item: CrossedPathItem) => {
+    Alert.alert(
+      'Hide this person?',
+      `${item.otherUserName} will be hidden from your crossed paths list. You can still see them if you cross paths again.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Hide',
+          style: 'destructive',
+          onPress: async () => {
+            if (isDemo) {
+              // Demo mode: hide locally
+              setHiddenDemoIds((prev) => new Set([...prev, item.id]));
+              return;
+            }
+
+            // Live mode: call mutation
+            if (!convexUserId) return;
+            try {
+              await hideCrossedPathMutation({
+                userId: convexUserId,
+                historyId: item.id as Id<'crossPathHistory'>,
+              });
+            } catch (error) {
+              if (__DEV__) console.error('[CROSSED_PATHS] Hide failed:', error);
+              Alert.alert('Error', 'Failed to hide. Please try again.');
+            }
+          },
+        },
+      ]
+    );
+  }, [isDemo, convexUserId, hideCrossedPathMutation]);
+
+  const handleDeletePress = useCallback((item: CrossedPathItem) => {
+    Alert.alert(
+      'Remove permanently?',
+      `This will permanently remove ${item.otherUserName} from your crossed paths history. This action cannot be undone.`,
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Remove',
+          style: 'destructive',
+          onPress: async () => {
+            if (isDemo) {
+              // Demo mode: hide locally (same effect)
+              setHiddenDemoIds((prev) => new Set([...prev, item.id]));
+              return;
+            }
+
+            // Live mode: call mutation
+            if (!convexUserId) return;
+            try {
+              await deleteCrossedPathMutation({
+                userId: convexUserId,
+                historyId: item.id as Id<'crossPathHistory'>,
+              });
+            } catch (error) {
+              if (__DEV__) console.error('[CROSSED_PATHS] Delete failed:', error);
+              Alert.alert('Error', 'Failed to remove. Please try again.');
+            }
+          },
+        },
+      ]
+    );
+  }, [isDemo, convexUserId, deleteCrossedPathMutation]);
+
+  const handleOptionsPress = useCallback((item: CrossedPathItem) => {
+    Alert.alert(
+      item.otherUserName,
+      'What would you like to do?',
+      [
+        { text: 'Cancel', style: 'cancel' },
+        {
+          text: 'Hide from list',
+          onPress: () => handleHidePress(item),
+        },
+        {
+          text: 'Remove permanently',
+          style: 'destructive',
+          onPress: () => handleDeletePress(item),
+        },
+      ]
+    );
+  }, [handleHidePress, handleDeletePress]);
+
+  // ---------------------------------------------------------------------------
+  // Render item
+  // ---------------------------------------------------------------------------
+  const renderItem = useCallback(({ item }: { item: CrossedPathItem }) => {
+    return (
+      <TouchableOpacity
+        style={styles.card}
+        onPress={() => handleProfilePress(item.otherUserId as string)}
+        onLongPress={() => handleOptionsPress(item)}
+        activeOpacity={0.7}
+        delayLongPress={400}
+      >
+        <View style={styles.cardContent}>
+          {/* Profile photo */}
+          <View style={styles.photoContainer}>
+            {item.photoUrl ? (
+              <Image source={{ uri: item.photoUrl }} style={styles.photo} />
+            ) : (
+              <View style={styles.photoPlaceholder}>
+                <Text style={styles.photoInitial}>{item.initial}</Text>
+              </View>
+            )}
+            {item.isVerified && (
+              <View style={styles.verifiedBadge}>
+                <Ionicons name="checkmark-circle" size={16} color={COLORS.primary} />
+              </View>
+            )}
+          </View>
+
+          {/* Info section */}
+          <View style={styles.infoSection}>
+            <View style={styles.nameRow}>
+              <Text style={styles.name} numberOfLines={1}>
+                {item.otherUserName}, {item.otherUserAge}
+              </Text>
+              {item.crossingCount > 1 && (
+                <View style={styles.crossingBadge}>
+                  <Ionicons name="footsteps" size={12} color={COLORS.primary} />
+                  <Text style={styles.crossingCount}>{item.crossingCount}x</Text>
+                </View>
+              )}
+            </View>
+
+            <View style={styles.detailsRow}>
+              <View style={styles.detailItem}>
+                <Ionicons name="location-outline" size={14} color={COLORS.textLight} />
+                <Text style={styles.detailText}>{item.areaName}</Text>
+              </View>
+              {item.distanceRange && (
+                <View style={styles.detailItem}>
+                  <Ionicons name="navigate-outline" size={14} color={COLORS.textLight} />
+                  <Text style={styles.detailText}>{item.distanceRange}</Text>
+                </View>
+              )}
+            </View>
+
+            <View style={styles.timeRow}>
+              <Ionicons name="time-outline" size={14} color={COLORS.textLight} />
+              <Text style={styles.timeText}>{item.relativeTime}</Text>
+            </View>
+
+            {/* Why am I seeing this? */}
+            {item.reasonText && (
+              <View style={styles.reasonRow}>
+                <Ionicons name="heart-outline" size={14} color={COLORS.primary} />
+                <Text style={styles.reasonText} numberOfLines={1}>
+                  {item.reasonText}
+                </Text>
+              </View>
+            )}
+          </View>
+
+          {/* Options button */}
+          <TouchableOpacity
+            style={styles.optionsButton}
+            onPress={() => handleOptionsPress(item)}
+            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+          >
+            <Ionicons name="ellipsis-vertical" size={18} color={COLORS.textLight} />
+          </TouchableOpacity>
+        </View>
+      </TouchableOpacity>
+    );
+  }, [handleProfilePress, handleOptionsPress]);
+
+  // ---------------------------------------------------------------------------
+  // Empty state
+  // ---------------------------------------------------------------------------
+  const renderEmpty = useCallback(() => {
+    if (isLoading) return null;
+
+    return (
+      <View style={styles.emptyContainer}>
+        <Ionicons name="footsteps-outline" size={64} color={COLORS.textLight} />
+        <Text style={styles.emptyTitle}>No crossed paths yet</Text>
+        <Text style={styles.emptySubtitle}>
+          When you cross paths with someone nearby, they'll appear here.
+        </Text>
+      </View>
+    );
+  }, [isLoading]);
+
+  // ---------------------------------------------------------------------------
+  // Header info
+  // ---------------------------------------------------------------------------
+  const renderHeader = useCallback(() => {
+    if (crossedPaths.length === 0) return null;
+
+    return (
+      <View style={styles.headerInfo}>
+        <View style={styles.headerInfoContent}>
+          <Ionicons name="information-circle-outline" size={18} color={COLORS.primary} />
+          <Text style={styles.headerInfoText}>
+            People you've crossed paths with in the last 4 weeks. Long-press or tap the menu to hide.
+          </Text>
+        </View>
+      </View>
+    );
+  }, [crossedPaths.length]);
+
+  // ---------------------------------------------------------------------------
+  // Render
+  // ---------------------------------------------------------------------------
   return (
-    <View style={styles.container}>
+    <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
       {/* Header */}
       <View style={styles.header}>
-        <TouchableOpacity onPress={() => router.back()}>
+        <TouchableOpacity onPress={handleBack} style={styles.backButton}>
           <Ionicons name="arrow-back" size={24} color={COLORS.text} />
         </TouchableOpacity>
         <Text style={styles.headerTitle}>Crossed Paths</Text>
-        <View style={{ width: 24 }} />
+        <View style={styles.headerSpacer} />
       </View>
 
-      {/* Section label */}
-      <Text style={styles.sectionLabel}>People you crossed paths with recently</Text>
+      {/* Loading state */}
+      {isLoading && (
+        <View style={styles.loadingContainer}>
+          <ActivityIndicator size="large" color={COLORS.primary} />
+          <Text style={styles.loadingText}>Loading...</Text>
+        </View>
+      )}
 
-      {/* History list */}
-      <FlatList
-        data={history}
-        keyExtractor={(item) => item.id}
-        contentContainerStyle={styles.listContent}
-        renderItem={({ item }) => (
-          <View style={styles.historyCard}>
-            {/* Blurred / anonymous avatar circle with initial */}
-            <View style={styles.avatarCircle}>
-              <Text style={styles.avatarInitial}>{item.initial}</Text>
-            </View>
+      {/* Demo mode notice */}
+      {isDemo && (
+        <View style={styles.demoNotice}>
+          <Ionicons name="flask-outline" size={16} color={COLORS.warning} />
+          <Text style={styles.demoNoticeText}>Demo mode - showing sample data</Text>
+        </View>
+      )}
 
-            <View style={styles.historyInfo}>
-              {/* Area name only — no coordinates, no exact distance */}
-              <Text style={styles.areaName}>{item.areaName}</Text>
-              {/* Relative time */}
-              <Text style={styles.timeAgo}>{formatTimeAgo(item.createdAt)}</Text>
-            </View>
-          </View>
-        )}
-        ListEmptyComponent={
-          <View style={styles.emptyContainer}>
-            <Ionicons name="location-outline" size={64} color={COLORS.textLight} />
-            <Text style={styles.emptyTitle}>No crossed paths yet</Text>
-            <Text style={styles.emptySubtitle}>
-              When you and someone else use the app in the same area, it will appear here.
-            </Text>
-          </View>
-        }
-      />
-    </View>
+      {/* List */}
+      {!isLoading && (
+        <FlatList
+          data={crossedPaths}
+          renderItem={renderItem}
+          keyExtractor={(item) => item.id as string}
+          contentContainerStyle={styles.listContent}
+          ListHeaderComponent={renderHeader}
+          ListEmptyComponent={renderEmpty}
+          showsVerticalScrollIndicator={false}
+          initialNumToRender={10}
+          maxToRenderPerBatch={10}
+          windowSize={5}
+          refreshControl={
+            <RefreshControl
+              refreshing={isRefreshing}
+              onRefresh={handleRefresh}
+              colors={[COLORS.primary]}
+              tintColor={COLORS.primary}
+            />
+          }
+        />
+      )}
+    </SafeAreaView>
   );
 }
 
@@ -127,83 +458,196 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    padding: 16,
-    paddingTop: Platform.OS === 'ios' ? 50 : 16,
-    backgroundColor: COLORS.background,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
     borderBottomWidth: 1,
     borderBottomColor: COLORS.border,
+  },
+  backButton: {
+    padding: 4,
   },
   headerTitle: {
     fontSize: 20,
     fontWeight: '600',
     color: COLORS.text,
   },
-  sectionLabel: {
-    fontSize: 13,
+  headerSpacer: {
+    width: 32,
+  },
+  loadingContainer: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  loadingText: {
+    marginTop: 12,
+    fontSize: 15,
     color: COLORS.textLight,
-    paddingHorizontal: 16,
-    paddingTop: 16,
-    paddingBottom: 8,
   },
-  listContent: {
-    paddingBottom: 40,
-  },
-
-  // History card — anonymous, area-only
-  historyCard: {
+  demoNotice: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingVertical: 14,
-    paddingHorizontal: 16,
-    borderBottomWidth: 1,
-    borderBottomColor: COLORS.border,
-  },
-  avatarCircle: {
-    width: 48,
-    height: 48,
-    borderRadius: 24,
-    backgroundColor: COLORS.primary + '30',
-    alignItems: 'center',
     justifyContent: 'center',
-    marginRight: 14,
+    backgroundColor: `${COLORS.warning}15`,
+    paddingVertical: 8,
+    gap: 6,
   },
-  avatarInitial: {
-    fontSize: 18,
-    fontWeight: '700',
-    color: COLORS.primary,
+  demoNoticeText: {
+    fontSize: 13,
+    color: COLORS.warning,
   },
-  historyInfo: {
-    flex: 1,
+  headerInfo: {
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    backgroundColor: `${COLORS.primary}08`,
   },
-  areaName: {
-    fontSize: 15,
-    fontWeight: '600',
-    color: COLORS.text,
+  headerInfoContent: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
   },
-  timeAgo: {
+  headerInfoText: {
     fontSize: 13,
     color: COLORS.textLight,
-    marginTop: 3,
+    flex: 1,
   },
-
-  // Empty state
-  emptyContainer: {
+  listContent: {
+    flexGrow: 1,
+    paddingBottom: 24,
+  },
+  card: {
+    backgroundColor: '#fff',
+    marginHorizontal: 16,
+    marginTop: 12,
+    borderRadius: 12,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.08,
+    shadowRadius: 3,
+    elevation: 2,
+  },
+  cardContent: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    padding: 14,
+  },
+  photoContainer: {
+    position: 'relative',
+  },
+  photo: {
+    width: 60,
+    height: 60,
+    borderRadius: 30,
+    backgroundColor: COLORS.border,
+  },
+  photoPlaceholder: {
+    width: 60,
+    height: 60,
+    borderRadius: 30,
+    backgroundColor: COLORS.primary,
     alignItems: 'center',
     justifyContent: 'center',
-    padding: 40,
-    marginTop: 60,
+  },
+  photoInitial: {
+    fontSize: 24,
+    fontWeight: '700',
+    color: '#fff',
+  },
+  verifiedBadge: {
+    position: 'absolute',
+    bottom: -2,
+    right: -2,
+    backgroundColor: '#fff',
+    borderRadius: 8,
+  },
+  infoSection: {
+    flex: 1,
+    marginLeft: 14,
+    marginRight: 8,
+  },
+  nameRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  name: {
+    fontSize: 17,
+    fontWeight: '600',
+    color: COLORS.text,
+    flex: 1,
+  },
+  crossingBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: `${COLORS.primary}15`,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 12,
+    gap: 4,
+  },
+  crossingCount: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: COLORS.primary,
+  },
+  detailsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 4,
+    gap: 12,
+  },
+  detailItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  detailText: {
+    fontSize: 13,
+    color: COLORS.textLight,
+  },
+  timeRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 4,
+    gap: 4,
+  },
+  timeText: {
+    fontSize: 13,
+    color: COLORS.textLight,
+  },
+  reasonRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 6,
+    gap: 4,
+  },
+  reasonText: {
+    fontSize: 12,
+    color: COLORS.primary,
+    flex: 1,
+  },
+  optionsButton: {
+    padding: 4,
+  },
+  emptyContainer: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 40,
+    paddingTop: 60,
   },
   emptyTitle: {
     fontSize: 20,
-    fontWeight: '600',
+    fontWeight: '700',
     color: COLORS.text,
     marginTop: 16,
-    marginBottom: 8,
+    textAlign: 'center',
   },
   emptySubtitle: {
-    fontSize: 14,
+    fontSize: 15,
     color: COLORS.textLight,
     textAlign: 'center',
-    lineHeight: 20,
+    marginTop: 8,
+    lineHeight: 22,
   },
 });

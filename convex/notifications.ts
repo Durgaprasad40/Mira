@@ -198,7 +198,7 @@ export const createNotification = mutation({
 });
 
 // Compute dedupeKey from notification type and data (matches client-side logic)
-function computeDedupeKey(type: string, data?: { matchId?: string; conversationId?: string; userId?: string }): string {
+function computeDedupeKey(type: string, data?: { matchId?: string; conversationId?: string; userId?: string; pairKey?: string }): string {
   const userId = data?.userId;
   switch (type) {
     case 'match':
@@ -208,7 +208,8 @@ function computeDedupeKey(type: string, data?: { matchId?: string; conversationI
     case 'super_like':
       return `super_like:${userId ?? 'unknown'}`;
     case 'crossed_paths':
-      return `crossed_paths:${userId ?? 'unknown'}`;
+      // Use pairKey if available (deterministic sorted pair format), fallback to userId
+      return data?.pairKey ?? `crossed_paths:${userId ?? 'unknown'}`;
     default:
       return `${type}:unknown`;
   }
@@ -246,6 +247,7 @@ export const markReadByDedupeKey = mutation({
 });
 
 // Mark message notifications for a conversation as read (A2 fix)
+// D2/D4: Use dedupeKey index for efficient lookup instead of scanning all notifications
 export const markReadForConversation = mutation({
   args: {
     userId: v.id('users'),
@@ -255,28 +257,23 @@ export const markReadForConversation = mutation({
     const { userId, conversationId } = args;
     const now = Date.now();
 
-    // Find unread message notifications for this conversation
-    const notifications = await ctx.db
-      .query('notifications')
-      .withIndex('by_user', (q) => q.eq('userId', userId))
-      .filter((q) =>
-        q.and(
-          q.eq(q.field('type'), 'message'),
-          q.eq(q.field('readAt'), undefined)
-        )
-      )
-      .collect();
+    // D2/D4: Use dedupeKey format matching messages.ts: `message:${conversationId}:unread`
+    const dedupeKey = `message:${conversationId}:unread`;
 
-    let count = 0;
-    for (const notification of notifications) {
-      // Check if this notification is for the given conversation
-      if (notification.data?.conversationId === conversationId) {
-        await ctx.db.patch(notification._id, { readAt: now });
-        count++;
-      }
+    // Use by_user_dedupe index for direct lookup
+    const notification = await ctx.db
+      .query('notifications')
+      .withIndex('by_user_dedupe', (q) =>
+        q.eq('userId', userId).eq('dedupeKey', dedupeKey)
+      )
+      .first();
+
+    if (notification && !notification.readAt) {
+      await ctx.db.patch(notification._id, { readAt: now });
+      return { success: true, count: 1 };
     }
 
-    return { success: true, count };
+    return { success: true, count: 0 };
   },
 });
 

@@ -6,6 +6,7 @@ import {
   StyleSheet,
   Alert,
 } from 'react-native';
+import { Image } from 'expo-image';
 import { Ionicons } from '@expo/vector-icons';
 import { COLORS } from '@/lib/constants';
 import { ConfessionMood } from '@/types';
@@ -17,6 +18,15 @@ interface ReplyPreview {
   type: string;
   createdAt: number;
 }
+
+// Gender labels for display
+const GENDER_LABELS: Record<string, string> = {
+  male: 'M',
+  female: 'F',
+  non_binary: 'NB',
+  lesbian: 'F',
+  other: '',
+};
 
 interface ConfessionCardProps {
   id: string;
@@ -30,6 +40,8 @@ interface ConfessionCardProps {
   reactionCount: number;
   authorName?: string;
   authorPhotoUrl?: string;
+  authorAge?: number;
+  authorGender?: string;
   createdAt: number;
   isExpired?: boolean; // true if confession has expired from public feed
   isTaggedForMe?: boolean; // true if current user is tagged in this confession
@@ -49,6 +61,7 @@ interface ConfessionCardProps {
   onLongPress?: () => void; // for author manual delete
   onTagPress?: () => void; // tap @tag to open profile preview
   onConnect?: () => void; // tagged user connects to start chat
+  onAuthorPress?: () => void; // tap author identity to open full profile preview
 }
 
 function getTimeAgo(timestamp: number): string {
@@ -71,6 +84,9 @@ export default function ConfessionCard({
   replyPreviews,
   reactionCount,
   authorName,
+  authorPhotoUrl,
+  authorAge,
+  authorGender,
   createdAt,
   isExpired,
   isTaggedForMe,
@@ -89,6 +105,7 @@ export default function ConfessionCard({
   onLongPress,
   onTagPress,
   onConnect,
+  onAuthorPress,
 }: ConfessionCardProps) {
   // Privacy-safe tag display logic
   const getTagDisplayText = (): string | null => {
@@ -103,10 +120,49 @@ export default function ConfessionCard({
     onReport?.();
   };
 
-  const displayName = isAnonymous ? 'Anonymous' : (authorName || 'Someone');
+  // Build display name with age and gender for non-anonymous confessions
+  const getDisplayName = (): string => {
+    if (isAnonymous) return 'Anonymous';
+    if (!authorName) return 'Someone';
+
+    let name = authorName;
+    if (authorAge) {
+      name += `, ${authorAge}`;
+    }
+    if (authorGender && GENDER_LABELS[authorGender]) {
+      name += ` ${GENDER_LABELS[authorGender]}`;
+    }
+    return name;
+  };
+  const displayName = getDisplayName();
 
   // Check if we have a tappable tag to display
   const hasTag = taggedUserId && taggedUserName;
+
+  // Non-anonymous confessions can have tappable author area
+  const isAuthorTappable = !isAnonymous && authorId && onAuthorPress;
+
+  // Render the author identity content
+  const renderAuthorIdentity = () => (
+    <>
+      {!isAnonymous && authorPhotoUrl ? (
+        <Image
+          source={{ uri: authorPhotoUrl }}
+          style={styles.avatarImage}
+          contentFit="cover"
+        />
+      ) : (
+        <View style={[styles.avatar, isAnonymous && styles.avatarAnonymous]}>
+          <Ionicons
+            name={isAnonymous ? 'eye-off' : 'person'}
+            size={12}
+            color={isAnonymous ? COLORS.textMuted : COLORS.primary}
+          />
+        </View>
+      )}
+      <Text style={[styles.authorName, !isAnonymous && styles.authorNamePublic]}>{displayName}</Text>
+    </>
+  );
 
   return (
     <TouchableOpacity
@@ -118,14 +174,22 @@ export default function ConfessionCard({
     >
       {/* Author row */}
       <View style={styles.authorRow}>
-        <View style={[styles.avatar, isAnonymous && styles.avatarAnonymous]}>
-          <Ionicons
-            name={isAnonymous ? 'eye-off' : 'person'}
-            size={12}
-            color={isAnonymous ? COLORS.textMuted : COLORS.primary}
-          />
-        </View>
-        <Text style={styles.authorName}>{displayName}</Text>
+        {isAuthorTappable ? (
+          <TouchableOpacity
+            style={styles.authorIdentityTappable}
+            onPress={(e) => {
+              e.stopPropagation?.();
+              onAuthorPress?.();
+            }}
+            activeOpacity={0.7}
+          >
+            {renderAuthorIdentity()}
+          </TouchableOpacity>
+        ) : (
+          <View style={styles.authorIdentity}>
+            {renderAuthorIdentity()}
+          </View>
+        )}
         <Text style={styles.timeAgo}>{getTimeAgo(createdAt)}</Text>
         {isTaggedForMe && (
           <View style={styles.forYouBadge}>
@@ -258,7 +322,9 @@ export default function ConfessionCard({
           ))}
           {replyCount > 2 && (
             <TouchableOpacity onPress={onPress}>
-              <Text style={styles.viewAllReplies}>View all {replyCount} replies</Text>
+              <Text style={styles.viewAllReplies}>
+                View all {replyCount} {replyCount === 1 ? 'reply' : 'replies'}
+              </Text>
             </TouchableOpacity>
           )}
         </View>
@@ -266,18 +332,27 @@ export default function ConfessionCard({
 
       {/* Footer */}
       <View style={styles.footer}>
-        <TouchableOpacity
-          style={styles.footerButton}
-          onPress={(e) => {
-            e.stopPropagation?.();
-            onReplyAnonymously?.();
-          }}
-          hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-        >
-          <Ionicons name="chatbubble-outline" size={14} color={COLORS.textMuted} />
-          <Text style={styles.footerCount}>{replyCount}</Text>
-          <Text style={styles.footerLabel}>Reply</Text>
-        </TouchableOpacity>
+        {/* For own confessions: show non-tappable reply count, let taps bubble to card */}
+        {authorId && viewerId && authorId === viewerId ? (
+          <View style={styles.footerButton} pointerEvents="none">
+            <Ionicons name="chatbubble-outline" size={14} color={COLORS.textMuted} />
+            <Text style={styles.footerCount}>{replyCount}</Text>
+            <Text style={styles.footerLabel}>{replyCount === 1 ? 'Reply' : 'Replies'}</Text>
+          </View>
+        ) : (
+          <TouchableOpacity
+            style={styles.footerButton}
+            onPress={(e) => {
+              e.stopPropagation?.();
+              onReplyAnonymously?.();
+            }}
+            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+          >
+            <Ionicons name="chatbubble-outline" size={14} color={COLORS.textMuted} />
+            <Text style={styles.footerCount}>{replyCount}</Text>
+            <Text style={styles.footerLabel}>{replyCount === 1 ? 'Reply' : 'Replies'}</Text>
+          </TouchableOpacity>
+        )}
       </View>
     </TouchableOpacity>
   );
@@ -332,13 +407,34 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     alignItems: 'center',
   },
+  avatarImage: {
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+  },
   avatarAnonymous: {
     backgroundColor: 'rgba(153,153,153,0.12)',
+  },
+  authorIdentity: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+  },
+  authorIdentityTappable: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingVertical: 2,
+    paddingRight: 4,
+    borderRadius: 6,
   },
   authorName: {
     fontSize: 12,
     fontWeight: '600',
     color: COLORS.text,
+  },
+  authorNamePublic: {
+    color: COLORS.primary,
   },
   timeAgo: {
     fontSize: 11,

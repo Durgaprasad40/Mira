@@ -10,6 +10,8 @@ import {
   TouchableOpacity,
   InteractionManager,
   ScrollView,
+  Modal,
+  Easing,
 } from "react-native";
 import { LoadingGuard } from "@/components/safety";
 import { useShallow } from "zustand/react/shallow";
@@ -40,13 +42,18 @@ import { ProfileNudge } from "@/components/ui/ProfileNudge";
 import { trackEvent } from "@/lib/analytics";
 import { Toast } from "@/components/ui/Toast";
 import { usePrivateChatStore } from "@/stores/privateChatStore";
+import { NotificationPopover } from "@/components/discover/NotificationPopover";
 import type { IncognitoConversation, ConnectionSource } from "@/types";
+import type { Id } from "@/convex/_generated/dataModel";
 
 import { markPhase2Matched } from "@/lib/phase2MatchSession";
+
+// Type for swipe actions
+type SwipeAction = 'like' | 'pass' | 'super_like';
 import { log } from "@/utils/logger";
 
-// DEV-only match rate for demo mode (80% for fast testing, 30% for prod)
-const DEMO_MATCH_RATE = __DEV__ ? 0.8 : 0.3;
+// Demo mode match rate (20% for realistic testing)
+const DEMO_MATCH_RATE = 0.2;
 
 /** Create Phase 2 private conversation for match. Returns true if new, false if duplicate. */
 function handlePhase2Match(profile: { id: string; name: string; age?: number; photoUrl?: string }): boolean {
@@ -86,6 +93,143 @@ const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get("window");
 
 const EMPTY_ARRAY: any[] = [];
 
+// ── Star-burst animation for super-like ──
+const STAR_COUNT = 8;
+const STAR_COLORS = ['#FFD700', '#FFA500', '#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FFEAA7', '#DDA0DD'];
+
+interface StarBurstAnimationProps {
+  visible: boolean;
+  onComplete: () => void;
+}
+
+function StarBurstAnimation({ visible, onComplete }: StarBurstAnimationProps) {
+  const animations = useRef(
+    Array.from({ length: STAR_COUNT }, () => ({
+      scale: new Animated.Value(0),
+      opacity: new Animated.Value(1),
+      translateX: new Animated.Value(0),
+      translateY: new Animated.Value(0),
+    }))
+  ).current;
+
+  useEffect(() => {
+    if (!visible) return;
+
+    // Reset all animations
+    animations.forEach((anim) => {
+      anim.scale.setValue(0);
+      anim.opacity.setValue(1);
+      anim.translateX.setValue(0);
+      anim.translateY.setValue(0);
+    });
+
+    // Create staggered star burst
+    const starAnimations = animations.map((anim, i) => {
+      const angle = (i / STAR_COUNT) * 2 * Math.PI;
+      const distance = 80 + Math.random() * 40; // Random distance 80-120
+      const targetX = Math.cos(angle) * distance;
+      const targetY = Math.sin(angle) * distance;
+
+      return Animated.sequence([
+        Animated.delay(i * 30), // Stagger each star
+        Animated.parallel([
+          Animated.timing(anim.scale, {
+            toValue: 1,
+            duration: 150,
+            easing: Easing.out(Easing.back(2)),
+            useNativeDriver: true,
+          }),
+          Animated.timing(anim.translateX, {
+            toValue: targetX,
+            duration: 500,
+            easing: Easing.out(Easing.cubic),
+            useNativeDriver: true,
+          }),
+          Animated.timing(anim.translateY, {
+            toValue: targetY,
+            duration: 500,
+            easing: Easing.out(Easing.cubic),
+            useNativeDriver: true,
+          }),
+          Animated.sequence([
+            Animated.delay(200),
+            Animated.timing(anim.opacity, {
+              toValue: 0,
+              duration: 300,
+              useNativeDriver: true,
+            }),
+          ]),
+        ]),
+      ]);
+    });
+
+    Animated.parallel(starAnimations).start(() => {
+      onComplete();
+    });
+  }, [visible, animations, onComplete]);
+
+  if (!visible) return null;
+
+  return (
+    <View style={starBurstStyles.container} pointerEvents="none">
+      {animations.map((anim, i) => (
+        <Animated.View
+          key={i}
+          style={[
+            starBurstStyles.star,
+            {
+              backgroundColor: STAR_COLORS[i % STAR_COLORS.length],
+              opacity: anim.opacity,
+              transform: [
+                { translateX: anim.translateX },
+                { translateY: anim.translateY },
+                { scale: anim.scale },
+                { rotate: `${(i * 45)}deg` },
+              ],
+            },
+          ]}
+        >
+          <Ionicons name="star" size={24} color={STAR_COLORS[i % STAR_COLORS.length]} />
+        </Animated.View>
+      ))}
+      {/* Center star pulse */}
+      <Animated.View
+        style={[
+          starBurstStyles.centerStar,
+          {
+            opacity: animations[0].opacity,
+            transform: [{ scale: animations[0].scale }],
+          },
+        ]}
+      >
+        <Ionicons name="star" size={48} color="#FFD700" />
+      </Animated.View>
+    </View>
+  );
+}
+
+const starBurstStyles = StyleSheet.create({
+  container: {
+    ...StyleSheet.absoluteFillObject,
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 100,
+  },
+  star: {
+    position: 'absolute',
+    width: 24,
+    height: 24,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'transparent',
+  },
+  centerStar: {
+    position: 'absolute',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+});
+
 const HEADER_H = 44;
 
 export interface DiscoverCardStackProps {
@@ -112,12 +256,21 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   const userId = useAuthStore((s) => s.userId);
   const [index, setIndex] = useState(0);
   const [retryKey, setRetryKey] = useState(0); // For LoadingGuard retry
+  const [showNotificationPopover, setShowNotificationPopover] = useState(false);
+
+  // Random Match popup state (F2-D)
+  const [showRandomMatchPopup, setShowRandomMatchPopup] = useState(false);
+  const randomMatchPopupShownRef = useRef(false); // Anti-spam: one popup per component lifecycle
+
+  // Super-like star-burst animation state
+  const [showSuperLikeAnimation, setShowSuperLikeAnimation] = useState(false);
+  const clearSuperLikeAnimation = useCallback(() => setShowSuperLikeAnimation(false), []);
 
   // Phase-2 only: Intent filters from store (syncs with Discovery Preferences)
   const { privateIntentKeys: intentFilters, togglePrivateIntentKey, setPrivateIntentKeys } = useFilterStore();
 
-  // P1-7 fix: Phase-1 filter preferences (age, gender, distance)
-  const { minAge, maxAge, maxDistance, gender: genderFilter } = useFilterStore();
+  // P1-7 fix: Phase-1 filter preferences (age, gender, distance, sortBy)
+  const { minAge, maxAge, maxDistance, gender: genderFilter, sortBy } = useFilterStore();
 
   // Daily limits — individual selectors to avoid full re-render on AsyncStorage hydration
   const likesRemaining = useDiscoverStore((s) => s.likesRemaining);
@@ -210,12 +363,16 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
     hasHydrated: s._hasHydrated,           // FIX: track hydration for safe seeding
   })));
   const blockedUserIds = useBlockStore((s) => s.blockedUserIds);
-  // Derive excluded IDs as a Set for O(1) lookup in filters.
-  // 3B-1: Deps now include swipedCount so excludedSet updates after each swipe
+  // R1 FIX: Derive excluded IDs with stable dependencies.
+  // Use blockedUserIds.length as a primitive trigger instead of array reference.
+  // For demo mode, call getExcludedUserIds() inside the memo body — the function
+  // itself is stable (from useShallow), and we trigger recalc via matchCount/swipedCount.
   const excludedSet = useMemo(() => {
     if (!isDemoMode) return new Set(blockedUserIds);
+    // demo.getExcludedUserIds() reads current state inside the function
     return new Set(demo.getExcludedUserIds());
-  }, [blockedUserIds, demo.matchCount, demo.swipedCount, demo.getExcludedUserIds]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [blockedUserIds.length, demo.matchCount, demo.swipedCount]);
   // FIX: Only seed after hydration completes to prevent overwriting persisted data
   useEffect(() => { if (isDemoMode && demo.hasHydrated) demo.seed(); }, [demo.seed, demo.hasHydrated]);
 
@@ -226,10 +383,10 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   const discoverArgs = useMemo(
     () =>
       !isDemoMode && convexUserId && !skipInternalQuery
-        ? { userId: convexUserId, sortBy: "recommended" as any, limit: 20 }
+        ? { userId: convexUserId, sortBy: (sortBy || "recommended") as any, limit: 20 }
         : "skip" as const,
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [convexUserId, skipInternalQuery, retryKey],
+    [convexUserId, skipInternalQuery, retryKey, sortBy],
   );
   const convexProfiles = useQuery(api.discover.getDiscoverProfiles, discoverArgs);
   const profilesSafe = convexProfiles ?? EMPTY_ARRAY;
@@ -592,12 +749,21 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       // F2-A: Track swipe for random match control
       incSwipe();
 
-      // F2-D: Check if random match popup should trigger (Discover-only entry point)
-      const shouldTriggerRandomMatch = maybeTriggerRandomMatch();
-      if (shouldTriggerRandomMatch) {
-        // F2-D: Gate returned true - no existing popup handler function exists in this file.
-        // Match logic is inline (simulateMatch + router.push). Future: extract handler or add UI.
-        if (__DEV__) console.log('[F2-D] Gate returned true but no existing match popup handler found');
+      // F2-D: Random match popup trigger (Option C: only on positive interaction)
+      // Only trigger on like (right) or super_like (up), NOT on pass (left)
+      if ((direction === "right" || direction === "up") && !randomMatchPopupShownRef.current) {
+        const shouldTriggerRandomMatch = maybeTriggerRandomMatch();
+        if (shouldTriggerRandomMatch && mountedRef.current && isFocusedRef.current) {
+          // Anti-spam: mark as shown in this component lifecycle
+          randomMatchPopupShownRef.current = true;
+          // Defer popup slightly to let swipe animation complete
+          setTimeout(() => {
+            if (mountedRef.current && isFocusedRef.current) {
+              setShowRandomMatchPopup(true);
+              if (__DEV__) console.log('[F2-D] Random match popup shown');
+            }
+          }, 400);
+        }
       }
 
       // Increment daily counters
@@ -609,7 +775,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
           // 3B-1: Record swipe to prevent profile from reappearing
           demo.recordSwipe(swipedProfile.id);
 
-          // Match probability: DEMO_MATCH_RATE (50% in DEV, 30% in prod)
+          // Match probability: DEMO_MATCH_RATE (20% for realistic testing)
           const shouldMatch = direction === "right" && Math.random() < DEMO_MATCH_RATE;
 
           if (shouldMatch) {
@@ -641,6 +807,12 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
                 releaseSwipeLock(deferredSwipeId);
                 return;
               }
+              // CRASH FIX: Guard against stale swipedProfile in deferred callback
+              if (!swipedProfile?.id) {
+                releaseSwipeLock(deferredSwipeId);
+                navigatingRef.current = false;
+                return;
+              }
               try {
                 trackEvent({ name: 'match_created', matchId, otherUserId: swipedProfile.id });
                 router.push(`/(main)/match-celebration?matchId=${matchId}&userId=${swipedProfile.id}` as any);
@@ -658,7 +830,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
         }
 
         if (!convexUserId) { releaseSwipeLock(activeSwipeId); return; }
-        const action = direction === "left" ? "pass" : direction === "up" ? "super_like" : "like";
+        const action: SwipeAction = direction === "left" ? "pass" : direction === "up" ? "super_like" : "like";
         // B5 fix: wrap mutation in Promise.race with 6s timeout to prevent stuck swipe lock
         const SWIPE_TIMEOUT_MS = 6000;
         const timeoutPromise = new Promise<null>((_, reject) =>
@@ -667,8 +839,8 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
         const result = await Promise.race([
           swipeMutation({
             fromUserId: convexUserId,
-            toUserId: swipedProfile.id as any,
-            action: action as any,
+            toUserId: swipedProfile.id as Id<'users'>,
+            action,
             message: message,
           }),
           timeoutPromise,
@@ -677,6 +849,22 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
         // Guard: check mounted/focused before navigating on match
         if (!mountedRef.current || !isFocusedRef.current) return;
         if (result?.isMatch && !navigatingRef.current) {
+          // DL-001 FIX: Phase-2 matches stay on Desire Land, no navigation
+          if (isPhase2) {
+            const isNewMatch = handlePhase2Match({
+              id: swipedProfile.id,
+              name: swipedProfile.name,
+              age: swipedProfile.age,
+              photoUrl: swipedProfile.photos?.[0]?.url,
+            });
+            if (isNewMatch) {
+              trackEvent({ name: 'match_created', otherUserId: swipedProfile.id });
+            }
+            releaseSwipeLock(activeSwipeId);
+            return;
+          }
+
+          // Phase-1: Navigate to match-celebration
           navigatingRef.current = true;
           // B6 fix: wrap navigation in try/catch and reset navigatingRef on failure
           // 3B-4: Defer swipe lock release until after navigation initiated
@@ -685,6 +873,12 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
           InteractionManager.runAfterInteractions(() => {
             if (!mountedRef.current || !isFocusedRef.current) {
               releaseSwipeLock(deferredSwipeId);
+              return;
+            }
+            // CRASH FIX: Guard against stale swipedProfile/result in deferred callback
+            if (!swipedProfile?.id || !result?.matchId) {
+              releaseSwipeLock(deferredSwipeId);
+              navigatingRef.current = false;
               return;
             }
             try {
@@ -816,11 +1010,26 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
     if (!standOutResult || !currentRef.current) return;
     if (!mountedRef.current || !isFocusedRef.current) return;
     if (swipeLockRef.current) return;
+
+    // CORRECTNESS FIX: Validate that standOutResult.profileId matches current profile
+    // This prevents sending the message to a different profile if the deck changed
+    if (standOutResult.profileId !== currentRef.current.id) {
+      if (__DEV__) console.log('[StandOut] Profile mismatch - clearing stale result', {
+        resultId: standOutResult.profileId,
+        currentId: currentRef.current.id,
+      });
+      useInteractionStore.getState().setStandOutResult(null);
+      return;
+    }
+
     useInteractionStore.getState().setStandOutResult(null);
     const msg = standOutResult.message;
 
     // ★ RACE FIX: Acquire swipe lock and capture unique ID for this stand-out lifecycle
     const swipeId = acquireSwipeLock();
+
+    // ★ Trigger star-burst animation for super-like
+    setShowSuperLikeAnimation(true);
 
     // Animate the card out (up direction)
     const currentPan = getActivePan();
@@ -877,35 +1086,64 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
     };
 
     return (
-      <View style={[styles.center, dark && { backgroundColor: INCOGNITO_COLORS.background }]}>
-        <Text style={styles.emptyEmoji}>✨</Text>
-        <Text style={[styles.emptyTitle, dark && { color: INCOGNITO_COLORS.text }]}>No more profiles right now</Text>
-        <Text style={[styles.emptySubtitle, dark && { color: INCOGNITO_COLORS.textLight }]}>
-          {isDemoMode
-            ? "You may have swiped through the demo deck or your filters are strict."
-            : "Check back soon — we'll bring you more people as they join."}
-        </Text>
-        {isDemoMode && (
-          <>
-            <TouchableOpacity
-              style={[styles.resetButton, { marginTop: 24 }]}
-              onPress={handleResetDemoSwipes}
-            >
-              <Ionicons name="refresh" size={18} color="#FFFFFF" style={{ marginRight: 8 }} />
-              <Text style={styles.resetButtonText}>Reset Demo Swipes</Text>
+      <View style={[styles.container, dark && { backgroundColor: INCOGNITO_COLORS.background }]}>
+        {/* Header - always visible even when feed is empty */}
+        {!hideHeader && (
+          <View style={[styles.header, { paddingTop: insets.top, height: insets.top + HEADER_H }, dark && { backgroundColor: INCOGNITO_COLORS.background }]}>
+            <TouchableOpacity style={styles.headerBtn} onPress={() => router.push({ pathname: "/(main)/discovery-preferences", params: { mode: isPhase2 ? 'phase2' : 'phase1' } } as any)}>
+              <Ionicons name="options-outline" size={22} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
             </TouchableOpacity>
-            <TouchableOpacity
-              style={[styles.secondaryButton, { marginTop: 12 }]}
-              onPress={() => router.push({ pathname: "/(main)/discovery-preferences", params: { mode: 'phase1' } } as any)}
-            >
-              <Ionicons name="options-outline" size={18} color={C.primary} style={{ marginRight: 8 }} />
-              <Text style={[styles.secondaryButtonText, { color: C.primary }]}>Open Filters</Text>
-            </TouchableOpacity>
-            <Text style={[styles.tipText, dark && { color: INCOGNITO_COLORS.textLight }]}>
-              Tip: Set distance 200+ km and age 18–60 to see more.
-            </Text>
-          </>
+            <Text style={[styles.headerLogo, dark && { color: INCOGNITO_COLORS.primary }]}>mira</Text>
+            {!isPhase2 ? (
+              <TouchableOpacity style={styles.headerBtn} onPress={() => setShowNotificationPopover(true)}>
+                <Ionicons name="notifications-outline" size={22} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
+                {unseenCount > 0 && (
+                  <View style={styles.bellBadge}>
+                    <Text style={styles.bellBadgeText}>{unseenCount > 9 ? "9+" : unseenCount}</Text>
+                  </View>
+                )}
+              </TouchableOpacity>
+            ) : (
+              <View style={styles.headerBtn} />
+            )}
+          </View>
         )}
+        <View style={[styles.center, { flex: 1 }]}>
+          <Text style={styles.emptyEmoji}>✨</Text>
+          <Text style={[styles.emptyTitle, dark && { color: INCOGNITO_COLORS.text }]}>No more profiles right now</Text>
+          <Text style={[styles.emptySubtitle, dark && { color: INCOGNITO_COLORS.textLight }]}>
+            {isDemoMode
+              ? "You may have swiped through the demo deck or your filters are strict."
+              : "Check back soon — we'll bring you more people as they join."}
+          </Text>
+          {isDemoMode && (
+            <>
+              <TouchableOpacity
+                style={[styles.resetButton, { marginTop: 24 }]}
+                onPress={handleResetDemoSwipes}
+              >
+                <Ionicons name="refresh" size={18} color="#FFFFFF" style={{ marginRight: 8 }} />
+                <Text style={styles.resetButtonText}>Reset Demo Swipes</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.secondaryButton, { marginTop: 12 }]}
+                onPress={() => router.push({ pathname: "/(main)/discovery-preferences", params: { mode: 'phase1' } } as any)}
+              >
+                <Ionicons name="options-outline" size={18} color={C.primary} style={{ marginRight: 8 }} />
+                <Text style={[styles.secondaryButtonText, { color: C.primary }]}>Open Filters</Text>
+              </TouchableOpacity>
+              <Text style={[styles.tipText, dark && { color: INCOGNITO_COLORS.textLight }]}>
+                Tip: Set distance 200+ km and age 18–60 to see more.
+              </Text>
+            </>
+          )}
+        </View>
+        {/* Notification Popover */}
+        <NotificationPopover
+          visible={showNotificationPopover}
+          onClose={() => setShowNotificationPopover(false)}
+          anchorTop={insets.top + HEADER_H + 8}
+        />
       </View>
     );
   }
@@ -916,19 +1154,31 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       .map(k => PRIVATE_INTENT_CATEGORIES.find((c) => c.key === k)?.label ?? k)
       .join(', ');
     return (
-      <View style={[styles.center, dark && { backgroundColor: INCOGNITO_COLORS.background }]}>
-        <Text style={styles.emptyEmoji}>🔍</Text>
-        <Text style={[styles.emptyTitle, dark && { color: INCOGNITO_COLORS.text }]}>No matching profiles</Text>
-        <Text style={[styles.emptySubtitle, dark && { color: INCOGNITO_COLORS.textLight }]}>
-          No profiles match "{filterLabels}". Try different intents or clear filters.
-        </Text>
-        <TouchableOpacity
-          style={[styles.resetButton, { marginTop: 24 }]}
-          onPress={() => setPrivateIntentKeys([])}
-        >
-          <Ionicons name="funnel-outline" size={18} color="#FFFFFF" style={{ marginRight: 8 }} />
-          <Text style={styles.resetButtonText}>Show All</Text>
-        </TouchableOpacity>
+      <View style={[styles.container, dark && { backgroundColor: INCOGNITO_COLORS.background }]}>
+        {/* Header - always visible even when feed is empty */}
+        {!hideHeader && (
+          <View style={[styles.header, { paddingTop: insets.top, height: insets.top + HEADER_H }, dark && { backgroundColor: INCOGNITO_COLORS.background }]}>
+            <TouchableOpacity style={styles.headerBtn} onPress={() => router.push({ pathname: "/(main)/discovery-preferences", params: { mode: isPhase2 ? 'phase2' : 'phase1' } } as any)}>
+              <Ionicons name="options-outline" size={22} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
+            </TouchableOpacity>
+            <Text style={[styles.headerLogo, dark && { color: INCOGNITO_COLORS.primary }]}>mira</Text>
+            <View style={styles.headerBtn} />
+          </View>
+        )}
+        <View style={[styles.center, { flex: 1 }]}>
+          <Text style={styles.emptyEmoji}>🔍</Text>
+          <Text style={[styles.emptyTitle, dark && { color: INCOGNITO_COLORS.text }]}>No matching profiles</Text>
+          <Text style={[styles.emptySubtitle, dark && { color: INCOGNITO_COLORS.textLight }]}>
+            No profiles match "{filterLabels}". Try different intents or clear filters.
+          </Text>
+          <TouchableOpacity
+            style={[styles.resetButton, { marginTop: 24 }]}
+            onPress={() => setPrivateIntentKeys([])}
+          >
+            <Ionicons name="funnel-outline" size={18} color="#FFFFFF" style={{ marginRight: 8 }} />
+            <Text style={styles.resetButtonText}>Show All</Text>
+          </TouchableOpacity>
+        </View>
       </View>
     );
   }
@@ -946,32 +1196,61 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
     };
 
     return (
-      <View style={[styles.center, dark && { backgroundColor: INCOGNITO_COLORS.background }]}>
-        <Text style={styles.emptyEmoji}>🎉</Text>
-        <Text style={[styles.emptyTitle, dark && { color: INCOGNITO_COLORS.text }]}>No more profiles</Text>
-        <Text style={[styles.emptySubtitle, dark && { color: INCOGNITO_COLORS.textLight }]}>
-          {isDemoMode
-            ? "You've swiped through the demo deck. Reset to see everyone again!"
-            : "You've seen everyone available right now."}
-        </Text>
-        {isDemoMode && (
-          <>
-            <TouchableOpacity
-              style={[styles.resetButton, { marginTop: 24 }]}
-              onPress={handleResetDeck}
-            >
-              <Ionicons name="refresh" size={18} color="#FFFFFF" style={{ marginRight: 8 }} />
-              <Text style={styles.resetButtonText}>Reset Demo Deck</Text>
+      <View style={[styles.container, dark && { backgroundColor: INCOGNITO_COLORS.background }]}>
+        {/* Header - always visible even when feed is empty */}
+        {!hideHeader && (
+          <View style={[styles.header, { paddingTop: insets.top, height: insets.top + HEADER_H }, dark && { backgroundColor: INCOGNITO_COLORS.background }]}>
+            <TouchableOpacity style={styles.headerBtn} onPress={() => router.push({ pathname: "/(main)/discovery-preferences", params: { mode: isPhase2 ? 'phase2' : 'phase1' } } as any)}>
+              <Ionicons name="options-outline" size={22} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
             </TouchableOpacity>
-            <TouchableOpacity
-              style={[styles.secondaryButton, { marginTop: 12 }]}
-              onPress={() => router.push({ pathname: "/(main)/discovery-preferences", params: { mode: 'phase1' } } as any)}
-            >
-              <Ionicons name="options-outline" size={18} color={C.primary} style={{ marginRight: 8 }} />
-              <Text style={[styles.secondaryButtonText, { color: C.primary }]}>Open Filters</Text>
-            </TouchableOpacity>
-          </>
+            <Text style={[styles.headerLogo, dark && { color: INCOGNITO_COLORS.primary }]}>mira</Text>
+            {!isPhase2 ? (
+              <TouchableOpacity style={styles.headerBtn} onPress={() => setShowNotificationPopover(true)}>
+                <Ionicons name="notifications-outline" size={22} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
+                {unseenCount > 0 && (
+                  <View style={styles.bellBadge}>
+                    <Text style={styles.bellBadgeText}>{unseenCount > 9 ? "9+" : unseenCount}</Text>
+                  </View>
+                )}
+              </TouchableOpacity>
+            ) : (
+              <View style={styles.headerBtn} />
+            )}
+          </View>
         )}
+        <View style={[styles.center, { flex: 1 }]}>
+          <Text style={styles.emptyEmoji}>🎉</Text>
+          <Text style={[styles.emptyTitle, dark && { color: INCOGNITO_COLORS.text }]}>No more profiles</Text>
+          <Text style={[styles.emptySubtitle, dark && { color: INCOGNITO_COLORS.textLight }]}>
+            {isDemoMode
+              ? "You've swiped through the demo deck. Reset to see everyone again!"
+              : "You've seen everyone available right now."}
+          </Text>
+          {isDemoMode && (
+            <>
+              <TouchableOpacity
+                style={[styles.resetButton, { marginTop: 24 }]}
+                onPress={handleResetDeck}
+              >
+                <Ionicons name="refresh" size={18} color="#FFFFFF" style={{ marginRight: 8 }} />
+                <Text style={styles.resetButtonText}>Reset Demo Deck</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.secondaryButton, { marginTop: 12 }]}
+                onPress={() => router.push({ pathname: "/(main)/discovery-preferences", params: { mode: 'phase1' } } as any)}
+              >
+                <Ionicons name="options-outline" size={18} color={C.primary} style={{ marginRight: 8 }} />
+                <Text style={[styles.secondaryButtonText, { color: C.primary }]}>Open Filters</Text>
+              </TouchableOpacity>
+            </>
+          )}
+        </View>
+        {/* Notification Popover */}
+        <NotificationPopover
+          visible={showNotificationPopover}
+          onClose={() => setShowNotificationPopover(false)}
+          anchorTop={insets.top + HEADER_H + 8}
+        />
       </View>
     );
   }
@@ -988,7 +1267,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
           <Text style={[styles.headerLogo, dark && { color: INCOGNITO_COLORS.primary }]}>mira</Text>
           {/* Hide bell in Phase 2 — notifications are Phase 1 only */}
           {!isPhase2 ? (
-            <TouchableOpacity style={styles.headerBtn} onPress={() => router.push("/(main)/notifications" as any)}>
+            <TouchableOpacity style={styles.headerBtn} onPress={() => setShowNotificationPopover(true)}>
               <Ionicons name="notifications-outline" size={22} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
               {unseenCount > 0 && (
                 <View style={styles.bellBadge}>
@@ -1013,6 +1292,12 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
             <Text style={styles.limitButtonText}>Check who liked you</Text>
           </TouchableOpacity>
         </View>
+        {/* Notification Popover */}
+        <NotificationPopover
+          visible={showNotificationPopover}
+          onClose={() => setShowNotificationPopover(false)}
+          anchorTop={insets.top + HEADER_H + 8}
+        />
       </View>
     );
   }
@@ -1037,7 +1322,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
           <Text style={[styles.headerLogo, dark && { color: INCOGNITO_COLORS.primary }]}>mira</Text>
           {/* Hide bell in Phase 2 — notifications are Phase 1 only */}
           {!isPhase2 ? (
-            <TouchableOpacity style={styles.headerBtn} onPress={() => router.push("/(main)/notifications" as any)}>
+            <TouchableOpacity style={styles.headerBtn} onPress={() => setShowNotificationPopover(true)}>
               <Ionicons name="notifications-outline" size={22} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
               {unseenCount > 0 && (
                 <View style={styles.bellBadge}>
@@ -1079,6 +1364,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
               profilePrompt={next.profilePrompts?.[0]}
               theme={isPhase2 ? "dark" : "light"}
               privateIntentKeys={next.privateIntentKeys ?? (next as any).intentKeys ?? (next.privateIntentKey ? [next.privateIntentKey] : [])}
+              isIncognito={next.isIncognito}
             />
           </Animated.View>
         )}
@@ -1099,10 +1385,14 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
               onOpenProfile={openProfileCb}
               theme={isPhase2 ? "dark" : "light"}
               privateIntentKeys={current.privateIntentKeys ?? (current as any).intentKeys ?? (current.privateIntentKey ? [current.privateIntentKey] : [])}
+              isIncognito={current.isIncognito}
             />
             <SwipeOverlay direction={overlayDirection} opacity={overlayOpacityAnim} />
           </Animated.View>
         )}
+
+        {/* Super-like star-burst animation */}
+        <StarBurstAnimation visible={showSuperLikeAnimation} onComplete={clearSuperLikeAnimation} />
       </View>
 
       {/* 3-Button Action Bar */}
@@ -1148,6 +1438,60 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
         </TouchableOpacity>
       </View>
 
+      {/* Notification Popover */}
+      <NotificationPopover
+        visible={showNotificationPopover}
+        onClose={() => setShowNotificationPopover(false)}
+        anchorTop={insets.top + HEADER_H + 8}
+      />
+
+      {/* Random Match Popup (F2-D) */}
+      <Modal
+        visible={showRandomMatchPopup}
+        transparent
+        animationType="fade"
+        onRequestClose={() => setShowRandomMatchPopup(false)}
+      >
+        <View style={styles.randomMatchOverlay}>
+          <View style={styles.randomMatchPopup}>
+            {/* Sparkle icon */}
+            <View style={styles.randomMatchIconWrap}>
+              <Ionicons name="sparkles" size={48} color={COLORS.primary} />
+            </View>
+
+            {/* Title */}
+            <Text style={styles.randomMatchTitle}>Someone&apos;s interested!</Text>
+
+            {/* Subtitle */}
+            <Text style={styles.randomMatchSubtitle}>
+              A match is waiting for you. Would you like to see who liked you?
+            </Text>
+
+            {/* Primary CTA */}
+            <TouchableOpacity
+              style={styles.randomMatchCta}
+              onPress={() => {
+                setShowRandomMatchPopup(false);
+                // Navigate to likes screen to see who liked them
+                router.push("/(main)/likes" as any);
+              }}
+              activeOpacity={0.8}
+            >
+              <Ionicons name="heart" size={20} color={COLORS.white} style={{ marginRight: 8 }} />
+              <Text style={styles.randomMatchCtaText}>See Who Liked Me</Text>
+            </TouchableOpacity>
+
+            {/* Dismiss */}
+            <TouchableOpacity
+              style={styles.randomMatchDismiss}
+              onPress={() => setShowRandomMatchPopup(false)}
+              activeOpacity={0.7}
+            >
+              <Text style={styles.randomMatchDismissText}>Maybe later</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }
@@ -1365,4 +1709,78 @@ const styles = StyleSheet.create({
     lineHeight: 18,
   },
 
+  // Random Match Popup (F2-D)
+  randomMatchOverlay: {
+    flex: 1,
+    backgroundColor: "rgba(0, 0, 0, 0.6)",
+    justifyContent: "center",
+    alignItems: "center",
+    padding: 24,
+  },
+  randomMatchPopup: {
+    backgroundColor: COLORS.white,
+    borderRadius: 24,
+    padding: 32,
+    alignItems: "center",
+    width: "100%",
+    maxWidth: 340,
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 8 },
+    shadowOpacity: 0.25,
+    shadowRadius: 24,
+    elevation: 12,
+  },
+  randomMatchIconWrap: {
+    width: 88,
+    height: 88,
+    borderRadius: 44,
+    backgroundColor: `${COLORS.primary}15`,
+    alignItems: "center",
+    justifyContent: "center",
+    marginBottom: 20,
+  },
+  randomMatchTitle: {
+    fontSize: 24,
+    fontWeight: "700",
+    color: COLORS.text,
+    marginBottom: 12,
+    textAlign: "center",
+  },
+  randomMatchSubtitle: {
+    fontSize: 16,
+    color: COLORS.textLight,
+    textAlign: "center",
+    lineHeight: 24,
+    marginBottom: 28,
+  },
+  randomMatchCta: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: COLORS.primary,
+    paddingHorizontal: 32,
+    paddingVertical: 16,
+    borderRadius: 28,
+    width: "100%",
+    shadowColor: COLORS.primary,
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+    elevation: 4,
+  },
+  randomMatchCtaText: {
+    fontSize: 17,
+    fontWeight: "700",
+    color: COLORS.white,
+  },
+  randomMatchDismiss: {
+    marginTop: 16,
+    paddingVertical: 12,
+    paddingHorizontal: 24,
+  },
+  randomMatchDismissText: {
+    fontSize: 15,
+    fontWeight: "500",
+    color: COLORS.textLight,
+  },
 });

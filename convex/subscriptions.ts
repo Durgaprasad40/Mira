@@ -142,7 +142,7 @@ export const purchaseSubscription = mutation({
     if (tier === 'basic') {
       updates.superLikesRemaining = 5;
       updates.messagesRemaining = 10;
-      updates.rewindsRemaining = 999999;
+      updates.rewindsRemaining = 3; // Basic tier: 3 rewinds per day
       updates.boostsRemaining = 2;
     } else if (tier === 'premium') {
       updates.likesRemaining = 999999;
@@ -309,11 +309,13 @@ export const checkExpiredSubscriptions = mutation({
         user.subscriptionExpiresAt &&
         user.subscriptionExpiresAt < now
       ) {
-        // Downgrade to free tier
+        // Downgrade to free tier with gender-specific limits
+        // Female users get unlimited likes on free tier
+        const isFemale = user.gender === 'female';
         await ctx.db.patch(user._id, {
           subscriptionTier: 'free',
-          // Reset to free tier limits
-          likesRemaining: 50,
+          // Reset to free tier limits (gender-specific)
+          likesRemaining: isFemale ? 999999 : 50, // Females get unlimited likes
           superLikesRemaining: 0,
           messagesRemaining: 0,
           rewindsRemaining: 0,

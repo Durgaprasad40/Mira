@@ -14,6 +14,7 @@
  * 7. completeMandatoryRound() → sets isMandatoryComplete, transitions to unlocked
  *
  * SECURITY:
+ * - TOD-009 FIX: All mutations now verify caller identity server-side
  * - Only conversation participants can mutate game state
  * - Skip count cannot go below 0
  * - Phase transitions are validated
@@ -64,6 +65,7 @@
 
 import { v } from 'convex/values';
 import { mutation, query } from './_generated/server';
+import { resolveUserIdByAuthId } from './helpers';
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -89,6 +91,30 @@ const answerTypeValidator = v.union(
   v.literal('photo'),
   v.literal('video')
 );
+
+// ─── Auth Helper ──────────────────────────────────────────────────────────────
+
+/**
+ * TOD-009 FIX: Verify caller identity and that it matches the claimed callerId.
+ * This ensures clients cannot impersonate other users.
+ */
+async function verifyCallerIdentity(
+  ctx: any,
+  authUserId: string,
+  callerId: string
+): Promise<void> {
+  if (!authUserId || authUserId.trim().length === 0) {
+    throw new Error('Unauthorized: authentication required');
+  }
+  const resolvedUserId = await resolveUserIdByAuthId(ctx, authUserId);
+  if (!resolvedUserId) {
+    throw new Error('Unauthorized: user not found');
+  }
+  // Verify the authenticated user matches who they claim to be
+  if (resolvedUserId !== callerId) {
+    throw new Error('Unauthorized: caller identity mismatch');
+  }
+}
 
 // ─── Queries ─────────────────────────────────────────────────────────────────
 
@@ -160,15 +186,20 @@ export const isMandatoryComplete = query({
 /**
  * Initialize a new T&D game for a conversation.
  * Idempotent: won't overwrite if game exists and is unlocked.
+ * TOD-009 FIX: Auth hardening - verify caller identity server-side
  */
 export const initGame = mutation({
   args: {
     conversationId: v.string(),
     participant1Id: v.string(),
     participant2Id: v.string(),
-    callerId: v.string(), // The user initiating (for auth)
+    callerId: v.string(), // The user initiating (for participant check)
+    authUserId: v.string(), // TOD-009: Auth verification required
   },
-  handler: async (ctx, { conversationId, participant1Id, participant2Id, callerId }) => {
+  handler: async (ctx, { conversationId, participant1Id, participant2Id, callerId, authUserId }) => {
+    // TOD-009 FIX: Verify caller identity
+    await verifyCallerIdentity(ctx, authUserId, callerId);
+
     // Security: caller must be a participant
     if (callerId !== participant1Id && callerId !== participant2Id) {
       throw new Error('Only conversation participants can initialize T&D game');
@@ -219,13 +250,18 @@ export const initGame = mutation({
 /**
  * Start spinning the bottle.
  * Transitions: idle/round_complete → spinning
+ * TOD-009 FIX: Auth hardening - verify caller identity server-side
  */
 export const spinBottle = mutation({
   args: {
     conversationId: v.string(),
     callerId: v.string(),
+    authUserId: v.string(), // TOD-009: Auth verification required
   },
-  handler: async (ctx, { conversationId, callerId }) => {
+  handler: async (ctx, { conversationId, callerId, authUserId }) => {
+    // TOD-009 FIX: Verify caller identity
+    await verifyCallerIdentity(ctx, authUserId, callerId);
+
     const game = await ctx.db
       .query('chatTodGames')
       .withIndex('by_conversation', (q) => q.eq('conversationId', conversationId))
@@ -267,14 +303,19 @@ export const spinBottle = mutation({
 /**
  * Complete the spin animation and randomly select the chooser.
  * Transitions: spinning → choosing
+ * TOD-009 FIX: Auth hardening - verify caller identity server-side
  */
 export const completeSpinAnimation = mutation({
   args: {
     conversationId: v.string(),
     callerId: v.string(),
     winnerId: v.string(), // Pre-determined winner from client animation
+    authUserId: v.string(), // TOD-009: Auth verification required
   },
-  handler: async (ctx, { conversationId, callerId, winnerId }) => {
+  handler: async (ctx, { conversationId, callerId, winnerId, authUserId }) => {
+    // TOD-009 FIX: Verify caller identity
+    await verifyCallerIdentity(ctx, authUserId, callerId);
+
     const game = await ctx.db
       .query('chatTodGames')
       .withIndex('by_conversation', (q) => q.eq('conversationId', conversationId))
@@ -316,14 +357,19 @@ export const completeSpinAnimation = mutation({
 /**
  * Chooser selects Truth or Dare.
  * Transitions: choosing → writing
+ * TOD-009 FIX: Auth hardening - verify caller identity server-side
  */
 export const chooseTruthOrDare = mutation({
   args: {
     conversationId: v.string(),
     callerId: v.string(),
     promptType: promptTypeValidator,
+    authUserId: v.string(), // TOD-009: Auth verification required
   },
-  handler: async (ctx, { conversationId, callerId, promptType }) => {
+  handler: async (ctx, { conversationId, callerId, promptType, authUserId }) => {
+    // TOD-009 FIX: Verify caller identity
+    await verifyCallerIdentity(ctx, authUserId, callerId);
+
     const game = await ctx.db
       .query('chatTodGames')
       .withIndex('by_conversation', (q) => q.eq('conversationId', conversationId))
@@ -356,14 +402,19 @@ export const chooseTruthOrDare = mutation({
 /**
  * Chooser writes the prompt text.
  * Transitions: writing → answering
+ * TOD-009 FIX: Auth hardening - verify caller identity server-side
  */
 export const setPrompt = mutation({
   args: {
     conversationId: v.string(),
     callerId: v.string(),
     promptText: v.string(),
+    authUserId: v.string(), // TOD-009: Auth verification required
   },
-  handler: async (ctx, { conversationId, callerId, promptText }) => {
+  handler: async (ctx, { conversationId, callerId, promptText, authUserId }) => {
+    // TOD-009 FIX: Verify caller identity
+    await verifyCallerIdentity(ctx, authUserId, callerId);
+
     const game = await ctx.db
       .query('chatTodGames')
       .withIndex('by_conversation', (q) => q.eq('conversationId', conversationId))
@@ -405,6 +456,7 @@ export const setPrompt = mutation({
 /**
  * Responder submits their answer.
  * Transitions: answering → round_complete
+ * TOD-009 FIX: Auth hardening - verify caller identity server-side
  */
 export const submitAnswer = mutation({
   args: {
@@ -414,11 +466,15 @@ export const submitAnswer = mutation({
     answerText: v.optional(v.string()),
     answerMediaUri: v.optional(v.string()),
     answerDurationSec: v.optional(v.number()),
+    authUserId: v.string(), // TOD-009: Auth verification required
   },
   handler: async (
     ctx,
-    { conversationId, callerId, answerType, answerText, answerMediaUri, answerDurationSec }
+    { conversationId, callerId, answerType, answerText, answerMediaUri, answerDurationSec, authUserId }
   ) => {
+    // TOD-009 FIX: Verify caller identity
+    await verifyCallerIdentity(ctx, authUserId, callerId);
+
     const game = await ctx.db
       .query('chatTodGames')
       .withIndex('by_conversation', (q) => q.eq('conversationId', conversationId))
@@ -464,13 +520,18 @@ export const submitAnswer = mutation({
  * Skip logic:
  * - In 'choosing' phase: swap roles, other user becomes chooser
  * - In 'answering' phase: round ends, back to idle for new spin
+ * TOD-009 FIX: Auth hardening - verify caller identity server-side
  */
 export const useSkip = mutation({
   args: {
     conversationId: v.string(),
     callerId: v.string(),
+    authUserId: v.string(), // TOD-009: Auth verification required
   },
-  handler: async (ctx, { conversationId, callerId }) => {
+  handler: async (ctx, { conversationId, callerId, authUserId }) => {
+    // TOD-009 FIX: Verify caller identity
+    await verifyCallerIdentity(ctx, authUserId, callerId);
+
     const game = await ctx.db
       .query('chatTodGames')
       .withIndex('by_conversation', (q) => q.eq('conversationId', conversationId))
@@ -545,13 +606,18 @@ export const useSkip = mutation({
 /**
  * Mark the mandatory round as complete. Unlocks chat.
  * Transitions: round_complete → unlocked
+ * TOD-009 FIX: Auth hardening - verify caller identity server-side
  */
 export const completeMandatoryRound = mutation({
   args: {
     conversationId: v.string(),
     callerId: v.string(),
+    authUserId: v.string(), // TOD-009: Auth verification required
   },
-  handler: async (ctx, { conversationId, callerId }) => {
+  handler: async (ctx, { conversationId, callerId, authUserId }) => {
+    // TOD-009 FIX: Verify caller identity
+    await verifyCallerIdentity(ctx, authUserId, callerId);
+
     const game = await ctx.db
       .query('chatTodGames')
       .withIndex('by_conversation', (q) => q.eq('conversationId', conversationId))
@@ -589,13 +655,18 @@ export const completeMandatoryRound = mutation({
 /**
  * Reset game state for a conversation.
  * Used for testing or if users want to replay.
+ * TOD-009 FIX: Auth hardening - verify caller identity server-side
  */
 export const resetGame = mutation({
   args: {
     conversationId: v.string(),
     callerId: v.string(),
+    authUserId: v.string(), // TOD-009: Auth verification required
   },
-  handler: async (ctx, { conversationId, callerId }) => {
+  handler: async (ctx, { conversationId, callerId, authUserId }) => {
+    // TOD-009 FIX: Verify caller identity
+    await verifyCallerIdentity(ctx, authUserId, callerId);
+
     const game = await ctx.db
       .query('chatTodGames')
       .withIndex('by_conversation', (q) => q.eq('conversationId', conversationId))

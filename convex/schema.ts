@@ -16,6 +16,13 @@ export default defineSchema({
     handle: v.optional(v.string()), // Unique user ID / nickname (e.g., @johndoe)
     dateOfBirth: v.string(),
     gender: v.union(v.literal('male'), v.literal('female'), v.literal('non_binary'), v.literal('lesbian'), v.literal('other')),
+    lgbtqSelf: v.optional(v.array(v.union(
+      v.literal('gay'),
+      v.literal('lesbian'),
+      v.literal('bisexual'),
+      v.literal('transgender'),
+      v.literal('prefer_not_to_say')
+    ))), // LGBTQ identity (optional, max 2)
 
     // Profile
     bio: v.string(),
@@ -106,6 +113,9 @@ export default defineSchema({
       v.literal('cartoon')     // AI-generated cartoon/avatar version
     )),
 
+    // STABILITY FIX: C-10 - Denormalized primary photo URL to avoid N+1 queries
+    primaryPhotoUrl: v.optional(v.string()),
+
     // Location (live device location - private)
     latitude: v.optional(v.number()),
     longitude: v.optional(v.number()),
@@ -153,6 +163,21 @@ export default defineSchema({
     minAge: v.number(),
     maxAge: v.number(),
     maxDistance: v.number(),
+    orientation: v.optional(v.union(
+      v.literal('straight'),
+      v.literal('gay'),
+      v.literal('lesbian'),
+      v.literal('bisexual'),
+      v.literal('prefer_not_to_say'),
+      v.null()
+    )),
+    sortBy: v.optional(v.union(
+      v.literal('recommended'),
+      v.literal('newest'),
+      v.literal('distance'),
+      v.literal('age'),
+      v.literal('recently_active')
+    )),
 
     // Subscription
     subscriptionTier: v.union(v.literal('free'), v.literal('basic'), v.literal('premium')),
@@ -191,6 +216,13 @@ export default defineSchema({
     lastActive: v.number(),
     lastLocationUpdatedAt: v.optional(v.number()),   // timestamp of last location save (30-min gate)
     nearbyEnabled: v.optional(v.boolean()),           // user opt-in toggle (default true)
+    crossedPathsEnabled: v.optional(v.boolean()),     // participate in crossed paths detection (default true)
+    nearbyPausedUntil: v.optional(v.number()),        // pause nearby visibility until timestamp
+    nearbyVisibilityMode: v.optional(v.union(         // time-based visibility mode
+      v.literal('always'),          // Always visible (default)
+      v.literal('app_open'),        // Only while using app
+      v.literal('recent')           // Visible for 30 min after app use
+    )),
     createdAt: v.number(),
 
     // Profile Prompts (icebreakers)
@@ -202,6 +234,16 @@ export default defineSchema({
     // Onboarding
     onboardingCompleted: v.boolean(),
     onboardingStep: v.optional(v.string()),
+
+    // Phase-2 Onboarding (Private Mode)
+    // Once true, user never sees Phase-2 onboarding again
+    phase2OnboardingCompleted: v.optional(v.boolean()),
+    phase2OnboardingCompletedAt: v.optional(v.number()),
+
+    // Private Mode Welcome/Guidelines Confirmation (18+ consent gate)
+    // Once true, user skips the consent screen on subsequent visits
+    privateWelcomeConfirmed: v.optional(v.boolean()),
+    privateWelcomeConfirmedAt: v.optional(v.number()),
 
     // Onboarding Draft (persistent storage for incomplete onboarding)
     onboardingDraft: v.optional(v.object({
@@ -233,6 +275,11 @@ export default defineSchema({
           question: v.string(),
           answer: v.string(),
         }))),
+        displayPhotoVariant: v.optional(v.union(
+          v.literal('original'),
+          v.literal('blurred'),
+          v.literal('cartoon')
+        )),
       })),
       // Lifestyle
       lifestyle: v.optional(v.object({
@@ -301,7 +348,10 @@ export default defineSchema({
 
     // Privacy
     showLastSeen: v.optional(v.boolean()),
-    hideDistance: v.optional(v.boolean()),        // true = larger fuzz on Nearby map (200-400m vs 20-100m)
+    hideDistance: v.optional(v.boolean()),         // true = don't show distance info to others
+    hideAge: v.optional(v.boolean()),              // true = don't show age on profile
+    disableReadReceipts: v.optional(v.boolean()), // true = others can't see when user read messages
+    strongPrivacyMode: v.optional(v.boolean()),    // true = larger fuzz on Nearby map (200-400m vs 50-150m)
 
     // Photo Blur (user-controlled privacy)
     photoBlurred: v.optional(v.boolean()),       // true = photo shown blurred in Discover/profile
@@ -312,6 +362,12 @@ export default defineSchema({
     // Push Notifications
     pushToken: v.optional(v.string()),
     notificationsEnabled: v.boolean(),
+    emailNotificationsEnabled: v.optional(v.boolean()), // Email notification preference
+    // Notification type preferences
+    notifyNewMatches: v.optional(v.boolean()),
+    notifyNewMessages: v.optional(v.boolean()),
+    notifyLikesAndSuperLikes: v.optional(v.boolean()),
+    notifyProfileViews: v.optional(v.boolean()),
 
     // Account Status
     isActive: v.boolean(),
@@ -379,6 +435,13 @@ export default defineSchema({
 
     // Demo mode: identifier for demo users (e.g. "demo_manmohan_gmain_com")
     demoUserId: v.optional(v.string()),
+
+    // Universal auth identity key (preferred over demoUserId for new lookups)
+    authUserId: v.optional(v.string()),
+
+    // Duplicate user detection: points to the primary user if this is a duplicate
+    // Set when race condition creates multiple users with same demoUserId
+    duplicateOf: v.optional(v.id('users')),
   })
     .index('by_email', ['email'])
     .index('by_phone', ['phone'])
@@ -388,7 +451,8 @@ export default defineSchema({
     .index('by_last_active', ['lastActive'])
     .index('by_boosted', ['boostedUntil'])
     .index('by_verification_status', ['verificationStatus'])
-    .index('by_demo_user_id', ['demoUserId']),
+    .index('by_demo_user_id', ['demoUserId'])
+    .index('by_auth_user_id', ['authUserId']),
 
   // Photos table
   photos: defineTable({
@@ -458,11 +522,31 @@ export default defineSchema({
     expiresAt: v.optional(v.number()), // Only set for confession-based threads (24h after creation)
     // Phase-2: Room this DM originated from (for per-room unread badge)
     sourceRoomId: v.optional(v.id('chatRooms')),
+    // Connection source for Phase-2 T&D/Room/Desire handoffs
+    connectionSource: v.optional(v.union(
+      v.literal('match'),
+      v.literal('confession'),
+      v.literal('tod'),
+      v.literal('room'),
+      v.literal('desire')
+    )),
   })
     .index('by_match', ['matchId'])
     .index('by_confession', ['confessionId'])
     .index('by_last_message', ['lastMessageAt'])
-    .index('by_source_room', ['sourceRoomId']),
+    .index('by_source_room', ['sourceRoomId'])
+    .index('by_connection_source', ['connectionSource']),
+
+  // C1/C2/C3-REPAIR: Conversation participants junction table
+  // Enables efficient user-scoped conversation queries + denormalized unread counts
+  conversationParticipants: defineTable({
+    conversationId: v.id('conversations'),
+    userId: v.id('users'),
+    unreadCount: v.number(),
+  })
+    .index('by_user', ['userId'])
+    .index('by_conversation', ['conversationId'])
+    .index('by_user_conversation', ['userId', 'conversationId']),
 
   // Messages table
   messages: defineTable({
@@ -575,6 +659,7 @@ export default defineSchema({
       matchId: v.optional(v.string()),
       conversationId: v.optional(v.string()),
       userId: v.optional(v.string()),
+      pairKey: v.optional(v.string()), // Deterministic crossed paths pair key
     })),
     // 4-1: Deduplication key — same key = same logical event (upsert instead of insert)
     dedupeKey: v.optional(v.string()),
@@ -681,20 +766,32 @@ export default defineSchema({
     reporterId: v.id('users'),
     reportedUserId: v.id('users'),
     reason: v.union(
+      // Original reasons
       v.literal('fake_profile'),
       v.literal('inappropriate_photos'),
       v.literal('harassment'),
       v.literal('spam'),
       v.literal('underage'),
-      v.literal('other')
+      v.literal('other'),
+      // Chat room reasons
+      v.literal('hate_speech'),
+      v.literal('sexual_content'),
+      v.literal('nudity'),
+      v.literal('violent_threats'),
+      v.literal('impersonation'),
+      v.literal('selling')
     ),
     description: v.optional(v.string()),
     status: v.union(v.literal('pending'), v.literal('reviewed'), v.literal('resolved')),
     reviewedAt: v.optional(v.number()),
     createdAt: v.number(),
+    // Optional: chat room context for in-room reports
+    roomId: v.optional(v.string()),
   })
     .index('by_reported_user', ['reportedUserId'])
-    .index('by_status', ['status']),
+    .index('by_reporter', ['reporterId'])
+    .index('by_status', ['status'])
+    .index('by_room', ['roomId']),
 
   // Blocks table
   blocks: defineTable({
@@ -705,6 +802,60 @@ export default defineSchema({
     .index('by_blocker', ['blockerId'])
     .index('by_blocked', ['blockedUserId'])
     .index('by_blocker_blocked', ['blockerId', 'blockedUserId']),
+
+  // Support requests table (Phase-2 Safety escalation)
+  supportRequests: defineTable({
+    userId: v.id('users'),
+    category: v.union(
+      v.literal('scam_extortion'),
+      v.literal('non_consensual_sharing'),
+      v.literal('physical_safety'),
+      v.literal('harassment_stalking'),
+      v.literal('other_safety')
+    ),
+    description: v.string(),
+    status: v.union(
+      v.literal('submitted'),
+      v.literal('in_review'),
+      v.literal('resolved'),
+      v.literal('closed')
+    ),
+    // Optional context
+    relatedUserId: v.optional(v.id('users')),
+    relatedReportId: v.optional(v.id('reports')),
+    // Timestamps
+    createdAt: v.number(),
+    updatedAt: v.optional(v.number()),
+    resolvedAt: v.optional(v.number()),
+    // Latest message timestamp for sorting (updated on each message)
+    lastMessageAt: v.optional(v.number()),
+  })
+    .index('by_user', ['userId'])
+    .index('by_status', ['status']),
+
+  // Support messages table (Phase-2 Safety thread messages)
+  supportMessages: defineTable({
+    supportRequestId: v.id('supportRequests'),
+    senderType: v.union(v.literal('user'), v.literal('admin')),
+    senderUserId: v.optional(v.id('users')), // For user messages; admin may be null
+    text: v.optional(v.string()),
+    attachmentType: v.optional(
+      v.union(v.literal('image'), v.literal('video'), v.literal('audio'))
+    ),
+    attachmentStorageId: v.optional(v.id('_storage')),
+    createdAt: v.number(),
+  })
+    .index('by_support_request', ['supportRequestId'])
+    .index('by_request_created', ['supportRequestId', 'createdAt']),
+
+  // Support conversation snapshots (captures last 20 messages for moderation context)
+  supportConversationSnapshots: defineTable({
+    supportRequestId: v.id('supportRequests'),
+    senderUserId: v.id('users'),
+    messageText: v.optional(v.string()),
+    attachmentType: v.optional(v.string()),
+    createdAt: v.number(),
+  }).index('by_support_request', ['supportRequestId']),
 
   // OTP table for verification
   otpCodes: defineTable({
@@ -893,6 +1044,25 @@ export default defineSchema({
     // Phase-1 imported fields (read-only after import, stored in Phase-2 for isolation)
     hobbies: v.optional(v.array(v.string())),
     isVerified: v.optional(v.boolean()),
+    // Phase-2 profile details (editable)
+    height: v.optional(v.number()),
+    weight: v.optional(v.number()),
+    smoking: v.optional(v.string()),
+    drinking: v.optional(v.string()),
+    education: v.optional(v.string()),
+    religion: v.optional(v.string()),
+    // Phase-2 Onboarding Step 3: Prompt answers
+    promptAnswers: v.optional(v.array(v.object({
+      promptId: v.string(),
+      question: v.string(),
+      answer: v.string(),
+    }))),
+    // Phase-2 Preference Strength (ranking signal)
+    preferenceStrength: v.optional(v.object({
+      smoking: v.union(v.literal('not_important'), v.literal('slight_preference'), v.literal('important'), v.literal('deal_breaker')),
+      drinking: v.union(v.literal('not_important'), v.literal('slight_preference'), v.literal('important'), v.literal('deal_breaker')),
+      intent: v.union(v.literal('not_important'), v.literal('prefer_similar'), v.literal('important'), v.literal('must_match_exactly')),
+    })),
     createdAt: v.number(),
     updatedAt: v.number(),
   })
@@ -1012,6 +1182,18 @@ export default defineSchema({
   todAnswerReports: defineTable({
     answerId: v.string(),
     reporterId: v.string(),
+    // Structured report reason (required for new reports)
+    reasonCode: v.optional(v.union(
+      v.literal('harassment'),
+      v.literal('sexual'),
+      v.literal('spam'),
+      v.literal('hate'),
+      v.literal('violence'),
+      v.literal('other')
+    )),
+    // Optional additional details (renamed from reason for clarity)
+    reasonText: v.optional(v.string()),
+    // Legacy field for backwards compatibility with old reports
     reason: v.optional(v.string()),
     createdAt: v.number(),
   })
@@ -1092,17 +1274,42 @@ export default defineSchema({
     imageUrl: v.optional(v.string()),
     authorName: v.optional(v.string()),
     authorPhotoUrl: v.optional(v.string()),
+    authorAge: v.optional(v.number()),
+    authorGender: v.optional(v.string()),
     replyCount: v.number(),
     reactionCount: v.number(),
     voiceReplyCount: v.optional(v.number()),
     createdAt: v.number(),
     expiresAt: v.optional(v.number()), // 24h after createdAt; undefined = never expires (legacy)
     taggedUserId: v.optional(v.id('users')), // User being confessed to (must be someone current user has liked)
+    // Soft delete support
+    isDeleted: v.optional(v.boolean()),
+    deletedAt: v.optional(v.number()),
   })
     .index('by_created', ['createdAt'])
     .index('by_user', ['userId'])
     .index('by_expires', ['expiresAt'])
     .index('by_tagged_user', ['taggedUserId']),
+
+  // Confession Reports table (for moderation)
+  confessionReports: defineTable({
+    confessionId: v.id('confessions'),
+    reporterId: v.id('users'),
+    reportedUserId: v.id('users'),
+    reason: v.union(
+      v.literal('spam'),
+      v.literal('harassment'),
+      v.literal('hate'),
+      v.literal('sexual'),
+      v.literal('other')
+    ),
+    description: v.optional(v.string()),
+    status: v.union(v.literal('pending'), v.literal('reviewed'), v.literal('actioned')),
+    createdAt: v.number(),
+  })
+    .index('by_confession', ['confessionId'])
+    .index('by_reporter', ['reporterId'])
+    .index('by_status', ['status']),
 
   // Confession Replies table
   confessionReplies: defineTable({
@@ -1113,6 +1320,7 @@ export default defineSchema({
     type: v.optional(v.union(v.literal('text'), v.literal('voice'))),
     voiceUrl: v.optional(v.string()),
     voiceDurationSec: v.optional(v.number()),
+    parentReplyId: v.optional(v.id('confessionReplies')), // For reply-to-reply (OP responding to anonymous reply)
     createdAt: v.number(),
   })
     .index('by_confession', ['confessionId'])
@@ -1128,16 +1336,6 @@ export default defineSchema({
     .index('by_confession', ['confessionId'])
     .index('by_user', ['userId'])
     .index('by_confession_user', ['confessionId', 'userId']),
-
-  // Confession Reports table
-  confessionReports: defineTable({
-    confessionId: v.id('confessions'),
-    reporterId: v.id('users'),
-    reason: v.optional(v.string()),
-    createdAt: v.number(),
-  })
-    .index('by_confession', ['confessionId'])
-    .index('by_reporter', ['reporterId']),
 
   // Confession Notifications table (for tagged confessions)
   confessionNotifications: defineTable({
@@ -1178,14 +1376,19 @@ export default defineSchema({
     .index('by_category', ['category'])
     .index('by_expires', ['expiresAt'])
     .index('by_join_code', ['joinCode'])
-    .index('by_public', ['isPublic']),
+    .index('by_public', ['isPublic'])
+    .index('by_creator', ['createdBy']), // LEAVE-VS-END FIX: Index for finding rooms by creator
 
   // Chat Room Members table
   chatRoomMembers: defineTable({
     roomId: v.id('chatRooms'),
     userId: v.id('users'),
     joinedAt: v.number(),
-    role: v.optional(v.union(v.literal('owner'), v.literal('mod'), v.literal('member'))), // Member role
+    // Role hierarchy: owner > admin > member
+    // - owner: full control (delete room, kick anyone, delete any msg, promote/demote)
+    // - admin: moderate (kick members, delete member msgs)
+    // - member: basic (send messages, view room)
+    role: v.union(v.literal('owner'), v.literal('admin'), v.literal('member')),
     lastMessageAt: v.optional(v.number()), // For rate limiting
   })
     .index('by_room', ['roomId'])
@@ -1377,4 +1580,27 @@ export default defineSchema({
   })
     .index('by_user', ['userId'])
     .index('by_user_game_convo', ['userId', 'game', 'convoId', 'windowKey']),
+
+  // H-1: Track pending uploads to prevent orphaned storage blobs
+  // Records created after upload, deleted when addPhoto succeeds or cleanup runs
+  pendingUploads: defineTable({
+    storageId: v.id('_storage'),
+    userId: v.id('users'),
+    createdAt: v.number(),
+  })
+    .index('by_storage', ['storageId'])
+    .index('by_user', ['userId'])
+    .index('by_createdAt', ['createdAt']),
+
+  // B2-FIX: Track failed storage deletions for retry
+  // Records created when ctx.storage.delete fails after DB photo deletion
+  // Cron job retries these periodically to clean up orphaned storage blobs
+  failedStorageDeletions: defineTable({
+    storageId: v.id('_storage'),
+    failedAt: v.number(),
+    retryCount: v.number(),
+    lastError: v.optional(v.string()),
+  })
+    .index('by_failedAt', ['failedAt'])
+    .index('by_storageId', ['storageId']),
 });

@@ -31,11 +31,31 @@ interface PreferredChatRoomState {
   /** Hydration flag (always true - no AsyncStorage) */
   _hasHydrated: boolean;
   setHasHydrated: (hydrated: boolean) => void;
+
+  /**
+   * Session-level flag: has the initial redirect already fired in this session?
+   * Prevents navigation trap when user backs out of a room.
+   * Resets only on app restart (cold start), NOT on component remount.
+   */
+  hasRedirectedInSession: boolean;
+  setHasRedirectedInSession: (value: boolean) => void;
+
+  /**
+   * MEMBERSHIP LIFECYCLE: Track the room user is currently viewing.
+   * Used to call leaveRoom when user returns to homepage.
+   * - Set when entering a room
+   * - Cleared when returning to homepage (after leaveRoom is called)
+   * - NOT cleared when switching to other app tabs
+   */
+  currentRoomId: string | null;
+  setCurrentRoom: (roomId: string | null) => void;
 }
 
 export const usePreferredChatRoomStore = create<PreferredChatRoomState>()((set) => ({
   preferredRoomId: null,
   _hasHydrated: true, // Always ready - no AsyncStorage
+  hasRedirectedInSession: false, // Session-level: resets only on app cold start
+  currentRoomId: null, // MEMBERSHIP LIFECYCLE: room user is currently viewing
 
   setPreferredRoom: (roomId) => {
     set({ preferredRoomId: roomId });
@@ -47,5 +67,13 @@ export const usePreferredChatRoomStore = create<PreferredChatRoomState>()((set) 
 
   setHasHydrated: (hydrated) => {
     set({ _hasHydrated: true }); // No-op
+  },
+
+  setHasRedirectedInSession: (value) => {
+    set({ hasRedirectedInSession: value });
+  },
+
+  setCurrentRoom: (roomId) => {
+    set({ currentRoomId: roomId });
   },
 }));

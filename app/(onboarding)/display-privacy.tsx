@@ -32,9 +32,12 @@ import { useOnboardingStore } from '@/stores/onboardingStore';
 import { useDemoStore } from '@/stores/demoStore';
 import { useAuthStore } from '@/stores/authStore';
 import { isDemoMode } from '@/hooks/useConvex';
+import { useMutation } from 'convex/react';
+import { api } from '@/convex/_generated/api';
 import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
 import { processPhotoVariant, PhotoVariant } from '@/services/photoPrivacy';
 import { OnboardingProgressHeader } from '@/components/OnboardingProgressHeader';
+import { useScreenTrace } from '@/lib/devTrace';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 
@@ -55,6 +58,7 @@ interface PrivacyOption {
 // =============================================================================
 
 export default function DisplayPrivacyScreen() {
+  useScreenTrace("ONB_DISPLAY_PRIVACY");
   const { photos, setPhotoAtIndex, setStep, setDisplayPhotoVariant } = useOnboardingStore();
   const { userId } = useAuthStore();
   const demoHydrated = useDemoStore((s) => s._hasHydrated);
@@ -62,6 +66,9 @@ export default function DisplayPrivacyScreen() {
     isDemoMode && userId ? s.demoProfiles[userId] : null
   );
   const router = useRouter();
+
+  // Live mode persistence
+  const upsertDraft = useMutation(api.users.upsertOnboardingDraft);
 
   const [selectedVariant, setSelectedVariant] = useState<PhotoVariant>('original');
   const [isProcessing, setIsProcessing] = useState(false);
@@ -318,9 +325,24 @@ export default function DisplayPrivacyScreen() {
           const demoStore = useDemoStore.getState();
           demoStore.saveDemoProfile(userId, {
             photos: validPhotos.map((uri) => ({ url: uri })),
+            displayPhotoVariant: selectedVariant,
           });
-          console.log(`[DisplayPrivacy] saved ${validPhotos.length} photos to demoProfile`);
+          console.log(`[DisplayPrivacy] saved ${validPhotos.length} photos + variant=${selectedVariant} to demoProfile`);
         }
+      }
+
+      // LIVE MODE: Persist displayPhotoVariant to Convex onboarding draft
+      if (!isDemoMode && userId) {
+        upsertDraft({
+          userId,
+          patch: {
+            basicInfo: { displayPhotoVariant: selectedVariant },
+            progress: { lastStepKey: 'display_privacy' },
+          },
+        }).catch((error) => {
+          if (__DEV__) console.error('[DisplayPrivacy] Failed to save draft:', error);
+        });
+        if (__DEV__) console.log(`[ONB_DRAFT] Saved displayPhotoVariant: ${selectedVariant}`);
       }
 
       console.log(`[DisplayPrivacy] User selected variant: ${selectedVariant}`);

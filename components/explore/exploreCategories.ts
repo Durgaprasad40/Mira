@@ -212,7 +212,7 @@ const RIGHT_NOW_TILES: ExploreCategory[] = [
     icon: "🌙",
     color: TILE_COLORS.indigo,
     kind: "relationship",
-    predicate: (p) => p?.freeTonight === true,
+    predicate: (p) => p?.activities?.includes('free_tonight'),
   },
 ];
 
@@ -278,8 +278,7 @@ const INTEREST_TILES: ExploreCategory[] = [
     color: TILE_COLORS.lime,
     kind: "interest",
     predicate: (p) =>
-      p?.tags?.includes("gym") || p?.tags?.includes("fitness") ||
-      p?.activities?.includes("gym") || p?.activities?.includes("fitness"),
+      p?.activities?.includes("gym_partner") || p?.activities?.includes("gym"),
   },
   {
     id: "music",
@@ -289,7 +288,7 @@ const INTEREST_TILES: ExploreCategory[] = [
     color: TILE_COLORS.pink,
     kind: "interest",
     predicate: (p) =>
-      p?.tags?.includes("music") || p?.activities?.includes("music"),
+      p?.activities?.includes("music_lover") || p?.activities?.includes("concerts"),
   },
 ];
 

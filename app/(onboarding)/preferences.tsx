@@ -35,6 +35,7 @@ import { useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import type { Gender, ActivityFilter, RelationshipIntent } from '@/types';
 import { OnboardingProgressHeader } from '@/components/OnboardingProgressHeader';
+import { useScreenTrace } from '@/lib/devTrace';
 
 // Age range constraints
 const MIN_AGE_LIMIT = 18;
@@ -49,7 +50,24 @@ const MIN_INTERESTS = 3;
 const MAX_INTERESTS = 7;
 const MAX_RELATIONSHIP_INTENTS = 3;
 
+// STABILITY FIX: Schema-safe relationship intent values (excludes UI-only values)
+const ALLOWED_RELATIONSHIP_INTENTS = new Set([
+  'long_term', 'short_term', 'fwb', 'figuring_out',
+  'short_to_long', 'long_to_short', 'new_friends', 'open_to_anything'
+]);
+
+// Sanitize relationshipIntent to only include schema-valid values before Convex mutation
+function sanitizeRelationshipIntent(arr: string[]): string[] {
+  const sanitized = arr.filter(v => ALLOWED_RELATIONSHIP_INTENTS.has(v));
+  if (__DEV__ && sanitized.length !== arr.length) {
+    const removed = arr.filter(v => !ALLOWED_RELATIONSHIP_INTENTS.has(v));
+    console.warn('[PREFERENCES] Removed invalid relationshipIntent values:', removed);
+  }
+  return sanitized;
+}
+
 export default function PreferencesScreen() {
+  useScreenTrace("ONB_PREFERENCES");
   const {
     lookingFor,
     relationshipIntent,
@@ -364,8 +382,12 @@ export default function PreferencesScreen() {
     if (!isDemoMode && userId) {
       const preferences: Record<string, any> = {};
       if (lookingFor.length > 0) preferences.lookingFor = lookingFor;
-      if (relationshipIntent.length > 0) preferences.relationshipIntent = relationshipIntent;
+      // STABILITY FIX: Sanitize relationshipIntent before sending to Convex
+      const sanitizedIntent = sanitizeRelationshipIntent(relationshipIntent);
+      if (sanitizedIntent.length > 0) preferences.relationshipIntent = sanitizedIntent;
       if (activities.length > 0) preferences.activities = activities;
+      // LGBTQ Preference is optional - only save if user selected any
+      if (lgbtqPreference.length > 0) preferences.lgbtqPreference = lgbtqPreference;
       preferences.minAge = finalMin;
       preferences.maxAge = finalMax;
       preferences.maxDistance = finalDistance;

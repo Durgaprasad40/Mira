@@ -5,10 +5,15 @@ export function useScreenProtection(enabled: boolean) {
   useEffect(() => {
     if (!enabled) return;
 
-    ScreenCapture.preventScreenCaptureAsync();
+    // STABILITY: Wrap in void + catch to prevent unhandled promise rejection
+    void ScreenCapture.preventScreenCaptureAsync().catch(() => {
+      // Non-critical: screen capture prevention may not be supported on all devices
+    });
 
     return () => {
-      ScreenCapture.allowScreenCaptureAsync();
+      void ScreenCapture.allowScreenCaptureAsync().catch(() => {
+        // Non-critical: cleanup failure is acceptable
+      });
     };
   }, [enabled]);
 }

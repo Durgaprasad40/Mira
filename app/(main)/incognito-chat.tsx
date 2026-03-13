@@ -186,11 +186,11 @@ export default function PrivateChatScreen() {
   // ─── Truth-or-Dare game (same as Phase-1: BottleSpinGame) ───
   const [showTruthDareGame, setShowTruthDareGame] = useState(false);
 
-  // Handler for tapping header avatar/name to open profile
+  // C10 FIX: Disable profile navigation in incognito mode to prevent identity leak
+  // In incognito chat, tapping the header should NOT reveal the other user's profile
   const handleOpenProfile = useCallback(() => {
-    if (!conversation) return;
-    router.push(`/(main)/profile/${conversation.participantId}?mode=phase2` as any);
-  }, [conversation, router]);
+    // No-op: profile viewing disabled in incognito mode
+  }, []);
 
   // Phase-1 parity: send result message to chat when spin completes
   const handleSendTodResult = useCallback((message: string) => {
@@ -293,26 +293,31 @@ export default function PrivateChatScreen() {
     if (!conversation) return;
     setShowAttachMenu(false);
 
-    const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
-    if (status !== 'granted') {
-      Alert.alert('Permission Required', 'Photo library access is needed to select media.');
-      return;
+    try {
+      const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (status !== 'granted') {
+        Alert.alert('Permission Required', 'Photo library access is needed to select media.');
+        return;
+      }
+
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: ['images', 'videos'],
+        quality: 1,
+        allowsEditing: false,
+        selectionLimit: 1,
+      });
+
+      if (result.canceled || !result.assets?.[0]?.uri) return;
+
+      const asset = result.assets[0];
+      const isVideo = asset.type === 'video';
+      setPickedImageUri(asset.uri);
+      setPendingMediaType(isVideo ? 'video' : 'photo');
+      setShowCameraSheet(true);
+    } catch {
+      // STABILITY: ImagePicker can fail on various devices
+      Alert.alert('Error', 'Could not open photo picker. Please try again.');
     }
-
-    const result = await ImagePicker.launchImageLibraryAsync({
-      mediaTypes: ['images', 'videos'],
-      quality: 1,
-      allowsEditing: false,
-      selectionLimit: 1,
-    });
-
-    if (result.canceled || !result.assets?.[0]?.uri) return;
-
-    const asset = result.assets[0];
-    const isVideo = asset.type === 'video';
-    setPickedImageUri(asset.uri);
-    setPendingMediaType(isVideo ? 'video' : 'photo');
-    setShowCameraSheet(true);
   }, [conversation]);
 
   // Camera capture: navigate directly to camera screen in PHOTO mode (no Alert prompt)

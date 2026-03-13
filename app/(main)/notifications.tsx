@@ -1,9 +1,9 @@
-import React, { useEffect, useState } from 'react';
+import React, { useEffect, useState, useRef } from 'react';
 import {
   View,
   Text,
   StyleSheet,
-  FlatList,
+  SectionList,
   TouchableOpacity,
   RefreshControl,
 } from 'react-native';
@@ -16,15 +16,17 @@ import { useDemoStore } from '@/stores/demoStore';
 import { isDemoMode } from '@/hooks/useConvex';
 import { log } from '@/utils/logger';
 
-interface NotificationGroup {
+interface NotificationSection {
   title: string;
-  notifications: AppNotification[];
+  data: AppNotification[];
 }
 
 export default function NotificationsScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const [refreshing, setRefreshing] = useState(false);
+  // STABILITY: Track refresh timeout for cleanup on unmount
+  const refreshTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // ── Single source of truth — same hook the bell badge uses ──
   const { notifications, unseenCount, markAllSeen, markRead, cleanupExpiredNotifications } = useNotifications();
@@ -40,12 +42,29 @@ export default function NotificationsScreen() {
     cleanupExpiredNotifications();
   }, [cleanupExpiredNotifications]);
 
+  // STABILITY: Cleanup refresh timeout on unmount to prevent setState after unmount
+  useEffect(() => {
+    return () => {
+      if (refreshTimeoutRef.current) {
+        clearTimeout(refreshTimeoutRef.current);
+        refreshTimeoutRef.current = null;
+      }
+    };
+  }, []);
+
   const onRefresh = async () => {
+    // STABILITY: Clear any existing timeout before starting new refresh
+    if (refreshTimeoutRef.current) {
+      clearTimeout(refreshTimeoutRef.current);
+    }
     setRefreshing(true);
-    setTimeout(() => setRefreshing(false), 1000);
+    refreshTimeoutRef.current = setTimeout(() => {
+      setRefreshing(false);
+      refreshTimeoutRef.current = null;
+    }, 1000);
   };
 
-  const groupNotifications = (notifs: AppNotification[]): NotificationGroup[] => {
+  const groupNotifications = (notifs: AppNotification[]): NotificationSection[] => {
     if (!notifs || notifs.length === 0) return [];
 
     const now = Date.now();
@@ -53,27 +72,27 @@ export default function NotificationsScreen() {
     const yesterday = today - 24 * 60 * 60 * 1000;
     const thisWeek = today - 7 * 24 * 60 * 60 * 1000;
 
-    const groups: NotificationGroup[] = [
-      { title: 'Today', notifications: [] },
-      { title: 'Yesterday', notifications: [] },
-      { title: 'This Week', notifications: [] },
-      { title: 'Earlier', notifications: [] },
+    const sections: NotificationSection[] = [
+      { title: 'Today', data: [] },
+      { title: 'Yesterday', data: [] },
+      { title: 'This Week', data: [] },
+      { title: 'Earlier', data: [] },
     ];
 
     notifs.forEach((notif) => {
       const notifTime = notif.createdAt;
       if (notifTime >= today) {
-        groups[0].notifications.push(notif);
+        sections[0].data.push(notif);
       } else if (notifTime >= yesterday) {
-        groups[1].notifications.push(notif);
+        sections[1].data.push(notif);
       } else if (notifTime >= thisWeek) {
-        groups[2].notifications.push(notif);
+        sections[2].data.push(notif);
       } else {
-        groups[3].notifications.push(notif);
+        sections[3].data.push(notif);
       }
     });
 
-    return groups.filter((group) => group.notifications.length > 0);
+    return sections.filter((section) => section.data.length > 0);
   };
 
   // 4-4: Pass notificationId in navigation params so destination knows why it was opened
@@ -104,7 +123,13 @@ export default function NotificationsScreen() {
         // Validate the like still exists before navigating to Likes screen
         const likeUserId = notification.data?.otherUserId;
 
-        if (isDemoMode && likeUserId) {
+        // Guard: Prevent crash if likeUserId is missing
+        if (!likeUserId) {
+          console.warn('[Notifications] like notification missing otherUserId, skipping navigation');
+          break;
+        }
+
+        if (isDemoMode) {
           const likeExists = demoLikes.some((l) => l.userId === likeUserId);
 
           if (!likeExists) {
@@ -148,41 +173,13 @@ export default function NotificationsScreen() {
         }
         break;
       case 'crossed_paths': {
-        // INVARIANT: A crossed_paths notification may exist IF AND ONLY IF a crossedPaths entry exists
-        // Validate the crossed path still exists before navigating to Nearby screen
-        const crossedUserId = notification.data?.otherUserId;
-
-        if (isDemoMode && crossedUserId) {
-          const crossedPathExists = demoCrossedPaths.some((cp) => cp.otherUserId === crossedUserId);
-
-          if (!crossedPathExists) {
-            // Crossed path no longer exists - this is an orphaned notification
-            log.warn('[BUG]', 'crossed_paths_notification_without_entry', { profileId: crossedUserId });
-
-            // Remove the orphaned notification to prevent future taps
-            removeCrossedPathNotificationsForUser(crossedUserId);
-
-            // Navigate to Nearby home instead of focusing on a specific profile
-            router.push({
-              pathname: '/(main)/(tabs)/nearby',
-              params: {
-                source: 'notification',
-                notificationId: notification._id,
-              },
-            } as any);
-            return;
-          }
-        }
-
-        // Crossed path exists - navigate to Nearby with focus on crossed_paths section
+        // FROZEN (2026-03-06): Nearby feature disabled for stability
+        // Redirect to home instead of nearby to prevent crashes
         router.push({
-          pathname: '/(main)/(tabs)/nearby',
+          pathname: '/(main)/(tabs)/home',
           params: {
-            focus: 'crossed_paths',
-            profileId: crossedUserId,
             source: 'notification',
             notificationId: notification._id,
-            dedupeKey: notification.dedupeKey,
           },
         } as any);
         break;
@@ -340,19 +337,13 @@ export default function NotificationsScreen() {
         </TouchableOpacity>
       </View>
 
-      <FlatList
-        data={groupedNotifications}
-        keyExtractor={(item, index) => `group-${index}`}
-        renderItem={({ item: group }) => (
-          <View>
-            <View style={styles.groupHeader}>
-              <Text style={styles.groupTitle}>{group.title}</Text>
-            </View>
-            {group.notifications.map((notif) => (
-              <View key={notif._id}>
-                {renderNotification({ item: notif })}
-              </View>
-            ))}
+      <SectionList
+        sections={groupedNotifications}
+        keyExtractor={(item) => item._id}
+        renderItem={renderNotification}
+        renderSectionHeader={({ section }) => (
+          <View style={styles.groupHeader}>
+            <Text style={styles.groupTitle}>{section.title}</Text>
           </View>
         )}
         ListEmptyComponent={
@@ -368,6 +359,7 @@ export default function NotificationsScreen() {
           <RefreshControl refreshing={refreshing} onRefresh={onRefresh} />
         }
         contentContainerStyle={styles.listContent}
+        stickySectionHeadersEnabled={false}
       />
     </View>
   );

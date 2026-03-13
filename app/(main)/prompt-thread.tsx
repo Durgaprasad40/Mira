@@ -1,6 +1,6 @@
 import React, { useState, useCallback, useEffect, useRef, useMemo } from 'react';
 import {
-  View, Text, StyleSheet, FlatList, TouchableOpacity, Alert, ActivityIndicator, Modal,
+  View, Text, StyleSheet, FlatList, TouchableOpacity, Alert, ActivityIndicator, Modal, TextInput,
 } from 'react-native';
 import { Image } from 'expo-image';
 import { Video, ResizeMode } from 'expo-av';
@@ -19,12 +19,22 @@ import { getTimeAgo } from '@/lib/utils';
 import { useAuthStore } from '@/stores/authStore';
 import { usePrivateProfileStore } from '@/stores/privateProfileStore';
 import { useDemoStore } from '@/stores/demoStore';
-import type { TodPrompt, TodProfileVisibility } from '@/types';
+import type { TodPrompt, TodProfileVisibility, TodReportReason } from '@/types';
 
 const C = INCOGNITO_COLORS;
 
 // Available emoji reactions
 const REACTION_EMOJIS = ['😂', '🔥', '😍', '👏', '😮', '💀'];
+
+// Report reason options
+const REPORT_REASONS: { code: TodReportReason; label: string; icon: string }[] = [
+  { code: 'harassment', label: 'Harassment', icon: '🚫' },
+  { code: 'sexual', label: 'Sexual Content', icon: '🔞' },
+  { code: 'spam', label: 'Spam', icon: '📢' },
+  { code: 'hate', label: 'Hate Speech', icon: '💢' },
+  { code: 'violence', label: 'Violence', icon: '⚠️' },
+  { code: 'other', label: 'Other', icon: '📝' },
+];
 
 // Time remaining helper
 function formatTimeLeft(expiresAt: number): string {
@@ -48,6 +58,7 @@ export default function PromptThreadScreen() {
   const userId = useAuthStore((s) => s.userId);
   const demoUserId = useDemoStore((s) => s.currentDemoUserId);
 
+  // C-002 FIX: Stable fallback ID constant (outside useMemo to avoid re-creation)
   // Resolve currentUserId: authStore userId → demoStore currentDemoUserId
   const currentUserId = useMemo(() => {
     if (userId) {
@@ -58,10 +69,10 @@ export default function PromptThreadScreen() {
       console.log(`[T/D] resolvedUserId source=demoStore valuePrefix=${demoUserId.substring(0, 12)}...`);
       return demoUserId;
     }
-    // Fallback: generate stable ID (should rarely happen)
-    const fallbackId = `demo_fallback_${Date.now()}`;
-    console.warn(`[T/D] resolvedUserId source=fallback (no auth or demoStore userId) valuePrefix=${fallbackId.substring(0, 12)}...`);
-    return fallbackId;
+    // C-002 FIX: Use stable constant fallback instead of Date.now()
+    // This prevents render loops when auth state is missing
+    console.warn(`[T/D] resolvedUserId source=fallback (no auth or demoStore userId)`);
+    return 'demo_fallback_user';
   }, [userId, demoUserId]);
 
   // Get profile data for author identity snapshot
@@ -100,6 +111,8 @@ export default function PromptThreadScreen() {
   // Secure media APIs (for future viewer implementation)
   const claimAnswerMediaView = useMutation(api.truthDare.claimAnswerMediaView);
   const finalizeAnswerMediaView = useMutation(api.truthDare.finalizeAnswerMediaView);
+  // T&D Connect
+  const sendConnectRequest = useMutation(api.truthDare.sendTodConnectRequest);
 
   const isLoading = threadData === undefined;
   const prompt = threadData?.prompt;
@@ -126,6 +139,14 @@ export default function PromptThreadScreen() {
   // Emoji picker state (per answer)
   const [emojiPickerAnswerId, setEmojiPickerAnswerId] = useState<string | null>(null);
 
+  // Report modal state
+  const [reportModalVisible, setReportModalVisible] = useState(false);
+  const [reportingAnswerId, setReportingAnswerId] = useState<string | null>(null);
+  const [reportingAuthorId, setReportingAuthorId] = useState<string | null>(null);
+  const [selectedReportReason, setSelectedReportReason] = useState<TodReportReason | null>(null);
+  const [reportReasonText, setReportReasonText] = useState('');
+  const [isSubmittingReport, setIsSubmittingReport] = useState(false);
+
   // Media viewer state for tap-to-view
   const [viewingMedia, setViewingMedia] = useState<{
     answerId: string;
@@ -136,7 +157,30 @@ export default function PromptThreadScreen() {
     isFrontCamera?: boolean;
   } | null>(null);
 
+  // T&D Connect state - tracks which answers have pending/sent connect requests
+  const [connectSentFor, setConnectSentFor] = useState<Set<string>>(new Set());
+  const [connectSending, setConnectSending] = useState<string | null>(null);
+
+  // Check if current user is the prompt owner
+  const isPromptOwner = prompt?.ownerUserId === currentUserId;
+
   const listRef = useRef<FlatList>(null);
+
+  // M-003 FIX: Track scroll timeout for cleanup
+  const scrollTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const isMountedRef = useRef(true);
+
+  // M-003 FIX: Cleanup on unmount
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+      if (scrollTimeoutRef.current) {
+        clearTimeout(scrollTimeoutRef.current);
+        scrollTimeoutRef.current = null;
+      }
+    };
+  }, []);
 
   // Ref to always have latest answers for callbacks (avoids stale closure)
   const answersRef = useRef(answers);
@@ -153,8 +197,18 @@ export default function PromptThreadScreen() {
     }
   }, [autoOpenComposer, myAnswer]);
 
+  // M-003 FIX: Safe scroll with cleanup support
   const scrollToEnd = () => {
-    setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), 200);
+    // Clear any pending scroll timeout
+    if (scrollTimeoutRef.current) {
+      clearTimeout(scrollTimeoutRef.current);
+    }
+    scrollTimeoutRef.current = setTimeout(() => {
+      if (isMountedRef.current && listRef.current) {
+        listRef.current.scrollToEnd({ animated: true });
+      }
+      scrollTimeoutRef.current = null;
+    }, 200);
   };
 
   // Handle emoji reaction
@@ -194,43 +248,55 @@ export default function PromptThreadScreen() {
     }
   }, [userId, setReaction]);
 
-  // Handle report
-  const handleReport = useCallback(async (answerId: string, authorId: string) => {
+  // Open report modal
+  const handleReport = useCallback((answerId: string, authorId: string) => {
     if (!userId || userId === authorId) return;
+    setReportingAnswerId(answerId);
+    setReportingAuthorId(authorId);
+    setSelectedReportReason(null);
+    setReportReasonText('');
+    setReportModalVisible(true);
+  }, [userId]);
 
-    Alert.alert(
-      'Report Comment',
-      'Are you sure you want to report this comment as inappropriate?',
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Report',
-          style: 'destructive',
-          onPress: async () => {
-            try {
-              const result = await reportAnswer({
-                answerId,
-                reporterId: userId,
-              });
-              if (result.isNowHidden) {
-                Alert.alert('Reported', 'This comment has been hidden due to multiple reports.');
-              } else {
-                Alert.alert('Reported', 'Thank you for your report. We will review it.');
-              }
-            } catch (error: any) {
-              if (error.message?.includes('already reported')) {
-                Alert.alert('Already Reported', 'You have already reported this comment.');
-              } else if (error.message?.includes('daily report limit')) {
-                Alert.alert('Limit Reached', 'You have reached your daily report limit.');
-              } else {
-                Alert.alert('Error', 'Failed to report. Please try again.');
-              }
-            }
-          },
-        },
-      ]
-    );
-  }, [userId, reportAnswer]);
+  // Submit report with selected reason
+  const submitReport = useCallback(async () => {
+    if (!userId || !reportingAnswerId || !selectedReportReason) return;
+
+    setIsSubmittingReport(true);
+    try {
+      const result = await reportAnswer({
+        answerId: reportingAnswerId,
+        reporterId: userId,
+        reasonCode: selectedReportReason,
+        reasonText: reportReasonText.trim() || undefined,
+      });
+      setReportModalVisible(false);
+      if (result.isNowHidden) {
+        Alert.alert('Reported', 'This comment has been hidden due to multiple reports.');
+      } else {
+        Alert.alert('Reported', 'Thank you for your report. We will review it.');
+      }
+    } catch (error: any) {
+      if (error.message?.includes('already reported')) {
+        Alert.alert('Already Reported', 'You have already reported this comment.');
+      } else if (error.message?.includes('daily report limit')) {
+        Alert.alert('Limit Reached', 'You have reached your daily report limit.');
+      } else {
+        Alert.alert('Error', 'Failed to report. Please try again.');
+      }
+    } finally {
+      setIsSubmittingReport(false);
+    }
+  }, [userId, reportingAnswerId, selectedReportReason, reportReasonText, reportAnswer]);
+
+  // Close report modal
+  const closeReportModal = useCallback(() => {
+    setReportModalVisible(false);
+    setReportingAnswerId(null);
+    setReportingAuthorId(null);
+    setSelectedReportReason(null);
+    setReportReasonText('');
+  }, []);
 
   // Handle delete own comment
   const handleDeleteAnswer = useCallback(async (answerId: string) => {
@@ -255,6 +321,31 @@ export default function PromptThreadScreen() {
       ]
     );
   }, [userId, deleteAnswer]);
+
+  // Handle send T&D connect request (prompt owner → answer author)
+  const handleSendConnect = useCallback(async (answerId: string) => {
+    if (!userId || !promptId) return;
+
+    setConnectSending(answerId);
+    try {
+      const result = await sendConnectRequest({
+        promptId,
+        answerId,
+        authUserId: userId,
+      });
+
+      if (result.success) {
+        setConnectSentFor((prev) => new Set(prev).add(answerId));
+        Alert.alert('Connect Sent', 'Your connect request has been sent!');
+      } else {
+        Alert.alert('Cannot Connect', result.reason || 'Failed to send connect request.');
+      }
+    } catch (error) {
+      Alert.alert('Error', 'Failed to send connect request. Please try again.');
+    } finally {
+      setConnectSending(null);
+    }
+  }, [userId, promptId, sendConnectRequest]);
 
   // Handle tap-to-view for media content
   const handleViewMedia = useCallback(async (answer: typeof answers[0]) => {
@@ -319,6 +410,13 @@ export default function PromptThreadScreen() {
         console.log('[T/D] Media view finalized');
       } catch (error) {
         console.error('[T/D] Finalize media view failed:', error);
+        // M-002 FIX: Add non-disruptive user feedback on failure
+        // This informs the user but doesn't block the flow
+        Alert.alert(
+          'View Not Recorded',
+          'Your view may not have been recorded. The media may still be viewable.',
+          [{ text: 'OK', style: 'default' }]
+        );
       }
     }
     setViewingMedia(null);
@@ -430,9 +528,10 @@ export default function PromptThreadScreen() {
 
   // These functions are kept for camera-composer route compatibility
   const openCamera = () => {
+    if (!promptId) return;
     router.push({
       pathname: '/(main)/camera-composer' as any,
-      params: { promptId: promptId!, promptType: prompt?.type },
+      params: { promptId, promptType: prompt?.type },
     });
   };
 
@@ -705,17 +804,46 @@ export default function PromptThreadScreen() {
                 <Ionicons name="trash-outline" size={16} color={C.textLight} />
               </TouchableOpacity>
             </View>
-          ) : !hasReported ? (
-            <TouchableOpacity
-              style={styles.reportBtn}
-              onPress={() => handleReport(item._id, item.userId)}
-            >
-              <Ionicons name="flag-outline" size={16} color={C.textLight} />
-            </TouchableOpacity>
           ) : (
-            <View style={styles.reportedBadge}>
-              <Ionicons name="flag" size={12} color={C.textLight} />
-              <Text style={styles.reportedText}>Reported</Text>
+            <View style={styles.otherCommentActions}>
+              {/* Connect button: only for prompt owner on non-anonymous answers */}
+              {isPromptOwner && !isAnon && !connectSentFor.has(item._id) && (
+                <TouchableOpacity
+                  style={styles.connectBtn}
+                  onPress={() => handleSendConnect(item._id)}
+                  disabled={connectSending === item._id}
+                >
+                  {connectSending === item._id ? (
+                    <ActivityIndicator size="small" color={C.primary} />
+                  ) : (
+                    <>
+                      <Ionicons name="chatbubble-outline" size={14} color={C.primary} />
+                      <Text style={styles.connectBtnText}>Connect</Text>
+                    </>
+                  )}
+                </TouchableOpacity>
+              )}
+              {/* Connect sent indicator */}
+              {isPromptOwner && connectSentFor.has(item._id) && (
+                <View style={styles.connectSentBadge}>
+                  <Ionicons name="checkmark-circle" size={12} color={C.textLight} />
+                  <Text style={styles.connectSentText}>Sent</Text>
+                </View>
+              )}
+              {/* Report button */}
+              {!hasReported ? (
+                <TouchableOpacity
+                  style={styles.reportBtn}
+                  onPress={() => handleReport(item._id, item.userId)}
+                >
+                  <Ionicons name="flag-outline" size={16} color={C.textLight} />
+                </TouchableOpacity>
+              ) : (
+                <View style={styles.reportedBadge}>
+                  <Ionicons name="flag" size={12} color={C.textLight} />
+                  <Text style={styles.reportedText}>Reported</Text>
+                </View>
+              )}
             </View>
           )}
         </View>
@@ -992,6 +1120,86 @@ export default function PromptThreadScreen() {
           )}
         </View>
       </Modal>
+
+      {/* Report Reason Modal */}
+      <Modal
+        visible={reportModalVisible}
+        transparent
+        animationType="fade"
+        onRequestClose={closeReportModal}
+      >
+        <View style={styles.reportModalOverlay}>
+          <View style={styles.reportModalContent}>
+            <View style={styles.reportModalHeader}>
+              <Text style={styles.reportModalTitle}>Report Comment</Text>
+              <TouchableOpacity onPress={closeReportModal}>
+                <Ionicons name="close" size={24} color={C.text} />
+              </TouchableOpacity>
+            </View>
+
+            <Text style={styles.reportModalSubtitle}>
+              Why are you reporting this comment?
+            </Text>
+
+            {/* Reason selection */}
+            <View style={styles.reportReasonList}>
+              {REPORT_REASONS.map((reason) => (
+                <TouchableOpacity
+                  key={reason.code}
+                  style={[
+                    styles.reportReasonItem,
+                    selectedReportReason === reason.code && styles.reportReasonItemSelected,
+                  ]}
+                  onPress={() => setSelectedReportReason(reason.code)}
+                >
+                  <Text style={styles.reportReasonIcon}>{reason.icon}</Text>
+                  <Text style={[
+                    styles.reportReasonLabel,
+                    selectedReportReason === reason.code && styles.reportReasonLabelSelected,
+                  ]}>
+                    {reason.label}
+                  </Text>
+                  {selectedReportReason === reason.code && (
+                    <Ionicons name="checkmark-circle" size={20} color={C.primary} />
+                  )}
+                </TouchableOpacity>
+              ))}
+            </View>
+
+            {/* Optional additional details (shown after reason selected) */}
+            {selectedReportReason && (
+              <View style={styles.reportTextContainer}>
+                <Text style={styles.reportTextLabel}>Additional details (optional)</Text>
+                <TextInput
+                  style={styles.reportTextInput}
+                  placeholder="Add more context..."
+                  placeholderTextColor={C.textLight}
+                  value={reportReasonText}
+                  onChangeText={setReportReasonText}
+                  multiline
+                  maxLength={500}
+                />
+              </View>
+            )}
+
+            {/* Submit button */}
+            <TouchableOpacity
+              style={[
+                styles.reportSubmitButton,
+                !selectedReportReason && styles.reportSubmitButtonDisabled,
+              ]}
+              onPress={submitReport}
+              disabled={!selectedReportReason || isSubmittingReport}
+            >
+              {isSubmittingReport ? (
+                <ActivityIndicator size="small" color="#FFF" />
+              ) : (
+                <Text style={styles.reportSubmitButtonText}>Submit Report</Text>
+              )}
+            </TouchableOpacity>
+          </View>
+        </View>
+      </Modal>
     </View>
   );
 }
@@ -1199,6 +1407,21 @@ const styles = StyleSheet.create({
   },
   reportedText: { fontSize: 10, color: C.textLight },
 
+  // Other comment actions (connect + report)
+  otherCommentActions: {
+    flexDirection: 'row', alignItems: 'center', gap: 8,
+  },
+  connectBtn: {
+    flexDirection: 'row', alignItems: 'center', gap: 4,
+    backgroundColor: `${C.primary}20`, paddingHorizontal: 10, paddingVertical: 5, borderRadius: 12,
+  },
+  connectBtnText: { fontSize: 11, fontWeight: '600', color: C.primary },
+  connectSentBadge: {
+    flexDirection: 'row', alignItems: 'center', gap: 4,
+    backgroundColor: C.surface, paddingHorizontal: 8, paddingVertical: 4, borderRadius: 8,
+  },
+  connectSentText: { fontSize: 10, color: C.textLight },
+
   // Emoji picker
   emojiPickerOverlay: {
     position: 'absolute', bottom: 50, left: 16,
@@ -1329,5 +1552,98 @@ const styles = StyleSheet.create({
     fontSize: 13,
     color: '#FFF',
     fontWeight: '500',
+  },
+
+  // Report modal styles
+  reportModalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.6)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 20,
+  },
+  reportModalContent: {
+    backgroundColor: C.background,
+    borderRadius: 16,
+    padding: 20,
+    width: '100%',
+    maxWidth: 400,
+  },
+  reportModalHeader: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginBottom: 8,
+  },
+  reportModalTitle: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: C.text,
+  },
+  reportModalSubtitle: {
+    fontSize: 14,
+    color: C.textLight,
+    marginBottom: 16,
+  },
+  reportReasonList: {
+    gap: 8,
+  },
+  reportReasonItem: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    padding: 12,
+    borderRadius: 10,
+    backgroundColor: C.surface,
+  },
+  reportReasonItemSelected: {
+    backgroundColor: C.primary + '20',
+    borderWidth: 1,
+    borderColor: C.primary,
+  },
+  reportReasonIcon: {
+    fontSize: 18,
+  },
+  reportReasonLabel: {
+    flex: 1,
+    fontSize: 15,
+    fontWeight: '500',
+    color: C.text,
+  },
+  reportReasonLabelSelected: {
+    color: C.primary,
+  },
+  reportTextContainer: {
+    marginTop: 16,
+  },
+  reportTextLabel: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: C.text,
+    marginBottom: 8,
+  },
+  reportTextInput: {
+    backgroundColor: C.surface,
+    borderRadius: 10,
+    padding: 12,
+    fontSize: 14,
+    color: C.text,
+    minHeight: 80,
+    textAlignVertical: 'top',
+  },
+  reportSubmitButton: {
+    marginTop: 20,
+    backgroundColor: '#E74C3C',
+    borderRadius: 10,
+    padding: 14,
+    alignItems: 'center',
+  },
+  reportSubmitButtonDisabled: {
+    backgroundColor: C.surface,
+  },
+  reportSubmitButtonText: {
+    fontSize: 15,
+    fontWeight: '700',
+    color: '#FFF',
   },
 });

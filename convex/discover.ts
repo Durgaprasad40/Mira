@@ -435,6 +435,7 @@ export const getDiscoverProfiles = query({
         isBoosted: !!(user.boostedUntil && user.boostedUntil > Date.now()),
         theyLikedMe,
         photoCount: nonNsfwPhotos.length,
+        isIncognito: user.incognitoMode === true,
       });
     }
 
@@ -506,29 +507,100 @@ export const getExploreProfiles = query({
     const effectiveMaxAge = maxAge ?? currentUser.maxAge;
     const effectiveMaxDistance = maxDistance ?? currentUser.maxDistance;
 
-    const allUsers = await ctx.db.query('users').collect();
-    const candidates = [];
+    // PERF FIX: Pre-fetch all swipes, matches, blocks upfront (converts O(4*N) queries to O(4))
+    // Same efficient pattern as getDiscoverProfiles
+    const now = Date.now();
+    const passExpiry = now - 7 * 24 * 60 * 60 * 1000;
+
+    // P1/R3 FIX: Adaptive buffer sizing instead of full table scan
+    // Base multiplier with adjustment for filter strictness
+    const hasStrictFilters = (relationshipIntent && relationshipIntent.length > 0) ||
+                              (activities && activities.length > 0);
+    const bufferMultiplier = hasStrictFilters ? 20 : 10; // Higher buffer for stricter filters
+    const fetchLimit = Math.max((offset + limit) * bufferMultiplier, 200); // Min 200 candidates
+
+    const [
+      allUsers,
+      mySwipes,
+      matchesAsUser1,
+      matchesAsUser2,
+      blocksICreated,
+      blocksAgainstMe,
+    ] = await Promise.all([
+      // P1 FIX: Use take() with verified users index instead of full collect()
+      ctx.db.query('users')
+        .withIndex('by_verification_status', (q) => q.eq('verificationStatus', 'verified'))
+        .take(fetchLimit),
+      // All my swipes (likes/passes)
+      ctx.db
+        .query('likes')
+        .withIndex('by_from_user', (q) => q.eq('fromUserId', userId))
+        .collect(),
+      // Matches where I'm user1
+      ctx.db
+        .query('matches')
+        .withIndex('by_user1', (q) => q.eq('user1Id', userId))
+        .filter((q) => q.eq(q.field('isActive'), true))
+        .collect(),
+      // Matches where I'm user2
+      ctx.db
+        .query('matches')
+        .withIndex('by_user2', (q) => q.eq('user2Id', userId))
+        .filter((q) => q.eq(q.field('isActive'), true))
+        .collect(),
+      // Blocks I created
+      ctx.db
+        .query('blocks')
+        .withIndex('by_blocker', (q) => q.eq('blockerId', userId))
+        .collect(),
+      // Blocks against me
+      ctx.db
+        .query('blocks')
+        .withIndex('by_blocked', (q) => q.eq('blockedUserId', userId))
+        .collect(),
+    ]);
+
+    // Build Maps/Sets for O(1) lookups
+    // Swiped users: exclude likes/superlikes, and recent passes (within 7 days)
+    const swipedUserIds = new Set<string>();
+    for (const swipe of mySwipes) {
+      // Skip expired passes (can re-show after 7 days)
+      if (swipe.action === 'pass' && swipe.createdAt < passExpiry) continue;
+      swipedUserIds.add(swipe.toUserId as string);
+    }
+
+    const matchedUserIds = new Set<string>();
+    for (const m of matchesAsUser1) matchedUserIds.add(m.user2Id as string);
+    for (const m of matchesAsUser2) matchedUserIds.add(m.user1Id as string);
+
+    const blockedUserIds = new Set<string>();
+    for (const b of blocksICreated) blockedUserIds.add(b.blockedUserId as string);
+    for (const b of blocksAgainstMe) blockedUserIds.add(b.blockerId as string);
+
+    // STABILITY FIX: C-9 - Two-pass approach to eliminate N+1 photo queries
+    // First pass: filter candidates, collect user objects with computed values
+    type FilteredUser = { user: typeof allUsers[0]; userAge: number; distance: number | undefined };
+    const filteredUsers: FilteredUser[] = [];
 
     for (const user of allUsers) {
       if (user._id === userId) continue;
       if (!user.isActive || user.isBanned) continue;
       if (isUserPaused(user)) continue;
-
-      // 8A: Filter out unverified/rejected users from Explore
-      const verificationStatus = user.verificationStatus || 'unverified';
-      if (verificationStatus !== 'verified') continue;
+      // Note: verification check removed - already filtered by index (by_verification_status)
 
       if (!effectiveGender.includes(user.gender)) continue;
 
       const userAge = calculateAge(user.dateOfBirth);
       if (userAge < effectiveMinAge || userAge > effectiveMaxAge) continue;
 
+      let distance: number | undefined;
       if (currentUser.latitude && currentUser.longitude && user.latitude && user.longitude) {
         const dist = calculateDistance(
           currentUser.latitude, currentUser.longitude,
           user.latitude, user.longitude,
         );
         if (!isDistanceAllowed(dist, effectiveMaxDistance)) continue;
+        distance = dist;
       }
 
       if (relationshipIntent && relationshipIntent.length > 0) {
@@ -539,56 +611,36 @@ export const getExploreProfiles = query({
         if (!activities.some((a) => user.activities.includes(a))) continue;
       }
 
-      // BUGFIX #17: Exclude users I already swiped on (likes/superlikes, passes within 7 days)
-      const existingLike = await ctx.db
-        .query('likes')
-        .withIndex('by_from_to', (q) => q.eq('fromUserId', userId).eq('toUserId', user._id))
-        .first();
+      // PERF FIX: O(1) Set lookups instead of per-user database queries
+      if (swipedUserIds.has(user._id as string)) continue;
+      if (matchedUserIds.has(user._id as string)) continue;
+      if (blockedUserIds.has(user._id as string)) continue;
 
-      if (existingLike) {
-        if (existingLike.action !== 'pass') continue;
-        if (existingLike.createdAt > Date.now() - 7 * 24 * 60 * 60 * 1000) continue;
-      }
+      filteredUsers.push({ user, userAge, distance });
+    }
 
-      // BUGFIX #17: Exclude users I'm already matched with
-      const orderedUser1 = userId < user._id ? userId : user._id;
-      const orderedUser2 = userId < user._id ? user._id : userId;
-      const existingMatch = await ctx.db
-        .query('matches')
-        .withIndex('by_users', (q) =>
-          q.eq('user1Id', orderedUser1).eq('user2Id', orderedUser2)
+    // STABILITY FIX: C-9 - Batch fetch photos with chunked concurrency (avoids N+1)
+    const CHUNK_SIZE = 20;
+    const photosByUser = new Map<string, any[]>();
+    for (let i = 0; i < filteredUsers.length; i += CHUNK_SIZE) {
+      const chunk = filteredUsers.slice(i, i + CHUNK_SIZE);
+      const chunkPhotos = await Promise.all(
+        chunk.map((f) =>
+          ctx.db
+            .query('photos')
+            .withIndex('by_user_order', (q) => q.eq('userId', f.user._id))
+            .collect()
         )
-        .first();
-
-      if (existingMatch && existingMatch.isActive) continue;
-
-      const blocked = await ctx.db
-        .query('blocks')
-        .withIndex('by_blocker_blocked', (q) => q.eq('blockerId', userId).eq('blockedUserId', user._id))
-        .first();
-      if (blocked) continue;
-
-      // 9-8: Check reverse block (candidate blocked current user)
-      const reverseBlocked = await ctx.db
-        .query('blocks')
-        .withIndex('by_blocker_blocked', (q) => q.eq('blockerId', user._id).eq('blockedUserId', userId))
-        .first();
-      if (reverseBlocked) continue;
-
-      const photos = await ctx.db
-        .query('photos')
-        .withIndex('by_user_order', (q) => q.eq('userId', user._id))
-        .collect();
-
-      let distance: number | undefined;
-      if (currentUser.latitude && currentUser.longitude && user.latitude && user.longitude) {
-        distance = calculateDistance(
-          currentUser.latitude, currentUser.longitude,
-          user.latitude, user.longitude,
-        );
+      );
+      for (let j = 0; j < chunk.length; j++) {
+        photosByUser.set(chunk[j].user._id as string, chunkPhotos[j]);
       }
+    }
 
-      candidates.push({
+    // Second pass: build candidates with photos from the map
+    const candidates = filteredUsers.map(({ user, userAge, distance }) => {
+      const photos = photosByUser.get(user._id as string) ?? [];
+      return {
         id: user._id,
         name: user.name,
         age: userAge,
@@ -602,11 +654,12 @@ export const getExploreProfiles = query({
         relationshipIntent: user.relationshipIntent,
         activities: user.activities,
         profilePrompts: user.profilePrompts,
-        photos: photos.sort((a, b) => a.order - b.order),
+        photos, // Already sorted by order via by_user_order index
         photoBlurred: user.photoBlurred === true,
-        photoCount: photos.filter((p) => !p.isNsfw).length,
-      });
-    }
+        photoCount: photos.filter((p: any) => !p.isNsfw).length,
+        isIncognito: user.incognitoMode === true,
+      };
+    });
 
     // Sort: interests sort uses shared activities, filtered categories use relevance,
     // default falls back to the simple 4-signal score.

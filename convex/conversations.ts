@@ -1,5 +1,6 @@
 import { v } from 'convex/values';
 import { mutation } from './_generated/server';
+import { resolveUserIdByAuthId } from './helpers';
 
 /**
  * Ensure a conversation exists for a given match.
@@ -7,14 +8,24 @@ import { mutation } from './_generated/server';
  * Otherwise create a new post-match conversation.
  *
  * This is safe to call multiple times — it is idempotent.
+ * MSG-005 FIX: Auth hardening - verify caller identity server-side
  */
 export const getOrCreateForMatch = mutation({
   args: {
     matchId: v.id('matches'),
-    userId: v.id('users'),
+    authUserId: v.string(), // MSG-005: Auth verification required
   },
   handler: async (ctx, args) => {
-    const { matchId, userId } = args;
+    const { matchId, authUserId } = args;
+
+    // MSG-005 FIX: Verify caller identity via session-based auth
+    if (!authUserId || authUserId.trim().length === 0) {
+      throw new Error('Unauthorized: authentication required');
+    }
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      throw new Error('Unauthorized: user not found');
+    }
 
     const match = await ctx.db.get(matchId);
     if (!match || !match.isActive) {

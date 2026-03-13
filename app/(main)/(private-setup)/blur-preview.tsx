@@ -13,12 +13,14 @@ import { isDemoMode } from '@/hooks/useConvex';
 import { createBlurredImages } from '@/lib/imageBlur';
 import { FEATURES } from '@/lib/featureFlags';
 import { INCOGNITO_COLORS } from '@/lib/constants';
+import { useScreenTrace } from '@/lib/devTrace';
 
 const C = INCOGNITO_COLORS;
 const { width } = Dimensions.get('window');
 const PREVIEW_SIZE = (width - 48) / 2;
 
 export default function BlurPreviewScreen() {
+  useScreenTrace("P2_SETUP_BLUR_PREVIEW");
   const router = useRouter();
   const insets = useSafeAreaInsets();
 

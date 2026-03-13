@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useCallback } from 'react';
 import {
   View,
   Text,
@@ -22,6 +22,15 @@ export default function AccountSettingsScreen() {
   const router = useRouter();
   const logout = useAuthStore((s) => s.logout);
 
+  // Safe back navigation - ensures return to Profile tab
+  const handleGoBack = useCallback(() => {
+    if (router.canGoBack()) {
+      router.back();
+    } else {
+      router.replace('/(main)/(tabs)/profile' as any);
+    }
+  }, [router]);
+
   // Delete confirmation modal state (Step 1: info modal)
   const [showDeleteModal, setShowDeleteModal] = useState(false);
 
@@ -34,12 +43,13 @@ export default function AccountSettingsScreen() {
         {
           text: 'Log Out',
           style: 'destructive',
-          onPress: () => {
+          onPress: async () => {
             if (isDemoMode) {
               useDemoStore.getState().demoLogout();
             }
             useOnboardingStore.getState().reset();
-            logout();
+            // H5 FIX: Await async logout to ensure SecureStore is cleared before navigation
+            await logout();
             safeReplace(router, '/(auth)/welcome', 'account->logout');
           },
         },
@@ -64,13 +74,14 @@ export default function AccountSettingsScreen() {
         {
           text: 'Delete',
           style: 'destructive',
-          onPress: () => {
+          onPress: async () => {
             // Log out immediately (UI only - actual deletion not implemented)
             if (isDemoMode) {
               useDemoStore.getState().demoLogout();
             }
             useOnboardingStore.getState().reset();
-            logout();
+            // H5 FIX: Await async logout to ensure SecureStore is cleared before navigation
+            await logout();
             safeReplace(router, '/(auth)/welcome', 'account->delete');
           },
         },
@@ -85,7 +96,7 @@ export default function AccountSettingsScreen() {
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
       <View style={styles.header}>
-        <TouchableOpacity onPress={() => router.back()} hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}>
+        <TouchableOpacity onPress={handleGoBack} hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}>
           <Ionicons name="arrow-back" size={24} color={COLORS.text} />
         </TouchableOpacity>
         <Text style={styles.headerTitle}>Account</Text>

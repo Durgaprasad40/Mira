@@ -2,20 +2,57 @@ import { useEffect, useRef, useState } from "react";
 import { AppState, AppStateStatus, LogBox } from "react-native";
 import { Stack, useRouter, useSegments } from "expo-router";
 
+// P0-1 STABILITY FIX: Import Sentry for crash reporting
+import { initSentry, captureException, setUserContext, clearUserContext } from "@/lib/sentry";
+
+// Initialize Sentry FIRST, before any other code runs
+// This ensures we catch errors during app initialization
+initSentry();
+
 // Suppress known dev-mode warning: Expo's withDevTools calls useKeepAwake() which can fail
 // on Android before activity is ready. This is non-critical (screen may sleep during dev).
 if (__DEV__) {
   LogBox.ignoreLogs(["Unable to activate keep awake"]);
 
+  // Also patch console.error to suppress keep-awake messages at the console level
+  // This catches errors that appear before ErrorUtils handlers are invoked
+  const originalConsoleError = console.error;
+  console.error = (...args: any[]) => {
+    const message = args[0]?.toString?.() || '';
+    if (message.includes('Unable to activate keep awake') ||
+        message.includes('keep awake') ||
+        message.includes('keepAwake')) {
+      // Silently suppress - this is expected during lifecycle transitions
+      return;
+    }
+    originalConsoleError.apply(console, args);
+  };
+}
+
+// P0-1 STABILITY FIX: Global error handlers with Sentry integration
+// Set up ONCE at module load, before React renders
+(() => {
   // Catch synchronous errors via ErrorUtils
   const originalHandler = (global as any).ErrorUtils?.getGlobalHandler?.();
   if ((global as any).ErrorUtils?.setGlobalHandler) {
     (global as any).ErrorUtils.setGlobalHandler((error: Error, isFatal?: boolean) => {
       // Suppress keep-awake errors (non-fatal, dev-only)
       if (error?.message?.includes("Unable to activate keep awake")) {
-        console.warn("[KeepAwake] Activation failed (non-critical in dev mode)");
+        if (__DEV__) {
+          console.warn("[KeepAwake] Activation failed (non-critical in dev mode)");
+        }
         return;
       }
+
+      // P0-1: Send to Sentry before forwarding to original handler
+      captureException(error, {
+        tags: {
+          type: 'global_error',
+          fatal: String(isFatal ?? false),
+        },
+        level: isFatal ? 'fatal' : 'error',
+      });
+
       // Forward all other errors to original handler
       if (originalHandler) {
         originalHandler(error, isFatal);
@@ -23,7 +60,7 @@ if (__DEV__) {
     });
   }
 
-  // Catch unhandled promise rejections (for async keep-awake activation)
+  // Catch unhandled promise rejections
   // React Native uses 'promise/setimmediate/rejection-tracking' internally
   try {
     const rejectionTracking = require('promise/setimmediate/rejection-tracking');
@@ -31,9 +68,21 @@ if (__DEV__) {
       allRejections: true,
       onUnhandled: (id: number, error: Error) => {
         if (error?.message?.includes("Unable to activate keep awake")) {
-          console.warn("[KeepAwake] Async activation failed (non-critical in dev mode)");
+          if (__DEV__) {
+            console.warn("[KeepAwake] Async activation failed (non-critical in dev mode)");
+          }
           return; // Suppress - do not forward
         }
+
+        // P0-1: Send unhandled promise rejections to Sentry
+        captureException(error, {
+          tags: {
+            type: 'unhandled_promise_rejection',
+            rejectionId: String(id),
+          },
+          level: 'error',
+        });
+
         // Forward other rejections to default handling
         const handler = (global as any).ErrorUtils?.getGlobalHandler?.();
         if (handler) {
@@ -47,7 +96,7 @@ if (__DEV__) {
   } catch {
     // rejection-tracking not available - rely on ErrorUtils handler above
   }
-}
+})()
 import { ConvexProvider, useMutation, useQuery } from "convex/react";
 import { convex, isDemoMode } from "@/hooks/useConvex";
 
@@ -108,7 +157,8 @@ function ResetEpochChecker() {
           console.log('[RESET_EPOCH] Database reset detected - forcing logout...');
 
           // Clear all auth/onboarding/demo stores
-          logout();
+          // STABILITY FIX: Await logout to ensure cleanup completes before navigation
+          await logout();
           resetOnboarding();
           if (isDemoMode) {
             demoLogout();
@@ -116,8 +166,9 @@ function ResetEpochChecker() {
 
           // Force navigation to welcome screen (logged out state)
           // This prevents stale onboardingCompleted from bypassing onboarding
+          // FIX: Navigate directly to welcome, not "/" which remounts index.tsx
           console.log('[RESET_EPOCH] Navigating to welcome screen...');
-          router.replace('/');
+          router.replace('/(auth)/welcome');
         }
       } catch (error) {
         console.error('[RESET_EPOCH] Error during reset epoch check:', error);
@@ -184,6 +235,8 @@ let _hasMarkedBootHidden = false;
 
 function BootScreenWrapper() {
   const routeDecisionMade = useBootStore((s) => s.routeDecisionMade);
+  const authHydrated = useBootStore((s) => s.authHydrated);
+  const demoHydrated = useBootStore((s) => s.demoHydrated);
   const reset = useBootStore((s) => s.reset);
   const [, forceUpdate] = useState(0);
   const timerStarted = useRef(false);
@@ -205,8 +258,8 @@ function BootScreenWrapper() {
     return () => clearTimeout(timer);
   }, [minTimeElapsed, elapsedMs]);
 
-  // Hide when: minimum time passed OR route decision made (whichever comes first)
-  const isReady = minTimeElapsed || routeDecisionMade;
+  // Hide when: minimum time passed AND hydration complete (safety timeout in bootStore guarantees resolution)
+  const isReady = (minTimeElapsed || routeDecisionMade) && authHydrated && demoHydrated;
 
   // Mark boot_hidden timing milestone once (module-level guard)
   if (isReady && !_hasMarkedBootHidden) {
@@ -240,6 +293,8 @@ function SessionValidator() {
   const router = useRouter();
   const segments = useSegments();
   const token = useAuthStore((s) => s.token);
+  // M2 FIX: Normalized token check - empty string and whitespace-only are invalid
+  const hasValidToken = typeof token === 'string' && token.trim().length > 0;
   const userId = useAuthStore((s) => s.userId); // TASK D: Get userId for demo migration detection
   const logout = useAuthStore((s) => s.logout);
   const syncFromServerValidation = useAuthStore((s) => s.syncFromServerValidation);
@@ -247,21 +302,44 @@ function SessionValidator() {
   const appStateRef = useRef<AppStateStatus>(AppState.currentState);
   const isValidatingRef = useRef(false);
   const hasInitialValidation = useRef(false);
+  // M1 FIX: State to force query re-subscription on app resume
+  const [sessionRefreshTrigger, setSessionRefreshTrigger] = useState(false);
+  // M1 FIX: Timer ref for cleanup of refresh re-enable
+  const refreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // STABILITY FIX: C-16 - Track mounted state to prevent navigation/setState after unmount
+  const mountedRef = useRef(true);
+
+  // STABILITY FIX: C-16 - Track mounted state
+  // M1 FIX: Clean up refresh timer on unmount
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+      if (refreshTimerRef.current) {
+        clearTimeout(refreshTimerRef.current);
+      }
+    };
+  }, []);
 
   // Use Convex query to validate session with FULL checks
   // validateSessionFull checks: expiry, revocation, user status, deletedAt
+  // M2 FIX: Use hasValidToken to skip query for empty/whitespace tokens
+  // M1 FIX: sessionRefreshTrigger gates query to force re-subscription on app resume
   const sessionStatus = useQuery(
     api.auth.validateSessionFull,
-    !isDemoMode && token ? { token } : 'skip'
+    sessionRefreshTrigger ? 'skip' : (!isDemoMode && hasValidToken ? { token } : 'skip')
   );
 
   // Handle session validation result
   useEffect(() => {
-    if (isDemoMode || !token) {
-      // No token = mark as validated (nothing to validate)
-      if (!token) {
+    // M2 FIX: Use hasValidToken for early return; only mark validated if token is truly null
+    if (isDemoMode || !hasValidToken) {
+      // Only mark as validated if token is truly absent (null), not empty/whitespace
+      if (token === null) {
         setSessionValidated(true);
       }
+      // For empty/whitespace token: don't mark as validated, don't run query
+      // This leaves session in unvalidated state, which will prevent protected routes
       return;
     }
     if (sessionStatus === undefined) return; // Still loading
@@ -270,6 +348,9 @@ function SessionValidator() {
     hasInitialValidation.current = true;
 
     if (sessionStatus.valid) {
+      // STABILITY FIX: C-16 - Guard state operations after unmount
+      if (!mountedRef.current) return;
+
       // Session is valid — sync onboarding state from server
       // SAFETY: This only updates LOCAL state, never modifies server
       if (sessionStatus.userInfo) {
@@ -280,6 +361,13 @@ function SessionValidator() {
         });
       }
       setSessionValidated(true);
+
+      // P0-1 STABILITY FIX: Attach user context to Sentry for error attribution
+      if (userId) {
+        setUserContext(userId, {
+          onboardingCompleted: sessionStatus.userInfo?.onboardingCompleted,
+        });
+      }
     } else {
       // Session is invalid
       console.warn(`[SessionValidator] Session invalid: ${sessionStatus.reason}`);
@@ -300,21 +388,33 @@ function SessionValidator() {
         return;
       }
 
+      // STABILITY FIX: C-16 - Guard navigation and state operations after unmount
+      if (!mountedRef.current) return;
+
       // For non-migration cases (truly invalid sessions), proceed with logout
-      // Clear all LOCAL state (server data untouched)
-      logout();
-      useOnboardingStore.getState().reset();
-      if (isDemoMode) {
-        useDemoStore.getState().demoLogout();
-      }
+      // STABILITY FIX: Wrap in async IIFE to properly await logout before navigation
+      (async () => {
+        // P0-1 STABILITY FIX: Clear Sentry user context on logout
+        clearUserContext();
 
-      setSessionValidated(false, sessionStatus.reason);
+        // Clear all LOCAL state (server data untouched)
+        await logout();
+        useOnboardingStore.getState().reset();
+        if (isDemoMode) {
+          useDemoStore.getState().demoLogout();
+        }
 
-      // Navigate to login (only if currently in main/protected area)
-      const inProtectedRoute = segments[0] === '(main)';
-      if (inProtectedRoute) {
-        router.replace('/(auth)/welcome');
-      }
+        // Guard: check mounted again after async operation
+        if (!mountedRef.current) return;
+
+        setSessionValidated(false, sessionStatus.reason);
+
+        // Navigate to login (only if currently in main/protected area)
+        const inProtectedRoute = segments[0] === '(main)';
+        if (inProtectedRoute) {
+          router.replace('/(auth)/welcome');
+        }
+      })();
     }
   }, [sessionStatus, token, userId, logout, syncFromServerValidation, setSessionValidated, router, segments]);
 
@@ -324,14 +424,28 @@ function SessionValidator() {
 
     const handleAppStateChange = (nextAppState: AppStateStatus) => {
       // If app was in background and is now active
+      // M2 FIX: Use hasValidToken to skip resume validation for empty/whitespace tokens
       if (
         appStateRef.current.match(/inactive|background/) &&
         nextAppState === 'active' &&
-        token &&
+        hasValidToken &&
         !isValidatingRef.current
       ) {
-        // The query will automatically re-fetch when app becomes active
-        // due to Convex's reactivity
+        // M1 FIX: Force query re-subscription by cycling through skip -> active
+        // Clear any pending re-enable timer
+        if (refreshTimerRef.current) {
+          clearTimeout(refreshTimerRef.current);
+        }
+        // Temporarily skip query
+        setSessionRefreshTrigger(true);
+        // Re-enable on next tick to force re-subscription
+        refreshTimerRef.current = setTimeout(() => {
+          if (mountedRef.current) {
+            setSessionRefreshTrigger(false);
+          }
+        }, 0);
+
+        // Debounce: prevent rapid repeated refresh triggers
         isValidatingRef.current = true;
         setTimeout(() => {
           isValidatingRef.current = false;
@@ -474,9 +588,17 @@ function OnboardingDraftHydrator() {
       const store = useOnboardingStore.getState();
       const hydratedFields: string[] = [];
 
-      if (name && !store.name) {
-        store.setName(name);
-        hydratedFields.push('name');
+      // Parse backend 'name' into firstName/lastName
+      if (name && (!store.firstName && !store.lastName)) {
+        const parts = name.trim().split(/\s+/);
+        if (parts.length === 1) {
+          store.setFirstName(parts[0]);
+          store.setLastName('');
+        } else {
+          store.setFirstName(parts[0]);
+          store.setLastName(parts.slice(1).join(' '));
+        }
+        hydratedFields.push('firstName', 'lastName');
       }
       if (nickname && !store.nickname) {
         store.setNickname(nickname);

@@ -27,9 +27,13 @@ import { useOnboardingStore } from "@/stores/onboardingStore";
 import { useDemoStore } from "@/stores/demoStore";
 import { useAuthStore } from "@/stores/authStore";
 import { isDemoMode } from "@/hooks/useConvex";
+import { useMutation } from "convex/react";
+import { api } from "@/convex/_generated/api";
 import { OnboardingProgressHeader } from "@/components/OnboardingProgressHeader";
+import { useScreenTrace } from "@/lib/devTrace";
 
 export default function ProfileDetailsEducationReligionScreen() {
+  useScreenTrace("ONB_EDUCATION_RELIGION");
   const {
     education,
     religion,
@@ -43,6 +47,9 @@ export default function ProfileDetailsEducationReligionScreen() {
     isDemoMode && userId ? s.demoProfiles[userId] : null
   );
   const router = useRouter();
+
+  // Live mode persistence
+  const upsertDraft = useMutation(api.users.upsertOnboardingDraft);
   const params = useLocalSearchParams<{ editFromReview?: string }>();
 
   // CENTRAL EDIT HUB: Detect if editing from Review screen
@@ -74,6 +81,26 @@ export default function ProfileDetailsEducationReligionScreen() {
       if (Object.keys(dataToSave).length > 0) {
         demoStore.saveDemoProfile(userId, dataToSave);
         console.log(`[EDUCATION] saved: ${JSON.stringify(dataToSave)}`);
+      }
+    }
+
+    // LIVE MODE: Persist to Convex onboarding draft
+    if (!isDemoMode && userId) {
+      const profileDetails: Record<string, any> = {};
+      if (education) profileDetails.education = education;
+      if (religion) profileDetails.religion = religion;
+
+      if (Object.keys(profileDetails).length > 0) {
+        upsertDraft({
+          userId,
+          patch: {
+            profileDetails,
+            progress: { lastStepKey: 'education_religion' },
+          },
+        }).catch((error) => {
+          if (__DEV__) console.error('[EDUCATION] Failed to save draft:', error);
+        });
+        if (__DEV__) console.log(`[ONB_DRAFT] Saved education/religion: ${JSON.stringify(profileDetails)}`);
       }
     }
 

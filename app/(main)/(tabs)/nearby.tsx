@@ -1,96 +1,328 @@
-import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
+/**
+ * Nearby Tab - Full Implementation
+ *
+ * Features:
+ * - Permission state UI (checking/denied/settings/ready)
+ * - Safe current-location map render with coordinate validation
+ * - Demo mode fallback
+ * - Nearby user markers with privacy fuzzing
+ * - Marker tap → full profile view (Discover-style)
+ * - Clustering: overlapping markers merge into single marker
+ * - Cluster tap → zooms into cluster area
+ * - Uses Discovery preferences for filtering (no separate Nearby filters)
+ *
+ * ============================================================================
+ * LOCKED IMPLEMENTATIONS - DO NOT CHANGE WITHOUT APPROVAL
+ * ============================================================================
+ * The following behaviors are LOCKED and approved by Durga Prasad.
+ * Do not modify without explicit unlock approval.
+ *
+ * 1. INDIVIDUAL PINK MARKERS (LOCKED)
+ *    - Uses image={pinPink} prop for Android reliability
+ *    - Do NOT replace with View-based markers
+ *    - Tap opens profile via Discover-style flow
+ *
+ * 2. CLUSTERING BEHAVIOR (LOCKED)
+ *    - Uses react-native-map-clustering with image-based cluster markers
+ *    - Cluster tap zooms into cluster area to reveal individual markers
+ *    - Do NOT change clustering radius or behavior without testing
+ *
+ * 3. RECENTER BUTTON (LOCKED)
+ *    - Tap-once recenter only
+ *    - No follow mode
+ *    - No second-state behavior
+ *
+ * ANDROID MARKER RELIABILITY:
+ * View-based markers are UNRELIABLE on Android. All markers use image prop.
+ * DO NOT switch back to View-based markers without extensive Android testing.
+ * ============================================================================
+ *
+ * FUTURE PHASES (documented for later):
+ * - Live area pulse animation
+ * - "Seen around you" horizontal card strip
+ * - Advanced subscription/privacy rules
+ * - Freshness ring indicators
+ */
+import React, { useState, useEffect, useCallback, useMemo, useRef, Component, ReactNode } from 'react';
 import {
   View,
   Text,
   StyleSheet,
   TouchableOpacity,
-  Image,
-  Animated,
-  Dimensions,
   ActivityIndicator,
-  PanResponder,
-  AppState,
-  AppStateStatus,
   Linking,
   Platform,
 } from 'react-native';
-import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
-import { useBottomTabBarHeight } from '@react-navigation/bottom-tabs';
-import MapView, { Marker, Region } from 'react-native-maps';
+import { SafeAreaView } from 'react-native-safe-area-context';
+import { useFocusEffect, useRouter } from 'expo-router';
 import ClusteredMapView from 'react-native-map-clustering';
-import { getDemoMarkerImage } from '@/components/map/demoMarkerIndex';
-import { getDemoClusterImage } from '@/components/map/demoClusterIndex';
-
-// Native pin image — rendered via Marker `image` prop to avoid Android snapshot OOM
-// Using image prop instead of React children eliminates bitmap snapshotting
-const PIN_PINK_IMAGE = require('../../../assets/map/pin_pink.png');
-import { useRouter, useFocusEffect, useLocalSearchParams } from 'expo-router';
-import { safePush } from '@/lib/safeRouter';
-import { LoadingGuard } from '@/components/safety';
+import { Region, Marker } from 'react-native-maps';
 import { Ionicons } from '@expo/vector-icons';
 import { useQuery, useMutation } from 'convex/react';
-import { useLocationStore, useBestLocation } from '@/stores/locationStore';
-import { COLORS } from '@/lib/constants';
-import { DEMO_PROFILES } from '@/lib/demoData';
-import { useAuthStore } from '@/stores/authStore';
-import { isDemoMode } from '@/hooks/useConvex';
-import { useDemoStore } from '@/stores/demoStore';
-import { useBlockStore } from '@/stores/blockStore';
-import { useDemoDmStore } from '@/stores/demoDmStore';
-import { useDemoNotifStore } from '@/hooks/useNotifications';
 import { api } from '@/convex/_generated/api';
-import { useScreenSafety } from '@/hooks/useScreenSafety';
-import { rankNearbyProfiles } from '@/lib/rankProfiles';
-import { isWithinAllowedDistance } from '@/lib/distanceRules';
-import { logDebugEvent } from '@/lib/debugEventLogger';
+import { useLocationStore, useBestLocation } from '@/stores/locationStore';
+import { useAuthStore } from '@/stores/authStore';
+import { asUserId } from '@/convex/id';
+import { safePush } from '@/lib/safeRouter';
+import { COLORS } from '@/lib/constants';
+import { isDemoMode } from '@/hooks/useConvex';
+import { DEMO_USER, DEMO_PROFILES } from '@/lib/demoData';
 import { log } from '@/utils/logger';
-import { markTiming } from '@/utils/startupTiming';
+
+// ---------------------------------------------------------------------------
+// STABILITY FIX S4: Error boundary for map crash containment
+// ---------------------------------------------------------------------------
+interface MapErrorBoundaryState {
+  hasError: boolean;
+}
+
+class MapErrorBoundary extends Component<
+  { children: ReactNode; onRetry?: () => void },
+  MapErrorBoundaryState
+> {
+  state: MapErrorBoundaryState = { hasError: false };
+
+  static getDerivedStateFromError(): MapErrorBoundaryState {
+    return { hasError: true };
+  }
+
+  componentDidCatch(error: Error, errorInfo: React.ErrorInfo) {
+    log.error('[Nearby] Map render error caught by boundary:', String(error), String(errorInfo?.componentStack || ''));
+  }
+
+  handleRetry = () => {
+    this.setState({ hasError: false });
+    this.props.onRetry?.();
+  };
+
+  render() {
+    if (this.state.hasError) {
+      return (
+        <View style={mapErrorStyles.container}>
+          <Ionicons name="map-outline" size={48} color={COLORS.textLight} />
+          <Text style={mapErrorStyles.title}>Map unavailable</Text>
+          <Text style={mapErrorStyles.subtitle}>
+            Something went wrong loading the map
+          </Text>
+          <TouchableOpacity style={mapErrorStyles.retryButton} onPress={this.handleRetry}>
+            <Text style={mapErrorStyles.retryText}>Try Again</Text>
+          </TouchableOpacity>
+        </View>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+const mapErrorStyles = StyleSheet.create({
+  container: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 32,
+    backgroundColor: COLORS.background,
+  },
+  title: {
+    fontSize: 18,
+    fontWeight: '600',
+    color: COLORS.text,
+    marginTop: 16,
+  },
+  subtitle: {
+    fontSize: 14,
+    color: COLORS.textLight,
+    textAlign: 'center',
+    marginTop: 8,
+  },
+  retryButton: {
+    marginTop: 20,
+    backgroundColor: COLORS.primary,
+    paddingHorizontal: 24,
+    paddingVertical: 12,
+    borderRadius: 20,
+  },
+  retryText: {
+    color: '#fff',
+    fontSize: 15,
+    fontWeight: '600',
+  },
+});
+
+// PNG marker for Android stability (relative path for reliable loading)
+const pinPink = require('../../../assets/map/pin_pink.png');
+
+// Cluster marker images with count (Android-safe)
+const clusterImages = {
+  2: require('../../../assets/demo/cluster/cluster_2.png'),
+  3: require('../../../assets/demo/cluster/cluster_3.png'),
+  4: require('../../../assets/demo/cluster/cluster_4.png'),
+  5: require('../../../assets/demo/cluster/cluster_5.png'),
+  6: require('../../../assets/demo/cluster/cluster_6.png'),
+  7: require('../../../assets/demo/cluster/cluster_7.png'),
+  8: require('../../../assets/demo/cluster/cluster_8.png'),
+  9: require('../../../assets/demo/cluster/cluster_9.png'),
+  10: require('../../../assets/demo/cluster/cluster_10.png'),
+  20: require('../../../assets/demo/cluster/cluster_20.png'),
+  50: require('../../../assets/demo/cluster/cluster_50.png'),
+  99: require('../../../assets/demo/cluster/cluster_99.png'),
+} as const;
+
+/**
+ * Get the appropriate cluster image based on point count.
+ * Uses exact match when available, otherwise selects closest lower bound.
+ */
+function getClusterImage(pointCount: number) {
+  if (pointCount <= 2) return clusterImages[2];
+  if (pointCount <= 3) return clusterImages[3];
+  if (pointCount <= 4) return clusterImages[4];
+  if (pointCount <= 5) return clusterImages[5];
+  if (pointCount <= 6) return clusterImages[6];
+  if (pointCount <= 7) return clusterImages[7];
+  if (pointCount <= 8) return clusterImages[8];
+  if (pointCount <= 9) return clusterImages[9];
+  if (pointCount <= 10) return clusterImages[10];
+  if (pointCount <= 20) return clusterImages[20];
+  if (pointCount <= 50) return clusterImages[50];
+  return clusterImages[99]; // 50+ uses 99 marker
+}
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
-interface NearbyProfile {
-  _id: string;
+/** Explicit location UI states for stability */
+type LocationUIState =
+  | 'checking'
+  | 'permission_required'
+  | 'denied_needs_settings'
+  | 'restricted'           // iOS parental controls
+  | 'services_disabled'    // System-wide location off
+  | 'error'
+  | 'ready';
+
+/** Nearby user from query */
+interface NearbyUser {
+  id: string;
   name: string;
   age: number;
-  latitude: number;
-  longitude: number;
-  lastSeenArea?: string;
-  lastLocationUpdatedAt?: number;
-  photoUrl?: string;
-  photos?: { url: string }[];
-  isVerified?: boolean;
+  publishedLat: number;
+  publishedLng: number;
+  publishedAt?: number;
+  distance?: number; // Server-side distance in meters (privacy-safe)
   freshness: 'solid' | 'faded';
+  photoUrl: string | null;
+  isVerified: boolean;
+  strongPrivacyMode: boolean;
+  hideDistance: boolean;
 }
+
+/** Processed nearby user with fuzzed coordinates */
+interface ProcessedNearbyUser extends NearbyUser {
+  fuzzedLat: number;
+  fuzzedLng: number;
+}
+
+// ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+const DEFAULT_LATITUDE_DELTA = 0.02; // ~2km view
+const DEFAULT_LONGITUDE_DELTA = 0.02;
+
+// Rate limiting constants for crossed paths detection
+const DETECTION_MIN_MOVEMENT_METERS = 60; // Only scan if moved 60m+
+const DETECTION_MIN_INTERVAL_MS = 30000; // Only scan every 30s+
+
+// Privacy fuzzing constants
+const FUZZ_MIN_METERS = 50;  // Minimum offset
+const FUZZ_MAX_METERS = 150; // Maximum offset
+const STRONG_PRIVACY_FUZZ_MIN = 200; // Larger offset for users with strongPrivacyMode
+const STRONG_PRIVACY_FUZZ_MAX = 400;
+
+// Demo fallback location (Mumbai)
+const DEMO_LOCATION = {
+  latitude: DEMO_USER.latitude,
+  longitude: DEMO_USER.longitude,
+};
+
+// ---------------------------------------------------------------------------
+// STABILITY FIX P1: Cryptographically secure session salt
+// ---------------------------------------------------------------------------
+// Module-level session salt for stable privacy fuzzing across Nearby remounts.
+// Generated once per app session (module load), not per component mount.
+// Combined with viewerId + otherId for deterministic per-user fuzzing.
+//
+// FIX: Use crypto API for unpredictable salt instead of Date.now()
+// This prevents reverse-engineering of fuzz offsets.
+// ---------------------------------------------------------------------------
+function generateSecureSessionSalt(): number {
+  try {
+    // Use Web Crypto API (available in Hermes/React Native)
+    const array = new Uint32Array(2);
+    if (typeof crypto !== 'undefined' && crypto.getRandomValues) {
+      crypto.getRandomValues(array);
+      // Combine two 32-bit values into a larger number
+      return array[0] * 0x100000000 + array[1];
+    }
+  } catch {
+    // Fallback silently
+  }
+  // Fallback: combine Math.random with high-resolution time for entropy
+  return Math.floor(Math.random() * Number.MAX_SAFE_INTEGER) ^ Date.now();
+}
+
+const MODULE_SESSION_SALT = generateSecureSessionSalt();
+
+// Module-level flag: has empty state been shown this app session?
+// Resets only on full app restart (module reload).
+let hasShownEmptyStateThisSession = false;
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-/** Haversine distance in meters between two lat/lng points. */
-function haversineMeters(
+/**
+ * Calculate distance between two coordinates in meters using Haversine formula.
+ * Used for rate limiting crossed paths detection.
+ */
+function calculateDistanceMeters(
   lat1: number,
   lon1: number,
   lat2: number,
-  lon2: number,
+  lon2: number
 ): number {
-  const toRad = (v: number) => (v * Math.PI) / 180;
-  const R = 6371000;
-  const dLat = toRad(lat2 - lat1);
-  const dLon = toRad(lon2 - lon1);
+  const R = 6371000; // Earth radius in meters
+  const dLat = (lat2 - lat1) * (Math.PI / 180);
+  const dLon = (lon2 - lon1) * (Math.PI / 180);
   const a =
-    Math.sin(dLat / 2) ** 2 +
-    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLon / 2) ** 2;
-  return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(lat1 * (Math.PI / 180)) *
+      Math.cos(lat2 * (Math.PI / 180)) *
+      Math.sin(dLon / 2) *
+      Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c;
 }
 
-/** Convert a radius in meters to a rough latitudeDelta for the MapView region. */
-function radiusToLatDelta(meters: number): number {
-  return (meters * 2.5) / 111320;
+/**
+ * Validate coordinates before passing to MapView.
+ * Invalid coords (NaN, Infinity, out-of-range) cause crashes on Android.
+ */
+function isValidMapCoordinate(
+  lat: number | null | undefined,
+  lng: number | null | undefined,
+): boolean {
+  if (lat == null || lng == null) return false;
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return false;
+  if (lat < -90 || lat > 90) return false;
+  if (lng < -180 || lng > 180) return false;
+  return true;
 }
 
-/** Simple deterministic hash for client-side demo jitter. */
+/**
+ * Simple deterministic hash for stable fuzzing.
+ * Same input always produces same output within a session.
+ */
 function simpleHash(str: string): number {
   let hash = 0;
   for (let i = 0; i < str.length; i++) {
@@ -101,25 +333,42 @@ function simpleHash(str: string): number {
   return Math.abs(hash);
 }
 
-/** Offset a lat/lng by a distance (meters) and bearing (radians). */
-function offsetCoords(
+/**
+ * Apply client-side privacy fuzzing to coordinates.
+ * Deterministic per user+viewer+session so markers stay stable.
+ * Never reveals exact location.
+ */
+function applyPrivacyFuzz(
   lat: number,
   lng: number,
-  distanceMeters: number,
-  bearingRad: number,
+  otherId: string,
+  viewerId: string,
+  sessionSalt: number,
+  strongPrivacyMode: boolean,
 ): { lat: number; lng: number } {
+  // Deterministic seed
+  const seed = simpleHash(`${viewerId}:${otherId}:${sessionSalt}`);
+
+  // Random angle (0-360 degrees)
+  const angle = ((seed % 36000) / 100) * (Math.PI / 180);
+
+  // Random radius based on strongPrivacyMode preference
+  const minMeters = strongPrivacyMode ? STRONG_PRIVACY_FUZZ_MIN : FUZZ_MIN_METERS;
+  const maxMeters = strongPrivacyMode ? STRONG_PRIVACY_FUZZ_MAX : FUZZ_MAX_METERS;
+  const radiusMeters = minMeters + (seed % (maxMeters - minMeters + 1));
+
+  // Earth radius in meters
   const R = 6371000;
-  const toRad = (v: number) => (v * Math.PI) / 180;
-  const latRad = toRad(lat);
-  const lngRad = toRad(lng);
-  const d = distanceMeters / R;
+  const latRad = lat * (Math.PI / 180);
+  const lngRad = lng * (Math.PI / 180);
+  const d = radiusMeters / R;
 
   const newLat = Math.asin(
     Math.sin(latRad) * Math.cos(d) +
-    Math.cos(latRad) * Math.sin(d) * Math.cos(bearingRad),
+    Math.cos(latRad) * Math.sin(d) * Math.cos(angle),
   );
   const newLng = lngRad + Math.atan2(
-    Math.sin(bearingRad) * Math.sin(d) * Math.cos(latRad),
+    Math.sin(angle) * Math.sin(d) * Math.cos(latRad),
     Math.cos(d) - Math.sin(latRad) * Math.sin(newLat),
   );
 
@@ -129,1107 +378,1097 @@ function offsetCoords(
   };
 }
 
-/** Compute freshness tier from lastLocationUpdatedAt. */
-function computeFreshness(timestamp: number): 'solid' | 'faded' | 'hidden' {
-  const ageMs = Date.now() - timestamp;
-  const THREE_DAYS = 3 * 24 * 60 * 60 * 1000;
-  const SIX_DAYS = 6 * 24 * 60 * 60 * 1000;
-  if (ageMs <= THREE_DAYS) return 'solid';
-  if (ageMs <= SIX_DAYS) return 'faded';
-  return 'hidden';
-}
-
-/**
- * BUGFIX #12: Validate coordinates before passing to map.
- * Checks for NaN, Infinity, and out-of-range values.
- * Invalid coords cause react-native-maps to crash on Android.
- */
-function isValidMapCoordinate(lat: number | null | undefined, lng: number | null | undefined): boolean {
-  if (lat == null || lng == null) return false;
-  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return false;
-  if (lat < -90 || lat > 90) return false;
-  if (lng < -180 || lng > 180) return false;
-  return true;
-}
-
-// ---------------------------------------------------------------------------
-// Anti-Zoom Shifting: Zoom buckets + client-side fuzz
-// ---------------------------------------------------------------------------
-
-/** Get zoom bucket from latitudeDelta (0-4, smaller = more zoomed in) */
-function getZoomBucket(latitudeDelta: number): number {
-  if (latitudeDelta > 0.30) return 0;
-  if (latitudeDelta > 0.15) return 1;
-  if (latitudeDelta > 0.08) return 2;
-  if (latitudeDelta > 0.04) return 3;
-  return 4;
-}
-
-/** Apply client-side fuzz with anti-zoom shifting.
- * Jitter changes when zoom bucket or session changes, preventing triangulation.
- *
- * @param hideDistance - If true, use larger fuzz radius (200-400m) for privacy
- */
-function applyClientFuzz(
-  lat: number,
-  lng: number,
-  viewerId: string,
-  otherUserId: string,
-  sessionSalt: number,
-  zoomBucket: number,
-  hideDistance: boolean = false,
-): { lat: number; lng: number } {
-  // Deterministic seed based on viewer, other user, session, and zoom bucket
-  const seed = simpleHash(`${viewerId}:${otherUserId}:${sessionSalt}:${zoomBucket}`);
-
-  // Random angle (0-360 degrees)
-  const angle = ((seed % 36000) / 100) * (Math.PI / 180);
-
-  // Random radius — larger for hideDistance users (200-400m vs 20-100m)
-  const radiusMeters = hideDistance
-    ? 200 + (seed % 201)   // 200-400m for hidden users
-    : 20 + (seed % 81);    // 20-100m for normal users
-
-  return offsetCoords(lat, lng, radiusMeters, angle);
-}
-
-// ---------------------------------------------------------------------------
-// Constants
-// ---------------------------------------------------------------------------
-
-// DEBUG FLAG: Set to true to disable MapView for crash isolation testing
-// When true, the map will not render, showing a placeholder instead
-// To re-enable the map, set this to false
-const DEBUG_DISABLE_MAP = false;
-
-// OOM PREVENTION: Hard limit on rendered markers to prevent Android native memory exhaustion
-// Markers with React children cause bitmap snapshotting; even with image prop, limit as safety net
-const MAX_NEARBY_MARKERS = 30;
-
-const { width: SCREEN_WIDTH } = Dimensions.get('window');
-const BOTTOM_SHEET_HEIGHT = 200;
-const FIXED_RADIUS_METERS = 1000; // 1km
-const FIXED_RADIUS_KM = 1; // 1km for distance rules
-
-// Extract demo "nearby" profiles that have lat/lng.
-// Fallback: used when demoStore hasn't seeded yet.
-const NEARBY_DEMO_PROFILES = (DEMO_PROFILES as any[]).filter(
-  (p) => typeof p.latitude === 'number' && (p._id as string).startsWith('demo_nearby'),
-);
-
 // ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
 
-// ---------------------------------------------------------------------------
-// Constants for refresh feature
-// ---------------------------------------------------------------------------
-const REFRESH_COOLDOWN_MS = 10000; // 10 seconds cooldown between manual refreshes
-const AUTO_REFRESH_TIMEOUT_MS = 8000; // 8 seconds timeout for location fetch
-const AUTO_REFRESH_STALE_MS = 90000; // 90 seconds - auto-refresh if location older than this
-const LOCATION_TIMEOUT_MS = 15000; // 15 seconds - show error if no location obtained
-const FAB_SIZE = 52; // Size of the floating action button
-const FAB_EDGE_MARGIN = 16; // Margin from screen edges (left/right snap positions)
-const FAB_SAFE_PADDING = 12; // Extra padding from safe area boundaries
-const TOAST_DURATION_MS = 2000; // Duration to show cooldown toast
-
 export default function NearbyScreen() {
   const router = useRouter();
-  const insets = useSafeAreaInsets();
-  // Check if we arrived from tapping a notification — if so, skip creating new notification
-  // Also check for focus=crossed_paths to center map on specific crossed path marker
-  const { source, dedupeKey, focus, profileId: focusProfileId } = useLocalSearchParams<{
-    source?: string;
-    dedupeKey?: string;
-    focus?: string;
-    profileId?: string;
-  }>();
-  const arrivedFromNotification = source === 'notification';
-  const tabBarHeight = useBottomTabBarHeight();
-  const { width: screenWidth, height: screenHeight } = Dimensions.get('window');
+  const isDemo = isDemoMode;
 
-  // Centralized location store — prewarmed on app boot for instant display
-  const bestLocation = useBestLocation();
-  const permissionStatus = useLocationStore((s) => s.permissionStatus);
-  const refreshLocation = useLocationStore((s) => s.refreshLocation);
-  const startLocationTracking = useLocationStore((s) => s.startLocationTracking);
-  const locationError = useLocationStore((s) => s.error);
+  // Map ref for programmatic control (any type for clustering library compatibility)
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const mapRef = useRef<any>(null);
 
-  // Extract coordinates from best available location
-  const latitude = bestLocation?.latitude ?? null;
-  const longitude = bestLocation?.longitude ?? null;
+  // SuperCluster ref for accessing cluster leaves
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const superClusterRef = useRef<any>(null);
 
-  // Note: Heading is handled by native showsUserLocation={true} on the map
-  // which provides Google Maps style blue dot with direction cone automatically
-
+  // Auth store
   const userId = useAuthStore((s) => s.userId);
-  const mapRef = useRef<MapView>(null);
-  const { safeTimeout } = useScreenSafety();
+  const convexUserId = userId ? asUserId(userId) : undefined;
 
-  // BUGFIX #12: Track if we've warned about invalid coords (avoid log spam)
-  const hasWarnedInvalidCoordsRef = useRef(false);
+  // Location store
+  const permissionStatus = useLocationStore((s) => s.permissionStatus);
+  const startLocationTracking = useLocationStore((s) => s.startLocationTracking);
+  const stopLocationTracking = useLocationStore((s) => s.stopLocationTracking);
+  const error = useLocationStore((s) => s.error);
+  const bestLocation = useBestLocation();
 
-  // Demo store — read mutable profiles for nearby display
-  const demoStoreProfiles = useDemoStore((s) => s.profiles);
-  const demoCrossedPaths = useDemoStore((s) => s.crossedPaths);
-  const getVisibleCrossedPaths = useDemoStore((s) => s.getVisibleCrossedPaths);
-  const demoSeed = useDemoStore((s) => s.seed);
-  const blockedUserIds = useBlockStore((s) => s.blockedUserIds);
-  const demoMatches = useDemoStore((s) => s.matches);
-  const markCrossedPathSeen = useDemoStore((s) => s.markCrossedPathSeen);
-  const hideCrossedPath = useDemoStore((s) => s.hideCrossedPath);
-  const seedCrossedPathsWithLocation = useDemoStore((s) => s.seedCrossedPathsWithLocation);
-  const crossedPathsSeeded = useDemoStore((s) => s.crossedPathsSeeded);
-  // BUGFIX #34: Subscribe to hydration status to prevent seed before hydration
-  const demoHasHydrated = useDemoStore((s) => s._hasHydrated);
+  // UI state
+  const [locationUIState, setLocationUIState] = useState<LocationUIState>('checking');
+  const [queryError, setQueryError] = useState<string | null>(null);
+  const [isRetrying, setIsRetrying] = useState(false);
+  const [showEmptyState, setShowEmptyState] = useState(false);
 
-  // Demo DM store — to check for existing conversations
-  const demoConversations = useDemoDmStore((s) => s.conversations);
+  // Mount guard for async operations
+  const isMountedRef = useRef(true);
   useEffect(() => {
-    // BUGFIX #34: Only seed after hydration completes
-    if (isDemoMode && demoHasHydrated) demoSeed();
-  }, [demoSeed, demoHasHydrated]);
-
-  // Start full location tracking when Nearby tab opens
-  // This is deferred from app boot to avoid blocking startup
-  const trackingStarted = useRef(false);
-  useEffect(() => {
-    if (!trackingStarted.current) {
-      trackingStarted.current = true;
-      startLocationTracking();
-    }
-  }, [startLocationTracking]);
-
-  // Mark focused crossed path as seen when navigating from notification
-  useEffect(() => {
-    if (focusProfileId && isDemoMode) {
-      markCrossedPathSeen(focusProfileId);
-    }
-  }, [focusProfileId, markCrossedPathSeen]);
-
-  // GUARD: Filter crossed paths with valid coordinates to prevent map crash
-  // Maps crash if Marker receives null/undefined/NaN/Infinity latitude or longitude
-  // Also filters out hidden and expired entries via getVisibleCrossedPaths
-  // BUGFIX #12: Use isValidMapCoordinate for comprehensive validation
-  // SAFETY FIX: Exclude blocked users from crossed paths (critical safety requirement)
-  const validCrossedPaths = useMemo(() => {
-    // Use getVisibleCrossedPaths to filter out hidden/expired entries
-    const visiblePaths = getVisibleCrossedPaths();
-    return visiblePaths.filter((cp) => {
-      // SAFETY: Exclude blocked users - they must NEVER appear on map
-      if (blockedUserIds.includes(cp.otherUserId)) return false;
-      // Exclude current user
-      if (userId && cp.otherUserId === userId) return false;
-      // Validate coordinates
-      return isValidMapCoordinate(cp.latitude, cp.longitude);
-    });
-  }, [demoCrossedPaths, getVisibleCrossedPaths, userId, blockedUserIds]);
-
-  // DEV: Log invalid crossed paths so we can debug seed/creation issues
-  useEffect(() => {
-    if (__DEV__ && demoCrossedPaths.length > 0) {
-      const invalid = demoCrossedPaths.filter((cp) =>
-        typeof cp.latitude !== 'number' ||
-        typeof cp.longitude !== 'number' ||
-        Number.isNaN(cp.latitude) ||
-        Number.isNaN(cp.longitude)
-      );
-      if (invalid.length > 0) {
-        log.error('[MAP]', 'Invalid crossedPath coordinates - skipping markers', {
-          count: invalid.length,
-          ids: invalid.map((cp) => cp.id).join(','),
-        });
-      }
-    }
-  }, [demoCrossedPaths]);
-
-  // User location — ALWAYS use live GPS location (no hardcoded fallbacks)
-  // In demo mode, we still require real GPS to place crossed paths near the user
-  const userLat = latitude;
-  const userLng = longitude;
-
-  // Seed crossed paths with bestLocation (once location is available)
-  // This generates crossed paths relative to where the user actually is
-  const hasSeededWithLiveLocation = useRef(false);
-  useEffect(() => {
-    if (
-      isDemoMode &&
-      !hasSeededWithLiveLocation.current &&
-      bestLocation &&
-      !Number.isNaN(bestLocation.latitude) &&
-      !Number.isNaN(bestLocation.longitude)
-    ) {
-      hasSeededWithLiveLocation.current = true;
-      // Only seed if not already seeded OR if we have no valid crossed paths
-      if (!crossedPathsSeeded || demoCrossedPaths.length === 0) {
-        seedCrossedPathsWithLocation(bestLocation.latitude, bestLocation.longitude);
-      }
-    }
-  }, [isDemoMode, bestLocation, crossedPathsSeeded, demoCrossedPaths.length, seedCrossedPathsWithLocation]);
-
-  // Permission and loading states — minimal since location is prewarmed
-  // If we have any location (lastKnown or current), show map immediately
-  const hasLocation = bestLocation != null;
-  const permissionDenied = permissionStatus === 'denied';
-  const hasAnimatedToLocation = useRef(false);
-  const hasCenteredOnBestLocation = useRef(false);
-
-
-  // Bottom sheet state
-  const [selectedProfile, setSelectedProfile] = useState<NearbyProfile | null>(null);
-  const sheetAnim = useRef(new Animated.Value(0)).current;
-
-  // Check if selected profile has an existing match or conversation
-  // If yes, we show "Message" CTA instead of "View Profile"
-  const selectedProfileConversationId = useMemo(() => {
-    if (!selectedProfile) return null;
-    const profileId = selectedProfile._id;
-    // Check for existing match
-    const existingMatch = demoMatches.find((m) => m.otherUser?.id === profileId);
-    if (existingMatch) return existingMatch.conversationId;
-    // Check for existing conversation in demoDmStore
-    const convoId = `demo_convo_${profileId}`;
-    if (demoConversations[convoId] && demoConversations[convoId].length > 0) {
-      return convoId;
-    }
-    return null;
-  }, [selectedProfile, demoMatches, demoConversations]);
-
-  // Refresh button state (simplified — store handles auto-refresh)
-  const [isRefreshing, setIsRefreshing] = useState(false);
-  const [refreshError, setRefreshError] = useState<string | null>(null);
-  const [lastRefreshTime, setLastRefreshTime] = useState(0);
-  const [cooldownRemaining, setCooldownRemaining] = useState(0);
-
-  // Toast state for cooldown message
-  const [showCooldownToast, setShowCooldownToast] = useState(false);
-  const toastTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  // LOC-FIX: Timeout state - show error if no location after 15 seconds
-  const [locationTimedOut, setLocationTimedOut] = useState(false);
-  const locationTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
-  // Cleanup timeouts on unmount
-  useEffect(() => {
+    isMountedRef.current = true;
     return () => {
-      if (toastTimeoutRef.current) {
-        clearTimeout(toastTimeoutRef.current);
-      }
-      if (locationTimeoutRef.current) {
-        clearTimeout(locationTimeoutRef.current);
-      }
+      isMountedRef.current = false;
     };
   }, []);
 
-  // LOC-FIX: Start timeout when screen mounts, clear when location obtained
-  useEffect(() => {
-    const hasLocation = bestLocation != null;
-    const permissionDenied = permissionStatus === 'denied';
-
-    // Clear any existing timeout
-    if (locationTimeoutRef.current) {
-      clearTimeout(locationTimeoutRef.current);
-      locationTimeoutRef.current = null;
-    }
-
-    // If we have location, reset timeout state
-    if (hasLocation) {
-      setLocationTimedOut(false);
-      return;
-    }
-
-    // If permission already denied or error, no need for timeout
-    if (permissionDenied || locationError) {
-      return;
-    }
-
-    // Start timeout - if no location after 15s, show error state
-    locationTimeoutRef.current = setTimeout(() => {
-      setLocationTimedOut(true);
-      log.warn('[NEARBY]', 'Location timeout - no location after 15s');
-    }, LOCATION_TIMEOUT_MS);
-
-    return () => {
-      if (locationTimeoutRef.current) {
-        clearTimeout(locationTimeoutRef.current);
-      }
-    };
-  }, [bestLocation, permissionStatus, locationError]);
-
-  // LOC-FIX: Unified location error - permission denied, store error, or timeout
-  // Must be computed AFTER locationTimedOut state is declared
-  const showLocationError = permissionDenied || !!locationError || locationTimedOut;
-  // Only show brief "locating" overlay if no location, no error, and still within timeout
-  const showLocatingOverlay = !hasLocation && !showLocationError && permissionStatus !== 'unknown';
-
-  // FAB safe area bounds - computed from real insets and tab bar height
-  const fabMinX = FAB_EDGE_MARGIN;
-  const fabMaxX = screenWidth - FAB_SIZE - FAB_EDGE_MARGIN;
-  const fabMinY = insets.top + FAB_SAFE_PADDING;
-  // Bottom bound: screen height minus FAB size, tab bar, and safe padding
-  const fabMaxY = screenHeight - FAB_SIZE - tabBarHeight - FAB_SAFE_PADDING;
-
-  // FAB position state - default to bottom-right within safe area
-  const defaultFabPosition = {
-    x: fabMaxX,
-    y: Math.max(fabMinY, fabMaxY),
-  };
-  const fabPosition = useRef(new Animated.ValueXY(defaultFabPosition)).current;
-  const [fabLoaded, setFabLoaded] = useState(true); // FAB is now always loaded (no AsyncStorage)
-
-  // FAB position is now session-only UI state - no persistence needed
-  // User can drag it around during the session, but it resets to default on next launch
-
-  // 6-3: Recalculate FAB bounds on orientation/dimension change and clamp position
-  useEffect(() => {
-    if (!fabLoaded) return;
-
-    // Get current FAB position and clamp to new bounds
-    // @ts-ignore - accessing internal animated value
-    const currentX = fabPosition.x._value ?? defaultFabPosition.x;
-    // @ts-ignore
-    const currentY = fabPosition.y._value ?? defaultFabPosition.y;
-
-    const clampedX = Math.max(fabMinX, Math.min(currentX, fabMaxX));
-    const clampedY = Math.max(fabMinY, Math.min(currentY, fabMaxY));
-
-    // If position changed due to clamping, update (session-only, no save)
-    if (clampedX !== currentX || clampedY !== currentY) {
-      fabPosition.setValue({ x: clampedX, y: clampedY });
-    }
-  }, [fabLoaded, fabMinX, fabMaxX, fabMinY, fabMaxY, screenWidth, screenHeight, insets.top, tabBarHeight]);
-
-  // Snap FAB to nearest edge (left or right) with safe area clamping
-  const snapToEdge = useCallback((currentX: number, currentY: number) => {
-    const centerX = screenWidth / 2;
-    const targetX = currentX < centerX ? fabMinX : fabMaxX;
-
-    // Clamp Y within safe bounds
-    const targetY = Math.max(fabMinY, Math.min(currentY, fabMaxY));
-
-    Animated.spring(fabPosition, {
-      toValue: { x: targetX, y: targetY },
-      useNativeDriver: false,
-      friction: 7,
-      tension: 40,
-    }).start();
-    // FAB position is now session-only - no save needed
-  }, [screenWidth, fabMinX, fabMaxX, fabMinY, fabMaxY, fabPosition]);
-
-  // PanResponder for dragging the FAB
-  const panResponder = useMemo(() => {
-    let startX = 0;
-    let startY = 0;
-
-    return PanResponder.create({
-      onStartShouldSetPanResponder: () => true,
-      onMoveShouldSetPanResponder: (_, gestureState) => {
-        // Only become responder if there's significant movement (to allow taps)
-        return Math.abs(gestureState.dx) > 5 || Math.abs(gestureState.dy) > 5;
-      },
-      onPanResponderGrant: () => {
-        // Store starting position
-        // @ts-ignore - accessing internal value
-        startX = fabPosition.x._value;
-        // @ts-ignore
-        startY = fabPosition.y._value;
-      },
-      onPanResponderMove: (_, gestureState) => {
-        const newX = startX + gestureState.dx;
-        const newY = startY + gestureState.dy;
-
-        // Clamp within safe area bounds
-        const clampedX = Math.max(fabMinX, Math.min(newX, fabMaxX));
-        const clampedY = Math.max(fabMinY, Math.min(newY, fabMaxY));
-
-        fabPosition.setValue({ x: clampedX, y: clampedY });
-      },
-      onPanResponderRelease: () => {
-        // Snap to edge on release
-        // @ts-ignore
-        const finalX = fabPosition.x._value;
-        // @ts-ignore
-        const finalY = fabPosition.y._value;
-        snapToEdge(finalX, finalY);
-      },
-    });
-  }, [fabMinX, fabMaxX, fabMinY, fabMaxY, fabPosition, snapToEdge]);
-
-  // Anti-zoom shifting: session salt + zoom bucket
-  // Session salt changes when screen opens — prevents position prediction across sessions
-  const sessionSalt = useRef(Date.now()).current;
-  const [zoomBucket, setZoomBucket] = useState(4); // Start at most zoomed in
-
-  // Convex mutation/query (skipped in demo mode)
-  const publishLocation = useMutation(api.crossedPaths.publishLocation);
-  const recordLocation = useMutation(api.crossedPaths.recordLocation);
-  const detectCrossedUsers = useMutation(api.crossedPaths.detectCrossedUsers);
-  const convexNearby = useQuery(
+  // ---------------------------------------------------------------------------
+  // Query nearby users (live mode only)
+  // ---------------------------------------------------------------------------
+  const nearbyUsersQuery = useQuery(
     api.crossedPaths.getNearbyUsers,
-    !isDemoMode && userId ? { userId: userId as any } : 'skip',
+    !isDemo && convexUserId ? { userId: convexUserId } : 'skip'
   );
 
-  // ------------------------------------------------------------------
-  // Cooldown timer: update remaining time every second when active
-  // ------------------------------------------------------------------
+  // Track query loading state for error detection
+  const isQueryActive = !isDemo && convexUserId !== undefined;
+  const isQueryLoading = isQueryActive && nearbyUsersQuery === undefined;
+
+  // Ref to track query timeout (prevents race condition)
+  const queryTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Auto-retry refs (conservative: max 2 attempts, 5s delay)
+  const autoRetryCountRef = useRef(0);
+  const autoRetryTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const AUTO_RETRY_MAX = 2;
+  const AUTO_RETRY_DELAY_MS = 5000;
+
+  // Empty state auto-dismiss timer ref
+  const emptyStateTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const EMPTY_STATE_DISMISS_MS = 3000;
+
+  // Clear timeout when query succeeds or on unmount
   useEffect(() => {
-    if (cooldownRemaining <= 0) return;
-
-    const interval = setInterval(() => {
-      const elapsed = Date.now() - lastRefreshTime;
-      const remaining = Math.max(0, REFRESH_COOLDOWN_MS - elapsed);
-      setCooldownRemaining(remaining);
-      if (remaining <= 0) {
-        clearInterval(interval);
+    if (nearbyUsersQuery !== undefined) {
+      // Query succeeded - clear any pending timeout
+      if (queryTimeoutRef.current) {
+        clearTimeout(queryTimeoutRef.current);
+        queryTimeoutRef.current = null;
       }
-    }, 1000);
+      // Clear any pending auto-retry
+      if (autoRetryTimeoutRef.current) {
+        clearTimeout(autoRetryTimeoutRef.current);
+        autoRetryTimeoutRef.current = null;
+      }
+      // Reset auto-retry counter on success
+      autoRetryCountRef.current = 0;
+      // Clear error if previously set
+      if (queryError) {
+        setQueryError(null);
+      }
+    }
+  }, [nearbyUsersQuery, queryError]);
 
-    return () => clearInterval(interval);
-  }, [cooldownRemaining, lastRefreshTime]);
-
-  // ------------------------------------------------------------------
-  // Recenter button handler: INSTANT using stored locations
-  // Only calls refreshLocation() if no location exists at all
-  // ------------------------------------------------------------------
-  const handleRecenterMap = useCallback(() => {
-    // Use stored location for instant recenter
-    const loc = bestLocation;
-
-    // BUGFIX #12: Validate coords before animateToRegion (prevents Android crash)
-    if (loc && mapRef.current && isValidMapCoordinate(loc.latitude, loc.longitude)) {
-      const d = radiusToLatDelta(FIXED_RADIUS_METERS);
-      mapRef.current.animateToRegion({
-        latitude: loc.latitude,
-        longitude: loc.longitude,
-        latitudeDelta: d,
-        longitudeDelta: d * (SCREEN_WIDTH / Dimensions.get('window').height),
-      }, 400);
+  // Set timeout for query loading (30 seconds)
+  useEffect(() => {
+    if (!isQueryLoading) {
       return;
     }
 
-    // Invalid coords or no location — log warning once and try refresh
-    if (loc && !isValidMapCoordinate(loc.latitude, loc.longitude)) {
-      if (!hasWarnedInvalidCoordsRef.current) {
-        hasWarnedInvalidCoordsRef.current = true;
-        log.warn('[MAP]', 'Invalid coords in handleRecenterMap, skipping animate', {
-          lat: loc.latitude,
-          lng: loc.longitude,
-        });
-      }
+    // Clear any existing timeout
+    if (queryTimeoutRef.current) {
+      clearTimeout(queryTimeoutRef.current);
     }
 
-    // No stored location or invalid — trigger refresh (rare case)
-    setIsRefreshing(true);
-    refreshLocation().then((newLoc) => {
-      setIsRefreshing(false);
-      // BUGFIX #12: Validate refreshed coords before animateToRegion
-      if (newLoc && mapRef.current && isValidMapCoordinate(newLoc.latitude, newLoc.longitude)) {
-        const d = radiusToLatDelta(FIXED_RADIUS_METERS);
-        mapRef.current.animateToRegion({
-          latitude: newLoc.latitude,
-          longitude: newLoc.longitude,
-          latitudeDelta: d,
-          longitudeDelta: d * (SCREEN_WIDTH / Dimensions.get('window').height),
-        }, 400);
+    queryTimeoutRef.current = setTimeout(() => {
+      if (!isMountedRef.current) return;
+      // Only set error if query is still pending
+      if (nearbyUsersQuery === undefined && isQueryActive) {
+        setQueryError('Unable to load nearby users. Please check your connection.');
+        log.warn('[NEARBY]', 'query timeout - no data after 30s');
       }
-    }).catch(() => {
-      setIsRefreshing(false);
-    });
-  }, [bestLocation, refreshLocation]);
+      queryTimeoutRef.current = null;
+    }, 30000);
 
-  // ------------------------------------------------------------------
-  // Publish location to Convex when available (live mode only)
-  // Location tracking is handled by the centralized store
-  // ------------------------------------------------------------------
-  const hasPublishedRef = useRef(false);
+    return () => {
+      if (queryTimeoutRef.current) {
+        clearTimeout(queryTimeoutRef.current);
+        queryTimeoutRef.current = null;
+      }
+    };
+  }, [isQueryLoading, isQueryActive, nearbyUsersQuery]);
+
+  // ---------------------------------------------------------------------------
+  // Auto-retry on query error (conservative: max 2 attempts, 5s delay)
+  // ---------------------------------------------------------------------------
   useEffect(() => {
-    if (
-      !hasPublishedRef.current &&
-      bestLocation &&
-      userId &&
-      !isDemoMode
-    ) {
-      hasPublishedRef.current = true;
-      (async () => {
-        try {
-          // Publish location (respects 6-hour window on server)
-          await publishLocation({
-            userId: userId as any,
-            latitude: bestLocation.latitude,
-            longitude: bestLocation.longitude,
-          });
+    // Only auto-retry if there's an error and we haven't exceeded max attempts
+    if (!queryError) {
+      return;
+    }
 
-          // Record location for crossed paths detection
-          await recordLocation({
-            userId: userId as any,
-            latitude: bestLocation.latitude,
-            longitude: bestLocation.longitude,
-          });
+    // Check if we've exceeded max auto-retry attempts
+    if (autoRetryCountRef.current >= AUTO_RETRY_MAX) {
+      if (__DEV__) {
+        console.log('[NEARBY] auto-retry limit reached, waiting for manual retry');
+      }
+      return;
+    }
 
-          // Detect "Someone crossed you" alert
-          const detectResult = await detectCrossedUsers({
-            userId: userId as any,
-            myLat: bestLocation.latitude,
-            myLng: bestLocation.longitude,
-          });
+    // Clear any existing auto-retry timer (prevents duplicates)
+    if (autoRetryTimeoutRef.current) {
+      clearTimeout(autoRetryTimeoutRef.current);
+    }
 
-          if (detectResult?.triggered) {
-            logDebugEvent('NEARBY_CROSSED', 'Crossed paths alert triggered');
-          }
-        } catch {
-          // Silently fail — user can still view map
+    // Schedule auto-retry
+    autoRetryTimeoutRef.current = setTimeout(() => {
+      if (!isMountedRef.current) return;
+
+      // Double-check we still have an error and haven't exceeded limit
+      if (queryError && autoRetryCountRef.current < AUTO_RETRY_MAX) {
+        autoRetryCountRef.current += 1;
+        if (__DEV__) {
+          console.log('[NEARBY] auto-retry attempt', autoRetryCountRef.current, 'of', AUTO_RETRY_MAX);
         }
-      })();
-    }
-  }, [bestLocation, userId, publishLocation, recordLocation, detectCrossedUsers]);
+        log.info('[NEARBY]', 'auto-retry attempt', { attempt: autoRetryCountRef.current, max: AUTO_RETRY_MAX });
 
-  // ------------------------------------------------------------------
-  // Center map on bestLocation when it becomes available (FIRST time only)
-  // This ensures map centers on Jamnagar (actual location), not Mumbai default
-  // ------------------------------------------------------------------
+        // Clear error and trigger retry (same as manual retry)
+        setQueryError(null);
+        setIsRetrying(true);
+        startLocationTracking();
+
+        // Clear retry feedback after delay
+        setTimeout(() => {
+          if (isMountedRef.current) {
+            setIsRetrying(false);
+          }
+        }, 2000);
+      }
+
+      autoRetryTimeoutRef.current = null;
+    }, AUTO_RETRY_DELAY_MS);
+
+    // Cleanup on unmount or when error clears
+    return () => {
+      if (autoRetryTimeoutRef.current) {
+        clearTimeout(autoRetryTimeoutRef.current);
+        autoRetryTimeoutRef.current = null;
+      }
+    };
+  }, [queryError, startLocationTracking]);
+
+  // ---------------------------------------------------------------------------
+  // Publish location mutation (live mode only)
+  // ---------------------------------------------------------------------------
+  const publishLocationMutation = useMutation(api.crossedPaths.publishLocation);
+
+  // Track last published coords to avoid spam
+  const lastPublishedRef = useRef<{ lat: number; lng: number } | null>(null);
+  // Guard to prevent concurrent publish calls during initial mount/focus
+  const isPublishingRef = useRef(false);
+
+  // ---------------------------------------------------------------------------
+  // Crossed Paths Detection - recordLocation mutation with rate limiting
+  // ---------------------------------------------------------------------------
+  const recordLocationMutation = useMutation(api.crossedPaths.recordLocation);
+
+  // Rate limiting refs for crossed paths detection
+  const lastDetectionTimeRef = useRef<number>(0);
+  const lastDetectionLatLngRef = useRef<{ lat: number; lng: number } | null>(null);
+
+  // Publish location when screen is ready and location is valid
   useEffect(() => {
-    if (
-      bestLocation &&
-      !hasCenteredOnBestLocation.current &&
-      mapRef.current &&
-      // BUGFIX #12: Validate coords before animateToRegion (prevents Android crash)
-      isValidMapCoordinate(bestLocation.latitude, bestLocation.longitude)
-    ) {
-      hasCenteredOnBestLocation.current = true;
-      const d = radiusToLatDelta(FIXED_RADIUS_METERS);
+    // Skip in demo mode
+    if (isDemo) {
+      if (__DEV__) console.log('[NEARBY] publishLocation skipped: demo mode');
+      return;
+    }
+
+    // Skip if no user ID
+    if (!convexUserId) {
+      if (__DEV__) console.log('[NEARBY] publishLocation skipped: no userId');
+      return;
+    }
+
+    // Skip if location not ready
+    if (locationUIState !== 'ready') {
+      return;
+    }
+
+    // Skip if no valid location
+    if (!bestLocation || !isValidMapCoordinate(bestLocation.latitude, bestLocation.longitude)) {
+      if (__DEV__) console.log('[NEARBY] publishLocation skipped: invalid coordinates');
+      return;
+    }
+
+    // Skip if already publishing (prevents duplicate calls during initial mount/focus)
+    if (isPublishingRef.current) {
+      if (__DEV__) console.log('[NEARBY] publishLocation skipped: already in progress');
+      return;
+    }
+
+    const lat = bestLocation.latitude;
+    const lng = bestLocation.longitude;
+
+    // Skip if same coordinates already published (within ~10m threshold)
+    const last = lastPublishedRef.current;
+    if (last) {
+      const latDiff = Math.abs(lat - last.lat);
+      const lngDiff = Math.abs(lng - last.lng);
+      // ~10m threshold (0.0001 degrees ≈ 11m)
+      if (latDiff < 0.0001 && lngDiff < 0.0001) {
+        if (__DEV__) console.log('[NEARBY] publishLocation skipped: same location');
+        return;
+      }
+    }
+
+    // Mark as publishing to prevent concurrent calls
+    isPublishingRef.current = true;
+
+    // Publish location (with mount guard)
+    (async () => {
+      try {
+        const result = await publishLocationMutation({
+          userId: convexUserId,
+          latitude: lat,
+          longitude: lng,
+        });
+
+        // Guard: skip state updates if unmounted
+        if (!isMountedRef.current) return;
+
+        // Update last published ref
+        lastPublishedRef.current = { lat, lng };
+
+        if (__DEV__) {
+          console.log('[NEARBY] publishLocation success:', result);
+        }
+
+        // -----------------------------------------------------------------------
+        // Crossed Paths Detection: Call recordLocation with rate limiting
+        // Only scan if: moved >= 60m AND >= 30s since last scan
+        // -----------------------------------------------------------------------
+        const now = Date.now();
+        const timeSinceLastDetection = now - lastDetectionTimeRef.current;
+        const lastDetectionPos = lastDetectionLatLngRef.current;
+
+        // Check time threshold (30 seconds minimum)
+        if (timeSinceLastDetection < DETECTION_MIN_INTERVAL_MS) {
+          if (__DEV__) {
+            console.log('[NEARBY] recordLocation skipped: too soon', {
+              elapsed: Math.round(timeSinceLastDetection / 1000) + 's',
+            });
+          }
+          return;
+        }
+
+        // Check movement threshold (60 meters minimum)
+        if (lastDetectionPos) {
+          const distanceMoved = calculateDistanceMeters(
+            lastDetectionPos.lat,
+            lastDetectionPos.lng,
+            lat,
+            lng
+          );
+          if (distanceMoved < DETECTION_MIN_MOVEMENT_METERS) {
+            if (__DEV__) {
+              console.log('[NEARBY] recordLocation skipped: not enough movement', {
+                moved: Math.round(distanceMoved) + 'm',
+                required: DETECTION_MIN_MOVEMENT_METERS + 'm',
+              });
+            }
+            return;
+          }
+        }
+
+        // Rate limits passed - trigger crossed paths detection
+        if (!isMountedRef.current) return;
+        try {
+          await recordLocationMutation({
+            userId: convexUserId,
+            latitude: lat,
+            longitude: lng,
+            accuracy: bestLocation.accuracy,
+          });
+
+          // Update rate limiting refs on success
+          lastDetectionTimeRef.current = now;
+          lastDetectionLatLngRef.current = { lat, lng };
+
+          if (__DEV__) {
+            console.log('[NEARBY] recordLocation success - crossed paths scan triggered');
+          }
+        } catch (recordErr) {
+          // recordLocation failure should not affect publishLocation flow
+          if (__DEV__) {
+            console.warn('[NEARBY] recordLocation failed (non-critical):', recordErr);
+          }
+        }
+      } catch (err) {
+        // Guard: skip logging if unmounted
+        if (!isMountedRef.current) return;
+
+        if (__DEV__) {
+          console.error('[NEARBY] publishLocation failed:', err);
+        }
+        // Silently fail - don't crash the app
+      } finally {
+        // Always reset publishing flag to allow future calls
+        isPublishingRef.current = false;
+      }
+    })();
+  }, [isDemo, convexUserId, locationUIState, bestLocation, publishLocationMutation, recordLocationMutation]);
+
+  // ---------------------------------------------------------------------------
+  // Demo mode nearby users - placed around current location
+  // ---------------------------------------------------------------------------
+  const demoNearbyUsers: NearbyUser[] = useMemo(() => {
+    if (!isDemo) return [];
+
+    // Demo marker offsets relative to current location (lat, lng in degrees)
+    // ~0.003 degrees ≈ 300m, spread in different directions
+    const demoOffsets = [
+      { latOff: +0.0030, lngOff: +0.0020, distance: 350 },  // NE ~350m
+      { latOff: -0.0025, lngOff: +0.0040, distance: 480 },  // SE ~480m
+      { latOff: -0.0035, lngOff: -0.0025, distance: 430 },  // SW ~430m
+      { latOff: +0.0020, lngOff: -0.0035, distance: 400 },  // NW ~400m
+      { latOff: +0.0045, lngOff: +0.0010, distance: 460 },  // N  ~460m
+    ];
+
+    // Use current location as base, fallback to demo location
+    const baseLat = bestLocation?.latitude ?? DEMO_LOCATION.latitude;
+    const baseLng = bestLocation?.longitude ?? DEMO_LOCATION.longitude;
+
+    return DEMO_PROFILES.slice(0, 5).map((profile, index) => {
+      const offset = demoOffsets[index] ?? { latOff: 0, lngOff: 0, distance: 500 };
+      return {
+        id: profile._id,
+        name: profile.name,
+        age: profile.age,
+        publishedLat: baseLat + offset.latOff,
+        publishedLng: baseLng + offset.lngOff,
+        publishedAt: Date.now() - index * 60 * 60 * 1000, // Stagger by hours
+        distance: offset.distance,
+        freshness: 'solid' as const,
+        photoUrl: profile.photos?.[0]?.url ?? null,
+        isVerified: profile.isVerified ?? false,
+        strongPrivacyMode: false,
+        hideDistance: false,
+      };
+    });
+  }, [isDemo, bestLocation]);
+
+  // ---------------------------------------------------------------------------
+  // Combine and process nearby users with fuzzing
+  // ---------------------------------------------------------------------------
+  const processedNearbyUsers = useMemo(() => {
+    const rawUsers: NearbyUser[] = isDemo
+      ? demoNearbyUsers
+      : (nearbyUsersQuery ?? []);
+
+    const viewerId = userId || 'anonymous';
+    let validCount = 0;
+    let skippedCount = 0;
+
+    const processed = rawUsers
+      .filter((user) => {
+        // Skip invalid coordinates
+        if (!isValidMapCoordinate(user.publishedLat, user.publishedLng)) {
+          skippedCount++;
+          return false;
+        }
+        // Skip self (shouldn't happen but guard anyway)
+        if (user.id === userId) {
+          skippedCount++;
+          return false;
+        }
+        validCount++;
+        return true;
+      })
+      .map((user) => {
+        // Apply privacy fuzzing (use strongPrivacyMode for larger fuzz radius)
+        const fuzzed = applyPrivacyFuzz(
+          user.publishedLat,
+          user.publishedLng,
+          user.id,
+          viewerId,
+          MODULE_SESSION_SALT,
+          user.strongPrivacyMode,
+        );
+
+        return {
+          ...user,
+          fuzzedLat: fuzzed.lat,
+          fuzzedLng: fuzzed.lng,
+        };
+      });
+
+    // DEV-only logging
+    if (__DEV__) {
+      console.log('[NEARBY] Query count:', rawUsers.length);
+      console.log('[NEARBY] Rendered markers:', validCount);
+      console.log('[NEARBY] Skipped invalid:', skippedCount);
+    }
+
+    return processed;
+  }, [isDemo, demoNearbyUsers, nearbyUsersQuery, userId]);
+
+  // ---------------------------------------------------------------------------
+  // Sort and limit visible markers for performance (max 30)
+  // Filtering is handled by Discovery preferences at the backend level
+  // ---------------------------------------------------------------------------
+  const visibleUsers = useMemo(() => {
+    const sorted = [...processedNearbyUsers];
+
+    // Sort: verified users first, then by freshness, then by distance
+    sorted.sort((a, b) => {
+      // Verified first
+      if (a.isVerified && !b.isVerified) return -1;
+      if (!a.isVerified && b.isVerified) return 1;
+      // Fresh first
+      if (a.freshness === 'solid' && b.freshness === 'faded') return -1;
+      if (a.freshness === 'faded' && b.freshness === 'solid') return 1;
+      // Closer first
+      return (a.distance ?? 1000) - (b.distance ?? 1000);
+    });
+
+    return sorted.slice(0, 30);
+  }, [processedNearbyUsers]);
+
+  // Alias for rendering (visibleUsers are the processed, sorted, limited markers)
+  const mapUsers = visibleUsers;
+
+  // ---------------------------------------------------------------------------
+  // Empty state: show once per app session, auto-dismiss after 3 seconds
+  // ---------------------------------------------------------------------------
+  const isEmptyStateCondition = locationUIState === 'ready' && mapUsers.length === 0 && !isDemo && !isQueryLoading && !isRetrying;
+
+  useEffect(() => {
+    // If conditions for empty state are not met, hide and clear timer
+    if (!isEmptyStateCondition) {
+      setShowEmptyState(false);
+      if (emptyStateTimerRef.current) {
+        clearTimeout(emptyStateTimerRef.current);
+        emptyStateTimerRef.current = null;
+      }
+      return;
+    }
+
+    // If already shown this session, don't show again
+    if (hasShownEmptyStateThisSession) {
+      return;
+    }
+
+    // Show empty state and mark as shown this session
+    hasShownEmptyStateThisSession = true;
+    setShowEmptyState(true);
+
+    // Auto-dismiss after 3 seconds
+    emptyStateTimerRef.current = setTimeout(() => {
+      if (isMountedRef.current) {
+        setShowEmptyState(false);
+      }
+      emptyStateTimerRef.current = null;
+    }, EMPTY_STATE_DISMISS_MS);
+
+    // Cleanup on unmount
+    return () => {
+      if (emptyStateTimerRef.current) {
+        clearTimeout(emptyStateTimerRef.current);
+        emptyStateTimerRef.current = null;
+      }
+    };
+  }, [isEmptyStateCondition]);
+
+  // ---------------------------------------------------------------------------
+  // Navigation handlers for header buttons
+  // ---------------------------------------------------------------------------
+  const handleOpenCrossedPaths = useCallback(() => {
+    safePush(router, '/(main)/crossed-paths' as any, 'nearby->crossed-paths');
+  }, [router]);
+
+  const handleOpenNearbySettings = useCallback(() => {
+    safePush(router, '/(main)/nearby-settings' as any, 'nearby->nearby-settings');
+  }, [router]);
+
+  // ---------------------------------------------------------------------------
+  // Marker press handler - opens full profile
+  // ---------------------------------------------------------------------------
+  const handleMarkerPress = useCallback((user: ProcessedNearbyUser) => {
+    if (!user?.id) {
+      if (__DEV__) console.warn('[NEARBY] Marker press with no user');
+      return;
+    }
+
+    log.info('[NEARBY]', 'marker tapped, opening profile', { id: user.id, name: user.name });
+    safePush(router, `/(main)/profile/${user.id}` as any, 'nearby->profile');
+  }, [router]);
+
+  // ---------------------------------------------------------------------------
+  // Map control handlers
+  // ---------------------------------------------------------------------------
+  // ============================================================================
+  // LOCKED: RECENTER BUTTON BEHAVIOR
+  // - Tap-once recenter only (no follow mode, no second-state)
+  // - Do NOT add tracking mode or other stateful behavior without approval
+  // ============================================================================
+
+  /** Recenter map to user's current location */
+  const handleRecenterToMyLocation = useCallback(() => {
+    if (!mapRef.current) return;
+
+    // Use real location if available
+    if (bestLocation && isValidMapCoordinate(bestLocation.latitude, bestLocation.longitude)) {
       mapRef.current.animateToRegion({
         latitude: bestLocation.latitude,
         longitude: bestLocation.longitude,
-        latitudeDelta: d,
-        longitudeDelta: d * (SCREEN_WIDTH / Dimensions.get('window').height),
-      }, 600);
+        latitudeDelta: DEFAULT_LATITUDE_DELTA,
+        longitudeDelta: DEFAULT_LONGITUDE_DELTA,
+      }, 300);
+      log.info('[NEARBY]', 'recentered to my location');
+    } else if (__DEV__) {
+      console.warn('[NEARBY] No valid location for recenter');
     }
   }, [bestLocation]);
 
-  // ------------------------------------------------------------------
-  // Build nearby profiles list (memoized to avoid recomputing each render)
-  // Applies client-side fuzz that changes with zoom bucket (anti-triangulation)
-  // ------------------------------------------------------------------
-  const nearbyProfiles: NearbyProfile[] = useMemo(() => {
-    // If location is not available, return empty array
-    if (userLat == null || userLng == null) {
-      return [];
-    }
+  // ---------------------------------------------------------------------------
+  // Permission flow on focus - start/stop GPS tracking
+  // ---------------------------------------------------------------------------
+  useFocusEffect(
+    useCallback(() => {
+      log.info('[NEARBY]', 'screen focused, starting location tracking');
+      startLocationTracking();
 
-    // 6-4: Validate user coordinates before processing
-    if (Number.isNaN(userLat) || Number.isNaN(userLng)) {
-      return [];
-    }
-
-    const viewerId = userId ?? 'demo_viewer';
-
-    if (isDemoMode || !convexNearby) {
-      // Demo mode: use demoStore profiles that have lat/lng within radius,
-      // plus the static NEARBY_DEMO_PROFILES as fallback
-      const allCandidates = [
-        ...demoStoreProfiles.filter((p) => typeof p.latitude === 'number'),
-        ...NEARBY_DEMO_PROFILES,
-      ];
-      // Deduplicate by _id
-      const seen = new Set<string>();
-      const unique = allCandidates.filter((p: any) => {
-        if (seen.has(p._id)) return false;
-        seen.add(p._id);
-        return true;
-      });
-      const filtered = unique.filter((p: any) => {
-        // FIX: Exclude current user from nearby profiles (don't show "me")
-        if (userId && p._id === userId) return false;
-        if (blockedUserIds.includes(p._id)) return false;
-        // 6-4: Validate profile coordinates before using
-        if (
-          typeof p.latitude !== 'number' ||
-          typeof p.longitude !== 'number' ||
-          Number.isNaN(p.latitude) ||
-          Number.isNaN(p.longitude)
-        ) {
-          return false;
-        }
-        const distanceMeters = haversineMeters(userLat, userLng, p.latitude, p.longitude);
-        const distanceKm = distanceMeters / 1000;
-        return isWithinAllowedDistance({ distance: distanceKm }, FIXED_RADIUS_KM);
-      });
-      // Apply client-side fuzz to demo profiles
-      const fuzzedProfiles = filtered.map((p: any) => {
-        const ts = p.lastLocationUpdatedAt ?? Date.now();
-        const freshness = computeFreshness(ts);
-        if (freshness === 'hidden') return null;
-
-        // Apply anti-zoom fuzz
-        const { lat, lng } = applyClientFuzz(
-          p.latitude,
-          p.longitude,
-          viewerId,
-          p._id,
-          sessionSalt,
-          zoomBucket,
-        );
-        return {
-          ...p,
-          latitude: lat,
-          longitude: lng,
-          freshness,
-        } as NearbyProfile;
-      }).filter(Boolean) as NearbyProfile[];
-
-      return rankNearbyProfiles(fuzzedProfiles);
-    }
-
-    // Live mode: map Convex query results with client-side fuzz
-    return rankNearbyProfiles(convexNearby
-      // FIX: Exclude current user from nearby profiles
-      .filter((u) => !(userId && u.id === userId))
-      // 6-4: Filter out profiles with invalid coordinates
-      .filter((u) =>
-        typeof u.publishedLat === 'number' &&
-        typeof u.publishedLng === 'number' &&
-        !Number.isNaN(u.publishedLat) &&
-        !Number.isNaN(u.publishedLng)
-      )
-      .map((u) => {
-        // Apply anti-zoom fuzz to published coordinates
-        // hideDistance users get larger fuzz (200-400m vs 20-100m)
-        const { lat, lng } = applyClientFuzz(
-          u.publishedLat,
-          u.publishedLng,
-          viewerId,
-          u.id,
-          sessionSalt,
-          zoomBucket,
-          u.hideDistance,
-        );
-        return {
-          _id: u.id,
-          name: u.name,
-          age: u.age,
-          latitude: lat,
-          longitude: lng,
-          freshness: u.freshness as 'solid' | 'faded',
-          photoUrl: u.photoUrl ?? undefined,
-          isVerified: u.isVerified,
-        };
-      }));
-  }, [demoStoreProfiles, blockedUserIds, userLat, userLng, userId, convexNearby, sessionSalt, zoomBucket]);
-
-  // ------------------------------------------------------------------
-  // DEBUG: Log marker counts for OOM debugging
-  // "You" marker is now native (showsUserLocation), not counted in custom markers
-  // ------------------------------------------------------------------
-  useEffect(() => {
-    const renderedNearby = Math.min(nearbyProfiles.length, MAX_NEARBY_MARKERS);
-    const renderedCrossed = validCrossedPaths.length;
-    const totalCustomMarkers = renderedNearby + renderedCrossed; // "You" is native, not counted
-    log.info('[MAP_OOM_DEBUG]', 'Marker counts (excluding native "You" marker)', {
-      nearbyTotal: nearbyProfiles.length,
-      nearbyRendered: renderedNearby,
-      crossedPaths: renderedCrossed,
-      totalCustomMarkers,
-      maxAllowed: MAX_NEARBY_MARKERS,
-      truncated: nearbyProfiles.length > MAX_NEARBY_MARKERS,
-    });
-    // Milestone G: map markers ready
-    if (totalCustomMarkers > 0) {
-      markTiming('map_ready');
-    }
-  }, [nearbyProfiles.length, validCrossedPaths.length]);
-
-  // ------------------------------------------------------------------
-  // Fire "Someone just crossed you" notification once per session (demo mode)
-  // Privacy-safe: no identity revealed, just generic alert
-  // System notification only — no in-app banner
-  // SKIP if we arrived from tapping a notification (prevents unseenCount bounce-back)
-  // ------------------------------------------------------------------
-  const crossedPathsNotifiedRef = useRef(false);
-  useEffect(() => {
-    if (!isDemoMode || crossedPathsNotifiedRef.current) return;
-    if (nearbyProfiles.length === 0) return;
-    // Skip creating notification if we arrived from a notification tap
-    // This prevents the unseenCount from bouncing back up after marking as read
-    if (arrivedFromNotification) {
-      crossedPathsNotifiedRef.current = true;
-      return;
-    }
-    crossedPathsNotifiedRef.current = true;
-
-    // Add to demo notification store (system notification, no in-app banner)
-    useDemoNotifStore.getState().addNotification({
-      type: 'crossed_paths',
-      title: 'Mira',
-      body: 'Someone just crossed you',
-      data: {}, // No identity data — privacy-safe
-    });
-  }, [nearbyProfiles, arrivedFromNotification]);
-
-  // ------------------------------------------------------------------
-  // Bottom sheet animation helpers
-  // ------------------------------------------------------------------
-  const openSheet = useCallback(
-    (profile: NearbyProfile) => {
-      setSelectedProfile(profile);
-      Animated.spring(sheetAnim, {
-        toValue: 1,
-        useNativeDriver: true,
-        tension: 80,
-        friction: 12,
-      }).start();
-    },
-    [sheetAnim],
+      // Cleanup: stop tracking when leaving Nearby tab (battery optimization)
+      return () => {
+        log.info('[NEARBY]', 'screen unfocused, stopping location tracking');
+        stopLocationTracking();
+      };
+    }, [startLocationTracking, stopLocationTracking])
   );
 
-  const closeSheet = useCallback(() => {
-    Animated.timing(sheetAnim, {
-      toValue: 0,
-      duration: 200,
-      useNativeDriver: true,
-    }).start(() => setSelectedProfile(null));
-  }, [sheetAnim]);
-
-  // ------------------------------------------------------------------
-  // Map region — fixed 1km radius
-  // BUGFIX #12: Validate coordinates before building region (prevents Android crash)
-  // ------------------------------------------------------------------
-  const buildRegion = (): Region | null => {
-    // Validate coords first — NaN/Infinity/out-of-range will crash react-native-maps
-    if (!isValidMapCoordinate(userLat, userLng)) {
-      return null;
-    }
-    const d = radiusToLatDelta(FIXED_RADIUS_METERS);
-    return {
-      latitude: userLat!,
-      longitude: userLng!,
-      latitudeDelta: d,
-      longitudeDelta: d * (SCREEN_WIDTH / Dimensions.get('window').height),
-    };
-  };
-  const initialRegion = buildRegion();
-
-  // ------------------------------------------------------------------
-  // Bottom sheet transform
-  // ------------------------------------------------------------------
-  const sheetTranslateY = sheetAnim.interpolate({
-    inputRange: [0, 1],
-    outputRange: [BOTTOM_SHEET_HEIGHT + 40, 0],
-  });
-
-  // ------------------------------------------------------------------
-  // Crossed path marker handlers (must be before any early returns)
-  // ------------------------------------------------------------------
-
-  // Handle crossed path marker tap — mark seen and open profile
-  const handleCrossedPathMarkerPress = useCallback((cp: typeof demoCrossedPaths[0]) => {
-    markCrossedPathSeen(cp.otherUserId);
-    safePush(router, `/(main)/profile/${cp.otherUserId}`, 'nearby->crossedPath');
-  }, [markCrossedPathSeen, router]);
-
-  // Deep link: animate to focused crossed path marker
+  // ---------------------------------------------------------------------------
+  // Derive UI state from location store
+  // ---------------------------------------------------------------------------
   useEffect(() => {
-    if (focusProfileId && mapRef.current && isDemoMode) {
-      // Use validCrossedPaths to ensure we only animate to entries with valid coordinates
-      const crossedPath = validCrossedPaths.find((cp) => cp.otherUserId === focusProfileId);
-      // BUGFIX #12: Extra validation before animateToRegion
-      if (crossedPath && isValidMapCoordinate(crossedPath.latitude, crossedPath.longitude)) {
-        // Animate map to the crossed path location
-        const d = radiusToLatDelta(FIXED_RADIUS_METERS);
-        mapRef.current.animateToRegion({
-          latitude: crossedPath.latitude,
-          longitude: crossedPath.longitude,
-          latitudeDelta: d * 0.5, // Zoom in closer
-          longitudeDelta: d * 0.5 * (SCREEN_WIDTH / Dimensions.get('window').height),
-        }, 500);
+    // Demo mode: always ready with fallback location
+    if (isDemo) {
+      setLocationUIState('ready');
+      return;
+    }
+
+    // Check permission status
+    if (permissionStatus === 'unknown') {
+      setLocationUIState('checking');
+      return;
+    }
+
+    if (permissionStatus === 'services_disabled') {
+      setLocationUIState('services_disabled');
+      return;
+    }
+
+    if (permissionStatus === 'restricted') {
+      setLocationUIState('restricted');
+      return;
+    }
+
+    if (permissionStatus === 'denied') {
+      setLocationUIState('denied_needs_settings');
+      return;
+    }
+
+    // Permission granted - check if we have valid coordinates
+    if (permissionStatus === 'granted') {
+      if (error) {
+        setLocationUIState('error');
+        return;
+      }
+
+      if (bestLocation && isValidMapCoordinate(bestLocation.latitude, bestLocation.longitude)) {
+        setLocationUIState('ready');
+      } else {
+        // Still waiting for GPS fix
+        setLocationUIState('checking');
       }
     }
-  }, [focusProfileId, validCrossedPaths]);
+  }, [isDemo, permissionStatus, error, bestLocation]);
 
-  // Format crossed time (e.g., "5m ago", "1h ago") - helper function
-  const formatCrossedTime = useCallback((timestamp: number) => {
-    const diff = Date.now() - timestamp;
-    const minutes = Math.floor(diff / 60000);
-    const hours = Math.floor(diff / 3600000);
-    if (minutes < 1) return 'Just now';
-    if (minutes < 60) return `${minutes}m ago`;
-    if (hours < 24) return `${hours}h ago`;
-    return `${Math.floor(hours / 24)}d ago`;
+  // ---------------------------------------------------------------------------
+  // Compute map region
+  // ---------------------------------------------------------------------------
+  const mapRegion: Region | null = useMemo(() => {
+    // Use best available location (works for both demo and real mode)
+    if (bestLocation && isValidMapCoordinate(bestLocation.latitude, bestLocation.longitude)) {
+      return {
+        latitude: bestLocation.latitude,
+        longitude: bestLocation.longitude,
+        latitudeDelta: DEFAULT_LATITUDE_DELTA,
+        longitudeDelta: DEFAULT_LONGITUDE_DELTA,
+      };
+    }
+
+    // Fallback: Demo mode uses DEMO_LOCATION, real mode returns null
+    if (isDemo) {
+      return {
+        latitude: DEMO_LOCATION.latitude,
+        longitude: DEMO_LOCATION.longitude,
+        latitudeDelta: DEFAULT_LATITUDE_DELTA,
+        longitudeDelta: DEFAULT_LONGITUDE_DELTA,
+      };
+    }
+
+    return null;
+  }, [isDemo, bestLocation]);
+
+  // ---------------------------------------------------------------------------
+  // Open device settings
+  // ---------------------------------------------------------------------------
+  const openSettings = useCallback(() => {
+    if (Platform.OS === 'ios') {
+      Linking.openURL('app-settings:');
+    } else {
+      Linking.openSettings().catch(() => {
+        log.warn('[NEARBY]', 'Failed to open settings');
+      });
+    }
   }, []);
 
-  // ------------------------------------------------------------------
-  // Render — map shown immediately, no heavy loading screens
-  // ------------------------------------------------------------------
-
-  // LOC-FIX: Handle "Enable Location" button press
-  const handleEnableLocation = useCallback(() => {
-    // Reset timeout state so we can try again
-    setLocationTimedOut(false);
-
-    if (permissionDenied) {
-      // Permission was denied — open system settings
-      Linking.openSettings();
-    } else {
-      // Try to get location again (permission not explicitly denied, may be services OFF)
-      startLocationTracking();
-      refreshLocation();
+  // ---------------------------------------------------------------------------
+  // Retry query handler (manual)
+  // ---------------------------------------------------------------------------
+  const handleRetryQuery = useCallback(() => {
+    // Clear any pending auto-retry timer
+    if (autoRetryTimeoutRef.current) {
+      clearTimeout(autoRetryTimeoutRef.current);
+      autoRetryTimeoutRef.current = null;
     }
-  }, [permissionDenied, startLocationTracking, refreshLocation]);
 
-  // LOC-FIX: Unified error state - permission denied, location error, or timeout
-  if (showLocationError && !hasLocation) {
+    // Reset auto-retry counter (user gets fresh attempts after manual retry)
+    autoRetryCountRef.current = 0;
+
+    // Clear error and show loading feedback
+    setQueryError(null);
+    setIsRetrying(true);
+
+    // Re-trigger location tracking which will re-run query
+    startLocationTracking();
+
+    // Clear retry state after a delay (query will auto-resolve via Convex)
+    setTimeout(() => {
+      if (isMountedRef.current) {
+        setIsRetrying(false);
+      }
+    }, 2000);
+  }, [startLocationTracking]);
+
+  // ---------------------------------------------------------------------------
+  // Render: Checking state
+  // ---------------------------------------------------------------------------
+  if (locationUIState === 'checking') {
     return (
       <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
-        <View style={styles.permissionOverlay}>
-          <Ionicons name="location-outline" size={48} color={COLORS.textLight} />
-          <Text style={styles.permissionTitle}>Turn on location to see people nearby</Text>
-          <Text style={styles.permissionSubtitle}>
-            {locationTimedOut
-              ? 'Unable to get your location. Please check that location services are enabled.'
-              : 'Your location is only shared as an approximate area, never your exact position.'}
+        <View style={styles.header}>
+          <TouchableOpacity onPress={handleOpenCrossedPaths} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+            <Ionicons name="footsteps-outline" size={22} color={COLORS.text} />
+          </TouchableOpacity>
+          <Text style={styles.headerTitle}>Nearby</Text>
+          <TouchableOpacity onPress={handleOpenNearbySettings} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+            <Ionicons name="settings-outline" size={22} color={COLORS.text} />
+          </TouchableOpacity>
+        </View>
+        <View style={styles.centered}>
+          <ActivityIndicator size="large" color={COLORS.primary} />
+          <Text style={styles.statusText}>Getting your location...</Text>
+        </View>
+      </SafeAreaView>
+    );
+  }
+
+  // ---------------------------------------------------------------------------
+  // Render: Permission required
+  // ---------------------------------------------------------------------------
+  if (locationUIState === 'permission_required') {
+    return (
+      <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
+        <View style={styles.header}>
+          <TouchableOpacity onPress={handleOpenCrossedPaths} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+            <Ionicons name="footsteps-outline" size={22} color={COLORS.text} />
+          </TouchableOpacity>
+          <Text style={styles.headerTitle}>Nearby</Text>
+          <TouchableOpacity onPress={handleOpenNearbySettings} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+            <Ionicons name="settings-outline" size={22} color={COLORS.text} />
+          </TouchableOpacity>
+        </View>
+        <View style={styles.centered}>
+          <Ionicons name="location-outline" size={64} color={COLORS.textLight} />
+          <Text style={styles.title}>Location Access Needed</Text>
+          <Text style={styles.subtitle}>
+            To see people nearby, please enable location access.
           </Text>
-          <TouchableOpacity
-            style={styles.permissionButton}
-            onPress={handleEnableLocation}
-          >
-            <Text style={styles.permissionButtonText}>Enable Location</Text>
+          <TouchableOpacity style={styles.primaryButton} onPress={startLocationTracking}>
+            <Text style={styles.primaryButtonText}>Enable Location</Text>
           </TouchableOpacity>
         </View>
       </SafeAreaView>
     );
   }
 
-  // Default region for map when no location yet (center of India as safe default)
-  const defaultRegion: Region = {
-    latitude: 20.5937,
-    longitude: 78.9629,
-    latitudeDelta: 10,
-    longitudeDelta: 10,
-  };
+  // ---------------------------------------------------------------------------
+  // Render: Denied - needs settings
+  // ---------------------------------------------------------------------------
+  if (locationUIState === 'denied_needs_settings') {
+    return (
+      <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
+        <View style={styles.header}>
+          <TouchableOpacity onPress={handleOpenCrossedPaths} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+            <Ionicons name="footsteps-outline" size={22} color={COLORS.text} />
+          </TouchableOpacity>
+          <Text style={styles.headerTitle}>Nearby</Text>
+          <TouchableOpacity onPress={handleOpenNearbySettings} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+            <Ionicons name="settings-outline" size={22} color={COLORS.text} />
+          </TouchableOpacity>
+        </View>
+        <View style={styles.centered}>
+          <Ionicons name="navigate-circle-outline" size={64} color={COLORS.textLight} />
+          <Text style={styles.title}>Location Access Denied</Text>
+          <Text style={styles.subtitle}>
+            Please enable location access in your device settings to see people nearby.
+          </Text>
+          <TouchableOpacity style={styles.primaryButton} onPress={openSettings}>
+            <Text style={styles.primaryButtonText}>Open Settings</Text>
+          </TouchableOpacity>
+        </View>
+      </SafeAreaView>
+    );
+  }
 
-  // Use real location region if available, else default
-  const mapRegion = initialRegion || defaultRegion;
+  // ---------------------------------------------------------------------------
+  // Render: Restricted (iOS parental controls)
+  // ---------------------------------------------------------------------------
+  if (locationUIState === 'restricted') {
+    return (
+      <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
+        <View style={styles.header}>
+          <TouchableOpacity onPress={handleOpenCrossedPaths} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+            <Ionicons name="footsteps-outline" size={22} color={COLORS.text} />
+          </TouchableOpacity>
+          <Text style={styles.headerTitle}>Nearby</Text>
+          <TouchableOpacity onPress={handleOpenNearbySettings} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+            <Ionicons name="settings-outline" size={22} color={COLORS.text} />
+          </TouchableOpacity>
+        </View>
+        <View style={styles.centered}>
+          <Ionicons name="lock-closed-outline" size={64} color={COLORS.textLight} />
+          <Text style={styles.title}>Location Restricted</Text>
+          <Text style={styles.subtitle}>
+            Location access is restricted on this device, possibly due to parental controls or device management. Contact your device administrator for help.
+          </Text>
+        </View>
+      </SafeAreaView>
+    );
+  }
+
+  // ---------------------------------------------------------------------------
+  // Render: Location Services Disabled (system-wide)
+  // ---------------------------------------------------------------------------
+  if (locationUIState === 'services_disabled') {
+    return (
+      <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
+        <View style={styles.header}>
+          <TouchableOpacity onPress={handleOpenCrossedPaths} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+            <Ionicons name="footsteps-outline" size={22} color={COLORS.text} />
+          </TouchableOpacity>
+          <Text style={styles.headerTitle}>Nearby</Text>
+          <TouchableOpacity onPress={handleOpenNearbySettings} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+            <Ionicons name="settings-outline" size={22} color={COLORS.text} />
+          </TouchableOpacity>
+        </View>
+        <View style={styles.centered}>
+          <Ionicons name="location-outline" size={64} color={COLORS.textLight} />
+          <Text style={styles.title}>Location Services Off</Text>
+          <Text style={styles.subtitle}>
+            Please enable Location Services in your device settings to see people nearby.
+          </Text>
+          <TouchableOpacity style={styles.primaryButton} onPress={openSettings}>
+            <Text style={styles.primaryButtonText}>Open Settings</Text>
+          </TouchableOpacity>
+        </View>
+      </SafeAreaView>
+    );
+  }
+
+  // ---------------------------------------------------------------------------
+  // Render: Error state
+  // ---------------------------------------------------------------------------
+  if (locationUIState === 'error') {
+    return (
+      <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
+        <View style={styles.header}>
+          <TouchableOpacity onPress={handleOpenCrossedPaths} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+            <Ionicons name="footsteps-outline" size={22} color={COLORS.text} />
+          </TouchableOpacity>
+          <Text style={styles.headerTitle}>Nearby</Text>
+          <TouchableOpacity onPress={handleOpenNearbySettings} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+            <Ionicons name="settings-outline" size={22} color={COLORS.text} />
+          </TouchableOpacity>
+        </View>
+        <View style={styles.centered}>
+          <Ionicons name="warning-outline" size={64} color={COLORS.warning} />
+          <Text style={styles.title}>Location Error</Text>
+          <Text style={styles.subtitle}>
+            {error || 'Unable to get your location. Please try again.'}
+          </Text>
+          <TouchableOpacity style={styles.primaryButton} onPress={startLocationTracking}>
+            <Text style={styles.primaryButtonText}>Retry</Text>
+          </TouchableOpacity>
+        </View>
+      </SafeAreaView>
+    );
+  }
+
+  // ---------------------------------------------------------------------------
+  // Render: Query error state
+  // ---------------------------------------------------------------------------
+  if (queryError) {
+    return (
+      <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
+        <View style={styles.header}>
+          <TouchableOpacity onPress={handleOpenCrossedPaths} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+            <Ionicons name="footsteps-outline" size={22} color={COLORS.text} />
+          </TouchableOpacity>
+          <Text style={styles.headerTitle}>Nearby</Text>
+          <TouchableOpacity onPress={handleOpenNearbySettings} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+            <Ionicons name="settings-outline" size={22} color={COLORS.text} />
+          </TouchableOpacity>
+        </View>
+        <View style={styles.centered}>
+          <Ionicons name="cloud-offline-outline" size={64} color={COLORS.warning} />
+          <Text style={styles.title}>Connection Issue</Text>
+          <Text style={styles.subtitle}>
+            {queryError}
+          </Text>
+          <TouchableOpacity style={styles.primaryButton} onPress={handleRetryQuery}>
+            <Text style={styles.primaryButtonText}>Try Again</Text>
+          </TouchableOpacity>
+        </View>
+      </SafeAreaView>
+    );
+  }
+
+  // ---------------------------------------------------------------------------
+  // Render: Ready - show map
+  // ---------------------------------------------------------------------------
+  // Final safety check: ensure we have valid region
+  if (!mapRegion) {
+    return (
+      <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
+        <View style={styles.header}>
+          <TouchableOpacity onPress={handleOpenCrossedPaths} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+            <Ionicons name="footsteps-outline" size={22} color={COLORS.text} />
+          </TouchableOpacity>
+          <Text style={styles.headerTitle}>Nearby</Text>
+          <TouchableOpacity onPress={handleOpenNearbySettings} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+            <Ionicons name="settings-outline" size={22} color={COLORS.text} />
+          </TouchableOpacity>
+        </View>
+        <View style={styles.centered}>
+          <ActivityIndicator size="large" color={COLORS.primary} />
+          <Text style={styles.statusText}>Preparing map...</Text>
+        </View>
+      </SafeAreaView>
+    );
+  }
 
   return (
     <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
-      {/* DEBUG: Map disabled for crash isolation */}
-      {DEBUG_DISABLE_MAP ? (
-        <View style={styles.debugMapPlaceholder}>
-          <Ionicons name="map-outline" size={48} color={COLORS.textLight} />
-          <Text style={styles.debugMapText}>Map temporarily disabled for debugging</Text>
-          <Text style={styles.debugMapSubtext}>Testing Android crash isolation</Text>
-        </View>
-      ) : (
-      /* Full-screen map with clustering — shown immediately with prewarmed location */
-      <ClusteredMapView
-        ref={mapRef}
-        style={{ flex: 1 }}
-        initialRegion={mapRegion}
-        showsUserLocation={true}
-        followsUserLocation={false}
-        showsMyLocationButton={false}
-        toolbarEnabled={false}
-        rotateEnabled={false}
-        pitchEnabled={false}
-        onPress={closeSheet}
-        onRegionChangeComplete={(region) => {
-          // Update zoom bucket when user zooms — causes pins to shift (anti-triangulation)
-          const newBucket = getZoomBucket(region.latitudeDelta);
-          if (newBucket !== zoomBucket) {
-            setZoomBucket(newBucket);
-          }
-        }}
-        // Clustering configuration — cluster until city zoom, then show individual pins
-        // maxZoom=11 shows profiles earlier (less zoom needed)
-        clusterColor={COLORS.primary}
-        clusterTextColor={COLORS.white}
-        clusterFontFamily="System"
-        radius={50} // Cluster nearby points
-        minZoom={1}
-        maxZoom={11} // Stop clustering at zoom 11 — profiles appear earlier
-        minPoints={2} // Minimum points to form a cluster
-        extent={512}
-        nodeSize={64}
-        // Single pre-composited cluster marker (pin + count number baked in)
-        // No React children inside Marker — 100% Android stable
-        renderCluster={(cluster) => {
-          const { id, geometry, onPress, properties } = cluster;
-          const points = properties.point_count;
+      <View style={styles.header}>
+        <TouchableOpacity onPress={handleOpenCrossedPaths} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+          <Ionicons name="footsteps-outline" size={22} color={COLORS.text} />
+        </TouchableOpacity>
 
-          return (
-            <Marker
-              key={`cluster-${id}`}
-              coordinate={{
-                latitude: geometry.coordinates[1],
-                longitude: geometry.coordinates[0],
-              }}
-              image={getDemoClusterImage(points)}
-              anchor={{ x: 0.5, y: 1 }}
-              tracksViewChanges={false}
-              onPress={onPress}
-            />
-          );
-        }}
-      >
-        {/* "You" marker — handled by native showsUserLocation={true} above */}
-        {/* This provides Google Maps style: blue dot + accuracy circle + heading indicator */}
+        <Text style={styles.headerTitle}>Nearby</Text>
 
-        {/* Nearby profile markers — OOM FIX: use image prop, limit count, no React children */}
-        {nearbyProfiles.slice(0, MAX_NEARBY_MARKERS).map((p) => (
-          <Marker
-            key={p._id}
-            coordinate={{ latitude: p.latitude, longitude: p.longitude }}
-            anchor={{ x: 0.5, y: 1 }}
-            image={PIN_PINK_IMAGE}
-            tracksViewChanges={false}
-            opacity={p.freshness === 'faded' ? 0.5 : 1}
-            onPress={(e) => {
-              e.stopPropagation();
-              openSheet(p);
-            }}
-          />
-        ))}
+        <TouchableOpacity onPress={handleOpenNearbySettings} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
+          <Ionicons name="settings-outline" size={22} color={COLORS.text} />
+        </TouchableOpacity>
 
-        {/* Crossed paths markers — SINGLE pre-composited image (pin + avatar baked in) */}
-        {/* No overlay marker, no drift, no delay — instant stable rendering */}
-        {isDemoMode && validCrossedPaths.map((cp) => (
-          <Marker
-            key={`crossed-${cp.id}`}
-            coordinate={{ latitude: cp.latitude, longitude: cp.longitude }}
-            image={getDemoMarkerImage(cp.otherUserId)}
-            anchor={{ x: 0.5, y: 1 }}
-            tracksViewChanges={false}
-            onPress={(e) => {
-              e.stopPropagation();
-              handleCrossedPathMarkerPress(cp);
-            }}
-          />
-        ))}
-      </ClusteredMapView>
-      )}
+        {isDemo && (
+          <View style={styles.demoBadge}>
+            <Text style={styles.demoBadgeText}>DEMO</Text>
+          </View>
+        )}
+      </View>
 
-      {/* Locating overlay — shown briefly when no location yet */}
-      {showLocatingOverlay && (
-        <View style={styles.locatingOverlay}>
-          <ActivityIndicator size="small" color={COLORS.primary} />
-          <Text style={styles.locatingText}>Locating...</Text>
-        </View>
-      )}
+      {/* STABILITY FIX S4: Error boundary around map for crash containment */}
+      <MapErrorBoundary>
+      <View style={styles.mapContainer}>
+        <ClusteredMapView
+          ref={mapRef}
+          style={styles.map}
+          initialRegion={mapRegion}
+          showsUserLocation={permissionStatus === 'granted'}
+          showsMyLocationButton={false}
+          showsCompass={false}
+          rotateEnabled={false}
+          pitchEnabled={false}
+          // ================================================================
+          // LOCKED: CLUSTERING BEHAVIOR
+          // ================================================================
+          // STATUS: LOCKED - Do not change without Durga Prasad approval
+          //
+          // IMPLEMENTATION:
+          // - Image-based cluster markers for Android reliability
+          // - Cluster tap → opens cluster results page (not just zoom)
+          // - radius={45} for "50% overlap" feel
+          //
+          // DO NOT:
+          // - Change clustering radius without testing
+          // - Switch to View-based cluster markers
+          // - Remove animation disabling (causes blank states)
+          // ================================================================
+          clusteringEnabled={true}
+          radius={45}
+          extent={512}
+          nodeSize={64}
+          minZoom={1}
+          maxZoom={20}
+          spiralEnabled={false}
+          animationEnabled={false}
+          superClusterRef={superClusterRef}
+          // CLUSTER MARKER RENDERER - Image-based with numbered count for Android reliability
+          // STABILITY FIX S5: Wrapped in try-catch for crash containment
+          renderCluster={(cluster) => {
+            try {
+              const { id, geometry, properties, onPress } = cluster;
+              const coords = geometry?.coordinates;
+              const lat = coords?.[1];
+              const lng = coords?.[0];
+              const pointCount = properties?.point_count ?? 2;
 
-      {/* Draggable Refresh FAB */}
-      {fabLoaded && (
-        <Animated.View
-          style={[
-            styles.fab,
-            {
-              transform: [
-                { translateX: fabPosition.x },
-                { translateY: fabPosition.y },
-              ],
-            },
-          ]}
-          {...panResponder.panHandlers}
+              // Safety: validate coordinates
+              if (!isValidMapCoordinate(lat, lng)) {
+                return null;
+              }
+
+              // Select cluster image based on count
+              const clusterImage = getClusterImage(pointCount);
+
+              return (
+                <Marker
+                  key={`cluster-${id}`}
+                  coordinate={{ latitude: lat, longitude: lng }}
+                  anchor={{ x: 0.5, y: 1 }}
+                  onPress={() => {
+                    try {
+                      // Zoom into cluster area to reveal individual markers
+                      if (mapRef.current) {
+                        const region = {
+                          latitude: lat,
+                          longitude: lng,
+                          latitudeDelta: 0.01,
+                          longitudeDelta: 0.01,
+                        };
+                        mapRef.current.animateToRegion(region, 300);
+                      }
+                      if (onPress) onPress();
+                    } catch (e) {
+                      // Silently handle cluster tap errors
+                      log.warn('[Nearby] Cluster tap error:', String(e));
+                    }
+                  }}
+                  // CRITICAL: Use image prop with numbered cluster for Android reliability
+                  image={clusterImage}
+                />
+              );
+            } catch (e) {
+              // STABILITY FIX S5: Graceful fallback on render error
+              log.warn('[Nearby] Cluster render error:', String(e));
+              return null;
+            }
+          }}
         >
-          <TouchableOpacity
-            style={[
-              styles.fabButton,
-              isRefreshing && styles.fabButtonLoading,
-            ]}
-            onPress={handleRecenterMap}
-            disabled={isRefreshing}
-            activeOpacity={0.8}
-          >
-            {isRefreshing ? (
-              <ActivityIndicator size="small" color={COLORS.white} />
-            ) : (
-              <Ionicons name="locate" size={24} color={COLORS.white} />
-            )}
-          </TouchableOpacity>
-        </Animated.View>
-      )}
-
-      {/* Cooldown toast */}
-      {showCooldownToast && (
-        <View style={[styles.toast, { bottom: tabBarHeight + FAB_SAFE_PADDING }]}>
-          <Text style={styles.toastText}>Please wait a few seconds</Text>
-        </View>
-      )}
-
-      {/* Refresh error message */}
-      {refreshError && (
-        <View style={styles.errorBanner}>
-          <Ionicons name="warning-outline" size={16} color={COLORS.white} />
-          <Text style={styles.errorText} numberOfLines={2}>{refreshError}</Text>
-          <TouchableOpacity onPress={() => setRefreshError(null)} style={styles.errorDismiss}>
-            <Ionicons name="close" size={16} color={COLORS.white} />
-          </TouchableOpacity>
-        </View>
-      )}
-
-      {/* Crossed paths shortcut */}
-      <TouchableOpacity
-        style={styles.crossedPathsButton}
-        onPress={() => safePush(router, '/(main)/crossed-paths', 'nearby->crossedPaths')}
-      >
-        <Ionicons name="footsteps" size={22} color={COLORS.white} />
-      </TouchableOpacity>
-
-      {/* Bottom sheet — no distance, no time text */}
-      <Animated.View
-        style={[
-          styles.bottomSheet,
-          { transform: [{ translateY: sheetTranslateY }] },
-        ]}
-        pointerEvents={selectedProfile ? 'auto' : 'none'}
-      >
-        {selectedProfile && (
-          <>
-            <TouchableOpacity style={styles.sheetClose} onPress={closeSheet}>
-              <Ionicons name="close" size={20} color={COLORS.textLight} />
-            </TouchableOpacity>
-
-            <View style={styles.sheetContent}>
-              <Image
-                source={{
-                  uri: selectedProfile.photoUrl ??
-                    selectedProfile.photos?.[0]?.url,
+          {/* ================================================================
+           * LOCKED: INDIVIDUAL PINK MARKERS
+           * ================================================================
+           * IMPLEMENTATION: image={pinPink} for Android reliability
+           * STATUS: LOCKED - Do not change without Durga Prasad approval
+           *
+           * BEHAVIOR:
+           * - Individual marker tap → handleMarkerPress(user)
+           * - Navigate to Discover-style profile
+           *
+           * DO NOT:
+           * - Replace with View-based markers
+           * - Change the image prop approach
+           * - Modify anchor position
+           * ================================================================ */}
+          {/* STABILITY FIX S4: Safe marker rendering with validation */}
+          {mapUsers.map((user) => {
+            // Skip invalid markers silently
+            if (!isValidMapCoordinate(user.fuzzedLat, user.fuzzedLng)) {
+              return null;
+            }
+            return (
+              <Marker
+                key={user.id}
+                coordinate={{
+                  latitude: user.fuzzedLat,
+                  longitude: user.fuzzedLng,
                 }}
-                style={styles.sheetPhoto}
+                anchor={{ x: 0.5, y: 1 }}
+                onPress={() => handleMarkerPress(user)}
+                image={pinPink}
               />
-              <View style={styles.sheetInfo}>
-                <Text style={styles.sheetName}>
-                  {selectedProfile.name}, {selectedProfile.age}
-                </Text>
-                <Text style={styles.sheetNearby}>Nearby</Text>
-                {selectedProfileConversationId ? (
-                  // Existing match/conversation: show "Message" CTA
-                  <TouchableOpacity
-                    style={[styles.viewProfileButton, styles.messageButton]}
-                    onPress={() => {
-                      closeSheet();
-                      safePush(router, `/(main)/(tabs)/messages/chat/${selectedProfileConversationId}`, 'nearby->chat');
-                    }}
-                  >
-                    <Ionicons name="chatbubble" size={14} color={COLORS.white} style={{ marginRight: 6 }} />
-                    <Text style={styles.viewProfileText}>Message</Text>
-                  </TouchableOpacity>
-                ) : (
-                  // No existing thread: show "View Profile"
-                  <TouchableOpacity
-                    style={styles.viewProfileButton}
-                    onPress={() => {
-                      closeSheet();
-                      safePush(router, `/(main)/profile/${selectedProfile._id}`, 'nearby->profile');
-                    }}
-                  >
-                    <Text style={styles.viewProfileText}>View Profile</Text>
-                  </TouchableOpacity>
-                )}
+            );
+          })}
+        </ClusteredMapView>
+
+        {/* Query loading indicator - shown while fetching nearby users */}
+        {(isQueryLoading || isRetrying) && !isDemo && (
+          <View style={styles.loadingOverlay}>
+            <View style={styles.loadingCard}>
+              <ActivityIndicator size="small" color={COLORS.primary} />
+              <Text style={styles.loadingText}>
+                {isRetrying ? 'Retrying...' : 'Finding people nearby...'}
+              </Text>
+            </View>
+          </View>
+        )}
+
+        {/* Empty state overlay - shown once per app session, auto-dismisses after 3s */}
+        {showEmptyState && (
+          <View style={styles.emptyOverlay}>
+            <View style={styles.emptyCard}>
+              <Ionicons name="people-outline" size={32} color={COLORS.textLight} />
+              <Text style={styles.emptyTitle}>No one nearby right now</Text>
+              <Text style={styles.emptySubtitle}>
+                Check back later or see who crossed your path
+              </Text>
+              <View style={styles.emptyActions}>
+                <TouchableOpacity style={styles.emptyActionButton} onPress={handleOpenCrossedPaths}>
+                  <Ionicons name="footsteps-outline" size={16} color={COLORS.primary} />
+                  <Text style={styles.emptyActionText}>Crossed Paths</Text>
+                </TouchableOpacity>
+                <TouchableOpacity style={styles.emptyActionButton} onPress={handleOpenNearbySettings}>
+                  <Ionicons name="settings-outline" size={16} color={COLORS.primary} />
+                  <Text style={styles.emptyActionText}>Settings</Text>
+                </TouchableOpacity>
               </View>
             </View>
-          </>
+          </View>
         )}
-      </Animated.View>
 
+        {/* My location button (static, tap-once recenter) */}
+        {permissionStatus === 'granted' && bestLocation && (
+          <TouchableOpacity
+            style={styles.myLocationButton}
+            onPress={handleRecenterToMyLocation}
+            activeOpacity={0.8}
+          >
+            <Ionicons name="locate" size={22} color={COLORS.primary} />
+          </TouchableOpacity>
+        )}
+      </View>
+      </MapErrorBoundary>
     </SafeAreaView>
   );
 }
@@ -1243,283 +1482,172 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: COLORS.background,
   },
-
-  // DEBUG: Placeholder when map is disabled for crash isolation
-  debugMapPlaceholder: {
-    flex: 1,
-    alignItems: 'center',
-    justifyContent: 'center',
-    backgroundColor: COLORS.backgroundDark,
-  },
-  debugMapText: {
-    fontSize: 16,
-    fontWeight: '600',
-    color: COLORS.text,
-    marginTop: 16,
-    textAlign: 'center',
-  },
-  debugMapSubtext: {
-    fontSize: 13,
-    color: COLORS.textLight,
-    marginTop: 6,
-  },
-
-  // Locating overlay — small, non-blocking indicator
-  locatingOverlay: {
-    position: 'absolute',
-    top: 60,
-    alignSelf: 'center',
+  header: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: 'rgba(255, 255, 255, 0.95)',
+    justifyContent: 'space-between',
     paddingHorizontal: 16,
-    paddingVertical: 8,
-    borderRadius: 20,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.15,
-    shadowRadius: 4,
-    elevation: 4,
-    gap: 8,
+    paddingVertical: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: COLORS.border,
   },
-  locatingText: {
-    fontSize: 14,
-    fontWeight: '500',
+  // CLEANUP: headerSpacer removed - unused
+  headerTitle: {
+    fontSize: 20,
+    fontWeight: '600',
     color: COLORS.text,
   },
-
-  // "You" marker
-  youMarkerWrapper: {
-    alignItems: 'center',
+  demoBadge: {
+    position: 'absolute',
+    right: 16,
+    backgroundColor: COLORS.warning,
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    borderRadius: 4,
   },
-  youMarkerDot: {
-    width: 18,
-    height: 18,
-    borderRadius: 9,
-    backgroundColor: '#4A90D9',
-    borderWidth: 3,
-    borderColor: COLORS.white,
-  },
-  youMarkerLabel: {
+  demoBadgeText: {
     fontSize: 10,
     fontWeight: '700',
-    color: '#4A90D9',
-    marginTop: 2,
+    color: '#fff',
   },
-
-  // Profile pin markers — solid state
-  pinWrapper: {
-    alignItems: 'center',
-  },
-  pinDot: {
-    width: 32,
-    height: 32,
-    borderRadius: 16,
-    backgroundColor: COLORS.primary,
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderWidth: 2,
-    borderColor: COLORS.white,
-  },
-  pinInitial: {
-    fontSize: 14,
-    fontWeight: '700',
-    color: COLORS.white,
-  },
-
-  // Faded state (3-6 days inactive) — semi-transparent
-  pinDotFaded: {
-    opacity: 0.45,
-  },
-  pinInitialFaded: {
-    opacity: 0.7,
-  },
-
-  // Permission denied overlay
-  permissionOverlay: {
+  centered: {
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
     paddingHorizontal: 40,
   },
-  permissionTitle: {
-    fontSize: 18,
+  title: {
+    fontSize: 22,
     fontWeight: '700',
     color: COLORS.text,
-    textAlign: 'center',
     marginTop: 16,
+    textAlign: 'center',
   },
-  permissionSubtitle: {
-    fontSize: 14,
+  subtitle: {
+    fontSize: 15,
     color: COLORS.textLight,
     textAlign: 'center',
     marginTop: 8,
-    lineHeight: 20,
+    lineHeight: 22,
   },
-  permissionButton: {
+  statusText: {
+    fontSize: 15,
+    color: COLORS.textLight,
+    marginTop: 12,
+  },
+  primaryButton: {
     marginTop: 24,
     backgroundColor: COLORS.primary,
-    borderRadius: 24,
-    paddingVertical: 12,
     paddingHorizontal: 32,
+    paddingVertical: 14,
+    borderRadius: 25,
   },
-  permissionButtonText: {
-    color: COLORS.white,
+  primaryButtonText: {
     fontSize: 16,
     fontWeight: '600',
+    color: '#fff',
   },
-
-  // Draggable FAB (Floating Action Button) for refresh
-  fab: {
+  mapContainer: {
+    flex: 1,
+  },
+  map: {
+    flex: 1,
+  },
+  // NOTE: Cluster markers use image={pinPink} for Android reliability.
+  // Custom View-based cluster styles removed - they were unreliable on Android.
+  // Overlay styles
+  loadingOverlay: {
     position: 'absolute',
-    top: 0,
-    left: 0,
-    zIndex: 100,
-  },
-  fabButton: {
-    width: FAB_SIZE,
-    height: FAB_SIZE,
-    borderRadius: FAB_SIZE / 2,
-    backgroundColor: COLORS.primary,
-    alignItems: 'center',
-    justifyContent: 'center',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 3 },
-    shadowOpacity: 0.3,
-    shadowRadius: 5,
-    elevation: 8,
-  },
-  fabButtonLoading: {
-    opacity: 0.7,
-  },
-
-  // Toast for cooldown message (bottom position set dynamically via inline style)
-  toast: {
-    position: 'absolute',
-    alignSelf: 'center',
-    backgroundColor: 'rgba(0, 0, 0, 0.8)',
-    paddingHorizontal: 20,
-    paddingVertical: 12,
-    borderRadius: 24,
-    zIndex: 200,
-  },
-  toastText: {
-    color: COLORS.white,
-    fontSize: 14,
-    fontWeight: '500',
-  },
-
-  // Error banner
-  errorBanner: {
-    position: 'absolute',
-    top: 70,
+    top: 16,
     left: 16,
     right: 16,
+    alignItems: 'center',
+  },
+  loadingCard: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: '#E74C3C',
-    paddingHorizontal: 14,
+    backgroundColor: 'rgba(255, 255, 255, 0.95)',
+    paddingHorizontal: 16,
     paddingVertical: 10,
-    borderRadius: 10,
+    borderRadius: 20,
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.2,
+    shadowOpacity: 0.1,
     shadowRadius: 4,
-    elevation: 4,
+    elevation: 3,
     gap: 8,
   },
-  errorText: {
-    flex: 1,
+  loadingText: {
     fontSize: 13,
-    color: COLORS.white,
+    color: COLORS.textLight,
   },
-  errorDismiss: {
-    padding: 4,
-  },
-
-  // Crossed paths shortcut
-  crossedPathsButton: {
+  emptyOverlay: {
     position: 'absolute',
-    bottom: 40,
-    left: 20,
-    width: 48,
-    height: 48,
-    borderRadius: 24,
-    backgroundColor: COLORS.primary,
+    bottom: 24,
+    left: 16,
+    right: 16,
+    alignItems: 'center',
+  },
+  emptyCard: {
+    flexDirection: 'column',
+    alignItems: 'center',
+    backgroundColor: 'rgba(255, 255, 255, 0.97)',
+    paddingHorizontal: 24,
+    paddingVertical: 20,
+    borderRadius: 16,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.12,
+    shadowRadius: 6,
+    elevation: 4,
+  },
+  emptyTitle: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: COLORS.text,
+    marginTop: 10,
+    textAlign: 'center',
+  },
+  emptySubtitle: {
+    fontSize: 13,
+    color: COLORS.textLight,
+    textAlign: 'center',
+    marginTop: 4,
+  },
+  emptyActions: {
+    flexDirection: 'row',
+    marginTop: 16,
+    gap: 12,
+  },
+  emptyActionButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 20,
+    backgroundColor: `${COLORS.primary}15`,
+    gap: 6,
+  },
+  emptyActionText: {
+    fontSize: 13,
+    fontWeight: '500',
+    color: COLORS.primary,
+  },
+  // My location button (static, tap-once recenter)
+  myLocationButton: {
+    position: 'absolute',
+    bottom: 24,
+    right: 16,
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: '#fff',
     alignItems: 'center',
     justifyContent: 'center',
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 2 },
-    shadowOpacity: 0.25,
-    shadowRadius: 4,
-    elevation: 5,
-  },
-
-  // Bottom sheet
-  bottomSheet: {
-    position: 'absolute',
-    bottom: 0,
-    left: 0,
-    right: 0,
-    height: BOTTOM_SHEET_HEIGHT,
-    backgroundColor: COLORS.white,
-    borderTopLeftRadius: 20,
-    borderTopRightRadius: 20,
-    padding: 16,
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: -3 },
     shadowOpacity: 0.15,
-    shadowRadius: 6,
-    elevation: 10,
+    shadowRadius: 4,
+    elevation: 4,
   },
-  sheetClose: {
-    position: 'absolute',
-    top: 12,
-    right: 12,
-    zIndex: 1,
-    padding: 4,
-  },
-  sheetContent: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    flex: 1,
-  },
-  sheetPhoto: {
-    width: 90,
-    height: 120,
-    borderRadius: 12,
-    backgroundColor: COLORS.backgroundDark,
-  },
-  sheetInfo: {
-    flex: 1,
-    marginLeft: 16,
-  },
-  sheetName: {
-    fontSize: 20,
-    fontWeight: '700',
-    color: COLORS.text,
-  },
-  sheetNearby: {
-    fontSize: 14,
-    color: COLORS.textLight,
-    marginTop: 4,
-  },
-  viewProfileButton: {
-    marginTop: 14,
-    backgroundColor: COLORS.primary,
-    borderRadius: 24,
-    paddingVertical: 10,
-    paddingHorizontal: 24,
-    alignSelf: 'flex-start',
-  },
-  messageButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-  },
-  viewProfileText: {
-    color: COLORS.white,
-    fontSize: 14,
-    fontWeight: '600',
-  },
-
 });
