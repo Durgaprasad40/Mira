@@ -19,6 +19,19 @@ let _cachedPromptsData: any[] = [];
 let _cachedTrendingData: { trendingDarePrompt: any; trendingTruthPrompt: any } | null = null;
 let _hasEverLoaded = false;
 
+/**
+ * Clear the T&D cache on logout to prevent data leak between users.
+ * Called from authStore.logout() to ensure clean state.
+ */
+export function clearTodCache() {
+  _cachedPromptsData = [];
+  _cachedTrendingData = null;
+  _hasEverLoaded = false;
+  if (__DEV__) {
+    console.log('[T/D] Cache cleared on logout');
+  }
+}
+
 // Timing for diagnostics
 let _tabOpenTime = 0;
 

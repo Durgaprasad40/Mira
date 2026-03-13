@@ -335,6 +335,22 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
       console.warn('[AUTH] logout: failed to reset confessionStore', error);
     }
 
+    try {
+      const { clearTodCache } = require('@/app/(main)/(private)/(tabs)/truth-or-dare');
+      clearTodCache?.();
+      if (__DEV__) console.log('[AUTH] logout: cleared T&D cache');
+    } catch (error) {
+      console.warn('[AUTH] logout: failed to clear T&D cache', error);
+    }
+
+    try {
+      const { useChatTodStore } = require('@/stores/chatTodStore');
+      useChatTodStore.setState({ games: {} });
+      if (__DEV__) console.log('[AUTH] logout: cleared chatTodStore');
+    } catch (error) {
+      console.warn('[AUTH] logout: failed to clear chatTodStore', error);
+    }
+
     // STEP 4: Finish logout - clear in-memory state
     get().finishLogout();
   },
