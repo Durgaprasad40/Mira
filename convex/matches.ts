@@ -3,6 +3,7 @@ import { mutation, query } from './_generated/server';
 import { Id } from './_generated/dataModel';
 
 // Get all matches for a user
+// FIX: Excludes blocked users (bidirectional)
 export const getMatches = query({
   args: {
     userId: v.id('users'),
@@ -27,6 +28,24 @@ export const getMatches = query({
 
     const allMatches = [...matchesAsUser1, ...matchesAsUser2];
     if (allMatches.length === 0) return [];
+
+    // FIX: Batch fetch blocked users (bidirectional)
+    const [myBlocks, blocksOnMe] = await Promise.all([
+      // Users I have blocked
+      ctx.db
+        .query('blocks')
+        .withIndex('by_blocker', (q) => q.eq('blockerId', userId))
+        .collect(),
+      // Users who have blocked me
+      ctx.db
+        .query('blocks')
+        .withIndex('by_blocked', (q) => q.eq('blockedUserId', userId))
+        .collect(),
+    ]);
+    const blockedUserIds = new Set([
+      ...myBlocks.map((b) => b.blockedUserId as string),
+      ...blocksOnMe.map((b) => b.blockerId as string),
+    ]);
 
     // PERF #6: Batch-fetch all other users and conversations in parallel
     const otherUserIds = allMatches.map((m) =>
@@ -115,6 +134,10 @@ export const getMatches = query({
     const result = [];
     for (const match of allMatches) {
       const otherUserId = match.user1Id === userId ? match.user2Id : match.user1Id;
+
+      // FIX: Skip matches with blocked users (either direction)
+      if (blockedUserIds.has(otherUserId as string)) continue;
+
       const otherUser = userMap.get(otherUserId);
       if (!otherUser || !otherUser.isActive) continue;
 
