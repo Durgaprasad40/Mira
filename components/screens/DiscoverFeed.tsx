@@ -250,7 +250,7 @@ export function DiscoverFeed({ mode = "main", theme = "light", onOpenProfile }: 
 
         const result = await Promise.race([
           swipeMutation({
-            fromUserId: userId as any,
+            authUserId: userId as string,
             toUserId: currentProfile.id as any,
             action: action as any,
           }),
@@ -419,7 +419,7 @@ export function DiscoverFeed({ mode = "main", theme = "light", onOpenProfile }: 
     }
 
     try {
-      await rewindMutation({ userId: userId as any });
+      await rewindMutation({ authUserId: userId as string });
       if (currentIndex > 0) {
         setCurrentIndex(currentIndex - 1);
       }

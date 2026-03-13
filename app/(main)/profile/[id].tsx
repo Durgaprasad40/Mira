@@ -231,7 +231,7 @@ export default function ViewProfileScreen() {
 
     try {
       const result = await swipe({
-        fromUserId: currentUserId as any,
+        authUserId: currentUserId as string,
         toUserId: userId as any,
         action,
       });

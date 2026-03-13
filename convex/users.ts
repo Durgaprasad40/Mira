@@ -186,7 +186,7 @@ export const updateProfilePrompts = mutation({
 // Update user profile
 export const updateProfile = mutation({
   args: {
-    userId: v.id("users"),
+    authUserId: v.string(), // AUTH FIX: Server-side auth instead of trusting client
     name: v.optional(v.string()),
     bio: v.optional(v.string()),
     height: v.optional(v.number()),
@@ -333,7 +333,16 @@ export const updateProfile = mutation({
     ),
   },
   handler: async (ctx, args) => {
-    const { userId, bio, pets, insect, ...otherUpdates } = args;
+    const { authUserId, bio, pets, insect, ...otherUpdates } = args;
+
+    // AUTH FIX: Resolve acting user from server-side auth
+    if (!authUserId || authUserId.trim().length === 0) {
+      throw new Error('Unauthorized: authentication required');
+    }
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      throw new Error('Unauthorized: user not found');
+    }
 
     // BUGFIX #61: Bio length validation (max 300 chars)
     if (bio !== undefined && bio.length > 300) {

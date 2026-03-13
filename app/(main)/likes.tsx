@@ -105,7 +105,7 @@ export default function LikesScreen() {
 
     try {
       const result = await swipeMutation({
-        fromUserId: userId as any,
+        authUserId: userId as string,
         toUserId: like.userId as any,
         action: 'like' as any,
       });
@@ -125,7 +125,7 @@ export default function LikesScreen() {
 
     try {
       await swipeMutation({
-        fromUserId: userId as any,
+        authUserId: userId as string,
         toUserId: like.userId as any,
         action: 'pass' as any,
       });

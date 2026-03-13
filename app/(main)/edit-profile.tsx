@@ -631,7 +631,7 @@ export default function EditProfileScreen() {
       const fullName = `${firstName.trim()} ${lastName.trim()}`.trim();
 
       await updateProfile({
-        userId: convexUserId,
+        authUserId: userId as string,
         name: fullName || undefined,
         bio: bio || undefined,
         height: height ? parseInt(height) : undefined,

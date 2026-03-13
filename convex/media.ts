@@ -1,11 +1,12 @@
 import { v } from 'convex/values';
 import { mutation, query } from './_generated/server';
+import { resolveUserIdByAuthId } from './helpers';
 
 // Create a protected media message with per-recipient permissions
 export const createMediaMessage = mutation({
   args: {
     chatId: v.id('conversations'),
-    senderId: v.id('users'),
+    authUserId: v.string(), // AUTH FIX: Server-side auth instead of trusting client
     objectKey: v.id('_storage'),
     mediaType: v.union(v.literal('image'), v.literal('video')),
     timerSeconds: v.optional(v.number()),
@@ -15,7 +16,7 @@ export const createMediaMessage = mutation({
   handler: async (ctx, args) => {
     const {
       chatId,
-      senderId,
+      authUserId,
       objectKey,
       mediaType,
       timerSeconds,
@@ -23,6 +24,15 @@ export const createMediaMessage = mutation({
       watermarkEnabled = true,
     } = args;
     const now = Date.now();
+
+    // AUTH FIX: Resolve acting user from server-side auth
+    if (!authUserId || authUserId.trim().length === 0) {
+      throw new Error('Unauthorized: authentication required');
+    }
+    const senderId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!senderId) {
+      throw new Error('Unauthorized: user not found');
+    }
 
     const conversation = await ctx.db.get(chatId);
     if (!conversation) throw new Error('Conversation not found');

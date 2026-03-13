@@ -105,11 +105,20 @@ export const markAsRead = mutation({
 // Mark all notifications as read
 export const markAllAsRead = mutation({
   args: {
-    userId: v.id('users'),
+    authUserId: v.string(), // AUTH FIX: Server-side auth instead of trusting client
   },
   handler: async (ctx, args) => {
-    const { userId } = args;
+    const { authUserId } = args;
     const now = Date.now();
+
+    // AUTH FIX: Resolve acting user from server-side auth
+    if (!authUserId || authUserId.trim().length === 0) {
+      throw new Error('Unauthorized: authentication required');
+    }
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      throw new Error('Unauthorized: user not found');
+    }
 
     const unreadNotifications = await ctx.db
       .query('notifications')

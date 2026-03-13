@@ -640,10 +640,10 @@ export function useNotifications() {
       demoMarkAllRead();
       return;
     }
-    if (convexUserId) {
-      markAllAsReadMutation({ userId: convexUserId }).catch(console.error);
+    if (userId) {
+      markAllAsReadMutation({ authUserId: userId as string }).catch(console.error);
     }
-  }, [convexUserId, markAllAsReadMutation, demoMarkAllRead]);
+  }, [userId, markAllAsReadMutation, demoMarkAllRead]);
 
   // ── Mark single notification as read ──
   // BUGFIX #33: Uses ref for pending reads to avoid setState on unmount warnings

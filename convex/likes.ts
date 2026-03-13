@@ -1,6 +1,7 @@
 import { v } from 'convex/values';
 import { mutation, query, MutationCtx } from './_generated/server';
 import { Id } from './_generated/dataModel';
+import { resolveUserIdByAuthId } from './helpers';
 
 // D1-REPAIR: Helper to check if either user has blocked the other
 // Returns true if blocked (should prevent messaging)
@@ -29,14 +30,23 @@ async function isBlockedBidirectional(
 // Like, pass, or super like a user
 export const swipe = mutation({
   args: {
-    fromUserId: v.id('users'),
+    authUserId: v.string(), // AUTH FIX: Server-side auth instead of trusting client
     toUserId: v.id('users'),
     action: v.union(v.literal('like'), v.literal('pass'), v.literal('super_like'), v.literal('text')),
     message: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const { fromUserId, toUserId, action, message } = args;
+    const { authUserId, toUserId, action, message } = args;
     const now = Date.now();
+
+    // AUTH FIX: Resolve acting user from server-side auth
+    if (!authUserId || authUserId.trim().length === 0) {
+      throw new Error('Unauthorized: authentication required');
+    }
+    const fromUserId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!fromUserId) {
+      throw new Error('Unauthorized: user not found');
+    }
 
     // P2-003 FIX: Prevent self-swiping
     if (fromUserId === toUserId) {
@@ -269,10 +279,19 @@ export const swipe = mutation({
 // Rewind last swipe
 export const rewind = mutation({
   args: {
-    userId: v.id('users'),
+    authUserId: v.string(), // AUTH FIX: Server-side auth instead of trusting client
   },
   handler: async (ctx, args) => {
-    const { userId } = args;
+    const { authUserId } = args;
+
+    // AUTH FIX: Resolve acting user from server-side auth
+    if (!authUserId || authUserId.trim().length === 0) {
+      throw new Error('Unauthorized: authentication required');
+    }
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      throw new Error('Unauthorized: user not found');
+    }
 
     const user = await ctx.db.get(userId);
     if (!user) throw new Error('User not found');

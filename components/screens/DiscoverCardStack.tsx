@@ -873,7 +873,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
         );
         const result = await Promise.race([
           swipeMutation({
-            fromUserId: convexUserId,
+            authUserId: userId as string,
             toUserId: swipedProfile.id as Id<'users'>,
             action,
             message: message,
