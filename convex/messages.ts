@@ -621,39 +621,26 @@ export const getConversations = query({
       .map((c) => c.participants.find((id) => id !== userId))
       .filter((id): id is Id<'users'> => id !== undefined);
 
-    // SAFETY FIX: Batch-check blocks in both directions for all other users
-    const [blockedByMe, blockedMe] = await Promise.all([
-      // Users I have blocked
-      Promise.all(
-        otherUserIds.map((otherId) =>
-          ctx.db
-            .query('blocks')
-            .withIndex('by_blocker_blocked', (q) =>
-              q.eq('blockerId', userId).eq('blockedUserId', otherId)
-            )
-            .first()
-        )
-      ),
-      // Users who have blocked me
-      Promise.all(
-        otherUserIds.map((otherId) =>
-          ctx.db
-            .query('blocks')
-            .withIndex('by_blocker_blocked', (q) =>
-              q.eq('blockerId', otherId).eq('blockedUserId', userId)
-            )
-            .first()
-        )
-      ),
+    // M2 FIX: Batch-fetch ALL blocks for current user in just 2 queries (not 2*N)
+    // Uses same efficient pattern as privateDiscover.ts
+    const [blocksOut, blocksIn] = await Promise.all([
+      // All users I have blocked
+      ctx.db
+        .query('blocks')
+        .withIndex('by_blocker', (q) => q.eq('blockerId', userId))
+        .collect(),
+      // All users who have blocked me
+      ctx.db
+        .query('blocks')
+        .withIndex('by_blocked', (q) => q.eq('blockedUserId', userId))
+        .collect(),
     ]);
 
     // Build set of blocked user IDs (either direction)
-    const blockedUserIds = new Set<string>();
-    otherUserIds.forEach((otherId, i) => {
-      if (blockedByMe[i] || blockedMe[i]) {
-        blockedUserIds.add(otherId as string);
-      }
-    });
+    const blockedUserIds = new Set([
+      ...blocksOut.map((b) => b.blockedUserId as string),
+      ...blocksIn.map((b) => b.blockerId as string),
+    ]);
 
     // Parallel batch: users, photos, last messages, and unread counts
     const [users, photos, lastMessages, unreadCounts] = await Promise.all([
