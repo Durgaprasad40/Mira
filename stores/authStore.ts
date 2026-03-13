@@ -108,12 +108,47 @@ export const useAuthStore = create<AuthState>()((set) => ({
   // This follows the "Logout ≠ Delete" principle
   // C2 FIX: Made async - waits for SecureStore cleanup before resolving
   // C8 FIX: All resets wrapped in try-catch to prevent cascade failure
+  // H2 FIX: Atomic logout - SecureStore cleared FIRST to prevent split-brain state
   logout: async () => {
     // ═══════════════════════════════════════════════════════════════════════
-    // SAFE LOGOUT CASCADE - Each reset is wrapped to prevent cascade failure
+    // ATOMIC LOGOUT - SecureStore cleared FIRST, then in-memory state
+    // H2 FIX: Prevents split-brain where memory is cleared but persistent
+    // auth remains (causing ghost login on app restart)
     // ═══════════════════════════════════════════════════════════════════════
 
-    // 1. Reset onboarding store
+    // STEP 1: Clear SecureStore FIRST (persistent auth layer)
+    // If this fails, abort immediately - do NOT clear in-memory state
+    // This ensures no half-logged-out state where restart would re-login
+    try {
+      const { clearAuthBootCache } = require('@/stores/authBootCache');
+      await clearAuthBootCache();
+      if (__DEV__) console.log('[AUTH] logout: cleared SecureStore (step 1)');
+    } catch (error) {
+      console.error('[AUTH] logout: SecureStore cleanup failed, aborting logout:', error);
+      // H2 FIX: Do NOT proceed - keeps user logged in rather than half-logged-out
+      throw error;
+    }
+
+    // STEP 2: Clear in-memory auth state (now safe since SecureStore is cleared)
+    // This makes isAuthenticated=false, triggering UI updates
+    set({
+      isAuthenticated: false,
+      userId: null,
+      token: null,
+      error: null,
+      onboardingCompleted: false,
+      faceVerificationPassed: false,
+      faceVerificationPending: false,
+      _sessionValidated: false,
+      _sessionValidationError: null,
+    });
+    if (__DEV__) console.log('[AUTH] logout: cleared in-memory auth state (step 2)');
+
+    // STEP 3: Clear dependent stores (with try-catch for each)
+    // These are safe to fail individually - the session is already invalidated
+    // C8 FIX: Each reset wrapped to prevent cascade failure
+
+    // 3a. Reset onboarding store
     try {
       useOnboardingStore.getState()?.reset?.();
       if (__DEV__) console.log('[AUTH] logout: cleared onboardingStore');
@@ -121,7 +156,7 @@ export const useAuthStore = create<AuthState>()((set) => ({
       console.warn('[AUTH] logout: failed to reset onboardingStore', error);
     }
 
-    // 2. Reset private profile store (Phase-2 private data)
+    // 3b. Reset private profile store (Phase-2 private data)
     try {
       const { usePrivateProfileStore } = require('@/stores/privateProfileStore');
       usePrivateProfileStore.getState()?.resetPhase2?.();
@@ -130,7 +165,7 @@ export const useAuthStore = create<AuthState>()((set) => ({
       console.warn('[AUTH] logout: failed to reset privateProfileStore', error);
     }
 
-    // 3. Reset private chat store (Phase-2 conversations, messages, unlocked users)
+    // 3c. Reset private chat store (Phase-2 conversations, messages, unlocked users)
     try {
       const { usePrivateChatStore } = require('@/stores/privateChatStore');
       usePrivateChatStore.setState({
@@ -145,7 +180,7 @@ export const useAuthStore = create<AuthState>()((set) => ({
       console.warn('[AUTH] logout: failed to reset privateChatStore', error);
     }
 
-    // 4. Clear demo session (only in demo mode)
+    // 3d. Clear demo session (only in demo mode)
     if (isDemoMode) {
       try {
         const { useDemoStore } = require('@/stores/demoStore');
@@ -156,7 +191,7 @@ export const useAuthStore = create<AuthState>()((set) => ({
       }
     }
 
-    // 5. Reset verification store
+    // 3e. Reset verification store
     try {
       const { useVerificationStore } = require('@/stores/verificationStore');
       useVerificationStore.getState()?.resetVerification?.();
@@ -165,7 +200,7 @@ export const useAuthStore = create<AuthState>()((set) => ({
       console.warn('[AUTH] logout: failed to reset verificationStore', error);
     }
 
-    // 6. Reset confession store
+    // 3f. Reset confession store
     try {
       const { useConfessionStore } = require('@/stores/confessionStore');
       const confessionState = useConfessionStore.getState();
@@ -183,30 +218,6 @@ export const useAuthStore = create<AuthState>()((set) => ({
       if (__DEV__) console.log('[AUTH] logout: cleared confessionStore');
     } catch (error) {
       console.warn('[AUTH] logout: failed to reset confessionStore', error);
-    }
-
-    // 7. Clear in-memory auth state (immediate effect for UI)
-    set({
-      isAuthenticated: false,
-      userId: null,
-      token: null,
-      error: null,
-      onboardingCompleted: false,
-      faceVerificationPassed: false,
-      faceVerificationPending: false,
-      _sessionValidated: false,
-      _sessionValidationError: null,
-    });
-
-    // 8. Await SecureStore cleanup - logout does NOT resolve until this completes
-    // If cleanup fails, rethrow so callers know logout didn't fully complete
-    try {
-      const { clearAuthBootCache } = require('@/stores/authBootCache');
-      await clearAuthBootCache();
-      if (__DEV__) console.log('[AUTH] logout: cleared SecureStore');
-    } catch (error) {
-      console.error('[AUTH] logout: SecureStore cleanup failed:', error);
-      throw error;
     }
   },
 
