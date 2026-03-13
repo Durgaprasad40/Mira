@@ -95,7 +95,10 @@ function SecureVideoPlayerInner({ mediaUri, isPlaying, visible }: SecureVideoPla
     };
   }, [player]);
 
-  if (!player) return null;
+  // CR-002: Guard against rendering VideoView with released player.
+  // When visible=false, return null BEFORE unmount to ensure native view
+  // is removed from hierarchy before player is released.
+  if (!player || !visible) return null;
 
   return (
     <VideoView

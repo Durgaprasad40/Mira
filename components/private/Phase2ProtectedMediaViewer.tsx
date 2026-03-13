@@ -45,13 +45,28 @@ interface Phase2ProtectedMediaViewerProps {
 // Persists across component unmounts to prevent re-viewing.
 const viewedOnceHoldMessages = new Set<string>();
 
+// CR-002: Validate URI before creating video player
+function isValidMediaUri(uri: string | undefined | null): boolean {
+  if (!uri || typeof uri !== 'string') return false;
+  return (
+    uri.startsWith('http://') ||
+    uri.startsWith('https://') ||
+    uri.startsWith('file://') ||
+    uri.startsWith('content://')
+  );
+}
+
 // Secure Video Player component using expo-video with wall-clock resume
 interface SecureVideoPlayerProps {
   uri: string;
   elapsedMs: number; // How long since first view (for resume calculation)
 }
 
-function SecureVideoPlayer({ uri, elapsedMs }: SecureVideoPlayerProps) {
+/**
+ * CR-002: Inner component that contains the useVideoPlayer hook.
+ * Only rendered when URI is valid (via wrapper).
+ */
+function SecureVideoPlayerInner({ uri, elapsedMs }: SecureVideoPlayerProps) {
   const [isPlaying, setIsPlaying] = useState(true);
   const hasSeekRef = useRef(false); // Only seek once on mount
   const mountedRef = useRef(true);
@@ -152,6 +167,17 @@ function SecureVideoPlayer({ uri, elapsedMs }: SecureVideoPlayerProps) {
       )}
     </Pressable>
   );
+}
+
+/**
+ * CR-002: Wrapper that validates URI before rendering inner component.
+ * Prevents useVideoPlayer from being called with invalid URI.
+ */
+function SecureVideoPlayer({ uri, elapsedMs }: SecureVideoPlayerProps) {
+  if (!isValidMediaUri(uri)) {
+    return null;
+  }
+  return <SecureVideoPlayerInner uri={uri} elapsedMs={elapsedMs} />;
 }
 
 const secureVideoStyles = StyleSheet.create({
