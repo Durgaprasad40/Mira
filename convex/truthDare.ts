@@ -1572,6 +1572,24 @@ export const getPromptThread = query({
           hasViewedMedia = viewRecord?.viewedAt !== undefined;
         }
 
+        // Check if viewer (as prompt owner) has sent a connect request for this answer
+        let hasSentConnect = false;
+        if (viewerUserId && viewerUserId !== answer.userId) {
+          const connectReq = await ctx.db
+            .query('todConnectRequests')
+            .withIndex('by_from_to', (q) =>
+              q.eq('fromUserId', viewerUserId).eq('toUserId', answer.userId)
+            )
+            .filter((q) =>
+              q.or(
+                q.eq(q.field('status'), 'pending'),
+                q.eq(q.field('status'), 'connected')
+              )
+            )
+            .first();
+          hasSentConnect = !!connectReq;
+        }
+
         return {
           _id: answer._id,
           promptId: answer.promptId,
@@ -1594,6 +1612,7 @@ export const getPromptThread = query({
           isOwnAnswer: viewerUserId === answer.userId,
           hasReported,
           hasViewedMedia,
+          hasSentConnect,
           // Author identity snapshot
           authorName: answer.authorName,
           authorPhotoUrl: answer.authorPhotoUrl,

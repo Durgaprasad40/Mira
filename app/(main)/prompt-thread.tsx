@@ -833,7 +833,7 @@ export default function PromptThreadScreen() {
           ) : (
             <View style={styles.otherCommentActions}>
               {/* Connect button: only for prompt owner on non-anonymous answers */}
-              {isPromptOwner && !isAnon && !connectSentFor.has(item._id) && (
+              {isPromptOwner && !isAnon && !item.hasSentConnect && !connectSentFor.has(item._id) && (
                 <TouchableOpacity
                   style={styles.connectBtn}
                   onPress={() => handleSendConnect(item._id)}
@@ -850,7 +850,7 @@ export default function PromptThreadScreen() {
                 </TouchableOpacity>
               )}
               {/* Connect sent indicator */}
-              {isPromptOwner && connectSentFor.has(item._id) && (
+              {isPromptOwner && (item.hasSentConnect || connectSentFor.has(item._id)) && (
                 <View style={styles.connectSentBadge}>
                   <Ionicons name="checkmark-circle" size={12} color={C.textLight} />
                   <Text style={styles.connectSentText}>Sent</Text>
