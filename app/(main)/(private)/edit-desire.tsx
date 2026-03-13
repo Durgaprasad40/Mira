@@ -85,10 +85,8 @@ export default function EditDesireScreen() {
 
     setIsSaving(true);
     try {
-      // Update local store immediately
-      setPrivateBio(desireText.trim());
-
-      // Sync to backend (if not demo mode) - auth-safe mutation
+      // Sync to backend FIRST (if not demo mode) - auth-safe mutation
+      // Only update local store after backend succeeds to avoid stale optimistic state
       if (!isDemoMode && userId) {
         const result = await updateFields({
           authUserId: userId,
@@ -99,12 +97,16 @@ export default function EditDesireScreen() {
         }
       }
 
+      // Update local store AFTER backend success
+      setPrivateBio(desireText.trim());
+
       // Navigate back
       router.back();
     } catch (error) {
       if (__DEV__) {
         console.error('[EditDesire] Save error:', error);
       }
+      // No rollback needed - local store was never updated
       Alert.alert('Error', 'Failed to save. Please try again.');
     } finally {
       isSavingRef.current = false;

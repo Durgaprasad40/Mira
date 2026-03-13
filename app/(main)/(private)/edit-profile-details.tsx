@@ -190,7 +190,24 @@ export default function EditProfileDetailsScreen() {
 
     setIsSaving(true);
     try {
-      // Update local store
+      // Sync to Convex backend FIRST (auth-safe mutation)
+      // Only update local store after backend succeeds to avoid stale optimistic state
+      if (!isDemoMode && userId) {
+        const result = await updatePrivateProfile({
+          authUserId: userId,
+          height: parsedHeight,
+          weight: parsedWeight,
+          smoking: smoking,
+          drinking: drinking,
+          education: education,
+          religion: religion,
+        });
+        if (__DEV__ && result.success) {
+          console.log('[EditProfileDetails] Synced to Convex');
+        }
+      }
+
+      // Update local store AFTER backend success
       setHeight(parsedHeight);
       setWeight(parsedWeight);
       setSmoking(smoking);
@@ -198,34 +215,12 @@ export default function EditProfileDetailsScreen() {
       setEducation(education);
       setReligion(religion);
 
-      // Sync to Convex backend (auth-safe mutation)
-      if (!isDemoMode && userId) {
-        try {
-          const result = await updatePrivateProfile({
-            authUserId: userId,
-            height: parsedHeight,
-            weight: parsedWeight,
-            smoking: smoking,
-            drinking: drinking,
-            education: education,
-            religion: religion,
-          });
-          if (__DEV__ && result.success) {
-            console.log('[EditProfileDetails] Synced to Convex');
-          }
-        } catch (syncError) {
-          if (__DEV__) {
-            console.error('[EditProfileDetails] Backend sync failed:', syncError);
-          }
-          // Local store is already updated, continue
-        }
-      }
-
       router.back();
     } catch (error) {
       if (__DEV__) {
         console.error('[EditProfileDetails] Save error:', error);
       }
+      // No rollback needed - local store was never updated
       Alert.alert('Error', 'Failed to save. Please try again.');
     } finally {
       isSavingRef.current = false;
