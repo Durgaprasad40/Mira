@@ -143,6 +143,9 @@ export default function ChatRoomsScreen() {
   // Track if user manually navigated (tapped a room) - skip preferred redirect if so
   const userNavigatedRef = useRef(false);
 
+  // NAV-RACE FIX: Synchronous guard to prevent double-tap duplicate navigation
+  const isNavigatingToRoomRef = useRef(false);
+
   // M-006/M-007 FIX: Track mount state to prevent setState after unmount
   const mountedRef = useRef(true);
 
@@ -427,6 +430,12 @@ export default function ChatRoomsScreen() {
     (roomId: string) => {
       if (__DEV__) console.log('[TAP] room pressed', { roomId, t: Date.now() });
 
+      // NAV-RACE FIX: Prevent double-tap duplicate navigation (synchronous guard)
+      if (isNavigatingToRoomRef.current) {
+        if (__DEV__) console.log('[TAP] blocked - navigation in progress');
+        return;
+      }
+
       // BUG FIX: Prevent navigation with fallback IDs (not real Convex IDs)
       // Fallback IDs crash when passed to Convex mutations/queries
       if (roomId.startsWith('fallback_')) {
@@ -442,6 +451,9 @@ export default function ChatRoomsScreen() {
         );
         return;
       }
+
+      // NAV-RACE FIX: Set synchronous lock before navigation
+      isNavigatingToRoomRef.current = true;
 
       // Mark user navigated to cancel any pending preferred room redirect
       userNavigatedRef.current = true;
@@ -462,6 +474,11 @@ export default function ChatRoomsScreen() {
       if (__DEV__) console.log('[NAV] room push scheduled', { roomName, isPrivate, t: Date.now() });
       // Mark room as visited to clear unread badge
       markRoomVisited(roomId);
+
+      // NAV-RACE FIX: Reset lock after navigation settles (allows future navigations)
+      setTimeout(() => {
+        isNavigatingToRoomRef.current = false;
+      }, 500);
     },
     [router, markRoomVisited, rooms, privateRooms, isSeedingRooms]
   );
