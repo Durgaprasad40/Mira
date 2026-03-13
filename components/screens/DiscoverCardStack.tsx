@@ -695,7 +695,6 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
     if (viewedUserIds.length > 0) {
       recordImpressionsMutation({
         viewedUserIds,
-        authUserId: userId,
       }).catch(() => {
         // Silently ignore errors - impression recording is non-critical
       });

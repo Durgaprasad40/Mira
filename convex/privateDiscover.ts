@@ -286,12 +286,13 @@ export const getProfileByUserId = query({
 export const recordDesireLandImpressions = mutation({
   args: {
     viewedUserIds: v.array(v.id('users')),
-    authUserId: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    // Resolve viewer from auth
-    if (!args.authUserId) return;
-    const viewerId = await resolveUserIdByAuthId(ctx, args.authUserId);
+    // Resolve viewer from server-side auth (secure - not client-supplied)
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity?.subject) return;
+
+    const viewerId = await resolveUserIdByAuthId(ctx, identity.subject);
     if (!viewerId) return;
 
     const now = Date.now();
