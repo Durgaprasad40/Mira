@@ -2006,11 +2006,9 @@ export const devWipeMyTestUserData = mutation({
     userId: v.union(v.id('users'), v.string()),
   },
   handler: async (ctx, args) => {
-    // Safety: Refuse in production (check for common prod indicators)
-    const convexUrl = process.env.CONVEX_URL || '';
-    if (convexUrl.includes('prod') || convexUrl.includes('production')) {
-      console.error('[DEV_WIPE] REFUSED: Production environment detected');
-      return { success: false, error: 'production_blocked' };
+    // STRICT PRODUCTION GUARD: Only allow in development environment
+    if (process.env.NODE_ENV !== 'development') {
+      throw new Error('devWipeMyTestUserData is disabled in production');
     }
 
     console.log('[DEV_WIPE] === STARTING USER DATA WIPE ===');
@@ -2269,11 +2267,9 @@ export const getMyReports = query({
 export const devWipeAllUserData = mutation({
   args: {},
   handler: async (ctx) => {
-    // Safety: Refuse in production (check for common prod indicators)
-    const convexUrl = process.env.CONVEX_URL || '';
-    if (convexUrl.includes('prod') || convexUrl.includes('production')) {
-      console.error('[DEV_WIPE_ALL] REFUSED: Production environment detected');
-      return { success: false, error: 'production_blocked' };
+    // STRICT PRODUCTION GUARD: Only allow in development environment
+    if (process.env.NODE_ENV !== 'development') {
+      throw new Error('devWipeAllUserData is disabled in production');
     }
 
     console.log('[DEV_WIPE_ALL] ════════════════════════════════════════════');
