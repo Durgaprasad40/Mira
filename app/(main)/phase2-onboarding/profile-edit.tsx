@@ -161,15 +161,20 @@ export default function Phase2ProfileEdit() {
   const [heightInput, setHeightInput] = useState<string>(height ? height.toString() : '');
   const [weightInput, setWeightInput] = useState<string>(weight ? weight.toString() : '');
 
+  // Track whether user has touched height/weight fields (prevents late hydration from clobbering edits)
+  const hasUserEditedHeightRef = useRef(false);
+  const hasUserEditedWeightRef = useRef(false);
+
   // Sync store values to local input state when they arrive after mount (e.g., from importPhase1Data)
+  // STABILITY FIX: Only hydrate if user hasn't touched the field yet
   useEffect(() => {
-    if (height && height > 0 && heightInput === '') {
+    if (height && height > 0 && heightInput === '' && !hasUserEditedHeightRef.current) {
       setHeightInput(height.toString());
     }
   }, [height, heightInput]);
 
   useEffect(() => {
-    if (weight && weight > 0 && weightInput === '') {
+    if (weight && weight > 0 && weightInput === '' && !hasUserEditedWeightRef.current) {
       setWeightInput(weight.toString());
     }
   }, [weight, weightInput]);
@@ -515,6 +520,7 @@ export default function Phase2ProfileEdit() {
                 style={styles.heightInput}
                 value={heightInput}
                 onChangeText={(text) => {
+                  hasUserEditedHeightRef.current = true;
                   setHeightInput(text);
                   const num = parseInt(text, 10);
                   setHeight(isNaN(num) || num <= 0 ? null : num);
@@ -536,6 +542,7 @@ export default function Phase2ProfileEdit() {
                 style={styles.heightInput}
                 value={weightInput}
                 onChangeText={(text) => {
+                  hasUserEditedWeightRef.current = true;
                   setWeightInput(text);
                   const num = parseInt(text, 10);
                   setWeight(isNaN(num) || num <= 0 ? null : num);
