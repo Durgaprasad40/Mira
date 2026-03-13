@@ -4,7 +4,7 @@
  * Allows editing the desire/bio text for the private profile.
  * This is a standalone edit screen within Phase-2 (no onboarding navigation).
  */
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   View,
   Text,
@@ -45,6 +45,12 @@ export default function EditDesireScreen() {
   const [desireText, setDesireText] = useState(currentBio || '');
   const [isSaving, setIsSaving] = useState(false);
 
+  // Track mount status to prevent state updates after unmount
+  const isMountedRef = useRef(true);
+  useEffect(() => {
+    return () => { isMountedRef.current = false; };
+  }, []);
+
   // Validation
   const charCount = desireText.trim().length;
   const isValid = charCount >= PHASE2_DESIRE_MIN_LENGTH && charCount <= PHASE2_DESIRE_MAX_LENGTH;
@@ -77,7 +83,9 @@ export default function EditDesireScreen() {
       }
       Alert.alert('Error', 'Failed to save. Please try again.');
     } finally {
-      setIsSaving(false);
+      if (isMountedRef.current) {
+        setIsSaving(false);
+      }
     }
   };
 

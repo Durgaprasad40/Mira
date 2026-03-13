@@ -9,7 +9,7 @@
  * Editable fields: height, weight, smoking, drinking, education, religion
  * Locked fields (read-only): name, age, gender, User ID
  */
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   View,
   Text,
@@ -129,6 +129,12 @@ export default function EditProfileDetailsScreen() {
   const [religion, setLocalReligion] = useState(storeReligion);
   const [isSaving, setIsSaving] = useState(false);
 
+  // Track mount status to prevent state updates after unmount
+  const isMountedRef = useRef(true);
+  useEffect(() => {
+    return () => { isMountedRef.current = false; };
+  }, []);
+
   // Parse height/weight for comparison and validation
   const parsedHeight = heightText.trim() === '' ? null : parseInt(heightText, 10);
   const parsedWeight = weightText.trim() === '' ? null : parseInt(weightText, 10);
@@ -199,7 +205,9 @@ export default function EditProfileDetailsScreen() {
       }
       Alert.alert('Error', 'Failed to save. Please try again.');
     } finally {
-      setIsSaving(false);
+      if (isMountedRef.current) {
+        setIsSaving(false);
+      }
     }
   };
 
