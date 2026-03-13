@@ -171,6 +171,8 @@ type Overlay =
 export default function ChatRoomScreen() {
   // B2-HIGH FIX: Prevent setState-after-unmount
   const mountedRef = useRef(true);
+  // Synchronous guard against double-tap send (React state is async and race-prone)
+  const isSendingRef = useRef(false);
 
   // ISSUE B: Read route params for instant render fallback
   const { roomId, roomName: routeRoomName, isPrivate: routeIsPrivate } = useLocalSearchParams<{
@@ -904,6 +906,9 @@ export default function ChatRoomScreen() {
   const handleSend = useCallback(async () => {
     const trimmed = inputText.trim();
     if (!trimmed || !roomIdStr) return;
+    // Synchronous double-tap guard (ChatComposer's isSending state is async)
+    if (isSendingRef.current) return;
+    isSendingRef.current = true;
 
     if (isDemoMode) {
       const newMessage: DemoChatMessage = {
@@ -919,8 +924,12 @@ export default function ChatRoomScreen() {
       setInputText('');
       // Demo mode: local coin increment (no backend)
       incrementCoins();
+      isSendingRef.current = false;
     } else {
-      if (!authUserId || !hasValidRoomId) return;
+      if (!authUserId || !hasValidRoomId) {
+        isSendingRef.current = false;
+        return;
+      }
       const clientId = generateUUID();
       const now = Date.now();
       const pendingId = `pending_${clientId}`;
@@ -959,6 +968,8 @@ export default function ChatRoomScreen() {
           setInputText(textToRestore);
         }
         Alert.alert('Send Failed', error?.message || 'Message could not be sent. Please try again.');
+      } finally {
+        isSendingRef.current = false;
       }
     }
   }, [inputText, roomIdStr, hasValidRoomId, addStoreMessage, authUserId, sendMessageMutation, persistedDisplayName]);
