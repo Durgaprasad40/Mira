@@ -166,8 +166,9 @@ function ResetEpochChecker() {
 
           // Force navigation to welcome screen (logged out state)
           // This prevents stale onboardingCompleted from bypassing onboarding
+          // FIX: Navigate directly to welcome, not "/" which remounts index.tsx
           console.log('[RESET_EPOCH] Navigating to welcome screen...');
-          router.replace('/');
+          router.replace('/(auth)/welcome');
         }
       } catch (error) {
         console.error('[RESET_EPOCH] Error during reset epoch check:', error);

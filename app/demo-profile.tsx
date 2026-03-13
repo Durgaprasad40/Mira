@@ -75,6 +75,9 @@ export default function DemoProfileScreen() {
       return;
     }
 
+    // H7 FIX: Capture auth version before any auth operation
+    const capturedAuthVersion = useAuthStore.getState().authVersion;
+
     // Save profile to demoStore (persisted)
     saveDemoProfile(DEMO_USER_ID, {
       name: trimmedName,
@@ -83,7 +86,7 @@ export default function DemoProfileScreen() {
     });
 
     // Set auth so the app treats us as authenticated
-    setAuth(DEMO_USER_ID, 'demo_token', true);
+    setAuth(DEMO_USER_ID, 'demo_token', true, capturedAuthVersion);
 
     // Clear stale data from any previous demo session, then seed fresh
     useDemoDmStore.setState({ conversations: {}, meta: {}, drafts: {} });

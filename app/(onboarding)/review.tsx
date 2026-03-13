@@ -7,7 +7,7 @@
  * - Do not change UX/flows without explicit unlock
  * Date locked: 2026-03-04
  */
-import React, { useState, useCallback } from "react";
+import React, { useState, useCallback, useRef, useEffect } from "react";
 import {
   View,
   Text,
@@ -137,6 +137,13 @@ export default function ReviewScreen() {
   const router = useRouter();
   const { userId, setOnboardingCompleted, faceVerificationPassed, faceVerificationPending } = useAuthStore();
   const demoProfile = useDemoStore((s) => isDemoMode && userId ? s.demoProfiles[userId] : null);
+
+  // H8 FIX: Track mounted state to prevent setAuth after unmount
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
 
   // BUG FIX: Always query backend status as authoritative source + fallback
   const onboardingStatus = useQuery(
@@ -448,16 +455,21 @@ export default function ReviewScreen() {
         });
       }
 
-      // H5 FIX: Capture logout timestamp before async operation
-      const logoutTimestampBefore = useAuthStore.getState()._logoutTimestamp;
+      // H7 FIX: Capture auth version before async operation
+      const capturedAuthVersion = useAuthStore.getState().authVersion;
 
       // Submit all onboarding data to backend
       await completeOnboarding(onboardingData);
 
-      // H5 FIX: Check if logout happened during mutation
-      const logoutTimestampAfter = useAuthStore.getState()._logoutTimestamp;
-      if (logoutTimestampAfter !== logoutTimestampBefore) {
+      // H7 FIX: Check if logout happened during mutation (version changed)
+      if (useAuthStore.getState().authVersion !== capturedAuthVersion) {
         if (__DEV__) console.log('[AUTH] Logout detected during onboarding completion - ignoring result');
+        return;
+      }
+
+      // H8 FIX: Check if component unmounted during async onboarding
+      if (!mountedRef.current) {
+        if (__DEV__) console.log('[AUTH] Component unmounted during onboarding completion - ignoring result');
         return;
       }
 

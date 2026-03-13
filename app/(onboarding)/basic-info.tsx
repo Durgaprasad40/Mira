@@ -711,6 +711,9 @@ export default function BasicInfoScreen() {
     // Close modal
     setShowConfirmModal(false);
 
+    // H7 FIX: Capture auth version at start of handleNext (before any async/branching)
+    const capturedAuthVersion = useAuthStore.getState().authVersion;
+
     // Create user account
     setIsSubmitting(true);
     try {
@@ -726,7 +729,7 @@ export default function BasicInfoScreen() {
             try {
               const result = demoStore.demoSignIn(email, password);
               newUserId = result.userId;
-              setAuth(newUserId, "demo_token", result.onboardingComplete);
+              setAuth(newUserId, "demo_token", result.onboardingComplete, capturedAuthVersion);
               if (result.onboardingComplete) {
                 router.replace("/(main)/(tabs)/home");
                 return;
@@ -767,7 +770,7 @@ export default function BasicInfoScreen() {
         console.log('[BASIC] ════════════════════════════════════════');
 
         demoStore.saveDemoProfile(newUserId, dataToSave);
-        setAuth(newUserId, "demo_token", false);
+        setAuth(newUserId, "demo_token", false, capturedAuthVersion);
         setStep("consent");
         router.push("/(onboarding)/consent" as any);
         return;
@@ -777,8 +780,7 @@ export default function BasicInfoScreen() {
       // Construct full name from firstName + lastName for backend
       const fullName = `${firstName.trim()} ${lastName.trim()}`.trim();
 
-      // H5 FIX: Capture logout timestamp before async operation
-      const logoutTimestampBefore = useAuthStore.getState()._logoutTimestamp;
+      // H7 FIX: capturedAuthVersion already captured at start of handleNext
 
       const result = await submitEmailRegistration({
         email,
@@ -790,10 +792,15 @@ export default function BasicInfoScreen() {
         lgbtqSelf: lgbtqSelf.length > 0 ? lgbtqSelf : undefined, // LGBTQ identity (optional)
       });
 
-      // H5 FIX: Check if logout happened during mutation
-      const logoutTimestampAfter = useAuthStore.getState()._logoutTimestamp;
-      if (logoutTimestampAfter !== logoutTimestampBefore) {
+      // H7 FIX: Check if logout happened during mutation (version changed)
+      if (useAuthStore.getState().authVersion !== capturedAuthVersion) {
         if (__DEV__) console.log('[AUTH] Logout detected during registration - ignoring result');
+        return;
+      }
+
+      // H8 FIX: Check if component unmounted during async registration
+      if (!isMountedRef.current) {
+        if (__DEV__) console.log('[AUTH] Component unmounted during registration - ignoring result');
         return;
       }
 
@@ -804,7 +811,7 @@ export default function BasicInfoScreen() {
       }
 
       if (result.success && result.userId && result.token) {
-        setAuth(result.userId, result.token, false);
+        setAuth(result.userId, result.token, false, capturedAuthVersion);
 
         // STABILITY FIX (2026-03-04): Wrap token persistence in try-catch to prevent navigation on failure
         try {
