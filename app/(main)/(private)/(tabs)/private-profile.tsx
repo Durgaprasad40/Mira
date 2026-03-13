@@ -230,8 +230,15 @@ export default function PrivateProfileScreen() {
     return localIntentKeys;
   }, [isDemoMode, backendProfile, localIntentKeys]);
 
+  // STABILITY FIX: Prioritize local store for immediate feedback after edit
+  // (matches photos pattern - local first, backend fallback)
   const privateBio = useMemo(() => {
     if (isDemoMode) return localPrivateBio;
+    // Use local store if it has a value (includes data from recent edits)
+    if (localPrivateBio && localPrivateBio.trim().length > 0) {
+      return localPrivateBio;
+    }
+    // Fallback to backend if local is empty (e.g., first load before hydration)
     if (backendProfile?.privateBio) return backendProfile.privateBio;
     return localPrivateBio;
   }, [isDemoMode, backendProfile, localPrivateBio]);
