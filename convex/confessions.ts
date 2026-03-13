@@ -409,6 +409,9 @@ export const toggleReaction = mutation({
             createdAt: now,
             lastMessageAt: now,
             expiresAt: now + TWENTY_FOUR_HOURS, // Confession chats expire in 24h
+            // PRIVACY FIX: Mark confession author as anonymous participant
+            // Their real identity should not be revealed to the tagged user
+            anonymousParticipantId: confession.isAnonymous ? confession.userId : undefined,
           });
 
           // Create participant junction rows for efficient Messages queries
@@ -712,6 +715,9 @@ export const getOrCreateForConfession = mutation({
       createdAt: now,
       lastMessageAt: now,
       expiresAt: now + TWENTY_FOUR_HOURS,
+      // PRIVACY FIX: Mark confession author as anonymous participant if confession is anonymous
+      // Their real identity should not be revealed to the replying user
+      anonymousParticipantId: confession.isAnonymous ? authorId : undefined,
     });
 
     // Create participant junction rows for efficient queries

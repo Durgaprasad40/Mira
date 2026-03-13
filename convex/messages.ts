@@ -555,12 +555,19 @@ export const getConversation = query({
     const otherUser = await ctx.db.get(otherUserId);
     if (!otherUser) return null;
 
-    // Get primary photo
-    const photo = await ctx.db
-      .query('photos')
-      .withIndex('by_user', (q) => q.eq('userId', otherUserId))
-      .filter((q) => q.eq(q.field('isPrimary'), true))
-      .first();
+    // PRIVACY FIX: Check if the other user should be shown anonymously
+    // This happens when they're the confession author on an anonymous confession
+    const isOtherUserAnonymous = conversation.anonymousParticipantId === otherUserId;
+
+    // Get primary photo (only if not anonymous)
+    let photo = null;
+    if (!isOtherUserAnonymous) {
+      photo = await ctx.db
+        .query('photos')
+        .withIndex('by_user', (q) => q.eq('userId', otherUserId))
+        .filter((q) => q.eq(q.field('isPrimary'), true))
+        .first();
+    }
 
     // Check if this is an expired confession-based conversation
     const isConfessionChat = !!conversation.confessionId;
@@ -578,10 +585,12 @@ export const getConversation = query({
       isExpired,
       otherUser: {
         id: otherUserId,
-        name: otherUser.name,
-        photoUrl: photo?.url,
-        lastActive: otherUser.lastActive,
-        isVerified: otherUser.isVerified,
+        // PRIVACY FIX: Return anonymous display info if user should be anonymous
+        name: isOtherUserAnonymous ? 'Anonymous' : otherUser.name,
+        photoUrl: isOtherUserAnonymous ? undefined : photo?.url,
+        lastActive: isOtherUserAnonymous ? undefined : otherUser.lastActive,
+        isVerified: isOtherUserAnonymous ? false : otherUser.isVerified,
+        isAnonymous: isOtherUserAnonymous, // Flag for UI to show anonymous avatar
       },
     };
   },
@@ -708,6 +717,10 @@ export const getConversations = query({
       const lastMessage = lastMessages[i];
       const unreadCount = unreadCounts[i]?.length || 0;
 
+      // PRIVACY FIX: Check if the other user should be shown anonymously
+      // This happens when they're the confession author on an anonymous confession
+      const isOtherUserAnonymous = conversation.anonymousParticipantId === otherUserId;
+
       result.push({
         id: conversation._id,
         matchId: conversation.matchId,
@@ -715,11 +728,13 @@ export const getConversations = query({
         lastMessageAt: conversation.lastMessageAt,
         otherUser: {
           id: otherUserId,
-          name: otherUser.name,
-          photoUrl: photo?.url,
-          lastActive: otherUser.lastActive,
-          isVerified: otherUser.isVerified,
-          photoBlurred: otherUser.photoBlurred === true,
+          // PRIVACY FIX: Return anonymous display info if user should be anonymous
+          name: isOtherUserAnonymous ? 'Anonymous' : otherUser.name,
+          photoUrl: isOtherUserAnonymous ? undefined : photo?.url,
+          lastActive: isOtherUserAnonymous ? undefined : otherUser.lastActive,
+          isVerified: isOtherUserAnonymous ? false : otherUser.isVerified,
+          photoBlurred: isOtherUserAnonymous ? false : otherUser.photoBlurred === true,
+          isAnonymous: isOtherUserAnonymous, // Flag for UI to show anonymous avatar
         },
         lastMessage: lastMessage
           ? {

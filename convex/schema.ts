@@ -520,6 +520,9 @@ export default defineSchema({
     lastMessageAt: v.optional(v.number()),
     createdAt: v.number(),
     expiresAt: v.optional(v.number()), // Only set for confession-based threads (24h after creation)
+    // PRIVACY FIX: Track which participant should be shown anonymously in confession chats
+    // When set, this user's real identity (name, photo) should NOT be exposed to the other participant
+    anonymousParticipantId: v.optional(v.id('users')),
     // Phase-2: Room this DM originated from (for per-room unread badge)
     sourceRoomId: v.optional(v.id('chatRooms')),
     // Connection source for Phase-2 T&D/Room/Desire handoffs
