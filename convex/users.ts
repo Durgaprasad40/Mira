@@ -1,6 +1,7 @@
 import { v } from "convex/values";
 import { mutation, query } from "./_generated/server";
 import { Id } from "./_generated/dataModel";
+import { internal } from "./_generated/api";
 import { logAdminAction } from "./adminLog";
 import { resolveUserIdByAuthId, ensureUserByAuthId, validateSessionToken } from "./helpers";
 
@@ -1860,6 +1861,11 @@ export const setPhase2OnboardingCompleted = mutation({
     await ctx.db.patch(resolvedUserId, {
       phase2OnboardingCompleted: true,
       phase2OnboardingCompletedAt: Date.now(),
+    });
+
+    // Initialize Phase-2 ranking metrics for Desire Land discovery
+    await ctx.runMutation(internal.phase2Ranking.initializePhase2RankingMetrics, {
+      userId: resolvedUserId,
     });
 
     console.log('[P2_ONBOARD] setPhase2OnboardingCompleted: success for user', resolvedUserId.substring(0, 8));

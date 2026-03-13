@@ -3,6 +3,8 @@
  */
 export interface ProfileData {
   id: string;
+  /** Phase-2 only: The user ID (distinct from profile doc _id) */
+  userId?: string;
   name: string;
   age: number;
   bio?: string;
@@ -43,6 +45,8 @@ export function toProfileData(p: any): ProfileData {
 
   const result: ProfileData = {
     id: p._id || p.id,
+    // Phase-2 profiles have separate userId; Phase-1 uses id as userId
+    userId: p.userId,
     name: p.name,
     age: p.age,
     bio: p.bio,

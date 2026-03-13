@@ -995,6 +995,9 @@ export const sendMessage = mutation({
       await ctx.db.patch(roomId, { messageCount: TARGET_AFTER_TRIM });
     }
 
+    // Record Phase-2 activity for ranking freshness (throttled to 1 update/hour)
+    await ctx.runMutation(internal.phase2Ranking.recordPhase2Activity, {});
+
     return messageId;
   },
 });

@@ -1603,4 +1603,30 @@ export default defineSchema({
   })
     .index('by_failedAt', ['failedAt'])
     .index('by_storageId', ['storageId']),
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Phase-2 Ranking System Tables
+  // ─────────────────────────────────────────────────────────────────────────
+
+  // Phase-2 Ranking Metrics (per-user ranking signals for Desire Land)
+  phase2RankingMetrics: defineTable({
+    userId: v.id('users'),
+    phase2OnboardedAt: v.number(),      // When Phase-2 onboarding completed
+    lastPhase2ActiveAt: v.number(),     // Last activity in Phase-2 (TD, chat, Desire Land)
+    totalImpressions: v.number(),       // Total times shown to any viewer
+    lastShownAt: v.number(),            // Timestamp of last impression
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index('by_user', ['userId']),
+
+  // Phase-2 Viewer Impressions (per-viewer repetition suppression)
+  phase2ViewerImpressions: defineTable({
+    viewerId: v.id('users'),            // Who was viewing
+    viewedUserId: v.id('users'),        // Who was shown
+    lastSeenAt: v.number(),             // When they were last shown
+    seenCount: v.number(),              // How many times shown to this viewer
+  })
+    .index('by_viewer', ['viewerId'])
+    .index('by_pair', ['viewerId', 'viewedUserId']),
 });

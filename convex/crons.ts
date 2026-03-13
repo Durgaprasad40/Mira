@@ -65,4 +65,12 @@ crons.hourly(
   internal.crossedPaths.cleanupExpiredCrossedEvents
 );
 
+// Phase-2 Ranking: Cleanup old viewer impressions daily
+// Removes impressions older than 7 days to prevent unbounded table growth
+crons.daily(
+  'cleanup-old-viewer-impressions',
+  { hourUTC: 4, minuteUTC: 0 },
+  internal.phase2Ranking.cleanupOldImpressions
+);
+
 export default crons;

@@ -1,6 +1,7 @@
 import { mutation, query, internalMutation } from './_generated/server';
 import { v } from 'convex/values';
 import { Id } from './_generated/dataModel';
+import { internal } from './_generated/api';
 import { resolveUserIdByAuthId } from './helpers';
 
 // 24-hour auto-delete rule (same as Confessions)
@@ -1878,6 +1879,10 @@ export const createOrEditAnswer = mutation({
       console.log(`[T/D] identityMode reused=${existing.identityMode ?? 'anonymous'}`);
 
       await ctx.db.patch(existing._id, patch);
+
+      // Record Phase-2 activity for ranking freshness (throttled to 1 update/hour)
+      await ctx.runMutation(internal.phase2Ranking.recordPhase2Activity, {});
+
       return { answerId: existing._id, isEdit: true };
     } else {
       // CREATE new answer
@@ -1935,6 +1940,9 @@ export const createOrEditAnswer = mutation({
         answerCount: prompt.answerCount + 1,
         activeCount: prompt.activeCount + 1,
       });
+
+      // Record Phase-2 activity for ranking freshness (throttled to 1 update/hour)
+      await ctx.runMutation(internal.phase2Ranking.recordPhase2Activity, {});
 
       console.log(`[T/D] answer created, identityMode=${identityMode}`);
       return { answerId, isEdit: false };

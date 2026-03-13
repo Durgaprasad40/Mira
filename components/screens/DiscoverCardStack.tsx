@@ -565,6 +565,8 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   const NUDGE_H = 38;
 
   const swipeMutation = useMutation(api.likes.swipe);
+  // Phase-2 only: Impression recording for ranking system
+  const recordImpressionsMutation = useMutation(api.privateDiscover.recordDesireLandImpressions);
 
   // Two-pan alternating approach
   const panA = useRef(new Animated.ValueXY()).current;
@@ -665,6 +667,40 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       privateIntentKey: intentKeys[0] ?? DEFAULT_INTENT_KEY, // Never send undefined
     });
   }, [isPhase2, current?.id]);
+
+  // Phase-2 only: Record impressions for ranking system (fire-and-forget)
+  // Guard: track which profile batch was recorded to avoid duplicate calls on rerender
+  const recordedImpressionSignatureRef = useRef<string | null>(null);
+  useEffect(() => {
+    // Only for Phase-2, non-demo mode, with valid profiles
+    if (!isPhase2 || isDemoMode || displayProfiles.length === 0 || !userId) return;
+
+    // Build a signature of the current batch (sorted user IDs joined)
+    // Using userId ?? id to handle both Phase-2 (userId) and Phase-1 (id = userId) shapes
+    const userIds = displayProfiles
+      .map((p) => (p.userId ?? p.id) as string)
+      .filter(Boolean)
+      .sort()
+      .join(',');
+
+    // Skip if already recorded this exact batch
+    if (recordedImpressionSignatureRef.current === userIds) return;
+    recordedImpressionSignatureRef.current = userIds;
+
+    // Fire-and-forget: record impressions for displayed profiles
+    const viewedUserIds = displayProfiles
+      .map((p) => p.userId ?? p.id)
+      .filter(Boolean) as Id<'users'>[];
+
+    if (viewedUserIds.length > 0) {
+      recordImpressionsMutation({
+        viewedUserIds,
+        authUserId: userId,
+      }).catch(() => {
+        // Silently ignore errors - impression recording is non-critical
+      });
+    }
+  }, [isPhase2, displayProfiles, userId, recordImpressionsMutation]);
 
   // Stable refs for panResponder callbacks — prevents panResponder recreation
   // when current/handleSwipe/animateSwipe change between renders.
