@@ -117,7 +117,26 @@ export default function PromptThreadScreen() {
   const isLoading = threadData === undefined;
   const prompt = threadData?.prompt;
   const answers = threadData?.answers ?? [];
-  const isExpired = threadData?.isExpired ?? false;
+
+  // Force re-render when expiry time passes (so isExpired updates in real-time)
+  const [, forceUpdate] = useState(0);
+  useEffect(() => {
+    if (!prompt?.expiresAt || threadData?.isExpired) return;
+    const msUntilExpiry = prompt.expiresAt - Date.now();
+    if (msUntilExpiry <= 0) return; // Already expired
+    // Schedule re-render when expiry time is reached
+    const timer = setTimeout(() => forceUpdate((n) => n + 1), msUntilExpiry + 100);
+    return () => clearTimeout(timer);
+  }, [prompt?.expiresAt, threadData?.isExpired]);
+
+  // Compute expiration locally to catch real-time expiry (server flag is a snapshot)
+  const isExpired = useMemo(() => {
+    // If server already says expired, trust it
+    if (threadData?.isExpired) return true;
+    // Otherwise check locally against expiresAt
+    if (!prompt?.expiresAt) return false;
+    return Date.now() >= prompt.expiresAt;
+  }, [threadData?.isExpired, prompt?.expiresAt]);
 
   // Find user's own answer
   const myAnswer = useMemo(() => {
@@ -127,6 +146,13 @@ export default function PromptThreadScreen() {
   // Composer state - unified composer for text + optional media
   const [showUnifiedComposer, setShowUnifiedComposer] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
+
+  // Close composer if prompt expires while it's open
+  useEffect(() => {
+    if (isExpired && showUnifiedComposer) {
+      setShowUnifiedComposer(false);
+    }
+  }, [isExpired, showUnifiedComposer]);
 
   // Gallery media state for privacy sheet (camera flow)
   const [galleryMedia, setGalleryMedia] = useState<{
