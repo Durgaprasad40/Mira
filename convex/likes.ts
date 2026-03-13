@@ -348,6 +348,7 @@ export const rewind = mutation({
 });
 
 // Get likes received (who liked you)
+// FIX: Excludes blocked users (bidirectional)
 export const getLikesReceived = query({
   args: {
     userId: v.id('users'),
@@ -378,9 +379,30 @@ export const getLikesReceived = query({
       .order('desc')
       .take(limit);
 
+    // FIX: Batch fetch blocked users (bidirectional)
+    const [myBlocks, blocksOnMe] = await Promise.all([
+      // Users I have blocked
+      ctx.db
+        .query('blocks')
+        .withIndex('by_blocker', (q) => q.eq('blockerId', userId))
+        .collect(),
+      // Users who have blocked me
+      ctx.db
+        .query('blocks')
+        .withIndex('by_blocked', (q) => q.eq('blockedUserId', userId))
+        .collect(),
+    ]);
+    const blockedUserIds = new Set([
+      ...myBlocks.map((b) => b.blockedUserId as string),
+      ...blocksOnMe.map((b) => b.blockerId as string),
+    ]);
+
     // Check which ones are already matched
     const result = [];
     for (const like of likes) {
+      // FIX: Skip likes from blocked users (either direction)
+      if (blockedUserIds.has(like.fromUserId as string)) continue;
+
       // Check if already swiped on this person
       const alreadySwiped = await ctx.db
         .query('likes')
