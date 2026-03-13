@@ -493,6 +493,8 @@ export default function ChatRoomsScreen() {
     setIsJoining(true);
     try {
       const result = await joinRoomByCodeMut({ joinCode: joinCode.trim(), authUserId: userId! });
+      // UNMOUNT-GUARD: Check mounted before setState after async
+      if (!mountedRef.current) return;
       setJoinCode('');
       if (result.alreadyMember) {
         Alert.alert('Already a Member', 'You are already a member of this room.');
@@ -505,7 +507,10 @@ export default function ChatRoomsScreen() {
     } catch (error: any) {
       Alert.alert('Error', error.message || 'Failed to join room');
     } finally {
-      setIsJoining(false);
+      // UNMOUNT-GUARD: Check mounted before setState in finally
+      if (mountedRef.current) {
+        setIsJoining(false);
+      }
     }
   }, [joinCode, isJoining, joinRoomByCodeMut, router]);
 
@@ -531,6 +536,9 @@ export default function ChatRoomsScreen() {
         args.password = pwd;
       }
       const result = await createPrivateRoomMut(args);
+
+      // UNMOUNT-GUARD: Check mounted before setState after async
+      if (!mountedRef.current) return;
 
       // Clear inputs on success
       setNewRoomName('');
@@ -559,7 +567,10 @@ export default function ChatRoomsScreen() {
       // Keep inputs on error so user can edit
       Alert.alert('Error', error.message || 'Failed to create room');
     } finally {
-      setIsCreating(false);
+      // UNMOUNT-GUARD: Check mounted before setState in finally
+      if (mountedRef.current) {
+        setIsCreating(false);
+      }
     }
   }, [newRoomName, newRoomPassword, isCreating, createPrivateRoomMut, router]);
 
