@@ -924,6 +924,7 @@ export default function ChatRoomScreen() {
       const clientId = generateUUID();
       const now = Date.now();
       const pendingId = `pending_${clientId}`;
+      const textToRestore = trimmed; // Save text before clearing for retry on failure
 
       const pendingMsg: DemoChatMessage = {
         id: pendingId,
@@ -947,12 +948,17 @@ export default function ChatRoomScreen() {
           text: trimmed,
           clientId,
         });
-      } finally {
-        // P1 CR-003: Always remove pending message, regardless of success/failure
-        // B2-HIGH FIX: Guard setState after async
+        // Success: remove pending message (real message arrives via subscription)
         if (mountedRef.current) {
           setPendingMessages((prev) => prev.filter((m) => m.id !== pendingId));
         }
+      } catch (error: any) {
+        // STABILITY FIX: On failure, restore text and show error alert
+        if (mountedRef.current) {
+          setPendingMessages((prev) => prev.filter((m) => m.id !== pendingId));
+          setInputText(textToRestore);
+        }
+        Alert.alert('Send Failed', error?.message || 'Message could not be sent. Please try again.');
       }
     }
   }, [inputText, roomIdStr, hasValidRoomId, addStoreMessage, authUserId, sendMessageMutation, persistedDisplayName]);
