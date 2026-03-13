@@ -246,10 +246,13 @@ export const sendMessage = mutation({
         .withIndex('by_user_dedupe', (q) => q.eq('userId', recipientId).eq('dedupeKey', dedupeKey))
         .first();
 
+      // M1 FIX: Privacy-safe notification body - never expose message content
+      const notificationBody = 'You have a new message';
+
       if (existingNotif) {
         // Update existing notification instead of creating duplicate
         await ctx.db.patch(existingNotif._id, {
-          body: type === 'text' ? maskedContent.substring(0, 50) : 'Sent you a message',
+          body: notificationBody,
           createdAt: now,
           expiresAt: now + 24 * 60 * 60 * 1000,
         });
@@ -258,7 +261,7 @@ export const sendMessage = mutation({
           userId: recipientId,
           type: 'message',
           title: 'New Message',
-          body: type === 'text' ? maskedContent.substring(0, 50) : 'Sent you a message',
+          body: notificationBody,
           data: { conversationId: conversationId },
           dedupeKey,
           createdAt: now,
@@ -402,7 +405,9 @@ export const sendPreMatchMessage = mutation({
     await upsertParticipantUnreadCount(ctx, conversation._id, fromUserId);
 
     // 9-5: Notify recipient with TTL and dedupe
+    // M1 FIX: Privacy-safe notification body - never expose message content
     const dedupeKey = `message:${conversation._id}:unread`;
+    const notificationBody = 'You have a new message';
     const existingNotif = await ctx.db
       .query('notifications')
       .withIndex('by_user_dedupe', (q) => q.eq('userId', toUserId).eq('dedupeKey', dedupeKey))
@@ -411,7 +416,7 @@ export const sendPreMatchMessage = mutation({
     if (existingNotif) {
       await ctx.db.patch(existingNotif._id, {
         title: `${fromUser.name} sent you a message`,
-        body: maskedContent.substring(0, 50),
+        body: notificationBody,
         createdAt: now,
         expiresAt: now + 24 * 60 * 60 * 1000,
       });
@@ -420,7 +425,7 @@ export const sendPreMatchMessage = mutation({
         userId: toUserId,
         type: 'message',
         title: `${fromUser.name} sent you a message`,
-        body: maskedContent.substring(0, 50),
+        body: notificationBody,
         data: { conversationId: conversation._id, userId: fromUserId },
         dedupeKey,
         createdAt: now,
