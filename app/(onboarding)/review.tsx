@@ -241,25 +241,34 @@ export default function ReviewScreen() {
     }
   }, [currentUser, backendPhotos]);
 
-  // CRITICAL: Check demoProfile.faceVerificationPassed for demo mode (persisted across logout)
-  // BUG FIX: Also accept faceVerificationPending (manual review) as valid to proceed
-  const isVerified = isDemoMode
-    ? !!(demoProfile?.faceVerificationPassed || faceVerificationPassed || faceVerificationPending)
+  // CRITICAL: Check face verification status for Review entry
+  // POLICY: Allow entry if user has PASSED or is PENDING manual review.
+  // - PASSED (faceVerificationPassed=true): Fully verified, can proceed
+  // - PENDING (faceVerificationPending=true): Submitted for manual review, can proceed
+  // - UNVERIFIED/FAILED: Must complete face verification first
+  const canProceedWithVerification = isDemoMode
+    ? !!(demoProfile?.faceVerificationPassed || demoProfile?.faceVerificationPending || faceVerificationPassed || faceVerificationPending)
     : (faceVerificationPassed || faceVerificationPending);
 
-  // CHECKPOINT GATE: Block access if face verification not completed
+  // CHECKPOINT GATE: Allow entry if face verification was attempted (passed or pending)
+  // SOFT-GATE POLICY: Pending verification is informational only - does NOT block completion
   React.useEffect(() => {
-    if (isVerified) {
+    if (canProceedWithVerification) {
       if (__DEV__) {
-        console.log("[REVIEW_GATE] verified=true (passed or pending) -> allow");
+        console.log("[REVIEW_GATE] Entry allowed");
         console.log("[REVIEW_GATE] faceVerificationPassed:", faceVerificationPassed);
         console.log("[REVIEW_GATE] faceVerificationPending:", faceVerificationPending);
+        if (faceVerificationPending && !faceVerificationPassed) {
+          console.log("[REVIEW_GATE] Pending verification is informational only (no blocking)");
+        }
       }
       return;
     }
-    if (__DEV__) console.log("[REVIEW_GATE] verified=false -> redirect to face-verification");
+    if (__DEV__) {
+      console.log("[REVIEW_GATE] No verification attempt -> redirect to face-verification");
+    }
     router.replace("/(onboarding)/face-verification" as any);
-  }, [isVerified, router, faceVerificationPassed, faceVerificationPending]);
+  }, [canProceedWithVerification, router, faceVerificationPassed, faceVerificationPending]);
   const [isSubmitting, setIsSubmitting] = React.useState(false);
   const [uploadProgress, setUploadProgress] = React.useState("");
 
@@ -286,6 +295,18 @@ export default function ReviewScreen() {
       console.log("[REVIEW] isSubmitting:", isSubmitting);
       console.log("[REVIEW] faceVerificationPassed:", faceVerificationPassed);
       console.log("[REVIEW] faceVerificationPending:", faceVerificationPending);
+    }
+
+    // SOFT-GATE POLICY: Face verification does NOT block onboarding completion.
+    // Pending/failed verification may affect trust/ranking later, but not access.
+    // Log status for debugging but proceed regardless.
+    if (__DEV__) {
+      if (!faceVerificationPassed) {
+        console.log("[REVIEW_SUBMIT] proceeding with faceVerificationPassed=false");
+        console.log("[REVIEW_SUBMIT] faceVerificationPending:", faceVerificationPending, "(soft-gate only)");
+      } else {
+        console.log("[REVIEW_SUBMIT] faceVerificationPassed=true (verified)");
+      }
     }
 
     if (!userId) {

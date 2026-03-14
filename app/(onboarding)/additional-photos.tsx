@@ -482,6 +482,12 @@ export default function AdditionalPhotosScreen() {
 
             if (!uploadResult.success) {
               setUploadState(targetIndex, 'failed');
+              // STABILITY FIX: Clear preview on failure so slot reverts to empty state
+              setSlotPreviewUriByIndex((prev) => {
+                const next = [...prev];
+                next[targetIndex] = null;
+                return next;
+              });
               Alert.alert(
                 'Upload Failed',
                 'Failed to upload photo to server. Please try again.',
@@ -530,6 +536,12 @@ export default function AdditionalPhotosScreen() {
             );
             if (!uploadResult.success) {
               setUploadState(targetIndex, 'failed');
+              // STABILITY FIX: Clear preview on failure so slot reverts to empty state
+              setSlotPreviewUriByIndex((prev) => {
+                const next = [...prev];
+                next[targetIndex] = null;
+                return next;
+              });
               Alert.alert('Upload Failed', 'Please try again.');
               return;
             }
@@ -607,6 +619,12 @@ export default function AdditionalPhotosScreen() {
 
             if (!uploadResult.success) {
               setUploadState(targetIndex, 'failed');
+              // STABILITY FIX: Clear preview on failure so slot reverts to empty state
+              setSlotPreviewUriByIndex((prev) => {
+                const next = [...prev];
+                next[targetIndex] = null;
+                return next;
+              });
               Alert.alert('Upload Failed', 'Failed to upload photo to server. Please try again.');
               console.error('[PHOTO_ONBOARDING] Camera photo upload failed:', uploadResult.message);
               return;
@@ -645,6 +663,12 @@ export default function AdditionalPhotosScreen() {
             const uploadResult = await uploadPhotoToBackend(userId, uri, targetIndex === 0, targetIndex, token || undefined);
             if (!uploadResult.success) {
               setUploadState(targetIndex, 'failed');
+              // STABILITY FIX: Clear preview on failure so slot reverts to empty state
+              setSlotPreviewUriByIndex((prev) => {
+                const next = [...prev];
+                next[targetIndex] = null;
+                return next;
+              });
               Alert.alert('Upload Failed', 'Please try again.');
               return;
             }

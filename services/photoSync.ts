@@ -186,6 +186,7 @@ export async function syncPhotosFromBackend(
  * Upload a photo to Convex backend immediately.
  *
  * This is called when user adds a photo - ensures backend is updated ASAP.
+ * Includes retry logic for transient network failures.
  *
  * @param userId - The user ID
  * @param localUri - The local file:// URI
@@ -209,92 +210,122 @@ export async function uploadPhotoToBackend(
     return { success: true, message: 'Demo mode - no backend upload' };
   }
 
-  try {
-    if (__DEV__) {
-      console.log(`[PHOTO_SYNC] Uploading photo slot ${slotIndex} to backend for userId:`, userId);
-    }
+  // STABILITY FIX: Retry logic for transient network failures
+  const MAX_RETRIES = 2;
+  let lastError: Error | null = null;
 
-    // Step 1: Get upload URL from Convex
-    const uploadUrl = await convex.mutation(api.photos.generateUploadUrl);
-
-    // Step 2: Read file as blob
-    const response = await fetch(localUri);
-    const blob = await response.blob();
-
-    if (__DEV__) {
-      console.log(`[PHOTO_SYNC] Uploading blob: size=${blob.size} type=${blob.type}`);
-    }
-
-    // Step 3: Upload to Convex storage
-    const uploadResponse = await fetch(uploadUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': blob.type || 'image/jpeg',
-      },
-      body: blob,
-    });
-
-    if (!uploadResponse.ok) {
-      throw new Error(`Upload failed with status ${uploadResponse.status}`);
-    }
-
-    const uploadResult = await uploadResponse.json();
-    const storageId = uploadResult.storageId as Id<'_storage'>;
-
-    if (__DEV__) {
-      console.log(`[PHOTO_SYNC] Photo uploaded to storage: ${storageId}`);
-    }
-
-    // H-1: Track pending upload (best-effort, non-fatal)
+  for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
     try {
-      await convex.mutation(api.photos.trackPendingUpload, { userId, storageId });
-    } catch (e) {
-      console.warn('[PHOTO_SYNC] H-1: trackPendingUpload failed (non-fatal):', e);
-    }
+      if (__DEV__) {
+        console.log(`[PHOTO_SYNC] Uploading photo slot ${slotIndex} (attempt ${attempt}/${MAX_RETRIES}) for userId:`, userId);
+      }
 
-    // Step 4: Add photo to photos table
-    try {
-      const addPhotoResult = await convex.mutation(api.photos.addPhoto, {
-        userId,
-        storageId,
-        isPrimary,
-        hasFace: true, // Assume all profile photos have faces (verification happens separately)
-        token, // Pass session token for auth validation
-      });
+      // Step 1: Get upload URL from Convex
+      const uploadUrl = await convex.mutation(api.photos.generateUploadUrl);
+
+      // Step 2: Read file as blob
+      const response = await fetch(localUri);
+      if (!response.ok) {
+        throw new Error(`Failed to read local file: ${response.status}`);
+      }
+      const blob = await response.blob();
 
       if (__DEV__) {
-        console.log(`[PHOTO_SYNC] Photo added to database: ${addPhotoResult.photoId}`);
+        console.log(`[PHOTO_SYNC] Uploading blob: size=${blob.size} type=${blob.type}`);
       }
 
-      return {
-        success: true,
-        storageId,
-        photoId: addPhotoResult.photoId,
-        message: 'Photo uploaded successfully',
-      };
-    } catch (addPhotoError: any) {
-      // H-1: Cleanup orphaned storage (best-effort)
-      try {
-        await convex.mutation(api.photos.cleanupPendingUpload, { userId, storageId });
-      } catch (e) {
-        // M12 FIX: Log with full detail for diagnosis, not just a warning
-        console.error('[PHOTO_SYNC] M12: ORPHANED STORAGE - cleanup failed');
-        console.error('[PHOTO_SYNC] M12: userId:', userId, 'storageId:', storageId);
-        console.error('[PHOTO_SYNC] M12: cleanup error:', e);
-        // Attach orphanedStorageId to error so outer catch can expose it
-        addPhotoError.orphanedStorageId = storageId;
+      // Step 3: Upload to Convex storage
+      const uploadResponse = await fetch(uploadUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': blob.type || 'image/jpeg',
+        },
+        body: blob,
+      });
+
+      if (!uploadResponse.ok) {
+        throw new Error(`Upload failed with status ${uploadResponse.status}`);
       }
-      throw addPhotoError;
+
+      const uploadResult = await uploadResponse.json();
+      const storageId = uploadResult.storageId as Id<'_storage'>;
+
+      if (__DEV__) {
+        console.log(`[PHOTO_SYNC] Photo uploaded to storage: ${storageId}`);
+      }
+
+      // H-1: Track pending upload (best-effort, non-fatal)
+      try {
+        await convex.mutation(api.photos.trackPendingUpload, { userId, storageId });
+      } catch (e) {
+        console.warn('[PHOTO_SYNC] H-1: trackPendingUpload failed (non-fatal):', e);
+      }
+
+      // Step 4: Add photo to photos table
+      try {
+        const addPhotoResult = await convex.mutation(api.photos.addPhoto, {
+          userId,
+          storageId,
+          isPrimary,
+          hasFace: true, // Assume all profile photos have faces (verification happens separately)
+          token, // Pass session token for auth validation
+        });
+
+        if (__DEV__) {
+          console.log(`[PHOTO_SYNC] Photo added to database: ${addPhotoResult.photoId}`);
+        }
+
+        return {
+          success: true,
+          storageId,
+          photoId: addPhotoResult.photoId,
+          message: 'Photo uploaded successfully',
+        };
+      } catch (addPhotoError: any) {
+        // H-1: Cleanup orphaned storage (best-effort)
+        try {
+          await convex.mutation(api.photos.cleanupPendingUpload, { userId, storageId });
+        } catch (e) {
+          // M12 FIX: Log with full detail for diagnosis, not just a warning
+          console.error('[PHOTO_SYNC] M12: ORPHANED STORAGE - cleanup failed');
+          console.error('[PHOTO_SYNC] M12: userId:', userId, 'storageId:', storageId);
+          console.error('[PHOTO_SYNC] M12: cleanup error:', e);
+          // Attach orphanedStorageId to error so outer catch can expose it
+          addPhotoError.orphanedStorageId = storageId;
+        }
+        throw addPhotoError;
+      }
+    } catch (error: any) {
+      lastError = error;
+      const isNetworkError = error.message?.includes('Network request failed') ||
+                             error.message?.includes('network') ||
+                             error.message?.includes('timeout');
+
+      // STABILITY FIX: Only retry on transient network errors, not on business logic errors
+      if (isNetworkError && attempt < MAX_RETRIES) {
+        const delayMs = attempt * 1000; // 1s, 2s backoff
+        console.warn(`[PHOTO_SYNC] Network error on attempt ${attempt}, retrying in ${delayMs}ms...`);
+        await new Promise(resolve => setTimeout(resolve, delayMs));
+        continue; // Retry
+      }
+
+      // Non-retryable error or max retries reached
+      console.error('[PHOTO_SYNC] Upload failed:', error);
+      return {
+        success: false,
+        message: error.message || 'Photo upload failed',
+        // M12 FIX: Include orphanedStorageId if cleanup failed, for diagnosis/retry
+        ...(error.orphanedStorageId ? { orphanedStorageId: error.orphanedStorageId } : {}),
+      };
     }
-  } catch (error: any) {
-    console.error('[PHOTO_SYNC] Upload failed:', error);
-    return {
-      success: false,
-      message: error.message || 'Photo upload failed',
-      // M12 FIX: Include orphanedStorageId if cleanup failed, for diagnosis/retry
-      ...(error.orphanedStorageId ? { orphanedStorageId: error.orphanedStorageId } : {}),
-    };
   }
+
+  // Should not reach here, but handle just in case
+  console.error('[PHOTO_SYNC] Upload failed after all retries');
+  return {
+    success: false,
+    message: lastError?.message || 'Photo upload failed after retries',
+  };
 }
 
 /**

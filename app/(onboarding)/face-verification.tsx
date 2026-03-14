@@ -127,11 +127,15 @@ export default function FaceVerificationScreen() {
   const isFocused = useIsFocused();
   const [appState, setAppState] = useState(AppState.currentState);
 
-  // CRITICAL: Check demoProfile.faceVerificationPassed for demo mode (persisted across logout)
-  // Also check faceVerificationPending - if pending, user has already completed verification step
+  // CRITICAL: Determine verification status from BACKEND source of truth
+  // The authStore flags (faceVerificationPassed, faceVerificationPending) can be stale.
+  // Use backend faceVerificationStatus to determine the actual state.
+  const backendFaceStatus = onboardingStatus?.faceVerificationStatus;
+
+  // For auto-skip logic: only skip if BACKEND confirms 'verified' status
   const isAlreadyVerified = isDemoMode
-    ? !!(demoProfile?.faceVerificationPassed || demoProfile?.faceVerificationPending || faceVerificationPassed || faceVerificationPending)
-    : (faceVerificationPassed || faceVerificationPending);
+    ? !!(demoProfile?.faceVerificationPassed || faceVerificationPassed)
+    : (backendFaceStatus === 'verified' || faceVerificationPassed);
 
   // Camera
   const device = useCameraDevice('front');
@@ -141,20 +145,58 @@ export default function FaceVerificationScreen() {
   // Camera active state - controlled by multiple conditions
   const [cameraActive, setCameraActive] = useState(false);
 
-  // State - initialize to 'success' if already verified (prevents re-verification on back)
-  const [verificationState, setVerificationState] = useState<VerificationState>(
-    isAlreadyVerified ? 'success' : 'waiting'
-  );
+  // State - derive initial state from authStore flags to prevent flickering.
+  // AuthStore flags are persisted, so returning users see correct state immediately.
+  // Backend status (via effect below) is still the ultimate source of truth.
+  const [verificationState, setVerificationState] = useState<VerificationState>(() => {
+    // STABILITY FIX: Initialize from persisted flags to prevent flicker
+    if (faceVerificationPassed) return 'success';
+    if (faceVerificationPending) return 'pending';
+    return 'waiting';
+  });
 
-  // CRITICAL: Skip verification entirely if already verified or pending - redirect immediately
+  // Effect to sync verificationState with backend status (once loaded)
+  // This runs AFTER the component mounts and backend data is available
+  const didSyncBackendStateRef = useRef(false);
+  useEffect(() => {
+    // Skip if backend not loaded yet or already synced
+    if (onboardingStatus === undefined || didSyncBackendStateRef.current) {
+      return;
+    }
+
+    // Only sync once per mount to avoid overwriting user interactions
+    didSyncBackendStateRef.current = true;
+
+    const status = onboardingStatus.faceVerificationStatus;
+    if (__DEV__) {
+      console.log('[FaceDebug] Syncing verificationState from backend:', status);
+    }
+
+    if (status === 'verified') {
+      setVerificationState('success');
+    } else if (status === 'pending') {
+      setVerificationState('pending');
+    } else {
+      // 'unverified' or 'failed' -> require live capture
+      setVerificationState('waiting');
+    }
+  }, [onboardingStatus]);
+
+  // CRITICAL: Skip verification ONLY if backend confirms VERIFIED status - redirect immediately
+  // Wait for backend data before deciding to skip
   const didSkipRef = useRef(false);
   // STABILITY FIX (2026-03-04): Add cleanup to prevent setState on unmounted component
   useEffect(() => {
     let isMounted = true;
 
+    // Don't skip until backend data is loaded (prevents premature skip based on stale authStore)
+    if (onboardingStatus === undefined) {
+      return;
+    }
+
     if (isAlreadyVerified && !didSkipRef.current) {
       didSkipRef.current = true;
-      console.log('[FaceDebug] face verification completed (passed or pending) -> skip capture -> additional-photos');
+      console.log('[FaceDebug] face verification PASSED (backend confirmed) -> skip capture -> additional-photos');
 
       // Only call setState/navigate if still mounted
       if (isMounted) {
@@ -166,7 +208,7 @@ export default function FaceVerificationScreen() {
     return () => {
       isMounted = false; // Cleanup: prevent state updates if unmounted
     };
-  }, [isAlreadyVerified, setStep, router]);
+  }, [isAlreadyVerified, onboardingStatus, setStep, router]);
   const [capturedFrames, setCapturedFrames] = useState<CapturedFrame[]>([]);
   const [framesCaptured, setFramesCaptured] = useState(0);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -205,6 +247,10 @@ export default function FaceVerificationScreen() {
     console.log('[FaceDebug] userId:', userId);
     console.log('[FaceDebug] backendDataLoaded:', backendDataLoaded);
     console.log('[FaceDebug] referencePhotoExists (backend):', referencePhotoExists);
+    console.log('[FaceDebug] backendFaceStatus:', onboardingStatus?.faceVerificationStatus);
+    console.log('[FaceDebug] verificationState:', verificationState);
+    console.log('[FaceDebug] authStore faceVerificationPassed:', faceVerificationPassed);
+    console.log('[FaceDebug] authStore faceVerificationPending:', faceVerificationPending);
     console.log('[FaceDebug] ========================================');
 
     // GATE CHECK: Wait for backend data to load before blocking user
@@ -243,7 +289,7 @@ export default function FaceVerificationScreen() {
     return () => {
       isMounted = false; // Cleanup: prevent state updates if unmounted
     };
-  }, [onboardingStatus, userId, setStep, router]);
+  }, [onboardingStatus, userId, setStep, router, verificationState, faceVerificationPassed, faceVerificationPending]);
 
   // Log mount/unmount separately (no deps needed)
   useEffect(() => {
@@ -301,6 +347,7 @@ export default function FaceVerificationScreen() {
         isAppActive,
         hasDevice: !!device,
         hasPermission,
+        verificationState,
         needsCamera,
         shouldActivate: allConditionsMet,
       });
@@ -317,6 +364,9 @@ export default function FaceVerificationScreen() {
         if (__DEV__) {
           console.log('[FaceDebug] cameraActive false (condition failed)');
         }
+        // BUG FIX: Abort any in-flight capture when camera becomes inactive
+        // This prevents partial captures from being submitted for verification
+        captureAbortedRef.current = true;
         setCameraActive(false);
       }
     }, 150); // 150ms debounce
@@ -348,8 +398,14 @@ export default function FaceVerificationScreen() {
   // Capture Logic
   // =============================================================================
 
+  // Ref to track if capture was aborted (camera closed, background, etc.)
+  const captureAbortedRef = useRef(false);
+
   const startCapture = useCallback(async () => {
     if (!cameraRef.current || verificationState !== 'waiting') return;
+
+    // Reset abort flag at start of new capture
+    captureAbortedRef.current = false;
 
     console.log('[FaceMatch] Starting 3-frame capture for face verification...');
     isCapturing.value = true;
@@ -360,13 +416,38 @@ export default function FaceVerificationScreen() {
     setMatchScore(null);
 
     const frames: CapturedFrame[] = [];
+    let captureSuccessful = true;
 
     for (let i = 0; i < FRAME_COUNT; i++) {
+      // Check if capture was aborted (camera closed, app backgrounded, etc.)
+      // NOTE: Only check captureAbortedRef, NOT cameraActive state variable.
+      // cameraActive is not in useCallback deps and would be stale.
+      // captureAbortedRef is set by the camera activation effect when camera becomes inactive.
+      if (captureAbortedRef.current) {
+        console.log(`[FaceMatch] Capture aborted before frame ${i + 1}`);
+        captureSuccessful = false;
+        break;
+      }
+
       try {
         console.log(`[FaceMatch] Capture frame ${i + 1}/${FRAME_COUNT}...`);
 
+        // Check camera ref is still valid
+        if (!cameraRef.current) {
+          console.error(`[FaceMatch] Frame ${i + 1} capture error: Camera ref is null`);
+          captureSuccessful = false;
+          break;
+        }
+
         // Take photo
         const photo = await cameraRef.current.takePhoto({});
+
+        // Check if aborted during async capture
+        if (captureAbortedRef.current) {
+          console.log(`[FaceMatch] Capture aborted after frame ${i + 1} async operation`);
+          captureSuccessful = false;
+          break;
+        }
 
         frames.push({
           base64: photo.path, // File path - will be converted to base64 in service
@@ -380,21 +461,57 @@ export default function FaceVerificationScreen() {
         // Wait before next capture (except for last frame)
         if (i < FRAME_COUNT - 1) {
           await new Promise(resolve => setTimeout(resolve, CAPTURE_INTERVAL_MS));
+          // Check if aborted during wait
+          if (captureAbortedRef.current) {
+            console.log(`[FaceMatch] Capture aborted during inter-frame delay`);
+            captureSuccessful = false;
+            break;
+          }
         }
-      } catch (error) {
+      } catch (error: any) {
+        // BUG FIX: On ANY frame capture error, abort entire verification attempt
+        // Do NOT continue with partial frames - require user to retry
         console.error(`[FaceMatch] Frame ${i + 1} capture error:`, error);
-        frames.push({
-          base64: '',
-          hasFace: false,
-          timestamp: Date.now(),
-        });
-        setFramesCaptured(i + 1);
+        const errorMsg = error?.message || String(error);
+
+        // Check for camera closed / background interruption errors
+        if (errorMsg.includes('Camera is closed') || errorMsg.includes('camera') || errorMsg.includes('session')) {
+          console.log('[FaceMatch] Camera closed or session error - aborting capture');
+          setErrorMessage('Camera was interrupted. Please try again.');
+        } else {
+          setErrorMessage('Failed to capture selfie. Please try again.');
+        }
+
+        captureSuccessful = false;
+        break; // Exit loop immediately - do NOT continue with partial capture
       }
     }
 
     isCapturing.value = false;
+
+    // BUG FIX: Only proceed to verification if ALL frames captured successfully
+    if (!captureSuccessful || frames.length < FRAME_COUNT) {
+      console.log(`[FaceMatch] Capture incomplete (${frames.length}/${FRAME_COUNT} frames) - aborting verification`);
+      setCapturedFrames([]);
+      setVerificationState('failed');
+      if (!errorMessage) {
+        setErrorMessage('Capture was interrupted. Please try again.');
+      }
+      return; // Do NOT proceed to verifyFace()
+    }
+
+    // Validate all frames have valid data
+    const validFrames = frames.filter(f => f.base64 && f.base64.length > 0 && f.hasFace);
+    if (validFrames.length < FRAME_COUNT) {
+      console.log(`[FaceMatch] Only ${validFrames.length}/${FRAME_COUNT} valid frames - aborting verification`);
+      setCapturedFrames([]);
+      setVerificationState('failed');
+      setErrorMessage('Some frames failed to capture. Please try again.');
+      return; // Do NOT proceed to verifyFace()
+    }
+
     setCapturedFrames(frames);
-    console.log('[FaceMatch] All frames captured, sending to server for face comparison...');
+    console.log('[FaceMatch] All frames captured successfully, sending to server for face comparison...');
 
     // Start server-side verification
     setVerificationState('verifying');
