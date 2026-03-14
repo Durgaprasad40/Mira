@@ -68,6 +68,9 @@ export default function ProfileDetailsBasicScreen() {
   // Validation error state
   const [educationOtherError, setEducationOtherError] = useState<string | null>(null);
 
+  // P1 STABILITY: Prevent double-submission on rapid taps
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
   // STABILITY FIX: Wait for Convex hydration before rendering form
   // This prevents data loss when user navigates before hydration completes
   if (!isDemoMode && !convexHydrated) {
@@ -122,13 +125,18 @@ export default function ProfileDetailsBasicScreen() {
     }
   }, [demoHydrated, demoProfile]);
 
-  const handleNext = () => {
+  const handleNext = async () => {
+    // P1 STABILITY: Prevent double-submission on rapid taps
+    if (isSubmitting) return;
+
     // Validate: if education is "other", educationOther must be non-empty
     if (education === 'other' && !educationOther.trim()) {
       setEducationOtherError('Please specify your education');
       return;
     }
     setEducationOtherError(null);
+
+    setIsSubmitting(true);
 
     // SAVE-AS-YOU-GO: Persist to demoProfiles immediately
     if (isDemoMode && userId) {
@@ -195,21 +203,30 @@ export default function ProfileDetailsBasicScreen() {
       if (__DEV__) {
         console.log('[PROFILE-DETAILS] Calling upsertDraft with patch:', JSON.stringify(patch));
       }
-      upsertDraft({ userId, patch }).catch((error) => {
+      try {
+        await upsertDraft({ userId, patch });
+      } catch (error) {
         if (__DEV__) console.error('[PROFILE-DETAILS] Failed to save draft:', error);
-      });
+        // P1 STABILITY: Re-enable button on failure
+        setIsSubmitting(false);
+        return;
+      }
     }
 
     // CENTRAL EDIT HUB: Return to Review if editing from there
     if (isEditFromReview) {
       if (__DEV__) console.log('[ONB] profile-details/basic → review (editFromReview)');
       router.replace('/(onboarding)/review' as any);
+      // P1 STABILITY: Reset after navigation completes
+      setIsSubmitting(false);
       return;
     }
 
     if (__DEV__) console.log('[ONB] profile-details/basic → lifestyle');
     setStep('profile_details');
     router.push("/(onboarding)/profile-details/lifestyle");
+    // P1 STABILITY: Reset after navigation completes
+    setIsSubmitting(false);
   };
 
   const handlePrevious = () => {
@@ -373,6 +390,8 @@ export default function ProfileDetailsBasicScreen() {
             variant="primary"
             onPress={handleNext}
             fullWidth
+            loading={isSubmitting}
+            disabled={isSubmitting}
           />
           <View style={styles.navRow}>
             <TouchableOpacity style={styles.navButton} onPress={handlePrevious}>

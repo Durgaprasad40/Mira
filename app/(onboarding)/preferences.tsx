@@ -116,6 +116,9 @@ export default function PreferencesScreen() {
   const [lgbtqError, setLgbtqError] = useState('');
   const [ageError, setAgeError] = useState(''); // STABILITY FIX: Age validation feedback
 
+  // P1 STABILITY: Prevent double-submission on rapid taps
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
   // Local text states for age inputs (allows temporary empty string while typing)
   const [minAgeText, setMinAgeText] = useState(minAge.toString());
   const [maxAgeText, setMaxAgeText] = useState(maxAge.toString());
@@ -296,7 +299,10 @@ export default function PreferencesScreen() {
     }
   };
 
-  const handleNext = () => {
+  const handleNext = async () => {
+    // P1 STABILITY: Prevent double-submission on rapid taps
+    if (isSubmitting) return;
+
     if (lookingFor.length === 0) {
       Alert.alert('Required', 'Please select who you\'re looking for');
       return;
@@ -383,6 +389,9 @@ export default function PreferencesScreen() {
 
     setShowTopError(false);
 
+    // P1 STABILITY: Mark as submitting after validation passes
+    setIsSubmitting(true);
+
     // Age values already validated above - use parsed values directly
     const finalDistance = parsedDistance;
 
@@ -424,22 +433,29 @@ export default function PreferencesScreen() {
       preferences.maxAge = finalMax;
       preferences.maxDistance = finalDistance;
 
-      upsertDraft({
-        userId,
-        patch: {
-          preferences,
-          progress: { lastStepKey: 'preferences' },
-        },
-      }).catch((error) => {
+      try {
+        await upsertDraft({
+          userId,
+          patch: {
+            preferences,
+            progress: { lastStepKey: 'preferences' },
+          },
+        });
+        if (__DEV__) console.log(`[ONB_DRAFT] Saved preferences: lookingFor=${lookingFor.length}, intent=${relationshipIntent.length}, activities=${activities.length}, age=${finalMin}-${finalMax}, dist=${finalDistance}`);
+      } catch (error) {
         if (__DEV__) console.error('[PREFERENCES] Failed to save draft:', error);
-      });
-      if (__DEV__) console.log(`[ONB_DRAFT] Saved preferences: lookingFor=${lookingFor.length}, intent=${relationshipIntent.length}, activities=${activities.length}, age=${finalMin}-${finalMax}, dist=${finalDistance}`);
+        // P1 STABILITY: Re-enable button on failure
+        setIsSubmitting(false);
+        return;
+      }
     }
 
     // CENTRAL EDIT HUB: Return to Review if editing from there
     if (isEditFromReview) {
       if (__DEV__) console.log('[ONB] preferences → review (editFromReview)');
       router.replace('/(onboarding)/review' as any);
+      // P1 STABILITY: Reset after navigation completes
+      setIsSubmitting(false);
       return;
     }
 
@@ -458,6 +474,8 @@ export default function PreferencesScreen() {
       setStep('photo_upload');
       router.push('/(onboarding)/photo-upload' as any);
     }
+    // P1 STABILITY: Reset after navigation completes
+    setIsSubmitting(false);
   };
 
   // POST-VERIFICATION: Previous goes back
@@ -467,7 +485,8 @@ export default function PreferencesScreen() {
     router.push('/(onboarding)/profile-details' as any);
   };
 
-  const canContinue = lookingFor.length > 0 && relationshipIntent.length >= 1 && activities.length >= 1;
+  // P1 STABILITY: Include isSubmitting in disabled check
+  const canContinue = !isSubmitting && lookingFor.length > 0 && relationshipIntent.length >= 1 && activities.length >= 1;
 
   // STABILITY FIX: Wait for Convex hydration before rendering form
   // This prevents showing empty preferences when user returns with incomplete onboarding
@@ -690,6 +709,7 @@ export default function PreferencesScreen() {
           variant="primary"
           onPress={handleNext}
           disabled={!canContinue}
+          loading={isSubmitting}
           fullWidth
         />
         <View style={styles.navRow}>
