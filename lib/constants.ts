@@ -410,14 +410,14 @@ export const PROFILE_PROMPT_QUESTIONS = [
 // Page 1: Seed Questions (3 required questions)
 // ─────────────────────────────────────────────
 
-// Q1: Identity Anchor - "Which best describes you right now?"
+// Q1: Identity Anchor - "Which one sounds most like you?"
 export type IdentityAnchorValue = 'builder' | 'performer' | 'seeker' | 'grounded';
-export const IDENTITY_ANCHOR_PROMPT = 'Which best describes you right now?';
+export const IDENTITY_ANCHOR_PROMPT = 'Which one sounds most like you?';
 export const IDENTITY_ANCHOR_OPTIONS: { value: IdentityAnchorValue; label: string; subtitle: string }[] = [
-  { value: 'builder', label: 'Builder / Alchemist', subtitle: 'Creating, fixing, experimenting' },
-  { value: 'performer', label: 'Performer / Artist', subtitle: 'Music, style, expression' },
-  { value: 'seeker', label: 'Seeker / Explorer', subtitle: 'Travel, learning, curiosity' },
-  { value: 'grounded', label: 'Grounded / Zen', subtitle: 'Comfort, food, calm life' },
+  { value: 'builder', label: 'I like building things', subtitle: 'Projects, ideas, fixing stuff' },
+  { value: 'performer', label: 'I enjoy performing or expressing myself', subtitle: 'Music, style, creativity' },
+  { value: 'seeker', label: 'I love exploring new things', subtitle: 'Travel, learning, adventures' },
+  { value: 'grounded', label: 'I enjoy a calm, simple life', subtitle: 'Comfort, food, relaxing' },
 ];
 
 // Q2: Social Battery - slider from Relieved to Restless

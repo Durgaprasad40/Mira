@@ -598,7 +598,11 @@ function OnboardingDraftHydrator() {
 
   useEffect(() => {
     // Only in production mode (not demo)
-    if (isDemoMode) return;
+    if (isDemoMode) {
+      // Demo mode doesn't use Convex for onboarding draft, mark as hydrated immediately
+      useOnboardingStore.getState().setConvexHydrated();
+      return;
+    }
 
     // Wait for auth and onboarding stores to hydrate
     if (!authHydrated || !onboardingHydrated || !userId) return;
@@ -612,9 +616,11 @@ function OnboardingDraftHydrator() {
     // P0 FIX #1: Check mounted before proceeding
     if (!mountedRef.current) return;
 
-    // P0 FIX #1: If no status found, DON'T set hasHydratedRef - allow retry on next query result
+    // P0 FIX #1: If no status found, mark hydration complete so screens don't wait indefinitely
     if (!onboardingStatus) {
-      if (__DEV__) console.log('[ONB_DRAFT] No onboarding status found - will retry');
+      if (__DEV__) console.log('[ONB_DRAFT] No onboarding status found');
+      // No status, but hydration attempt complete - mark as hydrated so screens don't wait
+      hydrateFromDraft(null);
       return;
     }
 

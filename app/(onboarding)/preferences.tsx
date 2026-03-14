@@ -90,7 +90,7 @@ export default function PreferencesScreen() {
     setLgbtqPreference,
     setStep,
   } = useOnboardingStore();
-  const convexHydrated = useOnboardingStore((s) => s._hasHydrated);
+  const convexHydrated = useOnboardingStore((s) => s._convexHydrated);
   const { userId, faceVerificationPassed } = useAuthStore();
   const demoHydrated = useDemoStore((s) => s._hasHydrated);
   const demoProfile = useDemoStore((s) =>
@@ -487,6 +487,20 @@ export default function PreferencesScreen() {
 
   // P1 STABILITY: Include isSubmitting in disabled check
   const canContinue = !isSubmitting && lookingFor.length > 0 && relationshipIntent.length >= 1 && activities.length >= 1;
+
+  // STABILITY FIX: Wait for Convex hydration before rendering form
+  // This prevents showing empty preferences when user returns with incomplete onboarding
+  if (!isDemoMode && !convexHydrated) {
+    return (
+      <SafeAreaView style={styles.safeArea} edges={['top']}>
+        <OnboardingProgressHeader />
+        <View style={styles.loadingContainer}>
+          <ActivityIndicator size="large" color={COLORS.primary} />
+          <Text style={styles.loadingText}>Loading your preferences...</Text>
+        </View>
+      </SafeAreaView>
+    );
+  }
 
   // STABILITY FIX: Wait for Convex hydration before rendering form
   // This prevents showing empty preferences when user returns with incomplete onboarding

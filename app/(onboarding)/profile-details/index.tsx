@@ -52,7 +52,7 @@ export default function ProfileDetailsBasicScreen() {
     setReligion,
     setStep,
   } = useOnboardingStore();
-  const convexHydrated = useOnboardingStore((s) => s._hasHydrated);
+  const convexHydrated = useOnboardingStore((s) => s._convexHydrated);
   const { userId } = useAuthStore();
   const demoHydrated = useDemoStore((s) => s._hasHydrated);
   const demoProfile = useDemoStore((s) =>

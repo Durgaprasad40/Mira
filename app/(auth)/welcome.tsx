@@ -83,12 +83,17 @@ export default function WelcomeScreen() {
   // ==========================================================================
   // REDIRECT LOGIC - Demo Mode
   // ==========================================================================
+  // Only auto-redirect if onboarding is COMPLETE → go to home
+  // If onboarding is INCOMPLETE, stay on welcome and let user choose action
 
   if (isDemoMode && currentDemoUserId && demoOnboardingComplete[currentDemoUserId]) {
     if (didRedirectRef.current) return null;
     didRedirectRef.current = true;
     return <Redirect href={"/(main)/(tabs)/home" as any} />;
   }
+
+  // Demo mode: Authenticated but incomplete onboarding → STAY on welcome
+  // User must explicitly tap a button to continue (no auto-redirect)
 
   // ==========================================================================
   // REDIRECT LOGIC - Live Mode
@@ -135,16 +140,27 @@ export default function WelcomeScreen() {
   }
 
   // ==========================================================================
+  // STAY ON WELCOME - Authenticated but incomplete onboarding
+  // ==========================================================================
+  // Do NOT auto-redirect to basic-info. User must explicitly tap a button.
+  // This is intentional: user needs to see welcome to understand which account
+  // they're in and choose how to proceed. Auto-dropping into basic-info is confusing.
+
+  // ==========================================================================
   // STAY ON WELCOME - Show buttons
   // ==========================================================================
+  // At this point, user is either:
+  // 1. Not authenticated (NO_AUTH, INVALID) → show buttons, let them login/signup
+  // 2. Authenticated but incomplete onboarding → show buttons, let them choose action
 
-  const handleCreateAccount = async () => {
-    // Force logout if there's any existing session (prevents token leakage)
-    if (userId || token) {
-      if (__DEV__) {
-        console.log("[WELCOME] Existing session detected, forcing logout before signup");
-      }
-      await useAuthStore.getState().logout();
+  const handleCreateAccount = () => {
+    // STABILITY FIX: Do NOT force logout here.
+    // Welcome page must be passive - no automatic state clearing.
+    // If user has an existing session, email-phone will handle it appropriately.
+    // Users who want to continue their incomplete onboarding should tap
+    // "I already have an account" instead.
+    if (__DEV__) {
+      console.log("[WELCOME] Create Account tapped, navigating to email-phone");
     }
     router.push("/(onboarding)/email-phone");
   };
@@ -199,7 +215,14 @@ export default function WelcomeScreen() {
         <Button
           title="I already have an account"
           variant="outline"
-          onPress={() => router.push("/(auth)/login")}
+          onPress={() => {
+            // STABILITY FIX: Welcome page must be passive - no automatic routing decisions.
+            // Always go to login page. Login will handle session state appropriately.
+            if (__DEV__) {
+              console.log("[WELCOME] I already have an account tapped, going to login");
+            }
+            router.push("/(auth)/login");
+          }}
           fullWidth
           style={{
             backgroundColor: "#00000000",
