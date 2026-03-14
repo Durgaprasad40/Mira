@@ -16,6 +16,15 @@ import {
   createEmptyPhotoSlots,
 } from "@/types";
 import { logPhotoRemoved, logPhotosCleared } from "@/lib/photoSafety";
+import {
+  IdentityAnchorValue,
+  SocialBatteryValue,
+  ValueTriggerValue,
+  SeedQuestions,
+  SectionPrompts,
+  SectionPromptAnswer,
+  PromptSectionKey,
+} from "@/lib/constants";
 
 // STORAGE POLICY ENFORCEMENT:
 // This store contains ALL user onboarding data (email, phone, password, profile, photos, preferences).
@@ -117,7 +126,15 @@ interface OnboardingState {
 
   displayPhotoVariant: DisplayPhotoVariant; // Privacy option: original, blurred, or cartoon
   bio: string;
-  profilePrompts: { question: string; answer: string }[];
+  profilePrompts: { question: string; answer: string }[]; // Legacy prompt system
+
+  // ═══════════════════════════════════════════════════════════════════════════════
+  // NEW PROMPT SYSTEM V2 (2-Page Structure)
+  // ═══════════════════════════════════════════════════════════════════════════════
+  seedQuestions: SeedQuestions;       // Page 1: Identity, Social Battery, Values
+  sectionPrompts: SectionPrompts;     // Page 2: Builder, Performer, Seeker, Grounded
+  // ═══════════════════════════════════════════════════════════════════════════════
+
   height: number | null;
   weight: number | null;
   smoking: SmokingStatus | null;
@@ -162,6 +179,12 @@ interface OnboardingState {
   setDisplayPhotoVariant: (variant: DisplayPhotoVariant) => void;
   setBio: (bio: string) => void;
   setProfilePrompts: (prompts: { question: string; answer: string }[]) => void;
+  // New Prompt System V2 actions
+  setIdentityAnchor: (value: IdentityAnchorValue | null) => void;
+  setSocialBattery: (value: SocialBatteryValue | null) => void;
+  setValueTrigger: (value: ValueTriggerValue | null) => void;
+  setSectionPromptAnswer: (section: PromptSectionKey, questionText: string, answer: string) => void;
+  removeSectionPromptAnswer: (section: PromptSectionKey, questionText: string) => void;
   setHeight: (height: number | null) => void;
   setWeight: (weight: number | null) => void;
   setSmoking: (status: SmokingStatus | null) => void;
@@ -213,6 +236,18 @@ const initialState = {
   displayPhotoVariant: 'original' as DisplayPhotoVariant,
   bio: "",
   profilePrompts: [],
+  // New Prompt System V2
+  seedQuestions: {
+    identityAnchor: null,
+    socialBattery: null,
+    valueTrigger: null,
+  } as SeedQuestions,
+  sectionPrompts: {
+    builder: [],
+    performer: [],
+    seeker: [],
+    grounded: [],
+  } as SectionPrompts,
   height: null,
   weight: null,
   smoking: null,
@@ -369,6 +404,56 @@ export const useOnboardingStore = create<OnboardingState>()((set, get) => ({
 
       setProfilePrompts: (profilePrompts) => set({ profilePrompts }),
 
+      // ═══════════════════════════════════════════════════════════════════════════════
+      // NEW PROMPT SYSTEM V2 ACTIONS
+      // ═══════════════════════════════════════════════════════════════════════════════
+
+      setIdentityAnchor: (value) =>
+        set((state) => ({
+          seedQuestions: { ...state.seedQuestions, identityAnchor: value },
+        })),
+
+      setSocialBattery: (value) =>
+        set((state) => ({
+          seedQuestions: { ...state.seedQuestions, socialBattery: value },
+        })),
+
+      setValueTrigger: (value) =>
+        set((state) => ({
+          seedQuestions: { ...state.seedQuestions, valueTrigger: value },
+        })),
+
+      setSectionPromptAnswer: (section, questionText, answer) =>
+        set((state) => {
+          const currentSection = [...state.sectionPrompts[section]];
+          const existingIndex = currentSection.findIndex((p) => p.question === questionText);
+
+          if (existingIndex >= 0) {
+            // Update existing answer
+            currentSection[existingIndex] = { question: questionText, answer };
+          } else {
+            // Add new answer
+            currentSection.push({ question: questionText, answer });
+          }
+
+          return {
+            sectionPrompts: {
+              ...state.sectionPrompts,
+              [section]: currentSection,
+            },
+          };
+        }),
+
+      removeSectionPromptAnswer: (section, questionText) =>
+        set((state) => ({
+          sectionPrompts: {
+            ...state.sectionPrompts,
+            [section]: state.sectionPrompts[section].filter((p) => p.question !== questionText),
+          },
+        })),
+
+      // ═══════════════════════════════════════════════════════════════════════════════
+
       setHeight: (height) => set({ height }),
 
       setWeight: (weight) => set({ weight }),
@@ -505,6 +590,22 @@ export const useOnboardingStore = create<OnboardingState>()((set, get) => ({
           if (draft.profileDetails.bio) updates.bio = draft.profileDetails.bio;
           if (draft.profileDetails.profilePrompts) updates.profilePrompts = draft.profileDetails.profilePrompts;
           if (draft.profileDetails.displayPhotoVariant) updates.displayPhotoVariant = draft.profileDetails.displayPhotoVariant;
+          // New Prompt System V2
+          if (draft.profileDetails.seedQuestions) {
+            updates.seedQuestions = {
+              identityAnchor: draft.profileDetails.seedQuestions.identityAnchor ?? null,
+              socialBattery: draft.profileDetails.seedQuestions.socialBattery ?? null,
+              valueTrigger: draft.profileDetails.seedQuestions.valueTrigger ?? null,
+            };
+          }
+          if (draft.profileDetails.sectionPrompts) {
+            updates.sectionPrompts = {
+              builder: draft.profileDetails.sectionPrompts.builder ?? [],
+              performer: draft.profileDetails.sectionPrompts.performer ?? [],
+              seeker: draft.profileDetails.sectionPrompts.seeker ?? [],
+              grounded: draft.profileDetails.sectionPrompts.grounded ?? [],
+            };
+          }
         }
 
         // Lifestyle

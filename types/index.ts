@@ -869,7 +869,9 @@ export type OnboardingStep =
   | "display_privacy"  // Privacy options after verification
   | "additional_photos"
   | "bio"
-  | "prompts"
+  | "prompts"          // Legacy - kept for backward compat
+  | "prompts_part1"    // New: Seed questions (identity, social battery, values)
+  | "prompts_part2"    // New: Section prompts (builder, performer, seeker, grounded)
   | "profile_details"
   | "lifestyle"
   | "preferences"
