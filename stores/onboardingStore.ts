@@ -342,32 +342,44 @@ export const useOnboardingStore = create<OnboardingState>()((set) => ({
 
       setLgbtqSelf: (lgbtqSelf) => set({ lgbtqSelf: lgbtqSelf.slice(0, 2) }),
 
+      // P2 STABILITY: Use atomic set() to prevent race conditions on rapid taps
       toggleLgbtqSelf: (option) => {
-        const state = useOnboardingStore.getState();
-        if (state.lgbtqSelf.includes(option)) {
-          set({ lgbtqSelf: state.lgbtqSelf.filter((o) => o !== option) });
-          return true;
-        }
-        if (state.lgbtqSelf.length >= 2) {
-          return false; // Max 2 selections reached
-        }
-        set({ lgbtqSelf: [...state.lgbtqSelf, option] });
-        return true;
+        let success = true;
+        set((state) => {
+          if (state.lgbtqSelf.includes(option)) {
+            // Remove existing option
+            return { lgbtqSelf: state.lgbtqSelf.filter((o) => o !== option) };
+          }
+          if (state.lgbtqSelf.length >= 2) {
+            // Max 2 reached, cannot add
+            success = false;
+            return state;
+          }
+          // Add new option
+          return { lgbtqSelf: [...state.lgbtqSelf, option] };
+        });
+        return success;
       },
 
       setLgbtqPreference: (lgbtqPreference) => set({ lgbtqPreference: lgbtqPreference.slice(0, 2) }),
 
+      // P2 STABILITY: Use atomic set() to prevent race conditions on rapid taps
       toggleLgbtqPreference: (option) => {
-        const state = useOnboardingStore.getState();
-        if (state.lgbtqPreference.includes(option)) {
-          set({ lgbtqPreference: state.lgbtqPreference.filter((o) => o !== option) });
-          return true;
-        }
-        if (state.lgbtqPreference.length >= 2) {
-          return false; // Max 2 selections reached
-        }
-        set({ lgbtqPreference: [...state.lgbtqPreference, option] });
-        return true;
+        let success = true;
+        set((state) => {
+          if (state.lgbtqPreference.includes(option)) {
+            // Remove existing option
+            return { lgbtqPreference: state.lgbtqPreference.filter((o) => o !== option) };
+          }
+          if (state.lgbtqPreference.length >= 2) {
+            // Max 2 reached, cannot add
+            success = false;
+            return state;
+          }
+          // Add new option
+          return { lgbtqPreference: [...state.lgbtqPreference, option] };
+        });
+        return success;
       },
 
       // ════════════════════════════════════════════════════════════════════════
@@ -498,17 +510,23 @@ export const useOnboardingStore = create<OnboardingState>()((set) => ({
 
       setPets: (pets) => set({ pets: pets.slice(0, 3) }),
 
+      // P2 STABILITY: Use atomic set() to prevent race conditions on rapid taps
       togglePet: (pet) => {
-        const state = useOnboardingStore.getState();
-        if (state.pets.includes(pet)) {
-          set({ pets: state.pets.filter((p) => p !== pet) });
-          return true;
-        }
-        if (state.pets.length >= 3) {
-          return false;
-        }
-        set({ pets: [...state.pets, pet] });
-        return true;
+        let success = true;
+        set((state) => {
+          if (state.pets.includes(pet)) {
+            // Remove existing pet
+            return { pets: state.pets.filter((p) => p !== pet) };
+          }
+          if (state.pets.length >= 3) {
+            // Max 3 reached, cannot add
+            success = false;
+            return state;
+          }
+          // Add new pet
+          return { pets: [...state.pets, pet] };
+        });
+        return success;
       },
 
       setInsect: (insect) => set({ insect }),
@@ -559,31 +577,34 @@ export const useOnboardingStore = create<OnboardingState>()((set) => ({
           lifeRhythm: { ...state.lifeRhythm, coreValues: coreValues.slice(0, 3) },
         })),
 
+      // P2 STABILITY: Use atomic set() to prevent race conditions on rapid taps
       toggleLifeRhythmCoreValue: (value) => {
-        const state = useOnboardingStore.getState();
-        const currentValues = state.lifeRhythm.coreValues;
-        if (currentValues.includes(value)) {
-          // Remove value
-          set({
+        let success = true;
+        set((state) => {
+          const currentValues = state.lifeRhythm.coreValues;
+          if (currentValues.includes(value)) {
+            // Remove value
+            return {
+              lifeRhythm: {
+                ...state.lifeRhythm,
+                coreValues: currentValues.filter((v) => v !== value),
+              },
+            };
+          }
+          if (currentValues.length >= 3) {
+            // Max 3 reached, cannot add
+            success = false;
+            return state;
+          }
+          // Add value
+          return {
             lifeRhythm: {
               ...state.lifeRhythm,
-              coreValues: currentValues.filter((v) => v !== value),
+              coreValues: [...currentValues, value],
             },
-          });
-          return true;
-        }
-        // Check max 3 limit
-        if (currentValues.length >= 3) {
-          return false; // Max 3 selections reached
-        }
-        // Add value
-        set({
-          lifeRhythm: {
-            ...state.lifeRhythm,
-            coreValues: [...currentValues, value],
-          },
+          };
         });
-        return true;
+        return success;
       },
 
       // ═══════════════════════════════════════════════════════════════════════════════
