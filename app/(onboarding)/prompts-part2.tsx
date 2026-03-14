@@ -172,7 +172,7 @@ export default function PromptsPart2Screen() {
     return getFilledCount(section) >= MIN_ANSWERS_PER_SECTION;
   };
 
-  const handleContinue = () => {
+  const handleContinue = async () => {
     if (!canContinue) return;
 
     // Build sectionPrompts data for saving
@@ -202,19 +202,22 @@ export default function PromptsPart2Screen() {
     });
 
     // LIVE MODE: Persist sectionPrompts to Convex onboarding draft
+    // STABILITY FIX: Await mutation before navigation to prevent data loss
     if (!isDemoMode && userId) {
-      upsertDraft({
-        userId,
-        patch: {
-          profileDetails: { sectionPrompts: sectionPromptsData },
-          progress: { lastStepKey: 'prompts_part2' },
-        },
-      }).catch((error) => {
+      try {
+        await upsertDraft({
+          userId,
+          patch: {
+            profileDetails: { sectionPrompts: sectionPromptsData },
+            progress: { lastStepKey: 'prompts_part2' },
+          },
+        });
+        if (__DEV__) {
+          const counts = SECTION_KEYS.map(k => `${k}=${sectionPromptsData[k].length}`).join(', ');
+          console.log('[ONB_DRAFT] Saved sectionPrompts:', counts);
+        }
+      } catch (error) {
         if (__DEV__) console.error('[PROMPTS_PART2] Failed to save draft:', error);
-      });
-      if (__DEV__) {
-        const counts = SECTION_KEYS.map(k => `${k}=${sectionPromptsData[k].length}`).join(', ');
-        console.log('[ONB_DRAFT] Saved sectionPrompts:', counts);
       }
     }
 

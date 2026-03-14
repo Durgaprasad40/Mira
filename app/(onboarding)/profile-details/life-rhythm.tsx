@@ -284,6 +284,7 @@ export default function LifeRhythmScreen() {
         keyboardShouldPersistTaps="handled"
       >
         <Text style={styles.title}>Life Rhythm</Text>
+        <Text style={styles.stepIndicator}>Step 3 of 3</Text>
         <Text style={styles.subtitle}>
           Tell us a little about your lifestyle and values.
         </Text>
@@ -514,6 +515,11 @@ const styles = StyleSheet.create({
     fontWeight: "700",
     color: COLORS.text,
     marginBottom: 4,
+  },
+  stepIndicator: {
+    fontSize: 14,
+    color: COLORS.textLight,
+    marginBottom: 10,
   },
   subtitle: {
     fontSize: 16,

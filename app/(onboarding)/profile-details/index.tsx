@@ -229,7 +229,7 @@ export default function ProfileDetailsBasicScreen() {
         keyboardShouldPersistTaps="handled"
       >
         <Text style={styles.title}>Profile Details</Text>
-        <Text style={styles.stepIndicator}>Step 1 of 2</Text>
+        <Text style={styles.stepIndicator}>Step 1 of 3</Text>
         <Text style={styles.subtitle}>
           Share more about yourself. These details help others get to know you better.
         </Text>
