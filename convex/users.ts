@@ -1021,9 +1021,11 @@ function toRad(deg: number): number {
 }
 
 // Complete onboarding with all user data
+// P0 SECURITY FIX: Added token validation to prevent unauthorized onboarding completion
 export const completeOnboarding = mutation({
   args: {
     userId: v.id("users"),
+    token: v.optional(v.string()), // P0 FIX: Session token for auth validation
     name: v.optional(v.string()),
     dateOfBirth: v.optional(v.string()),
     gender: v.optional(
@@ -1195,7 +1197,26 @@ export const completeOnboarding = mutation({
     photoStorageIds: v.optional(v.array(v.id("_storage"))),
   },
   handler: async (ctx, args) => {
-    const { userId, photoStorageIds, pets, insect, ...updates } = args;
+    const { userId, token, photoStorageIds, pets, insect, ...updates } = args;
+
+    // P0 SECURITY FIX: Validate session token to prevent unauthorized onboarding
+    // This ensures only the authenticated user can complete their own onboarding
+    if (token) {
+      const authenticatedUserId = await validateSessionToken(ctx, token);
+      if (!authenticatedUserId) {
+        throw new Error("Unauthorized: invalid or expired session");
+      }
+      if (authenticatedUserId !== userId) {
+        throw new Error("Unauthorized: cannot complete onboarding for another user");
+      }
+    }
+
+    // P0 SECURITY FIX: Validate photoStorageIds array length
+    // Prevents excessive DB writes from malicious clients
+    const MAX_PHOTOS = 9;
+    if (photoStorageIds && photoStorageIds.length > MAX_PHOTOS) {
+      throw new Error(`Too many photos: maximum ${MAX_PHOTOS} allowed`);
+    }
 
     // Verify user exists
     const user = await ctx.db.get(userId);
