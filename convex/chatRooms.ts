@@ -600,8 +600,45 @@ export const getRoom = query({
   },
 });
 
+/**
+ * CR-011: Media source classification for persisted messages
+ * Only durable remote URLs (http/https) should be used for display.
+ * Local cache paths (file://, content://, /) are transient and may not exist.
+ */
+type MediaSourceClass = 'remote_url' | 'local_cache_stale' | 'invalid' | 'missing';
+
+function classifyMediaUri(uri: string | undefined): MediaSourceClass {
+  if (!uri || typeof uri !== 'string' || uri.trim() === '') {
+    return 'missing';
+  }
+  // Durable remote URLs - safe to use
+  if (uri.startsWith('http://') || uri.startsWith('https://')) {
+    return 'remote_url';
+  }
+  // Local device paths - stale for persisted messages, may not exist
+  if (uri.startsWith('file://') || uri.startsWith('/') || uri.startsWith('content://')) {
+    return 'local_cache_stale';
+  }
+  return 'invalid';
+}
+
+/**
+ * CR-011: Sanitize media URL for persisted message display
+ * Only returns durable remote URLs. Strips out stale local cache paths.
+ */
+function sanitizeMediaUrl(uri: string | undefined): string | undefined {
+  const sourceClass = classifyMediaUri(uri);
+  if (sourceClass === 'remote_url') {
+    return uri;
+  }
+  // All other sources (local_cache_stale, invalid, missing) return undefined
+  // This prevents stale local file paths from reaching the UI
+  return undefined;
+}
+
 // List messages for a room (with pagination)
 // CR-010: Includes sender profile data (displayName, avatar) for proper message display
+// CR-011: Sanitizes media URLs to prevent stale local cache paths from reaching UI
 export const listMessages = query({
   args: {
     roomId: v.id('chatRooms'),
@@ -635,7 +672,7 @@ export const listMessages = query({
     const result = hasMore ? messages.slice(0, limit) : messages;
 
     // CR-010: Hydrate sender profile data for each message
-    // Cache profile lookups to avoid duplicate queries for same sender
+    // CR-011: Sanitize media URLs to strip stale local cache paths
     const profileCache = new Map<string, { displayName: string; avatar: string | undefined } | null>();
 
     const messagesWithSenders = await Promise.all(
@@ -660,8 +697,21 @@ export const listMessages = query({
         }
 
         const cached = profileCache.get(senderIdStr);
+
+        // CR-011: Sanitize media URLs - only pass through durable remote URLs
+        // Local cache paths are stripped to prevent "file not found" errors
+        const sanitizedImageUrl = sanitizeMediaUrl(msg.imageUrl);
+        const sanitizedAudioUrl = sanitizeMediaUrl(msg.audioUrl);
+
+        // CR-011: Source classification for debugging (dev only via console on backend)
+        // Frontend can infer from presence/absence of URLs
+
         return {
           ...msg,
+          // CR-011: Override raw URLs with sanitized versions
+          imageUrl: sanitizedImageUrl,
+          audioUrl: sanitizedAudioUrl,
+          // CR-010: Add sender profile data
           senderName: cached?.displayName ?? 'User',
           senderAvatar: cached?.avatar,
         };
