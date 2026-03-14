@@ -50,6 +50,17 @@ crons.interval(
   internal.chatRooms.cleanupExpiredMessages
 );
 
+// CR-012: Migrate legacy messages without expiresAt field
+// Runs every 10 minutes until all legacy messages are processed
+// - Messages older than 24h: deleted immediately
+// - Messages within 24h: expiresAt set to createdAt + 24h
+// Safe to run indefinitely - becomes no-op when all messages have expiresAt
+crons.interval(
+  'migrate-legacy-message-expiry',
+  { minutes: 10 },
+  internal.chatRooms.migrateLegacyMessageExpiry
+);
+
 // B2-FIX: Retry failed storage deletions every 30 minutes
 // Cleans up orphaned storage blobs from failed photo deletions
 crons.interval(

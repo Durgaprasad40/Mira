@@ -2130,6 +2130,106 @@ export const cleanupExpiredMessages = internalMutation({
   },
 });
 
+/**
+ * CR-012: Migrate legacy messages without expiresAt field
+ *
+ * This internal mutation handles legacy chatRoomMessages that were created
+ * before the expiresAt field was added. It ensures the 24-hour rule applies
+ * consistently to all messages, old and new.
+ *
+ * Logic:
+ * 1. Find messages where expiresAt is undefined/null
+ * 2. If createdAt + 24h < now (already expired): delete immediately
+ * 3. Otherwise: set expiresAt = createdAt + 24h
+ *
+ * Safety:
+ * - Processes in batches (BATCH_DELETE_SIZE) to avoid timeout
+ * - Idempotent: can run multiple times safely
+ * - Updates room messageCount after deletions
+ * - try/catch for concurrent safety
+ */
+export const migrateLegacyMessageExpiry = internalMutation({
+  args: {},
+  handler: async (ctx) => {
+    const now = Date.now();
+    const expiryThreshold = now - MESSAGE_EXPIRY_MS; // Messages created before this are expired
+
+    // Find messages without expiresAt field
+    // Using by_room index and filtering (no direct index on undefined expiresAt)
+    const legacyMessages = await ctx.db
+      .query('chatRoomMessages')
+      .filter((q) =>
+        q.or(
+          q.eq(q.field('expiresAt'), undefined),
+          q.eq(q.field('expiresAt'), null)
+        )
+      )
+      .take(BATCH_DELETE_SIZE);
+
+    if (legacyMessages.length === 0) {
+      return { processed: 0, deleted: 0, updated: 0, complete: true };
+    }
+
+    // Track affected rooms for messageCount updates
+    const affectedRooms = new Set<string>();
+    let deleted = 0;
+    let updated = 0;
+
+    for (const msg of legacyMessages) {
+      try {
+        if (msg.createdAt < expiryThreshold) {
+          // Message is older than 24h - delete it
+          affectedRooms.add(msg.roomId as string);
+          await ctx.db.delete(msg._id);
+          deleted++;
+        } else {
+          // Message is still within 24h window - set expiresAt
+          const expiresAt = msg.createdAt + MESSAGE_EXPIRY_MS;
+          await ctx.db.patch(msg._id, { expiresAt });
+          updated++;
+        }
+      } catch {
+        // Silently ignore if already deleted/modified by concurrent request
+      }
+    }
+
+    // Update messageCount for rooms that had deletions
+    for (const roomIdStr of affectedRooms) {
+      try {
+        const roomId = roomIdStr as any;
+        const room = await ctx.db.get(roomId);
+        if (!room) continue;
+
+        const remainingMessages = await ctx.db
+          .query('chatRoomMessages')
+          .withIndex('by_room', (q) => q.eq('roomId', roomId))
+          .collect();
+
+        await ctx.db.patch(roomId, { messageCount: remainingMessages.length });
+      } catch {
+        // Ignore errors updating room count
+      }
+    }
+
+    if (process.env.NODE_ENV === 'development') {
+      console.log('[RETENTION-MIGRATE]', {
+        processed: legacyMessages.length,
+        deleted,
+        updated,
+        affectedRooms: affectedRooms.size,
+      });
+    }
+
+    // Return complete: false to indicate more messages may need processing
+    return {
+      processed: legacyMessages.length,
+      deleted,
+      updated,
+      complete: legacyMessages.length < BATCH_DELETE_SIZE,
+    };
+  },
+});
+
 // ═══════════════════════════════════════════════════════════════════════════
 // PHASE-2: Private Rooms - Password + Admin Approval
 // ═══════════════════════════════════════════════════════════════════════════
