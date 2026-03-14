@@ -874,6 +874,7 @@ export type OnboardingStep =
   | "prompts_part2"    // New: Section prompts (builder, performer, seeker, grounded)
   | "profile_details"
   | "lifestyle"
+  | "life_rhythm"      // New: City, social rhythm, sleep, travel, work, values
   | "preferences"
   | "permissions"
   | "review"

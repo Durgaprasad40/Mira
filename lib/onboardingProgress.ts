@@ -21,6 +21,7 @@ export const ONBOARDING_PROGRESS_STEPS: OnboardingStep[] = [
   'prompts_part2',     // NEW: Section prompts (builder, performer, seeker, grounded)
   'profile_details',   // profile-details/index.tsx
   'lifestyle',         // profile-details/lifestyle.tsx
+  'life_rhythm',       // profile-details/life-rhythm.tsx (city, social, sleep, travel, work, values)
   'preferences',
   'photo_upload',
   'face_verification',
@@ -64,6 +65,7 @@ const ROUTE_TO_STEP_MAP: Record<string, OnboardingStep> = {
   'prompts-part1': 'prompts_part1',
   'prompts-part2': 'prompts_part2',
   // Profile details sub-routes (must be before generic profile-details)
+  'profile-details/life-rhythm': 'life_rhythm',
   'profile-details/lifestyle': 'lifestyle',
   'profile-details/index': 'profile_details',
   'profile-details': 'profile_details',

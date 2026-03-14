@@ -323,6 +323,32 @@ export default defineSchema({
           v.literal('spiritual'), v.literal('other'), v.literal('prefer_not_to_say')
         )),
       })),
+      // Life Rhythm (new matching signals)
+      lifeRhythm: v.optional(v.object({
+        city: v.optional(v.string()),
+        socialRhythm: v.optional(v.union(
+          v.literal('quiet_homebody'), v.literal('small_group'), v.literal('balanced_mix'),
+          v.literal('very_social'), v.literal('party_nightlife')
+        )),
+        sleepSchedule: v.optional(v.union(
+          v.literal('early_bird'), v.literal('slightly_early'), v.literal('flexible'),
+          v.literal('night_owl'), v.literal('very_late_night')
+        )),
+        travelStyle: v.optional(v.union(
+          v.literal('love_frequent'), v.literal('few_trips_yearly'), v.literal('occasional'),
+          v.literal('prefer_local'), v.literal('special_reasons')
+        )),
+        workStyle: v.optional(v.union(
+          v.literal('very_career'), v.literal('ambitious_balanced'), v.literal('balanced_lifestyle'),
+          v.literal('flexible_creative'), v.literal('still_exploring')
+        )),
+        coreValues: v.optional(v.array(v.union(
+          v.literal('kindness'), v.literal('humor'), v.literal('loyalty'), v.literal('intelligence'),
+          v.literal('ambition'), v.literal('curiosity'), v.literal('emotional_maturity'), v.literal('honesty'),
+          v.literal('independence'), v.literal('creativity'), v.literal('stability'), v.literal('adventure'),
+          v.literal('discipline'), v.literal('generosity'), v.literal('open_mindedness')
+        ))),
+      })),
       // Preferences
       preferences: v.optional(v.object({
         lookingFor: v.optional(v.array(v.union(v.literal('male'), v.literal('female'), v.literal('non_binary'), v.literal('lesbian'), v.literal('other')))),

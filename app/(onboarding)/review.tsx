@@ -6,6 +6,8 @@
  * - ONLY stability/bug fixes allowed IF Durga Prasad explicitly requests
  * - Do not change UX/flows without explicit unlock
  * Date locked: 2026-03-04
+ *
+ * UNLOCKED: 2026-03-14 for Life Rhythm section addition (per explicit user request)
  */
 import React, { useState, useCallback, useRef, useEffect } from "react";
 import {
@@ -38,6 +40,12 @@ import {
   VALUE_TRIGGER_OPTIONS,
   SECTION_LABELS,
   PromptSectionKey,
+  // Life Rhythm
+  SOCIAL_RHYTHM_OPTIONS,
+  SLEEP_SCHEDULE_OPTIONS,
+  TRAVEL_STYLE_OPTIONS,
+  WORK_STYLE_OPTIONS,
+  CORE_VALUES_OPTIONS,
 } from "@/lib/constants";
 import { Button } from "@/components/ui";
 import { useOnboardingStore, LGBTQ_OPTIONS } from "@/stores/onboardingStore";
@@ -130,6 +138,7 @@ export default function ReviewScreen() {
     jobTitle,
     company,
     school,
+    lifeRhythm,
     lookingFor,
     relationshipIntent,
     activities,
@@ -793,6 +802,62 @@ export default function ReviewScreen() {
               if (petsData.length === 0) return "–";
               return petsData.map((p) => PETS_OPTIONS.find((o) => o.value === p)?.label ?? p).join(", ");
             })()}
+          </Text>
+        </View>
+      </View>
+
+      {/* Life Rhythm Section */}
+      <View style={styles.section}>
+        <View style={styles.sectionHeader}>
+          <Text style={styles.sectionTitle}>Life Rhythm</Text>
+          <TouchableOpacity onPress={() => handleEdit("profile-details/life-rhythm")}>
+            <Text style={styles.editLink}>Edit</Text>
+          </TouchableOpacity>
+        </View>
+        <View style={styles.infoRow}>
+          <Text style={styles.infoLabel}>City:</Text>
+          <Text style={styles.infoValue}>{lifeRhythm.city || "–"}</Text>
+        </View>
+        <View style={styles.infoRow}>
+          <Text style={styles.infoLabel}>Social Energy:</Text>
+          <Text style={styles.infoValue}>
+            {lifeRhythm.socialRhythm
+              ? SOCIAL_RHYTHM_OPTIONS.find((o) => o.value === lifeRhythm.socialRhythm)?.label || "–"
+              : "–"}
+          </Text>
+        </View>
+        <View style={styles.infoRow}>
+          <Text style={styles.infoLabel}>Sleep Schedule:</Text>
+          <Text style={styles.infoValue}>
+            {lifeRhythm.sleepSchedule
+              ? SLEEP_SCHEDULE_OPTIONS.find((o) => o.value === lifeRhythm.sleepSchedule)?.label || "–"
+              : "–"}
+          </Text>
+        </View>
+        <View style={styles.infoRow}>
+          <Text style={styles.infoLabel}>Travel Style:</Text>
+          <Text style={styles.infoValue}>
+            {lifeRhythm.travelStyle
+              ? TRAVEL_STYLE_OPTIONS.find((o) => o.value === lifeRhythm.travelStyle)?.label || "–"
+              : "–"}
+          </Text>
+        </View>
+        <View style={styles.infoRow}>
+          <Text style={styles.infoLabel}>Work Style:</Text>
+          <Text style={styles.infoValue}>
+            {lifeRhythm.workStyle
+              ? WORK_STYLE_OPTIONS.find((o) => o.value === lifeRhythm.workStyle)?.label || "–"
+              : "–"}
+          </Text>
+        </View>
+        <View style={styles.infoRow}>
+          <Text style={styles.infoLabel}>Core Values:</Text>
+          <Text style={styles.infoValue}>
+            {lifeRhythm.coreValues && lifeRhythm.coreValues.length > 0
+              ? lifeRhythm.coreValues
+                  .map((v) => CORE_VALUES_OPTIONS.find((o) => o.value === v)?.label || v)
+                  .join(", ")
+              : "–"}
           </Text>
         </View>
       </View>

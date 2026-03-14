@@ -24,6 +24,13 @@ import {
   SectionPrompts,
   SectionPromptAnswer,
   PromptSectionKey,
+  // Life Rhythm types
+  SocialRhythmValue,
+  SleepScheduleValue,
+  TravelStyleValue,
+  WorkStyleValue,
+  CoreValueValue,
+  LifeRhythm,
 } from "@/lib/constants";
 
 // STORAGE POLICY ENFORCEMENT:
@@ -149,6 +156,13 @@ interface OnboardingState {
   jobTitle: string;
   company: string;
   school: string;
+
+  // ═══════════════════════════════════════════════════════════════════════════════
+  // LIFE RHYTHM (New Matching Signals)
+  // ═══════════════════════════════════════════════════════════════════════════════
+  lifeRhythm: LifeRhythm;
+  // ═══════════════════════════════════════════════════════════════════════════════
+
   lookingFor: Gender[];
   relationshipIntent: RelationshipIntent[];
   activities: ActivityFilter[];
@@ -200,6 +214,14 @@ interface OnboardingState {
   setJobTitle: (title: string) => void;
   setCompany: (company: string) => void;
   setSchool: (school: string) => void;
+  // Life Rhythm actions
+  setLifeRhythmCity: (city: string | null) => void;
+  setLifeRhythmSocialRhythm: (value: SocialRhythmValue | null) => void;
+  setLifeRhythmSleepSchedule: (value: SleepScheduleValue | null) => void;
+  setLifeRhythmTravelStyle: (value: TravelStyleValue | null) => void;
+  setLifeRhythmWorkStyle: (value: WorkStyleValue | null) => void;
+  setLifeRhythmCoreValues: (values: CoreValueValue[]) => void;
+  toggleLifeRhythmCoreValue: (value: CoreValueValue) => boolean; // Returns false if max 3 reached
   setLookingFor: (genders: Gender[]) => void;
   toggleLookingFor: (gender: Gender) => void;
   setRelationshipIntent: (intents: RelationshipIntent[]) => void;
@@ -262,6 +284,15 @@ const initialState = {
   jobTitle: "",
   company: "",
   school: "",
+  // Life Rhythm
+  lifeRhythm: {
+    city: null,
+    socialRhythm: null,
+    sleepSchedule: null,
+    travelStyle: null,
+    workStyle: null,
+    coreValues: [],
+  } as LifeRhythm,
   lookingFor: [],
   relationshipIntent: [],
   activities: [],
@@ -501,6 +532,69 @@ export const useOnboardingStore = create<OnboardingState>()((set, get) => ({
 
       setSchool: (school) => set({ school }),
 
+      // ═══════════════════════════════════════════════════════════════════════════════
+      // LIFE RHYTHM SETTERS
+      // ═══════════════════════════════════════════════════════════════════════════════
+
+      setLifeRhythmCity: (city) =>
+        set((state) => ({
+          lifeRhythm: { ...state.lifeRhythm, city },
+        })),
+
+      setLifeRhythmSocialRhythm: (socialRhythm) =>
+        set((state) => ({
+          lifeRhythm: { ...state.lifeRhythm, socialRhythm },
+        })),
+
+      setLifeRhythmSleepSchedule: (sleepSchedule) =>
+        set((state) => ({
+          lifeRhythm: { ...state.lifeRhythm, sleepSchedule },
+        })),
+
+      setLifeRhythmTravelStyle: (travelStyle) =>
+        set((state) => ({
+          lifeRhythm: { ...state.lifeRhythm, travelStyle },
+        })),
+
+      setLifeRhythmWorkStyle: (workStyle) =>
+        set((state) => ({
+          lifeRhythm: { ...state.lifeRhythm, workStyle },
+        })),
+
+      setLifeRhythmCoreValues: (coreValues) =>
+        set((state) => ({
+          lifeRhythm: { ...state.lifeRhythm, coreValues: coreValues.slice(0, 3) },
+        })),
+
+      toggleLifeRhythmCoreValue: (value) => {
+        const state = useOnboardingStore.getState();
+        const currentValues = state.lifeRhythm.coreValues;
+        if (currentValues.includes(value)) {
+          // Remove value
+          set({
+            lifeRhythm: {
+              ...state.lifeRhythm,
+              coreValues: currentValues.filter((v) => v !== value),
+            },
+          });
+          return true;
+        }
+        // Check max 3 limit
+        if (currentValues.length >= 3) {
+          return false; // Max 3 selections reached
+        }
+        // Add value
+        set({
+          lifeRhythm: {
+            ...state.lifeRhythm,
+            coreValues: [...currentValues, value],
+          },
+        });
+        return true;
+      },
+
+      // ═══════════════════════════════════════════════════════════════════════════════
+
       setLookingFor: (lookingFor) => set({ lookingFor }),
 
       toggleLookingFor: (gender) =>
@@ -617,6 +711,26 @@ export const useOnboardingStore = create<OnboardingState>()((set, get) => ({
           if (draft.lifestyle.insect) updates.insect = draft.lifestyle.insect;
           if (draft.lifestyle.kids) updates.kids = draft.lifestyle.kids;
           if (draft.lifestyle.religion) updates.religion = draft.lifestyle.religion;
+        }
+
+        // Life Rhythm
+        if (draft.lifeRhythm) {
+          updates.lifeRhythm = {
+            city: draft.lifeRhythm.city ?? null,
+            socialRhythm: draft.lifeRhythm.socialRhythm ?? null,
+            sleepSchedule: draft.lifeRhythm.sleepSchedule ?? null,
+            travelStyle: draft.lifeRhythm.travelStyle ?? null,
+            workStyle: draft.lifeRhythm.workStyle ?? null,
+            coreValues: draft.lifeRhythm.coreValues ?? [],
+          };
+          if (__DEV__) {
+            console.log('[ONB_DRAFT] Life Rhythm hydration:', {
+              city: draft.lifeRhythm.city ?? 'undefined',
+              socialRhythm: draft.lifeRhythm.socialRhythm ?? 'undefined',
+              sleepSchedule: draft.lifeRhythm.sleepSchedule ?? 'undefined',
+              coreValuesCount: draft.lifeRhythm.coreValues?.length ?? 0,
+            });
+          }
         }
 
         // Preferences
