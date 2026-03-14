@@ -213,11 +213,15 @@ export const compareFaces = action({
   args: {
     userId: v.string(),
     selfieBase64: v.string(), // Base64 encoded selfie image
-    isDemoMode: v.optional(v.boolean()), // Demo mode flag from client
+    // P0 SECURITY FIX: REMOVED client-controlled isDemoMode parameter
+    // Demo mode is now determined server-side only via process.env.DEMO_MODE
   },
   handler: async (ctx, args): Promise<FaceMatchResult> => {
-    const { userId, selfieBase64, isDemoMode = false } = args;
+    const { userId, selfieBase64 } = args;
 
+    // P0 SECURITY FIX: Determine demo mode from trusted server-side environment only
+    // Client cannot spoof demo mode to bypass verification
+    const isDemoMode = process.env.DEMO_MODE === 'true';
     const mode = isDemoMode ? 'demo_auto' : 'manual_review';
     console.log(`[FaceVerify] mode=${mode} Starting verification for user ${userId}`);
 
