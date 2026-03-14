@@ -476,7 +476,7 @@ function SessionValidator() {
  * - Runs AFTER hydration completes
  *
  * P2 STABILITY:
- * - Uses _convexHydrated (not legacy _hasHydrated) for proper Convex readiness
+ * - Uses _hasHydrated for Convex hydration readiness
  * - Adds 10s timeout fallback to prevent infinite wait if hydration hangs
  */
 // P2 STABILITY: Hydration timeout constant
@@ -485,8 +485,8 @@ const HYDRATION_TIMEOUT_MS = 10000;
 function PhotoSyncManager() {
   const userId = useAuthStore((s) => s.userId);
   const authHydrated = useAuthStore((s) => s._hasHydrated);
-  // P2 STABILITY FIX: Use _convexHydrated for actual Convex hydration readiness
-  const convexHydrated = useOnboardingStore((s) => s._convexHydrated);
+  // P2 STABILITY FIX: Use _hasHydrated for Convex hydration readiness
+  const convexHydrated = useOnboardingStore((s) => s._hasHydrated);
   const demoHydrated = useDemoStore((s) => s._hasHydrated);
   const hasSyncedRef = useRef(false);
   const hasEnsuredUserRef = useRef<string | null>(null);
@@ -529,7 +529,7 @@ function PhotoSyncManager() {
     if (isDemoMode || convexHydrated || hydrationTimedOut) return;
 
     const timer = setTimeout(() => {
-      if (!useOnboardingStore.getState()._convexHydrated) {
+      if (!useOnboardingStore.getState()._hasHydrated) {
         console.warn('[PHOTO_SYNC] Convex hydration timeout after', HYDRATION_TIMEOUT_MS, 'ms - proceeding anyway');
         setHydrationTimedOut(true);
       }

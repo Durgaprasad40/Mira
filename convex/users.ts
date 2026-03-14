@@ -1774,7 +1774,6 @@ export const upsertOnboardingDraft = mutation({
       basicInfo: safeMerge(existingDraft.basicInfo, args.patch.basicInfo),
       profileDetails: safeMerge(existingDraft.profileDetails, args.patch.profileDetails),
       lifestyle: safeMerge(existingDraft.lifestyle, args.patch.lifestyle),
-      lifeRhythm: safeMerge(existingDraft.lifeRhythm, args.patch.lifeRhythm),
       preferences: safeMerge(existingDraft.preferences, args.patch.preferences),
       progress: {
         lastStepKey: args.patch.progress?.lastStepKey ?? existingDraft.progress?.lastStepKey,
