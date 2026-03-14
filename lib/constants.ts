@@ -393,7 +393,7 @@ export const MICRO_SURVEY_QUESTIONS = [
   { id: 'usage_frequency', text: 'How often do you open Mira?', options: ['Daily', 'Few times a week', 'Weekly', 'Rarely'] },
 ];
 
-// Profile Prompt Questions
+// Profile Prompt Questions (LEGACY - kept for backward compatibility)
 export const PROFILE_PROMPT_QUESTIONS = [
   { id: 'perfect_day', text: 'My perfect first date would be...' },
   { id: 'fun_fact', text: 'A fun fact about me...' },
@@ -402,6 +402,122 @@ export const PROFILE_PROMPT_QUESTIONS = [
   { id: 'love_language', text: 'My love language is...' },
   { id: 'bucket_list', text: 'Top of my bucket list...' },
 ];
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// NEW PROMPT SYSTEM (Phase-1 Onboarding - 2-Page Structure)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Page 1: Seed Questions (3 required questions)
+// ─────────────────────────────────────────────
+
+// Q1: Identity Anchor - "Which best describes you right now?"
+export type IdentityAnchorValue = 'builder' | 'performer' | 'seeker' | 'grounded';
+export const IDENTITY_ANCHOR_PROMPT = 'Which best describes you right now?';
+export const IDENTITY_ANCHOR_OPTIONS: { value: IdentityAnchorValue; label: string; subtitle: string }[] = [
+  { value: 'builder', label: 'Builder / Alchemist', subtitle: 'Creating, fixing, experimenting' },
+  { value: 'performer', label: 'Performer / Artist', subtitle: 'Music, style, expression' },
+  { value: 'seeker', label: 'Seeker / Explorer', subtitle: 'Travel, learning, curiosity' },
+  { value: 'grounded', label: 'Grounded / Zen', subtitle: 'Comfort, food, calm life' },
+];
+
+// Q2: Social Battery - slider from Relieved to Restless
+// "Your plans got cancelled on Friday night. How do you feel?"
+export type SocialBatteryValue = 1 | 2 | 3 | 4 | 5;
+export const SOCIAL_BATTERY_PROMPT = 'Your plans got cancelled on Friday night. How do you feel?';
+export const SOCIAL_BATTERY_LEFT_LABEL = 'Relieved';
+export const SOCIAL_BATTERY_RIGHT_LABEL = 'Restless';
+
+// Q3: Value Trigger - "On a first date, what tells you someone is a good person?"
+export type ValueTriggerValue = 'thoughtful_questions' | 'kind_to_staff' | 'great_humor' | 'on_time';
+export const VALUE_TRIGGER_PROMPT = 'On a first date, what tells you someone is a good person?';
+export const VALUE_TRIGGER_OPTIONS: { value: ValueTriggerValue; label: string }[] = [
+  { value: 'thoughtful_questions', label: 'They ask thoughtful questions' },
+  { value: 'kind_to_staff', label: 'They are kind to staff' },
+  { value: 'great_humor', label: 'They have great humor' },
+  { value: 'on_time', label: 'They show up on time' },
+];
+
+// Seed Questions data structure
+export interface SeedQuestions {
+  identityAnchor: IdentityAnchorValue | null;
+  socialBattery: SocialBatteryValue | null;
+  valueTrigger: ValueTriggerValue | null;
+}
+
+// Page 2: Section Prompts (4 sections, min 1 answer per section)
+// ─────────────────────────────────────────────────────────────
+
+// Section 1: Builder/Alchemist
+export const BUILDER_PROMPTS = [
+  { id: 'builder_1', text: 'What is something broken in the world or your city that you wish you could fix?' },
+  { id: 'builder_2', text: 'What is one thing you own that you are very protective of?' },
+  { id: 'builder_3', text: "Would you rather build something used by many people or something that deeply changes one person's life?" },
+  { id: 'builder_4', text: 'What is the last thing you stayed up late learning about because you were curious?' },
+];
+
+// Section 2: Performer/Artist
+export const PERFORMER_PROMPTS = [
+  { id: 'performer_1', text: 'If you had to perform something on stage, what would you choose?' },
+  { id: 'performer_2', text: 'Is your room more of a creative mess or very neat and minimal?' },
+  { id: 'performer_3', text: 'Do you create music or art to discover new feelings or to express feelings you already have?' },
+  { id: 'performer_4', text: 'What famous movie, song, or artwork do you think is overrated?' },
+];
+
+// Section 3: Seeker/Explorer
+export const SEEKER_PROMPTS = [
+  { id: 'seeker_1', text: "Would you rather explore a new country where you don't know the language or visit your favorite city again in luxury?" },
+  { id: 'seeker_2', text: 'What big question about life or the universe do you often think about?' },
+  { id: 'seeker_3', text: 'What is the most unusual thing you brought back from a trip just because it had a good story?' },
+  { id: 'seeker_4', text: 'When you travel, do you plan everything or just go with the flow?' },
+];
+
+// Section 4: Grounded/Zen
+export const GROUNDED_PROMPTS = [
+  { id: 'grounded_1', text: 'What daily routine do you never skip?' },
+  { id: 'grounded_2', text: 'What food always makes you feel better on a bad day?' },
+  { id: 'grounded_3', text: 'Do you prefer hanging out with a big group or spending time with one close friend?' },
+  { id: 'grounded_4', text: 'How do you relax without using your phone or a screen?' },
+];
+
+// Combined section prompts for easy iteration
+export const SECTION_PROMPTS = {
+  builder: BUILDER_PROMPTS,
+  performer: PERFORMER_PROMPTS,
+  seeker: SEEKER_PROMPTS,
+  grounded: GROUNDED_PROMPTS,
+} as const;
+
+export type PromptSectionKey = keyof typeof SECTION_PROMPTS;
+
+export const SECTION_LABELS: Record<PromptSectionKey, { title: string; emoji: string; description: string }> = {
+  builder: { title: 'Builder/Alchemist', emoji: '🔧', description: 'Creative & project-oriented' },
+  performer: { title: 'Performer/Artist', emoji: '🎭', description: 'Expression & entertainment' },
+  seeker: { title: 'Seeker/Explorer', emoji: '🧭', description: 'Adventure & discovery' },
+  grounded: { title: 'Grounded/Zen', emoji: '🧘', description: 'Values & inner peace' },
+};
+
+// Section prompts data structure
+export interface SectionPromptAnswer {
+  question: string;
+  answer: string;
+}
+
+export interface SectionPrompts {
+  builder: SectionPromptAnswer[];
+  performer: SectionPromptAnswer[];
+  seeker: SectionPromptAnswer[];
+  grounded: SectionPromptAnswer[];
+}
+
+// Combined prompts data structure for storage
+export interface ProfilePromptsV2 {
+  seedQuestions: SeedQuestions;
+  sectionPrompts: SectionPrompts;
+}
+
+// Constants for validation
+export const PROMPT_ANSWER_MAX_LENGTH = 200;
+export const MIN_ANSWERS_PER_SECTION = 1;
 
 // Confession Topics Config
 export const CONFESSION_TOPICS: Record<ConfessionTopic, { emoji: string; label: string; color: string; bg: string }> = {

@@ -32,6 +32,12 @@ import {
   PETS_OPTIONS,
   EDUCATION_OPTIONS,
   RELIGION_OPTIONS,
+  IDENTITY_ANCHOR_OPTIONS,
+  SOCIAL_BATTERY_LEFT_LABEL,
+  SOCIAL_BATTERY_RIGHT_LABEL,
+  VALUE_TRIGGER_OPTIONS,
+  SECTION_LABELS,
+  PromptSectionKey,
 } from "@/lib/constants";
 import { Button } from "@/components/ui";
 import { useOnboardingStore, LGBTQ_OPTIONS } from "@/stores/onboardingStore";
@@ -128,6 +134,8 @@ export default function ReviewScreen() {
     relationshipIntent,
     activities,
     profilePrompts,
+    seedQuestions,
+    sectionPrompts,
     minAge,
     maxAge,
     maxDistance,
@@ -310,6 +318,8 @@ export default function ReviewScreen() {
           relationshipIntent: sanitizeRelationshipIntent(relationshipIntent as string[]),
           activities: activities as string[],
           profilePrompts,
+          seedQuestions,
+          sectionPrompts,
           minAge,
           maxAge,
           maxDistance,
@@ -625,23 +635,78 @@ export default function ReviewScreen() {
         <Text style={styles.bioText}>{bio || demoProfile?.bio || "No bio added"}</Text>
       </View>
 
-      {/* Prompts Section */}
+      {/* Prompts Section (New 2-Page System) */}
       <View style={styles.section}>
         <View style={styles.sectionHeader}>
-          <Text style={styles.sectionTitle}>Prompts</Text>
+          <Text style={styles.sectionTitle}>About You</Text>
           <TouchableOpacity onPress={() => handleEdit("prompts")}>
             <Text style={styles.editLink}>Edit</Text>
           </TouchableOpacity>
         </View>
-        {(profilePrompts.length > 0 || (demoProfile?.profilePrompts && demoProfile.profilePrompts.length > 0)) ? (
-          (profilePrompts.length > 0 ? profilePrompts : demoProfile?.profilePrompts || []).map((prompt, index) => (
-            <View key={index} style={styles.promptItem}>
-              <Text style={styles.promptQuestion}>{prompt.question}</Text>
-              <Text style={styles.promptAnswer}>{prompt.answer}</Text>
+
+        {/* Seed Questions */}
+        {(seedQuestions.identityAnchor || seedQuestions.socialBattery || seedQuestions.valueTrigger) ? (
+          <View style={styles.promptSubsection}>
+            {seedQuestions.identityAnchor && (
+              <View style={styles.infoRow}>
+                <Text style={styles.infoLabel}>Describes you:</Text>
+                <Text style={styles.infoValue}>
+                  {IDENTITY_ANCHOR_OPTIONS.find(o => o.value === seedQuestions.identityAnchor)?.label || seedQuestions.identityAnchor}
+                </Text>
+              </View>
+            )}
+            {seedQuestions.socialBattery && (
+              <View style={styles.infoRow}>
+                <Text style={styles.infoLabel}>Social energy:</Text>
+                <Text style={styles.infoValue}>
+                  {seedQuestions.socialBattery <= 2 ? SOCIAL_BATTERY_LEFT_LABEL :
+                   seedQuestions.socialBattery >= 4 ? SOCIAL_BATTERY_RIGHT_LABEL :
+                   'Balanced'} ({seedQuestions.socialBattery}/5)
+                </Text>
+              </View>
+            )}
+            {seedQuestions.valueTrigger && (
+              <View style={styles.infoRow}>
+                <Text style={styles.infoLabel}>Good person sign:</Text>
+                <Text style={styles.infoValue}>
+                  {VALUE_TRIGGER_OPTIONS.find(o => o.value === seedQuestions.valueTrigger)?.label || seedQuestions.valueTrigger}
+                </Text>
+              </View>
+            )}
+          </View>
+        ) : null}
+
+        {/* Section Prompts */}
+        {(['builder', 'performer', 'seeker', 'grounded'] as PromptSectionKey[]).map((section) => {
+          const answers = sectionPrompts[section];
+          if (!answers || answers.length === 0) return null;
+          const label = SECTION_LABELS[section];
+          return (
+            <View key={section} style={styles.promptSubsection}>
+              <Text style={styles.promptSectionLabel}>{label.emoji} {label.title}</Text>
+              {answers.map((prompt, index) => (
+                <View key={index} style={styles.promptItem}>
+                  <Text style={styles.promptQuestion}>{prompt.question}</Text>
+                  <Text style={styles.promptAnswer}>{prompt.answer}</Text>
+                </View>
+              ))}
             </View>
-          ))
-        ) : (
-          <Text style={styles.emptyText}>No prompts added</Text>
+          );
+        })}
+
+        {/* Legacy prompts fallback */}
+        {(!seedQuestions.identityAnchor && !seedQuestions.socialBattery && !seedQuestions.valueTrigger &&
+          Object.values(sectionPrompts).every(s => s.length === 0)) && (
+          profilePrompts.length > 0 ? (
+            profilePrompts.map((prompt, index) => (
+              <View key={index} style={styles.promptItem}>
+                <Text style={styles.promptQuestion}>{prompt.question}</Text>
+                <Text style={styles.promptAnswer}>{prompt.answer}</Text>
+              </View>
+            ))
+          ) : (
+            <Text style={styles.emptyText}>No prompts added</Text>
+          )
         )}
       </View>
 
@@ -948,6 +1013,18 @@ const styles = StyleSheet.create({
     color: COLORS.textMuted,
     fontStyle: "italic",
     marginTop: 8,
+  },
+  promptSubsection: {
+    marginBottom: 16,
+    paddingBottom: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: COLORS.border,
+  },
+  promptSectionLabel: {
+    fontSize: 14,
+    fontWeight: "600",
+    color: COLORS.primary,
+    marginBottom: 10,
   },
   promptItem: {
     marginBottom: 12,
