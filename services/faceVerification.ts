@@ -236,13 +236,14 @@ async function serverVerify(request: FaceVerificationRequest, demoMode: boolean)
     const selfieBase64 = await imageToBase64(bestFrame.base64);
     console.log(`[FaceVerify] mode=${mode} Converted selfie to base64, length=${selfieBase64.length}`);
 
-    // Call the Convex action with isDemoMode flag (only for real users)
+    // Call the Convex action (demo mode determined server-side)
     console.log(`[FaceVerify] mode=${mode} Calling Convex faceVerification.compareFaces...`);
 
+    // P0 SECURITY FIX: Removed client-controlled isDemoMode parameter
+    // Demo mode is now determined server-side via process.env.DEMO_MODE
     const result = await convex.action(api.faceVerification.compareFaces, {
       userId: request.userId,
       selfieBase64,
-      isDemoMode: demoMode,
     });
 
     console.log(`[FaceVerify] mode=${result.mode} status=${result.status} reasonCode=${result.reasonCode}`);

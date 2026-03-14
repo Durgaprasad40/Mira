@@ -7,7 +7,7 @@
  * - Do not change UX/flows without explicit unlock
  * Date locked: 2026-03-04
  */
-import React, { useState } from "react";
+import React, { useState, useRef, useEffect } from "react";
 import { View, Text, StyleSheet } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useRouter } from "expo-router";
@@ -28,6 +28,16 @@ export default function TutorialScreen() {
   const { reset } = useOnboardingStore();
   const { setOnboardingCompleted } = useAuthStore();
   const [currentStep, setCurrentStep] = useState(0);
+
+  // P1 STABILITY: Track component mount status to prevent state updates after unmount
+  const mountedRef = useRef(true);
+  const [isCompleting, setIsCompleting] = useState(false);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   const steps = [
     {
@@ -61,6 +71,10 @@ export default function TutorialScreen() {
   ];
 
   const handleComplete = () => {
+    // P1 STABILITY: Prevent double-completion and guard against unmount
+    if (isCompleting || !mountedRef.current) return;
+    setIsCompleting(true);
+
     // OB-4 fix: Mark onboarding complete ONLY here (after tutorial is finished)
     // This ensures user sees the tutorial before being marked complete
     setOnboardingCompleted(true);
@@ -81,6 +95,8 @@ export default function TutorialScreen() {
       // Seed demo profiles/matches/likes
       useDemoStore.getState().seed();
     }
+    // P1 STABILITY: Check mount status before navigation
+    if (!mountedRef.current) return;
     router.replace("/(main)/(tabs)/home");
   };
 

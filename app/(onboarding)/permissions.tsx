@@ -35,7 +35,15 @@ export default function PermissionsScreen() {
   // Notification permission state: 'pending' | 'granted' | 'denied' | 'unavailable'
   const [notificationStatus, setNotificationStatus] = useState<'pending' | 'granted' | 'denied' | 'unavailable'>('pending');
 
+  // P2 STABILITY: Busy flags to prevent concurrent permission requests
+  const [isRequestingLocation, setIsRequestingLocation] = useState(false);
+  const [isRequestingNotifications, setIsRequestingNotifications] = useState(false);
+
   const requestLocation = async () => {
+    // P2 STABILITY: Prevent concurrent permission requests
+    if (isRequestingLocation || locationGranted) return;
+    setIsRequestingLocation(true);
+
     try {
       const { status } = await Location.requestForegroundPermissionsAsync();
       if (status === "granted") {
@@ -54,16 +62,28 @@ export default function PermissionsScreen() {
       }
     } catch (error) {
       Alert.alert("Error", "Failed to request location permission");
+    } finally {
+      setIsRequestingLocation(false);
     }
   };
 
   const requestNotifications = () => {
+    // P2 STABILITY: Prevent concurrent permission requests
+    if (isRequestingNotifications || notificationStatus !== 'pending') return;
+    setIsRequestingNotifications(true);
+
     // expo-notifications is not installed in this build
     // PRIVACY FIX: Don't fake permission as granted - be honest about the limitation
     Alert.alert(
       "Notifications",
       "Push notifications are not available in this beta build. You'll be able to enable notifications in a future update.",
-      [{ text: "OK", onPress: () => setNotificationStatus('unavailable') }]
+      [{
+        text: "OK",
+        onPress: () => {
+          setNotificationStatus('unavailable');
+          setIsRequestingNotifications(false);
+        }
+      }]
     );
   };
 
@@ -103,7 +123,8 @@ export default function PermissionsScreen() {
           title={locationGranted ? "Granted ✓" : "Enable Location"}
           variant={locationGranted ? "outline" : "primary"}
           onPress={requestLocation}
-          disabled={locationGranted}
+          disabled={locationGranted || isRequestingLocation}
+          loading={isRequestingLocation}
           style={styles.permissionButton}
         />
       </View>
@@ -127,7 +148,8 @@ export default function PermissionsScreen() {
           }
           variant={notificationStatus === 'pending' ? "primary" : "outline"}
           onPress={requestNotifications}
-          disabled={notificationStatus !== 'pending'}
+          disabled={notificationStatus !== 'pending' || isRequestingNotifications}
+          loading={isRequestingNotifications}
           style={styles.permissionButton}
         />
       </View>

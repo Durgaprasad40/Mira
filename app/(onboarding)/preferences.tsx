@@ -20,6 +20,7 @@ import {
   TextInput,
   Keyboard,
   useWindowDimensions,
+  ActivityIndicator,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter, useLocalSearchParams } from 'expo-router';
@@ -89,6 +90,7 @@ export default function PreferencesScreen() {
     setLgbtqPreference,
     setStep,
   } = useOnboardingStore();
+  const convexHydrated = useOnboardingStore((s) => s._convexHydrated);
   const { userId, faceVerificationPassed } = useAuthStore();
   const demoHydrated = useDemoStore((s) => s._hasHydrated);
   const demoProfile = useDemoStore((s) =>
@@ -112,6 +114,10 @@ export default function PreferencesScreen() {
   const [relationshipIntentError, setRelationshipIntentError] = useState('');
   const [distanceError, setDistanceError] = useState('');
   const [lgbtqError, setLgbtqError] = useState('');
+  const [ageError, setAgeError] = useState(''); // STABILITY FIX: Age validation feedback
+
+  // P1 STABILITY: Prevent double-submission on rapid taps
+  const [isSubmitting, setIsSubmitting] = useState(false);
 
   // Local text states for age inputs (allows temporary empty string while typing)
   const [minAgeText, setMinAgeText] = useState(minAge.toString());
@@ -124,6 +130,7 @@ export default function PreferencesScreen() {
   const [distanceSectionY, setDistanceSectionY] = useState<number | null>(null);
   const [relationshipIntentSectionY, setRelationshipIntentSectionY] = useState<number | null>(null);
   const [interestsSectionY, setInterestsSectionY] = useState<number | null>(null);
+  const [ageSectionY, setAgeSectionY] = useState<number | null>(null);
 
   // Calculate interest chip width: 3 columns default, 2 for narrow screens (<360px)
   const contentPadding = 48; // 24px * 2
@@ -156,6 +163,24 @@ export default function PreferencesScreen() {
       setActivities(sanitized as typeof activities);
     }
   }, []); // Run only on mount
+
+  // STABILITY FIX: Sync local text states after Convex hydration completes
+  // This ensures previously entered values are visible when user returns
+  useEffect(() => {
+    if (!isDemoMode && convexHydrated) {
+      // Sync from hydrated store values
+      setMinAgeText(minAge.toString());
+      setMaxAgeText(maxAge.toString());
+      setDistanceText(maxDistance.toString());
+      if (__DEV__) {
+        console.log('[PREFERENCES] Synced from hydrated store:', {
+          minAge,
+          maxAge,
+          maxDistance,
+        });
+      }
+    }
+  }, [convexHydrated]); // Run when hydration completes
 
   // Prefill from demoProfiles if onboardingStore is empty
   useEffect(() => {
@@ -274,7 +299,10 @@ export default function PreferencesScreen() {
     }
   };
 
-  const handleNext = () => {
+  const handleNext = async () => {
+    // P1 STABILITY: Prevent double-submission on rapid taps
+    if (isSubmitting) return;
+
     if (lookingFor.length === 0) {
       Alert.alert('Required', 'Please select who you\'re looking for');
       return;
@@ -305,7 +333,7 @@ export default function PreferencesScreen() {
       setInterestsError('');
     }
 
-    // D) Validate distance: required, must be valid number
+    // D) Validate distance: required, must be valid number within bounds
     const trimmedDistance = distanceText.trim();
     const parsedDistance = parseInt(trimmedDistance, 10);
     if (!trimmedDistance || isNaN(parsedDistance)) {
@@ -316,8 +344,38 @@ export default function PreferencesScreen() {
       setDistanceError(`Distance must be at least ${DISTANCE_MIN} mile.`);
       hasError = true;
       if (firstErrorY === null) firstErrorY = distanceSectionY;
+    } else if (parsedDistance > DISTANCE_MAX) {
+      // STABILITY FIX: Show error instead of silent clamping
+      setDistanceError(`Distance must be at most ${DISTANCE_MAX} miles.`);
+      hasError = true;
+      if (firstErrorY === null) firstErrorY = distanceSectionY;
     } else {
       setDistanceError('');
+    }
+
+    // E) Validate age: parse and validate bounds with explicit feedback
+    let finalMin = parseInt(minAgeText, 10);
+    let finalMax = parseInt(maxAgeText, 10);
+
+    // Default empty values
+    if (isNaN(finalMin)) finalMin = MIN_AGE_LIMIT;
+    if (isNaN(finalMax)) finalMax = MAX_AGE_LIMIT;
+
+    // STABILITY FIX: Validate age bounds with user feedback instead of silent clamping
+    if (finalMin < MIN_AGE_LIMIT || finalMin > MAX_AGE_LIMIT) {
+      setAgeError(`Minimum age must be between ${MIN_AGE_LIMIT} and ${MAX_AGE_LIMIT}.`);
+      hasError = true;
+      if (firstErrorY === null) firstErrorY = ageSectionY;
+    } else if (finalMax < MIN_AGE_LIMIT || finalMax > MAX_AGE_LIMIT) {
+      setAgeError(`Maximum age must be between ${MIN_AGE_LIMIT} and ${MAX_AGE_LIMIT}.`);
+      hasError = true;
+      if (firstErrorY === null) firstErrorY = ageSectionY;
+    } else if (finalMin > finalMax) {
+      setAgeError('Minimum age cannot be greater than maximum age.');
+      hasError = true;
+      if (firstErrorY === null) firstErrorY = ageSectionY;
+    } else {
+      setAgeError('');
     }
 
     if (hasError) {
@@ -331,28 +389,11 @@ export default function PreferencesScreen() {
 
     setShowTopError(false);
 
-    // Commit age values: parse, default if empty, clamp to bounds, ensure min <= max
-    let finalMin = parseInt(minAgeText, 10);
-    let finalMax = parseInt(maxAgeText, 10);
+    // P1 STABILITY: Mark as submitting after validation passes
+    setIsSubmitting(true);
 
-    // Default empty values
-    if (isNaN(finalMin)) finalMin = MIN_AGE_LIMIT;
-    if (isNaN(finalMax)) finalMax = MAX_AGE_LIMIT;
-
-    // Clamp to bounds
-    finalMin = Math.max(MIN_AGE_LIMIT, Math.min(MAX_AGE_LIMIT, finalMin));
-    finalMax = Math.max(MIN_AGE_LIMIT, Math.min(MAX_AGE_LIMIT, finalMax));
-
-    // Ensure min <= max (if violated, set max = min)
-    if (finalMin > finalMax) {
-      finalMax = finalMin;
-    }
-
-    // D) Commit distance: clamp to max 75 (validation already passed)
-    let finalDistance = parsedDistance;
-    if (finalDistance > DISTANCE_MAX) {
-      finalDistance = DISTANCE_MAX;
-    }
+    // Age values already validated above - use parsed values directly
+    const finalDistance = parsedDistance;
 
     // Commit to store and update text display
     setMinAge(finalMin);
@@ -392,22 +433,29 @@ export default function PreferencesScreen() {
       preferences.maxAge = finalMax;
       preferences.maxDistance = finalDistance;
 
-      upsertDraft({
-        userId,
-        patch: {
-          preferences,
-          progress: { lastStepKey: 'preferences' },
-        },
-      }).catch((error) => {
+      try {
+        await upsertDraft({
+          userId,
+          patch: {
+            preferences,
+            progress: { lastStepKey: 'preferences' },
+          },
+        });
+        if (__DEV__) console.log(`[ONB_DRAFT] Saved preferences: lookingFor=${lookingFor.length}, intent=${relationshipIntent.length}, activities=${activities.length}, age=${finalMin}-${finalMax}, dist=${finalDistance}`);
+      } catch (error) {
         if (__DEV__) console.error('[PREFERENCES] Failed to save draft:', error);
-      });
-      if (__DEV__) console.log(`[ONB_DRAFT] Saved preferences: lookingFor=${lookingFor.length}, intent=${relationshipIntent.length}, activities=${activities.length}, age=${finalMin}-${finalMax}, dist=${finalDistance}`);
+        // P1 STABILITY: Re-enable button on failure
+        setIsSubmitting(false);
+        return;
+      }
     }
 
     // CENTRAL EDIT HUB: Return to Review if editing from there
     if (isEditFromReview) {
       if (__DEV__) console.log('[ONB] preferences → review (editFromReview)');
       router.replace('/(onboarding)/review' as any);
+      // P1 STABILITY: Reset after navigation completes
+      setIsSubmitting(false);
       return;
     }
 
@@ -426,6 +474,8 @@ export default function PreferencesScreen() {
       setStep('photo_upload');
       router.push('/(onboarding)/photo-upload' as any);
     }
+    // P1 STABILITY: Reset after navigation completes
+    setIsSubmitting(false);
   };
 
   // POST-VERIFICATION: Previous goes back
@@ -435,7 +485,22 @@ export default function PreferencesScreen() {
     router.push('/(onboarding)/profile-details' as any);
   };
 
-  const canContinue = lookingFor.length > 0 && relationshipIntent.length >= 1 && activities.length >= 1;
+  // P1 STABILITY: Include isSubmitting in disabled check
+  const canContinue = !isSubmitting && lookingFor.length > 0 && relationshipIntent.length >= 1 && activities.length >= 1;
+
+  // STABILITY FIX: Wait for Convex hydration before rendering form
+  // This prevents showing empty preferences when user returns with incomplete onboarding
+  if (!isDemoMode && !convexHydrated) {
+    return (
+      <SafeAreaView style={styles.safeArea} edges={['top']}>
+        <OnboardingProgressHeader />
+        <View style={styles.loadingContainer}>
+          <ActivityIndicator size="large" color={COLORS.primary} />
+          <Text style={styles.loadingText}>Loading your preferences...</Text>
+        </View>
+      </SafeAreaView>
+    );
+  }
 
   return (
     <SafeAreaView style={styles.safeArea} edges={['top']}>
@@ -578,15 +643,21 @@ export default function PreferencesScreen() {
         {interestsError ? <Text style={styles.fieldError}>{interestsError}</Text> : null}
       </View>
 
-      <View style={styles.section}>
+      <View
+        style={styles.section}
+        onLayout={(e) => setAgeSectionY(e.nativeEvent.layout.y)}
+      >
         <Text style={styles.sectionTitle}>Age Range</Text>
         <Text style={styles.sectionSubtitle}>{MIN_AGE_LIMIT} - {MAX_AGE_LIMIT} years</Text>
-        <View style={styles.ageRow}>
+        <View style={[styles.ageRow, ageError ? styles.ageRowError : null]}>
           <View style={styles.ageInputContainer}>
             <Text style={styles.ageLabel}>Min</Text>
             <Input
               value={minAgeText}
-              onChangeText={handleMinAgeChange}
+              onChangeText={(text) => {
+                handleMinAgeChange(text);
+                if (ageError) setAgeError('');
+              }}
               keyboardType="numeric"
               style={styles.ageInput}
             />
@@ -596,12 +667,16 @@ export default function PreferencesScreen() {
             <Text style={styles.ageLabel}>Max</Text>
             <Input
               value={maxAgeText}
-              onChangeText={handleMaxAgeChange}
+              onChangeText={(text) => {
+                handleMaxAgeChange(text);
+                if (ageError) setAgeError('');
+              }}
               keyboardType="numeric"
               style={styles.ageInput}
             />
           </View>
         </View>
+        {ageError ? <Text style={styles.fieldError}>{ageError}</Text> : null}
       </View>
 
       <View
@@ -634,6 +709,7 @@ export default function PreferencesScreen() {
           variant="primary"
           onPress={handleNext}
           disabled={!canContinue}
+          loading={isSubmitting}
           fullWidth
         />
         <View style={styles.navRow}>
@@ -803,6 +879,13 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     gap: 16,
   },
+  ageRowError: {
+    borderRadius: 12,
+    borderWidth: 2,
+    borderColor: COLORS.error,
+    padding: 8,
+    margin: -8,
+  },
   ageInputContainer: {
     flex: 1,
   },
@@ -863,5 +946,15 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: COLORS.textLight,
     fontWeight: '500',
+  },
+  loadingContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  loadingText: {
+    marginTop: 16,
+    fontSize: 16,
+    color: COLORS.textLight,
   },
 });
