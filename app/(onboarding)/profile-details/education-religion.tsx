@@ -86,21 +86,32 @@ export default function ProfileDetailsEducationReligionScreen() {
 
     // LIVE MODE: Persist to Convex onboarding draft
     if (!isDemoMode && userId) {
-      const profileDetails: Record<string, any> = {};
-      if (education) profileDetails.education = education;
-      if (religion) profileDetails.religion = religion;
+      const patch: Record<string, any> = {
+        progress: { lastStepKey: 'education_religion' },
+      };
 
-      if (Object.keys(profileDetails).length > 0) {
-        upsertDraft({
-          userId,
-          patch: {
-            profileDetails,
-            progress: { lastStepKey: 'education_religion' },
-          },
-        }).catch((error) => {
+      // Education goes in profileDetails
+      if (education) {
+        patch.profileDetails = { education };
+      }
+
+      // Religion goes in lifestyle (per schema)
+      if (religion) {
+        patch.lifestyle = { religion };
+      }
+
+      if (patch.profileDetails || patch.lifestyle) {
+        // BUG FIX DEBUG: Log full patch to trace religion save
+        if (__DEV__) {
+          console.log('[ONB_DRAFT] Saving education/religion:', {
+            education,
+            religion,
+            patch: JSON.stringify(patch),
+          });
+        }
+        upsertDraft({ userId, patch }).catch((error) => {
           if (__DEV__) console.error('[EDUCATION] Failed to save draft:', error);
         });
-        if (__DEV__) console.log(`[ONB_DRAFT] Saved education/religion: ${JSON.stringify(profileDetails)}`);
       }
     }
 

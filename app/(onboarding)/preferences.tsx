@@ -20,6 +20,7 @@ import {
   TextInput,
   Keyboard,
   useWindowDimensions,
+  ActivityIndicator,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter, useLocalSearchParams } from 'expo-router';
@@ -89,6 +90,7 @@ export default function PreferencesScreen() {
     setLgbtqPreference,
     setStep,
   } = useOnboardingStore();
+  const convexHydrated = useOnboardingStore((s) => s._convexHydrated);
   const { userId, faceVerificationPassed } = useAuthStore();
   const demoHydrated = useDemoStore((s) => s._hasHydrated);
   const demoProfile = useDemoStore((s) =>
@@ -156,6 +158,24 @@ export default function PreferencesScreen() {
       setActivities(sanitized as typeof activities);
     }
   }, []); // Run only on mount
+
+  // STABILITY FIX: Sync local text states after Convex hydration completes
+  // This ensures previously entered values are visible when user returns
+  useEffect(() => {
+    if (!isDemoMode && convexHydrated) {
+      // Sync from hydrated store values
+      setMinAgeText(minAge.toString());
+      setMaxAgeText(maxAge.toString());
+      setDistanceText(maxDistance.toString());
+      if (__DEV__) {
+        console.log('[PREFERENCES] Synced from hydrated store:', {
+          minAge,
+          maxAge,
+          maxDistance,
+        });
+      }
+    }
+  }, [convexHydrated]); // Run when hydration completes
 
   // Prefill from demoProfiles if onboardingStore is empty
   useEffect(() => {
@@ -436,6 +456,20 @@ export default function PreferencesScreen() {
   };
 
   const canContinue = lookingFor.length > 0 && relationshipIntent.length >= 1 && activities.length >= 1;
+
+  // STABILITY FIX: Wait for Convex hydration before rendering form
+  // This prevents showing empty preferences when user returns with incomplete onboarding
+  if (!isDemoMode && !convexHydrated) {
+    return (
+      <SafeAreaView style={styles.safeArea} edges={['top']}>
+        <OnboardingProgressHeader />
+        <View style={styles.loadingContainer}>
+          <ActivityIndicator size="large" color={COLORS.primary} />
+          <Text style={styles.loadingText}>Loading your preferences...</Text>
+        </View>
+      </SafeAreaView>
+    );
+  }
 
   return (
     <SafeAreaView style={styles.safeArea} edges={['top']}>
@@ -863,5 +897,15 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: COLORS.textLight,
     fontWeight: '500',
+  },
+  loadingContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  loadingText: {
+    marginTop: 16,
+    fontSize: 16,
+    color: COLORS.textLight,
   },
 });

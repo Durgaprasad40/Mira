@@ -16,6 +16,7 @@ import {
   ScrollView,
   TouchableOpacity,
   Pressable,
+  ActivityIndicator,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter, useLocalSearchParams } from 'expo-router';
@@ -37,6 +38,10 @@ import { Button } from '@/components/ui';
 import { useOnboardingStore } from '@/stores/onboardingStore';
 import { OnboardingProgressHeader } from '@/components/OnboardingProgressHeader';
 import { useScreenTrace } from '@/lib/devTrace';
+import { useMutation } from 'convex/react';
+import { api } from '@/convex/_generated/api';
+import { useAuthStore } from '@/stores/authStore';
+import { isDemoMode } from '@/hooks/useConvex';
 
 export default function PromptsPart1Screen() {
   useScreenTrace('ONB_PROMPTS_PART1');
@@ -44,6 +49,10 @@ export default function PromptsPart1Screen() {
   const router = useRouter();
   const params = useLocalSearchParams<{ editFromReview?: string }>();
   const isEditFromReview = params.editFromReview === 'true';
+
+  // Auth and persistence
+  const { userId } = useAuthStore();
+  const upsertDraft = useMutation(api.users.upsertOnboardingDraft);
 
   // Store state and actions
   const {
@@ -53,6 +62,7 @@ export default function PromptsPart1Screen() {
     setValueTrigger,
     setStep,
   } = useOnboardingStore();
+  const convexHydrated = useOnboardingStore((s) => s._convexHydrated);
 
   // Local state for immediate UI feedback
   const [identityAnchor, setLocalIdentityAnchor] = useState<IdentityAnchorValue | null>(
@@ -65,7 +75,20 @@ export default function PromptsPart1Screen() {
     seedQuestions.valueTrigger
   );
 
-  // Sync from store on mount (for edit flow)
+  // STABILITY FIX: Sync from store AFTER Convex hydration completes
+  // This ensures previously entered values are visible when user returns
+  useEffect(() => {
+    if (!isDemoMode && convexHydrated) {
+      if (seedQuestions.identityAnchor) setLocalIdentityAnchor(seedQuestions.identityAnchor);
+      if (seedQuestions.socialBattery) setLocalSocialBattery(seedQuestions.socialBattery);
+      if (seedQuestions.valueTrigger) setLocalValueTrigger(seedQuestions.valueTrigger);
+      if (__DEV__) {
+        console.log('[PROMPTS_PART1] Synced from hydrated store:', seedQuestions);
+      }
+    }
+  }, [convexHydrated]);
+
+  // Sync from store on mount (for edit flow and demo mode)
   useEffect(() => {
     if (seedQuestions.identityAnchor) setLocalIdentityAnchor(seedQuestions.identityAnchor);
     if (seedQuestions.socialBattery) setLocalSocialBattery(seedQuestions.socialBattery);
@@ -85,6 +108,25 @@ export default function PromptsPart1Screen() {
     setIdentityAnchor(identityAnchor);
     setSocialBattery(socialBattery);
     setValueTrigger(valueTrigger);
+
+    // LIVE MODE: Persist seedQuestions to Convex onboarding draft
+    if (!isDemoMode && userId) {
+      const seedQuestionsData = {
+        identityAnchor,
+        socialBattery,
+        valueTrigger,
+      };
+      upsertDraft({
+        userId,
+        patch: {
+          profileDetails: { seedQuestions: seedQuestionsData },
+          progress: { lastStepKey: 'prompts_part1' },
+        },
+      }).catch((error) => {
+        if (__DEV__) console.error('[PROMPTS_PART1] Failed to save draft:', error);
+      });
+      if (__DEV__) console.log('[ONB_DRAFT] Saved seedQuestions:', seedQuestionsData);
+    }
 
     // Navigate
     if (isEditFromReview) {
@@ -108,6 +150,20 @@ export default function PromptsPart1Screen() {
     const value = (position + 1) as SocialBatteryValue;
     setLocalSocialBattery(value);
   }, []);
+
+  // STABILITY FIX: Wait for Convex hydration before rendering form
+  // This prevents showing empty prompts when user returns with incomplete onboarding
+  if (!isDemoMode && !convexHydrated) {
+    return (
+      <SafeAreaView style={styles.safeArea} edges={['top']}>
+        <OnboardingProgressHeader />
+        <View style={styles.loadingContainer}>
+          <ActivityIndicator size="large" color={COLORS.primary} />
+          <Text style={styles.loadingText}>Loading your answers...</Text>
+        </View>
+      </SafeAreaView>
+    );
+  }
 
   return (
     <SafeAreaView style={styles.safeArea} edges={['top']}>
@@ -419,5 +475,15 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: COLORS.textLight,
     fontWeight: '500',
+  },
+  loadingContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  loadingText: {
+    marginTop: 16,
+    fontSize: 16,
+    color: COLORS.textLight,
   },
 });

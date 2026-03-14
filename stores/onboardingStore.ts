@@ -216,6 +216,10 @@ interface OnboardingState {
   // OB-1: Hydration state for startup safety
   _hasHydrated: boolean;
   setHasHydrated: (state: boolean) => void;
+
+  // Convex draft hydration state - tracks whether backend data has been loaded
+  _convexHydrated: boolean;
+  setConvexHydrated: () => void;
 }
 
 const initialState = {
@@ -274,11 +278,18 @@ const initialState = {
 // Onboarding data is rehydrated from Convex queries on app boot.
 export const useOnboardingStore = create<OnboardingState>()((set) => ({
   ...initialState,
-  // Always true since there's no async hydration from AsyncStorage
+  // Legacy flag - always true for backward compatibility
   _hasHydrated: true,
+
+  // New flag: tracks whether Convex draft has been hydrated
+  // Screens should check this before rendering forms to prevent data loss
+  _convexHydrated: false,
 
   // No-op for compatibility
   setHasHydrated: (state) => set({ _hasHydrated: true }),
+
+  // Set convex hydration complete
+  setConvexHydrated: () => set({ _convexHydrated: true }),
 
       setStep: (step) => set({ currentStep: step }),
 
@@ -528,7 +539,11 @@ export const useOnboardingStore = create<OnboardingState>()((set) => ({
         // between accounts. Convex draft is the ONLY source of truth.
         set({ ...initialState, _hasHydrated: true });
 
-        if (!draft) return;
+        if (!draft) {
+          // No draft, but hydration is complete (nothing to hydrate)
+          set({ _convexHydrated: true });
+          return;
+        }
 
         const updates: Partial<OnboardingState> = {};
 
@@ -558,6 +573,7 @@ export const useOnboardingStore = create<OnboardingState>()((set) => ({
           if (draft.profileDetails.company) updates.company = draft.profileDetails.company;
           if (draft.profileDetails.school) updates.school = draft.profileDetails.school;
           if (draft.profileDetails.education) updates.education = draft.profileDetails.education;
+          if (draft.profileDetails.educationOther) updates.educationOther = draft.profileDetails.educationOther;
           if (draft.profileDetails.bio) updates.bio = draft.profileDetails.bio;
           if (draft.profileDetails.profilePrompts) updates.profilePrompts = draft.profileDetails.profilePrompts;
           if (draft.profileDetails.displayPhotoVariant) updates.displayPhotoVariant = draft.profileDetails.displayPhotoVariant;
@@ -588,6 +604,14 @@ export const useOnboardingStore = create<OnboardingState>()((set) => ({
           if (draft.lifestyle.insect) updates.insect = draft.lifestyle.insect;
           if (draft.lifestyle.kids) updates.kids = draft.lifestyle.kids;
           if (draft.lifestyle.religion) updates.religion = draft.lifestyle.religion;
+          // BUG FIX DEBUG: Trace religion hydration
+          if (__DEV__) {
+            console.log('[ONB_DRAFT] Lifestyle hydration:', {
+              hasLifestyle: !!draft.lifestyle,
+              religion: draft.lifestyle.religion ?? 'undefined',
+              religionSet: !!draft.lifestyle.religion,
+            });
+          }
         }
 
         // Preferences
@@ -598,6 +622,7 @@ export const useOnboardingStore = create<OnboardingState>()((set) => ({
           if (draft.preferences.minAge !== undefined) updates.minAge = draft.preferences.minAge;
           if (draft.preferences.maxAge !== undefined) updates.maxAge = draft.preferences.maxAge;
           if (draft.preferences.maxDistance !== undefined) updates.maxDistance = draft.preferences.maxDistance;
+          if (draft.preferences.lgbtqPreference) updates.lgbtqPreference = draft.preferences.lgbtqPreference;
         }
 
         // Apply updates if any
@@ -607,6 +632,9 @@ export const useOnboardingStore = create<OnboardingState>()((set) => ({
           }
           set(updates);
         }
+
+        // Mark Convex hydration as complete
+        set({ _convexHydrated: true });
       },
 
       reset: () => {

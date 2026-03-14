@@ -564,7 +564,11 @@ function OnboardingDraftHydrator() {
 
   useEffect(() => {
     // Only in production mode (not demo)
-    if (isDemoMode) return;
+    if (isDemoMode) {
+      // Demo mode doesn't use Convex for onboarding draft, mark as hydrated immediately
+      useOnboardingStore.getState().setConvexHydrated();
+      return;
+    }
 
     // Wait for auth and onboarding stores to hydrate
     if (!authHydrated || !onboardingHydrated || !userId) return;
@@ -578,6 +582,8 @@ function OnboardingDraftHydrator() {
 
     if (!onboardingStatus) {
       if (__DEV__) console.log('[ONB_DRAFT] No onboarding status found');
+      // No status, but hydration attempt complete - mark as hydrated so screens don't wait
+      hydrateFromDraft(null);
       return;
     }
 
@@ -663,12 +669,20 @@ function OnboardingDraftHydrator() {
       );
       if (__DEV__) {
         console.log(`[BASIC_HYDRATE] source=draft fields=${JSON.stringify(draftKeys)}`);
+        // BUG FIX DEBUG: Log lifestyle section to trace religion persistence
+        if (draft.lifestyle) {
+          console.log('[ONB_DRAFT] Draft lifestyle from backend:', JSON.stringify(draft.lifestyle));
+        } else {
+          console.log('[ONB_DRAFT] Draft has NO lifestyle section');
+        }
       }
-      hydrateFromDraft(draft);
+      hydrateFromDraft(draft); // This now sets _convexHydrated: true
     } else {
       if (__DEV__) {
         console.log('[ONB_DRAFT] No draft found in Convex');
       }
+      // No draft, but hydration is complete - mark as hydrated so screens don't wait
+      hydrateFromDraft(null);
     }
   }, [userId, authHydrated, onboardingHydrated, onboardingStatus, hydrateFromDraft, setFaceVerificationPassed, setFaceVerificationPending]);
 

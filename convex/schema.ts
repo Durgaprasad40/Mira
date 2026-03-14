@@ -280,6 +280,24 @@ export default defineSchema({
           v.literal('blurred'),
           v.literal('cartoon')
         )),
+        // New Prompt System V2
+        seedQuestions: v.optional(v.object({
+          identityAnchor: v.optional(v.union(
+            v.literal('builder'), v.literal('performer'), v.literal('seeker'), v.literal('grounded')
+          )),
+          socialBattery: v.optional(v.union(
+            v.literal(1), v.literal(2), v.literal(3), v.literal(4), v.literal(5)
+          )),
+          valueTrigger: v.optional(v.union(
+            v.literal('thoughtful_questions'), v.literal('kind_to_staff'), v.literal('great_humor'), v.literal('on_time')
+          )),
+        })),
+        sectionPrompts: v.optional(v.object({
+          builder: v.optional(v.array(v.object({ question: v.string(), answer: v.string() }))),
+          performer: v.optional(v.array(v.object({ question: v.string(), answer: v.string() }))),
+          seeker: v.optional(v.array(v.object({ question: v.string(), answer: v.string() }))),
+          grounded: v.optional(v.array(v.object({ question: v.string(), answer: v.string() }))),
+        })),
       })),
       // Lifestyle
       lifestyle: v.optional(v.object({
@@ -335,6 +353,9 @@ export default defineSchema({
         minAge: v.optional(v.number()),
         maxAge: v.optional(v.number()),
         maxDistance: v.optional(v.number()),
+        lgbtqPreference: v.optional(v.array(v.union(
+          v.literal('gay'), v.literal('lesbian'), v.literal('bisexual'), v.literal('transgender'), v.literal('prefer_not_to_say')
+        ))),
       })),
       // Progress tracking
       progress: v.optional(v.object({
