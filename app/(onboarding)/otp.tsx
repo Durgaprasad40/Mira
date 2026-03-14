@@ -130,6 +130,9 @@ export default function OTPScreen() {
   };
 
   const handleVerify = async () => {
+    // STABILITY FIX: Prevent double-tap race condition
+    if (isVerifying) return;
+
     const otpCode = otp.join("");
     if (otpCode.length !== VALIDATION.OTP_LENGTH) {
       Alert.alert("Invalid OTP", "Please enter the complete 6-digit code");
@@ -233,6 +236,7 @@ export default function OTPScreen() {
           variant="primary"
           onPress={handleVerify}
           loading={isVerifying}
+          disabled={isVerifying}
           fullWidth
         />
       </View>

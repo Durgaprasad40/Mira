@@ -211,7 +211,7 @@ export default function ProfileDetailsLifestyleScreen() {
         keyboardShouldPersistTaps="handled"
       >
         <Text style={styles.title}>Profile Details</Text>
-        <Text style={styles.stepIndicator}>Step 2 of 2</Text>
+        <Text style={styles.stepIndicator}>Step 2 of 3</Text>
         <Text style={styles.subtitle}>
           Tell us about your lifestyle preferences.
         </Text>

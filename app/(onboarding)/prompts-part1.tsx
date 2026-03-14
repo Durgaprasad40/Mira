@@ -101,7 +101,7 @@ export default function PromptsPart1Screen() {
     socialBattery !== null &&
     valueTrigger !== null;
 
-  const handleContinue = () => {
+  const handleContinue = async () => {
     if (!canContinue) return;
 
     // Save to store
@@ -110,22 +110,25 @@ export default function PromptsPart1Screen() {
     setValueTrigger(valueTrigger);
 
     // LIVE MODE: Persist seedQuestions to Convex onboarding draft
+    // STABILITY FIX: Await mutation before navigation to prevent data loss
     if (!isDemoMode && userId) {
       const seedQuestionsData = {
         identityAnchor,
         socialBattery,
         valueTrigger,
       };
-      upsertDraft({
-        userId,
-        patch: {
-          profileDetails: { seedQuestions: seedQuestionsData },
-          progress: { lastStepKey: 'prompts_part1' },
-        },
-      }).catch((error) => {
+      try {
+        await upsertDraft({
+          userId,
+          patch: {
+            profileDetails: { seedQuestions: seedQuestionsData },
+            progress: { lastStepKey: 'prompts_part1' },
+          },
+        });
+        if (__DEV__) console.log('[ONB_DRAFT] Saved seedQuestions:', seedQuestionsData);
+      } catch (error) {
         if (__DEV__) console.error('[PROMPTS_PART1] Failed to save draft:', error);
-      });
-      if (__DEV__) console.log('[ONB_DRAFT] Saved seedQuestions:', seedQuestionsData);
+      }
     }
 
     // Navigate
