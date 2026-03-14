@@ -1399,6 +1399,7 @@ export default defineSchema({
     .index('by_room_user', ['roomId', 'userId']),
 
   // Chat Room Messages table
+  // CR-012: Message retention - max 1000/room, 24h per-message expiry
   chatRoomMessages: defineTable({
     roomId: v.id('chatRooms'),
     senderId: v.id('users'),
@@ -1407,13 +1408,15 @@ export default defineSchema({
     imageUrl: v.optional(v.string()),
     audioUrl: v.optional(v.string()), // For audio/voice messages
     createdAt: v.number(),
+    expiresAt: v.optional(v.number()), // CR-012: Message expiry (createdAt + 24h)
     clientId: v.optional(v.string()), // For deduplication
     status: v.optional(v.union(v.literal('pending'), v.literal('sent'), v.literal('failed'))), // Message status
     deletedAt: v.optional(v.number()), // Soft delete
   })
     .index('by_room', ['roomId'])
     .index('by_room_created', ['roomId', 'createdAt'])
-    .index('by_room_clientId', ['roomId', 'clientId']), // For idempotency check
+    .index('by_room_clientId', ['roomId', 'clientId']) // For idempotency check
+    .index('by_expires', ['expiresAt']), // CR-012: For scheduled expiry cleanup
 
   // Chat Room Penalties table (Phase-2: kicked users read-only for 24h)
   chatRoomPenalties: defineTable({
