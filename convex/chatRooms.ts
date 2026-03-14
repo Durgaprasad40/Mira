@@ -601,6 +601,7 @@ export const getRoom = query({
 });
 
 // List messages for a room (with pagination)
+// CR-010: Includes sender profile data (displayName, avatar) for proper message display
 export const listMessages = query({
   args: {
     roomId: v.id('chatRooms'),
@@ -633,8 +634,42 @@ export const listMessages = query({
     const hasMore = messages.length > limit;
     const result = hasMore ? messages.slice(0, limit) : messages;
 
+    // CR-010: Hydrate sender profile data for each message
+    // Cache profile lookups to avoid duplicate queries for same sender
+    const profileCache = new Map<string, { displayName: string; avatar: string | undefined } | null>();
+
+    const messagesWithSenders = await Promise.all(
+      result.map(async (msg) => {
+        const senderIdStr = msg.senderId as string;
+
+        // Check cache first
+        if (!profileCache.has(senderIdStr)) {
+          const profile = await ctx.db
+            .query('userPrivateProfiles')
+            .withIndex('by_user', (q) => q.eq('userId', msg.senderId))
+            .first();
+
+          if (profile) {
+            profileCache.set(senderIdStr, {
+              displayName: profile.displayName,
+              avatar: profile.privatePhotoUrls?.[0], // First photo as avatar
+            });
+          } else {
+            profileCache.set(senderIdStr, null);
+          }
+        }
+
+        const cached = profileCache.get(senderIdStr);
+        return {
+          ...msg,
+          senderName: cached?.displayName ?? 'User',
+          senderAvatar: cached?.avatar,
+        };
+      })
+    );
+
     return {
-      messages: result.reverse(), // return oldest-first for display
+      messages: messagesWithSenders.reverse(), // return oldest-first for display
       hasMore,
     };
   },

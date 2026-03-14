@@ -1,4 +1,4 @@
-import React, { useCallback, useRef, useMemo, useEffect } from 'react';
+import React, { useCallback, useRef, useMemo, useEffect, useState } from 'react';
 import {
   View,
   Text,
@@ -10,6 +10,21 @@ import {
 import { Image } from 'expo-image';
 import { Ionicons } from '@expo/vector-icons';
 import { useMediaViewStore } from '@/stores/mediaViewStore';
+
+/**
+ * CR-010: Validate media URI format synchronously
+ * Returns true for valid URL patterns (http/https/file/content)
+ */
+function isValidMediaUriFormat(uri: string | undefined): boolean {
+  if (!uri || typeof uri !== 'string') return false;
+  return (
+    uri.startsWith('http://') ||
+    uri.startsWith('https://') ||
+    uri.startsWith('file://') ||
+    uri.startsWith('content://') ||
+    uri.startsWith('/')
+  );
+}
 
 // Thumbnail size: ~1/4th of original (was 200x150, now 100x75)
 const THUMB_WIDTH = 100;
@@ -47,6 +62,7 @@ export default function MediaMessage({
   viewOnce = false,
 }: MediaMessageProps) {
   const markViewedTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const [mediaError, setMediaError] = useState(false); // CR-010: Track media load errors
 
   // Cleanup timeout on unmount to prevent state updates after unmount
   useEffect(() => {
@@ -57,6 +73,29 @@ export default function MediaMessage({
       }
     };
   }, []);
+
+  // CR-010: Reset error state when mediaUrl changes
+  useEffect(() => {
+    setMediaError(false);
+  }, [mediaUrl]);
+
+  // CR-010: Handle image load error
+  const handleImageError = useCallback(() => {
+    if (__DEV__) console.log('[MediaMessage] Image load failed:', mediaUrl);
+    setMediaError(true);
+  }, [mediaUrl]);
+
+  // CR-010: If URI format is invalid or we have a load error, show unavailable state
+  if (!isValidMediaUriFormat(mediaUrl) || mediaError) {
+    return (
+      <View style={styles.container}>
+        <View style={styles.errorOverlay}>
+          <Ionicons name="image-outline" size={24} color="rgba(255,255,255,0.4)" />
+          <Text style={styles.errorText}>Media unavailable</Text>
+        </View>
+      </View>
+    );
+  }
 
   // Secure mode: only when messageId is provided (chat rooms)
   const isSecureMode = !!messageId;
@@ -90,6 +129,7 @@ export default function MediaMessage({
           source={{ uri: mediaUrl }}
           style={styles.legacyThumbnail}
           contentFit="cover"
+          onError={handleImageError}
         />
         {type === 'video' && (
           <View style={styles.legacyPlayOverlay}>
@@ -108,6 +148,7 @@ export default function MediaMessage({
           source={{ uri: mediaUrl }}
           style={styles.thumbnail}
           contentFit="cover"
+          onError={handleImageError}
         />
       </Pressable>
     );
@@ -191,6 +232,7 @@ export default function MediaMessage({
         style={styles.thumbnail}
         contentFit="cover"
         blurRadius={canBlur ? 25 : 0}
+        onError={handleImageError}
       />
 
       {/* Video indicator (always visible) */}
@@ -266,6 +308,18 @@ const styles = StyleSheet.create({
     fontSize: 9,
     color: 'rgba(255,255,255,0.4)',
     marginTop: 2,
+  },
+  // CR-010: Error state for unavailable media
+  errorOverlay: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: '#2C2C3A',
+  },
+  errorText: {
+    fontSize: 9,
+    color: 'rgba(255,255,255,0.4)',
+    marginTop: 4,
   },
   // Legacy mode (DMs) - larger previews
   legacyContainer: {
