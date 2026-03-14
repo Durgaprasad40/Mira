@@ -280,6 +280,22 @@ export default defineSchema({
           v.literal('blurred'),
           v.literal('cartoon')
         )),
+        seedQuestions: v.optional(v.object({
+          identityAnchor: v.union(
+            v.literal('builder'),
+            v.literal('performer'),
+            v.literal('seeker'),
+            v.literal('grounded')
+          ),
+          socialBattery: v.float64(),
+          valueTrigger: v.string(),
+        })),
+        sectionPrompts: v.optional(v.object({
+          builder: v.array(v.object({ question: v.string(), answer: v.string() })),
+          performer: v.array(v.object({ question: v.string(), answer: v.string() })),
+          seeker: v.array(v.object({ question: v.string(), answer: v.string() })),
+          grounded: v.array(v.object({ question: v.string(), answer: v.string() })),
+        })),
       })),
       // Lifestyle
       lifestyle: v.optional(v.object({
@@ -310,6 +326,9 @@ export default defineSchema({
       // Preferences
       preferences: v.optional(v.object({
         lookingFor: v.optional(v.array(v.union(v.literal('male'), v.literal('female'), v.literal('non_binary'), v.literal('lesbian'), v.literal('other')))),
+        lgbtqPreference: v.optional(v.array(v.union(
+          v.literal('male'), v.literal('female'), v.literal('non_binary'), v.literal('lesbian'), v.literal('other'), v.literal('transgender')
+        ))),
         relationshipIntent: v.optional(v.array(v.union(
           v.literal('long_term'), v.literal('short_term'), v.literal('fwb'), v.literal('figuring_out'),
           v.literal('short_to_long'), v.literal('long_to_short'), v.literal('new_friends'), v.literal('open_to_anything')
@@ -1410,6 +1429,7 @@ export default defineSchema({
     clientId: v.optional(v.string()), // For deduplication
     status: v.optional(v.union(v.literal('pending'), v.literal('sent'), v.literal('failed'))), // Message status
     deletedAt: v.optional(v.number()), // Soft delete
+    expiresAt: v.optional(v.float64()), // For ephemeral/expiring messages
   })
     .index('by_room', ['roomId'])
     .index('by_room_created', ['roomId', 'createdAt'])
