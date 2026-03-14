@@ -114,6 +114,7 @@ export default function PreferencesScreen() {
   const [relationshipIntentError, setRelationshipIntentError] = useState('');
   const [distanceError, setDistanceError] = useState('');
   const [lgbtqError, setLgbtqError] = useState('');
+  const [ageError, setAgeError] = useState(''); // STABILITY FIX: Age validation feedback
 
   // Local text states for age inputs (allows temporary empty string while typing)
   const [minAgeText, setMinAgeText] = useState(minAge.toString());
@@ -126,6 +127,7 @@ export default function PreferencesScreen() {
   const [distanceSectionY, setDistanceSectionY] = useState<number | null>(null);
   const [relationshipIntentSectionY, setRelationshipIntentSectionY] = useState<number | null>(null);
   const [interestsSectionY, setInterestsSectionY] = useState<number | null>(null);
+  const [ageSectionY, setAgeSectionY] = useState<number | null>(null);
 
   // Calculate interest chip width: 3 columns default, 2 for narrow screens (<360px)
   const contentPadding = 48; // 24px * 2
@@ -325,7 +327,7 @@ export default function PreferencesScreen() {
       setInterestsError('');
     }
 
-    // D) Validate distance: required, must be valid number
+    // D) Validate distance: required, must be valid number within bounds
     const trimmedDistance = distanceText.trim();
     const parsedDistance = parseInt(trimmedDistance, 10);
     if (!trimmedDistance || isNaN(parsedDistance)) {
@@ -336,8 +338,38 @@ export default function PreferencesScreen() {
       setDistanceError(`Distance must be at least ${DISTANCE_MIN} mile.`);
       hasError = true;
       if (firstErrorY === null) firstErrorY = distanceSectionY;
+    } else if (parsedDistance > DISTANCE_MAX) {
+      // STABILITY FIX: Show error instead of silent clamping
+      setDistanceError(`Distance must be at most ${DISTANCE_MAX} miles.`);
+      hasError = true;
+      if (firstErrorY === null) firstErrorY = distanceSectionY;
     } else {
       setDistanceError('');
+    }
+
+    // E) Validate age: parse and validate bounds with explicit feedback
+    let finalMin = parseInt(minAgeText, 10);
+    let finalMax = parseInt(maxAgeText, 10);
+
+    // Default empty values
+    if (isNaN(finalMin)) finalMin = MIN_AGE_LIMIT;
+    if (isNaN(finalMax)) finalMax = MAX_AGE_LIMIT;
+
+    // STABILITY FIX: Validate age bounds with user feedback instead of silent clamping
+    if (finalMin < MIN_AGE_LIMIT || finalMin > MAX_AGE_LIMIT) {
+      setAgeError(`Minimum age must be between ${MIN_AGE_LIMIT} and ${MAX_AGE_LIMIT}.`);
+      hasError = true;
+      if (firstErrorY === null) firstErrorY = ageSectionY;
+    } else if (finalMax < MIN_AGE_LIMIT || finalMax > MAX_AGE_LIMIT) {
+      setAgeError(`Maximum age must be between ${MIN_AGE_LIMIT} and ${MAX_AGE_LIMIT}.`);
+      hasError = true;
+      if (firstErrorY === null) firstErrorY = ageSectionY;
+    } else if (finalMin > finalMax) {
+      setAgeError('Minimum age cannot be greater than maximum age.');
+      hasError = true;
+      if (firstErrorY === null) firstErrorY = ageSectionY;
+    } else {
+      setAgeError('');
     }
 
     if (hasError) {
@@ -351,28 +383,8 @@ export default function PreferencesScreen() {
 
     setShowTopError(false);
 
-    // Commit age values: parse, default if empty, clamp to bounds, ensure min <= max
-    let finalMin = parseInt(minAgeText, 10);
-    let finalMax = parseInt(maxAgeText, 10);
-
-    // Default empty values
-    if (isNaN(finalMin)) finalMin = MIN_AGE_LIMIT;
-    if (isNaN(finalMax)) finalMax = MAX_AGE_LIMIT;
-
-    // Clamp to bounds
-    finalMin = Math.max(MIN_AGE_LIMIT, Math.min(MAX_AGE_LIMIT, finalMin));
-    finalMax = Math.max(MIN_AGE_LIMIT, Math.min(MAX_AGE_LIMIT, finalMax));
-
-    // Ensure min <= max (if violated, set max = min)
-    if (finalMin > finalMax) {
-      finalMax = finalMin;
-    }
-
-    // D) Commit distance: clamp to max 75 (validation already passed)
-    let finalDistance = parsedDistance;
-    if (finalDistance > DISTANCE_MAX) {
-      finalDistance = DISTANCE_MAX;
-    }
+    // Age values already validated above - use parsed values directly
+    const finalDistance = parsedDistance;
 
     // Commit to store and update text display
     setMinAge(finalMin);
@@ -612,15 +624,21 @@ export default function PreferencesScreen() {
         {interestsError ? <Text style={styles.fieldError}>{interestsError}</Text> : null}
       </View>
 
-      <View style={styles.section}>
+      <View
+        style={styles.section}
+        onLayout={(e) => setAgeSectionY(e.nativeEvent.layout.y)}
+      >
         <Text style={styles.sectionTitle}>Age Range</Text>
         <Text style={styles.sectionSubtitle}>{MIN_AGE_LIMIT} - {MAX_AGE_LIMIT} years</Text>
-        <View style={styles.ageRow}>
+        <View style={[styles.ageRow, ageError ? styles.ageRowError : null]}>
           <View style={styles.ageInputContainer}>
             <Text style={styles.ageLabel}>Min</Text>
             <Input
               value={minAgeText}
-              onChangeText={handleMinAgeChange}
+              onChangeText={(text) => {
+                handleMinAgeChange(text);
+                if (ageError) setAgeError('');
+              }}
               keyboardType="numeric"
               style={styles.ageInput}
             />
@@ -630,12 +648,16 @@ export default function PreferencesScreen() {
             <Text style={styles.ageLabel}>Max</Text>
             <Input
               value={maxAgeText}
-              onChangeText={handleMaxAgeChange}
+              onChangeText={(text) => {
+                handleMaxAgeChange(text);
+                if (ageError) setAgeError('');
+              }}
               keyboardType="numeric"
               style={styles.ageInput}
             />
           </View>
         </View>
+        {ageError ? <Text style={styles.fieldError}>{ageError}</Text> : null}
       </View>
 
       <View
@@ -836,6 +858,13 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 16,
+  },
+  ageRowError: {
+    borderRadius: 12,
+    borderWidth: 2,
+    borderColor: COLORS.error,
+    padding: 8,
+    margin: -8,
   },
   ageInputContainer: {
     flex: 1,

@@ -146,6 +146,12 @@ export default function BasicInfoScreen() {
   // Guard ref to prevent re-prefilling firstName/lastName after user starts editing in editFromReview mode
   const hasPrefilledEditFromReviewRef = useRef(false);
 
+  // STABILITY FIX: Reset prefill guard when editFromReview mode changes
+  // This ensures clean state when entering from different navigation contexts
+  useEffect(() => {
+    hasPrefilledEditFromReviewRef.current = false;
+  }, [isEditFromReview]);
+
   // Nickname availability state (for new users)
   const [isCheckingAvailability, setIsCheckingAvailability] = useState(false);
   const [isNicknameAvailable, setIsNicknameAvailable] = useState<boolean | null>(null);

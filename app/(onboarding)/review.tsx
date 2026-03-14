@@ -501,6 +501,13 @@ export default function ReviewScreen() {
         await saveAuthBootCache(authState.token, authState.userId, { onboardingCompleted: true });
       }
 
+      // STABILITY FIX: Recheck mounted state after saveAuthBootCache async operation
+      // This prevents navigation if user rapidly navigated away during the save
+      if (!mountedRef.current) {
+        if (__DEV__) console.log('[REVIEW] Unmounted during saveAuthBootCache - skipping navigation');
+        return;
+      }
+
       setStep("tutorial");
       router.push("/(onboarding)/tutorial" as any);
     } catch (error: any) {
