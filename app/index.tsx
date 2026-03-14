@@ -329,7 +329,10 @@ function getRouteForState(state: BootState): string {
     case "DEMO_HOME":
       return "/(main)/(tabs)/home";
     case "VALID_ONBOARD":
-      return "/(onboarding)/basic-info";
+      // Authenticated but incomplete onboarding - show welcome page first
+      // User needs to see welcome to understand which account they're in
+      // and explicitly choose how to proceed (prevents confusion)
+      return "/(auth)/welcome";
     case "NO_AUTH":
     case "INVALID":
     case "DEMO_WELCOME":

@@ -41,6 +41,26 @@ crons.hourly(
   internal.chatRooms.cleanupExpiredPenalties
 );
 
+// CR-012: Phase-2 Chat Rooms: Cleanup expired messages every 15 minutes
+// Each message expires 24h after its createdAt timestamp
+// This ensures time-based retention even for inactive rooms
+crons.interval(
+  'cleanup-expired-chat-room-messages',
+  { minutes: 15 },
+  internal.chatRooms.cleanupExpiredMessages
+);
+
+// CR-012: Migrate legacy messages without expiresAt field
+// Runs every 10 minutes until all legacy messages are processed
+// - Messages older than 24h: deleted immediately
+// - Messages within 24h: expiresAt set to createdAt + 24h
+// Safe to run indefinitely - becomes no-op when all messages have expiresAt
+crons.interval(
+  'migrate-legacy-message-expiry',
+  { minutes: 10 },
+  internal.chatRooms.migrateLegacyMessageExpiry
+);
+
 // B2-FIX: Retry failed storage deletions every 30 minutes
 // Cleans up orphaned storage blobs from failed photo deletions
 crons.interval(

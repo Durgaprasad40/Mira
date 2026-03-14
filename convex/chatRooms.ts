@@ -9,10 +9,14 @@ import { resolveUserIdByAuthId } from './helpers';
 // 24 hours in milliseconds
 const ROOM_LIFETIME_MS = 24 * 60 * 60 * 1000;
 const PENALTY_DURATION_MS = 24 * 60 * 60 * 1000;
-// Message retention constants
-const MAX_MESSAGES_PER_ROOM = 1000; // Trigger cleanup when exceeded
-const TARGET_AFTER_TRIM = 900;      // Target count after cleanup
-const BATCH_DELETE_SIZE = 200;      // Delete in batches for efficiency
+const MESSAGE_EXPIRY_MS = 24 * 60 * 60 * 1000; // CR-012: Each message expires 24h after creation
+
+// CR-012: Message retention constants
+// - Max 1000 messages per room
+// - When exceeding 1000, delete oldest 500, keep newest ~500
+const MAX_MESSAGES_PER_ROOM = 1000;  // Trigger count-based cleanup when exceeded
+const DELETE_COUNT_ON_OVERFLOW = 500; // Delete this many oldest messages when triggered
+const BATCH_DELETE_SIZE = 100;        // Delete in batches for efficiency
 
 // Generate a random 6-character alphanumeric join code
 function generateJoinCode(): string {
@@ -600,7 +604,45 @@ export const getRoom = query({
   },
 });
 
+/**
+ * CR-011: Media source classification for persisted messages
+ * Only durable remote URLs (http/https) should be used for display.
+ * Local cache paths (file://, content://, /) are transient and may not exist.
+ */
+type MediaSourceClass = 'remote_url' | 'local_cache_stale' | 'invalid' | 'missing';
+
+function classifyMediaUri(uri: string | undefined): MediaSourceClass {
+  if (!uri || typeof uri !== 'string' || uri.trim() === '') {
+    return 'missing';
+  }
+  // Durable remote URLs - safe to use
+  if (uri.startsWith('http://') || uri.startsWith('https://')) {
+    return 'remote_url';
+  }
+  // Local device paths - stale for persisted messages, may not exist
+  if (uri.startsWith('file://') || uri.startsWith('/') || uri.startsWith('content://')) {
+    return 'local_cache_stale';
+  }
+  return 'invalid';
+}
+
+/**
+ * CR-011: Sanitize media URL for persisted message display
+ * Only returns durable remote URLs. Strips out stale local cache paths.
+ */
+function sanitizeMediaUrl(uri: string | undefined): string | undefined {
+  const sourceClass = classifyMediaUri(uri);
+  if (sourceClass === 'remote_url') {
+    return uri;
+  }
+  // All other sources (local_cache_stale, invalid, missing) return undefined
+  // This prevents stale local file paths from reaching the UI
+  return undefined;
+}
+
 // List messages for a room (with pagination)
+// CR-010: Includes sender profile data (displayName, avatar) for proper message display
+// CR-011: Sanitizes media URLs to prevent stale local cache paths from reaching UI
 export const listMessages = query({
   args: {
     roomId: v.id('chatRooms'),
@@ -633,8 +675,55 @@ export const listMessages = query({
     const hasMore = messages.length > limit;
     const result = hasMore ? messages.slice(0, limit) : messages;
 
+    // CR-010: Hydrate sender profile data for each message
+    // CR-011: Sanitize media URLs to strip stale local cache paths
+    const profileCache = new Map<string, { displayName: string; avatar: string | undefined } | null>();
+
+    const messagesWithSenders = await Promise.all(
+      result.map(async (msg) => {
+        const senderIdStr = msg.senderId as string;
+
+        // Check cache first
+        if (!profileCache.has(senderIdStr)) {
+          const profile = await ctx.db
+            .query('userPrivateProfiles')
+            .withIndex('by_user', (q) => q.eq('userId', msg.senderId))
+            .first();
+
+          if (profile) {
+            profileCache.set(senderIdStr, {
+              displayName: profile.displayName,
+              avatar: profile.privatePhotoUrls?.[0], // First photo as avatar
+            });
+          } else {
+            profileCache.set(senderIdStr, null);
+          }
+        }
+
+        const cached = profileCache.get(senderIdStr);
+
+        // CR-011: Sanitize media URLs - only pass through durable remote URLs
+        // Local cache paths are stripped to prevent "file not found" errors
+        const sanitizedImageUrl = sanitizeMediaUrl(msg.imageUrl);
+        const sanitizedAudioUrl = sanitizeMediaUrl(msg.audioUrl);
+
+        // CR-011: Source classification for debugging (dev only via console on backend)
+        // Frontend can infer from presence/absence of URLs
+
+        return {
+          ...msg,
+          // CR-011: Override raw URLs with sanitized versions
+          imageUrl: sanitizedImageUrl,
+          audioUrl: sanitizedAudioUrl,
+          // CR-010: Add sender profile data
+          senderName: cached?.displayName ?? 'User',
+          senderAvatar: cached?.avatar,
+        };
+      })
+    );
+
     return {
-      messages: result.reverse(), // return oldest-first for display
+      messages: messagesWithSenders.reverse(), // return oldest-first for display
       hasMore,
     };
   },
@@ -925,7 +1014,29 @@ export const sendMessage = mutation({
     // Soft-mask sensitive words in text messages
     const maskedText = text ? softMaskText(text) : undefined;
 
-    // 4. Insert message with resolved URLs
+    // CR-012: Delete expired messages in this room BEFORE inserting new message
+    // This ensures time-based retention is enforced on every send
+    const expiredMessages = await ctx.db
+      .query('chatRoomMessages')
+      .withIndex('by_room_created', (q) => q.eq('roomId', roomId))
+      .filter((q) =>
+        q.and(
+          q.neq(q.field('expiresAt'), undefined),
+          q.lt(q.field('expiresAt'), now)
+        )
+      )
+      .take(BATCH_DELETE_SIZE);
+
+    for (const expiredMsg of expiredMessages) {
+      try {
+        await ctx.db.delete(expiredMsg._id);
+      } catch {
+        // Ignore if already deleted by concurrent request
+      }
+    }
+
+    // 4. Insert message with resolved URLs and expiry time
+    const expiresAt = now + MESSAGE_EXPIRY_MS; // CR-012: Message expires 24h after creation
     const messageId = await ctx.db.insert('chatRoomMessages', {
       roomId,
       senderId,
@@ -934,6 +1045,7 @@ export const sendMessage = mutation({
       imageUrl: resolvedImageUrl ?? undefined,
       audioUrl: resolvedAudioUrl ?? undefined,
       createdAt: now,
+      expiresAt, // CR-012: Per-message expiry
       clientId,
       status: 'sent',
     });
@@ -955,33 +1067,35 @@ export const sendMessage = mutation({
       await ctx.db.patch(senderId, { walletCoins: currentCoins + 1 });
     }
 
-    // 8. DETERMINISTIC RETENTION: Delete exactly (newCount - 900) oldest when >= 1000
-    // Uses room.messageCount as primary counter for efficiency
-    const newCount = (room.messageCount ?? 0) + 1;
+    // 8. CR-012: COUNT-BASED RETENTION
+    // When room exceeds 1000 messages, delete oldest 500, keep newest ~501
+    // Count actual messages (more reliable than cached counter for concurrent sends)
+    const allMessages = await ctx.db
+      .query('chatRoomMessages')
+      .withIndex('by_room', (q) => q.eq('roomId', roomId))
+      .collect();
 
-    if (newCount < MAX_MESSAGES_PER_ROOM) {
-      // Below threshold: just update counter
-      await ctx.db.patch(roomId, { messageCount: newCount });
-    } else {
-      // At or above 1000: delete exactly (newCount - 900) oldest messages
-      const deleteCount = newCount - TARGET_AFTER_TRIM;
+    const currentCount = allMessages.length;
 
+    if (currentCount > MAX_MESSAGES_PER_ROOM) {
+      // Room has >1000 messages: delete oldest DELETE_COUNT_ON_OVERFLOW (500)
       // DEV logging for retention verification
       if (process.env.NODE_ENV === 'development') {
-        console.log('[RETENTION]', { roomId, newCount, deleteCount, targetFinal: TARGET_AFTER_TRIM });
+        console.log('[RETENTION-COUNT]', {
+          roomId,
+          currentCount,
+          deleteTarget: DELETE_COUNT_ON_OVERFLOW,
+          keepTarget: currentCount - DELETE_COUNT_ON_OVERFLOW,
+        });
       }
 
-      // Fetch oldest messages to delete (fetch extra to handle edge case where new msg is oldest)
-      const oldestMessages = await ctx.db
-        .query('chatRoomMessages')
-        .withIndex('by_room_created', (q) => q.eq('roomId', roomId))
-        .order('asc')
-        .take(deleteCount + 1); // +1 buffer in case new message appears in oldest
+      // Sort by createdAt ascending to get oldest first
+      const sortedMessages = allMessages.sort((a, b) => a.createdAt - b.createdAt);
+      const messagesToDelete = sortedMessages.slice(0, DELETE_COUNT_ON_OVERFLOW);
 
-      // Delete exactly deleteCount messages, never the just-inserted one
+      // Delete in batches, never delete the just-inserted message
       let deleted = 0;
-      for (const msg of oldestMessages) {
-        if (deleted >= deleteCount) break;
+      for (const msg of messagesToDelete) {
         if (msg._id === messageId) continue; // Safety: never delete new message
         try {
           await ctx.db.delete(msg._id);
@@ -991,8 +1105,12 @@ export const sendMessage = mutation({
         }
       }
 
-      // Set room messageCount to exactly 900
-      await ctx.db.patch(roomId, { messageCount: TARGET_AFTER_TRIM });
+      // Update room messageCount to reflect new count
+      const newCount = currentCount - deleted;
+      await ctx.db.patch(roomId, { messageCount: newCount });
+    } else {
+      // Below threshold: just update counter
+      await ctx.db.patch(roomId, { messageCount: currentCount });
     }
 
     // Record Phase-2 activity for ranking freshness (throttled to 1 update/hour)
@@ -1936,6 +2054,179 @@ export const cleanupExpiredPenalties = internalMutation({
     }
 
     return { deletedCount: expiredPenalties.length };
+  },
+});
+
+/**
+ * CR-012: Internal cleanup for expired chat room messages (called by cron job)
+ *
+ * Time-based retention: Each message expires 24 hours after its createdAt timestamp.
+ * This runs independently of sendMessage to ensure cleanup happens even in inactive rooms.
+ *
+ * Concurrency-safe:
+ * - Uses try/catch for each delete (idempotent)
+ * - Processes in batches to avoid timeout
+ * - Index-based query for efficiency
+ */
+export const cleanupExpiredMessages = internalMutation({
+  args: {},
+  handler: async (ctx) => {
+    const now = Date.now();
+
+    // Find messages where expiresAt has passed
+    // Using by_expires index for efficient lookup
+    const expiredMessages = await ctx.db
+      .query('chatRoomMessages')
+      .withIndex('by_expires')
+      .filter((q) =>
+        q.and(
+          q.neq(q.field('expiresAt'), undefined),
+          q.lte(q.field('expiresAt'), now)
+        )
+      )
+      .take(BATCH_DELETE_SIZE);
+
+    // Track which rooms are affected to update their messageCount
+    const affectedRooms = new Set<string>();
+
+    let deletedCount = 0;
+    for (const msg of expiredMessages) {
+      try {
+        affectedRooms.add(msg.roomId as string);
+        await ctx.db.delete(msg._id);
+        deletedCount++;
+      } catch {
+        // Silently ignore if already deleted by concurrent request
+      }
+    }
+
+    // Update messageCount for affected rooms
+    for (const roomIdStr of affectedRooms) {
+      try {
+        const roomId = roomIdStr as any; // Already a valid ID
+        const room = await ctx.db.get(roomId);
+        if (!room) continue;
+
+        // Recount actual messages for accuracy
+        const remainingMessages = await ctx.db
+          .query('chatRoomMessages')
+          .withIndex('by_room', (q) => q.eq('roomId', roomId))
+          .collect();
+
+        await ctx.db.patch(roomId, { messageCount: remainingMessages.length });
+      } catch {
+        // Ignore errors updating room count
+      }
+    }
+
+    if (process.env.NODE_ENV === 'development' && deletedCount > 0) {
+      console.log('[RETENTION-EXPIRY]', {
+        deletedCount,
+        affectedRooms: affectedRooms.size,
+      });
+    }
+
+    return { deletedCount, affectedRoomsCount: affectedRooms.size };
+  },
+});
+
+/**
+ * CR-012: Migrate legacy messages without expiresAt field
+ *
+ * This internal mutation handles legacy chatRoomMessages that were created
+ * before the expiresAt field was added. It ensures the 24-hour rule applies
+ * consistently to all messages, old and new.
+ *
+ * Logic:
+ * 1. Find messages where expiresAt is undefined/null
+ * 2. If createdAt + 24h < now (already expired): delete immediately
+ * 3. Otherwise: set expiresAt = createdAt + 24h
+ *
+ * Safety:
+ * - Processes in batches (BATCH_DELETE_SIZE) to avoid timeout
+ * - Idempotent: can run multiple times safely
+ * - Updates room messageCount after deletions
+ * - try/catch for concurrent safety
+ */
+export const migrateLegacyMessageExpiry = internalMutation({
+  args: {},
+  handler: async (ctx) => {
+    const now = Date.now();
+    const expiryThreshold = now - MESSAGE_EXPIRY_MS; // Messages created before this are expired
+
+    // Find messages without expiresAt field
+    // Using by_room index and filtering (no direct index on undefined expiresAt)
+    const legacyMessages = await ctx.db
+      .query('chatRoomMessages')
+      .filter((q) =>
+        q.or(
+          q.eq(q.field('expiresAt'), undefined),
+          q.eq(q.field('expiresAt'), null)
+        )
+      )
+      .take(BATCH_DELETE_SIZE);
+
+    if (legacyMessages.length === 0) {
+      return { processed: 0, deleted: 0, updated: 0, complete: true };
+    }
+
+    // Track affected rooms for messageCount updates
+    const affectedRooms = new Set<string>();
+    let deleted = 0;
+    let updated = 0;
+
+    for (const msg of legacyMessages) {
+      try {
+        if (msg.createdAt < expiryThreshold) {
+          // Message is older than 24h - delete it
+          affectedRooms.add(msg.roomId as string);
+          await ctx.db.delete(msg._id);
+          deleted++;
+        } else {
+          // Message is still within 24h window - set expiresAt
+          const expiresAt = msg.createdAt + MESSAGE_EXPIRY_MS;
+          await ctx.db.patch(msg._id, { expiresAt });
+          updated++;
+        }
+      } catch {
+        // Silently ignore if already deleted/modified by concurrent request
+      }
+    }
+
+    // Update messageCount for rooms that had deletions
+    for (const roomIdStr of affectedRooms) {
+      try {
+        const roomId = roomIdStr as any;
+        const room = await ctx.db.get(roomId);
+        if (!room) continue;
+
+        const remainingMessages = await ctx.db
+          .query('chatRoomMessages')
+          .withIndex('by_room', (q) => q.eq('roomId', roomId))
+          .collect();
+
+        await ctx.db.patch(roomId, { messageCount: remainingMessages.length });
+      } catch {
+        // Ignore errors updating room count
+      }
+    }
+
+    if (process.env.NODE_ENV === 'development') {
+      console.log('[RETENTION-MIGRATE]', {
+        processed: legacyMessages.length,
+        deleted,
+        updated,
+        affectedRooms: affectedRooms.size,
+      });
+    }
+
+    // Return complete: false to indicate more messages may need processing
+    return {
+      processed: legacyMessages.length,
+      deleted,
+      updated,
+      complete: legacyMessages.length < BATCH_DELETE_SIZE,
+    };
   },
 });
 

@@ -6,6 +6,9 @@
  * - ONLY stability/bug fixes allowed IF Durga Prasad explicitly requests
  * - Do not change UX/flows without explicit unlock
  * Date locked: 2026-03-04
+ *
+ * UNLOCKED: 2026-03-14 for Life Rhythm page addition (per explicit user request)
+ * Changed navigation: lifestyle -> life-rhythm (instead of preferences)
  */
 import React, { useEffect } from "react";
 import {
@@ -15,6 +18,7 @@ import {
   ScrollView,
   TouchableOpacity,
   Alert,
+  ActivityIndicator,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useRouter, useLocalSearchParams } from "expo-router";
@@ -47,6 +51,7 @@ export default function ProfileDetailsLifestyleScreen() {
     exercise,
     pets,
     insect,
+    religion, // BUG FIX: Read religion to preserve it during lifestyle save
     setSmoking,
     setDrinking,
     setKids,
@@ -55,6 +60,7 @@ export default function ProfileDetailsLifestyleScreen() {
     setPets,
     setInsect,
   } = useOnboardingStore();
+  const convexHydrated = useOnboardingStore((s) => s._convexHydrated);
   const { userId } = useAuthStore();
   const demoHydrated = useDemoStore((s) => s._hasHydrated);
   const demoProfile = useDemoStore((s) =>
@@ -66,6 +72,20 @@ export default function ProfileDetailsLifestyleScreen() {
 
   // CENTRAL EDIT HUB: Detect if editing from Review screen
   const isEditFromReview = params.editFromReview === 'true';
+
+  // STABILITY FIX: Wait for Convex hydration before rendering form
+  // This prevents data loss when user navigates before hydration completes
+  if (!isDemoMode && !convexHydrated) {
+    return (
+      <SafeAreaView style={styles.safeArea} edges={["top"]}>
+        <OnboardingProgressHeader />
+        <View style={styles.loadingContainer}>
+          <ActivityIndicator size="large" color={COLORS.primary} />
+          <Text style={styles.loadingText}>Loading your profile...</Text>
+        </View>
+      </SafeAreaView>
+    );
+  }
 
   // Prefill from demoProfiles if onboardingStore is empty
   useEffect(() => {
@@ -125,8 +145,17 @@ export default function ProfileDetailsLifestyleScreen() {
       if (exercise) lifestyle.exercise = exercise;
       if (pets.length > 0) lifestyle.pets = pets;
       if (insect) lifestyle.insect = insect;
+      // BUG FIX: Preserve religion from store (set in profile-details/index.tsx)
+      // This ensures religion isn't lost due to race conditions between saves
+      if (religion) lifestyle.religion = religion;
 
       if (Object.keys(lifestyle).length > 0) {
+        if (__DEV__) {
+          console.log('[LIFESTYLE] Saving with religion preserved:', {
+            religion: religion ?? 'null',
+            lifestyleKeys: Object.keys(lifestyle),
+          });
+        }
         upsertDraft({
           userId,
           patch: {
@@ -136,7 +165,6 @@ export default function ProfileDetailsLifestyleScreen() {
         }).catch((error) => {
           if (__DEV__) console.error('[LIFESTYLE] Failed to save draft:', error);
         });
-        if (__DEV__) console.log(`[ONB_DRAFT] Saved lifestyle: ${JSON.stringify(lifestyle)}`);
       }
     }
 
@@ -147,8 +175,8 @@ export default function ProfileDetailsLifestyleScreen() {
       return;
     }
 
-    if (__DEV__) console.log('[ONB] profile-details/lifestyle → preferences');
-    router.push("/(onboarding)/preferences");
+    if (__DEV__) console.log('[ONB] profile-details/lifestyle → life-rhythm');
+    router.push("/(onboarding)/profile-details/life-rhythm");
   };
 
   const handlePrevious = () => {
@@ -183,7 +211,7 @@ export default function ProfileDetailsLifestyleScreen() {
         keyboardShouldPersistTaps="handled"
       >
         <Text style={styles.title}>Profile Details</Text>
-        <Text style={styles.stepIndicator}>Step 2 of 2</Text>
+        <Text style={styles.stepIndicator}>Step 2 of 3</Text>
         <Text style={styles.subtitle}>
           Tell us about your lifestyle preferences.
         </Text>
@@ -466,5 +494,15 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: COLORS.textLight,
     fontWeight: "500",
+  },
+  loadingContainer: {
+    flex: 1,
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  loadingText: {
+    marginTop: 16,
+    fontSize: 16,
+    color: COLORS.textLight,
   },
 });

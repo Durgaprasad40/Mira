@@ -184,7 +184,12 @@ export default function EditProfileScreen() {
           setLastName(parts.slice(1).join(' '));
         }
       }
-      // Note: blurEnabled is now persisted in photoBlurStore, not initialized from server
+
+      // FIX: Initialize blurEnabled from Convex source of truth (photoBlurred field)
+      // The photoBlurStore is in-memory only, so we must hydrate from Convex on each load
+      if (!isDemoMode && currentUser.photoBlurred !== undefined) {
+        setBlurEnabled(currentUser.photoBlurred);
+      }
 
       // SLOT-BASED: Initialize from getCurrentProfile() (SINGLE SOURCE OF TRUTH)
       let initSlots: PhotoSlots9 = createEmptyPhotoSlots();

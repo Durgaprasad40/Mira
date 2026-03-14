@@ -113,8 +113,9 @@ export default function EmailPhoneScreen() {
           if (result.onboardingCompleted) {
             router.replace('/(main)/(tabs)/home' as any);
           } else {
-            setStep('basic_info');
-            router.push('/(onboarding)/basic-info' as any);
+            // Incomplete onboarding - go directly to basic-info in confirm mode
+            // Do NOT route to welcome first (that creates a confusing loop)
+            router.replace('/(onboarding)/basic-info?confirm=true' as any);
           }
         } else {
           // STABILITY FIX (2026-03-04): Handle unexpected response format

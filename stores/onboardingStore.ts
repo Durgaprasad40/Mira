@@ -16,6 +16,22 @@ import {
   createEmptyPhotoSlots,
 } from "@/types";
 import { logPhotoRemoved, logPhotosCleared } from "@/lib/photoSafety";
+import {
+  IdentityAnchorValue,
+  SocialBatteryValue,
+  ValueTriggerValue,
+  SeedQuestions,
+  SectionPrompts,
+  SectionPromptAnswer,
+  PromptSectionKey,
+  // Life Rhythm types
+  SocialRhythmValue,
+  SleepScheduleValue,
+  TravelStyleValue,
+  WorkStyleValue,
+  CoreValueValue,
+  LifeRhythm,
+} from "@/lib/constants";
 
 // STORAGE POLICY ENFORCEMENT:
 // This store contains ALL user onboarding data (email, phone, password, profile, photos, preferences).
@@ -117,7 +133,15 @@ interface OnboardingState {
 
   displayPhotoVariant: DisplayPhotoVariant; // Privacy option: original, blurred, or cartoon
   bio: string;
-  profilePrompts: { question: string; answer: string }[];
+  profilePrompts: { question: string; answer: string }[]; // Legacy prompt system
+
+  // ═══════════════════════════════════════════════════════════════════════════════
+  // NEW PROMPT SYSTEM V2 (2-Page Structure)
+  // ═══════════════════════════════════════════════════════════════════════════════
+  seedQuestions: SeedQuestions;       // Page 1: Identity, Social Battery, Values
+  sectionPrompts: SectionPrompts;     // Page 2: Builder, Performer, Seeker, Grounded
+  // ═══════════════════════════════════════════════════════════════════════════════
+
   height: number | null;
   weight: number | null;
   smoking: SmokingStatus | null;
@@ -132,6 +156,13 @@ interface OnboardingState {
   jobTitle: string;
   company: string;
   school: string;
+
+  // ═══════════════════════════════════════════════════════════════════════════════
+  // LIFE RHYTHM (New Matching Signals)
+  // ═══════════════════════════════════════════════════════════════════════════════
+  lifeRhythm: LifeRhythm;
+  // ═══════════════════════════════════════════════════════════════════════════════
+
   lookingFor: Gender[];
   relationshipIntent: RelationshipIntent[];
   activities: ActivityFilter[];
@@ -162,6 +193,12 @@ interface OnboardingState {
   setDisplayPhotoVariant: (variant: DisplayPhotoVariant) => void;
   setBio: (bio: string) => void;
   setProfilePrompts: (prompts: { question: string; answer: string }[]) => void;
+  // New Prompt System V2 actions
+  setIdentityAnchor: (value: IdentityAnchorValue | null) => void;
+  setSocialBattery: (value: SocialBatteryValue | null) => void;
+  setValueTrigger: (value: ValueTriggerValue | null) => void;
+  setSectionPromptAnswer: (section: PromptSectionKey, questionText: string, answer: string) => void;
+  removeSectionPromptAnswer: (section: PromptSectionKey, questionText: string) => void;
   setHeight: (height: number | null) => void;
   setWeight: (weight: number | null) => void;
   setSmoking: (status: SmokingStatus | null) => void;
@@ -177,6 +214,14 @@ interface OnboardingState {
   setJobTitle: (title: string) => void;
   setCompany: (company: string) => void;
   setSchool: (school: string) => void;
+  // Life Rhythm actions
+  setLifeRhythmCity: (city: string | null) => void;
+  setLifeRhythmSocialRhythm: (value: SocialRhythmValue | null) => void;
+  setLifeRhythmSleepSchedule: (value: SleepScheduleValue | null) => void;
+  setLifeRhythmTravelStyle: (value: TravelStyleValue | null) => void;
+  setLifeRhythmWorkStyle: (value: WorkStyleValue | null) => void;
+  setLifeRhythmCoreValues: (values: CoreValueValue[]) => void;
+  toggleLifeRhythmCoreValue: (value: CoreValueValue) => boolean; // Returns false if max 3 reached
   setLookingFor: (genders: Gender[]) => void;
   toggleLookingFor: (gender: Gender) => void;
   setRelationshipIntent: (intents: RelationshipIntent[]) => void;
@@ -193,6 +238,10 @@ interface OnboardingState {
   // OB-1: Hydration state for startup safety
   _hasHydrated: boolean;
   setHasHydrated: (state: boolean) => void;
+
+  // Convex draft hydration state - tracks whether backend data has been loaded
+  _convexHydrated: boolean;
+  setConvexHydrated: () => void;
 }
 
 const initialState = {
@@ -213,6 +262,18 @@ const initialState = {
   displayPhotoVariant: 'original' as DisplayPhotoVariant,
   bio: "",
   profilePrompts: [],
+  // New Prompt System V2
+  seedQuestions: {
+    identityAnchor: null,
+    socialBattery: null,
+    valueTrigger: null,
+  } as SeedQuestions,
+  sectionPrompts: {
+    builder: [],
+    performer: [],
+    seeker: [],
+    grounded: [],
+  } as SectionPrompts,
   height: null,
   weight: null,
   smoking: null,
@@ -227,6 +288,15 @@ const initialState = {
   jobTitle: "",
   company: "",
   school: "",
+  // Life Rhythm
+  lifeRhythm: {
+    city: null,
+    socialRhythm: null,
+    sleepSchedule: null,
+    travelStyle: null,
+    workStyle: null,
+    coreValues: [],
+  } as LifeRhythm,
   lookingFor: [],
   relationshipIntent: [],
   activities: [],
@@ -239,11 +309,18 @@ const initialState = {
 // Onboarding data is rehydrated from Convex queries on app boot.
 export const useOnboardingStore = create<OnboardingState>()((set) => ({
   ...initialState,
-  // Always true since there's no async hydration from AsyncStorage
+  // Legacy flag - always true for backward compatibility
   _hasHydrated: true,
+
+  // New flag: tracks whether Convex draft has been hydrated
+  // Screens should check this before rendering forms to prevent data loss
+  _convexHydrated: false,
 
   // No-op for compatibility
   setHasHydrated: (state) => set({ _hasHydrated: true }),
+
+  // Set convex hydration complete
+  setConvexHydrated: () => set({ _convexHydrated: true }),
 
       setStep: (step) => set({ currentStep: step }),
 
@@ -265,32 +342,44 @@ export const useOnboardingStore = create<OnboardingState>()((set) => ({
 
       setLgbtqSelf: (lgbtqSelf) => set({ lgbtqSelf: lgbtqSelf.slice(0, 2) }),
 
+      // P2 STABILITY: Use atomic set() to prevent race conditions on rapid taps
       toggleLgbtqSelf: (option) => {
-        const state = useOnboardingStore.getState();
-        if (state.lgbtqSelf.includes(option)) {
-          set({ lgbtqSelf: state.lgbtqSelf.filter((o) => o !== option) });
-          return true;
-        }
-        if (state.lgbtqSelf.length >= 2) {
-          return false; // Max 2 selections reached
-        }
-        set({ lgbtqSelf: [...state.lgbtqSelf, option] });
-        return true;
+        let success = true;
+        set((state) => {
+          if (state.lgbtqSelf.includes(option)) {
+            // Remove existing option
+            return { lgbtqSelf: state.lgbtqSelf.filter((o) => o !== option) };
+          }
+          if (state.lgbtqSelf.length >= 2) {
+            // Max 2 reached, cannot add
+            success = false;
+            return state;
+          }
+          // Add new option
+          return { lgbtqSelf: [...state.lgbtqSelf, option] };
+        });
+        return success;
       },
 
       setLgbtqPreference: (lgbtqPreference) => set({ lgbtqPreference: lgbtqPreference.slice(0, 2) }),
 
+      // P2 STABILITY: Use atomic set() to prevent race conditions on rapid taps
       toggleLgbtqPreference: (option) => {
-        const state = useOnboardingStore.getState();
-        if (state.lgbtqPreference.includes(option)) {
-          set({ lgbtqPreference: state.lgbtqPreference.filter((o) => o !== option) });
-          return true;
-        }
-        if (state.lgbtqPreference.length >= 2) {
-          return false; // Max 2 selections reached
-        }
-        set({ lgbtqPreference: [...state.lgbtqPreference, option] });
-        return true;
+        let success = true;
+        set((state) => {
+          if (state.lgbtqPreference.includes(option)) {
+            // Remove existing option
+            return { lgbtqPreference: state.lgbtqPreference.filter((o) => o !== option) };
+          }
+          if (state.lgbtqPreference.length >= 2) {
+            // Max 2 reached, cannot add
+            success = false;
+            return state;
+          }
+          // Add new option
+          return { lgbtqPreference: [...state.lgbtqPreference, option] };
+        });
+        return success;
       },
 
       // ════════════════════════════════════════════════════════════════════════
@@ -357,6 +446,56 @@ export const useOnboardingStore = create<OnboardingState>()((set) => ({
 
       setProfilePrompts: (profilePrompts) => set({ profilePrompts }),
 
+      // ═══════════════════════════════════════════════════════════════════════════════
+      // NEW PROMPT SYSTEM V2 ACTIONS
+      // ═══════════════════════════════════════════════════════════════════════════════
+
+      setIdentityAnchor: (value) =>
+        set((state) => ({
+          seedQuestions: { ...state.seedQuestions, identityAnchor: value },
+        })),
+
+      setSocialBattery: (value) =>
+        set((state) => ({
+          seedQuestions: { ...state.seedQuestions, socialBattery: value },
+        })),
+
+      setValueTrigger: (value) =>
+        set((state) => ({
+          seedQuestions: { ...state.seedQuestions, valueTrigger: value },
+        })),
+
+      setSectionPromptAnswer: (section, questionText, answer) =>
+        set((state) => {
+          const currentSection = [...state.sectionPrompts[section]];
+          const existingIndex = currentSection.findIndex((p) => p.question === questionText);
+
+          if (existingIndex >= 0) {
+            // Update existing answer
+            currentSection[existingIndex] = { question: questionText, answer };
+          } else {
+            // Add new answer
+            currentSection.push({ question: questionText, answer });
+          }
+
+          return {
+            sectionPrompts: {
+              ...state.sectionPrompts,
+              [section]: currentSection,
+            },
+          };
+        }),
+
+      removeSectionPromptAnswer: (section, questionText) =>
+        set((state) => ({
+          sectionPrompts: {
+            ...state.sectionPrompts,
+            [section]: state.sectionPrompts[section].filter((p) => p.question !== questionText),
+          },
+        })),
+
+      // ═══════════════════════════════════════════════════════════════════════════════
+
       setHeight: (height) => set({ height }),
 
       setWeight: (weight) => set({ weight }),
@@ -371,17 +510,23 @@ export const useOnboardingStore = create<OnboardingState>()((set) => ({
 
       setPets: (pets) => set({ pets: pets.slice(0, 3) }),
 
+      // P2 STABILITY: Use atomic set() to prevent race conditions on rapid taps
       togglePet: (pet) => {
-        const state = useOnboardingStore.getState();
-        if (state.pets.includes(pet)) {
-          set({ pets: state.pets.filter((p) => p !== pet) });
-          return true;
-        }
-        if (state.pets.length >= 3) {
-          return false;
-        }
-        set({ pets: [...state.pets, pet] });
-        return true;
+        let success = true;
+        set((state) => {
+          if (state.pets.includes(pet)) {
+            // Remove existing pet
+            return { pets: state.pets.filter((p) => p !== pet) };
+          }
+          if (state.pets.length >= 3) {
+            // Max 3 reached, cannot add
+            success = false;
+            return state;
+          }
+          // Add new pet
+          return { pets: [...state.pets, pet] };
+        });
+        return success;
       },
 
       setInsect: (insect) => set({ insect }),
@@ -397,6 +542,72 @@ export const useOnboardingStore = create<OnboardingState>()((set) => ({
       setCompany: (company) => set({ company }),
 
       setSchool: (school) => set({ school }),
+
+      // ═══════════════════════════════════════════════════════════════════════════════
+      // LIFE RHYTHM SETTERS
+      // ═══════════════════════════════════════════════════════════════════════════════
+
+      setLifeRhythmCity: (city) =>
+        set((state) => ({
+          lifeRhythm: { ...state.lifeRhythm, city },
+        })),
+
+      setLifeRhythmSocialRhythm: (socialRhythm) =>
+        set((state) => ({
+          lifeRhythm: { ...state.lifeRhythm, socialRhythm },
+        })),
+
+      setLifeRhythmSleepSchedule: (sleepSchedule) =>
+        set((state) => ({
+          lifeRhythm: { ...state.lifeRhythm, sleepSchedule },
+        })),
+
+      setLifeRhythmTravelStyle: (travelStyle) =>
+        set((state) => ({
+          lifeRhythm: { ...state.lifeRhythm, travelStyle },
+        })),
+
+      setLifeRhythmWorkStyle: (workStyle) =>
+        set((state) => ({
+          lifeRhythm: { ...state.lifeRhythm, workStyle },
+        })),
+
+      setLifeRhythmCoreValues: (coreValues) =>
+        set((state) => ({
+          lifeRhythm: { ...state.lifeRhythm, coreValues: coreValues.slice(0, 3) },
+        })),
+
+      // P2 STABILITY: Use atomic set() to prevent race conditions on rapid taps
+      toggleLifeRhythmCoreValue: (value) => {
+        let success = true;
+        set((state) => {
+          const currentValues = state.lifeRhythm.coreValues;
+          if (currentValues.includes(value)) {
+            // Remove value
+            return {
+              lifeRhythm: {
+                ...state.lifeRhythm,
+                coreValues: currentValues.filter((v) => v !== value),
+              },
+            };
+          }
+          if (currentValues.length >= 3) {
+            // Max 3 reached, cannot add
+            success = false;
+            return state;
+          }
+          // Add value
+          return {
+            lifeRhythm: {
+              ...state.lifeRhythm,
+              coreValues: [...currentValues, value],
+            },
+          };
+        });
+        return success;
+      },
+
+      // ═══════════════════════════════════════════════════════════════════════════════
 
       setLookingFor: (lookingFor) => set({ lookingFor }),
 
@@ -443,7 +654,11 @@ export const useOnboardingStore = create<OnboardingState>()((set) => ({
         // between accounts. Convex draft is the ONLY source of truth.
         set({ ...initialState, _hasHydrated: true });
 
-        if (!draft) return;
+        if (!draft) {
+          // No draft, but hydration is complete (nothing to hydrate)
+          set({ _convexHydrated: true });
+          return;
+        }
 
         const updates: Partial<OnboardingState> = {};
 
@@ -473,9 +688,26 @@ export const useOnboardingStore = create<OnboardingState>()((set) => ({
           if (draft.profileDetails.company) updates.company = draft.profileDetails.company;
           if (draft.profileDetails.school) updates.school = draft.profileDetails.school;
           if (draft.profileDetails.education) updates.education = draft.profileDetails.education;
+          if (draft.profileDetails.educationOther) updates.educationOther = draft.profileDetails.educationOther;
           if (draft.profileDetails.bio) updates.bio = draft.profileDetails.bio;
           if (draft.profileDetails.profilePrompts) updates.profilePrompts = draft.profileDetails.profilePrompts;
           if (draft.profileDetails.displayPhotoVariant) updates.displayPhotoVariant = draft.profileDetails.displayPhotoVariant;
+          // New Prompt System V2
+          if (draft.profileDetails.seedQuestions) {
+            updates.seedQuestions = {
+              identityAnchor: draft.profileDetails.seedQuestions.identityAnchor ?? null,
+              socialBattery: draft.profileDetails.seedQuestions.socialBattery ?? null,
+              valueTrigger: draft.profileDetails.seedQuestions.valueTrigger ?? null,
+            };
+          }
+          if (draft.profileDetails.sectionPrompts) {
+            updates.sectionPrompts = {
+              builder: draft.profileDetails.sectionPrompts.builder ?? [],
+              performer: draft.profileDetails.sectionPrompts.performer ?? [],
+              seeker: draft.profileDetails.sectionPrompts.seeker ?? [],
+              grounded: draft.profileDetails.sectionPrompts.grounded ?? [],
+            };
+          }
         }
 
         // Lifestyle
@@ -487,6 +719,34 @@ export const useOnboardingStore = create<OnboardingState>()((set) => ({
           if (draft.lifestyle.insect) updates.insect = draft.lifestyle.insect;
           if (draft.lifestyle.kids) updates.kids = draft.lifestyle.kids;
           if (draft.lifestyle.religion) updates.religion = draft.lifestyle.religion;
+          // BUG FIX DEBUG: Trace religion hydration
+          if (__DEV__) {
+            console.log('[ONB_DRAFT] Lifestyle hydration:', {
+              hasLifestyle: !!draft.lifestyle,
+              religion: draft.lifestyle.religion ?? 'undefined',
+              religionSet: !!draft.lifestyle.religion,
+            });
+          }
+        }
+
+        // Life Rhythm
+        if (draft.lifeRhythm) {
+          updates.lifeRhythm = {
+            city: draft.lifeRhythm.city ?? null,
+            socialRhythm: draft.lifeRhythm.socialRhythm ?? null,
+            sleepSchedule: draft.lifeRhythm.sleepSchedule ?? null,
+            travelStyle: draft.lifeRhythm.travelStyle ?? null,
+            workStyle: draft.lifeRhythm.workStyle ?? null,
+            coreValues: draft.lifeRhythm.coreValues ?? [],
+          };
+          if (__DEV__) {
+            console.log('[ONB_DRAFT] Life Rhythm hydration:', {
+              city: draft.lifeRhythm.city ?? 'undefined',
+              socialRhythm: draft.lifeRhythm.socialRhythm ?? 'undefined',
+              sleepSchedule: draft.lifeRhythm.sleepSchedule ?? 'undefined',
+              coreValuesCount: draft.lifeRhythm.coreValues?.length ?? 0,
+            });
+          }
         }
 
         // Preferences
@@ -497,6 +757,7 @@ export const useOnboardingStore = create<OnboardingState>()((set) => ({
           if (draft.preferences.minAge !== undefined) updates.minAge = draft.preferences.minAge;
           if (draft.preferences.maxAge !== undefined) updates.maxAge = draft.preferences.maxAge;
           if (draft.preferences.maxDistance !== undefined) updates.maxDistance = draft.preferences.maxDistance;
+          if (draft.preferences.lgbtqPreference) updates.lgbtqPreference = draft.preferences.lgbtqPreference;
         }
 
         // Apply updates if any
@@ -506,6 +767,9 @@ export const useOnboardingStore = create<OnboardingState>()((set) => ({
           }
           set(updates);
         }
+
+        // Mark Convex hydration as complete
+        set({ _convexHydrated: true });
       },
 
       reset: () => {

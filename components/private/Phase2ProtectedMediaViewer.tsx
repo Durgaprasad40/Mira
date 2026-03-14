@@ -45,58 +45,113 @@ interface Phase2ProtectedMediaViewerProps {
 // Persists across component unmounts to prevent re-viewing.
 const viewedOnceHoldMessages = new Set<string>();
 
+// CR-002: Validate URI before creating video player
+function isValidMediaUri(uri: string | undefined | null): boolean {
+  if (!uri || typeof uri !== 'string') return false;
+  return (
+    uri.startsWith('http://') ||
+    uri.startsWith('https://') ||
+    uri.startsWith('file://') ||
+    uri.startsWith('content://')
+  );
+}
+
 // Secure Video Player component using expo-video with wall-clock resume
 interface SecureVideoPlayerProps {
   uri: string;
   elapsedMs: number; // How long since first view (for resume calculation)
+  visible: boolean; // CR-003: Added visibility prop for safe detach
 }
 
-function SecureVideoPlayer({ uri, elapsedMs }: SecureVideoPlayerProps) {
+/**
+ * CR-003: Safe Video Player with deferred release pattern.
+ *
+ * This component ensures the VideoView is ALWAYS removed from the render tree
+ * BEFORE the player object is released. This prevents the "shared object already
+ * released" crash that occurs when the native SurfaceVideoView tries to access
+ * a released player.
+ *
+ * Key safety mechanisms:
+ * 1. showVideoView state - controls when VideoView renders (independent of player)
+ * 2. mountedRef - tracks component lifecycle for safe async operations
+ * 3. playerSessionRef - tracks which player instance is current
+ * 4. Deferred cleanup - hides VideoView first, then allows unmount on next frame
+ */
+function SecureVideoPlayerInner({ uri, elapsedMs, visible }: SecureVideoPlayerProps) {
+  // CR-003: State to control VideoView rendering independently of player lifecycle
+  const [showVideoView, setShowVideoView] = useState(true);
   const [isPlaying, setIsPlaying] = useState(true);
-  const hasSeekRef = useRef(false); // Only seek once on mount
+
+  // CR-003: Track component mount state for safe async operations
   const mountedRef = useRef(true);
+  const hasSeekRef = useRef(false); // Only seek once on mount
+
+  // CR-003: Track current player session to detect stale callbacks
+  const playerSessionRef = useRef(0);
+
+  // CR-003: Track if we're in the process of releasing (prevents double operations)
+  const isReleasingRef = useRef(false);
 
   const player = useVideoPlayer(uri, (p) => {
     p.loop = true;
     // Don't auto-play yet; wait for seek
   });
 
-  // Track mounted state for safe operations
+  // CR-003: Track mounted state
   useEffect(() => {
     mountedRef.current = true;
+    playerSessionRef.current += 1;
     return () => {
       mountedRef.current = false;
     };
   }, []);
 
+  // CR-003: When visibility changes, handle VideoView detachment FIRST
+  useEffect(() => {
+    if (!visible && showVideoView) {
+      // Step 1: Hide VideoView immediately (removes from render tree)
+      setShowVideoView(false);
+    } else if (visible && !showVideoView && player) {
+      // Re-show VideoView when becoming visible again (if player exists)
+      setShowVideoView(true);
+    }
+  }, [visible, showVideoView, player]);
+
   // Handle seek to correct position based on elapsed time
   useEffect(() => {
-    if (!player || hasSeekRef.current) return;
+    if (!player || hasSeekRef.current || !mountedRef.current) return;
+
+    const currentSession = playerSessionRef.current;
 
     // Get video duration when available
     const checkAndSeek = () => {
-      if (!mountedRef.current) return;
-      const videoDurationMs = player.duration * 1000; // duration is in seconds
+      if (!mountedRef.current || currentSession !== playerSessionRef.current) return;
 
-      if (videoDurationMs > 0 && !hasSeekRef.current) {
-        hasSeekRef.current = true;
+      try {
+        const videoDurationMs = player.duration * 1000; // duration is in seconds
 
-        // Calculate resume position: elapsedMs mod videoDurationMs
-        const resumeMs = elapsedMs > 0 ? elapsedMs % videoDurationMs : 0;
-        const resumeSec = resumeMs / 1000;
+        if (videoDurationMs > 0 && !hasSeekRef.current) {
+          hasSeekRef.current = true;
 
-        console.log('[SECURE_VIDEO_RESUME]', {
-          elapsedMs,
-          videoDurationMs,
-          resumeMs,
-          resumeSec: resumeSec.toFixed(2),
-        });
+          // Calculate resume position: elapsedMs mod videoDurationMs
+          const resumeMs = elapsedMs > 0 ? elapsedMs % videoDurationMs : 0;
+          const resumeSec = resumeMs / 1000;
 
-        // Seek to resume position and play
-        if (mountedRef.current) {
-          player.currentTime = resumeSec;
-          player.play();
+          console.log('[SECURE_VIDEO_RESUME]', {
+            elapsedMs,
+            videoDurationMs,
+            resumeMs,
+            resumeSec: resumeSec.toFixed(2),
+          });
+
+          // Seek to resume position and play
+          if (mountedRef.current && currentSession === playerSessionRef.current) {
+            player.currentTime = resumeSec;
+            player.play();
+          }
         }
+      } catch {
+        // Ignore errors from released player
       }
     };
 
@@ -104,38 +159,89 @@ function SecureVideoPlayer({ uri, elapsedMs }: SecureVideoPlayerProps) {
     checkAndSeek();
 
     // Also listen for status changes in case duration wasn't ready
-    const subscription = player.addListener('statusChange', (status) => {
-      if (status.status === 'readyToPlay') {
-        checkAndSeek();
-      }
-    });
+    let subscription: any = null;
+    try {
+      subscription = player.addListener('statusChange', (status: any) => {
+        if (status.status === 'readyToPlay') {
+          checkAndSeek();
+        }
+      });
+    } catch {
+      // Ignore - player may be released
+    }
 
-    return () => subscription.remove();
+    return () => {
+      try {
+        subscription?.remove();
+      } catch {
+        // Ignore
+      }
+    };
   }, [player, elapsedMs]);
 
   // Track playing state for UI
   useEffect(() => {
-    if (!player) return;
+    if (!player || !mountedRef.current) return;
 
-    const subscription = player.addListener('playingChange', (event) => {
-      if (!mountedRef.current) return;
-      setIsPlaying(event.isPlaying);
-    });
+    const currentSession = playerSessionRef.current;
 
-    return () => subscription.remove();
+    let subscription: any = null;
+    try {
+      subscription = player.addListener('playingChange', (event: any) => {
+        if (!mountedRef.current || currentSession !== playerSessionRef.current) return;
+        setIsPlaying(event.isPlaying);
+      });
+    } catch {
+      // Ignore - player may be released
+    }
+
+    return () => {
+      try {
+        subscription?.remove();
+      } catch {
+        // Ignore
+      }
+    };
   }, [player]);
 
-  const togglePlayback = () => {
-    if (!player) return;
-    if (player.playing) {
-      player.pause();
-    } else {
-      player.play();
+  const togglePlayback = useCallback(() => {
+    if (!player || !mountedRef.current) return;
+    try {
+      if (player.playing) {
+        player.pause();
+      } else {
+        player.play();
+      }
+    } catch {
+      // Ignore - player may be released
     }
-  };
+  }, [player]);
 
-  // Guard: never render VideoView with null/released player
-  if (!player) return null;
+  // CR-003: Safe cleanup - pause player before unmount
+  useEffect(() => {
+    const currentSession = playerSessionRef.current;
+
+    return () => {
+      // Only cleanup if this is still the current session
+      if (currentSession !== playerSessionRef.current) return;
+      if (isReleasingRef.current) return;
+
+      isReleasingRef.current = true;
+
+      try {
+        player?.pause();
+      } catch {
+        // Ignore - player may already be released
+      }
+    };
+  }, [player]);
+
+  // CR-003: Guard against rendering VideoView with released/invalid player
+  // Multiple conditions to ensure safety:
+  // 1. player must exist
+  // 2. visible must be true (prop from parent)
+  // 3. showVideoView must be true (internal state for deferred release)
+  if (!player || !visible || !showVideoView) return null;
 
   return (
     <Pressable style={StyleSheet.absoluteFill} onPress={togglePlayback}>
@@ -151,6 +257,43 @@ function SecureVideoPlayer({ uri, elapsedMs }: SecureVideoPlayerProps) {
         </View>
       )}
     </Pressable>
+  );
+}
+
+/**
+ * CR-002/CR-003: Wrapper that validates URI before rendering inner component.
+ * Prevents useVideoPlayer from being called with invalid URI.
+ * Uses key prop to force remount on URI change for clean player lifecycle.
+ */
+function SecureVideoPlayer({ uri, elapsedMs, visible }: SecureVideoPlayerProps) {
+  // CR-003: Track previous URI to detect changes
+  const prevUriRef = useRef(uri);
+  const [stableUri, setStableUri] = useState(uri);
+
+  // CR-003: When URI changes, we need to handle the transition safely
+  useEffect(() => {
+    if (uri !== prevUriRef.current) {
+      // URI changed - update stable URI which will cause inner component remount
+      prevUriRef.current = uri;
+      if (isValidMediaUri(uri)) {
+        setStableUri(uri);
+      }
+    }
+  }, [uri]);
+
+  if (!isValidMediaUri(stableUri)) {
+    return null;
+  }
+
+  // CR-003: Key on stableUri to force remount when URI changes
+  // This ensures old player is fully cleaned up before new one is created
+  return (
+    <SecureVideoPlayerInner
+      key={stableUri}
+      uri={stableUri}
+      elapsedMs={elapsedMs}
+      visible={visible}
+    />
   );
 }
 
@@ -454,7 +597,7 @@ export function Phase2ProtectedMediaViewer({
         {mediaUri && !mediaLoadError ? (
           <View style={[StyleSheet.absoluteFill, isMirrored && styles.mirrored]}>
             {isVideo ? (
-              <SecureVideoPlayer uri={mediaUri} elapsedMs={elapsedMs} />
+              <SecureVideoPlayer uri={mediaUri} elapsedMs={elapsedMs} visible={visible} />
             ) : (
               <Image
                 source={{ uri: mediaUri }}

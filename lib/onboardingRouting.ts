@@ -54,13 +54,25 @@ export function decideNextOnboardingRoute(status: OnboardingStatus): string {
     return '/(onboarding)/photo-upload';
   }
 
-  // Step 3: Face Verification (if not verified or pending)
-  if (status.faceVerificationStatus === 'unverified' || status.faceVerificationStatus === 'failed') {
-    console.log('[ONB_ROUTE] status=face_verification_needed -> route=/(onboarding)/face-verification');
+  // Step 3: Face Verification
+  // POLICY: Allow proceeding through screens if VERIFIED or PENDING (manual review).
+  // Block only UNVERIFIED and FAILED users who haven't attempted or were rejected.
+  // SOFT-GATE: Pending users can complete onboarding - verification affects trust/ranking later, not access.
+  const canProceedPastVerification =
+    status.faceVerificationStatus === 'verified' ||
+    status.faceVerificationStatus === 'pending';
+
+  if (!canProceedPastVerification) {
+    console.log('[ONB_ROUTE] status=face_verification_needed (status=' + status.faceVerificationStatus + ') -> route=/(onboarding)/face-verification');
     return '/(onboarding)/face-verification';
   }
 
-  // Step 4: Additional Photos (if face verification passed or pending)
+  // Log soft-gate status for pending users (informational only, no blocking)
+  if (status.faceVerificationStatus === 'pending') {
+    console.log('[ONB_ROUTE] pending verification -> allow onboarding continuation (soft-gate)');
+  }
+
+  // Step 4: Additional Photos (face verification is VERIFIED or PENDING at this point)
   if (!status.hasMinPhotos) {
     console.log('[ONB_ROUTE] status=need_more_photos -> route=/(onboarding)/additional-photos');
     return '/(onboarding)/additional-photos';

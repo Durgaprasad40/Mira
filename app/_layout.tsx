@@ -474,14 +474,24 @@ function SessionValidator() {
  * - READ-ONLY: Only reads from backend, writes to local cache
  * - Does NOT upload or modify backend data
  * - Runs AFTER hydration completes
+ *
+ * P2 STABILITY:
+ * - Uses _convexHydrated (not legacy _hasHydrated) for proper Convex readiness
+ * - Adds 10s timeout fallback to prevent infinite wait if hydration hangs
  */
+// P2 STABILITY: Hydration timeout constant
+const HYDRATION_TIMEOUT_MS = 10000;
+
 function PhotoSyncManager() {
   const userId = useAuthStore((s) => s.userId);
   const authHydrated = useAuthStore((s) => s._hasHydrated);
-  const onboardingHydrated = useOnboardingStore((s) => s._hasHydrated);
+  // P2 STABILITY FIX: Use _convexHydrated for actual Convex hydration readiness
+  const convexHydrated = useOnboardingStore((s) => s._convexHydrated);
   const demoHydrated = useDemoStore((s) => s._hasHydrated);
   const hasSyncedRef = useRef(false);
   const hasEnsuredUserRef = useRef<string | null>(null);
+  // P2 STABILITY: Track hydration timeout
+  const [hydrationTimedOut, setHydrationTimedOut] = useState(false);
   const ensureUser = useMutation(api.users.ensureCurrentUser);
 
   // TASK C: Bootstrap - Ensure Convex user record exists BEFORE any queries run
@@ -513,9 +523,26 @@ function PhotoSyncManager() {
     })();
   }, [userId, authHydrated, ensureUser]);
 
+  // P2 STABILITY: Hydration timeout fallback - don't wait forever
+  useEffect(() => {
+    // Only set timeout if not already hydrated and not in demo mode
+    if (isDemoMode || convexHydrated || hydrationTimedOut) return;
+
+    const timer = setTimeout(() => {
+      if (!useOnboardingStore.getState()._convexHydrated) {
+        console.warn('[PHOTO_SYNC] Convex hydration timeout after', HYDRATION_TIMEOUT_MS, 'ms - proceeding anyway');
+        setHydrationTimedOut(true);
+      }
+    }, HYDRATION_TIMEOUT_MS);
+
+    return () => clearTimeout(timer);
+  }, [convexHydrated, hydrationTimedOut]);
+
   useEffect(() => {
     // Wait for all stores to hydrate
-    if (!authHydrated || !onboardingHydrated || !demoHydrated) return;
+    // P2 STABILITY FIX: Use convexHydrated (or timeout) instead of legacy _hasHydrated
+    const onboardingReady = isDemoMode || convexHydrated || hydrationTimedOut;
+    if (!authHydrated || !onboardingReady || !demoHydrated) return;
 
     // Only sync once
     if (hasSyncedRef.current) return;
@@ -525,7 +552,7 @@ function PhotoSyncManager() {
     if (userId) {
       autoSyncPhotosOnStartup(userId);
     }
-  }, [userId, authHydrated, onboardingHydrated, demoHydrated]);
+  }, [userId, authHydrated, convexHydrated, demoHydrated, hydrationTimedOut]);
 
   return null;
 }
@@ -564,7 +591,11 @@ function OnboardingDraftHydrator() {
 
   useEffect(() => {
     // Only in production mode (not demo)
-    if (isDemoMode) return;
+    if (isDemoMode) {
+      // Demo mode doesn't use Convex for onboarding draft, mark as hydrated immediately
+      useOnboardingStore.getState().setConvexHydrated();
+      return;
+    }
 
     // Wait for auth and onboarding stores to hydrate
     if (!authHydrated || !onboardingHydrated || !userId) return;
@@ -578,6 +609,8 @@ function OnboardingDraftHydrator() {
 
     if (!onboardingStatus) {
       if (__DEV__) console.log('[ONB_DRAFT] No onboarding status found');
+      // No status, but hydration attempt complete - mark as hydrated so screens don't wait
+      hydrateFromDraft(null);
       return;
     }
 
@@ -663,12 +696,20 @@ function OnboardingDraftHydrator() {
       );
       if (__DEV__) {
         console.log(`[BASIC_HYDRATE] source=draft fields=${JSON.stringify(draftKeys)}`);
+        // BUG FIX DEBUG: Log lifestyle section to trace religion persistence
+        if (draft.lifestyle) {
+          console.log('[ONB_DRAFT] Draft lifestyle from backend:', JSON.stringify(draft.lifestyle));
+        } else {
+          console.log('[ONB_DRAFT] Draft has NO lifestyle section');
+        }
       }
-      hydrateFromDraft(draft);
+      hydrateFromDraft(draft); // This now sets _convexHydrated: true
     } else {
       if (__DEV__) {
         console.log('[ONB_DRAFT] No draft found in Convex');
       }
+      // No draft, but hydration is complete - mark as hydrated so screens don't wait
+      hydrateFromDraft(null);
     }
   }, [userId, authHydrated, onboardingHydrated, onboardingStatus, hydrateFromDraft, setFaceVerificationPassed, setFaceVerificationPending]);
 

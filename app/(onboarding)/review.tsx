@@ -6,6 +6,8 @@
  * - ONLY stability/bug fixes allowed IF Durga Prasad explicitly requests
  * - Do not change UX/flows without explicit unlock
  * Date locked: 2026-03-04
+ *
+ * UNLOCKED: 2026-03-14 for Life Rhythm section addition (per explicit user request)
  */
 import React, { useState, useCallback, useRef, useEffect } from "react";
 import {
@@ -32,6 +34,18 @@ import {
   PETS_OPTIONS,
   EDUCATION_OPTIONS,
   RELIGION_OPTIONS,
+  IDENTITY_ANCHOR_OPTIONS,
+  SOCIAL_BATTERY_LEFT_LABEL,
+  SOCIAL_BATTERY_RIGHT_LABEL,
+  VALUE_TRIGGER_OPTIONS,
+  SECTION_LABELS,
+  PromptSectionKey,
+  // Life Rhythm
+  SOCIAL_RHYTHM_OPTIONS,
+  SLEEP_SCHEDULE_OPTIONS,
+  TRAVEL_STYLE_OPTIONS,
+  WORK_STYLE_OPTIONS,
+  CORE_VALUES_OPTIONS,
 } from "@/lib/constants";
 import { Button } from "@/components/ui";
 import { useOnboardingStore, LGBTQ_OPTIONS } from "@/stores/onboardingStore";
@@ -124,10 +138,13 @@ export default function ReviewScreen() {
     jobTitle,
     company,
     school,
+    lifeRhythm,
     lookingFor,
     relationshipIntent,
     activities,
     profilePrompts,
+    seedQuestions,
+    sectionPrompts,
     minAge,
     maxAge,
     maxDistance,
@@ -224,25 +241,34 @@ export default function ReviewScreen() {
     }
   }, [currentUser, backendPhotos]);
 
-  // CRITICAL: Check demoProfile.faceVerificationPassed for demo mode (persisted across logout)
-  // BUG FIX: Also accept faceVerificationPending (manual review) as valid to proceed
-  const isVerified = isDemoMode
-    ? !!(demoProfile?.faceVerificationPassed || faceVerificationPassed || faceVerificationPending)
+  // CRITICAL: Check face verification status for Review entry
+  // POLICY: Allow entry if user has PASSED or is PENDING manual review.
+  // - PASSED (faceVerificationPassed=true): Fully verified, can proceed
+  // - PENDING (faceVerificationPending=true): Submitted for manual review, can proceed
+  // - UNVERIFIED/FAILED: Must complete face verification first
+  const canProceedWithVerification = isDemoMode
+    ? !!(demoProfile?.faceVerificationPassed || demoProfile?.faceVerificationPending || faceVerificationPassed || faceVerificationPending)
     : (faceVerificationPassed || faceVerificationPending);
 
-  // CHECKPOINT GATE: Block access if face verification not completed
+  // CHECKPOINT GATE: Allow entry if face verification was attempted (passed or pending)
+  // SOFT-GATE POLICY: Pending verification is informational only - does NOT block completion
   React.useEffect(() => {
-    if (isVerified) {
+    if (canProceedWithVerification) {
       if (__DEV__) {
-        console.log("[REVIEW_GATE] verified=true (passed or pending) -> allow");
+        console.log("[REVIEW_GATE] Entry allowed");
         console.log("[REVIEW_GATE] faceVerificationPassed:", faceVerificationPassed);
         console.log("[REVIEW_GATE] faceVerificationPending:", faceVerificationPending);
+        if (faceVerificationPending && !faceVerificationPassed) {
+          console.log("[REVIEW_GATE] Pending verification is informational only (no blocking)");
+        }
       }
       return;
     }
-    if (__DEV__) console.log("[REVIEW_GATE] verified=false -> redirect to face-verification");
+    if (__DEV__) {
+      console.log("[REVIEW_GATE] No verification attempt -> redirect to face-verification");
+    }
     router.replace("/(onboarding)/face-verification" as any);
-  }, [isVerified, router, faceVerificationPassed, faceVerificationPending]);
+  }, [canProceedWithVerification, router, faceVerificationPassed, faceVerificationPending]);
   const [isSubmitting, setIsSubmitting] = React.useState(false);
   const [uploadProgress, setUploadProgress] = React.useState("");
 
@@ -269,6 +295,18 @@ export default function ReviewScreen() {
       console.log("[REVIEW] isSubmitting:", isSubmitting);
       console.log("[REVIEW] faceVerificationPassed:", faceVerificationPassed);
       console.log("[REVIEW] faceVerificationPending:", faceVerificationPending);
+    }
+
+    // SOFT-GATE POLICY: Face verification does NOT block onboarding completion.
+    // Pending/failed verification may affect trust/ranking later, but not access.
+    // Log status for debugging but proceed regardless.
+    if (__DEV__) {
+      if (!faceVerificationPassed) {
+        console.log("[REVIEW_SUBMIT] proceeding with faceVerificationPassed=false");
+        console.log("[REVIEW_SUBMIT] faceVerificationPending:", faceVerificationPending, "(soft-gate only)");
+      } else {
+        console.log("[REVIEW_SUBMIT] faceVerificationPassed=true (verified)");
+      }
     }
 
     if (!userId) {
@@ -310,6 +348,8 @@ export default function ReviewScreen() {
           relationshipIntent: sanitizeRelationshipIntent(relationshipIntent as string[]),
           activities: activities as string[],
           profilePrompts,
+          seedQuestions,
+          sectionPrompts,
           minAge,
           maxAge,
           maxDistance,
@@ -482,6 +522,13 @@ export default function ReviewScreen() {
         await saveAuthBootCache(authState.token, authState.userId, { onboardingCompleted: true });
       }
 
+      // STABILITY FIX: Recheck mounted state after saveAuthBootCache async operation
+      // This prevents navigation if user rapidly navigated away during the save
+      if (!mountedRef.current) {
+        if (__DEV__) console.log('[REVIEW] Unmounted during saveAuthBootCache - skipping navigation');
+        return;
+      }
+
       setStep("tutorial");
       router.push("/(onboarding)/tutorial" as any);
     } catch (error: any) {
@@ -625,23 +672,78 @@ export default function ReviewScreen() {
         <Text style={styles.bioText}>{bio || demoProfile?.bio || "No bio added"}</Text>
       </View>
 
-      {/* Prompts Section */}
+      {/* Prompts Section (New 2-Page System) */}
       <View style={styles.section}>
         <View style={styles.sectionHeader}>
-          <Text style={styles.sectionTitle}>Prompts</Text>
+          <Text style={styles.sectionTitle}>About You</Text>
           <TouchableOpacity onPress={() => handleEdit("prompts")}>
             <Text style={styles.editLink}>Edit</Text>
           </TouchableOpacity>
         </View>
-        {(profilePrompts.length > 0 || (demoProfile?.profilePrompts && demoProfile.profilePrompts.length > 0)) ? (
-          (profilePrompts.length > 0 ? profilePrompts : demoProfile?.profilePrompts || []).map((prompt, index) => (
-            <View key={index} style={styles.promptItem}>
-              <Text style={styles.promptQuestion}>{prompt.question}</Text>
-              <Text style={styles.promptAnswer}>{prompt.answer}</Text>
+
+        {/* Seed Questions */}
+        {(seedQuestions.identityAnchor || seedQuestions.socialBattery || seedQuestions.valueTrigger) ? (
+          <View style={styles.promptSubsection}>
+            {seedQuestions.identityAnchor && (
+              <View style={styles.infoRow}>
+                <Text style={styles.infoLabel}>Describes you:</Text>
+                <Text style={styles.infoValue}>
+                  {IDENTITY_ANCHOR_OPTIONS.find(o => o.value === seedQuestions.identityAnchor)?.label || seedQuestions.identityAnchor}
+                </Text>
+              </View>
+            )}
+            {seedQuestions.socialBattery && (
+              <View style={styles.infoRow}>
+                <Text style={styles.infoLabel}>Social energy:</Text>
+                <Text style={styles.infoValue}>
+                  {seedQuestions.socialBattery <= 2 ? SOCIAL_BATTERY_LEFT_LABEL :
+                   seedQuestions.socialBattery >= 4 ? SOCIAL_BATTERY_RIGHT_LABEL :
+                   'Balanced'} ({seedQuestions.socialBattery}/5)
+                </Text>
+              </View>
+            )}
+            {seedQuestions.valueTrigger && (
+              <View style={styles.infoRow}>
+                <Text style={styles.infoLabel}>Good person sign:</Text>
+                <Text style={styles.infoValue}>
+                  {VALUE_TRIGGER_OPTIONS.find(o => o.value === seedQuestions.valueTrigger)?.label || seedQuestions.valueTrigger}
+                </Text>
+              </View>
+            )}
+          </View>
+        ) : null}
+
+        {/* Section Prompts */}
+        {(['builder', 'performer', 'seeker', 'grounded'] as PromptSectionKey[]).map((section) => {
+          const answers = sectionPrompts[section];
+          if (!answers || answers.length === 0) return null;
+          const label = SECTION_LABELS[section];
+          return (
+            <View key={section} style={styles.promptSubsection}>
+              <Text style={styles.promptSectionLabel}>{label.emoji} {label.title}</Text>
+              {answers.map((prompt, index) => (
+                <View key={index} style={styles.promptItem}>
+                  <Text style={styles.promptQuestion}>{prompt.question}</Text>
+                  <Text style={styles.promptAnswer}>{prompt.answer}</Text>
+                </View>
+              ))}
             </View>
-          ))
-        ) : (
-          <Text style={styles.emptyText}>No prompts added</Text>
+          );
+        })}
+
+        {/* Legacy prompts fallback */}
+        {(!seedQuestions.identityAnchor && !seedQuestions.socialBattery && !seedQuestions.valueTrigger &&
+          Object.values(sectionPrompts).every(s => s.length === 0)) && (
+          profilePrompts.length > 0 ? (
+            profilePrompts.map((prompt, index) => (
+              <View key={index} style={styles.promptItem}>
+                <Text style={styles.promptQuestion}>{prompt.question}</Text>
+                <Text style={styles.promptAnswer}>{prompt.answer}</Text>
+              </View>
+            ))
+          ) : (
+            <Text style={styles.emptyText}>No prompts added</Text>
+          )
         )}
       </View>
 
@@ -725,6 +827,62 @@ export default function ReviewScreen() {
               if (petsData.length === 0) return "–";
               return petsData.map((p) => PETS_OPTIONS.find((o) => o.value === p)?.label ?? p).join(", ");
             })()}
+          </Text>
+        </View>
+      </View>
+
+      {/* Life Rhythm Section */}
+      <View style={styles.section}>
+        <View style={styles.sectionHeader}>
+          <Text style={styles.sectionTitle}>Life Rhythm</Text>
+          <TouchableOpacity onPress={() => handleEdit("profile-details/life-rhythm")}>
+            <Text style={styles.editLink}>Edit</Text>
+          </TouchableOpacity>
+        </View>
+        <View style={styles.infoRow}>
+          <Text style={styles.infoLabel}>City:</Text>
+          <Text style={styles.infoValue}>{lifeRhythm.city || "–"}</Text>
+        </View>
+        <View style={styles.infoRow}>
+          <Text style={styles.infoLabel}>Social Energy:</Text>
+          <Text style={styles.infoValue}>
+            {lifeRhythm.socialRhythm
+              ? SOCIAL_RHYTHM_OPTIONS.find((o) => o.value === lifeRhythm.socialRhythm)?.label || "–"
+              : "–"}
+          </Text>
+        </View>
+        <View style={styles.infoRow}>
+          <Text style={styles.infoLabel}>Sleep Schedule:</Text>
+          <Text style={styles.infoValue}>
+            {lifeRhythm.sleepSchedule
+              ? SLEEP_SCHEDULE_OPTIONS.find((o) => o.value === lifeRhythm.sleepSchedule)?.label || "–"
+              : "–"}
+          </Text>
+        </View>
+        <View style={styles.infoRow}>
+          <Text style={styles.infoLabel}>Travel Style:</Text>
+          <Text style={styles.infoValue}>
+            {lifeRhythm.travelStyle
+              ? TRAVEL_STYLE_OPTIONS.find((o) => o.value === lifeRhythm.travelStyle)?.label || "–"
+              : "–"}
+          </Text>
+        </View>
+        <View style={styles.infoRow}>
+          <Text style={styles.infoLabel}>Work Style:</Text>
+          <Text style={styles.infoValue}>
+            {lifeRhythm.workStyle
+              ? WORK_STYLE_OPTIONS.find((o) => o.value === lifeRhythm.workStyle)?.label || "–"
+              : "–"}
+          </Text>
+        </View>
+        <View style={styles.infoRow}>
+          <Text style={styles.infoLabel}>Core Values:</Text>
+          <Text style={styles.infoValue}>
+            {lifeRhythm.coreValues && lifeRhythm.coreValues.length > 0
+              ? lifeRhythm.coreValues
+                  .map((v) => CORE_VALUES_OPTIONS.find((o) => o.value === v)?.label || v)
+                  .join(", ")
+              : "–"}
           </Text>
         </View>
       </View>
@@ -948,6 +1106,18 @@ const styles = StyleSheet.create({
     color: COLORS.textMuted,
     fontStyle: "italic",
     marginTop: 8,
+  },
+  promptSubsection: {
+    marginBottom: 16,
+    paddingBottom: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: COLORS.border,
+  },
+  promptSectionLabel: {
+    fontSize: 14,
+    fontWeight: "600",
+    color: COLORS.primary,
+    marginBottom: 10,
   },
   promptItem: {
     marginBottom: 12,

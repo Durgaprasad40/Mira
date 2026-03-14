@@ -558,11 +558,13 @@ export default function ChatRoomScreen() {
     // P1 FIX: Filter out server messages whose clientId matches a pending message (dedup)
     const pendingClientIds = new Set(pendingMessages.map((m) => m.id.replace('pending_', '')));
     const deduped = convexMsgs.filter((m) => !m.clientId || !pendingClientIds.has(m.clientId));
+    // CR-010: Use sender profile data from backend (senderName, senderAvatar)
     const converted: DemoChatMessage[] = deduped.map((m) => ({
       id: m._id,
       roomId: m.roomId,
       senderId: m.senderId,
-      senderName: 'User',
+      senderName: m.senderName ?? 'User', // CR-010: Use hydrated sender name
+      senderAvatar: m.senderAvatar, // CR-010: Use hydrated sender avatar
       type: m.type as DemoChatMessage['type'],
       text: m.text,
       mediaUrl: m.imageUrl,

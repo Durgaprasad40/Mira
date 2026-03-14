@@ -3,10 +3,45 @@ import { View, Text, TouchableOpacity, Pressable, StyleSheet, ActivityIndicator,
 import { Image } from 'expo-image';
 import { Ionicons } from '@expo/vector-icons';
 import { Audio } from 'expo-av';
+import * as FileSystem from 'expo-file-system';
 import { INCOGNITO_COLORS } from '@/lib/constants';
 import MediaMessage from '@/components/chat/MediaMessage';
 
 const C = INCOGNITO_COLORS;
+
+/**
+ * CR-010: Validate media URI for playback safety
+ * Returns true if:
+ * - URI is a valid remote URL (http/https)
+ * - URI is a local file that exists
+ */
+async function isValidMediaUri(uri: string | undefined): Promise<boolean> {
+  if (!uri || typeof uri !== 'string') return false;
+
+  // Remote URLs are valid (cloud storage)
+  if (uri.startsWith('http://') || uri.startsWith('https://')) {
+    return true;
+  }
+
+  // Local file paths need existence check
+  if (uri.startsWith('file://') || uri.startsWith('/')) {
+    try {
+      const fileUri = uri.startsWith('/') ? `file://${uri}` : uri;
+      const info = await FileSystem.getInfoAsync(fileUri);
+      return info.exists;
+    } catch (e) {
+      if (__DEV__) console.log('[MediaValidation] File check failed:', uri, e);
+      return false;
+    }
+  }
+
+  // content:// URIs (Android media) - assume valid
+  if (uri.startsWith('content://')) {
+    return true;
+  }
+
+  return false;
+}
 
 interface ChatMessageItemProps {
   /** Unique message ID (required for media view tracking) */
@@ -59,6 +94,7 @@ function ChatMessageItem({
   // Audio playback state
   const [isPlaying, setIsPlaying] = useState(false);
   const [isLoading, setIsLoading] = useState(false);
+  const [audioError, setAudioError] = useState(false); // CR-010: Track audio load errors
   const soundRef = useRef<Audio.Sound | null>(null);
 
   // Cleanup sound on unmount
@@ -70,9 +106,18 @@ function ChatMessageItem({
     };
   }, []);
 
+  // CR-010: Reset error state when audioUrl changes
+  useEffect(() => {
+    setAudioError(false);
+  }, [audioUrl]);
+
   // Handle audio play/pause
+  // CR-010: Validate URL before playback to handle stale local cache paths
   const handleAudioPress = useCallback(async () => {
     if (!audioUrl) return;
+
+    // CR-010: If we already know the audio is unavailable, don't retry
+    if (audioError) return;
 
     try {
       if (isPlaying && soundRef.current) {
@@ -89,8 +134,17 @@ function ChatMessageItem({
         return;
       }
 
-      // Load and play
+      // CR-010: Validate URL before attempting to load
       setIsLoading(true);
+      const isValid = await isValidMediaUri(audioUrl);
+      if (!isValid) {
+        if (__DEV__) console.log('[AudioPlayback] Invalid/missing audio URI:', audioUrl);
+        setAudioError(true);
+        setIsLoading(false);
+        return;
+      }
+
+      // Load and play
       await Audio.setAudioModeAsync({
         allowsRecordingIOS: false,
         playsInSilentModeIOS: true,
@@ -109,10 +163,11 @@ function ChatMessageItem({
       setIsLoading(false);
     } catch (error) {
       console.error('[AudioPlayback] Error:', error);
+      setAudioError(true); // CR-010: Mark as error so we show unavailable state
       setIsLoading(false);
       setIsPlaying(false);
     }
-  }, [audioUrl, isPlaying]);
+  }, [audioUrl, isPlaying, audioError]);
 
   // Memoize hold callbacks to prevent re-renders (only for secure media)
   const handleHoldStart = useCallback(() => {
@@ -175,6 +230,7 @@ function ChatMessageItem({
           <TouchableOpacity
             onPress={handleAudioPress}
             activeOpacity={0.7}
+            disabled={audioError} // CR-010: Disable tap if audio unavailable
             style={[styles.bubble, styles.audioBubble, isMe ? styles.bubbleMe : styles.bubbleOther]}
           >
             {/* Name inside bubble - only for other users */}
@@ -183,39 +239,49 @@ function ChatMessageItem({
                 <Text style={styles.senderName}>{senderName}</Text>
               </TouchableOpacity>
             )}
-            {/* Audio message with play button */}
-            <View style={styles.audioRow}>
-              {isLoading ? (
-                <ActivityIndicator size="small" color={isMe ? '#FFFFFF' : C.primary} />
-              ) : (
-                <View style={[styles.playButton, isMe && styles.playButtonMe]}>
-                  <Ionicons
-                    name={isPlaying ? 'pause' : 'play'}
-                    size={18}
-                    color={isMe ? C.primary : '#FFFFFF'}
-                  />
+            {/* CR-010: Show unavailable state if audio file is missing */}
+            {audioError ? (
+              <View style={styles.audioRow}>
+                <View style={[styles.playButton, styles.playButtonError]}>
+                  <Ionicons name="alert-circle" size={18} color={C.textLight} />
                 </View>
-              )}
-              <View style={styles.audioWaveform}>
-                {/* Simple waveform visualization - static heights */}
-                {[6, 10, 14, 8, 16, 12, 10, 6].map((h, i) => (
-                  <View
-                    key={i}
-                    style={[
-                      styles.waveformBar,
-                      { height: h },
-                      isMe ? styles.waveformBarMe : styles.waveformBarOther,
-                      isPlaying && styles.waveformBarPlaying,
-                    ]}
-                  />
-                ))}
+                <Text style={styles.audioErrorText}>Audio unavailable</Text>
               </View>
-              <Ionicons
-                name="mic"
-                size={14}
-                color={isMe ? 'rgba(255,255,255,0.7)' : C.textLight}
-              />
-            </View>
+            ) : (
+              /* Audio message with play button */
+              <View style={styles.audioRow}>
+                {isLoading ? (
+                  <ActivityIndicator size="small" color={isMe ? '#FFFFFF' : C.primary} />
+                ) : (
+                  <View style={[styles.playButton, isMe && styles.playButtonMe]}>
+                    <Ionicons
+                      name={isPlaying ? 'pause' : 'play'}
+                      size={18}
+                      color={isMe ? C.primary : '#FFFFFF'}
+                    />
+                  </View>
+                )}
+                <View style={styles.audioWaveform}>
+                  {/* Simple waveform visualization - static heights */}
+                  {[6, 10, 14, 8, 16, 12, 10, 6].map((h, i) => (
+                    <View
+                      key={i}
+                      style={[
+                        styles.waveformBar,
+                        { height: h },
+                        isMe ? styles.waveformBarMe : styles.waveformBarOther,
+                        isPlaying && styles.waveformBarPlaying,
+                      ]}
+                    />
+                  ))}
+                </View>
+                <Ionicons
+                  name="mic"
+                  size={14}
+                  color={isMe ? 'rgba(255,255,255,0.7)' : C.textLight}
+                />
+              </View>
+            )}
           </TouchableOpacity>
         ) : (
           <View style={[styles.bubble, isMe ? styles.bubbleMe : styles.bubbleOther]}>
@@ -329,6 +395,15 @@ const styles = StyleSheet.create({
   },
   playButtonMe: {
     backgroundColor: '#FFFFFF',
+  },
+  // CR-010: Error state for unavailable audio
+  playButtonError: {
+    backgroundColor: 'rgba(255,255,255,0.1)',
+  },
+  audioErrorText: {
+    fontSize: 12,
+    color: C.textLight,
+    fontStyle: 'italic',
   },
   audioWaveform: {
     flex: 1,

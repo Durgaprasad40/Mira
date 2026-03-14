@@ -188,7 +188,8 @@ export default function PhotoUploadScreen() {
       didSkipRef.current = true;
       console.log('[REF_PHOTO] Demo mode: verified -> skip to face-verification');
       setStep('face_verification');
-      router.replace('/(onboarding)/face-verification' as any);
+      // BUG FIX: Use push (not replace) so back from face-verification returns to photo-upload
+      router.push('/(onboarding)/face-verification' as any);
       return;
     }
 
@@ -213,7 +214,8 @@ export default function PhotoUploadScreen() {
           setStep('additional_photos');
         }
 
-        router.replace(nextRoute as any);
+        // BUG FIX: Use push (not replace) so back from face-verification returns to photo-upload
+        router.push(nextRoute as any);
       }
     }
   }, [isDemoMode, isAlreadyVerified, onboardingStatus, setStep, router]);

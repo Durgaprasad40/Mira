@@ -280,6 +280,24 @@ export default defineSchema({
           v.literal('blurred'),
           v.literal('cartoon')
         )),
+        // New Prompt System V2
+        seedQuestions: v.optional(v.object({
+          identityAnchor: v.optional(v.union(
+            v.literal('builder'), v.literal('performer'), v.literal('seeker'), v.literal('grounded')
+          )),
+          socialBattery: v.optional(v.union(
+            v.literal(1), v.literal(2), v.literal(3), v.literal(4), v.literal(5)
+          )),
+          valueTrigger: v.optional(v.union(
+            v.literal('thoughtful_questions'), v.literal('kind_to_staff'), v.literal('great_humor'), v.literal('on_time')
+          )),
+        })),
+        sectionPrompts: v.optional(v.object({
+          builder: v.optional(v.array(v.object({ question: v.string(), answer: v.string() }))),
+          performer: v.optional(v.array(v.object({ question: v.string(), answer: v.string() }))),
+          seeker: v.optional(v.array(v.object({ question: v.string(), answer: v.string() }))),
+          grounded: v.optional(v.array(v.object({ question: v.string(), answer: v.string() }))),
+        })),
       })),
       // Lifestyle
       lifestyle: v.optional(v.object({
@@ -306,6 +324,32 @@ export default defineSchema({
           v.literal('jewish'), v.literal('sikh'), v.literal('atheist'), v.literal('agnostic'),
           v.literal('spiritual'), v.literal('other'), v.literal('prefer_not_to_say')
         )),
+      })),
+      // Life Rhythm (new matching signals)
+      lifeRhythm: v.optional(v.object({
+        city: v.optional(v.string()),
+        socialRhythm: v.optional(v.union(
+          v.literal('quiet_homebody'), v.literal('small_group'), v.literal('balanced_mix'),
+          v.literal('very_social'), v.literal('party_nightlife')
+        )),
+        sleepSchedule: v.optional(v.union(
+          v.literal('early_bird'), v.literal('slightly_early'), v.literal('flexible'),
+          v.literal('night_owl'), v.literal('very_late_night')
+        )),
+        travelStyle: v.optional(v.union(
+          v.literal('love_frequent'), v.literal('few_trips_yearly'), v.literal('occasional'),
+          v.literal('prefer_local'), v.literal('special_reasons')
+        )),
+        workStyle: v.optional(v.union(
+          v.literal('very_career'), v.literal('ambitious_balanced'), v.literal('balanced_lifestyle'),
+          v.literal('flexible_creative'), v.literal('still_exploring')
+        )),
+        coreValues: v.optional(v.array(v.union(
+          v.literal('kindness'), v.literal('humor'), v.literal('loyalty'), v.literal('intelligence'),
+          v.literal('ambition'), v.literal('curiosity'), v.literal('emotional_maturity'), v.literal('honesty'),
+          v.literal('independence'), v.literal('creativity'), v.literal('stability'), v.literal('adventure'),
+          v.literal('discipline'), v.literal('generosity'), v.literal('open_mindedness')
+        ))),
       })),
       // Preferences
       preferences: v.optional(v.object({
@@ -335,6 +379,9 @@ export default defineSchema({
         minAge: v.optional(v.number()),
         maxAge: v.optional(v.number()),
         maxDistance: v.optional(v.number()),
+        lgbtqPreference: v.optional(v.array(v.union(
+          v.literal('gay'), v.literal('lesbian'), v.literal('bisexual'), v.literal('transgender'), v.literal('prefer_not_to_say')
+        ))),
       })),
       // Progress tracking
       progress: v.optional(v.object({
@@ -1399,6 +1446,7 @@ export default defineSchema({
     .index('by_room_user', ['roomId', 'userId']),
 
   // Chat Room Messages table
+  // CR-012: Message retention - max 1000/room, 24h per-message expiry
   chatRoomMessages: defineTable({
     roomId: v.id('chatRooms'),
     senderId: v.id('users'),
@@ -1407,13 +1455,15 @@ export default defineSchema({
     imageUrl: v.optional(v.string()),
     audioUrl: v.optional(v.string()), // For audio/voice messages
     createdAt: v.number(),
+    expiresAt: v.optional(v.number()), // CR-012: Message expiry (createdAt + 24h)
     clientId: v.optional(v.string()), // For deduplication
     status: v.optional(v.union(v.literal('pending'), v.literal('sent'), v.literal('failed'))), // Message status
     deletedAt: v.optional(v.number()), // Soft delete
   })
     .index('by_room', ['roomId'])
     .index('by_room_created', ['roomId', 'createdAt'])
-    .index('by_room_clientId', ['roomId', 'clientId']), // For idempotency check
+    .index('by_room_clientId', ['roomId', 'clientId']) // For idempotency check
+    .index('by_expires', ['expiresAt']), // CR-012: For scheduled expiry cleanup
 
   // Chat Room Penalties table (Phase-2: kicked users read-only for 24h)
   chatRoomPenalties: defineTable({

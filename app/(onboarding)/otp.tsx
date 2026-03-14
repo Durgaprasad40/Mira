@@ -7,7 +7,7 @@
  * - Do not change UX/flows without explicit unlock
  * Date locked: 2026-03-04
  */
-import React, { useState, useRef, useEffect } from "react";
+import React, { useState, useRef, useEffect, useCallback } from "react";
 import {
   View,
   Text,
@@ -28,6 +28,9 @@ import { useDemoStore } from "@/stores/demoStore";
 import { OnboardingProgressHeader } from "@/components/OnboardingProgressHeader";
 import { useScreenTrace } from "@/lib/devTrace";
 
+// P1 STABILITY: Track auth state version to detect stale async callbacks
+let globalAuthVersion = 0;
+
 // ============================================================================
 // DEV MODE: Skip OTP entirely – auto-redirect to password step
 // In production builds, __DEV__ is false, so OTP screen works normally
@@ -41,6 +44,17 @@ export default function OTPScreen() {
   const { setAuth } = useAuthStore();
   const currentDemoUserId = useDemoStore((s) => s.currentDemoUserId);
   const demoOnboardingComplete = useDemoStore((s) => s.demoOnboardingComplete);
+
+  // P1 STABILITY: Track component mount status to prevent state updates after unmount
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    // Increment auth version on mount to invalidate stale callbacks
+    globalAuthVersion++;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   // DEV MODE: Skip OTP screen entirely – redirect to password
   if (SKIP_OTP_IN_DEV) {
@@ -81,6 +95,8 @@ export default function OTPScreen() {
 
     try {
       await sendOTP({ identifier, type: type as "email" | "phone" });
+      // P1 STABILITY: Check mount status before state updates
+      if (!mountedRef.current) return;
       setHasSentOTP(true);
       // In demo mode, show the OTP hint
       Alert.alert(
@@ -88,6 +104,8 @@ export default function OTPScreen() {
         "Check the console for your OTP code (demo mode)",
       );
     } catch (error: any) {
+      // P1 STABILITY: Check mount status before showing alert
+      if (!mountedRef.current) return;
       Alert.alert("Error", error.message || "Failed to send OTP");
     }
   };
@@ -112,26 +130,43 @@ export default function OTPScreen() {
   };
 
   const handleVerify = async () => {
+    // STABILITY FIX: Prevent double-tap race condition
+    if (isVerifying) return;
+
     const otpCode = otp.join("");
     if (otpCode.length !== VALIDATION.OTP_LENGTH) {
       Alert.alert("Invalid OTP", "Please enter the complete 6-digit code");
       return;
     }
 
+    // P1 STABILITY: Capture auth version before async work
+    const capturedAuthVersion = globalAuthVersion;
+
     setIsVerifying(true);
     try {
       const result = await verifyOTP({ identifier, code: otpCode });
+      // P1 STABILITY: Abort if unmounted or auth state changed
+      if (!mountedRef.current) return;
+      if (globalAuthVersion !== capturedAuthVersion) {
+        if (__DEV__) console.log('[OTP] Auth version changed, aborting navigation');
+        return;
+      }
       if (result.verified) {
         setStep("password");
         router.push("/(onboarding)/password");
       }
     } catch (error: any) {
+      // P1 STABILITY: Check mount status before showing alert
+      if (!mountedRef.current) return;
       Alert.alert(
         "Verification Failed",
         error.message || "Invalid OTP. Please try again.",
       );
     } finally {
-      setIsVerifying(false);
+      // P1 STABILITY: Only update state if still mounted
+      if (mountedRef.current) {
+        setIsVerifying(false);
+      }
     }
   };
 
@@ -140,9 +175,13 @@ export default function OTPScreen() {
 
     try {
       await sendOTP({ identifier, type: type as "email" | "phone" });
+      // P1 STABILITY: Check mount status before state updates
+      if (!mountedRef.current) return;
       setResendTimer(60);
       Alert.alert("OTP Sent", "A new verification code has been sent");
     } catch (error: any) {
+      // P1 STABILITY: Check mount status before showing alert
+      if (!mountedRef.current) return;
       Alert.alert("Error", error.message || "Failed to resend OTP");
     }
   };
@@ -197,6 +236,7 @@ export default function OTPScreen() {
           variant="primary"
           onPress={handleVerify}
           loading={isVerifying}
+          disabled={isVerifying}
           fullWidth
         />
       </View>

@@ -59,7 +59,8 @@ export default function LoginScreen() {
         if (onboardingComplete) {
           router.replace("/(main)/(tabs)/home");
         } else {
-          // Route to basic-info in confirm mode so user sees their info before continuing
+          // Incomplete onboarding - go directly to basic-info in confirm mode
+          // Do NOT route to welcome first (that creates a confusing loop)
           router.replace("/(onboarding)/basic-info?confirm=true" as any);
         }
       } catch (e: any) {
@@ -115,7 +116,8 @@ export default function LoginScreen() {
         if (result.onboardingCompleted) {
           router.replace("/(main)/(tabs)/home");
         } else {
-          // Route to basic-info in confirm mode so user sees their info before continuing
+          // Incomplete onboarding - go directly to basic-info in confirm mode
+          // Do NOT route to welcome first (that creates a confusing loop)
           router.replace("/(onboarding)/basic-info?confirm=true" as any);
         }
       }
