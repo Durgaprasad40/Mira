@@ -539,6 +539,90 @@ export const MOOD_TO_TOPIC: Record<ConfessionMood, ConfessionTopic> = {
   funny: 'funny',
 };
 
+// ═══════════════════════════════════════════════════════════════════════════════
+// LIFE RHYTHM (Phase-1 Onboarding - New Matching Signals)
+// ═══════════════════════════════════════════════════════════════════════════════
+
+// Social Rhythm - "What kind of social energy feels most natural to you?"
+export type SocialRhythmValue = 'quiet_homebody' | 'small_group' | 'balanced_mix' | 'very_social' | 'party_nightlife';
+export const SOCIAL_RHYTHM_PROMPT = 'What kind of social energy feels most natural to you?';
+export const SOCIAL_RHYTHM_OPTIONS: { value: SocialRhythmValue; label: string }[] = [
+  { value: 'quiet_homebody', label: 'Quiet homebody' },
+  { value: 'small_group', label: 'Small group hangouts' },
+  { value: 'balanced_mix', label: 'Balanced mix' },
+  { value: 'very_social', label: 'Very social' },
+  { value: 'party_nightlife', label: 'Party / nightlife energy' },
+];
+
+// Sleep Schedule - "What does your natural sleep schedule look like?"
+export type SleepScheduleValue = 'early_bird' | 'slightly_early' | 'flexible' | 'night_owl' | 'very_late_night';
+export const SLEEP_SCHEDULE_PROMPT = 'What does your natural sleep schedule look like?';
+export const SLEEP_SCHEDULE_OPTIONS: { value: SleepScheduleValue; label: string }[] = [
+  { value: 'early_bird', label: 'Early bird' },
+  { value: 'slightly_early', label: 'Slightly early' },
+  { value: 'flexible', label: 'Flexible' },
+  { value: 'night_owl', label: 'Night owl' },
+  { value: 'very_late_night', label: 'Very late night person' },
+];
+
+// Travel Style - "How do you usually feel about travel?" (Optional)
+export type TravelStyleValue = 'love_frequent' | 'few_trips_yearly' | 'occasional' | 'prefer_local' | 'special_reasons';
+export const TRAVEL_STYLE_PROMPT = 'How do you usually feel about travel?';
+export const TRAVEL_STYLE_OPTIONS: { value: TravelStyleValue; label: string }[] = [
+  { value: 'love_frequent', label: 'Love frequent travel' },
+  { value: 'few_trips_yearly', label: 'A few trips per year' },
+  { value: 'occasional', label: 'Occasional trips' },
+  { value: 'prefer_local', label: 'Prefer staying local' },
+  { value: 'special_reasons', label: 'Only travel for special reasons' },
+];
+
+// Work Style - "Which work-life balance fits you right now?" (Optional)
+export type WorkStyleValue = 'very_career' | 'ambitious_balanced' | 'balanced_lifestyle' | 'flexible_creative' | 'still_exploring';
+export const WORK_STYLE_PROMPT = 'Which work-life balance fits you right now?';
+export const WORK_STYLE_OPTIONS: { value: WorkStyleValue; label: string }[] = [
+  { value: 'very_career', label: 'Very career focused' },
+  { value: 'ambitious_balanced', label: 'Ambitious but balanced' },
+  { value: 'balanced_lifestyle', label: 'Balanced lifestyle' },
+  { value: 'flexible_creative', label: 'Flexible / creative work' },
+  { value: 'still_exploring', label: 'Still exploring' },
+];
+
+// Core Values - "Which qualities matter most to you in people?" (Multi-select, 1-3)
+export type CoreValueValue =
+  | 'kindness' | 'humor' | 'loyalty' | 'intelligence' | 'ambition'
+  | 'curiosity' | 'emotional_maturity' | 'honesty' | 'independence' | 'creativity'
+  | 'stability' | 'adventure' | 'discipline' | 'generosity' | 'open_mindedness';
+export const CORE_VALUES_PROMPT = 'Which qualities matter most to you in people?';
+export const CORE_VALUES_OPTIONS: { value: CoreValueValue; label: string }[] = [
+  { value: 'kindness', label: 'Kindness' },
+  { value: 'humor', label: 'Humor' },
+  { value: 'loyalty', label: 'Loyalty' },
+  { value: 'intelligence', label: 'Intelligence' },
+  { value: 'ambition', label: 'Ambition' },
+  { value: 'curiosity', label: 'Curiosity' },
+  { value: 'emotional_maturity', label: 'Emotional maturity' },
+  { value: 'honesty', label: 'Honesty' },
+  { value: 'independence', label: 'Independence' },
+  { value: 'creativity', label: 'Creativity' },
+  { value: 'stability', label: 'Stability' },
+  { value: 'adventure', label: 'Adventure' },
+  { value: 'discipline', label: 'Discipline' },
+  { value: 'generosity', label: 'Generosity' },
+  { value: 'open_mindedness', label: 'Open-mindedness' },
+];
+
+// Life Rhythm data structure for storage
+export interface LifeRhythm {
+  city: string | null;
+  socialRhythm: SocialRhythmValue | null;
+  sleepSchedule: SleepScheduleValue | null;
+  travelStyle: TravelStyleValue | null;
+  workStyle: WorkStyleValue | null;
+  coreValues: CoreValueValue[];
+}
+
+// ═══════════════════════════════════════════════════════════════════════════════
+
 // Incognito Mode Colors
 export const INCOGNITO_COLORS = {
   background: '#1A1A2E',

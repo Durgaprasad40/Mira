@@ -1727,6 +1727,9 @@ export const upsertOnboardingDraft = mutation({
       lifestyle: args.patch.lifestyle
         ? { ...existingDraft.lifestyle, ...args.patch.lifestyle }
         : existingDraft.lifestyle,
+      lifeRhythm: args.patch.lifeRhythm
+        ? { ...existingDraft.lifeRhythm, ...args.patch.lifeRhythm }
+        : existingDraft.lifeRhythm,
       preferences: args.patch.preferences
         ? { ...existingDraft.preferences, ...args.patch.preferences }
         : existingDraft.preferences,

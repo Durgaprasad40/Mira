@@ -6,6 +6,9 @@
  * - ONLY stability/bug fixes allowed IF Durga Prasad explicitly requests
  * - Do not change UX/flows without explicit unlock
  * Date locked: 2026-03-04
+ *
+ * UNLOCKED: 2026-03-14 for Life Rhythm page addition (per explicit user request)
+ * Changed navigation: lifestyle -> life-rhythm (instead of preferences)
  */
 import React, { useEffect } from "react";
 import {
@@ -172,8 +175,8 @@ export default function ProfileDetailsLifestyleScreen() {
       return;
     }
 
-    if (__DEV__) console.log('[ONB] profile-details/lifestyle → preferences');
-    router.push("/(onboarding)/preferences");
+    if (__DEV__) console.log('[ONB] profile-details/lifestyle → life-rhythm');
+    router.push("/(onboarding)/profile-details/life-rhythm");
   };
 
   const handlePrevious = () => {
