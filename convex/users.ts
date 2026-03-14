@@ -1224,6 +1224,12 @@ export const completeOnboarding = mutation({
       throw new Error("User not found");
     }
 
+    // P1 SECURITY FIX: Enforce consent acceptance before allowing onboarding completion
+    // This ensures users have explicitly accepted terms before entering the app
+    if (!user.consentAcceptedAt) {
+      throw new Error("Consent required: please accept the data consent agreement before completing onboarding");
+    }
+
     // Server-side validation: pets max 3
     if (pets !== undefined && pets.length > 3) {
       throw new Error("You can select up to 3 pets only");
@@ -1719,6 +1725,11 @@ export const getOnboardingDraft = query({
  * Upsert onboarding draft - save partial onboarding progress (live mode only).
  * Called as user fills each onboarding screen to persist their progress.
  *
+ * P1 CONCURRENCY NOTE: This mutation uses additive merge (existing + patch).
+ * Concurrent calls within a short window may still lose data if they read
+ * stale state. Convex serializes mutations per document, but rapid client
+ * calls can still race. The safest approach is to debounce client-side saves.
+ *
  * MUTATION: Can create user, uses ensureUserByAuthId.
  */
 export const upsertOnboardingDraft = mutation({
@@ -1737,23 +1748,37 @@ export const upsertOnboardingDraft = mutation({
 
     // Deep merge patch into existing onboardingDraft
     const existingDraft = user.onboardingDraft || {};
+
+    // P1 STABILITY: Warn if draft was updated very recently (potential race condition)
+    const lastUpdatedAt = existingDraft.progress?.lastUpdatedAt;
+    const now = Date.now();
+    if (lastUpdatedAt && (now - lastUpdatedAt) < 500) {
+      console.warn(`[DRAFT_RACE] Rapid draft update detected for user ${userId}: ${now - lastUpdatedAt}ms since last update`);
+    }
+
+    // P1 STABILITY: Helper to merge objects while filtering out undefined values
+    // This prevents accidentally overwriting existing values with undefined
+    const safeMerge = (existing: any, patch: any) => {
+      if (!patch) return existing;
+      const merged = { ...existing };
+      for (const [key, value] of Object.entries(patch)) {
+        if (value !== undefined) {
+          merged[key] = value;
+        }
+      }
+      return merged;
+    };
+
     const mergedDraft = {
       ...existingDraft,
-      basicInfo: args.patch.basicInfo
-        ? { ...existingDraft.basicInfo, ...args.patch.basicInfo }
-        : existingDraft.basicInfo,
-      profileDetails: args.patch.profileDetails
-        ? { ...existingDraft.profileDetails, ...args.patch.profileDetails }
-        : existingDraft.profileDetails,
-      lifestyle: args.patch.lifestyle
-        ? { ...existingDraft.lifestyle, ...args.patch.lifestyle }
-        : existingDraft.lifestyle,
-      preferences: args.patch.preferences
-        ? { ...existingDraft.preferences, ...args.patch.preferences }
-        : existingDraft.preferences,
+      basicInfo: safeMerge(existingDraft.basicInfo, args.patch.basicInfo),
+      profileDetails: safeMerge(existingDraft.profileDetails, args.patch.profileDetails),
+      lifestyle: safeMerge(existingDraft.lifestyle, args.patch.lifestyle),
+      lifeRhythm: safeMerge(existingDraft.lifeRhythm, args.patch.lifeRhythm),
+      preferences: safeMerge(existingDraft.preferences, args.patch.preferences),
       progress: {
         lastStepKey: args.patch.progress?.lastStepKey ?? existingDraft.progress?.lastStepKey,
-        lastUpdatedAt: Date.now(),
+        lastUpdatedAt: now,
       },
     };
 

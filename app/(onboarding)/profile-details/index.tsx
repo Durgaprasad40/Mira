@@ -15,6 +15,7 @@ import {
   ScrollView,
   TouchableOpacity,
   TextInput,
+  ActivityIndicator,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useRouter, useLocalSearchParams } from "expo-router";
@@ -51,6 +52,7 @@ export default function ProfileDetailsBasicScreen() {
     setReligion,
     setStep,
   } = useOnboardingStore();
+  const convexHydrated = useOnboardingStore((s) => s._convexHydrated);
   const { userId } = useAuthStore();
   const demoHydrated = useDemoStore((s) => s._hasHydrated);
   const demoProfile = useDemoStore((s) =>
@@ -65,6 +67,23 @@ export default function ProfileDetailsBasicScreen() {
 
   // Validation error state
   const [educationOtherError, setEducationOtherError] = useState<string | null>(null);
+
+  // P1 STABILITY: Prevent double-submission on rapid taps
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  // STABILITY FIX: Wait for Convex hydration before rendering form
+  // This prevents data loss when user navigates before hydration completes
+  if (!isDemoMode && !convexHydrated) {
+    return (
+      <SafeAreaView style={styles.safeArea} edges={["top"]}>
+        <OnboardingProgressHeader />
+        <View style={styles.loadingContainer}>
+          <ActivityIndicator size="large" color={COLORS.primary} />
+          <Text style={styles.loadingText}>Loading your profile...</Text>
+        </View>
+      </SafeAreaView>
+    );
+  }
 
   // Prefill from demoProfiles if onboardingStore is empty
   useEffect(() => {
@@ -106,13 +125,18 @@ export default function ProfileDetailsBasicScreen() {
     }
   }, [demoHydrated, demoProfile]);
 
-  const handleNext = () => {
+  const handleNext = async () => {
+    // P1 STABILITY: Prevent double-submission on rapid taps
+    if (isSubmitting) return;
+
     // Validate: if education is "other", educationOther must be non-empty
     if (education === 'other' && !educationOther.trim()) {
       setEducationOtherError('Please specify your education');
       return;
     }
     setEducationOtherError(null);
+
+    setIsSubmitting(true);
 
     // SAVE-AS-YOU-GO: Persist to demoProfiles immediately
     if (isDemoMode && userId) {
@@ -152,17 +176,40 @@ export default function ProfileDetailsBasicScreen() {
         profileDetails.educationOther = educationOther.trim();
       }
 
-      if (Object.keys(profileDetails).length > 0) {
-        upsertDraft({
-          userId,
-          patch: {
-            profileDetails,
-            progress: { lastStepKey: 'profile-details/basic' },
-          },
-        }).catch((error) => {
-          if (__DEV__) console.error('[PROFILE-DETAILS] Failed to save draft:', error);
+      // BUG FIX: Religion goes in lifestyle section (per Convex schema)
+      const lifestyle: Record<string, any> = {};
+      if (religion) lifestyle.religion = religion;
+
+      // DEBUG: Log religion value at save time
+      if (__DEV__) {
+        console.log('[PROFILE-DETAILS] Religion at save time:', {
+          religion,
+          religionType: typeof religion,
+          willSave: !!religion,
         });
-        if (__DEV__) console.log(`[ONB_DRAFT] Saved profile-details: ${JSON.stringify(profileDetails)}`);
+      }
+
+      const patch: Record<string, any> = {
+        progress: { lastStepKey: 'profile-details/basic' },
+      };
+      if (Object.keys(profileDetails).length > 0) {
+        patch.profileDetails = profileDetails;
+      }
+      if (Object.keys(lifestyle).length > 0) {
+        patch.lifestyle = lifestyle;
+      }
+
+      // Always save - even if just progress update
+      if (__DEV__) {
+        console.log('[PROFILE-DETAILS] Calling upsertDraft with patch:', JSON.stringify(patch));
+      }
+      try {
+        await upsertDraft({ userId, patch });
+      } catch (error) {
+        if (__DEV__) console.error('[PROFILE-DETAILS] Failed to save draft:', error);
+        // P1 STABILITY: Re-enable button on failure
+        setIsSubmitting(false);
+        return;
       }
     }
 
@@ -170,12 +217,16 @@ export default function ProfileDetailsBasicScreen() {
     if (isEditFromReview) {
       if (__DEV__) console.log('[ONB] profile-details/basic → review (editFromReview)');
       router.replace('/(onboarding)/review' as any);
+      // P1 STABILITY: Reset after navigation completes
+      setIsSubmitting(false);
       return;
     }
 
     if (__DEV__) console.log('[ONB] profile-details/basic → lifestyle');
     setStep('profile_details');
     router.push("/(onboarding)/profile-details/lifestyle");
+    // P1 STABILITY: Reset after navigation completes
+    setIsSubmitting(false);
   };
 
   const handlePrevious = () => {
@@ -195,7 +246,7 @@ export default function ProfileDetailsBasicScreen() {
         keyboardShouldPersistTaps="handled"
       >
         <Text style={styles.title}>Profile Details</Text>
-        <Text style={styles.stepIndicator}>Step 1 of 2</Text>
+        <Text style={styles.stepIndicator}>Step 1 of 3</Text>
         <Text style={styles.subtitle}>
           Share more about yourself. These details help others get to know you better.
         </Text>
@@ -339,6 +390,8 @@ export default function ProfileDetailsBasicScreen() {
             variant="primary"
             onPress={handleNext}
             fullWidth
+            loading={isSubmitting}
+            disabled={isSubmitting}
           />
           <View style={styles.navRow}>
             <TouchableOpacity style={styles.navButton} onPress={handlePrevious}>
@@ -461,5 +514,15 @@ const styles = StyleSheet.create({
     fontSize: 14,
     color: COLORS.textLight,
     fontWeight: "500",
+  },
+  loadingContainer: {
+    flex: 1,
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  loadingText: {
+    marginTop: 16,
+    fontSize: 16,
+    color: COLORS.textLight,
   },
 });
