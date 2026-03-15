@@ -10,7 +10,7 @@
  * UNLOCKED: 2026-03-14 for Life Rhythm page addition (per explicit user request)
  * Changed navigation: lifestyle -> life-rhythm (instead of preferences)
  */
-import React, { useEffect } from "react";
+import React, { useEffect, useState } from "react";
 import {
   View,
   Text,
