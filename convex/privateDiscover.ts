@@ -194,7 +194,7 @@ export const getProfiles = query({
           comparisons.push([candidateId, i, sharedRank]);
         }
 
-        logBatchRankingComparison(viewerId, comparisons);
+        logBatchRankingComparison(viewerId, comparisons, 'phase2');
       } catch {
         // Silent fail - shadow mode must never break production
       }

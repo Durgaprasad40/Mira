@@ -736,16 +736,19 @@ export function logRankingComparison(
  *
  * @param viewerId - The viewer's ID
  * @param comparisons - Array of [candidateId, oldScore, newScore] tuples
+ * @param phase - Optional phase label ('phase1' or 'phase2') for log separation
  * @returns Summary of the batch comparison
  */
 export function logBatchRankingComparison(
   viewerId: string,
-  comparisons: Array<[string, number, number]>
+  comparisons: Array<[string, number, number]>,
+  phase?: 'phase1' | 'phase2'
 ): {
   total: number;
   significant: number;
   avgDiff: number;
   maxDiff: number;
+  missing: number;
 } | null {
   // Check if we should log
   if (!shouldRunShadowComparison()) {
@@ -755,8 +758,14 @@ export function logBatchRankingComparison(
   let totalDiff = 0;
   let maxDiff = 0;
   let significant = 0;
+  let missing = 0;
 
   for (const [candidateId, oldScore, newScore] of comparisons) {
+    // newScore of -1 indicates candidate missing from shared results
+    if (newScore === -1) {
+      missing++;
+      continue;
+    }
     const diff = Math.abs(newScore - oldScore);
     totalDiff += diff;
     maxDiff = Math.max(maxDiff, diff);
@@ -765,23 +774,25 @@ export function logBatchRankingComparison(
     }
   }
 
+  const compared = comparisons.length - missing;
   const summary = {
     total: comparisons.length,
     significant,
-    avgDiff: comparisons.length > 0 ? Math.round(totalDiff / comparisons.length * 100) / 100 : 0,
+    avgDiff: compared > 0 ? Math.round(totalDiff / compared * 100) / 100 : 0,
     maxDiff,
+    missing,
   };
 
-  if (significant > 0) {
-    console.warn('[RANKING_SHADOW] Batch summary with significant diffs:', {
-      viewerId,
-      ...summary,
-    });
+  const logPayload = {
+    viewerId,
+    phase: phase ?? 'unknown',
+    ...summary,
+  };
+
+  if (significant > 0 || missing > 0) {
+    console.warn('[RANKING_SHADOW] Batch summary with issues:', logPayload);
   } else if (ENABLE_SHADOW_MODE_LOGGING) {
-    console.log('[RANKING_SHADOW] Batch summary:', {
-      viewerId,
-      ...summary,
-    });
+    console.log('[RANKING_SHADOW] Batch summary:', logPayload);
   }
 
   return summary;
