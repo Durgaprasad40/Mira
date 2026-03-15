@@ -183,6 +183,7 @@ export const getMatches = query({
 });
 
 // Get single match details
+// P0 SECURITY: Added bidirectional block check to prevent blocked users from viewing profiles
 export const getMatch = query({
   args: {
     matchId: v.id('matches'),
@@ -200,6 +201,26 @@ export const getMatch = query({
     }
 
     const otherUserId = match.user1Id === userId ? match.user2Id : match.user1Id;
+
+    // P0 SECURITY: Check if either user blocked the other
+    const [blockByMe, blockByThem] = await Promise.all([
+      ctx.db
+        .query('blocks')
+        .withIndex('by_blocker_blocked', (q) =>
+          q.eq('blockerId', userId).eq('blockedUserId', otherUserId)
+        )
+        .first(),
+      ctx.db
+        .query('blocks')
+        .withIndex('by_blocker_blocked', (q) =>
+          q.eq('blockerId', otherUserId).eq('blockedUserId', userId)
+        )
+        .first(),
+    ]);
+    if (blockByMe || blockByThem) {
+      return null; // Block exists - deny access
+    }
+
     const otherUser = await ctx.db.get(otherUserId);
 
     if (!otherUser) return null;
@@ -276,6 +297,7 @@ export const unmatch = mutation({
 });
 
 // Get new matches (for notifications)
+// P1 SECURITY: Added bidirectional block filtering
 export const getNewMatches = query({
   args: {
     userId: v.id('users'),
@@ -284,43 +306,91 @@ export const getNewMatches = query({
   handler: async (ctx, args) => {
     const { userId, since } = args;
 
-    const matchesAsUser1 = await ctx.db
-      .query('matches')
-      .withIndex('by_user1', (q) => q.eq('user1Id', userId))
-      .filter((q) =>
-        q.and(
-          q.eq(q.field('isActive'), true),
-          q.gt(q.field('matchedAt'), since)
+    const [matchesAsUser1, matchesAsUser2, myBlocks, blocksOnMe] = await Promise.all([
+      ctx.db
+        .query('matches')
+        .withIndex('by_user1', (q) => q.eq('user1Id', userId))
+        .filter((q) =>
+          q.and(
+            q.eq(q.field('isActive'), true),
+            q.gt(q.field('matchedAt'), since)
+          )
         )
-      )
-      .collect();
-
-    const matchesAsUser2 = await ctx.db
-      .query('matches')
-      .withIndex('by_user2', (q) => q.eq('user2Id', userId))
-      .filter((q) =>
-        q.and(
-          q.eq(q.field('isActive'), true),
-          q.gt(q.field('matchedAt'), since)
+        .collect(),
+      ctx.db
+        .query('matches')
+        .withIndex('by_user2', (q) => q.eq('user2Id', userId))
+        .filter((q) =>
+          q.and(
+            q.eq(q.field('isActive'), true),
+            q.gt(q.field('matchedAt'), since)
+          )
         )
-      )
-      .collect();
+        .collect(),
+      // P1 SECURITY: Fetch blocks bidirectionally
+      ctx.db
+        .query('blocks')
+        .withIndex('by_blocker', (q) => q.eq('blockerId', userId))
+        .collect(),
+      ctx.db
+        .query('blocks')
+        .withIndex('by_blocked', (q) => q.eq('blockedUserId', userId))
+        .collect(),
+    ]);
 
-    return [...matchesAsUser1, ...matchesAsUser2];
+    // Build blocked user set
+    const blockedUserIds = new Set([
+      ...myBlocks.map((b) => b.blockedUserId as string),
+      ...blocksOnMe.map((b) => b.blockerId as string),
+    ]);
+
+    // Filter out matches with blocked users
+    const allMatches = [...matchesAsUser1, ...matchesAsUser2];
+    return allMatches.filter((match) => {
+      const otherUserId = match.user1Id === userId ? match.user2Id : match.user1Id;
+      return !blockedUserIds.has(otherUserId as string);
+    });
   },
 });
 
 // Check if two users are matched
+// P1 SECURITY: Added authorization (caller must be one of the users) and block check
 export const areMatched = query({
   args: {
-    user1Id: v.id('users'),
-    user2Id: v.id('users'),
+    authUserId: v.string(), // Caller's auth ID for authorization
+    otherUserId: v.id('users'), // The other user to check match with
   },
   handler: async (ctx, args) => {
-    const { user1Id, user2Id } = args;
+    const { authUserId, otherUserId } = args;
 
-    const orderedUser1 = user1Id < user2Id ? user1Id : user2Id;
-    const orderedUser2 = user1Id < user2Id ? user2Id : user1Id;
+    // P1 SECURITY: Resolve caller's auth ID to Convex user ID
+    const callerId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!callerId) {
+      return false; // Unauthorized
+    }
+
+    // P1 SECURITY: Check if either user blocked the other
+    const [blockByMe, blockByThem] = await Promise.all([
+      ctx.db
+        .query('blocks')
+        .withIndex('by_blocker_blocked', (q) =>
+          q.eq('blockerId', callerId).eq('blockedUserId', otherUserId)
+        )
+        .first(),
+      ctx.db
+        .query('blocks')
+        .withIndex('by_blocker_blocked', (q) =>
+          q.eq('blockerId', otherUserId).eq('blockedUserId', callerId)
+        )
+        .first(),
+    ]);
+    if (blockByMe || blockByThem) {
+      return false; // Block exists
+    }
+
+    // Normalize user ordering for index lookup
+    const orderedUser1 = callerId < otherUserId ? callerId : otherUserId;
+    const orderedUser2 = callerId < otherUserId ? otherUserId : callerId;
 
     const match = await ctx.db
       .query('matches')

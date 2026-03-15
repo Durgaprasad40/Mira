@@ -81,13 +81,20 @@ export const getUnreadCount = query({
 });
 
 // Mark notification as read
+// P1 SECURITY: Use authUserId + server-side resolution to prevent spoofing
 export const markAsRead = mutation({
   args: {
     notificationId: v.id('notifications'),
-    userId: v.id('users'),
+    authUserId: v.string(),
   },
   handler: async (ctx, args) => {
-    const { notificationId, userId } = args;
+    const { notificationId, authUserId } = args;
+
+    // P1 SECURITY: Resolve auth ID server-side
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      throw new Error('Unauthorized: user not found');
+    }
 
     const notification = await ctx.db.get(notificationId);
     if (!notification || notification.userId !== userId) {
@@ -225,14 +232,21 @@ function computeDedupeKey(type: string, data?: { matchId?: string; conversationI
 }
 
 // Mark notifications by dedupeKey as read (A1 fix)
+// P1 SECURITY: Use authUserId + server-side resolution to prevent spoofing
 export const markReadByDedupeKey = mutation({
   args: {
-    userId: v.id('users'),
+    authUserId: v.string(),
     dedupeKey: v.string(),
   },
   handler: async (ctx, args) => {
-    const { userId, dedupeKey } = args;
+    const { authUserId, dedupeKey } = args;
     const now = Date.now();
+
+    // P1 SECURITY: Resolve auth ID server-side
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      throw new Error('Unauthorized: user not found');
+    }
 
     // Find unread notifications matching the dedupeKey
     const notifications = await ctx.db
@@ -257,14 +271,21 @@ export const markReadByDedupeKey = mutation({
 
 // Mark message notifications for a conversation as read (A2 fix)
 // D2/D4: Use dedupeKey index for efficient lookup instead of scanning all notifications
+// P1 SECURITY: Use authUserId + server-side resolution to prevent spoofing
 export const markReadForConversation = mutation({
   args: {
-    userId: v.id('users'),
+    authUserId: v.string(),
     conversationId: v.string(),
   },
   handler: async (ctx, args) => {
-    const { userId, conversationId } = args;
+    const { authUserId, conversationId } = args;
     const now = Date.now();
+
+    // P1 SECURITY: Resolve auth ID server-side
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      throw new Error('Unauthorized: user not found');
+    }
 
     // D2/D4: Use dedupeKey format matching messages.ts: `message:${conversationId}:unread`
     const dedupeKey = `message:${conversationId}:unread`;
@@ -287,13 +308,20 @@ export const markReadForConversation = mutation({
 });
 
 // Delete notification
+// P1 SECURITY: Use authUserId + server-side resolution to prevent spoofing
 export const deleteNotification = mutation({
   args: {
     notificationId: v.id('notifications'),
-    userId: v.id('users'),
+    authUserId: v.string(),
   },
   handler: async (ctx, args) => {
-    const { notificationId, userId } = args;
+    const { notificationId, authUserId } = args;
+
+    // P1 SECURITY: Resolve auth ID server-side
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      throw new Error('Unauthorized: user not found');
+    }
 
     const notification = await ctx.db.get(notificationId);
     if (!notification || notification.userId !== userId) {
@@ -306,12 +334,19 @@ export const deleteNotification = mutation({
 });
 
 // Delete all notifications
+// P1 SECURITY: Use authUserId + server-side resolution to prevent spoofing
 export const deleteAllNotifications = mutation({
   args: {
-    userId: v.id('users'),
+    authUserId: v.string(),
   },
   handler: async (ctx, args) => {
-    const { userId } = args;
+    const { authUserId } = args;
+
+    // P1 SECURITY: Resolve auth ID server-side
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      throw new Error('Unauthorized: user not found');
+    }
 
     const notifications = await ctx.db
       .query('notifications')

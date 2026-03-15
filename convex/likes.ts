@@ -100,6 +100,14 @@ export const swipe = mutation({
       throw new Error('Already swiped on this user');
     }
 
+    // P1 SECURITY: Block check for like/super_like actions (not just text)
+    // Prevents blocked users from liking each other and creating matches
+    if (action === 'like' || action === 'super_like') {
+      if (await isBlockedBidirectional(ctx, fromUserId, toUserId)) {
+        throw new Error('Cannot like this user');
+      }
+    }
+
     // Record the like
     await ctx.db.insert('likes', {
       fromUserId,
