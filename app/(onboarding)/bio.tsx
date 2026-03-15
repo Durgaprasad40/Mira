@@ -36,6 +36,9 @@ export default function BioScreen() {
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [showTopError, setShowTopError] = useState(false);
 
+  // P0 STABILITY: Prevent double-submission on rapid taps
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
   // Refs for scroll-to-invalid behavior
   const scrollRef = useRef<ScrollView>(null);
   const bioInputRef = useRef<TextInput>(null);
@@ -57,6 +60,9 @@ export default function BioScreen() {
   };
 
   const handleNext = () => {
+    // P0 STABILITY: Prevent double-tap
+    if (isSubmitting) return;
+
     // Run validation
     const result = validateRequired({ bio }, validationRules);
 
@@ -67,6 +73,8 @@ export default function BioScreen() {
       scrollToFirstInvalid(scrollRef, { bio: bioInputRef }, result.firstInvalidKey as string);
       return;
     }
+
+    setIsSubmitting(true);
 
     // Clear errors and proceed
     setErrors({});
@@ -99,6 +107,7 @@ export default function BioScreen() {
     if (__DEV__) console.log('[ONB] bio → permissions (continue)');
     setStep('permissions');
     router.push('/(onboarding)/permissions' as any);
+    setIsSubmitting(false);
   };
 
   // Clear field error when user types

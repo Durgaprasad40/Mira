@@ -73,6 +73,9 @@ export default function ProfileDetailsLifestyleScreen() {
   // CENTRAL EDIT HUB: Detect if editing from Review screen
   const isEditFromReview = params.editFromReview === 'true';
 
+  // P0 STABILITY: Prevent double-submission on rapid taps
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
   // STABILITY FIX: Wait for Convex hydration before rendering form
   // This prevents data loss when user navigates before hydration completes
   if (!isDemoMode && !convexHydrated) {
@@ -120,6 +123,10 @@ export default function ProfileDetailsLifestyleScreen() {
   }, [demoHydrated, demoProfile]);
 
   const handleNext = () => {
+    // P0 STABILITY: Prevent double-tap
+    if (isSubmitting) return;
+    setIsSubmitting(true);
+
     // SAVE-AS-YOU-GO: Persist to demoProfiles immediately
     if (isDemoMode && userId) {
       const demoStore = useDemoStore.getState();
@@ -172,11 +179,13 @@ export default function ProfileDetailsLifestyleScreen() {
     if (isEditFromReview) {
       if (__DEV__) console.log('[ONB] profile-details/lifestyle → review (editFromReview)');
       router.replace('/(onboarding)/review' as any);
+      setIsSubmitting(false);
       return;
     }
 
     if (__DEV__) console.log('[ONB] profile-details/lifestyle → life-rhythm');
     router.push("/(onboarding)/profile-details/life-rhythm");
+    setIsSubmitting(false);
   };
 
   const handlePrevious = () => {

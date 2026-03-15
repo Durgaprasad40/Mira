@@ -75,6 +75,9 @@ export default function PromptsPart1Screen() {
     seedQuestions.valueTrigger
   );
 
+  // P0 STABILITY: Prevent double-submission on rapid taps
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
   // STABILITY FIX: Sync from store AFTER Convex hydration completes
   // This ensures previously entered values are visible when user returns
   useEffect(() => {
@@ -102,7 +105,9 @@ export default function PromptsPart1Screen() {
     valueTrigger !== null;
 
   const handleContinue = async () => {
-    if (!canContinue) return;
+    // P0 STABILITY: Prevent double-tap
+    if (!canContinue || isSubmitting) return;
+    setIsSubmitting(true);
 
     // Save to store
     setIdentityAnchor(identityAnchor);
@@ -140,6 +145,7 @@ export default function PromptsPart1Screen() {
       setStep('prompts_part2');
       router.push('/(onboarding)/prompts-part2' as any);
     }
+    setIsSubmitting(false);
   };
 
   const handlePrevious = () => {

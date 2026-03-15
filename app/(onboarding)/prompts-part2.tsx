@@ -85,6 +85,9 @@ export default function PromptsPart2Screen() {
   // Level 3: Only ONE question input can be open at a time
   const [activeQuestionId, setActiveQuestionId] = useState<string | null>(null);
 
+  // P0 STABILITY: Prevent double-submission on rapid taps
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
   // Local answers state for immediate feedback
   const [localAnswers, setLocalAnswers] = useState<Record<PromptSectionKey, Record<string, string>>>({
     builder: {},
@@ -173,7 +176,9 @@ export default function PromptsPart2Screen() {
   };
 
   const handleContinue = async () => {
-    if (!canContinue) return;
+    // P0 STABILITY: Prevent double-tap
+    if (!canContinue || isSubmitting) return;
+    setIsSubmitting(true);
 
     // Build sectionPrompts data for saving
     const sectionPromptsData: Record<string, { question: string; answer: string }[]> = {
@@ -230,6 +235,7 @@ export default function PromptsPart2Screen() {
       setStep('profile_details');
       router.push('/(onboarding)/profile-details' as any);
     }
+    setIsSubmitting(false);
   };
 
   const handlePrevious = () => {

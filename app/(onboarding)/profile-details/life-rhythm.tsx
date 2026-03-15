@@ -99,6 +99,9 @@ export default function LifeRhythmScreen() {
   const [isDetectingLocation, setIsDetectingLocation] = useState(false);
   const [locationError, setLocationError] = useState<string | null>(null);
 
+  // P0 STABILITY: Prevent double-submission on rapid taps
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
   // STABILITY FIX: Sync from store AFTER Convex hydration completes
   useEffect(() => {
     if (!isDemoMode && convexHydrated) {
@@ -201,7 +204,9 @@ export default function LifeRhythmScreen() {
     coreValues.length >= 1;
 
   const handleNext = () => {
-    if (!canContinue) return;
+    // P0 STABILITY: Prevent double-tap
+    if (!canContinue || isSubmitting) return;
+    setIsSubmitting(true);
 
     // Save to store
     setLifeRhythmCity(city.trim());
@@ -255,6 +260,7 @@ export default function LifeRhythmScreen() {
       setStep("life_rhythm");
       router.push("/(onboarding)/preferences" as any);
     }
+    setIsSubmitting(false);
   };
 
   const handlePrevious = () => {
