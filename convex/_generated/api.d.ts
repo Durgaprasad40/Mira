@@ -25,6 +25,7 @@ import type * as dares from "../dares.js";
 import type * as devReset from "../devReset.js";
 import type * as deviceFingerprint from "../deviceFingerprint.js";
 import type * as discover from "../discover.js";
+import type * as discoverRanking from "../discoverRanking.js";
 import type * as emailActions from "../emailActions.js";
 import type * as events from "../events.js";
 import type * as faceVerification from "../faceVerification.js";
@@ -85,6 +86,7 @@ declare const fullApi: ApiFromModules<{
   devReset: typeof devReset;
   deviceFingerprint: typeof deviceFingerprint;
   discover: typeof discover;
+  discoverRanking: typeof discoverRanking;
   emailActions: typeof emailActions;
   events: typeof events;
   faceVerification: typeof faceVerification;
