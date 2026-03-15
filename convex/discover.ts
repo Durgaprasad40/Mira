@@ -642,9 +642,9 @@ export const getExploreProfiles = query({
       blocksICreated,
       blocksAgainstMe,
     ] = await Promise.all([
-      // P1 FIX: Use take() with verified users index instead of full collect()
+      // P0 FIX: Remove verification hard-filter - verification is a ranking boost, not exclusion
+      // Use take() with buffer for efficiency without filtering by verification status
       ctx.db.query('users')
-        .withIndex('by_verification_status', (q) => q.eq('verificationStatus', 'verified'))
         .take(fetchLimit),
       // All my swipes (likes/passes)
       ctx.db
@@ -701,7 +701,7 @@ export const getExploreProfiles = query({
       if (user._id === userId) continue;
       if (!user.isActive || user.isBanned) continue;
       if (isUserPaused(user)) continue;
-      // Note: verification check removed - already filtered by index (by_verification_status)
+      // P0 FIX: Verification is a ranking boost, not a hard filter - no verification check here
 
       if (!effectiveGender.includes(user.gender)) continue;
 
@@ -840,9 +840,8 @@ export const getFilterCounts = query({
       if (isUserPaused(user)) continue;
       if (!currentUser.lookingFor.includes(user.gender)) continue;
 
-      // 9-7: Exclude unverified users from filter counts to match discovery queries
-      const verificationStatus = user.verificationStatus || 'unverified';
-      if (verificationStatus !== 'verified') continue;
+      // P0 FIX: Verification is a ranking boost, not a hard filter
+      // Removed verification check - unverified users are included in counts
 
       const userAge = calculateAge(user.dateOfBirth);
       if (userAge < currentUser.minAge || userAge > currentUser.maxAge) continue;
