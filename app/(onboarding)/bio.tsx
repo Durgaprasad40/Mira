@@ -8,7 +8,7 @@
  * Date locked: 2026-03-04
  */
 import React, { useState, useRef, useEffect } from 'react';
-import { View, Text, StyleSheet, ScrollView, TextInput, TouchableOpacity } from 'react-native';
+import { View, Text, StyleSheet, ScrollView, TextInput, TouchableOpacity, Alert } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { COLORS, VALIDATION } from '@/lib/constants';
@@ -36,6 +36,9 @@ export default function BioScreen() {
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [showTopError, setShowTopError] = useState(false);
 
+  // P0 STABILITY: Prevent double-submission on rapid taps
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
   // Refs for scroll-to-invalid behavior
   const scrollRef = useRef<ScrollView>(null);
   const bioInputRef = useRef<TextInput>(null);
@@ -56,7 +59,10 @@ export default function BioScreen() {
     ),
   };
 
-  const handleNext = () => {
+  const handleNext = async () => {
+    // P0 STABILITY: Prevent double-tap
+    if (isSubmitting) return;
+
     // Run validation
     const result = validateRequired({ bio }, validationRules);
 
@@ -67,6 +73,8 @@ export default function BioScreen() {
       scrollToFirstInvalid(scrollRef, { bio: bioInputRef }, result.firstInvalidKey as string);
       return;
     }
+
+    setIsSubmitting(true);
 
     // Clear errors and proceed
     setErrors({});
@@ -80,17 +88,26 @@ export default function BioScreen() {
     }
 
     // LIVE MODE: Persist bio to onboarding draft in Convex
+    // P1 STABILITY: Await and handle failure with user-visible alert
     if (!isDemoMode && userId && bio.trim()) {
-      upsertDraft({
-        userId: userId as any,
-        patch: {
-          profileDetails: { bio: bio.trim() },
-          progress: { lastStepKey: 'bio' },
-        },
-      }).catch((error) => {
+      try {
+        await upsertDraft({
+          userId: userId as any,
+          patch: {
+            profileDetails: { bio: bio.trim() },
+            progress: { lastStepKey: 'bio' },
+          },
+        });
+        if (__DEV__) console.log(`[ONB_DRAFT] Saved bio: ${bio.trim().length} chars`);
+      } catch (error) {
         if (__DEV__) console.error('[BIO] Failed to save draft:', error);
-      });
-      if (__DEV__) console.log(`[ONB_DRAFT] Saved bio: ${bio.trim().length} chars`);
+        // P1 STABILITY: Alert user but allow continue (non-blocking)
+        Alert.alert(
+          'Save Warning',
+          'Your bio could not be saved to the server. You can continue, but please check your connection.',
+          [{ text: 'OK' }]
+        );
+      }
     }
 
     // TODO: Profanity filter check
@@ -99,6 +116,7 @@ export default function BioScreen() {
     if (__DEV__) console.log('[ONB] bio → permissions (continue)');
     setStep('permissions');
     router.push('/(onboarding)/permissions' as any);
+    setIsSubmitting(false);
   };
 
   // Clear field error when user types

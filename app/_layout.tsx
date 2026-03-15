@@ -474,14 +474,24 @@ function SessionValidator() {
  * - READ-ONLY: Only reads from backend, writes to local cache
  * - Does NOT upload or modify backend data
  * - Runs AFTER hydration completes
+ *
+ * P2 STABILITY:
+ * - Uses _hasHydrated for Convex hydration readiness
+ * - Adds 10s timeout fallback to prevent infinite wait if hydration hangs
  */
+// P2 STABILITY: Hydration timeout constant
+const HYDRATION_TIMEOUT_MS = 10000;
+
 function PhotoSyncManager() {
   const userId = useAuthStore((s) => s.userId);
   const authHydrated = useAuthStore((s) => s._hasHydrated);
-  const onboardingHydrated = useOnboardingStore((s) => s._hasHydrated);
+  // P2 STABILITY FIX: Use _hasHydrated for Convex hydration readiness
+  const convexHydrated = useOnboardingStore((s) => s._hasHydrated);
   const demoHydrated = useDemoStore((s) => s._hasHydrated);
   const hasSyncedRef = useRef(false);
   const hasEnsuredUserRef = useRef<string | null>(null);
+  // P2 STABILITY: Track hydration timeout
+  const [hydrationTimedOut, setHydrationTimedOut] = useState(false);
   const ensureUser = useMutation(api.users.ensureCurrentUser);
 
   // TASK C: Bootstrap - Ensure Convex user record exists BEFORE any queries run
@@ -513,9 +523,26 @@ function PhotoSyncManager() {
     })();
   }, [userId, authHydrated, ensureUser]);
 
+  // P2 STABILITY: Hydration timeout fallback - don't wait forever
+  useEffect(() => {
+    // Only set timeout if not already hydrated and not in demo mode
+    if (isDemoMode || convexHydrated || hydrationTimedOut) return;
+
+    const timer = setTimeout(() => {
+      if (!useOnboardingStore.getState()._hasHydrated) {
+        console.warn('[PHOTO_SYNC] Convex hydration timeout after', HYDRATION_TIMEOUT_MS, 'ms - proceeding anyway');
+        setHydrationTimedOut(true);
+      }
+    }, HYDRATION_TIMEOUT_MS);
+
+    return () => clearTimeout(timer);
+  }, [convexHydrated, hydrationTimedOut]);
+
   useEffect(() => {
     // Wait for all stores to hydrate
-    if (!authHydrated || !onboardingHydrated || !demoHydrated) return;
+    // P2 STABILITY FIX: Use convexHydrated (or timeout) instead of legacy _hasHydrated
+    const onboardingReady = isDemoMode || convexHydrated || hydrationTimedOut;
+    if (!authHydrated || !onboardingReady || !demoHydrated) return;
 
     // Only sync once
     if (hasSyncedRef.current) return;
@@ -525,7 +552,7 @@ function PhotoSyncManager() {
     if (userId) {
       autoSyncPhotosOnStartup(userId);
     }
-  }, [userId, authHydrated, onboardingHydrated, demoHydrated]);
+  }, [userId, authHydrated, convexHydrated, demoHydrated, hydrationTimedOut]);
 
   return null;
 }
@@ -553,6 +580,13 @@ function OnboardingDraftHydrator() {
   const setFaceVerificationPassed = useAuthStore((s) => s.setFaceVerificationPassed);
   const setFaceVerificationPending = useAuthStore((s) => s.setFaceVerificationPending);
   const hasHydratedRef = useRef(false);
+  // P0 FIX: Add mounted guard to prevent setState after unmount
+  const mountedRef = useRef(true);
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
 
   // BUG FIX: Use getOnboardingStatus to get comprehensive data including basicInfo from user document
   const onboardingStatus = useQuery(
@@ -564,7 +598,11 @@ function OnboardingDraftHydrator() {
 
   useEffect(() => {
     // Only in production mode (not demo)
-    if (isDemoMode) return;
+    if (isDemoMode) {
+      // Demo mode doesn't use Convex for onboarding draft, mark as hydrated immediately
+      useOnboardingStore.getState().setConvexHydrated();
+      return;
+    }
 
     // Wait for auth and onboarding stores to hydrate
     if (!authHydrated || !onboardingHydrated || !userId) return;
@@ -574,22 +612,47 @@ function OnboardingDraftHydrator() {
 
     // Only hydrate once per session
     if (hasHydratedRef.current) return;
-    hasHydratedRef.current = true;
 
+    // P0 FIX #1: Check mounted before proceeding
+    if (!mountedRef.current) return;
+
+    // P0 FIX #1: If no status found, mark hydration complete so screens don't wait indefinitely
     if (!onboardingStatus) {
       if (__DEV__) console.log('[ONB_DRAFT] No onboarding status found');
+      // No status, but hydration attempt complete - mark as hydrated so screens don't wait
+      hydrateFromDraft(null);
       return;
     }
 
-    // BUG FIX: Hydrate basicInfo from user document (authoritative source)
-    // This fixes "Not set" issue on Review screen
+    // P0 FIX #2: STEP 1 - Hydrate from draft FIRST (resets store, applies draft data)
+    // This must happen BEFORE user doc hydration so user doc can override stale draft data
+    if (onboardingStatus.onboardingDraft) {
+      const draft = onboardingStatus.onboardingDraft;
+      const draftKeys = Object.keys(draft).filter(
+        key => (draft as any)[key] != null
+      );
+      if (__DEV__) {
+        console.log(`[BASIC_HYDRATE] source=draft fields=${JSON.stringify(draftKeys)}`);
+      }
+      hydrateFromDraft(draft);
+    } else {
+      if (__DEV__) {
+        console.log('[ONB_DRAFT] No draft found in Convex');
+      }
+      // Still call hydrateFromDraft with null to reset state properly
+      hydrateFromDraft(null);
+    }
+
+    // P0 FIX #2: STEP 2 - Apply user document data AFTER draft (user doc is authoritative)
+    // This overrides any stale draft data with the canonical user record
     if (onboardingStatus.basicInfo) {
       const { name, nickname, dateOfBirth, gender } = onboardingStatus.basicInfo;
       const store = useOnboardingStore.getState();
       const hydratedFields: string[] = [];
 
-      // Parse backend 'name' into firstName/lastName
-      if (name && (!store.firstName && !store.lastName)) {
+      // P0 FIX #2: Always apply user doc data if present (user doc is authoritative, not draft)
+      // Remove the check for empty store fields - user doc should always win
+      if (name) {
         const parts = name.trim().split(/\s+/);
         if (parts.length === 1) {
           store.setFirstName(parts[0]);
@@ -600,16 +663,16 @@ function OnboardingDraftHydrator() {
         }
         hydratedFields.push('firstName', 'lastName');
       }
-      if (nickname && !store.nickname) {
+      if (nickname) {
         store.setNickname(nickname);
         hydratedFields.push('nickname');
       }
-      if (dateOfBirth && !store.dateOfBirth) {
+      if (dateOfBirth) {
         store.setDateOfBirth(dateOfBirth);
         hydratedFields.push('dateOfBirth');
       }
       // Type guard: only set gender if it's a valid Gender type
-      if (gender && !store.gender) {
+      if (gender) {
         const validGenders = ['male', 'female', 'non_binary'];
         if (validGenders.includes(gender)) {
           store.setGender(gender as any);
@@ -618,7 +681,7 @@ function OnboardingDraftHydrator() {
       }
 
       if (__DEV__ && hydratedFields.length > 0) {
-        console.log(`[BASIC_HYDRATE] source=user fields=${JSON.stringify(hydratedFields)}`);
+        console.log(`[BASIC_HYDRATE] source=user (authoritative) fields=${JSON.stringify(hydratedFields)}`);
       }
     }
 
@@ -638,9 +701,6 @@ function OnboardingDraftHydrator() {
       const store = useOnboardingStore.getState();
       // Only hydrate if not already set (don't overwrite user changes)
       if (!store.verificationReferencePrimary) {
-        // Note: verificationReferencePhotoUrl might not be in onboarding status
-        // We'll need to get it from the user query or construct it
-        // For now, we'll fetch it when needed in the UI
         store.setVerificationReferencePrimary({
           storageId: onboardingStatus.verificationReferencePhotoId,
           url: '', // Will be fetched in UI via getUrl() if needed
@@ -655,21 +715,9 @@ function OnboardingDraftHydrator() {
       }
     }
 
-    // Hydrate onboardingStore from draft if draft exists
-    if (onboardingStatus.onboardingDraft) {
-      const draft = onboardingStatus.onboardingDraft;
-      const draftKeys = Object.keys(draft).filter(
-        key => (draft as any)[key] != null
-      );
-      if (__DEV__) {
-        console.log(`[BASIC_HYDRATE] source=draft fields=${JSON.stringify(draftKeys)}`);
-      }
-      hydrateFromDraft(draft);
-    } else {
-      if (__DEV__) {
-        console.log('[ONB_DRAFT] No draft found in Convex');
-      }
-    }
+    // P0 FIX #1: Only mark hydration complete AFTER all steps succeed
+    hasHydratedRef.current = true;
+    if (__DEV__) console.log('[ONB_DRAFT] Hydration complete');
   }, [userId, authHydrated, onboardingHydrated, onboardingStatus, hydrateFromDraft, setFaceVerificationPassed, setFaceVerificationPending]);
 
   return null;

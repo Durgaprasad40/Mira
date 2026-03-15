@@ -2,6 +2,14 @@ import { v } from 'convex/values';
 import { query } from './_generated/server';
 import { Id } from './_generated/dataModel';
 import { resolveUserIdByAuthId, ensureUserByAuthId } from './helpers';
+import {
+  CandidateProfile,
+  CurrentUser,
+  TrustSignals,
+  rankDiscoverCandidates,
+  qualifiesForFallback,
+  DISCOVER_RANKING_CONFIG,
+} from './discoverRanking';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -180,50 +188,8 @@ function rotationScore(viewerId: string, candidateId: string): number {
   return Math.abs(h) % 101; // 0–100
 }
 
-/** Combined weighted score. */
-function rankScore(
-  candidate: {
-    id: string;
-    lastActive: number;
-    bio: string;
-    profilePrompts?: { question: string; answer: string }[];
-    activities: string[];
-    relationshipIntent: string[];
-    isVerified: boolean;
-    city?: string;
-    height?: number;
-    jobTitle?: string;
-    education?: string;
-    theyLikedMe: boolean;
-    isBoosted: boolean;
-    photoCount: number;
-  },
-  currentUser: {
-    _id: string;
-    city?: string;
-    activities: string[];
-    relationshipIntent: string[];
-  },
-): number {
-  const activity    = activityScore(candidate.lastActive);
-  const complete    = completenessScore(candidate, candidate.photoCount);
-  const preference  = preferenceMatchScore(candidate, currentUser);
-  const rotation    = rotationScore(currentUser._id as string, candidate.id);
-
-  let score =
-    0.45 * activity +
-    0.35 * complete +
-    0.15 * preference +
-    0.05 * rotation;
-
-  // Bonus: they already liked the viewer — surface them first
-  if (candidate.theyLikedMe) score += 50;
-
-  // Bonus: currently boosted
-  if (candidate.isBoosted) score += 30;
-
-  return score;
-}
+// NOTE: Old rankScore function removed (P1 dead code cleanup)
+// New ranking system in discoverRanking.ts is now the only scoring logic
 
 // ---------------------------------------------------------------------------
 // getDiscoverProfiles — main swipe deck query
@@ -272,6 +238,9 @@ export const getDiscoverProfiles = query({
       blocksICreated,
       blocksAgainstMe,
       likesToMe,
+      myReports,
+      allReports,
+      allBlocks,
     ] = await Promise.all([
       // All my swipes (likes/passes)
       ctx.db
@@ -306,6 +275,19 @@ export const getDiscoverProfiles = query({
         .withIndex('by_to_user', (q) => q.eq('toUserId', userId))
         .filter((q) => q.eq(q.field('action'), 'like'))
         .collect(),
+      // Reports I created (viewer-specific hard exclusion)
+      ctx.db
+        .query('reports')
+        .withIndex('by_reporter', (q) => q.eq('reporterId', userId))
+        .collect(),
+      // All reports (for aggregate trust penalty - limited query)
+      ctx.db
+        .query('reports')
+        .take(1000),
+      // All blocks (for aggregate trust penalty - limited query)
+      ctx.db
+        .query('blocks')
+        .take(2000),
     ]);
 
     // Build Sets for O(1) lookups
@@ -327,6 +309,24 @@ export const getDiscoverProfiles = query({
     const usersWhoLikedMe = new Set<string>();
     for (const like of likesToMe) usersWhoLikedMe.add(like.fromUserId as string);
 
+    // TRUST SIGNALS: Viewer-specific reports (hard exclusion)
+    const viewerReportedIds = new Set<string>();
+    for (const report of myReports) viewerReportedIds.add(report.reportedUserId as string);
+
+    // TRUST SIGNALS: Aggregate report counts per user (soft penalty)
+    const aggregateReportCounts = new Map<string, number>();
+    for (const report of allReports) {
+      const targetId = report.reportedUserId as string;
+      aggregateReportCounts.set(targetId, (aggregateReportCounts.get(targetId) || 0) + 1);
+    }
+
+    // TRUST SIGNALS: Aggregate block counts per user (soft penalty)
+    const aggregateBlockCounts = new Map<string, number>();
+    for (const block of allBlocks) {
+      const targetId = block.blockedUserId as string;
+      aggregateBlockCounts.set(targetId, (aggregateBlockCounts.get(targetId) || 0) + 1);
+    }
+
     // PERF #8: Use take() with buffer to avoid loading entire user table
     // Fetch more than needed since many will be filtered out
     const fetchLimit = (offset + limit) * 10; // 10x buffer for filtering
@@ -340,9 +340,8 @@ export const getDiscoverProfiles = query({
       if (!user.isActive || user.isBanned) continue;
       if (isUserPaused(user)) continue;
 
-      // 8A: Filter out unverified/rejected users from Discover
-      const verificationStatus = user.verificationStatus || 'unverified';
-      if (verificationStatus !== 'verified') continue;
+      // NOTE: Verification is NOT a hard filter - it's a ranking boost
+      // Unverified users appear lower in ranking, not excluded
 
       // Incognito check
       if (user.incognitoMode) {
@@ -374,6 +373,8 @@ export const getDiscoverProfiles = query({
       if (swipedUserIds.has(user._id as string)) continue;
       if (matchedUserIds.has(user._id as string)) continue;
       if (blockedUserIds.has(user._id as string)) continue;
+      // TRUST: Viewer-specific report exclusion (hard filter)
+      if (viewerReportedIds.has(user._id as string)) continue;
 
       // Enforcement
       if (user.verificationEnforcementLevel === 'security_only') continue;
@@ -441,7 +442,99 @@ export const getDiscoverProfiles = query({
 
     // Sort
     if (sortBy === 'recommended') {
-      candidates.sort((a, b) => rankScore(b, currentUser) - rankScore(a, currentUser));
+      // NEW RANKING: Use Phase-1 Discover ranking system
+      const trustSignals: TrustSignals = {
+        viewerBlockedIds: blockedUserIds,
+        viewerReportedIds,
+        aggregateReportCounts,
+        aggregateBlockCounts,
+      };
+
+      // Build CurrentUser object for ranking
+      const rankingCurrentUser: CurrentUser = {
+        _id: currentUser._id as string,
+        city: currentUser.city,
+        activities: currentUser.activities,
+        relationshipIntent: currentUser.relationshipIntent,
+        lookingFor: currentUser.lookingFor,
+        minAge: currentUser.minAge,
+        maxAge: currentUser.maxAge,
+        maxDistance: currentUser.maxDistance,
+        smoking: currentUser.smoking,
+        drinking: currentUser.drinking,
+        religion: currentUser.religion,
+        kids: currentUser.kids,
+        // Life rhythm from onboarding draft (if available)
+        lifeRhythm: currentUser.onboardingDraft?.lifeRhythm,
+        // Seed questions from onboarding draft (if available)
+        seedQuestions: currentUser.onboardingDraft?.profileDetails?.seedQuestions,
+      };
+
+      // Map candidates to CandidateProfile format
+      const candidateProfiles: CandidateProfile[] = candidates.map(c => ({
+        id: c.id as string,
+        name: c.name,
+        age: c.age,
+        gender: c.gender,
+        bio: c.bio,
+        city: c.city,
+        distance: c.distance,
+        lastActive: c.lastActive,
+        createdAt: c.createdAt,
+        isVerified: c.isVerified,
+        lookingFor: c.lookingFor,
+        relationshipIntent: c.relationshipIntent,
+        activities: c.activities,
+        profilePrompts: c.profilePrompts,
+        height: c.height,
+        jobTitle: c.jobTitle,
+        education: c.education,
+        smoking: c.smoking,
+        drinking: c.drinking,
+        religion: c.religion,
+        kids: c.kids,
+        photoCount: c.photoCount,
+        theyLikedMe: c.theyLikedMe,
+        isBoosted: c.isBoosted,
+      }));
+
+      // Apply new ranking with exploration mix
+      const { rankedCandidates, exhausted } = rankDiscoverCandidates(
+        candidateProfiles,
+        rankingCurrentUser,
+        trustSignals,
+        limit,
+        false // useFallback flag - fallback logic handled below
+      );
+
+      // Map back to original candidate format (preserve photos, etc.)
+      const rankedIds = new Set(rankedCandidates.map(c => c.id));
+      const rankedMap = new Map(rankedCandidates.map((c, i) => [c.id, i]));
+      let result = candidates
+        .filter(c => rankedIds.has(c.id as string))
+        .sort((a, b) => (rankedMap.get(a.id as string) || 0) - (rankedMap.get(b.id as string) || 0));
+
+      // P1 FIX: Fallback mechanism when primary pool is exhausted
+      // If we have fewer results than requested, activate fallback pool
+      // Fallback candidates must have 2+ compatibility signals
+      if (exhausted && result.length < limit) {
+        const needed = limit - result.length;
+        const usedIds = new Set(result.map(r => r.id as string));
+
+        // Find candidates not already in result that qualify for fallback
+        const fallbackCandidates = candidateProfiles
+          .filter(c => !usedIds.has(c.id) && qualifiesForFallback(c, rankingCurrentUser))
+          .slice(0, needed);
+
+        // Map fallback candidates back to original format
+        const fallbackIds = new Set(fallbackCandidates.map(c => c.id));
+        const fallbackResults = candidates.filter(c => fallbackIds.has(c.id as string));
+
+        // Append fallback results (they appear after ranked results)
+        result = [...result, ...fallbackResults];
+      }
+
+      return result.slice(offset, offset + limit);
     } else {
       candidates.sort((a, b) => {
         // Boosted first
@@ -527,9 +620,9 @@ export const getExploreProfiles = query({
       blocksICreated,
       blocksAgainstMe,
     ] = await Promise.all([
-      // P1 FIX: Use take() with verified users index instead of full collect()
+      // P0 FIX: Remove verification hard-filter - verification is a ranking boost, not exclusion
+      // Use take() with buffer for efficiency without filtering by verification status
       ctx.db.query('users')
-        .withIndex('by_verification_status', (q) => q.eq('verificationStatus', 'verified'))
         .take(fetchLimit),
       // All my swipes (likes/passes)
       ctx.db
@@ -586,7 +679,7 @@ export const getExploreProfiles = query({
       if (user._id === userId) continue;
       if (!user.isActive || user.isBanned) continue;
       if (isUserPaused(user)) continue;
-      // Note: verification check removed - already filtered by index (by_verification_status)
+      // P0 FIX: Verification is a ranking boost, not a hard filter - no verification check here
 
       if (!effectiveGender.includes(user.gender)) continue;
 
@@ -725,9 +818,8 @@ export const getFilterCounts = query({
       if (isUserPaused(user)) continue;
       if (!currentUser.lookingFor.includes(user.gender)) continue;
 
-      // 9-7: Exclude unverified users from filter counts to match discovery queries
-      const verificationStatus = user.verificationStatus || 'unverified';
-      if (verificationStatus !== 'verified') continue;
+      // P0 FIX: Verification is a ranking boost, not a hard filter
+      // Removed verification check - unverified users are included in counts
 
       const userAge = calculateAge(user.dateOfBirth);
       if (userAge < currentUser.minAge || userAge > currentUser.maxAge) continue;

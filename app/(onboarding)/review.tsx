@@ -6,6 +6,8 @@
  * - ONLY stability/bug fixes allowed IF Durga Prasad explicitly requests
  * - Do not change UX/flows without explicit unlock
  * Date locked: 2026-03-04
+ *
+ * UNLOCKED: 2026-03-14 for Life Rhythm section addition (per explicit user request)
  */
 import React, { useState, useCallback, useRef, useEffect } from "react";
 import {
@@ -32,6 +34,18 @@ import {
   PETS_OPTIONS,
   EDUCATION_OPTIONS,
   RELIGION_OPTIONS,
+  IDENTITY_ANCHOR_OPTIONS,
+  SOCIAL_BATTERY_LEFT_LABEL,
+  SOCIAL_BATTERY_RIGHT_LABEL,
+  VALUE_TRIGGER_OPTIONS,
+  SECTION_LABELS,
+  PromptSectionKey,
+  // Life Rhythm
+  SOCIAL_RHYTHM_OPTIONS,
+  SLEEP_SCHEDULE_OPTIONS,
+  TRAVEL_STYLE_OPTIONS,
+  WORK_STYLE_OPTIONS,
+  CORE_VALUES_OPTIONS,
 } from "@/lib/constants";
 import { Button } from "@/components/ui";
 import { useOnboardingStore, LGBTQ_OPTIONS } from "@/stores/onboardingStore";
@@ -124,10 +138,13 @@ export default function ReviewScreen() {
     jobTitle,
     company,
     school,
+    lifeRhythm,
     lookingFor,
     relationshipIntent,
     activities,
     profilePrompts,
+    seedQuestions,
+    sectionPrompts,
     minAge,
     maxAge,
     maxDistance,
@@ -310,6 +327,8 @@ export default function ReviewScreen() {
           relationshipIntent: sanitizeRelationshipIntent(relationshipIntent as string[]),
           activities: activities as string[],
           profilePrompts,
+          seedQuestions,
+          sectionPrompts,
           minAge,
           maxAge,
           maxDistance,
@@ -401,6 +420,9 @@ export default function ReviewScreen() {
         minAge,
         maxAge,
         maxDistance,
+        // FIX: Add missing fields from demo mode payload
+        profilePrompts: profilePrompts.length > 0 ? profilePrompts : undefined,
+        lgbtqSelf: lgbtqSelf.length > 0 ? lgbtqSelf : undefined,
         // photoStorageIds omitted - photos already uploaded in additional-photos screen
       };
 
@@ -625,23 +647,78 @@ export default function ReviewScreen() {
         <Text style={styles.bioText}>{bio || demoProfile?.bio || "No bio added"}</Text>
       </View>
 
-      {/* Prompts Section */}
+      {/* Prompts Section (New 2-Page System) */}
       <View style={styles.section}>
         <View style={styles.sectionHeader}>
-          <Text style={styles.sectionTitle}>Prompts</Text>
+          <Text style={styles.sectionTitle}>About You</Text>
           <TouchableOpacity onPress={() => handleEdit("prompts")}>
             <Text style={styles.editLink}>Edit</Text>
           </TouchableOpacity>
         </View>
-        {(profilePrompts.length > 0 || (demoProfile?.profilePrompts && demoProfile.profilePrompts.length > 0)) ? (
-          (profilePrompts.length > 0 ? profilePrompts : demoProfile?.profilePrompts || []).map((prompt, index) => (
-            <View key={index} style={styles.promptItem}>
-              <Text style={styles.promptQuestion}>{prompt.question}</Text>
-              <Text style={styles.promptAnswer}>{prompt.answer}</Text>
+
+        {/* Seed Questions */}
+        {(seedQuestions.identityAnchor || seedQuestions.socialBattery || seedQuestions.valueTrigger) ? (
+          <View style={styles.promptSubsection}>
+            {seedQuestions.identityAnchor && (
+              <View style={styles.infoRow}>
+                <Text style={styles.infoLabel}>Describes you:</Text>
+                <Text style={styles.infoValue}>
+                  {IDENTITY_ANCHOR_OPTIONS.find(o => o.value === seedQuestions.identityAnchor)?.label || seedQuestions.identityAnchor}
+                </Text>
+              </View>
+            )}
+            {seedQuestions.socialBattery && (
+              <View style={styles.infoRow}>
+                <Text style={styles.infoLabel}>Social energy:</Text>
+                <Text style={styles.infoValue}>
+                  {seedQuestions.socialBattery <= 2 ? SOCIAL_BATTERY_LEFT_LABEL :
+                   seedQuestions.socialBattery >= 4 ? SOCIAL_BATTERY_RIGHT_LABEL :
+                   'Balanced'} ({seedQuestions.socialBattery}/5)
+                </Text>
+              </View>
+            )}
+            {seedQuestions.valueTrigger && (
+              <View style={styles.infoRow}>
+                <Text style={styles.infoLabel}>Good person sign:</Text>
+                <Text style={styles.infoValue}>
+                  {VALUE_TRIGGER_OPTIONS.find(o => o.value === seedQuestions.valueTrigger)?.label || seedQuestions.valueTrigger}
+                </Text>
+              </View>
+            )}
+          </View>
+        ) : null}
+
+        {/* Section Prompts */}
+        {(['builder', 'performer', 'seeker', 'grounded'] as PromptSectionKey[]).map((section) => {
+          const answers = sectionPrompts[section];
+          if (!answers || answers.length === 0) return null;
+          const label = SECTION_LABELS[section];
+          return (
+            <View key={section} style={styles.promptSubsection}>
+              <Text style={styles.promptSectionLabel}>{label.emoji} {label.title}</Text>
+              {answers.map((prompt, index) => (
+                <View key={index} style={styles.promptItem}>
+                  <Text style={styles.promptQuestion}>{prompt.question}</Text>
+                  <Text style={styles.promptAnswer}>{prompt.answer}</Text>
+                </View>
+              ))}
             </View>
-          ))
-        ) : (
-          <Text style={styles.emptyText}>No prompts added</Text>
+          );
+        })}
+
+        {/* Legacy prompts fallback */}
+        {(!seedQuestions.identityAnchor && !seedQuestions.socialBattery && !seedQuestions.valueTrigger &&
+          Object.values(sectionPrompts).every(s => s.length === 0)) && (
+          profilePrompts.length > 0 ? (
+            profilePrompts.map((prompt, index) => (
+              <View key={index} style={styles.promptItem}>
+                <Text style={styles.promptQuestion}>{prompt.question}</Text>
+                <Text style={styles.promptAnswer}>{prompt.answer}</Text>
+              </View>
+            ))
+          ) : (
+            <Text style={styles.emptyText}>No prompts added</Text>
+          )
         )}
       </View>
 
@@ -725,6 +802,62 @@ export default function ReviewScreen() {
               if (petsData.length === 0) return "–";
               return petsData.map((p) => PETS_OPTIONS.find((o) => o.value === p)?.label ?? p).join(", ");
             })()}
+          </Text>
+        </View>
+      </View>
+
+      {/* Life Rhythm Section */}
+      <View style={styles.section}>
+        <View style={styles.sectionHeader}>
+          <Text style={styles.sectionTitle}>Life Rhythm</Text>
+          <TouchableOpacity onPress={() => handleEdit("profile-details/life-rhythm")}>
+            <Text style={styles.editLink}>Edit</Text>
+          </TouchableOpacity>
+        </View>
+        <View style={styles.infoRow}>
+          <Text style={styles.infoLabel}>City:</Text>
+          <Text style={styles.infoValue}>{lifeRhythm.city || "–"}</Text>
+        </View>
+        <View style={styles.infoRow}>
+          <Text style={styles.infoLabel}>Social Energy:</Text>
+          <Text style={styles.infoValue}>
+            {lifeRhythm.socialRhythm
+              ? SOCIAL_RHYTHM_OPTIONS.find((o) => o.value === lifeRhythm.socialRhythm)?.label || "–"
+              : "–"}
+          </Text>
+        </View>
+        <View style={styles.infoRow}>
+          <Text style={styles.infoLabel}>Sleep Schedule:</Text>
+          <Text style={styles.infoValue}>
+            {lifeRhythm.sleepSchedule
+              ? SLEEP_SCHEDULE_OPTIONS.find((o) => o.value === lifeRhythm.sleepSchedule)?.label || "–"
+              : "–"}
+          </Text>
+        </View>
+        <View style={styles.infoRow}>
+          <Text style={styles.infoLabel}>Travel Style:</Text>
+          <Text style={styles.infoValue}>
+            {lifeRhythm.travelStyle
+              ? TRAVEL_STYLE_OPTIONS.find((o) => o.value === lifeRhythm.travelStyle)?.label || "–"
+              : "–"}
+          </Text>
+        </View>
+        <View style={styles.infoRow}>
+          <Text style={styles.infoLabel}>Work Style:</Text>
+          <Text style={styles.infoValue}>
+            {lifeRhythm.workStyle
+              ? WORK_STYLE_OPTIONS.find((o) => o.value === lifeRhythm.workStyle)?.label || "–"
+              : "–"}
+          </Text>
+        </View>
+        <View style={styles.infoRow}>
+          <Text style={styles.infoLabel}>Core Values:</Text>
+          <Text style={styles.infoValue}>
+            {lifeRhythm.coreValues && lifeRhythm.coreValues.length > 0
+              ? lifeRhythm.coreValues
+                  .map((v) => CORE_VALUES_OPTIONS.find((o) => o.value === v)?.label || v)
+                  .join(", ")
+              : "–"}
           </Text>
         </View>
       </View>
@@ -948,6 +1081,18 @@ const styles = StyleSheet.create({
     color: COLORS.textMuted,
     fontStyle: "italic",
     marginTop: 8,
+  },
+  promptSubsection: {
+    marginBottom: 16,
+    paddingBottom: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: COLORS.border,
+  },
+  promptSectionLabel: {
+    fontSize: 14,
+    fontWeight: "600",
+    color: COLORS.primary,
+    marginBottom: 10,
   },
   promptItem: {
     marginBottom: 12,
