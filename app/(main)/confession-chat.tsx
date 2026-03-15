@@ -183,7 +183,7 @@ export default function ConfessionChatScreen() {
   }, [keyboardVisible, chat?.messages.length, scrollToBottom]);
 
   const handleSend = useCallback(() => {
-    if (!text.trim() || !chat) return;
+    if (!text.trim() || !chat || !currentUserId) return;
     const message = {
       id: `ccm_new_${Date.now()}`,
       chatId: chat.id,
@@ -199,12 +199,12 @@ export default function ConfessionChatScreen() {
   }, [text, chat, currentUserId, addChatMessage, scrollToBottom]);
 
   const handleAgreeReveal = useCallback(() => {
-    if (!chat) return;
+    if (!chat || !currentUserId) return;
     agreeMutualReveal(chat.id, currentUserId);
   }, [chat, currentUserId, agreeMutualReveal]);
 
   const handleDeclineReveal = useCallback(() => {
-    if (!chat) return;
+    if (!chat || !currentUserId) return;
     declineMutualReveal(chat.id, currentUserId);
   }, [chat, currentUserId, declineMutualReveal]);
 
@@ -269,7 +269,7 @@ export default function ConfessionChatScreen() {
   // Show "waiting" status to tagged person after they requested (and chat not expired)
   const showTaggedWaiting = isTaggedPerson && taggedPersonRequested && !isRevealed && !isDeclined && iHaveAgreed && !isChatExpired;
 
-  const statusText = getRevealStatusText(revealStatus, currentUserId, chat.initiatorId, chat.declinedBy);
+  const statusText = getRevealStatusText(revealStatus, currentUserId ?? '', chat.initiatorId, chat.declinedBy);
 
   return (
     <SafeAreaView style={styles.container} edges={['top']}>
