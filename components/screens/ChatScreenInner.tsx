@@ -872,7 +872,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
         >
           <Text style={styles.headerName}>{activeConversation.otherUser.name}</Text>
           <Text style={styles.headerStatus}>
-            {activeConversation.otherUser.lastActive > Date.now() - 5 * 60 * 1000
+            {(activeConversation.otherUser.lastActive ?? 0) > Date.now() - 5 * 60 * 1000
               ? 'Active now'
               : 'Recently active'}
           </Text>
