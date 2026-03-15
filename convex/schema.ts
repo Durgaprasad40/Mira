@@ -387,10 +387,6 @@ export default defineSchema({
         lastStepKey: v.optional(v.string()),
         lastUpdatedAt: v.optional(v.number()),
       })),
-      // LEGACY COMPAT: lifeRhythm field exists in some documents but was removed from app.
-      // Added back as optional v.any() to allow Convex startup. Run migration to remove.
-      // After migration completes and verification passes, remove this field.
-      lifeRhythm: v.optional(v.any()),
     })),
 
     // 8C: Consent timestamp (required before permissions/photo upload)
