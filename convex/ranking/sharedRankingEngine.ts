@@ -28,6 +28,14 @@ import {
   DEFAULT_RANKING_CONFIG,
 } from './rankingTypes';
 
+import {
+  USE_SHARED_RANKING_ENGINE,
+  ENABLE_SHADOW_MODE_LOGGING,
+  SCORE_DIFF_WARNING_THRESHOLD,
+  shouldUseSharedEngine,
+  shouldRunShadowComparison,
+} from './rankingConfig';
+
 // ---------------------------------------------------------------------------
 // Score Components (0-100 each)
 // ---------------------------------------------------------------------------
@@ -634,3 +642,147 @@ export function rankCandidates(
 // ---------------------------------------------------------------------------
 
 export { DEFAULT_RANKING_CONFIG };
+
+// ---------------------------------------------------------------------------
+// Feature Flag Helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Check if the shared ranking engine is enabled globally.
+ *
+ * @returns true if USE_SHARED_RANKING_ENGINE is true
+ */
+export function isSharedRankingEnabled(): boolean {
+  return USE_SHARED_RANKING_ENGINE;
+}
+
+/**
+ * Check if the shared engine should be used for a specific request.
+ *
+ * @param phase - Which phase ('phase1' or 'phase2')
+ * @param userId - Optional user ID for deterministic rollout
+ * @returns true if this request should use the shared engine
+ */
+export function shouldUseSharedRankingEngine(
+  phase: 'phase1' | 'phase2',
+  userId?: string
+): boolean {
+  return shouldUseSharedEngine(phase, userId);
+}
+
+// ---------------------------------------------------------------------------
+// Shadow Mode Logging Helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Score comparison result for shadow mode logging.
+ */
+export interface ScoreComparison {
+  viewerId: string;
+  candidateId: string;
+  oldScore: number;
+  newScore: number;
+  diff: number;
+  percentDiff: number;
+  isSignificant: boolean;
+}
+
+/**
+ * Log a ranking score comparison for shadow mode analysis.
+ * Only logs if shadow mode is enabled and sample rate allows.
+ *
+ * @param viewerId - The viewer's ID
+ * @param candidateId - The candidate's ID
+ * @param oldScore - Score from legacy ranking system
+ * @param newScore - Score from shared ranking engine
+ */
+export function logRankingComparison(
+  viewerId: string,
+  candidateId: string,
+  oldScore: number,
+  newScore: number
+): ScoreComparison | null {
+  // Check if we should log this comparison
+  if (!shouldRunShadowComparison()) {
+    return null;
+  }
+
+  const diff = newScore - oldScore;
+  const percentDiff = oldScore !== 0 ? (diff / oldScore) * 100 : (newScore !== 0 ? 100 : 0);
+  const isSignificant = Math.abs(diff) > SCORE_DIFF_WARNING_THRESHOLD;
+
+  const comparison: ScoreComparison = {
+    viewerId,
+    candidateId,
+    oldScore,
+    newScore,
+    diff,
+    percentDiff: Math.round(percentDiff * 100) / 100,
+    isSignificant,
+  };
+
+  // Log the comparison
+  if (isSignificant) {
+    console.warn('[RANKING_SHADOW] Significant score difference:', comparison);
+  } else if (ENABLE_SHADOW_MODE_LOGGING) {
+    console.log('[RANKING_SHADOW] Score comparison:', comparison);
+  }
+
+  return comparison;
+}
+
+/**
+ * Log a batch of ranking comparisons.
+ *
+ * @param viewerId - The viewer's ID
+ * @param comparisons - Array of [candidateId, oldScore, newScore] tuples
+ * @returns Summary of the batch comparison
+ */
+export function logBatchRankingComparison(
+  viewerId: string,
+  comparisons: Array<[string, number, number]>
+): {
+  total: number;
+  significant: number;
+  avgDiff: number;
+  maxDiff: number;
+} | null {
+  // Check if we should log
+  if (!shouldRunShadowComparison()) {
+    return null;
+  }
+
+  let totalDiff = 0;
+  let maxDiff = 0;
+  let significant = 0;
+
+  for (const [candidateId, oldScore, newScore] of comparisons) {
+    const diff = Math.abs(newScore - oldScore);
+    totalDiff += diff;
+    maxDiff = Math.max(maxDiff, diff);
+    if (diff > SCORE_DIFF_WARNING_THRESHOLD) {
+      significant++;
+    }
+  }
+
+  const summary = {
+    total: comparisons.length,
+    significant,
+    avgDiff: comparisons.length > 0 ? Math.round(totalDiff / comparisons.length * 100) / 100 : 0,
+    maxDiff,
+  };
+
+  if (significant > 0) {
+    console.warn('[RANKING_SHADOW] Batch summary with significant diffs:', {
+      viewerId,
+      ...summary,
+    });
+  } else if (ENABLE_SHADOW_MODE_LOGGING) {
+    console.log('[RANKING_SHADOW] Batch summary:', {
+      viewerId,
+      ...summary,
+    });
+  }
+
+  return summary;
+}
