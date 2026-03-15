@@ -11,7 +11,7 @@
  *
  * Placed after Lifestyle, before Preferences.
  */
-import React, { useEffect, useState, useCallback } from "react";
+import React, { useEffect, useState, useCallback, useRef } from "react";
 import {
   View,
   Text,
@@ -102,6 +102,14 @@ export default function LifeRhythmScreen() {
   // P0 STABILITY: Prevent double-submission on rapid taps
   const [isSubmitting, setIsSubmitting] = useState(false);
 
+  // P1 STABILITY: Track mounted state to prevent setState after unmount
+  const isMountedRef = useRef(true);
+  useEffect(() => {
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
+
   // STABILITY FIX: Sync from store AFTER Convex hydration completes
   useEffect(() => {
     if (!isDemoMode && convexHydrated) {
@@ -142,6 +150,8 @@ export default function LifeRhythmScreen() {
     try {
       // Request permission
       const { status } = await Location.requestForegroundPermissionsAsync();
+      // P1 STABILITY: Check mounted before setState after async
+      if (!isMountedRef.current) return;
       if (status !== "granted") {
         setLocationError("Location permission not granted. Please enter your city manually.");
         setIsDetectingLocation(false);
@@ -152,12 +162,16 @@ export default function LifeRhythmScreen() {
       const location = await Location.getCurrentPositionAsync({
         accuracy: Location.Accuracy.Balanced,
       });
+      // P1 STABILITY: Check mounted before setState after async
+      if (!isMountedRef.current) return;
 
       // Reverse geocode to get city
       const [geocode] = await Location.reverseGeocodeAsync({
         latitude: location.coords.latitude,
         longitude: location.coords.longitude,
       });
+      // P1 STABILITY: Check mounted before setState after async
+      if (!isMountedRef.current) return;
 
       if (geocode) {
         const detectedCity = geocode.city || geocode.subregion || geocode.region || "";
@@ -176,9 +190,14 @@ export default function LifeRhythmScreen() {
       if (__DEV__) {
         console.log("[LIFE_RHYTHM] Location detection error:", error);
       }
+      // P1 STABILITY: Check mounted before setState in catch
+      if (!isMountedRef.current) return;
       setLocationError("Could not detect location. Please enter your city manually.");
     } finally {
-      setIsDetectingLocation(false);
+      // P1 STABILITY: Check mounted before setState in finally
+      if (isMountedRef.current) {
+        setIsDetectingLocation(false);
+      }
     }
   }, []);
 
