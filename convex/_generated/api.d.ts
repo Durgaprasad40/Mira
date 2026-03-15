@@ -38,6 +38,7 @@ import type * as matches from "../matches.js";
 import type * as media from "../media.js";
 import type * as messageTemplates from "../messageTemplates.js";
 import type * as messages from "../messages.js";
+import type * as migrations from "../migrations.js";
 import type * as notifications from "../notifications.js";
 import type * as permissions from "../permissions.js";
 import type * as phase2Ranking from "../phase2Ranking.js";
@@ -97,6 +98,7 @@ declare const fullApi: ApiFromModules<{
   media: typeof media;
   messageTemplates: typeof messageTemplates;
   messages: typeof messages;
+  migrations: typeof migrations;
   notifications: typeof notifications;
   permissions: typeof permissions;
   phase2Ranking: typeof phase2Ranking;
