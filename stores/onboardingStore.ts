@@ -237,7 +237,7 @@ const initialState = {
 
 // NO PERSISTENCE: This is an in-memory store only.
 // Onboarding data is rehydrated from Convex queries on app boot.
-export const useOnboardingStore = create<OnboardingState>()((set) => ({
+export const useOnboardingStore = create<OnboardingState>()((set, get) => ({
   ...initialState,
   // Always true since there's no async hydration from AsyncStorage
   _hasHydrated: true,
