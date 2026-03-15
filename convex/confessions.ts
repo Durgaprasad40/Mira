@@ -10,6 +10,9 @@ const EMAIL_PATTERN = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/;
 // Confession expiry duration (24 hours in milliseconds)
 const CONFESSION_EXPIRY_MS = 24 * 60 * 60 * 1000;
 
+// P1-01: Server-side rate limit (5 confessions per 24 hours)
+const CONFESSION_RATE_LIMIT = 5;
+
 // Create a new confession
 export const createConfession = mutation({
   args: {
@@ -28,6 +31,19 @@ export const createConfession = mutation({
   handler: async (ctx, args) => {
     // Map authUserId -> Convex Id<"users"> (MUTATION: can create)
     const userId = await ensureUserByAuthId(ctx, args.userId as string);
+
+    // P1-01: Server-side rate limiting - count confessions in last 24 hours
+    const now = Date.now();
+    const twentyFourHoursAgo = now - CONFESSION_EXPIRY_MS;
+    const recentConfessions = await ctx.db
+      .query('confessions')
+      .withIndex('by_user', (q) => q.eq('userId', userId))
+      .filter((q) => q.gt(q.field('createdAt'), twentyFourHoursAgo))
+      .collect();
+
+    if (recentConfessions.length >= CONFESSION_RATE_LIMIT) {
+      throw new Error('You have reached the confession limit. Please try again later.');
+    }
 
     // Map taggedUserId if provided (MUTATION: can create)
     let taggedUserId: Id<'users'> | undefined;
@@ -147,8 +163,12 @@ export const listConfessions = query({
           .slice(0, 3)
           .map(([emoji, count]) => ({ emoji, count }));
 
+        // P1-02: Omit taggedUserId from anonymous confessions to prevent privacy leak
+        const { taggedUserId: _omitTagged, ...confessionWithoutTagged } = c;
+        const safeConfession = c.isAnonymous ? confessionWithoutTagged : c;
+
         return {
-          ...c,
+          ...safeConfession,
           replyPreviews: replies.map((r) => ({
             _id: r._id,
             text: r.text,
@@ -209,7 +229,10 @@ export const getTrendingConfessions = query({
       const score =
         (c.replyCount * 5 + c.reactionCount * 2 + voiceReplies * 1) /
         (hoursSince + 2);
-      return { ...c, trendingScore: score };
+      // P1-02: Omit taggedUserId from anonymous confessions to prevent privacy leak
+      const { taggedUserId: _omitTagged, ...confessionWithoutTagged } = c;
+      const safeConfession = c.isAnonymous ? confessionWithoutTagged : c;
+      return { ...safeConfession, trendingScore: score };
     });
 
     scored.sort((a, b) => b.trendingScore - a.trendingScore);
@@ -223,7 +246,14 @@ export const getTrendingConfessions = query({
 export const getConfession = query({
   args: { confessionId: v.id('confessions') },
   handler: async (ctx, { confessionId }) => {
-    return await ctx.db.get(confessionId);
+    const confession = await ctx.db.get(confessionId);
+    if (!confession) return null;
+    // P1-02: Omit taggedUserId from anonymous confessions to prevent privacy leak
+    if (confession.isAnonymous) {
+      const { taggedUserId: _omitTagged, ...safeConfession } = confession;
+      return safeConfession;
+    }
+    return confession;
   },
 });
 
