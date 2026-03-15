@@ -108,7 +108,7 @@ export default function PrivacySettingsScreen() {
     // Sync to backend in live mode
     if (!isDemoMode && userId && currentUser?._id) {
       try {
-        await updateNearbySettings({ userId: currentUser._id, token: token ?? undefined, hideDistance: newValue });
+        await updateNearbySettings({ authUserId: userId, hideDistance: newValue });
       } catch {
         Toast.show("Couldn't update setting. Please try again.");
         setHideDistance(!newValue); // Revert on error
