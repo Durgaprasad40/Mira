@@ -1,6 +1,7 @@
 import { v } from 'convex/values';
 import { mutation, query, internalMutation } from './_generated/server';
 import { Doc, Id } from './_generated/dataModel';
+import { resolveUserIdByAuthId } from './helpers';
 
 // ---------------------------------------------------------------------------
 // STABILITY FIX S1/S2/S3: Pre-fetch helpers to avoid full table scans
@@ -1184,13 +1185,20 @@ export const getCrossPathHistory = query({
 // hideCrossedPath — mark a crossed path as hidden for the current user
 // ---------------------------------------------------------------------------
 
+// P2 SECURITY: Uses authUserId + server-side resolution to prevent spoofing.
 export const hideCrossedPath = mutation({
   args: {
-    userId: v.id('users'),
+    authUserId: v.string(), // P2 SECURITY: Server-side auth instead of trusting client
     historyId: v.id('crossPathHistory'),
   },
   handler: async (ctx, args) => {
-    const { userId, historyId } = args;
+    const { authUserId, historyId } = args;
+
+    // P2 SECURITY: Resolve auth ID to Convex user ID server-side
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      throw new Error('Unauthorized: user not found');
+    }
 
     const entry = await ctx.db.get(historyId);
     if (!entry) {
@@ -1220,13 +1228,20 @@ export const hideCrossedPath = mutation({
 // deleteCrossedPath — permanently delete a crossed path entry
 // ---------------------------------------------------------------------------
 
+// P2 SECURITY: Uses authUserId + server-side resolution to prevent spoofing.
 export const deleteCrossedPath = mutation({
   args: {
-    userId: v.id('users'),
+    authUserId: v.string(), // P2 SECURITY: Server-side auth instead of trusting client
     historyId: v.id('crossPathHistory'),
   },
   handler: async (ctx, args) => {
-    const { userId, historyId } = args;
+    const { authUserId, historyId } = args;
+
+    // P2 SECURITY: Resolve auth ID to Convex user ID server-side
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      throw new Error('Unauthorized: user not found');
+    }
 
     const entry = await ctx.db.get(historyId);
     if (!entry) {

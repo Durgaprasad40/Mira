@@ -200,10 +200,10 @@ export default function CrossedPathsScreen() {
             }
 
             // Live mode: call mutation
-            if (!convexUserId) return;
+            if (!userId) return;
             try {
               await hideCrossedPathMutation({
-                userId: convexUserId,
+                authUserId: userId,
                 historyId: item.id as Id<'crossPathHistory'>,
               });
             } catch (error) {
@@ -214,7 +214,7 @@ export default function CrossedPathsScreen() {
         },
       ]
     );
-  }, [isDemo, convexUserId, hideCrossedPathMutation]);
+  }, [isDemo, userId, hideCrossedPathMutation]);
 
   const handleDeletePress = useCallback((item: CrossedPathItem) => {
     Alert.alert(
@@ -233,10 +233,10 @@ export default function CrossedPathsScreen() {
             }
 
             // Live mode: call mutation
-            if (!convexUserId) return;
+            if (!userId) return;
             try {
               await deleteCrossedPathMutation({
-                userId: convexUserId,
+                authUserId: userId,
                 historyId: item.id as Id<'crossPathHistory'>,
               });
             } catch (error) {
@@ -247,7 +247,7 @@ export default function CrossedPathsScreen() {
         },
       ]
     );
-  }, [isDemo, convexUserId, deleteCrossedPathMutation]);
+  }, [isDemo, userId, deleteCrossedPathMutation]);
 
   const handleOptionsPress = useCallback((item: CrossedPathItem) => {
     Alert.alert(
