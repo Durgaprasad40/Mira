@@ -404,6 +404,19 @@ export function calculateRankScore(
 // ---------------------------------------------------------------------------
 
 /**
+ * Fisher-Yates shuffle for uniform random ordering.
+ * Returns a new shuffled array without modifying the original.
+ */
+function fisherYatesShuffle<T>(array: T[]): T[] {
+  const result = [...array];
+  for (let i = result.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [result[i], result[j]] = [result[j], result[i]];
+  }
+  return result;
+}
+
+/**
  * Mix ranked candidates with exploration pool.
  * 80% from top-ranked, 20% from random exploration.
  */
@@ -427,7 +440,7 @@ export function applyExplorationMix(
 
   if (remaining.length > 0 && explorationCount > 0) {
     // Shuffle remaining for random exploration
-    const shuffled = [...remaining].sort(() => Math.random() - 0.5);
+    const shuffled = fisherYatesShuffle(remaining);
     exploration.push(...shuffled.slice(0, explorationCount));
   }
 
