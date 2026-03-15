@@ -4,6 +4,10 @@ import { isPrivateDataDeleted } from './privateDeletion';
 import { computeFinalScore } from './phase2Ranking';
 import { resolveUserIdByAuthId } from './helpers';
 
+// Phase 3: Shadow mode imports
+import { shouldRunShadowComparison } from './ranking/rankingConfig';
+import { computeRankScore, logBatchRankingComparison, DEFAULT_RANKING_CONFIG } from './ranking/sharedRankingEngine';
+
 // Suppression window: 4 hours in milliseconds
 const SUPPRESSION_WINDOW_MS = 4 * 60 * 60 * 1000;
 
@@ -25,6 +29,9 @@ export const getProfiles = query({
   handler: async (ctx, args) => {
     const now = Date.now();
     const suppressionCutoff = now - SUPPRESSION_WINDOW_MS;
+
+    // Phase 3: Shadow mode decision (once per request)
+    const runShadow = shouldRunShadowComparison();
 
     // Get blocks for current user (both directions - shared across Phase-1 and Phase-2)
     const blocksOut = await ctx.db
@@ -116,6 +123,82 @@ export const getProfiles = query({
 
     const limit = args.limit ?? 50;
     const limited = ranked.slice(0, limit);
+
+    // Phase 3: Shadow mode rank comparison (no production impact)
+    // Legacy result is finalized above - this only logs for analysis
+    if (runShadow) {
+      try {
+        // Build minimal normalized viewer for Phase-2
+        // NOTE: Viewer preferences are intentionally neutral because Phase-2
+        // has limited viewer preference data and this is rank-only shadow comparison
+        const normalizedViewer: import('./ranking/rankingTypes').NormalizedViewer = {
+          id: viewerId,
+          phase: 'phase2',
+          relationshipIntent: [],
+          activities: [],
+          lifestyle: {},
+          maxDistance: 0,
+          blockedIds: new Set<string>(),
+          reportedIds: new Set<string>(),
+        };
+
+        // Build normalized candidates from limited results only (capped)
+        const normalizedCandidates: import('./ranking/rankingTypes').NormalizedCandidate[] = limited.map(({ profile: p }) => {
+          const profile = p as typeof p & { hobbies?: string[]; isVerified?: boolean; promptAnswers?: Array<{ answer?: string }>; height?: number; education?: string };
+          const metrics = metricsMap.get(p.userId as string);
+
+          // Count filled prompts if available (Phase-2 uses promptAnswers field)
+          const promptsAnswered = Array.isArray(profile.promptAnswers)
+            ? profile.promptAnswers.filter((pr: any) => pr.answer?.trim().length > 0).length
+            : 0;
+
+          return {
+            id: p.userId as string,
+            phase: 'phase2' as const,
+            relationshipIntent: [],
+            activities: profile.hobbies ?? [],
+            lifestyle: {},
+            bioLength: p.privateBio?.trim().length ?? 0,
+            promptsAnswered,
+            photoCount: p.privatePhotoUrls?.length ?? 0,
+            isVerified: profile.isVerified ?? false,
+            hasOptionalFields: { height: !!profile.height, jobTitle: false, education: !!profile.education },
+            lastActiveAt: metrics?.lastPhase2ActiveAt ?? p.updatedAt ?? now,
+            onboardedAt: metrics?.phase2OnboardedAt ?? p.createdAt ?? now,
+            createdAt: p.createdAt ?? now,
+            distance: undefined,
+            theyLikedMe: false,   // Phase-2 has no swipe system
+            isBoosted: false,     // Phase-2 has no boost system
+            reportCount: 0,
+            blockCount: 0,
+            totalImpressions: metrics?.totalImpressions ?? 0,
+            lastShownAt: metrics?.lastShownAt ?? 0,
+          };
+        });
+
+        // Compute shared scores and build rank lookup
+        const sharedScored = normalizedCandidates.map((c, i) => ({
+          id: c.id,
+          score: computeRankScore(c, normalizedViewer, DEFAULT_RANKING_CONFIG).score,
+          originalIndex: i,
+        }));
+        sharedScored.sort((a, b) => b.score - a.score);
+        const sharedRankMap = new Map<string, number>();
+        sharedScored.forEach((s, i) => sharedRankMap.set(s.id, i));
+
+        // Build comparisons: [candidateId, legacyRank, sharedRank]
+        const comparisons: Array<[string, number, number]> = [];
+        for (let i = 0; i < limited.length; i++) {
+          const candidateId = limited[i].profile.userId as string;
+          const sharedRank = sharedRankMap.get(candidateId) ?? -1;
+          comparisons.push([candidateId, i, sharedRank]);
+        }
+
+        logBatchRankingComparison(viewerId, comparisons);
+      } catch {
+        // Silent fail - shadow mode must never break production
+      }
+    }
 
     // Return only blurred data — never expose original photos
     // Cast to access optional schema fields that may not be in generated types yet

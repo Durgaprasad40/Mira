@@ -11,6 +11,10 @@ import {
   DISCOVER_RANKING_CONFIG,
 } from './discoverRanking';
 
+// Phase 3: Shadow mode imports
+import { shouldRunShadowComparison } from './ranking/rankingConfig';
+import { rankCandidates as sharedRankCandidates, logBatchRankingComparison } from './ranking/sharedRankingEngine';
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -442,6 +446,9 @@ export const getDiscoverProfiles = query({
 
     // Sort
     if (sortBy === 'recommended') {
+      // Phase 3: Shadow mode decision (once per request)
+      const runShadow = shouldRunShadowComparison();
+
       // NEW RANKING: Use Phase-1 Discover ranking system
       const trustSignals: TrustSignals = {
         viewerBlockedIds: blockedUserIds,
@@ -532,6 +539,88 @@ export const getDiscoverProfiles = query({
 
         // Append fallback results (they appear after ranked results)
         result = [...result, ...fallbackResults];
+      }
+
+      // Phase 3: Shadow mode rank comparison (no production impact)
+      // Legacy result is finalized above - this only logs for analysis
+      if (runShadow) {
+        try {
+          // Build normalized viewer inline (avoids adapter type mismatch)
+          const normalizedViewer: import('./ranking/rankingTypes').NormalizedViewer = {
+            id: currentUser._id as string,
+            phase: 'phase1',
+            relationshipIntent: rankingCurrentUser.relationshipIntent ?? [],
+            activities: rankingCurrentUser.activities ?? [],
+            lifestyle: {
+              smoking: rankingCurrentUser.smoking,
+              drinking: rankingCurrentUser.drinking,
+              kids: rankingCurrentUser.kids,
+              religion: rankingCurrentUser.religion,
+            },
+            maxDistance: rankingCurrentUser.maxDistance,
+            lifeRhythm: rankingCurrentUser.lifeRhythm,
+            seedQuestions: rankingCurrentUser.seedQuestions,
+            blockedIds: blockedUserIds,
+            reportedIds: viewerReportedIds,
+          };
+
+          // Build normalized candidates inline from candidateProfiles
+          const normalizedCandidates: import('./ranking/rankingTypes').NormalizedCandidate[] = candidateProfiles.map(c => ({
+            id: c.id,
+            phase: 'phase1' as const,
+            relationshipIntent: c.relationshipIntent ?? [],
+            activities: c.activities ?? [],
+            lifestyle: {
+              smoking: c.smoking,
+              drinking: c.drinking,
+              kids: c.kids,
+              religion: c.religion,
+            },
+            bioLength: c.bio?.trim().length ?? 0,
+            promptsAnswered: (c.profilePrompts ?? []).filter(p => p.answer?.trim().length > 0).length,
+            photoCount: c.photoCount,
+            isVerified: c.isVerified,
+            hasOptionalFields: {
+              height: !!c.height,
+              jobTitle: !!c.jobTitle,
+              education: !!c.education,
+            },
+            lastActiveAt: c.lastActive,
+            onboardedAt: c.createdAt,
+            createdAt: c.createdAt,
+            distance: c.distance,
+            theyLikedMe: c.theyLikedMe,
+            isBoosted: c.isBoosted,
+            lifeRhythm: c.lifeRhythm,
+            seedQuestions: c.seedQuestions,
+            reportCount: c.reportCount ?? 0,
+            blockCount: c.blockCount ?? 0,
+            totalImpressions: 0,
+            lastShownAt: 0,
+          }));
+
+          // Run shared ranking engine
+          const sharedResult = sharedRankCandidates(normalizedCandidates, normalizedViewer, undefined, { limit });
+
+          // Build rank lookup for shared results
+          const sharedRankMap = new Map<string, number>();
+          sharedResult.rankedCandidates.forEach((c, i) => sharedRankMap.set(c.id, i));
+
+          // Build comparisons for returned window only (capped)
+          // Using [candidateId, legacyRank, sharedRank] for rank-diff analysis
+          // logBatchRankingComparison computes |sharedRank - legacyRank| as diff
+          const finalResult = result.slice(offset, offset + limit);
+          const comparisons: Array<[string, number, number]> = [];
+          for (let i = 0; i < finalResult.length; i++) {
+            const candidateId = finalResult[i].id as string;
+            const sharedRank = sharedRankMap.get(candidateId) ?? -1;
+            comparisons.push([candidateId, i, sharedRank]);
+          }
+
+          logBatchRankingComparison(currentUser._id as string, comparisons);
+        } catch {
+          // Silent fail - shadow mode must never break production
+        }
       }
 
       return result.slice(offset, offset + limit);
