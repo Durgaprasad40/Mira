@@ -19,6 +19,7 @@ import {
   ActivityIndicator,
   TextInput,
   Modal,
+  BackHandler,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { useRouter, useLocalSearchParams } from "expo-router";
@@ -151,6 +152,25 @@ export default function BasicInfoScreen() {
   const [isNicknameAvailable, setIsNicknameAvailable] = useState<boolean | null>(null);
   const availabilityTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isMountedRef = useRef(true); // Track mounted state to ignore late async results
+
+  // FIX: Handle Android back button when basic-info is root screen
+  // Prevents "GO_BACK was not handled" error when navigated here directly on boot
+  useEffect(() => {
+    if (Platform.OS !== 'android') return;
+
+    const onBackPress = () => {
+      if (router.canGoBack()) {
+        router.back();
+        return true;
+      }
+      // No screen to go back to - prevent default (exit app) behavior
+      // User is on onboarding entry point, back should do nothing
+      return true;
+    };
+
+    const subscription = BackHandler.addEventListener('hardwareBackPress', onBackPress);
+    return () => subscription.remove();
+  }, [router]);
 
   // Fetch existing user data in read-only mode (live mode only)
   const existingUserData = useQuery(
