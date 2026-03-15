@@ -329,11 +329,11 @@ function getRouteForState(state: BootState): string {
     case "DEMO_HOME":
       return "/(main)/(tabs)/home";
     case "VALID_ONBOARD":
-      return "/(onboarding)/basic-info";
     case "NO_AUTH":
     case "INVALID":
     case "DEMO_WELCOME":
     default:
+      // All non-completed users (including VALID_ONBOARD) start from Welcome
       return "/(auth)/welcome";
   }
 }
