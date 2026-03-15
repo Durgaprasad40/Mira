@@ -457,9 +457,20 @@ export const useOnboardingStore = create<OnboardingState>()((set) => ({
        * This ensures Convex is the source of truth and prevents data leakage.
        */
       hydrateFromDraft: (draft) => {
-        // STABILITY FIX: Always reset to initial state first to prevent data leakage
-        // between accounts. Convex draft is the ONLY source of truth.
-        set({ ...initialState, _hasHydrated: true });
+        // STABILITY FIX: Reset to initial state to prevent data leakage between accounts.
+        // P0 FIX: Preserve photos array - photos are synced separately via autoSyncPhotosOnStartup.
+        // Resetting photos here would wipe photos synced from backend before draft hydration.
+        const currentPhotos = get().photos;
+        const currentVerificationPhoto = get().verificationPhotoUri;
+        const currentVerificationReferencePrimary = get().verificationReferencePrimary;
+        set({
+          ...initialState,
+          _hasHydrated: true,
+          // P0 FIX: Preserve photo state (synced from backend, not from draft)
+          photos: currentPhotos,
+          verificationPhotoUri: currentVerificationPhoto,
+          verificationReferencePrimary: currentVerificationReferencePrimary,
+        });
 
         if (!draft) return;
 
