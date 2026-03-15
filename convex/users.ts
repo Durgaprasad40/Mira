@@ -831,11 +831,18 @@ export const markVerified = mutation({
 // Block user
 export const blockUser = mutation({
   args: {
-    blockerId: v.id("users"),
+    // C2 SECURITY: Use authUserId for server-side validation
+    authUserId: v.string(),
     blockedUserId: v.id("users"),
   },
   handler: async (ctx, args) => {
-    const { blockerId, blockedUserId } = args;
+    const { authUserId, blockedUserId } = args;
+
+    // C2 SECURITY: Resolve auth ID to Convex user ID
+    const blockerId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!blockerId) {
+      return { success: false, error: 'unauthorized' };
+    }
 
     // Prevent self-blocking
     if (blockerId === blockedUserId) {
@@ -865,11 +872,18 @@ export const blockUser = mutation({
 // Unblock user
 export const unblockUser = mutation({
   args: {
-    blockerId: v.id("users"),
+    // C2 SECURITY: Use authUserId for server-side validation
+    authUserId: v.string(),
     blockedUserId: v.id("users"),
   },
   handler: async (ctx, args) => {
-    const { blockerId, blockedUserId } = args;
+    const { authUserId, blockedUserId } = args;
+
+    // C2 SECURITY: Resolve auth ID to Convex user ID
+    const blockerId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!blockerId) {
+      return { success: false, error: 'unauthorized' };
+    }
 
     const block = await ctx.db
       .query("blocks")
@@ -889,7 +903,8 @@ export const unblockUser = mutation({
 // Report user
 export const reportUser = mutation({
   args: {
-    reporterId: v.id("users"),
+    // C2 SECURITY: Use authUserId for server-side validation
+    authUserId: v.string(),
     reportedUserId: v.id("users"),
     reason: v.union(
       v.literal("fake_profile"),
@@ -902,8 +917,14 @@ export const reportUser = mutation({
     description: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const { reporterId, reportedUserId, reason, description } = args;
+    const { authUserId, reportedUserId, reason, description } = args;
     const now = Date.now();
+
+    // C2 SECURITY: Resolve auth ID to Convex user ID
+    const reporterId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!reporterId) {
+      return { success: false, error: 'unauthorized' };
+    }
 
     // Prevent self-reporting
     if (reporterId === reportedUserId) {

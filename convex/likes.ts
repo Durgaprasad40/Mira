@@ -220,6 +220,35 @@ export const swipe = mutation({
           isActive: true,
         });
 
+        // B1 SECURITY: Race condition protection - check for duplicates BEFORE downstream writes
+        // If two swipes raced past the existingMatch check, multiple matches may exist.
+        // Only the OLDEST match (by _creationTime) wins and proceeds with conversation/notifications.
+        const allMatches = await ctx.db
+          .query('matches')
+          .withIndex('by_users', (q) => q.eq('user1Id', user1Id).eq('user2Id', user2Id))
+          .collect();
+
+        if (allMatches.length > 1) {
+          // Duplicates detected - determine winner by oldest _creationTime
+          allMatches.sort((a, b) => a._creationTime - b._creationTime);
+          const winnerMatchId = allMatches[0]._id;
+
+          if (matchId !== winnerMatchId) {
+            // Our match lost the race - delete it and return winner's ID
+            // Do NOT create conversation/notifications (winner mutation will do it)
+            await ctx.db.delete(matchId);
+            console.log(`[LIKES] Match race detected: our match ${matchId} lost to ${winnerMatchId}, cleaned up`);
+            return { success: true, isMatch: true, matchId: winnerMatchId };
+          }
+
+          // We are the winner - delete the other duplicates
+          for (let i = 1; i < allMatches.length; i++) {
+            await ctx.db.delete(allMatches[i]._id);
+            console.log(`[LIKES] Match race detected: cleaned up duplicate ${allMatches[i]._id}`);
+          }
+        }
+
+        // We are the sole/winning match - proceed with downstream writes
         // Create conversation
         await ctx.db.insert('conversations', {
           matchId,

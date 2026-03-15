@@ -55,10 +55,9 @@ export default function BlockedUsersScreen() {
           onPress: async () => {
             setUnblockingId(blockedUserId);
             try {
-              // Need to resolve current user's internal ID for the mutation
-              // The mutation expects convex IDs, not auth IDs
+              // C2 SECURITY: Use authUserId for server-side validation
               await unblockUser({
-                blockerId: userId as unknown as Id<'users'>,
+                authUserId: userId,
                 blockedUserId: blockedUserId as Id<'users'>,
               });
             } catch (error) {

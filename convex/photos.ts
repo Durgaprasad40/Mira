@@ -122,8 +122,8 @@ export const addPhoto = mutation({
     fileSize: v.optional(v.number()),
     mimeType: v.optional(v.string()),
     isNsfwDetected: v.optional(v.boolean()), // Client-side NSFW detection result
-    // SECURITY FIX: Session token for auth validation (custom auth system)
-    token: v.optional(v.string()),
+    // C1 SECURITY: Session token for auth validation (MANDATORY - custom auth system)
+    token: v.string(),
   },
   handler: async (ctx, args) => {
     const { storageId, isPrimary, hasFace, width, height, fileSize, mimeType, isNsfwDetected, token } = args;
@@ -131,17 +131,15 @@ export const addPhoto = mutation({
     // Map authUserId -> Convex Id<"users"> (MUTATION: can create)
     const userId = await ensureUserByAuthId(ctx, args.userId as string);
 
-    // SECURITY FIX: Validate session token (replaces broken ctx.auth.getUserIdentity)
+    // C1 SECURITY: Validate session token (MANDATORY - replaces broken ctx.auth.getUserIdentity)
     // This app uses custom session/token auth, not Convex built-in auth
-    if (token) {
-      const authenticatedUserId = await validateSessionToken(ctx, token);
-      if (!authenticatedUserId) {
-        throw new Error('Unauthorized: invalid or expired session');
-      }
-      // Verify the authenticated user is modifying their own profile
-      if (authenticatedUserId !== userId) {
-        throw new Error('Unauthorized: cannot add photos to another user\'s profile');
-      }
+    const authenticatedUserId = await validateSessionToken(ctx, token);
+    if (!authenticatedUserId) {
+      throw new Error('Unauthorized: invalid or expired session');
+    }
+    // Verify the authenticated user is modifying their own profile
+    if (authenticatedUserId !== userId) {
+      throw new Error('Unauthorized: cannot add photos to another user\'s profile');
     }
 
     // BUGFIX #67: Validate storage ID exists before proceeding

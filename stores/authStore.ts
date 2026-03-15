@@ -351,6 +351,25 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
       console.warn('[AUTH] logout: failed to clear chatTodStore', error);
     }
 
+    // P1 SECURITY: Reset discoverStore to prevent cross-user state bleed
+    // Daily like limits and session counters must not leak between users
+    try {
+      const { useDiscoverStore } = require('@/stores/discoverStore');
+      useDiscoverStore.setState({
+        likesUsedToday: 0,
+        standOutsUsedToday: 0,
+        lastResetDate: new Date().toISOString().slice(0, 10),
+        hasUserShownIntent: false,
+        swipeCount: 0,
+        profileViewCount: 0,
+        lastRandomMatchAt: null,
+        randomMatchShownThisSession: false,
+      });
+      if (__DEV__) console.log('[AUTH] logout: cleared discoverStore');
+    } catch (error) {
+      console.warn('[AUTH] logout: failed to reset discoverStore', error);
+    }
+
     // STEP 4: Finish logout - clear in-memory state
     get().finishLogout();
   },

@@ -155,7 +155,7 @@ export function ReportBlockModal({
 
     try {
       await blockMutation({
-        blockerId: currentUserId as any,
+        authUserId: currentUserId,
         blockedUserId: reportedUserId as any,
       });
       resetAndClose();
@@ -177,7 +177,7 @@ export function ReportBlockModal({
 
     try {
       await reportMutation({
-        reporterId: currentUserId as any,
+        authUserId: currentUserId,
         reportedUserId: reportedUserId as any,
         reason: 'inappropriate_photos',
       });
@@ -199,7 +199,7 @@ export function ReportBlockModal({
 
     try {
       await reportMutation({
-        reporterId: currentUserId as any,
+        authUserId: currentUserId,
         reportedUserId: reportedUserId as any,
         reason: 'spam',
       });
@@ -221,7 +221,7 @@ export function ReportBlockModal({
 
     try {
       await reportMutation({
-        reporterId: currentUserId as any,
+        authUserId: currentUserId,
         reportedUserId: reportedUserId as any,
         reason: 'other',
         description: 'Scam/fraudulent behavior',
@@ -255,7 +255,7 @@ export function ReportBlockModal({
 
     try {
       await reportMutation({
-        reporterId: currentUserId as any,
+        authUserId: currentUserId,
         reportedUserId: reportedUserId as any,
         reason: 'other',
         description: trimmed,
