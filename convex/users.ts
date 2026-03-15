@@ -1194,6 +1194,18 @@ export const completeOnboarding = mutation({
     minAge: v.optional(v.number()),
     maxAge: v.optional(v.number()),
     maxDistance: v.optional(v.number()),
+    // FIX: Add missing validators for profilePrompts and lgbtqSelf
+    profilePrompts: v.optional(v.array(v.object({
+      question: v.string(),
+      answer: v.string(),
+    }))),
+    lgbtqSelf: v.optional(v.array(v.union(
+      v.literal('gay'),
+      v.literal('lesbian'),
+      v.literal('bisexual'),
+      v.literal('transgender'),
+      v.literal('prefer_not_to_say')
+    ))),
     photoStorageIds: v.optional(v.array(v.id("_storage"))),
   },
   handler: async (ctx, args) => {

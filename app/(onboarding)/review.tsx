@@ -401,6 +401,9 @@ export default function ReviewScreen() {
         minAge,
         maxAge,
         maxDistance,
+        // FIX: Add missing fields from demo mode payload
+        profilePrompts: profilePrompts.length > 0 ? profilePrompts : undefined,
+        lgbtqSelf: lgbtqSelf.length > 0 ? lgbtqSelf : undefined,
         // photoStorageIds omitted - photos already uploaded in additional-photos screen
       };
 
