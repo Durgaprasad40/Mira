@@ -236,7 +236,7 @@ export function DevDebugBanner({ defaultExpanded = false }: DevDebugBannerProps)
 
               // 5. In demo mode, clear demo state
               if (isDemoMode) {
-                useDemoStore.getState().clearAll();
+                useDemoStore.getState().reset();
                 console.log("[DEV_WIPE] Demo store cleared");
               }
 
