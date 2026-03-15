@@ -526,11 +526,11 @@ export const toggleIncognito = mutation({
 /**
  * Update nearby settings (visibility, privacy, crossed paths).
  * All fields are optional - only provided fields will be updated.
+ * P1 SECURITY: Uses authUserId + server-side resolution to prevent spoofing.
  */
 export const updateNearbySettings = mutation({
   args: {
-    userId: v.id("users"),
-    token: v.optional(v.string()), // Session token for auth validation
+    authUserId: v.string(), // P1 SECURITY: Server-side auth instead of trusting client
     nearbyEnabled: v.optional(v.boolean()),
     crossedPathsEnabled: v.optional(v.boolean()),
     hideDistance: v.optional(v.boolean()),
@@ -545,17 +545,12 @@ export const updateNearbySettings = mutation({
     ),
   },
   handler: async (ctx, args) => {
-    const { userId, token, incognitoMode, ...updates } = args;
+    const { authUserId, incognitoMode, ...updates } = args;
 
-    // Auth validation: if token provided, verify it matches the userId
-    if (token) {
-      const authenticatedUserId = await validateSessionToken(ctx, token);
-      if (!authenticatedUserId) {
-        throw new Error("Unauthorized: invalid or expired session");
-      }
-      if (authenticatedUserId !== userId) {
-        throw new Error("Unauthorized: cannot modify another user's settings");
-      }
+    // P1 SECURITY: Resolve auth ID to Convex user ID server-side
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      throw new Error("Unauthorized: user not found");
     }
 
     const user = await ctx.db.get(userId);
@@ -588,14 +583,21 @@ export const updateNearbySettings = mutation({
 
 /**
  * Pause nearby visibility for 24 hours.
+ * P1 SECURITY: Uses authUserId + server-side resolution to prevent spoofing.
  */
 export const pauseNearby = mutation({
   args: {
-    userId: v.id("users"),
+    authUserId: v.string(), // P1 SECURITY: Server-side auth instead of trusting client
     paused: v.boolean(),
   },
   handler: async (ctx, args) => {
-    const { userId, paused } = args;
+    const { authUserId, paused } = args;
+
+    // P1 SECURITY: Resolve auth ID to Convex user ID server-side
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      throw new Error("Unauthorized: user not found");
+    }
 
     const user = await ctx.db.get(userId);
     if (!user) throw new Error("User not found");

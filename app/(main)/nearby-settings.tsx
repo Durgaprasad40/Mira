@@ -108,7 +108,7 @@ export default function NearbySettingsScreen() {
 
       try {
         await updateNearbySettingsMut({
-          userId: userId as any,
+          authUserId: userId,
           [field]: value,
         });
       } catch (error: any) {
@@ -185,7 +185,7 @@ export default function NearbySettingsScreen() {
 
     try {
       await pauseNearbyMut({
-        userId: userId as any,
+        authUserId: userId,
         paused: !isPaused,
       });
       if (isPaused) {
