@@ -209,6 +209,11 @@ export async function uploadPhotoToBackend(
     return { success: true, message: 'Demo mode - no backend upload' };
   }
 
+  // C1 SECURITY: Token required for live mode upload
+  if (!token) {
+    return { success: false, message: 'Authentication required for photo upload' };
+  }
+
   try {
     if (__DEV__) {
       console.log(`[PHOTO_SYNC] Uploading photo slot ${slotIndex} to backend for userId:`, userId);
