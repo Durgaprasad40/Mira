@@ -34,7 +34,7 @@ import { useAuthStore } from '@/stores/authStore';
 import { isDemoMode } from '@/hooks/useConvex';
 import { useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
-import { Ionicons, MaterialCommunityIcons } from '@expo/vector-icons';
+import { Ionicons } from '@expo/vector-icons';
 import { processPhotoVariant, PhotoVariant } from '@/services/photoPrivacy';
 import { OnboardingProgressHeader } from '@/components/OnboardingProgressHeader';
 import { useScreenTrace } from '@/lib/devTrace';

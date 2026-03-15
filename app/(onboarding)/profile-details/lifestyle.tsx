@@ -57,7 +57,6 @@ export default function ProfileDetailsLifestyleScreen() {
     setKids,
     setExercise,
     togglePet,
-    setPets,
     setInsect,
   } = useOnboardingStore();
   const convexHydrated = useOnboardingStore((s) => s._convexHydrated);
