@@ -166,6 +166,12 @@ export function compatibilityScore(
 ): number {
   let score = 0;
 
+  // SAFETY: Normalize arrays to prevent crashes on undefined fields
+  const candidateIntent = candidate.relationshipIntent ?? [];
+  const userIntent = currentUser.relationshipIntent ?? [];
+  const candidateActivities = candidate.activities ?? [];
+  const userActivities = currentUser.activities ?? [];
+
   // 1. Relationship intent alignment (0-30)
   const intentCompat: Record<string, string[]> = {
     long_term: ['long_term', 'short_to_long'],
@@ -179,8 +185,8 @@ export function compatibilityScore(
   };
 
   let bestIntent = 0;
-  for (const mine of currentUser.relationshipIntent) {
-    for (const theirs of candidate.relationshipIntent) {
+  for (const mine of userIntent) {
+    for (const theirs of candidateIntent) {
       if (mine === theirs) bestIntent = Math.max(bestIntent, 30);
       else if (intentCompat[mine]?.includes(theirs)) bestIntent = Math.max(bestIntent, 15);
     }
@@ -188,7 +194,7 @@ export function compatibilityScore(
   score += bestIntent;
 
   // 2. Shared activities/interests (0-25)
-  const sharedActivities = candidate.activities.filter(a => currentUser.activities.includes(a));
+  const sharedActivities = candidateActivities.filter(a => userActivities.includes(a));
   score += Math.min(sharedActivities.length * 5, 25);
 
   // 3. Lifestyle match (0-20) - smoking, drinking, kids, religion
@@ -247,9 +253,11 @@ export function profileQualityScore(candidate: CandidateProfile): number {
   if (filledPrompts >= 3) score += 1;
 
   // Activities selected (0-15)
-  if (candidate.activities.length >= 5) score += 15;
-  else if (candidate.activities.length >= 3) score += 10;
-  else if (candidate.activities.length >= 1) score += 5;
+  // SAFETY: Guard against undefined activities array
+  const activitiesCount = (candidate.activities ?? []).length;
+  if (activitiesCount >= 5) score += 15;
+  else if (activitiesCount >= 3) score += 10;
+  else if (activitiesCount >= 1) score += 5;
 
   // Photos (0-20)
   if (candidate.photoCount >= 4) score += 20;
@@ -296,6 +304,8 @@ export function distanceScore(
   distance: number | undefined,
   maxDistance: number
 ): number {
+  // SAFETY: Guard against division by zero
+  if (!maxDistance || maxDistance <= 0) return 100;
   if (distance == null) return 50; // Unknown distance = neutral
   if (distance <= 0) return 100;
   if (distance >= maxDistance) return 0;
@@ -462,6 +472,12 @@ export function countStrongCompatibilitySignals(
 ): number {
   let signals = 0;
 
+  // SAFETY: Normalize arrays to prevent crashes on undefined fields
+  const candidateActivities = candidate.activities ?? [];
+  const userActivities = currentUser.activities ?? [];
+  const candidateIntent = candidate.relationshipIntent ?? [];
+  const userIntent = currentUser.relationshipIntent ?? [];
+
   // 1. Same identity anchor
   if (
     candidate.seedQuestions?.identityAnchor &&
@@ -481,7 +497,7 @@ export function countStrongCompatibilitySignals(
   }
 
   // 3. Overlapping interests (3+ shared)
-  const sharedActivities = candidate.activities.filter(a => currentUser.activities.includes(a));
+  const sharedActivities = candidateActivities.filter(a => userActivities.includes(a));
   if (sharedActivities.length >= 3) {
     signals++;
   }
@@ -512,8 +528,8 @@ export function countStrongCompatibilitySignals(
   if (lifestyleMatches >= 2) signals++;
 
   // 6. Same relationship intent (exact match)
-  const hasMatchingIntent = currentUser.relationshipIntent.some(i =>
-    candidate.relationshipIntent.includes(i)
+  const hasMatchingIntent = userIntent.some(i =>
+    candidateIntent.includes(i)
   );
   if (hasMatchingIntent) signals++;
 
