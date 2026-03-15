@@ -326,8 +326,9 @@ export default defineSchema({
       // Preferences
       preferences: v.optional(v.object({
         lookingFor: v.optional(v.array(v.union(v.literal('male'), v.literal('female'), v.literal('non_binary'), v.literal('lesbian'), v.literal('other')))),
+        // LEGACY COMPAT: includes 'bisexual' (meaningful data) and 'prefer_not_to_say' (run migration to remove).
         lgbtqPreference: v.optional(v.array(v.union(
-          v.literal('male'), v.literal('female'), v.literal('non_binary'), v.literal('lesbian'), v.literal('other'), v.literal('transgender')
+          v.literal('male'), v.literal('female'), v.literal('non_binary'), v.literal('lesbian'), v.literal('other'), v.literal('transgender'), v.literal('bisexual'), v.literal('prefer_not_to_say')
         ))),
         relationshipIntent: v.optional(v.array(v.union(
           v.literal('long_term'), v.literal('short_term'), v.literal('fwb'), v.literal('figuring_out'),
@@ -360,6 +361,10 @@ export default defineSchema({
         lastStepKey: v.optional(v.string()),
         lastUpdatedAt: v.optional(v.number()),
       })),
+      // LEGACY COMPAT: lifeRhythm field exists in some documents but was removed from app.
+      // Added back as optional v.any() to allow Convex startup. Run migration to remove.
+      // After migration completes and verification passes, remove this field.
+      lifeRhythm: v.optional(v.any()),
     })),
 
     // 8C: Consent timestamp (required before permissions/photo upload)
