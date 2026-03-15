@@ -48,6 +48,8 @@ import type * as privateDeletion from "../privateDeletion.js";
 import type * as privateDiscover from "../privateDiscover.js";
 import type * as privateProfiles from "../privateProfiles.js";
 import type * as protectedMedia from "../protectedMedia.js";
+import type * as ranking_rankingTypes from "../ranking/rankingTypes.js";
+import type * as ranking_sharedRankingEngine from "../ranking/sharedRankingEngine.js";
 import type * as revealRequests from "../revealRequests.js";
 import type * as smartSuggestions from "../smartSuggestions.js";
 import type * as softMask from "../softMask.js";
@@ -109,6 +111,8 @@ declare const fullApi: ApiFromModules<{
   privateDiscover: typeof privateDiscover;
   privateProfiles: typeof privateProfiles;
   protectedMedia: typeof protectedMedia;
+  "ranking/rankingTypes": typeof ranking_rankingTypes;
+  "ranking/sharedRankingEngine": typeof ranking_sharedRankingEngine;
   revealRequests: typeof revealRequests;
   smartSuggestions: typeof smartSuggestions;
   softMask: typeof softMask;
