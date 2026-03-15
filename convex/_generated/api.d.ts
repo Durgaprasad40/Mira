@@ -50,6 +50,7 @@ import type * as privateProfiles from "../privateProfiles.js";
 import type * as protectedMedia from "../protectedMedia.js";
 import type * as ranking_phase1Adapter from "../ranking/phase1Adapter.js";
 import type * as ranking_phase2Adapter from "../ranking/phase2Adapter.js";
+import type * as ranking_rankingConfig from "../ranking/rankingConfig.js";
 import type * as ranking_rankingTypes from "../ranking/rankingTypes.js";
 import type * as ranking_sharedRankingEngine from "../ranking/sharedRankingEngine.js";
 import type * as revealRequests from "../revealRequests.js";
@@ -115,6 +116,7 @@ declare const fullApi: ApiFromModules<{
   protectedMedia: typeof protectedMedia;
   "ranking/phase1Adapter": typeof ranking_phase1Adapter;
   "ranking/phase2Adapter": typeof ranking_phase2Adapter;
+  "ranking/rankingConfig": typeof ranking_rankingConfig;
   "ranking/rankingTypes": typeof ranking_rankingTypes;
   "ranking/sharedRankingEngine": typeof ranking_sharedRankingEngine;
   revealRequests: typeof revealRequests;
