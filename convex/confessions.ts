@@ -83,7 +83,6 @@ export const createConfession = mutation({
       }
     }
 
-    const now = Date.now();
     const confessionId = await ctx.db.insert('confessions', {
       userId: userId,
       text: trimmed,
