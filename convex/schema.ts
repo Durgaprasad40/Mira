@@ -383,9 +383,6 @@ export default defineSchema({
         minAge: v.optional(v.number()),
         maxAge: v.optional(v.number()),
         maxDistance: v.optional(v.number()),
-        lgbtqPreference: v.optional(v.array(v.union(
-          v.literal('gay'), v.literal('lesbian'), v.literal('bisexual'), v.literal('transgender'), v.literal('prefer_not_to_say')
-        ))),
       })),
       // Progress tracking
       progress: v.optional(v.object({
