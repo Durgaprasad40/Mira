@@ -188,50 +188,8 @@ function rotationScore(viewerId: string, candidateId: string): number {
   return Math.abs(h) % 101; // 0–100
 }
 
-/** Combined weighted score. */
-function rankScore(
-  candidate: {
-    id: string;
-    lastActive: number;
-    bio: string;
-    profilePrompts?: { question: string; answer: string }[];
-    activities: string[];
-    relationshipIntent: string[];
-    isVerified: boolean;
-    city?: string;
-    height?: number;
-    jobTitle?: string;
-    education?: string;
-    theyLikedMe: boolean;
-    isBoosted: boolean;
-    photoCount: number;
-  },
-  currentUser: {
-    _id: string;
-    city?: string;
-    activities: string[];
-    relationshipIntent: string[];
-  },
-): number {
-  const activity    = activityScore(candidate.lastActive);
-  const complete    = completenessScore(candidate, candidate.photoCount);
-  const preference  = preferenceMatchScore(candidate, currentUser);
-  const rotation    = rotationScore(currentUser._id as string, candidate.id);
-
-  let score =
-    0.45 * activity +
-    0.35 * complete +
-    0.15 * preference +
-    0.05 * rotation;
-
-  // Bonus: they already liked the viewer — surface them first
-  if (candidate.theyLikedMe) score += 50;
-
-  // Bonus: currently boosted
-  if (candidate.isBoosted) score += 30;
-
-  return score;
-}
+// NOTE: Old rankScore function removed (P1 dead code cleanup)
+// New ranking system in discoverRanking.ts is now the only scoring logic
 
 // ---------------------------------------------------------------------------
 // getDiscoverProfiles — main swipe deck query
@@ -546,15 +504,35 @@ export const getDiscoverProfiles = query({
         rankingCurrentUser,
         trustSignals,
         limit,
-        false // useFallback - handled separately
+        false // useFallback flag - fallback logic handled below
       );
 
       // Map back to original candidate format (preserve photos, etc.)
       const rankedIds = new Set(rankedCandidates.map(c => c.id));
       const rankedMap = new Map(rankedCandidates.map((c, i) => [c.id, i]));
-      const result = candidates
+      let result = candidates
         .filter(c => rankedIds.has(c.id as string))
         .sort((a, b) => (rankedMap.get(a.id as string) || 0) - (rankedMap.get(b.id as string) || 0));
+
+      // P1 FIX: Fallback mechanism when primary pool is exhausted
+      // If we have fewer results than requested, activate fallback pool
+      // Fallback candidates must have 2+ compatibility signals
+      if (exhausted && result.length < limit) {
+        const needed = limit - result.length;
+        const usedIds = new Set(result.map(r => r.id as string));
+
+        // Find candidates not already in result that qualify for fallback
+        const fallbackCandidates = candidateProfiles
+          .filter(c => !usedIds.has(c.id) && qualifiesForFallback(c, rankingCurrentUser))
+          .slice(0, needed);
+
+        // Map fallback candidates back to original format
+        const fallbackIds = new Set(fallbackCandidates.map(c => c.id));
+        const fallbackResults = candidates.filter(c => fallbackIds.has(c.id as string));
+
+        // Append fallback results (they appear after ranked results)
+        result = [...result, ...fallbackResults];
+      }
 
       return result.slice(offset, offset + limit);
     } else {
