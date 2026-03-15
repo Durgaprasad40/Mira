@@ -7,7 +7,7 @@
  * - Do not change UX/flows without explicit unlock
  * Date locked: 2026-03-04
  */
-import React, { useState } from "react";
+import React, { useState, useRef, useEffect } from "react";
 import {
   View,
   Text,
@@ -39,6 +39,14 @@ export default function PermissionsScreen() {
   const [isRequestingLocation, setIsRequestingLocation] = useState(false);
   const [isRequestingNotifications, setIsRequestingNotifications] = useState(false);
 
+  // P1 STABILITY: Track mounted state to prevent setState after unmount
+  const isMountedRef = useRef(true);
+  useEffect(() => {
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
+
   const requestLocation = async () => {
     // P2 STABILITY: Prevent concurrent permission requests
     if (isRequestingLocation || locationGranted) return;
@@ -46,6 +54,8 @@ export default function PermissionsScreen() {
 
     try {
       const { status } = await Location.requestForegroundPermissionsAsync();
+      // P1 STABILITY: Check mounted after async
+      if (!isMountedRef.current) return;
       if (status === "granted") {
         setLocationGranted(true);
 
@@ -63,7 +73,8 @@ export default function PermissionsScreen() {
     } catch (error) {
       Alert.alert("Error", "Failed to request location permission");
     } finally {
-      setIsRequestingLocation(false);
+      // P1 STABILITY: Guard setState after async
+      if (isMountedRef.current) setIsRequestingLocation(false);
     }
   };
 
@@ -80,8 +91,11 @@ export default function PermissionsScreen() {
       [{
         text: "OK",
         onPress: () => {
-          setNotificationStatus('unavailable');
-          setIsRequestingNotifications(false);
+          // P1 STABILITY: Guard setState in Alert callback
+          if (isMountedRef.current) {
+            setNotificationStatus('unavailable');
+            setIsRequestingNotifications(false);
+          }
         }
       }]
     );

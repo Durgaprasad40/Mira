@@ -43,6 +43,14 @@ export default function BioScreen() {
   const scrollRef = useRef<ScrollView>(null);
   const bioInputRef = useRef<TextInput>(null);
 
+  // P1 STABILITY: Track mounted state to prevent setState after unmount
+  const isMountedRef = useRef(true);
+  useEffect(() => {
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
+
   // Prefill from demoProfiles if onboardingStore is empty
   useEffect(() => {
     if (isDemoMode && demoHydrated && demoProfile?.bio && !bio) {
@@ -116,7 +124,8 @@ export default function BioScreen() {
     if (__DEV__) console.log('[ONB] bio → permissions (continue)');
     setStep('permissions');
     router.push('/(onboarding)/permissions' as any);
-    setIsSubmitting(false);
+    // P1 STABILITY: Guard setState after navigation
+    if (isMountedRef.current) setIsSubmitting(false);
   };
 
   // Clear field error when user types

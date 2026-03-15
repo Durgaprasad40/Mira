@@ -7,7 +7,7 @@
  * - Do not change UX/flows without explicit unlock
  * Date locked: 2026-03-04
  */
-import React, { useState } from "react";
+import React, { useState, useRef, useEffect } from "react";
 import {
   View,
   Text,
@@ -42,6 +42,14 @@ export default function ConsentScreen() {
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   const acceptConsent = useMutation(api.auth.acceptConsent);
+
+  // P1 STABILITY: Track mounted state to prevent setState after unmount
+  const isMountedRef = useRef(true);
+  useEffect(() => {
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
 
   const handlePrivacyPolicy = () => {
     Linking.openURL(PRIVACY_POLICY_URL).catch(() => {
@@ -80,7 +88,8 @@ export default function ConsentScreen() {
     } catch (error: any) {
       Alert.alert("Error", error.message || "Failed to save consent");
     } finally {
-      setIsSubmitting(false);
+      // P1 STABILITY: Guard setState after async
+      if (isMountedRef.current) setIsSubmitting(false);
     }
   };
 

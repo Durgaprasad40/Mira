@@ -222,7 +222,7 @@ export default function LifeRhythmScreen() {
     sleepSchedule !== null &&
     coreValues.length >= 1;
 
-  const handleNext = () => {
+  const handleNext = async () => {
     // P0 STABILITY: Prevent double-tap
     if (!canContinue || isSubmitting) return;
     setIsSubmitting(true);
@@ -249,6 +249,7 @@ export default function LifeRhythmScreen() {
     });
 
     // LIVE MODE: Persist to Convex onboarding draft
+    // P1 STABILITY: Await draft save before navigation to prevent data loss
     if (!isDemoMode && userId) {
       const lifeRhythmData = {
         city: city.trim(),
@@ -258,17 +259,31 @@ export default function LifeRhythmScreen() {
         workStyle,
         coreValues,
       };
-      upsertDraft({
-        userId,
-        patch: {
-          lifeRhythm: lifeRhythmData,
-          progress: { lastStepKey: "profile-details/life-rhythm" },
-        },
-      }).catch((error) => {
+      try {
+        await upsertDraft({
+          userId,
+          patch: {
+            lifeRhythm: lifeRhythmData,
+            progress: { lastStepKey: "profile-details/life-rhythm" },
+          },
+        });
+        if (__DEV__) console.log("[ONB_DRAFT] Saved lifeRhythm:", lifeRhythmData);
+      } catch (error) {
         if (__DEV__) console.error("[LIFE_RHYTHM] Failed to save draft:", error);
-      });
-      if (__DEV__) console.log("[ONB_DRAFT] Saved lifeRhythm:", lifeRhythmData);
+        // P1 STABILITY: Block navigation on save failure, alert user
+        if (isMountedRef.current) {
+          setIsSubmitting(false);
+          Alert.alert(
+            "Save Failed",
+            "Could not save your life rhythm details. Please check your connection and try again."
+          );
+        }
+        return;
+      }
     }
+
+    // P1 STABILITY: Check mounted before continuing (async gap)
+    if (!isMountedRef.current) return;
 
     // Navigate
     if (isEditFromReview) {
@@ -279,7 +294,7 @@ export default function LifeRhythmScreen() {
       setStep("life_rhythm");
       router.push("/(onboarding)/preferences" as any);
     }
-    setIsSubmitting(false);
+    if (isMountedRef.current) setIsSubmitting(false);
   };
 
   const handlePrevious = () => {

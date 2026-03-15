@@ -10,7 +10,7 @@
  * UNLOCKED: 2026-03-14 for Life Rhythm page addition (per explicit user request)
  * Changed navigation: lifestyle -> life-rhythm (instead of preferences)
  */
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useState, useRef } from "react";
 import {
   View,
   Text,
@@ -75,6 +75,14 @@ export default function ProfileDetailsLifestyleScreen() {
   // P0 STABILITY: Prevent double-submission on rapid taps
   const [isSubmitting, setIsSubmitting] = useState(false);
 
+  // P1 STABILITY: Track mounted state to prevent setState after unmount
+  const isMountedRef = useRef(true);
+  useEffect(() => {
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
+
   // STABILITY FIX: Wait for Convex hydration before rendering form
   // This prevents data loss when user navigates before hydration completes
   if (!isDemoMode && !convexHydrated) {
@@ -121,7 +129,7 @@ export default function ProfileDetailsLifestyleScreen() {
     }
   }, [demoHydrated, demoProfile]);
 
-  const handleNext = () => {
+  const handleNext = async () => {
     // P0 STABILITY: Prevent double-tap
     if (isSubmitting) return;
     setIsSubmitting(true);
@@ -143,6 +151,7 @@ export default function ProfileDetailsLifestyleScreen() {
     }
 
     // LIVE MODE: Persist to Convex onboarding draft
+    // P1 STABILITY: Await draft save before navigation to prevent data loss
     if (!isDemoMode && userId) {
       const lifestyle: Record<string, any> = {};
       if (smoking) lifestyle.smoking = smoking;
@@ -162,29 +171,43 @@ export default function ProfileDetailsLifestyleScreen() {
             lifestyleKeys: Object.keys(lifestyle),
           });
         }
-        upsertDraft({
-          userId,
-          patch: {
-            lifestyle,
-            progress: { lastStepKey: 'profile-details/lifestyle' },
-          },
-        }).catch((error) => {
+        try {
+          await upsertDraft({
+            userId,
+            patch: {
+              lifestyle,
+              progress: { lastStepKey: 'profile-details/lifestyle' },
+            },
+          });
+        } catch (error) {
           if (__DEV__) console.error('[LIFESTYLE] Failed to save draft:', error);
-        });
+          // P1 STABILITY: Block navigation on save failure, alert user
+          if (isMountedRef.current) {
+            setIsSubmitting(false);
+            Alert.alert(
+              'Save Failed',
+              'Could not save your lifestyle details. Please check your connection and try again.'
+            );
+          }
+          return;
+        }
       }
     }
+
+    // P1 STABILITY: Check mounted before continuing (async gap)
+    if (!isMountedRef.current) return;
 
     // CENTRAL EDIT HUB: Return to Review if editing from there
     if (isEditFromReview) {
       if (__DEV__) console.log('[ONB] profile-details/lifestyle → review (editFromReview)');
       router.replace('/(onboarding)/review' as any);
-      setIsSubmitting(false);
+      if (isMountedRef.current) setIsSubmitting(false);
       return;
     }
 
     if (__DEV__) console.log('[ONB] profile-details/lifestyle → life-rhythm');
     router.push("/(onboarding)/profile-details/life-rhythm");
-    setIsSubmitting(false);
+    if (isMountedRef.current) setIsSubmitting(false);
   };
 
   const handlePrevious = () => {
