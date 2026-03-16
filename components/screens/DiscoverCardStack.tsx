@@ -261,6 +261,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   // Random Match popup state (F2-D)
   const [showRandomMatchPopup, setShowRandomMatchPopup] = useState(false);
   const randomMatchPopupShownRef = useRef(false); // Anti-spam: one popup per component lifecycle
+  const randomMatchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null); // DL-004: cleanup on unmount
 
   // Super-like star-burst animation state
   const [showSuperLikeAnimation, setShowSuperLikeAnimation] = useState(false);
@@ -336,6 +337,11 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       // Clean up locks so a future remount starts fresh
       navigatingRef.current = false;
       swipeLockRef.current = false;
+      // DL-004: Clear random match timer on unmount
+      if (randomMatchTimerRef.current) {
+        clearTimeout(randomMatchTimerRef.current);
+        randomMatchTimerRef.current = null;
+      }
     };
   }, []);
 
@@ -519,7 +525,10 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   useEffect(() => {
     const filterKey = JSON.stringify(intentFilters);
     if (isPhase2 && prevFilterRef.current !== filterKey) {
-      setIndex(0);
+      // DL-006: Skip index reset if swipe is in progress to prevent race condition
+      if (!swipeLockRef.current) {
+        setIndex(0);
+      }
       // Track Phase-2 intent filter selection (use first key for backward compat)
       trackEvent({ name: 'phase2_intent_filter_selected', intentKey: intentFilters[0] ?? 'all' });
       prevFilterRef.current = filterKey;
@@ -692,12 +701,17 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       .map((p) => p.userId ?? p.id)
       .filter(Boolean) as Id<'users'>[];
 
-    if (viewedUserIds.length > 0) {
-      recordImpressionsMutation({
-        viewedUserIds,
-      }).catch(() => {
-        // Silently ignore errors - impression recording is non-critical
-      });
+    // DL-007: Batch into chunks of 10 to reduce backend load
+    const BATCH_SIZE = 10;
+    for (let i = 0; i < viewedUserIds.length; i += BATCH_SIZE) {
+      const batch = viewedUserIds.slice(i, i + BATCH_SIZE);
+      if (batch.length > 0) {
+        recordImpressionsMutation({
+          viewedUserIds: batch,
+        }).catch(() => {
+          // Silently ignore errors - impression recording is non-critical
+        });
+      }
     }
   }, [isPhase2, displayProfiles, userId, recordImpressionsMutation]);
 
@@ -791,8 +805,13 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
         if (shouldTriggerRandomMatch && mountedRef.current && isFocusedRef.current) {
           // Anti-spam: mark as shown in this component lifecycle
           randomMatchPopupShownRef.current = true;
+          // DL-004: Clear any existing timer before scheduling new one
+          if (randomMatchTimerRef.current) {
+            clearTimeout(randomMatchTimerRef.current);
+          }
           // Defer popup slightly to let swipe animation complete
-          setTimeout(() => {
+          randomMatchTimerRef.current = setTimeout(() => {
+            randomMatchTimerRef.current = null;
             if (mountedRef.current && isFocusedRef.current) {
               setShowRandomMatchPopup(true);
               if (__DEV__) console.log('[F2-D] Random match popup shown');
@@ -929,7 +948,11 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
         }
       } catch (error: any) {
         if (!mountedRef.current) return;
-        Toast.show("Something went wrong. Please try again.");
+        // DL-003: Don't show error toast for timeout - card already advanced and swipe likely recorded server-side
+        const isTimeout = error?.message === "Swipe timed out";
+        if (!isTimeout) {
+          Toast.show("Something went wrong. Please try again.");
+        }
       } finally {
         releaseSwipeLock(activeSwipeId);
       }
@@ -971,7 +994,8 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
           return;
         }
         // B4 fix: guard against unmount before calling handleSwipe
-        if (!mountedRef.current) {
+        // DL-005: Also guard against focus loss during animation
+        if (!mountedRef.current || !isFocusedRef.current) {
           releaseSwipeLock(swipeId);
           return;
         }
