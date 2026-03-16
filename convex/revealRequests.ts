@@ -1,18 +1,29 @@
 import { v } from 'convex/values';
 import { mutation, query } from './_generated/server';
+import { resolveUserIdByAuthId } from './helpers';
 
 // Send a reveal request
 export const sendRequest = mutation({
   args: {
-    fromUserId: v.id('users'),
+    // REVEAL-P0-001 FIX: Removed fromUserId - now derived from server auth
     toUserId: v.id('users'),
   },
   handler: async (ctx, args) => {
+    // REVEAL-P0-001 FIX: Derive sender identity from server auth
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) {
+      return { success: false, error: 'Unauthorized: authentication required' };
+    }
+    const fromUserId = await resolveUserIdByAuthId(ctx, identity.subject);
+    if (!fromUserId) {
+      return { success: false, error: 'Unauthorized: user not found' };
+    }
+
     // Check if a request already exists in this direction
     const existing = await ctx.db
       .query('revealRequests')
       .withIndex('by_from_to', (q) =>
-        q.eq('fromUserId', args.fromUserId).eq('toUserId', args.toUserId)
+        q.eq('fromUserId', fromUserId).eq('toUserId', args.toUserId)
       )
       .first();
 
@@ -33,7 +44,7 @@ export const sendRequest = mutation({
     }
 
     const requestId = await ctx.db.insert('revealRequests', {
-      fromUserId: args.fromUserId,
+      fromUserId: fromUserId,
       toUserId: args.toUserId,
       status: 'pending',
       createdAt: Date.now(),
@@ -47,13 +58,23 @@ export const sendRequest = mutation({
 export const respondToRequest = mutation({
   args: {
     requestId: v.id('revealRequests'),
-    responderId: v.id('users'),
+    // REVEAL-P0-002 FIX: Removed responderId - now derived from server auth
     status: v.union(v.literal('accepted'), v.literal('declined')),
   },
   handler: async (ctx, args) => {
+    // REVEAL-P0-002 FIX: Derive responder identity from server auth
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) {
+      throw new Error('Unauthorized: authentication required');
+    }
+    const responderId = await resolveUserIdByAuthId(ctx, identity.subject);
+    if (!responderId) {
+      throw new Error('Unauthorized: user not found');
+    }
+
     const request = await ctx.db.get(args.requestId);
     if (!request) throw new Error('Request not found');
-    if (request.toUserId !== args.responderId) {
+    if (request.toUserId !== responderId) {
       throw new Error('Not authorized to respond to this request');
     }
     if (request.status !== 'pending') {
@@ -129,22 +150,32 @@ export const getPendingReceived = query({
 // Get mutual reveal photos — ONLY returns Face 1 photos if both directions accepted
 export const getMutualRevealPhotos = query({
   args: {
-    userId: v.id('users'),
+    // REVEAL-P0-003 FIX: Removed userId - now derived from server auth
     otherUserId: v.id('users'),
   },
   handler: async (ctx, args) => {
+    // REVEAL-P0-003 FIX: Derive caller identity from server auth
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) {
+      return { revealed: false, photos: [] };
+    }
+    const userId = await resolveUserIdByAuthId(ctx, identity.subject);
+    if (!userId) {
+      return { revealed: false, photos: [] };
+    }
+
     // Verify both directions are accepted
     const sentRequest = await ctx.db
       .query('revealRequests')
       .withIndex('by_from_to', (q) =>
-        q.eq('fromUserId', args.userId).eq('toUserId', args.otherUserId)
+        q.eq('fromUserId', userId).eq('toUserId', args.otherUserId)
       )
       .first();
 
     const receivedRequest = await ctx.db
       .query('revealRequests')
       .withIndex('by_from_to', (q) =>
-        q.eq('fromUserId', args.otherUserId).eq('toUserId', args.userId)
+        q.eq('fromUserId', args.otherUserId).eq('toUserId', userId)
       )
       .first();
 

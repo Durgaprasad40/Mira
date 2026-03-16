@@ -837,6 +837,20 @@ export const markVerified = mutation({
     verificationPhotoId: v.id("_storage"),
   },
   handler: async (ctx, args) => {
+    // IDOR-P0-001 FIX: Restrict to admin users only
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) {
+      throw new Error("Unauthorized: authentication required");
+    }
+    const callerId = await resolveUserIdByAuthId(ctx, identity.subject);
+    if (!callerId) {
+      throw new Error("Unauthorized: user not found");
+    }
+    const caller = await ctx.db.get(callerId);
+    if (!caller?.isAdmin) {
+      throw new Error("Unauthorized: Admin access required");
+    }
+
     await ctx.db.patch(args.userId, {
       isVerified: true,
       verificationPhotoId: args.verificationPhotoId,
@@ -1295,6 +1309,12 @@ export const completeOnboarding = mutation({
     // This ensures users have explicitly accepted terms before entering the app
     if (!user.consentAcceptedAt) {
       throw new Error("Consent required: please accept the data consent agreement before completing onboarding");
+    }
+
+    // ONB-P0-002 FIX: Enforce face verification before onboarding completion
+    // Only verified users can complete onboarding - PENDING status is not allowed
+    if (user.faceVerificationStatus !== 'verified') {
+      throw new Error("Face verification required: please complete face verification before continuing");
     }
 
     // Server-side validation: pets max 3

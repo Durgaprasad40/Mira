@@ -777,23 +777,18 @@ export default function FaceVerificationScreen() {
 
           {verificationState === 'pending' && (
             <>
+              {/* ONB-P0-001 FIX: Block onboarding progression for PENDING status */}
+              {/* Users must wait for manual review approval or retry verification */}
               <View style={styles.pendingInfo}>
                 <Text style={styles.pendingInfoText}>
-                  Manual review may take a few minutes or hours. You can continue setting up your profile and using the app while we verify your identity.
+                  Your verification is under manual review. Please wait for approval or retake your selfie for faster processing.
                 </Text>
               </View>
               <Button
-                title="Continue to Profile Setup"
-                variant="primary"
-                onPress={handlePendingContinue}
-                fullWidth
-              />
-              <Button
                 title="Retake Selfie"
-                variant="outline"
+                variant="primary"
                 onPress={handleRetry}
                 fullWidth
-                style={{ marginTop: 8 }}
               />
             </>
           )}

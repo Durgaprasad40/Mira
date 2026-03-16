@@ -1551,6 +1551,11 @@ export const validateSessionFull = query({
       return { valid: false, reason: "user_deleted", sessionId: session._id };
     }
 
+    // AUTH-P0-001 FIX: Block banned users from passing session validation
+    if (user.isBanned) {
+      return { valid: false, reason: "user_banned", sessionId: session._id };
+    }
+
     // Session is valid
     return {
       valid: true,
