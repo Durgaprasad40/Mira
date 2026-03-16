@@ -491,14 +491,14 @@ export default function EditProfileScreen() {
         return;
       }
       const convexUserId = currentUser?._id;
-      if (!convexUserId || !togglePhotoBlur) return;
+      if (!convexUserId || !togglePhotoBlur || !userId) return;
       // EXTRA GUARD: Block demo IDs (only startsWith to avoid false positives)
       if (typeof convexUserId === 'string' && convexUserId.startsWith('demo_')) {
         if (__DEV__) console.log('[DEMO GUARD] Blocked togglePhotoBlur (off)', { file: 'edit-profile.tsx' });
         setBlurEnabled(false);
         return;
       }
-      togglePhotoBlur({ userId: convexUserId, blurred: false })
+      togglePhotoBlur({ authUserId: userId, blurred: false })
         .then(() => setBlurEnabled(false))
         .catch((err: any) => Alert.alert('Error', err.message));
     }
@@ -513,7 +513,7 @@ export default function EditProfileScreen() {
       return;
     }
     const convexUserId = currentUser?._id;
-    if (!convexUserId || !togglePhotoBlur) return;
+    if (!convexUserId || !togglePhotoBlur || !userId) return;
     // EXTRA GUARD: Block demo IDs (only startsWith to avoid false positives)
     if (typeof convexUserId === 'string' && convexUserId.startsWith('demo_')) {
       if (__DEV__) console.log('[DEMO GUARD] Blocked togglePhotoBlur (on)', { file: 'edit-profile.tsx' });
@@ -521,7 +521,7 @@ export default function EditProfileScreen() {
       return;
     }
     try {
-      await togglePhotoBlur({ userId: convexUserId, blurred: true });
+      await togglePhotoBlur({ authUserId: userId, blurred: true });
       setBlurEnabled(true);
     } catch (err: any) {
       Alert.alert('Error', err.message);

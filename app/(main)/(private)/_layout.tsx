@@ -96,6 +96,22 @@ export default function PrivateLayout() {
     };
   }, []);
 
+  // APP-P1-003 FIX: Auth guard - redirect unauthenticated users
+  useEffect(() => {
+    if (!mountedRef.current) return;
+    if (didRedirectRef.current) return;
+    if (!hasHydrated) return;
+    if (isDemoMode) return; // Demo mode uses local state
+
+    if (!userId) {
+      didRedirectRef.current = true;
+      requestAnimationFrame(() => {
+        if (!mountedRef.current) return;
+        router.replace(PHASE1_DISCOVER_ROUTE);
+      });
+    }
+  }, [userId, hasHydrated, router]);
+
   // 🚨 CRITICAL: Collapse phantom "/" route inside Phase-2
   // Expo Router creates an implicit "/" entry before the real Phase-2 home.
   // This causes double back gestures. Normalize immediately to desire-land.

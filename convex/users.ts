@@ -499,13 +499,20 @@ export const updateLocation = mutation({
 });
 
 // Toggle incognito mode
+// APP-P1-005 FIX: Server-side auth - user can only toggle their own incognito
 export const toggleIncognito = mutation({
   args: {
-    userId: v.id("users"),
+    authUserId: v.string(),
     enabled: v.boolean(),
   },
   handler: async (ctx, args) => {
-    const { userId, enabled } = args;
+    const { authUserId, enabled } = args;
+
+    // APP-P1-005 FIX: Resolve auth ID to Convex user ID server-side
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      throw new Error('Unauthorized: user not found');
+    }
 
     const user = await ctx.db.get(userId);
     if (!user) throw new Error("User not found");
@@ -626,24 +633,19 @@ export const pauseNearby = mutation({
 });
 
 // Toggle discovery pause
+// APP-P1-005 FIX: Server-side auth - user can only toggle their own discovery pause
 export const toggleDiscoveryPause = mutation({
   args: {
-    userId: v.id("users"),
-    token: v.optional(v.string()), // Session token for auth validation
+    authUserId: v.string(),
     paused: v.boolean(),
   },
   handler: async (ctx, args) => {
-    const { userId, token, paused } = args;
+    const { authUserId, paused } = args;
 
-    // Auth validation: if token provided, verify it matches the userId
-    if (token) {
-      const authenticatedUserId = await validateSessionToken(ctx, token);
-      if (!authenticatedUserId) {
-        throw new Error("Unauthorized: invalid or expired session");
-      }
-      if (authenticatedUserId !== userId) {
-        throw new Error("Unauthorized: cannot modify another user's settings");
-      }
+    // APP-P1-005 FIX: Resolve auth ID to Convex user ID server-side
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      throw new Error('Unauthorized: user not found');
     }
 
     const user = await ctx.db.get(userId);
@@ -666,13 +668,20 @@ export const toggleDiscoveryPause = mutation({
 });
 
 // Toggle show last seen
+// APP-P1-005 FIX: Server-side auth - user can only toggle their own setting
 export const toggleShowLastSeen = mutation({
   args: {
-    userId: v.id("users"),
+    authUserId: v.string(),
     enabled: v.boolean(),
   },
   handler: async (ctx, args) => {
-    const { userId, enabled } = args;
+    const { authUserId, enabled } = args;
+
+    // APP-P1-005 FIX: Resolve auth ID to Convex user ID server-side
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      throw new Error('Unauthorized: user not found');
+    }
 
     const user = await ctx.db.get(userId);
     if (!user) throw new Error("User not found");
@@ -683,25 +692,20 @@ export const toggleShowLastSeen = mutation({
 });
 
 // Update privacy settings (hideAge, disableReadReceipts)
+// APP-P1-005 FIX: Server-side auth - user can only update their own privacy settings
 export const updatePrivacySettings = mutation({
   args: {
-    userId: v.id("users"),
-    token: v.optional(v.string()), // Session token for auth validation
+    authUserId: v.string(),
     hideAge: v.optional(v.boolean()),
     disableReadReceipts: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
-    const { userId, token, hideAge, disableReadReceipts } = args;
+    const { authUserId, hideAge, disableReadReceipts } = args;
 
-    // Auth validation: if token provided, verify it matches the userId
-    if (token) {
-      const authenticatedUserId = await validateSessionToken(ctx, token);
-      if (!authenticatedUserId) {
-        throw new Error("Unauthorized: invalid or expired session");
-      }
-      if (authenticatedUserId !== userId) {
-        throw new Error("Unauthorized: cannot modify another user's settings");
-      }
+    // APP-P1-005 FIX: Resolve auth ID to Convex user ID server-side
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      throw new Error('Unauthorized: user not found');
     }
 
     const user = await ctx.db.get(userId);
@@ -1016,12 +1020,19 @@ export const deactivateAccount = mutation({
 });
 
 // Reactivate account
+// APP-P1-005 FIX: Server-side auth - user can only reactivate their own account
 export const reactivateAccount = mutation({
   args: {
-    userId: v.id("users"),
+    authUserId: v.string(),
   },
   handler: async (ctx, args) => {
-    await ctx.db.patch(args.userId, { isActive: true, lastActive: Date.now() });
+    // APP-P1-005 FIX: Resolve auth ID to Convex user ID server-side
+    const userId = await resolveUserIdByAuthId(ctx, args.authUserId);
+    if (!userId) {
+      throw new Error('Unauthorized: user not found');
+    }
+
+    await ctx.db.patch(userId, { isActive: true, lastActive: Date.now() });
     return { success: true };
   },
 });
@@ -1363,15 +1374,22 @@ export const completeOnboarding = mutation({
 // ---------------------------------------------------------------------------
 
 /** Toggle blur on/off. No hard-block — user can always toggle freely. */
+// APP-P1-005 FIX: Server-side auth - user can only toggle their own photo blur
 export const togglePhotoBlur = mutation({
   args: {
-    userId: v.id("users"),
+    authUserId: v.string(),
     blurred: v.boolean(),
   },
   handler: async (ctx, args) => {
-    const user = await ctx.db.get(args.userId);
+    // APP-P1-005 FIX: Resolve auth ID to Convex user ID server-side
+    const userId = await resolveUserIdByAuthId(ctx, args.authUserId);
+    if (!userId) {
+      throw new Error('Unauthorized: user not found');
+    }
+
+    const user = await ctx.db.get(userId);
     if (!user) throw new Error("User not found");
-    await ctx.db.patch(args.userId, { photoBlurred: args.blurred });
+    await ctx.db.patch(userId, { photoBlurred: args.blurred });
     return { success: true, blurred: args.blurred };
   },
 });

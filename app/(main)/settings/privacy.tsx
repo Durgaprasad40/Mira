@@ -69,7 +69,7 @@ export default function PrivacySettingsScreen() {
       // Sync to backend in live mode
       if (!isDemoMode && userId && currentUser?._id) {
         try {
-          await toggleDiscoveryPause({ userId: currentUser._id, token: token ?? undefined, paused: newValue });
+          await toggleDiscoveryPause({ authUserId: userId, paused: newValue });
         } catch {
           Toast.show("Couldn't update setting. Please try again.");
           setHideFromDiscover(!newValue); // Revert on error
@@ -122,7 +122,7 @@ export default function PrivacySettingsScreen() {
     // Sync to backend in live mode
     if (!isDemoMode && userId && currentUser?._id) {
       try {
-        await updatePrivacySettings({ userId: currentUser._id, token: token ?? undefined, hideAge: newValue });
+        await updatePrivacySettings({ authUserId: userId, hideAge: newValue });
       } catch {
         Toast.show("Couldn't update setting. Please try again.");
         setHideAge(!newValue); // Revert on error
@@ -136,7 +136,7 @@ export default function PrivacySettingsScreen() {
     // Sync to backend in live mode
     if (!isDemoMode && userId && currentUser?._id) {
       try {
-        await updatePrivacySettings({ userId: currentUser._id, token: token ?? undefined, disableReadReceipts: newValue });
+        await updatePrivacySettings({ authUserId: userId, disableReadReceipts: newValue });
       } catch {
         Toast.show("Couldn't update setting. Please try again.");
         setDisableReadReceipts(!newValue); // Revert on error

@@ -370,6 +370,15 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
       console.warn('[AUTH] logout: failed to reset discoverStore', error);
     }
 
+    // APP-P1-007 FIX: Clear blockStore to prevent cross-user blocked list bleed
+    try {
+      const { useBlockStore } = require('@/stores/blockStore');
+      useBlockStore.getState().clearBlocks();
+      if (__DEV__) console.log('[AUTH] logout: cleared blockStore');
+    } catch (error) {
+      console.warn('[AUTH] logout: failed to reset blockStore', error);
+    }
+
     // STEP 4: Finish logout - clear in-memory state
     get().finishLogout();
   },

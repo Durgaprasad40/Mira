@@ -299,6 +299,8 @@ export async function validateSessionToken(
   if (!user) return null;
   if (!user.isActive) return null;
   if (user.deletedAt) return null;
+  // APP-P1-004 FIX: Deny session for banned users
+  if (user.isBanned) return null;
 
   // Check mass session revocation
   if (user.sessionsRevokedAt && session.createdAt < user.sessionsRevokedAt) {
