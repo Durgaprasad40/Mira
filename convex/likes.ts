@@ -293,15 +293,21 @@ export const swipe = mutation({
 
       // SMART MATCHING: Check for T&D connected status
       // Only check if both users have authUserId (required for mixed-type query)
+      // Skip T&D matching if target has passed current user
+      // (Current user's pass toward target is impossible here - blocked by existingLike check)
       let hasTodConn = false;
       if (fromUser.authUserId && toUser?.authUserId) {
-        hasTodConn = await hasTodConnection(
-          ctx,
-          fromUserId,
-          fromUser.authUserId,
-          toUserId,
-          toUser.authUserId
-        );
+        const targetHasPassed = reciprocalLike?.action === 'pass';
+
+        if (!targetHasPassed) {
+          hasTodConn = await hasTodConnection(
+            ctx,
+            fromUserId,
+            fromUser.authUserId,
+            toUserId,
+            toUser.authUserId
+          );
+        }
       }
 
       const isMatchEligible = hasReciprocalLike || hasTodConn;
