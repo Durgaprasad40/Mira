@@ -396,8 +396,12 @@ export default function AdditionalPhotosScreen() {
   }, [photos]);
 
   // Count valid photos from backend + any in-flight uploads/previews
+  // FIX: Only count previews for slots that DON'T have a backend URL yet
+  // This prevents double-counting when preview persists while backend URL arrives
   const backendPhotoCount = backendPhotos?.length ?? 0;
-  const pendingPreviewCount = slotPreviewUriByIndex.filter(uri => uri !== null).length;
+  const pendingPreviewCount = slotPreviewUriByIndex.filter(
+    (uri, index) => uri !== null && !backendUrlByIndex[index]
+  ).length;
   const photoCount = backendPhotoCount + pendingPreviewCount;
 
   // Find first empty slot index (check backend URLs + previews)
