@@ -55,6 +55,10 @@ export const createConfession = mutation({
     if (trimmed.length < 10) {
       throw new Error('Confession must be at least 10 characters.');
     }
+    // P2-1 FIX: Add max length validation to prevent DoS/database bloat
+    if (trimmed.length > 5000) {
+      throw new Error('Confession must be 5000 characters or less.');
+    }
     if (PHONE_PATTERN.test(trimmed)) {
       throw new Error('Do not include phone numbers in confessions.');
     }

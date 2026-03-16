@@ -615,9 +615,12 @@ export const loginWithEmail = mutation({
     const { email, password } = args;
     const now = Date.now();
 
+    // P2-3 FIX: Normalize email to match registration (which uses toLowerCase().trim())
+    const normalizedEmail = email.toLowerCase().trim();
+
     const user = await ctx.db
       .query("users")
-      .withIndex("by_email", (q) => q.eq("email", email))
+      .withIndex("by_email", (q) => q.eq("email", normalizedEmail))
       .first();
 
     if (!user) {
