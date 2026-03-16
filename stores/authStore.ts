@@ -327,7 +327,10 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
         useConfessionStore.setState({
           seeded: false,
           confessions: [],
-          myReplies: [],
+          userReactions: {},
+          replies: {},
+          chats: [],
+          secretCrushes: [],
           confessionThreads: {},
           reportedIds: [],
           blockedIds: [],
