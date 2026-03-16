@@ -107,6 +107,7 @@ export const sendProtectedImage = mutation({
 });
 
 // Legacy: getMediaUrl → uses new media/permissions tables
+// MSG-P1-001 FIX: Server-side auth - verify caller matches requested userId
 export const getMediaUrl = query({
   args: {
     messageId: v.id('messages'),
@@ -115,6 +116,17 @@ export const getMediaUrl = query({
   handler: async (ctx, args) => {
     const { messageId, userId } = args;
     const now = Date.now();
+
+    // MSG-P1-001 FIX: Server-side auth verification
+    // Verify caller identity matches the requested userId
+    const identity = await ctx.auth.getUserIdentity();
+    if (identity?.subject) {
+      const callerUserId = await resolveUserIdByAuthId(ctx, identity.subject);
+      if (callerUserId !== userId) {
+        // Caller is not authorized to view media as this user
+        return null;
+      }
+    }
 
     const message = await ctx.db.get(messageId);
     if (!message) return null;
