@@ -36,7 +36,7 @@ import { isDemoMode } from '@/hooks/useConvex';
 import { Ionicons } from '@expo/vector-icons';
 import { OnboardingProgressHeader } from '@/components/OnboardingProgressHeader';
 import { checkPhotoExists, getPhotoFileState, type PhotoFileState } from '@/lib/photoFileGuard';
-import { uploadPhotoToBackend, syncPhotosFromBackend } from '@/services/photoSync';
+import { uploadPhotoToBackend } from '@/services/photoSync';
 import { useMutation, useQuery } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { Id } from '@/convex/_generated/dataModel';
@@ -166,6 +166,24 @@ export default function AdditionalPhotosScreen() {
         }
       });
       setBackendUrlByIndex(newBackendUrls);
+
+      // FIX 1: Clear preview for any slot that now has a backend URL
+      // This prevents the "flash" where preview is cleared before backend URL is ready
+      setSlotPreviewUriByIndex((prevPreviews) => {
+        const updated = [...prevPreviews];
+        let changed = false;
+        for (let i = 0; i < TOTAL_SLOTS; i++) {
+          if (newBackendUrls[i] && prevPreviews[i]) {
+            // Backend URL is now available for this slot - safe to clear preview
+            updated[i] = null;
+            changed = true;
+            if (__DEV__) {
+              console.log(`[PHOTO_PREVIEW] Clearing preview for slot ${i} - backend URL now available`);
+            }
+          }
+        }
+        return changed ? updated : prevPreviews;
+      });
 
       if (__DEV__) {
         console.log('[PHOTO_BACKEND] Synced backend photos:', {
@@ -303,31 +321,9 @@ export default function AdditionalPhotosScreen() {
     console.log('[PHOTOS] prefilled bio from demoProfile');
   }, [demoHydrated, demoProfile, bio, bioDirty, setBio]);
 
-  // LIVE MODE: Sync photos from backend on mount to ensure local store is up-to-date
-  // This ensures photos uploaded in earlier screens are available here
-  const didSyncPhotos = React.useRef(false);
-  useEffect(() => {
-    if (didSyncPhotos.current || isDemoMode || !userId) return;
-    didSyncPhotos.current = true;
-
-    if (__DEV__) {
-      console.log('[PHOTOS] Syncing photos from backend on mount (skipDownload=true for onboarding)...');
-    }
-
-    syncPhotosFromBackend(userId, false, true) // skipDownload=true for onboarding
-      .then((result) => {
-        if (result.success) {
-          if (__DEV__) {
-            console.log(`[PHOTOS] Sync complete: ${result.photosCount} photos (backend URLs only)`);
-          }
-        } else {
-          console.warn('[PHOTOS] Sync failed:', result.message);
-        }
-      })
-      .catch((error) => {
-        console.error('[PHOTOS] Sync error:', error);
-      });
-  }, [userId]);
+  // FIX 2: Removed redundant syncPhotosFromBackend on mount
+  // The useQuery(api.photos.getUserPhotos) subscription at line 151-154 already provides
+  // reactive backend photo data. Calling syncPhotosFromBackend duplicates the same query.
 
   // Per-slot render nonce to force re-render on photo change
   const [slotNonce, setSlotNonce] = useState<number[]>(Array(TOTAL_SLOTS).fill(0));
@@ -493,15 +489,11 @@ export default function AdditionalPhotosScreen() {
 
             setUploadState(targetIndex, 'uploaded');
 
-            // Clear preview - backend will provide URL via query
-            setSlotPreviewUriByIndex((prev) => {
-              const next = [...prev];
-              next[targetIndex] = null;
-              return next;
-            });
+            // FIX 1: Do NOT clear preview here - keep it visible until backend URL arrives
+            // The preview will be cleared automatically when backendPhotos updates (see effect above)
 
             if (__DEV__) {
-              console.log(`[PHOTO_ONBOARDING] ✅ Photo uploaded to Convex: storageId=${uploadResult.storageId}, no local storage`);
+              console.log(`[PHOTO_ONBOARDING] ✅ Photo uploaded to Convex: storageId=${uploadResult.storageId}, keeping preview until backend URL ready`);
             }
           }
 
@@ -535,12 +527,7 @@ export default function AdditionalPhotosScreen() {
             }
             setUploadState(targetIndex, 'uploaded');
 
-            // Clear preview after upload
-            setSlotPreviewUriByIndex((prev) => {
-              const next = [...prev];
-              next[targetIndex] = null;
-              return next;
-            });
+            // FIX 1: Do NOT clear preview here - keep it visible until backend URL arrives
           }
 
           bumpSlot(targetIndex);
@@ -614,15 +601,10 @@ export default function AdditionalPhotosScreen() {
 
             setUploadState(targetIndex, 'uploaded');
 
-            // Clear preview - backend will provide URL via query
-            setSlotPreviewUriByIndex((prev) => {
-              const next = [...prev];
-              next[targetIndex] = null;
-              return next;
-            });
+            // FIX 1: Do NOT clear preview here - keep it visible until backend URL arrives
 
             if (__DEV__) {
-              console.log(`[PHOTO_ONBOARDING] ✅ Camera photo uploaded: storageId=${uploadResult.storageId}, no local storage`);
+              console.log(`[PHOTO_ONBOARDING] ✅ Camera photo uploaded: storageId=${uploadResult.storageId}, keeping preview until backend URL ready`);
             }
           }
 
@@ -650,12 +632,7 @@ export default function AdditionalPhotosScreen() {
             }
             setUploadState(targetIndex, 'uploaded');
 
-            // Clear preview after upload
-            setSlotPreviewUriByIndex((prev) => {
-              const next = [...prev];
-              next[targetIndex] = null;
-              return next;
-            });
+            // FIX 1: Do NOT clear preview here - keep it visible until backend URL arrives
           }
 
           bumpSlot(targetIndex);
@@ -780,11 +757,8 @@ export default function AdditionalPhotosScreen() {
                       photoId: photoToDelete._id,
                     });
 
-                    // Sync photos from backend to refresh UI
-                    if (__DEV__) {
-                      console.log('[PHOTOS_UI] Syncing photos after deletion (skipDownload=true for onboarding)...');
-                    }
-                    await syncPhotosFromBackend(userId, false, true); // skipDownload=true for onboarding
+                    // FIX 3: Removed redundant syncPhotosFromBackend after delete
+                    // The useQuery subscription will auto-update when the mutation completes
 
                     if (__DEV__) {
                       console.log('[PHOTOS_UI] removeSuccess', { index: indexToRemove });
