@@ -18,6 +18,9 @@ const RATE_LIMITS = {
 // Report threshold for hiding
 const REPORT_HIDE_THRESHOLD = 5;
 
+// TOD-P2-001 FIX: Rate limit error message
+const RATE_LIMIT_ERROR = 'Rate limit exceeded. Please try again later.';
+
 // Get trending prompts (1 truth + 1 dare), excluding expired
 export const getTrendingPrompts = query({
   args: {},
@@ -154,6 +157,18 @@ export const submitAnswer = mutation({
       throw new Error("Unauthorized");
     }
 
+    // TOD-P2-001 FIX: Enforce rate limit (10 answers per minute)
+    const now = Date.now();
+    const windowStart = now - RATE_LIMITS.answer.windowMs;
+    const recentAnswers = await ctx.db
+      .query('todAnswers')
+      .withIndex('by_user', (q) => q.eq('userId', userId))
+      .filter((q) => q.gte(q.field('createdAt'), windowStart))
+      .collect();
+    if (recentAnswers.length >= RATE_LIMITS.answer.max) {
+      throw new Error(RATE_LIMIT_ERROR);
+    }
+
     // Enforce one answer per user per prompt
     const existing = await ctx.db
       .query('todAnswers')
@@ -207,6 +222,18 @@ export const likeAnswer = mutation({
     // Validate args match identity
     if (argsLikedByUserId && argsLikedByUserId !== likedByUserId) {
       throw new Error("Unauthorized");
+    }
+
+    // TOD-P2-001 FIX: Enforce rate limit (30 reactions per minute)
+    const now = Date.now();
+    const windowStart = now - RATE_LIMITS.reaction.windowMs;
+    const recentLikes = await ctx.db
+      .query('todAnswerLikes')
+      .withIndex('by_user', (q) => q.eq('likedByUserId', likedByUserId))
+      .filter((q) => q.gte(q.field('createdAt'), windowStart))
+      .collect();
+    if (recentLikes.length >= RATE_LIMITS.reaction.max) {
+      throw new Error(RATE_LIMIT_ERROR);
     }
 
     // Check if already liked
@@ -1224,13 +1251,33 @@ export const listActivePromptsWithTop2Answers = query({
   handler: async (ctx, { viewerUserId }) => {
     const now = Date.now();
 
+    // TOD-P2-002 FIX: Get blocked user IDs for viewer (both directions)
+    let blockedUserIds = new Set<string>();
+    if (viewerUserId) {
+      const blocksOut = await ctx.db
+        .query('blocks')
+        .withIndex('by_blocker', (q) => q.eq('blockerId', viewerUserId as Id<'users'>))
+        .collect();
+      const blocksIn = await ctx.db
+        .query('blocks')
+        .withIndex('by_blocked', (q) => q.eq('blockedUserId', viewerUserId as Id<'users'>))
+        .collect();
+      blockedUserIds = new Set([
+        ...blocksOut.map((b) => b.blockedUserId as string),
+        ...blocksIn.map((b) => b.blockerId as string),
+      ]);
+    }
+
     // Get all prompts
     const allPrompts = await ctx.db.query('todPrompts').collect();
 
-    // Filter to active (not expired)
+    // Filter to active (not expired) and not from blocked users
     const activePrompts = allPrompts.filter((p) => {
       const expires = p.expiresAt ?? p.createdAt + TWENTY_FOUR_HOURS_MS;
-      return expires > now;
+      if (expires <= now) return false;
+      // TOD-P2-002 FIX: Filter out prompts from blocked users
+      if (blockedUserIds.has(p.ownerUserId as string)) return false;
+      return true;
     });
 
     // Compute totalReactionCount for each prompt (sum of all answer reactions)
@@ -1268,7 +1315,10 @@ export const listActivePromptsWithTop2Answers = query({
           .collect();
 
         // Filter: exclude hidden answers (reportCount >= 5) UNLESS viewer is the author
+        // TOD-P2-002 FIX: Also exclude answers from blocked users
         const visibleAnswers = answers.filter((a) => {
+          // TOD-P2-002 FIX: Filter out answers from blocked users
+          if (blockedUserIds.has(a.userId as string)) return false;
           const isHidden = (a.reportCount ?? 0) >= REPORT_HIDE_THRESHOLD;
           if (!isHidden) return true;
           // Author can always see their own answer

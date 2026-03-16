@@ -112,6 +112,9 @@ export function ChatTodOverlay({
     };
   }, []);
 
+  // TOD-P2-003 FIX: Track polling interval to prevent multiple concurrent intervals
+  const pollingIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+
   // Initialize game if needed
   React.useEffect(() => {
     if (!game) {
@@ -220,6 +223,12 @@ export function ChatTodOverlay({
    * it stores in memory with key 'tod_camera_answer_{conversationId}'
    */
   useEffect(() => {
+    // TOD-P2-003 FIX: Clear any existing interval before starting new one
+    if (pollingIntervalRef.current) {
+      clearInterval(pollingIntervalRef.current);
+      pollingIntervalRef.current = null;
+    }
+
     if (game?.roundPhase !== 'answering') return;
 
     const checkForCameraAnswer = () => {
@@ -254,8 +263,15 @@ export function ChatTodOverlay({
 
     // Check immediately and then poll every second
     checkForCameraAnswer();
-    const interval = setInterval(checkForCameraAnswer, 1000);
-    return () => clearInterval(interval);
+    pollingIntervalRef.current = setInterval(checkForCameraAnswer, 1000);
+
+    return () => {
+      // TOD-P2-003 FIX: Clear interval on cleanup
+      if (pollingIntervalRef.current) {
+        clearInterval(pollingIntervalRef.current);
+        pollingIntervalRef.current = null;
+      }
+    };
   }, [game?.roundPhase, conversationId, submitAnswer]);
 
   const handleSkipAnswering = useCallback(() => {
