@@ -299,7 +299,8 @@ export default function Phase2Review() {
           <Ionicons name="arrow-back" size={24} color={C.text} />
         </TouchableOpacity>
         <Text style={styles.headerTitle}>Review & Desire</Text>
-        <Text style={styles.stepLabel}>Step 4 of 4</Text>
+        {/* P2-PHOTO-001: Updated step number for 5-step flow */}
+        <Text style={styles.stepLabel}>Step 5 of 5</Text>
       </View>
 
       <ScrollView

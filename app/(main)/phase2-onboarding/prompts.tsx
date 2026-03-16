@@ -42,8 +42,9 @@ import {
 import { usePrivateProfileStore } from '@/stores/privateProfileStore';
 import { Button } from '@/components/ui';
 
-const TOTAL_STEPS = 4;
-const CURRENT_STEP = 3;
+// P2-PHOTO-001: Updated step numbers for 5-step flow
+const TOTAL_STEPS = 5;
+const CURRENT_STEP = 4;
 
 type SectionKey = 'section1' | 'section2' | 'section3' | 'section4';
 

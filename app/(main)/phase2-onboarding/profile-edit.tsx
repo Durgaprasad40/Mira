@@ -384,7 +384,8 @@ export default function Phase2ProfileEdit() {
           <Ionicons name="arrow-back" size={24} color={C.text} />
         </TouchableOpacity>
         <Text style={styles.headerTitle}>Edit Profile</Text>
-        <Text style={styles.stepLabel}>Step 2 of 4</Text>
+        {/* P2-PHOTO-001: Updated step number for 5-step flow */}
+        <Text style={styles.stepLabel}>Step 3 of 5</Text>
       </View>
 
       <KeyboardAvoidingView

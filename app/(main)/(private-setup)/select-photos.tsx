@@ -62,7 +62,8 @@ export default function SelectPhotosScreen() {
     }
   };
 
-  const canProceed = selectedPhotoIds.length >= 1;
+  // P2-PHOTO-001 FIX: Minimum 2 photos required (matches profile-edit requirement)
+  const canProceed = selectedPhotoIds.length >= 2;
 
   return (
     <View style={[styles.container, { paddingTop: insets.top }]}>
@@ -72,11 +73,12 @@ export default function SelectPhotosScreen() {
           <Ionicons name="close" size={24} color={C.text} />
         </TouchableOpacity>
         <Text style={styles.headerTitle}>Select Photos</Text>
-        <Text style={styles.stepLabel}>Step 1 of 4</Text>
+        {/* P2-PHOTO-001: Updated step number for phase2-onboarding flow */}
+        <Text style={styles.stepLabel}>Step 2 of 5</Text>
       </View>
 
       <Text style={styles.subtitle}>
-        Choose photos from your main profile. They'll be blurred for your private profile — originals stay private.
+        Choose which photos from your main profile to use in Private Mode. Select at least 2 photos to continue.
       </Text>
 
       {loading ? (
@@ -103,10 +105,11 @@ export default function SelectPhotosScreen() {
       <View style={[styles.bottomBar, { paddingBottom: insets.bottom + 16 }]}>
         <TouchableOpacity
           style={[styles.nextBtn, !canProceed && styles.nextBtnDisabled]}
-          onPress={() => canProceed && router.push('/(main)/(private-setup)/blur-preview' as any)}
+          onPress={() => canProceed && router.push('/(main)/phase2-onboarding/profile-edit' as any)}
           disabled={!canProceed}
         >
-          <Text style={styles.nextBtnText}>Continue to Preview</Text>
+          {/* P2-PHOTO-001 FIX: Navigate to profile-edit instead of blur-preview */}
+          <Text style={styles.nextBtnText}>Continue to Edit Profile</Text>
           <Ionicons name="arrow-forward" size={18} color="#FFFFFF" />
         </TouchableOpacity>
       </View>
