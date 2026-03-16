@@ -289,6 +289,9 @@ export default function PrivateProfileScreen() {
   const [missingPhotos, setMissingPhotos] = useState<Set<string>>(new Set());
   // FIX: Track which specific slot is loading (null = none)
   const [addingSlotIndex, setAddingSlotIndex] = useState<number | null>(null);
+  // PROFILE-P2-002 FIX: Track concurrent photo sync operations (reorder/remove)
+  const syncingPhotoCountRef = useRef(0);
+  const [isSyncingPhotos, setIsSyncingPhotos] = useState(false);
 
   // Track last checked photos to avoid redundant checks
   const lastCheckedRef = useRef<string>('');
@@ -445,12 +448,15 @@ export default function PrivateProfileScreen() {
 
   /**
    * Set a photo as main (move to index 0) and sync to backend
+   * PROFILE-P2-001 FIX: Read fresh store state to avoid stale memoized data
    */
   const handleSetAsMain = useCallback(
     async (index: number) => {
-      if (index === 0 || index >= validPhotos.length) return;
+      // PROFILE-P2-001 FIX: Read current store state, not stale memoized validPhotos
+      const currentPhotos = usePrivateProfileStore.getState().selectedPhotoUrls.filter(isValidPhotoUrl);
+      if (index === 0 || index >= currentPhotos.length) return;
 
-      const newOrder = [...validPhotos];
+      const newOrder = [...currentPhotos];
       const [photo] = newOrder.splice(index, 1);
       newOrder.unshift(photo);
 
@@ -458,6 +464,9 @@ export default function PrivateProfileScreen() {
 
       // Sync reorder to backend (auth-safe mutation)
       if (!isDemoMode && userId) {
+        // PROFILE-P2-002 FIX: Track sync in progress
+        syncingPhotoCountRef.current++;
+        if (mountedRef.current) setIsSyncingPhotos(true);
         try {
           const result = await updatePrivateProfile({
             authUserId: userId,
@@ -470,6 +479,11 @@ export default function PrivateProfileScreen() {
           if (__DEV__) {
             console.error('[PrivateProfile] Backend sync failed:', syncError);
           }
+        } finally {
+          syncingPhotoCountRef.current--;
+          if (mountedRef.current && syncingPhotoCountRef.current === 0) {
+            setIsSyncingPhotos(false);
+          }
         }
       }
 
@@ -477,21 +491,48 @@ export default function PrivateProfileScreen() {
         console.log('[PrivateProfile] Set photo as main:', { index });
       }
     },
-    [validPhotos, setSelectedPhotos, isDemoMode, userId, updatePrivateProfile]
+    [setSelectedPhotos, isDemoMode, userId, updatePrivateProfile]
   );
 
   /**
    * Remove a photo and sync to backend
+   * PROFILE-P2-001 FIX: Read fresh store state to avoid stale memoized data
+   * PROFILE-P3-001 FIX: Clean up local permanent file to prevent orphaned files
    */
   const handleRemovePhoto = useCallback(
     async (index: number) => {
-      if (index < 0 || index >= validPhotos.length) return;
+      // PROFILE-P2-001 FIX: Read current store state, not stale memoized validPhotos
+      const currentPhotos = usePrivateProfileStore.getState().selectedPhotoUrls.filter(isValidPhotoUrl);
+      if (index < 0 || index >= currentPhotos.length) return;
 
-      const newPhotos = validPhotos.filter((_, i) => i !== index);
+      // PROFILE-P3-001 FIX: Capture removed photo URL before filtering
+      const removedPhotoUrl = currentPhotos[index];
+      const newPhotos = currentPhotos.filter((_, i) => i !== index);
       setSelectedPhotos([], newPhotos);
+
+      // PROFILE-P3-001 FIX: Clean up local permanent file if applicable (best-effort)
+      if (removedPhotoUrl.includes(PRIVATE_PHOTOS_DIR_NAME) && !removedPhotoUrl.startsWith('http')) {
+        try {
+          const fileToDelete = new ExpoFile(removedPhotoUrl);
+          if (fileToDelete.exists) {
+            fileToDelete.delete();
+            if (__DEV__) {
+              console.log('[PrivateProfile] Deleted local photo file:', removedPhotoUrl);
+            }
+          }
+        } catch (deleteError) {
+          // Silent fail - cleanup is best-effort, do not block UI
+          if (__DEV__) {
+            console.warn('[PrivateProfile] Failed to delete local photo:', deleteError);
+          }
+        }
+      }
 
       // Sync removal to Convex backend (auth-safe mutation)
       if (!isDemoMode && userId) {
+        // PROFILE-P2-002 FIX: Track sync in progress
+        syncingPhotoCountRef.current++;
+        if (mountedRef.current) setIsSyncingPhotos(true);
         try {
           const result = await updatePrivateProfile({
             authUserId: userId,
@@ -504,6 +545,11 @@ export default function PrivateProfileScreen() {
           if (__DEV__) {
             console.error('[PrivateProfile] Backend sync failed:', syncError);
           }
+        } finally {
+          syncingPhotoCountRef.current--;
+          if (mountedRef.current && syncingPhotoCountRef.current === 0) {
+            setIsSyncingPhotos(false);
+          }
         }
       }
 
@@ -511,22 +557,28 @@ export default function PrivateProfileScreen() {
         console.log('[PrivateProfile] Removed photo:', { index, remaining: newPhotos.length });
       }
     },
-    [validPhotos, setSelectedPhotos, isDemoMode, userId, updatePrivateProfile]
+    [setSelectedPhotos, isDemoMode, userId, updatePrivateProfile]
   );
 
   /**
    * Move photo up in order and sync to backend
+   * PROFILE-P2-001 FIX: Read fresh store state to avoid stale memoized data
    */
   const handleMoveUp = useCallback(
     async (index: number) => {
-      if (index <= 0 || index >= validPhotos.length) return;
+      // PROFILE-P2-001 FIX: Read current store state, not stale memoized validPhotos
+      const currentPhotos = usePrivateProfileStore.getState().selectedPhotoUrls.filter(isValidPhotoUrl);
+      if (index <= 0 || index >= currentPhotos.length) return;
 
-      const newOrder = [...validPhotos];
+      const newOrder = [...currentPhotos];
       [newOrder[index - 1], newOrder[index]] = [newOrder[index], newOrder[index - 1]];
       setSelectedPhotos([], newOrder);
 
       // Sync reorder to backend (auth-safe mutation)
       if (!isDemoMode && userId) {
+        // PROFILE-P2-002 FIX: Track sync in progress
+        syncingPhotoCountRef.current++;
+        if (mountedRef.current) setIsSyncingPhotos(true);
         try {
           const result = await updatePrivateProfile({
             authUserId: userId,
@@ -539,25 +591,36 @@ export default function PrivateProfileScreen() {
           if (__DEV__) {
             console.error('[PrivateProfile] Backend sync failed:', syncError);
           }
+        } finally {
+          syncingPhotoCountRef.current--;
+          if (mountedRef.current && syncingPhotoCountRef.current === 0) {
+            setIsSyncingPhotos(false);
+          }
         }
       }
     },
-    [validPhotos, setSelectedPhotos, isDemoMode, userId, updatePrivateProfile]
+    [setSelectedPhotos, isDemoMode, userId, updatePrivateProfile]
   );
 
   /**
    * Move photo down in order and sync to backend
+   * PROFILE-P2-001 FIX: Read fresh store state to avoid stale memoized data
    */
   const handleMoveDown = useCallback(
     async (index: number) => {
-      if (index < 0 || index >= validPhotos.length - 1) return;
+      // PROFILE-P2-001 FIX: Read current store state, not stale memoized validPhotos
+      const currentPhotos = usePrivateProfileStore.getState().selectedPhotoUrls.filter(isValidPhotoUrl);
+      if (index < 0 || index >= currentPhotos.length - 1) return;
 
-      const newOrder = [...validPhotos];
+      const newOrder = [...currentPhotos];
       [newOrder[index], newOrder[index + 1]] = [newOrder[index + 1], newOrder[index]];
       setSelectedPhotos([], newOrder);
 
       // Sync reorder to backend (auth-safe mutation)
       if (!isDemoMode && userId) {
+        // PROFILE-P2-002 FIX: Track sync in progress
+        syncingPhotoCountRef.current++;
+        if (mountedRef.current) setIsSyncingPhotos(true);
         try {
           const result = await updatePrivateProfile({
             authUserId: userId,
@@ -570,10 +633,15 @@ export default function PrivateProfileScreen() {
           if (__DEV__) {
             console.error('[PrivateProfile] Backend sync failed:', syncError);
           }
+        } finally {
+          syncingPhotoCountRef.current--;
+          if (mountedRef.current && syncingPhotoCountRef.current === 0) {
+            setIsSyncingPhotos(false);
+          }
         }
       }
     },
-    [validPhotos, setSelectedPhotos, isDemoMode, userId, updatePrivateProfile]
+    [setSelectedPhotos, isDemoMode, userId, updatePrivateProfile]
   );
 
   /**
@@ -867,7 +935,10 @@ export default function PrivateProfileScreen() {
         {/* Photo Grid - Full 9 Slots */}
         <View style={styles.section}>
           <View style={styles.sectionHeader}>
-            <Text style={styles.sectionTitle}>Photos ({validPhotos.length}/9)</Text>
+            <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+              <Text style={styles.sectionTitle}>Photos ({validPhotos.length}/9)</Text>
+              {isSyncingPhotos && <ActivityIndicator size="small" color={C.primary} />}
+            </View>
           </View>
 
           <View style={styles.photoGrid}>

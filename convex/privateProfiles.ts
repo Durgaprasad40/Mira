@@ -287,10 +287,23 @@ export const updateFieldsByAuthId = mutation({
  * Get private profile by auth user ID (string).
  * Resolves auth ID to Convex user ID internally.
  * Used by Phase-2 Profile tab to load backend data.
+ *
+ * PROFILE-P1-002 FIX: Strict server-side auth verification.
  */
 export const getByAuthUserId = query({
   args: { authUserId: v.string() },
   handler: async (ctx, args) => {
+    // PROFILE-P1-002 FIX: Require authentication for private profile access
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity?.subject) {
+      // No auth identity - deny access to private profile data
+      return null;
+    }
+    if (identity.subject !== args.authUserId) {
+      // Caller requesting a different user's profile - deny access
+      return null;
+    }
+
     const userId = await resolveUserIdByAuthId(ctx, args.authUserId);
     if (!userId) {
       return null;
