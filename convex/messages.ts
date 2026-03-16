@@ -813,7 +813,7 @@ export const getUnreadCount = query({
 
     // C1/C2-REPAIR: Hybrid approach - use denormalized counts where available,
     // fall back to source-of-truth computation for conversations without participant rows.
-    // This ensures correct counts even before/during backfill.
+    // P1-FIX: Bounded fallback instead of unbounded .collect() on all conversations.
 
     // 1. Get all participant rows for this user (fast indexed query)
     const participantRows = await ctx.db
@@ -821,28 +821,31 @@ export const getUnreadCount = query({
       .withIndex('by_user', (q) => q.eq('userId', userId))
       .collect();
 
-    // Build set of conversation IDs that have participant rows
-    const coveredConversationIds = new Set(
+    // Build set of conversation IDs that have participant rows (O(1) lookup)
+    const coveredConversationIds = new Set<string>(
       participantRows.map((row) => row.conversationId as string)
     );
 
-    // 2. Get all conversations where user is a participant
-    const allConversations = await ctx.db
-      .query('conversations')
-      .collect();
-    const userConversations = allConversations.filter((c) =>
-      c.participants.includes(userId)
-    );
-
-    // 3. Sum denormalized counts for covered conversations
+    // 2. Sum denormalized counts for covered conversations
     let totalUnread = participantRows.reduce((sum, row) => sum + row.unreadCount, 0);
 
-    // 4. For conversations WITHOUT participant rows, compute from messages (fallback)
-    const uncoveredConversations = userConversations.filter(
-      (c) => !coveredConversationIds.has(c._id as string)
-    );
+    // 3. Bounded fallback: only check recent conversations (last 30 days) without participant rows
+    // This replaces the unbounded .collect() that loaded ALL conversations
+    const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
+    const thirtyDaysAgo = Date.now() - THIRTY_DAYS_MS;
+    const MAX_FALLBACK_CONVERSATIONS = 500;
 
-    for (const conversation of uncoveredConversations) {
+    const recentConversations = await ctx.db
+      .query('conversations')
+      .withIndex('by_last_message', (q) => q.gt('lastMessageAt', thirtyDaysAgo))
+      .take(MAX_FALLBACK_CONVERSATIONS);
+
+    for (const conversation of recentConversations) {
+      // Skip if not a participant
+      if (!conversation.participants.includes(userId)) continue;
+      // Skip if already covered by participant row
+      if (coveredConversationIds.has(conversation._id as string)) continue;
+
       const count = await computeUnreadCountFromMessages(ctx, conversation._id, userId);
       totalUnread += count;
     }
@@ -868,7 +871,7 @@ export const getUnreadDmCountsByRoom = query({
   handler: async (ctx, { userId }) => {
     // C3-REPAIR: Hybrid approach - use denormalized counts where available,
     // fall back to source-of-truth computation for conversations without participant rows.
-    // This ensures correct counts even before/during backfill.
+    // P1-FIX: Bounded fallback instead of unbounded .collect() on all conversations.
 
     // 1. Get all participant rows for this user (fast indexed query)
     const participantRows = await ctx.db
@@ -876,40 +879,54 @@ export const getUnreadDmCountsByRoom = query({
       .withIndex('by_user', (q) => q.eq('userId', userId))
       .collect();
 
-    // Build set of conversation IDs that have participant rows
-    const coveredConversationIds = new Set(
+    // Build set for O(1) lookup
+    const coveredConversationIds = new Set<string>(
       participantRows.map((row) => row.conversationId as string)
     );
 
-    // 2. Get all conversations where user is a participant AND has sourceRoomId
-    const allConversations = await ctx.db
-      .query('conversations')
-      .collect();
-    const userRoomConversations = allConversations.filter(
-      (c) => c.participants.includes(userId) && c.sourceRoomId
+    // 2. Batch-fetch referenced conversations by ID (bounded by user's conversation count)
+    const conversations = await Promise.all(
+      participantRows.map((row) => ctx.db.get(row.conversationId))
     );
 
-    // 3. Build unread counts by room
+    // 3. Build unread counts by room from participant rows
     const byRoomId: Record<string, number> = {};
 
-    for (const conversation of userRoomConversations) {
+    for (let i = 0; i < conversations.length; i++) {
+      const conversation = conversations[i];
+      if (!conversation) continue;
+      if (!conversation.sourceRoomId) continue;
+
       const roomIdStr = conversation.sourceRoomId as string;
-
-      // Check if we have a participant row for this conversation
-      const participantRow = participantRows.find(
-        (row) => (row.conversationId as string) === (conversation._id as string)
-      );
-
-      let unreadCount: number;
-      if (participantRow) {
-        // Use denormalized count
-        unreadCount = participantRow.unreadCount;
-      } else {
-        // Fallback: compute from messages
-        unreadCount = await computeUnreadCountFromMessages(ctx, conversation._id, userId);
-      }
+      const unreadCount = participantRows[i].unreadCount;
 
       if (unreadCount > 0) {
+        byRoomId[roomIdStr] = (byRoomId[roomIdStr] || 0) + unreadCount;
+      }
+    }
+
+    // 4. Bounded fallback: check recent conversations without participant rows
+    // This replaces the unbounded .collect() that loaded ALL conversations
+    const THIRTY_DAYS_MS = 30 * 24 * 60 * 60 * 1000;
+    const thirtyDaysAgo = Date.now() - THIRTY_DAYS_MS;
+    const MAX_FALLBACK_CONVERSATIONS = 500;
+
+    const recentConversations = await ctx.db
+      .query('conversations')
+      .withIndex('by_last_message', (q) => q.gt('lastMessageAt', thirtyDaysAgo))
+      .take(MAX_FALLBACK_CONVERSATIONS);
+
+    for (const conversation of recentConversations) {
+      // Skip if not a participant
+      if (!conversation.participants.includes(userId)) continue;
+      // Skip if no sourceRoomId (not a room DM)
+      if (!conversation.sourceRoomId) continue;
+      // Skip if already covered by participant row
+      if (coveredConversationIds.has(conversation._id as string)) continue;
+
+      const unreadCount = await computeUnreadCountFromMessages(ctx, conversation._id, userId);
+      if (unreadCount > 0) {
+        const roomIdStr = conversation.sourceRoomId as string;
         byRoomId[roomIdStr] = (byRoomId[roomIdStr] || 0) + unreadCount;
       }
     }
