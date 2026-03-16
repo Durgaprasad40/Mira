@@ -27,6 +27,92 @@ async function isBlockedBidirectional(
   return !!block2;
 }
 
+// SMART MATCHING: Check for T&D connected status between two users
+// Returns true if there's a 'connected' todConnectRequest between them
+// Handles mixed storage patterns in todConnectRequests (authUserId vs Id<'users'>)
+async function hasTodConnection(
+  ctx: MutationCtx,
+  user1DbId: Id<'users'>,
+  user1AuthId: string,
+  user2DbId: Id<'users'>,
+  user2AuthId: string
+): Promise<boolean> {
+  // Pattern A: likeAnswer stores (authUserId, Id<'users'>)
+  // Pattern B: sendTodConnectRequest stores (Id<'users'>, authUserId)
+  // Check both patterns in both directions (4 queries total)
+
+  // Direction 1: user1 -> user2
+  let conn = await ctx.db
+    .query('todConnectRequests')
+    .withIndex('by_from_to', (q) =>
+      q.eq('fromUserId', user1AuthId).eq('toUserId', user2DbId)
+    )
+    .filter((q) => q.eq(q.field('status'), 'connected'))
+    .first();
+  if (conn) return true;
+
+  conn = await ctx.db
+    .query('todConnectRequests')
+    .withIndex('by_from_to', (q) =>
+      q.eq('fromUserId', user1DbId).eq('toUserId', user2AuthId)
+    )
+    .filter((q) => q.eq(q.field('status'), 'connected'))
+    .first();
+  if (conn) return true;
+
+  // Direction 2: user2 -> user1
+  conn = await ctx.db
+    .query('todConnectRequests')
+    .withIndex('by_from_to', (q) =>
+      q.eq('fromUserId', user2AuthId).eq('toUserId', user1DbId)
+    )
+    .filter((q) => q.eq(q.field('status'), 'connected'))
+    .first();
+  if (conn) return true;
+
+  conn = await ctx.db
+    .query('todConnectRequests')
+    .withIndex('by_from_to', (q) =>
+      q.eq('fromUserId', user2DbId).eq('toUserId', user1AuthId)
+    )
+    .filter((q) => q.eq(q.field('status'), 'connected'))
+    .first();
+  return !!conn;
+}
+
+// SMART MATCHING: Find existing T&D conversation between two users
+// Returns conversationId ONLY if connectionSource === 'tod'
+// Ignores confession conversations and all other conversation types
+async function findExistingTodConversation(
+  ctx: MutationCtx,
+  user1Id: Id<'users'>,
+  user2Id: Id<'users'>
+): Promise<Id<'conversations'> | null> {
+  const user1Participations = await ctx.db
+    .query('conversationParticipants')
+    .withIndex('by_user', (q) => q.eq('userId', user1Id))
+    .collect();
+
+  for (const p of user1Participations) {
+    const user2InConvo = await ctx.db
+      .query('conversationParticipants')
+      .withIndex('by_user_conversation', (q) =>
+        q.eq('userId', user2Id).eq('conversationId', p.conversationId)
+      )
+      .first();
+
+    if (user2InConvo) {
+      // Found shared conversation - verify it's a T&D conversation
+      const conversation = await ctx.db.get(p.conversationId);
+      if (conversation && conversation.connectionSource === 'tod') {
+        return p.conversationId;
+      }
+      // Not a T&D conversation - continue searching (don't return non-T&D)
+    }
+  }
+  return null;
+}
+
 // Like, pass, or super like a user
 export const swipe = mutation({
   args: {
@@ -199,13 +285,28 @@ export const swipe = mutation({
         )
         .first();
 
-      const isReciprocal = reciprocalLike && (
+      const hasReciprocalLike = reciprocalLike && (
         reciprocalLike.action === 'like' ||
         reciprocalLike.action === 'super_like' ||
         reciprocalLike.action === 'text'
       );
 
-      if (isReciprocal) {
+      // SMART MATCHING: Check for T&D connected status
+      // Only check if both users have authUserId (required for mixed-type query)
+      let hasTodConn = false;
+      if (fromUser.authUserId && toUser?.authUserId) {
+        hasTodConn = await hasTodConnection(
+          ctx,
+          fromUserId,
+          fromUser.authUserId,
+          toUserId,
+          toUser.authUserId
+        );
+      }
+
+      const isMatchEligible = hasReciprocalLike || hasTodConn;
+
+      if (isMatchEligible) {
         // 9-2: Check if match already exists to prevent duplicates from race conditions
         const user1Id = fromUserId < toUserId ? fromUserId : toUserId;
         const user2Id = fromUserId < toUserId ? toUserId : fromUserId;
@@ -257,13 +358,25 @@ export const swipe = mutation({
         }
 
         // We are the sole/winning match - proceed with downstream writes
-        // Create conversation
-        await ctx.db.insert('conversations', {
-          matchId,
-          participants: [fromUserId, toUserId],
-          isPreMatch: false,
-          createdAt: now,
-        });
+        // SMART MATCHING: Check for existing T&D conversation only
+        const existingTodConvoId = await findExistingTodConversation(ctx, fromUserId, toUserId);
+
+        if (existingTodConvoId) {
+          // Upgrade existing T&D conversation to match conversation
+          await ctx.db.patch(existingTodConvoId, {
+            matchId,
+            isPreMatch: false,
+            lastMessageAt: now,
+          });
+        } else {
+          // Create new conversation
+          await ctx.db.insert('conversations', {
+            matchId,
+            participants: [fromUserId, toUserId],
+            isPreMatch: false,
+            createdAt: now,
+          });
+        }
 
         // Create notifications for both users
         // D5: Add dedupeKey and expiresAt for match notifications
