@@ -297,7 +297,7 @@ export default function ProfileScreen() {
           onPress: async () => {
             try {
               if (!isDemoMode) {
-                await deactivateAccount({ userId: userId as any });
+                await deactivateAccount({ authUserId: userId });
               } else {
                 useDemoStore.getState().demoLogout();
               }

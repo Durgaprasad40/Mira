@@ -52,7 +52,7 @@ export default function NotificationsSettingsScreen() {
     if (!userId) return;
 
     try {
-      await updateNotificationSettings({ userId: userId as any, notificationsEnabled: enabled });
+      await updateNotificationSettings({ authUserId: userId, notificationsEnabled: enabled });
       setPushEnabled(enabled);
     } catch {
       Toast.show('Couldn\u2019t update notification settings. Please try again.');
@@ -65,7 +65,7 @@ export default function NotificationsSettingsScreen() {
     if (isDemoMode) { setNewMatches(enabled); return; }
     if (!userId) return;
     try {
-      await updateNotificationSettings({ userId: userId as any, notifyNewMatches: enabled });
+      await updateNotificationSettings({ authUserId: userId, notifyNewMatches: enabled });
       setNewMatches(enabled);
     } catch {
       Toast.show('Couldn\u2019t update setting. Please try again.');
@@ -77,7 +77,7 @@ export default function NotificationsSettingsScreen() {
     if (isDemoMode) { setNewMessages(enabled); return; }
     if (!userId) return;
     try {
-      await updateNotificationSettings({ userId: userId as any, notifyNewMessages: enabled });
+      await updateNotificationSettings({ authUserId: userId, notifyNewMessages: enabled });
       setNewMessages(enabled);
     } catch {
       Toast.show('Couldn\u2019t update setting. Please try again.');
@@ -89,7 +89,7 @@ export default function NotificationsSettingsScreen() {
     if (isDemoMode) { setLikesAndSuperLikes(enabled); return; }
     if (!userId) return;
     try {
-      await updateNotificationSettings({ userId: userId as any, notifyLikesAndSuperLikes: enabled });
+      await updateNotificationSettings({ authUserId: userId, notifyLikesAndSuperLikes: enabled });
       setLikesAndSuperLikes(enabled);
     } catch {
       Toast.show('Couldn\u2019t update setting. Please try again.');
@@ -101,7 +101,7 @@ export default function NotificationsSettingsScreen() {
     if (isDemoMode) { setProfileViews(enabled); return; }
     if (!userId) return;
     try {
-      await updateNotificationSettings({ userId: userId as any, notifyProfileViews: enabled });
+      await updateNotificationSettings({ authUserId: userId, notifyProfileViews: enabled });
       setProfileViews(enabled);
     } catch {
       Toast.show('Couldn\u2019t update setting. Please try again.');

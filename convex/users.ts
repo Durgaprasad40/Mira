@@ -470,15 +470,22 @@ export const updatePreferences = mutation({
 });
 
 // Update location
+// APP-P0-001 FIX: Server-side auth - user can only update their own location
 export const updateLocation = mutation({
   args: {
-    userId: v.id("users"),
+    authUserId: v.string(),
     latitude: v.number(),
     longitude: v.number(),
     city: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const { userId, latitude, longitude, city } = args;
+    const { authUserId, latitude, longitude, city } = args;
+
+    // APP-P0-001 FIX: Resolve auth ID to Convex user ID server-side
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      throw new Error('Unauthorized: user not found');
+    }
 
     await ctx.db.patch(userId, {
       latitude,
@@ -714,9 +721,10 @@ export const updatePrivacySettings = mutation({
 });
 
 // Update notification settings
+// APP-P0-002 FIX: Server-side auth - user can only update their own settings
 export const updateNotificationSettings = mutation({
   args: {
-    userId: v.id("users"),
+    authUserId: v.string(),
     notificationsEnabled: v.optional(v.boolean()),
     emailNotificationsEnabled: v.optional(v.boolean()),
     // Notification type preferences
@@ -727,7 +735,7 @@ export const updateNotificationSettings = mutation({
   },
   handler: async (ctx, args) => {
     const {
-      userId,
+      authUserId,
       notificationsEnabled,
       emailNotificationsEnabled,
       notifyNewMatches,
@@ -735,6 +743,12 @@ export const updateNotificationSettings = mutation({
       notifyLikesAndSuperLikes,
       notifyProfileViews,
     } = args;
+
+    // APP-P0-002 FIX: Resolve auth ID to Convex user ID server-side
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      throw new Error('Unauthorized: user not found');
+    }
 
     const user = await ctx.db.get(userId);
     if (!user) throw new Error("User not found");
@@ -984,12 +998,19 @@ export const reportUser = mutation({
 });
 
 // Deactivate account
+// APP-P0-003 FIX: Server-side auth - user can only deactivate their own account
 export const deactivateAccount = mutation({
   args: {
-    userId: v.id("users"),
+    authUserId: v.string(),
   },
   handler: async (ctx, args) => {
-    await ctx.db.patch(args.userId, { isActive: false });
+    // APP-P0-003 FIX: Resolve auth ID to Convex user ID server-side
+    const userId = await resolveUserIdByAuthId(ctx, args.authUserId);
+    if (!userId) {
+      throw new Error('Unauthorized: user not found');
+    }
+
+    await ctx.db.patch(userId, { isActive: false });
     return { success: true };
   },
 });

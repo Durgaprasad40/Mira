@@ -597,14 +597,21 @@ export const getConversation = query({
 });
 
 // Get all conversations for a user
+// APP-P0-004 FIX: Server-side auth - resolve userId from authUserId to prevent cross-user access
 export const getConversations = query({
   args: {
-    userId: v.id('users'),
+    authUserId: v.string(), // APP-P0-004: Changed from userId: v.id('users')
     limit: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
-    const { userId, limit = 50 } = args;
+    const { authUserId, limit = 50 } = args;
     const now = Date.now();
+
+    // APP-P0-004 FIX: Resolve auth ID to Convex user ID server-side
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      return []; // Unauthorized - return empty array
+    }
 
     // Get all conversations where user is a participant
     const allConversations = await ctx.db

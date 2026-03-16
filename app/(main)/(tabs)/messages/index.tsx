@@ -219,13 +219,18 @@ export default function MessagesScreen() {
 
   // HIGH #1 FIX: Memoize Convex query args to prevent re-subscriptions
   // Creating new object references on every render causes Convex to re-subscribe
+  // APP-P0-004: Split args - getConversations uses authUserId, others use userId
+  const convexConversationsArgs = useMemo(
+    () => (!isDemoMode && userId ? { authUserId: userId } : 'skip' as const),
+    [userId]
+  );
   const convexQueryArgs = useMemo(
     () => (!isDemoMode && convexUserId ? { userId: convexUserId } : 'skip' as const),
     [convexUserId]
   );
 
   // Convex queries (skipped in demo mode)
-  const convexConversations = useQuery(api.messages.getConversations, convexQueryArgs);
+  const convexConversations = useQuery(api.messages.getConversations, convexConversationsArgs);
   const convexUnreadCount = useQuery(api.messages.getUnreadCount, convexQueryArgs);
   const convexCurrentUser = useQuery(api.users.getCurrentUser, convexQueryArgs);
   const convexLikesReceived = useQuery(api.likes.getLikesReceived, convexQueryArgs);
