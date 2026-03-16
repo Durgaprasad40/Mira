@@ -11,7 +11,7 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
-import { useMutation } from 'convex/react';
+import { useQuery, useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { COLORS } from '@/lib/constants';
 import { useAuthStore } from '@/stores/authStore';
@@ -19,12 +19,20 @@ import { useDemoStore } from '@/stores/demoStore';
 import { useOnboardingStore } from '@/stores/onboardingStore';
 import { isDemoMode } from '@/hooks/useConvex';
 import { safeReplace } from '@/lib/safeRouter';
+import { getDemoCurrentUser } from '@/lib/demoData';
 
 export default function AccountSettingsScreen() {
   const router = useRouter();
   const logout = useAuthStore((s) => s.logout);
   const authUserId = useAuthStore((s) => s.userId);
   const softDeleteMutation = useMutation(api.auth.softDeleteAccount);
+
+  // Query current user for email display (live mode only)
+  const currentUserQuery = useQuery(
+    api.users.getCurrentUser,
+    !isDemoMode && authUserId ? { userId: authUserId as any } : 'skip'
+  );
+  const currentUser = isDemoMode ? (getDemoCurrentUser() as any) : currentUserQuery;
 
   // Safe back navigation - ensures return to Profile tab
   const handleGoBack = useCallback(() => {
@@ -137,7 +145,7 @@ export default function AccountSettingsScreen() {
               <Ionicons name="mail-outline" size={22} color={COLORS.text} />
               <View style={styles.infoRowContent}>
                 <Text style={styles.infoRowLabel}>Email</Text>
-                <Text style={styles.infoRowValue}>demo@mira.app</Text>
+                <Text style={styles.infoRowValue}>{currentUser?.email || 'Not set'}</Text>
               </View>
             </View>
           </View>
