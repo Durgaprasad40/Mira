@@ -1555,12 +1555,21 @@ export const getUserPenalty = query({
   },
 });
 
-// Check if user has any active readOnly penalty (for blocking DMs from Chat Rooms)
+// Check if authenticated user has any active readOnly penalty (for blocking DMs from Chat Rooms)
+// CR-P1-002 FIX: Server-side auth only - user can only check their own penalty status
 export const hasAnyActivePenalty = query({
-  args: {
-    userId: v.id('users'),
-  },
-  handler: async (ctx, { userId }) => {
+  args: {},
+  handler: async (ctx) => {
+    // CR-P1-002 FIX: Resolve userId from server-side auth, not client-supplied
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity?.subject) {
+      return false; // Safe default - not authenticated
+    }
+    const userId = await resolveUserIdByAuthId(ctx, identity.subject);
+    if (!userId) {
+      return false; // Safe default - user not found
+    }
+
     const now = Date.now();
     const penalties = await ctx.db
       .query('chatRoomPenalties')
