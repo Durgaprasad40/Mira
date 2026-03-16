@@ -20,6 +20,7 @@ interface PhotoSelectionGridProps {
   selectedIds: string[];
   onToggle: (id: string, url: string) => void;
   maxSelection?: number;
+  minSelection?: number;
 }
 
 const C = INCOGNITO_COLORS;
@@ -28,12 +29,13 @@ export function PhotoSelectionGrid({
   photos,
   selectedIds,
   onToggle,
-  maxSelection = 6,
+  maxSelection = 9,
+  minSelection = 2,
 }: PhotoSelectionGridProps) {
   return (
     <View style={styles.container}>
       <Text style={styles.hint}>
-        Select 1-{maxSelection} photos from your main profile
+        Select {minSelection}-{maxSelection} photos from your main profile
       </Text>
       <View style={styles.grid}>
         {photos.map((photo) => {

@@ -1,11 +1,8 @@
-import React, { useEffect, useState } from 'react';
-import { View, Text, TouchableOpacity, StyleSheet, ActivityIndicator } from 'react-native';
+import React, { useEffect, useMemo } from 'react';
+import { View, Text, TouchableOpacity, StyleSheet } from 'react-native';
 import { useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
-import { useQuery } from 'convex/react';
-import { api } from '@/convex/_generated/api';
-import { useAuthStore } from '@/stores/authStore';
 import { usePrivateProfileStore } from '@/stores/privateProfileStore';
 import { isDemoMode } from '@/hooks/useConvex';
 import { PhotoSelectionGrid } from '@/components/private/PhotoSelectionGrid';
@@ -14,36 +11,47 @@ import { useScreenTrace } from '@/lib/devTrace';
 
 const C = INCOGNITO_COLORS;
 
+// Maximum photos supported in Phase-2 (same as Phase-1)
+const MAX_PHASE2_PHOTOS = 9;
+
 // Demo photos for when not connected to Convex
 const DEMO_PHOTOS = [
+  { id: 'demo_0', url: 'https://picsum.photos/seed/p0/400/520' },
   { id: 'demo_1', url: 'https://picsum.photos/seed/p1/400/520' },
   { id: 'demo_2', url: 'https://picsum.photos/seed/p2/400/520' },
   { id: 'demo_3', url: 'https://picsum.photos/seed/p3/400/520' },
-  { id: 'demo_4', url: 'https://picsum.photos/seed/p4/400/520' },
 ];
 
 export default function SelectPhotosScreen() {
   useScreenTrace("P2_SETUP_SELECT_PHOTOS");
   const router = useRouter();
   const insets = useSafeAreaInsets();
-  const { userId } = useAuthStore();
 
   const selectedPhotoIds = usePrivateProfileStore((s) => s.selectedPhotoIds);
   const selectedPhotoUrls = usePrivateProfileStore((s) => s.selectedPhotoUrls);
   const setSelectedPhotos = usePrivateProfileStore((s) => s.setSelectedPhotos);
   const setCurrentStep = usePrivateProfileStore((s) => s.setCurrentStep);
 
-  // Fetch Face 1 photos
-  const convexPhotos = useQuery(
-    api.photos.getUserPhotos,
-    !isDemoMode && userId ? { userId: userId as any } : 'skip'
-  );
+  // FIX: Use phase1PhotoSlots from store (already populated by importPhase1Data in Step 1)
+  // This includes ALL Phase-1 photos including the primary/verification photo
+  const phase1PhotoSlots = usePrivateProfileStore((s) => s.phase1PhotoSlots);
 
-  const photos = isDemoMode
-    ? DEMO_PHOTOS
-    : (convexPhotos ?? []).map((p) => ({ id: p._id, url: p.url }));
+  // Convert phase1PhotoSlots to PhotoItem[] format for the grid
+  // Each photo gets a unique ID based on its slot index to preserve ordering
+  const photos = useMemo(() => {
+    if (isDemoMode) return DEMO_PHOTOS;
 
-  const loading = !isDemoMode && convexPhotos === undefined;
+    const items: { id: string; url: string }[] = [];
+    phase1PhotoSlots.forEach((url, index) => {
+      if (url && typeof url === 'string' && url.length > 0 && url !== 'null' && url !== 'undefined') {
+        items.push({
+          id: `p1_slot_${index}`,
+          url,
+        });
+      }
+    });
+    return items;
+  }, [phase1PhotoSlots]);
 
   useEffect(() => {
     setCurrentStep(1);
@@ -51,13 +59,15 @@ export default function SelectPhotosScreen() {
 
   const handleToggle = (id: string, url: string) => {
     if (selectedPhotoIds.includes(id)) {
+      // Deselect: remove from selection
       const idx = selectedPhotoIds.indexOf(id);
       const newIds = [...selectedPhotoIds];
       const newUrls = [...selectedPhotoUrls];
       newIds.splice(idx, 1);
       newUrls.splice(idx, 1);
       setSelectedPhotos(newIds, newUrls);
-    } else {
+    } else if (selectedPhotoIds.length < MAX_PHASE2_PHOTOS) {
+      // Select: add to selection (only if under max)
       setSelectedPhotos([...selectedPhotoIds, id], [...selectedPhotoUrls, url]);
     }
   };
@@ -81,12 +91,7 @@ export default function SelectPhotosScreen() {
         Choose which photos from your main profile to use in Private Mode. Select at least 2 photos to continue.
       </Text>
 
-      {loading ? (
-        <View style={styles.loadingContainer}>
-          <ActivityIndicator size="large" color={C.primary} />
-          <Text style={styles.loadingText}>Loading your photos...</Text>
-        </View>
-      ) : photos.length === 0 ? (
+      {photos.length === 0 ? (
         <View style={styles.emptyContainer}>
           <Ionicons name="images-outline" size={64} color={C.textLight} />
           <Text style={styles.emptyText}>No photos found in your main profile</Text>
@@ -97,7 +102,7 @@ export default function SelectPhotosScreen() {
           photos={photos}
           selectedIds={selectedPhotoIds}
           onToggle={handleToggle}
-          maxSelection={6}
+          maxSelection={MAX_PHASE2_PHOTOS}
         />
       )}
 
@@ -137,8 +142,6 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
     paddingVertical: 12,
   },
-  loadingContainer: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 12 },
-  loadingText: { fontSize: 14, color: C.textLight },
   emptyContainer: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 8 },
   emptyText: { fontSize: 16, fontWeight: '600', color: C.text },
   emptyHint: { fontSize: 13, color: C.textLight },
