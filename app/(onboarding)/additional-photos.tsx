@@ -777,7 +777,6 @@ export default function AdditionalPhotosScreen() {
                     }
 
                     await deletePhotoMutation({
-                      userId: userId as Id<'users'>,
                       photoId: photoToDelete._id,
                     });
 

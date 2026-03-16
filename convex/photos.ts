@@ -337,11 +337,21 @@ export const addPhoto = mutation({
 // Delete photo
 export const deletePhoto = mutation({
   args: {
-    userId: v.id('users'),
+    // IDOR-P1-002 FIX: Removed userId - now derived from server auth
     photoId: v.id('photos'),
   },
   handler: async (ctx, args) => {
-    const { userId, photoId } = args;
+    // IDOR-P1-002 FIX: Derive caller identity from server auth
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) {
+      throw new Error('Unauthorized: authentication required');
+    }
+    const userId = await resolveUserIdByAuthId(ctx, identity.subject);
+    if (!userId) {
+      throw new Error('Unauthorized: user not found');
+    }
+
+    const { photoId } = args;
 
     const photo = await ctx.db.get(photoId);
     if (!photo) {
@@ -449,11 +459,21 @@ export const deletePhoto = mutation({
 // Reorder photos
 export const reorderPhotos = mutation({
   args: {
-    userId: v.id('users'),
+    // IDOR-P1-003 FIX: Removed userId - now derived from server auth
     photoIds: v.array(v.id('photos')),
   },
   handler: async (ctx, args) => {
-    const { userId, photoIds } = args;
+    // IDOR-P1-003 FIX: Derive caller identity from server auth
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) {
+      throw new Error('Unauthorized: authentication required');
+    }
+    const userId = await resolveUserIdByAuthId(ctx, identity.subject);
+    if (!userId) {
+      throw new Error('Unauthorized: user not found');
+    }
+
+    const { photoIds } = args;
 
     // SECURITY: Verify all photos belong to user before reordering
     for (const photoId of photoIds) {
@@ -514,11 +534,21 @@ export const getUserPhotos = query({
 // Set primary photo
 export const setPrimaryPhoto = mutation({
   args: {
-    userId: v.id('users'),
+    // IDOR-P1-004 FIX: Removed userId - now derived from server auth
     photoId: v.id('photos'),
   },
   handler: async (ctx, args) => {
-    const { userId, photoId } = args;
+    // IDOR-P1-004 FIX: Derive caller identity from server auth
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) {
+      throw new Error('Unauthorized: authentication required');
+    }
+    const userId = await resolveUserIdByAuthId(ctx, identity.subject);
+    if (!userId) {
+      throw new Error('Unauthorized: user not found');
+    }
+
+    const { photoId } = args;
 
     const photo = await ctx.db.get(photoId);
     if (!photo) {
@@ -595,11 +625,21 @@ export const markPhotoNsfw = mutation({
 // Save verification photo (legacy - use uploadVerificationReferencePhoto instead)
 export const saveVerificationPhoto = mutation({
   args: {
-    userId: v.id('users'),
+    // IDOR-P1-005 FIX: Removed userId - now derived from server auth
     storageId: v.id('_storage'),
   },
   handler: async (ctx, args) => {
-    const { userId, storageId } = args;
+    // IDOR-P1-005 FIX: Derive caller identity from server auth
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) {
+      throw new Error('Unauthorized: authentication required');
+    }
+    const userId = await resolveUserIdByAuthId(ctx, identity.subject);
+    if (!userId) {
+      throw new Error('Unauthorized: user not found');
+    }
+
+    const { storageId } = args;
 
     // BUGFIX #67: Validate storage ID exists before saving
     const url = await ctx.storage.getUrl(storageId);
@@ -813,13 +853,23 @@ export const uploadVerificationReferencePhoto = mutation({
  */
 export const setDisplayPhotoVariant = mutation({
   args: {
-    userId: v.id('users'),
+    // IDOR-P1-006 FIX: Removed userId - now derived from server auth
     variant: v.union(v.literal('original'), v.literal('blurred'), v.literal('cartoon')),
     // For blurred/cartoon, client uploads a processed version
     processedStorageId: v.optional(v.id('_storage')),
   },
   handler: async (ctx, args) => {
-    const { userId, variant, processedStorageId } = args;
+    // IDOR-P1-006 FIX: Derive caller identity from server auth
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) {
+      throw new Error('Unauthorized: authentication required');
+    }
+    const userId = await resolveUserIdByAuthId(ctx, identity.subject);
+    if (!userId) {
+      throw new Error('Unauthorized: user not found');
+    }
+
+    const { variant, processedStorageId } = args;
 
     const user = await ctx.db.get(userId);
     if (!user) throw new Error('User not found');

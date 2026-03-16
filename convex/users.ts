@@ -150,14 +150,24 @@ export const getUserById = query({
 // Update profile prompts (icebreakers)
 export const updateProfilePrompts = mutation({
   args: {
-    userId: v.id("users"),
+    // IDOR-P1-001 FIX: Removed userId - now derived from server auth
     prompts: v.array(v.object({
       question: v.string(),
       answer: v.string(),
     })),
   },
   handler: async (ctx, args) => {
-    const user = await ctx.db.get(args.userId);
+    // IDOR-P1-001 FIX: Derive caller identity from server auth
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) {
+      throw new Error('Unauthorized: authentication required');
+    }
+    const userId = await resolveUserIdByAuthId(ctx, identity.subject);
+    if (!userId) {
+      throw new Error('Unauthorized: user not found');
+    }
+
+    const user = await ctx.db.get(userId);
     if (!user) throw new Error("User not found");
 
     // BUGFIX #62: Reject empty prompts after trimming whitespace
@@ -178,7 +188,7 @@ export const updateProfilePrompts = mutation({
       answer: p.answer.trim().slice(0, 200),
     }));
 
-    await ctx.db.patch(args.userId, { profilePrompts: cleaned });
+    await ctx.db.patch(userId, { profilePrompts: cleaned });
     return { success: true };
   },
 });

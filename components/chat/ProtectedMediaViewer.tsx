@@ -84,7 +84,6 @@ export function ProtectedMediaViewer({
     if (messageId && userId) {
       logScreenshot({
         messageId: messageId as any,
-        userId: userId as any,
         wasTaken: true,
       });
     }

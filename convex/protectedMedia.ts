@@ -335,11 +335,21 @@ export const markExpired = mutation({
 export const logScreenshotEvent = mutation({
   args: {
     messageId: v.id('messages'),
-    userId: v.id('users'),
+    // MEDIA-P1-003 FIX: Removed userId - now derived from server auth
     wasTaken: v.boolean(),
   },
   handler: async (ctx, args) => {
-    const { messageId, userId, wasTaken } = args;
+    // MEDIA-P1-003 FIX: Derive caller identity from server auth
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) {
+      return { success: true }; // Silent return for unauthenticated
+    }
+    const userId = await resolveUserIdByAuthId(ctx, identity.subject);
+    if (!userId) {
+      return { success: true }; // Silent return if user not found
+    }
+
+    const { messageId, wasTaken } = args;
     const now = Date.now();
 
     const message = await ctx.db.get(messageId);

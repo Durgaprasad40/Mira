@@ -645,7 +645,7 @@ export default function EditProfileScreen() {
         company: company || undefined,
         school: school || undefined,
       });
-      await updateProfilePrompts({ userId: convexUserId, prompts: filledPrompts });
+      await updateProfilePrompts({ prompts: filledPrompts });
       Alert.alert('Success', 'Profile updated!');
       router.back();
     } catch (error: any) {
