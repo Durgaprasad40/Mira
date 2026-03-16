@@ -163,9 +163,15 @@ function StarBurstAnimation({ visible, onComplete }: StarBurstAnimationProps) {
       ]);
     });
 
-    Animated.parallel(starAnimations).start(() => {
+    const compositeAnimation = Animated.parallel(starAnimations);
+    compositeAnimation.start(() => {
       onComplete();
     });
+
+    // DL-014: Stop animation on unmount to prevent stale callback
+    return () => {
+      compositeAnimation.stop();
+    };
   }, [visible, animations, onComplete]);
 
   if (!visible) return null;
@@ -544,7 +550,12 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
     if (profiles.length > 0) { replenishingRef.current = false; return; }
     if (replenishingRef.current) return;
     replenishingRef.current = true;
-    useDemoStore.getState().resetDiscoverPool();
+    try {
+      useDemoStore.getState().resetDiscoverPool();
+    } finally {
+      // DL-016: Always reset ref after attempt to prevent stuck state
+      replenishingRef.current = false;
+    }
     // 7-3: Guard against setState after unmount
     if (!mountedRef.current) return;
     setIndex(0);
@@ -1137,8 +1148,8 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
     // STEP 2.7: Demo-only reset that clears swipedProfileIds + re-injects profiles
     const handleResetDemoSwipes = () => {
       if (isDemoMode) {
-        // Clear swiped history so profiles reappear
-        useDemoStore.setState({ swipedProfileIds: [] });
+        // DL-009: Use safe store action instead of direct setState
+        useDemoStore.getState().clearSwipedProfiles();
         useDemoStore.getState().resetDiscoverPool();
         setIndex(0);
       }
@@ -1247,8 +1258,8 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
     // STEP 2.7: Demo-only reset that clears swipedProfileIds + re-injects profiles
     const handleResetDeck = () => {
       if (isDemoMode) {
-        // Clear swiped history so profiles reappear
-        useDemoStore.setState({ swipedProfileIds: [] });
+        // DL-009: Use safe store action instead of direct setState
+        useDemoStore.getState().clearSwipedProfiles();
         useDemoStore.getState().resetDiscoverPool();
         setIndex(0);
       }
@@ -1397,9 +1408,10 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
 
 
       {/* Profile completeness nudge */}
-      {showNudge && (
+      {/* DL-015: Runtime guard with optional chaining for safety */}
+      {showNudge && NUDGE_MESSAGES[nudgeStatus]?.discover && (
         <ProfileNudge
-          message={NUDGE_MESSAGES[nudgeStatus as Exclude<typeof nudgeStatus, 'complete'>].discover}
+          message={NUDGE_MESSAGES[nudgeStatus].discover}
           onDismiss={() => dismissNudge('discover')}
         />
       )}

@@ -275,6 +275,8 @@ interface DemoState {
   /** 3B-1: Track swiped profile IDs to prevent repeated profiles */
   swipedProfileIds: string[];
   recordSwipe: (profileId: string) => void;
+  /** DL-009: Clear swiped profiles safely via store action */
+  clearSwipedProfiles: () => void;
 
   seed: () => void;
   reset: () => void;
@@ -611,6 +613,11 @@ export const useDemoStore = create<DemoState>()((set, get) => ({
         ? s.swipedProfileIds
         : [...s.swipedProfileIds, profileId],
     }));
+  },
+
+  // DL-009: Safe action to clear swiped profiles (avoids direct setState outside React)
+  clearSwipedProfiles: () => {
+    set({ swipedProfileIds: [] });
   },
 
   getExcludedUserIds: () => {

@@ -23,12 +23,26 @@ const SUPPRESSION_WINDOW_MS = 4 * 60 * 60 * 1000;
 // Returns profiles sorted by ranking score (descending)
 export const getProfiles = query({
   args: {
-    userId: v.id('users'),
+    // DL-013: userId is optional; prefer server-side auth resolution
+    userId: v.optional(v.id('users')),
     limit: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
     const now = Date.now();
     const suppressionCutoff = now - SUPPRESSION_WINDOW_MS;
+
+    // DL-013: Resolve viewer from server-side auth, fall back to args.userId for backward compat
+    let viewerUserId = args.userId;
+    const identity = await ctx.auth.getUserIdentity();
+    if (identity?.subject) {
+      const resolvedId = await resolveUserIdByAuthId(ctx, identity.subject);
+      if (resolvedId) {
+        viewerUserId = resolvedId;
+      }
+    }
+    if (!viewerUserId) {
+      return []; // No valid viewer - return empty
+    }
 
     // Phase 3: Shadow mode decision (once per request)
     const runShadow = shouldRunShadowComparison();
@@ -36,11 +50,11 @@ export const getProfiles = query({
     // Get blocks for current user (both directions - shared across Phase-1 and Phase-2)
     const blocksOut = await ctx.db
       .query('blocks')
-      .withIndex('by_blocker', (q) => q.eq('blockerId', args.userId))
+      .withIndex('by_blocker', (q) => q.eq('blockerId', viewerUserId))
       .collect();
     const blocksIn = await ctx.db
       .query('blocks')
-      .withIndex('by_blocked', (q) => q.eq('blockedUserId', args.userId))
+      .withIndex('by_blocked', (q) => q.eq('blockedUserId', viewerUserId))
       .collect();
 
     // Combine into a set of blocked user IDs
@@ -70,7 +84,7 @@ export const getProfiles = query({
     // Get viewer's recent impressions for suppression check
     const viewerImpressions = await ctx.db
       .query('phase2ViewerImpressions')
-      .withIndex('by_viewer', (q) => q.eq('viewerId', args.userId))
+      .withIndex('by_viewer', (q) => q.eq('viewerId', viewerUserId))
       .collect();
     const recentlySeen = new Set(
       viewerImpressions
@@ -86,14 +100,14 @@ export const getProfiles = query({
     // NOTE: Profiles without ranking metrics are still eligible (use fallback defaults)
     const eligible = profiles.filter(
       (p) =>
-        p.userId !== args.userId &&
+        p.userId !== viewerUserId &&
         p.isSetupComplete &&
         !blockedUserIds.has(p.userId as string) &&
         !deletedUserIds.has(p.userId as string)
     );
 
     // Compute scores and separate suppressed vs unsuppressed profiles
-    const viewerId = args.userId as string;
+    const viewerId = viewerUserId as string;
     const unsuppressed: Array<{ profile: typeof eligible[0]; score: number }> = [];
     const suppressed: Array<{ profile: typeof eligible[0]; score: number }> = [];
 

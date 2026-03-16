@@ -166,7 +166,8 @@ export const usePrivateChatStore = create<PrivateChatState>()((set, get) => ({
 
   createConversation: (convo) =>
     set((s) => {
-      if (s.conversations.some((c) => c.id === convo.id)) return s;
+      // DL-010: Check both id and participantId to prevent duplicate conversations
+      if (s.conversations.some((c) => c.id === convo.id || c.participantId === convo.participantId)) return s;
       return { conversations: [convo, ...s.conversations] };
     }),
 
