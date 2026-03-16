@@ -521,7 +521,7 @@ export default function ConfessionsScreen() {
     setShowTaggedSection(true);
     // Mark all as seen
     if (!isDemoMode && convexUserId) {
-      markTaggedSeenMutation({ userId: convexUserId }).catch(() => {});
+      markTaggedSeenMutation({ userId: convexUserId }).catch((e) => console.warn('[MarkSeen] Silent fail:', e));
     } else if (isDemoMode) {
       // Demo mode: mark all tagged confessions as seen via store action
       const unseenIds = taggedConfessions.filter((t) => !t.seen).map((t) => t.confessionId);
@@ -851,7 +851,7 @@ export default function ConfessionsScreen() {
               confessionId: confessionId as Id<'confessions'>,
               reporterId: convexUserId,
               reason,
-            }).catch(() => {});
+            }).catch((e) => console.warn('[Report] Silent fail:', e));
           }
         }
         triggerWarningHaptic();

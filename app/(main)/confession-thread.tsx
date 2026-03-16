@@ -448,7 +448,7 @@ export default function ConfessionThreadScreen() {
           confessionId: confessionId as any,
           reporterId: currentUserId as any,
           reason,
-        }).catch(() => {});
+        }).catch((e) => console.warn('[Report] Silent fail:', e));
       }
       router.back();
     };

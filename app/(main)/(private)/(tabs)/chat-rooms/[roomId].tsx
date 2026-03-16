@@ -830,7 +830,7 @@ export default function ChatRoomScreen() {
               clearPreferredRoom();
               if (!isDemoMode && authUserId) {
                 // CR-017 FIX: Use authUserId for server-side verification
-                clearPreferredRoomMutation({ authUserId }).catch(() => {});
+                clearPreferredRoomMutation({ authUserId }).catch((e) => console.warn('[ClearRoom] Silent fail:', e));
               }
               setHasRedirectedInSession(true);
               router.replace('/(main)/(private)/(tabs)/chat-rooms');
