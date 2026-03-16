@@ -5,6 +5,7 @@
 import { create } from 'zustand';
 import { useBlockStore } from './blockStore';
 import type { IncognitoConversation, IncognitoMessage } from '@/types';
+import { isDemoMode } from '@/hooks/useConvex';
 // NOTE: Phase-2 no longer seeds demo conversations/messages.
 // Conversations are created dynamically via Desire Land matches.
 // Messages are created when users actually chat.
@@ -209,7 +210,7 @@ export const usePrivateChatStore = create<PrivateChatState>()((set, get) => ({
       };
     }),
 
-  pendingDares: DEMO_PENDING_DARES,
+  pendingDares: isDemoMode ? DEMO_PENDING_DARES : [],
   sentDares: [],
 
   addPendingDare: (dare) =>

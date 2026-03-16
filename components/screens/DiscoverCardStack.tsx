@@ -820,7 +820,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
                 id: swipedProfile.id,
                 name: swipedProfile.name,
                 age: swipedProfile.age,
-                photoUrl: swipedProfile.photos[0]?.url,
+                photoUrl: swipedProfile.photos?.[0]?.url,
               });
               if (isNewMatch) {
                 log.info('[MATCH]', 'phase2', { name: swipedProfile.name });
