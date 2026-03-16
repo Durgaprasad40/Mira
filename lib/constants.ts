@@ -516,6 +516,7 @@ export interface ProfilePromptsV2 {
 }
 
 // Constants for validation
+export const PROMPT_ANSWER_MIN_LENGTH = 20; // Minimum characters per prompt answer
 export const PROMPT_ANSWER_MAX_LENGTH = 200;
 export const MIN_ANSWERS_PER_SECTION = 1;
 

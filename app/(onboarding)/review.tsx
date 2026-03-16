@@ -688,23 +688,45 @@ export default function ReviewScreen() {
           </View>
         ) : null}
 
-        {/* Section Prompts */}
-        {(['builder', 'performer', 'seeker', 'grounded'] as PromptSectionKey[]).map((section) => {
-          const answers = sectionPrompts[section];
-          if (!answers || answers.length === 0) return null;
-          const label = SECTION_LABELS[section];
-          return (
-            <View key={section} style={styles.promptSubsection}>
-              <Text style={styles.promptSectionLabel}>{label.emoji} {label.title}</Text>
-              {answers.map((prompt, index) => (
-                <View key={index} style={styles.promptItem}>
-                  <Text style={styles.promptQuestion}>{prompt.question}</Text>
-                  <Text style={styles.promptAnswer}>{prompt.answer}</Text>
-                </View>
-              ))}
-            </View>
+        {/* Section Prompts - with separate Edit link */}
+        {(() => {
+          const hasSectionPrompts = ['builder', 'performer', 'seeker', 'grounded'].some(
+            (section) => sectionPrompts[section as PromptSectionKey]?.length > 0
           );
-        })}
+          return (
+            <>
+              {hasSectionPrompts && (
+                <View style={styles.sectionPromptsHeader}>
+                  <Text style={styles.sectionPromptsLabel}>Your Prompts</Text>
+                  <TouchableOpacity onPress={() => handleEdit("prompts-part2")}>
+                    <Text style={styles.editLink}>Edit</Text>
+                  </TouchableOpacity>
+                </View>
+              )}
+              {(['builder', 'performer', 'seeker', 'grounded'] as PromptSectionKey[]).map((section) => {
+                const answers = sectionPrompts[section];
+                if (!answers || answers.length === 0) return null;
+                const label = SECTION_LABELS[section];
+                return (
+                  <View key={section} style={styles.promptSubsection}>
+                    <Text style={styles.promptSectionLabel}>{label.emoji} {label.title}</Text>
+                    {answers.map((prompt, index) => (
+                      <View key={index} style={styles.promptItem}>
+                        <Text style={styles.promptQuestion}>{prompt.question}</Text>
+                        <Text style={styles.promptAnswer}>{prompt.answer}</Text>
+                      </View>
+                    ))}
+                  </View>
+                );
+              })}
+              {!hasSectionPrompts && (
+                <TouchableOpacity onPress={() => handleEdit("prompts-part2")}>
+                  <Text style={styles.emptyText}>No section prompts added — Tap to add</Text>
+                </TouchableOpacity>
+              )}
+            </>
+          );
+        })()}
 
         {/* Legacy prompts fallback */}
         {(!seedQuestions.identityAnchor && !seedQuestions.socialBattery && !seedQuestions.valueTrigger &&
@@ -1081,6 +1103,18 @@ const styles = StyleSheet.create({
     color: COLORS.textMuted,
     fontStyle: "italic",
     marginTop: 8,
+  },
+  sectionPromptsHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: 12,
+    marginTop: 8,
+  },
+  sectionPromptsLabel: {
+    fontSize: 14,
+    fontWeight: "600",
+    color: COLORS.text,
   },
   promptSubsection: {
     marginBottom: 16,

@@ -29,6 +29,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { COLORS } from '@/lib/constants';
 import {
   SECTION_PROMPTS,
+  PROMPT_ANSWER_MIN_LENGTH,
   PROMPT_ANSWER_MAX_LENGTH,
   MIN_ANSWERS_PER_SECTION,
   PromptSectionKey,
@@ -162,15 +163,20 @@ export default function PromptsPart2Screen() {
     }));
   }, []);
 
-  // Count filled answers per section
-  const getFilledCount = (section: PromptSectionKey): number => {
-    return Object.values(localAnswers[section]).filter((a) => a.trim().length > 0).length;
+  // Check if answer meets minimum length requirement
+  const isAnswerValid = (answer: string): boolean => {
+    return answer.trim().length >= PROMPT_ANSWER_MIN_LENGTH;
   };
 
-  // Validation: at least 1 answer per section
+  // Count filled answers per section (only counts answers with 20+ chars)
+  const getFilledCount = (section: PromptSectionKey): number => {
+    return Object.values(localAnswers[section]).filter((a) => isAnswerValid(a)).length;
+  };
+
+  // Validation: at least 1 valid (20+ char) answer per section
   const canContinue = SECTION_KEYS.every((key) => getFilledCount(key) >= MIN_ANSWERS_PER_SECTION);
 
-  // Check if a section has at least 1 answer
+  // Check if a section has at least 1 valid answer
   const isSectionValid = (section: PromptSectionKey): boolean => {
     return getFilledCount(section) >= MIN_ANSWERS_PER_SECTION;
   };
@@ -189,17 +195,18 @@ export default function PromptsPart2Screen() {
     };
 
     // Save all answers to store and build data for draft
+    // Only save answers that meet the minimum length requirement (20+ chars)
     SECTION_KEYS.forEach((section) => {
       // First clear existing answers for this section
       sectionPrompts[section].forEach((item: SectionPromptAnswer) => {
-        if (!localAnswers[section][item.question]?.trim()) {
+        if (!isAnswerValid(localAnswers[section][item.question] || '')) {
           removeSectionPromptAnswer(section, item.question);
         }
       });
 
-      // Then add/update current answers
+      // Then add/update current answers that meet minimum length
       Object.entries(localAnswers[section]).forEach(([question, answer]) => {
-        if (answer.trim().length > 0) {
+        if (isAnswerValid(answer)) {
           setSectionPromptAnswer(section, question, answer.trim());
           sectionPromptsData[section].push({ question, answer: answer.trim() });
         }
@@ -353,9 +360,19 @@ export default function PromptsPart2Screen() {
                                 textAlignVertical="top"
                                 autoFocus
                               />
-                              <Text style={styles.charCount}>
-                                {answer.length}/{PROMPT_ANSWER_MAX_LENGTH}
-                              </Text>
+                              <View style={styles.inputFooter}>
+                                {/* Inline validation message */}
+                                {answer.trim().length > 0 && answer.trim().length < PROMPT_ANSWER_MIN_LENGTH ? (
+                                  <Text style={styles.minCharWarning}>
+                                    {PROMPT_ANSWER_MIN_LENGTH - answer.trim().length} more characters needed
+                                  </Text>
+                                ) : (
+                                  <View />
+                                )}
+                                <Text style={styles.charCount}>
+                                  {answer.length}/{PROMPT_ANSWER_MAX_LENGTH}
+                                </Text>
+                              </View>
                             </View>
                           )}
                         </TouchableOpacity>
@@ -372,7 +389,7 @@ export default function PromptsPart2Screen() {
             <View style={styles.validationHint}>
               <Ionicons name="information-circle" size={18} color={COLORS.warning} />
               <Text style={styles.validationHintText}>
-                Answer at least 1 prompt in each section to continue
+                Answer at least 1 prompt ({PROMPT_ANSWER_MIN_LENGTH}+ chars) in each section
               </Text>
             </View>
           )}
@@ -515,11 +532,21 @@ const styles = StyleSheet.create({
     lineHeight: 18,
     padding: 0,
   },
+  inputFooter: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    marginTop: 4,
+  },
   charCount: {
     fontSize: 10,
     color: COLORS.textMuted,
     textAlign: 'right',
-    marginTop: 4,  // Reduced from 8
+  },
+  minCharWarning: {
+    fontSize: 11,
+    color: COLORS.warning,
+    fontWeight: '500',
   },
   // Validation hint
   validationHint: {
