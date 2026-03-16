@@ -48,6 +48,47 @@ type BootState =
 
 const H = (p: string) => p as unknown as Href;
 
+/**
+ * Map onboarding lastStepKey to resume route.
+ * Returns the route to resume onboarding from based on saved progress.
+ */
+function getOnboardingResumeRoute(lastStepKey: string | undefined | null): string {
+  // Default: start from basic-info (first profile step after auth)
+  if (!lastStepKey) {
+    return "/(onboarding)/basic-info";
+  }
+
+  // Map lastStepKey to route
+  const stepToRoute: Record<string, string> = {
+    // Auth steps (should not happen for VALID_ONBOARD, but handle gracefully)
+    'email_phone': '/(onboarding)/basic-info',
+    'otp': '/(onboarding)/basic-info',
+    'password': '/(onboarding)/basic-info',
+    // Profile building steps
+    'basic_info': '/(onboarding)/basic-info',
+    'consent': '/(onboarding)/consent',
+    'prompts_part1': '/(onboarding)/prompts-part1',
+    'prompts_part2': '/(onboarding)/prompts-part2',
+    'profile_details': '/(onboarding)/profile-details',
+    'profile-details/basic': '/(onboarding)/profile-details',
+    'lifestyle': '/(onboarding)/profile-details/lifestyle',
+    'profile-details/lifestyle': '/(onboarding)/profile-details/lifestyle',
+    'life_rhythm': '/(onboarding)/profile-details/life-rhythm',
+    'profile-details/life-rhythm': '/(onboarding)/profile-details/life-rhythm',
+    'education_religion': '/(onboarding)/profile-details/education-religion',
+    'preferences': '/(onboarding)/preferences',
+    'bio': '/(onboarding)/bio',
+    'display_privacy': '/(onboarding)/display-privacy',
+    'photo_upload': '/(onboarding)/photo-upload',
+    'face_verification': '/(onboarding)/face-verification',
+    'additional_photos': '/(onboarding)/additional-photos',
+    'permissions': '/(onboarding)/permissions',
+    'review': '/(onboarding)/review',
+  };
+
+  return stepToRoute[lastStepKey] || '/(onboarding)/basic-info';
+}
+
 export default function Index() {
   const router = useRouter();
   const setRouteDecisionMade = useBootStore((s) => s.setRouteDecisionMade);
@@ -62,6 +103,8 @@ export default function Index() {
     currentDemoUserId: string | null;
     demoOnboardingComplete: Record<string, boolean>;
   } | null>(null);
+  // FIX: Store resume route for VALID_ONBOARD state
+  const [onboardingResumeRoute, setOnboardingResumeRoute] = useState<string | null>(null);
 
   // ==========================================================================
   // GUARDS
@@ -222,7 +265,18 @@ export default function Index() {
         }
 
         // Route based on onboarding status
-        setBootState(backendOnboardingCompleted ? "VALID_HOME" : "VALID_ONBOARD");
+        if (backendOnboardingCompleted) {
+          setBootState("VALID_HOME");
+        } else {
+          // FIX: Compute resume route from lastStepKey before setting state
+          const lastStepKey = status.onboardingDraft?.progress?.lastStepKey;
+          const resumeRoute = getOnboardingResumeRoute(lastStepKey);
+          if (__DEV__) {
+            console.log(`[BOOT] VALID_ONBOARD: lastStepKey=${lastStepKey}, resumeRoute=${resumeRoute}`);
+          }
+          setOnboardingResumeRoute(resumeRoute);
+          setBootState("VALID_ONBOARD");
+        }
 
       } catch (error) {
         console.error("[BOOT] Validation failed:", error);
@@ -292,14 +346,17 @@ export default function Index() {
     }
 
     // Navigate based on state
-    const route = getRouteForState(bootState);
+    // FIX: Use onboardingResumeRoute for VALID_ONBOARD instead of welcome
+    const route = bootState === "VALID_ONBOARD" && onboardingResumeRoute
+      ? onboardingResumeRoute
+      : getRouteForState(bootState);
     if (__DEV__) {
       console.log(`[BOOT] Final state=${bootState}, navigating to ${route}`);
     }
 
     // Use replace for all routes to prevent back navigation to boot screen
     router.replace(route as any);
-  }, [bootState, router, setRouteDecisionMade, demoCache]);
+  }, [bootState, router, setRouteDecisionMade, demoCache, onboardingResumeRoute]);
 
   // ==========================================================================
   // RENDER
@@ -329,11 +386,14 @@ function getRouteForState(state: BootState): string {
     case "DEMO_HOME":
       return "/(main)/(tabs)/home";
     case "VALID_ONBOARD":
+      // FIX: Fallback for VALID_ONBOARD - resume from basic-info (first profile step)
+      // Note: Normally onboardingResumeRoute is used instead of this fallback
+      return "/(onboarding)/basic-info";
     case "NO_AUTH":
     case "INVALID":
     case "DEMO_WELCOME":
     default:
-      // All non-completed users (including VALID_ONBOARD) start from Welcome
+      // Unauthenticated users start from auth welcome
       return "/(auth)/welcome";
   }
 }
