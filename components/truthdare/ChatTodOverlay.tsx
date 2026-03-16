@@ -20,7 +20,7 @@
  * - unlocked    → (overlay hides, chat opens)
  */
 
-import React, { useState, useCallback, useMemo, useEffect } from 'react';
+import React, { useState, useCallback, useMemo, useEffect, useRef } from 'react';
 import {
   View,
   Text,
@@ -102,6 +102,15 @@ export function ChatTodOverlay({
   const [promptText, setPromptText] = useState('');
   const [answerText, setAnswerText] = useState('');
   const [showVoiceRecorder, setShowVoiceRecorder] = useState(false);
+
+  // TOD-P1-001 FIX: Track mount state to prevent setState after unmount
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   // Initialize game if needed
   React.useEffect(() => {
@@ -214,11 +223,17 @@ export function ChatTodOverlay({
     if (game?.roundPhase !== 'answering') return;
 
     const checkForCameraAnswer = () => {
+      // TOD-P1-001 FIX: Guard against unmount before calling submitAnswer
+      if (!mountedRef.current) return;
+
       try {
         const key = `tod_camera_answer_${conversationId}`;
         // Pop from memory (get and delete atomically, no persistence)
         const data = popHandoff<{ type: 'photo' | 'video'; mediaUri: string; durationSec?: number }>(key);
         if (data) {
+          // TOD-P1-001 FIX: Double-check mount state before state update
+          if (!mountedRef.current) return;
+
           const meta: TodAnswerMeta = {
             type: data.type,
             mediaUri: data.mediaUri,

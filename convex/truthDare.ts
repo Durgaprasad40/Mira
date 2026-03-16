@@ -1028,8 +1028,9 @@ export const rejectPrivateMediaConnect = mutation({
 /**
  * Cleanup expired private media (called periodically).
  * Deletes storage and marks records where timer expired.
+ * TOD-P1-003 FIX: Converted to internalMutation - only callable by cron/scheduler
  */
-export const cleanupExpiredPrivateMedia = mutation({
+export const cleanupExpiredPrivateMedia = internalMutation({
   args: {},
   handler: async (ctx) => {
     const now = Date.now();

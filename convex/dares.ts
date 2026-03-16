@@ -68,12 +68,22 @@ export const sendDare = mutation({
 });
 
 // Get pending dares received
+// TOD-P1-002 FIX: Server-side auth - verify caller matches requested userId
 export const getPendingDares = query({
   args: {
     userId: v.id('users'),
   },
   handler: async (ctx, args) => {
     const { userId } = args;
+
+    // TOD-P1-002 FIX: Server-side auth verification
+    const identity = await ctx.auth.getUserIdentity();
+    if (identity?.subject) {
+      const callerUserId = await resolveUserIdByAuthId(ctx, identity.subject);
+      if (callerUserId !== userId) {
+        return []; // Caller is not authorized to view this user's dares
+      }
+    }
 
     const dares = await ctx.db
       .query('dares')
@@ -91,12 +101,22 @@ export const getPendingDares = query({
 });
 
 // Get dares sent by user
+// TOD-P1-002 FIX: Server-side auth - verify caller matches requested userId
 export const getDaresSent = query({
   args: {
     userId: v.id('users'),
   },
   handler: async (ctx, args) => {
     const { userId } = args;
+
+    // TOD-P1-002 FIX: Server-side auth verification
+    const identity = await ctx.auth.getUserIdentity();
+    if (identity?.subject) {
+      const callerUserId = await resolveUserIdByAuthId(ctx, identity.subject);
+      if (callerUserId !== userId) {
+        return []; // Caller is not authorized to view this user's dares
+      }
+    }
 
     const dares = await ctx.db
       .query('dares')
