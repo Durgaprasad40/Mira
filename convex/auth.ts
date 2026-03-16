@@ -818,6 +818,41 @@ export const completeSocialAuth = mutation({
     // P0-008 FIX: Normalize email to prevent duplicate accounts with different casing
     const normalizedEmail = email?.toLowerCase().trim();
 
+    // P1-FIX: Re-check for existing user to prevent race condition duplicates
+    // Between socialAuth check and completeSocialAuth, another request may have created the user
+    let existingUser = await ctx.db
+      .query("users")
+      .withIndex("by_external_id", (q) => q.eq("externalId", externalId))
+      .first();
+
+    if (!existingUser && normalizedEmail) {
+      existingUser = await ctx.db
+        .query("users")
+        .withIndex("by_email", (q) => q.eq("email", normalizedEmail))
+        .first();
+    }
+
+    if (existingUser) {
+      // Race condition detected: user was created between socialAuth and completeSocialAuth
+      // Return existing user instead of creating duplicate
+      await ctx.db.patch(existingUser._id, { lastActive: now });
+
+      const token = generateToken();
+      await ctx.db.insert("sessions", {
+        userId: existingUser._id,
+        token,
+        expiresAt: now + 30 * 24 * 60 * 60 * 1000,
+        createdAt: now,
+      });
+
+      return {
+        success: true,
+        userId: existingUser._id,
+        token,
+      };
+    }
+
+    // No existing user found - safe to create new user
     const trialEndsAt =
       gender === "male" ? now + 7 * 24 * 60 * 60 * 1000 : undefined;
 
@@ -1380,12 +1415,49 @@ export const getOrCreateUserByIdentity = mutation({
     //
     // NOTE: We do NOT pre-fill profile data. Onboarding handles that.
 
+    // P1-FIX: Re-check for existing user to prevent race condition duplicates
+    // Another parallel request may have created the user between Step 1 and now
+    const normalizedEmail = email?.toLowerCase().trim();
+    let raceCheckUser = null;
+
+    if (normalizedEmail) {
+      raceCheckUser = await ctx.db
+        .query("users")
+        .withIndex("by_email", (q) => q.eq("email", normalizedEmail))
+        .first();
+    }
+    if (!raceCheckUser && phone) {
+      raceCheckUser = await ctx.db
+        .query("users")
+        .withIndex("by_phone", (q) => q.eq("phone", phone))
+        .first();
+    }
+    if (!raceCheckUser && externalId) {
+      raceCheckUser = await ctx.db
+        .query("users")
+        .withIndex("by_external_id", (q) => q.eq("externalId", externalId))
+        .first();
+    }
+
+    if (raceCheckUser) {
+      // Race condition detected: user was created by parallel request
+      // Return existing user instead of creating duplicate
+      await ctx.db.patch(raceCheckUser._id, { lastActive: Date.now() });
+      return {
+        userId: raceCheckUser._id,
+        isNewUser: false,
+        wasRestored: false,
+        onboardingCompleted: raceCheckUser.onboardingCompleted,
+      };
+    }
+
+    // No existing user found after re-check - safe to create new user
     const now = Date.now();
     const authProvider = email ? "email" : phone ? "phone" : "google";
 
     const newUserId = await ctx.db.insert("users", {
-      // Auth fields (only set what was provided)
-      email: email || undefined,
+      // Auth fields (only set what was provided, email normalized)
+      email: normalizedEmail || undefined,
       phone: phone || undefined,
       externalId: externalId || undefined,
       authProvider,
