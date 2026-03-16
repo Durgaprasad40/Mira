@@ -745,10 +745,12 @@ export const socialAuth = mutation({
     }
 
     // Check if user exists with same email
-    if (email) {
+    // P0-008 FIX: Normalize email to prevent duplicate accounts with different casing
+    const normalizedEmail = email?.toLowerCase().trim();
+    if (normalizedEmail) {
       user = await ctx.db
         .query("users")
-        .withIndex("by_email", (q) => q.eq("email", email))
+        .withIndex("by_email", (q) => q.eq("email", normalizedEmail))
         .first();
 
       if (user) {
@@ -778,12 +780,13 @@ export const socialAuth = mutation({
     }
 
     // New user - need to complete registration
+    // P0-008 FIX: Return normalized email for consistency
     return {
       success: true,
       isNewUser: true,
       provider,
       externalId,
-      email,
+      email: normalizedEmail,
       name,
     };
   },
@@ -812,12 +815,14 @@ export const completeSocialAuth = mutation({
   handler: async (ctx, args) => {
     const { provider, externalId, email, name, dateOfBirth, gender } = args;
     const now = Date.now();
+    // P0-008 FIX: Normalize email to prevent duplicate accounts with different casing
+    const normalizedEmail = email?.toLowerCase().trim();
 
     const trialEndsAt =
       gender === "male" ? now + 7 * 24 * 60 * 60 * 1000 : undefined;
 
     const userId = await ctx.db.insert("users", {
-      email,
+      email: normalizedEmail,
       externalId,
       authProvider: provider,
       name,
