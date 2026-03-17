@@ -19,7 +19,30 @@ import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useQuery, useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { useAuthStore } from '@/stores/authStore';
-import { COLORS, SMOKING_OPTIONS, DRINKING_OPTIONS, KIDS_OPTIONS, EDUCATION_OPTIONS, RELIGION_OPTIONS, PROFILE_PROMPT_QUESTIONS } from '@/lib/constants';
+import {
+  COLORS,
+  SMOKING_OPTIONS,
+  DRINKING_OPTIONS,
+  KIDS_OPTIONS,
+  EDUCATION_OPTIONS,
+  RELIGION_OPTIONS,
+  EXERCISE_OPTIONS,
+  PETS_OPTIONS,
+  INSECT_OPTIONS,
+  PROFILE_PROMPT_QUESTIONS,
+  PROFILE_PROMPTS_MIN,
+  PROFILE_PROMPTS_MAX,
+  SOCIAL_RHYTHM_OPTIONS,
+  SLEEP_SCHEDULE_OPTIONS,
+  TRAVEL_STYLE_OPTIONS,
+  WORK_STYLE_OPTIONS,
+  CORE_VALUES_OPTIONS,
+  SocialRhythmValue,
+  SleepScheduleValue,
+  TravelStyleValue,
+  WorkStyleValue,
+  CoreValueValue,
+} from '@/lib/constants';
 import { Button, Input } from '@/components/ui';
 import { Ionicons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
@@ -67,6 +90,9 @@ export default function EditProfileScreen() {
   const hasInitializedRef = useRef(false);
   const lastUserIdRef = useRef<string | null>(null);
 
+  // MIGRATION: Track if sectionPrompts → profilePrompts migration has been attempted
+  const hasMigratedPromptsRef = useRef(false);
+
   // Ref for bio TextInput to enable tap-anywhere-to-focus
   const bioInputRef = useRef<TextInput>(null);
 
@@ -90,6 +116,7 @@ export default function EditProfileScreen() {
 
   const updateProfile = useMutation(api.users.updateProfile);
   const updateProfilePrompts = useMutation(api.users.updateProfilePrompts);
+  const upsertOnboardingDraft = useMutation(api.users.upsertOnboardingDraft);
   const togglePhotoBlur = isDemoMode ? null : useMutation(api.users.togglePhotoBlur);
 
   // Subscribe to currentDemoUserId to prevent stale closures on account switch
@@ -134,6 +161,64 @@ export default function EditProfileScreen() {
   const [jobTitle, setJobTitle] = useState('');
   const [company, setCompany] = useState('');
   const [school, setSchool] = useState('');
+  const [exercise, setExercise] = useState<string | null>(null);
+  const [pets, setPets] = useState<string[]>([]);
+  const [insect, setInsect] = useState<string | null>(null);
+
+  // Life Rhythm state (from onboardingDraft)
+  const [lifeRhythmCity, setLifeRhythmCity] = useState<string>('');
+  const [socialRhythm, setSocialRhythm] = useState<SocialRhythmValue | null>(null);
+  const [sleepSchedule, setSleepSchedule] = useState<SleepScheduleValue | null>(null);
+  const [travelStyle, setTravelStyle] = useState<TravelStyleValue | null>(null);
+  const [workStyle, setWorkStyle] = useState<WorkStyleValue | null>(null);
+  const [coreValues, setCoreValues] = useState<CoreValueValue[]>([]);
+
+  // Review-style UI: Track which section is expanded for inline editing
+  type ExpandableSection = 'prompts' | 'basicInfo' | 'lifestyle' | 'lifeRhythm' | 'educationReligion' | null;
+  const [expandedSection, setExpandedSection] = useState<ExpandableSection>(null);
+
+  // Helper: Get label from options array by value
+  const getOptionLabel = useCallback((
+    options: { value: string; label: string }[],
+    value: string | null
+  ): string => {
+    if (!value) return '—';
+    const option = options.find((o) => o.value === value);
+    return option?.label || value;
+  }, []);
+
+  // Helper: Toggle section expansion
+  const toggleSection = useCallback((section: ExpandableSection) => {
+    setExpandedSection((prev) => (prev === section ? null : section));
+  }, []);
+
+  // Helper: Toggle pet selection (max 3)
+  const togglePet = useCallback((pet: string) => {
+    setPets((prev) => {
+      if (prev.includes(pet)) {
+        return prev.filter((p) => p !== pet);
+      }
+      if (prev.length >= 3) {
+        Alert.alert('Limit Reached', 'You can select up to 3 pets only.');
+        return prev;
+      }
+      return [...prev, pet];
+    });
+  }, []);
+
+  // Helper: Toggle core value selection (max 3)
+  const toggleCoreValue = useCallback((value: CoreValueValue) => {
+    setCoreValues((prev) => {
+      if (prev.includes(value)) {
+        return prev.filter((v) => v !== value);
+      }
+      if (prev.length >= 3) {
+        Alert.alert('Limit Reached', 'You can select up to 3 core values.');
+        return prev;
+      }
+      return [...prev, value];
+    });
+  }, []);
 
   // Photo state for 9-slot grid (SLOT-BASED: index = slot number)
   const [photoSlots, setPhotoSlots] = useState<PhotoSlots9>(createEmptyPhotoSlots());
@@ -153,7 +238,87 @@ export default function EditProfileScreen() {
       setTimedOut(false);
 
       setBio(currentUser.bio || '');
-      setPrompts((currentUser as any)?.profilePrompts ?? []);
+
+      // Load prompts from multiple sources:
+      // 1. profilePrompts on user document (main icebreaker prompts)
+      // 2. sectionPrompts in onboardingDraft (section prompts from Part-2)
+      const mainPrompts = (currentUser as any)?.profilePrompts ?? [];
+      const draft = (currentUser as any)?.onboardingDraft;
+      const sectionPrompts = draft?.profileDetails?.sectionPrompts;
+
+      // Flatten section prompts into array
+      const flatSectionPrompts: { question: string; answer: string }[] = [];
+      if (sectionPrompts) {
+        ['builder', 'performer', 'seeker', 'grounded'].forEach((section) => {
+          const sectionArr = sectionPrompts[section];
+          if (Array.isArray(sectionArr)) {
+            sectionArr.forEach((p: { question: string; answer: string }) => {
+              if (p.question && p.answer?.trim()) {
+                flatSectionPrompts.push(p);
+              }
+            });
+          }
+        });
+      }
+
+      // Combine: main prompts first, then section prompts (dedupe by question)
+      const seenQuestions = new Set<string>();
+      const allPrompts: { question: string; answer: string }[] = [];
+      [...mainPrompts, ...flatSectionPrompts].forEach((p) => {
+        if (p.question && !seenQuestions.has(p.question)) {
+          seenQuestions.add(p.question);
+          allPrompts.push(p);
+        }
+      });
+      setPrompts(allPrompts);
+
+      if (__DEV__) {
+        console.log('[EditProfile] Loaded prompts:', {
+          mainCount: mainPrompts.length,
+          sectionCount: flatSectionPrompts.length,
+          totalCount: allPrompts.length,
+        });
+      }
+
+      // MIGRATION: Auto-migrate old sectionPrompts to profilePrompts
+      // Condition: profilePrompts is empty/undefined BUT sectionPrompts exists
+      // This preserves old user data in the new unified format
+      const needsMigration =
+        mainPrompts.length === 0 &&
+        flatSectionPrompts.length > 0 &&
+        !hasMigratedPromptsRef.current;
+
+      if (needsMigration && !isDemoMode) {
+        hasMigratedPromptsRef.current = true;
+
+        // Limit to PROFILE_PROMPTS_MAX (5) prompts
+        const migratedPrompts = flatSectionPrompts
+          .filter((p) => p.answer.trim().length >= 20) // Must meet min length
+          .slice(0, PROFILE_PROMPTS_MAX)
+          .map((p) => ({
+            question: p.question,
+            answer: p.answer.trim().slice(0, 200), // Max 200 chars
+          }));
+
+        if (migratedPrompts.length > 0) {
+          // Get session token for secure save
+          const sessionToken = useAuthStore.getState().token;
+          if (sessionToken) {
+            updateProfilePrompts({ token: sessionToken, prompts: migratedPrompts })
+              .then(() => {
+                console.log('[PROMPTS MIGRATED]', {
+                  count: migratedPrompts.length,
+                  source: 'sectionPrompts',
+                  destination: 'user.profilePrompts',
+                });
+              })
+              .catch((err) => {
+                console.error('[PROMPTS MIGRATION FAILED]', err);
+              });
+          }
+        }
+      }
+
       setHeight(currentUser.height?.toString() || '');
       setWeight(currentUser.weight?.toString() || '');
       setSmoking(currentUser.smoking || null);
@@ -164,6 +329,23 @@ export default function EditProfileScreen() {
       setJobTitle(currentUser.jobTitle || '');
       setCompany(currentUser.company || '');
       setSchool(currentUser.school || '');
+      setExercise(currentUser.exercise || null);
+      setPets(currentUser.pets || []);
+      setInsect(currentUser.insect || null);
+
+      // Load Life Rhythm from onboardingDraft
+      const lifeRhythm = draft?.lifeRhythm;
+      if (lifeRhythm) {
+        setLifeRhythmCity(lifeRhythm.city || '');
+        setSocialRhythm(lifeRhythm.socialRhythm || null);
+        setSleepSchedule(lifeRhythm.sleepSchedule || null);
+        setTravelStyle(lifeRhythm.travelStyle || null);
+        setWorkStyle(lifeRhythm.workStyle || null);
+        setCoreValues(lifeRhythm.coreValues || []);
+        if (__DEV__) {
+          console.log('[EditProfile] Loaded lifeRhythm:', lifeRhythm);
+        }
+      }
 
       // Initialize firstName/lastName from profile
       // Priority: demoProfile firstName/lastName > parse from name
@@ -473,12 +655,18 @@ export default function EditProfileScreen() {
     setPrompts(updated);
   };
   const handleAddPrompt = (questionText: string) => {
+    // Enforce max limit
+    if (prompts.length >= PROFILE_PROMPTS_MAX) {
+      Alert.alert('Limit Reached', `You can add up to ${PROFILE_PROMPTS_MAX} prompts.`);
+      return;
+    }
     setPrompts([...prompts, { question: questionText, answer: '' }]);
     setShowPromptPicker(false);
   };
 
   const usedQuestions = prompts.map((p) => p.question);
   const availableQuestions = PROFILE_PROMPT_QUESTIONS.filter((q) => !usedQuestions.includes(q.text));
+  const canAddMorePrompts = prompts.length < PROFILE_PROMPTS_MAX && availableQuestions.length > 0;
 
   const handleBlurToggle = (newValue: boolean) => {
     if (newValue) {
@@ -585,6 +773,21 @@ export default function EditProfileScreen() {
       if (smoking) patch.smoking = smoking;
       if (drinking) patch.drinking = drinking;
       if (kids) patch.kids = kids;
+      if (exercise) patch.exercise = exercise;
+      if (pets.length > 0) patch.pets = pets;
+      if (insect) patch.insect = insect;
+
+      // Life Rhythm - save to onboardingDraft structure
+      const lifeRhythmPatch: Record<string, any> = {};
+      if (lifeRhythmCity) lifeRhythmPatch.city = lifeRhythmCity;
+      if (socialRhythm) lifeRhythmPatch.socialRhythm = socialRhythm;
+      if (sleepSchedule) lifeRhythmPatch.sleepSchedule = sleepSchedule;
+      if (travelStyle) lifeRhythmPatch.travelStyle = travelStyle;
+      if (workStyle) lifeRhythmPatch.workStyle = workStyle;
+      if (coreValues.length > 0) lifeRhythmPatch.coreValues = coreValues;
+      if (Object.keys(lifeRhythmPatch).length > 0) {
+        patch.onboardingDraft = { ...(patch.onboardingDraft || {}), lifeRhythm: lifeRhythmPatch };
+      }
 
       // Compute non-null slots for logging
       const nonNullSlots = photoSlots.map((s, i) => (s ? i : -1)).filter((i) => i >= 0);
@@ -644,8 +847,33 @@ export default function EditProfileScreen() {
         jobTitle: jobTitle || undefined,
         company: company || undefined,
         school: school || undefined,
+        exercise: (exercise || undefined) as any,
+        pets: pets.length > 0 ? (pets as any) : undefined,
+        insect: (insect || undefined) as any,
       });
-      await updateProfilePrompts({ prompts: filledPrompts });
+      // Get session token from authStore for secure server-side validation
+      const sessionToken = useAuthStore.getState().token;
+      if (!sessionToken) {
+        throw new Error('No session token available');
+      }
+      await updateProfilePrompts({ token: sessionToken, prompts: filledPrompts });
+
+      // Save Life Rhythm to onboardingDraft
+      const lifeRhythmPatch: Record<string, any> = {};
+      if (lifeRhythmCity) lifeRhythmPatch.city = lifeRhythmCity;
+      if (socialRhythm) lifeRhythmPatch.socialRhythm = socialRhythm;
+      if (sleepSchedule) lifeRhythmPatch.sleepSchedule = sleepSchedule;
+      if (travelStyle) lifeRhythmPatch.travelStyle = travelStyle;
+      if (workStyle) lifeRhythmPatch.workStyle = workStyle;
+      if (coreValues.length > 0) lifeRhythmPatch.coreValues = coreValues;
+
+      if (Object.keys(lifeRhythmPatch).length > 0) {
+        await upsertOnboardingDraft({
+          userId: userId as string,
+          patch: { lifeRhythm: lifeRhythmPatch },
+        });
+      }
+
       Alert.alert('Success', 'Profile updated!');
       router.back();
     } catch (error: any) {
@@ -873,136 +1101,553 @@ export default function EditProfileScreen() {
         <Text style={styles.charCount}>{bio.length}/500</Text>
       </View>
 
+      {/* PROMPTS SECTION - Review Style */}
       <View style={styles.section}>
-        <Text style={styles.sectionTitle}>Prompts</Text>
-        {prompts.map((prompt, index) => (
-          <View key={index} style={styles.promptCard}>
-            <View style={styles.promptHeader}>
-              <Text style={styles.promptQuestion}>{prompt.question}</Text>
-              <TouchableOpacity onPress={() => handleDeletePrompt(index)}><Ionicons name="close-circle" size={22} color={COLORS.textMuted} /></TouchableOpacity>
+        <TouchableOpacity style={styles.reviewHeader} onPress={() => toggleSection('prompts')} activeOpacity={0.7}>
+          <View style={styles.reviewHeaderLeft}>
+            <Text style={styles.reviewSectionTitle}>Prompts</Text>
+            <Text style={styles.reviewSummary}>
+              {filledPrompts.length > 0
+                ? `${filledPrompts.length} prompt${filledPrompts.length > 1 ? 's' : ''}`
+                : 'Add prompts'}
+            </Text>
+          </View>
+          <Ionicons
+            name={expandedSection === 'prompts' ? 'chevron-up' : 'chevron-down'}
+            size={22}
+            color={COLORS.textMuted}
+          />
+        </TouchableOpacity>
+
+        {/* Collapsed: Show prompt previews */}
+        {expandedSection !== 'prompts' && filledPrompts.length > 0 && (
+          <View style={styles.reviewPreviewList}>
+            {filledPrompts.slice(0, 2).map((prompt, idx) => (
+              <View key={idx} style={styles.reviewPreviewItem}>
+                <Text style={styles.reviewPreviewQuestion} numberOfLines={1}>{prompt.question}</Text>
+                <Text style={styles.reviewPreviewAnswer} numberOfLines={1}>{prompt.answer}</Text>
+              </View>
+            ))}
+            {filledPrompts.length > 2 && (
+              <Text style={styles.reviewMoreText}>+{filledPrompts.length - 2} more</Text>
+            )}
+          </View>
+        )}
+
+        {/* Expanded: Full edit UI */}
+        {expandedSection === 'prompts' && (
+          <View style={styles.expandedContent}>
+            {prompts.map((prompt, index) => (
+              <View key={index} style={styles.promptCard}>
+                <View style={styles.promptHeader}>
+                  <Text style={styles.promptQuestion}>{prompt.question}</Text>
+                  <TouchableOpacity onPress={() => handleDeletePrompt(index)}>
+                    <Ionicons name="close-circle" size={22} color={COLORS.textMuted} />
+                  </TouchableOpacity>
+                </View>
+                <TextInput
+                  style={styles.promptAnswerInput}
+                  value={prompt.answer}
+                  onChangeText={(t) => handleUpdatePromptAnswer(index, t)}
+                  placeholder="Type your answer..."
+                  placeholderTextColor={COLORS.textMuted}
+                  multiline
+                  maxLength={200}
+                />
+                <Text style={styles.promptCharCount}>{prompt.answer.length}/200</Text>
+              </View>
+            ))}
+            {canAddMorePrompts && !showPromptPicker && (
+              <TouchableOpacity style={styles.addPromptButton} onPress={() => setShowPromptPicker(true)}>
+                <Ionicons name="add-circle-outline" size={20} color={COLORS.primary} />
+                <Text style={styles.addPromptText}>Add a prompt ({prompts.length}/{PROFILE_PROMPTS_MAX})</Text>
+              </TouchableOpacity>
+            )}
+            {prompts.length >= PROFILE_PROMPTS_MAX && !showPromptPicker && (
+              <View style={styles.promptLimitReached}>
+                <Ionicons name="checkmark-circle" size={18} color={COLORS.success} />
+                <Text style={styles.promptLimitText}>Maximum {PROFILE_PROMPTS_MAX} prompts reached</Text>
+              </View>
+            )}
+            {showPromptPicker && (
+              <View style={styles.promptPickerContainer}>
+                {availableQuestions.length > 0 ? (
+                  availableQuestions.map((q) => (
+                    <TouchableOpacity key={q.id} style={styles.promptPickerOption} onPress={() => handleAddPrompt(q.text)}>
+                      <Text style={styles.promptPickerOptionText}>{q.text}</Text>
+                      <Ionicons name="chevron-forward" size={16} color={COLORS.textMuted} />
+                    </TouchableOpacity>
+                  ))
+                ) : (
+                  <Text style={styles.noPromptsAvailable}>No more prompts available</Text>
+                )}
+                <TouchableOpacity style={styles.promptPickerCancel} onPress={() => setShowPromptPicker(false)}>
+                  <Text style={styles.promptPickerCancelText}>Cancel</Text>
+                </TouchableOpacity>
+              </View>
+            )}
+          </View>
+        )}
+      </View>
+
+      {/* BASIC INFO (lower) SECTION - Review Style */}
+      <View style={styles.section}>
+        <TouchableOpacity style={styles.reviewHeader} onPress={() => toggleSection('basicInfo')} activeOpacity={0.7}>
+          <View style={styles.reviewHeaderLeft}>
+            <Text style={styles.reviewSectionTitle}>Details</Text>
+            <Text style={styles.reviewSummary}>
+              {[height && `${height}cm`, weight && `${weight}kg`, jobTitle].filter(Boolean).join(' · ') || 'Add details'}
+            </Text>
+          </View>
+          <Ionicons
+            name={expandedSection === 'basicInfo' ? 'chevron-up' : 'chevron-down'}
+            size={22}
+            color={COLORS.textMuted}
+          />
+        </TouchableOpacity>
+
+        {/* Collapsed: Show key values */}
+        {expandedSection !== 'basicInfo' && (
+          <View style={styles.reviewRowList}>
+            {height ? (
+              <View style={styles.reviewRow}>
+                <Text style={styles.reviewRowLabel}>Height</Text>
+                <Text style={styles.reviewRowValue}>{height} cm</Text>
+              </View>
+            ) : null}
+            {weight ? (
+              <View style={styles.reviewRow}>
+                <Text style={styles.reviewRowLabel}>Weight</Text>
+                <Text style={styles.reviewRowValue}>{weight} kg</Text>
+              </View>
+            ) : null}
+            {jobTitle ? (
+              <View style={styles.reviewRow}>
+                <Text style={styles.reviewRowLabel}>Job</Text>
+                <Text style={styles.reviewRowValue} numberOfLines={1}>{jobTitle}{company ? ` at ${company}` : ''}</Text>
+              </View>
+            ) : null}
+            {school ? (
+              <View style={styles.reviewRow}>
+                <Text style={styles.reviewRowLabel}>School</Text>
+                <Text style={styles.reviewRowValue} numberOfLines={1}>{school}</Text>
+              </View>
+            ) : null}
+            {!height && !weight && !jobTitle && !school && (
+              <Text style={styles.reviewEmptyHint}>Tap to add your details</Text>
+            )}
+          </View>
+        )}
+
+        {/* Expanded: Full edit UI */}
+        {expandedSection === 'basicInfo' && (
+          <View style={styles.expandedContent}>
+            <View style={styles.inputRow}>
+              <Text style={styles.label}>Height (cm)</Text>
+              <Input placeholder="e.g. 170" value={height} onChangeText={setHeight} keyboardType="numeric" style={styles.numberInput} />
             </View>
-            <TextInput style={styles.promptAnswerInput} value={prompt.answer} onChangeText={(t) => handleUpdatePromptAnswer(index, t)} placeholder="Type your answer..." placeholderTextColor={COLORS.textMuted} multiline maxLength={200} />
-            <Text style={styles.promptCharCount}>{prompt.answer.length}/200</Text>
-          </View>
-        ))}
-        {prompts.length < 3 && !showPromptPicker && (
-          <TouchableOpacity style={styles.addPromptButton} onPress={() => setShowPromptPicker(true)}>
-            <Ionicons name="add-circle-outline" size={20} color={COLORS.primary} />
-            <Text style={styles.addPromptText}>Add a prompt ({prompts.length}/3)</Text>
-          </TouchableOpacity>
-        )}
-        {showPromptPicker && (
-          <View style={styles.promptPickerContainer}>
-            {availableQuestions.map((q) => (
-              <TouchableOpacity key={q.id} style={styles.promptPickerOption} onPress={() => handleAddPrompt(q.text)}>
-                <Text style={styles.promptPickerOptionText}>{q.text}</Text>
-                <Ionicons name="chevron-forward" size={16} color={COLORS.textMuted} />
-              </TouchableOpacity>
-            ))}
-            <TouchableOpacity style={styles.promptPickerCancel} onPress={() => setShowPromptPicker(false)}><Text style={styles.promptPickerCancelText}>Cancel</Text></TouchableOpacity>
+            <View style={styles.inputRow}>
+              <Text style={styles.label}>Weight (kg)</Text>
+              <Input placeholder="e.g. 65" value={weight} onChangeText={setWeight} keyboardType="numeric" style={styles.numberInput} />
+            </View>
+            <View style={styles.inputRow}>
+              <Text style={styles.label}>Job Title</Text>
+              <Input placeholder="e.g. Software Engineer" value={jobTitle} onChangeText={setJobTitle} />
+            </View>
+            <View style={styles.inputRow}>
+              <Text style={styles.label}>Company</Text>
+              <Input placeholder="e.g. Google" value={company} onChangeText={setCompany} />
+            </View>
+            <View style={styles.inputRow}>
+              <Text style={styles.label}>School</Text>
+              <Input placeholder="e.g. Stanford University" value={school} onChangeText={setSchool} />
+            </View>
           </View>
         )}
       </View>
 
+      {/* LIFESTYLE SECTION - Review Style */}
       <View style={styles.section}>
-        <Text style={styles.sectionTitle}>Basic Info</Text>
-        <View style={styles.inputRow}><Text style={styles.label}>Height (cm)</Text><Input placeholder="Height" value={height} onChangeText={setHeight} keyboardType="numeric" style={styles.numberInput} /></View>
-        <View style={styles.inputRow}><Text style={styles.label}>Weight (kg)</Text><Input placeholder="Weight" value={weight} onChangeText={setWeight} keyboardType="numeric" style={styles.numberInput} /></View>
-        <View style={styles.inputRow}><Text style={styles.label}>Job Title</Text><Input placeholder="Job title" value={jobTitle} onChangeText={setJobTitle} /></View>
-        <View style={styles.inputRow}><Text style={styles.label}>Company</Text><Input placeholder="Company name" value={company} onChangeText={setCompany} /></View>
-        <View style={styles.inputRow}><Text style={styles.label}>School</Text><Input placeholder="School/University" value={school} onChangeText={setSchool} /></View>
+        <TouchableOpacity style={styles.reviewHeader} onPress={() => toggleSection('lifestyle')} activeOpacity={0.7}>
+          <View style={styles.reviewHeaderLeft}>
+            <Text style={styles.reviewSectionTitle}>Lifestyle</Text>
+            <Text style={styles.reviewSummary}>
+              {[
+                smoking && getOptionLabel(SMOKING_OPTIONS, smoking),
+                drinking && getOptionLabel(DRINKING_OPTIONS, drinking),
+              ].filter(Boolean).join(' · ') || 'Add lifestyle info'}
+            </Text>
+          </View>
+          <Ionicons
+            name={expandedSection === 'lifestyle' ? 'chevron-up' : 'chevron-down'}
+            size={22}
+            color={COLORS.textMuted}
+          />
+        </TouchableOpacity>
+
+        {/* Collapsed: Show key values */}
+        {expandedSection !== 'lifestyle' && (
+          <View style={styles.reviewRowList}>
+            <View style={styles.reviewRow}>
+              <Text style={styles.reviewRowLabel}>Smoking</Text>
+              <Text style={styles.reviewRowValue}>{getOptionLabel(SMOKING_OPTIONS, smoking)}</Text>
+            </View>
+            <View style={styles.reviewRow}>
+              <Text style={styles.reviewRowLabel}>Drinking</Text>
+              <Text style={styles.reviewRowValue}>{getOptionLabel(DRINKING_OPTIONS, drinking)}</Text>
+            </View>
+            <View style={styles.reviewRow}>
+              <Text style={styles.reviewRowLabel}>Kids</Text>
+              <Text style={styles.reviewRowValue}>{getOptionLabel(KIDS_OPTIONS, kids)}</Text>
+            </View>
+            <View style={styles.reviewRow}>
+              <Text style={styles.reviewRowLabel}>Exercise</Text>
+              <Text style={styles.reviewRowValue}>{getOptionLabel(EXERCISE_OPTIONS, exercise)}</Text>
+            </View>
+            <View style={styles.reviewRow}>
+              <Text style={styles.reviewRowLabel}>Pets</Text>
+              <Text style={styles.reviewRowValue}>
+                {pets.length > 0
+                  ? pets.map((p) => PETS_OPTIONS.find((o) => o.value === p)?.label || p).join(', ')
+                  : '—'}
+              </Text>
+            </View>
+            <View style={styles.reviewRow}>
+              <Text style={styles.reviewRowLabel}>Insects</Text>
+              <Text style={styles.reviewRowValue}>
+                {insect ? INSECT_OPTIONS.find((o) => o.value === insect)?.label || insect : '—'}
+              </Text>
+            </View>
+          </View>
+        )}
+
+        {/* Expanded: Full edit UI */}
+        {expandedSection === 'lifestyle' && (
+          <View style={styles.expandedContent}>
+            <View style={styles.inputRow}>
+              <Text style={styles.label}>Smoking</Text>
+              <View style={styles.optionsRow}>
+                {SMOKING_OPTIONS.map((o) => (
+                  <TouchableOpacity
+                    key={o.value}
+                    style={[styles.optionChip, smoking === o.value && styles.optionChipSelected]}
+                    onPress={() => setSmoking(smoking === o.value ? null : o.value)}
+                  >
+                    <Text style={[styles.optionChipText, smoking === o.value && styles.optionChipTextSelected]}>{o.label}</Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            </View>
+            <View style={styles.inputRow}>
+              <Text style={styles.label}>Drinking</Text>
+              <View style={styles.optionsRow}>
+                {DRINKING_OPTIONS.map((o) => (
+                  <TouchableOpacity
+                    key={o.value}
+                    style={[styles.optionChip, drinking === o.value && styles.optionChipSelected]}
+                    onPress={() => setDrinking(drinking === o.value ? null : o.value)}
+                  >
+                    <Text style={[styles.optionChipText, drinking === o.value && styles.optionChipTextSelected]}>{o.label}</Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            </View>
+            <View style={styles.inputRow}>
+              <Text style={styles.label}>Kids</Text>
+              <View style={styles.optionsRow}>
+                {KIDS_OPTIONS.map((o) => (
+                  <TouchableOpacity
+                    key={o.value}
+                    style={[styles.optionChip, kids === o.value && styles.optionChipSelected]}
+                    onPress={() => setKids(kids === o.value ? null : o.value)}
+                  >
+                    <Text style={[styles.optionChipText, kids === o.value && styles.optionChipTextSelected]}>{o.label}</Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            </View>
+            <View style={styles.inputRow}>
+              <Text style={styles.label}>Exercise</Text>
+              <View style={styles.optionsRow}>
+                {EXERCISE_OPTIONS.map((o) => (
+                  <TouchableOpacity
+                    key={o.value}
+                    style={[styles.optionChip, exercise === o.value && styles.optionChipSelected]}
+                    onPress={() => setExercise(exercise === o.value ? null : o.value)}
+                  >
+                    <Text style={[styles.optionChipText, exercise === o.value && styles.optionChipTextSelected]}>{o.label}</Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            </View>
+            <View style={styles.inputRow}>
+              <Text style={styles.label}>Pets (select up to 3)</Text>
+              <View style={styles.optionsRow}>
+                {PETS_OPTIONS.map((o) => (
+                  <TouchableOpacity
+                    key={o.value}
+                    style={[styles.optionChip, pets.includes(o.value) && styles.optionChipSelected]}
+                    onPress={() => togglePet(o.value)}
+                  >
+                    <Text style={[styles.optionChipText, pets.includes(o.value) && styles.optionChipTextSelected]}>
+                      {o.emoji} {o.label}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            </View>
+            <View style={styles.inputRow}>
+              <Text style={styles.label}>Insects (optional)</Text>
+              <View style={styles.optionsRow}>
+                {INSECT_OPTIONS.map((o) => (
+                  <TouchableOpacity
+                    key={o.value}
+                    style={[styles.optionChip, insect === o.value && styles.optionChipSelected]}
+                    onPress={() => setInsect(insect === o.value ? null : o.value)}
+                  >
+                    <Text style={[styles.optionChipText, insect === o.value && styles.optionChipTextSelected]}>
+                      {o.emoji} {o.label}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            </View>
+          </View>
+        )}
       </View>
 
+      {/* LIFE RHYTHM SECTION - Review Style */}
       <View style={styles.section}>
-        <Text style={styles.sectionTitle}>Lifestyle</Text>
-        <View style={styles.inputRow}>
-          <Text style={styles.label}>Smoking</Text>
-          <View style={styles.optionsRow}>
-            {SMOKING_OPTIONS.map((o) => (
-              <TouchableOpacity key={o.value} style={[styles.optionChip, smoking === o.value && styles.optionChipSelected]} onPress={() => setSmoking(smoking === o.value ? null : o.value)}>
-                <Text style={[styles.optionChipText, smoking === o.value && styles.optionChipTextSelected]}>{o.label}</Text>
-              </TouchableOpacity>
-            ))}
+        <TouchableOpacity style={styles.reviewHeader} onPress={() => toggleSection('lifeRhythm')} activeOpacity={0.7}>
+          <View style={styles.reviewHeaderLeft}>
+            <Text style={styles.reviewSectionTitle}>Life Rhythm</Text>
+            <Text style={styles.reviewSummary}>
+              {[
+                socialRhythm && getOptionLabel(SOCIAL_RHYTHM_OPTIONS, socialRhythm),
+                sleepSchedule && getOptionLabel(SLEEP_SCHEDULE_OPTIONS, sleepSchedule),
+              ].filter(Boolean).join(' · ') || 'Add life rhythm info'}
+            </Text>
           </View>
-        </View>
-        <View style={styles.inputRow}>
-          <Text style={styles.label}>Drinking</Text>
-          <View style={styles.optionsRow}>
-            {DRINKING_OPTIONS.map((o) => (
-              <TouchableOpacity key={o.value} style={[styles.optionChip, drinking === o.value && styles.optionChipSelected]} onPress={() => setDrinking(drinking === o.value ? null : o.value)}>
-                <Text style={[styles.optionChipText, drinking === o.value && styles.optionChipTextSelected]}>{o.label}</Text>
-              </TouchableOpacity>
-            ))}
+          <Ionicons
+            name={expandedSection === 'lifeRhythm' ? 'chevron-up' : 'chevron-down'}
+            size={22}
+            color={COLORS.textMuted}
+          />
+        </TouchableOpacity>
+
+        {/* Collapsed: Show key values */}
+        {expandedSection !== 'lifeRhythm' && (
+          <View style={styles.reviewRowList}>
+            {lifeRhythmCity ? (
+              <View style={styles.reviewRow}>
+                <Text style={styles.reviewRowLabel}>City</Text>
+                <Text style={styles.reviewRowValue}>{lifeRhythmCity}</Text>
+              </View>
+            ) : null}
+            <View style={styles.reviewRow}>
+              <Text style={styles.reviewRowLabel}>Social Style</Text>
+              <Text style={styles.reviewRowValue}>{getOptionLabel(SOCIAL_RHYTHM_OPTIONS, socialRhythm)}</Text>
+            </View>
+            <View style={styles.reviewRow}>
+              <Text style={styles.reviewRowLabel}>Sleep Schedule</Text>
+              <Text style={styles.reviewRowValue}>{getOptionLabel(SLEEP_SCHEDULE_OPTIONS, sleepSchedule)}</Text>
+            </View>
+            <View style={styles.reviewRow}>
+              <Text style={styles.reviewRowLabel}>Travel Style</Text>
+              <Text style={styles.reviewRowValue}>{getOptionLabel(TRAVEL_STYLE_OPTIONS, travelStyle)}</Text>
+            </View>
+            <View style={styles.reviewRow}>
+              <Text style={styles.reviewRowLabel}>Work Style</Text>
+              <Text style={styles.reviewRowValue}>{getOptionLabel(WORK_STYLE_OPTIONS, workStyle)}</Text>
+            </View>
+            <View style={styles.reviewRow}>
+              <Text style={styles.reviewRowLabel}>Core Values</Text>
+              <Text style={styles.reviewRowValue}>
+                {coreValues.length > 0
+                  ? coreValues.map((v) => CORE_VALUES_OPTIONS.find((o) => o.value === v)?.label || v).join(', ')
+                  : '—'}
+              </Text>
+            </View>
           </View>
-        </View>
-        <View style={styles.inputRow}>
-          <Text style={styles.label}>Kids</Text>
-          <View style={styles.optionsRow}>
-            {KIDS_OPTIONS.map((o) => (
-              <TouchableOpacity key={o.value} style={[styles.optionChip, kids === o.value && styles.optionChipSelected]} onPress={() => setKids(kids === o.value ? null : o.value)}>
-                <Text style={[styles.optionChipText, kids === o.value && styles.optionChipTextSelected]}>{o.label}</Text>
-              </TouchableOpacity>
-            ))}
+        )}
+
+        {/* Expanded: Full edit UI */}
+        {expandedSection === 'lifeRhythm' && (
+          <View style={styles.expandedContent}>
+            <View style={styles.inputRow}>
+              <Text style={styles.label}>City</Text>
+              <Input
+                placeholder="e.g. San Francisco"
+                value={lifeRhythmCity}
+                onChangeText={setLifeRhythmCity}
+              />
+            </View>
+            <View style={styles.inputRow}>
+              <Text style={styles.label}>Social Style</Text>
+              <View style={styles.optionsRow}>
+                {SOCIAL_RHYTHM_OPTIONS.map((o) => (
+                  <TouchableOpacity
+                    key={o.value}
+                    style={[styles.optionChip, socialRhythm === o.value && styles.optionChipSelected]}
+                    onPress={() => setSocialRhythm(socialRhythm === o.value ? null : o.value)}
+                  >
+                    <Text style={[styles.optionChipText, socialRhythm === o.value && styles.optionChipTextSelected]}>{o.label}</Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            </View>
+            <View style={styles.inputRow}>
+              <Text style={styles.label}>Sleep Schedule</Text>
+              <View style={styles.optionsRow}>
+                {SLEEP_SCHEDULE_OPTIONS.map((o) => (
+                  <TouchableOpacity
+                    key={o.value}
+                    style={[styles.optionChip, sleepSchedule === o.value && styles.optionChipSelected]}
+                    onPress={() => setSleepSchedule(sleepSchedule === o.value ? null : o.value)}
+                  >
+                    <Text style={[styles.optionChipText, sleepSchedule === o.value && styles.optionChipTextSelected]}>{o.label}</Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            </View>
+            <View style={styles.inputRow}>
+              <Text style={styles.label}>Travel Style (optional)</Text>
+              <View style={styles.optionsRow}>
+                {TRAVEL_STYLE_OPTIONS.map((o) => (
+                  <TouchableOpacity
+                    key={o.value}
+                    style={[styles.optionChip, travelStyle === o.value && styles.optionChipSelected]}
+                    onPress={() => setTravelStyle(travelStyle === o.value ? null : o.value)}
+                  >
+                    <Text style={[styles.optionChipText, travelStyle === o.value && styles.optionChipTextSelected]}>{o.label}</Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            </View>
+            <View style={styles.inputRow}>
+              <Text style={styles.label}>Work Style (optional)</Text>
+              <View style={styles.optionsRow}>
+                {WORK_STYLE_OPTIONS.map((o) => (
+                  <TouchableOpacity
+                    key={o.value}
+                    style={[styles.optionChip, workStyle === o.value && styles.optionChipSelected]}
+                    onPress={() => setWorkStyle(workStyle === o.value ? null : o.value)}
+                  >
+                    <Text style={[styles.optionChipText, workStyle === o.value && styles.optionChipTextSelected]}>{o.label}</Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            </View>
+            <View style={styles.inputRow}>
+              <Text style={styles.label}>Core Values (select up to 3)</Text>
+              <View style={styles.optionsRow}>
+                {CORE_VALUES_OPTIONS.map((o) => (
+                  <TouchableOpacity
+                    key={o.value}
+                    style={[styles.optionChip, coreValues.includes(o.value) && styles.optionChipSelected]}
+                    onPress={() => toggleCoreValue(o.value)}
+                  >
+                    <Text style={[styles.optionChipText, coreValues.includes(o.value) && styles.optionChipTextSelected]}>{o.label}</Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            </View>
           </View>
-        </View>
+        )}
       </View>
 
+      {/* EDUCATION & RELIGION SECTION - Review Style */}
       <View style={styles.section}>
-        <Text style={styles.sectionTitle}>Education & Religion</Text>
-        <View style={styles.inputRow}>
-          <Text style={styles.label}>Education</Text>
-          <View style={styles.chipGrid}>
-            {EDUCATION_OPTIONS.map((o) => (
-              <TouchableOpacity
-                key={o.value}
-                style={[styles.compactChip, education === o.value && styles.compactChipSelected]}
-                onPress={() => {
-                  setEducation(education === o.value ? null : o.value);
-                  if (o.value !== 'other') setEducationOther('');
-                }}
-              >
-                <Text style={[styles.compactChipText, education === o.value && styles.compactChipTextSelected]}>{o.label}</Text>
-              </TouchableOpacity>
-            ))}
+        <TouchableOpacity style={styles.reviewHeader} onPress={() => toggleSection('educationReligion')} activeOpacity={0.7}>
+          <View style={styles.reviewHeaderLeft}>
+            <Text style={styles.reviewSectionTitle}>Education & Religion</Text>
+            <Text style={styles.reviewSummary}>
+              {[
+                education && getOptionLabel(EDUCATION_OPTIONS, education),
+                religion && getOptionLabel(RELIGION_OPTIONS, religion),
+              ].filter(Boolean).join(' · ') || 'Add info'}
+            </Text>
           </View>
-          {education === 'other' && (
-            <TextInput
-              style={styles.otherInput}
-              placeholder="Please specify..."
-              placeholderTextColor={COLORS.textMuted}
-              value={educationOther}
-              onChangeText={setEducationOther}
-              maxLength={50}
-            />
-          )}
-        </View>
-        <View style={styles.inputRow}>
-          <Text style={styles.label}>Religion</Text>
-          <View style={styles.chipGrid}>
-            {RELIGION_OPTIONS.map((o) => (
-              <TouchableOpacity
-                key={o.value}
-                style={[styles.compactChip, religion === o.value && styles.compactChipSelected]}
-                onPress={() => {
-                  setReligion(religion === o.value ? null : o.value);
-                  if (o.value !== 'other') setReligionOther('');
-                }}
-              >
-                <Text style={[styles.compactChipText, religion === o.value && styles.compactChipTextSelected]}>{o.label}</Text>
-              </TouchableOpacity>
-            ))}
+          <Ionicons
+            name={expandedSection === 'educationReligion' ? 'chevron-up' : 'chevron-down'}
+            size={22}
+            color={COLORS.textMuted}
+          />
+        </TouchableOpacity>
+
+        {/* Collapsed: Show key values */}
+        {expandedSection !== 'educationReligion' && (
+          <View style={styles.reviewRowList}>
+            <View style={styles.reviewRow}>
+              <Text style={styles.reviewRowLabel}>Education</Text>
+              <Text style={styles.reviewRowValue}>{getOptionLabel(EDUCATION_OPTIONS, education)}</Text>
+            </View>
+            <View style={styles.reviewRow}>
+              <Text style={styles.reviewRowLabel}>Religion</Text>
+              <Text style={styles.reviewRowValue}>{getOptionLabel(RELIGION_OPTIONS, religion)}</Text>
+            </View>
           </View>
-          {religion === 'other' && (
-            <TextInput
-              style={styles.otherInput}
-              placeholder="Please specify..."
-              placeholderTextColor={COLORS.textMuted}
-              value={religionOther}
-              onChangeText={setReligionOther}
-              maxLength={50}
-            />
-          )}
-        </View>
+        )}
+
+        {/* Expanded: Full edit UI */}
+        {expandedSection === 'educationReligion' && (
+          <View style={styles.expandedContent}>
+            <View style={styles.inputRow}>
+              <Text style={styles.label}>Education</Text>
+              <View style={styles.chipGrid}>
+                {EDUCATION_OPTIONS.map((o) => (
+                  <TouchableOpacity
+                    key={o.value}
+                    style={[styles.compactChip, education === o.value && styles.compactChipSelected]}
+                    onPress={() => {
+                      setEducation(education === o.value ? null : o.value);
+                      if (o.value !== 'other') setEducationOther('');
+                    }}
+                  >
+                    <Text style={[styles.compactChipText, education === o.value && styles.compactChipTextSelected]}>{o.label}</Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+              {education === 'other' && (
+                <TextInput
+                  style={styles.otherInput}
+                  placeholder="Please specify..."
+                  placeholderTextColor={COLORS.textMuted}
+                  value={educationOther}
+                  onChangeText={setEducationOther}
+                  maxLength={50}
+                />
+              )}
+            </View>
+            <View style={styles.inputRow}>
+              <Text style={styles.label}>Religion</Text>
+              <View style={styles.chipGrid}>
+                {RELIGION_OPTIONS.map((o) => (
+                  <TouchableOpacity
+                    key={o.value}
+                    style={[styles.compactChip, religion === o.value && styles.compactChipSelected]}
+                    onPress={() => {
+                      setReligion(religion === o.value ? null : o.value);
+                      if (o.value !== 'other') setReligionOther('');
+                    }}
+                  >
+                    <Text style={[styles.compactChipText, religion === o.value && styles.compactChipTextSelected]}>{o.label}</Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+              {religion === 'other' && (
+                <TextInput
+                  style={styles.otherInput}
+                  placeholder="Please specify..."
+                  placeholderTextColor={COLORS.textMuted}
+                  value={religionOther}
+                  onChangeText={setReligionOther}
+                  maxLength={50}
+                />
+              )}
+            </View>
+          </View>
+        )}
       </View>
 
       {/* FIX 1: Footer with proper safe area spacing */}
@@ -1025,6 +1670,85 @@ const styles = StyleSheet.create({
   section: { padding: 16, borderBottomWidth: 1, borderBottomColor: COLORS.border },
   sectionTitle: { fontSize: 18, fontWeight: '600', color: COLORS.text, marginBottom: 8 },
   sectionHint: { fontSize: 13, color: COLORS.textLight, marginBottom: 12 },
+  // Review-style UI for expandable sections
+  reviewHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: 4,
+  },
+  reviewHeaderLeft: {
+    flex: 1,
+    marginRight: 12,
+  },
+  reviewSectionTitle: {
+    fontSize: 18,
+    fontWeight: '600',
+    color: COLORS.text,
+    marginBottom: 0,
+  },
+  reviewSummary: {
+    fontSize: 13,
+    color: COLORS.textMuted,
+    marginTop: 2,
+  },
+  reviewRowList: {
+    marginTop: 12,
+  },
+  reviewRow: {
+    flexDirection: 'row',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    paddingVertical: 10,
+    borderBottomWidth: 1,
+    borderBottomColor: COLORS.border,
+  },
+  reviewRowLabel: {
+    fontSize: 14,
+    color: COLORS.textLight,
+  },
+  reviewRowValue: {
+    fontSize: 14,
+    fontWeight: '500',
+    color: COLORS.text,
+    maxWidth: '60%',
+    textAlign: 'right',
+  },
+  reviewEmptyHint: {
+    fontSize: 13,
+    color: COLORS.textMuted,
+    fontStyle: 'italic',
+    paddingVertical: 8,
+  },
+  reviewPreviewList: {
+    marginTop: 12,
+  },
+  reviewPreviewItem: {
+    backgroundColor: COLORS.backgroundDark,
+    borderRadius: 8,
+    padding: 10,
+    marginBottom: 8,
+    borderLeftWidth: 2,
+    borderLeftColor: COLORS.primary,
+  },
+  reviewPreviewQuestion: {
+    fontSize: 12,
+    color: COLORS.textMuted,
+    marginBottom: 2,
+  },
+  reviewPreviewAnswer: {
+    fontSize: 14,
+    color: COLORS.text,
+  },
+  reviewMoreText: {
+    fontSize: 12,
+    color: COLORS.primary,
+    fontWeight: '500',
+    paddingTop: 4,
+  },
+  expandedContent: {
+    marginTop: 16,
+  },
   photoGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: GRID_GAP },
   photoSlot: { width: slotSize, height: slotSize * 1.25, borderRadius: 10, overflow: 'hidden', backgroundColor: COLORS.backgroundDark },
   photoSlotEmpty: { alignItems: 'center', justifyContent: 'center', borderWidth: 1.5, borderColor: COLORS.border, borderStyle: 'dashed' },
@@ -1152,6 +1876,25 @@ const styles = StyleSheet.create({
   promptPickerOptionText: { fontSize: 14, color: COLORS.text, flex: 1 },
   promptPickerCancel: { alignItems: 'center', paddingTop: 10 },
   promptPickerCancelText: { fontSize: 13, color: COLORS.textMuted },
+  promptLimitReached: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 12,
+    gap: 6,
+  },
+  promptLimitText: {
+    fontSize: 13,
+    color: COLORS.success,
+    fontWeight: '500',
+  },
+  noPromptsAvailable: {
+    fontSize: 14,
+    color: COLORS.textMuted,
+    textAlign: 'center',
+    paddingVertical: 16,
+    fontStyle: 'italic',
+  },
   // FIX 1: Footer with better spacing
   footer: { padding: 16, paddingTop: 24, marginTop: 8 },
   blurRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },

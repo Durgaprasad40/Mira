@@ -394,13 +394,28 @@ export const MICRO_SURVEY_QUESTIONS = [
 ];
 
 // Profile Prompt Questions (LEGACY - kept for backward compatibility)
+// Profile Prompts - Users can select and answer up to 5 prompts
+// Minimum: 1 required, Maximum: 5 allowed
+export const PROFILE_PROMPTS_MIN = 1;
+export const PROFILE_PROMPTS_MAX = 5;
+
 export const PROFILE_PROMPT_QUESTIONS = [
-  { id: 'perfect_day', text: 'My perfect first date would be...' },
-  { id: 'fun_fact', text: 'A fun fact about me...' },
-  { id: 'dealbreaker', text: 'My biggest dealbreaker is...' },
-  { id: 'superpower', text: 'If I had a superpower it would be...' },
-  { id: 'love_language', text: 'My love language is...' },
-  { id: 'bucket_list', text: 'Top of my bucket list...' },
+  { id: 'perfect_weekend', text: 'My perfect weekend looks like…' },
+  { id: 'known_for', text: "I'm known for…" },
+  { id: 'green_flag_me', text: 'A green flag in me is…' },
+  { id: 'fall_for_you', text: "I'll fall for you if…" },
+  { id: 'my_vibe', text: 'My vibe is…' },
+  { id: 'win_me_over', text: 'The way to win me over is…' },
+  { id: 'competitive', text: "I'm overly competitive about…" },
+  { id: 'random_skill', text: 'A random skill I have…' },
+  { id: 'simple_pleasures', text: 'My simple pleasures…' },
+  { id: 'geek_out', text: 'I geek out on…' },
+  { id: 'friends_describe', text: 'My friends describe me as…' },
+  { id: 'green_flag_look', text: 'Biggest green flag I look for…' },
+  { id: 'comfort_activity', text: 'My comfort activity…' },
+  { id: 'toxic_trait', text: 'My toxic trait (funny)…' },
+  { id: 'dream_life', text: 'Dream life looks like…' },
+  { id: 'one_thing', text: 'One thing you should know about me…' },
 ];
 
 // ═══════════════════════════════════════════════════════════════════════════════

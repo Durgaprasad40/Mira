@@ -38,8 +38,6 @@ import {
   SOCIAL_BATTERY_LEFT_LABEL,
   SOCIAL_BATTERY_RIGHT_LABEL,
   VALUE_TRIGGER_OPTIONS,
-  SECTION_LABELS,
-  PromptSectionKey,
   // Life Rhythm
   SOCIAL_RHYTHM_OPTIONS,
   SLEEP_SCHEDULE_OPTIONS,
@@ -144,7 +142,6 @@ export default function ReviewScreen() {
     activities,
     profilePrompts,
     seedQuestions,
-    sectionPrompts,
     minAge,
     maxAge,
     maxDistance,
@@ -327,7 +324,6 @@ export default function ReviewScreen() {
           activities: activities as string[],
           profilePrompts,
           seedQuestions,
-          sectionPrompts,
           minAge,
           maxAge,
           maxDistance,
@@ -687,60 +683,32 @@ export default function ReviewScreen() {
           </View>
         ) : null}
 
-        {/* Section Prompts - with separate Edit link */}
+        {/* Profile Prompts (Unified System) */}
         {(() => {
-          const hasSectionPrompts = ['builder', 'performer', 'seeker', 'grounded'].some(
-            (section) => sectionPrompts[section as PromptSectionKey]?.length > 0
-          );
+          const hasPrompts = profilePrompts && profilePrompts.length > 0;
           return (
             <>
-              {hasSectionPrompts && (
-                <View style={styles.sectionPromptsHeader}>
-                  <Text style={styles.sectionPromptsLabel}>Your Prompts</Text>
-                  <TouchableOpacity onPress={() => handleEdit("prompts-part2")}>
-                    <Text style={styles.editLink}>Edit</Text>
-                  </TouchableOpacity>
-                </View>
-              )}
-              {(['builder', 'performer', 'seeker', 'grounded'] as PromptSectionKey[]).map((section) => {
-                const answers = sectionPrompts[section];
-                if (!answers || answers.length === 0) return null;
-                const label = SECTION_LABELS[section];
-                return (
-                  <View key={section} style={styles.promptSubsection}>
-                    <Text style={styles.promptSectionLabel}>{label.emoji} {label.title}</Text>
-                    {answers.map((prompt, index) => (
-                      <View key={index} style={styles.promptItem}>
-                        <Text style={styles.promptQuestion}>{prompt.question}</Text>
-                        <Text style={styles.promptAnswer}>{prompt.answer}</Text>
-                      </View>
-                    ))}
-                  </View>
-                );
-              })}
-              {!hasSectionPrompts && (
+              <View style={styles.sectionPromptsHeader}>
+                <Text style={styles.sectionPromptsLabel}>Your Prompts</Text>
                 <TouchableOpacity onPress={() => handleEdit("prompts-part2")}>
-                  <Text style={styles.emptyText}>No section prompts added — Tap to add</Text>
+                  <Text style={styles.editLink}>Edit</Text>
+                </TouchableOpacity>
+              </View>
+              {hasPrompts ? (
+                profilePrompts.map((prompt, index) => (
+                  <View key={index} style={styles.promptItem}>
+                    <Text style={styles.promptQuestion}>{prompt.question}</Text>
+                    <Text style={styles.promptAnswer}>{prompt.answer}</Text>
+                  </View>
+                ))
+              ) : (
+                <TouchableOpacity onPress={() => handleEdit("prompts-part2")}>
+                  <Text style={styles.emptyText}>No prompts added — Tap to add</Text>
                 </TouchableOpacity>
               )}
             </>
           );
         })()}
-
-        {/* Legacy prompts fallback */}
-        {(!seedQuestions.identityAnchor && !seedQuestions.socialBattery && !seedQuestions.valueTrigger &&
-          Object.values(sectionPrompts).every(s => s.length === 0)) && (
-          profilePrompts.length > 0 ? (
-            profilePrompts.map((prompt, index) => (
-              <View key={index} style={styles.promptItem}>
-                <Text style={styles.promptQuestion}>{prompt.question}</Text>
-                <Text style={styles.promptAnswer}>{prompt.answer}</Text>
-              </View>
-            ))
-          ) : (
-            <Text style={styles.emptyText}>No prompts added</Text>
-          )
-        )}
       </View>
 
       {/* Profile Details Section - Height, Weight, Job, Company, School, Education, Religion */}
