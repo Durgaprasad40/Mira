@@ -27,7 +27,7 @@ import type { Gender, Orientation } from '@/types';
 // Age and distance limits
 const MIN_AGE = 18;
 const MAX_AGE = 70;
-const MAX_DISTANCE_MILES = 100; // UI shows miles
+const MAX_DISTANCE_MILES = 150; // UI shows miles
 const MAX_DISTANCE_KM = milesToKm(MAX_DISTANCE_MILES); // ~161km stored
 
 // "Looking for" is single-select (exactly 1)
@@ -274,7 +274,7 @@ export default function DiscoveryPreferencesScreen() {
         parsedMaxAge = parsedMinAge;
       }
 
-      // Enforce distance limit (1-100 miles)
+      // Enforce distance limit (1-150 miles)
       parsedDistanceMiles = Math.max(1, Math.min(MAX_DISTANCE_MILES, parsedDistanceMiles));
 
       // Convert miles to km for storage
