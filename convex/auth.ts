@@ -725,7 +725,11 @@ export const socialAuth = mutation({
 
     if (user) {
       // Existing user - update last active and create session
-      await ctx.db.patch(user._id, { lastActive: now });
+      // Backfill: ensure social auth users have emailVerified set
+      await ctx.db.patch(user._id, {
+        lastActive: now,
+        ...(user.emailVerified !== true ? { emailVerified: true, emailVerifiedAt: now } : {}),
+      });
 
       const token = generateToken();
       await ctx.db.insert("sessions", {
@@ -754,11 +758,13 @@ export const socialAuth = mutation({
         .first();
 
       if (user) {
-        // Link account
+        // Link account + set email verified (social auth verifies on provider side)
         await ctx.db.patch(user._id, {
           externalId,
           authProvider: provider,
           lastActive: now,
+          emailVerified: true,
+          emailVerifiedAt: now,
         });
 
         const token = generateToken();
