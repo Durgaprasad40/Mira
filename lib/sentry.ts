@@ -58,9 +58,9 @@ export function initSentry(): void {
       dsn: SENTRY_DSN,
       environment: ENVIRONMENT,
 
-      // Only send errors in production by default
-      // In dev, errors are logged to console but not sent
-      enabled: !IS_DEV,
+      // Enable Sentry in all environments when DSN is configured
+      // Safe: DSN presence controls whether events are sent
+      enabled: true,
 
       // Debug mode (shows Sentry logs in dev)
       debug: IS_DEV,
@@ -88,16 +88,15 @@ export function initSentry(): void {
 
       // Before send hook - can modify or drop events
       beforeSend(event, hint) {
-        // In dev mode, log to console but don't send to Sentry
+        // Log in dev mode for visibility
         if (IS_DEV) {
-          console.log('[Sentry] Would send event:', event.exception?.values?.[0]?.value);
-          return null; // Don't send in dev
+          console.log('[Sentry] Sending event:', event.exception?.values?.[0]?.value);
         }
 
-        // Filter out non-critical errors if needed
+        // Filter out non-critical errors
         const error = hint.originalException;
         if (error instanceof Error) {
-          // Suppress keep-awake errors (non-critical)
+          // Suppress keep-awake errors (non-critical, dev-only noise)
           if (error.message?.includes('Unable to activate keep awake')) {
             return null;
           }
@@ -110,7 +109,7 @@ export function initSentry(): void {
     isInitialized = true;
 
     if (IS_DEV) {
-      console.log('[Sentry] Initialized successfully (dev mode - events logged but not sent)');
+      console.log('[Sentry] Initialized successfully (events will be sent to Sentry)');
     }
   } catch (error) {
     console.error('[Sentry] Failed to initialize:', error);
