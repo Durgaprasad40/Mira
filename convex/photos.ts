@@ -337,21 +337,19 @@ export const addPhoto = mutation({
 // Delete photo
 export const deletePhoto = mutation({
   args: {
-    // IDOR-P1-002 FIX: Removed userId - now derived from server auth
     photoId: v.id('photos'),
+    // C1 SECURITY: Session token for auth validation (MANDATORY - custom auth system)
+    token: v.string(),
   },
   handler: async (ctx, args) => {
-    // IDOR-P1-002 FIX: Derive caller identity from server auth
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) {
-      throw new Error('Unauthorized: authentication required');
-    }
-    const userId = await resolveUserIdByAuthId(ctx, identity.subject);
-    if (!userId) {
-      throw new Error('Unauthorized: user not found');
-    }
+    const { photoId, token } = args;
 
-    const { photoId } = args;
+    // C1 SECURITY: Validate session token (MANDATORY - custom auth system)
+    // This app uses custom session/token auth, not Convex built-in auth
+    const userId = await validateSessionToken(ctx, token);
+    if (!userId) {
+      throw new Error('Unauthorized: invalid or expired session');
+    }
 
     const photo = await ctx.db.get(photoId);
     if (!photo) {
