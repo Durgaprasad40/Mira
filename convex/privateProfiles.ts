@@ -409,7 +409,7 @@ export const upsertByAuthId = mutation({
       privateDesireTagKeys: args.privateDesireTagKeys ?? [],
       privateBoundaries: args.privateBoundaries ?? [],
       revealPolicy: args.revealPolicy ?? 'mutual_only',
-      isSetupComplete: args.isSetupComplete ?? true,
+      isSetupComplete: args.isSetupComplete ?? false,
       hobbies: args.hobbies ?? [],
       isVerified: args.isVerified ?? false,
       // Phase-2 Onboarding Step 3: Prompt answers

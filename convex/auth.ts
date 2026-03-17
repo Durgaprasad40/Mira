@@ -865,6 +865,9 @@ export const completeSocialAuth = mutation({
       gender,
       bio: "",
       isVerified: false,
+      // Social auth (Google/Apple) verifies email on their side
+      emailVerified: true,
+      emailVerifiedAt: now,
       lookingFor: gender === "male" ? ["female"] : ["male"],
       relationshipIntent: [],
       activities: [],
