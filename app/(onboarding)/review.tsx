@@ -242,18 +242,17 @@ export default function ReviewScreen() {
   }, [currentUser, backendPhotos]);
 
   // CRITICAL: Check demoProfile.faceVerificationPassed for demo mode (persisted across logout)
-  // BUG FIX: Also accept faceVerificationPending (manual review) as valid to proceed
+  // Backend requires faceVerificationStatus === 'verified' - pending is NOT sufficient
   const isVerified = isDemoMode
-    ? !!(demoProfile?.faceVerificationPassed || faceVerificationPassed || faceVerificationPending)
-    : (faceVerificationPassed || faceVerificationPending);
+    ? !!(demoProfile?.faceVerificationPassed || faceVerificationPassed)
+    : !!faceVerificationPassed;
 
   // CHECKPOINT GATE: Block access if face verification not completed
   React.useEffect(() => {
     if (isVerified) {
       if (__DEV__) {
-        console.log("[REVIEW_GATE] verified=true (passed or pending) -> allow");
+        console.log("[REVIEW_GATE] verified=true (faceVerificationPassed) -> allow");
         console.log("[REVIEW_GATE] faceVerificationPassed:", faceVerificationPassed);
-        console.log("[REVIEW_GATE] faceVerificationPending:", faceVerificationPending);
       }
       return;
     }

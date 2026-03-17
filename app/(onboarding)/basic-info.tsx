@@ -33,7 +33,7 @@ import { Gender } from "@/types";
 import { isDemoMode, convex } from "@/hooks/useConvex";
 import { useDemoStore } from "@/stores/demoStore";
 import { useAuthSubmit } from "@/hooks/useAuthSubmit";
-import { useQuery } from "convex/react";
+import { useQuery, useMutation } from "convex/react";
 import { api } from "@/convex/_generated/api";
 import { Ionicons } from "@expo/vector-icons";
 import { validateRequired, scrollToFirstInvalid, ValidationRule } from "@/lib/onboardingValidation";
@@ -399,6 +399,9 @@ export default function BasicInfoScreen() {
   }, [isConfirmMode, isEditFromReview, demoHydrated, demoProfile, existingUserData]);
 
   const { submitEmailRegistration } = useAuthSubmit();
+
+  // BUG-002 FIX: Mutation for persisting basic info to onboarding draft
+  const upsertDraft = useMutation(api.users.upsertOnboardingDraft);
 
   // Debounced nickname availability check (only for new users)
   const checkNicknameAvailability = useCallback(async (handle: string) => {
@@ -847,6 +850,22 @@ export default function BasicInfoScreen() {
           setIsSubmitting(false);
           return; // DO NOT navigate if token persistence fails
         }
+
+        // BUG-002 FIX: Persist basic info to onboarding draft (non-blocking)
+        upsertDraft({
+          userId: result.userId,
+          patch: {
+            basicInfo: {
+              name: [firstName, lastName].filter(Boolean).join(" ").trim(),
+              handle: nickname,
+              dateOfBirth,
+              gender,
+            },
+            progress: {
+              lastStepKey: 'basic_info',
+            },
+          },
+        }).catch(console.error);
 
         setStep("consent");
         router.push("/(onboarding)/consent" as any);
