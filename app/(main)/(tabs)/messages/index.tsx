@@ -295,7 +295,15 @@ export default function MessagesScreen() {
     );
   }, [isDemoMode, demoMessageThreads, demoConfessionThreads]);
 
-  const conversations = isDemoMode ? demoThreads : convexConversations;
+  // FIX: Filter out conversations without messages — those should only appear in
+  // Super Likes / New Matches section, not in the Messages list. This prevents
+  // the same profile from appearing in both places.
+  const conversations = useMemo(() => {
+    if (isDemoMode) return demoThreads;
+    if (!convexConversations) return [];
+    // Only show conversations that have at least one message
+    return convexConversations.filter((c: any) => c.lastMessage !== null);
+  }, [isDemoMode, demoThreads, convexConversations]);
   const unreadCount = isDemoMode ? demoUnreadCount : convexUnreadCount;
   const currentUser = isDemoMode
     ? { gender: 'male', messagesRemaining: 999999, messagesResetAt: undefined, subscriptionTier: 'premium' as const }

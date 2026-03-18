@@ -480,15 +480,19 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
     marginBottom: 48,
-    gap: 20,
+    gap: 12,
+    // FIX: Ensure photos don't overflow screen on smaller devices
+    paddingHorizontal: 8,
   },
   photoWrapper: {
     alignItems: "center",
+    flexShrink: 1,
   },
   photo: {
-    width: 120,
-    height: 120,
-    borderRadius: 60,
+    // FIX: Reduced from 120 to fit on smaller screens (total row ~280px vs ~340px before)
+    width: 100,
+    height: 100,
+    borderRadius: 50,
     borderWidth: 4,
     borderColor: COLORS.white,
   },

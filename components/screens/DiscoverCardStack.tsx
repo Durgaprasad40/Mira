@@ -549,12 +549,112 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       // DL-006: Skip index reset if swipe is in progress to prevent race condition
       if (!swipeLockRef.current) {
         setIndex(0);
+        // Also reset queue when filter changes
+        visibleQueueRef.current = [];
+        consumedIdsRef.current.clear();
       }
       // Track Phase-2 intent filter selection (use first key for backward compat)
       trackEvent({ name: 'phase2_intent_filter_selected', intentKey: intentFilters[0] ?? 'all' });
       prevFilterRef.current = filterKey;
     }
   }, [intentFilters, isPhase2]);
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // STABLE QUEUE MODEL: Prevents back card from changing during swipe animation
+  // ══════════════════════════════════════════════════════════════════════════
+  // The queue holds profile IDs for the visible cards (front, back, third).
+  // It is "frozen" during swipe animation and only advances after swipe completion.
+  // This ensures the back card remains stable even if source data changes mid-swipe.
+
+  const QUEUE_SIZE = 3; // Number of cards to buffer
+  const visibleQueueRef = useRef<string[]>([]); // Profile IDs in queue
+  const consumedIdsRef = useRef<Set<string>>(new Set()); // Profiles already swiped
+
+  // Source profiles for queue refill (use filtered for Phase-2, regular for Phase-1)
+  const sourceProfiles = isPhase2 ? filteredProfiles : profiles;
+
+  // Build a map from profile ID to profile data for O(1) lookup
+  const profileMapRef = useRef<Map<string, ProfileData>>(new Map());
+  useMemo(() => {
+    profileMapRef.current.clear();
+    for (const p of sourceProfiles) {
+      profileMapRef.current.set(p.id, p);
+    }
+  }, [sourceProfiles]);
+
+  /**
+   * Refill the visible queue from source profiles.
+   * Only adds profiles that are:
+   * - Not already in the queue
+   * - Not already consumed (swiped)
+   * - Not the current user
+   */
+  const refillQueue = useCallback(() => {
+    const queue = visibleQueueRef.current;
+    const consumed = consumedIdsRef.current;
+    const needed = QUEUE_SIZE - queue.length;
+    if (needed <= 0) return;
+
+    const queueSet = new Set(queue);
+    const toAdd: string[] = [];
+
+    for (const p of sourceProfiles) {
+      if (toAdd.length >= needed) break;
+      // Skip if already in queue, consumed, or is current user
+      if (queueSet.has(p.id)) continue;
+      if (consumed.has(p.id)) continue;
+      if (p.id === userId) continue;
+      toAdd.push(p.id);
+    }
+
+    if (toAdd.length > 0) {
+      visibleQueueRef.current = [...queue, ...toAdd];
+    }
+  }, [sourceProfiles, userId]);
+
+  /**
+   * Advance the queue after swipe completion.
+   * Removes the front card, marks it as consumed, and refills.
+   */
+  const advanceQueue = useCallback(() => {
+    const queue = visibleQueueRef.current;
+    if (queue.length === 0) return;
+
+    // Mark front card as consumed
+    const consumedId = queue[0];
+    consumedIdsRef.current.add(consumedId);
+
+    // Remove front card from queue
+    visibleQueueRef.current = queue.slice(1);
+
+    // Refill queue with next available profiles
+    refillQueue();
+  }, [refillQueue]);
+
+  // Refill queue when source data changes AND no swipe is in progress
+  // This ensures the queue is populated but doesn't change mid-swipe
+  useEffect(() => {
+    // Don't refill during active swipe
+    if (swipeLockRef.current) return;
+    refillQueue();
+  }, [sourceProfiles, refillQueue]);
+
+  // Reset queue when user changes (prevents showing stale profiles)
+  const prevUserIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (prevUserIdRef.current !== null && prevUserIdRef.current !== userId) {
+      // User changed — clear queue and consumed IDs
+      visibleQueueRef.current = [];
+      consumedIdsRef.current.clear();
+    }
+    prevUserIdRef.current = userId;
+  }, [userId]);
+
+  // Get current/next from the STABLE QUEUE (not from live array indices)
+  const currentQueueId = visibleQueueRef.current[0];
+  const nextQueueId = visibleQueueRef.current[1];
+  const queueCurrent = currentQueueId ? profileMapRef.current.get(currentQueueId) : undefined;
+  const queueNext = nextQueueId ? profileMapRef.current.get(nextQueueId) : undefined;
 
   // ── Demo auto-replenish: re-inject profiles when pool is exhausted ──
   // Guard ref prevents the effect from firing twice before the store update
@@ -574,6 +674,9 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
     // 7-3: Guard against setState after unmount
     if (!mountedRef.current) return;
     setIndex(0);
+    // STABLE QUEUE: Reset queue when demo pool is replenished
+    visibleQueueRef.current = [];
+    consumedIdsRef.current.clear();
   }, [profiles.length, externalProfiles]);
 
   // Profile completeness nudge (main Discover only, not explore categories)
@@ -665,11 +768,11 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
     extrapolate: "clamp",
   });
 
-  // Strict bounds: no modulo wrapping — when deck exhausted, current becomes undefined
-  // Phase-2: Use filteredProfiles when intent filter is active
-  const displayProfiles = isPhase2 ? filteredProfiles : profiles;
-  const current = index < displayProfiles.length ? displayProfiles[index] : undefined;
-  const next = index + 1 < displayProfiles.length ? displayProfiles[index + 1] : undefined;
+  // STABLE QUEUE: Use queue-based current/next instead of index-based access
+  // This ensures the back card doesn't change during swipe animation
+  const displayProfiles = isPhase2 ? filteredProfiles : profiles; // Keep for compatibility
+  const current = queueCurrent; // From stable queue
+  const next = queueNext; // From stable queue
 
   // Trust badges — memoized per profile to avoid allocation each render
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -785,10 +888,13 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
     setOverlayDirection(null);
     setActiveSlot(newSlot);
     setIndex((prev) => prev + 1);
+    // STABLE QUEUE: Advance the queue after swipe
+    // This removes front card, promotes back -> front, and refills from source
+    advanceQueue();
     // Old pan is reset in the useEffect below, AFTER React has re-rendered
     // with the new activeSlot. This prevents a 1-frame flicker where the
     // swiped-away card snaps back to center before the slot switch renders.
-  }, [panA, panB, overlayOpacityAnim]);
+  }, [panA, panB, overlayOpacityAnim, advanceQueue]);
 
   // Reset the now-inactive pan AFTER React commits the new activeSlot.
   // This avoids the race where requestAnimationFrame fires before the
