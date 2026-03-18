@@ -508,10 +508,24 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
 
   // Keep last non-empty profiles to prevent blank-frame flicker
   const stableProfilesRef = useRef<ProfileData[]>([]);
+  // FIX: Track userId to invalidate cache when user changes (prevents showing stale profiles)
+  const stableUserIdRef = useRef<string | null>(null);
+  if (userId !== stableUserIdRef.current) {
+    // User changed — clear stale cache to prevent showing old user's excluded profiles
+    stableProfilesRef.current = [];
+    stableUserIdRef.current = userId;
+  }
   if (validProfiles.length > 0) {
     stableProfilesRef.current = validProfiles;
   }
-  const profiles = validProfiles.length > 0 ? validProfiles : stableProfilesRef.current;
+  const profilesRaw = validProfiles.length > 0 ? validProfiles : stableProfilesRef.current;
+
+  // FIX: Defensive filter — never show current user's profile in Discover
+  // Backend already excludes, but this protects against stale cache contamination
+  const profiles = useMemo(
+    () => userId ? profilesRaw.filter((p) => p.id !== userId) : profilesRaw,
+    [profilesRaw, userId],
+  );
 
   // Phase-2 only: Filter profiles by intent categories (any match)
   const filteredProfiles = useMemo(() => {
@@ -1077,9 +1091,12 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   );
 
   // Handle stand-out result from route screen
+  // NOTE: We do NOT check isFocusedRef here because the stand-out flow is user-initiated
+  // from a modal overlay. When router.back() is called, the focus state updates asynchronously
+  // but the standOutResult is set synchronously. We must process it regardless of focus timing.
   useEffect(() => {
     if (!standOutResult || !currentRef.current) return;
-    if (!mountedRef.current || !isFocusedRef.current) return;
+    if (!mountedRef.current) return;
     if (swipeLockRef.current) return;
 
     // CORRECTNESS FIX: Validate that standOutResult.profileId matches current profile

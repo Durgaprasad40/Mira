@@ -22,7 +22,7 @@ import { useRouter, useLocalSearchParams, useFocusEffect } from 'expo-router';
 import { safePush } from '@/lib/safeRouter';
 import { LoadingGuard } from '@/components/safety';
 import { Image } from 'expo-image';
-import { useQuery } from 'convex/react';
+import { useQuery, useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { useAuthStore } from '@/stores/authStore';
 import { COLORS } from '@/lib/constants';
@@ -84,8 +84,12 @@ export default function MessagesScreen() {
   }>();
 
   const userId = useAuthStore((s) => s.userId);
+  const token = useAuthStore((s) => s.token);
   const convexUserId = asUserId(userId);
   const [refreshing, setRefreshing] = useState(false);
+
+  // Swipe mutation for Convex mode like/pass actions
+  const swipe = useMutation(api.likes.swipe);
   const [retryKey, setRetryKey] = useState(0);
   const { safeTimeout } = useScreenSafety();
 
@@ -146,6 +150,12 @@ export default function MessagesScreen() {
     useCallback(() => {
       if (focus === 'likes') {
         setActiveView('likes');
+        // LIFECYCLE: Mark likes as opened when arriving via deep link
+        if (!isDemoMode && token) {
+          markLikesOpened({ token }).catch((err) => {
+            log.warn('[MESSAGES]', 'markLikesOpened (deeplink) failed', { error: err });
+          });
+        }
         // If profileId is provided, scroll to that like after render
         if (profileId && likesListRef.current) {
           // Stability fix: clear any pending scroll timeout
@@ -234,6 +244,10 @@ export default function MessagesScreen() {
   const convexUnreadCount = useQuery(api.messages.getUnreadCount, convexQueryArgs);
   const convexCurrentUser = useQuery(api.users.getCurrentUser, convexQueryArgs);
   const convexLikesReceived = useQuery(api.likes.getLikesReceived, convexQueryArgs);
+  const convexMatches = useQuery(api.matches.getMatches, convexQueryArgs);
+
+  // Mutation to mark likes as opened (starts 24h expiry timer)
+  const markLikesOpened = useMutation(api.likes.markLikesOpened);
 
   // Demo DM store for thread model
   const demoMeta = useDemoDmStore((s) => s.meta);
@@ -289,8 +303,13 @@ export default function MessagesScreen() {
 
   // Build matched user IDs set for likes filtering
   const matchedUserIds = useMemo(() => {
-    return new Set(demoMatches.map((m) => m.otherUser?.id).filter(Boolean) as string[]);
-  }, [demoMatches]);
+    if (isDemoMode) {
+      return new Set(demoMatches.map((m) => m.otherUser?.id).filter(Boolean) as string[]);
+    }
+    // Convex mode: use real matches
+    const matches = (convexMatches || []) as any[];
+    return new Set(matches.map((m) => m.user?.id).filter(Boolean) as string[]);
+  }, [isDemoMode, demoMatches, convexMatches]);
 
   // Process likes — filter out blocked and already-matched users
   // IMPORTANT: Use demoLikesRaw directly, only filter blocked/matched
@@ -355,20 +374,75 @@ export default function MessagesScreen() {
     safeTimeout(() => setRefreshing(false), 300);
   };
 
-  // New Matches row
-  const newMatches = demoNewMatches;
+  // Process matches: separate Super Likes (above) from New Matches
+  // A match is "new" if it has no messages yet (lastMessage is null)
+  const { superLikeMatches, newMatches } = useMemo(() => {
+    if (isDemoMode) {
+      // Demo mode: all new matches are regular (no super_like tracking in demo)
+      return { superLikeMatches: [], newMatches: demoNewMatches };
+    }
+
+    // Convex mode: process real matches
+    const matches = (convexMatches || []) as any[];
+    const superLikes: any[] = [];
+    const regular: any[] = [];
+
+    for (const match of matches) {
+      // Only include matches with no messages (new matches)
+      if (match.lastMessage) continue;
+
+      // FIX: Defensive check — skip matches without valid matchId (prevents keyExtractor crash)
+      if (!match.matchId) {
+        log.warn('[MESSAGES]', 'Skipping match without matchId', { match });
+        continue;
+      }
+
+      // Transform to the format expected by renderNewMatchesRow
+      const transformed = {
+        id: match.matchId,
+        conversationId: match.conversationId,
+        matchSource: match.matchSource || 'like',
+        otherUser: {
+          id: match.user?.id,
+          name: match.user?.name,
+          photoUrl: match.user?.photoUrl,
+          lastActive: match.user?.lastActive,
+          isVerified: match.user?.isVerified,
+        },
+      };
+
+      if (match.matchSource === 'super_like') {
+        superLikes.push(transformed);
+      } else {
+        regular.push(transformed);
+      }
+    }
+
+    return { superLikeMatches: superLikes, newMatches: regular };
+  }, [isDemoMode, demoNewMatches, convexMatches]);
 
   // ── Like actions ──
 
-  const handlePass = useCallback((like: any) => {
+  const handlePass = useCallback(async (like: any) => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     if (isDemoMode) {
       removeLike(like.userId);
+    } else {
+      // Convex mode: call swipe mutation with 'pass' action
+      if (!token || !like.userId) return;
+      try {
+        await swipe({
+          token,
+          toUserId: like.userId,
+          action: 'pass',
+        });
+      } catch (error) {
+        log.error('[MESSAGES]', 'handlePass failed', { error });
+      }
     }
-    // Convex mode would call a mutation here
-  }, [removeLike]);
+  }, [removeLike, token, swipe]);
 
-  const handleLikeBack = useCallback((like: any) => {
+  const handleLikeBack = useCallback(async (like: any) => {
     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
 
     if (isDemoMode) {
@@ -419,9 +493,26 @@ export default function MessagesScreen() {
       });
 
       Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+    } else {
+      // Convex mode: call swipe mutation with 'like' action
+      if (!token || !like.userId) return;
+      try {
+        const result = await swipe({
+          token,
+          toUserId: like.userId,
+          action: 'like',
+        });
+
+        // If mutual like, it's a match - navigate to match celebration
+        if (result.isMatch && result.matchId) {
+          Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+          safePush(router, `/(main)/match-celebration?matchId=${result.matchId}&userId=${like.userId}` as any, 'messages->matchCelebration');
+        }
+      } catch (error) {
+        log.error('[MESSAGES]', 'handleLikeBack failed', { error });
+      }
     }
-    // Convex mode would call swipe mutation
-  }, [removeLike, simulateMatch, modalScale, heartScale]);
+  }, [removeLike, simulateMatch, modalScale, heartScale, token, swipe, router]);
 
   const handleSayHi = useCallback(() => {
     if (!matchedProfile) return;
@@ -468,8 +559,13 @@ export default function MessagesScreen() {
     const isRecent = isRecentLike(like.createdAt || Date.now());
     const isSuperLike = like.action === 'super_like';
 
+    // Border color: blue for super like, pink for regular like
+    const borderStyle = isSuperLike
+      ? { borderColor: COLORS.superLike, borderWidth: 2 }
+      : { borderColor: COLORS.primary, borderWidth: 2 };
+
     return (
-      <View style={[styles.likeCard, isRecent && styles.likeCardRecent]}>
+      <View style={[styles.likeCard, borderStyle, isRecent && styles.likeCardRecent]}>
         <TouchableOpacity
           style={styles.likeCardTouchable}
           activeOpacity={0.8}
@@ -526,6 +622,64 @@ export default function MessagesScreen() {
     );
   };
 
+  // Super Likes section (above New Matches)
+  const renderSuperLikesRow = () => {
+    if (superLikeMatches.length === 0) return null;
+    return (
+      <View style={styles.newMatchesSection}>
+        <View style={styles.sectionHeader}>
+          <Ionicons name="star" size={18} color={COLORS.superLike} />
+          <Text style={styles.sectionTitle}>Super Likes</Text>
+          <View style={[styles.countBadge, { backgroundColor: COLORS.superLike + '20' }]}>
+            <Text style={[styles.countBadgeText, { color: COLORS.superLike }]}>{superLikeMatches.length}</Text>
+          </View>
+        </View>
+        <FlatList
+          horizontal
+          data={superLikeMatches}
+          keyExtractor={(item: any, index: number) => item.id || `superlike-${index}`}
+          renderItem={({ item }: { item: any }) => (
+            <TouchableOpacity
+              style={styles.matchItem}
+              activeOpacity={0.7}
+              onPress={() => {
+                // Safety: only navigate if conversationId exists
+                if (item.conversationId) {
+                  safePush(router, `/(main)/(tabs)/messages/chat/${item.conversationId}` as any, 'messages->superLikeChat');
+                } else {
+                  log.warn('[MESSAGES]', 'Super Like card missing conversationId', { matchId: item.id });
+                }
+              }}
+            >
+              <View style={styles.matchAvatarContainer}>
+                <View style={[styles.matchRing, { borderColor: COLORS.superLike }]}>
+                  {item.otherUser?.photoUrl ? (
+                    <Image
+                      source={{ uri: item.otherUser.photoUrl }}
+                      style={styles.matchAvatar}
+                      contentFit="cover"
+                    />
+                  ) : (
+                    <View style={[styles.matchAvatar, styles.placeholderAvatar]}>
+                      <Text style={styles.avatarInitial}>{item.otherUser?.name?.[0] || '?'}</Text>
+                    </View>
+                  )}
+                </View>
+                {/* Super Like star badge */}
+                <View style={styles.superLikeMatchBadge}>
+                  <Ionicons name="star" size={10} color={COLORS.white} />
+                </View>
+              </View>
+              <Text style={styles.matchName} numberOfLines={1}>{item.otherUser?.name || 'Someone'}</Text>
+            </TouchableOpacity>
+          )}
+          showsHorizontalScrollIndicator={false}
+          contentContainerStyle={styles.matchesList}
+        />
+      </View>
+    );
+  };
+
   const renderNewMatchesRow = () => {
     if (newMatches.length === 0) return null;
     return (
@@ -540,12 +694,19 @@ export default function MessagesScreen() {
         <FlatList
           horizontal
           data={newMatches}
-          keyExtractor={(item: any) => item.id}
+          keyExtractor={(item: any, index: number) => item.id || `newmatch-${index}`}
           renderItem={({ item }: { item: any }) => (
             <TouchableOpacity
               style={styles.matchItem}
               activeOpacity={0.7}
-              onPress={() => safePush(router, `/(main)/(tabs)/messages/chat/${item.conversationId}` as any, 'messages->newMatchChat')}
+              onPress={() => {
+                // Safety: only navigate if conversationId exists
+                if (item.conversationId) {
+                  safePush(router, `/(main)/(tabs)/messages/chat/${item.conversationId}` as any, 'messages->newMatchChat');
+                } else {
+                  log.warn('[MESSAGES]', 'New Match card missing conversationId', { matchId: item.id });
+                }
+              }}
             >
               <View style={styles.matchAvatarContainer}>
                 <View style={styles.matchRing}>
@@ -638,6 +799,12 @@ export default function MessagesScreen() {
                   // BUGFIX #5: Reset layout ready flag since FlatList will be created fresh
                   likesListLayoutReady.current = false;
                   setActiveView('likes');
+                  // LIFECYCLE: Mark likes as opened (starts 24h expiry timer)
+                  if (!isDemoMode && token) {
+                    markLikesOpened({ token }).catch((err) => {
+                      log.warn('[MESSAGES]', 'markLikesOpened failed', { error: err });
+                    });
+                  }
                 }}
               >
                 <Ionicons
@@ -737,9 +904,11 @@ export default function MessagesScreen() {
                 />
               )}
               {renderQuotaBanner()}
+              {/* Order: Super Likes (top) > New Matches > Messages */}
+              {renderSuperLikesRow()}
               {renderNewMatchesRow()}
-              {/* Messages section header - only show if there are new matches above */}
-              {newMatches.length > 0 && (conversations || []).length > 0 && (
+              {/* Messages section header - only show if there are matches above */}
+              {(superLikeMatches.length > 0 || newMatches.length > 0) && (conversations || []).length > 0 && (
                 <View style={styles.threadsSectionHeader}>
                   <Text style={styles.sectionTitle}>Messages</Text>
                 </View>
@@ -1047,6 +1216,20 @@ const styles = StyleSheet.create({
     color: COLORS.text,
     fontWeight: '500',
     textAlign: 'center',
+  },
+  // Super Like badge on match avatar
+  superLikeMatchBadge: {
+    position: 'absolute',
+    bottom: 0,
+    right: 0,
+    backgroundColor: COLORS.superLike,
+    width: 18,
+    height: 18,
+    borderRadius: 9,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 2,
+    borderColor: COLORS.background,
   },
 
   // Section headers

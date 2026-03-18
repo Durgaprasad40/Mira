@@ -539,6 +539,9 @@ export default defineSchema({
     action: v.union(v.literal('like'), v.literal('pass'), v.literal('super_like'), v.literal('text')),
     message: v.optional(v.string()),
     createdAt: v.number(),
+    // Lifecycle tracking: when the recipient first opened/viewed this like
+    // Unopened likes stay indefinitely; opened likes expire after 24h if no action
+    firstOpenedAt: v.optional(v.number()),
   })
     .index('by_from_user', ['fromUserId'])
     .index('by_to_user', ['toUserId'])
@@ -554,6 +557,9 @@ export default defineSchema({
     user2UnmatchedAt: v.optional(v.number()),
     crossedPathsCount: v.optional(v.number()),
     isActive: v.boolean(),
+    // Track how this match was created for UI organization
+    // 'super_like' matches appear in Super Likes section, 'like' in New Matches
+    matchSource: v.optional(v.union(v.literal('like'), v.literal('super_like'))),
   })
     .index('by_user1', ['user1Id'])
     .index('by_user2', ['user2Id'])
@@ -698,6 +704,7 @@ export default defineSchema({
     type: v.union(
       v.literal('match'),
       v.literal('message'),
+      v.literal('like'),
       v.literal('super_like'),
       v.literal('crossed_paths'),
       v.literal('subscription'),
@@ -711,6 +718,7 @@ export default defineSchema({
       conversationId: v.optional(v.string()),
       userId: v.optional(v.string()),
       pairKey: v.optional(v.string()), // Deterministic crossed paths pair key
+      likeType: v.optional(v.union(v.literal('like'), v.literal('super_like'))), // Type of like received
     })),
     // 4-1: Deduplication key — same key = same logical event (upsert instead of insert)
     dedupeKey: v.optional(v.string()),

@@ -325,11 +325,16 @@ export const swipe = mutation({
         }
 
         // It's a match!
+        // Determine matchSource: super_like if either user sent super_like
+        const reciprocalAction = reciprocalLike?.action;
+        const isSuperLikeMatch = action === 'super_like' || reciprocalAction === 'super_like';
+
         const matchId = await ctx.db.insert('matches', {
           user1Id,
           user2Id,
           matchedAt: now,
           isActive: true,
+          matchSource: isSuperLikeMatch ? 'super_like' : 'like',
         });
 
         // B1 SECURITY: Race condition protection - check for duplicates BEFORE downstream writes
@@ -410,18 +415,32 @@ export const swipe = mutation({
       }
     }
 
-    // Send notification for super like
-    // D5: Add dedupeKey and expiresAt for super_like notifications
-    if (action === 'super_like') {
+    // Send notification for like/super_like (not for pass)
+    // Notification lifecycle: stays until opened/acted on, then 24h expiry after opened
+    // Use real sender name in notification (fallback to generic only if name missing)
+    const senderName = fromUser.name || 'Someone';
+
+    if (action === 'like') {
+      await ctx.db.insert('notifications', {
+        userId: toUserId,
+        type: 'like',
+        title: `${senderName} liked you`,
+        body: 'Check your likes to see their profile',
+        data: { userId: fromUserId, likeType: 'like' },
+        dedupeKey: `like:${fromUserId}`,
+        createdAt: now,
+        // No expiresAt - notification stays until acted on
+      });
+    } else if (action === 'super_like') {
       await ctx.db.insert('notifications', {
         userId: toUserId,
         type: 'super_like',
-        title: 'You got a Super Like!',
-        body: 'Someone super liked you!',
-        data: { userId: fromUserId },
+        title: `${senderName} super liked you`,
+        body: 'Open your likes to view their profile',
+        data: { userId: fromUserId, likeType: 'super_like' },
         dedupeKey: `super_like:${fromUserId}`,
         createdAt: now,
-        expiresAt: now + 24 * 60 * 60 * 1000,
+        // No expiresAt - notification stays until acted on
       });
     }
 
@@ -502,6 +521,8 @@ export const rewind = mutation({
 
 // Get likes received (who liked you)
 // FIX: Excludes blocked users (bidirectional)
+// PRODUCT FIX: Always return real profile data (photo/name/age)
+// LIFECYCLE: Filter out expired likes (opened > 24h ago with no action)
 export const getLikesReceived = query({
   args: {
     userId: v.id('users'),
@@ -509,16 +530,11 @@ export const getLikesReceived = query({
   },
   handler: async (ctx, args) => {
     const { userId, limit = 50 } = args;
+    const now = Date.now();
+    const LIKE_EXPIRY_MS = 24 * 60 * 60 * 1000; // 24 hours
 
     const user = await ctx.db.get(userId);
     if (!user) return [];
-
-    // Determine if user can see who liked them:
-    // - Premium/Basic subscribers can see
-    // - Female users on free tier can see (free-tier benefit)
-    const isPaid = user.subscriptionTier === 'premium' || user.subscriptionTier === 'basic';
-    const isFemale = user.gender === 'female';
-    const canSee = isPaid || isFemale;
 
     const likes = await ctx.db
       .query('likes')
@@ -556,6 +572,13 @@ export const getLikesReceived = query({
       // FIX: Skip likes from blocked users (either direction)
       if (blockedUserIds.has(like.fromUserId as string)) continue;
 
+      // LIFECYCLE: Skip expired likes (opened > 24h ago)
+      // Unopened likes (firstOpenedAt undefined) never expire
+      const firstOpenedAt = (like as any).firstOpenedAt as number | undefined;
+      if (firstOpenedAt && now - firstOpenedAt > LIKE_EXPIRY_MS) {
+        continue; // Expired - skip
+      }
+
       // Check if already swiped on this person
       const alreadySwiped = await ctx.db
         .query('likes')
@@ -569,24 +592,34 @@ export const getLikesReceived = query({
       const fromUser = await ctx.db.get(like.fromUserId);
       if (!fromUser || !fromUser.isActive) continue;
 
-      // Get primary photo
-      const photo = await ctx.db
+      // Get primary photo, fallback to any photo if no primary exists
+      let photo = await ctx.db
         .query('photos')
         .withIndex('by_user', (q) => q.eq('userId', like.fromUserId))
         .filter((q) => q.eq(q.field('isPrimary'), true))
         .first();
 
+      // BUG FIX: Fallback to any photo if no isPrimary photo exists
+      if (!photo) {
+        photo = await ctx.db
+          .query('photos')
+          .withIndex('by_user', (q) => q.eq('userId', like.fromUserId))
+          .first();
+      }
+
+      // PRODUCT FIX: Always return REAL profile data (no anonymization)
       result.push({
         likeId: like._id,
         userId: like.fromUserId,
         action: like.action,
         message: like.message,
         createdAt: like.createdAt,
-        // Only show details if user can see
-        name: canSee ? fromUser.name : undefined,
-        age: canSee ? calculateAge(fromUser.dateOfBirth) : undefined,
-        photoUrl: canSee ? photo?.url : undefined,
-        isBlurred: !canSee,
+        firstOpenedAt, // Include for UI lifecycle tracking
+        // Always show real data
+        name: fromUser.name,
+        age: calculateAge(fromUser.dateOfBirth),
+        photoUrl: photo?.url,
+        gender: fromUser.gender,
       });
     }
 
@@ -810,5 +843,51 @@ export const resetSwipeBetweenUsers = mutation({
       deletedCount,
       message: `Deleted ${deletedCount} swipe record(s) between users`,
     };
+  },
+});
+
+// =============================================================================
+// LIFECYCLE: Mark likes as opened when user views the likes section
+// =============================================================================
+// When user opens the likes/heart section, mark all unopened likes as opened.
+// Opened likes start a 24-hour expiry timer.
+// =============================================================================
+export const markLikesOpened = mutation({
+  args: {
+    token: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const { token } = args;
+    const now = Date.now();
+
+    // Validate session and derive current user
+    const userId = await validateSessionToken(ctx, token);
+    if (!userId) {
+      throw new Error('Unauthorized: invalid or expired session');
+    }
+
+    // Get all unopened likes for this user
+    const likes = await ctx.db
+      .query('likes')
+      .withIndex('by_to_user', (q) => q.eq('toUserId', userId))
+      .filter((q) =>
+        q.and(
+          q.or(
+            q.eq(q.field('action'), 'like'),
+            q.eq(q.field('action'), 'super_like')
+          ),
+          q.eq(q.field('firstOpenedAt'), undefined)
+        )
+      )
+      .collect();
+
+    // Mark each as opened
+    let markedCount = 0;
+    for (const like of likes) {
+      await ctx.db.patch(like._id, { firstOpenedAt: now });
+      markedCount++;
+    }
+
+    return { success: true, markedCount };
   },
 });
