@@ -309,6 +309,15 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
       }
     }
 
+    // P0-001 FIX: Reset demoDmStore to prevent cross-user DM leakage in demo mode
+    try {
+      const { useDemoDmStore } = require('@/stores/demoDmStore');
+      useDemoDmStore.getState()?.reset?.();
+      if (__DEV__) console.log('[AUTH] logout: cleared demoDmStore');
+    } catch (error) {
+      console.warn('[AUTH] logout: failed to reset demoDmStore', error);
+    }
+
     try {
       const { useVerificationStore } = require('@/stores/verificationStore');
       useVerificationStore.getState()?.resetVerification?.();

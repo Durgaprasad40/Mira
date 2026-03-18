@@ -754,17 +754,22 @@ export default function BasicInfoScreen() {
               newUserId = result.userId;
               setAuth(newUserId, "demo_token", result.onboardingComplete, capturedAuthVersion);
               if (result.onboardingComplete) {
+                // ONB-001 FIX: Reset isSubmitting before early return to prevent stuck button
+                setIsSubmitting(false);
                 router.replace("/(main)/(tabs)/home");
                 return;
               }
+              setIsSubmitting(false);
               setStep("consent");
               router.push("/(onboarding)/consent" as any);
               return;
             } catch (loginError: any) {
+              setIsSubmitting(false);
               Alert.alert("Error", loginError.message || "Failed to login. Please check your password.");
               return;
             }
           } else {
+            setIsSubmitting(false);
             Alert.alert("Error", signUpError.message || "Failed to create account");
             return;
           }
