@@ -1,7 +1,7 @@
 import { v } from 'convex/values';
 import { mutation, query, MutationCtx } from './_generated/server';
 import { Id } from './_generated/dataModel';
-import { resolveUserIdByAuthId } from './helpers';
+import { resolveUserIdByAuthId, validateSessionToken } from './helpers';
 
 // D1-REPAIR: Helper to check if either user has blocked the other
 // Returns true if blocked (should prevent messaging)
@@ -116,22 +116,19 @@ async function findExistingTodConversation(
 // Like, pass, or super like a user
 export const swipe = mutation({
   args: {
-    authUserId: v.string(), // AUTH FIX: Server-side auth instead of trusting client
+    token: v.string(), // P1-028 FIX: Session token for server-side auth
     toUserId: v.id('users'),
     action: v.union(v.literal('like'), v.literal('pass'), v.literal('super_like'), v.literal('text')),
     message: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const { authUserId, toUserId, action, message } = args;
+    const { token, toUserId, action, message } = args;
     const now = Date.now();
 
-    // AUTH FIX: Resolve acting user from server-side auth
-    if (!authUserId || authUserId.trim().length === 0) {
-      throw new Error('Unauthorized: authentication required');
-    }
-    const fromUserId = await resolveUserIdByAuthId(ctx, authUserId);
+    // P1-028 FIX: Validate session and derive user from trusted server context
+    const fromUserId = await validateSessionToken(ctx, token);
     if (!fromUserId) {
-      throw new Error('Unauthorized: user not found');
+      throw new Error('Unauthorized: invalid or expired session');
     }
 
     // P2-003 FIX: Prevent self-swiping
@@ -747,3 +744,71 @@ function calculateAge(dateOfBirth: string): number {
   }
   return age;
 }
+
+// =============================================================================
+// TEST-ONLY: Reset swipe state between two users
+// =============================================================================
+// WARNING: This is strictly for testing. Do not use in production UI.
+// Purpose: Allow repeated testing of swipe flows with limited test users.
+// =============================================================================
+export const resetSwipeBetweenUsers = mutation({
+  args: {
+    token: v.string(),
+    targetUserId: v.id('users'),
+  },
+  handler: async (ctx, args) => {
+    const { token, targetUserId } = args;
+
+    // Validate session and derive current user
+    const fromUserId = await validateSessionToken(ctx, token);
+    if (!fromUserId) {
+      throw new Error('Unauthorized: invalid or expired session');
+    }
+
+    // Prevent self-targeting
+    if (fromUserId === targetUserId) {
+      throw new Error('Cannot reset swipe with yourself');
+    }
+
+    // Find and delete: fromUserId → targetUserId
+    const like1 = await ctx.db
+      .query('likes')
+      .withIndex('by_from_to', (q) =>
+        q.eq('fromUserId', fromUserId).eq('toUserId', targetUserId)
+      )
+      .first();
+
+    // Find and delete: targetUserId → fromUserId
+    const like2 = await ctx.db
+      .query('likes')
+      .withIndex('by_from_to', (q) =>
+        q.eq('fromUserId', targetUserId).eq('toUserId', fromUserId)
+      )
+      .first();
+
+    let deletedCount = 0;
+
+    if (like1) {
+      await ctx.db.delete(like1._id);
+      deletedCount++;
+    }
+
+    if (like2) {
+      await ctx.db.delete(like2._id);
+      deletedCount++;
+    }
+
+    // Test logging
+    console.log('[TEST] resetSwipeBetweenUsers executed', {
+      fromUserId,
+      targetUserId,
+      deletedCount,
+    });
+
+    return {
+      success: true,
+      deletedCount,
+      message: `Deleted ${deletedCount} swipe record(s) between users`,
+    };
+  },
+});

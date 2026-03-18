@@ -260,6 +260,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
 
   const insets = useSafeAreaInsets();
   const userId = useAuthStore((s) => s.userId);
+  const token = useAuthStore((s) => s.token);
   const [index, setIndex] = useState(0);
   const [retryKey, setRetryKey] = useState(0); // For LoadingGuard retry
   const [showNotificationPopover, setShowNotificationPopover] = useState(false);
@@ -903,7 +904,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
         );
         const result = await Promise.race([
           swipeMutation({
-            authUserId: userId as string,
+            token: token!,
             toUserId: swipedProfile.id as Id<'users'>,
             action,
             message: message,

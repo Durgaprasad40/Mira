@@ -27,7 +27,7 @@ const MAX_VISIBLE_LIKES = 5;
 export default function LikesScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
-  const { userId } = useAuthStore();
+  const { userId, token } = useAuthStore();
 
   const convexLikes = useQuery(
     api.likes.getLikesReceived,
@@ -105,7 +105,7 @@ export default function LikesScreen() {
 
     try {
       const result = await swipeMutation({
-        authUserId: userId as string,
+        token: token!,
         toUserId: like.userId as any,
         action: 'like' as any,
       });
@@ -125,7 +125,7 @@ export default function LikesScreen() {
 
     try {
       await swipeMutation({
-        authUserId: userId as string,
+        token: token!,
         toUserId: like.userId as any,
         action: 'pass' as any,
       });

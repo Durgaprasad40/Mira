@@ -61,6 +61,7 @@ export function DiscoverFeed({ mode = "main", theme = "light", onOpenProfile }: 
   const TC = dark ? INCOGNITO_COLORS : COLORS;
   const insets = useSafeAreaInsets();
   const userId = useAuthStore((s) => s.userId);
+  const token = useAuthStore((s) => s.token);
   const { minAge, maxAge, maxDistance, gender, relationshipIntent, filterVersion } = useFilterStore();
   useSubscriptionStore();
 
@@ -250,7 +251,7 @@ export function DiscoverFeed({ mode = "main", theme = "light", onOpenProfile }: 
 
         const result = await Promise.race([
           swipeMutation({
-            authUserId: userId as string,
+            token: token!,
             toUserId: currentProfile.id as any,
             action: action as any,
           }),
