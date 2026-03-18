@@ -402,9 +402,9 @@ export default function FaceVerificationScreen() {
     try {
       // SECURITY: Face comparison happens on the server, not the client
       // The server compares the selfie against the user's uploaded profile photo
-      // C5 FIX: Prefer backend URL (persisted) over local photos[0] (transient)
-      // This ensures verification works after app restart when local store is empty
-      const referencePhotoUrl = onboardingStatus?.verificationReferencePhotoUrl || photos[0] || '';
+      // ONB-003 FIX: Prefer local photos[0] first (immediately available on restart),
+      // fallback to backend URL if local store is empty
+      const referencePhotoUrl = photos[0] || onboardingStatus?.verificationReferencePhotoUrl || '';
       const result = await verifyFace({
         userId: userId || 'unknown',
         profilePhotoUri: referencePhotoUrl,

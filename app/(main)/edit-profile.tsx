@@ -252,9 +252,10 @@ export default function EditProfileScreen() {
   const [profileError, setProfileError] = useState<string | null>(null);
 
   // FIX 1: Initialize state ONCE per user using refs to prevent infinite loop
+  // P1-004 FIX: Require currentUserId to be truthy to prevent race when ID is briefly null
   useEffect(() => {
     const currentUserId = currentUser?._id || currentUser?.id || null;
-    if (currentUser && (!hasInitializedRef.current || lastUserIdRef.current !== currentUserId)) {
+    if (currentUser && currentUserId && (!hasInitializedRef.current || lastUserIdRef.current !== currentUserId)) {
       hasInitializedRef.current = true;
       lastUserIdRef.current = currentUserId;
       setTimedOut(false);
@@ -671,6 +672,7 @@ export default function EditProfileScreen() {
       // Turning blur OFF - Demo mode: just update local state (no persist)
       if (isDemoMode) {
         setBlurEnabled(false);
+        setBlurredPhotos({}); // P1-007 FIX: Clear blurredPhotos when disabling blur
         if (__DEV__) console.log('[DEMO] Set blurEnabled=false (local state only)');
         return;
       }
@@ -683,7 +685,10 @@ export default function EditProfileScreen() {
         return;
       }
       togglePhotoBlur({ authUserId: userId, blurred: false })
-        .then(() => setBlurEnabled(false))
+        .then(() => {
+          setBlurEnabled(false);
+          setBlurredPhotos({}); // P1-007 FIX: Clear blurredPhotos when disabling blur
+        })
         .catch((err: any) => Alert.alert('Error', err.message));
     }
   };

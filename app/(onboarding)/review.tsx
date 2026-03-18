@@ -476,7 +476,11 @@ export default function ReviewScreen() {
       const capturedAuthVersion = useAuthStore.getState().authVersion;
 
       // Submit all onboarding data to backend
-      await completeOnboarding(onboardingData);
+      // ONB-005 FIX: Capture and validate result before marking complete
+      const result = await completeOnboarding(onboardingData);
+      if (!result) {
+        throw new Error('Failed to complete onboarding - server returned no result');
+      }
 
       // H7 FIX: Check if logout happened during mutation (version changed)
       if (useAuthStore.getState().authVersion !== capturedAuthVersion) {

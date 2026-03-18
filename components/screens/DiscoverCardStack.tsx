@@ -377,15 +377,14 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   })));
   const blockedUserIds = useBlockStore((s) => s.blockedUserIds);
   // R1 FIX: Derive excluded IDs with stable dependencies.
-  // Use blockedUserIds.length as a primitive trigger instead of array reference.
+  // P1-003 FIX: Use blockedUserIds array (not .length) to detect content changes.
   // For demo mode, call getExcludedUserIds() inside the memo body — the function
   // itself is stable (from useShallow), and we trigger recalc via matchCount/swipedCount.
   const excludedSet = useMemo(() => {
     if (!isDemoMode) return new Set(blockedUserIds);
     // demo.getExcludedUserIds() reads current state inside the function
     return new Set(demo.getExcludedUserIds());
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [blockedUserIds.length, demo.matchCount, demo.swipedCount]);
+  }, [isDemoMode, blockedUserIds, demo.matchCount, demo.swipedCount, demo.getExcludedUserIds]);
   // FIX: Only seed after hydration completes to prevent overwriting persisted data
   useEffect(() => { if (isDemoMode && demo.hasHydrated) demo.seed(); }, [demo.seed, demo.hasHydrated]);
 
