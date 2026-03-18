@@ -148,6 +148,12 @@ export default function FaceVerificationScreen() {
 
   // CRITICAL: Skip verification entirely if already verified or pending - redirect immediately
   const didSkipRef = useRef(false);
+  // ONB-012 FIX: Component-wide mounted ref to guard async setState calls
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
   // STABILITY FIX (2026-03-04): Add cleanup to prevent setState on unmounted component
   useEffect(() => {
     let isMounted = true;
@@ -374,7 +380,8 @@ export default function FaceVerificationScreen() {
           timestamp: Date.now(),
         });
 
-        setFramesCaptured(i + 1);
+        // ONB-012 FIX: Guard setState after async
+        if (mountedRef.current) setFramesCaptured(i + 1);
         console.log(`[FaceMatch] Frame ${i + 1}/${FRAME_COUNT} captured: ${photo.path}`);
 
         // Wait before next capture (except for last frame)
@@ -388,11 +395,14 @@ export default function FaceVerificationScreen() {
           hasFace: false,
           timestamp: Date.now(),
         });
-        setFramesCaptured(i + 1);
+        // ONB-012 FIX: Guard setState in catch
+        if (mountedRef.current) setFramesCaptured(i + 1);
       }
     }
 
     isCapturing.value = false;
+    // ONB-012 FIX: Guard setState after capture loop
+    if (!mountedRef.current) return;
     setCapturedFrames(frames);
     console.log('[FaceMatch] All frames captured, sending to server for face comparison...');
 
@@ -413,6 +423,9 @@ export default function FaceVerificationScreen() {
 
       console.log(`[FaceMatch] Server result: status=${result.status}, score=${result.score}, reasonCode=${result.reasonCode}`);
       console.log(`[FaceMatch] Reason: ${result.reason || result.message}`);
+
+      // ONB-012 FIX: Guard setState after verifyFace async call
+      if (!mountedRef.current) return;
 
       setMatchScore(result.score);
       setFailReasonCode(result.reasonCode || null);
@@ -481,6 +494,8 @@ export default function FaceVerificationScreen() {
       }
     } catch (error: any) {
       console.error('[FaceMatch] Verification error:', error);
+      // ONB-012 FIX: Guard setState in catch
+      if (!mountedRef.current) return;
       setVerificationState('failed');
       setErrorMessage('Failed to capture selfie. Please try again.');
       setFailReasonCode('SELFIE_NO_FACE');

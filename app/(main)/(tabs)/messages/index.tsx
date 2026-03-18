@@ -38,6 +38,7 @@ import { useDemoDmStore } from '@/stores/demoDmStore';
 import { useScreenSafety } from '@/hooks/useScreenSafety';
 import { getProfileCompleteness, NUDGE_MESSAGES } from '@/lib/profileCompleteness';
 import { ProfileNudge } from '@/components/ui/ProfileNudge';
+import { Toast } from '@/components/ui/Toast';
 import { LinearGradient } from 'expo-linear-gradient';
 import * as Haptics from 'expo-haptics';
 import {
@@ -437,7 +438,11 @@ export default function MessagesScreen() {
       removeLike(like.userId);
     } else {
       // Convex mode: call swipe mutation with 'pass' action
-      if (!token || !like.userId) return;
+      // P1-010 FIX: Show user feedback instead of silent return
+      if (!token || !like.userId) {
+        Toast.show('Unable to pass. Please try again.');
+        return;
+      }
       try {
         await swipe({
           token,
@@ -632,7 +637,8 @@ export default function MessagesScreen() {
 
   // Super Likes section (above New Matches)
   const renderSuperLikesRow = () => {
-    if (superLikeMatches.length === 0) return null;
+    // P1-011 FIX: Guard against null/undefined superLikeMatches
+    if (!superLikeMatches?.length) return null;
     return (
       <View style={styles.newMatchesSection}>
         <View style={styles.sectionHeader}>
@@ -645,7 +651,7 @@ export default function MessagesScreen() {
         <FlatList
           horizontal
           data={superLikeMatches}
-          keyExtractor={(item: any, index: number) => item.id || `superlike-${index}`}
+          keyExtractor={(item: any, index: number) => item.id || item.matchId || `superlike-${item.matchedUserId || item.userId || index}`}
           renderItem={({ item }: { item: any }) => (
             <TouchableOpacity
               style={styles.matchItem}
@@ -702,7 +708,7 @@ export default function MessagesScreen() {
         <FlatList
           horizontal
           data={newMatches}
-          keyExtractor={(item: any, index: number) => item.id || `newmatch-${index}`}
+          keyExtractor={(item: any, index: number) => item.id || item.matchId || `newmatch-${item.matchedUserId || item.userId || index}`}
           renderItem={({ item }: { item: any }) => (
             <TouchableOpacity
               style={styles.matchItem}

@@ -23,6 +23,8 @@ export default function NotificationsSettingsScreen() {
   // Mutation to update notification settings
   const updateNotificationSettings = useMutation(api.users.updateNotificationSettings);
 
+  // P1-017 FIX: Track hydration to prevent toggle flicker
+  const [settingsHydrated, setSettingsHydrated] = useState(isDemoMode);
   // Local state for toggles (synced with backend on load)
   const [pushEnabled, setPushEnabled] = useState(true);
   const [newMatches, setNewMatches] = useState(true);
@@ -40,6 +42,8 @@ export default function NotificationsSettingsScreen() {
       setNewMessages(currentUser.notifyNewMessages !== false);
       setLikesAndSuperLikes(currentUser.notifyLikesAndSuperLikes !== false);
       setProfileViews(currentUser.notifyProfileViews !== false);
+      // P1-017 FIX: Mark as hydrated after syncing
+      setSettingsHydrated(true);
     }
   }, [currentUser]);
 
@@ -123,6 +127,9 @@ export default function NotificationsSettingsScreen() {
       </View>
 
       <ScrollView style={styles.content} showsVerticalScrollIndicator={false}>
+        {/* P1-017 FIX: Only render toggles after hydrated to prevent flicker */}
+        {settingsHydrated && (
+        <>
         {/* Master Push Toggle */}
         <View style={styles.section}>
           <View style={styles.masterToggleRow}>
@@ -236,6 +243,8 @@ export default function NotificationsSettingsScreen() {
             </View>
           </View>
         </View>
+        </>
+        )}
       </ScrollView>
     </SafeAreaView>
   );

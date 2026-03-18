@@ -1143,9 +1143,11 @@ export default function BasicInfoScreen() {
                     setLgbtqError("");
                     // Save-as-you-go: update demoProfile immediately
                     if (isDemoMode && userId) {
+                      // ONB-008 FIX: Compute new value, update React state, then save
                       const newLgbtqSelf = lgbtqSelf.includes(option.value)
                         ? lgbtqSelf.filter((o) => o !== option.value)
                         : [...lgbtqSelf, option.value];
+                      setLgbtqSelf(newLgbtqSelf);
                       useDemoStore.getState().saveDemoProfile(userId, { lgbtqSelf: newLgbtqSelf });
                     }
                   }
