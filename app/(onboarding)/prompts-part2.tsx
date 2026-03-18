@@ -1,11 +1,12 @@
 /**
- * Phase-1 Onboarding: Prompts Part 2 (Profile Prompts)
+ * Phase-1 Onboarding: Prompts Part 2 (Section-Based Prompts)
  *
- * Unified prompt system - same as Edit Profile:
- * - Select from 16 prompt questions
- * - Min 1, max 5 prompts required
- * - 20-200 character answers
- * - Saves directly to user.profilePrompts (not onboardingDraft)
+ * Fixed 4-prompt section system:
+ * - 4 sections displayed as Section 1, Section 2, Section 3, Section 4
+ * - Each section has 4 predefined questions
+ * - User selects exactly 1 question per section (replace behavior)
+ * - Total: 4 answered prompts (one per section)
+ * - 20-200 character answers required
  */
 import React, { useState, useRef, useCallback, useEffect } from 'react';
 import {
@@ -20,18 +21,19 @@ import {
   LayoutAnimation,
   UIManager,
   ActivityIndicator,
-  Pressable,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter, useLocalSearchParams } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import {
   COLORS,
-  PROFILE_PROMPT_QUESTIONS,
-  PROFILE_PROMPTS_MIN,
-  PROFILE_PROMPTS_MAX,
+  BUILDER_PROMPTS,
+  PERFORMER_PROMPTS,
+  SEEKER_PROMPTS,
+  GROUNDED_PROMPTS,
   PROMPT_ANSWER_MIN_LENGTH,
   PROMPT_ANSWER_MAX_LENGTH,
+  TOTAL_SECTIONS,
 } from '@/lib/constants';
 import { Button } from '@/components/ui';
 import { useOnboardingStore } from '@/stores/onboardingStore';
@@ -47,7 +49,23 @@ if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental
   UIManager.setLayoutAnimationEnabledExperimental(true);
 }
 
-type PromptEntry = { question: string; answer: string };
+// Section key type
+type SectionKey = 'builder' | 'performer' | 'seeker' | 'grounded';
+
+// Prompt entry with section identity
+type SectionPromptEntry = {
+  section: SectionKey;
+  question: string;
+  answer: string;
+};
+
+// Section configuration with display labels (Section 1-4)
+const SECTIONS: { key: SectionKey; label: string; questions: { id: string; text: string }[] }[] = [
+  { key: 'builder', label: 'Section 1', questions: BUILDER_PROMPTS },
+  { key: 'performer', label: 'Section 2', questions: PERFORMER_PROMPTS },
+  { key: 'seeker', label: 'Section 3', questions: SEEKER_PROMPTS },
+  { key: 'grounded', label: 'Section 4', questions: GROUNDED_PROMPTS },
+];
 
 export default function PromptsPart2Screen() {
   useScreenTrace('ONB_PROMPTS_PART2');
@@ -57,9 +75,6 @@ export default function PromptsPart2Screen() {
   const params = useLocalSearchParams<{ editFromReview?: string }>();
   const isEditFromReview = params.editFromReview === 'true';
 
-  // MIGRATION: Track if sectionPrompts → profilePrompts migration has been attempted
-  const hasMigratedRef = useRef(false);
-
   // Auth and persistence
   const { userId, token } = useAuthStore();
   const updateProfilePrompts = useMutation(api.users.updateProfilePrompts);
@@ -68,11 +83,16 @@ export default function PromptsPart2Screen() {
   const { profilePrompts, setProfilePrompts, setStep } = useOnboardingStore();
   const convexHydrated = useOnboardingStore((s) => s._convexHydrated);
 
-  // Local state for prompts
-  const [prompts, setPrompts] = useState<PromptEntry[]>([]);
+  // Local state: one answer per section (keyed by section)
+  const [sectionAnswers, setSectionAnswers] = useState<Record<SectionKey, SectionPromptEntry | null>>({
+    builder: null,
+    performer: null,
+    seeker: null,
+    grounded: null,
+  });
 
-  // Track which prompt is being edited
-  const [activePromptIndex, setActivePromptIndex] = useState<number | null>(null);
+  // Track which section is currently expanded for editing
+  const [activeSection, setActiveSection] = useState<SectionKey | null>(null);
 
   // P0 STABILITY: Prevent double-submission on rapid taps
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -80,82 +100,50 @@ export default function PromptsPart2Screen() {
   // Query existing profilePrompts from user (for edit flow or resumption)
   const currentUser = useQuery(api.users.getCurrentUser, userId ? { userId } : 'skip');
 
-  // Initialize from existing data + MIGRATION from old sectionPrompts
+  // Initialize from existing data
   useEffect(() => {
     // Priority: currentUser.profilePrompts > onboardingStore.profilePrompts
     const existingPrompts = (currentUser as any)?.profilePrompts ?? profilePrompts ?? [];
 
-    // Check for old sectionPrompts that need migration
-    const draft = (currentUser as any)?.onboardingDraft;
-    const sectionPrompts = draft?.profileDetails?.sectionPrompts;
+    if (existingPrompts.length > 0) {
+      // Reconstruct sectionAnswers from stored prompts
+      const newSectionAnswers: Record<SectionKey, SectionPromptEntry | null> = {
+        builder: null,
+        performer: null,
+        seeker: null,
+        grounded: null,
+      };
 
-    // Flatten old section prompts if they exist
-    const flatSectionPrompts: PromptEntry[] = [];
-    if (sectionPrompts) {
-      ['builder', 'performer', 'seeker', 'grounded'].forEach((section) => {
-        const sectionArr = sectionPrompts[section];
-        if (Array.isArray(sectionArr)) {
-          sectionArr.forEach((p: PromptEntry) => {
-            if (p.question && p.answer?.trim()) {
-              flatSectionPrompts.push(p);
-            }
-          });
+      // Try to match prompts to sections by question text
+      existingPrompts.forEach((prompt: { question: string; answer: string; section?: SectionKey }) => {
+        // If prompt has section field, use it directly
+        if (prompt.section && SECTIONS.find(s => s.key === prompt.section)) {
+          newSectionAnswers[prompt.section] = {
+            section: prompt.section,
+            question: prompt.question,
+            answer: prompt.answer,
+          };
+          return;
+        }
+
+        // Otherwise, try to find the section by matching question text
+        for (const section of SECTIONS) {
+          const matchingQuestion = section.questions.find(q => q.text === prompt.question);
+          if (matchingQuestion && !newSectionAnswers[section.key]) {
+            newSectionAnswers[section.key] = {
+              section: section.key,
+              question: prompt.question,
+              answer: prompt.answer,
+            };
+            break;
+          }
         }
       });
-    }
 
-    // MIGRATION: If profilePrompts is empty but sectionPrompts exists, auto-migrate
-    const needsMigration =
-      existingPrompts.length === 0 &&
-      flatSectionPrompts.length > 0 &&
-      !hasMigratedRef.current;
-
-    if (needsMigration && !isDemoMode && token) {
-      hasMigratedRef.current = true;
-
-      // Limit to PROFILE_PROMPTS_MAX (5) prompts, filter by min length
-      const migratedPrompts = flatSectionPrompts
-        .filter((p) => p.answer.trim().length >= PROMPT_ANSWER_MIN_LENGTH)
-        .slice(0, PROFILE_PROMPTS_MAX)
-        .map((p) => ({
-          question: p.question,
-          answer: p.answer.trim().slice(0, PROMPT_ANSWER_MAX_LENGTH),
-        }));
-
-      if (migratedPrompts.length > 0) {
-        // Set local state immediately
-        setPrompts(migratedPrompts);
-
-        // Persist to backend
-        updateProfilePrompts({ token, prompts: migratedPrompts })
-          .then(() => {
-            console.log('[PROMPTS MIGRATED]', {
-              count: migratedPrompts.length,
-              source: 'onboardingDraft.sectionPrompts',
-              destination: 'user.profilePrompts',
-            });
-          })
-          .catch((err) => {
-            console.error('[PROMPTS MIGRATION FAILED]', err);
-          });
-      }
-    } else if (existingPrompts.length > 0) {
-      // Normal case: use existing profilePrompts
-      const validPrompts = existingPrompts.filter((p: PromptEntry) => {
-        return p.answer && p.answer.trim().length > 0;
-      }).slice(0, PROFILE_PROMPTS_MAX);
-      setPrompts(validPrompts);
+      setSectionAnswers(newSectionAnswers);
       if (__DEV__) {
-        console.log('[PROMPTS_PART2] Initialized with', validPrompts.length, 'prompts');
-      }
-    } else if (flatSectionPrompts.length > 0 && prompts.length === 0) {
-      // Fallback: show old sectionPrompts in UI (even if migration failed)
-      const validPrompts = flatSectionPrompts
-        .filter((p) => p.answer.trim().length >= PROMPT_ANSWER_MIN_LENGTH)
-        .slice(0, PROFILE_PROMPTS_MAX);
-      setPrompts(validPrompts);
-      if (__DEV__) {
-        console.log('[PROMPTS_PART2] Loaded from sectionPrompts fallback:', validPrompts.length);
+        const filledCount = Object.values(newSectionAnswers).filter(Boolean).length;
+        console.log('[PROMPTS_PART2] Initialized with', filledCount, 'section prompts');
       }
     }
   }, [currentUser]);
@@ -163,68 +151,89 @@ export default function PromptsPart2Screen() {
   // STABILITY FIX: Sync from store AFTER Convex hydration completes
   useEffect(() => {
     if (!isDemoMode && convexHydrated && profilePrompts.length > 0) {
-      const validPrompts = profilePrompts.filter((p: PromptEntry) => {
-        return p.answer && p.answer.trim().length > 0;
-      }).slice(0, PROFILE_PROMPTS_MAX);
-      if (validPrompts.length > 0 && prompts.length === 0) {
-        setPrompts(validPrompts);
+      const newSectionAnswers: Record<SectionKey, SectionPromptEntry | null> = {
+        builder: null,
+        performer: null,
+        seeker: null,
+        grounded: null,
+      };
+
+      profilePrompts.forEach((prompt: { question: string; answer: string; section?: SectionKey }) => {
+        if (prompt.section && SECTIONS.find(s => s.key === prompt.section)) {
+          newSectionAnswers[prompt.section] = {
+            section: prompt.section,
+            question: prompt.question,
+            answer: prompt.answer,
+          };
+          return;
+        }
+
+        for (const section of SECTIONS) {
+          const matchingQuestion = section.questions.find(q => q.text === prompt.question);
+          if (matchingQuestion && !newSectionAnswers[section.key]) {
+            newSectionAnswers[section.key] = {
+              section: section.key,
+              question: prompt.question,
+              answer: prompt.answer,
+            };
+            break;
+          }
+        }
+      });
+
+      // Only update if we found some prompts
+      const filledCount = Object.values(newSectionAnswers).filter(Boolean).length;
+      if (filledCount > 0) {
+        setSectionAnswers(newSectionAnswers);
         if (__DEV__) {
-          console.log('[PROMPTS_PART2] Synced from hydrated store:', validPrompts.length, 'prompts');
+          console.log('[PROMPTS_PART2] Synced from hydrated store:', filledCount, 'prompts');
         }
       }
     }
   }, [convexHydrated]);
-
-  // Get list of questions that haven't been answered yet
-  const availableQuestions = PROFILE_PROMPT_QUESTIONS.filter(
-    (q) => !prompts.some((p) => p.question === q.text)
-  );
 
   // Check if answer meets minimum length requirement
   const isAnswerValid = (answer: string): boolean => {
     return answer.trim().length >= PROMPT_ANSWER_MIN_LENGTH;
   };
 
-  // Count valid prompts (20+ char answers)
-  const filledCount = prompts.filter((p) => isAnswerValid(p.answer)).length;
+  // Count valid sections (with 20+ char answers)
+  const filledSections = Object.values(sectionAnswers).filter(
+    (entry) => entry && isAnswerValid(entry.answer)
+  ).length;
 
-  // Validation: at least 1 valid prompt
-  const canContinue = filledCount >= PROFILE_PROMPTS_MIN;
-  const canAddMore = prompts.length < PROFILE_PROMPTS_MAX && availableQuestions.length > 0;
+  // Validation: all 4 sections must have valid prompts
+  const canContinue = filledSections === TOTAL_SECTIONS;
 
-  // Add a new prompt with a selected question
-  const addPrompt = useCallback((questionText: string) => {
+  // Select a question in a section (replaces any existing selection in that section)
+  const selectQuestion = useCallback((sectionKey: SectionKey, questionText: string) => {
     LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
-    const newPrompt = { question: questionText, answer: '' };
-    setPrompts((prev) => [...prev, newPrompt]);
-    // Automatically expand the new prompt for editing
-    setActivePromptIndex(prompts.length);
-  }, [prompts.length]);
 
-  // Remove a prompt
-  const removePrompt = useCallback((index: number) => {
-    LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
-    setPrompts((prev) => prev.filter((_, i) => i !== index));
-    if (activePromptIndex === index) {
-      setActivePromptIndex(null);
-    } else if (activePromptIndex !== null && activePromptIndex > index) {
-      setActivePromptIndex(activePromptIndex - 1);
-    }
-  }, [activePromptIndex]);
-
-  // Update answer for a prompt
-  const updateAnswer = useCallback((index: number, answer: string) => {
-    setPrompts((prev) => {
-      const newPrompts = [...prev];
-      newPrompts[index] = { ...newPrompts[index], answer };
-      return newPrompts;
-    });
+    setSectionAnswers((prev) => ({
+      ...prev,
+      [sectionKey]: {
+        section: sectionKey,
+        question: questionText,
+        answer: prev[sectionKey]?.question === questionText ? (prev[sectionKey]?.answer || '') : '',
+      },
+    }));
+    setActiveSection(sectionKey);
   }, []);
 
-  // Toggle prompt editing
-  const togglePrompt = useCallback((index: number) => {
+  // Update answer for a section
+  const updateSectionAnswer = useCallback((sectionKey: SectionKey, answer: string) => {
+    setSectionAnswers((prev) => ({
+      ...prev,
+      [sectionKey]: prev[sectionKey]
+        ? { ...prev[sectionKey]!, answer }
+        : null,
+    }));
+  }, []);
+
+  // Toggle section expansion
+  const toggleSection = useCallback((sectionKey: SectionKey) => {
     LayoutAnimation.configureNext(LayoutAnimation.Presets.easeInEaseOut);
-    setActivePromptIndex((prev) => (prev === index ? null : index));
+    setActiveSection((prev) => (prev === sectionKey ? null : sectionKey));
   }, []);
 
   const handleContinue = async () => {
@@ -232,19 +241,26 @@ export default function PromptsPart2Screen() {
     if (!canContinue || isSubmitting) return;
     setIsSubmitting(true);
 
-    // Filter to only prompts with valid answers (20+ chars)
-    const validPrompts = prompts.filter((p) => isAnswerValid(p.answer)).map((p) => ({
+    // Convert sectionAnswers to array format for storage
+    const validPrompts = Object.values(sectionAnswers)
+      .filter((entry): entry is SectionPromptEntry => entry !== null && isAnswerValid(entry.answer))
+      .map((entry) => ({
+        section: entry.section,
+        question: entry.question,
+        answer: entry.answer.trim().slice(0, PROMPT_ANSWER_MAX_LENGTH),
+      }));
+
+    // Save to local store (without section for backward compatibility with display)
+    const storagePrompts = validPrompts.map((p) => ({
       question: p.question,
-      answer: p.answer.trim().slice(0, PROMPT_ANSWER_MAX_LENGTH),
+      answer: p.answer,
     }));
+    setProfilePrompts(storagePrompts);
 
-    // Save to local store
-    setProfilePrompts(validPrompts);
-
-    // LIVE MODE: Save directly to user.profilePrompts (NOT onboardingDraft)
+    // LIVE MODE: Save directly to user.profilePrompts
     if (!isDemoMode && token) {
       try {
-        await updateProfilePrompts({ token, prompts: validPrompts });
+        await updateProfilePrompts({ token, prompts: storagePrompts });
         if (__DEV__) {
           console.log('[PROMPTS_PART2] Saved', validPrompts.length, 'prompts to user.profilePrompts');
         }
@@ -299,130 +315,146 @@ export default function PromptsPart2Screen() {
         >
           <Text style={styles.title}>Tell us about you</Text>
           <Text style={styles.subtitle}>
-            Pick {PROFILE_PROMPTS_MIN}-{PROFILE_PROMPTS_MAX} prompts and share your answers. These help others get to know you.
+            Choose 1 question from each section and share your answer.
           </Text>
 
           {/* Progress indicator */}
           <View style={styles.progressRow}>
             <Text style={styles.progressText}>
-              {filledCount} of {PROFILE_PROMPTS_MIN}-{PROFILE_PROMPTS_MAX} prompts completed
+              {filledSections} of {TOTAL_SECTIONS} sections completed
             </Text>
-            {filledCount >= PROFILE_PROMPTS_MIN && (
+            {canContinue && (
               <Ionicons name="checkmark-circle" size={18} color={COLORS.success} />
             )}
           </View>
 
-          {/* Selected prompts */}
-          {prompts.map((prompt, index) => {
-            const isActive = activePromptIndex === index;
-            const hasValidAnswer = isAnswerValid(prompt.answer);
+          {/* Render each section as accordion */}
+          {SECTIONS.map((section) => {
+            const currentAnswer = sectionAnswers[section.key];
+            const isExpanded = activeSection === section.key;
+            const hasValidAnswer = currentAnswer && isAnswerValid(currentAnswer.answer);
 
             return (
-              <View
-                key={`${prompt.question}-${index}`}
-                style={[
-                  styles.promptCard,
-                  hasValidAnswer && styles.promptCardValid,
-                  isActive && styles.promptCardActive,
-                ]}
-              >
+              <View key={section.key} style={styles.sectionContainer}>
+                {/* Section Header - simple accordion style */}
                 <TouchableOpacity
-                  style={styles.promptHeader}
-                  onPress={() => togglePrompt(index)}
+                  style={[
+                    styles.sectionHeader,
+                    hasValidAnswer && styles.sectionHeaderComplete,
+                  ]}
+                  onPress={() => toggleSection(section.key)}
                   activeOpacity={0.7}
                 >
-                  <View style={styles.promptHeaderLeft}>
-                    <Text style={styles.promptQuestion}>{prompt.question}</Text>
-                    {!isActive && prompt.answer.length > 0 && (
-                      <Text style={styles.promptPreview} numberOfLines={1}>
-                        {prompt.answer}
-                      </Text>
+                  <View style={styles.sectionHeaderLeft}>
+                    <Text style={styles.sectionTitle}>{section.label}</Text>
+                    {hasValidAnswer && (
+                      <Ionicons name="checkmark-circle" size={16} color={COLORS.success} style={{ marginLeft: 8 }} />
                     )}
                   </View>
-                  <View style={styles.promptHeaderRight}>
-                    {hasValidAnswer && !isActive && (
-                      <Ionicons name="checkmark-circle" size={18} color={COLORS.success} />
-                    )}
-                    <Ionicons
-                      name={isActive ? 'chevron-up' : 'chevron-down'}
-                      size={18}
-                      color={COLORS.textMuted}
-                    />
-                  </View>
+                  <Ionicons
+                    name={isExpanded ? 'chevron-up' : 'chevron-down'}
+                    size={20}
+                    color={COLORS.textMuted}
+                  />
                 </TouchableOpacity>
 
-                {/* Expanded input area */}
-                {isActive && (
-                  <View style={styles.inputContainer}>
-                    <TextInput
-                      style={styles.textInput}
-                      value={prompt.answer}
-                      onChangeText={(text) => updateAnswer(index, text)}
-                      placeholder="Type your answer..."
-                      placeholderTextColor={COLORS.textMuted}
-                      multiline
-                      maxLength={PROMPT_ANSWER_MAX_LENGTH}
-                      textAlignVertical="top"
-                      autoFocus
-                    />
-                    <View style={styles.inputFooter}>
-                      {/* Inline validation message */}
-                      {prompt.answer.trim().length > 0 &&
-                        prompt.answer.trim().length < PROMPT_ANSWER_MIN_LENGTH ? (
-                        <Text style={styles.minCharWarning}>
-                          {PROMPT_ANSWER_MIN_LENGTH - prompt.answer.trim().length} more chars needed
-                        </Text>
-                      ) : (
-                        <TouchableOpacity onPress={() => removePrompt(index)}>
-                          <Text style={styles.removeText}>Remove</Text>
-                        </TouchableOpacity>
-                      )}
-                      <Text style={styles.charCount}>
-                        {prompt.answer.length}/{PROMPT_ANSWER_MAX_LENGTH}
+                {/* Section Content (expanded) */}
+                {isExpanded && (
+                  <View style={styles.sectionContent}>
+                    <Text style={styles.sectionInstruction}>
+                      Choose 1 question from this section:
+                    </Text>
+
+                    {/* Question options */}
+                    {section.questions.map((question) => {
+                      const isSelected = currentAnswer?.question === question.text;
+
+                      return (
+                        <View key={question.id}>
+                          <TouchableOpacity
+                            style={[
+                              styles.questionOption,
+                              isSelected && styles.questionOptionSelected,
+                            ]}
+                            onPress={() => selectQuestion(section.key, question.text)}
+                            activeOpacity={0.7}
+                          >
+                            <View style={styles.questionRadio}>
+                              {isSelected ? (
+                                <Ionicons name="radio-button-on" size={20} color={COLORS.primary} />
+                              ) : (
+                                <Ionicons name="radio-button-off" size={20} color={COLORS.textMuted} />
+                              )}
+                            </View>
+                            <Text
+                              style={[
+                                styles.questionText,
+                                isSelected && styles.questionTextSelected,
+                              ]}
+                            >
+                              {question.text}
+                            </Text>
+                          </TouchableOpacity>
+
+                          {/* Answer input (only for selected question) */}
+                          {isSelected && (
+                            <View style={styles.answerContainer}>
+                              <TextInput
+                                style={styles.textInput}
+                                value={currentAnswer?.answer || ''}
+                                onChangeText={(text) => updateSectionAnswer(section.key, text)}
+                                placeholder="Type your answer..."
+                                placeholderTextColor={COLORS.textMuted}
+                                multiline
+                                maxLength={PROMPT_ANSWER_MAX_LENGTH}
+                                textAlignVertical="top"
+                                autoFocus
+                              />
+                              <View style={styles.inputFooter}>
+                                {currentAnswer?.answer &&
+                                  currentAnswer.answer.trim().length > 0 &&
+                                  currentAnswer.answer.trim().length < PROMPT_ANSWER_MIN_LENGTH ? (
+                                  <Text style={styles.minCharWarning}>
+                                    {PROMPT_ANSWER_MIN_LENGTH - currentAnswer.answer.trim().length} more chars needed
+                                  </Text>
+                                ) : (
+                                  <View />
+                                )}
+                                <Text style={styles.charCount}>
+                                  {currentAnswer?.answer?.length || 0}/{PROMPT_ANSWER_MAX_LENGTH}
+                                </Text>
+                              </View>
+                            </View>
+                          )}
+                        </View>
+                      );
+                    })}
+                  </View>
+                )}
+
+                {/* Collapsed preview (show selected question if any) */}
+                {!isExpanded && currentAnswer && (
+                  <View style={styles.collapsedPreview}>
+                    <Text style={styles.collapsedQuestion} numberOfLines={2}>
+                      {currentAnswer.question}
+                    </Text>
+                    {currentAnswer.answer && (
+                      <Text style={styles.collapsedAnswer} numberOfLines={1}>
+                        {currentAnswer.answer}
                       </Text>
-                    </View>
+                    )}
                   </View>
                 )}
               </View>
             );
           })}
 
-          {/* Add prompt button */}
-          {canAddMore && (
-            <View style={styles.addSection}>
-              <Text style={styles.addLabel}>Add a prompt:</Text>
-              <ScrollView
-                horizontal
-                showsHorizontalScrollIndicator={false}
-                contentContainerStyle={styles.questionChips}
-              >
-                {availableQuestions.slice(0, 8).map((q) => (
-                  <Pressable
-                    key={q.id}
-                    style={styles.questionChip}
-                    onPress={() => addPrompt(q.text)}
-                  >
-                    <Text style={styles.questionChipText} numberOfLines={1}>
-                      {q.text}
-                    </Text>
-                    <Ionicons name="add" size={16} color={COLORS.primary} />
-                  </Pressable>
-                ))}
-              </ScrollView>
-              {availableQuestions.length > 8 && (
-                <Text style={styles.morePromptsHint}>
-                  + {availableQuestions.length - 8} more prompts available
-                </Text>
-              )}
-            </View>
-          )}
-
           {/* Validation hint */}
-          {!canContinue && prompts.length > 0 && (
+          {!canContinue && filledSections > 0 && (
             <View style={styles.validationHint}>
               <Ionicons name="information-circle" size={18} color={COLORS.warning} />
               <Text style={styles.validationHintText}>
-                Complete at least {PROFILE_PROMPTS_MIN} prompt ({PROMPT_ANSWER_MIN_LENGTH}+ chars) to continue
+                Complete all {TOTAL_SECTIONS} sections ({PROMPT_ANSWER_MIN_LENGTH}+ chars each) to continue
               </Text>
             </View>
           )}
@@ -481,64 +513,92 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
-    marginBottom: 16,
+    marginBottom: 20,
   },
   progressText: {
     fontSize: 14,
     color: COLORS.textMuted,
     fontWeight: '500',
   },
-  // Prompt cards
-  promptCard: {
+  // Section container - accordion style
+  sectionContainer: {
+    marginBottom: 12,
+    borderRadius: 10,
     backgroundColor: COLORS.backgroundDark,
-    borderRadius: 12,
-    marginBottom: 10,
     borderWidth: 1,
     borderColor: COLORS.border,
     overflow: 'hidden',
   },
-  promptCardValid: {
-    borderColor: COLORS.success,
-    borderLeftWidth: 3,
-    borderLeftColor: COLORS.success,
-  },
-  promptCardActive: {
-    borderColor: COLORS.primary,
-    borderWidth: 2,
-  },
-  promptHeader: {
+  sectionHeader: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
     paddingVertical: 14,
-    paddingHorizontal: 14,
+    paddingHorizontal: 16,
   },
-  promptHeaderLeft: {
-    flex: 1,
-    marginRight: 8,
+  sectionHeaderComplete: {
+    borderLeftWidth: 3,
+    borderLeftColor: COLORS.success,
   },
-  promptHeaderRight: {
+  sectionHeaderLeft: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 6,
+    flex: 1,
   },
-  promptQuestion: {
-    fontSize: 14,
+  sectionTitle: {
+    fontSize: 15,
     fontWeight: '600',
     color: COLORS.text,
-    lineHeight: 19,
   },
-  promptPreview: {
-    fontSize: 13,
-    color: COLORS.textMuted,
-    marginTop: 4,
-  },
-  // Input container
-  inputContainer: {
+  // Section content (expanded)
+  sectionContent: {
     paddingHorizontal: 14,
     paddingBottom: 14,
     borderTopWidth: 1,
     borderTopColor: COLORS.border,
+  },
+  sectionInstruction: {
+    fontSize: 13,
+    color: COLORS.textLight,
+    fontWeight: '500',
+    marginVertical: 12,
+  },
+  // Question options
+  questionOption: {
+    flexDirection: 'row',
+    alignItems: 'flex-start',
+    paddingVertical: 10,
+    paddingHorizontal: 8,
+    borderRadius: 8,
+    marginBottom: 6,
+  },
+  questionOptionSelected: {
+    backgroundColor: COLORS.primary + '15',
+  },
+  questionRadio: {
+    marginRight: 10,
+    marginTop: 1,
+  },
+  questionText: {
+    fontSize: 14,
+    color: COLORS.text,
+    flex: 1,
+    lineHeight: 20,
+  },
+  questionTextSelected: {
+    fontWeight: '500',
+    color: COLORS.primary,
+  },
+  // Answer input
+  answerContainer: {
+    marginLeft: 30,
+    marginTop: 4,
+    marginBottom: 8,
+    backgroundColor: COLORS.background,
+    borderRadius: 8,
+    padding: 12,
+    borderWidth: 1,
+    borderColor: COLORS.primary,
   },
   textInput: {
     fontSize: 14,
@@ -546,7 +606,6 @@ const styles = StyleSheet.create({
     minHeight: 60,
     maxHeight: 120,
     lineHeight: 20,
-    paddingTop: 12,
     padding: 0,
   },
   inputFooter: {
@@ -564,50 +623,24 @@ const styles = StyleSheet.create({
     color: COLORS.warning,
     fontWeight: '500',
   },
-  removeText: {
+  // Collapsed preview
+  collapsedPreview: {
+    paddingHorizontal: 16,
+    paddingBottom: 12,
+    borderTopWidth: 1,
+    borderTopColor: COLORS.border,
+    paddingTop: 8,
+  },
+  collapsedQuestion: {
     fontSize: 13,
-    color: COLORS.error,
+    color: COLORS.textLight,
     fontWeight: '500',
+    lineHeight: 18,
   },
-  // Add section
-  addSection: {
-    marginTop: 8,
-    marginBottom: 16,
-  },
-  addLabel: {
-    fontSize: 14,
-    color: COLORS.text,
-    fontWeight: '600',
-    marginBottom: 10,
-  },
-  questionChips: {
-    paddingVertical: 2,
-    gap: 8,
-  },
-  questionChip: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    backgroundColor: COLORS.backgroundDark,
-    borderRadius: 20,
-    paddingVertical: 8,
-    paddingHorizontal: 14,
-    borderWidth: 1,
-    borderColor: COLORS.border,
-    marginRight: 8,
-    maxWidth: 200,
-    gap: 4,
-  },
-  questionChipText: {
-    fontSize: 13,
-    color: COLORS.text,
-    fontWeight: '500',
-    flex: 1,
-  },
-  morePromptsHint: {
+  collapsedAnswer: {
     fontSize: 12,
     color: COLORS.textMuted,
-    marginTop: 8,
-    marginLeft: 4,
+    marginTop: 4,
   },
   // Validation hint
   validationHint: {

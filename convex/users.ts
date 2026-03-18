@@ -178,8 +178,8 @@ export const updateProfilePrompts = mutation({
       }
     }
 
-    // Max 5 prompts, answer max 200 chars
-    const cleaned = args.prompts.slice(0, 5).map((p) => ({
+    // Exactly 4 prompts (one per section), answer max 200 chars
+    const cleaned = args.prompts.slice(0, 4).map((p) => ({
       question: p.question.trim().slice(0, 100),
       answer: p.answer.trim().slice(0, 200),
     }));

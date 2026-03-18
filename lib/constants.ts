@@ -394,10 +394,14 @@ export const MICRO_SURVEY_QUESTIONS = [
 ];
 
 // Profile Prompt Questions (LEGACY - kept for backward compatibility)
-// Profile Prompts - Users can select and answer up to 5 prompts
-// Minimum: 1 required, Maximum: 5 allowed
-export const PROFILE_PROMPTS_MIN = 1;
-export const PROFILE_PROMPTS_MAX = 5;
+// Profile Prompts - Users select exactly 4 prompts (1 per section)
+// Minimum: 4 required, Maximum: 4 allowed (fixed)
+export const PROFILE_PROMPTS_MIN = 4;
+export const PROFILE_PROMPTS_MAX = 4;
+
+// Section-based prompt system constants
+export const PROMPTS_PER_SECTION = 1; // Exactly one question must be answered per section
+export const TOTAL_SECTIONS = 4; // Builder, Performer, Seeker, Grounded
 
 export const PROFILE_PROMPT_QUESTIONS = [
   { id: 'perfect_weekend', text: 'My perfect weekend looks like…' },
@@ -513,15 +517,24 @@ export const SECTION_LABELS: Record<PromptSectionKey, { title: string; emoji: st
 
 // Section prompts data structure
 export interface SectionPromptAnswer {
+  section: PromptSectionKey; // Which section this prompt belongs to
   question: string;
   answer: string;
 }
 
+// Legacy interface (kept for backward compatibility)
 export interface SectionPrompts {
   builder: SectionPromptAnswer[];
   performer: SectionPromptAnswer[];
   seeker: SectionPromptAnswer[];
   grounded: SectionPromptAnswer[];
+}
+
+// Fixed 4-prompt storage: exactly one answer per section
+export interface ProfilePromptEntry {
+  section: PromptSectionKey;
+  question: string;
+  answer: string;
 }
 
 // Combined prompts data structure for storage

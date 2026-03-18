@@ -29,9 +29,13 @@ import {
   EXERCISE_OPTIONS,
   PETS_OPTIONS,
   INSECT_OPTIONS,
-  PROFILE_PROMPT_QUESTIONS,
-  PROFILE_PROMPTS_MIN,
-  PROFILE_PROMPTS_MAX,
+  BUILDER_PROMPTS,
+  PERFORMER_PROMPTS,
+  SEEKER_PROMPTS,
+  GROUNDED_PROMPTS,
+  PROMPT_ANSWER_MIN_LENGTH,
+  PROMPT_ANSWER_MAX_LENGTH,
+  TOTAL_SECTIONS,
   SOCIAL_RHYTHM_OPTIONS,
   SLEEP_SCHEDULE_OPTIONS,
   TRAVEL_STYLE_OPTIONS,
@@ -43,6 +47,18 @@ import {
   WorkStyleValue,
   CoreValueValue,
 } from '@/lib/constants';
+
+// Section-based prompt types
+type SectionKey = 'builder' | 'performer' | 'seeker' | 'grounded';
+type SectionPromptEntry = { section: SectionKey; question: string; answer: string };
+
+// Section configuration for prompts with display labels (Section 1-4)
+const PROMPT_SECTIONS: { key: SectionKey; label: string; questions: { id: string; text: string }[] }[] = [
+  { key: 'builder', label: 'Section 1', questions: BUILDER_PROMPTS },
+  { key: 'performer', label: 'Section 2', questions: PERFORMER_PROMPTS },
+  { key: 'seeker', label: 'Section 3', questions: SEEKER_PROMPTS },
+  { key: 'grounded', label: 'Section 4', questions: GROUNDED_PROMPTS },
+];
 import { Button, Input } from '@/components/ui';
 import { Ionicons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
@@ -143,12 +159,18 @@ export default function EditProfileScreen() {
 
   const [showBlurNotice, setShowBlurNotice] = useState(false);
   const [bio, setBio] = useState('');
-  const [prompts, setPrompts] = useState<{ question: string; answer: string }[]>([]);
+  // Section-based prompts: one answer per section
+  const [sectionAnswers, setSectionAnswers] = useState<Record<SectionKey, SectionPromptEntry | null>>({
+    builder: null,
+    performer: null,
+    seeker: null,
+    grounded: null,
+  });
+  const [activePromptSection, setActivePromptSection] = useState<SectionKey | null>(null);
 
   // Basic Info fields (firstName/lastName editable, others read-only)
   const [firstName, setFirstName] = useState('');
   const [lastName, setLastName] = useState('');
-  const [showPromptPicker, setShowPromptPicker] = useState(false);
   const [height, setHeight] = useState('');
   const [weight, setWeight] = useState('');
   const [smoking, setSmoking] = useState<string | null>(null);
@@ -239,84 +261,46 @@ export default function EditProfileScreen() {
 
       setBio(currentUser.bio || '');
 
-      // Load prompts from multiple sources:
-      // 1. profilePrompts on user document (main icebreaker prompts)
-      // 2. sectionPrompts in onboardingDraft (section prompts from Part-2)
-      const mainPrompts = (currentUser as any)?.profilePrompts ?? [];
-      const draft = (currentUser as any)?.onboardingDraft;
-      const sectionPrompts = draft?.profileDetails?.sectionPrompts;
+      // Load prompts into section-based format
+      const existingPrompts = (currentUser as any)?.profilePrompts ?? [];
+      const newSectionAnswers: Record<SectionKey, SectionPromptEntry | null> = {
+        builder: null,
+        performer: null,
+        seeker: null,
+        grounded: null,
+      };
 
-      // Flatten section prompts into array
-      const flatSectionPrompts: { question: string; answer: string }[] = [];
-      if (sectionPrompts) {
-        ['builder', 'performer', 'seeker', 'grounded'].forEach((section) => {
-          const sectionArr = sectionPrompts[section];
-          if (Array.isArray(sectionArr)) {
-            sectionArr.forEach((p: { question: string; answer: string }) => {
-              if (p.question && p.answer?.trim()) {
-                flatSectionPrompts.push(p);
-              }
-            });
+      // Reconstruct section answers from existing prompts by matching question text
+      existingPrompts.forEach((prompt: { question: string; answer: string; section?: SectionKey }) => {
+        // If prompt has section field, use it directly
+        if (prompt.section && PROMPT_SECTIONS.find(s => s.key === prompt.section)) {
+          newSectionAnswers[prompt.section] = {
+            section: prompt.section,
+            question: prompt.question,
+            answer: prompt.answer,
+          };
+          return;
+        }
+
+        // Otherwise, find the section by matching question text
+        for (const section of PROMPT_SECTIONS) {
+          const matchingQuestion = section.questions.find(q => q.text === prompt.question);
+          if (matchingQuestion && !newSectionAnswers[section.key]) {
+            newSectionAnswers[section.key] = {
+              section: section.key,
+              question: prompt.question,
+              answer: prompt.answer,
+            };
+            break;
           }
-        });
-      }
-
-      // Combine: main prompts first, then section prompts (dedupe by question)
-      const seenQuestions = new Set<string>();
-      const allPrompts: { question: string; answer: string }[] = [];
-      [...mainPrompts, ...flatSectionPrompts].forEach((p) => {
-        if (p.question && !seenQuestions.has(p.question)) {
-          seenQuestions.add(p.question);
-          allPrompts.push(p);
         }
       });
-      setPrompts(allPrompts);
+
+      setSectionAnswers(newSectionAnswers);
 
       if (__DEV__) {
-        console.log('[EditProfile] Loaded prompts:', {
-          mainCount: mainPrompts.length,
-          sectionCount: flatSectionPrompts.length,
-          totalCount: allPrompts.length,
-        });
-      }
-
-      // MIGRATION: Auto-migrate old sectionPrompts to profilePrompts
-      // Condition: profilePrompts is empty/undefined BUT sectionPrompts exists
-      // This preserves old user data in the new unified format
-      const needsMigration =
-        mainPrompts.length === 0 &&
-        flatSectionPrompts.length > 0 &&
-        !hasMigratedPromptsRef.current;
-
-      if (needsMigration && !isDemoMode) {
-        hasMigratedPromptsRef.current = true;
-
-        // Limit to PROFILE_PROMPTS_MAX (5) prompts
-        const migratedPrompts = flatSectionPrompts
-          .filter((p) => p.answer.trim().length >= 20) // Must meet min length
-          .slice(0, PROFILE_PROMPTS_MAX)
-          .map((p) => ({
-            question: p.question,
-            answer: p.answer.trim().slice(0, 200), // Max 200 chars
-          }));
-
-        if (migratedPrompts.length > 0) {
-          // Get session token for secure save
-          const sessionToken = useAuthStore.getState().token;
-          if (sessionToken) {
-            updateProfilePrompts({ token: sessionToken, prompts: migratedPrompts })
-              .then(() => {
-                console.log('[PROMPTS MIGRATED]', {
-                  count: migratedPrompts.length,
-                  source: 'sectionPrompts',
-                  destination: 'user.profilePrompts',
-                });
-              })
-              .catch((err) => {
-                console.error('[PROMPTS MIGRATION FAILED]', err);
-              });
-          }
-        }
+        const filledCount = Object.values(newSectionAnswers).filter(Boolean).length;
+        console.log('[EditProfile] Loaded section prompts:', filledCount);
       }
 
       setHeight(currentUser.height?.toString() || '');
@@ -334,7 +318,7 @@ export default function EditProfileScreen() {
       setInsect(currentUser.insect || null);
 
       // Load Life Rhythm from onboardingDraft
-      const lifeRhythm = draft?.lifeRhythm;
+      const lifeRhythm = currentUser?.onboardingDraft?.lifeRhythm;
       if (lifeRhythm) {
         setLifeRhythmCity(lifeRhythm.city || '');
         setSocialRhythm(lifeRhythm.socialRhythm || null);
@@ -646,27 +630,39 @@ export default function EditProfileScreen() {
     );
   };
 
-  const filledPrompts = prompts.filter((p) => p.answer.trim().length > 0);
+  // Section-based prompts: computed values
+  const filledPrompts = Object.values(sectionAnswers)
+    .filter((entry): entry is SectionPromptEntry => entry !== null && entry.answer.trim().length >= PROMPT_ANSWER_MIN_LENGTH)
+    .map((entry) => ({ question: entry.question, answer: entry.answer }));
 
-  const handleDeletePrompt = (index: number) => setPrompts(prompts.filter((_, i) => i !== index));
-  const handleUpdatePromptAnswer = (index: number, answer: string) => {
-    const updated = [...prompts];
-    updated[index] = { ...updated[index], answer };
-    setPrompts(updated);
-  };
-  const handleAddPrompt = (questionText: string) => {
-    // Enforce max limit
-    if (prompts.length >= PROFILE_PROMPTS_MAX) {
-      Alert.alert('Limit Reached', `You can add up to ${PROFILE_PROMPTS_MAX} prompts.`);
-      return;
-    }
-    setPrompts([...prompts, { question: questionText, answer: '' }]);
-    setShowPromptPicker(false);
-  };
+  const filledSectionCount = filledPrompts.length;
+  const allSectionsFilled = filledSectionCount === TOTAL_SECTIONS;
 
-  const usedQuestions = prompts.map((p) => p.question);
-  const availableQuestions = PROFILE_PROMPT_QUESTIONS.filter((q) => !usedQuestions.includes(q.text));
-  const canAddMorePrompts = prompts.length < PROFILE_PROMPTS_MAX && availableQuestions.length > 0;
+  // Section-based handlers
+  const handleSelectQuestion = useCallback((sectionKey: SectionKey, questionText: string) => {
+    setSectionAnswers((prev) => ({
+      ...prev,
+      [sectionKey]: {
+        section: sectionKey,
+        question: questionText,
+        answer: prev[sectionKey]?.question === questionText ? (prev[sectionKey]?.answer || '') : '',
+      },
+    }));
+    setActivePromptSection(sectionKey);
+  }, []);
+
+  const handleUpdateSectionAnswer = useCallback((sectionKey: SectionKey, answer: string) => {
+    setSectionAnswers((prev) => ({
+      ...prev,
+      [sectionKey]: prev[sectionKey]
+        ? { ...prev[sectionKey]!, answer }
+        : null,
+    }));
+  }, []);
+
+  const togglePromptSection = useCallback((sectionKey: SectionKey) => {
+    setActivePromptSection((prev) => (prev === sectionKey ? null : sectionKey));
+  }, []);
 
   const handleBlurToggle = (newValue: boolean) => {
     if (newValue) {
@@ -717,8 +713,8 @@ export default function EditProfileScreen() {
   };
 
   const handleSave = async () => {
-    if (filledPrompts.length === 0) {
-      Alert.alert('Prompts Required', 'Add at least one prompt to your profile.');
+    if (!allSectionsFilled) {
+      Alert.alert('Prompts Required', `Complete all ${TOTAL_SECTIONS} prompt sections to continue.`);
       return;
     }
     if (validPhotoCount === 0) {
@@ -1101,22 +1097,25 @@ export default function EditProfileScreen() {
         <Text style={styles.charCount}>{bio.length}/500</Text>
       </View>
 
-      {/* PROMPTS SECTION - Review Style */}
+      {/* PROMPTS SECTION - Section-Based */}
       <View style={styles.section}>
         <TouchableOpacity style={styles.reviewHeader} onPress={() => toggleSection('prompts')} activeOpacity={0.7}>
           <View style={styles.reviewHeaderLeft}>
             <Text style={styles.reviewSectionTitle}>Prompts</Text>
             <Text style={styles.reviewSummary}>
-              {filledPrompts.length > 0
-                ? `${filledPrompts.length} prompt${filledPrompts.length > 1 ? 's' : ''}`
+              {filledSectionCount > 0
+                ? `${filledSectionCount} of ${TOTAL_SECTIONS} sections`
                 : 'Add prompts'}
             </Text>
           </View>
-          <Ionicons
-            name={expandedSection === 'prompts' ? 'chevron-up' : 'chevron-down'}
-            size={22}
-            color={COLORS.textMuted}
-          />
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+            {allSectionsFilled && <Ionicons name="checkmark-circle" size={18} color={COLORS.success} />}
+            <Ionicons
+              name={expandedSection === 'prompts' ? 'chevron-up' : 'chevron-down'}
+              size={22}
+              color={COLORS.textMuted}
+            />
+          </View>
         </TouchableOpacity>
 
         {/* Collapsed: Show prompt previews */}
@@ -1134,56 +1133,100 @@ export default function EditProfileScreen() {
           </View>
         )}
 
-        {/* Expanded: Full edit UI */}
+        {/* Expanded: Section-based edit UI (Section 1-4 accordion style) */}
         {expandedSection === 'prompts' && (
           <View style={styles.expandedContent}>
-            {prompts.map((prompt, index) => (
-              <View key={index} style={styles.promptCard}>
-                <View style={styles.promptHeader}>
-                  <Text style={styles.promptQuestion}>{prompt.question}</Text>
-                  <TouchableOpacity onPress={() => handleDeletePrompt(index)}>
-                    <Ionicons name="close-circle" size={22} color={COLORS.textMuted} />
+            <Text style={styles.promptSectionHint}>Choose 1 question from each section:</Text>
+            {PROMPT_SECTIONS.map((section) => {
+              const currentAnswer = sectionAnswers[section.key];
+              const isExpanded = activePromptSection === section.key;
+              const hasValidAnswer = currentAnswer && currentAnswer.answer.trim().length >= PROMPT_ANSWER_MIN_LENGTH;
+
+              return (
+                <View key={section.key} style={styles.promptSectionContainer}>
+                  {/* Section Header - simple accordion style */}
+                  <TouchableOpacity
+                    style={[styles.promptSectionHeader, hasValidAnswer && styles.promptSectionHeaderComplete]}
+                    onPress={() => togglePromptSection(section.key)}
+                    activeOpacity={0.7}
+                  >
+                    <View style={styles.promptSectionHeaderLeft}>
+                      <Text style={styles.promptSectionTitle}>{section.label}</Text>
+                      {hasValidAnswer && <Ionicons name="checkmark-circle" size={16} color={COLORS.success} style={{ marginLeft: 8 }} />}
+                    </View>
+                    <Ionicons name={isExpanded ? 'chevron-up' : 'chevron-down'} size={18} color={COLORS.textMuted} />
                   </TouchableOpacity>
+
+                  {/* Section Content (expanded) */}
+                  {isExpanded && (
+                    <View style={styles.promptSectionContent}>
+                      {section.questions.map((question) => {
+                        const isSelected = currentAnswer?.question === question.text;
+                        return (
+                          <View key={question.id}>
+                            <TouchableOpacity
+                              style={[styles.promptQuestionOption, isSelected && styles.promptQuestionSelected]}
+                              onPress={() => handleSelectQuestion(section.key, question.text)}
+                              activeOpacity={0.7}
+                            >
+                              <Ionicons
+                                name={isSelected ? 'radio-button-on' : 'radio-button-off'}
+                                size={18}
+                                color={isSelected ? COLORS.primary : COLORS.textMuted}
+                              />
+                              <Text style={[styles.promptQuestionText, isSelected && styles.promptQuestionTextSelected]}>
+                                {question.text}
+                              </Text>
+                            </TouchableOpacity>
+                            {isSelected && (
+                              <View style={styles.promptAnswerBox}>
+                                <TextInput
+                                  style={styles.promptAnswerInput}
+                                  value={currentAnswer?.answer || ''}
+                                  onChangeText={(t) => handleUpdateSectionAnswer(section.key, t)}
+                                  placeholder="Type your answer..."
+                                  placeholderTextColor={COLORS.textMuted}
+                                  multiline
+                                  maxLength={PROMPT_ANSWER_MAX_LENGTH}
+                                  textAlignVertical="top"
+                                />
+                                <View style={styles.promptAnswerFooter}>
+                                  {currentAnswer?.answer && currentAnswer.answer.trim().length > 0 &&
+                                    currentAnswer.answer.trim().length < PROMPT_ANSWER_MIN_LENGTH && (
+                                    <Text style={styles.promptMinCharWarn}>
+                                      {PROMPT_ANSWER_MIN_LENGTH - currentAnswer.answer.trim().length} more chars
+                                    </Text>
+                                  )}
+                                  <Text style={styles.promptCharCount}>
+                                    {currentAnswer?.answer?.length || 0}/{PROMPT_ANSWER_MAX_LENGTH}
+                                  </Text>
+                                </View>
+                              </View>
+                            )}
+                          </View>
+                        );
+                      })}
+                    </View>
+                  )}
+
+                  {/* Collapsed preview */}
+                  {!isExpanded && currentAnswer && (
+                    <View style={styles.promptCollapsedPreview}>
+                      <Text style={styles.promptCollapsedQuestion} numberOfLines={1}>{currentAnswer.question}</Text>
+                      {currentAnswer.answer && (
+                        <Text style={styles.promptCollapsedAnswer} numberOfLines={1}>{currentAnswer.answer}</Text>
+                      )}
+                    </View>
+                  )}
                 </View>
-                <TextInput
-                  style={styles.promptAnswerInput}
-                  value={prompt.answer}
-                  onChangeText={(t) => handleUpdatePromptAnswer(index, t)}
-                  placeholder="Type your answer..."
-                  placeholderTextColor={COLORS.textMuted}
-                  multiline
-                  maxLength={200}
-                />
-                <Text style={styles.promptCharCount}>{prompt.answer.length}/200</Text>
-              </View>
-            ))}
-            {canAddMorePrompts && !showPromptPicker && (
-              <TouchableOpacity style={styles.addPromptButton} onPress={() => setShowPromptPicker(true)}>
-                <Ionicons name="add-circle-outline" size={20} color={COLORS.primary} />
-                <Text style={styles.addPromptText}>Add a prompt ({prompts.length}/{PROFILE_PROMPTS_MAX})</Text>
-              </TouchableOpacity>
-            )}
-            {prompts.length >= PROFILE_PROMPTS_MAX && !showPromptPicker && (
-              <View style={styles.promptLimitReached}>
-                <Ionicons name="checkmark-circle" size={18} color={COLORS.success} />
-                <Text style={styles.promptLimitText}>Maximum {PROFILE_PROMPTS_MAX} prompts reached</Text>
-              </View>
-            )}
-            {showPromptPicker && (
-              <View style={styles.promptPickerContainer}>
-                {availableQuestions.length > 0 ? (
-                  availableQuestions.map((q) => (
-                    <TouchableOpacity key={q.id} style={styles.promptPickerOption} onPress={() => handleAddPrompt(q.text)}>
-                      <Text style={styles.promptPickerOptionText}>{q.text}</Text>
-                      <Ionicons name="chevron-forward" size={16} color={COLORS.textMuted} />
-                    </TouchableOpacity>
-                  ))
-                ) : (
-                  <Text style={styles.noPromptsAvailable}>No more prompts available</Text>
-                )}
-                <TouchableOpacity style={styles.promptPickerCancel} onPress={() => setShowPromptPicker(false)}>
-                  <Text style={styles.promptPickerCancelText}>Cancel</Text>
-                </TouchableOpacity>
+              );
+            })}
+            {!allSectionsFilled && (
+              <View style={styles.promptValidationHint}>
+                <Ionicons name="information-circle" size={16} color={COLORS.warning} />
+                <Text style={styles.promptValidationText}>
+                  Complete all {TOTAL_SECTIONS} sections ({PROMPT_ANSWER_MIN_LENGTH}+ chars each)
+                </Text>
               </View>
             )}
           </View>
@@ -1864,37 +1907,28 @@ const styles = StyleSheet.create({
   selectOptionSelected: { backgroundColor: COLORS.primary + '20', borderColor: COLORS.primary },
   selectOptionText: { fontSize: 14, color: COLORS.text },
   selectOptionTextSelected: { color: COLORS.primary, fontWeight: '600' },
-  promptCard: { backgroundColor: COLORS.backgroundDark, borderRadius: 12, padding: 14, marginBottom: 12, borderLeftWidth: 3, borderLeftColor: COLORS.primary },
-  promptHeader: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 },
-  promptQuestion: { fontSize: 13, fontWeight: '600', color: COLORS.textLight, flex: 1, marginRight: 8 },
-  promptAnswerInput: { fontSize: 15, color: COLORS.text, minHeight: 48, textAlignVertical: 'top', lineHeight: 20 },
-  promptCharCount: { fontSize: 11, color: COLORS.textMuted, textAlign: 'right' },
-  addPromptButton: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', paddingVertical: 12, borderRadius: 12, borderWidth: 1, borderColor: COLORS.primary + '40', borderStyle: 'dashed', gap: 6 },
-  addPromptText: { fontSize: 14, fontWeight: '600', color: COLORS.primary },
-  promptPickerContainer: { backgroundColor: COLORS.backgroundDark, borderRadius: 12, padding: 12 },
-  promptPickerOption: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', paddingVertical: 11, borderBottomWidth: 1, borderBottomColor: COLORS.border },
-  promptPickerOptionText: { fontSize: 14, color: COLORS.text, flex: 1 },
-  promptPickerCancel: { alignItems: 'center', paddingTop: 10 },
-  promptPickerCancelText: { fontSize: 13, color: COLORS.textMuted },
-  promptLimitReached: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingVertical: 12,
-    gap: 6,
-  },
-  promptLimitText: {
-    fontSize: 13,
-    color: COLORS.success,
-    fontWeight: '500',
-  },
-  noPromptsAvailable: {
-    fontSize: 14,
-    color: COLORS.textMuted,
-    textAlign: 'center',
-    paddingVertical: 16,
-    fontStyle: 'italic',
-  },
+  // Section-based prompt styles
+  promptSectionHint: { fontSize: 13, color: COLORS.textLight, marginBottom: 12, fontWeight: '500' },
+  promptSectionContainer: { marginBottom: 12, borderRadius: 10, backgroundColor: COLORS.backgroundDark, borderWidth: 1, borderColor: COLORS.border, overflow: 'hidden' },
+  promptSectionHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingVertical: 14, paddingHorizontal: 14 },
+  promptSectionHeaderComplete: { borderLeftWidth: 3, borderLeftColor: COLORS.success },
+  promptSectionHeaderLeft: { flexDirection: 'row', alignItems: 'center', flex: 1 },
+  promptSectionTitle: { fontSize: 14, fontWeight: '600', color: COLORS.text },
+  promptSectionContent: { paddingHorizontal: 12, paddingBottom: 12, borderTopWidth: 1, borderTopColor: COLORS.border },
+  promptQuestionOption: { flexDirection: 'row', alignItems: 'flex-start', paddingVertical: 8, paddingHorizontal: 6, borderRadius: 6, marginTop: 8, gap: 8 },
+  promptQuestionSelected: { backgroundColor: COLORS.primary + '15' },
+  promptQuestionText: { fontSize: 13, color: COLORS.text, flex: 1, lineHeight: 18 },
+  promptQuestionTextSelected: { fontWeight: '500', color: COLORS.primary },
+  promptAnswerBox: { marginLeft: 26, marginTop: 6, marginBottom: 6, backgroundColor: COLORS.background, borderRadius: 8, padding: 10, borderWidth: 1, borderColor: COLORS.primary },
+  promptAnswerInput: { fontSize: 14, color: COLORS.text, minHeight: 50, maxHeight: 100, lineHeight: 18, padding: 0 },
+  promptAnswerFooter: { flexDirection: 'row', justifyContent: 'space-between', alignItems: 'center', marginTop: 6 },
+  promptMinCharWarn: { fontSize: 11, color: COLORS.warning, fontWeight: '500' },
+  promptCharCount: { fontSize: 10, color: COLORS.textMuted },
+  promptCollapsedPreview: { paddingHorizontal: 12, paddingBottom: 10, marginLeft: 42 },
+  promptCollapsedQuestion: { fontSize: 12, color: COLORS.textLight, fontWeight: '500' },
+  promptCollapsedAnswer: { fontSize: 12, color: COLORS.textMuted, marginTop: 2 },
+  promptValidationHint: { flexDirection: 'row', alignItems: 'center', backgroundColor: COLORS.warning + '15', padding: 10, borderRadius: 8, marginTop: 4, gap: 6 },
+  promptValidationText: { fontSize: 12, color: COLORS.warning, flex: 1 },
   // FIX 1: Footer with better spacing
   footer: { padding: 16, paddingTop: 24, marginTop: 8 },
   blurRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },

@@ -472,10 +472,10 @@ export const useOnboardingStore = create<OnboardingState>()((set, get) => ({
 
           if (existingIndex >= 0) {
             // Update existing answer
-            currentSection[existingIndex] = { question: questionText, answer };
+            currentSection[existingIndex] = { section, question: questionText, answer };
           } else {
             // Add new answer
-            currentSection.push({ question: questionText, answer });
+            currentSection.push({ section, question: questionText, answer });
           }
 
           return {
@@ -490,7 +490,7 @@ export const useOnboardingStore = create<OnboardingState>()((set, get) => ({
         set((state) => ({
           sectionPrompts: {
             ...state.sectionPrompts,
-            [section]: state.sectionPrompts[section].filter((p) => p.question !== questionText),
+            [section]: state.sectionPrompts[section].filter((p: SectionPromptAnswer) => p.question !== questionText),
           },
         })),
 
