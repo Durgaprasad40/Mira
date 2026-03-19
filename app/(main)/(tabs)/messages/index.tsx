@@ -127,6 +127,9 @@ export default function MessagesScreen() {
   // Stability fix: track scroll timeout for cleanup on unmount/blur
   const scrollTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
+  // FOCUS-GUARD: Prevent repeated markLikesOpened calls on tab focus
+  const hasMarkedLikesOpenedRef = useRef(false);
+
   // Track if we arrived from notification to prevent bounce-back
   const arrivedFromNotification = source === 'notification';
 
@@ -152,8 +155,12 @@ export default function MessagesScreen() {
       if (focus === 'likes') {
         setActiveView('likes');
         // LIFECYCLE: Mark likes as opened when arriving via deep link
-        if (!isDemoMode && token) {
+        // FOCUS-GUARD: Only call once per session to avoid repeated API calls
+        if (!isDemoMode && token && !hasMarkedLikesOpenedRef.current) {
+          hasMarkedLikesOpenedRef.current = true;
           markLikesOpened({ token }).catch((err) => {
+            // Reset guard on failure so retry is possible
+            hasMarkedLikesOpenedRef.current = false;
             log.warn('[MESSAGES]', 'markLikesOpened (deeplink) failed', { error: err });
           });
         }

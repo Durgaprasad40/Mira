@@ -6,6 +6,7 @@ import {
   TouchableOpacity,
   Image,
   Animated,
+  InteractionManager,
 } from "react-native";
 import { useRouter, useLocalSearchParams } from "expo-router";
 import { LinearGradient } from "expo-linear-gradient";
@@ -238,20 +239,20 @@ export default function MatchCelebrationScreen() {
       }
       hasNavigatedRef.current = true;
 
-      // Dismiss the celebration modal, push Messages list first, then chat.
+      // NAV-RACE-FIX: Use InteractionManager for safer navigation sequencing
       // Stack becomes: Messages list → Chat, so router.back() from chat
       // returns to the Messages list instead of Discover.
       router.dismiss();
-      const t1 = setTimeout(() => {
+      InteractionManager.runAfterInteractions(() => {
         if (!mountedRef.current) return;
         router.push("/(main)/(tabs)/messages" as any);
-        const t2 = setTimeout(() => {
+        // Single short delay after messages tab push is sufficient
+        const t = setTimeout(() => {
           if (!mountedRef.current) return;
           router.push(`/(main)/(tabs)/messages/chat/${demoConversationId}?source=match` as any);
-        }, 0);
-        navTimeoutRefs.current.push(t2);
-      }, 0);
-      navTimeoutRefs.current.push(t1);
+        }, 50);
+        navTimeoutRefs.current.push(t);
+      });
       sendingRef.current = false;
       return;
     }
@@ -296,17 +297,18 @@ export default function MatchCelebrationScreen() {
 
       const target = `/(main)/(tabs)/messages/chat/${conversationIdFinal}?source=match`;
       if (__DEV__) console.log("[SayHi] navigating to", target);
+      // NAV-RACE-FIX: Use InteractionManager for safer navigation sequencing
       router.dismiss();
-      const t1 = setTimeout(() => {
+      InteractionManager.runAfterInteractions(() => {
         if (!mountedRef.current) return;
         router.push("/(main)/(tabs)/messages" as any);
-        const t2 = setTimeout(() => {
+        // Single short delay after messages tab push is sufficient
+        const t = setTimeout(() => {
           if (!mountedRef.current) return;
           router.push(target as any);
-        }, 0);
-        navTimeoutRefs.current.push(t2);
-      }, 0);
-      navTimeoutRefs.current.push(t1);
+        }, 50);
+        navTimeoutRefs.current.push(t);
+      });
     } catch (error: any) {
       if (__DEV__) console.error("[SayHi] error", error);
       Toast.show("Couldn\u2019t start chat. Please try again.");

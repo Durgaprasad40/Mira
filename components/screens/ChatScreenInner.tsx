@@ -411,8 +411,13 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
         if (isDemo && conversationId) {
           markDemoRead(conversationId, getDemoUserId());
         } else if (!isDemo && conversationId && userId) {
-          // Mark new messages as read immediately since user is viewing
-          markAsRead({ conversationId: conversationId as any, authUserId: userId });
+          // UNREAD-FIX: Mark new messages as read immediately since user is viewing
+          // Add error handling to prevent silent failures that leave stale badges
+          markAsRead({ conversationId: conversationId as any, authUserId: userId })
+            .catch((err) => {
+              // Log but don't crash - badge may be stale but user can refresh
+              if (__DEV__) console.warn('[ChatScreen] markAsRead failed:', err);
+            });
         }
       }
     }
