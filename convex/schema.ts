@@ -609,11 +609,14 @@ export default defineSchema({
   messages: defineTable({
     conversationId: v.id('conversations'),
     senderId: v.id('users'),
-    type: v.union(v.literal('text'), v.literal('image'), v.literal('video'), v.literal('template'), v.literal('dare'), v.literal('system')),
+    type: v.union(v.literal('text'), v.literal('image'), v.literal('video'), v.literal('template'), v.literal('dare'), v.literal('system'), v.literal('voice')),
     content: v.string(),
     imageStorageId: v.optional(v.id('_storage')),
     mediaId: v.optional(v.id('media')),
     templateId: v.optional(v.string()),
+    // Voice message fields
+    audioStorageId: v.optional(v.id('_storage')),
+    audioDurationMs: v.optional(v.number()),
     systemSubtype: v.optional(v.union(
       v.literal('screenshot_taken'),
       v.literal('screenshot_attempted'),
@@ -644,6 +647,12 @@ export default defineSchema({
     viewOnce: v.boolean(),
     watermarkEnabled: v.boolean(),
     deletedAt: v.optional(v.number()),
+    // EXPIRY-SYNC-FIX: Track global expiry for both sender and receiver
+    expiredAt: v.optional(v.number()),
+    // HOLD-TAP-FIX: Store the viewing mode (tap-to-view vs hold-to-view)
+    viewMode: v.optional(v.union(v.literal('tap'), v.literal('hold'))),
+    // VIDEO-MIRROR-FIX: Store mirrored flag for front-camera videos
+    isMirrored: v.optional(v.boolean()),
   })
     .index('by_chat', ['chatId'])
     .index('by_owner', ['ownerId']),

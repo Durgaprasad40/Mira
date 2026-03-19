@@ -1,9 +1,10 @@
 import React, { useState, useRef, useEffect } from 'react';
 import {
-  View, Text, StyleSheet, TouchableOpacity, Alert, ActivityIndicator,
+  View, Text, StyleSheet, TouchableOpacity, Alert,
 } from 'react-native';
 import { CameraView, useCameraPermissions } from 'expo-camera';
-import * as ImagePicker from 'expo-image-picker';
+import { Video, ResizeMode } from 'expo-av';
+import * as ImageManipulator from 'expo-image-manipulator';
 import { Paths, File as ExpoFile, Directory } from 'expo-file-system';
 import { Image } from 'expo-image';
 import { useRouter, useLocalSearchParams } from 'expo-router';
@@ -24,65 +25,78 @@ export default function CameraComposerScreen() {
     mode?: string;
     promptId?: string;
     promptType?: string;
-    todConversationId?: string; // For in-chat T&D answers
-    conversationId?: string; // For secure capture in private DMs
+    todConversationId?: string;
+    conversationId?: string;
   }>();
 
-  // Check if this is an in-chat T&D answer (mandatory game)
   const isTodAnswer = params.mode === 'tod_answer' && params.todConversationId;
-  // Check if this is secure capture mode from private DM
   const isSecureCapture = params.mode === 'secure_capture' && params.conversationId;
-  // Use 30s limit for secure capture, 60s for T&D
   const MAX_VIDEO_SEC = isSecureCapture ? MAX_VIDEO_SEC_SECURE : MAX_VIDEO_SEC_TOD;
 
-  // Support both: explicit mode from old callers, or switchable mode (default)
   const [captureMode, setCaptureMode] = useState<'photo' | 'video'>(
     params.mode === 'video' ? 'video' : 'photo'
   );
 
   const [permission, requestPermission] = useCameraPermissions();
-  const [tab, setTab] = useState<'camera' | 'gallery'>('camera');
   const [facing, setFacing] = useState<'front' | 'back'>('front');
+
+  // Recording state
   const [isRecordingVideo, setIsRecordingVideo] = useState(false);
   const [videoSeconds, setVideoSeconds] = useState(0);
+
+  // Captured media state
   const [capturedUri, setCapturedUri] = useState<string | null>(null);
-  const [capturedType, setCapturedType] = useState<'photo' | 'video'>('photo');
-  const [capturedFacing, setCapturedFacing] = useState<'front' | 'back'>('front'); // Track camera used at capture
+  const [capturedType, setCapturedType] = useState<'photo' | 'video' | null>(null);
+  const [capturedFacing, setCapturedFacing] = useState<'front' | 'back'>('front');
+
   const [isCapturing, setIsCapturing] = useState(false);
   const [mediaVisibility, setMediaVisibility] = useState<TodMediaVisibility>('owner_only');
+
   const cameraRef = useRef<CameraView>(null);
   const videoTimerRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
+  // Cleanup timer on unmount
   useEffect(() => {
     return () => {
       if (videoTimerRef.current) clearInterval(videoTimerRef.current);
     };
   }, []);
 
+  // PHOTO: Clean flow
   const handleTakePhoto = async () => {
     if (!cameraRef.current || isCapturing) return;
     setIsCapturing(true);
+
     try {
-      // Don't use mirror prop here - we'll fix at render time for reliability
-      const photo = await cameraRef.current.takePictureAsync({ quality: 0.8 });
+      const photo = await cameraRef.current.takePictureAsync({
+        quality: 0.8,
+        shutterSound: false
+      });
+
       if (photo?.uri) {
+        // Set state immediately - go to preview
         setCapturedUri(photo.uri);
         setCapturedType('photo');
-        setCapturedFacing(facing); // Track which camera was used
+        setCapturedFacing(facing);
       }
-    } catch {
+    } catch (e) {
       Alert.alert('Error', 'Failed to take photo');
     } finally {
       setIsCapturing(false);
     }
   };
 
+  // VIDEO: Start recording
   const handleStartVideo = async () => {
     if (!cameraRef.current || isRecordingVideo) return;
+
+    // Set state BEFORE recording
     setIsRecordingVideo(true);
+    setCapturedType('video');
+    setCapturedFacing(facing);
     setVideoSeconds(0);
-    // Track which camera we're recording with BEFORE starting
-    const recordingFacing = facing;
+
+    // Start timer
     videoTimerRef.current = setInterval(() => {
       setVideoSeconds((s) => {
         if (s >= MAX_VIDEO_SEC - 1) {
@@ -92,73 +106,78 @@ export default function CameraComposerScreen() {
         return s + 1;
       });
     }, 1000);
+
     try {
-      // Don't use mirror prop here - we'll fix at render time for reliability
-      const video = await cameraRef.current.recordAsync({ maxDuration: MAX_VIDEO_SEC });
+      const video = await cameraRef.current.recordAsync({
+        maxDuration: MAX_VIDEO_SEC
+      });
+
+      // Recording finished - set URI and go to preview
       if (video?.uri) {
         setCapturedUri(video.uri);
-        setCapturedType('video');
-        setCapturedFacing(recordingFacing); // Track which camera was used
+        setIsRecordingVideo(false);
+        if (videoTimerRef.current) {
+          clearInterval(videoTimerRef.current);
+          videoTimerRef.current = null;
+        }
       }
-    } catch {
-      // Recording stopped
+    } catch (e) {
+      // Recording was stopped or failed
+      setIsRecordingVideo(false);
+      if (videoTimerRef.current) {
+        clearInterval(videoTimerRef.current);
+        videoTimerRef.current = null;
+      }
     }
   };
 
+  // VIDEO: Stop recording
   const handleStopVideo = () => {
+    if (!cameraRef.current) return;
+
     if (videoTimerRef.current) {
       clearInterval(videoTimerRef.current);
       videoTimerRef.current = null;
     }
-    setIsRecordingVideo(false);
-    cameraRef.current?.stopRecording();
+
+    // This triggers recordAsync to resolve
+    cameraRef.current.stopRecording();
   };
 
-  const handlePickFromGallery = async () => {
-    // Allow both photos and videos from gallery
-    try {
-      const result = await ImagePicker.launchImageLibraryAsync({
-        mediaTypes: ['images', 'videos'],
-        quality: 0.8,
-        videoMaxDuration: MAX_VIDEO_SEC,
-      });
-      if (!result.canceled && result.assets[0]) {
-        const asset = result.assets[0];
-        const isVideo = asset.type === 'video';
-        if (isVideo && asset.duration && asset.duration > MAX_VIDEO_SEC * 1000) {
-          Alert.alert('Too Long', `Video must be ${MAX_VIDEO_SEC} seconds or less.`);
-          return;
-        }
-        setCapturedUri(asset.uri);
-        setCapturedType(isVideo ? 'video' : 'photo');
-        setCapturedFacing('back'); // Gallery media is not from front camera
-        if (isVideo && asset.duration) {
-          setVideoSeconds(Math.round(asset.duration / 1000));
-        }
-      }
-    } catch {
-      // STABILITY: ImagePicker can fail on various devices
-      Alert.alert('Error', 'Could not open photo picker. Please try again.');
-    }
-  };
-
+  // SUBMIT: Send to chat
   const handleSubmit = async () => {
-    if (!capturedUri) return;
+    if (!capturedUri || !capturedType) return;
+
     try {
-      // Copy media to permanent document directory so URI survives navigation
       const dirName = isSecureCapture ? 'secure_media' : 'tod_media';
       const mediaDir = new Directory(Paths.document, dirName);
       if (!mediaDir.exists) {
         mediaDir.create();
       }
+
       const ext = capturedType === 'video' ? 'mp4' : 'jpg';
       const fileName = `${Date.now()}.${ext}`;
-      const sourceFile = new ExpoFile(capturedUri);
+
+      // MIRROR FIX: Flip front camera photos
+      let finalUri = capturedUri;
+      if (capturedType === 'photo' && capturedFacing === 'front') {
+        try {
+          const flipped = await ImageManipulator.manipulateAsync(
+            capturedUri,
+            [{ flip: ImageManipulator.FlipType.Horizontal }],
+            { compress: 0.9, format: ImageManipulator.SaveFormat.JPEG }
+          );
+          finalUri = flipped.uri;
+        } catch (flipErr) {
+          console.warn('[CameraComposer] Failed to flip image:', flipErr);
+        }
+      }
+
+      const sourceFile = new ExpoFile(finalUri);
       const destFile = new ExpoFile(mediaDir, fileName);
       sourceFile.copy(destFile);
       const permanentUri = destFile.uri;
 
-      // Determine storage key based on mode
       let storageKey: string;
       if (isSecureCapture) {
         storageKey = `secure_capture_media_${params.conversationId}`;
@@ -168,24 +187,26 @@ export default function CameraComposerScreen() {
         storageKey = 'tod_captured_media';
       }
 
-      // Store in memory for handoff to receiving screen (no persistence)
       setHandoff(storageKey, {
         uri: permanentUri,
         type: capturedType,
-        mediaUri: permanentUri, // Alias for ChatTodOverlay compatibility
+        mediaUri: permanentUri,
         promptId: params.promptId,
         durationSec: capturedType === 'video' ? videoSeconds : undefined,
         visibility: isSecureCapture ? undefined : mediaVisibility,
-        isMirrored: capturedFacing === 'front', // Front camera media needs render-time flip
+        isMirrored: capturedType === 'video' && capturedFacing === 'front',
       });
+
       router.back();
-    } catch {
+    } catch (e) {
       Alert.alert('Error', 'Failed to save media. Please try again.');
     }
   };
 
+  // RETAKE: Clear and go back to camera
   const handleRetake = () => {
     setCapturedUri(null);
+    setCapturedType(null);
     setVideoSeconds(0);
   };
 
@@ -209,27 +230,43 @@ export default function CameraComposerScreen() {
     );
   }
 
-  // Preview captured media
-  if (capturedUri) {
+  // PREVIEW SCREEN
+  if (capturedUri && capturedType) {
+    const isFrontCamera = capturedFacing === 'front';
+    const isVideo = capturedType === 'video';
+
     return (
       <View style={[styles.container, { paddingTop: insets.top }]}>
         <View style={styles.previewHeader}>
           <TouchableOpacity onPress={handleRetake}>
             <Ionicons name="arrow-back" size={24} color={C.text} />
           </TouchableOpacity>
-          <Text style={styles.previewTitle}>Preview</Text>
+          <Text style={styles.previewTitle}>
+            {isVideo ? 'Video Preview' : 'Photo Preview'}
+          </Text>
           <View style={{ width: 24 }} />
         </View>
+
         <View style={styles.previewArea}>
-          <Image
-            source={{ uri: capturedUri }}
-            style={[
-              styles.previewImage,
-              capturedFacing === 'front' && { transform: [{ scaleX: -1 }] },
-            ]}
-            contentFit="contain"
-          />
-          {capturedType === 'video' && (
+          {isVideo ? (
+            // VIDEO-PREVIEW-FIX: Use expo-av Video with proper mirroring for front camera
+            <Video
+              source={{ uri: capturedUri }}
+              style={[styles.previewMedia, isFrontCamera && styles.mirrored]}
+              resizeMode={ResizeMode.CONTAIN}
+              shouldPlay={true}
+              isLooping={true}
+              isMuted={false}
+            />
+          ) : (
+            <Image
+              source={{ uri: capturedUri }}
+              style={[styles.previewMedia, isFrontCamera && styles.mirrored]}
+              contentFit="contain"
+            />
+          )}
+
+          {isVideo && (
             <View style={styles.videoDurationBadge}>
               <Ionicons name="videocam" size={14} color="#FFF" />
               <Text style={styles.videoDurationText}>{formatTime(videoSeconds)}</Text>
@@ -237,7 +274,7 @@ export default function CameraComposerScreen() {
           )}
         </View>
 
-        {/* Visibility selector - only for T&D, not secure capture */}
+        {/* Visibility selector - only for T&D */}
         {!isSecureCapture && (
           <View style={styles.visibilitySection}>
             <Text style={styles.visibilityLabel}>Who can view this?</Text>
@@ -282,6 +319,7 @@ export default function CameraComposerScreen() {
     );
   }
 
+  // CAMERA SCREEN
   return (
     <View style={[styles.container, { paddingTop: insets.top }]}>
       {/* Top bar */}
@@ -289,90 +327,78 @@ export default function CameraComposerScreen() {
         <TouchableOpacity onPress={() => router.back()}>
           <Ionicons name="close" size={26} color={C.text} />
         </TouchableOpacity>
-        <View style={styles.tabRow}>
-          <TouchableOpacity
-            style={[styles.tabBtn, tab === 'camera' && styles.tabBtnActive]}
-            onPress={() => setTab('camera')}
-          >
-            <Text style={[styles.tabText, tab === 'camera' && styles.tabTextActive]}>Camera</Text>
-          </TouchableOpacity>
-          <TouchableOpacity
-            style={[styles.tabBtn, tab === 'gallery' && styles.tabBtnActive]}
-            onPress={() => { setTab('gallery'); handlePickFromGallery(); }}
-          >
-            <Text style={[styles.tabText, tab === 'gallery' && styles.tabTextActive]}>Gallery</Text>
-          </TouchableOpacity>
-        </View>
+        <View style={{ width: 24 }} />
         <TouchableOpacity onPress={() => setFacing((f) => f === 'front' ? 'back' : 'front')}>
           <Ionicons name="camera-reverse-outline" size={24} color={C.text} />
         </TouchableOpacity>
       </View>
 
       {/* Camera */}
-      {tab === 'camera' && (
-        <View style={styles.cameraWrap}>
-          <CameraView
-            ref={cameraRef}
-            style={styles.camera}
-            facing={facing}
-            mode={captureMode === 'video' ? 'video' : 'picture'}
-          />
+      <View style={styles.cameraWrap}>
+        <CameraView
+          ref={cameraRef}
+          style={styles.camera}
+          facing={facing}
+          mode={captureMode === 'video' ? 'video' : 'picture'}
+        />
 
-          {captureMode === 'video' && isRecordingVideo && (
-            <View style={styles.videoTimerOverlay}>
-              <View style={styles.recordingDot} />
-              <Text style={styles.videoTimerText}>{formatTime(videoSeconds)} / {formatTime(MAX_VIDEO_SEC)}</Text>
-            </View>
-          )}
-        </View>
-      )}
-
-      {tab === 'gallery' && (
-        <View style={styles.galleryPlaceholder}>
-          <ActivityIndicator size="large" color={C.primary} />
-          <Text style={styles.galleryText}>Opening gallery...</Text>
-        </View>
-      )}
+        {captureMode === 'video' && isRecordingVideo && (
+          <View style={styles.videoTimerOverlay}>
+            <View style={styles.recordingDot} />
+            <Text style={styles.videoTimerText}>
+              {formatTime(videoSeconds)} / {formatTime(MAX_VIDEO_SEC)}
+            </Text>
+          </View>
+        )}
+      </View>
 
       {/* Bottom controls */}
-      {tab === 'camera' && (
-        <View style={styles.bottomBar}>
-          {/* Mode toggle: Photo / Video */}
+      <View style={styles.bottomBar}>
+        {/* Mode toggle - hide when recording */}
+        {!isRecordingVideo && (
           <View style={styles.modeToggleRow}>
             <TouchableOpacity
               style={[styles.modeToggleBtn, captureMode === 'photo' && styles.modeToggleActive]}
-              onPress={() => !isRecordingVideo && setCaptureMode('photo')}
+              onPress={() => setCaptureMode('photo')}
             >
-              <Text style={[styles.modeToggleText, captureMode === 'photo' && styles.modeToggleTextActive]}>PHOTO</Text>
+              <Text style={[styles.modeToggleText, captureMode === 'photo' && styles.modeToggleTextActive]}>
+                PHOTO
+              </Text>
             </TouchableOpacity>
             <TouchableOpacity
               style={[styles.modeToggleBtn, captureMode === 'video' && styles.modeToggleActive]}
-              onPress={() => !isRecordingVideo && setCaptureMode('video')}
+              onPress={() => setCaptureMode('video')}
             >
-              <Text style={[styles.modeToggleText, captureMode === 'video' && styles.modeToggleTextActive]}>VIDEO</Text>
+              <Text style={[styles.modeToggleText, captureMode === 'video' && styles.modeToggleTextActive]}>
+                VIDEO
+              </Text>
             </TouchableOpacity>
           </View>
+        )}
 
-          {/* Capture button */}
-          {captureMode === 'photo' ? (
-            <TouchableOpacity style={styles.captureBtn} onPress={handleTakePhoto} disabled={isCapturing}>
-              <View style={styles.captureInner} />
-            </TouchableOpacity>
-          ) : (
-            <>
-              {!isRecordingVideo ? (
-                <TouchableOpacity style={styles.videoCaptureBtn} onPress={handleStartVideo}>
-                  <View style={styles.videoCaptureInner} />
-                </TouchableOpacity>
-              ) : (
-                <TouchableOpacity style={styles.videoStopBtn} onPress={handleStopVideo}>
-                  <View style={styles.videoStopInner} />
-                </TouchableOpacity>
-              )}
-            </>
-          )}
-        </View>
-      )}
+        {/* Capture button */}
+        {captureMode === 'photo' ? (
+          <TouchableOpacity
+            style={styles.captureBtn}
+            onPress={handleTakePhoto}
+            disabled={isCapturing}
+          >
+            <View style={styles.captureInner} />
+          </TouchableOpacity>
+        ) : (
+          <>
+            {!isRecordingVideo ? (
+              <TouchableOpacity style={styles.videoCaptureBtn} onPress={handleStartVideo}>
+                <View style={styles.videoCaptureInner} />
+              </TouchableOpacity>
+            ) : (
+              <TouchableOpacity style={styles.videoStopBtn} onPress={handleStopVideo}>
+                <View style={styles.videoStopInner} />
+              </TouchableOpacity>
+            )}
+          </>
+        )}
+      </View>
     </View>
   );
 }
@@ -392,11 +418,6 @@ const styles = StyleSheet.create({
     flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
     paddingHorizontal: 16, paddingVertical: 8,
   },
-  tabRow: { flexDirection: 'row', gap: 4 },
-  tabBtn: { paddingHorizontal: 14, paddingVertical: 6, borderRadius: 14 },
-  tabBtnActive: { backgroundColor: C.primary },
-  tabText: { fontSize: 13, fontWeight: '600', color: C.textLight },
-  tabTextActive: { color: '#FFF' },
   // Camera
   cameraWrap: { flex: 1, overflow: 'hidden', borderRadius: 12, marginHorizontal: 8 },
   camera: { flex: 1 },
@@ -407,9 +428,6 @@ const styles = StyleSheet.create({
   },
   recordingDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: '#F44336' },
   videoTimerText: { fontSize: 13, fontWeight: '600', color: '#FFF' },
-  // Gallery placeholder
-  galleryPlaceholder: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 12 },
-  galleryText: { fontSize: 14, color: C.textLight },
   // Bottom
   bottomBar: { alignItems: 'center', paddingVertical: 16, gap: 12 },
   // Mode toggle
@@ -443,7 +461,8 @@ const styles = StyleSheet.create({
   },
   previewTitle: { fontSize: 17, fontWeight: '700', color: C.text },
   previewArea: { flex: 1, marginHorizontal: 8, borderRadius: 12, overflow: 'hidden' },
-  previewImage: { flex: 1 },
+  previewMedia: { flex: 1 },
+  mirrored: { transform: [{ scaleX: -1 }] },
   videoDurationBadge: {
     position: 'absolute', bottom: 12, right: 12,
     flexDirection: 'row', alignItems: 'center', gap: 4,

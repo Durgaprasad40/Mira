@@ -19,6 +19,12 @@ export const sendProtectedImage = mutation({
     screenshotAllowed: v.boolean(),
     viewOnce: v.boolean(),
     watermark: v.boolean(),
+    // HOLD-TAP-FIX: Accept viewMode from frontend
+    viewMode: v.optional(v.union(v.literal('tap'), v.literal('hold'))),
+    // VIDEO-FIX: Accept mediaType to distinguish photo vs video
+    mediaType: v.optional(v.union(v.literal('image'), v.literal('video'))),
+    // VIDEO-MIRROR-FIX: Accept isMirrored flag for front-camera videos
+    isMirrored: v.optional(v.boolean()),
   },
   handler: async (ctx, args) => {
     const {
@@ -29,6 +35,9 @@ export const sendProtectedImage = mutation({
       screenshotAllowed,
       viewOnce,
       watermark,
+      viewMode,
+      mediaType = 'image', // Default to image for backwards compatibility
+      isMirrored = false, // VIDEO-MIRROR-FIX: Default to false
     } = args;
     const now = Date.now();
 
@@ -50,24 +59,38 @@ export const sendProtectedImage = mutation({
     const sender = await ctx.db.get(senderId);
     if (!sender) throw new Error('Sender not found');
 
+    // MEDIA-BUG-001 FIX: Validate storage object exists before creating media
+    // This prevents "blank media" bugs caused by failed uploads returning stale storageIds
+    const storageUrl = await ctx.storage.getUrl(imageStorageId);
+    if (!storageUrl) {
+      throw new Error('Upload validation failed: storage object not found. Please try uploading again.');
+    }
+
     // Insert media row
+    // HOLD-TAP-FIX: Store viewMode for consistent rendering on both sides
+    // VIDEO-FIX: Use passed mediaType instead of hardcoded 'image'
+    // VIDEO-MIRROR-FIX: Store isMirrored for front-camera video correction
     const mediaId = await ctx.db.insert('media', {
       chatId: conversationId,
       ownerId: senderId,
       objectKey: imageStorageId,
-      mediaType: 'image',
+      mediaType,
       createdAt: now,
       timerSeconds: timer > 0 ? timer : undefined,
       viewOnce,
       watermarkEnabled: watermark,
+      viewMode: viewMode ?? 'tap', // Default to tap if not specified
+      isMirrored: mediaType === 'video' ? isMirrored : undefined, // Only store for videos
     });
 
     // Insert message row
+    // VIDEO-FIX: Use correct type and content based on mediaType
+    const isVideo = mediaType === 'video';
     const messageId = await ctx.db.insert('messages', {
       conversationId,
       senderId,
-      type: 'image',
-      content: 'Protected Photo',
+      type: isVideo ? 'video' : 'image',
+      content: isVideo ? 'Protected Video' : 'Protected Photo',
       mediaId,
       createdAt: now,
     });
@@ -96,7 +119,7 @@ export const sendProtectedImage = mutation({
         userId: recipientId,
         type: 'message',
         title: 'New Message',
-        body: `${sender.name} sent you a protected photo`,
+        body: `${sender.name} sent you a protected ${isVideo ? 'video' : 'photo'}`,
         data: { conversationId },
         createdAt: now,
       });
@@ -142,9 +165,59 @@ export const getMediaUrl = query({
     const media = await ctx.db.get(message.mediaId);
     if (!media) return null;
 
-    // Owner can always view
+    // EXPIRY-SYNC-FIX: Check global expiry first (applies to both owner and recipient)
+    if (media.expiredAt) {
+      return {
+        url: null,
+        isExpired: true,
+        allowScreenshot: false,
+        shouldBlur: true,
+        watermarkText: null,
+        mediaId: media._id,
+        timerSeconds: null,
+        expiresAt: null, // TIMER-FIX: Include deadline for consistency
+        viewOnce: media.viewOnce,
+        viewMode: media.viewMode ?? 'tap', // HOLD-TAP-FIX: Include viewMode
+        mediaType: media.mediaType ?? 'image', // VIDEO-FIX: Include mediaType for viewer
+        isMirrored: media.isMirrored ?? false, // VIDEO-MIRROR-FIX: Include mirrored flag
+      };
+    }
+
+    // Find permission first (needed for owner too to show timer)
+    const permission = await ctx.db
+      .query('mediaPermissions')
+      .withIndex('by_media_recipient', (q) =>
+        q.eq('mediaId', media._id).eq('recipientId', userId)
+      )
+      .first();
+
+    // Owner can view if not globally expired
     if (media.ownerId === userId) {
       const url = await ctx.storage.getUrl(media.objectKey);
+      // MEDIA-BUG-002 FIX: Handle null URL (storage object missing/deleted)
+      if (!url) {
+        return {
+          url: null,
+          isExpired: false,
+          allowScreenshot: true,
+          shouldBlur: false,
+          watermarkText: null,
+          mediaId: media._id,
+          timerSeconds: null,
+          expiresAt: null,
+          viewOnce: false,
+          viewMode: media.viewMode ?? 'tap',
+          mediaType: media.mediaType ?? 'image', // VIDEO-FIX: Include mediaType for viewer
+          isMirrored: media.isMirrored ?? false, // VIDEO-MIRROR-FIX: Include mirrored flag
+          error: 'storage_unavailable', // Indicates media could not be loaded
+        };
+      }
+      // TIMER-FIX: For owner, show the recipient's timer deadline if exists
+      // This ensures owner sees the same countdown as the recipient
+      const recipientPermission = await ctx.db
+        .query('mediaPermissions')
+        .withIndex('by_media_recipient', (q) => q.eq('mediaId', media._id))
+        .first();
       return {
         url,
         isExpired: false,
@@ -153,30 +226,26 @@ export const getMediaUrl = query({
         watermarkText: null,
         mediaId: media._id,
         timerSeconds: media.timerSeconds ?? null,
+        expiresAt: recipientPermission?.expiresAt ?? null, // TIMER-FIX: Owner sees recipient's deadline
         viewOnce: media.viewOnce,
+        viewMode: media.viewMode ?? 'tap', // HOLD-TAP-FIX: Include viewMode
+        mediaType: media.mediaType ?? 'image', // VIDEO-FIX: Include mediaType for viewer
+        isMirrored: media.isMirrored ?? false, // VIDEO-MIRROR-FIX: Include mirrored flag
       };
     }
 
-    // Find permission
-    const permission = await ctx.db
-      .query('mediaPermissions')
-      .withIndex('by_media_recipient', (q) =>
-        q.eq('mediaId', media._id).eq('recipientId', userId)
-      )
-      .first();
-
     if (!permission || permission.revoked || !permission.canView) {
-      return { url: null, isExpired: true, allowScreenshot: false, shouldBlur: true, watermarkText: null, mediaId: media._id, timerSeconds: null, viewOnce: false };
+      return { url: null, isExpired: true, allowScreenshot: false, shouldBlur: true, watermarkText: null, mediaId: media._id, timerSeconds: null, expiresAt: null, viewOnce: false, viewMode: media.viewMode ?? 'tap', mediaType: media.mediaType ?? 'image', isMirrored: media.isMirrored ?? false };
     }
 
     // Timer expired
     if (permission.expiresAt && now >= permission.expiresAt) {
-      return { url: null, isExpired: true, allowScreenshot: false, shouldBlur: true, watermarkText: null, mediaId: media._id, timerSeconds: null, viewOnce: false };
+      return { url: null, isExpired: true, allowScreenshot: false, shouldBlur: true, watermarkText: null, mediaId: media._id, timerSeconds: null, expiresAt: permission.expiresAt, viewOnce: false, viewMode: media.viewMode ?? 'tap', mediaType: media.mediaType ?? 'image', isMirrored: media.isMirrored ?? false };
     }
 
     // View-once consumed
     if (media.viewOnce && permission.viewCount >= 1) {
-      return { url: null, isExpired: true, allowScreenshot: false, shouldBlur: true, watermarkText: null, mediaId: media._id, timerSeconds: null, viewOnce: true };
+      return { url: null, isExpired: true, allowScreenshot: false, shouldBlur: true, watermarkText: null, mediaId: media._id, timerSeconds: null, expiresAt: null, viewOnce: true, viewMode: media.viewMode ?? 'tap', mediaType: media.mediaType ?? 'image', isMirrored: media.isMirrored ?? false };
     }
 
     const allowScreenshot = permission.canScreenshot &&
@@ -184,6 +253,25 @@ export const getMediaUrl = query({
     const shouldBlur = !allowScreenshot;
 
     const url = await ctx.storage.getUrl(media.objectKey);
+
+    // MEDIA-BUG-002 FIX: Handle null URL (storage object missing/deleted)
+    if (!url) {
+      return {
+        url: null,
+        isExpired: false,
+        allowScreenshot: false,
+        shouldBlur: true,
+        watermarkText: null,
+        mediaId: media._id,
+        timerSeconds: null,
+        expiresAt: null,
+        viewOnce: false,
+        viewMode: media.viewMode ?? 'tap',
+        mediaType: media.mediaType ?? 'image', // VIDEO-FIX: Include mediaType for viewer
+        isMirrored: media.isMirrored ?? false, // VIDEO-MIRROR-FIX: Include mirrored flag
+        error: 'storage_unavailable', // Indicates media could not be loaded
+      };
+    }
 
     // Build watermark
     const viewer = await ctx.db.get(userId);
@@ -199,7 +287,11 @@ export const getMediaUrl = query({
       watermarkText,
       mediaId: media._id,
       timerSeconds: media.timerSeconds ?? null,
+      expiresAt: permission.expiresAt ?? null, // TIMER-FIX: Include absolute deadline
       viewOnce: media.viewOnce,
+      viewMode: media.viewMode ?? 'tap', // HOLD-TAP-FIX: Include viewMode
+      mediaType: media.mediaType ?? 'image', // VIDEO-FIX: Include mediaType for viewer
+      isMirrored: media.isMirrored ?? false, // VIDEO-MIRROR-FIX: Include mirrored flag
     };
   },
 });
@@ -296,6 +388,12 @@ export const markExpired = mutation({
     const media = await ctx.db.get(message.mediaId);
     if (!media) return { success: true };
 
+    // EXPIRY-SYNC-FIX: Mark media itself as expired so BOTH sender and receiver see it
+    // This is the single source of truth for expiry status
+    if (!media.expiredAt) {
+      await ctx.db.patch(media._id, { expiredAt: now });
+    }
+
     // Revoke all permissions
     const permissions = await ctx.db
       .query('mediaPermissions')
@@ -317,15 +415,8 @@ export const markExpired = mutation({
       createdAt: now,
     });
 
-    // System message
-    await ctx.db.insert('messages', {
-      conversationId: media.chatId,
-      senderId: userId,
-      type: 'system',
-      content: '⏱ Media expired',
-      systemSubtype: 'expired',
-      createdAt: now,
-    });
+    // DUPLICATE-FIX: Removed system message insertion
+    // The ProtectedMediaBubble already shows "Expired" pill - no need for duplicate
 
     return { success: true };
   },

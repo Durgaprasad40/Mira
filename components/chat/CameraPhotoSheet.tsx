@@ -103,11 +103,18 @@ export function CameraPhotoSheet({
           {/* Header: Thumbnail + Title */}
           <View style={styles.optionsContainer}>
             <View style={styles.headerRow}>
-              <Image
-                source={{ uri: imageUri }}
-                style={styles.thumbnail}
-                contentFit="cover"
-              />
+              <View style={styles.thumbnailWrapper}>
+                <Image
+                  source={{ uri: imageUri }}
+                  style={styles.thumbnail}
+                  contentFit="cover"
+                />
+                {isVideo && (
+                  <View style={styles.videoBadge}>
+                    <Ionicons name="videocam" size={12} color="#FFF" />
+                  </View>
+                )}
+              </View>
               <View style={styles.headerTextContainer}>
                 <View style={styles.titleRow}>
                   <Ionicons name="shield-checkmark" size={18} color={COLORS.primary} />
@@ -240,10 +247,21 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     padding: 12,
   },
+  thumbnailWrapper: {
+    position: 'relative',
+  },
   thumbnail: {
     width: 52,
     height: 52,
     borderRadius: 8,
+  },
+  videoBadge: {
+    position: 'absolute',
+    bottom: 2,
+    right: 2,
+    backgroundColor: 'rgba(0,0,0,0.7)',
+    borderRadius: 4,
+    padding: 2,
   },
   headerTextContainer: {
     flex: 1,

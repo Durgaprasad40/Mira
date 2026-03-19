@@ -43,6 +43,12 @@ export const createMediaMessage = mutation({
     const sender = await ctx.db.get(senderId);
     if (!sender) throw new Error('Sender not found');
 
+    // MEDIA-BUG-001 FIX: Validate storage object exists before creating media
+    const storageUrl = await ctx.storage.getUrl(objectKey);
+    if (!storageUrl) {
+      throw new Error('Upload validation failed: storage object not found. Please try uploading again.');
+    }
+
     // 1. Insert media row (never stores a URL — only objectKey)
     const mediaId = await ctx.db.insert('media', {
       chatId,
@@ -124,6 +130,10 @@ export const openMedia = query({
     // Owner can always view their own media
     if (media.ownerId === userId) {
       const url = await ctx.storage.getUrl(media.objectKey);
+      // MEDIA-BUG-002 FIX: Handle null URL (storage object missing/deleted)
+      if (!url) {
+        return { error: 'storage_unavailable' };
+      }
       return {
         url,
         allowScreenshot: true,
@@ -167,6 +177,11 @@ export const openMedia = query({
 
     // Generate URL from private storage
     const url = await ctx.storage.getUrl(media.objectKey);
+
+    // MEDIA-BUG-002 FIX: Handle null URL (storage object missing/deleted)
+    if (!url) {
+      return { error: 'storage_unavailable' };
+    }
 
     // Build watermark text (viewerId + datetime)
     const viewer = await ctx.db.get(userId);
@@ -282,15 +297,8 @@ export const expireMedia = mutation({
       createdAt: now,
     });
 
-    // Insert system message
-    await ctx.db.insert('messages', {
-      conversationId: media.chatId,
-      senderId: userId,
-      type: 'system',
-      content: '⏱ Media expired',
-      systemSubtype: 'expired',
-      createdAt: now,
-    });
+    // DUPLICATE-FIX: Removed system message insertion
+    // The ProtectedMediaBubble already shows "Expired" pill - no need for duplicate
 
     return { success: true };
   },
@@ -316,9 +324,20 @@ export const getMediaInfo = query({
       .first();
 
     const isOwner = media.ownerId === userId;
-    const isExpired = permission?.revoked ||
+
+    // EXPIRY-SYNC-FIX: Check global expiry first (applies to both owner and recipient)
+    // media.expiredAt is the single source of truth set by markExpired
+    const globallyExpired = !!media.expiredAt;
+
+    // Recipient-specific expiry checks (only apply if not owner)
+    const recipientExpired = !isOwner && (
+      permission?.revoked ||
       (permission?.expiresAt != null && Date.now() >= permission.expiresAt) ||
-      (media.viewOnce && (permission?.viewCount ?? 0) >= 1);
+      (media.viewOnce && (permission?.viewCount ?? 0) >= 1)
+    );
+
+    // Final expiry: either globally expired OR recipient-specifically expired
+    const isExpired = globallyExpired || !!recipientExpired;
 
     return {
       mediaId,
@@ -327,8 +346,10 @@ export const getMediaInfo = query({
       viewOnce: media.viewOnce,
       watermarkEnabled: media.watermarkEnabled,
       canScreenshot: isOwner ? true : (permission?.canScreenshot ?? false),
-      isExpired: isOwner ? false : !!isExpired,
+      isExpired, // EXPIRY-SYNC-FIX: Now includes owner expiry
       isOwner,
+      // HOLD-TAP-FIX: Return viewMode so bubble renders correct interaction label
+      viewMode: media.viewMode ?? 'tap',
     };
   },
 });

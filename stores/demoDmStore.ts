@@ -36,6 +36,7 @@ export interface DemoDmMessage {
     screenshotAllowed: boolean;
     viewOnce: boolean;
     watermark: boolean;
+    isMirrored?: boolean; // True if front-camera video (needs render-time flip)
   };
   timerEndsAt?: number;   // Wall-clock time when timer expires (set on first view)
   isExpired?: boolean;

@@ -1,5 +1,5 @@
 import React from 'react';
-import { View, Text, StyleSheet } from 'react-native';
+import { View, Text, StyleSheet, ActivityIndicator } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { COLORS } from '@/lib/constants';
 import MediaMessage from './MediaMessage';
@@ -38,8 +38,12 @@ interface MessageBubbleProps {
     systemSubtype?: string;
     mediaId?: string;
     // Voice message fields
-    audioUri?: string;
+    audioUri?: string;      // Demo mode local URI
+    audioUrl?: string;      // Production mode Convex URL
     durationMs?: number;
+    audioDurationMs?: number; // Production mode duration
+    // SECURE-REWRITE: Pending/optimistic message indicator
+    isPending?: boolean;
   };
   isOwn: boolean;
   otherUserName?: string;
@@ -90,6 +94,20 @@ export function MessageBubble({
       const displayText = message.content.slice(markerMatch[0].length);
       return <SystemMessage text={displayText} subtype={subtype as any} />;
     }
+  }
+
+  // SECURE-REWRITE: Pending/optimistic message (uploading secure photo)
+  if (message.isPending) {
+    return (
+      <View style={[styles.container, styles.ownContainer]}>
+        <View style={[styles.bubble, styles.ownBubble, styles.pendingBubble]}>
+          <View style={styles.pendingContent}>
+            <ActivityIndicator size="small" color={COLORS.white} />
+            <Text style={styles.pendingText}>Sending secure photo...</Text>
+          </View>
+        </View>
+      </View>
+    );
   }
 
   // Protected media messages (detected via mediaId or isProtected flag)
@@ -171,14 +189,18 @@ export function MessageBubble({
     );
   }
 
-  // Voice message rendering
-  if (message.type === 'voice' && message.audioUri) {
+  // Voice message rendering (supports both demo audioUri and production audioUrl)
+  // VOICE-FIX: Always render VoiceMessageBubble for voice type, even if audio source is missing
+  // VoiceMessageBubble will show "Unavailable" state if URI is invalid
+  const voiceAudioSource = message.audioUri || message.audioUrl || '';
+  const voiceDuration = message.durationMs || message.audioDurationMs || 0;
+  if (message.type === 'voice') {
     return (
       <View style={[styles.container, isOwn && styles.ownContainer]}>
         <VoiceMessageBubble
           messageId={message.id}
-          audioUri={message.audioUri}
-          durationMs={message.durationMs || 0}
+          audioUri={voiceAudioSource}
+          durationMs={voiceDuration}
           isOwn={isOwn}
           timestamp={message.createdAt}
           onDelete={isOwn && onVoiceDelete ? () => onVoiceDelete(message.id) : undefined}
@@ -267,6 +289,22 @@ const styles = StyleSheet.create({
   protectedBubble: {
     padding: 6,
     backgroundColor: 'transparent',
+  },
+  // SECURE-REWRITE: Pending/uploading secure photo styles
+  pendingBubble: {
+    paddingVertical: 16,
+    paddingHorizontal: 20,
+    minWidth: 160,
+  },
+  pendingContent: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  pendingText: {
+    color: COLORS.white,
+    fontSize: 14,
+    fontWeight: '500',
   },
   emojiBubble: {
     backgroundColor: 'transparent',

@@ -98,15 +98,18 @@ export const sendMessage = mutation({
   args: {
     conversationId: v.id('conversations'),
     authUserId: v.string(), // MSG-001: Auth verification required
-    type: v.union(v.literal('text'), v.literal('image'), v.literal('video'), v.literal('template'), v.literal('dare')),
+    type: v.union(v.literal('text'), v.literal('image'), v.literal('video'), v.literal('template'), v.literal('dare'), v.literal('voice')),
     content: v.string(),
     imageStorageId: v.optional(v.id('_storage')),
     templateId: v.optional(v.string()),
+    // Voice message fields
+    audioStorageId: v.optional(v.id('_storage')),
+    audioDurationMs: v.optional(v.number()),
     // BUGFIX #3: Client-provided idempotency key to prevent double-decrement on retry
     clientMessageId: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const { conversationId, authUserId, type, content, imageStorageId, templateId, clientMessageId } = args;
+    const { conversationId, authUserId, type, content, imageStorageId, templateId, audioStorageId, audioDurationMs, clientMessageId } = args;
     const now = Date.now();
 
     // MSG-001 FIX: Verify caller identity via session-based auth
@@ -218,6 +221,8 @@ export const sendMessage = mutation({
       content: maskedContent,
       imageStorageId,
       templateId,
+      audioStorageId,
+      audioDurationMs,
       clientMessageId, // For retry idempotency
       createdAt: now,
     });
@@ -468,12 +473,71 @@ export const getMessages = query({
 
     const messages = await query.order('desc').take(limit);
 
-    // Strip imageStorageId from protected messages and add isProtected flag
+    // SECURE-MEDIA-FIX: Batch-fetch media info for protected messages
+    // This ensures both sender and receiver have consistent metadata (viewMode, expiresAt, expiredAt)
+    const mediaIds = messages.filter((m) => m.mediaId).map((m) => m.mediaId!);
+    const mediaRecords = await Promise.all(mediaIds.map((id) => ctx.db.get(id)));
+    const mediaMap = new Map(mediaRecords.filter(Boolean).map((m) => [m!._id, m!]));
+
+    // Also fetch permissions for this user (for expiresAt / timer deadline)
+    const permissionsForUser = await Promise.all(
+      mediaIds.map((mediaId) =>
+        ctx.db
+          .query('mediaPermissions')
+          .withIndex('by_media_recipient', (q) =>
+            q.eq('mediaId', mediaId).eq('recipientId', userId)
+          )
+          .first()
+      )
+    );
+    const permissionMap = new Map(
+      mediaIds.map((id, i) => [id as string, permissionsForUser[i]])
+    );
+
+    // Batch-fetch audio URLs for voice messages
+    const audioStorageIds = messages.filter((m) => m.audioStorageId).map((m) => m.audioStorageId!);
+    const audioUrls = await Promise.all(
+      audioStorageIds.map((id) => ctx.storage.getUrl(id))
+    );
+    const audioUrlMap = new Map(audioStorageIds.map((id, i) => [id as string, audioUrls[i]]));
+
+    // Strip imageStorageId from protected messages and add isProtected flag + media metadata
     return messages.reverse().map((msg) => {
+      // Voice messages: include audio URL
+      if (msg.type === 'voice' && msg.audioStorageId) {
+        const { audioStorageId, ...rest } = msg;
+        return {
+          ...rest,
+          isProtected: false,
+          audioUrl: audioUrlMap.get(audioStorageId as string) ?? null,
+        };
+      }
+
       if (msg.mediaId) {
         // Protected media — strip storage keys, flag as protected
         const { imageStorageId, ...rest } = msg;
-        return { ...rest, isProtected: true };
+        const media = mediaMap.get(msg.mediaId);
+        const permission = permissionMap.get(msg.mediaId as string);
+        const isOwner = media?.ownerId === userId;
+
+        // SECURE-MEDIA-FIX: Compute expiry state consistently for both sides
+        const globallyExpired = !!media?.expiredAt;
+        const recipientExpired = !isOwner && (
+          permission?.revoked ||
+          (permission?.expiresAt != null && Date.now() >= permission.expiresAt) ||
+          (media?.viewOnce && (permission?.viewCount ?? 0) >= 1)
+        );
+        const isExpired = globallyExpired || !!recipientExpired;
+
+        return {
+          ...rest,
+          isProtected: true,
+          // SECURE-MEDIA-FIX: Include media metadata for both sender and receiver
+          viewMode: media?.viewMode ?? 'tap',
+          timerEndsAt: permission?.expiresAt ?? null, // Absolute deadline (wall-clock)
+          isExpired,
+          expiredAt: media?.expiredAt ?? null, // For auto-hide timer
+        };
       }
       return { ...msg, isProtected: false };
     });
