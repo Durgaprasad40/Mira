@@ -339,15 +339,15 @@ export const swipe = mutation({
 
         // B1 SECURITY: Race condition protection - check for duplicates BEFORE downstream writes
         // If two swipes raced past the existingMatch check, multiple matches may exist.
-        // Only the OLDEST match (by _creationTime) wins and proceeds with conversation/notifications.
+        // P1-FIX: Use _id (lexicographic) for deterministic winner - both mutations agree on same winner
         const allMatches = await ctx.db
           .query('matches')
           .withIndex('by_users', (q) => q.eq('user1Id', user1Id).eq('user2Id', user2Id))
           .collect();
 
         if (allMatches.length > 1) {
-          // Duplicates detected - determine winner by oldest _creationTime
-          allMatches.sort((a, b) => a._creationTime - b._creationTime);
+          // Duplicates detected - determine winner by _id (deterministic, never identical)
+          allMatches.sort((a, b) => a._id.localeCompare(b._id));
           const winnerMatchId = allMatches[0]._id;
 
           if (matchId !== winnerMatchId) {
@@ -365,7 +365,31 @@ export const swipe = mutation({
           }
         }
 
-        // We are the sole/winning match - proceed with downstream writes
+        // P1-FIX: STRICT RE-VERIFICATION before any downstream writes
+        // Re-query and re-determine winner to handle race where both mutations cleaned up
+        const finalMatches = await ctx.db
+          .query('matches')
+          .withIndex('by_users', (q) => q.eq('user1Id', user1Id).eq('user2Id', user2Id))
+          .collect();
+
+        if (finalMatches.length === 0) {
+          // All matches were deleted (shouldn't happen, but guard anyway)
+          console.error('[LIKES] Race condition: all matches deleted, cannot proceed');
+          return { success: false, isMatch: false };
+        }
+
+        // Deterministic winner: smallest _id wins
+        finalMatches.sort((a, b) => a._id.localeCompare(b._id));
+        const finalWinnerId = finalMatches[0]._id;
+
+        if (matchId !== finalWinnerId) {
+          // We are NOT the winner after re-verification - do NOT proceed with downstream writes
+          // The actual winner will handle conversation/notifications
+          console.log(`[LIKES] Race re-verify: ${matchId} is not winner (${finalWinnerId}), exiting`);
+          return { success: true, isMatch: true, matchId: finalWinnerId };
+        }
+
+        // We are the verified winner - proceed with downstream writes
         // SMART MATCHING: Check for existing T&D conversation only
         const existingTodConvoId = await findExistingTodConversation(ctx, fromUserId, toUserId);
 

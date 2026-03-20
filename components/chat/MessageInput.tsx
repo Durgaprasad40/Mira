@@ -88,17 +88,19 @@ export function MessageInput({
     const hasText = value.trim().length > 0;
 
     // Production mode: notify parent of typing state change
-    if (!isDemoMode && onTypingChange) {
+    // P1-B FIX: Use ref for ALL calls to avoid stale closure in setTimeout
+    if (!isDemoMode && onTypingChangeRef.current) {
       if (hasText) {
         // User is typing - notify immediately
-        onTypingChange(true);
+        onTypingChangeRef.current(true);
         // Stop typing after 2s of inactivity
         hideTypingTimerRef.current = setTimeout(() => {
-          onTypingChange(false);
+          // P1-B FIX: Use ref here - closure would capture stale onTypingChange
+          onTypingChangeRef.current?.(false);
         }, 2000);
       } else {
         // User cleared input - stop typing
-        onTypingChange(false);
+        onTypingChangeRef.current(false);
       }
     }
 
@@ -106,8 +108,21 @@ export function MessageInput({
 
   const [isSending, setIsSending] = useState(false);
 
+  // P1-A FIX: Ref-based guard to prevent duplicate sends on rapid double-tap
+  // State updates are async; ref is synchronous and prevents race
+  const isSendingRef = useRef(false);
+
   // Typing notification timer ref (for debouncing typing status)
   const hideTypingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // P1-B FIX: Ref to hold latest onTypingChange callback
+  // Prevents stale closure in setTimeout
+  const onTypingChangeRef = useRef(onTypingChange);
+
+  // P1-B FIX: Sync ref when onTypingChange prop changes
+  useEffect(() => {
+    onTypingChangeRef.current = onTypingChange;
+  }, [onTypingChange]);
 
   // Cleanup timer on unmount
   useEffect(() => {
@@ -117,6 +132,8 @@ export function MessageInput({
   }, []);
 
   const handleSend = async () => {
+    // P1-A FIX: Ref guard at START - prevents double-tap race condition
+    if (isSendingRef.current) return;
     if (!text.trim() || isSending) return;
 
     if (!isDemoMode && isPreMatch && !canSendCustom && subscriptionTier === 'free') {
@@ -132,6 +149,8 @@ export function MessageInput({
 
     const trimmed = text.trim();
     handleTextChange('');
+    // P1-A FIX: Set ref BEFORE async operation
+    isSendingRef.current = true;
     setIsSending(true);
     try {
       await onSend(trimmed, 'text');
@@ -140,6 +159,8 @@ export function MessageInput({
       handleTextChange(trimmed);
       Alert.alert('Send Failed', 'Message could not be sent. Please try again.');
     } finally {
+      // P1-A FIX: Reset ref in finally (always runs)
+      isSendingRef.current = false;
       setIsSending(false);
     }
   };
