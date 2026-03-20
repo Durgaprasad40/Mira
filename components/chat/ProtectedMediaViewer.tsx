@@ -33,6 +33,8 @@ interface ProtectedMediaViewerProps {
   onReport?: () => void;
   // VIDEO-MIRROR-FIX: Pass through mirrored flag for front camera video
   isMirrored?: boolean;
+  // HOLD-MODE-FIX: When true, viewer closes on ANY touch release (finger up)
+  isHoldMode?: boolean;
 }
 
 export function ProtectedMediaViewer({
@@ -43,6 +45,7 @@ export function ProtectedMediaViewer({
   onClose,
   onReport,
   isMirrored = false,
+  isHoldMode = false,
 }: ProtectedMediaViewerProps) {
   const insets = useSafeAreaInsets();
   const [timeLeft, setTimeLeft] = useState<number | null>(null);
@@ -353,11 +356,26 @@ export function ProtectedMediaViewer({
     }
   }, []);
 
+  // HOLD-MODE-FIX: Close viewer immediately when finger is released in hold mode
+  // This is critical because the Modal captures touch events, preventing the
+  // original PanResponder from receiving onPanResponderRelease
+  const handleHoldModeRelease = useCallback(() => {
+    if (isHoldMode) {
+      console.log('[SECURE-VIEWER] hold-mode: Touch released, closing viewer');
+      handleClose();
+    }
+  }, [isHoldMode, handleClose]);
+
   if (!visible) return null;
 
   return (
     <Modal visible={visible} transparent animationType="fade">
-      <View style={styles.container}>
+      <View
+        style={styles.container}
+        // HOLD-MODE-FIX: Detect touch end to close viewer when finger is released
+        onTouchEnd={isHoldMode ? handleHoldModeRelease : undefined}
+        onTouchCancel={isHoldMode ? handleHoldModeRelease : undefined}
+      >
         {/* Header */}
         <View style={[styles.header, { paddingTop: insets.top + 8 }]}>
           <TouchableOpacity onPress={handleClose} style={styles.closeButton}>

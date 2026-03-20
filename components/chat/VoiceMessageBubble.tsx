@@ -269,16 +269,19 @@ export function VoiceMessageBubble({
 
 const styles = StyleSheet.create({
   container: {
-    maxWidth: '75%',
+    maxWidth: '70%',
     minWidth: 180,
-    padding: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
     borderRadius: 16,
   },
   containerOwn: {
     borderBottomRightRadius: 4,
+    alignSelf: 'flex-end',
   },
   containerOther: {
     borderBottomLeftRadius: 4,
+    alignSelf: 'flex-start',
   },
   content: {
     flexDirection: 'row',

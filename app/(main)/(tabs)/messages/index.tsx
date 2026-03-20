@@ -257,6 +257,9 @@ export default function MessagesScreen() {
   // Mutation to mark likes as opened (starts 24h expiry timer)
   const markLikesOpened = useMutation(api.likes.markLikesOpened);
 
+  // DELIVERED-TICK-FIX: Mark all incoming messages as delivered when messages list loads
+  const markAllAsDelivered = useMutation(api.messages.markAllAsDelivered);
+
   // Demo DM store for thread model
   const demoMeta = useDemoDmStore((s) => s.meta);
   const demoConversations = useDemoDmStore((s) => s.conversations);
@@ -294,6 +297,20 @@ export default function MessagesScreen() {
       cleanupExpiredThreads(expiredThreadIds);
     }
   }, [isDemoMode, expiredThreadIds, cleanupExpiredThreads]);
+
+  // DELIVERED-TICK-FIX: Mark all incoming messages as delivered when messages arrive
+  // This ensures "delivered" state (two gray ticks) is set as soon as messages reach the device,
+  // BEFORE the user opens any specific conversation. The dependency on convexConversations
+  // ensures this runs whenever new messages arrive via Convex real-time sync.
+  // Note: This is separate from "read" (blue ticks) which only happens when user opens the chat.
+  useEffect(() => {
+    // Only run when we have conversation data (meaning messages have arrived)
+    if (!isDemoMode && userId && convexConversations && convexConversations.length > 0) {
+      markAllAsDelivered({ authUserId: userId }).catch(() => {
+        // Silent fail - delivery marking is best-effort
+      });
+    }
+  }, [isDemoMode, userId, convexConversations, markAllAsDelivered]);
 
   // Combine message threads
   const demoThreads = useMemo(() => {

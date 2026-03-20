@@ -443,24 +443,40 @@ export const sendPreMatchMessage = mutation({
 });
 
 // Get messages in a conversation
+// SYNC-FIX: Accept authUserId string for consistent identity resolution across devices
 export const getMessages = query({
   args: {
     conversationId: v.id('conversations'),
-    userId: v.id('users'),
+    userId: v.optional(v.id('users')), // Legacy support
+    authUserId: v.optional(v.string()), // SYNC-FIX: New auth-based lookup
     limit: v.optional(v.number()),
     before: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
-    const { conversationId, userId, limit = 50, before } = args;
+    const { conversationId, limit = 50, before } = args;
+
+    // SYNC-FIX: Resolve user ID consistently using auth helper
+    let userId: Id<'users'> | undefined = args.userId;
+    if (!userId && args.authUserId) {
+      const resolved = await resolveUserIdByAuthId(ctx, args.authUserId);
+      userId = resolved ?? undefined;
+    }
+
+    if (!userId) {
+      return [];
+    }
 
     const conversation = await ctx.db.get(conversationId);
-    if (!conversation) return [];
+    if (!conversation) {
+      return [];
+    }
 
     // Verify user is part of conversation
     if (!conversation.participants.includes(userId)) {
       return [];
     }
 
+    // SYNC-FIX: Deterministic query - same for all devices
     let query = ctx.db
       .query('messages')
       .withIndex('by_conversation_created', (q) =>
@@ -471,6 +487,7 @@ export const getMessages = query({
       query = query.filter((q) => q.lt(q.field('createdAt'), before));
     }
 
+    // Fetch latest messages (desc order), then reverse for chronological display
     const messages = await query.order('desc').take(limit);
 
     // SECURE-MEDIA-FIX: Batch-fetch media info for protected messages
@@ -479,16 +496,31 @@ export const getMessages = query({
     const mediaRecords = await Promise.all(mediaIds.map((id) => ctx.db.get(id)));
     const mediaMap = new Map(mediaRecords.filter(Boolean).map((m) => [m!._id, m!]));
 
-    // Also fetch permissions for this user (for expiresAt / timer deadline)
+    // SENDER-TIMER-FIX: Fetch permissions correctly for both sender and receiver
+    // For receiver: get their own permission (recipientId = userId)
+    // For sender: get the recipient's permission (to see their timer)
     const permissionsForUser = await Promise.all(
-      mediaIds.map((mediaId) =>
-        ctx.db
-          .query('mediaPermissions')
-          .withIndex('by_media_recipient', (q) =>
-            q.eq('mediaId', mediaId).eq('recipientId', userId)
-          )
-          .first()
-      )
+      mediaIds.map(async (mediaId) => {
+        const media = mediaMap.get(mediaId);
+        const isOwner = media?.ownerId === userId;
+
+        if (isOwner) {
+          // SENDER-TIMER-FIX: Sender needs recipient's permission to show their timer
+          // Find any recipient permission for this media
+          return ctx.db
+            .query('mediaPermissions')
+            .withIndex('by_media_recipient', (q) => q.eq('mediaId', mediaId))
+            .first();
+        } else {
+          // Receiver gets their own permission
+          return ctx.db
+            .query('mediaPermissions')
+            .withIndex('by_media_recipient', (q) =>
+              q.eq('mediaId', mediaId).eq('recipientId', userId)
+            )
+            .first();
+        }
+      })
     );
     const permissionMap = new Map(
       mediaIds.map((id, i) => [id as string, permissionsForUser[i]])
@@ -522,11 +554,14 @@ export const getMessages = query({
 
         // SECURE-MEDIA-FIX: Compute expiry state consistently for both sides
         const globallyExpired = !!media?.expiredAt;
+        // VIEW-ONCE-FIX: Don't use viewCount for expiry - it causes race conditions
+        // View-once expiry is determined ONLY by media.expiredAt (set when viewer closes)
+        // The viewCount >= 1 check was causing premature expiry during active viewing
         const recipientExpired = !isOwner && (
           permission?.revoked ||
-          (permission?.expiresAt != null && Date.now() >= permission.expiresAt) ||
-          (media?.viewOnce && (permission?.viewCount ?? 0) >= 1)
+          (permission?.expiresAt != null && Date.now() >= permission.expiresAt)
         );
+        // SENDER-TIMER-FIX: Both sender and receiver use globallyExpired as single source of truth
         const isExpired = globallyExpired || !!recipientExpired;
 
         return {
@@ -537,6 +572,10 @@ export const getMessages = query({
           timerEndsAt: permission?.expiresAt ?? null, // Absolute deadline (wall-clock)
           isExpired,
           expiredAt: media?.expiredAt ?? null, // For auto-hide timer
+          // VIEW-ONCE-FIX: Include viewOnce flag for UI to handle properly
+          viewOnce: media?.viewOnce ?? false,
+          // SENDER-TIMER-FIX: Include opened state so sender knows recipient is viewing
+          recipientOpened: !!(permission?.openedAt),
         };
       }
       return { ...msg, isProtected: false };
@@ -595,15 +634,146 @@ export const markAsRead = mutation({
   },
 });
 
+// MESSAGE-TICKS-FIX: Mark messages as delivered
+// Called when recipient's app receives/loads messages
+export const markAsDelivered = mutation({
+  args: {
+    conversationId: v.id('conversations'),
+    authUserId: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const { conversationId, authUserId } = args;
+    const now = Date.now();
+
+    // Verify caller identity
+    if (!authUserId || authUserId.trim().length === 0) {
+      return { success: false, count: 0 };
+    }
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      return { success: false, count: 0 };
+    }
+
+    const conversation = await ctx.db.get(conversationId);
+    if (!conversation || !conversation.participants.includes(userId)) {
+      return { success: false, count: 0 };
+    }
+
+    // Get all messages from OTHER user that are not yet delivered
+    const undeliveredMessages = await ctx.db
+      .query('messages')
+      .withIndex('by_conversation', (q) => q.eq('conversationId', conversationId))
+      .filter((q) =>
+        q.and(
+          q.neq(q.field('senderId'), userId),
+          q.eq(q.field('deliveredAt'), undefined)
+        )
+      )
+      .collect();
+
+    for (const message of undeliveredMessages) {
+      await ctx.db.patch(message._id, { deliveredAt: now });
+    }
+
+    return { success: true, count: undeliveredMessages.length };
+  },
+});
+
+// DELIVERED-TICK-FIX: Mark ALL incoming messages as delivered across all conversations
+// Called when recipient's app loads the messages list (before opening any conversation)
+// This ensures "delivered" state is set when message reaches device, not when conversation is opened
+export const markAllAsDelivered = mutation({
+  args: {
+    authUserId: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const { authUserId } = args;
+    const now = Date.now();
+
+    if (!authUserId || authUserId.trim().length === 0) {
+      return { success: false, count: 0 };
+    }
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      return { success: false, count: 0 };
+    }
+
+    // Find all messages sent TO this user that are not yet delivered
+    // Query all conversations this user is part of
+    const participations = await ctx.db
+      .query('conversationParticipants')
+      .withIndex('by_user', (q) => q.eq('userId', userId))
+      .collect();
+
+    let totalMarked = 0;
+
+    for (const participation of participations) {
+      const undeliveredMessages = await ctx.db
+        .query('messages')
+        .withIndex('by_conversation', (q) => q.eq('conversationId', participation.conversationId))
+        .filter((q) =>
+          q.and(
+            q.neq(q.field('senderId'), userId),
+            q.eq(q.field('deliveredAt'), undefined)
+          )
+        )
+        .collect();
+
+      for (const message of undeliveredMessages) {
+        await ctx.db.patch(message._id, { deliveredAt: now });
+        totalMarked++;
+      }
+    }
+
+    return { success: true, count: totalMarked };
+  },
+});
+
+// ONLINE-STATUS-FIX: Update user's lastActive timestamp
+// Called periodically while user is in a conversation to show "Online" status
+export const updatePresence = mutation({
+  args: {
+    authUserId: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const { authUserId } = args;
+    const now = Date.now();
+
+    if (!authUserId || authUserId.trim().length === 0) {
+      return { success: false };
+    }
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      return { success: false };
+    }
+
+    await ctx.db.patch(userId, { lastActive: now });
+    return { success: true, lastActive: now };
+  },
+});
+
 // Get conversation by ID
+// SYNC-FIX: Accept authUserId string for consistent identity resolution across devices
 export const getConversation = query({
   args: {
     conversationId: v.id('conversations'),
-    userId: v.id('users'),
+    userId: v.optional(v.id('users')), // Legacy support
+    authUserId: v.optional(v.string()), // SYNC-FIX: New auth-based lookup
   },
   handler: async (ctx, args) => {
-    const { conversationId, userId } = args;
+    const { conversationId } = args;
     const now = Date.now();
+
+    // SYNC-FIX: Resolve user ID consistently using auth helper
+    let userId: Id<'users'> | undefined = args.userId;
+    if (!userId && args.authUserId) {
+      const resolved = await resolveUserIdByAuthId(ctx, args.authUserId);
+      userId = resolved ?? undefined;
+    }
+
+    if (!userId) {
+      return null;
+    }
 
     const conversation = await ctx.db.get(conversationId);
     if (!conversation) return null;
@@ -890,8 +1060,9 @@ export const getUnreadCount = query({
       participantRows.map((row) => row.conversationId as string)
     );
 
-    // 2. Sum denormalized counts for covered conversations
-    let totalUnread = participantRows.reduce((sum, row) => sum + row.unreadCount, 0);
+    // BADGE-FIX: Count CONVERSATIONS with unread messages, not total messages
+    // 2. Count conversations that have unreadCount > 0 (not sum of all unread)
+    let totalUnreadConversations = participantRows.filter((row) => row.unreadCount > 0).length;
 
     // 3. Bounded fallback: only check recent conversations (last 30 days) without participant rows
     // This replaces the unbounded .collect() that loaded ALL conversations
@@ -911,10 +1082,13 @@ export const getUnreadCount = query({
       if (coveredConversationIds.has(conversation._id as string)) continue;
 
       const count = await computeUnreadCountFromMessages(ctx, conversation._id, userId);
-      totalUnread += count;
+      // BADGE-FIX: Add 1 if conversation has any unread, not the count itself
+      if (count > 0) {
+        totalUnreadConversations += 1;
+      }
     }
 
-    return totalUnread;
+    return totalUnreadConversations;
   },
 });
 

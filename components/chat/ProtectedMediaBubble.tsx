@@ -36,6 +36,9 @@ interface ProtectedMediaBubbleProps {
   isExpired?: boolean;
   expiredAt?: number;    // Wall-clock timestamp when expired (for auto-removal)
   isOwn: boolean;
+  // SENDER-TIMER-FIX: New props for sender status display
+  viewOnce?: boolean;         // Whether this is view-once media
+  recipientOpened?: boolean;  // Whether recipient has opened the media
   // Handlers
   onPress?: () => void;           // Tap mode: open viewer
   onHoldStart?: () => void;       // Hold mode: press in => open viewer
@@ -52,6 +55,8 @@ export function ProtectedMediaBubble({
   isExpired: isExpiredProp,
   expiredAt,
   isOwn,
+  viewOnce: viewOnceProp,
+  recipientOpened: recipientOpenedProp,
   onPress,
   onHoldStart,
   onHoldEnd,
@@ -265,8 +270,17 @@ export function ProtectedMediaBubble({
   const hasActiveTimer = remainingSec !== null && remainingSec > 0;
   const displayTimerLabel = hasActiveTimer ? timerLabel : null;
 
-  // SENDER-TIMER: Show external timer for sender when recipient is viewing
-  const showSenderExternalTimer = isOwn && hasActiveTimer && timerEndsAt;
+  // SENDER-TIMER-FIX: Improved sender status display
+  // Show for sender when:
+  // 1. Recipient has opened (recipientOpenedProp) AND timer is active, OR
+  // 2. View-once was opened (recipientOpenedProp but no timer)
+  const isViewOnceMedia = viewOnceProp ?? viewOnce;
+  const recipientHasOpened = recipientOpenedProp ?? false;
+
+  // Sender sees timer countdown if recipient opened timed media
+  const showSenderTimer = isOwn && hasActiveTimer && recipientHasOpened;
+  // Sender sees "Opened" indicator for view-once (no timer, but opened)
+  const showSenderViewOnceOpened = isOwn && isViewOnceMedia && recipientHasOpened && !hasActiveTimer;
 
   // AUTO-HIDE: Return null when auto-hide timer has fired (60s after expiry)
   if (isAutoHidden) {
@@ -344,15 +358,28 @@ export function ProtectedMediaBubble({
     </View>
   );
 
-  // SENDER-TIMER: Wrap with external timer indicator for sender
-  if (showSenderExternalTimer) {
+  // SENDER-TIMER-FIX: Wrap with status indicator for sender
+  if (showSenderTimer) {
     return (
       <View style={styles.senderWrapper}>
         {bubbleContent}
-        {/* External timer badge below bubble for sender */}
+        {/* Timer countdown badge for sender */}
         <View style={styles.senderTimerBadge}>
           <Ionicons name="eye" size={10} color={COLORS.primary} />
           <Text style={styles.senderTimerText}>Viewing • {timerLabel}</Text>
+        </View>
+      </View>
+    );
+  }
+
+  // SENDER-TIMER-FIX: Show "Opened" for view-once media that was opened
+  if (showSenderViewOnceOpened) {
+    return (
+      <View style={styles.senderWrapper}>
+        {bubbleContent}
+        <View style={styles.senderOpenedBadge}>
+          <Ionicons name="eye" size={10} color={COLORS.success} />
+          <Text style={styles.senderOpenedText}>Opened</Text>
         </View>
       </View>
     );
@@ -462,6 +489,22 @@ const styles = StyleSheet.create({
   senderTimerText: {
     fontSize: 10,
     color: COLORS.primary,
+    fontWeight: '600',
+  },
+  // SENDER-TIMER-FIX: "Opened" badge for view-once media
+  senderOpenedBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    marginTop: 4,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    backgroundColor: 'rgba(76, 175, 80, 0.15)',
+    borderRadius: 10,
+  },
+  senderOpenedText: {
+    fontSize: 10,
+    color: COLORS.success,
     fontWeight: '600',
   },
 });

@@ -10,3 +10,4 @@ export { SystemMessage } from './SystemMessage';
 export { ReportModal } from './ReportModal';
 export { BottleSpinGame } from './BottleSpinGame';
 export { VoiceMessageBubble } from './VoiceMessageBubble';
+export { TruthDareInviteCard } from './TruthDareInviteCard';

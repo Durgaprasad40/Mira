@@ -24,8 +24,6 @@ interface MessageInputProps {
   onTextChange?: (text: string) => void;
   /** Called when user starts/stops typing (for production typing indicators). */
   onTypingChange?: (isTyping: boolean) => void;
-  /** Whether the OTHER user is typing (passed from parent in production mode). */
-  otherUserTyping?: boolean;
 }
 
 export function MessageInput({
@@ -43,7 +41,6 @@ export function MessageInput({
   initialText = '',
   onTextChange,
   onTypingChange,
-  otherUserTyping = false,
 }: MessageInputProps) {
   const [text, setText] = useState(initialText);
   const [showTemplates, setShowTemplates] = useState(false);
@@ -85,8 +82,7 @@ export function MessageInput({
       setShowAttachMenu(false);
     }
 
-    // Clear any existing timers
-    if (showTypingTimerRef.current) clearTimeout(showTypingTimerRef.current);
+    // Clear any existing timer
     if (hideTypingTimerRef.current) clearTimeout(hideTypingTimerRef.current);
 
     const hasText = value.trim().length > 0;
@@ -106,37 +102,16 @@ export function MessageInput({
       }
     }
 
-    // Demo mode: simulate other user typing (fake indicator)
-    if (isDemoMode) {
-      if (hasText) {
-        // User started typing - show "other typing" after 600ms
-        if (!otherTyping) {
-          showTypingTimerRef.current = setTimeout(() => {
-            setOtherTyping(true);
-          }, 600);
-        }
-        // Reset hide timer - hide after 1200ms of inactivity
-        hideTypingTimerRef.current = setTimeout(() => {
-          setOtherTyping(false);
-        }, 1200);
-      } else {
-        // Input is empty - hide typing indicator immediately
-        setOtherTyping(false);
-      }
-    }
   };
 
   const [isSending, setIsSending] = useState(false);
 
-  // Demo typing indicator state (simulates other user typing)
-  const [otherTyping, setOtherTyping] = useState(false);
-  const showTypingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Typing notification timer ref (for debouncing typing status)
   const hideTypingTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
-  // Cleanup timers on unmount
+  // Cleanup timer on unmount
   useEffect(() => {
     return () => {
-      if (showTypingTimerRef.current) clearTimeout(showTypingTimerRef.current);
       if (hideTypingTimerRef.current) clearTimeout(hideTypingTimerRef.current);
     };
   }, []);
@@ -243,13 +218,6 @@ export function MessageInput({
       )}
 
       {/* Message limit banner removed — no weekly limit for now (until subscriptions added) */}
-
-      {/* Typing indicator - uses otherUserTyping prop in production, local state in demo */}
-      {(isDemoMode ? otherTyping : otherUserTyping) && !isRecording && (
-        <View style={styles.typingBanner}>
-          <Text style={styles.typingText}>Typing…</Text>
-        </View>
-      )}
 
       <View style={styles.inputContainer}>
         {/* + Button with popup menu - LEFT side of TextInput */}
@@ -435,15 +403,6 @@ const styles = StyleSheet.create({
     color: COLORS.warning,
     marginLeft: 8,
     fontWeight: '500',
-  },
-  typingBanner: {
-    paddingHorizontal: 16,
-    paddingVertical: 4,
-  },
-  typingText: {
-    fontSize: 12,
-    color: COLORS.textLight,
-    fontStyle: 'italic',
   },
   inputContainer: {
     flexDirection: 'row',

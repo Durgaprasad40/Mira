@@ -305,7 +305,8 @@ export default function CameraComposerScreen() {
           </View>
         )}
 
-        <View style={styles.previewActions}>
+        {/* ANDROID-SAFE-AREA-FIX: Use safe area inset for bottom spacing */}
+        <View style={[styles.previewActions, { paddingBottom: insets.bottom + 20 }]}>
           <TouchableOpacity style={styles.retakeBtn} onPress={handleRetake}>
             <Ionicons name="refresh" size={20} color={C.text} />
             <Text style={styles.retakeBtnText}>Retake</Text>
@@ -352,8 +353,8 @@ export default function CameraComposerScreen() {
         )}
       </View>
 
-      {/* Bottom controls */}
-      <View style={styles.bottomBar}>
+      {/* Bottom controls - ANDROID-SAFE-AREA-FIX: Use safe area inset */}
+      <View style={[styles.bottomBar, { paddingBottom: insets.bottom + 16 }]}>
         {/* Mode toggle - hide when recording */}
         {!isRecordingVideo && (
           <View style={styles.modeToggleRow}>
@@ -428,8 +429,8 @@ const styles = StyleSheet.create({
   },
   recordingDot: { width: 8, height: 8, borderRadius: 4, backgroundColor: '#F44336' },
   videoTimerText: { fontSize: 13, fontWeight: '600', color: '#FFF' },
-  // Bottom
-  bottomBar: { alignItems: 'center', paddingVertical: 16, gap: 12 },
+  // Bottom - ANDROID-SAFE-AREA-FIX: paddingBottom is applied dynamically via style prop
+  bottomBar: { alignItems: 'center', paddingTop: 16, gap: 12 },
   // Mode toggle
   modeToggleRow: { flexDirection: 'row', gap: 4 },
   modeToggleBtn: {
@@ -469,8 +470,9 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(0,0,0,0.6)', paddingHorizontal: 10, paddingVertical: 4, borderRadius: 12,
   },
   videoDurationText: { fontSize: 12, fontWeight: '600', color: '#FFF' },
+  // ANDROID-SAFE-AREA-FIX: paddingBottom is applied dynamically via style prop
   previewActions: {
-    flexDirection: 'row', justifyContent: 'center', gap: 16, paddingVertical: 20,
+    flexDirection: 'row', justifyContent: 'center', gap: 16, paddingTop: 20,
   },
   retakeBtn: {
     flexDirection: 'row', alignItems: 'center', gap: 6,

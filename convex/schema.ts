@@ -1650,6 +1650,40 @@ export default defineSchema({
     .index('by_user', ['userId'])
     .index('by_user_game_convo', ['userId', 'game', 'convoId', 'windowKey']),
 
+  // Bottle Spin Game Sessions (invite + active game tracking)
+  bottleSpinSessions: defineTable({
+    conversationId: v.string(),
+    inviterId: v.string(),           // User who sent the invite
+    inviteeId: v.string(),           // User who received the invite
+    status: v.union(
+      v.literal('pending'),          // Invite sent, waiting for response
+      v.literal('active'),           // Invite accepted, game in progress
+      v.literal('rejected'),         // Invite rejected
+      v.literal('ended')             // Game ended
+    ),
+    createdAt: v.number(),
+    respondedAt: v.optional(v.number()),  // When invite was accepted/rejected
+    endedAt: v.optional(v.number()),      // When game was ended
+    cooldownUntil: v.optional(v.number()), // Cooldown end time (10 min after rejection/end)
+    // Turn tracking for real-time sync across devices
+    // NOTE: Using role-based turn tracking to avoid ID format mismatch issues
+    currentTurnUserId: v.optional(v.string()), // Legacy - kept for compatibility
+    currentTurnRole: v.optional(v.union(
+      v.literal('inviter'),          // Inviter's turn to choose
+      v.literal('invitee')           // Invitee's turn to choose
+    )),
+    turnPhase: v.optional(v.union(
+      v.literal('idle'),             // Waiting for spin
+      v.literal('spinning'),         // Spin animation in progress
+      v.literal('choosing'),         // Current turn user choosing Truth/Dare/Skip
+      v.literal('complete')          // Choice made, can spin again
+    )),
+    lastSpinResult: v.optional(v.string()), // 'truth' | 'dare' | 'skip' | null
+  })
+    .index('by_conversation', ['conversationId'])
+    .index('by_inviter', ['inviterId'])
+    .index('by_invitee', ['inviteeId']),
+
   // H-1: Track pending uploads to prevent orphaned storage blobs
   // Records created after upload, deleted when addPhoto succeeds or cleanup runs
   pendingUploads: defineTable({

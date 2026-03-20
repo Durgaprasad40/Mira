@@ -1,5 +1,5 @@
 import React from 'react';
-import { View, Text, StyleSheet, ActivityIndicator } from 'react-native';
+import { View, Text, StyleSheet, ActivityIndicator, Image, TouchableOpacity } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { COLORS } from '@/lib/constants';
 import MediaMessage from './MediaMessage';
@@ -7,6 +7,11 @@ import { ProtectedMediaBubble } from './ProtectedMediaBubble';
 import { SystemMessage } from './SystemMessage';
 import { VoiceMessageBubble } from './VoiceMessageBubble';
 import { formatTime } from '@/utils/chatTime';
+
+// Avatar size constant for consistent spacing
+// AVATAR-ENLARGE: Increased from 28 to 34 for better visibility
+const AVATAR_SIZE = 34;
+const AVATAR_GAP = 8;
 
 interface MessageBubbleProps {
   message: {
@@ -37,6 +42,11 @@ interface MessageBubbleProps {
     viewedAt?: number;
     systemSubtype?: string;
     mediaId?: string;
+    // SENDER-TIMER-FIX: New fields for sender status display
+    viewOnce?: boolean;         // Whether this is view-once media
+    recipientOpened?: boolean;  // Whether recipient has opened the media
+    // MESSAGE-TICKS-FIX: Delivered status
+    deliveredAt?: number;
     // Voice message fields
     audioUri?: string;      // Demo mode local URI
     audioUrl?: string;      // Production mode Convex URL
@@ -56,6 +66,15 @@ interface MessageBubbleProps {
   onVoiceDelete?: (messageId: string) => void;
   /** Whether to show the timestamp (for grouping). Defaults to true. */
   showTimestamp?: boolean;
+  // AVATAR GROUPING: Show avatar only on last message of group for received messages
+  /** Whether to show avatar (only for received messages, last in group) */
+  showAvatar?: boolean;
+  /** Avatar URL for the other user */
+  avatarUrl?: string;
+  /** Whether this is the last message in a sender group (for spacing) */
+  isLastInGroup?: boolean;
+  /** Callback when avatar is pressed (to open profile) */
+  onAvatarPress?: () => void;
 }
 
 // Detect messages that are only emoji (1–8 emoji, no other text)
@@ -64,6 +83,27 @@ const EMOJI_ONLY_RE = /^[\p{Emoji_Presentation}\p{Extended_Pictographic}\u200d\u
 // System message marker for Convex mode (hidden from UI, used to detect system messages)
 // Format: [SYSTEM:subtype]actual message content
 const SYSTEM_MARKER_RE = /^\[SYSTEM:(\w+)\]/;
+
+// MESSAGE-TICKS-FIX: Helper to determine message status and tick appearance
+type TickStatus = 'sent' | 'delivered' | 'read';
+
+function getTickStatus(message: { readAt?: number; deliveredAt?: number }): TickStatus {
+  if (message.readAt) return 'read';
+  if (message.deliveredAt) return 'delivered';
+  return 'sent';
+}
+
+function getTickIcon(status: TickStatus): 'checkmark' | 'checkmark-done' {
+  return status === 'sent' ? 'checkmark' : 'checkmark-done';
+}
+
+function getTickColor(status: TickStatus, isOwn: boolean): string {
+  if (status === 'read') {
+    return '#34B7F1'; // Blue for read (WhatsApp-style)
+  }
+  // Gray/white for sent and delivered
+  return isOwn ? 'rgba(255,255,255,0.8)' : COLORS.textLight;
+}
 
 export function MessageBubble({
   message,
@@ -77,10 +117,36 @@ export function MessageBubble({
   onProtectedMediaExpire,
   onVoiceDelete,
   showTimestamp = true,
+  showAvatar = false,
+  avatarUrl,
+  isLastInGroup = true,
+  onAvatarPress,
 }: MessageBubbleProps) {
   const isEmojiOnly = message.type === 'text' && EMOJI_ONLY_RE.test(message.content.trim());
 
-  // System messages (native type)
+  // Avatar rendering helper for received messages - tappable to open profile
+  const renderAvatar = () => {
+    if (isOwn) return null; // No avatar for sent messages
+
+    if (showAvatar && avatarUrl) {
+      return (
+        <TouchableOpacity
+          onPress={onAvatarPress}
+          activeOpacity={0.7}
+          disabled={!onAvatarPress}
+        >
+          <Image
+            source={{ uri: avatarUrl }}
+            style={styles.avatar}
+          />
+        </TouchableOpacity>
+      );
+    }
+    // Spacer to maintain alignment when avatar is not shown
+    return <View style={styles.avatarSpacer} />;
+  };
+
+  // System messages (native type) - no avatar, centered
   if (message.type === 'system') {
     return <SystemMessage text={message.content} subtype={message.systemSubtype as any} />;
   }
@@ -97,6 +163,7 @@ export function MessageBubble({
   }
 
   // SECURE-REWRITE: Pending/optimistic message (uploading secure photo)
+  // Always own message, no avatar needed
   if (message.isPending) {
     return (
       <View style={[styles.container, styles.ownContainer]}>
@@ -121,7 +188,12 @@ export function MessageBubble({
     }
 
     return (
-      <View style={[styles.container, isOwn && styles.ownContainer]}>
+      <View style={[
+        styles.container,
+        isOwn ? styles.ownContainer : styles.otherContainer,
+        !isLastInGroup && styles.groupedContainer,
+      ]}>
+        {!isOwn && renderAvatar()}
         <View style={[styles.bubble, isOwn ? styles.ownBubble : styles.otherBubble, styles.protectedBubble]}>
           <ProtectedMediaBubble
             messageId={message.id}
@@ -132,6 +204,8 @@ export function MessageBubble({
             isExpired={!!message.isExpired}
             expiredAt={message.expiredAt}
             isOwn={isOwn}
+            viewOnce={message.viewOnce}
+            recipientOpened={message.recipientOpened}
             onPress={() => onProtectedMediaPress?.(message.id)}
             onHoldStart={() => onProtectedMediaHoldStart?.(message.id)}
             onHoldEnd={() => onProtectedMediaHoldEnd?.(message.id)}
@@ -142,14 +216,17 @@ export function MessageBubble({
               <Text style={[styles.time, isOwn && styles.ownTime]}>
                 {formatTime(message.createdAt)}
               </Text>
-              {isOwn && (
-                <Ionicons
-                  name={message.readAt ? 'checkmark-done' : 'checkmark'}
-                  size={14}
-                  color={isOwn ? COLORS.white : COLORS.textLight}
-                  style={styles.readIcon}
-                />
-              )}
+              {isOwn && (() => {
+                const tickStatus = getTickStatus(message);
+                return (
+                  <Ionicons
+                    name={getTickIcon(tickStatus)}
+                    size={14}
+                    color={getTickColor(tickStatus, isOwn)}
+                    style={styles.readIcon}
+                  />
+                );
+              })()}
             </View>
           )}
         </View>
@@ -164,7 +241,12 @@ export function MessageBubble({
 
   if (isMedia) {
     return (
-      <View style={[styles.container, isOwn && styles.ownContainer]}>
+      <View style={[
+        styles.container,
+        isOwn ? styles.ownContainer : styles.otherContainer,
+        !isLastInGroup && styles.groupedContainer,
+      ]}>
+        {!isOwn && renderAvatar()}
         <View style={[styles.bubble, isOwn ? styles.ownBubble : styles.otherBubble]}>
           <MediaMessage
             mediaUrl={mediaUrl!}
@@ -175,14 +257,17 @@ export function MessageBubble({
             <Text style={[styles.time, isOwn && styles.ownTime]}>
               {formatTime(message.createdAt)}
             </Text>
-            {isOwn && (
-              <Ionicons
-                name={message.readAt ? 'checkmark-done' : 'checkmark'}
-                size={14}
-                color={isOwn ? COLORS.white : COLORS.textLight}
-                style={styles.readIcon}
-              />
-            )}
+            {isOwn && (() => {
+              const tickStatus = getTickStatus(message);
+              return (
+                <Ionicons
+                  name={getTickIcon(tickStatus)}
+                  size={14}
+                  color={getTickColor(tickStatus, isOwn)}
+                  style={styles.readIcon}
+                />
+              );
+            })()}
           </View>
         </View>
       </View>
@@ -196,7 +281,12 @@ export function MessageBubble({
   const voiceDuration = message.durationMs || message.audioDurationMs || 0;
   if (message.type === 'voice') {
     return (
-      <View style={[styles.container, isOwn && styles.ownContainer]}>
+      <View style={[
+        styles.container,
+        isOwn ? styles.ownContainer : styles.otherContainer,
+        !isLastInGroup && styles.groupedContainer,
+      ]}>
+        {!isOwn && renderAvatar()}
         <VoiceMessageBubble
           messageId={message.id}
           audioUri={voiceAudioSource}
@@ -211,7 +301,12 @@ export function MessageBubble({
 
   if (message.type === 'dare') {
     return (
-      <View style={[styles.container, isOwn && styles.ownContainer]}>
+      <View style={[
+        styles.container,
+        isOwn ? styles.ownContainer : styles.otherContainer,
+        !isLastInGroup && styles.groupedContainer,
+      ]}>
+        {!isOwn && renderAvatar()}
         <View style={[styles.bubble, styles.dareBubble, isOwn && styles.ownBubble]}>
           <View style={styles.dareHeader}>
             <Ionicons name="dice" size={20} color={COLORS.white} />
@@ -227,7 +322,14 @@ export function MessageBubble({
   }
 
   return (
-    <View style={[styles.container, isOwn && styles.ownContainer]}>
+    <View style={[
+      styles.container,
+      isOwn ? styles.ownContainer : styles.otherContainer,
+      !isLastInGroup && styles.groupedContainer,
+    ]}>
+      {/* Avatar for received messages */}
+      {!isOwn && renderAvatar()}
+
       <View style={[
         styles.bubble,
         isOwn ? styles.ownBubble : styles.otherBubble,
@@ -245,14 +347,17 @@ export function MessageBubble({
             <Text style={[styles.time, isOwn && styles.ownTime]}>
               {formatTime(message.createdAt)}
             </Text>
-            {isOwn && (
-              <Ionicons
-                name={message.readAt ? 'checkmark-done' : 'checkmark'}
-                size={14}
-                color={isOwn ? COLORS.white : COLORS.textLight}
-                style={styles.readIcon}
-              />
-            )}
+            {isOwn && (() => {
+              const tickStatus = getTickStatus(message);
+              return (
+                <Ionicons
+                  name={getTickIcon(tickStatus)}
+                  size={14}
+                  color={getTickColor(tickStatus, isOwn)}
+                  style={styles.readIcon}
+                />
+              );
+            })()}
           </View>
         )}
       </View>
@@ -262,15 +367,36 @@ export function MessageBubble({
 
 const styles = StyleSheet.create({
   container: {
-    marginVertical: 4,
-    paddingHorizontal: 16,
+    flexDirection: 'row',
+    alignItems: 'flex-end',
+    marginVertical: 3,
+    paddingHorizontal: 12,
   },
   ownContainer: {
-    alignItems: 'flex-end',
+    justifyContent: 'flex-end',
+  },
+  otherContainer: {
+    justifyContent: 'flex-start',
+  },
+  groupedContainer: {
+    marginVertical: 1, // Tighter spacing for grouped messages
+  },
+  // Avatar styles
+  avatar: {
+    width: AVATAR_SIZE,
+    height: AVATAR_SIZE,
+    borderRadius: AVATAR_SIZE / 2,
+    marginRight: AVATAR_GAP,
+    backgroundColor: COLORS.backgroundDark,
+  },
+  avatarSpacer: {
+    width: AVATAR_SIZE,
+    marginRight: AVATAR_GAP,
   },
   bubble: {
-    maxWidth: '75%',
-    padding: 12,
+    maxWidth: '70%',
+    paddingHorizontal: 12,
+    paddingVertical: 8,
     borderRadius: 18,
     backgroundColor: COLORS.backgroundDark,
   },
@@ -284,17 +410,17 @@ const styles = StyleSheet.create({
   },
   dareBubble: {
     backgroundColor: COLORS.secondary,
-    maxWidth: '85%',
+    maxWidth: '70%',
   },
   protectedBubble: {
-    padding: 6,
+    paddingHorizontal: 6,
+    paddingVertical: 6,
     backgroundColor: 'transparent',
   },
   // SECURE-REWRITE: Pending/uploading secure photo styles
   pendingBubble: {
-    paddingVertical: 16,
-    paddingHorizontal: 20,
-    minWidth: 160,
+    paddingVertical: 12,
+    paddingHorizontal: 16,
   },
   pendingContent: {
     flexDirection: 'row',
@@ -315,7 +441,6 @@ const styles = StyleSheet.create({
     fontSize: 15,
     color: COLORS.text,
     lineHeight: 20,
-    flexShrink: 1,
   },
   ownText: {
     color: COLORS.white,
@@ -328,13 +453,12 @@ const styles = StyleSheet.create({
   footer: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginTop: 4,
+    marginTop: 2,
     justifyContent: 'flex-end',
   },
   time: {
     fontSize: 11,
     color: COLORS.textLight,
-    marginTop: 4,
   },
   ownTime: {
     color: COLORS.white,

@@ -243,10 +243,12 @@ export const getMediaUrl = query({
       return { url: null, isExpired: true, allowScreenshot: false, shouldBlur: true, watermarkText: null, mediaId: media._id, timerSeconds: null, expiresAt: permission.expiresAt, viewOnce: false, viewMode: media.viewMode ?? 'tap', mediaType: media.mediaType ?? 'image', isMirrored: media.isMirrored ?? false };
     }
 
-    // View-once consumed
-    if (media.viewOnce && permission.viewCount >= 1) {
-      return { url: null, isExpired: true, allowScreenshot: false, shouldBlur: true, watermarkText: null, mediaId: media._id, timerSeconds: null, expiresAt: null, viewOnce: true, viewMode: media.viewMode ?? 'tap', mediaType: media.mediaType ?? 'image', isMirrored: media.isMirrored ?? false };
-    }
+    // VIEW-ONCE-FIX: Don't check viewCount >= 1 here!
+    // The issue was: markViewed increments viewCount, then Convex reactivity re-runs this query,
+    // which sees viewCount >= 1 and returns expired while the viewer is still open.
+    // Instead, view-once expiry is determined ONLY by media.expiredAt (set when viewer closes).
+    // The viewCount check was causing premature expiry during active viewing.
+    // (Removed the viewCount >= 1 check that was here)
 
     const allowScreenshot = permission.canScreenshot &&
       (permission.allowedUntil == null || now < permission.allowedUntil);

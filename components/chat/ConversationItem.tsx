@@ -75,15 +75,27 @@ export function ConversationItem({
     return name.slice(0, 2).toUpperCase() || '??';
   }, [otherUser.name]);
 
+  // System message marker regex (matches [SYSTEM:subtype] prefix)
+  const SYSTEM_MARKER_RE = /^\[SYSTEM:(\w+)\]/;
+
   // 5-7: Safe fallback for corrupted/missing preview content
+  // TASK-2: Strip system message markers from preview
   const getMessagePreview = () => {
     if (!lastMessage) return 'Say hi 👋';
     if (lastMessage.isProtected) return '🔒 Protected Photo';
     if (lastMessage.type === 'image') return '📷 Photo';
+    if (lastMessage.type === 'video') return '🎬 Video';
+    if (lastMessage.type === 'voice') return '🎤 Voice message';
     if (lastMessage.type === 'dare') return '🎲 Dare sent';
     // 5-7: Check for valid content before returning
     const content = lastMessage.content;
     if (typeof content === 'string' && content.trim()) {
+      // TASK-2: Strip [SYSTEM:...] prefix from system messages
+      const markerMatch = content.match(SYSTEM_MARKER_RE);
+      if (markerMatch) {
+        const cleanContent = content.slice(markerMatch[0].length).trim();
+        return cleanContent || 'New message';
+      }
       return content;
     }
     // Fallback for corrupted/missing content
@@ -110,11 +122,7 @@ export function ConversationItem({
             <Text style={styles.avatarInitials}>{avatarInitials}</Text>
           </View>
         )}
-        {otherUser.isVerified && (
-          <View style={styles.verifiedBadge}>
-            <Ionicons name="checkmark-circle" size={16} color={COLORS.primary} />
-          </View>
-        )}
+{/* TASK-1: Removed verified badge checkmark from Messages list avatars */}
         {isPreMatch && (
           <View style={styles.preMatchBadge}>
             <Text style={styles.preMatchText}>Pre-Match</Text>
@@ -173,13 +181,7 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     color: COLORS.white,
   },
-  verifiedBadge: {
-    position: 'absolute',
-    bottom: -2,
-    right: -2,
-    backgroundColor: COLORS.background,
-    borderRadius: 10,
-  },
+  // TASK-1: Removed verifiedBadge style (badge removed from Messages list)
   preMatchBadge: {
     position: 'absolute',
     top: -4,
