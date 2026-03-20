@@ -87,6 +87,9 @@ export function ProtectedMediaBubble({
   const videoPrefetchRef = useRef<Video | null>(null);
   const prefetchStartTimeRef = useRef<number>(0);
 
+  // P1-FIX: Lock the first valid timer value to prevent jump when query hydrates
+  const lockedTimerSecondsRef = useRef<number | null>(null);
+
   // Live countdown state
   const [remainingSec, setRemainingSec] = useState<number | null>(null);
   const [timerLabel, setTimerLabel] = useState<string>('');
@@ -102,7 +105,12 @@ export function ProtectedMediaBubble({
   const touchStartTimeRef = useRef(0);
 
   // Use fetched data or fall back to props (derived values, not hooks)
-  const timerSeconds = mediaInfo?.timerSeconds ?? protectedMedia?.timer ?? 0;
+  // P1-FIX: Lock first valid timer value to prevent visual jump when query hydrates
+  const rawTimerSeconds = mediaInfo?.timerSeconds ?? protectedMedia?.timer ?? 0;
+  if (lockedTimerSecondsRef.current === null && rawTimerSeconds > 0) {
+    lockedTimerSecondsRef.current = rawTimerSeconds;
+  }
+  const timerSeconds = lockedTimerSecondsRef.current ?? rawTimerSeconds;
   const viewingMode = protectedMedia?.viewingMode ?? mediaInfo?.viewMode ?? 'tap';
   const isHoldMode = viewingMode === 'hold';
   const viewOnce = mediaInfo?.viewOnce ?? protectedMedia?.viewOnce ?? false;
