@@ -245,6 +245,7 @@ export const getDiscoverProfiles = query({
       myReports,
       allReports,
       allBlocks,
+      myConversationParticipations,
     ] = await Promise.all([
       // All my swipes (likes/passes)
       ctx.db
@@ -292,6 +293,12 @@ export const getDiscoverProfiles = query({
       ctx.db
         .query('blocks')
         .take(2000),
+      // CONVERSATION PARTNER EXCLUSION: All my conversation participations
+      // Users with existing message threads must not reappear in Discover
+      ctx.db
+        .query('conversationParticipants')
+        .withIndex('by_user', (q) => q.eq('userId', userId))
+        .collect(),
     ]);
 
     // Build Sets for O(1) lookups
@@ -316,6 +323,25 @@ export const getDiscoverProfiles = query({
     // TRUST SIGNALS: Viewer-specific reports (hard exclusion)
     const viewerReportedIds = new Set<string>();
     for (const report of myReports) viewerReportedIds.add(report.reportedUserId as string);
+
+    // CONVERSATION PARTNER EXCLUSION: Build set of users with existing message threads
+    // This ensures users who already have a chat connection don't reappear in Discover
+    const conversationPartnerIds = new Set<string>();
+    if (myConversationParticipations.length > 0) {
+      // Batch fetch all conversations for efficiency
+      const conversations = await Promise.all(
+        myConversationParticipations.map((p) => ctx.db.get(p.conversationId))
+      );
+      for (const conv of conversations) {
+        if (!conv) continue;
+        // Extract partner IDs from participants array (excluding self)
+        for (const participantId of conv.participants) {
+          if (participantId !== userId) {
+            conversationPartnerIds.add(participantId as string);
+          }
+        }
+      }
+    }
 
     // TRUST SIGNALS: Aggregate report counts per user (soft penalty)
     const aggregateReportCounts = new Map<string, number>();
@@ -379,6 +405,8 @@ export const getDiscoverProfiles = query({
       if (blockedUserIds.has(user._id as string)) continue;
       // TRUST: Viewer-specific report exclusion (hard filter)
       if (viewerReportedIds.has(user._id as string)) continue;
+      // CONVERSATION PARTNER EXCLUSION: Users with existing chat threads must not reappear
+      if (conversationPartnerIds.has(user._id as string)) continue;
 
       // Enforcement
       if (user.verificationEnforcementLevel === 'security_only') continue;
@@ -897,27 +925,44 @@ export const getFilterCounts = query({
     const currentUser = await ctx.db.get(userId);
     if (!currentUser) return {};
 
-    const allUsers = await ctx.db.query('users').collect();
     const intentCounts: Record<string, number> = {};
     const activityCounts: Record<string, number> = {};
 
-    for (const user of allUsers) {
-      if (user._id === userId) continue;
-      if (!user.isActive || user.isBanned) continue;
-      if (isUserPaused(user)) continue;
-      if (!currentUser.lookingFor.includes(user.gender)) continue;
+    // P1-001 FIX: Use by_gender index with bounded reads instead of .collect()
+    // Dedupe genders to avoid querying same bucket twice
+    const genders = Array.from(new Set(currentUser.lookingFor ?? []));
+    if (genders.length === 0) return { intentCounts, activityCounts };
 
-      // P0 FIX: Verification is a ranking boost, not a hard filter
-      // Removed verification check - unverified users are included in counts
+    // Track seen users to avoid double-counting if user appears in multiple queries
+    const seenUserIds = new Set<string>();
+    const MAX_PER_GENDER = 2500;
 
-      const userAge = calculateAge(user.dateOfBirth);
-      if (userAge < currentUser.minAge || userAge > currentUser.maxAge) continue;
+    for (const gender of genders) {
+      const users = await ctx.db
+        .query('users')
+        .withIndex('by_gender', (q) => q.eq('gender', gender))
+        .take(MAX_PER_GENDER);
 
-      for (const intent of user.relationshipIntent) {
-        intentCounts[intent] = (intentCounts[intent] || 0) + 1;
-      }
-      for (const activity of user.activities) {
-        activityCounts[activity] = (activityCounts[activity] || 0) + 1;
+      for (const user of users) {
+        if (String(user._id) === String(userId)) continue;
+        if (seenUserIds.has(String(user._id))) continue;
+        seenUserIds.add(String(user._id));
+
+        if (!user.isActive || user.isBanned) continue;
+        if (isUserPaused(user)) continue;
+
+        // P0 FIX: Verification is a ranking boost, not a hard filter
+        // Removed verification check - unverified users are included in counts
+
+        const userAge = calculateAge(user.dateOfBirth);
+        if (userAge < currentUser.minAge || userAge > currentUser.maxAge) continue;
+
+        for (const intent of user.relationshipIntent) {
+          intentCounts[intent] = (intentCounts[intent] || 0) + 1;
+        }
+        for (const activity of user.activities) {
+          activityCounts[activity] = (activityCounts[activity] || 0) + 1;
+        }
       }
     }
 

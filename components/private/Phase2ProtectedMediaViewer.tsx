@@ -313,8 +313,13 @@ export function Phase2ProtectedMediaViewer({
     viewedOnceHoldMessages.add(messageId);
 
     // Cleanup: expire on release (component unmount)
+    // P0-FIX: Guard with hasExpiredRef to prevent duplicate expiration
+    // (handleClose may have already expired via onTouchEnd)
     return () => {
-      markSecurePhotoExpired(conversationId, messageId);
+      if (!hasExpiredRef.current) {
+        hasExpiredRef.current = true;
+        markSecurePhotoExpired(conversationId, messageId);
+      }
     };
   }, [visible, isOnce, isHoldMode, messageId, conversationId, markSecurePhotoExpired]);
 
@@ -419,6 +424,17 @@ export function Phase2ProtectedMediaViewer({
     return () => clearTimer();
   }, [clearTimer]);
 
+  // HOLD-MODE-FIX: Close viewer immediately when finger is released in hold mode
+  // This is critical because the Modal captures touch events, preventing the
+  // original PanResponder from receiving onPanResponderRelease
+  // BUG-FIX: Must call handleClose() (not onClose) to trigger once-view expiry logic
+  const handleHoldModeRelease = useCallback(() => {
+    if (isHoldMode) {
+      console.log('[SECURE-VIEWER] hold-mode: Touch released, closing viewer via handleClose');
+      handleClose();
+    }
+  }, [isHoldMode, handleClose]);
+
   if (!visible || !message) return null;
 
   // Check if already expired
@@ -449,7 +465,12 @@ export function Phase2ProtectedMediaViewer({
   return (
     <Modal visible={visible} transparent animationType="fade" statusBarTranslucent onRequestClose={handleClose}>
       <StatusBar hidden />
-      <View style={styles.container}>
+      <View
+        style={styles.container}
+        // HOLD-MODE-FIX: Detect touch end to close viewer when finger is released
+        onTouchEnd={isHoldMode ? handleHoldModeRelease : undefined}
+        onTouchCancel={isHoldMode ? handleHoldModeRelease : undefined}
+      >
         {/* Media layer - fullscreen (photo or video) */}
         {mediaUri && !mediaLoadError ? (
           <View style={[StyleSheet.absoluteFill, isMirrored && styles.mirrored]}>

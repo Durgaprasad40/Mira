@@ -16,6 +16,7 @@ import { COLORS, GENDER_OPTIONS, ORIENTATION_OPTIONS, RELATIONSHIP_INTENTS, INCO
 import { PRIVATE_INTENT_CATEGORIES } from '@/lib/privateConstants';
 import { Button, Input } from '@/components/ui';
 import { useFilterStore, kmToMiles, milesToKm } from '@/stores/filterStore';
+import { usePrivateProfileStore } from '@/stores/privateProfileStore';
 import { isDemoMode } from '@/hooks/useConvex';
 import { useAuthStore } from '@/stores/authStore';
 import { useMutation, useQuery } from 'convex/react';
@@ -26,7 +27,7 @@ import type { Gender, Orientation } from '@/types';
 // Age and distance limits
 const MIN_AGE = 18;
 const MAX_AGE = 70;
-const MAX_DISTANCE_MILES = 100; // UI shows miles
+const MAX_DISTANCE_MILES = 150; // UI shows miles
 const MAX_DISTANCE_KM = milesToKm(MAX_DISTANCE_MILES); // ~161km stored
 
 // "Looking for" is single-select (exactly 1)
@@ -38,7 +39,7 @@ const MAX_PHASE1_INTENTS = 3;
 
 // Phase-2 intent selection limits
 const MIN_PHASE2_INTENTS = 1;
-const MAX_PHASE2_INTENTS = 5;
+const MAX_PHASE2_INTENTS = 3;
 
 export default function DiscoveryPreferencesScreen() {
   const router = useRouter();
@@ -108,6 +109,23 @@ export default function DiscoveryPreferencesScreen() {
       if (__DEV__) console.log('[Prefs] Cleaned stale Phase-2 intents:', privateIntentKeys.length - cleanedPhase2.length, 'removed');
     }
   }, []); // Run once on mount
+
+  // Phase-2 ONLY: Hydrate filterStore.privateIntentKeys from privateProfileStore.intentKeys
+  // This syncs onboarding-selected intents to the Sort By / filter UI
+  const phase2OnboardingIntents = usePrivateProfileStore((s) => s.intentKeys);
+  useEffect(() => {
+    if (!isPhase2) return;
+
+    // If filterStore has no Phase-2 intents but onboarding has them, sync them
+    if (privateIntentKeys.length === 0 && phase2OnboardingIntents.length > 0) {
+      // Respect max limit when syncing (take first MAX_PHASE2_INTENTS)
+      const toSync = phase2OnboardingIntents.slice(0, MAX_PHASE2_INTENTS);
+      setPrivateIntentKeys(toSync);
+      if (__DEV__) {
+        console.log('[Prefs] Phase-2 hydrated intents from onboarding:', toSync.length);
+      }
+    }
+  }, [isPhase2, phase2OnboardingIntents, privateIntentKeys.length, setPrivateIntentKeys]);
 
   // "Looking for" is single-select — selecting replaces previous selection
   const handleLookingForSelect = (genderValue: Gender) => {
@@ -256,7 +274,7 @@ export default function DiscoveryPreferencesScreen() {
         parsedMaxAge = parsedMinAge;
       }
 
-      // Enforce distance limit (1-100 miles)
+      // Enforce distance limit (1-150 miles)
       parsedDistanceMiles = Math.max(1, Math.min(MAX_DISTANCE_MILES, parsedDistanceMiles));
 
       // Convert miles to km for storage

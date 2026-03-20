@@ -166,13 +166,15 @@ export default function LifeRhythmScreen() {
       if (!isMountedRef.current) return;
 
       // Reverse geocode to get city
-      const [geocode] = await Location.reverseGeocodeAsync({
+      // ONB-014 FIX: Safely handle null/empty result from reverseGeocodeAsync
+      const geocodeResult = await Location.reverseGeocodeAsync({
         latitude: location.coords.latitude,
         longitude: location.coords.longitude,
       });
       // P1 STABILITY: Check mounted before setState after async
       if (!isMountedRef.current) return;
 
+      const geocode = Array.isArray(geocodeResult) && geocodeResult.length > 0 ? geocodeResult[0] : null;
       if (geocode) {
         const detectedCity = geocode.city || geocode.subregion || geocode.region || "";
         if (detectedCity) {

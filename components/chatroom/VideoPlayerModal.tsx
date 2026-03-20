@@ -1,4 +1,4 @@
-import React, { useEffect, useRef } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   View,
   Text,
@@ -10,6 +10,7 @@ import {
 import { useVideoPlayer, VideoView, VideoPlayer } from 'expo-video';
 import { Ionicons } from '@expo/vector-icons';
 import { INCOGNITO_COLORS } from '@/lib/constants';
+import { getVideoUri } from '@/lib/videoCache';
 
 const C = INCOGNITO_COLORS;
 
@@ -38,7 +39,41 @@ interface VideoPlayerModalProps {
 }
 
 export default function VideoPlayerModal({ visible, videoUri, onClose }: VideoPlayerModalProps) {
-  const player = useVideoPlayer(videoUri, (p) => {
+  // VIDEO-CACHE-FIX: Track cached URI state
+  const [cachedUri, setCachedUri] = useState<string>(videoUri);
+  const [isLoading, setIsLoading] = useState(true);
+
+  // VIDEO-CACHE-FIX: Load cached URI when modal opens
+  useEffect(() => {
+    if (!visible || !videoUri) return;
+
+    let mounted = true;
+    setIsLoading(true);
+
+    const loadCachedVideo = async () => {
+      try {
+        const cached = await getVideoUri(videoUri);
+        if (mounted) {
+          setCachedUri(cached);
+          setIsLoading(false);
+        }
+      } catch {
+        if (mounted) {
+          setCachedUri(videoUri);
+          setIsLoading(false);
+        }
+      }
+    };
+
+    loadCachedVideo();
+
+    return () => {
+      mounted = false;
+    };
+  }, [visible, videoUri]);
+
+  // Use cached URI for player
+  const player = useVideoPlayer(cachedUri, (p) => {
     p.loop = false;
     p.play();
   });
@@ -59,7 +94,25 @@ export default function VideoPlayerModal({ visible, videoUri, onClose }: VideoPl
     };
   }, [visible]);
 
-  if (!visible || !videoUri || !player) return null;
+  if (!visible || !videoUri) return null;
+
+  // Show loading indicator while caching
+  if (isLoading || !player) {
+    return (
+      <Modal visible={visible} animationType="fade" onRequestClose={onClose}>
+        <View style={styles.container}>
+          <TouchableOpacity
+            style={styles.closeBtn}
+            onPress={onClose}
+            hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+          >
+            <Ionicons name="close" size={28} color="#FFFFFF" />
+          </TouchableOpacity>
+          <ActivityIndicator size="large" color="#FFFFFF" />
+        </View>
+      </Modal>
+    );
+  }
 
   return (
     <Modal visible={visible} animationType="fade" onRequestClose={onClose}>

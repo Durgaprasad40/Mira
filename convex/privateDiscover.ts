@@ -48,20 +48,43 @@ export const getProfiles = query({
     const runShadow = shouldRunShadowComparison();
 
     // Get blocks for current user (both directions - shared across Phase-1 and Phase-2)
-    const blocksOut = await ctx.db
-      .query('blocks')
-      .withIndex('by_blocker', (q) => q.eq('blockerId', viewerUserId))
-      .collect();
-    const blocksIn = await ctx.db
-      .query('blocks')
-      .withIndex('by_blocked', (q) => q.eq('blockedUserId', viewerUserId))
-      .collect();
+    const [blocksOut, blocksIn, myConversationParticipations] = await Promise.all([
+      ctx.db
+        .query('blocks')
+        .withIndex('by_blocker', (q) => q.eq('blockerId', viewerUserId))
+        .collect(),
+      ctx.db
+        .query('blocks')
+        .withIndex('by_blocked', (q) => q.eq('blockedUserId', viewerUserId))
+        .collect(),
+      // CONVERSATION PARTNER EXCLUSION: Users with existing chats must not reappear
+      ctx.db
+        .query('conversationParticipants')
+        .withIndex('by_user', (q) => q.eq('userId', viewerUserId))
+        .collect(),
+    ]);
 
     // Combine into a set of blocked user IDs
     const blockedUserIds = new Set([
       ...blocksOut.map((b) => b.blockedUserId as string),
       ...blocksIn.map((b) => b.blockerId as string),
     ]);
+
+    // CONVERSATION PARTNER EXCLUSION: Build set of users with existing message threads
+    const conversationPartnerIds = new Set<string>();
+    if (myConversationParticipations.length > 0) {
+      const conversations = await Promise.all(
+        myConversationParticipations.map((p) => ctx.db.get(p.conversationId))
+      );
+      for (const conv of conversations) {
+        if (!conv) continue;
+        for (const participantId of conv.participants) {
+          if (participantId !== viewerUserId) {
+            conversationPartnerIds.add(participantId as string);
+          }
+        }
+      }
+    }
 
     const profiles = await ctx.db
       .query('userPrivateProfiles')
@@ -103,7 +126,9 @@ export const getProfiles = query({
         p.userId !== viewerUserId &&
         p.isSetupComplete &&
         !blockedUserIds.has(p.userId as string) &&
-        !deletedUserIds.has(p.userId as string)
+        !deletedUserIds.has(p.userId as string) &&
+        // CONVERSATION PARTNER EXCLUSION: Users with existing chat threads must not reappear
+        !conversationPartnerIds.has(p.userId as string)
     );
 
     // Compute scores and separate suppressed vs unsuppressed profiles

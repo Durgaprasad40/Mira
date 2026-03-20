@@ -47,7 +47,8 @@ export function VoiceMessageBubble({
 }: VoiceMessageBubbleProps) {
   const [isPlaying, setIsPlaying] = useState(false);
   const [playbackPosition, setPlaybackPosition] = useState(0);
-  const [isUnavailable, setIsUnavailable] = useState(false);
+  // VOICE-FIX: Check for missing/empty URI upfront
+  const [isUnavailable, setIsUnavailable] = useState(!audioUri || audioUri.trim() === '');
   const soundRef = useRef<Audio.Sound | null>(null);
   const isMountedRef = useRef(true);
 
@@ -93,6 +94,12 @@ export function VoiceMessageBubble({
   };
 
   const handlePlayPause = useCallback(async () => {
+    // VOICE-FIX: Early return if no valid audio URI
+    if (!audioUri || audioUri.trim() === '') {
+      setIsUnavailable(true);
+      return;
+    }
+
     try {
       if (isPlaying && soundRef.current) {
         // Pause
@@ -262,16 +269,19 @@ export function VoiceMessageBubble({
 
 const styles = StyleSheet.create({
   container: {
-    maxWidth: '75%',
+    maxWidth: '70%',
     minWidth: 180,
-    padding: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 8,
     borderRadius: 16,
   },
   containerOwn: {
     borderBottomRightRadius: 4,
+    alignSelf: 'flex-end',
   },
   containerOther: {
     borderBottomLeftRadius: 4,
+    alignSelf: 'flex-start',
   },
   content: {
     flexDirection: 'row',

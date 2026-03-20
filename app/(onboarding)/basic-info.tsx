@@ -33,7 +33,7 @@ import { Gender } from "@/types";
 import { isDemoMode, convex } from "@/hooks/useConvex";
 import { useDemoStore } from "@/stores/demoStore";
 import { useAuthSubmit } from "@/hooks/useAuthSubmit";
-import { useQuery } from "convex/react";
+import { useQuery, useMutation } from "convex/react";
 import { api } from "@/convex/_generated/api";
 import { Ionicons } from "@expo/vector-icons";
 import { validateRequired, scrollToFirstInvalid, ValidationRule } from "@/lib/onboardingValidation";
@@ -400,6 +400,9 @@ export default function BasicInfoScreen() {
 
   const { submitEmailRegistration } = useAuthSubmit();
 
+  // BUG-002 FIX: Mutation for persisting basic info to onboarding draft
+  const upsertDraft = useMutation(api.users.upsertOnboardingDraft);
+
   // Debounced nickname availability check (only for new users)
   const checkNicknameAvailability = useCallback(async (handle: string) => {
     // Clear any pending check
@@ -751,17 +754,22 @@ export default function BasicInfoScreen() {
               newUserId = result.userId;
               setAuth(newUserId, "demo_token", result.onboardingComplete, capturedAuthVersion);
               if (result.onboardingComplete) {
+                // ONB-001 FIX: Reset isSubmitting before early return to prevent stuck button
+                setIsSubmitting(false);
                 router.replace("/(main)/(tabs)/home");
                 return;
               }
+              setIsSubmitting(false);
               setStep("consent");
               router.push("/(onboarding)/consent" as any);
               return;
             } catch (loginError: any) {
+              setIsSubmitting(false);
               Alert.alert("Error", loginError.message || "Failed to login. Please check your password.");
               return;
             }
           } else {
+            setIsSubmitting(false);
             Alert.alert("Error", signUpError.message || "Failed to create account");
             return;
           }
@@ -847,6 +855,22 @@ export default function BasicInfoScreen() {
           setIsSubmitting(false);
           return; // DO NOT navigate if token persistence fails
         }
+
+        // BUG-002 FIX: Persist basic info to onboarding draft (non-blocking)
+        upsertDraft({
+          userId: result.userId,
+          patch: {
+            basicInfo: {
+              name: [firstName, lastName].filter(Boolean).join(" ").trim(),
+              handle: nickname,
+              dateOfBirth,
+              gender,
+            },
+            progress: {
+              lastStepKey: 'basic_info',
+            },
+          },
+        }).catch(console.error);
 
         setStep("consent");
         router.push("/(onboarding)/consent" as any);
@@ -1119,9 +1143,11 @@ export default function BasicInfoScreen() {
                     setLgbtqError("");
                     // Save-as-you-go: update demoProfile immediately
                     if (isDemoMode && userId) {
+                      // ONB-008 FIX: Compute new value, update React state, then save
                       const newLgbtqSelf = lgbtqSelf.includes(option.value)
                         ? lgbtqSelf.filter((o) => o !== option.value)
                         : [...lgbtqSelf, option.value];
+                      setLgbtqSelf(newLgbtqSelf);
                       useDemoStore.getState().saveDemoProfile(userId, { lgbtqSelf: newLgbtqSelf });
                     }
                   }

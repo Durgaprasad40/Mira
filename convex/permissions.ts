@@ -1,5 +1,6 @@
 import { v } from 'convex/values';
 import { mutation } from './_generated/server';
+import { validateSessionToken } from './helpers';
 
 // Sender controls screenshot permission: OFF | ON | ON_FOR_10_MIN
 export const setScreenshotPermission = mutation({
@@ -7,16 +8,22 @@ export const setScreenshotPermission = mutation({
     mediaId: v.id('media'),
     recipientId: v.id('users'),
     mode: v.union(v.literal('OFF'), v.literal('ON'), v.literal('ON_FOR_10_MIN')),
-    senderId: v.id('users'),
+    token: v.string(), // P0-003 FIX: Session token for server-side auth
   },
   handler: async (ctx, args) => {
-    const { mediaId, recipientId, mode, senderId } = args;
+    const { mediaId, recipientId, mode, token } = args;
     const now = Date.now();
+
+    // P0-003 FIX: Validate session and derive user from trusted server context
+    const senderId = await validateSessionToken(ctx, token);
+    if (!senderId) {
+      throw new Error('Unauthorized: invalid or expired session');
+    }
 
     const media = await ctx.db.get(mediaId);
     if (!media) throw new Error('Media not found');
 
-    // Only owner can change permissions
+    // Only owner can change permissions (now using server-validated senderId)
     if (media.ownerId !== senderId) {
       throw new Error('Not authorized — only media owner can change permissions');
     }

@@ -150,21 +150,17 @@ export const getUserById = query({
 // Update profile prompts (icebreakers)
 export const updateProfilePrompts = mutation({
   args: {
-    // IDOR-P1-001 FIX: Removed userId - now derived from server auth
+    token: v.string(), // SESSION AUTH: Validate session token server-side
     prompts: v.array(v.object({
       question: v.string(),
       answer: v.string(),
     })),
   },
   handler: async (ctx, args) => {
-    // IDOR-P1-001 FIX: Derive caller identity from server auth
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) {
-      throw new Error('Unauthorized: authentication required');
-    }
-    const userId = await resolveUserIdByAuthId(ctx, identity.subject);
+    // SESSION AUTH: Validate token and get userId (same pattern as photos.ts)
+    const userId = await validateSessionToken(ctx, args.token);
     if (!userId) {
-      throw new Error('Unauthorized: user not found');
+      throw new Error('Unauthorized: invalid or expired session');
     }
 
     const user = await ctx.db.get(userId);
@@ -182,8 +178,8 @@ export const updateProfilePrompts = mutation({
       }
     }
 
-    // Max 3 prompts, answer max 200 chars
-    const cleaned = args.prompts.slice(0, 3).map((p) => ({
+    // Exactly 4 prompts (one per section), answer max 200 chars
+    const cleaned = args.prompts.slice(0, 4).map((p) => ({
       question: p.question.trim().slice(0, 100),
       answer: p.answer.trim().slice(0, 200),
     }));

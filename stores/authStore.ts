@@ -309,6 +309,15 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
       }
     }
 
+    // P0-001 FIX: Reset demoDmStore to prevent cross-user DM leakage in demo mode
+    try {
+      const { useDemoDmStore } = require('@/stores/demoDmStore');
+      useDemoDmStore.getState()?.reset?.();
+      if (__DEV__) console.log('[AUTH] logout: cleared demoDmStore');
+    } catch (error) {
+      console.warn('[AUTH] logout: failed to reset demoDmStore', error);
+    }
+
     try {
       const { useVerificationStore } = require('@/stores/verificationStore');
       useVerificationStore.getState()?.resetVerification?.();
@@ -317,17 +326,36 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
       console.warn('[AUTH] logout: failed to reset verificationStore', error);
     }
 
+    // P0-PRIVACY-FIX: Reset privacy settings to prevent cross-user leakage
+    try {
+      const { usePrivacyStore } = require('@/stores/privacyStore');
+      usePrivacyStore.getState()?.resetPrivacy?.();
+      if (__DEV__) console.log('[AUTH] logout: cleared privacyStore');
+    } catch (error) {
+      console.warn('[AUTH] logout: failed to reset privacyStore', error);
+    }
+
     try {
       const { useConfessionStore } = require('@/stores/confessionStore');
       const confessionState = useConfessionStore.getState();
       if (confessionState?.reset) {
         confessionState.reset();
       } else {
+        // P0-002 FIX: Clear ALL user-specific state including rate limits and block lists
         useConfessionStore.setState({
           seeded: false,
           confessions: [],
-          myReplies: [],
+          userReactions: {},
+          replies: {},
+          chats: [],
+          secretCrushes: [],
           confessionThreads: {},
+          reportedIds: [],
+          blockedIds: [],
+          seenTaggedConfessionIds: [],
+          connectedConfessionIds: [],
+          confessionTimestamps: [],
+          revealSkippedChats: {},
         });
       }
       if (__DEV__) console.log('[AUTH] logout: cleared confessionStore');
@@ -377,6 +405,56 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
       if (__DEV__) console.log('[AUTH] logout: cleared blockStore');
     } catch (error) {
       console.warn('[AUTH] logout: failed to reset blockStore', error);
+    }
+
+    // P0-002 FIX: Clear filterStore to prevent cross-user filter bleed
+    try {
+      const { useFilterStore } = require('@/stores/filterStore');
+      useFilterStore.getState().clearFilters();
+      if (__DEV__) console.log('[AUTH] logout: cleared filterStore');
+    } catch (error) {
+      console.warn('[AUTH] logout: failed to reset filterStore', error);
+    }
+
+    // P0-002 FIX: Clear photoBlurStore to prevent cross-user blur settings bleed
+    try {
+      const { usePhotoBlurStore } = require('@/stores/photoBlurStore');
+      usePhotoBlurStore.setState({ userSettings: {} });
+      if (__DEV__) console.log('[AUTH] logout: cleared photoBlurStore');
+    } catch (error) {
+      console.warn('[AUTH] logout: failed to reset photoBlurStore', error);
+    }
+
+    // P0-002 FIX: Clear subscriptionStore to prevent cross-user subscription bleed
+    try {
+      const { useSubscriptionStore } = require('@/stores/subscriptionStore');
+      useSubscriptionStore.setState({
+        tier: 'free',
+        expiresAt: null,
+        trialEndsAt: null,
+        isInTrial: false,
+        isPremium: false,
+        likesRemaining: 50,
+        superLikesRemaining: 1,
+        messagesRemaining: 5,
+        rewindsRemaining: 0,
+        boostsRemaining: 0,
+        likesResetAt: 0,
+        superLikesResetAt: 0,
+        messagesResetAt: 0,
+      });
+      if (__DEV__) console.log('[AUTH] logout: cleared subscriptionStore');
+    } catch (error) {
+      console.warn('[AUTH] logout: failed to reset subscriptionStore', error);
+    }
+
+    // P0-003 FIX: Stop GPS tracking to prevent battery drain and privacy leak
+    try {
+      const { useLocationStore } = require('@/stores/locationStore');
+      useLocationStore.getState().stopLocationTracking();
+      if (__DEV__) console.log('[AUTH] logout: stopped location tracking');
+    } catch (error) {
+      console.warn('[AUTH] logout: failed to stop location tracking', error);
     }
 
     // STEP 4: Finish logout - clear in-memory state

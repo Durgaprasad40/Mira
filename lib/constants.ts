@@ -53,7 +53,7 @@ export const VALIDATION = {
   MAX_PHOTOS: 6,
   MIN_PHOTOS: 1,
   MIN_DISTANCE: 1,
-  MAX_DISTANCE: 100,
+  MAX_DISTANCE: 150,
   PASSWORD_MIN_LENGTH: 8,
   OTP_LENGTH: 6,
 };
@@ -394,13 +394,32 @@ export const MICRO_SURVEY_QUESTIONS = [
 ];
 
 // Profile Prompt Questions (LEGACY - kept for backward compatibility)
+// Profile Prompts - Users select exactly 4 prompts (1 per section)
+// Minimum: 4 required, Maximum: 4 allowed (fixed)
+export const PROFILE_PROMPTS_MIN = 4;
+export const PROFILE_PROMPTS_MAX = 4;
+
+// Section-based prompt system constants
+export const PROMPTS_PER_SECTION = 1; // Exactly one question must be answered per section
+export const TOTAL_SECTIONS = 4; // Builder, Performer, Seeker, Grounded
+
 export const PROFILE_PROMPT_QUESTIONS = [
-  { id: 'perfect_day', text: 'My perfect first date would be...' },
-  { id: 'fun_fact', text: 'A fun fact about me...' },
-  { id: 'dealbreaker', text: 'My biggest dealbreaker is...' },
-  { id: 'superpower', text: 'If I had a superpower it would be...' },
-  { id: 'love_language', text: 'My love language is...' },
-  { id: 'bucket_list', text: 'Top of my bucket list...' },
+  { id: 'perfect_weekend', text: 'My perfect weekend looks like…' },
+  { id: 'known_for', text: "I'm known for…" },
+  { id: 'green_flag_me', text: 'A green flag in me is…' },
+  { id: 'fall_for_you', text: "I'll fall for you if…" },
+  { id: 'my_vibe', text: 'My vibe is…' },
+  { id: 'win_me_over', text: 'The way to win me over is…' },
+  { id: 'competitive', text: "I'm overly competitive about…" },
+  { id: 'random_skill', text: 'A random skill I have…' },
+  { id: 'simple_pleasures', text: 'My simple pleasures…' },
+  { id: 'geek_out', text: 'I geek out on…' },
+  { id: 'friends_describe', text: 'My friends describe me as…' },
+  { id: 'green_flag_look', text: 'Biggest green flag I look for…' },
+  { id: 'comfort_activity', text: 'My comfort activity…' },
+  { id: 'toxic_trait', text: 'My toxic trait (funny)…' },
+  { id: 'dream_life', text: 'Dream life looks like…' },
+  { id: 'one_thing', text: 'One thing you should know about me…' },
 ];
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -498,15 +517,24 @@ export const SECTION_LABELS: Record<PromptSectionKey, { title: string; emoji: st
 
 // Section prompts data structure
 export interface SectionPromptAnswer {
+  section: PromptSectionKey; // Which section this prompt belongs to
   question: string;
   answer: string;
 }
 
+// Legacy interface (kept for backward compatibility)
 export interface SectionPrompts {
   builder: SectionPromptAnswer[];
   performer: SectionPromptAnswer[];
   seeker: SectionPromptAnswer[];
   grounded: SectionPromptAnswer[];
+}
+
+// Fixed 4-prompt storage: exactly one answer per section
+export interface ProfilePromptEntry {
+  section: PromptSectionKey;
+  question: string;
+  answer: string;
 }
 
 // Combined prompts data structure for storage
@@ -516,6 +544,7 @@ export interface ProfilePromptsV2 {
 }
 
 // Constants for validation
+export const PROMPT_ANSWER_MIN_LENGTH = 20; // Minimum characters per prompt answer
 export const PROMPT_ANSWER_MAX_LENGTH = 200;
 export const MIN_ANSWERS_PER_SECTION = 1;
 

@@ -27,7 +27,7 @@ const MAX_VISIBLE_LIKES = 5;
 export default function LikesScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
-  const { userId } = useAuthStore();
+  const { userId, token } = useAuthStore();
 
   const convexLikes = useQuery(
     api.likes.getLikesReceived,
@@ -105,7 +105,7 @@ export default function LikesScreen() {
 
     try {
       const result = await swipeMutation({
-        authUserId: userId as string,
+        token: token!,
         toUserId: like.userId as any,
         action: 'like' as any,
       });
@@ -125,7 +125,7 @@ export default function LikesScreen() {
 
     try {
       await swipeMutation({
-        authUserId: userId as string,
+        token: token!,
         toUserId: like.userId as any,
         action: 'pass' as any,
       });
@@ -162,6 +162,15 @@ export default function LikesScreen() {
             {like.name}, {like.age}
           </Text>
         </View>
+
+        {/* Standout message (if present) */}
+        {like.message && (
+          <View style={styles.standoutMessageContainer}>
+            <Text style={styles.standoutMessageText} numberOfLines={2}>
+              "{like.message}"
+            </Text>
+          </View>
+        )}
 
         {/* Action buttons */}
         <View style={styles.cardActions}>
@@ -292,6 +301,17 @@ const styles = StyleSheet.create({
     fontSize: 15,
     fontWeight: '600',
     color: COLORS.text,
+  },
+  // Standout message display
+  standoutMessageContainer: {
+    paddingHorizontal: 10,
+    paddingBottom: 8,
+  },
+  standoutMessageText: {
+    fontSize: 12,
+    fontStyle: 'italic',
+    color: '#2196F3', // Super like blue
+    lineHeight: 16,
   },
   cardActions: {
     flexDirection: 'row',

@@ -1,6 +1,7 @@
-import React, { useState, useEffect, useRef } from 'react';
-import { View, Text, StyleSheet, Pressable } from 'react-native';
+import React, { useState, useEffect, useRef, useMemo, useCallback } from 'react';
+import { View, Text, StyleSheet, PanResponder, GestureResponderEvent } from 'react-native';
 import { Image } from 'expo-image';
+import { Video, AVPlaybackStatus } from 'expo-av';
 import { Ionicons } from '@expo/vector-icons';
 import { useQuery } from 'convex/react';
 import { api } from '@/convex/_generated/api';
@@ -35,6 +36,9 @@ interface ProtectedMediaBubbleProps {
   isExpired?: boolean;
   expiredAt?: number;    // Wall-clock timestamp when expired (for auto-removal)
   isOwn: boolean;
+  // SENDER-TIMER-FIX: New props for sender status display
+  viewOnce?: boolean;         // Whether this is view-once media
+  recipientOpened?: boolean;  // Whether recipient has opened the media
   // Handlers
   onPress?: () => void;           // Tap mode: open viewer
   onHoldStart?: () => void;       // Hold mode: press in => open viewer
@@ -51,31 +55,134 @@ export function ProtectedMediaBubble({
   isExpired: isExpiredProp,
   expiredAt,
   isOwn,
+  viewOnce: viewOnceProp,
+  recipientOpened: recipientOpenedProp,
   onPress,
   onHoldStart,
   onHoldEnd,
   onExpire,
 }: ProtectedMediaBubbleProps) {
+  // ============================================================================
+  // HOOKS-FIX: ALL hooks must be declared at the top, BEFORE any early returns
+  // This ensures hooks are called in the same order on every render
+  // ============================================================================
+
   // Fetch media info from Convex if mediaId is provided
   const mediaInfo = useQuery(
     api.media.getMediaInfo,
     mediaId && userId ? { mediaId: mediaId as any, userId: userId as any } : 'skip'
   );
 
-  // Use fetched data or fall back to props
-  const timerSeconds = mediaInfo?.timerSeconds ?? protectedMedia?.timer ?? 0;
-  const viewingMode = protectedMedia?.viewingMode ?? 'tap';
+  // PREFETCH-FIX: Fetch media URL for prefetching (only if not expired and mediaId exists)
+  // Note: We use isExpiredProp here since isExpired derived value isn't available yet
+  const mediaUrlData = useQuery(
+    api.protectedMedia.getMediaUrl,
+    mediaId && userId && !isExpiredProp
+      ? { messageId: messageId as any, userId: userId as any }
+      : 'skip'
+  );
+
+  // PREFETCH-FIX-V2: Refs for prefetching
+  const hasPrefetchedRef = useRef(false);
+  const videoPrefetchRef = useRef<Video | null>(null);
+  const prefetchStartTimeRef = useRef<number>(0);
+
+  // P1-FIX: Lock the first valid timer value to prevent jump when query hydrates
+  const lockedTimerSecondsRef = useRef<number | null>(null);
+
+  // Live countdown state
+  const [remainingSec, setRemainingSec] = useState<number | null>(null);
+  const [timerLabel, setTimerLabel] = useState<string>('');
+  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const prevRemainingSec = useRef<number | null>(null);
+
+  // AUTO-HIDE: State to hide expired messages after 60s
+  const [isAutoHidden, setIsAutoHidden] = useState(false);
+  const autoHideTimerStartedRef = useRef(false);
+
+  // HOLD-FIX-V2: Refs for PanResponder (must be before useMemo)
+  const holdActiveRef = useRef(false);
+  const touchStartTimeRef = useRef(0);
+
+  // Use fetched data or fall back to props (derived values, not hooks)
+  // P1-FIX: Lock first valid timer value to prevent visual jump when query hydrates
+  const rawTimerSeconds = mediaInfo?.timerSeconds ?? protectedMedia?.timer ?? 0;
+  if (lockedTimerSecondsRef.current === null && rawTimerSeconds > 0) {
+    lockedTimerSecondsRef.current = rawTimerSeconds;
+  }
+  const timerSeconds = lockedTimerSecondsRef.current ?? rawTimerSeconds;
+  const viewingMode = protectedMedia?.viewingMode ?? mediaInfo?.viewMode ?? 'tap';
   const isHoldMode = viewingMode === 'hold';
   const viewOnce = mediaInfo?.viewOnce ?? protectedMedia?.viewOnce ?? false;
   const canScreenshot = mediaInfo?.canScreenshot ?? protectedMedia?.screenshotAllowed ?? false;
   const watermark = mediaInfo?.watermarkEnabled ?? protectedMedia?.watermark ?? false;
   const isExpired = mediaInfo?.isExpired ?? isExpiredProp ?? false;
 
-  // Live countdown state — uses shared helper to match Phase2ProtectedMediaViewer exactly
-  const [remainingSec, setRemainingSec] = useState<number | null>(null);
-  const [timerLabel, setTimerLabel] = useState<string>('');
-  const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const prevRemainingSec = useRef<number | null>(null);
+  // PanResponder for hold mode - must be declared before any early returns
+  const panResponder = useMemo(() => PanResponder.create({
+    onStartShouldSetPanResponder: () => true,
+    onMoveShouldSetPanResponder: () => false,
+    onPanResponderTerminationRequest: () => false,
+
+    onPanResponderGrant: (_evt: GestureResponderEvent) => {
+      touchStartTimeRef.current = Date.now();
+      if (isHoldMode && onHoldStart) {
+        holdActiveRef.current = true;
+        log.info('[SECURE_HOLD]', 'grant (hold start)', { messageId });
+        onHoldStart();
+      }
+    },
+
+    onPanResponderMove: () => {
+      // HOLD-FIX-V2: Do nothing on move - hold stays active
+    },
+
+    onPanResponderRelease: () => {
+      const touchDuration = Date.now() - touchStartTimeRef.current;
+
+      if (isHoldMode && holdActiveRef.current && onHoldEnd) {
+        holdActiveRef.current = false;
+        log.info('[SECURE_HOLD]', 'release (hold end)', { messageId, touchDuration });
+        onHoldEnd();
+      } else if (!isHoldMode && onPress && touchDuration < 300) {
+        log.info('[SECURE_TAP]', 'tap', { messageId, touchDuration });
+        onPress();
+      }
+    },
+
+    onPanResponderTerminate: () => {
+      if (isHoldMode && holdActiveRef.current && onHoldEnd) {
+        holdActiveRef.current = false;
+        log.info('[SECURE_HOLD]', 'terminated', { messageId });
+        onHoldEnd();
+      }
+    },
+  }), [isHoldMode, onHoldStart, onHoldEnd, onPress, messageId]);
+
+  // VIDEO-PREFETCH: Callback when video is preloaded
+  const handleVideoPrefetchLoad = useCallback((status: AVPlaybackStatus) => {
+    if (status.isLoaded) {
+      const prefetchTime = Date.now() - prefetchStartTimeRef.current;
+      log.info('[SECURE_BUBBLE]', 'video prefetch complete', { messageId, prefetchTime });
+    }
+  }, [messageId]);
+
+  // Prefetch effect
+  useEffect(() => {
+    if (mediaUrlData?.url && !hasPrefetchedRef.current && !isExpired) {
+      hasPrefetchedRef.current = true;
+      prefetchStartTimeRef.current = Date.now();
+
+      const isVideoMedia = mediaUrlData?.mediaType === 'video';
+
+      if (isVideoMedia) {
+        log.info('[SECURE_BUBBLE]', 'video prefetch started', { messageId, url: mediaUrlData.url.substring(0, 50) });
+      } else {
+        Image.prefetch(mediaUrlData.url).catch(() => {});
+        log.info('[SECURE_BUBBLE]', 'image prefetch started', { messageId });
+      }
+    }
+  }, [mediaUrlData?.url, mediaUrlData?.mediaType, isExpired, messageId]);
 
   // Calculate remaining time from wall-clock using shared countdown helper
   useEffect(() => {
@@ -87,27 +194,21 @@ export function ProtectedMediaBubble({
     }
 
     const updateRemaining = () => {
-      // Use shared countdown calculation (matches viewer exactly)
       const countdown = calculateProtectedMediaCountdown(timerEndsAt);
 
-      // Only update state when value changes (reduces rerenders, matches viewer)
       if (countdown.remainingSeconds !== prevRemainingSec.current) {
         prevRemainingSec.current = countdown.remainingSeconds;
         setRemainingSec(countdown.remainingSeconds);
         setTimerLabel(countdown.label);
       }
 
-      // Check if expired
       if (countdown.expired && onExpire) {
         log.info('[SECURE_BUBBLE]', 'timer expired', { messageId });
         onExpire();
       }
     };
 
-    // Initial update
     updateRemaining();
-
-    // Update every 1000ms (1s) - sufficient for seconds-based countdown in list view
     intervalRef.current = setInterval(updateRemaining, 1000);
 
     return () => {
@@ -126,19 +227,75 @@ export function ProtectedMediaBubble({
       remainingSec,
       isExpired,
       expiredAt,
+      isOwn,
     });
-  }, [messageId, viewingMode, remainingSec, isExpired, expiredAt]);
+  }, [messageId, viewingMode, remainingSec, isExpired, expiredAt, isOwn]);
 
-  // Auto-hide after 60 seconds post-expiry
-  if (isExpired && expiredAt) {
-    const timeSinceExpiry = Date.now() - expiredAt;
-    if (timeSinceExpiry > AUTO_REMOVE_DELAY) {
-      // Return null to hide the message entirely
-      return null;
+  // AUTO-HIDE: Start 60-second timer when message expires to auto-remove from UI
+  useEffect(() => {
+    // Only start timer once when expired
+    if (!isExpired || autoHideTimerStartedRef.current) {
+      return;
     }
+
+    autoHideTimerStartedRef.current = true;
+
+    // Calculate remaining time until auto-hide
+    // If expiredAt is provided, account for time already passed
+    const alreadyExpiredFor = expiredAt ? Date.now() - expiredAt : 0;
+    const remainingDelay = Math.max(0, AUTO_REMOVE_DELAY - alreadyExpiredFor);
+
+    // If already past 60s, hide immediately
+    if (remainingDelay === 0) {
+      log.info('[SECURE_BUBBLE]', 'auto-hide immediate', { messageId, alreadyExpiredFor });
+      setIsAutoHidden(true);
+      return;
+    }
+
+    log.info('[SECURE_BUBBLE]', 'auto-hide timer started', { messageId, remainingDelay });
+
+    const timer = setTimeout(() => {
+      log.info('[SECURE_BUBBLE]', 'auto-hide triggered', { messageId });
+      setIsAutoHidden(true);
+    }, remainingDelay);
+
+    return () => {
+      clearTimeout(timer);
+    };
+  }, [isExpired, expiredAt, messageId]);
+
+  // ============================================================================
+  // END OF HOOKS - Early returns are safe below this point
+  // ============================================================================
+
+  // Determine if we should show hidden video prefetcher
+  const shouldPrefetchVideo = mediaUrlData?.url &&
+    mediaUrlData?.mediaType === 'video' &&
+    hasPrefetchedRef.current &&
+    !isExpired;
+
+  // Determine timer display using shared countdown formatting
+  const hasActiveTimer = remainingSec !== null && remainingSec > 0;
+  const displayTimerLabel = hasActiveTimer ? timerLabel : null;
+
+  // SENDER-TIMER-FIX: Improved sender status display
+  // Show for sender when:
+  // 1. Recipient has opened (recipientOpenedProp) AND timer is active, OR
+  // 2. View-once was opened (recipientOpenedProp but no timer)
+  const isViewOnceMedia = viewOnceProp ?? viewOnce;
+  const recipientHasOpened = recipientOpenedProp ?? false;
+
+  // Sender sees timer countdown if recipient opened timed media
+  const showSenderTimer = isOwn && hasActiveTimer && recipientHasOpened;
+  // Sender sees "Opened" indicator for view-once (no timer, but opened)
+  const showSenderViewOnceOpened = isOwn && isViewOnceMedia && recipientHasOpened && !hasActiveTimer;
+
+  // AUTO-HIDE: Return null when auto-hide timer has fired (60s after expiry)
+  if (isAutoHidden) {
+    return null;
   }
 
-  // Expired state: compact pill
+  // Expired state: compact pill (shows for up to 60s after expiry)
   if (isExpired) {
     return (
       <View style={styles.expiredPill}>
@@ -148,46 +305,17 @@ export function ProtectedMediaBubble({
     );
   }
 
-  // Determine timer display using shared countdown formatting
-  const hasActiveTimer = remainingSec !== null && remainingSec > 0;
-  const displayTimerLabel = hasActiveTimer ? timerLabel : null;
-
-  // Handle press events based on mode
-  const handlePressIn = () => {
-    if (isHoldMode && onHoldStart) {
-      log.info('[SECURE_HOLD]', 'pressIn', { messageId });
-      onHoldStart();
-    }
-  };
-
-  const handlePressOut = () => {
-    if (isHoldMode && onHoldEnd) {
-      log.info('[SECURE_HOLD]', 'pressOut', { messageId });
-      onHoldEnd();
-    }
-  };
-
-  const handlePress = () => {
-    if (!isHoldMode && onPress) {
-      onPress();
-    }
-  };
-
   // Phase-1 style: Blurred tile matching MediaMessage.tsx exactly
   const localUri = protectedMedia?.localUri;
   const isVideo = protectedMedia?.mediaType === 'video';
   const canBlur = localUri ? !isContentUri(localUri) : true;
   const isMirrored = protectedMedia?.isMirrored === true;
 
-  return (
-    <Pressable
-      onPressIn={handlePressIn}
-      onPressOut={handlePressOut}
-      onPress={handlePress}
-      style={({ pressed }) => [
-        styles.container,
-        pressed && !isHoldMode && styles.pressed,
-      ]}
+  // Main bubble content
+  const bubbleContent = (
+    <View
+      {...panResponder.panHandlers}
+      style={styles.container}
     >
       {/* Blurred thumbnail image */}
       {localUri && (
@@ -206,8 +334,8 @@ export function ProtectedMediaBubble({
         </View>
       )}
 
-      {/* Timer badge (bottom-left) - matches viewer countdown exactly */}
-      {displayTimerLabel && (
+      {/* Timer badge (bottom-left) - for RECEIVER only, matches viewer countdown */}
+      {displayTimerLabel && !isOwn && (
         <View style={styles.timerBadge}>
           <Ionicons name="time-outline" size={10} color="#FFFFFF" />
           <Text style={styles.timerText}>{displayTimerLabel}</Text>
@@ -223,8 +351,49 @@ export function ProtectedMediaBubble({
 
       {/* Semi-transparent overlay */}
       <View style={[styles.blurOverlay, !canBlur && styles.darkOverlay]} />
-    </Pressable>
+
+      {/* VIDEO-PREFETCH: Hidden video for preloading */}
+      {shouldPrefetchVideo && (
+        <Video
+          ref={videoPrefetchRef}
+          source={{ uri: mediaUrlData!.url }}
+          style={styles.hiddenPrefetch}
+          shouldPlay={false}
+          isMuted={true}
+          onLoad={handleVideoPrefetchLoad}
+        />
+      )}
+    </View>
   );
+
+  // SENDER-TIMER-FIX: Wrap with status indicator for sender
+  if (showSenderTimer) {
+    return (
+      <View style={styles.senderWrapper}>
+        {bubbleContent}
+        {/* Timer countdown badge for sender */}
+        <View style={styles.senderTimerBadge}>
+          <Ionicons name="eye" size={10} color={COLORS.primary} />
+          <Text style={styles.senderTimerText}>Viewing • {timerLabel}</Text>
+        </View>
+      </View>
+    );
+  }
+
+  // SENDER-TIMER-FIX: Show "Opened" for view-once media that was opened
+  if (showSenderViewOnceOpened) {
+    return (
+      <View style={styles.senderWrapper}>
+        {bubbleContent}
+        <View style={styles.senderOpenedBadge}>
+          <Ionicons name="eye" size={10} color={COLORS.success} />
+          <Text style={styles.senderOpenedText}>Opened</Text>
+        </View>
+      </View>
+    );
+  }
+
+  return bubbleContent;
 }
 
 // Phase-1 styles matching MediaMessage.tsx exactly
@@ -235,9 +404,6 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     overflow: 'hidden',
     backgroundColor: '#1E1E2E',
-  },
-  pressed: {
-    opacity: 0.7,
   },
   thumbnail: {
     width: '100%',
@@ -305,5 +471,48 @@ const styles = StyleSheet.create({
     fontSize: 11,
     color: COLORS.textMuted,
     fontWeight: '500',
+  },
+  // VIDEO-PREFETCH: Hidden element for preloading video
+  hiddenPrefetch: {
+    width: 1,
+    height: 1,
+    position: 'absolute',
+    opacity: 0,
+  },
+  // SENDER-TIMER: Wrapper for bubble + external timer
+  senderWrapper: {
+    alignItems: 'flex-end',
+  },
+  // SENDER-TIMER: External timer badge below bubble
+  senderTimerBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    marginTop: 4,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    backgroundColor: 'rgba(155, 125, 196, 0.15)',
+    borderRadius: 10,
+  },
+  senderTimerText: {
+    fontSize: 10,
+    color: COLORS.primary,
+    fontWeight: '600',
+  },
+  // SENDER-TIMER-FIX: "Opened" badge for view-once media
+  senderOpenedBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    marginTop: 4,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    backgroundColor: 'rgba(76, 175, 80, 0.15)',
+    borderRadius: 10,
+  },
+  senderOpenedText: {
+    fontSize: 10,
+    color: COLORS.success,
+    fontWeight: '600',
   },
 });

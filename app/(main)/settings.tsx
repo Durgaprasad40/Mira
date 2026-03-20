@@ -70,10 +70,12 @@ export default function SettingsScreen() {
   const togglePhotoBlurMut = isDemoMode ? null : useMutation(api.users.togglePhotoBlur);
   const toggleShowLastSeenMut = useMutation(api.users.toggleShowLastSeen);
 
-  const [incognitoEnabled, setIncognitoEnabled] = useState(currentUser?.incognitoMode || false);
+  // P1-016 FIX: Track if settings have been hydrated from currentUser to prevent flicker
+  const [settingsHydrated, setSettingsHydrated] = useState(false);
+  const [incognitoEnabled, setIncognitoEnabled] = useState(false);
   const [pauseEnabled, setPauseEnabled] = useState(false);
-  const [showLastSeenEnabled, setShowLastSeenEnabled] = useState(currentUser?.showLastSeen !== false);
-  const [blurEnabled, setBlurEnabled] = useState(currentUser?.photoBlurred === true);
+  const [showLastSeenEnabled, setShowLastSeenEnabled] = useState(true);
+  const [blurEnabled, setBlurEnabled] = useState(false);
   const [showBlurNotice, setShowBlurNotice] = useState(false);
 
   // ── Hidden Dev Panel (7 taps on title) ──
@@ -145,6 +147,8 @@ export default function SettingsScreen() {
         currentUser.discoveryPausedUntil > Date.now();
       setPauseEnabled(isPaused);
       setBlurEnabled(currentUser.photoBlurred === true);
+      // P1-016 FIX: Mark settings as hydrated to prevent flicker
+      setSettingsHydrated(true);
     }
   }, [currentUser]);
 
@@ -277,6 +281,8 @@ export default function SettingsScreen() {
         </TouchableOpacity>
       </View>
 
+      {/* P1-016 FIX: Only render Privacy toggles after settings hydrated to prevent flicker */}
+      {settingsHydrated && (
       <View style={styles.section}>
         <Text style={styles.sectionTitle}>Privacy</Text>
 
@@ -346,6 +352,7 @@ export default function SettingsScreen() {
           />
         </View>
       </View>
+      )}
 
       <View style={styles.section}>
         <Text style={styles.sectionTitle}>Nearby</Text>

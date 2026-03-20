@@ -151,6 +151,7 @@ export const getMatches = query({
         matchId: match._id,
         conversationId: conversation?._id,
         matchedAt: match.matchedAt,
+        matchSource: (match as any).matchSource || 'like', // Track super_like vs normal match
         user: {
           id: otherUserId,
           name: otherUser.name,

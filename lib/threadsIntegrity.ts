@@ -16,6 +16,19 @@ import type { DemoMatch } from '@/stores/demoStore';
 import type { DemoDmMessage, DemoConversationMeta } from '@/stores/demoDmStore';
 
 // ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+/**
+ * UNREAD-RULE: Message types that count toward unread badges.
+ * Includes: text, image (photo), video, voice, template, dare
+ * Excludes: system (screenshot events, permission events, T&D connection system messages, etc.)
+ *
+ * Must stay in sync with convex/messages.ts COUNTABLE_MESSAGE_TYPES
+ */
+const COUNTABLE_MESSAGE_TYPES = ['text', 'image', 'video', 'voice', 'template', 'dare'];
+
+// ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
@@ -49,6 +62,7 @@ export interface ProcessedThread {
     type: string;
     senderId: string;
     createdAt: number;
+    isProtected?: boolean;
   } | null;
   unreadCount: number;
   isPreMatch: boolean;
@@ -127,9 +141,14 @@ export function processThreadsIntegrity(input: ThreadsIntegrityInput): ThreadsIn
     const expiresAt = convoMeta?.expiresAt;
     const isExpired = isConfession && expiresAt != null && expiresAt <= now;
 
-    // Calculate unread count
+    // Calculate unread count — only countable message types
+    // UNREAD-RULE: Excludes system messages (screenshot_taken, permission_granted, T&D state, etc.)
     const unreadCount = currentUserId
-      ? msgs.filter((m) => m.senderId !== currentUserId && !m.readAt).length
+      ? msgs.filter((m) =>
+          m.senderId !== currentUserId &&
+          !m.readAt &&
+          COUNTABLE_MESSAGE_TYPES.includes(m.type)
+        ).length
       : 0;
 
     // Get last message for display and sorting
@@ -152,6 +171,7 @@ export function processThreadsIntegrity(input: ThreadsIntegrityInput): ThreadsIn
             type: lastMsg.type,
             senderId: lastMsg.senderId,
             createdAt: lastMsg.createdAt,
+            isProtected: lastMsg.isProtected,
           }
         : match.lastMessage,
       unreadCount,

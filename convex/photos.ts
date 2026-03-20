@@ -334,24 +334,87 @@ export const addPhoto = mutation({
   },
 });
 
+// Replace photo (update existing photo record with new image)
+export const replacePhoto = mutation({
+  args: {
+    photoId: v.id('photos'),
+    storageId: v.id('_storage'),
+    // C1 SECURITY: Session token for auth validation (MANDATORY - custom auth system)
+    token: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const { photoId, storageId, token } = args;
+
+    // C1 SECURITY: Validate session token
+    const userId = await validateSessionToken(ctx, token);
+    if (!userId) {
+      throw new Error('Unauthorized: invalid or expired session');
+    }
+
+    // Get existing photo
+    const existingPhoto = await ctx.db.get(photoId);
+    if (!existingPhoto) {
+      throw new Error('Photo not found');
+    }
+
+    // SECURITY: Verify photo ownership
+    if (existingPhoto.userId !== userId) {
+      throw new Error('Unauthorized: cannot replace another user\'s photo');
+    }
+
+    // Get URL for new storage
+    const url = await ctx.storage.getUrl(storageId);
+    if (!url) {
+      throw new Error('Invalid storage reference: file does not exist');
+    }
+
+    // Validate URL format
+    if (typeof url !== 'string' || url.trim().length === 0) {
+      throw new Error('Invalid photo URL: URL cannot be empty');
+    }
+    if (!url.startsWith('http://') && !url.startsWith('https://')) {
+      throw new Error('Invalid photo URL: must be a valid HTTP(S) URL');
+    }
+
+    // Update existing photo record - preserve order, isPrimary, etc.
+    await ctx.db.patch(photoId, {
+      storageId,
+      url,
+      // Reset NSFW flag for new image
+      isNsfw: false,
+      // Update timestamp
+      createdAt: Date.now(),
+    });
+
+    // Clean up pending upload tracking if exists
+    const pendingRecord = await ctx.db
+      .query('pendingUploads')
+      .withIndex('by_storage', (q) => q.eq('storageId', storageId))
+      .first();
+    if (pendingRecord) {
+      await ctx.db.delete(pendingRecord._id);
+    }
+
+    return { success: true, photoId, order: existingPhoto.order, url };
+  },
+});
+
 // Delete photo
 export const deletePhoto = mutation({
   args: {
-    // IDOR-P1-002 FIX: Removed userId - now derived from server auth
     photoId: v.id('photos'),
+    // C1 SECURITY: Session token for auth validation (MANDATORY - custom auth system)
+    token: v.string(),
   },
   handler: async (ctx, args) => {
-    // IDOR-P1-002 FIX: Derive caller identity from server auth
-    const identity = await ctx.auth.getUserIdentity();
-    if (!identity) {
-      throw new Error('Unauthorized: authentication required');
-    }
-    const userId = await resolveUserIdByAuthId(ctx, identity.subject);
-    if (!userId) {
-      throw new Error('Unauthorized: user not found');
-    }
+    const { photoId, token } = args;
 
-    const { photoId } = args;
+    // C1 SECURITY: Validate session token (MANDATORY - custom auth system)
+    // This app uses custom session/token auth, not Convex built-in auth
+    const userId = await validateSessionToken(ctx, token);
+    if (!userId) {
+      throw new Error('Unauthorized: invalid or expired session');
+    }
 
     const photo = await ctx.db.get(photoId);
     if (!photo) {

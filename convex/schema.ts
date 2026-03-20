@@ -539,6 +539,9 @@ export default defineSchema({
     action: v.union(v.literal('like'), v.literal('pass'), v.literal('super_like'), v.literal('text')),
     message: v.optional(v.string()),
     createdAt: v.number(),
+    // Lifecycle tracking: when the recipient first opened/viewed this like
+    // Unopened likes stay indefinitely; opened likes expire after 24h if no action
+    firstOpenedAt: v.optional(v.number()),
   })
     .index('by_from_user', ['fromUserId'])
     .index('by_to_user', ['toUserId'])
@@ -554,6 +557,9 @@ export default defineSchema({
     user2UnmatchedAt: v.optional(v.number()),
     crossedPathsCount: v.optional(v.number()),
     isActive: v.boolean(),
+    // Track how this match was created for UI organization
+    // 'super_like' matches appear in Super Likes section, 'like' in New Matches
+    matchSource: v.optional(v.union(v.literal('like'), v.literal('super_like'))),
   })
     .index('by_user1', ['user1Id'])
     .index('by_user2', ['user2Id'])
@@ -603,11 +609,14 @@ export default defineSchema({
   messages: defineTable({
     conversationId: v.id('conversations'),
     senderId: v.id('users'),
-    type: v.union(v.literal('text'), v.literal('image'), v.literal('video'), v.literal('template'), v.literal('dare'), v.literal('system')),
+    type: v.union(v.literal('text'), v.literal('image'), v.literal('video'), v.literal('template'), v.literal('dare'), v.literal('system'), v.literal('voice')),
     content: v.string(),
     imageStorageId: v.optional(v.id('_storage')),
     mediaId: v.optional(v.id('media')),
     templateId: v.optional(v.string()),
+    // Voice message fields
+    audioStorageId: v.optional(v.id('_storage')),
+    audioDurationMs: v.optional(v.number()),
     systemSubtype: v.optional(v.union(
       v.literal('screenshot_taken'),
       v.literal('screenshot_attempted'),
@@ -638,6 +647,12 @@ export default defineSchema({
     viewOnce: v.boolean(),
     watermarkEnabled: v.boolean(),
     deletedAt: v.optional(v.number()),
+    // EXPIRY-SYNC-FIX: Track global expiry for both sender and receiver
+    expiredAt: v.optional(v.number()),
+    // HOLD-TAP-FIX: Store the viewing mode (tap-to-view vs hold-to-view)
+    viewMode: v.optional(v.union(v.literal('tap'), v.literal('hold'))),
+    // VIDEO-MIRROR-FIX: Store mirrored flag for front-camera videos
+    isMirrored: v.optional(v.boolean()),
   })
     .index('by_chat', ['chatId'])
     .index('by_owner', ['ownerId']),
@@ -698,6 +713,7 @@ export default defineSchema({
     type: v.union(
       v.literal('match'),
       v.literal('message'),
+      v.literal('like'),
       v.literal('super_like'),
       v.literal('crossed_paths'),
       v.literal('subscription'),
@@ -711,6 +727,7 @@ export default defineSchema({
       conversationId: v.optional(v.string()),
       userId: v.optional(v.string()),
       pairKey: v.optional(v.string()), // Deterministic crossed paths pair key
+      likeType: v.optional(v.union(v.literal('like'), v.literal('super_like'))), // Type of like received
     })),
     // 4-1: Deduplication key — same key = same logical event (upsert instead of insert)
     dedupeKey: v.optional(v.string()),
@@ -1632,6 +1649,40 @@ export default defineSchema({
   })
     .index('by_user', ['userId'])
     .index('by_user_game_convo', ['userId', 'game', 'convoId', 'windowKey']),
+
+  // Bottle Spin Game Sessions (invite + active game tracking)
+  bottleSpinSessions: defineTable({
+    conversationId: v.string(),
+    inviterId: v.string(),           // User who sent the invite
+    inviteeId: v.string(),           // User who received the invite
+    status: v.union(
+      v.literal('pending'),          // Invite sent, waiting for response
+      v.literal('active'),           // Invite accepted, game in progress
+      v.literal('rejected'),         // Invite rejected
+      v.literal('ended')             // Game ended
+    ),
+    createdAt: v.number(),
+    respondedAt: v.optional(v.number()),  // When invite was accepted/rejected
+    endedAt: v.optional(v.number()),      // When game was ended
+    cooldownUntil: v.optional(v.number()), // Cooldown end time (10 min after rejection/end)
+    // Turn tracking for real-time sync across devices
+    // NOTE: Using role-based turn tracking to avoid ID format mismatch issues
+    currentTurnUserId: v.optional(v.string()), // Legacy - kept for compatibility
+    currentTurnRole: v.optional(v.union(
+      v.literal('inviter'),          // Inviter's turn to choose
+      v.literal('invitee')           // Invitee's turn to choose
+    )),
+    turnPhase: v.optional(v.union(
+      v.literal('idle'),             // Waiting for spin
+      v.literal('spinning'),         // Spin animation in progress
+      v.literal('choosing'),         // Current turn user choosing Truth/Dare/Skip
+      v.literal('complete')          // Choice made, can spin again
+    )),
+    lastSpinResult: v.optional(v.string()), // 'truth' | 'dare' | 'skip' | null
+  })
+    .index('by_conversation', ['conversationId'])
+    .index('by_inviter', ['inviterId'])
+    .index('by_invitee', ['inviteeId']),
 
   // H-1: Track pending uploads to prevent orphaned storage blobs
   // Records created after upload, deleted when addPhoto succeeds or cleanup runs

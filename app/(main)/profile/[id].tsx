@@ -50,7 +50,7 @@ export default function ViewProfileScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const { width: screenWidth } = useWindowDimensions();
-  const { userId: currentUserId } = useAuthStore();
+  const { userId: currentUserId, token } = useAuthStore();
   const [currentPhotoIndex, setCurrentPhotoIndex] = useState(0);
   const [showReportBlock, setShowReportBlock] = useState(false);
 
@@ -231,7 +231,7 @@ export default function ViewProfileScreen() {
 
     try {
       const result = await swipe({
-        authUserId: currentUserId as string,
+        token: token!,
         toUserId: userId as any,
         action,
       });

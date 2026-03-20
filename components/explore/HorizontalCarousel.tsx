@@ -15,7 +15,7 @@ export function HorizontalCarousel({ profiles, onPressProfile }: HorizontalCarou
       data={profiles}
       horizontal
       showsHorizontalScrollIndicator={false}
-      keyExtractor={(item) => item._id ?? item.id ?? String(Math.random())}
+      keyExtractor={(item, index) => item._id ?? item.id ?? `profile_${index}`}
       contentContainerStyle={styles.list}
       renderItem={({ item }) => (
         <ProfileCard profile={item} onPress={() => onPressProfile(item)} />

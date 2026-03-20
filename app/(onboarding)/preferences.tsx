@@ -44,7 +44,7 @@ const MAX_AGE_LIMIT = 70;
 
 // Distance constraints
 const DISTANCE_MIN = 1;
-const DISTANCE_MAX = 75;
+const DISTANCE_MAX = 150;
 const DISTANCE_DEFAULT = 50;
 
 const MIN_INTERESTS = 3;
@@ -337,7 +337,7 @@ export default function PreferencesScreen() {
     const trimmedDistance = distanceText.trim();
     const parsedDistance = parseInt(trimmedDistance, 10);
     if (!trimmedDistance || isNaN(parsedDistance)) {
-      setDistanceError('Enter a distance (1-75 miles).');
+      setDistanceError('Enter a distance (1-150 miles).');
       hasError = true;
       if (firstErrorY === null) firstErrorY = distanceSectionY;
     } else if (parsedDistance < DISTANCE_MIN) {

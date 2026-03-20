@@ -17,8 +17,6 @@ import {
   Modal,
   Dimensions,
   ScrollView,
-  Platform,
-  ActionSheetIOS,
   TextInput,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -36,7 +34,7 @@ import { isDemoMode } from '@/hooks/useConvex';
 import { Ionicons } from '@expo/vector-icons';
 import { OnboardingProgressHeader } from '@/components/OnboardingProgressHeader';
 import { checkPhotoExists, getPhotoFileState, type PhotoFileState } from '@/lib/photoFileGuard';
-import { uploadPhotoToBackend, syncPhotosFromBackend } from '@/services/photoSync';
+import { uploadPhotoToBackend } from '@/services/photoSync';
 import { useMutation, useQuery } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { Id } from '@/convex/_generated/dataModel';
@@ -44,11 +42,10 @@ import { useScreenTrace } from '@/lib/devTrace';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 
-// Total 9 photos: 1 primary (circle) + 8 additional (grid)
+// Total 9 photos: ALL managed in unified grid system (indices 0-8)
 // MUST match backend limit in convex/photos.ts (MAX 9 photos)
 const TOTAL_SLOTS = 9;
 const MAX_PHOTOS = 9; // Backend enforces maximum 9 photos
-const GRID_SLOTS = 8; // Additional photos grid slots (indices 1-8)
 const MIN_PHOTOS_REQUIRED = 2; // Must have at least 2 photos to continue
 
 // Compute uniform tile size: 3 columns with gaps, portrait aspect ratio
@@ -158,6 +155,10 @@ export default function AdditionalPhotosScreen() {
     if (backendPhotos !== undefined) {
       setBackendLoadedOnce(true);
 
+      const prevCount = prevBackendCountRef.current;
+      const newCount = backendPhotos.length;
+      const backendAbsorbedNewPhoto = newCount > prevCount;
+
       // Map backend photos to slots by order
       const newBackendUrls = Array(TOTAL_SLOTS).fill(null);
       backendPhotos.forEach((photo) => {
@@ -167,9 +168,66 @@ export default function AdditionalPhotosScreen() {
       });
       setBackendUrlByIndex(newBackendUrls);
 
+      // FIX: Clear previews safely to avoid duplicate photos
+      // Two cases where we can safely clear a preview:
+      // 1. REPLACE: Backend URL now exists at SAME slot as preview (in-place replacement complete)
+      // 2. ADD: Backend count INCREASED and upload completed at tapped slot
+      //    This proves the backend absorbed the photo (at first-vacant order)
+      //    Safe to clear preview at tapped slot since photo now exists in backend
+      setSlotPreviewUriByIndex((prevPreviews) => {
+        const updated = [...prevPreviews];
+        let changed = false;
+        const currentUploadState = uploadStateRef.current;
+
+        for (let i = 0; i < TOTAL_SLOTS; i++) {
+          if (prevPreviews[i]) {
+            // Case 1 (REPLACE): Backend URL now at same slot - in-place replacement complete
+            if (newBackendUrls[i]) {
+              updated[i] = null;
+              changed = true;
+              if (__DEV__) {
+                console.log(`[PHOTO_PREVIEW] Clearing preview slot ${i} - backend URL at same slot (REPLACE complete)`);
+              }
+            }
+            // Case 2 (ADD): Backend absorbed new photo AND this slot's upload completed
+            // The photo is now in backend (at first-vacant order), safe to clear tapped-slot preview
+            else if (backendAbsorbedNewPhoto && currentUploadState[i] === 'uploaded') {
+              updated[i] = null;
+              changed = true;
+              if (__DEV__) {
+                console.log(`[PHOTO_PREVIEW] Clearing preview slot ${i} - backend absorbed photo (ADD complete)`);
+              }
+            }
+          }
+        }
+        return changed ? updated : prevPreviews;
+      });
+
+      // Reset 'uploaded' states to 'idle' once backend has absorbed the photos
+      if (backendAbsorbedNewPhoto) {
+        setUploadStateByIndex((prev) => {
+          const updated: Record<number, UploadState> = {};
+          let changed = false;
+          for (const [indexStr, state] of Object.entries(prev)) {
+            if (state === 'uploaded') {
+              // Don't include - effectively deletes/resets to idle
+              changed = true;
+            } else {
+              updated[Number(indexStr)] = state;
+            }
+          }
+          return changed ? updated : prev;
+        });
+      }
+
+      // Update ref for next comparison
+      prevBackendCountRef.current = newCount;
+
       if (__DEV__) {
         console.log('[PHOTO_BACKEND] Synced backend photos:', {
           count: backendPhotos.length,
+          prevCount,
+          absorbed: backendAbsorbedNewPhoto,
           slots: newBackendUrls.map((url, i) => url ? `[${i}]:✓` : `[${i}]:✗`).join(' '),
         });
       }
@@ -303,31 +361,9 @@ export default function AdditionalPhotosScreen() {
     console.log('[PHOTOS] prefilled bio from demoProfile');
   }, [demoHydrated, demoProfile, bio, bioDirty, setBio]);
 
-  // LIVE MODE: Sync photos from backend on mount to ensure local store is up-to-date
-  // This ensures photos uploaded in earlier screens are available here
-  const didSyncPhotos = React.useRef(false);
-  useEffect(() => {
-    if (didSyncPhotos.current || isDemoMode || !userId) return;
-    didSyncPhotos.current = true;
-
-    if (__DEV__) {
-      console.log('[PHOTOS] Syncing photos from backend on mount (skipDownload=true for onboarding)...');
-    }
-
-    syncPhotosFromBackend(userId, false, true) // skipDownload=true for onboarding
-      .then((result) => {
-        if (result.success) {
-          if (__DEV__) {
-            console.log(`[PHOTOS] Sync complete: ${result.photosCount} photos (backend URLs only)`);
-          }
-        } else {
-          console.warn('[PHOTOS] Sync failed:', result.message);
-        }
-      })
-      .catch((error) => {
-        console.error('[PHOTOS] Sync error:', error);
-      });
-  }, [userId]);
+  // FIX 2: Removed redundant syncPhotosFromBackend on mount
+  // The useQuery(api.photos.getUserPhotos) subscription at line 151-154 already provides
+  // reactive backend photo data. Calling syncPhotosFromBackend duplicates the same query.
 
   // Per-slot render nonce to force re-render on photo change
   const [slotNonce, setSlotNonce] = useState<number[]>(Array(TOTAL_SLOTS).fill(0));
@@ -350,6 +386,12 @@ export default function AdditionalPhotosScreen() {
 
   // Track if backend photos have loaded at least once (prevents flicker on empty result during uploads)
   const [backendLoadedOnce, setBackendLoadedOnce] = useState(false);
+
+  // FIX: Track previous backend photo count to detect when new photos are absorbed
+  const prevBackendCountRef = React.useRef(0);
+  // FIX: Ref to always have latest uploadStateByIndex (avoid stale closure reads)
+  const uploadStateRef = React.useRef(uploadStateByIndex);
+  uploadStateRef.current = uploadStateByIndex;
 
   const bumpSlot = (i: number) => {
     setSlotNonce((prev) => {
@@ -400,8 +442,12 @@ export default function AdditionalPhotosScreen() {
   }, [photos]);
 
   // Count valid photos from backend + any in-flight uploads/previews
+  // FIX: Only count previews for slots that DON'T have a backend URL yet
+  // This prevents double-counting when preview persists while backend URL arrives
   const backendPhotoCount = backendPhotos?.length ?? 0;
-  const pendingPreviewCount = slotPreviewUriByIndex.filter(uri => uri !== null).length;
+  const pendingPreviewCount = slotPreviewUriByIndex.filter(
+    (uri, index) => uri !== null && !backendUrlByIndex[index]
+  ).length;
   const photoCount = backendPhotoCount + pendingPreviewCount;
 
   // Find first empty slot index (check backend URLs + previews)
@@ -468,7 +514,20 @@ export default function AdditionalPhotosScreen() {
 
           // Upload to Convex backend IMMEDIATELY (backend is ONLY source of truth)
           if (!isDemoMode && userId) {
-            if (__DEV__) console.log(`[PHOTO_ONBOARDING] Uploading slot ${targetIndex} to Convex (no local storage)...`);
+            // REPLACE vs ADD: Check if this slot has an existing backend photo
+            // FIX: For slot 0, find existing primary photo by isPrimary flag (not by order)
+            // When verification_reference occupies order 0, the primary normal photo is at order 1+
+            const existingPhoto = targetIndex === 0
+              ? backendPhotos?.find((p) => p.isPrimary)
+              : backendPhotos?.find((p) => p.order === targetIndex);
+            const isReplace = !!existingPhoto;
+
+            if (__DEV__) {
+              console.log(`[PHOTO_ONBOARDING] ${isReplace ? 'REPLACE' : 'ADD'} slot ${targetIndex} to Convex...`);
+              if (targetIndex === 0) {
+                console.log(`[PHOTO_ONBOARDING] Slot 0: existingPrimary=${existingPhoto?._id}, order=${existingPhoto?.order}`);
+              }
+            }
 
             setUploadState(targetIndex, 'uploading');
 
@@ -477,7 +536,8 @@ export default function AdditionalPhotosScreen() {
               cacheUri, // Upload directly from cache, no local copy
               targetIndex === 0, // isPrimary
               targetIndex,
-              token || undefined // Pass session token for auth
+              token || undefined, // Pass session token for auth
+              isReplace ? existingPhoto._id : undefined // Pass existing photoId for REPLACE
             );
 
             if (!uploadResult.success) {
@@ -493,15 +553,11 @@ export default function AdditionalPhotosScreen() {
 
             setUploadState(targetIndex, 'uploaded');
 
-            // Clear preview - backend will provide URL via query
-            setSlotPreviewUriByIndex((prev) => {
-              const next = [...prev];
-              next[targetIndex] = null;
-              return next;
-            });
+            // FIX 1: Do NOT clear preview here - keep it visible until backend URL arrives
+            // The preview will be cleared automatically when backendPhotos updates (see effect above)
 
             if (__DEV__) {
-              console.log(`[PHOTO_ONBOARDING] ✅ Photo uploaded to Convex: storageId=${uploadResult.storageId}, no local storage`);
+              console.log(`[PHOTO_ONBOARDING] ✅ Photo uploaded to Convex: storageId=${uploadResult.storageId}, keeping preview until backend URL ready`);
             }
           }
 
@@ -520,13 +576,20 @@ export default function AdditionalPhotosScreen() {
 
           // Upload to Convex even on normalize failure (no local storage)
           if (!isDemoMode && userId) {
+            // REPLACE vs ADD: Check if this slot has an existing backend photo
+            // FIX: For slot 0, find existing primary photo by isPrimary flag (not by order)
+            const existingPhoto = targetIndex === 0
+              ? backendPhotos?.find((p) => p.isPrimary)
+              : backendPhotos?.find((p) => p.order === targetIndex);
+
             setUploadState(targetIndex, 'uploading');
             const uploadResult = await uploadPhotoToBackend(
               userId,
               uri, // Upload directly, no local copy
               targetIndex === 0,
               targetIndex,
-              token || undefined // Pass session token for auth
+              token || undefined, // Pass session token for auth
+              existingPhoto?._id // Pass existing photoId for REPLACE
             );
             if (!uploadResult.success) {
               setUploadState(targetIndex, 'failed');
@@ -535,12 +598,7 @@ export default function AdditionalPhotosScreen() {
             }
             setUploadState(targetIndex, 'uploaded');
 
-            // Clear preview after upload
-            setSlotPreviewUriByIndex((prev) => {
-              const next = [...prev];
-              next[targetIndex] = null;
-              return next;
-            });
+            // FIX 1: Do NOT clear preview here - keep it visible until backend URL arrives
           }
 
           bumpSlot(targetIndex);
@@ -593,7 +651,16 @@ export default function AdditionalPhotosScreen() {
 
           // Upload to Convex backend IMMEDIATELY (backend is ONLY source of truth)
           if (!isDemoMode && userId) {
-            if (__DEV__) console.log(`[PHOTO_ONBOARDING] Uploading camera photo slot ${targetIndex} to Convex (no local storage)...`);
+            // REPLACE vs ADD: Check if this slot has an existing backend photo
+            // FIX: For slot 0, find existing primary photo by isPrimary flag (not by order)
+            const existingPhoto = targetIndex === 0
+              ? backendPhotos?.find((p) => p.isPrimary)
+              : backendPhotos?.find((p) => p.order === targetIndex);
+            const isReplace = !!existingPhoto;
+
+            if (__DEV__) {
+              console.log(`[PHOTO_ONBOARDING] ${isReplace ? 'REPLACE' : 'ADD'} camera photo slot ${targetIndex} to Convex...`);
+            }
 
             setUploadState(targetIndex, 'uploading');
 
@@ -602,7 +669,8 @@ export default function AdditionalPhotosScreen() {
               cacheUri, // Upload directly from cache, no local copy
               targetIndex === 0,
               targetIndex,
-              token || undefined // Pass session token for auth
+              token || undefined, // Pass session token for auth
+              isReplace ? existingPhoto._id : undefined // Pass existing photoId for REPLACE
             );
 
             if (!uploadResult.success) {
@@ -614,15 +682,10 @@ export default function AdditionalPhotosScreen() {
 
             setUploadState(targetIndex, 'uploaded');
 
-            // Clear preview - backend will provide URL via query
-            setSlotPreviewUriByIndex((prev) => {
-              const next = [...prev];
-              next[targetIndex] = null;
-              return next;
-            });
+            // FIX 1: Do NOT clear preview here - keep it visible until backend URL arrives
 
             if (__DEV__) {
-              console.log(`[PHOTO_ONBOARDING] ✅ Camera photo uploaded: storageId=${uploadResult.storageId}, no local storage`);
+              console.log(`[PHOTO_ONBOARDING] ✅ Camera photo uploaded: storageId=${uploadResult.storageId}, keeping preview until backend URL ready`);
             }
           }
 
@@ -641,8 +704,21 @@ export default function AdditionalPhotosScreen() {
 
           // Upload even on error (no local storage)
           if (!isDemoMode && userId) {
+            // REPLACE vs ADD: Check if this slot has an existing backend photo
+            // FIX: For slot 0, find existing primary photo by isPrimary flag (not by order)
+            const existingPhoto = targetIndex === 0
+              ? backendPhotos?.find((p) => p.isPrimary)
+              : backendPhotos?.find((p) => p.order === targetIndex);
+
             setUploadState(targetIndex, 'uploading');
-            const uploadResult = await uploadPhotoToBackend(userId, uri, targetIndex === 0, targetIndex, token || undefined);
+            const uploadResult = await uploadPhotoToBackend(
+              userId,
+              uri,
+              targetIndex === 0,
+              targetIndex,
+              token || undefined, // Pass session token for auth
+              existingPhoto?._id // Pass existing photoId for REPLACE
+            );
             if (!uploadResult.success) {
               setUploadState(targetIndex, 'failed');
               Alert.alert('Upload Failed', 'Please try again.');
@@ -650,12 +726,7 @@ export default function AdditionalPhotosScreen() {
             }
             setUploadState(targetIndex, 'uploaded');
 
-            // Clear preview after upload
-            setSlotPreviewUriByIndex((prev) => {
-              const next = [...prev];
-              next[targetIndex] = null;
-              return next;
-            });
+            // FIX 1: Do NOT clear preview here - keep it visible until backend URL arrives
           }
 
           bumpSlot(targetIndex);
@@ -669,59 +740,19 @@ export default function AdditionalPhotosScreen() {
     }
   };
 
-  // Show action sheet for photo selection (primary photo)
-  const showPhotoActionSheet = (targetIndex: number) => {
-    if (Platform.OS === 'ios') {
-      ActionSheetIOS.showActionSheetWithOptions(
-        {
-          options: ['Cancel', 'Take Photo', 'Choose from Gallery'],
-          cancelButtonIndex: 0,
-        },
-        (buttonIndex) => {
-          if (buttonIndex === 1) {
-            takePhotoForIndex(targetIndex);
-          } else if (buttonIndex === 2) {
-            pickImageForIndex(targetIndex);
-          }
-        }
-      );
-    } else {
-      Alert.alert(
-        'Add Photo',
-        'Choose source',
-        [
-          { text: 'Cancel', style: 'cancel' },
-          { text: 'Take Photo', onPress: () => takePhotoForIndex(targetIndex) },
-          { text: 'Choose from Gallery', onPress: () => pickImageForIndex(targetIndex) },
-        ]
-      );
-    }
-  };
-
-  // Handle tap on primary photo circle
-  // BUG FIX: Check backendUrlByIndex/slotPreviewUriByIndex (source of truth in live mode),
-  // not photos[] from local store which may be empty in live mode
-  const handlePrimaryPhotoPress = () => {
-    const backendUrl = backendUrlByIndex[0];
-    const previewUri = slotPreviewUriByIndex[0];
-    const uriToShow = previewUri ?? backendUrl;
-    const hasPhoto = typeof uriToShow === 'string' && uriToShow.length > 0;
-
-    if (hasPhoto) {
-      // Photo exists - open full-screen viewer with Replace/Remove options
-      setViewerIndex(0);
-      setViewerOpen(true);
-    } else {
-      // No photo - show action sheet to add
-      showPhotoActionSheet(0);
-    }
-  };
-
-  // Handle tap on a photo tile (for grid slots 1-8)
+  // Handle tap on a photo tile (unified grid - all slots 0-8)
   // BUG FIX: Check backendUrlByIndex/slotPreviewUriByIndex (source of truth in live mode),
   // not photos[] from local store which may be empty in live mode
   const handlePhotoPress = (index: number) => {
-    const backendUrl = backendUrlByIndex[index];
+    // FIX: For slot 0, also check primary photo by isPrimary flag and reference fallback
+    // When verification_reference occupies order 0, the primary normal photo is at order 1+
+    let backendUrl: string | null;
+    if (index === 0) {
+      const primaryBackendPhoto = backendPhotos?.find(p => p.isPrimary);
+      backendUrl = backendUrlByIndex[0] ?? primaryBackendPhoto?.url ?? (hasReferencePhoto ? referencePhotoUrl : null);
+    } else {
+      backendUrl = backendUrlByIndex[index];
+    }
     const previewUri = slotPreviewUriByIndex[index];
     const uriToShow = previewUri ?? backendUrl;
     const hasPhoto = typeof uriToShow === 'string' && uriToShow.length > 0;
@@ -740,6 +771,15 @@ export default function AdditionalPhotosScreen() {
   // Handle replace from viewer
   const handleReplace = () => {
     if (viewerIndex !== null) {
+      // Guard: Primary photo (slot 0) locked until face verification is complete
+      if (viewerIndex === 0 && !faceVerificationComplete) {
+        Alert.alert(
+          'Complete Verification First',
+          'Your primary photo cannot be changed until you complete face verification.',
+          [{ text: 'OK' }]
+        );
+        return;
+      }
       pickImageForIndex(viewerIndex);
     }
   };
@@ -751,6 +791,18 @@ export default function AdditionalPhotosScreen() {
 
       if (__DEV__) {
         console.log('[PHOTOS_UI] removePressed', { index: indexToRemove });
+      }
+
+      // Guard: Primary photo (slot 0) locked until face verification is complete
+      // BEFORE verification: block all edit/remove actions on primary
+      // AFTER verification: primary behaves like normal editable photo
+      if (indexToRemove === 0 && !faceVerificationComplete) {
+        Alert.alert(
+          'Complete Verification First',
+          'Your primary photo cannot be changed until you complete face verification.',
+          [{ text: 'OK', onPress: handleCloseViewer }]
+        );
+        return;
       }
 
       Alert.alert(
@@ -766,9 +818,17 @@ export default function AdditionalPhotosScreen() {
                 // Remove from backend if not in demo mode
                 if (!isDemoMode && userId && backendPhotos) {
                   // Find the backend photo at this order/index
-                  const photoToDelete = backendPhotos.find((p) => p.order === indexToRemove);
+                  // FIX: For slot 0, find by isPrimary flag (not by order)
+                  const photoToDelete = indexToRemove === 0
+                    ? backendPhotos.find((p) => p.isPrimary)
+                    : backendPhotos.find((p) => p.order === indexToRemove);
 
                   if (photoToDelete) {
+                    // C1 SECURITY: Validate token before calling mutation
+                    if (!token) {
+                      throw new Error('Missing session token');
+                    }
+
                     if (__DEV__) {
                       console.log('[PHOTOS_UI] Deleting photo from backend:', {
                         photoId: photoToDelete._id,
@@ -778,13 +838,11 @@ export default function AdditionalPhotosScreen() {
 
                     await deletePhotoMutation({
                       photoId: photoToDelete._id,
+                      token,
                     });
 
-                    // Sync photos from backend to refresh UI
-                    if (__DEV__) {
-                      console.log('[PHOTOS_UI] Syncing photos after deletion (skipDownload=true for onboarding)...');
-                    }
-                    await syncPhotosFromBackend(userId, false, true); // skipDownload=true for onboarding
+                    // FIX 3: Removed redundant syncPhotosFromBackend after delete
+                    // The useQuery subscription will auto-update when the mutation completes
 
                     if (__DEV__) {
                       console.log('[PHOTOS_UI] removeSuccess', { index: indexToRemove });
@@ -978,12 +1036,12 @@ export default function AdditionalPhotosScreen() {
     router.push('/(onboarding)/permissions');
   };
 
-  // Render additional photos grid (indices 1-8 only, primary is shown separately)
+  // Render unified photo grid (ALL slots 0-8, primary included)
   const renderPhotoGrid = () => {
     const grid = [];
 
-    // Count filled additional slots (indices 1-8) from backend + previews
-    const filledAdditionalSlots = Array.from({ length: GRID_SLOTS }, (_, i) => i + 1).filter(
+    // Count filled slots from backend + previews
+    const filledSlots = Array.from({ length: TOTAL_SLOTS }, (_, i) => i).filter(
       i => backendUrlByIndex[i] || slotPreviewUriByIndex[i]
     ).length;
 
@@ -993,17 +1051,38 @@ export default function AdditionalPhotosScreen() {
         normalPhotoCount: photoCount,
         atMax: photoCount >= MAX_PHOTOS,
       });
-      console.log('[PHOTOS_UI] render additional slots', {
-        filled: filledAdditionalSlots,
-        totalAdditionalSlots: GRID_SLOTS,
+      console.log('[PHOTOS_UI] render unified grid', {
+        filled: filledSlots,
+        totalSlots: TOTAL_SLOTS,
       });
     }
 
-    // Start from index 1 (skip primary photo which is shown in circle)
-    for (let i = 1; i <= GRID_SLOTS; i++) {
-      const backendUrl = backendUrlByIndex[i]; // Backend URL from Convex (source of truth)
+    // Render ALL slots (0-8) in unified grid - index 0 is primary
+    // FIX: Find primary photo by isPrimary flag (not just order 0)
+    // When verification_reference occupies order 0, normal photos start at order 1
+    const primaryBackendPhoto = backendPhotos?.find(p => p.isPrimary);
+
+    for (let i = 0; i < TOTAL_SLOTS; i++) {
+      const isPrimarySlot = i === 0;
+
+      // FIX: For slot 0, use primary photo URL (by isPrimary flag), fallback to reference
+      // For slots 1-8, use order-based mapping (excluding the primary if it was shown in slot 0)
+      let backendUrl: string | null;
+      if (isPrimarySlot) {
+        // Slot 0: Show primary photo (regardless of order) OR reference fallback
+        backendUrl = backendUrlByIndex[0] ?? primaryBackendPhoto?.url ?? (hasReferencePhoto ? referencePhotoUrl : null);
+      } else {
+        // Slots 1-8: Show by order, but skip if it's the primary already shown in slot 0
+        const photoAtThisOrder = backendPhotos?.find(p => p.order === i);
+        // If this photo is primary and already shown in slot 0, skip it here
+        if (photoAtThisOrder?.isPrimary && !backendUrlByIndex[0]) {
+          backendUrl = null; // Primary is shown in slot 0, don't duplicate
+        } else {
+          backendUrl = backendUrlByIndex[i];
+        }
+      }
       const previewUri = slotPreviewUriByIndex[i]; // Temporary preview during upload
-      const uriToShow = previewUri ?? backendUrl; // Prefer preview (instant), fallback to backend
+      const uriToShow = previewUri ?? backendUrl; // Prefer preview (instant), fallback to backend/reference
       const hasUri = typeof uriToShow === 'string' && uriToShow.length > 0;
       // Show photo if we have preview OR backend URL
       const showPhoto = hasUri && !slotError[i];
@@ -1085,6 +1164,14 @@ export default function AdditionalPhotosScreen() {
               </View>
             </>
           )}
+
+          {/* Primary badge for slot 0 */}
+          {isPrimarySlot && (
+            <View style={styles.primaryBadge}>
+              <Ionicons name="star" size={10} color={COLORS.white} />
+              <Text style={styles.primaryBadgeText}>Primary</Text>
+            </View>
+          )}
         </TouchableOpacity>
       );
     }
@@ -1132,6 +1219,11 @@ export default function AdditionalPhotosScreen() {
   // Consider reference photo valid if backend says it exists OR we have a URL to display
   const hasReferencePhoto = referencePhotoExistsBackend || hasReferencePhotoUrl;
 
+  // Face verification status - determines primary photo edit rules
+  // BEFORE verification: primary (slot 0) is read-only (no Replace/Remove)
+  // AFTER verification: primary can be edited normally
+  const faceVerificationComplete = onboardingStatus?.faceVerificationPassed ?? false;
+
   const normalPrimaryBackendUrl = backendUrlByIndex[0]; // Backend URL for slot 0
   const normalPrimaryPreview = slotPreviewUriByIndex[0]; // Temporary preview during upload
   const normalPrimaryPhoto = normalPrimaryPreview ?? normalPrimaryBackendUrl; // Prefer preview, fallback to backend
@@ -1170,55 +1262,25 @@ export default function AdditionalPhotosScreen() {
         <Text style={styles.title}>Your Photos</Text>
         <Text style={styles.subtitle}>Add up to {MAX_PHOTOS} photos to show more of yourself.</Text>
 
-        {/* Primary Photo Circle */}
+        {/* Primary Photo Display (DISPLAY ONLY - editing via grid below) */}
         <View style={styles.primarySection}>
-          <TouchableOpacity
-            style={styles.primaryCircle}
-            onPress={primaryIsFailed ? () => pickImageForIndex(0) : handlePrimaryPhotoPress}
-            activeOpacity={0.8}
-          >
+          <View style={styles.primaryCircle}>
             {primaryPhotoExists && !slotError[0] ? (
-              <>
-                <Image
-                  source={{ uri: primaryPhoto ?? undefined }}
-                  style={styles.primaryImage}
-                  contentFit="cover"
-                  blurRadius={displayPhotoVariant === 'blurred' ? 15 : 0}
-                />
-                {/* Upload State Overlay for Primary Photo */}
-                {(primaryIsUploading || primaryIsFailed) && (
-                  <View style={[styles.uploadStateOverlay, styles.primaryUploadOverlay]}>
-                    <View style={styles.uploadStateContent}>
-                      {primaryIsUploading && (
-                        <>
-                          <Ionicons name="cloud-upload" size={20} color={COLORS.white} />
-                          <Text style={styles.uploadStateText}>Uploading...</Text>
-                        </>
-                      )}
-                      {primaryIsFailed && (
-                        <>
-                          <Ionicons name="alert-circle" size={20} color={COLORS.error} />
-                          <Text style={styles.uploadStateTextFailed}>Failed • Tap to retry</Text>
-                        </>
-                      )}
-                    </View>
-                  </View>
-                )}
-              </>
-            ) : primaryPhotoMissing ? (
-              <View style={styles.primaryPlaceholder}>
-                <Ionicons name="alert-circle" size={32} color={COLORS.error} />
-                <Text style={[styles.primaryAddText, { color: COLORS.error }]}>File Missing</Text>
-                <Text style={styles.primaryMissingHint}>Tap to re-upload</Text>
-              </View>
+              <Image
+                source={{ uri: primaryPhoto ?? undefined }}
+                style={styles.primaryImage}
+                contentFit="cover"
+                blurRadius={displayPhotoVariant === 'blurred' ? 15 : 0}
+              />
             ) : (
               <View style={styles.primaryPlaceholder}>
-                <Ionicons name="add" size={32} color={COLORS.primary} />
-                <Text style={styles.primaryAddText}>Add Photo</Text>
+                <Ionicons name="person" size={32} color={COLORS.textMuted} />
+                <Text style={styles.primaryAddText}>No Primary</Text>
               </View>
             )}
-          </TouchableOpacity>
+          </View>
           <Text style={styles.primaryLabel}>Primary Photo</Text>
+          <Text style={styles.primaryHint}>Edit in grid below</Text>
         </View>
 
         {/* DEV: Reset Photos button */}
@@ -1322,16 +1384,16 @@ export default function AdditionalPhotosScreen() {
           })}
         </View>
 
-        {/* Additional Photos Grid */}
+        {/* Unified Photo Grid (All 9 slots including primary) */}
         <View style={styles.gridSection}>
-          <Text style={styles.sectionTitle}>Additional Photos</Text>
+          <Text style={styles.sectionTitle}>Your Photos</Text>
           {photoCount >= MAX_PHOTOS ? (
             <Text style={styles.photoHelperTextMax}>
               Maximum reached ({photoCount}/{MAX_PHOTOS}). Remove one to add.
             </Text>
           ) : (
             <Text style={styles.photoHelperText}>
-              You can add up to {MAX_PHOTOS} photos (1 primary + {GRID_SLOTS} additional).
+              Add up to {MAX_PHOTOS} photos. First photo is your primary.
             </Text>
           )}
           <View style={styles.photoGrid}>{renderPhotoGrid()}</View>
@@ -1372,13 +1434,21 @@ export default function AdditionalPhotosScreen() {
           </TouchableOpacity>
 
           {/* Photo display */}
-          {viewerIndex !== null && (backendUrlByIndex[viewerIndex] || slotPreviewUriByIndex[viewerIndex]) && (
-            <Image
-              source={{ uri: (slotPreviewUriByIndex[viewerIndex] ?? backendUrlByIndex[viewerIndex])! }}
-              style={styles.viewerImage}
-              contentFit="contain"
-            />
-          )}
+          {viewerIndex !== null && (() => {
+            // For slot 0 (primary), also consider reference photo fallback
+            const normalUrl = slotPreviewUriByIndex[viewerIndex] ?? backendUrlByIndex[viewerIndex];
+            const photoUrl = viewerIndex === 0 && !normalUrl && hasReferencePhoto
+              ? referencePhotoUrl
+              : normalUrl;
+
+            return photoUrl ? (
+              <Image
+                source={{ uri: photoUrl }}
+                style={styles.viewerImage}
+                contentFit="contain"
+              />
+            ) : null;
+          })()}
 
           {/* Primary badge in viewer */}
           {viewerIndex === 0 && (
@@ -1387,23 +1457,27 @@ export default function AdditionalPhotosScreen() {
             </View>
           )}
 
-          {/* Action buttons at bottom */}
-          <View style={styles.viewerActions}>
-            <TouchableOpacity style={styles.viewerActionButton} onPress={handleReplace}>
-              <Ionicons name="swap-horizontal" size={24} color={COLORS.white} />
-              <Text style={styles.viewerActionText}>Replace</Text>
-            </TouchableOpacity>
+          {/* Action buttons at bottom - hidden entirely for slot 0 (primary) */}
+          {/* Primary photo (slot 0): NO bottom actions, close via top X only */}
+          {/* Additional photos (slots 1-8): normal Replace/Remove/Cancel actions */}
+          {viewerIndex !== 0 && (
+            <View style={styles.viewerActions}>
+              <TouchableOpacity style={styles.viewerActionButton} onPress={handleReplace}>
+                <Ionicons name="swap-horizontal" size={24} color={COLORS.white} />
+                <Text style={styles.viewerActionText}>Replace</Text>
+              </TouchableOpacity>
 
-            <TouchableOpacity style={styles.viewerActionButton} onPress={handleRemove}>
-              <Ionicons name="trash-outline" size={24} color={COLORS.error} />
-              <Text style={[styles.viewerActionText, { color: COLORS.error }]}>Remove</Text>
-            </TouchableOpacity>
+              <TouchableOpacity style={styles.viewerActionButton} onPress={handleRemove}>
+                <Ionicons name="trash-outline" size={24} color={COLORS.error} />
+                <Text style={[styles.viewerActionText, { color: COLORS.error }]}>Remove</Text>
+              </TouchableOpacity>
 
-            <TouchableOpacity style={styles.viewerActionButton} onPress={handleCloseViewer}>
-              <Ionicons name="close-circle-outline" size={24} color={COLORS.white} />
-              <Text style={styles.viewerActionText}>Cancel</Text>
-            </TouchableOpacity>
-          </View>
+              <TouchableOpacity style={styles.viewerActionButton} onPress={handleCloseViewer}>
+                <Ionicons name="close-circle-outline" size={24} color={COLORS.white} />
+                <Text style={styles.viewerActionText}>Cancel</Text>
+              </TouchableOpacity>
+            </View>
+          )}
         </View>
       </Modal>
     </SafeAreaView>
@@ -1479,6 +1553,29 @@ const styles = StyleSheet.create({
     color: COLORS.textLight,
     marginTop: 8,
     fontWeight: '500',
+  },
+  primaryHint: {
+    fontSize: 10,
+    color: COLORS.textMuted,
+    marginTop: 2,
+  },
+  // Primary badge for grid slot 0
+  primaryBadge: {
+    position: 'absolute',
+    bottom: 4,
+    left: 4,
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: COLORS.primary,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+    gap: 3,
+  },
+  primaryBadgeText: {
+    fontSize: 9,
+    color: COLORS.white,
+    fontWeight: '600',
   },
   // Bio section
   bioSection: {

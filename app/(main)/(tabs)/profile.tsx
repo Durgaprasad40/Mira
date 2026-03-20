@@ -122,7 +122,8 @@ export default function ProfileScreen() {
       rawPhotos = user.photoUrls;
     }
 
-    if (!rawPhotos?.length) return [];
+    // P1-013 FIX: Guard against non-array values with length property
+    if (!rawPhotos?.length || !Array.isArray(rawPhotos)) return [];
 
     return rawPhotos
       .map((p: any, i: number) => {
@@ -136,7 +137,7 @@ export default function ProfileScreen() {
         }
         return null;
       })
-      .filter((p: any) => p && p.url);
+      .filter((p): p is { url: string; isPrimary: boolean } => p !== null && !!p.url);
   };
 
   // BUGFIX #26: Build currentUser reactively from subscribed demoProfiles

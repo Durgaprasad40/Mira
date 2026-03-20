@@ -260,6 +260,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
 
   const insets = useSafeAreaInsets();
   const userId = useAuthStore((s) => s.userId);
+  const token = useAuthStore((s) => s.token);
   const [index, setIndex] = useState(0);
   const [retryKey, setRetryKey] = useState(0); // For LoadingGuard retry
   const [showNotificationPopover, setShowNotificationPopover] = useState(false);
@@ -376,15 +377,14 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   })));
   const blockedUserIds = useBlockStore((s) => s.blockedUserIds);
   // R1 FIX: Derive excluded IDs with stable dependencies.
-  // Use blockedUserIds.length as a primitive trigger instead of array reference.
+  // P1-003 FIX: Use blockedUserIds array (not .length) to detect content changes.
   // For demo mode, call getExcludedUserIds() inside the memo body — the function
   // itself is stable (from useShallow), and we trigger recalc via matchCount/swipedCount.
   const excludedSet = useMemo(() => {
     if (!isDemoMode) return new Set(blockedUserIds);
     // demo.getExcludedUserIds() reads current state inside the function
     return new Set(demo.getExcludedUserIds());
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [blockedUserIds.length, demo.matchCount, demo.swipedCount]);
+  }, [isDemoMode, blockedUserIds, demo.matchCount, demo.swipedCount, demo.getExcludedUserIds]);
   // FIX: Only seed after hydration completes to prevent overwriting persisted data
   useEffect(() => { if (isDemoMode && demo.hasHydrated) demo.seed(); }, [demo.seed, demo.hasHydrated]);
 
@@ -507,10 +507,24 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
 
   // Keep last non-empty profiles to prevent blank-frame flicker
   const stableProfilesRef = useRef<ProfileData[]>([]);
+  // FIX: Track userId to invalidate cache when user changes (prevents showing stale profiles)
+  const stableUserIdRef = useRef<string | null>(null);
+  if (userId !== stableUserIdRef.current) {
+    // User changed — clear stale cache to prevent showing old user's excluded profiles
+    stableProfilesRef.current = [];
+    stableUserIdRef.current = userId;
+  }
   if (validProfiles.length > 0) {
     stableProfilesRef.current = validProfiles;
   }
-  const profiles = validProfiles.length > 0 ? validProfiles : stableProfilesRef.current;
+  const profilesRaw = validProfiles.length > 0 ? validProfiles : stableProfilesRef.current;
+
+  // FIX: Defensive filter — never show current user's profile in Discover
+  // Backend already excludes, but this protects against stale cache contamination
+  const profiles = useMemo(
+    () => userId ? profilesRaw.filter((p) => p.id !== userId) : profilesRaw,
+    [profilesRaw, userId],
+  );
 
   // Phase-2 only: Filter profiles by intent categories (any match)
   const filteredProfiles = useMemo(() => {
@@ -534,12 +548,112 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       // DL-006: Skip index reset if swipe is in progress to prevent race condition
       if (!swipeLockRef.current) {
         setIndex(0);
+        // Also reset queue when filter changes
+        visibleQueueRef.current = [];
+        consumedIdsRef.current.clear();
       }
       // Track Phase-2 intent filter selection (use first key for backward compat)
       trackEvent({ name: 'phase2_intent_filter_selected', intentKey: intentFilters[0] ?? 'all' });
       prevFilterRef.current = filterKey;
     }
   }, [intentFilters, isPhase2]);
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // STABLE QUEUE MODEL: Prevents back card from changing during swipe animation
+  // ══════════════════════════════════════════════════════════════════════════
+  // The queue holds profile IDs for the visible cards (front, back, third).
+  // It is "frozen" during swipe animation and only advances after swipe completion.
+  // This ensures the back card remains stable even if source data changes mid-swipe.
+
+  const QUEUE_SIZE = 3; // Number of cards to buffer
+  const visibleQueueRef = useRef<string[]>([]); // Profile IDs in queue
+  const consumedIdsRef = useRef<Set<string>>(new Set()); // Profiles already swiped
+
+  // Source profiles for queue refill (use filtered for Phase-2, regular for Phase-1)
+  const sourceProfiles = isPhase2 ? filteredProfiles : profiles;
+
+  // Build a map from profile ID to profile data for O(1) lookup
+  const profileMapRef = useRef<Map<string, ProfileData>>(new Map());
+  useMemo(() => {
+    profileMapRef.current.clear();
+    for (const p of sourceProfiles) {
+      profileMapRef.current.set(p.id, p);
+    }
+  }, [sourceProfiles]);
+
+  /**
+   * Refill the visible queue from source profiles.
+   * Only adds profiles that are:
+   * - Not already in the queue
+   * - Not already consumed (swiped)
+   * - Not the current user
+   */
+  const refillQueue = useCallback(() => {
+    const queue = visibleQueueRef.current;
+    const consumed = consumedIdsRef.current;
+    const needed = QUEUE_SIZE - queue.length;
+    if (needed <= 0) return;
+
+    const queueSet = new Set(queue);
+    const toAdd: string[] = [];
+
+    for (const p of sourceProfiles) {
+      if (toAdd.length >= needed) break;
+      // Skip if already in queue, consumed, or is current user
+      if (queueSet.has(p.id)) continue;
+      if (consumed.has(p.id)) continue;
+      if (p.id === userId) continue;
+      toAdd.push(p.id);
+    }
+
+    if (toAdd.length > 0) {
+      visibleQueueRef.current = [...queue, ...toAdd];
+    }
+  }, [sourceProfiles, userId]);
+
+  /**
+   * Advance the queue after swipe completion.
+   * Removes the front card, marks it as consumed, and refills.
+   */
+  const advanceQueue = useCallback(() => {
+    const queue = visibleQueueRef.current;
+    if (queue.length === 0) return;
+
+    // Mark front card as consumed
+    const consumedId = queue[0];
+    consumedIdsRef.current.add(consumedId);
+
+    // Remove front card from queue
+    visibleQueueRef.current = queue.slice(1);
+
+    // Refill queue with next available profiles
+    refillQueue();
+  }, [refillQueue]);
+
+  // Refill queue when source data changes AND no swipe is in progress
+  // This ensures the queue is populated but doesn't change mid-swipe
+  useEffect(() => {
+    // Don't refill during active swipe
+    if (swipeLockRef.current) return;
+    refillQueue();
+  }, [sourceProfiles, refillQueue]);
+
+  // Reset queue when user changes (prevents showing stale profiles)
+  const prevUserIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (prevUserIdRef.current !== null && prevUserIdRef.current !== userId) {
+      // User changed — clear queue and consumed IDs
+      visibleQueueRef.current = [];
+      consumedIdsRef.current.clear();
+    }
+    prevUserIdRef.current = userId;
+  }, [userId]);
+
+  // Get current/next from the STABLE QUEUE (not from live array indices)
+  const currentQueueId = visibleQueueRef.current[0];
+  const nextQueueId = visibleQueueRef.current[1];
+  const queueCurrent = currentQueueId ? profileMapRef.current.get(currentQueueId) : undefined;
+  const queueNext = nextQueueId ? profileMapRef.current.get(nextQueueId) : undefined;
 
   // ── Demo auto-replenish: re-inject profiles when pool is exhausted ──
   // Guard ref prevents the effect from firing twice before the store update
@@ -559,6 +673,9 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
     // 7-3: Guard against setState after unmount
     if (!mountedRef.current) return;
     setIndex(0);
+    // STABLE QUEUE: Reset queue when demo pool is replenished
+    visibleQueueRef.current = [];
+    consumedIdsRef.current.clear();
   }, [profiles.length, externalProfiles]);
 
   // Profile completeness nudge (main Discover only, not explore categories)
@@ -650,11 +767,11 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
     extrapolate: "clamp",
   });
 
-  // Strict bounds: no modulo wrapping — when deck exhausted, current becomes undefined
-  // Phase-2: Use filteredProfiles when intent filter is active
-  const displayProfiles = isPhase2 ? filteredProfiles : profiles;
-  const current = index < displayProfiles.length ? displayProfiles[index] : undefined;
-  const next = index + 1 < displayProfiles.length ? displayProfiles[index + 1] : undefined;
+  // STABLE QUEUE: Use queue-based current/next instead of index-based access
+  // This ensures the back card doesn't change during swipe animation
+  const displayProfiles = isPhase2 ? filteredProfiles : profiles; // Keep for compatibility
+  const current = queueCurrent; // From stable queue
+  const next = queueNext; // From stable queue
 
   // Trust badges — memoized per profile to avoid allocation each render
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -770,10 +887,13 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
     setOverlayDirection(null);
     setActiveSlot(newSlot);
     setIndex((prev) => prev + 1);
+    // STABLE QUEUE: Advance the queue after swipe
+    // This removes front card, promotes back -> front, and refills from source
+    advanceQueue();
     // Old pan is reset in the useEffect below, AFTER React has re-rendered
     // with the new activeSlot. This prevents a 1-frame flicker where the
     // swiped-away card snaps back to center before the slot switch renders.
-  }, [panA, panB, overlayOpacityAnim]);
+  }, [panA, panB, overlayOpacityAnim, advanceQueue]);
 
   // Reset the now-inactive pan AFTER React commits the new activeSlot.
   // This avoids the race where requestAnimationFrame fires before the
@@ -903,7 +1023,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
         );
         const result = await Promise.race([
           swipeMutation({
-            authUserId: userId as string,
+            token: token!,
             toUserId: swipedProfile.id as Id<'users'>,
             action,
             message: message,
@@ -1076,9 +1196,12 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   );
 
   // Handle stand-out result from route screen
+  // NOTE: We do NOT check isFocusedRef here because the stand-out flow is user-initiated
+  // from a modal overlay. When router.back() is called, the focus state updates asynchronously
+  // but the standOutResult is set synchronously. We must process it regardless of focus timing.
   useEffect(() => {
     if (!standOutResult || !currentRef.current) return;
-    if (!mountedRef.current || !isFocusedRef.current) return;
+    if (!mountedRef.current) return;
     if (swipeLockRef.current) return;
 
     // CORRECTNESS FIX: Validate that standOutResult.profileId matches current profile

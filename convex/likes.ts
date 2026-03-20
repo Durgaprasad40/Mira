@@ -1,7 +1,7 @@
 import { v } from 'convex/values';
 import { mutation, query, MutationCtx } from './_generated/server';
 import { Id } from './_generated/dataModel';
-import { resolveUserIdByAuthId } from './helpers';
+import { resolveUserIdByAuthId, validateSessionToken } from './helpers';
 
 // D1-REPAIR: Helper to check if either user has blocked the other
 // Returns true if blocked (should prevent messaging)
@@ -27,25 +27,108 @@ async function isBlockedBidirectional(
   return !!block2;
 }
 
+// SMART MATCHING: Check for T&D connected status between two users
+// Returns true if there's a 'connected' todConnectRequest between them
+// Handles mixed storage patterns in todConnectRequests (authUserId vs Id<'users'>)
+async function hasTodConnection(
+  ctx: MutationCtx,
+  user1DbId: Id<'users'>,
+  user1AuthId: string,
+  user2DbId: Id<'users'>,
+  user2AuthId: string
+): Promise<boolean> {
+  // Pattern A: likeAnswer stores (authUserId, Id<'users'>)
+  // Pattern B: sendTodConnectRequest stores (Id<'users'>, authUserId)
+  // Check both patterns in both directions (4 queries total)
+
+  // Direction 1: user1 -> user2
+  let conn = await ctx.db
+    .query('todConnectRequests')
+    .withIndex('by_from_to', (q) =>
+      q.eq('fromUserId', user1AuthId).eq('toUserId', user2DbId)
+    )
+    .filter((q) => q.eq(q.field('status'), 'connected'))
+    .first();
+  if (conn) return true;
+
+  conn = await ctx.db
+    .query('todConnectRequests')
+    .withIndex('by_from_to', (q) =>
+      q.eq('fromUserId', user1DbId).eq('toUserId', user2AuthId)
+    )
+    .filter((q) => q.eq(q.field('status'), 'connected'))
+    .first();
+  if (conn) return true;
+
+  // Direction 2: user2 -> user1
+  conn = await ctx.db
+    .query('todConnectRequests')
+    .withIndex('by_from_to', (q) =>
+      q.eq('fromUserId', user2AuthId).eq('toUserId', user1DbId)
+    )
+    .filter((q) => q.eq(q.field('status'), 'connected'))
+    .first();
+  if (conn) return true;
+
+  conn = await ctx.db
+    .query('todConnectRequests')
+    .withIndex('by_from_to', (q) =>
+      q.eq('fromUserId', user2DbId).eq('toUserId', user1AuthId)
+    )
+    .filter((q) => q.eq(q.field('status'), 'connected'))
+    .first();
+  return !!conn;
+}
+
+// SMART MATCHING: Find existing T&D conversation between two users
+// Returns conversationId ONLY if connectionSource === 'tod'
+// Ignores confession conversations and all other conversation types
+async function findExistingTodConversation(
+  ctx: MutationCtx,
+  user1Id: Id<'users'>,
+  user2Id: Id<'users'>
+): Promise<Id<'conversations'> | null> {
+  const user1Participations = await ctx.db
+    .query('conversationParticipants')
+    .withIndex('by_user', (q) => q.eq('userId', user1Id))
+    .collect();
+
+  for (const p of user1Participations) {
+    const user2InConvo = await ctx.db
+      .query('conversationParticipants')
+      .withIndex('by_user_conversation', (q) =>
+        q.eq('userId', user2Id).eq('conversationId', p.conversationId)
+      )
+      .first();
+
+    if (user2InConvo) {
+      // Found shared conversation - verify it's a T&D conversation
+      const conversation = await ctx.db.get(p.conversationId);
+      if (conversation && conversation.connectionSource === 'tod') {
+        return p.conversationId;
+      }
+      // Not a T&D conversation - continue searching (don't return non-T&D)
+    }
+  }
+  return null;
+}
+
 // Like, pass, or super like a user
 export const swipe = mutation({
   args: {
-    authUserId: v.string(), // AUTH FIX: Server-side auth instead of trusting client
+    token: v.string(), // P1-028 FIX: Session token for server-side auth
     toUserId: v.id('users'),
     action: v.union(v.literal('like'), v.literal('pass'), v.literal('super_like'), v.literal('text')),
     message: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const { authUserId, toUserId, action, message } = args;
+    const { token, toUserId, action, message } = args;
     const now = Date.now();
 
-    // AUTH FIX: Resolve acting user from server-side auth
-    if (!authUserId || authUserId.trim().length === 0) {
-      throw new Error('Unauthorized: authentication required');
-    }
-    const fromUserId = await resolveUserIdByAuthId(ctx, authUserId);
+    // P1-028 FIX: Validate session and derive user from trusted server context
+    const fromUserId = await validateSessionToken(ctx, token);
     if (!fromUserId) {
-      throw new Error('Unauthorized: user not found');
+      throw new Error('Unauthorized: invalid or expired session');
     }
 
     // P2-003 FIX: Prevent self-swiping
@@ -199,13 +282,34 @@ export const swipe = mutation({
         )
         .first();
 
-      const isReciprocal = reciprocalLike && (
+      const hasReciprocalLike = reciprocalLike && (
         reciprocalLike.action === 'like' ||
         reciprocalLike.action === 'super_like' ||
         reciprocalLike.action === 'text'
       );
 
-      if (isReciprocal) {
+      // SMART MATCHING: Check for T&D connected status
+      // Only check if both users have authUserId (required for mixed-type query)
+      // Skip T&D matching if target has passed current user
+      // (Current user's pass toward target is impossible here - blocked by existingLike check)
+      let hasTodConn = false;
+      if (fromUser.authUserId && toUser?.authUserId) {
+        const targetHasPassed = reciprocalLike?.action === 'pass';
+
+        if (!targetHasPassed) {
+          hasTodConn = await hasTodConnection(
+            ctx,
+            fromUserId,
+            fromUser.authUserId,
+            toUserId,
+            toUser.authUserId
+          );
+        }
+      }
+
+      const isMatchEligible = hasReciprocalLike || hasTodConn;
+
+      if (isMatchEligible) {
         // 9-2: Check if match already exists to prevent duplicates from race conditions
         const user1Id = fromUserId < toUserId ? fromUserId : toUserId;
         const user2Id = fromUserId < toUserId ? toUserId : fromUserId;
@@ -221,24 +325,29 @@ export const swipe = mutation({
         }
 
         // It's a match!
+        // Determine matchSource: super_like if either user sent super_like
+        const reciprocalAction = reciprocalLike?.action;
+        const isSuperLikeMatch = action === 'super_like' || reciprocalAction === 'super_like';
+
         const matchId = await ctx.db.insert('matches', {
           user1Id,
           user2Id,
           matchedAt: now,
           isActive: true,
+          matchSource: isSuperLikeMatch ? 'super_like' : 'like',
         });
 
         // B1 SECURITY: Race condition protection - check for duplicates BEFORE downstream writes
         // If two swipes raced past the existingMatch check, multiple matches may exist.
-        // Only the OLDEST match (by _creationTime) wins and proceeds with conversation/notifications.
+        // P1-FIX: Use _id (lexicographic) for deterministic winner - both mutations agree on same winner
         const allMatches = await ctx.db
           .query('matches')
           .withIndex('by_users', (q) => q.eq('user1Id', user1Id).eq('user2Id', user2Id))
           .collect();
 
         if (allMatches.length > 1) {
-          // Duplicates detected - determine winner by oldest _creationTime
-          allMatches.sort((a, b) => a._creationTime - b._creationTime);
+          // Duplicates detected - determine winner by _id (deterministic, never identical)
+          allMatches.sort((a, b) => a._id.localeCompare(b._id));
           const winnerMatchId = allMatches[0]._id;
 
           if (matchId !== winnerMatchId) {
@@ -256,14 +365,96 @@ export const swipe = mutation({
           }
         }
 
-        // We are the sole/winning match - proceed with downstream writes
-        // Create conversation
-        await ctx.db.insert('conversations', {
-          matchId,
-          participants: [fromUserId, toUserId],
-          isPreMatch: false,
-          createdAt: now,
-        });
+        // P1-FIX: STRICT RE-VERIFICATION before any downstream writes
+        // Re-query and re-determine winner to handle race where both mutations cleaned up
+        const finalMatches = await ctx.db
+          .query('matches')
+          .withIndex('by_users', (q) => q.eq('user1Id', user1Id).eq('user2Id', user2Id))
+          .collect();
+
+        if (finalMatches.length === 0) {
+          // All matches were deleted (shouldn't happen, but guard anyway)
+          console.error('[LIKES] Race condition: all matches deleted, cannot proceed');
+          return { success: false, isMatch: false };
+        }
+
+        // Deterministic winner: smallest _id wins
+        finalMatches.sort((a, b) => a._id.localeCompare(b._id));
+        const finalWinnerId = finalMatches[0]._id;
+
+        if (matchId !== finalWinnerId) {
+          // We are NOT the winner after re-verification - do NOT proceed with downstream writes
+          // The actual winner will handle conversation/notifications
+          console.log(`[LIKES] Race re-verify: ${matchId} is not winner (${finalWinnerId}), exiting`);
+          return { success: true, isMatch: true, matchId: finalWinnerId };
+        }
+
+        // We are the verified winner - proceed with downstream writes
+        // SMART MATCHING: Check for existing T&D conversation only
+        const existingTodConvoId = await findExistingTodConversation(ctx, fromUserId, toUserId);
+
+        let conversationId: Id<'conversations'>;
+        if (existingTodConvoId) {
+          // Upgrade existing T&D conversation to match conversation
+          await ctx.db.patch(existingTodConvoId, {
+            matchId,
+            isPreMatch: false,
+            lastMessageAt: now,
+          });
+          conversationId = existingTodConvoId;
+        } else {
+          // Create new conversation
+          conversationId = await ctx.db.insert('conversations', {
+            matchId,
+            participants: [fromUserId, toUserId],
+            isPreMatch: false,
+            createdAt: now,
+          });
+        }
+
+        // STANDOUT MESSAGE SEEDING: If either super_like has a message, seed it as first chat message
+        // Priority: current swipe's message > reciprocal like's message (deterministic rule)
+        // This ensures the standout message appears as opening context in the conversation
+        const currentSuperLikeMessage = (action === 'super_like' && message) ? message : null;
+        const reciprocalSuperLikeMessage = (reciprocalLike?.action === 'super_like' && reciprocalLike?.message)
+          ? reciprocalLike.message
+          : null;
+
+        // Determine which message to seed (if any) and who sent it
+        let seededMessage: { senderId: Id<'users'>; content: string } | null = null;
+        if (currentSuperLikeMessage) {
+          seededMessage = { senderId: fromUserId, content: currentSuperLikeMessage };
+        } else if (reciprocalSuperLikeMessage) {
+          seededMessage = { senderId: toUserId, content: reciprocalSuperLikeMessage };
+        }
+
+        if (seededMessage) {
+          // Check if this exact message already exists to prevent duplicates
+          // (could happen in race conditions or retries)
+          const existingSeededMsg = await ctx.db
+            .query('messages')
+            .withIndex('by_conversation', (q) => q.eq('conversationId', conversationId))
+            .filter((q) =>
+              q.and(
+                q.eq(q.field('senderId'), seededMessage!.senderId),
+                q.eq(q.field('content'), seededMessage!.content)
+              )
+            )
+            .first();
+
+          if (!existingSeededMsg) {
+            await ctx.db.insert('messages', {
+              conversationId,
+              senderId: seededMessage.senderId,
+              type: 'text',
+              content: seededMessage.content,
+              createdAt: now,
+            });
+
+            // Update conversation's lastMessageAt
+            await ctx.db.patch(conversationId, { lastMessageAt: now });
+          }
+        }
 
         // Create notifications for both users
         // D5: Add dedupeKey and expiresAt for match notifications
@@ -294,18 +485,32 @@ export const swipe = mutation({
       }
     }
 
-    // Send notification for super like
-    // D5: Add dedupeKey and expiresAt for super_like notifications
-    if (action === 'super_like') {
+    // Send notification for like/super_like (not for pass)
+    // Notification lifecycle: stays until opened/acted on, then 24h expiry after opened
+    // Use real sender name in notification (fallback to generic only if name missing)
+    const senderName = fromUser.name || 'Someone';
+
+    if (action === 'like') {
+      await ctx.db.insert('notifications', {
+        userId: toUserId,
+        type: 'like',
+        title: `${senderName} liked you`,
+        body: 'Check your likes to see their profile',
+        data: { userId: fromUserId, likeType: 'like' },
+        dedupeKey: `like:${fromUserId}`,
+        createdAt: now,
+        // No expiresAt - notification stays until acted on
+      });
+    } else if (action === 'super_like') {
       await ctx.db.insert('notifications', {
         userId: toUserId,
         type: 'super_like',
-        title: 'You got a Super Like!',
-        body: 'Someone super liked you!',
-        data: { userId: fromUserId },
+        title: `${senderName} super liked you`,
+        body: 'Open your likes to view their profile',
+        data: { userId: fromUserId, likeType: 'super_like' },
         dedupeKey: `super_like:${fromUserId}`,
         createdAt: now,
-        expiresAt: now + 24 * 60 * 60 * 1000,
+        // No expiresAt - notification stays until acted on
       });
     }
 
@@ -386,6 +591,8 @@ export const rewind = mutation({
 
 // Get likes received (who liked you)
 // FIX: Excludes blocked users (bidirectional)
+// PRODUCT FIX: Always return real profile data (photo/name/age)
+// LIFECYCLE: Filter out expired likes (opened > 24h ago with no action)
 export const getLikesReceived = query({
   args: {
     userId: v.id('users'),
@@ -393,16 +600,11 @@ export const getLikesReceived = query({
   },
   handler: async (ctx, args) => {
     const { userId, limit = 50 } = args;
+    const now = Date.now();
+    const LIKE_EXPIRY_MS = 24 * 60 * 60 * 1000; // 24 hours
 
     const user = await ctx.db.get(userId);
     if (!user) return [];
-
-    // Determine if user can see who liked them:
-    // - Premium/Basic subscribers can see
-    // - Female users on free tier can see (free-tier benefit)
-    const isPaid = user.subscriptionTier === 'premium' || user.subscriptionTier === 'basic';
-    const isFemale = user.gender === 'female';
-    const canSee = isPaid || isFemale;
 
     const likes = await ctx.db
       .query('likes')
@@ -440,6 +642,13 @@ export const getLikesReceived = query({
       // FIX: Skip likes from blocked users (either direction)
       if (blockedUserIds.has(like.fromUserId as string)) continue;
 
+      // LIFECYCLE: Skip expired likes (opened > 24h ago)
+      // Unopened likes (firstOpenedAt undefined) never expire
+      const firstOpenedAt = (like as any).firstOpenedAt as number | undefined;
+      if (firstOpenedAt && now - firstOpenedAt > LIKE_EXPIRY_MS) {
+        continue; // Expired - skip
+      }
+
       // Check if already swiped on this person
       const alreadySwiped = await ctx.db
         .query('likes')
@@ -453,24 +662,34 @@ export const getLikesReceived = query({
       const fromUser = await ctx.db.get(like.fromUserId);
       if (!fromUser || !fromUser.isActive) continue;
 
-      // Get primary photo
-      const photo = await ctx.db
+      // Get primary photo, fallback to any photo if no primary exists
+      let photo = await ctx.db
         .query('photos')
         .withIndex('by_user', (q) => q.eq('userId', like.fromUserId))
         .filter((q) => q.eq(q.field('isPrimary'), true))
         .first();
 
+      // BUG FIX: Fallback to any photo if no isPrimary photo exists
+      if (!photo) {
+        photo = await ctx.db
+          .query('photos')
+          .withIndex('by_user', (q) => q.eq('userId', like.fromUserId))
+          .first();
+      }
+
+      // PRODUCT FIX: Always return REAL profile data (no anonymization)
       result.push({
         likeId: like._id,
         userId: like.fromUserId,
         action: like.action,
         message: like.message,
         createdAt: like.createdAt,
-        // Only show details if user can see
-        name: canSee ? fromUser.name : undefined,
-        age: canSee ? calculateAge(fromUser.dateOfBirth) : undefined,
-        photoUrl: canSee ? photo?.url : undefined,
-        isBlurred: !canSee,
+        firstOpenedAt, // Include for UI lifecycle tracking
+        // Always show real data
+        name: fromUser.name,
+        age: calculateAge(fromUser.dateOfBirth),
+        photoUrl: photo?.url,
+        gender: fromUser.gender,
       });
     }
 
@@ -628,3 +847,117 @@ function calculateAge(dateOfBirth: string): number {
   }
   return age;
 }
+
+// =============================================================================
+// TEST-ONLY: Reset swipe state between two users
+// =============================================================================
+// WARNING: This is strictly for testing. Do not use in production UI.
+// Purpose: Allow repeated testing of swipe flows with limited test users.
+// =============================================================================
+export const resetSwipeBetweenUsers = mutation({
+  args: {
+    token: v.string(),
+    targetUserId: v.id('users'),
+  },
+  handler: async (ctx, args) => {
+    const { token, targetUserId } = args;
+
+    // Validate session and derive current user
+    const fromUserId = await validateSessionToken(ctx, token);
+    if (!fromUserId) {
+      throw new Error('Unauthorized: invalid or expired session');
+    }
+
+    // Prevent self-targeting
+    if (fromUserId === targetUserId) {
+      throw new Error('Cannot reset swipe with yourself');
+    }
+
+    // Find and delete: fromUserId → targetUserId
+    const like1 = await ctx.db
+      .query('likes')
+      .withIndex('by_from_to', (q) =>
+        q.eq('fromUserId', fromUserId).eq('toUserId', targetUserId)
+      )
+      .first();
+
+    // Find and delete: targetUserId → fromUserId
+    const like2 = await ctx.db
+      .query('likes')
+      .withIndex('by_from_to', (q) =>
+        q.eq('fromUserId', targetUserId).eq('toUserId', fromUserId)
+      )
+      .first();
+
+    let deletedCount = 0;
+
+    if (like1) {
+      await ctx.db.delete(like1._id);
+      deletedCount++;
+    }
+
+    if (like2) {
+      await ctx.db.delete(like2._id);
+      deletedCount++;
+    }
+
+    // Test logging
+    console.log('[TEST] resetSwipeBetweenUsers executed', {
+      fromUserId,
+      targetUserId,
+      deletedCount,
+    });
+
+    return {
+      success: true,
+      deletedCount,
+      message: `Deleted ${deletedCount} swipe record(s) between users`,
+    };
+  },
+});
+
+// =============================================================================
+// LIFECYCLE: Mark likes as opened when user views the likes section
+// =============================================================================
+// When user opens the likes/heart section, mark all unopened likes as opened.
+// Opened likes start a 24-hour expiry timer.
+// =============================================================================
+export const markLikesOpened = mutation({
+  args: {
+    token: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const { token } = args;
+    const now = Date.now();
+
+    // Validate session and derive current user
+    const userId = await validateSessionToken(ctx, token);
+    if (!userId) {
+      throw new Error('Unauthorized: invalid or expired session');
+    }
+
+    // Get all unopened likes for this user
+    const likes = await ctx.db
+      .query('likes')
+      .withIndex('by_to_user', (q) => q.eq('toUserId', userId))
+      .filter((q) =>
+        q.and(
+          q.or(
+            q.eq(q.field('action'), 'like'),
+            q.eq(q.field('action'), 'super_like')
+          ),
+          q.eq(q.field('firstOpenedAt'), undefined)
+        )
+      )
+      .collect();
+
+    // Mark each as opened
+    let markedCount = 0;
+    for (const like of likes) {
+      await ctx.db.patch(like._id, { firstOpenedAt: now });
+      markedCount++;
+    }
+
+    return { success: true, markedCount };
+  },
+});

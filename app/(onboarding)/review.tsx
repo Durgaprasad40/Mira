@@ -38,8 +38,6 @@ import {
   SOCIAL_BATTERY_LEFT_LABEL,
   SOCIAL_BATTERY_RIGHT_LABEL,
   VALUE_TRIGGER_OPTIONS,
-  SECTION_LABELS,
-  PromptSectionKey,
   // Life Rhythm
   SOCIAL_RHYTHM_OPTIONS,
   SLEEP_SCHEDULE_OPTIONS,
@@ -144,7 +142,6 @@ export default function ReviewScreen() {
     activities,
     profilePrompts,
     seedQuestions,
-    sectionPrompts,
     minAge,
     maxAge,
     maxDistance,
@@ -242,18 +239,17 @@ export default function ReviewScreen() {
   }, [currentUser, backendPhotos]);
 
   // CRITICAL: Check demoProfile.faceVerificationPassed for demo mode (persisted across logout)
-  // BUG FIX: Also accept faceVerificationPending (manual review) as valid to proceed
+  // Backend requires faceVerificationStatus === 'verified' - pending is NOT sufficient
   const isVerified = isDemoMode
-    ? !!(demoProfile?.faceVerificationPassed || faceVerificationPassed || faceVerificationPending)
-    : (faceVerificationPassed || faceVerificationPending);
+    ? !!(demoProfile?.faceVerificationPassed || faceVerificationPassed)
+    : !!faceVerificationPassed;
 
   // CHECKPOINT GATE: Block access if face verification not completed
   React.useEffect(() => {
     if (isVerified) {
       if (__DEV__) {
-        console.log("[REVIEW_GATE] verified=true (passed or pending) -> allow");
+        console.log("[REVIEW_GATE] verified=true (faceVerificationPassed) -> allow");
         console.log("[REVIEW_GATE] faceVerificationPassed:", faceVerificationPassed);
-        console.log("[REVIEW_GATE] faceVerificationPending:", faceVerificationPending);
       }
       return;
     }
@@ -328,7 +324,6 @@ export default function ReviewScreen() {
           activities: activities as string[],
           profilePrompts,
           seedQuestions,
-          sectionPrompts,
           minAge,
           maxAge,
           maxDistance,
@@ -481,7 +476,11 @@ export default function ReviewScreen() {
       const capturedAuthVersion = useAuthStore.getState().authVersion;
 
       // Submit all onboarding data to backend
-      await completeOnboarding(onboardingData);
+      // ONB-005 FIX: Capture and validate result before marking complete
+      const result = await completeOnboarding(onboardingData);
+      if (!result) {
+        throw new Error('Failed to complete onboarding - server returned no result');
+      }
 
       // H7 FIX: Check if logout happened during mutation (version changed)
       if (useAuthStore.getState().authVersion !== capturedAuthVersion) {
@@ -688,38 +687,32 @@ export default function ReviewScreen() {
           </View>
         ) : null}
 
-        {/* Section Prompts */}
-        {(['builder', 'performer', 'seeker', 'grounded'] as PromptSectionKey[]).map((section) => {
-          const answers = sectionPrompts[section];
-          if (!answers || answers.length === 0) return null;
-          const label = SECTION_LABELS[section];
+        {/* Profile Prompts (Unified System) */}
+        {(() => {
+          const hasPrompts = profilePrompts && profilePrompts.length > 0;
           return (
-            <View key={section} style={styles.promptSubsection}>
-              <Text style={styles.promptSectionLabel}>{label.emoji} {label.title}</Text>
-              {answers.map((prompt, index) => (
-                <View key={index} style={styles.promptItem}>
-                  <Text style={styles.promptQuestion}>{prompt.question}</Text>
-                  <Text style={styles.promptAnswer}>{prompt.answer}</Text>
-                </View>
-              ))}
-            </View>
-          );
-        })}
-
-        {/* Legacy prompts fallback */}
-        {(!seedQuestions.identityAnchor && !seedQuestions.socialBattery && !seedQuestions.valueTrigger &&
-          Object.values(sectionPrompts).every(s => s.length === 0)) && (
-          profilePrompts.length > 0 ? (
-            profilePrompts.map((prompt, index) => (
-              <View key={index} style={styles.promptItem}>
-                <Text style={styles.promptQuestion}>{prompt.question}</Text>
-                <Text style={styles.promptAnswer}>{prompt.answer}</Text>
+            <>
+              <View style={styles.sectionPromptsHeader}>
+                <Text style={styles.sectionPromptsLabel}>Your Prompts</Text>
+                <TouchableOpacity onPress={() => handleEdit("prompts-part2")}>
+                  <Text style={styles.editLink}>Edit</Text>
+                </TouchableOpacity>
               </View>
-            ))
-          ) : (
-            <Text style={styles.emptyText}>No prompts added</Text>
-          )
-        )}
+              {hasPrompts ? (
+                profilePrompts.map((prompt, index) => (
+                  <View key={index} style={styles.promptItem}>
+                    <Text style={styles.promptQuestion}>{prompt.question}</Text>
+                    <Text style={styles.promptAnswer}>{prompt.answer}</Text>
+                  </View>
+                ))
+              ) : (
+                <TouchableOpacity onPress={() => handleEdit("prompts-part2")}>
+                  <Text style={styles.emptyText}>No prompts added — Tap to add</Text>
+                </TouchableOpacity>
+              )}
+            </>
+          );
+        })()}
       </View>
 
       {/* Profile Details Section - Height, Weight, Job, Company, School, Education, Religion */}
@@ -1081,6 +1074,18 @@ const styles = StyleSheet.create({
     color: COLORS.textMuted,
     fontStyle: "italic",
     marginTop: 8,
+  },
+  sectionPromptsHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: 12,
+    marginTop: 8,
+  },
+  sectionPromptsLabel: {
+    fontSize: 14,
+    fontWeight: "600",
+    color: COLORS.text,
   },
   promptSubsection: {
     marginBottom: 16,

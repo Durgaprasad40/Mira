@@ -185,21 +185,23 @@ export async function syncPhotosFromBackend(
 /**
  * Upload a photo to Convex backend immediately.
  *
- * This is called when user adds a photo - ensures backend is updated ASAP.
+ * This is called when user adds OR replaces a photo - ensures backend is updated ASAP.
  *
  * @param userId - The user ID
  * @param localUri - The local file:// URI
  * @param isPrimary - Whether this is the primary photo
  * @param slotIndex - The slot index (0-8)
  * @param token - Optional session token for auth validation
- * @returns Promise<{ success: boolean; storageId?: string; message?: string }>
+ * @param existingPhotoId - If provided, REPLACE this existing photo instead of adding new
+ * @returns Promise<{ success: boolean; storageId?: string; photoId?: string; message?: string }>
  */
 export async function uploadPhotoToBackend(
   userId: string,
   localUri: string,
   isPrimary: boolean,
   slotIndex: number,
-  token?: string
+  token?: string,
+  existingPhotoId?: string
 ): Promise<{ success: boolean; storageId?: string; photoId?: string; message?: string }> {
   // Skip upload in demo mode
   if (isDemoMode) {
@@ -257,8 +259,33 @@ export async function uploadPhotoToBackend(
       console.warn('[PHOTO_SYNC] H-1: trackPendingUpload failed (non-fatal):', e);
     }
 
-    // Step 4: Add photo to photos table
+    // Step 4: Add or Replace photo in photos table
     try {
+      // REPLACE flow: Update existing photo record (preserves order/slot)
+      if (existingPhotoId) {
+        if (__DEV__) {
+          console.log(`[PHOTO_SYNC] REPLACE mode: updating photo ${existingPhotoId} with new storage ${storageId}`);
+        }
+
+        const replaceResult = await convex.mutation(api.photos.replacePhoto, {
+          photoId: existingPhotoId as Id<'photos'>,
+          storageId,
+          token: token!, // Token is required for replace
+        });
+
+        if (__DEV__) {
+          console.log(`[PHOTO_SYNC] Photo replaced in database: ${replaceResult.photoId} at order ${replaceResult.order}`);
+        }
+
+        return {
+          success: true,
+          storageId,
+          photoId: replaceResult.photoId,
+          message: 'Photo replaced successfully',
+        };
+      }
+
+      // ADD flow: Create new photo record
       const addPhotoResult = await convex.mutation(api.photos.addPhoto, {
         userId,
         storageId,
@@ -277,8 +304,9 @@ export async function uploadPhotoToBackend(
         photoId: addPhotoResult.photoId,
         message: 'Photo uploaded successfully',
       };
-    } catch (addPhotoError: any) {
-      // H-1: Cleanup orphaned storage (best-effort)
+    } catch (mutationError: any) {
+      // H-1: Cleanup orphaned storage (best-effort) for BOTH add and replace failures
+      // Both flows upload new storage first, so failure leaves orphaned storage object
       try {
         await convex.mutation(api.photos.cleanupPendingUpload, { userId, storageId });
       } catch (e) {
@@ -287,9 +315,9 @@ export async function uploadPhotoToBackend(
         console.error('[PHOTO_SYNC] M12: userId:', userId, 'storageId:', storageId);
         console.error('[PHOTO_SYNC] M12: cleanup error:', e);
         // Attach orphanedStorageId to error so outer catch can expose it
-        addPhotoError.orphanedStorageId = storageId;
+        mutationError.orphanedStorageId = storageId;
       }
-      throw addPhotoError;
+      throw mutationError;
     }
   } catch (error: any) {
     console.error('[PHOTO_SYNC] Upload failed:', error);
