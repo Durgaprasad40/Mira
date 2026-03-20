@@ -313,8 +313,13 @@ export function Phase2ProtectedMediaViewer({
     viewedOnceHoldMessages.add(messageId);
 
     // Cleanup: expire on release (component unmount)
+    // P0-FIX: Guard with hasExpiredRef to prevent duplicate expiration
+    // (handleClose may have already expired via onTouchEnd)
     return () => {
-      markSecurePhotoExpired(conversationId, messageId);
+      if (!hasExpiredRef.current) {
+        hasExpiredRef.current = true;
+        markSecurePhotoExpired(conversationId, messageId);
+      }
     };
   }, [visible, isOnce, isHoldMode, messageId, conversationId, markSecurePhotoExpired]);
 

@@ -308,20 +308,10 @@ export const sendBottleSpinInvite = mutation({
       throw new Error('Unauthorized: user not found');
     }
 
-    // CRITICAL: Convert otherUserId to auth ID for consistent ID format
-    // otherUserId comes as Convex document ID from frontend (activeConversation.otherUser.id)
-    // We need to store auth ID so turn ownership comparisons work across devices
-    let otherUserAuthId = otherUserId;
-    try {
-      // Try to get the user document and extract their authUserId
-      const otherUserDoc = await ctx.db.get(otherUserId as Id<'users'>);
-      if (otherUserDoc && otherUserDoc.authUserId) {
-        otherUserAuthId = otherUserDoc.authUserId;
-      }
-    } catch {
-      // If otherUserId is not a valid Convex ID, it might already be an auth ID
-      // Keep the original value
-    }
+    // P0-T&D-FIX: Use Convex IDs directly for both inviter and invitee
+    // Frontend passes Convex document IDs (user._id) as "authUserId" parameter
+    // DO NOT convert to user.authUserId field - that causes ID format mismatch
+    // because frontend's useAuthStore().userId is the Convex ID, not the authUserId field
 
     const now = Date.now();
 
@@ -351,11 +341,11 @@ export const sendBottleSpinInvite = mutation({
       throw new Error('Cooldown active');
     }
 
-    // Create new invite session - BOTH IDs are now auth IDs for consistent comparison
+    // Create new invite session - use Convex IDs directly (passed from frontend)
     await ctx.db.insert('bottleSpinSessions', {
       conversationId,
       inviterId: authUserId,
-      inviteeId: otherUserAuthId,
+      inviteeId: otherUserId,
       status: 'pending',
       createdAt: now,
     });

@@ -326,6 +326,15 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
       console.warn('[AUTH] logout: failed to reset verificationStore', error);
     }
 
+    // P0-PRIVACY-FIX: Reset privacy settings to prevent cross-user leakage
+    try {
+      const { usePrivacyStore } = require('@/stores/privacyStore');
+      usePrivacyStore.getState()?.resetPrivacy?.();
+      if (__DEV__) console.log('[AUTH] logout: cleared privacyStore');
+    } catch (error) {
+      console.warn('[AUTH] logout: failed to reset privacyStore', error);
+    }
+
     try {
       const { useConfessionStore } = require('@/stores/confessionStore');
       const confessionState = useConfessionStore.getState();
