@@ -24,6 +24,7 @@ import {
 import { Image } from 'expo-image';
 import { useVideoPlayer, VideoView } from 'expo-video';
 import { Ionicons } from '@expo/vector-icons';
+import { getVideoUri } from '@/lib/videoCache';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 
@@ -63,15 +64,49 @@ interface SecureVideoPlayerProps {
 /**
  * CR-001: Inner component that contains the useVideoPlayer hook.
  * Only rendered when URI is valid (via wrapper).
+ *
+ * VIDEO-CACHE-FIX: Uses cached video URI for instant playback on repeat views.
  */
 function SecureVideoPlayerInner({ mediaUri, isPlaying, visible }: SecureVideoPlayerProps) {
-  const player = useVideoPlayer(mediaUri, (p) => {
+  // VIDEO-CACHE-FIX: Track cached URI state
+  const [cachedUri, setCachedUri] = useState<string>(mediaUri);
+  const [isReady, setIsReady] = useState(false);
+
+  // VIDEO-CACHE-FIX: Load cached URI on mount
+  useEffect(() => {
+    let mounted = true;
+
+    const loadCachedVideo = async () => {
+      try {
+        const cached = await getVideoUri(mediaUri);
+        if (mounted) {
+          setCachedUri(cached);
+          setIsReady(true);
+        }
+      } catch {
+        // Fallback to original URI
+        if (mounted) {
+          setCachedUri(mediaUri);
+          setIsReady(true);
+        }
+      }
+    };
+
+    loadCachedVideo();
+
+    return () => {
+      mounted = false;
+    };
+  }, [mediaUri]);
+
+  // Use cached URI for player
+  const player = useVideoPlayer(cachedUri, (p) => {
     p.loop = true;
   });
 
   // Control playback based on hold state
   useEffect(() => {
-    if (!player) return;
+    if (!player || !isReady) return;
 
     try {
       if (isPlaying && visible) {
@@ -82,7 +117,7 @@ function SecureVideoPlayerInner({ mediaUri, isPlaying, visible }: SecureVideoPla
     } catch {
       // Ignore errors from released player during unmount race
     }
-  }, [isPlaying, visible, player]);
+  }, [isPlaying, visible, player, isReady]);
 
   // Pause on unmount
   useEffect(() => {

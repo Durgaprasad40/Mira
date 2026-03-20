@@ -163,6 +163,15 @@ export default function LikesScreen() {
           </Text>
         </View>
 
+        {/* Standout message (if present) */}
+        {like.message && (
+          <View style={styles.standoutMessageContainer}>
+            <Text style={styles.standoutMessageText} numberOfLines={2}>
+              "{like.message}"
+            </Text>
+          </View>
+        )}
+
         {/* Action buttons */}
         <View style={styles.cardActions}>
           <TouchableOpacity
@@ -292,6 +301,17 @@ const styles = StyleSheet.create({
     fontSize: 15,
     fontWeight: '600',
     color: COLORS.text,
+  },
+  // Standout message display
+  standoutMessageContainer: {
+    paddingHorizontal: 10,
+    paddingBottom: 8,
+  },
+  standoutMessageText: {
+    fontSize: 12,
+    fontStyle: 'italic',
+    color: '#2196F3', // Super like blue
+    lineHeight: 16,
   },
   cardActions: {
     flexDirection: 'row',

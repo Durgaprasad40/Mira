@@ -422,12 +422,13 @@ export function Phase2ProtectedMediaViewer({
   // HOLD-MODE-FIX: Close viewer immediately when finger is released in hold mode
   // This is critical because the Modal captures touch events, preventing the
   // original PanResponder from receiving onPanResponderRelease
+  // BUG-FIX: Must call handleClose() (not onClose) to trigger once-view expiry logic
   const handleHoldModeRelease = useCallback(() => {
     if (isHoldMode) {
-      console.log('[SECURE-VIEWER] hold-mode: Touch released, closing viewer');
-      onClose();
+      console.log('[SECURE-VIEWER] hold-mode: Touch released, closing viewer via handleClose');
+      handleClose();
     }
-  }, [isHoldMode, onClose]);
+  }, [isHoldMode, handleClose]);
 
   if (!visible || !message) return null;
 

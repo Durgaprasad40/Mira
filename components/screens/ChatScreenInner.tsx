@@ -54,6 +54,7 @@ import {
   isExpiredConfessionThread,
   getOtherUserIdFromMeta,
 } from '@/lib/threadsIntegrity';
+import { preloadVideos } from '@/lib/videoCache';
 
 /** Resolve the current demo user ID at call-time from authStore.
  *  Falls back to 'demo_user_1' for legacy data compatibility. */
@@ -381,6 +382,44 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
     }
 
     return hash;
+  }, [displayMessages]);
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // VIDEO PRELOADING — Cache video messages for instant playback
+  // ═══════════════════════════════════════════════════════════════════════════
+  useEffect(() => {
+    if (!displayMessages || displayMessages.length === 0) return;
+
+    // Extract video URLs from messages (last 10 for performance)
+    const videoUrls: string[] = [];
+    const recentMessages = displayMessages.slice(-10);
+
+    for (const msg of recentMessages) {
+      // Cast to any to access all possible message properties
+      const m = msg as any;
+
+      // Check for video type messages with URLs
+      if (m.type === 'video') {
+        const videoUrl = m.mediaUrl || m.videoUri || m.imageUrl;
+        if (videoUrl && (videoUrl.startsWith('http://') || videoUrl.startsWith('https://'))) {
+          videoUrls.push(videoUrl);
+        }
+      }
+      // Check for protected video media
+      if (m.isProtected && m.protectedMedia?.mediaType === 'video') {
+        const protectedUrl = m.protectedMedia?.localUri || m.mediaUrl;
+        if (protectedUrl && (protectedUrl.startsWith('http://') || protectedUrl.startsWith('https://'))) {
+          videoUrls.push(protectedUrl);
+        }
+      }
+    }
+
+    // Preload unique video URLs (non-blocking)
+    if (videoUrls.length > 0) {
+      const uniqueUrls = [...new Set(videoUrls)];
+      if (__DEV__) console.log('[VIDEO-PRELOAD] Preloading', uniqueUrls.length, 'videos');
+      preloadVideos(uniqueUrls, 2); // Max 2 concurrent downloads
+    }
   }, [displayMessages]);
 
   // ═══════════════════════════════════════════════════════════════════════════

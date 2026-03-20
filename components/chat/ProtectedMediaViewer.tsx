@@ -18,6 +18,7 @@ import { api } from '@/convex/_generated/api';
 import { COLORS } from '@/lib/constants';
 import { useScreenshotDetection } from '@/hooks/useScreenshotDetection';
 import { useScreenProtection } from '@/hooks/useScreenProtection';
+import { getVideoUri } from '@/lib/videoCache';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 
@@ -210,11 +211,31 @@ export function ProtectedMediaViewer({
 
     // Handle URL received - stay in loading until image actually loads
     if (mediaData?.url && !hasMarkedViewed.current) {
-      // CACHE-FIX: Store URL in cache for faster re-opens
-      urlCacheRef.current.set(messageId, mediaData.url);
-      setMediaUrl(mediaData.url);
       hasMarkedViewed.current = true;
       // viewerState stays 'loading' until image onLoad fires
+
+      // VIDEO-CACHE-FIX: Cache video to local file system for instant playback
+      const processUrl = async () => {
+        let finalUrl = mediaData.url;
+
+        // For videos, use file-based caching
+        if (mediaData.mediaType === 'video') {
+          try {
+            finalUrl = await getVideoUri(mediaData.url);
+            console.log('[SECURE-VIEWER] video-cached:', finalUrl.includes('video-cache') ? 'local' : 'remote');
+          } catch {
+            // Fallback to original URL
+          }
+        }
+
+        // CACHE-FIX: Store URL in cache for faster re-opens
+        urlCacheRef.current.set(messageId, finalUrl);
+        if (mountedRef.current) {
+          setMediaUrl(finalUrl);
+        }
+      };
+
+      processUrl();
 
       // MSG-006 FIX: Use authUserId for server-side verification
       markViewed({

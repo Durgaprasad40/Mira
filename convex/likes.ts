@@ -369,6 +369,7 @@ export const swipe = mutation({
         // SMART MATCHING: Check for existing T&D conversation only
         const existingTodConvoId = await findExistingTodConversation(ctx, fromUserId, toUserId);
 
+        let conversationId: Id<'conversations'>;
         if (existingTodConvoId) {
           // Upgrade existing T&D conversation to match conversation
           await ctx.db.patch(existingTodConvoId, {
@@ -376,14 +377,59 @@ export const swipe = mutation({
             isPreMatch: false,
             lastMessageAt: now,
           });
+          conversationId = existingTodConvoId;
         } else {
           // Create new conversation
-          await ctx.db.insert('conversations', {
+          conversationId = await ctx.db.insert('conversations', {
             matchId,
             participants: [fromUserId, toUserId],
             isPreMatch: false,
             createdAt: now,
           });
+        }
+
+        // STANDOUT MESSAGE SEEDING: If either super_like has a message, seed it as first chat message
+        // Priority: current swipe's message > reciprocal like's message (deterministic rule)
+        // This ensures the standout message appears as opening context in the conversation
+        const currentSuperLikeMessage = (action === 'super_like' && message) ? message : null;
+        const reciprocalSuperLikeMessage = (reciprocalLike?.action === 'super_like' && reciprocalLike?.message)
+          ? reciprocalLike.message
+          : null;
+
+        // Determine which message to seed (if any) and who sent it
+        let seededMessage: { senderId: Id<'users'>; content: string } | null = null;
+        if (currentSuperLikeMessage) {
+          seededMessage = { senderId: fromUserId, content: currentSuperLikeMessage };
+        } else if (reciprocalSuperLikeMessage) {
+          seededMessage = { senderId: toUserId, content: reciprocalSuperLikeMessage };
+        }
+
+        if (seededMessage) {
+          // Check if this exact message already exists to prevent duplicates
+          // (could happen in race conditions or retries)
+          const existingSeededMsg = await ctx.db
+            .query('messages')
+            .withIndex('by_conversation', (q) => q.eq('conversationId', conversationId))
+            .filter((q) =>
+              q.and(
+                q.eq(q.field('senderId'), seededMessage!.senderId),
+                q.eq(q.field('content'), seededMessage!.content)
+              )
+            )
+            .first();
+
+          if (!existingSeededMsg) {
+            await ctx.db.insert('messages', {
+              conversationId,
+              senderId: seededMessage.senderId,
+              type: 'text',
+              content: seededMessage.content,
+              createdAt: now,
+            });
+
+            // Update conversation's lastMessageAt
+            await ctx.db.patch(conversationId, { lastMessageAt: now });
+          }
         }
 
         // Create notifications for both users

@@ -43,6 +43,11 @@ async function isBlockedBidirectional(
   return !!block2;
 }
 
+// UNREAD-RULE: Message types that count toward unread badges
+// Includes: text, image (photo), video, voice, template, dare
+// Excludes: system (screenshot events, permission events, T&D connection system messages, etc.)
+const COUNTABLE_MESSAGE_TYPES = ['text', 'image', 'video', 'voice', 'template', 'dare'];
+
 // C1/C2/C3-REPAIR: Helper to compute unread count from source of truth (messages table)
 // Used for: race-safe updates, fallback when participant rows are missing, backfill
 async function computeUnreadCountFromMessages(
@@ -60,7 +65,10 @@ async function computeUnreadCountFromMessages(
       )
     )
     .collect();
-  return unreadMessages.length;
+
+  // UNREAD-RULE: Only count messages with countable types
+  // System messages (screenshot_taken, permission_granted, T&D state, etc.) are excluded
+  return unreadMessages.filter((m) => COUNTABLE_MESSAGE_TYPES.includes(m.type)).length;
 }
 
 // C1/C2/C3-REPAIR: Helper to upsert participant row with recomputed unread count

@@ -48,8 +48,24 @@ import {
 import { log } from '@/utils/logger';
 import { useScreenTrace } from '@/lib/devTrace';
 
-const { width: SCREEN_WIDTH } = Dimensions.get('window');
+const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 const CARD_WIDTH = (SCREEN_WIDTH - 48) / 2;
+
+// ═══════════════════════════════════════════════════════════════════════════
+// RESPONSIVE SPACING SYSTEM - Consistent across devices
+// ═══════════════════════════════════════════════════════════════════════════
+// Base scale factor: smaller phones get slightly tighter spacing
+const SCALE_FACTOR = Math.min(SCREEN_WIDTH / 375, 1.1); // Cap at 1.1x for large phones
+
+// Section spacing (compact top sections, more room for messages)
+const SPACING = {
+  sectionTop: Math.round(8 * SCALE_FACTOR),        // Top padding of sections
+  titleToRow: Math.round(6 * SCALE_FACTOR),        // Title to avatar row
+  sectionGap: Math.round(8 * SCALE_FACTOR),        // Between Super Likes and New Matches
+  beforeMessages: Math.round(12 * SCALE_FACTOR),   // Before Messages list
+  avatarSize: Math.round(56 * SCALE_FACTOR),       // Avatar circle size
+  avatarGap: Math.round(12 * SCALE_FACTOR),        // Gap between avatars
+};
 
 // Recency threshold: 24 hours
 const RECENCY_THRESHOLD_MS = 24 * 60 * 60 * 1000;
@@ -636,6 +652,15 @@ export default function MessagesScreen() {
               {formatRelativeTime(like.createdAt || Date.now())}
             </Text>
           </View>
+
+          {/* Standout message (if present) */}
+          {like.message && (
+            <View style={styles.standoutMessageContainer}>
+              <Text style={styles.standoutMessageText} numberOfLines={2}>
+                "{like.message}"
+              </Text>
+            </View>
+          )}
         </TouchableOpacity>
 
         {/* Action buttons */}
@@ -659,15 +684,18 @@ export default function MessagesScreen() {
     );
   };
 
-  // Super Likes section (above New Matches)
+  // Super Likes section (above New Matches) - only renders when there's data
   const renderSuperLikesRow = () => {
-    // P1-011 FIX: Guard against null/undefined superLikeMatches
-    if (!superLikeMatches?.length) return null;
+    // Only render if we have real super like matches
+    if (!superLikeMatches || superLikeMatches.length === 0) {
+      return null;
+    }
+
     return (
-      <View style={styles.newMatchesSection}>
-        <View style={styles.sectionHeader}>
-          <Ionicons name="star" size={18} color={COLORS.superLike} />
-          <Text style={styles.sectionTitle}>Super Likes</Text>
+      <View style={styles.superLikesSection}>
+        <View style={styles.compactSectionHeader}>
+          <Ionicons name="star" size={16} color={COLORS.superLike} />
+          <Text style={styles.compactSectionTitle}>Super Likes</Text>
           <View style={[styles.countBadge, { backgroundColor: COLORS.superLike + '20' }]}>
             <Text style={[styles.countBadgeText, { color: COLORS.superLike }]}>{superLikeMatches.length}</Text>
           </View>
@@ -675,13 +703,12 @@ export default function MessagesScreen() {
         <FlatList
           horizontal
           data={superLikeMatches}
-          keyExtractor={(item: any, index: number) => item.id || item.matchId || `superlike-${item.matchedUserId || item.userId || index}`}
+          keyExtractor={(item: any) => item.id || item.matchId || `superlike-${item.otherUser?.id}`}
           renderItem={({ item }: { item: any }) => (
             <TouchableOpacity
-              style={styles.matchItem}
+              style={styles.compactMatchItem}
               activeOpacity={0.7}
               onPress={() => {
-                // Safety: only navigate if conversationId exists
                 if (item.conversationId) {
                   safePush(router, `/(main)/(tabs)/messages/chat/${item.conversationId}` as any, 'messages->superLikeChat');
                 } else {
@@ -689,42 +716,46 @@ export default function MessagesScreen() {
                 }
               }}
             >
-              <View style={styles.matchAvatarContainer}>
-                <View style={[styles.matchRing, { borderColor: COLORS.superLike }]}>
+              <View style={styles.compactAvatarContainer}>
+                <View style={[styles.compactMatchRing, { borderColor: COLORS.superLike }]}>
                   {item.otherUser?.photoUrl ? (
                     <Image
                       source={{ uri: item.otherUser.photoUrl }}
-                      style={styles.matchAvatar}
+                      style={styles.compactMatchAvatar}
                       contentFit="cover"
                     />
                   ) : (
-                    <View style={[styles.matchAvatar, styles.placeholderAvatar]}>
-                      <Text style={styles.avatarInitial}>{item.otherUser?.name?.[0] || '?'}</Text>
+                    <View style={[styles.compactMatchAvatar, styles.placeholderAvatar]}>
+                      <Text style={styles.compactAvatarInitial}>{item.otherUser?.name?.[0] || '?'}</Text>
                     </View>
                   )}
                 </View>
                 {/* Super Like star badge */}
-                <View style={styles.superLikeMatchBadge}>
-                  <Ionicons name="star" size={10} color={COLORS.white} />
+                <View style={styles.compactSuperLikeBadge}>
+                  <Ionicons name="star" size={8} color={COLORS.white} />
                 </View>
               </View>
-              <Text style={styles.matchName} numberOfLines={1}>{item.otherUser?.name || 'Someone'}</Text>
             </TouchableOpacity>
           )}
           showsHorizontalScrollIndicator={false}
-          contentContainerStyle={styles.matchesList}
+          contentContainerStyle={styles.compactMatchesList}
         />
       </View>
     );
   };
 
+  // New Matches section - only renders when there's data
   const renderNewMatchesRow = () => {
-    if (newMatches.length === 0) return null;
+    // Only render if we have real new matches
+    if (!newMatches || newMatches.length === 0) {
+      return null;
+    }
+
     return (
       <View style={styles.newMatchesSection}>
-        <View style={styles.sectionHeader}>
-          <Ionicons name="heart-circle" size={18} color={COLORS.primary} />
-          <Text style={styles.sectionTitle}>New Matches</Text>
+        <View style={styles.compactSectionHeader}>
+          <Ionicons name="heart-circle" size={16} color={COLORS.primary} />
+          <Text style={styles.compactSectionTitle}>New Matches</Text>
           <View style={[styles.countBadge, { backgroundColor: COLORS.primary + '20' }]}>
             <Text style={[styles.countBadgeText, { color: COLORS.primary }]}>{newMatches.length}</Text>
           </View>
@@ -732,13 +763,12 @@ export default function MessagesScreen() {
         <FlatList
           horizontal
           data={newMatches}
-          keyExtractor={(item: any, index: number) => item.id || item.matchId || `newmatch-${item.matchedUserId || item.userId || index}`}
+          keyExtractor={(item: any) => item.id || item.matchId || `newmatch-${item.otherUser?.id}`}
           renderItem={({ item }: { item: any }) => (
             <TouchableOpacity
-              style={styles.matchItem}
+              style={styles.compactMatchItem}
               activeOpacity={0.7}
               onPress={() => {
-                // Safety: only navigate if conversationId exists
                 if (item.conversationId) {
                   safePush(router, `/(main)/(tabs)/messages/chat/${item.conversationId}` as any, 'messages->newMatchChat');
                 } else {
@@ -746,26 +776,25 @@ export default function MessagesScreen() {
                 }
               }}
             >
-              <View style={styles.matchAvatarContainer}>
-                <View style={styles.matchRing}>
+              <View style={styles.compactAvatarContainer}>
+                <View style={[styles.compactMatchRing, { borderColor: COLORS.primary }]}>
                   {item.otherUser?.photoUrl ? (
                     <Image
                       source={{ uri: item.otherUser.photoUrl }}
-                      style={styles.matchAvatar}
+                      style={styles.compactMatchAvatar}
                       contentFit="cover"
                     />
                   ) : (
-                    <View style={[styles.matchAvatar, styles.placeholderAvatar]}>
-                      <Text style={styles.avatarInitial}>{item.otherUser?.name?.[0] || '?'}</Text>
+                    <View style={[styles.compactMatchAvatar, styles.placeholderAvatar]}>
+                      <Text style={styles.compactAvatarInitial}>{item.otherUser?.name?.[0] || '?'}</Text>
                     </View>
                   )}
                 </View>
               </View>
-              <Text style={styles.matchName} numberOfLines={1}>{item.otherUser?.name || 'Someone'}</Text>
             </TouchableOpacity>
           )}
           showsHorizontalScrollIndicator={false}
-          contentContainerStyle={styles.matchesList}
+          contentContainerStyle={styles.compactMatchesList}
         />
       </View>
     );
@@ -916,59 +945,62 @@ export default function MessagesScreen() {
           refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
         />
       ) : (
-        // Messages view
-        // key="messages-list" forces remount when switching views (fixes numColumns error)
-        <FlatList
-          key="messages-list"
-          data={(conversations || []) as any[]}
-          keyExtractor={(item: any) => item.id}
-          renderItem={({ item }: { item: any }) => (
-            <ConversationItem
-              id={item.id}
-              otherUser={item.otherUser}
-              lastMessage={item.lastMessage}
-              unreadCount={item.unreadCount}
-              isPreMatch={item.isPreMatch}
-              onPress={() => safePush(router, `/(main)/(tabs)/messages/chat/${item.conversationId || item.id}` as any, 'messages->chat')}
-              onAvatarPress={() => safePush(router, `/(main)/profile/${item.otherUser?.id}` as any, 'messages->avatarProfile')}
+        // ════════════════════════════════════════════════════════════════════════
+        // MESSAGES VIEW - Clean layout structure (gap fix rewrite)
+        // ════════════════════════════════════════════════════════════════════════
+        // Structure:
+        //   1. Optional sections (ProfileNudge, Super Likes, New Matches) - ONLY if they exist
+        //   2. FlatList for conversations - NO ListHeaderComponent (avoids gap bug)
+        //
+        // Key fix: Removed ListHeaderComponent entirely. FlatList's ListHeaderComponent
+        // can reserve space even when returning null, causing unwanted gaps.
+        // Instead, optional sections are rendered as direct siblings ABOVE the FlatList.
+        // ════════════════════════════════════════════════════════════════════════
+        <View style={styles.messagesContent}>
+          {/* Optional top sections - rendered ONLY when they have data */}
+          {showMessagesNudge && (
+            <ProfileNudge
+              message={NUDGE_MESSAGES.needs_both.messages}
+              onDismiss={() => dismissNudge('messages')}
             />
           )}
-          ListHeaderComponent={
-            <>
-              {showMessagesNudge && (
-                <ProfileNudge
-                  message={NUDGE_MESSAGES.needs_both.messages}
-                  onDismiss={() => dismissNudge('messages')}
-                />
-              )}
-              {renderQuotaBanner()}
-              {/* Order: Super Likes (top) > New Matches > Messages */}
-              {renderSuperLikesRow()}
-              {renderNewMatchesRow()}
-              {/* Messages section header - only show if there are matches above */}
-              {(superLikeMatches.length > 0 || newMatches.length > 0) && (conversations || []).length > 0 && (
-                <View style={styles.threadsSectionHeader}>
-                  <Text style={styles.sectionTitle}>Messages</Text>
-                </View>
-              )}
-            </>
-          }
-          ListEmptyComponent={
-            <View style={styles.emptyContainer}>
-              <Ionicons name="chatbubbles-outline" size={64} color={COLORS.textLight} />
-              <Text style={styles.emptyTitle}>No chats yet</Text>
-              <Text style={styles.emptySubtitle}>
-                Match with someone or accept a confession to start chatting.
-              </Text>
-            </View>
-          }
-          refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
-          contentContainerStyle={
-            (!conversations || conversations.length === 0) && newMatches.length === 0
-              ? styles.emptyListContainer
-              : undefined
-          }
-        />
+          {superLikeMatches.length > 0 && renderSuperLikesRow()}
+          {newMatches.length > 0 && renderNewMatchesRow()}
+
+          {/* Conversation list - starts immediately after header when no top sections */}
+          <FlatList
+            key="messages-list"
+            style={styles.conversationList}
+            data={(conversations || []) as any[]}
+            keyExtractor={(item: any) => item.id}
+            renderItem={({ item }: { item: any }) => (
+              <ConversationItem
+                id={item.id}
+                otherUser={item.otherUser}
+                lastMessage={item.lastMessage}
+                unreadCount={item.unreadCount}
+                isPreMatch={item.isPreMatch}
+                onPress={() => safePush(router, `/(main)/(tabs)/messages/chat/${item.conversationId || item.id}` as any, 'messages->chat')}
+                onAvatarPress={() => safePush(router, `/(main)/profile/${item.otherUser?.id}` as any, 'messages->avatarProfile')}
+              />
+            )}
+            ListEmptyComponent={
+              <View style={styles.emptyContainer}>
+                <Ionicons name="chatbubbles-outline" size={64} color={COLORS.textLight} />
+                <Text style={styles.emptyTitle}>No chats yet</Text>
+                <Text style={styles.emptySubtitle}>
+                  Match with someone or accept a confession to start chatting.
+                </Text>
+              </View>
+            }
+            refreshControl={<RefreshControl refreshing={refreshing} onRefresh={onRefresh} />}
+            contentContainerStyle={
+              (!conversations || conversations.length === 0)
+                ? styles.emptyListContainer
+                : styles.conversationListContent
+            }
+          />
+        </View>
       )}
 
       {/* Match Modal */}
@@ -1032,11 +1064,27 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: COLORS.background,
   },
+  // Messages view content wrapper - flex: 1, zero top spacing (gap fix)
+  messagesContent: {
+    flex: 1,
+    marginTop: 0,
+    paddingTop: 0,
+  },
+  // HARD FIX: FlatList style - negative margin to pull content up and eliminate gap
+  conversationList: {
+    flex: 1,
+    marginTop: 0,
+  },
+  // HARD FIX: FlatList content - zero top padding
+  conversationListContent: {
+    paddingTop: 0,
+  },
   header: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    padding: 16,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
     backgroundColor: COLORS.background,
     borderBottomWidth: 1,
     borderBottomColor: COLORS.border,
@@ -1158,6 +1206,17 @@ const styles = StyleSheet.create({
     color: COLORS.textLight,
     marginTop: 2,
   },
+  // Standout message display
+  standoutMessageContainer: {
+    paddingHorizontal: 10,
+    paddingBottom: 8,
+  },
+  standoutMessageText: {
+    fontSize: 12,
+    fontStyle: 'italic',
+    color: COLORS.superLike,
+    lineHeight: 16,
+  },
   likeCardActions: {
     flexDirection: 'row',
     paddingHorizontal: 10,
@@ -1216,11 +1275,86 @@ const styles = StyleSheet.create({
     borderColor: COLORS.background,
   },
 
-  // New Matches Section
-  newMatchesSection: {
-    marginTop: 16,
-    marginBottom: 4,
+  // ═══════════════════════════════════════════════════════════════════════════
+  // COMPACT SECTIONS - Super Likes & New Matches (responsive spacing)
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  // Super Likes section (compact)
+  superLikesSection: {
+    paddingTop: SPACING.sectionTop,
+    paddingBottom: 0,
   },
+
+  // New Matches Section (compact)
+  newMatchesSection: {
+    paddingTop: SPACING.sectionGap,
+    paddingBottom: SPACING.sectionGap,
+  },
+
+  // Compact section header (shared)
+  compactSectionHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 16,
+    marginBottom: SPACING.titleToRow,
+    gap: 6,
+  },
+  compactSectionTitle: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: COLORS.text,
+  },
+
+  // Compact avatar list
+  compactMatchesList: {
+    paddingLeft: 16,
+    paddingRight: 16,
+  },
+  compactMatchItem: {
+    marginRight: SPACING.avatarGap,
+    alignItems: 'center',
+  },
+  compactAvatarContainer: {
+    position: 'relative',
+  },
+  compactMatchRing: {
+    width: SPACING.avatarSize + 8,
+    height: SPACING.avatarSize + 8,
+    borderRadius: (SPACING.avatarSize + 8) / 2,
+    borderWidth: 2,
+    borderColor: COLORS.primary,
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 2,
+  },
+  compactMatchAvatar: {
+    width: SPACING.avatarSize,
+    height: SPACING.avatarSize,
+    borderRadius: SPACING.avatarSize / 2,
+    backgroundColor: COLORS.backgroundDark,
+  },
+  compactAvatarInitial: {
+    fontSize: 18,
+    fontWeight: '600',
+    color: COLORS.text,
+  },
+
+  // Compact Super Like badge
+  compactSuperLikeBadge: {
+    position: 'absolute',
+    bottom: 0,
+    right: 0,
+    backgroundColor: COLORS.superLike,
+    width: 16,
+    height: 16,
+    borderRadius: 8,
+    alignItems: 'center',
+    justifyContent: 'center',
+    borderWidth: 1.5,
+    borderColor: COLORS.background,
+  },
+
+  // Legacy styles (kept for compatibility)
   matchesList: {
     paddingLeft: 16,
     paddingRight: 24,
@@ -1285,22 +1419,22 @@ const styles = StyleSheet.create({
   },
   countBadge: {
     backgroundColor: COLORS.superLike + '20',
-    paddingHorizontal: 8,
-    paddingVertical: 2,
-    borderRadius: 10,
+    paddingHorizontal: 6,
+    paddingVertical: 1,
+    borderRadius: 8,
   },
   countBadgeText: {
-    fontSize: 12,
+    fontSize: 11,
     fontWeight: '600',
     color: COLORS.superLike,
   },
   threadsSectionHeader: {
     paddingHorizontal: 16,
-    paddingTop: 16,
-    paddingBottom: 8,
+    paddingTop: SPACING.beforeMessages,
+    paddingBottom: 6,
     borderTopWidth: 1,
     borderTopColor: COLORS.border,
-    marginTop: 12,
+    marginTop: SPACING.sectionGap,
   },
 
   // Quota banner
