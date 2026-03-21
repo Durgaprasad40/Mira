@@ -457,13 +457,13 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
       console.warn('[AUTH] logout: failed to stop location tracking', error);
     }
 
-    // PHASE 2: Stop background location tracking on logout
+    // PHASE 2: Stop background location tracking and clear settings on logout
     try {
-      const { stopBackgroundLocation } = require('@/utils/backgroundLocation');
-      await stopBackgroundLocation();
-      if (__DEV__) console.log('[AUTH] logout: stopped background location');
+      const { cleanupBackgroundLocation } = require('@/utils/backgroundLocation');
+      await cleanupBackgroundLocation();
+      if (__DEV__) console.log('[AUTH] logout: cleaned up background location');
     } catch (error) {
-      console.warn('[AUTH] logout: failed to stop background location', error);
+      console.warn('[AUTH] logout: failed to cleanup background location', error);
     }
 
     // STEP 4: Finish logout - clear in-memory state

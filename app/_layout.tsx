@@ -760,6 +760,11 @@ function DeviceFingerprintCollector() {
  * - Does NOT modify existing Nearby logic
  * - Uses existing publishLocation mutation
  * - Updates every ~20 min with 200m distance filter
+ *
+ * HARDENING (v2):
+ * - Respects user's preferred location mode (foreground vs background)
+ * - Only requests background permission if user selected background mode
+ * - Gracefully falls back to foreground-only if background denied
  */
 function BackgroundLocationManager() {
   const userId = useAuthStore((s) => s.userId);
@@ -774,13 +779,17 @@ function BackgroundLocationManager() {
     if (hasStartedRef.current || !userId) return;
     hasStartedRef.current = true;
 
-    // Start background location
-    startBackgroundLocation().then((started) => {
+    // Start background location (respects user's preferred mode)
+    startBackgroundLocation().then((result) => {
       if (__DEV__) {
-        console.log('[BG_MANAGER] Background location started:', started);
+        console.log('[BG_MANAGER] Location initialized:', {
+          success: result.success,
+          effectiveMode: result.effectiveMode,
+          backgroundDenied: result.backgroundDenied,
+        });
       }
     }).catch((error) => {
-      console.warn('[BG_MANAGER] Failed to start background location:', error?.message);
+      console.warn('[BG_MANAGER] Failed to start location:', error?.message);
     });
   }, [userId, authHydrated]);
 
