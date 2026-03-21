@@ -5,14 +5,23 @@ import {
   StyleSheet,
   Dimensions,
   ActivityIndicator,
-  Animated,
-  PanResponder,
   TouchableOpacity,
   InteractionManager,
   ScrollView,
   Modal,
   Easing,
+  Animated as RNAnimated, // Keep for star burst animation only
 } from "react-native";
+import Animated, {
+  useSharedValue,
+  useAnimatedStyle,
+  withSpring,
+  withTiming,
+  interpolate,
+  runOnJS,
+  Extrapolation,
+} from "react-native-reanimated";
+import { Gesture, GestureDetector } from "react-native-gesture-handler";
 import { LoadingGuard } from "@/components/safety";
 import { useShallow } from "zustand/react/shallow";
 import { useQuery, useMutation } from "convex/react";
@@ -37,16 +46,19 @@ import { useInteractionStore } from "@/stores/interactionStore";
 import { asUserId } from "@/convex/id";
 import { ProfileData, toProfileData } from "@/lib/profileData";
 import { rankProfiles } from "@/lib/rankProfiles";
+import { sortProfilesByScore } from "@/lib/profileRanking";
 import { getProfileCompleteness, NUDGE_MESSAGES } from "@/lib/profileCompleteness";
 import { ProfileNudge } from "@/components/ui/ProfileNudge";
 import { trackEvent } from "@/lib/analytics";
 import { Toast } from "@/components/ui/Toast";
 import { usePrivateChatStore } from "@/stores/privateChatStore";
+import { useExplorePrefsStore } from "@/stores/explorePrefsStore";
 import { NotificationPopover } from "@/components/discover/NotificationPopover";
 import type { IncognitoConversation, ConnectionSource } from "@/types";
 import type { Id } from "@/convex/_generated/dataModel";
 
 import { markPhase2Matched } from "@/lib/phase2MatchSession";
+import * as Haptics from 'expo-haptics';
 
 // Type for swipe actions
 type SwipeAction = 'like' | 'pass' | 'super_like';
@@ -105,10 +117,10 @@ interface StarBurstAnimationProps {
 function StarBurstAnimation({ visible, onComplete }: StarBurstAnimationProps) {
   const animations = useRef(
     Array.from({ length: STAR_COUNT }, () => ({
-      scale: new Animated.Value(0),
-      opacity: new Animated.Value(1),
-      translateX: new Animated.Value(0),
-      translateY: new Animated.Value(0),
+      scale: new RNAnimated.Value(0),
+      opacity: new RNAnimated.Value(1),
+      translateX: new RNAnimated.Value(0),
+      translateY: new RNAnimated.Value(0),
     }))
   ).current;
 
@@ -130,30 +142,30 @@ function StarBurstAnimation({ visible, onComplete }: StarBurstAnimationProps) {
       const targetX = Math.cos(angle) * distance;
       const targetY = Math.sin(angle) * distance;
 
-      return Animated.sequence([
-        Animated.delay(i * 30), // Stagger each star
-        Animated.parallel([
-          Animated.timing(anim.scale, {
+      return RNAnimated.sequence([
+        RNAnimated.delay(i * 30), // Stagger each star
+        RNAnimated.parallel([
+          RNAnimated.timing(anim.scale, {
             toValue: 1,
             duration: 150,
             easing: Easing.out(Easing.back(2)),
             useNativeDriver: true,
           }),
-          Animated.timing(anim.translateX, {
+          RNAnimated.timing(anim.translateX, {
             toValue: targetX,
             duration: 500,
             easing: Easing.out(Easing.cubic),
             useNativeDriver: true,
           }),
-          Animated.timing(anim.translateY, {
+          RNAnimated.timing(anim.translateY, {
             toValue: targetY,
             duration: 500,
             easing: Easing.out(Easing.cubic),
             useNativeDriver: true,
           }),
-          Animated.sequence([
-            Animated.delay(200),
-            Animated.timing(anim.opacity, {
+          RNAnimated.sequence([
+            RNAnimated.delay(200),
+            RNAnimated.timing(anim.opacity, {
               toValue: 0,
               duration: 300,
               useNativeDriver: true,
@@ -163,7 +175,7 @@ function StarBurstAnimation({ visible, onComplete }: StarBurstAnimationProps) {
       ]);
     });
 
-    const compositeAnimation = Animated.parallel(starAnimations);
+    const compositeAnimation = RNAnimated.parallel(starAnimations);
     compositeAnimation.start(() => {
       onComplete();
     });
@@ -179,7 +191,7 @@ function StarBurstAnimation({ visible, onComplete }: StarBurstAnimationProps) {
   return (
     <View style={starBurstStyles.container} pointerEvents="none">
       {animations.map((anim, i) => (
-        <Animated.View
+        <RNAnimated.View
           key={i}
           style={[
             starBurstStyles.star,
@@ -196,10 +208,10 @@ function StarBurstAnimation({ visible, onComplete }: StarBurstAnimationProps) {
           ]}
         >
           <Ionicons name="star" size={24} color={STAR_COLORS[i % STAR_COLORS.length]} />
-        </Animated.View>
+        </RNAnimated.View>
       ))}
       {/* Center star pulse */}
-      <Animated.View
+      <RNAnimated.View
         style={[
           starBurstStyles.centerStar,
           {
@@ -209,7 +221,7 @@ function StarBurstAnimation({ visible, onComplete }: StarBurstAnimationProps) {
         ]}
       >
         <Ionicons name="star" size={48} color="#FFD700" />
-      </Animated.View>
+      </RNAnimated.View>
     </View>
   );
 }
@@ -251,12 +263,41 @@ export interface DiscoverCardStackProps {
   externalProfiles?: any[];
   /** Hide the built-in header (caller renders its own). */
   hideHeader?: boolean;
+  /** Category ID when used from Explore - shows "Why this profile" tag */
+  exploreCategoryId?: string;
+  /** Callback when user swipes through all profiles in stack */
+  onStackEmpty?: () => void;
 }
 
-export function DiscoverCardStack({ theme = "light", mode = "phase1", externalProfiles, hideHeader }: DiscoverCardStackProps) {
+// "Why this profile" tag labels based on category
+const CATEGORY_TAG_LABELS: Record<string, string> = {
+  serious_vibes: "Looking for something serious",
+  keep_it_casual: "Looking for casual",
+  exploring_vibes: "Still figuring it out",
+  see_where_it_goes: "Open to more",
+  open_to_vibes: "Flexible on commitment",
+  just_friends: "Looking for friends",
+  open_to_anything: "Open to anything",
+  single_parent: "Single parent",
+  new_to_dating: "New to dating",
+  nearby: "Close to you",
+  online_now: "Online now",
+  active_today: "Active today",
+  free_tonight: "Free tonight",
+  coffee_date: "Loves coffee",
+  nature_lovers: "Nature lover",
+  binge_watchers: "Binge watcher",
+  fitness_buffs: "Fitness enthusiast",
+  foodies: "Food lover",
+  pet_lovers: "Pet lover",
+  creative_souls: "Creative soul",
+};
+
+export function DiscoverCardStack({ theme = "light", mode = "phase1", externalProfiles, hideHeader, exploreCategoryId, onStackEmpty }: DiscoverCardStackProps) {
   const dark = theme === "dark";
   const isPhase2 = mode === "phase2";
   const C = dark ? INCOGNITO_COLORS : COLORS;
+
 
   const insets = useSafeAreaInsets();
   const userId = useAuthStore((s) => s.userId);
@@ -292,6 +333,10 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   const incSwipe = useDiscoverStore((s) => s.incSwipe);
   const maybeTriggerRandomMatch = useDiscoverStore((s) => s.maybeTriggerRandomMatch);
 
+  // Engagement triggers - swipe progress tracking
+  const trackSwipe = useExplorePrefsStore((s) => s.trackSwipe);
+  const shouldShowSwipeProgress = useExplorePrefsStore((s) => s.shouldShowSwipeProgress);
+
   // Reset daily limits if new day
   useEffect(() => {
     checkAndResetIfNewDay();
@@ -301,8 +346,6 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   const navigatingRef = useRef(false);
   // ── Focus guard: tracks whether this screen is the active tab ──
   const isFocusedRef = useRef(true);
-  // ── Track in-flight animation so we can cancel on blur ──
-  const activeAnimationRef = useRef<Animated.CompositeAnimation | null>(null);
   // ── Swipe lock: prevents re-entrant swipes while animation + processing is in flight ──
   // Acquired in animateSwipe, released after advanceCard + match logic complete.
   const swipeLockRef = useRef(false);
@@ -352,9 +395,9 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
     };
   }, []);
 
-  // Overlay refs + animated value (no React re-renders during drag)
+  // Overlay refs + shared values (no React re-renders during drag)
   const overlayDirectionRef = useRef<"left" | "right" | "up" | null>(null);
-  const overlayOpacityAnim = useRef(new Animated.Value(0)).current;
+  const overlayOpacity = useSharedValue(0);
   const [overlayDirection, setOverlayDirection] = useState<"left" | "right" | "up" | null>(null);
 
   // Stand Out result from route screen
@@ -413,6 +456,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       // (blocked users, matched users, swiped users should not appear in explore categories)
       const filtered = externalProfiles.filter((p: any) => !excludedSet.has(p._id ?? p.id));
       const mapped = filtered.map(toProfileData);
+
       // Demo mode: preserve array order for deterministic Discover feed
       return isDemoMode ? mapped : rankProfiles(mapped);
     }
@@ -570,7 +614,14 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   const consumedIdsRef = useRef<Set<string>>(new Set()); // Profiles already swiped
 
   // Source profiles for queue refill (use filtered for Phase-2, regular for Phase-1)
-  const sourceProfiles = isPhase2 ? filteredProfiles : profiles;
+  const baseProfiles = isPhase2 ? filteredProfiles : profiles;
+
+  // INVISIBLE RANKING: Sort profiles by score (activity + completeness + stable random)
+  // This is invisible to users - no UI changes, just better ordering
+  const sourceProfiles = useMemo(
+    () => sortProfilesByScore(baseProfiles),
+    [baseProfiles]
+  );
 
   // Build a map from profile ID to profile data for O(1) lookup
   const profileMapRef = useRef<Map<string, ProfileData>>(new Map());
@@ -705,12 +756,19 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   // Phase-2 only: Impression recording for ranking system
   const recordImpressionsMutation = useMutation(api.privateDiscover.recordDesireLandImpressions);
 
-  // Two-pan alternating approach
-  const panA = useRef(new Animated.ValueXY()).current;
-  const panB = useRef(new Animated.ValueXY()).current;
+  // Two-pan alternating approach with Reanimated shared values
+  const panAX = useSharedValue(0);
+  const panAY = useSharedValue(0);
+  const panBX = useSharedValue(0);
+  const panBY = useSharedValue(0);
   const activeSlotRef = useRef<0 | 1>(0);
+  // SharedValue mirror of activeSlotRef for worklet access (refs cannot be read in worklets)
+  const activeSlotShared = useSharedValue<0 | 1>(0);
   const [activeSlot, setActiveSlot] = useState<0 | 1>(0);
-  const getActivePan = () => (activeSlotRef.current === 0 ? panA : panB);
+
+  // Helper to get the active pan shared values (for JS thread use only)
+  const getActivePanX = () => (activeSlotRef.current === 0 ? panAX : panBX);
+  const getActivePanY = () => (activeSlotRef.current === 0 ? panAY : panBY);
 
   // ── Focus effect: cancel animations on blur, reset nav lock on focus ──
   // Uses useIsFocused() (a single boolean) + idempotent ref guard.
@@ -735,36 +793,51 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       // from the previous focus session. Their releaseSwipeLock(oldId) calls will no-op.
       swipeIdRef.current += 1;
       swipeLockRef.current = false;
-      if (activeAnimationRef.current) {
-        activeAnimationRef.current.stop();
-        activeAnimationRef.current = null;
-      }
-      panA.setValue({ x: 0, y: 0 });
-      panB.setValue({ x: 0, y: 0 });
-      overlayOpacityAnim.setValue(0);
+      // Reset all shared values on blur
+      panAX.value = 0;
+      panAY.value = 0;
+      panBX.value = 0;
+      panBY.value = 0;
+      overlayOpacity.value = 0;
       overlayDirectionRef.current = null;
     }
-  // panA, panB, overlayOpacityAnim are useRef().current — stable across renders,
-  // so only isFocused drives this effect.
+  // Shared values are stable across renders, so only isFocused drives this effect.
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isFocused]);
 
-  const activePan = activeSlot === 0 ? panA : panB;
+  // Get current active pan values based on slot
+  const activePanX = activeSlot === 0 ? panAX : panBX;
+  const activePanY = activeSlot === 0 ? panAY : panBY;
 
-  const rotation = activePan.x.interpolate({
-    inputRange: [-SCREEN_WIDTH / 2, 0, SCREEN_WIDTH / 2],
-    outputRange: [`-${SWIPE_CONFIG.ROTATION_ANGLE}deg`, "0deg", `${SWIPE_CONFIG.ROTATION_ANGLE}deg`],
-    extrapolate: "clamp",
+  // Card animated style - runs on UI thread
+  const cardAnimatedStyle = useAnimatedStyle(() => {
+    const rotation = interpolate(
+      activePanX.value,
+      [-SCREEN_WIDTH / 2, 0, SCREEN_WIDTH / 2],
+      [-SWIPE_CONFIG.ROTATION_ANGLE, 0, SWIPE_CONFIG.ROTATION_ANGLE],
+      Extrapolation.CLAMP
+    );
+    return {
+      transform: [
+        { translateX: activePanX.value },
+        { translateY: activePanY.value },
+        { rotate: `${rotation}deg` },
+        { scale: 1 },
+      ],
+    };
   });
 
-  const cardStyle = {
-    transform: [{ translateX: activePan.x }, { translateY: activePan.y }, { rotate: rotation }, { scale: 1 }],
-  } as const;
-
-  const nextScale = activePan.x.interpolate({
-    inputRange: [-SCREEN_WIDTH / 2, 0, SCREEN_WIDTH / 2],
-    outputRange: [1, 0.95, 1],
-    extrapolate: "clamp",
+  // Next card scale animated style - runs on UI thread
+  const nextCardAnimatedStyle = useAnimatedStyle(() => {
+    const scale = interpolate(
+      activePanX.value,
+      [-SCREEN_WIDTH / 2, 0, SCREEN_WIDTH / 2],
+      [1, 0.95, 1],
+      Extrapolation.CLAMP
+    );
+    return {
+      transform: [{ scale }],
+    };
   });
 
   // STABLE QUEUE: Use queue-based current/next instead of index-based access
@@ -772,6 +845,19 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   const displayProfiles = isPhase2 ? filteredProfiles : profiles; // Keep for compatibility
   const current = queueCurrent; // From stable queue
   const next = queueNext; // From stable queue
+
+  // Track when stack becomes empty (for onStackEmpty callback)
+  const hadProfilesRef = useRef(false);
+  const stackEmptyCalledRef = useRef(false);
+  useEffect(() => {
+    if (current) {
+      hadProfilesRef.current = true;
+      stackEmptyCalledRef.current = false;
+    } else if (hadProfilesRef.current && !stackEmptyCalledRef.current && onStackEmpty) {
+      stackEmptyCalledRef.current = true;
+      onStackEmpty();
+    }
+  }, [current, onStackEmpty]);
 
   // Trust badges — memoized per profile to avoid allocation each render
   // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -865,24 +951,30 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   }, [isPhase2]);
 
   const resetPosition = useCallback(() => {
-    const currentPan = getActivePan();
-    Animated.spring(currentPan, {
-      toValue: { x: 0, y: 0 },
-      friction: 6,
-      tension: 80,
-      useNativeDriver: true,
-    }).start();
+    const currentPanX = getActivePanX();
+    const currentPanY = getActivePanY();
+    // Use withSpring for smooth return animation on UI thread
+    currentPanX.value = withSpring(0, { damping: 15, stiffness: 200 });
+    currentPanY.value = withSpring(0, { damping: 15, stiffness: 200 });
     overlayDirectionRef.current = null;
-    overlayOpacityAnim.setValue(0);
+    overlayOpacity.value = 0;
     setOverlayDirection(null);
-  }, [panA, panB, overlayOpacityAnim]);
+  }, [panAX, panAY, panBX, panBY, overlayOpacity]);
 
   const advanceCard = useCallback(() => {
     const newSlot: 0 | 1 = activeSlotRef.current === 0 ? 1 : 0;
     activeSlotRef.current = newSlot;
-    const newPan = newSlot === 0 ? panA : panB;
-    newPan.setValue({ x: 0, y: 0 });
-    overlayOpacityAnim.setValue(0);
+    // Keep SharedValue in sync for worklet access
+    activeSlotShared.value = newSlot;
+    // Reset the new active slot's pan values
+    if (newSlot === 0) {
+      panAX.value = 0;
+      panAY.value = 0;
+    } else {
+      panBX.value = 0;
+      panBY.value = 0;
+    }
+    overlayOpacity.value = 0;
     overlayDirectionRef.current = null;
     setOverlayDirection(null);
     setActiveSlot(newSlot);
@@ -890,18 +982,29 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
     // STABLE QUEUE: Advance the queue after swipe
     // This removes front card, promotes back -> front, and refills from source
     advanceQueue();
+
+    // Engagement trigger: Track swipe and show progress toast (Task 3)
+    trackSwipe();
+    if (shouldShowSwipeProgress()) {
+      Toast.show("You're exploring fast 🔥");
+    }
     // Old pan is reset in the useEffect below, AFTER React has re-rendered
     // with the new activeSlot. This prevents a 1-frame flicker where the
     // swiped-away card snaps back to center before the slot switch renders.
-  }, [panA, panB, overlayOpacityAnim, advanceQueue]);
+  }, [panAX, panAY, panBX, panBY, overlayOpacity, activeSlotShared, advanceQueue, trackSwipe, shouldShowSwipeProgress]);
 
   // Reset the now-inactive pan AFTER React commits the new activeSlot.
   // This avoids the race where requestAnimationFrame fires before the
   // batched state update, causing the old card to flash at center.
   useEffect(() => {
-    const oldPan = activeSlot === 0 ? panB : panA;
-    oldPan.setValue({ x: 0, y: 0 });
-  }, [activeSlot, panA, panB]);
+    if (activeSlot === 0) {
+      panBX.value = 0;
+      panBY.value = 0;
+    } else {
+      panAX.value = 0;
+      panAY.value = 0;
+    }
+  }, [activeSlot, panAX, panAY, panBX, panBY]);
 
   const handleSwipe = useCallback(
     async (direction: "left" | "right" | "up", message?: string, swipeId?: number) => {
@@ -925,6 +1028,9 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       // ★ ALWAYS advance card FIRST — this guarantees the index moves
       // regardless of match/navigation/error below.
       advanceCard();
+
+      // Task 3: Light haptic feedback on swipe
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
 
       // F2-A: Track swipe for random match control
       incSwipe();
@@ -1103,22 +1209,18 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       // ★ RACE FIX: Acquire swipe lock and capture unique ID for this swipe lifecycle
       const swipeId = acquireSwipeLock();
 
-      const currentPan = getActivePan();
+      const currentPanX = getActivePanX();
+      const currentPanY = getActivePanY();
       const targetX = direction === "left" ? -SCREEN_WIDTH * 1.5 : direction === "right" ? SCREEN_WIDTH * 1.5 : 0;
       const targetY = direction === "up" ? -SCREEN_HEIGHT * 1.5 : 0;
       const speed = Math.abs(velocity || 0);
       const duration = speed > 1.5 ? 120 : speed > 0.5 ? 180 : 250;
 
       setOverlayDirection(direction);
-      overlayOpacityAnim.setValue(1);
+      overlayOpacity.value = 1;
 
-      const anim = Animated.parallel([
-        Animated.timing(currentPan.x, { toValue: targetX, duration, useNativeDriver: true }),
-        Animated.timing(currentPan.y, { toValue: targetY, duration, useNativeDriver: true }),
-      ]);
-      activeAnimationRef.current = anim;
-      anim.start(({ finished }) => {
-        activeAnimationRef.current = null;
+      // Callback to run after animation completes
+      const onAnimationComplete = (finished: boolean) => {
         if (!finished) {
           // Animation was interrupted (blur/unmount) — release lock only if we still own it
           releaseSwipeLock(swipeId);
@@ -1132,9 +1234,18 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
         }
         // Pass swipeId to handleSwipe so it can release the correct lock
         handleSwipeRef.current(direction, undefined, swipeId);
+      };
+
+      // Use withTiming for smooth animation on UI thread
+      currentPanX.value = withTiming(targetX, { duration }, (finished) => {
+        // Only call completion callback once (from X animation)
+        if (finished !== undefined) {
+          runOnJS(onAnimationComplete)(finished);
+        }
       });
+      currentPanY.value = withTiming(targetY, { duration });
     },
-    [panA, panB, overlayOpacityAnim, hasReachedLikeLimit, hasReachedStandOutLimit, acquireSwipeLock, releaseSwipeLock],
+    [panAX, panAY, panBX, panBY, overlayOpacity, hasReachedLikeLimit, hasReachedStandOutLimit, acquireSwipeLock, releaseSwipeLock],
   );
 
   // Stable refs so the panResponder (created once) always calls the latest version
@@ -1148,51 +1259,83 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   const velocityX = SWIPE_CONFIG.SWIPE_VELOCITY_X;
   const velocityY = SWIPE_CONFIG.SWIPE_VELOCITY_Y;
 
-  // PanResponder created ONCE (empty deps). Uses refs for all callback logic
-  // so it always calls the latest handleSwipe/animateSwipe without recreation.
-  const panResponder = useMemo(
-    () =>
-      PanResponder.create({
-        onMoveShouldSetPanResponder: (_, gs) => {
-          // Don't claim touches if navigating, unfocused, or swipe in flight
-          if (navigatingRef.current || !isFocusedRef.current || swipeLockRef.current) return false;
-          return Math.abs(gs.dx) > 8 || Math.abs(gs.dy) > 8;
-        },
-        // Allow other responders (e.g. tab bar) to take over
-        onPanResponderTerminationRequest: () => true,
-        onPanResponderGrant: () => {},
-        onPanResponderMove: (_, gs) => {
-          getActivePan().setValue({ x: gs.dx, y: gs.dy });
-          const absX = Math.abs(gs.dx);
-          const absY = Math.abs(gs.dy);
-          if (gs.dy < -15 && absY > absX) overlayDirectionRef.current = "up";
-          else if (gs.dx < -10) overlayDirectionRef.current = "left";
-          else if (gs.dx > 10) overlayDirectionRef.current = "right";
-          else overlayDirectionRef.current = null;
-          overlayOpacityAnim.setValue(Math.min(Math.max(absX, absY) / 60, 1));
-          const newDir = overlayDirectionRef.current;
-          setOverlayDirection((prev) => (prev === newDir ? prev : newDir));
-        },
-        onPanResponderRelease: (_, gs) => {
-          // If screen lost focus during drag, or swipe already in flight, just reset
-          if (navigatingRef.current || !isFocusedRef.current || swipeLockRef.current) { resetPosition(); return; }
-          if (gs.dx < -thresholdX || gs.vx < -velocityX) { animateSwipeRef.current("left", gs.vx); return; }
-          if (gs.dx > thresholdX  || gs.vx > velocityX)  { animateSwipeRef.current("right", gs.vx); return; }
-          if (gs.dy < -thresholdY || gs.vy < -velocityY)  {
-            // Up swipe triggers Stand Out screen instead of instant swipe
-            resetPosition();
-            const c = currentRef.current;
-            if (!hasReachedStandOutLimit() && c) {
-              router.push(`/(main)/stand-out?profileId=${c.id}&name=${encodeURIComponent(c.name)}&standOutsLeft=${standOutsRemaining()}` as any);
-            }
-            return;
-          }
-          resetPosition();
-        },
-        onPanResponderTerminate: () => resetPosition(),
+  // JS callbacks to be called from UI thread via runOnJS
+  const updateOverlayDirection = useCallback((newDir: "left" | "right" | "up" | null) => {
+    if (overlayDirectionRef.current !== newDir) {
+      overlayDirectionRef.current = newDir;
+      setOverlayDirection(newDir);
+    }
+  }, []);
+
+  const handlePanEnd = useCallback((dx: number, dy: number, vx: number, vy: number) => {
+    // If screen lost focus during drag, or swipe already in flight, just reset
+    if (navigatingRef.current || !isFocusedRef.current || swipeLockRef.current) {
+      resetPosition();
+      return;
+    }
+    if (dx < -thresholdX || vx < -velocityX) {
+      animateSwipeRef.current("left", vx);
+      return;
+    }
+    if (dx > thresholdX || vx > velocityX) {
+      animateSwipeRef.current("right", vx);
+      return;
+    }
+    if (dy < -thresholdY || vy < -velocityY) {
+      // Up swipe triggers Stand Out screen instead of instant swipe
+      resetPosition();
+      const c = currentRef.current;
+      if (!hasReachedStandOutLimit() && c) {
+        router.push(`/(main)/stand-out?profileId=${c.id}&name=${encodeURIComponent(c.name)}&standOutsLeft=${standOutsRemaining()}` as any);
+      }
+      return;
+    }
+    resetPosition();
+  }, [thresholdX, thresholdY, velocityX, velocityY, resetPosition, hasReachedStandOutLimit, standOutsRemaining]);
+
+  // Gesture.Pan() runs on UI thread - replaces PanResponder for better performance
+  const panGesture = useMemo(() =>
+    Gesture.Pan()
+      .minDistance(8)
+      .onStart(() => {
+        // Don't claim gestures if navigating, unfocused, or swipe in flight
+        // Note: This check is on UI thread, refs are read synchronously
+      })
+      .onUpdate((event) => {
+        // Update pan position directly (UI thread)
+        // Use activeSlotShared (SharedValue) instead of activeSlotRef (ref can't be read in worklet)
+        const currentPanX = activeSlotShared.value === 0 ? panAX : panBX;
+        const currentPanY = activeSlotShared.value === 0 ? panAY : panBY;
+        currentPanX.value = event.translationX;
+        currentPanY.value = event.translationY;
+
+        // Calculate overlay opacity (UI thread)
+        const absX = Math.abs(event.translationX);
+        const absY = Math.abs(event.translationY);
+        overlayOpacity.value = Math.min(Math.max(absX, absY) / 60, 1);
+
+        // Calculate new direction
+        let newDir: "left" | "right" | "up" | null = null;
+        if (event.translationY < -15 && absY > absX) newDir = "up";
+        else if (event.translationX < -10) newDir = "left";
+        else if (event.translationX > 10) newDir = "right";
+
+        // Update React state only when direction changes (via JS thread)
+        runOnJS(updateOverlayDirection)(newDir);
+      })
+      .onEnd((event) => {
+        // Handle pan end via JS thread (threshold checks, navigation, etc.)
+        runOnJS(handlePanEnd)(
+          event.translationX,
+          event.translationY,
+          event.velocityX / 1000, // Convert to roughly same scale as old PanResponder
+          event.velocityY / 1000
+        );
+      })
+      .onFinalize(() => {
+        // Gesture was cancelled/interrupted
       }),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [panA, panB, overlayOpacityAnim, resetPosition, thresholdX, thresholdY, velocityX, velocityY],
+    [panAX, panAY, panBX, panBY, activeSlotShared, overlayOpacity, updateOverlayDirection, handlePanEnd]
   );
 
   // Handle stand-out result from route screen
@@ -1225,16 +1368,14 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
     setShowSuperLikeAnimation(true);
 
     // Animate the card out (up direction)
-    const currentPan = getActivePan();
+    const currentPanY = getActivePanY();
     const targetY = -SCREEN_HEIGHT * 1.5;
 
     setOverlayDirection("up");
-    overlayOpacityAnim.setValue(1);
+    overlayOpacity.value = 1;
 
-    const anim = Animated.timing(currentPan.y, { toValue: targetY, duration: 250, useNativeDriver: true });
-    activeAnimationRef.current = anim;
-    anim.start(({ finished }) => {
-      activeAnimationRef.current = null;
+    // Callback to run after animation completes
+    const onStandOutAnimComplete = (finished: boolean) => {
       if (!finished) {
         releaseSwipeLock(swipeId);
         return;
@@ -1245,8 +1386,15 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       }
       // Pass swipeId to handleSwipe so it can release the correct lock
       handleSwipeRef.current("up", msg || undefined, swipeId);
+    };
+
+    // Use withTiming for smooth animation on UI thread
+    currentPanY.value = withTiming(targetY, { duration: 250 }, (finished) => {
+      if (finished !== undefined) {
+        runOnJS(onStandOutAnimComplete)(finished);
+      }
     });
-  }, [standOutResult, acquireSwipeLock, releaseSwipeLock]);
+  }, [standOutResult, acquireSwipeLock, releaseSwipeLock, overlayOpacity, panAY, panBY]);
 
   // Loading state — non-demo only; skip when using external profiles
   const isDiscoverLoading = !isDemoMode && !externalProfiles && !convexProfiles;
@@ -1544,7 +1692,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
         {/* Back card */}
         {next && (
           <Animated.View
-            style={[styles.card, { zIndex: 0, transform: [{ scale: nextScale }] }]}
+            style={[styles.card, { zIndex: 0 }, nextCardAnimatedStyle]}
           >
             <ProfileCard
               name={next.name}
@@ -1562,27 +1710,31 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
             />
           </Animated.View>
         )}
-        {/* Top card */}
+        {/* Top card - wrapped in GestureDetector for UI thread gesture handling */}
         {current && (
-          <Animated.View style={[styles.card, { zIndex: 1 }, cardStyle]} {...panResponder.panHandlers}>
-            <ProfileCard
-              name={current.name}
-              age={current.age}
-              bio={current.bio}
-              city={current.city}
-              isVerified={current.isVerified}
-              distance={current.distance}
-              photos={current.photos}
-              trustBadges={currentBadges}
-              profilePrompt={current.profilePrompts?.[0]}
-              showCarousel
-              onOpenProfile={openProfileCb}
-              theme={isPhase2 ? "dark" : "light"}
-              privateIntentKeys={current.privateIntentKeys ?? (current as any).intentKeys ?? (current.privateIntentKey ? [current.privateIntentKey] : [])}
-              isIncognito={current.isIncognito}
-            />
-            <SwipeOverlay direction={overlayDirection} opacity={overlayOpacityAnim} />
-          </Animated.View>
+          <GestureDetector gesture={panGesture}>
+            <Animated.View style={[styles.card, { zIndex: 1 }, cardAnimatedStyle]}>
+              <ProfileCard
+                name={current.name}
+                age={current.age}
+                bio={current.bio}
+                city={current.city}
+                isVerified={current.isVerified}
+                distance={current.distance}
+                photos={current.photos}
+                trustBadges={currentBadges}
+                profilePrompt={current.profilePrompts?.[0]}
+                showCarousel
+                onOpenProfile={openProfileCb}
+                theme={isPhase2 ? "dark" : "light"}
+                privateIntentKeys={current.privateIntentKeys ?? (current as any).intentKeys ?? (current.privateIntentKey ? [current.privateIntentKey] : [])}
+                isIncognito={current.isIncognito}
+                exploreTag={exploreCategoryId ? CATEGORY_TAG_LABELS[exploreCategoryId] : undefined}
+                lastActive={current.lastActive ?? (current as any).lastActiveAt}
+              />
+              <SwipeOverlay direction={overlayDirection} opacity={overlayOpacity} />
+            </Animated.View>
+          </GestureDetector>
         )}
 
         {/* Super-like star-burst animation */}

@@ -31,17 +31,17 @@ export type Gender = "male" | "female" | "non_binary";
 
 export type Orientation = "straight" | "gay" | "lesbian" | "bisexual" | "prefer_not_to_say";
 
+// CURRENT 9 RELATIONSHIP CATEGORIES (source of truth - matches schema.ts)
 export type RelationshipIntent =
-  | "long_term"
-  | "short_term"
-  | "fwb"
-  | "figuring_out"
-  | "short_to_long"
-  | "long_to_short"
-  | "new_friends"
+  | "serious_vibes"
+  | "keep_it_casual"
+  | "exploring_vibes"
+  | "see_where_it_goes"
+  | "open_to_vibes"
+  | "just_friends"
   | "open_to_anything"
   | "single_parent"
-  | "just_18";
+  | "new_to_dating";
 
 export type ActivityFilter =
   // Original 20 (backward compatible)

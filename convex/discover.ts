@@ -1,5 +1,5 @@
 import { v } from 'convex/values';
-import { query } from './_generated/server';
+import { query, mutation } from './_generated/server';
 import { Id } from './_generated/dataModel';
 import { resolveUserIdByAuthId, ensureUserByAuthId } from './helpers';
 import {
@@ -67,6 +67,203 @@ function toRad(deg: number): number {
 function isDistanceAllowed(distance: number | undefined, maxDistanceKm: number): boolean {
   if (distance == null) return true;
   return distance <= maxDistanceKm;
+}
+
+// ---------------------------------------------------------------------------
+// DISCOVER-CATEGORY-FIX: Shared eligibility helper for counts + detail consistency
+// ---------------------------------------------------------------------------
+
+type ExclusionSets = {
+  swipedUserIds: Set<string>;
+  matchedUserIds: Set<string>;
+  blockedUserIds: Set<string>;
+  viewerReportedIds: Set<string>;
+  conversationPartnerIds: Set<string>;
+};
+
+/**
+ * Build exclusion sets for a viewer (swipes, matches, blocks, reports, conversations)
+ */
+async function buildExclusionSets(
+  ctx: any,
+  viewerId: Id<'users'>,
+): Promise<ExclusionSets> {
+  const now = Date.now();
+  const passExpiry = now - 7 * 24 * 60 * 60 * 1000;
+
+  const [
+    mySwipes,
+    matchesAsUser1,
+    matchesAsUser2,
+    blocksICreated,
+    blocksAgainstMe,
+    myReports,
+    myConversationParticipations,
+  ] = await Promise.all([
+    ctx.db.query('likes').withIndex('by_from_user', (q: any) => q.eq('fromUserId', viewerId)).collect(),
+    ctx.db.query('matches').withIndex('by_user1', (q: any) => q.eq('user1Id', viewerId)).filter((q: any) => q.eq(q.field('isActive'), true)).collect(),
+    ctx.db.query('matches').withIndex('by_user2', (q: any) => q.eq('user2Id', viewerId)).filter((q: any) => q.eq(q.field('isActive'), true)).collect(),
+    ctx.db.query('blocks').withIndex('by_blocker', (q: any) => q.eq('blockerId', viewerId)).collect(),
+    ctx.db.query('blocks').withIndex('by_blocked', (q: any) => q.eq('blockedUserId', viewerId)).collect(),
+    ctx.db.query('reports').withIndex('by_reporter', (q: any) => q.eq('reporterId', viewerId)).collect(),
+    ctx.db.query('conversationParticipants').withIndex('by_user', (q: any) => q.eq('userId', viewerId)).collect(),
+  ]);
+
+  const swipedUserIds = new Set<string>();
+  for (const swipe of mySwipes) {
+    if (swipe.action === 'pass' && swipe.createdAt < passExpiry) continue;
+    swipedUserIds.add(swipe.toUserId as string);
+  }
+
+  const matchedUserIds = new Set<string>();
+  for (const m of matchesAsUser1) matchedUserIds.add(m.user2Id as string);
+  for (const m of matchesAsUser2) matchedUserIds.add(m.user1Id as string);
+
+  const blockedUserIds = new Set<string>();
+  for (const b of blocksICreated) blockedUserIds.add(b.blockedUserId as string);
+  for (const b of blocksAgainstMe) blockedUserIds.add(b.blockerId as string);
+
+  const viewerReportedIds = new Set<string>();
+  for (const report of myReports) viewerReportedIds.add(report.reportedUserId as string);
+
+  const conversationPartnerIds = new Set<string>();
+  if (myConversationParticipations.length > 0) {
+    const conversations = await Promise.all(
+      myConversationParticipations.map((p: any) => ctx.db.get(p.conversationId))
+    );
+    for (const conv of conversations) {
+      if (!conv) continue;
+      for (const participantId of conv.participants) {
+        if (participantId !== viewerId) {
+          conversationPartnerIds.add(participantId as string);
+        }
+      }
+    }
+  }
+
+  return {
+    swipedUserIds,
+    matchedUserIds,
+    blockedUserIds,
+    viewerReportedIds,
+    conversationPartnerIds,
+  };
+}
+
+/**
+ * Check if a user is eligible to be shown to a viewer
+ * SINGLE SOURCE OF TRUTH for category counts AND category detail
+ */
+function isUserEligibleForViewer(
+  user: any,
+  viewer: any,
+  viewerId: Id<'users'>,
+  exclusions: ExclusionSets,
+  cooldownThreshold: number,
+  debug?: { categoryId: string; logs: string[] },
+): boolean {
+  // Self exclusion
+  if (user._id === viewerId) {
+    debug?.logs.push(`  [EXCLUDE] ${user.name}: self`);
+    return false;
+  }
+
+  // Basic filters
+  if (!user.isActive) {
+    debug?.logs.push(`  [EXCLUDE] ${user.name}: not active`);
+    return false;
+  }
+  if (user.isBanned) {
+    debug?.logs.push(`  [EXCLUDE] ${user.name}: banned`);
+    return false;
+  }
+  if (isUserPaused(user)) {
+    debug?.logs.push(`  [EXCLUDE] ${user.name}: paused`);
+    return false;
+  }
+
+  // Cooldown check
+  if (user.lastShownInDiscoverAt && user.lastShownInDiscoverAt > cooldownThreshold) {
+    debug?.logs.push(`  [EXCLUDE] ${user.name}: cooldown`);
+    return false;
+  }
+
+  // Incognito check
+  if (user.incognitoMode) {
+    const canSee = viewer.gender === 'female' || viewer.subscriptionTier === 'premium';
+    if (!canSee) {
+      debug?.logs.push(`  [EXCLUDE] ${user.name}: incognito`);
+      return false;
+    }
+  }
+
+  // Gender preference (both ways)
+  if (!viewer.lookingFor?.includes(user.gender)) {
+    debug?.logs.push(`  [EXCLUDE] ${user.name}: viewer gender pref`);
+    return false;
+  }
+  if (!user.lookingFor?.includes(viewer.gender)) {
+    debug?.logs.push(`  [EXCLUDE] ${user.name}: user gender pref`);
+    return false;
+  }
+
+  // Age range (both ways)
+  const userAge = calculateAge(user.dateOfBirth);
+  const viewerAge = calculateAge(viewer.dateOfBirth);
+  if (userAge > 0 && viewer.minAge && viewer.maxAge) {
+    if (userAge < viewer.minAge || userAge > viewer.maxAge) {
+      debug?.logs.push(`  [EXCLUDE] ${user.name}: viewer age pref (user=${userAge}, range=${viewer.minAge}-${viewer.maxAge})`);
+      return false;
+    }
+  }
+  if (viewerAge > 0 && user.minAge && user.maxAge) {
+    if (viewerAge < user.minAge || viewerAge > user.maxAge) {
+      debug?.logs.push(`  [EXCLUDE] ${user.name}: user age pref (viewer=${viewerAge}, range=${user.minAge}-${user.maxAge})`);
+      return false;
+    }
+  }
+
+  // Distance check
+  if (viewer.latitude && viewer.longitude && user.latitude && user.longitude && viewer.maxDistance) {
+    const distance = calculateDistance(viewer.latitude, viewer.longitude, user.latitude, user.longitude);
+    if (!isDistanceAllowed(distance, viewer.maxDistance)) {
+      debug?.logs.push(`  [EXCLUDE] ${user.name}: distance (${distance}km > ${viewer.maxDistance}km)`);
+      return false;
+    }
+  }
+
+  // Exclusion sets
+  if (exclusions.swipedUserIds.has(user._id as string)) {
+    debug?.logs.push(`  [EXCLUDE] ${user.name}: already swiped`);
+    return false;
+  }
+  if (exclusions.matchedUserIds.has(user._id as string)) {
+    debug?.logs.push(`  [EXCLUDE] ${user.name}: already matched`);
+    return false;
+  }
+  if (exclusions.blockedUserIds.has(user._id as string)) {
+    debug?.logs.push(`  [EXCLUDE] ${user.name}: blocked`);
+    return false;
+  }
+  if (exclusions.viewerReportedIds.has(user._id as string)) {
+    debug?.logs.push(`  [EXCLUDE] ${user.name}: reported`);
+    return false;
+  }
+  if (exclusions.conversationPartnerIds.has(user._id as string)) {
+    debug?.logs.push(`  [EXCLUDE] ${user.name}: conversation partner`);
+    return false;
+  }
+
+  // Verification enforcement
+  if (user.verificationEnforcementLevel === 'security_only') {
+    debug?.logs.push(`  [EXCLUDE] ${user.name}: security_only enforcement`);
+    return false;
+  }
+  // Note: reduced_reach random exclusion NOT applied in counts for consistency
+  // (would cause non-deterministic count/detail mismatch)
+
+  debug?.logs.push(`  [ELIGIBLE] ${user.name}`);
+  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -159,16 +356,17 @@ function preferenceMatchScore(
   const shared = candidate.activities.filter((a) => currentUser.activities.includes(a));
   score += Math.min(shared.length * 10, 40);
 
-  // Relationship intent alignment (0–30)
+  // Relationship intent alignment (0–30) - CURRENT 9 RELATIONSHIP CATEGORIES
   const intentCompat: Record<string, string[]> = {
-    long_term: ['long_term', 'short_to_long'],
-    short_term: ['short_term', 'long_to_short', 'fwb'],
-    fwb: ['fwb', 'short_term'],
-    figuring_out: ['figuring_out', 'open_to_anything'],
-    short_to_long: ['short_to_long', 'long_term', 'short_term'],
-    long_to_short: ['long_to_short', 'short_term'],
-    new_friends: ['new_friends', 'open_to_anything'],
-    open_to_anything: ['open_to_anything', 'figuring_out', 'new_friends'],
+    serious_vibes: ['serious_vibes', 'see_where_it_goes'],
+    keep_it_casual: ['keep_it_casual', 'open_to_vibes'],
+    exploring_vibes: ['exploring_vibes', 'open_to_anything', 'new_to_dating'],
+    see_where_it_goes: ['see_where_it_goes', 'serious_vibes'],
+    open_to_vibes: ['open_to_vibes', 'keep_it_casual'],
+    just_friends: ['just_friends', 'open_to_anything'],
+    open_to_anything: ['open_to_anything', 'exploring_vibes', 'just_friends'],
+    single_parent: ['single_parent', 'serious_vibes', 'exploring_vibes'],
+    new_to_dating: ['new_to_dating', 'exploring_vibes', 'open_to_anything'],
   };
   let bestIntent = 0;
   for (const mine of currentUser.relationshipIntent) {
@@ -683,10 +881,11 @@ export const getExploreProfiles = query({
     minAge: v.optional(v.number()),
     maxAge: v.optional(v.number()),
     maxDistance: v.optional(v.number()),
+    // CURRENT 9 RELATIONSHIP CATEGORIES (source of truth - matches schema.ts)
     relationshipIntent: v.optional(v.array(v.union(
-      v.literal('long_term'), v.literal('short_term'), v.literal('fwb'),
-      v.literal('figuring_out'), v.literal('short_to_long'), v.literal('long_to_short'),
-      v.literal('new_friends'), v.literal('open_to_anything'),
+      v.literal('serious_vibes'), v.literal('keep_it_casual'), v.literal('exploring_vibes'),
+      v.literal('see_where_it_goes'), v.literal('open_to_vibes'), v.literal('just_friends'),
+      v.literal('open_to_anything'), v.literal('single_parent'), v.literal('new_to_dating'),
     ))),
     activities: v.optional(v.array(v.union(
       v.literal('coffee'), v.literal('date_night'), v.literal('sports'),
@@ -967,5 +1166,405 @@ export const getFilterCounts = query({
     }
 
     return { intentCounts, activityCounts };
+  },
+});
+
+// ---------------------------------------------------------------------------
+// DISCOVER-CATEGORY-FIX: Category-based profile query
+// Uses single-category assignment to prevent duplicate visibility
+// ---------------------------------------------------------------------------
+
+// Constants imported from discoverCategories.ts
+const SHOWN_COOLDOWN_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+
+/**
+ * Get profiles for a specific Explore category
+ * Uses the single-category assignment system to ensure mutual exclusivity
+ * FIXED: Now uses shared isUserEligibleForViewer for consistency with getExploreCategoryCounts
+ */
+export const getExploreCategoryProfiles = query({
+  args: {
+    viewerId: v.union(v.id('users'), v.string()), // Accept both Convex ID and authUserId
+    categoryId: v.string(), // Category key from exploreCategories.ts
+    limit: v.optional(v.number()),
+    offset: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    const { categoryId, limit = 20, offset = 0 } = args;
+
+    // Resolve viewer ID
+    const viewerId = await resolveUserIdByAuthId(ctx, args.viewerId as string);
+    if (!viewerId) {
+      console.log('[getExploreCategoryProfiles] Viewer not found:', args.viewerId);
+      return { profiles: [], totalCount: 0 };
+    }
+
+    const viewer = await ctx.db.get(viewerId);
+    if (!viewer) return { profiles: [], totalCount: 0 };
+    if (isUserPaused(viewer)) return { profiles: [], totalCount: 0 };
+
+    const cooldownThreshold = Date.now() - SHOWN_COOLDOWN_MS;
+
+    // FIXED: Use shared helper to build exclusion sets (same as counts query)
+    const exclusions = await buildExclusionSets(ctx, viewerId);
+
+    // Also fetch likes for "they liked me" badge
+    const likesToMe = await ctx.db
+      .query('likes')
+      .withIndex('by_to_user', (q) => q.eq('toUserId', viewerId))
+      .filter((q) => q.eq(q.field('action'), 'like'))
+      .collect();
+    const usersWhoLikedMe = new Set<string>();
+    for (const like of likesToMe) usersWhoLikedMe.add(like.fromUserId as string);
+
+    // Distance threshold for "nearby" category (5km)
+    const NEARBY_DISTANCE_KM = 5;
+
+    // DEBUG: Collect logs
+    const debug = { categoryId, logs: [] as string[] };
+    const filteredCandidates: { user: any; distance?: number }[] = [];
+
+    // Special handling for "nearby" - uses location, not assignedDiscoverCategory
+    if (categoryId === 'nearby') {
+      // Skip if viewer has no location
+      if (!viewer.latitude || !viewer.longitude) {
+        return { profiles: [], totalCount: 0 };
+      }
+
+      // Query users by recent activity and filter by distance
+      // Use by_last_active index to get recently active users
+      const fetchLimit = (offset + limit) * 5;
+      const allActiveUsers = await ctx.db
+        .query('users')
+        .withIndex('by_last_active')
+        .order('desc')
+        .filter((q) => q.eq(q.field('isActive'), true))
+        .take(fetchLimit);
+
+      debug.logs.push(`[nearby] Raw candidates: ${allActiveUsers.length}`);
+
+      for (const user of allActiveUsers) {
+        // Skip users without location
+        if (!user.latitude || !user.longitude) continue;
+
+        // Check distance
+        const distance = calculateDistance(
+          viewer.latitude, viewer.longitude,
+          user.latitude, user.longitude
+        );
+        if (distance > NEARBY_DISTANCE_KM) continue;
+
+        // Use shared eligibility check
+        if (!isUserEligibleForViewer(user, viewer, viewerId, exclusions, cooldownThreshold, debug)) {
+          continue;
+        }
+
+        filteredCandidates.push({ user, distance });
+      }
+    } else {
+      // Standard category handling - use assignedDiscoverCategory index
+      const fetchLimit = (offset + limit) * 5; // Buffer for filtering
+      const categoryUsers = await ctx.db
+        .query('users')
+        .withIndex('by_discover_category', (q) =>
+          q.eq('assignedDiscoverCategory', categoryId)
+        )
+        .take(fetchLimit);
+
+      debug.logs.push(`[${categoryId}] Raw candidates: ${categoryUsers.length}`);
+
+      // FIXED: Filter using shared eligibility helper (same as counts query)
+      for (const user of categoryUsers) {
+        // Use shared eligibility check
+        if (!isUserEligibleForViewer(user, viewer, viewerId, exclusions, cooldownThreshold, debug)) {
+          continue;
+        }
+
+        // Calculate distance for display (not filtering - that's in shared helper)
+        let distance: number | undefined;
+        if (viewer.latitude && viewer.longitude && user.latitude && user.longitude) {
+          distance = calculateDistance(
+            viewer.latitude, viewer.longitude,
+            user.latitude, user.longitude,
+          );
+        }
+
+        filteredCandidates.push({ user, distance });
+      }
+    }
+
+    debug.logs.push(`[${categoryId}] Final eligible: ${filteredCandidates.length}`);
+
+    // Batch fetch photos for filtered candidates
+    const photoResults = await Promise.all(
+      filteredCandidates.map(({ user }) =>
+        ctx.db
+          .query('photos')
+          .withIndex('by_user_order', (q) => q.eq('userId', user._id))
+          .collect()
+      )
+    );
+
+    // Build final profiles
+    const candidates = [];
+    for (let i = 0; i < filteredCandidates.length; i++) {
+      const { user, distance } = filteredCandidates[i];
+      const photos = photoResults[i];
+
+      const nonNsfwPhotos = photos.filter((p) => !p.isNsfw);
+      if (nonNsfwPhotos.length === 0) continue; // Require at least 1 photo
+
+      const userAge = calculateAge(user.dateOfBirth);
+      const theyLikedMe = usersWhoLikedMe.has(user._id as string);
+
+      candidates.push({
+        id: user._id,
+        name: user.name,
+        age: userAge,
+        gender: user.gender,
+        bio: user.bio,
+        height: user.height,
+        smoking: user.smoking,
+        drinking: user.drinking,
+        kids: user.kids,
+        education: user.education,
+        religion: user.religion,
+        jobTitle: user.jobTitle,
+        company: user.company,
+        school: user.school,
+        isVerified: user.isVerified,
+        verificationStatus: user.verificationStatus || 'unverified',
+        city: user.city,
+        distance,
+        lastActive: user.lastActive,
+        createdAt: user.createdAt,
+        lookingFor: user.lookingFor,
+        relationshipIntent: user.relationshipIntent,
+        activities: user.activities,
+        profilePrompts: user.profilePrompts,
+        photos: photos.sort((a, b) => a.order - b.order),
+        photoBlurred: user.photoBlurred === true,
+        isBoosted: !!(user.boostedUntil && user.boostedUntil > Date.now()),
+        theyLikedMe,
+        photoCount: nonNsfwPhotos.length,
+        isIncognito: user.incognitoMode === true,
+        // DISCOVER-CATEGORY-FIX: Include category info for debugging/UI
+        assignedCategory: user.assignedDiscoverCategory,
+      });
+    }
+
+    // Sort by activity score (recently active first)
+    candidates.sort((a, b) => {
+      // Boosted profiles first
+      if (a.isBoosted && !b.isBoosted) return -1;
+      if (!a.isBoosted && b.isBoosted) return 1;
+      // Then by recency
+      return b.lastActive - a.lastActive;
+    });
+
+    return {
+      profiles: candidates.slice(offset, offset + limit),
+      totalCount: candidates.length,
+    };
+  },
+});
+
+// ---------------------------------------------------------------------------
+// DISCOVER-CATEGORY-FIX: Shown tracking mutations
+// Track when profiles are displayed to enable 7-day cooldown
+// ---------------------------------------------------------------------------
+
+/**
+ * Mark a single profile as shown in Discover
+ * Called when a profile card is rendered/viewed
+ */
+export const markProfileAsShown = mutation({
+  args: {
+    userId: v.id('users'), // The profile that was shown
+  },
+  handler: async (ctx, args) => {
+    const user = await ctx.db.get(args.userId);
+    if (!user) return;
+
+    await ctx.db.patch(args.userId, {
+      lastShownInDiscoverAt: Date.now(),
+    });
+  },
+});
+
+/**
+ * Batch mark multiple profiles as shown (for efficiency)
+ * Called when a batch of profiles is loaded in Discover
+ */
+export const batchMarkProfilesAsShown = mutation({
+  args: {
+    userIds: v.array(v.id('users')),
+  },
+  handler: async (ctx, args) => {
+    const now = Date.now();
+    await Promise.all(
+      args.userIds.map(userId =>
+        ctx.db.patch(userId, { lastShownInDiscoverAt: now })
+      )
+    );
+  },
+});
+
+/**
+ * Assign a category to a user (or refresh if needed)
+ * Called during onboarding completion or when category refresh is needed
+ */
+export const assignUserCategory = mutation({
+  args: {
+    userId: v.union(v.id('users'), v.string()),
+  },
+  handler: async (ctx, args) => {
+    // Resolve user ID
+    const userId = await resolveUserIdByAuthId(ctx, args.userId as string);
+    if (!userId) return null;
+
+    const user = await ctx.db.get(userId);
+    if (!user) return null;
+
+    // Import category assignment logic
+    const { findBestCategory, needsCategoryRefresh } = await import('./discoverCategories');
+
+    // Check if refresh is needed
+    if (!needsCategoryRefresh(
+      user.discoverCategoryAssignedAt,
+      user.lastShownInDiscoverAt
+    )) {
+      // Return existing assignment
+      return user.assignedDiscoverCategory;
+    }
+
+    // Calculate best category
+    const bestCategory = findBestCategory({
+      relationshipIntent: user.relationshipIntent,
+      activities: user.activities,
+      lastActive: user.lastActive,
+    });
+
+    // Update user with new assignment
+    await ctx.db.patch(userId, {
+      assignedDiscoverCategory: bestCategory,
+      discoverCategoryAssignedAt: Date.now(),
+    });
+
+    return bestCategory;
+  },
+});
+
+/**
+ * Get category counts for Explore grid badges
+ * Uses the single-category assignment system
+ * FIXED: Now uses shared isUserEligibleForViewer for consistency with getExploreCategoryProfiles
+ */
+export const getExploreCategoryCounts = query({
+  args: {
+    viewerId: v.union(v.id('users'), v.string()),
+  },
+  handler: async (ctx, args) => {
+    // Resolve viewer ID
+    const viewerId = await resolveUserIdByAuthId(ctx, args.viewerId as string);
+    if (!viewerId) {
+      console.log('[getExploreCategoryCounts] Viewer not found:', args.viewerId);
+      return {};
+    }
+
+    const viewer = await ctx.db.get(viewerId);
+    if (!viewer) return {};
+
+    // FIXED: Check if viewer is paused (same as detail query)
+    if (isUserPaused(viewer)) return {};
+
+    const cooldownThreshold = Date.now() - SHOWN_COOLDOWN_MS;
+
+    // FIXED: Build exclusion sets using shared helper (same as detail query)
+    const exclusions = await buildExclusionSets(ctx, viewerId);
+
+    // Define category IDs - CURRENT PRODUCT TAXONOMY
+    // (imported from discoverCategories would create circular dep)
+    const categoryIds = [
+      // Relationship (9)
+      'serious_vibes', 'keep_it_casual', 'exploring_vibes', 'see_where_it_goes', 'open_to_vibes',
+      'just_friends', 'open_to_anything', 'single_parent', 'new_to_dating',
+      // Right Now (4) - including 'nearby' with special location handling
+      'nearby', 'online_now', 'active_today', 'free_tonight',
+      // Interest (7)
+      'coffee_date', 'nature_lovers', 'binge_watchers', 'travel', 'gaming', 'fitness', 'music',
+    ];
+
+    // Distance threshold for "nearby" category (5km)
+    const NEARBY_DISTANCE_KM = 5;
+
+    const counts: Record<string, number> = {};
+
+    // Count users per category using SHARED eligibility logic
+    for (const categoryId of categoryIds) {
+      // Special handling for "nearby" - uses location, not assignedDiscoverCategory
+      if (categoryId === 'nearby') {
+        // Skip if viewer has no location
+        if (!viewer.latitude || !viewer.longitude) {
+          counts['nearby'] = 0;
+          continue;
+        }
+
+        // Query users by recent activity and filter by distance
+        // Use by_last_active index to get recently active users
+        const allActiveUsers = await ctx.db
+          .query('users')
+          .withIndex('by_last_active')
+          .order('desc')
+          .filter((q) => q.eq(q.field('isActive'), true))
+          .take(200); // Cap for efficiency
+
+        const debug = { categoryId: 'nearby', logs: [] as string[] };
+        let nearbyCount = 0;
+
+        for (const user of allActiveUsers) {
+          // Skip users without location
+          if (!user.latitude || !user.longitude) continue;
+
+          // Check distance
+          const distance = calculateDistance(
+            viewer.latitude, viewer.longitude,
+            user.latitude, user.longitude
+          );
+          if (distance > NEARBY_DISTANCE_KM) continue;
+
+          // Use shared eligibility check
+          if (isUserEligibleForViewer(user, viewer, viewerId, exclusions, cooldownThreshold, debug)) {
+            nearbyCount++;
+          }
+        }
+
+        counts['nearby'] = nearbyCount;
+        continue;
+      }
+
+      // Standard category handling - use assignedDiscoverCategory index
+      const users = await ctx.db
+        .query('users')
+        .withIndex('by_discover_category', (q) =>
+          q.eq('assignedDiscoverCategory', categoryId)
+        )
+        .take(100); // Cap for efficiency
+
+      // DEBUG: Collect logs for this category
+      const debug = { categoryId, logs: [] as string[] };
+      debug.logs.push(`[${categoryId}] Raw candidates: ${users.length}`);
+
+      // FIXED: Use shared eligibility helper (same as detail query)
+      const validCount = users.filter(user =>
+        isUserEligibleForViewer(user, viewer, viewerId, exclusions, cooldownThreshold, debug)
+      ).length;
+
+      debug.logs.push(`[${categoryId}] Final eligible: ${validCount}`);
+
+      counts[categoryId] = validCount;
+    }
+
+    return counts;
   },
 });

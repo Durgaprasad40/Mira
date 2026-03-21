@@ -62,7 +62,7 @@ export const DEMO_USER = {
   discoveryPausedUntil: undefined,
   subscriptionTier: 'premium',
   lookingFor: ['female'],
-  relationshipIntent: ['long_term'],
+  relationshipIntent: ['serious_vibes'],
   activities: ['coffee', 'movies'],
   minAge: 18,
   maxAge: 35,
@@ -173,7 +173,7 @@ export const DEMO_PROFILES = [
     latitude: 19.082,
     longitude: 72.871,
     lastSeenArea: 'Bandra West',
-    relationshipIntent: ['long_term'],
+    relationshipIntent: ['serious_vibes'],
     activities: ['coffee', 'travel', 'foodie'],
     profilePrompts: [
       { question: 'My ideal first date is...', answer: 'A sunset walk along Marine Drive followed by street food at Juhu Beach' },
@@ -199,7 +199,7 @@ export const DEMO_PROFILES = [
     latitude: 12.9716,
     longitude: 77.5946,
     lastSeenArea: 'Koramangala',
-    relationshipIntent: ['figuring_out'],
+    relationshipIntent: ['exploring_vibes'],
     activities: ['coffee', 'movies', 'concerts'],
     profilePrompts: [
       { question: 'My go-to karaoke song is...', answer: 'Anything by Arijit Singh — I know every word' },
@@ -224,7 +224,7 @@ export const DEMO_PROFILES = [
     latitude: 18.5204,
     longitude: 73.8567,
     lastSeenArea: 'Koregaon Park',
-    relationshipIntent: ['long_term'],
+    relationshipIntent: ['serious_vibes'],
     activities: ['outdoors', 'gym_partner', 'coffee'],
     profilePrompts: [
       { question: 'A non-negotiable for me is...', answer: 'Kindness. Everything else is figureoutable.' },
@@ -249,7 +249,7 @@ export const DEMO_PROFILES = [
     latitude: 28.6139,
     longitude: 77.209,
     lastSeenArea: 'Hauz Khas',
-    relationshipIntent: ['short_to_long'],
+    relationshipIntent: ['see_where_it_goes'],
     activities: ['coffee', 'art_culture', 'brunch'],
     profilePrompts: [
       { question: 'I geek out about...', answer: 'Neuroscience papers and obscure Urdu poetry — yes, both at the same time' },
@@ -274,7 +274,7 @@ export const DEMO_PROFILES = [
     latitude: 19.076,
     longitude: 72.877,
     lastSeenArea: 'Worli',
-    relationshipIntent: ['long_term'],
+    relationshipIntent: ['serious_vibes'],
     activities: ['foodie', 'art_culture', 'photography'],
     profilePrompts: [
       { question: 'My ideal first date is...', answer: 'Exploring a neighbourhood we\'ve never been to and finding a hidden cafe' },
@@ -299,7 +299,7 @@ export const DEMO_PROFILES = [
     latitude: 17.385,
     longitude: 78.4867,
     lastSeenArea: 'Jubilee Hills',
-    relationshipIntent: ['new_friends'],
+    relationshipIntent: ['just_friends'],
     activities: ['movies', 'nightlife', 'brunch'],
     profilePrompts: [
       { question: 'The way to my heart is...', answer: 'Biryani. That\'s it. That\'s the answer.' },
@@ -324,7 +324,7 @@ export const DEMO_PROFILES = [
     latitude: 12.972,
     longitude: 77.594,
     lastSeenArea: 'Indiranagar',
-    relationshipIntent: ['long_term'],
+    relationshipIntent: ['serious_vibes'],
     activities: ['coffee', 'gaming', 'concerts'],
     profilePrompts: [
       { question: 'My go-to karaoke song is...', answer: 'Bohemian Rhapsody — full commitment, no shame' },
@@ -349,7 +349,7 @@ export const DEMO_PROFILES = [
     latitude: 13.0827,
     longitude: 80.2707,
     lastSeenArea: 'T. Nagar',
-    relationshipIntent: ['figuring_out'],
+    relationshipIntent: ['exploring_vibes'],
     activities: ['photography', 'beach_pool', 'travel'],
     profilePrompts: [
       { question: 'My happy place is...', answer: 'Marina Beach at 5:30 AM with my camera' },
@@ -374,7 +374,7 @@ export const DEMO_PROFILES = [
     latitude: 19.089,
     longitude: 72.868,
     lastSeenArea: 'Andheri',
-    relationshipIntent: ['long_term'],
+    relationshipIntent: ['serious_vibes'],
     activities: ['gym_partner', 'outdoors', 'road_trip'],
     profilePrompts: [
       { question: 'A non-negotiable for me is...', answer: 'Ambition. I love people who have a fire in them.' },
@@ -424,7 +424,7 @@ export const DEMO_PROFILES = [
     latitude: 19.075,
     longitude: 72.880,
     lastSeenArea: 'Powai',
-    relationshipIntent: ['long_term'],
+    relationshipIntent: ['serious_vibes'],
     activities: ['coffee', 'art_culture', 'brunch'],
     profilePrompts: [
       { question: 'I geek out about...', answer: 'Obscure historical facts and building the perfect reading nook' },
@@ -449,7 +449,7 @@ export const DEMO_PROFILES = [
     latitude: 28.620,
     longitude: 77.215,
     lastSeenArea: 'Connaught Place',
-    relationshipIntent: ['short_to_long'],
+    relationshipIntent: ['see_where_it_goes'],
     activities: ['foodie', 'travel', 'brunch'],
     profilePrompts: [
       { question: 'My most controversial opinion is...', answer: 'Delhi has better street food than Mumbai. I said what I said.' },
@@ -474,7 +474,7 @@ export const DEMO_PROFILES = [
     latitude: 18.525,
     longitude: 73.860,
     lastSeenArea: 'Viman Nagar',
-    relationshipIntent: ['figuring_out'],
+    relationshipIntent: ['exploring_vibes'],
     activities: ['art_culture', 'coffee', 'movies'],
     profilePrompts: [
       { question: 'My go-to karaoke song is...', answer: 'Tujhe Dekha Toh — a classic never fails' },
@@ -499,7 +499,7 @@ export const DEMO_PROFILES = [
     latitude: 19.080,
     longitude: 72.875,
     lastSeenArea: 'Lower Parel',
-    relationshipIntent: ['long_term'],
+    relationshipIntent: ['serious_vibes'],
     activities: ['nightlife', 'concerts', 'foodie'],
     profilePrompts: [
       { question: 'The way to my heart is...', answer: 'A well-timed joke. Bonus points if it\'s self-deprecating.' },
@@ -524,7 +524,7 @@ export const DEMO_PROFILES = [
     latitude: 26.9124,
     longitude: 75.7873,
     lastSeenArea: 'C-Scheme',
-    relationshipIntent: ['new_friends'],
+    relationshipIntent: ['just_friends'],
     activities: ['outdoors', 'travel', 'photography'],
     profilePrompts: [
       { question: 'I geek out about...', answer: 'Marine biology documentaries and composting techniques' },
@@ -550,7 +550,7 @@ export const DEMO_PROFILES = [
     latitude: 13.085,
     longitude: 80.275,
     lastSeenArea: 'Mylapore',
-    relationshipIntent: ['long_term'],
+    relationshipIntent: ['serious_vibes'],
     activities: ['concerts', 'art_culture', 'coffee'],
     profilePrompts: [
       { question: 'My happy place is...', answer: 'On stage, mid-raga, when everything just clicks' },
@@ -575,7 +575,7 @@ export const DEMO_PROFILES = [
     latitude: 17.390,
     longitude: 78.490,
     lastSeenArea: 'Banjara Hills',
-    relationshipIntent: ['short_to_long'],
+    relationshipIntent: ['see_where_it_goes'],
     activities: ['foodie', 'travel', 'art_culture'],
     profilePrompts: [
       { question: 'A green flag for me is...', answer: 'Someone who reads the news and has opinions about it' },
@@ -600,7 +600,7 @@ export const DEMO_PROFILES = [
     latitude: 12.975,
     longitude: 77.590,
     lastSeenArea: 'HSR Layout',
-    relationshipIntent: ['figuring_out'],
+    relationshipIntent: ['exploring_vibes'],
     activities: ['coffee', 'art_culture', 'gaming'],
     profilePrompts: [
       { question: 'My go-to karaoke song is...', answer: 'Shut Up and Dance — it gets everyone moving' },
@@ -625,7 +625,7 @@ export const DEMO_PROFILES = [
     latitude: 18.530,
     longitude: 73.855,
     lastSeenArea: 'Aundh',
-    relationshipIntent: ['long_term'],
+    relationshipIntent: ['serious_vibes'],
     activities: ['outdoors', 'coffee', 'road_trip'],
     profilePrompts: [
       { question: 'A non-negotiable for me is...', answer: 'You must like dogs. Not negotiable. Cats are acceptable too.' },
@@ -676,7 +676,7 @@ export const DEMO_PROFILES = [
     latitude: 12.975,
     longitude: 77.590,
     lastSeenArea: 'Indiranagar',
-    relationshipIntent: ['long_term'],
+    relationshipIntent: ['serious_vibes'],
     activities: ['coffee', 'art_culture', 'brunch'],
     profilePrompts: [
       { question: 'My ideal first date is...', answer: 'A cozy bookstore followed by coffee and deep conversation' },
@@ -701,7 +701,7 @@ export const DEMO_PROFILES = [
     latitude: 19.078,
     longitude: 72.880,
     lastSeenArea: 'Lower Parel',
-    relationshipIntent: ['short_to_long'],
+    relationshipIntent: ['see_where_it_goes'],
     activities: ['coffee', 'art_culture', 'foodie'],
     profilePrompts: [
       { question: 'The way to my heart is...', answer: 'Show up on time and bring chai' },
@@ -726,7 +726,7 @@ export const DEMO_PROFILES = [
     latitude: 17.390,
     longitude: 78.490,
     lastSeenArea: 'Banjara Hills',
-    relationshipIntent: ['figuring_out'],
+    relationshipIntent: ['exploring_vibes'],
     activities: ['coffee', 'nightlife', 'concerts'],
     profilePrompts: [
       { question: 'I geek out about...', answer: 'CRISPR gene editing and why mitochondria really is the powerhouse of the cell' },
@@ -751,7 +751,7 @@ export const DEMO_PROFILES = [
     latitude: 15.496,
     longitude: 73.827,
     lastSeenArea: 'Panjim',
-    relationshipIntent: ['long_term'],
+    relationshipIntent: ['serious_vibes'],
     activities: ['photography', 'travel', 'coffee'],
     profilePrompts: [
       { question: 'My ideal first date is...', answer: 'Golden hour shoot at a beach, then seafood and wine' },
@@ -776,7 +776,7 @@ export const DEMO_PROFILES = [
     latitude: 28.620,
     longitude: 77.215,
     lastSeenArea: 'Connaught Place',
-    relationshipIntent: ['long_term'],
+    relationshipIntent: ['serious_vibes'],
     activities: ['outdoors', 'gym_partner', 'foodie'],
     profilePrompts: [
       { question: 'My happy place is...', answer: 'Any trail with elevation gain and zero cell signal' },
@@ -801,7 +801,7 @@ export const DEMO_PROFILES = [
     latitude: 18.525,
     longitude: 73.860,
     lastSeenArea: 'Viman Nagar',
-    relationshipIntent: ['new_friends'],
+    relationshipIntent: ['just_friends'],
     activities: ['gaming', 'art_culture', 'movies'],
     profilePrompts: [
       { question: 'I geek out about...', answer: 'Studio Ghibli lore and why Howl is the ultimate green flag' },
@@ -826,7 +826,7 @@ export const DEMO_PROFILES = [
     latitude: 12.980,
     longitude: 77.595,
     lastSeenArea: 'HSR Layout',
-    relationshipIntent: ['long_term'],
+    relationshipIntent: ['serious_vibes'],
     activities: ['concerts', 'coffee', 'brunch'],
     profilePrompts: [
       { question: 'My go-to karaoke song is...', answer: 'Tum Hi Ho — judge me, I dare you' },
@@ -851,7 +851,7 @@ export const DEMO_PROFILES = [
     latitude: 13.085,
     longitude: 80.275,
     lastSeenArea: 'Alwarpet',
-    relationshipIntent: ['long_term'],
+    relationshipIntent: ['serious_vibes'],
     activities: ['art_culture', 'coffee', 'foodie'],
     profilePrompts: [
       { question: "I'm happiest when...", answer: 'Glazing a fresh batch of mugs with South Indian filter coffee nearby' },
@@ -876,7 +876,7 @@ export const DEMO_PROFILES = [
     latitude: 19.065,
     longitude: 72.870,
     lastSeenArea: 'Andheri West',
-    relationshipIntent: ['short_to_long'],
+    relationshipIntent: ['see_where_it_goes'],
     activities: ['outdoors', 'gym_partner', 'road_trip'],
     profilePrompts: [
       { question: 'A non-negotiable for me is...', answer: 'Someone who can keep up on a trek — or at least tries' },
@@ -901,7 +901,7 @@ export const DEMO_PROFILES = [
     latitude: 22.575,
     longitude: 88.365,
     lastSeenArea: 'Park Street',
-    relationshipIntent: ['figuring_out'],
+    relationshipIntent: ['exploring_vibes'],
     activities: ['coffee', 'foodie', 'art_culture'],
     profilePrompts: [
       { question: 'The way to my heart is...', answer: 'A perfectly brewed Darjeeling first flush' },
@@ -926,7 +926,7 @@ export const DEMO_PROFILES = [
     latitude: 28.630,
     longitude: 77.220,
     lastSeenArea: 'Saket',
-    relationshipIntent: ['new_friends'],
+    relationshipIntent: ['just_friends'],
     activities: ['art_culture', 'coffee', 'photography'],
     profilePrompts: [
       { question: 'My most controversial opinion is...', answer: 'Fast fashion should be illegal and I will not be debating this' },
@@ -951,7 +951,7 @@ export const DEMO_PROFILES = [
     latitude: 19.072,
     longitude: 72.882,
     lastSeenArea: 'Dadar',
-    relationshipIntent: ['long_term'],
+    relationshipIntent: ['serious_vibes'],
     activities: ['nightlife', 'movies', 'foodie'],
     profilePrompts: [
       { question: 'The way to my heart is...', answer: 'Make me laugh after a 12-hour shift and I\'m yours' },
@@ -1001,7 +1001,7 @@ export const DEMO_PROFILES = [
     latitude: 18.530,
     longitude: 73.850,
     lastSeenArea: 'Aundh',
-    relationshipIntent: ['figuring_out'],
+    relationshipIntent: ['exploring_vibes'],
     activities: ['outdoors', 'coffee', 'movies'],
     profilePrompts: [
       { question: 'My ideal first date is...', answer: 'Night drive to a dark-sky spot with blankets and a telescope' },
@@ -1026,7 +1026,7 @@ export const DEMO_PROFILES = [
     latitude: 28.618,
     longitude: 77.205,
     lastSeenArea: 'Lodhi Colony',
-    relationshipIntent: ['short_to_long'],
+    relationshipIntent: ['see_where_it_goes'],
     activities: ['foodie', 'photography', 'brunch'],
     profilePrompts: [
       { question: 'The way to my heart is...', answer: 'Take me to a hole-in-the-wall place that even Google doesn\'t know about' },
@@ -1051,7 +1051,7 @@ export const DEMO_PROFILES = [
     latitude: 21.145,
     longitude: 79.088,
     lastSeenArea: 'Dharampeth',
-    relationshipIntent: ['long_term'],
+    relationshipIntent: ['serious_vibes'],
     activities: ['outdoors', 'photography', 'travel'],
     profilePrompts: [
       { question: 'My happy place is...', answer: 'A hide in Tadoba at dawn, waiting for the tiger to appear' },
@@ -1076,7 +1076,7 @@ export const DEMO_PROFILES = [
     latitude: 17.395,
     longitude: 78.480,
     lastSeenArea: 'Madhapur',
-    relationshipIntent: ['long_term'],
+    relationshipIntent: ['serious_vibes'],
     activities: ['gym_partner', 'coffee', 'art_culture'],
     profilePrompts: [
       { question: 'A green flag for me is...', answer: 'Someone who respects my gym schedule like I respect theirs' },
@@ -1101,7 +1101,7 @@ export const DEMO_PROFILES = [
     latitude: 15.500,
     longitude: 73.830,
     lastSeenArea: 'Dona Paula',
-    relationshipIntent: ['new_friends'],
+    relationshipIntent: ['just_friends'],
     activities: ['outdoors', 'travel', 'beach_pool'],
     profilePrompts: [
       { question: 'I geek out about...', answer: 'Coral reef ecosystems and why every ocean cleanup matters' },
@@ -1126,7 +1126,7 @@ export const DEMO_PROFILES = [
     latitude: 19.068,
     longitude: 72.875,
     lastSeenArea: 'Bandra East',
-    relationshipIntent: ['long_term'],
+    relationshipIntent: ['serious_vibes'],
     activities: ['foodie', 'coffee', 'brunch'],
     profilePrompts: [
       { question: 'The way to my heart is...', answer: 'Appreciate my soufflé — it took 3 attempts' },
@@ -1151,7 +1151,7 @@ export const DEMO_PROFILES = [
     latitude: 12.972,
     longitude: 77.588,
     lastSeenArea: 'JP Nagar',
-    relationshipIntent: ['figuring_out'],
+    relationshipIntent: ['exploring_vibes'],
     activities: ['gaming', 'coffee', 'movies'],
     profilePrompts: [
       { question: 'I geek out about...', answer: 'Pixel art animation and why Stardew Valley is a masterpiece' },
@@ -1201,7 +1201,7 @@ export const DEMO_PROFILES = [
     latitude: 28.625,
     longitude: 77.210,
     lastSeenArea: 'Vasant Kunj',
-    relationshipIntent: ['long_term'],
+    relationshipIntent: ['serious_vibes'],
     activities: ['coffee', 'brunch', 'art_culture'],
     profilePrompts: [
       { question: 'A non-negotiable for me is...', answer: 'You have to vote. Non-negotiable.' },
@@ -1226,7 +1226,7 @@ export const DEMO_PROFILES = [
     latitude: 18.515,
     longitude: 73.855,
     lastSeenArea: 'Kothrud',
-    relationshipIntent: ['new_friends'],
+    relationshipIntent: ['just_friends'],
     activities: ['gym_partner', 'movies', 'brunch'],
     profilePrompts: [
       { question: 'My go-to karaoke song is...', answer: 'Lose Yourself by Eminem — full intensity, every time' },
@@ -1251,7 +1251,7 @@ export const DEMO_PROFILES = [
     latitude: 19.075,
     longitude: 72.878,
     lastSeenArea: 'Colaba',
-    relationshipIntent: ['long_term'],
+    relationshipIntent: ['serious_vibes'],
     activities: ['travel', 'photography', 'foodie'],
     profilePrompts: [
       { question: 'My ideal first date is...', answer: 'Planning a trip together over wine — even if we never go' },
@@ -1276,7 +1276,7 @@ export const DEMO_PROFILES = [
     latitude: 26.920,
     longitude: 75.790,
     lastSeenArea: 'C-Scheme',
-    relationshipIntent: ['short_to_long'],
+    relationshipIntent: ['see_where_it_goes'],
     activities: ['art_culture', 'coffee', 'photography'],
     profilePrompts: [
       { question: 'I geek out about...', answer: 'Colour theory and why certain palettes make you feel calm' },
@@ -1301,7 +1301,7 @@ export const DEMO_PROFILES = [
     latitude: 12.965,
     longitude: 77.605,
     lastSeenArea: 'Marathahalli',
-    relationshipIntent: ['long_term'],
+    relationshipIntent: ['serious_vibes'],
     activities: ['gym_partner', 'outdoors', 'road_trip'],
     profilePrompts: [
       { question: 'My happy place is...', answer: 'A quiet highway at 5 AM with just me and my bike' },
@@ -1351,7 +1351,7 @@ export const DEMO_PROFILES = [
     latitude: 17.388,
     longitude: 78.492,
     lastSeenArea: 'Gachibowli',
-    relationshipIntent: ['long_term'],
+    relationshipIntent: ['serious_vibes'],
     activities: ['gaming', 'coffee', 'movies'],
     profilePrompts: [
       { question: 'I geek out about...', answer: 'CTF competitions and why your password is probably terrible' },
@@ -1376,7 +1376,7 @@ export const DEMO_PROFILES = [
     latitude: 13.090,
     longitude: 80.280,
     lastSeenArea: 'Anna Nagar',
-    relationshipIntent: ['short_to_long'],
+    relationshipIntent: ['see_where_it_goes'],
     activities: ['art_culture', 'coffee', 'photography'],
     profilePrompts: [
       { question: "I'm happiest when...", answer: 'My studio smells like fresh peonies and there\'s filter coffee brewing' },
@@ -1401,7 +1401,7 @@ export const DEMO_PROFILES = [
     latitude: 18.528,
     longitude: 73.858,
     lastSeenArea: 'Baner',
-    relationshipIntent: ['long_term'],
+    relationshipIntent: ['serious_vibes'],
     activities: ['outdoors', 'foodie', 'coffee'],
     profilePrompts: [
       { question: 'A non-negotiable for me is...', answer: 'You have to try the wine I recommend. Just once.' },
@@ -1427,7 +1427,7 @@ export const DEMO_PROFILES = [
     latitude: 19.076,
     longitude: 72.877,
     lastSeenArea: 'Colaba',
-    relationshipIntent: ['long_term'],
+    relationshipIntent: ['serious_vibes'],
     activities: ['travel', 'photography', 'coffee', 'foodie'],
     profilePrompts: [
       { question: 'My ideal first date is...', answer: 'Golden hour photowalk followed by chai at a hidden rooftop cafe' },
@@ -1453,7 +1453,7 @@ export const DEMO_PROFILES = [
     latitude: 19.080,
     longitude: 72.880,
     lastSeenArea: 'Bandra',
-    relationshipIntent: ['figuring_out', 'long_term'],
+    relationshipIntent: ['exploring_vibes', 'serious_vibes'],
     activities: ['coffee', 'brunch', 'foodie', 'art_culture'],
     profilePrompts: [
       { question: 'The way to my heart is...', answer: 'A perfectly pulled espresso and genuine conversation' },
@@ -1479,7 +1479,7 @@ export const DEMO_PROFILES = [
     latitude: 19.082,
     longitude: 72.882,
     lastSeenArea: 'Juhu',
-    relationshipIntent: ['long_term'],
+    relationshipIntent: ['serious_vibes'],
     activities: ['music', 'travel', 'reading', 'coffee'],
     profilePrompts: [
       { question: 'My ideal first date is...', answer: 'Midnight walk on the beach with good music in our ears' },

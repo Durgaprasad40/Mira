@@ -128,15 +128,26 @@ export default defineSchema({
 
     // Preferences
     lookingFor: v.array(v.union(v.literal('male'), v.literal('female'), v.literal('non_binary'), v.literal('lesbian'), v.literal('other'))),
+    // CURRENT 9 RELATIONSHIP CATEGORIES (source of truth)
+    // LEGACY COMPAT: Also accepts old values (long_term, short_term, etc.) for existing data - run migration to remove
     relationshipIntent: v.array(v.union(
+      // NEW values (canonical)
+      v.literal('serious_vibes'),
+      v.literal('keep_it_casual'),
+      v.literal('exploring_vibes'),
+      v.literal('see_where_it_goes'),
+      v.literal('open_to_vibes'),
+      v.literal('just_friends'),
+      v.literal('open_to_anything'),
+      v.literal('single_parent'),
+      v.literal('new_to_dating'),
+      // LEGACY values (deprecated - run migration to convert)
       v.literal('long_term'),
       v.literal('short_term'),
       v.literal('fwb'),
       v.literal('figuring_out'),
       v.literal('short_to_long'),
-      v.literal('long_to_short'),
-      v.literal('new_friends'),
-      v.literal('open_to_anything')
+      v.literal('long_to_short')
     )),
     activities: v.array(v.union(
       v.literal('coffee'),
@@ -190,6 +201,12 @@ export default defineSchema({
     // Discovery Pause
     isDiscoveryPaused: v.optional(v.boolean()),
     discoveryPausedUntil: v.optional(v.number()),
+
+    // DISCOVER-CATEGORY-FIX: Single-category assignment to prevent duplicate visibility
+    // Each user belongs to ONE category at a time (mutual exclusivity)
+    assignedDiscoverCategory: v.optional(v.string()), // Category key from exploreCategories.ts
+    discoverCategoryAssignedAt: v.optional(v.number()), // When category was assigned (28-48h reassignment window)
+    lastShownInDiscoverAt: v.optional(v.number()), // When last shown (7-day cooldown after shown)
 
     // Chat Rooms: Preferred room (auto-opens on tab entry)
     preferredChatRoomId: v.optional(v.id('chatRooms')),
@@ -358,9 +375,14 @@ export default defineSchema({
         lgbtqPreference: v.optional(v.array(v.union(
           v.literal('male'), v.literal('female'), v.literal('non_binary'), v.literal('lesbian'), v.literal('other'), v.literal('transgender'), v.literal('bisexual'), v.literal('prefer_not_to_say')
         ))),
+        // CURRENT 9 RELATIONSHIP CATEGORIES (source of truth)
+        // LEGACY COMPAT: Also accepts old values for existing data - run migration to remove
         relationshipIntent: v.optional(v.array(v.union(
-          v.literal('long_term'), v.literal('short_term'), v.literal('fwb'), v.literal('figuring_out'),
-          v.literal('short_to_long'), v.literal('long_to_short'), v.literal('new_friends'), v.literal('open_to_anything')
+          // NEW values (canonical)
+          v.literal('serious_vibes'), v.literal('keep_it_casual'), v.literal('exploring_vibes'), v.literal('see_where_it_goes'),
+          v.literal('open_to_vibes'), v.literal('just_friends'), v.literal('open_to_anything'), v.literal('single_parent'), v.literal('new_to_dating'),
+          // LEGACY values (deprecated - run migration to convert)
+          v.literal('long_term'), v.literal('short_term'), v.literal('fwb'), v.literal('figuring_out'), v.literal('short_to_long'), v.literal('long_to_short')
         ))),
         activities: v.optional(v.array(v.union(
           // Original 20 activities
@@ -500,7 +522,9 @@ export default defineSchema({
     .index('by_boosted', ['boostedUntil'])
     .index('by_verification_status', ['verificationStatus'])
     .index('by_demo_user_id', ['demoUserId'])
-    .index('by_auth_user_id', ['authUserId']),
+    .index('by_auth_user_id', ['authUserId'])
+    // DISCOVER-CATEGORY-FIX: Index for category-based profile queries
+    .index('by_discover_category', ['assignedDiscoverCategory']),
 
   // Photos table
   photos: defineTable({

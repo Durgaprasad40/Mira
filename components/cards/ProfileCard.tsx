@@ -52,6 +52,10 @@ export interface ProfileCardProps {
   activities?: string[];
   /** True if user has incognito mode enabled (shows badge) */
   isIncognito?: boolean;
+  /** Explore category tag - shows "Why this profile" label above name */
+  exploreTag?: string;
+  /** Last active timestamp for "Active Now" badge */
+  lastActive?: number;
   // Legacy props for non-Discover usage (explore grid etc.)
   user?: any;
   onPress?: () => void;
@@ -78,6 +82,8 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
   relationshipIntent,
   activities,
   isIncognito,
+  exploreTag,
+  lastActive,
   onPress,
 }) => {
   const dark = theme === 'dark';
@@ -100,6 +106,13 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
   // Phase-2: Show max 2 labels + overflow count
   const phase2VisibleLabels = phase2IntentLabels.slice(0, 2);
   const phase2OverflowCount = phase2IntentLabels.length > 2 ? phase2IntentLabels.length - 2 : 0;
+
+  // Check if user is active now (within 10 minutes)
+  const isActiveNow = useMemo(() => {
+    if (!lastActive) return false;
+    const tenMinutesMs = 10 * 60 * 1000;
+    return (Date.now() - lastActive) < tenMinutesMs;
+  }, [lastActive]);
 
   // Phase-1 only: Compute "Looking for" text
   const lookingForText = useMemo(() => {
@@ -258,6 +271,19 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
       <View style={styles.overlay} pointerEvents="none">
         <View style={styles.headerRow}>
           <View style={{ flex: 1 }}>
+            {/* Active Now badge */}
+            {isActiveNow && (
+              <View style={styles.activeNowBadge}>
+                <View style={styles.activeNowDot} />
+                <Text style={styles.activeNowText}>Active now</Text>
+              </View>
+            )}
+            {/* Explore category tag - "Why this profile" */}
+            {exploreTag && !isActiveNow && (
+              <View style={styles.exploreTagContainer}>
+                <Text style={styles.exploreTagText}>{exploreTag}</Text>
+              </View>
+            )}
             <View style={styles.nameRow}>
               <Text style={styles.name}>
                 {name}, {age}
@@ -453,6 +479,44 @@ const styles = StyleSheet.create({
     textShadowColor: 'rgba(0,0,0,0.6)',
     textShadowOffset: { width: 0, height: 1 },
     textShadowRadius: 4,
+  },
+  exploreTagContainer: {
+    backgroundColor: 'rgba(255,255,255,0.2)',
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 12,
+    alignSelf: 'flex-start',
+    marginBottom: 6,
+  },
+  exploreTagText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: COLORS.white,
+    textShadowColor: 'rgba(0,0,0,0.5)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 2,
+  },
+  activeNowBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(16, 185, 129, 0.25)',
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 12,
+    alignSelf: 'flex-start',
+    marginBottom: 6,
+    gap: 6,
+  },
+  activeNowDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: '#10B981',
+  },
+  activeNowText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: '#10B981',
   },
   city: {
     fontSize: 14,

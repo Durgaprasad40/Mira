@@ -2734,7 +2734,7 @@ export const seedDemoUser = mutation({
       isVerified: false,
       demoUserId: demoUserId,
       lookingFor: ['other'],
-      relationshipIntent: ['figuring_out'],
+      relationshipIntent: ['exploring_vibes'],
       activities: [],
       minAge: 18,
       maxAge: 99,

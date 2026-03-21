@@ -9,9 +9,9 @@ export function computeIntentCompat(
   myIntents: string[],
   theirIntents: string[],
 ): { compat: IntentCompat; theirPrimaryLabel: string; theirPrimaryEmoji: string } {
-  const theirPrimary = theirIntents[0] || 'figuring_out';
+  const theirPrimary = theirIntents[0] || 'exploring_vibes';
   const found = RELATIONSHIP_INTENTS.find((r) => r.value === theirPrimary);
-  const theirPrimaryLabel = found?.label || 'Figuring out';
+  const theirPrimaryLabel = found?.label || 'Exploring Vibes';
   const theirPrimaryEmoji = found?.emoji || '🤔';
 
   if (!myIntents.length || !theirIntents.length) {
@@ -23,16 +23,17 @@ export function computeIntentCompat(
     return { compat: 'match', theirPrimaryLabel, theirPrimaryEmoji };
   }
 
-  // Check for near-matches (e.g. short_to_long ↔ long_term)
+  // Check for near-matches using CURRENT 9 RELATIONSHIP CATEGORIES
   const compatible: Record<string, string[]> = {
-    long_term: ['short_to_long', 'open_to_anything'],
-    short_term: ['long_to_short', 'open_to_anything', 'fwb'],
-    fwb: ['short_term', 'open_to_anything'],
-    short_to_long: ['long_term', 'open_to_anything'],
-    long_to_short: ['short_term', 'open_to_anything'],
-    open_to_anything: ['long_term', 'short_term', 'fwb', 'new_friends', 'figuring_out'],
-    figuring_out: ['open_to_anything'],
-    new_friends: ['open_to_anything', 'new_friends'],
+    serious_vibes: ['see_where_it_goes', 'open_to_anything'],
+    keep_it_casual: ['open_to_vibes', 'open_to_anything'],
+    exploring_vibes: ['open_to_anything', 'new_to_dating'],
+    see_where_it_goes: ['serious_vibes', 'open_to_anything'],
+    open_to_vibes: ['keep_it_casual', 'open_to_anything'],
+    just_friends: ['open_to_anything'],
+    open_to_anything: ['serious_vibes', 'keep_it_casual', 'exploring_vibes', 'just_friends'],
+    single_parent: ['serious_vibes', 'exploring_vibes', 'open_to_anything'],
+    new_to_dating: ['exploring_vibes', 'open_to_anything'],
   };
 
   for (const mine of myIntents) {

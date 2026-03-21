@@ -5,10 +5,10 @@ import { internal } from "./_generated/api";
 import { logAdminAction } from "./adminLog";
 import { resolveUserIdByAuthId, ensureUserByAuthId, validateSessionToken } from "./helpers";
 
-// ALLOWED_RELATIONSHIP_INTENTS: Schema-safe values (excludes UI-only values like single_parent, just_18)
+// CURRENT 9 RELATIONSHIP CATEGORIES (source of truth - matches schema.ts)
 const ALLOWED_RELATIONSHIP_INTENTS = new Set([
-  'long_term', 'short_term', 'fwb', 'figuring_out',
-  'short_to_long', 'long_to_short', 'new_friends', 'open_to_anything'
+  'serious_vibes', 'keep_it_casual', 'exploring_vibes', 'see_where_it_goes',
+  'open_to_vibes', 'just_friends', 'open_to_anything', 'single_parent', 'new_to_dating'
 ]);
 
 // Sanitize relationshipIntent to only include schema-valid values
@@ -259,17 +259,19 @@ export const updateProfile = mutation({
     jobTitle: v.optional(v.string()),
     company: v.optional(v.string()),
     school: v.optional(v.string()),
+    // CURRENT 9 RELATIONSHIP CATEGORIES (source of truth - matches schema.ts)
     relationshipIntent: v.optional(
       v.array(
         v.union(
-          v.literal("long_term"),
-          v.literal("short_term"),
-          v.literal("fwb"),
-          v.literal("figuring_out"),
-          v.literal("short_to_long"),
-          v.literal("long_to_short"),
-          v.literal("new_friends"),
+          v.literal("serious_vibes"),
+          v.literal("keep_it_casual"),
+          v.literal("exploring_vibes"),
+          v.literal("see_where_it_goes"),
+          v.literal("open_to_vibes"),
+          v.literal("just_friends"),
           v.literal("open_to_anything"),
+          v.literal("single_parent"),
+          v.literal("new_to_dating"),
         ),
       ),
     ),
@@ -391,17 +393,19 @@ export const updatePreferences = mutation({
         ),
       ),
     ),
+    // CURRENT 9 RELATIONSHIP CATEGORIES (source of truth - matches schema.ts)
     relationshipIntent: v.optional(
       v.array(
         v.union(
-          v.literal("long_term"),
-          v.literal("short_term"),
-          v.literal("fwb"),
-          v.literal("figuring_out"),
-          v.literal("short_to_long"),
-          v.literal("long_to_short"),
-          v.literal("new_friends"),
+          v.literal("serious_vibes"),
+          v.literal("keep_it_casual"),
+          v.literal("exploring_vibes"),
+          v.literal("see_where_it_goes"),
+          v.literal("open_to_vibes"),
+          v.literal("just_friends"),
           v.literal("open_to_anything"),
+          v.literal("single_parent"),
+          v.literal("new_to_dating"),
         ),
       ),
     ),
@@ -430,6 +434,13 @@ export const updatePreferences = mutation({
   },
   handler: async (ctx, args) => {
     const { userId, minAge, maxAge, maxDistance, ...otherUpdates } = args;
+
+    // DEBUG: Log relationship category save
+    console.log('[RelationshipCategorySave] updatePreferences', {
+      source: 'updatePreferences',
+      userId,
+      relationshipIntent: args.relationshipIntent,
+    });
 
     // BUGFIX #37: Age bounds validation
     if (minAge !== undefined) {
@@ -470,7 +481,28 @@ export const updatePreferences = mutation({
       }
     }
 
+    // REAL-TIME SYNC FIX: When relationshipIntent changes, force category refresh
+    // This ensures Explore category visibility updates immediately, not after 28-48h
+    const intentChanged = args.relationshipIntent !== undefined;
+    if (intentChanged) {
+      cleanUpdates.assignedDiscoverCategory = undefined;
+      cleanUpdates.discoverCategoryAssignedAt = undefined;
+      console.log('[CategoryRefresh] Cleared category assignment due to relationshipIntent change', {
+        userId,
+        newIntent: args.relationshipIntent,
+      });
+    }
+
     await ctx.db.patch(userId, cleanUpdates);
+
+    // REAL-TIME SYNC FIX: Immediately reassign category after preference change
+    // This ensures the user appears in the correct category without delay
+    if (intentChanged) {
+      await ctx.scheduler.runAfter(0, internal.discoverCategories.assignCategory, {
+        userId,
+      });
+    }
+
     return { success: true };
   },
 });
@@ -1226,17 +1258,19 @@ export const completeOnboarding = mutation({
         ),
       ),
     ),
+    // CURRENT 9 RELATIONSHIP CATEGORIES (source of truth - matches schema.ts)
     relationshipIntent: v.optional(
       v.array(
         v.union(
-          v.literal("long_term"),
-          v.literal("short_term"),
-          v.literal("fwb"),
-          v.literal("figuring_out"),
-          v.literal("short_to_long"),
-          v.literal("long_to_short"),
-          v.literal("new_friends"),
+          v.literal("serious_vibes"),
+          v.literal("keep_it_casual"),
+          v.literal("exploring_vibes"),
+          v.literal("see_where_it_goes"),
+          v.literal("open_to_vibes"),
+          v.literal("just_friends"),
           v.literal("open_to_anything"),
+          v.literal("single_parent"),
+          v.literal("new_to_dating"),
         ),
       ),
     ),
@@ -1838,6 +1872,13 @@ export const upsertOnboardingDraft = mutation({
     patch: v.any(), // Accepts partial draft updates
   },
   handler: async (ctx, args) => {
+    // DEBUG: Log relationship category save
+    console.log('[RelationshipCategorySave] upsertOnboardingDraft', {
+      source: 'upsertOnboardingDraft',
+      userId: args.userId,
+      relationshipIntent: args.patch?.preferences?.relationshipIntent,
+    });
+
     // MUTATION: can create
     const userId = await ensureUserByAuthId(ctx, args.userId as string);
 

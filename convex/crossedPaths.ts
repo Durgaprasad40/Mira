@@ -2019,12 +2019,17 @@ function formatReasonForNotification(reasonTag: string): string {
   }
 
   if (type === 'lookingFor') {
+    // CURRENT 9 RELATIONSHIP CATEGORIES
     const labels: Record<string, string> = {
-      long_term: 'something long-term',
-      short_term: 'something casual',
-      fwb: 'keeping it casual',
-      figuring_out: 'figuring things out',
-      new_friends: 'new friends',
+      serious_vibes: 'something serious',
+      keep_it_casual: 'keeping it casual',
+      exploring_vibes: 'figuring things out',
+      see_where_it_goes: 'seeing where it goes',
+      open_to_vibes: 'staying open',
+      just_friends: 'new friends',
+      open_to_anything: 'open to anything',
+      single_parent: 'a fellow parent',
+      new_to_dating: 'starting fresh',
     };
     return `You're both looking for ${labels[value] ?? value}`;
   }

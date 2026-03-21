@@ -51,10 +51,10 @@ const MIN_INTERESTS = 3;
 const MAX_INTERESTS = 7;
 const MAX_RELATIONSHIP_INTENTS = 3;
 
-// STABILITY FIX: Schema-safe relationship intent values (excludes UI-only values)
+// CURRENT 9 RELATIONSHIP CATEGORIES (source of truth - matches schema.ts)
 const ALLOWED_RELATIONSHIP_INTENTS = new Set([
-  'long_term', 'short_term', 'fwb', 'figuring_out',
-  'short_to_long', 'long_to_short', 'new_friends', 'open_to_anything'
+  'serious_vibes', 'keep_it_casual', 'exploring_vibes', 'see_where_it_goes',
+  'open_to_vibes', 'just_friends', 'open_to_anything', 'single_parent', 'new_to_dating'
 ]);
 
 // Sanitize relationshipIntent to only include schema-valid values before Convex mutation

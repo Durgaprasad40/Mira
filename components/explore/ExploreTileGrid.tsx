@@ -1,4 +1,4 @@
-import React, { useMemo, memo } from "react";
+import React, { useMemo, memo, useRef } from "react";
 import {
   View,
   Text,
@@ -7,15 +7,16 @@ import {
   ScrollView,
   RefreshControl,
   Dimensions,
+  Animated,
 } from "react-native";
 import { LinearGradient } from "expo-linear-gradient";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
+import * as Haptics from 'expo-haptics';
 
 import {
   RELATIONSHIP_CATEGORIES,
   RIGHT_NOW_CATEGORIES,
   INTEREST_CATEGORIES,
-  countProfilesPerCategory,
   ExploreCategory,
 } from "./exploreCategories";
 
@@ -25,29 +26,48 @@ const HORIZONTAL_PADDING = 16;
 const TILE_WIDTH = (SCREEN_WIDTH - HORIZONTAL_PADDING * 2 - TILE_GAP) / 2;
 
 type Props = {
-  profiles: any[];
-  selectedCategory?: ExploreCategory | null;
   onCategoryPress?: (category: ExploreCategory) => void;
   refreshing?: boolean;
   onRefresh?: () => void;
+  // Backend counts from single-category system
+  backendCounts?: Record<string, number> | null;
+  // Phase 4: Intelligent sorting props
+  categoryClickCounts?: Record<string, number>;
 };
 
-// Memoized tile component for performance
+// Memoized tile component with smooth press animation
 const ExploreTile = memo(function ExploreTile({
   category,
   count,
-  isSelected,
   onPress,
 }: {
   category: ExploreCategory;
   count: number;
-  isSelected: boolean;
   onPress: () => void;
 }) {
-  // Visual-only: dim tiles with zero profiles but still allow navigation
-  const isEmpty = count === 0;
+  // Animated scale for smooth press feedback (0.96 → 1)
+  const scaleAnim = useRef(new Animated.Value(1)).current;
 
-  // Generate gradient colors from the category color
+  const handlePressIn = () => {
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    Animated.spring(scaleAnim, {
+      toValue: 0.96,
+      useNativeDriver: true,
+      speed: 50,
+      bounciness: 4,
+    }).start();
+  };
+
+  const handlePressOut = () => {
+    Animated.spring(scaleAnim, {
+      toValue: 1,
+      useNativeDriver: true,
+      speed: 50,
+      bounciness: 4,
+    }).start();
+  };
+
+  // Generate gradient colors from the category color (always colorful)
   const baseColor = category.color;
   const darkerColor = adjustColorBrightness(baseColor, -30);
   const lighterColor = adjustColorBrightness(baseColor, 20);
@@ -55,36 +75,37 @@ const ExploreTile = memo(function ExploreTile({
   return (
     <Pressable
       onPress={onPress}
-      style={({ pressed }) => [
-        styles.tileWrapper,
-        isSelected && styles.tileSelected,
-        pressed && styles.tilePressed,
-      ]}
+      onPressIn={handlePressIn}
+      onPressOut={handlePressOut}
     >
-      <LinearGradient
-        colors={isEmpty ? ["#2a2a2a", "#1a1a1a"] : [lighterColor, baseColor, darkerColor]}
-        start={{ x: 0, y: 0 }}
-        end={{ x: 1, y: 1 }}
+      <Animated.View
         style={[
-          styles.tile,
-          isEmpty && styles.tileDisabled,
+          styles.tileWrapper,
+          { transform: [{ scale: scaleAnim }] },
         ]}
       >
-        <View style={styles.tileContent}>
-          <Text style={styles.tileIcon}>{category.icon}</Text>
-          <Text
-            style={[styles.tileLabel, isEmpty && styles.tileLabelDisabled]}
-            numberOfLines={2}
-          >
-            {category.label}
-          </Text>
-          <View style={[styles.countBadge, isEmpty && styles.countBadgeDisabled]}>
-            <Text style={[styles.countText, isEmpty && styles.countTextDisabled]}>
-              {count}
+        <LinearGradient
+          colors={[lighterColor, baseColor, darkerColor]}
+          start={{ x: 0, y: 0 }}
+          end={{ x: 1, y: 1 }}
+          style={styles.tile}
+        >
+          <View style={styles.tileContent}>
+            <Text style={styles.tileIcon}>{category.icon}</Text>
+            <Text
+              style={styles.tileLabel}
+              numberOfLines={2}
+            >
+              {category.label}
             </Text>
+            <View style={styles.countBadge}>
+              <Text style={styles.countText}>
+                {count}
+              </Text>
+            </View>
           </View>
-        </View>
-      </LinearGradient>
+        </LinearGradient>
+      </Animated.View>
     </Pressable>
   );
 });
@@ -104,35 +125,58 @@ const BASE_BOTTOM_PADDING = 20;
 const TAB_BAR_HEIGHT = 60;
 
 export default function ExploreTileGrid({
-  profiles,
-  selectedCategory,
   onCategoryPress,
   refreshing = false,
   onRefresh,
+  backendCounts,
+  categoryClickCounts = {},
 }: Props) {
   const insets = useSafeAreaInsets();
   // Dynamic bottom spacing: safe area inset + tab bar + base padding
   const bottomSpacing = insets.bottom + TAB_BAR_HEIGHT + BASE_BOTTOM_PADDING;
 
-  // Compute counts for all categories
+  // Use backend counts or default to zeros (safer than misleading client-side counts)
   const categoryCounts = useMemo(() => {
+    if (backendCounts) {
+      return backendCounts;
+    }
+    // Return zeros when backend counts unavailable
     const counts: Record<string, number> = {};
     for (const cat of [...RELATIONSHIP_CATEGORIES, ...RIGHT_NOW_CATEGORIES, ...INTEREST_CATEGORIES]) {
-      counts[cat.id] = countProfilesPerCategory(cat, profiles);
+      counts[cat.id] = 0;
     }
     return counts;
-  }, [profiles]);
+  }, [backendCounts]);
+
+
+  // Phase 4: Intelligent sort - click frequency first, then by count
+  const sortByIntelligence = (categories: ExploreCategory[]) => {
+    return [...categories].sort((a, b) => {
+      const countA = categoryCounts[a.id] ?? 0;
+      const countB = categoryCounts[b.id] ?? 0;
+      const clicksA = categoryClickCounts[a.id] ?? 0;
+      const clicksB = categoryClickCounts[b.id] ?? 0;
+
+      // Non-zero counts first
+      if (countA > 0 && countB === 0) return -1;
+      if (countA === 0 && countB > 0) return 1;
+
+      // Then by click frequency (highest first)
+      if (clicksA !== clicksB) return clicksB - clicksA;
+
+      // Then by descending count
+      return countB - countA;
+    });
+  };
 
   const renderTile = (category: ExploreCategory) => {
     const count = categoryCounts[category.id] ?? 0;
-    const isSelected = selectedCategory?.id === category.id;
 
     return (
       <ExploreTile
         key={category.id}
         category={category}
         count={count}
-        isSelected={isSelected}
         onPress={() => {
           // Always navigate - category detail handles empty state
           if (onCategoryPress) {
@@ -142,6 +186,11 @@ export default function ExploreTileGrid({
       />
     );
   };
+
+  // Pre-sort categories by intelligence (click frequency + count)
+  const sortedRelationship = useMemo(() => sortByIntelligence(RELATIONSHIP_CATEGORIES), [categoryCounts, categoryClickCounts]);
+  const sortedRightNow = useMemo(() => sortByIntelligence(RIGHT_NOW_CATEGORIES), [categoryCounts, categoryClickCounts]);
+  const sortedInterests = useMemo(() => sortByIntelligence(INTEREST_CATEGORIES), [categoryCounts, categoryClickCounts]);
 
   return (
     <ScrollView
@@ -165,7 +214,7 @@ export default function ExploreTileGrid({
         <Text style={styles.sectionTitle}>Relationship</Text>
       </View>
       <View style={styles.grid}>
-        {RELATIONSHIP_CATEGORIES.map(renderTile)}
+        {sortedRelationship.map(renderTile)}
       </View>
 
       {/* RIGHT NOW Section */}
@@ -174,7 +223,7 @@ export default function ExploreTileGrid({
         <Text style={styles.sectionTitle}>Right Now</Text>
       </View>
       <View style={styles.grid}>
-        {RIGHT_NOW_CATEGORIES.map(renderTile)}
+        {sortedRightNow.map(renderTile)}
       </View>
 
       {/* INTERESTS Section */}
@@ -183,7 +232,7 @@ export default function ExploreTileGrid({
         <Text style={styles.sectionTitle}>Interests</Text>
       </View>
       <View style={styles.grid}>
-        {INTEREST_CATEGORIES.map(renderTile)}
+        {sortedInterests.map(renderTile)}
       </View>
 
       {/* Bottom spacing - dynamic based on safe area and tab bar */}
@@ -235,21 +284,10 @@ const styles = StyleSheet.create({
     // Elevation for Android
     elevation: 6,
   },
-  tileSelected: {
-    borderWidth: 3,
-    borderColor: "#fff",
-  },
-  tilePressed: {
-    transform: [{ scale: 0.96 }],
-    opacity: 0.9,
-  },
   tile: {
     height: 110,
     borderRadius: 20,
     padding: 14,
-  },
-  tileDisabled: {
-    opacity: 0.5,
   },
   tileContent: {
     flex: 1,
@@ -267,9 +305,6 @@ const styles = StyleSheet.create({
     textShadowOffset: { width: 0, height: 1 },
     textShadowRadius: 2,
   },
-  tileLabelDisabled: {
-    color: "#666",
-  },
   countBadge: {
     position: "absolute",
     top: 0,
@@ -279,16 +314,9 @@ const styles = StyleSheet.create({
     paddingVertical: 4,
     borderRadius: 12,
   },
-  countBadgeDisabled: {
-    backgroundColor: "rgba(255,255,255,0.1)",
-  },
   countText: {
     color: "#fff",
     fontSize: 13,
     fontWeight: "700",
   },
-  countTextDisabled: {
-    color: "#555",
-  },
-  // bottomSpacer removed - now using dynamic height based on safe area insets
 });

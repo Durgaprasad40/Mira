@@ -157,18 +157,18 @@ export const IAP_PRODUCTS: IAPProduct[] = [
   { id: 'messages_50', type: 'messages', quantity: 50, price: 350 },
 ];
 
-// Relationship Intent Options (Phase-1 ONLY — store-safe labels, no overlap with Phase-2)
-// CANONICAL LIST: 9 Relationship Goals used across Explore, Sort By, Filters
+// CURRENT 9 RELATIONSHIP CATEGORIES (source of truth - matches schema.ts)
+// These are the ONLY valid values for relationshipIntent across the entire app
 export const RELATIONSHIP_INTENTS: { value: RelationshipIntent; label: string; emoji: string }[] = [
-  { value: 'long_term', label: 'Serious Vibes', emoji: '💑' },
-  { value: 'short_term', label: 'Keep It Casual', emoji: '🎉' },
-  { value: 'figuring_out', label: 'Exploring Vibes', emoji: '🤔' },
-  { value: 'short_to_long', label: 'See Where It Goes', emoji: '📈' },
-  { value: 'long_to_short', label: 'Open to Vibes', emoji: '📉' },
-  { value: 'new_friends', label: 'Just Friends', emoji: '👋' },
+  { value: 'serious_vibes', label: 'Serious Vibes', emoji: '💑' },
+  { value: 'keep_it_casual', label: 'Keep It Casual', emoji: '🎉' },
+  { value: 'exploring_vibes', label: 'Exploring Vibes', emoji: '🤔' },
+  { value: 'see_where_it_goes', label: 'See Where It Goes', emoji: '📈' },
+  { value: 'open_to_vibes', label: 'Open to Vibes', emoji: '📉' },
+  { value: 'just_friends', label: 'Just Friends', emoji: '👋' },
   { value: 'open_to_anything', label: 'Open to Anything', emoji: '✨' },
   { value: 'single_parent', label: 'Single Parent', emoji: '👨‍👧' },
-  { value: 'just_18', label: 'New to Dating', emoji: '🌱' },
+  { value: 'new_to_dating', label: 'New to Dating', emoji: '🌱' },
 ];
 
 // Activity Filter Options (70 interests for onboarding)
