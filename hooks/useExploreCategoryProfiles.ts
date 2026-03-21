@@ -91,10 +91,14 @@ export function useExploreCategoryProfiles({
     : profiles.length;
 
   // Track shown profiles (mark as shown in backend)
-  // WARNING: This causes instant cooldown bug if enabled!
+  // P1-FIX: DISABLED - This feature causes instant cooldown bug!
   // Profiles get marked on load, then subsequent queries exclude them immediately.
-  // Leave trackShown=false. Swipe exclusion via likes table is the correct mechanism.
+  // Swipe exclusion via likes table is the correct mechanism.
+  // Hard-disabled regardless of trackShown parameter to prevent accidental re-enablement.
+  const TRACK_SHOWN_FEATURE_ENABLED = false; // P1-FIX: Feature flag - do not enable
   useEffect(() => {
+    // P1-FIX: Hard guard - feature is disabled at code level
+    if (!TRACK_SHOWN_FEATURE_ENABLED) return;
     if (!trackShown || !isUsingBackend || profiles.length === 0) return;
 
     // Find profiles that haven't been marked yet

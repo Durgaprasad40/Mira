@@ -177,6 +177,9 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
   // ── "Just unblocked" one-time banner state ──
   const [showJustUnblockedBanner, setShowJustUnblockedBanner] = useState(false);
 
+  // P1-FIX: Track if blocked alert has been shown this mount (prevents alert loop)
+  const hasShownBlockedAlertRef = useRef(false);
+
   // Check if this chat is with the just-unblocked user and show banner once
   useEffect(() => {
     if (justUnblockedUserId && otherUserIdFromMeta === justUnblockedUserId) {
@@ -188,11 +191,16 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
 
   // 5-3: Live re-check of blocked user status (not one-time)
   // Re-runs whenever blockedUserIds changes, even if chat is already open
+  // P1-FIX: Guard prevents alert loop from repeated navigation/deep links
   useEffect(() => {
     if (!isDemo) return;
 
     // Guard 1: Blocked user — re-check live when blockedUserIds changes
     if (otherUserIdFromMeta && isUserBlocked(otherUserIdFromMeta, blockedUserIds)) {
+      // P1-FIX: Only show alert once per mount to prevent stacking
+      if (hasShownBlockedAlertRef.current) return;
+      hasShownBlockedAlertRef.current = true;
+
       logDebugEvent('BLOCK_OR_REPORT', 'Blocked user chat navigation prevented');
       Alert.alert(
         'User Blocked',

@@ -122,15 +122,17 @@ export default function MessagesScreen() {
   const matchAnimationRef = useRef<Animated.CompositeAnimation | null>(null);
 
   // BUGFIX #25: Stop animations on unmount
+  // P1-FIX: Reset values BEFORE stopping to prevent partial animation state
   useEffect(() => {
     return () => {
+      // P1-FIX: Reset animated values FIRST (before stop) to ensure clean state
+      modalScale.setValue(0);
+      heartScale.setValue(0);
+      // Then stop any running animation
       if (matchAnimationRef.current) {
         matchAnimationRef.current.stop();
         matchAnimationRef.current = null;
       }
-      // Reset animated values to prevent memory leaks
-      modalScale.setValue(0);
-      heartScale.setValue(0);
     };
   }, [modalScale, heartScale]);
 

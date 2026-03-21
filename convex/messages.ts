@@ -451,25 +451,21 @@ export const sendPreMatchMessage = mutation({
 });
 
 // Get messages in a conversation
-// SYNC-FIX: Accept authUserId string for consistent identity resolution across devices
+// P0-AUTH-FIX: Require authUserId and resolve server-side only (matches sendMessage pattern)
 export const getMessages = query({
   args: {
     conversationId: v.id('conversations'),
-    userId: v.optional(v.id('users')), // Legacy support
-    authUserId: v.optional(v.string()), // SYNC-FIX: New auth-based lookup
+    userId: v.optional(v.id('users')), // IGNORED: Legacy compat only, never used
+    authUserId: v.string(), // P0-AUTH-FIX: Required, resolved server-side
     limit: v.optional(v.number()),
     before: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
-    const { conversationId, limit = 50, before } = args;
+    const { conversationId, authUserId, limit = 50, before } = args;
 
-    // SYNC-FIX: Resolve user ID consistently using auth helper
-    let userId: Id<'users'> | undefined = args.userId;
-    if (!userId && args.authUserId) {
-      const resolved = await resolveUserIdByAuthId(ctx, args.authUserId);
-      userId = resolved ?? undefined;
-    }
-
+    // P0-AUTH-FIX: Always resolve identity server-side from authUserId
+    // Never trust client-provided userId - it is ignored even if passed
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
     if (!userId) {
       return [];
     }
@@ -761,24 +757,20 @@ export const updatePresence = mutation({
 });
 
 // Get conversation by ID
-// SYNC-FIX: Accept authUserId string for consistent identity resolution across devices
+// P0-AUTH-FIX: Require authUserId and resolve server-side only (matches sendMessage pattern)
 export const getConversation = query({
   args: {
     conversationId: v.id('conversations'),
-    userId: v.optional(v.id('users')), // Legacy support
-    authUserId: v.optional(v.string()), // SYNC-FIX: New auth-based lookup
+    userId: v.optional(v.id('users')), // IGNORED: Legacy compat only, never used
+    authUserId: v.string(), // P0-AUTH-FIX: Required, resolved server-side
   },
   handler: async (ctx, args) => {
-    const { conversationId } = args;
+    const { conversationId, authUserId } = args;
     const now = Date.now();
 
-    // SYNC-FIX: Resolve user ID consistently using auth helper
-    let userId: Id<'users'> | undefined = args.userId;
-    if (!userId && args.authUserId) {
-      const resolved = await resolveUserIdByAuthId(ctx, args.authUserId);
-      userId = resolved ?? undefined;
-    }
-
+    // P0-AUTH-FIX: Always resolve identity server-side from authUserId
+    // Never trust client-provided userId - it is ignored even if passed
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
     if (!userId) {
       return null;
     }
