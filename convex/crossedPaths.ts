@@ -337,28 +337,11 @@ export const publishLocation = mutation({
       };
     }
 
-    // DEBUG: Log location being received by backend
-    console.log('[DEBUG][BACKEND_RECEIVED_LOCATION]', {
-      userId: userId,
-      userName: user.name,
-      latitude: latitude,
-      longitude: longitude,
-    });
-
     // Publish new location
     await ctx.db.patch(userId, {
       publishedLat: latitude,
       publishedLng: longitude,
       publishedAt: now,
-    });
-
-    // DEBUG: Log location saved to DB
-    console.log('[DEBUG][LOCATION_SAVED_IN_DB]', {
-      userId: userId,
-      userName: user.name,
-      publishedLat: latitude,
-      publishedLng: longitude,
-      publishedAt: new Date(now).toISOString(),
     });
 
     devLog('publishLocation: SUCCESS - location published', {
@@ -1041,19 +1024,6 @@ export const getNearbyUsers = query({
       publishedAt: currentUser.publishedAt ? new Date(currentUser.publishedAt).toISOString() : null,
     });
 
-    // DEBUG: Always log viewer info for visibility debugging
-    console.log('[DEBUG][NEARBY_QUERY_VIEWER]', {
-      viewerId: userId,
-      viewerName: currentUser.name,
-      viewerLat: currentUser.publishedLat ?? currentUser.latitude,
-      viewerLng: currentUser.publishedLng ?? currentUser.longitude,
-      viewerGender: currentUser.gender,
-      viewerLookingFor: currentUser.lookingFor,
-      viewerMinAge: currentUser.minAge,
-      viewerMaxAge: currentUser.maxAge,
-      viewerVerificationStatus: currentUser.verificationStatus,
-    });
-
     // Current user must be verified to see nearby users
     // DEV MODE: Can skip this check
     if (!config.SKIP_VERIFICATION_CHECK && currentUser.verificationStatus !== 'verified') {
@@ -1103,23 +1073,6 @@ export const getNearbyUsers = query({
       prefetchBlockedUserIds(ctx, userId),
       prefetchSwipes(ctx, userId),
     ]);
-
-    // DEBUG: Log ALL users before any filtering (CRITICAL for visibility debugging)
-    console.log('[DEBUG][ALL_USERS_RAW]', {
-      viewerId: userId,
-      totalUsers: allUsers.length,
-      users: allUsers.map(u => ({
-        id: u._id,
-        name: u.name,
-        publishedLat: u.publishedLat,
-        publishedLng: u.publishedLng,
-        publishedAt: u.publishedAt ? new Date(u.publishedAt).toISOString() : null,
-        gender: u.gender,
-        lookingFor: u.lookingFor,
-        isActive: u.isActive,
-        verificationStatus: u.verificationStatus,
-      })),
-    });
 
     // First pass: collect candidate user IDs that pass basic filters
     const candidateUserIds: string[] = [];
@@ -1438,22 +1391,6 @@ export const getNearbyUsers = query({
       isDevMode: config.IS_DEV_MODE,
       users: results.map((r) => ({ id: r.id, name: r.name, distance: Math.round(r.distance) })),
     });
-
-    // DEBUG: Always log final results for visibility debugging
-    console.log('[DEBUG][FINAL_NEARBY_USERS]', {
-      viewerId: userId,
-      resultCount: results.length,
-      users: results.map((r) => ({
-        id: r.id,
-        name: r.name,
-        distanceMeters: Math.round(r.distance),
-        publishedLat: r.publishedLat,
-        publishedLng: r.publishedLng,
-      })),
-    });
-
-    // DEBUG: Also log filter stats summary
-    console.log('[DEBUG][FILTER_STATS]', filterStats);
 
     return results;
   },

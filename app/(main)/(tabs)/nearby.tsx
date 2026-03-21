@@ -687,14 +687,6 @@ export default function NearbyScreen() {
     // Mark as publishing to prevent concurrent calls
     isPublishingRef.current = true;
 
-    // DEBUG: Log location being sent to backend
-    console.log('[DEBUG][SENDING_LOCATION_TO_BACKEND]', {
-      userId: userId,
-      latitude: lat,
-      longitude: lng,
-      timestamp: Date.now(),
-    });
-
     // Publish location (with mount guard)
     (async () => {
       try {
@@ -855,20 +847,6 @@ export default function NearbyScreen() {
     const rawUsers: NearbyUser[] = isDemo
       ? demoNearbyUsers
       : (nearbyUsersQuery ?? []);
-
-    // DEBUG: Log raw query results from backend
-    console.log('[DEBUG][NEARBY_QUERY_RESULT]', {
-      viewerId: userId,
-      isDemo,
-      rawUserCount: rawUsers.length,
-      rawUsers: rawUsers.map(u => ({
-        id: u.id,
-        name: u.name,
-        publishedLat: u.publishedLat,
-        publishedLng: u.publishedLng,
-        distanceMeters: u.distanceMeters,
-      })),
-    });
 
     const viewerId = userId || 'anonymous';
     let validCount = 0;
