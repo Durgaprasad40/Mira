@@ -1,5 +1,5 @@
-import React from 'react';
-import { View, Text, StyleSheet, ViewStyle } from 'react-native';
+import React, { useEffect, useRef } from 'react';
+import { View, Text, StyleSheet, ViewStyle, Animated } from 'react-native';
 import { COLORS } from '@/lib/constants';
 
 interface BadgeProps {
@@ -7,18 +7,52 @@ interface BadgeProps {
   dot?: boolean;
   style?: ViewStyle;
   maxCount?: number;
+  /** Enable subtle scale-in animation when badge appears */
+  animate?: boolean;
 }
 
-export function Badge({ count, dot = false, style, maxCount = 99 }: BadgeProps) {
+export function Badge({ count, dot = false, style, maxCount = 99, animate = false }: BadgeProps) {
+  const scaleAnim = useRef(new Animated.Value(animate ? 0.9 : 1)).current;
+  const hasAnimatedRef = useRef(false);
+
+  // Subtle pulse animation on mount (scale 0.9 → 1.0)
+  useEffect(() => {
+    if (!animate || hasAnimatedRef.current) return;
+    hasAnimatedRef.current = true;
+
+    scaleAnim.setValue(0.9);
+    Animated.spring(scaleAnim, {
+      toValue: 1,
+      friction: 6,
+      tension: 150,
+      useNativeDriver: true,
+    }).start();
+  }, [animate, scaleAnim]);
+
   if (!dot && (!count || count <= 0)) {
     return null;
   }
 
   if (dot) {
+    if (animate) {
+      return (
+        <Animated.View
+          style={[styles.dot, style, { transform: [{ scale: scaleAnim }] }]}
+        />
+      );
+    }
     return <View style={[styles.dot, style]} />;
   }
 
   const displayCount = count && count > maxCount ? `${maxCount}+` : count;
+
+  if (animate) {
+    return (
+      <Animated.View style={[styles.badge, style, { transform: [{ scale: scaleAnim }] }]}>
+        <Text style={styles.text}>{displayCount}</Text>
+      </Animated.View>
+    );
+  }
 
   return (
     <View style={[styles.badge, style]}>

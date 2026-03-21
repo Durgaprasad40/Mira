@@ -1176,6 +1176,8 @@ export default function NearbyScreen() {
     return (
       <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
         <View style={styles.header}>
+          <View style={{ width: 22 }} />
+          <Text style={styles.headerTitle}>Nearby</Text>
           <TouchableOpacity
             onPress={handleOpenCrossedPaths}
             hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
@@ -1185,13 +1187,9 @@ export default function NearbyScreen() {
             <View>
               <Ionicons name="footsteps-outline" size={22} color={COLORS.text} />
               {hasNewCrossedPaths && (
-                <Badge dot style={styles.crossedPathsBadge} />
+                <Badge dot animate style={styles.crossedPathsBadge} />
               )}
             </View>
-          </TouchableOpacity>
-          <Text style={styles.headerTitle}>Nearby</Text>
-          <TouchableOpacity onPress={handleOpenNearbySettings} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
-            <Ionicons name="settings-outline" size={22} color={COLORS.text} />
           </TouchableOpacity>
         </View>
         <View style={styles.centered}>
@@ -1209,6 +1207,8 @@ export default function NearbyScreen() {
     return (
       <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
         <View style={styles.header}>
+          <View style={{ width: 22 }} />
+          <Text style={styles.headerTitle}>Nearby</Text>
           <TouchableOpacity
             onPress={handleOpenCrossedPaths}
             hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
@@ -1218,13 +1218,9 @@ export default function NearbyScreen() {
             <View>
               <Ionicons name="footsteps-outline" size={22} color={COLORS.text} />
               {hasNewCrossedPaths && (
-                <Badge dot style={styles.crossedPathsBadge} />
+                <Badge dot animate style={styles.crossedPathsBadge} />
               )}
             </View>
-          </TouchableOpacity>
-          <Text style={styles.headerTitle}>Nearby</Text>
-          <TouchableOpacity onPress={handleOpenNearbySettings} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
-            <Ionicons name="settings-outline" size={22} color={COLORS.text} />
           </TouchableOpacity>
         </View>
         <View style={styles.centered}>
@@ -1248,6 +1244,8 @@ export default function NearbyScreen() {
     return (
       <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
         <View style={styles.header}>
+          <View style={{ width: 22 }} />
+          <Text style={styles.headerTitle}>Nearby</Text>
           <TouchableOpacity
             onPress={handleOpenCrossedPaths}
             hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
@@ -1257,13 +1255,9 @@ export default function NearbyScreen() {
             <View>
               <Ionicons name="footsteps-outline" size={22} color={COLORS.text} />
               {hasNewCrossedPaths && (
-                <Badge dot style={styles.crossedPathsBadge} />
+                <Badge dot animate style={styles.crossedPathsBadge} />
               )}
             </View>
-          </TouchableOpacity>
-          <Text style={styles.headerTitle}>Nearby</Text>
-          <TouchableOpacity onPress={handleOpenNearbySettings} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
-            <Ionicons name="settings-outline" size={22} color={COLORS.text} />
           </TouchableOpacity>
         </View>
         <View style={styles.centered}>
@@ -1287,6 +1281,8 @@ export default function NearbyScreen() {
     return (
       <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
         <View style={styles.header}>
+          <View style={{ width: 22 }} />
+          <Text style={styles.headerTitle}>Nearby</Text>
           <TouchableOpacity
             onPress={handleOpenCrossedPaths}
             hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
@@ -1296,13 +1292,9 @@ export default function NearbyScreen() {
             <View>
               <Ionicons name="footsteps-outline" size={22} color={COLORS.text} />
               {hasNewCrossedPaths && (
-                <Badge dot style={styles.crossedPathsBadge} />
+                <Badge dot animate style={styles.crossedPathsBadge} />
               )}
             </View>
-          </TouchableOpacity>
-          <Text style={styles.headerTitle}>Nearby</Text>
-          <TouchableOpacity onPress={handleOpenNearbySettings} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
-            <Ionicons name="settings-outline" size={22} color={COLORS.text} />
           </TouchableOpacity>
         </View>
         <View style={styles.centered}>
@@ -1323,6 +1315,8 @@ export default function NearbyScreen() {
     return (
       <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
         <View style={styles.header}>
+          <View style={{ width: 22 }} />
+          <Text style={styles.headerTitle}>Nearby</Text>
           <TouchableOpacity
             onPress={handleOpenCrossedPaths}
             hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
@@ -1332,13 +1326,9 @@ export default function NearbyScreen() {
             <View>
               <Ionicons name="footsteps-outline" size={22} color={COLORS.text} />
               {hasNewCrossedPaths && (
-                <Badge dot style={styles.crossedPathsBadge} />
+                <Badge dot animate style={styles.crossedPathsBadge} />
               )}
             </View>
-          </TouchableOpacity>
-          <Text style={styles.headerTitle}>Nearby</Text>
-          <TouchableOpacity onPress={handleOpenNearbySettings} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
-            <Ionicons name="settings-outline" size={22} color={COLORS.text} />
           </TouchableOpacity>
         </View>
         <View style={styles.centered}>
@@ -1362,6 +1352,8 @@ export default function NearbyScreen() {
     return (
       <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
         <View style={styles.header}>
+          <View style={{ width: 22 }} />
+          <Text style={styles.headerTitle}>Nearby</Text>
           <TouchableOpacity
             onPress={handleOpenCrossedPaths}
             hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
@@ -1371,13 +1363,9 @@ export default function NearbyScreen() {
             <View>
               <Ionicons name="footsteps-outline" size={22} color={COLORS.text} />
               {hasNewCrossedPaths && (
-                <Badge dot style={styles.crossedPathsBadge} />
+                <Badge dot animate style={styles.crossedPathsBadge} />
               )}
             </View>
-          </TouchableOpacity>
-          <Text style={styles.headerTitle}>Nearby</Text>
-          <TouchableOpacity onPress={handleOpenNearbySettings} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
-            <Ionicons name="settings-outline" size={22} color={COLORS.text} />
           </TouchableOpacity>
         </View>
         <View style={styles.centered}>
@@ -1401,6 +1389,8 @@ export default function NearbyScreen() {
     return (
       <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
         <View style={styles.header}>
+          <View style={{ width: 22 }} />
+          <Text style={styles.headerTitle}>Nearby</Text>
           <TouchableOpacity
             onPress={handleOpenCrossedPaths}
             hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
@@ -1410,13 +1400,9 @@ export default function NearbyScreen() {
             <View>
               <Ionicons name="footsteps-outline" size={22} color={COLORS.text} />
               {hasNewCrossedPaths && (
-                <Badge dot style={styles.crossedPathsBadge} />
+                <Badge dot animate style={styles.crossedPathsBadge} />
               )}
             </View>
-          </TouchableOpacity>
-          <Text style={styles.headerTitle}>Nearby</Text>
-          <TouchableOpacity onPress={handleOpenNearbySettings} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
-            <Ionicons name="settings-outline" size={22} color={COLORS.text} />
           </TouchableOpacity>
         </View>
         <View style={styles.centered}>
@@ -1441,6 +1427,8 @@ export default function NearbyScreen() {
     return (
       <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
         <View style={styles.header}>
+          <View style={{ width: 22 }} />
+          <Text style={styles.headerTitle}>Nearby</Text>
           <TouchableOpacity
             onPress={handleOpenCrossedPaths}
             hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
@@ -1450,13 +1438,9 @@ export default function NearbyScreen() {
             <View>
               <Ionicons name="footsteps-outline" size={22} color={COLORS.text} />
               {hasNewCrossedPaths && (
-                <Badge dot style={styles.crossedPathsBadge} />
+                <Badge dot animate style={styles.crossedPathsBadge} />
               )}
             </View>
-          </TouchableOpacity>
-          <Text style={styles.headerTitle}>Nearby</Text>
-          <TouchableOpacity onPress={handleOpenNearbySettings} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
-            <Ionicons name="settings-outline" size={22} color={COLORS.text} />
           </TouchableOpacity>
         </View>
         <View style={styles.centered}>
@@ -1470,6 +1454,10 @@ export default function NearbyScreen() {
   return (
     <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
       <View style={styles.header}>
+        <View style={{ width: 22 }} />
+
+        <Text style={styles.headerTitle}>Nearby</Text>
+
         <TouchableOpacity
           onPress={handleOpenCrossedPaths}
           hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
@@ -1479,15 +1467,9 @@ export default function NearbyScreen() {
           <View>
             <Ionicons name="footsteps-outline" size={22} color={COLORS.text} />
             {hasNewCrossedPaths && (
-              <Badge dot style={styles.crossedPathsBadge} />
+              <Badge dot animate style={styles.crossedPathsBadge} />
             )}
           </View>
-        </TouchableOpacity>
-
-        <Text style={styles.headerTitle}>Nearby</Text>
-
-        <TouchableOpacity onPress={handleOpenNearbySettings} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
-          <Ionicons name="settings-outline" size={22} color={COLORS.text} />
         </TouchableOpacity>
 
         {isDemo && (
@@ -1496,13 +1478,7 @@ export default function NearbyScreen() {
           </View>
         )}
 
-        {/* DEV TEST MODE indicator - shows when server is in test mode */}
-        {__DEV__ && (
-          <View style={styles.devTestBadge}>
-            <Text style={styles.devTestBadgeText}>DEV TEST</Text>
-          </View>
-        )}
-      </View>
+              </View>
 
       {/* STABILITY FIX S4: Error boundary around map for crash containment */}
       <MapErrorBoundary>
@@ -1646,16 +1622,10 @@ export default function NearbyScreen() {
               <Text style={styles.emptySubtitle}>
                 Check back later or see who crossed your path
               </Text>
-              <View style={styles.emptyActions}>
-                <TouchableOpacity style={styles.emptyActionButton} onPress={handleOpenCrossedPaths}>
-                  <Ionicons name="footsteps-outline" size={16} color={COLORS.primary} />
-                  <Text style={styles.emptyActionText}>Crossed Paths</Text>
-                </TouchableOpacity>
-                <TouchableOpacity style={styles.emptyActionButton} onPress={handleOpenNearbySettings}>
-                  <Ionicons name="settings-outline" size={16} color={COLORS.primary} />
-                  <Text style={styles.emptyActionText}>Settings</Text>
-                </TouchableOpacity>
-              </View>
+              <TouchableOpacity style={styles.emptyActionButton} onPress={handleOpenCrossedPaths}>
+                <Ionicons name="footsteps-outline" size={16} color={COLORS.primary} />
+                <Text style={styles.emptyActionText}>Crossed Paths</Text>
+              </TouchableOpacity>
             </View>
           </View>
         )}
@@ -1715,20 +1685,6 @@ const styles = StyleSheet.create({
   },
   demoBadgeText: {
     fontSize: 10,
-    fontWeight: '700',
-    color: '#fff',
-  },
-  // DEV TEST MODE badge - green to indicate dev testing is active
-  devTestBadge: {
-    position: 'absolute',
-    right: 56, // Offset from demo badge
-    backgroundColor: '#4CAF50', // Green for dev mode
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    borderRadius: 4,
-  },
-  devTestBadgeText: {
-    fontSize: 9,
     fontWeight: '700',
     color: '#fff',
   },
@@ -1835,11 +1791,6 @@ const styles = StyleSheet.create({
     color: COLORS.textLight,
     textAlign: 'center',
     marginTop: 4,
-  },
-  emptyActions: {
-    flexDirection: 'row',
-    marginTop: 16,
-    gap: 12,
   },
   emptyActionButton: {
     flexDirection: 'row',

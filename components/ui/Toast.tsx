@@ -12,6 +12,7 @@
  */
 import React, { useEffect, useRef, useState, useCallback } from 'react';
 import { Animated, StyleSheet, Text, View, TouchableOpacity } from 'react-native';
+import * as Haptics from 'expo-haptics';
 import { COLORS } from '@/lib/constants';
 
 // ── Imperative API ──
@@ -66,6 +67,12 @@ export function ToastHost() {
   );
 
   const handleTap = useCallback(() => {
+    // Light haptic on toast tap
+    try {
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    } catch {
+      // Haptics not available
+    }
     if (timerRef.current) clearTimeout(timerRef.current);
     dismiss();
     tapHandler?.();

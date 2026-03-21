@@ -11,7 +11,7 @@
  * - Hide/delete crossed path entries
  * - Demo mode with sample data
  */
-import React, { useCallback, useState, useMemo, useEffect } from 'react';
+import React, { useCallback, useState, useMemo, useEffect, useRef } from 'react';
 import {
   View,
   Text,
@@ -22,7 +22,9 @@ import {
   ActivityIndicator,
   RefreshControl,
   Alert,
+  Animated,
 } from 'react-native';
+import * as Haptics from 'expo-haptics';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
@@ -156,6 +158,17 @@ export default function CrossedPathsScreen() {
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [hiddenDemoIds, setHiddenDemoIds] = useState<Set<string>>(new Set());
 
+  // ---------------------------------------------------------------------------
+  // Animation state for section reveals
+  // ---------------------------------------------------------------------------
+  const justCrossedOpacity = useRef(new Animated.Value(0)).current;
+  const justCrossedTranslateY = useRef(new Animated.Value(12)).current;
+  const frequentOpacity = useRef(new Animated.Value(0)).current;
+  const frequentTranslateY = useRef(new Animated.Value(12)).current;
+  const recentOpacity = useRef(new Animated.Value(0)).current;
+  const recentTranslateY = useRef(new Animated.Value(12)).current;
+  const hasAnimatedRef = useRef(false);
+
   // Query crossed paths history (live mode only)
   const crossedPathsQuery = useQuery(
     api.crossedPaths.getCrossPathHistory,
@@ -219,6 +232,83 @@ export default function CrossedPathsScreen() {
   }, [crossedPaths]);
 
   // ---------------------------------------------------------------------------
+  // Staggered section reveal animation
+  // ---------------------------------------------------------------------------
+  useEffect(() => {
+    // Only animate once when data first loads
+    // Safe guards: check arrays exist before accessing .length
+    if (hasAnimatedRef.current || isLoading) return;
+    if (!crossedPaths || crossedPaths.length === 0) return;
+    hasAnimatedRef.current = true;
+
+    // Reset values
+    justCrossedOpacity.setValue(0);
+    justCrossedTranslateY.setValue(12);
+    frequentOpacity.setValue(0);
+    frequentTranslateY.setValue(12);
+    recentOpacity.setValue(0);
+    recentTranslateY.setValue(12);
+
+    // Staggered animation sequence
+    const DURATION = 250;
+    const STAGGER_DELAY = 140;
+
+    // Just Crossed section (immediate)
+    if (justCrossed) {
+      Animated.parallel([
+        Animated.timing(justCrossedOpacity, {
+          toValue: 1,
+          duration: DURATION,
+          useNativeDriver: true,
+        }),
+        Animated.timing(justCrossedTranslateY, {
+          toValue: 0,
+          duration: DURATION,
+          useNativeDriver: true,
+        }),
+      ]).start();
+    }
+
+    // Frequent section (delayed)
+    if (frequentCrosses && frequentCrosses.length > 0) {
+      setTimeout(() => {
+        Animated.parallel([
+          Animated.timing(frequentOpacity, {
+            toValue: 1,
+            duration: DURATION,
+            useNativeDriver: true,
+          }),
+          Animated.timing(frequentTranslateY, {
+            toValue: 0,
+            duration: DURATION,
+            useNativeDriver: true,
+          }),
+        ]).start();
+      }, justCrossed ? STAGGER_DELAY : 0);
+    }
+
+    // Recent section (further delayed)
+    if (recentEncounters && recentEncounters.length > 0) {
+      const delay = (justCrossed ? STAGGER_DELAY : 0) +
+                    (frequentCrosses?.length > 0 ? STAGGER_DELAY : 0);
+      setTimeout(() => {
+        Animated.parallel([
+          Animated.timing(recentOpacity, {
+            toValue: 1,
+            duration: DURATION,
+            useNativeDriver: true,
+          }),
+          Animated.timing(recentTranslateY, {
+            toValue: 0,
+            duration: DURATION,
+            useNativeDriver: true,
+          }),
+        ]).start();
+      }, delay);
+    }
+  }, [isLoading, crossedPaths, justCrossed, frequentCrosses, recentEncounters]);
+
+  // ---------------------------------------------------------------------------
   // Refresh handler
   // ---------------------------------------------------------------------------
   const handleRefresh = useCallback(async () => {
@@ -245,6 +335,12 @@ export default function CrossedPathsScreen() {
   }, [router]);
 
   const handleProfilePress = useCallback((profileId: string) => {
+    // Light haptic on card tap
+    try {
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    } catch {
+      // Haptics not available
+    }
     safePush(router, `/(main)/profile/${profileId}` as any, 'crossed-paths->profile');
   }, [router]);
 
@@ -597,26 +693,41 @@ export default function CrossedPathsScreen() {
 
           {/* Just Crossed Section (if recent crossing exists) */}
           {justCrossed && (
-            <>
+            <Animated.View
+              style={{
+                opacity: justCrossedOpacity,
+                transform: [{ translateY: justCrossedTranslateY }],
+              }}
+            >
               {renderSectionHeader('Just crossed', 'Someone crossed your path recently')}
               {renderJustCrossedCard(justCrossed)}
-            </>
+            </Animated.View>
           )}
 
           {/* Frequent Crosses Section */}
           {frequentCrosses.length > 0 && (
-            <>
+            <Animated.View
+              style={{
+                opacity: frequentOpacity,
+                transform: [{ translateY: frequentTranslateY }],
+              }}
+            >
               {renderSectionHeader('You keep crossing paths')}
               {frequentCrosses.map(renderFrequentCard)}
-            </>
+            </Animated.View>
           )}
 
           {/* Recent Encounters Section */}
           {recentEncounters.length > 0 && (
-            <>
+            <Animated.View
+              style={{
+                opacity: recentOpacity,
+                transform: [{ translateY: recentTranslateY }],
+              }}
+            >
               {renderSectionHeader('Recent encounters')}
               {recentEncounters.map(renderCard)}
-            </>
+            </Animated.View>
           )}
 
           {/* Bottom padding */}

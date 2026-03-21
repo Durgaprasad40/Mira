@@ -229,6 +229,28 @@ export default function PrivacySettingsScreen() {
           </View>
         </View>
 
+        {/* Location & Nearby */}
+        <View style={styles.section}>
+          <Text style={styles.sectionTitle}>Location</Text>
+
+          {/* Nearby Settings Link */}
+          <TouchableOpacity
+            style={styles.linkRow}
+            onPress={() => router.push('/(main)/nearby-settings' as any)}
+          >
+            <View style={styles.linkInfo}>
+              <Ionicons name="location-outline" size={22} color={COLORS.text} style={styles.linkIcon} />
+              <View>
+                <Text style={styles.linkTitle}>Nearby Settings</Text>
+                <Text style={styles.linkDescription}>
+                  Control your visibility and discovery preferences
+                </Text>
+              </View>
+            </View>
+            <Ionicons name="chevron-forward" size={20} color={COLORS.textMuted} />
+          </TouchableOpacity>
+        </View>
+
       </ScrollView>
     </SafeAreaView>
   );
@@ -288,6 +310,33 @@ const styles = StyleSheet.create({
     marginBottom: 2,
   },
   toggleDescription: {
+    fontSize: 13,
+    color: COLORS.textMuted,
+    lineHeight: 18,
+  },
+  // Link rows (for navigation items)
+  linkRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingVertical: 14,
+  },
+  linkInfo: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    flex: 1,
+    marginRight: 12,
+  },
+  linkIcon: {
+    marginRight: 12,
+  },
+  linkTitle: {
+    fontSize: 16,
+    fontWeight: '500',
+    color: COLORS.text,
+    marginBottom: 2,
+  },
+  linkDescription: {
     fontSize: 13,
     color: COLORS.textMuted,
     lineHeight: 18,
