@@ -113,6 +113,7 @@ import { collectDeviceFingerprint } from "@/lib/deviceFingerprint";
 import { markTiming } from "@/utils/startupTiming";
 import { autoSyncPhotosOnStartup } from "@/services/photoSync";
 import { checkAndHandleResetEpoch } from "@/lib/resetEpochCheck";
+import { startBackgroundLocation } from "@/utils/backgroundLocation";
 
 /**
  * ResetEpochChecker - Detects database resets and clears stale local caches
@@ -746,6 +747,42 @@ function DeviceFingerprintCollector() {
   return null;
 }
 
+/**
+ * BackgroundLocationManager - Starts background location tracking
+ *
+ * SAFETY:
+ * - Only starts when user is authenticated
+ * - Respects OS permissions (requests if needed)
+ * - Does NOT modify existing Nearby logic
+ * - Uses existing publishLocation mutation
+ * - Updates every ~20 min with 200m distance filter
+ */
+function BackgroundLocationManager() {
+  const userId = useAuthStore((s) => s.userId);
+  const authHydrated = useAuthStore((s) => s._hasHydrated);
+  const hasStartedRef = useRef(false);
+
+  useEffect(() => {
+    // Wait for auth hydration
+    if (!authHydrated) return;
+
+    // Only start once per session and when user is logged in
+    if (hasStartedRef.current || !userId) return;
+    hasStartedRef.current = true;
+
+    // Start background location
+    startBackgroundLocation().then((started) => {
+      if (__DEV__) {
+        console.log('[BG_MANAGER] Background location started:', started);
+      }
+    }).catch((error) => {
+      console.warn('[BG_MANAGER] Failed to start background location:', error?.message);
+    });
+  }, [userId, authHydrated]);
+
+  return null;
+}
+
 export default function RootLayout() {
   // Milestone A: RootLayout first render
   markTiming('root_layout');
@@ -763,6 +800,7 @@ export default function RootLayout() {
           <PhotoSyncManager />
           <OnboardingDraftHydrator />
           <DeviceFingerprintCollector />
+          <BackgroundLocationManager />
           <Stack screenOptions={{ headerShown: false }}>
             <Stack.Screen name="index" />
             <Stack.Screen name="demo-profile" />

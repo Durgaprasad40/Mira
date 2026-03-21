@@ -173,13 +173,14 @@ export default function NotificationsScreen() {
         }
         break;
       case 'crossed_paths': {
-        // FROZEN (2026-03-06): Nearby feature disabled for stability
-        // Redirect to home instead of nearby to prevent crashes
+        // Navigate to crossed-paths screen
         router.push({
-          pathname: '/(main)/(tabs)/home',
+          pathname: '/(main)/crossed-paths',
           params: {
             source: 'notification',
             notificationId: notification._id,
+            // If notification contains userId, pass it for potential highlighting
+            ...(notification.data?.userId && { highlightUserId: notification.data.userId }),
           },
         } as any);
         break;

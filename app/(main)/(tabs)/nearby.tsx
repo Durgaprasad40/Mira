@@ -12,14 +12,12 @@
  * - Uses Discovery preferences for filtering (no separate Nearby filters)
  *
  * ============================================================================
- * LOCKED IMPLEMENTATIONS - DO NOT CHANGE WITHOUT APPROVAL
+ * IMPLEMENTATION NOTES
  * ============================================================================
- * The following behaviors are LOCKED and approved by Durga Prasad.
- * Do not modify without explicit unlock approval.
  *
- * 1. INDIVIDUAL PINK MARKERS (LOCKED)
- *    - Uses image={pinPink} prop for Android reliability
- *    - Do NOT replace with View-based markers
+ * 1. PINK PIN MARKERS (RESTORED - STABLE VERSION)
+ *    - Uses image={pinPink} prop for reliable Android rendering
+ *    - Same appearance on Metro (Samsung) and standalone APK (OnePlus)
  *    - Tap opens profile via Discover-style flow
  *
  * 2. CLUSTERING BEHAVIOR (LOCKED)
@@ -32,9 +30,9 @@
  *    - No follow mode
  *    - No second-state behavior
  *
- * ANDROID MARKER RELIABILITY:
- * View-based markers are UNRELIABLE on Android. All markers use image prop.
- * DO NOT switch back to View-based markers without extensive Android testing.
+ * ANDROID MARKER NOTE:
+ * Using image={pinPink} prop ensures consistent rendering across all builds.
+ * View-based markers had inconsistent rendering on Android.
  * ============================================================================
  *
  * FUTURE PHASES (documented for later):
@@ -68,6 +66,12 @@ import { COLORS } from '@/lib/constants';
 import { isDemoMode } from '@/hooks/useConvex';
 import { DEMO_USER, DEMO_PROFILES } from '@/lib/demoData';
 import { log } from '@/utils/logger';
+import { Toast } from '@/components/ui/Toast';
+import { Badge } from '@/components/ui/Badge';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+
+// Key for storing when user last viewed crossed paths
+const CROSSED_PATHS_LAST_SEEN_KEY = 'mira_crossed_paths_last_seen';
 
 // ---------------------------------------------------------------------------
 // STABILITY FIX S4: Error boundary for map crash containment
@@ -226,12 +230,15 @@ interface ProcessedNearbyUser extends NearbyUser {
 // Constants
 // ---------------------------------------------------------------------------
 
-const DEFAULT_LATITUDE_DELTA = 0.02; // ~2km view
-const DEFAULT_LONGITUDE_DELTA = 0.02;
+const DEFAULT_LATITUDE_DELTA = 0.004; // ~2x closer than original 0.008
+const DEFAULT_LONGITUDE_DELTA = 0.004;
 
 // Rate limiting constants for crossed paths detection
 const DETECTION_MIN_MOVEMENT_METERS = 60; // Only scan if moved 60m+
 const DETECTION_MIN_INTERVAL_MS = 30000; // Only scan every 30s+
+
+// P3-NEARBY-002: Query timeout constant (extracted from inline 30000ms)
+const QUERY_TIMEOUT_MS = 30000; // 30 seconds before showing error
 
 // Privacy fuzzing constants
 const FUZZ_MIN_METERS = 50;  // Minimum offset
@@ -273,8 +280,15 @@ function generateSecureSessionSalt(): number {
 
 const MODULE_SESSION_SALT = generateSecureSessionSalt();
 
-// Module-level flag: has empty state been shown this app session?
-// Resets only on full app restart (module reload).
+// ---------------------------------------------------------------------------
+// P2-NEARBY-003: Module-level empty state flag
+// ---------------------------------------------------------------------------
+// DESIGN: Show "no nearby users" empty state only ONCE per app session.
+// This prevents repeated display on every navigation back to Nearby tab.
+// The flag persists across component remounts within the same JS bundle session.
+// It resets only on full app restart (JS context reload / hot reload).
+// This is intentional UX behavior - not a bug.
+// ---------------------------------------------------------------------------
 let hasShownEmptyStateThisSession = false;
 
 // ---------------------------------------------------------------------------
@@ -413,24 +427,6 @@ export default function NearbyScreen() {
 
   // Mount guard for async operations
   const isMountedRef = useRef(true);
-  useEffect(() => {
-    isMountedRef.current = true;
-    return () => {
-      isMountedRef.current = false;
-    };
-  }, []);
-
-  // ---------------------------------------------------------------------------
-  // Query nearby users (live mode only)
-  // ---------------------------------------------------------------------------
-  const nearbyUsersQuery = useQuery(
-    api.crossedPaths.getNearbyUsers,
-    !isDemo && convexUserId ? { userId: convexUserId } : 'skip'
-  );
-
-  // Track query loading state for error detection
-  const isQueryActive = !isDemo && convexUserId !== undefined;
-  const isQueryLoading = isQueryActive && nearbyUsersQuery === undefined;
 
   // Ref to track query timeout (prevents race condition)
   const queryTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -444,6 +440,70 @@ export default function NearbyScreen() {
   // Empty state auto-dismiss timer ref
   const emptyStateTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const EMPTY_STATE_DISMISS_MS = 3000;
+
+  // P2-NEARBY-002: Centralized unmount cleanup for all timer refs
+  // This ensures all timers are cleared on unmount, regardless of effect state
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+      // Clear all timer refs on unmount to prevent leaks
+      if (queryTimeoutRef.current) {
+        clearTimeout(queryTimeoutRef.current);
+        queryTimeoutRef.current = null;
+      }
+      if (autoRetryTimeoutRef.current) {
+        clearTimeout(autoRetryTimeoutRef.current);
+        autoRetryTimeoutRef.current = null;
+      }
+      if (emptyStateTimerRef.current) {
+        clearTimeout(emptyStateTimerRef.current);
+        emptyStateTimerRef.current = null;
+      }
+    };
+  }, []);
+
+  // ---------------------------------------------------------------------------
+  // Query nearby users (live mode only)
+  // ---------------------------------------------------------------------------
+  const nearbyUsersQuery = useQuery(
+    api.crossedPaths.getNearbyUsers,
+    !isDemo && userId ? { authUserId: userId } : 'skip' // P2 AUTH FIX: Pass auth ID for server-side resolution
+  );
+
+  // ---------------------------------------------------------------------------
+  // Crossed Paths Badge - show dot when there are new entries
+  // ---------------------------------------------------------------------------
+  const crossedPathsQuery = useQuery(
+    api.crossedPaths.getCrossPathHistory,
+    !isDemo && convexUserId ? { userId: convexUserId } : 'skip'
+  );
+
+  const [hasNewCrossedPaths, setHasNewCrossedPaths] = useState(false);
+
+  // Check if there are new crossed paths since last viewed
+  useEffect(() => {
+    if (!crossedPathsQuery || crossedPathsQuery.length === 0) {
+      setHasNewCrossedPaths(false);
+      return;
+    }
+
+    // Get the latest crossed path timestamp
+    const latestTimestamp = Math.max(...crossedPathsQuery.map((cp: any) => cp.createdAt || 0));
+
+    // Get last seen timestamp from storage
+    AsyncStorage.getItem(CROSSED_PATHS_LAST_SEEN_KEY).then((lastSeenStr) => {
+      const lastSeen = lastSeenStr ? parseInt(lastSeenStr, 10) : 0;
+      setHasNewCrossedPaths(latestTimestamp > lastSeen);
+    }).catch(() => {
+      // On error, assume there are new paths if we have any
+      setHasNewCrossedPaths(crossedPathsQuery.length > 0);
+    });
+  }, [crossedPathsQuery]);
+
+  // Track query loading state for error detection
+  const isQueryActive = !isDemo && convexUserId !== undefined;
+  const isQueryLoading = isQueryActive && nearbyUsersQuery === undefined;
 
   // Clear timeout when query succeeds or on unmount
   useEffect(() => {
@@ -486,7 +546,7 @@ export default function NearbyScreen() {
         log.warn('[NEARBY]', 'query timeout - no data after 30s');
       }
       queryTimeoutRef.current = null;
-    }, 30000);
+    }, QUERY_TIMEOUT_MS);
 
     return () => {
       if (queryTimeoutRef.current) {
@@ -574,6 +634,10 @@ export default function NearbyScreen() {
   const lastDetectionTimeRef = useRef<number>(0);
   const lastDetectionLatLngRef = useRef<{ lat: number; lng: number } | null>(null);
 
+  // Anti-spam: Don't show crossed-path toast more than once per 10 minutes
+  const TOAST_COOLDOWN_MS = 10 * 60 * 1000; // 10 minutes
+  const lastToastTimeRef = useRef<number>(0);
+
   // Publish location when screen is ready and location is valid
   useEffect(() => {
     // Skip in demo mode
@@ -582,8 +646,8 @@ export default function NearbyScreen() {
       return;
     }
 
-    // Skip if no user ID
-    if (!convexUserId) {
+    // Skip if no user ID (P1 AUTH FIX: now using userId for server-side resolution)
+    if (!userId) {
       if (__DEV__) console.log('[NEARBY] publishLocation skipped: no userId');
       return;
     }
@@ -623,11 +687,19 @@ export default function NearbyScreen() {
     // Mark as publishing to prevent concurrent calls
     isPublishingRef.current = true;
 
+    // DEBUG: Log location being sent to backend
+    console.log('[DEBUG][SENDING_LOCATION_TO_BACKEND]', {
+      userId: userId,
+      latitude: lat,
+      longitude: lng,
+      timestamp: Date.now(),
+    });
+
     // Publish location (with mount guard)
     (async () => {
       try {
         const result = await publishLocationMutation({
-          userId: convexUserId,
+          authUserId: userId!, // P1 AUTH FIX: Pass auth ID for server-side resolution
           latitude: lat,
           longitude: lng,
         });
@@ -682,8 +754,8 @@ export default function NearbyScreen() {
         // Rate limits passed - trigger crossed paths detection
         if (!isMountedRef.current) return;
         try {
-          await recordLocationMutation({
-            userId: convexUserId,
+          const result = await recordLocationMutation({
+            authUserId: userId!, // P1 AUTH FIX: Pass auth ID for server-side resolution
             latitude: lat,
             longitude: lng,
             accuracy: bestLocation.accuracy,
@@ -694,7 +766,27 @@ export default function NearbyScreen() {
           lastDetectionLatLngRef.current = { lat, lng };
 
           if (__DEV__) {
-            console.log('[NEARBY] recordLocation success - crossed paths scan triggered');
+            console.log('[NEARBY] recordLocation success - crossed paths scan triggered', {
+              nearbyCount: result?.nearbyCount,
+            });
+          }
+
+          // Show crossed-path toast if new crossings detected (with anti-spam)
+          if (result?.nearbyCount && result.nearbyCount > 0) {
+            const timeSinceLastToast = now - lastToastTimeRef.current;
+            if (timeSinceLastToast >= TOAST_COOLDOWN_MS) {
+              lastToastTimeRef.current = now;
+              Toast.show(
+                'You crossed paths with someone nearby',
+                undefined,
+                () => safePush(router, '/(main)/crossed-paths' as any, 'toast->crossed-paths')
+              );
+            } else if (__DEV__) {
+              console.log('[NEARBY] crossed-path toast suppressed (cooldown)', {
+                elapsed: Math.round(timeSinceLastToast / 1000) + 's',
+                cooldown: Math.round(TOAST_COOLDOWN_MS / 1000) + 's',
+              });
+            }
           }
         } catch (recordErr) {
           // recordLocation failure should not affect publishLocation flow
@@ -715,7 +807,7 @@ export default function NearbyScreen() {
         isPublishingRef.current = false;
       }
     })();
-  }, [isDemo, convexUserId, locationUIState, bestLocation, publishLocationMutation, recordLocationMutation]);
+  }, [isDemo, userId, locationUIState, bestLocation, publishLocationMutation, recordLocationMutation, router]);
 
   // ---------------------------------------------------------------------------
   // Demo mode nearby users - placed around current location
@@ -763,6 +855,20 @@ export default function NearbyScreen() {
     const rawUsers: NearbyUser[] = isDemo
       ? demoNearbyUsers
       : (nearbyUsersQuery ?? []);
+
+    // DEBUG: Log raw query results from backend
+    console.log('[DEBUG][NEARBY_QUERY_RESULT]', {
+      viewerId: userId,
+      isDemo,
+      rawUserCount: rawUsers.length,
+      rawUsers: rawUsers.map(u => ({
+        id: u.id,
+        name: u.name,
+        publishedLat: u.publishedLat,
+        publishedLng: u.publishedLng,
+        distanceMeters: u.distanceMeters,
+      })),
+    });
 
     const viewerId = userId || 'anonymous';
     let validCount = 0;
@@ -882,6 +988,9 @@ export default function NearbyScreen() {
   // Navigation handlers for header buttons
   // ---------------------------------------------------------------------------
   const handleOpenCrossedPaths = useCallback(() => {
+    // Mark crossed paths as seen
+    AsyncStorage.setItem(CROSSED_PATHS_LAST_SEEN_KEY, Date.now().toString()).catch(() => {});
+    setHasNewCrossedPaths(false);
     safePush(router, '/(main)/crossed-paths' as any, 'nearby->crossed-paths');
   }, [router]);
 
@@ -1067,8 +1176,18 @@ export default function NearbyScreen() {
     return (
       <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
         <View style={styles.header}>
-          <TouchableOpacity onPress={handleOpenCrossedPaths} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
-            <Ionicons name="footsteps-outline" size={22} color={COLORS.text} />
+          <TouchableOpacity
+            onPress={handleOpenCrossedPaths}
+            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+            accessibilityLabel="Crossed paths"
+            accessibilityHint="View people you've crossed paths with"
+          >
+            <View>
+              <Ionicons name="footsteps-outline" size={22} color={COLORS.text} />
+              {hasNewCrossedPaths && (
+                <Badge dot style={styles.crossedPathsBadge} />
+              )}
+            </View>
           </TouchableOpacity>
           <Text style={styles.headerTitle}>Nearby</Text>
           <TouchableOpacity onPress={handleOpenNearbySettings} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
@@ -1090,8 +1209,18 @@ export default function NearbyScreen() {
     return (
       <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
         <View style={styles.header}>
-          <TouchableOpacity onPress={handleOpenCrossedPaths} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
-            <Ionicons name="footsteps-outline" size={22} color={COLORS.text} />
+          <TouchableOpacity
+            onPress={handleOpenCrossedPaths}
+            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+            accessibilityLabel="Crossed paths"
+            accessibilityHint="View people you've crossed paths with"
+          >
+            <View>
+              <Ionicons name="footsteps-outline" size={22} color={COLORS.text} />
+              {hasNewCrossedPaths && (
+                <Badge dot style={styles.crossedPathsBadge} />
+              )}
+            </View>
           </TouchableOpacity>
           <Text style={styles.headerTitle}>Nearby</Text>
           <TouchableOpacity onPress={handleOpenNearbySettings} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
@@ -1119,8 +1248,18 @@ export default function NearbyScreen() {
     return (
       <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
         <View style={styles.header}>
-          <TouchableOpacity onPress={handleOpenCrossedPaths} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
-            <Ionicons name="footsteps-outline" size={22} color={COLORS.text} />
+          <TouchableOpacity
+            onPress={handleOpenCrossedPaths}
+            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+            accessibilityLabel="Crossed paths"
+            accessibilityHint="View people you've crossed paths with"
+          >
+            <View>
+              <Ionicons name="footsteps-outline" size={22} color={COLORS.text} />
+              {hasNewCrossedPaths && (
+                <Badge dot style={styles.crossedPathsBadge} />
+              )}
+            </View>
           </TouchableOpacity>
           <Text style={styles.headerTitle}>Nearby</Text>
           <TouchableOpacity onPress={handleOpenNearbySettings} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
@@ -1148,8 +1287,18 @@ export default function NearbyScreen() {
     return (
       <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
         <View style={styles.header}>
-          <TouchableOpacity onPress={handleOpenCrossedPaths} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
-            <Ionicons name="footsteps-outline" size={22} color={COLORS.text} />
+          <TouchableOpacity
+            onPress={handleOpenCrossedPaths}
+            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+            accessibilityLabel="Crossed paths"
+            accessibilityHint="View people you've crossed paths with"
+          >
+            <View>
+              <Ionicons name="footsteps-outline" size={22} color={COLORS.text} />
+              {hasNewCrossedPaths && (
+                <Badge dot style={styles.crossedPathsBadge} />
+              )}
+            </View>
           </TouchableOpacity>
           <Text style={styles.headerTitle}>Nearby</Text>
           <TouchableOpacity onPress={handleOpenNearbySettings} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
@@ -1174,8 +1323,18 @@ export default function NearbyScreen() {
     return (
       <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
         <View style={styles.header}>
-          <TouchableOpacity onPress={handleOpenCrossedPaths} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
-            <Ionicons name="footsteps-outline" size={22} color={COLORS.text} />
+          <TouchableOpacity
+            onPress={handleOpenCrossedPaths}
+            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+            accessibilityLabel="Crossed paths"
+            accessibilityHint="View people you've crossed paths with"
+          >
+            <View>
+              <Ionicons name="footsteps-outline" size={22} color={COLORS.text} />
+              {hasNewCrossedPaths && (
+                <Badge dot style={styles.crossedPathsBadge} />
+              )}
+            </View>
           </TouchableOpacity>
           <Text style={styles.headerTitle}>Nearby</Text>
           <TouchableOpacity onPress={handleOpenNearbySettings} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
@@ -1203,8 +1362,18 @@ export default function NearbyScreen() {
     return (
       <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
         <View style={styles.header}>
-          <TouchableOpacity onPress={handleOpenCrossedPaths} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
-            <Ionicons name="footsteps-outline" size={22} color={COLORS.text} />
+          <TouchableOpacity
+            onPress={handleOpenCrossedPaths}
+            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+            accessibilityLabel="Crossed paths"
+            accessibilityHint="View people you've crossed paths with"
+          >
+            <View>
+              <Ionicons name="footsteps-outline" size={22} color={COLORS.text} />
+              {hasNewCrossedPaths && (
+                <Badge dot style={styles.crossedPathsBadge} />
+              )}
+            </View>
           </TouchableOpacity>
           <Text style={styles.headerTitle}>Nearby</Text>
           <TouchableOpacity onPress={handleOpenNearbySettings} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
@@ -1232,8 +1401,18 @@ export default function NearbyScreen() {
     return (
       <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
         <View style={styles.header}>
-          <TouchableOpacity onPress={handleOpenCrossedPaths} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
-            <Ionicons name="footsteps-outline" size={22} color={COLORS.text} />
+          <TouchableOpacity
+            onPress={handleOpenCrossedPaths}
+            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+            accessibilityLabel="Crossed paths"
+            accessibilityHint="View people you've crossed paths with"
+          >
+            <View>
+              <Ionicons name="footsteps-outline" size={22} color={COLORS.text} />
+              {hasNewCrossedPaths && (
+                <Badge dot style={styles.crossedPathsBadge} />
+              )}
+            </View>
           </TouchableOpacity>
           <Text style={styles.headerTitle}>Nearby</Text>
           <TouchableOpacity onPress={handleOpenNearbySettings} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
@@ -1262,8 +1441,18 @@ export default function NearbyScreen() {
     return (
       <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
         <View style={styles.header}>
-          <TouchableOpacity onPress={handleOpenCrossedPaths} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
-            <Ionicons name="footsteps-outline" size={22} color={COLORS.text} />
+          <TouchableOpacity
+            onPress={handleOpenCrossedPaths}
+            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+            accessibilityLabel="Crossed paths"
+            accessibilityHint="View people you've crossed paths with"
+          >
+            <View>
+              <Ionicons name="footsteps-outline" size={22} color={COLORS.text} />
+              {hasNewCrossedPaths && (
+                <Badge dot style={styles.crossedPathsBadge} />
+              )}
+            </View>
           </TouchableOpacity>
           <Text style={styles.headerTitle}>Nearby</Text>
           <TouchableOpacity onPress={handleOpenNearbySettings} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
@@ -1281,8 +1470,18 @@ export default function NearbyScreen() {
   return (
     <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
       <View style={styles.header}>
-        <TouchableOpacity onPress={handleOpenCrossedPaths} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
-          <Ionicons name="footsteps-outline" size={22} color={COLORS.text} />
+        <TouchableOpacity
+          onPress={handleOpenCrossedPaths}
+          hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+          accessibilityLabel="Crossed paths"
+          accessibilityHint="View people you've crossed paths with"
+        >
+          <View>
+            <Ionicons name="footsteps-outline" size={22} color={COLORS.text} />
+            {hasNewCrossedPaths && (
+              <Badge dot style={styles.crossedPathsBadge} />
+            )}
+          </View>
         </TouchableOpacity>
 
         <Text style={styles.headerTitle}>Nearby</Text>
@@ -1294,6 +1493,13 @@ export default function NearbyScreen() {
         {isDemo && (
           <View style={styles.demoBadge}>
             <Text style={styles.demoBadgeText}>DEMO</Text>
+          </View>
+        )}
+
+        {/* DEV TEST MODE indicator - shows when server is in test mode */}
+        {__DEV__ && (
+          <View style={styles.devTestBadge}>
+            <Text style={styles.devTestBadgeText}>DEV TEST</Text>
           </View>
         )}
       </View>
@@ -1308,7 +1514,7 @@ export default function NearbyScreen() {
           showsUserLocation={permissionStatus === 'granted'}
           showsMyLocationButton={false}
           showsCompass={false}
-          rotateEnabled={false}
+          rotateEnabled={true}
           pitchEnabled={false}
           // ================================================================
           // LOCKED: CLUSTERING BEHAVIOR
@@ -1387,19 +1593,16 @@ export default function NearbyScreen() {
           }}
         >
           {/* ================================================================
-           * LOCKED: INDIVIDUAL PINK MARKERS
+           * PINK PIN MARKERS (STABLE VERSION)
            * ================================================================
            * IMPLEMENTATION: image={pinPink} for Android reliability
-           * STATUS: LOCKED - Do not change without Durga Prasad approval
            *
            * BEHAVIOR:
            * - Individual marker tap → handleMarkerPress(user)
            * - Navigate to Discover-style profile
            *
-           * DO NOT:
-           * - Replace with View-based markers
-           * - Change the image prop approach
-           * - Modify anchor position
+           * NOTE: Using image prop instead of custom View-based markers
+           * for consistent rendering across Metro and standalone APK builds.
            * ================================================================ */}
           {/* STABILITY FIX S4: Safe marker rendering with validation */}
           {mapUsers.map((user) => {
@@ -1497,6 +1700,11 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     color: COLORS.text,
   },
+  crossedPathsBadge: {
+    position: 'absolute',
+    top: -2,
+    right: -4,
+  },
   demoBadge: {
     position: 'absolute',
     right: 16,
@@ -1507,6 +1715,20 @@ const styles = StyleSheet.create({
   },
   demoBadgeText: {
     fontSize: 10,
+    fontWeight: '700',
+    color: '#fff',
+  },
+  // DEV TEST MODE badge - green to indicate dev testing is active
+  devTestBadge: {
+    position: 'absolute',
+    right: 56, // Offset from demo badge
+    backgroundColor: '#4CAF50', // Green for dev mode
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+  },
+  devTestBadgeText: {
+    fontSize: 9,
     fontWeight: '700',
     color: '#fff',
   },

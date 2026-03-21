@@ -11,13 +11,13 @@
  * - Hide/delete crossed path entries
  * - Demo mode with sample data
  */
-import React, { useCallback, useState, useMemo } from 'react';
+import React, { useCallback, useState, useMemo, useEffect } from 'react';
 import {
   View,
   Text,
   StyleSheet,
   TouchableOpacity,
-  FlatList,
+  ScrollView,
   Image,
   ActivityIndicator,
   RefreshControl,
@@ -35,6 +35,10 @@ import { COLORS } from '@/lib/constants';
 import { isDemoMode } from '@/hooks/useConvex';
 import { DEMO_PROFILES } from '@/lib/demoData';
 import { Id } from '@/convex/_generated/dataModel';
+import AsyncStorage from '@react-native-async-storage/async-storage';
+
+// Key for storing when user last viewed crossed paths (shared with nearby.tsx)
+const CROSSED_PATHS_LAST_SEEN_KEY = 'mira_crossed_paths_last_seen';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -55,7 +59,11 @@ interface CrossedPathItem {
   photoUrl: string | null | undefined;
   initial: string;
   isVerified: boolean;
+  createdAt?: number; // Timestamp for sorting/filtering
 }
+
+// 12 hours in milliseconds for "Just Crossed" threshold
+const JUST_CROSSED_THRESHOLD_MS = 12 * 60 * 60 * 1000;
 
 // ---------------------------------------------------------------------------
 // Demo Data
@@ -70,13 +78,14 @@ const DEMO_CROSSED_PATHS: CrossedPathItem[] = [
     areaName: 'Near Bandra West',
     crossingCount: 3,
     distanceRange: '2-3 km',
-    relativeTime: 'today',
+    relativeTime: '2 hours ago',
     reasonTags: ['interest:coffee', 'lookingFor:serious_vibes'],
     reasonText: 'You both enjoy coffee',
     whyExplanation: "You've crossed paths 3 times in similar areas. You both enjoy coffee.",
     photoUrl: DEMO_PROFILES[0]?.photos?.[0]?.url ?? null,
     initial: 'P',
     isVerified: true,
+    createdAt: Date.now() - 2 * 60 * 60 * 1000, // 2 hours ago
   },
   {
     id: 'demo_cp_2',
@@ -86,13 +95,14 @@ const DEMO_CROSSED_PATHS: CrossedPathItem[] = [
     areaName: 'Nearby area',
     crossingCount: 1,
     distanceRange: '1-2 km',
-    relativeTime: 'yesterday',
+    relativeTime: 'Yesterday',
     reasonTags: ['interest:movies'],
     reasonText: 'You both enjoy movies',
     whyExplanation: 'You were in the same area within the last 24 hours. You both enjoy movies.',
     photoUrl: DEMO_PROFILES[1]?.photos?.[0]?.url ?? null,
     initial: 'A',
     isVerified: true,
+    createdAt: Date.now() - 26 * 60 * 60 * 1000, // Yesterday
   },
   {
     id: 'demo_cp_3',
@@ -109,6 +119,24 @@ const DEMO_CROSSED_PATHS: CrossedPathItem[] = [
     photoUrl: DEMO_PROFILES[2]?.photos?.[0]?.url ?? null,
     initial: 'M',
     isVerified: true,
+    createdAt: Date.now() - 2 * 24 * 60 * 60 * 1000, // 2 days ago
+  },
+  {
+    id: 'demo_cp_4',
+    otherUserId: 'demo_profile_4',
+    otherUserName: DEMO_PROFILES[3]?.name ?? 'Riya',
+    otherUserAge: DEMO_PROFILES[3]?.age ?? 24,
+    areaName: 'Near Indiranagar',
+    crossingCount: 2,
+    distanceRange: '1-2 km',
+    relativeTime: '3 days ago',
+    reasonTags: ['interest:travel'],
+    reasonText: 'You both enjoy traveling',
+    whyExplanation: "You've crossed paths 2 times. You both enjoy traveling.",
+    photoUrl: DEMO_PROFILES[3]?.photos?.[0]?.url ?? null,
+    initial: 'R',
+    isVerified: true,
+    createdAt: Date.now() - 3 * 24 * 60 * 60 * 1000, // 3 days ago
   },
 ];
 
@@ -141,6 +169,11 @@ export default function CrossedPathsScreen() {
   // Loading state
   const isLoading = !isDemo && crossedPathsQuery === undefined;
 
+  // Mark crossed paths as seen when screen opens
+  useEffect(() => {
+    AsyncStorage.setItem(CROSSED_PATHS_LAST_SEEN_KEY, Date.now().toString()).catch(() => {});
+  }, []);
+
   // Combine demo and live data
   const crossedPaths: CrossedPathItem[] = useMemo(() => {
     if (isDemo) {
@@ -149,6 +182,41 @@ export default function CrossedPathsScreen() {
     }
     return crossedPathsQuery ?? [];
   }, [isDemo, crossedPathsQuery, hiddenDemoIds]);
+
+  // ---------------------------------------------------------------------------
+  // Section Data - Split into "Just Crossed", "Frequent Crosses", "Recent"
+  // ---------------------------------------------------------------------------
+  const { justCrossed, frequentCrosses, recentEncounters } = useMemo(() => {
+    const now = Date.now();
+
+    // Sort all by createdAt DESC
+    const sorted = [...crossedPaths].sort((a, b) =>
+      (b.createdAt || 0) - (a.createdAt || 0)
+    );
+
+    // Just Crossed: Most recent within last 12 hours (only 1 item)
+    const justCrossedItem = sorted.find((item) => {
+      if (!item.createdAt) return false;
+      return now - item.createdAt < JUST_CROSSED_THRESHOLD_MS;
+    });
+
+    // Frequent Crosses: crossingCount >= 2 (excluding justCrossed)
+    const frequent = sorted.filter((item) =>
+      item.crossingCount >= 2 && item.id !== justCrossedItem?.id
+    );
+
+    // Recent Encounters: Everything else (excluding justCrossed and frequent)
+    const frequentIds = new Set(frequent.map(f => f.id));
+    const recent = sorted.filter((item) =>
+      item.id !== justCrossedItem?.id && !frequentIds.has(item.id)
+    );
+
+    return {
+      justCrossed: justCrossedItem || null,
+      frequentCrosses: frequent,
+      recentEncounters: recent,
+    };
+  }, [crossedPaths]);
 
   // ---------------------------------------------------------------------------
   // Refresh handler
@@ -269,11 +337,12 @@ export default function CrossedPathsScreen() {
   }, [handleHidePress, handleDeletePress]);
 
   // ---------------------------------------------------------------------------
-  // Render item
+  // Render standard card (used in Recent and Frequent sections)
   // ---------------------------------------------------------------------------
-  const renderItem = useCallback(({ item }: { item: CrossedPathItem }) => {
+  const renderCard = useCallback((item: CrossedPathItem) => {
     return (
       <TouchableOpacity
+        key={item.id}
         style={styles.card}
         onPress={() => handleProfilePress(item.otherUserId as string)}
         onLongPress={() => handleOptionsPress(item)}
@@ -316,12 +385,6 @@ export default function CrossedPathsScreen() {
                 <Ionicons name="location-outline" size={14} color={COLORS.textLight} />
                 <Text style={styles.detailText}>{item.areaName}</Text>
               </View>
-              {item.distanceRange && (
-                <View style={styles.detailItem}>
-                  <Ionicons name="navigate-outline" size={14} color={COLORS.textLight} />
-                  <Text style={styles.detailText}>{item.distanceRange}</Text>
-                </View>
-              )}
             </View>
 
             <View style={styles.timeRow}>
@@ -354,6 +417,120 @@ export default function CrossedPathsScreen() {
   }, [handleProfilePress, handleOptionsPress]);
 
   // ---------------------------------------------------------------------------
+  // Render "Just Crossed" highlight card (larger, more prominent)
+  // ---------------------------------------------------------------------------
+  const renderJustCrossedCard = useCallback((item: CrossedPathItem) => {
+    return (
+      <TouchableOpacity
+        style={styles.justCrossedCard}
+        onPress={() => handleProfilePress(item.otherUserId as string)}
+        onLongPress={() => handleOptionsPress(item)}
+        activeOpacity={0.7}
+        delayLongPress={400}
+      >
+        <View style={styles.justCrossedGlow} />
+        <View style={styles.justCrossedContent}>
+          {/* Large profile photo */}
+          <View style={styles.justCrossedPhotoContainer}>
+            {item.photoUrl ? (
+              <Image source={{ uri: item.photoUrl }} style={styles.justCrossedPhoto} />
+            ) : (
+              <View style={styles.justCrossedPhotoPlaceholder}>
+                <Text style={styles.justCrossedPhotoInitial}>{item.initial}</Text>
+              </View>
+            )}
+            {item.isVerified && (
+              <View style={styles.justCrossedVerifiedBadge}>
+                <Ionicons name="checkmark-circle" size={20} color={COLORS.primary} />
+              </View>
+            )}
+          </View>
+
+          {/* Info */}
+          <View style={styles.justCrossedInfo}>
+            <Text style={styles.justCrossedName}>
+              {item.otherUserName}, {item.otherUserAge}
+            </Text>
+            <View style={styles.justCrossedTimeRow}>
+              <Ionicons name="time-outline" size={14} color={COLORS.primary} />
+              <Text style={styles.justCrossedTime}>{item.relativeTime}</Text>
+            </View>
+            <Text style={styles.justCrossedLocation}>Near your area</Text>
+            {item.reasonText && (
+              <Text style={styles.justCrossedReason} numberOfLines={1}>
+                {item.reasonText}
+              </Text>
+            )}
+          </View>
+
+          {/* CTA arrow */}
+          <View style={styles.justCrossedArrow}>
+            <Ionicons name="chevron-forward" size={24} color={COLORS.primary} />
+          </View>
+        </View>
+      </TouchableOpacity>
+    );
+  }, [handleProfilePress, handleOptionsPress]);
+
+  // ---------------------------------------------------------------------------
+  // Render frequent crossing card (compact with crossing count emphasis)
+  // ---------------------------------------------------------------------------
+  const renderFrequentCard = useCallback((item: CrossedPathItem) => {
+    return (
+      <TouchableOpacity
+        key={item.id}
+        style={styles.frequentCard}
+        onPress={() => handleProfilePress(item.otherUserId as string)}
+        onLongPress={() => handleOptionsPress(item)}
+        activeOpacity={0.7}
+        delayLongPress={400}
+      >
+        <View style={styles.frequentContent}>
+          {/* Photo */}
+          <View style={styles.frequentPhotoContainer}>
+            {item.photoUrl ? (
+              <Image source={{ uri: item.photoUrl }} style={styles.frequentPhoto} />
+            ) : (
+              <View style={styles.frequentPhotoPlaceholder}>
+                <Text style={styles.frequentPhotoInitial}>{item.initial}</Text>
+              </View>
+            )}
+          </View>
+
+          {/* Info */}
+          <View style={styles.frequentInfo}>
+            <Text style={styles.frequentName} numberOfLines={1}>
+              {item.otherUserName}, {item.otherUserAge}
+            </Text>
+            <View style={styles.frequentStatsRow}>
+              <View style={styles.frequentCountBadge}>
+                <Ionicons name="footsteps" size={12} color="#fff" />
+                <Text style={styles.frequentCountText}>Crossed {item.crossingCount}x</Text>
+              </View>
+            </View>
+            <Text style={styles.frequentTime}>Last seen {item.relativeTime.toLowerCase()}</Text>
+          </View>
+
+          {/* Arrow */}
+          <Ionicons name="chevron-forward" size={20} color={COLORS.textLight} />
+        </View>
+      </TouchableOpacity>
+    );
+  }, [handleProfilePress, handleOptionsPress]);
+
+  // ---------------------------------------------------------------------------
+  // Section header component
+  // ---------------------------------------------------------------------------
+  const renderSectionHeader = useCallback((title: string, subtitle?: string) => {
+    return (
+      <View style={styles.sectionHeader}>
+        <Text style={styles.sectionTitle}>{title}</Text>
+        {subtitle && <Text style={styles.sectionSubtitle}>{subtitle}</Text>}
+      </View>
+    );
+  }, []);
+
+  // ---------------------------------------------------------------------------
   // Empty state
   // ---------------------------------------------------------------------------
   const renderEmpty = useCallback(() => {
@@ -362,31 +539,13 @@ export default function CrossedPathsScreen() {
     return (
       <View style={styles.emptyContainer}>
         <Ionicons name="footsteps-outline" size={64} color={COLORS.textLight} />
-        <Text style={styles.emptyTitle}>No crossed paths yet</Text>
+        <Text style={styles.emptyTitle}>No crossings yet</Text>
         <Text style={styles.emptySubtitle}>
-          When you cross paths with someone nearby, they'll appear here.
+          Keep Nearby open when you're out and about. We'll let you know when someone interesting crosses your path.
         </Text>
       </View>
     );
   }, [isLoading]);
-
-  // ---------------------------------------------------------------------------
-  // Header info
-  // ---------------------------------------------------------------------------
-  const renderHeader = useCallback(() => {
-    if (crossedPaths.length === 0) return null;
-
-    return (
-      <View style={styles.headerInfo}>
-        <View style={styles.headerInfoContent}>
-          <Ionicons name="information-circle-outline" size={18} color={COLORS.primary} />
-          <Text style={styles.headerInfoText}>
-            People you've crossed paths with in the last 4 weeks. Long-press or tap the menu to hide.
-          </Text>
-        </View>
-      </View>
-    );
-  }, [crossedPaths.length]);
 
   // ---------------------------------------------------------------------------
   // Render
@@ -418,19 +577,12 @@ export default function CrossedPathsScreen() {
         </View>
       )}
 
-      {/* List */}
+      {/* Sectioned Content */}
       {!isLoading && (
-        <FlatList
-          data={crossedPaths}
-          renderItem={renderItem}
-          keyExtractor={(item) => item.id as string}
-          contentContainerStyle={styles.listContent}
-          ListHeaderComponent={renderHeader}
-          ListEmptyComponent={renderEmpty}
+        <ScrollView
+          style={styles.scrollView}
+          contentContainerStyle={styles.scrollContent}
           showsVerticalScrollIndicator={false}
-          initialNumToRender={10}
-          maxToRenderPerBatch={10}
-          windowSize={5}
           refreshControl={
             <RefreshControl
               refreshing={isRefreshing}
@@ -439,7 +591,37 @@ export default function CrossedPathsScreen() {
               tintColor={COLORS.primary}
             />
           }
-        />
+        >
+          {/* Empty state */}
+          {crossedPaths.length === 0 && renderEmpty()}
+
+          {/* Just Crossed Section (if recent crossing exists) */}
+          {justCrossed && (
+            <>
+              {renderSectionHeader('Just crossed', 'Someone crossed your path recently')}
+              {renderJustCrossedCard(justCrossed)}
+            </>
+          )}
+
+          {/* Frequent Crosses Section */}
+          {frequentCrosses.length > 0 && (
+            <>
+              {renderSectionHeader('You keep crossing paths')}
+              {frequentCrosses.map(renderFrequentCard)}
+            </>
+          )}
+
+          {/* Recent Encounters Section */}
+          {recentEncounters.length > 0 && (
+            <>
+              {renderSectionHeader('Recent encounters')}
+              {recentEncounters.map(renderCard)}
+            </>
+          )}
+
+          {/* Bottom padding */}
+          <View style={styles.bottomPadding} />
+        </ScrollView>
       )}
     </SafeAreaView>
   );
@@ -649,5 +831,197 @@ const styles = StyleSheet.create({
     textAlign: 'center',
     marginTop: 8,
     lineHeight: 22,
+  },
+
+  // ScrollView styles
+  scrollView: {
+    flex: 1,
+  },
+  scrollContent: {
+    flexGrow: 1,
+  },
+  bottomPadding: {
+    height: 24,
+  },
+
+  // Section header styles
+  sectionHeader: {
+    paddingHorizontal: 16,
+    paddingTop: 20,
+    paddingBottom: 8,
+  },
+  sectionTitle: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: COLORS.text,
+  },
+  sectionSubtitle: {
+    fontSize: 13,
+    color: COLORS.textLight,
+    marginTop: 2,
+  },
+
+  // Just Crossed card (highlighted)
+  justCrossedCard: {
+    backgroundColor: '#fff',
+    marginHorizontal: 16,
+    marginTop: 12,
+    borderRadius: 16,
+    shadowColor: COLORS.primary,
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.15,
+    shadowRadius: 12,
+    elevation: 6,
+    overflow: 'hidden',
+  },
+  justCrossedGlow: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    height: 4,
+    backgroundColor: COLORS.primary,
+  },
+  justCrossedContent: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    padding: 16,
+  },
+  justCrossedPhotoContainer: {
+    position: 'relative',
+  },
+  justCrossedPhoto: {
+    width: 80,
+    height: 80,
+    borderRadius: 40,
+    backgroundColor: COLORS.border,
+  },
+  justCrossedPhotoPlaceholder: {
+    width: 80,
+    height: 80,
+    borderRadius: 40,
+    backgroundColor: COLORS.primary,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  justCrossedPhotoInitial: {
+    fontSize: 32,
+    fontWeight: '700',
+    color: '#fff',
+  },
+  justCrossedVerifiedBadge: {
+    position: 'absolute',
+    bottom: 0,
+    right: 0,
+    backgroundColor: '#fff',
+    borderRadius: 10,
+  },
+  justCrossedInfo: {
+    flex: 1,
+    marginLeft: 16,
+  },
+  justCrossedName: {
+    fontSize: 20,
+    fontWeight: '700',
+    color: COLORS.text,
+  },
+  justCrossedTimeRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 4,
+    gap: 4,
+  },
+  justCrossedTime: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: COLORS.primary,
+  },
+  justCrossedLocation: {
+    fontSize: 13,
+    color: COLORS.textLight,
+    marginTop: 2,
+  },
+  justCrossedReason: {
+    fontSize: 13,
+    color: COLORS.primary,
+    marginTop: 6,
+  },
+  justCrossedArrow: {
+    padding: 8,
+  },
+
+  // Frequent crossing card
+  frequentCard: {
+    backgroundColor: '#fff',
+    marginHorizontal: 16,
+    marginTop: 10,
+    borderRadius: 12,
+    borderLeftWidth: 3,
+    borderLeftColor: COLORS.primary,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.06,
+    shadowRadius: 2,
+    elevation: 1,
+  },
+  frequentContent: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    padding: 12,
+  },
+  frequentPhotoContainer: {
+    position: 'relative',
+  },
+  frequentPhoto: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    backgroundColor: COLORS.border,
+  },
+  frequentPhotoPlaceholder: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    backgroundColor: COLORS.primary,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  frequentPhotoInitial: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: '#fff',
+  },
+  frequentInfo: {
+    flex: 1,
+    marginLeft: 12,
+  },
+  frequentName: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: COLORS.text,
+  },
+  frequentStatsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    marginTop: 4,
+  },
+  frequentCountBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: COLORS.primary,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 10,
+    gap: 4,
+  },
+  frequentCountText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#fff',
+  },
+  frequentTime: {
+    fontSize: 12,
+    color: COLORS.textLight,
+    marginTop: 2,
   },
 });
