@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 import { AppState, AppStateStatus, LogBox } from "react-native";
 import { Stack, useRouter, useSegments } from "expo-router";
 
@@ -114,6 +114,10 @@ import { markTiming } from "@/utils/startupTiming";
 import { autoSyncPhotosOnStartup } from "@/services/photoSync";
 import { checkAndHandleResetEpoch } from "@/lib/resetEpochCheck";
 import { startBackgroundLocation } from "@/utils/backgroundLocation";
+import { Toast } from "@/components/ui/Toast";
+import { safePush } from "@/lib/safeRouter";
+import { asUserId } from "@/convex/id";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 
 /**
  * ResetEpochChecker - Detects database resets and clears stale local caches
@@ -783,6 +787,135 @@ function BackgroundLocationManager() {
   return null;
 }
 
+/**
+ * CrossedPathToastManager - Shows in-app toast for crossed-path events globally
+ *
+ * BEHAVIOR:
+ * - Queries crossed-path history when app is foregrounded
+ * - Compares latest createdAt with AsyncStorage lastSeen timestamp
+ * - Shows tappable toast if new crossings detected
+ * - Uses 10-minute cooldown to prevent spam
+ * - Only triggers when user is authenticated and not on crossed-paths screen
+ *
+ * SAFETY:
+ * - READ-ONLY: Only reads from backend, no mutations
+ * - Non-blocking: silent failures don't affect app
+ */
+const CROSSED_PATHS_LAST_SEEN_KEY = 'mira_crossed_paths_last_seen';
+const TOAST_COOLDOWN_MS = 10 * 60 * 1000; // 10 minutes
+
+function CrossedPathToastManager() {
+  const router = useRouter();
+  const segments = useSegments();
+  const userId = useAuthStore((s) => s.userId);
+  const authHydrated = useAuthStore((s) => s._hasHydrated);
+  const convexUserId = userId ? asUserId(userId) : undefined;
+  const appStateRef = useRef<AppStateStatus>(AppState.currentState);
+  const lastToastTimeRef = useRef<number>(0);
+  const mountedRef = useRef(true);
+  const hasCheckedOnMountRef = useRef(false);
+
+  // Track mounted state
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
+
+  // Query crossed-path history (live mode only)
+  const crossedPathsQuery = useQuery(
+    api.crossedPaths.getCrossPathHistory,
+    !isDemoMode && convexUserId ? { userId: convexUserId } : 'skip'
+  );
+
+  // Check for new crossed paths and show toast
+  const checkAndShowToast = useCallback(async () => {
+    // Guard: must be authenticated and have data
+    if (!crossedPathsQuery || crossedPathsQuery.length === 0) return;
+    if (!mountedRef.current) return;
+
+    // Guard: don't show if already on crossed-paths screen
+    const currentPath = segments.join('/');
+    if (currentPath.includes('crossed-paths')) return;
+
+    // Find the latest createdAt timestamp
+    const latestCreatedAt = Math.max(
+      ...crossedPathsQuery.map((item: any) => item.createdAt || 0)
+    );
+    if (!latestCreatedAt) return;
+
+    try {
+      // Get last seen timestamp from AsyncStorage
+      const lastSeenStr = await AsyncStorage.getItem(CROSSED_PATHS_LAST_SEEN_KEY);
+      const lastSeen = lastSeenStr ? parseInt(lastSeenStr, 10) : 0;
+
+      // Check if there are new crossings
+      if (latestCreatedAt > lastSeen) {
+        const now = Date.now();
+        const timeSinceLastToast = now - lastToastTimeRef.current;
+
+        // Check cooldown
+        if (timeSinceLastToast >= TOAST_COOLDOWN_MS) {
+          lastToastTimeRef.current = now;
+
+          // Show toast with navigation callback
+          Toast.show(
+            'You crossed paths with someone nearby',
+            undefined,
+            () => safePush(router, '/(main)/crossed-paths' as any, 'global-toast->crossed-paths')
+          );
+
+          // Update lastSeen to prevent duplicate toasts
+          // (Note: User will still see badge until they actually visit the screen)
+          // We intentionally do NOT update lastSeen here - let the crossed-paths screen do that
+          // This ensures the badge remains visible until user actually views the screen
+        }
+      }
+    } catch (error) {
+      // Silent failure - AsyncStorage errors are non-critical
+      if (__DEV__) {
+        console.warn('[CROSSED_TOAST] Failed to check lastSeen:', error);
+      }
+    }
+  }, [crossedPathsQuery, segments, router]);
+
+  // Check on initial data load (after mount)
+  useEffect(() => {
+    if (!authHydrated || !convexUserId) return;
+    if (hasCheckedOnMountRef.current) return;
+    if (!crossedPathsQuery || crossedPathsQuery.length === 0) return;
+
+    hasCheckedOnMountRef.current = true;
+    checkAndShowToast();
+  }, [authHydrated, convexUserId, crossedPathsQuery, checkAndShowToast]);
+
+  // Check on app resume (foreground)
+  useEffect(() => {
+    if (isDemoMode) return;
+    if (!authHydrated || !convexUserId) return;
+
+    const handleAppStateChange = (nextAppState: AppStateStatus) => {
+      // If app was in background and is now active
+      if (
+        appStateRef.current.match(/inactive|background/) &&
+        nextAppState === 'active'
+      ) {
+        // Give a small delay for query to potentially refresh
+        setTimeout(() => {
+          if (mountedRef.current) {
+            checkAndShowToast();
+          }
+        }, 500);
+      }
+      appStateRef.current = nextAppState;
+    };
+
+    const subscription = AppState.addEventListener('change', handleAppStateChange);
+    return () => subscription.remove();
+  }, [authHydrated, convexUserId, checkAndShowToast]);
+
+  return null;
+}
+
 export default function RootLayout() {
   // Milestone A: RootLayout first render
   markTiming('root_layout');
@@ -801,6 +934,7 @@ export default function RootLayout() {
           <OnboardingDraftHydrator />
           <DeviceFingerprintCollector />
           <BackgroundLocationManager />
+          <CrossedPathToastManager />
           <Stack screenOptions={{ headerShown: false }}>
             <Stack.Screen name="index" />
             <Stack.Screen name="demo-profile" />
