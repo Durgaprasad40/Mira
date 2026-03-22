@@ -730,11 +730,18 @@ export type ConfessionReplyType = 'text' | 'voice';
 export type ConfessionRevealPolicy = 'never' | 'allow_later';
 export type TimedRevealOption = 'never' | '24h' | '48h';
 
+// Author visibility mode for confessions
+// - anonymous: fully hidden identity (no photo, no name, no age/gender)
+// - open: fully visible identity (photo, name, age, gender)
+// - blur_photo: partially hidden (blurred photo, visible name/age/gender)
+export type ConfessionAuthorVisibility = 'anonymous' | 'open' | 'blur_photo';
+
 export interface Confession {
   id: string;
   userId: string;
   text: string;
-  isAnonymous: boolean;
+  isAnonymous: boolean; // Legacy field - use authorVisibility instead
+  authorVisibility?: ConfessionAuthorVisibility; // New 3-mode visibility
   mood: ConfessionMood;
   topic?: ConfessionTopic;
   reactions?: Record<string, number>;

@@ -155,6 +155,8 @@ export const createConfession = mutation({
     userId: v.union(v.id('users'), v.string()),
     text: v.string(),
     isAnonymous: v.boolean(),
+    // New 3-mode visibility: anonymous (hidden), open (visible), blur_photo (blurred photo + visible info)
+    authorVisibility: v.optional(v.union(v.literal('anonymous'), v.literal('open'), v.literal('blur_photo'))),
     mood: v.union(v.literal('romantic'), v.literal('spicy'), v.literal('emotional'), v.literal('funny')),
     visibility: v.literal('global'),
     imageUrl: v.optional(v.string()),
@@ -222,17 +224,23 @@ export const createConfession = mutation({
       }
     }
 
+    // Determine effective visibility (backward compat: derive from isAnonymous if not provided)
+    const effectiveVisibility = args.authorVisibility || (args.isAnonymous ? 'anonymous' : 'open');
+    // Include author info for 'open' and 'blur_photo' modes
+    const includeAuthorInfo = effectiveVisibility !== 'anonymous';
+
     const confessionId = await ctx.db.insert('confessions', {
       userId: userId,
       text: trimmed,
       isAnonymous: args.isAnonymous,
+      authorVisibility: effectiveVisibility,
       mood: args.mood,
       visibility: args.visibility,
       imageUrl: args.imageUrl,
-      authorName: args.isAnonymous ? undefined : args.authorName,
-      authorPhotoUrl: args.isAnonymous ? undefined : args.authorPhotoUrl,
-      authorAge: args.isAnonymous ? undefined : args.authorAge,
-      authorGender: args.isAnonymous ? undefined : args.authorGender,
+      authorName: includeAuthorInfo ? args.authorName : undefined,
+      authorPhotoUrl: includeAuthorInfo ? args.authorPhotoUrl : undefined,
+      authorAge: includeAuthorInfo ? args.authorAge : undefined,
+      authorGender: includeAuthorInfo ? args.authorGender : undefined,
       replyCount: 0,
       reactionCount: 0,
       voiceReplyCount: 0,
@@ -830,6 +838,8 @@ export const listTaggedConfessionsForUser = query({
         isExpired: confession.expiresAt !== undefined && confession.expiresAt <= now,
         replyCount: confession.replyCount,
         reactionCount: confession.reactionCount,
+        // P1-PREVIEW FIX: Include preview consumption status for persistence
+        previewConsumed: !!(confession.previewConsumedAt && confession.previewConsumedBy === userId),
       });
     }
 
@@ -1161,5 +1171,78 @@ export const getEligibleTagTargets = query({
     result.sort((a, b) => a.name.localeCompare(b.name));
 
     return result;
+  },
+});
+
+// =============================================================================
+// One-time Profile Preview for Tagged Users
+// =============================================================================
+// When a tagged user views the confessor's profile, they consume their one-time
+// preview. This is persisted on the confession record itself for durability.
+// =============================================================================
+
+// Query to check if preview has been consumed for a confession
+export const isPreviewConsumed = query({
+  args: {
+    confessionId: v.id('confessions'),
+    userId: v.union(v.id('users'), v.string()),
+  },
+  handler: async (ctx, args) => {
+    // Map authUserId -> Convex Id<"users">
+    const userId = await resolveUserIdByAuthId(ctx, args.userId as string);
+    if (!userId) return false;
+
+    const confession = await ctx.db.get(args.confessionId);
+    if (!confession) return false;
+
+    // Only the tagged user can have preview status
+    if (confession.taggedUserId !== userId) return false;
+
+    // Preview is consumed if previewConsumedAt is set and matches this user
+    return !!(confession.previewConsumedAt && confession.previewConsumedBy === userId);
+  },
+});
+
+// Mutation to consume the one-time profile preview
+export const consumePreview = mutation({
+  args: {
+    confessionId: v.id('confessions'),
+    userId: v.union(v.id('users'), v.string()),
+  },
+  handler: async (ctx, args) => {
+    // Map authUserId -> Convex Id<"users">
+    const userId = await ensureUserByAuthId(ctx, args.userId as string);
+
+    const confession = await ctx.db.get(args.confessionId);
+    if (!confession) {
+      throw new Error('Confession not found');
+    }
+
+    // Only the tagged user can consume the preview
+    if (confession.taggedUserId !== userId) {
+      throw new Error('Only the tagged user can view this profile');
+    }
+
+    // Check if confession is deleted or expired
+    const now = Date.now();
+    if (confession.isDeleted) {
+      throw new Error('This confession has been deleted');
+    }
+    if (confession.expiresAt && confession.expiresAt < now) {
+      throw new Error('This confession has expired');
+    }
+
+    // Idempotent: if already consumed by this user, return success
+    if (confession.previewConsumedAt && confession.previewConsumedBy === userId) {
+      return { success: true, alreadyConsumed: true };
+    }
+
+    // Consume the preview
+    await ctx.db.patch(args.confessionId, {
+      previewConsumedAt: now,
+      previewConsumedBy: userId,
+    });
+
+    return { success: true, alreadyConsumed: false };
   },
 });

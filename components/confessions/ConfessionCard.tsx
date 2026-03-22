@@ -9,8 +9,11 @@ import {
 import { Image } from 'expo-image';
 import { Ionicons } from '@expo/vector-icons';
 import { COLORS } from '@/lib/constants';
-import { ConfessionMood } from '@/types';
+import { ConfessionMood, ConfessionAuthorVisibility } from '@/types';
 import ReactionBar, { EmojiCount } from './ReactionBar';
+
+// Blur radius for blur_photo mode
+const BLUR_PHOTO_RADIUS = 20;
 
 interface ReplyPreview {
   text: string;
@@ -32,6 +35,7 @@ interface ConfessionCardProps {
   id: string;
   text: string;
   isAnonymous: boolean;
+  authorVisibility?: ConfessionAuthorVisibility; // New 3-mode visibility
   mood: ConfessionMood;
   topEmojis: EmojiCount[];
   userEmoji: string | null;
@@ -80,6 +84,7 @@ function getTimeAgo(timestamp: number | undefined | null): string {
 export default function ConfessionCard({
   text,
   isAnonymous,
+  authorVisibility,
   topEmojis,
   userEmoji,
   replyCount,
@@ -108,6 +113,10 @@ export default function ConfessionCard({
   onConnect,
   onAuthorPress,
 }: ConfessionCardProps) {
+  // Determine effective visibility mode (backward compat: use isAnonymous if authorVisibility not set)
+  const effectiveVisibility: ConfessionAuthorVisibility = authorVisibility || (isAnonymous ? 'anonymous' : 'open');
+  const isFullyAnonymous = effectiveVisibility === 'anonymous';
+  const isBlurPhoto = effectiveVisibility === 'blur_photo';
   // Privacy-safe tag display logic
   const getTagDisplayText = (): string | null => {
     if (!taggedUserId) return null;
@@ -121,12 +130,13 @@ export default function ConfessionCard({
     onReport?.();
   };
 
-  // Build display name with age and gender for non-anonymous confessions
+  // Build display name with age and gender based on visibility mode
   const getDisplayName = (): string => {
-    if (isAnonymous) return 'Anonymous';
+    if (isFullyAnonymous) return 'Anonymous';
     if (!authorName) return 'Someone';
 
     let name = authorName;
+    // For blur_photo and open modes, show age and gender
     if (authorAge) {
       name += `, ${authorAge}`;
     }
@@ -140,28 +150,46 @@ export default function ConfessionCard({
   // Check if we have a tappable tag to display
   const hasTag = taggedUserId && taggedUserName;
 
-  // Non-anonymous confessions can have tappable author area
-  const isAuthorTappable = !isAnonymous && authorId && onAuthorPress;
+  // Non-anonymous confessions can have tappable author area (open and blur_photo modes)
+  const isAuthorTappable = !isFullyAnonymous && authorId && onAuthorPress;
 
-  // Render the author identity content
+  // Render the author identity content based on visibility mode
   const renderAuthorIdentity = () => (
     <>
-      {!isAnonymous && authorPhotoUrl ? (
+      {/* Photo rendering based on visibility mode */}
+      {isFullyAnonymous ? (
+        // Anonymous: no photo, just icon
+        <View style={[styles.avatar, styles.avatarAnonymous]}>
+          <Ionicons name="eye-off" size={12} color={COLORS.textMuted} />
+        </View>
+      ) : isBlurPhoto && authorPhotoUrl ? (
+        // Blur photo: show blurred image
+        <Image
+          source={{ uri: authorPhotoUrl }}
+          style={styles.avatarImage}
+          contentFit="cover"
+          blurRadius={BLUR_PHOTO_RADIUS}
+        />
+      ) : authorPhotoUrl ? (
+        // Open: show clear photo
         <Image
           source={{ uri: authorPhotoUrl }}
           style={styles.avatarImage}
           contentFit="cover"
         />
       ) : (
-        <View style={[styles.avatar, isAnonymous && styles.avatarAnonymous]}>
-          <Ionicons
-            name={isAnonymous ? 'eye-off' : 'person'}
-            size={12}
-            color={isAnonymous ? COLORS.textMuted : COLORS.primary}
-          />
+        // No photo available: show person icon
+        <View style={styles.avatar}>
+          <Ionicons name="person" size={12} color={COLORS.primary} />
         </View>
       )}
-      <Text style={[styles.authorName, !isAnonymous && styles.authorNamePublic]}>{displayName}</Text>
+      <Text style={[styles.authorName, !isFullyAnonymous && styles.authorNamePublic]}>{displayName}</Text>
+      {/* Blur indicator badge */}
+      {isBlurPhoto && (
+        <View style={styles.blurBadge}>
+          <Ionicons name="eye-off-outline" size={10} color={COLORS.textMuted} />
+        </View>
+      )}
     </>
   );
 
@@ -421,6 +449,12 @@ const styles = StyleSheet.create({
   },
   authorNamePublic: {
     color: COLORS.primary,
+  },
+  blurBadge: {
+    marginLeft: 4,
+    padding: 2,
+    backgroundColor: 'rgba(153,153,153,0.15)',
+    borderRadius: 4,
   },
   timeAgo: {
     fontSize: 11,

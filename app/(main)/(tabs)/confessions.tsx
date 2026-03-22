@@ -23,6 +23,7 @@ import {
   TouchableWithoutFeedback,
   Keyboard,
   ActionSheetIOS,
+  ScrollView,
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter, useLocalSearchParams } from 'expo-router';
@@ -59,6 +60,7 @@ import { isDemoMode } from '@/hooks/useConvex';
 import { asUserId } from '@/convex/id';
 import ConfessionCard from '@/components/confessions/ConfessionCard';
 import SecretCrushCard from '@/components/confessions/SecretCrushCard';
+import type { ConfessionAuthorVisibility } from '@/types';
 import { useConfessionNotifications } from '@/hooks/useConfessionNotifications';
 import { useConfessPreviewStore } from '@/stores/confessPreviewStore';
 import { useScreenSafety } from '@/hooks/useScreenSafety';
@@ -186,14 +188,17 @@ export default function ConfessionsScreen() {
   const [emojiTargetConfessionId, setEmojiTargetConfessionId] = useState<string | null>(null);
 
   // Profile preview state (one-time preview for tagged confessions)
-  const isPreviewUsed = useConfessPreviewStore((s) => s.isPreviewUsed);
+  // P1-PREVIEW FIX: Use backend data for live mode, in-memory for demo
+  const demoIsPreviewUsed = useConfessPreviewStore((s) => s.isPreviewUsed);
+  const markPreviewUsed = useConfessPreviewStore((s) => s.markPreviewUsed); // For demo mode
   const [showPreviewConfirm, setShowPreviewConfirm] = useState(false);
   const [previewTarget, setPreviewTarget] = useState<{ confessionId: string; authorId: string } | null>(null);
+  const [consumingPreview, setConsumingPreview] = useState(false);
 
   // Composer modal state
   const [showComposer, setShowComposer] = useState(false);
   const [composerText, setComposerText] = useState('');
-  const [composerAnonymous, setComposerAnonymous] = useState(true);
+  const [composerVisibility, setComposerVisibility] = useState<ConfessionAuthorVisibility>('anonymous');
   const [composerSubmitting, setComposerSubmitting] = useState(false);
   const [showComposerEmoji, setShowComposerEmoji] = useState(false);
   const composerInputRef = useRef<TextInput>(null);
@@ -329,6 +334,7 @@ export default function ConfessionsScreen() {
   const reportConfessionMutation = useMutation(api.confessions.reportConfession);
   const deleteConfessionMutation = useMutation(api.confessions.deleteConfession);
   const markTaggedSeenMutation = useMutation(api.confessions.markTaggedConfessionsSeen);
+  const consumePreviewMutation = useMutation(api.confessions.consumePreview);
 
   // ══════════════════════════════════════════════════════════════════════════
   // INTEGRITY MODULE — Single source of truth for confession state
@@ -349,6 +355,8 @@ export default function ConfessionsScreen() {
         isExpired: c.isExpired,
         replyCount: c.replyCount,
         reactionCount: c.reactionCount,
+        // P1-PREVIEW FIX: Include preview consumption from backend
+        previewConsumed: (c as any).previewConsumed ?? false,
       }));
     }
     // Demo mode: use helper with seen tracking
@@ -405,6 +413,31 @@ export default function ConfessionsScreen() {
     seenTaggedConfessionIds,
     currentUserId,
   ]);
+
+  // P1-PREVIEW FIX: Build lookup map for preview consumption status from backend data
+  // This provides persistent preview state that survives app restart
+  const previewConsumedMap = useMemo(() => {
+    const map = new Map<string, boolean>();
+    for (const tagged of rawTaggedConfessions) {
+      if (tagged.previewConsumed) {
+        map.set(tagged.confessionId, true);
+      }
+    }
+    return map;
+  }, [rawTaggedConfessions]);
+
+  // P1-PREVIEW FIX: Check if preview is used - backend data for live mode, in-memory for demo
+  const isPreviewUsed = useCallback(
+    (confessionId: string, receiverId: string) => {
+      if (!isDemoMode) {
+        // Live mode: Use backend-persisted data
+        return previewConsumedMap.get(confessionId) ?? false;
+      }
+      // Demo mode: Fall back to in-memory store
+      return demoIsPreviewUsed(confessionId, receiverId);
+    },
+    [isDemoMode, previewConsumedMap, demoIsPreviewUsed]
+  );
 
   // Cleanup expired items on mount/refresh (guarded to prevent loops)
   const cleanupDoneRef = useRef(false);
@@ -619,7 +652,7 @@ export default function ConfessionsScreen() {
 
   const handleOpenCompose = useCallback(() => {
     setComposerText('');
-    setComposerAnonymous(true);
+    setComposerVisibility('anonymous');
     setTagInput('');
     setTaggedUser(null);
     setShowDuplicatePicker(false);
@@ -680,11 +713,12 @@ export default function ConfessionsScreen() {
       return;
     }
 
-    // Get author info for non-anonymous confessions
-    const authorInfo = !composerAnonymous ? getAuthorInfo() : {};
+    // Determine if we need author info (for open and blur_photo modes)
+    const needsAuthorInfo = composerVisibility !== 'anonymous';
+    const authorInfo = needsAuthorInfo ? getAuthorInfo() : {};
 
-    // Safety guard: prevent posting non-anonymous without profile data
-    if (!composerAnonymous && !authorInfo.authorName) {
+    // Safety guard: prevent posting with visible identity without profile data
+    if (needsAuthorInfo && !authorInfo.authorName) {
       setComposerSubmitting(false);
       Alert.alert(
         'Profile Not Ready',
@@ -694,12 +728,16 @@ export default function ConfessionsScreen() {
       return;
     }
 
+    // Convert visibility mode to legacy isAnonymous for backward compatibility
+    const isAnonymous = composerVisibility === 'anonymous';
+
     const confessionId = `conf_new_${Date.now()}`;
     addConfession({
       id: confessionId,
       userId: currentUserId,
       text: trimmed,
-      isAnonymous: composerAnonymous,
+      isAnonymous,
+      authorVisibility: composerVisibility,
       mood: 'emotional' as const,
       topEmojis: [],
       replyPreviews: [],
@@ -710,7 +748,7 @@ export default function ConfessionsScreen() {
       revealPolicy: 'never',
       targetUserId: taggedUser?.id,
       targetUserName: taggedUser?.name,
-      // Include author identity for non-anonymous confessions
+      // Include author identity for open and blur_photo modes
       ...(authorInfo.authorName ? { authorName: authorInfo.authorName } : {}),
       ...(authorInfo.authorPhotoUrl ? { authorPhotoUrl: authorInfo.authorPhotoUrl } : {}),
       ...(authorInfo.authorAge ? { authorAge: authorInfo.authorAge } : {}),
@@ -722,11 +760,12 @@ export default function ConfessionsScreen() {
       createConfessionMutation({
         userId: currentUserId as Id<'users'>,
         text: trimmed,
-        isAnonymous: composerAnonymous,
+        isAnonymous,
+        authorVisibility: composerVisibility,
         mood: 'emotional',
         visibility: 'global',
         taggedUserId: taggedUser?.id as Id<'users'> | undefined,
-        // Include author identity for non-anonymous confessions
+        // Include author identity for open and blur_photo modes
         ...(authorInfo.authorName ? { authorName: authorInfo.authorName } : {}),
         ...(authorInfo.authorPhotoUrl ? { authorPhotoUrl: authorInfo.authorPhotoUrl } : {}),
         ...(authorInfo.authorAge ? { authorAge: authorInfo.authorAge } : {}),
@@ -747,7 +786,7 @@ export default function ConfessionsScreen() {
     setComposerText('');
     setTagInput('');
     setTaggedUser(null);
-  }, [canSubmitComposer, composerText, composerAnonymous, currentUserId, addConfession, createConfessionMutation, taggedUser, canPostConfession, tagInput, recordConfessionTimestamp, convexCurrentUser, demoMyProfile, getAuthorInfo]);
+  }, [canSubmitComposer, composerText, composerVisibility, currentUserId, addConfession, createConfessionMutation, taggedUser, canPostConfession, tagInput, recordConfessionTimestamp, convexCurrentUser, demoMyProfile, getAuthorInfo]);
 
   const handleComposerEmojiSelected = useCallback((emojiObj: any) => {
     setComposerText((prev) => prev + emojiObj.emoji);
@@ -926,25 +965,45 @@ export default function ConfessionsScreen() {
     [isPreviewUsed, currentUserId]
   );
 
-  const handleConfirmPreview = useCallback(() => {
-    if (!previewTarget) return;
-    // Close modal first
-    setShowPreviewConfirm(false);
+  const handleConfirmPreview = useCallback(async () => {
+    if (!previewTarget || !currentUserId || consumingPreview) return;
+
     const { confessionId, authorId } = previewTarget;
+
+    // P1-PREVIEW FIX: Consume preview BEFORE navigation to prevent abuse
+    if (!isDemoMode) {
+      try {
+        setConsumingPreview(true);
+        await consumePreviewMutation({
+          confessionId: confessionId as any,
+          userId: currentUserId,
+        });
+      } catch (err: any) {
+        // Close modal and show error
+        setShowPreviewConfirm(false);
+        setPreviewTarget(null);
+        setConsumingPreview(false);
+        Alert.alert('Error', err?.message || 'Could not view profile. Please try again.');
+        return;
+      }
+      setConsumingPreview(false);
+    } else {
+      // Demo mode: use in-memory store
+      markPreviewUsed(confessionId, currentUserId);
+    }
+
+    // Close modal and navigate
+    setShowPreviewConfirm(false);
     setPreviewTarget(null);
-    // Navigate to profile in read-only mode
-    // Pass confessionId and receiverId so the profile screen can mark preview as used on mount
+
     safePush(router, {
       pathname: '/(main)/profile/[id]',
       params: {
         id: authorId,
         mode: 'confess_preview',
-        confessionId,
-        receiverId: currentUserId,
       },
     } as any, 'confessions->profilePreview');
-    // NOTE: markPreviewUsed is called in the profile screen on successful mount, not here
-  }, [previewTarget, currentUserId, router]);
+  }, [previewTarget, currentUserId, router, consumingPreview, consumePreviewMutation, markPreviewUsed]);
 
   const handleCancelPreview = useCallback(() => {
     setShowPreviewConfirm(false);
@@ -1233,6 +1292,7 @@ export default function ConfessionsScreen() {
               id={item.id}
               text={item.text}
               isAnonymous={item.isAnonymous}
+              authorVisibility={(item as any).authorVisibility}
               mood={item.mood}
               topEmojis={item.topEmojis || []}
               userEmoji={userReactions[item.id] && isProbablyEmoji(userReactions[item.id]!) ? userReactions[item.id]! : null}
@@ -1318,168 +1378,237 @@ export default function ConfessionsScreen() {
         }}
       />
 
-      {/* Composer Bottom Sheet Modal */}
+      {/* New Confession Composer - Clean Full-Screen Modal */}
       <Modal
         visible={showComposer}
         animationType="slide"
-        transparent
         onRequestClose={handleCloseComposer}
+        statusBarTranslucent={false}
       >
-        <TouchableWithoutFeedback onPress={handleCloseComposer}>
-          <View style={styles.composerOverlay}>
-            <TouchableWithoutFeedback onPress={Keyboard.dismiss}>
-              <KeyboardAvoidingView
-                behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-                style={styles.composerSheet}
-              >
-                {/* Drag handle */}
-                <View style={styles.composerHandle} />
+        {/* Full-screen white container - completely covers app underneath */}
+        <View style={styles.composerFullScreen}>
+          {/* Top safe area - explicit padding for status bar */}
+          <View style={{ height: insets.top, backgroundColor: COLORS.white }} />
 
-                {/* Header */}
-                <View style={styles.composerHeader}>
-                  <TouchableOpacity onPress={handleCloseComposer} hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}>
-                    <Ionicons name="close" size={24} color={COLORS.text} />
-                  </TouchableOpacity>
-                  <Text style={styles.composerTitle}>New Confession</Text>
-                  <TouchableOpacity
-                    onPress={handleSubmitComposer}
-                    disabled={!canSubmitComposer}
-                    style={[styles.composerSubmitBtn, !canSubmitComposer && styles.composerSubmitBtnDisabled]}
-                  >
-                    <Text style={[styles.composerSubmitText, !canSubmitComposer && styles.composerSubmitTextDisabled]}>
-                      {composerSubmitting ? 'Posting...' : 'Post'}
-                    </Text>
-                  </TouchableOpacity>
-                </View>
-
-                {/* Safety banner */}
-                <View style={styles.composerSafetyBanner}>
-                  <Ionicons name="shield-checkmark" size={14} color={COLORS.primary} />
-                  <Text style={styles.composerSafetyText}>Don't include phone numbers or personal details.</Text>
-                </View>
-
-                {/* Text input */}
-                <TextInput
-                  ref={composerInputRef}
-                  style={styles.composerInput}
-                  placeholder="What's on your mind? Share your confession..."
-                  placeholderTextColor={COLORS.textMuted}
-                  multiline
-                  maxLength={500}
-                  value={composerText}
-                  onChangeText={setComposerText}
-                  textAlignVertical="top"
-                />
-
-                {/* Toolbar */}
-                <View style={styles.composerToolbar}>
-                  <TouchableOpacity onPress={() => setShowComposerEmoji(true)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
-                    <Text style={{ fontSize: 20 }}>🙂</Text>
-                  </TouchableOpacity>
-                  <View style={{ flex: 1 }} />
-                  <Text style={styles.composerCharCount}>{composerText.length}/500</Text>
-                </View>
-
-                {/* Confess-to tagging */}
-                <View style={styles.tagSection}>
-                  <View style={styles.tagHeader}>
-                    <Ionicons name="heart-outline" size={18} color={COLORS.primary} />
-                    <Text style={styles.tagLabel}>Mention username (optional)</Text>
-                  </View>
-
-                  {taggedUser ? (
-                    <View style={styles.taggedUserRow}>
-                      <Text style={styles.taggedLabel}>Tagged:</Text>
-                      {taggedUser.avatarUrl ? (
-                        <Image
-                          source={{ uri: taggedUser.avatarUrl }}
-                          style={styles.taggedUserAvatarImg}
-                          contentFit="cover"
-                        />
-                      ) : (
-                        <View style={styles.taggedUserAvatar}>
-                          <Ionicons name="person" size={16} color={COLORS.white} />
-                        </View>
-                      )}
-                      <View style={{ flex: 1 }}>
-                        <Text style={styles.taggedUserName}>
-                          {taggedUser.name}{taggedUser.age ? `, ${taggedUser.age}` : ''}
-                        </Text>
-                        <Text style={styles.taggedUserDisambiguator}>{taggedUser.disambiguator}</Text>
-                      </View>
-                      <TouchableOpacity onPress={handleClearTag} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
-                        <Ionicons name="close-circle" size={20} color={COLORS.textMuted} />
-                      </TouchableOpacity>
-                    </View>
-                  ) : (
-                    <View>
-                      <TextInput
-                        style={styles.tagInput}
-                        placeholder="Type a name from people you've liked..."
-                        placeholderTextColor={COLORS.textMuted}
-                        value={tagInput}
-                        onChangeText={handleTagInputChange}
-                        editable={!taggedUser}
-                      />
-                      {likedUsers.length === 0 ? (
-                        <Text style={styles.tagHint}>Like someone first to confess to them</Text>
-                      ) : (
-                        <Text style={styles.tagHintSubtle}>You can only tag people you liked</Text>
-                      )}
-                    </View>
-                  )}
-
-                  {/* Long name suggestions (>7 chars) */}
-                  {tagSuggestions.length > 0 && !taggedUser && (
-                    <View style={styles.suggestionsList}>
-                      {tagSuggestions.map((user) => (
-                        <TouchableOpacity
-                          key={user.id}
-                          style={styles.suggestionRow}
-                          onPress={() => handleSelectSuggestion(user)}
-                        >
-                          <View style={styles.suggestionAvatar}>
-                            <Ionicons name="person" size={14} color={COLORS.white} />
-                          </View>
-                          <View style={{ flex: 1 }}>
-                            <Text style={styles.suggestionName}>{user.name}</Text>
-                            <Text style={styles.suggestionDisambiguator}>{user.disambiguator}</Text>
-                          </View>
-                        </TouchableOpacity>
-                      ))}
-                    </View>
-                  )}
-                </View>
-
-                {/* Anonymous / Open toggle */}
-                <View style={styles.composerToggleRow}>
-                  <View style={styles.composerToggleInfo}>
-                    <Ionicons
-                      name={composerAnonymous ? 'eye-off' : 'person'}
-                      size={20}
-                      color={composerAnonymous ? COLORS.textMuted : COLORS.primary}
-                    />
-                    <View>
-                      <Text style={styles.composerToggleLabel}>{composerAnonymous ? 'Anonymous' : 'Open to all'}</Text>
-                      <Text style={styles.composerToggleDesc}>
-                        {composerAnonymous ? 'Your identity is hidden' : 'Your profile will be visible'}
-                      </Text>
-                    </View>
-                  </View>
-                  <Switch
-                    value={!composerAnonymous}
-                    onValueChange={(val) => setComposerAnonymous(!val)}
-                    trackColor={{ false: COLORS.border, true: COLORS.primaryLight }}
-                    thumbColor={!composerAnonymous ? COLORS.primary : '#f4f3f4'}
-                  />
-                </View>
-
-                {/* Bottom padding for safe area */}
-                <View style={{ height: insets.bottom + 10 }} />
-              </KeyboardAvoidingView>
-            </TouchableWithoutFeedback>
+          {/* Header - always visible, below status bar */}
+          <View style={styles.composerHeader}>
+            <TouchableOpacity onPress={handleCloseComposer} hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}>
+              <Ionicons name="close" size={24} color={COLORS.text} />
+            </TouchableOpacity>
+            <Text style={styles.composerTitle}>New Confession</Text>
+            <TouchableOpacity
+              onPress={handleSubmitComposer}
+              disabled={!canSubmitComposer}
+              style={[styles.composerSubmitBtn, !canSubmitComposer && styles.composerSubmitBtnDisabled]}
+            >
+              <Text style={[styles.composerSubmitText, !canSubmitComposer && styles.composerSubmitTextDisabled]}>
+                {composerSubmitting ? 'Posting...' : 'Post'}
+              </Text>
+            </TouchableOpacity>
           </View>
-        </TouchableWithoutFeedback>
+
+          {/* Content area with keyboard handling */}
+          <KeyboardAvoidingView
+            behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+            style={styles.composerContentArea}
+            keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 0}
+          >
+            <ScrollView
+              style={styles.composerScrollView}
+              contentContainerStyle={[styles.composerScrollContent, { paddingBottom: insets.bottom + 24 }]}
+              keyboardShouldPersistTaps="handled"
+              showsVerticalScrollIndicator={true}
+              bounces={false}
+            >
+              {/* Safety banner */}
+              <View style={styles.composerSafetyBanner}>
+                <Ionicons name="shield-checkmark" size={14} color={COLORS.primary} />
+                <Text style={styles.composerSafetyText}>Don't include phone numbers or personal details.</Text>
+              </View>
+
+              {/* Text input */}
+              <TextInput
+                ref={composerInputRef}
+                style={styles.composerInput}
+                placeholder="What's on your mind? Share your confession..."
+                placeholderTextColor={COLORS.textMuted}
+                multiline
+                maxLength={500}
+                value={composerText}
+                onChangeText={setComposerText}
+                textAlignVertical="top"
+              />
+
+              {/* Toolbar */}
+              <View style={styles.composerToolbar}>
+                <TouchableOpacity onPress={() => setShowComposerEmoji(true)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+                  <Text style={{ fontSize: 20 }}>🙂</Text>
+                </TouchableOpacity>
+                <View style={{ flex: 1 }} />
+                <Text style={styles.composerCharCount}>{composerText.length}/500</Text>
+              </View>
+
+              {/* Confess-to tagging */}
+              <View style={styles.tagSection}>
+                <View style={styles.tagHeader}>
+                  <Ionicons name="heart-outline" size={18} color={COLORS.primary} />
+                  <Text style={styles.tagLabel}>Mention username (optional)</Text>
+                </View>
+
+                {taggedUser ? (
+                  <View style={styles.taggedUserRow}>
+                    <Text style={styles.taggedLabel}>Tagged:</Text>
+                    {taggedUser.avatarUrl ? (
+                      <Image
+                        source={{ uri: taggedUser.avatarUrl }}
+                        style={styles.taggedUserAvatarImg}
+                        contentFit="cover"
+                      />
+                    ) : (
+                      <View style={styles.taggedUserAvatar}>
+                        <Ionicons name="person" size={16} color={COLORS.white} />
+                      </View>
+                    )}
+                    <View style={{ flex: 1 }}>
+                      <Text style={styles.taggedUserName}>
+                        {taggedUser.name}{taggedUser.age ? `, ${taggedUser.age}` : ''}
+                      </Text>
+                      <Text style={styles.taggedUserDisambiguator}>{taggedUser.disambiguator}</Text>
+                    </View>
+                    <TouchableOpacity onPress={handleClearTag} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+                      <Ionicons name="close-circle" size={20} color={COLORS.textMuted} />
+                    </TouchableOpacity>
+                  </View>
+                ) : (
+                  <View>
+                    <TextInput
+                      style={styles.tagInput}
+                      placeholder="Type a name from people you've liked..."
+                      placeholderTextColor={COLORS.textMuted}
+                      value={tagInput}
+                      onChangeText={handleTagInputChange}
+                      editable={!taggedUser}
+                    />
+                    {likedUsers.length === 0 ? (
+                      <Text style={styles.tagHint}>Like someone first to confess to them</Text>
+                    ) : (
+                      <Text style={styles.tagHintSubtle}>You can only tag people you liked</Text>
+                    )}
+                  </View>
+                )}
+
+                {/* Long name suggestions (>7 chars) */}
+                {tagSuggestions.length > 0 && !taggedUser && (
+                  <View style={styles.suggestionsList}>
+                    {tagSuggestions.map((user) => (
+                      <TouchableOpacity
+                        key={user.id}
+                        style={styles.suggestionRow}
+                        onPress={() => handleSelectSuggestion(user)}
+                      >
+                        <View style={styles.suggestionAvatar}>
+                          <Ionicons name="person" size={14} color={COLORS.white} />
+                        </View>
+                        <View style={{ flex: 1 }}>
+                          <Text style={styles.suggestionName}>{user.name}</Text>
+                          <Text style={styles.suggestionDisambiguator}>{user.disambiguator}</Text>
+                        </View>
+                      </TouchableOpacity>
+                    ))}
+                  </View>
+                )}
+              </View>
+
+              {/* Visibility Mode Selection - 3 options */}
+              <View style={styles.visibilitySection}>
+                <Text style={styles.visibilitySectionTitle}>How others will see you</Text>
+                <View style={styles.visibilityOptions}>
+                  {/* Anonymous option */}
+                  <TouchableOpacity
+                    style={[
+                      styles.visibilityOption,
+                      composerVisibility === 'anonymous' && styles.visibilityOptionSelected,
+                    ]}
+                    onPress={() => setComposerVisibility('anonymous')}
+                    activeOpacity={0.7}
+                  >
+                    <View style={[
+                      styles.visibilityIconWrap,
+                      composerVisibility === 'anonymous' && styles.visibilityIconWrapSelected,
+                    ]}>
+                      <Ionicons
+                        name="eye-off"
+                        size={20}
+                        color={composerVisibility === 'anonymous' ? COLORS.white : COLORS.textMuted}
+                      />
+                    </View>
+                    <Text style={[
+                      styles.visibilityLabel,
+                      composerVisibility === 'anonymous' && styles.visibilityLabelSelected,
+                    ]}>Anonymous</Text>
+                  </TouchableOpacity>
+
+                  {/* Open to all option */}
+                  <TouchableOpacity
+                    style={[
+                      styles.visibilityOption,
+                      composerVisibility === 'open' && styles.visibilityOptionSelected,
+                    ]}
+                    onPress={() => setComposerVisibility('open')}
+                    activeOpacity={0.7}
+                  >
+                    <View style={[
+                      styles.visibilityIconWrap,
+                      composerVisibility === 'open' && styles.visibilityIconWrapSelected,
+                    ]}>
+                      <Ionicons
+                        name="person"
+                        size={20}
+                        color={composerVisibility === 'open' ? COLORS.white : COLORS.textMuted}
+                      />
+                    </View>
+                    <Text style={[
+                      styles.visibilityLabel,
+                      composerVisibility === 'open' && styles.visibilityLabelSelected,
+                    ]}>Open</Text>
+                  </TouchableOpacity>
+
+                  {/* Blur photo option */}
+                  <TouchableOpacity
+                    style={[
+                      styles.visibilityOption,
+                      composerVisibility === 'blur_photo' && styles.visibilityOptionSelected,
+                    ]}
+                    onPress={() => setComposerVisibility('blur_photo')}
+                    activeOpacity={0.7}
+                  >
+                    <View style={[
+                      styles.visibilityIconWrap,
+                      composerVisibility === 'blur_photo' && styles.visibilityIconWrapSelected,
+                    ]}>
+                      <Ionicons
+                        name="image"
+                        size={20}
+                        color={composerVisibility === 'blur_photo' ? COLORS.white : COLORS.textMuted}
+                      />
+                    </View>
+                    <Text style={[
+                      styles.visibilityLabel,
+                      composerVisibility === 'blur_photo' && styles.visibilityLabelSelected,
+                    ]}>Blur Photo</Text>
+                  </TouchableOpacity>
+                </View>
+
+                {/* Helper text based on selection */}
+                <Text style={styles.visibilityHelperText}>
+                  {composerVisibility === 'anonymous' && 'Your identity stays completely hidden.'}
+                  {composerVisibility === 'open' && 'Your photo, name, and details are visible.'}
+                  {composerVisibility === 'blur_photo' && 'Blurred photo with name and age visible.'}
+                </Text>
+              </View>
+            </ScrollView>
+          </KeyboardAvoidingView>
+        </View>
 
         {/* Emoji picker for composer */}
         <EmojiPicker
@@ -1558,15 +1687,23 @@ export default function ConfessionsScreen() {
                   <TouchableOpacity
                     style={styles.previewConfirmCancelBtn}
                     onPress={handleCancelPreview}
+                    disabled={consumingPreview}
                   >
                     <Text style={styles.previewConfirmCancelText}>Cancel</Text>
                   </TouchableOpacity>
                   <TouchableOpacity
-                    style={styles.previewConfirmViewBtn}
+                    style={[styles.previewConfirmViewBtn, consumingPreview && { opacity: 0.7 }]}
                     onPress={handleConfirmPreview}
+                    disabled={consumingPreview}
                   >
-                    <Ionicons name="eye" size={18} color={COLORS.white} />
-                    <Text style={styles.previewConfirmViewText}>View Profile</Text>
+                    {consumingPreview ? (
+                      <ActivityIndicator size="small" color={COLORS.white} />
+                    ) : (
+                      <Ionicons name="eye" size={18} color={COLORS.white} />
+                    )}
+                    <Text style={styles.previewConfirmViewText}>
+                      {consumingPreview ? 'Loading...' : 'View Profile'}
+                    </Text>
                   </TouchableOpacity>
                 </View>
               </View>
@@ -1879,27 +2016,21 @@ const styles = StyleSheet.create({
     shadowRadius: 8,
     elevation: 6,
   },
-  // Composer modal styles
-  composerOverlay: {
+  // Composer modal styles - clean full-screen architecture
+  composerFullScreen: {
+    // Full-screen opaque container - completely covers app underneath
     flex: 1,
-    backgroundColor: 'rgba(0,0,0,0.4)',
-    justifyContent: 'flex-end',
-  },
-  composerSheet: {
     backgroundColor: COLORS.white,
-    borderTopLeftRadius: 20,
-    borderTopRightRadius: 20,
-    minHeight: SCREEN_HEIGHT * 0.5,
-    maxHeight: SCREEN_HEIGHT * 0.85,
   },
-  composerHandle: {
-    width: 36,
-    height: 4,
-    backgroundColor: COLORS.border,
-    borderRadius: 2,
-    alignSelf: 'center',
-    marginTop: 10,
-    marginBottom: 6,
+  composerContentArea: {
+    // Flexible content area below header
+    flex: 1,
+  },
+  composerScrollView: {
+    flex: 1,
+  },
+  composerScrollContent: {
+    flexGrow: 1,
   },
   composerHeader: {
     flexDirection: 'row',
@@ -1967,28 +2098,62 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: COLORS.textMuted,
   },
-  composerToggleRow: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    justifyContent: 'space-between',
+  // Visibility mode selector styles (3 options)
+  visibilitySection: {
     paddingHorizontal: 16,
-    paddingVertical: 14,
+    paddingVertical: 16,
   },
-  composerToggleInfo: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 12,
-    flex: 1,
-  },
-  composerToggleLabel: {
-    fontSize: 15,
+  visibilitySectionTitle: {
+    fontSize: 14,
     fontWeight: '600',
     color: COLORS.text,
+    marginBottom: 12,
   },
-  composerToggleDesc: {
+  visibilityOptions: {
+    flexDirection: 'row',
+    gap: 10,
+  },
+  visibilityOption: {
+    flex: 1,
+    alignItems: 'center',
+    paddingVertical: 12,
+    paddingHorizontal: 8,
+    borderRadius: 12,
+    backgroundColor: COLORS.backgroundDark,
+    borderWidth: 2,
+    borderColor: 'transparent',
+  },
+  visibilityOptionSelected: {
+    borderColor: COLORS.primary,
+    backgroundColor: 'rgba(255,107,107,0.08)',
+  },
+  visibilityIconWrap: {
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: 'rgba(153,153,153,0.15)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: 6,
+  },
+  visibilityIconWrapSelected: {
+    backgroundColor: COLORS.primary,
+  },
+  visibilityLabel: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: COLORS.textMuted,
+    textAlign: 'center',
+  },
+  visibilityLabelSelected: {
+    color: COLORS.primary,
+  },
+  visibilityHelperText: {
     fontSize: 12,
     color: COLORS.textMuted,
-    marginTop: 2,
+    textAlign: 'center',
+    marginTop: 12,
+    fontStyle: 'italic',
   },
   // Tagging styles
   tagSection: {

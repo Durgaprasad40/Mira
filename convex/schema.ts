@@ -1360,7 +1360,9 @@ export default defineSchema({
   confessions: defineTable({
     userId: v.id('users'),
     text: v.string(),
-    isAnonymous: v.boolean(),
+    isAnonymous: v.boolean(), // Legacy field - derived from authorVisibility for backward compat
+    // Author visibility mode: anonymous (fully hidden), open (fully visible), blur_photo (blurred photo + visible name/age/gender)
+    authorVisibility: v.optional(v.union(v.literal('anonymous'), v.literal('open'), v.literal('blur_photo'))),
     mood: v.union(v.literal('romantic'), v.literal('spicy'), v.literal('emotional'), v.literal('funny')),
     visibility: v.literal('global'),
     imageUrl: v.optional(v.string()),
@@ -1381,6 +1383,9 @@ export default defineSchema({
       v.literal('connected')   // Tagged user connected - boosts discover priority
     )),
     taggedUserRespondedAt: v.optional(v.number()), // When tagged user responded
+    // One-time profile preview for tagged user
+    previewConsumedAt: v.optional(v.number()),    // When preview was consumed (null = not consumed)
+    previewConsumedBy: v.optional(v.id('users')), // Who consumed the preview (should match taggedUserId)
     // Soft delete support
     isDeleted: v.optional(v.boolean()),
     deletedAt: v.optional(v.number()),

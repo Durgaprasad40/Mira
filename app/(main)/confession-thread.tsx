@@ -23,7 +23,7 @@ import * as Clipboard from 'expo-clipboard';
 import { COLORS } from '@/lib/constants';
 import { isProbablyEmoji } from '@/lib/utils';
 import { Toast } from '@/components/ui/Toast';
-import { ConfessionMood, ConfessionReply } from '@/types';
+import { ConfessionMood, ConfessionReply, ConfessionAuthorVisibility } from '@/types';
 import ReactionBar from '@/components/confessions/ReactionBar';
 import { useAuthStore } from '@/stores/authStore';
 import { useConfessionStore } from '@/stores/confessionStore';
@@ -141,6 +141,7 @@ export default function ConfessionThreadScreen() {
         odId: convexConfession._id,
         text: convexConfession.text,
         isAnonymous: convexConfession.isAnonymous,
+        authorVisibility: convexConfession.authorVisibility as ConfessionAuthorVisibility | undefined,
         mood: convexConfession.mood as ConfessionMood,
         userId: convexConfession.userId,
         replyCount: convexConfession.replyCount || 0,
@@ -578,8 +579,13 @@ export default function ConfessionThreadScreen() {
   const myReaction = rawReaction && isProbablyEmoji(rawReaction) ? rawReaction : null;
   const topEmojis = confession.topEmojis || [];
 
+  // Determine effective visibility mode (backward compat: use isAnonymous if authorVisibility not set)
+  const effectiveVisibility: ConfessionAuthorVisibility = (confession as any).authorVisibility || (confession.isAnonymous ? 'anonymous' : 'open');
+  const isFullyAnonymous = effectiveVisibility === 'anonymous';
+  const isBlurPhoto = effectiveVisibility === 'blur_photo';
+
   const getDisplayName = (): string => {
-    if (confession.isAnonymous) return 'Anonymous';
+    if (isFullyAnonymous) return 'Anonymous';
     const authorName = (confession as any).authorName;
     if (!authorName) return 'Someone';
     let name = authorName;
@@ -591,7 +597,7 @@ export default function ConfessionThreadScreen() {
   };
 
   const displayName = getDisplayName();
-  const authorPhotoUrl = !confession.isAnonymous ? (confession as any).authorPhotoUrl : null;
+  const authorPhotoUrl = !isFullyAnonymous ? (confession as any).authorPhotoUrl : null;
 
   // Whether to show bottom composer (hidden for OP viewing own confession)
   const showBottomComposer = !isOwnConfession;
@@ -706,23 +712,44 @@ export default function ConfessionThreadScreen() {
   // ──────────────────────────────────────────────────────────────────────────
   // RENDER: Confession Header (ListHeaderComponent)
   // ──────────────────────────────────────────────────────────────────────────
+  // Blur radius constant for blur_photo mode
+  const BLUR_PHOTO_RADIUS = 20;
+
   const renderConfessionHeader = () => (
     <View style={styles.confessionCard}>
       {/* Author row */}
       <View style={styles.confessionHeader}>
         <View style={styles.authorRow}>
-          {!confession.isAnonymous && authorPhotoUrl ? (
+          {/* Photo rendering based on visibility mode */}
+          {isFullyAnonymous ? (
+            // Anonymous: no photo, just icon
+            <View style={[styles.avatar, styles.avatarAnonymous]}>
+              <Ionicons name="eye-off" size={16} color={COLORS.textMuted} />
+            </View>
+          ) : isBlurPhoto && authorPhotoUrl ? (
+            // Blur photo: show blurred image
+            <Image
+              source={{ uri: authorPhotoUrl }}
+              style={styles.avatarImage}
+              contentFit="cover"
+              blurRadius={BLUR_PHOTO_RADIUS}
+            />
+          ) : authorPhotoUrl ? (
+            // Open: show clear photo
             <Image source={{ uri: authorPhotoUrl }} style={styles.avatarImage} contentFit="cover" />
           ) : (
-            <View style={[styles.avatar, confession.isAnonymous && styles.avatarAnonymous]}>
-              <Ionicons
-                name={confession.isAnonymous ? 'eye-off' : 'person'}
-                size={16}
-                color={confession.isAnonymous ? COLORS.textMuted : COLORS.primary}
-              />
+            // No photo available: show person icon
+            <View style={styles.avatar}>
+              <Ionicons name="person" size={16} color={COLORS.primary} />
             </View>
           )}
           <Text style={styles.authorName}>{displayName}</Text>
+          {/* Blur indicator badge */}
+          {isBlurPhoto && (
+            <View style={styles.blurBadge}>
+              <Ionicons name="eye-off-outline" size={10} color={COLORS.textMuted} />
+            </View>
+          )}
           <Text style={styles.timeAgo}>{getTimeAgo(confession.createdAt)}</Text>
         </View>
         <View style={[styles.moodBadge, { backgroundColor: badgeInfo.bg }]}>
@@ -990,6 +1017,12 @@ const styles = StyleSheet.create({
   },
   avatarAnonymous: {
     backgroundColor: 'rgba(153,153,153,0.12)',
+  },
+  blurBadge: {
+    marginLeft: 4,
+    padding: 2,
+    backgroundColor: 'rgba(153,153,153,0.15)',
+    borderRadius: 4,
   },
   avatarImage: {
     width: 36,
