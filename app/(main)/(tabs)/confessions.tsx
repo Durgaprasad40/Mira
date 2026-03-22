@@ -50,7 +50,6 @@ import { COLORS } from '@/lib/constants';
 import { Image } from 'expo-image';
 import { isProbablyEmoji } from '@/lib/utils';
 import { isContentClean } from '@/lib/contentFilter';
-import { ConfessionChat } from '@/types';
 import { useAuthStore } from '@/stores/authStore';
 import { useConfessionStore } from '@/stores/confessionStore';
 import { useDemoStore } from '@/stores/demoStore';
@@ -92,7 +91,6 @@ export default function ConfessionsScreen() {
   const seedConfessions = useConfessionStore((s) => s.seedConfessions);
   const demoToggleReaction = useConfessionStore((s) => s.toggleReaction);
   const demoReportConfession = useConfessionStore((s) => s.reportConfession);
-  const addChat = useConfessionStore((s) => s.addChat);
   const revealCrush = useConfessionStore((s) => s.revealCrush);
   const confessionThreads = useConfessionStore((s) => s.confessionThreads);
   const confessionBlockedIds = useConfessionStore((s) => s.blockedIds);
@@ -331,7 +329,6 @@ export default function ConfessionsScreen() {
   const reportConfessionMutation = useMutation(api.confessions.reportConfession);
   const deleteConfessionMutation = useMutation(api.confessions.deleteConfession);
   const markTaggedSeenMutation = useMutation(api.confessions.markTaggedConfessionsSeen);
-  const getOrCreateForConfessionMutation = useMutation(api.confessions.getOrCreateForConfession);
 
   // ══════════════════════════════════════════════════════════════════════════
   // INTEGRITY MODULE — Single source of truth for confession state
@@ -491,9 +488,11 @@ export default function ConfessionsScreen() {
     // Demo mode — compute trending from active posts only
     const now = Date.now();
     const cutoff = now - 48 * 60 * 60 * 1000;
-    const recent = integrityOutput.activePosts.filter((c) => c.createdAt > cutoff);
+    // P1-004 FIX: Guard against undefined createdAt (legacy data)
+    const recent = integrityOutput.activePosts.filter((c) => (c.createdAt ?? 0) > cutoff);
     const scored = recent.map((c) => {
-      const hoursSince = (now - c.createdAt) / (1000 * 60 * 60);
+      const createdAt = c.createdAt ?? now;
+      const hoursSince = (now - createdAt) / (1000 * 60 * 60);
       const score = (c.reactionCount * 3 + c.replyCount * 4) / (hoursSince + 2);
       return { ...c, trendingScore: score };
     });
@@ -601,7 +600,9 @@ export default function ConfessionsScreen() {
         // BUGFIX #24: Notify only on successful Convex mutation, not before
         notifyReaction(confessionId);
       }).catch((err) => {
+        // P2-003 FIX: Show error feedback to user
         console.error('[Confessions] toggleReaction failed:', err);
+        showToastMessage('Reaction failed to save', 'alert-circle');
       });
       // BUGFIX #24: Removed duplicate notifyReaction call here
     },
@@ -766,70 +767,6 @@ export default function ConfessionsScreen() {
     [router]
   );
 
-  const handleReplyAnonymously = useCallback(
-    async (confessionId: string, confessionUserId: string) => {
-      // Guard: require valid userId
-      if (!currentUserId) return;
-
-      // Defensive guard: prevent self-chat
-      if (confessionUserId === currentUserId) {
-        if (__DEV__) console.warn('[CONFESS] Blocked self-chat attempt');
-        return;
-      }
-
-      // Real mode: Use Convex conversation and route to Messages chat
-      if (!isDemoMode) {
-        try {
-          const convexId = asUserId(currentUserId);
-          if (!convexId) return;
-
-          const result = await getOrCreateForConfessionMutation({
-            confessionId: confessionId as Id<'confessions'>,
-            userId: convexId,
-          });
-
-          // Route to Messages chat with confession source
-          safePush(
-            router,
-            `/(main)/(tabs)/messages/chat/${result.conversationId}?source=confession` as any,
-            'confessions->messagesChat'
-          );
-          notifyReply(confessionId);
-        } catch (error) {
-          if (__DEV__) console.error('[CONFESS] Failed to create confession chat:', error);
-          Alert.alert('Error', 'Could not start chat. Please try again.');
-        }
-        return;
-      }
-
-      // Demo mode: Use local confessionStore (existing behavior)
-      const existing = chats.find(
-        (c) => c.confessionId === confessionId &&
-          (c.initiatorId === currentUserId || c.responderId === currentUserId)
-      );
-      if (existing) {
-        safePush(router, `/(main)/confession-chat?chatId=${existing.id}` as any, 'confessions->chat');
-        return;
-      }
-
-      const newChat: ConfessionChat = {
-        id: `cc_new_${Date.now()}`,
-        confessionId,
-        initiatorId: currentUserId,
-        responderId: confessionUserId,
-        messages: [],
-        isRevealed: false,
-        createdAt: Date.now(),
-        expiresAt: Date.now() + 1000 * 60 * 60 * 24,
-        mutualRevealStatus: 'none',
-      };
-      addChat(newChat);
-      safePush(router, `/(main)/confession-chat?chatId=${newChat.id}` as any, 'confessions->newChat');
-      notifyReply(confessionId);
-    },
-    [chats, currentUserId, addChat, notifyReply, router, isDemoMode, getOrCreateForConfessionMutation]
-  );
-
   // Report reason selection helper
   const showReportReasonPicker = useCallback(
     (confessionId: string) => {
@@ -844,6 +781,9 @@ export default function ConfessionsScreen() {
       const submitReport = (reason: 'spam' | 'harassment' | 'hate' | 'sexual' | 'other') => {
         demoReportConfession(confessionId);
         if (__DEV__) console.log('[CONFESS] confess_reported:', confessionId, 'reason:', reason);
+        triggerWarningHaptic();
+        // P2-003 FIX: Show optimistic success, then error if backend fails
+        showToastMessage('Report submitted', 'checkmark-circle');
         if (!isDemoMode) {
           const convexUserId = asUserId(currentUserId);
           if (convexUserId) {
@@ -851,11 +791,13 @@ export default function ConfessionsScreen() {
               confessionId: confessionId as Id<'confessions'>,
               reporterId: convexUserId,
               reason,
-            }).catch((e) => console.warn('[Report] Silent fail:', e));
+            }).catch((e) => {
+              // P2-003 FIX: Show error feedback if backend fails
+              console.warn('[Report] Backend fail:', e);
+              showToastMessage('Report may not have been saved', 'alert-circle');
+            });
           }
         }
-        triggerWarningHaptic();
-        showToastMessage('Report submitted', 'checkmark-circle');
       };
 
       if (Platform.OS === 'ios') {
@@ -1116,7 +1058,9 @@ export default function ConfessionsScreen() {
                   confessionId: confessionId as Id<'confessions'>,
                   userId: currentUserId as Id<'users'>,
                 }).catch((err) => {
+                  // P2-003 FIX: Show error feedback if backend fails
                   if (__DEV__) console.warn('[CONFESS] Backend delete failed:', err);
+                  showToastMessage('Delete may not have synced', 'alert-circle');
                 });
               }
             }
@@ -1143,7 +1087,9 @@ export default function ConfessionsScreen() {
                     confessionId: confessionId as Id<'confessions'>,
                     userId: currentUserId as Id<'users'>,
                   }).catch((err) => {
+                    // P2-003 FIX: Show error feedback if backend fails
                     if (__DEV__) console.warn('[CONFESS] Backend delete failed:', err);
+                    showToastMessage('Delete may not have synced', 'alert-circle');
                   });
                 }
               },
@@ -1308,7 +1254,6 @@ export default function ConfessionsScreen() {
               onPress={() => handleOpenThread(item.id)}
               onReact={() => handleOpenEmojiPicker(item.id)}
               onToggleEmoji={(emoji) => toggleReaction(item.id, emoji)}
-              onReplyAnonymously={() => handleReplyAnonymously(item.id, item.userId)}
               onReport={() => handleReportBlock(item.id, item.userId)}
               onViewProfile={isTaggedForMe ? () => handleViewProfileRequest(item.id, item.userId) : undefined}
               onLongPress={() => handleLongPressConfession(item.id, item.userId)}
@@ -1743,8 +1688,11 @@ export default function ConfessionsScreen() {
 }
 
 // Helper function for tagged confessions time display
-function getTimeAgoSimple(timestamp: number): string {
+// P1-004 FIX: Guard against undefined/null timestamp (legacy data)
+function getTimeAgoSimple(timestamp: number | undefined | null): string {
+  if (timestamp == null || !Number.isFinite(timestamp)) return 'just now';
   const diff = Date.now() - timestamp;
+  if (diff < 0) return 'just now'; // Future timestamp protection
   const minutes = Math.floor(diff / 60000);
   if (minutes < 1) return 'just now';
   if (minutes < 60) return `${minutes}m`;

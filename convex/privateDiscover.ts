@@ -356,6 +356,21 @@ export const getProfileByUserId = query({
       .first();
     if (blockedByOwner) return null;
 
+    // P0-004 FIX: Block profile lookup for anonymous confession participants
+    const anonymousConversation = await ctx.db
+      .query('conversations')
+      .filter((q) =>
+        q.and(
+          q.eq(q.field('anonymousParticipantId'), args.userId),
+          q.or(
+            q.eq(q.field('participants'), [args.userId, args.viewerId]),
+            q.eq(q.field('participants'), [args.viewerId, args.userId])
+          )
+        )
+      )
+      .first();
+    if (anonymousConversation) return null;
+
     // Cast to access optional schema fields that may not be in generated types yet
     const profile = p as typeof p & { hobbies?: string[]; isVerified?: boolean; privateIntentKey?: string };
 

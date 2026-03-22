@@ -1,17 +1,153 @@
-import { mutation, query } from './_generated/server';
+import { mutation, query, MutationCtx } from './_generated/server';
 import { v } from 'convex/values';
 import { Id } from './_generated/dataModel';
 import { resolveUserIdByAuthId, ensureUserByAuthId } from './helpers';
 
-// Phone number & email patterns for server-side validation
-const PHONE_PATTERN = /\b\d{10,}\b|\b\d{3}[-.\s]?\d{3}[-.\s]?\d{4}\b/;
-const EMAIL_PATTERN = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/;
+// ═══════════════════════════════════════════════════════════════════════════
+// P0-002 FIX: Enhanced PII validation patterns for server-side safety
+// Goal: Block phone numbers, emails, and social handles without false positives
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Phone patterns - catch various formats while avoiding false positives on normal numbers
+const PHONE_PATTERNS = [
+  // International format: +1 (555) 123-4567, +91 98765 43210, +44 7911 123456
+  /\+\d{1,3}[-.\s]?\(?\d{2,4}\)?[-.\s]?\d{3,4}[-.\s]?\d{3,4}/,
+  // US/CA format with parentheses: (555) 123-4567, (555)123-4567
+  /\(\d{3}\)[-.\s]?\d{3}[-.\s]?\d{4}/,
+  // Standard formats: 555-123-4567, 555.123.4567, 555 123 4567
+  /\b\d{3}[-.\s]\d{3}[-.\s]\d{4}\b/,
+  // 10+ consecutive digits (likely a phone number)
+  /\b\d{10,14}\b/,
+  // Indian format: 98765 43210, 9876543210
+  /\b[6-9]\d{4}[-.\s]?\d{5}\b/,
+];
+
+// Email pattern (existing - already good)
+const EMAIL_PATTERN = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/i;
+
+// Social handle patterns - detect attempts to share contact info
+const SOCIAL_PATTERNS = [
+  // Direct messaging URLs (high confidence PII sharing)
+  /\b(wa\.me|t\.me|m\.me|discord\.gg|bit\.ly)\/[a-zA-Z0-9_-]+/i,
+  // Full social profile URLs
+  /\b(instagram\.com|snapchat\.com|tiktok\.com|twitter\.com|x\.com)\/[a-zA-Z0-9._]+/i,
+  // "DM me on [platform]" or "my [platform] is" patterns (intent to share)
+  /\b(dm|message|text|contact|add|follow)\s+(me\s+)?(on|at|@)?\s*(instagram|insta|snap|snapchat|telegram|whatsapp|discord|tiktok|twitter)\b/i,
+  /\bmy\s+(instagram|insta|snap|snapchat|telegram|whatsapp|discord|tiktok|twitter)\s*(is|:|\s+@)/i,
+  // Platform + username pattern: "insta: @username" or "snap: username123" or "telegram: @handle"
+  /\b(instagram|insta|snap|snapchat|telegram|whatsapp|discord|tiktok|twitter)\s*[:@]\s*@?[a-zA-Z0-9._]{2,30}\b/i,
+  // WhatsApp number sharing: "whatsapp 9876543210" or "wa +91..."
+  /\b(whatsapp|wa)\s*[+\d][\d\s-]{8,}/i,
+];
+
+// P0-002 FIX: Unified PII check function
+function containsPII(text: string): { hasPII: boolean; type: string } {
+  // Check phone patterns
+  for (const pattern of PHONE_PATTERNS) {
+    if (pattern.test(text)) {
+      return { hasPII: true, type: 'phone number' };
+    }
+  }
+
+  // Check email
+  if (EMAIL_PATTERN.test(text)) {
+    return { hasPII: true, type: 'email address' };
+  }
+
+  // Check social patterns
+  for (const pattern of SOCIAL_PATTERNS) {
+    if (pattern.test(text)) {
+      return { hasPII: true, type: 'social media contact' };
+    }
+  }
+
+  return { hasPII: false, type: '' };
+}
 
 // Confession expiry duration (24 hours in milliseconds)
 const CONFESSION_EXPIRY_MS = 24 * 60 * 60 * 1000;
 
 // P1-01: Server-side rate limit (5 confessions per 24 hours)
 const CONFESSION_RATE_LIMIT = 5;
+
+// P0-003 FIX: Helper to check if either user has blocked the other (bidirectional)
+// Returns true if blocked (should prevent conversation creation)
+async function isBlockedBidirectional(
+  ctx: MutationCtx,
+  userId1: Id<'users'>,
+  userId2: Id<'users'>
+): Promise<boolean> {
+  // Check if userId1 blocked userId2
+  const block1 = await ctx.db
+    .query('blocks')
+    .withIndex('by_blocker_blocked', (q) =>
+      q.eq('blockerId', userId1).eq('blockedUserId', userId2)
+    )
+    .first();
+  if (block1) return true;
+
+  // Check if userId2 blocked userId1
+  const block2 = await ctx.db
+    .query('blocks')
+    .withIndex('by_blocker_blocked', (q) =>
+      q.eq('blockerId', userId2).eq('blockedUserId', userId1)
+    )
+    .first();
+  return !!block2;
+}
+
+// P2-001 FIX: Helper to deduplicate conversations after creation
+// Handles race condition where concurrent mutations create duplicate conversations
+// Strategy: Keep oldest conversation (by _creationTime), delete duplicates
+async function dedupeConversationsForConfession(
+  ctx: MutationCtx,
+  confessionId: Id<'confessions'>,
+  participantIds: [Id<'users'>, Id<'users'>]
+): Promise<Id<'conversations'>> {
+  // Query all conversations for this confession
+  const allConversations = await ctx.db
+    .query('conversations')
+    .withIndex('by_confession', (q) => q.eq('confessionId', confessionId))
+    .collect();
+
+  // Filter to only those with matching participants (order-independent)
+  const matchingConversations = allConversations.filter((c) => {
+    const hasUser1 = c.participants.includes(participantIds[0]);
+    const hasUser2 = c.participants.includes(participantIds[1]);
+    return hasUser1 && hasUser2;
+  });
+
+  if (matchingConversations.length === 0) {
+    throw new Error('No conversation found after creation - unexpected state');
+  }
+
+  if (matchingConversations.length === 1) {
+    // No duplicates, return the single conversation
+    return matchingConversations[0]._id;
+  }
+
+  // Multiple conversations found - keep oldest, delete duplicates
+  // Sort by _creationTime ascending (oldest first)
+  matchingConversations.sort((a, b) => a._creationTime - b._creationTime);
+  const keepConversation = matchingConversations[0];
+  const duplicates = matchingConversations.slice(1);
+
+  // Delete duplicate conversations and their participant junction rows
+  for (const dupe of duplicates) {
+    // Delete participant junction rows for this conversation
+    const dupeParticipants = await ctx.db
+      .query('conversationParticipants')
+      .withIndex('by_conversation', (q) => q.eq('conversationId', dupe._id))
+      .collect();
+    for (const p of dupeParticipants) {
+      await ctx.db.delete(p._id);
+    }
+    // Delete the duplicate conversation
+    await ctx.db.delete(dupe._id);
+  }
+
+  return keepConversation._id;
+}
 
 // Create a new confession
 export const createConfession = mutation({
@@ -59,11 +195,10 @@ export const createConfession = mutation({
     if (trimmed.length > 5000) {
       throw new Error('Confession must be 5000 characters or less.');
     }
-    if (PHONE_PATTERN.test(trimmed)) {
-      throw new Error('Do not include phone numbers in confessions.');
-    }
-    if (EMAIL_PATTERN.test(trimmed)) {
-      throw new Error('Do not include email addresses in confessions.');
+    // P0-002 FIX: Enhanced PII validation (phone, email, social handles)
+    const piiCheck = containsPII(trimmed);
+    if (piiCheck.hasPII) {
+      throw new Error(`Do not include ${piiCheck.type} in confessions. Keep it anonymous!`);
     }
 
     // If taggedUserId provided, verify the current user has liked them
@@ -189,8 +324,11 @@ export const listConfessions = query({
       // Replies are strongest signal (weight 5), reactions medium (weight 2)
       // Time decay reduces score for older confessions
       withPreviews.sort((a, b) => {
-        const hoursSinceA = (now - a.createdAt) / (1000 * 60 * 60);
-        const hoursSinceB = (now - b.createdAt) / (1000 * 60 * 60);
+        // P1-004 FIX: Guard against undefined createdAt (legacy data)
+        const createdAtA = a.createdAt ?? now;
+        const createdAtB = b.createdAt ?? now;
+        const hoursSinceA = (now - createdAtA) / (1000 * 60 * 60);
+        const hoursSinceB = (now - createdAtB) / (1000 * 60 * 60);
 
         // Score formula: (replies * 5 + reactions * 2) / (hours + 2)
         // The +2 prevents division by zero and gives new posts a baseline
@@ -227,7 +365,9 @@ export const getTrendingConfessions = query({
     // Replies are strongest signal (weight 5), reactions medium (weight 2)
     // Voice replies get additional bonus (+1 each)
     const scored = recent.map((c) => {
-      const hoursSince = (now - c.createdAt) / (1000 * 60 * 60);
+      // P1-004 FIX: Guard against undefined createdAt (legacy data)
+      const createdAt = c.createdAt ?? now;
+      const hoursSince = (now - createdAt) / (1000 * 60 * 60);
       const voiceReplies = c.voiceReplyCount || 0;
       const score =
         (c.replyCount * 5 + c.reactionCount * 2 + voiceReplies * 1) /
@@ -283,11 +423,10 @@ export const createReply = mutation({
       if (trimmed.length < 1) {
         throw new Error('Reply cannot be empty.');
       }
-      if (PHONE_PATTERN.test(trimmed)) {
-        throw new Error('Do not include phone numbers.');
-      }
-      if (EMAIL_PATTERN.test(trimmed)) {
-        throw new Error('Do not include email addresses.');
+      // P0-002 FIX: Enhanced PII validation for replies too
+      const piiCheck = containsPII(trimmed);
+      if (piiCheck.hasPII) {
+        throw new Error(`Do not include ${piiCheck.type}. Keep it anonymous!`);
       }
     }
 
@@ -318,6 +457,7 @@ export const createReply = mutation({
 });
 
 // Delete own reply
+// P1-003 FIX: Also delete nested replies (child replies to this reply)
 export const deleteReply = mutation({
   args: {
     replyId: v.id('confessionReplies'),
@@ -331,16 +471,33 @@ export const deleteReply = mutation({
     if (!reply) throw new Error('Reply not found.');
     if (reply.userId !== userId) throw new Error('You can only delete your own replies.');
 
+    // P1-003 FIX: Find and delete any nested replies (child replies to this reply)
+    const childReplies = await ctx.db
+      .query('confessionReplies')
+      .withIndex('by_confession', (q) => q.eq('confessionId', reply.confessionId))
+      .filter((q) => q.eq(q.field('parentReplyId'), args.replyId))
+      .collect();
+
+    // Delete child replies first
+    let childVoiceCount = 0;
+    for (const child of childReplies) {
+      if (child.type === 'voice') childVoiceCount++;
+      await ctx.db.delete(child._id);
+    }
+
+    // Delete the main reply
     await ctx.db.delete(args.replyId);
 
-    // Decrement reply count
+    // Decrement reply count (include deleted children in count adjustment)
+    const totalDeleted = 1 + childReplies.length;
     const confession = await ctx.db.get(reply.confessionId);
     if (confession) {
+      const voiceDeleted = (reply.type === 'voice' ? 1 : 0) + childVoiceCount;
       const patch: any = {
-        replyCount: Math.max(0, confession.replyCount - 1),
+        replyCount: Math.max(0, confession.replyCount - totalDeleted),
       };
-      if (reply.type === 'voice') {
-        patch.voiceReplyCount = Math.max(0, (confession.voiceReplyCount || 0) - 1);
+      if (voiceDeleted > 0) {
+        patch.voiceReplyCount = Math.max(0, (confession.voiceReplyCount || 0) - voiceDeleted);
       }
       await ctx.db.patch(reply.confessionId, patch);
     }
@@ -385,22 +542,52 @@ export const toggleReaction = mutation({
     const confession = await ctx.db.get(args.confessionId);
     if (!confession) return { added: false, replaced: false, chatUnlocked: false };
 
-    // CONSISTENCY FIX B3: Helper to recompute reaction count from source of truth
-    const recomputeReactionCount = async () => {
+    // P1-001 FIX: Helper to clean up duplicate reactions and recompute count atomically
+    // This handles race conditions where multiple concurrent mutations insert duplicates
+    const cleanupAndRecomputeCount = async () => {
+      // Get all reactions for this confession
       const allReactions = await ctx.db
         .query('confessionReactions')
         .withIndex('by_confession', (q) => q.eq('confessionId', args.confessionId))
         .collect();
-      return allReactions.length;
+
+      // Group by userId to find duplicates
+      const reactionsByUser = new Map<string, typeof allReactions>();
+      for (const reaction of allReactions) {
+        const key = reaction.userId as string;
+        if (!reactionsByUser.has(key)) {
+          reactionsByUser.set(key, []);
+        }
+        reactionsByUser.get(key)!.push(reaction);
+      }
+
+      // Clean up duplicates: keep the oldest reaction per user
+      let cleanCount = 0;
+      for (const [, userReactions] of reactionsByUser) {
+        if (userReactions.length > 1) {
+          // P1-004 FIX: Sort by createdAt ascending (oldest first), with null-safe fallback
+          userReactions.sort((a, b) => (a.createdAt ?? 0) - (b.createdAt ?? 0));
+          // Delete all but the oldest
+          for (let i = 1; i < userReactions.length; i++) {
+            await ctx.db.delete(userReactions[i]._id);
+          }
+          cleanCount++; // Count this user's single remaining reaction
+        } else {
+          cleanCount++; // Single reaction, count it
+        }
+      }
+
+      // Update confession with accurate count
+      await ctx.db.patch(args.confessionId, { reactionCount: cleanCount });
+      return cleanCount;
     };
 
     if (existing) {
       if (existing.type === args.type) {
         // Same emoji → remove (toggle off)
         await ctx.db.delete(existing._id);
-        // CONSISTENCY FIX B3: Recompute count from actual reactions to avoid race
-        const actualCount = await recomputeReactionCount();
-        await ctx.db.patch(args.confessionId, { reactionCount: actualCount });
+        // P1-001 FIX: Clean up any duplicates and recompute
+        await cleanupAndRecomputeCount();
         return { added: false, replaced: false, chatUnlocked: false };
       } else {
         // Different emoji → replace (count stays the same)
@@ -408,6 +595,8 @@ export const toggleReaction = mutation({
           type: args.type,
           createdAt: Date.now(),
         });
+        // P1-001 FIX: Still clean up in case of race-created duplicates
+        await cleanupAndRecomputeCount();
         return { added: false, replaced: true, chatUnlocked: false };
       }
     } else {
@@ -418,57 +607,20 @@ export const toggleReaction = mutation({
         type: args.type,
         createdAt: Date.now(),
       });
-      // CONSISTENCY FIX B3: Recompute count from actual reactions to avoid race
-      const actualCount = await recomputeReactionCount();
-      await ctx.db.patch(args.confessionId, { reactionCount: actualCount });
+      // P1-001 FIX: Clean up any race-created duplicates and recompute
+      await cleanupAndRecomputeCount();
 
-      // SPECIAL: If tagged user likes a tagged confession, create/find a DM thread
-      let chatUnlocked = false;
-      if (confession.taggedUserId && userId === confession.taggedUserId) {
-        // Check if conversation already exists for this confession (idempotency)
-        const existingConvo = await ctx.db
-          .query('conversations')
-          .withIndex('by_confession', (q) => q.eq('confessionId', args.confessionId))
-          .first();
+      // NOTE: DM creation on tagged user reaction has been removed.
+      // Tagged users now use respondToTaggedConfession mutation with Reject/Connect actions.
+      // Reactions are purely for engagement - no chat is created.
 
-        if (!existingConvo) {
-          // Create new conversation between author and tagged user
-          const now = Date.now();
-          const TWENTY_FOUR_HOURS = 24 * 60 * 60 * 1000;
-          const conversationId = await ctx.db.insert('conversations', {
-            confessionId: args.confessionId,
-            participants: [confession.userId, confession.taggedUserId],
-            isPreMatch: true, // Confession-based threads are pre-match
-            createdAt: now,
-            lastMessageAt: now,
-            expiresAt: now + TWENTY_FOUR_HOURS, // Confession chats expire in 24h
-            // PRIVACY FIX: Mark confession author as anonymous participant
-            // Their real identity should not be revealed to the tagged user
-            anonymousParticipantId: confession.isAnonymous ? confession.userId : undefined,
-          });
-
-          // Create participant junction rows for efficient Messages queries
-          await ctx.db.insert('conversationParticipants', {
-            conversationId,
-            userId: confession.userId,
-            unreadCount: 0,
-          });
-          await ctx.db.insert('conversationParticipants', {
-            conversationId,
-            userId: confession.taggedUserId,
-            unreadCount: 0,
-          });
-
-          chatUnlocked = true;
-        }
-      }
-
-      return { added: true, replaced: false, chatUnlocked };
+      return { added: true, replaced: false, chatUnlocked: false };
     }
   },
 });
 
 // Get all reactions for a confession (grouped by emoji)
+// P1-001 FIX: Dedupe by user to handle any race-created duplicates
 export const getReactionCounts = query({
   args: { confessionId: v.id('confessions') },
   handler: async (ctx, { confessionId }) => {
@@ -476,12 +628,28 @@ export const getReactionCounts = query({
       .query('confessionReactions')
       .withIndex('by_confession', (q) => q.eq('confessionId', confessionId))
       .collect();
-    const emojiCounts: Record<string, number> = {};
+
+    // P1-001 FIX: Dedupe - only count one reaction per user (keep newest)
+    // P1-004 FIX: Guard against undefined createdAt (legacy data)
+    const userReactionMap = new Map<string, { type: string; createdAt: number }>();
     for (const r of reactions) {
-      // Skip old string-based reaction keys (e.g. "relatable", "bold")
-      if (/^[a-zA-Z0-9_\s]+$/.test(r.type)) continue;
-      emojiCounts[r.type] = (emojiCounts[r.type] || 0) + 1;
+      const userId = r.userId as string;
+      const existing = userReactionMap.get(userId);
+      const rCreatedAt = r.createdAt ?? 0;
+      // Keep the newest reaction per user
+      if (!existing || rCreatedAt > existing.createdAt) {
+        userReactionMap.set(userId, { type: r.type, createdAt: rCreatedAt });
+      }
     }
+
+    // Count emojis from deduped reactions
+    const emojiCounts: Record<string, number> = {};
+    for (const [, reaction] of userReactionMap) {
+      // Skip old string-based reaction keys (e.g. "relatable", "bold")
+      if (/^[a-zA-Z0-9_\s]+$/.test(reaction.type)) continue;
+      emojiCounts[reaction.type] = (emojiCounts[reaction.type] || 0) + 1;
+    }
+
     // Return top emojis sorted by count
     const topEmojis = Object.entries(emojiCounts)
       .sort((a, b) => b[1] - a[1])
@@ -491,6 +659,7 @@ export const getReactionCounts = query({
 });
 
 // Get user's reaction on a confession (single emoji or null)
+// P1-001 FIX: Handle duplicates by returning newest reaction
 export const getUserReaction = query({
   args: {
     confessionId: v.id('confessions'),
@@ -504,13 +673,19 @@ export const getUserReaction = query({
       return null;
     }
 
-    const existing = await ctx.db
+    // P1-001 FIX: Collect all reactions and return newest (handles race-created duplicates)
+    const reactions = await ctx.db
       .query('confessionReactions')
       .withIndex('by_confession_user', (q) =>
         q.eq('confessionId', args.confessionId).eq('userId', userId)
       )
-      .first();
-    return existing ? existing.type : null;
+      .collect();
+
+    if (reactions.length === 0) return null;
+
+    // P1-004 FIX: Return the newest reaction's type, guarding against undefined createdAt
+    const newest = reactions.reduce((a, b) => ((a.createdAt ?? 0) > (b.createdAt ?? 0) ? a : b));
+    return newest.type;
   },
 });
 
@@ -698,79 +873,27 @@ export const markTaggedConfessionsSeen = mutation({
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
-// Get or create a conversation for an anonymous confession reply
-// This unifies confession chats with the Messages system
+// DEPRECATED: Get or create a conversation for an anonymous confession reply
+// ═══════════════════════════════════════════════════════════════════════════
+// This mutation is no longer used. Anonymous reply/chat path has been removed.
+// Tagged users now use respondToTaggedConfession with Reject/Connect actions.
+// Keeping this mutation for backward compatibility - it throws an error.
 // ═══════════════════════════════════════════════════════════════════════════
 export const getOrCreateForConfession = mutation({
   args: {
     confessionId: v.id('confessions'),
     userId: v.union(v.id('users'), v.string()),
   },
-  handler: async (ctx, args) => {
-    // Map authUserId -> Convex Id<"users">
-    const userId = await ensureUserByAuthId(ctx, args.userId as string);
-
-    // Get the confession to find the author
-    const confession = await ctx.db.get(args.confessionId);
-    if (!confession) {
-      throw new Error('Confession not found');
-    }
-
-    const authorId = confession.userId;
-
-    // Prevent self-chat
-    if (userId === authorId) {
-      throw new Error('Cannot start a chat with yourself');
-    }
-
-    // Look for existing conversation for this confession between these users
-    const existingConversations = await ctx.db
-      .query('conversations')
-      .withIndex('by_confession', (q) => q.eq('confessionId', args.confessionId))
-      .collect();
-
-    // Find one where both users are participants
-    const existingConvo = existingConversations.find(
-      (c) => c.participants.includes(userId) && c.participants.includes(authorId)
-    );
-
-    if (existingConvo) {
-      return { conversationId: existingConvo._id, isNew: false };
-    }
-
-    // Create new conversation
-    const now = Date.now();
-    const TWENTY_FOUR_HOURS = 24 * 60 * 60 * 1000;
-    const conversationId = await ctx.db.insert('conversations', {
-      confessionId: args.confessionId,
-      participants: [userId, authorId],
-      isPreMatch: true,
-      createdAt: now,
-      lastMessageAt: now,
-      expiresAt: now + TWENTY_FOUR_HOURS,
-      // PRIVACY FIX: Mark confession author as anonymous participant if confession is anonymous
-      // Their real identity should not be revealed to the replying user
-      anonymousParticipantId: confession.isAnonymous ? authorId : undefined,
-    });
-
-    // Create participant junction rows for efficient queries
-    await ctx.db.insert('conversationParticipants', {
-      conversationId,
-      userId,
-      unreadCount: 0,
-    });
-    await ctx.db.insert('conversationParticipants', {
-      conversationId,
-      userId: authorId,
-      unreadCount: 0,
-    });
-
-    return { conversationId, isNew: true };
+  handler: async () => {
+    // Private anonymous chat path has been removed from Confess.
+    // Use public replies instead, or respondToTaggedConfession for tagged users.
+    throw new Error('Anonymous chat feature has been removed. Use public replies instead.');
   },
 });
 
 // Delete own confession (soft delete via isDeleted flag)
 // Only the author can delete their own confession
+// P1-003 FIX: Properly clean up related data to prevent orphans
 export const deleteConfession = mutation({
   args: {
     confessionId: v.id('confessions'),
@@ -788,13 +911,255 @@ export const deleteConfession = mutation({
       throw new Error('You can only delete your own confessions.');
     }
 
-    // Soft delete: mark as deleted rather than hard delete
-    // This preserves referential integrity with replies, reactions, conversations
+    const now = Date.now();
+
+    // P1-003 FIX: Clean up related data in parallel for efficiency
+    // 1. Delete all reactions (no reason to keep reactions on deleted confession)
+    const reactions = await ctx.db
+      .query('confessionReactions')
+      .withIndex('by_confession', (q) => q.eq('confessionId', args.confessionId))
+      .collect();
+
+    // 2. Delete all replies (replies are meaningless without the confession)
+    const replies = await ctx.db
+      .query('confessionReplies')
+      .withIndex('by_confession', (q) => q.eq('confessionId', args.confessionId))
+      .collect();
+
+    // 3. Delete all notifications (notifications for deleted confessions are spam)
+    const notifications = await ctx.db
+      .query('confessionNotifications')
+      .withIndex('by_confession', (q) => q.eq('confessionId', args.confessionId))
+      .collect();
+
+    // 4. Expire any linked conversations (don't delete - preserve message history)
+    const conversations = await ctx.db
+      .query('conversations')
+      .withIndex('by_confession', (q) => q.eq('confessionId', args.confessionId))
+      .collect();
+
+    // Execute deletes
+    for (const reaction of reactions) {
+      await ctx.db.delete(reaction._id);
+    }
+    for (const reply of replies) {
+      await ctx.db.delete(reply._id);
+    }
+    for (const notification of notifications) {
+      await ctx.db.delete(notification._id);
+    }
+    // Mark conversations as expired (not deleted - preserves chat history)
+    for (const conversation of conversations) {
+      await ctx.db.patch(conversation._id, { expiresAt: now });
+    }
+
+    // Soft delete the confession itself
     await ctx.db.patch(args.confessionId, {
       isDeleted: true,
-      deletedAt: Date.now(),
+      deletedAt: now,
+      // Reset counts since we deleted the related data
+      reactionCount: 0,
+      replyCount: 0,
     });
 
     return { success: true };
+  },
+});
+
+// =============================================================================
+// Respond to a tagged confession (Reject or Connect)
+// =============================================================================
+// Called by the tagged user to respond to a confession directed at them.
+// - reject: Mark as handled, no DM created, confession remains visible
+// - connect: Store a discover boost signal, no DM created
+// =============================================================================
+export const respondToTaggedConfession = mutation({
+  args: {
+    confessionId: v.id('confessions'),
+    userId: v.union(v.id('users'), v.string()),
+    action: v.union(v.literal('reject'), v.literal('connect')),
+  },
+  handler: async (ctx, args) => {
+    // Map authUserId -> Convex Id<"users">
+    const userId = await ensureUserByAuthId(ctx, args.userId as string);
+
+    // Get the confession
+    const confession = await ctx.db.get(args.confessionId);
+    if (!confession) {
+      throw new Error('Confession not found');
+    }
+
+    // Verify this user is the tagged user
+    if (confession.taggedUserId !== userId) {
+      throw new Error('Only the tagged user can respond to this confession');
+    }
+
+    // Check if already responded
+    if (confession.taggedUserResponse && confession.taggedUserResponse !== 'pending') {
+      throw new Error('You have already responded to this confession');
+    }
+
+    // Check if confession is deleted or expired
+    const now = Date.now();
+    if (confession.isDeleted) {
+      throw new Error('This confession has been deleted');
+    }
+    if (confession.expiresAt && confession.expiresAt < now) {
+      throw new Error('This confession has expired');
+    }
+
+    if (args.action === 'reject') {
+      // REJECT: Mark as handled, no chat created
+      await ctx.db.patch(args.confessionId, {
+        taggedUserResponse: 'rejected',
+        taggedUserRespondedAt: now,
+      });
+
+      return { success: true, action: 'rejected' };
+    } else {
+      // CONNECT: Store a discover boost signal
+      // The confessor (confession.userId) gets boosted in the tagged user's (userId) discover feed
+      const SEVEN_DAYS = 7 * 24 * 60 * 60 * 1000;
+
+      // Check if signal already exists for this confession (idempotency)
+      const existingSignal = await ctx.db
+        .query('confessionConnectSignals')
+        .withIndex('by_confession', (q) => q.eq('confessionId', args.confessionId))
+        .first();
+
+      if (!existingSignal) {
+        await ctx.db.insert('confessionConnectSignals', {
+          confessionId: args.confessionId,
+          fromUserId: confession.userId,  // The confessor gets boosted
+          toUserId: userId,               // In the tagged user's discover feed
+          createdAt: now,
+          expiresAt: now + SEVEN_DAYS,
+        });
+      }
+
+      // Update confession response status
+      await ctx.db.patch(args.confessionId, {
+        taggedUserResponse: 'connected',
+        taggedUserRespondedAt: now,
+      });
+
+      return { success: true, action: 'connected' };
+    }
+  },
+});
+
+// =============================================================================
+// Get eligible tag targets for confession tagging
+// =============================================================================
+// Returns users that the current user can tag in a confession:
+// - Matched users (mutual likes)
+// - Users the current user has liked (one-way)
+// Excludes: self, blocked users, inactive users
+// =============================================================================
+export const getEligibleTagTargets = query({
+  args: {
+    userId: v.union(v.id('users'), v.string()),
+  },
+  handler: async (ctx, args) => {
+    // Resolve userId
+    const userId = await resolveUserIdByAuthId(ctx, args.userId as string);
+    if (!userId) return [];
+
+    // Get blocked users (bidirectional)
+    const [myBlocks, blocksOnMe] = await Promise.all([
+      ctx.db
+        .query('blocks')
+        .withIndex('by_blocker', (q) => q.eq('blockerId', userId))
+        .collect(),
+      ctx.db
+        .query('blocks')
+        .withIndex('by_blocked', (q) => q.eq('blockedUserId', userId))
+        .collect(),
+    ]);
+    const blockedUserIds = new Set([
+      ...myBlocks.map((b) => b.blockedUserId as string),
+      ...blocksOnMe.map((b) => b.blockerId as string),
+    ]);
+
+    // Collect unique target user IDs
+    const targetUserIds = new Set<string>();
+
+    // 1. Get matched users
+    const [matchesAsUser1, matchesAsUser2] = await Promise.all([
+      ctx.db
+        .query('matches')
+        .withIndex('by_user1', (q) => q.eq('user1Id', userId))
+        .filter((q) => q.eq(q.field('isActive'), true))
+        .collect(),
+      ctx.db
+        .query('matches')
+        .withIndex('by_user2', (q) => q.eq('user2Id', userId))
+        .filter((q) => q.eq(q.field('isActive'), true))
+        .collect(),
+    ]);
+
+    for (const match of [...matchesAsUser1, ...matchesAsUser2]) {
+      const otherUserId = match.user1Id === userId ? match.user2Id : match.user1Id;
+      if (!blockedUserIds.has(otherUserId as string)) {
+        targetUserIds.add(otherUserId as string);
+      }
+    }
+
+    // 2. Get users I've liked (like, super_like, text)
+    const likes = await ctx.db
+      .query('likes')
+      .withIndex('by_from_user', (q) => q.eq('fromUserId', userId))
+      .filter((q) =>
+        q.or(
+          q.eq(q.field('action'), 'like'),
+          q.eq(q.field('action'), 'super_like'),
+          q.eq(q.field('action'), 'text')
+        )
+      )
+      .collect();
+
+    for (const like of likes) {
+      if (!blockedUserIds.has(like.toUserId as string)) {
+        targetUserIds.add(like.toUserId as string);
+      }
+    }
+
+    // Remove self
+    targetUserIds.delete(userId as string);
+
+    if (targetUserIds.size === 0) return [];
+
+    // Batch fetch user profiles and photos
+    const userIdArray = Array.from(targetUserIds);
+    const [users, photos] = await Promise.all([
+      Promise.all(userIdArray.map((id) => ctx.db.get(id as Id<'users'>))),
+      Promise.all(
+        userIdArray.map((id) =>
+          ctx.db
+            .query('photos')
+            .withIndex('by_user', (q) => q.eq('userId', id as Id<'users'>))
+            .filter((q) => q.eq(q.field('isPrimary'), true))
+            .first()
+        )
+      ),
+    ]);
+
+    // Build result with minimal fields
+    const result: { id: string; name: string; photoUrl: string | null }[] = [];
+    for (let i = 0; i < userIdArray.length; i++) {
+      const user = users[i];
+      if (!user || !user.isActive) continue;
+
+      result.push({
+        id: userIdArray[i],
+        name: user.name || 'Unknown',
+        photoUrl: photos[i]?.url || null,
+      });
+    }
+
+    // Sort alphabetically by name
+    result.sort((a, b) => a.name.localeCompare(b.name));
+
+    return result;
   },
 });

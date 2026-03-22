@@ -9,8 +9,11 @@ export function isProbablyEmoji(s: string): boolean {
   return true;
 }
 
-export function getTimeAgo(timestamp: number): string {
+// P1-004 FIX: Guard against undefined/null timestamp (legacy data)
+export function getTimeAgo(timestamp: number | undefined | null): string {
+  if (timestamp == null || !Number.isFinite(timestamp)) return 'now';
   const diff = Date.now() - timestamp;
+  if (diff < 0) return 'now'; // Future timestamp protection
   const mins = Math.floor(diff / 60000);
   if (mins < 1) return 'now';
   if (mins < 60) return `${mins}m`;

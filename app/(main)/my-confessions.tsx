@@ -72,18 +72,22 @@ export default function MyConfessionsScreen() {
     const EXPIRY_MS = 24 * 60 * 60 * 1000;
     return demoConfessions
       .filter((c) => c.userId === currentUserId)
-      .map((c) => ({
-        id: c.id,
-        text: c.text,
-        isAnonymous: c.isAnonymous,
-        mood: c.mood,
-        authorName: c.authorName,
-        authorPhotoUrl: c.authorPhotoUrl,
-        replyCount: c.replyCount,
-        reactionCount: c.reactionCount,
-        createdAt: c.createdAt,
-        isExpired: c.createdAt + EXPIRY_MS < now,
-      }))
+      .map((c) => {
+        // P1-004 FIX: Guard against undefined createdAt (legacy data)
+        const createdAt = c.createdAt ?? now;
+        return {
+          id: c.id,
+          text: c.text,
+          isAnonymous: c.isAnonymous,
+          mood: c.mood,
+          authorName: c.authorName,
+          authorPhotoUrl: c.authorPhotoUrl,
+          replyCount: c.replyCount,
+          reactionCount: c.reactionCount,
+          createdAt,
+          isExpired: createdAt + EXPIRY_MS < now,
+        };
+      })
       .sort((a, b) => b.createdAt - a.createdAt);
   }, [isDemoMode, convexMyConfessions, demoConfessions, currentUserId]);
 

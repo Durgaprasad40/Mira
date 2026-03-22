@@ -23,14 +23,13 @@ import * as Clipboard from 'expo-clipboard';
 import { COLORS } from '@/lib/constants';
 import { isProbablyEmoji } from '@/lib/utils';
 import { Toast } from '@/components/ui/Toast';
-import { ConfessionMood, ConfessionReply, ConfessionChat } from '@/types';
+import { ConfessionMood, ConfessionReply } from '@/types';
 import ReactionBar from '@/components/confessions/ReactionBar';
 import { useAuthStore } from '@/stores/authStore';
 import { useConfessionStore } from '@/stores/confessionStore';
 import { useBlockStore } from '@/stores/blockStore';
 import { isDemoMode } from '@/hooks/useConvex';
-import { asUserId } from '@/convex/id';
-import { safePush } from '@/lib/safeRouter';
+import { asUserId, asConfessionId, asReplyId } from '@/convex/id';
 import { shouldBlockConfessionOpen } from '@/lib/confessionsIntegrity';
 import { logDebugEvent } from '@/lib/debugEventLogger';
 
@@ -57,8 +56,11 @@ const GENDER_LABELS: Record<string, string> = {
 // HELPERS
 // ============================================================================
 
-function getTimeAgo(timestamp: number): string {
+// P1-004 FIX: Guard against undefined/null timestamp (legacy data)
+function getTimeAgo(timestamp: number | undefined | null): string {
+  if (timestamp == null || !Number.isFinite(timestamp)) return 'just now';
   const diff = Date.now() - timestamp;
+  if (diff < 0) return 'just now'; // Future timestamp protection
   const minutes = Math.floor(diff / 60000);
   if (minutes < 1) return 'just now';
   if (minutes < 60) return `${minutes}m ago`;
@@ -87,10 +89,8 @@ export default function ConfessionThreadScreen() {
   const confessions = useConfessionStore((s) => s.confessions);
   const userReactions = useConfessionStore((s) => s.userReactions);
   const storeReplies = useConfessionStore((s) => s.replies);
-  const chats = useConfessionStore((s) => s.chats);
   const toggleReaction = useConfessionStore((s) => s.toggleReaction);
   const reportConfession = useConfessionStore((s) => s.reportConfession);
-  const addChat = useConfessionStore((s) => s.addChat);
   const addReplyToStore = useConfessionStore((s) => s.addReply);
   const deleteReplyFromStore = useConfessionStore((s) => s.deleteReply);
   const reportedIds = useConfessionStore((s) => s.reportedIds);
@@ -100,9 +100,11 @@ export default function ConfessionThreadScreen() {
   // ──────────────────────────────────────────────────────────────────────────
   // CONVEX QUERIES
   // ──────────────────────────────────────────────────────────────────────────
+  // P0-001 FIX: Use safe ID helper for route param
+  const safeConfessionId = asConfessionId(confessionId);
   const convexConfession = useQuery(
     api.confessions.getConfession,
-    !isDemoMode && confessionId ? { confessionId: confessionId as any } : 'skip'
+    !isDemoMode && safeConfessionId ? { confessionId: safeConfessionId } : 'skip'
   );
 
   const convexUserQueryArgs = !isDemoMode && currentUserId
@@ -112,7 +114,7 @@ export default function ConfessionThreadScreen() {
 
   const convexReplies = useQuery(
     api.confessions.getReplies,
-    !isDemoMode && confessionId ? { confessionId: confessionId as any } : 'skip'
+    !isDemoMode && safeConfessionId ? { confessionId: safeConfessionId } : 'skip'
   );
 
   // ──────────────────────────────────────────────────────────────────────────
@@ -212,6 +214,21 @@ export default function ConfessionThreadScreen() {
     return reply.userId === confession.userId;
   }, [confession]);
 
+  // Check if current user is the tagged user (for Reject/Connect actions)
+  // Note: taggedUserId may be stripped from anonymous confessions for privacy,
+  // but is still present on the backend for verification
+  const isTaggedUser = useMemo(() => {
+    if (!effectiveUserId || !convexConfession) return false;
+    const taggedUserId = (convexConfession as any).taggedUserId;
+    return taggedUserId === effectiveUserId;
+  }, [effectiveUserId, convexConfession]);
+
+  // Get the tagged user response status from backend
+  const taggedUserResponse = useMemo(() => {
+    if (!convexConfession) return null;
+    return (convexConfession as any).taggedUserResponse ?? null;
+  }, [convexConfession]);
+
   // ──────────────────────────────────────────────────────────────────────────
   // LOCAL STATE
   // ──────────────────────────────────────────────────────────────────────────
@@ -222,6 +239,9 @@ export default function ConfessionThreadScreen() {
   const [replyingToReplyId, setReplyingToReplyId] = useState<string | null>(null);
   const [replyToReplyText, setReplyToReplyText] = useState('');
   const [guardTriggered, setGuardTriggered] = useState(false);
+  // State for Reject/Connect actions (tagged user only)
+  const [responding, setResponding] = useState(false);
+  const [respondAction, setRespondAction] = useState<'reject' | 'connect' | null>(null);
 
   // ──────────────────────────────────────────────────────────────────────────
   // NAVIGATION GUARD: Block expired/reported confessions
@@ -253,7 +273,7 @@ export default function ConfessionThreadScreen() {
   const deleteReplyMutation = useMutation(api.confessions.deleteReply);
   const reportMutation = useMutation(api.confessions.reportConfession);
   const toggleReactionMutation = useMutation(api.confessions.toggleReaction);
-  const getOrCreateForConfessionMutation = useMutation(api.confessions.getOrCreateForConfession);
+  const respondToTaggedConfessionMutation = useMutation(api.confessions.respondToTaggedConfession);
 
   // ──────────────────────────────────────────────────────────────────────────
   // HANDLERS
@@ -276,11 +296,13 @@ export default function ConfessionThreadScreen() {
     setReplyText('');
     setSending(true);
 
-    if (!isDemoMode) {
+    if (!isDemoMode && safeConfessionId) {
+      const safeUserId = asUserId(currentUserId);
+      if (!safeUserId) return setSending(false);
       try {
         await createReplyMutation({
-          confessionId: confessionId as any,
-          userId: currentUserId as any,
+          confessionId: safeConfessionId,
+          userId: safeUserId,
           text: submittedText,
           isAnonymous: true,
           type: 'text',
@@ -292,7 +314,7 @@ export default function ConfessionThreadScreen() {
       }
     }
     setSending(false);
-  }, [replyText, confessionId, currentUserId, createReplyMutation, sending, addReplyToStore, deleteReplyFromStore]);
+  }, [replyText, confessionId, currentUserId, createReplyMutation, sending, addReplyToStore, deleteReplyFromStore, safeConfessionId]);
 
   const handleSendReplyToReply = useCallback(async (parentReplyId: string) => {
     if (!replyToReplyText.trim() || !confessionId || sending || !currentUserId) return;
@@ -313,15 +335,18 @@ export default function ConfessionThreadScreen() {
     setReplyingToReplyId(null);
     setSending(true);
 
-    if (!isDemoMode) {
+    if (!isDemoMode && safeConfessionId) {
+      const safeUserId = asUserId(currentUserId);
+      const safeParentReplyId = asReplyId(parentReplyId);
+      if (!safeUserId) return setSending(false);
       try {
         await createReplyMutation({
-          confessionId: confessionId as any,
-          userId: currentUserId as any,
+          confessionId: safeConfessionId,
+          userId: safeUserId,
           text: submittedText,
           isAnonymous: false,
           type: 'text',
-          parentReplyId: parentReplyId as any,
+          parentReplyId: safeParentReplyId ?? undefined,
         });
       } catch {
         Toast.show("Couldn't send reply. Please try again.");
@@ -330,7 +355,7 @@ export default function ConfessionThreadScreen() {
       }
     }
     setSending(false);
-  }, [replyToReplyText, confessionId, currentUserId, createReplyMutation, sending, addReplyToStore, deleteReplyFromStore]);
+  }, [replyToReplyText, confessionId, currentUserId, createReplyMutation, sending, addReplyToStore, deleteReplyFromStore, safeConfessionId]);
 
   const handleDeleteReply = useCallback(async (reply: ConfessionReply) => {
     if (reply.userId !== currentUserId || !confessionId) return;
@@ -342,11 +367,14 @@ export default function ConfessionThreadScreen() {
         style: 'destructive',
         onPress: async () => {
           deleteReplyFromStore(confessionId, reply.id);
-          if (!isDemoMode && currentUserId) {
+          // P0-001 FIX: Use safe ID helpers
+          const safeReplyId = asReplyId(reply.id);
+          const safeUserId = asUserId(currentUserId);
+          if (!isDemoMode && safeReplyId && safeUserId) {
             try {
               await deleteReplyMutation({
-                replyId: reply.id as any,
-                userId: currentUserId as any,
+                replyId: safeReplyId,
+                userId: safeUserId,
               });
             } catch {
               addReplyToStore(confessionId, reply);
@@ -367,7 +395,11 @@ export default function ConfessionThreadScreen() {
         confessionId: confession.id as any,
         userId: currentUserId as any,
         type: emoji,
-      }).catch(() => toggleReaction(confession.id, emoji));
+      }).catch(() => {
+        // P2-003 FIX: Rollback and show error feedback
+        toggleReaction(confession.id, emoji);
+        Toast.show('Reaction failed to save');
+      });
     }
   }, [confession, toggleReaction, toggleReactionMutation, currentUserId]);
 
@@ -379,57 +411,65 @@ export default function ConfessionThreadScreen() {
         confessionId: confession.id as any,
         userId: currentUserId as any,
         type: emoji,
-      }).catch(() => toggleReaction(confession.id, emoji));
+      }).catch(() => {
+        // P2-003 FIX: Rollback and show error feedback
+        toggleReaction(confession.id, emoji);
+        Toast.show('Reaction failed to save');
+      });
     }
   }, [confession, toggleReaction, toggleReactionMutation, currentUserId]);
 
-  const handleReplyAnonymously = useCallback(async () => {
-    if (!confession || !confessionId || !currentUserId) return;
-    if (effectiveUserId && confession.userId === effectiveUserId) return; // Prevent self-chat
+  // Handler for tagged user Reject action
+  const handleReject = useCallback(async () => {
+    if (!confession || !confessionId || !currentUserId || !isTaggedUser) return;
+    if (responding) return; // Prevent double-taps
 
-    if (!isDemoMode) {
+    if (!isDemoMode && safeConfessionId) {
       try {
         const convexId = asUserId(currentUserId);
         if (!convexId) return;
-        const result = await getOrCreateForConfessionMutation({
-          confessionId: confessionId as any,
+        setResponding(true);
+        setRespondAction('reject');
+        await respondToTaggedConfessionMutation({
+          confessionId: safeConfessionId,
           userId: convexId,
+          action: 'reject',
         });
-        safePush(
-          router,
-          `/(main)/(tabs)/messages/chat/${result.conversationId}?source=confession` as any,
-          'confessionThread->messagesChat'
-        );
-      } catch {
-        Alert.alert('Error', 'Could not start chat. Please try again.');
+        Toast.show('Confession rejected');
+      } catch (e: any) {
+        Toast.show(e?.message || 'Could not reject. Please try again.');
+      } finally {
+        setResponding(false);
+        setRespondAction(null);
       }
-      return;
     }
+  }, [confession, confessionId, currentUserId, isTaggedUser, responding, safeConfessionId, respondToTaggedConfessionMutation]);
 
-    // Demo mode
-    const existing = chats.find(
-      (c) => c.confessionId === confessionId &&
-        (c.initiatorId === currentUserId || c.responderId === currentUserId)
-    );
-    if (existing) {
-      router.push(`/(main)/confession-chat?chatId=${existing.id}` as any);
-      return;
+  // Handler for tagged user Connect action
+  const handleConnect = useCallback(async () => {
+    if (!confession || !confessionId || !currentUserId || !isTaggedUser) return;
+    if (responding) return; // Prevent double-taps
+
+    if (!isDemoMode && safeConfessionId) {
+      try {
+        const convexId = asUserId(currentUserId);
+        if (!convexId) return;
+        setResponding(true);
+        setRespondAction('connect');
+        await respondToTaggedConfessionMutation({
+          confessionId: safeConfessionId,
+          userId: convexId,
+          action: 'connect',
+        });
+        Toast.show('Connection interest saved! They\'ll appear higher in your Discover feed.');
+      } catch (e: any) {
+        Toast.show(e?.message || 'Could not connect. Please try again.');
+      } finally {
+        setResponding(false);
+        setRespondAction(null);
+      }
     }
-
-    const newChat: ConfessionChat = {
-      id: `cc_new_${Date.now()}`,
-      confessionId,
-      initiatorId: currentUserId,
-      responderId: confession.userId,
-      messages: [],
-      isRevealed: false,
-      createdAt: Date.now(),
-      expiresAt: Date.now() + 1000 * 60 * 60 * 24,
-      mutualRevealStatus: 'none',
-    };
-    addChat(newChat);
-    router.push(`/(main)/confession-chat?chatId=${newChat.id}` as any);
-  }, [confession, confessionId, chats, currentUserId, effectiveUserId, addChat, router, getOrCreateForConfessionMutation]);
+  }, [confession, confessionId, currentUserId, isTaggedUser, responding, safeConfessionId, respondToTaggedConfessionMutation]);
 
   const handleReport = useCallback(() => {
     if (!confessionId) return;
@@ -443,12 +483,20 @@ export default function ConfessionThreadScreen() {
 
     const submitReport = (reason: typeof reportReasons[number]['key']) => {
       reportConfession(confessionId);
-      if (!isDemoMode && currentUserId) {
+      // P2-003 FIX: Show optimistic success feedback
+      Toast.show('Report submitted');
+      // P0-001 FIX: Use safe ID helpers
+      const safeReporterId = asUserId(currentUserId);
+      if (!isDemoMode && safeConfessionId && safeReporterId) {
         reportMutation({
-          confessionId: confessionId as any,
-          reporterId: currentUserId as any,
+          confessionId: safeConfessionId,
+          reporterId: safeReporterId,
           reason,
-        }).catch((e) => console.warn('[Report] Silent fail:', e));
+        }).catch((e) => {
+          // P2-003 FIX: Show error feedback if backend fails
+          console.warn('[Report] Backend fail:', e);
+          Toast.show('Report may not have been saved');
+        });
       }
       router.back();
     };
@@ -704,12 +752,53 @@ export default function ConfessionThreadScreen() {
         </View>
       </View>
 
-      {/* Anonymous reply button (hidden for OP) */}
-      {!isOwnConfession && (
-        <TouchableOpacity style={styles.anonReplyButton} onPress={handleReplyAnonymously}>
-          <Ionicons name="chatbubble-ellipses-outline" size={18} color={COLORS.primary} />
-          <Text style={styles.anonReplyText}>Reply Anonymously</Text>
-        </TouchableOpacity>
+      {/* Reject/Connect action block (tagged user only) */}
+      {isTaggedUser && !isOwnConfession && (
+        <View style={styles.taggedActionBlock}>
+          <Text style={styles.taggedActionLabel}>Someone confessed to you</Text>
+          {taggedUserResponse === 'rejected' ? (
+            <View style={styles.respondedBadge}>
+              <Ionicons name="close-circle" size={16} color={COLORS.textMuted} />
+              <Text style={styles.respondedText}>Rejected</Text>
+            </View>
+          ) : taggedUserResponse === 'connected' ? (
+            <View style={styles.respondedBadgeConnect}>
+              <Ionicons name="heart" size={16} color={COLORS.primary} />
+              <Text style={styles.respondedTextConnect}>Connected - they'll appear in your Discover</Text>
+            </View>
+          ) : (
+            <View style={styles.taggedActionButtons}>
+              <TouchableOpacity
+                style={[styles.rejectButton, responding && respondAction === 'reject' && styles.buttonLoading]}
+                onPress={handleReject}
+                disabled={responding}
+              >
+                {responding && respondAction === 'reject' ? (
+                  <ActivityIndicator size="small" color={COLORS.textMuted} />
+                ) : (
+                  <>
+                    <Ionicons name="close" size={18} color={COLORS.textMuted} />
+                    <Text style={styles.rejectButtonText}>Reject</Text>
+                  </>
+                )}
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.connectButton, responding && respondAction === 'connect' && styles.buttonLoading]}
+                onPress={handleConnect}
+                disabled={responding}
+              >
+                {responding && respondAction === 'connect' ? (
+                  <ActivityIndicator size="small" color={COLORS.white} />
+                ) : (
+                  <>
+                    <Ionicons name="heart" size={18} color={COLORS.white} />
+                    <Text style={styles.connectButtonText}>Connect</Text>
+                  </>
+                )}
+              </TouchableOpacity>
+            </View>
+          )}
+        </View>
       )}
     </View>
   );
@@ -957,20 +1046,91 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     color: COLORS.primary,
   },
-  anonReplyButton: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 6,
-    marginTop: 4,
-    paddingVertical: 8,
-    paddingHorizontal: 14,
-    borderRadius: 20,
-    backgroundColor: 'rgba(255,107,107,0.08)',
-    alignSelf: 'flex-start',
+  // Tagged user action block (Reject/Connect)
+  taggedActionBlock: {
+    marginTop: 12,
+    padding: 14,
+    backgroundColor: 'rgba(255,107,107,0.06)',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(255,107,107,0.15)',
   },
-  anonReplyText: {
+  taggedActionLabel: {
     fontSize: 13,
     fontWeight: '600',
+    color: COLORS.text,
+    marginBottom: 10,
+    textAlign: 'center',
+  },
+  taggedActionButtons: {
+    flexDirection: 'row',
+    gap: 10,
+  },
+  rejectButton: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    borderRadius: 24,
+    backgroundColor: COLORS.backgroundDark,
+    borderWidth: 1,
+    borderColor: COLORS.border,
+  },
+  rejectButtonText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: COLORS.textMuted,
+  },
+  connectButton: {
+    flex: 1,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    borderRadius: 24,
+    backgroundColor: COLORS.primary,
+  },
+  connectButtonText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: COLORS.white,
+  },
+  buttonLoading: {
+    opacity: 0.7,
+  },
+  respondedBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderRadius: 20,
+    backgroundColor: COLORS.backgroundDark,
+  },
+  respondedText: {
+    fontSize: 13,
+    fontWeight: '500',
+    color: COLORS.textMuted,
+  },
+  respondedBadgeConnect: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 6,
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderRadius: 20,
+    backgroundColor: 'rgba(255,107,107,0.12)',
+  },
+  respondedTextConnect: {
+    fontSize: 13,
+    fontWeight: '500',
     color: COLORS.primary,
   },
 

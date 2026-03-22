@@ -41,13 +41,16 @@ export function NotificationPopover({
 }: NotificationPopoverProps) {
   const { notifications, markAllSeen, markRead, cleanupExpiredNotifications } = useNotifications();
 
-  // Mark all as seen when popover opens
+  // BUGFIX: Do NOT mark all as read when popover opens.
+  // Notifications should only be marked read when user explicitly:
+  // 1) Taps a specific notification (handled in handleNotificationPress)
+  // 2) Presses "Mark Read" button in header
+  // Only cleanup expired notifications on open.
   useEffect(() => {
     if (visible) {
-      markAllSeen();
       cleanupExpiredNotifications();
     }
-  }, [visible, markAllSeen, cleanupExpiredNotifications]);
+  }, [visible, cleanupExpiredNotifications]);
 
   const handleNotificationPress = (notification: AppNotification) => {
     if (!notification.isRead) {

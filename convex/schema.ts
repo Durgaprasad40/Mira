@@ -1374,6 +1374,13 @@ export default defineSchema({
     createdAt: v.number(),
     expiresAt: v.optional(v.number()), // 24h after createdAt; undefined = never expires (legacy)
     taggedUserId: v.optional(v.id('users')), // User being confessed to (must be someone current user has liked)
+    // Tagged user response (Reject/Connect flow)
+    taggedUserResponse: v.optional(v.union(
+      v.literal('pending'),    // Default: not yet responded
+      v.literal('rejected'),   // Tagged user rejected - no chat, marks as handled
+      v.literal('connected')   // Tagged user connected - boosts discover priority
+    )),
+    taggedUserRespondedAt: v.optional(v.number()), // When tagged user responded
     // Soft delete support
     isDeleted: v.optional(v.boolean()),
     deletedAt: v.optional(v.number()),
@@ -1382,6 +1389,21 @@ export default defineSchema({
     .index('by_user', ['userId'])
     .index('by_expires', ['expiresAt'])
     .index('by_tagged_user', ['taggedUserId']),
+
+  // Confession Connect Signals table (discover boost for Connect action)
+  // When a tagged user taps "Connect" on a confession, this stores a signal
+  // that boosts the confessor's priority in the tagged user's discover feed
+  confessionConnectSignals: defineTable({
+    confessionId: v.id('confessions'),
+    fromUserId: v.id('users'),      // The person who confessed (gets boosted)
+    toUserId: v.id('users'),        // The tagged person who tapped Connect
+    createdAt: v.number(),
+    expiresAt: v.number(),          // Signal expires after 7 days (ranking decay)
+  })
+    .index('by_to_user', ['toUserId'])              // For discover ranking lookup
+    .index('by_from_user', ['fromUserId'])          // For checking existing signals
+    .index('by_confession', ['confessionId'])       // For cleanup on confession delete
+    .index('by_expires', ['expiresAt']),            // For cleanup cron
 
   // Confession Reports table (for moderation)
   confessionReports: defineTable({

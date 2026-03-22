@@ -1416,70 +1416,104 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
 
   const messagesRemaining = isDemo ? 999999 : (currentUser?.messagesRemaining || 0);
 
+  // CONFESSION CHAT PRIVACY: Check if other user is anonymous (from confession chat)
+  const isOtherUserAnonymous = !isDemo && (activeConversation.otherUser as any).isAnonymous === true;
+  const isConfessionChat = !isDemo && (activeConversation as any).isConfessionChat === true;
+
   return (
     <View style={styles.container}>
-      {/* LOCKED: P1 chat header avatar + open profile. Do not modify without explicit approval. */}
+      {/* CONFESSION CHAT BANNER: Show safety notice for anonymous confession chats */}
+      {isConfessionChat && (
+        <View style={[styles.confessionBanner, { paddingTop: insets.top + 8 }]}>
+          <View style={styles.confessionBannerInner}>
+            <Ionicons name="eye-off" size={14} color={COLORS.primary} />
+            <Text style={styles.confessionBannerText}>Anonymous Chat from Confess</Text>
+          </View>
+          <Text style={styles.confessionBannerHint}>Be kind. Do not share personal info.</Text>
+        </View>
+      )}
       {/* Header — sits above KAV (does not move when keyboard opens) */}
-      <View style={[styles.header, { paddingTop: insets.top }]}>
+      <View style={[styles.header, !isConfessionChat && { paddingTop: insets.top }]}>
         <TouchableOpacity onPress={handleBack} style={styles.backButton}>
           <Ionicons name="arrow-back" size={24} color={COLORS.text} />
         </TouchableOpacity>
-        {/* Avatar with presence dot - tappable to open profile */}
-        <TouchableOpacity
-          onPress={() => handleOpenProfile(activeConversation.otherUser.id)}
-          style={styles.avatarButton}
-          activeOpacity={0.7}
-        >
-          <View style={styles.avatarContainer}>
-            {activeConversation.otherUser.photoUrl ? (
-              <Image
-                source={{ uri: activeConversation.otherUser.photoUrl }}
-                style={styles.headerAvatar}
-              />
-            ) : (
-              <View style={styles.headerAvatarPlaceholder}>
-                <Text style={styles.headerAvatarInitials}>{avatarInitials}</Text>
+        {/* Avatar with presence dot - tappable to open profile (disabled for anonymous users) */}
+        {isOtherUserAnonymous ? (
+          // PRIVACY: Non-tappable anonymous avatar
+          <View style={styles.avatarButton}>
+            <View style={styles.avatarContainer}>
+              <View style={[styles.headerAvatarPlaceholder, styles.headerAvatarAnonymous]}>
+                <Ionicons name="eye-off" size={18} color={COLORS.textMuted} />
               </View>
-            )}
-            {/* PRESENCE-DOT: Online indicator on avatar */}
-            {(() => {
-              const lastActive = activeConversation.otherUser.lastActive ?? 0;
-              const isOnline = Date.now() - lastActive < 60_000;
-              return (
-                <View style={[
-                  styles.presenceDot,
-                  isOnline ? styles.presenceDotOnline : styles.presenceDotOffline,
-                ]} />
-              );
-            })()}
+            </View>
           </View>
-        </TouchableOpacity>
-        {/* Name + status - tappable to open profile */}
-        <TouchableOpacity
-          onPress={() => handleOpenProfile(activeConversation.otherUser.id)}
-          style={styles.headerInfo}
-          activeOpacity={0.7}
-        >
-          {/* LONG-NAME-FIX: Truncate long names with ellipsis */}
-          <Text style={styles.headerName} numberOfLines={1} ellipsizeMode="tail">
-            {activeConversation.otherUser.name}
-          </Text>
-          {/* ONLINE-STATUS-FIX: Show "Online" for very recent activity */}
-          <Text style={styles.headerStatus}>
-            {(() => {
-              const lastActive = activeConversation.otherUser.lastActive ?? 0;
-              const now = Date.now();
-              const diff = now - lastActive;
-              // Online: within 1 minute (likely still in app)
-              if (diff < 60_000) return 'Online';
-              // Active now: within 5 minutes
-              if (diff < 5 * 60_000) return 'Active now';
-              // Recently active: anything else with valid timestamp
-              if (lastActive > 0) return 'Recently active';
-              return 'Offline';
-            })()}
-          </Text>
-        </TouchableOpacity>
+        ) : (
+          <TouchableOpacity
+            onPress={() => handleOpenProfile(activeConversation.otherUser.id)}
+            style={styles.avatarButton}
+            activeOpacity={0.7}
+          >
+            <View style={styles.avatarContainer}>
+              {activeConversation.otherUser.photoUrl ? (
+                <Image
+                  source={{ uri: activeConversation.otherUser.photoUrl }}
+                  style={styles.headerAvatar}
+                />
+              ) : (
+                <View style={styles.headerAvatarPlaceholder}>
+                  <Text style={styles.headerAvatarInitials}>{avatarInitials}</Text>
+                </View>
+              )}
+              {/* PRESENCE-DOT: Online indicator on avatar */}
+              {(() => {
+                const lastActive = activeConversation.otherUser.lastActive ?? 0;
+                const isOnline = Date.now() - lastActive < 60_000;
+                return (
+                  <View style={[
+                    styles.presenceDot,
+                    isOnline ? styles.presenceDotOnline : styles.presenceDotOffline,
+                  ]} />
+                );
+              })()}
+            </View>
+          </TouchableOpacity>
+        )}
+        {/* Name + status - tappable to open profile (disabled for anonymous users) */}
+        {isOtherUserAnonymous ? (
+          // PRIVACY: Non-tappable anonymous name display
+          <View style={styles.headerInfo}>
+            <Text style={styles.headerName} numberOfLines={1} ellipsizeMode="tail">
+              Anonymous
+            </Text>
+            <Text style={styles.headerStatus}>From a confession</Text>
+          </View>
+        ) : (
+          <TouchableOpacity
+            onPress={() => handleOpenProfile(activeConversation.otherUser.id)}
+            style={styles.headerInfo}
+            activeOpacity={0.7}
+          >
+            {/* LONG-NAME-FIX: Truncate long names with ellipsis */}
+            <Text style={styles.headerName} numberOfLines={1} ellipsizeMode="tail">
+              {activeConversation.otherUser.name}
+            </Text>
+            {/* ONLINE-STATUS-FIX: Show "Online" for very recent activity */}
+            <Text style={styles.headerStatus}>
+              {(() => {
+                const lastActive = activeConversation.otherUser.lastActive ?? 0;
+                const now = Date.now();
+                const diff = now - lastActive;
+                // Online: within 1 minute (likely still in app)
+                if (diff < 60_000) return 'Online';
+                // Active now: within 5 minutes
+                if (diff < 5 * 60_000) return 'Active now';
+                // Recently active: anything else with valid timestamp
+                if (lastActive > 0) return 'Recently active';
+                return 'Offline';
+              })()}
+            </Text>
+          </TouchableOpacity>
+        )}
         {/* Right section: T/D button + menu with stable spacing */}
         <View style={styles.headerRightSection}>
         {/* Truth/Dare game button - only for matched users (non-pre-match) */}
@@ -1631,10 +1665,10 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
               onVoiceDelete={isDemo ? handleVoiceDelete : undefined}
               // AVATAR GROUPING: Pass grouping info for Instagram/Tinder style layout
               showAvatar={showAvatar}
-              avatarUrl={activeConversation.otherUser.photoUrl}
+              avatarUrl={isOtherUserAnonymous ? undefined : activeConversation.otherUser.photoUrl}
               isLastInGroup={isLastInGroup}
-              // PROFILE-TAP: Avatar tap opens profile
-              onAvatarPress={() => handleOpenProfile(activeConversation.otherUser.id)}
+              // PROFILE-TAP: Avatar tap opens profile (disabled for anonymous users)
+              onAvatarPress={isOtherUserAnonymous ? undefined : () => handleOpenProfile(activeConversation.otherUser.id)}
             />
           );
           }}
@@ -1642,7 +1676,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
             <View style={styles.emptyChat}>
               <Ionicons name="chatbubble-outline" size={40} color={COLORS.border} />
               <Text style={styles.emptyChatText}>
-                Say hello to {activeConversation.otherUser.name}!
+                Say hello to {isOtherUserAnonymous ? 'Anonymous' : activeConversation.otherUser.name}!
               </Text>
             </View>
           }
@@ -2132,5 +2166,31 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: '500',
     color: COLORS.success,
+  },
+  // CONFESSION CHAT: Anonymous privacy styles
+  confessionBanner: {
+    backgroundColor: 'rgba(233, 30, 99, 0.08)',
+    paddingBottom: 8,
+    paddingHorizontal: 16,
+  },
+  confessionBannerInner: {
+    flexDirection: 'row' as const,
+    alignItems: 'center' as const,
+    justifyContent: 'center' as const,
+    gap: 6,
+  },
+  confessionBannerText: {
+    fontSize: 13,
+    fontWeight: '600' as const,
+    color: COLORS.primary,
+  },
+  confessionBannerHint: {
+    fontSize: 11,
+    color: COLORS.textMuted,
+    textAlign: 'center' as const,
+    marginTop: 2,
+  },
+  headerAvatarAnonymous: {
+    backgroundColor: COLORS.backgroundDark,
   },
 });

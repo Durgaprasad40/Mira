@@ -55,7 +55,6 @@ interface ConfessionCardProps {
   onPress?: () => void;
   onReact: () => void; // opens emoji picker
   onToggleEmoji?: (emoji: string) => void; // directly toggle a specific emoji
-  onReplyAnonymously?: () => void;
   onReport?: () => void;
   onViewProfile?: () => void; // one-time profile preview for tagged receivers
   onLongPress?: () => void; // for author manual delete
@@ -64,8 +63,11 @@ interface ConfessionCardProps {
   onAuthorPress?: () => void; // tap author identity to open full profile preview
 }
 
-function getTimeAgo(timestamp: number): string {
+// P1-004 FIX: Guard against undefined/null timestamp (legacy data)
+function getTimeAgo(timestamp: number | undefined | null): string {
+  if (timestamp == null || !Number.isFinite(timestamp)) return 'just now';
   const diff = Date.now() - timestamp;
+  if (diff < 0) return 'just now'; // Future timestamp protection
   const minutes = Math.floor(diff / 60000);
   if (minutes < 1) return 'just now';
   if (minutes < 60) return `${minutes}m ago`;
@@ -99,7 +101,6 @@ export default function ConfessionCard({
   onPress,
   onReact,
   onToggleEmoji,
-  onReplyAnonymously,
   onReport,
   onViewProfile,
   onLongPress,
@@ -331,28 +332,13 @@ export default function ConfessionCard({
       )}
 
       {/* Footer */}
+      {/* Reply count - non-tappable, taps bubble to card which opens thread */}
       <View style={styles.footer}>
-        {/* For own confessions: show non-tappable reply count, let taps bubble to card */}
-        {authorId && viewerId && authorId === viewerId ? (
-          <View style={styles.footerButton} pointerEvents="none">
-            <Ionicons name="chatbubble-outline" size={14} color={COLORS.textMuted} />
-            <Text style={styles.footerCount}>{replyCount}</Text>
-            <Text style={styles.footerLabel}>{replyCount === 1 ? 'Reply' : 'Replies'}</Text>
-          </View>
-        ) : (
-          <TouchableOpacity
-            style={styles.footerButton}
-            onPress={(e) => {
-              e.stopPropagation?.();
-              onReplyAnonymously?.();
-            }}
-            hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-          >
-            <Ionicons name="chatbubble-outline" size={14} color={COLORS.textMuted} />
-            <Text style={styles.footerCount}>{replyCount}</Text>
-            <Text style={styles.footerLabel}>{replyCount === 1 ? 'Reply' : 'Replies'}</Text>
-          </TouchableOpacity>
-        )}
+        <View style={styles.footerButton} pointerEvents="none">
+          <Ionicons name="chatbubble-outline" size={14} color={COLORS.textMuted} />
+          <Text style={styles.footerCount}>{replyCount}</Text>
+          <Text style={styles.footerLabel}>{replyCount === 1 ? 'Reply' : 'Replies'}</Text>
+        </View>
       </View>
     </TouchableOpacity>
   );

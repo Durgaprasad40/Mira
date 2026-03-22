@@ -93,6 +93,28 @@ export const getUserById = query({
 
     if (reverseBlocked) return null;
 
+    // P0-004 FIX: Block profile lookup for anonymous confession participants
+    // If the requested user is an anonymousParticipantId in any conversation with the viewer,
+    // deny the profile lookup to protect their identity
+    const anonymousConversation = await ctx.db
+      .query("conversations")
+      .filter((q) =>
+        q.and(
+          q.eq(q.field("anonymousParticipantId"), args.userId),
+          q.or(
+            q.eq(q.field("participants"), [args.userId, args.viewerId]),
+            q.eq(q.field("participants"), [args.viewerId, args.userId])
+          )
+        )
+      )
+      .first();
+
+    if (anonymousConversation) {
+      // The requested user is anonymous in a conversation with the viewer
+      // Deny the profile lookup to protect their identity
+      return null;
+    }
+
     // Get photos
     const photos = await ctx.db
       .query("photos")
