@@ -1,4 +1,4 @@
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState } from 'react';
 import {
   View,
   Text,
@@ -26,7 +26,6 @@ import { useDemoStore } from '@/stores/demoStore';
 import { ReportBlockModal } from '@/components/security/ReportBlockModal';
 import { Toast } from '@/components/ui/Toast';
 import { PRIVATE_INTENT_CATEGORIES } from '@/lib/privateConstants';
-import { useConfessPreviewStore } from '@/stores/confessPreviewStore';
 
 // Gender labels for "Looking for" display
 const GENDER_LABELS: Record<string, string> = {
@@ -47,6 +46,8 @@ export default function ViewProfileScreen() {
   }>();
   const isPhase2 = mode === 'phase2';
   const isConfessPreview = mode === 'confess_preview';
+  const isConfessRevisit = mode === 'confess_revisit';
+  const isConfessViewOnly = isConfessPreview || isConfessRevisit;
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const { width: screenWidth } = useWindowDimensions();
@@ -54,17 +55,8 @@ export default function ViewProfileScreen() {
   const [currentPhotoIndex, setCurrentPhotoIndex] = useState(0);
   const [showReportBlock, setShowReportBlock] = useState(false);
 
-  // Confess preview: mark as used on successful screen mount (one-time only)
-  const markPreviewUsed = useConfessPreviewStore((s) => s.markPreviewUsed);
-  const previewMarkedRef = useRef(false);
-
-  useEffect(() => {
-    if (isConfessPreview && confessionId && receiverId && !previewMarkedRef.current) {
-      // Mark preview as used now that screen has successfully opened
-      markPreviewUsed(confessionId, receiverId);
-      previewMarkedRef.current = true;
-    }
-  }, [isConfessPreview, confessionId, receiverId, markPreviewUsed]);
+  // NOTE: Preview consumption is now handled BEFORE navigation in confessions.tsx
+  // This ensures the preview is consumed before showing the profile, preventing abuse
 
   // Phase-1: Use users.getUserById
   const convexPhase1Profile = useQuery(
@@ -635,11 +627,13 @@ export default function ViewProfileScreen() {
           </View>
         )}
 
-        {/* Action Buttons - Hidden in confess_preview mode or when opened from chat */}
-        {isConfessPreview ? (
+        {/* Action Buttons - Hidden in confess view modes or when opened from chat */}
+        {isConfessViewOnly ? (
           <View style={styles.previewOnlyBanner}>
             <Ionicons name="eye-outline" size={18} color={COLORS.textMuted} />
-            <Text style={styles.previewOnlyText}>View Only — One-time preview</Text>
+            <Text style={styles.previewOnlyText}>
+              {isConfessPreview ? 'View Only' : 'View Only'}
+            </Text>
           </View>
         ) : fromChat === '1' ? null : (
           <View style={styles.actions}>
