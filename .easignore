@@ -1,0 +1,3 @@
+# Include android folder for EAS builds (override .gitignore)
+# EAS will use the pre-built android folder instead of running prebuild
+!android/

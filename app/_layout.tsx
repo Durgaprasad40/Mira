@@ -118,6 +118,14 @@ import { Toast } from "@/components/ui/Toast";
 import { safePush } from "@/lib/safeRouter";
 import { asUserId } from "@/convex/id";
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import { log } from "@/utils/logger";
+
+// ══════════════════════════════════════════════════════════════════════════════
+// STARTUP LOG: Visible in adb logcat even in standalone APK
+// ══════════════════════════════════════════════════════════════════════════════
+log.info('[APP]', '═══════════════════════════════════════════════════');
+log.info('[APP]', 'Mira app starting', { env: __DEV__ ? 'DEV' : 'PROD' });
+log.info('[APP]', '═══════════════════════════════════════════════════');
 
 /**
  * ResetEpochChecker - Detects database resets and clears stale local caches
@@ -928,6 +936,7 @@ function CrossedPathToastManager() {
 export default function RootLayout() {
   // Milestone A: RootLayout first render
   markTiming('root_layout');
+  log.info('[APP]', 'RootLayout rendering');
 
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>
