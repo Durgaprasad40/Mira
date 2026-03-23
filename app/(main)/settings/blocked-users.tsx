@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState } from 'react';
 import {
   View,
   Text,
@@ -10,16 +10,65 @@ import {
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
+import { useMutation } from 'convex/react';
+import { api } from '@/convex/_generated/api';
+import { Id } from '@/convex/_generated/dataModel';
 import { COLORS } from '@/lib/constants';
 import { useBlockStore } from '@/stores/blockStore';
+import { useAuthStore } from '@/stores/authStore';
+import { Toast } from '@/components/ui/Toast';
+
+// Report reason type matching backend
+type ReportReason = 'harassment' | 'spam' | 'inappropriate_photos';
 
 export default function BlockedUsersScreen() {
   const router = useRouter();
+  const { userId } = useAuthStore();
 
   // Get blocked users from store
   const blockedUsersInfo = useBlockStore((s) => s.blockedUsersInfo);
 
-  const handleReport = (userId: string) => {
+  // Backend mutation
+  const reportUserMutation = useMutation(api.users.reportUser);
+
+  // Prevent spam clicks
+  const [isReporting, setIsReporting] = useState(false);
+
+  const submitReport = async (reportedUserId: string, reason: ReportReason) => {
+    if (!userId) {
+      Toast.show('Please log in to report users');
+      return;
+    }
+
+    setIsReporting(true);
+    try {
+      const result = await reportUserMutation({
+        authUserId: userId,
+        reportedUserId: reportedUserId as Id<'users'>,
+        reason,
+      });
+
+      if (result.success) {
+        Toast.show('Report submitted. Our team will review it.');
+      } else {
+        // Handle specific errors
+        if (result.error === 'cannot_report_self') {
+          Toast.show('You cannot report yourself');
+        } else {
+          Toast.show('Failed to submit report. Please try again.');
+        }
+      }
+    } catch (error: any) {
+      console.error('[BlockedUsers] Report failed:', error);
+      Toast.show('Failed to submit report. Please try again.');
+    } finally {
+      setIsReporting(false);
+    }
+  };
+
+  const handleReport = (reportedUserId: string) => {
+    if (isReporting) return; // Prevent spam clicks
+
     Alert.alert(
       'Report User',
       'What would you like to report?',
@@ -27,21 +76,15 @@ export default function BlockedUsersScreen() {
         { text: 'Cancel', style: 'cancel' },
         {
           text: 'Harassment',
-          onPress: () => {
-            Alert.alert('Report Submitted', 'Thank you for your report. Our team will review it.');
-          },
+          onPress: () => submitReport(reportedUserId, 'harassment'),
         },
         {
           text: 'Spam / Scam',
-          onPress: () => {
-            Alert.alert('Report Submitted', 'Thank you for your report. Our team will review it.');
-          },
+          onPress: () => submitReport(reportedUserId, 'spam'),
         },
         {
           text: 'Inappropriate Content',
-          onPress: () => {
-            Alert.alert('Report Submitted', 'Thank you for your report. Our team will review it.');
-          },
+          onPress: () => submitReport(reportedUserId, 'inappropriate_photos'),
         },
       ]
     );
@@ -98,9 +141,10 @@ export default function BlockedUsersScreen() {
 
                 <View style={styles.entryActions}>
                   <TouchableOpacity
-                    style={styles.actionButton}
+                    style={[styles.actionButton, isReporting && styles.actionButtonDisabled]}
                     onPress={() => handleReport(user.id)}
                     hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                    disabled={isReporting}
                   >
                     <Ionicons name="flag-outline" size={20} color={COLORS.textMuted} />
                   </TouchableOpacity>
@@ -218,6 +262,9 @@ const styles = StyleSheet.create({
   },
   actionButton: {
     padding: 8,
+  },
+  actionButtonDisabled: {
+    opacity: 0.4,
   },
   // Info footer
   infoFooter: {
