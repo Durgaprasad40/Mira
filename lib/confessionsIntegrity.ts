@@ -1,4 +1,12 @@
 /**
+ * LOCKED (CONFESSIONS RANKING - DEMO MODE)
+ * Do NOT modify this file unless Durga Prasad explicitly unlocks it.
+ *
+ * LOCKED LOGIC:
+ * - Demo mode ranking: engagement-only scoring (no baseScore, no timeDecay)
+ * - Sort: rankingScore DESC, createdAt ASC tie-breaker
+ * - New posts appear at BOTTOM (score=0, newest createdAt)
+ *
  * confessionsIntegrity.ts — Pure helper module for confession state management
  *
  * Single source of truth for:

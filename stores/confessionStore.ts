@@ -1,4 +1,11 @@
 /**
+ * LOCKED (CONFESSIONS STORE - RANKING BEHAVIOR)
+ * Do NOT modify this file unless Durga Prasad explicitly unlocks it.
+ *
+ * LOCKED LOGIC:
+ * - addConfession: APPENDS to end (new posts at bottom)
+ * - Rate limit bypassed for TESTING (TODO: re-enable for production)
+ *
  * STORAGE POLICY: NO local persistence. Convex is ONLY source of truth.
  * Store is in-memory only. Any required rehydration must come from Convex queries/mutations.
  */

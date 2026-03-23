@@ -1,7 +1,11 @@
 /*
- * LOCKED (PHASE-1 TAB)
+ * LOCKED (CONFESSIONS TAB - RANKING + LOADING)
  * Do NOT modify this file unless Durga Prasad explicitly unlocks it.
- * Nearby tab is the only Phase-1 tab currently unlocked.
+ *
+ * LOCKED LOGIC:
+ * - Query uses sortBy: 'trending' for ranking-based order
+ * - isLoading: correctly detects Convex loading state
+ * - Loading shows spinner, not "Post a Confession" empty state
  */
 import React, { useState, useCallback, useMemo, useEffect, useRef } from 'react';
 import {

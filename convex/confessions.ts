@@ -1,3 +1,15 @@
+/*
+ * LOCKED (CONFESSIONS RANKING SYSTEM)
+ * Do NOT modify this file unless Durga Prasad explicitly unlocks it.
+ *
+ * LOCKED LOGIC:
+ * - Engagement-based ranking (no baseScore, no timeDecay)
+ * - New confessions appear at BOTTOM by default (score=0)
+ * - Engaged confessions rise based on: reactions, replies, unique commenters
+ * - Sort: rankingScore DESC, createdAt ASC tie-breaker
+ * - computeRankingScore() formula
+ * - updateConfessionRanking() on reactions/replies/reports
+ */
 import { mutation, query, MutationCtx } from './_generated/server';
 import { v } from 'convex/values';
 import { Id } from './_generated/dataModel';

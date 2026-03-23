@@ -1,7 +1,10 @@
 /*
- * LOCKED (PHASE-1 TAB)
+ * LOCKED (TABS LAYOUT - CONFESSIONS PRELOAD)
  * Do NOT modify this file unless Durga Prasad explicitly unlocks it.
- * Nearby tab is the only Phase-1 tab currently unlocked.
+ *
+ * LOCKED LOGIC:
+ * - Prefetch query for listConfessions with sortBy: 'trending'
+ * - Ensures Confessions tab feels instant (data cached before tab open)
  */
 import { useEffect, useRef, useMemo, useCallback } from "react";
 import { Tabs, useRouter, useFocusEffect } from "expo-router";
