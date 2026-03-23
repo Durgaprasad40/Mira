@@ -117,11 +117,13 @@ export default function ConfessionCard({
   const effectiveVisibility: ConfessionAuthorVisibility = authorVisibility || (isAnonymous ? 'anonymous' : 'open');
   const isFullyAnonymous = effectiveVisibility === 'anonymous';
   const isBlurPhoto = effectiveVisibility === 'blur_photo';
-  // Privacy-safe tag display logic
+  // Tag display logic - show actual tagged user name to all viewers
+  // Author remains anonymous, but target is visible
   const getTagDisplayText = (): string | null => {
     if (!taggedUserId) return null;
     if (viewerId === taggedUserId) return 'You';
-    if (viewerId === authorId && taggedUserName) return taggedUserName;
+    // Show actual name to all viewers if available
+    if (taggedUserName) return taggedUserName;
     return 'Someone';
   };
   const tagDisplayText = getTagDisplayText();
@@ -261,68 +263,25 @@ export default function ConfessionCard({
         )}
       </Text>
 
-      {/* Tagged user display (non-clickable, privacy-safe) */}
+      {/* Tagged user display - tappable to open profile */}
       {tagDisplayText && (
-        <View style={styles.taggedRow}>
+        <TouchableOpacity
+          style={styles.taggedRow}
+          onPress={(e) => {
+            e.stopPropagation?.();
+            onTagPress?.();
+          }}
+          disabled={!onTagPress}
+          activeOpacity={onTagPress ? 0.7 : 1}
+        >
           <Ionicons name="heart" size={12} color={COLORS.primary} />
           <Text style={styles.taggedLabel}>Confess-to:</Text>
-          <Text style={styles.taggedName}>{tagDisplayText}</Text>
-        </View>
-      )}
-
-      {/* View Profile button for tagged receivers (one-time use) */}
-      {isTaggedForMe && onViewProfile && (
-        <TouchableOpacity
-          style={[
-            styles.viewProfileButton,
-            previewUsed && styles.viewProfileButtonUsed,
-          ]}
-          onPress={previewUsed ? undefined : onViewProfile}
-          activeOpacity={previewUsed ? 1 : 0.7}
-          disabled={previewUsed}
-        >
-          <Ionicons
-            name={previewUsed ? 'checkmark-circle' : 'eye-outline'}
-            size={14}
-            color={previewUsed ? COLORS.textMuted : COLORS.primary}
-          />
-          <Text
-            style={[
-              styles.viewProfileText,
-              previewUsed && styles.viewProfileTextUsed,
-            ]}
-          >
-            {previewUsed ? 'Preview used' : 'View their profile'}
-          </Text>
+          <Text style={[styles.taggedName, onTagPress && styles.taggedNameTappable]}>{tagDisplayText}</Text>
         </TouchableOpacity>
       )}
 
-      {/* Connect button - ONLY for the tagged user */}
-      {isTaggedForMe && onConnect && (
-        <TouchableOpacity
-          style={[
-            styles.connectButton,
-            isConnected && styles.connectButtonConnected,
-          ]}
-          onPress={isConnected ? undefined : onConnect}
-          activeOpacity={isConnected ? 1 : 0.7}
-          disabled={isConnected}
-        >
-          <Ionicons
-            name={isConnected ? 'checkmark-circle' : 'chatbubbles-outline'}
-            size={14}
-            color={isConnected ? COLORS.textMuted : COLORS.white}
-          />
-          <Text
-            style={[
-              styles.connectButtonText,
-              isConnected && styles.connectButtonTextConnected,
-            ]}
-          >
-            {isConnected ? 'Chat unlocked' : 'Accept & start chat'}
-          </Text>
-        </TouchableOpacity>
-      )}
+      {/* NOTE: View Profile and Connect buttons removed from homepage cards.
+          Actions now only appear inside the thread screen for cleaner UX. */}
 
       {/* Emoji Reactions */}
       <View style={styles.reactionBarWrap}>
@@ -349,7 +308,8 @@ export default function ConfessionCard({
               </Text>
             </View>
           ))}
-          {replyCount > 2 && (
+          {/* Show "View all" only if more replies than previews shown */}
+          {replyCount > replyPreviews.length && (
             <TouchableOpacity onPress={onPress}>
               <Text style={styles.viewAllReplies}>
                 View all {replyCount} {replyCount === 1 ? 'reply' : 'replies'}
@@ -359,15 +319,16 @@ export default function ConfessionCard({
         </View>
       )}
 
-      {/* Footer */}
-      {/* Reply count - non-tappable, taps bubble to card which opens thread */}
-      <View style={styles.footer}>
-        <View style={styles.footerButton} pointerEvents="none">
-          <Ionicons name="chatbubble-outline" size={14} color={COLORS.textMuted} />
-          <Text style={styles.footerCount}>{replyCount}</Text>
-          <Text style={styles.footerLabel}>{replyCount === 1 ? 'Reply' : 'Replies'}</Text>
+      {/* Footer - only show reply count if no previews displayed (avoids duplicate) */}
+      {replyPreviews.length === 0 && replyCount > 0 && (
+        <View style={styles.footer}>
+          <View style={styles.footerButton} pointerEvents="none">
+            <Ionicons name="chatbubble-outline" size={14} color={COLORS.textMuted} />
+            <Text style={styles.footerCount}>{replyCount}</Text>
+            <Text style={styles.footerLabel}>{replyCount === 1 ? 'Reply' : 'Replies'}</Text>
+          </View>
         </View>
-      </View>
+      )}
     </TouchableOpacity>
   );
 }
@@ -503,6 +464,9 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontWeight: '600',
     color: COLORS.primary,
+  },
+  taggedNameTappable: {
+    textDecorationLine: 'underline',
   },
   viewProfileButton: {
     flexDirection: 'row',

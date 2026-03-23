@@ -67,9 +67,6 @@ function containsPII(text: string): { hasPII: boolean; type: string } {
 // Confession expiry duration (24 hours in milliseconds)
 const CONFESSION_EXPIRY_MS = 24 * 60 * 60 * 1000;
 
-// P1-01: Server-side rate limit (5 confessions per 24 hours)
-const CONFESSION_RATE_LIMIT = 5;
-
 // P0-003 FIX: Helper to check if either user has blocked the other (bidirectional)
 // Returns true if blocked (should prevent conversation creation)
 async function isBlockedBidirectional(
@@ -170,18 +167,8 @@ export const createConfession = mutation({
     // Map authUserId -> Convex Id<"users"> (MUTATION: can create)
     const userId = await ensureUserByAuthId(ctx, args.userId as string);
 
-    // P1-01: Server-side rate limiting - count confessions in last 24 hours
+    // NOTE: Confession creation limit removed - users can create unlimited confessions
     const now = Date.now();
-    const twentyFourHoursAgo = now - CONFESSION_EXPIRY_MS;
-    const recentConfessions = await ctx.db
-      .query('confessions')
-      .withIndex('by_user', (q) => q.eq('userId', userId))
-      .filter((q) => q.gt(q.field('createdAt'), twentyFourHoursAgo))
-      .collect();
-
-    if (recentConfessions.length >= CONFESSION_RATE_LIMIT) {
-      throw new Error('You have reached the confession limit. Please try again later.');
-    }
 
     // Map taggedUserId if provided (MUTATION: can create)
     let taggedUserId: Id<'users'> | undefined;
@@ -424,6 +411,17 @@ export const createReply = mutation({
     // Map authUserId -> Convex Id<"users"> (MUTATION: can create)
     const userId = await ensureUserByAuthId(ctx, args.userId as string);
 
+    // ONE REPLY PER USER: Check if user already has any reply (top-level or nested) for this confession
+    const existingReply = await ctx.db
+      .query('confessionReplies')
+      .withIndex('by_confession', (q) => q.eq('confessionId', args.confessionId))
+      .filter((q) => q.eq(q.field('userId'), userId))
+      .first();
+
+    if (existingReply) {
+      throw new Error('You can reply only once to this confession.');
+    }
+
     const replyType = args.type || 'text';
 
     if (replyType === 'text') {
@@ -450,14 +448,21 @@ export const createReply = mutation({
       createdAt: Date.now(),
     });
 
-    // Increment reply count (and voice reply count if applicable)
+    // Increment reply count ONLY for top-level replies (not nested child replies)
+    // Nested replies (with parentReplyId) should not inflate the main reply count
     const confession = await ctx.db.get(args.confessionId);
     if (confession) {
-      const patch: any = { replyCount: confession.replyCount + 1 };
+      const patch: any = {};
+      // Only count top-level replies in replyCount
+      if (!args.parentReplyId) {
+        patch.replyCount = confession.replyCount + 1;
+      }
       if (replyType === 'voice') {
         patch.voiceReplyCount = (confession.voiceReplyCount || 0) + 1;
       }
-      await ctx.db.patch(args.confessionId, patch);
+      if (Object.keys(patch).length > 0) {
+        await ctx.db.patch(args.confessionId, patch);
+      }
     }
 
     return replyId;
@@ -496,18 +501,22 @@ export const deleteReply = mutation({
     // Delete the main reply
     await ctx.db.delete(args.replyId);
 
-    // Decrement reply count (include deleted children in count adjustment)
-    const totalDeleted = 1 + childReplies.length;
+    // Decrement reply count ONLY if this was a top-level reply
+    // Nested replies (with parentReplyId) don't affect the main reply count
     const confession = await ctx.db.get(reply.confessionId);
     if (confession) {
       const voiceDeleted = (reply.type === 'voice' ? 1 : 0) + childVoiceCount;
-      const patch: any = {
-        replyCount: Math.max(0, confession.replyCount - totalDeleted),
-      };
+      const patch: any = {};
+      // Only decrement replyCount if this was a top-level reply (no parentReplyId)
+      if (!reply.parentReplyId) {
+        patch.replyCount = Math.max(0, confession.replyCount - 1);
+      }
       if (voiceDeleted > 0) {
         patch.voiceReplyCount = Math.max(0, (confession.voiceReplyCount || 0) - voiceDeleted);
       }
-      await ctx.db.patch(reply.confessionId, patch);
+      if (Object.keys(patch).length > 0) {
+        await ctx.db.patch(reply.confessionId, patch);
+      }
     }
 
     return { success: true };
@@ -981,7 +990,7 @@ export const deleteConfession = mutation({
 // =============================================================================
 // Called by the tagged user to respond to a confession directed at them.
 // - reject: Mark as handled, no DM created, confession remains visible
-// - connect: Store a discover boost signal, no DM created
+// - connect: Notify author for step 2 response (NO Discover boost - independent flow)
 // =============================================================================
 export const respondToTaggedConfession = mutation({
   args: {
@@ -1019,7 +1028,7 @@ export const respondToTaggedConfession = mutation({
     }
 
     if (args.action === 'reject') {
-      // REJECT: Mark as handled, no chat created
+      // REJECT: Mark as handled, no further action
       await ctx.db.patch(args.confessionId, {
         taggedUserResponse: 'rejected',
         taggedUserRespondedAt: now,
@@ -1027,33 +1036,114 @@ export const respondToTaggedConfession = mutation({
 
       return { success: true, action: 'rejected' };
     } else {
-      // CONNECT: Store a discover boost signal
-      // The confessor (confession.userId) gets boosted in the tagged user's (userId) discover feed
-      const SEVEN_DAYS = 7 * 24 * 60 * 60 * 1000;
-
-      // Check if signal already exists for this confession (idempotency)
-      const existingSignal = await ctx.db
-        .query('confessionConnectSignals')
-        .withIndex('by_confession', (q) => q.eq('confessionId', args.confessionId))
-        .first();
-
-      if (!existingSignal) {
-        await ctx.db.insert('confessionConnectSignals', {
-          confessionId: args.confessionId,
-          fromUserId: confession.userId,  // The confessor gets boosted
-          toUserId: userId,               // In the tagged user's discover feed
-          createdAt: now,
-          expiresAt: now + SEVEN_DAYS,
-        });
-      }
-
-      // Update confession response status
+      // CONNECT (Step 1): Tagged user is open to connect
+      // Set authorResponse to 'pending' to signal author needs to respond
+      // NO Discover boost - this flow is independent of Discover
       await ctx.db.patch(args.confessionId, {
         taggedUserResponse: 'connected',
         taggedUserRespondedAt: now,
+        authorResponse: 'pending', // Signal author needs to respond
       });
 
       return { success: true, action: 'connected' };
+    }
+  },
+});
+
+// =============================================================================
+// Author responds to tagged user's connect request (Step 2)
+// =============================================================================
+// - reject: No match created
+// - connect: Create match and chat thread
+// =============================================================================
+export const authorRespondToConnect = mutation({
+  args: {
+    confessionId: v.id('confessions'),
+    userId: v.union(v.id('users'), v.string()),
+    action: v.union(v.literal('reject'), v.literal('connect')),
+  },
+  handler: async (ctx, args) => {
+    // Map authUserId -> Convex Id<"users">
+    const userId = await ensureUserByAuthId(ctx, args.userId as string);
+
+    // Get the confession
+    const confession = await ctx.db.get(args.confessionId);
+    if (!confession) {
+      throw new Error('Confession not found');
+    }
+
+    // Verify this user is the author
+    if (confession.userId !== userId) {
+      throw new Error('Only the confession author can respond');
+    }
+
+    // Verify tagged user has connected (step 1 complete)
+    if (confession.taggedUserResponse !== 'connected') {
+      throw new Error('Tagged user has not connected yet');
+    }
+
+    // Check if author already responded
+    if (confession.authorResponse && confession.authorResponse !== 'pending') {
+      throw new Error('You have already responded');
+    }
+
+    // Check if confession is deleted or expired
+    const now = Date.now();
+    if (confession.isDeleted) {
+      throw new Error('This confession has been deleted');
+    }
+    if (confession.expiresAt && confession.expiresAt < now) {
+      throw new Error('This confession has expired');
+    }
+
+    if (args.action === 'reject') {
+      // REJECT: Mark as handled, no match created
+      await ctx.db.patch(args.confessionId, {
+        authorResponse: 'rejected',
+        authorRespondedAt: now,
+      });
+
+      return { success: true, action: 'rejected', matchCreated: false };
+    } else {
+      // CONNECT (Step 2): Both users want to connect - create match!
+      const taggedUserId = confession.taggedUserId;
+      if (!taggedUserId) {
+        throw new Error('No tagged user found');
+      }
+
+      // Check for existing match between these users (idempotency)
+      const existingMatch = await ctx.db
+        .query('matches')
+        .withIndex('by_user1', (q) => q.eq('user1Id', userId))
+        .filter((q) => q.eq(q.field('user2Id'), taggedUserId))
+        .first();
+
+      const existingMatchReverse = await ctx.db
+        .query('matches')
+        .withIndex('by_user1', (q) => q.eq('user1Id', taggedUserId))
+        .filter((q) => q.eq(q.field('user2Id'), userId))
+        .first();
+
+      let matchId: any = existingMatch?._id || existingMatchReverse?._id;
+
+      if (!matchId) {
+        // Create new match
+        matchId = await ctx.db.insert('matches', {
+          user1Id: userId,
+          user2Id: taggedUserId,
+          matchedAt: now,
+          isActive: true,
+          matchSource: 'confession', // Track that this came from confession connect
+        });
+      }
+
+      // Update confession
+      await ctx.db.patch(args.confessionId, {
+        authorResponse: 'connected',
+        authorRespondedAt: now,
+      });
+
+      return { success: true, action: 'connected', matchCreated: true, matchId };
     }
   },
 });
@@ -1244,5 +1334,113 @@ export const consumePreview = mutation({
     });
 
     return { success: true, alreadyConsumed: false };
+  },
+});
+
+// =============================================================================
+// Edit own reply
+// =============================================================================
+// Users can edit their own replies. Validates content and updates editedAt timestamp.
+// =============================================================================
+export const editReply = mutation({
+  args: {
+    replyId: v.id('confessionReplies'),
+    userId: v.union(v.id('users'), v.string()),
+    text: v.string(),
+  },
+  handler: async (ctx, args) => {
+    // Map authUserId -> Convex Id<"users">
+    const userId = await ensureUserByAuthId(ctx, args.userId as string);
+
+    const reply = await ctx.db.get(args.replyId);
+    if (!reply) {
+      throw new Error('Reply not found.');
+    }
+    if (reply.userId !== userId) {
+      throw new Error('You can only edit your own replies.');
+    }
+
+    // Validate text
+    const trimmed = args.text.trim();
+    if (trimmed.length < 1) {
+      throw new Error('Reply cannot be empty.');
+    }
+    if (trimmed.length > 300) {
+      throw new Error('Reply must be 300 characters or less.');
+    }
+
+    // PII validation
+    const piiCheck = containsPII(trimmed);
+    if (piiCheck.hasPII) {
+      throw new Error(`Do not include ${piiCheck.type}. Keep it anonymous!`);
+    }
+
+    // Update the reply
+    await ctx.db.patch(args.replyId, {
+      text: trimmed,
+      editedAt: Date.now(),
+    });
+
+    return { success: true };
+  },
+});
+
+// =============================================================================
+// Report a reply
+// =============================================================================
+// Users can report other users' replies for moderation review.
+// =============================================================================
+export const reportReply = mutation({
+  args: {
+    replyId: v.id('confessionReplies'),
+    reporterId: v.union(v.id('users'), v.string()),
+    reason: v.union(
+      v.literal('spam'),
+      v.literal('harassment'),
+      v.literal('hate'),
+      v.literal('sexual'),
+      v.literal('other')
+    ),
+    description: v.optional(v.string()),
+  },
+  handler: async (ctx, args) => {
+    // Map authUserId -> Convex Id<"users">
+    const reporterId = await ensureUserByAuthId(ctx, args.reporterId as string);
+
+    const reply = await ctx.db.get(args.replyId);
+    if (!reply) {
+      throw new Error('Reply not found.');
+    }
+
+    // Cannot report own replies
+    if (reply.userId === reporterId) {
+      throw new Error('You cannot report your own reply.');
+    }
+
+    // Check if already reported by this user
+    const existingReport = await ctx.db
+      .query('replyReports')
+      .withIndex('by_reply', (q) => q.eq('replyId', args.replyId))
+      .filter((q) => q.eq(q.field('reporterId'), reporterId))
+      .first();
+
+    if (existingReport) {
+      // Already reported - return success (idempotent)
+      return { success: true, alreadyReported: true };
+    }
+
+    // Create report record
+    await ctx.db.insert('replyReports', {
+      replyId: args.replyId,
+      confessionId: reply.confessionId,
+      reporterId: reporterId,
+      reportedUserId: reply.userId,
+      reason: args.reason,
+      description: args.description,
+      status: 'pending',
+      createdAt: Date.now(),
+    });
+
+    return { success: true, alreadyReported: false };
   },
 });

@@ -42,6 +42,8 @@ export interface TaggedConfessionItem {
   isExpired: boolean;
   replyCount: number;
   reactionCount: number;
+  // P1-PREVIEW FIX: Track if one-time preview has been consumed (persisted on backend)
+  previewConsumed?: boolean;
 }
 
 /** Input for processConfessionsIntegrity */

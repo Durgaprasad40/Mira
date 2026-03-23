@@ -177,6 +177,8 @@ export default function ConfessionThreadScreen() {
         type: r.type || 'text',
         voiceUrl: r.voiceUrl,
         voiceDurationSec: r.voiceDurationSec,
+        parentReplyId: r.parentReplyId, // Map parentReplyId for nested replies
+        editedAt: r.editedAt,
         createdAt: r.createdAt,
       }));
     } else {
@@ -188,6 +190,35 @@ export default function ConfessionThreadScreen() {
     }
     return items;
   }, [convexReplies, demoReplies, globalBlockedIds]);
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // DERIVED STATE: Organized Replies (top-level + nested children)
+  // ──────────────────────────────────────────────────────────────────────────
+  // Top-level replies are those WITHOUT a parentReplyId
+  const topLevelReplies = useMemo(() => {
+    return replies.filter((r) => !r.parentReplyId);
+  }, [replies]);
+
+  // Map of parentReplyId -> child replies for quick lookup
+  const childRepliesMap = useMemo(() => {
+    const map: Record<string, ConfessionReply[]> = {};
+    for (const r of replies) {
+      if (r.parentReplyId) {
+        if (!map[r.parentReplyId]) {
+          map[r.parentReplyId] = [];
+        }
+        map[r.parentReplyId].push(r);
+      }
+    }
+    // Sort children by createdAt ascending (oldest first)
+    for (const key of Object.keys(map)) {
+      map[key].sort((a, b) => a.createdAt - b.createdAt);
+    }
+    return map;
+  }, [replies]);
+
+  // Top-level reply count (for display - excludes nested replies)
+  const topLevelReplyCount = topLevelReplies.length;
 
   // ──────────────────────────────────────────────────────────────────────────
   // CENTRALIZED OWNERSHIP CHECKS
@@ -230,6 +261,18 @@ export default function ConfessionThreadScreen() {
     return (convexConfession as any).taggedUserResponse ?? null;
   }, [convexConfession]);
 
+  // Get the author response status from backend (for two-step flow)
+  const authorResponse = useMemo(() => {
+    if (!convexConfession) return null;
+    return (convexConfession as any).authorResponse ?? null;
+  }, [convexConfession]);
+
+  // Get the tagged user ID for match celebration navigation
+  const taggedUserId = useMemo(() => {
+    if (!convexConfession) return null;
+    return (convexConfession as any).taggedUserId ?? null;
+  }, [convexConfession]);
+
   // ──────────────────────────────────────────────────────────────────────────
   // LOCAL STATE
   // ──────────────────────────────────────────────────────────────────────────
@@ -243,6 +286,13 @@ export default function ConfessionThreadScreen() {
   // State for Reject/Connect actions (tagged user only)
   const [responding, setResponding] = useState(false);
   const [respondAction, setRespondAction] = useState<'reject' | 'connect' | null>(null);
+  // State for author's response (two-step flow)
+  const [authorResponding, setAuthorResponding] = useState(false);
+  const [authorRespondAction, setAuthorRespondAction] = useState<'reject' | 'connect' | null>(null);
+  // State for editing replies
+  const [editingReplyId, setEditingReplyId] = useState<string | null>(null);
+  const [editingReplyText, setEditingReplyText] = useState('');
+  const [savingEdit, setSavingEdit] = useState(false);
 
   // ──────────────────────────────────────────────────────────────────────────
   // NAVIGATION GUARD: Block expired/reported confessions
@@ -272,9 +322,12 @@ export default function ConfessionThreadScreen() {
   // ──────────────────────────────────────────────────────────────────────────
   const createReplyMutation = useMutation(api.confessions.createReply);
   const deleteReplyMutation = useMutation(api.confessions.deleteReply);
+  const editReplyMutation = useMutation(api.confessions.editReply);
+  const reportReplyMutation = useMutation(api.confessions.reportReply);
   const reportMutation = useMutation(api.confessions.reportConfession);
   const toggleReactionMutation = useMutation(api.confessions.toggleReaction);
   const respondToTaggedConfessionMutation = useMutation(api.confessions.respondToTaggedConfession);
+  const authorRespondToConnectMutation = useMutation(api.confessions.authorRespondToConnect);
 
   // ──────────────────────────────────────────────────────────────────────────
   // HANDLERS
@@ -317,7 +370,7 @@ export default function ConfessionThreadScreen() {
     setSending(false);
   }, [replyText, confessionId, currentUserId, createReplyMutation, sending, addReplyToStore, deleteReplyFromStore, safeConfessionId]);
 
-  const handleSendReplyToReply = useCallback(async (parentReplyId: string) => {
+  const handleSendReplyToReply = useCallback(async (parentReplyIdArg: string) => {
     if (!replyToReplyText.trim() || !confessionId || sending || !currentUserId) return;
 
     const submittedText = replyToReplyText.trim();
@@ -328,6 +381,7 @@ export default function ConfessionThreadScreen() {
       text: submittedText,
       isAnonymous: false,
       type: 'text',
+      parentReplyId: parentReplyIdArg, // Include parentReplyId for nested replies
       createdAt: Date.now(),
     };
 
@@ -338,7 +392,7 @@ export default function ConfessionThreadScreen() {
 
     if (!isDemoMode && safeConfessionId) {
       const safeUserId = asUserId(currentUserId);
-      const safeParentReplyId = asReplyId(parentReplyId);
+      const safeParentReplyId = asReplyId(parentReplyIdArg);
       if (!safeUserId) return setSending(false);
       try {
         await createReplyMutation({
@@ -386,6 +440,128 @@ export default function ConfessionThreadScreen() {
       },
     ]);
   }, [currentUserId, confessionId, deleteReplyMutation, deleteReplyFromStore, addReplyToStore]);
+
+  // Handler for own reply menu (Edit/Delete)
+  const handleReplyMenu = useCallback((reply: ConfessionReply) => {
+    if (Platform.OS === 'ios') {
+      ActionSheetIOS.showActionSheetWithOptions(
+        {
+          options: ['Edit', 'Delete', 'Cancel'],
+          destructiveButtonIndex: 1,
+          cancelButtonIndex: 2,
+        },
+        (buttonIndex) => {
+          if (buttonIndex === 0) {
+            // Edit
+            setEditingReplyId(reply.id);
+            setEditingReplyText(reply.text);
+          } else if (buttonIndex === 1) {
+            // Delete
+            handleDeleteReply(reply);
+          }
+        }
+      );
+    } else {
+      Alert.alert('Reply Options', undefined, [
+        {
+          text: 'Edit',
+          onPress: () => {
+            setEditingReplyId(reply.id);
+            setEditingReplyText(reply.text);
+          },
+        },
+        { text: 'Delete', style: 'destructive', onPress: () => handleDeleteReply(reply) },
+        { text: 'Cancel', style: 'cancel' },
+      ]);
+    }
+  }, [handleDeleteReply]);
+
+  // Handler to save edited reply
+  const handleSaveEdit = useCallback(async (reply: ConfessionReply) => {
+    if (!editingReplyText.trim() || savingEdit || !currentUserId) return;
+
+    const trimmedText = editingReplyText.trim();
+    if (trimmedText === reply.text) {
+      // No change, just cancel
+      setEditingReplyId(null);
+      setEditingReplyText('');
+      return;
+    }
+
+    setSavingEdit(true);
+    const safeReplyId = asReplyId(reply.id);
+    const safeUserId = asUserId(currentUserId);
+
+    if (!isDemoMode && safeReplyId && safeUserId) {
+      try {
+        await editReplyMutation({
+          replyId: safeReplyId,
+          userId: safeUserId,
+          text: trimmedText,
+        });
+        Toast.show('Reply updated');
+      } catch (e: any) {
+        Toast.show(e?.message || "Couldn't update reply. Please try again.");
+        setSavingEdit(false);
+        return;
+      }
+    }
+
+    // Update local store optimistically (for demo mode or after success)
+    // Note: In live mode, Convex will auto-refresh via subscription
+    setEditingReplyId(null);
+    setEditingReplyText('');
+    setSavingEdit(false);
+  }, [editingReplyText, savingEdit, currentUserId, editReplyMutation]);
+
+  // Handler for reporting other users' replies
+  const handleReportReply = useCallback((reply: ConfessionReply) => {
+    const reportReasons = [
+      { key: 'spam', label: 'Spam' },
+      { key: 'harassment', label: 'Abuse / Harassment' },
+      { key: 'sexual', label: 'Vulgar / Sexual' },
+      { key: 'hate', label: 'Hate / Offensive' },
+      { key: 'other', label: 'Other' },
+    ] as const;
+
+    const submitReport = async (reason: typeof reportReasons[number]['key']) => {
+      Toast.show('Report submitted');
+      const safeReplyId = asReplyId(reply.id);
+      const safeUserId = asUserId(currentUserId);
+      if (!isDemoMode && safeReplyId && safeUserId) {
+        try {
+          await reportReplyMutation({
+            replyId: safeReplyId,
+            reporterId: safeUserId,
+            reason,
+          });
+        } catch (e) {
+          console.warn('[ReportReply] Backend fail:', e);
+          Toast.show('Report may not have been saved');
+        }
+      }
+    };
+
+    if (Platform.OS === 'ios') {
+      ActionSheetIOS.showActionSheetWithOptions(
+        {
+          title: 'Why are you reporting this reply?',
+          options: [...reportReasons.map((r) => r.label), 'Cancel'],
+          cancelButtonIndex: reportReasons.length,
+        },
+        (buttonIndex) => {
+          if (buttonIndex < reportReasons.length) {
+            submitReport(reportReasons[buttonIndex].key);
+          }
+        }
+      );
+    } else {
+      Alert.alert('Report Reply', 'Why are you reporting this reply?', [
+        ...reportReasons.map((r) => ({ text: r.label, onPress: () => submitReport(r.key) })),
+        { text: 'Cancel', style: 'cancel' as const },
+      ]);
+    }
+  }, [currentUserId, reportReplyMutation]);
 
   const handleReactEmoji = useCallback((emojiObj: any) => {
     if (!confession) return;
@@ -462,7 +638,7 @@ export default function ConfessionThreadScreen() {
           userId: convexId,
           action: 'connect',
         });
-        Toast.show('Connection interest saved! They\'ll appear higher in your Discover feed.');
+        Toast.show('Interest sent! Waiting for their response.');
       } catch (e: any) {
         Toast.show(e?.message || 'Could not connect. Please try again.');
       } finally {
@@ -471,6 +647,63 @@ export default function ConfessionThreadScreen() {
       }
     }
   }, [confession, confessionId, currentUserId, isTaggedUser, responding, safeConfessionId, respondToTaggedConfessionMutation]);
+
+  // Handler for author Reject action (two-step flow - Step 2)
+  const handleAuthorReject = useCallback(async () => {
+    if (!confession || !confessionId || !currentUserId || !isOwnConfession) return;
+    if (authorResponding) return; // Prevent double-taps
+
+    if (!isDemoMode && safeConfessionId) {
+      try {
+        const convexId = asUserId(currentUserId);
+        if (!convexId) return;
+        setAuthorResponding(true);
+        setAuthorRespondAction('reject');
+        await authorRespondToConnectMutation({
+          confessionId: safeConfessionId,
+          userId: convexId,
+          action: 'reject',
+        });
+        Toast.show('Connection declined');
+      } catch (e: any) {
+        Toast.show(e?.message || 'Could not decline. Please try again.');
+      } finally {
+        setAuthorResponding(false);
+        setAuthorRespondAction(null);
+      }
+    }
+  }, [confession, confessionId, currentUserId, isOwnConfession, authorResponding, safeConfessionId, authorRespondToConnectMutation]);
+
+  // Handler for author Connect action (two-step flow - Step 2)
+  const handleAuthorConnect = useCallback(async () => {
+    if (!confession || !confessionId || !currentUserId || !isOwnConfession) return;
+    if (authorResponding) return; // Prevent double-taps
+
+    if (!isDemoMode && safeConfessionId) {
+      try {
+        const convexId = asUserId(currentUserId);
+        if (!convexId) return;
+        setAuthorResponding(true);
+        setAuthorRespondAction('connect');
+        const result = await authorRespondToConnectMutation({
+          confessionId: safeConfessionId,
+          userId: convexId,
+          action: 'connect',
+        });
+        if (result.matchCreated && result.matchId && taggedUserId) {
+          // Navigate to match celebration screen
+          router.push(`/(main)/match-celebration?matchId=${result.matchId}&userId=${taggedUserId}` as any);
+        } else {
+          Toast.show('Connected!');
+        }
+      } catch (e: any) {
+        Toast.show(e?.message || 'Could not connect. Please try again.');
+      } finally {
+        setAuthorResponding(false);
+        setAuthorRespondAction(null);
+      }
+    }
+  }, [confession, confessionId, currentUserId, isOwnConfession, authorResponding, safeConfessionId, authorRespondToConnectMutation, taggedUserId, router]);
 
   const handleReport = useCallback(() => {
     if (!confessionId) return;
@@ -611,13 +844,13 @@ export default function ConfessionThreadScreen() {
     // Plus button: only for confession author, only on OTHER users' replies
     const showPlusButton = isConfessionAuthor && !replyIsOwn;
     const isReplyingToThis = replyingToReplyId === item.id;
+    const isEditingThis = editingReplyId === item.id;
+    // Show report button for other users' replies (not own, not when OP has plus button)
+    const showReportButton = !replyIsOwn && !showPlusButton;
 
     return (
       <View style={styles.replyCard}>
-        <TouchableOpacity
-          onLongPress={() => replyIsOwn && handleDeleteReply(item)}
-          activeOpacity={0.8}
-        >
+        <View>
           <View style={styles.replyHeader}>
             <View style={[styles.replyAvatar, item.isAnonymous && styles.avatarAnonymous]}>
               <Ionicons
@@ -639,16 +872,31 @@ export default function ConfessionThreadScreen() {
                 <Ionicons name="mic" size={10} color={COLORS.primary} />
               </View>
             )}
+            {/* Show "(edited)" indicator if reply was edited */}
+            {(item as any).editedAt && (
+              <Text style={styles.editedIndicator}>(edited)</Text>
+            )}
             <Text style={styles.replyTime}>{getTimeAgo(item.createdAt)}</Text>
 
-            {/* Delete button for own replies */}
-            {replyIsOwn && (
+            {/* Three-dots menu for own replies (Edit/Delete) */}
+            {replyIsOwn && !isEditingThis && (
               <TouchableOpacity
-                onPress={() => handleDeleteReply(item)}
+                onPress={() => handleReplyMenu(item)}
                 hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-                style={styles.deleteButton}
+                style={styles.menuButton}
               >
-                <Ionicons name="trash-outline" size={14} color={COLORS.textMuted} />
+                <Ionicons name="ellipsis-vertical" size={16} color={COLORS.textMuted} />
+              </TouchableOpacity>
+            )}
+
+            {/* Report button for other users' replies */}
+            {showReportButton && (
+              <TouchableOpacity
+                onPress={() => handleReportReply(item)}
+                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                style={styles.reportButton}
+              >
+                <Ionicons name="flag-outline" size={14} color={COLORS.textMuted} />
               </TouchableOpacity>
             )}
 
@@ -675,10 +923,52 @@ export default function ConfessionThreadScreen() {
               </TouchableOpacity>
             )}
           </View>
-          <Text style={styles.replyText}>
-            {item.type === 'voice' ? `🎙️ Voice reply (${item.voiceDurationSec || 0}s)` : item.text}
-          </Text>
-        </TouchableOpacity>
+
+          {/* Reply text or inline edit input */}
+          {isEditingThis ? (
+            <View style={styles.editContainer}>
+              <TextInput
+                style={styles.editInput}
+                value={editingReplyText}
+                onChangeText={setEditingReplyText}
+                maxLength={300}
+                multiline
+                autoFocus
+                placeholder="Edit your reply..."
+                placeholderTextColor={COLORS.textMuted}
+              />
+              <View style={styles.editActions}>
+                <TouchableOpacity
+                  style={styles.editCancelButton}
+                  onPress={() => {
+                    setEditingReplyId(null);
+                    setEditingReplyText('');
+                  }}
+                >
+                  <Text style={styles.editCancelText}>Cancel</Text>
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[
+                    styles.editSaveButton,
+                    (!editingReplyText.trim() || savingEdit) && styles.buttonDisabled,
+                  ]}
+                  onPress={() => handleSaveEdit(item)}
+                  disabled={!editingReplyText.trim() || savingEdit}
+                >
+                  {savingEdit ? (
+                    <ActivityIndicator size="small" color={COLORS.white} />
+                  ) : (
+                    <Text style={styles.editSaveText}>Save</Text>
+                  )}
+                </TouchableOpacity>
+              </View>
+            </View>
+          ) : (
+            <Text style={styles.replyText}>
+              {item.type === 'voice' ? `🎙️ Voice reply (${item.voiceDurationSec || 0}s)` : item.text}
+            </Text>
+          )}
+        </View>
 
         {/* Inline composer for OP reply-to-reply */}
         {isReplyingToThis && (
@@ -703,6 +993,112 @@ export default function ConfessionThreadScreen() {
                 color={replyToReplyText.trim() && !sending ? COLORS.white : COLORS.textMuted}
               />
             </TouchableOpacity>
+          </View>
+        )}
+
+        {/* Nested child replies */}
+        {childRepliesMap[item.id] && childRepliesMap[item.id].length > 0 && (
+          <View style={styles.nestedRepliesContainer}>
+            {childRepliesMap[item.id].map((childReply) => {
+              const childIsOwn = isOwnReply(childReply);
+              const childIsFromOP = isReplyFromOP(childReply);
+              const isEditingChild = editingReplyId === childReply.id;
+
+              return (
+                <View key={childReply.id} style={styles.nestedReplyCard}>
+                  <View style={styles.nestedReplyHeader}>
+                    <View style={[styles.nestedReplyAvatar, childReply.isAnonymous && styles.avatarAnonymous]}>
+                      <Ionicons
+                        name={childReply.isAnonymous ? 'eye-off' : 'person'}
+                        size={8}
+                        color={childReply.isAnonymous ? COLORS.textMuted : COLORS.primary}
+                      />
+                    </View>
+                    <Text style={styles.nestedReplyAuthor}>
+                      {childReply.isAnonymous ? 'Anonymous' : 'Someone'}
+                    </Text>
+                    {childIsFromOP && (
+                      <View style={styles.opBadgeSmall}>
+                        <Text style={styles.opBadgeSmallText}>OP</Text>
+                      </View>
+                    )}
+                    {childReply.editedAt && (
+                      <Text style={styles.editedIndicator}>(edited)</Text>
+                    )}
+                    <Text style={styles.nestedReplyTime}>{getTimeAgo(childReply.createdAt)}</Text>
+
+                    {/* Three-dots menu for own nested replies */}
+                    {childIsOwn && !isEditingChild && (
+                      <TouchableOpacity
+                        onPress={() => handleReplyMenu(childReply)}
+                        hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                        style={styles.menuButton}
+                      >
+                        <Ionicons name="ellipsis-vertical" size={14} color={COLORS.textMuted} />
+                      </TouchableOpacity>
+                    )}
+
+                    {/* Report button for other users' nested replies */}
+                    {!childIsOwn && (
+                      <TouchableOpacity
+                        onPress={() => handleReportReply(childReply)}
+                        hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                        style={styles.reportButton}
+                      >
+                        <Ionicons name="flag-outline" size={12} color={COLORS.textMuted} />
+                      </TouchableOpacity>
+                    )}
+                  </View>
+
+                  {/* Nested reply text or inline edit */}
+                  {isEditingChild ? (
+                    <View style={styles.editContainer}>
+                      <TextInput
+                        style={styles.editInput}
+                        value={editingReplyText}
+                        onChangeText={setEditingReplyText}
+                        maxLength={300}
+                        multiline
+                        autoFocus
+                        placeholder="Edit your reply..."
+                        placeholderTextColor={COLORS.textMuted}
+                      />
+                      <View style={styles.editActions}>
+                        <TouchableOpacity
+                          style={styles.editCancelButton}
+                          onPress={() => {
+                            setEditingReplyId(null);
+                            setEditingReplyText('');
+                          }}
+                        >
+                          <Text style={styles.editCancelText}>Cancel</Text>
+                        </TouchableOpacity>
+                        <TouchableOpacity
+                          style={[
+                            styles.editSaveButton,
+                            (!editingReplyText.trim() || savingEdit) && styles.buttonDisabled,
+                          ]}
+                          onPress={() => handleSaveEdit(childReply)}
+                          disabled={!editingReplyText.trim() || savingEdit}
+                        >
+                          {savingEdit ? (
+                            <ActivityIndicator size="small" color={COLORS.white} />
+                          ) : (
+                            <Text style={styles.editSaveText}>Save</Text>
+                          )}
+                        </TouchableOpacity>
+                      </View>
+                    </View>
+                  ) : (
+                    <Text style={styles.nestedReplyText}>
+                      {childReply.type === 'voice'
+                        ? `🎙️ Voice reply (${childReply.voiceDurationSec || 0}s)`
+                        : childReply.text}
+                    </Text>
+                  )}
+                </View>
+              );
+            })}
           </View>
         )}
       </View>
@@ -774,13 +1170,14 @@ export default function ConfessionThreadScreen() {
         <View style={styles.replyCountBadge}>
           <Ionicons name="chatbubble-outline" size={12} color={COLORS.primary} />
           <Text style={styles.replyCountText}>
-            {replies.length} {replies.length === 1 ? 'Reply' : 'Replies'}
+            {topLevelReplyCount} {topLevelReplyCount === 1 ? 'Reply' : 'Replies'}
           </Text>
         </View>
       </View>
 
       {/* Reject/Connect action block (tagged user only) */}
-      {isTaggedUser && !isOwnConfession && (
+      {/* Hide block entirely once both connected (match already created) */}
+      {isTaggedUser && !isOwnConfession && authorResponse !== 'connected' && (
         <View style={styles.taggedActionBlock}>
           <Text style={styles.taggedActionLabel}>Someone confessed to you</Text>
           {taggedUserResponse === 'rejected' ? (
@@ -790,8 +1187,8 @@ export default function ConfessionThreadScreen() {
             </View>
           ) : taggedUserResponse === 'connected' ? (
             <View style={styles.respondedBadgeConnect}>
-              <Ionicons name="heart" size={16} color={COLORS.primary} />
-              <Text style={styles.respondedTextConnect}>Connected - they'll appear in your Discover</Text>
+              <Ionicons name="hourglass-outline" size={16} color={COLORS.primary} />
+              <Text style={styles.respondedTextConnect}>Waiting for their response...</Text>
             </View>
           ) : (
             <View style={styles.taggedActionButtons}>
@@ -827,6 +1224,56 @@ export default function ConfessionThreadScreen() {
           )}
         </View>
       )}
+
+      {/* Author action block - Two-Step Flow (author sees this when tagged user connects) */}
+      {/* Hide block entirely once connected (match celebration handles navigation) */}
+      {isOwnConfession && taggedUserResponse === 'connected' && authorResponse !== 'connected' && (
+        <View style={styles.authorActionBlock}>
+          {authorResponse === 'rejected' ? (
+            <View style={styles.respondedBadge}>
+              <Ionicons name="close-circle" size={16} color={COLORS.textMuted} />
+              <Text style={styles.respondedText}>You declined this connection</Text>
+            </View>
+          ) : (
+            <>
+              <View style={styles.authorNotification}>
+                <Ionicons name="notifications" size={18} color={COLORS.primary} />
+                <Text style={styles.authorNotificationText}>Someone you tagged is open to connect</Text>
+              </View>
+              <View style={styles.taggedActionButtons}>
+                <TouchableOpacity
+                  style={[styles.rejectButton, authorResponding && authorRespondAction === 'reject' && styles.buttonLoading]}
+                  onPress={handleAuthorReject}
+                  disabled={authorResponding}
+                >
+                  {authorResponding && authorRespondAction === 'reject' ? (
+                    <ActivityIndicator size="small" color={COLORS.textMuted} />
+                  ) : (
+                    <>
+                      <Ionicons name="close" size={18} color={COLORS.textMuted} />
+                      <Text style={styles.rejectButtonText}>Reject</Text>
+                    </>
+                  )}
+                </TouchableOpacity>
+                <TouchableOpacity
+                  style={[styles.connectButton, authorResponding && authorRespondAction === 'connect' && styles.buttonLoading]}
+                  onPress={handleAuthorConnect}
+                  disabled={authorResponding}
+                >
+                  {authorResponding && authorRespondAction === 'connect' ? (
+                    <ActivityIndicator size="small" color={COLORS.white} />
+                  ) : (
+                    <>
+                      <Ionicons name="heart" size={18} color={COLORS.white} />
+                      <Text style={styles.connectButtonText}>Connect</Text>
+                    </>
+                  )}
+                </TouchableOpacity>
+              </View>
+            </>
+          )}
+        </View>
+      )}
     </View>
   );
 
@@ -837,7 +1284,7 @@ export default function ConfessionThreadScreen() {
     <View style={styles.threadFooter}>
       <View style={styles.footerLine} />
       <Text style={styles.footerText}>
-        {replies.length === 0 ? 'No replies yet' : 'End of thread'}
+        {topLevelReplyCount === 0 ? 'No replies yet' : 'End of thread'}
       </Text>
       <View style={styles.footerLine} />
     </View>
@@ -866,7 +1313,7 @@ export default function ConfessionThreadScreen() {
         keyboardVerticalOffset={Platform.OS === 'ios' ? insets.top : 0}
       >
         <FlatList
-          data={replies}
+          data={topLevelReplies}
           keyExtractor={(item) => item.id}
           renderItem={renderReplyItem}
           ListHeaderComponent={renderConfessionHeader}
@@ -1166,6 +1613,43 @@ const styles = StyleSheet.create({
     fontWeight: '500',
     color: COLORS.primary,
   },
+  // Author action block (Two-Step Flow)
+  authorActionBlock: {
+    marginTop: 12,
+    padding: 14,
+    backgroundColor: 'rgba(76,175,80,0.08)',
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(76,175,80,0.2)',
+  },
+  authorNotification: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    marginBottom: 12,
+  },
+  authorNotificationText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: COLORS.text,
+    textAlign: 'center',
+  },
+  matchCreatedBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    borderRadius: 24,
+    backgroundColor: COLORS.primary,
+  },
+  matchCreatedText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: COLORS.white,
+  },
 
   // ── Reply Card ──
   replyCard: {
@@ -1216,7 +1700,16 @@ const styles = StyleSheet.create({
     color: COLORS.textMuted,
     marginLeft: 'auto',
   },
-  deleteButton: {
+  editedIndicator: {
+    fontSize: 10,
+    color: COLORS.textMuted,
+    fontStyle: 'italic',
+  },
+  menuButton: {
+    marginLeft: 4,
+    padding: 4,
+  },
+  reportButton: {
     marginLeft: 4,
     padding: 4,
   },
@@ -1228,6 +1721,106 @@ const styles = StyleSheet.create({
     fontSize: 14,
     lineHeight: 20,
     color: COLORS.text,
+  },
+
+  // ── Nested Replies (compact Instagram-style) ──
+  nestedRepliesContainer: {
+    marginTop: 6,
+    marginLeft: 28, // Align with parent text, not avatar
+    paddingLeft: 8,
+    borderLeftWidth: 1.5,
+    borderLeftColor: 'rgba(255,107,107,0.25)',
+  },
+  nestedReplyCard: {
+    marginBottom: 4,
+  },
+  nestedReplyHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4, // Tighter than parent (8)
+  },
+  nestedReplyAvatar: {
+    width: 16,
+    height: 16,
+    borderRadius: 8,
+    backgroundColor: 'rgba(255,107,107,0.1)',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  nestedReplyAuthor: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: COLORS.text,
+  },
+  opBadgeSmall: {
+    backgroundColor: COLORS.primary,
+    paddingHorizontal: 3,
+    paddingVertical: 0,
+    borderRadius: 3,
+  },
+  opBadgeSmallText: {
+    fontSize: 7,
+    fontWeight: '700',
+    color: COLORS.white,
+  },
+  nestedReplyTime: {
+    fontSize: 9,
+    color: COLORS.textMuted,
+    marginLeft: 'auto',
+  },
+  nestedReplyText: {
+    fontSize: 12,
+    lineHeight: 16,
+    color: COLORS.text,
+    marginTop: 1,
+    marginLeft: 20, // Align with author name, past avatar
+  },
+
+  // ── Edit Reply ──
+  editContainer: {
+    marginTop: 4,
+  },
+  editInput: {
+    fontSize: 14,
+    lineHeight: 20,
+    color: COLORS.text,
+    backgroundColor: COLORS.backgroundDark,
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    minHeight: 60,
+    maxHeight: 120,
+    textAlignVertical: 'top',
+  },
+  editActions: {
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    gap: 8,
+    marginTop: 8,
+  },
+  editCancelButton: {
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 16,
+    backgroundColor: COLORS.backgroundDark,
+  },
+  editCancelText: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: COLORS.textMuted,
+  },
+  editSaveButton: {
+    paddingHorizontal: 16,
+    paddingVertical: 8,
+    borderRadius: 16,
+    backgroundColor: COLORS.primary,
+    minWidth: 60,
+    alignItems: 'center',
+  },
+  editSaveText: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: COLORS.white,
   },
 
   // ── Inline Composer (OP reply-to-reply) ──

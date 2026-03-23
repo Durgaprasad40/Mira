@@ -773,6 +773,8 @@ export interface ConfessionReply {
   type?: ConfessionReplyType;
   voiceUrl?: string;
   voiceDurationSec?: number;
+  parentReplyId?: string; // For nested replies - if set, this is a child reply
+  editedAt?: number; // Timestamp if reply was edited
   createdAt: number;
 }
 

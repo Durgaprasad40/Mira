@@ -25,6 +25,10 @@
 type LogLevel = 'silent' | 'error' | 'warn' | 'info' | 'debug';
 const LOG_LEVEL: LogLevel = 'info';
 
+// PROD_LOGGING: Enable logging in production builds (standalone APK)
+// Set to true to see logs in adb logcat for debugging
+const ENABLE_PROD_LOGGING = true;
+
 const LEVEL_PRIORITY: Record<LogLevel, number> = {
   silent: 0,
   error: 1,
@@ -34,7 +38,9 @@ const LEVEL_PRIORITY: Record<LogLevel, number> = {
 };
 
 function shouldLog(level: LogLevel): boolean {
-  if (!__DEV__) return false;
+  // In DEV mode: always check log level
+  // In PROD mode: only log if ENABLE_PROD_LOGGING is true
+  if (!__DEV__ && !ENABLE_PROD_LOGGING) return false;
   return LEVEL_PRIORITY[level] <= LEVEL_PRIORITY[LOG_LEVEL];
 }
 

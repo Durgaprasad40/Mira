@@ -18,7 +18,6 @@ import {
   TextInput,
   KeyboardAvoidingView,
   Platform,
-  Switch,
   Dimensions,
   TouchableWithoutFeedback,
   Keyboard,
@@ -191,6 +190,9 @@ export default function ConfessionsScreen() {
   // P1-PREVIEW FIX: Use backend data for live mode, in-memory for demo
   const demoIsPreviewUsed = useConfessPreviewStore((s) => s.isPreviewUsed);
   const markPreviewUsed = useConfessPreviewStore((s) => s.markPreviewUsed); // For demo mode
+  // Soft tracking for tagged profile views (per viewer + target pair)
+  const hasViewedTaggedProfile = useConfessPreviewStore((s) => s.hasViewedTaggedProfile);
+  const markTaggedProfileViewed = useConfessPreviewStore((s) => s.markTaggedProfileViewed);
   const [showPreviewConfirm, setShowPreviewConfirm] = useState(false);
   const [previewTarget, setPreviewTarget] = useState<{ confessionId: string; authorId: string } | null>(null);
   const [consumingPreview, setConsumingPreview] = useState(false);
@@ -473,6 +475,7 @@ export default function ConfessionsScreen() {
         userId: c.userId,
         text: c.text,
         isAnonymous: c.isAnonymous,
+        authorVisibility: c.authorVisibility, // 3-mode visibility: anonymous/open/blur_photo
         mood: c.mood,
         authorName: c.authorName,
         authorPhotoUrl: c.authorPhotoUrl,
@@ -510,8 +513,12 @@ export default function ConfessionsScreen() {
         userId: c.userId,
         text: c.text,
         isAnonymous: c.isAnonymous,
+        authorVisibility: c.authorVisibility, // 3-mode visibility
         mood: c.mood,
         authorName: c.authorName as string | undefined,
+        authorPhotoUrl: c.authorPhotoUrl,
+        authorAge: c.authorAge,
+        authorGender: c.authorGender,
         replyCount: c.replyCount,
         reactionCount: c.reactionCount,
         createdAt: c.createdAt,
@@ -658,8 +665,7 @@ export default function ConfessionsScreen() {
     setShowDuplicatePicker(false);
     setDuplicateCandidates([]);
     setShowComposer(true);
-    // Focus input after modal opens
-    setTimeout(() => composerInputRef.current?.focus(), 100);
+    // No auto-focus - let user tap input to open keyboard
   }, []);
 
   const handleCloseComposer = useCallback(() => {
@@ -1010,27 +1016,50 @@ export default function ConfessionsScreen() {
     setPreviewTarget(null);
   }, []);
 
-  // Handle tapping @tag to open profile preview (read-only)
+  // Handle tapping @tag to open profile preview (read-only, soft one-time tracking)
   const handleTagPress = useCallback(
     (targetUserId: string) => {
+      // Check if this is the first view for this viewer+target pair
+      const isFirstView = currentUserId ? !hasViewedTaggedProfile(currentUserId, targetUserId) : true;
+
+      // Mark as viewed (soft tracking - doesn't block, just tracks)
+      if (currentUserId) {
+        markTaggedProfileViewed(currentUserId, targetUserId);
+      }
+
+      // Navigate to profile with mode indicating first vs revisit
       safePush(router, {
         pathname: '/(main)/profile/[id]',
-        params: { id: targetUserId, mode: 'confess_preview' },
+        params: {
+          id: targetUserId,
+          mode: isFirstView ? 'confess_preview' : 'confess_revisit',
+        },
       } as any, 'confessions->tagProfile');
     },
-    [router]
+    [router, currentUserId, hasViewedTaggedProfile, markTaggedProfileViewed]
   );
 
   // Handle tapping on author identity (non-anonymous confessions only)
-  // Opens full profile in read-only mode
+  // Opens full profile in read-only mode with soft one-time tracking
   const handleAuthorPress = useCallback(
     (authorUserId: string) => {
+      // Check if this is the first view for this viewer+author pair
+      const isFirstView = currentUserId ? !hasViewedTaggedProfile(currentUserId, authorUserId) : true;
+
+      // Mark as viewed (soft tracking)
+      if (currentUserId) {
+        markTaggedProfileViewed(currentUserId, authorUserId);
+      }
+
       safePush(router, {
         pathname: '/(main)/profile/[id]',
-        params: { id: authorUserId, mode: 'confess_preview' },
+        params: {
+          id: authorUserId,
+          mode: isFirstView ? 'confess_preview' : 'confess_revisit',
+        },
       } as any, 'confessions->authorProfile');
     },
-    [router]
+    [router, currentUserId, hasViewedTaggedProfile, markTaggedProfileViewed]
   );
 
   // Handle Connect button (tagged user only)
@@ -1315,10 +1344,8 @@ export default function ConfessionsScreen() {
               onReact={() => handleOpenEmojiPicker(item.id)}
               onToggleEmoji={(emoji) => toggleReaction(item.id, emoji)}
               onReport={() => handleReportBlock(item.id, item.userId)}
-              onViewProfile={isTaggedForMe ? () => handleViewProfileRequest(item.id, item.userId) : undefined}
               onLongPress={() => handleLongPressConfession(item.id, item.userId)}
               onTagPress={hasTag ? () => handleTagPress(item.targetUserId!) : undefined}
-              onConnect={isTaggedForMe ? () => handleConnect(item.id, authorDisplayName) : undefined}
               onAuthorPress={!item.isAnonymous && item.userId ? () => handleAuthorPress(item.userId) : undefined}
             />
           );
@@ -1409,13 +1436,13 @@ export default function ConfessionsScreen() {
 
           {/* Content area with keyboard handling */}
           <KeyboardAvoidingView
-            behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
+            behavior={Platform.OS === 'ios' ? 'padding' : undefined}
             style={styles.composerContentArea}
             keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 0}
           >
             <ScrollView
               style={styles.composerScrollView}
-              contentContainerStyle={[styles.composerScrollContent, { paddingBottom: insets.bottom + 24 }]}
+              contentContainerStyle={styles.composerScrollContent}
               keyboardShouldPersistTaps="handled"
               showsVerticalScrollIndicator={true}
               bounces={false}
@@ -1519,7 +1546,7 @@ export default function ConfessionsScreen() {
                 )}
               </View>
 
-              {/* Visibility Mode Selection - 3 options */}
+              {/* Visibility Mode Selection - 3 side-by-side options */}
               <View style={styles.visibilitySection}>
                 <Text style={styles.visibilitySectionTitle}>How others will see you</Text>
                 <View style={styles.visibilityOptions}>
@@ -1538,7 +1565,7 @@ export default function ConfessionsScreen() {
                     ]}>
                       <Ionicons
                         name="eye-off"
-                        size={20}
+                        size={18}
                         color={composerVisibility === 'anonymous' ? COLORS.white : COLORS.textMuted}
                       />
                     </View>
@@ -1563,14 +1590,14 @@ export default function ConfessionsScreen() {
                     ]}>
                       <Ionicons
                         name="person"
-                        size={20}
+                        size={18}
                         color={composerVisibility === 'open' ? COLORS.white : COLORS.textMuted}
                       />
                     </View>
                     <Text style={[
                       styles.visibilityLabel,
                       composerVisibility === 'open' && styles.visibilityLabelSelected,
-                    ]}>Open</Text>
+                    ]}>Open to all</Text>
                   </TouchableOpacity>
 
                   {/* Blur photo option */}
@@ -1587,23 +1614,33 @@ export default function ConfessionsScreen() {
                       composerVisibility === 'blur_photo' && styles.visibilityIconWrapSelected,
                     ]}>
                       <Ionicons
-                        name="image"
-                        size={20}
+                        name="eye"
+                        size={18}
                         color={composerVisibility === 'blur_photo' ? COLORS.white : COLORS.textMuted}
                       />
                     </View>
                     <Text style={[
                       styles.visibilityLabel,
                       composerVisibility === 'blur_photo' && styles.visibilityLabelSelected,
-                    ]}>Blur Photo</Text>
+                    ]}>Blur photo</Text>
                   </TouchableOpacity>
                 </View>
+              </View>
 
-                {/* Helper text based on selection */}
-                <Text style={styles.visibilityHelperText}>
-                  {composerVisibility === 'anonymous' && 'Your identity stays completely hidden.'}
-                  {composerVisibility === 'open' && 'Your photo, name, and details are visible.'}
-                  {composerVisibility === 'blur_photo' && 'Blurred photo with name and age visible.'}
+              {/* Helper explanation section */}
+              <View style={styles.helperSection}>
+                <Text style={styles.helperTitle}>How your confession will appear</Text>
+                <Text style={styles.helperBulletText}>
+                  • <Text style={styles.helperBulletLabel}>Anonymous:</Text> your name, photo, and profile details will be completely hidden from everyone
+                </Text>
+                <Text style={styles.helperBulletText}>
+                  • <Text style={styles.helperBulletLabel}>Open:</Text> your profile will be fully visible with the confession
+                </Text>
+                <Text style={styles.helperBulletText}>
+                  • <Text style={styles.helperBulletLabel}>Blur photo:</Text> your photo will be blurred, but your name and basic info remain visible
+                </Text>
+                <Text style={styles.helperBulletText}>
+                  • <Text style={styles.helperBulletLabel}>Mention username:</Text> tag someone so your confession reaches them directly
                 </Text>
               </View>
             </ScrollView>
@@ -2030,7 +2067,7 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   composerScrollContent: {
-    flexGrow: 1,
+    paddingBottom: 120,
   },
   composerHeader: {
     flexDirection: 'row',
@@ -2148,12 +2185,25 @@ const styles = StyleSheet.create({
   visibilityLabelSelected: {
     color: COLORS.primary,
   },
-  visibilityHelperText: {
+  // Helper instructions section (minimal)
+  helperSection: {
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    marginTop: 4,
+  },
+  helperTitle: {
     fontSize: 12,
+    fontWeight: '600',
     color: COLORS.textMuted,
-    textAlign: 'center',
-    marginTop: 12,
-    fontStyle: 'italic',
+    marginBottom: 8,
+  },
+  helperBulletText: {
+    fontSize: 12,
+    lineHeight: 20,
+    color: COLORS.textMuted,
+  },
+  helperBulletLabel: {
+    fontWeight: '600',
   },
   // Tagging styles
   tagSection: {

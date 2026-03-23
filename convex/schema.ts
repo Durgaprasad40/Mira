@@ -583,7 +583,8 @@ export default defineSchema({
     isActive: v.boolean(),
     // Track how this match was created for UI organization
     // 'super_like' matches appear in Super Likes section, 'like' in New Matches
-    matchSource: v.optional(v.union(v.literal('like'), v.literal('super_like'))),
+    // 'confession' for matches created via the two-step confess-connect flow
+    matchSource: v.optional(v.union(v.literal('like'), v.literal('super_like'), v.literal('confession'))),
   })
     .index('by_user1', ['user1Id'])
     .index('by_user2', ['user2Id'])
@@ -1376,13 +1377,20 @@ export default defineSchema({
     createdAt: v.number(),
     expiresAt: v.optional(v.number()), // 24h after createdAt; undefined = never expires (legacy)
     taggedUserId: v.optional(v.id('users')), // User being confessed to (must be someone current user has liked)
-    // Tagged user response (Reject/Connect flow)
+    // Tagged user response (Reject/Connect flow - Step 1)
     taggedUserResponse: v.optional(v.union(
       v.literal('pending'),    // Default: not yet responded
-      v.literal('rejected'),   // Tagged user rejected - no chat, marks as handled
-      v.literal('connected')   // Tagged user connected - boosts discover priority
+      v.literal('rejected'),   // Tagged user rejected - no chat
+      v.literal('connected')   // Tagged user connected - waiting for author
     )),
     taggedUserRespondedAt: v.optional(v.number()), // When tagged user responded
+    // Author response (Step 2 - only active after tagged user connects)
+    authorResponse: v.optional(v.union(
+      v.literal('pending'),    // Default: not yet responded (only after tagged user connects)
+      v.literal('rejected'),   // Author rejected - no match
+      v.literal('connected')   // Author connected - match created
+    )),
+    authorRespondedAt: v.optional(v.number()), // When author responded
     // One-time profile preview for tagged user
     previewConsumedAt: v.optional(v.number()),    // When preview was consumed (null = not consumed)
     previewConsumedBy: v.optional(v.id('users')), // Who consumed the preview (should match taggedUserId)
@@ -1441,9 +1449,31 @@ export default defineSchema({
     voiceDurationSec: v.optional(v.number()),
     parentReplyId: v.optional(v.id('confessionReplies')), // For reply-to-reply (OP responding to anonymous reply)
     createdAt: v.number(),
+    editedAt: v.optional(v.number()), // Timestamp of last edit
   })
     .index('by_confession', ['confessionId'])
     .index('by_user', ['userId']),
+
+  // Confession Reply Reports table (for moderation)
+  replyReports: defineTable({
+    replyId: v.id('confessionReplies'),
+    confessionId: v.id('confessions'),
+    reporterId: v.id('users'),
+    reportedUserId: v.id('users'),
+    reason: v.union(
+      v.literal('spam'),
+      v.literal('harassment'),
+      v.literal('hate'),
+      v.literal('sexual'),
+      v.literal('other')
+    ),
+    description: v.optional(v.string()),
+    status: v.union(v.literal('pending'), v.literal('reviewed'), v.literal('actioned')),
+    createdAt: v.number(),
+  })
+    .index('by_reply', ['replyId'])
+    .index('by_reporter', ['reporterId'])
+    .index('by_status', ['status']),
 
   // Confession Reactions table (free emoji — one emoji per user per confession)
   confessionReactions: defineTable({
