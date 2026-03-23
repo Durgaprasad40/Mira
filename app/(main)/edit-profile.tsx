@@ -433,42 +433,43 @@ export default function EditProfileScreen() {
     }
   }, [currentUser?._id, currentUser?.id, currentDemoUserId]);
 
-  // LIVE MODE: Sync photo slots from backend photos query (source of truth)
-  // This ensures photos persist correctly after upload and across screen reloads
+  // LIVE MODE: Sync photo slots from currentUser.photos (source of truth)
+  // BUG FIX (2026-03-23): Use currentUser.photos instead of backendPhotos (getUserPhotos)
+  // getUserPhotos EXCLUDES verification_reference photos, causing the primary selfie to be hidden
+  // currentUser.photos from getCurrentUser includes ALL photos (same fix as Phase-2 onboarding)
   useEffect(() => {
-    if (isDemoMode || !backendPhotos) return;
+    if (isDemoMode || !currentUser?.photos) return;
 
-    // Map backend photos to slots by array index (not photo.order)
-    // Backend orders may start at 1 if verification_reference exists at order 0
-    // Using index ensures slot 0 = first regular photo, slot 1 = second, etc.
+    // Map photos to slots by array index (photos are already sorted by order from getCurrentUser)
     const slotsFromBackend: PhotoSlots9 = createEmptyPhotoSlots();
-    backendPhotos.forEach((photo, index) => {
+    currentUser.photos.forEach((photo: any, index: number) => {
       if (index >= 0 && index < 9 && photo.url) {
         slotsFromBackend[index] = photo.url;
       }
     });
 
-    // Only update if there's actual backend data (avoid clearing slots during loading)
-    const hasBackendPhotos = slotsFromBackend.some((s) => s !== null);
-    if (hasBackendPhotos) {
+    // Only update if there's actual data (avoid clearing slots during loading)
+    const hasPhotos = slotsFromBackend.some((s) => s !== null);
+    if (hasPhotos) {
       if (__DEV__) {
         const filledSlots = slotsFromBackend.map((s, i) => s ? i : -1).filter(i => i >= 0);
-        // Show raw backend photo records with order/isPrimary
-        const photoDetails = backendPhotos.map((p: any) => ({
+        // Show raw photo records with order/isPrimary/photoType
+        const photoDetails = currentUser.photos.map((p: any) => ({
           id: p._id?.slice(-6),
           order: p.order,
           isPrimary: p.isPrimary,
+          photoType: p.photoType || 'regular',
         }));
-        console.log('[EditProfile] 📸 Backend photos loaded:', {
-          count: backendPhotos.length,
+        console.log('[EditProfile] 📸 Photos loaded (includes all types):', {
+          count: currentUser.photos.length,
           filledSlots,
           photos: photoDetails,
-          primaryPhoto: backendPhotos.find((p: any) => p.isPrimary)?._id?.slice(-6),
+          primaryPhoto: currentUser.photos.find((p: any) => p.isPrimary)?._id?.slice(-6),
         });
       }
       setPhotoSlots(slotsFromBackend);
     }
-  }, [backendPhotos]);
+  }, [currentUser?.photos]);
 
   // SLOT-BASED: Get valid photos with their slot indices
   const validPhotoEntries = useMemo(() => {
