@@ -312,9 +312,11 @@ export default function ConfessionsScreen() {
   }, []);
 
   // Convex queries (only when not in demo mode)
+  // RANKING FIX: Use 'trending' sort to get ranking-based order
+  // New posts appear at bottom, engaged posts rise to top
   const convexConfessions = useQuery(
     api.confessions.listConfessions,
-    !isDemoMode ? { sortBy: 'latest' as const } : 'skip'
+    !isDemoMode ? { sortBy: 'trending' as const } : 'skip'
   );
   const convexTrending = useQuery(
     api.confessions.getTrendingConfessions,
@@ -489,6 +491,7 @@ export default function ConfessionsScreen() {
         visibility: c.visibility,
         revealPolicy: 'never' as const,
         targetUserId: c.taggedUserId,
+        targetUserName: c.taggedUserName, // Display name from Convex query
       }));
       // Filter blocked users (unified via blockStore)
       if (globalBlockedIds.length > 0) {
@@ -523,6 +526,8 @@ export default function ConfessionsScreen() {
         reactionCount: c.reactionCount,
         createdAt: c.createdAt,
         trendingScore: c.trendingScore,
+        targetUserId: c.taggedUserId,
+        targetUserName: c.taggedUserName,
       }));
     }
     // Demo mode — compute trending from active posts only
@@ -1189,7 +1194,9 @@ export default function ConfessionsScreen() {
     [currentUserId, deleteConfession, showToastMessage, deleteConfessionMutation]
   );
 
-  const isLoading = !isDemoMode && convexConfessions === undefined && demoConfessions.length === 0;
+  // LOADING FIX: In live mode, show loading until Convex returns data
+  // Old check incorrectly included `demoConfessions.length === 0` which is always false after seed
+  const isLoading = !isDemoMode && convexConfessions === undefined;
 
   // BUGFIX #20: Trending hero card with null/empty guards
   const trendingHero = trendingConfessions.length > 0 && trendingConfessions[0]?.text
@@ -1924,15 +1931,15 @@ const styles = StyleSheet.create({
   },
   // Trending
   trendingSection: {
-    marginBottom: 8,
-    paddingTop: 8,
+    marginBottom: 4, // Tightened from 8
+    paddingTop: 4, // Tightened from 8
   },
   trendingSectionHeader: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 6,
     paddingHorizontal: 14,
-    marginBottom: 8,
+    marginBottom: 6, // Tightened from 8
   },
   trendingSectionTitle: {
     fontSize: 15,
@@ -1942,16 +1949,18 @@ const styles = StyleSheet.create({
   trendingHeroCard: {
     marginHorizontal: 10,
     borderRadius: 14,
-    padding: 16,
+    padding: 12, // Tightened from 16
     backgroundColor: COLORS.primary,
-    marginBottom: 10,
+    marginBottom: 8, // Tightened from 10
   },
   trendingHeroText: {
+    flex: 1, // Use full width
+    minWidth: 0, // Allow proper text wrapping
     fontSize: 15,
     fontWeight: '600',
     lineHeight: 22,
     color: COLORS.white,
-    marginBottom: 10,
+    marginBottom: 8, // Tightened from 10
   },
   trendingHeroTagLink: {
     color: COLORS.white,
@@ -2382,10 +2391,10 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
     backgroundColor: 'rgba(255,107,107,0.08)',
     marginHorizontal: 10,
-    marginTop: 8,
-    marginBottom: 4,
+    marginTop: 6, // Tightened from 8
+    marginBottom: 2, // Tightened from 4
     paddingHorizontal: 14,
-    paddingVertical: 12,
+    paddingVertical: 8, // Tightened from 12
     borderRadius: 12,
   },
   taggedForYouLeft: {

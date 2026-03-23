@@ -1376,6 +1376,21 @@ export default defineSchema({
     voiceReplyCount: v.optional(v.number()),
     createdAt: v.number(),
     expiresAt: v.optional(v.number()), // 24h after createdAt; undefined = never expires (legacy)
+    // ═══════════════════════════════════════════════════════════════════════════
+    // RANKING SYSTEM FIELDS
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Computed ranking score (updated on each engagement)
+    rankingScore: v.optional(v.number()),
+    // Timestamp of last engagement (reply, reaction) - used as tie-breaker
+    lastEngagementAt: v.optional(v.number()),
+    // Count of unique users who commented/replied (excluding author)
+    uniqueCommenters: v.optional(v.number()),
+    // Report count for ranking penalty
+    reportCount: v.optional(v.number()),
+    // Recent engagement counts (within rolling 6-hour window)
+    recentReplyCount: v.optional(v.number()),
+    recentReactionCount: v.optional(v.number()),
+    recentEngagementWindowStart: v.optional(v.number()),
     taggedUserId: v.optional(v.id('users')), // User being confessed to (must be someone current user has liked)
     // Tagged user response (Reject/Connect flow - Step 1)
     taggedUserResponse: v.optional(v.union(
@@ -1401,7 +1416,8 @@ export default defineSchema({
     .index('by_created', ['createdAt'])
     .index('by_user', ['userId'])
     .index('by_expires', ['expiresAt'])
-    .index('by_tagged_user', ['taggedUserId']),
+    .index('by_tagged_user', ['taggedUserId'])
+    .index('by_ranking', ['rankingScore']),
 
   // Confession Connect Signals table (discover boost for Connect action)
   // When a tagged user taps "Connect" on a confession, this stores a signal

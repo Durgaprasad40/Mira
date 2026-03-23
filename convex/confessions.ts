@@ -67,6 +67,147 @@ function containsPII(text: string): { hasPII: boolean; type: string } {
 // Confession expiry duration (24 hours in milliseconds)
 const CONFESSION_EXPIRY_MS = 24 * 60 * 60 * 1000;
 
+// ═══════════════════════════════════════════════════════════════════════════
+// RANKING SYSTEM
+// ═══════════════════════════════════════════════════════════════════════════
+// New posts start at bottom, rise based on engagement
+// Formula:
+//   rankingScore =
+//     (likeCount * 2) + (reactionCount * 1.5) + (topLevelCommentCount * 6)
+//     + (replyCount * 3) + (uniqueCommenters * 4)
+//     + (recentReactions * 1) + (recentComments * 5)
+//     - (ln(postAgeHours + 1) * 8) - (reportCount * 8)
+// ═══════════════════════════════════════════════════════════════════════════
+
+const RECENT_WINDOW_MS = 6 * 60 * 60 * 1000; // 6-hour rolling window for "recent" engagement
+
+interface RankingInputs {
+  reactionCount: number;
+  replyCount: number; // top-level replies
+  voiceReplyCount: number;
+  uniqueCommenters: number;
+  recentReactionCount: number;
+  recentReplyCount: number;
+  reportCount: number;
+  createdAt: number;
+  authorId: string;
+}
+
+function computeRankingScore(inputs: RankingInputs): number {
+  // ═══════════════════════════════════════════════════════════════════════════
+  // RANKING FIX: Engagement-only scoring
+  // ═══════════════════════════════════════════════════════════════════════════
+  // - NO baseScore: Posts start at 0, not 10
+  // - NO timeDecay: Age doesn't penalize posts
+  // - ONLY engagement matters for ranking
+  // - Tie-breaker (createdAt ASC) ensures newer posts appear AFTER older posts
+  //   when they have the same score
+  //
+  // Result:
+  // - New post (0 engagement): score = 0, appears at BOTTOM (newest createdAt)
+  // - Old post (0 engagement): score = 0, appears BEFORE new posts (older createdAt)
+  // - Post with engagement: score > 0, rises based on engagement amount
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  // Base engagement weights (reactions serve as "likes" in confessions)
+  const reactionScore = inputs.reactionCount * 2; // Treat as likes (weight 2)
+  const topLevelCommentScore = inputs.replyCount * 6;
+  const uniqueCommenterScore = inputs.uniqueCommenters * 4;
+
+  // Recent engagement bonus (within 6h window)
+  const recentReactionScore = inputs.recentReactionCount * 1.5;
+  const recentCommentScore = inputs.recentReplyCount * 5;
+
+  // Report penalty
+  const reportPenalty = inputs.reportCount * 8;
+
+  // Compute final score - ENGAGEMENT ONLY
+  // New post (0 engagement): 0
+  // With 1 reaction: 2
+  // With 1 comment: 6
+  // With 1 comment + 2 reactions: 10
+  const score =
+    reactionScore +
+    topLevelCommentScore +
+    uniqueCommenterScore +
+    recentReactionScore +
+    recentCommentScore -
+    reportPenalty;
+
+  return score;
+}
+
+// Helper to count unique commenters for a confession
+async function countUniqueCommenters(
+  ctx: any,
+  confessionId: Id<'confessions'>,
+  authorId: Id<'users'>
+): Promise<number> {
+  const replies = await ctx.db
+    .query('confessionReplies')
+    .withIndex('by_confession', (q: any) => q.eq('confessionId', confessionId))
+    .collect();
+
+  const uniqueUserIds = new Set<string>();
+  for (const reply of replies) {
+    // Exclude author's own comments from unique commenter count
+    if (reply.userId !== authorId) {
+      uniqueUserIds.add(reply.userId as string);
+    }
+  }
+  return uniqueUserIds.size;
+}
+
+// Helper to update ranking score for a confession
+async function updateConfessionRanking(
+  ctx: MutationCtx,
+  confessionId: Id<'confessions'>
+): Promise<void> {
+  const confession = await ctx.db.get(confessionId);
+  if (!confession) return;
+
+  const now = Date.now();
+
+  // Count unique commenters (excluding author)
+  const uniqueCommenters = await countUniqueCommenters(ctx, confessionId, confession.userId);
+
+  // Check if recent engagement window needs reset
+  const windowStart = confession.recentEngagementWindowStart || now;
+  const isWindowExpired = (now - windowStart) > RECENT_WINDOW_MS;
+
+  // If window expired, reset recent counts
+  let recentReplyCount = confession.recentReplyCount || 0;
+  let recentReactionCount = confession.recentReactionCount || 0;
+
+  if (isWindowExpired) {
+    recentReplyCount = 0;
+    recentReactionCount = 0;
+  }
+
+  const rankingScore = computeRankingScore({
+    reactionCount: confession.reactionCount,
+    replyCount: confession.replyCount,
+    voiceReplyCount: confession.voiceReplyCount || 0,
+    uniqueCommenters,
+    recentReactionCount,
+    recentReplyCount,
+    reportCount: confession.reportCount || 0,
+    createdAt: confession.createdAt,
+    authorId: confession.userId as string,
+  });
+
+  await ctx.db.patch(confessionId, {
+    rankingScore,
+    uniqueCommenters,
+    lastEngagementAt: now,
+    ...(isWindowExpired ? {
+      recentEngagementWindowStart: now,
+      recentReplyCount: 0,
+      recentReactionCount: 0,
+    } : {}),
+  });
+}
+
 // P0-003 FIX: Helper to check if either user has blocked the other (bidirectional)
 // Returns true if blocked (should prevent conversation creation)
 async function isBlockedBidirectional(
@@ -216,6 +357,19 @@ export const createConfession = mutation({
     // Include author info for 'open' and 'blur_photo' modes
     const includeAuthorInfo = effectiveVisibility !== 'anonymous';
 
+    // Compute initial ranking score (0 with no engagement - new posts start at bottom)
+    const initialRankingScore = computeRankingScore({
+      reactionCount: 0,
+      replyCount: 0,
+      voiceReplyCount: 0,
+      uniqueCommenters: 0,
+      recentReactionCount: 0,
+      recentReplyCount: 0,
+      reportCount: 0,
+      createdAt: now,
+      authorId: userId as string,
+    });
+
     const confessionId = await ctx.db.insert('confessions', {
       userId: userId,
       text: trimmed,
@@ -234,6 +388,14 @@ export const createConfession = mutation({
       createdAt: now,
       expiresAt: now + CONFESSION_EXPIRY_MS,
       taggedUserId: taggedUserId,
+      // Initialize ranking fields - new posts start at bottom
+      rankingScore: initialRankingScore,
+      lastEngagementAt: now,
+      uniqueCommenters: 0,
+      reportCount: 0,
+      recentReplyCount: 0,
+      recentReactionCount: 0,
+      recentEngagementWindowStart: now,
     });
 
     // If tagged, create notification for the tagged user
@@ -300,8 +462,16 @@ export const listConfessions = query({
         const { taggedUserId: _omitTagged, ...confessionWithoutTagged } = c;
         const safeConfession = c.isAnonymous ? confessionWithoutTagged : c;
 
+        // Fetch tagged user's display name (privacy-safe: only name, not other PII)
+        let taggedUserName: string | undefined;
+        if (c.taggedUserId) {
+          const taggedUser = await ctx.db.get(c.taggedUserId);
+          taggedUserName = taggedUser?.name;
+        }
+
         return {
           ...safeConfession,
+          taggedUserName, // Display name for tagged user (visible to all)
           replyPreviews: replies.map((r) => ({
             _id: r._id,
             text: r.text,
@@ -314,24 +484,32 @@ export const listConfessions = query({
       })
     );
 
+    // ═══════════════════════════════════════════════════════════════════════════
+    // RANKING-BASED SORTING
+    // ═══════════════════════════════════════════════════════════════════════════
+    // 'trending' = sort by rankingScore DESC (new posts at bottom, engaged posts rise)
+    // 'latest' = sort by createdAt DESC (newest first - for users who want to see new content)
     if (sortBy === 'trending') {
-      // Improved trending scoring with time decay
-      // Replies are strongest signal (weight 5), reactions medium (weight 2)
-      // Time decay reduces score for older confessions
+      // Sort by ranking score (primary), createdAt ASC (tie-breaker)
+      // - Higher engagement score = higher position
+      // - Same score: older posts first, newer posts LAST
+      // - New posts with 0 engagement appear at BOTTOM (newest createdAt)
       withPreviews.sort((a, b) => {
-        // P1-004 FIX: Guard against undefined createdAt (legacy data)
+        // Primary: rankingScore DESC (higher score = higher position)
+        const scoreA = a.rankingScore ?? -Infinity;
+        const scoreB = b.rankingScore ?? -Infinity;
+        if (scoreB !== scoreA) {
+          return scoreB - scoreA;
+        }
+
+        // Tie-breaker: createdAt ASC (older posts first, newer posts LAST)
+        // This ensures brand new posts with 0 engagement appear at the bottom
         const createdAtA = a.createdAt ?? now;
         const createdAtB = b.createdAt ?? now;
-        const hoursSinceA = (now - createdAtA) / (1000 * 60 * 60);
-        const hoursSinceB = (now - createdAtB) / (1000 * 60 * 60);
-
-        // Score formula: (replies * 5 + reactions * 2) / (hours + 2)
-        // The +2 prevents division by zero and gives new posts a baseline
-        const scoreA = (a.replyCount * 5 + a.reactionCount * 2) / (hoursSinceA + 2);
-        const scoreB = (b.replyCount * 5 + b.reactionCount * 2) / (hoursSinceB + 2);
-        return scoreB - scoreA;
+        return createdAtA - createdAtB;
       });
     }
+    // 'latest' sorting: already fetched in createdAt DESC order, no re-sort needed
 
     return withPreviews;
   },
@@ -356,24 +534,37 @@ export const getTrendingConfessions = query({
       (c) => c.createdAt > cutoff && (c.expiresAt === undefined || c.expiresAt > now) && !c.isDeleted
     );
 
-    // Improved trending scoring with consistent weights
-    // Replies are strongest signal (weight 5), reactions medium (weight 2)
-    // Voice replies get additional bonus (+1 each)
-    const scored = recent.map((c) => {
-      // P1-004 FIX: Guard against undefined createdAt (legacy data)
-      const createdAt = c.createdAt ?? now;
-      const hoursSince = (now - createdAt) / (1000 * 60 * 60);
-      const voiceReplies = c.voiceReplyCount || 0;
-      const score =
-        (c.replyCount * 5 + c.reactionCount * 2 + voiceReplies * 1) /
-        (hoursSince + 2);
-      // P1-02: Omit taggedUserId from anonymous confessions to prevent privacy leak
-      const { taggedUserId: _omitTagged, ...confessionWithoutTagged } = c;
-      const safeConfession = c.isAnonymous ? confessionWithoutTagged : c;
-      return { ...safeConfession, trendingScore: score };
-    });
+    // Use precomputed rankingScore for trending (with fallback for legacy data)
+    const scored = await Promise.all(
+      recent.map(async (c) => {
+        // Use rankingScore if available, otherwise compute on-the-fly for legacy
+        let trendingScore = c.rankingScore;
+        if (trendingScore === undefined) {
+          // Fallback for legacy confessions without rankingScore
+          const createdAt = c.createdAt ?? now;
+          const hoursSince = (now - createdAt) / (1000 * 60 * 60);
+          const voiceReplies = c.voiceReplyCount || 0;
+          trendingScore =
+            (c.replyCount * 5 + c.reactionCount * 2 + voiceReplies * 1) /
+            (hoursSince + 2);
+        }
+        // P1-02: Omit taggedUserId from anonymous confessions to prevent privacy leak
+        const { taggedUserId: _omitTagged, ...confessionWithoutTagged } = c;
+        const safeConfession = c.isAnonymous ? confessionWithoutTagged : c;
 
-    scored.sort((a, b) => b.trendingScore - a.trendingScore);
+        // Fetch tagged user's display name (privacy-safe: only name)
+        let taggedUserName: string | undefined;
+        if (c.taggedUserId) {
+          const taggedUser = await ctx.db.get(c.taggedUserId);
+          taggedUserName = taggedUser?.name;
+        }
+
+        return { ...safeConfession, taggedUserName, trendingScore };
+      })
+    );
+
+    // Sort by trendingScore (rankingScore) DESC
+    scored.sort((a, b) => (b.trendingScore ?? -Infinity) - (a.trendingScore ?? -Infinity));
 
     // Return top 5 trending
     return scored.slice(0, 5);
@@ -386,12 +577,20 @@ export const getConfession = query({
   handler: async (ctx, { confessionId }) => {
     const confession = await ctx.db.get(confessionId);
     if (!confession) return null;
+
+    // Lookup tagged user name (like listConfessions does)
+    let taggedUserName: string | undefined;
+    if (confession.taggedUserId) {
+      const taggedUser = await ctx.db.get(confession.taggedUserId);
+      taggedUserName = taggedUser?.name;
+    }
+
     // P1-02: Omit taggedUserId from anonymous confessions to prevent privacy leak
     if (confession.isAnonymous) {
       const { taggedUserId: _omitTagged, ...safeConfession } = confession;
-      return safeConfession;
+      return { ...safeConfession, taggedUserName };
     }
-    return confession;
+    return { ...confession, taggedUserName };
   },
 });
 
@@ -411,16 +610,47 @@ export const createReply = mutation({
     // Map authUserId -> Convex Id<"users"> (MUTATION: can create)
     const userId = await ensureUserByAuthId(ctx, args.userId as string);
 
-    // ONE REPLY PER USER: Check if user already has any reply (top-level or nested) for this confession
-    const existingReply = await ctx.db
-      .query('confessionReplies')
-      .withIndex('by_confession', (q) => q.eq('confessionId', args.confessionId))
-      .filter((q) => q.eq(q.field('userId'), userId))
-      .first();
-
-    if (existingReply) {
-      throw new Error('You can reply only once to this confession.');
+    // Fetch confession to check if user is OP (confession author)
+    const confession = await ctx.db.get(args.confessionId);
+    if (!confession) {
+      throw new Error('Confession not found.');
     }
+
+    const isOP = confession.userId === userId;
+    const isTopLevel = !args.parentReplyId;
+
+    // REPLY RULES:
+    // - Non-OP: can reply ONLY ONCE (top-level)
+    // - OP: can make unlimited nested replies, but only ONE top-level reply
+    if (!isOP) {
+      // Non-OP: check for any existing reply
+      const existingReply = await ctx.db
+        .query('confessionReplies')
+        .withIndex('by_confession', (q) => q.eq('confessionId', args.confessionId))
+        .filter((q) => q.eq(q.field('userId'), userId))
+        .first();
+
+      if (existingReply) {
+        throw new Error('You can reply only once to this confession.');
+      }
+    } else if (isOP && isTopLevel) {
+      // OP: check for existing top-level reply only
+      const existingTopLevel = await ctx.db
+        .query('confessionReplies')
+        .withIndex('by_confession', (q) => q.eq('confessionId', args.confessionId))
+        .filter((q) =>
+          q.and(
+            q.eq(q.field('userId'), userId),
+            q.eq(q.field('parentReplyId'), undefined)
+          )
+        )
+        .first();
+
+      if (existingTopLevel) {
+        throw new Error('You already posted a main reply.');
+      }
+    }
+    // OP nested replies (parentReplyId provided) → allowed freely
 
     const replyType = args.type || 'text';
 
@@ -450,20 +680,33 @@ export const createReply = mutation({
 
     // Increment reply count ONLY for top-level replies (not nested child replies)
     // Nested replies (with parentReplyId) should not inflate the main reply count
-    const confession = await ctx.db.get(args.confessionId);
-    if (confession) {
-      const patch: any = {};
-      // Only count top-level replies in replyCount
-      if (!args.parentReplyId) {
-        patch.replyCount = confession.replyCount + 1;
-      }
-      if (replyType === 'voice') {
-        patch.voiceReplyCount = (confession.voiceReplyCount || 0) + 1;
-      }
-      if (Object.keys(patch).length > 0) {
-        await ctx.db.patch(args.confessionId, patch);
+    // Note: confession was already fetched above for OP check
+    const now = Date.now();
+    const patch: any = {};
+    // Only count top-level replies in replyCount
+    if (!args.parentReplyId) {
+      patch.replyCount = confession.replyCount + 1;
+      // Update recent reply count for ranking (only for non-author replies)
+      if (userId !== confession.userId) {
+        const windowStart = confession.recentEngagementWindowStart || now;
+        const isWindowExpired = (now - windowStart) > RECENT_WINDOW_MS;
+        if (isWindowExpired) {
+          patch.recentReplyCount = 1;
+          patch.recentEngagementWindowStart = now;
+        } else {
+          patch.recentReplyCount = (confession.recentReplyCount || 0) + 1;
+        }
       }
     }
+    if (replyType === 'voice') {
+      patch.voiceReplyCount = (confession.voiceReplyCount || 0) + 1;
+    }
+    if (Object.keys(patch).length > 0) {
+      await ctx.db.patch(args.confessionId, patch);
+    }
+
+    // Update ranking score after reply (author replies don't boost ranking as much)
+    await updateConfessionRanking(ctx, args.confessionId);
 
     return replyId;
   },
@@ -517,6 +760,8 @@ export const deleteReply = mutation({
       if (Object.keys(patch).length > 0) {
         await ctx.db.patch(reply.confessionId, patch);
       }
+      // Update ranking score after reply deletion
+      await updateConfessionRanking(ctx, reply.confessionId);
     }
 
     return { success: true };
@@ -599,21 +844,27 @@ export const toggleReaction = mutation({
       return cleanCount;
     };
 
+    const now = Date.now();
+    const isAuthorReaction = userId === confession.userId;
+
     if (existing) {
       if (existing.type === args.type) {
         // Same emoji → remove (toggle off)
         await ctx.db.delete(existing._id);
         // P1-001 FIX: Clean up any duplicates and recompute
         await cleanupAndRecomputeCount();
+        // Update ranking score
+        await updateConfessionRanking(ctx, args.confessionId);
         return { added: false, replaced: false, chatUnlocked: false };
       } else {
         // Different emoji → replace (count stays the same)
         await ctx.db.patch(existing._id, {
           type: args.type,
-          createdAt: Date.now(),
+          createdAt: now,
         });
         // P1-001 FIX: Still clean up in case of race-created duplicates
         await cleanupAndRecomputeCount();
+        // Ranking doesn't change for emoji replacement
         return { added: false, replaced: true, chatUnlocked: false };
       }
     } else {
@@ -622,10 +873,29 @@ export const toggleReaction = mutation({
         confessionId: args.confessionId,
         userId: userId,
         type: args.type,
-        createdAt: Date.now(),
+        createdAt: now,
       });
       // P1-001 FIX: Clean up any race-created duplicates and recompute
       await cleanupAndRecomputeCount();
+
+      // Update recent reaction count for ranking (only for non-author reactions)
+      if (!isAuthorReaction) {
+        const windowStart = confession.recentEngagementWindowStart || now;
+        const isWindowExpired = (now - windowStart) > RECENT_WINDOW_MS;
+        if (isWindowExpired) {
+          await ctx.db.patch(args.confessionId, {
+            recentReactionCount: 1,
+            recentEngagementWindowStart: now,
+          });
+        } else {
+          await ctx.db.patch(args.confessionId, {
+            recentReactionCount: (confession.recentReactionCount || 0) + 1,
+          });
+        }
+      }
+
+      // Update ranking score
+      await updateConfessionRanking(ctx, args.confessionId);
 
       // NOTE: DM creation on tagged user reaction has been removed.
       // Tagged users now use respondToTaggedConfession mutation with Reject/Connect actions.
@@ -782,6 +1052,13 @@ export const reportConfession = mutation({
       status: 'pending',
       createdAt: Date.now(),
     });
+
+    // Increment report count for ranking penalty
+    const newReportCount = (confession.reportCount || 0) + 1;
+    await ctx.db.patch(args.confessionId, { reportCount: newReportCount });
+
+    // Update ranking score (reports penalize ranking)
+    await updateConfessionRanking(ctx, args.confessionId);
 
     return { success: true, alreadyReported: false };
   },

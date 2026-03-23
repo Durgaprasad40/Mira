@@ -87,6 +87,13 @@ export default function MainTabsLayout() {
     !isDemoMode && convexUserId ? { userId: convexUserId } : 'skip'
   );
 
+  // PRELOAD: Prefetch confessions data so Confessions tab feels instant
+  // Convex caches query results - when tab opens, data is already available
+  useQuery(
+    api.confessions.listConfessions,
+    !isDemoMode ? { sortBy: 'trending' as const } : 'skip'
+  );
+
   // Demo mode: use store for tagged count (count confessions targeting current user)
   const demoTaggedCount = useConfessionStore((s) => {
     if (!isDemoMode) return 0;
