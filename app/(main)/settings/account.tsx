@@ -155,7 +155,7 @@ export default function AccountSettingsScreen() {
               <Ionicons name="call-outline" size={22} color={COLORS.text} />
               <View style={styles.infoRowContent}>
                 <Text style={styles.infoRowLabel}>Phone</Text>
-                <Text style={styles.infoRowValue}>Not set</Text>
+                <Text style={styles.infoRowValue}>{currentUser?.phone || 'Not set'}</Text>
               </View>
             </View>
           </View>

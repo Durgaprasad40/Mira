@@ -18,35 +18,6 @@ export default function BlockedUsersScreen() {
 
   // Get blocked users from store
   const blockedUsersInfo = useBlockStore((s) => s.blockedUsersInfo);
-  const unblockUser = useBlockStore((s) => s.unblockUser);
-  const setJustUnblockedUserId = useBlockStore((s) => s.setJustUnblockedUserId);
-
-  const handleUnblock = (userId: string) => {
-    Alert.alert(
-      'Unblock User',
-      'This user will be able to see your profile and message you again.',
-      [
-        { text: 'Cancel', style: 'cancel' },
-        {
-          text: 'Unblock',
-          onPress: () => {
-            // Unblock the user
-            unblockUser(userId);
-
-            // Set the one-time "just unblocked" flag
-            setJustUnblockedUserId(userId);
-
-            // Navigate to Messages tab, then to the chat with this user
-            const conversationId = `demo_convo_${userId}`;
-            router.replace({
-              pathname: '/(main)/(tabs)/messages/chat/[conversationId]',
-              params: { conversationId, source: 'unblock' },
-            });
-          },
-        },
-      ]
-    );
-  };
 
   const handleReport = (userId: string) => {
     Alert.alert(
@@ -133,13 +104,6 @@ export default function BlockedUsersScreen() {
                   >
                     <Ionicons name="flag-outline" size={20} color={COLORS.textMuted} />
                   </TouchableOpacity>
-
-                  <TouchableOpacity
-                    style={styles.unblockButton}
-                    onPress={() => handleUnblock(user.id)}
-                  >
-                    <Text style={styles.unblockButtonText}>Unblock</Text>
-                  </TouchableOpacity>
                 </View>
               </View>
             ))}
@@ -150,7 +114,7 @@ export default function BlockedUsersScreen() {
         <View style={styles.infoFooter}>
           <Ionicons name="information-circle-outline" size={18} color={COLORS.textMuted} />
           <Text style={styles.infoFooterText}>
-            Blocked users cannot see your profile or send you messages. Blocking is private and instant.
+            Blocked users cannot see your profile or send you messages. Blocks are permanent and private.
           </Text>
         </View>
       </ScrollView>
@@ -254,19 +218,6 @@ const styles = StyleSheet.create({
   },
   actionButton: {
     padding: 8,
-  },
-  unblockButton: {
-    paddingHorizontal: 14,
-    paddingVertical: 8,
-    borderRadius: 8,
-    borderWidth: 1,
-    borderColor: COLORS.border,
-    backgroundColor: COLORS.background,
-  },
-  unblockButtonText: {
-    fontSize: 14,
-    fontWeight: '500',
-    color: COLORS.text,
   },
   // Info footer
   infoFooter: {

@@ -76,6 +76,7 @@ import type * as smartSuggestions from "../smartSuggestions.js";
 import type * as softMask from "../softMask.js";
 import type * as subscriptions from "../subscriptions.js";
 import type * as support from "../support.js";
+import type * as supportTickets from "../supportTickets.js";
 import type * as surveys from "../surveys.js";
 import type * as system from "../system.js";
 import type * as trustScore from "../trustScore.js";
@@ -160,6 +161,7 @@ declare const fullApi: ApiFromModules<{
   softMask: typeof softMask;
   subscriptions: typeof subscriptions;
   support: typeof support;
+  supportTickets: typeof supportTickets;
   surveys: typeof surveys;
   system: typeof system;
   trustScore: typeof trustScore;

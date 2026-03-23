@@ -293,35 +293,58 @@ export default function ViewProfileScreen() {
         </TouchableOpacity>
       </View>
 
-      {profile.photos && profile.photos.length > 0 ? (
-        <FlatList
-          horizontal
-          pagingEnabled
-          showsHorizontalScrollIndicator={false}
-          bounces={false}
-          snapToAlignment="start"
-          decelerationRate="fast"
-          snapToInterval={screenWidth}
-          disableIntervalMomentum
-          data={profile.photos}
-          keyExtractor={(item, index) => item._id || `photo-${index}`}
-          onMomentumScrollEnd={(e) => {
-            const index = Math.round(e.nativeEvent.contentOffset.x / screenWidth);
-            setCurrentPhotoIndex(index);
-          }}
-          renderItem={({ item }) => (
-            <View style={{ width: screenWidth, height: 500 + insets.top, overflow: 'hidden', paddingTop: insets.top }}>
-              <Image
-                source={{ uri: item.url }}
-                style={{ width: '100%', height: 500 }}
-                contentFit="cover"
-                blurRadius={isPhase2 ? 20 : 0}
-              />
-            </View>
-          )}
-          style={styles.photoCarousel}
-        />
-      ) : (
+      {/* BLUR ACCESS CONTROL:
+          - Phase-2: Always blurred (privacy mode)
+          - Phase-1: Respect owner's photoBlurred setting
+          - Owner sees their own profile clear (handled in profile.tsx tab, not here)
+          - Other users see blurred if owner enabled photoBlurred */}
+      {(() => {
+        // Determine blur: Phase-2 = strong blur, Phase-1 = respect owner's photoBlurred setting
+        const shouldBlur = isPhase2 || (profile as any).photoBlurred === true;
+        const blurIntensity = isPhase2 ? 20 : (shouldBlur ? 8 : 0);
+
+        if (__DEV__) {
+          console.log('[ViewProfile] 🔒 Photo blur access control:', {
+            viewerId: currentUserId?.slice(-8),
+            ownerId: userId?.slice(-8),
+            isPhase2,
+            ownerPhotoBlurred: (profile as any).photoBlurred,
+            shouldBlur,
+            blurIntensity,
+          });
+        }
+
+        return profile.photos && profile.photos.length > 0 ? (
+          <FlatList
+            horizontal
+            pagingEnabled
+            showsHorizontalScrollIndicator={false}
+            bounces={false}
+            snapToAlignment="start"
+            decelerationRate="fast"
+            snapToInterval={screenWidth}
+            disableIntervalMomentum
+            data={profile.photos}
+            keyExtractor={(item, index) => item._id || `photo-${index}`}
+            onMomentumScrollEnd={(e) => {
+              const index = Math.round(e.nativeEvent.contentOffset.x / screenWidth);
+              setCurrentPhotoIndex(index);
+            }}
+            renderItem={({ item }) => (
+              <View style={{ width: screenWidth, height: 500 + insets.top, overflow: 'hidden', paddingTop: insets.top }}>
+                <Image
+                  source={{ uri: item.url }}
+                  style={{ width: '100%', height: 500 }}
+                  contentFit="cover"
+                  blurRadius={blurIntensity}
+                />
+              </View>
+            )}
+            style={styles.photoCarousel}
+          />
+        ) : null;
+      })()}
+      {!(profile.photos && profile.photos.length > 0) && (
         <View style={[styles.photoPlaceholder, { height: 500 + insets.top, paddingTop: insets.top }]}>
           <Ionicons name="person" size={64} color={COLORS.textLight} />
         </View>

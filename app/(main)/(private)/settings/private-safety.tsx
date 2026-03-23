@@ -120,7 +120,7 @@ export default function SafetyScreen() {
           {/* Blocked Users */}
           <TouchableOpacity
             style={styles.navRow}
-            onPress={() => router.push('/(main)/(private)/settings/blocked-users')}
+            onPress={() => router.push('/(main)/(private)/settings/phase2-blocked-users')}
             activeOpacity={0.7}
           >
             <View style={styles.navRowLeft}>

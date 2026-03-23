@@ -124,9 +124,11 @@ export const addPhoto = mutation({
     isNsfwDetected: v.optional(v.boolean()), // Client-side NSFW detection result
     // C1 SECURITY: Session token for auth validation (MANDATORY - custom auth system)
     token: v.string(),
+    // Slot position (0-8) for photo placement - if provided, use this instead of auto-incrementing
+    slotOrder: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
-    const { storageId, isPrimary, hasFace, width, height, fileSize, mimeType, isNsfwDetected, token } = args;
+    const { storageId, isPrimary, hasFace, width, height, fileSize, mimeType, isNsfwDetected, token, slotOrder } = args;
 
     // Map authUserId -> Convex Id<"users"> (MUTATION: can create)
     const userId = await ensureUserByAuthId(ctx, args.userId as string);
@@ -212,7 +214,10 @@ export const addPhoto = mutation({
     for (const photo of existingPhotos) {
       maxOrder = Math.max(maxOrder, photo.order);
     }
-    const order = maxOrder + 1;
+    // Use client-provided slotOrder if valid (0-8), otherwise auto-increment
+    const order = (slotOrder !== undefined && slotOrder >= 0 && slotOrder <= 8)
+      ? slotOrder
+      : maxOrder + 1;
 
     // BUG FIX: If verification_reference is primary, this is NOT the "first photo"
     // so it should NOT auto-become primary. Only explicit isPrimary=true should make it primary.
@@ -566,6 +571,54 @@ export const reorderPhotos = mutation({
     await ctx.db.patch(userId, { primaryPhotoUrl: primaryPhoto?.url });
 
     return { success: true };
+  },
+});
+
+// Reorder photos with token-based auth (for apps using custom session auth)
+export const reorderPhotosWithToken = mutation({
+  args: {
+    photoIds: v.array(v.id('photos')),
+    token: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const { photoIds, token } = args;
+
+    // Validate session token
+    const userId = await validateSessionToken(ctx, token);
+    if (!userId) {
+      throw new Error('Unauthorized: invalid or expired session');
+    }
+
+    // SECURITY: Verify all photos belong to user before reordering
+    for (const photoId of photoIds) {
+      const photo = await ctx.db.get(photoId);
+      if (!photo) {
+        throw new Error('Photo not found');
+      }
+      if (photo.userId !== userId) {
+        throw new Error('Unauthorized photo modification');
+      }
+    }
+
+    // Update order and isPrimary (first photo is primary)
+    for (let i = 0; i < photoIds.length; i++) {
+      await ctx.db.patch(photoIds[i], {
+        order: i,
+        isPrimary: i === 0,
+      });
+    }
+
+    // Keep primaryPhotoUrl in sync
+    const primaryPhoto = await ctx.db
+      .query('photos')
+      .withIndex('by_user', (q) => q.eq('userId', userId))
+      .filter((q) => q.eq(q.field('isPrimary'), true))
+      .first();
+    await ctx.db.patch(userId, { primaryPhotoUrl: primaryPhoto?.url });
+
+    console.log('[reorderPhotosWithToken] Reordered', photoIds.length, 'photos, primary:', primaryPhoto?._id);
+
+    return { success: true, primaryPhotoId: primaryPhoto?._id, primaryPhotoUrl: primaryPhoto?.url };
   },
 });
 

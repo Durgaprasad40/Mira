@@ -1,6 +1,6 @@
 import React, { useState, useRef, useCallback } from 'react';
 import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Alert, LayoutChangeEvent, Modal, ActivityIndicator } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { COLORS } from '@/lib/constants';
@@ -41,6 +41,7 @@ const SAFETY_TIPS = {
 
 export default function SafetySettingsScreen() {
   const router = useRouter();
+  const insets = useSafeAreaInsets();
 
   // Safe back navigation - ensures return to Profile tab
   const handleGoBack = useCallback(() => {
@@ -213,7 +214,7 @@ export default function SafetySettingsScreen() {
         <View style={{ width: 24 }} />
       </View>
 
-      <ScrollView ref={scrollViewRef} style={styles.content} showsVerticalScrollIndicator={false}>
+      <ScrollView ref={scrollViewRef} style={styles.content} contentContainerStyle={{ paddingBottom: insets.bottom + 20 }} showsVerticalScrollIndicator={false}>
         {/* Verification Section */}
         <View style={styles.section}>
           <Text style={styles.sectionTitle}>Verification</Text>

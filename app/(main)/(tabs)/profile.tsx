@@ -19,6 +19,7 @@ import { useRouter, useFocusEffect } from 'expo-router';
 import { safePush, safeReplace } from '@/lib/safeRouter';
 import { useQuery, useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
+import { Id } from '@/convex/_generated/dataModel';
 import { useAuthStore } from '@/stores/authStore';
 import { COLORS } from '@/lib/constants';
 import { Avatar } from '@/components/ui';
@@ -88,10 +89,11 @@ export default function ProfileScreen() {
     !isDemoMode && userId ? { userId: userId as any } : 'skip'
   );
 
-  // CRITICAL DEBUG: In demo mode, still check if Convex has photos for this userId
+  // DEBUG ONLY: In demo mode + dev, check if Convex has photos for this userId
+  // Skip in production to avoid unnecessary network calls
   const convexPhotosDebug = useQuery(
     api.users.getCurrentUser,
-    isDemoMode && userId ? { userId: userId as any } : 'skip'
+    __DEV__ && isDemoMode && userId ? { userId: userId as any } : 'skip'
   );
 
   const subscriptionStatus = useQuery(
@@ -105,6 +107,13 @@ export default function ProfileScreen() {
     !isDemoMode && userId ? { userId: userId as any } : 'skip'
   );
   const isAdmin = adminCheck?.isAdmin === true;
+
+  // CONSISTENCY FIX: Use same photo source as Edit Profile (api.photos.getUserPhotos)
+  // This ensures Profile Tab shows the SAME photos as Edit Profile grid
+  const backendPhotos = useQuery(
+    api.photos.getUserPhotos,
+    !isDemoMode && userId ? { userId: userId as Id<'users'> } : 'skip'
+  );
 
   const deactivateAccount = useMutation(api.users.deactivateAccount);
   // 3A1-2: Server-side logout mutation
@@ -171,12 +180,31 @@ export default function ProfileScreen() {
         }
       : null;
 
-  // FIX C: Get main photo (index 0 after reorder)
-  // PERF: Memoize main photo URL to prevent re-creating source object
-  const mainPhotoUrl = React.useMemo(
-    () => currentUser?.photos?.[0]?.url || null,
-    [currentUser?.photos]
-  );
+  // MAIN PHOTO SOURCE OF TRUTH:
+  // - Live mode: Use photo with isPrimary=true from backendPhotos
+  // - Demo mode: Use first photo from demoStore
+  // The isPrimary flag is the authoritative source, set by reorderPhotosWithToken
+  const mainPhotoUrl = React.useMemo(() => {
+    if (isDemoMode) {
+      // Demo mode: use first photo from demoStore
+      return currentUser?.photos?.[0]?.url || null;
+    }
+    // Live mode: Find photo with isPrimary=true (authoritative)
+    // Fallback to first by order if no isPrimary found
+    const primaryPhoto = backendPhotos?.find((p: any) => p.isPrimary);
+    const mainPhoto = primaryPhoto || backendPhotos?.[0];
+
+    if (__DEV__ && backendPhotos?.length) {
+      console.log('[ProfileTab] 📸 Main photo selection:', {
+        hasPrimaryFlag: !!primaryPhoto,
+        selectedId: mainPhoto?._id,
+        selectedOrder: mainPhoto?.order,
+        isPrimary: mainPhoto?.isPrimary,
+      });
+    }
+
+    return mainPhoto?.url || null;
+  }, [isDemoMode, currentUser?.photos, backendPhotos]);
 
   // PERF: Prefetch top photos after hydration
   React.useEffect(() => {
@@ -196,14 +224,18 @@ export default function ProfileScreen() {
     }
   }, [currentUser?.photos]);
 
-  // Blur status: detect from existing field names only (no new fields added)
-  const blurEnabled = Boolean(
-    (currentUser as any)?.blurMyPhoto ??
-    (currentUser as any)?.blurPhoto ??
-    (currentUser as any)?.blurEnabled ??
-    (currentUser as any)?.photoVisibilityBlur ??
-    false
-  );
+  // Blur status: read from backend field 'photoBlurred' (source of truth)
+  // This field is set by api.users.togglePhotoBlur mutation
+  const blurEnabled = Boolean((currentUser as any)?.photoBlurred ?? false);
+
+  // __DEV__ LOG: Blur state tracing
+  if (__DEV__) {
+    console.log('[ProfileTab] 🔒 Blur state:', {
+      photoBlurred: (currentUser as any)?.photoBlurred,
+      blurEnabled,
+      userId: userId?.slice(-8),
+    });
+  }
 
   // Preview toggle state (UI only, doesn't change settings)
   const [previewBlur, setPreviewBlur] = useState(false);
@@ -212,48 +244,37 @@ export default function ProfileScreen() {
   const [showPhotoPreview, setShowPhotoPreview] = useState(false);
 
   if (__DEV__) {
-    const source = isDemoMode ? 'demoStore' : 'convex';
-    const count = currentUser?.photos?.length ?? 0;
-    console.log('[ProfileTab] photoSource', {
+    // CONSISTENCY DEBUG: Show both sources to verify they match
+    const backendPhotoCount = backendPhotos?.length ?? 0;
+    const demoPhotoCount = currentUser?.photos?.length ?? 0;
+    const source = isDemoMode ? 'demoStore' : 'api.photos.getUserPhotos';
+
+    console.log('[ProfileTab] 📸 Photo source consistency check:', {
       source,
-      count,
-      main: !!mainPhotoUrl,
-      refreshKey,
-      hydrated: demoHydrated,
-      // CRITICAL DEBUG: Show auth state
       isDemoMode,
-      authUserId: userId,
-      demoUserId: currentDemoUserId,
+      // Backend photos (same query as Edit Profile)
+      backendPhotoCount,
+      backendSlot0: backendPhotos?.[0]?.url?.slice(-30) || null,
+      // What we're displaying
+      mainPhotoUrl: mainPhotoUrl?.slice(-30) || null,
+      // For comparison with Edit Profile logs
+      refreshKey,
     });
 
     // CRITICAL: If in demo mode, warn that Convex photos are being ignored
     if (isDemoMode) {
-      console.warn('[ProfileTab] ⚠️ DEMO MODE ACTIVE - Reading photos from demoStore (local), NOT Convex backend!');
-      console.warn('[ProfileTab] ⚠️ Phase-1 photos uploaded to Convex will NOT be visible in demo mode.');
-      console.warn('[ProfileTab] ⚠️ To see Convex photos, set EXPO_PUBLIC_DEMO_MODE=false in .env.local');
+      console.warn('[ProfileTab] ⚠️ DEMO MODE ACTIVE - Using demoStore photos');
 
       // DEBUG: Check if Convex actually has photos for this user
       if (convexPhotosDebug) {
         const convexPhotoCount = convexPhotosDebug.photos?.length ?? 0;
-        const convexPhotoIds = convexPhotosDebug.photos?.map((p: any) => ({
-          id: p._id,
-          storageId: p.storageId,
-          order: p.order,
-        })) ?? [];
-
-        console.log('[ProfileTab] 🔍 Convex backend CHECK:', {
-          userId,
-          convexPhotoCount,
-          convexPhotoIds,
-          displayUrl: convexPhotosDebug.displayPrimaryPhotoUrl,
-          verificationPhotoId: convexPhotosDebug.verificationReferencePhotoId,
-        });
-
         if (convexPhotoCount > 0) {
-          console.error('[ProfileTab] ❌ FOUND CONVEX PHOTOS BUT NOT DISPLAYING THEM!');
-          console.error('[ProfileTab] ❌ This is WHY Phase-1 photos are missing - demo mode ignores Convex backend.');
+          console.warn('[ProfileTab] ⚠️ Convex has', convexPhotoCount, 'photos but demo mode ignores them');
         }
       }
+    } else {
+      // LIVE MODE: Log for consistency verification with Edit Profile
+      console.log('[ProfileTab] ✅ LIVE MODE - Using api.photos.getUserPhotos (same as Edit Profile)');
     }
   }
 
@@ -333,91 +354,108 @@ export default function ProfileScreen() {
     <ScrollView style={{ flex: 1 }} showsVerticalScrollIndicator={false}>
       <View style={styles.header}>
         <Text style={styles.headerTitle}>Profile</Text>
-        <TouchableOpacity onPress={() => safePush(router, '/(main)/edit-profile', 'profile->edit')}>
+        <TouchableOpacity
+          onPress={() => safePush(router, '/(main)/edit-profile', 'profile->edit')}
+          accessibilityRole="button"
+          accessibilityLabel="Edit profile"
+        >
           <Ionicons name="create-outline" size={24} color={COLORS.primary} />
         </TouchableOpacity>
       </View>
 
       <View style={styles.profileSection}>
-        {/* Main photo - always clear for owner, tappable for full-screen view */}
+        {/* Main photo - large with shadow, tappable for full-screen view */}
+        {/* BLUR FIX: Apply soft blur (radius 8) when photoBlurred is true */}
         {mainPhotoUrl ? (
           <TouchableOpacity
             activeOpacity={0.9}
             onPress={() => setShowPhotoPreview(true)}
+            accessibilityRole="imagebutton"
+            accessibilityLabel="View profile photo full screen"
+            style={styles.avatarContainer}
           >
             <Image
               source={{ uri: mainPhotoUrl }}
               style={styles.avatar}
               contentFit="cover"
               transition={200}
+              blurRadius={blurEnabled ? 8 : 0}
               onLoadEnd={() => {
                 // PERF: Log photo load time once per focus
                 if (__DEV__ && !hasLoggedPhotoLoad.current && focusTimeRef.current > 0) {
                   const loadTime = Date.now() - focusTimeRef.current;
-                  console.log('[PERF ProfileTab] Main photo loaded:', { loadTimeMs: loadTime });
+                  console.log('[PERF ProfileTab] Main photo loaded:', { loadTimeMs: loadTime, blurEnabled });
                   hasLoggedPhotoLoad.current = true;
                 }
               }}
             />
           </TouchableOpacity>
         ) : (
-          <Avatar size={100} />
+          <View style={styles.avatarContainer}>
+            <Avatar size={120} />
+          </View>
         )}
 
-        {/* Blur status badge */}
-        <View style={[styles.blurStatusBadge, blurEnabled ? styles.blurStatusOn : styles.blurStatusOff]}>
+        {/* Name + Age + Verified (inline) */}
+        <View style={styles.nameRow}>
+          <Text style={styles.name}>
+            {currentUser.name}{age !== null ? `, ${age}` : ''}
+          </Text>
+          {currentUser.isVerified && (
+            <View style={styles.verifiedInline}>
+              <Ionicons name="checkmark-circle" size={18} color={COLORS.primary} />
+              <Text style={styles.verifiedInlineText}>Verified</Text>
+            </View>
+          )}
+        </View>
+
+        {/* Bio */}
+        {currentUser.bio && <Text style={styles.bio}>{currentUser.bio}</Text>}
+
+        {/* Photo visibility status - subtle info row */}
+        <View style={styles.visibilityRow}>
           <Ionicons
-            name={blurEnabled ? 'eye-off' : 'eye'}
+            name={blurEnabled ? 'eye-off-outline' : 'eye-outline'}
             size={16}
-            color={blurEnabled ? COLORS.primary : COLORS.textLight}
+            color={COLORS.textMuted}
           />
-          <Text style={[styles.blurStatusText, blurEnabled && styles.blurStatusTextOn]}>
-            {blurEnabled ? 'Blur ON — others see your photos blurred' : 'Blur OFF — others see your photos clearly'}
+          <Text style={styles.visibilityText}>
+            {blurEnabled ? 'Photos blurred to others' : 'Photos visible to others'}
           </Text>
         </View>
 
-        {/* Preview toggle */}
-        {mainPhotoUrl && (
+        {/* Preview toggle (only if blur is on and has photo) */}
+        {blurEnabled && mainPhotoUrl && (
           <TouchableOpacity
             style={styles.previewToggle}
             onPress={() => setPreviewBlur((p) => !p)}
             activeOpacity={0.7}
+            accessibilityRole="button"
+            accessibilityLabel={previewBlur ? 'Hide blur preview' : 'Preview how others see your photo'}
           >
-            <Ionicons name={previewBlur ? 'eye' : 'eye-off-outline'} size={14} color={COLORS.primary} />
             <Text style={styles.previewToggleText}>
-              {previewBlur ? 'Hide preview' : 'Preview how others see it'}
+              {previewBlur ? 'Hide preview' : 'See how others view you'}
             </Text>
           </TouchableOpacity>
         )}
 
-        {/* Blurred preview thumbnail */}
+        {/* Blurred preview thumbnail - same blur intensity as main photo */}
         {previewBlur && mainPhotoUrl && (
           <View style={styles.previewContainer}>
             <Image
               source={{ uri: mainPhotoUrl }}
               style={styles.previewThumbnail}
               contentFit="cover"
-              blurRadius={blurEnabled ? 20 : 0}
+              blurRadius={8}
               transition={100}
             />
-            <Text style={styles.previewLabel}>
-              {blurEnabled ? 'Others see this (blurred)' : 'Others see this (clear)'}
-            </Text>
-            <Text style={styles.previewHint}>Preview only — does not change your setting</Text>
+            <Text style={styles.previewHint}>How others see your photo</Text>
           </View>
         )}
-
-        {currentUser.isVerified && (
-          <View style={styles.verifiedBadge}>
-            <Ionicons name="checkmark-circle" size={24} color={COLORS.primary} />
-            <Text style={styles.verifiedText}>Verified</Text>
-          </View>
-        )}
-        <Text style={styles.name}>
-          {currentUser.name}{age !== null ? `, ${age}` : ''}
-        </Text>
-        {currentUser.bio && <Text style={styles.bio}>{currentUser.bio}</Text>}
       </View>
+
+      {/* Section divider */}
+      <View style={styles.sectionDivider} />
 
 {/* HIDDEN: Subscription UI temporarily removed per product rules */}
 
@@ -426,6 +464,8 @@ export default function ProfileScreen() {
         <TouchableOpacity
           style={styles.menuItem}
           onPress={() => safePush(router, '/(main)/edit-profile', 'profile->editMenu')}
+          accessibilityRole="button"
+          accessibilityLabel="Edit Profile"
         >
           <Ionicons name="create-outline" size={24} color={COLORS.text} />
           <Text style={styles.menuText}>Edit Profile</Text>
@@ -436,6 +476,8 @@ export default function ProfileScreen() {
         <TouchableOpacity
           style={styles.menuItem}
           onPress={() => safePush(router, '/(main)/settings/privacy', 'profile->privacy')}
+          accessibilityRole="button"
+          accessibilityLabel="Privacy settings"
         >
           <Ionicons name="lock-closed-outline" size={24} color={COLORS.text} />
           <Text style={styles.menuText}>Privacy</Text>
@@ -446,6 +488,8 @@ export default function ProfileScreen() {
         <TouchableOpacity
           style={styles.menuItem}
           onPress={() => safePush(router, '/(main)/settings/notifications', 'profile->notifications')}
+          accessibilityRole="button"
+          accessibilityLabel="Notification settings"
         >
           <Ionicons name="notifications-outline" size={24} color={COLORS.text} />
           <Text style={styles.menuText}>Notifications</Text>
@@ -456,6 +500,8 @@ export default function ProfileScreen() {
         <TouchableOpacity
           style={styles.menuItem}
           onPress={() => safePush(router, '/(main)/settings/safety', 'profile->safety')}
+          accessibilityRole="button"
+          accessibilityLabel="Safety settings"
         >
           <Ionicons name="shield-checkmark-outline" size={24} color={COLORS.text} />
           <Text style={styles.menuText}>Safety</Text>
@@ -466,19 +512,23 @@ export default function ProfileScreen() {
         <TouchableOpacity
           style={styles.menuItem}
           onPress={() => safePush(router, '/(main)/settings/account', 'profile->account')}
+          accessibilityRole="button"
+          accessibilityLabel="Account settings"
         >
           <Ionicons name="person-outline" size={24} color={COLORS.text} />
           <Text style={styles.menuText}>Account</Text>
           <Ionicons name="chevron-forward" size={20} color={COLORS.textLight} />
         </TouchableOpacity>
 
-        {/* 6. Help & FAQ */}
+        {/* 6. Support & FAQ */}
         <TouchableOpacity
           style={styles.menuItem}
-          onPress={() => safePush(router, '/(main)/settings/help', 'profile->help')}
+          onPress={() => safePush(router, '/(main)/settings/support', 'profile->support')}
+          accessibilityRole="button"
+          accessibilityLabel="Support and FAQ"
         >
           <Ionicons name="help-circle-outline" size={24} color={COLORS.text} />
-          <Text style={styles.menuText}>Help & FAQ</Text>
+          <Text style={styles.menuText}>Support & FAQ</Text>
           <Ionicons name="chevron-forward" size={20} color={COLORS.textLight} />
         </TouchableOpacity>
 
@@ -486,6 +536,8 @@ export default function ProfileScreen() {
         <TouchableOpacity
           style={styles.menuItem}
           onPress={handleLogout}
+          accessibilityRole="button"
+          accessibilityLabel="Log out"
         >
           <Ionicons name="log-out-outline" size={24} color={COLORS.text} />
           <Text style={styles.menuText}>Log Out</Text>
@@ -516,7 +568,12 @@ export default function ProfileScreen() {
 
       {/* 8. Deactivate Account - destructive action at bottom */}
       <View style={styles.footer}>
-        <TouchableOpacity onPress={handleDeactivate} style={styles.deactivateButton}>
+        <TouchableOpacity
+          onPress={handleDeactivate}
+          style={styles.deactivateButton}
+          accessibilityRole="button"
+          accessibilityLabel="Deactivate account"
+        >
           <Text style={styles.deactivateText}>Deactivate Account</Text>
         </TouchableOpacity>
       </View>
@@ -534,6 +591,8 @@ export default function ProfileScreen() {
             style={styles.photoPreviewCloseArea}
             activeOpacity={1}
             onPress={() => setShowPhotoPreview(false)}
+            accessibilityRole="button"
+            accessibilityLabel="Close photo preview"
           >
             {mainPhotoUrl && (
               <Image
@@ -587,42 +646,70 @@ const styles = StyleSheet.create({
   },
   profileSection: {
     alignItems: 'center',
-    padding: 24,
-    borderBottomWidth: 1,
-    borderBottomColor: COLORS.border,
+    paddingTop: 24,
+    paddingHorizontal: 24,
+    paddingBottom: 20,
+  },
+  avatarContainer: {
+    marginBottom: 16,
+    // Soft shadow for premium feel
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.15,
+    shadowRadius: 12,
+    elevation: 8,
   },
   avatar: {
-    width: 100,
-    height: 100,
-    borderRadius: 50,
-    marginBottom: 12,
+    width: 120,
+    height: 120,
+    borderRadius: 60,
+    borderWidth: 3,
+    borderColor: COLORS.white,
   },
-  verifiedBadge: {
+  nameRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: COLORS.primary + '20',
-    paddingHorizontal: 12,
-    paddingVertical: 6,
-    borderRadius: 16,
-    marginBottom: 12,
-  },
-  verifiedText: {
-    fontSize: 12,
-    fontWeight: '600',
-    color: COLORS.primary,
-    marginLeft: 4,
+    justifyContent: 'center',
+    flexWrap: 'wrap',
+    gap: 8,
+    marginBottom: 6,
   },
   name: {
     fontSize: 24,
     fontWeight: '700',
     color: COLORS.text,
-    marginBottom: 8,
+  },
+  verifiedInline: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+  },
+  verifiedInlineText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: COLORS.primary,
   },
   bio: {
-    fontSize: 16,
+    fontSize: 15,
     color: COLORS.textLight,
     textAlign: 'center',
-    lineHeight: 22,
+    lineHeight: 21,
+    marginBottom: 12,
+    paddingHorizontal: 16,
+  },
+  visibilityRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    paddingVertical: 4,
+  },
+  visibilityText: {
+    fontSize: 13,
+    color: COLORS.textMuted,
+  },
+  sectionDivider: {
+    height: 8,
+    backgroundColor: COLORS.backgroundDark,
   },
   statsCard: {
     backgroundColor: COLORS.backgroundDark,
@@ -684,31 +771,6 @@ const styles = StyleSheet.create({
   deactivateText: {
     fontSize: 14,
     color: COLORS.error,
-    fontWeight: '500',
-  },
-  // Blur status badge
-  blurStatusBadge: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 20,
-    marginTop: 12,
-    marginBottom: 8,
-    gap: 6,
-  },
-  blurStatusOn: {
-    backgroundColor: COLORS.primary + '20',
-  },
-  blurStatusOff: {
-    backgroundColor: COLORS.backgroundDark,
-  },
-  blurStatusText: {
-    fontSize: 12,
-    color: COLORS.textLight,
-  },
-  blurStatusTextOn: {
-    color: COLORS.primary,
     fontWeight: '500',
   },
   // Preview toggle

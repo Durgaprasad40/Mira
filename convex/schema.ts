@@ -1829,4 +1829,55 @@ export default defineSchema({
   })
     .index('by_viewer', ['viewerId'])
     .index('by_pair', ['viewerId', 'viewedUserId']),
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Support Tickets System
+  // ─────────────────────────────────────────────────────────────────────────
+
+  // User support tickets for Help & Support inquiries
+  supportTickets: defineTable({
+    userId: v.id('users'),
+    category: v.union(
+      v.literal('payment'),
+      v.literal('subscription'),
+      v.literal('account'),
+      v.literal('bug'),
+      v.literal('safety'),
+      v.literal('verification'),
+      v.literal('other')
+    ),
+    message: v.string(),
+    status: v.union(
+      v.literal('open'),
+      v.literal('in_review'),
+      v.literal('replied'),
+      v.literal('closed')
+    ),
+    adminReply: v.optional(v.string()),
+    // Attachments: up to 5 photos OR 1 video (not both)
+    attachments: v.optional(v.array(v.object({
+      storageId: v.id('_storage'),
+      type: v.union(v.literal('photo'), v.literal('video')),
+    }))),
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index('by_user', ['userId'])
+    .index('by_status', ['status'])
+    .index('by_created', ['createdAt']),
+
+  // Support ticket conversation messages (general support thread, distinct from Phase-2 Safety)
+  supportTicketMessages: defineTable({
+    ticketId: v.id('supportTickets'),
+    senderType: v.union(v.literal('user'), v.literal('admin')),
+    senderUserId: v.optional(v.id('users')), // For user messages
+    senderName: v.optional(v.string()),       // For admin display name
+    message: v.string(),
+    attachments: v.optional(v.array(v.object({
+      storageId: v.id('_storage'),
+      type: v.union(v.literal('photo'), v.literal('video')),
+    }))),
+    createdAt: v.number(),
+  })
+    .index('by_ticket', ['ticketId']),
 });
