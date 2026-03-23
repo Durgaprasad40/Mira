@@ -1,3 +1,11 @@
+/*
+ * LOCKED (PRIVATE ROOM CHAT)
+ * Do NOT modify this file unless Durga Prasad explicitly unlocks it.
+ *
+ * STATUS:
+ * - Feature is stable and production-locked
+ * - No logic/UI changes allowed
+ */
 import React, { useState, useCallback, useRef, useEffect, useMemo } from 'react';
 import {
   StyleSheet,

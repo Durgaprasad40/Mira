@@ -1,3 +1,12 @@
+/*
+ * LOCKED (NEARBY TAB)
+ * Do NOT modify this file unless Durga Prasad explicitly unlocks it.
+ *
+ * STATUS:
+ * - Feature is stable and production-locked
+ * - No logic/UI changes allowed
+ */
+
 /**
  * Nearby Tab - Full Implementation
  *

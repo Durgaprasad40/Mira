@@ -1,3 +1,12 @@
+/*
+ * LOCKED (PRIVATE PROFILE SCREEN)
+ * Do NOT modify this file unless Durga Prasad explicitly unlocks it.
+ *
+ * STATUS:
+ * - Feature is stable and production-locked
+ * - No logic/UI changes allowed
+ */
+
 /**
  * Phase-2 Private Profile Screen
  *

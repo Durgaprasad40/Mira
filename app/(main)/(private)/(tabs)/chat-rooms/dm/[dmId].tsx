@@ -1,3 +1,12 @@
+/*
+ * LOCKED (PRIVATE DM ROUTE - ORPHANED)
+ * Do NOT modify this file unless Durga Prasad explicitly unlocks it.
+ *
+ * STATUS:
+ * - Feature is stable and production-locked
+ * - No logic/UI changes allowed
+ */
+
 // ⚠️ ORPHANED ROUTE
 // This route is currently unused.
 // Private Chat uses modal inside [roomId].tsx.
