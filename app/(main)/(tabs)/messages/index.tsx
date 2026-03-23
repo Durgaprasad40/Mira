@@ -107,8 +107,12 @@ export default function MessagesScreen() {
 
   // Swipe mutation for Convex mode like/pass actions
   const swipe = useMutation(api.likes.swipe);
+  // Mutation to ensure conversation exists for a match (used when conversationId is missing)
+  const ensureConversation = useMutation(api.conversations.getOrCreateForMatch);
   const [retryKey, setRetryKey] = useState(0);
   const { safeTimeout } = useScreenSafety();
+  // Track ongoing conversation creation to prevent double-taps
+  const [creatingConversation, setCreatingConversation] = useState<string | null>(null);
 
   // View state: 'messages' | 'likes' — IN-PLACE toggle, not a route change
   const [activeView, setActiveView] = useState<'messages' | 'likes'>('messages');
@@ -168,6 +172,7 @@ export default function MessagesScreen() {
   }, [isDemoMode, hasHydrated, demoSeed]);
 
   // Handle focus param from notification deep link
+  // FIX: Always reset to correct view based on focus param to prevent stale state
   useFocusEffect(
     useCallback(() => {
       if (focus === 'likes') {
@@ -225,6 +230,10 @@ export default function MessagesScreen() {
             likesListRef.current?.scrollToIndex({ index: rowIndex, animated: true });
           }, 150); // Slightly longer delay to allow layout
         }
+      } else {
+        // FIX: Reset to messages view when not explicitly requesting likes
+        // This prevents stale 'likes' view state when navigating from Discover
+        setActiveView('messages');
       }
 
       // Cleanup: clear pending scroll timeout on blur/unmount
@@ -601,6 +610,58 @@ export default function MessagesScreen() {
     safePush(router, `/(main)/profile/${like.userId}` as any, 'messages->likeProfile');
   }, [router]);
 
+  // ── Open match chat with fallback conversation creation ──
+  // This ensures tapping a match card always navigates to chat, even if conversationId is missing
+  const handleOpenMatchChat = useCallback(async (
+    matchId: string,
+    conversationId: string | undefined,
+    sourceLabel: string
+  ) => {
+    // Guard: log matchId presence
+    log.info('[MESSAGES]', `${sourceLabel}: handleOpenMatchChat`, {
+      matchId,
+      hasConversationId: !!conversationId,
+    });
+
+    // Prevent double-tap while creating
+    if (creatingConversation) {
+      log.warn('[MESSAGES]', `${sourceLabel}: already creating conversation`, { creatingConversation });
+      return;
+    }
+
+    if (conversationId) {
+      // Direct navigation - conversation exists
+      log.info('[MESSAGES]', `${sourceLabel}: navigating directly`, { conversationId });
+      safePush(router, `/(main)/(tabs)/messages/chat/${conversationId}` as any, sourceLabel);
+    } else {
+      // Fallback: create conversation for this match, then navigate
+      if (!userId) {
+        log.error('[MESSAGES]', `${sourceLabel}: userId missing, cannot create conversation`);
+        Toast.show('Unable to open chat. Please try again.');
+        return;
+      }
+      log.info('[MESSAGES]', `${sourceLabel}: conversationId missing, creating...`, { matchId });
+      setCreatingConversation(matchId);
+      try {
+        const result = await ensureConversation({ matchId: matchId as any, authUserId: userId });
+        if (result?.conversationId) {
+          log.info('[MESSAGES]', `${sourceLabel}: conversation created, navigating`, {
+            conversationId: result.conversationId,
+          });
+          safePush(router, `/(main)/(tabs)/messages/chat/${result.conversationId}` as any, sourceLabel);
+        } else {
+          log.error('[MESSAGES]', `${sourceLabel}: ensureConversation returned no conversationId`, { result });
+          Toast.show('Unable to open chat. Please try again.');
+        }
+      } catch (error) {
+        log.error('[MESSAGES]', `${sourceLabel}: ensureConversation failed`, { error, matchId });
+        Toast.show('Unable to open chat. Please try again.');
+      } finally {
+        setCreatingConversation(null);
+      }
+    }
+  }, [creatingConversation, ensureConversation, router, userId]);
+
   // Back to messages (for in-place header button)
   const handleBackToMessages = useCallback(() => {
     // BUGFIX #5: Reset layout ready flag since FlatList will be destroyed
@@ -710,13 +771,7 @@ export default function MessagesScreen() {
             <TouchableOpacity
               style={styles.compactMatchItem}
               activeOpacity={0.7}
-              onPress={() => {
-                if (item.conversationId) {
-                  safePush(router, `/(main)/(tabs)/messages/chat/${item.conversationId}` as any, 'messages->superLikeChat');
-                } else {
-                  log.warn('[MESSAGES]', 'Super Like card missing conversationId', { matchId: item.id });
-                }
-              }}
+              onPress={() => handleOpenMatchChat(item.id, item.conversationId, 'messages->superLikeChat')}
             >
               <View style={styles.compactAvatarContainer}>
                 <View style={[styles.compactMatchRing, { borderColor: COLORS.superLike }]}>
@@ -770,13 +825,7 @@ export default function MessagesScreen() {
             <TouchableOpacity
               style={styles.compactMatchItem}
               activeOpacity={0.7}
-              onPress={() => {
-                if (item.conversationId) {
-                  safePush(router, `/(main)/(tabs)/messages/chat/${item.conversationId}` as any, 'messages->newMatchChat');
-                } else {
-                  log.warn('[MESSAGES]', 'New Match card missing conversationId', { matchId: item.id });
-                }
-              }}
+              onPress={() => handleOpenMatchChat(item.id, item.conversationId, 'messages->newMatchChat')}
             >
               <View style={styles.compactAvatarContainer}>
                 <View style={[styles.compactMatchRing, { borderColor: COLORS.primary }]}>
