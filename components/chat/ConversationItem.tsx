@@ -2,7 +2,7 @@ import React, { useMemo } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity } from 'react-native';
 import { Image } from 'expo-image';
 import { Ionicons } from '@expo/vector-icons';
-import { COLORS } from '@/lib/constants';
+import { COLORS, SPACING, SIZES, FONT_SIZE, FONT_WEIGHT, HAIRLINE, moderateScale } from '@/lib/constants';
 import { Badge } from '@/components/ui';
 import { DEMO_PROFILES } from '@/lib/demoData';
 
@@ -153,23 +153,28 @@ export function ConversationItem({
   );
 }
 
+// Responsive avatar size
+const AVATAR_SIZE = moderateScale(56, 0.3);
+
 const styles = StyleSheet.create({
   container: {
     flexDirection: 'row',
-    padding: 16,
+    padding: SPACING.base,
     backgroundColor: COLORS.background,
-    borderBottomWidth: 1,
+    borderBottomWidth: HAIRLINE,
     borderBottomColor: COLORS.border,
   },
   avatarContainer: {
     position: 'relative',
-    marginRight: 12,
+    marginRight: SPACING.md,
+    flexShrink: 0,
   },
   avatar: {
-    width: 56,
-    height: 56,
-    borderRadius: 28,
+    width: AVATAR_SIZE,
+    height: AVATAR_SIZE,
+    borderRadius: AVATAR_SIZE / 2,
     backgroundColor: COLORS.backgroundDark,
+    flexShrink: 0,
   },
   avatarPlaceholder: {
     alignItems: 'center',
@@ -177,45 +182,49 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.primary,
   },
   avatarInitials: {
-    fontSize: 18,
-    fontWeight: '600',
+    fontSize: FONT_SIZE.lg,
+    fontWeight: FONT_WEIGHT.semibold,
     color: COLORS.white,
   },
   // TASK-1: Removed verifiedBadge style (badge removed from Messages list)
   preMatchBadge: {
     position: 'absolute',
-    top: -4,
-    right: -4,
+    top: -SPACING.xs,
+    right: -SPACING.xs,
     backgroundColor: COLORS.warning,
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    borderRadius: 8,
+    paddingHorizontal: SPACING.xs,
+    paddingVertical: SPACING.xxs,
+    borderRadius: SIZES.radius.sm,
+    flexShrink: 0,
   },
   preMatchText: {
-    fontSize: 10,
-    fontWeight: '600',
+    fontSize: FONT_SIZE.xs,
+    fontWeight: FONT_WEIGHT.semibold,
     color: COLORS.white,
   },
   content: {
     flex: 1,
     justifyContent: 'center',
+    minWidth: 0, // Allow text truncation
   },
   header: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: 4,
+    marginBottom: SPACING.xs,
   },
   name: {
-    fontSize: 16,
-    fontWeight: '600',
+    fontSize: FONT_SIZE.lg,
+    fontWeight: FONT_WEIGHT.semibold,
     color: COLORS.text,
     flex: 1,
+    flexShrink: 1,
   },
   time: {
-    fontSize: 12,
+    fontSize: FONT_SIZE.caption,
     color: COLORS.textLight,
-    marginLeft: 8,
+    marginLeft: SPACING.sm,
+    flexShrink: 0,
   },
   messageRow: {
     flexDirection: 'row',
@@ -223,13 +232,14 @@ const styles = StyleSheet.create({
     justifyContent: 'space-between',
   },
   message: {
-    fontSize: 14,
+    fontSize: FONT_SIZE.md,
     color: COLORS.textLight,
     flex: 1,
-    marginRight: 8,
+    marginRight: SPACING.sm,
+    flexShrink: 1,
   },
   unreadMessage: {
-    fontWeight: '600',
+    fontWeight: FONT_WEIGHT.semibold,
     color: COLORS.text,
   },
 });

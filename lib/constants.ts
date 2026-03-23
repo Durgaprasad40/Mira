@@ -662,3 +662,45 @@ export const INCOGNITO_COLORS = {
   primary: '#E94560',
   border: '#2D3748',
 };
+
+// ═══════════════════════════════════════════════════════════════════════════════
+// RESPONSIVE DESIGN SYSTEM RE-EXPORTS
+// ═══════════════════════════════════════════════════════════════════════════════
+// These re-exports allow importing from '@/lib/constants' for convenience.
+// For full API, import directly from '@/lib/responsive' or '@/lib/typography'.
+
+export {
+  // Scale utilities
+  normalize,
+  moderateScale,
+  verticalScale,
+  cappedScale,
+  SCALE,
+  CAPPED_SCALE,
+  // Spacing and sizing
+  SPACING,
+  SIZES,
+  // Border utilities
+  HAIRLINE,
+  normalizeBorder,
+  // Screen info
+  SCREEN,
+  // Flex utilities
+  FLEX,
+  // Platform utilities
+  platformSelect,
+} from './responsive';
+
+export {
+  // Font sizes
+  FONT_SIZE,
+  FONT_WEIGHT,
+  // Line height
+  LINE_HEIGHT_MULTIPLIER,
+  lineHeight,
+  // Text styles
+  TEXT_STYLE,
+  // Accessibility
+  hasLargeFontScale,
+  accessibleFontSize,
+} from './typography';

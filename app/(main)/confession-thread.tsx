@@ -20,7 +20,7 @@ import { useQuery, useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import EmojiPicker from 'rn-emoji-keyboard';
 import * as Clipboard from 'expo-clipboard';
-import { COLORS } from '@/lib/constants';
+import { COLORS, SPACING, SIZES, FONT_SIZE, FONT_WEIGHT, HAIRLINE, moderateScale } from '@/lib/constants';
 import { isProbablyEmoji } from '@/lib/utils';
 import { Toast } from '@/components/ui/Toast';
 import { ConfessionMood, ConfessionReply, ConfessionAuthorVisibility } from '@/types';
@@ -153,6 +153,8 @@ export default function ConfessionThreadScreen() {
         authorPhotoUrl: convexConfession.authorPhotoUrl,
         authorAge: convexConfession.authorAge,
         authorGender: convexConfession.authorGender,
+        taggedUserId: (convexConfession as any).taggedUserId,
+        taggedUserName: (convexConfession as any).taggedUserName,
       };
     }
     return undefined;
@@ -323,7 +325,6 @@ export default function ConfessionThreadScreen() {
   const createReplyMutation = useMutation(api.confessions.createReply);
   const deleteReplyMutation = useMutation(api.confessions.deleteReply);
   const editReplyMutation = useMutation(api.confessions.editReply);
-  const reportReplyMutation = useMutation(api.confessions.reportReply);
   const reportMutation = useMutation(api.confessions.reportConfession);
   const toggleReactionMutation = useMutation(api.confessions.toggleReaction);
   const respondToTaggedConfessionMutation = useMutation(api.confessions.respondToTaggedConfession);
@@ -514,55 +515,6 @@ export default function ConfessionThreadScreen() {
     setSavingEdit(false);
   }, [editingReplyText, savingEdit, currentUserId, editReplyMutation]);
 
-  // Handler for reporting other users' replies
-  const handleReportReply = useCallback((reply: ConfessionReply) => {
-    const reportReasons = [
-      { key: 'spam', label: 'Spam' },
-      { key: 'harassment', label: 'Abuse / Harassment' },
-      { key: 'sexual', label: 'Vulgar / Sexual' },
-      { key: 'hate', label: 'Hate / Offensive' },
-      { key: 'other', label: 'Other' },
-    ] as const;
-
-    const submitReport = async (reason: typeof reportReasons[number]['key']) => {
-      Toast.show('Report submitted');
-      const safeReplyId = asReplyId(reply.id);
-      const safeUserId = asUserId(currentUserId);
-      if (!isDemoMode && safeReplyId && safeUserId) {
-        try {
-          await reportReplyMutation({
-            replyId: safeReplyId,
-            reporterId: safeUserId,
-            reason,
-          });
-        } catch (e) {
-          console.warn('[ReportReply] Backend fail:', e);
-          Toast.show('Report may not have been saved');
-        }
-      }
-    };
-
-    if (Platform.OS === 'ios') {
-      ActionSheetIOS.showActionSheetWithOptions(
-        {
-          title: 'Why are you reporting this reply?',
-          options: [...reportReasons.map((r) => r.label), 'Cancel'],
-          cancelButtonIndex: reportReasons.length,
-        },
-        (buttonIndex) => {
-          if (buttonIndex < reportReasons.length) {
-            submitReport(reportReasons[buttonIndex].key);
-          }
-        }
-      );
-    } else {
-      Alert.alert('Report Reply', 'Why are you reporting this reply?', [
-        ...reportReasons.map((r) => ({ text: r.label, onPress: () => submitReport(r.key) })),
-        { text: 'Cancel', style: 'cancel' as const },
-      ]);
-    }
-  }, [currentUserId, reportReplyMutation]);
-
   const handleReactEmoji = useCallback((emojiObj: any) => {
     if (!confession) return;
     const emoji = emojiObj.emoji;
@@ -749,10 +701,15 @@ export default function ConfessionThreadScreen() {
         }
       );
     } else {
-      Alert.alert('Report Confession', 'Why are you reporting this?', [
-        ...reportReasons.map((r) => ({ text: r.label, onPress: () => submitReport(r.key) })),
-        { text: 'Cancel', style: 'cancel' as const },
-      ]);
+      Alert.alert(
+        'Report Confession',
+        'Why are you reporting this?',
+        [
+          ...reportReasons.map((r) => ({ text: r.label, onPress: () => submitReport(r.key) })),
+          { text: 'Cancel', style: 'cancel' as const },
+        ],
+        { cancelable: true } // Allow dismiss by tapping outside or back button
+      );
     }
   }, [confessionId, reportConfession, reportMutation, currentUserId, router]);
 
@@ -762,16 +719,28 @@ export default function ConfessionThreadScreen() {
   }, [confession]);
 
   const handleMenu = useCallback(() => {
-    Alert.alert('Options', undefined, [
-      { text: 'Copy Text', onPress: handleCopyText },
-      { text: 'Report', style: 'destructive', onPress: handleReport },
-      { text: 'Cancel', style: 'cancel' },
-    ]);
+    Alert.alert(
+      'Options',
+      undefined,
+      [
+        { text: 'Copy Text', onPress: handleCopyText },
+        { text: 'Report', style: 'destructive', onPress: handleReport },
+        { text: 'Cancel', style: 'cancel' },
+      ],
+      { cancelable: true } // Allow dismiss by tapping outside or back button
+    );
   }, [handleCopyText, handleReport]);
 
   const handleEmojiSelected = useCallback((emoji: any) => {
     setReplyText((prev) => prev + emoji.emoji);
   }, []);
+
+  // Handler for tagged user press - navigate to profile
+  const handleTagPress = useCallback(() => {
+    const tagId = (confession as any)?.taggedUserId;
+    if (!tagId) return;
+    router.push(`/(main)/profile/${tagId}` as any);
+  }, [confession, router]);
 
   // ──────────────────────────────────────────────────────────────────────────
   // LOADING/EMPTY STATE
@@ -845,8 +814,6 @@ export default function ConfessionThreadScreen() {
     const showPlusButton = isConfessionAuthor && !replyIsOwn;
     const isReplyingToThis = replyingToReplyId === item.id;
     const isEditingThis = editingReplyId === item.id;
-    // Show report button for other users' replies (not own, not when OP has plus button)
-    const showReportButton = !replyIsOwn && !showPlusButton;
 
     return (
       <View style={styles.replyCard}>
@@ -886,17 +853,6 @@ export default function ConfessionThreadScreen() {
                 style={styles.menuButton}
               >
                 <Ionicons name="ellipsis-vertical" size={16} color={COLORS.textMuted} />
-              </TouchableOpacity>
-            )}
-
-            {/* Report button for other users' replies */}
-            {showReportButton && (
-              <TouchableOpacity
-                onPress={() => handleReportReply(item)}
-                hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-                style={styles.reportButton}
-              >
-                <Ionicons name="flag-outline" size={14} color={COLORS.textMuted} />
               </TouchableOpacity>
             )}
 
@@ -1037,17 +993,6 @@ export default function ConfessionThreadScreen() {
                         <Ionicons name="ellipsis-vertical" size={14} color={COLORS.textMuted} />
                       </TouchableOpacity>
                     )}
-
-                    {/* Report button for other users' nested replies */}
-                    {!childIsOwn && (
-                      <TouchableOpacity
-                        onPress={() => handleReportReply(childReply)}
-                        hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-                        style={styles.reportButton}
-                      >
-                        <Ionicons name="flag-outline" size={12} color={COLORS.textMuted} />
-                      </TouchableOpacity>
-                    )}
                   </View>
 
                   {/* Nested reply text or inline edit */}
@@ -1156,6 +1101,15 @@ export default function ConfessionThreadScreen() {
 
       {/* Confession text */}
       <Text style={styles.confessionText}>{confession.text}</Text>
+
+      {/* Tagged user row (if confession has a tagged user) */}
+      {(confession as any).taggedUserName && (
+        <TouchableOpacity style={styles.taggedRow} onPress={handleTagPress} activeOpacity={0.7}>
+          <Ionicons name="at" size={14} color={COLORS.primary} />
+          <Text style={styles.taggedLabel}>Confessed to</Text>
+          <Text style={styles.taggedName}>{(confession as any).taggedUserName}</Text>
+        </TouchableOpacity>
+      )}
 
       {/* Reactions + Reply count */}
       <View style={styles.actionsRow}>
@@ -1375,6 +1329,13 @@ export default function ConfessionThreadScreen() {
 // STYLES
 // ============================================================================
 
+// Responsive avatar sizes
+const AVATAR_SIZE = moderateScale(36, 0.3);
+const REPLY_AVATAR_SIZE = moderateScale(24, 0.3);
+const NESTED_AVATAR_SIZE = moderateScale(16, 0.3);
+const SEND_BUTTON_SIZE = moderateScale(44, 0.3);
+const INLINE_SEND_SIZE = moderateScale(32, 0.3);
+
 const styles = StyleSheet.create({
   // ── Layout ──
   container: {
@@ -1394,15 +1355,15 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingHorizontal: 16,
-    paddingVertical: 12,
+    paddingHorizontal: SPACING.base,
+    paddingVertical: SPACING.md,
     backgroundColor: COLORS.white,
-    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomWidth: HAIRLINE,
     borderBottomColor: COLORS.border,
   },
   navTitle: {
-    fontSize: 17,
-    fontWeight: '700',
+    fontSize: FONT_SIZE.lg,
+    fontWeight: FONT_WEIGHT.bold,
     color: COLORS.text,
   },
 
@@ -1411,157 +1372,185 @@ const styles = StyleSheet.create({
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
-    padding: 24,
+    padding: SPACING.xl,
     backgroundColor: COLORS.white,
   },
   loadingText: {
-    fontSize: 16,
+    fontSize: FONT_SIZE.lg,
     color: COLORS.textMuted,
-    marginTop: 12,
+    marginTop: SPACING.md,
   },
   emptyEmoji: {
-    fontSize: 56,
-    marginBottom: 16,
+    fontSize: moderateScale(56, 0.3),
+    marginBottom: SPACING.base,
   },
   emptyTitle: {
-    fontSize: 22,
-    fontWeight: '700',
+    fontSize: FONT_SIZE.xxl,
+    fontWeight: FONT_WEIGHT.bold,
     color: COLORS.text,
-    marginBottom: 8,
+    marginBottom: SPACING.sm,
     textAlign: 'center',
   },
   emptySubtitle: {
-    fontSize: 15,
+    fontSize: FONT_SIZE.md,
     color: COLORS.textLight,
     textAlign: 'center',
-    lineHeight: 22,
+    lineHeight: moderateScale(22, 0.4),
   },
 
   // ── Confession Card ──
   confessionCard: {
     backgroundColor: COLORS.white,
-    padding: 16,
-    marginBottom: 8,
+    padding: SPACING.base,
+    marginBottom: SPACING.sm,
   },
   confessionHeader: {
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
-    marginBottom: 14,
+    marginBottom: SPACING.md,
   },
   authorRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8,
+    gap: SPACING.sm,
+    flexShrink: 1,
+    minWidth: 0,
   },
   avatar: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
+    width: AVATAR_SIZE,
+    height: AVATAR_SIZE,
+    borderRadius: AVATAR_SIZE / 2,
     backgroundColor: 'rgba(255,107,107,0.12)',
     justifyContent: 'center',
     alignItems: 'center',
+    flexShrink: 0,
   },
   avatarAnonymous: {
     backgroundColor: 'rgba(153,153,153,0.12)',
   },
   blurBadge: {
-    marginLeft: 4,
-    padding: 2,
+    marginLeft: SPACING.xs,
+    padding: SPACING.xxs,
     backgroundColor: 'rgba(153,153,153,0.15)',
-    borderRadius: 4,
+    borderRadius: SIZES.radius.xs,
   },
   avatarImage: {
-    width: 36,
-    height: 36,
-    borderRadius: 18,
+    width: AVATAR_SIZE,
+    height: AVATAR_SIZE,
+    borderRadius: AVATAR_SIZE / 2,
+    flexShrink: 0,
   },
   authorName: {
-    fontSize: 15,
-    fontWeight: '600',
+    fontSize: FONT_SIZE.md,
+    fontWeight: FONT_WEIGHT.semibold,
     color: COLORS.text,
+    flexShrink: 1,
   },
   timeAgo: {
-    fontSize: 12,
+    fontSize: FONT_SIZE.caption,
     color: COLORS.textMuted,
+    flexShrink: 0,
   },
   moodBadge: {
     flexDirection: 'row',
     alignItems: 'center',
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 12,
-    gap: 4,
+    paddingHorizontal: SPACING.sm,
+    paddingVertical: SPACING.xs,
+    borderRadius: SIZES.radius.md,
+    gap: SPACING.xs,
+    flexShrink: 0,
   },
   moodEmoji: {
-    fontSize: 12,
+    fontSize: FONT_SIZE.caption,
   },
   moodLabel: {
-    fontSize: 11,
-    fontWeight: '600',
+    fontSize: FONT_SIZE.sm,
+    fontWeight: FONT_WEIGHT.semibold,
   },
   confessionText: {
-    fontSize: 16,
-    lineHeight: 24,
+    fontSize: FONT_SIZE.lg,
+    lineHeight: moderateScale(24, 0.4),
     color: COLORS.text,
-    marginBottom: 16,
+    marginBottom: SPACING.base,
+  },
+  taggedRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: SPACING.xs,
+    marginBottom: SPACING.sm,
+    paddingVertical: SPACING.xxs + 1,
+    paddingHorizontal: SPACING.sm,
+    backgroundColor: 'rgba(255,107,107,0.08)',
+    borderRadius: SIZES.radius.sm,
+    alignSelf: 'flex-start',
+  },
+  taggedLabel: {
+    fontSize: FONT_SIZE.caption,
+    color: COLORS.textLight,
+  },
+  taggedName: {
+    fontSize: FONT_SIZE.caption,
+    fontWeight: FONT_WEIGHT.semibold,
+    color: COLORS.primary,
   },
   actionsRow: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    marginBottom: 8,
+    marginBottom: SPACING.sm,
   },
   replyCountBadge: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 4,
-    paddingHorizontal: 8,
-    paddingVertical: 4,
-    borderRadius: 12,
+    gap: SPACING.xs,
+    paddingHorizontal: SPACING.sm,
+    paddingVertical: SPACING.xs,
+    borderRadius: SIZES.radius.md,
     backgroundColor: 'rgba(255,107,107,0.1)',
+    flexShrink: 0,
   },
   replyCountText: {
-    fontSize: 12,
-    fontWeight: '600',
+    fontSize: FONT_SIZE.caption,
+    fontWeight: FONT_WEIGHT.semibold,
     color: COLORS.primary,
   },
   // Tagged user action block (Reject/Connect)
   taggedActionBlock: {
-    marginTop: 12,
-    padding: 14,
+    marginTop: SPACING.md,
+    padding: SPACING.md,
     backgroundColor: 'rgba(255,107,107,0.06)',
-    borderRadius: 12,
-    borderWidth: 1,
+    borderRadius: SIZES.radius.md,
+    borderWidth: HAIRLINE,
     borderColor: 'rgba(255,107,107,0.15)',
   },
   taggedActionLabel: {
-    fontSize: 13,
-    fontWeight: '600',
+    fontSize: FONT_SIZE.caption,
+    fontWeight: FONT_WEIGHT.semibold,
     color: COLORS.text,
-    marginBottom: 10,
+    marginBottom: SPACING.sm,
     textAlign: 'center',
   },
   taggedActionButtons: {
     flexDirection: 'row',
-    gap: 10,
+    gap: SPACING.sm,
   },
   rejectButton: {
     flex: 1,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 6,
-    paddingVertical: 12,
-    paddingHorizontal: 16,
-    borderRadius: 24,
+    gap: SPACING.xs,
+    paddingVertical: SPACING.md,
+    paddingHorizontal: SPACING.base,
+    borderRadius: SIZES.radius.xl,
     backgroundColor: COLORS.backgroundDark,
-    borderWidth: 1,
+    borderWidth: HAIRLINE,
     borderColor: COLORS.border,
   },
   rejectButtonText: {
-    fontSize: 14,
-    fontWeight: '600',
+    fontSize: FONT_SIZE.md,
+    fontWeight: FONT_WEIGHT.semibold,
     color: COLORS.textMuted,
   },
   connectButton: {
@@ -1569,15 +1558,15 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 6,
-    paddingVertical: 12,
-    paddingHorizontal: 16,
-    borderRadius: 24,
+    gap: SPACING.xs,
+    paddingVertical: SPACING.md,
+    paddingHorizontal: SPACING.base,
+    borderRadius: SIZES.radius.xl,
     backgroundColor: COLORS.primary,
   },
   connectButtonText: {
-    fontSize: 14,
-    fontWeight: '600',
+    fontSize: FONT_SIZE.md,
+    fontWeight: FONT_WEIGHT.semibold,
     color: COLORS.white,
   },
   buttonLoading: {
@@ -1587,51 +1576,51 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 6,
-    paddingVertical: 8,
-    paddingHorizontal: 12,
-    borderRadius: 20,
+    gap: SPACING.xs,
+    paddingVertical: SPACING.sm,
+    paddingHorizontal: SPACING.md,
+    borderRadius: SIZES.radius.lg,
     backgroundColor: COLORS.backgroundDark,
   },
   respondedText: {
-    fontSize: 13,
-    fontWeight: '500',
+    fontSize: FONT_SIZE.caption,
+    fontWeight: FONT_WEIGHT.medium,
     color: COLORS.textMuted,
   },
   respondedBadgeConnect: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 6,
-    paddingVertical: 8,
-    paddingHorizontal: 12,
-    borderRadius: 20,
+    gap: SPACING.xs,
+    paddingVertical: SPACING.sm,
+    paddingHorizontal: SPACING.md,
+    borderRadius: SIZES.radius.lg,
     backgroundColor: 'rgba(255,107,107,0.12)',
   },
   respondedTextConnect: {
-    fontSize: 13,
-    fontWeight: '500',
+    fontSize: FONT_SIZE.caption,
+    fontWeight: FONT_WEIGHT.medium,
     color: COLORS.primary,
   },
   // Author action block (Two-Step Flow)
   authorActionBlock: {
-    marginTop: 12,
-    padding: 14,
+    marginTop: SPACING.md,
+    padding: SPACING.md,
     backgroundColor: 'rgba(76,175,80,0.08)',
-    borderRadius: 12,
-    borderWidth: 1,
+    borderRadius: SIZES.radius.md,
+    borderWidth: HAIRLINE,
     borderColor: 'rgba(76,175,80,0.2)',
   },
   authorNotification: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 8,
-    marginBottom: 12,
+    gap: SPACING.sm,
+    marginBottom: SPACING.md,
   },
   authorNotificationText: {
-    fontSize: 14,
-    fontWeight: '600',
+    fontSize: FONT_SIZE.md,
+    fontWeight: FONT_WEIGHT.semibold,
     color: COLORS.text,
     textAlign: 'center',
   },
@@ -1639,187 +1628,192 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    gap: 8,
-    paddingVertical: 12,
-    paddingHorizontal: 16,
-    borderRadius: 24,
+    gap: SPACING.sm,
+    paddingVertical: SPACING.md,
+    paddingHorizontal: SPACING.base,
+    borderRadius: SIZES.radius.xl,
     backgroundColor: COLORS.primary,
   },
   matchCreatedText: {
-    fontSize: 14,
-    fontWeight: '600',
+    fontSize: FONT_SIZE.md,
+    fontWeight: FONT_WEIGHT.semibold,
     color: COLORS.white,
   },
 
   // ── Reply Card ──
   replyCard: {
     backgroundColor: COLORS.white,
-    marginHorizontal: 16,
-    marginBottom: 4,
-    borderRadius: 12,
-    padding: 14,
+    marginHorizontal: SPACING.base,
+    marginBottom: SPACING.xs,
+    borderRadius: SIZES.radius.md,
+    padding: SPACING.md,
   },
   replyHeader: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8,
-    marginBottom: 8,
+    gap: SPACING.sm,
+    marginBottom: SPACING.sm,
+    flexWrap: 'wrap',
   },
   replyAvatar: {
-    width: 24,
-    height: 24,
-    borderRadius: 12,
+    width: REPLY_AVATAR_SIZE,
+    height: REPLY_AVATAR_SIZE,
+    borderRadius: REPLY_AVATAR_SIZE / 2,
     backgroundColor: 'rgba(255,107,107,0.12)',
     justifyContent: 'center',
     alignItems: 'center',
+    flexShrink: 0,
   },
   replyAuthor: {
-    fontSize: 13,
-    fontWeight: '600',
+    fontSize: FONT_SIZE.caption,
+    fontWeight: FONT_WEIGHT.semibold,
     color: COLORS.text,
   },
   opBadge: {
     backgroundColor: COLORS.primary,
-    paddingHorizontal: 6,
-    paddingVertical: 2,
-    borderRadius: 6,
+    paddingHorizontal: SPACING.xs,
+    paddingVertical: SPACING.xxs,
+    borderRadius: SIZES.radius.xs,
+    flexShrink: 0,
   },
   opBadgeText: {
-    fontSize: 10,
-    fontWeight: '700',
+    fontSize: FONT_SIZE.xs,
+    fontWeight: FONT_WEIGHT.bold,
     color: COLORS.white,
   },
   voiceBadge: {
     backgroundColor: 'rgba(255,107,107,0.1)',
-    paddingHorizontal: 4,
-    paddingVertical: 2,
-    borderRadius: 6,
+    paddingHorizontal: SPACING.xs,
+    paddingVertical: SPACING.xxs,
+    borderRadius: SIZES.radius.xs,
+    flexShrink: 0,
   },
   replyTime: {
-    fontSize: 11,
+    fontSize: FONT_SIZE.sm,
     color: COLORS.textMuted,
     marginLeft: 'auto',
+    flexShrink: 0,
   },
   editedIndicator: {
-    fontSize: 10,
+    fontSize: FONT_SIZE.xs,
     color: COLORS.textMuted,
     fontStyle: 'italic',
   },
   menuButton: {
-    marginLeft: 4,
-    padding: 4,
-  },
-  reportButton: {
-    marginLeft: 4,
-    padding: 4,
+    marginLeft: SPACING.xs,
+    padding: SPACING.xs,
   },
   plusButton: {
-    marginLeft: 8,
-    padding: 4,
+    marginLeft: SPACING.sm,
+    padding: SPACING.xs,
   },
   replyText: {
-    fontSize: 14,
-    lineHeight: 20,
+    fontSize: FONT_SIZE.md,
+    lineHeight: moderateScale(20, 0.4),
     color: COLORS.text,
   },
 
   // ── Nested Replies (compact Instagram-style) ──
   nestedRepliesContainer: {
-    marginTop: 6,
-    marginLeft: 28, // Align with parent text, not avatar
-    paddingLeft: 8,
-    borderLeftWidth: 1.5,
+    marginTop: SPACING.xs,
+    marginLeft: moderateScale(28, 0.3), // Align with parent text, not avatar
+    paddingLeft: SPACING.sm,
+    borderLeftWidth: HAIRLINE * 3,
     borderLeftColor: 'rgba(255,107,107,0.25)',
   },
   nestedReplyCard: {
-    marginBottom: 4,
+    marginBottom: SPACING.xs,
   },
   nestedReplyHeader: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 4, // Tighter than parent (8)
+    gap: SPACING.xs, // Tighter than parent
+    flexWrap: 'wrap',
   },
   nestedReplyAvatar: {
-    width: 16,
-    height: 16,
-    borderRadius: 8,
+    width: NESTED_AVATAR_SIZE,
+    height: NESTED_AVATAR_SIZE,
+    borderRadius: NESTED_AVATAR_SIZE / 2,
     backgroundColor: 'rgba(255,107,107,0.1)',
     justifyContent: 'center',
     alignItems: 'center',
+    flexShrink: 0,
   },
   nestedReplyAuthor: {
-    fontSize: 11,
-    fontWeight: '600',
+    fontSize: FONT_SIZE.sm,
+    fontWeight: FONT_WEIGHT.semibold,
     color: COLORS.text,
   },
   opBadgeSmall: {
     backgroundColor: COLORS.primary,
-    paddingHorizontal: 3,
+    paddingHorizontal: SPACING.xxs,
     paddingVertical: 0,
-    borderRadius: 3,
+    borderRadius: SIZES.radius.xxs,
+    flexShrink: 0,
   },
   opBadgeSmallText: {
-    fontSize: 7,
-    fontWeight: '700',
+    fontSize: moderateScale(7, 0.3),
+    fontWeight: FONT_WEIGHT.bold,
     color: COLORS.white,
   },
   nestedReplyTime: {
-    fontSize: 9,
+    fontSize: FONT_SIZE.xxs,
     color: COLORS.textMuted,
     marginLeft: 'auto',
+    flexShrink: 0,
   },
   nestedReplyText: {
-    fontSize: 12,
-    lineHeight: 16,
+    fontSize: FONT_SIZE.caption,
+    lineHeight: moderateScale(16, 0.4),
     color: COLORS.text,
-    marginTop: 1,
-    marginLeft: 20, // Align with author name, past avatar
+    marginTop: SPACING.xxs,
+    marginLeft: moderateScale(20, 0.3), // Align with author name, past avatar
   },
 
   // ── Edit Reply ──
   editContainer: {
-    marginTop: 4,
+    marginTop: SPACING.xs,
   },
   editInput: {
-    fontSize: 14,
-    lineHeight: 20,
+    fontSize: FONT_SIZE.md,
+    lineHeight: moderateScale(20, 0.4),
     color: COLORS.text,
     backgroundColor: COLORS.backgroundDark,
-    borderRadius: 8,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    minHeight: 60,
-    maxHeight: 120,
+    borderRadius: SIZES.radius.sm,
+    paddingHorizontal: SPACING.md,
+    paddingVertical: SPACING.sm,
+    minHeight: moderateScale(60, 0.3),
+    maxHeight: moderateScale(120, 0.3),
     textAlignVertical: 'top',
   },
   editActions: {
     flexDirection: 'row',
     justifyContent: 'flex-end',
-    gap: 8,
-    marginTop: 8,
+    gap: SPACING.sm,
+    marginTop: SPACING.sm,
   },
   editCancelButton: {
-    paddingHorizontal: 14,
-    paddingVertical: 8,
-    borderRadius: 16,
+    paddingHorizontal: SPACING.md,
+    paddingVertical: SPACING.sm,
+    borderRadius: SIZES.radius.lg,
     backgroundColor: COLORS.backgroundDark,
   },
   editCancelText: {
-    fontSize: 13,
-    fontWeight: '600',
+    fontSize: FONT_SIZE.caption,
+    fontWeight: FONT_WEIGHT.semibold,
     color: COLORS.textMuted,
   },
   editSaveButton: {
-    paddingHorizontal: 16,
-    paddingVertical: 8,
-    borderRadius: 16,
+    paddingHorizontal: SPACING.base,
+    paddingVertical: SPACING.sm,
+    borderRadius: SIZES.radius.lg,
     backgroundColor: COLORS.primary,
-    minWidth: 60,
+    minWidth: moderateScale(60, 0.3),
     alignItems: 'center',
   },
   editSaveText: {
-    fontSize: 13,
-    fontWeight: '600',
+    fontSize: FONT_SIZE.caption,
+    fontWeight: FONT_WEIGHT.semibold,
     color: COLORS.white,
   },
 
@@ -1827,28 +1821,29 @@ const styles = StyleSheet.create({
   inlineComposer: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginTop: 10,
-    paddingTop: 10,
-    borderTopWidth: StyleSheet.hairlineWidth,
+    marginTop: SPACING.sm,
+    paddingTop: SPACING.sm,
+    borderTopWidth: HAIRLINE,
     borderTopColor: COLORS.border,
-    gap: 8,
+    gap: SPACING.sm,
   },
   inlineInput: {
     flex: 1,
-    fontSize: 13,
+    fontSize: FONT_SIZE.caption,
     color: COLORS.text,
-    paddingHorizontal: 12,
-    paddingVertical: 8,
+    paddingHorizontal: SPACING.md,
+    paddingVertical: SPACING.sm,
     backgroundColor: COLORS.backgroundDark,
-    borderRadius: 16,
+    borderRadius: SIZES.radius.lg,
   },
   inlineSendButton: {
-    width: 32,
-    height: 32,
-    borderRadius: 16,
+    width: INLINE_SEND_SIZE,
+    height: INLINE_SEND_SIZE,
+    borderRadius: INLINE_SEND_SIZE / 2,
     backgroundColor: COLORS.primary,
     justifyContent: 'center',
     alignItems: 'center',
+    flexShrink: 0,
   },
 
   // ── Thread Footer ──
@@ -1856,20 +1851,20 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    paddingVertical: 12,
-    paddingHorizontal: 24,
-    marginTop: 8,
+    paddingVertical: SPACING.md,
+    paddingHorizontal: SPACING.xl,
+    marginTop: SPACING.sm,
   },
   footerLine: {
     flex: 1,
-    height: StyleSheet.hairlineWidth,
+    height: HAIRLINE,
     backgroundColor: COLORS.border,
   },
   footerText: {
-    fontSize: 12,
+    fontSize: FONT_SIZE.caption,
     color: COLORS.textMuted,
-    paddingHorizontal: 12,
-    fontWeight: '500',
+    paddingHorizontal: SPACING.md,
+    fontWeight: FONT_WEIGHT.medium,
   },
 
   // ── Bottom Composer ──
@@ -1877,29 +1872,30 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'flex-end',
     backgroundColor: COLORS.white,
-    paddingHorizontal: 12,
-    paddingTop: 10,
-    borderTopWidth: StyleSheet.hairlineWidth,
+    paddingHorizontal: SPACING.md,
+    paddingTop: SPACING.sm,
+    borderTopWidth: HAIRLINE,
     borderTopColor: COLORS.border,
-    gap: 8,
+    gap: SPACING.sm,
   },
   composerInput: {
     flex: 1,
-    fontSize: 15,
+    fontSize: FONT_SIZE.md,
     color: COLORS.text,
-    maxHeight: 80,
-    paddingHorizontal: 14,
-    paddingVertical: 10,
+    maxHeight: moderateScale(80, 0.3),
+    paddingHorizontal: SPACING.md,
+    paddingVertical: SPACING.sm,
     backgroundColor: COLORS.backgroundDark,
-    borderRadius: 20,
+    borderRadius: SIZES.radius.lg,
   },
   sendButton: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
+    width: SEND_BUTTON_SIZE,
+    height: SEND_BUTTON_SIZE,
+    borderRadius: SEND_BUTTON_SIZE / 2,
     backgroundColor: COLORS.primary,
     justifyContent: 'center',
     alignItems: 'center',
+    flexShrink: 0,
   },
   buttonDisabled: {
     backgroundColor: COLORS.border,
