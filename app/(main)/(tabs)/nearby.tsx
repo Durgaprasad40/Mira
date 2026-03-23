@@ -21,7 +21,7 @@
  *    - Tap opens profile via Discover-style flow
  *
  * 2. CLUSTERING BEHAVIOR (LOCKED)
- *    - Uses react-native-map-clustering with image-based cluster markers
+ *    - Uses supercluster (JS) with react-native-maps for Fabric compatibility
  *    - Cluster tap zooms into cluster area to reveal individual markers
  *    - Do NOT change clustering radius or behavior without testing
  *
@@ -53,8 +53,8 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useFocusEffect, useRouter } from 'expo-router';
-import ClusteredMapView from 'react-native-map-clustering';
-import { Region, Marker } from 'react-native-maps';
+import MapView, { Region, Marker } from 'react-native-maps';
+import Supercluster from 'supercluster';
 import { Ionicons } from '@expo/vector-icons';
 import { useQuery, useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
@@ -226,6 +226,16 @@ interface ProcessedNearbyUser extends NearbyUser {
   fuzzedLng: number;
 }
 
+/** GeoJSON Point properties for supercluster */
+interface UserPointProperties {
+  id: string;
+  user: ProcessedNearbyUser;
+}
+
+/** Cluster or point from supercluster - using any for cluster properties to handle library types */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type ClusterFeature = Supercluster.ClusterFeature<any> | Supercluster.PointFeature<UserPointProperties>;
+
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
@@ -251,6 +261,10 @@ const DEMO_LOCATION = {
   latitude: DEMO_USER.latitude,
   longitude: DEMO_USER.longitude,
 };
+
+// Supercluster configuration (matches previous react-native-map-clustering behavior)
+const CLUSTER_RADIUS = 45;
+const CLUSTER_MAX_ZOOM = 20;
 
 // ---------------------------------------------------------------------------
 // STABILITY FIX P1: Cryptographically secure session salt
@@ -392,21 +406,56 @@ function applyPrivacyFuzz(
   };
 }
 
+/**
+ * Convert map region to zoom level for supercluster.
+ * Formula based on how map tiles work at different zoom levels.
+ */
+function getZoomFromRegion(region: Region): number {
+  const angle = region.longitudeDelta;
+  // Clamp zoom to reasonable range
+  return Math.max(0, Math.min(20, Math.round(Math.log(360 / angle) / Math.LN2)));
+}
+
+/**
+ * Get map bounding box from region for supercluster.
+ * Returns [westLng, southLat, eastLng, northLat]
+ */
+function getBoundingBox(region: Region): [number, number, number, number] {
+  const { latitude, longitude, latitudeDelta, longitudeDelta } = region;
+  return [
+    longitude - longitudeDelta / 2, // west
+    latitude - latitudeDelta / 2,   // south
+    longitude + longitudeDelta / 2, // east
+    latitude + latitudeDelta / 2,   // north
+  ];
+}
+
 // ---------------------------------------------------------------------------
 // Component
 // ---------------------------------------------------------------------------
 
 export default function NearbyScreen() {
+  // ══════════════════════════════════════════════════════════════════════════
+  // NEARBY STARTUP LOG - trace rendering/crash point
+  // ══════════════════════════════════════════════════════════════════════════
+  log.info('[NEARBY]', '═══════════════════════════════════════════════');
+  log.info('[NEARBY]', 'NearbyScreen rendering');
+
   const router = useRouter();
   const isDemo = isDemoMode;
+  log.info('[NEARBY]', 'Initial state', { isDemo });
 
-  // Map ref for programmatic control (any type for clustering library compatibility)
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const mapRef = useRef<any>(null);
+  // Map ref for programmatic control
+  const mapRef = useRef<MapView>(null);
 
-  // SuperCluster ref for accessing cluster leaves
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const superClusterRef = useRef<any>(null);
+  // Supercluster instance ref
+  const superclusterRef = useRef<Supercluster<UserPointProperties> | null>(null);
+
+  // Current map region for cluster computation
+  const [currentRegion, setCurrentRegion] = useState<Region | null>(null);
+
+  // Computed clusters/points to render
+  const [clusters, setClusters] = useState<ClusterFeature[]>([]);
 
   // Auth store
   const userId = useAuthStore((s) => s.userId);
@@ -921,6 +970,90 @@ export default function NearbyScreen() {
   const mapUsers = visibleUsers;
 
   // ---------------------------------------------------------------------------
+  // Supercluster: Initialize and compute clusters
+  // ---------------------------------------------------------------------------
+  useEffect(() => {
+    // Create supercluster instance with same settings as previous library
+    const cluster = new Supercluster<UserPointProperties>({
+      radius: CLUSTER_RADIUS,
+      maxZoom: CLUSTER_MAX_ZOOM,
+    });
+
+    // Convert users to GeoJSON points
+    const points: Supercluster.PointFeature<UserPointProperties>[] = mapUsers
+      .filter(user => isValidMapCoordinate(user.fuzzedLat, user.fuzzedLng))
+      .map(user => ({
+        type: 'Feature' as const,
+        properties: {
+          id: user.id,
+          user,
+        },
+        geometry: {
+          type: 'Point' as const,
+          coordinates: [user.fuzzedLng, user.fuzzedLat], // GeoJSON is [lng, lat]
+        },
+      }));
+
+    // Load points into supercluster
+    cluster.load(points);
+    superclusterRef.current = cluster;
+
+    // Compute initial clusters if we have a region
+    if (currentRegion) {
+      try {
+        const zoom = getZoomFromRegion(currentRegion);
+        const bbox = getBoundingBox(currentRegion);
+        const newClusters = cluster.getClusters(bbox, zoom);
+        setClusters(newClusters);
+      } catch (e) {
+        log.warn('[NEARBY]', 'Error computing clusters', { error: String(e) });
+        setClusters([]);
+      }
+    }
+  }, [mapUsers, currentRegion]);
+
+  // Handler for map region changes - recompute clusters
+  const handleRegionChangeComplete = useCallback((region: Region) => {
+    setCurrentRegion(region);
+
+    if (!superclusterRef.current) return;
+
+    try {
+      const zoom = getZoomFromRegion(region);
+      const bbox = getBoundingBox(region);
+      const newClusters = superclusterRef.current.getClusters(bbox, zoom);
+      setClusters(newClusters);
+    } catch (e) {
+      log.warn('[NEARBY]', 'Error computing clusters on region change', { error: String(e) });
+    }
+  }, []);
+
+  // Handler for cluster press - zoom into cluster
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const handleClusterPress = useCallback((cluster: Supercluster.ClusterFeature<any>) => {
+    if (!mapRef.current || !superclusterRef.current) return;
+
+    try {
+      const clusterId = cluster.properties.cluster_id;
+      const expansionZoom = superclusterRef.current.getClusterExpansionZoom(clusterId);
+      const [lng, lat] = cluster.geometry.coordinates;
+
+      // Calculate new region based on expansion zoom
+      const latDelta = 360 / Math.pow(2, expansionZoom);
+      const lngDelta = latDelta;
+
+      mapRef.current.animateToRegion({
+        latitude: lat,
+        longitude: lng,
+        latitudeDelta: latDelta,
+        longitudeDelta: lngDelta,
+      }, 300);
+    } catch (e) {
+      log.warn('[NEARBY]', 'Error handling cluster press', { error: String(e) });
+    }
+  }, []);
+
+  // ---------------------------------------------------------------------------
   // Empty state: show once per app session, auto-dismiss after 3 seconds
   // ---------------------------------------------------------------------------
   const isEmptyStateCondition = locationUIState === 'ready' && mapUsers.length === 0 && !isDemo && !isQueryLoading && !isRetrying;
@@ -1150,7 +1283,10 @@ export default function NearbyScreen() {
   // ---------------------------------------------------------------------------
   // Render: Checking state
   // ---------------------------------------------------------------------------
+  log.info('[NEARBY]', 'Render check', { locationUIState, permissionStatus, hasError: !!error });
+
   if (locationUIState === 'checking') {
+    log.info('[NEARBY]', 'Showing checking state');
     return (
       <SafeAreaView style={styles.container} edges={['top', 'left', 'right']}>
         <View style={styles.header}>
@@ -1400,6 +1536,12 @@ export default function NearbyScreen() {
   // ---------------------------------------------------------------------------
   // Render: Ready - show map
   // ---------------------------------------------------------------------------
+  log.info('[NEARBY]', 'Attempting to render map', {
+    hasMapRegion: !!mapRegion,
+    locationUIState,
+    userCount: mapUsers?.length ?? 0,
+  });
+
   // Final safety check: ensure we have valid region
   if (!mapRegion) {
     return (
@@ -1461,123 +1603,81 @@ export default function NearbyScreen() {
       {/* STABILITY FIX S4: Error boundary around map for crash containment */}
       <MapErrorBoundary>
       <View style={styles.mapContainer}>
-        <ClusteredMapView
+        <MapView
           ref={mapRef}
           style={styles.map}
           initialRegion={mapRegion}
+          onRegionChangeComplete={handleRegionChangeComplete}
+          onMapReady={() => {
+            // Set initial region for cluster computation
+            if (mapRegion) {
+              setCurrentRegion(mapRegion);
+            }
+          }}
           showsUserLocation={permissionStatus === 'granted'}
           showsMyLocationButton={false}
           showsCompass={false}
           rotateEnabled={true}
           pitchEnabled={false}
-          // ================================================================
-          // LOCKED: CLUSTERING BEHAVIOR
-          // ================================================================
-          // STATUS: LOCKED - Do not change without Durga Prasad approval
-          //
-          // IMPLEMENTATION:
-          // - Image-based cluster markers for Android reliability
-          // - Cluster tap → opens cluster results page (not just zoom)
-          // - radius={45} for "50% overlap" feel
-          //
-          // DO NOT:
-          // - Change clustering radius without testing
-          // - Switch to View-based cluster markers
-          // - Remove animation disabling (causes blank states)
-          // ================================================================
-          clusteringEnabled={true}
-          radius={45}
-          extent={512}
-          nodeSize={64}
-          minZoom={1}
-          maxZoom={20}
-          spiralEnabled={false}
-          animationEnabled={false}
-          superClusterRef={superClusterRef}
-          // CLUSTER MARKER RENDERER - Image-based with numbered count for Android reliability
-          // STABILITY FIX S5: Wrapped in try-catch for crash containment
-          renderCluster={(cluster) => {
-            try {
-              const { id, geometry, properties, onPress } = cluster;
-              const coords = geometry?.coordinates;
-              const lat = coords?.[1];
-              const lng = coords?.[0];
-              const pointCount = properties?.point_count ?? 2;
+        >
+          {/* ================================================================
+           * CLUSTERING: Manual implementation with supercluster
+           * ================================================================
+           * STATUS: LOCKED - Do not change without Durga Prasad approval
+           *
+           * IMPLEMENTATION:
+           * - Uses supercluster (JS) for Fabric/New Architecture compatibility
+           * - Image-based cluster markers for Android reliability
+           * - Cluster tap → zooms to reveal individual markers
+           * - radius={45} matches previous react-native-map-clustering config
+           *
+           * DO NOT:
+           * - Change clustering radius without testing
+           * - Switch to View-based cluster markers
+           * ================================================================ */}
+          {clusters.map((feature) => {
+            const [lng, lat] = feature.geometry.coordinates;
 
-              // Safety: validate coordinates
-              if (!isValidMapCoordinate(lat, lng)) {
-                return null;
-              }
+            // Safety: validate coordinates
+            if (!isValidMapCoordinate(lat, lng)) {
+              return null;
+            }
 
-              // Select cluster image based on count
+            // Check if this is a cluster or individual point
+            const isCluster = feature.properties && 'cluster' in feature.properties && feature.properties.cluster;
+
+            if (isCluster) {
+              // Render cluster marker
+              const clusterFeature = feature as Supercluster.ClusterFeature<UserPointProperties>;
+              const pointCount = clusterFeature.properties.point_count ?? 2;
               const clusterImage = getClusterImage(pointCount);
 
               return (
                 <Marker
-                  key={`cluster-${id}`}
+                  key={`cluster-${clusterFeature.properties.cluster_id}`}
                   coordinate={{ latitude: lat, longitude: lng }}
                   anchor={{ x: 0.5, y: 1 }}
-                  onPress={() => {
-                    try {
-                      // Zoom into cluster area to reveal individual markers
-                      if (mapRef.current) {
-                        const region = {
-                          latitude: lat,
-                          longitude: lng,
-                          latitudeDelta: 0.01,
-                          longitudeDelta: 0.01,
-                        };
-                        mapRef.current.animateToRegion(region, 300);
-                      }
-                      if (onPress) onPress();
-                    } catch (e) {
-                      // Silently handle cluster tap errors
-                      log.warn('[Nearby] Cluster tap error:', String(e));
-                    }
-                  }}
-                  // CRITICAL: Use image prop with numbered cluster for Android reliability
+                  onPress={() => handleClusterPress(clusterFeature)}
                   image={clusterImage}
                 />
               );
-            } catch (e) {
-              // STABILITY FIX S5: Graceful fallback on render error
-              log.warn('[Nearby] Cluster render error:', String(e));
-              return null;
+            } else {
+              // Render individual user marker
+              const pointFeature = feature as Supercluster.PointFeature<UserPointProperties>;
+              const user = pointFeature.properties.user;
+
+              return (
+                <Marker
+                  key={user.id}
+                  coordinate={{ latitude: lat, longitude: lng }}
+                  anchor={{ x: 0.5, y: 1 }}
+                  onPress={() => handleMarkerPress(user)}
+                  image={pinPink}
+                />
+              );
             }
-          }}
-        >
-          {/* ================================================================
-           * PINK PIN MARKERS (STABLE VERSION)
-           * ================================================================
-           * IMPLEMENTATION: image={pinPink} for Android reliability
-           *
-           * BEHAVIOR:
-           * - Individual marker tap → handleMarkerPress(user)
-           * - Navigate to Discover-style profile
-           *
-           * NOTE: Using image prop instead of custom View-based markers
-           * for consistent rendering across Metro and standalone APK builds.
-           * ================================================================ */}
-          {/* STABILITY FIX S4: Safe marker rendering with validation */}
-          {mapUsers.map((user) => {
-            // Skip invalid markers silently
-            if (!isValidMapCoordinate(user.fuzzedLat, user.fuzzedLng)) {
-              return null;
-            }
-            return (
-              <Marker
-                key={user.id}
-                coordinate={{
-                  latitude: user.fuzzedLat,
-                  longitude: user.fuzzedLng,
-                }}
-                anchor={{ x: 0.5, y: 1 }}
-                onPress={() => handleMarkerPress(user)}
-                image={pinPink}
-              />
-            );
           })}
-        </ClusteredMapView>
+        </MapView>
 
         {/* Query loading indicator - shown while fetching nearby users */}
         {(isQueryLoading || isRetrying) && !isDemo && (
