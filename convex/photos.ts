@@ -1452,3 +1452,87 @@ export const retryFailedStorageDeletions = internalMutation({
     return { successCount, failCount, abandonedCount, processed: failedDeletions.length };
   },
 });
+
+// ---------------------------------------------------------------------------
+// Per-Photo Blur (Phase-1 feature)
+// ---------------------------------------------------------------------------
+
+/**
+ * Toggle blur on a specific photo by its order (slot index).
+ * This is the backend source of truth for per-photo blur state.
+ * When isBlurred=true, other users see this photo with blur applied.
+ */
+export const setPhotoBlur = mutation({
+  args: {
+    token: v.string(),
+    order: v.number(), // Photo slot index (0-8)
+    isBlurred: v.boolean(),
+  },
+  handler: async (ctx, args) => {
+    // Validate session token
+    const userId = await validateSessionToken(ctx, args.token);
+    if (!userId) {
+      throw new Error('Unauthorized: invalid or expired session');
+    }
+
+    // Find the photo by userId and order
+    const photo = await ctx.db
+      .query('photos')
+      .withIndex('by_user_order', (q) =>
+        q.eq('userId', userId).eq('order', args.order)
+      )
+      .first();
+
+    if (!photo) {
+      // No photo at this slot - silently succeed (user may have deleted it)
+      return { success: true, isBlurred: args.isBlurred, photoFound: false };
+    }
+
+    // Update the blur state
+    await ctx.db.patch(photo._id, { isBlurred: args.isBlurred });
+
+    return { success: true, isBlurred: args.isBlurred, photoFound: true };
+  },
+});
+
+/**
+ * Batch update blur state for multiple photos at once.
+ * Used when saving Edit Profile to persist all blur changes atomically.
+ */
+export const setPhotosBlur = mutation({
+  args: {
+    token: v.string(),
+    blurStates: v.array(v.object({
+      order: v.number(),
+      isBlurred: v.boolean(),
+    })),
+  },
+  handler: async (ctx, args) => {
+    // Validate session token
+    const userId = await validateSessionToken(ctx, args.token);
+    if (!userId) {
+      throw new Error('Unauthorized: invalid or expired session');
+    }
+
+    // Get all user's photos
+    const photos = await ctx.db
+      .query('photos')
+      .withIndex('by_user', (q) => q.eq('userId', userId))
+      .collect();
+
+    // Create a map of order -> photo for quick lookup
+    const photosByOrder = new Map(photos.map(p => [p.order, p]));
+
+    // Update each photo's blur state
+    let updatedCount = 0;
+    for (const { order, isBlurred } of args.blurStates) {
+      const photo = photosByOrder.get(order);
+      if (photo) {
+        await ctx.db.patch(photo._id, { isBlurred });
+        updatedCount++;
+      }
+    }
+
+    return { success: true, updatedCount };
+  },
+});

@@ -119,8 +119,8 @@ export default function ProfileScreen() {
   // 3A1-2: Server-side logout mutation
   const serverLogout = useMutation(api.auth.logout);
 
-  // FIX C: Extract photos robustly from any format
-  const extractPhotos = (user: any): { url: string; isPrimary: boolean }[] => {
+  // FIX C: Extract photos robustly from any format, preserving isBlurred for backend blur
+  const extractPhotos = (user: any): { url: string; isPrimary: boolean; isBlurred?: boolean; order?: number }[] => {
     if (!user) return [];
 
     // Try user.photos first (most common)
@@ -138,15 +138,20 @@ export default function ProfileScreen() {
       .map((p: any, i: number) => {
         // Handle string URLs directly
         if (typeof p === 'string') {
-          return { url: p, isPrimary: i === 0 };
+          return { url: p, isPrimary: i === 0, isBlurred: undefined, order: undefined };
         }
-        // Handle { url: string } objects
+        // Handle { url: string } objects - preserve isBlurred and order from backend
         if (p?.url) {
-          return { url: p.url, isPrimary: p.isPrimary ?? i === 0 };
+          return {
+            url: p.url,
+            isPrimary: p.isPrimary ?? i === 0,
+            isBlurred: p.isBlurred as boolean | undefined,
+            order: p.order as number | undefined,
+          };
         }
         return null;
       })
-      .filter((p): p is { url: string; isPrimary: boolean } => p !== null && !!p.url);
+      .filter((p): p is { url: string; isPrimary: boolean; isBlurred?: boolean; order?: number } => p !== null && !!p.url);
   };
 
   // BUGFIX #26: Build currentUser reactively from subscribed demoProfiles
@@ -181,30 +186,47 @@ export default function ProfileScreen() {
       : null;
 
   // MAIN PHOTO SOURCE OF TRUTH:
-  // - Live mode: Use photo with isPrimary=true from backendPhotos
+  // - Live mode: Use photo with isPrimary=true from currentUser.photos (getCurrentUser)
   // - Demo mode: Use first photo from demoStore
-  // The isPrimary flag is the authoritative source, set by reorderPhotosWithToken
+  // BUG FIX: Use currentUser.photos instead of backendPhotos (getUserPhotos)
+  // getUserPhotos EXCLUDES verification_reference photos, causing primary photo to be missed
+  // currentUser.photos from getCurrentUser includes ALL photos with isPrimary flag
   const mainPhotoUrl = React.useMemo(() => {
     if (isDemoMode) {
       // Demo mode: use first photo from demoStore
       return currentUser?.photos?.[0]?.url || null;
     }
-    // Live mode: Find photo with isPrimary=true (authoritative)
-    // Fallback to first by order if no isPrimary found
-    const primaryPhoto = backendPhotos?.find((p: any) => p.isPrimary);
-    const mainPhoto = primaryPhoto || backendPhotos?.[0];
+    // Live mode: Find photo with isPrimary=true from currentUser.photos (authoritative)
+    // Fallback to first photo if no isPrimary found
+    const primaryPhoto = currentUser?.photos?.find((p: any) => p.isPrimary);
+    const mainPhoto = primaryPhoto || currentUser?.photos?.[0];
 
-    if (__DEV__ && backendPhotos?.length) {
+    if (__DEV__ && currentUser?.photos?.length) {
       console.log('[ProfileTab] 📸 Main photo selection:', {
         hasPrimaryFlag: !!primaryPhoto,
-        selectedId: mainPhoto?._id,
-        selectedOrder: mainPhoto?.order,
+        selectedUrl: mainPhoto?.url?.slice(-30),
         isPrimary: mainPhoto?.isPrimary,
+        totalPhotos: currentUser?.photos?.length,
       });
     }
 
     return mainPhoto?.url || null;
-  }, [isDemoMode, currentUser?.photos, backendPhotos]);
+  }, [isDemoMode, currentUser?.photos]);
+
+  // PER-PHOTO BLUR CHECK: Read from backend photo.isBlurred field (source of truth)
+  // Edit Profile persists blur state to Convex on Save via api.photos.setPhotosBlur
+  // A photo is individually blurred when photo.isBlurred === true
+  const mainPhotoIsBlurred = React.useMemo(() => {
+    if (isDemoMode) {
+      // Demo mode: check first photo's isBlurred field
+      const firstPhoto = currentUser?.photos?.[0];
+      return firstPhoto?.isBlurred === true;
+    }
+    // Live mode: find the primary photo and check its isBlurred field from backend
+    const primaryPhoto = currentUser?.photos?.find((p: any) => p.isPrimary);
+    const mainPhoto = primaryPhoto || currentUser?.photos?.[0];
+    return mainPhoto?.isBlurred === true;
+  }, [isDemoMode, currentUser?.photos]);
 
   // PERF: Prefetch top photos after hydration
   React.useEffect(() => {
@@ -224,15 +246,15 @@ export default function ProfileScreen() {
     }
   }, [currentUser?.photos]);
 
-  // Blur status: read from backend field 'photoBlurred' (source of truth)
-  // This field is set by api.users.togglePhotoBlur mutation
-  const blurEnabled = Boolean((currentUser as any)?.photoBlurred ?? false);
+  // Global blur feature toggle (enables per-photo blur controls, does NOT mean "blur all")
+  const blurFeatureEnabled = Boolean((currentUser as any)?.photoBlurred ?? false);
 
   // __DEV__ LOG: Blur state tracing
   if (__DEV__) {
     console.log('[ProfileTab] 🔒 Blur state:', {
       photoBlurred: (currentUser as any)?.photoBlurred,
-      blurEnabled,
+      blurFeatureEnabled,
+      mainPhotoIsBlurred,
       userId: userId?.slice(-8),
     });
   }
@@ -379,12 +401,12 @@ export default function ProfileScreen() {
               style={styles.avatar}
               contentFit="cover"
               transition={200}
-              blurRadius={blurEnabled ? 8 : 0}
+              blurRadius={0}
               onLoadEnd={() => {
                 // PERF: Log photo load time once per focus
                 if (__DEV__ && !hasLoggedPhotoLoad.current && focusTimeRef.current > 0) {
                   const loadTime = Date.now() - focusTimeRef.current;
-                  console.log('[PERF ProfileTab] Main photo loaded:', { loadTimeMs: loadTime, blurEnabled });
+                  console.log('[PERF ProfileTab] Main photo loaded:', { loadTimeMs: loadTime, mainPhotoIsBlurred });
                   hasLoggedPhotoLoad.current = true;
                 }
               }}
@@ -412,20 +434,20 @@ export default function ProfileScreen() {
         {/* Bio */}
         {currentUser.bio && <Text style={styles.bio}>{currentUser.bio}</Text>}
 
-        {/* Photo visibility status - subtle info row */}
+        {/* Photo visibility status - based on main photo's individual blur state */}
         <View style={styles.visibilityRow}>
           <Ionicons
-            name={blurEnabled ? 'eye-off-outline' : 'eye-outline'}
+            name={mainPhotoIsBlurred ? 'eye-off-outline' : 'eye-outline'}
             size={16}
             color={COLORS.textMuted}
           />
           <Text style={styles.visibilityText}>
-            {blurEnabled ? 'Photos blurred to others' : 'Photos visible to others'}
+            {mainPhotoIsBlurred ? 'Photo blurred to others' : 'Photos visible to others'}
           </Text>
         </View>
 
-        {/* Preview toggle (only if blur is on and has photo) */}
-        {blurEnabled && mainPhotoUrl && (
+        {/* Preview toggle (only if main photo is individually blurred) */}
+        {mainPhotoIsBlurred && mainPhotoUrl && (
           <TouchableOpacity
             style={styles.previewToggle}
             onPress={() => setPreviewBlur((p) => !p)}
@@ -439,8 +461,8 @@ export default function ProfileScreen() {
           </TouchableOpacity>
         )}
 
-        {/* Blurred preview thumbnail - same blur intensity as main photo */}
-        {previewBlur && mainPhotoUrl && (
+        {/* Blurred preview thumbnail - only shown if main photo is individually blurred */}
+        {previewBlur && mainPhotoIsBlurred && mainPhotoUrl && (
           <View style={styles.previewContainer}>
             <Image
               source={{ uri: mainPhotoUrl }}

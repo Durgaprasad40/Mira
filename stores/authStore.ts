@@ -416,15 +416,6 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
       console.warn('[AUTH] logout: failed to reset filterStore', error);
     }
 
-    // P0-002 FIX: Clear photoBlurStore to prevent cross-user blur settings bleed
-    try {
-      const { usePhotoBlurStore } = require('@/stores/photoBlurStore');
-      usePhotoBlurStore.setState({ userSettings: {} });
-      if (__DEV__) console.log('[AUTH] logout: cleared photoBlurStore');
-    } catch (error) {
-      console.warn('[AUTH] logout: failed to reset photoBlurStore', error);
-    }
-
     // P0-002 FIX: Clear subscriptionStore to prevent cross-user subscription bleed
     try {
       const { useSubscriptionStore } = require('@/stores/subscriptionStore');

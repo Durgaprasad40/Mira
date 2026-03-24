@@ -70,7 +70,6 @@ import { BlurProfileNotice } from '@/components/profile/BlurProfileNotice';
 import { isDemoMode } from '@/hooks/useConvex';
 import { getDemoCurrentUser } from '@/lib/demoData';
 import { useDemoStore, slotsToPhotos } from '@/stores/demoStore';
-import { usePhotoBlurStore } from '@/stores/photoBlurStore';
 import { PhotoSlots9, createEmptyPhotoSlots } from '@/types';
 import { uploadPhotoToBackend } from '@/services/photoSync';
 import { Id } from '@/convex/_generated/dataModel';
@@ -89,9 +88,6 @@ import {
 } from '@/components/profile/edit';
 
 const GRID_SIZE = 9;
-
-// Stable empty object reference to avoid re-renders when no blur settings exist
-const EMPTY_BLURRED_PHOTOS: Record<number, boolean> = {};
 
 function isValidPhotoUrl(url: unknown): url is string {
   return typeof url === 'string' && url.length > 0 && url !== 'undefined' && url !== 'null';
@@ -136,31 +132,20 @@ export default function EditProfileScreen() {
   const updateProfile = useMutation(api.users.updateProfile);
   const updateProfilePrompts = useMutation(api.users.updateProfilePrompts);
   const upsertOnboardingDraft = useMutation(api.users.upsertOnboardingDraft);
-  const togglePhotoBlur = isDemoMode ? null : useMutation(api.users.togglePhotoBlur);
   const reorderPhotos = useMutation(api.photos.reorderPhotosWithToken);
   const deletePhotoMutation = useMutation(api.photos.deletePhoto);
+  // Per-photo blur mutation - backend is source of truth
+  const setPhotosBlurMutation = isDemoMode ? null : useMutation(api.photos.setPhotosBlur);
 
   // Subscribe to currentDemoUserId to prevent stale closures on account switch
   const currentDemoUserId = useDemoStore((s) => s.currentDemoUserId);
 
-  // Get effective userId for blur settings (works for both demo and prod)
-  const effectiveUserId = isDemoMode
-    ? currentDemoUserId || 'demo_user'
-    : userId || '';
-
-  // Per-photo blur from persisted store - use direct selectors for stable references
-  const userBlurSettings = usePhotoBlurStore((s) => s.userSettings[effectiveUserId]);
-  const blurEnabled = userBlurSettings?.blurEnabled ?? false;
-  const blurredPhotos = userBlurSettings?.blurredPhotos ?? EMPTY_BLURRED_PHOTOS;
-
-  const setBlurEnabled = useCallback(
-    (enabled: boolean) => usePhotoBlurStore.getState().setBlurEnabled(effectiveUserId, enabled),
-    [effectiveUserId]
-  );
-  const setBlurredPhotos = useCallback(
-    (photos: Record<number, boolean>) => usePhotoBlurStore.getState().setBlurredPhotos(effectiveUserId, photos),
-    [effectiveUserId]
-  );
+  // LOCAL blur state - temporary UI state during editing
+  // Backend photos.isBlurred is source of truth, persisted on Save
+  const [blurEnabled, setBlurEnabled] = useState(false);
+  const [blurredPhotos, setBlurredPhotos] = useState<Record<number, boolean>>({});
+  // Track if blur state has been initialized from backend
+  const blurInitializedRef = useRef(false);
 
   const [showBlurNotice, setShowBlurNotice] = useState(false);
   const [bio, setBio] = useState('');
@@ -360,7 +345,6 @@ export default function EditProfileScreen() {
           setLastName(parts.slice(1).join(' '));
         }
       }
-      // Note: blurEnabled is now persisted in photoBlurStore, not initialized from server
 
       // SLOT-BASED: Initialize from getCurrentProfile() (SINGLE SOURCE OF TRUTH)
       let initSlots: PhotoSlots9 = createEmptyPhotoSlots();
@@ -417,23 +401,10 @@ export default function EditProfileScreen() {
       }
 
       setPhotoSlots(initSlots);
-
-      // BLUR SYNC: Initialize local blur state from backend photoBlurred field
-      // This ensures Edit Profile shows correct blur toggle state on load
-      const backendBlurEnabled = (currentUser as any)?.photoBlurred ?? false;
-      if (backendBlurEnabled !== blurEnabled) {
-        setBlurEnabled(backendBlurEnabled);
-        if (__DEV__) {
-          console.log('[EditProfile] 🔒 Synced blur state from backend:', {
-            photoBlurred: backendBlurEnabled,
-            previousLocalState: blurEnabled,
-          });
-        }
-      }
     }
   }, [currentUser?._id, currentUser?.id, currentDemoUserId]);
 
-  // LIVE MODE: Sync photo slots from currentUser.photos (source of truth)
+  // LIVE MODE: Sync photo slots AND blur state from currentUser.photos (source of truth)
   // BUG FIX (2026-03-23): Use currentUser.photos instead of backendPhotos (getUserPhotos)
   // getUserPhotos EXCLUDES verification_reference photos, causing the primary selfie to be hidden
   // currentUser.photos from getCurrentUser includes ALL photos (same fix as Phase-2 onboarding)
@@ -442,9 +413,16 @@ export default function EditProfileScreen() {
 
     // Map photos to slots by array index (photos are already sorted by order from getCurrentUser)
     const slotsFromBackend: PhotoSlots9 = createEmptyPhotoSlots();
+    // Initialize blur state from backend photos.isBlurred field
+    const blurFromBackend: Record<number, boolean> = {};
+
     currentUser.photos.forEach((photo: any, index: number) => {
       if (index >= 0 && index < 9 && photo.url) {
         slotsFromBackend[index] = photo.url;
+        // Read isBlurred from backend photo record
+        if (photo.isBlurred === true) {
+          blurFromBackend[index] = true;
+        }
       }
     });
 
@@ -453,21 +431,38 @@ export default function EditProfileScreen() {
     if (hasPhotos) {
       if (__DEV__) {
         const filledSlots = slotsFromBackend.map((s, i) => s ? i : -1).filter(i => i >= 0);
-        // Show raw photo records with order/isPrimary/photoType
+        // Show raw photo records with order/isPrimary/photoType/isBlurred
         const photoDetails = currentUser.photos.map((p: any) => ({
           id: p._id?.slice(-6),
           order: p.order,
           isPrimary: p.isPrimary,
           photoType: p.photoType || 'regular',
+          isBlurred: p.isBlurred ?? false,
         }));
         console.log('[EditProfile] 📸 Photos loaded (includes all types):', {
           count: currentUser.photos.length,
           filledSlots,
           photos: photoDetails,
           primaryPhoto: currentUser.photos.find((p: any) => p.isPrimary)?._id?.slice(-6),
+          blurredSlots: Object.keys(blurFromBackend).filter(k => blurFromBackend[Number(k)]),
         });
       }
       setPhotoSlots(slotsFromBackend);
+
+      // Initialize blur state from backend (only once to avoid overwriting user edits)
+      if (!blurInitializedRef.current) {
+        blurInitializedRef.current = true;
+        setBlurredPhotos(blurFromBackend);
+        // Set blurEnabled if any photo is blurred
+        const anyBlurred = Object.values(blurFromBackend).some(v => v);
+        setBlurEnabled(anyBlurred || (currentUser as any)?.photoBlurred === true);
+        if (__DEV__) {
+          console.log('[EditProfile] 🔒 Initialized blur state from backend:', {
+            blurredPhotos: blurFromBackend,
+            blurEnabled: anyBlurred,
+          });
+        }
+      }
     }
   }, [currentUser?.photos]);
 
@@ -498,13 +493,6 @@ export default function EditProfileScreen() {
       }
     }
   }, [validPhotoEntries]);
-
-  // Cleanup blur state when photos are removed
-  useEffect(() => {
-    if (effectiveUserId && validPhotoCount > 0) {
-      usePhotoBlurStore.getState().cleanupBlurredPhotos(effectiveUserId, validPhotoCount);
-    }
-  }, [validPhotoCount, effectiveUserId]);
 
   // PERF: Track grid render start time
   useEffect(() => {
@@ -760,7 +748,10 @@ export default function EditProfileScreen() {
     }
 
     // BACKEND PERSISTENCE: Call reorderPhotosWithToken immediately
-    if (!isDemoMode && backendPhotos && backendPhotos.length > 0) {
+    // BUG FIX: Use currentUser.photos (from getCurrentUser) instead of backendPhotos (from getUserPhotos)
+    // getUserPhotos EXCLUDES verification_reference photos, causing URL lookup failures
+    // This aligns with the slot population logic (lines 440-470) which uses currentUser.photos
+    if (!isDemoMode && currentUser?.photos && currentUser.photos.length > 0) {
       const token = useAuthStore.getState().token;
       if (!token) {
         Alert.alert('Error', 'Session expired. Please log in again.');
@@ -769,9 +760,9 @@ export default function EditProfileScreen() {
       }
 
       try {
-        // Build URL -> photoId map
+        // Build URL -> photoId map from currentUser.photos (includes ALL photo types)
         const urlToPhotoId = new Map<string, string>();
-        for (const photo of backendPhotos) {
+        for (const photo of currentUser.photos) {
           if (photo.url) {
             urlToPhotoId.set(photo.url, photo._id);
           }
@@ -808,13 +799,17 @@ export default function EditProfileScreen() {
     }
   };
 
-  // Toggle blur for a specific photo (persisted to store)
+  // Toggle blur for a specific photo (local state only, persisted on Save)
   const handleTogglePhotoBlur = useCallback((index: number) => {
-    usePhotoBlurStore.getState().togglePhotoBlur(effectiveUserId, index);
-    if (__DEV__) {
-      console.log('[EditProfile] togglePhotoBlur', { index, userId: effectiveUserId });
-    }
-  }, [effectiveUserId]);
+    setBlurredPhotos((prev) => {
+      const newState = { ...prev };
+      newState[index] = !prev[index];
+      if (__DEV__) {
+        console.log('[EditProfile] togglePhotoBlur (local)', { index, newValue: newState[index] });
+      }
+      return newState;
+    });
+  }, []);
 
   // Section-based prompts: computed values
   const filledPrompts = Object.values(sectionAnswers)
@@ -849,78 +844,28 @@ export default function EditProfileScreen() {
     setActivePromptSection((prev) => (prev === sectionKey ? null : sectionKey));
   }, []);
 
+  // Handle blur feature toggle (local state only, persisted on Save)
   const handleBlurToggle = (newValue: boolean) => {
     if (__DEV__) {
-      console.log('[EditProfile] 🔒 handleBlurToggle called:', {
-        newValue,
-        currentBlurEnabled: blurEnabled,
-        isDemoMode,
-      });
+      console.log('[EditProfile] 🔒 handleBlurToggle (local):', { newValue, currentBlurEnabled: blurEnabled });
     }
 
     if (newValue) {
+      // Show notice before enabling blur feature
       setShowBlurNotice(true);
     } else {
-      // Turning blur OFF - Demo mode: just update local state (no persist)
-      if (isDemoMode) {
-        setBlurEnabled(false);
-        setBlurredPhotos({}); // P1-007 FIX: Clear blurredPhotos when disabling blur
-        if (__DEV__) console.log('[DEMO] Set blurEnabled=false (local state only)');
-        return;
-      }
-      const convexUserId = currentUser?._id;
-      if (!convexUserId || !togglePhotoBlur || !userId) return;
-      // EXTRA GUARD: Block demo IDs (only startsWith to avoid false positives)
-      if (typeof convexUserId === 'string' && convexUserId.startsWith('demo_')) {
-        if (__DEV__) console.log('[DEMO GUARD] Blocked togglePhotoBlur (off)', { file: 'edit-profile.tsx' });
-        setBlurEnabled(false);
-        return;
-      }
-      if (__DEV__) {
-        console.log('[EditProfile] 🔒 Calling togglePhotoBlur mutation:', {
-          authUserId: userId,
-          blurred: false,
-        });
-      }
-      togglePhotoBlur({ authUserId: userId, blurred: false })
-        .then(() => {
-          setBlurEnabled(false);
-          setBlurredPhotos({}); // P1-007 FIX: Clear blurredPhotos when disabling blur
-          if (__DEV__) console.log('[EditProfile] ✅ Blur disabled, backend updated');
-        })
-        .catch((err: any) => Alert.alert('Error', err.message));
+      // Turning blur OFF - clear all per-photo blur settings
+      setBlurEnabled(false);
+      setBlurredPhotos({});
+      if (__DEV__) console.log('[EditProfile] 🔒 Blur disabled (local), will persist on Save');
     }
   };
 
-  const handleBlurConfirm = async () => {
+  // Confirm enabling blur feature (local state only, persisted on Save)
+  const handleBlurConfirm = () => {
     setShowBlurNotice(false);
-    // Turning blur ON - Demo mode: just update local state (no persist)
-    if (isDemoMode) {
-      setBlurEnabled(true);
-      if (__DEV__) console.log('[DEMO] Set blurEnabled=true (local state only)');
-      return;
-    }
-    const convexUserId = currentUser?._id;
-    if (!convexUserId || !togglePhotoBlur || !userId) return;
-    // EXTRA GUARD: Block demo IDs (only startsWith to avoid false positives)
-    if (typeof convexUserId === 'string' && convexUserId.startsWith('demo_')) {
-      if (__DEV__) console.log('[DEMO GUARD] Blocked togglePhotoBlur (on)', { file: 'edit-profile.tsx' });
-      setBlurEnabled(true);
-      return;
-    }
-    try {
-      if (__DEV__) {
-        console.log('[EditProfile] 🔒 Calling togglePhotoBlur mutation:', {
-          authUserId: userId,
-          blurred: true,
-        });
-      }
-      await togglePhotoBlur({ authUserId: userId, blurred: true });
-      setBlurEnabled(true);
-      if (__DEV__) console.log('[EditProfile] ✅ Blur enabled, backend updated');
-    } catch (err: any) {
-      Alert.alert('Error', err.message);
-    }
+    setBlurEnabled(true);
+    if (__DEV__) console.log('[EditProfile] 🔒 Blur enabled (local), will persist on Save');
   };
 
   const handleSave = async () => {
@@ -1112,6 +1057,35 @@ export default function EditProfileScreen() {
           await reorderPhotos({
             photoIds: orderedPhotoIds as any, // Cast to Id<'photos'>[]
             token: sessionToken,
+          });
+        }
+      }
+
+      // PERSIST PER-PHOTO BLUR: Save blur states to backend
+      // Backend photos.isBlurred is the source of truth
+      if (setPhotosBlurMutation) {
+        // Build blur states array for all photos with explicit blur state
+        const blurStates: { order: number; isBlurred: boolean }[] = [];
+        photoSlots.forEach((url, slotIndex) => {
+          if (url) {
+            // Include all photos - set isBlurred to true or false explicitly
+            blurStates.push({
+              order: slotIndex,
+              isBlurred: blurredPhotos[slotIndex] === true,
+            });
+          }
+        });
+
+        if (blurStates.length > 0) {
+          if (__DEV__) {
+            console.log('[EditProfile] 🔒 Persisting blur states:', {
+              blurStates,
+              blurEnabled,
+            });
+          }
+          await setPhotosBlurMutation({
+            token: sessionToken,
+            blurStates,
           });
         }
       }

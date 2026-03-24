@@ -535,6 +535,9 @@ export default defineSchema({
     isPrimary: v.boolean(),
     hasFace: v.boolean(),
     isNsfw: v.boolean(),
+    // Per-photo blur: when true, other users see this photo blurred
+    // This is the backend source of truth for Phase-1 per-photo blur feature
+    isBlurred: v.optional(v.boolean()),
     width: v.optional(v.number()),
     height: v.optional(v.number()),
     createdAt: v.number(),
@@ -1833,6 +1836,88 @@ export default defineSchema({
   // ─────────────────────────────────────────────────────────────────────────
   // Support Tickets System
   // ─────────────────────────────────────────────────────────────────────────
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // Phase-2 Private Mode Backend Tables (Desire Land - STRICT ISOLATION)
+  // These tables are COMPLETELY SEPARATE from Phase-1 tables.
+  // Phase-2 swipes, matches, conversations, and messages NEVER mix with Phase-1.
+  // ─────────────────────────────────────────────────────────────────────────
+
+  // Phase-2 Private Likes (swipe records for Desire Land)
+  privateLikes: defineTable({
+    fromUserId: v.id('users'),
+    toUserId: v.id('users'),
+    action: v.union(v.literal('like'), v.literal('pass'), v.literal('super_like')),
+    message: v.optional(v.string()), // For super_like standout messages
+    createdAt: v.number(),
+  })
+    .index('by_from_user', ['fromUserId'])
+    .index('by_to_user', ['toUserId'])
+    .index('by_from_to', ['fromUserId', 'toUserId'])
+    .index('by_to_from', ['toUserId', 'fromUserId']),
+
+  // Phase-2 Private Matches (Desire Land matches - separate from Phase-1 matches)
+  privateMatches: defineTable({
+    user1Id: v.id('users'),           // Ordered pair: user1Id < user2Id
+    user2Id: v.id('users'),
+    matchedAt: v.number(),
+    isActive: v.boolean(),
+    user1UnmatchedAt: v.optional(v.number()),
+    user2UnmatchedAt: v.optional(v.number()),
+    // Track match source for analytics
+    matchSource: v.optional(v.union(v.literal('like'), v.literal('super_like'))),
+  })
+    .index('by_user1', ['user1Id'])
+    .index('by_user2', ['user2Id'])
+    .index('by_users', ['user1Id', 'user2Id']),
+
+  // Phase-2 Private Conversations (DM threads for Desire Land matches)
+  privateConversations: defineTable({
+    matchId: v.optional(v.id('privateMatches')),
+    participants: v.array(v.id('users')),
+    isPreMatch: v.boolean(),          // False for match-based conversations
+    lastMessageAt: v.optional(v.number()),
+    createdAt: v.number(),
+    // Connection source tracking
+    connectionSource: v.optional(v.union(
+      v.literal('desire_match'),      // Match from Desire Land swipes
+      v.literal('desire_super_like'), // Super like match
+      v.literal('tod'),               // Truth or Dare connection
+      v.literal('room')               // Chat room DM
+    )),
+  })
+    .index('by_match', ['matchId'])
+    .index('by_last_message', ['lastMessageAt'])
+    .index('by_connection_source', ['connectionSource']),
+
+  // Phase-2 Private Conversation Participants (for efficient user-scoped queries)
+  privateConversationParticipants: defineTable({
+    conversationId: v.id('privateConversations'),
+    userId: v.id('users'),
+    unreadCount: v.number(),
+  })
+    .index('by_user', ['userId'])
+    .index('by_conversation', ['conversationId'])
+    .index('by_user_conversation', ['userId', 'conversationId']),
+
+  // Phase-2 Private Messages (messages in Desire Land conversations)
+  privateMessages: defineTable({
+    conversationId: v.id('privateConversations'),
+    senderId: v.id('users'),
+    type: v.union(v.literal('text'), v.literal('image'), v.literal('video'), v.literal('voice'), v.literal('system')),
+    content: v.string(),
+    imageStorageId: v.optional(v.id('_storage')),
+    audioStorageId: v.optional(v.id('_storage')),
+    audioDurationMs: v.optional(v.number()),
+    deliveredAt: v.optional(v.number()),
+    readAt: v.optional(v.number()),
+    createdAt: v.number(),
+    // Client-provided idempotency key
+    clientMessageId: v.optional(v.string()),
+  })
+    .index('by_conversation', ['conversationId'])
+    .index('by_conversation_created', ['conversationId', 'createdAt'])
+    .index('by_conversation_clientMessageId', ['conversationId', 'clientMessageId']),
 
   // User support tickets for Help & Support inquiries
   supportTickets: defineTable({
