@@ -183,19 +183,19 @@ export default function Phase2Review() {
     setPreviewIndex(null);
   }, []);
 
-  // Navigation handlers
+  // Navigation handlers - pass fromReview=true so edit screens return here after save
   const handleEditProfile = useCallback(() => {
-    router.push('/(main)/phase2-onboarding/profile-edit' as any);
+    router.push('/(main)/phase2-onboarding/profile-edit?fromReview=true' as any);
   }, [router]);
 
   // P2-UX-001 FIX: Dedicated handler for Looking For edit
   const handleEditLookingFor = useCallback(() => {
-    router.push('/(main)/phase2-onboarding/looking-for-edit' as any);
+    router.push('/(main)/phase2-onboarding/looking-for-edit?fromReview=true' as any);
   }, [router]);
 
   // Handler for editing prompts (Step 3)
   const handleEditPrompts = useCallback(() => {
-    router.push('/(main)/phase2-onboarding/prompts' as any);
+    router.push('/(main)/phase2-onboarding/prompts?fromReview=true' as any);
   }, [router]);
 
   // Handle completion
@@ -319,7 +319,7 @@ export default function Phase2Review() {
         >
           <Ionicons name="arrow-back" size={24} color={C.text} />
         </TouchableOpacity>
-        <Text style={styles.headerTitle}>Review & Desire</Text>
+        <Text style={styles.headerTitle}>Review Profile</Text>
         {/* P2-PHOTO-001: Updated step number for 5-step flow */}
         <Text style={styles.stepLabel}>Step 5 of 5</Text>
       </View>

@@ -1,7 +1,8 @@
-import React, { useEffect, useMemo } from 'react';
+import React, { useEffect, useMemo, useCallback } from 'react';
 import { View, Text, TouchableOpacity, StyleSheet } from 'react-native';
 import { useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useFocusEffect } from '@react-navigation/native';
 import { Ionicons } from '@expo/vector-icons';
 import { usePrivateProfileStore } from '@/stores/privateProfileStore';
 import { isDemoMode } from '@/hooks/useConvex';
@@ -53,22 +54,79 @@ export default function SelectPhotosScreen() {
     return items;
   }, [phase1PhotoSlots]);
 
+  // BUG FIX: Hydrate selectedPhotoIds from selectedPhotoUrls on screen focus
+  // After app restart or re-entry, hydrateFromConvex restores URLs but NOT IDs
+  // This reconstructs IDs by matching URLs to phase1PhotoSlots
+  const hydrateSelectedPhotoIds = useCallback(() => {
+    if (isDemoMode) return;
+
+    // Skip if no URLs to hydrate from
+    if (!selectedPhotoUrls || selectedPhotoUrls.length === 0) return;
+
+    // Skip if IDs are already in sync with URLs (same count and all IDs exist in photos)
+    if (
+      selectedPhotoIds.length === selectedPhotoUrls.length &&
+      selectedPhotoIds.every((id) => photos.some((p) => p.id === id))
+    ) {
+      return;
+    }
+
+    // Reconstruct IDs from URLs by matching against phase1PhotoSlots
+    const reconstructedIds: string[] = [];
+    const reconstructedUrls: string[] = [];
+
+    selectedPhotoUrls.forEach((url) => {
+      // Find the matching photo in phase1PhotoSlots
+      const matchingPhoto = photos.find((p) => p.url === url);
+      if (matchingPhoto) {
+        // Avoid duplicates
+        if (!reconstructedIds.includes(matchingPhoto.id)) {
+          reconstructedIds.push(matchingPhoto.id);
+          reconstructedUrls.push(url);
+        }
+      }
+    });
+
+    // Update store if we reconstructed any IDs
+    if (reconstructedIds.length > 0) {
+      if (__DEV__) {
+        console.log('[SelectPhotos] Hydrated selectedPhotoIds from URLs:', {
+          originalUrlCount: selectedPhotoUrls.length,
+          reconstructedIdCount: reconstructedIds.length,
+          ids: reconstructedIds,
+        });
+      }
+      setSelectedPhotos(reconstructedIds, reconstructedUrls);
+    }
+  }, [photos, selectedPhotoUrls, selectedPhotoIds, setSelectedPhotos]);
+
+  // Run hydration on screen focus (handles re-entry after back navigation)
+  useFocusEffect(
+    useCallback(() => {
+      hydrateSelectedPhotoIds();
+    }, [hydrateSelectedPhotoIds])
+  );
+
   useEffect(() => {
     setCurrentStep(1);
   }, []);
 
   const handleToggle = (id: string, url: string) => {
-    if (selectedPhotoIds.includes(id)) {
-      // Deselect: remove from selection
-      const idx = selectedPhotoIds.indexOf(id);
-      const newIds = [...selectedPhotoIds];
-      const newUrls = [...selectedPhotoUrls];
-      newIds.splice(idx, 1);
-      newUrls.splice(idx, 1);
+    // Check if already selected by ID OR URL (defense against mismatched state)
+    const isSelectedById = selectedPhotoIds.includes(id);
+    const isSelectedByUrl = selectedPhotoUrls.includes(url);
+
+    if (isSelectedById || isSelectedByUrl) {
+      // Deselect: remove from selection (by both ID and URL to handle edge cases)
+      const newIds = selectedPhotoIds.filter((existingId) => existingId !== id);
+      const newUrls = selectedPhotoUrls.filter((existingUrl) => existingUrl !== url);
       setSelectedPhotos(newIds, newUrls);
     } else if (selectedPhotoIds.length < MAX_PHASE2_PHOTOS) {
       // Select: add to selection (only if under max)
-      setSelectedPhotos([...selectedPhotoIds, id], [...selectedPhotoUrls, url]);
+      // Deduplicate before adding (safety against any edge case)
+      const deduplicatedIds = [...new Set([...selectedPhotoIds, id])];
+      const deduplicatedUrls = [...new Set([...selectedPhotoUrls, url])];
+      setSelectedPhotos(deduplicatedIds, deduplicatedUrls);
     }
   };
 

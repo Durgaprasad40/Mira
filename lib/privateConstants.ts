@@ -153,7 +153,7 @@ export interface Phase2PromptAnswer {
 }
 
 // Validation constants
-export const PHASE2_PROMPT_MIN_TEXT_LENGTH = 10; // Minimum characters for text answers
+export const PHASE2_PROMPT_MIN_TEXT_LENGTH = 20; // Minimum characters for text answers
 export const PHASE2_PROMPT_MAX_TEXT_LENGTH = 200; // Maximum characters for text answers
 
 // ============================================================

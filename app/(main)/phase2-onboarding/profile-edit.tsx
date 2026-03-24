@@ -27,7 +27,7 @@ import {
   KeyboardAvoidingView,
   Platform,
 } from 'react-native';
-import { useRouter, useFocusEffect } from 'expo-router';
+import { useRouter, useFocusEffect, useLocalSearchParams } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
@@ -73,6 +73,10 @@ export default function Phase2ProfileEdit() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const desireInputRef = useRef<TextInput>(null);
+
+  // Check if opened from review screen (Step 5)
+  const { fromReview } = useLocalSearchParams<{ fromReview?: string }>();
+  const isFromReview = fromReview === 'true';
 
   // P2-003 FIX: Ref guard to prevent double-tap navigation
   const isContinuingRef = useRef(false);
@@ -345,7 +349,12 @@ export default function Phase2ProfileEdit() {
       // B2-HIGH FIX: Delay navigation after keyboard dismiss to prevent Android crash
       setTimeout(() => {
         try {
-          router.push('/(main)/phase2-onboarding/prompts' as any);
+          // FIX: If opened from review, go back to review instead of continuing to next step
+          if (isFromReview) {
+            router.back();
+          } else {
+            router.push('/(main)/phase2-onboarding/prompts' as any);
+          }
         } catch (navError) {
           // STABILITY: Reset guards if navigation throws
           isContinuingRef.current = false;
@@ -360,7 +369,7 @@ export default function Phase2ProfileEdit() {
       if (isMountedRef.current) setIsProcessing(false);
       if (__DEV__) console.error('[profile-edit] handleContinue error:', e);
     }
-  }, [canContinue, isProcessing, photoSlots, setSelectedPhotos, router]);
+  }, [canContinue, isProcessing, photoSlots, setSelectedPhotos, router, isFromReview]);
 
   // Desire hint
   const getDesireHint = () => {
@@ -693,9 +702,9 @@ export default function Phase2ProfileEdit() {
           ) : (
             <>
               <Text style={[styles.continueBtnText, !canContinue && styles.continueBtnTextDisabled]}>
-                Continue to Review
+                {isFromReview ? 'Save & Return' : 'Continue to Review'}
               </Text>
-              <Ionicons name="arrow-forward" size={18} color={canContinue ? '#FFF' : C.textLight} />
+              <Ionicons name={isFromReview ? 'checkmark-circle' : 'arrow-forward'} size={18} color={canContinue ? '#FFF' : C.textLight} />
             </>
           )}
         </TouchableOpacity>
