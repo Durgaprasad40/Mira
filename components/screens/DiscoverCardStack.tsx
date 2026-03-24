@@ -51,10 +51,10 @@ import { getProfileCompleteness, NUDGE_MESSAGES } from "@/lib/profileCompletenes
 import { ProfileNudge } from "@/components/ui/ProfileNudge";
 import { trackEvent } from "@/lib/analytics";
 import { Toast } from "@/components/ui/Toast";
-import { usePrivateChatStore } from "@/stores/privateChatStore";
+// REMOVED: usePrivateChatStore - local conversation creation disabled, backend handles this
 import { useExplorePrefsStore } from "@/stores/explorePrefsStore";
 import { NotificationPopover } from "@/components/discover/NotificationPopover";
-import type { IncognitoConversation, ConnectionSource } from "@/types";
+// REMOVED: IncognitoConversation, ConnectionSource types - no longer needed after disabling local conversation creation
 import type { Id } from "@/convex/_generated/dataModel";
 
 import { markPhase2Matched } from "@/lib/phase2MatchSession";
@@ -67,37 +67,25 @@ import { log } from "@/utils/logger";
 // Demo mode match rate (20% for realistic testing)
 const DEMO_MATCH_RATE = 0.2;
 
-/** Create Phase 2 private conversation for match. Returns true if new, false if duplicate. */
+/**
+ * Handle Phase 2 match event. Returns true if new match, false if duplicate.
+ *
+ * NOTE: Conversation is now created by backend (privateSwipes.ts).
+ * Frontend only tracks idempotency and logs the event.
+ * Frontend must reflect backend state, not create local conversations.
+ */
 function handlePhase2Match(profile: { id: string; name: string; age?: number; photoUrl?: string }): boolean {
   // Check idempotency via shared session module
   if (!markPhase2Matched(profile.id)) {
     return false;
   }
 
-  const conversationId = `ic_desire_${profile.id}`;
-  const conversation: IncognitoConversation = {
-    id: conversationId,
-    participantId: profile.id,
-    participantName: profile.name,
-    participantAge: profile.age ?? 0,
-    participantPhotoUrl: profile.photoUrl ?? '',
-    lastMessage: 'Matched! Start chatting.',
-    lastMessageAt: Date.now(),
-    unreadCount: 0,
-    connectionSource: 'desire' as ConnectionSource,
-  };
+  // DISABLED: Local conversation creation removed - backend now handles this
+  // Frontend should fetch conversations from backend (privateConversations table)
+  // usePrivateChatStore.getState().createConversation(...);
+  // usePrivateChatStore.getState().unlockUser(...);
 
-  usePrivateChatStore.getState().createConversation(conversation);
-  usePrivateChatStore.getState().unlockUser({
-    id: profile.id,
-    username: profile.name,
-    photoUrl: profile.photoUrl ?? '',
-    age: profile.age ?? 0,
-    source: 'tod',
-    unlockedAt: Date.now(),
-  });
-
-  log.info('[MATCH]', 'private', { name: profile.name });
+  log.info('[MATCH]', 'phase2-backend', { name: profile.name });
   return true;
 }
 
@@ -434,16 +422,36 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   // Profile data — memoize args to prevent Convex re-subscriptions
   const convexUserId = asUserId(userId);
   const skipInternalQuery = !!externalProfiles;
-  // retryKey in deps forces re-evaluation on retry (even if args unchanged, Convex re-subscribes)
+
+  // PHASE-2 ISOLATION FIX: Use separate queries for Phase-1 and Phase-2
+  // Phase-1 uses discover.getDiscoverProfiles (users table)
+  // Phase-2 uses privateDiscover.getProfiles (userPrivateProfiles table with isSetupComplete check)
+
+  // Phase-1 discover query args (skip if Phase-2 mode)
   const discoverArgs = useMemo(
     () =>
-      !isDemoMode && convexUserId && !skipInternalQuery
+      !isDemoMode && convexUserId && !skipInternalQuery && !isPhase2
         ? { userId: convexUserId, sortBy: (sortBy || "recommended") as any, limit: 20 }
         : "skip" as const,
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [convexUserId, skipInternalQuery, retryKey, sortBy],
+    [convexUserId, skipInternalQuery, retryKey, sortBy, isPhase2],
   );
-  const convexProfiles = useQuery(api.discover.getDiscoverProfiles, discoverArgs);
+  const phase1Profiles = useQuery(api.discover.getDiscoverProfiles, discoverArgs);
+
+  // Phase-2 private discover query args (skip if Phase-1 mode)
+  // CRITICAL: This queries userPrivateProfiles table which requires isSetupComplete=true
+  const privateDiscoverArgs = useMemo(
+    () =>
+      !isDemoMode && convexUserId && !skipInternalQuery && isPhase2
+        ? { userId: convexUserId, limit: 50 }
+        : "skip" as const,
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [convexUserId, skipInternalQuery, retryKey, isPhase2],
+  );
+  const phase2Profiles = useQuery(api.privateDiscover.getProfiles, privateDiscoverArgs);
+
+  // Use the correct profiles based on mode
+  const convexProfiles = isPhase2 ? phase2Profiles : phase1Profiles;
   const profilesSafe = convexProfiles ?? EMPTY_ARRAY;
 
   // CRITICAL: useMemo prevents new array/object references on every render.
@@ -540,6 +548,29 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
         createdAt: Date.now() - 60 * 24 * 60 * 60 * 1000,
       }));
     }
+
+    // PHASE-2 ISOLATION FIX: Map Phase-2 profiles to ProfileData format
+    // Phase-2 profiles from privateDiscover.getProfiles have different field names
+    if (isPhase2) {
+      return profilesSafe.map((p: any) => toProfileData({
+        _id: p._id,
+        id: p.userId, // Phase-2 uses userId as the primary identifier for matching
+        userId: p.userId,
+        name: p.displayNameInitial ?? 'U', // Phase-2 only shows initial
+        age: p.age,
+        city: p.city,
+        bio: p.privateBio,
+        photos: (p.blurredPhotoUrls ?? []).map((url: string) => ({ url })),
+        activities: p.hobbies ?? [],
+        isVerified: p.isVerified ?? false,
+        privateIntentKeys: p.intentKeys ?? [],
+        privateIntentKey: p.intentKeys?.[0],
+        lastActive: Date.now() - 2 * 60 * 60 * 1000,
+        createdAt: Date.now() - 60 * 24 * 60 * 60 * 1000,
+      }));
+    }
+
+    // Phase-1: use standard mapping
     return rankProfiles(profilesSafe.map(toProfileData));
   }, [externalProfiles, profilesSafe, demo.profiles, excludedSet, isPhase2, genderFilter, minAge, maxAge, maxDistance]);
 
@@ -752,7 +783,10 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
     !dismissedNudges.includes('discover');
   const NUDGE_H = 38;
 
+  // Phase-1 swipe mutation (shared likes.ts)
   const swipeMutation = useMutation(api.likes.swipe);
+  // Phase-2 swipe mutation (isolated privateSwipes.ts) - STRICT ISOLATION
+  const phase2SwipeMutation = useMutation(api.privateSwipes.swipe);
   // Phase-2 only: Impression recording for ranking system
   const recordImpressionsMutation = useMutation(api.privateDiscover.recordDesireLandImpressions);
 
@@ -1127,15 +1161,25 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
         const timeoutPromise = new Promise<null>((_, reject) =>
           setTimeout(() => reject(new Error("Swipe timed out")), SWIPE_TIMEOUT_MS)
         );
-        const result = await Promise.race([
-          swipeMutation({
-            token: token!,
-            toUserId: swipedProfile.id as Id<'users'>,
-            action,
-            message: message,
-          }),
-          timeoutPromise,
-        ]);
+
+        // PHASE-2 ISOLATION: Use separate mutation path for Phase-2 (Desire Land)
+        // Phase-2 writes to privateLikes/privateMatches/privateConversations
+        // Phase-1 writes to likes/matches/conversations (shared tables)
+        const swipePromise = isPhase2
+          ? phase2SwipeMutation({
+              token: token!,
+              toUserId: swipedProfile.id as Id<'users'>,
+              action,
+              message: message,
+            })
+          : swipeMutation({
+              token: token!,
+              toUserId: swipedProfile.id as Id<'users'>,
+              action,
+              message: message,
+            });
+
+        const result = await Promise.race([swipePromise, timeoutPromise]);
 
         // Guard: check mounted/focused before navigating on match
         if (!mountedRef.current || !isFocusedRef.current) return;
@@ -1194,7 +1238,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
         releaseSwipeLock(activeSwipeId);
       }
     },
-    [convexUserId, swipeMutation, advanceCard, hasReachedLikeLimit, hasReachedStandOutLimit, incrementLikes, incrementStandOuts, demo.recordSwipe, incSwipe, maybeTriggerRandomMatch, releaseSwipeLock],
+    [convexUserId, swipeMutation, phase2SwipeMutation, isPhase2, advanceCard, hasReachedLikeLimit, hasReachedStandOutLimit, incrementLikes, incrementStandOuts, demo.recordSwipe, incSwipe, maybeTriggerRandomMatch, releaseSwipeLock],
   );
 
   const animateSwipe = useCallback(

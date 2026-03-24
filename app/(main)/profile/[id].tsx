@@ -182,7 +182,10 @@ export default function ViewProfileScreen() {
   // The UI handles conditional display of fields appropriately
   const profile = (isDemoMode ? demoProfile : convexProfile) as any;
 
+  // Phase-1 swipe mutation (shared likes.ts)
   const swipe = useMutation(api.likes.swipe);
+  // Phase-2 swipe mutation (isolated privateSwipes.ts) - STRICT ISOLATION
+  const phase2Swipe = useMutation(api.privateSwipes.swipe);
 
   const demoLikes = useDemoStore((s) => s.likes);
   const simulateMatch = useDemoStore((s) => s.simulateMatch);
@@ -222,14 +225,24 @@ export default function ViewProfileScreen() {
     }
 
     try {
-      const result = await swipe({
-        token: token!,
-        toUserId: userId as any,
-        action,
-      });
+      // PHASE-2 ISOLATION: Use separate mutation path for Phase-2
+      // Phase-2 writes to privateLikes/privateMatches/privateConversations
+      // Phase-1 writes to likes/matches/conversations (shared tables)
+      const result = isPhase2
+        ? await phase2Swipe({
+            token: token!,
+            toUserId: userId as any,
+            action,
+          })
+        : await swipe({
+            token: token!,
+            toUserId: userId as any,
+            action,
+          });
 
       if (result.isMatch) {
-        safePush(router, `/(main)/match-celebration?matchId=${result.matchId}&userId=${userId}` as any, 'profile->matchCelebration');
+        const modeParam = isPhase2 ? '&mode=phase2' : '';
+        safePush(router, `/(main)/match-celebration?matchId=${result.matchId}&userId=${userId}${modeParam}` as any, 'profile->matchCelebration');
       } else {
         router.back();
       }
