@@ -47,8 +47,9 @@ export const getProfiles = query({
     // Phase 3: Shadow mode decision (once per request)
     const runShadow = shouldRunShadowComparison();
 
-    // Get blocks for current user (both directions - shared across Phase-1 and Phase-2)
-    const [blocksOut, blocksIn, myConversationParticipations] = await Promise.all([
+    // Get blocks, conversation partners, and already-swiped users for exclusion
+    // P0-001 FIX: Added privateLikes query to exclude already-swiped profiles
+    const [blocksOut, blocksIn, myConversationParticipations, mySwipes] = await Promise.all([
       ctx.db
         .query('blocks')
         .withIndex('by_blocker', (q) => q.eq('blockerId', viewerUserId))
@@ -62,6 +63,11 @@ export const getProfiles = query({
         .query('conversationParticipants')
         .withIndex('by_user', (q) => q.eq('userId', viewerUserId))
         .collect(),
+      // P0-001 FIX: Get all users this viewer has already swiped on (like/pass/super_like)
+      ctx.db
+        .query('privateLikes')
+        .withIndex('by_from_user', (q) => q.eq('fromUserId', viewerUserId))
+        .collect(),
     ]);
 
     // Combine into a set of blocked user IDs
@@ -69,6 +75,12 @@ export const getProfiles = query({
       ...blocksOut.map((b) => b.blockedUserId as string),
       ...blocksIn.map((b) => b.blockerId as string),
     ]);
+
+    // P0-001 FIX: Build set of already-swiped user IDs (includes like, pass, super_like)
+    // These users must NEVER reappear in the discover feed
+    const alreadySwipedUserIds = new Set(
+      mySwipes.map((s) => s.toUserId as string)
+    );
 
     // CONVERSATION PARTNER EXCLUSION: Build set of users with existing message threads
     const conversationPartnerIds = new Set<string>();
@@ -120,6 +132,8 @@ export const getProfiles = query({
     // - Incomplete profiles
     // - Blocked users (either direction)
     // - Users with pending deletion
+    // - P0-001 FIX: Users already swiped on (like/pass/super_like)
+    // - Users with existing chat threads
     // NOTE: Profiles without ranking metrics are still eligible (use fallback defaults)
     const eligible = profiles.filter(
       (p) =>
@@ -127,6 +141,8 @@ export const getProfiles = query({
         p.isSetupComplete &&
         !blockedUserIds.has(p.userId as string) &&
         !deletedUserIds.has(p.userId as string) &&
+        // P0-001 FIX: Already-swiped users must NEVER reappear
+        !alreadySwipedUserIds.has(p.userId as string) &&
         // CONVERSATION PARTNER EXCLUSION: Users with existing chat threads must not reappear
         !conversationPartnerIds.has(p.userId as string)
     );

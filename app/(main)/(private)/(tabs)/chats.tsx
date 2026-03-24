@@ -1,10 +1,9 @@
 /*
- * LOCKED (PRIVATE CHATS SCREEN)
- * Do NOT modify this file unless Durga Prasad explicitly unlocks it.
+ * PHASE-2 PRIVATE CHATS SCREEN
+ * P0-002 FIX: Migrated to use Phase-2 privateConversations backend
  *
- * STATUS:
- * - Feature is stable and production-locked
- * - No logic/UI changes allowed
+ * Backend source: privateConversations, privateConversationParticipants, privateMessages
+ * Query: api.privateConversations.getUserPrivateConversations
  */
 import React, { useState, useEffect, useMemo, useCallback } from 'react';
 import { View, Text, StyleSheet, ScrollView, TouchableOpacity, FlatList, Alert, ActivityIndicator } from 'react-native';
@@ -26,14 +25,31 @@ import { useScreenTrace } from '@/lib/devTrace';
 
 const C = INCOGNITO_COLORS;
 
+// Phase-2 connection sources mapped to icons
 const connectionIcon = (source: string) => {
   switch (source) {
     case 'tod': return 'flame';
     case 'room': return 'chatbubbles';
     case 'desire': return 'heart';
+    case 'desire_match': return 'heart';
+    case 'desire_super_like': return 'star';
     case 'friend': return 'people';
     default: return 'chatbubble';
   }
+};
+
+// Normalize Phase-2 connectionSource for local store compatibility
+const normalizeConnectionSource = (source: string): 'tod' | 'room' | 'desire' | 'friend' => {
+  if (source === 'desire_match' || source === 'desire_super_like') return 'desire';
+  if (source === 'tod' || source === 'room' || source === 'desire' || source === 'friend') {
+    return source as 'tod' | 'room' | 'desire' | 'friend';
+  }
+  return 'desire'; // Default for Phase-2 matches
+};
+
+// Check if connectionSource is a Phase-2 source
+const isPhase2Source = (source: string): boolean => {
+  return ['tod', 'room', 'desire', 'desire_match', 'desire_super_like'].includes(source);
 };
 
 /** Look up Phase-2 intent label for a participant */
@@ -56,10 +72,10 @@ export default function ChatsScreen() {
   const pruneDeletedMessages = usePrivateChatStore((s) => s.pruneDeletedMessages);
   const [reportTarget, setReportTarget] = useState<{ id: string; name: string } | null>(null);
 
-  // Auth for T&D connect
+  // Auth for queries
   const currentUserId = useAuthStore((s) => s.userId);
 
-  // T&D Pending Connect Requests
+  // T&D Pending Connect Requests (still uses truthDare API - T&D is a separate feature)
   const pendingRequests = useQuery(
     api.truthDare.getPendingConnectRequests,
     currentUserId ? { authUserId: currentUserId } : 'skip'
@@ -67,13 +83,15 @@ export default function ChatsScreen() {
   const respondToConnect = useMutation(api.truthDare.respondToConnect);
   const [respondingTo, setRespondingTo] = useState<string | null>(null);
 
-  // Backend conversations (source of truth) from EXISTING conversations table
+  // ═══════════════════════════════════════════════════════════════════════════
+  // P0-002 FIX: Backend conversations from Phase-2 privateConversations table
+  // ═══════════════════════════════════════════════════════════════════════════
   const backendConversations = useQuery(
-    api.truthDare.getUserConversations,
+    api.privateConversations.getUserPrivateConversations,
     currentUserId ? { authUserId: currentUserId } : 'skip'
   );
 
-  // Rehydrate local store from backend conversations on mount/update
+  // Rehydrate local store from Phase-2 backend conversations on mount/update
   useEffect(() => {
     if (!backendConversations || backendConversations.length === 0) return;
 
@@ -82,29 +100,31 @@ export default function ChatsScreen() {
       // Use backend conversation ID to check for existing
       const existingLocal = conversations.find((c) => c.id === bc.id);
       if (!existingLocal) {
-        // Only sync Phase-2 connections (tod, room, desire)
         const source = bc.connectionSource as string;
-        if (source === 'tod' || source === 'room' || source === 'desire') {
-          // Unlock the user
+        // Only sync Phase-2 connections
+        if (isPhase2Source(source)) {
+          // Unlock the user (participantId is the direct user ID from Phase-2 query)
           unlockUser({
-            id: bc.participantAuthId || bc.participantId,
+            id: bc.participantId,
             username: bc.participantName,
             photoUrl: bc.participantPhotoUrl || '',
             age: bc.participantAge || 0,
-            source: source as 'tod' | 'room',
+            source: normalizeConnectionSource(source) as 'tod' | 'room',
             unlockedAt: bc.createdAt,
           });
           // Create local conversation with backend ID
           createConversation({
             id: bc.id,
-            participantId: bc.participantAuthId || bc.participantId,
+            participantId: bc.participantId,
             participantName: bc.participantName,
             participantAge: bc.participantAge || 0,
             participantPhotoUrl: bc.participantPhotoUrl || '',
             lastMessage: bc.lastMessage || 'Say hi!',
             lastMessageAt: bc.lastMessageAt,
             unreadCount: bc.unreadCount,
-            connectionSource: source as 'tod' | 'room' | 'desire' | 'friend',
+            connectionSource: normalizeConnectionSource(source),
+            // Preserve super_like info for UI badges
+            matchSource: source === 'desire_super_like' ? 'super_like' : undefined,
           });
         }
       }

@@ -1,4 +1,11 @@
-import React, { useState, useRef, useCallback, useEffect } from 'react';
+/**
+ * Phase-2 Private Chat Screen
+ * P0-002b FIX: Migrated to use Phase-2 privateConversations backend
+ *
+ * Backend source: privateMessages table
+ * Queries: getPrivateMessages, sendPrivateMessage, markPrivateMessagesRead
+ */
+import React, { useState, useRef, useCallback, useEffect, useMemo } from 'react';
 import {
   View,
   Text,
@@ -14,18 +21,23 @@ import {
   InteractionManager,
   Modal,
   Pressable,
+  ActivityIndicator,
 } from 'react-native';
 import { Image } from 'expo-image';
 import { FlashList, type FlashListRef } from '@shopify/flash-list';
 import { useLocalSearchParams, useRouter, useFocusEffect } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
+import { useQuery, useMutation } from 'convex/react';
+import { api } from '@/convex/_generated/api';
+import { Id } from '@/convex/_generated/dataModel';
 import { popHandoff } from '@/lib/memoryHandoff';
 import * as ImagePicker from 'expo-image-picker';
 import { INCOGNITO_COLORS } from '@/lib/constants';
 import { PRIVATE_INTENT_CATEGORIES } from '@/lib/privateConstants';
 import { maskExplicitWords, MASKED_CONTENT_NOTICE } from '@/lib/contentFilter';
 import { usePrivateChatStore } from '@/stores/privateChatStore';
+import { useAuthStore } from '@/stores/authStore';
 import { BottleSpinGame } from '@/components/chat/BottleSpinGame';
 import { CameraPhotoSheet, type CameraPhotoOptions } from '@/components/chat/CameraPhotoSheet';
 import { ReportModal } from '@/components/private/ReportModal';
@@ -37,6 +49,20 @@ import { trackEvent } from '@/lib/analytics';
 import { useVoiceRecorder, type VoiceRecorderResult } from '@/hooks/useVoiceRecorder';
 import { VoiceMessageBubble } from '@/components/chat/VoiceMessageBubble';
 import type { IncognitoMessage } from '@/types';
+
+// ═══════════════════════════════════════════════════════════════════════════
+// P0-002b: Message type for backend messages (mapped for UI compatibility)
+// ═══════════════════════════════════════════════════════════════════════════
+interface BackendMessage {
+  id: string;
+  conversationId: string;
+  senderId: string;
+  type: string;
+  content: string;
+  createdAt: number;
+  readAt?: number;
+  deliveredAt?: number;
+}
 
 /** Look up Phase-2 intent label for a participant (checks both demoStore and DEMO_INCOGNITO_PROFILES) */
 const getIntentLabel = (participantId: string): string | null => {
@@ -69,6 +95,11 @@ export default function PrivateChatScreen() {
   const insets = useSafeAreaInsets();
   const flatListRef = useRef<FlashListRef<IncognitoMessage>>(null);
 
+  // ═══════════════════════════════════════════════════════════════════════════
+  // P0-002b: Auth for backend mutations
+  // ═══════════════════════════════════════════════════════════════════════════
+  const { token, userId: currentUserId } = useAuthStore();
+
   // ─── Composer height tracking (matches locked chat-rooms pattern) ───
   const [composerHeight, setComposerHeight] = useState(56);
   // Phase-1 style: + menu state
@@ -84,27 +115,64 @@ export default function PrivateChatScreen() {
     isNearBottomRef.current = distanceFromBottom < 80;
   }, []);
 
+  // Local store - ONLY used for conversation metadata (header info), NOT messages
   const conversations = usePrivateChatStore((s) => s.conversations);
-  const storeMessages = usePrivateChatStore((s) => s.messages);
-  const addMessage = usePrivateChatStore((s) => s.addMessage);
-  const deleteMessage = usePrivateChatStore((s) => s.deleteMessage);
   const blockUser = usePrivateChatStore((s) => s.blockUser);
-  const pruneDeletedMessages = usePrivateChatStore((s) => s.pruneDeletedMessages);
 
   const conversation = conversations.find((c) => c.id === id);
-  const messages = id ? storeMessages[id] || [] : [];
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // P0-002b: Backend message fetching (replaces local store)
+  // ═══════════════════════════════════════════════════════════════════════════
+  const backendMessages = useQuery(
+    api.privateConversations.getPrivateMessages,
+    id && currentUserId
+      ? { conversationId: id as Id<'privateConversations'>, authUserId: currentUserId }
+      : 'skip'
+  );
+
+  // Map backend messages to UI-compatible IncognitoMessage format
+  const messages: IncognitoMessage[] = useMemo(() => {
+    if (!backendMessages) return [];
+    return backendMessages.map((m: BackendMessage) => ({
+      id: m.id,
+      conversationId: m.conversationId,
+      // P0-002b: Map senderId to 'me' for own messages (UI expects 'me' for isOwn check)
+      senderId: m.senderId === currentUserId ? 'me' : m.senderId,
+      content: m.content,
+      type: m.type as any,
+      createdAt: m.createdAt,
+      isRead: !!m.readAt,
+    }));
+  }, [backendMessages, currentUserId]);
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // P0-002b: Backend mutations
+  // ═══════════════════════════════════════════════════════════════════════════
+  const sendMessageMutation = useMutation(api.privateConversations.sendPrivateMessage);
+  const markReadMutation = useMutation(api.privateConversations.markPrivateMessagesRead);
+
+  // P0-002b: Mark messages as read when screen opens
+  const hasMarkedReadRef = useRef(false);
+  useEffect(() => {
+    if (!id || !token || hasMarkedReadRef.current) return;
+    hasMarkedReadRef.current = true;
+
+    markReadMutation({
+      token,
+      conversationId: id as Id<'privateConversations'>,
+    }).catch((err) => {
+      if (__DEV__) console.warn('[Phase2Chat] Failed to mark messages read:', err);
+    });
+  }, [id, token, markReadMutation]);
+
+  // Reset mark-read flag when conversation changes
+  useEffect(() => {
+    hasMarkedReadRef.current = false;
+  }, [id]);
 
   // GOAL A: Live countdown state - updates every 250ms for smooth countdown display
   const [now, setNow] = useState(Date.now());
-
-  // GOAL D: Auto-cleanup - prune deleted messages on mount and every 5 seconds
-  useEffect(() => {
-    pruneDeletedMessages(); // Prune on mount
-    const interval = setInterval(() => {
-      pruneDeletedMessages();
-    }, 5000);
-    return () => clearInterval(interval);
-  }, [pruneDeletedMessages]);
 
   // GOAL A: Update 'now' every 250ms for live countdown (only when messages have active timers)
   const hasActiveTimers = messages.some(
@@ -118,6 +186,7 @@ export default function PrivateChatScreen() {
 
   const [text, setText] = useState('');
   const [reportVisible, setReportVisible] = useState(false);
+  const [isSending, setIsSending] = useState(false);
 
   // ─── Scroll to bottom helper (with Android timing fix - matches locked pattern) ───
   const scrollToBottom = useCallback((animated = true) => {
@@ -129,9 +198,13 @@ export default function PrivateChatScreen() {
     }
   }, []);
 
-  // Voice recording
+  // Voice recording - NOTE: Voice messages still use local store for now (media upload TODO)
+  const localAddMessage = usePrivateChatStore((s) => s.addMessage);
+  const deleteMessage = usePrivateChatStore((s) => s.deleteMessage);
+
   const handleRecordingComplete = useCallback((result: VoiceRecorderResult) => {
     if (!id) return;
+    // Voice messages temporarily stored locally (backend media upload is separate feature)
     const newMsg: IncognitoMessage = {
       id: `im_voice_${Date.now()}`,
       conversationId: id,
@@ -143,8 +216,8 @@ export default function PrivateChatScreen() {
       createdAt: Date.now(),
       isRead: false,
     };
-    addMessage(id, newMsg);
-  }, [id, addMessage]);
+    localAddMessage(id, newMsg);
+  }, [id, localAddMessage]);
 
   const handleRecordingError = useCallback((message: string) => {
     Alert.alert('Recording Error', message);
@@ -193,10 +266,11 @@ export default function PrivateChatScreen() {
   }, []);
 
   // Phase-1 parity: send result message to chat when spin completes
+  // NOTE: ToD results use local store for now (system messages)
   const handleSendTodResult = useCallback((message: string) => {
     if (!id) return;
     // Add as system message (senderId: 'tod' renders as capsule)
-    addMessage(id, {
+    localAddMessage(id, {
       id: `tod_result_${Date.now()}`,
       conversationId: id,
       senderId: 'tod',
@@ -207,7 +281,7 @@ export default function PrivateChatScreen() {
     if (__DEV__) {
       console.log('[Phase2Chat] ToD result:', message);
     }
-  }, [id, addMessage]);
+  }, [id, localAddMessage]);
 
   // Check for captured media from camera-composer when screen regains focus
   useFocusEffect(
@@ -263,19 +337,35 @@ export default function PrivateChatScreen() {
     });
   }, [id, conversation?.id]);
 
-  const handleSend = () => {
-    if (!text.trim() || !id) return;
-    const newMsg: IncognitoMessage = {
-      id: `im_${Date.now()}`,
-      conversationId: id,
-      senderId: 'me',
-      content: text.trim(),
-      createdAt: Date.now(),
-      isRead: false,
-    };
-    addMessage(id, newMsg);
-    setText('');
-  };
+  // ═══════════════════════════════════════════════════════════════════════════
+  // P0-002b: Send message via backend (replaces local store)
+  // ═══════════════════════════════════════════════════════════════════════════
+  const handleSend = useCallback(async () => {
+    if (!text.trim() || !id || !token || isSending) return;
+
+    const content = text.trim();
+    setText(''); // Clear immediately for responsiveness
+
+    setIsSending(true);
+    try {
+      await sendMessageMutation({
+        token,
+        conversationId: id as Id<'privateConversations'>,
+        type: 'text',
+        content,
+        clientMessageId: `msg_${Date.now()}_${Math.random().toString(36).slice(2)}`,
+      });
+      // Message will appear via query reactivity
+      scrollToBottom(true);
+    } catch (err) {
+      // Restore text on error
+      setText(content);
+      Alert.alert('Error', 'Failed to send message. Please try again.');
+      if (__DEV__) console.error('[Phase2Chat] Send failed:', err);
+    } finally {
+      setIsSending(false);
+    }
+  }, [text, id, token, isSending, sendMessageMutation, scrollToBottom]);
 
   const handleReport = (reason: string) => {
     console.log('Report submitted:', reason, 'for user:', conversation?.participantId);
@@ -335,6 +425,7 @@ export default function PrivateChatScreen() {
   }, [toggleRecording]);
 
   // Handle secure photo/video confirmation from CameraPhotoSheet
+  // NOTE: Secure media still uses local store (backend media upload is separate feature)
   const handleCameraPhotoConfirm = useCallback((imageUri: string, options: CameraPhotoOptions) => {
     setShowCameraSheet(false);
     setPickedImageUri(null);
@@ -346,6 +437,7 @@ export default function PrivateChatScreen() {
     if (!id) return;
 
     // Create secure photo/video message for Phase-2 chat
+    // NOTE: Protected media temporarily stored locally (backend media upload is separate feature)
     const newMsg: IncognitoMessage = {
       id: `im_${isVideo ? 'video' : 'photo'}_${Date.now()}`,
       conversationId: id,
@@ -367,13 +459,14 @@ export default function PrivateChatScreen() {
       },
     };
 
-    addMessage(id, newMsg);
+    localAddMessage(id, newMsg);
 
     if (__DEV__) {
       console.log('[Phase2Chat] Sent secure media:', { type: pendingMediaType, timer: options.timer, viewingMode: options.viewingMode, isMirrored });
     }
-  }, [id, addMessage, pendingMediaType, pendingIsMirrored]);
+  }, [id, localAddMessage, pendingMediaType, pendingIsMirrored]);
 
+  // Loading state while fetching messages
   if (!conversation) {
     return (
       <View style={[styles.container, { paddingTop: insets.top }]}>
@@ -387,7 +480,7 @@ export default function PrivateChatScreen() {
     );
   }
 
-  const renderMessage = useCallback(({ item }: { item: IncognitoMessage }) => {
+  const renderMessage = ({ item }: { item: IncognitoMessage }) => {
     const isOwn = item.senderId === 'me';
     const isSystem = item.senderId === 'system';
     const isTodEvent = item.senderId === 'tod';
@@ -559,7 +652,7 @@ export default function PrivateChatScreen() {
         </View>
       </View>
     );
-  }, [conversation?.participantPhotoUrl, handleDeleteVoiceMessage]);
+  };
 
   return (
     <View style={styles.container}>
@@ -611,30 +704,37 @@ export default function PrivateChatScreen() {
       >
         <View style={styles.chatArea}>
           {/* Messages */}
-          <FlashList
-            ref={flatListRef}
-            data={messages}
-            extraData={now}
-            keyExtractor={(item) => item.id}
-            renderItem={renderMessage}
-            ListEmptyComponent={
-              <View style={styles.emptyContainer}>
-                <Ionicons name="chatbubble-outline" size={40} color={C.textLight} />
-                <Text style={styles.emptyText}>Say hi 👋</Text>
-              </View>
-            }
-            contentContainerStyle={{
-              flexGrow: 1,
-              justifyContent: messages.length > 0 ? 'flex-end' as const : 'center' as const,
-              paddingHorizontal: 16,
-              paddingTop: 16,
-              paddingBottom: composerHeight,
-            }}
-            onScroll={onScroll}
-            scrollEventThrottle={16}
-            keyboardShouldPersistTaps="handled"
-            keyboardDismissMode="interactive"
-          />
+          {backendMessages === undefined ? (
+            // Loading state
+            <View style={styles.loadingContainer}>
+              <ActivityIndicator size="large" color={C.primary} />
+            </View>
+          ) : (
+            <FlashList
+              ref={flatListRef}
+              data={messages}
+              extraData={now}
+              keyExtractor={(item) => item.id}
+              renderItem={renderMessage}
+              ListEmptyComponent={
+                <View style={styles.emptyContainer}>
+                  <Ionicons name="chatbubble-outline" size={40} color={C.textLight} />
+                  <Text style={styles.emptyText}>Say hi 👋</Text>
+                </View>
+              }
+              contentContainerStyle={{
+                flexGrow: 1,
+                justifyContent: messages.length > 0 ? 'flex-end' as const : 'center' as const,
+                paddingHorizontal: 16,
+                paddingTop: 16,
+                paddingBottom: composerHeight,
+              }}
+              onScroll={onScroll}
+              scrollEventThrottle={16}
+              keyboardShouldPersistTaps="handled"
+              keyboardDismissMode="interactive"
+            />
+          )}
 
           {/* Recording indicator */}
           {isRecording && (
@@ -680,7 +780,7 @@ export default function PrivateChatScreen() {
                 textAlignVertical="top"
                 blurOnSubmit={false}
                 maxLength={1000}
-                editable={!isRecording}
+                editable={!isRecording && !isSending}
                 autoComplete="off"
                 textContentType="none"
                 importantForAutofill="noExcludeDescendants"
@@ -688,11 +788,15 @@ export default function PrivateChatScreen() {
 
               {!isRecording && (
                 <TouchableOpacity
-                  style={[styles.sendButton, !text.trim() && styles.sendButtonDisabled]}
+                  style={[styles.sendButton, (!text.trim() || isSending) && styles.sendButtonDisabled]}
                   onPress={handleSend}
-                  disabled={!text.trim()}
+                  disabled={!text.trim() || isSending}
                 >
-                  <Ionicons name="send" size={20} color={text.trim() ? '#FFFFFF' : C.textLight} />
+                  {isSending ? (
+                    <ActivityIndicator size="small" color={C.textLight} />
+                  ) : (
+                    <Ionicons name="send" size={20} color={text.trim() ? '#FFFFFF' : C.textLight} />
+                  )}
                 </TouchableOpacity>
               )}
             </View>
@@ -795,6 +899,11 @@ const styles = StyleSheet.create({
   container: { flex: 1, backgroundColor: C.background },
   keyboardAvoid: { flex: 1 },
   chatArea: { flex: 1 },
+  loadingContainer: {
+    flex: 1,
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
   emptyContainer: {
     flex: 1,
     justifyContent: 'center',

@@ -51,6 +51,7 @@ import type * as phase1DiscoveryAdapter from "../phase1DiscoveryAdapter.js";
 import type * as phase2DiscoveryAdapter from "../phase2DiscoveryAdapter.js";
 import type * as phase2Ranking from "../phase2Ranking.js";
 import type * as photos from "../photos.js";
+import type * as privateConversations from "../privateConversations.js";
 import type * as privateDeletion from "../privateDeletion.js";
 import type * as privateDiscover from "../privateDiscover.js";
 import type * as privateProfiles from "../privateProfiles.js";
@@ -137,6 +138,7 @@ declare const fullApi: ApiFromModules<{
   phase2DiscoveryAdapter: typeof phase2DiscoveryAdapter;
   phase2Ranking: typeof phase2Ranking;
   photos: typeof photos;
+  privateConversations: typeof privateConversations;
   privateDeletion: typeof privateDeletion;
   privateDiscover: typeof privateDiscover;
   privateProfiles: typeof privateProfiles;
