@@ -25,6 +25,7 @@ import { useDemoDmStore } from "@/stores/demoDmStore";
 import { useDemoStore } from "@/stores/demoStore";
 import { trackEvent } from "@/lib/analytics";
 import { Toast } from "@/components/ui/Toast";
+import { getPrimaryPhotoUrl } from "@/lib/photoUtils";
 
 export default function MatchCelebrationScreen() {
   const router = useRouter();
@@ -385,7 +386,7 @@ export default function MatchCelebrationScreen() {
             style={[styles.photoWrapper, { transform: [{ scale: scale1 }] }]}
           >
             <Image
-              source={{ uri: currentUser.photos?.[0]?.url }}
+              source={{ uri: getPrimaryPhotoUrl(currentUser.photos) }}
               style={styles.photo}
             />
             <View style={styles.photoBadge}>
@@ -408,7 +409,7 @@ export default function MatchCelebrationScreen() {
             style={[styles.photoWrapper, { transform: [{ scale: scale2 }] }]}
           >
             <Image
-              source={{ uri: otherUser.photos?.[0]?.url }}
+              source={{ uri: getPrimaryPhotoUrl(otherUser.photos) }}
               style={styles.photo}
             />
             <View style={styles.photoBadge}>

@@ -20,6 +20,7 @@ import { useInteractionStore } from '@/stores/interactionStore';
 import { useAuthStore } from '@/stores/authStore';
 import { isDemoMode } from '@/hooks/useConvex';
 import { asUserId } from '@/convex/id';
+import { getPrimaryPhotoUrl } from '@/lib/photoUtils';
 
 interface PersonItem {
   id: string;
@@ -66,7 +67,7 @@ export default function PersonPickerScreen() {
     const fromProfiles: PersonItem[] = DEMO_PROFILES.map((p) => ({
       id: p._id,
       name: p.name,
-      photoUrl: p.photos[0]?.url || null,
+      photoUrl: getPrimaryPhotoUrl(p.photos),
     }));
 
     const seen = new Set<string>();

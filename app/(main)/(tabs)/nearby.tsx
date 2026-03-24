@@ -78,6 +78,7 @@ import { log } from '@/utils/logger';
 import { Toast } from '@/components/ui/Toast';
 import { Badge } from '@/components/ui/Badge';
 import AsyncStorage from '@react-native-async-storage/async-storage';
+import { getPrimaryPhotoUrl } from '@/lib/photoUtils';
 
 // Key for storing when user last viewed crossed paths
 const CROSSED_PATHS_LAST_SEEN_KEY = 'mira_crossed_paths_last_seen';
@@ -890,7 +891,7 @@ export default function NearbyScreen() {
         publishedAt: Date.now() - index * 60 * 60 * 1000, // Stagger by hours
         distance: offset.distance,
         freshness: 'solid' as const,
-        photoUrl: profile.photos?.[0]?.url ?? null,
+        photoUrl: getPrimaryPhotoUrl(profile.photos),
         isVerified: profile.isVerified ?? false,
         strongPrivacyMode: false,
         hideDistance: false,
