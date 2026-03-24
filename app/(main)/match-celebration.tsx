@@ -30,32 +30,49 @@ import { getPrimaryPhotoUrl } from "@/lib/photoUtils";
 export default function MatchCelebrationScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
-  const { matchId, userId: otherUserId } = useLocalSearchParams<{
+  // P1-001 FIX: Read mode and conversationId for Phase-2 support
+  const { matchId, userId: otherUserId, mode, conversationId } = useLocalSearchParams<{
     matchId: string;
     userId: string;
+    mode?: string;
+    conversationId?: string;
   }>();
-  const { userId } = useAuthStore();
+  const { userId, token } = useAuthStore();
 
-  const isDemo = isDemoMode || matchId?.startsWith("demo_") || userId?.startsWith("demo_");
+  // P1-001 FIX: Detect Phase-2 mode
+  const isPhase2 = mode === 'phase2';
+
+  const isDemo = isDemoMode || matchId?.startsWith("demo_") || matchId?.startsWith("match_") || userId?.startsWith("demo_");
   const viewerId = userId ? (userId as Id<"users">) : null;
   const matchIdValue = matchId ? (matchId as unknown as Id<"matches">) : null;
   const otherUserIdValue = otherUserId
     ? (otherUserId as unknown as Id<"users">)
     : null;
 
-  // Fetch match and other user data (skip in demo mode)
+  // P1-001 FIX: Phase-1 match query - SKIP for Phase-2 (uses privateMatches table)
   const matchQuery = useQuery(
     api.matches.getMatch,
-    !isDemo && matchIdValue && viewerId
+    !isDemo && !isPhase2 && matchIdValue && viewerId
       ? { matchId: matchIdValue, userId: viewerId }
       : "skip",
   );
+
+  // P1-001 FIX: Phase-1 other user query - SKIP for Phase-2
   const otherUserQuery = useQuery(
     api.users.getUserById,
-    !isDemo && otherUserIdValue && viewerId
+    !isDemo && !isPhase2 && otherUserIdValue && viewerId
       ? { userId: otherUserIdValue, viewerId }
       : "skip",
   );
+
+  // P1-001 FIX: Phase-2 profile query - only for Phase-2
+  const phase2ProfileQuery = useQuery(
+    api.privateDiscover.getProfileByUserId,
+    !isDemo && isPhase2 && otherUserIdValue && viewerId
+      ? { userId: otherUserIdValue, viewerId }
+      : "skip",
+  );
+
   const currentUserQuery = useQuery(
     api.users.getCurrentUser,
     !isDemo && viewerId ? { userId: viewerId } : "skip",
@@ -70,8 +87,13 @@ export default function MatchCelebrationScreen() {
       : { name: "Someone", photos: [{ url: "https://via.placeholder.com/400" }] };
   }, [isDemo, otherUserId]);
 
-  const match = isDemo ? { _id: matchId } : matchQuery;
-  const otherUser = isDemo ? demoOtherUser : otherUserQuery;
+  const match = isDemo ? { _id: matchId } : (isPhase2 ? { _id: matchId } : matchQuery);
+  // P1-001 FIX: Use Phase-2 profile query for Phase-2 matches
+  const otherUser = isDemo
+    ? demoOtherUser
+    : isPhase2
+      ? (phase2ProfileQuery ? { name: phase2ProfileQuery.name, photos: phase2ProfileQuery.photos } : null)
+      : otherUserQuery;
   const demoCurrentUser = isDemo ? getDemoCurrentUser() : null;
   const currentUser = isDemo
     ? demoCurrentUser
@@ -225,10 +247,7 @@ export default function MatchCelebrationScreen() {
     // handler. Just pre-fill a draft "Hi" and navigate to the chat.
     if (isDemo) {
       const demoConversationId = `demo_convo_${otherUserId}`;
-      if (__DEV__) console.log("[SayHi] demo mode — convoId=", demoConversationId);
-
-      // Pre-fill draft so the chat input shows "Hi" ready to send.
-      useDemoDmStore.getState().setDraft(demoConversationId, "Hi");
+      if (__DEV__) console.log("[SayHi] demo mode — convoId=", demoConversationId, "isPhase2=", isPhase2);
 
       // Clear the match celebration event.
       useDemoStore.getState().setNewMatchUserId(null);
@@ -239,6 +258,26 @@ export default function MatchCelebrationScreen() {
         return;
       }
       hasNavigatedRef.current = true;
+
+      // P1-001 FIX: Phase-2 demo mode navigates to incognito-chat
+      if (isPhase2) {
+        router.dismiss();
+        InteractionManager.runAfterInteractions(() => {
+          if (!mountedRef.current) return;
+          router.push("/(main)/(private)/(tabs)/chats" as any);
+          const t = setTimeout(() => {
+            if (!mountedRef.current) return;
+            router.push(`/(main)/incognito-chat?id=${demoConversationId}` as any);
+          }, 50);
+          navTimeoutRefs.current.push(t);
+        });
+        sendingRef.current = false;
+        return;
+      }
+
+      // Phase-1 demo mode
+      // Pre-fill draft so the chat input shows "Hi" ready to send.
+      useDemoDmStore.getState().setDraft(demoConversationId, "Hi");
 
       // NAV-RACE-FIX: Use InteractionManager for safer navigation sequencing
       // Stack becomes: Messages list → Chat, so router.back() from chat
@@ -258,6 +297,36 @@ export default function MatchCelebrationScreen() {
       return;
     }
 
+    // P1-001 FIX: Phase-2 flow - navigate directly to incognito-chat
+    // Conversation already created by privateSwipes.swipe mutation
+    if (isPhase2 && conversationId) {
+      if (__DEV__) console.log("[SayHi] Phase-2 mode — conversationId=", conversationId);
+
+      // E1: Single-fire navigation guard
+      if (hasNavigatedRef.current) {
+        sendingRef.current = false;
+        return;
+      }
+      hasNavigatedRef.current = true;
+
+      // Navigate to Phase-2 incognito chat (via Private tab)
+      router.dismiss();
+      InteractionManager.runAfterInteractions(() => {
+        if (!mountedRef.current) return;
+        // Go to Private chats tab first
+        router.push("/(main)/(private)/(tabs)/chats" as any);
+        const t = setTimeout(() => {
+          if (!mountedRef.current) return;
+          // Then open the specific conversation
+          router.push(`/(main)/incognito-chat?id=${conversationId}` as any);
+        }, 50);
+        navTimeoutRefs.current.push(t);
+      });
+      sendingRef.current = false;
+      return;
+    }
+
+    // Phase-1 flow continues below
     if (!matchIdValue || !viewerId) {
       Toast.show("Something went wrong. Please go back and try again.");
       sendingRef.current = false;
@@ -386,7 +455,7 @@ export default function MatchCelebrationScreen() {
             style={[styles.photoWrapper, { transform: [{ scale: scale1 }] }]}
           >
             <Image
-              source={{ uri: getPrimaryPhotoUrl(currentUser.photos) }}
+              source={{ uri: getPrimaryPhotoUrl(currentUser.photos) || "https://via.placeholder.com/400" }}
               style={styles.photo}
             />
             <View style={styles.photoBadge}>
@@ -409,7 +478,7 @@ export default function MatchCelebrationScreen() {
             style={[styles.photoWrapper, { transform: [{ scale: scale2 }] }]}
           >
             <Image
-              source={{ uri: getPrimaryPhotoUrl(otherUser.photos) }}
+              source={{ uri: getPrimaryPhotoUrl(otherUser.photos) || "https://via.placeholder.com/400" }}
               style={styles.photo}
             />
             <View style={styles.photoBadge}>

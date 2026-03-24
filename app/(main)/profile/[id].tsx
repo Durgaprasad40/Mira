@@ -241,8 +241,11 @@ export default function ViewProfileScreen() {
           });
 
       if (result.isMatch) {
+        // P1-001 FIX: Pass conversationId for Phase-2 so match-celebration can navigate correctly
         const modeParam = isPhase2 ? '&mode=phase2' : '';
-        safePush(router, `/(main)/match-celebration?matchId=${result.matchId}&userId=${userId}${modeParam}` as any, 'profile->matchCelebration');
+        const convoId = (result as any).conversationId;
+        const convoParam = isPhase2 && convoId ? `&conversationId=${convoId}` : '';
+        safePush(router, `/(main)/match-celebration?matchId=${result.matchId}&userId=${userId}${modeParam}${convoParam}` as any, 'profile->matchCelebration');
       } else {
         router.back();
       }
