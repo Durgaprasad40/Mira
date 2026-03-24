@@ -62,6 +62,14 @@ interface PrivateChatState {
   removeConversation: (conversationId: string) => void;
   /** Remove a conversation by participant ID (for block/unmatch) */
   removeConversationByParticipant: (participantId: string) => void;
+  /**
+   * P1-003 FIX: Reconcile local conversations with backend truth.
+   * - Adds new backend conversations missing locally
+   * - Updates existing conversations with backend metadata
+   * - Removes local conversations no longer in backend
+   * - Cleans up orphaned messages for removed conversations
+   */
+  reconcileConversations: (backendConversations: IncognitoConversation[]) => void;
 
   // Truth or Dare
   pendingDares: PendingDare[];
@@ -208,6 +216,80 @@ export const usePrivateChatStore = create<PrivateChatState>()((set, get) => ({
         conversations: s.conversations.filter((c) => c.participantId !== participantId),
         messages: remainingMessages,
         unlockedUsers: s.unlockedUsers.filter((u) => u.id !== participantId),
+      };
+    }),
+
+  // P1-003 FIX: Full bidirectional sync with backend
+  reconcileConversations: (backendConversations) =>
+    set((s) => {
+      const backendIds = new Set(backendConversations.map((c) => c.id));
+      const localIds = new Set(s.conversations.map((c) => c.id));
+
+      // Find conversations to remove (in local but not in backend)
+      const toRemove = s.conversations.filter((c) => !backendIds.has(c.id));
+
+      // Find conversations to add (in backend but not in local)
+      const toAdd = backendConversations.filter((c) => !localIds.has(c.id));
+
+      // Find conversations to update (in both, update metadata from backend)
+      const toUpdateIds = new Set(
+        backendConversations
+          .filter((c) => localIds.has(c.id))
+          .map((c) => c.id)
+      );
+
+      // Early exit if no changes needed
+      if (toRemove.length === 0 && toAdd.length === 0 && toUpdateIds.size === 0) {
+        return s;
+      }
+
+      // Build new conversations array
+      let updatedConversations = s.conversations
+        // Remove conversations no longer in backend
+        .filter((c) => backendIds.has(c.id))
+        // Update existing conversations with backend metadata
+        .map((c) => {
+          if (!toUpdateIds.has(c.id)) return c;
+          const backendConvo = backendConversations.find((bc) => bc.id === c.id);
+          if (!backendConvo) return c;
+          // Update backend-authoritative fields (lastMessage, unreadCount, etc.)
+          return {
+            ...c,
+            lastMessage: backendConvo.lastMessage,
+            lastMessageAt: backendConvo.lastMessageAt,
+            unreadCount: backendConvo.unreadCount,
+            participantName: backendConvo.participantName,
+            participantPhotoUrl: backendConvo.participantPhotoUrl,
+            participantAge: backendConvo.participantAge,
+          };
+        });
+
+      // Add new conversations from backend
+      updatedConversations = [...toAdd, ...updatedConversations];
+
+      // Clean up messages for removed conversations
+      const remainingMessages = { ...s.messages };
+      const removedParticipantIds: string[] = [];
+      for (const removed of toRemove) {
+        delete remainingMessages[removed.id];
+        removedParticipantIds.push(removed.participantId);
+      }
+
+      // Clean up unlocked users for removed conversations
+      const updatedUnlockedUsers = s.unlockedUsers.filter(
+        (u) => !removedParticipantIds.includes(u.id)
+      );
+
+      if (__DEV__) {
+        console.log(
+          `[P1-003 Reconcile] added=${toAdd.length} removed=${toRemove.length} updated=${toUpdateIds.size}`
+        );
+      }
+
+      return {
+        conversations: updatedConversations,
+        messages: remainingMessages,
+        unlockedUsers: updatedUnlockedUsers,
       };
     }),
 

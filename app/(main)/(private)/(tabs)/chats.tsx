@@ -69,6 +69,7 @@ export default function ChatsScreen() {
   const blockUser = usePrivateChatStore((s) => s.blockUser);
   const createConversation = usePrivateChatStore((s) => s.createConversation);
   const unlockUser = usePrivateChatStore((s) => s.unlockUser);
+  const reconcileConversations = usePrivateChatStore((s) => s.reconcileConversations);
   const pruneDeletedMessages = usePrivateChatStore((s) => s.pruneDeletedMessages);
   const [reportTarget, setReportTarget] = useState<{ id: string; name: string } | null>(null);
 
@@ -91,45 +92,35 @@ export default function ChatsScreen() {
     currentUserId ? { authUserId: currentUserId } : 'skip'
   );
 
-  // Rehydrate local store from Phase-2 backend conversations on mount/update
+  // P1-003 FIX: Bidirectional sync from Phase-2 backend to local store
+  // Reconciles additions, updates, AND removals (unmatch/block/delete)
   useEffect(() => {
-    if (!backendConversations || backendConversations.length === 0) return;
+    // Handle empty backend gracefully - reconcile with empty array to clear stale local data
+    if (!backendConversations) return;
 
-    // Sync backend conversations to local store
-    backendConversations.forEach((bc) => {
-      // Use backend conversation ID to check for existing
-      const existingLocal = conversations.find((c) => c.id === bc.id);
-      if (!existingLocal) {
+    // Transform backend conversations to local format
+    const normalizedBackend: import('@/types').IncognitoConversation[] = backendConversations
+      .filter((bc) => isPhase2Source(bc.connectionSource as string))
+      .map((bc) => {
         const source = bc.connectionSource as string;
-        // Only sync Phase-2 connections
-        if (isPhase2Source(source)) {
-          // Unlock the user (participantId is the direct user ID from Phase-2 query)
-          unlockUser({
-            id: bc.participantId,
-            username: bc.participantName,
-            photoUrl: bc.participantPhotoUrl || '',
-            age: bc.participantAge || 0,
-            source: normalizeConnectionSource(source) as 'tod' | 'room',
-            unlockedAt: bc.createdAt,
-          });
-          // Create local conversation with backend ID
-          createConversation({
-            id: bc.id,
-            participantId: bc.participantId,
-            participantName: bc.participantName,
-            participantAge: bc.participantAge || 0,
-            participantPhotoUrl: bc.participantPhotoUrl || '',
-            lastMessage: bc.lastMessage || 'Say hi!',
-            lastMessageAt: bc.lastMessageAt,
-            unreadCount: bc.unreadCount,
-            connectionSource: normalizeConnectionSource(source),
-            // Preserve super_like info for UI badges
-            matchSource: source === 'desire_super_like' ? 'super_like' : undefined,
-          });
-        }
-      }
-    });
-  }, [backendConversations, conversations, unlockUser, createConversation]);
+        return {
+          id: bc.id as string,
+          participantId: bc.participantId as string,
+          participantName: bc.participantName,
+          participantAge: bc.participantAge || 0,
+          participantPhotoUrl: bc.participantPhotoUrl || '',
+          lastMessage: bc.lastMessage || 'Say hi!',
+          lastMessageAt: bc.lastMessageAt,
+          unreadCount: bc.unreadCount,
+          connectionSource: normalizeConnectionSource(source),
+          // Preserve super_like info for UI badges
+          matchSource: source === 'desire_super_like' ? 'super_like' as const : undefined,
+        };
+      });
+
+    // Single reconciliation pass: add/update/remove
+    reconcileConversations(normalizedBackend);
+  }, [backendConversations, reconcileConversations]);
 
   // Auto-cleanup: Prune expired messages when entering Phase-2 messages tab
   useEffect(() => {
