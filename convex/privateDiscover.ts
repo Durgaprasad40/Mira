@@ -58,9 +58,10 @@ export const getProfiles = query({
         .query('blocks')
         .withIndex('by_blocked', (q) => q.eq('blockedUserId', viewerUserId))
         .collect(),
-      // CONVERSATION PARTNER EXCLUSION: Users with existing chats must not reappear
+      // P2-003 FIX: Use Phase-2 privateConversationParticipants table (not Phase-1 conversationParticipants)
+      // Users with existing Phase-2 chats must not reappear in Desire Land
       ctx.db
-        .query('conversationParticipants')
+        .query('privateConversationParticipants')
         .withIndex('by_user', (q) => q.eq('userId', viewerUserId))
         .collect(),
       // P0-001 FIX: Get all users this viewer has already swiped on (like/pass/super_like)
@@ -82,7 +83,8 @@ export const getProfiles = query({
       mySwipes.map((s) => s.toUserId as string)
     );
 
-    // CONVERSATION PARTNER EXCLUSION: Build set of users with existing message threads
+    // P2-003 FIX: Build set of users with existing Phase-2 message threads
+    // Uses privateConversations (Phase-2) via the privateConversationParticipants lookup above
     const conversationPartnerIds = new Set<string>();
     if (myConversationParticipations.length > 0) {
       const conversations = await Promise.all(
@@ -143,7 +145,7 @@ export const getProfiles = query({
         !deletedUserIds.has(p.userId as string) &&
         // P0-001 FIX: Already-swiped users must NEVER reappear
         !alreadySwipedUserIds.has(p.userId as string) &&
-        // CONVERSATION PARTNER EXCLUSION: Users with existing chat threads must not reappear
+        // P2-003 FIX: Users with existing Phase-2 chat threads must not reappear
         !conversationPartnerIds.has(p.userId as string)
     );
 
