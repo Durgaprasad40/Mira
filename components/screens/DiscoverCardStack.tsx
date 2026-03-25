@@ -34,8 +34,9 @@ import { useDiscoverStore } from "@/stores/discoverStore";
 import { useFilterStore } from "@/stores/filterStore";
 import { ProfileCard, SwipeOverlay } from "@/components/cards";
 import { isDemoMode } from "@/hooks/useConvex";
+import { getDiscoverPrefetch, markPrefetchUsed, clearUsedPrefetch } from "@/lib/discoverPrefetch";
 import { useNotifications } from "@/hooks/useNotifications";
-import { DEMO_PROFILES, getDemoCurrentUser, DEMO_INCOGNITO_PROFILES } from "@/lib/demoData";
+import { DEMO_PROFILES, DEMO_INCOGNITO_PROFILES } from "@/lib/demoData";
 import { useDemoStore } from "@/stores/demoStore";
 import { useBlockStore } from "@/stores/blockStore";
 import { router } from "expo-router";
@@ -47,8 +48,6 @@ import { asUserId } from "@/convex/id";
 import { ProfileData, toProfileData } from "@/lib/profileData";
 import { rankProfiles } from "@/lib/rankProfiles";
 import { sortProfilesByScore } from "@/lib/profileRanking";
-import { getProfileCompleteness, NUDGE_MESSAGES } from "@/lib/profileCompleteness";
-import { ProfileNudge } from "@/components/ui/ProfileNudge";
 import { trackEvent } from "@/lib/analytics";
 import { Toast } from "@/components/ui/Toast";
 // REMOVED: usePrivateChatStore - local conversation creation disabled, backend handles this
@@ -103,6 +102,15 @@ interface StarBurstAnimationProps {
 }
 
 function StarBurstAnimation({ visible, onComplete }: StarBurstAnimationProps) {
+  // P1-002 FIX: Track mounted state to prevent stale callback after unmount
+  const isMountedRef = useRef(true);
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+    };
+  }, []);
+
   const animations = useRef(
     Array.from({ length: STAR_COUNT }, () => ({
       scale: new RNAnimated.Value(0),
@@ -165,7 +173,10 @@ function StarBurstAnimation({ visible, onComplete }: StarBurstAnimationProps) {
 
     const compositeAnimation = RNAnimated.parallel(starAnimations);
     compositeAnimation.start(() => {
-      onComplete();
+      // P1-002 FIX: Only call onComplete if still mounted
+      if (isMountedRef.current) {
+        onComplete();
+      }
     });
 
     // DL-014: Stop animation on unmount to prevent stale callback
@@ -362,6 +373,13 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   const releaseSwipeLock = useCallback((id: number): void => {
     if (swipeIdRef.current === id) {
       swipeLockRef.current = false;
+      // P2-001 FIX: Apply pending filter reset after swipe completes
+      if (pendingFilterResetRef.current) {
+        pendingFilterResetRef.current = false;
+        setIndex(0);
+        visibleQueueRef.current = [];
+        consumedIdsRef.current.clear();
+      }
     }
     // else: stale callback from old swipe — ignore silently
   }, []);
@@ -438,6 +456,43 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   );
   const phase1Profiles = useQuery(api.discover.getDiscoverProfiles, discoverArgs);
 
+  // PERF: Consume prefetched Discover profiles (from index.tsx parallel fetch)
+  // This provides instant first render while useQuery subscription is setting up.
+  // Ref ensures we only check for prefetch once (safe for StrictMode double-render).
+  const prefetchCheckedRef = useRef(false);
+  const prefetchResultRef = useRef<any[] | null>(null);
+
+  // Check for prefetch on first render only (Phase-1, non-demo, no external profiles)
+  if (!prefetchCheckedRef.current) {
+    prefetchCheckedRef.current = true;
+    if (!isPhase2 && userId && !isDemoMode && !skipInternalQuery) {
+      const authVersion = useAuthStore.getState().authVersion;
+      const prefetched = getDiscoverPrefetch(userId, authVersion);
+      if (prefetched !== null) {
+        prefetchResultRef.current = prefetched;
+        markPrefetchUsed();
+        if (__DEV__) {
+          console.log('[PREFETCH] Using prefetched profiles:', prefetched.length);
+        }
+      }
+    }
+  }
+
+  // Use prefetch while useQuery is loading (undefined), then switch to query result
+  const phase1ProfilesWithPrefetch = phase1Profiles ?? prefetchResultRef.current;
+
+  // Clear prefetch cache once useQuery returns real data (subscription is active)
+  useEffect(() => {
+    if (phase1Profiles !== undefined && prefetchResultRef.current !== null) {
+      // Query has returned - clear prefetch to free memory
+      clearUsedPrefetch();
+      prefetchResultRef.current = null;
+      if (__DEV__) {
+        console.log('[PREFETCH] Subscription active, cleared prefetch cache');
+      }
+    }
+  }, [phase1Profiles]);
+
   // Phase-2 private discover query args (skip if Phase-1 mode)
   // CRITICAL: This queries userPrivateProfiles table which requires isSetupComplete=true
   const privateDiscoverArgs = useMemo(
@@ -451,7 +506,11 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   const phase2Profiles = useQuery(api.privateDiscover.getProfiles, privateDiscoverArgs);
 
   // Use the correct profiles based on mode
-  const convexProfiles = isPhase2 ? phase2Profiles : phase1Profiles;
+  // PERF: For Phase-1, use prefetch-aware variable that provides data during initial query loading
+  const convexProfiles = isPhase2 ? phase2Profiles : phase1ProfilesWithPrefetch;
+  // P1-003 FIX: Track explicit loading state to distinguish undefined (loading) from [] (empty results)
+  // useQuery returns: undefined = still loading, [] = loaded but empty
+  const isPhase2QueryLoading = isPhase2 && !isDemoMode && phase2Profiles === undefined && privateDiscoverArgs !== "skip";
   const profilesSafe = convexProfiles ?? EMPTY_ARRAY;
 
   // CRITICAL: useMemo prevents new array/object references on every render.
@@ -617,6 +676,8 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
 
   // Reset index when filter changes (always show first matching profile)
   const prevFilterRef = useRef<string>(JSON.stringify([]));
+  // P2-001 FIX: Track pending filter change to apply after swipe completes
+  const pendingFilterResetRef = useRef<boolean>(false);
   useEffect(() => {
     const filterKey = JSON.stringify(intentFilters);
     if (isPhase2 && prevFilterRef.current !== filterKey) {
@@ -626,6 +687,10 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
         // Also reset queue when filter changes
         visibleQueueRef.current = [];
         consumedIdsRef.current.clear();
+        pendingFilterResetRef.current = false;
+      } else {
+        // P2-001 FIX: Mark that filter changed during swipe, will apply after swipe completes
+        pendingFilterResetRef.current = true;
       }
       // Track Phase-2 intent filter selection (use first key for backward compat)
       trackEvent({ name: 'phase2_intent_filter_selected', intentKey: intentFilters[0] ?? 'all' });
@@ -760,28 +825,8 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
     consumedIdsRef.current.clear();
   }, [profiles.length, externalProfiles]);
 
-  // Profile completeness nudge (main Discover only, not explore categories)
-  const { dismissedNudges, dismissNudge } = useDemoStore(useShallow((s) => ({
-    dismissedNudges: s.dismissedNudges,
-    dismissNudge: s.dismissNudge,
-  })));
-  const currentUserForNudge = useQuery(
-    api.users.getCurrentUser,
-    !isDemoMode && convexUserId ? { userId: convexUserId } : "skip" as const,
-  );
-  const currentUser = isDemoMode ? getDemoCurrentUser() : currentUserForNudge;
-  const nudgeStatus = currentUser
-    ? getProfileCompleteness({
-        photoCount: Array.isArray(currentUser.photos) ? currentUser.photos.length : 0,
-        bioLength: currentUser.bio?.length ?? 0,
-      })
-    : 'complete';
-  const showNudge =
-    !hideHeader &&
-    !externalProfiles &&
-    nudgeStatus !== 'complete' &&
-    !dismissedNudges.includes('discover');
-  const NUDGE_H = 38;
+  // Profile completion nudge DISABLED on Discover screen
+  // Nudges should only appear on Profile/Edit Profile screens (not swiping context)
 
   // Phase-1 swipe mutation (shared likes.ts)
   const swipeMutation = useMutation(api.likes.swipe);
@@ -1044,6 +1089,8 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
     async (direction: "left" | "right" | "up", message?: string, swipeId?: number) => {
       // RACE FIX: Use provided swipeId, or current if not provided (backward compat)
       const activeSwipeId = swipeId ?? swipeIdRef.current;
+      // P1-001 FIX: Track if release was deferred to prevent double-release in finally
+      let releaseDeferredToCallback = false;
 
       // Guard: unmounted or unfocused
       if (!mountedRef.current || !isFocusedRef.current) { releaseSwipeLock(activeSwipeId); return; }
@@ -1127,6 +1174,8 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
             // Defer navigation so advanceCard's setState commits first
             // RACE FIX: Capture swipeId in closure so deferred callback releases correct lock
             const deferredSwipeId = activeSwipeId;
+            // P1-001 FIX: Mark that release will happen in deferred callback
+            releaseDeferredToCallback = true;
             InteractionManager.runAfterInteractions(() => {
               if (!mountedRef.current || !isFocusedRef.current) {
                 releaseSwipeLock(deferredSwipeId);
@@ -1205,6 +1254,8 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
           // 3B-4: Defer swipe lock release until after navigation initiated
           // RACE FIX: Capture swipeId in closure so deferred callback releases correct lock
           const deferredSwipeId = activeSwipeId;
+          // P1-001 FIX: Mark that release will happen in deferred callback
+          releaseDeferredToCallback = true;
           InteractionManager.runAfterInteractions(() => {
             if (!mountedRef.current || !isFocusedRef.current) {
               releaseSwipeLock(deferredSwipeId);
@@ -1235,7 +1286,10 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
           Toast.show("Something went wrong. Please try again.");
         }
       } finally {
-        releaseSwipeLock(activeSwipeId);
+        // P1-001 FIX: Only release here if not deferred to callback
+        if (!releaseDeferredToCallback) {
+          releaseSwipeLock(activeSwipeId);
+        }
       }
     },
     [convexUserId, swipeMutation, phase2SwipeMutation, isPhase2, advanceCard, hasReachedLikeLimit, hasReachedStandOutLimit, incrementLikes, incrementStandOuts, demo.recordSwipe, incSwipe, maybeTriggerRandomMatch, releaseSwipeLock],
@@ -1298,6 +1352,15 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   const animateSwipeRef = useRef(animateSwipe);
   animateSwipeRef.current = animateSwipe;
 
+  // P0-001 FIX: Stable ref for handlePanEnd to prevent panGesture recreation on dependency changes
+  const handlePanEndRef = useRef<(dx: number, dy: number, vx: number, vy: number) => void>(() => {});
+
+  // WORKLET FIX: Stable wrapper that never changes identity - avoids "Tried to modify key `current`" warning
+  // The wrapper reads handlePanEndRef.current at call time, so the ref object isn't captured in worklet closure
+  const onPanEndWrapper = useCallback((dx: number, dy: number, vx: number, vy: number) => {
+    handlePanEndRef.current(dx, dy, vx, vy);
+  }, []); // Empty deps - this function identity never changes
+
   const thresholdX = SCREEN_WIDTH * SWIPE_CONFIG.SWIPE_THRESHOLD_X;
   const thresholdY = SCREEN_HEIGHT * SWIPE_CONFIG.SWIPE_THRESHOLD_Y;
   const velocityX = SWIPE_CONFIG.SWIPE_VELOCITY_X;
@@ -1337,6 +1400,9 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
     resetPosition();
   }, [thresholdX, thresholdY, velocityX, velocityY, resetPosition, hasReachedStandOutLimit, standOutsRemaining]);
 
+  // P0-001 FIX: Keep handlePanEndRef in sync with latest handlePanEnd
+  handlePanEndRef.current = handlePanEnd;
+
   // Gesture.Pan() runs on UI thread - replaces PanResponder for better performance
   const panGesture = useMemo(() =>
     Gesture.Pan()
@@ -1369,7 +1435,8 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       })
       .onEnd((event) => {
         // Handle pan end via JS thread (threshold checks, navigation, etc.)
-        runOnJS(handlePanEnd)(
+        // WORKLET FIX: Pass stable wrapper function - avoids capturing ref object in worklet closure
+        runOnJS(onPanEndWrapper)(
           event.translationX,
           event.translationY,
           event.velocityX / 1000, // Convert to roughly same scale as old PanResponder
@@ -1379,7 +1446,8 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       .onFinalize(() => {
         // Gesture was cancelled/interrupted
       }),
-    [panAX, panAY, panBX, panBY, activeSlotShared, overlayOpacity, updateOverlayDirection, handlePanEnd]
+    // P0-001 FIX: Using stable ref pattern - onPanEndWrapper has empty deps so it never changes
+    [panAX, panAY, panBX, panBY, activeSlotShared, overlayOpacity, updateOverlayDirection, onPanEndWrapper]
   );
 
   // Handle stand-out result from route screen
@@ -1441,7 +1509,8 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   }, [standOutResult, acquireSwipeLock, releaseSwipeLock, overlayOpacity, panAY, panBY]);
 
   // Loading state — non-demo only; skip when using external profiles
-  const isDiscoverLoading = !isDemoMode && !externalProfiles && !convexProfiles;
+  // P1-003 FIX: Include explicit Phase-2 query loading check to prevent false empty state
+  const isDiscoverLoading = !isDemoMode && !externalProfiles && (!convexProfiles || isPhase2QueryLoading);
   if (isDiscoverLoading) {
     return (
       <LoadingGuard
@@ -1479,18 +1548,14 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
               <Ionicons name="options-outline" size={22} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
             </TouchableOpacity>
             <Text style={[styles.headerLogo, dark && { color: INCOGNITO_COLORS.primary }]}>mira</Text>
-            {!isPhase2 ? (
-              <TouchableOpacity style={styles.headerBtn} onPress={() => setShowNotificationPopover(true)}>
-                <Ionicons name="notifications-outline" size={22} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
-                {unseenCount > 0 && (
-                  <View style={styles.bellBadge}>
-                    <Text style={styles.bellBadgeText}>{unseenCount > 9 ? "9+" : unseenCount}</Text>
-                  </View>
-                )}
-              </TouchableOpacity>
-            ) : (
-              <View style={styles.headerBtn} />
-            )}
+            <TouchableOpacity style={styles.headerBtn} onPress={() => setShowNotificationPopover(true)}>
+              <Ionicons name="notifications-outline" size={22} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
+              {unseenCount > 0 && (
+                <View style={styles.bellBadge}>
+                  <Text style={styles.bellBadgeText}>{unseenCount > 9 ? "9+" : unseenCount}</Text>
+                </View>
+              )}
+            </TouchableOpacity>
           </View>
         )}
         <View style={[styles.center, { flex: 1 }]}>
@@ -1589,18 +1654,14 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
               <Ionicons name="options-outline" size={22} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
             </TouchableOpacity>
             <Text style={[styles.headerLogo, dark && { color: INCOGNITO_COLORS.primary }]}>mira</Text>
-            {!isPhase2 ? (
-              <TouchableOpacity style={styles.headerBtn} onPress={() => setShowNotificationPopover(true)}>
-                <Ionicons name="notifications-outline" size={22} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
-                {unseenCount > 0 && (
-                  <View style={styles.bellBadge}>
-                    <Text style={styles.bellBadgeText}>{unseenCount > 9 ? "9+" : unseenCount}</Text>
-                  </View>
-                )}
-              </TouchableOpacity>
-            ) : (
-              <View style={styles.headerBtn} />
-            )}
+            <TouchableOpacity style={styles.headerBtn} onPress={() => setShowNotificationPopover(true)}>
+              <Ionicons name="notifications-outline" size={22} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
+              {unseenCount > 0 && (
+                <View style={styles.bellBadge}>
+                  <Text style={styles.bellBadgeText}>{unseenCount > 9 ? "9+" : unseenCount}</Text>
+                </View>
+              )}
+            </TouchableOpacity>
           </View>
         )}
         <View style={[styles.center, { flex: 1 }]}>
@@ -1650,19 +1711,14 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
             <Ionicons name="options-outline" size={22} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
           </TouchableOpacity>
           <Text style={[styles.headerLogo, dark && { color: INCOGNITO_COLORS.primary }]}>mira</Text>
-          {/* Hide bell in Phase 2 — notifications are Phase 1 only */}
-          {!isPhase2 ? (
-            <TouchableOpacity style={styles.headerBtn} onPress={() => setShowNotificationPopover(true)}>
-              <Ionicons name="notifications-outline" size={22} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
-              {unseenCount > 0 && (
-                <View style={styles.bellBadge}>
-                  <Text style={styles.bellBadgeText}>{unseenCount > 9 ? "9+" : unseenCount}</Text>
-                </View>
-              )}
-            </TouchableOpacity>
-          ) : (
-            <View style={styles.headerBtn} />
-          )}
+          <TouchableOpacity style={styles.headerBtn} onPress={() => setShowNotificationPopover(true)}>
+            <Ionicons name="notifications-outline" size={22} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
+            {unseenCount > 0 && (
+              <View style={styles.bellBadge}>
+                <Text style={styles.bellBadgeText}>{unseenCount > 9 ? "9+" : unseenCount}</Text>
+              </View>
+            )}
+          </TouchableOpacity>
         </View>
 
         <View style={styles.limitContainer}>
@@ -1688,7 +1744,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   }
 
   // Layout: card fills from header to bottom of content area
-  const cardTop = hideHeader ? 0 : insets.top + HEADER_H + (showNudge ? NUDGE_H : 0);
+  const cardTop = hideHeader ? 0 : insets.top + HEADER_H;
   const actionRowBottom = Math.max(insets.bottom, 12);
   // Leave room for the action bar so card content (bio) isn't hidden behind the buttons.
   const cardBottom = actionRowBottom + 72;
@@ -1705,31 +1761,17 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
             <Ionicons name="options-outline" size={22} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
           </TouchableOpacity>
           <Text style={[styles.headerLogo, dark && { color: INCOGNITO_COLORS.primary }]}>mira</Text>
-          {/* Hide bell in Phase 2 — notifications are Phase 1 only */}
-          {!isPhase2 ? (
-            <TouchableOpacity style={styles.headerBtn} onPress={() => setShowNotificationPopover(true)}>
-              <Ionicons name="notifications-outline" size={22} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
-              {unseenCount > 0 && (
-                <View style={styles.bellBadge}>
-                  <Text style={styles.bellBadgeText}>{unseenCount > 9 ? "9+" : unseenCount}</Text>
-                </View>
-              )}
-            </TouchableOpacity>
-          ) : (
-            <View style={styles.headerBtn} />
-          )}
+          <TouchableOpacity style={styles.headerBtn} onPress={() => setShowNotificationPopover(true)}>
+            <Ionicons name="notifications-outline" size={22} color={dark ? INCOGNITO_COLORS.text : COLORS.text} />
+            {unseenCount > 0 && (
+              <View style={styles.bellBadge}>
+                <Text style={styles.bellBadgeText}>{unseenCount > 9 ? "9+" : unseenCount}</Text>
+              </View>
+            )}
+          </TouchableOpacity>
         </View>
       )}
 
-
-      {/* Profile completeness nudge */}
-      {/* DL-015: Runtime guard with optional chaining for safety */}
-      {showNudge && NUDGE_MESSAGES[nudgeStatus]?.discover && (
-        <ProfileNudge
-          message={NUDGE_MESSAGES[nudgeStatus].discover}
-          onDismiss={() => dismissNudge('discover')}
-        />
-      )}
 
       {/* Card Area (fills between header and tab bar) */}
       <View style={[styles.cardArea, { top: cardTop, bottom: cardBottom }]} pointerEvents="box-none">

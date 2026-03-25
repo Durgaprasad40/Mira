@@ -13,6 +13,7 @@ import { api } from "@/convex/_generated/api";
 import type { Id } from "@/convex/_generated/dataModel";
 import { COLORS } from "@/lib/constants";
 import { markTiming, markDuration } from "@/utils/startupTiming";
+import { startDiscoverPrefetch, clearDiscoverPrefetch } from "@/lib/discoverPrefetch";
 
 // =============================================================================
 // BOOT STATE MACHINE
@@ -168,6 +169,12 @@ export default function Index() {
         // Live mode decision
         const hasValidToken = authData.token && authData.token.trim().length > 0;
         if (hasValidToken && authData.userId) {
+          // PERF: Start prefetching Discover profiles in parallel with validation
+          // This eliminates the serial wait: validate → navigate → mount → query
+          // Instead: validate + prefetch (parallel) → navigate → mount → render immediately
+          const currentAuthVersion = useAuthStore.getState().authVersion;
+          startDiscoverPrefetch(authData.userId, currentAuthVersion);
+
           setBootState("VALIDATING");
         } else {
           setBootState("NO_AUTH");
@@ -238,9 +245,10 @@ export default function Index() {
         }
 
         if (!status) {
-          // User not found in database - clear stale auth
+          // User not found in database - clear stale auth and prefetch
           if (__DEV__) console.log("[BOOT] User not found (null status), clearing auth");
           await clearAuthBootCache();
+          clearDiscoverPrefetch();
           setBootState("INVALID");
           return;
         }

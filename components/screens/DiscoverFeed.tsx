@@ -469,7 +469,7 @@ export function DiscoverFeed({ mode = "main", theme = "light", onOpenProfile }: 
         >
           <Text style={[styles.headerButtonText, dark && { color: TC.text }]}>Preferences</Text>
         </TouchableOpacity>
-        <Text style={[styles.headerTitle, dark && { color: TC.text }]}>{dark ? "Desire Land" : "Discover"}</Text>
+        <Text style={[styles.headerTitle, dark && { color: TC.text }]}>{dark ? "Deep Connect" : "Discover"}</Text>
         <View style={styles.headerRight}>
           <TouchableOpacity
             style={styles.headerIcon}
