@@ -2463,7 +2463,6 @@ export const getMyReports = query({
  * - deviceFingerprints
  * - behaviorFlags
  * - userStrikes
- * - revealRequests
  * - todAnswers
  * - todConnectRequests
  * - todPrivateMedia
@@ -2549,10 +2548,7 @@ export const devWipeAllUserData = mutation({
     await wipeTable('confessionReactions');
     await wipeTable('confessionNotifications');
 
-    // 7. Reveal requests
-    await wipeTable('revealRequests');
-
-    // 8. Chat rooms
+    // 7. Chat rooms
     await wipeTable('chatRoomMembers');
 
     // 9. Verification and security

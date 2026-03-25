@@ -275,7 +275,6 @@ export const getProfiles = query({
         intentKeys,
         desireTagKeys: p.privateDesireTagKeys,
         privateBio: p.privateBio,
-        revealPolicy: p.revealPolicy ?? 'mutual_only',
         // Include hobbies and verification status if available
         hobbies: profile.hobbies ?? [],
         isVerified: profile.isVerified ?? false,
@@ -331,7 +330,6 @@ export const getProfileCard = query({
       intentKeys,
       desireTagKeys: p.privateDesireTagKeys,
       privateBio: p.privateBio,
-      revealPolicy: p.revealPolicy ?? 'mutual_only',
       // Include hobbies and verification status if available
       hobbies: profile.hobbies ?? [],
       isVerified: profile.isVerified ?? false,
@@ -413,7 +411,6 @@ export const getProfileByUserId = query({
       privateIntentKey: intentKeys[0] ?? null,
       desireTagKeys: p.privateDesireTagKeys,
       privateBio: p.privateBio,
-      revealPolicy: p.revealPolicy ?? 'mutual_only',
       // Include hobbies and verification status if available
       hobbies: profile.hobbies ?? [],
       isVerified: profile.isVerified ?? false,

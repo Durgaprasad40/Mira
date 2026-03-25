@@ -686,8 +686,6 @@ export type PrivateBoundary =
   | 'no_sharing_screenshots'
   | 'meet_when_ready';
 
-export type RevealRequestStatus = 'none' | 'pending_sent' | 'pending_received' | 'mutual_accepted' | 'declined';
-
 export interface PrivateProfileData {
   userId: string;
   isPrivateEnabled: boolean;
@@ -703,20 +701,10 @@ export interface PrivateProfileData {
   age: number;
   city?: string;
   gender: string;
-  revealPolicy: 'mutual_only' | 'request_based';
   isSetupComplete: boolean;
   // Phase-1 imported fields (read-only after import)
   hobbies?: string[];
   isVerified?: boolean;
-}
-
-export interface RevealRequest {
-  id: string;
-  fromUserId: string;
-  toUserId: string;
-  status: 'pending' | 'accepted' | 'declined';
-  respondedAt?: number;
-  createdAt: number;
 }
 
 // Confession Types
