@@ -62,7 +62,6 @@ import type * as ranking_phase2Adapter from "../ranking/phase2Adapter.js";
 import type * as ranking_rankingConfig from "../ranking/rankingConfig.js";
 import type * as ranking_rankingTypes from "../ranking/rankingTypes.js";
 import type * as ranking_sharedRankingEngine from "../ranking/sharedRankingEngine.js";
-import type * as revealRequests from "../revealRequests.js";
 import type * as scripts_assignAllCategories from "../scripts/assignAllCategories.js";
 import type * as scripts_checkSessions from "../scripts/checkSessions.js";
 import type * as scripts_checkUserIds from "../scripts/checkUserIds.js";
@@ -149,7 +148,6 @@ declare const fullApi: ApiFromModules<{
   "ranking/rankingConfig": typeof ranking_rankingConfig;
   "ranking/rankingTypes": typeof ranking_rankingTypes;
   "ranking/sharedRankingEngine": typeof ranking_sharedRankingEngine;
-  revealRequests: typeof revealRequests;
   "scripts/assignAllCategories": typeof scripts_assignAllCategories;
   "scripts/checkSessions": typeof scripts_checkSessions;
   "scripts/checkUserIds": typeof scripts_checkUserIds;
