@@ -46,14 +46,18 @@ interface Phase2ProtectedMediaViewerProps {
 const viewedOnceHoldMessages = new Set<string>();
 
 // Secure Video Player component using expo-video with wall-clock resume
+// TIMER-FIX: Now reports when video is ready to play via onReady callback
 interface SecureVideoPlayerProps {
   uri: string;
   elapsedMs: number; // How long since first view (for resume calculation)
+  onReady?: () => void; // TIMER-FIX: Called when video is ready to play
 }
 
-function SecureVideoPlayer({ uri, elapsedMs }: SecureVideoPlayerProps) {
+function SecureVideoPlayer({ uri, elapsedMs, onReady }: SecureVideoPlayerProps) {
   const [isPlaying, setIsPlaying] = useState(true);
+  const [isLoading, setIsLoading] = useState(true); // TIMER-FIX: Track loading state
   const hasSeekRef = useRef(false); // Only seek once on mount
+  const hasReportedReadyRef = useRef(false); // TIMER-FIX: Only report ready once
   const mountedRef = useRef(true);
 
   const player = useVideoPlayer(uri, (p) => {
@@ -96,6 +100,14 @@ function SecureVideoPlayer({ uri, elapsedMs }: SecureVideoPlayerProps) {
         if (mountedRef.current) {
           player.currentTime = resumeSec;
           player.play();
+
+          // TIMER-FIX: Report video is ready to play
+          if (!hasReportedReadyRef.current && onReady) {
+            hasReportedReadyRef.current = true;
+            setIsLoading(false);
+            console.log('[SECURE_VIDEO_TIMER]', 'video ready, starting timer');
+            onReady();
+          }
         }
       }
     };
@@ -111,7 +123,7 @@ function SecureVideoPlayer({ uri, elapsedMs }: SecureVideoPlayerProps) {
     });
 
     return () => subscription.remove();
-  }, [player, elapsedMs]);
+  }, [player, elapsedMs, onReady]);
 
   // Track playing state for UI
   useEffect(() => {
@@ -145,7 +157,13 @@ function SecureVideoPlayer({ uri, elapsedMs }: SecureVideoPlayerProps) {
         contentFit="contain"
         nativeControls={false}
       />
-      {!isPlaying && (
+      {/* TIMER-FIX: Show loading indicator while video loads */}
+      {isLoading && (
+        <View style={secureVideoStyles.loadingOverlay}>
+          <Text style={secureVideoStyles.loadingText}>Loading video...</Text>
+        </View>
+      )}
+      {!isPlaying && !isLoading && (
         <View style={secureVideoStyles.playOverlay}>
           <Ionicons name="play-circle" size={64} color="rgba(255,255,255,0.9)" />
         </View>
@@ -161,6 +179,18 @@ const secureVideoStyles = StyleSheet.create({
     justifyContent: 'center',
     backgroundColor: 'rgba(0,0,0,0.3)',
   },
+  // TIMER-FIX: Loading overlay while video buffers
+  loadingOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: 'rgba(0,0,0,0.5)',
+  },
+  loadingText: {
+    fontSize: 16,
+    color: 'rgba(255,255,255,0.8)',
+    fontWeight: '500',
+  },
 });
 
 export function Phase2ProtectedMediaViewer({
@@ -174,6 +204,9 @@ export function Phase2ProtectedMediaViewer({
   const [timerLabel, setTimerLabel] = useState<string>('');
   // Phase-2 Fix B: Track media load state for graceful error handling
   const [mediaLoadError, setMediaLoadError] = useState(false);
+  // TIMER-FIX: Track when media is actually ready to display
+  // Timer should NOT start until media is loaded and playable
+  const [isMediaReady, setIsMediaReady] = useState(false);
 
   // SAFETY FIX: Screen protection (Android FLAG_SECURE) — blocks screenshots/recording
   useScreenProtection(visible);
@@ -355,20 +388,30 @@ export function Phase2ProtectedMediaViewer({
       setTimeLeft(null);
       setTimerLabel('');
       setMediaLoadError(false); // Phase-2 Fix B: Reset error state
+      setIsMediaReady(false); // TIMER-FIX: Reset media ready state for next open
       clearTimer();
     }
   }, [visible, isOnce, isHoldMode, conversationId, messageId, clearTimer, markSecurePhotoExpired]);
 
-  // Mark as viewed on first open (sets timerEndsAt in store ONCE)
+  // TIMER-FIX: Mark as viewed ONLY when media is actually ready to display
+  // For videos: wait for SecureVideoPlayer.onReady callback
+  // For photos: wait for Image.onLoad callback
+  // This ensures the countdown timer doesn't consume time while media loads
   useEffect(() => {
     if (!visible || !message) return;
     if (message.isExpired) return;
+    // TIMER-FIX: Wait for media to be ready before starting timer
+    if (!isMediaReady) {
+      console.log('[SECURE_TIMER]', 'waiting for media to load before starting timer');
+      return;
+    }
 
     // Only set timerEndsAt if not already set
     if (!message.viewedAt && !message.timerEndsAt) {
+      console.log('[SECURE_TIMER]', 'media ready, starting timer now');
       markSecurePhotoViewed(conversationId, messageId);
     }
-  }, [visible, message, conversationId, messageId, markSecurePhotoViewed]);
+  }, [visible, message, conversationId, messageId, markSecurePhotoViewed, isMediaReady]);
 
   // Countdown timer - uses ref to read timerEndsAt (avoids stale closure)
   useEffect(() => {
@@ -435,6 +478,15 @@ export function Phase2ProtectedMediaViewer({
     }
   }, [isHoldMode, handleClose]);
 
+  // TIMER-FIX: Callback when media is ready to display
+  // This triggers the timer to start only after loading is complete
+  const handleMediaReady = useCallback(() => {
+    if (!isMediaReady) {
+      console.log('[SECURE_TIMER]', 'handleMediaReady called, setting isMediaReady=true');
+      setIsMediaReady(true);
+    }
+  }, [isMediaReady]);
+
   if (!visible || !message) return null;
 
   // Check if already expired
@@ -472,15 +524,21 @@ export function Phase2ProtectedMediaViewer({
         onTouchCancel={isHoldMode ? handleHoldModeRelease : undefined}
       >
         {/* Media layer - fullscreen (photo or video) */}
+        {/* TIMER-FIX: Pass onReady/onLoad callbacks to start timer only when media is playable */}
         {mediaUri && !mediaLoadError ? (
           <View style={[StyleSheet.absoluteFill, isMirrored && styles.mirrored]}>
             {isVideo ? (
-              <SecureVideoPlayer uri={mediaUri} elapsedMs={elapsedMs} />
+              <SecureVideoPlayer
+                uri={mediaUri}
+                elapsedMs={elapsedMs}
+                onReady={handleMediaReady}
+              />
             ) : (
               <Image
                 source={{ uri: mediaUri }}
                 style={StyleSheet.absoluteFill}
                 contentFit="contain"
+                onLoad={handleMediaReady}
                 onError={() => setMediaLoadError(true)}
               />
             )}

@@ -119,13 +119,25 @@ export function ProtectedMediaBubble({
   const isExpired = mediaInfo?.isExpired ?? isExpiredProp ?? false;
 
   // PanResponder for hold mode - must be declared before any early returns
+  // TOUCH-FIX: Enhanced logging for debugging touch interactions
   const panResponder = useMemo(() => PanResponder.create({
-    onStartShouldSetPanResponder: () => true,
+    onStartShouldSetPanResponder: () => {
+      log.info('[TOUCH_DEBUG]', 'onStartShouldSetPanResponder', { messageId, isOwn, isHoldMode });
+      return true;
+    },
     onMoveShouldSetPanResponder: () => false,
     onPanResponderTerminationRequest: () => false,
 
     onPanResponderGrant: (_evt: GestureResponderEvent) => {
       touchStartTimeRef.current = Date.now();
+      log.info('[TOUCH_DEBUG]', 'onPanResponderGrant', {
+        messageId,
+        isOwn,
+        isHoldMode,
+        hasOnPress: !!onPress,
+        hasOnHoldStart: !!onHoldStart,
+      });
+
       if (isHoldMode && onHoldStart) {
         holdActiveRef.current = true;
         log.info('[SECURE_HOLD]', 'grant (hold start)', { messageId });
@@ -139,25 +151,40 @@ export function ProtectedMediaBubble({
 
     onPanResponderRelease: () => {
       const touchDuration = Date.now() - touchStartTimeRef.current;
+      log.info('[TOUCH_DEBUG]', 'onPanResponderRelease', {
+        messageId,
+        touchDuration,
+        isHoldMode,
+        holdActive: holdActiveRef.current,
+      });
 
       if (isHoldMode && holdActiveRef.current && onHoldEnd) {
         holdActiveRef.current = false;
         log.info('[SECURE_HOLD]', 'release (hold end)', { messageId, touchDuration });
         onHoldEnd();
       } else if (!isHoldMode && onPress && touchDuration < 300) {
-        log.info('[SECURE_TAP]', 'tap', { messageId, touchDuration });
+        log.info('[SECURE_TAP]', 'tap detected, calling onPress', { messageId, touchDuration });
         onPress();
+      } else {
+        log.info('[TOUCH_DEBUG]', 'release - no action', {
+          messageId,
+          touchDuration,
+          isHoldMode,
+          hasOnPress: !!onPress,
+          reason: touchDuration >= 300 ? 'touchDuration >= 300ms' : 'no handler',
+        });
       }
     },
 
     onPanResponderTerminate: () => {
+      log.info('[TOUCH_DEBUG]', 'onPanResponderTerminate', { messageId });
       if (isHoldMode && holdActiveRef.current && onHoldEnd) {
         holdActiveRef.current = false;
         log.info('[SECURE_HOLD]', 'terminated', { messageId });
         onHoldEnd();
       }
     },
-  }), [isHoldMode, onHoldStart, onHoldEnd, onPress, messageId]);
+  }), [isHoldMode, onHoldStart, onHoldEnd, onPress, messageId, isOwn]);
 
   // VIDEO-PREFETCH: Callback when video is preloaded
   const handleVideoPrefetchLoad = useCallback((status: AVPlaybackStatus) => {
@@ -167,22 +194,46 @@ export function ProtectedMediaBubble({
     }
   }, [messageId]);
 
-  // Prefetch effect
+  // PREFETCH-FIX-V3: Prefetch from BOTH Convex URL and local URI
+  // This ensures instant open in both demo mode (local URI) and Convex mode (remote URL)
   useEffect(() => {
-    if (mediaUrlData?.url && !hasPrefetchedRef.current && !isExpired) {
-      hasPrefetchedRef.current = true;
-      prefetchStartTimeRef.current = Date.now();
+    if (hasPrefetchedRef.current || isExpired) return;
 
-      const isVideoMedia = mediaUrlData?.mediaType === 'video';
+    // Determine the URI to prefetch - prioritize Convex URL, fall back to local URI
+    const urlToFetch = mediaUrlData?.url || protectedMedia?.localUri;
+    const isVideoMedia = mediaUrlData?.mediaType === 'video' || protectedMedia?.mediaType === 'video';
 
-      if (isVideoMedia) {
-        log.info('[SECURE_BUBBLE]', 'video prefetch started', { messageId, url: mediaUrlData.url.substring(0, 50) });
-      } else {
-        Image.prefetch(mediaUrlData.url).catch(() => {});
-        log.info('[SECURE_BUBBLE]', 'image prefetch started', { messageId });
-      }
+    if (!urlToFetch) {
+      log.info('[SECURE_PREFETCH]', 'no URL available yet', { messageId, hasMediaUrlData: !!mediaUrlData, hasLocalUri: !!protectedMedia?.localUri });
+      return;
     }
-  }, [mediaUrlData?.url, mediaUrlData?.mediaType, isExpired, messageId]);
+
+    hasPrefetchedRef.current = true;
+    prefetchStartTimeRef.current = Date.now();
+
+    if (isVideoMedia) {
+      // For videos, we log but actual prefetch happens via hidden Video component
+      log.info('[SECURE_PREFETCH]', 'video prefetch queued', {
+        messageId,
+        source: mediaUrlData?.url ? 'convex' : 'local',
+        url: urlToFetch.substring(0, 50),
+      });
+    } else {
+      // For photos, use Image.prefetch for instant load
+      Image.prefetch(urlToFetch)
+        .then(() => {
+          const prefetchTime = Date.now() - prefetchStartTimeRef.current;
+          log.info('[SECURE_PREFETCH]', 'image prefetch complete', { messageId, prefetchTime });
+        })
+        .catch((err) => {
+          log.info('[SECURE_PREFETCH]', 'image prefetch failed', { messageId, error: err?.message });
+        });
+      log.info('[SECURE_PREFETCH]', 'image prefetch started', {
+        messageId,
+        source: mediaUrlData?.url ? 'convex' : 'local',
+      });
+    }
+  }, [mediaUrlData?.url, mediaUrlData?.mediaType, protectedMedia?.localUri, protectedMedia?.mediaType, isExpired, messageId]);
 
   // Calculate remaining time from wall-clock using shared countdown helper
   useEffect(() => {
@@ -219,7 +270,7 @@ export function ProtectedMediaBubble({
     };
   }, [timerEndsAt, isExpired, messageId, onExpire]);
 
-  // Log render for debugging
+  // Log render for debugging (production logging only)
   useEffect(() => {
     log.info('[SECURE_BUBBLE]', 'render', {
       messageId,
@@ -278,6 +329,18 @@ export function ProtectedMediaBubble({
   const hasActiveTimer = remainingSec !== null && remainingSec > 0;
   const displayTimerLabel = hasActiveTimer ? timerLabel : null;
 
+  // TIMER-PREVIEW-FIX: Show configured timer BEFORE opening for receiver
+  // Format: 30 → "30s", 60 → "1m"
+  const formatTimerPreview = (seconds: number): string => {
+    if (seconds >= 60) {
+      const mins = Math.floor(seconds / 60);
+      return `${mins}m`;
+    }
+    return `${seconds}s`;
+  };
+  // Show preview when timer is configured but not yet started (receiver hasn't opened)
+  const showTimerPreview = !isOwn && timerSeconds > 0 && !timerEndsAt && !hasActiveTimer;
+
   // SENDER-TIMER-FIX: Improved sender status display
   // Show for sender when:
   // 1. Recipient has opened (recipientOpenedProp) AND timer is active, OR
@@ -311,13 +374,89 @@ export function ProtectedMediaBubble({
   const canBlur = localUri ? !isContentUri(localUri) : true;
   const isMirrored = protectedMedia?.isMirrored === true;
 
-  // Main bubble content
-  const bubbleContent = (
+  // DEBUG: Log media type to trace video detection issues
+  log.info('[PROTECTED_BUBBLE]', 'render', {
+    messageId,
+    isOwn,
+    mediaType: protectedMedia?.mediaType,
+    isVideo,
+    hasLocalUri: !!localUri,
+    hasProtectedMedia: !!protectedMedia,
+  });
+
+  // SENDER-UI-FIX: Completely separate render paths for sender vs receiver
+  // This ensures no overlay leakage between paths
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // SENDER PATH: Clear thumbnail with type indicator and shield badge
+  // ═══════════════════════════════════════════════════════════════════════════
+  if (isOwn === true) {
+    const senderBubble = (
+      <View style={styles.container}>
+        {/* Clear thumbnail (no blur) */}
+        {localUri && (
+          <Image
+            source={{ uri: localUri }}
+            style={[styles.thumbnail, isMirrored && styles.mirrored]}
+            contentFit="cover"
+          />
+        )}
+
+        {/* Media type indicator (top-left) */}
+        <View style={styles.senderTypeIndicator}>
+          <Ionicons
+            name={isVideo ? 'videocam' : 'image'}
+            size={12}
+            color="#FFFFFF"
+          />
+        </View>
+
+        {/* Shield badge (bottom-right) */}
+        <View style={styles.senderShieldBadge}>
+          <Ionicons name="shield-checkmark" size={10} color="#FFFFFF" />
+        </View>
+      </View>
+    );
+
+    // Wrap with sender status if applicable
+    if (showSenderTimer) {
+      return (
+        <View style={styles.senderWrapper}>
+          {senderBubble}
+          <View style={styles.senderTimerBadge}>
+            <Ionicons name="eye" size={10} color={COLORS.primary} />
+            <Text style={styles.senderTimerText}>Viewing • {timerLabel}</Text>
+          </View>
+        </View>
+      );
+    }
+
+    if (showSenderViewOnceOpened) {
+      return (
+        <View style={styles.senderWrapper}>
+          {senderBubble}
+          <View style={styles.senderOpenedBadge}>
+            <Ionicons name="eye" size={10} color={COLORS.success} />
+            <Text style={styles.senderOpenedText}>Opened</Text>
+          </View>
+        </View>
+      );
+    }
+
+    return senderBubble;
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // RECEIVER PATH: Blurred thumbnail with "Tap/Hold to view" hint
+  // TOUCH-FIX: All overlay Views must have pointerEvents="none" to allow
+  // touch events to pass through to the parent container with PanResponder
+  // ═══════════════════════════════════════════════════════════════════════════
+  const receiverBubble = (
     <View
       {...panResponder.panHandlers}
       style={styles.container}
     >
-      {/* Blurred thumbnail image */}
+      {/* Blurred thumbnail */}
       {localUri && (
         <Image
           source={{ uri: localUri }}
@@ -327,30 +466,43 @@ export function ProtectedMediaBubble({
         />
       )}
 
-      {/* Video indicator (top-right badge) */}
-      {isVideo && (
-        <View style={styles.videoIndicator}>
-          <Ionicons name="play" size={14} color="#FFFFFF" />
+      {/* Semi-transparent overlay - MUST be first overlay for blur effect */}
+      <View
+        style={[styles.blurOverlay, !canBlur && styles.darkOverlay]}
+        pointerEvents="none"
+      />
+
+      {/* Media type indicator (top-left) - shows photo or video icon */}
+      <View style={styles.receiverTypeIndicator} pointerEvents="none">
+        <Ionicons
+          name={isVideo ? 'videocam' : 'image'}
+          size={12}
+          color="#FFFFFF"
+        />
+      </View>
+
+      {/* Timer preview badge (top-right) - shows BEFORE opening */}
+      {showTimerPreview && (
+        <View style={styles.timerPreviewBadge} pointerEvents="none">
+          <Ionicons name="time-outline" size={10} color="#FFFFFF" />
+          <Text style={styles.timerPreviewText}>{formatTimerPreview(timerSeconds)}</Text>
         </View>
       )}
 
-      {/* Timer badge (bottom-left) - for RECEIVER only, matches viewer countdown */}
-      {displayTimerLabel && !isOwn && (
-        <View style={styles.timerBadge}>
+      {/* Live countdown timer badge (bottom-left) - shows DURING viewing */}
+      {displayTimerLabel && (
+        <View style={styles.timerBadge} pointerEvents="none">
           <Ionicons name="time-outline" size={10} color="#FFFFFF" />
           <Text style={styles.timerText}>{displayTimerLabel}</Text>
         </View>
       )}
 
-      {/* Hold/Tap to view hint - centered */}
-      <View style={styles.hintOverlay}>
+      {/* Tap/Hold to view hint */}
+      <View style={styles.hintOverlay} pointerEvents="none">
         <Text style={styles.hintText}>
           {isHoldMode ? 'Hold to view' : 'Tap to view'}
         </Text>
       </View>
-
-      {/* Semi-transparent overlay */}
-      <View style={[styles.blurOverlay, !canBlur && styles.darkOverlay]} />
 
       {/* VIDEO-PREFETCH: Hidden video for preloading */}
       {shouldPrefetchVideo && (
@@ -366,34 +518,7 @@ export function ProtectedMediaBubble({
     </View>
   );
 
-  // SENDER-TIMER-FIX: Wrap with status indicator for sender
-  if (showSenderTimer) {
-    return (
-      <View style={styles.senderWrapper}>
-        {bubbleContent}
-        {/* Timer countdown badge for sender */}
-        <View style={styles.senderTimerBadge}>
-          <Ionicons name="eye" size={10} color={COLORS.primary} />
-          <Text style={styles.senderTimerText}>Viewing • {timerLabel}</Text>
-        </View>
-      </View>
-    );
-  }
-
-  // SENDER-TIMER-FIX: Show "Opened" for view-once media that was opened
-  if (showSenderViewOnceOpened) {
-    return (
-      <View style={styles.senderWrapper}>
-        {bubbleContent}
-        <View style={styles.senderOpenedBadge}>
-          <Ionicons name="eye" size={10} color={COLORS.success} />
-          <Text style={styles.senderOpenedText}>Opened</Text>
-        </View>
-      </View>
-    );
-  }
-
-  return bubbleContent;
+  return receiverBubble;
 }
 
 // Phase-1 styles matching MediaMessage.tsx exactly
@@ -430,6 +555,62 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
+  // SENDER-UI-FIX: Media type indicator for sender (top-left)
+  senderTypeIndicator: {
+    position: 'absolute',
+    top: 4,
+    left: 4,
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    backgroundColor: 'rgba(0,0,0,0.5)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  // RECEIVER-UI-FIX: Media type indicator for receiver (top-left)
+  receiverTypeIndicator: {
+    position: 'absolute',
+    top: 4,
+    left: 4,
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    backgroundColor: 'rgba(0,0,0,0.6)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    zIndex: 10, // Above blur overlay
+  },
+  // TIMER-PREVIEW-FIX: Timer preview badge for receiver (top-right) - shows BEFORE opening
+  timerPreviewBadge: {
+    position: 'absolute',
+    top: 4,
+    right: 4,
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 2,
+    backgroundColor: 'rgba(155, 125, 196, 0.8)',
+    paddingHorizontal: 5,
+    paddingVertical: 2,
+    borderRadius: 8,
+    zIndex: 10, // Above blur overlay
+  },
+  timerPreviewText: {
+    fontSize: 10,
+    color: '#FFFFFF',
+    fontWeight: '600',
+  },
+  // SENDER-UI-FIX: Shield badge for sender (bottom-right)
+  senderShieldBadge: {
+    position: 'absolute',
+    bottom: 4,
+    right: 4,
+    width: 18,
+    height: 18,
+    borderRadius: 9,
+    backgroundColor: 'rgba(155, 125, 196, 0.8)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
   timerBadge: {
     position: 'absolute',
     bottom: 4,
@@ -451,11 +632,12 @@ const styles = StyleSheet.create({
     ...StyleSheet.absoluteFillObject,
     alignItems: 'center',
     justifyContent: 'center',
+    zIndex: 5, // Above blur overlay but below badges
   },
   hintText: {
     fontSize: 10,
-    color: 'rgba(255,255,255,0.4)',
-    fontWeight: '500',
+    color: 'rgba(255,255,255,0.7)',
+    fontWeight: '600',
     textAlign: 'center',
   },
   expiredPill: {

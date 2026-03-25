@@ -45,9 +45,8 @@ interface CameraPhotoSheetProps {
 }
 
 const TIMER_OPTIONS = [
-  { label: 'Once', value: 0 },
-  { label: '3s', value: 3 },
-  { label: '10s', value: 10 },
+  { label: 'Normal', value: -1 },
+  { label: 'View once', value: 0 },
   { label: '30s', value: 30 },
   { label: '60s', value: 60 },
 ];
@@ -63,14 +62,13 @@ export function CameraPhotoSheet({
   const insets = useSafeAreaInsets();
 
   // State
-  const [timer, setTimer] = useState(0); // Default: Once
-  const [viewingMode, setViewingMode] = useState<'tap' | 'hold'>('tap');
+  const [timer, setTimer] = useState(-1); // Default: Normal
+  const viewingMode = 'tap' as const; // Fixed: tap-to-view only
 
   // Reset state when modal closes
   useEffect(() => {
     if (!visible) {
-      setTimer(0);
-      setViewingMode('tap');
+      setTimer(-1); // Reset to Normal
     }
   }, [visible]);
 
@@ -78,13 +76,11 @@ export function CameraPhotoSheet({
     if (!imageUri) return;
     onConfirm(imageUri, { timer, viewingMode });
     // Reset for next use
-    setTimer(0);
-    setViewingMode('tap');
+    setTimer(-1); // Reset to Normal
   };
 
   const handleCancel = () => {
-    setTimer(0);
-    setViewingMode('tap');
+    setTimer(-1); // Reset to Normal
     onCancel();
   };
 
@@ -154,43 +150,6 @@ export function CameraPhotoSheet({
                   </TouchableOpacity>
                 ))}
               </View>
-            </View>
-
-            {/* Viewing mode: Timed / Hold */}
-            <View style={styles.viewingModeContainer}>
-              <TouchableOpacity
-                style={[
-                  styles.viewingModeButton,
-                  viewingMode === 'tap' && styles.viewingModeButtonActive,
-                ]}
-                onPress={() => setViewingMode('tap')}
-              >
-                <Text
-                  style={[
-                    styles.viewingModeText,
-                    viewingMode === 'tap' && styles.viewingModeTextActive,
-                  ]}
-                >
-                  Timed
-                </Text>
-              </TouchableOpacity>
-
-              <TouchableOpacity
-                style={[
-                  styles.viewingModeButton,
-                  viewingMode === 'hold' && styles.viewingModeButtonActive,
-                ]}
-                onPress={() => setViewingMode('hold')}
-              >
-                <Text
-                  style={[
-                    styles.viewingModeText,
-                    viewingMode === 'hold' && styles.viewingModeTextActive,
-                  ]}
-                >
-                  Hold
-                </Text>
-              </TouchableOpacity>
             </View>
 
             {/* Cancel / Send buttons */}

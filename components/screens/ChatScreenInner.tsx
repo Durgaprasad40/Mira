@@ -1153,23 +1153,28 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
         const uniqueId = `secure_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
         const now = Date.now();
         // Calculate expiry duration in ms (for continuous video resume)
-        // timer=0 means "Once" (view once), otherwise timer is in seconds
-        const expiresDurationMs = options.timer > 0 ? options.timer * 1000 : 0;
+        // timer=-1 means "Normal" (no timer, not view-once)
+        // timer=0 means "View once" (view once)
+        // timer>0 means timed (seconds)
+        const effectiveTimer = options.timer === -1 ? 0 : options.timer;
+        const isViewOnce = options.timer === 0; // Only 0 = View once
+        const expiresDurationMs = effectiveTimer > 0 ? effectiveTimer * 1000 : 0;
 
         const protectedMedia = {
           localUri: imageUri,
           mediaType: isVideo ? 'video' as const : 'photo' as const,
-          timer: options.timer,
+          timer: effectiveTimer,
           expiresDurationMs, // Store for wall-clock based video resume
           viewingMode: options.viewingMode,
           screenshotAllowed: false,
-          viewOnce: options.timer === 0,
+          viewOnce: isViewOnce,
           watermark: false,
           isMirrored: isVideo && isMirrored, // Only videos need render-time flip
         };
 
         // Add to demoDmStore for chat list (bubble uses isProtected + protectedMedia for display)
         // For videos: use type 'video' and videoUri; for photos: use type 'image'
+        // BUGFIX: Pass the FULL protectedMedia object including localUri and mediaType
         addDemoMessage(conversationId, {
           _id: uniqueId,
           content: isVideo ? 'Secure Video' : 'Secure Photo',
@@ -1179,14 +1184,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
           isProtected: true,
           // For videos, store in videoUri; for photos, the protectedMedia.localUri is used
           ...(isVideo ? { videoUri: imageUri } : {}),
-          protectedMedia: {
-            timer: options.timer,
-            viewingMode: options.viewingMode,
-            screenshotAllowed: false,
-            viewOnce: options.timer === 0,
-            watermark: false,
-            isMirrored: isVideo && isMirrored, // For bubble thumbnail flip
-          },
+          protectedMedia, // Use full object with localUri and mediaType
         });
 
         // Add to privateChatStore for viewer (has full schema with localUri)
@@ -1249,13 +1247,16 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
       // HOLD-TAP-FIX: Pass viewMode to backend for consistent rendering
       // VIDEO-FIX: Pass mediaType to distinguish photo vs video
       // VIDEO-MIRROR-FIX: Pass isMirrored for front-camera video correction
+      // MEDIA-OPTIONS-FIX: timer=-1 means Normal (no timer, not view-once)
+      const effectiveTimerConvex = options.timer === -1 ? 0 : options.timer;
+      const isViewOnceConvex = options.timer === 0; // Only 0 = View once
       await sendProtectedImage({
         conversationId: conversationId as any,
         authUserId: userId,
         imageStorageId: storageId,
-        timer: options.timer,
+        timer: effectiveTimerConvex,
         screenshotAllowed: false, // Phase-1 default: no screenshots
-        viewOnce: options.timer === 0, // "Once" timer = view once
+        viewOnce: isViewOnceConvex,
         watermark: false, // Phase-1 default: no watermark
         viewMode: options.viewingMode, // HOLD-TAP-FIX: Store the actual viewing mode
         mediaType: isVideo ? 'video' : 'image', // VIDEO-FIX: Pass correct media type
