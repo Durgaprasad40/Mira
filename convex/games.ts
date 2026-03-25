@@ -245,6 +245,8 @@ export const getBottleSpinSession = query({
         inviteeId: session.inviteeId,
         currentTurnUserId: session.currentTurnUserId,
         currentTurnRole: session.currentTurnRole,
+        // SPIN-TURN-FIX: Include spinTurnRole in response
+        spinTurnRole: session.spinTurnRole,
         turnPhase: session.turnPhase,
         lastSpinResult: session.lastSpinResult,
       };
@@ -392,11 +394,13 @@ export const respondToBottleSpinInvite = mutation({
 
     if (accept) {
       // Accept: activate the game AND initialize turn state
+      // SPIN-TURN-FIX: Initialize spinTurnRole to 'inviter' (inviter spins first)
       await ctx.db.patch(session._id, {
         status: 'active',
         respondedAt: now,
         // Initialize turn state to avoid undefined issues
         turnPhase: 'idle',
+        spinTurnRole: 'inviter', // Inviter gets first spin
         currentTurnRole: undefined,
         lastSpinResult: undefined,
       });
@@ -465,6 +469,7 @@ export const endBottleSpinGame = mutation({
 
 // Update turn state after spin completes or choice is made
 // CRITICAL FIX: Find the ACTIVE session specifically, not just the latest one
+// SPIN-TURN-FIX: Added spin turn ownership validation and alternation
 export const setBottleSpinTurn = mutation({
   args: {
     authUserId: v.string(),
@@ -517,10 +522,41 @@ export const setBottleSpinTurn = mutation({
       throw new Error('Only participants can update turn state');
     }
 
+    // SPIN-TURN-FIX: Determine caller's role
+    const callerRole: 'inviter' | 'invitee' = session.inviterId === authUserId ? 'inviter' : 'invitee';
+
+    // SPIN-TURN-FIX: Enforce spin turn ownership
+    // Only the current spin turn owner can initiate a spin (transition to 'spinning')
+    if (turnPhase === 'spinning') {
+      const currentSpinTurnRole = session.spinTurnRole || 'inviter'; // Default to inviter if not set
+      if (callerRole !== currentSpinTurnRole) {
+        console.log('[SPIN-TURN-FIX] Rejected spin attempt - not turn owner', {
+          callerRole,
+          currentSpinTurnRole,
+          authUserId,
+          conversationId,
+        });
+        throw new Error('Not your turn to spin');
+      }
+    }
+
+    // SPIN-TURN-FIX: Calculate next spinTurnRole when round completes
+    // After each complete round, alternate who gets to spin next
+    let nextSpinTurnRole = session.spinTurnRole;
+    if (turnPhase === 'complete') {
+      // Alternate spin turn: inviter -> invitee -> inviter ...
+      nextSpinTurnRole = session.spinTurnRole === 'inviter' ? 'invitee' : 'inviter';
+      console.log('[SPIN-TURN-FIX] Round complete, alternating spinTurnRole', {
+        previousSpinTurnRole: session.spinTurnRole,
+        nextSpinTurnRole,
+      });
+    }
+
     // Update turn state with role-based ownership
     await ctx.db.patch(session._id, {
       currentTurnRole,
       turnPhase,
+      spinTurnRole: nextSpinTurnRole,
       lastSpinResult: lastSpinResult ?? session.lastSpinResult,
     });
 
