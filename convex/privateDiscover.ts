@@ -1,5 +1,6 @@
 import { v } from 'convex/values';
 import { query, mutation } from './_generated/server';
+import { Id } from './_generated/dataModel';
 import { isPrivateDataDeleted } from './privateDeletion';
 import { computeFinalScore } from './phase2Ranking';
 import { resolveUserIdByAuthId } from './helpers';
@@ -23,7 +24,7 @@ const SUPPRESSION_WINDOW_MS = 4 * 60 * 60 * 1000;
 // Returns profiles sorted by ranking score (descending)
 export const getProfiles = query({
   args: {
-    // DL-013: userId is optional; prefer server-side auth resolution
+    // P1-007 FIX: userId arg kept for backward compat but IGNORED - server auth is authoritative
     userId: v.optional(v.id('users')),
     limit: v.optional(v.number()),
   },
@@ -31,17 +32,15 @@ export const getProfiles = query({
     const now = Date.now();
     const suppressionCutoff = now - SUPPRESSION_WINDOW_MS;
 
-    // DL-013: Resolve viewer from server-side auth, fall back to args.userId for backward compat
-    let viewerUserId = args.userId;
+    // P1-007 FIX: ALWAYS resolve from server-side auth - never trust client-supplied userId
+    // args.userId is ignored to prevent auth bypass via spoofed client IDs
+    let viewerUserId: Id<'users'> | null = null;
     const identity = await ctx.auth.getUserIdentity();
     if (identity?.subject) {
-      const resolvedId = await resolveUserIdByAuthId(ctx, identity.subject);
-      if (resolvedId) {
-        viewerUserId = resolvedId;
-      }
+      viewerUserId = await resolveUserIdByAuthId(ctx, identity.subject);
     }
     if (!viewerUserId) {
-      return []; // No valid viewer - return empty
+      return []; // No valid auth - return empty
     }
 
     // Phase 3: Shadow mode decision (once per request)
@@ -372,7 +371,12 @@ export const getProfileByUserId = query({
       .first();
     if (blockedByOwner) return null;
 
-    // P0-004 FIX: Block profile lookup for anonymous confession participants
+    // P0-004 FIX + P2-008 REVIEW: Cross-phase anonymity protection
+    // INTENTIONAL SHARED BEHAVIOR: This check queries Phase-1 conversations table
+    // to prevent de-anonymizing users who sent anonymous confessions.
+    // If user A sent an anonymous confession to user B in Phase-1, and user B
+    // tries to view user A's Phase-2 profile, we return null to preserve anonymity.
+    // This cross-phase check is REQUIRED for privacy - not an unnecessary dependency.
     const anonymousConversation = await ctx.db
       .query('conversations')
       .filter((q) =>

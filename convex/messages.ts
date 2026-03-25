@@ -235,6 +235,13 @@ export const sendMessage = mutation({
       createdAt: now,
     });
 
+    // SEC-4 FIX: Post-insert block verification to close race condition
+    // If a block was created between pre-check and insert, delete the message
+    if (recipientId && await isBlockedBidirectional(ctx, senderId, recipientId)) {
+      await ctx.db.delete(messageId);
+      throw new Error('Cannot send message');
+    }
+
     // Update conversation last message time
     await ctx.db.patch(conversationId, {
       lastMessageAt: now,
@@ -704,6 +711,8 @@ export const markAllAsDelivered = mutation({
 
     // Find all messages sent TO this user that are not yet delivered
     // Query all conversations this user is part of
+    // SEC-6 NOTE: Access validation is enforced by the by_user index - we only get
+    // conversations where this userId is a participant. No additional validation needed.
     const participations = await ctx.db
       .query('conversationParticipants')
       .withIndex('by_user', (q) => q.eq('userId', userId))
