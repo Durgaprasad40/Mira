@@ -742,6 +742,67 @@ export const markAllAsDelivered = mutation({
   },
 });
 
+/**
+ * FEAT-2: Delete a message from a private DM conversation.
+ * Only the sender can delete their own messages.
+ * Hard deletes the message (privacy-first: users expect true deletion).
+ */
+export const deleteMessage = mutation({
+  args: {
+    messageId: v.id('messages'),
+    authUserId: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const { messageId, authUserId } = args;
+
+    // Resolve auth ID to user ID
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      throw new Error('Unauthorized: user not found');
+    }
+
+    // Get the message
+    const message = await ctx.db.get(messageId);
+    if (!message) {
+      // Message already deleted or doesn't exist
+      return { success: true, alreadyDeleted: true };
+    }
+
+    // Verify sender owns this message
+    if (message.senderId !== userId) {
+      throw new Error('Unauthorized: you can only delete your own messages');
+    }
+
+    // Verify user is part of the conversation
+    const conversation = await ctx.db.get(message.conversationId);
+    if (!conversation || !conversation.participants.includes(userId)) {
+      throw new Error('Unauthorized: conversation not found or access denied');
+    }
+
+    // Delete any associated storage (images, voice, etc.)
+    if (message.imageStorageId) {
+      try {
+        await ctx.storage.delete(message.imageStorageId);
+      } catch (e) {
+        // Storage may already be deleted, continue
+        console.warn('[deleteMessage] Failed to delete image storage:', e);
+      }
+    }
+    if (message.audioStorageId) {
+      try {
+        await ctx.storage.delete(message.audioStorageId);
+      } catch (e) {
+        console.warn('[deleteMessage] Failed to delete audio storage:', e);
+      }
+    }
+
+    // Hard delete the message
+    await ctx.db.delete(messageId);
+
+    return { success: true };
+  },
+});
+
 // ONLINE-STATUS-FIX: Update user's lastActive timestamp
 // Called periodically while user is in a conversation to show "Online" status
 export const updatePresence = mutation({

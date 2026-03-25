@@ -313,6 +313,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
   }, [isExpiredChat]);
 
   const sendMessage = useMutation(api.messages.sendMessage);
+  const deleteMessageMutation = useMutation(api.messages.deleteMessage); // FEAT-2
   const markAsRead = useMutation(api.messages.markAsRead);
   const markAsDelivered = useMutation(api.messages.markAsDelivered); // MESSAGE-TICKS-FIX
   const updatePresence = useMutation(api.messages.updatePresence); // ONLINE-STATUS-FIX
@@ -1074,14 +1075,31 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
     }
   }, [isDemo, activeConversation, conversationId, userId, addDemoMessage, generateUploadUrl, sendMessage]);
 
-  // Delete voice message (demo mode only)
-  const handleVoiceDelete = useCallback((messageId: string) => {
+  // FEAT-2: Delete voice message (supports both demo and live modes)
+  const handleVoiceDelete = useCallback(async (messageId: string) => {
     if (!conversationId) return;
+
     if (isDemo) {
       deleteDemoMessage(conversationId, messageId);
+      return;
     }
-    // TODO: Add Convex delete support when backend is ready
-  }, [isDemo, conversationId, deleteDemoMessage]);
+
+    // Live mode: call Convex mutation
+    if (!userId) {
+      console.warn('[ChatScreenInner] Cannot delete message: no userId');
+      return;
+    }
+
+    try {
+      await deleteMessageMutation({
+        messageId: messageId as any, // Cast to Id<'messages'>
+        authUserId: userId,
+      });
+    } catch (e) {
+      console.error('[ChatScreenInner] Failed to delete message:', e);
+      Alert.alert('Error', 'Failed to delete message. Please try again.');
+    }
+  }, [isDemo, conversationId, userId, deleteDemoMessage, deleteMessageMutation]);
 
   // Camera handler: navigate to camera-composer for photo/video capture
   // This enables: photo/video toggle, 30s video limit, proper front camera handling
