@@ -758,11 +758,13 @@ export interface ConfessionReply {
   userId: string;
   text: string;
   isAnonymous: boolean;
+  identityMode?: 'anonymous' | 'blur' | 'open'; // FIX 2: Identity mode for replies
   type?: ConfessionReplyType;
   voiceUrl?: string;
   voiceDurationSec?: number;
   parentReplyId?: string; // For nested replies - if set, this is a child reply
   editedAt?: number; // Timestamp if reply was edited
+  hasActiveConnectRequest?: boolean; // FIX 3: Whether reply has active connect request (locked)
   createdAt: number;
 }
 

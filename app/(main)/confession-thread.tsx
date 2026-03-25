@@ -112,9 +112,12 @@ export default function ConfessionThreadScreen() {
     : 'skip';
   const convexCurrentUser = useQuery(api.users.getCurrentUser, convexUserQueryArgs);
 
+  // FIX 5: Pass viewerId to reveal blur for connected users
   const convexReplies = useQuery(
     api.confessions.getReplies,
-    !isDemoMode && safeConfessionId ? { confessionId: safeConfessionId } : 'skip'
+    !isDemoMode && safeConfessionId
+      ? { confessionId: safeConfessionId, viewerId: currentUserId }
+      : 'skip'
   );
 
   // ──────────────────────────────────────────────────────────────────────────
@@ -167,15 +170,19 @@ export default function ConfessionThreadScreen() {
   // ──────────────────────────────────────────────────────────────────────────
   const demoReplies = confessionId ? (storeReplies[confessionId] || []) : [];
 
-  const replies: ConfessionReply[] = useMemo(() => {
-    let items: ConfessionReply[];
+  const replies = useMemo(() => {
+    let items: any[];
     if (!isDemoMode && convexReplies) {
+      // BUG 3 FIX: Pass through identityMode, commenterInfo, and hasActiveConnectRequest
       items = convexReplies.map((r: any) => ({
         id: r._id,
         confessionId: r.confessionId,
         userId: r.userId,
         text: r.text,
         isAnonymous: r.isAnonymous,
+        identityMode: r.identityMode, // BUG 3 FIX: Pass identity mode
+        commenterInfo: r.commenterInfo, // BUG 3 FIX: Pass enriched commenter info
+        hasActiveConnectRequest: r.hasActiveConnectRequest, // Pass lock status
         type: r.type || 'text',
         voiceUrl: r.voiceUrl,
         voiceDurationSec: r.voiceDurationSec,
@@ -285,6 +292,8 @@ export default function ConfessionThreadScreen() {
   const [replyingToReplyId, setReplyingToReplyId] = useState<string | null>(null);
   const [replyToReplyText, setReplyToReplyText] = useState('');
   const [guardTriggered, setGuardTriggered] = useState(false);
+  // FIX 2: Identity mode for comments - default is 'blur'
+  const [identityMode, setIdentityMode] = useState<'anonymous' | 'blur' | 'open'>('blur');
   // State for Reject/Connect actions (tagged user only)
   const [responding, setResponding] = useState(false);
   const [respondAction, setRespondAction] = useState<'reject' | 'connect' | null>(null);
@@ -329,6 +338,29 @@ export default function ConfessionThreadScreen() {
   const toggleReactionMutation = useMutation(api.confessions.toggleReaction);
   const respondToTaggedConfessionMutation = useMutation(api.confessions.respondToTaggedConfession);
   const authorRespondToConnectMutation = useMutation(api.confessions.authorRespondToConnect);
+  const requestCommentConnectMutation = useMutation(api.confessions.requestCommentConnect);
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // COMMENT CONNECT QUERY (for OP to see connection statuses)
+  // ──────────────────────────────────────────────────────────────────────────
+  const commentConnectData = useQuery(
+    api.confessions.getCommentConnectStatusesForConfession,
+    !isDemoMode && safeConfessionId && currentUserId
+      ? { confessionId: safeConfessionId, userId: currentUserId }
+      : 'skip'
+  );
+
+  // FIX 6: Destructure for UI lock - extract statusMap and activeReplyId
+  const commentConnectStatuses = commentConnectData?.statusMap || {};
+  const activeCommentConnectReplyId = commentConnectData?.activeReplyId || null;
+  const hasActiveCommentConnect = commentConnectData?.hasActiveRequest || false;
+  // FIX 8: Get already-connected user IDs to hide Connect for already-matched users
+  const alreadyConnectedUserIds = commentConnectData?.alreadyConnectedUserIds || [];
+
+  // State for tracking which reply is currently being connected
+  const [connectingReplyId, setConnectingReplyId] = useState<string | null>(null);
+  // UX FIX: Track which reply is selected for Connect (only show Connect on tapped comment)
+  const [selectedReplyForConnect, setSelectedReplyForConnect] = useState<string | null>(null);
 
   // ──────────────────────────────────────────────────────────────────────────
   // HANDLERS
@@ -337,12 +369,15 @@ export default function ConfessionThreadScreen() {
     if (!replyText.trim() || !confessionId || sending || !currentUserId) return;
 
     const submittedText = replyText.trim();
+    // FIX 2: Derive isAnonymous from identityMode
+    const isAnonymousFromMode = identityMode !== 'open';
     const newReply: ConfessionReply = {
       id: `cr_new_${Date.now()}`,
       confessionId,
       userId: currentUserId,
       text: submittedText,
-      isAnonymous: true,
+      isAnonymous: isAnonymousFromMode,
+      identityMode, // FIX 2: Include identity mode
       type: 'text',
       createdAt: Date.now(),
     };
@@ -359,7 +394,8 @@ export default function ConfessionThreadScreen() {
           confessionId: safeConfessionId,
           userId: safeUserId,
           text: submittedText,
-          isAnonymous: true,
+          isAnonymous: isAnonymousFromMode,
+          identityMode, // FIX 2: Pass identity mode to backend
           type: 'text',
         });
       } catch {
@@ -369,7 +405,7 @@ export default function ConfessionThreadScreen() {
       }
     }
     setSending(false);
-  }, [replyText, confessionId, currentUserId, createReplyMutation, sending, addReplyToStore, deleteReplyFromStore, safeConfessionId]);
+  }, [replyText, confessionId, currentUserId, createReplyMutation, sending, addReplyToStore, deleteReplyFromStore, safeConfessionId, identityMode]);
 
   const handleSendReplyToReply = useCallback(async (parentReplyIdArg: string) => {
     if (!replyToReplyText.trim() || !confessionId || sending || !currentUserId) return;
@@ -643,8 +679,13 @@ export default function ConfessionThreadScreen() {
           action: 'connect',
         });
         if (result.matchCreated && result.matchId && taggedUserId) {
-          // Navigate to match celebration screen
-          router.push(`/(main)/match-celebration?matchId=${result.matchId}&userId=${taggedUserId}` as any);
+          // Navigate to match celebration screen with source=confessions
+          // This ensures "Keep Discovering" returns to Confessions tab, not an empty page
+          if (__DEV__) {
+            console.log('[ConfessionThread] Author connect success, matchId=', result.matchId, 'taggedUserId=', taggedUserId);
+            console.log('[ConfessionThread] Navigating to match-celebration with source=confessions');
+          }
+          router.push(`/(main)/match-celebration?matchId=${result.matchId}&userId=${taggedUserId}&source=confessions` as any);
         } else {
           Toast.show('Connected!');
         }
@@ -656,6 +697,45 @@ export default function ConfessionThreadScreen() {
       }
     }
   }, [confession, confessionId, currentUserId, isOwnConfession, authorResponding, safeConfessionId, authorRespondToConnectMutation, taggedUserId, router]);
+
+  // Handler for OP to request connect with a commenter
+  const handleRequestCommentConnect = useCallback(async (replyId: string) => {
+    if (!confession || !confessionId || !currentUserId || !isConfessionAuthor) return;
+    if (connectingReplyId === replyId) return; // Prevent double-taps
+
+    if (!isDemoMode && safeConfessionId) {
+      try {
+        const convexId = asUserId(currentUserId);
+        const safeReplyId = asReplyId(replyId);
+        if (!convexId || !safeReplyId) return;
+
+        setConnectingReplyId(replyId);
+        const result = await requestCommentConnectMutation({
+          confessionId: safeConfessionId,
+          replyId: safeReplyId,
+          userId: convexId,
+        });
+
+        if (result.alreadyRequested) {
+          Toast.show('Connection already requested');
+        } else {
+          Toast.show('Connection request sent!');
+        }
+      } catch (e: any) {
+        Toast.show(e?.message || 'Could not send connection request.');
+      } finally {
+        setConnectingReplyId(null);
+        // UX FIX: Clear selection after connect request is sent
+        setSelectedReplyForConnect(null);
+      }
+    }
+  }, [confession, confessionId, currentUserId, isConfessionAuthor, connectingReplyId, safeConfessionId, requestCommentConnectMutation]);
+
+  // UX FIX: Handler for selecting a reply to show Connect option
+  const handleSelectReplyForConnect = useCallback((replyId: string) => {
+    // Toggle selection: if already selected, deselect; otherwise select
+    setSelectedReplyForConnect((prev) => (prev === replyId ? null : replyId));
+  }, []);
 
   const handleReport = useCallback(() => {
     if (!confessionId) return;
@@ -804,10 +884,19 @@ export default function ConfessionThreadScreen() {
   // Whether to show bottom composer (hidden for OP viewing own confession)
   const showBottomComposer = !isOwnConfession;
 
+  // BUG 1 FIX: Composer is disabled if user already replied
+  // Note: userHasReplied is computed inline to avoid issues with early returns
+  // Editing happens INLINE in the reply item, NOT in bottom composer, so keep composer disabled
+  const userHasReplied = effectiveUserId ? topLevelReplies.some((r) => r.userId === effectiveUserId) : false;
+  const composerDisabled = userHasReplied;
+
   // ──────────────────────────────────────────────────────────────────────────
   // RENDER: Reply Item
   // ──────────────────────────────────────────────────────────────────────────
-  const renderReplyItem = ({ item }: { item: ConfessionReply }) => {
+  // BUG 3 FIX: Blur radius for blurred photos
+  const REPLY_BLUR_RADIUS = 20;
+
+  const renderReplyItem = ({ item }: { item: any }) => {
     const replyIsOwn = isOwnReply(item);
     const replyIsFromOP = isReplyFromOP(item);
     // Plus button: only for confession author, only on OTHER users' replies
@@ -815,20 +904,77 @@ export default function ConfessionThreadScreen() {
     const isReplyingToThis = replyingToReplyId === item.id;
     const isEditingThis = editingReplyId === item.id;
 
+    // BUG 3 FIX: Extract commenterInfo for proper identity rendering
+    const commenterInfo = item.commenterInfo;
+    // FIX: Correct fallback for backward compat - isAnonymous=true means blur (not anonymous), isAnonymous=false means open
+    const identityMode = commenterInfo?.mode || item.identityMode || (item.isAnonymous === false ? 'open' : 'blur');
+    const isAnonymousMode = identityMode === 'anonymous';
+    const isBlurMode = identityMode === 'blur';
+    const isOpenMode = identityMode === 'open';
+
+    // Build display name based on identity mode
+    let displayAuthorName = 'Anonymous';
+    if (isOpenMode && commenterInfo?.name) {
+      displayAuthorName = commenterInfo.name;
+      if (commenterInfo.age) displayAuthorName += `, ${commenterInfo.age}`;
+      if (commenterInfo.gender && GENDER_LABELS[commenterInfo.gender]) {
+        displayAuthorName += ` ${GENDER_LABELS[commenterInfo.gender]}`;
+      }
+    } else if (isBlurMode && commenterInfo?.name) {
+      displayAuthorName = commenterInfo.name;
+      if (commenterInfo.age) displayAuthorName += `, ${commenterInfo.age}`;
+      if (commenterInfo.gender && GENDER_LABELS[commenterInfo.gender]) {
+        displayAuthorName += ` ${GENDER_LABELS[commenterInfo.gender]}`;
+      }
+    }
+
+    // Get photo URL
+    const photoUrl = commenterInfo?.photoUrl;
+    const isPhotoBlurred = commenterInfo?.photoBlurred || isBlurMode;
+
+    // UX FIX: Determine if this reply is selectable for Connect
+    const connectStatus = !isDemoMode ? commentConnectStatuses?.[item.id] : null;
+    const hasExistingConnectStatus = !!connectStatus?.status;
+    // FIX 8: Also check if the commenter is already connected with the OP
+    const isAlreadyConnected = alreadyConnectedUserIds.includes(item.userId);
+    const isSelectableForConnect = showPlusButton && !isDemoMode && !hasExistingConnectStatus && !hasActiveCommentConnect && !isAlreadyConnected;
+    const isSelectedForConnect = selectedReplyForConnect === item.id;
+
+    // Wrapper component: TouchableOpacity if selectable, View otherwise
+    const CardWrapper = isSelectableForConnect ? TouchableOpacity : View;
+    const cardWrapperProps = isSelectableForConnect
+      ? {
+          onPress: () => handleSelectReplyForConnect(item.id),
+          activeOpacity: 0.7,
+          style: [styles.replyCard, isSelectedForConnect && styles.replyCardSelected],
+        }
+      : { style: styles.replyCard };
+
     return (
-      <View style={styles.replyCard}>
+      <CardWrapper {...cardWrapperProps}>
         <View>
           <View style={styles.replyHeader}>
-            <View style={[styles.replyAvatar, item.isAnonymous && styles.avatarAnonymous]}>
-              <Ionicons
-                name={item.isAnonymous ? 'eye-off' : 'person'}
-                size={12}
-                color={item.isAnonymous ? COLORS.textMuted : COLORS.primary}
+            {/* BUG 3 FIX: Render avatar based on identity mode */}
+            {isAnonymousMode ? (
+              // ANONYMOUS: Show eye-off icon
+              <View style={[styles.replyAvatar, styles.avatarAnonymous]}>
+                <Ionicons name="eye-off" size={12} color={COLORS.textMuted} />
+              </View>
+            ) : photoUrl ? (
+              // BLUR or OPEN with photo: Show image (blurred or clear)
+              <Image
+                source={{ uri: photoUrl }}
+                style={styles.replyAvatarImage}
+                contentFit="cover"
+                blurRadius={isPhotoBlurred ? REPLY_BLUR_RADIUS : 0}
               />
-            </View>
-            <Text style={styles.replyAuthor}>
-              {item.isAnonymous ? 'Anonymous' : 'Someone'}
-            </Text>
+            ) : (
+              // BLUR or OPEN without photo: Show person icon
+              <View style={styles.replyAvatar}>
+                <Ionicons name="person" size={12} color={COLORS.primary} />
+              </View>
+            )}
+            <Text style={styles.replyAuthor}>{displayAuthorName}</Text>
             {replyIsFromOP && (
               <View style={styles.opBadge}>
                 <Text style={styles.opBadgeText}>OP</Text>
@@ -845,8 +991,8 @@ export default function ConfessionThreadScreen() {
             )}
             <Text style={styles.replyTime}>{getTimeAgo(item.createdAt)}</Text>
 
-            {/* Three-dots menu for own replies (Edit/Delete) */}
-            {replyIsOwn && !isEditingThis && (
+            {/* Three-dots menu for own replies (Edit/Delete) - FIX 3: hidden when reply is locked */}
+            {replyIsOwn && !isEditingThis && !(item as any).hasActiveConnectRequest && (
               <TouchableOpacity
                 onPress={() => handleReplyMenu(item)}
                 hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
@@ -878,6 +1024,55 @@ export default function ConfessionThreadScreen() {
                 />
               </TouchableOpacity>
             )}
+
+            {/* Connect status badges for OP (always visible when status exists) */}
+            {showPlusButton && !isDemoMode && (() => {
+              const isConnecting = connectingReplyId === item.id;
+
+              // Already connected - show match indicator
+              if (connectStatus?.status === 'accepted') {
+                return (
+                  <View style={styles.replyConnectBadgeConnected}>
+                    <Ionicons name="checkmark-circle" size={14} color="#4CAF50" />
+                    <Text style={styles.replyConnectBadgeConnectedText}>Connected</Text>
+                  </View>
+                );
+              }
+
+              // Pending - show waiting indicator
+              if (connectStatus?.status === 'pending') {
+                return (
+                  <View style={styles.replyConnectBadgePending}>
+                    <Ionicons name="hourglass-outline" size={14} color={COLORS.primary} />
+                    <Text style={styles.replyConnectBadgePendingText}>Pending</Text>
+                  </View>
+                );
+              }
+
+              // Rejected - show rejected state (OP can see the commenter declined)
+              if (connectStatus?.status === 'rejected') {
+                return (
+                  <View style={styles.replyConnectBadgeRejected}>
+                    <Ionicons name="close-circle-outline" size={14} color={COLORS.textMuted} />
+                    <Text style={styles.replyConnectBadgeRejectedText}>Declined</Text>
+                  </View>
+                );
+              }
+
+              // Expired - show expired state (OP can try again)
+              if (connectStatus?.status === 'expired') {
+                return (
+                  <View style={styles.replyConnectBadgeExpired}>
+                    <Ionicons name="time-outline" size={14} color={COLORS.textMuted} />
+                    <Text style={styles.replyConnectBadgeExpiredText}>Expired</Text>
+                  </View>
+                );
+              }
+
+              // UX FIX: Connect button moved BELOW reply text - not rendered in header
+              // Status badges (above) are kept in header, Connect action is below
+              return null;
+            })()}
           </View>
 
           {/* Reply text or inline edit input */}
@@ -924,6 +1119,29 @@ export default function ConfessionThreadScreen() {
               {item.type === 'voice' ? `🎙️ Voice reply (${item.voiceDurationSec || 0}s)` : item.text}
             </Text>
           )}
+
+          {/* UX FIX: Connect button BELOW reply text - only shown when this reply is selected */}
+          {isSelectedForConnect && !hasActiveCommentConnect && !connectStatus?.status && (
+            <View style={styles.replyConnectActionRow}>
+              <TouchableOpacity
+                onPress={() => handleRequestCommentConnect(item.id)}
+                disabled={connectingReplyId === item.id}
+                style={[
+                  styles.replyConnectButtonBelow,
+                  connectingReplyId === item.id && styles.replyConnectButtonLoading,
+                ]}
+              >
+                {connectingReplyId === item.id ? (
+                  <ActivityIndicator size="small" color={COLORS.white} />
+                ) : (
+                  <>
+                    <Ionicons name="heart-outline" size={14} color={COLORS.white} />
+                    <Text style={styles.replyConnectButtonText}>Connect</Text>
+                  </>
+                )}
+              </TouchableOpacity>
+            </View>
+          )}
         </View>
 
         {/* Inline composer for OP reply-to-reply */}
@@ -955,24 +1173,59 @@ export default function ConfessionThreadScreen() {
         {/* Nested child replies */}
         {childRepliesMap[item.id] && childRepliesMap[item.id].length > 0 && (
           <View style={styles.nestedRepliesContainer}>
-            {childRepliesMap[item.id].map((childReply) => {
+            {childRepliesMap[item.id].map((childReply: any) => {
               const childIsOwn = isOwnReply(childReply);
               const childIsFromOP = isReplyFromOP(childReply);
               const isEditingChild = editingReplyId === childReply.id;
 
+              // BUG 3 FIX: Extract commenterInfo for nested replies too
+              const childCommenterInfo = childReply.commenterInfo;
+              // FIX: Correct fallback for backward compat - isAnonymous=true means blur (not anonymous), isAnonymous=false means open
+              const childIdentityMode = childCommenterInfo?.mode || childReply.identityMode || (childReply.isAnonymous === false ? 'open' : 'blur');
+              const childIsAnonymousMode = childIdentityMode === 'anonymous';
+              const childIsBlurMode = childIdentityMode === 'blur';
+              const childIsOpenMode = childIdentityMode === 'open';
+
+              // Build display name for nested reply
+              let childDisplayName = 'Anonymous';
+              if (childIsOpenMode && childCommenterInfo?.name) {
+                childDisplayName = childCommenterInfo.name;
+                if (childCommenterInfo.age) childDisplayName += `, ${childCommenterInfo.age}`;
+                if (childCommenterInfo.gender && GENDER_LABELS[childCommenterInfo.gender]) {
+                  childDisplayName += ` ${GENDER_LABELS[childCommenterInfo.gender]}`;
+                }
+              } else if (childIsBlurMode && childCommenterInfo?.name) {
+                childDisplayName = childCommenterInfo.name;
+                if (childCommenterInfo.age) childDisplayName += `, ${childCommenterInfo.age}`;
+                if (childCommenterInfo.gender && GENDER_LABELS[childCommenterInfo.gender]) {
+                  childDisplayName += ` ${GENDER_LABELS[childCommenterInfo.gender]}`;
+                }
+              }
+
+              const childPhotoUrl = childCommenterInfo?.photoUrl;
+              const childIsPhotoBlurred = childCommenterInfo?.photoBlurred || childIsBlurMode;
+
               return (
                 <View key={childReply.id} style={styles.nestedReplyCard}>
                   <View style={styles.nestedReplyHeader}>
-                    <View style={[styles.nestedReplyAvatar, childReply.isAnonymous && styles.avatarAnonymous]}>
-                      <Ionicons
-                        name={childReply.isAnonymous ? 'eye-off' : 'person'}
-                        size={8}
-                        color={childReply.isAnonymous ? COLORS.textMuted : COLORS.primary}
+                    {/* BUG 3 FIX: Render nested avatar based on identity mode */}
+                    {childIsAnonymousMode ? (
+                      <View style={[styles.nestedReplyAvatar, styles.avatarAnonymous]}>
+                        <Ionicons name="eye-off" size={8} color={COLORS.textMuted} />
+                      </View>
+                    ) : childPhotoUrl ? (
+                      <Image
+                        source={{ uri: childPhotoUrl }}
+                        style={styles.nestedReplyAvatarImage}
+                        contentFit="cover"
+                        blurRadius={childIsPhotoBlurred ? REPLY_BLUR_RADIUS : 0}
                       />
-                    </View>
-                    <Text style={styles.nestedReplyAuthor}>
-                      {childReply.isAnonymous ? 'Anonymous' : 'Someone'}
-                    </Text>
+                    ) : (
+                      <View style={styles.nestedReplyAvatar}>
+                        <Ionicons name="person" size={8} color={COLORS.primary} />
+                      </View>
+                    )}
+                    <Text style={styles.nestedReplyAuthor}>{childDisplayName}</Text>
                     {childIsFromOP && (
                       <View style={styles.opBadgeSmall}>
                         <Text style={styles.opBadgeSmallText}>OP</Text>
@@ -983,8 +1236,8 @@ export default function ConfessionThreadScreen() {
                     )}
                     <Text style={styles.nestedReplyTime}>{getTimeAgo(childReply.createdAt)}</Text>
 
-                    {/* Three-dots menu for own nested replies */}
-                    {childIsOwn && !isEditingChild && (
+                    {/* Three-dots menu for own nested replies - FIX 3: hidden when locked */}
+                    {childIsOwn && !isEditingChild && !(childReply as any).hasActiveConnectRequest && (
                       <TouchableOpacity
                         onPress={() => handleReplyMenu(childReply)}
                         hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
@@ -1046,7 +1299,7 @@ export default function ConfessionThreadScreen() {
             })}
           </View>
         )}
-      </View>
+      </CardWrapper>
     );
   };
 
@@ -1282,30 +1535,114 @@ export default function ConfessionThreadScreen() {
 
         {/* Bottom Composer (hidden for OP) */}
         {showBottomComposer && (
-          <View style={[styles.bottomComposer, { paddingBottom: Math.max(insets.bottom, 12) }]}>
-            <TouchableOpacity onPress={() => setShowEmojiPicker(true)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
-              <Text style={{ fontSize: 20 }}>🙂</Text>
-            </TouchableOpacity>
-            <TextInput
-              style={styles.composerInput}
-              placeholder="Reply anonymously..."
-              placeholderTextColor={COLORS.textMuted}
-              value={replyText}
-              onChangeText={setReplyText}
-              maxLength={300}
-              multiline
-            />
-            <TouchableOpacity
-              style={[styles.sendButton, (!replyText.trim() || sending) && styles.buttonDisabled]}
-              onPress={handleSendReply}
-              disabled={!replyText.trim() || sending}
-            >
-              <Ionicons
-                name="send"
-                size={18}
-                color={replyText.trim() && !sending ? COLORS.white : COLORS.textMuted}
-              />
-            </TouchableOpacity>
+          <View style={[styles.bottomComposerWrapper, { paddingBottom: Math.max(insets.bottom, 12) }]}>
+            {/* BUG 1 FIX: Show "already replied" message when user has replied */}
+            {composerDisabled ? (
+              <View style={styles.alreadyRepliedBanner}>
+                <Ionicons name="checkmark-circle" size={16} color={COLORS.primary} />
+                <Text style={styles.alreadyRepliedText}>
+                  You've already replied. Tap ••• on your reply to edit.
+                </Text>
+              </View>
+            ) : (
+              <>
+                {/* Identity Mode Selector */}
+                <View style={styles.identitySelector}>
+                  <Text style={styles.identitySelectorLabel}>Reply as:</Text>
+                  <View style={styles.identityOptions}>
+                    <TouchableOpacity
+                      style={[
+                        styles.identityOption,
+                        identityMode === 'anonymous' && styles.identityOptionActive,
+                      ]}
+                      onPress={() => setIdentityMode('anonymous')}
+                    >
+                      <Ionicons
+                        name="eye-off"
+                        size={14}
+                        color={identityMode === 'anonymous' ? COLORS.white : COLORS.textMuted}
+                      />
+                      <Text
+                        style={[
+                          styles.identityOptionText,
+                          identityMode === 'anonymous' && styles.identityOptionTextActive,
+                        ]}
+                      >
+                        Anonymous
+                      </Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={[
+                        styles.identityOption,
+                        identityMode === 'blur' && styles.identityOptionActive,
+                      ]}
+                      onPress={() => setIdentityMode('blur')}
+                    >
+                      <Ionicons
+                        name="water"
+                        size={14}
+                        color={identityMode === 'blur' ? COLORS.white : COLORS.textMuted}
+                      />
+                      <Text
+                        style={[
+                          styles.identityOptionText,
+                          identityMode === 'blur' && styles.identityOptionTextActive,
+                        ]}
+                      >
+                        Blur
+                      </Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity
+                      style={[
+                        styles.identityOption,
+                        identityMode === 'open' && styles.identityOptionActive,
+                      ]}
+                      onPress={() => setIdentityMode('open')}
+                    >
+                      <Ionicons
+                        name="person"
+                        size={14}
+                        color={identityMode === 'open' ? COLORS.white : COLORS.textMuted}
+                      />
+                      <Text
+                        style={[
+                          styles.identityOptionText,
+                          identityMode === 'open' && styles.identityOptionTextActive,
+                        ]}
+                      >
+                        Open to All
+                      </Text>
+                    </TouchableOpacity>
+                  </View>
+                </View>
+                {/* Input Row */}
+                <View style={styles.bottomComposer}>
+                  <TouchableOpacity onPress={() => setShowEmojiPicker(true)} hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}>
+                    <Text style={{ fontSize: 20 }}>🙂</Text>
+                  </TouchableOpacity>
+                  <TextInput
+                    style={styles.composerInput}
+                    placeholder={identityMode === 'anonymous' ? 'Reply anonymously...' : identityMode === 'blur' ? 'Reply with blur...' : 'Reply openly...'}
+                    placeholderTextColor={COLORS.textMuted}
+                    value={replyText}
+                    onChangeText={setReplyText}
+                    maxLength={300}
+                    multiline
+                  />
+                  <TouchableOpacity
+                    style={[styles.sendButton, (!replyText.trim() || sending) && styles.buttonDisabled]}
+                    onPress={handleSendReply}
+                    disabled={!replyText.trim() || sending}
+                  >
+                    <Ionicons
+                      name="send"
+                      size={18}
+                      color={replyText.trim() && !sending ? COLORS.white : COLORS.textMuted}
+                    />
+                  </TouchableOpacity>
+                </View>
+              </>
+            )}
           </View>
         )}
       </KeyboardAvoidingView>
@@ -1648,6 +1985,12 @@ const styles = StyleSheet.create({
     borderRadius: SIZES.radius.md,
     padding: SPACING.md,
   },
+  // UX FIX: Selected reply card for Connect action
+  replyCardSelected: {
+    borderWidth: 1.5,
+    borderColor: COLORS.primary,
+    backgroundColor: 'rgba(255,107,107,0.04)',
+  },
   replyHeader: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -1662,6 +2005,13 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(255,107,107,0.12)',
     justifyContent: 'center',
     alignItems: 'center',
+    flexShrink: 0,
+  },
+  // BUG 3 FIX: Style for reply avatar image (blur/open modes)
+  replyAvatarImage: {
+    width: REPLY_AVATAR_SIZE,
+    height: REPLY_AVATAR_SIZE,
+    borderRadius: REPLY_AVATAR_SIZE / 2,
     flexShrink: 0,
   },
   replyAuthor: {
@@ -1707,6 +2057,100 @@ const styles = StyleSheet.create({
     marginLeft: SPACING.sm,
     padding: SPACING.xs,
   },
+  // Comment Connect button and badges (for OP to connect with commenters)
+  replyConnectButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: SPACING.xxs,
+    marginLeft: SPACING.sm,
+    paddingHorizontal: SPACING.sm,
+    paddingVertical: SPACING.xxs + 1,
+    borderRadius: SIZES.radius.lg,
+    backgroundColor: COLORS.primary,
+  },
+  replyConnectButtonLoading: {
+    opacity: 0.7,
+    paddingHorizontal: SPACING.md,
+  },
+  replyConnectButtonText: {
+    fontSize: FONT_SIZE.xs,
+    fontWeight: FONT_WEIGHT.semibold,
+    color: COLORS.white,
+  },
+  // UX FIX: Connect action row below reply text (shown only when selected)
+  replyConnectActionRow: {
+    marginTop: SPACING.sm,
+    alignItems: 'flex-start',
+  },
+  replyConnectButtonBelow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: SPACING.xs,
+    paddingHorizontal: SPACING.md,
+    paddingVertical: SPACING.sm,
+    borderRadius: SIZES.radius.lg,
+    backgroundColor: COLORS.primary,
+  },
+  replyConnectBadgePending: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: SPACING.xxs,
+    marginLeft: SPACING.sm,
+    paddingHorizontal: SPACING.sm,
+    paddingVertical: SPACING.xxs + 1,
+    borderRadius: SIZES.radius.lg,
+    backgroundColor: 'rgba(255,107,107,0.12)',
+  },
+  replyConnectBadgePendingText: {
+    fontSize: FONT_SIZE.xs,
+    fontWeight: FONT_WEIGHT.medium,
+    color: COLORS.primary,
+  },
+  replyConnectBadgeConnected: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: SPACING.xxs,
+    marginLeft: SPACING.sm,
+    paddingHorizontal: SPACING.sm,
+    paddingVertical: SPACING.xxs + 1,
+    borderRadius: SIZES.radius.lg,
+    backgroundColor: 'rgba(76,175,80,0.12)',
+  },
+  replyConnectBadgeConnectedText: {
+    fontSize: FONT_SIZE.xs,
+    fontWeight: FONT_WEIGHT.medium,
+    color: '#4CAF50',
+  },
+  replyConnectBadgeRejected: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: SPACING.xxs,
+    marginLeft: SPACING.sm,
+    paddingHorizontal: SPACING.sm,
+    paddingVertical: SPACING.xxs + 1,
+    borderRadius: SIZES.radius.lg,
+    backgroundColor: 'rgba(153,153,153,0.12)',
+  },
+  replyConnectBadgeRejectedText: {
+    fontSize: FONT_SIZE.xs,
+    fontWeight: FONT_WEIGHT.medium,
+    color: COLORS.textMuted,
+  },
+  replyConnectBadgeExpired: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: SPACING.xxs,
+    marginLeft: SPACING.sm,
+    paddingHorizontal: SPACING.sm,
+    paddingVertical: SPACING.xxs + 1,
+    borderRadius: SIZES.radius.lg,
+    backgroundColor: 'rgba(153,153,153,0.08)',
+  },
+  replyConnectBadgeExpiredText: {
+    fontSize: FONT_SIZE.xs,
+    fontWeight: FONT_WEIGHT.medium,
+    color: COLORS.textMuted,
+  },
   replyText: {
     fontSize: FONT_SIZE.md,
     lineHeight: moderateScale(20, 0.4),
@@ -1737,6 +2181,13 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(255,107,107,0.1)',
     justifyContent: 'center',
     alignItems: 'center',
+    flexShrink: 0,
+  },
+  // BUG 3 FIX: Style for nested reply avatar image
+  nestedReplyAvatarImage: {
+    width: NESTED_AVATAR_SIZE,
+    height: NESTED_AVATAR_SIZE,
+    borderRadius: NESTED_AVATAR_SIZE / 2,
     flexShrink: 0,
   },
   nestedReplyAuthor: {
@@ -1868,14 +2319,69 @@ const styles = StyleSheet.create({
   },
 
   // ── Bottom Composer ──
+  bottomComposerWrapper: {
+    backgroundColor: COLORS.white,
+    borderTopWidth: HAIRLINE,
+    borderTopColor: COLORS.border,
+  },
+  // BUG 1 FIX: Styles for "already replied" banner
+  alreadyRepliedBanner: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: SPACING.sm,
+    paddingVertical: SPACING.md,
+    paddingHorizontal: SPACING.base,
+    backgroundColor: 'rgba(255,107,107,0.08)',
+  },
+  alreadyRepliedText: {
+    fontSize: FONT_SIZE.caption,
+    color: COLORS.text,
+    fontWeight: FONT_WEIGHT.medium,
+  },
+  identitySelector: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: SPACING.md,
+    paddingTop: SPACING.sm,
+    gap: SPACING.sm,
+  },
+  identitySelectorLabel: {
+    fontSize: FONT_SIZE.xs,
+    color: COLORS.textMuted,
+    fontWeight: FONT_WEIGHT.medium,
+  },
+  identityOptions: {
+    flexDirection: 'row',
+    gap: SPACING.xs,
+  },
+  identityOption: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: SPACING.sm,
+    paddingVertical: SPACING.xs,
+    borderRadius: SIZES.radius.xl,
+    backgroundColor: COLORS.backgroundDark,
+  },
+  identityOptionActive: {
+    backgroundColor: COLORS.primary,
+  },
+  identityOptionText: {
+    fontSize: FONT_SIZE.xs,
+    color: COLORS.textMuted,
+    fontWeight: FONT_WEIGHT.medium,
+  },
+  identityOptionTextActive: {
+    color: COLORS.white,
+  },
   bottomComposer: {
     flexDirection: 'row',
     alignItems: 'flex-end',
     backgroundColor: COLORS.white,
     paddingHorizontal: SPACING.md,
     paddingTop: SPACING.sm,
-    borderTopWidth: HAIRLINE,
-    borderTopColor: COLORS.border,
+    paddingBottom: SPACING.sm,
     gap: SPACING.sm,
   },
   composerInput: {

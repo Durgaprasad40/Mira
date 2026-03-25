@@ -587,7 +587,8 @@ export default defineSchema({
     // Track how this match was created for UI organization
     // 'super_like' matches appear in Super Likes section, 'like' in New Matches
     // 'confession' for matches created via the two-step confess-connect flow
-    matchSource: v.optional(v.union(v.literal('like'), v.literal('super_like'), v.literal('confession'))),
+    // 'confession_comment' for matches created via comment-based connection
+    matchSource: v.optional(v.union(v.literal('like'), v.literal('super_like'), v.literal('confession'), v.literal('confession_comment'))),
   })
     .index('by_user1', ['user1Id'])
     .index('by_user2', ['user2Id'])
@@ -746,7 +747,8 @@ export default defineSchema({
       v.literal('crossed_paths'),
       v.literal('subscription'),
       v.literal('weekly_refresh'),
-      v.literal('profile_nudge')
+      v.literal('profile_nudge'),
+      v.literal('comment_connect')
     ),
     title: v.string(),
     body: v.string(),
@@ -756,6 +758,8 @@ export default defineSchema({
       userId: v.optional(v.string()),
       pairKey: v.optional(v.string()), // Deterministic crossed paths pair key
       likeType: v.optional(v.union(v.literal('like'), v.literal('super_like'))), // Type of like received
+      confessionId: v.optional(v.string()), // For comment_connect notifications
+      connectId: v.optional(v.string()), // For comment_connect notifications
     })),
     // 4-1: Deduplication key — same key = same logical event (upsert instead of insert)
     dedupeKey: v.optional(v.string()),
@@ -1135,6 +1139,7 @@ export default defineSchema({
     age: v.number(),
     city: v.optional(v.string()),
     gender: v.string(),
+    // DEPRECATED: Photo reveal feature removed. Kept for backward compat with existing data.
     revealPolicy: v.optional(v.union(v.literal('mutual_only'), v.literal('request_based'))),
     isSetupComplete: v.boolean(),
     // Phase-1 imported fields (read-only after import, stored in Phase-2 for isolation)
@@ -1163,19 +1168,9 @@ export default defineSchema({
     updatedAt: v.number(),
   })
     .index('by_user', ['userId'])
-    .index('by_enabled', ['isPrivateEnabled']),
-
-  // Reveal Requests table (mutual photo reveal for Private Mode)
-  revealRequests: defineTable({
-    fromUserId: v.id('users'),
-    toUserId: v.id('users'),
-    status: v.union(v.literal('pending'), v.literal('accepted'), v.literal('declined')),
-    respondedAt: v.optional(v.number()),
-    createdAt: v.number(),
-  })
-    .index('by_from_user', ['fromUserId'])
-    .index('by_to_user', ['toUserId'])
-    .index('by_from_to', ['fromUserId', 'toUserId']),
+    .index('by_enabled', ['isPrivateEnabled'])
+    // P2-007 FIX: Add index for setup complete queries
+    .index('by_setup_complete', ['isSetupComplete']),
 
   // Truth & Dare Prompts (trending system)
   todPrompts: defineTable({
@@ -1462,13 +1457,24 @@ export default defineSchema({
     confessionId: v.id('confessions'),
     userId: v.id('users'),
     text: v.string(),
-    isAnonymous: v.boolean(),
+    isAnonymous: v.boolean(), // Legacy: true if anonymous or blur, false if open
+    // FIX 2: Identity mode for comments (replaces isAnonymous behavior)
+    // - anonymous: name hidden, photo hidden, gender hidden, age hidden
+    // - blur: partial name, blurred photo, gender visible, age visible
+    // - open: full name, full photo, gender visible, age visible
+    identityMode: v.optional(v.union(
+      v.literal('anonymous'),
+      v.literal('blur'),
+      v.literal('open')
+    )), // Default: 'blur' if not set (for backward compat, treat isAnonymous=true as 'blur')
     type: v.optional(v.union(v.literal('text'), v.literal('voice'))),
     voiceUrl: v.optional(v.string()),
     voiceDurationSec: v.optional(v.number()),
     parentReplyId: v.optional(v.id('confessionReplies')), // For reply-to-reply (OP responding to anonymous reply)
     createdAt: v.number(),
     editedAt: v.optional(v.number()), // Timestamp of last edit
+    // FIX 5: Lock reply when OP sends connect request (cannot edit/delete)
+    hasActiveConnectRequest: v.optional(v.boolean()),
   })
     .index('by_confession', ['confessionId'])
     .index('by_user', ['userId']),
@@ -1517,6 +1523,40 @@ export default defineSchema({
     .index('by_user_seen', ['userId', 'seen'])
     .index('by_user_created', ['userId', 'createdAt'])
     .index('by_confession', ['confessionId']),
+
+  // Comment-based Connection Requests table
+  // Allows confession authors (OP) to request a connection with anonymous commenters
+  // Flow: OP sees reply they like → requests connect → commenter accepts/rejects → match created
+  //
+  // RULES ENFORCED:
+  // - ONE active request per confession (pending or accepted blocks new requests)
+  // - 24h expiry on pending requests (allows OP to choose again after expiry)
+  // - Cannot request same user twice for same confession
+  // - Tagged confession connect flow blocks comment-based connect
+  confessionCommentConnects: defineTable({
+    confessionId: v.id('confessions'),     // The confession this connection originated from
+    replyId: v.id('confessionReplies'),    // The specific reply that triggered the connect request
+    fromUserId: v.id('users'),             // The OP (confession author) requesting connection
+    toUserId: v.id('users'),               // The anonymous commenter being requested
+    status: v.union(
+      v.literal('pending'),                // OP sent request, waiting for commenter response
+      v.literal('accepted'),               // Commenter accepted - match will be created
+      v.literal('rejected'),               // Commenter declined
+      v.literal('expired')                 // Request expired (24h timeout)
+    ),
+    createdAt: v.number(),                 // When OP sent the request
+    expiresAt: v.number(),                 // createdAt + 24h (for pending timeout)
+    respondedAt: v.optional(v.number()),   // When commenter responded
+    matchId: v.optional(v.id('matches')),  // Created match ID (if accepted)
+  })
+    .index('by_confession', ['confessionId'])           // Find all connects for a confession
+    .index('by_reply', ['replyId'])                     // Find connect for a specific reply
+    .index('by_from_user', ['fromUserId'])              // OP's sent requests
+    .index('by_to_user', ['toUserId'])                  // Commenter's received requests
+    .index('by_to_user_status', ['toUserId', 'status']) // Pending requests for commenter
+    .index('by_confession_reply', ['confessionId', 'replyId']) // Unique per confession+reply
+    .index('by_confession_status', ['confessionId', 'status']) // Find active requests per confession
+    .index('by_confession_to_user', ['confessionId', 'toUserId']), // Block duplicate requests to same user
 
   // Chat Rooms table (group chat rooms in Private section)
   chatRooms: defineTable({
@@ -1870,11 +1910,14 @@ export default defineSchema({
     user1UnmatchedAt: v.optional(v.number()),
     user2UnmatchedAt: v.optional(v.number()),
     // Track match source for analytics
-    matchSource: v.optional(v.union(v.literal('like'), v.literal('super_like'))),
+    matchSource: v.optional(v.union(v.literal('like'), v.literal('super_like'), v.literal('confession'), v.literal('confession_comment'))),
   })
     .index('by_user1', ['user1Id'])
     .index('by_user2', ['user2Id'])
-    .index('by_users', ['user1Id', 'user2Id']),
+    .index('by_users', ['user1Id', 'user2Id'])
+    // P2-007 FIX: Add indexes for common query patterns
+    .index('by_active', ['isActive'])
+    .index('by_matched_at', ['matchedAt']),
 
   // Phase-2 Private Conversations (DM threads for Desire Land matches)
   privateConversations: defineTable({
@@ -1922,7 +1965,10 @@ export default defineSchema({
   })
     .index('by_conversation', ['conversationId'])
     .index('by_conversation_created', ['conversationId', 'createdAt'])
-    .index('by_conversation_clientMessageId', ['conversationId', 'clientMessageId']),
+    .index('by_conversation_clientMessageId', ['conversationId', 'clientMessageId'])
+    // P2-007 FIX: Add indexes for sender and read status queries
+    .index('by_sender', ['senderId'])
+    .index('by_read_at', ['readAt']),
 
   // User support tickets for Help & Support inquiries
   supportTickets: defineTable({

@@ -13,7 +13,7 @@
 import { mutation, query, MutationCtx } from './_generated/server';
 import { v } from 'convex/values';
 import { Id } from './_generated/dataModel';
-import { resolveUserIdByAuthId, ensureUserByAuthId } from './helpers';
+import { resolveUserIdByAuthId, ensureUserByAuthId, isPairEligibleForPhase } from './helpers';
 
 // ═══════════════════════════════════════════════════════════════════════════
 // P0-002 FIX: Enhanced PII validation patterns for server-side safety
@@ -607,12 +607,19 @@ export const getConfession = query({
 });
 
 // Create a reply to a confession (text or voice only — no images/videos/gifs)
+// FIX 2: Added identityMode for commenter visibility control
 export const createReply = mutation({
   args: {
     confessionId: v.id('confessions'),
     userId: v.union(v.id('users'), v.string()),
     text: v.string(),
-    isAnonymous: v.boolean(),
+    isAnonymous: v.boolean(), // Legacy field - derived from identityMode
+    // FIX 2: Identity mode - anonymous/blur/open (default: blur)
+    identityMode: v.optional(v.union(
+      v.literal('anonymous'),
+      v.literal('blur'),
+      v.literal('open')
+    )),
     type: v.optional(v.union(v.literal('text'), v.literal('voice'))),
     voiceUrl: v.optional(v.string()),
     voiceDurationSec: v.optional(v.number()),
@@ -678,11 +685,17 @@ export const createReply = mutation({
       }
     }
 
+    // FIX 2: Default identity mode is 'blur' if not specified
+    const identityMode = args.identityMode || 'blur';
+    // Derive isAnonymous from identityMode for backward compatibility
+    const isAnonymousFromMode = identityMode !== 'open';
+
     const replyId = await ctx.db.insert('confessionReplies', {
       confessionId: args.confessionId,
       userId: userId,
       text: args.text.trim(),
-      isAnonymous: args.isAnonymous,
+      isAnonymous: isAnonymousFromMode, // Derived from identityMode
+      identityMode, // FIX 2: Store the identity mode
       type: replyType,
       voiceUrl: args.voiceUrl,
       voiceDurationSec: args.voiceDurationSec,
@@ -739,6 +752,11 @@ export const deleteReply = mutation({
     if (!reply) throw new Error('Reply not found.');
     if (reply.userId !== userId) throw new Error('You can only delete your own replies.');
 
+    // FIX 5: Block deletion if reply has active connect request
+    if (reply.hasActiveConnectRequest) {
+      throw new Error('Cannot delete reply with active connection request');
+    }
+
     // P1-003 FIX: Find and delete any nested replies (child replies to this reply)
     const childReplies = await ctx.db
       .query('confessionReplies')
@@ -781,15 +799,132 @@ export const deleteReply = mutation({
 });
 
 // Get replies for a confession
+// FIX 2: Enriched with commenter info based on identity mode
+// FIX 5: Reveals blur if viewer has accepted connect with commenter
 export const getReplies = query({
-  args: { confessionId: v.id('confessions') },
-  handler: async (ctx, { confessionId }) => {
+  args: {
+    confessionId: v.id('confessions'),
+    viewerId: v.optional(v.union(v.id('users'), v.string())), // FIX 5: Optional viewer for blur reveal check
+  },
+  handler: async (ctx, { confessionId, viewerId }) => {
     const replies = await ctx.db
       .query('confessionReplies')
       .withIndex('by_confession', (q) => q.eq('confessionId', confessionId))
       .order('asc')
       .collect();
-    return replies;
+
+    // FIX 5: Get all accepted connects for this confession to check for reveals
+    let acceptedConnects: { fromUserId: string; toUserId: string }[] = [];
+    if (viewerId) {
+      const resolvedViewerId = typeof viewerId === 'string'
+        ? (await ctx.db
+            .query('users')
+            .withIndex('by_auth_user_id', (q) => q.eq('authUserId', viewerId))
+            .first())?._id
+        : viewerId;
+
+      if (resolvedViewerId) {
+        const connects = await ctx.db
+          .query('confessionCommentConnects')
+          .withIndex('by_confession', (q) => q.eq('confessionId', confessionId))
+          .filter((q) => q.eq(q.field('status'), 'accepted'))
+          .collect();
+
+        // Filter to connects involving the viewer
+        acceptedConnects = connects
+          .filter((c) => c.fromUserId === resolvedViewerId || c.toUserId === resolvedViewerId)
+          .map((c) => ({ fromUserId: c.fromUserId as string, toUserId: c.toUserId as string }));
+      }
+    }
+
+    // FIX 2: Enrich replies with commenter info based on identity mode
+    const enrichedReplies = await Promise.all(
+      replies.map(async (reply) => {
+        const user = await ctx.db.get(reply.userId);
+        if (!user) {
+          return {
+            ...reply,
+            commenterInfo: null,
+          };
+        }
+
+        // Get commenter's primary photo
+        const photos = await ctx.db
+          .query('photos')
+          .withIndex('by_user_order', (q) => q.eq('userId', reply.userId))
+          .collect();
+        const primaryPhoto = photos.find((p) => p.isPrimary) || photos[0];
+
+        // Determine identity mode (backward compat: default to 'blur' if not set)
+        let mode = reply.identityMode || (reply.isAnonymous ? 'blur' : 'open');
+
+        // FIX 5: Check if viewer has accepted connect with this commenter - reveal blur
+        const isConnectedWithViewer = acceptedConnects.some(
+          (c) => c.fromUserId === (reply.userId as string) || c.toUserId === (reply.userId as string)
+        );
+        if (isConnectedWithViewer && mode === 'blur') {
+          mode = 'open'; // Reveal blur for connected users
+        }
+
+        // Calculate age
+        const dateOfBirth = user.dateOfBirth;
+        let age: number | undefined;
+        if (dateOfBirth) {
+          const birthDate = new Date(dateOfBirth);
+          const today = new Date();
+          age = today.getFullYear() - birthDate.getFullYear();
+          const monthDiff = today.getMonth() - birthDate.getMonth();
+          if (monthDiff < 0 || (monthDiff === 0 && today.getDate() < birthDate.getDate())) {
+            age--;
+          }
+        }
+
+        // Build commenter info based on identity mode
+        let commenterInfo: {
+          mode: string;
+          name?: string;
+          photoUrl?: string;
+          photoBlurred?: boolean;
+          gender?: string;
+          age?: number;
+          revealed?: boolean; // FIX 5: Flag to indicate reveal from connect
+        };
+
+        if (mode === 'anonymous') {
+          // ANONYMOUS: everything hidden (cannot be revealed)
+          commenterInfo = { mode: 'anonymous' };
+        } else if (mode === 'blur') {
+          // BLUR: partial name, blurred photo, gender, age
+          const firstName = user.name?.split(' ')[0] || 'Someone';
+          commenterInfo = {
+            mode: 'blur',
+            name: firstName,
+            photoUrl: primaryPhoto?.url,
+            photoBlurred: true,
+            gender: user.gender,
+            age,
+          };
+        } else {
+          // OPEN: full identity (or revealed from connect)
+          commenterInfo = {
+            mode: 'open',
+            name: user.name,
+            photoUrl: primaryPhoto?.url,
+            photoBlurred: false,
+            gender: user.gender,
+            age,
+            revealed: isConnectedWithViewer && reply.identityMode === 'blur', // Was blur, now revealed
+          };
+        }
+
+        return {
+          ...reply,
+          commenterInfo,
+        };
+      })
+    );
+
+    return enrichedReplies;
   },
 });
 
@@ -1261,6 +1396,30 @@ export const deleteConfession = mutation({
       await ctx.db.patch(conversation._id, { expiresAt: now });
     }
 
+    // ═══════════════════════════════════════════════════════════════════════════
+    // HARDENING FIX 2: Cancel any pending comment connect requests
+    // ═══════════════════════════════════════════════════════════════════════════
+    const commentConnects = await ctx.db
+      .query('confessionCommentConnects')
+      .withIndex('by_confession', (q) => q.eq('confessionId', args.confessionId))
+      .collect();
+
+    for (const connect of commentConnects) {
+      // Only cancel pending requests - accepted matches should remain
+      if (connect.status === 'pending') {
+        // Mark as expired (not deleted - preserves audit trail)
+        await ctx.db.patch(connect._id, {
+          status: 'expired',
+          respondedAt: now,
+        });
+        // Clear the lock on the reply (if reply still exists - it might be deleted above)
+        const reply = await ctx.db.get(connect.replyId);
+        if (reply && reply.hasActiveConnectRequest) {
+          await ctx.db.patch(connect.replyId, { hasActiveConnectRequest: false });
+        }
+      }
+    }
+
     // Soft delete the confession itself
     await ctx.db.patch(args.confessionId, {
       isDeleted: true,
@@ -1649,6 +1808,11 @@ export const editReply = mutation({
       throw new Error('You can only edit your own replies.');
     }
 
+    // FIX 5: Block editing if reply has active connect request
+    if (reply.hasActiveConnectRequest) {
+      throw new Error('Cannot edit reply with active connection request');
+    }
+
     // Validate text
     const trimmed = args.text.trim();
     if (trimmed.length < 1) {
@@ -1731,5 +1895,667 @@ export const reportReply = mutation({
     });
 
     return { success: true, alreadyReported: false };
+  },
+});
+
+// =============================================================================
+// COMMENT-BASED CONFESSION CONNECTION
+// =============================================================================
+// Allows confession authors (OP) to request a connection with anonymous commenters.
+// Flow: OP sees a reply they like → sends connect request → commenter accepts/rejects
+// If accepted, a match is created and both users can start chatting.
+//
+// CRITICAL RULES ENFORCED:
+// 1. ONE active request per confession (pending/accepted blocks new requests)
+// 2. Race condition prevention via atomic checks
+// 3. Cannot request same user twice for same confession
+// 4. 24h expiry on pending requests (allows OP to choose again after expiry)
+// 5. Tagged confession connect flow blocks comment-based connect
+// 6. Reply cannot be edited/deleted after request is sent
+// =============================================================================
+
+const COMMENT_CONNECT_EXPIRY_MS = 24 * 60 * 60 * 1000; // 24 hours
+
+// Helper: Check if any active (pending/accepted) request exists for a confession
+async function hasActiveCommentConnect(
+  ctx: MutationCtx,
+  confessionId: Id<'confessions'>
+): Promise<{ hasActive: boolean; activeRequest?: any }> {
+  const now = Date.now();
+
+  // Get all requests for this confession
+  const allRequests = await ctx.db
+    .query('confessionCommentConnects')
+    .withIndex('by_confession', (q) => q.eq('confessionId', confessionId))
+    .collect();
+
+  // Check for any pending (non-expired) or accepted request
+  for (const req of allRequests) {
+    if (req.status === 'accepted') {
+      return { hasActive: true, activeRequest: req };
+    }
+    if (req.status === 'pending' && req.expiresAt > now) {
+      return { hasActive: true, activeRequest: req };
+    }
+  }
+
+  return { hasActive: false };
+}
+
+// Helper: Auto-expire pending requests that have passed 24h
+// HARDENING FIX 2: Also clears hasActiveConnectRequest flag on associated replies
+async function expirePendingRequests(
+  ctx: MutationCtx,
+  confessionId: Id<'confessions'>
+): Promise<number> {
+  const now = Date.now();
+  let expiredCount = 0;
+
+  const pendingRequests = await ctx.db
+    .query('confessionCommentConnects')
+    .withIndex('by_confession', (q) => q.eq('confessionId', confessionId))
+    .filter((q) => q.eq(q.field('status'), 'pending'))
+    .collect();
+
+  for (const req of pendingRequests) {
+    if (req.expiresAt <= now) {
+      // Mark request as expired
+      await ctx.db.patch(req._id, { status: 'expired' });
+      expiredCount++;
+
+      // HARDENING FIX 2: Clear the lock on the reply
+      const reply = await ctx.db.get(req.replyId);
+      if (reply && reply.hasActiveConnectRequest) {
+        await ctx.db.patch(req.replyId, { hasActiveConnectRequest: false });
+      }
+    }
+  }
+
+  return expiredCount;
+}
+
+// Request to connect with a commenter (OP only)
+export const requestCommentConnect = mutation({
+  args: {
+    confessionId: v.id('confessions'),
+    replyId: v.id('confessionReplies'),
+    userId: v.union(v.id('users'), v.string()), // OP's userId
+  },
+  handler: async (ctx, args) => {
+    // Map authUserId -> Convex Id<"users">
+    const userId = await ensureUserByAuthId(ctx, args.userId as string);
+    const now = Date.now();
+
+    // Get the confession
+    const confession = await ctx.db.get(args.confessionId);
+    if (!confession) {
+      throw new Error('Confession not found');
+    }
+
+    // Verify the user is the confession author (OP)
+    if (confession.userId !== userId) {
+      throw new Error('Only the confession author can request connections');
+    }
+
+    // Check if confession is deleted or expired
+    if (confession.isDeleted) {
+      throw new Error('This confession has been deleted');
+    }
+    if (confession.expiresAt && confession.expiresAt < now) {
+      throw new Error('This confession has expired');
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // FIX 7: BLOCK TAG FLOW CONFLICT
+    // ═══════════════════════════════════════════════════════════════════════════
+    // If this is a tagged confession and tagged user has connected or author is pending,
+    // block comment-based connect entirely
+    if (confession.taggedUserId) {
+      const taggedResponse = confession.taggedUserResponse;
+      const authorResponse = confession.authorResponse;
+
+      // If tagged flow is active (connected or pending), block comment connect
+      if (taggedResponse === 'connected' || authorResponse === 'pending' || authorResponse === 'connected') {
+        throw new Error('Cannot use comment connect when tagged connect is active');
+      }
+    }
+
+    // Get the reply
+    const reply = await ctx.db.get(args.replyId);
+    if (!reply) {
+      throw new Error('Reply not found');
+    }
+
+    // Verify the reply belongs to this confession
+    if (reply.confessionId !== args.confessionId) {
+      throw new Error('Reply does not belong to this confession');
+    }
+
+    // Cannot connect with yourself
+    if (reply.userId === userId) {
+      throw new Error('Cannot connect with your own reply');
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // FIX 4: AUTO-EXPIRE PENDING REQUESTS
+    // ═══════════════════════════════════════════════════════════════════════════
+    // First, expire any pending requests that have passed 24h
+    await expirePendingRequests(ctx, args.confessionId);
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // FIX 1 & 2: ONE ACTIVE REQUEST PER CONFESSION (with race condition guard)
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Check if any active (pending/accepted) request exists for this confession
+    const { hasActive, activeRequest } = await hasActiveCommentConnect(ctx, args.confessionId);
+
+    if (hasActive) {
+      // If this exact reply already has the active request, return idempotent
+      if (activeRequest.replyId === args.replyId) {
+        return {
+          success: true,
+          alreadyRequested: true,
+          status: activeRequest.status,
+          connectId: activeRequest._id,
+        };
+      }
+      // Otherwise, block - can only have ONE active request per confession
+      throw new Error('You already have an active connection request for this confession');
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // FIX 3: BLOCK REPEATED REQUEST TO SAME USER
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Check if we already sent a request to this user for this confession (any status)
+    const existingToUser = await ctx.db
+      .query('confessionCommentConnects')
+      .withIndex('by_confession_to_user', (q) =>
+        q.eq('confessionId', args.confessionId).eq('toUserId', reply.userId)
+      )
+      .first();
+
+    if (existingToUser) {
+      // If it's expired or rejected, we COULD allow re-request, but for now block
+      // to prevent harassment. OP must wait for expiry of active request.
+      if (existingToUser.status === 'pending' || existingToUser.status === 'accepted') {
+        return {
+          success: true,
+          alreadyRequested: true,
+          status: existingToUser.status,
+          connectId: existingToUser._id,
+        };
+      }
+      // Rejected/expired - user already declined, do not allow re-request
+      if (existingToUser.status === 'rejected') {
+        throw new Error('This user has already declined your connection request');
+      }
+      // Expired - allow new request (fall through)
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // ONE PAIR, ONE CONNECTION: Check pair eligibility (replaces block + match checks)
+    // ═══════════════════════════════════════════════════════════════════════════
+    // If users have ANY prior Phase-1 history (blocks, matches, likes, etc.), block connect
+    const isEligible = await isPairEligibleForPhase(ctx, userId, reply.userId, 'phase1');
+    if (!isEligible) {
+      throw new Error('Cannot connect with this user');
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // HARDENING FIX 1: ATOMIC + IDEMPOTENT REQUEST CREATION
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Convex mutations are serializable - concurrent calls are executed sequentially.
+    // This final check ensures we don't create duplicates even under retry scenarios.
+    const finalCheck = await hasActiveCommentConnect(ctx, args.confessionId);
+    if (finalCheck.hasActive) {
+      // IDEMPOTENT: If active request exists for same reply, return it
+      if (finalCheck.activeRequest.replyId === args.replyId) {
+        return {
+          success: true,
+          alreadyRequested: true,
+          status: finalCheck.activeRequest.status,
+          connectId: finalCheck.activeRequest._id,
+          expiresAt: finalCheck.activeRequest.expiresAt,
+        };
+      }
+      // Different reply - cannot have multiple active requests
+      throw new Error('You already have an active connection request for this confession');
+    }
+
+    // Create the connection request with 24h expiry
+    const expiresAt = now + COMMENT_CONNECT_EXPIRY_MS;
+    const connectId = await ctx.db.insert('confessionCommentConnects', {
+      confessionId: args.confessionId,
+      replyId: args.replyId,
+      fromUserId: userId,
+      toUserId: reply.userId,
+      status: 'pending',
+      createdAt: now,
+      expiresAt,
+    });
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // HARDENING FIX 1: POST-INSERT VERIFICATION (belt + suspenders)
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Verify we don't have duplicate active requests after insert
+    // This catches any edge case where concurrent requests might have both passed
+    const allActive = await ctx.db
+      .query('confessionCommentConnects')
+      .withIndex('by_confession', (q) => q.eq('confessionId', args.confessionId))
+      .filter((q) =>
+        q.or(
+          q.eq(q.field('status'), 'pending'),
+          q.eq(q.field('status'), 'accepted')
+        )
+      )
+      .collect();
+
+    // Filter to only valid pending (not expired)
+    const validActive = allActive.filter((r) =>
+      r.status === 'accepted' || (r.status === 'pending' && r.expiresAt > now)
+    );
+
+    if (validActive.length > 1) {
+      // Multiple active requests detected - keep oldest, delete newest (ours)
+      const oldest = validActive.reduce((a, b) => (a.createdAt < b.createdAt ? a : b));
+      if (oldest._id !== connectId) {
+        // Our request is not the oldest - delete it and return the existing one
+        await ctx.db.delete(connectId);
+        return {
+          success: true,
+          alreadyRequested: true,
+          status: oldest.status,
+          connectId: oldest._id,
+          expiresAt: oldest.expiresAt,
+        };
+      }
+      // Our request is the oldest - delete the others
+      for (const req of validActive) {
+        if (req._id !== connectId) {
+          await ctx.db.delete(req._id);
+        }
+      }
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // FIX 5: LOCK THE REPLY (mark as having active connection request)
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Mark the reply as locked (cannot be edited/deleted)
+    await ctx.db.patch(args.replyId, {
+      hasActiveConnectRequest: true,
+    });
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // FIX 4: CREATE NOTIFICATION FOR COMMENTER
+    // ═══════════════════════════════════════════════════════════════════════════
+    await ctx.db.insert('notifications', {
+      userId: reply.userId,
+      type: 'comment_connect',
+      title: 'Connection Request',
+      body: 'Someone wants to connect based on your confession reply!',
+      data: {
+        confessionId: args.confessionId as string,
+        connectId: connectId as string,
+      },
+      dedupeKey: `comment_connect:${connectId}`,
+      createdAt: now,
+      expiresAt, // Same expiry as the connect request (24h)
+    });
+
+    return {
+      success: true,
+      alreadyRequested: false,
+      status: 'pending',
+      connectId,
+      expiresAt,
+    };
+  },
+});
+
+// Respond to a comment connection request (commenter only)
+export const respondToCommentConnect = mutation({
+  args: {
+    connectId: v.id('confessionCommentConnects'),
+    userId: v.union(v.id('users'), v.string()), // Commenter's userId
+    action: v.union(v.literal('accept'), v.literal('reject')),
+  },
+  handler: async (ctx, args) => {
+    // Map authUserId -> Convex Id<"users">
+    const userId = await ensureUserByAuthId(ctx, args.userId as string);
+
+    // Get the connection request
+    const connect = await ctx.db.get(args.connectId);
+    if (!connect) {
+      throw new Error('Connection request not found');
+    }
+
+    // Verify this user is the recipient (commenter)
+    if (connect.toUserId !== userId) {
+      throw new Error('Only the recipient can respond to this request');
+    }
+
+    // Check if already responded
+    if (connect.status !== 'pending') {
+      return {
+        success: true,
+        alreadyResponded: true,
+        status: connect.status,
+        matchId: connect.matchId,
+      };
+    }
+
+    const now = Date.now();
+
+    // FIX 4: Check if request has expired (24h limit)
+    if (connect.expiresAt && connect.expiresAt <= now) {
+      // Mark as expired
+      await ctx.db.patch(args.connectId, {
+        status: 'expired',
+        respondedAt: now,
+      });
+      // Clear the lock on the reply
+      const reply = await ctx.db.get(connect.replyId);
+      if (reply && reply.hasActiveConnectRequest) {
+        await ctx.db.patch(connect.replyId, { hasActiveConnectRequest: false });
+      }
+      return {
+        success: false,
+        expired: true,
+        message: 'This connection request has expired',
+      };
+    }
+
+    if (args.action === 'reject') {
+      // REJECT: Mark as rejected, no match created
+      await ctx.db.patch(args.connectId, {
+        status: 'rejected',
+        respondedAt: now,
+      });
+
+      // Clear the lock on the reply so OP can try another comment
+      const reply = await ctx.db.get(connect.replyId);
+      if (reply && reply.hasActiveConnectRequest) {
+        await ctx.db.patch(connect.replyId, { hasActiveConnectRequest: false });
+      }
+
+      return { success: true, action: 'rejected', matchCreated: false };
+    } else {
+      // ACCEPT: Create match!
+      const fromUserId = connect.fromUserId;
+
+      // Check if bidirectionally blocked (may have changed since request)
+      const isBlocked = await isBlockedBidirectional(ctx, fromUserId, userId);
+      if (isBlocked) {
+        // Mark as rejected due to block
+        await ctx.db.patch(args.connectId, {
+          status: 'rejected',
+          respondedAt: now,
+        });
+        throw new Error('Cannot connect due to block status');
+      }
+
+      // Check for existing match between these users (idempotency)
+      const existingMatch = await ctx.db
+        .query('matches')
+        .withIndex('by_user1', (q) => q.eq('user1Id', fromUserId))
+        .filter((q) => q.eq(q.field('user2Id'), userId))
+        .first();
+
+      const existingMatchReverse = await ctx.db
+        .query('matches')
+        .withIndex('by_user1', (q) => q.eq('user1Id', userId))
+        .filter((q) => q.eq(q.field('user2Id'), fromUserId))
+        .first();
+
+      let matchId: any = existingMatch?._id || existingMatchReverse?._id;
+
+      if (!matchId) {
+        // Create new match
+        matchId = await ctx.db.insert('matches', {
+          user1Id: fromUserId,
+          user2Id: userId,
+          matchedAt: now,
+          isActive: true,
+          matchSource: 'confession_comment', // Track that this came from comment connect
+        });
+      }
+
+      // Update connection request
+      await ctx.db.patch(args.connectId, {
+        status: 'accepted',
+        respondedAt: now,
+        matchId,
+      });
+
+      // FIX 1: Return the other user's ID for match-celebration navigation
+      return {
+        success: true,
+        action: 'accepted',
+        matchCreated: true,
+        matchId,
+        otherUserId: fromUserId, // The confession author (OP)
+      };
+    }
+  },
+});
+
+// Query: Get connection status for a specific reply (for OP to see if they've requested)
+export const getCommentConnectStatus = query({
+  args: {
+    confessionId: v.id('confessions'),
+    replyId: v.id('confessionReplies'),
+    userId: v.union(v.id('users'), v.string()),
+  },
+  handler: async (ctx, args) => {
+    // Map authUserId -> Convex Id<"users">
+    const userId = await resolveUserIdByAuthId(ctx, args.userId as string);
+    if (!userId) return null;
+
+    const connect = await ctx.db
+      .query('confessionCommentConnects')
+      .withIndex('by_confession_reply', (q) =>
+        q.eq('confessionId', args.confessionId).eq('replyId', args.replyId)
+      )
+      .first();
+
+    if (!connect) return null;
+
+    // Return status if user is the requester (OP) or recipient (commenter)
+    if (connect.fromUserId !== userId && connect.toUserId !== userId) {
+      return null; // Not involved in this connection
+    }
+
+    return {
+      connectId: connect._id,
+      status: connect.status,
+      isRequester: connect.fromUserId === userId,
+      isRecipient: connect.toUserId === userId,
+      matchId: connect.matchId,
+      createdAt: connect.createdAt,
+      respondedAt: connect.respondedAt,
+    };
+  },
+});
+
+// Query: Get pending connection requests for a user (commenter view)
+// HARDENING FIX 4: Also check request expiry
+export const getPendingCommentConnects = query({
+  args: {
+    userId: v.union(v.id('users'), v.string()),
+  },
+  handler: async (ctx, args) => {
+    // Map authUserId -> Convex Id<"users">
+    const userId = await resolveUserIdByAuthId(ctx, args.userId as string);
+    if (!userId) return [];
+
+    const now = Date.now();
+
+    // Get pending connection requests where this user is the recipient
+    const pendingConnects = await ctx.db
+      .query('confessionCommentConnects')
+      .withIndex('by_to_user_status', (q) =>
+        q.eq('toUserId', userId).eq('status', 'pending')
+      )
+      .collect();
+
+    // Enrich with confession and reply data
+    const result = [];
+    for (const connect of pendingConnects) {
+      // HARDENING FIX 4: Skip if request itself is expired (24h limit)
+      if (connect.expiresAt && connect.expiresAt <= now) continue;
+
+      // Get the confession
+      const confession = await ctx.db.get(connect.confessionId);
+      if (!confession) continue;
+
+      // Skip expired or deleted confessions
+      if (confession.isDeleted) continue;
+      if (confession.expiresAt && confession.expiresAt < now) continue;
+
+      // Get the reply (user's own reply)
+      const reply = await ctx.db.get(connect.replyId);
+      if (!reply) continue;
+
+      result.push({
+        connectId: connect._id,
+        confessionId: connect.confessionId,
+        replyId: connect.replyId,
+        confessionText: confession.text,
+        confessionMood: confession.mood,
+        replyText: reply.text,
+        requestedAt: connect.createdAt,
+        expiresAt: connect.expiresAt, // Include expiry for UI display
+      });
+    }
+
+    // Sort by most recent first
+    result.sort((a, b) => b.requestedAt - a.requestedAt);
+
+    return result;
+  },
+});
+
+// Query: Get badge count of pending comment connect requests
+// HARDENING FIX 4: Also check request expiry, not just confession expiry
+export const getPendingCommentConnectCount = query({
+  args: {
+    userId: v.union(v.id('users'), v.string()),
+  },
+  handler: async (ctx, args) => {
+    // Map authUserId -> Convex Id<"users">
+    const userId = await resolveUserIdByAuthId(ctx, args.userId as string);
+    if (!userId) return 0;
+
+    const pendingConnects = await ctx.db
+      .query('confessionCommentConnects')
+      .withIndex('by_to_user_status', (q) =>
+        q.eq('toUserId', userId).eq('status', 'pending')
+      )
+      .collect();
+
+    // HARDENING FIX 4: Filter to only non-expired requests and confessions
+    const now = Date.now();
+    let count = 0;
+    for (const connect of pendingConnects) {
+      // Skip if request itself is expired (24h limit)
+      if (connect.expiresAt && connect.expiresAt <= now) continue;
+
+      const confession = await ctx.db.get(connect.confessionId);
+      if (!confession) continue;
+      if (confession.isDeleted) continue;
+      if (confession.expiresAt && confession.expiresAt < now) continue;
+      count++;
+    }
+
+    return count;
+  },
+});
+
+// Query: Get connection statuses for all replies in a confession (batch for efficiency)
+// FIX 6: Also returns activeReplyId to enable UI lock (hide connect on non-selected replies)
+export const getCommentConnectStatusesForConfession = query({
+  args: {
+    confessionId: v.id('confessions'),
+    userId: v.union(v.id('users'), v.string()),
+  },
+  handler: async (ctx, args) => {
+    // Map authUserId -> Convex Id<"users">
+    const userId = await resolveUserIdByAuthId(ctx, args.userId as string);
+    if (!userId) return { statusMap: {}, activeReplyId: null, hasActiveRequest: false, alreadyConnectedUserIds: [] };
+
+    const now = Date.now();
+
+    // Get all connection requests for this confession
+    const connects = await ctx.db
+      .query('confessionCommentConnects')
+      .withIndex('by_confession', (q) => q.eq('confessionId', args.confessionId))
+      .collect();
+
+    // Build a map of replyId -> status for quick lookup
+    const statusMap: Record<string, {
+      connectId: string;
+      status: 'pending' | 'accepted' | 'rejected' | 'expired';
+      isRequester: boolean;
+      isRecipient: boolean;
+      matchId?: string;
+      expiresAt?: number;
+    }> = {};
+
+    // FIX 6: Track active request for UI lock
+    let activeReplyId: string | null = null;
+    let hasActiveRequest = false;
+
+    for (const connect of connects) {
+      // Determine effective status (treat expired pending as 'expired')
+      let effectiveStatus = connect.status;
+      if (connect.status === 'pending' && connect.expiresAt && connect.expiresAt <= now) {
+        effectiveStatus = 'expired';
+      }
+
+      // Track active requests (for UI lock - applies to all users viewing)
+      if (effectiveStatus === 'accepted' || effectiveStatus === 'pending') {
+        activeReplyId = connect.replyId as string;
+        hasActiveRequest = true;
+      }
+
+      // Only include in statusMap if user is involved
+      if (connect.fromUserId !== userId && connect.toUserId !== userId) continue;
+
+      statusMap[connect.replyId as string] = {
+        connectId: connect._id as string,
+        status: effectiveStatus,
+        isRequester: connect.fromUserId === userId,
+        isRecipient: connect.toUserId === userId,
+        matchId: connect.matchId as string | undefined,
+        expiresAt: connect.expiresAt,
+      };
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // ONE PAIR, ONE CONNECTION: Return ineligible commenter IDs
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Get all replies on this confession to find unique commenter IDs
+    const replies = await ctx.db
+      .query('confessionReplies')
+      .withIndex('by_confession', (q) => q.eq('confessionId', args.confessionId))
+      .collect();
+
+    // Get unique commenter user IDs (excluding self)
+    const commenterUserIds = [...new Set(
+      replies
+        .filter((r) => r.userId !== userId)
+        .map((r) => r.userId)
+    )];
+
+    // Check which commenters are ineligible (have any prior relationship with OP)
+    const ineligibleUserIds: string[] = [];
+    for (const commenterId of commenterUserIds) {
+      const isEligible = await isPairEligibleForPhase(ctx, userId, commenterId, 'phase1');
+      if (!isEligible) {
+        ineligibleUserIds.push(commenterId as string);
+      }
+    }
+
+    // Keep alreadyConnectedUserIds for backward compatibility (alias)
+    return { statusMap, activeReplyId, hasActiveRequest, alreadyConnectedUserIds: ineligibleUserIds };
   },
 });

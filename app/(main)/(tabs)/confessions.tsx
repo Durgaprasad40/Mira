@@ -337,6 +337,12 @@ export default function ConfessionsScreen() {
     !isDemoMode && convexUserId ? { userId: convexUserId } : 'skip'
   );
 
+  // Pending comment connect requests (commenters who OP wants to connect with)
+  const pendingCommentConnectCount = useQuery(
+    api.confessions.getPendingCommentConnectCount,
+    !isDemoMode && convexUserId ? { userId: convexUserId } : 'skip'
+  );
+
   // Convex mutations
   const toggleReactionMutation = useMutation(api.confessions.toggleReaction);
   const reportConfessionMutation = useMutation(api.confessions.reportConfession);
@@ -582,6 +588,11 @@ export default function ConfessionsScreen() {
   const handleCloseTaggedSection = useCallback(() => {
     setShowTaggedSection(false);
   }, []);
+
+  // Navigate to comment connect requests screen
+  const handleOpenConnectRequests = useCallback(() => {
+    safePush(router, '/(main)/comment-connect-requests');
+  }, [router]);
 
   // Auto-open Tagged modal if query param is set (from QA checklist)
   useEffect(() => {
@@ -1229,6 +1240,24 @@ export default function ConfessionsScreen() {
         </TouchableOpacity>
       )}
 
+      {/* Connect requests section (when someone wants to connect based on your reply) */}
+      {!isDemoMode && (pendingCommentConnectCount ?? 0) > 0 && (
+        <TouchableOpacity
+          style={styles.taggedForYouRow}
+          onPress={handleOpenConnectRequests}
+          activeOpacity={0.7}
+        >
+          <View style={styles.taggedForYouLeft}>
+            <Ionicons name="chatbubbles" size={18} color={COLORS.secondary} />
+            <Text style={styles.taggedForYouText}>Connect requests</Text>
+            <View style={[styles.taggedBadge, { backgroundColor: COLORS.secondary }]}>
+              <Text style={styles.taggedBadgeText}>{pendingCommentConnectCount}</Text>
+            </View>
+          </View>
+          <Ionicons name="chevron-forward" size={18} color={COLORS.textMuted} />
+        </TouchableOpacity>
+      )}
+
       {/* Secret Crushes */}
       {myCrushes.length > 0 && (
         <View style={styles.crushSection}>
@@ -1291,7 +1320,7 @@ export default function ConfessionsScreen() {
         </View>
       )}
     </View>
-  ), [myCrushes, trendingConfessions, trendingHero, handleRevealCrush, revealCrush, handleOpenThread, taggedConfessions, taggedBadgeCount, handleOpenTaggedSection]);
+  ), [myCrushes, trendingConfessions, trendingHero, handleRevealCrush, revealCrush, handleOpenThread, taggedConfessions, taggedBadgeCount, handleOpenTaggedSection, pendingCommentConnectCount, handleOpenConnectRequests]);
 
   return (
     <LoadingGuard
