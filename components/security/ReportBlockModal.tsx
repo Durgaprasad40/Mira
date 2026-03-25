@@ -48,6 +48,7 @@ export function ReportBlockModal({
   const blockMutation = useMutation(api.users.blockUser);
   const reportMutation = useMutation(api.users.reportUser);
   const unmatchMutation = useMutation(api.matches.unmatch);
+  const uncrushMutation = useMutation(api.likes.uncrush);
 
   // Track action with standard payload
   const logAction = (action: ActionType, reason?: string) => {
@@ -129,20 +130,33 @@ export function ReportBlockModal({
         { text: "Cancel", style: "cancel" },
         {
           text: "Yes",
-          onPress: () => {
+          onPress: async () => {
             logAction('uncrush');
             if (isDemoMode) {
               useDemoStore.getState().removeLike(reportedUserId);
+              Toast.show(`Removed crush on ${reportedUserName}`);
+              resetAndClose();
+              return;
             }
-            Toast.show(`Removed crush on ${reportedUserName}`);
-            resetAndClose();
+
+            // Convex mode: call uncrush mutation
+            try {
+              await uncrushMutation({
+                authUserId: currentUserId,
+                targetUserId: reportedUserId as any,
+              });
+              Toast.show(`Removed crush on ${reportedUserName}`);
+              resetAndClose();
+            } catch (error: any) {
+              Alert.alert("Error", error.message || "Failed to remove crush.");
+            }
           },
         },
       ]
     );
   };
 
-  // Block: keep existing behavior
+  // Block: persist to backend AND update local store
   const handleBlock = async () => {
     logAction('block');
     if (isDemoMode) {
@@ -158,6 +172,9 @@ export function ReportBlockModal({
         authUserId: currentUserId,
         blockedUserId: reportedUserId as any,
       });
+      // FIX: Also update local blockStore so blocked list shows the user immediately
+      const { useBlockStore } = await import('@/stores/blockStore');
+      useBlockStore.getState().blockUser(reportedUserId);
       resetAndClose();
       Toast.show(`${reportedUserName} blocked`);
       onBlockSuccess?.();
@@ -275,16 +292,7 @@ export function ReportBlockModal({
   // Main action sheet
   const renderMain = () => (
     <View style={styles.content}>
-      {/* Unmatch - only show if there's a matchId (matched users) */}
-      {matchId && (
-        <>
-          <TouchableOpacity style={styles.actionRow} onPress={handleUnmatch}>
-            <Ionicons name="close-circle-outline" size={20} color={COLORS.textLight} />
-            <Text style={styles.actionText}>Unmatch</Text>
-          </TouchableOpacity>
-          <View style={styles.divider} />
-        </>
-      )}
+      {/* REMOVED: Unmatch option - no longer needed in Phase-1 Messages */}
 
       {/* Uncrush */}
       <TouchableOpacity style={styles.actionRow} onPress={handleUncrush}>

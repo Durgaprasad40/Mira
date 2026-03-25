@@ -2,7 +2,7 @@ import React, { useState, useRef, useEffect } from 'react';
 import {
   View, Text, StyleSheet, TouchableOpacity, Alert,
 } from 'react-native';
-import { CameraView, useCameraPermissions } from 'expo-camera';
+import { CameraView, useCameraPermissions, useMicrophonePermissions } from 'expo-camera';
 import { Video, ResizeMode } from 'expo-av';
 import * as ImageManipulator from 'expo-image-manipulator';
 import { Paths, File as ExpoFile, Directory } from 'expo-file-system';
@@ -38,6 +38,7 @@ export default function CameraComposerScreen() {
   );
 
   const [permission, requestPermission] = useCameraPermissions();
+  const [micPermission, requestMicPermission] = useMicrophonePermissions();
   const [facing, setFacing] = useState<'front' | 'back'>('front');
 
   // Recording state
@@ -88,13 +89,35 @@ export default function CameraComposerScreen() {
 
   // VIDEO: Start recording
   const handleStartVideo = async () => {
-    if (!cameraRef.current || isRecordingVideo) return;
+    if (__DEV__) console.log('[CameraComposer] handleStartVideo called, isRecordingVideo:', isRecordingVideo);
+
+    if (!cameraRef.current || isRecordingVideo) {
+      if (__DEV__) console.log('[CameraComposer] Early return - cameraRef:', !!cameraRef.current, 'isRecording:', isRecordingVideo);
+      return;
+    }
+
+    // Check microphone permission for video recording
+    if (__DEV__) console.log('[CameraComposer] Checking mic permission:', micPermission?.granted);
+    if (!micPermission?.granted) {
+      if (__DEV__) console.log('[CameraComposer] Requesting mic permission...');
+      const result = await requestMicPermission();
+      if (__DEV__) console.log('[CameraComposer] Mic permission result:', result?.granted);
+      if (!result?.granted) {
+        Alert.alert(
+          'Microphone Required',
+          'Video recording requires microphone access. Please grant permission in Settings.',
+          [{ text: 'OK' }]
+        );
+        return;
+      }
+    }
 
     // Set state BEFORE recording
     setIsRecordingVideo(true);
     setCapturedType('video');
     setCapturedFacing(facing);
     setVideoSeconds(0);
+    if (__DEV__) console.log('[CameraComposer] State set, starting timer...');
 
     // Start timer
     videoTimerRef.current = setInterval(() => {
@@ -108,9 +131,11 @@ export default function CameraComposerScreen() {
     }, 1000);
 
     try {
+      if (__DEV__) console.log('[CameraComposer] Calling recordAsync...');
       const video = await cameraRef.current.recordAsync({
         maxDuration: MAX_VIDEO_SEC
       });
+      if (__DEV__) console.log('[CameraComposer] recordAsync resolved, uri:', video?.uri);
 
       // Recording finished - set URI and go to preview
       if (video?.uri) {
@@ -123,6 +148,7 @@ export default function CameraComposerScreen() {
       }
     } catch (e) {
       // Recording was stopped or failed
+      if (__DEV__) console.error('[CameraComposer] recordAsync error:', e);
       setIsRecordingVideo(false);
       if (videoTimerRef.current) {
         clearInterval(videoTimerRef.current);
@@ -133,7 +159,11 @@ export default function CameraComposerScreen() {
 
   // VIDEO: Stop recording
   const handleStopVideo = () => {
-    if (!cameraRef.current) return;
+    if (__DEV__) console.log('[CameraComposer] handleStopVideo called');
+    if (!cameraRef.current) {
+      if (__DEV__) console.log('[CameraComposer] handleStopVideo - no cameraRef');
+      return;
+    }
 
     if (videoTimerRef.current) {
       clearInterval(videoTimerRef.current);
@@ -141,6 +171,7 @@ export default function CameraComposerScreen() {
     }
 
     // This triggers recordAsync to resolve
+    if (__DEV__) console.log('[CameraComposer] Calling stopRecording...');
     cameraRef.current.stopRecording();
   };
 
@@ -212,8 +243,15 @@ export default function CameraComposerScreen() {
 
   const formatTime = (s: number) => `${Math.floor(s / 60)}:${(s % 60).toString().padStart(2, '0')}`;
 
-  // Permission check
-  if (!permission?.granted) {
+  // Permission check - camera is required, mic is needed for video
+  const needsCameraPermission = !permission?.granted;
+  const needsMicPermission = captureMode === 'video' && !micPermission?.granted;
+
+  if (__DEV__ && (needsCameraPermission || needsMicPermission)) {
+    console.log('[CameraComposer] Permission check - camera:', permission?.granted, 'mic:', micPermission?.granted, 'mode:', captureMode);
+  }
+
+  if (needsCameraPermission) {
     return (
       <View style={[styles.container, { paddingTop: insets.top }]}>
         <View style={styles.permissionBox}>
@@ -368,7 +406,10 @@ export default function CameraComposerScreen() {
             </TouchableOpacity>
             <TouchableOpacity
               style={[styles.modeToggleBtn, captureMode === 'video' && styles.modeToggleActive]}
-              onPress={() => setCaptureMode('video')}
+              onPress={() => {
+                if (__DEV__) console.log('[CameraComposer] Switching to video mode');
+                setCaptureMode('video');
+              }}
             >
               <Text style={[styles.modeToggleText, captureMode === 'video' && styles.modeToggleTextActive]}>
                 VIDEO
@@ -389,11 +430,17 @@ export default function CameraComposerScreen() {
         ) : (
           <>
             {!isRecordingVideo ? (
-              <TouchableOpacity style={styles.videoCaptureBtn} onPress={handleStartVideo}>
+              <TouchableOpacity style={styles.videoCaptureBtn} onPress={() => {
+                if (__DEV__) console.log('[CameraComposer] Record button pressed');
+                handleStartVideo();
+              }}>
                 <View style={styles.videoCaptureInner} />
               </TouchableOpacity>
             ) : (
-              <TouchableOpacity style={styles.videoStopBtn} onPress={handleStopVideo}>
+              <TouchableOpacity style={styles.videoStopBtn} onPress={() => {
+                if (__DEV__) console.log('[CameraComposer] Stop button pressed');
+                handleStopVideo();
+              }}>
                 <View style={styles.videoStopInner} />
               </TouchableOpacity>
             )}

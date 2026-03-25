@@ -308,7 +308,23 @@ export default function ProfileScreen() {
         text: 'Logout',
         style: 'destructive',
         onPress: async () => {
-          // Clear local state FIRST for crash safety
+          // SEC-3 FIX: Server logout FIRST (with timeout) to invalidate session
+          // This ensures the token is invalidated server-side before we clear local state
+          if (!isDemoMode && token) {
+            try {
+              // Use Promise.race with 3s timeout - don't block UX indefinitely
+              await Promise.race([
+                serverLogout({ token }),
+                new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 3000))
+              ]);
+              if (__DEV__) console.log('[Logout] Server session invalidated');
+            } catch (e) {
+              // Log but continue - local logout is more important for UX
+              console.warn('[Logout] Server logout failed or timed out:', e);
+            }
+          }
+
+          // Clear local state after server logout attempt
           if (isDemoMode) {
             useDemoStore.getState().demoLogout();
           }
@@ -316,13 +332,6 @@ export default function ProfileScreen() {
           // H5 FIX: Await async logout to ensure SecureStore is cleared before navigation
           await logout();
           safeReplace(router, '/(auth)/welcome', 'profile->logout');
-
-          // Server logout in background (best-effort)
-          if (!isDemoMode && token) {
-            serverLogout({ token }).catch((e) => {
-              console.warn('[Logout] Server logout failed:', e);
-            });
-          }
         },
       },
     ]);

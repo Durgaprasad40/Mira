@@ -24,6 +24,9 @@ const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 const POPOVER_WIDTH = Math.min(SCREEN_WIDTH - 32, 360);
 const POPOVER_MAX_HEIGHT = SCREEN_HEIGHT * 0.6;
 
+// DEFENSIVE: Types that must NEVER render in bell popover (safety net if upstream filtering fails)
+const BELL_RENDER_EXCLUDED = new Set(['message', 'new_message']);
+
 interface NotificationPopoverProps {
   visible: boolean;
   onClose: () => void;
@@ -217,8 +220,10 @@ export function NotificationPopover({
     </TouchableOpacity>
   );
 
-  // Limit to most recent 5 notifications for popover
-  const displayNotifications = notifications.slice(0, 5);
+  // DEFENSIVE: Filter out message types at render level (safety net), then limit to 5
+  const displayNotifications = notifications
+    .filter((n) => !BELL_RENDER_EXCLUDED.has(n.type))
+    .slice(0, 5);
 
   return (
     <Modal

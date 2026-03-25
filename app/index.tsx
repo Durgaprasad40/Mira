@@ -5,6 +5,7 @@ import { View, ActivityIndicator, StyleSheet, Text } from "react-native";
 
 import { useAuthStore } from "@/stores/authStore";
 import { useBootStore } from "@/stores/bootStore";
+import { useOnboardingStore } from "@/stores/onboardingStore";
 import { getBootCache } from "@/stores/bootCache";
 import { getAuthBootCache, clearAuthBootCache, type AuthBootCacheData } from "@/stores/authBootCache";
 import { isDemoMode, convex } from "@/hooks/useConvex";
@@ -282,6 +283,49 @@ export default function Index() {
           if (__DEV__) {
             console.log(`[BOOT] VALID_ONBOARD: lastStepKey=${lastStepKey}, resumeRoute=${resumeRoute}`);
           }
+
+          // DATA-1 FIX: Hydrate onboarding store BEFORE navigation
+          // We already have the draft data from getOnboardingStatus, so hydrate now
+          // This prevents the "pop in" effect where screens render empty then fill in
+          const onbStore = useOnboardingStore.getState();
+
+          // Step 1: Hydrate from draft (resets store, applies saved progress)
+          if (status.onboardingDraft) {
+            if (__DEV__) {
+              console.log('[BOOT] Pre-hydrating onboarding store from draft');
+            }
+            onbStore.hydrateFromDraft(status.onboardingDraft);
+          } else {
+            // No draft - just mark as hydrated
+            onbStore.hydrateFromDraft(null);
+          }
+
+          // Step 2: Apply user document basicInfo (authoritative, overrides stale draft)
+          if (status.basicInfo) {
+            const { name, nickname, dateOfBirth, gender } = status.basicInfo;
+            if (name) {
+              const parts = name.trim().split(/\s+/);
+              if (parts.length === 1) {
+                onbStore.setFirstName(parts[0]);
+                onbStore.setLastName('');
+              } else {
+                onbStore.setFirstName(parts[0]);
+                onbStore.setLastName(parts.slice(1).join(' '));
+              }
+            }
+            if (nickname) onbStore.setNickname(nickname);
+            if (dateOfBirth) onbStore.setDateOfBirth(dateOfBirth);
+            if (gender) {
+              const validGenders = ['male', 'female', 'non_binary'];
+              if (validGenders.includes(gender)) {
+                onbStore.setGender(gender as any);
+              }
+            }
+            if (__DEV__) {
+              console.log('[BOOT] Applied basicInfo from user document');
+            }
+          }
+
           setOnboardingResumeRoute(resumeRoute);
           setBootState("VALID_ONBOARD");
         }

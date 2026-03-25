@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useEffect, useRef, useMemo } from 'react';
+import React, { useState, useCallback, useEffect, useRef, useMemo, memo } from 'react';
 import {
   View,
   Text,
@@ -9,6 +9,9 @@ import {
 } from 'react-native';
 import { Image } from 'expo-image';
 import { Ionicons } from '@expo/vector-icons';
+
+// PERF: Max photos to prefetch when card becomes visible
+const PREFETCH_COUNT = 5;
 import { COLORS, INCOGNITO_COLORS, RELATIONSHIP_INTENTS, ACTIVITY_FILTERS } from '@/lib/constants';
 import type { TrustBadge } from '@/lib/trustBadges';
 import { PRIVATE_INTENT_CATEGORIES } from '@/lib/privateConstants';
@@ -62,6 +65,49 @@ export interface ProfileCardProps {
 }
 
 const BLUR_RADIUS = 25; // Strong but recognisable blur
+
+/**
+ * PERF: Memoized photo stack for instant switching
+ * Renders all photos in a stack with only opacity changes on index change.
+ * This prevents remounting images and keeps them warm in memory.
+ */
+interface PhotoStackProps {
+  photos: { url: string }[];
+  activeIndex: number;
+  photoBlurred?: boolean;
+  onError?: () => void;
+}
+
+const PhotoStack = memo(function PhotoStack({
+  photos,
+  activeIndex,
+  photoBlurred,
+  onError,
+}: PhotoStackProps) {
+  // Only render up to PREFETCH_COUNT photos to limit memory usage
+  const visiblePhotos = photos.slice(0, PREFETCH_COUNT);
+
+  return (
+    <>
+      {visiblePhotos.map((photo, idx) => (
+        <Image
+          key={photo.url}
+          source={{ uri: photo.url }}
+          style={[
+            styles.image,
+            // PERF: Only current photo is visible; others are pre-rendered but hidden
+            { opacity: idx === activeIndex ? 1 : 0 },
+          ]}
+          contentFit="cover"
+          cachePolicy="memory-disk"
+          blurRadius={photoBlurred ? BLUR_RADIUS : undefined}
+          // Only attach error handler to active photo
+          onError={idx === activeIndex ? onError : undefined}
+        />
+      ))}
+    </>
+  );
+});
 
 export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
   name,
@@ -163,6 +209,23 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
     setImageError(false);
   }, [photoIndex]);
 
+  // PERF: Prefetch first N photos on mount for instant switching
+  const prefetchedRef = useRef(false);
+  useEffect(() => {
+    if (prefetchedRef.current || !photos || photos.length === 0) return;
+    prefetchedRef.current = true;
+
+    // Prefetch first PREFETCH_COUNT photos (or all if fewer)
+    const toPrefetch = photos.slice(0, PREFETCH_COUNT);
+    toPrefetch.forEach((photo) => {
+      if (photo?.url) {
+        Image.prefetch(photo.url).catch(() => {
+          // Silently ignore prefetch failures - image will load on-demand
+        });
+      }
+    });
+  }, [photos]);
+
   // 3B-2: Safe access with clamping
   const safeIndex = Math.min(Math.max(0, photoIndex), Math.max(0, photoCount - 1));
   const currentPhoto = photos?.[safeIndex] || photos?.[0];
@@ -187,6 +250,7 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
             source={{ uri: currentPhoto.url }}
             style={styles.gridImage}
             contentFit="cover"
+            cachePolicy="memory-disk"
             blurRadius={photoBlurred ? BLUR_RADIUS : undefined}
             onError={() => setImageError(true)}
           />
@@ -210,17 +274,22 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
     <View style={[styles.card, dark && { backgroundColor: INCOGNITO_COLORS.surface }]}>
       {/* Photo area fills entire card */}
       <View style={styles.photoContainer}>
-        {/* 7-1: Show placeholder on image error or missing photo */}
-        {currentPhoto && !imageError ? (
-          <Image
-            source={{ uri: currentPhoto.url }}
-            style={styles.image}
-            contentFit="cover"
-            blurRadius={photoBlurred ? BLUR_RADIUS : undefined}
+        {/* PERF: Memoized photo stack for instant switching */}
+        {photos && photos.length > 0 ? (
+          <PhotoStack
+            photos={photos}
+            activeIndex={safeIndex}
+            photoBlurred={photoBlurred}
             onError={() => setImageError(true)}
           />
         ) : (
           <View style={[styles.photoPlaceholder, dark && { backgroundColor: INCOGNITO_COLORS.accent }]}>
+            <Ionicons name="image-outline" size={48} color={TC.textLight} />
+          </View>
+        )}
+        {/* Fallback placeholder for error state */}
+        {imageError && (
+          <View style={[styles.photoPlaceholder, dark && { backgroundColor: INCOGNITO_COLORS.accent }, StyleSheet.absoluteFillObject]}>
             <Ionicons name="image-outline" size={48} color={TC.textLight} />
           </View>
         )}

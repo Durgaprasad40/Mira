@@ -25,7 +25,9 @@ export default function AccountSettingsScreen() {
   const router = useRouter();
   const logout = useAuthStore((s) => s.logout);
   const authUserId = useAuthStore((s) => s.userId);
+  const token = useAuthStore((s) => s.token);
   const softDeleteMutation = useMutation(api.auth.softDeleteAccount);
+  const serverLogout = useMutation(api.auth.logout);
 
   // Query current user for email display (live mode only)
   const currentUserQuery = useQuery(
@@ -56,6 +58,20 @@ export default function AccountSettingsScreen() {
           text: 'Log Out',
           style: 'destructive',
           onPress: async () => {
+            // SEC-3 FIX: Server logout FIRST (with timeout) to invalidate session
+            if (!isDemoMode && token) {
+              try {
+                await Promise.race([
+                  serverLogout({ token }),
+                  new Promise((_, reject) => setTimeout(() => reject(new Error('timeout')), 3000))
+                ]);
+                if (__DEV__) console.log('[Logout] Server session invalidated');
+              } catch (e) {
+                console.warn('[Logout] Server logout failed or timed out:', e);
+              }
+            }
+
+            // Clear local state after server logout attempt
             if (isDemoMode) {
               useDemoStore.getState().demoLogout();
             }

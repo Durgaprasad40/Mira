@@ -375,3 +375,215 @@ export const resetPhase2ForUser = mutation({
     }
   },
 });
+
+// ============================================================================
+// FULL DATABASE RESET - Clear ALL user activity data
+// ============================================================================
+
+// All tables containing user activity data to be cleared
+const TABLES_TO_CLEAR = [
+  // Phase-1 Core
+  "likes",
+  "matches",
+  "conversations",
+  "conversationParticipants",
+  "messages",
+
+  // Media & Permissions
+  "photos",
+  "media",
+  "mediaPermissions",
+  "securityEvents",
+  "mediaReports",
+
+  // Notifications & Location
+  "notifications",
+  "crossedPaths",
+  "crossPathHistory",
+  "crossedEvents",
+
+  // Social Features
+  "dares",
+  "reports",
+  "blocks",
+
+  // Support System
+  "supportRequests",
+  "supportMessages",
+  "supportConversationSnapshots",
+  "supportTickets",
+  "supportTicketMessages",
+
+  // Auth & Sessions
+  "otpCodes",
+  "phoneOtps",
+  "sessions",
+  "typingStatus",
+
+  // User Behavior
+  "nudges",
+  "surveyResponses",
+  "verificationSessions",
+  "deviceFingerprints",
+  "behaviorFlags",
+
+  // Moderation
+  "moderationQueue",
+  "userStrikes",
+  "adminLogs",
+
+  // Phase-2 Profiles
+  "userPrivateProfiles",
+  "privateDeletionStates",
+
+  // Truth or Dare
+  "todPrompts",
+  "todAnswers",
+  "todAnswerViews",
+  "todAnswerLikes",
+  "todAnswerReactions",
+  "todAnswerReports",
+  "todRateLimits",
+  "todConnectRequests",
+  "todPrivateMedia",
+
+  // Confessions
+  "confessions",
+  "confessionConnectSignals",
+  "confessionReports",
+  "confessionReplies",
+  "replyReports",
+  "confessionReactions",
+  "confessionNotifications",
+  "confessionCommentConnects",
+
+  // Chat Rooms
+  "chatRooms",
+  "chatRoomMembers",
+  "chatRoomMessages",
+  "chatRoomPenalties",
+  "chatRoomJoinRequests",
+  "chatRoomBans",
+  "chatTodGames",
+
+  // User Preferences
+  "filterPresets",
+  "userRoomPrefs",
+  "userRoomReports",
+  "userGameLimits",
+
+  // Games
+  "bottleSpinSessions",
+
+  // Storage Cleanup
+  "pendingUploads",
+  "failedStorageDeletions",
+
+  // Phase-2 Ranking
+  "phase2RankingMetrics",
+  "phase2ViewerImpressions",
+
+  // Phase-2 Private Interactions
+  "privateLikes",
+  "privateMatches",
+  "privateConversations",
+  "privateConversationParticipants",
+  "privateMessages",
+] as const;
+
+/**
+ * Clear ALL user activity data from the database (DEV only).
+ *
+ * SECURITY: Requires DEV_RESET_ENABLED="true" AND valid DEV_RESET_TOKEN.
+ *
+ * WHAT IT DELETES:
+ * - ALL records from 70+ activity tables
+ * - Photos, media, messages, matches, likes, etc.
+ *
+ * WHAT IT KEEPS:
+ * - users table (unless includeUsers=true)
+ * - systemConfig table
+ * - subscriptionRecords/purchases (unless includePurchases=true)
+ * - Schema and indexes remain intact
+ *
+ * USAGE:
+ * npx convex run devReset:clearAllUserData '{"token":"YOUR_TOKEN"}'
+ * npx convex run devReset:clearAllUserData '{"token":"YOUR_TOKEN","includeUsers":true}'
+ */
+export const clearAllUserData = mutation({
+  args: {
+    token: v.string(),
+    includeUsers: v.optional(v.boolean()),
+    includePurchases: v.optional(v.boolean()),
+  },
+  handler: async (ctx, args) => {
+    // SECURITY GATE
+    validateAccess(args.token);
+
+    const results: Record<string, number> = {};
+    let totalDeleted = 0;
+
+    // Clear each table
+    for (const tableName of TABLES_TO_CLEAR) {
+      try {
+        const docs = await ctx.db.query(tableName as any).collect();
+        const count = docs.length;
+
+        for (const doc of docs) {
+          await ctx.db.delete(doc._id);
+        }
+
+        results[tableName] = count;
+        totalDeleted += count;
+      } catch (error) {
+        // Table might not exist or be empty - continue
+        results[tableName] = 0;
+      }
+    }
+
+    // Optionally clear purchases
+    if (args.includePurchases) {
+      for (const table of ["subscriptionRecords", "purchases"]) {
+        try {
+          const docs = await ctx.db.query(table as any).collect();
+          const count = docs.length;
+          for (const doc of docs) {
+            await ctx.db.delete(doc._id);
+          }
+          results[table] = count;
+          totalDeleted += count;
+        } catch {
+          results[table] = 0;
+        }
+      }
+    }
+
+    // Optionally clear users table
+    if (args.includeUsers) {
+      try {
+        const users = await ctx.db.query("users").collect();
+        const count = users.length;
+
+        for (const user of users) {
+          await ctx.db.delete(user._id);
+        }
+
+        results["users"] = count;
+        totalDeleted += count;
+      } catch (error) {
+        results["users"] = 0;
+      }
+    }
+
+    // Count non-zero tables
+    const tablesWithData = Object.entries(results).filter(([_, count]) => count > 0);
+
+    return {
+      success: true,
+      tablesCleared: tablesWithData.length,
+      totalRecordsDeleted: totalDeleted,
+      usersDeleted: args.includeUsers ? (results["users"] || 0) : "skipped",
+      details: Object.fromEntries(tablesWithData),
+    };
+  },
+});

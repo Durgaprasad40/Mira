@@ -120,6 +120,13 @@ const MAX_HISTORY_ENTRIES = 15; // Max crossed paths list entries
 // Grid size for approximate crossing location (privacy: round to ~300m)
 const LOCATION_GRID_METERS = 300;
 
+// SEC-1 FIX: Privacy fuzzing constants for Nearby map coordinates
+// Prevents exact location reconstruction from API responses
+const FUZZ_MIN_METERS = 50;
+const FUZZ_MAX_METERS = 150;
+const STRONG_PRIVACY_FUZZ_MIN = 200;
+const STRONG_PRIVACY_FUZZ_MAX = 400;
+
 // ---------------------------------------------------------------------------
 // Shared Places Constants (Phase-1)
 // ---------------------------------------------------------------------------
@@ -1361,12 +1368,22 @@ export const getNearbyUsers = query({
         user.publishedLng!,
       );
 
+      // SEC-1 FIX: Apply server-side privacy fuzzing BEFORE returning coordinates
+      // This prevents exact location reconstruction from API responses
+      const fuzzed = applyPrivacyFuzz(
+        user.publishedLat!,
+        user.publishedLng!,
+        user._id, // userId of the person being viewed
+        userId,   // viewerId (current user)
+        user.strongPrivacyMode ?? false,
+      );
+
       results.push({
         id: user._id,
         name: user.name,
         age: calculateAge(user.dateOfBirth),
-        publishedLat: user.publishedLat!,
-        publishedLng: user.publishedLng!,
+        publishedLat: fuzzed.lat,  // SEC-1 FIX: Return fuzzed coordinates
+        publishedLng: fuzzed.lng,  // SEC-1 FIX: Return fuzzed coordinates
         publishedAt: user.publishedAt,
         distance,
         freshness,
@@ -2082,6 +2099,62 @@ export const getSharedPlaces = query({
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/**
+ * SEC-1 FIX: Server-side privacy fuzzing for location coordinates.
+ * Applies deterministic random offset based on user ID hash.
+ * Ensures same user always gets same fuzzing for consistent map rendering.
+ *
+ * @param lat - Original latitude
+ * @param lng - Original longitude
+ * @param userId - User ID (for deterministic hash)
+ * @param viewerId - Viewer ID (combined with userId for unique offset per viewer)
+ * @param strongPrivacyMode - If true, apply larger fuzz radius
+ * @returns Fuzzed coordinates
+ */
+function applyPrivacyFuzz(
+  lat: number,
+  lng: number,
+  userId: string,
+  viewerId: string,
+  strongPrivacyMode: boolean,
+): { lat: number; lng: number } {
+  // Create deterministic hash from combined IDs (consistent across sessions)
+  const combined = `${userId}_${viewerId}_privacy_fuzz`;
+  let hash = 0;
+  for (let i = 0; i < combined.length; i++) {
+    hash = ((hash << 5) - hash) + combined.charCodeAt(i);
+    hash |= 0;
+  }
+
+  // Convert hash to pseudo-random values between 0 and 1
+  const hashAbs = Math.abs(hash);
+  const r1 = (hashAbs % 10000) / 10000;
+  const r2 = ((hashAbs >> 8) % 10000) / 10000;
+
+  // Determine fuzz radius based on privacy mode
+  const minMeters = strongPrivacyMode ? STRONG_PRIVACY_FUZZ_MIN : FUZZ_MIN_METERS;
+  const maxMeters = strongPrivacyMode ? STRONG_PRIVACY_FUZZ_MAX : FUZZ_MAX_METERS;
+
+  // Random distance within range
+  const fuzzDistance = minMeters + r1 * (maxMeters - minMeters);
+
+  // Random angle (0 to 2π)
+  const angle = r2 * 2 * Math.PI;
+
+  // Convert meters to degrees (approximate: 1 degree ≈ 111km at equator)
+  // Adjust for latitude to account for longitude compression
+  const metersPerDegreeLat = 111000;
+  const metersPerDegreeLng = 111000 * Math.cos(lat * Math.PI / 180);
+
+  const latOffset = (fuzzDistance * Math.cos(angle)) / metersPerDegreeLat;
+  const lngOffset = (fuzzDistance * Math.sin(angle)) / metersPerDegreeLng;
+
+  return {
+    lat: lat + latOffset,
+    lng: lng + lngOffset,
+  };
+}
 
 function calculateDistanceMeters(
   lat1: number,

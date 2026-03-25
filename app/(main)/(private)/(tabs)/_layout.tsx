@@ -55,7 +55,7 @@ export default function PrivateTabsLayout() {
       <Tabs.Screen
         name="desire-land"
         options={{
-          title: 'Desire Land',
+          title: 'Deep Connect',
           tabBarIcon: ({ color, size }) => (
             <Ionicons name="compass" size={size} color={color} />
           ),

@@ -87,6 +87,57 @@ function normalizePhotos(input: unknown): PhotoSlots9 {
   return result;
 }
 
+// CURRENT 9 RELATIONSHIP CATEGORIES (source of truth - matches schema.ts)
+const ALLOWED_RELATIONSHIP_INTENTS = new Set([
+  'serious_vibes', 'keep_it_casual', 'exploring_vibes', 'see_where_it_goes',
+  'open_to_vibes', 'just_friends', 'open_to_anything', 'single_parent', 'new_to_dating'
+]);
+
+// Legacy → Current mapping for relationshipIntent values
+// These old values may exist in cached drafts or older user profiles
+const LEGACY_INTENT_MAP: Record<string, string> = {
+  'long_term': 'serious_vibes',
+  'short_term': 'keep_it_casual',
+  'fwb': 'keep_it_casual',
+  'figuring_out': 'exploring_vibes',
+  'short_to_long': 'see_where_it_goes',
+  'long_to_short': 'see_where_it_goes',
+  'casual': 'keep_it_casual',
+  'serious': 'serious_vibes',
+  'marriage': 'serious_vibes',
+  'friendship': 'just_friends',
+  'open': 'open_to_anything',
+};
+
+/**
+ * Normalize relationshipIntent values from backend draft.
+ * Maps legacy values to current schema and filters invalid values.
+ */
+function normalizeRelationshipIntent(arr: unknown): RelationshipIntent[] {
+  if (!arr || !Array.isArray(arr)) return [];
+
+  // Step 1: Map legacy values to current valid values
+  const mapped = arr.map(v => {
+    const strVal = typeof v === 'string' ? v : String(v);
+    return LEGACY_INTENT_MAP[strVal] || strVal;
+  });
+
+  // Step 2: Filter to only valid values
+  const sanitized = mapped.filter(v => ALLOWED_RELATIONSHIP_INTENTS.has(v));
+
+  // Step 3: Deduplicate
+  const deduped = [...new Set(sanitized)] as RelationshipIntent[];
+
+  if (__DEV__ && (arr.length !== deduped.length || arr.some((v, i) => v !== mapped[i]))) {
+    console.log('[ONB_STORE] relationshipIntent normalization:', {
+      original: arr,
+      mapped,
+      final: deduped,
+    });
+  }
+  return deduped;
+}
+
 // LGBTQ identity options (max 2 selections)
 export type LgbtqOption = 'gay' | 'lesbian' | 'bisexual' | 'transgender' | 'prefer_not_to_say';
 
@@ -760,7 +811,10 @@ export const useOnboardingStore = create<OnboardingState>()((set, get) => ({
         // Preferences
         if (draft.preferences) {
           if (draft.preferences.lookingFor) updates.lookingFor = draft.preferences.lookingFor;
-          if (draft.preferences.relationshipIntent) updates.relationshipIntent = draft.preferences.relationshipIntent;
+          // STABILITY FIX: Normalize legacy relationshipIntent values from backend draft
+          if (draft.preferences.relationshipIntent) {
+            updates.relationshipIntent = normalizeRelationshipIntent(draft.preferences.relationshipIntent);
+          }
           if (draft.preferences.activities) updates.activities = draft.preferences.activities;
           if (draft.preferences.minAge !== undefined) updates.minAge = draft.preferences.minAge;
           if (draft.preferences.maxAge !== undefined) updates.maxAge = draft.preferences.maxAge;

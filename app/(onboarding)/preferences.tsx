@@ -57,14 +57,41 @@ const ALLOWED_RELATIONSHIP_INTENTS = new Set([
   'open_to_vibes', 'just_friends', 'open_to_anything', 'single_parent', 'new_to_dating'
 ]);
 
-// Sanitize relationshipIntent to only include schema-valid values before Convex mutation
+// Legacy → Current mapping for relationshipIntent values
+// These old values may exist in cached drafts or older user profiles
+const LEGACY_INTENT_MAP: Record<string, string> = {
+  'long_term': 'serious_vibes',
+  'short_term': 'keep_it_casual',
+  'fwb': 'keep_it_casual',
+  'figuring_out': 'exploring_vibes',
+  'short_to_long': 'see_where_it_goes',
+  'long_to_short': 'see_where_it_goes',
+  'casual': 'keep_it_casual',
+  'serious': 'serious_vibes',
+  'marriage': 'serious_vibes',
+  'friendship': 'just_friends',
+  'open': 'open_to_anything',
+};
+
+// Sanitize relationshipIntent: map legacy values AND filter invalid ones
 function sanitizeRelationshipIntent(arr: string[]): string[] {
-  const sanitized = arr.filter(v => ALLOWED_RELATIONSHIP_INTENTS.has(v));
-  if (__DEV__ && sanitized.length !== arr.length) {
-    const removed = arr.filter(v => !ALLOWED_RELATIONSHIP_INTENTS.has(v));
-    console.warn('[PREFERENCES] Removed invalid relationshipIntent values:', removed);
+  // Step 1: Map legacy values to current valid values
+  const mapped = arr.map(v => LEGACY_INTENT_MAP[v] || v);
+
+  // Step 2: Filter to only valid values
+  const sanitized = mapped.filter(v => ALLOWED_RELATIONSHIP_INTENTS.has(v));
+
+  // Step 3: Deduplicate (multiple legacy values might map to same current value)
+  const deduped = [...new Set(sanitized)];
+
+  if (__DEV__ && (arr.length !== deduped.length || arr.some((v, i) => v !== mapped[i]))) {
+    console.log('[PREFERENCES] relationshipIntent normalization:', {
+      original: arr,
+      mapped,
+      final: deduped,
+    });
   }
-  return sanitized;
+  return deduped;
 }
 
 export default function PreferencesScreen() {

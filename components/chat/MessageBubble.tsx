@@ -1,5 +1,5 @@
 import React from 'react';
-import { View, Text, StyleSheet, ActivityIndicator, Image, TouchableOpacity } from 'react-native';
+import { View, Text, StyleSheet, ActivityIndicator, Image, TouchableOpacity, Alert, Pressable } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { COLORS } from '@/lib/constants';
 import MediaMessage from './MediaMessage';
@@ -187,6 +187,47 @@ export function MessageBubble({
       }
     }
 
+    // TOUCH-FIX: Wrap protected media with Pressable for sender long-press delete
+    // Receiver uses ProtectedMediaBubble's internal PanResponder for tap/hold to view
+    const protectedMediaContent = (
+      <View style={[styles.bubble, isOwn ? styles.ownBubble : styles.otherBubble, styles.protectedBubble]}>
+        <ProtectedMediaBubble
+          messageId={message.id}
+          mediaId={message.mediaId}
+          userId={currentUserId}
+          protectedMedia={message.protectedMedia as any}
+          timerEndsAt={message.timerEndsAt}
+          isExpired={!!message.isExpired}
+          expiredAt={message.expiredAt}
+          isOwn={isOwn}
+          viewOnce={message.viewOnce}
+          recipientOpened={message.recipientOpened}
+          onPress={() => onProtectedMediaPress?.(message.id)}
+          onHoldStart={() => onProtectedMediaHoldStart?.(message.id)}
+          onHoldEnd={() => onProtectedMediaHoldEnd?.(message.id)}
+          onExpire={() => onProtectedMediaExpire?.(message.id)}
+        />
+        {!message.isExpired && (
+          <View style={styles.imageFooter}>
+            <Text style={[styles.time, isOwn && styles.ownTime]}>
+              {formatTime(message.createdAt)}
+            </Text>
+            {isOwn && (() => {
+              const tickStatus = getTickStatus(message);
+              return (
+                <Ionicons
+                  name={getTickIcon(tickStatus)}
+                  size={14}
+                  color={getTickColor(tickStatus, isOwn)}
+                  style={styles.readIcon}
+                />
+              );
+            })()}
+          </View>
+        )}
+      </View>
+    );
+
     return (
       <View style={[
         styles.container,
@@ -194,42 +235,7 @@ export function MessageBubble({
         !isLastInGroup && styles.groupedContainer,
       ]}>
         {!isOwn && renderAvatar()}
-        <View style={[styles.bubble, isOwn ? styles.ownBubble : styles.otherBubble, styles.protectedBubble]}>
-          <ProtectedMediaBubble
-            messageId={message.id}
-            mediaId={message.mediaId}
-            userId={currentUserId}
-            protectedMedia={message.protectedMedia as any}
-            timerEndsAt={message.timerEndsAt}
-            isExpired={!!message.isExpired}
-            expiredAt={message.expiredAt}
-            isOwn={isOwn}
-            viewOnce={message.viewOnce}
-            recipientOpened={message.recipientOpened}
-            onPress={() => onProtectedMediaPress?.(message.id)}
-            onHoldStart={() => onProtectedMediaHoldStart?.(message.id)}
-            onHoldEnd={() => onProtectedMediaHoldEnd?.(message.id)}
-            onExpire={() => onProtectedMediaExpire?.(message.id)}
-          />
-          {!message.isExpired && (
-            <View style={styles.imageFooter}>
-              <Text style={[styles.time, isOwn && styles.ownTime]}>
-                {formatTime(message.createdAt)}
-              </Text>
-              {isOwn && (() => {
-                const tickStatus = getTickStatus(message);
-                return (
-                  <Ionicons
-                    name={getTickIcon(tickStatus)}
-                    size={14}
-                    color={getTickColor(tickStatus, isOwn)}
-                    style={styles.readIcon}
-                  />
-                );
-              })()}
-            </View>
-          )}
-        </View>
+        {protectedMediaContent}
       </View>
     );
   }
@@ -248,28 +254,28 @@ export function MessageBubble({
       ]}>
         {!isOwn && renderAvatar()}
         <View style={[styles.bubble, isOwn ? styles.ownBubble : styles.otherBubble]}>
-          <MediaMessage
-            mediaUrl={mediaUrl!}
-            type={message.type as 'image' | 'video'}
-            onPress={() => onMediaPress?.(mediaUrl!, message.type as 'image' | 'video')}
-          />
-          <View style={styles.imageFooter}>
-            <Text style={[styles.time, isOwn && styles.ownTime]}>
-              {formatTime(message.createdAt)}
-            </Text>
-            {isOwn && (() => {
-              const tickStatus = getTickStatus(message);
-              return (
-                <Ionicons
-                  name={getTickIcon(tickStatus)}
-                  size={14}
-                  color={getTickColor(tickStatus, isOwn)}
-                  style={styles.readIcon}
-                />
-              );
-            })()}
+            <MediaMessage
+              mediaUrl={mediaUrl!}
+              type={message.type as 'image' | 'video'}
+              onPress={() => onMediaPress?.(mediaUrl!, message.type as 'image' | 'video')}
+            />
+            <View style={styles.imageFooter}>
+              <Text style={[styles.time, isOwn && styles.ownTime]}>
+                {formatTime(message.createdAt)}
+              </Text>
+              {isOwn && (() => {
+                const tickStatus = getTickStatus(message);
+                return (
+                  <Ionicons
+                    name={getTickIcon(tickStatus)}
+                    size={14}
+                    color={getTickColor(tickStatus, isOwn)}
+                    style={styles.readIcon}
+                  />
+                );
+              })()}
+            </View>
           </View>
-        </View>
       </View>
     );
   }

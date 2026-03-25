@@ -70,6 +70,12 @@ interface PrivateChatState {
    * - Cleans up orphaned messages for removed conversations
    */
   reconcileConversations: (backendConversations: IncognitoConversation[]) => void;
+  /**
+   * P2-006 FIX: Reconcile unlocked users with backend conversation participants.
+   * Removes any locally unlocked user that no longer has an active conversation.
+   * @param validParticipantIds - Set of participant IDs that have active backend conversations
+   */
+  reconcileUnlockedUsers: (validParticipantIds: Set<string>) => void;
 
   // Truth or Dare
   pendingDares: PendingDare[];
@@ -291,6 +297,21 @@ export const usePrivateChatStore = create<PrivateChatState>()((set, get) => ({
         messages: remainingMessages,
         unlockedUsers: updatedUnlockedUsers,
       };
+    }),
+
+  // P2-006 FIX: Explicit unlocked users reconciliation
+  reconcileUnlockedUsers: (validParticipantIds) =>
+    set((s) => {
+      const before = s.unlockedUsers.length;
+      const updated = s.unlockedUsers.filter((u) => validParticipantIds.has(u.id));
+      const removed = before - updated.length;
+
+      if (removed > 0 && __DEV__) {
+        console.log(`[P2-006 Reconcile] Removed ${removed} stale unlocked users`);
+      }
+
+      if (removed === 0) return s;
+      return { unlockedUsers: updated };
     }),
 
   pendingDares: isDemoMode ? DEMO_PENDING_DARES : [],

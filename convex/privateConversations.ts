@@ -72,17 +72,20 @@ async function computeUnreadCountFromPrivateMessages(
  * - Unread count
  * - Connection source (desire_match, desire_super_like, tod, room)
  *
- * Security: Resolves user from authUserId server-side, never trusts client userId
+ * P2-005 FIX: Uses ctx.auth.getUserIdentity() for server-side auth resolution
  */
 export const getUserPrivateConversations = query({
   args: {
-    authUserId: v.string(),
+    // P2-005 FIX: authUserId kept for backward compat but IGNORED - server auth is authoritative
+    authUserId: v.optional(v.string()),
   },
-  handler: async (ctx, args) => {
-    const { authUserId } = args;
-
-    // Resolve user from auth - never trust client
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+  handler: async (ctx, _args) => {
+    // P2-005 FIX: ALWAYS resolve from server-side auth - never trust client-supplied authUserId
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity?.subject) {
+      return [];
+    }
+    const userId = await resolveUserIdByAuthId(ctx, identity.subject);
     if (!userId) {
       return [];
     }
@@ -186,20 +189,25 @@ export const getUserPrivateConversations = query({
 /**
  * Get messages for a Phase-2 conversation.
  *
- * Security: Verifies user is a participant in the conversation
+ * P2-005 FIX: Uses ctx.auth.getUserIdentity() for server-side auth resolution
  */
 export const getPrivateMessages = query({
   args: {
     conversationId: v.id('privateConversations'),
-    authUserId: v.string(),
+    // P2-005 FIX: authUserId kept for backward compat but IGNORED - server auth is authoritative
+    authUserId: v.optional(v.string()),
     limit: v.optional(v.number()),
     before: v.optional(v.number()), // For pagination: get messages before this timestamp
   },
   handler: async (ctx, args) => {
-    const { conversationId, authUserId, limit = 50, before } = args;
+    const { conversationId, limit = 50, before } = args;
 
-    // Resolve user from auth - never trust client
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    // P2-005 FIX: ALWAYS resolve from server-side auth - never trust client-supplied authUserId
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity?.subject) {
+      return [];
+    }
+    const userId = await resolveUserIdByAuthId(ctx, identity.subject);
     if (!userId) {
       return [];
     }
@@ -442,18 +450,23 @@ export const sendPrivateMessage = mutation({
 /**
  * Get details of a single Phase-2 conversation.
  *
- * Security: Verifies user is participant
+ * P2-005 FIX: Uses ctx.auth.getUserIdentity() for server-side auth resolution
  */
 export const getPrivateConversation = query({
   args: {
     conversationId: v.id('privateConversations'),
-    authUserId: v.string(),
+    // P2-005 FIX: authUserId kept for backward compat but IGNORED - server auth is authoritative
+    authUserId: v.optional(v.string()),
   },
   handler: async (ctx, args) => {
-    const { conversationId, authUserId } = args;
+    const { conversationId } = args;
 
-    // Resolve user from auth
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    // P2-005 FIX: ALWAYS resolve from server-side auth - never trust client-supplied authUserId
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity?.subject) {
+      return null;
+    }
+    const userId = await resolveUserIdByAuthId(ctx, identity.subject);
     if (!userId) {
       return null;
     }
@@ -520,15 +533,21 @@ export const getPrivateConversation = query({
 /**
  * Get total unread message count across all Phase-2 conversations.
  * Used for notification badges.
+ *
+ * P2-005 FIX: Uses ctx.auth.getUserIdentity() for server-side auth resolution
  */
 export const getTotalUnreadCount = query({
   args: {
-    authUserId: v.string(),
+    // P2-005 FIX: authUserId kept for backward compat but IGNORED - server auth is authoritative
+    authUserId: v.optional(v.string()),
   },
-  handler: async (ctx, args) => {
-    const { authUserId } = args;
-
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+  handler: async (ctx, _args) => {
+    // P2-005 FIX: ALWAYS resolve from server-side auth - never trust client-supplied authUserId
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity?.subject) {
+      return 0;
+    }
+    const userId = await resolveUserIdByAuthId(ctx, identity.subject);
     if (!userId) {
       return 0;
     }

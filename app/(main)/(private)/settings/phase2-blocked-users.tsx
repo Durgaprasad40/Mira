@@ -63,7 +63,7 @@ export default function BlockedUsersScreen() {
         <View style={styles.infoBanner}>
           <Ionicons name="information-circle-outline" size={20} color={C.textLight} />
           <Text style={styles.infoText}>
-            Blocked users cannot find you in Desire Land or send you messages. Blocks are permanent.
+            Blocked users cannot find you in Deep Connect or send you messages. Blocks are permanent.
           </Text>
         </View>
 
