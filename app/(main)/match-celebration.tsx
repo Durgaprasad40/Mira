@@ -31,11 +31,13 @@ export default function MatchCelebrationScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   // P1-001 FIX: Read mode and conversationId for Phase-2 support
-  const { matchId, userId: otherUserId, mode, conversationId } = useLocalSearchParams<{
+  // CONFESS-NAV-FIX: Added source param for proper "Keep Discovering" navigation
+  const { matchId, userId: otherUserId, mode, conversationId, source } = useLocalSearchParams<{
     matchId: string;
     userId: string;
     mode?: string;
     conversationId?: string;
+    source?: string; // 'confessions' = return to Confessions tab, undefined = router.back()
   }>();
   const { userId, token } = useAuthStore();
 
@@ -394,7 +396,20 @@ export default function MatchCelebrationScreen() {
     if (isDemo) {
       useDemoStore.getState().setNewMatchUserId(null);
     }
-    router.back();
+
+    // CONFESS-NAV-FIX: Navigate based on source param
+    // - source=confessions: go to Confessions tab (avoids empty connect-requests page)
+    // - undefined: use router.back() for Discover flow
+    if (__DEV__) {
+      console.log('[MatchCelebration] handleKeepSwiping source=', source);
+    }
+
+    if (source === 'confessions') {
+      // Replace current screen with Confessions tab to avoid stale back stack
+      router.replace('/(main)/(tabs)/confessions' as any);
+    } else {
+      router.back();
+    }
   };
 
   if (!match || !otherUser || !currentUser) {
