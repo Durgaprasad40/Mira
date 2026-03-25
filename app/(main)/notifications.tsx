@@ -21,6 +21,9 @@ interface NotificationSection {
   data: AppNotification[];
 }
 
+// DEFENSIVE: Types that must NEVER render in notification screens (safety net if upstream filtering fails)
+const BELL_RENDER_EXCLUDED = new Set(['message', 'new_message']);
+
 export default function NotificationsScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
@@ -324,7 +327,9 @@ export default function NotificationsScreen() {
     </TouchableOpacity>
   );
 
-  const groupedNotifications = groupNotifications(notifications);
+  // DEFENSIVE: Filter out message types at render level (safety net), then group
+  const safeNotifications = notifications.filter((n) => !BELL_RENDER_EXCLUDED.has(n.type));
+  const groupedNotifications = groupNotifications(safeNotifications);
 
   return (
     <View style={[styles.container, { paddingTop: insets.top }]}>

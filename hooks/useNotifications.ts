@@ -11,6 +11,14 @@ import { log } from '@/utils/logger';
 // Phase 1-only notification types — never shown in Phase 2 (private tabs)
 const PHASE1_ONLY_TYPES = new Set(['crossed_paths', 'nearby']);
 
+// Phase 2-only notification types — never shown in Phase 1 (main discover)
+// comment_connect: TOD confession reactions and connects
+const PHASE2_ONLY_TYPES = new Set(['comment_connect']);
+
+// Types excluded from ALL in-app bells — messages have dedicated chat UI, not bell
+// Push notifications for messages still work; this only affects the bell popover
+const BELL_EXCLUDED_TYPES = new Set(['message', 'new_message']);
+
 // Module-level phase tracking for creation-side blocking in Zustand store
 let _isInPhase2 = false;
 export function setPhase2Active(active: boolean) {
@@ -615,8 +623,21 @@ export function useNotifications() {
   const baseNotifications = isDemoMode
     ? (demoStoreReady ? filteredDemoNotifs : EMPTY_ARRAY)
     : filteredConvexNotifs;
+  // Filter notifications for bell display:
+  // 1. Always exclude BELL_EXCLUDED_TYPES (messages have dedicated chat UI)
+  // 2. Phase separation: Phase 1 excludes Phase-2 types, Phase 2 excludes Phase-1 types
   const notifications: AppNotification[] = useMemo(
-    () => isInPhase2 ? baseNotifications.filter((n) => !PHASE1_ONLY_TYPES.has(n.type)) : baseNotifications,
+    () => {
+      let filtered = baseNotifications.filter((n) => !BELL_EXCLUDED_TYPES.has(n.type));
+      if (isInPhase2) {
+        // In Phase 2: show Phase-2 notifications, hide Phase-1 only types
+        filtered = filtered.filter((n) => !PHASE1_ONLY_TYPES.has(n.type));
+      } else {
+        // In Phase 1: show Phase-1 notifications, hide Phase-2 only types
+        filtered = filtered.filter((n) => !PHASE2_ONLY_TYPES.has(n.type));
+      }
+      return filtered;
+    },
     [baseNotifications, isInPhase2],
   );
 
