@@ -129,7 +129,7 @@ export default function ExploreTileGrid({
   refreshing = false,
   onRefresh,
   backendCounts,
-  categoryClickCounts = {},
+  // categoryClickCounts preserved in Props for API compatibility, but not used for sorting
 }: Props) {
   const insets = useSafeAreaInsets();
   // Dynamic bottom spacing: safe area inset + tab bar + base padding
@@ -149,25 +149,10 @@ export default function ExploreTileGrid({
   }, [backendCounts]);
 
 
-  // Phase 4: Intelligent sort - click frequency first, then by count
-  const sortByIntelligence = (categories: ExploreCategory[]) => {
-    return [...categories].sort((a, b) => {
-      const countA = categoryCounts[a.id] ?? 0;
-      const countB = categoryCounts[b.id] ?? 0;
-      const clicksA = categoryClickCounts[a.id] ?? 0;
-      const clicksB = categoryClickCounts[b.id] ?? 0;
-
-      // Non-zero counts first
-      if (countA > 0 && countB === 0) return -1;
-      if (countA === 0 && countB > 0) return 1;
-
-      // Then by click frequency (highest first)
-      if (clicksA !== clicksB) return clicksB - clicksA;
-
-      // Then by descending count
-      return countB - countA;
-    });
-  };
+  // STABILITY FIX: Category order is now FIXED (defined in exploreCategories.ts)
+  // Only profile counts update inside tiles - categories never reorder.
+  // This prevents visual jumping when backend counts change.
+  // Click tracking is preserved for analytics but NOT used for sorting.
 
   const renderTile = (category: ExploreCategory) => {
     const count = categoryCounts[category.id] ?? 0;
@@ -186,11 +171,6 @@ export default function ExploreTileGrid({
       />
     );
   };
-
-  // Pre-sort categories by intelligence (click frequency + count)
-  const sortedRelationship = useMemo(() => sortByIntelligence(RELATIONSHIP_CATEGORIES), [categoryCounts, categoryClickCounts]);
-  const sortedRightNow = useMemo(() => sortByIntelligence(RIGHT_NOW_CATEGORIES), [categoryCounts, categoryClickCounts]);
-  const sortedInterests = useMemo(() => sortByIntelligence(INTEREST_CATEGORIES), [categoryCounts, categoryClickCounts]);
 
   return (
     <ScrollView
@@ -214,7 +194,7 @@ export default function ExploreTileGrid({
         <Text style={styles.sectionTitle}>Relationship</Text>
       </View>
       <View style={styles.grid}>
-        {sortedRelationship.map(renderTile)}
+        {RELATIONSHIP_CATEGORIES.map(renderTile)}
       </View>
 
       {/* RIGHT NOW Section */}
@@ -223,7 +203,7 @@ export default function ExploreTileGrid({
         <Text style={styles.sectionTitle}>Right Now</Text>
       </View>
       <View style={styles.grid}>
-        {sortedRightNow.map(renderTile)}
+        {RIGHT_NOW_CATEGORIES.map(renderTile)}
       </View>
 
       {/* INTERESTS Section */}
@@ -232,7 +212,7 @@ export default function ExploreTileGrid({
         <Text style={styles.sectionTitle}>Interests</Text>
       </View>
       <View style={styles.grid}>
-        {sortedInterests.map(renderTile)}
+        {INTEREST_CATEGORIES.map(renderTile)}
       </View>
 
       {/* Bottom spacing - dynamic based on safe area and tab bar */}
