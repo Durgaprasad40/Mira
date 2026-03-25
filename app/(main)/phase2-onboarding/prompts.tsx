@@ -136,6 +136,8 @@ export default function Phase2PromptsScreen() {
     setExpandedSection((prev) => (prev === section ? null : section));
     setEditingPrompt(null);
     setDraftAnswer('');
+    // P2-003 FIX: Clear validation error when changing sections
+    setValidationError(null);
     // Reset selected sub-question when collapsing
     if (expandedSection === section) {
       setSelectedSubQuestion({ section2: null, section3: null });
@@ -161,6 +163,9 @@ export default function Phase2PromptsScreen() {
     const existingAnswer = getAnswer(promptId) || '';
     setEditingPrompt(promptId);
     setDraftAnswer(existingAnswer);
+
+    // P2-003 FIX: Clear validation error when switching sub-questions
+    setValidationError(null);
 
     // Reset input height to compact (will grow if existing answer is long)
     setInputHeight(existingAnswer ? 60 : 40);

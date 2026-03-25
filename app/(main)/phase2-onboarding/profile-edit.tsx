@@ -157,6 +157,13 @@ export default function Phase2ProfileEdit() {
   const photoBlurSlots = usePrivateProfileStore((s) => s.photoBlurSlots);
   const togglePhotoBlurSlot = usePrivateProfileStore((s) => s.togglePhotoBlurSlot);
   const setPhotoBlurSlots = usePrivateProfileStore((s) => s.setPhotoBlurSlots);
+
+  // P2-002 FIX: Sync photoSlots to store whenever they change
+  // This preserves photo changes even when user navigates back without pressing Continue
+  useEffect(() => {
+    const photoUrls = photoSlots.filter((uri): uri is string => uri !== null);
+    setSelectedPhotos([], photoUrls);
+  }, [photoSlots, setSelectedPhotos]);
   const [mainPhotoSlot, setMainPhotoSlot] = useState<number>(0);
   const [previewSlot, setPreviewSlot] = useState<number | null>(null);
   // Note: isProcessing moved above with useFocusEffect for FIX #2

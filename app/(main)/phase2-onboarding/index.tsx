@@ -166,22 +166,14 @@ async function persistPhotoUris(uris: string[]): Promise<string[]> {
     }
 
     // Copy cache file to persistent storage
+    // P2-004 FIX: Removed pre-check to avoid TOCTOU race condition
+    // Instead, we attempt the copy and handle failures gracefully
     try {
-      // Verify source exists - MUST use fullUri
-      if (__DEV__) console.log("[PersistPhotos] Checking source:", fullUri);
-      const sourceInfo = await FileSystem.getInfoAsync(fullUri);
-      if (!sourceInfo.exists) {
-        if (__DEV__) console.warn("[PersistPhotos] Source missing (short):", short);
-        // Still add to results so fallback works
-        results.push(fullUri);
-        continue;
-      }
-
       // Generate filename and destination path
       const filename = fullUri.split("/").pop() || `p1_${Date.now()}.jpg`;
       const dest = destDir + filename;
 
-      // Check if already copied
+      // Check if already copied (destination exists = already persisted)
       const destInfo = await FileSystem.getInfoAsync(dest);
       if (destInfo.exists) {
         if (__DEV__) console.log("[PersistPhotos] Already exists:", dest);
@@ -189,18 +181,27 @@ async function persistPhotoUris(uris: string[]): Promise<string[]> {
         continue;
       }
 
-      // Copy to persistent storage - MUST use fullUri
-      await FileSystem.copyAsync({ from: fullUri, to: dest });
+      // P2-004 FIX: Attempt copy directly without pre-checking source
+      // This eliminates the TOCTOU window where source could disappear
+      try {
+        await FileSystem.copyAsync({ from: fullUri, to: dest });
 
-      // Verify copy succeeded
-      const check = await FileSystem.getInfoAsync(dest);
-      if (__DEV__) {
-        console.log("[PersistPhotos] Copied:", { from: short, dest, exists: check.exists });
-      }
+        // Verify copy succeeded
+        const check = await FileSystem.getInfoAsync(dest);
+        if (__DEV__) {
+          console.log("[PersistPhotos] Copied:", { from: short, dest, exists: check.exists });
+        }
 
-      if (check.exists) {
-        results.push(dest);
-      } else {
+        if (check.exists) {
+          results.push(dest);
+        } else {
+          // Copy silently failed, keep original URI as fallback
+          results.push(fullUri);
+        }
+      } catch (copyErr) {
+        // P2-004 FIX: Source file disappeared or copy failed
+        // Gracefully fallback to original URI - UI will handle missing image
+        if (__DEV__) console.warn("[PersistPhotos] Copy failed (TOCTOU or missing):", short, copyErr);
         results.push(fullUri);
       }
     } catch (err) {
@@ -246,9 +247,12 @@ export default function Phase2OnboardingTerms() {
   // Navigation guard: prevent double-tap on X button
   const isExitingRef = useRef(false);
 
-  // O-001 FIX: Track mount state to prevent setState after unmount
+  // P0-002 FIX: Track mount state to prevent setState after unmount
+  // Must reset to true on each mount (not just initial) to handle component remounting
   const mountedRef = useRef(true);
   useEffect(() => {
+    // P0-002 FIX: Reset to true on mount/remount so state updates work after re-entering
+    mountedRef.current = true;
     return () => {
       mountedRef.current = false;
     };
@@ -319,10 +323,15 @@ export default function Phase2OnboardingTerms() {
       .filter((p: any): p is { url: string } => p !== null);
   };
 
-  const canContinue = rulesChecked && screenshotChecked && !isProcessing;
+  // P1-006 FIX: Track loading state to prevent false "No profile found" error
+  // useQuery returns undefined while loading, actual data (or null) when complete
+  const isUserLoading = !isDemoMode && userId && convexUser === undefined;
+  const canContinue = rulesChecked && screenshotChecked && !isProcessing && !isUserLoading;
 
   const handleContinue = async () => {
     if (isProcessing) return;
+    // P1-006 FIX: Guard against Continue press while user query is loading
+    if (isUserLoading) return;
     setIsProcessing(true);
 
     try {
