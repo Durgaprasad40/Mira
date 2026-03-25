@@ -47,7 +47,10 @@ export default function ViewProfileScreen() {
   const isPhase2 = mode === 'phase2';
   const isConfessPreview = mode === 'confess_preview';
   const isConfessRevisit = mode === 'confess_revisit';
+  const isConfessionComment = mode === 'confession_comment'; // FIX 8: Mini profile for comment connect
   const isConfessViewOnly = isConfessPreview || isConfessRevisit;
+  // HARDENING FIX 3: Check backend flag for confession_comment profile (automatic detection)
+  const isLimitedView = isConfessViewOnly || isConfessionComment; // FIX 8: All limited view modes
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const { width: screenWidth } = useWindowDimensions();
@@ -666,12 +669,19 @@ export default function ViewProfileScreen() {
           </View>
         )}
 
-        {/* Action Buttons - Hidden in confess view modes or when opened from chat */}
-        {isConfessViewOnly ? (
+        {/* Action Buttons - Hidden in limited view modes or when opened from chat */}
+        {/* HARDENING FIX 3: Also check backend flag for automatic detection */}
+        {(isLimitedView || profile?.isConfessionCommentProfile) ? (
           <View style={styles.previewOnlyBanner}>
-            <Ionicons name="eye-outline" size={18} color={COLORS.textMuted} />
+            <Ionicons
+              name={(isConfessionComment || profile?.isConfessionCommentProfile) ? 'chatbubble-ellipses-outline' : 'eye-outline'}
+              size={18}
+              color={COLORS.textMuted}
+            />
             <Text style={styles.previewOnlyText}>
-              {isConfessPreview ? 'View Only' : 'View Only'}
+              {(isConfessionComment || profile?.isConfessionCommentProfile)
+                ? 'Connected via Confession - Limited Profile'
+                : 'View Only'}
             </Text>
           </View>
         ) : fromChat === '1' ? null : (

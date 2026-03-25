@@ -818,9 +818,17 @@ export const getConversation = query({
       ? conversation.expiresAt <= now
       : false;
 
+    // FIX 8: Get matchSource to determine if this is a confession_comment match
+    let matchSource: string | undefined;
+    if (conversation.matchId) {
+      const match = await ctx.db.get(conversation.matchId);
+      matchSource = (match as any)?.matchSource;
+    }
+
     return {
       id: conversation._id,
       matchId: conversation.matchId,
+      matchSource, // FIX 8: Include matchSource for mini profile mode
       isPreMatch: conversation.isPreMatch,
       createdAt: conversation.createdAt,
       isConfessionChat,

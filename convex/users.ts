@@ -138,7 +138,77 @@ export const getUserById = query({
       );
     }
 
-    // Return public profile data
+    // ═══════════════════════════════════════════════════════════════════════════
+    // HARDENING FIX 3: CHECK FOR CONFESSION_COMMENT MATCH - RETURN MINI PROFILE
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Check if there's a confession_comment match between these users
+    // If so, return limited profile data to prevent data leaks
+    const confessionCommentMatch = await ctx.db
+      .query("matches")
+      .withIndex("by_user1", (q) => q.eq("user1Id", args.userId))
+      .filter((q) =>
+        q.and(
+          q.eq(q.field("user2Id"), args.viewerId),
+          q.eq(q.field("matchSource"), "confession_comment" as any)
+        )
+      )
+      .first();
+
+    const reverseConfessionCommentMatch = !confessionCommentMatch
+      ? await ctx.db
+          .query("matches")
+          .withIndex("by_user1", (q) => q.eq("user1Id", args.viewerId))
+          .filter((q) =>
+            q.and(
+              q.eq(q.field("user2Id"), args.userId),
+              q.eq(q.field("matchSource"), "confession_comment" as any)
+            )
+          )
+          .first()
+      : null;
+
+    const isConfessionCommentMatch = !!(confessionCommentMatch || reverseConfessionCommentMatch);
+
+    if (isConfessionCommentMatch) {
+      // MINI PROFILE: Return limited data for confession_comment matches
+      // Only expose: name (first name only), age, gender, one blurred photo
+      const firstName = user.name?.split(" ")[0] || "Anonymous";
+      const primaryPhoto = photos.find((p) => p.isPrimary) || photos[0];
+
+      return {
+        id: user._id,
+        name: firstName, // First name only
+        age: calculateAge(user.dateOfBirth),
+        gender: user.gender,
+        // Limited fields - all others are undefined/hidden
+        bio: undefined,
+        height: undefined,
+        smoking: undefined,
+        drinking: undefined,
+        kids: undefined,
+        education: undefined,
+        religion: undefined,
+        jobTitle: undefined,
+        company: undefined,
+        school: undefined,
+        isVerified: user.isVerified,
+        verificationStatus: user.verificationStatus || "unverified",
+        city: user.city, // City is okay to show
+        distance,
+        lastActive: undefined, // Hide last active for privacy
+        lookingFor: undefined,
+        relationshipIntent: undefined,
+        activities: undefined,
+        profilePrompts: [], // No prompts
+        photos: primaryPhoto
+          ? [{ ...primaryPhoto, isBlurred: true }] // Single blurred photo
+          : [],
+        photoBlurred: true, // Force blur
+        isConfessionCommentProfile: true, // Flag for UI to show mini profile notice
+      };
+    }
+
+    // Return full public profile data
     return {
       id: user._id,
       name: user.name,

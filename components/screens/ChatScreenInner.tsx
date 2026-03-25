@@ -94,11 +94,17 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
   }, [source, router]);
 
   // Open other user's profile when tapping avatar or name (with fromChat flag to hide action buttons)
-  const handleOpenProfile = useCallback((otherUserId: string | undefined) => {
+  // FIX 8: Pass mode='confession_comment' for mini profile when matchSource is 'confession_comment'
+  const handleOpenProfile = useCallback((otherUserId: string | undefined, matchSource?: string) => {
     if (otherUserId) {
+      const params: any = { id: otherUserId, fromChat: '1' };
+      // FIX 8: Mini profile for confession_comment matches
+      if (matchSource === 'confession_comment') {
+        params.mode = 'confession_comment';
+      }
       router.push({
         pathname: '/(main)/profile/[id]',
-        params: { id: otherUserId, fromChat: '1' },
+        params,
       });
     } else if (__DEV__) {
       console.warn('[P1ChatHeader] missing otherUserId', { convoId: conversationId });
@@ -1449,7 +1455,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
           </View>
         ) : (
           <TouchableOpacity
-            onPress={() => handleOpenProfile(activeConversation.otherUser.id)}
+            onPress={() => handleOpenProfile(activeConversation.otherUser.id, (activeConversation as any).matchSource)}
             style={styles.avatarButton}
             activeOpacity={0.7}
           >
@@ -1489,7 +1495,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
           </View>
         ) : (
           <TouchableOpacity
-            onPress={() => handleOpenProfile(activeConversation.otherUser.id)}
+            onPress={() => handleOpenProfile(activeConversation.otherUser.id, (activeConversation as any).matchSource)}
             style={styles.headerInfo}
             activeOpacity={0.7}
           >
@@ -1668,7 +1674,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
               avatarUrl={isOtherUserAnonymous ? undefined : activeConversation.otherUser.photoUrl}
               isLastInGroup={isLastInGroup}
               // PROFILE-TAP: Avatar tap opens profile (disabled for anonymous users)
-              onAvatarPress={isOtherUserAnonymous ? undefined : () => handleOpenProfile(activeConversation.otherUser.id)}
+              onAvatarPress={isOtherUserAnonymous ? undefined : () => handleOpenProfile(activeConversation.otherUser.id, (activeConversation as any).matchSource)}
             />
           );
           }}
