@@ -135,19 +135,20 @@ export default function ProfileScreen() {
     if (!rawPhotos?.length || !Array.isArray(rawPhotos)) return [];
 
     return rawPhotos
-      .map((p: any, i: number) => {
+      .map((p: any, i: number): { url: string; isPrimary: boolean; isBlurred?: boolean; order?: number } | null => {
         // Handle string URLs directly
         if (typeof p === 'string') {
-          return { url: p, isPrimary: i === 0, isBlurred: undefined, order: undefined };
+          return { url: p, isPrimary: i === 0 };
         }
         // Handle { url: string } objects - preserve isBlurred and order from backend
         if (p?.url) {
-          return {
+          const result: { url: string; isPrimary: boolean; isBlurred?: boolean; order?: number } = {
             url: p.url,
             isPrimary: p.isPrimary ?? i === 0,
-            isBlurred: p.isBlurred as boolean | undefined,
-            order: p.order as number | undefined,
           };
+          if (typeof p.isBlurred === 'boolean') result.isBlurred = p.isBlurred;
+          if (typeof p.order === 'number') result.order = p.order;
+          return result;
         }
         return null;
       })

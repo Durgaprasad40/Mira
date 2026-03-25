@@ -183,7 +183,7 @@ export default function ConfessionsScreen() {
   const [retryKey, setRetryKey] = useState(0); // For LoadingGuard retry
   const [showToast, setShowToast] = useState(false);
   const [toastMessage, setToastMessage] = useState('Posted anonymously');
-  const [toastIcon, setToastIcon] = useState<'checkmark-circle' | 'chatbubbles'>('checkmark-circle');
+  const [toastIcon, setToastIcon] = useState<'checkmark-circle' | 'chatbubbles' | 'alert-circle'>('checkmark-circle');
   const toastOpacity = useRef(new Animated.Value(0)).current;
 
   // Emoji picker state
@@ -612,7 +612,7 @@ export default function ConfessionsScreen() {
   }, []);
 
   // Show toast with custom message
-  const showToastMessage = useCallback((message: string, icon: 'checkmark-circle' | 'chatbubbles' = 'checkmark-circle') => {
+  const showToastMessage = useCallback((message: string, icon: 'checkmark-circle' | 'chatbubbles' | 'alert-circle' = 'checkmark-circle') => {
     setToastMessage(message);
     setToastIcon(icon);
     setShowToast(true);
@@ -1420,7 +1420,7 @@ export default function ConfessionsScreen() {
           <Ionicons
             name={toastIcon}
             size={18}
-            color={toastIcon === 'chatbubbles' ? COLORS.primary : '#34C759'}
+            color={toastIcon === 'chatbubbles' ? COLORS.primary : toastIcon === 'alert-circle' ? '#FF9500' : '#34C759'}
           />
           <Text style={styles.toastText}>{toastMessage}</Text>
         </Animated.View>

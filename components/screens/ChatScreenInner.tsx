@@ -387,7 +387,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
 
     // LIVE-TICK-DEBUG: Log when hash changes (tracks sender seeing tick updates)
     if (__DEV__) {
-      const lastMsg = recentMessages[recentMessages.length - 1];
+      const lastMsg = recentMessages[recentMessages.length - 1] as any;
       console.log('[LIVE-TICK-HASH] Hash computed:', {
         msgCount: recentMessages.length,
         lastMsgId: lastMsg?._id?.slice(-6),
@@ -769,7 +769,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
     }
 
     // Get the latest message
-    const latestMsg = messages[messages.length - 1];
+    const latestMsg = messages[messages.length - 1] as any;
     const latestMsgId = latestMsg?._id;
 
     // Check if we have any unread messages from the other user
