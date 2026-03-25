@@ -1772,6 +1772,11 @@ export default defineSchema({
       v.literal('inviter'),          // Inviter's turn to choose
       v.literal('invitee')           // Invitee's turn to choose
     )),
+    // SPIN-TURN-FIX: Track who can spin next (alternates after each round)
+    spinTurnRole: v.optional(v.union(
+      v.literal('inviter'),          // Inviter's turn to spin
+      v.literal('invitee')           // Invitee's turn to spin
+    )),
     turnPhase: v.optional(v.union(
       v.literal('idle'),             // Waiting for spin
       v.literal('spinning'),         // Spin animation in progress
