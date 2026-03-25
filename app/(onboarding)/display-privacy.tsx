@@ -7,7 +7,7 @@
  * - Do not change UX/flows without explicit unlock
  * Date locked: 2026-03-04
  */
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   View,
   Text,
@@ -74,6 +74,13 @@ export default function DisplayPrivacyScreen() {
   const [isProcessing, setIsProcessing] = useState(false);
   const [previewUri, setPreviewUri] = useState<string | null>(null);
   const [viewerOpen, setViewerOpen] = useState(false);
+
+  // P1-013 FIX: Track mounted state to prevent setState on unmounted component
+  const mountedRef = useRef(true);
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => { mountedRef.current = false; };
+  }, []);
 
   // Get first non-null photo for display
   const profilePhoto = photos[0] ?? null;
@@ -291,12 +298,20 @@ export default function DisplayPrivacyScreen() {
       setIsProcessing(true);
       try {
         const processed = await processPhotoVariant(profilePhoto, 'blurred');
-        setPreviewUri(processed.uri);
+        // P1-013 FIX: Only update state if still mounted
+        if (mountedRef.current) {
+          setPreviewUri(processed.uri);
+        }
       } catch (error) {
         console.error('[DisplayPrivacy] Error generating blur preview:', error);
-        Alert.alert('Error', 'Failed to generate preview. Please try again.');
+        if (mountedRef.current) {
+          Alert.alert('Error', 'Failed to generate preview. Please try again.');
+        }
       } finally {
-        setIsProcessing(false);
+        // P1-013 FIX: Only update state if still mounted
+        if (mountedRef.current) {
+          setIsProcessing(false);
+        }
       }
     } else {
       setPreviewUri(null);

@@ -74,6 +74,11 @@ function normalizePhotos(input: unknown): PhotoSlots9 {
     return result;
   }
 
+  // P1-001 FIX: Warn if photos array exceeds slot capacity (DEV only)
+  if (__DEV__ && input.length > 9) {
+    console.warn(`[ONB_STORE] normalizePhotos: ${input.length} photos provided, only first 9 will be used`);
+  }
+
   // ✅ PRODUCTION FIX: Copy ALL URIs without filtering
   // Previous code used isValidPhotoUri() which DELETED photos - removed for data safety
   for (let i = 0; i < Math.min(input.length, 9); i++) {
@@ -628,31 +633,34 @@ export const useOnboardingStore = create<OnboardingState>()((set, get) => ({
           lifeRhythm: { ...state.lifeRhythm, coreValues: coreValues.slice(0, 3) },
         })),
 
+      // P1-002 FIX: Use atomic set() callback to prevent race conditions on rapid toggles
       toggleLifeRhythmCoreValue: (value) => {
-        const state = useOnboardingStore.getState();
-        const currentValues = state.lifeRhythm.coreValues;
-        if (currentValues.includes(value)) {
-          // Remove value
-          set({
+        let success = true;
+        set((state) => {
+          const currentValues = state.lifeRhythm.coreValues;
+          if (currentValues.includes(value)) {
+            // Remove value
+            return {
+              lifeRhythm: {
+                ...state.lifeRhythm,
+                coreValues: currentValues.filter((v) => v !== value),
+              },
+            };
+          }
+          // Check max 3 limit
+          if (currentValues.length >= 3) {
+            success = false;
+            return state; // Return unchanged state
+          }
+          // Add value
+          return {
             lifeRhythm: {
               ...state.lifeRhythm,
-              coreValues: currentValues.filter((v) => v !== value),
+              coreValues: [...currentValues, value],
             },
-          });
-          return true;
-        }
-        // Check max 3 limit
-        if (currentValues.length >= 3) {
-          return false; // Max 3 selections reached
-        }
-        // Add value
-        set({
-          lifeRhythm: {
-            ...state.lifeRhythm,
-            coreValues: [...currentValues, value],
-          },
+          };
         });
-        return true;
+        return success;
       },
 
       // ═══════════════════════════════════════════════════════════════════════════════

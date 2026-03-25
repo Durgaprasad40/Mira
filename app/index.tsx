@@ -105,7 +105,8 @@ export default function Index() {
     currentDemoUserId: string | null;
     demoOnboardingComplete: Record<string, boolean>;
   } | null>(null);
-  // FIX: Store resume route for VALID_ONBOARD state
+  // P1-003 FIX: Store resume route for VALID_ONBOARD state
+  // Reset when bootState changes to non-onboarding state to prevent route leakage
   const [onboardingResumeRoute, setOnboardingResumeRoute] = useState<string | null>(null);
 
   // ==========================================================================
@@ -151,6 +152,15 @@ export default function Index() {
       markDuration("boot_caches", Date.now() - t0);
 
       if (!mounted.current) return;
+
+      // P0-004 FIX: Re-check logout state AFTER async cache read
+      // Logout could have occurred during the Promise.all wait
+      const postLoadAuthState = useAuthStore.getState();
+      if (postLoadAuthState.logoutInProgress || (postLoadAuthState.authVersion > 0 && !postLoadAuthState.token)) {
+        if (__DEV__) console.log('[BOOT] Logout detected after cache load, aborting auth restoration');
+        setBootState(isDemoMode ? "DEMO_WELCOME" : "NO_AUTH");
+        return;
+      }
 
       setAuthCache(authData);
       if (demoData) setDemoCache(demoData);
@@ -341,6 +351,8 @@ export default function Index() {
         const currentState = useAuthStore.getState();
         if (currentState.logoutInProgress || currentState.authVersion !== capturedAuthVersion) {
           if (__DEV__) console.log("[BOOT] Logout during validation error handling, routing to welcome");
+          // P1-003 FIX: Clear resume route on logout/invalid state
+          setOnboardingResumeRoute(null);
           setBootState("INVALID");
           return;
         }

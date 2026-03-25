@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useCallback, useRef, useEffect } from 'react';
-import { View, Text, TextInput, StyleSheet, TouchableOpacity, Alert, ActivityIndicator, Modal, Pressable } from 'react-native';
+import { View, Text, TextInput, StyleSheet, TouchableOpacity, Alert, ActivityIndicator, Modal, Pressable, Keyboard } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { COLORS, MESSAGE_TEMPLATES } from '@/lib/constants';
 import { Button } from '@/components/ui';
@@ -149,6 +149,8 @@ export function MessageInput({
 
     const trimmed = text.trim();
     handleTextChange('');
+    // P2-024 FIX: Dismiss keyboard after sending message
+    Keyboard.dismiss();
     // P1-A FIX: Set ref BEFORE async operation
     isSendingRef.current = true;
     setIsSending(true);

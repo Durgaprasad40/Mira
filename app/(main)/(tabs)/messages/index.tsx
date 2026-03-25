@@ -342,6 +342,19 @@ export default function MessagesScreen() {
     }
   }, [isDemoMode, userId, convexConversations, markAllAsDelivered]);
 
+  // P0-009 FIX: Mark messages as delivered when app resumes from background
+  // useFocusEffect runs when screen is focused (including when app resumes)
+  // This complements the above useEffect which only runs when data changes
+  useFocusEffect(
+    useCallback(() => {
+      if (!isDemoMode && userId) {
+        markAllAsDelivered({ authUserId: userId }).catch(() => {
+          // Silent fail - delivery marking is best-effort
+        });
+      }
+    }, [userId, markAllAsDelivered])
+  );
+
   // Combine message threads
   const demoThreads = useMemo(() => {
     if (!isDemoMode) return [];

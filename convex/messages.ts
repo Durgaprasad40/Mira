@@ -1034,7 +1034,9 @@ export const getConversations = query({
 
       const photo = photoMap.get(otherUserId);
       const lastMessage = lastMessages[i];
-      const unreadCount = unreadCounts[i]?.length || 0;
+      // P0-008 FIX: Filter unread messages by COUNTABLE_MESSAGE_TYPES (same as computeUnreadCountFromMessages)
+      // System messages should not count toward the unread badge
+      const unreadCount = (unreadCounts[i] || []).filter((m) => COUNTABLE_MESSAGE_TYPES.includes(m.type)).length;
 
       // PRIVACY FIX: Check if the other user should be shown anonymously
       // This happens when they're the confession author on an anonymous confession

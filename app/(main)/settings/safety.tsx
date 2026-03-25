@@ -74,6 +74,9 @@ export default function SafetySettingsScreen() {
   // Track which safety tip section is expanded
   const [expandedTip, setExpandedTip] = useState<string | null>(null);
 
+  // P2-035 FIX: Loading states for verification buttons
+  const [isStartingFaceVerification, setIsStartingFaceVerification] = useState(false);
+
   // ScrollView ref for auto-scroll
   const scrollViewRef = useRef<ScrollView>(null);
 
@@ -89,16 +92,23 @@ export default function SafetySettingsScreen() {
   ];
 
   // Handle face verification start
+  // P2-035 FIX: Add loading state to prevent double-tap and show feedback
   const handleStartFaceVerification = async () => {
-    if (!permission?.granted) {
-      const result = await requestPermission();
-      if (!result.granted) {
-        Alert.alert('Camera Permission', 'Camera access is required for face verification.');
-        return;
+    if (isStartingFaceVerification) return;
+    setIsStartingFaceVerification(true);
+    try {
+      if (!permission?.granted) {
+        const result = await requestPermission();
+        if (!result.granted) {
+          Alert.alert('Camera Permission', 'Camera access is required for face verification.');
+          return;
+        }
       }
+      setCaptureStep(0);
+      setShowCamera(true);
+    } finally {
+      setIsStartingFaceVerification(false);
     }
-    setCaptureStep(0);
-    setShowCamera(true);
   };
 
   // Handle camera modal close — reset all capture state to prevent stale step on reopen
@@ -285,10 +295,21 @@ export default function SafetySettingsScreen() {
               </Text>
 
               {/* CTA only if not started */}
+              {/* P2-035 FIX: Add loading state and disabled during loading */}
               {faceStatus === 'not_verified' && (
-                <TouchableOpacity style={styles.verificationButton} onPress={handleStartFaceVerification}>
-                  <Ionicons name="camera-outline" size={18} color={COLORS.white} />
-                  <Text style={styles.verificationButtonText}>Start Verification</Text>
+                <TouchableOpacity
+                  style={[styles.verificationButton, isStartingFaceVerification && styles.verificationButtonLoading]}
+                  onPress={handleStartFaceVerification}
+                  disabled={isStartingFaceVerification}
+                >
+                  {isStartingFaceVerification ? (
+                    <ActivityIndicator size="small" color={COLORS.white} />
+                  ) : (
+                    <Ionicons name="camera-outline" size={18} color={COLORS.white} />
+                  )}
+                  <Text style={styles.verificationButtonText}>
+                    {isStartingFaceVerification ? 'Starting...' : 'Start Verification'}
+                  </Text>
                 </TouchableOpacity>
               )}
 
@@ -733,6 +754,10 @@ const styles = StyleSheet.create({
   },
   verificationButtonDisabled: {
     backgroundColor: COLORS.border,
+  },
+  // P2-035 FIX: Loading state style for verification button
+  verificationButtonLoading: {
+    opacity: 0.8,
   },
   verificationButtonText: {
     fontSize: 15,

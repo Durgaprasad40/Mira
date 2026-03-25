@@ -7,7 +7,7 @@
  * - Do not change UX/flows without explicit unlock
  * Date locked: 2026-03-04
  */
-import { useRef } from "react";
+import { useRef, useState, useEffect } from "react";
 import { View, Text, StyleSheet, ActivityIndicator } from "react-native";
 import { Button } from "@/components/ui";
 import { useRouter, Redirect, useSegments } from "expo-router";
@@ -17,6 +17,9 @@ import { Ionicons } from "@expo/vector-icons";
 import { LinearGradient } from "expo-linear-gradient";
 import { isDemoMode } from "@/hooks/useConvex";
 import { useDemoStore } from "@/stores/demoStore";
+
+// P1-021 FIX: Timeout for demo hydration to prevent frozen screen
+const DEMO_HYDRATION_TIMEOUT_MS = 5000;
 
 // =============================================================================
 // WELCOME SCREEN - Auth Entry Point
@@ -52,6 +55,22 @@ export default function WelcomeScreen() {
   // Single-fire guard to prevent repeated redirects
   const didRedirectRef = useRef(false);
 
+  // P1-021 FIX: Track hydration timeout to prevent frozen screen
+  const [hydrationTimedOut, setHydrationTimedOut] = useState(false);
+  useEffect(() => {
+    if (isDemoMode && !demoStoreHydrated) {
+      const timer = setTimeout(() => {
+        setHydrationTimedOut(true);
+        console.warn('[AUTH_WELCOME] P1-021: Demo hydration timeout after 5s');
+      }, DEMO_HYDRATION_TIMEOUT_MS);
+      return () => clearTimeout(timer);
+    }
+    // Reset timeout flag if hydration completes
+    if (demoStoreHydrated) {
+      setHydrationTimedOut(false);
+    }
+  }, [demoStoreHydrated]);
+
   // ==========================================================================
   // GUARD: Only process redirect logic if on auth path
   // ==========================================================================
@@ -68,6 +87,30 @@ export default function WelcomeScreen() {
   // ==========================================================================
 
   if (isDemoMode && !demoStoreHydrated) {
+    // P1-021 FIX: Show error and proceed option if hydration times out
+    if (hydrationTimedOut) {
+      return (
+        <LinearGradient
+          colors={[COLORS.primary, COLORS.secondary]}
+          style={styles.container}
+        >
+          <View style={styles.content}>
+            <Ionicons name="cloud-offline-outline" size={48} color={COLORS.white} />
+            <Text style={[styles.title, { fontSize: 24, marginTop: 16 }]}>Demo Loading Slow</Text>
+            <Text style={styles.subtitle}>
+              Demo data is taking longer than expected. You can continue anyway.
+            </Text>
+            <Button
+              title="Continue Anyway"
+              variant="outline"
+              onPress={() => setHydrationTimedOut(false)}
+              style={{ marginTop: 20, borderColor: COLORS.white }}
+              textStyle={{ color: COLORS.white }}
+            />
+          </View>
+        </LinearGradient>
+      );
+    }
     return (
       <LinearGradient
         colors={[COLORS.primary, COLORS.secondary]}

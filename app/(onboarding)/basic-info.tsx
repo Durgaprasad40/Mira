@@ -150,6 +150,8 @@ export default function BasicInfoScreen() {
   // Nickname availability state (for new users)
   const [isCheckingAvailability, setIsCheckingAvailability] = useState(false);
   const [isNicknameAvailable, setIsNicknameAvailable] = useState<boolean | null>(null);
+  // P1-007 FIX: Track if availability check failed to show retry option
+  const [availabilityCheckFailed, setAvailabilityCheckFailed] = useState(false);
   const availabilityTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const isMountedRef = useRef(true); // Track mounted state to ignore late async results
 
@@ -403,6 +405,9 @@ export default function BasicInfoScreen() {
   // BUG-002 FIX: Mutation for persisting basic info to onboarding draft
   const upsertDraft = useMutation(api.users.upsertOnboardingDraft);
 
+  // P1-006 FIX: Track the handle being checked to prevent stale results
+  const checkingHandleRef = useRef<string | null>(null);
+
   // Debounced nickname availability check (only for new users)
   const checkNicknameAvailability = useCallback(async (handle: string) => {
     // Clear any pending check
@@ -414,12 +419,17 @@ export default function BasicInfoScreen() {
     if (!handle || handle.length < 3) {
       setIsCheckingAvailability(false);
       setIsNicknameAvailable(null);
+      setAvailabilityCheckFailed(false); // P1-007 FIX: Reset failure state
+      checkingHandleRef.current = null;
       return;
     }
 
     // Start checking indicator
     setIsCheckingAvailability(true);
     setIsNicknameAvailable(null);
+    setAvailabilityCheckFailed(false); // P1-007 FIX: Reset failure state
+    // P1-006 FIX: Track which handle we're checking
+    checkingHandleRef.current = handle;
 
     // Log demo mode status for debugging
     console.log(`[BASIC] EXPO_PUBLIC_DEMO_MODE=${process.env.EXPO_PUBLIC_DEMO_MODE}, isDemoMode=${isDemoMode}`);
@@ -435,8 +445,8 @@ export default function BasicInfoScreen() {
           const profiles = Object.values(demoStore.demoProfiles);
           const taken = profiles.some((p: any) => p.handle === handle);
           console.log(`[BASIC] nickname=${handle} available=${!taken} (demo mode - checked local demoStore)`);
-          // Only update state if still mounted
-          if (isMountedRef.current) {
+          // P1-006 FIX: Only update state if still mounted AND handle hasn't changed
+          if (isMountedRef.current && checkingHandleRef.current === handle) {
             setIsNicknameAvailable(!taken);
           }
         } else {
@@ -445,20 +455,22 @@ export default function BasicInfoScreen() {
           const result = await convex.query(api.auth.checkHandleExists, { handle });
           const available = !result.exists;
           console.log(`[BASIC] nickname=${handle} available=${available} (live mode - Convex DB, exists=${result.exists})`);
-          // Only update state if still mounted
-          if (isMountedRef.current) {
+          // P1-006 FIX: Only update state if still mounted AND handle hasn't changed
+          if (isMountedRef.current && checkingHandleRef.current === handle) {
             setIsNicknameAvailable(available);
           }
         }
       } catch (error) {
         console.error('[BASIC] availability check error:', error);
-        // Only update state if still mounted
-        if (isMountedRef.current) {
+        // P1-006 FIX: Only update state if still mounted AND handle hasn't changed
+        // P1-007 FIX: Set failure state so user can retry
+        if (isMountedRef.current && checkingHandleRef.current === handle) {
           setIsNicknameAvailable(null);
+          setAvailabilityCheckFailed(true);
         }
       } finally {
-        // Only update state if still mounted
-        if (isMountedRef.current) {
+        // P1-006 FIX: Only update state if still mounted AND handle hasn't changed
+        if (isMountedRef.current && checkingHandleRef.current === handle) {
           setIsCheckingAvailability(false);
         }
       }
@@ -743,6 +755,12 @@ export default function BasicInfoScreen() {
       if (isDemoMode) {
         // Demo mode: local account creation via demoStore
         const demoStore = useDemoStore.getState();
+        // P1-005 FIX: Defensive check for demoStore initialization
+        if (!demoStore || typeof demoStore.demoSignUp !== 'function') {
+          setIsSubmitting(false);
+          Alert.alert("Error", "Demo mode not properly initialized. Please restart the app.");
+          return;
+        }
         let newUserId: string;
         try {
           newUserId = demoStore.demoSignUp(email, password);
@@ -750,6 +768,10 @@ export default function BasicInfoScreen() {
           // If email already exists, try sign-in
           if (signUpError.message?.includes("already exists")) {
             try {
+              // P1-005 FIX: Defensive check for demoSignIn
+              if (typeof demoStore.demoSignIn !== 'function') {
+                throw new Error("Demo sign-in not available");
+              }
               const result = demoStore.demoSignIn(email, password);
               newUserId = result.userId;
               setAuth(newUserId, "demo_token", result.onboardingComplete, capturedAuthVersion);
@@ -1037,6 +1059,16 @@ export default function BasicInfoScreen() {
                 <Ionicons name="close-circle" size={16} color={COLORS.error} />
                 <Text style={styles.availabilityError}>Taken</Text>
               </>
+            ) : availabilityCheckFailed ? (
+              // P1-007 FIX: Show retry option when check fails
+              <TouchableOpacity
+                style={styles.availabilityRetry}
+                onPress={() => checkNicknameAvailability(nickname)}
+              >
+                <Ionicons name="alert-circle" size={16} color={COLORS.warning} />
+                <Text style={styles.availabilityWarning}>Check failed</Text>
+                <Text style={styles.availabilityRetryText}>Tap to retry</Text>
+              </TouchableOpacity>
             ) : null}
           </View>
         )}
@@ -1212,11 +1244,15 @@ export default function BasicInfoScreen() {
               >
                 <Text style={styles.modalButtonEditText}>Edit</Text>
               </TouchableOpacity>
+              {/* P2-003 FIX: Disable confirm button while submitting to prevent double-submit */}
               <TouchableOpacity
-                style={styles.modalButtonConfirm}
+                style={[styles.modalButtonConfirm, isSubmitting && styles.modalButtonDisabled]}
                 onPress={handleNext}
+                disabled={isSubmitting}
               >
-                <Text style={styles.modalButtonConfirmText}>Confirm & Continue</Text>
+                <Text style={styles.modalButtonConfirmText}>
+                  {isSubmitting ? 'Submitting...' : 'Confirm & Continue'}
+                </Text>
               </TouchableOpacity>
             </View>
           </View>
@@ -1300,6 +1336,23 @@ const styles = StyleSheet.create({
     fontSize: 12,
     color: COLORS.error,
     fontWeight: "500",
+  },
+  // P1-007 FIX: Styles for retry UI when availability check fails
+  availabilityRetry: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+  },
+  availabilityWarning: {
+    fontSize: 12,
+    color: COLORS.warning,
+    fontWeight: "500",
+  },
+  availabilityRetryText: {
+    fontSize: 12,
+    color: COLORS.primary,
+    fontWeight: "500",
+    textDecorationLine: "underline",
   },
   dateButton: {
     marginTop: 8,
@@ -1462,6 +1515,10 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     backgroundColor: COLORS.primary,
     alignItems: 'center',
+  },
+  // P2-003 FIX: Disabled state for modal button during submission
+  modalButtonDisabled: {
+    opacity: 0.6,
   },
   modalButtonConfirmText: {
     fontSize: 16,

@@ -73,7 +73,8 @@ interface AuthState {
 
   // Begin logout - sets logoutInProgress, increments authVersion
   // After this, all setAuthenticatedSession calls will be rejected
-  beginLogout: () => void;
+  // P0-003 FIX: Returns false if logout already in progress (mutex)
+  beginLogout: () => boolean;
 
   // Finish logout - clears all state, sets logoutInProgress=false
   finishLogout: () => void;
@@ -202,6 +203,15 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
   },
 
   beginLogout: () => {
+    // P0-003 FIX: Prevent double logout - if already in progress, return false
+    // This acts as a mutex to prevent concurrent logout execution
+    if (get().logoutInProgress) {
+      if (__DEV__) {
+        console.log('[AUTH] beginLogout: already in progress, skipping');
+      }
+      return false;
+    }
+
     const currentVersion = get().authVersion;
     const newVersion = currentVersion + 1;
 
@@ -213,6 +223,8 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
       logoutInProgress: true,
       authVersion: newVersion,
     });
+
+    return true;
   },
 
   finishLogout: () => {
@@ -251,7 +263,14 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
     // =======================================================================
 
     // STEP 1: Begin logout - blocks all auth restoration
-    get().beginLogout();
+    // P0-003 FIX: Check if logout already in progress (mutex)
+    const didAcquireLock = get().beginLogout();
+    if (!didAcquireLock) {
+      if (__DEV__) {
+        console.log('[AUTH] logout: skipped (already in progress)');
+      }
+      return; // Another logout is already running
+    }
 
     // STEP 2: Clear SecureStore FIRST
     try {

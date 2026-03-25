@@ -8,6 +8,7 @@ import {
   TrustSignals,
   rankDiscoverCandidates,
   qualifiesForFallback,
+  calculateRankScore, // P2-018 FIX: Import for fallback ranking
   DISCOVER_RANKING_CONFIG,
 } from './discoverRanking';
 
@@ -608,7 +609,17 @@ export const getDiscoverProfiles = query({
 
       // Enforcement
       if (user.verificationEnforcementLevel === 'security_only') continue;
-      if (user.verificationEnforcementLevel === 'reduced_reach' && Math.random() > 0.5) continue;
+      // P1-027 FIX: Use deterministic hash instead of Math.random() for reduced_reach
+      // This ensures consistent results across page loads for the same viewer+user pair
+      if (user.verificationEnforcementLevel === 'reduced_reach') {
+        // Simple hash: sum of character codes modulo 2
+        const pairId = `${userId}:${user._id}`;
+        let hash = 0;
+        for (let i = 0; i < pairId.length; i++) {
+          hash = (hash + pairId.charCodeAt(i)) % 100;
+        }
+        if (hash >= 50) continue; // Skip 50% deterministically
+      }
 
       filteredCandidates.push({ user, distance });
     }
@@ -754,14 +765,22 @@ export const getDiscoverProfiles = query({
         const needed = limit - result.length;
         const usedIds = new Set(result.map(r => r.id as string));
 
-        // Find candidates not already in result that qualify for fallback
+        // P2-018 FIX: Find and RANK candidates for fallback
+        // Sort by ranking score to ensure best fallback candidates are selected first
         const fallbackCandidates = candidateProfiles
           .filter(c => !usedIds.has(c.id) && qualifiesForFallback(c, rankingCurrentUser))
-          .slice(0, needed);
+          .map(c => ({ c, score: calculateRankScore(c, rankingCurrentUser, trustSignals) }))
+          .sort((a, b) => b.score - a.score)
+          .slice(0, needed)
+          .map(({ c }) => c);
 
-        // Map fallback candidates back to original format
-        const fallbackIds = new Set(fallbackCandidates.map(c => c.id));
-        const fallbackResults = candidates.filter(c => fallbackIds.has(c.id as string));
+        // P2-018 FIX: Map fallback candidates back to original format, preserving rank order
+        const candidateById = new Map(candidates.map(c => [c.id as string, c]));
+        const fallbackResults: typeof candidates = [];
+        for (const c of fallbackCandidates) {
+          const original = candidateById.get(c.id);
+          if (original) fallbackResults.push(original);
+        }
 
         // Append fallback results (they appear after ranked results)
         result = [...result, ...fallbackResults];

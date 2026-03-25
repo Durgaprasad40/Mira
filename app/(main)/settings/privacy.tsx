@@ -37,9 +37,14 @@ export default function PrivacySettingsScreen() {
   const setHideDistance = usePrivacyStore((s) => s.setHideDistance);
   const setDisableReadReceipts = usePrivacyStore((s) => s.setDisableReadReceipts);
 
+  // P1-042 FIX: Track if initial sync has been done to prevent overwriting pending changes
+  const initialSyncDoneRef = React.useRef(false);
+
   // Hydrate local state from backend on load (live mode only)
+  // P1-042 FIX: Only sync once on initial load to prevent overwriting user's pending changes
   useEffect(() => {
-    if (currentUser) {
+    if (currentUser && !initialSyncDoneRef.current) {
+      initialSyncDoneRef.current = true;
       // Sync hideFromDiscover from isDiscoveryPaused
       if (currentUser.isDiscoveryPaused !== undefined) {
         setHideFromDiscover(currentUser.isDiscoveryPaused);

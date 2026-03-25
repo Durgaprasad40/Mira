@@ -28,6 +28,7 @@ import { Image } from 'expo-image';
 import { isDemoMode } from '@/hooks/useConvex';
 import { useDemoStore } from '@/stores/demoStore';
 import { useOnboardingStore } from '@/stores/onboardingStore';
+import { usePrivacyStore } from '@/stores/privacyStore';
 import { getDemoCurrentUser } from '@/lib/demoData';
 import { useScreenTrace } from '@/lib/devTrace';
 
@@ -266,6 +267,14 @@ export default function ProfileScreen() {
   // Full-screen photo preview state
   const [showPhotoPreview, setShowPhotoPreview] = useState(false);
 
+  // P2-033 FIX: Track main photo load error to show fallback
+  const [mainPhotoError, setMainPhotoError] = useState(false);
+
+  // P2-033 FIX: Reset error state when photo URL changes
+  React.useEffect(() => {
+    setMainPhotoError(false);
+  }, [mainPhotoUrl]);
+
   if (__DEV__) {
     // CONSISTENCY DEBUG: Show both sources to verify they match
     const backendPhotoCount = backendPhotos?.length ?? 0;
@@ -330,6 +339,8 @@ export default function ProfileScreen() {
             useDemoStore.getState().demoLogout();
           }
           useOnboardingStore.getState().reset();
+          // P0-002 FIX: Reset privacy store to prevent leaking settings to next user
+          usePrivacyStore.getState().resetPrivacy();
           // H5 FIX: Await async logout to ensure SecureStore is cleared before navigation
           await logout();
           safeReplace(router, '/(auth)/welcome', 'profile->logout');
@@ -357,6 +368,8 @@ export default function ProfileScreen() {
               }
               // 3A1-2: Also clear onboarding store on deactivate
               useOnboardingStore.getState().reset();
+              // P0-002 FIX: Reset privacy store to prevent leaking settings to next user
+              usePrivacyStore.getState().resetPrivacy();
               // H5 FIX: Await async logout to ensure SecureStore is cleared before navigation
               await logout();
               safeReplace(router, '/(auth)/welcome', 'profile->deactivate');
@@ -398,7 +411,8 @@ export default function ProfileScreen() {
       <View style={styles.profileSection}>
         {/* Main photo - large with shadow, tappable for full-screen view */}
         {/* BLUR FIX: Apply soft blur (radius 8) when photoBlurred is true */}
-        {mainPhotoUrl ? (
+        {/* P2-033 FIX: Show fallback Avatar if photo fails to load */}
+        {mainPhotoUrl && !mainPhotoError ? (
           <TouchableOpacity
             activeOpacity={0.9}
             onPress={() => setShowPhotoPreview(true)}
@@ -419,6 +433,10 @@ export default function ProfileScreen() {
                   console.log('[PERF ProfileTab] Main photo loaded:', { loadTimeMs: loadTime, mainPhotoIsBlurred });
                   hasLoggedPhotoLoad.current = true;
                 }
+              }}
+              onError={() => {
+                // P2-033 FIX: Show fallback Avatar when image fails to load
+                setMainPhotoError(true);
               }}
             />
           </TouchableOpacity>

@@ -555,10 +555,13 @@ export default function ConfessionThreadScreen() {
     if (!confession) return;
     const emoji = emojiObj.emoji;
     toggleReaction(confession.id, emoji);
-    if (!isDemoMode && currentUserId) {
+    // P0-010 FIX: Use safe ID helpers instead of unsafe 'as any' casts
+    const safeConfId = asConfessionId(confession.id);
+    const safeUid = asUserId(currentUserId);
+    if (!isDemoMode && safeConfId && safeUid) {
       toggleReactionMutation({
-        confessionId: confession.id as any,
-        userId: currentUserId as any,
+        confessionId: safeConfId,
+        userId: safeUid,
         type: emoji,
       }).catch(() => {
         // P2-003 FIX: Rollback and show error feedback
@@ -571,10 +574,13 @@ export default function ConfessionThreadScreen() {
   const handleToggleEmoji = useCallback((emoji: string) => {
     if (!confession) return;
     toggleReaction(confession.id, emoji);
-    if (!isDemoMode && currentUserId) {
+    // P0-010 FIX: Use safe ID helpers instead of unsafe 'as any' casts
+    const safeConfId = asConfessionId(confession.id);
+    const safeUid = asUserId(currentUserId);
+    if (!isDemoMode && safeConfId && safeUid) {
       toggleReactionMutation({
-        confessionId: confession.id as any,
-        userId: currentUserId as any,
+        confessionId: safeConfId,
+        userId: safeUid,
         type: emoji,
       }).catch(() => {
         // P2-003 FIX: Rollback and show error feedback
