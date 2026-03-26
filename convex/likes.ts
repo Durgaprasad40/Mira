@@ -917,6 +917,68 @@ export const resetSwipeBetweenUsers = mutation({
 });
 
 // =============================================================================
+// UNCRUSH: Remove your like/crush on another user
+// =============================================================================
+// Allows user to take back their like before or after matching.
+// Only removes the current user's like, not the other user's.
+// =============================================================================
+export const uncrush = mutation({
+  args: {
+    token: v.string(),
+    targetUserId: v.id('users'),
+  },
+  handler: async (ctx, args) => {
+    const { token, targetUserId } = args;
+
+    // Validate session and derive current user
+    const fromUserId = await validateSessionToken(ctx, token);
+    if (!fromUserId) {
+      throw new Error('Unauthorized: invalid or expired session');
+    }
+
+    // Prevent self-targeting
+    if (fromUserId === targetUserId) {
+      throw new Error('Cannot uncrush yourself');
+    }
+
+    // Find the like from current user to target user
+    const existingLike = await ctx.db
+      .query('likes')
+      .withIndex('by_from_to', (q) =>
+        q.eq('fromUserId', fromUserId).eq('toUserId', targetUserId)
+      )
+      .first();
+
+    if (!existingLike) {
+      // No like found - nothing to remove
+      return {
+        success: true,
+        removed: false,
+        message: 'No crush found to remove',
+      };
+    }
+
+    // Delete the like
+    await ctx.db.delete(existingLike._id);
+
+    if (process.env.NODE_ENV !== 'production') {
+      console.log('[Uncrush] Removed like', {
+        fromUserId,
+        targetUserId,
+        likeId: existingLike._id,
+        action: existingLike.action,
+      });
+    }
+
+    return {
+      success: true,
+      removed: true,
+      message: 'Crush removed successfully',
+    };
+  },
+});
+
+// =============================================================================
 // LIFECYCLE: Mark likes as opened when user views the likes section
 // =============================================================================
 // When user opens the likes/heart section, mark all unopened likes as opened.
