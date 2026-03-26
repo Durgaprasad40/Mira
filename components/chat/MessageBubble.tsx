@@ -128,21 +128,46 @@ export function MessageBubble({
   const renderAvatar = () => {
     if (isOwn) return null; // No avatar for sent messages
 
-    if (showAvatar && avatarUrl) {
+    // Only render avatar on last message in group (showAvatar=true)
+    if (showAvatar) {
+      // Compute initials fallback from otherUserName
+      const initials = (() => {
+        const name = otherUserName || '';
+        const parts = name.split(' ').filter(Boolean);
+        if (parts.length >= 2) {
+          return (parts[0][0] + parts[1][0]).toUpperCase();
+        }
+        return name.slice(0, 2).toUpperCase() || '?';
+      })();
+
+      if (avatarUrl) {
+        return (
+          <TouchableOpacity
+            onPress={onAvatarPress}
+            activeOpacity={0.7}
+            disabled={!onAvatarPress}
+          >
+            <Image
+              source={{ uri: avatarUrl }}
+              style={styles.avatar}
+            />
+          </TouchableOpacity>
+        );
+      }
+      // Fallback: show initials avatar when photoUrl is missing
       return (
         <TouchableOpacity
           onPress={onAvatarPress}
           activeOpacity={0.7}
           disabled={!onAvatarPress}
         >
-          <Image
-            source={{ uri: avatarUrl }}
-            style={styles.avatar}
-          />
+          <View style={[styles.avatar, styles.avatarFallback]}>
+            <Text style={styles.avatarInitials}>{initials}</Text>
+          </View>
         </TouchableOpacity>
       );
     }
-    // Spacer to maintain alignment when avatar is not shown
+    // Spacer to maintain alignment when avatar is not shown (not last in group)
     return <View style={styles.avatarSpacer} />;
   };
 
@@ -398,6 +423,16 @@ const styles = StyleSheet.create({
   avatarSpacer: {
     width: AVATAR_SIZE,
     marginRight: AVATAR_GAP,
+  },
+  avatarFallback: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    backgroundColor: COLORS.primary,
+  },
+  avatarInitials: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: COLORS.white,
   },
   bubble: {
     maxWidth: '70%',

@@ -1635,12 +1635,13 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
               msgSenderId === currentUserId
             );
 
-            // AVATAR GROUPING: Determine if this is the last message in a sender group
-            // Show avatar only on the LAST message of consecutive messages from the same sender
-            const nextMessage = displayMessages[index + 1];
-            const isLastInGroup = !nextMessage || nextMessage.senderId !== item.senderId;
-            // Show avatar only for received messages (not own) and only on last in group
-            const showAvatar = !isMessageOwn && isLastInGroup;
+            // AVATAR GROUPING: Show avatar on FIRST message of each incoming group
+            // Check if previous message is from different sender (or doesn't exist)
+            // This puts avatar at TOP of visual group (WhatsApp/Slack style)
+            const prevMessage = displayMessages[index - 1];
+            const isFirstInGroup = !prevMessage || prevMessage.senderId !== item.senderId;
+            // Show avatar only for received messages (not own) and only on first in group
+            const showAvatar = !isMessageOwn && isFirstInGroup;
 
             // SECURE-MEDIA-FIX: Merge backend viewMode into protectedMedia for consistent mode
             // This ensures both sender and receiver use the same viewMode from the single source of truth
@@ -1688,10 +1689,10 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
               onProtectedMediaExpire={handleProtectedMediaExpire}
               // L2 FIX: Voice delete only works in demo mode
               onVoiceDelete={isDemo ? handleVoiceDelete : undefined}
-              // AVATAR GROUPING: Pass grouping info for Instagram/Tinder style layout
+              // AVATAR GROUPING: Pass grouping info for WhatsApp/Slack style layout
               showAvatar={showAvatar}
               avatarUrl={isOtherUserAnonymous ? undefined : activeConversation.otherUser.photoUrl}
-              isLastInGroup={isLastInGroup}
+              isLastInGroup={isFirstInGroup}
               // PROFILE-TAP: Avatar tap opens profile (disabled for anonymous users)
               onAvatarPress={isOtherUserAnonymous ? undefined : () => handleOpenProfile(activeConversation.otherUser.id, (activeConversation as any).matchSource)}
             />
