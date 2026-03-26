@@ -627,8 +627,9 @@ export interface IncognitoMessage {
   /** Timestamp when message should be auto-deleted */
   deleteAt?: number;
   // Voice message fields
-  type?: 'text' | 'voice';
-  audioUri?: string;
+  type?: 'text' | 'voice' | 'image' | 'video';
+  audioUri?: string; // Local URI (legacy, for local-only messages)
+  audioUrl?: string | null; // P0-003: Backend URL from Convex storage
   durationMs?: number;
 }
 

@@ -62,6 +62,9 @@ interface BackendMessage {
   createdAt: number;
   readAt?: number;
   deliveredAt?: number;
+  // P0-003: Voice message fields
+  audioUrl?: string | null;
+  audioDurationMs?: number;
 }
 
 /** Look up Phase-2 intent label for a participant (checks both demoStore and DEMO_INCOGNITO_PROFILES) */
@@ -157,6 +160,7 @@ export default function PrivateChatScreen() {
 
   // Map backend messages to UI-compatible IncognitoMessage format
   // MESSAGE-TICKS-FIX: Include deliveredAt and readAt for visual ticks
+  // P0-003: Include audioUrl for voice messages
   const messages: IncognitoMessage[] = useMemo(() => {
     if (!backendMessages) return [];
     return backendMessages.map((m: BackendMessage) => ({
@@ -171,6 +175,9 @@ export default function PrivateChatScreen() {
       // MESSAGE-TICKS-FIX: Pass through delivery and read timestamps
       deliveredAt: m.deliveredAt,
       readAt: m.readAt,
+      // P0-003: Voice message fields - map audioUrl to audioUri for VoiceMessageBubble compatibility
+      audioUri: m.audioUrl ?? undefined,
+      durationMs: m.audioDurationMs,
     }));
   }, [backendMessages, currentUserId]);
 
@@ -181,6 +188,7 @@ export default function PrivateChatScreen() {
   const markReadMutation = useMutation(api.privateConversations.markPrivateMessagesRead);
   const markDeliveredMutation = useMutation(api.privateConversations.markPrivateMessagesDelivered);
   const deleteMessageMutation = useMutation(api.privateConversations.deletePrivateMessage);
+  const generateUploadUrl = useMutation(api.photos.generateUploadUrl); // P0-003: For voice upload
 
   // MESSAGE-TICKS-FIX: Mark messages as read AND delivered when screen opens
   // Following Phase-1 pattern: delivery happens when conversation opens
@@ -236,6 +244,7 @@ export default function PrivateChatScreen() {
   const [text, setText] = useState('');
   const [reportVisible, setReportVisible] = useState(false);
   const [isSending, setIsSending] = useState(false);
+  const [isSendingVoice, setIsSendingVoice] = useState(false); // P0-003: Voice upload state
 
   // ─── Scroll to bottom helper (with Android timing fix - matches locked pattern) ───
   const scrollToBottom = useCallback((animated = true) => {
@@ -247,26 +256,60 @@ export default function PrivateChatScreen() {
     }
   }, []);
 
-  // Voice recording - NOTE: Voice messages still use local store for now (media upload TODO)
+  // P0-003: Voice recording with backend upload (Phase-1 parity)
+  // Voice messages are uploaded to Convex storage and sent via sendPrivateMessage
+  // Note: localAddMessage still needed for ToD system messages and secure media
   const localAddMessage = usePrivateChatStore((s) => s.addMessage);
   const deleteMessage = usePrivateChatStore((s) => s.deleteMessage);
 
-  const handleRecordingComplete = useCallback((result: VoiceRecorderResult) => {
-    if (!id) return;
-    // Voice messages temporarily stored locally (backend media upload is separate feature)
-    const newMsg: IncognitoMessage = {
-      id: `im_voice_${Date.now()}`,
-      conversationId: id,
-      senderId: 'me',
-      content: 'Voice message',
-      type: 'voice',
-      audioUri: result.audioUri,
-      durationMs: result.durationMs,
-      createdAt: Date.now(),
-      isRead: false,
-    };
-    localAddMessage(id, newMsg);
-  }, [id, localAddMessage]);
+  const handleRecordingComplete = useCallback(async (result: VoiceRecorderResult) => {
+    if (!id || !token) {
+      Alert.alert('Error', 'Cannot send voice message. Please try again.');
+      return;
+    }
+
+    setIsSendingVoice(true);
+
+    try {
+      // Step 1: Get upload URL from Convex
+      const uploadUrl = await generateUploadUrl();
+
+      // Step 2: Read audio file and convert to blob
+      const response = await fetch(result.audioUri);
+      const blob = await response.blob();
+
+      // Step 3: Upload blob to Convex storage
+      const uploadResult = await fetch(uploadUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': blob.type || 'audio/m4a' },
+        body: blob,
+      });
+
+      if (!uploadResult.ok) {
+        throw new Error('Failed to upload audio file');
+      }
+
+      const { storageId } = await uploadResult.json();
+
+      // Step 4: Send voice message via backend mutation
+      await sendMessageMutation({
+        token,
+        conversationId: id as Id<'privateConversations'>,
+        type: 'voice',
+        content: 'Voice message',
+        audioStorageId: storageId,
+        audioDurationMs: result.durationMs,
+      });
+
+      // Message will appear via Convex subscription - no local add needed
+      scrollToBottom();
+    } catch (e) {
+      console.error('[Phase2Chat] Failed to send voice message:', e);
+      Alert.alert('Error', 'Failed to send voice message. Please try again.');
+    } finally {
+      setIsSendingVoice(false);
+    }
+  }, [id, token, generateUploadUrl, sendMessageMutation, scrollToBottom]);
 
   const handleRecordingError = useCallback((message: string) => {
     Alert.alert('Recording Error', message);
@@ -291,12 +334,13 @@ export default function PrivateChatScreen() {
   };
 
   // P0-001: Delete message handler (supports both local and backend messages)
-  // - Backend messages: call deletePrivateMessage mutation
-  // - Local messages (voice, tod): just remove from local store
+  // - Backend messages (including voice after P0-003): call deletePrivateMessage mutation
+  // - Local messages (tod system messages only): just remove from local store
   const handleDeleteMessage = useCallback(async (messageId: string) => {
     if (!id) return;
 
-    // Local-only messages (voice, tod) have prefixed IDs
+    // Local-only messages have prefixed IDs (tod_result_ for Truth-or-Dare system messages)
+    // Note: Voice messages now go through backend (P0-003), so im_voice_ prefix is legacy only
     const isLocalOnly = messageId.startsWith('im_voice_') || messageId.startsWith('tod_result_');
 
     if (isLocalOnly) {

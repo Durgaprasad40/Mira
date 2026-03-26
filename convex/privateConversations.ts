@@ -236,20 +236,46 @@ export const getPrivateMessages = query({
     // Fetch latest messages (desc order), then reverse for chronological display
     const messages = await messagesQuery.order('desc').take(limit);
 
-    // Return in chronological order
-    return messages.reverse().map((m) => ({
-      id: m._id,
-      conversationId: m.conversationId,
-      senderId: m.senderId,
-      type: m.type,
-      content: m.content,
-      imageStorageId: m.imageStorageId,
-      audioStorageId: m.audioStorageId,
-      audioDurationMs: m.audioDurationMs,
-      deliveredAt: m.deliveredAt,
-      readAt: m.readAt,
-      createdAt: m.createdAt,
-    }));
+    // P0-003: Batch-fetch audio URLs for voice messages (Phase-1 parity)
+    const audioStorageIds = messages.filter((m) => m.audioStorageId).map((m) => m.audioStorageId!);
+    const audioUrls = await Promise.all(
+      audioStorageIds.map((id) => ctx.storage.getUrl(id))
+    );
+    const audioUrlMap = new Map(audioStorageIds.map((id, i) => [id as string, audioUrls[i]]));
+
+    // Return in chronological order with audio URLs resolved
+    return messages.reverse().map((m) => {
+      // Voice messages: include audio URL instead of storage ID
+      if (m.type === 'voice' && m.audioStorageId) {
+        return {
+          id: m._id,
+          conversationId: m.conversationId,
+          senderId: m.senderId,
+          type: m.type,
+          content: m.content,
+          imageStorageId: m.imageStorageId,
+          audioUrl: audioUrlMap.get(m.audioStorageId as string) ?? null,
+          audioDurationMs: m.audioDurationMs,
+          deliveredAt: m.deliveredAt,
+          readAt: m.readAt,
+          createdAt: m.createdAt,
+        };
+      }
+
+      // Non-voice messages: return as-is
+      return {
+        id: m._id,
+        conversationId: m.conversationId,
+        senderId: m.senderId,
+        type: m.type,
+        content: m.content,
+        imageStorageId: m.imageStorageId,
+        audioDurationMs: m.audioDurationMs,
+        deliveredAt: m.deliveredAt,
+        readAt: m.readAt,
+        createdAt: m.createdAt,
+      };
+    });
   },
 });
 
