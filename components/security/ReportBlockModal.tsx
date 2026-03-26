@@ -36,14 +36,12 @@ interface Props {
   onUnmatchSuccess?: () => void;
 }
 
-type ActionType = 'unmatch' | 'uncrush' | 'block' | 'report' | 'spam' | 'scam' | 'other';
+type ActionType = 'unmatch' | 'uncrush' | 'block' | 'report' | 'inappropriate' | 'other';
 type ViewState = 'main' | 'report' | 'other';
 
-// Report reason options
+// Report reason options (simplified for messages context)
 const REPORT_REASONS = [
   { key: 'inappropriate', label: 'Inappropriate Content', icon: 'warning-outline' as const },
-  { key: 'spam', label: 'Spam', icon: 'megaphone-outline' as const },
-  { key: 'scam', label: 'Scam / Fraud', icon: 'alert-circle-outline' as const },
   { key: 'other', label: 'Other', icon: 'ellipsis-horizontal' as const },
 ];
 
@@ -257,8 +255,6 @@ export function ReportBlockModal({
 
     const reasonMap: Record<string, { reason: string; description?: string }> = {
       'inappropriate': { reason: 'inappropriate_photos' },
-      'spam': { reason: 'spam' },
-      'scam': { reason: 'other', description: 'Scam/fraudulent behavior' },
     };
 
     const reportData = reasonMap[reasonKey];
