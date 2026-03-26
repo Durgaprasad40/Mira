@@ -603,6 +603,9 @@ export interface IncognitoMessage {
   content: string;
   createdAt: number;
   isRead: boolean;
+  // MESSAGE-TICKS-FIX: Delivery and read timestamps for visual ticks
+  deliveredAt?: number;
+  readAt?: number;
   // Protected media fields (secure photos for Phase-2)
   isProtected?: boolean;
   protectedMedia?: {

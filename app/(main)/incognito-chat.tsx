@@ -89,6 +89,30 @@ const getPrivateIntentKey = (participantId: string): string | undefined => {
   return incognitoProfile?.privateIntentKey;
 };
 
+// ═══════════════════════════════════════════════════════════════════════════
+// MESSAGE-TICKS-FIX: Helper functions for message status ticks
+// Following Phase-1 pattern exactly: sent (1 gray), delivered (2 gray), read (2 blue)
+// ═══════════════════════════════════════════════════════════════════════════
+type TickStatus = 'sent' | 'delivered' | 'read';
+
+function getTickStatus(message: { readAt?: number; deliveredAt?: number }): TickStatus {
+  if (message.readAt) return 'read';
+  if (message.deliveredAt) return 'delivered';
+  return 'sent';
+}
+
+function getTickIcon(status: TickStatus): 'checkmark' | 'checkmark-done' {
+  return status === 'sent' ? 'checkmark' : 'checkmark-done';
+}
+
+function getTickColor(status: TickStatus): string {
+  if (status === 'read') {
+    return '#34B7F1'; // Blue for read (WhatsApp-style)
+  }
+  // White/light for sent and delivered on dark bubbles
+  return 'rgba(255,255,255,0.8)';
+}
+
 export default function PrivateChatScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const router = useRouter();
@@ -132,6 +156,7 @@ export default function PrivateChatScreen() {
   );
 
   // Map backend messages to UI-compatible IncognitoMessage format
+  // MESSAGE-TICKS-FIX: Include deliveredAt and readAt for visual ticks
   const messages: IncognitoMessage[] = useMemo(() => {
     if (!backendMessages) return [];
     return backendMessages.map((m: BackendMessage) => ({
@@ -143,6 +168,9 @@ export default function PrivateChatScreen() {
       type: m.type as any,
       createdAt: m.createdAt,
       isRead: !!m.readAt,
+      // MESSAGE-TICKS-FIX: Pass through delivery and read timestamps
+      deliveredAt: m.deliveredAt,
+      readAt: m.readAt,
     }));
   }, [backendMessages, currentUserId]);
 
@@ -151,28 +179,49 @@ export default function PrivateChatScreen() {
   // ═══════════════════════════════════════════════════════════════════════════
   const sendMessageMutation = useMutation(api.privateConversations.sendPrivateMessage);
   const markReadMutation = useMutation(api.privateConversations.markPrivateMessagesRead);
+  const markDeliveredMutation = useMutation(api.privateConversations.markPrivateMessagesDelivered);
+  const deleteMessageMutation = useMutation(api.privateConversations.deletePrivateMessage);
 
-  // P0-002b: Mark messages as read when screen opens
-  const hasMarkedReadRef = useRef(false);
+  // MESSAGE-TICKS-FIX: Mark messages as read AND delivered when screen opens
+  // Following Phase-1 pattern: delivery happens when conversation opens
+  const hasMarkedRef = useRef(false);
   useEffect(() => {
-    if (!id || !token || hasMarkedReadRef.current) return;
-    hasMarkedReadRef.current = true;
+    if (!id || !token || hasMarkedRef.current) return;
+    hasMarkedRef.current = true;
 
+    // Mark as delivered first (Phase-1 pattern)
+    markDeliveredMutation({
+      token,
+      conversationId: id as Id<'privateConversations'>,
+    }).catch((err) => {
+      if (process.env.NODE_ENV !== 'production') console.warn('[Phase2Chat] Failed to mark messages delivered:', err);
+    });
+
+    // Then mark as read
     markReadMutation({
       token,
       conversationId: id as Id<'privateConversations'>,
     }).catch((err) => {
-      if (__DEV__) console.warn('[Phase2Chat] Failed to mark messages read:', err);
+      if (process.env.NODE_ENV !== 'production') console.warn('[Phase2Chat] Failed to mark messages read:', err);
     });
-  }, [id, token, markReadMutation]);
+  }, [id, token, markReadMutation, markDeliveredMutation]);
 
-  // Reset mark-read flag when conversation changes
+  // Reset mark flag when conversation changes
   useEffect(() => {
-    hasMarkedReadRef.current = false;
+    hasMarkedRef.current = false;
   }, [id]);
 
   // GOAL A: Live countdown state - updates every 250ms for smooth countdown display
   const [now, setNow] = useState(Date.now());
+
+  // MESSAGE-TICKS-FIX: Live tick updates - hash of last 20 messages' delivery/read status
+  // Following Phase-1 pattern: triggers FlashList re-render when ticks change
+  const messageStatusHash = useMemo(() => {
+    return messages
+      .slice(-20)
+      .map((m) => `${m.id}:${m.deliveredAt || 0}:${m.readAt || 0}`)
+      .join('|');
+  }, [messages]);
 
   // GOAL A: Update 'now' every 250ms for live countdown (only when messages have active timers)
   const hasActiveTimers = messages.some(
@@ -241,11 +290,42 @@ export default function PrivateChatScreen() {
     return `${min}:${sec.toString().padStart(2, '0')}`;
   };
 
-  // Delete voice message handler
-  const handleDeleteVoiceMessage = useCallback((messageId: string) => {
+  // P0-001: Delete message handler (supports both local and backend messages)
+  // - Backend messages: call deletePrivateMessage mutation
+  // - Local messages (voice, tod): just remove from local store
+  const handleDeleteMessage = useCallback(async (messageId: string) => {
     if (!id) return;
-    deleteMessage(id, messageId);
-  }, [id, deleteMessage]);
+
+    // Local-only messages (voice, tod) have prefixed IDs
+    const isLocalOnly = messageId.startsWith('im_voice_') || messageId.startsWith('tod_result_');
+
+    if (isLocalOnly) {
+      // Just remove from local store
+      deleteMessage(id, messageId);
+      return;
+    }
+
+    // Backend message: call mutation
+    if (!token) {
+      console.warn('[Phase2Chat] Cannot delete message: no token');
+      return;
+    }
+
+    try {
+      await deleteMessageMutation({
+        token,
+        messageId: messageId as Id<'privateMessages'>,
+      });
+      // Also remove from local store for immediate UI feedback
+      deleteMessage(id, messageId);
+    } catch (e) {
+      console.error('[Phase2Chat] Failed to delete message:', e);
+      Alert.alert('Error', 'Failed to delete message. Please try again.');
+    }
+  }, [id, token, deleteMessage, deleteMessageMutation]);
+
+  // Alias for backward compatibility with voice message component
+  const handleDeleteVoiceMessage = handleDeleteMessage;
 
   // Camera/gallery state for secure photos
   const [showCameraSheet, setShowCameraSheet] = useState(false);
@@ -621,9 +701,23 @@ export default function PrivateChatScreen() {
                 <Text style={styles.timerBadgeText}>{timerLabel}</Text>
               </View>
             </View>
-            <Text style={[styles.msgTime, isOwn && styles.msgTimeOwn]}>
-              {formatTime(item.createdAt)}
-            </Text>
+            {/* MESSAGE-TICKS-FIX: Time + tick row for secure photos */}
+            <View style={styles.msgTimeRow}>
+              <Text style={[styles.msgTime, isOwn && styles.msgTimeOwn]}>
+                {formatTime(item.createdAt)}
+              </Text>
+              {isOwn && (() => {
+                const tickStatus = getTickStatus(item);
+                return (
+                  <Ionicons
+                    name={getTickIcon(tickStatus)}
+                    size={14}
+                    color={getTickColor(tickStatus)}
+                    style={styles.tickIcon}
+                  />
+                );
+              })()}
+            </View>
           </TouchableOpacity>
         </View>
       );
@@ -631,6 +725,9 @@ export default function PrivateChatScreen() {
 
     // D2: Mask explicit words in private chat with "****"
     const { masked, wasMasked } = maskExplicitWords(item.content);
+
+    // MESSAGE-TICKS-FIX: Get tick status for own messages
+    const tickStatus = isOwn ? getTickStatus(item) : null;
 
     return (
       <View style={[styles.msgRow, isOwn && styles.msgRowOwn]}>
@@ -646,9 +743,20 @@ export default function PrivateChatScreen() {
           {wasMasked && (
             <Text style={styles.maskedNotice}>{MASKED_CONTENT_NOTICE}</Text>
           )}
-          <Text style={[styles.msgTime, isOwn && styles.msgTimeOwn]}>
-            {formatTime(item.createdAt)}
-          </Text>
+          {/* MESSAGE-TICKS-FIX: Time + tick row for own messages */}
+          <View style={styles.msgTimeRow}>
+            <Text style={[styles.msgTime, isOwn && styles.msgTimeOwn]}>
+              {formatTime(item.createdAt)}
+            </Text>
+            {isOwn && tickStatus && (
+              <Ionicons
+                name={getTickIcon(tickStatus)}
+                size={14}
+                color={getTickColor(tickStatus)}
+                style={styles.tickIcon}
+              />
+            )}
+          </View>
         </View>
       </View>
     );
@@ -713,7 +821,7 @@ export default function PrivateChatScreen() {
             <FlashList
               ref={flatListRef}
               data={messages}
-              extraData={now}
+              extraData={{ now, messageStatusHash }}
               keyExtractor={(item) => item.id}
               renderItem={renderMessage}
               ListEmptyComponent={
@@ -1040,8 +1148,20 @@ const styles = StyleSheet.create({
   },
   msgText: { fontSize: 14, color: C.text, lineHeight: 20 },
   msgTextOwn: { color: '#FFFFFF' },
-  msgTime: { fontSize: 10, color: C.textLight, marginTop: 4, textAlign: 'right' },
+  // MESSAGE-TICKS-FIX: Time + tick row container
+  msgTimeRow: {
+    flexDirection: 'row' as const,
+    alignItems: 'center' as const,
+    justifyContent: 'flex-end' as const,
+    marginTop: 4,
+    gap: 4,
+  },
+  msgTime: { fontSize: 10, color: C.textLight, textAlign: 'right' as const },
   msgTimeOwn: { color: 'rgba(255,255,255,0.7)' },
+  // MESSAGE-TICKS-FIX: Tick icon style
+  tickIcon: {
+    marginLeft: 2,
+  },
   maskedNotice: { fontSize: 10, color: C.textLight, fontStyle: 'italic', marginTop: 2 },
 
   // Recording indicator

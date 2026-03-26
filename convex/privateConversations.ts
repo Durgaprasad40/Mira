@@ -12,6 +12,7 @@ import { v } from 'convex/values';
 import { query, mutation, MutationCtx, QueryCtx } from './_generated/server';
 import { Id } from './_generated/dataModel';
 import { validateSessionToken, resolveUserIdByAuthId } from './helpers';
+import { softMaskText } from './softMask';
 
 // Message types that count toward unread badges (excludes system messages)
 const COUNTABLE_MESSAGE_TYPES = ['text', 'image', 'video', 'voice'];
@@ -407,12 +408,15 @@ export const sendPrivateMessage = mutation({
       throw new Error('Sender not found or inactive');
     }
 
+    // P0-002: Soft-mask sensitive words in text messages (Phase-1 parity)
+    const maskedContent = type === 'text' ? softMaskText(content) : content;
+
     // Insert message into privateMessages table
     const messageId = await ctx.db.insert('privateMessages', {
       conversationId,
       senderId,
       type,
-      content,
+      content: maskedContent,
       imageStorageId,
       audioStorageId,
       audioDurationMs,
@@ -558,5 +562,189 @@ export const getTotalUnreadCount = query({
       .collect();
 
     return participations.reduce((total, p) => total + p.unreadCount, 0);
+  },
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Mutation G: Mark Phase-2 Messages as Delivered (per conversation)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Mark all undelivered incoming messages in a Phase-2 conversation as delivered.
+ * Called when user opens a conversation.
+ *
+ * MESSAGE-TICKS-FIX: Follows Phase-1 pattern exactly
+ * Security: Uses token-based auth, verifies user is participant
+ */
+export const markPrivateMessagesDelivered = mutation({
+  args: {
+    token: v.string(),
+    conversationId: v.id('privateConversations'),
+  },
+  handler: async (ctx, args) => {
+    const { token, conversationId } = args;
+    const now = Date.now();
+
+    // Validate session and get current user
+    const userId = await validateSessionToken(ctx, token);
+    if (!userId) {
+      return { success: false, count: 0 };
+    }
+
+    // Get conversation and verify user is participant
+    const conversation = await ctx.db.get(conversationId);
+    if (!conversation) {
+      return { success: false, count: 0 };
+    }
+
+    // SECURITY: Verify user is part of this conversation (IDOR prevention)
+    if (!conversation.participants.includes(userId)) {
+      return { success: false, count: 0 };
+    }
+
+    // Get all messages from OTHER user that are not yet delivered
+    const undeliveredMessages = await ctx.db
+      .query('privateMessages')
+      .withIndex('by_conversation', (q) => q.eq('conversationId', conversationId))
+      .filter((q) =>
+        q.and(
+          q.neq(q.field('senderId'), userId),
+          q.eq(q.field('deliveredAt'), undefined)
+        )
+      )
+      .collect();
+
+    // Mark each message as delivered
+    for (const message of undeliveredMessages) {
+      await ctx.db.patch(message._id, { deliveredAt: now });
+    }
+
+    return { success: true, count: undeliveredMessages.length };
+  },
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Mutation H: Mark ALL Phase-2 Messages as Delivered (bulk)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Mark ALL incoming messages as delivered across all Phase-2 conversations.
+ * Called when Messages list loads (before opening any conversation).
+ *
+ * DELIVERED-TICK-FIX: Ensures "delivered" state is set when message reaches device,
+ * not when conversation is opened. Follows Phase-1 pattern exactly.
+ *
+ * Security: Uses token-based auth
+ */
+export const markAllPrivateMessagesDelivered = mutation({
+  args: {
+    token: v.string(),
+  },
+  handler: async (ctx, args) => {
+    const { token } = args;
+    const now = Date.now();
+
+    // Validate session and get current user
+    const userId = await validateSessionToken(ctx, token);
+    if (!userId) {
+      return { success: false, count: 0 };
+    }
+
+    // Get all conversations this user is part of
+    const participations = await ctx.db
+      .query('privateConversationParticipants')
+      .withIndex('by_user', (q) => q.eq('userId', userId))
+      .collect();
+
+    let totalMarked = 0;
+
+    // Mark all undelivered messages in each conversation
+    for (const participation of participations) {
+      const undeliveredMessages = await ctx.db
+        .query('privateMessages')
+        .withIndex('by_conversation', (q) => q.eq('conversationId', participation.conversationId))
+        .filter((q) =>
+          q.and(
+            q.neq(q.field('senderId'), userId),
+            q.eq(q.field('deliveredAt'), undefined)
+          )
+        )
+        .collect();
+
+      for (const message of undeliveredMessages) {
+        await ctx.db.patch(message._id, { deliveredAt: now });
+        totalMarked++;
+      }
+    }
+
+    return { success: true, count: totalMarked };
+  },
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// P0-001: Delete Private Message
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Delete a private message.
+ * Matches Phase-1 deleteMessage behavior exactly:
+ * - Only the sender can delete their own message
+ * - User must be a participant in the conversation
+ * - Deletes associated storage (images, audio)
+ * - Hard deletes the message record
+ */
+export const deletePrivateMessage = mutation({
+  args: {
+    token: v.string(),
+    messageId: v.id('privateMessages'),
+  },
+  handler: async (ctx, args) => {
+    const { token, messageId } = args;
+
+    // Validate session token and get user ID
+    const userId = await validateSessionToken(ctx, token);
+    if (!userId) {
+      throw new Error('Unauthorized: invalid session');
+    }
+
+    // Get the message
+    const message = await ctx.db.get(messageId);
+    if (!message) {
+      // Message already deleted or doesn't exist
+      return { success: true, alreadyDeleted: true };
+    }
+
+    // Verify sender owns this message
+    if (message.senderId !== userId) {
+      throw new Error('Unauthorized: you can only delete your own messages');
+    }
+
+    // Verify user is part of the conversation
+    const conversation = await ctx.db.get(message.conversationId);
+    if (!conversation || !conversation.participants.includes(userId)) {
+      throw new Error('Unauthorized: conversation not found or access denied');
+    }
+
+    // Delete any associated storage (images, voice, etc.)
+    if (message.imageStorageId) {
+      try {
+        await ctx.storage.delete(message.imageStorageId);
+      } catch (e) {
+        // Storage may already be deleted, continue
+        console.warn('[deletePrivateMessage] Failed to delete image storage:', e);
+      }
+    }
+    if (message.audioStorageId) {
+      try {
+        await ctx.storage.delete(message.audioStorageId);
+      } catch (e) {
+        console.warn('[deletePrivateMessage] Failed to delete audio storage:', e);
+      }
+    }
+
+    // Hard delete the message
+    await ctx.db.delete(messageId);
+
+    return { success: true };
   },
 });

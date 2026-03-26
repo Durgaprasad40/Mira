@@ -5,7 +5,7 @@
  * Backend source: privateConversations, privateConversationParticipants, privateMessages
  * Query: api.privateConversations.getUserPrivateConversations
  */
-import React, { useState, useEffect, useMemo, useCallback } from 'react';
+import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
 import { View, Text, StyleSheet, ScrollView, TouchableOpacity, FlatList, Alert, ActivityIndicator } from 'react-native';
 import { Image } from 'expo-image';
 import { useRouter } from 'expo-router';
@@ -73,8 +73,27 @@ export default function ChatsScreen() {
   const pruneDeletedMessages = usePrivateChatStore((s) => s.pruneDeletedMessages);
   const [reportTarget, setReportTarget] = useState<{ id: string; name: string } | null>(null);
 
-  // Auth for queries
+  // Auth for queries and mutations
   const currentUserId = useAuthStore((s) => s.userId);
+  const token = useAuthStore((s) => s.token);
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // DELIVERED-TICK-FIX: Mark ALL messages as delivered when messages list loads
+  // Following Phase-1 pattern: delivery state set when device receives messages
+  // ═══════════════════════════════════════════════════════════════════════════
+  const markAllDeliveredMutation = useMutation(api.privateConversations.markAllPrivateMessagesDelivered);
+  const hasMarkedDeliveredRef = useRef(false);
+
+  useEffect(() => {
+    if (!token || hasMarkedDeliveredRef.current) return;
+    hasMarkedDeliveredRef.current = true;
+
+    markAllDeliveredMutation({ token }).catch((err) => {
+      if (process.env.NODE_ENV !== 'production') {
+        console.warn('[Phase2Chats] Failed to mark all messages delivered:', err);
+      }
+    });
+  }, [token, markAllDeliveredMutation]);
 
   // T&D Pending Connect Requests (still uses truthDare API - T&D is a separate feature)
   const pendingRequests = useQuery(
