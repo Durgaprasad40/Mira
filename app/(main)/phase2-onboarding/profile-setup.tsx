@@ -273,8 +273,8 @@ export default function Phase2Review() {
           });
         }
 
-        // Navigate to Phase-2 private tabs
-        router.replace('/(main)/(private)/(tabs)' as any);
+        // Navigate to Phase-2 private tabs (desire-land is the first tab)
+        router.replace('/(main)/(private)/(tabs)/desire-land' as any);
       } catch (err) {
         // P2-001: Show user-facing error
         console.warn('[Phase2Review] Backend mutation failed:', err);
@@ -299,8 +299,8 @@ export default function Phase2Review() {
         });
       }
 
-      // Navigate to Phase-2 private tabs
-      router.replace('/(main)/(private)/(tabs)' as any);
+      // Navigate to Phase-2 private tabs (desire-land is the first tab)
+      router.replace('/(main)/(private)/(tabs)/desire-land' as any);
     }
   }, [
     canComplete, completeSetup, intentKeys, privateBio, photoCount, router,

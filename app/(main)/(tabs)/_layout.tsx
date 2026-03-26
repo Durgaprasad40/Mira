@@ -174,23 +174,71 @@ export default function MainTabsLayout() {
     }
     didRouteToPrivateRef.current = true;
 
+    // BUG FIX: Get current location for debug logging and duplicate navigation check
+    const currentPath = router.pathname || '';
+    const currentSegments = (router.segments || []).join('/');
+
     // Determine effective deletion status (server in non-demo, local in demo)
     const effectiveDeletionStatus = isDemoMode
       ? localDeletionStatus
       : (privateDeletionState?.status ?? localDeletionStatus);
 
-    // Check deletion state FIRST - if pending, go to recovery screen
+    // Determine target route
+    let targetRoute = '';
     if (effectiveDeletionStatus === 'pending_deletion') {
-      if (__DEV__) console.log('[PRIVATE TAP] pressed -> Recovery (deletion pending)');
-      router.replace('/(main)/private-recovery' as any);
-    }
-    // Otherwise, navigate based on onboarding completion
-    else if (phase2OnboardingCompleted) {
-      if (__DEV__) console.log('[PRIVATE TAP] pressed -> Phase-2 tabs');
-      router.replace('/(main)/(private)/(tabs)' as any);
+      targetRoute = '/(main)/private-recovery';
+    } else if (phase2OnboardingCompleted) {
+      // BUG FIX: Navigate to concrete screen (desire-land) instead of group path
+      targetRoute = '/(main)/(private)/(tabs)/desire-land';
     } else {
-      if (__DEV__) console.log('[PRIVATE TAP] pressed -> onboarding (direct)');
-      router.replace('/(main)/phase2-onboarding' as any);
+      targetRoute = '/(main)/phase2-onboarding';
+    }
+
+    // BUG FIX: Avoid duplicate navigation if already at target
+    if (currentPath === targetRoute || currentSegments.includes('(private)/(tabs)')) {
+      if (__DEV__) console.log('[PRIVATE TAP] ignored: already in Phase-2', { currentPath, currentSegments });
+      didRouteToPrivateRef.current = false; // Reset guard immediately
+      return;
+    }
+
+    // BUG FIX: Add try/catch with debug logging
+    if (__DEV__) {
+      console.log('[PRIVATE TAP] Navigation attempt:', {
+        from: currentPath,
+        fromSegments: currentSegments,
+        to: targetRoute,
+        reason: effectiveDeletionStatus === 'pending_deletion' ? 'recovery' : phase2OnboardingCompleted ? 'phase2' : 'onboarding',
+      });
+    }
+
+    try {
+      // Check deletion state FIRST - if pending, go to recovery screen
+      if (effectiveDeletionStatus === 'pending_deletion') {
+        if (__DEV__) console.log('[PRIVATE TAP] pressed -> Recovery (deletion pending)');
+        router.replace(targetRoute as any);
+      }
+      // Otherwise, navigate based on onboarding completion
+      else if (phase2OnboardingCompleted) {
+        if (__DEV__) console.log('[PRIVATE TAP] pressed -> Phase-2 tabs (desire-land)');
+        router.replace(targetRoute as any);
+      } else {
+        if (__DEV__) console.log('[PRIVATE TAP] pressed -> onboarding (direct)');
+        router.replace(targetRoute as any);
+      }
+
+      // BUG FIX: Log post-navigation state
+      setTimeout(() => {
+        if (__DEV__) {
+          console.log('[PRIVATE TAP] Post-navigation:', {
+            newPath: router.pathname,
+            newSegments: (router.segments || []).join('/'),
+          });
+        }
+      }, 100);
+    } catch (error) {
+      if (__DEV__) console.error('[PRIVATE TAP] Navigation failed:', error);
+      didRouteToPrivateRef.current = false; // Reset guard on error
+      return;
     }
 
     // N-001/C-004: Reset guard after navigation settles (allows future taps after returning)
