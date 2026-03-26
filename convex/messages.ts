@@ -871,6 +871,22 @@ export const getConversation = query({
         .withIndex('by_user', (q) => q.eq('userId', otherUserId))
         .filter((q) => q.eq(q.field('isPrimary'), true))
         .first();
+
+      // BUG FIX: Fallback to any photo if no isPrimary photo exists
+      // Same pattern as likes.ts to handle edge cases where isPrimary flag is not set
+      if (!photo) {
+        photo = await ctx.db
+          .query('photos')
+          .withIndex('by_user', (q) => q.eq('userId', otherUserId))
+          .first();
+      }
+    }
+
+    // BUG FIX: Resolve photo URL at query time using ctx.storage.getUrl
+    // Stored URLs can expire; always fetch fresh URL from storage
+    let resolvedPhotoUrl: string | null = null;
+    if (photo?.storageId) {
+      resolvedPhotoUrl = await ctx.storage.getUrl(photo.storageId);
     }
 
     // Check if this is an expired confession-based conversation
@@ -899,7 +915,7 @@ export const getConversation = query({
         id: otherUserId,
         // PRIVACY FIX: Return anonymous display info if user should be anonymous
         name: isOtherUserAnonymous ? 'Anonymous' : otherUser.name,
-        photoUrl: isOtherUserAnonymous ? undefined : photo?.url,
+        photoUrl: isOtherUserAnonymous ? undefined : resolvedPhotoUrl,
         lastActive: isOtherUserAnonymous ? undefined : otherUser.lastActive,
         isVerified: isOtherUserAnonymous ? false : otherUser.isVerified,
         isAnonymous: isOtherUserAnonymous, // Flag for UI to show anonymous avatar
@@ -1019,6 +1035,39 @@ export const getConversations = query({
     const userMap = new Map(otherUserIds.map((id, i) => [id, users[i]]));
     const photoMap = new Map(otherUserIds.map((id, i) => [id, photos[i]]));
 
+    // BUG FIX: Fallback to any photo for users without isPrimary photo
+    // Same pattern as likes.ts to handle edge cases where isPrimary flag is not set
+    const usersWithoutPrimaryPhoto = otherUserIds.filter((id, i) => !photos[i]);
+    if (usersWithoutPrimaryPhoto.length > 0) {
+      const fallbackPhotos = await Promise.all(
+        usersWithoutPrimaryPhoto.map((id) =>
+          ctx.db
+            .query('photos')
+            .withIndex('by_user', (q) => q.eq('userId', id))
+            .first()
+        )
+      );
+      // Update photoMap with fallback photos
+      usersWithoutPrimaryPhoto.forEach((id, i) => {
+        if (fallbackPhotos[i]) {
+          photoMap.set(id, fallbackPhotos[i]);
+        }
+      });
+    }
+
+    // BUG FIX: Resolve photo URLs at query time using ctx.storage.getUrl
+    // Stored URLs can expire; always fetch fresh URLs from storage
+    const photoUrlMap = new Map<string, string | null>();
+    const usersWithPhotos = Array.from(photoMap.entries()).filter(([_, photo]) => photo?.storageId);
+    if (usersWithPhotos.length > 0) {
+      const resolvedUrls = await Promise.all(
+        usersWithPhotos.map(([_, photo]) => ctx.storage.getUrl(photo!.storageId))
+      );
+      usersWithPhotos.forEach(([odId], i) => {
+        photoUrlMap.set(odId as string, resolvedUrls[i]);
+      });
+    }
+
     // Build result
     const result = [];
     for (let i = 0; i < userConversations.length; i++) {
@@ -1032,7 +1081,7 @@ export const getConversations = query({
       const otherUser = userMap.get(otherUserId);
       if (!otherUser || !otherUser.isActive) continue;
 
-      const photo = photoMap.get(otherUserId);
+      const resolvedPhotoUrl = photoUrlMap.get(otherUserId as string) ?? null;
       const lastMessage = lastMessages[i];
       // P0-008 FIX: Filter unread messages by COUNTABLE_MESSAGE_TYPES (same as computeUnreadCountFromMessages)
       // System messages should not count toward the unread badge
@@ -1051,7 +1100,7 @@ export const getConversations = query({
           id: otherUserId,
           // PRIVACY FIX: Return anonymous display info if user should be anonymous
           name: isOtherUserAnonymous ? 'Anonymous' : otherUser.name,
-          photoUrl: isOtherUserAnonymous ? undefined : photo?.url,
+          photoUrl: isOtherUserAnonymous ? undefined : resolvedPhotoUrl,
           lastActive: isOtherUserAnonymous ? undefined : otherUser.lastActive,
           isVerified: isOtherUserAnonymous ? false : otherUser.isVerified,
           photoBlurred: isOtherUserAnonymous ? false : otherUser.photoBlurred === true,
