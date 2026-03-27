@@ -128,26 +128,19 @@ log.info('[APP]', 'Mira app starting', { env: __DEV__ ? 'DEV' : 'PROD' });
 log.info('[APP]', '═══════════════════════════════════════════════════');
 
 /**
- * ResetEpochChecker - Detects database resets and clears stale local caches
+ * ResetEpochChecker - Clears stale demo caches on database reset (non-blocking)
  *
- * How it works:
- * 1. Fetch current resetEpoch from Convex backend
- * 2. Compare with locally stored resetEpoch
- * 3. If mismatch: clear all persisted stores (user data is stale)
- * 4. Update local resetEpoch to match server
- * 5. Force navigation to logged-out state to prevent stale onboarding bypass
+ * SAFE BEHAVIOR:
+ * - Does NOT logout users
+ * - Does NOT clear auth or onboarding state
+ * - Only clears demo-related stores
+ * - Runs asynchronously, does not block UI render
  *
  * This prevents bugs where:
- * - After resetAllUsers, app still shows old user profile (Manmohan, 26)
  * - Demo users/messages still appear after demo mode disabled
- * - Cached onboardingCompleted=true allows bypassing onboarding
- * - Old chat room messages/members show despite empty backend
+ * - Stale demo data shows despite backend changes
  */
 function ResetEpochChecker() {
-  const router = useRouter();
-  const logout = useAuthStore((s) => s.logout);
-  const resetOnboarding = useOnboardingStore((s) => s.reset);
-  const demoLogout = useDemoStore((s) => s.demoLogout);
   const hasCheckedRef = useRef(false);
 
   // Fetch current reset epoch from server
@@ -161,33 +154,17 @@ function ResetEpochChecker() {
     if (hasCheckedRef.current) return;
     hasCheckedRef.current = true;
 
-    (async () => {
-      try {
-        const didClearCaches = await checkAndHandleResetEpoch(serverResetEpoch);
-
-        if (didClearCaches) {
-          // Database was reset - force logout and clear all stores
-          console.log('[RESET_EPOCH] Database reset detected - forcing logout...');
-
-          // Clear all auth/onboarding/demo stores
-          // STABILITY FIX: Await logout to ensure cleanup completes before navigation
-          await logout();
-          resetOnboarding();
-          if (isDemoMode) {
-            demoLogout();
-          }
-
-          // Force navigation to welcome screen (logged out state)
-          // This prevents stale onboardingCompleted from bypassing onboarding
-          // FIX: Navigate directly to welcome, not "/" which remounts index.tsx
-          console.log('[RESET_EPOCH] Navigating to welcome screen...');
-          router.replace('/(auth)/welcome');
+    // NON-BLOCKING: Run async without awaiting - don't delay UI
+    checkAndHandleResetEpoch(serverResetEpoch)
+      .then((didClear) => {
+        if (didClear) {
+          console.log('[RESET_EPOCH] Demo caches cleared (no logout, no navigation)');
         }
-      } catch (error) {
+      })
+      .catch((error) => {
         console.error('[RESET_EPOCH] Error during reset epoch check:', error);
-      }
-    })();
-  }, [serverResetEpoch, logout, resetOnboarding, demoLogout, router]);
+      });
+  }, [serverResetEpoch]);
 
   return null;
 }

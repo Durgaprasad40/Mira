@@ -53,6 +53,8 @@ interface UnifiedAnswerComposerProps {
   existingIdentityMode?: IdentityMode;
   /** Whether this is a new answer (show identity picker) or edit (hide picker) */
   isNewAnswer: boolean;
+  /** VISUAL MEDIA LOCK: If true, photo/video has been viewed and cannot be replaced/removed */
+  visualMediaLocked?: boolean;
   onClose: () => void;
   /** Called when user submits */
   onSubmit: (params: {
@@ -72,6 +74,7 @@ export function UnifiedAnswerComposer({
   initialAttachment,
   existingIdentityMode,
   isNewAnswer,
+  visualMediaLocked,
   onClose,
   onSubmit,
   isSubmitting,
@@ -414,6 +417,15 @@ export function UnifiedAnswerComposer({
   }, []);
 
   const removeAttachment = () => {
+    // VISUAL MEDIA LOCK: Don't allow removing locked photo/video
+    if (visualMediaLocked && attachment && (attachment.kind === 'photo' || attachment.kind === 'video')) {
+      Alert.alert(
+        'Media Locked',
+        'This photo/video has been viewed and cannot be removed. You can still edit text or add audio.'
+      );
+      return;
+    }
+
     if (soundRef.current) {
       soundRef.current.unloadAsync().catch(() => {});
       soundRef.current = null;
@@ -593,9 +605,16 @@ export function UnifiedAnswerComposer({
                         <Ionicons name="expand-outline" size={24} color="#FFF" />
                         <Text style={styles.mediaLabel}>Tap to preview</Text>
                       </View>
-                      <TouchableOpacity onPress={removeAttachment} style={styles.removeMediaBtn}>
-                        <Ionicons name="close-circle" size={28} color="#FFF" />
-                      </TouchableOpacity>
+                      {/* VISUAL MEDIA LOCK: Show lock icon instead of remove when locked */}
+                      {visualMediaLocked ? (
+                        <View style={styles.lockedMediaBadge}>
+                          <Ionicons name="lock-closed" size={16} color="#FFF" />
+                        </View>
+                      ) : (
+                        <TouchableOpacity onPress={removeAttachment} style={styles.removeMediaBtn}>
+                          <Ionicons name="close-circle" size={28} color="#FFF" />
+                        </TouchableOpacity>
+                      )}
                     </TouchableOpacity>
                   );
                 })()}
@@ -621,9 +640,16 @@ export function UnifiedAnswerComposer({
                         <Ionicons name="play-circle" size={48} color="#FFF" />
                         <Text style={styles.mediaLabel}>Tap to preview</Text>
                       </View>
-                      <TouchableOpacity onPress={removeAttachment} style={styles.removeMediaBtn}>
-                        <Ionicons name="close-circle" size={28} color="#FFF" />
-                      </TouchableOpacity>
+                      {/* VISUAL MEDIA LOCK: Show lock icon instead of remove when locked */}
+                      {visualMediaLocked ? (
+                        <View style={styles.lockedMediaBadge}>
+                          <Ionicons name="lock-closed" size={16} color="#FFF" />
+                        </View>
+                      ) : (
+                        <TouchableOpacity onPress={removeAttachment} style={styles.removeMediaBtn}>
+                          <Ionicons name="close-circle" size={28} color="#FFF" />
+                        </TouchableOpacity>
+                      )}
                     </TouchableOpacity>
                   );
                 })()}
@@ -641,17 +667,32 @@ export function UnifiedAnswerComposer({
               </View>
             )}
 
+            {/* VISUAL MEDIA LOCK: Warning when photo/video is locked */}
+            {visualMediaLocked && attachment && (attachment.kind === 'photo' || attachment.kind === 'video') && (
+              <View style={styles.mediaLockedWarning}>
+                <Ionicons name="lock-closed" size={14} color="#F59E0B" />
+                <Text style={styles.mediaLockedText}>
+                  Photo/video already viewed and locked. You can still edit text or audio.
+                </Text>
+              </View>
+            )}
+
             {/* Attachment buttons */}
             {!attachment && !isRecording && (
               <View style={styles.attachmentButtons}>
-                <TouchableOpacity style={styles.attachBtn} onPress={pickFromGallery}>
-                  <Ionicons name="images-outline" size={22} color="#00B894" />
-                  <Text style={styles.attachBtnText}>Gallery</Text>
-                </TouchableOpacity>
-                <TouchableOpacity style={styles.attachBtn} onPress={openMediaCamera}>
-                  <Ionicons name="camera-outline" size={22} color="#E94560" />
-                  <Text style={styles.attachBtnText}>Camera</Text>
-                </TouchableOpacity>
+                {/* VISUAL MEDIA LOCK: Hide Gallery/Camera when visual media is locked */}
+                {!visualMediaLocked && (
+                  <>
+                    <TouchableOpacity style={styles.attachBtn} onPress={pickFromGallery}>
+                      <Ionicons name="images-outline" size={22} color="#00B894" />
+                      <Text style={styles.attachBtnText}>Gallery</Text>
+                    </TouchableOpacity>
+                    <TouchableOpacity style={styles.attachBtn} onPress={openMediaCamera}>
+                      <Ionicons name="camera-outline" size={22} color="#E94560" />
+                      <Text style={styles.attachBtnText}>Camera</Text>
+                    </TouchableOpacity>
+                  </>
+                )}
                 <TouchableOpacity style={styles.attachBtn} onPress={startRecording}>
                   <Ionicons name="mic-outline" size={22} color="#FF9800" />
                   <Text style={styles.attachBtnText}>Voice</Text>
@@ -971,6 +1012,35 @@ const styles = StyleSheet.create({
   },
   mediaLabel: { fontSize: 13, color: '#FFF', fontWeight: '600', marginTop: 4 },
   removeMediaBtn: { position: 'absolute', top: 8, right: 8 },
+
+  // VISUAL MEDIA LOCK: Locked badge and warning styles
+  lockedMediaBadge: {
+    position: 'absolute',
+    top: 8,
+    right: 8,
+    width: 28,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: 'rgba(245,158,11,0.9)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  mediaLockedWarning: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    backgroundColor: 'rgba(245,158,11,0.15)',
+    borderRadius: 8,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    marginBottom: 8,
+  },
+  mediaLockedText: {
+    flex: 1,
+    fontSize: 12,
+    color: '#F59E0B',
+    fontWeight: '500',
+  },
 
   // Recording indicator
   recordingIndicator: {

@@ -287,15 +287,20 @@ export const likeAnswer = mutation({
         .first();
 
       // Create connect request for prompt owner
+      // CONNECT FIX: Resolve user IDs to Convex IDs for consistent storage format
       if (prompt && prompt.ownerUserId !== likedByUserId) {
-        await ctx.db.insert('todConnectRequests', {
-          promptId: answer.promptId,
-          answerId,
-          fromUserId: likedByUserId,
-          toUserId: prompt.ownerUserId,
-          status: 'pending',
-          createdAt: Date.now(),
-        });
+        const likerDbId = await resolveUserIdByAuthId(ctx, likedByUserId);
+        const ownerDbId = await resolveUserIdByAuthId(ctx, prompt.ownerUserId);
+        if (likerDbId && ownerDbId) {
+          await ctx.db.insert('todConnectRequests', {
+            promptId: answer.promptId,
+            answerId,
+            fromUserId: likerDbId,
+            toUserId: ownerDbId,
+            status: 'pending',
+            createdAt: Date.now(),
+          });
+        }
       }
     }
 
@@ -440,7 +445,12 @@ export const sendTodConnectRequest = mutation({
       return { success: false, reason: 'Answer not found' };
     }
 
-    const toUserId = answer.userId;
+    // CONNECT FIX: Resolve answer.userId (authUserId) to Convex ID for consistent storage
+    // Previously stored authUserId, which caused query mismatches in getPendingConnectRequests
+    const toUserId = await resolveUserIdByAuthId(ctx, answer.userId);
+    if (!toUserId) {
+      return { success: false, reason: 'Recipient user not found' };
+    }
 
     // Cannot connect to self
     if (toUserId === fromUserId) {
@@ -648,10 +658,14 @@ export const checkTodConnectStatus = query({
       .first();
     if (!answer) return { status: 'none' as const };
 
+    // CONNECT FIX: Resolve answer.userId to Convex ID to match storage format
+    const answerAuthorDbId = await resolveUserIdByAuthId(ctx, answer.userId);
+    if (!answerAuthorDbId) return { status: 'none' as const };
+
     // Check for request from current user to answer author
     const requestSent = await ctx.db
       .query('todConnectRequests')
-      .withIndex('by_from_to', (q) => q.eq('fromUserId', userId).eq('toUserId', answer.userId))
+      .withIndex('by_from_to', (q) => q.eq('fromUserId', userId).eq('toUserId', answerAuthorDbId))
       .first();
 
     if (requestSent) {
@@ -661,7 +675,7 @@ export const checkTodConnectStatus = query({
     // Check for request from answer author to current user
     const requestReceived = await ctx.db
       .query('todConnectRequests')
-      .withIndex('by_from_to', (q) => q.eq('fromUserId', answer.userId).eq('toUserId', userId))
+      .withIndex('by_from_to', (q) => q.eq('fromUserId', answerAuthorDbId).eq('toUserId', userId))
       .first();
 
     if (requestReceived) {
@@ -1031,6 +1045,13 @@ export const sendPrivateMediaConnect = mutation({
       return { success: false, reason: 'Already processed' };
     }
 
+    // CONNECT FIX: Resolve user IDs to Convex IDs for consistent storage format
+    const senderDbId = await resolveUserIdByAuthId(ctx, fromUserId);
+    const recipientDbId = await resolveUserIdByAuthId(ctx, item.fromUserId);
+    if (!senderDbId || !recipientDbId) {
+      throw new Error('User not found');
+    }
+
     // Update connect status
     await ctx.db.patch(privateMediaId, {
       connectStatus: 'pending',
@@ -1040,8 +1061,8 @@ export const sendPrivateMediaConnect = mutation({
     await ctx.db.insert('todConnectRequests', {
       promptId: item.promptId,
       answerId: item._id as string, // using privateMediaId as reference
-      fromUserId: fromUserId, // prompt owner
-      toUserId: item.fromUserId, // responder
+      fromUserId: senderDbId, // prompt owner (Convex ID)
+      toUserId: recipientDbId, // responder (Convex ID)
       status: 'pending',
       createdAt: Date.now(),
     });
@@ -1679,21 +1700,26 @@ export const getPromptThread = query({
         }
 
         // Check if viewer (as prompt owner) has sent a connect request for this answer
+        // CONNECT FIX: Resolve both viewer and answer author to Convex IDs to match storage format
         let hasSentConnect = false;
         if (viewerUserId && viewerUserId !== answer.userId) {
-          const connectReq = await ctx.db
-            .query('todConnectRequests')
-            .withIndex('by_from_to', (q) =>
-              q.eq('fromUserId', viewerUserId).eq('toUserId', answer.userId)
-            )
-            .filter((q) =>
-              q.or(
-                q.eq(q.field('status'), 'pending'),
-                q.eq(q.field('status'), 'connected')
+          const viewerDbId = await resolveUserIdByAuthId(ctx, viewerUserId);
+          const answerAuthorDbId = await resolveUserIdByAuthId(ctx, answer.userId);
+          if (viewerDbId && answerAuthorDbId) {
+            const connectReq = await ctx.db
+              .query('todConnectRequests')
+              .withIndex('by_from_to', (q) =>
+                q.eq('fromUserId', viewerDbId).eq('toUserId', answerAuthorDbId)
               )
-            )
-            .first();
-          hasSentConnect = !!connectReq;
+              .filter((q) =>
+                q.or(
+                  q.eq(q.field('status'), 'pending'),
+                  q.eq(q.field('status'), 'connected')
+                )
+              )
+              .first();
+            hasSentConnect = !!connectReq;
+          }
         }
 
         // P0-004 FIX: Server-side access control for private media
@@ -1720,6 +1746,19 @@ export const getPromptThread = query({
         // Keep hasMedia flag so UI can show "media exists" placeholder
         const safeMediaUrl = authorizedForMediaUrl ? answer.mediaUrl : null;
         const safeMediaStorageId = authorizedForMediaUrl ? answer.mediaStorageId : null;
+
+        // VISUAL MEDIA LOCK: For answer author, check if photo/video was viewed by anyone
+        // This locks visual media from being replaced or removed after consumption
+        let isVisualMediaConsumed = false;
+        const isVisualMedia = answer.type === 'photo' || answer.type === 'video';
+        if (isAnswerAuthor && isVisualMedia && answer.mediaStorageId) {
+          // Check if any view record exists for this answer's media
+          const anyViewRecord = await ctx.db
+            .query('todAnswerViews')
+            .withIndex('by_answer_viewer', (q) => q.eq('answerId', answerId))
+            .first();
+          isVisualMediaConsumed = !!anyViewRecord;
+        }
 
         return {
           _id: answer._id,
@@ -1754,6 +1793,8 @@ export const getPromptThread = query({
           photoBlurMode: answer.photoBlurMode,
           identityMode: answer.identityMode,
           isFrontCamera: answer.isFrontCamera ?? false,
+          // VISUAL MEDIA LOCK: For answer author, indicates if photo/video has been viewed
+          isVisualMediaConsumed,
         };
       })
     );
@@ -1967,11 +2008,33 @@ export const createOrEditAnswer = mutation({
       // Build patch object with only changed fields
       const patch: Record<string, any> = { editedAt: now };
 
+      // VISUAL MEDIA LOCK: Check if existing visual media has been viewed
+      const existingIsVisualMedia = existing.type === 'photo' || existing.type === 'video';
+      let isVisualMediaConsumed = false;
+      if (existingIsVisualMedia && existing.mediaStorageId) {
+        const anyViewRecord = await ctx.db
+          .query('todAnswerViews')
+          .withIndex('by_answer_viewer', (q) => q.eq('answerId', existing._id))
+          .first();
+        isVisualMediaConsumed = !!anyViewRecord;
+      }
+
+      // Block visual media replacement/removal if it was consumed
+      if (isVisualMediaConsumed) {
+        const isReplacingVisualMedia = args.mediaStorageId && existingIsVisualMedia;
+        const isRemovingVisualMedia = args.removeMedia && existingIsVisualMedia;
+        if (isReplacingVisualMedia || isRemovingVisualMedia) {
+          console.log(`[T/D] BLOCKED: visual media already viewed, cannot replace/remove`);
+          throw new Error('This photo/video has already been viewed and cannot be replaced or removed.');
+        }
+      }
+
       console.log(`[T/D] EDIT existing answer`, {
         existingText: existing.text,
         argsText: args.text,
         argsMediaStorageId: !!args.mediaStorageId,
         removeMedia: args.removeMedia,
+        isVisualMediaConsumed,
       });
 
       // Text: update if provided, otherwise keep existing

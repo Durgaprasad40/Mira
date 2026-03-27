@@ -8,7 +8,7 @@ import {
   View, Text, StyleSheet, TouchableOpacity, Modal, ActivityIndicator,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
-import { CameraView, CameraType, useCameraPermissions } from 'expo-camera';
+import { CameraView, CameraType, useCameraPermissions, useMicrophonePermissions } from 'expo-camera';
 import { Image } from 'expo-image';
 import { Video, ResizeMode } from 'expo-av';
 import { Ionicons } from '@expo/vector-icons';
@@ -40,9 +40,12 @@ export function InAppMediaCamera({
 }: InAppMediaCameraProps) {
   const insets = useSafeAreaInsets();
   const [permission, requestPermission] = useCameraPermissions();
+  const [micPermission, requestMicPermission] = useMicrophonePermissions();
 
   // Camera state
   const [mode, setMode] = useState<CaptureMode>('photo');
+  // Track if microphone permission was denied (for user-facing feedback)
+  const [micPermissionDenied, setMicPermissionDenied] = useState(false);
   const [facing, setFacing] = useState<CameraType>('back');
   const [isRecording, setIsRecording] = useState(false);
   const [recordSeconds, setRecordSeconds] = useState(0);
@@ -78,6 +81,7 @@ export function InAppMediaCamera({
       setCapturedUri(null);
       setCapturedKind(null);
       setCapturedDurationMs(undefined);
+      setMicPermissionDenied(false);
     }
     return () => {
       if (timerRef.current) {
@@ -129,6 +133,32 @@ export function InAppMediaCamera({
     setFacing((prev) => (prev === 'back' ? 'front' : 'back'));
   }, []);
 
+  // VIDEO FIX: Handle mode switch - proactively request microphone permission for video
+  const handleModeSwitch = useCallback(async (newMode: CaptureMode) => {
+    if (isRecording) return; // Don't switch modes while recording
+
+    if (newMode === 'video') {
+      // Check/request microphone permission when switching to video mode
+      if (!micPermission?.granted) {
+        const result = await requestMicPermission();
+        if (!result.granted) {
+          // Don't block mode switch, but track denial for UI feedback
+          if (mountedRef.current) {
+            setMicPermissionDenied(true);
+          }
+        } else {
+          if (mountedRef.current) {
+            setMicPermissionDenied(false);
+          }
+        }
+      }
+    }
+
+    if (mountedRef.current) {
+      setMode(newMode);
+    }
+  }, [isRecording, micPermission, requestMicPermission]);
+
   const takePhoto = useCallback(async () => {
     if (!cameraRef.current || isProcessing) return;
 
@@ -161,6 +191,23 @@ export function InAppMediaCamera({
   const startVideoRecording = useCallback(async () => {
     if (!cameraRef.current || isRecording || isProcessing) return;
 
+    // VIDEO FIX: Check/request microphone permission before recording
+    if (!micPermission?.granted) {
+      const result = await requestMicPermission();
+      if (!result.granted) {
+        // Permission denied - show user-facing feedback, don't crash
+        if (mountedRef.current) {
+          setMicPermissionDenied(true);
+        }
+        console.warn('[InAppMediaCamera] Microphone permission denied - cannot record video');
+        return; // Exit early, don't attempt recording
+      } else {
+        if (mountedRef.current) {
+          setMicPermissionDenied(false);
+        }
+      }
+    }
+
     try {
       setIsRecording(true);
       setRecordSeconds(0);
@@ -188,7 +235,7 @@ export function InAppMediaCamera({
         setIsRecording(false);
       }
     }
-  }, [facing, isRecording, isProcessing, recordSeconds]);
+  }, [facing, isRecording, isProcessing, recordSeconds, micPermission, requestMicPermission]);
 
   const stopVideoRecording = useCallback(async () => {
     if (!cameraRef.current || !isRecording) return;
@@ -419,7 +466,7 @@ export function InAppMediaCamera({
           <View style={styles.modeToggle}>
             <TouchableOpacity
               style={[styles.modeBtn, mode === 'photo' && styles.modeBtnActive]}
-              onPress={() => !isRecording && setMode('photo')}
+              onPress={() => handleModeSwitch('photo')}
               disabled={isRecording}
             >
               <Text style={[styles.modeBtnText, mode === 'photo' && styles.modeBtnTextActive]}>
@@ -428,7 +475,7 @@ export function InAppMediaCamera({
             </TouchableOpacity>
             <TouchableOpacity
               style={[styles.modeBtn, mode === 'video' && styles.modeBtnActive]}
-              onPress={() => !isRecording && setMode('video')}
+              onPress={() => handleModeSwitch('video')}
               disabled={isRecording}
             >
               <Text style={[styles.modeBtnText, mode === 'video' && styles.modeBtnTextActive]}>
@@ -436,6 +483,14 @@ export function InAppMediaCamera({
               </Text>
             </TouchableOpacity>
           </View>
+
+          {/* VIDEO FIX: Microphone permission warning */}
+          {mode === 'video' && micPermissionDenied && (
+            <View style={styles.micWarning}>
+              <Ionicons name="mic-off" size={14} color="#F44336" />
+              <Text style={styles.micWarningText}>Microphone access needed for video</Text>
+            </View>
+          )}
 
           {/* Capture row: Spacer + Shutter + Flip */}
           <View style={styles.captureRow}>
@@ -640,6 +695,22 @@ const styles = StyleSheet.create({
   hintText: {
     fontSize: 14,
     color: 'rgba(255,255,255,0.7)',
+    fontWeight: '500',
+  },
+
+  // VIDEO FIX: Microphone permission warning styles
+  micWarning: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    backgroundColor: 'rgba(244,67,54,0.2)',
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 12,
+  },
+  micWarningText: {
+    fontSize: 12,
+    color: '#F44336',
     fontWeight: '500',
   },
 

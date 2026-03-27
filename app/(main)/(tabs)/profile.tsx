@@ -90,13 +90,6 @@ export default function ProfileScreen() {
     !isDemoMode && userId ? { userId: userId as any } : 'skip'
   );
 
-  // DEBUG ONLY: In demo mode + dev, check if Convex has photos for this userId
-  // Skip in production to avoid unnecessary network calls
-  const convexPhotosDebug = useQuery(
-    api.users.getCurrentUser,
-    __DEV__ && isDemoMode && userId ? { userId: userId as any } : 'skip'
-  );
-
   const subscriptionStatus = useQuery(
     api.subscriptions.getSubscriptionStatus,
     !isDemoMode && userId ? { userId: userId as any } : 'skip'
@@ -115,6 +108,64 @@ export default function ProfileScreen() {
     api.photos.getUserPhotos,
     !isDemoMode && userId ? { userId: userId as Id<'users'> } : 'skip'
   );
+
+  // HYDRATION FIX: Distinguish loading vs empty to prevent flicker
+  // - backendPhotos === undefined → loading (query not yet resolved)
+  // - backendPhotos is array (even empty) → loaded
+  const isPhotosLoading = !isDemoMode && backendPhotos === undefined;
+
+  // HYDRATION FIX: Keep last valid photos to prevent flicker during re-fetch
+  // CRITICAL: This ref MUST persist across renders to provide stable fallback
+  const lastValidPhotosRef = React.useRef<typeof backendPhotos>(undefined);
+  const hydrationStartRef = React.useRef<number>(0);
+
+  // Update last valid photos BEFORE computing effectivePhotos
+  // Use layout effect to ensure ref is updated before render computations
+  if (!isDemoMode && backendPhotos !== undefined && backendPhotos !== lastValidPhotosRef.current) {
+    lastValidPhotosRef.current = backendPhotos;
+  }
+
+  // EFFECTIVE PHOTOS: THE authoritative source for all photo logic
+  // RULE: During loading, NEVER return null/empty if we have cached data
+  // This prevents UI from showing incorrect empty state during hydration
+  const effectivePhotos = React.useMemo(() => {
+    if (isDemoMode) {
+      return undefined; // Demo mode uses currentUser.photos directly
+    }
+    // CRITICAL: Use lastValidPhotos during loading to prevent flicker
+    if (isPhotosLoading) {
+      // Return cached data if available, undefined only if truly first load
+      return lastValidPhotosRef.current;
+    }
+    // Not loading - use actual backend data
+    return backendPhotos;
+  }, [isDemoMode, isPhotosLoading, backendPhotos]);
+
+  // Track if we have any cached photos (for render guards)
+  const hasCachedPhotos = lastValidPhotosRef.current !== undefined && lastValidPhotosRef.current.length > 0;
+
+  // Track hydration timing
+  React.useEffect(() => {
+    if (isPhotosLoading && hydrationStartRef.current === 0) {
+      hydrationStartRef.current = Date.now();
+      if (__DEV__) {
+        console.log('[ProfileTab] ⏳ Photo hydration started', {
+          hasCachedPhotos,
+          cachedCount: lastValidPhotosRef.current?.length ?? 0,
+        });
+      }
+    }
+    if (!isPhotosLoading && hydrationStartRef.current > 0) {
+      const hydrationTime = Date.now() - hydrationStartRef.current;
+      if (__DEV__) {
+        console.log('[ProfileTab] ✅ Photo hydration complete:', {
+          hydrationTimeMs: hydrationTime,
+          photoCount: backendPhotos?.length ?? 0,
+        });
+      }
+      hydrationStartRef.current = 0;
+    }
+  }, [isPhotosLoading, backendPhotos?.length, hasCachedPhotos]);
 
   const deactivateAccount = useMutation(api.users.deactivateAccount);
   // 3A1-2: Server-side logout mutation
@@ -188,54 +239,69 @@ export default function ProfileScreen() {
       : null;
 
   // MAIN PHOTO SOURCE OF TRUTH:
-  // - Live mode: Use photo with isPrimary=true from currentUser.photos (getCurrentUser)
+  // - Live mode: Use effectivePhotos (api.photos.getUserPhotos with hydration guard)
   // - Demo mode: Use first photo from demoStore
-  // BUG FIX: Use currentUser.photos instead of backendPhotos (getUserPhotos)
-  // getUserPhotos EXCLUDES verification_reference photos, causing primary photo to be missed
-  // currentUser.photos from getCurrentUser includes ALL photos with isPrimary flag
+  // HYDRATION FIX: effectivePhotos uses cached data during loading
   const mainPhotoUrl = React.useMemo(() => {
     if (isDemoMode) {
       // Demo mode: use first photo from demoStore
       return currentUser?.photos?.[0]?.url || null;
     }
-    // Live mode: Find photo with isPrimary=true from currentUser.photos (authoritative)
-    // Fallback to first photo if no isPrimary found
-    const primaryPhoto = currentUser?.photos?.find((p: any) => p.isPrimary);
-    const mainPhoto = primaryPhoto || currentUser?.photos?.[0];
+    // Live mode: Use effectivePhotos (cached during loading, real when loaded)
+    // CRITICAL: Only return null if we truly have no photos (not during loading)
+    if (!effectivePhotos?.length) {
+      // No photos available - but check if we're loading with no cache
+      if (isPhotosLoading && !hasCachedPhotos) {
+        // First load with no cache - keep previous mainPhotoUrl (handled by memo)
+        return null;
+      }
+      return null;
+    }
+    const primaryPhoto = effectivePhotos.find((p: any) => p.isPrimary);
+    const mainPhoto = primaryPhoto || effectivePhotos[0];
 
-    if (__DEV__ && currentUser?.photos?.length) {
+    if (__DEV__) {
       console.log('[ProfileTab] 📸 Main photo selection:', {
         hasPrimaryFlag: !!primaryPhoto,
         selectedUrl: mainPhoto?.url?.slice(-30),
         isPrimary: mainPhoto?.isPrimary,
-        totalPhotos: currentUser?.photos?.length,
+        totalPhotos: effectivePhotos.length,
+        isPhotosLoading,
+        usingCachedData: isPhotosLoading && hasCachedPhotos,
       });
     }
 
     return mainPhoto?.url || null;
-  }, [isDemoMode, currentUser?.photos]);
+  }, [isDemoMode, currentUser?.photos, effectivePhotos, isPhotosLoading, hasCachedPhotos]);
 
   // PER-PHOTO BLUR CHECK: Read from backend photo.isBlurred field (source of truth)
   // Edit Profile persists blur state to Convex on Save via api.photos.setPhotosBlur
-  // A photo is individually blurred when photo.isBlurred === true
+  // HYDRATION FIX: Use effectivePhotos to prevent flicker during loading
   const mainPhotoIsBlurred = React.useMemo(() => {
     if (isDemoMode) {
       // Demo mode: check first photo's isBlurred field
       const firstPhoto = currentUser?.photos?.[0];
       return firstPhoto?.isBlurred === true;
     }
-    // Live mode: find the primary photo and check its isBlurred field from backend
-    const primaryPhoto = currentUser?.photos?.find((p: any) => p.isPrimary);
-    const mainPhoto = primaryPhoto || currentUser?.photos?.[0];
+    // Live mode: Use effectivePhotos (cached during loading)
+    if (!effectivePhotos?.length) {
+      return false;
+    }
+    const primaryPhoto = effectivePhotos.find((p: any) => p.isPrimary);
+    const mainPhoto = primaryPhoto || effectivePhotos[0];
     return mainPhoto?.isBlurred === true;
-  }, [isDemoMode, currentUser?.photos]);
+  }, [isDemoMode, currentUser?.photos, effectivePhotos]);
 
-  // PERF: Prefetch top photos after hydration
+  // PERF: Prefetch top photos after hydration (only when not loading)
+  // HYDRATION FIX: Use effectivePhotos for live mode, currentUser.photos for demo mode
   React.useEffect(() => {
-    const photos = currentUser?.photos;
+    // Skip prefetch during loading to avoid wasted work
+    if (isPhotosLoading) return;
+
+    const photos = isDemoMode ? currentUser?.photos : effectivePhotos;
     if (photos && photos.length > 0) {
       const topPhotos = photos.slice(0, Math.min(6, photos.length));
-      topPhotos.forEach((photo) => {
+      topPhotos.forEach((photo: any) => {
         if (photo.url) {
           Image.prefetch(photo.url).catch(() => {
             // Silently ignore prefetch errors
@@ -246,7 +312,7 @@ export default function ProfileScreen() {
         console.log('[PERF ProfileTab] Prefetching', topPhotos.length, 'photos');
       }
     }
-  }, [currentUser?.photos]);
+  }, [isDemoMode, currentUser?.photos, effectivePhotos, isPhotosLoading]);
 
   // Global blur feature toggle (enables per-photo blur controls, does NOT mean "blur all")
   const blurFeatureEnabled = Boolean((currentUser as any)?.photoBlurred ?? false);
@@ -276,37 +342,34 @@ export default function ProfileScreen() {
   }, [mainPhotoUrl]);
 
   if (__DEV__) {
-    // CONSISTENCY DEBUG: Show both sources to verify they match
-    const backendPhotoCount = backendPhotos?.length ?? 0;
-    const demoPhotoCount = currentUser?.photos?.length ?? 0;
+    // Photo source debug: single source for live mode (api.photos.getUserPhotos)
+    // HYDRATION FIX: Show resolved photo count from effectivePhotos (cached during loading)
+    const resolvedPhotoCount = isDemoMode
+      ? (currentUser?.photos?.length ?? 0)
+      : (effectivePhotos?.length ?? 0);
     const source = isDemoMode ? 'demoStore' : 'api.photos.getUserPhotos';
 
-    console.log('[ProfileTab] 📸 Photo source consistency check:', {
+    console.log('[ProfileTab] 📸 Photo data (unified source):', {
       source,
       isDemoMode,
-      // Backend photos (same query as Edit Profile)
-      backendPhotoCount,
-      backendSlot0: backendPhotos?.[0]?.url?.slice(-30) || null,
-      // What we're displaying
+      isPhotosLoading,
+      hasCachedPhotos,
+      resolvedPhotoCount,
       mainPhotoUrl: mainPhotoUrl?.slice(-30) || null,
-      // For comparison with Edit Profile logs
+      mainPhotoIsBlurred,
       refreshKey,
     });
 
-    // CRITICAL: If in demo mode, warn that Convex photos are being ignored
-    if (isDemoMode) {
-      console.warn('[ProfileTab] ⚠️ DEMO MODE ACTIVE - Using demoStore photos');
+    // Only log loading state if we're actually loading
+    if (isPhotosLoading) {
+      console.log('[ProfileTab] ⏳ Loading photos...', {
+        usingCachedData: hasCachedPhotos,
+        cachedCount: lastValidPhotosRef.current?.length ?? 0,
+      });
+    }
 
-      // DEBUG: Check if Convex actually has photos for this user
-      if (convexPhotosDebug) {
-        const convexPhotoCount = convexPhotosDebug.photos?.length ?? 0;
-        if (convexPhotoCount > 0) {
-          console.warn('[ProfileTab] ⚠️ Convex has', convexPhotoCount, 'photos but demo mode ignores them');
-        }
-      }
-    } else {
-      // LIVE MODE: Log for consistency verification with Edit Profile
-      console.log('[ProfileTab] ✅ LIVE MODE - Using api.photos.getUserPhotos (same as Edit Profile)');
+    if (isDemoMode) {
+      console.warn('[ProfileTab] ⚠️ DEMO MODE - Using demoStore photos');
     }
   }
 

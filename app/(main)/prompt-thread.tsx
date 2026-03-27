@@ -1627,6 +1627,8 @@ export default function PromptThreadScreen() {
         } as Attachment : null}
         existingIdentityMode={myAnswer?.identityMode as IdentityMode | undefined}
         isNewAnswer={!myAnswer}
+        // VISUAL MEDIA LOCK: Lock photo/video if already viewed by authorized viewer
+        visualMediaLocked={myAnswer?.isVisualMediaConsumed ?? false}
         onClose={() => setShowUnifiedComposer(false)}
         onSubmit={handleUnifiedSubmit}
         isSubmitting={isSubmitting}
