@@ -393,6 +393,26 @@ export default function CreateTodScreen() {
           )}
         </TouchableOpacity>
       </View>
+
+      {/* Guidelines - below POST button */}
+      <View style={styles.guidelinesContainer}>
+        <Text style={styles.guidelinesTitle}>Before you post:</Text>
+
+        <Text style={styles.guidelinesPoint}>• Be respectful to others</Text>
+        <Text style={styles.guidelinesPoint}>• Keep content safe and appropriate</Text>
+        <Text style={styles.guidelinesPoint}>• No scams or misleading content</Text>
+        <Text style={styles.guidelinesPoint}>• Respect privacy and consent</Text>
+
+        <Text style={styles.guidelinesLinkText}>
+          Read full{' '}
+          <Text
+            style={styles.guidelinesLink}
+            onPress={() => router.push('/(main)/community-guidelines')}
+          >
+            community guidelines
+          </Text>
+        </Text>
+      </View>
     </KeyboardAvoidingView>
   );
 }
@@ -478,5 +498,30 @@ const styles = StyleSheet.create({
   },
   postButtonMainTextDisabled: {
     color: C.textLight,
+  },
+
+  // Guidelines section - below POST button
+  guidelinesContainer: {
+    marginTop: 16,
+    paddingHorizontal: 16,
+  },
+  guidelinesTitle: {
+    fontSize: 13,
+    color: C.text,
+    marginBottom: 6,
+  },
+  guidelinesPoint: {
+    fontSize: 12,
+    color: C.textLight,
+    marginBottom: 2,
+  },
+  guidelinesLinkText: {
+    fontSize: 12,
+    color: C.textLight,
+    marginTop: 6,
+  },
+  guidelinesLink: {
+    color: C.primary,
+    textDecorationLine: 'underline',
   },
 });
