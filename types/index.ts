@@ -512,8 +512,8 @@ export interface TodResponse {
 
 export type TodUserState = "answered" | "skipped" | "could_not_answer";
 
-// Truth & Dare Report Reasons
-export type TodReportReason = 'harassment' | 'sexual' | 'spam' | 'hate' | 'violence' | 'other';
+// Truth & Dare Report Reasons (P0-002: Added 'privacy' and 'scam' for prompt reports)
+export type TodReportReason = 'harassment' | 'sexual' | 'spam' | 'hate' | 'violence' | 'privacy' | 'scam' | 'other';
 
 // Truth & Dare Trending System Types
 export type TodAnswerType = "text" | "photo" | "video" | "voice";

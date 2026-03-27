@@ -1182,6 +1182,10 @@ export default defineSchema({
     activeCount: v.number(),
     createdAt: v.number(),
     expiresAt: v.optional(v.number()),
+    // P0-002: Hidden flag for prompts with 5+ reports
+    isHidden: v.optional(v.boolean()),
+    // Prompt reaction count (emoji reactions)
+    totalReactionCount: v.optional(v.number()),
     // Owner profile snapshot (immutable at creation time)
     isAnonymous: v.optional(v.boolean()), // true = hide photo/name, show only age+gender
     photoBlurMode: v.optional(v.union(v.literal('none'), v.literal('blur'))), // 'blur' = show blurred photo
@@ -1269,17 +1273,32 @@ export default defineSchema({
     .index('by_user', ['userId'])
     .index('by_answer_user', ['answerId', 'userId']),
 
+  // Truth & Dare Prompt Reactions (emoji reactions - one per user per prompt)
+  todPromptReactions: defineTable({
+    promptId: v.string(),
+    userId: v.string(),
+    emoji: v.string(), // any emoji: "😂", "🔥", "❤️", "😮", "👏"
+    createdAt: v.number(),
+    updatedAt: v.optional(v.number()),
+  })
+    .index('by_prompt', ['promptId'])
+    .index('by_user', ['userId'])
+    .index('by_prompt_user', ['promptId', 'userId']),
+
   // Truth & Dare Answer Reports (for hiding answers with 5+ reports)
   todAnswerReports: defineTable({
     answerId: v.string(),
     reporterId: v.string(),
     // Structured report reason (required for new reports)
+    // P0-002 FIX: Added 'privacy' and 'scam' to match reportPrompt
     reasonCode: v.optional(v.union(
       v.literal('harassment'),
       v.literal('sexual'),
       v.literal('spam'),
       v.literal('hate'),
       v.literal('violence'),
+      v.literal('privacy'),
+      v.literal('scam'),
       v.literal('other')
     )),
     // Optional additional details (renamed from reason for clarity)
@@ -1292,13 +1311,36 @@ export default defineSchema({
     .index('by_reporter', ['reporterId'])
     .index('by_answer_reporter', ['answerId', 'reporterId']),
 
+  // P0-002: Truth & Dare Prompt Reports (for hiding prompts with 5+ reports)
+  todPromptReports: defineTable({
+    promptId: v.string(),
+    reporterId: v.string(),
+    reasonCode: v.union(
+      v.literal('harassment'),
+      v.literal('sexual'),
+      v.literal('spam'),
+      v.literal('hate'),
+      v.literal('violence'),
+      v.literal('privacy'),
+      v.literal('scam'),
+      v.literal('other')
+    ),
+    reasonText: v.optional(v.string()),
+    createdAt: v.number(),
+  })
+    .index('by_prompt', ['promptId'])
+    .index('by_reporter', ['reporterId'])
+    .index('by_prompt_reporter', ['promptId', 'reporterId']),
+
   // Truth & Dare Rate Limiting (tracks user action counts per day)
   todRateLimits: defineTable({
     userId: v.string(),
     actionType: v.union(
       v.literal('answer'),
       v.literal('reaction'),
-      v.literal('report')
+      v.literal('report'),
+      v.literal('prompt'), // P0-003: Rate limit prompt creation
+      v.literal('claim_media') // Rate limit media view claims
     ),
     windowStart: v.number(), // Start of the rate limit window (day start)
     count: v.number(), // Actions in this window

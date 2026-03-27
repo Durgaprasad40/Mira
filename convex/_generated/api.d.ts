@@ -16,6 +16,7 @@ import type * as chatRooms from "../chatRooms.js";
 import type * as chatTod from "../chatTod.js";
 import type * as cleanup from "../cleanup.js";
 import type * as confessions from "../confessions.js";
+import type * as contentFilter from "../contentFilter.js";
 import type * as contentModeration from "../contentModeration.js";
 import type * as conversations from "../conversations.js";
 import type * as crons from "../crons.js";
@@ -102,6 +103,7 @@ declare const fullApi: ApiFromModules<{
   chatTod: typeof chatTod;
   cleanup: typeof cleanup;
   confessions: typeof confessions;
+  contentFilter: typeof contentFilter;
   contentModeration: typeof contentModeration;
   conversations: typeof conversations;
   crons: typeof crons;

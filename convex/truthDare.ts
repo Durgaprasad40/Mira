@@ -3,6 +3,7 @@ import { v } from 'convex/values';
 import { Id } from './_generated/dataModel';
 import { internal } from './_generated/api';
 import { resolveUserIdByAuthId } from './helpers';
+import { filterContent } from './contentFilter'; // P0-001: Content filtering
 
 // 24-hour auto-delete rule (same as Confessions)
 const TWENTY_FOUR_HOURS_MS = 24 * 60 * 60 * 1000;
@@ -13,6 +14,7 @@ const RATE_LIMITS = {
   reaction: { max: 30, windowMs: 60 * 1000 }, // 30 reactions per minute
   report: { max: 10, windowMs: 24 * 60 * 60 * 1000 }, // 10 reports per day
   claim_media: { max: 20, windowMs: 60 * 1000 }, // 20 media claims per minute
+  prompt: { max: 5, windowMs: 60 * 60 * 1000 }, // P0-003: 5 prompts per hour
 };
 
 // Report threshold for hiding
@@ -33,7 +35,10 @@ export const getTrendingPrompts = query({
 
     const active = allTrending.filter((p) => {
       const expires = p.expiresAt ?? p.createdAt + TWENTY_FOUR_HOURS_MS;
-      return expires > now;
+      if (expires <= now) return false;
+      // P0-002: Filter out hidden prompts
+      if (p.isHidden) return false;
+      return true;
     });
 
     const truth = active.find((p) => p.type === 'truth') || null;
@@ -93,6 +98,18 @@ export const createPrompt = mutation({
     const ownerUserId = await resolveUserIdByAuthId(ctx, authUserId);
     if (!ownerUserId) {
       throw new Error('Unauthorized: user not found');
+    }
+
+    // P0-001: Content filtering - reject unsafe prompts
+    const contentCheck = filterContent(args.text);
+    if (!contentCheck.isClean) {
+      throw new Error('This prompt violates community guidelines');
+    }
+
+    // P0-003: Rate limit prompt creation (5 per hour)
+    const rateCheck = await checkRateLimit(ctx, ownerUserId, 'prompt');
+    if (!rateCheck.allowed) {
+      throw new Error('Too many prompts. Try again later.');
     }
 
     const now = Date.now();
@@ -178,6 +195,16 @@ export const submitAnswer = mutation({
       throw new Error('You already posted for this prompt.');
     }
 
+    // SELF-COMMENT RESTRICTION: Owner cannot answer their own prompt
+    // Mirrors Confess pattern where self-interaction is blocked
+    const prompt = await ctx.db
+      .query('todPrompts')
+      .filter((q) => q.eq(q.field('_id'), args.promptId as Id<'todPrompts'>))
+      .first();
+    if (prompt && prompt.ownerUserId === userId) {
+      throw new Error('You cannot answer your own prompt.');
+    }
+
     const answerId = await ctx.db.insert('todAnswers', {
       promptId: args.promptId,
       userId,
@@ -190,11 +217,7 @@ export const submitAnswer = mutation({
       createdAt: Date.now(),
     });
 
-    // Increment answer count on prompt
-    const prompt = await ctx.db
-      .query('todPrompts')
-      .filter((q) => q.eq(q.field('_id'), args.promptId as Id<'todPrompts'>))
-      .first();
+    // Increment answer count on prompt (reuse prompt from self-comment check above)
     if (prompt) {
       await ctx.db.patch(prompt._id, {
         answerCount: prompt.answerCount + 1,
@@ -1239,10 +1262,15 @@ export const cleanupExpiredTodData = internalMutation({
 // GLOBAL FEED & THREAD QUERIES
 // ============================================================
 
+// P2-004: Safe limits to prevent excessive data loading
+const FEED_PROMPTS_LIMIT = 50; // Max prompts to return in feed
+const THREAD_ANSWERS_LIMIT = 100; // Max answers to load per thread
+
 /**
  * List all active (non-expired) prompts with their top 2 answers.
  * Ranking: totalReactionCount DESC, then createdAt DESC.
  * Respects hidden-by-reports logic for non-authors.
+ * P2-004: Limited to FEED_PROMPTS_LIMIT prompts for performance.
  */
 export const listActivePromptsWithTop2Answers = query({
   args: {
@@ -1277,6 +1305,8 @@ export const listActivePromptsWithTop2Answers = query({
       if (expires <= now) return false;
       // TOD-P2-002 FIX: Filter out prompts from blocked users
       if (blockedUserIds.has(p.ownerUserId as string)) return false;
+      // P0-002: Filter out hidden prompts (unless viewer is owner)
+      if (p.isHidden && p.ownerUserId !== viewerUserId) return false;
       return true;
     });
 
@@ -1294,12 +1324,21 @@ export const listActivePromptsWithTop2Answers = query({
       );
     }
 
-    // Sort by answerCount DESC, then createdAt ASC (older first for ties)
-    // Prompts with more answers float to top; ties = older appears first (new goes to bottom)
+    // CONFESS-STYLE RANKING: engagement score using exact Confess weights
+    // Confess formula (confessions.ts:125-126): replyCount * 6 + reactionCount * 2
+    // Applied here: answerCount * 6 + totalReactionCount * 2
+    // New posts (0 engagement) = score 0, appear at BOTTOM
+    // Tie-breaker: createdAt ASC (older first, newer posts go to bottom)
     activePrompts.sort((a, b) => {
-      // Primary: answerCount DESC (more comments = higher)
-      if (b.answerCount !== a.answerCount) return b.answerCount - a.answerCount;
-      // Secondary: createdAt ASC (older first, new prompts go to bottom)
+      const promptIdA = a._id as unknown as string;
+      const promptIdB = b._id as unknown as string;
+      // Exact Confess weights: comments * 6, reactions * 2
+      const scoreA = (a.answerCount * 6) + ((promptReactionCounts[promptIdA] ?? 0) * 2);
+      const scoreB = (b.answerCount * 6) + ((promptReactionCounts[promptIdB] ?? 0) * 2);
+
+      // Primary: score DESC (higher engagement = higher position)
+      if (scoreB !== scoreA) return scoreB - scoreA;
+      // Tie-breaker: createdAt ASC (older first, new prompts go to bottom)
       return a.createdAt - b.createdAt;
     });
 
@@ -1421,7 +1460,8 @@ export const listActivePromptsWithTop2Answers = query({
       })
     );
 
-    return promptsWithAnswers;
+    // P2-004: Apply limit to prevent loading too many prompts
+    return promptsWithAnswers.slice(0, FEED_PROMPTS_LIMIT);
   },
 });
 
@@ -1512,6 +1552,7 @@ export const getTrendingTruthAndDare = query({
 /**
  * Get full thread for a prompt - all answers with reactions.
  * Respects hidden-by-reports: hidden answers only visible to their author.
+ * P2-004: Limited to THREAD_ANSWERS_LIMIT answers for performance.
  */
 export const getPromptThread = query({
   args: {
@@ -1526,6 +1567,16 @@ export const getPromptThread = query({
       .first();
 
     if (!prompt) return null;
+
+    // P0-002: Check if prompt is hidden (unless viewer is owner)
+    if (prompt.isHidden && prompt.ownerUserId !== viewerUserId) {
+      return {
+        prompt: null,
+        answers: [],
+        isExpired: false,
+        isHidden: true, // P0-002: Indicates prompt was hidden due to reports
+      };
+    }
 
     // Check if expired
     const now = Date.now();
@@ -1574,9 +1625,12 @@ export const getPromptThread = query({
       return b.createdAt - a.createdAt;
     });
 
+    // P2-004: Apply limit to prevent loading too many answers
+    const limitedAnswers = visibleAnswers.slice(0, THREAD_ANSWERS_LIMIT);
+
     // Enrich with reactions
     const enrichedAnswers = await Promise.all(
-      visibleAnswers.map(async (answer) => {
+      limitedAnswers.map(async (answer) => {
         const answerId = answer._id as unknown as string;
 
         const reactions = await ctx.db
@@ -1642,14 +1696,41 @@ export const getPromptThread = query({
           hasSentConnect = !!connectReq;
         }
 
+        // P0-004 FIX: Server-side access control for private media
+        // Do NOT expose mediaUrl to unauthorized viewers
+        // Authorized viewers: answer author, prompt owner (for owner_only), everyone (for public)
+        const isAnswerAuthor = viewerUserId === answer.userId;
+        const isPromptOwnerViewer = viewerUserId === prompt.ownerUserId;
+        const isOwnerOnlyMedia = answer.visibility === 'owner_only';
+
+        // Determine if viewer is authorized to receive the media URL
+        let authorizedForMediaUrl = false;
+        if (isAnswerAuthor) {
+          // Answer author can always see their own media
+          authorizedForMediaUrl = true;
+        } else if (isOwnerOnlyMedia) {
+          // Owner-only media: only prompt owner can access
+          authorizedForMediaUrl = isPromptOwnerViewer;
+        } else {
+          // Public media: everyone can access (will go through claim flow)
+          authorizedForMediaUrl = true;
+        }
+
+        // P0-004 FIX: Only return mediaUrl if authorized, otherwise return null
+        // Keep hasMedia flag so UI can show "media exists" placeholder
+        const safeMediaUrl = authorizedForMediaUrl ? answer.mediaUrl : null;
+        const safeMediaStorageId = authorizedForMediaUrl ? answer.mediaStorageId : null;
+
         return {
           _id: answer._id,
           promptId: answer.promptId,
           userId: answer.userId,
           type: answer.type,
           text: answer.text,
-          mediaUrl: answer.mediaUrl,
-          mediaStorageId: answer.mediaStorageId,
+          mediaUrl: safeMediaUrl,
+          mediaStorageId: safeMediaStorageId,
+          // P0-004 FIX: Flag indicating media exists (for UI placeholder) even if URL hidden
+          hasMedia: !!answer.mediaStorageId,
           durationSec: answer.durationSec,
           createdAt: answer.createdAt,
           editedAt: answer.editedAt,
@@ -1677,6 +1758,28 @@ export const getPromptThread = query({
       })
     );
 
+    // Get prompt reactions
+    const promptReactions = await ctx.db
+      .query('todPromptReactions')
+      .withIndex('by_prompt', (q) => q.eq('promptId', promptId))
+      .collect();
+
+    // Group prompt reactions by emoji
+    const promptEmojiCountMap: Map<string, number> = new Map();
+    for (const r of promptReactions) {
+      promptEmojiCountMap.set(r.emoji, (promptEmojiCountMap.get(r.emoji) || 0) + 1);
+    }
+    const promptReactionCounts = Array.from(promptEmojiCountMap.entries()).map(
+      ([emoji, count]) => ({ emoji, count })
+    );
+
+    // Get viewer's reaction on prompt
+    let promptMyReaction: string | null = null;
+    if (viewerUserId) {
+      const myPromptR = promptReactions.find((r) => r.userId === viewerUserId);
+      if (myPromptR) promptMyReaction = myPromptR.emoji;
+    }
+
     return {
       prompt: {
         _id: prompt._id,
@@ -1693,6 +1796,10 @@ export const getPromptThread = query({
         ownerPhotoUrl: prompt.ownerPhotoUrl,
         ownerAge: prompt.ownerAge,
         ownerGender: prompt.ownerGender,
+        // Prompt reactions
+        totalReactionCount: prompt.totalReactionCount ?? 0,
+        reactionCounts: promptReactionCounts,
+        myReaction: promptMyReaction,
       },
       answers: enrichedAnswers,
       isExpired: false,
@@ -1711,7 +1818,7 @@ export const getPromptThread = query({
 async function checkRateLimit(
   ctx: any,
   userId: string,
-  actionType: 'answer' | 'reaction' | 'report' | 'claim_media'
+  actionType: 'answer' | 'reaction' | 'report' | 'claim_media' | 'prompt' // P0-003: Added 'prompt'
 ): Promise<{ allowed: boolean; remaining: number }> {
   const now = Date.now();
   const limit = RATE_LIMITS[actionType];
@@ -1822,6 +1929,11 @@ export const createOrEditAnswer = mutation({
 
     if (!prompt) {
       throw new Error('Prompt not found');
+    }
+
+    // SELF-COMMENT RESTRICTION: Owner cannot answer their own prompt
+    if (prompt.ownerUserId === userId) {
+      throw new Error('You cannot answer your own prompt.');
     }
 
     const now = Date.now();
@@ -2096,6 +2208,100 @@ export const setAnswerReaction = mutation({
 });
 
 /**
+ * Set (upsert) an emoji reaction on a prompt.
+ * One reaction per user per prompt. Changing updates counts.
+ */
+export const setPromptReaction = mutation({
+  args: {
+    promptId: v.string(),
+    userId: v.string(),
+    emoji: v.string(), // pass empty string to remove reaction
+  },
+  handler: async (ctx, { promptId, userId: argsUserId, emoji }) => {
+    // Auth guard: allow if authenticated OR in demo mode
+    const identity = await ctx.auth.getUserIdentity();
+    const hasAuth = !!identity;
+    const demoMode = isDemoModeEnabled();
+
+    if (!hasAuth && !demoMode) {
+      console.log(`[T/D] setPromptReaction denied auth=false demoMode=false`);
+      return { ok: false, reason: 'unauthenticated' };
+    }
+
+    // Determine acting user: use identity if available, else use argsUserId in demo mode
+    const userId = identity?.subject ?? argsUserId;
+    if (!userId) {
+      console.log(`[T/D] setPromptReaction no userId available`);
+      return { ok: false, reason: 'no_user_id' };
+    }
+
+    console.log(`[T/D] setPromptReaction allowed auth=${hasAuth} demoMode=${demoMode} userId=${userId}`);
+
+    // Validate prompt exists
+    const prompt = await ctx.db
+      .query('todPrompts')
+      .filter((q) => q.eq(q.field('_id'), promptId as Id<'todPrompts'>))
+      .first();
+
+    if (!prompt) {
+      throw new Error('Prompt not found');
+    }
+
+    // Check rate limit
+    const rateCheck = await checkRateLimit(ctx, userId, 'reaction');
+    if (!rateCheck.allowed) {
+      throw new Error('Rate limit exceeded. Please wait a moment.');
+    }
+
+    const now = Date.now();
+
+    // Check for existing reaction
+    const existing = await ctx.db
+      .query('todPromptReactions')
+      .withIndex('by_prompt_user', (q) =>
+        q.eq('promptId', promptId).eq('userId', userId)
+      )
+      .first();
+
+    if (emoji === '' || !emoji) {
+      // Remove reaction
+      if (existing) {
+        await ctx.db.delete(existing._id);
+        // Decrement count
+        const newCount = Math.max(0, (prompt.totalReactionCount ?? 0) - 1);
+        await ctx.db.patch(prompt._id, { totalReactionCount: newCount });
+      }
+      return { ok: true, action: 'removed' };
+    }
+
+    if (existing) {
+      // Update reaction
+      if (existing.emoji !== emoji) {
+        await ctx.db.patch(existing._id, {
+          emoji,
+          updatedAt: now,
+        });
+        return { ok: true, action: 'changed', oldEmoji: existing.emoji, newEmoji: emoji };
+      }
+      return { ok: true, action: 'unchanged' };
+    } else {
+      // Create new reaction
+      await ctx.db.insert('todPromptReactions', {
+        promptId,
+        userId,
+        emoji,
+        createdAt: now,
+      });
+      // Increment count
+      await ctx.db.patch(prompt._id, {
+        totalReactionCount: (prompt.totalReactionCount ?? 0) + 1,
+      });
+      return { ok: true, action: 'added', emoji };
+    }
+  },
+});
+
+/**
  * Report an answer.
  * Rate limited per day. Same user can't report same answer twice.
  * If answer reaches 5 unique reports, it's hidden from everyone except author.
@@ -2105,12 +2311,15 @@ export const reportAnswer = mutation({
     answerId: v.string(),
     reporterId: v.string(),
     // Structured report reason (required)
+    // P0-002 FIX: Added 'privacy' and 'scam' to match reportPrompt and UI options
     reasonCode: v.union(
       v.literal('harassment'),
       v.literal('sexual'),
       v.literal('spam'),
       v.literal('hate'),
       v.literal('violence'),
+      v.literal('privacy'),
+      v.literal('scam'),
       v.literal('other')
     ),
     // Optional additional details
@@ -2183,6 +2392,103 @@ export const reportAnswer = mutation({
     return {
       success: true,
       reportCount: newReportCount,
+      isNowHidden,
+    };
+  },
+});
+
+/**
+ * P0-002: Report a prompt
+ * Rate limited per day. Same user can't report same prompt twice.
+ * If prompt reaches 5 unique reports, it's hidden from everyone except owner.
+ * Uses server-side auth - no reporterId in args.
+ */
+export const reportPrompt = mutation({
+  args: {
+    promptId: v.string(),
+    reasonCode: v.union(
+      v.literal('harassment'),
+      v.literal('sexual'),
+      v.literal('spam'),
+      v.literal('hate'),
+      v.literal('violence'),
+      v.literal('privacy'),
+      v.literal('scam'),
+      v.literal('other')
+    ),
+    reasonText: v.optional(v.string()),
+  },
+  handler: async (ctx, { promptId, reasonCode, reasonText }) => {
+    // Server-side auth - resolve reporter from identity
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity) {
+      throw new Error('Unauthorized: authentication required');
+    }
+
+    const reporterId = await resolveUserIdByAuthId(ctx, identity.subject);
+    if (!reporterId) {
+      throw new Error('Unauthorized: user not found');
+    }
+
+    // Get the prompt
+    const prompt = await ctx.db
+      .query('todPrompts')
+      .filter((q) => q.eq(q.field('_id'), promptId as Id<'todPrompts'>))
+      .first();
+
+    if (!prompt) {
+      throw new Error('Prompt not found');
+    }
+
+    // Can't report own prompt
+    if (prompt.ownerUserId === reporterId) {
+      throw new Error('Cannot report your own prompt');
+    }
+
+    // Check if already reported by this user
+    const existingReport = await ctx.db
+      .query('todPromptReports')
+      .withIndex('by_prompt_reporter', (q) =>
+        q.eq('promptId', promptId).eq('reporterId', reporterId)
+      )
+      .first();
+
+    if (existingReport) {
+      throw new Error('You have already reported this prompt');
+    }
+
+    // Check rate limit (daily)
+    const rateCheck = await checkRateLimit(ctx, reporterId, 'report');
+    if (!rateCheck.allowed) {
+      throw new Error('You have reached your daily report limit');
+    }
+
+    // Create report
+    await ctx.db.insert('todPromptReports', {
+      promptId,
+      reporterId,
+      reasonCode,
+      reasonText,
+      createdAt: Date.now(),
+    });
+
+    // Count total reports for this prompt
+    const allReports = await ctx.db
+      .query('todPromptReports')
+      .withIndex('by_prompt', (q) => q.eq('promptId', promptId))
+      .collect();
+
+    const reportCount = allReports.length;
+
+    // Check if threshold reached - mark prompt as hidden
+    const isNowHidden = reportCount >= REPORT_HIDE_THRESHOLD;
+    if (isNowHidden && !prompt.isHidden) {
+      await ctx.db.patch(prompt._id, { isHidden: true });
+    }
+
+    return {
+      success: true,
+      reportCount,
       isNowHidden,
     };
   },
@@ -2303,6 +2609,132 @@ export const deleteMyAnswer = mutation({
   },
 });
 
+/**
+ * Delete user's own prompt (Truth or Dare post)
+ */
+export const deleteMyPrompt = mutation({
+  args: {
+    promptId: v.string(),
+    userId: v.string(),
+  },
+  handler: async (ctx, { promptId, userId: argsUserId }) => {
+    // Auth guard: allow if authenticated OR in demo mode
+    const identity = await ctx.auth.getUserIdentity();
+    const hasAuth = !!identity;
+    const demoMode = isDemoModeEnabled();
+
+    if (!hasAuth && !demoMode) {
+      console.log(`[T/D] deleteMyPrompt denied auth=false demoMode=false`);
+      throw new Error("Unauthorized");
+    }
+
+    // Use identity subject if authenticated, otherwise use provided userId
+    const userId = identity?.subject ?? argsUserId;
+
+    // Validate args match identity (only if authenticated)
+    if (hasAuth && argsUserId && argsUserId !== identity.subject) {
+      throw new Error("Unauthorized");
+    }
+
+    const prompt = await ctx.db
+      .query('todPrompts')
+      .filter((q) => q.eq(q.field('_id'), promptId as Id<'todPrompts'>))
+      .first();
+
+    if (!prompt) {
+      throw new Error('Prompt not found');
+    }
+
+    if (prompt.ownerUserId !== userId) {
+      throw new Error('You can only delete your own prompts');
+    }
+
+    console.log(`[T/D] deleteMyPrompt allowed for promptId=${promptId}`);
+
+    // 1. Delete all answers and their related data
+    const answers = await ctx.db
+      .query('todAnswers')
+      .withIndex('by_prompt', (q) => q.eq('promptId', promptId))
+      .collect();
+
+    for (const answer of answers) {
+      // Delete answer media if exists
+      if (answer.mediaStorageId) {
+        try {
+          await ctx.storage.delete(answer.mediaStorageId);
+        } catch { /* already deleted */ }
+      }
+
+      // Delete reactions
+      const reactions = await ctx.db
+        .query('todAnswerReactions')
+        .withIndex('by_answer', (q) => q.eq('answerId', answer._id))
+        .collect();
+      for (const r of reactions) {
+        await ctx.db.delete(r._id);
+      }
+
+      // Delete reports
+      const reports = await ctx.db
+        .query('todAnswerReports')
+        .withIndex('by_answer', (q) => q.eq('answerId', answer._id))
+        .collect();
+      for (const r of reports) {
+        await ctx.db.delete(r._id);
+      }
+
+      // Delete views
+      const views = await ctx.db
+        .query('todAnswerViews')
+        .withIndex('by_answer', (q) => q.eq('answerId', answer._id))
+        .collect();
+      for (const v of views) {
+        await ctx.db.delete(v._id);
+      }
+
+      // Delete the answer
+      await ctx.db.delete(answer._id);
+    }
+
+    // 2. Delete connect requests for this prompt
+    const connectRequests = await ctx.db
+      .query('todConnectRequests')
+      .withIndex('by_prompt', (q) => q.eq('promptId', promptId))
+      .collect();
+    for (const cr of connectRequests) {
+      await ctx.db.delete(cr._id);
+    }
+
+    // 3. Delete private media for this prompt
+    const privateMedia = await ctx.db
+      .query('todPrivateMedia')
+      .withIndex('by_prompt', (q) => q.eq('promptId', promptId))
+      .collect();
+    for (const pm of privateMedia) {
+      if (pm.storageId) {
+        try {
+          await ctx.storage.delete(pm.storageId);
+        } catch { /* already deleted */ }
+      }
+      await ctx.db.delete(pm._id);
+    }
+
+    // 4. Delete prompt reports
+    const promptReports = await ctx.db
+      .query('todPromptReports')
+      .withIndex('by_prompt', (q) => q.eq('promptId', promptId))
+      .collect();
+    for (const pr of promptReports) {
+      await ctx.db.delete(pr._id);
+    }
+
+    // 5. Delete the prompt itself
+    await ctx.db.delete(prompt._id);
+
+    return { success: true };
+  },
+});
+
 // ============================================================
 // SECURE ANSWER MEDIA VIEWING APIs
 // ============================================================
@@ -2329,12 +2761,19 @@ export const claimAnswerMediaView = mutation({
       throw new Error("Unauthorized");
     }
 
-    // Use identity subject if authenticated, otherwise use provided viewerId
-    const viewerId = identity?.subject ?? argsViewerId;
+    // FIX: Resolve viewerId to Convex user ID for proper comparison
+    // The argsViewerId from frontend is already the Convex user ID (from authStore)
+    // Use it directly, or resolve from identity if needed
+    let viewerId = argsViewerId;
 
-    // Validate args match identity (only if authenticated)
-    if (hasAuth && argsViewerId && argsViewerId !== identity.subject) {
-      throw new Error("Unauthorized");
+    // If authenticated, try to resolve from identity.subject (Clerk ID) to Convex user ID
+    if (hasAuth && identity?.subject) {
+      const resolvedId = await resolveUserIdByAuthId(ctx, identity.subject);
+      if (resolvedId) {
+        viewerId = resolvedId as string;
+      }
+      // If resolved ID differs from args but both are valid, prefer resolved
+      // This handles the case where frontend sends Convex ID but identity has Clerk ID
     }
 
     // Rate limit check
@@ -2465,12 +2904,14 @@ export const finalizeAnswerMediaView = mutation({
       throw new Error("Unauthorized");
     }
 
-    // Use identity subject if authenticated, otherwise use provided viewerId
-    const viewerId = identity?.subject ?? argsViewerId;
+    // FIX: Resolve viewerId to Convex user ID for proper comparison
+    let viewerId = argsViewerId;
 
-    // Validate args match identity (only if authenticated)
-    if (hasAuth && argsViewerId && argsViewerId !== identity.subject) {
-      throw new Error("Unauthorized");
+    if (hasAuth && identity?.subject) {
+      const resolvedId = await resolveUserIdByAuthId(ctx, identity.subject);
+      if (resolvedId) {
+        viewerId = resolvedId as string;
+      }
     }
 
     // Rate limit
