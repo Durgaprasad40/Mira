@@ -362,11 +362,10 @@ export const getPendingConnectRequests = query({
     // Enrich with sender profile and prompt data
     const enriched = await Promise.all(
       requests.map(async (req) => {
-        // Get sender profile from users table
-        const sender = await ctx.db
-          .query('users')
-          .withIndex('by_auth_user_id', (q) => q.eq('authUserId', req.fromUserId))
-          .first();
+        // P0-FIX: req.fromUserId is now stored as Convex ID, use direct lookup
+        // Previous code incorrectly queried by_auth_user_id index with Convex ID
+        const senderDbId = await resolveUserIdByAuthId(ctx, req.fromUserId);
+        const sender = senderDbId ? await ctx.db.get(senderDbId) : null;
 
         // Get prompt for context
         const prompt = await ctx.db
@@ -457,8 +456,9 @@ export const sendTodConnectRequest = mutation({
       return { success: false, reason: 'Cannot connect to yourself' };
     }
 
-    // Check for existing pending/connected request for this user pair
-    const existing = await ctx.db
+    // P1-FIX: Check for existing pending/connected request BIDIRECTIONALLY
+    // Check A→B (current user → answer author)
+    const existingAtoB = await ctx.db
       .query('todConnectRequests')
       .withIndex('by_from_to', (q) => q.eq('fromUserId', fromUserId).eq('toUserId', toUserId))
       .filter((q) =>
@@ -469,8 +469,24 @@ export const sendTodConnectRequest = mutation({
       )
       .first();
 
-    if (existing) {
+    if (existingAtoB) {
       return { success: false, reason: 'Request already exists' };
+    }
+
+    // Check B→A (answer author → current user) - prevents duplicate pair requests
+    const existingBtoA = await ctx.db
+      .query('todConnectRequests')
+      .withIndex('by_from_to', (q) => q.eq('fromUserId', toUserId).eq('toUserId', fromUserId))
+      .filter((q) =>
+        q.or(
+          q.eq(q.field('status'), 'pending'),
+          q.eq(q.field('status'), 'connected')
+        )
+      )
+      .first();
+
+    if (existingBtoA) {
+      return { success: false, reason: 'You already have a pending request from this user' };
     }
 
     // Create connect request
@@ -1589,13 +1605,23 @@ export const getPromptThread = query({
 
     if (!prompt) return null;
 
+    // CONNECT FIX: Resolve viewerUserId to Convex ID for proper comparison
+    // prompt.ownerUserId is stored as Convex ID, viewerUserId is authUserId format
+    const resolvedViewerId = viewerUserId
+      ? await resolveUserIdByAuthId(ctx, viewerUserId)
+      : null;
+
+    // Check if viewer is the prompt owner (using Convex IDs for both)
+    const isViewerPromptOwner = resolvedViewerId === prompt.ownerUserId;
+
     // P0-002: Check if prompt is hidden (unless viewer is owner)
-    if (prompt.isHidden && prompt.ownerUserId !== viewerUserId) {
+    if (prompt.isHidden && !isViewerPromptOwner) {
       return {
         prompt: null,
         answers: [],
         isExpired: false,
         isHidden: true, // P0-002: Indicates prompt was hidden due to reports
+        isViewerPromptOwner: false,
       };
     }
 
@@ -1622,6 +1648,7 @@ export const getPromptThread = query({
         },
         answers: [],
         isExpired: true,
+        isViewerPromptOwner,
       };
     }
 
@@ -1844,6 +1871,7 @@ export const getPromptThread = query({
       },
       answers: enrichedAnswers,
       isExpired: false,
+      isViewerPromptOwner,
     };
   },
 });
