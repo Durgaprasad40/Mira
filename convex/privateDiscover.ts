@@ -148,12 +148,29 @@ export const getProfiles = query({
         !conversationPartnerIds.has(p.userId as string)
     );
 
+    // P1-FIX: FALLBACK - If no eligible profiles after strict filters,
+    // relax the already-swiped filter to show profiles again (they can re-engage)
+    // This prevents "no profiles" state when all profiles have been seen
+    let finalEligible = eligible;
+    if (eligible.length === 0 && profiles.length > 0) {
+      finalEligible = profiles.filter(
+        (p) =>
+          p.userId !== viewerUserId &&
+          p.isSetupComplete &&
+          !blockedUserIds.has(p.userId as string) &&
+          !deletedUserIds.has(p.userId as string) &&
+          // Allow already-swiped profiles as fallback
+          // Still exclude chat partners (active conversations)
+          !conversationPartnerIds.has(p.userId as string)
+      );
+    }
+
     // Compute scores and separate suppressed vs unsuppressed profiles
     const viewerId = viewerUserId as string;
-    const unsuppressed: Array<{ profile: typeof eligible[0]; score: number }> = [];
-    const suppressed: Array<{ profile: typeof eligible[0]; score: number }> = [];
+    const unsuppressed: Array<{ profile: typeof finalEligible[0]; score: number }> = [];
+    const suppressed: Array<{ profile: typeof finalEligible[0]; score: number }> = [];
 
-    for (const p of eligible) {
+    for (const p of finalEligible) {
       // Use fallback defaults for profiles without ranking metrics
       const metrics = metricsMap.get(p.userId as string) ?? {
         phase2OnboardedAt: p.createdAt ?? now,
