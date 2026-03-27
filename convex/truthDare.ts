@@ -348,16 +348,55 @@ export const unlikeAnswer = mutation({
 export const getPendingConnectRequests = query({
   args: { authUserId: v.string() },
   handler: async (ctx, { authUserId }) => {
-    if (!authUserId) return [];
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
-    if (!userId) return [];
+    // [T/D RECEIVE QUERY] Debug logs
+    console.log('[T/D RECEIVE] Input authUserId:', authUserId?.slice(-8) ?? 'NULL');
 
+    if (!authUserId) {
+      console.log('[T/D RECEIVE] ERROR: authUserId is empty');
+      return [];
+    }
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    console.log('[T/D RECEIVE] Resolved Convex userId:', userId?.slice(-8) ?? 'NULL');
+    if (!userId) {
+      console.log('[T/D RECEIVE] ERROR: Could not resolve authUserId to Convex ID');
+      return [];
+    }
+
+    // FIX: Cast userId to string to ensure consistent comparison with stored string field
+    const userIdStr = userId as string;
     const requests = await ctx.db
       .query('todConnectRequests')
-      .withIndex('by_to_user', (q) => q.eq('toUserId', userId))
+      .withIndex('by_to_user', (q) => q.eq('toUserId', userIdStr))
       .filter((q) => q.eq(q.field('status'), 'pending'))
       .order('desc')
       .collect();
+
+    console.log('[T/D RECEIVE] Found pending requests:', {
+      count: requests.length,
+      queryUserId: userId,
+      queryUserIdType: typeof userId,
+      requestIds: requests.map((r) => r._id.toString().slice(-8)),
+      toUserIds: requests.map((r) => r.toUserId),
+      fromUserIds: requests.map((r) => r.fromUserId),
+    });
+
+    // DEBUG: If no requests found, check if ANY pending requests exist
+    if (requests.length === 0) {
+      const allPending = await ctx.db
+        .query('todConnectRequests')
+        .filter((q) => q.eq(q.field('status'), 'pending'))
+        .take(10);
+      console.log('[T/D RECEIVE] DEBUG - All pending requests in system:', {
+        totalPending: allPending.length,
+        samples: allPending.map((r) => ({
+          id: r._id.toString().slice(-8),
+          fromUserId: r.fromUserId,
+          toUserId: r.toUserId,
+          match: r.toUserId === userId,
+          matchAsString: r.toUserId === (userId as string),
+        })),
+      });
+    }
 
     // Enrich with sender profile and prompt data
     const enriched = await Promise.all(
@@ -415,10 +454,18 @@ export const sendTodConnectRequest = mutation({
     authUserId: v.string(),
   },
   handler: async (ctx, { promptId, answerId, authUserId }) => {
+    // [T/D SEND] Debug: Log input params
+    console.log('[T/D SEND] Input:', {
+      promptId: promptId?.slice(-8),
+      answerId: answerId?.slice(-8),
+      authUserId: authUserId?.slice(-8),
+    });
+
     if (!authUserId) {
       throw new Error('Unauthorized: authentication required');
     }
     const fromUserId = await resolveUserIdByAuthId(ctx, authUserId);
+    console.log('[T/D SEND] Resolved fromUserId:', fromUserId?.slice(-8) ?? 'NULL');
     if (!fromUserId) {
       throw new Error('Unauthorized: user not found');
     }
@@ -432,6 +479,10 @@ export const sendTodConnectRequest = mutation({
       return { success: false, reason: 'Prompt not found' };
     }
     if (prompt.ownerUserId !== fromUserId) {
+      console.log('[T/D SEND] Ownership mismatch:', {
+        promptOwner: prompt.ownerUserId?.slice(-8),
+        fromUserId: fromUserId?.slice(-8),
+      });
       return { success: false, reason: 'Only prompt owner can send connect' };
     }
 
@@ -446,8 +497,11 @@ export const sendTodConnectRequest = mutation({
 
     // CONNECT FIX: Resolve answer.userId (authUserId) to Convex ID for consistent storage
     // Previously stored authUserId, which caused query mismatches in getPendingConnectRequests
+    console.log('[T/D SEND] Answer userId (raw):', answer.userId?.slice(-8));
     const toUserId = await resolveUserIdByAuthId(ctx, answer.userId);
+    console.log('[T/D SEND] Resolved toUserId:', toUserId?.slice(-8) ?? 'NULL');
     if (!toUserId) {
+      console.log('[T/D SEND] ERROR: Could not resolve answer.userId to Convex ID');
       return { success: false, reason: 'Recipient user not found' };
     }
 
@@ -490,14 +544,24 @@ export const sendTodConnectRequest = mutation({
     }
 
     // Create connect request
-    await ctx.db.insert('todConnectRequests', {
+    // FIX: Ensure IDs are stored as strings to match schema (v.string())
+    const fromUserIdStr = fromUserId as string;
+    const toUserIdStr = toUserId as string;
+    const requestDoc = {
       promptId,
       answerId,
-      fromUserId,
-      toUserId,
-      status: 'pending',
+      fromUserId: fromUserIdStr,
+      toUserId: toUserIdStr,
+      status: 'pending' as const,
       createdAt: Date.now(),
+    };
+    console.log('[T/D SEND] Creating request:', {
+      fromUserId: fromUserIdStr,
+      toUserId: toUserIdStr,
+      status: requestDoc.status,
     });
+    const requestId = await ctx.db.insert('todConnectRequests', requestDoc);
+    console.log('[T/D SEND] SUCCESS - Created request:', requestId);
 
     return { success: true };
   },

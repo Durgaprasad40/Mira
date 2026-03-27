@@ -103,6 +103,19 @@ export default function ChatsScreen() {
   const respondToConnect = useMutation(api.truthDare.respondToConnect);
   const [respondingTo, setRespondingTo] = useState<string | null>(null);
 
+  // [T/D RECEIVE UI] Debug logs for pending connect requests
+  useEffect(() => {
+    if (__DEV__) {
+      console.log('[T/D RECEIVE UI] State:', {
+        currentUserId: currentUserId?.slice(-8) ?? 'NULL',
+        querySkipped: !currentUserId,
+        pendingRequestsLoading: pendingRequests === undefined,
+        pendingRequestsCount: pendingRequests?.length ?? 0,
+        pendingRequestIds: pendingRequests?.map((r) => r._id?.slice(-8)) ?? [],
+      });
+    }
+  }, [currentUserId, pendingRequests]);
+
   // ═══════════════════════════════════════════════════════════════════════════
   // P0-002 FIX: Backend conversations from Phase-2 privateConversations table
   // ═══════════════════════════════════════════════════════════════════════════
