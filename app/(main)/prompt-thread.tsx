@@ -287,7 +287,23 @@ export default function PromptThreadScreen() {
   const [selectedAnswerId, setSelectedAnswerId] = useState<string | null>(null);
 
   // Check if current user is the prompt owner
-  const isPromptOwner = prompt?.ownerUserId === currentUserId;
+  // CONNECT FIX: Use backend-computed flag (resolves ID format mismatch)
+  // prompt.ownerUserId is Convex ID, currentUserId is authUserId - can't compare directly
+  const isPromptOwner = threadData?.isViewerPromptOwner ?? false;
+
+  // CONNECT DEBUG: Log thread ownership state
+  useEffect(() => {
+    if (__DEV__ && threadData) {
+      console.log('[T/D Connect] Thread state:', {
+        promptId: promptId?.slice(-8),
+        viewerUserId: currentUserId?.slice(-8),
+        promptOwnerUserId: prompt?.ownerUserId?.slice(-8),
+        isViewerPromptOwner: threadData?.isViewerPromptOwner,
+        isPromptOwner,
+        answerCount: answers.length,
+      });
+    }
+  }, [promptId, currentUserId, prompt?.ownerUserId, threadData?.isViewerPromptOwner, isPromptOwner, answers.length]);
 
   const listRef = useRef<FlatList>(null);
 
@@ -975,10 +991,31 @@ export default function PromptThreadScreen() {
       genderIcon,
     ].filter(Boolean).join(' · ');
 
-    // Can show connect button? Only for prompt owner, on selected card, for eligible answers
-    const isEligibleForConnect = isPromptOwner && !isAnon && !item.hasSentConnect && !connectSentFor.has(item._id) && !isOwnAnswer;
+    // CONNECT ELIGIBILITY RULE (Product Rule):
+    // Show Connect for ALL answer types (anonymous, no-photo, full-view, photo, video, voice)
+    // Only block for: own answer, existing pending request, already connected
+    // NOTE: !isAnon was REMOVED - anonymous display doesn't block connection
+    const isEligibleForConnect = isPromptOwner && !item.hasSentConnect && !connectSentFor.has(item._id) && !isOwnAnswer;
     const canConnect = isEligibleForConnect && isSelected;
     const hasSentConnect = isPromptOwner && (item.hasSentConnect || connectSentFor.has(item._id));
+
+    // CONNECT DEBUG: Log eligibility for each answer
+    if (__DEV__) {
+      console.log(`[T/D Connect] Answer ${item._id.slice(-6)}:`, {
+        answerType: item.type,
+        isAnon,
+        identityMode: item.identityMode,
+        isPromptOwner,
+        isOwnAnswer,
+        hasSentConnectBackend: item.hasSentConnect,
+        hasSentConnectLocal: connectSentFor.has(item._id),
+        isEligibleForConnect,
+        isSelected,
+        canConnect,
+        // Product rule: Connect shown for ALL types except self/pending/connected
+        hideReason: isOwnAnswer ? 'own_answer' : item.hasSentConnect ? 'already_sent' : connectSentFor.has(item._id) ? 'local_sent' : !isPromptOwner ? 'not_owner' : null,
+      });
+    }
 
     return (
       <TouchableOpacity
