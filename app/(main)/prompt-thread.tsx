@@ -97,10 +97,10 @@ export default function PromptThreadScreen() {
       console.log(`[T/D] resolvedUserId source=demoStore valuePrefix=${demoUserId.substring(0, 12)}...`);
       return demoUserId;
     }
-    // C-002 FIX: Use stable constant fallback instead of Date.now()
-    // This prevents render loops when auth state is missing
-    console.warn(`[T/D] resolvedUserId source=fallback (no auth or demoStore userId)`);
-    return 'demo_fallback_user';
+    // P0-001 FIX: Return null instead of fake user ID to prevent cross-user data leaks
+    // Downstream code already handles null (guards + query 'skip')
+    console.warn(`[T/D] resolvedUserId source=none (no auth or demoStore userId)`);
+    return null;
   }, [userId, demoUserId]);
 
   // Get profile data for author identity snapshot
@@ -125,10 +125,49 @@ export default function PromptThreadScreen() {
 
 
   // Fetch thread data from Convex
+  // P0-001 FIX: Also check currentUserId to prevent query with null viewer
   const threadData = useQuery(
     api.truthDare.getPromptThread,
-    promptId ? { promptId, viewerUserId: currentUserId } : 'skip'
+    promptId && currentUserId ? { promptId, viewerUserId: currentUserId } : 'skip'
   );
+
+  // RECEIVER VISIBILITY: Fetch pending connect requests for this user
+  // This allows non-prompt-owners (answer authors) to see incoming connect requests
+  const pendingRequests = useQuery(
+    api.truthDare.getPendingConnectRequests,
+    currentUserId ? { authUserId: currentUserId } : 'skip'
+  );
+  const respondToConnect = useMutation(api.truthDare.respondToConnect);
+  const [respondingTo, setRespondingTo] = useState<string | null>(null);
+
+  // FIX: Success sheet state for post-accept celebration (matching chats.tsx behavior)
+  const [successSheet, setSuccessSheet] = useState<{
+    visible: boolean;
+    conversationId: string;
+    senderName: string;
+    senderPhotoUrl: string;
+    recipientName: string;
+    recipientPhotoUrl: string;
+  } | null>(null);
+
+  // Filter pending requests for this specific prompt
+  const pendingRequestsForPrompt = useMemo(() => {
+    if (!pendingRequests || !promptId) return [];
+    return pendingRequests.filter((r) => r.promptId === promptId);
+  }, [pendingRequests, promptId]);
+
+  // Debug log for pending requests
+  useEffect(() => {
+    if (__DEV__) {
+      console.log('[T/D THREAD] Pending requests state:', {
+        currentUserId: currentUserId?.slice(-8),
+        promptId: promptId?.slice(-8),
+        totalPendingRequests: pendingRequests?.length ?? 0,
+        pendingForThisPrompt: pendingRequestsForPrompt.length,
+        pendingIds: pendingRequestsForPrompt.map((r) => r._id?.slice(-8)),
+      });
+    }
+  }, [currentUserId, promptId, pendingRequests, pendingRequestsForPrompt]);
 
   // Mutations
   const createOrEditAnswer = useMutation(api.truthDare.createOrEditAnswer);
@@ -269,6 +308,13 @@ export default function PromptThreadScreen() {
     hasViewed?: boolean;
     isFrontCamera?: boolean;
   } | null>(null);
+
+  // T/D VIDEO FIX: Custom progress for front camera videos (native controls flip with scaleX)
+  const [videoProgress, setVideoProgress] = useState<{
+    position: number;
+    duration: number;
+    isPlaying: boolean;
+  }>({ position: 0, duration: 0, isPlaying: false });
 
   // T&D Connect state - tracks which answers have pending/sent connect requests
   const [connectSentFor, setConnectSentFor] = useState<Set<string>>(new Set());
@@ -453,10 +499,12 @@ export default function PromptThreadScreen() {
 
     setIsSubmittingReport(true);
     try {
-      if (isReportingPrompt && promptId) {
-        // P0-002: Report the prompt (server-side auth, no reporterId)
+      if (isReportingPrompt && promptId && userId) {
+        // P0-002: Report the prompt
+        // P1-002 FIX: Pass reporterId for demo mode compatibility
         const result = await reportPromptMutation({
           promptId,
+          reporterId: userId,
           reasonCode: selectedReportReason,
           reasonText: reportReasonText.trim() || undefined,
         });
@@ -476,10 +524,11 @@ export default function PromptThreadScreen() {
           reasonText: reportReasonText.trim() || undefined,
         });
         setReportModalVisible(false);
+        // P1-002: Content is immediately hidden for the reporter
         if (result.isNowHidden) {
           Alert.alert('Reported', 'This comment has been hidden due to multiple reports.');
         } else {
-          Alert.alert('Reported', 'Thank you for your report. We will review it.');
+          Alert.alert('Reported', 'Thank you for your report. This content is now hidden for you.');
         }
       }
     } catch (error: any) {
@@ -608,6 +657,69 @@ export default function PromptThreadScreen() {
     handleCloseMenu();
   }, [menuAnswerId, menuAnswerOwnerId, menuIsOwnAnswer, handleReport, handleCloseMenu]);
 
+  // RECEIVER: Handle accept T&D connect request
+  // FIX: Show success sheet instead of navigating directly to chat
+  const handleAcceptConnect = useCallback(async (requestId: string) => {
+    if (!currentUserId) return;
+    setRespondingTo(requestId);
+    try {
+      const result = await respondToConnect({
+        requestId: requestId as any,
+        action: 'connect',
+        authUserId: currentUserId,
+      });
+      if (__DEV__) {
+        console.log('[T/D ACCEPT RESULT]', {
+          success: result.success,
+          conversationId: result.conversationId?.slice(-8),
+          action: result.action,
+          senderName: result.senderName,
+        });
+      }
+      if (result.success && result.conversationId) {
+        // FIX: Show success sheet instead of navigating directly
+        console.log('[T/D ACCEPT] Showing success sheet instead of direct navigation');
+        setSuccessSheet({
+          visible: true,
+          conversationId: result.conversationId,
+          senderName: result.senderName || 'Someone',
+          senderPhotoUrl: result.senderPhotoUrl || '',
+          recipientName: result.recipientName || 'You',
+          recipientPhotoUrl: result.recipientPhotoUrl || '',
+        });
+      } else {
+        Alert.alert('Error', result.reason || 'Failed to accept request');
+      }
+    } catch (error: any) {
+      Alert.alert('Error', error.message || 'Failed to accept connect request');
+    } finally {
+      setRespondingTo(null);
+    }
+  }, [currentUserId, respondToConnect]);
+
+  // RECEIVER: Handle reject T&D connect request
+  const handleRejectConnect = useCallback(async (requestId: string) => {
+    if (!currentUserId) return;
+    setRespondingTo(requestId);
+    try {
+      const result = await respondToConnect({
+        requestId: requestId as any,
+        action: 'remove',
+        authUserId: currentUserId,
+      });
+      if (__DEV__) {
+        console.log('[T/D THREAD] Reject result:', result);
+      }
+      if (!result.success) {
+        Alert.alert('Error', result.reason || 'Failed to decline request');
+      }
+    } catch (error: any) {
+      Alert.alert('Error', error.message || 'Failed to decline connect request');
+    } finally {
+      setRespondingTo(null);
+    }
+  }, [currentUserId, respondToConnect]);
+
   // Handle send T&D connect request (prompt owner → answer author)
   const handleSendConnect = useCallback(async (answerId: string) => {
     if (!userId || !promptId) return;
@@ -673,9 +785,10 @@ export default function PromptThreadScreen() {
         viewerId: currentUserId,
       });
 
-      // P0-001 FIX: Handle all possible backend responses
+      // Handle backend responses
+      // ONE-TIME VIEW: Block if already viewed
       if (result.status === 'already_viewed') {
-        Alert.alert('Already Viewed', 'This media can only be viewed once.');
+        Alert.alert('Already Viewed', 'You can only view this media once.');
         return;
       }
 
@@ -684,7 +797,7 @@ export default function PromptThreadScreen() {
         return;
       }
 
-      if (result.status === 'no_media' || result.status === 'already_deleted') {
+      if (result.status === 'no_media') {
         Alert.alert('Media Unavailable', 'This media is no longer available.');
         return;
       }
@@ -694,7 +807,7 @@ export default function PromptThreadScreen() {
         return;
       }
 
-      // P0-001 FIX: Use the fresh URL from backend, not stale answer.mediaUrl
+      // Use the fresh URL from backend
       setViewingMedia({
         answerId,
         mediaUrl: result.url,
@@ -705,9 +818,7 @@ export default function PromptThreadScreen() {
       });
     } catch (error: any) {
       console.error('[T/D] Claim media view failed:', error);
-      if (error.message?.includes('already viewed')) {
-        Alert.alert('Already Viewed', 'This media can only be viewed once.');
-      } else if (error.message?.includes('Rate limit')) {
+      if (error.message?.includes('Rate limit')) {
         Alert.alert('Please Wait', 'Too many requests. Try again in a moment.');
       } else {
         Alert.alert('Error', 'Failed to view media. Please try again.');
@@ -740,6 +851,8 @@ export default function PromptThreadScreen() {
       }
     }
     setViewingMedia(null);
+    // T/D VIDEO FIX: Reset video progress state
+    setVideoProgress({ position: 0, duration: 0, isPlaying: false });
   }, [viewingMedia, currentUserId, finalizeAnswerMediaView]);
 
   // Unified submit handler - handles text + optional media attachment
@@ -1032,15 +1145,16 @@ export default function PromptThreadScreen() {
         ]}>
           {/* Header with 3-dot menu */}
           <View style={styles.answerHeader}>
-            {/* Avatar: Anonymous icon OR photo (if public) OR placeholder (no_photo/blur) */}
+            {/* Avatar: Anonymous icon OR photo (clear/blurred based on mode) OR placeholder */}
             {isAnon ? (
               <View style={styles.answerAvatarAnon}>
                 <Ionicons name="eye-off" size={14} color={PREMIUM.textMuted} />
               </View>
-            ) : authorPhotoUrl && photoBlurMode !== 'blur' ? (
+            ) : authorPhotoUrl ? (
               <Image
                 source={{ uri: authorPhotoUrl }}
                 style={styles.answerAvatar}
+                blurRadius={photoBlurMode === 'blur' ? 20 : 0}
               />
             ) : (
               <View style={styles.answerAvatarPlaceholder}>
@@ -1096,12 +1210,13 @@ export default function PromptThreadScreen() {
             </View>
           )}
 
-          {/* Photo/Video media */}
+          {/* Photo/Video media - ONE-TIME PER USER VIEW */}
           {(item.type === 'photo' || item.type === 'video') && item.mediaUrl && (
             <TouchableOpacity
               style={styles.mediaContainer}
               onPress={() => handleViewMedia(item)}
               activeOpacity={0.7}
+              disabled={item.hasViewedMedia && !isOwnAnswer}
             >
               <View style={[
                 styles.mediaBadge,
@@ -1118,11 +1233,25 @@ export default function PromptThreadScreen() {
                 ]}>
                   {item.type === 'video' ? 'Video' : 'Photo'}
                 </Text>
+                {/* Visibility label: show who can see this media */}
+                <View style={styles.visibilityLabel}>
+                  <Ionicons
+                    name={item.visibility === 'owner_only' ? 'lock-closed' : 'eye'}
+                    size={10}
+                    color={item.visibility === 'owner_only' ? PREMIUM.truthPurple : PREMIUM.textMuted}
+                  />
+                  <Text style={[
+                    styles.visibilityLabelText,
+                    item.visibility === 'owner_only' && { color: PREMIUM.truthPurple },
+                  ]}>
+                    {item.visibility === 'owner_only' ? 'Private' : 'Everyone'}
+                  </Text>
+                </View>
                 <Text style={[
                   styles.mediaViewMode,
                   item.hasViewedMedia && !isOwnAnswer && { color: PREMIUM.textMuted },
                 ]}>
-                  {item.hasViewedMedia && !isOwnAnswer ? 'Viewed' : 'Tap to view'}
+                  {item.hasViewedMedia && !isOwnAnswer ? 'Viewed' : 'Tap to view (1 time)'}
                 </Text>
               </View>
             </TouchableOpacity>
@@ -1198,12 +1327,24 @@ export default function PromptThreadScreen() {
                 </View>
               )}
 
-              {/* Connect sent indicator */}
-              {hasSentConnect && (
-                <View style={styles.connectSentInline}>
-                  <Ionicons name="checkmark-circle" size={12} color={PREMIUM.textSecondary} />
-                  <Text style={styles.connectSentInlineText}>Sent</Text>
+              {/* Connect status indicator - P0-FIX: Show different states */}
+              {hasSentConnect && item.connectStatus === 'pending' && (
+                <View style={styles.connectPendingInline}>
+                  <Ionicons name="hourglass-outline" size={12} color="#F5A623" />
+                  <Text style={styles.connectPendingInlineText}>Waiting</Text>
                 </View>
+              )}
+              {hasSentConnect && item.connectStatus === 'connected' && (
+                <TouchableOpacity
+                  style={[styles.connectPendingInline, { backgroundColor: 'rgba(76, 175, 80, 0.15)' }]}
+                  onPress={() => {
+                    // Navigate to Phase-2 Messages to find the conversation
+                    router.push('/(main)/(private)/(tabs)/chats');
+                  }}
+                >
+                  <Ionicons name="checkmark-circle" size={12} color="#4CAF50" />
+                  <Text style={[styles.connectPendingInlineText, { color: '#4CAF50' }]}>Connected</Text>
+                </TouchableOpacity>
               )}
 
               {/* Own comment: Edit button - compact */}
@@ -1496,10 +1637,45 @@ export default function PromptThreadScreen() {
         style={styles.answersListContainer}
         contentContainerStyle={styles.listContent}
         ListHeaderComponent={
-          <View style={styles.commentsHeader}>
-            <Text style={styles.commentsHeaderText}>
-              {answers.length === 0 ? 'Be the first to respond' : `${answers.length} ${answers.length === 1 ? 'Response' : 'Responses'}`}
-            </Text>
+          <View>
+            {/* RECEIVER VISIBILITY: Simple inline Accept/Reject bar */}
+            {pendingRequestsForPrompt.length > 0 && (
+              <View style={styles.pendingConnectBar}>
+                <Ionicons name="heart" size={16} color={PREMIUM.coral} />
+                <Text style={styles.pendingConnectBarText}>
+                  Connect request from prompt owner
+                </Text>
+                <View style={styles.pendingConnectBarActions}>
+                  <TouchableOpacity
+                    style={styles.pendingConnectReject}
+                    onPress={() => handleRejectConnect(pendingRequestsForPrompt[0]._id)}
+                    disabled={!!respondingTo}
+                  >
+                    {respondingTo === pendingRequestsForPrompt[0]._id ? (
+                      <ActivityIndicator size="small" color={PREMIUM.textMuted} />
+                    ) : (
+                      <Text style={styles.pendingConnectRejectText}>Decline</Text>
+                    )}
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={styles.pendingConnectAcceptBtn}
+                    onPress={() => handleAcceptConnect(pendingRequestsForPrompt[0]._id)}
+                    disabled={!!respondingTo}
+                  >
+                    {respondingTo === pendingRequestsForPrompt[0]._id ? (
+                      <ActivityIndicator size="small" color="#FFF" />
+                    ) : (
+                      <Text style={styles.pendingConnectAcceptBtnText}>Accept</Text>
+                    )}
+                  </TouchableOpacity>
+                </View>
+              </View>
+            )}
+            <View style={styles.commentsHeader}>
+              <Text style={styles.commentsHeaderText}>
+                {answers.length === 0 ? 'Be the first to respond' : `${answers.length} ${answers.length === 1 ? 'Response' : 'Responses'}`}
+              </Text>
+            </View>
           </View>
         }
         ListEmptyComponent={
@@ -1600,11 +1776,11 @@ export default function PromptThreadScreen() {
         >
           <View style={styles.menuContent}>
             <Text style={styles.menuTitle}>
-              {isPromptOwner ? 'Delete Prompt?' : 'Report Prompt'}
+              {isPromptOwner ? 'Prompt Options' : 'Report Prompt'}
             </Text>
             <Text style={styles.menuSubtitle}>
               {isPromptOwner
-                ? 'This will delete the prompt and all responses.'
+                ? 'Edit or delete your prompt.'
                 : 'Help us keep the community safe.'}
             </Text>
 
@@ -1614,20 +1790,42 @@ export default function PromptThreadScreen() {
               </TouchableOpacity>
 
               {isPromptOwner ? (
-                <TouchableOpacity
-                  style={[styles.menuItem, styles.menuItemDestructive]}
-                  onPress={handleDeletePrompt}
-                  disabled={isDeletingPrompt}
-                >
-                  {isDeletingPrompt ? (
-                    <ActivityIndicator size="small" color="#FFF" />
-                  ) : (
-                    <>
-                      <Ionicons name="trash-outline" size={16} color="#FFF" />
-                      <Text style={styles.menuItemTextDestructive}>Delete</Text>
-                    </>
-                  )}
-                </TouchableOpacity>
+                <>
+                  {/* Edit button - navigate to create screen with edit params */}
+                  <TouchableOpacity
+                    style={styles.menuItem}
+                    onPress={() => {
+                      handleClosePromptActionPopup();
+                      router.push({
+                        pathname: '/(main)/incognito-create-tod',
+                        params: {
+                          editPromptId: prompt._id as string,
+                          editType: prompt.type,
+                          editText: prompt.text,
+                        },
+                      } as any);
+                    }}
+                  >
+                    <Ionicons name="pencil-outline" size={16} color={PREMIUM.textSecondary} />
+                    <Text style={styles.menuItemText}>Edit</Text>
+                  </TouchableOpacity>
+
+                  {/* Delete button */}
+                  <TouchableOpacity
+                    style={[styles.menuItem, styles.menuItemDestructive]}
+                    onPress={handleDeletePrompt}
+                    disabled={isDeletingPrompt}
+                  >
+                    {isDeletingPrompt ? (
+                      <ActivityIndicator size="small" color="#FFF" />
+                    ) : (
+                      <>
+                        <Ionicons name="trash-outline" size={16} color="#FFF" />
+                        <Text style={styles.menuItemTextDestructive}>Delete</Text>
+                      </>
+                    )}
+                  </TouchableOpacity>
+                </>
               ) : (
                 <TouchableOpacity
                   style={[styles.menuItem, styles.menuItemDestructive]}
@@ -1715,24 +1913,51 @@ export default function PromptThreadScreen() {
           )}
 
           {viewingMedia?.mediaType === 'video' && (
-            <Video
-              source={{ uri: viewingMedia.mediaUrl }}
-              style={[
-                styles.mediaViewerVideo,
-                viewingMedia.isFrontCamera && styles.unmirrorMedia,
-              ]}
-              resizeMode={ResizeMode.CONTAIN}
-              shouldPlay
-              useNativeControls
-              isLooping={false}
-            />
+            <View style={styles.videoContainer}>
+              <Video
+                source={{ uri: viewingMedia.mediaUrl }}
+                style={[
+                  styles.mediaViewerVideo,
+                  viewingMedia.isFrontCamera && styles.unmirrorMedia,
+                ]}
+                resizeMode={ResizeMode.CONTAIN}
+                shouldPlay
+                useNativeControls={!viewingMedia.isFrontCamera}
+                isLooping={false}
+                onPlaybackStatusUpdate={(status) => {
+                  if (status.isLoaded && viewingMedia.isFrontCamera) {
+                    setVideoProgress({
+                      position: status.positionMillis ?? 0,
+                      duration: status.durationMillis ?? 0,
+                      isPlaying: status.isPlaying ?? false,
+                    });
+                  }
+                }}
+              />
+              {/* T/D VIDEO FIX: Custom progress bar for front camera videos (unflipped) */}
+              {viewingMedia.isFrontCamera && videoProgress.duration > 0 && (
+                <View style={styles.customVideoProgress}>
+                  <View style={styles.progressBarBg}>
+                    <View
+                      style={[
+                        styles.progressBarFill,
+                        { width: `${(videoProgress.position / videoProgress.duration) * 100}%` },
+                      ]}
+                    />
+                  </View>
+                  <Text style={styles.progressTime}>
+                    {Math.floor(videoProgress.position / 1000)}s / {Math.floor(videoProgress.duration / 1000)}s
+                  </Text>
+                </View>
+              )}
+            </View>
           )}
 
           {!viewingMedia?.isOwnAnswer && (
             <View style={styles.mediaViewerHint}>
               <Ionicons name="eye-outline" size={14} color="#FFF" />
               <Text style={styles.mediaViewerHintText}>
-                One-time view — this will disappear when you close
+                One-time view — you won't be able to view this again
               </Text>
             </View>
           )}
@@ -1820,6 +2045,96 @@ export default function PromptThreadScreen() {
           </View>
         </View>
       </Modal>
+
+      {/* FIX: Post-accept success sheet (matching chats.tsx behavior) */}
+      {successSheet?.visible && (
+        <Modal
+          visible
+          transparent
+          animationType="fade"
+          onRequestClose={() => setSuccessSheet(null)}
+        >
+          <View style={styles.successOverlay}>
+            <View style={styles.successSheet}>
+              {/* Both users' photos side by side */}
+              <View style={styles.successAvatarsRow}>
+                {/* Sender photo (T/D requester) */}
+                <View style={styles.successAvatarContainer}>
+                  {successSheet.senderPhotoUrl ? (
+                    <Image
+                      source={{ uri: successSheet.senderPhotoUrl }}
+                      style={styles.successAvatar}
+                      blurRadius={8}
+                    />
+                  ) : (
+                    <View style={[styles.successAvatar, styles.successAvatarPlaceholder]}>
+                      <Text style={styles.successAvatarInitial}>
+                        {successSheet.senderName?.[0] || '?'}
+                      </Text>
+                    </View>
+                  )}
+                  <Text style={styles.successAvatarName} numberOfLines={1}>
+                    {successSheet.senderName}
+                  </Text>
+                </View>
+
+                {/* Heart icon between photos */}
+                <View style={styles.successHeartContainer}>
+                  <Ionicons name="heart" size={32} color={PREMIUM.coral} />
+                </View>
+
+                {/* Recipient photo (current user / acceptor) */}
+                <View style={styles.successAvatarContainer}>
+                  {successSheet.recipientPhotoUrl ? (
+                    <Image
+                      source={{ uri: successSheet.recipientPhotoUrl }}
+                      style={styles.successAvatar}
+                      blurRadius={8}
+                    />
+                  ) : (
+                    <View style={[styles.successAvatar, styles.successAvatarPlaceholder]}>
+                      <Text style={styles.successAvatarInitial}>
+                        {successSheet.recipientName?.[0] || '?'}
+                      </Text>
+                    </View>
+                  )}
+                  <Text style={styles.successAvatarName} numberOfLines={1}>
+                    {successSheet.recipientName}
+                  </Text>
+                </View>
+              </View>
+
+              {/* Title */}
+              <Text style={styles.successTitle}>You're Connected! 🎉</Text>
+              <Text style={styles.successSubtitle}>
+                You and {successSheet.senderName} can now chat
+              </Text>
+
+              {/* Actions */}
+              <View style={styles.successActions}>
+                <TouchableOpacity
+                  style={styles.successPrimaryBtn}
+                  onPress={() => {
+                    const convoId = successSheet.conversationId;
+                    setSuccessSheet(null);
+                    router.push(`/(main)/incognito-chat?id=${convoId}` as any);
+                  }}
+                >
+                  <Ionicons name="chatbubble" size={18} color="#FFF" />
+                  <Text style={styles.successPrimaryText}>Say Hi</Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  style={styles.successSecondaryBtn}
+                  onPress={() => setSuccessSheet(null)}
+                >
+                  <Text style={styles.successSecondaryText}>Keep Discovering</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          </View>
+        </Modal>
+      )}
     </LinearGradient>
   );
 }
@@ -2182,6 +2497,18 @@ const styles = StyleSheet.create({
   },
   mediaBadgeText: { fontSize: 13, fontWeight: '600', color: PREMIUM.textPrimary },
   mediaViewMode: { fontSize: 11, color: PREMIUM.textSecondary, marginLeft: 'auto' },
+  // T/D VISIBILITY LABEL: Shows who can view this media
+  visibilityLabel: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 3,
+    backgroundColor: PREMIUM.bgBase,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+    marginLeft: 6,
+  },
+  visibilityLabelText: { fontSize: 9, fontWeight: '500', color: PREMIUM.textMuted },
   mediaBadgeViewed: {
     backgroundColor: PREMIUM.bgBase,
     borderColor: PREMIUM.textMuted + '30',
@@ -2288,6 +2615,23 @@ const styles = StyleSheet.create({
   connectSentInlineText: {
     fontSize: 10,
     color: PREMIUM.textMuted,
+  },
+  // Strong pending approval state - orange/yellow glow effect
+  connectPendingInline: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    backgroundColor: '#FFF3E0',
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: '#F5A623',
+  },
+  connectPendingInlineText: {
+    fontSize: 10,
+    fontWeight: '600',
+    color: '#F5A623',
   },
   editBtnCompact: {
     width: 28,
@@ -2481,6 +2825,38 @@ const styles = StyleSheet.create({
     width: '100%',
     height: '80%',
   },
+  // T/D VIDEO FIX: Container for video + custom progress
+  videoContainer: {
+    width: '100%',
+    height: '80%',
+    justifyContent: 'center',
+    alignItems: 'center',
+  },
+  customVideoProgress: {
+    position: 'absolute',
+    bottom: 20,
+    left: 20,
+    right: 20,
+    alignItems: 'center',
+    gap: 8,
+  },
+  progressBarBg: {
+    width: '100%',
+    height: 4,
+    backgroundColor: 'rgba(255,255,255,0.3)',
+    borderRadius: 2,
+    overflow: 'hidden',
+  },
+  progressBarFill: {
+    height: '100%',
+    backgroundColor: PREMIUM.coral,
+    borderRadius: 2,
+  },
+  progressTime: {
+    fontSize: 12,
+    color: 'rgba(255,255,255,0.8)',
+    fontWeight: '500',
+  },
   unmirrorMedia: {
     transform: [{ scaleX: -1 }],
   },
@@ -2596,5 +2972,153 @@ const styles = StyleSheet.create({
     fontSize: 15,
     fontWeight: '700',
     color: '#FFF',
+  },
+
+  // Pending Connect Bar - simple inline Accept/Reject (RECEIVER VISIBILITY)
+  pendingConnectBar: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: `${PREMIUM.coral}12`,
+    marginHorizontal: 16,
+    marginTop: 8,
+    marginBottom: 8,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    borderRadius: 12,
+    gap: 10,
+  },
+  pendingConnectBarText: {
+    flex: 1,
+    fontSize: 14,
+    fontWeight: '500',
+    color: PREMIUM.coral,
+  },
+  pendingConnectBarActions: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  pendingConnectReject: {
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 14,
+    backgroundColor: PREMIUM.bgHighlight,
+  },
+  pendingConnectRejectText: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: PREMIUM.textSecondary,
+  },
+  pendingConnectAcceptBtn: {
+    paddingHorizontal: 14,
+    paddingVertical: 6,
+    borderRadius: 14,
+    backgroundColor: PREMIUM.coral,
+  },
+  pendingConnectAcceptBtnText: {
+    fontSize: 13,
+    fontWeight: '700',
+    color: '#FFF',
+  },
+
+  // FIX: Success sheet styles (matching chats.tsx)
+  successOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0,0,0,0.7)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 24,
+  },
+  successSheet: {
+    backgroundColor: PREMIUM.bgElevated,
+    borderRadius: 24,
+    padding: 32,
+    alignItems: 'center',
+    width: '100%',
+    maxWidth: 320,
+  },
+  successAvatarsRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 24,
+    gap: 12,
+  },
+  successAvatarContainer: {
+    alignItems: 'center',
+    width: 80,
+  },
+  successAvatar: {
+    width: 70,
+    height: 70,
+    borderRadius: 35,
+    borderWidth: 3,
+    borderColor: PREMIUM.coral,
+  },
+  successAvatarPlaceholder: {
+    backgroundColor: PREMIUM.bgBase,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  successAvatarInitial: {
+    fontSize: 24,
+    fontWeight: '700',
+    color: PREMIUM.textPrimary,
+  },
+  successAvatarName: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: PREMIUM.textPrimary,
+    marginTop: 6,
+    textAlign: 'center',
+  },
+  successHeartContainer: {
+    width: 44,
+    height: 44,
+    borderRadius: 22,
+    backgroundColor: PREMIUM.coral + '20',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  successTitle: {
+    fontSize: 22,
+    fontWeight: '700',
+    color: PREMIUM.textPrimary,
+    marginBottom: 8,
+    textAlign: 'center',
+  },
+  successSubtitle: {
+    fontSize: 14,
+    color: PREMIUM.textSecondary,
+    textAlign: 'center',
+    marginBottom: 28,
+  },
+  successActions: {
+    width: '100%',
+    gap: 12,
+  },
+  successPrimaryBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    backgroundColor: PREMIUM.coral,
+    paddingVertical: 14,
+    borderRadius: 12,
+  },
+  successPrimaryText: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#FFF',
+  },
+  successSecondaryBtn: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 14,
+  },
+  successSecondaryText: {
+    fontSize: 15,
+    fontWeight: '500',
+    color: PREMIUM.textSecondary,
   },
 });

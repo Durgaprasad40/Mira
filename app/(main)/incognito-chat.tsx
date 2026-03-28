@@ -146,7 +146,40 @@ export default function PrivateChatScreen() {
   const conversations = usePrivateChatStore((s) => s.conversations);
   const blockUser = usePrivateChatStore((s) => s.blockUser);
 
-  const conversation = conversations.find((c) => c.id === id);
+  const localConversation = conversations.find((c) => c.id === id);
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // T/D PHASE2 FIX: Fetch conversation from backend when not in local store
+  // This handles T/D connect acceptances where conversation is created server-side
+  // P0-FIX: Include authUserId for custom auth fallback (ctx.auth not configured)
+  // ═══════════════════════════════════════════════════════════════════════════
+  const backendConversation = useQuery(
+    api.privateConversations.getPrivateConversation,
+    id && !localConversation && currentUserId
+      ? { conversationId: id as Id<'privateConversations'>, authUserId: currentUserId }
+      : 'skip'
+  );
+
+  // Use local store first, fallback to backend query for T/D connections
+  const conversation = useMemo(() => {
+    if (localConversation) return localConversation;
+    if (backendConversation) {
+      // Map backend response to local store format
+      console.log('[T/D PHASE2 OPEN] Using backend conversation:', backendConversation.id?.toString().slice(-8));
+      return {
+        id: backendConversation.id as string,
+        participantId: backendConversation.participantId as string,
+        participantName: backendConversation.participantName || 'Someone',
+        participantAge: 0,
+        participantPhotoUrl: backendConversation.participantPhotoUrl || '',
+        lastMessage: '',
+        lastMessageAt: backendConversation.createdAt || Date.now(),
+        unreadCount: backendConversation.unreadCount || 0,
+        connectionSource: backendConversation.connectionSource || 'tod',
+      };
+    }
+    return null;
+  }, [localConversation, backendConversation]);
 
   // ═══════════════════════════════════════════════════════════════════════════
   // P0-002b: Backend message fetching (replaces local store)
@@ -590,8 +623,31 @@ export default function PrivateChatScreen() {
     }
   }, [id, localAddMessage, pendingMediaType, pendingIsMirrored]);
 
-  // Loading state while fetching messages
+  // Loading state while fetching conversation from backend
+  const isLoadingConversation = !localConversation && backendConversation === undefined;
+
+  if (isLoadingConversation) {
+    return (
+      <View style={[styles.container, { paddingTop: insets.top }]}>
+        <View style={styles.header}>
+          <TouchableOpacity onPress={() => router.back()}>
+            <Ionicons name="arrow-back" size={24} color={C.text} />
+          </TouchableOpacity>
+          <View style={{ flexDirection: 'row', alignItems: 'center', gap: 8 }}>
+            <ActivityIndicator size="small" color={C.text} />
+            <Text style={styles.headerName}>Loading...</Text>
+          </View>
+        </View>
+      </View>
+    );
+  }
+
   if (!conversation) {
+    console.log('[T/D PHASE2 OPEN] Conversation not found:', {
+      id: id?.slice(-8),
+      hasLocal: !!localConversation,
+      backendResult: backendConversation,
+    });
     return (
       <View style={[styles.container, { paddingTop: insets.top }]}>
         <View style={styles.header}>

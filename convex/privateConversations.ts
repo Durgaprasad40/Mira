@@ -77,17 +77,28 @@ async function computeUnreadCountFromPrivateMessages(
  */
 export const getUserPrivateConversations = query({
   args: {
-    // P2-005 FIX: authUserId kept for backward compat but IGNORED - server auth is authoritative
+    // P0-FIX: authUserId used as fallback since ctx.auth is not configured in this app
     authUserId: v.optional(v.string()),
   },
-  handler: async (ctx, _args) => {
-    // P2-005 FIX: ALWAYS resolve from server-side auth - never trust client-supplied authUserId
+  handler: async (ctx, { authUserId }) => {
+    // P0-FIX: Try server-side auth first, fallback to client-supplied authUserId
+    let userId: Id<'users'> | null = null;
+
+    // Primary: Try server-side auth identity (future-proofing)
     const identity = await ctx.auth.getUserIdentity();
-    if (!identity?.subject) {
-      return [];
+    if (identity?.subject) {
+      userId = await resolveUserIdByAuthId(ctx, identity.subject);
+      console.log('[PHASE2 MESSAGES] Resolved from identity.subject:', (userId as string)?.slice(-8) ?? 'NULL');
     }
-    const userId = await resolveUserIdByAuthId(ctx, identity.subject);
+
+    // Fallback: Use client-supplied authUserId (current custom auth system)
+    if (!userId && authUserId) {
+      userId = await resolveUserIdByAuthId(ctx, authUserId);
+      console.log('[PHASE2 MESSAGES] Fallback to authUserId:', (userId as string)?.slice(-8) ?? 'NULL');
+    }
+
     if (!userId) {
+      console.log('[PHASE2 MESSAGES] Could not resolve user from any source');
       return [];
     }
 
@@ -96,6 +107,8 @@ export const getUserPrivateConversations = query({
       .query('privateConversationParticipants')
       .withIndex('by_user', (q) => q.eq('userId', userId))
       .collect();
+
+    console.log('[PHASE2 MESSAGES] Found participations:', participations.length);
 
     if (participations.length === 0) {
       return [];
@@ -150,10 +163,9 @@ export const getUserPrivateConversations = query({
         // Get photo URL - use Phase-2 private profile photos only (strict isolation)
         const photoUrl = otherPrivateProfile?.privatePhotoUrls?.[0] ?? null;
 
-        // Get display name - use Phase-2 initial or fallback
-        const displayName = otherPrivateProfile?.displayName
-          ? otherPrivateProfile.displayName.charAt(0).toUpperCase()
-          : otherUser.name?.charAt(0).toUpperCase() || 'U';
+        // Get display name - use Phase-2 nickname (displayName) ONLY
+        // FIX: Do NOT fall back to user.name (full name) - Phase-2 must use nickname only
+        const displayName = otherPrivateProfile?.displayName || 'Anonymous';
 
         // Compute unread count from source of truth (privateMessages table)
         const unreadCount = await computeUnreadCountFromPrivateMessages(ctx, conversation._id, userId);
@@ -195,20 +207,29 @@ export const getUserPrivateConversations = query({
 export const getPrivateMessages = query({
   args: {
     conversationId: v.id('privateConversations'),
-    // P2-005 FIX: authUserId kept for backward compat but IGNORED - server auth is authoritative
+    // P0-FIX: authUserId used as fallback since ctx.auth is not configured in this app
     authUserId: v.optional(v.string()),
     limit: v.optional(v.number()),
     before: v.optional(v.number()), // For pagination: get messages before this timestamp
   },
-  handler: async (ctx, args) => {
-    const { conversationId, limit = 50, before } = args;
+  handler: async (ctx, { conversationId, authUserId, limit = 50, before }) => {
+    // P0-FIX: Try server-side auth first, fallback to client-supplied authUserId
+    let userId: Id<'users'> | null = null;
 
-    // P2-005 FIX: ALWAYS resolve from server-side auth - never trust client-supplied authUserId
     const identity = await ctx.auth.getUserIdentity();
-    if (!identity?.subject) {
-      return [];
+    if (identity?.subject) {
+      userId = await resolveUserIdByAuthId(ctx, identity.subject);
     }
-    const userId = await resolveUserIdByAuthId(ctx, identity.subject);
+
+    if (!userId && authUserId) {
+      userId = await resolveUserIdByAuthId(ctx, authUserId);
+    }
+
+    console.log('[PHASE2 MSGS] Auth resolve:', {
+      conversationId: (conversationId as string)?.slice(-8),
+      resolvedUserId: (userId as string)?.slice(-8) ?? 'NULL',
+    });
+
     if (!userId) {
       return [];
     }
@@ -216,11 +237,13 @@ export const getPrivateMessages = query({
     // Get conversation and verify user is participant
     const conversation = await ctx.db.get(conversationId);
     if (!conversation) {
+      console.log('[PHASE2 MSGS] Conversation not found');
       return [];
     }
 
     // SECURITY: Verify user is part of this conversation (IDOR prevention)
     if (!conversation.participants.includes(userId)) {
+      console.log('[PHASE2 MSGS] User not authorized');
       return [];
     }
 
@@ -485,30 +508,49 @@ export const sendPrivateMessage = mutation({
 export const getPrivateConversation = query({
   args: {
     conversationId: v.id('privateConversations'),
-    // P2-005 FIX: authUserId kept for backward compat but IGNORED - server auth is authoritative
+    // P0-FIX: authUserId used as fallback since ctx.auth is not configured in this app
     authUserId: v.optional(v.string()),
   },
-  handler: async (ctx, args) => {
-    const { conversationId } = args;
+  handler: async (ctx, { conversationId, authUserId }) => {
+    // P0-FIX: Try server-side auth first, fallback to client-supplied authUserId
+    let userId: Id<'users'> | null = null;
 
-    // P2-005 FIX: ALWAYS resolve from server-side auth - never trust client-supplied authUserId
     const identity = await ctx.auth.getUserIdentity();
-    if (!identity?.subject) {
-      return null;
+    if (identity?.subject) {
+      userId = await resolveUserIdByAuthId(ctx, identity.subject);
     }
-    const userId = await resolveUserIdByAuthId(ctx, identity.subject);
+
+    if (!userId && authUserId) {
+      userId = await resolveUserIdByAuthId(ctx, authUserId);
+    }
+
+    console.log('[PHASE2 CONVO] Auth resolve:', {
+      conversationId: (conversationId as string)?.slice(-8),
+      resolvedUserId: (userId as string)?.slice(-8) ?? 'NULL',
+      source: identity?.subject ? 'identity' : authUserId ? 'authUserId' : 'none',
+    });
+
     if (!userId) {
+      console.log('[PHASE2 CONVO] No user resolved - returning null');
       return null;
     }
 
     // Get conversation
     const conversation = await ctx.db.get(conversationId);
     if (!conversation) {
+      console.log('[PHASE2 CONVO] Conversation not found in DB');
       return null;
     }
 
     // SECURITY: Verify user is participant (IDOR prevention)
-    if (!conversation.participants.includes(userId)) {
+    const isParticipant = conversation.participants.includes(userId);
+    console.log('[PHASE2 CONVO] Participant check:', {
+      isParticipant,
+      participants: conversation.participants.map((p) => (p as string)?.slice(-8)),
+      userId: (userId as string)?.slice(-8),
+    });
+    if (!isParticipant) {
+      console.log('[PHASE2 CONVO] User not authorized - not a participant');
       return null;
     }
 
@@ -538,9 +580,8 @@ export const getPrivateConversation = query({
     // Get photo URL - use Phase-2 private profile photos only (strict isolation)
     const photoUrl = otherPrivateProfile?.privatePhotoUrls?.[0] ?? null;
 
-    const displayName = otherPrivateProfile?.displayName
-      ? otherPrivateProfile.displayName.charAt(0).toUpperCase()
-      : otherUser?.name?.charAt(0).toUpperCase() || 'U';
+    // FIX: Use Phase-2 nickname (displayName) ONLY - do NOT fall back to full name
+    const displayName = otherPrivateProfile?.displayName || 'Anonymous';
 
     return {
       id: conversation._id,
@@ -568,16 +609,22 @@ export const getPrivateConversation = query({
  */
 export const getTotalUnreadCount = query({
   args: {
-    // P2-005 FIX: authUserId kept for backward compat but IGNORED - server auth is authoritative
+    // P0-FIX: authUserId used as fallback since ctx.auth is not configured in this app
     authUserId: v.optional(v.string()),
   },
-  handler: async (ctx, _args) => {
-    // P2-005 FIX: ALWAYS resolve from server-side auth - never trust client-supplied authUserId
+  handler: async (ctx, { authUserId }) => {
+    // P0-FIX: Try server-side auth first, fallback to client-supplied authUserId
+    let userId: Id<'users'> | null = null;
+
     const identity = await ctx.auth.getUserIdentity();
-    if (!identity?.subject) {
-      return 0;
+    if (identity?.subject) {
+      userId = await resolveUserIdByAuthId(ctx, identity.subject);
     }
-    const userId = await resolveUserIdByAuthId(ctx, identity.subject);
+
+    if (!userId && authUserId) {
+      userId = await resolveUserIdByAuthId(ctx, authUserId);
+    }
+
     if (!userId) {
       return 0;
     }
