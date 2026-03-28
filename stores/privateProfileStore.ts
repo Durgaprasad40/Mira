@@ -25,6 +25,7 @@ export const MAX_PHASE1_PHOTO_IMPORTS = 3;
 // Type for Phase-1 profile data imported during Phase-2 onboarding
 export interface Phase1ProfileData {
   name: string;
+  handle?: string; // Phase-1 nickname (used as Phase-2 displayName)
   photoSlots?: PhotoSlots9; // NEW: Slot-preserving photo array (9 slots)
   photos: { url: string }[]; // Legacy: list of photo URLs (for backward compat)
   bio?: string;
@@ -406,8 +407,10 @@ export const usePrivateProfileStore = create<PrivateProfileState>()((set) => ({
         console.log('[P2 IMPORT] skip heavy work: no photos');
       }
       // Minimal state update - no photo processing
+      // PHASE-2 IDENTITY FIX: Use Phase-1 handle (nickname) as displayName
+      // NEVER use Phase-1 real name (data.name) for displayName
       set({
-        displayName: data.name || '',
+        displayName: data.handle || '',
         gender: data.gender || '',
         phase1PhotoSlots: createEmptyPhotoSlots(),
       });
@@ -462,8 +465,9 @@ export const usePrivateProfileStore = create<PrivateProfileState>()((set) => ({
     set({
       // Store Phase-1 photo slots (9 slots, preserving positions)
       phase1PhotoSlots: photoSlots,
-      // Import profile info
-      displayName: data.name || '',
+      // PHASE-2 IDENTITY FIX: Use Phase-1 handle (nickname) as displayName
+      // NEVER use Phase-1 real name (data.name) for displayName
+      displayName: data.handle || '',
       age,
       city: data.city || '',
       gender: data.gender || '',

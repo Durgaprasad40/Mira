@@ -380,30 +380,28 @@ export default function PrivateProfileScreen() {
     }, [checkPhotosExist])
   );
 
-  // Get Phase-1 data as fallback
-  const phase1Data = useMemo(() => {
+  // PHASE-2 IDENTITY FIX: Get age fallback only (no name fallback to Phase-1)
+  const phase1Age = useMemo(() => {
     if (isDemoMode) {
       const demoUser = getDemoCurrentUser();
-      return {
-        name: demoUser?.name || 'User',
-        age: demoUser?.dateOfBirth ? calculateAgeFromDOB(demoUser.dateOfBirth) : 0,
-      };
+      return demoUser?.dateOfBirth ? calculateAgeFromDOB(demoUser.dateOfBirth) : 0;
     }
-    return { name: 'User', age: 0 };
+    return 0;
   }, []);
 
-  // Resolve display name and age
+  // PHASE-2 IDENTITY FIX: Display name is nickname only, fallback to "Anonymous"
+  // Never use Phase-1 real name in Phase-2
   const resolvedName = useMemo(() => {
     if (displayName && displayName.trim().length > 0) {
       return displayName;
     }
-    return phase1Data.name;
-  }, [displayName, phase1Data.name]);
+    return 'Anonymous';
+  }, [displayName]);
 
   const resolvedAge = useMemo(() => {
     if (age && age > 0) return age;
-    return phase1Data.age;
-  }, [age, phase1Data.age]);
+    return phase1Age;
+  }, [age, phase1Age]);
 
   // Filter and validate photos (defensive: ensure array, exclude missing/cache files)
   const validPhotos = useMemo(() => {

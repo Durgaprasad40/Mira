@@ -2444,14 +2444,23 @@ export const getMyBlockedUsers = query({
       .collect();
 
     // Fetch basic info for each blocked user
+    // PHASE-2 IDENTITY FIX: Use Phase-2 nickname, never real name
     const blockedUsers = await Promise.all(
       blocks.map(async (block) => {
         const user = await ctx.db.get(block.blockedUserId);
         if (!user) return null;
+
+        // Get Phase-2 nickname from private profile
+        const privateProfile = await ctx.db
+          .query('userPrivateProfiles')
+          .withIndex('by_user', (q) => q.eq('userId', block.blockedUserId))
+          .first();
+        const nickname = privateProfile?.displayName || 'Anonymous';
+
         return {
           blockId: block._id,
           blockedUserId: block.blockedUserId,
-          displayName: user.name || 'Unknown',
+          displayName: nickname,
           blockedAt: block.createdAt,
         };
       })

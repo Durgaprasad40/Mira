@@ -448,20 +448,23 @@ const TrendingCard = React.memo(function TrendingCard({
           <Text style={styles.typePillText}>{isTruth ? 'Truth' : 'Dare'}</Text>
         </LinearGradient>
 
-        <TouchableOpacity
-          style={styles.addButtonPremium}
-          onPress={(e) => { e.stopPropagation?.(); handleAddComment(); }}
-          activeOpacity={0.85}
-        >
-          <LinearGradient
-            colors={[PREMIUM.coral, PREMIUM.coralSoft]}
-            start={{ x: 0, y: 0 }}
-            end={{ x: 1, y: 1 }}
-            style={styles.addButtonGradient}
+        {/* Hide + button on own prompts - backend rejects own-prompt answers anyway */}
+        {!isOwner && (
+          <TouchableOpacity
+            style={styles.addButtonPremium}
+            onPress={(e) => { e.stopPropagation?.(); handleAddComment(); }}
+            activeOpacity={0.85}
           >
-            <Ionicons name="add" size={22} color="#FFF" />
-          </LinearGradient>
-        </TouchableOpacity>
+            <LinearGradient
+              colors={[PREMIUM.coral, PREMIUM.coralSoft]}
+              start={{ x: 0, y: 0 }}
+              end={{ x: 1, y: 1 }}
+              style={styles.addButtonGradient}
+            >
+              <Ionicons name="add" size={22} color="#FFF" />
+            </LinearGradient>
+          </TouchableOpacity>
+        )}
       </View>
     </AnimatedPressCard>
   );
@@ -562,7 +565,8 @@ const PromptCard = React.memo(function PromptCard({
         <Text style={styles.promptTextHero} numberOfLines={3}>{prompt.text}</Text>
 
         {/* Comment previews (up to 2) */}
-        {previewCount > 0 && (
+        {/* P1-006 FIX: Added optional chaining to prevent crash if top2Answers becomes undefined */}
+        {previewCount > 0 && prompt.top2Answers && (
           <View style={styles.previewSection}>
             {prompt.top2Answers.map((answer) => (
               <CommentPreviewRow key={answer._id} answer={answer} />
@@ -593,20 +597,23 @@ const PromptCard = React.memo(function PromptCard({
           <Text style={styles.typePillText}>{isTruth ? 'Truth' : 'Dare'}</Text>
         </LinearGradient>
 
-        <TouchableOpacity
-          style={styles.addButtonPremium}
-          onPress={(e) => { e.stopPropagation?.(); handleAddComment(); }}
-          activeOpacity={0.85}
-        >
-          <LinearGradient
-            colors={[PREMIUM.coral, PREMIUM.coralSoft]}
-            start={{ x: 0, y: 0 }}
-            end={{ x: 1, y: 1 }}
-            style={styles.addButtonGradient}
+        {/* Hide + button on own prompts - backend rejects own-prompt answers anyway */}
+        {!isOwner && (
+          <TouchableOpacity
+            style={styles.addButtonPremium}
+            onPress={(e) => { e.stopPropagation?.(); handleAddComment(); }}
+            activeOpacity={0.85}
           >
-            <Ionicons name="add" size={22} color="#FFF" />
-          </LinearGradient>
-        </TouchableOpacity>
+            <LinearGradient
+              colors={[PREMIUM.coral, PREMIUM.coralSoft]}
+              start={{ x: 0, y: 0 }}
+              end={{ x: 1, y: 1 }}
+              style={styles.addButtonGradient}
+            >
+              <Ionicons name="add" size={22} color="#FFF" />
+            </LinearGradient>
+          </TouchableOpacity>
+        )}
       </View>
     </AnimatedPressCard>
   );

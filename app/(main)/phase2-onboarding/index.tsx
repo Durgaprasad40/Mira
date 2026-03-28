@@ -370,6 +370,7 @@ export default function Phase2OnboardingTerms() {
         canonicalProfile = {
           userId: convexUser._id as string,
           name: convexUser.name,
+          handle: convexUser.handle, // Phase-1 nickname for Phase-2 displayName
           dateOfBirth: convexUser.dateOfBirth,
           gender: convexUser.gender,
           activities: convexUser.activities,
@@ -435,6 +436,7 @@ export default function Phase2OnboardingTerms() {
       // Build Phase-1 data object with SLOT-BASED photos
       const phase1Data: Phase1ProfileData = {
         name: canonicalProfile.name || phase1User?.name || '',
+        handle: canonicalProfile.handle || '', // Phase-1 nickname (live mode only)
         photoSlots: validatedSlots, // Pass full PhotoSlots9
         photos: validatedSlots.filter(Boolean).map((url) => ({ url: url! })), // Legacy compat
         dateOfBirth: canonicalProfile.dateOfBirth || phase1User?.dateOfBirth || '',
