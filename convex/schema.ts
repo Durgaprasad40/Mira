@@ -748,7 +748,8 @@ export default defineSchema({
       v.literal('subscription'),
       v.literal('weekly_refresh'),
       v.literal('profile_nudge'),
-      v.literal('comment_connect')
+      v.literal('comment_connect'),
+      v.literal('tod_connect') // Phase-2 only: T/D connect request accepted
     ),
     title: v.string(),
     body: v.string(),
@@ -1228,6 +1229,10 @@ export default defineSchema({
     // Reaction and report counts (denormalized for ranking)
     totalReactionCount: v.optional(v.number()), // total emoji reactions
     reportCount: v.optional(v.number()), // unique reporters
+    // P1-002: Per-user hiding - array of userIds who reported this answer
+    hiddenForUserIds: v.optional(v.array(v.string())),
+    // P1-002: Global soft-remove flag (set when reportCount >= threshold)
+    isGloballyHidden: v.optional(v.boolean()),
     // One-time view gating fields (for both owner_only and public visibility)
     viewMode: v.optional(v.union(v.literal('tap'), v.literal('hold'))),
     viewDurationSec: v.optional(v.number()), // 1-60 seconds for one-time view
@@ -1340,7 +1345,8 @@ export default defineSchema({
       v.literal('reaction'),
       v.literal('report'),
       v.literal('prompt'), // P0-003: Rate limit prompt creation
-      v.literal('claim_media') // Rate limit media view claims
+      v.literal('claim_media'), // Rate limit media view claims
+      v.literal('connect') // P0-004: Rate limit connect requests
     ),
     windowStart: v.number(), // Start of the rate limit window (day start)
     count: v.number(), // Actions in this window

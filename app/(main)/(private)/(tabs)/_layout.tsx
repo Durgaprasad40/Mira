@@ -8,6 +8,8 @@
  */
 import { Tabs } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
+import { useQuery } from 'convex/react';
+import { api } from '@/convex/_generated/api';
 import { INCOGNITO_COLORS } from '@/lib/constants';
 import { usePrivateChatStore } from '@/stores/privateChatStore';
 import { useDemoDmStore, computeUnreadDmCountsByRoom } from '@/stores/demoDmStore';
@@ -40,6 +42,13 @@ export default function PrivateTabsLayout() {
     ? computeUnreadDmCountsByRoom({ conversations: dmConversations, meta: dmMeta }, currentUserId).roomsWithUnread
     : 0;
 
+  // P0-FIX: Query pending T/D connect requests for badge
+  const pendingConnectRequests = useQuery(
+    api.truthDare.getPendingConnectRequests,
+    currentUserId ? { authUserId: currentUserId } : 'skip'
+  );
+  const todPendingCount = pendingConnectRequests?.length ?? 0;
+
   return (
     <Tabs
       screenOptions={{
@@ -68,6 +77,14 @@ export default function PrivateTabsLayout() {
           tabBarIcon: ({ color, size }) => (
             <Ionicons name="flame" size={size} color={color} />
           ),
+          // P0-FIX: Badge for pending connect requests
+          tabBarBadge: todPendingCount > 0 ? todPendingCount : undefined,
+          tabBarBadgeStyle: {
+            backgroundColor: '#E94560',
+            fontSize: 10,
+            minWidth: 18,
+            height: 18,
+          },
         }}
       />
       <Tabs.Screen

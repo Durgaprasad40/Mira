@@ -115,6 +115,13 @@ export function NotificationPopover({
       case 'subscription':
         router.push(`/(main)/subscription?${notifParams}${dedupeParam}` as any);
         break;
+      case 'tod_connect':
+      case 'comment_connect':
+        // Phase-2 T/D and Comment Connect: Navigate to the Phase-2 chat
+        if (notification.data?.conversationId) {
+          router.push(`/(main)/incognito-chat?id=${notification.data.conversationId}&${notifParams}${dedupeParam}` as any);
+        }
+        break;
       default:
         break;
     }
@@ -144,6 +151,10 @@ export function NotificationPopover({
         return 'information-circle';
       case 'subscription':
         return 'card';
+      case 'tod_connect':
+        return 'flame';
+      case 'comment_connect':
+        return 'chatbubble-ellipses';
       default:
         return 'notifications';
     }
@@ -170,6 +181,10 @@ export function NotificationPopover({
         return '#607D8B';
       case 'system':
         return '#2196F3';
+      case 'tod_connect':
+        return '#FF7849'; // T/D orange flame color
+      case 'comment_connect':
+        return '#7C6AEF'; // Phase-2 purple accent
       default:
         return COLORS.textLight;
     }

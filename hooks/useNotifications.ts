@@ -13,7 +13,7 @@ const PHASE1_ONLY_TYPES = new Set(['crossed_paths', 'nearby']);
 
 // Phase 2-only notification types — never shown in Phase 1 (main discover)
 // comment_connect: TOD confession reactions and connects
-const PHASE2_ONLY_TYPES = new Set(['comment_connect']);
+const PHASE2_ONLY_TYPES = new Set(['comment_connect', 'tod_connect']);
 
 // Types excluded from ALL in-app bells — messages have dedicated chat UI, not bell
 // Push notifications for messages still work; this only affects the bell popover
