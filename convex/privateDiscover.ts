@@ -449,15 +449,14 @@ export const getProfiles = query({
       const profile = p as typeof p & { hobbies?: string[]; isVerified?: boolean; privateIntentKey?: string };
       // Backward compat: older records may only have privateIntentKey (single)
       const intentKeys = p.privateIntentKeys ?? (profile.privateIntentKey ? [profile.privateIntentKey] : []);
-      // HANDLE_FIX: Use ONLY user.handle (user-controlled nickname)
-      // NEVER use user.name or displayName - strict privacy rule
-      const nickname = nicknameMap.get(p.userId as string) ?? 'Anonymous';
+      // P0-002 FIX: Standardize on single field 'displayName' for all Phase-2 profiles
+      // This is the user's handle (anonymous identifier), never their real name
+      const displayName = nicknameMap.get(p.userId as string) ?? 'Anonymous';
       return {
         _id: p._id,
         userId: p.userId,
-        // HANDLE_FIX: Return handle only, never real name
-        nickname,
-        displayNameInitial: p.displayName.charAt(0).toUpperCase(), // Keep for backward compat
+        // P0-002: Single canonical field for user's anonymous display name
+        displayName,
         age: p.age,
         city: p.city,
         gender: p.gender,
@@ -512,17 +511,15 @@ export const getProfileCard = query({
     // Backward compat: older records may only have privateIntentKey (single)
     const intentKeys = p.privateIntentKeys ?? (profile.privateIntentKey ? [profile.privateIntentKey] : []);
 
-    // HANDLE_FIX: Fetch user handle (nickname) from users table
-    // Phase-2 MUST use ONLY user.handle, NEVER user.name
+    // P0-002 FIX: Standardize on single field 'displayName' for all Phase-2 profiles
     const user = await ctx.db.get(p.userId);
-    const nickname = user?.handle ?? 'Anonymous';
+    const displayName = user?.handle ?? 'Anonymous';
 
     return {
       _id: p._id,
       userId: p.userId,
-      // HANDLE_FIX: Return handle only, never real name
-      nickname,
-      displayNameInitial: p.displayName.charAt(0).toUpperCase(), // Keep for backward compat
+      // P0-002: Single canonical field for user's anonymous display name
+      displayName,
       age: p.age,
       city: p.city,
       gender: p.gender,
@@ -599,10 +596,9 @@ export const getProfileByUserId = query({
     // Backward compat: older records may only have privateIntentKey (single), not privateIntentKeys (array)
     const intentKeys = p.privateIntentKeys ?? (profile.privateIntentKey ? [profile.privateIntentKey] : []);
 
-    // HANDLE_FIX: Fetch user handle (nickname) from users table
-    // Phase-2 MUST use ONLY user.handle, NEVER user.name
+    // P0-002 FIX: Standardize on single field 'displayName' for all Phase-2 profiles
     const user = await ctx.db.get(args.userId);
-    const nickname = user?.handle ?? 'Anonymous';
+    const displayName = user?.handle ?? 'Anonymous';
 
     // Cast to access optional promptAnswers field
     const profileWithPrompts = p as typeof p & { promptAnswers?: { promptId: string; question: string; answer: string }[] };
@@ -610,10 +606,8 @@ export const getProfileByUserId = query({
     return {
       _id: p._id,
       userId: p.userId,
-      // HANDLE_FIX: Use handle only, never real name
-      name: nickname,
-      nickname, // Also expose as nickname field
-      displayNameInitial: p.displayName.charAt(0).toUpperCase(), // Keep for backward compat
+      // P0-002: Single canonical field for user's anonymous display name
+      displayName,
       age: p.age,
       city: p.city,
       gender: p.gender,

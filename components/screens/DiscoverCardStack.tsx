@@ -764,8 +764,8 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
           _id: p._id,
           id: p.userId, // Phase-2 uses userId as the primary identifier for matching
           userId: p.userId,
-          // FIRST_NAME_FIX: Use first name only, never fall back to full name
-          name: p.nickname || 'Anonymous',
+          // P0-002 FIX: Use displayName only for Phase-2 profiles
+          name: p.displayName || 'Anonymous',
           age: p.age,
           city: p.city,
           bio: p.privateBio,

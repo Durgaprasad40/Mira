@@ -41,8 +41,8 @@ export function useDiscoverProfiles(): any[] {
   const result = useQuery(api.discover.getDiscoverProfiles, queryArgs);
 
   return useMemo(() => {
-    // Demo mode: filter from demoStore profiles
-    if (isDemoMode) {
+    // P0-004 FIX: Demo mode only available in __DEV__ builds
+    if (__DEV__ && isDemoMode) {
       return demo.profiles.filter((p) => !excludedSet.has(p._id));
     }
 

@@ -11,7 +11,7 @@ import {
 import { useRouter, useLocalSearchParams } from "expo-router";
 import { LinearGradient } from "expo-linear-gradient";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { COLORS } from "@/lib/constants";
+import { COLORS, INCOGNITO_COLORS } from "@/lib/constants";
 import { Button } from "@/components/ui";
 import { useQuery, useMutation } from "convex/react";
 import { api } from "@/convex/_generated/api";
@@ -43,6 +43,15 @@ export default function MatchCelebrationScreen() {
 
   // P1-001 FIX: Detect Phase-2 mode
   const isPhase2 = mode === 'phase2';
+
+  // P0-003 FIX: Log Phase-2 match celebration for debugging
+  if (__DEV__ && isPhase2) {
+    console.log('[P2_MATCH_CELEBRATION] Phase-2 match celebration opened', {
+      matchId: matchId?.slice?.(-8),
+      otherUserId: otherUserId?.slice?.(-8),
+      conversationId: conversationId?.slice?.(-8),
+    });
+  }
 
   const isDemo = isDemoMode || matchId?.startsWith("demo_") || matchId?.startsWith("match_") || userId?.startsWith("demo_");
   const viewerId = userId ? (userId as Id<"users">) : null;
@@ -91,10 +100,11 @@ export default function MatchCelebrationScreen() {
 
   const match = isDemo ? { _id: matchId } : (isPhase2 ? { _id: matchId } : matchQuery);
   // P1-001 FIX: Use Phase-2 profile query for Phase-2 matches
+  // P0-002 FIX: Phase-2 uses displayName only (no name/nickname)
   const otherUser = isDemo
     ? demoOtherUser
     : isPhase2
-      ? (phase2ProfileQuery ? { name: phase2ProfileQuery.name, photos: phase2ProfileQuery.photos } : null)
+      ? (phase2ProfileQuery ? { name: phase2ProfileQuery.displayName, photos: phase2ProfileQuery.photos } : null)
       : otherUserQuery;
   const demoCurrentUser = isDemo ? getDemoCurrentUser() : null;
   const currentUser = isDemo
@@ -435,9 +445,22 @@ export default function MatchCelebrationScreen() {
     );
   }
 
+  // P0-003 FIX: Explicit Phase-2 vs Phase-1 branching
+  // Phase-2 (Desire Land) uses incognito colors and different labels
+  const gradientColors: [string, string] = isPhase2
+    ? [INCOGNITO_COLORS.primary, INCOGNITO_COLORS.accent]
+    : [COLORS.primary, COLORS.secondary];
+
+  const titleText = isPhase2 ? '🔥 It\'s a Connection! 🔥' : '🎉 It\'s a Match! 🎉';
+  const subtitleText = isPhase2
+    ? `You and ${otherUser.name} connected in Desire Land!`
+    : `You and ${otherUser.name} liked each other!`;
+  const buttonText = isPhase2 ? 'Start Chatting' : 'Say Hi 👋';
+  const keepSwipingText = isPhase2 ? 'Keep Exploring' : 'Keep Discovering';
+
   return (
     <LinearGradient
-      colors={[COLORS.primary, COLORS.secondary]}
+      colors={gradientColors}
       style={[styles.container, { paddingTop: insets.top }]}
     >
       {/* Confetti Effect */}
@@ -452,7 +475,9 @@ export default function MatchCelebrationScreen() {
               {
                 left: piece.left,
                 top: piece.top,
-                backgroundColor: piece.backgroundColor,
+                backgroundColor: isPhase2
+                  ? [INCOGNITO_COLORS.text, INCOGNITO_COLORS.primary, INCOGNITO_COLORS.accent, '#FFD700', '#FF69B4'][Math.floor(Math.random() * 5)]
+                  : piece.backgroundColor,
               },
             ]}
           />
@@ -460,10 +485,8 @@ export default function MatchCelebrationScreen() {
       </Animated.View>
 
       <View style={styles.content}>
-        <Text style={styles.title}>🎉 It's a Match! 🎉</Text>
-        <Text style={styles.subtitle}>
-          You and {otherUser.name} liked each other!
-        </Text>
+        <Text style={styles.title}>{titleText}</Text>
+        <Text style={styles.subtitle}>{subtitleText}</Text>
 
         <View style={styles.photosContainer}>
           <Animated.View
@@ -502,22 +525,23 @@ export default function MatchCelebrationScreen() {
           </Animated.View>
         </View>
 
+        {/* P0-003 FIX: Use phase-specific button text */}
         <View style={styles.actions}>
           <Button
-            title={sending ? "Sending…" : "Say Hi 👋"}
+            title={sending ? "Sending…" : buttonText}
             variant="primary"
             onPress={handleSendMessage}
             loading={sending}
             disabled={sending}
             fullWidth
-            style={styles.messageButton}
-            textStyle={styles.messageButtonText}
+            style={isPhase2 ? styles.phase2MessageButton : styles.messageButton}
+            textStyle={isPhase2 ? styles.phase2MessageButtonText : styles.messageButtonText}
           />
           <TouchableOpacity
             style={styles.keepSwipingButton}
             onPress={handleKeepSwiping}
           >
-            <Text style={styles.keepSwipingText}>Keep Discovering</Text>
+            <Text style={styles.keepSwipingText}>{keepSwipingText}</Text>
           </TouchableOpacity>
         </View>
       </View>
@@ -608,6 +632,13 @@ const styles = StyleSheet.create({
   },
   messageButtonText: {
     color: COLORS.primary,
+  },
+  // P0-003 FIX: Phase-2 specific button styles
+  phase2MessageButton: {
+    backgroundColor: INCOGNITO_COLORS.text,
+  },
+  phase2MessageButtonText: {
+    color: INCOGNITO_COLORS.background,
   },
   keepSwipingButton: {
     padding: 16,

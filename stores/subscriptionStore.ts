@@ -106,35 +106,40 @@ export const useSubscriptionStore = create<SubscriptionState>()((set, get) => ({
   })),
 
   decrementLike: () => {
-    if (isDemoMode) return;
+    // P0-004 FIX: Demo bypass only in __DEV__ builds
+    if (__DEV__ && isDemoMode) return;
     set((state) => ({
       likesRemaining: state.likesRemaining > 0 ? state.likesRemaining - 1 : 0,
     }));
   },
 
   decrementSuperLike: () => {
-    if (isDemoMode) return;
+    // P0-004 FIX: Demo bypass only in __DEV__ builds
+    if (__DEV__ && isDemoMode) return;
     set((state) => ({
       superLikesRemaining: state.superLikesRemaining > 0 ? state.superLikesRemaining - 1 : 0,
     }));
   },
 
   decrementMessage: () => {
-    if (isDemoMode) return;
+    // P0-004 FIX: Demo bypass only in __DEV__ builds
+    if (__DEV__ && isDemoMode) return;
     set((state) => ({
       messagesRemaining: state.messagesRemaining > 0 ? state.messagesRemaining - 1 : 0,
     }));
   },
 
   decrementRewind: () => {
-    if (isDemoMode) return;
+    // P0-004 FIX: Demo bypass only in __DEV__ builds
+    if (__DEV__ && isDemoMode) return;
     set((state) => ({
       rewindsRemaining: state.rewindsRemaining > 0 ? state.rewindsRemaining - 1 : 0,
     }));
   },
 
   decrementBoost: () => {
-    if (isDemoMode) return;
+    // P0-004 FIX: Demo bypass only in __DEV__ builds
+    if (__DEV__ && isDemoMode) return;
     set((state) => ({
       boostsRemaining: state.boostsRemaining > 0 ? state.boostsRemaining - 1 : 0,
     }));
@@ -171,8 +176,8 @@ export const useSubscriptionStore = create<SubscriptionState>()((set, get) => ({
   getFeatureAccess: (gender) => {
     const { tier } = get();
 
-    // Demo mode — everything unlimited
-    if (isDemoMode) {
+    // P0-004 FIX: Demo bypass only in __DEV__ builds - production cannot access this
+    if (__DEV__ && isDemoMode) {
       return {
         swipesPerDay: 'unlimited',
         superLikesPerWeek: 'unlimited',

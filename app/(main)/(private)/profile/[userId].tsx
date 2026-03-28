@@ -8,7 +8,7 @@
  *
  * STRICT ISOLATION: This is a Phase-2-only route under /(main)/(private)/
  */
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import {
   View,
   Text,
@@ -27,6 +27,7 @@ import { useQuery, useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { useAuthStore } from '@/stores/authStore';
 import { useDiscoverStore } from '@/stores/discoverStore';
+import { useInteractionStore } from '@/stores/interactionStore';
 import { INCOGNITO_COLORS, COLORS } from '@/lib/constants';
 import {
   PRIVATE_INTENT_CATEGORIES,
@@ -54,6 +55,58 @@ export default function Phase2FullProfileScreen() {
   // Stand Out limits from discover store (shared with discovery card)
   const standOutsRemaining = useDiscoverStore((s) => s.standOutsRemaining);
   const hasReachedStandOutLimit = useDiscoverStore((s) => s.hasReachedStandOutLimit);
+  const incrementStandOuts = useDiscoverStore((s) => s.incrementStandOuts);
+
+  // P0-001 FIX: Watch for Stand Out result from stand-out screen
+  // When user sends a Stand Out message, this effect handles the API call
+  const standOutResult = useInteractionStore((s) => s.standOutResult);
+
+  // Phase-2 swipe mutation (must be declared before useEffect that uses it)
+  const swipeMutation = useMutation(api.privateSwipes.swipe);
+
+  useEffect(() => {
+    if (!standOutResult || !profileUserId || !token) return;
+    // Only handle if this is for our profile
+    if (standOutResult.profileId !== profileUserId) return;
+
+    // Clear the result immediately to prevent re-processing
+    useInteractionStore.getState().setStandOutResult(null);
+
+    const sendStandOut = async () => {
+      try {
+        if (__DEV__) {
+          console.log('[P2_FULL_PROFILE_STANDOUT] Sending stand out', {
+            profileId: profileUserId?.slice?.(-8),
+            hasMessage: !!standOutResult.message,
+          });
+        }
+
+        const result = await swipeMutation({
+          token,
+          toUserId: profileUserId as any,
+          action: 'super_like',
+          message: standOutResult.message || undefined,
+        });
+
+        // Increment stand out count
+        incrementStandOuts();
+
+        if (result?.isMatch) {
+          router.push(
+            `/(main)/match-celebration?matchId=${result.matchId}&userId=${profileUserId}&mode=phase2&conversationId=${result.conversationId || ''}` as any
+          );
+        } else {
+          Toast.show('Stand Out sent! They will see your message.');
+          router.back();
+        }
+      } catch (error: any) {
+        console.warn('[P2_FULL_PROFILE_STANDOUT] Error:', error?.message);
+        Toast.show("Couldn't send Stand Out. Please try again.");
+      }
+    };
+
+    sendStandOut();
+  }, [standOutResult, profileUserId, token, router, incrementStandOuts, swipeMutation]);
 
   // Phase-2 profile query
   const profile = useQuery(
@@ -62,9 +115,6 @@ export default function Phase2FullProfileScreen() {
       ? { userId: profileUserId as any, viewerId: currentUserId as any }
       : 'skip'
   );
-
-  // Phase-2 swipe mutation
-  const swipeMutation = useMutation(api.privateSwipes.swipe);
 
   // Loading state
   if (profile === undefined) {
@@ -157,10 +207,12 @@ export default function Phase2FullProfileScreen() {
     }
 
     // Navigate to Stand Out screen (same as discovery card flow)
-    const profileName = profile.nickname || profile.name || 'Someone';
+    // P0-001 FIX: Include mode=phase2 to ensure Phase-2 swipe mutation is used
+    // P0-002 FIX: Use displayName only (no name/nickname fallback)
+    const profileName = profile.displayName || 'Someone';
     const standOutsLeft = standOutsRemaining();
     router.push(
-      `/(main)/stand-out?profileId=${profileUserId}&name=${encodeURIComponent(profileName)}&standOutsLeft=${standOutsLeft}` as any
+      `/(main)/stand-out?profileId=${profileUserId}&name=${encodeURIComponent(profileName)}&standOutsLeft=${standOutsLeft}&mode=phase2` as any
     );
   };
 
@@ -260,8 +312,9 @@ export default function Phase2FullProfileScreen() {
             IDENTITY SECTION
         ═══════════════════════════════════════════════════════════════════ */}
         <View style={styles.identitySection}>
+          {/* P0-002 FIX: Use displayName only */}
           <View style={styles.nameRow}>
-            <Text style={styles.nameText}>{profile.nickname || profile.name}</Text>
+            <Text style={styles.nameText}>{profile.displayName}</Text>
             <Text style={styles.ageText}>, {profile.age}</Text>
             <Ionicons
               name={getGenderIcon(profile.gender) as any}

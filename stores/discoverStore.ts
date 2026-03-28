@@ -68,24 +68,29 @@ export const useDiscoverStore = create<DiscoverState>()((set, get) => ({
   randomMatchShownThisSession: false,
 
   likesRemaining: () => {
-    if (isDemoMode) return 999;
+    // P0-004 FIX: Demo mode bypass only in __DEV__ builds
+    // Production builds have this check completely removed at compile time
+    if (__DEV__ && isDemoMode) return 999;
     const state = get();
     return Math.max(0, DAILY_LIKE_LIMIT - state.likesUsedToday);
   },
 
   standOutsRemaining: () => {
-    if (isDemoMode) return 99;
+    // P0-004 FIX: Demo mode bypass only in __DEV__ builds
+    if (__DEV__ && isDemoMode) return 99;
     const state = get();
     return Math.max(0, DAILY_STANDOUT_LIMIT - state.standOutsUsedToday);
   },
 
   hasReachedLikeLimit: () => {
-    if (isDemoMode) return false;
+    // P0-004 FIX: Demo mode bypass only in __DEV__ builds
+    if (__DEV__ && isDemoMode) return false;
     return get().likesUsedToday >= DAILY_LIKE_LIMIT;
   },
 
   hasReachedStandOutLimit: () => {
-    if (isDemoMode) return false;
+    // P0-004 FIX: Demo mode bypass only in __DEV__ builds
+    if (__DEV__ && isDemoMode) return false;
     return get().standOutsUsedToday >= DAILY_STANDOUT_LIMIT;
   },
 

@@ -40,8 +40,8 @@ let prefetchUsed = false;
  * @param authVersion - Current auth version (for invalidation on logout)
  */
 export function startDiscoverPrefetch(userId: string, authVersion: number): void {
-  // Don't prefetch in demo mode
-  if (isDemoMode) return;
+  // P0-004 FIX: Demo bypass only in __DEV__ builds
+  if (__DEV__ && isDemoMode) return;
 
   // Clear any stale prefetch from different user/session
   if (prefetchState && (prefetchState.userId !== userId || prefetchState.authVersion !== authVersion)) {
