@@ -49,8 +49,12 @@ export default function Phase2LikesScreen() {
   const swipeMutation = useMutation(api.privateSwipes.swipe);
 
   // Handle like-back (triggers match creation)
+  // P1-005 FIX: Show proper error when auth is missing instead of silent return
   const handleLikeBack = async (like: any) => {
-    if (!token) return;
+    if (!token) {
+      Toast.show('Please sign in again to continue.');
+      return;
+    }
 
     try {
       const result = await swipeMutation({
@@ -83,8 +87,12 @@ export default function Phase2LikesScreen() {
   };
 
   // Handle ignore/pass
+  // P1-005 FIX: Show proper error when auth is missing instead of silent return
   const handleIgnore = async (like: any) => {
-    if (!token) return;
+    if (!token) {
+      Toast.show('Please sign in again to continue.');
+      return;
+    }
 
     try {
       await swipeMutation({

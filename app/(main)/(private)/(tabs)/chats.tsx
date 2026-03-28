@@ -20,7 +20,7 @@ import { useAuthStore } from '@/stores/authStore';
 import { textForPublicSurface } from '@/lib/contentFilter';
 import { ReportModal } from '@/components/private/ReportModal';
 import { getTimeAgo } from '@/lib/utils';
-import { DEMO_INCOGNITO_PROFILES } from '@/lib/demoData';
+// P1-004 FIX: Removed DEMO_INCOGNITO_PROFILES - now using backend participantIntentKey
 import { useScreenTrace } from '@/lib/devTrace';
 
 const C = INCOGNITO_COLORS;
@@ -52,11 +52,14 @@ const isPhase2Source = (source: string): boolean => {
   return ['tod', 'room', 'desire', 'desire_match', 'desire_super_like'].includes(source);
 };
 
-/** Look up Phase-2 intent label for a participant */
-const getIntentLabel = (participantId: string): string | null => {
-  const profile = DEMO_INCOGNITO_PROFILES.find((p) => p.id === participantId);
-  if (!profile?.privateIntentKey) return null;
-  const category = PRIVATE_INTENT_CATEGORIES.find((c) => c.key === profile.privateIntentKey);
+/**
+ * P1-004 FIX: Look up Phase-2 intent label for a participant.
+ * @param intentKey - The privateIntentKey from backend userPrivateProfiles
+ * @returns The human-readable label or null if not found
+ */
+const getIntentLabelFromKey = (intentKey: string | null | undefined): string | null => {
+  if (!intentKey) return null;
+  const category = PRIVATE_INTENT_CATEGORIES.find((c) => c.key === intentKey);
   return category?.label ?? null;
 };
 
@@ -176,6 +179,8 @@ export default function ChatsScreen() {
           participantName: bc.participantName,
           participantAge: bc.participantAge || 0,
           participantPhotoUrl: bc.participantPhotoUrl || '',
+          // P1-004 FIX: Include participantIntentKey from backend for intent label lookup
+          participantIntentKey: (bc as any).participantIntentKey ?? null,
           lastMessage: bc.lastMessage || 'Say hi!',
           lastMessageAt: bc.lastMessageAt,
           unreadCount: bc.unreadCount,
@@ -507,7 +512,8 @@ export default function ChatsScreen() {
           <View style={styles.emptyContainer}>
             <Ionicons name="lock-open-outline" size={64} color={C.textLight} />
             <Text style={styles.emptyTitle}>No conversations yet</Text>
-            <Text style={styles.emptySubtitle}>Accept a Truth or Dare or connect in a Room to start chatting</Text>
+            {/* P1-003 FIX: Updated copy to mention Desire Land */}
+            <Text style={styles.emptySubtitle}>Match in Desire Land, play Truth or Dare, or connect in a Room to start chatting</Text>
           </View>
         ) : (
           /* Message threads */
@@ -556,8 +562,9 @@ export default function ChatsScreen() {
                   <View style={styles.chatNameRow}>
                     <View style={styles.chatNameCol}>
                       <Text style={styles.chatName}>{convo.participantName}</Text>
+                      {/* P1-004 FIX: Use backend participantIntentKey instead of demo data */}
                       {(() => {
-                        const intentLabel = getIntentLabel(convo.participantId);
+                        const intentLabel = getIntentLabelFromKey(convo.participantIntentKey);
                         return intentLabel ? (
                           <Text style={styles.chatIntentLabel}>{intentLabel}</Text>
                         ) : null;

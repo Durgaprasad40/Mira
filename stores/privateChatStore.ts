@@ -273,11 +273,39 @@ export const usePrivateChatStore = create<PrivateChatState>()((set, get) => ({
       // Add new conversations from backend
       updatedConversations = [...toAdd, ...updatedConversations];
 
-      // Clean up messages for removed conversations
+      // P1-006 FIX: Smart message cleanup - preserve local-only messages
+      // Only delete regular messages for removed conversations, keep:
+      // - ToD/system messages (senderId === 'tod' or 'system')
+      // - Pending secure media (isProtected with local file URI)
       const remainingMessages = { ...s.messages };
       const removedParticipantIds: string[] = [];
+
       for (const removed of toRemove) {
-        delete remainingMessages[removed.id];
+        const conversationMessages = remainingMessages[removed.id];
+        if (conversationMessages && conversationMessages.length > 0) {
+          // Filter to keep local-only messages
+          const localOnlyMessages = conversationMessages.filter((m) => {
+            // Keep ToD/system messages
+            if (m.senderId === 'tod' || m.senderId === 'system') return true;
+            // Keep pending secure media (has local file URI, not yet uploaded)
+            if (m.isProtected && m.protectedMedia?.localUri?.startsWith('file://')) return true;
+            // Delete everything else
+            return false;
+          });
+
+          if (localOnlyMessages.length > 0) {
+            // Keep conversation messages with only local-only content
+            remainingMessages[removed.id] = localOnlyMessages;
+            if (__DEV__) {
+              console.log(
+                `[P1-006 Reconcile] Preserved ${localOnlyMessages.length} local-only messages for removed conversation ${removed.id.slice(-8)}`
+              );
+            }
+          } else {
+            // No local-only messages, safe to delete
+            delete remainingMessages[removed.id];
+          }
+        }
         removedParticipantIds.push(removed.participantId);
       }
 

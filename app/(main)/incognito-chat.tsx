@@ -43,8 +43,7 @@ import { CameraPhotoSheet, type CameraPhotoOptions } from '@/components/chat/Cam
 import { ReportModal } from '@/components/private/ReportModal';
 import { Phase2ProtectedMediaViewer } from '@/components/private/Phase2ProtectedMediaViewer';
 import { calculateProtectedMediaCountdown } from '@/utils/protectedMediaCountdown';
-import { DEMO_INCOGNITO_PROFILES } from '@/lib/demoData';
-import { useDemoStore } from '@/stores/demoStore';
+// P1-004 FIX: Removed DEMO_INCOGNITO_PROFILES and useDemoStore - now using backend participantIntentKey
 import { trackEvent } from '@/lib/analytics';
 import { useVoiceRecorder, type VoiceRecorderResult } from '@/hooks/useVoiceRecorder';
 import { VoiceMessageBubble } from '@/components/chat/VoiceMessageBubble';
@@ -52,6 +51,7 @@ import type { IncognitoMessage } from '@/types';
 
 // ═══════════════════════════════════════════════════════════════════════════
 // P0-002b: Message type for backend messages (mapped for UI compatibility)
+// P1-001: Added protected media fields
 // ═══════════════════════════════════════════════════════════════════════════
 interface BackendMessage {
   id: string;
@@ -59,6 +59,15 @@ interface BackendMessage {
   senderId: string;
   type: string;
   content: string;
+  // P1-001: Protected media fields from backend
+  isProtected?: boolean;
+  imageUrl?: string | null;
+  protectedMediaTimer?: number;
+  protectedMediaViewingMode?: 'tap' | 'hold';
+  protectedMediaIsMirrored?: boolean;
+  viewedAt?: number;
+  timerEndsAt?: number;
+  isExpired?: boolean;
   createdAt: number;
   readAt?: number;
   deliveredAt?: number;
@@ -67,30 +76,18 @@ interface BackendMessage {
   audioDurationMs?: number;
 }
 
-/** Look up Phase-2 intent label for a participant (checks both demoStore and DEMO_INCOGNITO_PROFILES) */
-const getIntentLabel = (participantId: string): string | null => {
-  // First check demoStore profiles (for DesireLand matches with demo_profile_* IDs)
-  const demoProfile = useDemoStore.getState().profiles.find((p) => p._id === participantId);
-  if (demoProfile?.privateIntentKey) {
-    const category = PRIVATE_INTENT_CATEGORIES.find((c) => c.key === demoProfile.privateIntentKey);
-    return category?.label ?? null;
-  }
-  // Fallback to DEMO_INCOGNITO_PROFILES (for inc_* IDs from ToD/Room matches)
-  const incognitoProfile = DEMO_INCOGNITO_PROFILES.find((p) => p.id === participantId);
-  if (!incognitoProfile?.privateIntentKey) return null;
-  const category = PRIVATE_INTENT_CATEGORIES.find((c) => c.key === incognitoProfile.privateIntentKey);
+/**
+ * P1-004 FIX: Look up Phase-2 intent label from backend data.
+ * @param intentKey - The privateIntentKey from backend userPrivateProfiles
+ * @returns The human-readable label or null if not found
+ */
+const getIntentLabelFromKey = (intentKey: string | null | undefined): string | null => {
+  if (!intentKey) return null;
+  const category = PRIVATE_INTENT_CATEGORIES.find((c) => c.key === intentKey);
   return category?.label ?? null;
 };
 
-/** Look up privateIntentKey for analytics (checks both demoStore and DEMO_INCOGNITO_PROFILES) */
-const getPrivateIntentKey = (participantId: string): string | undefined => {
-  // First check demoStore profiles (for DesireLand matches with demo_profile_* IDs)
-  const demoProfile = useDemoStore.getState().profiles.find((p) => p._id === participantId);
-  if (demoProfile?.privateIntentKey) return demoProfile.privateIntentKey;
-  // Fallback to DEMO_INCOGNITO_PROFILES (for inc_* IDs from ToD/Room matches)
-  const incognitoProfile = DEMO_INCOGNITO_PROFILES.find((p) => p.id === participantId);
-  return incognitoProfile?.privateIntentKey;
-};
+// P1-004 FIX: getPrivateIntentKey removed - now using backend participantIntentKey directly
 
 // ═══════════════════════════════════════════════════════════════════════════
 // MESSAGE-TICKS-FIX: Helper functions for message status ticks
@@ -172,6 +169,8 @@ export default function PrivateChatScreen() {
         participantName: backendConversation.participantName || 'Someone',
         participantAge: 0,
         participantPhotoUrl: backendConversation.participantPhotoUrl || '',
+        // P1-004 FIX: Include participantIntentKey from backend for intent label lookup
+        participantIntentKey: (backendConversation as any).participantIntentKey ?? null,
         lastMessage: '',
         lastMessageAt: backendConversation.createdAt || Date.now(),
         unreadCount: backendConversation.unreadCount || 0,
@@ -193,26 +192,68 @@ export default function PrivateChatScreen() {
 
   // Map backend messages to UI-compatible IncognitoMessage format
   // MESSAGE-TICKS-FIX: Include deliveredAt and readAt for visual ticks
+  // P1-006 FIX: Get local messages from store (ToD results, pending secure media)
+  const localMessages = usePrivateChatStore((s) => (id ? s.messages[id] ?? [] : []));
+
   // P0-003: Include audioUrl for voice messages
+  // P1-001: Include protected media fields
+  // P1-006: Merge backend messages with local-only messages (ToD, pending secure media)
   const messages: IncognitoMessage[] = useMemo(() => {
-    if (!backendMessages) return [];
-    return backendMessages.map((m: BackendMessage) => ({
-      id: m.id,
-      conversationId: m.conversationId,
-      // P0-002b: Map senderId to 'me' for own messages (UI expects 'me' for isOwn check)
-      senderId: m.senderId === currentUserId ? 'me' : m.senderId,
-      content: m.content,
-      type: m.type as any,
-      createdAt: m.createdAt,
-      isRead: !!m.readAt,
-      // MESSAGE-TICKS-FIX: Pass through delivery and read timestamps
-      deliveredAt: m.deliveredAt,
-      readAt: m.readAt,
-      // P0-003: Voice message fields - map audioUrl to audioUri for VoiceMessageBubble compatibility
-      audioUri: m.audioUrl ?? undefined,
-      durationMs: m.audioDurationMs,
-    }));
-  }, [backendMessages, currentUserId]);
+    // Map backend messages
+    const backendMapped: IncognitoMessage[] = backendMessages
+      ? backendMessages.map((m: BackendMessage) => ({
+          id: m.id,
+          conversationId: m.conversationId,
+          // P0-002b: Map senderId to 'me' for own messages (UI expects 'me' for isOwn check)
+          senderId: m.senderId === currentUserId ? 'me' : m.senderId,
+          content: m.content,
+          type: m.type as any,
+          createdAt: m.createdAt,
+          isRead: !!m.readAt,
+          // MESSAGE-TICKS-FIX: Pass through delivery and read timestamps
+          deliveredAt: m.deliveredAt,
+          readAt: m.readAt,
+          // P0-003: Voice message fields - map audioUrl to audioUri for VoiceMessageBubble compatibility
+          audioUri: m.audioUrl ?? undefined,
+          durationMs: m.audioDurationMs,
+          // P1-001: Protected media fields from backend
+          isProtected: m.isProtected,
+          protectedMedia: m.isProtected
+            ? {
+                localUri: m.imageUrl ?? '', // Backend URL instead of local URI
+                mediaType: m.type === 'video' ? 'video' : 'photo',
+                timer: m.protectedMediaTimer ?? 0,
+                viewingMode: m.protectedMediaViewingMode ?? 'tap',
+                screenshotAllowed: false,
+                viewOnce: m.protectedMediaTimer === 0,
+                watermark: false,
+                isMirrored: m.protectedMediaIsMirrored,
+              }
+            : undefined,
+          viewedAt: m.viewedAt,
+          timerEndsAt: m.timerEndsAt,
+          isExpired: m.isExpired,
+        }))
+      : [];
+
+    // P1-006: Filter local messages that should be shown
+    // Include: system/ToD messages, pending uploads (not yet in backend)
+    const backendIds = new Set(backendMapped.map((m) => m.id));
+    const localOnlyMessages = localMessages.filter((m) => {
+      // Don't duplicate backend messages
+      if (backendIds.has(m.id)) return false;
+      // Include ToD/system messages
+      if (m.senderId === 'tod' || m.senderId === 'system') return true;
+      // Include pending secure media (has localUri but not yet uploaded)
+      if (m.isProtected && m.protectedMedia?.localUri?.startsWith('file://')) return true;
+      return false;
+    });
+
+    // Merge and sort by createdAt
+    const merged = [...backendMapped, ...localOnlyMessages];
+    merged.sort((a, b) => a.createdAt - b.createdAt);
+    return merged;
+  }, [backendMessages, localMessages, currentUserId]);
 
   // ═══════════════════════════════════════════════════════════════════════════
   // P0-002b: Backend mutations
@@ -222,6 +263,8 @@ export default function PrivateChatScreen() {
   const markDeliveredMutation = useMutation(api.privateConversations.markPrivateMessagesDelivered);
   const deleteMessageMutation = useMutation(api.privateConversations.deletePrivateMessage);
   const generateUploadUrl = useMutation(api.photos.generateUploadUrl); // P0-003: For voice upload
+  // P1-001: Secure media upload mutation
+  const generateSecureMediaUploadUrl = useMutation(api.privateConversations.generateSecureMediaUploadUrl);
 
   // MESSAGE-TICKS-FIX: Mark messages as read AND delivered when screen opens
   // Following Phase-1 pattern: delivery happens when conversation opens
@@ -486,11 +529,11 @@ export default function PrivateChatScreen() {
   // Phase-2 analytics: Track when chat opens
   useEffect(() => {
     if (!conversation || !id) return;
-    // Look up participant's privateIntentKey for analytics (checks demoStore + DEMO_INCOGNITO_PROFILES)
+    // P1-004 FIX: Use backend participantIntentKey directly instead of demo data lookup
     trackEvent({
       name: 'phase2_match_started',
       conversationId: id,
-      privateIntentKey: getPrivateIntentKey(conversation.participantId),
+      privateIntentKey: (conversation as any).participantIntentKey ?? undefined,
     });
   }, [id, conversation?.id]);
 
@@ -581,9 +624,9 @@ export default function PrivateChatScreen() {
     toggleRecording();
   }, [toggleRecording]);
 
-  // Handle secure photo/video confirmation from CameraPhotoSheet
-  // NOTE: Secure media still uses local store (backend media upload is separate feature)
-  const handleCameraPhotoConfirm = useCallback((imageUri: string, options: CameraPhotoOptions) => {
+  // P1-001 FIX: Handle secure photo/video confirmation from CameraPhotoSheet
+  // Flow: 1) Show optimistic local message 2) Upload to storage 3) Send via backend
+  const handleCameraPhotoConfirm = useCallback(async (imageUri: string, options: CameraPhotoOptions) => {
     setShowCameraSheet(false);
     setPickedImageUri(null);
     const isVideo = pendingMediaType === 'video';
@@ -591,18 +634,19 @@ export default function PrivateChatScreen() {
     setPendingMediaType('photo'); // Reset for next time
     setPendingIsMirrored(false); // Reset for next time
 
-    if (!id) return;
+    if (!id || !token) return;
 
-    // Create secure photo/video message for Phase-2 chat
-    // NOTE: Protected media temporarily stored locally (backend media upload is separate feature)
-    const newMsg: IncognitoMessage = {
-      id: `im_${isVideo ? 'video' : 'photo'}_${Date.now()}`,
+    const optimisticId = `im_${isVideo ? 'video' : 'photo'}_${Date.now()}`;
+    const messageType = isVideo ? 'video' : 'image';
+
+    // Step 1: Create optimistic local message immediately (shows "uploading" state)
+    const optimisticMsg: IncognitoMessage = {
+      id: optimisticId,
       conversationId: id,
       senderId: 'me',
-      content: isVideo ? '🎬 Secure Video' : '📷 Secure Photo',
+      content: isVideo ? '🎬 Sending secure video...' : '📷 Sending secure photo...',
       createdAt: Date.now(),
       isRead: false,
-      // Add protected media metadata
       isProtected: true,
       protectedMedia: {
         localUri: imageUri,
@@ -612,16 +656,67 @@ export default function PrivateChatScreen() {
         screenshotAllowed: false,
         viewOnce: options.timer === 0,
         watermark: false,
-        isMirrored, // For render-time flip correction
+        isMirrored,
       },
     };
 
-    localAddMessage(id, newMsg);
+    localAddMessage(id, optimisticMsg);
 
     if (__DEV__) {
-      console.log('[Phase2Chat] Sent secure media:', { type: pendingMediaType, timer: options.timer, viewingMode: options.viewingMode, isMirrored });
+      console.log('[P1-001] Starting secure media upload:', { type: messageType, timer: options.timer });
     }
-  }, [id, localAddMessage, pendingMediaType, pendingIsMirrored]);
+
+    try {
+      // Step 2: Get upload URL from backend
+      const uploadUrl = await generateSecureMediaUploadUrl({ token });
+
+      // Step 3: Upload media file to storage
+      const response = await fetch(imageUri);
+      const blob = await response.blob();
+
+      const uploadResponse = await fetch(uploadUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': blob.type || (isVideo ? 'video/mp4' : 'image/jpeg') },
+        body: blob,
+      });
+
+      if (!uploadResponse.ok) {
+        throw new Error('Failed to upload media');
+      }
+
+      const { storageId } = await uploadResponse.json();
+
+      if (__DEV__) {
+        console.log('[P1-001] Media uploaded, storageId:', storageId?.slice?.(-8));
+      }
+
+      // Step 4: Send message via backend with storageId
+      await sendMessageMutation({
+        token,
+        conversationId: id as Id<'privateConversations'>,
+        type: messageType as 'image' | 'video',
+        content: isVideo ? '🎬 Secure Video' : '📷 Secure Photo',
+        imageStorageId: storageId,
+        isProtected: true,
+        protectedMediaTimer: options.timer,
+        protectedMediaViewingMode: options.viewingMode,
+        protectedMediaIsMirrored: isMirrored,
+        clientMessageId: optimisticId, // For idempotency
+      });
+
+      // Step 5: Remove optimistic message (backend subscription will add the real one)
+      deleteMessage(id, optimisticId);
+
+      if (__DEV__) {
+        console.log('[P1-001] Secure media sent successfully');
+      }
+    } catch (error: any) {
+      console.warn('[P1-001] Failed to send secure media:', error?.message);
+      // Update optimistic message to show error
+      deleteMessage(id, optimisticId);
+      Alert.alert('Error', 'Failed to send secure media. Please try again.');
+    }
+  }, [id, token, localAddMessage, deleteMessage, generateSecureMediaUploadUrl, sendMessageMutation, pendingMediaType, pendingIsMirrored]);
 
   // Loading state while fetching conversation from backend
   const isLoadingConversation = !localConversation && backendConversation === undefined;
@@ -895,8 +990,9 @@ export default function PrivateChatScreen() {
           />
           <View style={styles.headerInfo}>
             <Text style={styles.headerName}>{conversation.participantName}</Text>
+            {/* P1-004 FIX: Use backend participantIntentKey instead of demo data */}
             {(() => {
-              const intentLabel = getIntentLabel(conversation.participantId);
+              const intentLabel = getIntentLabelFromKey((conversation as any).participantIntentKey);
               return intentLabel ? (
                 <Text style={styles.headerIntent}>{intentLabel}</Text>
               ) : null;

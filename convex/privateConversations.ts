@@ -14,6 +14,9 @@ import { Id } from './_generated/dataModel';
 import { validateSessionToken, resolveUserIdByAuthId } from './helpers';
 import { softMaskText } from './softMask';
 
+// P1-001: Generate upload URL for secure media (photos/videos)
+// Used by incognito-chat.tsx to upload protected media to Convex storage
+
 // Message types that count toward unread badges (excludes system messages)
 const COUNTABLE_MESSAGE_TYPES = ['text', 'image', 'video', 'voice'];
 
@@ -178,6 +181,9 @@ export const getUserPrivateConversations = query({
           participantName: displayName,
           participantAge: otherAge,
           participantPhotoUrl: photoUrl,
+          // P1-004 FIX: Include first privateIntentKey for intent label lookup
+          // Backend stores array (multi-select), we take the first/primary one for display
+          participantIntentKey: otherPrivateProfile?.privateIntentKeys?.[0] ?? null,
           lastMessage: lastMessage?.content || null,
           lastMessageAt: lastMessage?.createdAt || conversation.lastMessageAt || conversation.createdAt,
           lastMessageSenderId: lastMessage?.senderId || null,
@@ -266,38 +272,53 @@ export const getPrivateMessages = query({
     );
     const audioUrlMap = new Map(audioStorageIds.map((id, i) => [id as string, audioUrls[i]]));
 
-    // Return in chronological order with audio URLs resolved
-    return messages.reverse().map((m) => {
-      // Voice messages: include audio URL instead of storage ID
-      if (m.type === 'voice' && m.audioStorageId) {
-        return {
-          id: m._id,
-          conversationId: m.conversationId,
-          senderId: m.senderId,
-          type: m.type,
-          content: m.content,
-          imageStorageId: m.imageStorageId,
-          audioUrl: audioUrlMap.get(m.audioStorageId as string) ?? null,
-          audioDurationMs: m.audioDurationMs,
-          deliveredAt: m.deliveredAt,
-          readAt: m.readAt,
-          createdAt: m.createdAt,
-        };
-      }
+    // P1-001: Batch-fetch image URLs for protected media (same pattern as audio)
+    const imageStorageIds = messages.filter((m) => m.imageStorageId).map((m) => m.imageStorageId!);
+    const imageUrls = await Promise.all(
+      imageStorageIds.map((id) => ctx.storage.getUrl(id))
+    );
+    const imageUrlMap = new Map(imageStorageIds.map((id, i) => [id as string, imageUrls[i]]));
 
-      // Non-voice messages: return as-is
-      return {
+    // Return in chronological order with media URLs resolved
+    return messages.reverse().map((m) => {
+      // Base message fields
+      const baseMessage = {
         id: m._id,
         conversationId: m.conversationId,
         senderId: m.senderId,
         type: m.type,
         content: m.content,
-        imageStorageId: m.imageStorageId,
-        audioDurationMs: m.audioDurationMs,
         deliveredAt: m.deliveredAt,
         readAt: m.readAt,
         createdAt: m.createdAt,
       };
+
+      // Voice messages: include audio URL
+      if (m.type === 'voice' && m.audioStorageId) {
+        return {
+          ...baseMessage,
+          audioUrl: audioUrlMap.get(m.audioStorageId as string) ?? null,
+          audioDurationMs: m.audioDurationMs,
+        };
+      }
+
+      // P1-001: Protected media messages: include image URL and metadata
+      if (m.isProtected && m.imageStorageId) {
+        return {
+          ...baseMessage,
+          isProtected: true,
+          imageUrl: imageUrlMap.get(m.imageStorageId as string) ?? null,
+          protectedMediaTimer: m.protectedMediaTimer,
+          protectedMediaViewingMode: m.protectedMediaViewingMode,
+          protectedMediaIsMirrored: m.protectedMediaIsMirrored,
+          viewedAt: m.viewedAt,
+          timerEndsAt: m.timerEndsAt,
+          isExpired: m.isExpired,
+        };
+      }
+
+      // Regular messages
+      return baseMessage;
     });
   },
 });
@@ -388,10 +409,19 @@ export const sendPrivateMessage = mutation({
     imageStorageId: v.optional(v.id('_storage')),
     audioStorageId: v.optional(v.id('_storage')),
     audioDurationMs: v.optional(v.number()),
+    // P1-001: Protected media fields for secure photos/videos
+    isProtected: v.optional(v.boolean()),
+    protectedMediaTimer: v.optional(v.number()),
+    protectedMediaViewingMode: v.optional(v.union(v.literal('tap'), v.literal('hold'))),
+    protectedMediaIsMirrored: v.optional(v.boolean()),
     clientMessageId: v.optional(v.string()), // Idempotency key
   },
   handler: async (ctx, args) => {
-    const { token, conversationId, type, content, imageStorageId, audioStorageId, audioDurationMs, clientMessageId } = args;
+    const {
+      token, conversationId, type, content, imageStorageId, audioStorageId, audioDurationMs,
+      isProtected, protectedMediaTimer, protectedMediaViewingMode, protectedMediaIsMirrored,
+      clientMessageId
+    } = args;
     const now = Date.now();
 
     // Validate session and get current user
@@ -461,6 +491,7 @@ export const sendPrivateMessage = mutation({
     const maskedContent = type === 'text' ? softMaskText(content) : content;
 
     // Insert message into privateMessages table
+    // P1-001: Include protected media fields for secure photos/videos
     const messageId = await ctx.db.insert('privateMessages', {
       conversationId,
       senderId,
@@ -469,6 +500,10 @@ export const sendPrivateMessage = mutation({
       imageStorageId,
       audioStorageId,
       audioDurationMs,
+      isProtected,
+      protectedMediaTimer,
+      protectedMediaViewingMode,
+      protectedMediaIsMirrored,
       createdAt: now,
       clientMessageId,
     });
@@ -589,6 +624,9 @@ export const getPrivateConversation = query({
       participantId: otherParticipantId,
       participantName: displayName,
       participantPhotoUrl: photoUrl,
+      // P1-004 FIX: Include first privateIntentKey for intent label lookup
+      // Backend stores array (multi-select), we take the first/primary one for display
+      participantIntentKey: otherPrivateProfile?.privateIntentKeys?.[0] ?? null,
       unreadCount: participantRecord?.unreadCount || 0,
       connectionSource: conversation.connectionSource || 'desire_match',
       createdAt: conversation.createdAt,
@@ -819,5 +857,32 @@ export const deletePrivateMessage = mutation({
     await ctx.db.delete(messageId);
 
     return { success: true };
+  },
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// P1-001: Generate Upload URL for Phase-2 Secure Media
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Generate a presigned upload URL for Phase-2 secure media.
+ * Used by incognito-chat.tsx to upload protected photos/videos to Convex storage.
+ *
+ * Security: Requires valid session token
+ */
+export const generateSecureMediaUploadUrl = mutation({
+  args: {
+    token: v.string(),
+  },
+  handler: async (ctx, { token }) => {
+    // Validate session
+    const userId = await validateSessionToken(ctx, token);
+    if (!userId) {
+      throw new Error('Unauthorized: invalid session');
+    }
+
+    // Generate upload URL
+    const uploadUrl = await ctx.storage.generateUploadUrl();
+    return uploadUrl;
   },
 });

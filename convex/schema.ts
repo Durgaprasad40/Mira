@@ -2005,6 +2005,14 @@ export default defineSchema({
     imageStorageId: v.optional(v.id('_storage')),
     audioStorageId: v.optional(v.id('_storage')),
     audioDurationMs: v.optional(v.number()),
+    // P1-001: Protected media metadata for secure photos/videos
+    isProtected: v.optional(v.boolean()),
+    protectedMediaTimer: v.optional(v.number()), // Timer in seconds (0 = view once)
+    protectedMediaViewingMode: v.optional(v.union(v.literal('tap'), v.literal('hold'))),
+    protectedMediaIsMirrored: v.optional(v.boolean()), // Front camera flip flag
+    viewedAt: v.optional(v.number()), // When recipient first viewed
+    timerEndsAt: v.optional(v.number()), // When timer expires
+    isExpired: v.optional(v.boolean()), // Whether media has expired
     deliveredAt: v.optional(v.number()),
     readAt: v.optional(v.number()),
     createdAt: v.number(),

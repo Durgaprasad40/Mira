@@ -588,6 +588,8 @@ export interface IncognitoConversation {
   participantName: string;
   participantAge: number;
   participantPhotoUrl: string;
+  /** P1-004 FIX: Intent key from backend userPrivateProfiles for intent label lookup */
+  participantIntentKey?: string | null;
   lastMessage: string;
   lastMessageAt: number;
   unreadCount: number;
