@@ -485,6 +485,8 @@ export default function PrivateLayout() {
   return (
     <Stack screenOptions={{ headerShown: false }}>
       <Stack.Screen name="(tabs)" />
+      <Stack.Screen name="profile/[userId]" />
+      <Stack.Screen name="phase2-likes" />
       <Stack.Screen name="edit-desire" options={{ presentation: 'modal' }} />
       <Stack.Screen name="edit-profile-details" options={{ presentation: 'modal' }} />
     </Stack>

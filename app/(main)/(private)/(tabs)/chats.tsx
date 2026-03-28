@@ -78,6 +78,30 @@ export default function ChatsScreen() {
   const token = useAuthStore((s) => s.token);
 
   // ═══════════════════════════════════════════════════════════════════════════
+  // P2_LIKES: Incoming likes (people who liked current user, pending match)
+  // ═══════════════════════════════════════════════════════════════════════════
+  const incomingLikes = useQuery(
+    api.privateSwipes.getIncomingLikes,
+    currentUserId ? { userId: currentUserId as any } : 'skip'
+  );
+  const incomingLikesCount = useQuery(
+    api.privateSwipes.getIncomingLikesCount,
+    currentUserId ? { userId: currentUserId as any } : 'skip'
+  );
+
+  // Log incoming likes count
+  useEffect(() => {
+    if (__DEV__ && incomingLikes !== undefined) {
+      console.log('[P2_FRONTEND_LIKES]', {
+        count: incomingLikes.length,
+        likes: incomingLikes.map(l => ({ from: l.fromUserId?.slice(-8), action: l.action }))
+      });
+    }
+  }, [incomingLikes]);
+
+  // Note: Likes modal removed - now uses dedicated page at /(main)/(private)/phase2-likes
+
+  // ═══════════════════════════════════════════════════════════════════════════
   // DELIVERED-TICK-FIX: Mark ALL messages as delivered when messages list loads
   // Following Phase-1 pattern: delivery state set when device receives messages
   // ═══════════════════════════════════════════════════════════════════════════
@@ -448,7 +472,20 @@ export default function ChatsScreen() {
       <View style={styles.header}>
         <Ionicons name="mail" size={24} color={C.primary} />
         <Text style={styles.headerTitle}>Messages</Text>
-        <View style={{ width: 32 }} />
+        {/* Likes button with badge - navigates to Phase-2 likes page */}
+        <TouchableOpacity
+          style={styles.likesButton}
+          onPress={() => router.push('/(main)/(private)/phase2-likes' as any)}
+        >
+          <Ionicons name="heart" size={24} color={C.primary} />
+          {(incomingLikesCount ?? 0) > 0 && (
+            <View style={styles.likesBadge}>
+              <Text style={styles.likesBadgeText}>
+                {incomingLikesCount! > 9 ? '9+' : incomingLikesCount}
+              </Text>
+            </View>
+          )}
+        </TouchableOpacity>
       </View>
 
       <ScrollView style={{ flex: 1 }} contentContainerStyle={styles.listContent}>
@@ -640,6 +677,8 @@ export default function ChatsScreen() {
           </View>
         </Modal>
       )}
+
+      {/* Note: Incoming Likes Modal removed - now uses dedicated page */}
     </View>
   );
 }
@@ -1015,4 +1054,29 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
   },
+
+  // ── Likes Button & Badge ──
+  likesButton: {
+    position: 'relative',
+    padding: 4,
+  },
+  likesBadge: {
+    position: 'absolute',
+    top: -2,
+    right: -4,
+    minWidth: 18,
+    height: 18,
+    borderRadius: 9,
+    backgroundColor: '#E94560',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 4,
+  },
+  likesBadgeText: {
+    fontSize: 10,
+    fontWeight: '700',
+    color: '#FFF',
+  },
+
+  // Note: Likes modal styles removed - now uses dedicated page at /(main)/(private)/phase2-likes
 });
