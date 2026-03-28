@@ -12,6 +12,7 @@ import {
   Easing,
   Animated as RNAnimated, // Keep for star burst animation only
 } from "react-native";
+import { Image } from "expo-image";
 import Animated, {
   useSharedValue,
   useAnimatedStyle,
@@ -297,10 +298,12 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   const isPhase2 = mode === "phase2";
   const C = dark ? INCOGNITO_COLORS : COLORS;
 
-
   const insets = useSafeAreaInsets();
   const userId = useAuthStore((s) => s.userId);
   const token = useAuthStore((s) => s.token);
+  // AUTH_READY_FIX: Wait for auth to be fully validated before running queries
+  const authReady = useAuthStore((s) => s.authReady);
+  const onboardingCompleted = useAuthStore((s) => s.onboardingCompleted);
   const [index, setIndex] = useState(0);
   const [retryKey, setRetryKey] = useState(0); // For LoadingGuard retry
   const [showNotificationPopover, setShowNotificationPopover] = useState(false);
@@ -313,6 +316,12 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   // Super-like star-burst animation state
   const [showSuperLikeAnimation, setShowSuperLikeAnimation] = useState(false);
   const clearSuperLikeAnimation = useCallback(() => setShowSuperLikeAnimation(false), []);
+
+  // P2_MATCH: Match celebration state for Phase-2
+  const [phase2MatchCelebration, setPhase2MatchCelebration] = useState<{
+    visible: boolean;
+    matchedProfile: { name: string; photoUrl?: string; conversationId?: string } | null;
+  }>({ visible: false, matchedProfile: null });
 
   // Phase-2 only: Intent filters from store (syncs with Discovery Preferences)
   const { privateIntentKeys: intentFilters, togglePrivateIntentKey, setPrivateIntentKeys } = useFilterStore();
@@ -441,6 +450,32 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   const convexUserId = asUserId(userId);
   const skipInternalQuery = !!externalProfiles;
 
+  // FIRST_MOUNT_FIX: Track userId availability and force query re-subscription
+  // On first mount, userId might not be available yet (auth store not hydrated)
+  // When it becomes available, we need to force the query to re-subscribe
+  const userIdTrackingRef = useRef<{ prev: string | null | undefined; firstMount: boolean }>({
+    prev: undefined,
+    firstMount: true,
+  });
+  const [queryTrigger, setQueryTrigger] = useState(0);
+
+  useEffect(() => {
+    const { prev, firstMount } = userIdTrackingRef.current;
+
+    // CASE 1: First mount with valid userId - trigger immediately
+    if (firstMount && userId && convexUserId) {
+      setQueryTrigger(1);
+      userIdTrackingRef.current.firstMount = false;
+    }
+    // CASE 2: userId became available after mount (was undefined/null, now has value)
+    else if (!prev && userId && convexUserId) {
+      setQueryTrigger(t => t + 1);
+    }
+
+    userIdTrackingRef.current.prev = userId;
+    userIdTrackingRef.current.firstMount = false;
+  }, [userId, convexUserId, isPhase2]);
+
   // PHASE-2 ISOLATION FIX: Use separate queries for Phase-1 and Phase-2
   // Phase-1 uses discover.getDiscoverProfiles (users table)
   // Phase-2 uses privateDiscover.getProfiles (userPrivateProfiles table with isSetupComplete check)
@@ -463,23 +498,29 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   const prefetchResultRef = useRef<any[] | null>(null);
 
   // Check for prefetch on first render only (Phase-1, non-demo, no external profiles)
+  // CRITICAL: NEVER use prefetch for Phase-2 - it's Phase-1 only
   if (!prefetchCheckedRef.current) {
     prefetchCheckedRef.current = true;
     if (!isPhase2 && userId && !isDemoMode && !skipInternalQuery) {
       const authVersion = useAuthStore.getState().authVersion;
       const prefetched = getDiscoverPrefetch(userId, authVersion);
-      if (prefetched !== null) {
+      // EMPTY_PREFETCH_FIX: Only use prefetch if it has actual profiles
+      // Empty prefetch should NOT be used - let the live query handle it
+      if (prefetched !== null && prefetched.length > 0) {
         prefetchResultRef.current = prefetched;
         markPrefetchUsed();
-        if (__DEV__) {
-          console.log('[PREFETCH] Using prefetched profiles:', prefetched.length);
-        }
+      } else if (prefetched !== null && prefetched.length === 0) {
+        // Empty prefetch - clear it immediately to prevent interference
+        clearUsedPrefetch();
       }
     }
   }
 
   // Use prefetch while useQuery is loading (undefined), then switch to query result
-  const phase1ProfilesWithPrefetch = phase1Profiles ?? prefetchResultRef.current;
+  // EMPTY_PREFETCH_FIX: Only use prefetch if it has actual profiles
+  // If prefetch is empty, treat as if no prefetch exists - let live query handle it
+  const hasValidPrefetch = Array.isArray(prefetchResultRef.current) && prefetchResultRef.current.length > 0;
+  const phase1ProfilesWithPrefetch = phase1Profiles ?? (hasValidPrefetch ? prefetchResultRef.current : null);
 
   // Clear prefetch cache once useQuery returns real data (subscription is active)
   useEffect(() => {
@@ -487,31 +528,125 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       // Query has returned - clear prefetch to free memory
       clearUsedPrefetch();
       prefetchResultRef.current = null;
-      if (__DEV__) {
-        console.log('[PREFETCH] Subscription active, cleared prefetch cache');
-      }
     }
   }, [phase1Profiles]);
 
   // Phase-2 private discover query args (skip if Phase-1 mode)
   // CRITICAL: This queries userPrivateProfiles table which requires isSetupComplete=true
+  // AUTH_FIX: Pass authUserId for fallback resolution when server auth fails
+  // FIRST_MOUNT_FIX: queryTrigger forces re-subscription when userId becomes available
+  // AUTH_READY_FIX: Wait for authReady before querying to ensure onboardingCompleted is correct
+  // FLICKER_FIX: Use stable ref so once auth is ready, it stays ready (no query skip toggle)
+  const stableAuthReadyRef = useRef(false);
+  const rawAuthReady = authReady && onboardingCompleted;
+
+  // Once auth becomes ready, lock it (prevents transient flicker back to not-ready)
+  if (rawAuthReady && !stableAuthReadyRef.current) {
+    stableAuthReadyRef.current = true;
+  }
+  // Reset stable flag if user explicitly logs out (userId becomes null)
+  if (!userId && stableAuthReadyRef.current) {
+    stableAuthReadyRef.current = false;
+  }
+
+  const isAuthReadyForQuery = stableAuthReadyRef.current;
+
+  // FLICKER_FIX: Debug log for auth state stability
+  if (__DEV__ && isPhase2) {
+    console.log('[DISCOVER_READY]', {
+      authReady,
+      onboardingCompleted,
+      rawAuthReady,
+      stableReady: stableAuthReadyRef.current,
+      isAuthReadyForQuery,
+      userId: userId?.slice(0, 10) ?? 'null',
+    });
+  }
+
   const privateDiscoverArgs = useMemo(
     () =>
-      !isDemoMode && convexUserId && !skipInternalQuery && isPhase2
-        ? { userId: convexUserId, limit: 50 }
+      !isDemoMode && convexUserId && !skipInternalQuery && isPhase2 && isAuthReadyForQuery
+        ? { userId: convexUserId, authUserId: userId ?? undefined, limit: 50 }
         : "skip" as const,
     // eslint-disable-next-line react-hooks/exhaustive-deps
-    [convexUserId, skipInternalQuery, retryKey, isPhase2],
+    [convexUserId, userId, skipInternalQuery, retryKey, isPhase2, queryTrigger, isAuthReadyForQuery],
   );
+
   const phase2Profiles = useQuery(api.privateDiscover.getProfiles, privateDiscoverArgs);
 
   // Use the correct profiles based on mode
   // PERF: For Phase-1, use prefetch-aware variable that provides data during initial query loading
   const convexProfiles = isPhase2 ? phase2Profiles : phase1ProfilesWithPrefetch;
+
+  // FIRST_LOAD_FIX: Track if Phase-2 query has ever returned profiles
+  // This prevents showing empty state when Convex returns cached empty result on first mount
+  // The query subscription will update with real data shortly after
+  const phase2HasEverHadProfilesRef = useRef(false);
+  const phase2FirstQueryTimeRef = useRef<number | null>(null);
+
+  // Track when we first start the query
+  if (isPhase2 && privateDiscoverArgs !== "skip" && phase2FirstQueryTimeRef.current === null) {
+    phase2FirstQueryTimeRef.current = Date.now();
+  }
+
+  // Mark that we've seen profiles
+  if (isPhase2 && phase2Profiles !== undefined && phase2Profiles.length > 0) {
+    phase2HasEverHadProfilesRef.current = true;
+  }
+
+  // Reset the flags when user changes (new session)
+  const phase2ProfilesUserRef = useRef<string | null>(null);
+  if (userId !== phase2ProfilesUserRef.current) {
+    phase2ProfilesUserRef.current = userId;
+    phase2HasEverHadProfilesRef.current = false;
+    phase2FirstQueryTimeRef.current = null;
+  }
+
+  // FIRST_LOAD_FIX: Grace period for treating empty as loading (max 5 seconds)
+  // After grace period, if still empty, show empty state (user genuinely has no profiles to see)
+  const FIRST_LOAD_GRACE_PERIOD_MS = 5000;
+  const [, forceUpdate] = useState(0);
+  const isWithinGracePeriod = phase2FirstQueryTimeRef.current !== null &&
+    (Date.now() - phase2FirstQueryTimeRef.current) < FIRST_LOAD_GRACE_PERIOD_MS;
+
+  // Force re-render when grace period expires to transition from loading to empty state
+  useEffect(() => {
+    if (!isPhase2 || isDemoMode) return;
+    if (phase2HasEverHadProfilesRef.current) return; // Already have profiles
+    if (phase2Profiles === undefined) return; // Still truly loading
+    if (phase2Profiles?.length > 0) return; // Have profiles now
+
+    // We have empty result and haven't seen profiles - set timeout to force re-render after grace period
+    const remaining = phase2FirstQueryTimeRef.current
+      ? FIRST_LOAD_GRACE_PERIOD_MS - (Date.now() - phase2FirstQueryTimeRef.current)
+      : FIRST_LOAD_GRACE_PERIOD_MS;
+
+    if (remaining <= 0) return; // Already past grace period
+
+    const timer = setTimeout(() => {
+      forceUpdate(n => n + 1);
+    }, remaining + 100); // Small buffer
+
+    return () => clearTimeout(timer);
+  }, [isPhase2, phase2Profiles, isDemoMode]);
+
   // P1-003 FIX: Track explicit loading state to distinguish undefined (loading) from [] (empty results)
   // useQuery returns: undefined = still loading, [] = loaded but empty
-  const isPhase2QueryLoading = isPhase2 && !isDemoMode && phase2Profiles === undefined && privateDiscoverArgs !== "skip";
-  const profilesSafe = convexProfiles ?? EMPTY_ARRAY;
+  // FIRST_LOAD_FIX: Also treat empty result as "loading" if we've never seen profiles before (within grace period)
+  // This handles the case where Convex returns cached empty array on first mount
+  // EMPTY_PREFETCH_FIX: Simpler logic - if query active but no profiles ever seen, keep loading
+  const isPhase2QueryLoading = isPhase2 && !isDemoMode && privateDiscoverArgs !== "skip" && (
+    phase2Profiles === undefined ||
+    (phase2Profiles?.length === 0 && !phase2HasEverHadProfilesRef.current && isWithinGracePeriod)
+  );
+
+  // EMPTY_PREFETCH_FIX: For Phase-2, ensure convexProfiles is only used if it has data
+  // If Phase-2 query returns empty but we haven't seen profiles, treat as undefined (loading)
+  const effectiveConvexProfiles = isPhase2 && phase2Profiles?.length === 0 && !phase2HasEverHadProfilesRef.current && isWithinGracePeriod
+    ? undefined  // Treat as loading
+    : convexProfiles;
+
+  const profilesSafe = effectiveConvexProfiles ?? EMPTY_ARRAY;
 
   // CRITICAL: useMemo prevents new array/object references on every render.
   // Without this, DEMO_PROFILES.map() creates new objects each render,
@@ -610,23 +745,42 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
 
     // PHASE-2 ISOLATION FIX: Map Phase-2 profiles to ProfileData format
     // Phase-2 profiles from privateDiscover.getProfiles have different field names
+    // SOFT_MATCH_FIX: Allow profiles without photos - use placeholder
     if (isPhase2) {
-      return profilesSafe.map((p: any) => toProfileData({
-        _id: p._id,
-        id: p.userId, // Phase-2 uses userId as the primary identifier for matching
-        userId: p.userId,
-        name: p.displayNameInitial ?? 'U', // Phase-2 only shows initial
-        age: p.age,
-        city: p.city,
-        bio: p.privateBio,
-        photos: (p.blurredPhotoUrls ?? []).map((url: string) => ({ url })),
-        activities: p.hobbies ?? [],
-        isVerified: p.isVerified ?? false,
-        privateIntentKeys: p.intentKeys ?? [],
-        privateIntentKey: p.intentKeys?.[0],
-        lastActive: Date.now() - 2 * 60 * 60 * 1000,
-        createdAt: Date.now() - 60 * 24 * 60 * 60 * 1000,
-      }));
+      // SOFT_MATCH_FIX: Debug logging for profile counts
+      const withPhotos = profilesSafe.filter((p: any) => p.blurredPhotoUrls?.length > 0).length;
+      const withoutPhotos = profilesSafe.filter((p: any) => !p.blurredPhotoUrls?.length).length;
+      const incomplete = profilesSafe.filter((p: any) => !p.isSetupComplete).length;
+      if (__DEV__) {
+        console.log('[PHASE2_DISCOVER_FE] Profile stats:', { total: profilesSafe.length, withPhotos, withoutPhotos, incomplete });
+      }
+
+      return profilesSafe.map((p: any) => {
+        // SOFT_MATCH_FIX: If no photos, pass empty array - ProfileCard shows placeholder
+        const photoUrls = p.blurredPhotoUrls ?? [];
+        const photos = photoUrls.map((url: string) => ({ url }));
+
+        return toProfileData({
+          _id: p._id,
+          id: p.userId, // Phase-2 uses userId as the primary identifier for matching
+          userId: p.userId,
+          // FIRST_NAME_FIX: Use first name only, never fall back to full name
+          name: p.nickname || 'Anonymous',
+          age: p.age,
+          city: p.city,
+          bio: p.privateBio,
+          photos,
+          activities: p.hobbies ?? [],
+          isVerified: p.isVerified ?? false,
+          privateIntentKeys: p.intentKeys ?? [],
+          privateIntentKey: p.intentKeys?.[0],
+          lastActive: Date.now() - 2 * 60 * 60 * 1000,
+          createdAt: Date.now() - 60 * 24 * 60 * 60 * 1000,
+          // SOFT_MATCH_FIX: Pass through completeness flags
+          isSetupComplete: p.isSetupComplete ?? false,
+          hasPhotos: p.hasPhotos ?? (photoUrls.length > 0),
+        });
+      });
     }
 
     // Phase-1: use standard mapping
@@ -634,9 +788,23 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   }, [externalProfiles, profilesSafe, demo.profiles, excludedSet, isPhase2, genderFilter, minAge, maxAge, maxDistance]);
 
   // Drop profiles with no valid primary photo — prevents blank Discover cards
+  // SOFT_MATCH_FIX: For Phase-2, allow profiles without photos (ProfileCard shows placeholder)
   const validProfiles = useMemo(
-    () => latestProfiles.filter((p) => (p.photos?.length ?? 0) > 0 && !!p.photos?.[0]?.url),
-    [latestProfiles],
+    () => {
+      if (isPhase2) {
+        // Phase-2: Allow ALL profiles - ProfileCard will show placeholder for no photos
+        // This implements the 90/10 soft matching rule
+        if (__DEV__) {
+          const withPhotos = latestProfiles.filter((p) => p.photos?.length > 0).length;
+          const withoutPhotos = latestProfiles.length - withPhotos;
+          console.log('[PHASE2_DISCOVER_FE] Soft match: all', latestProfiles.length, 'profiles kept (', withPhotos, 'with photos,', withoutPhotos, 'without)');
+        }
+        return latestProfiles;
+      }
+      // Phase-1: Strict photo requirement
+      return latestProfiles.filter((p) => (p.photos?.length ?? 0) > 0 && !!p.photos?.[0]?.url);
+    },
+    [latestProfiles, isPhase2],
   );
 
   // Keep last non-empty profiles to prevent blank-frame flicker
@@ -645,11 +813,22 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   const stableUserIdRef = useRef<string | null>(null);
   if (userId !== stableUserIdRef.current) {
     // User changed — clear stale cache to prevent showing old user's excluded profiles
-    stableProfilesRef.current = [];
+    // FLICKER_FIX: Only clear if there WAS a previous user (not first mount)
+    if (stableUserIdRef.current !== null) {
+      stableProfilesRef.current = [];
+      if (__DEV__ && isPhase2) {
+        console.log('[DISCOVER_RESET] reason=user_changed, prev=', stableUserIdRef.current?.slice(0, 10), 'new=', userId?.slice(0, 10));
+      }
+    }
     stableUserIdRef.current = userId;
   }
   if (validProfiles.length > 0) {
     stableProfilesRef.current = validProfiles;
+  }
+  // FLICKER_FIX: Log when falling back to stable cache
+  const usingStableCache = validProfiles.length === 0 && stableProfilesRef.current.length > 0;
+  if (__DEV__ && isPhase2 && usingStableCache) {
+    console.log('[DISCOVER_GUARD] Using stable cache:', stableProfilesRef.current.length, 'profiles (validProfiles was empty)');
   }
   const profilesRaw = validProfiles.length > 0 ? validProfiles : stableProfilesRef.current;
 
@@ -709,6 +888,14 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   const visibleQueueRef = useRef<string[]>([]); // Profile IDs in queue
   const consumedIdsRef = useRef<Set<string>>(new Set()); // Profiles already swiped
 
+  // P2_CARD_FIX: State trigger to force re-render when queue transitions from empty to populated
+  // Refs don't trigger re-renders, so we need this state to ensure the card appears on first load
+  const [queueVersion, setQueueVersion] = useState(0);
+
+  // P2_REFETCH_FIX: Track retry attempts to prevent infinite loops
+  const refetchRetryCountRef = useRef(0);
+  const MAX_REFETCH_RETRIES = 2;
+
   // Source profiles for queue refill (use filtered for Phase-2, regular for Phase-1)
   const baseProfiles = isPhase2 ? filteredProfiles : profiles;
 
@@ -720,13 +907,23 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   );
 
   // Build a map from profile ID to profile data for O(1) lookup
+  // FLICKER_FIX: Don't clear map when sourceProfiles is transiently empty
+  // This prevents the card from disappearing when query/state briefly resets
   const profileMapRef = useRef<Map<string, ProfileData>>(new Map());
   useMemo(() => {
+    // FLICKER_FIX: Only update map if we have profiles - don't clear on empty
+    if (sourceProfiles.length === 0) {
+      if (__DEV__ && isPhase2 && profileMapRef.current.size > 0) {
+        console.log('[DISCOVER_GUARD] Ignored empty sourceProfiles overwrite, keeping', profileMapRef.current.size, 'profiles in map');
+      }
+      return; // Keep existing map data
+    }
+    // Have new profiles - update the map
     profileMapRef.current.clear();
     for (const p of sourceProfiles) {
       profileMapRef.current.set(p.id, p);
     }
-  }, [sourceProfiles]);
+  }, [sourceProfiles, isPhase2]);
 
   /**
    * Refill the visible queue from source profiles.
@@ -754,9 +951,22 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
     }
 
     if (toAdd.length > 0) {
+      const wasEmpty = queue.length === 0;
       visibleQueueRef.current = [...queue, ...toAdd];
+
+      // P2_CARD_FIX: Force re-render when queue transitions from empty to populated
+      // This ensures the first card renders on first open
+      if (wasEmpty) {
+        if (__DEV__ && isPhase2) {
+          console.log('[P2_CARD_INIT] Queue populated, forcing re-render', {
+            addedCount: toAdd.length,
+            firstProfileId: toAdd[0]?.slice(0, 10),
+          });
+        }
+        setQueueVersion(v => v + 1);
+      }
     }
-  }, [sourceProfiles, userId]);
+  }, [sourceProfiles, userId, isPhase2]);
 
   /**
    * Advance the queue after swipe completion.
@@ -775,15 +985,75 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
 
     // Refill queue with next available profiles
     refillQueue();
-  }, [refillQueue]);
+
+    // P2_REFETCH_FIX: Log queue state after swipe
+    const newQueueLength = visibleQueueRef.current.length;
+    if (__DEV__ && isPhase2) {
+      console.log('[P2_QUEUE_STATE]', {
+        queueLength: newQueueLength,
+        profileMapSize: profileMapRef.current.size,
+        consumedCount: consumedIdsRef.current.size,
+        sourceProfilesLen: sourceProfiles.length,
+      });
+    }
+
+    // P2_REFETCH_FIX: If queue is empty after refill, trigger retry mechanism
+    if (newQueueLength === 0 && isPhase2) {
+      if (refetchRetryCountRef.current < MAX_REFETCH_RETRIES) {
+        refetchRetryCountRef.current++;
+        if (__DEV__) {
+          console.log('[P2_REFETCH_TRIGGERED] Queue empty, retry', refetchRetryCountRef.current, 'of', MAX_REFETCH_RETRIES);
+        }
+        // Force a queueVersion bump after a short delay to trigger re-render
+        // This gives the Convex subscription time to update with new profiles
+        setTimeout(() => {
+          // Re-run refillQueue with potentially updated sourceProfiles
+          refillQueue();
+          // If still empty, bump version to force UI update
+          if (visibleQueueRef.current.length === 0) {
+            setQueueVersion(v => v + 1);
+          }
+        }, 500);
+      } else if (__DEV__) {
+        console.log('[P2_REFETCH_EXHAUSTED] Max retries reached, no more profiles available');
+      }
+    }
+  }, [refillQueue, isPhase2, sourceProfiles]);
 
   // Refill queue when source data changes AND no swipe is in progress
   // This ensures the queue is populated but doesn't change mid-swipe
   useEffect(() => {
     // Don't refill during active swipe
     if (swipeLockRef.current) return;
+
+    // P2_REFETCH_FIX: Cleanup consumed IDs that are no longer in sourceProfiles
+    // This handles the case where backend has removed swiped profiles from results
+    if (sourceProfiles.length > 0) {
+      const sourceIdSet = new Set(sourceProfiles.map(p => p.id));
+      const consumed = consumedIdsRef.current;
+      const toRemove: string[] = [];
+      for (const id of consumed) {
+        if (!sourceIdSet.has(id)) {
+          toRemove.push(id);
+        }
+      }
+      if (toRemove.length > 0) {
+        for (const id of toRemove) {
+          consumed.delete(id);
+        }
+        if (__DEV__ && isPhase2) {
+          console.log('[P2_REFETCH_CLEANUP] Removed stale consumed IDs:', toRemove.length);
+        }
+      }
+    }
+
     refillQueue();
-  }, [sourceProfiles, refillQueue]);
+
+    // P2_REFETCH_FIX: If queue is now populated, reset retry count
+    if (visibleQueueRef.current.length > 0) {
+      refetchRetryCountRef.current = 0;
+    }
+  }, [sourceProfiles, refillQueue, isPhase2]);
 
   // Reset queue when user changes (prevents showing stale profiles)
   const prevUserIdRef = useRef<string | null>(null);
@@ -797,10 +1067,23 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   }, [userId]);
 
   // Get current/next from the STABLE QUEUE (not from live array indices)
+  // P2_CARD_FIX: queueVersion dependency ensures this re-computes after queue populates
   const currentQueueId = visibleQueueRef.current[0];
   const nextQueueId = visibleQueueRef.current[1];
   const queueCurrent = currentQueueId ? profileMapRef.current.get(currentQueueId) : undefined;
   const queueNext = nextQueueId ? profileMapRef.current.get(nextQueueId) : undefined;
+
+  // P2_CARD_FIX: Debug log for card visibility tracing
+  if (__DEV__ && isPhase2) {
+    console.log('[P2_CARD_VISIBLE]', {
+      queueVersion,
+      queueLength: visibleQueueRef.current.length,
+      currentQueueId: currentQueueId?.slice(0, 10) ?? 'none',
+      hasCurrent: !!queueCurrent,
+      profileMapSize: profileMapRef.current.size,
+      sourceProfilesLen: sourceProfiles.length,
+    });
+  }
 
   // ── Demo auto-replenish: re-inject profiles when pool is exhausted ──
   // Guard ref prevents the effect from firing twice before the store update
@@ -1014,17 +1297,18 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   currentRef.current = current;
 
   // Stable callback for opening profile — uses ref so it never changes identity
-  // Both Phase-1 and Phase-2 use the same route for viewing OTHER users' profiles
-  // (private-profile is only for your OWN Phase-2 tab, not for viewing others)
-  // Pass mode param so profile view can show Phase-2 specific content
+  // Phase-1 and Phase-2 now use SEPARATE routes for profile viewing
   const openProfileCb = useCallback(() => {
     const c = currentRef.current;
     if (!c) return;
     if (isPhase2) {
-      // Phase-2: pass mode (intentKeys are read from profile in the detail view)
-      router.push(`/(main)/profile/${c.id}?mode=phase2` as any);
+      // Phase-2: Use dedicated Phase-2 profile route (no Phase-1 leakage)
+      // OLD WRONG: /(main)/profile/${c.id}?mode=phase2
+      // NEW CORRECT: /(main)/(private)/profile/[userId]
+      const profileUserId = c.userId || c.id; // Prefer userId, fallback to id
+      router.push(`/(main)/(private)/profile/${profileUserId}` as any);
     } else {
-      // Phase-1: no params needed
+      // Phase-1: Use Phase-1 profile route
       router.push(`/(main)/profile/${c.id}` as any);
     }
   }, [isPhase2]);
@@ -1214,10 +1498,15 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
         // PHASE-2 ISOLATION: Use separate mutation path for Phase-2 (Desire Land)
         // Phase-2 writes to privateLikes/privateMatches/privateConversations
         // Phase-1 writes to likes/matches/conversations (shared tables)
+        // P2-SWIPE-FIX: Phase-2 profiles have userId (from users table) separate from id (profile doc _id)
+        const phase2UserId = swipedProfile.userId || swipedProfile.id;
+        if (__DEV__ && isPhase2) {
+          console.log('[P2_SWIPE] toUserId:', phase2UserId, 'profile.id:', swipedProfile.id, 'profile.userId:', swipedProfile.userId);
+        }
         const swipePromise = isPhase2
           ? phase2SwipeMutation({
               token: token!,
-              toUserId: swipedProfile.id as Id<'users'>,
+              toUserId: phase2UserId as Id<'users'>,
               action,
               message: message,
             })
@@ -1229,6 +1518,16 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
             });
 
         const result = await Promise.race([swipePromise, timeoutPromise]);
+
+        // P2_FRONTEND: Log match result
+        if (__DEV__ && isPhase2) {
+          console.log('[P2_FRONTEND_MATCH]', {
+            isMatch: result?.isMatch ?? false,
+            matchId: result?.matchId,
+            conversationId: result?.conversationId,
+            swipedUserId: swipedProfile.id?.slice(-8),
+          });
+        }
 
         // Guard: check mounted/focused before navigating on match
         if (!mountedRef.current || !isFocusedRef.current) return;
@@ -1243,6 +1542,15 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
             });
             if (isNewMatch) {
               trackEvent({ name: 'match_created', otherUserId: swipedProfile.id });
+              // P2_MATCH: Show match celebration
+              setPhase2MatchCelebration({
+                visible: true,
+                matchedProfile: {
+                  name: swipedProfile.name,
+                  photoUrl: swipedProfile.photos?.[0]?.url,
+                  conversationId: result.conversationId,
+                },
+              });
             }
             releaseSwipeLock(activeSwipeId);
             return;
@@ -1510,7 +1818,13 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
 
   // Loading state — non-demo only; skip when using external profiles
   // P1-003 FIX: Include explicit Phase-2 query loading check to prevent false empty state
-  const isDiscoverLoading = !isDemoMode && !externalProfiles && (!convexProfiles || isPhase2QueryLoading);
+  // FIRST_LOAD_FIX: Also show loading when auth is not ready (userId undefined in Phase-2)
+  // This prevents empty state flash on first load when auth hasn't hydrated yet
+  // EMPTY_PREFETCH_FIX: Use effectiveConvexProfiles for Phase-2 to treat empty as loading
+  // AUTH_READY_FIX: Show loading until authReady && onboardingCompleted for Phase-2
+  const isAuthPending = isPhase2 && !isDemoMode && (!userId || !isAuthReadyForQuery);
+  const isDiscoverLoading = !isDemoMode && !externalProfiles && (!effectiveConvexProfiles || isPhase2QueryLoading || isAuthPending);
+
   if (isDiscoverLoading) {
     return (
       <LoadingGuard
@@ -1924,6 +2238,68 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
           </View>
         </View>
       </Modal>
+
+      {/* P2_MATCH: Phase-2 Match Celebration Modal */}
+      {phase2MatchCelebration.visible && phase2MatchCelebration.matchedProfile && (
+        <Modal
+          visible
+          transparent
+          animationType="fade"
+          onRequestClose={() => setPhase2MatchCelebration({ visible: false, matchedProfile: null })}
+        >
+          <View style={styles.p2MatchOverlay}>
+            <View style={styles.p2MatchSheet}>
+              {/* Matched profile photo */}
+              <View style={styles.p2MatchAvatarContainer}>
+                {phase2MatchCelebration.matchedProfile.photoUrl ? (
+                  <Image
+                    source={{ uri: phase2MatchCelebration.matchedProfile.photoUrl }}
+                    style={styles.p2MatchAvatar}
+                    blurRadius={8}
+                  />
+                ) : (
+                  <View style={[styles.p2MatchAvatar, styles.p2MatchAvatarPlaceholder]}>
+                    <Ionicons name="person" size={40} color={INCOGNITO_COLORS.textLight} />
+                  </View>
+                )}
+                <View style={styles.p2MatchHeartBadge}>
+                  <Ionicons name="heart" size={20} color="#FFF" />
+                </View>
+              </View>
+
+              {/* Title */}
+              <Text style={styles.p2MatchTitle}>It's a Match! 🎉</Text>
+              <Text style={styles.p2MatchSubtitle}>
+                You and {phase2MatchCelebration.matchedProfile.name} liked each other
+              </Text>
+
+              {/* Actions */}
+              <View style={styles.p2MatchActions}>
+                <TouchableOpacity
+                  style={styles.p2MatchPrimaryBtn}
+                  onPress={() => {
+                    const convoId = phase2MatchCelebration.matchedProfile?.conversationId;
+                    setPhase2MatchCelebration({ visible: false, matchedProfile: null });
+                    if (convoId) {
+                      router.push(`/(main)/incognito-chat?id=${convoId}` as any);
+                    }
+                  }}
+                >
+                  <Ionicons name="chatbubble" size={18} color="#FFF" />
+                  <Text style={styles.p2MatchPrimaryText}>Send Message</Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  style={styles.p2MatchSecondaryBtn}
+                  onPress={() => setPhase2MatchCelebration({ visible: false, matchedProfile: null })}
+                >
+                  <Text style={styles.p2MatchSecondaryText}>Keep Swiping</Text>
+                </TouchableOpacity>
+              </View>
+            </View>
+          </View>
+        </Modal>
+      )}
     </View>
   );
 }
@@ -2214,5 +2590,92 @@ const styles = StyleSheet.create({
     fontSize: 15,
     fontWeight: "500",
     color: COLORS.textLight,
+  },
+
+  // P2_MATCH: Phase-2 Match Celebration styles
+  p2MatchOverlay: {
+    flex: 1,
+    backgroundColor: "rgba(0,0,0,0.8)",
+    alignItems: "center",
+    justifyContent: "center",
+    padding: 24,
+  },
+  p2MatchSheet: {
+    backgroundColor: INCOGNITO_COLORS.surface,
+    borderRadius: 24,
+    padding: 32,
+    alignItems: "center",
+    width: "100%",
+    maxWidth: 320,
+  },
+  p2MatchAvatarContainer: {
+    position: "relative",
+    marginBottom: 20,
+  },
+  p2MatchAvatar: {
+    width: 100,
+    height: 100,
+    borderRadius: 50,
+    borderWidth: 4,
+    borderColor: INCOGNITO_COLORS.primary,
+  },
+  p2MatchAvatarPlaceholder: {
+    backgroundColor: INCOGNITO_COLORS.background,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  p2MatchHeartBadge: {
+    position: "absolute",
+    bottom: -5,
+    right: -5,
+    width: 36,
+    height: 36,
+    borderRadius: 18,
+    backgroundColor: INCOGNITO_COLORS.primary,
+    alignItems: "center",
+    justifyContent: "center",
+    borderWidth: 3,
+    borderColor: INCOGNITO_COLORS.surface,
+  },
+  p2MatchTitle: {
+    fontSize: 24,
+    fontWeight: "700",
+    color: INCOGNITO_COLORS.text,
+    marginBottom: 8,
+    textAlign: "center",
+  },
+  p2MatchSubtitle: {
+    fontSize: 15,
+    color: INCOGNITO_COLORS.textLight,
+    textAlign: "center",
+    marginBottom: 28,
+  },
+  p2MatchActions: {
+    width: "100%",
+    gap: 12,
+  },
+  p2MatchPrimaryBtn: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 8,
+    backgroundColor: INCOGNITO_COLORS.primary,
+    paddingVertical: 14,
+    borderRadius: 12,
+  },
+  p2MatchPrimaryText: {
+    fontSize: 16,
+    fontWeight: "600",
+    color: "#FFF",
+  },
+  p2MatchSecondaryBtn: {
+    alignItems: "center",
+    justifyContent: "center",
+    paddingVertical: 14,
+  },
+  p2MatchSecondaryText: {
+    fontSize: 15,
+    fontWeight: "500",
+    color: INCOGNITO_COLORS.textLight,
   },
 });
