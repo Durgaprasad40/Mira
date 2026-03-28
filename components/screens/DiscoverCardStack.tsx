@@ -1524,7 +1524,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
           console.log('[P2_FRONTEND_MATCH]', {
             isMatch: result?.isMatch ?? false,
             matchId: result?.matchId,
-            conversationId: result?.conversationId,
+            conversationId: (result as any)?.conversationId,
             swipedUserId: swipedProfile.id?.slice(-8),
           });
         }
@@ -1548,7 +1548,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
                 matchedProfile: {
                   name: swipedProfile.name,
                   photoUrl: swipedProfile.photos?.[0]?.url,
-                  conversationId: result.conversationId,
+                  conversationId: (result as any)?.conversationId,
                 },
               });
             }

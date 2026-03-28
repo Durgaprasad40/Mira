@@ -782,6 +782,13 @@ export default function PromptThreadScreen() {
     // P0-001 FIX: For non-owners, ALWAYS call backend claim - it is the source of truth.
     // Do NOT rely on stale hasViewedMedia from query snapshot.
     // The backend will return the appropriate status.
+
+    // Guard: ensure user is authenticated before claiming
+    if (!currentUserId) {
+      Alert.alert('Sign In Required', 'Please sign in to view media.');
+      return;
+    }
+
     pendingMediaClaimsRef.current.add(answerId);
 
     try {
@@ -837,7 +844,7 @@ export default function PromptThreadScreen() {
 
   // Handle closing the media viewer
   const handleCloseMediaViewer = useCallback(async () => {
-    if (viewingMedia && !viewingMedia.isOwnAnswer && !viewingMedia.hasViewed) {
+    if (viewingMedia && !viewingMedia.isOwnAnswer && !viewingMedia.hasViewed && currentUserId) {
       // Finalize the view for non-owners
       try {
         await finalizeAnswerMediaView({

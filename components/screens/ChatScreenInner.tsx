@@ -1691,7 +1691,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
               onVoiceDelete={isDemo ? handleVoiceDelete : undefined}
               // AVATAR GROUPING: Pass grouping info for WhatsApp/Slack style layout
               showAvatar={showAvatar}
-              avatarUrl={isOtherUserAnonymous ? undefined : activeConversation.otherUser.photoUrl}
+              avatarUrl={isOtherUserAnonymous ? undefined : activeConversation.otherUser.photoUrl ?? undefined}
               isLastInGroup={isFirstInGroup}
               // PROFILE-TAP: Avatar tap opens profile (disabled for anonymous users)
               onAvatarPress={isOtherUserAnonymous ? undefined : () => handleOpenProfile(activeConversation.otherUser.id, (activeConversation as any).matchSource)}

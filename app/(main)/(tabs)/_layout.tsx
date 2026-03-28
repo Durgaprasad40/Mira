@@ -7,7 +7,7 @@
  * - Ensures Confessions tab feels instant (data cached before tab open)
  */
 import { useEffect, useRef, useMemo, useCallback } from "react";
-import { Tabs, useRouter, useFocusEffect } from "expo-router";
+import { Tabs, useRouter, usePathname, useSegments, useFocusEffect } from "expo-router";
 import { Ionicons } from "@expo/vector-icons";
 import { useQuery } from "convex/react";
 import { api } from "@/convex/_generated/api";
@@ -32,6 +32,8 @@ export default function MainTabsLayout() {
   markTiming('first_tab');
 
   const router = useRouter();
+  const pathname = usePathname();
+  const segments = useSegments();
   const locationPrewarmed = useRef(false);
   const fetchLastKnownOnly = useLocationStore((s) => s.fetchLastKnownOnly);
 
@@ -175,8 +177,8 @@ export default function MainTabsLayout() {
     didRouteToPrivateRef.current = true;
 
     // BUG FIX: Get current location for debug logging and duplicate navigation check
-    const currentPath = router.pathname || '';
-    const currentSegments = (router.segments || []).join('/');
+    const currentPath = pathname || '';
+    const currentSegments = segments.join('/');
 
     // Determine effective deletion status (server in non-demo, local in demo)
     const effectiveDeletionStatus = isDemoMode
@@ -230,8 +232,7 @@ export default function MainTabsLayout() {
       setTimeout(() => {
         if (__DEV__) {
           console.log('[PRIVATE TAP] Post-navigation:', {
-            newPath: router.pathname,
-            newSegments: (router.segments || []).join('/'),
+            targetRoute,
           });
         }
       }, 100);
