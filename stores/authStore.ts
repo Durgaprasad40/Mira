@@ -398,6 +398,15 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
       console.warn('[AUTH] logout: failed to clear chatTodStore', error);
     }
 
+    // P0-005 FIX: Reset Phase-2 active flag to prevent notification filtering for next user
+    try {
+      const { setPhase2Active } = require('@/hooks/useNotifications');
+      setPhase2Active(false);
+      if (__DEV__) console.log('[AUTH] logout: reset Phase-2 active flag');
+    } catch (error) {
+      console.warn('[AUTH] logout: failed to reset Phase-2 active flag', error);
+    }
+
     // P1 SECURITY: Reset discoverStore to prevent cross-user state bleed
     // Daily like limits and session counters must not leak between users
     try {

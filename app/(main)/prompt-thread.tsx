@@ -580,8 +580,10 @@ export default function PromptThreadScreen() {
   }, []);
 
   // Handle delete own prompt
+  // P0-006 FIX: Use finally block to always clear loading state
   const handleDeletePrompt = useCallback(async () => {
     if (!userId || !promptId || !isPromptOwner) return;
+    if (isDeletingPrompt) return; // Prevent double-tap
 
     setIsDeletingPrompt(true);
     try {
@@ -589,10 +591,11 @@ export default function PromptThreadScreen() {
       setShowPromptActionPopup(false);
       router.back(); // Navigate back after successful delete
     } catch (error: any) {
-      setIsDeletingPrompt(false);
       Alert.alert('Error', 'Failed to delete prompt. Please try again.');
+    } finally {
+      setIsDeletingPrompt(false);
     }
-  }, [userId, promptId, isPromptOwner, deletePrompt, router]);
+  }, [userId, promptId, isPromptOwner, isDeletingPrompt, deletePrompt, router]);
 
   // Handle delete own comment
   const handleDeleteAnswer = useCallback(async (answerId: string) => {
@@ -721,8 +724,10 @@ export default function PromptThreadScreen() {
   }, [currentUserId, respondToConnect]);
 
   // Handle send T&D connect request (prompt owner → answer author)
+  // P0-007 FIX: Add double-tap guard + backend is authoritative for dedup
   const handleSendConnect = useCallback(async (answerId: string) => {
     if (!userId || !promptId) return;
+    if (connectSending) return; // P0-007: Prevent double-tap while request in flight
 
     setConnectSending(answerId);
     try {
@@ -737,6 +742,7 @@ export default function PromptThreadScreen() {
         setSelectedAnswerId(null); // Clear selection after successful send
         Alert.alert('Connect Sent', 'Your connect request has been sent!');
       } else {
+        // Backend already deduplicates - show user-friendly message
         Alert.alert('Cannot Connect', result.reason || 'Failed to send connect request.');
       }
     } catch (error) {
@@ -744,7 +750,7 @@ export default function PromptThreadScreen() {
     } finally {
       setConnectSending(null);
     }
-  }, [userId, promptId, sendConnectRequest]);
+  }, [userId, promptId, connectSending, sendConnectRequest]);
 
   // Handle tap-to-view for media content
   // P0-001 FIX: Backend is the source of truth for view state.

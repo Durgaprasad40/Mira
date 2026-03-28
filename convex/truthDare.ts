@@ -82,22 +82,80 @@ export const getTrendingPrompts = query({
 });
 
 // Get answers for a prompt
+// P0-001 FIX: Resolve viewer server-side, filter hidden/globally-hidden answers
 export const getAnswersForPrompt = query({
-  args: { promptId: v.string(), viewerUserId: v.optional(v.string()) },
-  handler: async (ctx, { promptId }) => {
+  args: { promptId: v.string(), authUserId: v.optional(v.string()) },
+  handler: async (ctx, { promptId, authUserId }) => {
+    // P0-001 FIX: Resolve viewer identity server-side
+    let viewerId: string | null = null;
+
+    // Try server-side auth first
+    const identity = await ctx.auth.getUserIdentity();
+    if (identity?.subject) {
+      const resolved = await resolveUserIdByAuthId(ctx, identity.subject);
+      viewerId = resolved ? (resolved as string) : null;
+    }
+
+    // Fallback to client-supplied authUserId (for custom auth systems)
+    if (!viewerId && authUserId) {
+      const resolved = await resolveUserIdByAuthId(ctx, authUserId);
+      viewerId = resolved ? (resolved as string) : null;
+    }
+
     const answers = await ctx.db
       .query('todAnswers')
       .withIndex('by_prompt', (q) => q.eq('promptId', promptId))
       .order('desc')
       .collect();
-    return answers;
+
+    // P0-001 FIX: Filter out hidden/globally-hidden answers
+    return answers.filter((answer) => {
+      // Never show globally hidden answers (report threshold exceeded)
+      if (answer.isGloballyHidden === true) {
+        return false;
+      }
+
+      // If viewer is authenticated, filter out answers they reported
+      if (viewerId && answer.hiddenForUserIds?.includes(viewerId)) {
+        return false;
+      }
+
+      // Answer author can always see their own answer
+      if (viewerId && answer.userId === viewerId) {
+        return true;
+      }
+
+      return true;
+    });
   },
 });
 
-// Check if user already answered a prompt
+// Check if CURRENT USER already answered a prompt
+// P0-002 FIX: Use server-side auth only - cannot query other users' participation
 export const hasUserAnswered = query({
-  args: { promptId: v.string(), userId: v.string() },
-  handler: async (ctx, { promptId, userId }) => {
+  args: { promptId: v.string(), authUserId: v.optional(v.string()) },
+  handler: async (ctx, { promptId, authUserId }) => {
+    // P0-002 FIX: Resolve caller identity server-side
+    let userId: string | null = null;
+
+    // Try server-side auth first
+    const identity = await ctx.auth.getUserIdentity();
+    if (identity?.subject) {
+      const resolved = await resolveUserIdByAuthId(ctx, identity.subject);
+      userId = resolved ? (resolved as string) : null;
+    }
+
+    // Fallback to client-supplied authUserId (for custom auth systems)
+    if (!userId && authUserId) {
+      const resolved = await resolveUserIdByAuthId(ctx, authUserId);
+      userId = resolved ? (resolved as string) : null;
+    }
+
+    // If not authenticated, return false (cannot reveal participation)
+    if (!userId) {
+      return false;
+    }
+
     const existing = await ctx.db
       .query('todAnswers')
       .withIndex('by_prompt_user', (q) => q.eq('promptId', promptId).eq('userId', userId))
@@ -1171,13 +1229,35 @@ export const submitPrivateMediaResponse = mutation({
 /**
  * Get private media items for a prompt (owner only).
  * Returns metadata only, NOT the media URL.
+ * P0-003 FIX: Resolve viewer identity server-side, not from client param
  */
 export const getPrivateMediaForOwner = query({
   args: {
     promptId: v.string(),
-    viewerUserId: v.string(),
+    authUserId: v.optional(v.string()),
   },
-  handler: async (ctx, { promptId, viewerUserId }) => {
+  handler: async (ctx, { promptId, authUserId }) => {
+    // P0-003 FIX: Resolve viewer identity server-side
+    let viewerId: string | null = null;
+
+    // Try server-side auth first
+    const identity = await ctx.auth.getUserIdentity();
+    if (identity?.subject) {
+      const resolved = await resolveUserIdByAuthId(ctx, identity.subject);
+      viewerId = resolved ? (resolved as string) : null;
+    }
+
+    // Fallback to client-supplied authUserId (for custom auth systems)
+    if (!viewerId && authUserId) {
+      const resolved = await resolveUserIdByAuthId(ctx, authUserId);
+      viewerId = resolved ? (resolved as string) : null;
+    }
+
+    // If not authenticated, return empty
+    if (!viewerId) {
+      return [];
+    }
+
     // Get the prompt to verify ownership
     const prompt = await ctx.db
       .query('todPrompts')
@@ -1187,7 +1267,7 @@ export const getPrivateMediaForOwner = query({
     if (!prompt) return [];
 
     // Only prompt owner can see private media
-    if (prompt.ownerUserId !== viewerUserId) {
+    if (prompt.ownerUserId !== viewerId) {
       return [];
     }
 
@@ -1222,20 +1302,41 @@ export const getPrivateMediaForOwner = query({
  * Begin viewing private media (owner only).
  * Sets status to 'viewing', starts timer, returns short-lived URL.
  * This is the ONLY way to get the media URL, and only works once.
+ * P0-004 FIX: Resolve viewer identity server-side
  */
 export const beginPrivateMediaView = mutation({
   args: {
     privateMediaId: v.id('todPrivateMedia'),
-    viewerUserId: v.string(),
+    authUserId: v.optional(v.string()),
   },
-  handler: async (ctx, { privateMediaId, viewerUserId }) => {
+  handler: async (ctx, { privateMediaId, authUserId }) => {
+    // P0-004 FIX: Resolve viewer identity server-side
+    let viewerId: string | null = null;
+
+    // Try server-side auth first
+    const identity = await ctx.auth.getUserIdentity();
+    if (identity?.subject) {
+      const resolved = await resolveUserIdByAuthId(ctx, identity.subject);
+      viewerId = resolved ? (resolved as string) : null;
+    }
+
+    // Fallback to client-supplied authUserId (for custom auth systems)
+    if (!viewerId && authUserId) {
+      const resolved = await resolveUserIdByAuthId(ctx, authUserId);
+      viewerId = resolved ? (resolved as string) : null;
+    }
+
+    if (!viewerId) {
+      throw new Error('Unauthorized: authentication required');
+    }
+
     const item = await ctx.db.get(privateMediaId);
     if (!item) {
       throw new Error('Private media not found');
     }
 
-    // AUTH CHECK: Only prompt owner can view
-    if (item.toUserId !== viewerUserId) {
+    // AUTH CHECK: Only prompt owner (toUserId) can view
+    if (item.toUserId !== viewerId) {
       throw new Error('Access denied: You are not the prompt owner');
     }
 
@@ -1278,18 +1379,37 @@ export const beginPrivateMediaView = mutation({
 /**
  * Finalize private media view (called when timer ends or user closes).
  * Deletes the storage file and marks as expired/deleted.
+ * P0-004 FIX: Resolve viewer identity server-side
  */
 export const finalizePrivateMediaView = mutation({
   args: {
     privateMediaId: v.id('todPrivateMedia'),
-    viewerUserId: v.string(),
+    authUserId: v.optional(v.string()),
   },
-  handler: async (ctx, { privateMediaId, viewerUserId }) => {
+  handler: async (ctx, { privateMediaId, authUserId }) => {
+    // P0-004 FIX: Resolve viewer identity server-side
+    let viewerId: string | null = null;
+
+    const identity = await ctx.auth.getUserIdentity();
+    if (identity?.subject) {
+      const resolved = await resolveUserIdByAuthId(ctx, identity.subject);
+      viewerId = resolved ? (resolved as string) : null;
+    }
+
+    if (!viewerId && authUserId) {
+      const resolved = await resolveUserIdByAuthId(ctx, authUserId);
+      viewerId = resolved ? (resolved as string) : null;
+    }
+
+    if (!viewerId) {
+      throw new Error('Unauthorized');
+    }
+
     const item = await ctx.db.get(privateMediaId);
     if (!item) return { success: false };
 
     // AUTH CHECK: Only prompt owner can finalize
-    if (item.toUserId !== viewerUserId) {
+    if (item.toUserId !== viewerId) {
       throw new Error('Access denied');
     }
 

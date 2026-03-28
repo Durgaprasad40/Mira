@@ -642,6 +642,7 @@ export default function PrivateChatScreen() {
     );
   }
 
+  // P0-FIX C: Show clear error UI with explanation instead of dead blank screen
   if (!conversation) {
     console.log('[T/D PHASE2 OPEN] Conversation not found:', {
       id: id?.slice(-8),
@@ -654,7 +655,22 @@ export default function PrivateChatScreen() {
           <TouchableOpacity onPress={() => router.back()}>
             <Ionicons name="arrow-back" size={24} color={C.text} />
           </TouchableOpacity>
-          <Text style={styles.headerName}>Conversation not found</Text>
+          <Text style={styles.headerName}>Chat</Text>
+        </View>
+        <View style={{ flex: 1, alignItems: 'center', justifyContent: 'center', padding: 24 }}>
+          <Ionicons name="chatbubble-ellipses-outline" size={64} color={C.textLight} />
+          <Text style={{ fontSize: 18, fontWeight: '600', color: C.text, marginTop: 16, textAlign: 'center' }}>
+            Conversation not found
+          </Text>
+          <Text style={{ fontSize: 14, color: C.textLight, marginTop: 8, textAlign: 'center' }}>
+            This conversation may have been deleted or is no longer available.
+          </Text>
+          <TouchableOpacity
+            style={{ marginTop: 24, backgroundColor: C.primary, paddingHorizontal: 24, paddingVertical: 12, borderRadius: 12 }}
+            onPress={() => router.back()}
+          >
+            <Text style={{ color: '#FFF', fontWeight: '600' }}>Go Back</Text>
+          </TouchableOpacity>
         </View>
       </View>
     );
