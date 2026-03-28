@@ -30,6 +30,11 @@ interface AuthState {
   token: string | null;
   onboardingCompleted: boolean;
 
+  // AUTH_READY_FIX: Flag indicating auth state is fully validated and ready
+  // Set to true ONLY after setAuthenticatedSession is called with validated onboarding status
+  // Components should wait for this before running queries that depend on auth state
+  authReady: boolean;
+
   // Auth lifecycle flags
   authVersion: number;        // Monotonic counter, incremented on logout start
   logoutInProgress: boolean;  // True between beginLogout and finishLogout
@@ -125,6 +130,8 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
   userId: null,
   token: null,
   onboardingCompleted: false,
+  // AUTH_READY_FIX: Start as false, set true only after validation completes
+  authReady: false,
   authVersion: 0,
   logoutInProgress: false,
   faceVerificationPassed: false,
@@ -189,15 +196,22 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
       console.log(`[AUTH] setAuthenticatedSession: userId=${userId.substring(0, 10)}..., onboardingCompleted=${onboardingCompleted}, authVersion=${expectedAuthVersion}`);
     }
 
+    // AUTH_READY_FIX: Set authReady=true now that validation is complete
+    // This signals to components that auth state is fully hydrated and reliable
     set({
       userId,
       token,
       onboardingCompleted,
+      authReady: true, // AUTH_READY_FIX: Mark auth as ready
       isAuthenticated: true,
       error: null,
       _sessionValidated: false,
       _sessionValidationError: null,
     });
+
+    if (__DEV__) {
+      console.log('[AUTH_READY] authReady=true, onboardingCompleted=', onboardingCompleted);
+    }
 
     return true;
   },
@@ -236,6 +250,7 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
       userId: null,
       token: null,
       onboardingCompleted: false,
+      authReady: false, // AUTH_READY_FIX: Reset on logout
       faceVerificationPassed: false,
       faceVerificationPending: false,
       _sessionValidated: false,

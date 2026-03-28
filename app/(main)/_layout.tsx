@@ -7,7 +7,7 @@ import { useAuthStore } from "@/stores/authStore";
 import { isDemoMode } from "@/hooks/useConvex";
 import { computeEnforcementLevel } from "@/lib/securityEnforcement";
 import { ToastHost } from "@/components/ui/Toast";
-import { useRouteTrace } from "@/lib/devTrace";
+import { useRouteTrace, trace } from "@/lib/devTrace";
 
 // H-3: Session invalidation detection (NARROWED - does NOT match resource-level auth errors)
 // Only triggers logout for TRUE session invalidation, not room/resource access denials
@@ -85,14 +85,6 @@ export default function MainLayout() {
   const onboardingCompleted = useAuthStore((s) => s.onboardingCompleted);
   const didRedirect = useRef(false);
 
-  // DEV-only route change logging
-  useRouteTrace("P1_MAIN", useCallback(() => ({
-    userId: userId?.substring(0, 8) ?? null,
-    hasToken: !!token,
-    onboardingCompleted: !!onboardingCompleted,
-    isDemoMode,
-  }), [userId, token, onboardingCompleted]));
-
   // ── Navigation hooks ──
   // useRouter() returns a new object on every navigation state change.
   // Store it in a ref so the verification effect doesn't re-run from
@@ -105,6 +97,25 @@ export default function MainLayout() {
   // nav event. segmentsKey is derived as a stable string for the effect.
   const segments = useSegments();
   const rootNavState = useRootNavigationState();
+
+  // ── ROUTE ISOLATION FIX ──
+  // Phase-2 routes are handled by their own layout trace (P2_PRIVATE).
+  // The main layout should NOT emit P1_MAIN for Phase-2 routes.
+  const isPhase2Route = segments.includes('(private)' as never) || segments.includes('(private-setup)' as never);
+
+  // DEV-only route change logging - SKIP for Phase-2 routes
+  useRouteTrace(isPhase2Route ? "P2_SKIP" : "P1_MAIN", useCallback(() => {
+    // Log route isolation confirmation for Phase-2 routes
+    if (isPhase2Route && __DEV__) {
+      trace("P2_ROUTE_ISOLATION_OK", { pathname: segments.join('/') });
+    }
+    return {
+      userId: userId?.substring(0, 8) ?? null,
+      hasToken: !!token,
+      onboardingCompleted: !!onboardingCompleted,
+      isDemoMode,
+    };
+  }, [userId, token, onboardingCompleted, isPhase2Route, segments]));
 
   const currentUser = useQuery(
     api.users.getCurrentUser,
