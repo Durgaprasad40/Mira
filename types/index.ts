@@ -446,7 +446,8 @@ export type TodResponseType = "text" | "video" | "audio" | "picture";
 
 export type TodResponseStatus = "pending" | "correct" | "declined";
 
-export type ConnectionSource = "tod" | "room" | "desire" | "friend";
+// P2-006: Extended connection sources for Phase-2 matches
+export type ConnectionSource = "tod" | "room" | "desire" | "desire_match" | "desire_super_like" | "friend";
 
 export type BodyStructure = "slim" | "athletic" | "average" | "curvy" | "muscular" | "plus_size";
 

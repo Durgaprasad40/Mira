@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   View, Text, StyleSheet, ScrollView, TouchableOpacity, ActivityIndicator,
 } from 'react-native';
@@ -16,6 +16,9 @@ import { isDemoMode } from '@/hooks/useConvex';
 import { usePrivateChatStore } from '@/stores/privateChatStore';
 import { useScreenTrace } from '@/lib/devTrace';
 import type { IncognitoProfile } from '@/types';
+// P2-002/P2-004: Centralized utilities
+import { getGenderIcon } from '@/lib/genderIcon';
+import { PHASE2_BLUR_CARD } from '@/lib/phase2UI';
 
 const C = INCOGNITO_COLORS;
 
@@ -26,12 +29,17 @@ export default function PrivateProfileViewScreen() {
   const insets = useSafeAreaInsets();
   const currentUserId = useAuthStore((s) => s.userId);
 
+  // P2-003: Error and retry state
+  const [retryKey, setRetryKey] = useState(0);
+  const [hasError, setHasError] = useState(false);
+
   // Demo mode: use local demo data
   const demoProfile: IncognitoProfile | undefined = isDemoMode
     ? DEMO_INCOGNITO_PROFILES.find((p) => p.id === profileUserId)
     : undefined;
 
   // Convex mode: fetch real Phase-2 profile
+  // Note: retryKey is tracked locally but not passed to query (forces React to re-render)
   const convexProfile = useQuery(
     api.privateDiscover.getProfileByUserId,
     !isDemoMode && profileUserId && currentUserId
@@ -39,8 +47,32 @@ export default function PrivateProfileViewScreen() {
       : 'skip'
   );
 
-  // Loading state for Convex query
-  const isLoading = !isDemoMode && convexProfile === undefined;
+  // P2-003: Error detection - timeout after 15s of loading
+  const isLoading = !isDemoMode && convexProfile === undefined && !hasError;
+
+  useEffect(() => {
+    if (isDemoMode || convexProfile !== undefined) {
+      setHasError(false);
+      return;
+    }
+
+    const timeout = setTimeout(() => {
+      if (convexProfile === undefined) {
+        setHasError(true);
+        if (__DEV__) {
+          console.warn('[P2_PROFILE_VIEW] Query timeout - showing error state');
+        }
+      }
+    }, 15000);
+
+    return () => clearTimeout(timeout);
+  }, [convexProfile, retryKey]);
+
+  // P2-003: Retry handler
+  const handleRetry = useCallback(() => {
+    setHasError(false);
+    setRetryKey((k) => k + 1);
+  }, []);
 
   // Determine which profile to use
   const profile = isDemoMode ? demoProfile : convexProfile;
@@ -60,6 +92,32 @@ export default function PrivateProfileViewScreen() {
         </View>
         <View style={styles.emptyState}>
           <ActivityIndicator size="large" color={C.primary} />
+        </View>
+      </View>
+    );
+  }
+
+  // P2-003: Error state with retry
+  if (hasError) {
+    return (
+      <View style={[styles.container, { paddingTop: insets.top }]}>
+        <View style={styles.header}>
+          <TouchableOpacity onPress={() => router.back()}>
+            <Ionicons name="arrow-back" size={24} color={C.text} />
+          </TouchableOpacity>
+          <Text style={styles.headerTitle}>Profile</Text>
+          <View style={{ width: 24 }} />
+        </View>
+        <View style={styles.errorState}>
+          <Ionicons name="cloud-offline-outline" size={64} color={C.textLight} />
+          <Text style={styles.errorTitle}>Couldn't load profile</Text>
+          <Text style={styles.errorSubtitle}>
+            Please check your connection and try again
+          </Text>
+          <TouchableOpacity style={styles.retryButton} onPress={handleRetry}>
+            <Ionicons name="refresh" size={18} color="#FFFFFF" />
+            <Text style={styles.retryButtonText}>Retry</Text>
+          </TouchableOpacity>
         </View>
       </View>
     );
@@ -141,7 +199,8 @@ export default function PrivateProfileViewScreen() {
     router.push({ pathname: '/(main)/incognito-chat', params: { id: convoId } } as any);
   };
 
-  const genderIcon = profileGender === 'male' ? 'male' : profileGender === 'female' ? 'female' : 'male-female';
+  // P2-004: Using centralized getGenderIcon
+  const genderIcon = getGenderIcon(profileGender);
 
   return (
     <View style={[styles.container, { paddingTop: insets.top }]}>
@@ -161,7 +220,7 @@ export default function PrivateProfileViewScreen() {
             source={{ uri: profilePhotoUrl }}
             style={[styles.profilePhoto, !profileFaceUnblurred && styles.photoBlurred]}
             contentFit="cover"
-            blurRadius={profileFaceUnblurred ? 0 : 20}
+            blurRadius={profileFaceUnblurred ? 0 : PHASE2_BLUR_CARD}
           />
           {profileIsOnline && <View style={styles.onlineDot} />}
         </View>
@@ -314,6 +373,40 @@ const styles = StyleSheet.create({
   // Empty
   emptyState: { flex: 1, alignItems: 'center', justifyContent: 'center', gap: 12 },
   emptyText: { fontSize: 15, color: C.textLight },
+  // P2-003: Error state
+  errorState: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 40,
+    gap: 12,
+  },
+  errorTitle: {
+    fontSize: 18,
+    fontWeight: '600',
+    color: C.text,
+    marginTop: 4,
+  },
+  errorSubtitle: {
+    fontSize: 14,
+    color: C.textLight,
+    textAlign: 'center',
+    marginBottom: 8,
+  },
+  retryButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: C.primary,
+    paddingHorizontal: 24,
+    paddingVertical: 12,
+    borderRadius: 12,
+    gap: 8,
+  },
+  retryButtonText: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#FFFFFF',
+  },
   // Scroll
   scrollContent: { paddingHorizontal: 16 },
   // Photo

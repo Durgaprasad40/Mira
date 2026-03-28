@@ -36,6 +36,8 @@ import {
 import { isDemoMode } from '@/hooks/useConvex';
 import { useScreenTrace } from '@/lib/devTrace';
 import { Toast } from '@/components/ui/Toast';
+// P2-004: Centralized gender icon utility
+import { getGenderIcon } from '@/lib/genderIcon';
 
 const C = INCOGNITO_COLORS;
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
@@ -216,14 +218,7 @@ export default function Phase2FullProfileScreen() {
     );
   };
 
-  // Get gender display
-  const getGenderIcon = (gender: string | undefined): string => {
-    if (!gender) return 'person-outline';
-    const g = gender.toLowerCase();
-    if (g === 'male' || g === 'm') return 'male';
-    if (g === 'female' || g === 'f') return 'female';
-    return 'male-female';
-  };
+  // P2-004: Using centralized getGenderIcon from lib/genderIcon.ts
 
   // Render photo carousel item
   const renderPhotoItem = ({ item, index }: { item: { url: string }; index: number }) => (

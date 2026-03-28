@@ -8,7 +8,7 @@
  *
  * STRICT ISOLATION: Only uses Phase-2 queries (privateSwipes.getIncomingLikes)
  */
-import React from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   View,
   Text,
@@ -28,6 +28,8 @@ import { INCOGNITO_COLORS, COLORS } from '@/lib/constants';
 import { Ionicons } from '@expo/vector-icons';
 import { Toast } from '@/components/ui/Toast';
 import { useScreenTrace } from '@/lib/devTrace';
+import { getGenderIcon } from '@/lib/genderIcon';
+import { PHASE2_BLUR_LIKE_CARD } from '@/lib/phase2UI';
 
 const C = INCOGNITO_COLORS;
 const { width } = Dimensions.get('window');
@@ -39,11 +41,46 @@ export default function Phase2LikesScreen() {
   const insets = useSafeAreaInsets();
   const { userId, token } = useAuthStore();
 
+  // P2-003: Error and retry state
+  const [retryKey, setRetryKey] = useState(0);
+  const [hasError, setHasError] = useState(false);
+  const [loadStartTime, setLoadStartTime] = useState(Date.now());
+
   // Phase-2 incoming likes query
+  // Note: retryKey is tracked locally but not passed to query (forces React to re-render)
   const incomingLikes = useQuery(
     api.privateSwipes.getIncomingLikes,
     userId ? { userId: userId as any } : 'skip'
   );
+
+  // P2-003: Query states
+  const isLoading = incomingLikes === undefined && !hasError;
+
+  // P2-003: Error detection - timeout after 15s of loading
+  useEffect(() => {
+    if (incomingLikes !== undefined) {
+      setHasError(false);
+      return;
+    }
+
+    const timeout = setTimeout(() => {
+      if (incomingLikes === undefined) {
+        setHasError(true);
+        if (__DEV__) {
+          console.warn('[P2_LIKES_PAGE] Query timeout - showing error state');
+        }
+      }
+    }, 15000);
+
+    return () => clearTimeout(timeout);
+  }, [incomingLikes, retryKey]);
+
+  // P2-003: Retry handler
+  const handleRetry = useCallback(() => {
+    setHasError(false);
+    setLoadStartTime(Date.now());
+    setRetryKey((k) => k + 1);
+  }, []);
 
   // Phase-2 swipe mutation (like-back triggers match)
   const swipeMutation = useMutation(api.privateSwipes.swipe);
@@ -116,19 +153,10 @@ export default function Phase2LikesScreen() {
       console.log('[P2_LIKES_PAGE] Opening profile:', like.fromUserId?.slice?.(-8));
     }
     // Navigate to dedicated Phase-2 full profile (within private route group)
-    // OLD WRONG: /(main)/private-profile/[id] or /(main)/profile/[id]
-    // NEW CORRECT: /(main)/(private)/profile/[userId]
     router.push(`/(main)/(private)/profile/${like.fromUserId}` as any);
   };
 
-  // Get gender icon based on gender value
-  const getGenderIcon = (gender: string | undefined): string => {
-    if (!gender) return 'person-outline';
-    const g = gender.toLowerCase();
-    if (g === 'male' || g === 'm') return 'male';
-    if (g === 'female' || g === 'f') return 'female';
-    return 'male-female'; // non-binary or other
-  };
+  // P2-004: Using centralized getGenderIcon from lib/genderIcon.ts
 
   // Render individual like card (matching Phase-1 pattern)
   const renderLikeCard = ({ item: like }: { item: any }) => {
@@ -148,7 +176,7 @@ export default function Phase2LikesScreen() {
               source={{ uri: like.profile.blurredPhotoUrl }}
               style={styles.cardImage}
               contentFit="cover"
-              blurRadius={25}
+              blurRadius={PHASE2_BLUR_LIKE_CARD}
             />
           ) : (
             <View style={[styles.cardImage, styles.cardImagePlaceholder]}>
@@ -238,15 +266,31 @@ export default function Phase2LikesScreen() {
         <View style={styles.placeholder} />
       </View>
 
-      {/* Loading state */}
-      {incomingLikes === undefined && (
+      {/* P2-003: Loading state */}
+      {isLoading && (
         <View style={styles.loadingContainer}>
           <ActivityIndicator size="large" color={C.primary} />
+          <Text style={styles.loadingText}>Loading likes...</Text>
+        </View>
+      )}
+
+      {/* P2-003: Error state with retry */}
+      {hasError && (
+        <View style={styles.errorContainer}>
+          <Ionicons name="cloud-offline-outline" size={64} color={C.textLight} />
+          <Text style={styles.errorTitle}>Couldn't load likes</Text>
+          <Text style={styles.errorSubtitle}>
+            Please check your connection and try again
+          </Text>
+          <TouchableOpacity style={styles.retryButton} onPress={handleRetry}>
+            <Ionicons name="refresh" size={18} color="#FFFFFF" />
+            <Text style={styles.retryButtonText}>Retry</Text>
+          </TouchableOpacity>
         </View>
       )}
 
       {/* Likes grid */}
-      {incomingLikes !== undefined && (
+      {!isLoading && !hasError && (
         <FlatList
           data={incomingLikes}
           numColumns={2}
@@ -299,6 +343,45 @@ const styles = StyleSheet.create({
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
+  },
+  loadingText: {
+    marginTop: 12,
+    fontSize: 14,
+    color: C.textLight,
+  },
+  // P2-003: Error state styles
+  errorContainer: {
+    flex: 1,
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 40,
+  },
+  errorTitle: {
+    fontSize: 18,
+    fontWeight: '600',
+    color: C.text,
+    marginTop: 16,
+    marginBottom: 8,
+  },
+  errorSubtitle: {
+    fontSize: 14,
+    color: C.textLight,
+    textAlign: 'center',
+    marginBottom: 20,
+  },
+  retryButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: C.primary,
+    paddingHorizontal: 24,
+    paddingVertical: 12,
+    borderRadius: 12,
+    gap: 8,
+  },
+  retryButtonText: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#FFFFFF',
   },
   listContent: {
     padding: 16,

@@ -45,6 +45,8 @@ import { Phase2ProtectedMediaViewer } from '@/components/private/Phase2Protected
 import { calculateProtectedMediaCountdown } from '@/utils/protectedMediaCountdown';
 // P1-004 FIX: Removed DEMO_INCOGNITO_PROFILES and useDemoStore - now using backend participantIntentKey
 import { trackEvent } from '@/lib/analytics';
+// P2-002: Centralized blur constants
+import { PHASE2_BLUR_AVATAR } from '@/lib/phase2UI';
 import { useVoiceRecorder, type VoiceRecorderResult } from '@/hooks/useVoiceRecorder';
 import { VoiceMessageBubble } from '@/components/chat/VoiceMessageBubble';
 import type { IncognitoMessage } from '@/types';
@@ -804,7 +806,7 @@ export default function PrivateChatScreen() {
             <Image
               source={{ uri: conversation.participantPhotoUrl }}
               style={styles.msgAvatar}
-              blurRadius={10}
+              blurRadius={PHASE2_BLUR_AVATAR}
             />
           )}
           <VoiceMessageBubble
@@ -864,7 +866,7 @@ export default function PrivateChatScreen() {
               <Image
                 source={{ uri: conversation.participantPhotoUrl }}
                 style={styles.msgAvatar}
-                blurRadius={10}
+                blurRadius={PHASE2_BLUR_AVATAR}
               />
             )}
             <View style={[styles.expiredPill, isOwn && styles.expiredPillOwn]}>
@@ -881,7 +883,7 @@ export default function PrivateChatScreen() {
             <Image
               source={{ uri: conversation.participantPhotoUrl }}
               style={styles.msgAvatar}
-              blurRadius={10}
+              blurRadius={PHASE2_BLUR_AVATAR}
             />
           )}
           <TouchableOpacity
@@ -946,7 +948,7 @@ export default function PrivateChatScreen() {
           <Image
             source={{ uri: conversation.participantPhotoUrl }}
             style={styles.msgAvatar}
-            blurRadius={10}
+            blurRadius={PHASE2_BLUR_AVATAR}
           />
         )}
         <View style={[styles.msgBubble, isOwn ? styles.msgBubbleOwn : styles.msgBubbleOther]}>
@@ -985,7 +987,7 @@ export default function PrivateChatScreen() {
           <Image
             source={{ uri: conversation.participantPhotoUrl }}
             style={styles.headerAvatar}
-            blurRadius={10}
+            blurRadius={PHASE2_BLUR_AVATAR}
             contentFit="cover"
           />
           <View style={styles.headerInfo}>

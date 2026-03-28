@@ -296,11 +296,6 @@ export const usePrivateChatStore = create<PrivateChatState>()((set, get) => ({
           if (localOnlyMessages.length > 0) {
             // Keep conversation messages with only local-only content
             remainingMessages[removed.id] = localOnlyMessages;
-            if (__DEV__) {
-              console.log(
-                `[P1-006 Reconcile] Preserved ${localOnlyMessages.length} local-only messages for removed conversation ${removed.id.slice(-8)}`
-              );
-            }
           } else {
             // No local-only messages, safe to delete
             delete remainingMessages[removed.id];

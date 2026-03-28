@@ -72,11 +72,13 @@ export async function getAuthBootCache(): Promise<AuthBootCacheData> {
     return { ...DEFAULT_AUTH_BOOT };
   } catch (error: any) {
     // M-4: Differentiate SecureStore errors for better diagnostics
-    const msg = error?.message || String(error);
-    if (msg.includes('quota') || msg.includes('storage') || msg.includes('full')) {
-      console.error('[AUTH_BOOT] SecureStore QUOTA/STORAGE error (read):', msg);
-    } else {
-      console.error('[AUTH_BOOT] Failed to read from SecureStore:', error);
+    if (__DEV__) {
+      const msg = error?.message || String(error);
+      if (msg.includes('quota') || msg.includes('storage') || msg.includes('full')) {
+        console.error('[AUTH_BOOT] SecureStore QUOTA/STORAGE error (read):', msg);
+      } else {
+        console.error('[AUTH_BOOT] Failed to read from SecureStore:', error);
+      }
     }
     return { ...DEFAULT_AUTH_BOOT };
   }
@@ -114,14 +116,14 @@ export async function saveAuthBootCache(
   } catch (error: any) {
     // STABILITY FIX: C-3 - SecureStore save failure must not leave partial cache
     // M-4: Differentiate SecureStore quota/storage errors
-    const msg = error?.message || String(error);
-    const isQuotaError = msg.includes('quota') || msg.includes('storage') || msg.includes('full');
-    if (isQuotaError) {
-      console.error('[AUTH_BOOT] SecureStore QUOTA/STORAGE error (save):', msg);
-    } else {
-      console.error('[AUTH_BOOT] Failed to save to SecureStore:', error);
-    }
     if (__DEV__) {
+      const msg = error?.message || String(error);
+      const isQuotaError = msg.includes('quota') || msg.includes('storage') || msg.includes('full');
+      if (isQuotaError) {
+        console.error('[AUTH_BOOT] SecureStore QUOTA/STORAGE error (save):', msg);
+      } else {
+        console.error('[AUTH_BOOT] Failed to save to SecureStore:', error);
+      }
       console.warn('[AUTH_BOOT_CACHE] SecureStore save failed - cleaning up partial state:', error);
     }
     // Clean up any partial cache to prevent ghost login sessions
@@ -159,11 +161,13 @@ export async function clearAuthBootCache(): Promise<void> {
     }
   } catch (error: any) {
     // M-4: Differentiate SecureStore quota/storage errors
-    const msg = error?.message || String(error);
-    if (msg.includes('quota') || msg.includes('storage') || msg.includes('full')) {
-      console.error('[AUTH_BOOT] SecureStore QUOTA/STORAGE error (clear):', msg);
-    } else {
-      console.error('[AUTH_BOOT] Failed to clear SecureStore:', error);
+    if (__DEV__) {
+      const msg = error?.message || String(error);
+      if (msg.includes('quota') || msg.includes('storage') || msg.includes('full')) {
+        console.error('[AUTH_BOOT] SecureStore QUOTA/STORAGE error (clear):', msg);
+      } else {
+        console.error('[AUTH_BOOT] Failed to clear SecureStore:', error);
+      }
     }
     // C2/C3 FIX: Re-throw so caller knows cleanup failed
     throw error;

@@ -57,7 +57,9 @@ function startBootSafetyTimer(forceReady: () => void) {
     // Guard: don't force if already resolved
     if (_bootResolved) return;
 
-    console.warn('[BOOT_SAFETY] Timeout reached (5s) - forcing boot to resolve');
+    if (__DEV__) {
+      console.warn('[BOOT_SAFETY] Timeout reached (5s) - forcing boot to resolve');
+    }
     forceReady();
   }, BOOT_SAFETY_TIMEOUT_MS);
 }

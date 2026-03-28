@@ -22,6 +22,10 @@ import { ReportModal } from '@/components/private/ReportModal';
 import { getTimeAgo } from '@/lib/utils';
 // P1-004 FIX: Removed DEMO_INCOGNITO_PROFILES - now using backend participantIntentKey
 import { useScreenTrace } from '@/lib/devTrace';
+// P2-002: Centralized blur constants
+import { PHASE2_BLUR_AVATAR, PHASE2_BLUR_AVATAR_SMALL } from '@/lib/phase2UI';
+// P2-006: Connection source types
+import type { ConnectionSource } from '@/types';
 
 const C = INCOGNITO_COLORS;
 
@@ -38,13 +42,14 @@ const connectionIcon = (source: string) => {
   }
 };
 
-// Normalize Phase-2 connectionSource for local store compatibility
-const normalizeConnectionSource = (source: string): 'tod' | 'room' | 'desire' | 'friend' => {
-  if (source === 'desire_match' || source === 'desire_super_like') return 'desire';
-  if (source === 'tod' || source === 'room' || source === 'desire' || source === 'friend') {
-    return source as 'tod' | 'room' | 'desire' | 'friend';
+// P2-006 FIX: Preserve specific connection source without collapsing
+// This maintains desire_super_like vs desire_match distinction for UI badges
+const normalizeConnectionSource = (source: string): ConnectionSource => {
+  const validSources: ConnectionSource[] = ['tod', 'room', 'desire', 'desire_match', 'desire_super_like', 'friend'];
+  if (validSources.includes(source as ConnectionSource)) {
+    return source as ConnectionSource;
   }
-  return 'desire'; // Default for Phase-2 matches
+  return 'desire'; // Default for unknown Phase-2 matches
 };
 
 // Check if connectionSource is a Phase-2 source
@@ -75,6 +80,10 @@ export default function ChatsScreen() {
   const reconcileConversations = usePrivateChatStore((s) => s.reconcileConversations);
   const pruneDeletedMessages = usePrivateChatStore((s) => s.pruneDeletedMessages);
   const [reportTarget, setReportTarget] = useState<{ id: string; name: string } | null>(null);
+
+  // P2-003: Error and retry state for queries
+  const [retryKey, setRetryKey] = useState(0);
+  const [hasQueryError, setHasQueryError] = useState(false);
 
   // Auth for queries and mutations
   const currentUserId = useAuthStore((s) => s.userId);
@@ -157,10 +166,38 @@ export default function ChatsScreen() {
   // ═══════════════════════════════════════════════════════════════════════════
   // P0-002 FIX: Backend conversations from Phase-2 privateConversations table
   // ═══════════════════════════════════════════════════════════════════════════
+  // Note: retryKey is tracked locally but not passed to query (forces React to re-render)
   const backendConversations = useQuery(
     api.privateConversations.getUserPrivateConversations,
     currentUserId ? { authUserId: currentUserId } : 'skip'
   );
+
+  // P2-003: Error detection - timeout after 15s of loading
+  const isQueryLoading = backendConversations === undefined && !hasQueryError;
+
+  useEffect(() => {
+    if (backendConversations !== undefined) {
+      setHasQueryError(false);
+      return;
+    }
+
+    const timeout = setTimeout(() => {
+      if (backendConversations === undefined) {
+        setHasQueryError(true);
+        if (__DEV__) {
+          console.warn('[P2_CHATS] Query timeout - showing error state');
+        }
+      }
+    }, 15000);
+
+    return () => clearTimeout(timeout);
+  }, [backendConversations, retryKey]);
+
+  // P2-003: Retry handler
+  const handleRetryQuery = useCallback(() => {
+    setHasQueryError(false);
+    setRetryKey((k) => k + 1);
+  }, []);
 
   // P1-003 FIX: Bidirectional sync from Phase-2 backend to local store
   // Reconciles additions, updates, AND removals (unmatch/block/delete)
@@ -343,7 +380,7 @@ export default function ChatsScreen() {
             <View key={req._id} style={styles.pendingRequestCard}>
               <View style={styles.pendingRequestHeader}>
                 {req.senderPhotoUrl ? (
-                  <Image source={{ uri: req.senderPhotoUrl }} style={styles.pendingAvatar} blurRadius={8} />
+                  <Image source={{ uri: req.senderPhotoUrl }} style={styles.pendingAvatar} blurRadius={PHASE2_BLUR_AVATAR_SMALL} />
                 ) : (
                   <View style={[styles.pendingAvatar, styles.pendingAvatarPlaceholder]}>
                     <Ionicons name="person" size={20} color={C.textLight} />
@@ -443,7 +480,7 @@ export default function ChatsScreen() {
                         source={{ uri: item.participantPhotoUrl }}
                         style={styles.matchAvatar}
                         contentFit="cover"
-                        blurRadius={10}
+                        blurRadius={PHASE2_BLUR_AVATAR}
                       />
                     ) : (
                       <View style={[styles.matchAvatar, styles.placeholderAvatar]}>
@@ -494,21 +531,47 @@ export default function ChatsScreen() {
       </View>
 
       <ScrollView style={{ flex: 1 }} contentContainerStyle={styles.listContent}>
-        {/* T&D Pending Connect Requests */}
-        {renderPendingConnectRequests()}
-
-        {/* New Matches Row */}
-        {renderNewMatchesRow()}
-
-        {/* Messages section header (only show if we have both new matches and threads) */}
-        {newMatches.length > 0 && messageThreads.length > 0 && (
-          <View style={styles.threadsSectionHeader}>
-            <Text style={styles.sectionTitle}>Messages</Text>
+        {/* P2-003: Loading state */}
+        {isQueryLoading && (
+          <View style={styles.loadingContainer}>
+            <ActivityIndicator size="large" color={C.primary} />
+            <Text style={styles.loadingText}>Loading messages...</Text>
           </View>
         )}
 
-        {/* Empty state - only show if NO conversations at all */}
-        {conversations.length === 0 ? (
+        {/* P2-003: Error state with retry */}
+        {hasQueryError && (
+          <View style={styles.errorContainer}>
+            <Ionicons name="cloud-offline-outline" size={64} color={C.textLight} />
+            <Text style={styles.errorTitle}>Couldn't load messages</Text>
+            <Text style={styles.errorSubtitle}>
+              Please check your connection and try again
+            </Text>
+            <TouchableOpacity style={styles.retryButton} onPress={handleRetryQuery}>
+              <Ionicons name="refresh" size={18} color="#FFFFFF" />
+              <Text style={styles.retryButtonText}>Retry</Text>
+            </TouchableOpacity>
+          </View>
+        )}
+
+        {/* Content - only show when not loading and no error */}
+        {!isQueryLoading && !hasQueryError && (
+          <>
+            {/* T&D Pending Connect Requests */}
+            {renderPendingConnectRequests()}
+
+            {/* New Matches Row */}
+            {renderNewMatchesRow()}
+
+            {/* Messages section header (only show if we have both new matches and threads) */}
+            {newMatches.length > 0 && messageThreads.length > 0 && (
+              <View style={styles.threadsSectionHeader}>
+                <Text style={styles.sectionTitle}>Messages</Text>
+              </View>
+            )}
+
+            {/* Empty state - only show if NO conversations at all */}
+            {conversations.length === 0 ? (
           <View style={styles.emptyContainer}>
             <Ionicons name="lock-open-outline" size={64} color={C.textLight} />
             <Text style={styles.emptyTitle}>No conversations yet</Text>
@@ -537,7 +600,7 @@ export default function ChatsScreen() {
                     isTodConnect && !isSuperLike && { borderColor: '#FF7849', borderWidth: 2.5 }
                   ]}>
                     {convo.participantPhotoUrl ? (
-                      <Image source={{ uri: convo.participantPhotoUrl }} style={styles.chatAvatar} blurRadius={10} />
+                      <Image source={{ uri: convo.participantPhotoUrl }} style={styles.chatAvatar} blurRadius={PHASE2_BLUR_AVATAR} />
                     ) : (
                       <View style={[styles.chatAvatar, styles.placeholderChatAvatar]}>
                         <Text style={styles.chatAvatarInitial}>{convo.participantName?.[0] || '?'}</Text>
@@ -583,6 +646,8 @@ export default function ChatsScreen() {
             );
           })
         )}
+          </>
+        )}
       </ScrollView>
 
       {reportTarget && (
@@ -613,7 +678,7 @@ export default function ChatsScreen() {
                     <Image
                       source={{ uri: successSheet.senderPhotoUrl }}
                       style={styles.successAvatar}
-                      blurRadius={8}
+                      blurRadius={PHASE2_BLUR_AVATAR_SMALL}
                     />
                   ) : (
                     <View style={[styles.successAvatar, styles.successAvatarPlaceholder]}>
@@ -638,7 +703,7 @@ export default function ChatsScreen() {
                     <Image
                       source={{ uri: successSheet.recipientPhotoUrl }}
                       style={styles.successAvatar}
-                      blurRadius={8}
+                      blurRadius={PHASE2_BLUR_AVATAR_SMALL}
                     />
                   ) : (
                     <View style={[styles.successAvatar, styles.successAvatarPlaceholder]}>
@@ -699,6 +764,52 @@ const styles = StyleSheet.create({
   },
   headerTitle: { fontSize: 20, fontWeight: '700', color: C.text, flex: 1, marginLeft: 10 },
   listContent: { paddingBottom: 16 },
+  // P2-003: Loading state styles
+  loadingContainer: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 40,
+    marginTop: 60,
+  },
+  loadingText: {
+    marginTop: 12,
+    fontSize: 14,
+    color: C.textLight,
+  },
+  // P2-003: Error state styles
+  errorContainer: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 40,
+    marginTop: 60,
+  },
+  errorTitle: {
+    fontSize: 18,
+    fontWeight: '600',
+    color: C.text,
+    marginTop: 16,
+    marginBottom: 8,
+  },
+  errorSubtitle: {
+    fontSize: 14,
+    color: C.textLight,
+    textAlign: 'center',
+    marginBottom: 20,
+  },
+  retryButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: C.primary,
+    paddingHorizontal: 24,
+    paddingVertical: 12,
+    borderRadius: 12,
+    gap: 8,
+  },
+  retryButtonText: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: '#FFFFFF',
+  },
   emptyContainer: { alignItems: 'center', justifyContent: 'center', padding: 40, marginTop: 60 },
   emptyTitle: { fontSize: 18, fontWeight: '600', color: C.text, marginTop: 16, marginBottom: 8 },
   emptySubtitle: { fontSize: 13, color: C.textLight, textAlign: 'center' },
