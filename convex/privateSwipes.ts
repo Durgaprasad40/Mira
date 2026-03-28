@@ -98,13 +98,23 @@ export const swipe = mutation({
     }
 
     // Record the swipe in privateLikes (Phase-2 table)
-    await ctx.db.insert('privateLikes', {
+    const likeId = await ctx.db.insert('privateLikes', {
       fromUserId,
       toUserId,
       action,
       message,
       createdAt: now,
     });
+
+    // Log like creation
+    if (action === 'like' || action === 'super_like') {
+      console.log('[P2_LIKE_CREATED]', {
+        from: fromUserId,
+        to: toUserId,
+        action,
+        likeId
+      });
+    }
 
     // Check for match (only on like or super_like)
     if (action === 'like' || action === 'super_like') {
@@ -173,26 +183,109 @@ export const swipe = mutation({
           }
         }
 
-        // Create Phase-2 conversation
-        const conversationId = await ctx.db.insert('privateConversations', {
-          matchId,
-          participants: [fromUserId, toUserId],
-          isPreMatch: false,
-          createdAt: now,
-          connectionSource: isSuperLikeMatch ? 'desire_super_like' : 'desire_match',
-        });
+        // ONE-PAIR-ONE-THREAD: Check if conversation already exists for this pair
+        // This prevents duplicate threads when T/D or other paths already created one
+        const sortedParticipants = [fromUserId, toUserId].sort() as [Id<'users'>, Id<'users'>];
 
-        // Create conversation participants for efficient queries
-        await ctx.db.insert('privateConversationParticipants', {
-          conversationId,
-          userId: fromUserId,
-          unreadCount: 0,
-        });
-        await ctx.db.insert('privateConversationParticipants', {
-          conversationId,
-          userId: toUserId,
-          unreadCount: 0,
-        });
+        // Query for existing conversation using participant lookup
+        const fromUserConvos = await ctx.db
+          .query('privateConversationParticipants')
+          .withIndex('by_user', (q) => q.eq('userId', fromUserId))
+          .collect();
+
+        let existingConversationId: Id<'privateConversations'> | null = null;
+        for (const pc of fromUserConvos) {
+          const toUserInConvo = await ctx.db
+            .query('privateConversationParticipants')
+            .withIndex('by_user_conversation', (q) =>
+              q.eq('userId', toUserId).eq('conversationId', pc.conversationId)
+            )
+            .first();
+          if (toUserInConvo) {
+            existingConversationId = pc.conversationId;
+            break;
+          }
+        }
+
+        let conversationId: Id<'privateConversations'>;
+        let conversationCreated = false;
+
+        if (existingConversationId) {
+          // Reuse existing conversation, update matchId if needed
+          conversationId = existingConversationId;
+          const existingConvo = await ctx.db.get(existingConversationId);
+          if (existingConvo && !existingConvo.matchId) {
+            // Link match to existing conversation (e.g., T/D conversation now has a match)
+            await ctx.db.patch(existingConversationId, { matchId });
+          }
+          console.log('[PRIVATE_SWIPE] Reusing existing conversation for pair:', conversationId);
+        } else {
+          // Create Phase-2 conversation
+          conversationId = await ctx.db.insert('privateConversations', {
+            matchId,
+            participants: sortedParticipants,
+            isPreMatch: false,
+            createdAt: now,
+            connectionSource: isSuperLikeMatch ? 'desire_super_like' : 'desire_match',
+          });
+          conversationCreated = true;
+
+          // Create conversation participants for efficient queries
+          await ctx.db.insert('privateConversationParticipants', {
+            conversationId,
+            userId: fromUserId,
+            unreadCount: 0,
+          });
+          await ctx.db.insert('privateConversationParticipants', {
+            conversationId,
+            userId: toUserId,
+            unreadCount: 0,
+          });
+
+          // RACE CONDITION PROTECTION: Check for duplicate conversations
+          const allPairConvos = await ctx.db
+            .query('privateConversations')
+            .filter((q) =>
+              q.eq(q.field('participants'), sortedParticipants)
+            )
+            .collect();
+
+          if (allPairConvos.length > 1) {
+            // Duplicates detected - keep the one with lowest _id (deterministic winner)
+            allPairConvos.sort((a, b) => a._id.localeCompare(b._id));
+            const winnerConvoId = allPairConvos[0]._id;
+
+            if (conversationId !== winnerConvoId) {
+              // Our conversation lost - delete it and its participants, use winner
+              const ourParticipants = await ctx.db
+                .query('privateConversationParticipants')
+                .withIndex('by_conversation', (q) => q.eq('conversationId', conversationId))
+                .collect();
+              for (const p of ourParticipants) {
+                await ctx.db.delete(p._id);
+              }
+              await ctx.db.delete(conversationId);
+              conversationId = winnerConvoId;
+              console.log('[PRIVATE_SWIPE] Lost race, using winner conversation:', winnerConvoId);
+            } else {
+              // We won - delete duplicates
+              for (let i = 1; i < allPairConvos.length; i++) {
+                const dupeConvo = allPairConvos[i];
+                const dupeParticipants = await ctx.db
+                  .query('privateConversationParticipants')
+                  .withIndex('by_conversation', (q) => q.eq('conversationId', dupeConvo._id))
+                  .collect();
+                for (const p of dupeParticipants) {
+                  await ctx.db.delete(p._id);
+                }
+                await ctx.db.delete(dupeConvo._id);
+              }
+              console.log('[PRIVATE_SWIPE] Won race, deleted', allPairConvos.length - 1, 'duplicates');
+            }
+          } else {
+            console.log('[PRIVATE_SWIPE] Created new conversation for pair:', conversationId);
+          }
+        }
 
         // Seed super_like message if present
         const currentSuperLikeMessage = (action === 'super_like' && message) ? message : null;
@@ -234,7 +327,75 @@ export const swipe = mutation({
           }
         }
 
+        // Log match creation
+        console.log('[P2_MATCH_CREATED]', {
+          user1: user1Id,
+          user2: user2Id,
+          matchId,
+          conversationId,
+          source: isSuperLikeMatch ? 'super_like' : 'like'
+        });
+
+        // Create match notifications for both users
+        // Get display names for notifications
+        const fromProfile = await ctx.db
+          .query('userPrivateProfiles')
+          .withIndex('by_user', (q) => q.eq('userId', fromUserId))
+          .first();
+        const toProfile = await ctx.db
+          .query('userPrivateProfiles')
+          .withIndex('by_user', (q) => q.eq('userId', toUserId))
+          .first();
+
+        const fromDisplayName = fromProfile?.displayName || 'Someone';
+        const toDisplayName = toProfile?.displayName || 'Someone';
+
+        // Notify the other user (toUser) about the match
+        await ctx.db.insert('notifications', {
+          userId: toUserId,
+          type: 'match',
+          title: 'New Match! 🎉',
+          body: `You matched with ${fromDisplayName} in Desire Land!`,
+          data: { matchId: matchId as string, conversationId: conversationId as string },
+          dedupeKey: `p2_match:${matchId}:${toUserId}`,
+          createdAt: now,
+          expiresAt: now + 7 * 24 * 60 * 60 * 1000, // 7 days
+        });
+
+        // Notify the current user (fromUser) about the match
+        await ctx.db.insert('notifications', {
+          userId: fromUserId,
+          type: 'match',
+          title: 'New Match! 🎉',
+          body: `You matched with ${toDisplayName} in Desire Land!`,
+          data: { matchId: matchId as string, conversationId: conversationId as string },
+          dedupeKey: `p2_match:${matchId}:${fromUserId}`,
+          createdAt: now,
+          expiresAt: now + 7 * 24 * 60 * 60 * 1000, // 7 days
+        });
+
         return { success: true, isMatch: true, matchId, conversationId };
+      } else {
+        // NO RECIPROCAL LIKE YET - send "someone liked you" notification
+        // This is the pending like state - match will be created when other user likes back
+        console.log('[P2_LIKE_PENDING]', {
+          from: fromUserId,
+          to: toUserId,
+          action,
+          awaitingReciprocal: true
+        });
+
+        // Notify the recipient that someone liked them (anonymous)
+        await ctx.db.insert('notifications', {
+          userId: toUserId,
+          type: 'like',
+          title: action === 'super_like' ? 'Someone super liked you! ⭐' : 'Someone liked you! 💜',
+          body: 'Check your likes in Desire Land to see who!',
+          data: { likeType: action },
+          dedupeKey: `p2_like:${fromUserId}:${toUserId}`,
+          createdAt: now,
+          expiresAt: now + 7 * 24 * 60 * 60 * 1000, // 7 days
+        });
       }
     }
 
@@ -299,5 +460,107 @@ export const getSwipedUserIds = query({
       .collect();
 
     return swipes.map((s) => s.toUserId);
+  },
+});
+
+/**
+ * Get incoming likes (people who liked the current user) in Phase-2
+ * Used by Likes tab to show pending likes before match
+ */
+export const getIncomingLikes = query({
+  args: {
+    userId: v.id('users'),
+    limit: v.optional(v.number()),
+  },
+  handler: async (ctx, args) => {
+    const { userId, limit = 50 } = args;
+
+    // Get all likes TO the current user
+    const incomingLikes = await ctx.db
+      .query('privateLikes')
+      .withIndex('by_to_user', (q) => q.eq('toUserId', userId))
+      .order('desc')
+      .take(limit);
+
+    // Filter to only likes/super_likes (not passes), and exclude already matched
+    const pendingLikes = [];
+    for (const like of incomingLikes) {
+      if (like.action !== 'like' && like.action !== 'super_like') continue;
+
+      // Check if current user has already liked them back (would be matched)
+      const reciprocalLike = await ctx.db
+        .query('privateLikes')
+        .withIndex('by_from_to', (q) =>
+          q.eq('fromUserId', userId).eq('toUserId', like.fromUserId)
+        )
+        .first();
+
+      // If user hasn't swiped on them yet, it's a pending like
+      if (!reciprocalLike) {
+        // Get liker's profile info
+        const likerProfile = await ctx.db
+          .query('userPrivateProfiles')
+          .withIndex('by_user', (q) => q.eq('userId', like.fromUserId))
+          .first();
+
+        if (likerProfile) {
+          pendingLikes.push({
+            likeId: like._id,
+            fromUserId: like.fromUserId,
+            action: like.action,
+            createdAt: like.createdAt,
+            message: like.message,
+            // Profile preview (blurred until they swipe back)
+            // displayName is the Phase-2 nickname (user-chosen display identity)
+            profile: {
+              displayName: likerProfile.displayName,
+              age: likerProfile.age,
+              gender: likerProfile.gender,
+              city: likerProfile.city,
+              blurredPhotoUrl: likerProfile.privatePhotoUrls?.[0],
+            },
+          });
+        }
+      }
+    }
+
+    return pendingLikes;
+  },
+});
+
+/**
+ * Get count of pending incoming likes (for badge)
+ */
+export const getIncomingLikesCount = query({
+  args: {
+    userId: v.id('users'),
+  },
+  handler: async (ctx, args) => {
+    const { userId } = args;
+
+    // Get all likes TO the current user
+    const incomingLikes = await ctx.db
+      .query('privateLikes')
+      .withIndex('by_to_user', (q) => q.eq('toUserId', userId))
+      .collect();
+
+    let count = 0;
+    for (const like of incomingLikes) {
+      if (like.action !== 'like' && like.action !== 'super_like') continue;
+
+      // Check if current user has already liked them back
+      const reciprocalLike = await ctx.db
+        .query('privateLikes')
+        .withIndex('by_from_to', (q) =>
+          q.eq('fromUserId', userId).eq('toUserId', like.fromUserId)
+        )
+        .first();
+
+      if (!reciprocalLike) {
+        count++;
+      }
+    }
+
+    return count;
   },
 });

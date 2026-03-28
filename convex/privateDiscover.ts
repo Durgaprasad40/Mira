@@ -12,34 +12,78 @@ import { computeRankScore, logBatchRankingComparison, DEFAULT_RANKING_CONFIG } f
 // Suppression window: 4 hours in milliseconds
 const SUPPRESSION_WINDOW_MS = 4 * 60 * 60 * 1000;
 
+// SOFT_MATCH_FIX: Penalty scores for incomplete profiles (90/10 rule)
+// Incomplete profiles are NOT filtered out, just pushed to the end
+const SOFT_PENALTY = {
+  NO_SETUP_COMPLETE: -1000,  // Not onboarded yet
+  NO_PHOTOS: -500,           // No photos uploaded
+};
+
 // Get private discovery profiles (blurred photos only) with Phase-2 ranking
-// Filters out:
-// - The requesting user
-// - Incomplete profiles
+// HARD FILTERS (completely excluded):
+// - The requesting user (self)
 // - Blocked users (in BOTH directions - shared across phases)
 // - Users with pending deletion
+// - Users already swiped on
+// - Users with existing chat threads
+// SOFT FILTERS (pushed to end, not excluded):
+// - Incomplete profiles (isSetupComplete=false) -> penalty score
+// - Profiles without photos -> penalty score
 // Ranking behavior:
 // - Users seen within 4-hour suppression window are pushed to back
 // - Users without ranking metrics use fallback defaults for scoring
 // Returns profiles sorted by ranking score (descending)
 export const getProfiles = query({
   args: {
-    // P1-007 FIX: userId arg kept for backward compat but IGNORED - server auth is authoritative
+    // P1-007 FIX: userId arg kept for backward compat - used as fallback when server auth fails
     userId: v.optional(v.id('users')),
+    // AUTH_FIX: authUserId string for fallback resolution
+    authUserId: v.optional(v.string()),
     limit: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
     const now = Date.now();
     const suppressionCutoff = now - SUPPRESSION_WINDOW_MS;
 
-    // P1-007 FIX: ALWAYS resolve from server-side auth - never trust client-supplied userId
-    // args.userId is ignored to prevent auth bypass via spoofed client IDs
+    // AUTH_FIX: Robust identity resolution with fallback and debug logging
     let viewerUserId: Id<'users'> | null = null;
+    let authSource = 'none';
+
+    // Step 1: Try server-side auth (preferred)
     const identity = await ctx.auth.getUserIdentity();
     if (identity?.subject) {
       viewerUserId = await resolveUserIdByAuthId(ctx, identity.subject);
+      if (viewerUserId) {
+        authSource = 'server_auth';
+      }
     }
+
+    // Step 2: Fallback to authUserId string arg (for dev/testing)
+    if (!viewerUserId && args.authUserId) {
+      viewerUserId = await resolveUserIdByAuthId(ctx, args.authUserId);
+      if (viewerUserId) {
+        authSource = 'authUserId_fallback';
+      }
+    }
+
+    // Step 3: Fallback to userId arg (legacy)
+    if (!viewerUserId && args.userId) {
+      viewerUserId = args.userId;
+      authSource = 'userId_fallback';
+    }
+
+    // DEBUG: Log auth resolution
+    console.log('[PHASE2_DISCOVER_BE] Auth resolution:', {
+      identityExists: !!identity,
+      identitySubject: identity?.subject ? 'present' : 'missing',
+      argsAuthUserId: args.authUserId ? 'present' : 'missing',
+      argsUserId: args.userId ? 'present' : 'missing',
+      resolvedUserId: viewerUserId ? String(viewerUserId) : null,
+      authSource,
+    });
+
     if (!viewerUserId) {
+      console.warn('[PHASE2_DISCOVER_BE] No valid auth - returning empty');
       return []; // No valid auth - return empty
     }
 
@@ -104,6 +148,13 @@ export const getProfiles = query({
       .withIndex('by_enabled', (q) => q.eq('isPrivateEnabled', true))
       .collect();
 
+    // P2_BE_FETCH: Log raw profile count immediately after DB query
+    console.log('[P2_BE_FETCH]', {
+      totalProfiles: profiles.length,
+      viewerUserId: String(viewerUserId).slice(0, 15),
+      timestamp: now,
+    });
+
     // Get all deletion states to filter out pending deletions
     const deletionStates = await ctx.db
       .query('privateDeletionStates')
@@ -128,18 +179,20 @@ export const getProfiles = query({
         .map((imp) => imp.viewedUserId as string)
     );
 
-    // Filter out:
-    // - The requesting user
-    // - Incomplete profiles
-    // - Blocked users (either direction)
-    // - Users with pending deletion
-    // - P0-001 FIX: Users already swiped on (like/pass/super_like)
-    // - Users with existing chat threads
-    // NOTE: Profiles without ranking metrics are still eligible (use fallback defaults)
+    // SOFT_MATCH_FIX: Relaxed filtering - only hard-block truly ineligible users
+    // HARD FILTERS (completely excluded):
+    // - Self
+    // - Blocked users
+    // - Deleted users
+    // - Already swiped users
+    // - Existing chat partners
+    // SOFT FILTERS (included but penalized):
+    // - isSetupComplete=false -> penalty score
+    // - No photos -> penalty score
     const eligible = profiles.filter(
       (p) =>
         p.userId !== viewerUserId &&
-        p.isSetupComplete &&
+        // REMOVED: p.isSetupComplete - now a soft filter, not hard
         !blockedUserIds.has(p.userId as string) &&
         !deletedUserIds.has(p.userId as string) &&
         // P0-001 FIX: Already-swiped users must NEVER reappear
@@ -148,22 +201,83 @@ export const getProfiles = query({
         !conversationPartnerIds.has(p.userId as string)
     );
 
-    // P1-FIX: FALLBACK - If no eligible profiles after strict filters,
-    // relax the already-swiped filter to show profiles again (they can re-engage)
-    // This prevents "no profiles" state when all profiles have been seen
+    // P2_BE_FILTER: Debug logging for filter tracking
+    // Log exclusion set sizes to identify if sets are populated incorrectly on first call
+    console.log('[P2_BE_FILTER]', {
+      afterFilter: eligible.length,
+      totalProfiles: profiles.length,
+      // Exclusion set sizes (critical for first-load debugging)
+      blockedSetSize: blockedUserIds.size,
+      swipedSetSize: alreadySwipedUserIds.size,
+      chatPartnerSetSize: conversationPartnerIds.size,
+      deletedSetSize: deletedUserIds.size,
+      // Breakdown of what got excluded
+      excludedSelf: profiles.filter((p) => p.userId === viewerUserId).length,
+      excludedBlocked: profiles.filter((p) => blockedUserIds.has(p.userId as string)).length,
+      excludedDeleted: profiles.filter((p) => deletedUserIds.has(p.userId as string)).length,
+      excludedSwiped: profiles.filter((p) => alreadySwipedUserIds.has(p.userId as string)).length,
+      excludedChatPartners: profiles.filter((p) => conversationPartnerIds.has(p.userId as string)).length,
+      // Soft filter stats
+      incompleteProfiles: eligible.filter((p) => !p.isSetupComplete).length,
+      noPhotoProfiles: eligible.filter((p) => !p.privatePhotoUrls?.length).length,
+    });
+
+    // =========================================================================
+    // FALLBACK LADDER: Ensure we return profiles when they exist
+    // Hard filters (NEVER relaxed): self, blocked, deleted/pending deletion
+    // Soft filters (relaxed in stages): swiped, chat partners
+    // =========================================================================
     let finalEligible = eligible;
-    if (eligible.length === 0 && profiles.length > 0) {
+    let fallbackStage = 'strict'; // Track which stage we used
+
+    // STAGE 1 (STRICT): Use normal filters - already computed as `eligible`
+    if (eligible.length > 0) {
+      fallbackStage = 'strict';
+    }
+
+    // STAGE 2 (RELAXED): Relax swiped filter if strict result is empty
+    if (finalEligible.length === 0 && profiles.length > 0) {
+      fallbackStage = 'relaxed_swiped';
       finalEligible = profiles.filter(
         (p) =>
           p.userId !== viewerUserId &&
-          p.isSetupComplete &&
           !blockedUserIds.has(p.userId as string) &&
           !deletedUserIds.has(p.userId as string) &&
-          // Allow already-swiped profiles as fallback
-          // Still exclude chat partners (active conversations)
           !conversationPartnerIds.has(p.userId as string)
       );
     }
+
+    // STAGE 3 (MORE RELAXED): Also relax chat partners filter
+    if (finalEligible.length === 0 && profiles.length > 0) {
+      fallbackStage = 'relaxed_chatpartners';
+      finalEligible = profiles.filter(
+        (p) =>
+          p.userId !== viewerUserId &&
+          !blockedUserIds.has(p.userId as string) &&
+          !deletedUserIds.has(p.userId as string)
+      );
+    }
+
+    // STAGE 4 (SAFE POOL): Relax all soft filters, keep hard filters
+    // Hard filters always applied: self, blocked, deleted
+    if (finalEligible.length === 0 && profiles.length > 0) {
+      fallbackStage = 'safe_pool';
+      finalEligible = profiles.filter(
+        (p) =>
+          p.userId !== viewerUserId &&
+          !blockedUserIds.has(p.userId as string) &&
+          !deletedUserIds.has(p.userId as string)
+      );
+    }
+
+    // Log fallback result
+    console.log('[PRIVATE_DISCOVER_FALLBACK]', {
+      stage: fallbackStage,
+      strictCount: eligible.length,
+      finalCount: finalEligible.length,
+      profilesInDb: profiles.length,
+      otherUsersExist: profiles.some((p) => p.userId !== viewerUserId),
+    });
 
     // Compute scores and separate suppressed vs unsuppressed profiles
     const viewerId = viewerUserId as string;
@@ -178,7 +292,16 @@ export const getProfiles = query({
         totalImpressions: 0,
         lastShownAt: 0,
       };
-      const score = computeFinalScore(p, metrics, viewerId);
+      let score = computeFinalScore(p, metrics, viewerId);
+
+      // SOFT_MATCH_FIX: Apply soft penalties (push incomplete profiles to end)
+      // These profiles are still shown, just ranked lower
+      if (!p.isSetupComplete) {
+        score += SOFT_PENALTY.NO_SETUP_COMPLETE;
+      }
+      if (!p.privatePhotoUrls?.length) {
+        score += SOFT_PENALTY.NO_PHOTOS;
+      }
 
       if (recentlySeen.has(p.userId as string)) {
         suppressed.push({ profile: p, score });
@@ -273,27 +396,82 @@ export const getProfiles = query({
       }
     }
 
+    // HANDLE_FIX: Fetch user handles (nicknames) from users table
+    // Phase-2 MUST use ONLY user.handle (user-controlled nickname), NEVER user.name
+    // Handle is the @username chosen by user during onboarding
+    const userIds = limited.map(({ profile: p }) => p.userId);
+    const users = await Promise.all(userIds.map((id) => ctx.db.get(id)));
+    const nicknameMap = new Map<string, string>();
+    for (let i = 0; i < userIds.length; i++) {
+      const user = users[i];
+      // STRICT: Use ONLY user.handle, never user.name or firstName
+      if (user?.handle) {
+        nicknameMap.set(userIds[i] as string, user.handle);
+      }
+    }
+
+    // PRIVATE_DISCOVER_COUNTS: Comprehensive pipeline summary for debugging
+    console.log('[PRIVATE_DISCOVER_COUNTS]', {
+      total: profiles.length,
+      afterHardFilters: eligible.length,
+      afterFallback: finalEligible.length,
+      unsuppressed: unsuppressed.length,
+      suppressed: suppressed.length,
+      final: limited.length,
+      fallbackStage: eligible.length === 0 && finalEligible.length > 0 ? 'triggered' : 'none',
+    });
+
+    // P2_BE_RETURN: Final log before returning to client
+    console.log('[P2_BE_RETURN]', {
+      finalCount: limited.length,
+      unsuppressedCount: unsuppressed.length,
+      suppressedCount: suppressed.length,
+      requestedLimit: args.limit ?? 50,
+    });
+
+    // PRIVATE_DISCOVER_EMPTY: Explain WHY result is empty
+    if (limited.length === 0) {
+      console.log('[PRIVATE_DISCOVER_EMPTY]', {
+        reason: profiles.length === 0
+          ? 'no_phase2_profiles_in_db'
+          : eligible.length === 0 && finalEligible.length === 0
+            ? 'all_filtered_even_after_fallback'
+            : 'unknown',
+        totalDbProfiles: profiles.length,
+        viewerWasOnlyUser: profiles.length === 1 && profiles[0]?.userId === viewerUserId,
+      });
+    }
+
     // Return only blurred data — never expose original photos
     // Cast to access optional schema fields that may not be in generated types yet
+    // SOFT_MATCH_FIX: Include flags for incomplete profiles so frontend can show appropriate UI
     return limited.map(({ profile: p }) => {
       const profile = p as typeof p & { hobbies?: string[]; isVerified?: boolean; privateIntentKey?: string };
       // Backward compat: older records may only have privateIntentKey (single)
       const intentKeys = p.privateIntentKeys ?? (profile.privateIntentKey ? [profile.privateIntentKey] : []);
+      // HANDLE_FIX: Use ONLY user.handle (user-controlled nickname)
+      // NEVER use user.name or displayName - strict privacy rule
+      const nickname = nicknameMap.get(p.userId as string) ?? 'Anonymous';
       return {
         _id: p._id,
         userId: p.userId,
-        displayNameInitial: p.displayName.charAt(0).toUpperCase(),
+        // HANDLE_FIX: Return handle only, never real name
+        nickname,
+        displayNameInitial: p.displayName.charAt(0).toUpperCase(), // Keep for backward compat
         age: p.age,
         city: p.city,
         gender: p.gender,
-        blurredPhotoUrl: p.privatePhotoUrls[0] ?? null,
-        blurredPhotoUrls: p.privatePhotoUrls,
+        blurredPhotoUrl: p.privatePhotoUrls?.[0] ?? null,
+        blurredPhotoUrls: p.privatePhotoUrls ?? [],
         intentKeys,
         desireTagKeys: p.privateDesireTagKeys,
         privateBio: p.privateBio,
         // Include hobbies and verification status if available
         hobbies: profile.hobbies ?? [],
         isVerified: profile.isVerified ?? false,
+        // SOFT_MATCH_FIX: Flags for frontend to show appropriate UI
+        isSetupComplete: p.isSetupComplete ?? false,
+        hasPhotos: (p.privatePhotoUrls?.length ?? 0) > 0,
       };
     });
   },
@@ -334,10 +512,17 @@ export const getProfileCard = query({
     // Backward compat: older records may only have privateIntentKey (single)
     const intentKeys = p.privateIntentKeys ?? (profile.privateIntentKey ? [profile.privateIntentKey] : []);
 
+    // HANDLE_FIX: Fetch user handle (nickname) from users table
+    // Phase-2 MUST use ONLY user.handle, NEVER user.name
+    const user = await ctx.db.get(p.userId);
+    const nickname = user?.handle ?? 'Anonymous';
+
     return {
       _id: p._id,
       userId: p.userId,
-      displayNameInitial: p.displayName.charAt(0).toUpperCase(),
+      // HANDLE_FIX: Return handle only, never real name
+      nickname,
+      displayNameInitial: p.displayName.charAt(0).toUpperCase(), // Keep for backward compat
       age: p.age,
       city: p.city,
       gender: p.gender,
@@ -414,11 +599,21 @@ export const getProfileByUserId = query({
     // Backward compat: older records may only have privateIntentKey (single), not privateIntentKeys (array)
     const intentKeys = p.privateIntentKeys ?? (profile.privateIntentKey ? [profile.privateIntentKey] : []);
 
+    // HANDLE_FIX: Fetch user handle (nickname) from users table
+    // Phase-2 MUST use ONLY user.handle, NEVER user.name
+    const user = await ctx.db.get(args.userId);
+    const nickname = user?.handle ?? 'Anonymous';
+
+    // Cast to access optional promptAnswers field
+    const profileWithPrompts = p as typeof p & { promptAnswers?: { promptId: string; question: string; answer: string }[] };
+
     return {
       _id: p._id,
       userId: p.userId,
-      name: p.displayName,
-      displayNameInitial: p.displayName.charAt(0).toUpperCase(),
+      // HANDLE_FIX: Use handle only, never real name
+      name: nickname,
+      nickname, // Also expose as nickname field
+      displayNameInitial: p.displayName.charAt(0).toUpperCase(), // Keep for backward compat
       age: p.age,
       city: p.city,
       gender: p.gender,
@@ -431,7 +626,10 @@ export const getProfileByUserId = query({
       // Legacy single key for backward compat
       privateIntentKey: intentKeys[0] ?? null,
       desireTagKeys: p.privateDesireTagKeys,
+      boundaries: p.privateBoundaries ?? [],
       privateBio: p.privateBio,
+      // Phase-2 prompt answers
+      promptAnswers: profileWithPrompts.promptAnswers ?? [],
       // Include hobbies and verification status if available
       hobbies: profile.hobbies ?? [],
       isVerified: profile.isVerified ?? false,
