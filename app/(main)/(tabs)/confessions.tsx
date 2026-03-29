@@ -78,6 +78,133 @@ import { useScreenTrace } from '@/lib/devTrace';
 
 const { height: SCREEN_HEIGHT } = Dimensions.get('window');
 
+// ══════════════════════════════════════════════════════════════════════════
+// SKELETON LOADING CARD - Shows during initial load
+// ══════════════════════════════════════════════════════════════════════════
+const SkeletonCard = React.memo(function SkeletonCard() {
+  const pulseAnim = useRef(new Animated.Value(0.3)).current;
+
+  useEffect(() => {
+    const pulse = Animated.loop(
+      Animated.sequence([
+        Animated.timing(pulseAnim, {
+          toValue: 0.6,
+          duration: 800,
+          useNativeDriver: true,
+        }),
+        Animated.timing(pulseAnim, {
+          toValue: 0.3,
+          duration: 800,
+          useNativeDriver: true,
+        }),
+      ])
+    );
+    pulse.start();
+    return () => pulse.stop();
+  }, [pulseAnim]);
+
+  return (
+    <View style={skeletonStyles.card}>
+      {/* Author row skeleton */}
+      <View style={skeletonStyles.authorRow}>
+        <Animated.View style={[skeletonStyles.avatar, { opacity: pulseAnim }]} />
+        <Animated.View style={[skeletonStyles.authorName, { opacity: pulseAnim }]} />
+        <Animated.View style={[skeletonStyles.time, { opacity: pulseAnim }]} />
+      </View>
+      {/* Text skeleton */}
+      <Animated.View style={[skeletonStyles.textLine, { opacity: pulseAnim }]} />
+      <Animated.View style={[skeletonStyles.textLine, skeletonStyles.textLineShort, { opacity: pulseAnim }]} />
+      {/* Reaction bar skeleton */}
+      <View style={skeletonStyles.reactionRow}>
+        <Animated.View style={[skeletonStyles.chip, { opacity: pulseAnim }]} />
+        <Animated.View style={[skeletonStyles.chip, { opacity: pulseAnim }]} />
+        <Animated.View style={[skeletonStyles.addButton, { opacity: pulseAnim }]} />
+      </View>
+    </View>
+  );
+});
+
+const skeletonStyles = StyleSheet.create({
+  card: {
+    backgroundColor: COLORS.background,
+    borderRadius: 16,
+    paddingHorizontal: 18,
+    paddingTop: 16,
+    paddingBottom: 14,
+    marginHorizontal: 12,
+    marginVertical: 6,
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.08,
+    shadowRadius: 8,
+    elevation: 3,
+  },
+  authorRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    marginBottom: 12,
+  },
+  avatar: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    backgroundColor: COLORS.backgroundDark,
+  },
+  authorName: {
+    width: 80,
+    height: 12,
+    borderRadius: 6,
+    backgroundColor: COLORS.backgroundDark,
+  },
+  time: {
+    width: 40,
+    height: 10,
+    borderRadius: 5,
+    backgroundColor: COLORS.backgroundDark,
+    marginLeft: 'auto',
+  },
+  textLine: {
+    height: 14,
+    borderRadius: 7,
+    backgroundColor: COLORS.backgroundDark,
+    marginBottom: 8,
+  },
+  textLineShort: {
+    width: '70%',
+    marginBottom: 14,
+  },
+  reactionRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+  },
+  chip: {
+    width: 50,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: COLORS.backgroundDark,
+  },
+  addButton: {
+    width: 32,
+    height: 32,
+    borderRadius: 16,
+    backgroundColor: COLORS.backgroundDark,
+  },
+});
+
+// Skeleton list for initial loading
+const SkeletonList = React.memo(function SkeletonList() {
+  return (
+    <View style={{ paddingTop: 8 }}>
+      <SkeletonCard />
+      <SkeletonCard />
+      <SkeletonCard />
+      <SkeletonCard />
+    </View>
+  );
+});
+
 // TaggedConfessionItem is now imported from confessionsIntegrity.ts
 
 export default function ConfessionsScreen() {
@@ -181,6 +308,15 @@ export default function ConfessionsScreen() {
   const { safeTimeout } = useScreenSafety();
   const [refreshing, setRefreshing] = useState(false);
   const [retryKey, setRetryKey] = useState(0); // For LoadingGuard retry
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // PROGRESSIVE DISPLAY - Client-side virtual pagination
+  // ══════════════════════════════════════════════════════════════════════════
+  const INITIAL_DISPLAY_COUNT = 10;
+  const LOAD_MORE_COUNT = 8;
+  const [displayedCount, setDisplayedCount] = useState(INITIAL_DISPLAY_COUNT);
+  const [isLoadingMore, setIsLoadingMore] = useState(false);
+  const shownIdsRef = useRef<Set<string>>(new Set()); // Duplicate protection
   const [showToast, setShowToast] = useState(false);
   const [toastMessage, setToastMessage] = useState('Posted anonymously');
   const [toastIcon, setToastIcon] = useState<'checkmark-circle' | 'chatbubbles' | 'alert-circle'>('checkmark-circle');
@@ -517,6 +653,54 @@ export default function ConfessionsScreen() {
     }
     return posts;
   }, [isDemoMode, convexConfessions, globalBlockedIds, integrityOutput.activePosts]);
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // PROGRESSIVE DISPLAY - Build stable displayed list with duplicate prevention
+  // ══════════════════════════════════════════════════════════════════════════
+  type ConfessionItem = (typeof confessions)[number];
+  const displayedConfessionsRef = useRef<ConfessionItem[]>([]);
+
+  const displayedConfessions = useMemo(() => {
+    // Get items up to displayedCount
+    const sliced = confessions.slice(0, displayedCount);
+
+    // Build stable list: keep existing items + add only NEW items
+    const existingIds = new Set(displayedConfessionsRef.current.map((item) => item.id));
+    const newItems: ConfessionItem[] = [];
+
+    for (const item of sliced) {
+      if (!existingIds.has(item.id) && !shownIdsRef.current.has(item.id)) {
+        // New item not yet shown - add it
+        shownIdsRef.current.add(item.id);
+        newItems.push(item);
+      }
+    }
+
+    // Merge: existing displayed items + new items
+    // Filter existing to only keep items still in current slice (handles deletions)
+    const slicedIds = new Set(sliced.map((item) => item.id));
+    const retained = displayedConfessionsRef.current.filter((item) => slicedIds.has(item.id));
+
+    // Combine retained items with new items
+    const result = [...retained, ...newItems];
+
+    // Update ref for next render
+    displayedConfessionsRef.current = result;
+
+    return result;
+  }, [confessions, displayedCount]);
+
+  // Check if we've reached the end of all available content
+  const hasReachedEnd = displayedCount >= confessions.length && confessions.length > 0;
+
+  // Reset displayed count on refresh or data change
+  useEffect(() => {
+    if (refreshing) {
+      setDisplayedCount(INITIAL_DISPLAY_COUNT);
+      shownIdsRef.current.clear();
+      displayedConfessionsRef.current = [];
+    }
+  }, [refreshing]);
 
   // Trending confessions
   const trendingConfessions = useMemo(() => {
@@ -1213,6 +1397,19 @@ export default function ConfessionsScreen() {
   // Old check incorrectly included `demoConfessions.length === 0` which is always false after seed
   const isLoading = !isDemoMode && convexConfessions === undefined;
 
+  // Handle loading more items (triggered by onEndReached)
+  const handleLoadMore = useCallback(() => {
+    if (isLoadingMore || hasReachedEnd || isLoading) return;
+
+    setIsLoadingMore(true);
+
+    // Simulate brief loading delay for smooth perception
+    setTimeout(() => {
+      setDisplayedCount((prev) => Math.min(prev + LOAD_MORE_COUNT, confessions.length));
+      setIsLoadingMore(false);
+    }, 300);
+  }, [isLoadingMore, hasReachedEnd, isLoading, confessions.length]);
+
   // BUGFIX #20: Trending hero card with null/empty guards
   const trendingHero = trendingConfessions.length > 0 && trendingConfessions[0]?.text
     ? trendingConfessions[0]
@@ -1349,70 +1546,96 @@ export default function ConfessionsScreen() {
 
         {/* Feed */}
         <FlatList
-        data={confessions}
-        keyExtractor={(item) => item.id}
-        ListHeaderComponent={renderListHeader}
-        renderItem={({ item }) => {
-          const isTaggedForMe = (item as any).targetUserId === currentUserId;
-          const hasTag = item.targetUserId && (item as any).targetUserName;
-          const authorDisplayName = item.isAnonymous ? 'Anonymous' : ((item as any).authorName || 'Someone');
-          return (
-            <ConfessionCard
-              id={item.id}
-              text={item.text}
-              isAnonymous={item.isAnonymous}
-              authorVisibility={(item as any).authorVisibility}
-              mood={item.mood}
-              topEmojis={item.topEmojis || []}
-              userEmoji={userReactions[item.id] && isProbablyEmoji(userReactions[item.id]!) ? userReactions[item.id]! : null}
-              replyPreviews={item.replyPreviews || []}
-              replyCount={item.replyCount}
-              reactionCount={item.reactionCount}
-              authorName={(item as any).authorName}
-              authorPhotoUrl={(item as any).authorPhotoUrl}
-              authorAge={(item as any).authorAge}
-              authorGender={(item as any).authorGender}
-              createdAt={item.createdAt}
-              isTaggedForMe={isTaggedForMe}
-              previewUsed={isTaggedForMe && currentUserId ? isPreviewUsed(item.id, currentUserId) : undefined}
-              isConnected={isConfessionConnected(item.id)}
-              taggedUserId={item.targetUserId}
-              taggedUserName={(item as any).targetUserName}
-              authorId={item.userId}
-              viewerId={effectiveUserId}
-              onPress={() => handleOpenThread(item.id)}
-              onReact={() => handleOpenEmojiPicker(item.id)}
-              onToggleEmoji={(emoji) => toggleReaction(item.id, emoji)}
-              onReport={() => handleReportBlock(item.id, item.userId)}
-              onLongPress={() => handleLongPressConfession(item.id, item.userId)}
-              onTagPress={hasTag ? () => handleTagPress(item.targetUserId!) : undefined}
-              onAuthorPress={!item.isAnonymous && item.userId ? () => handleAuthorPress(item.userId) : undefined}
-            />
-          );
-        }}
-        contentContainerStyle={styles.listContent}
-        refreshControl={
-          <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={COLORS.primary} />
-        }
-        showsVerticalScrollIndicator={false}
-        ListEmptyComponent={
-          isLoading ? (
-            <View style={styles.loadingContainer}>
-              <ActivityIndicator size="large" color={COLORS.primary} />
-              <Text style={styles.loadingText}>Finding confessions...</Text>
-            </View>
-          ) : (
-            <View style={styles.emptyContainer}>
-              <Text style={styles.emptyEmoji}>💬</Text>
-              <Text style={styles.emptyTitle}>No confessions yet</Text>
-              <Text style={styles.emptySubtitle}>Be the first to share something — it's anonymous by default.</Text>
-              <TouchableOpacity style={styles.emptyButton} onPress={handleOpenCompose}>
-                <Text style={styles.emptyButtonText}>Post a Confession</Text>
-              </TouchableOpacity>
-            </View>
-          )
-        }
-      />
+          data={displayedConfessions}
+          keyExtractor={(item) => item.id}
+          ListHeaderComponent={renderListHeader}
+          renderItem={({ item }) => {
+            const isTaggedForMe = (item as any).targetUserId === currentUserId;
+            const hasTag = item.targetUserId && (item as any).targetUserName;
+            return (
+              <ConfessionCard
+                id={item.id}
+                text={item.text}
+                isAnonymous={item.isAnonymous}
+                authorVisibility={(item as any).authorVisibility}
+                mood={item.mood}
+                topEmojis={item.topEmojis || []}
+                userEmoji={userReactions[item.id] && isProbablyEmoji(userReactions[item.id]!) ? userReactions[item.id]! : null}
+                replyPreviews={item.replyPreviews || []}
+                replyCount={item.replyCount}
+                reactionCount={item.reactionCount}
+                authorName={(item as any).authorName}
+                authorPhotoUrl={(item as any).authorPhotoUrl}
+                authorAge={(item as any).authorAge}
+                authorGender={(item as any).authorGender}
+                createdAt={item.createdAt}
+                isTaggedForMe={isTaggedForMe}
+                previewUsed={isTaggedForMe && currentUserId ? isPreviewUsed(item.id, currentUserId) : undefined}
+                isConnected={isConfessionConnected(item.id)}
+                taggedUserId={item.targetUserId}
+                taggedUserName={(item as any).targetUserName}
+                authorId={item.userId}
+                viewerId={effectiveUserId}
+                onPress={() => handleOpenThread(item.id)}
+                onReact={() => handleOpenEmojiPicker(item.id)}
+                onToggleEmoji={(emoji) => toggleReaction(item.id, emoji)}
+                onReport={() => handleReportBlock(item.id, item.userId)}
+                onLongPress={() => handleLongPressConfession(item.id, item.userId)}
+                onTagPress={hasTag ? () => handleTagPress(item.targetUserId!) : undefined}
+                onAuthorPress={!item.isAnonymous && item.userId ? () => handleAuthorPress(item.userId) : undefined}
+              />
+            );
+          }}
+          contentContainerStyle={styles.listContent}
+          refreshControl={
+            <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={COLORS.primary} />
+          }
+          showsVerticalScrollIndicator={false}
+          // ══════════════════════════════════════════════════════════════════════════
+          // FLATLIST OPTIMIZATIONS - Smooth scrolling performance
+          // ══════════════════════════════════════════════════════════════════════════
+          initialNumToRender={6}
+          maxToRenderPerBatch={8}
+          windowSize={7}
+          removeClippedSubviews={Platform.OS === 'android'}
+          getItemLayout={undefined} // Variable height cards
+          // ══════════════════════════════════════════════════════════════════════════
+          // PREFETCH & PAGINATION - Load more before reaching bottom
+          // ══════════════════════════════════════════════════════════════════════════
+          onEndReached={handleLoadMore}
+          onEndReachedThreshold={0.65}
+          // ══════════════════════════════════════════════════════════════════════════
+          // LOADING STATES
+          // ══════════════════════════════════════════════════════════════════════════
+          ListEmptyComponent={
+            isLoading ? (
+              <SkeletonList />
+            ) : (
+              <View style={styles.emptyContainer}>
+                <Text style={styles.emptyEmoji}>👀</Text>
+                <Text style={styles.emptyTitle}>No confessions yet…</Text>
+                <Text style={styles.emptySubtitle}>Be the first to share something. It's anonymous by default.</Text>
+                <TouchableOpacity style={styles.emptyButton} onPress={handleOpenCompose} activeOpacity={0.85}>
+                  <Text style={styles.emptyButtonText}>Post a Confession</Text>
+                </TouchableOpacity>
+              </View>
+            )
+          }
+          ListFooterComponent={
+            // Show pagination loader while loading more, end-of-feed only when truly done
+            displayedConfessions.length > 0 ? (
+              isLoadingMore ? (
+                <View style={styles.paginationLoader}>
+                  <ActivityIndicator size="small" color={COLORS.textMuted} />
+                </View>
+              ) : hasReachedEnd ? (
+                <View style={styles.feedFooter}>
+                  <Text style={styles.feedFooterText}>You're all caught up ✨</Text>
+                </View>
+              ) : null
+            ) : null
+          }
+        />
 
       {/* Success Toast */}
       {showToast && (
@@ -1940,24 +2163,28 @@ const styles = StyleSheet.create({
   },
   topHint: {
     fontSize: 12,
-    color: COLORS.textLight,
+    fontWeight: '500',
+    color: COLORS.textMuted,
     textAlign: 'center',
     paddingHorizontal: 16,
-    paddingTop: 8,
-    paddingBottom: 6,
+    paddingTop: 10,
+    paddingBottom: 8,
+    letterSpacing: 0.2,
   },
   loadingContainer: {
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
     paddingHorizontal: 24,
-    paddingTop: 80,
-    gap: 12,
+    paddingTop: 100,
+    gap: 16,
   },
   loadingText: {
-    fontSize: 16,
+    fontSize: 15,
+    fontWeight: '500',
     color: COLORS.textLight,
     textAlign: 'center',
+    letterSpacing: 0.2,
   },
   crushSection: {
     marginBottom: 4,
@@ -2016,24 +2243,36 @@ const styles = StyleSheet.create({
     opacity: 0.85,
   },
   listContent: {
-    paddingTop: 4,
-    paddingBottom: 96,
+    paddingTop: 8,
+    paddingBottom: 100,
+    paddingHorizontal: 2,
   },
   emptyContainer: {
     alignItems: 'center',
     justifyContent: 'center',
-    padding: 40,
-    marginTop: 80,
+    paddingHorizontal: 40,
+    paddingVertical: 60,
+    marginTop: 60,
+    marginHorizontal: 16,
+    backgroundColor: COLORS.background,
+    borderRadius: 20,
+    // Shadow for iOS
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.06,
+    shadowRadius: 8,
+    // Elevation for Android
+    elevation: 2,
   },
   emptyEmoji: {
-    fontSize: 56,
-    marginBottom: 16,
+    fontSize: 48,
+    marginBottom: 20,
   },
   emptyTitle: {
-    fontSize: 22,
+    fontSize: 20,
     fontWeight: '700',
     color: COLORS.text,
-    marginBottom: 8,
+    marginBottom: 10,
     textAlign: 'center',
   },
   emptySubtitle: {
@@ -2041,18 +2280,26 @@ const styles = StyleSheet.create({
     color: COLORS.textLight,
     textAlign: 'center',
     lineHeight: 22,
-    marginBottom: 24,
+    marginBottom: 28,
+    maxWidth: 280, // Text width safety for large screens
   },
   emptyButton: {
     backgroundColor: COLORS.primary,
-    paddingHorizontal: 24,
-    paddingVertical: 12,
-    borderRadius: 24,
+    paddingHorizontal: 28,
+    paddingVertical: 14,
+    borderRadius: 28,
+    // Button shadow
+    shadowColor: COLORS.primary,
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.25,
+    shadowRadius: 8,
+    elevation: 4,
   },
   emptyButtonText: {
     fontSize: 15,
     fontWeight: '600',
     color: COLORS.white,
+    letterSpacing: 0.3,
   },
   toast: {
     position: 'absolute',
@@ -2081,19 +2328,20 @@ const styles = StyleSheet.create({
   },
   fab: {
     position: 'absolute',
-    right: 16,
-    bottom: 24,
-    width: 48,
-    height: 48,
-    borderRadius: 24,
+    right: 18,
+    bottom: 28,
+    width: 56,
+    height: 56,
+    borderRadius: 28,
     backgroundColor: COLORS.primary,
     justifyContent: 'center',
     alignItems: 'center',
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.2,
-    shadowRadius: 8,
-    elevation: 6,
+    // Enhanced shadow
+    shadowColor: COLORS.primary,
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.35,
+    shadowRadius: 12,
+    elevation: 8,
   },
   // Composer modal styles - clean full-screen architecture
   composerFullScreen: {
@@ -2670,5 +2918,26 @@ const styles = StyleSheet.create({
     fontSize: 15,
     fontWeight: '600',
     color: COLORS.white,
+  },
+  // Feed footer (end-of-feed experience)
+  feedFooter: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 32,
+    paddingHorizontal: 20,
+    marginTop: 8,
+  },
+  feedFooterText: {
+    fontSize: 14,
+    fontWeight: '500',
+    color: COLORS.textMuted,
+    letterSpacing: 0.2,
+  },
+  // Pagination loader (bottom loading indicator)
+  paginationLoader: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 20,
+    paddingHorizontal: 20,
   },
 });

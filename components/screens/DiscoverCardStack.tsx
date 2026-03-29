@@ -609,10 +609,11 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
     });
   }
 
+  // P1-002 FIX: Only pass authUserId and limit - userId was removed from validator
   const privateDiscoverArgs = useMemo(
     () =>
       !isDemoMode && convexUserId && !skipInternalQuery && isPhase2 && isAuthReadyForQuery
-        ? { userId: convexUserId, authUserId: userId ?? undefined, limit: 50 }
+        ? { authUserId: userId ?? undefined, limit: 50 }
         : "skip" as const,
     // eslint-disable-next-line react-hooks/exhaustive-deps
     [convexUserId, userId, skipInternalQuery, retryKey, isPhase2, queryTrigger, isAuthReadyForQuery],

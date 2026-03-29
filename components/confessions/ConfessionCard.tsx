@@ -1,13 +1,24 @@
-import React, { useMemo } from 'react';
+import React, { useMemo, useCallback } from 'react';
 import {
   View,
   Text,
   TouchableOpacity,
   StyleSheet,
   Alert,
+  Pressable,
 } from 'react-native';
+import Animated, {
+  useSharedValue,
+  useAnimatedStyle,
+  withTiming,
+  withSpring,
+} from 'react-native-reanimated';
+import * as Haptics from 'expo-haptics';
 import { Image } from 'expo-image';
 import { Ionicons } from '@expo/vector-icons';
+
+// Animated pressable for card
+const AnimatedPressable = Animated.createAnimatedComponent(Pressable);
 import {
   COLORS,
   SPACING,
@@ -124,6 +135,36 @@ export default function ConfessionCard({
   onConnect,
   onAuthorPress,
 }: ConfessionCardProps) {
+  // ══════════════════════════════════════════════════════════════════════════
+  // CARD PRESS ANIMATION - Subtle scale feedback (no haptic spam)
+  // ══════════════════════════════════════════════════════════════════════════
+  const cardScale = useSharedValue(1);
+
+  const cardAnimatedStyle = useAnimatedStyle(() => ({
+    transform: [{ scale: cardScale.value }],
+  }));
+
+  const handlePressIn = useCallback(() => {
+    cardScale.value = withTiming(0.985, { duration: 60 });
+  }, [cardScale]);
+
+  const handlePressOut = useCallback(() => {
+    cardScale.value = withTiming(1, { duration: 150 });
+  }, [cardScale]);
+
+  const handleCardPress = useCallback(() => {
+    // No haptic for card tap (minor action, opens thread)
+    onPress?.();
+  }, [onPress]);
+
+  const handleCardLongPress = useCallback(() => {
+    // Haptic only for long press (meaningful action - delete/report)
+    try {
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Medium);
+    } catch {}
+    onLongPress?.();
+  }, [onLongPress]);
+
   // Determine effective visibility mode (backward compat: use isAnonymous if authorVisibility not set)
   const effectiveVisibility: ConfessionAuthorVisibility = authorVisibility || (isAnonymous ? 'anonymous' : 'open');
   const isFullyAnonymous = effectiveVisibility === 'anonymous';
@@ -207,12 +248,13 @@ export default function ConfessionCard({
   );
 
   return (
-    <TouchableOpacity
-      style={[styles.card, isTaggedForMe && styles.cardHighlighted]}
-      onPress={onPress}
-      onLongPress={onLongPress}
+    <AnimatedPressable
+      style={[styles.card, isTaggedForMe && styles.cardHighlighted, cardAnimatedStyle]}
+      onPress={handleCardPress}
+      onLongPress={handleCardLongPress}
+      onPressIn={handlePressIn}
+      onPressOut={handlePressOut}
       delayLongPress={700}
-      activeOpacity={0.8}
     >
       {/* Author row */}
       <View style={styles.authorRow}>
@@ -341,25 +383,25 @@ export default function ConfessionCard({
           </View>
         </View>
       )}
-    </TouchableOpacity>
+    </AnimatedPressable>
   );
 }
 
 const styles = StyleSheet.create({
   card: {
-    backgroundColor: '#FFFFFF', // Explicit white, never override
-    borderRadius: SIZES.radius.md,
-    paddingHorizontal: SPACING.sm + 2,
-    paddingTop: SPACING.sm + 2,
-    paddingBottom: SPACING.sm,
-    marginHorizontal: SPACING.sm + 2,
-    marginVertical: SPACING.xs,
+    backgroundColor: COLORS.background,
+    borderRadius: 16,
+    paddingHorizontal: 18,
+    paddingTop: 16,
+    paddingBottom: 14,
+    marginHorizontal: 12,
+    marginVertical: 6,
     // Shadow for iOS
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.08,
-    shadowRadius: 6,
-    // Elevation for Android
+    shadowRadius: 8,
+    // Elevation for Android (proper cross-platform shadow)
     elevation: 3,
   },
   cardHighlighted: {
@@ -387,9 +429,9 @@ const styles = StyleSheet.create({
   authorRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: SPACING.xs, // Clean spacing, no arbitrary additions
-    marginBottom: SPACING.xs,
-    minHeight: moderateScale(24, 0.3),
+    gap: 8,
+    marginBottom: 10,
+    minHeight: 26,
   },
   avatar: {
     width: AVATAR_SIZE,
@@ -423,24 +465,24 @@ const styles = StyleSheet.create({
     flexShrink: 1,
   },
   authorName: {
-    fontSize: FONT_SIZE.caption,
-    fontWeight: FONT_WEIGHT.semibold,
-    color: COLORS.text,
-    flexShrink: 1, // Allow name to truncate if needed
+    fontSize: 13,
+    fontWeight: '600',
+    color: COLORS.textLight,
+    flexShrink: 1,
   },
   authorNamePublic: {
     color: COLORS.primary,
   },
   blurBadge: {
-    marginLeft: SPACING.xs,
-    padding: SPACING.xxs,
-    backgroundColor: 'rgba(153,153,153,0.15)',
-    borderRadius: SIZES.radius.xs,
+    marginLeft: 6,
+    padding: 3,
+    backgroundColor: 'rgba(153,153,153,0.12)',
+    borderRadius: 4,
   },
   timeAgo: {
-    fontSize: FONT_SIZE.sm,
+    fontSize: 12,
     color: COLORS.textMuted,
-    flexShrink: 0, // Prevent time from shrinking
+    flexShrink: 0,
   },
   headerSpacer: {
     flex: 1,
@@ -466,11 +508,13 @@ const styles = StyleSheet.create({
     color: COLORS.textMuted,
   },
   confessionText: {
-    fontSize: FONT_SIZE.body2,
-    fontWeight: FONT_WEIGHT.medium, // Lighter than semibold for Android
-    lineHeight: Math.round(FONT_SIZE.body2 * 1.3), // Fixed ratio, no double-scaling
+    fontSize: 16,
+    fontWeight: '500',
+    lineHeight: 24,
     color: COLORS.text,
-    marginBottom: SPACING.xs + 2, // Tightened from SPACING.sm
+    marginBottom: 14,
+    letterSpacing: 0.1,
+    // Text wrapping safety - works with card padding for proper line length
   },
   tagLink: {
     color: COLORS.primary,
@@ -546,7 +590,8 @@ const styles = StyleSheet.create({
     color: COLORS.textMuted,
   },
   reactionBarWrap: {
-    marginBottom: SPACING.xs, // Tightened from SPACING.xs + 2
+    marginBottom: 8,
+    marginTop: 2,
   },
   replyPreviewSection: {
     marginBottom: SPACING.xs + 2,
@@ -581,24 +626,26 @@ const styles = StyleSheet.create({
   footer: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: SPACING.base,
-    borderTopWidth: HAIRLINE,
+    gap: 16,
+    borderTopWidth: 1,
     borderTopColor: COLORS.border,
-    paddingTop: SPACING.xs + 2,
-    marginTop: SPACING.xs,
+    paddingTop: 12,
+    marginTop: 6,
   },
   footerButton: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: SPACING.xs,
+    gap: 6,
+    paddingVertical: 4,
+    paddingHorizontal: 2,
   },
   footerCount: {
-    fontSize: FONT_SIZE.sm,
+    fontSize: 13,
     color: COLORS.textMuted,
-    fontWeight: FONT_WEIGHT.medium,
+    fontWeight: '500',
   },
   footerLabel: {
-    fontSize: FONT_SIZE.sm,
+    fontSize: 13,
     color: COLORS.textMuted,
   },
 });
