@@ -51,6 +51,119 @@ const CATEGORY_FILTERS = [
 ];
 
 // ══════════════════════════════════════════════════════════════════════════
+// ANIMATED FILTER PILL - Category selection with smooth animations
+// ══════════════════════════════════════════════════════════════════════════
+interface FilterPillProps {
+  filter: { id: string; label: string; icon: string };
+  isSelected: boolean;
+  onPress: () => void;
+}
+
+const AnimatedFilterPill = ({ filter, isSelected, onPress }: FilterPillProps) => {
+  const scaleAnim = useRef(new Animated.Value(1)).current;
+  const selectionAnim = useRef(new Animated.Value(isSelected ? 1 : 0)).current;
+
+  // Animate selection state changes smoothly
+  useEffect(() => {
+    Animated.timing(selectionAnim, {
+      toValue: isSelected ? 1 : 0,
+      duration: 150,
+      useNativeDriver: false, // backgroundColor interpolation needs JS
+    }).start();
+
+    // Pop animation on selection (1 → 1.05 → 1)
+    if (isSelected) {
+      Animated.sequence([
+        Animated.timing(scaleAnim, {
+          toValue: 1.05,
+          duration: 80,
+          useNativeDriver: true,
+        }),
+        Animated.timing(scaleAnim, {
+          toValue: 1,
+          duration: 70,
+          useNativeDriver: true,
+        }),
+      ]).start();
+    }
+  }, [isSelected, scaleAnim, selectionAnim]);
+
+  const handlePressIn = useCallback(() => {
+    // Instant press feedback
+    Animated.timing(scaleAnim, {
+      toValue: 0.97,
+      duration: 60,
+      useNativeDriver: true,
+    }).start();
+  }, [scaleAnim]);
+
+  const handlePressOut = useCallback(() => {
+    Animated.timing(scaleAnim, {
+      toValue: 1,
+      duration: 100,
+      useNativeDriver: true,
+    }).start();
+  }, [scaleAnim]);
+
+  const handlePress = useCallback(() => {
+    try {
+      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
+    } catch {}
+    onPress();
+  }, [onPress]);
+
+  // Interpolate background color for smooth transition
+  const backgroundColor = selectionAnim.interpolate({
+    inputRange: [0, 1],
+    outputRange: [COLORS.backgroundDark, COLORS.primary],
+  });
+
+  // Interpolate shadow opacity for selected state
+  const shadowOpacity = selectionAnim.interpolate({
+    inputRange: [0, 1],
+    outputRange: [0, 0.15],
+  });
+
+  return (
+    <Animated.View
+      style={[
+        styles.filterPillWrapper,
+        {
+          transform: [{ scale: scaleAnim }],
+          shadowOpacity,
+        },
+      ]}
+    >
+      <Animated.View
+        style={[
+          styles.filterPill,
+          { backgroundColor },
+          isSelected && styles.filterPillSelectedBorder,
+        ]}
+      >
+        <TouchableOpacity
+          style={styles.filterPillTouchable}
+          onPress={handlePress}
+          onPressIn={handlePressIn}
+          onPressOut={handlePressOut}
+          activeOpacity={1}
+        >
+          <Ionicons
+            name={filter.icon as any}
+            size={16}
+            color={isSelected ? COLORS.white : COLORS.textLight}
+            style={styles.filterPillIcon}
+          />
+          <Text style={[styles.filterPillText, isSelected && styles.filterPillTextSelected]}>
+            {filter.label}
+          </Text>
+        </TouchableOpacity>
+      </Animated.View>
+    </Animated.View>
+  );
+};
+
+// ══════════════════════════════════════════════════════════════════════════
 // SKELETON LOADING CARD
 // ══════════════════════════════════════════════════════════════════════════
 const SkeletonTile = ({ index }: { index: number }) => {
@@ -205,6 +318,9 @@ export default function ExploreScreen() {
   const [selectedFilter, setSelectedFilter] = useState("all");
   const [isLoading, setIsLoading] = useState(true);
 
+  // FlatList ref for scroll-to-top on category change
+  const flatListRef = useRef<FlatList<ExploreCategory>>(null);
+
   // Backend counts for tile badges
   const backendCounts = useExploreCategoryCounts();
 
@@ -279,6 +395,18 @@ export default function ExploreScreen() {
     },
     [router, trackCategoryClick]
   );
+
+  // Handle filter change with scroll-to-top
+  const handleFilterChange = useCallback((filterId: string) => {
+    if (filterId === selectedFilter) return; // No change needed
+
+    setSelectedFilter(filterId);
+
+    // Scroll FlatList to top (safe check for ref)
+    try {
+      flatListRef.current?.scrollToOffset({ offset: 0, animated: true });
+    } catch {}
+  }, [selectedFilter]);
 
   // Handle return hook press
   const handleReturnHookPress = useCallback(() => {
@@ -383,27 +511,14 @@ export default function ExploreScreen() {
         contentContainerStyle={styles.filterScrollContent}
         style={styles.filterScroller}
       >
-        {CATEGORY_FILTERS.map((filter) => {
-          const isSelected = selectedFilter === filter.id;
-          return (
-            <TouchableOpacity
-              key={filter.id}
-              style={[styles.filterPill, isSelected && styles.filterPillSelected]}
-              onPress={() => setSelectedFilter(filter.id)}
-              activeOpacity={0.7}
-            >
-              <Ionicons
-                name={filter.icon as any}
-                size={16}
-                color={isSelected ? COLORS.white : COLORS.textLight}
-                style={styles.filterPillIcon}
-              />
-              <Text style={[styles.filterPillText, isSelected && styles.filterPillTextSelected]}>
-                {filter.label}
-              </Text>
-            </TouchableOpacity>
-          );
-        })}
+        {CATEGORY_FILTERS.map((filter) => (
+          <AnimatedFilterPill
+            key={filter.id}
+            filter={filter}
+            isSelected={selectedFilter === filter.id}
+            onPress={() => handleFilterChange(filter.id)}
+          />
+        ))}
       </ScrollView>
 
       {/* Return Hook */}
@@ -427,6 +542,7 @@ export default function ExploreScreen() {
         renderEmptyState()
       ) : (
         <FlatList
+          ref={flatListRef}
           data={filteredCategories}
           keyExtractor={(item) => item.id}
           renderItem={renderGridItem}
@@ -487,26 +603,37 @@ const styles = StyleSheet.create({
 
   // Filter Scroller
   filterScroller: {
-    maxHeight: 44,
+    maxHeight: 48,
     marginBottom: 12,
   },
   filterScrollContent: {
     paddingHorizontal: GRID_PADDING,
     gap: 8,
+    alignItems: "center",
+  },
+  // Wrapper for shadow and scale animation
+  filterPillWrapper: {
+    // iOS shadow for selected state (animated via shadowOpacity)
+    shadowColor: COLORS.primary,
+    shadowOffset: { width: 0, height: 2 },
+    shadowRadius: 6,
+    // Android elevation handled separately
+    elevation: 0,
   },
   filterPill: {
+    borderRadius: 20,
+    overflow: "hidden",
+  },
+  filterPillSelectedBorder: {
+    // Slight elevation on Android for selected state
+    elevation: 3,
+  },
+  filterPillTouchable: {
     flexDirection: "row",
     alignItems: "center",
-    backgroundColor: COLORS.backgroundDark,
     paddingHorizontal: 14,
     paddingVertical: 8,
-    borderRadius: 20,
-    borderWidth: 1,
-    borderColor: "transparent",
-  },
-  filterPillSelected: {
-    backgroundColor: COLORS.primary,
-    borderColor: COLORS.primary,
+    minHeight: 36,
   },
   filterPillIcon: {
     marginRight: 6,
@@ -518,6 +645,7 @@ const styles = StyleSheet.create({
   },
   filterPillTextSelected: {
     color: COLORS.white,
+    fontWeight: "700",
   },
 
   // Return Hook
