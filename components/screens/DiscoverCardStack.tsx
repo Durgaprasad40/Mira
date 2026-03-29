@@ -57,7 +57,8 @@ import { rankProfiles } from "@/lib/rankProfiles";
 import { sortProfilesByScore } from "@/lib/profileRanking";
 import { trackEvent } from "@/lib/analytics";
 import { Toast } from "@/components/ui/Toast";
-// REMOVED: usePrivateChatStore - local conversation creation disabled, backend handles this
+// usePrivateChatStore - read-only for retention UI hints (conversations count)
+import { usePrivateChatStore } from "@/stores/privateChatStore";
 import { useExplorePrefsStore } from "@/stores/explorePrefsStore";
 import { NotificationPopover } from "@/components/discover/NotificationPopover";
 // REMOVED: IncognitoConversation, ConnectionSource types - no longer needed after disabling local conversation creation
@@ -102,6 +103,7 @@ const EMPTY_ARRAY: any[] = [];
 // ── Star-burst animation for super-like ──
 const STAR_COUNT = 8;
 const STAR_COLORS = ['#FFD700', '#FFA500', '#FF6B6B', '#4ECDC4', '#45B7D1', '#96CEB4', '#FFEAA7', '#DDA0DD'];
+
 
 interface StarBurstAnimationProps {
   visible: boolean;
@@ -328,6 +330,9 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
     visible: boolean;
     matchedProfile: { name: string; photoUrl?: string; conversationId?: string } | null;
   }>({ visible: false, matchedProfile: null });
+
+  // Read-only: existing conversations count for match reminder (no new queries)
+  const privateConversationsCount = usePrivateChatStore((s) => s.conversations.length);
 
   // Phase-2 only: Intent filters from store (syncs with Discovery Preferences)
   const { privateIntentKeys: intentFilters, togglePrivateIntentKey, setPrivateIntentKeys } = useFilterStore();
@@ -2135,6 +2140,20 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
         </View>
       )}
 
+      {/* Match Reminder - Phase-2 only, shows if user has existing Deep Connects */}
+      {isPhase2 && privateConversationsCount > 0 && (
+        <TouchableOpacity
+          style={[styles.matchReminderPill, { top: cardTop + 8 }]}
+          onPress={() => router.push("/(main)/(private)/(tabs)/chats" as any)}
+          activeOpacity={0.6}
+        >
+          <Text style={styles.matchReminderText}>
+            {privateConversationsCount === 1
+              ? "You have a Deep Connect waiting"
+              : `${privateConversationsCount} Deep Connects waiting`}
+          </Text>
+        </TouchableOpacity>
+      )}
 
       {/* Card Area (fills between header and tab bar) */}
       <View style={[styles.cardArea, { top: cardTop, bottom: cardBottom }]} pointerEvents="box-none">
@@ -2899,5 +2918,21 @@ const styles = StyleSheet.create({
     fontSize: 15,
     fontWeight: "500",
     color: "rgba(255, 255, 255, 0.6)",
+  },
+
+  // Match Reminder Pill (Phase-2 Only)
+  matchReminderPill: {
+    position: "absolute",
+    alignSelf: "center",
+    left: 0,
+    right: 0,
+    alignItems: "center",
+    zIndex: 5,
+  },
+  matchReminderText: {
+    fontSize: 12,
+    fontWeight: "500",
+    color: "rgba(255, 255, 255, 0.4)",
+    letterSpacing: 0.2,
   },
 });
