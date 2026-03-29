@@ -22,6 +22,8 @@ import {
   InteractionManager,
   Image,
   Modal,
+  Animated,
+  Dimensions,
 } from 'react-native';
 import { FlashList, type FlashListRef } from '@shopify/flash-list';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -55,6 +57,68 @@ import {
   getOtherUserIdFromMeta,
 } from '@/lib/threadsIntegrity';
 import { preloadVideos } from '@/lib/videoCache';
+
+// ═══════════════════════════════════════════════════════════════════════════
+// SKELETON LOADING - Chat loading placeholder
+// ═══════════════════════════════════════════════════════════════════════════
+const { width: SCREEN_WIDTH } = Dimensions.get('window');
+
+const SkeletonBubble = ({ isOwn, width }: { isOwn: boolean; width: number }) => {
+  const pulseAnim = React.useRef(new Animated.Value(0.4)).current;
+
+  React.useEffect(() => {
+    const pulse = Animated.loop(
+      Animated.sequence([
+        Animated.timing(pulseAnim, { toValue: 0.7, duration: 700, useNativeDriver: true }),
+        Animated.timing(pulseAnim, { toValue: 0.4, duration: 700, useNativeDriver: true }),
+      ])
+    );
+    pulse.start();
+    return () => pulse.stop();
+  }, [pulseAnim]);
+
+  return (
+    <Animated.View
+      style={[
+        skeletonStyles.bubble,
+        isOwn ? skeletonStyles.ownBubble : skeletonStyles.otherBubble,
+        { width, opacity: pulseAnim },
+      ]}
+    />
+  );
+};
+
+const ChatLoadingSkeleton = () => (
+  <View style={skeletonStyles.container}>
+    <SkeletonBubble isOwn={false} width={SCREEN_WIDTH * 0.55} />
+    <SkeletonBubble isOwn={true} width={SCREEN_WIDTH * 0.45} />
+    <SkeletonBubble isOwn={false} width={SCREEN_WIDTH * 0.65} />
+    <SkeletonBubble isOwn={true} width={SCREEN_WIDTH * 0.5} />
+    <SkeletonBubble isOwn={false} width={SCREEN_WIDTH * 0.4} />
+  </View>
+);
+
+const skeletonStyles = StyleSheet.create({
+  container: {
+    flex: 1,
+    paddingHorizontal: 14,
+    paddingTop: 20,
+    gap: 12,
+    backgroundColor: COLORS.background,
+  },
+  bubble: {
+    height: 42,
+    borderRadius: 20,
+  },
+  ownBubble: {
+    alignSelf: 'flex-end',
+    backgroundColor: COLORS.primarySubtle,
+  },
+  otherBubble: {
+    alignSelf: 'flex-start',
+    backgroundColor: COLORS.backgroundDark,
+  },
+});
 
 /** Resolve the current demo user ID at call-time from authStore.
  *  Falls back to 'demo_user_1' for legacy data compatibility. */
@@ -1397,15 +1461,12 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
   if (!activeConversation) {
     const isLoading = !isDemo && conversation === undefined;
     return (
-      <View style={styles.loadingContainer}>
+      <View style={styles.container}>
         {isLoading ? (
-          <>
-            <ActivityIndicator size="large" color={COLORS.primary} />
-            <Text style={styles.loadingText}>Opening chat…</Text>
-          </>
+          <ChatLoadingSkeleton />
         ) : (
-          <>
-            <Ionicons name="chatbubble-ellipses-outline" size={48} color={COLORS.textLight} />
+          <View style={styles.loadingContainer}>
+            <Text style={styles.notFoundEmoji}>💬</Text>
             <Text style={styles.loadingText}>Chat not found</Text>
             <TouchableOpacity
               style={styles.errorBackButton}
@@ -1413,7 +1474,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
             >
               <Text style={styles.errorBackText}>Go Back</Text>
             </TouchableOpacity>
-          </>
+          </View>
         )}
       </View>
     );
@@ -1424,9 +1485,8 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
   const otherUser = activeConversation.otherUser;
   if (!otherUser || !otherUser.name) {
     return (
-      <View style={styles.loadingContainer}>
-        <ActivityIndicator size="large" color={COLORS.primary} />
-        <Text style={styles.loadingText}>Loading chat...</Text>
+      <View style={styles.container}>
+        <ChatLoadingSkeleton />
       </View>
     );
   }
@@ -1700,9 +1760,12 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
           }}
           ListEmptyComponent={
             <View style={styles.emptyChat}>
-              <Ionicons name="chatbubble-outline" size={40} color={COLORS.border} />
+              <Text style={styles.emptyChatEmoji}>👋</Text>
               <Text style={styles.emptyChatText}>
-                Say hello to {isOtherUserAnonymous ? 'Anonymous' : activeConversation.otherUser.name}!
+                No messages yet...
+              </Text>
+              <Text style={styles.emptyChatHint}>
+                Say hi to {isOtherUserAnonymous ? 'Anonymous' : activeConversation.otherUser.name}!
               </Text>
             </View>
           }
@@ -1912,11 +1975,17 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     backgroundColor: COLORS.background,
+    padding: 24,
+  },
+  notFoundEmoji: {
+    fontSize: 56,
+    marginBottom: 8,
   },
   loadingText: {
-    fontSize: 16,
-    color: COLORS.textLight,
-    marginTop: 12,
+    fontSize: 17,
+    fontWeight: '600',
+    color: COLORS.text,
+    marginTop: 8,
   },
   errorBackButton: {
     marginTop: 20,
@@ -2155,14 +2224,27 @@ const styles = StyleSheet.create({
     alignItems: 'center' as const,
     justifyContent: 'center' as const,
   },
+  // ═══════════════════════════════════════════════════════════════════════════
+  // EMPTY STATE - Friendly, calm, minimal
+  // ═══════════════════════════════════════════════════════════════════════════
   emptyChat: {
     alignItems: 'center',
-    padding: 24,
+    padding: 32,
+  },
+  emptyChatEmoji: {
+    fontSize: 48,
+    marginBottom: 12,
   },
   emptyChatText: {
-    fontSize: 15,
+    fontSize: 16,
+    fontWeight: '600',
+    color: COLORS.text,
+    marginBottom: 6,
+    textAlign: 'center',
+  },
+  emptyChatHint: {
+    fontSize: 14,
     color: COLORS.textMuted,
-    marginTop: 12,
     textAlign: 'center',
   },
   expiredBanner: {

@@ -10,6 +10,7 @@ export const COLORS = {
   secondaryDark: '#3DBDB5',
   background: '#FFFFFF',
   backgroundDark: '#F5F5F5',
+  card: '#F0F0F0',
   text: '#333333',
   textLight: '#666666',
   textMuted: '#999999',

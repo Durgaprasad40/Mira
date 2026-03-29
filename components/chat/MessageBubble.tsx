@@ -1,5 +1,5 @@
 import React from 'react';
-import { View, Text, StyleSheet, ActivityIndicator, Image, TouchableOpacity, Alert, Pressable } from 'react-native';
+import { View, Text, StyleSheet, ActivityIndicator, Image, TouchableOpacity, Alert, Pressable, Dimensions } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { COLORS } from '@/lib/constants';
 import MediaMessage from './MediaMessage';
@@ -8,10 +8,22 @@ import { SystemMessage } from './SystemMessage';
 import { VoiceMessageBubble } from './VoiceMessageBubble';
 import { formatTime } from '@/utils/chatTime';
 
-// Avatar size constant for consistent spacing
-// AVATAR-ENLARGE: Increased from 28 to 34 for better visibility
+// ═══════════════════════════════════════════════════════════════════════════
+// LAYOUT CONSTANTS - Cross-device safe
+// ═══════════════════════════════════════════════════════════════════════════
+const { width: SCREEN_WIDTH } = Dimensions.get('window');
+
+// Avatar sizing
 const AVATAR_SIZE = 34;
-const AVATAR_GAP = 8;
+const AVATAR_GAP = 10;
+
+// Bubble constraints - responsive to screen width
+// 75% on smaller screens, slightly less on larger for readability
+const MAX_BUBBLE_WIDTH = Math.min(SCREEN_WIDTH * 0.75, 320);
+
+// Border radius for premium rounded look
+const BUBBLE_RADIUS = 20;
+const BUBBLE_TAIL_RADIUS = 6; // Smaller radius for the tail corner
 
 interface MessageBubbleProps {
   message: {
@@ -397,11 +409,14 @@ export function MessageBubble({
 }
 
 const styles = StyleSheet.create({
+  // ═══════════════════════════════════════════════════════════════════════════
+  // CONTAINER - Message row layout
+  // ═══════════════════════════════════════════════════════════════════════════
   container: {
     flexDirection: 'row',
     alignItems: 'flex-end',
-    marginVertical: 3,
-    paddingHorizontal: 12,
+    marginVertical: 4,
+    paddingHorizontal: 14,
   },
   ownContainer: {
     justifyContent: 'flex-end',
@@ -410,9 +425,12 @@ const styles = StyleSheet.create({
     justifyContent: 'flex-start',
   },
   groupedContainer: {
-    marginVertical: 1, // Tighter spacing for grouped messages
+    marginVertical: 1, // Tighter spacing for consecutive same-sender messages
   },
-  // Avatar styles
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // AVATAR - Circular profile image for received messages
+  // ═══════════════════════════════════════════════════════════════════════════
   avatar: {
     width: AVATAR_SIZE,
     height: AVATAR_SIZE,
@@ -430,35 +448,42 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.primary,
   },
   avatarInitials: {
-    fontSize: 14,
-    fontWeight: '600',
+    fontSize: 13,
+    fontWeight: '700',
     color: COLORS.white,
   },
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // BUBBLE - Core message container styling
+  // ═══════════════════════════════════════════════════════════════════════════
   bubble: {
-    maxWidth: '70%',
-    paddingHorizontal: 12,
-    paddingVertical: 8,
-    borderRadius: 18,
+    maxWidth: MAX_BUBBLE_WIDTH,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderRadius: BUBBLE_RADIUS,
     backgroundColor: COLORS.backgroundDark,
   },
   ownBubble: {
     backgroundColor: COLORS.primary,
-    borderBottomRightRadius: 4,
+    borderBottomRightRadius: BUBBLE_TAIL_RADIUS,
   },
   otherBubble: {
-    backgroundColor: COLORS.backgroundDark,
-    borderBottomLeftRadius: 4,
+    backgroundColor: COLORS.card,
+    borderBottomLeftRadius: BUBBLE_TAIL_RADIUS,
   },
   dareBubble: {
     backgroundColor: COLORS.secondary,
-    maxWidth: '70%',
+    maxWidth: MAX_BUBBLE_WIDTH,
   },
   protectedBubble: {
     paddingHorizontal: 6,
     paddingVertical: 6,
     backgroundColor: 'transparent',
   },
-  // SECURE-REWRITE: Pending/uploading secure photo styles
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // PENDING - Uploading secure photo state
+  // ═══════════════════════════════════════════════════════════════════════════
   pendingBubble: {
     paddingVertical: 12,
     paddingHorizontal: 16,
@@ -473,46 +498,62 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: '500',
   },
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // EMOJI - Large emoji-only messages
+  // ═══════════════════════════════════════════════════════════════════════════
   emojiBubble: {
     backgroundColor: 'transparent',
     paddingHorizontal: 4,
     paddingVertical: 4,
   },
+  emojiText: {
+    fontSize: 34,
+    lineHeight: 42,
+    textAlign: 'center',
+  },
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // TEXT - Readable, clean typography
+  // ═══════════════════════════════════════════════════════════════════════════
   text: {
-    fontSize: 15,
+    fontSize: 16,
     color: COLORS.text,
-    lineHeight: 20,
+    lineHeight: 22,
   },
   ownText: {
     color: COLORS.white,
   },
-  emojiText: {
-    fontSize: 36,
-    lineHeight: 44,
-    textAlign: 'center',
-  },
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // FOOTER - Timestamp and read status (subtle, secondary)
+  // ═══════════════════════════════════════════════════════════════════════════
   footer: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginTop: 2,
+    marginTop: 4,
     justifyContent: 'flex-end',
   },
   time: {
     fontSize: 11,
-    color: COLORS.textLight,
+    color: COLORS.textMuted,
   },
   ownTime: {
-    color: COLORS.white,
-    opacity: 0.8,
+    color: 'rgba(255, 255, 255, 0.65)',
   },
   readIcon: {
-    marginLeft: 4,
+    marginLeft: 3,
   },
   imageFooter: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'flex-end',
+    marginTop: 4,
   },
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // DARE - Special dare message styling
+  // ═══════════════════════════════════════════════════════════════════════════
   dareHeader: {
     flexDirection: 'row',
     alignItems: 'center',
@@ -525,13 +566,13 @@ const styles = StyleSheet.create({
     marginLeft: 8,
   },
   dareContent: {
-    fontSize: 15,
+    fontSize: 16,
     color: COLORS.white,
-    lineHeight: 20,
+    lineHeight: 22,
     marginBottom: 8,
   },
   dareTime: {
-    color: COLORS.white,
-    opacity: 0.8,
+    fontSize: 11,
+    color: 'rgba(255, 255, 255, 0.65)',
   },
 });

@@ -449,7 +449,8 @@ export default function ProfileScreen() {
     return (
       <SafeAreaView edges={['top']} style={styles.container}>
         <View style={styles.loadingContainer}>
-          <Text style={styles.loadingText}>Loading profile...</Text>
+          <View style={styles.loadingAvatar} />
+          <Text style={styles.loadingText}>Loading your profile...</Text>
         </View>
       </SafeAreaView>
     );
@@ -728,6 +729,9 @@ export default function ProfileScreen() {
 }
 
 const styles = StyleSheet.create({
+  // ═══════════════════════════════════════════════════════════════════════════
+  // CONTAINER - Clean background
+  // ═══════════════════════════════════════════════════════════════════════════
   container: {
     flex: 1,
     backgroundColor: COLORS.background,
@@ -737,58 +741,74 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'center',
     backgroundColor: COLORS.background,
+    padding: 24,
   },
   loadingText: {
     fontSize: 16,
-    color: COLORS.textLight,
+    fontWeight: '500',
+    color: COLORS.textMuted,
+    marginTop: 12,
   },
+  loadingAvatar: {
+    width: 100,
+    height: 100,
+    borderRadius: 50,
+    backgroundColor: COLORS.backgroundDark,
+  },
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // HEADER - Clean, minimal top bar
+  // ═══════════════════════════════════════════════════════════════════════════
   header: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    padding: 16,
-    paddingTop: Platform.OS === 'ios' ? 50 : 16,
+    paddingHorizontal: 20,
+    paddingVertical: 14,
     backgroundColor: COLORS.background,
-    borderBottomWidth: 1,
-    borderBottomColor: COLORS.border,
   },
   headerTitle: {
-    fontSize: 28,
+    fontSize: 32,
     fontWeight: '700',
     color: COLORS.text,
   },
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // PROFILE SECTION - Prominent photo and identity
+  // ═══════════════════════════════════════════════════════════════════════════
   profileSection: {
     alignItems: 'center',
-    paddingTop: 24,
+    paddingTop: 28,
     paddingHorizontal: 24,
-    paddingBottom: 20,
+    paddingBottom: 28,
   },
   avatarContainer: {
-    marginBottom: 16,
-    // Soft shadow for premium feel
-    shadowColor: '#000',
-    shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.15,
-    shadowRadius: 12,
-    elevation: 8,
+    marginBottom: 20,
+    // Premium shadow
+    shadowColor: COLORS.primary,
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.2,
+    shadowRadius: 16,
+    elevation: 10,
   },
   avatar: {
-    width: 120,
-    height: 120,
-    borderRadius: 60,
-    borderWidth: 3,
+    width: 130,
+    height: 130,
+    borderRadius: 65,
+    borderWidth: 4,
     borderColor: COLORS.white,
+    backgroundColor: COLORS.backgroundDark,
   },
   nameRow: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
     flexWrap: 'wrap',
-    gap: 8,
-    marginBottom: 6,
+    gap: 10,
+    marginBottom: 8,
   },
   name: {
-    fontSize: 24,
+    fontSize: 26,
     fontWeight: '700',
     color: COLORS.text,
   },
@@ -796,9 +816,13 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 4,
+    backgroundColor: COLORS.primarySubtle,
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 12,
   },
   verifiedInlineText: {
-    fontSize: 14,
+    fontSize: 13,
     fontWeight: '600',
     color: COLORS.primary,
   },
@@ -806,29 +830,42 @@ const styles = StyleSheet.create({
     fontSize: 15,
     color: COLORS.textLight,
     textAlign: 'center',
-    lineHeight: 21,
-    marginBottom: 12,
-    paddingHorizontal: 16,
+    lineHeight: 22,
+    marginBottom: 14,
+    paddingHorizontal: 20,
+    maxWidth: 300,
   },
   visibilityRow: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 6,
-    paddingVertical: 4,
+    paddingVertical: 6,
+    paddingHorizontal: 12,
+    backgroundColor: COLORS.backgroundDark,
+    borderRadius: 16,
   },
   visibilityText: {
     fontSize: 13,
     color: COLORS.textMuted,
+    fontWeight: '500',
   },
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // SECTION DIVIDER - Subtle separation
+  // ═══════════════════════════════════════════════════════════════════════════
   sectionDivider: {
     height: 8,
     backgroundColor: COLORS.backgroundDark,
   },
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // STATS CARD (if used)
+  // ═══════════════════════════════════════════════════════════════════════════
   statsCard: {
     backgroundColor: COLORS.backgroundDark,
     margin: 16,
     padding: 16,
-    borderRadius: 12,
+    borderRadius: 16,
   },
   statsTitle: {
     fontSize: 18,
@@ -853,81 +890,97 @@ const styles = StyleSheet.create({
   subscriptionButton: {
     marginTop: 12,
   },
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // MENU SECTION - Clean settings list
+  // ═══════════════════════════════════════════════════════════════════════════
   menuSection: {
-    marginTop: 8,
+    paddingTop: 8,
   },
   menuItem: {
     flexDirection: 'row',
     alignItems: 'center',
-    padding: 16,
-    borderBottomWidth: 1,
-    borderBottomColor: COLORS.border,
+    paddingVertical: 16,
+    paddingHorizontal: 20,
+    minHeight: 56,
+    backgroundColor: COLORS.background,
   },
   adminMenuItem: {
-    backgroundColor: COLORS.primary + '10',
-    borderBottomColor: COLORS.primary + '30',
+    backgroundColor: COLORS.primarySubtle,
   },
   menuText: {
     flex: 1,
     fontSize: 16,
+    fontWeight: '500',
     color: COLORS.text,
-    marginLeft: 16,
+    marginLeft: 14,
   },
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // FOOTER - Destructive actions
+  // ═══════════════════════════════════════════════════════════════════════════
   footer: {
-    padding: 16,
-    paddingBottom: 32,
+    padding: 20,
+    paddingBottom: 40,
+    alignItems: 'center',
   },
   deactivateButton: {
-    marginTop: 16,
-    alignItems: 'center',
+    paddingVertical: 12,
+    paddingHorizontal: 24,
   },
   deactivateText: {
     fontSize: 14,
     color: COLORS.error,
     fontWeight: '500',
   },
-  // Preview toggle
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // PREVIEW TOGGLE - Blur preview
+  // ═══════════════════════════════════════════════════════════════════════════
   previewToggle: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 4,
-    paddingVertical: 6,
+    paddingVertical: 8,
+    paddingHorizontal: 14,
+    marginTop: 8,
   },
   previewToggleText: {
-    fontSize: 12,
+    fontSize: 13,
     color: COLORS.primary,
-    fontWeight: '500',
+    fontWeight: '600',
   },
-  // Preview container
   previewContainer: {
     alignItems: 'center',
-    marginTop: 8,
+    marginTop: 12,
     marginBottom: 8,
-    padding: 12,
+    padding: 16,
     backgroundColor: COLORS.backgroundDark,
-    borderRadius: 12,
+    borderRadius: 16,
   },
   previewThumbnail: {
-    width: 60,
-    height: 60,
-    borderRadius: 30,
-    marginBottom: 8,
+    width: 64,
+    height: 64,
+    borderRadius: 32,
+    marginBottom: 10,
   },
   previewLabel: {
-    fontSize: 11,
+    fontSize: 12,
     color: COLORS.text,
     fontWeight: '500',
     marginBottom: 2,
   },
   previewHint: {
-    fontSize: 10,
+    fontSize: 11,
     color: COLORS.textMuted,
-    fontStyle: 'italic',
   },
-  // Full-screen photo preview
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // PHOTO PREVIEW MODAL - Full-screen view
+  // ═══════════════════════════════════════════════════════════════════════════
   photoPreviewContainer: {
     flex: 1,
-    backgroundColor: '#000',
+    backgroundColor: COLORS.black,
     justifyContent: 'center',
     alignItems: 'center',
   },
@@ -948,7 +1001,7 @@ const styles = StyleSheet.create({
     width: 44,
     height: 44,
     borderRadius: 22,
-    backgroundColor: 'rgba(0,0,0,0.5)',
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
     justifyContent: 'center',
     alignItems: 'center',
   },

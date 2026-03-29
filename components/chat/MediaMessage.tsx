@@ -10,10 +10,16 @@ import {
 import { Image } from 'expo-image';
 import { Ionicons } from '@expo/vector-icons';
 import { useMediaViewStore } from '@/stores/mediaViewStore';
+import { COLORS } from '@/lib/constants';
 
-// Thumbnail size: ~1/4th of original (was 200x150, now 100x75)
-const THUMB_WIDTH = 100;
-const THUMB_HEIGHT = 75;
+// ═══════════════════════════════════════════════════════════════════════════
+// MEDIA SIZING - Consistent with bubble styling
+// ═══════════════════════════════════════════════════════════════════════════
+// Thumbnail size for secure mode (chat rooms)
+const THUMB_WIDTH = 120;
+const THUMB_HEIGHT = 90;
+// Border radius consistent with message bubbles
+const MEDIA_RADIUS = 14;
 
 // Check if URI is a local content:// URI (Android gallery) which doesn't work well with blur
 const isContentUri = (uri: string) => uri.startsWith('content://');
@@ -212,13 +218,15 @@ export default function MediaMessage({
 }
 
 const styles = StyleSheet.create({
-  // Secure mode (chat rooms) - small thumbnails
+  // ═══════════════════════════════════════════════════════════════════════════
+  // SECURE MODE - Small thumbnails for chat rooms
+  // ═══════════════════════════════════════════════════════════════════════════
   container: {
     width: THUMB_WIDTH,
     height: THUMB_HEIGHT,
-    borderRadius: 8,
+    borderRadius: MEDIA_RADIUS,
     overflow: 'hidden',
-    backgroundColor: '#1E1E2E',
+    backgroundColor: COLORS.backgroundDark,
   },
   thumbnail: {
     width: '100%',
@@ -232,16 +240,16 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(30, 30, 46, 0.4)',
   },
   darkOverlay: {
-    backgroundColor: 'rgba(30, 30, 46, 0.7)', // Darker overlay for non-blurred images to maintain privacy
+    backgroundColor: 'rgba(30, 30, 46, 0.7)',
   },
   videoIndicator: {
     position: 'absolute',
-    top: 4,
-    right: 4,
-    width: 22,
-    height: 22,
-    borderRadius: 11,
-    backgroundColor: 'rgba(0,0,0,0.6)',
+    top: 6,
+    right: 6,
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
     alignItems: 'center',
     justifyContent: 'center',
   },
@@ -252,28 +260,32 @@ const styles = StyleSheet.create({
   },
   hintText: {
     fontSize: 10,
-    color: 'rgba(255,255,255,0.4)',
-    fontWeight: '500',
+    color: 'rgba(255, 255, 255, 0.5)',
+    fontWeight: '600',
     textAlign: 'center',
   },
   consumedOverlay: {
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: '#2C2C3A',
+    backgroundColor: COLORS.border,
   },
   consumedText: {
-    fontSize: 9,
-    color: 'rgba(255,255,255,0.4)',
-    marginTop: 2,
+    fontSize: 10,
+    color: 'rgba(0, 0, 0, 0.4)',
+    marginTop: 3,
+    fontWeight: '500',
   },
-  // Legacy mode (DMs) - larger previews
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // LEGACY MODE - Larger previews for DMs
+  // ═══════════════════════════════════════════════════════════════════════════
   legacyContainer: {
-    width: 200,
-    height: 150,
-    borderRadius: 12,
+    width: 220,
+    height: 165,
+    borderRadius: 16,
     overflow: 'hidden',
-    backgroundColor: '#1E1E2E',
+    backgroundColor: COLORS.backgroundDark,
   },
   legacyThumbnail: {
     width: '100%',
@@ -283,6 +295,6 @@ const styles = StyleSheet.create({
     ...StyleSheet.absoluteFillObject,
     alignItems: 'center',
     justifyContent: 'center',
-    backgroundColor: 'rgba(0,0,0,0.3)',
+    backgroundColor: 'rgba(0, 0, 0, 0.25)',
   },
 });
