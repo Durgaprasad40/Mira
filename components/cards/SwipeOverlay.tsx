@@ -1,116 +1,269 @@
 import React from 'react';
-import { View, Text, StyleSheet, Animated as RNAnimated } from 'react-native';
-import Animated, { useAnimatedStyle, SharedValue } from 'react-native-reanimated';
+import { View, Text, StyleSheet, Dimensions } from 'react-native';
+import Animated, {
+  useAnimatedStyle,
+  SharedValue,
+  interpolate,
+  Extrapolation,
+} from 'react-native-reanimated';
 import { Ionicons } from '@expo/vector-icons';
 import { COLORS } from '@/lib/constants';
 
+const { width: SCREEN_WIDTH } = Dimensions.get('window');
+
 interface SwipeOverlayProps {
   direction: 'left' | 'right' | 'up' | null;
-  opacity: SharedValue<number> | number | RNAnimated.Value;
+  opacity: SharedValue<number> | number;
+  /** Optional: pass panX for position-based opacity interpolation */
+  panX?: SharedValue<number>;
+  /** Optional: pass panY for position-based opacity interpolation */
+  panY?: SharedValue<number>;
+  /** When true, uses premium Phase-2 styling */
+  dark?: boolean;
 }
 
 // Type guard to check if opacity is a Reanimated SharedValue
-// Uses .modify method presence (SharedValue-specific) to avoid reading .value during render
 function isSharedValue(value: any): value is SharedValue<number> {
   return value !== null && typeof value === 'object' && typeof value.modify === 'function';
 }
 
-// Type guard to check if opacity is a React Native Animated.Value
-function isAnimatedValue(value: any): value is RNAnimated.Value {
-  return value !== null && typeof value === 'object' && '_value' in value;
-}
+// Premium overlay configuration
+const OVERLAY_CONFIG = {
+  left: {
+    icon: 'close' as const,
+    iconColor: '#FFFFFF',
+    tintColor: 'rgba(239, 68, 68, 0.35)', // Red tint
+    borderColor: 'rgba(239, 68, 68, 0.8)',
+    labelColor: '#EF4444',
+    label: 'NOPE',
+    position: 'topLeft' as const,
+  },
+  right: {
+    icon: 'heart' as const,
+    iconColor: '#FFFFFF',
+    tintColor: 'rgba(34, 197, 94, 0.35)', // Green tint
+    borderColor: 'rgba(34, 197, 94, 0.8)',
+    labelColor: '#22C55E',
+    label: 'LIKE',
+    position: 'topRight' as const,
+  },
+  up: {
+    icon: 'star' as const,
+    iconColor: '#FFFFFF',
+    tintColor: 'rgba(250, 204, 21, 0.35)', // Gold tint
+    borderColor: 'rgba(250, 204, 21, 0.8)',
+    labelColor: '#FACC15',
+    label: 'STAND OUT',
+    position: 'topCenter' as const,
+  },
+};
 
-// Inner component for SharedValue opacity (Reanimated)
-function ReanimatedOverlay({ direction, opacity }: { direction: 'left' | 'right' | 'up'; opacity: SharedValue<number> }) {
-  const animatedStyle = useAnimatedStyle(() => ({
-    opacity: opacity.value,
+// Premium animated overlay with tint effect
+function PremiumSwipeOverlay({
+  direction,
+  opacity,
+  dark = false,
+}: {
+  direction: 'left' | 'right' | 'up';
+  opacity: SharedValue<number>;
+  dark?: boolean;
+}) {
+  const config = OVERLAY_CONFIG[direction];
+
+  // Animated style for the full-screen tint
+  const tintStyle = useAnimatedStyle(() => ({
+    opacity: interpolate(
+      opacity.value,
+      [0, 0.3, 1],
+      [0, 0.4, 0.85],
+      Extrapolation.CLAMP
+    ),
   }));
 
-  const config = getConfig(direction);
-  if (!config) return null;
+  // Animated style for the icon badge
+  const badgeStyle = useAnimatedStyle(() => ({
+    opacity: interpolate(
+      opacity.value,
+      [0, 0.2, 0.6],
+      [0, 0.5, 1],
+      Extrapolation.CLAMP
+    ),
+    transform: [
+      {
+        scale: interpolate(
+          opacity.value,
+          [0, 0.3, 0.7, 1],
+          [0.5, 0.8, 1, 1.05],
+          Extrapolation.CLAMP
+        ),
+      },
+    ],
+  }));
+
+  // Animated style for the label
+  const labelStyle = useAnimatedStyle(() => ({
+    opacity: interpolate(
+      opacity.value,
+      [0, 0.4, 0.8],
+      [0, 0.3, 1],
+      Extrapolation.CLAMP
+    ),
+    transform: [
+      {
+        translateY: interpolate(
+          opacity.value,
+          [0, 0.5, 1],
+          [10, 3, 0],
+          Extrapolation.CLAMP
+        ),
+      },
+    ],
+  }));
+
+  // Position styles based on direction
+  const getPositionStyle = () => {
+    switch (config.position) {
+      case 'topLeft':
+        return { top: 80, left: 24 };
+      case 'topRight':
+        return { top: 80, right: 24 };
+      case 'topCenter':
+        return { top: 80, alignSelf: 'center' as const };
+      default:
+        return { top: 80, alignSelf: 'center' as const };
+    }
+  };
 
   return (
-    <Animated.View style={[styles.container, animatedStyle]} pointerEvents="box-none">
-      <View style={[styles.overlay, { borderColor: config.color }]} pointerEvents="none">
-        <Ionicons name={config.icon} size={48} color={config.color} />
-        <Text style={[styles.text, { color: config.color }]}>{config.text}</Text>
-      </View>
-    </Animated.View>
+    <View style={styles.container} pointerEvents="none">
+      {/* Full-screen color tint overlay */}
+      <Animated.View
+        style={[
+          styles.tintOverlay,
+          { backgroundColor: config.tintColor },
+          tintStyle,
+        ]}
+      />
+
+      {/* Icon badge positioned at corner/top */}
+      <Animated.View
+        style={[
+          styles.iconBadge,
+          getPositionStyle(),
+          { borderColor: config.borderColor },
+          dark && styles.iconBadgeDark,
+          badgeStyle,
+        ]}
+      >
+        <Ionicons
+          name={config.icon}
+          size={direction === 'up' ? 36 : 32}
+          color={config.labelColor}
+        />
+      </Animated.View>
+
+      {/* Floating label below badge */}
+      <Animated.View
+        style={[
+          styles.labelContainer,
+          getPositionStyle(),
+          { marginTop: direction === 'up' ? 150 : 145 },
+          labelStyle,
+        ]}
+      >
+        <Text style={[styles.label, { color: config.labelColor }]}>
+          {config.label}
+        </Text>
+      </Animated.View>
+    </View>
   );
 }
 
-// Inner component for React Native Animated.Value opacity
-function RNAnimatedOverlay({ direction, opacity }: { direction: 'left' | 'right' | 'up'; opacity: RNAnimated.Value }) {
-  const config = getConfig(direction);
-  if (!config) return null;
+// Fallback component for static number opacity (backward compat)
+function StaticSwipeOverlay({
+  direction,
+  opacity,
+  dark = false,
+}: {
+  direction: 'left' | 'right' | 'up';
+  opacity: number;
+  dark?: boolean;
+}) {
+  const config = OVERLAY_CONFIG[direction];
+  if (opacity === 0) return null;
+
+  const getPositionStyle = () => {
+    switch (config.position) {
+      case 'topLeft':
+        return { top: 80, left: 24 };
+      case 'topRight':
+        return { top: 80, right: 24 };
+      case 'topCenter':
+        return { top: 80, alignSelf: 'center' as const };
+      default:
+        return { top: 80, alignSelf: 'center' as const };
+    }
+  };
 
   return (
-    <RNAnimated.View style={[styles.container, { opacity }]} pointerEvents="box-none">
-      <View style={[styles.overlay, { borderColor: config.color }]} pointerEvents="none">
-        <Ionicons name={config.icon} size={48} color={config.color} />
-        <Text style={[styles.text, { color: config.color }]}>{config.text}</Text>
+    <View style={[styles.container, { opacity }]} pointerEvents="none">
+      <View style={[styles.tintOverlay, { backgroundColor: config.tintColor }]} />
+      <View
+        style={[
+          styles.iconBadge,
+          getPositionStyle(),
+          { borderColor: config.borderColor },
+          dark && styles.iconBadgeDark,
+        ]}
+      >
+        <Ionicons
+          name={config.icon}
+          size={direction === 'up' ? 36 : 32}
+          color={config.labelColor}
+        />
       </View>
-    </RNAnimated.View>
-  );
-}
-
-// Inner component for static number opacity
-function StaticOverlay({ direction, opacity }: { direction: 'left' | 'right' | 'up'; opacity: number }) {
-  const config = getConfig(direction);
-  if (!config) return null;
-
-  return (
-    <View style={[styles.container, { opacity }]} pointerEvents="box-none">
-      <View style={[styles.overlay, { borderColor: config.color }]} pointerEvents="none">
-        <Ionicons name={config.icon} size={48} color={config.color} />
-        <Text style={[styles.text, { color: config.color }]}>{config.text}</Text>
+      <View
+        style={[
+          styles.labelContainer,
+          getPositionStyle(),
+          { marginTop: direction === 'up' ? 150 : 145 },
+        ]}
+      >
+        <Text style={[styles.label, { color: config.labelColor }]}>
+          {config.label}
+        </Text>
       </View>
     </View>
   );
 }
 
-function getConfig(direction: 'left' | 'right' | 'up') {
-  switch (direction) {
-    case 'left':
-      return {
-        icon: 'close' as const,
-        color: COLORS.error,
-        text: 'NOPE',
-      };
-    case 'right':
-      return {
-        icon: 'heart' as const,
-        color: COLORS.success,
-        text: 'LIKE',
-      };
-    case 'up':
-      return {
-        icon: 'star' as const,
-        color: '#2196F3',
-        text: 'STAND OUT',
-      };
-    default:
-      return null;
-  }
-}
-
-export const SwipeOverlay = React.memo(function SwipeOverlay({ direction, opacity }: SwipeOverlayProps) {
+export const SwipeOverlay = React.memo(function SwipeOverlay({
+  direction,
+  opacity,
+  dark = false,
+}: SwipeOverlayProps) {
   if (!direction) return null;
 
-  // Handle static number opacity - return null if zero
+  // Handle static number opacity (backward compatibility)
   if (typeof opacity === 'number') {
-    if (opacity === 0) return null;
-    return <StaticOverlay direction={direction} opacity={opacity} />;
+    return (
+      <StaticSwipeOverlay
+        direction={direction}
+        opacity={opacity}
+        dark={dark}
+      />
+    );
   }
 
-  // Handle Reanimated SharedValue
+  // Handle SharedValue opacity (premium animated version)
   if (isSharedValue(opacity)) {
-    return <ReanimatedOverlay direction={direction} opacity={opacity} />;
-  }
-
-  // Handle React Native Animated.Value
-  if (isAnimatedValue(opacity)) {
-    return <RNAnimatedOverlay direction={direction} opacity={opacity} />;
+    return (
+      <PremiumSwipeOverlay
+        direction={direction}
+        opacity={opacity}
+        dark={dark}
+      />
+    );
   }
 
   return null;
@@ -119,21 +272,43 @@ export const SwipeOverlay = React.memo(function SwipeOverlay({ direction, opacit
 const styles = StyleSheet.create({
   container: {
     ...StyleSheet.absoluteFillObject,
-    justifyContent: 'center',
-    alignItems: 'center',
-    zIndex: 10,
+    zIndex: 20,
   },
-  overlay: {
+  // Full-screen tint overlay
+  tintOverlay: {
+    ...StyleSheet.absoluteFillObject,
+  },
+  // Icon badge (positioned at corners/top)
+  iconBadge: {
+    position: 'absolute',
+    width: 64,
+    height: 64,
+    borderRadius: 32,
+    backgroundColor: 'rgba(0, 0, 0, 0.4)',
+    borderWidth: 3,
     alignItems: 'center',
     justifyContent: 'center',
-    padding: 24,
-    borderWidth: 4,
-    borderRadius: 16,
-    backgroundColor: 'rgba(0, 0, 0, 0.3)',
+    // Subtle shadow for depth
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+    elevation: 8,
   },
-  text: {
-    fontSize: 24,
+  iconBadgeDark: {
+    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+  },
+  // Label below icon
+  labelContainer: {
+    position: 'absolute',
+    alignItems: 'center',
+  },
+  label: {
+    fontSize: 16,
     fontWeight: '800',
-    marginTop: 8,
+    letterSpacing: 2,
+    textShadowColor: 'rgba(0, 0, 0, 0.5)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 4,
   },
 });

@@ -28,13 +28,19 @@ export const COLORS = {
 
 // Swipe Configuration
 export const SWIPE_CONFIG = {
-  SWIPE_THRESHOLD_X: 0.3, // 30% of screen width
-  SWIPE_THRESHOLD_Y: 0.2, // 20% of screen height
-  SWIPE_VELOCITY_X: 0.7, // horizontal velocity threshold
-  SWIPE_VELOCITY_Y: 0.7, // vertical velocity threshold
-  ROTATION_ANGLE: 15, // degrees
-  ANIMATION_DURATION: 300, // ms
+  SWIPE_THRESHOLD_X: 0.25, // 25% of screen width (slightly easier to trigger)
+  SWIPE_THRESHOLD_Y: 0.18, // 18% of screen height
+  SWIPE_VELOCITY_X: 0.6, // horizontal velocity threshold (more responsive)
+  SWIPE_VELOCITY_Y: 0.6, // vertical velocity threshold
+  ROTATION_ANGLE: 8, // degrees (subtle, premium feel)
+  ANIMATION_DURATION: 280, // ms (slightly faster exit)
   HAPTIC_ENABLED: true,
+  // Stack depth settings
+  NEXT_CARD_SCALE: 0.94, // Scale of card behind
+  NEXT_CARD_OFFSET_Y: 8, // Vertical offset (pixels)
+  // Spring animation config
+  SPRING_DAMPING: 18, // Bounciness control (lower = more bounce)
+  SPRING_STIFFNESS: 280, // Speed of spring (higher = snappier)
 };
 
 // Validation Rules

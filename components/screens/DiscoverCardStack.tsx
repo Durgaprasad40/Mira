@@ -18,10 +18,16 @@ import Animated, {
   useAnimatedStyle,
   withSpring,
   withTiming,
+  withDelay,
+  withSequence,
   interpolate,
   runOnJS,
   Extrapolation,
+  FadeIn,
+  FadeOut,
+  SlideInDown,
 } from "react-native-reanimated";
+import { BlurView } from "expo-blur";
 import { Gesture, GestureDetector } from "react-native-gesture-handler";
 import { LoadingGuard } from "@/components/safety";
 import { useShallow } from "zustand/react/shallow";
@@ -1171,12 +1177,23 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   const activePanX = activeSlot === 0 ? panAX : panBX;
   const activePanY = activeSlot === 0 ? panAY : panBY;
 
-  // Card animated style - runs on UI thread
+  // Card animated style - runs on UI thread (premium rotation + position)
   const cardAnimatedStyle = useAnimatedStyle(() => {
+    // Premium rotation: subtle tilt based on horizontal drag
     const rotation = interpolate(
       activePanX.value,
       [-SCREEN_WIDTH / 2, 0, SCREEN_WIDTH / 2],
       [-SWIPE_CONFIG.ROTATION_ANGLE, 0, SWIPE_CONFIG.ROTATION_ANGLE],
+      Extrapolation.CLAMP
+    );
+    // Slight scale reduction when dragging for depth feel
+    const dragDistance = Math.sqrt(
+      activePanX.value * activePanX.value + activePanY.value * activePanY.value
+    );
+    const scale = interpolate(
+      dragDistance,
+      [0, SCREEN_WIDTH * 0.5],
+      [1, 0.98],
       Extrapolation.CLAMP
     );
     return {
@@ -1184,21 +1201,42 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
         { translateX: activePanX.value },
         { translateY: activePanY.value },
         { rotate: `${rotation}deg` },
-        { scale: 1 },
+        { scale },
       ],
     };
   });
 
-  // Next card scale animated style - runs on UI thread
+  // Next card animated style - premium stack depth effect
+  // Card behind scales up and moves up as top card is dragged away
   const nextCardAnimatedStyle = useAnimatedStyle(() => {
+    const dragDistance = Math.abs(activePanX.value) + Math.abs(activePanY.value) * 0.5;
+    // Scale from 0.94 → 1.0 as top card moves away
     const scale = interpolate(
-      activePanX.value,
-      [-SCREEN_WIDTH / 2, 0, SCREEN_WIDTH / 2],
-      [1, 0.95, 1],
+      dragDistance,
+      [0, SCREEN_WIDTH * 0.4],
+      [SWIPE_CONFIG.NEXT_CARD_SCALE, 1],
+      Extrapolation.CLAMP
+    );
+    // Translate up slightly as it scales
+    const translateY = interpolate(
+      dragDistance,
+      [0, SCREEN_WIDTH * 0.4],
+      [SWIPE_CONFIG.NEXT_CARD_OFFSET_Y, 0],
+      Extrapolation.CLAMP
+    );
+    // Slight opacity increase for polish
+    const opacity = interpolate(
+      dragDistance,
+      [0, SCREEN_WIDTH * 0.3],
+      [0.92, 1],
       Extrapolation.CLAMP
     );
     return {
-      transform: [{ scale }],
+      transform: [
+        { scale },
+        { translateY },
+      ],
+      opacity,
     };
   });
 
@@ -1316,11 +1354,20 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   const resetPosition = useCallback(() => {
     const currentPanX = getActivePanX();
     const currentPanY = getActivePanY();
-    // Use withSpring for smooth return animation on UI thread
-    currentPanX.value = withSpring(0, { damping: 15, stiffness: 200 });
-    currentPanY.value = withSpring(0, { damping: 15, stiffness: 200 });
+    // Premium spring animation: snappy bounce-back with subtle overshoot
+    currentPanX.value = withSpring(0, {
+      damping: SWIPE_CONFIG.SPRING_DAMPING,
+      stiffness: SWIPE_CONFIG.SPRING_STIFFNESS,
+      mass: 0.8,
+    });
+    currentPanY.value = withSpring(0, {
+      damping: SWIPE_CONFIG.SPRING_DAMPING,
+      stiffness: SWIPE_CONFIG.SPRING_STIFFNESS,
+      mass: 0.8,
+    });
     overlayDirectionRef.current = null;
-    overlayOpacity.value = 0;
+    // Fade out overlay smoothly
+    overlayOpacity.value = withTiming(0, { duration: 150 });
     setOverlayDirection(null);
   }, [panAX, panAY, panBX, panBY, overlayOpacity]);
 
@@ -1542,6 +1589,8 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
             });
             if (isNewMatch) {
               trackEvent({ name: 'match_created', otherUserId: swipedProfile.id });
+              // Premium haptic: Strong feedback for match celebration
+              Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
               // P2_MATCH: Show match celebration
               setPhase2MatchCelebration({
                 visible: true,
@@ -2132,7 +2181,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
                 exploreTag={exploreCategoryId ? CATEGORY_TAG_LABELS[exploreCategoryId] : undefined}
                 lastActive={current.lastActive ?? (current as any).lastActiveAt}
               />
-              <SwipeOverlay direction={overlayDirection} opacity={overlayOpacity} />
+              <SwipeOverlay direction={overlayDirection} opacity={overlayOpacity} dark={dark} />
             </Animated.View>
           </GestureDetector>
         )}
@@ -2239,44 +2288,85 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
         </View>
       </Modal>
 
-      {/* P2_MATCH: Phase-2 Match Celebration Modal */}
+      {/* P2_MATCH: Premium Deep Connect Match Celebration */}
       {phase2MatchCelebration.visible && phase2MatchCelebration.matchedProfile && (
         <Modal
           visible
           transparent
-          animationType="fade"
+          statusBarTranslucent
+          animationType="none"
           onRequestClose={() => setPhase2MatchCelebration({ visible: false, matchedProfile: null })}
         >
-          <View style={styles.p2MatchOverlay}>
-            <View style={styles.p2MatchSheet}>
-              {/* Matched profile photo */}
-              <View style={styles.p2MatchAvatarContainer}>
-                {phase2MatchCelebration.matchedProfile.photoUrl ? (
-                  <Image
-                    source={{ uri: phase2MatchCelebration.matchedProfile.photoUrl }}
-                    style={styles.p2MatchAvatar}
-                    blurRadius={8}
-                  />
-                ) : (
-                  <View style={[styles.p2MatchAvatar, styles.p2MatchAvatarPlaceholder]}>
-                    <Ionicons name="person" size={40} color={INCOGNITO_COLORS.textLight} />
-                  </View>
-                )}
-                <View style={styles.p2MatchHeartBadge}>
-                  <Ionicons name="heart" size={20} color="#FFF" />
+          {/* Premium full-screen backdrop */}
+          <Animated.View
+            entering={FadeIn.duration(300)}
+            exiting={FadeOut.duration(200)}
+            style={styles.p2MatchFullScreen}
+          >
+            {/* Blur background for premium feel */}
+            <BlurView intensity={40} tint="dark" style={StyleSheet.absoluteFill} />
+
+            {/* Gradient overlay for depth */}
+            <View style={styles.p2MatchGradientOverlay} />
+
+            {/* Celebration content */}
+            <Animated.View
+              entering={FadeIn.delay(150).duration(400)}
+              style={styles.p2MatchContent}
+            >
+              {/* Decorative glow ring */}
+              <View style={styles.p2MatchGlowRing} />
+
+              {/* Premium avatar composition */}
+              <Animated.View
+                entering={FadeIn.delay(200).duration(500).springify()}
+                style={styles.p2MatchAvatarSection}
+              >
+                {/* Heart icon above */}
+                <View style={styles.p2MatchFloatingHeart}>
+                  <Ionicons name="heart" size={28} color="#9b59b6" />
                 </View>
-              </View>
 
-              {/* Title */}
-              <Text style={styles.p2MatchTitle}>It's a Match! 🎉</Text>
-              <Text style={styles.p2MatchSubtitle}>
-                You and {phase2MatchCelebration.matchedProfile.name} liked each other
-              </Text>
+                {/* Profile photo with premium frame */}
+                <View style={styles.p2MatchPremiumFrame}>
+                  <View style={styles.p2MatchInnerFrame}>
+                    {phase2MatchCelebration.matchedProfile.photoUrl ? (
+                      <Image
+                        source={{ uri: phase2MatchCelebration.matchedProfile.photoUrl }}
+                        style={styles.p2MatchPremiumAvatar}
+                        blurRadius={12}
+                        contentFit="cover"
+                      />
+                    ) : (
+                      <View style={[styles.p2MatchPremiumAvatar, styles.p2MatchAvatarPlaceholder]}>
+                        <Ionicons name="person" size={48} color="rgba(255,255,255,0.4)" />
+                      </View>
+                    )}
+                  </View>
+                  {/* Accent ring */}
+                  <View style={styles.p2MatchAccentRing} />
+                </View>
+              </Animated.View>
 
-              {/* Actions */}
-              <View style={styles.p2MatchActions}>
+              {/* Premium typography */}
+              <Animated.View
+                entering={FadeIn.delay(350).duration(400)}
+                style={styles.p2MatchTextSection}
+              >
+                <Text style={styles.p2MatchPremiumTitle}>It's a Deep Connect</Text>
+                <Text style={styles.p2MatchPremiumSubtitle}>
+                  You and {phase2MatchCelebration.matchedProfile.name} share a connection
+                </Text>
+              </Animated.View>
+
+              {/* Premium action buttons */}
+              <Animated.View
+                entering={FadeIn.delay(500).duration(400)}
+                style={styles.p2MatchPremiumActions}
+              >
                 <TouchableOpacity
-                  style={styles.p2MatchPrimaryBtn}
+                  style={styles.p2MatchStartChatBtn}
+                  activeOpacity={0.85}
                   onPress={() => {
                     const convoId = phase2MatchCelebration.matchedProfile?.conversationId;
                     setPhase2MatchCelebration({ visible: false, matchedProfile: null });
@@ -2285,19 +2375,22 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
                     }
                   }}
                 >
-                  <Ionicons name="chatbubble" size={18} color="#FFF" />
-                  <Text style={styles.p2MatchPrimaryText}>Send Message</Text>
+                  <View style={styles.p2MatchBtnGradient}>
+                    <Ionicons name="chatbubble-ellipses" size={20} color="#FFF" />
+                    <Text style={styles.p2MatchStartChatText}>Start Chat</Text>
+                  </View>
                 </TouchableOpacity>
 
                 <TouchableOpacity
-                  style={styles.p2MatchSecondaryBtn}
+                  style={styles.p2MatchKeepExploringBtn}
+                  activeOpacity={0.7}
                   onPress={() => setPhase2MatchCelebration({ visible: false, matchedProfile: null })}
                 >
-                  <Text style={styles.p2MatchSecondaryText}>Keep Swiping</Text>
+                  <Text style={styles.p2MatchKeepExploringText}>Keep Exploring</Text>
                 </TouchableOpacity>
-              </View>
-            </View>
-          </View>
+              </Animated.View>
+            </Animated.View>
+          </Animated.View>
         </Modal>
       )}
     </View>
@@ -2677,5 +2770,134 @@ const styles = StyleSheet.create({
     fontSize: 15,
     fontWeight: "500",
     color: INCOGNITO_COLORS.textLight,
+  },
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // PREMIUM MATCH CELEBRATION (Phase-2 Deep Connect)
+  // ══════════════════════════════════════════════════════════════════════════
+  p2MatchFullScreen: {
+    ...StyleSheet.absoluteFillObject,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  p2MatchGradientOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: "rgba(0, 0, 0, 0.75)",
+  },
+  p2MatchContent: {
+    alignItems: "center",
+    justifyContent: "center",
+    paddingHorizontal: 32,
+    paddingVertical: 48,
+    width: "100%",
+    maxWidth: 340,
+  },
+  p2MatchGlowRing: {
+    position: "absolute",
+    width: 280,
+    height: 280,
+    borderRadius: 140,
+    backgroundColor: "transparent",
+    borderWidth: 2,
+    borderColor: "rgba(155, 89, 182, 0.15)",
+    top: "50%",
+    marginTop: -140,
+  },
+  p2MatchAvatarSection: {
+    alignItems: "center",
+    marginBottom: 28,
+  },
+  p2MatchFloatingHeart: {
+    width: 48,
+    height: 48,
+    borderRadius: 24,
+    backgroundColor: "rgba(155, 89, 182, 0.2)",
+    alignItems: "center",
+    justifyContent: "center",
+    marginBottom: 16,
+  },
+  p2MatchPremiumFrame: {
+    width: 140,
+    height: 140,
+    borderRadius: 70,
+    backgroundColor: "rgba(155, 89, 182, 0.15)",
+    alignItems: "center",
+    justifyContent: "center",
+    position: "relative",
+  },
+  p2MatchInnerFrame: {
+    width: 120,
+    height: 120,
+    borderRadius: 60,
+    backgroundColor: INCOGNITO_COLORS.surface,
+    alignItems: "center",
+    justifyContent: "center",
+    overflow: "hidden",
+  },
+  p2MatchPremiumAvatar: {
+    width: 120,
+    height: 120,
+    borderRadius: 60,
+  },
+  p2MatchAccentRing: {
+    position: "absolute",
+    width: 148,
+    height: 148,
+    borderRadius: 74,
+    borderWidth: 2,
+    borderColor: "rgba(155, 89, 182, 0.4)",
+    borderStyle: "dashed",
+  },
+  p2MatchTextSection: {
+    alignItems: "center",
+    marginBottom: 32,
+  },
+  p2MatchPremiumTitle: {
+    fontSize: 28,
+    fontWeight: "700",
+    color: "#FFFFFF",
+    letterSpacing: -0.5,
+    marginBottom: 10,
+    textAlign: "center",
+  },
+  p2MatchPremiumSubtitle: {
+    fontSize: 16,
+    color: "rgba(255, 255, 255, 0.7)",
+    textAlign: "center",
+    lineHeight: 24,
+  },
+  p2MatchPremiumActions: {
+    width: "100%",
+    gap: 14,
+  },
+  p2MatchStartChatBtn: {
+    width: "100%",
+    borderRadius: 16,
+    overflow: "hidden",
+  },
+  p2MatchBtnGradient: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "center",
+    gap: 10,
+    backgroundColor: "#9b59b6",
+    paddingVertical: 16,
+    paddingHorizontal: 32,
+  },
+  p2MatchStartChatText: {
+    fontSize: 17,
+    fontWeight: "700",
+    color: "#FFFFFF",
+    letterSpacing: 0.3,
+  },
+  p2MatchKeepExploringBtn: {
+    alignItems: "center",
+    justifyContent: "center",
+    paddingVertical: 14,
+  },
+  p2MatchKeepExploringText: {
+    fontSize: 15,
+    fontWeight: "500",
+    color: "rgba(255, 255, 255, 0.6)",
   },
 });
