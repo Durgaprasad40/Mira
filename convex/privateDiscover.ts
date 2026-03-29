@@ -35,9 +35,8 @@ const SOFT_PENALTY = {
 // Returns profiles sorted by ranking score (descending)
 export const getProfiles = query({
   args: {
-    // P1-007 FIX: userId arg kept for backward compat - used as fallback when server auth fails
-    userId: v.optional(v.id('users')),
-    // AUTH_FIX: authUserId string for fallback resolution
+    // P1-002 FIX: Removed userId arg - server auth only (fail closed)
+    // AUTH_FIX: authUserId string for dev/testing fallback resolution
     authUserId: v.optional(v.string()),
     limit: v.optional(v.number()),
   },
@@ -66,25 +65,12 @@ export const getProfiles = query({
       }
     }
 
-    // Step 3: Fallback to userId arg (legacy)
-    if (!viewerUserId && args.userId) {
-      viewerUserId = args.userId;
-      authSource = 'userId_fallback';
-    }
+    // P1-002 FIX: REMOVED userId arg fallback - fail closed for security
+    // Client-supplied userId could allow impersonation
 
-    // DEBUG: Log auth resolution
-    console.log('[PHASE2_DISCOVER_BE] Auth resolution:', {
-      identityExists: !!identity,
-      identitySubject: identity?.subject ? 'present' : 'missing',
-      argsAuthUserId: args.authUserId ? 'present' : 'missing',
-      argsUserId: args.userId ? 'present' : 'missing',
-      resolvedUserId: viewerUserId ? String(viewerUserId) : null,
-      authSource,
-    });
-
+    // P1-002 FIX: Fail closed if auth fails - do not return empty silently
     if (!viewerUserId) {
-      console.warn('[PHASE2_DISCOVER_BE] No valid auth - returning empty');
-      return []; // No valid auth - return empty
+      throw new Error('Authentication required for Phase-2 discover');
     }
 
     // Phase 3: Shadow mode decision (once per request)
@@ -224,8 +210,9 @@ export const getProfiles = query({
 
     // =========================================================================
     // FALLBACK LADDER: Ensure we return profiles when they exist
-    // Hard filters (NEVER relaxed): self, blocked, deleted/pending deletion
-    // Soft filters (relaxed in stages): swiped, chat partners
+    // P0-004 FIX: alreadySwipedUserIds is NOW a HARD filter (NEVER relaxed)
+    // Hard filters (NEVER relaxed): self, blocked, deleted/pending deletion, SWIPED
+    // Soft filters (relaxed in stages): chat partners only
     // =========================================================================
     let finalEligible = eligible;
     let fallbackStage = 'strict'; // Track which stage we used
@@ -235,40 +222,22 @@ export const getProfiles = query({
       fallbackStage = 'strict';
     }
 
-    // STAGE 2 (RELAXED): Relax swiped filter if strict result is empty
-    if (finalEligible.length === 0 && profiles.length > 0) {
-      fallbackStage = 'relaxed_swiped';
-      finalEligible = profiles.filter(
-        (p) =>
-          p.userId !== viewerUserId &&
-          !blockedUserIds.has(p.userId as string) &&
-          !deletedUserIds.has(p.userId as string) &&
-          !conversationPartnerIds.has(p.userId as string)
-      );
-    }
-
-    // STAGE 3 (MORE RELAXED): Also relax chat partners filter
+    // STAGE 2 (RELAXED): Relax chat partners filter only
+    // P0-004 FIX: alreadySwipedUserIds is ALWAYS applied - users must NEVER see swiped profiles
     if (finalEligible.length === 0 && profiles.length > 0) {
       fallbackStage = 'relaxed_chatpartners';
       finalEligible = profiles.filter(
         (p) =>
           p.userId !== viewerUserId &&
           !blockedUserIds.has(p.userId as string) &&
-          !deletedUserIds.has(p.userId as string)
+          !deletedUserIds.has(p.userId as string) &&
+          !alreadySwipedUserIds.has(p.userId as string) // P0-004: NEVER removed
       );
     }
 
-    // STAGE 4 (SAFE POOL): Relax all soft filters, keep hard filters
-    // Hard filters always applied: self, blocked, deleted
-    if (finalEligible.length === 0 && profiles.length > 0) {
-      fallbackStage = 'safe_pool';
-      finalEligible = profiles.filter(
-        (p) =>
-          p.userId !== viewerUserId &&
-          !blockedUserIds.has(p.userId as string) &&
-          !deletedUserIds.has(p.userId as string)
-      );
-    }
+    // P0-004 FIX: Removed STAGE 3 and STAGE 4 that relaxed swiped filter
+    // If no profiles remain after hard filters, return empty list
+    // This is correct behavior - users should NOT see recycled profiles
 
     // Log fallback result
     console.log('[PRIVATE_DISCOVER_FALLBACK]', {

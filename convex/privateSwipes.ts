@@ -7,9 +7,9 @@
  */
 
 import { v } from 'convex/values';
-import { mutation, query, MutationCtx } from './_generated/server';
+import { mutation, query, MutationCtx, QueryCtx } from './_generated/server';
 import { Id } from './_generated/dataModel';
-import { validateSessionToken } from './helpers';
+import { validateSessionToken, resolveUserIdByAuthId } from './helpers';
 
 // Helper: Check if either user has blocked the other
 async function isBlockedBidirectional(
@@ -405,14 +405,24 @@ export const swipe = mutation({
 
 /**
  * Get Phase-2 swipe history for a user
+ * P1-SECURITY FIX: Requires auth - users can only access their OWN swipe history
  */
 export const getSwipeHistory = query({
   args: {
-    userId: v.id('users'),
     limit: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
-    const { userId, limit = 50 } = args;
+    const { limit = 50 } = args;
+
+    // P1-SECURITY FIX: Validate caller identity - fail closed
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity?.subject) {
+      throw new Error('Authentication required');
+    }
+    const userId = await resolveUserIdByAuthId(ctx, identity.subject);
+    if (!userId) {
+      throw new Error('User not found');
+    }
 
     return await ctx.db
       .query('privateLikes')
@@ -424,14 +434,24 @@ export const getSwipeHistory = query({
 
 /**
  * Check if user has already swiped on another user in Phase-2
+ * P1-SECURITY FIX: Requires auth - users can only check their OWN swipes
  */
 export const hasSwipedOn = query({
   args: {
-    fromUserId: v.id('users'),
     toUserId: v.id('users'),
   },
   handler: async (ctx, args) => {
-    const { fromUserId, toUserId } = args;
+    const { toUserId } = args;
+
+    // P1-SECURITY FIX: Validate caller identity - fail closed
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity?.subject) {
+      throw new Error('Authentication required');
+    }
+    const fromUserId = await resolveUserIdByAuthId(ctx, identity.subject);
+    if (!fromUserId) {
+      throw new Error('User not found');
+    }
 
     const existingLike = await ctx.db
       .query('privateLikes')
@@ -446,13 +466,20 @@ export const hasSwipedOn = query({
 
 /**
  * Get users that current user has swiped on in Phase-2 (for filtering discover)
+ * P1-SECURITY FIX: Requires auth - users can only access their OWN swipe list
  */
 export const getSwipedUserIds = query({
-  args: {
-    userId: v.id('users'),
-  },
-  handler: async (ctx, args) => {
-    const { userId } = args;
+  args: {},
+  handler: async (ctx) => {
+    // P1-SECURITY FIX: Validate caller identity - fail closed
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity?.subject) {
+      throw new Error('Authentication required');
+    }
+    const userId = await resolveUserIdByAuthId(ctx, identity.subject);
+    if (!userId) {
+      throw new Error('User not found');
+    }
 
     const swipes = await ctx.db
       .query('privateLikes')
