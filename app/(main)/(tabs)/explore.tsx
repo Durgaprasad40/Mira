@@ -37,9 +37,10 @@ import { COLORS } from "@/lib/constants";
 
 const { width: SCREEN_WIDTH } = Dimensions.get("window");
 const GRID_PADDING = 16;
-const GRID_GAP = 12;
+const GRID_GAP = 14; // Slightly more breathing room
 const TILE_WIDTH = (SCREEN_WIDTH - GRID_PADDING * 2 - GRID_GAP) / 2;
-const TILE_HEIGHT = 140;
+const TILE_HEIGHT = Math.round(TILE_WIDTH * 1.1); // Responsive height based on width
+const TILE_BORDER_RADIUS = 20; // Consistent rounded corners
 
 // Category filter tabs
 const CATEGORY_FILTERS = [
@@ -90,7 +91,7 @@ const SkeletonTile = ({ index }: { index: number }) => {
 };
 
 // ══════════════════════════════════════════════════════════════════════════
-// EXPLORE TILE - Grid item with gradient overlay
+// EXPLORE TILE - Premium grid item with gradient overlay
 // ══════════════════════════════════════════════════════════════════════════
 const ExploreTile = ({
   category,
@@ -109,26 +110,26 @@ const ExploreTile = ({
     try {
       Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     } catch {}
-    Animated.spring(scaleAnim, {
-      toValue: 0.96,
+    // Premium feel: subtle scale with quick timing (not bouncy)
+    Animated.timing(scaleAnim, {
+      toValue: 0.97,
+      duration: 100,
       useNativeDriver: true,
-      speed: 50,
-      bounciness: 4,
     }).start();
   };
 
   const handlePressOut = () => {
-    Animated.spring(scaleAnim, {
+    Animated.timing(scaleAnim, {
       toValue: 1,
+      duration: 150,
       useNativeDriver: true,
-      speed: 50,
-      bounciness: 4,
     }).start();
   };
 
-  // Generate gradient colors
+  // Generate rich gradient colors (3-stop for depth)
   const baseColor = category.color;
-  const darkerColor = adjustColorBrightness(baseColor, -40);
+  const lighterColor = adjustColorBrightness(baseColor, 15);
+  const darkerColor = adjustColorBrightness(baseColor, -35);
 
   return (
     <TouchableOpacity
@@ -142,30 +143,38 @@ const ExploreTile = ({
       ]}
     >
       <Animated.View style={[styles.tileWrapper, { transform: [{ scale: scaleAnim }] }]}>
+        {/* Main gradient background */}
         <LinearGradient
-          colors={[baseColor, darkerColor]}
+          colors={[lighterColor, baseColor, darkerColor]}
+          locations={[0, 0.4, 1]}
           start={{ x: 0, y: 0 }}
           end={{ x: 1, y: 1 }}
           style={styles.tile}
         >
-          {/* Overlay gradient for text readability */}
+          {/* Refined bottom overlay for text readability (not too dark) */}
           <LinearGradient
-            colors={["transparent", "rgba(0,0,0,0.4)"]}
+            colors={["transparent", "transparent", COLORS.overlayDark]}
+            locations={[0, 0.4, 1]}
+            start={{ x: 0.5, y: 0 }}
+            end={{ x: 0.5, y: 1 }}
             style={styles.tileOverlay}
           />
 
           {/* Content */}
           <View style={styles.tileContent}>
-            <Text style={styles.tileIcon}>{category.icon}</Text>
+            {/* Icon with subtle background */}
+            <View style={styles.tileIconContainer}>
+              <Text style={styles.tileIcon}>{category.icon}</Text>
+            </View>
 
-            {/* Count badge */}
+            {/* Count badge (top-right) */}
             {count > 0 && (
               <View style={styles.tileBadge}>
                 <Text style={styles.tileBadgeText}>{count}</Text>
               </View>
             )}
 
-            {/* Title at bottom */}
+            {/* Title at bottom with proper spacing */}
             <View style={styles.tileTitleContainer}>
               <Text style={styles.tileTitle} numberOfLines={2}>
                 {category.label}
@@ -551,60 +560,86 @@ const styles = StyleSheet.create({
     marginBottom: GRID_GAP,
   },
 
-  // Tile
+  // ══════════════════════════════════════════════════════════════════════════
+  // TILE STYLES - Premium grid item design
+  // ══════════════════════════════════════════════════════════════════════════
   tileContainer: {
     width: TILE_WIDTH,
   },
   tileWrapper: {
-    borderRadius: 16,
+    borderRadius: TILE_BORDER_RADIUS,
     overflow: "hidden",
+    // iOS shadow (subtle, consistent)
     shadowColor: COLORS.black,
     shadowOffset: { width: 0, height: 4 },
-    shadowOpacity: 0.15,
+    shadowOpacity: 0.12,
     shadowRadius: 8,
+    // Android elevation
     elevation: 5,
+    // Ensure clipping respects border radius
+    backgroundColor: COLORS.backgroundDark,
   },
   tile: {
     height: TILE_HEIGHT,
-    borderRadius: 16,
+    borderRadius: TILE_BORDER_RADIUS,
   },
   tileOverlay: {
     ...StyleSheet.absoluteFillObject,
-    borderRadius: 16,
+    borderRadius: TILE_BORDER_RADIUS,
   },
   tileContent: {
     flex: 1,
-    padding: 14,
+    padding: 16,
     justifyContent: "space-between",
   },
-  tileIcon: {
-    fontSize: 32,
+  // Icon container with subtle frosted background
+  tileIconContainer: {
+    width: 44,
+    height: 44,
+    borderRadius: 12,
+    backgroundColor: COLORS.overlayLight,
+    justifyContent: "center",
+    alignItems: "center",
   },
+  tileIcon: {
+    fontSize: 26,
+  },
+  // Premium badge styling
   tileBadge: {
     position: "absolute",
-    top: 14,
-    right: 14,
-    backgroundColor: "rgba(255, 255, 255, 0.25)",
+    top: 16,
+    right: 16,
+    backgroundColor: COLORS.overlayMedium,
     paddingHorizontal: 10,
-    paddingVertical: 4,
-    borderRadius: 10,
+    paddingVertical: 5,
+    borderRadius: 12,
+    minWidth: 28,
+    alignItems: "center",
+    // Subtle inner glow effect
+    borderWidth: 1,
+    borderColor: COLORS.overlaySubtle,
   },
   tileBadgeText: {
     color: COLORS.white,
     fontSize: 12,
     fontWeight: "700",
+    letterSpacing: 0.3,
   },
+  // Title container with proper bottom spacing
   tileTitleContainer: {
     marginTop: "auto",
+    paddingTop: 8,
   },
   tileTitle: {
     color: COLORS.white,
     fontSize: 15,
     fontWeight: "700",
-    lineHeight: 19,
-    textShadowColor: "rgba(0, 0, 0, 0.4)",
+    lineHeight: 20,
+    letterSpacing: 0.2,
+    // Strong text shadow for readability
+    textShadowColor: COLORS.overlay,
     textShadowOffset: { width: 0, height: 1 },
-    textShadowRadius: 3,
+    textShadowRadius: 4,
   },
 
   // Empty State
@@ -632,7 +667,9 @@ const styles = StyleSheet.create({
     textAlign: "center",
   },
 
-  // Skeleton Loading
+  // ══════════════════════════════════════════════════════════════════════════
+  // SKELETON LOADING - Polished placeholder tiles
+  // ══════════════════════════════════════════════════════════════════════════
   skeletonGrid: {
     flexDirection: "row",
     flexWrap: "wrap",
@@ -643,31 +680,37 @@ const styles = StyleSheet.create({
     width: TILE_WIDTH,
     height: TILE_HEIGHT,
     backgroundColor: COLORS.backgroundDark,
-    borderRadius: 16,
-    padding: 14,
+    borderRadius: TILE_BORDER_RADIUS,
+    padding: 16,
     marginBottom: GRID_GAP,
     justifyContent: "space-between",
+    // Match real tile shadow (lighter for skeleton)
+    shadowColor: COLORS.black,
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.08,
+    shadowRadius: 8,
+    elevation: 3,
   },
   skeletonIcon: {
-    width: 32,
-    height: 32,
-    borderRadius: 8,
+    width: 44,
+    height: 44,
+    borderRadius: 12,
     backgroundColor: COLORS.border,
   },
   skeletonTitle: {
-    width: "70%",
-    height: 16,
-    borderRadius: 4,
+    width: "65%",
+    height: 18,
+    borderRadius: 6,
     backgroundColor: COLORS.border,
     marginTop: "auto",
   },
   skeletonBadge: {
     position: "absolute",
-    top: 14,
-    right: 14,
-    width: 32,
-    height: 20,
-    borderRadius: 10,
+    top: 16,
+    right: 16,
+    width: 36,
+    height: 24,
+    borderRadius: 12,
     backgroundColor: COLORS.border,
   },
 });

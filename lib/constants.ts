@@ -22,6 +22,10 @@ export const COLORS = {
   gold: '#FFD700',
   platinum: '#E5E4E2',
   overlay: 'rgba(0, 0, 0, 0.5)',
+  overlayLight: 'rgba(255, 255, 255, 0.18)',
+  overlayMedium: 'rgba(255, 255, 255, 0.22)',
+  overlaySubtle: 'rgba(255, 255, 255, 0.1)',
+  overlayDark: 'rgba(0, 0, 0, 0.45)',
   white: '#FFFFFF',
   black: '#000000',
 };
