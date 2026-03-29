@@ -334,6 +334,41 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   // Read-only: existing conversations count for match reminder (no new queries)
   const privateConversationsCount = usePrivateChatStore((s) => s.conversations.length);
 
+  // ══════════════════════════════════════════════════════════════════════════
+  // PHASE TRANSITION OVERLAY (Phase-2 Entry Experience)
+  // Shows once per component mount when entering Deep Connect
+  // ══════════════════════════════════════════════════════════════════════════
+  const [showPhaseTransition, setShowPhaseTransition] = useState(isPhase2);
+  const phaseTransitionShownRef = useRef(false);
+  const phaseTransitionTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Auto-dismiss after hold duration
+  useEffect(() => {
+    if (!isPhase2 || phaseTransitionShownRef.current) {
+      setShowPhaseTransition(false);
+      return;
+    }
+    // Mark as shown immediately to prevent re-triggers
+    phaseTransitionShownRef.current = true;
+    // Auto-dismiss after 1.4 seconds
+    phaseTransitionTimerRef.current = setTimeout(() => {
+      setShowPhaseTransition(false);
+    }, 1400);
+    return () => {
+      if (phaseTransitionTimerRef.current) {
+        clearTimeout(phaseTransitionTimerRef.current);
+      }
+    };
+  }, [isPhase2]);
+
+  // Tap to skip handler
+  const dismissPhaseTransition = useCallback(() => {
+    if (phaseTransitionTimerRef.current) {
+      clearTimeout(phaseTransitionTimerRef.current);
+    }
+    setShowPhaseTransition(false);
+  }, []);
+
   // Phase-2 only: Intent filters from store (syncs with Discovery Preferences)
   const { privateIntentKeys: intentFilters, togglePrivateIntentKey, setPrivateIntentKeys } = useFilterStore();
 
@@ -2259,6 +2294,54 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
         anchorTop={insets.top + HEADER_H + 8}
       />
 
+      {/* ══════════════════════════════════════════════════════════════════════════
+          PHASE TRANSITION OVERLAY (Phase-2 Entry Experience)
+          Premium entry moment when entering Deep Connect
+          ══════════════════════════════════════════════════════════════════════════ */}
+      {showPhaseTransition && (
+        <TouchableOpacity
+          style={StyleSheet.absoluteFill}
+          activeOpacity={1}
+          onPress={dismissPhaseTransition}
+        >
+          <Animated.View
+            entering={FadeIn.duration(180)}
+            exiting={FadeOut.duration(250)}
+            style={styles.phaseTransitionOverlay}
+          >
+            {/* Gradient overlay for depth */}
+            <View style={styles.phaseTransitionGradient} />
+
+            {/* Centered intro text */}
+            <Animated.View
+              entering={FadeIn.delay(80).duration(300)}
+              style={styles.phaseTransitionContent}
+            >
+              <Animated.Text
+                entering={FadeIn.delay(120).duration(350)}
+                style={styles.phaseTransitionTitle}
+              >
+                Deep Connect
+              </Animated.Text>
+              <Animated.Text
+                entering={FadeIn.delay(220).duration(350)}
+                style={styles.phaseTransitionSubtitle}
+              >
+                More private. More real.
+              </Animated.Text>
+            </Animated.View>
+
+            {/* Subtle tap hint */}
+            <Animated.Text
+              entering={FadeIn.delay(600).duration(400)}
+              style={styles.phaseTransitionSkipHint}
+            >
+              tap to continue
+            </Animated.Text>
+          </Animated.View>
+        </TouchableOpacity>
+      )}
+
       {/* Random Match Popup (F2-D) */}
       <Modal
         visible={showRandomMatchPopup}
@@ -2934,5 +3017,51 @@ const styles = StyleSheet.create({
     fontWeight: "500",
     color: "rgba(255, 255, 255, 0.4)",
     letterSpacing: 0.2,
+  },
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // PHASE TRANSITION OVERLAY (Phase-2 Entry Experience)
+  // ══════════════════════════════════════════════════════════════════════════
+  phaseTransitionOverlay: {
+    ...StyleSheet.absoluteFillObject,
+    backgroundColor: "rgba(0, 0, 0, 0.88)",
+    alignItems: "center",
+    justifyContent: "center",
+    zIndex: 100,
+  },
+  phaseTransitionGradient: {
+    ...StyleSheet.absoluteFillObject,
+    // Subtle radial-like gradient effect using layered background
+    backgroundColor: "transparent",
+    // Top-to-bottom subtle gradient simulation
+    borderTopWidth: 0,
+    opacity: 0.3,
+  },
+  phaseTransitionContent: {
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  phaseTransitionTitle: {
+    fontSize: 32,
+    fontWeight: "300",
+    color: "#FFFFFF",
+    letterSpacing: 1.5,
+    marginBottom: 12,
+    textAlign: "center",
+  },
+  phaseTransitionSubtitle: {
+    fontSize: 16,
+    fontWeight: "400",
+    color: "rgba(255, 255, 255, 0.55)",
+    letterSpacing: 0.5,
+    textAlign: "center",
+  },
+  phaseTransitionSkipHint: {
+    position: "absolute",
+    bottom: 80,
+    fontSize: 12,
+    fontWeight: "400",
+    color: "rgba(255, 255, 255, 0.25)",
+    letterSpacing: 0.3,
   },
 });
