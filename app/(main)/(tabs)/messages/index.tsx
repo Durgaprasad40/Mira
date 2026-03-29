@@ -55,6 +55,86 @@ const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 const CARD_WIDTH = (SCREEN_WIDTH - 48) / 2;
 
 // ═══════════════════════════════════════════════════════════════════════════
+// SKELETON CHAT ROW - Loading placeholder for conversations
+// ═══════════════════════════════════════════════════════════════════════════
+const SkeletonChatRow = ({ index }: { index: number }) => {
+  const pulseAnim = React.useRef(new Animated.Value(0.4)).current;
+
+  React.useEffect(() => {
+    const pulse = Animated.loop(
+      Animated.sequence([
+        Animated.timing(pulseAnim, {
+          toValue: 0.8,
+          duration: 800,
+          useNativeDriver: true,
+        }),
+        Animated.timing(pulseAnim, {
+          toValue: 0.4,
+          duration: 800,
+          useNativeDriver: true,
+        }),
+      ])
+    );
+    pulse.start();
+    return () => pulse.stop();
+  }, [pulseAnim]);
+
+  // Vary widths for natural look
+  const nameWidth = 100 + (index % 3) * 30;
+  const messageWidth = 140 + (index % 4) * 25;
+
+  return (
+    <Animated.View style={[skeletonStyles.row, { opacity: pulseAnim }]}>
+      <View style={skeletonStyles.avatar} />
+      <View style={skeletonStyles.content}>
+        <View style={[skeletonStyles.name, { width: nameWidth }]} />
+        <View style={[skeletonStyles.message, { width: messageWidth }]} />
+      </View>
+      <View style={skeletonStyles.time} />
+    </Animated.View>
+  );
+};
+
+const skeletonStyles = StyleSheet.create({
+  row: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingVertical: 14,
+    paddingHorizontal: 16,
+    borderBottomWidth: StyleSheet.hairlineWidth,
+    borderBottomColor: COLORS.border,
+  },
+  avatar: {
+    width: 52,
+    height: 52,
+    borderRadius: 26,
+    backgroundColor: COLORS.backgroundDark,
+    marginRight: 14,
+  },
+  content: {
+    flex: 1,
+    gap: 8,
+  },
+  name: {
+    height: 16,
+    borderRadius: 4,
+    backgroundColor: COLORS.backgroundDark,
+  },
+  message: {
+    height: 14,
+    borderRadius: 4,
+    backgroundColor: COLORS.backgroundDark,
+  },
+  time: {
+    width: 32,
+    height: 12,
+    borderRadius: 4,
+    backgroundColor: COLORS.backgroundDark,
+    marginLeft: 8,
+  },
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
 // RESPONSIVE SPACING SYSTEM - Consistent across devices
 // ═══════════════════════════════════════════════════════════════════════════
 // Base scale factor: smaller phones get slightly tighter spacing
@@ -875,6 +955,15 @@ export default function MessagesScreen() {
   // Loading state
   const isLoading = !isDemoMode && conversations === undefined;
 
+  // Render skeleton loading rows
+  const renderSkeletonLoading = () => (
+    <View style={styles.skeletonContainer}>
+      {[0, 1, 2, 3, 4, 5].map((i) => (
+        <SkeletonChatRow key={i} index={i} />
+      ))}
+    </View>
+  );
+
   if (isLoading) {
     return (
       <LoadingGuard
@@ -887,10 +976,7 @@ export default function MessagesScreen() {
           <View style={styles.header}>
             <Text style={styles.title}>Messages</Text>
           </View>
-          <View style={styles.loadingContainer}>
-            <ActivityIndicator size="small" color={COLORS.primary} />
-            <Text style={styles.helperText}>Loading your conversations...</Text>
-          </View>
+          {renderSkeletonLoading()}
         </SafeAreaView>
       </LoadingGuard>
     );
@@ -1053,10 +1139,13 @@ export default function MessagesScreen() {
             )}
             ListEmptyComponent={
               <View style={styles.emptyContainer}>
-                <Ionicons name="chatbubbles-outline" size={64} color={COLORS.textLight} />
-                <Text style={styles.emptyTitle}>No chats yet</Text>
+                <Text style={styles.emptyEmoji}>💬</Text>
+                <Text style={styles.emptyTitle}>No messages yet...</Text>
                 <Text style={styles.emptySubtitle}>
-                  Match with someone or accept a confession to start chatting.
+                  Start a conversation 👀
+                </Text>
+                <Text style={styles.emptyHint}>
+                  Match with someone on Discover or{'\n'}accept a confession to begin chatting
                 </Text>
               </View>
             }
@@ -1574,27 +1663,44 @@ const styles = StyleSheet.create({
     color: COLORS.textLight,
     textAlign: 'center',
   },
+  skeletonContainer: {
+    flex: 1,
+  },
 
-  // Empty states
+  // ═══════════════════════════════════════════════════════════════════════════
+  // EMPTY STATE - Friendly, clean, minimal
+  // ═══════════════════════════════════════════════════════════════════════════
   emptyContainer: {
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
     padding: 40,
+    paddingTop: 80,
   },
   emptyListContainer: {
     flexGrow: 1,
   },
+  emptyEmoji: {
+    fontSize: 56,
+    marginBottom: 16,
+  },
   emptyTitle: {
-    fontSize: 20,
-    fontWeight: '600',
+    fontSize: 22,
+    fontWeight: '700',
     color: COLORS.text,
-    marginTop: 16,
     marginBottom: 8,
+    letterSpacing: -0.3,
   },
   emptySubtitle: {
-    fontSize: 14,
+    fontSize: 16,
+    fontWeight: '500',
     color: COLORS.textLight,
+    textAlign: 'center',
+    marginBottom: 12,
+  },
+  emptyHint: {
+    fontSize: 14,
+    color: COLORS.textMuted,
     textAlign: 'center',
     lineHeight: 20,
   },

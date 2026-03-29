@@ -5,6 +5,7 @@ export const COLORS = {
   primary: '#FF6B6B',
   primaryDark: '#E55A5A',
   primaryLight: '#FF8A8A',
+  primarySubtle: 'rgba(255, 107, 107, 0.06)',
   secondary: '#4ECDC4',
   secondaryDark: '#3DBDB5',
   background: '#FFFFFF',
