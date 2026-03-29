@@ -9,6 +9,7 @@ import {
 } from 'react-native';
 import { Image } from 'expo-image';
 import { Ionicons } from '@expo/vector-icons';
+import { LinearGradient } from 'expo-linear-gradient';
 
 // PERF: Max photos to prefetch when card becomes visible
 const PREFETCH_COUNT = 5;
@@ -271,7 +272,7 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
 
   // --- Discover card mode ---
   return (
-    <View style={[styles.card, dark && { backgroundColor: INCOGNITO_COLORS.surface }]}>
+    <View style={[styles.card, dark && styles.cardDark]}>
       {/* Photo area fills entire card */}
       <View style={styles.photoContainer}>
         {/* PERF: Memoized photo stack for instant switching */}
@@ -283,16 +284,41 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
             onError={() => setImageError(true)}
           />
         ) : (
-          <View style={[styles.photoPlaceholder, dark && { backgroundColor: INCOGNITO_COLORS.accent }]}>
-            <Ionicons name="image-outline" size={48} color={TC.textLight} />
+          // Premium placeholder for no-photo state
+          <View style={[styles.photoPlaceholder, dark && styles.photoPlaceholderDark]}>
+            <View style={[styles.placeholderIconContainer, dark && styles.placeholderIconContainerDark]}>
+              <Ionicons name="person" size={56} color={dark ? 'rgba(255,255,255,0.3)' : TC.textLight} />
+            </View>
+            <Text style={[styles.placeholderText, dark && styles.placeholderTextDark]}>No photo yet</Text>
           </View>
         )}
         {/* Fallback placeholder for error state */}
         {imageError && (
-          <View style={[styles.photoPlaceholder, dark && { backgroundColor: INCOGNITO_COLORS.accent }, StyleSheet.absoluteFillObject]}>
-            <Ionicons name="image-outline" size={48} color={TC.textLight} />
+          <View style={[styles.photoPlaceholder, dark && styles.photoPlaceholderDark, StyleSheet.absoluteFillObject]}>
+            <View style={[styles.placeholderIconContainer, dark && styles.placeholderIconContainerDark]}>
+              <Ionicons name="image-outline" size={48} color={dark ? 'rgba(255,255,255,0.3)' : TC.textLight} />
+            </View>
           </View>
         )}
+
+        {/* Premium gradient overlay - top (subtle, for status bar area) */}
+        <LinearGradient
+          colors={dark
+            ? ['rgba(0,0,0,0.5)', 'rgba(0,0,0,0.2)', 'transparent']
+            : ['rgba(0,0,0,0.3)', 'transparent']}
+          style={styles.topGradient}
+          pointerEvents="none"
+        />
+
+        {/* Premium gradient overlay - bottom (stronger, for text readability) */}
+        <LinearGradient
+          colors={dark
+            ? ['transparent', 'rgba(0,0,0,0.4)', 'rgba(0,0,0,0.85)', 'rgba(0,0,0,0.95)']
+            : ['transparent', 'rgba(0,0,0,0.3)', 'rgba(0,0,0,0.7)']}
+          locations={dark ? [0, 0.3, 0.7, 1] : [0, 0.4, 1]}
+          style={styles.bottomGradient}
+          pointerEvents="none"
+        />
 
         {/* Tap zones for photo navigation — left third = prev, right third = next */}
         {showCarousel && photoCount > 1 && (
@@ -311,11 +337,16 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
         {/* Photo indicator bars (Tinder-style) at top */}
         {/* 7-2: Optional chaining for photos array null safety */}
         {showCarousel && photoCount > 1 && (
-          <View style={styles.barsRow} pointerEvents="none">
+          <View style={[styles.barsRow, dark && styles.barsRowDark]} pointerEvents="none">
             {photos?.map((_, i) => (
               <View
                 key={i}
-                style={[styles.bar, i === photoIndex && styles.barActive]}
+                style={[
+                  styles.bar,
+                  dark && styles.barDark,
+                  i === photoIndex && styles.barActive,
+                  i === photoIndex && dark && styles.barActiveDark,
+                ]}
               />
             ))}
           </View>
@@ -323,26 +354,30 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
 
         {/* Incognito badge (top-right) */}
         {isIncognito && (
-          <View style={styles.incognitoBadge} pointerEvents="none">
+          <View style={[styles.incognitoBadge, dark && styles.incognitoBadgeDark]} pointerEvents="none">
             <Ionicons name="eye-off" size={14} color={COLORS.white} />
           </View>
         )}
 
         {/* Arrow button to open full profile */}
         {showCarousel && onOpenProfile && (
-          <TouchableOpacity style={[styles.arrowBtn, { bottom: arrowButtonBottom }]} onPress={onOpenProfile} activeOpacity={0.7}>
-            <Ionicons name="arrow-up" size={20} color={COLORS.white} />
+          <TouchableOpacity
+            style={[styles.arrowBtn, dark && styles.arrowBtnDark, { bottom: arrowButtonBottom }]}
+            onPress={onOpenProfile}
+            activeOpacity={0.7}
+          >
+            <Ionicons name="chevron-up" size={22} color={COLORS.white} />
           </TouchableOpacity>
         )}
       </View>
 
-      {/* Info overlay at bottom */}
-      <View style={styles.overlay} pointerEvents="none">
-        <View style={styles.headerRow}>
-          <View style={{ flex: 1 }}>
+      {/* Info overlay at bottom - uses gradient instead of solid bg */}
+      <View style={[styles.overlay, dark && styles.overlayDark]} pointerEvents="none">
+        <View style={[styles.headerRow, dark && styles.headerRowDark]}>
+          <View style={styles.headerContent}>
             {/* Active Now badge */}
             {isActiveNow && (
-              <View style={styles.activeNowBadge}>
+              <View style={[styles.activeNowBadge, dark && styles.activeNowBadgeDark]}>
                 <View style={styles.activeNowDot} />
                 <Text style={styles.activeNowText}>Active now</Text>
               </View>
@@ -353,13 +388,23 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
                 <Text style={styles.exploreTagText}>{exploreTag}</Text>
               </View>
             )}
+            {/* Name and Age - improved hierarchy */}
             <View style={styles.nameRow}>
-              <Text style={styles.name}>
-                {name}, {age}
-              </Text>
-              {isVerified && <Text style={styles.verified}>✔︎</Text>}
+              <Text style={[styles.name, dark && styles.nameDark]}>{name}</Text>
+              <Text style={[styles.age, dark && styles.ageDark]}>{age}</Text>
+              {isVerified && (
+                <View style={[styles.verifiedBadge, dark && styles.verifiedBadgeDark]}>
+                  <Ionicons name="checkmark" size={12} color={COLORS.white} />
+                </View>
+              )}
             </View>
-            {!!city && <Text style={styles.city}>{city}</Text>}
+            {/* City - subtler styling */}
+            {!!city && (
+              <View style={styles.locationRow}>
+                <Ionicons name="location-outline" size={13} color={dark ? 'rgba(255,255,255,0.6)' : 'rgba(255,255,255,0.8)'} />
+                <Text style={[styles.city, dark && styles.cityDark]}>{city}</Text>
+              </View>
+            )}
             {/* Phase-1 only: Looking for + intent chips */}
             {!dark && (lookingForText || intentLabels.length > 0) && (
               <View style={styles.intentChipRow}>
@@ -385,28 +430,29 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
                 ))}
               </View>
             )}
-            {/* Face 2 only: Intent category chips (up to 2 + overflow) */}
+            {/* Phase-2 (Dark): Premium intent chips */}
             {dark && phase2VisibleLabels.length > 0 && (
               <View style={styles.phase2IntentRow}>
                 {phase2VisibleLabels.map((label, idx) => (
-                  <View key={idx} style={styles.phase2IntentChip}>
-                    <Text style={styles.phase2IntentText}>{label}</Text>
+                  <View key={idx} style={styles.phase2IntentChipDark}>
+                    <Text style={styles.phase2IntentTextDark}>{label}</Text>
                   </View>
                 ))}
                 {phase2OverflowCount > 0 && (
-                  <View style={styles.phase2IntentChip}>
-                    <Text style={styles.phase2IntentText}>+{phase2OverflowCount}</Text>
+                  <View style={styles.phase2IntentChipOverflow}>
+                    <Text style={styles.phase2IntentTextDark}>+{phase2OverflowCount}</Text>
                   </View>
                 )}
               </View>
             )}
           </View>
           {!!distance && (
-            <Text style={styles.distance}>{distance.toFixed(0)} km away</Text>
+            <Text style={[styles.distance, dark && styles.distanceDark]}>{distance.toFixed(0)} km</Text>
           )}
         </View>
 
-        {trustBadges && trustBadges.length > 0 && (
+        {/* Trust badges - only show in light mode (Phase-1) */}
+        {!dark && trustBadges && trustBadges.length > 0 && (
           <View style={styles.trustBadgeRow}>
             {trustBadges.slice(0, 3).map((badge) => (
               <View key={badge.key} style={[styles.trustBadgeCompact, { backgroundColor: badge.color + '30' }]}>
@@ -422,18 +468,20 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
           </View>
         )}
 
-        {showCarousel && (
-          <Text style={styles.bio} numberOfLines={3}>
-            {bio || 'No bio yet'}
+        {/* Bio - improved readability */}
+        {showCarousel && bio && (
+          <Text style={[styles.bio, dark && styles.bioDark]} numberOfLines={2}>
+            {bio}
           </Text>
         )}
 
+        {/* Profile prompt - premium card styling for dark mode */}
         {profilePrompt && (
-          <View style={styles.promptCard}>
-            <Text style={styles.promptQuestion} numberOfLines={1}>
+          <View style={[styles.promptCard, dark && styles.promptCardDark]}>
+            <Text style={[styles.promptQuestion, dark && styles.promptQuestionDark]} numberOfLines={1}>
               {profilePrompt.question}
             </Text>
-            <Text style={styles.promptAnswer} numberOfLines={2}>
+            <Text style={[styles.promptAnswer, dark && styles.promptAnswerDark]} numberOfLines={2}>
               {profilePrompt.answer}
             </Text>
           </View>
@@ -451,17 +499,62 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.backgroundDark,
     flex: 1,
   },
+  cardDark: {
+    backgroundColor: '#0a0a0a',
+  },
   photoContainer: {
     ...StyleSheet.absoluteFillObject,
   },
   image: {
     ...StyleSheet.absoluteFillObject,
   },
+  // Premium gradient overlays
+  topGradient: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    height: 100,
+    zIndex: 2,
+  },
+  bottomGradient: {
+    position: 'absolute',
+    bottom: 0,
+    left: 0,
+    right: 0,
+    height: '55%',
+    zIndex: 2,
+  },
   photoPlaceholder: {
     flex: 1,
     alignItems: 'center',
     justifyContent: 'center',
     backgroundColor: COLORS.backgroundDark,
+  },
+  photoPlaceholderDark: {
+    backgroundColor: '#0d0d0d',
+  },
+  placeholderIconContainer: {
+    width: 100,
+    height: 100,
+    borderRadius: 50,
+    backgroundColor: 'rgba(255,255,255,0.08)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 12,
+  },
+  placeholderIconContainerDark: {
+    backgroundColor: 'rgba(255,255,255,0.05)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.1)',
+  },
+  placeholderText: {
+    fontSize: 14,
+    color: 'rgba(255,255,255,0.4)',
+    fontWeight: '500',
+  },
+  placeholderTextDark: {
+    color: 'rgba(255,255,255,0.3)',
   },
   // Tap zones for photo navigation (invisible, overlaid on photo)
   tapZoneLeft: {
@@ -483,12 +576,17 @@ const styles = StyleSheet.create({
   // Photo progress bars (Tinder-style)
   barsRow: {
     position: 'absolute',
-    top: 8,
-    left: 8,
-    right: 8,
+    top: 10,
+    left: 12,
+    right: 12,
     flexDirection: 'row',
     gap: 4,
     zIndex: 10,
+  },
+  barsRowDark: {
+    top: 12,
+    left: 16,
+    right: 16,
   },
   bar: {
     flex: 1,
@@ -496,8 +594,15 @@ const styles = StyleSheet.create({
     borderRadius: 1.5,
     backgroundColor: 'rgba(255,255,255,0.35)',
   },
+  barDark: {
+    height: 2.5,
+    backgroundColor: 'rgba(255,255,255,0.25)',
+  },
   barActive: {
     backgroundColor: COLORS.white,
+  },
+  barActiveDark: {
+    backgroundColor: 'rgba(255,255,255,0.95)',
   },
   // Arrow button (opens full profile)
   // NOTE: `bottom` is computed dynamically via arrowButtonBottom for device responsiveness
@@ -512,7 +617,16 @@ const styles = StyleSheet.create({
     justifyContent: 'center',
     zIndex: 15,
   },
-  // Info overlay — gradient backdrop for text legibility
+  arrowBtnDark: {
+    right: 16,
+    width: 40,
+    height: 40,
+    borderRadius: 20,
+    backgroundColor: 'rgba(255,255,255,0.12)',
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.15)',
+  },
+  // Info overlay — now transparent (gradient handles background)
   overlay: {
     position: 'absolute',
     left: 0,
@@ -521,7 +635,12 @@ const styles = StyleSheet.create({
     paddingTop: 32,
     paddingHorizontal: 16,
     paddingBottom: 16,
-    backgroundColor: 'rgba(0,0,0,0.45)',
+    backgroundColor: 'transparent',
+    zIndex: 3,
+  },
+  overlayDark: {
+    paddingHorizontal: 20,
+    paddingBottom: 20,
   },
   headerRow: {
     flexDirection: 'row',
@@ -529,9 +648,16 @@ const styles = StyleSheet.create({
     alignItems: 'flex-end',
     marginBottom: 6,
   },
+  headerRowDark: {
+    marginBottom: 10,
+  },
+  headerContent: {
+    flex: 1,
+  },
   nameRow: {
     flexDirection: 'row',
-    alignItems: 'center',
+    alignItems: 'baseline',
+    marginBottom: 2,
   },
   name: {
     fontSize: 26,
@@ -542,12 +668,52 @@ const styles = StyleSheet.create({
     textShadowOffset: { width: 0, height: 1 },
     textShadowRadius: 4,
   },
+  nameDark: {
+    fontSize: 28,
+    fontWeight: '700',
+    letterSpacing: -0.5,
+    marginRight: 8,
+  },
+  age: {
+    fontSize: 24,
+    fontWeight: '400',
+    color: 'rgba(255,255,255,0.9)',
+    marginRight: 8,
+    textShadowColor: 'rgba(0,0,0,0.6)',
+    textShadowOffset: { width: 0, height: 1 },
+    textShadowRadius: 4,
+  },
+  ageDark: {
+    fontSize: 26,
+    fontWeight: '300',
+    color: 'rgba(255,255,255,0.75)',
+  },
   verified: {
     fontSize: 18,
     color: COLORS.primary,
     textShadowColor: 'rgba(0,0,0,0.6)',
     textShadowOffset: { width: 0, height: 1 },
     textShadowRadius: 4,
+  },
+  verifiedBadge: {
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    backgroundColor: COLORS.primary,
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  verifiedBadgeDark: {
+    width: 18,
+    height: 18,
+    borderRadius: 9,
+    backgroundColor: '#9b59b6',
+  },
+  locationRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    marginTop: 2,
   },
   exploreTagContainer: {
     backgroundColor: 'rgba(255,255,255,0.2)',
@@ -587,12 +753,22 @@ const styles = StyleSheet.create({
     fontWeight: '600',
     color: '#10B981',
   },
+  activeNowBadgeDark: {
+    backgroundColor: 'rgba(16, 185, 129, 0.2)',
+    borderWidth: 1,
+    borderColor: 'rgba(16, 185, 129, 0.3)',
+  },
   city: {
     fontSize: 14,
     color: COLORS.white,
     textShadowColor: 'rgba(0,0,0,0.5)',
     textShadowOffset: { width: 0, height: 1 },
     textShadowRadius: 3,
+  },
+  cityDark: {
+    fontSize: 13,
+    color: 'rgba(255,255,255,0.6)',
+    fontWeight: '400',
   },
   intentLabel: {
     fontSize: 13,
@@ -607,14 +783,30 @@ const styles = StyleSheet.create({
   phase2IntentRow: {
     flexDirection: 'row',
     flexWrap: 'wrap',
-    gap: 4,
-    marginTop: 4,
+    gap: 6,
+    marginTop: 10,
   },
   phase2IntentChip: {
     backgroundColor: 'rgba(155,89,182,0.3)',
     borderRadius: 10,
     paddingHorizontal: 8,
     paddingVertical: 3,
+  },
+  phase2IntentChipDark: {
+    backgroundColor: 'rgba(155,89,182,0.25)',
+    borderRadius: 14,
+    paddingHorizontal: 12,
+    paddingVertical: 5,
+    borderWidth: 1,
+    borderColor: 'rgba(155,89,182,0.35)',
+  },
+  phase2IntentChipOverflow: {
+    backgroundColor: 'rgba(255,255,255,0.1)',
+    borderRadius: 14,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.15)',
   },
   phase2IntentText: {
     fontSize: 11,
@@ -623,6 +815,12 @@ const styles = StyleSheet.create({
     textShadowColor: 'rgba(0,0,0,0.4)',
     textShadowOffset: { width: 0, height: 1 },
     textShadowRadius: 2,
+  },
+  phase2IntentTextDark: {
+    fontSize: 12,
+    fontWeight: '500',
+    color: 'rgba(255,255,255,0.9)',
+    letterSpacing: 0.2,
   },
   // Phase-1 intent chips row
   intentChipRow: {
@@ -673,6 +871,11 @@ const styles = StyleSheet.create({
     textShadowOffset: { width: 0, height: 1 },
     textShadowRadius: 3,
   },
+  distanceDark: {
+    fontSize: 12,
+    color: 'rgba(255,255,255,0.5)',
+    fontWeight: '400',
+  },
   bio: {
     fontSize: 14,
     color: 'rgba(255,255,255,0.9)',
@@ -682,6 +885,13 @@ const styles = StyleSheet.create({
     textShadowOffset: { width: 0, height: 1 },
     textShadowRadius: 3,
   },
+  bioDark: {
+    fontSize: 14,
+    color: 'rgba(255,255,255,0.7)',
+    lineHeight: 20,
+    marginTop: 8,
+    marginBottom: 0,
+  },
   // Profile prompt card
   promptCard: {
     backgroundColor: 'rgba(0,0,0,0.35)',
@@ -689,6 +899,15 @@ const styles = StyleSheet.create({
     paddingHorizontal: 12,
     paddingVertical: 10,
     marginTop: 6,
+  },
+  promptCardDark: {
+    backgroundColor: 'rgba(255,255,255,0.08)',
+    borderRadius: 14,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    marginTop: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.08)',
   },
   promptQuestion: {
     fontSize: 12,
@@ -699,6 +918,14 @@ const styles = StyleSheet.create({
     textShadowOffset: { width: 0, height: 1 },
     textShadowRadius: 2,
   },
+  promptQuestionDark: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: 'rgba(255,255,255,0.5)',
+    textTransform: 'uppercase' as const,
+    letterSpacing: 0.5,
+    marginBottom: 4,
+  },
   promptAnswer: {
     fontSize: 14,
     fontWeight: '500',
@@ -706,6 +933,12 @@ const styles = StyleSheet.create({
     textShadowColor: 'rgba(0,0,0,0.4)',
     textShadowOffset: { width: 0, height: 1 },
     textShadowRadius: 2,
+  },
+  promptAnswerDark: {
+    fontSize: 14,
+    fontWeight: '400',
+    color: 'rgba(255,255,255,0.85)',
+    lineHeight: 20,
   },
   // Trust badge compact row (Discover overlay)
   trustBadgeRow: {
@@ -773,5 +1006,12 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     paddingHorizontal: 8,
     paddingVertical: 4,
+  },
+  incognitoBadgeDark: {
+    top: 52,
+    right: 16,
+    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.15)',
   },
 });
