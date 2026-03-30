@@ -244,15 +244,19 @@ export default function WelcomeScreen() {
           onPress={handleCreateAccount}
           fullWidth
           style={{
-            backgroundColor: "#00000000",
-            borderWidth: 2,
-            borderColor: COLORS.white,
+            backgroundColor: "rgba(255, 255, 255, 0.12)",
+            borderWidth: 1.5,
+            borderColor: "rgba(255, 255, 255, 0.9)",
             elevation: 0,
-            marginBottom: 12,
+            marginBottom: 14,
+            borderRadius: 14,
+            paddingVertical: 16,
           }}
           textStyle={{
             color: COLORS.white,
             fontWeight: "600",
+            fontSize: 17,
+            letterSpacing: 0.3,
           }}
         />
         <Button
@@ -268,15 +272,18 @@ export default function WelcomeScreen() {
           }}
           fullWidth
           style={{
-            backgroundColor: "#00000000",
-            borderWidth: 2,
-            borderColor: COLORS.white,
+            backgroundColor: "transparent",
+            borderWidth: 1.5,
+            borderColor: "rgba(255, 255, 255, 0.5)",
             elevation: 0,
-            marginBottom: 16,
+            marginBottom: 18,
+            borderRadius: 14,
+            paddingVertical: 14,
           }}
           textStyle={{
-            color: COLORS.white,
-            fontWeight: "600",
+            color: "rgba(255, 255, 255, 0.9)",
+            fontWeight: "500",
+            fontSize: 15,
           }}
         />
         <Text style={styles.terms}>
@@ -295,50 +302,58 @@ const styles = StyleSheet.create({
     flex: 1,
     alignItems: "center",
     justifyContent: "center",
-    padding: 24,
+    padding: 28,
   },
   iconContainer: {
-    marginBottom: 24,
+    marginBottom: 28,
   },
   title: {
-    fontSize: 48,
-    fontWeight: "bold",
+    fontSize: 52,
+    fontWeight: "700",
     color: COLORS.white,
-    marginBottom: 8,
+    marginBottom: 10,
+    letterSpacing: -1,
   },
   subtitle: {
-    fontSize: 18,
+    fontSize: 19,
     color: COLORS.white,
-    opacity: 0.9,
+    opacity: 0.92,
     marginBottom: 48,
+    fontWeight: "400",
+    letterSpacing: 0.2,
   },
   features: {
     width: "100%",
-    gap: 16,
+    gap: 14,
   },
   feature: {
     flexDirection: "row",
     alignItems: "center",
     gap: 16,
-    backgroundColor: COLORS.white + "20",
-    padding: 16,
-    borderRadius: 12,
+    backgroundColor: "rgba(255, 255, 255, 0.15)",
+    paddingVertical: 18,
+    paddingHorizontal: 20,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: "rgba(255, 255, 255, 0.1)",
   },
   featureText: {
     fontSize: 16,
     color: COLORS.white,
     fontWeight: "500",
+    letterSpacing: 0.1,
   },
   buttonContainer: {
     width: "100%",
     padding: 24,
-    paddingBottom: 40,
+    paddingBottom: 44,
   },
   terms: {
     fontSize: 12,
     color: COLORS.white,
     textAlign: "center",
-    opacity: 0.8,
+    opacity: 0.75,
     lineHeight: 18,
+    letterSpacing: 0.1,
   },
 });

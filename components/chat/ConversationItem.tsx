@@ -1,5 +1,6 @@
-import React, { useMemo, useRef, useCallback } from 'react';
+import React, { useMemo, useRef, useCallback, useEffect } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, Animated } from 'react-native';
+import Reanimated, { FadeIn } from 'react-native-reanimated';
 import { Image } from 'expo-image';
 import { COLORS, FONT_SIZE, FONT_WEIGHT, moderateScale } from '@/lib/constants';
 import { DEMO_PROFILES } from '@/lib/demoData';
@@ -37,7 +38,27 @@ export function ConversationItem({
   onAvatarPress,
 }: ConversationItemProps) {
   const scaleAnim = useRef(new Animated.Value(1)).current;
+  const highlightAnim = useRef(new Animated.Value(0)).current;
   const hasUnread = unreadCount > 0;
+
+  // Subtle highlight pulse for new/unread messages on mount
+  useEffect(() => {
+    if (hasUnread) {
+      // Brief pulse: 0 → 1 → 0 to highlight the row
+      Animated.sequence([
+        Animated.timing(highlightAnim, {
+          toValue: 1,
+          duration: 150,
+          useNativeDriver: false, // backgroundColor doesn't support native driver
+        }),
+        Animated.timing(highlightAnim, {
+          toValue: 0,
+          duration: 400,
+          useNativeDriver: false,
+        }),
+      ]).start();
+    }
+  }, []);
 
   // Press feedback animation (subtle, no bounce)
   const handlePressIn = useCallback(() => {
@@ -122,16 +143,33 @@ export function ConversationItem({
     return 'New message';
   };
 
+  // Interpolate highlight animation for subtle background pulse
+  const highlightBgColor = highlightAnim.interpolate({
+    inputRange: [0, 1],
+    outputRange: [
+      hasUnread ? COLORS.primarySubtle : COLORS.background,
+      COLORS.primary + '20', // Slightly more vibrant pulse
+    ],
+  });
+
+  // Entry animation for new items
+  const enteringAnimation = FadeIn.duration(200);
+
   return (
-    <TouchableOpacity
-      style={[styles.container, hasUnread && styles.containerUnread]}
-      onPress={onPress}
-      onPressIn={handlePressIn}
-      onPressOut={handlePressOut}
-      activeOpacity={1}
-    >
-      <Animated.View style={[styles.innerContainer, { transform: [{ scale: scaleAnim }] }]}>
-        {/* Avatar Section */}
+    <Reanimated.View entering={enteringAnimation}>
+      <TouchableOpacity
+        style={styles.container}
+        onPress={onPress}
+        onPressIn={handlePressIn}
+        onPressOut={handlePressOut}
+        activeOpacity={1}
+      >
+        <Animated.View style={[
+          styles.innerContainer,
+          { transform: [{ scale: scaleAnim }] },
+          hasUnread && { backgroundColor: highlightBgColor },
+        ]}>
+          {/* Avatar Section */}
         <TouchableOpacity
           style={styles.avatarContainer}
           onPress={onAvatarPress}
@@ -194,8 +232,9 @@ export function ConversationItem({
             )}
           </View>
         </View>
-      </Animated.View>
-    </TouchableOpacity>
+        </Animated.View>
+      </TouchableOpacity>
+    </Reanimated.View>
   );
 }
 

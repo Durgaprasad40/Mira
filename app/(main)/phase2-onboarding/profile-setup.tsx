@@ -331,9 +331,9 @@ export default function Phase2Review() {
       >
         {/* === SECTION A: Review Title === */}
         <View style={styles.section}>
-          <Text style={styles.mainTitle}>Review your profile</Text>
+          <Text style={styles.mainTitle}>Almost there</Text>
           <Text style={styles.mainSubtitle}>
-            This is how your private profile will appear to others.
+            Review your private profile before entering. You can always edit this later.
           </Text>
         </View>
 
@@ -409,7 +409,7 @@ export default function Phase2Review() {
             <View style={styles.warningBanner}>
               <Ionicons name="alert-circle" size={16} color="#FF6B6B" />
               <Text style={styles.warningText}>
-                Complete all fields to continue
+                Please complete the missing fields
               </Text>
             </View>
           )}
@@ -552,9 +552,9 @@ export default function Phase2Review() {
 
         {/* === SECTION F: Info Note === */}
         <View style={styles.infoNote}>
-          <Ionicons name="information-circle-outline" size={18} color={C.textLight} />
+          <Ionicons name="lock-closed" size={18} color={C.primary} />
           <Text style={styles.infoNoteText}>
-            After completing setup, you can edit your profile anytime from Phase-2 settings.
+            Your private profile is separate and secure. You can edit anytime from settings.
           </Text>
         </View>
 

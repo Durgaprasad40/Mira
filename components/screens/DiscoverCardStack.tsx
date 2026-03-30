@@ -40,6 +40,7 @@ import { useAuthStore } from "@/stores/authStore";
 import { useDiscoverStore } from "@/stores/discoverStore";
 import { useFilterStore } from "@/stores/filterStore";
 import { ProfileCard, SwipeOverlay } from "@/components/cards";
+import { WelcomeOverlay, SwipeGuidanceHint, SkeletonCard } from "@/components/ui";
 import { isDemoMode } from "@/hooks/useConvex";
 import { getDiscoverPrefetch, markPrefetchUsed, clearUsedPrefetch } from "@/lib/discoverPrefetch";
 import { useNotifications } from "@/hooks/useNotifications";
@@ -258,6 +259,68 @@ const starBurstStyles = StyleSheet.create({
 
 const HEADER_H = 44;
 
+// ═══════════════════════════════════════════════════════════════════════════
+// ANIMATED ACTION BUTTON - Micro-interaction feedback for action buttons
+// ═══════════════════════════════════════════════════════════════════════════
+const AnimatedTouchable = Animated.createAnimatedComponent(TouchableOpacity);
+
+interface AnimatedActionButtonProps {
+  onPress: () => void;
+  style: any;
+  children: React.ReactNode;
+  disabled?: boolean;
+  feedbackScale?: number;
+  hapticType?: 'light' | 'medium' | 'none';
+}
+
+function AnimatedActionButton({
+  onPress,
+  style,
+  children,
+  disabled = false,
+  feedbackScale = 0.92,
+  hapticType = 'light',
+}: AnimatedActionButtonProps) {
+  const scale = useSharedValue(1);
+
+  const animatedStyle = useAnimatedStyle(() => ({
+    transform: [{ scale: scale.value }],
+  }));
+
+  const handlePressIn = useCallback(() => {
+    scale.value = withSpring(feedbackScale, { damping: 15, stiffness: 400 });
+  }, [scale, feedbackScale]);
+
+  const handlePressOut = useCallback(() => {
+    scale.value = withSpring(1, { damping: 15, stiffness: 400 });
+  }, [scale]);
+
+  const handlePress = useCallback(() => {
+    // Trigger haptic feedback
+    if (hapticType !== 'none') {
+      Haptics.impactAsync(
+        hapticType === 'medium'
+          ? Haptics.ImpactFeedbackStyle.Medium
+          : Haptics.ImpactFeedbackStyle.Light
+      );
+    }
+    onPress();
+  }, [onPress, hapticType]);
+
+  return (
+    <AnimatedTouchable
+      style={[style, animatedStyle]}
+      onPress={handlePress}
+      onPressIn={handlePressIn}
+      onPressOut={handlePressOut}
+      disabled={disabled}
+      activeOpacity={0.9}
+    >
+      {children}
+    </AnimatedTouchable>
+  );
+}
+
 export interface DiscoverCardStackProps {
   /** 'dark' applies INCOGNITO_COLORS to background/header only; card UI stays identical */
   theme?: "light" | "dark";
@@ -368,6 +431,42 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
     }
     setShowPhaseTransition(false);
   }, []);
+
+  // ══════════════════════════════════════════════════════════════════════════
+  // FIRST-TIME USER EXPERIENCE OVERLAYS
+  // Shows welcome message and swipe guidance on first entry
+  // ══════════════════════════════════════════════════════════════════════════
+  const [showWelcomeOverlay, setShowWelcomeOverlay] = useState(false);
+  const [showSwipeGuidance, setShowSwipeGuidance] = useState(false);
+  const welcomeShownRef = useRef(false);
+  const swipeGuidanceShownRef = useRef(false);
+
+  // Show welcome overlay on first entry (Phase-1 only, Phase-2 has its own transition)
+  useEffect(() => {
+    if (!isPhase2 && !welcomeShownRef.current && onboardingCompleted) {
+      welcomeShownRef.current = true;
+      setShowWelcomeOverlay(true);
+    }
+  }, [isPhase2, onboardingCompleted]);
+
+  // Show swipe guidance after welcome (or phase transition for Phase-2)
+  useEffect(() => {
+    // For Phase-1: show after welcome overlay dismisses
+    // For Phase-2: show after phase transition dismisses
+    const shouldShowGuidance = !swipeGuidanceShownRef.current && (
+      (!isPhase2 && !showWelcomeOverlay && welcomeShownRef.current) ||
+      (isPhase2 && !showPhaseTransition && phaseTransitionShownRef.current)
+    );
+
+    if (shouldShowGuidance) {
+      swipeGuidanceShownRef.current = true;
+      // Small delay to let the main content appear first
+      const timer = setTimeout(() => {
+        setShowSwipeGuidance(true);
+      }, 200);
+      return () => clearTimeout(timer);
+    }
+  }, [isPhase2, showWelcomeOverlay, showPhaseTransition]);
 
   // Phase-2 only: Intent filters from store (syncs with Discovery Preferences)
   const { privateIntentKeys: intentFilters, togglePrivateIntentKey, setPrivateIntentKeys } = useFilterStore();
@@ -1923,10 +2022,8 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
         title="Finding people for you…"
         subtitle="This is taking longer than expected. Check your connection and try again."
       >
-        <View style={[styles.center, dark && { backgroundColor: INCOGNITO_COLORS.background }]}>
-          <ActivityIndicator size="large" color={C.primary} />
-          <Text style={[styles.loadingText, dark && { color: INCOGNITO_COLORS.textLight }]}>Finding people for you...</Text>
-        </View>
+        {/* Show skeleton card for instant visual feedback */}
+        <SkeletonCard dark={dark} />
       </LoadingGuard>
     );
   }
@@ -1964,11 +2061,11 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
         )}
         <View style={[styles.center, { flex: 1 }]}>
           <Text style={styles.emptyEmoji}>✨</Text>
-          <Text style={[styles.emptyTitle, dark && { color: INCOGNITO_COLORS.text }]}>No more profiles right now</Text>
+          <Text style={[styles.emptyTitle, dark && { color: INCOGNITO_COLORS.text }]}>We're finding people for you</Text>
           <Text style={[styles.emptySubtitle, dark && { color: INCOGNITO_COLORS.textLight }]}>
             {isDemoMode
-              ? "You may have swiped through the demo deck or your filters are strict."
-              : "Check back soon — we'll bring you more people as they join."}
+              ? "You may have swiped through the demo deck. Try adjusting your preferences."
+              : "New people are joining every day. Try adjusting your preferences to see more."}
           </Text>
           {isDemoMode && (
             <>
@@ -2070,11 +2167,11 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
         )}
         <View style={[styles.center, { flex: 1 }]}>
           <Text style={styles.emptyEmoji}>🎉</Text>
-          <Text style={[styles.emptyTitle, dark && { color: INCOGNITO_COLORS.text }]}>No more profiles</Text>
+          <Text style={[styles.emptyTitle, dark && { color: INCOGNITO_COLORS.text }]}>You've seen everyone</Text>
           <Text style={[styles.emptySubtitle, dark && { color: INCOGNITO_COLORS.textLight }]}>
             {isDemoMode
-              ? "You've swiped through the demo deck. Reset to see everyone again!"
-              : "You've seen everyone available right now."}
+              ? "Great job! Reset the deck or adjust your preferences to see more."
+              : "Check back soon for new people, or try different preferences."}
           </Text>
           {isDemoMode && (
             <>
@@ -2245,19 +2342,20 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
         <StarBurstAnimation visible={showSuperLikeAnimation} onComplete={clearSuperLikeAnimation} />
       </View>
 
-      {/* 3-Button Action Bar */}
+      {/* 3-Button Action Bar with Micro-Interaction Feedback */}
       <View style={[styles.actions, { bottom: actionRowBottom }]} pointerEvents="box-none">
-        {/* Skip (X) */}
-        <TouchableOpacity
+        {/* Skip (X) - Light feedback */}
+        <AnimatedActionButton
           style={[styles.actionButton, styles.skipBtn]}
           onPress={() => animateSwipeRef.current("left")}
-          activeOpacity={0.7}
+          feedbackScale={0.9}
+          hapticType="light"
         >
           <Ionicons name="close" size={30} color="#F44336" />
-        </TouchableOpacity>
+        </AnimatedActionButton>
 
-        {/* Stand Out (star) */}
-        <TouchableOpacity
+        {/* Stand Out (star) - Medium feedback */}
+        <AnimatedActionButton
           style={[
             styles.actionButton,
             styles.standOutBtn,
@@ -2270,22 +2368,24 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
             }
           }}
           disabled={hasReachedStandOutLimit()}
-          activeOpacity={0.7}
+          feedbackScale={0.88}
+          hapticType="medium"
         >
           <Ionicons name="star" size={24} color={COLORS.white} />
           <View style={styles.standOutBadge}>
             <Text style={styles.standOutBadgeText}>{standOutsLeft}</Text>
           </View>
-        </TouchableOpacity>
+        </AnimatedActionButton>
 
-        {/* Like (heart) */}
-        <TouchableOpacity
+        {/* Like (heart) - Medium feedback with stronger scale */}
+        <AnimatedActionButton
           style={[styles.actionButton, styles.likeBtn]}
           onPress={() => animateSwipeRef.current("right")}
-          activeOpacity={0.7}
+          feedbackScale={0.88}
+          hapticType="medium"
         >
           <Ionicons name="heart" size={30} color={COLORS.white} />
-        </TouchableOpacity>
+        </AnimatedActionButton>
       </View>
 
       {/* Notification Popover */}
@@ -2456,7 +2556,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
                 entering={FadeIn.delay(350).duration(400)}
                 style={styles.p2MatchTextSection}
               >
-                <Text style={styles.p2MatchPremiumTitle}>It's a Deep Connect</Text>
+                <Text style={styles.p2MatchPremiumTitle}>It's a connection 🔥</Text>
                 <Text style={styles.p2MatchPremiumSubtitle}>
                   You and {phase2MatchCelebration.matchedProfile.name} share a connection
                 </Text>
@@ -2496,6 +2596,26 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
           </Animated.View>
         </Modal>
       )}
+
+      {/* ══════════════════════════════════════════════════════════════════════════
+          FIRST-TIME USER EXPERIENCE OVERLAYS
+          ══════════════════════════════════════════════════════════════════════════ */}
+
+      {/* Welcome Overlay - Phase-1 only (Phase-2 has its own transition) */}
+      <WelcomeOverlay
+        visible={showWelcomeOverlay}
+        onDismiss={() => setShowWelcomeOverlay(false)}
+        dark={dark}
+        title="You're in"
+        subtitle="Welcome to Mira"
+      />
+
+      {/* Swipe Guidance Hint - shows after welcome/transition */}
+      <SwipeGuidanceHint
+        visible={showSwipeGuidance}
+        onDismiss={() => setShowSwipeGuidance(false)}
+        dark={dark}
+      />
     </View>
   );
 }

@@ -399,7 +399,10 @@ export default function Phase2ProfileEdit() {
         <TouchableOpacity onPress={() => router.back()} hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}>
           <Ionicons name="arrow-back" size={24} color={C.text} />
         </TouchableOpacity>
-        <Text style={styles.headerTitle}>Edit Profile</Text>
+        <View style={styles.headerTitleContainer}>
+          <Text style={styles.headerTitle}>Create your private profile</Text>
+          <Text style={styles.headerHelper}>This is separate from your main profile</Text>
+        </View>
         {/* P2-PHOTO-001: Updated step number for 5-step flow */}
         <Text style={styles.stepLabel}>Step 3 of 5</Text>
       </View>
@@ -473,7 +476,7 @@ export default function Phase2ProfileEdit() {
             </Text>
           </View>
           <Text style={[styles.sectionSubtitle, !canContinueIntents && styles.countWarning]}>
-            Select {PHASE2_MIN_INTENTS}-{PHASE2_MAX_INTENTS} intents
+            Choose {PHASE2_MIN_INTENTS}-{PHASE2_MAX_INTENTS} — be honest, it helps us match you better
           </Text>
 
           <View style={styles.intentGrid}>
@@ -648,9 +651,9 @@ export default function Phase2ProfileEdit() {
 
         {/* Section D: Desire */}
         <View style={styles.section}>
-          <Text style={styles.sectionTitle}>Desire</Text>
+          <Text style={styles.sectionTitle}>Your Desire</Text>
           <Text style={styles.sectionSubtitle}>
-            Share what you're looking for in a private connection.
+            Share what you're seeking — this helps others understand you better
           </Text>
 
           <TouchableOpacity
@@ -767,9 +770,11 @@ const styles = StyleSheet.create({
   scrollView: { flex: 1 },
   header: {
     flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between',
-    paddingHorizontal: 16, paddingVertical: 10, borderBottomWidth: 1, borderBottomColor: C.surface,
+    paddingHorizontal: 16, paddingVertical: 12, borderBottomWidth: 1, borderBottomColor: C.surface,
   },
-  headerTitle: { fontSize: 18, fontWeight: '700', color: C.text },
+  headerTitleContainer: { flex: 1, marginHorizontal: 12 },
+  headerTitle: { fontSize: 16, fontWeight: '700', color: C.text },
+  headerHelper: { fontSize: 11, color: C.textLight, marginTop: 2 },
   stepLabel: { fontSize: 12, color: C.textLight },
   section: { paddingHorizontal: SCREEN_PADDING, paddingTop: 20 },
   sectionHeader: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', marginBottom: 4 },

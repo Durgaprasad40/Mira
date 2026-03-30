@@ -1139,13 +1139,15 @@ export default function MessagesScreen() {
             )}
             ListEmptyComponent={
               <View style={styles.emptyContainer}>
-                <Text style={styles.emptyEmoji}>💬</Text>
-                <Text style={styles.emptyTitle}>No messages yet...</Text>
+                <View style={styles.emptyIconContainer}>
+                  <Ionicons name="chatbubbles-outline" size={40} color={COLORS.primary} />
+                </View>
+                <Text style={styles.emptyTitle}>No conversations yet</Text>
                 <Text style={styles.emptySubtitle}>
-                  Start a conversation 👀
+                  Start connecting to see messages here
                 </Text>
                 <Text style={styles.emptyHint}>
-                  Match with someone on Discover or{'\n'}accept a confession to begin chatting
+                  Swipe right on someone you like{'\n'}and start a conversation when you match
                 </Text>
               </View>
             }
@@ -1668,7 +1670,7 @@ const styles = StyleSheet.create({
   },
 
   // ═══════════════════════════════════════════════════════════════════════════
-  // EMPTY STATE - Friendly, clean, minimal
+  // EMPTY STATE - Friendly, engaging, clear guidance
   // ═══════════════════════════════════════════════════════════════════════════
   emptyContainer: {
     flex: 1,
@@ -1680,29 +1682,38 @@ const styles = StyleSheet.create({
   emptyListContainer: {
     flexGrow: 1,
   },
+  emptyIconContainer: {
+    width: 80,
+    height: 80,
+    borderRadius: 40,
+    backgroundColor: COLORS.primary + '12',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 20,
+  },
   emptyEmoji: {
     fontSize: 56,
     marginBottom: 16,
   },
   emptyTitle: {
-    fontSize: 22,
+    fontSize: 20,
     fontWeight: '700',
     color: COLORS.text,
-    marginBottom: 8,
+    marginBottom: 10,
     letterSpacing: -0.3,
   },
   emptySubtitle: {
-    fontSize: 16,
+    fontSize: 15,
     fontWeight: '500',
     color: COLORS.textLight,
     textAlign: 'center',
-    marginBottom: 12,
+    marginBottom: 14,
   },
   emptyHint: {
     fontSize: 14,
     color: COLORS.textMuted,
     textAlign: 'center',
-    lineHeight: 20,
+    lineHeight: 22,
   },
 
   // Match Modal

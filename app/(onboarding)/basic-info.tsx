@@ -962,18 +962,21 @@ export default function BasicInfoScreen() {
       {/* Top error banner (only in edit mode) */}
       {!isReadOnly && showTopError && (
         <View style={styles.topErrorBanner}>
-          <Text style={styles.topErrorText}>Please complete highlighted fields.</Text>
+          <Text style={styles.topErrorText}>Please fill in the required fields below</Text>
         </View>
       )}
 
-      <Text style={styles.title}>Tell us about yourself</Text>
+      <Text style={styles.title}>Let's set up your profile</Text>
       <Text style={styles.subtitle}>
         {isReadOnly
           ? "Please verify your information before continuing."
           : isRecoveryMode
           ? "We couldn't load your details. Please re-enter to continue."
-          : "This information will be shown on your profile."}
+          : "This helps people know who you are"}
       </Text>
+      {!isReadOnly && !isRecoveryMode && (
+        <Text style={styles.globalHelper}>You can edit this anytime later</Text>
+      )}
 
       {/* First Name field - always editable in editFromReview mode */}
       <View ref={firstNameFieldRef} style={styles.field}>
@@ -990,6 +993,7 @@ export default function BasicInfoScreen() {
           editable={!isReadOnly || isEditFromReview}
           style={[(isReadOnly && !isEditFromReview) ? styles.disabledInput : undefined, errors.firstName ? styles.inputError : undefined]}
         />
+        <Text style={styles.fieldHelper}>Shown on your profile</Text>
         {(!isReadOnly || isEditFromReview) && (
           <Text style={styles.hint}>
             {firstName.length}/{VALIDATION.FIRST_NAME_MAX_LENGTH} characters
@@ -1013,6 +1017,7 @@ export default function BasicInfoScreen() {
           editable={!isReadOnly || isEditFromReview}
           style={[(isReadOnly && !isEditFromReview) ? styles.disabledInput : undefined, errors.lastName ? styles.inputError : undefined]}
         />
+        <Text style={styles.fieldHelper}>Shown on your profile</Text>
         {(!isReadOnly || isEditFromReview) && (
           <Text style={styles.hint}>
             {lastName.length}/{VALIDATION.LAST_NAME_MAX_LENGTH} characters
@@ -1072,6 +1077,7 @@ export default function BasicInfoScreen() {
             ) : null}
           </View>
         )}
+        <Text style={styles.fieldHelper}>Your unique username on Mira</Text>
         {!isReadOnly && !isFieldLocked('nickname') && (
           <Text style={styles.hint}>
             Letters, numbers, and underscores only. {nickname.length}/20
@@ -1086,6 +1092,7 @@ export default function BasicInfoScreen() {
       {/* Date of Birth field - LOCKED in editFromReview mode */}
       <View ref={dobFieldRef} style={styles.field}>
         <Text style={styles.label}>Date of Birth</Text>
+        <Text style={styles.fieldHelper}>Used to show your age</Text>
         <Button
           title={currentDOB ? formatDate(currentDOB) : "Select your date of birth"}
           variant="outline"
@@ -1118,6 +1125,7 @@ export default function BasicInfoScreen() {
       {/* Gender field - LOCKED in editFromReview mode */}
       <View ref={genderFieldRef} style={styles.field}>
         <Text style={styles.label}>I am a</Text>
+        <Text style={styles.fieldHelper}>Helps us match you better</Text>
         <View style={[styles.genderContainer, errors.gender ? styles.genderContainerError : undefined]}>
           {GENDER_OPTIONS.map((option) => (
             <TouchableOpacity
@@ -1154,6 +1162,7 @@ export default function BasicInfoScreen() {
       {/* LGBTQ Self (Optional) - "What am I?" - ALWAYS editable, even in read-only mode */}
       <View style={styles.field}>
         <Text style={styles.label}>LGBTQ (Optional) — What am I?</Text>
+        <Text style={styles.fieldHelper}>Improves match suggestions</Text>
         <Text style={styles.hint}>Select up to 2 options</Text>
         <View style={styles.lgbtqContainer}>
           {LGBTQ_OPTIONS.map((option) => {
@@ -1215,7 +1224,7 @@ export default function BasicInfoScreen() {
       {/* Continue button */}
       <View style={styles.footer}>
         <Button
-          title="Continue"
+          title="Continue →"
           variant="primary"
           onPress={isReadOnly ? handleReadOnlyContinue : isRecoveryMode ? handleRecoveryContinue : handleNextWithConfirmation}
           loading={!isReadOnly && !isRecoveryMode && isSubmitting}
@@ -1274,6 +1283,7 @@ const styles = StyleSheet.create({
   },
   content: {
     padding: 24,
+    paddingBottom: 40,
   },
   loadingContainer: {
     flex: 1,
@@ -1289,22 +1299,34 @@ const styles = StyleSheet.create({
     fontSize: 28,
     fontWeight: "700",
     color: COLORS.text,
-    marginBottom: 8,
+    marginBottom: 10,
+    letterSpacing: -0.5,
   },
   subtitle: {
     fontSize: 16,
     color: COLORS.textLight,
+    marginBottom: 8,
+    lineHeight: 24,
+  },
+  globalHelper: {
+    fontSize: 13,
+    color: COLORS.textMuted,
     marginBottom: 24,
-    lineHeight: 22,
+  },
+  fieldHelper: {
+    fontSize: 12,
+    color: COLORS.textMuted,
+    marginTop: 4,
+    marginBottom: 2,
   },
   field: {
-    marginBottom: 20,
+    marginBottom: 22,
   },
   label: {
     fontSize: 14,
     fontWeight: "500",
-    color: COLORS.text,
-    marginBottom: 8,
+    color: COLORS.textLight,
+    marginBottom: 10,
   },
   hint: {
     fontSize: 12,
@@ -1418,22 +1440,22 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     flexWrap: "wrap",
     gap: 12,
-    marginTop: 8,
+    marginTop: 10,
   },
   genderOption: {
     flex: 1,
     minWidth: "45%",
-    paddingVertical: 16,
+    paddingVertical: 18,
     paddingHorizontal: 20,
-    borderRadius: 12,
+    borderRadius: 14,
     backgroundColor: COLORS.backgroundDark,
-    borderWidth: 2,
-    borderColor: COLORS.border,
+    borderWidth: 1.5,
+    borderColor: "transparent",
     alignItems: "center",
   },
   genderOptionSelected: {
     borderColor: COLORS.primary,
-    backgroundColor: COLORS.primary + "10",
+    backgroundColor: "rgba(255, 107, 107, 0.12)",
   },
   genderText: {
     fontSize: 16,
@@ -1442,6 +1464,7 @@ const styles = StyleSheet.create({
   },
   genderTextSelected: {
     color: COLORS.primary,
+    fontWeight: "600",
   },
   ageBlockedContainer: {
     backgroundColor: COLORS.error + "10",
@@ -1466,15 +1489,15 @@ const styles = StyleSheet.create({
   },
   modalOverlay: {
     flex: 1,
-    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+    backgroundColor: 'rgba(0, 0, 0, 0.6)',
     justifyContent: 'center',
     alignItems: 'center',
     padding: 24,
   },
   modalContent: {
     backgroundColor: COLORS.background,
-    borderRadius: 16,
-    padding: 24,
+    borderRadius: 20,
+    padding: 26,
     width: '100%',
     maxWidth: 340,
   },
@@ -1482,14 +1505,15 @@ const styles = StyleSheet.create({
     fontSize: 20,
     fontWeight: '700',
     color: COLORS.text,
-    marginBottom: 12,
+    marginBottom: 14,
     textAlign: 'center',
+    letterSpacing: -0.3,
   },
   modalMessage: {
     fontSize: 15,
     color: COLORS.textLight,
-    lineHeight: 22,
-    marginBottom: 24,
+    lineHeight: 24,
+    marginBottom: 26,
     textAlign: 'center',
   },
   modalButtons: {
@@ -1498,9 +1522,9 @@ const styles = StyleSheet.create({
   },
   modalButtonEdit: {
     flex: 1,
-    paddingVertical: 14,
-    borderRadius: 12,
-    borderWidth: 2,
+    paddingVertical: 16,
+    borderRadius: 14,
+    borderWidth: 1.5,
     borderColor: COLORS.border,
     alignItems: 'center',
   },
@@ -1511,8 +1535,8 @@ const styles = StyleSheet.create({
   },
   modalButtonConfirm: {
     flex: 1,
-    paddingVertical: 14,
-    borderRadius: 12,
+    paddingVertical: 16,
+    borderRadius: 14,
     backgroundColor: COLORS.primary,
     alignItems: 'center',
   },
@@ -1529,19 +1553,19 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     flexWrap: 'wrap',
     gap: 10,
-    marginTop: 8,
+    marginTop: 10,
   },
   lgbtqOption: {
-    paddingVertical: 10,
-    paddingHorizontal: 16,
-    borderRadius: 20,
+    paddingVertical: 12,
+    paddingHorizontal: 18,
+    borderRadius: 22,
     backgroundColor: COLORS.backgroundDark,
-    borderWidth: 2,
-    borderColor: COLORS.border,
+    borderWidth: 1.5,
+    borderColor: "transparent",
   },
   lgbtqOptionSelected: {
     borderColor: COLORS.primary,
-    backgroundColor: COLORS.primary + '10',
+    backgroundColor: "rgba(255, 107, 107, 0.12)",
   },
   lgbtqText: {
     fontSize: 14,
@@ -1550,5 +1574,6 @@ const styles = StyleSheet.create({
   },
   lgbtqTextSelected: {
     color: COLORS.primary,
+    fontWeight: '600',
   },
 });

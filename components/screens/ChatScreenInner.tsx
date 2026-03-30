@@ -1760,13 +1760,22 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
           }}
           ListEmptyComponent={
             <View style={styles.emptyChat}>
-              <Text style={styles.emptyChatEmoji}>👋</Text>
-              <Text style={styles.emptyChatText}>
-                No messages yet...
-              </Text>
+              <View style={styles.emptyChatIconContainer}>
+                <Text style={styles.emptyChatEmoji}>💬</Text>
+              </View>
+              <Text style={styles.emptyChatText}>Start the conversation</Text>
               <Text style={styles.emptyChatHint}>
-                Say hi to {isOtherUserAnonymous ? 'Anonymous' : activeConversation.otherUser.name}!
+                Say hi 👋 or send something interesting
               </Text>
+              {/* Match context hint for new conversations */}
+              {!activeConversation.isPreMatch && !isOtherUserAnonymous && (
+                <View style={styles.matchContextBadge}>
+                  <Ionicons name="heart" size={12} color={COLORS.primary} />
+                  <Text style={styles.matchContextText}>
+                    You matched with {activeConversation.otherUser.name}
+                  </Text>
+                </View>
+              )}
             </View>
           }
           contentContainerStyle={{
@@ -2225,27 +2234,52 @@ const styles = StyleSheet.create({
     justifyContent: 'center' as const,
   },
   // ═══════════════════════════════════════════════════════════════════════════
-  // EMPTY STATE - Friendly, calm, minimal
+  // EMPTY STATE - Friendly, engaging, clear CTA
   // ═══════════════════════════════════════════════════════════════════════════
   emptyChat: {
     alignItems: 'center',
     padding: 32,
+    paddingTop: 48,
+  },
+  emptyChatIconContainer: {
+    width: 72,
+    height: 72,
+    borderRadius: 36,
+    backgroundColor: COLORS.primary + '12',
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: 16,
   },
   emptyChatEmoji: {
-    fontSize: 48,
-    marginBottom: 12,
+    fontSize: 32,
   },
   emptyChatText: {
-    fontSize: 16,
-    fontWeight: '600',
+    fontSize: 18,
+    fontWeight: '700',
     color: COLORS.text,
-    marginBottom: 6,
+    marginBottom: 8,
     textAlign: 'center',
   },
   emptyChatHint: {
-    fontSize: 14,
+    fontSize: 15,
     color: COLORS.textMuted,
     textAlign: 'center',
+    lineHeight: 22,
+  },
+  matchContextBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    marginTop: 20,
+    paddingVertical: 8,
+    paddingHorizontal: 14,
+    backgroundColor: COLORS.primary + '10',
+    borderRadius: 16,
+  },
+  matchContextText: {
+    fontSize: 13,
+    fontWeight: '500',
+    color: COLORS.primary,
   },
   expiredBanner: {
     flexDirection: 'row',

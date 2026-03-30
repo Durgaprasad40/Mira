@@ -349,7 +349,7 @@ export default function Phase2PromptsScreen() {
 
     return (
       <View style={styles.sectionContent}>
-        <Text style={styles.subQuestionHint}>Tap a question to answer (1 answer only):</Text>
+        <Text style={styles.subQuestionHint}>Choose a question to answer (pick one):</Text>
         {sectionPrompts.map((prompt) => {
           const currentAnswer = getAnswer(prompt.id);
           const isSelected = selectedId === prompt.id;
@@ -642,9 +642,9 @@ export default function Phase2PromptsScreen() {
           keyboardDismissMode="interactive"
         >
           {/* Title */}
-          <Text style={styles.title}>Tell us about yourself</Text>
+          <Text style={styles.title}>Express yourself</Text>
           <Text style={styles.subtitle}>
-            Answer at least 1 question in each section to continue.
+            This helps others understand you better. Answer at least 1 question per section.
           </Text>
 
           {/* Validation Error */}

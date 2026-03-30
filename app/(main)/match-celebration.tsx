@@ -150,6 +150,9 @@ export default function MatchCelebrationScreen() {
   const rotation = useRef(new Animated.Value(0)).current;
   const confettiOpacity = useRef(new Animated.Value(0)).current;
   const heartScale = useRef(new Animated.Value(0)).current;
+  // Entry animation for entire content container
+  const contentScale = useRef(new Animated.Value(0.9)).current;
+  const contentOpacity = useRef(new Animated.Value(0)).current;
 
   const confettiPieces = useMemo(() => {
     type ConfettiPiece = {
@@ -177,6 +180,21 @@ export default function MatchCelebrationScreen() {
   useEffect(() => {
     // Celebration animation sequence
     Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
+
+    // Content container entry animation (scale 0.9 → 1, opacity 0 → 1)
+    Animated.parallel([
+      Animated.spring(contentScale, {
+        toValue: 1,
+        tension: 50,
+        friction: 7,
+        useNativeDriver: true,
+      }),
+      Animated.timing(contentOpacity, {
+        toValue: 1,
+        duration: 200,
+        useNativeDriver: true,
+      }),
+    ]).start();
 
     const t1 = Animated.spring(scale1, {
       toValue: 1,
@@ -484,7 +502,7 @@ export default function MatchCelebrationScreen() {
         ))}
       </Animated.View>
 
-      <View style={styles.content}>
+      <Animated.View style={[styles.content, { transform: [{ scale: contentScale }], opacity: contentOpacity }]}>
         <Text style={styles.title}>{titleText}</Text>
         <Text style={styles.subtitle}>{subtitleText}</Text>
 
@@ -544,7 +562,7 @@ export default function MatchCelebrationScreen() {
             <Text style={styles.keepSwipingText}>{keepSwipingText}</Text>
           </TouchableOpacity>
         </View>
-      </View>
+      </Animated.View>
     </LinearGradient>
   );
 }

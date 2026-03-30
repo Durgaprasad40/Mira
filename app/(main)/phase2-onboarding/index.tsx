@@ -491,11 +491,16 @@ export default function Phase2OnboardingTerms() {
           <View style={styles.iconContainer}>
             <Ionicons name="shield-checkmark" size={48} color={C.primary} />
           </View>
-          <Text style={styles.welcomeTitle}>Welcome to Private Mode</Text>
+          <Text style={styles.welcomeTitle}>Before you enter…</Text>
           <Text style={styles.welcomeSubtitle}>
-            Create a fresh, separate identity for your private connections.
-            Your Phase-2 profile is completely independent from your main profile.
+            This is a more private space.{'\n'}
+            Be respectful and genuine.{'\n'}
+            Only real interactions are allowed.
           </Text>
+          <View style={styles.trustLine}>
+            <Ionicons name="lock-closed" size={14} color={C.primary} />
+            <Text style={styles.trustLineText}>Your privacy and safety come first</Text>
+          </View>
         </View>
 
         {/* Terms Section */}
@@ -658,10 +663,25 @@ const styles = StyleSheet.create({
     marginBottom: 8,
   },
   welcomeSubtitle: {
-    fontSize: 14,
+    fontSize: 15,
     color: C.textLight,
     textAlign: "center",
-    lineHeight: 20,
+    lineHeight: 24,
+  },
+  trustLine: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    marginTop: 16,
+    paddingVertical: 8,
+    paddingHorizontal: 14,
+    backgroundColor: C.primary + "10",
+    borderRadius: 20,
+  },
+  trustLineText: {
+    fontSize: 13,
+    fontWeight: "500",
+    color: C.primary,
   },
 
   // Terms section

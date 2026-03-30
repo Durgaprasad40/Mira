@@ -1,5 +1,6 @@
 import React from 'react';
 import { View, Text, StyleSheet, ActivityIndicator, Image, TouchableOpacity, Alert, Pressable, Dimensions } from 'react-native';
+import Animated, { FadeIn, SlideInUp } from 'react-native-reanimated';
 import { Ionicons } from '@expo/vector-icons';
 import { COLORS } from '@/lib/constants';
 import MediaMessage from './MediaMessage';
@@ -136,6 +137,12 @@ export function MessageBubble({
 }: MessageBubbleProps) {
   const isEmojiOnly = message.type === 'text' && EMOJI_ONLY_RE.test(message.content.trim());
 
+  // Entry animation: subtle fade + slide up for new messages
+  const enteringAnimation = FadeIn.duration(180).withInitialValues({
+    opacity: 0,
+    transform: [{ translateY: 6 }],
+  });
+
   // Avatar rendering helper for received messages - tappable to open profile
   const renderAvatar = () => {
     if (isOwn) return null; // No avatar for sent messages
@@ -266,14 +273,17 @@ export function MessageBubble({
     );
 
     return (
-      <View style={[
-        styles.container,
-        isOwn ? styles.ownContainer : styles.otherContainer,
-        !isLastInGroup && styles.groupedContainer,
-      ]}>
+      <Animated.View
+        entering={enteringAnimation}
+        style={[
+          styles.container,
+          isOwn ? styles.ownContainer : styles.otherContainer,
+          !isLastInGroup && styles.groupedContainer,
+        ]}
+      >
         {!isOwn && renderAvatar()}
         {protectedMediaContent}
-      </View>
+      </Animated.View>
     );
   }
 
@@ -284,11 +294,14 @@ export function MessageBubble({
 
   if (isMedia) {
     return (
-      <View style={[
-        styles.container,
-        isOwn ? styles.ownContainer : styles.otherContainer,
-        !isLastInGroup && styles.groupedContainer,
-      ]}>
+      <Animated.View
+        entering={enteringAnimation}
+        style={[
+          styles.container,
+          isOwn ? styles.ownContainer : styles.otherContainer,
+          !isLastInGroup && styles.groupedContainer,
+        ]}
+      >
         {!isOwn && renderAvatar()}
         <View style={[styles.bubble, isOwn ? styles.ownBubble : styles.otherBubble]}>
             <MediaMessage
@@ -313,7 +326,7 @@ export function MessageBubble({
               })()}
             </View>
           </View>
-      </View>
+      </Animated.View>
     );
   }
 
@@ -324,11 +337,14 @@ export function MessageBubble({
   const voiceDuration = message.durationMs || message.audioDurationMs || 0;
   if (message.type === 'voice') {
     return (
-      <View style={[
-        styles.container,
-        isOwn ? styles.ownContainer : styles.otherContainer,
-        !isLastInGroup && styles.groupedContainer,
-      ]}>
+      <Animated.View
+        entering={enteringAnimation}
+        style={[
+          styles.container,
+          isOwn ? styles.ownContainer : styles.otherContainer,
+          !isLastInGroup && styles.groupedContainer,
+        ]}
+      >
         {!isOwn && renderAvatar()}
         <VoiceMessageBubble
           messageId={message.id}
@@ -338,17 +354,20 @@ export function MessageBubble({
           timestamp={message.createdAt}
           onDelete={isOwn && onVoiceDelete ? () => onVoiceDelete(message.id) : undefined}
         />
-      </View>
+      </Animated.View>
     );
   }
 
   if (message.type === 'dare') {
     return (
-      <View style={[
-        styles.container,
-        isOwn ? styles.ownContainer : styles.otherContainer,
-        !isLastInGroup && styles.groupedContainer,
-      ]}>
+      <Animated.View
+        entering={enteringAnimation}
+        style={[
+          styles.container,
+          isOwn ? styles.ownContainer : styles.otherContainer,
+          !isLastInGroup && styles.groupedContainer,
+        ]}
+      >
         {!isOwn && renderAvatar()}
         <View style={[styles.bubble, styles.dareBubble, isOwn && styles.ownBubble]}>
           <View style={styles.dareHeader}>
@@ -360,16 +379,19 @@ export function MessageBubble({
           <Text style={styles.dareContent}>{message.content}</Text>
           <Text style={[styles.time, styles.dareTime]}>{formatTime(message.createdAt)}</Text>
         </View>
-      </View>
+      </Animated.View>
     );
   }
 
   return (
-    <View style={[
-      styles.container,
-      isOwn ? styles.ownContainer : styles.otherContainer,
-      !isLastInGroup && styles.groupedContainer,
-    ]}>
+    <Animated.View
+      entering={enteringAnimation}
+      style={[
+        styles.container,
+        isOwn ? styles.ownContainer : styles.otherContainer,
+        !isLastInGroup && styles.groupedContainer,
+      ]}
+    >
       {/* Avatar for received messages */}
       {!isOwn && renderAvatar()}
 
@@ -404,18 +426,18 @@ export function MessageBubble({
           </View>
         )}
       </View>
-    </View>
+    </Animated.View>
   );
 }
 
 const styles = StyleSheet.create({
   // ═══════════════════════════════════════════════════════════════════════════
-  // CONTAINER - Message row layout
+  // CONTAINER - Message row layout with improved spacing
   // ═══════════════════════════════════════════════════════════════════════════
   container: {
     flexDirection: 'row',
     alignItems: 'flex-end',
-    marginVertical: 4,
+    marginVertical: 5, // Slightly increased for better readability
     paddingHorizontal: 14,
   },
   ownContainer: {
@@ -425,7 +447,7 @@ const styles = StyleSheet.create({
     justifyContent: 'flex-start',
   },
   groupedContainer: {
-    marginVertical: 1, // Tighter spacing for consecutive same-sender messages
+    marginVertical: 2, // Slightly increased for grouped messages
   },
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -454,12 +476,12 @@ const styles = StyleSheet.create({
   },
 
   // ═══════════════════════════════════════════════════════════════════════════
-  // BUBBLE - Core message container styling
+  // BUBBLE - Core message container styling with improved readability
   // ═══════════════════════════════════════════════════════════════════════════
   bubble: {
     maxWidth: MAX_BUBBLE_WIDTH,
     paddingHorizontal: 14,
-    paddingVertical: 10,
+    paddingVertical: 11, // Slightly increased for better readability
     borderRadius: BUBBLE_RADIUS,
     backgroundColor: COLORS.backgroundDark,
   },
@@ -470,6 +492,12 @@ const styles = StyleSheet.create({
   otherBubble: {
     backgroundColor: COLORS.card,
     borderBottomLeftRadius: BUBBLE_TAIL_RADIUS,
+    // Subtle shadow for better distinction
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.04,
+    shadowRadius: 2,
+    elevation: 1,
   },
   dareBubble: {
     backgroundColor: COLORS.secondary,

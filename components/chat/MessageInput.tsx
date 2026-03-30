@@ -1,10 +1,18 @@
 import React, { useState, useMemo, useCallback, useRef, useEffect } from 'react';
 import { View, Text, TextInput, StyleSheet, TouchableOpacity, Alert, ActivityIndicator, Modal, Pressable, Keyboard } from 'react-native';
+import Animated, {
+  useSharedValue,
+  useAnimatedStyle,
+  withSpring,
+  withTiming,
+} from 'react-native-reanimated';
 import { Ionicons } from '@expo/vector-icons';
 import { COLORS, MESSAGE_TEMPLATES } from '@/lib/constants';
 import { Button } from '@/components/ui';
 import { isDemoMode } from '@/config/demo';
 import { useVoiceRecorder, type VoiceRecorderResult } from '@/hooks/useVoiceRecorder';
+
+const AnimatedTouchable = Animated.createAnimatedComponent(TouchableOpacity);
 
 interface MessageInputProps {
   onSend: (text: string, type?: 'text' | 'template') => void | Promise<void>;
@@ -45,6 +53,38 @@ export function MessageInput({
   const [text, setText] = useState(initialText);
   const [showTemplates, setShowTemplates] = useState(false);
   const [showAttachMenu, setShowAttachMenu] = useState(false);
+  const [isFocused, setIsFocused] = useState(false);
+
+  // Send button animation
+  const sendButtonScale = useSharedValue(1);
+  const inputBorderColor = useSharedValue(0);
+
+  const sendButtonStyle = useAnimatedStyle(() => ({
+    transform: [{ scale: sendButtonScale.value }],
+  }));
+
+  const inputAnimatedStyle = useAnimatedStyle(() => ({
+    borderWidth: 1.5,
+    borderColor: inputBorderColor.value === 1 ? COLORS.primary : 'transparent',
+  }));
+
+  const handleFocus = useCallback(() => {
+    setIsFocused(true);
+    inputBorderColor.value = withTiming(1, { duration: 150 });
+  }, [inputBorderColor]);
+
+  const handleBlur = useCallback(() => {
+    setIsFocused(false);
+    inputBorderColor.value = withTiming(0, { duration: 150 });
+  }, [inputBorderColor]);
+
+  const handleSendPressIn = useCallback(() => {
+    sendButtonScale.value = withSpring(0.92, { damping: 15, stiffness: 400 });
+  }, [sendButtonScale]);
+
+  const handleSendPressOut = useCallback(() => {
+    sendButtonScale.value = withSpring(1, { damping: 15, stiffness: 400 });
+  }, [sendButtonScale]);
 
   // Voice recording
   const handleRecordingComplete = useCallback((result: VoiceRecorderResult) => {
@@ -313,39 +353,50 @@ export function MessageInput({
           </TouchableOpacity>
         )}
 
-        <TextInput
-          style={[
-            styles.input,
-            !isDemoMode && !canSendCustom && isPreMatch && styles.inputDisabled,
-            isRecording && styles.inputRecording,
-          ]}
-          placeholder={isRecording ? 'Recording voice message...' : (!isDemoMode && isPreMatch && !canSendCustom ? 'Use templates to message' : 'Type a message...')}
-          placeholderTextColor={isRecording ? COLORS.error : COLORS.textLight}
-          value={text}
-          onChangeText={handleTextChange}
-          multiline
-          scrollEnabled
-          textAlignVertical="top"
-          blurOnSubmit={false}
-          maxLength={isDemoMode || canSendCustom ? undefined : 150}
-          editable={!disabled && !isRecording && (isDemoMode || canSendCustom || !isPreMatch)}
-          autoComplete="off"
-          textContentType="none"
-          importantForAutofill="noExcludeDescendants"
-        />
+        <Animated.View style={[styles.inputWrapper, inputAnimatedStyle]}>
+          <TextInput
+            style={[
+              styles.input,
+              !isDemoMode && !canSendCustom && isPreMatch && styles.inputDisabled,
+              isRecording && styles.inputRecording,
+            ]}
+            placeholder={isRecording ? 'Recording voice message...' : (!isDemoMode && isPreMatch && !canSendCustom ? 'Use templates to message' : 'Type a message...')}
+            placeholderTextColor={isRecording ? COLORS.error : COLORS.textLight}
+            value={text}
+            onChangeText={handleTextChange}
+            onFocus={handleFocus}
+            onBlur={handleBlur}
+            multiline
+            scrollEnabled
+            textAlignVertical="top"
+            blurOnSubmit={false}
+            maxLength={isDemoMode || canSendCustom ? undefined : 150}
+            editable={!disabled && !isRecording && (isDemoMode || canSendCustom || !isPreMatch)}
+            autoComplete="off"
+            textContentType="none"
+            importantForAutofill="noExcludeDescendants"
+          />
+        </Animated.View>
 
         {!isRecording && (
-          <TouchableOpacity
-            style={[styles.sendButton, (!text.trim() || disabled || isSending) && styles.sendButtonDisabled]}
+          <AnimatedTouchable
+            style={[
+              styles.sendButton,
+              (!text.trim() || disabled || isSending) && styles.sendButtonDisabled,
+              sendButtonStyle,
+            ]}
             onPress={handleSend}
+            onPressIn={handleSendPressIn}
+            onPressOut={handleSendPressOut}
             disabled={!text.trim() || disabled || isSending}
+            activeOpacity={0.9}
           >
             {isSending ? (
               <ActivityIndicator size="small" color={COLORS.white} />
             ) : (
               <Ionicons name="send" size={20} color={COLORS.white} />
             )}
-          </TouchableOpacity>
+          </AnimatedTouchable>
         )}
       </View>
     </View>
@@ -495,13 +546,17 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.error + '20',
     borderRadius: 22,
   },
-  input: {
+  inputWrapper: {
     flex: 1,
+    borderRadius: 20,
+    overflow: 'hidden',
+  },
+  input: {
     backgroundColor: COLORS.backgroundDark,
     borderRadius: 20,
     paddingHorizontal: 16,
     paddingVertical: 10,
-    fontSize: 14,
+    fontSize: 15,
     color: COLORS.text,
     minHeight: 40,
     maxHeight: 100,

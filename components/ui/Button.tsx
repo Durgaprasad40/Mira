@@ -1,6 +1,5 @@
 import React from 'react';
 import {
-  TouchableOpacity,
   Text,
   StyleSheet,
   ActivityIndicator,
@@ -15,6 +14,7 @@ import {
   FONT_WEIGHT,
   HAIRLINE,
 } from '@/lib/constants';
+import { AnimatedPressable } from './AnimatedPressable';
 
 interface ButtonProps {
   title: string;
@@ -92,11 +92,11 @@ export function Button({
   };
 
   return (
-    <TouchableOpacity
+    <AnimatedPressable
       style={[...getButtonStyle(), style]}
       onPress={onPress}
       disabled={disabled || loading}
-      activeOpacity={0.8}
+      disableAnimation={loading}
     >
       {loading ? (
         <ActivityIndicator
@@ -109,7 +109,7 @@ export function Button({
           <Text style={[...getTextStyle(), textStyle]}>{title}</Text>
         </>
       )}
-    </TouchableOpacity>
+    </AnimatedPressable>
   );
 }
 
