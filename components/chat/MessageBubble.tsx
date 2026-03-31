@@ -10,21 +10,20 @@ import { VoiceMessageBubble } from './VoiceMessageBubble';
 import { formatTime } from '@/utils/chatTime';
 
 // ═══════════════════════════════════════════════════════════════════════════
-// LAYOUT CONSTANTS - Cross-device safe
+// LAYOUT CONSTANTS - Tight, modern chat layout (WhatsApp/Telegram density)
 // ═══════════════════════════════════════════════════════════════════════════
 const { width: SCREEN_WIDTH } = Dimensions.get('window');
 
-// Avatar sizing
-const AVATAR_SIZE = 34;
-const AVATAR_GAP = 10;
+// Avatar sizing - compact for tight layout
+const AVATAR_SIZE = 26;
+const AVATAR_GAP = 4;
 
-// Bubble constraints - responsive to screen width
-// 75% on smaller screens, slightly less on larger for readability
-const MAX_BUBBLE_WIDTH = Math.min(SCREEN_WIDTH * 0.75, 320);
+// Bubble constraints - maximize usable width
+const MAX_BUBBLE_WIDTH = Math.min(SCREEN_WIDTH * 0.80, 310);
 
 // Border radius for premium rounded look
-const BUBBLE_RADIUS = 20;
-const BUBBLE_TAIL_RADIUS = 6; // Smaller radius for the tail corner
+const BUBBLE_RADIUS = 18;
+const BUBBLE_TAIL_RADIUS = 4; // Smaller radius for the tail corner
 
 interface MessageBubbleProps {
   message: {
@@ -202,6 +201,18 @@ export function MessageBubble({
     if (markerMatch) {
       const subtype = markerMatch[1];
       const displayText = message.content.slice(markerMatch[0].length);
+
+      // PIN-NOTIFICATION-CLEANUP: Auto-hide "Bottle landed on" notifications
+      // after 5 minutes of being seen (UI-only suppression, message still exists in DB)
+      const isBottleLandedNotification = subtype === 'truthdare' && displayText.startsWith('Bottle landed on');
+      if (isBottleLandedNotification && message.readAt) {
+        const fiveMinutesMs = 5 * 60 * 1000;
+        const timeSinceSeen = Date.now() - message.readAt;
+        if (timeSinceSeen > fiveMinutesMs) {
+          return null; // Hide temporary pin notification after 5 min of being seen
+        }
+      }
+
       return <SystemMessage text={displayText} subtype={subtype as any} />;
     }
   }
@@ -432,13 +443,13 @@ export function MessageBubble({
 
 const styles = StyleSheet.create({
   // ═══════════════════════════════════════════════════════════════════════════
-  // CONTAINER - Message row layout with improved spacing
+  // CONTAINER - Tight message row layout (WhatsApp-style density)
   // ═══════════════════════════════════════════════════════════════════════════
   container: {
     flexDirection: 'row',
     alignItems: 'flex-end',
-    marginVertical: 5, // Slightly increased for better readability
-    paddingHorizontal: 14,
+    marginVertical: 2,
+    paddingHorizontal: 8, // Tight horizontal padding
   },
   ownContainer: {
     justifyContent: 'flex-end',
@@ -447,11 +458,11 @@ const styles = StyleSheet.create({
     justifyContent: 'flex-start',
   },
   groupedContainer: {
-    marginVertical: 2, // Slightly increased for grouped messages
+    marginVertical: 1, // Minimal gap for grouped messages
   },
 
   // ═══════════════════════════════════════════════════════════════════════════
-  // AVATAR - Circular profile image for received messages
+  // AVATAR - Compact circular profile image for received messages
   // ═══════════════════════════════════════════════════════════════════════════
   avatar: {
     width: AVATAR_SIZE,
@@ -470,18 +481,18 @@ const styles = StyleSheet.create({
     backgroundColor: COLORS.primary,
   },
   avatarInitials: {
-    fontSize: 13,
+    fontSize: 11,
     fontWeight: '700',
     color: COLORS.white,
   },
 
   // ═══════════════════════════════════════════════════════════════════════════
-  // BUBBLE - Core message container styling with improved readability
+  // BUBBLE - Compact, modern message container
   // ═══════════════════════════════════════════════════════════════════════════
   bubble: {
     maxWidth: MAX_BUBBLE_WIDTH,
-    paddingHorizontal: 14,
-    paddingVertical: 11, // Slightly increased for better readability
+    paddingHorizontal: 12,
+    paddingVertical: 8,
     borderRadius: BUBBLE_RADIUS,
     backgroundColor: COLORS.backgroundDark,
   },
@@ -492,11 +503,11 @@ const styles = StyleSheet.create({
   otherBubble: {
     backgroundColor: COLORS.card,
     borderBottomLeftRadius: BUBBLE_TAIL_RADIUS,
-    // Subtle shadow for better distinction
+    // Very subtle shadow
     shadowColor: '#000',
     shadowOffset: { width: 0, height: 1 },
-    shadowOpacity: 0.04,
-    shadowRadius: 2,
+    shadowOpacity: 0.03,
+    shadowRadius: 1,
     elevation: 1,
   },
   dareBubble: {
@@ -554,29 +565,30 @@ const styles = StyleSheet.create({
   },
 
   // ═══════════════════════════════════════════════════════════════════════════
-  // FOOTER - Timestamp and read status (subtle, secondary)
+  // FOOTER - Compact timestamp and read status (WhatsApp-style)
   // ═══════════════════════════════════════════════════════════════════════════
   footer: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginTop: 4,
+    marginTop: 2,
     justifyContent: 'flex-end',
   },
   time: {
-    fontSize: 11,
+    fontSize: 10,
     color: COLORS.textMuted,
+    letterSpacing: -0.2,
   },
   ownTime: {
-    color: 'rgba(255, 255, 255, 0.65)',
+    color: 'rgba(255, 255, 255, 0.55)',
   },
   readIcon: {
-    marginLeft: 3,
+    marginLeft: 2,
   },
   imageFooter: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'flex-end',
-    marginTop: 4,
+    marginTop: 3,
   },
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -594,13 +606,13 @@ const styles = StyleSheet.create({
     marginLeft: 8,
   },
   dareContent: {
-    fontSize: 16,
+    fontSize: 15,
     color: COLORS.white,
-    lineHeight: 22,
-    marginBottom: 8,
+    lineHeight: 21,
+    marginBottom: 6,
   },
   dareTime: {
-    fontSize: 11,
-    color: 'rgba(255, 255, 255, 0.65)',
+    fontSize: 10,
+    color: 'rgba(255, 255, 255, 0.55)',
   },
 });

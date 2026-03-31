@@ -1619,10 +1619,13 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
               !isDemo && gameSession?.state === 'cooldown' && styles.truthDareButtonCooldown,
             ]}>
               <Ionicons name="wine" size={18} color={COLORS.white} />
-              <Text style={styles.truthDareLabel}>
+              <Text style={[
+                styles.truthDareLabel,
+                !isDemo && gameSession?.state === 'pending' && gameSession?.inviterId === userId && styles.truthDareLabelWaiting,
+              ]} numberOfLines={1}>
                 {/* Show status on button */}
                 {!isDemo && gameSession?.state === 'pending' && gameSession?.inviterId === userId
-                  ? 'Wait'
+                  ? 'Sent'
                   : 'T/D'}
               </Text>
               {/* Pending invite indicator (for invitee) */}
@@ -2103,15 +2106,20 @@ const styles = StyleSheet.create({
     flexDirection: 'row' as const,
     alignItems: 'center' as const,
     backgroundColor: COLORS.secondary,
-    paddingHorizontal: 8,
+    paddingHorizontal: 10,
     paddingVertical: 6,
     borderRadius: 14,
     gap: 4,
+    minWidth: 52, // Prevent shrinking
   },
   truthDareLabel: {
     fontSize: 11,
     fontWeight: '700' as const,
     color: COLORS.white,
+    flexShrink: 0,
+  },
+  truthDareLabelWaiting: {
+    fontSize: 10,
   },
   truthDareButtonWithBadge: {
     position: 'relative' as const,
