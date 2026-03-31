@@ -3,7 +3,7 @@
  * Modern, visually rich explore experience
  */
 
-import { useCallback, useState, useMemo, useRef, useEffect } from "react";
+import React, { useCallback, useState, useMemo, useRef, useEffect } from "react";
 import {
   StyleSheet,
   View,
@@ -315,11 +315,10 @@ export default function ExploreScreen() {
   const router = useRouter();
   const [refreshKey, setRefreshKey] = useState(0);
   const [searchQuery, setSearchQuery] = useState("");
-  const [selectedFilter, setSelectedFilter] = useState("all");
   const [isLoading, setIsLoading] = useState(true);
 
-  // FlatList ref for scroll-to-top on category change
-  const flatListRef = useRef<FlatList<ExploreCategory>>(null);
+  // ScrollView ref for scroll-to-top
+  const scrollViewRef = useRef<ScrollView>(null);
 
   // Backend counts for tile badges
   const backendCounts = useExploreCategoryCounts();
@@ -339,36 +338,33 @@ export default function ExploreScreen() {
     [returnCategoryId]
   );
 
-  // Filter categories based on selected filter and search
-  const filteredCategories = useMemo(() => {
-    let categories: ExploreCategory[] = [];
+  // Filter categories by search query for each section
+  const filterBySearch = useCallback((categories: ExploreCategory[]) => {
+    if (!searchQuery.trim()) return categories;
+    const query = searchQuery.toLowerCase().trim();
+    return categories.filter(
+      (c) =>
+        c.label.toLowerCase().includes(query) ||
+        c.id.toLowerCase().includes(query)
+    );
+  }, [searchQuery]);
 
-    switch (selectedFilter) {
-      case "relationship":
-        categories = RELATIONSHIP_CATEGORIES;
-        break;
-      case "rightnow":
-        categories = RIGHT_NOW_CATEGORIES;
-        break;
-      case "interests":
-        categories = INTEREST_CATEGORIES;
-        break;
-      default:
-        categories = EXPLORE_CATEGORIES;
-    }
+  // Filtered section data
+  const relationshipItems = useMemo(
+    () => filterBySearch(RELATIONSHIP_CATEGORIES),
+    [filterBySearch]
+  );
+  const rightNowItems = useMemo(
+    () => filterBySearch(RIGHT_NOW_CATEGORIES),
+    [filterBySearch]
+  );
+  const interestItems = useMemo(
+    () => filterBySearch(INTEREST_CATEGORIES),
+    [filterBySearch]
+  );
 
-    // Apply search filter
-    if (searchQuery.trim()) {
-      const query = searchQuery.toLowerCase().trim();
-      categories = categories.filter(
-        (c) =>
-          c.label.toLowerCase().includes(query) ||
-          c.id.toLowerCase().includes(query)
-      );
-    }
-
-    return categories;
-  }, [selectedFilter, searchQuery]);
+  // Check if any items exist (for empty state)
+  const hasAnyItems = relationshipItems.length > 0 || rightNowItems.length > 0 || interestItems.length > 0;
 
   // Category counts
   const categoryCounts = useMemo(() => {
@@ -395,18 +391,6 @@ export default function ExploreScreen() {
     },
     [router, trackCategoryClick]
   );
-
-  // Handle filter change with scroll-to-top
-  const handleFilterChange = useCallback((filterId: string) => {
-    if (filterId === selectedFilter) return; // No change needed
-
-    setSelectedFilter(filterId);
-
-    // Scroll FlatList to top (safe check for ref)
-    try {
-      flatListRef.current?.scrollToOffset({ offset: 0, animated: true });
-    } catch {}
-  }, [selectedFilter]);
 
   // Handle return hook press
   const handleReturnHookPress = useCallback(() => {
@@ -446,10 +430,11 @@ export default function ExploreScreen() {
     }, [shouldShowReturnHook, returnCategory, markTriggerShown, trackExploreExit])
   );
 
-  // Render grid item
-  const renderGridItem = useCallback(
-    ({ item, index }: { item: ExploreCategory; index: number }) => (
+  // Render a single tile
+  const renderTile = useCallback(
+    (item: ExploreCategory, index: number) => (
       <ExploreTile
+        key={item.id}
         category={item}
         count={categoryCounts[item.id] ?? 0}
         onPress={() => handleCategoryPress(item)}
@@ -457,6 +442,24 @@ export default function ExploreScreen() {
       />
     ),
     [categoryCounts, handleCategoryPress]
+  );
+
+  // Render a 2-column grid for a section
+  const renderSectionGrid = useCallback(
+    (items: ExploreCategory[]) => {
+      const rows: React.ReactNode[] = [];
+      for (let i = 0; i < items.length; i += 2) {
+        const row = (
+          <View key={`row-${i}`} style={styles.gridRow}>
+            {renderTile(items[i], i)}
+            {items[i + 1] && renderTile(items[i + 1], i + 1)}
+          </View>
+        );
+        rows.push(row);
+      }
+      return rows;
+    },
+    [renderTile]
   );
 
   // Empty state
@@ -484,43 +487,6 @@ export default function ExploreScreen() {
         <Text style={styles.headerTitle}>Explore</Text>
       </View>
 
-      {/* Search Bar */}
-      <View style={styles.searchContainer}>
-        <View style={styles.searchBar}>
-          <Ionicons name="search" size={20} color={COLORS.textMuted} />
-          <TextInput
-            style={styles.searchInput}
-            placeholder="Search interests, people, or topics"
-            placeholderTextColor={COLORS.textMuted}
-            value={searchQuery}
-            onChangeText={setSearchQuery}
-            returnKeyType="search"
-          />
-          {searchQuery.length > 0 && (
-            <TouchableOpacity onPress={() => setSearchQuery("")}>
-              <Ionicons name="close-circle" size={20} color={COLORS.textMuted} />
-            </TouchableOpacity>
-          )}
-        </View>
-      </View>
-
-      {/* Category Filter Scroller */}
-      <ScrollView
-        horizontal
-        showsHorizontalScrollIndicator={false}
-        contentContainerStyle={styles.filterScrollContent}
-        style={styles.filterScroller}
-      >
-        {CATEGORY_FILTERS.map((filter) => (
-          <AnimatedFilterPill
-            key={filter.id}
-            filter={filter}
-            isSelected={selectedFilter === filter.id}
-            onPress={() => handleFilterChange(filter.id)}
-          />
-        ))}
-      </ScrollView>
-
       {/* Return Hook */}
       {showReturnHook && returnCategory && (
         <TouchableOpacity style={styles.returnHook} onPress={handleReturnHookPress}>
@@ -535,27 +501,57 @@ export default function ExploreScreen() {
         </TouchableOpacity>
       )}
 
-      {/* Main Grid Content */}
+      {/* Main Section-Based Content */}
       {isLoading ? (
         renderLoadingState()
-      ) : filteredCategories.length === 0 ? (
+      ) : !hasAnyItems ? (
         renderEmptyState()
       ) : (
-        <FlatList
-          ref={flatListRef}
-          data={filteredCategories}
-          keyExtractor={(item) => item.id}
-          renderItem={renderGridItem}
-          numColumns={2}
-          contentContainerStyle={styles.gridContent}
+        <ScrollView
+          ref={scrollViewRef}
+          style={styles.scrollView}
+          contentContainerStyle={styles.scrollContent}
           showsVerticalScrollIndicator={false}
-          columnWrapperStyle={styles.gridRow}
-          // Performance optimizations
-          initialNumToRender={8}
-          maxToRenderPerBatch={10}
-          windowSize={5}
-          removeClippedSubviews={true}
-        />
+        >
+          {/* ❤️ Relationship Section */}
+          {relationshipItems.length > 0 && (
+            <View style={styles.section}>
+              <View style={styles.sectionHeader}>
+                <Text style={styles.sectionIcon}>❤️</Text>
+                <Text style={styles.sectionTitle}>Relationship</Text>
+              </View>
+              <View style={styles.sectionGrid}>
+                {renderSectionGrid(relationshipItems)}
+              </View>
+            </View>
+          )}
+
+          {/* ⚡ Right Now Section */}
+          {rightNowItems.length > 0 && (
+            <View style={styles.section}>
+              <View style={styles.sectionHeader}>
+                <Text style={styles.sectionIcon}>⚡</Text>
+                <Text style={styles.sectionTitle}>Right Now</Text>
+              </View>
+              <View style={styles.sectionGrid}>
+                {renderSectionGrid(rightNowItems)}
+              </View>
+            </View>
+          )}
+
+          {/* 🎯 Interests Section */}
+          {interestItems.length > 0 && (
+            <View style={styles.section}>
+              <View style={styles.sectionHeader}>
+                <Text style={styles.sectionIcon}>🎯</Text>
+                <Text style={styles.sectionTitle}>Interests</Text>
+              </View>
+              <View style={styles.sectionGrid}>
+                {renderSectionGrid(interestItems)}
+              </View>
+            </View>
+          )}
+        </ScrollView>
       )}
     </SafeAreaView>
   );
@@ -679,12 +675,45 @@ const styles = StyleSheet.create({
     marginTop: 2,
   },
 
+  // ScrollView Layout
+  scrollView: {
+    flex: 1,
+  },
+  scrollContent: {
+    paddingHorizontal: GRID_PADDING,
+    paddingBottom: 100,
+  },
+
+  // Section Layout
+  section: {
+    marginTop: 20,
+  },
+  sectionHeader: {
+    flexDirection: "row",
+    alignItems: "center",
+    marginBottom: 14,
+    gap: 8,
+  },
+  sectionIcon: {
+    fontSize: 20,
+  },
+  sectionTitle: {
+    fontSize: 20,
+    fontWeight: "700",
+    color: COLORS.text,
+    letterSpacing: -0.3,
+  },
+  sectionGrid: {
+    // Container for the grid rows
+  },
+
   // Grid Layout
   gridContent: {
     paddingHorizontal: GRID_PADDING,
     paddingBottom: 100,
   },
   gridRow: {
+    flexDirection: "row",
     marginBottom: GRID_GAP,
   },
 
