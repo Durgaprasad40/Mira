@@ -50,10 +50,8 @@ export function markTiming(milestone: Milestone): void {
   if (state.times[milestone] !== undefined) return;
   state.times[milestone] = Date.now();
 
-  if (__DEV__) {
-    const elapsed = state.times[milestone]! - state.times.bundle_start!;
-    console.log(`[TIMING] ${milestone} @ +${elapsed}ms`);
-  }
+  // Individual milestone logs disabled to reduce DEV noise
+  // Summary is printed when boot completes (see tryPrintSummary)
 
   // Auto-print summary when key milestones are hit
   tryPrintSummary();
@@ -66,10 +64,7 @@ export function markTiming(milestone: Milestone): void {
 export function markDuration(metric: DurationMetric, durationMs: number): void {
   if (state.durations[metric] !== undefined) return;
   state.durations[metric] = durationMs;
-
-  if (__DEV__) {
-    console.log(`[DURATION] ${metric}: ${durationMs}ms`);
-  }
+  // Individual duration logs disabled - included in summary
 }
 
 /**

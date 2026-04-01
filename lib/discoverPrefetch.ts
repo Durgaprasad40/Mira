@@ -54,9 +54,7 @@ export function startDiscoverPrefetch(userId: string, authVersion: number): void
     return;
   }
 
-  if (__DEV__) {
-    console.log('[PREFETCH] Starting Discover prefetch for user:', userId.slice(0, 15) + '...');
-  }
+  // Prefetch start log disabled to reduce DEV noise
 
   const promise = convex.query(api.discover.getDiscoverProfiles, {
     userId: userId as any,
@@ -78,10 +76,7 @@ export function startDiscoverPrefetch(userId: string, authVersion: number): void
       // Only store if this prefetch is still valid
       if (prefetchState?.userId === userId && prefetchState?.authVersion === authVersion) {
         prefetchState.result = result;
-        if (__DEV__) {
-          const elapsed = Date.now() - prefetchState.startedAt;
-          console.log(`[PREFETCH] Discover prefetch completed: ${result?.length ?? 0} profiles in ${elapsed}ms`);
-        }
+        // Prefetch complete log disabled to reduce DEV noise
       }
     })
     .catch((error) => {
@@ -131,9 +126,6 @@ export function markPrefetchUsed(): void {
  */
 export function clearUsedPrefetch(): void {
   if (prefetchUsed && prefetchState) {
-    if (__DEV__) {
-      console.log('[PREFETCH] Clearing used prefetch cache');
-    }
     prefetchState = null;
     prefetchUsed = false;
   }
@@ -143,11 +135,6 @@ export function clearUsedPrefetch(): void {
  * Clear prefetch cache unconditionally (called on logout or auth failure).
  */
 export function clearDiscoverPrefetch(): void {
-  if (prefetchState) {
-    if (__DEV__) {
-      console.log('[PREFETCH] Clearing prefetch cache');
-    }
-  }
   prefetchState = null;
   prefetchUsed = false;
 }

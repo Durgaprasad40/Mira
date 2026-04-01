@@ -62,8 +62,9 @@ export function initSentry(): void {
       // Safe: DSN presence controls whether events are sent
       enabled: true,
 
-      // Debug mode (shows Sentry logs in dev)
-      debug: IS_DEV,
+      // Debug mode: DISABLED even in DEV to reduce console noise
+      // Set to true only when debugging Sentry integration issues
+      debug: false,
 
       // Sample rate for errors (1.0 = 100%)
       sampleRate: 1.0,
@@ -88,10 +89,8 @@ export function initSentry(): void {
 
       // Before send hook - can modify or drop events
       beforeSend(event, hint) {
-        // Log in dev mode for visibility
-        if (IS_DEV) {
-          console.log('[Sentry] Sending event:', event.exception?.values?.[0]?.value);
-        }
+        // DEV logging disabled to reduce console noise
+        // Uncomment for debugging: console.log('[Sentry] Sending event:', event.exception?.values?.[0]?.value);
 
         // Filter out non-critical errors
         const error = hint.originalException;
