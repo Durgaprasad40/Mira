@@ -230,6 +230,7 @@ export const usePrivateChatStore = create<PrivateChatState>()((set, get) => ({
     set((s) => {
       const backendIds = new Set(backendConversations.map((c) => c.id));
       const localIds = new Set(s.conversations.map((c) => c.id));
+      const localById = new Map(s.conversations.map((c) => [c.id, c]));
 
       // Find conversations to remove (in local but not in backend)
       const toRemove = s.conversations.filter((c) => !backendIds.has(c.id));
@@ -237,26 +238,43 @@ export const usePrivateChatStore = create<PrivateChatState>()((set, get) => ({
       // Find conversations to add (in backend but not in local)
       const toAdd = backendConversations.filter((c) => !localIds.has(c.id));
 
-      // Find conversations to update (in both, update metadata from backend)
-      const toUpdateIds = new Set(
-        backendConversations
-          .filter((c) => localIds.has(c.id))
-          .map((c) => c.id)
-      );
+      // P2-PERF: Find conversations that ACTUALLY changed (deep compare key fields)
+      // Only update if backend data differs from local data
+      const toUpdate: typeof backendConversations = [];
+      for (const bc of backendConversations) {
+        if (!localIds.has(bc.id)) continue; // New item, handled by toAdd
+        const local = localById.get(bc.id);
+        if (!local) continue;
+        // Compare backend-authoritative fields only
+        const hasChanges =
+          local.lastMessage !== bc.lastMessage ||
+          local.lastMessageAt !== bc.lastMessageAt ||
+          local.unreadCount !== bc.unreadCount ||
+          local.participantName !== bc.participantName ||
+          local.participantPhotoUrl !== bc.participantPhotoUrl ||
+          local.participantAge !== bc.participantAge;
+        if (hasChanges) {
+          toUpdate.push(bc);
+        }
+      }
 
-      // Early exit if no changes needed
-      if (toRemove.length === 0 && toAdd.length === 0 && toUpdateIds.size === 0) {
+      // P2-PERF: Early exit if no actual changes needed
+      if (toRemove.length === 0 && toAdd.length === 0 && toUpdate.length === 0) {
         return s;
       }
+
+      // P2-PERF: Create lookup for items to update
+      const toUpdateIds = new Set(toUpdate.map((c) => c.id));
+      const toUpdateById = new Map(toUpdate.map((c) => [c.id, c]));
 
       // Build new conversations array
       let updatedConversations = s.conversations
         // Remove conversations no longer in backend
         .filter((c) => backendIds.has(c.id))
-        // Update existing conversations with backend metadata
+        // Update existing conversations with backend metadata (only if changed)
         .map((c) => {
           if (!toUpdateIds.has(c.id)) return c;
-          const backendConvo = backendConversations.find((bc) => bc.id === c.id);
+          const backendConvo = toUpdateById.get(c.id);
           if (!backendConvo) return c;
           // Update backend-authoritative fields (lastMessage, unreadCount, etc.)
           return {

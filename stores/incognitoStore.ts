@@ -20,9 +20,13 @@ interface IncognitoState {
   setHasHydrated: (hydrated: boolean) => void;
 }
 
-export const useIncognitoStore = create<IncognitoState>()((set) => ({
+export const useIncognitoStore = create<IncognitoState>()((set, get) => ({
   isActive: false,
-  setActive: (active) => set({ isActive: active }),
+  setActive: (active) => {
+    // LOOP FIX: Equality guard - don't update if value is same
+    if (get().isActive === active) return;
+    set({ isActive: active });
+  },
   toggle: () => set((state) => ({ isActive: !state.isActive })),
 
   ageConfirmed18Plus: false,
@@ -33,5 +37,9 @@ export const useIncognitoStore = create<IncognitoState>()((set) => ({
     set({ ageConfirmed18Plus: false, ageConfirmedAt: null }),
 
   _hasHydrated: true, // Always ready - no AsyncStorage
-  setHasHydrated: (hydrated) => set({ _hasHydrated: true }), // No-op
+  setHasHydrated: (hydrated) => {
+    // LOOP FIX: Equality guard - already always true, but guard anyway
+    if (get()._hasHydrated === true) return;
+    set({ _hasHydrated: true });
+  },
 }));

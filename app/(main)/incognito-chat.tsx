@@ -34,11 +34,11 @@ import { Id } from '@/convex/_generated/dataModel';
 import { popHandoff } from '@/lib/memoryHandoff';
 import * as ImagePicker from 'expo-image-picker';
 import { INCOGNITO_COLORS } from '@/lib/constants';
-import { PRIVATE_INTENT_CATEGORIES } from '@/lib/privateConstants';
+// PHASE 2 FIX: Removed PRIVATE_INTENT_CATEGORIES import - intent labels not shown in header
 import { maskExplicitWords, MASKED_CONTENT_NOTICE } from '@/lib/contentFilter';
 import { usePrivateChatStore } from '@/stores/privateChatStore';
 import { useAuthStore } from '@/stores/authStore';
-import { BottleSpinGame } from '@/components/chat/BottleSpinGame';
+import { BottleSpinGame, TruthDareInviteCard } from '@/components/chat';
 import { CameraPhotoSheet, type CameraPhotoOptions } from '@/components/chat/CameraPhotoSheet';
 import { ReportModal } from '@/components/private/ReportModal';
 import { Phase2ProtectedMediaViewer } from '@/components/private/Phase2ProtectedMediaViewer';
@@ -50,6 +50,9 @@ import { PHASE2_BLUR_AVATAR } from '@/lib/phase2UI';
 import { useVoiceRecorder, type VoiceRecorderResult } from '@/hooks/useVoiceRecorder';
 import { VoiceMessageBubble } from '@/components/chat/VoiceMessageBubble';
 import type { IncognitoMessage } from '@/types';
+
+// SELECTOR FIX: Stable empty array reference to avoid infinite loop in useSyncExternalStore
+const EMPTY_ARRAY: IncognitoMessage[] = [];
 
 // ═══════════════════════════════════════════════════════════════════════════
 // P0-002b: Message type for backend messages (mapped for UI compatibility)
@@ -78,18 +81,7 @@ interface BackendMessage {
   audioDurationMs?: number;
 }
 
-/**
- * P1-004 FIX: Look up Phase-2 intent label from backend data.
- * @param intentKey - The privateIntentKey from backend userPrivateProfiles
- * @returns The human-readable label or null if not found
- */
-const getIntentLabelFromKey = (intentKey: string | null | undefined): string | null => {
-  if (!intentKey) return null;
-  const category = PRIVATE_INTENT_CATEGORIES.find((c) => c.key === intentKey);
-  return category?.label ?? null;
-};
-
-// P1-004 FIX: getPrivateIntentKey removed - now using backend participantIntentKey directly
+// PHASE 2 FIX: Removed getIntentLabelFromKey - intent labels not shown in Deep Connect chat header
 
 // ═══════════════════════════════════════════════════════════════════════════
 // MESSAGE-TICKS-FIX: Helper functions for message status ticks
@@ -115,16 +107,26 @@ function getTickColor(status: TickStatus): string {
   return 'rgba(255,255,255,0.8)';
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// NAVIGATION DEBUG: Track mount events for camera-composer bug investigation
+// ═══════════════════════════════════════════════════════════════════════════
+let _incognitoChatMountCount = 0;
+
 export default function PrivateChatScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const flatListRef = useRef<FlashListRef<IncognitoMessage>>(null);
 
+  // Mount counter for debugging (no logging to reduce noise)
+  const mountIdRef = useRef(++_incognitoChatMountCount);
+
   // ═══════════════════════════════════════════════════════════════════════════
   // P0-002b: Auth for backend mutations
+  // SELECTOR FIX: Use individual selectors to avoid unstable object references
   // ═══════════════════════════════════════════════════════════════════════════
-  const { token, userId: currentUserId } = useAuthStore();
+  const token = useAuthStore((s) => s.token);
+  const currentUserId = useAuthStore((s) => s.userId);
 
   // ─── Composer height tracking (matches locked chat-rooms pattern) ───
   const [composerHeight, setComposerHeight] = useState(56);
@@ -143,7 +145,10 @@ export default function PrivateChatScreen() {
 
   // Local store - ONLY used for conversation metadata (header info), NOT messages
   const conversations = usePrivateChatStore((s) => s.conversations);
-  const blockUser = usePrivateChatStore((s) => s.blockUser);
+  // Note: blockUser moved to ReportModal with full backend integration
+  // P1-006 PARITY: Local add/delete for ToD system messages and pending secure media
+  const localAddMessage = usePrivateChatStore((s) => s.addMessage);
+  const deleteMessage = usePrivateChatStore((s) => s.deleteMessage);
 
   const localConversation = conversations.find((c) => c.id === id);
 
@@ -164,7 +169,6 @@ export default function PrivateChatScreen() {
     if (localConversation) return localConversation;
     if (backendConversation) {
       // Map backend response to local store format
-      console.log('[T/D PHASE2 OPEN] Using backend conversation:', backendConversation.id?.toString().slice(-8));
       return {
         id: backendConversation.id as string,
         participantId: backendConversation.participantId as string,
@@ -177,10 +181,82 @@ export default function PrivateChatScreen() {
         lastMessageAt: backendConversation.createdAt || Date.now(),
         unreadCount: backendConversation.unreadCount || 0,
         connectionSource: backendConversation.connectionSource || 'tod',
+        // PHOTO ACCESS: New fields for privacy feature
+        isPhotoBlurred: (backendConversation as any).isPhotoBlurred ?? false,
+        photoAccessStatus: (backendConversation as any).photoAccessStatus ?? 'none',
+        canViewClearPhoto: (backendConversation as any).canViewClearPhoto ?? true,
+        // PRESENCE-FIX: Include participantLastActive from backend for online status
+        participantLastActive: (backendConversation as any).participantLastActive ?? 0,
       };
     }
     return null;
   }, [localConversation, backendConversation]);
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // PHOTO ACCESS: Request access mutation for blurred photos
+  // ═══════════════════════════════════════════════════════════════════════════
+  const requestPhotoAccessMutation = useMutation(api.privatePhotoAccess.requestPrivatePhotoAccess);
+  const [photoAccessRequesting, setPhotoAccessRequesting] = useState(false);
+
+  const handleRequestPhotoAccess = useCallback(async () => {
+    if (!conversation || !currentUserId || photoAccessRequesting) return;
+
+    setPhotoAccessRequesting(true);
+    try {
+      const result = await requestPhotoAccessMutation({
+        authUserId: currentUserId,
+        ownerUserId: conversation.participantId as Id<'users'>,
+        conversationId: id as Id<'privateConversations'>,
+      });
+
+      if (result.success) {
+        if (__DEV__) console.log('[PhotoAccess] Request sent:', result.status);
+      } else {
+        if (__DEV__) console.log('[PhotoAccess] Request failed:', result.error);
+      }
+    } catch (error) {
+      if (__DEV__) console.warn('[PhotoAccess] Error:', error);
+    } finally {
+      setPhotoAccessRequesting(false);
+    }
+  }, [conversation, currentUserId, id, requestPhotoAccessMutation, photoAccessRequesting]);
+
+  // PHOTO ACCESS: Query for pending requests where I am the OWNER
+  // This shows a banner when the other participant wants to see MY blurred photo
+  const pendingPhotoRequests = useQuery(
+    api.privatePhotoAccess.getPendingPhotoAccessRequests,
+    currentUserId ? { authUserId: currentUserId } : 'skip'
+  );
+
+  // Find if the OTHER participant in this conversation has a pending request for MY photo
+  const pendingRequestFromOther = useMemo(() => {
+    if (!pendingPhotoRequests || !conversation) return null;
+    return pendingPhotoRequests.find(
+      (req) => req.viewerUserId === conversation.participantId && req.conversationId === id
+    ) ?? null;
+  }, [pendingPhotoRequests, conversation, id]);
+
+  // Mutation to respond to photo access request
+  const respondPhotoAccessMutation = useMutation(api.privatePhotoAccess.respondPrivatePhotoAccessRequest);
+  const [respondingToRequest, setRespondingToRequest] = useState(false);
+
+  const handleRespondToPhotoRequest = useCallback(async (approve: boolean) => {
+    if (!pendingRequestFromOther || !currentUserId || respondingToRequest) return;
+
+    setRespondingToRequest(true);
+    try {
+      await respondPhotoAccessMutation({
+        authUserId: currentUserId,
+        requestId: pendingRequestFromOther.requestId as Id<'privatePhotoAccessRequests'>,
+        approve,
+      });
+      if (__DEV__) console.log('[PhotoAccess] Responded:', approve ? 'approved' : 'declined');
+    } catch (error) {
+      if (__DEV__) console.warn('[PhotoAccess] Respond error:', error);
+    } finally {
+      setRespondingToRequest(false);
+    }
+  }, [pendingRequestFromOther, currentUserId, respondPhotoAccessMutation, respondingToRequest]);
 
   // ═══════════════════════════════════════════════════════════════════════════
   // P0-002b: Backend message fetching (replaces local store)
@@ -195,7 +271,9 @@ export default function PrivateChatScreen() {
   // Map backend messages to UI-compatible IncognitoMessage format
   // MESSAGE-TICKS-FIX: Include deliveredAt and readAt for visual ticks
   // P1-006 FIX: Get local messages from store (ToD results, pending secure media)
-  const localMessages = usePrivateChatStore((s) => (id ? s.messages[id] ?? [] : []));
+  // SELECTOR FIX: Return undefined instead of new [] to avoid unstable references
+  const localMessagesRaw = usePrivateChatStore((s) => (id ? s.messages[id] : undefined));
+  const localMessages = localMessagesRaw ?? EMPTY_ARRAY;
 
   // P0-003: Include audioUrl for voice messages
   // P1-001: Include protected media fields
@@ -264,9 +342,195 @@ export default function PrivateChatScreen() {
   const markReadMutation = useMutation(api.privateConversations.markPrivateMessagesRead);
   const markDeliveredMutation = useMutation(api.privateConversations.markPrivateMessagesDelivered);
   const deleteMessageMutation = useMutation(api.privateConversations.deletePrivateMessage);
+  // EXPIRED-CLEANUP-FIX: New mutation for system cleanup (allows both participants, not just sender)
+  const cleanupExpiredMutation = useMutation(api.privateConversations.cleanupExpiredPrivateMessage);
   const generateUploadUrl = useMutation(api.photos.generateUploadUrl); // P0-003: For voice upload
   // P1-001: Secure media upload mutation
   const generateSecureMediaUploadUrl = useMutation(api.privateConversations.generateSecureMediaUploadUrl);
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // PHASE 1 PARITY: Truth/Dare Game Session Management
+  // Exactly matches Phase 1 ChatScreenInner T/D flow
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  // Query game session status from backend (same as Phase 1)
+  const gameSession = useQuery(
+    api.games.getBottleSpinSession,
+    id ? { conversationId: id } : 'skip'
+  );
+
+  // Game session mutations (same as Phase 1)
+  const sendInviteMutation = useMutation(api.games.sendBottleSpinInvite);
+  const respondToInviteMutation = useMutation(api.games.respondToBottleSpinInvite);
+  const endGameMutation = useMutation(api.games.endBottleSpinGame);
+
+  // Get other user's ID for invite
+  const otherUserId = conversation?.participantId;
+
+  // T/D UI state
+  const [showTruthDareGame, setShowTruthDareGame] = useState(false);
+  const [showTruthDareInvite, setShowTruthDareInvite] = useState(false);
+  const [showCooldownMessage, setShowCooldownMessage] = useState(false);
+  const [cooldownRemainingMin, setCooldownRemainingMin] = useState(0);
+
+  // AUTO-CLOSE: Watch game session state changes for cross-device sync (same as Phase 1)
+  useEffect(() => {
+    if (!gameSession) return;
+
+    // Auto-close game modal when game is ended/rejected on either device
+    if (gameSession.state === 'cooldown' || gameSession.state === 'none') {
+      if (showTruthDareGame) {
+        setShowTruthDareGame(false);
+      }
+    }
+
+    // Auto-open game modal when invite is accepted (for inviter)
+    if (gameSession.state === 'active') {
+      if (showTruthDareInvite) {
+        setShowTruthDareInvite(false);
+        setShowTruthDareGame(true);
+      }
+    }
+
+    // Clear cooldown message when cooldown expires
+    if (gameSession.state !== 'cooldown') {
+      setShowCooldownMessage(false);
+    }
+  }, [gameSession?.state, showTruthDareGame, showTruthDareInvite]);
+
+  // AUTO-OPEN: When it's my turn to choose, automatically open the game modal (same as Phase 1)
+  useEffect(() => {
+    if (!gameSession || !currentUserId) return;
+
+    // Only care about active games in choosing phase
+    if (gameSession.state !== 'active') return;
+    if (gameSession.turnPhase !== 'choosing') return;
+    if (!gameSession.currentTurnRole) return;
+
+    // Determine my role
+    const amIInviter = gameSession.inviterId === currentUserId;
+    const amIInvitee = gameSession.inviteeId === currentUserId;
+    const myRole = amIInviter ? 'inviter' : (amIInvitee ? 'invitee' : null);
+
+    if (!myRole) return;
+
+    // Check if it's MY turn
+    const isMyTurn = gameSession.currentTurnRole === myRole;
+
+    // If it's my turn and modal is closed, open it automatically
+    if (isMyTurn && !showTruthDareGame) {
+      setShowTruthDareGame(true);
+    }
+  }, [gameSession?.state, gameSession?.turnPhase, gameSession?.currentTurnRole, gameSession?.inviterId, gameSession?.inviteeId, currentUserId, showTruthDareGame]);
+
+  // Handle T/D button press based on current state (same logic as Phase 1)
+  const handleTruthDarePress = useCallback(() => {
+    if (!gameSession) return;
+
+    // Priority 1: Cooldown active - show inline message
+    if (gameSession.state === 'cooldown') {
+      const remainingMin = Math.ceil((gameSession.remainingMs || 0) / 60000);
+      setCooldownRemainingMin(remainingMin);
+      setShowCooldownMessage(true);
+      setTimeout(() => setShowCooldownMessage(false), 3000);
+      return;
+    }
+
+    // Priority 2: Active game exists - open game modal
+    if (gameSession.state === 'active') {
+      setShowTruthDareGame(true);
+      return;
+    }
+
+    // Priority 3: Pending invite exists - no action (invitee sees card, inviter waits)
+    if (gameSession.state === 'pending') {
+      return;
+    }
+
+    // Priority 4: No game - show invite modal
+    setShowTruthDareInvite(true);
+  }, [gameSession]);
+
+  // Send game invite (same as Phase 1)
+  // INVITE-FIX: Check pending state before sending to prevent "Invite already pending" error
+  const handleSendInvite = useCallback(async () => {
+    if (!currentUserId || !id || !otherUserId) return;
+
+    // INVITE-FIX: Don't send if invite is already pending
+    if (gameSession?.state === 'pending') {
+      setShowTruthDareInvite(false);
+      return;
+    }
+
+    try {
+      await sendInviteMutation({
+        authUserId: currentUserId,
+        conversationId: id,
+        otherUserId: String(otherUserId),
+      });
+      setShowTruthDareInvite(false);
+
+      // Send system message about invite (uses local store for now)
+      localAddMessage(id, {
+        id: `tod_invite_${Date.now()}`,
+        conversationId: id,
+        senderId: 'tod',
+        content: 'You want to play Truth or Dare!',
+        createdAt: Date.now(),
+        isRead: true,
+      });
+    } catch (error: any) {
+      Alert.alert('Error', error.message || 'Failed to send invite');
+    }
+  }, [currentUserId, id, otherUserId, gameSession?.state, sendInviteMutation, localAddMessage]);
+
+  // Respond to game invite (same as Phase 1)
+  const handleRespondToInvite = useCallback(async (accept: boolean) => {
+    if (!currentUserId || !id) return;
+
+    try {
+      await respondToInviteMutation({
+        authUserId: currentUserId,
+        conversationId: id,
+        accept,
+      });
+
+      // Send system message about response
+      const responseText = accept
+        ? 'Game starting...'
+        : 'Game invite declined';
+      localAddMessage(id, {
+        id: `tod_response_${Date.now()}`,
+        conversationId: id,
+        senderId: 'tod',
+        content: responseText,
+        createdAt: Date.now(),
+        isRead: true,
+      });
+
+      // If accepted, open the game
+      if (accept) {
+        setShowTruthDareGame(true);
+      }
+    } catch (error: any) {
+      Alert.alert('Error', error.message || 'Failed to respond to invite');
+    }
+  }, [currentUserId, id, respondToInviteMutation, localAddMessage]);
+
+  // End game (called from BottleSpinGame)
+  const handleEndGame = useCallback(async () => {
+    if (!currentUserId || !id) return;
+
+    try {
+      await endGameMutation({
+        authUserId: currentUserId,
+        conversationId: id,
+      });
+    } catch (error) {
+      // Silent fail - UI will close anyway
+      if (__DEV__) console.warn('[P2_TD] Failed to end game:', error);
+    }
+  }, [currentUserId, id, endGameMutation]);
 
   // MESSAGE-TICKS-FIX: Mark messages as read AND delivered when screen opens
   // Following Phase-1 pattern: delivery happens when conversation opens
@@ -297,6 +561,66 @@ export default function PrivateChatScreen() {
     hasMarkedRef.current = false;
   }, [id]);
 
+  // PHASE-1 PARITY FIX: Update presence periodically while chat is open
+  // This allows the other user to see "Online" status
+  const updatePresenceMutation = useMutation(api.messages.updatePresence);
+  useEffect(() => {
+    if (!currentUserId) return;
+
+    // Update presence immediately on mount
+    updatePresenceMutation({ authUserId: currentUserId }).catch(() => {
+      // Silent fail - presence is best-effort
+    });
+
+    // Update every 30 seconds while chat is open
+    const interval = setInterval(() => {
+      updatePresenceMutation({ authUserId: currentUserId }).catch(() => {
+        // Silent fail
+      });
+    }, 30_000);
+
+    return () => clearInterval(interval);
+  }, [currentUserId, updatePresenceMutation]);
+
+  // PHASE-1 PARITY FIX (LIVE-TICK-V2): Mark messages as delivered/read when new messages arrive
+  // This ensures the sender sees tick updates (1 -> 2 -> blue) in real-time
+  const lastProcessedMsgIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    // Skip if no messages or required data
+    if (!messages || messages.length === 0 || !id || !token) return;
+
+    // Get the latest message
+    const latestMsg = messages[messages.length - 1];
+    const latestMsgId = latestMsg?.id;
+
+    // Check if we have any unread messages from the other user
+    const hasUnreadFromOther = messages.some((m) =>
+      m.senderId !== 'me' && !m.readAt
+    );
+
+    // If there are unread messages from the other user, mark as delivered and read
+    if (hasUnreadFromOther) {
+      // Mark as delivered
+      markDeliveredMutation({
+        token,
+        conversationId: id as Id<'privateConversations'>,
+      }).catch((err) => {
+        if (__DEV__) console.warn('[P2_LIVE_TICK] markDelivered error:', err);
+      });
+
+      // Mark as read
+      markReadMutation({
+        token,
+        conversationId: id as Id<'privateConversations'>,
+      }).catch((err) => {
+        if (__DEV__) console.warn('[P2_LIVE_TICK] markRead error:', err);
+      });
+    }
+
+    // Update last processed message ID
+    lastProcessedMsgIdRef.current = latestMsgId;
+  }, [messages, id, token, markDeliveredMutation, markReadMutation]);
+
   // GOAL A: Live countdown state - updates every 250ms for smooth countdown display
   const [now, setNow] = useState(Date.now());
 
@@ -319,6 +643,65 @@ export default function PrivateChatScreen() {
     return () => clearInterval(interval);
   }, [hasActiveTimers]);
 
+  // EXPIRY-AUTO-TRIGGER: Mark expired messages when timer reaches 0 (without requiring tap)
+  // This ensures media auto-expires even if viewer is NOT open
+  const markExpiredMutation = useMutation(api.privateConversations.markPrivateSecureMediaExpired);
+  const expiredIdsRef = useRef(new Set<string>()); // Track already-expired IDs to prevent duplicates
+
+  useEffect(() => {
+    if (!token) return;
+
+    // Find messages that should be expired (timer ended but not marked expired)
+    const toExpire = messages.filter(
+      (m) =>
+        m.isProtected &&
+        m.timerEndsAt &&
+        !m.isExpired &&
+        m.timerEndsAt <= now &&
+        !expiredIdsRef.current.has(m.id)
+    );
+
+    // Auto-expire each message
+    toExpire.forEach((m) => {
+      expiredIdsRef.current.add(m.id);
+      markExpiredMutation({ token, messageId: m.id as Id<'privateMessages'> })
+        .catch((err) => {
+          if (__DEV__) console.warn('[EXPIRY_AUTO] Failed to mark expired:', err);
+          expiredIdsRef.current.delete(m.id); // Allow retry on failure
+        });
+    });
+  }, [messages, now, token, markExpiredMutation]);
+
+  // EXPIRED-CLEANUP: Auto-delete expired media messages after retention period (1 minute)
+  // This prevents expired pills from stacking forever in the thread
+  // EXPIRED-CLEANUP-FIX: Uses cleanupExpiredMutation (allows both participants, not just sender)
+  const EXPIRED_RETENTION_MS = 60_000; // 1 minute after expiry
+  const cleanedUpIdsRef = useRef(new Set<string>()); // Track already-cleaned IDs
+
+  useEffect(() => {
+    if (!token || !id) return;
+
+    // Find expired messages past retention period
+    const toCleanup = messages.filter(
+      (m) =>
+        m.isProtected &&
+        m.isExpired &&
+        m.timerEndsAt &&
+        now - m.timerEndsAt > EXPIRED_RETENTION_MS &&
+        !cleanedUpIdsRef.current.has(m.id)
+    );
+
+    // Auto-cleanup each expired message (system cleanup, not user deletion)
+    toCleanup.forEach((m) => {
+      cleanedUpIdsRef.current.add(m.id);
+      cleanupExpiredMutation({ token, messageId: m.id as Id<'privateMessages'> })
+        .catch((err) => {
+          if (__DEV__) console.warn('[EXPIRED_CLEANUP] Failed to cleanup:', err);
+          cleanedUpIdsRef.current.delete(m.id); // Allow retry on failure
+        });
+    });
+  }, [messages, now, token, id, cleanupExpiredMutation]);
+
   const [text, setText] = useState('');
   const [reportVisible, setReportVisible] = useState(false);
   const [isSending, setIsSending] = useState(false);
@@ -336,9 +719,7 @@ export default function PrivateChatScreen() {
 
   // P0-003: Voice recording with backend upload (Phase-1 parity)
   // Voice messages are uploaded to Convex storage and sent via sendPrivateMessage
-  // Note: localAddMessage still needed for ToD system messages and secure media
-  const localAddMessage = usePrivateChatStore((s) => s.addMessage);
-  const deleteMessage = usePrivateChatStore((s) => s.deleteMessage);
+  // Note: localAddMessage/deleteMessage defined earlier with store selectors
 
   const handleRecordingComplete = useCallback(async (result: VoiceRecorderResult) => {
     if (!id || !token) {
@@ -382,7 +763,7 @@ export default function PrivateChatScreen() {
       // Message will appear via Convex subscription - no local add needed
       scrollToBottom();
     } catch (e) {
-      console.error('[Phase2Chat] Failed to send voice message:', e);
+      if (__DEV__) console.warn('[Phase2Chat] Failed to send voice message:', e);
       Alert.alert('Error', 'Failed to send voice message. Please try again.');
     } finally {
       setIsSendingVoice(false);
@@ -441,7 +822,7 @@ export default function PrivateChatScreen() {
       // Also remove from local store for immediate UI feedback
       deleteMessage(id, messageId);
     } catch (e) {
-      console.error('[Phase2Chat] Failed to delete message:', e);
+      if (__DEV__) console.warn('[Phase2Chat] Failed to delete message:', e);
       Alert.alert('Error', 'Failed to delete message. Please try again.');
     }
   }, [id, token, deleteMessage, deleteMessageMutation]);
@@ -457,20 +838,28 @@ export default function PrivateChatScreen() {
 
   // Secure photo viewer state
   const [viewingMessageId, setViewingMessageId] = useState<string | null>(null);
+  // SENDER-VIEW-FIX: Track if sender is viewing their own sent media (no timer trigger)
+  const [isSenderViewing, setIsSenderViewing] = useState(false);
 
-  // ─── Truth-or-Dare game (same as Phase-1: BottleSpinGame) ───
-  const [showTruthDareGame, setShowTruthDareGame] = useState(false);
+  // ─── Truth-or-Dare game state moved to T/D Session Management section (line ~287) ───
 
-  // C10 FIX: Disable profile navigation in incognito mode to prevent identity leak
-  // In incognito chat, tapping the header should NOT reveal the other user's profile
+  // PHASE 2 FIX: Enable profile navigation to Phase 2 profile route
+  // Uses Phase 2 isolated profile screen - no Phase 1 data leakage
   const handleOpenProfile = useCallback(() => {
-    // No-op: profile viewing disabled in incognito mode
-  }, []);
+    if (!conversation?.participantId) return;
+    router.push(`/(main)/(private)/profile/${conversation.participantId}`);
+  }, [conversation?.participantId, router]);
 
-  // Phase-1 parity: send result message to chat when spin completes
-  // NOTE: ToD results use local store for now (system messages)
+  // PHASE 1 PARITY: Send result message to chat when spin completes
+  // Also calls handleEndGame when "ended the game" is detected (same as Phase 1 ChatScreenInner)
   const handleSendTodResult = useCallback((message: string) => {
     if (!id) return;
+
+    // PHASE 1 PARITY: Check for end game message and call backend
+    if (message.includes('ended the game')) {
+      handleEndGame();
+    }
+
     // Add as system message (senderId: 'tod' renders as capsule)
     localAddMessage(id, {
       id: `tod_result_${Date.now()}`,
@@ -480,10 +869,7 @@ export default function PrivateChatScreen() {
       createdAt: Date.now(),
       isRead: true,
     });
-    if (__DEV__) {
-      console.log('[Phase2Chat] ToD result:', message);
-    }
-  }, [id, localAddMessage]);
+  }, [id, localAddMessage, handleEndGame]);
 
   // Check for captured media from camera-composer when screen regains focus
   useFocusEffect(
@@ -563,22 +949,14 @@ export default function PrivateChatScreen() {
       // Restore text on error
       setText(content);
       Alert.alert('Error', 'Failed to send message. Please try again.');
-      if (__DEV__) console.error('[Phase2Chat] Send failed:', err);
+      if (__DEV__) console.warn('[Phase2Chat] Send failed:', err);
     } finally {
       setIsSending(false);
     }
   }, [text, id, token, isSending, sendMessageMutation, scrollToBottom]);
 
-  const handleReport = (reason: string) => {
-    console.log('Report submitted:', reason, 'for user:', conversation?.participantId);
-    setReportVisible(false);
-  };
-
-  const handleBlock = () => {
-    if (!conversation) return;
-    blockUser(conversation.participantId);
-    router.back();
-  };
+  // PHASE 1 PARITY: Report/Block/Leave handlers moved to ReportModal component
+  // ReportModal now handles all backend calls internally
 
   // Gallery picker for secure photos/videos (Phase-1 style: from + menu)
   const handleGalleryPick = useCallback(async () => {
@@ -614,9 +992,11 @@ export default function PrivateChatScreen() {
 
   // Camera capture: navigate directly to camera screen in PHOTO mode (no Alert prompt)
   const handleCameraCapture = useCallback(() => {
-    if (!conversation) return;
+    if (!conversation) {
+      if (__DEV__) console.log('[Phase2Chat] Camera capture aborted - no conversation');
+      return;
+    }
     setShowAttachMenu(false);
-    // Navigate to camera-composer in secure capture mode (default: photo)
     router.push(`/(main)/camera-composer?mode=secure_capture&conversationId=${id}` as any);
   }, [conversation, id, router]);
 
@@ -633,6 +1013,7 @@ export default function PrivateChatScreen() {
     setPickedImageUri(null);
     const isVideo = pendingMediaType === 'video';
     const isMirrored = pendingIsMirrored;
+
     setPendingMediaType('photo'); // Reset for next time
     setPendingIsMirrored(false); // Reset for next time
 
@@ -664,10 +1045,6 @@ export default function PrivateChatScreen() {
 
     localAddMessage(id, optimisticMsg);
 
-    if (__DEV__) {
-      console.log('[P1-001] Starting secure media upload:', { type: messageType, timer: options.timer });
-    }
-
     try {
       // Step 2: Get upload URL from backend
       const uploadUrl = await generateSecureMediaUploadUrl({ token });
@@ -688,10 +1065,6 @@ export default function PrivateChatScreen() {
 
       const { storageId } = await uploadResponse.json();
 
-      if (__DEV__) {
-        console.log('[P1-001] Media uploaded, storageId:', storageId?.slice?.(-8));
-      }
-
       // Step 4: Send message via backend with storageId
       await sendMessageMutation({
         token,
@@ -708,12 +1081,8 @@ export default function PrivateChatScreen() {
 
       // Step 5: Remove optimistic message (backend subscription will add the real one)
       deleteMessage(id, optimisticId);
-
-      if (__DEV__) {
-        console.log('[P1-001] Secure media sent successfully');
-      }
     } catch (error: any) {
-      console.warn('[P1-001] Failed to send secure media:', error?.message);
+      if (__DEV__) console.warn('[Phase2Chat] Failed to send secure media:', error?.message);
       // Update optimistic message to show error
       deleteMessage(id, optimisticId);
       Alert.alert('Error', 'Failed to send secure media. Please try again.');
@@ -741,11 +1110,6 @@ export default function PrivateChatScreen() {
 
   // P0-FIX C: Show clear error UI with explanation instead of dead blank screen
   if (!conversation) {
-    console.log('[T/D PHASE2 OPEN] Conversation not found:', {
-      id: id?.slice(-8),
-      hasLocal: !!localConversation,
-      backendResult: backendConversation,
-    });
     return (
       <View style={[styles.container, { paddingTop: insets.top }]}>
         <View style={styles.header}>
@@ -773,10 +1137,23 @@ export default function PrivateChatScreen() {
     );
   }
 
-  const renderMessage = ({ item }: { item: IncognitoMessage }) => {
+  const renderMessage = ({ item, index }: { item: IncognitoMessage; index: number }) => {
     const isOwn = item.senderId === 'me';
+
+    // AVATAR-GROUPING: Check if previous message is from same sender (to hide redundant avatars)
+    // For grouped consecutive messages, only show avatar on the FIRST message of the group
+    const prevMessage = index > 0 ? messages[index - 1] : null;
+    const isSameSenderAsPrev = prevMessage && prevMessage.senderId === item.senderId;
+    const showAvatar = !isOwn && !isSameSenderAsPrev;
     const isSystem = item.senderId === 'system';
     const isTodEvent = item.senderId === 'tod';
+
+    // PHASE-1 PARITY FIX: Avatar blur should be conditional (match header avatar behavior)
+    // Only blur when photo IS blurred AND viewer doesn't have clear access
+    const avatarBlurRadius =
+      (conversation as any)?.isPhotoBlurred && !(conversation as any)?.canViewClearPhoto
+        ? PHASE2_BLUR_AVATAR
+        : 0;
 
     // FIX #1: ToD event messages match Phase-1 SystemMessage style (dice icon, not flame)
     if (isTodEvent) {
@@ -802,13 +1179,16 @@ export default function PrivateChatScreen() {
     if (item.type === 'voice' && item.audioUri) {
       return (
         <View style={[styles.msgRow, isOwn && styles.msgRowOwn]}>
-          {!isOwn && (
+          {/* AVATAR-GROUPING: Only show avatar for first message in group */}
+          {showAvatar ? (
             <Image
               source={{ uri: conversation.participantPhotoUrl }}
               style={styles.msgAvatar}
-              blurRadius={PHASE2_BLUR_AVATAR}
+              blurRadius={avatarBlurRadius}
             />
-          )}
+          ) : !isOwn ? (
+            <View style={styles.msgAvatarPlaceholder} />
+          ) : null}
           <VoiceMessageBubble
             messageId={item.id}
             audioUri={item.audioUri}
@@ -822,53 +1202,46 @@ export default function PrivateChatScreen() {
       );
     }
 
-    // Protected media message (secure photo)
+    // ═══════════════════════════════════════════════════════════════════════════
+    // PHASE-1 PARITY FIX: Protected media message (secure photo/video)
+    // Uses SEPARATE render paths for sender vs receiver to match Phase-1 exactly
+    // ═══════════════════════════════════════════════════════════════════════════
     if (item.isProtected) {
       const isExpired = item.isExpired;
       const isHoldMode = item.protectedMedia?.viewingMode === 'hold';
       const originalTimer = item.protectedMedia?.timer ?? 0;
+      const isVideo = item.protectedMedia?.mediaType === 'video';
+      const thumbnailUri = item.protectedMedia?.localUri;
+      const isMirrored = item.protectedMedia?.isMirrored === true;
 
-      // GOAL A: Live countdown - use shared helper to match viewer exactly
+      // PHASE-1 PARITY: Live countdown - use shared helper
       const timerStarted = !!item.timerEndsAt;
       const countdown = timerStarted
         ? calculateProtectedMediaCountdown(item.timerEndsAt)
         : null;
+      const remainingSec = countdown ? countdown.remainingSeconds : 0;
+      const hasActiveTimer = timerStarted && remainingSec > 0;
 
-      // Format: View once OR remaining time (matches viewer M:SS format)
-      const remainingSec = countdown ? countdown.remainingSeconds : originalTimer;
-      const timerLabel = originalTimer === 0 ? 'View once' : (countdown ? countdown.label : `${originalTimer}s`);
-      const timerActive = timerStarted && remainingSec > 0;
-
-      // Handlers for tap vs hold mode
-      const handlePress = () => {
-        if (!isHoldMode && !isExpired) {
-          setViewingMessageId(item.id);
-        }
+      // Format timer preview for receiver (before opening): "30s" or "1m"
+      const formatTimerPreview = (seconds: number): string => {
+        if (seconds >= 60) return `${Math.floor(seconds / 60)}m`;
+        return `${seconds}s`;
       };
 
-      const handlePressIn = () => {
-        if (isHoldMode && !isExpired) {
-          setViewingMessageId(item.id);
-        }
-      };
-
-      const handlePressOut = () => {
-        if (isHoldMode) {
-          setViewingMessageId(null);
-        }
-      };
-
-      // GOAL B: Expired bubble is small pill (not large card)
+      // Expired state: compact pill (same for sender and receiver)
       if (isExpired) {
         return (
           <View style={[styles.msgRow, isOwn && styles.msgRowOwn]}>
-            {!isOwn && (
+            {/* AVATAR-GROUPING: Only show avatar for first message in group */}
+            {showAvatar ? (
               <Image
                 source={{ uri: conversation.participantPhotoUrl }}
                 style={styles.msgAvatar}
-                blurRadius={PHASE2_BLUR_AVATAR}
+                blurRadius={avatarBlurRadius}
               />
-            )}
+            ) : !isOwn ? (
+              <View style={styles.msgAvatarPlaceholder} />
+            ) : null}
             <View style={[styles.expiredPill, isOwn && styles.expiredPillOwn]}>
               <Ionicons name="lock-closed" size={12} color={C.textLight} />
               <Text style={styles.expiredPillText}>Expired</Text>
@@ -877,59 +1250,168 @@ export default function PrivateChatScreen() {
         );
       }
 
+      // ═══════════════════════════════════════════════════════════════════════
+      // SENDER PATH: Dark/blurred card, TAP to preview (without triggering timer)
+      // SENDER-VIEW-FIX: Sender can now tap to open viewer without triggering timer/expiry
+      // ═══════════════════════════════════════════════════════════════════════
+      if (isOwn) {
+        // SENDER-VIEW-FIX: Handler to open viewer as sender (no timer trigger)
+        const handleSenderPress = () => {
+          if (!isExpired) {
+            setIsSenderViewing(true);
+            setViewingMessageId(item.id);
+          }
+        };
+
+        return (
+          <View style={[styles.msgRow, styles.msgRowOwn]}>
+            <View style={styles.secureBubbleWrapper}>
+              {/* SENDER-VIEW-FIX: Wrap in TouchableOpacity to allow sender preview */}
+              <TouchableOpacity onPress={handleSenderPress} activeOpacity={0.8}>
+                <View style={styles.secureThumbnailContainer}>
+                  {/* PHASE-2 PRIVACY: Blurred thumbnail (same as receiver) */}
+                  {thumbnailUri ? (
+                    <Image
+                      source={{ uri: thumbnailUri }}
+                      style={[styles.secureThumbnail, isMirrored && styles.secureThumbnailMirrored]}
+                      contentFit="cover"
+                      blurRadius={25}
+                    />
+                  ) : (
+                    <View style={styles.secureThumbnailPlaceholder}>
+                      <Ionicons name={isVideo ? 'videocam' : 'image'} size={24} color={C.textLight} />
+                    </View>
+                  )}
+                  {/* Dark overlay for blur effect */}
+                  <View style={styles.secureBlurOverlay} />
+                  {/* Media type indicator (top-left) */}
+                  <View style={styles.secureMediaTypeIndicator}>
+                    <Ionicons name={isVideo ? 'videocam' : 'image'} size={10} color="#FFFFFF" />
+                  </View>
+                  {/* Shield badge (bottom-right) - indicates secure media */}
+                  <View style={styles.secureShieldBadge}>
+                    <Ionicons name="shield-checkmark" size={10} color="#FFFFFF" />
+                  </View>
+                  {/* "Tap to preview" hint for sender */}
+                  <View style={styles.secureHintOverlay}>
+                    <Text style={styles.secureHintText}>Tap to preview</Text>
+                  </View>
+                </View>
+              </TouchableOpacity>
+              {/* Sender status: show if recipient has viewed */}
+              {item.viewedAt && hasActiveTimer && (
+                <View style={styles.senderStatusBadge}>
+                  <Ionicons name="eye" size={10} color={SOFT_ACCENT} />
+                  <Text style={styles.senderStatusText}>Viewing • {countdown?.label}</Text>
+                </View>
+              )}
+              {item.viewedAt && originalTimer === 0 && (
+                <View style={[styles.senderStatusBadge, styles.senderStatusOpened]}>
+                  <Ionicons name="eye" size={10} color="#4CAF50" />
+                  <Text style={[styles.senderStatusText, { color: '#4CAF50' }]}>Opened</Text>
+                </View>
+              )}
+              {/* Time + tick row */}
+              <View style={styles.secureBubbleFooter}>
+                <Text style={[styles.msgTime, styles.msgTimeOwn]}>{formatTime(item.createdAt)}</Text>
+                {(() => {
+                  const tickStatus = getTickStatus(item);
+                  return (
+                    <Ionicons
+                      name={getTickIcon(tickStatus)}
+                      size={14}
+                      color={getTickColor(tickStatus)}
+                      style={styles.tickIcon}
+                    />
+                  );
+                })()}
+              </View>
+            </View>
+          </View>
+        );
+      }
+
+      // ═══════════════════════════════════════════════════════════════════════
+      // RECEIVER PATH: Blurred thumbnail, tap/hold to open viewer
+      // Receiver sees blurred preview and can tap/hold to view
+      // ═══════════════════════════════════════════════════════════════════════
+      const handleReceiverPress = () => {
+        if (!isHoldMode && !isExpired) {
+          setViewingMessageId(item.id);
+        }
+      };
+
+      const handleReceiverPressIn = () => {
+        if (isHoldMode && !isExpired) {
+          setViewingMessageId(item.id);
+        }
+      };
+
+      const handleReceiverPressOut = () => {
+        if (isHoldMode) {
+          setViewingMessageId(null);
+        }
+      };
+
       return (
-        <View style={[styles.msgRow, isOwn && styles.msgRowOwn]}>
-          {!isOwn && (
+        <View style={[styles.msgRow]}>
+          {/* AVATAR-GROUPING: Only show avatar for first message in group */}
+          {showAvatar ? (
             <Image
               source={{ uri: conversation.participantPhotoUrl }}
               style={styles.msgAvatar}
-              blurRadius={PHASE2_BLUR_AVATAR}
+              blurRadius={avatarBlurRadius}
             />
+          ) : (
+            <View style={styles.msgAvatarPlaceholder} />
           )}
           <TouchableOpacity
-            style={[
-              styles.msgBubble,
-              styles.securePhotoBubble,
-              isOwn ? styles.securePhotoBubbleOwn : styles.securePhotoBubbleOther,
-            ]}
-            onPress={handlePress}
-            onPressIn={handlePressIn}
-            onPressOut={handlePressOut}
+            onPress={handleReceiverPress}
+            onPressIn={handleReceiverPressIn}
+            onPressOut={handleReceiverPressOut}
             activeOpacity={isHoldMode ? 1 : 0.8}
             delayPressIn={isHoldMode ? 0 : undefined}
           >
-            <View style={styles.securePhotoContent}>
-              <View style={styles.securePhotoIcon}>
-                <Ionicons name="shield-checkmark" size={20} color={SOFT_ACCENT} />
+            <View style={styles.secureThumbnailContainer}>
+              {/* Blurred thumbnail */}
+              {thumbnailUri ? (
+                <Image
+                  source={{ uri: thumbnailUri }}
+                  style={[styles.secureThumbnail, isMirrored && styles.secureThumbnailMirrored]}
+                  contentFit="cover"
+                  blurRadius={25}
+                />
+              ) : (
+                <View style={styles.secureThumbnailPlaceholder}>
+                  <Ionicons name={isVideo ? 'videocam' : 'image'} size={24} color={C.textLight} />
+                </View>
+              )}
+              {/* Dark overlay for blur effect */}
+              <View style={styles.secureBlurOverlay} />
+              {/* Media type indicator (top-left) */}
+              <View style={styles.secureMediaTypeIndicator}>
+                <Ionicons name={isVideo ? 'videocam' : 'image'} size={10} color="#FFFFFF" />
               </View>
-              <View style={styles.securePhotoInfo}>
-                <Text style={[styles.securePhotoLabel, isOwn && { color: '#FFFFFF' }]}>Secure Photo</Text>
-                <Text style={styles.securePhotoMeta}>
+              {/* Timer preview badge (top-right) - shows BEFORE opening */}
+              {!timerStarted && originalTimer > 0 && (
+                <View style={styles.secureTimerPreviewBadge}>
+                  <Ionicons name="time-outline" size={10} color="#FFFFFF" />
+                  <Text style={styles.secureTimerPreviewText}>{formatTimerPreview(originalTimer)}</Text>
+                </View>
+              )}
+              {/* Live countdown (bottom-left) - shows DURING viewing */}
+              {hasActiveTimer && (
+                <View style={styles.secureLiveTimerBadge}>
+                  <Ionicons name="time-outline" size={10} color="#FFFFFF" />
+                  <Text style={styles.secureLiveTimerText}>{countdown?.label}</Text>
+                </View>
+              )}
+              {/* Tap/Hold to view hint */}
+              <View style={styles.secureHintOverlay}>
+                <Text style={styles.secureHintText}>
                   {isHoldMode ? 'Hold to view' : 'Tap to view'}
                 </Text>
               </View>
-              {/* GOAL A: Live countdown badge */}
-              <View style={[styles.timerBadge, timerActive && styles.timerBadgeActive]}>
-                <Ionicons name="timer-outline" size={11} color="#FFFFFF" />
-                <Text style={styles.timerBadgeText}>{timerLabel}</Text>
-              </View>
-            </View>
-            {/* MESSAGE-TICKS-FIX: Time + tick row for secure photos */}
-            <View style={styles.msgTimeRow}>
-              <Text style={[styles.msgTime, isOwn && styles.msgTimeOwn]}>
-                {formatTime(item.createdAt)}
-              </Text>
-              {isOwn && (() => {
-                const tickStatus = getTickStatus(item);
-                return (
-                  <Ionicons
-                    name={getTickIcon(tickStatus)}
-                    size={14}
-                    color={getTickColor(tickStatus)}
-                    style={styles.tickIcon}
-                  />
-                );
-              })()}
             </View>
           </TouchableOpacity>
         </View>
@@ -944,13 +1426,16 @@ export default function PrivateChatScreen() {
 
     return (
       <View style={[styles.msgRow, isOwn && styles.msgRowOwn]}>
-        {!isOwn && (
+        {/* AVATAR-GROUPING: Only show avatar for first message in group */}
+        {showAvatar ? (
           <Image
             source={{ uri: conversation.participantPhotoUrl }}
             style={styles.msgAvatar}
-            blurRadius={PHASE2_BLUR_AVATAR}
+            blurRadius={avatarBlurRadius}
           />
-        )}
+        ) : !isOwn ? (
+          <View style={styles.msgAvatarPlaceholder} />
+        ) : null}
         <View style={[styles.msgBubble, isOwn ? styles.msgBubbleOwn : styles.msgBubbleOther]}>
           <Text style={[styles.msgText, isOwn && styles.msgTextOwn]}>{masked}</Text>
           {wasMasked && (
@@ -982,41 +1467,167 @@ export default function PrivateChatScreen() {
         <TouchableOpacity onPress={() => router.back()} style={styles.backButton}>
           <Ionicons name="arrow-back" size={24} color={C.text} />
         </TouchableOpacity>
-        {/* Tappable avatar + info to open profile */}
-        <TouchableOpacity onPress={handleOpenProfile} style={styles.headerTappable} activeOpacity={0.7}>
-          <Image
-            source={{ uri: conversation.participantPhotoUrl }}
-            style={styles.headerAvatar}
-            blurRadius={PHASE2_BLUR_AVATAR}
-            contentFit="cover"
-          />
-          <View style={styles.headerInfo}>
-            <Text style={styles.headerName}>{conversation.participantName}</Text>
-            {/* P1-004 FIX: Use backend participantIntentKey instead of demo data */}
+        {/* PHASE 1 PARITY: Avatar with presence dot - tappable to open profile */}
+        {/* PHOTO ACCESS: Conditional blur based on canViewClearPhoto */}
+        <TouchableOpacity
+          onPress={handleOpenProfile}
+          style={styles.avatarButton}
+          activeOpacity={0.7}
+        >
+          <View style={styles.avatarContainer}>
+            {conversation.participantPhotoUrl ? (
+              <Image
+                source={{ uri: conversation.participantPhotoUrl }}
+                style={styles.headerAvatar}
+                blurRadius={
+                  // Apply blur if photo is blurred AND viewer doesn't have clear access
+                  (conversation as any).isPhotoBlurred && !(conversation as any).canViewClearPhoto
+                    ? PHASE2_BLUR_AVATAR
+                    : 0
+                }
+                contentFit="cover"
+              />
+            ) : (
+              <View style={[styles.headerAvatar, styles.headerAvatarPlaceholder]}>
+                <Ionicons name="person" size={20} color={C.textLight} />
+              </View>
+            )}
+            {/* PHASE 1 PARITY: Presence dot - green if online, gray if offline */}
             {(() => {
-              const intentLabel = getIntentLabelFromKey((conversation as any).participantIntentKey);
-              return intentLabel ? (
-                <Text style={styles.headerIntent}>{intentLabel}</Text>
-              ) : null;
+              const lastActive = (conversation as any).participantLastActive ?? 0;
+              const isOnline = Date.now() - lastActive < 60_000;
+              return (
+                <View style={[
+                  styles.presenceDot,
+                  isOnline ? styles.presenceDotOnline : styles.presenceDotOffline,
+                ]} />
+              );
             })()}
-            <Text style={styles.headerMeta}>{conversation.participantAge} · via {conversation.connectionSource}</Text>
+            {/* PHOTO ACCESS: Lock icon when photo is blurred and not approved */}
+            {(conversation as any).isPhotoBlurred && !(conversation as any).canViewClearPhoto && (
+              <View style={styles.photoLockedBadge}>
+                <Ionicons name="lock-closed" size={10} color="#FFFFFF" />
+              </View>
+            )}
           </View>
         </TouchableOpacity>
-        {/* Truth-or-Dare button — same as Phase-1: opens BottleSpinGame */}
+        {/* PHASE 1 PARITY: Name + online status - tappable to open profile */}
         <TouchableOpacity
-          onPress={() => setShowTruthDareGame(true)}
+          onPress={handleOpenProfile}
+          style={styles.headerInfo}
+          activeOpacity={0.7}
+        >
+          <Text style={styles.headerName} numberOfLines={1} ellipsizeMode="tail">
+            {conversation.participantName}
+          </Text>
+          {/* PHASE 1 PARITY: Online status text exactly like Phase 1 */}
+          <Text style={styles.headerStatus}>
+            {(() => {
+              const lastActive = (conversation as any).participantLastActive ?? 0;
+              const now = Date.now();
+              const diff = now - lastActive;
+              // Online: within 1 minute (likely still in app)
+              if (diff < 60_000) return 'Online';
+              // Active now: within 5 minutes
+              if (diff < 5 * 60_000) return 'Active now';
+              // Recently active: anything else with valid timestamp
+              if (lastActive > 0) return 'Recently active';
+              return 'Offline';
+            })()}
+          </Text>
+        </TouchableOpacity>
+        {/* PHOTO ACCESS: Request access button when photo is blurred */}
+        {(conversation as any).isPhotoBlurred && !(conversation as any).canViewClearPhoto && (
+          <TouchableOpacity
+            onPress={handleRequestPhotoAccess}
+            style={[
+              styles.photoAccessButton,
+              (conversation as any).photoAccessStatus === 'pending' && styles.photoAccessButtonPending,
+            ]}
+            disabled={(conversation as any).photoAccessStatus === 'pending' || photoAccessRequesting}
+            activeOpacity={0.7}
+          >
+            {photoAccessRequesting ? (
+              <ActivityIndicator size="small" color={C.primary} />
+            ) : (
+              <>
+                <Ionicons
+                  name={(conversation as any).photoAccessStatus === 'pending' ? 'time-outline' : 'eye-outline'}
+                  size={14}
+                  color={(conversation as any).photoAccessStatus === 'pending' ? C.textLight : C.primary}
+                />
+                <Text style={[
+                  styles.photoAccessButtonText,
+                  (conversation as any).photoAccessStatus === 'pending' && styles.photoAccessButtonTextPending,
+                ]}>
+                  {(conversation as any).photoAccessStatus === 'pending' ? 'Pending' : 'Request photo'}
+                </Text>
+              </>
+            )}
+          </TouchableOpacity>
+        )}
+        {/* PHASE 1 PARITY: Truth-or-Dare button with full session flow */}
+        {/* handleTruthDarePress checks: cooldown → active → pending → show invite */}
+        <TouchableOpacity
+          onPress={handleTruthDarePress}
           hitSlop={8}
           style={styles.gameButton}
         >
-          <View style={styles.truthDareButton}>
+          <View style={[
+            styles.truthDareButton,
+            // Visual feedback for pending invite or active game
+            gameSession?.state === 'pending' && styles.truthDareButtonPending,
+            gameSession?.state === 'active' && styles.truthDareButtonActive,
+          ]}>
             <Ionicons name="wine" size={18} color="#FFFFFF" />
             <Text style={styles.truthDareLabel}>T/D</Text>
           </View>
         </TouchableOpacity>
+        {/* PHASE 1 PARITY: Cooldown message toast */}
+        {showCooldownMessage && (
+          <View style={styles.cooldownToast}>
+            <Text style={styles.cooldownToastText}>
+              T/D available in {cooldownRemainingMin}m
+            </Text>
+          </View>
+        )}
         <TouchableOpacity onPress={() => setReportVisible(true)} style={styles.moreButton}>
           <Ionicons name="ellipsis-vertical" size={20} color={C.textLight} />
         </TouchableOpacity>
       </View>
+
+      {/* PHOTO ACCESS: Owner approval banner when someone requests access to my photo */}
+      {pendingRequestFromOther && (
+        <View style={styles.photoRequestBanner}>
+          <View style={styles.photoRequestContent}>
+            <Ionicons name="eye-outline" size={18} color={C.text} />
+            <Text style={styles.photoRequestText}>
+              <Text style={styles.photoRequestName}>{conversation?.participantName}</Text>
+              {' wants to see your photo'}
+            </Text>
+          </View>
+          <View style={styles.photoRequestActions}>
+            <TouchableOpacity
+              style={styles.photoRequestDeclineButton}
+              onPress={() => handleRespondToPhotoRequest(false)}
+              disabled={respondingToRequest}
+            >
+              <Text style={styles.photoRequestDeclineText}>Decline</Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.photoRequestApproveButton}
+              onPress={() => handleRespondToPhotoRequest(true)}
+              disabled={respondingToRequest}
+            >
+              {respondingToRequest ? (
+                <ActivityIndicator size="small" color="#FFFFFF" />
+              ) : (
+                <Text style={styles.photoRequestApproveText}>Approve</Text>
+              )}
+            </TouchableOpacity>
+          </View>
+        </View>
+      )}
 
       {/* ─── KEYBOARD AVOIDING VIEW (matches locked chat-rooms pattern) ─── */}
       <KeyboardAvoidingView
@@ -1069,8 +1680,9 @@ export default function PrivateChatScreen() {
           )}
 
           {/* ─── COMPOSER (Phase-1 style: + menu with Camera/Gallery/Voice) ─── */}
+          {/* ANDROID FIX: Use insets.bottom on all platforms for 3-button nav support */}
           <View
-            style={[styles.composerWrapper, { paddingBottom: (Platform.OS === 'ios' ? insets.bottom : 0) + 8 }]}
+            style={[styles.composerWrapper, { paddingBottom: insets.bottom + 8 }]}
             onLayout={(e) => setComposerHeight(e.nativeEvent.layout.height)}
           >
             <View style={styles.inputBar}>
@@ -1159,25 +1771,78 @@ export default function PrivateChatScreen() {
         </View>
       </KeyboardAvoidingView>
 
-      {/* Report/Block Modal */}
+      {/* PHASE 1 PARITY: Report/Block/Leave Modal with full backend integration */}
       <ReportModal
         visible={reportVisible}
         targetName={conversation.participantName}
+        targetUserId={conversation.participantId}
+        currentUserId={currentUserId || ''}
+        conversationId={id}
         onClose={() => setReportVisible(false)}
-        onReport={handleReport}
-        onBlock={handleBlock}
+        onBlockSuccess={() => router.back()}
+        onLeaveSuccess={() => router.back()}
       />
 
-      {/* Truth-or-Dare Game — same component as Phase-1 */}
+      {/* PHASE 1 PARITY: Truth-or-Dare Game — same component as Phase-1 */}
+      {/* T/D AUTH FIX: Use real currentUserId for backend mutations, not hardcoded "me" */}
+      {/* NOTE: handleEndGame called from handleSendTodResult when it detects "ended the game" */}
       <BottleSpinGame
         visible={showTruthDareGame}
         onClose={() => setShowTruthDareGame(false)}
         currentUserName="You"
         otherUserName={conversation.participantName}
         conversationId={id}
-        userId="me"
+        userId={currentUserId || ''}
         onSendResultMessage={handleSendTodResult}
       />
+
+      {/* PHASE 1 PARITY: Truth/Dare Invite Modal (first-tap flow) */}
+      <Modal
+        visible={showTruthDareInvite}
+        animationType="fade"
+        transparent
+        onRequestClose={() => setShowTruthDareInvite(false)}
+      >
+        <View style={styles.tdInviteOverlay}>
+          <View style={styles.tdInviteContainer}>
+            <View style={styles.tdInviteHeader}>
+              <View style={styles.tdInviteIconContainer}>
+                <Ionicons name="wine" size={28} color="#FFFFFF" />
+              </View>
+              <Text style={styles.tdInviteTitle}>Truth or Dare</Text>
+            </View>
+            <Text style={styles.tdInviteMessage}>
+              Invite {conversation.participantName} to play Truth or Dare?
+            </Text>
+            <View style={styles.tdInviteActions}>
+              <TouchableOpacity
+                style={[styles.tdInviteButton, styles.tdInviteCancelButton]}
+                onPress={() => setShowTruthDareInvite(false)}
+              >
+                <Text style={styles.tdInviteCancelText}>Cancel</Text>
+              </TouchableOpacity>
+              <TouchableOpacity
+                style={[styles.tdInviteButton, styles.tdInviteSendButton]}
+                onPress={handleSendInvite}
+              >
+                <Text style={styles.tdInviteSendText}>Invite</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </View>
+      </Modal>
+
+      {/* PHASE 1 PARITY: Truth/Dare Pending Invite Card (for invitee) */}
+      {gameSession?.state === 'pending' && gameSession?.inviteeId === currentUserId && (
+        <View style={styles.tdPendingInviteWrapper}>
+          <TruthDareInviteCard
+            inviterName={conversation.participantName}
+            isInvitee={true}
+            onAccept={() => handleRespondToInvite(true)}
+            onReject={() => handleRespondToInvite(false)}
+          />
+        </View>
+      )}
 
       {/* Camera Photo Sheet (gallery/camera picker -> secure options) */}
       <CameraPhotoSheet
@@ -1198,7 +1863,25 @@ export default function PrivateChatScreen() {
           visible={!!viewingMessageId}
           conversationId={id}
           messageId={viewingMessageId}
-          onClose={() => setViewingMessageId(null)}
+          onClose={() => {
+            setViewingMessageId(null);
+            setIsSenderViewing(false); // SENDER-VIEW-FIX: Reset sender viewing state
+          }}
+          // SENDER-VIEW-FIX: Pass sender viewing flag to prevent timer trigger
+          isSenderViewing={isSenderViewing}
+          // PHASE-1 PARITY FIX: Pass message data for backend messages
+          messageData={(() => {
+            const msg = messages.find((m) => m.id === viewingMessageId);
+            if (!msg) return null;
+            return {
+              id: msg.id,
+              isProtected: msg.isProtected,
+              isExpired: msg.isExpired,
+              viewedAt: msg.viewedAt,
+              timerEndsAt: msg.timerEndsAt,
+              protectedMedia: msg.protectedMedia,
+            };
+          })()}
         />
       )}
     </View>
@@ -1244,12 +1927,28 @@ const styles = StyleSheet.create({
     borderBottomWidth: 1, borderBottomColor: C.surface,
   },
   backButton: { marginRight: 8 },
-  headerTappable: { flexDirection: 'row' as const, alignItems: 'center' as const, flex: 1 },
-  headerAvatar: { width: 36, height: 36, borderRadius: 18, backgroundColor: C.accent },
+  // PHASE 1 PARITY: Avatar button and container for presence dot overlay
+  avatarButton: { marginRight: 8 },
+  avatarContainer: { position: 'relative' as const },
+  headerAvatar: { width: 40, height: 40, borderRadius: 20, backgroundColor: C.accent },
+  headerAvatarPlaceholder: { alignItems: 'center' as const, justifyContent: 'center' as const },
+  // PHASE 1 PARITY: Presence dot styles
+  presenceDot: {
+    position: 'absolute' as const,
+    bottom: 0,
+    right: 0,
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    borderWidth: 2,
+    borderColor: C.background,
+  },
+  presenceDotOnline: { backgroundColor: '#22C55E' },
+  presenceDotOffline: { backgroundColor: C.textLight, opacity: 0.5 },
+  // PHASE 1 PARITY: Header info layout
   headerInfo: { flex: 1, marginLeft: 10 },
-  headerName: { fontSize: 16, fontWeight: '600', color: C.text },
-  headerIntent: { fontSize: 11, color: C.primary, opacity: 0.85, marginTop: 1 },
-  headerMeta: { fontSize: 12, color: C.textLight },
+  headerName: { fontSize: 16, fontWeight: '600' as const, color: C.text },
+  headerStatus: { fontSize: 13, color: C.textLight, marginTop: 2 },
   moreButton: { padding: 8 },
   gameButton: {
     padding: 4,
@@ -1305,40 +2004,142 @@ const styles = StyleSheet.create({
   msgRow: { flexDirection: 'row', marginBottom: 12, alignItems: 'flex-end' },
   msgRowOwn: { flexDirection: 'row-reverse' },
   msgAvatar: { width: 28, height: 28, borderRadius: 14, marginRight: 8, backgroundColor: C.accent },
+  // AVATAR-GROUPING: Placeholder to maintain spacing when avatar is hidden
+  msgAvatarPlaceholder: { width: 28, height: 28, marginRight: 8 },
   msgBubble: { maxWidth: '75%', padding: 12, borderRadius: 16 },
   msgBubbleOwn: { backgroundColor: C.primary, borderBottomRightRadius: 4 },
   msgBubbleOther: { backgroundColor: C.surface, borderBottomLeftRadius: 4 },
 
-  // GOAL C: Secure photo bubble with softer colors (not C.primary pink)
-  securePhotoBubble: { minWidth: 180, padding: 10 },
-  securePhotoBubbleOwn: { backgroundColor: SOFT_ACCENT_BG, borderBottomRightRadius: 4 },
-  securePhotoBubbleOther: { backgroundColor: C.surface, borderBottomLeftRadius: 4 },
-  securePhotoContent: { flexDirection: 'row', alignItems: 'center', gap: 8 },
-  securePhotoIcon: {
-    width: 32, height: 32, borderRadius: 16,
-    backgroundColor: SOFT_ACCENT + '30', alignItems: 'center', justifyContent: 'center',
+  // ═══════════════════════════════════════════════════════════════════════════
+  // PHASE-1 PARITY: Secure media thumbnail card (matches ProtectedMediaBubble)
+  // ═══════════════════════════════════════════════════════════════════════════
+  secureBubbleWrapper: {
+    alignItems: 'flex-end' as const,
   },
-  securePhotoInfo: { flex: 1 },
-  securePhotoLabel: { fontSize: 13, fontWeight: '600', color: C.text },
-  securePhotoMeta: { fontSize: 10, color: C.textLight, marginTop: 1 },
-
-  // GOAL A: Timer badge styles
-  timerBadge: {
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: 3,
-    backgroundColor: SOFT_ACCENT_BG,
-    paddingHorizontal: 6,
-    paddingVertical: 3,
+  secureThumbnailContainer: {
+    width: 100,
+    height: 75,
+    borderRadius: 8,
+    overflow: 'hidden' as const,
+    backgroundColor: '#1E1E2E',
+  },
+  secureThumbnail: {
+    width: '100%' as any,
+    height: '100%' as any,
+  },
+  secureThumbnailMirrored: {
+    transform: [{ scaleX: -1 }],
+  },
+  secureThumbnailPlaceholder: {
+    width: '100%' as any,
+    height: '100%' as any,
+    alignItems: 'center' as const,
+    justifyContent: 'center' as const,
+    backgroundColor: '#1E1E2E',
+  },
+  secureBlurOverlay: {
+    position: 'absolute' as const,
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: 'rgba(30, 30, 46, 0.4)',
+  },
+  secureMediaTypeIndicator: {
+    position: 'absolute' as const,
+    top: 4,
+    left: 4,
+    width: 20,
+    height: 20,
+    borderRadius: 10,
+    backgroundColor: 'rgba(0,0,0,0.6)',
+    alignItems: 'center' as const,
+    justifyContent: 'center' as const,
+  },
+  secureShieldBadge: {
+    position: 'absolute' as const,
+    bottom: 4,
+    right: 4,
+    width: 18,
+    height: 18,
+    borderRadius: 9,
+    backgroundColor: 'rgba(155, 125, 196, 0.8)',
+    alignItems: 'center' as const,
+    justifyContent: 'center' as const,
+  },
+  secureTimerPreviewBadge: {
+    position: 'absolute' as const,
+    top: 4,
+    right: 4,
+    flexDirection: 'row' as const,
+    alignItems: 'center' as const,
+    gap: 2,
+    backgroundColor: 'rgba(155, 125, 196, 0.8)',
+    paddingHorizontal: 5,
+    paddingVertical: 2,
     borderRadius: 8,
   },
-  timerBadgeActive: {
-    backgroundColor: SOFT_ACCENT_ACTIVE,
-  },
-  timerBadgeText: {
+  secureTimerPreviewText: {
     fontSize: 10,
-    fontWeight: '600',
     color: '#FFFFFF',
+    fontWeight: '600' as const,
+  },
+  secureLiveTimerBadge: {
+    position: 'absolute' as const,
+    top: 4,
+    right: 26, // TIMER-UI-FIX: Move to top-right, next to timer preview badge
+    flexDirection: 'row' as const,
+    alignItems: 'center' as const,
+    gap: 2,
+    backgroundColor: 'rgba(0,0,0,0.6)',
+    paddingHorizontal: 5,
+    paddingVertical: 2,
+    borderRadius: 8,
+  },
+  secureLiveTimerText: {
+    fontSize: 10,
+    color: '#FFFFFF',
+    fontWeight: '600' as const,
+  },
+  secureHintOverlay: {
+    position: 'absolute' as const,
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    alignItems: 'center' as const,
+    justifyContent: 'center' as const,
+  },
+  secureHintText: {
+    fontSize: 10,
+    color: 'rgba(255,255,255,0.7)',
+    fontWeight: '600' as const,
+    textAlign: 'center' as const,
+  },
+  secureBubbleFooter: {
+    flexDirection: 'row' as const,
+    alignItems: 'center' as const,
+    justifyContent: 'flex-end' as const,
+    marginTop: 4,
+    gap: 4,
+  },
+  senderStatusBadge: {
+    flexDirection: 'row' as const,
+    alignItems: 'center' as const,
+    gap: 4,
+    marginTop: 4,
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    backgroundColor: 'rgba(155, 125, 196, 0.15)',
+    borderRadius: 10,
+  },
+  senderStatusOpened: {
+    backgroundColor: 'rgba(76, 175, 80, 0.15)',
+  },
+  senderStatusText: {
+    fontSize: 10,
+    color: SOFT_ACCENT,
+    fontWeight: '600' as const,
   },
 
   // GOAL B: Small expired pill (not large card)
@@ -1471,4 +2272,207 @@ const styles = StyleSheet.create({
     alignItems: 'center', justifyContent: 'center',
   },
   sendButtonDisabled: { backgroundColor: C.surface },
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // PHASE 1 PARITY: T/D button visual states
+  // ═══════════════════════════════════════════════════════════════════════════
+  truthDareButtonPending: {
+    backgroundColor: '#E67E22', // Orange for pending invite
+  },
+  truthDareButtonActive: {
+    backgroundColor: '#27AE60', // Green for active game
+  },
+  cooldownToast: {
+    position: 'absolute' as const,
+    top: -40,
+    right: 50,
+    backgroundColor: C.surface,
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 8,
+    zIndex: 10,
+  },
+  cooldownToastText: {
+    fontSize: 12,
+    color: C.textLight,
+    fontWeight: '500' as const,
+  },
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // PHASE 1 PARITY: T/D Invite Modal styles (matches ChatScreenInner)
+  // ═══════════════════════════════════════════════════════════════════════════
+  tdInviteOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.6)',
+    justifyContent: 'center' as const,
+    alignItems: 'center' as const,
+    padding: 24,
+  },
+  tdInviteContainer: {
+    backgroundColor: C.surface,
+    borderRadius: 18,
+    padding: 24,
+    width: '90%',
+    maxWidth: 320,
+    alignItems: 'center' as const,
+  },
+  tdInviteHeader: {
+    alignItems: 'center' as const,
+    marginBottom: 16,
+  },
+  tdInviteIconContainer: {
+    width: 56,
+    height: 56,
+    borderRadius: 28,
+    backgroundColor: C.primary,
+    alignItems: 'center' as const,
+    justifyContent: 'center' as const,
+    marginBottom: 12,
+  },
+  tdInviteTitle: {
+    fontSize: 20,
+    fontWeight: '700' as const,
+    color: C.text,
+  },
+  tdInviteMessage: {
+    fontSize: 15,
+    color: C.textLight,
+    textAlign: 'center' as const,
+    marginBottom: 24,
+    lineHeight: 22,
+  },
+  tdInviteActions: {
+    flexDirection: 'row' as const,
+    gap: 12,
+    width: '100%',
+  },
+  tdInviteButton: {
+    flex: 1,
+    paddingVertical: 12,
+    borderRadius: 24,
+    alignItems: 'center' as const,
+  },
+  tdInviteCancelButton: {
+    backgroundColor: C.background,
+    borderWidth: 1,
+    borderColor: C.surface,
+  },
+  tdInviteSendButton: {
+    backgroundColor: C.primary,
+  },
+  tdInviteCancelText: {
+    fontSize: 15,
+    fontWeight: '600' as const,
+    color: C.text,
+  },
+  tdInviteSendText: {
+    fontSize: 15,
+    fontWeight: '600' as const,
+    color: '#FFFFFF',
+  },
+  tdPendingInviteWrapper: {
+    position: 'absolute' as const,
+    bottom: 80,
+    left: 0,
+    right: 0,
+    zIndex: 100,
+  },
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // PHOTO ACCESS: Styles for privacy feature
+  // ═══════════════════════════════════════════════════════════════════════════
+  photoLockedBadge: {
+    position: 'absolute' as const,
+    bottom: -2,
+    right: -2,
+    width: 18,
+    height: 18,
+    borderRadius: 9,
+    backgroundColor: C.primary,
+    alignItems: 'center' as const,
+    justifyContent: 'center' as const,
+    borderWidth: 2,
+    borderColor: C.background,
+  },
+  photoAccessButton: {
+    flexDirection: 'row' as const,
+    alignItems: 'center' as const,
+    gap: 4,
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 16,
+    backgroundColor: C.surface,
+    marginLeft: 4,
+  },
+  photoAccessButtonPending: {
+    backgroundColor: 'transparent',
+    borderWidth: 1,
+    borderColor: C.surface,
+  },
+  photoAccessButtonText: {
+    fontSize: 11,
+    fontWeight: '600' as const,
+    color: C.primary,
+  },
+  photoAccessButtonTextPending: {
+    color: C.textLight,
+  },
+  // Owner-side photo request banner
+  photoRequestBanner: {
+    flexDirection: 'row' as const,
+    alignItems: 'center' as const,
+    justifyContent: 'space-between' as const,
+    backgroundColor: C.surface,
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: C.background,
+  },
+  photoRequestContent: {
+    flexDirection: 'row' as const,
+    alignItems: 'center' as const,
+    flex: 1,
+    gap: 8,
+  },
+  photoRequestText: {
+    fontSize: 13,
+    color: C.text,
+    flex: 1,
+  },
+  photoRequestName: {
+    fontWeight: '600' as const,
+    color: C.primary,
+  },
+  photoRequestActions: {
+    flexDirection: 'row' as const,
+    alignItems: 'center' as const,
+    gap: 8,
+    marginLeft: 12,
+  },
+  photoRequestDeclineButton: {
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 16,
+    backgroundColor: 'transparent',
+    borderWidth: 1,
+    borderColor: C.textLight,
+  },
+  photoRequestDeclineText: {
+    fontSize: 12,
+    fontWeight: '600' as const,
+    color: C.textLight,
+  },
+  photoRequestApproveButton: {
+    paddingHorizontal: 14,
+    paddingVertical: 8,
+    borderRadius: 16,
+    backgroundColor: C.primary,
+    minWidth: 70,
+    alignItems: 'center' as const,
+  },
+  photoRequestApproveText: {
+    fontSize: 12,
+    fontWeight: '600' as const,
+    color: '#FFFFFF',
+  },
 });
