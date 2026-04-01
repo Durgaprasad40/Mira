@@ -193,6 +193,8 @@ export default function MessagesScreen() {
   // Mutation to ensure conversation exists for a match (used when conversationId is missing)
   const ensureConversation = useMutation(api.conversations.getOrCreateForMatch);
   const [retryKey, setRetryKey] = useState(0);
+  // P2-PARITY: Error state + retry (matches Phase 2 inline error UX)
+  const [hasQueryError, setHasQueryError] = useState(false);
   const { safeTimeout } = useScreenSafety();
   // Track ongoing conversation creation to prevent double-taps
   const [creatingConversation, setCreatingConversation] = useState<string | null>(null);
@@ -369,6 +371,34 @@ export default function MessagesScreen() {
 
   // DELIVERED-TICK-FIX: Mark all incoming messages as delivered when messages list loads
   const markAllAsDelivered = useMutation(api.messages.markAllAsDelivered);
+
+  // P2-PARITY: Error detection - timeout after 10s of loading (faster feedback than 15s)
+  const isQueryLoading = !isDemoMode && convexConversations === undefined && !hasQueryError;
+
+  // FIX: Use functional update to clear error without needing hasQueryError in deps
+  // This prevents potential re-render cycles from deps including state we're updating
+  useEffect(() => {
+    if (isDemoMode) return; // Demo mode doesn't need error detection
+
+    if (convexConversations !== undefined) {
+      // Clear error state using functional update (only changes if currently true)
+      setHasQueryError((prev) => (prev ? false : prev));
+      return;
+    }
+
+    const timeout = setTimeout(() => {
+      setHasQueryError(true);
+      log.warn('[MESSAGES]', 'Query timeout - showing error state');
+    }, 10000); // 10s timeout (faster feedback)
+
+    return () => clearTimeout(timeout);
+  }, [convexConversations, retryKey]);
+
+  // P2-PARITY: Retry handler
+  const handleRetryQuery = useCallback(() => {
+    setHasQueryError(false);
+    setRetryKey((k) => k + 1);
+  }, []);
 
   // Demo DM store for thread model
   const demoMeta = useDemoDmStore((s) => s.meta);
@@ -952,8 +982,8 @@ export default function MessagesScreen() {
     return null;
   };
 
-  // Loading state
-  const isLoading = !isDemoMode && conversations === undefined;
+  // Loading state - P2-PARITY: Use isQueryLoading (excludes error state)
+  const isLoading = isQueryLoading;
 
   // Render skeleton loading rows
   const renderSkeletonLoading = () => (
@@ -961,6 +991,21 @@ export default function MessagesScreen() {
       {[0, 1, 2, 3, 4, 5].map((i) => (
         <SkeletonChatRow key={i} index={i} />
       ))}
+    </View>
+  );
+
+  // P2-PARITY: Render inline error state (matches Phase 2 UX)
+  const renderErrorState = () => (
+    <View style={styles.errorContainer}>
+      <Ionicons name="cloud-offline-outline" size={64} color={COLORS.textLight} />
+      <Text style={styles.errorTitle}>Couldn't load messages</Text>
+      <Text style={styles.errorSubtitle}>
+        Please check your connection and try again
+      </Text>
+      <TouchableOpacity style={styles.retryButton} onPress={handleRetryQuery}>
+        <Ionicons name="refresh" size={18} color={COLORS.white} />
+        <Text style={styles.retryButtonText}>Retry</Text>
+      </TouchableOpacity>
     </View>
   );
 
@@ -1110,17 +1155,26 @@ export default function MessagesScreen() {
         // Instead, optional sections are rendered as direct siblings ABOVE the FlatList.
         // ════════════════════════════════════════════════════════════════════════
         <View style={styles.messagesContent}>
-          {/* Optional top sections - rendered ONLY when they have data */}
-          {showMessagesNudge && (
-            <ProfileNudge
-              message={NUDGE_MESSAGES.needs_both.messages}
-              onDismiss={() => dismissNudge('messages')}
-            />
+          {/* P2-PARITY: Error state with retry */}
+          {hasQueryError && renderErrorState()}
+
+          {/* Content - only show when not in error state */}
+          {!hasQueryError && (
+            <>
+              {/* Optional top sections - rendered ONLY when they have data */}
+              {showMessagesNudge && (
+                <ProfileNudge
+                  message={NUDGE_MESSAGES.needs_both.messages}
+                  onDismiss={() => dismissNudge('messages')}
+                />
+              )}
+              {superLikeMatches.length > 0 && renderSuperLikesRow()}
+              {newMatches.length > 0 && renderNewMatchesRow()}
+            </>
           )}
-          {superLikeMatches.length > 0 && renderSuperLikesRow()}
-          {newMatches.length > 0 && renderNewMatchesRow()}
 
           {/* Conversation list - starts immediately after header when no top sections */}
+          {!hasQueryError && (
           <FlatList
             key="messages-list"
             style={styles.conversationList}
@@ -1158,6 +1212,7 @@ export default function MessagesScreen() {
                 : styles.conversationListContent
             }
           />
+          )}
         </View>
       )}
 
@@ -1667,6 +1722,43 @@ const styles = StyleSheet.create({
   },
   skeletonContainer: {
     flex: 1,
+  },
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // P2-PARITY: ERROR STATE - Matches Phase 2 inline error UI
+  // ═══════════════════════════════════════════════════════════════════════════
+  errorContainer: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    padding: 40,
+    marginTop: 60,
+  },
+  errorTitle: {
+    fontSize: 18,
+    fontWeight: '600',
+    color: COLORS.text,
+    marginTop: 16,
+    marginBottom: 8,
+  },
+  errorSubtitle: {
+    fontSize: 14,
+    color: COLORS.textLight,
+    textAlign: 'center',
+    marginBottom: 20,
+  },
+  retryButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: COLORS.primary,
+    paddingHorizontal: 24,
+    paddingVertical: 12,
+    borderRadius: 12,
+    gap: 8,
+  },
+  retryButtonText: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: COLORS.white,
   },
 
   // ═══════════════════════════════════════════════════════════════════════════

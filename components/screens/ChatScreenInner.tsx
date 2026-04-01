@@ -1014,10 +1014,9 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
     }>(handoffKey);
 
     if (capturedMedia) {
-      // Set pending media to trigger secure photo sheet
       setPendingImageUri(capturedMedia.uri);
       setPendingMediaType(capturedMedia.type);
-      setPendingIsMirrored(capturedMedia.isMirrored === true); // Track front-camera video mirroring
+      setPendingIsMirrored(capturedMedia.isMirrored === true);
     }
   }, [isFocused, conversationId]);
 
@@ -1166,11 +1165,9 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
   }, [isDemo, conversationId, userId, deleteDemoMessage, deleteMessageMutation]);
 
   // Camera handler: navigate to camera-composer for photo/video capture
-  // This enables: photo/video toggle, 30s video limit, proper front camera handling
   const handleSendCamera = useCallback(() => {
     if (!activeConversation || !conversationId) return;
 
-    // Navigate to camera-composer in secure capture mode
     router.push({
       pathname: '/(main)/camera-composer',
       params: {
@@ -1216,7 +1213,8 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
     if (!userId || !conversationId) return;
 
     const isVideo = pendingMediaType === 'video';
-    const isMirrored = pendingIsMirrored; // Capture before clearing
+    const isMirrored = pendingIsMirrored;
+
     setPendingImageUri(null);
     setPendingMediaType('photo'); // Reset for next time
     setPendingIsMirrored(false); // Reset mirrored flag

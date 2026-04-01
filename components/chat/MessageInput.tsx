@@ -197,9 +197,9 @@ export function MessageInput({
     try {
       await onSend(trimmed, 'text');
     } catch {
-      // Restore text so user can retry
+      // P1-RETRY-FIX: Restore text for retry, but don't show alert (parent handles it)
+      // ChatScreenInner already shows Alert with actual error message - avoid duplicate
       handleTextChange(trimmed);
-      Alert.alert('Send Failed', 'Message could not be sent. Please try again.');
     } finally {
       // P1-A FIX: Reset ref in finally (always runs)
       isSendingRef.current = false;
