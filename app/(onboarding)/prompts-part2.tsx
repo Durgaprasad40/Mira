@@ -19,7 +19,6 @@ import {
   KeyboardAvoidingView,
   Platform,
   LayoutAnimation,
-  UIManager,
   ActivityIndicator,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
@@ -44,10 +43,8 @@ import { api } from '@/convex/_generated/api';
 import { useAuthStore } from '@/stores/authStore';
 import { isDemoMode } from '@/hooks/useConvex';
 
-// Enable LayoutAnimation on Android
-if (Platform.OS === 'android' && UIManager.setLayoutAnimationEnabledExperimental) {
-  UIManager.setLayoutAnimationEnabledExperimental(true);
-}
+// Note: LayoutAnimation is enabled by default on Android since React Native 0.62+
+// The setLayoutAnimationEnabledExperimental call is no longer needed
 
 // Section key type
 type SectionKey = 'builder' | 'performer' | 'seeker' | 'grounded';
