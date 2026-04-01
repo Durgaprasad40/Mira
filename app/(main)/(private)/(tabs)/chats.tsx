@@ -79,7 +79,7 @@ export default function ChatsScreen() {
   const unlockUser = usePrivateChatStore((s) => s.unlockUser);
   const reconcileConversations = usePrivateChatStore((s) => s.reconcileConversations);
   const pruneDeletedMessages = usePrivateChatStore((s) => s.pruneDeletedMessages);
-  const [reportTarget, setReportTarget] = useState<{ id: string; name: string } | null>(null);
+  const [reportTarget, setReportTarget] = useState<{ id: string; name: string; conversationId: string } | null>(null);
 
   // P2-003: Error and retry state for queries
   const [retryKey, setRetryKey] = useState(0);
@@ -172,23 +172,25 @@ export default function ChatsScreen() {
     currentUserId ? { authUserId: currentUserId } : 'skip'
   );
 
-  // P2-003: Error detection - timeout after 15s of loading
+  // P2-003: Error detection - timeout after 10s of loading
   const isQueryLoading = backendConversations === undefined && !hasQueryError;
 
+  // FIX: Use functional update to clear error without needing hasQueryError in deps
+  // This prevents potential re-render cycles from deps including state we're updating
   useEffect(() => {
     if (backendConversations !== undefined) {
-      setHasQueryError(false);
+      // Clear error state using functional update (only changes if currently true)
+      setHasQueryError((prev) => (prev ? false : prev));
       return;
     }
 
+    // P2-PARITY: 10s timeout (matches Phase 1 for faster feedback)
     const timeout = setTimeout(() => {
-      if (backendConversations === undefined) {
-        setHasQueryError(true);
-        if (__DEV__) {
-          console.warn('[P2_CHATS] Query timeout - showing error state');
-        }
+      setHasQueryError(true);
+      if (__DEV__) {
+        console.warn('[P2_CHATS] Query timeout - showing error state');
       }
-    }, 15000);
+    }, 10000);
 
     return () => clearTimeout(timeout);
   }, [backendConversations, retryKey]);
@@ -201,12 +203,11 @@ export default function ChatsScreen() {
 
   // P1-003 FIX: Bidirectional sync from Phase-2 backend to local store
   // Reconciles additions, updates, AND removals (unmatch/block/delete)
-  useEffect(() => {
-    // Handle empty backend gracefully - reconcile with empty array to clear stale local data
-    if (!backendConversations) return;
+  // FIX: Memoize normalizedBackend to prevent unnecessary reconciliation calls
+  const normalizedBackend = useMemo(() => {
+    if (!backendConversations) return null;
 
-    // Transform backend conversations to local format
-    const normalizedBackend: import('@/types').IncognitoConversation[] = backendConversations
+    return backendConversations
       .filter((bc) => isPhase2Source(bc.connectionSource as string))
       .map((bc) => {
         const source = bc.connectionSource as string;
@@ -225,11 +226,17 @@ export default function ChatsScreen() {
           // Preserve super_like info for UI badges
           matchSource: source === 'desire_super_like' ? 'super_like' as const : undefined,
         };
-      });
+      }) as import('@/types').IncognitoConversation[];
+  }, [backendConversations]);
+
+  useEffect(() => {
+    // Handle empty backend gracefully - reconcile with empty array to clear stale local data
+    if (!normalizedBackend) return;
 
     // Single reconciliation pass: add/update/remove
+    // NOTE: reconcileConversations is a stable Zustand store function, not in deps
     reconcileConversations(normalizedBackend);
-  }, [backendConversations, reconcileConversations]);
+  }, [normalizedBackend, reconcileConversations]);
 
   // Auto-cleanup: Prune expired messages when entering Phase-2 messages tab
   useEffect(() => {
@@ -575,8 +582,8 @@ export default function ChatsScreen() {
           <View style={styles.emptyContainer}>
             <Ionicons name="lock-open-outline" size={64} color={C.textLight} />
             <Text style={styles.emptyTitle}>No conversations yet</Text>
-            {/* P1-003 FIX: Updated copy to mention Desire Land */}
-            <Text style={styles.emptySubtitle}>Match in Desire Land, play Truth or Dare, or connect in a Room to start chatting</Text>
+            {/* P1-003 FIX: Updated copy to mention Deep Connect */}
+            <Text style={styles.emptySubtitle}>Match in Deep Connect, play Truth or Dare, or connect in a Room to start chatting</Text>
           </View>
         ) : (
           /* Message threads */
@@ -590,7 +597,7 @@ export default function ChatsScreen() {
                 key={convo.id}
                 style={styles.chatRow}
                 onPress={() => router.push(`/(main)/incognito-chat?id=${convo.id}` as any)}
-                onLongPress={() => setReportTarget({ id: convo.participantId, name: convo.participantName })}
+                onLongPress={() => setReportTarget({ id: convo.participantId, name: convo.participantName, conversationId: convo.id })}
                 activeOpacity={0.8}
               >
                 <View style={styles.chatAvatarWrap}>
@@ -654,9 +661,12 @@ export default function ChatsScreen() {
         <ReportModal
           visible
           targetName={reportTarget.name}
+          targetUserId={reportTarget.id}
+          currentUserId={currentUserId || ''}
+          conversationId={reportTarget.conversationId}
           onClose={() => setReportTarget(null)}
-          onReport={() => setReportTarget(null)}
-          onBlock={() => { blockUser(reportTarget.id); setReportTarget(null); }}
+          onBlockSuccess={() => setReportTarget(null)}
+          onLeaveSuccess={() => setReportTarget(null)}
         />
       )}
 

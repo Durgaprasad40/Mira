@@ -8,7 +8,7 @@
  *
  * STRICT ISOLATION: This is a Phase-2-only route under /(main)/(private)/
  */
-import React, { useState, useRef, useEffect } from 'react';
+import React, { useState, useRef, useEffect, useCallback } from 'react';
 import {
   View,
   Text,
@@ -19,6 +19,7 @@ import {
   FlatList,
   ActivityIndicator,
 } from 'react-native';
+import { Id } from '@/convex/_generated/dataModel';
 import { Image } from 'expo-image';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -118,6 +119,65 @@ export default function Phase2FullProfileScreen() {
       : 'skip'
   );
 
+  // ═══════════════════════════════════════════════════════════════════════════
+  // PHOTO ACCESS: Query and mutation for privacy feature
+  // Shows request button when viewing a matched user's blurred photo
+  // ═══════════════════════════════════════════════════════════════════════════
+  const photoAccessStatus = useQuery(
+    api.privatePhotoAccess.getPrivatePhotoAccessStatus,
+    profileUserId && currentUserId
+      ? { authUserId: currentUserId, ownerUserId: profileUserId as Id<'users'> }
+      : 'skip'
+  );
+
+  // Query whether the profile owner has blurred photos enabled
+  const photoBlurStatus = useQuery(
+    api.privatePhotoAccess.isPhotoBlurredForOwner,
+    profileUserId
+      ? { ownerUserId: profileUserId as Id<'users'> }
+      : 'skip'
+  );
+
+  const requestPhotoAccessMutation = useMutation(api.privatePhotoAccess.requestPrivatePhotoAccess);
+  const [photoAccessRequesting, setPhotoAccessRequesting] = useState(false);
+
+  const handleRequestPhotoAccess = useCallback(async () => {
+    if (!profileUserId || !currentUserId || photoAccessRequesting) return;
+
+    setPhotoAccessRequesting(true);
+    try {
+      const result = await requestPhotoAccessMutation({
+        authUserId: currentUserId,
+        ownerUserId: profileUserId as Id<'users'>,
+      });
+
+      if (result.success) {
+        if (__DEV__) console.log('[P2_PROFILE_PhotoAccess] Request sent:', result.status);
+        if (result.status === 'already_approved') {
+          Toast.show('You already have access to view their photo');
+        } else if (result.status === 'already_pending') {
+          Toast.show('Request already pending');
+        } else {
+          Toast.show('Photo access requested');
+        }
+      } else {
+        if (__DEV__) console.log('[P2_PROFILE_PhotoAccess] Request failed:', result.error);
+        Toast.show("Couldn't send request. Please try again.");
+      }
+    } catch (error) {
+      if (__DEV__) console.error('[P2_PROFILE_PhotoAccess] Error:', error);
+      Toast.show("Couldn't send request. Please try again.");
+    } finally {
+      setPhotoAccessRequesting(false);
+    }
+  }, [profileUserId, currentUserId, requestPhotoAccessMutation, photoAccessRequesting]);
+
+  // Determine if photo should show blurred and if request button should be visible
+  const isPhotoBlurred = photoBlurStatus?.isBlurred ?? false;
+  const canViewClearPhoto = photoAccessStatus?.canViewClear ?? !isPhotoBlurred;
+  const photoAccessRequestStatus = photoAccessStatus?.status ?? 'none';
+  const showPhotoAccessButton = isPhotoBlurred && !canViewClearPhoto && photoAccessRequestStatus !== 'approved';
+
   // Loading state
   if (profile === undefined) {
     return (
@@ -163,8 +223,9 @@ export default function Phase2FullProfileScreen() {
       });
 
       if (result?.isMatch) {
+        // P2-ISOLATION-FIX: Pass conversationId to prevent Phase 1 API fallback
         router.push(
-          `/(main)/match-celebration?matchId=${result.matchId}&userId=${profileUserId}&mode=phase2` as any
+          `/(main)/match-celebration?matchId=${result.matchId}&userId=${profileUserId}&mode=phase2&conversationId=${result.conversationId}` as any
         );
       } else {
         Toast.show('Liked! They will see it in their likes.');
@@ -220,12 +281,13 @@ export default function Phase2FullProfileScreen() {
 
   // P2-004: Using centralized getGenderIcon from lib/genderIcon.ts
 
-  // Render photo carousel item
+  // Render photo carousel item with conditional blur
   const renderPhotoItem = ({ item, index }: { item: { url: string }; index: number }) => (
     <Image
       source={{ uri: item.url }}
       style={styles.heroPhoto}
       contentFit="cover"
+      blurRadius={isPhotoBlurred && !canViewClearPhoto ? 15 : 0}
     />
   );
 
@@ -244,9 +306,10 @@ export default function Phase2FullProfileScreen() {
 
   return (
     <View style={styles.container}>
+      {/* ANDROID FIX: Add top safe area padding so photo doesn't overlap status bar */}
       <ScrollView
         style={styles.scrollView}
-        contentContainerStyle={styles.scrollContent}
+        contentContainerStyle={[styles.scrollContent, { paddingTop: insets.top }]}
         showsVerticalScrollIndicator={false}
       >
         {/* ═══════════════════════════════════════════════════════════════════
@@ -292,9 +355,46 @@ export default function Phase2FullProfileScreen() {
           {/* Gradient overlay at bottom of photo */}
           <View style={styles.heroGradient} />
 
+          {/* PHOTO ACCESS: Request button overlay when photo is blurred */}
+          {showPhotoAccessButton && (
+            <View style={styles.photoAccessOverlay}>
+              <View style={styles.photoAccessContent}>
+                <Ionicons name="lock-closed" size={24} color="#FFFFFF" />
+                <Text style={styles.photoAccessTitle}>Photo is blurred</Text>
+                <Text style={styles.photoAccessSubtitle}>
+                  Request access to see the clear photo
+                </Text>
+                <TouchableOpacity
+                  style={[
+                    styles.photoAccessRequestButton,
+                    photoAccessRequestStatus === 'pending' && styles.photoAccessRequestButtonPending,
+                  ]}
+                  onPress={handleRequestPhotoAccess}
+                  disabled={photoAccessRequestStatus === 'pending' || photoAccessRequesting}
+                  activeOpacity={0.8}
+                >
+                  {photoAccessRequesting ? (
+                    <ActivityIndicator size="small" color="#FFFFFF" />
+                  ) : (
+                    <>
+                      <Ionicons
+                        name={photoAccessRequestStatus === 'pending' ? 'time-outline' : 'eye-outline'}
+                        size={18}
+                        color="#FFFFFF"
+                      />
+                      <Text style={styles.photoAccessRequestText}>
+                        {photoAccessRequestStatus === 'pending' ? 'Request pending' : 'Request access'}
+                      </Text>
+                    </>
+                  )}
+                </TouchableOpacity>
+              </View>
+            </View>
+          )}
+
           {/* Back button */}
           <TouchableOpacity
-            style={[styles.backButton, { top: insets.top + 10 }]}
+            style={[styles.backButton, { top: 10 }]}
             onPress={() => router.back()}
           >
             <View style={styles.backButtonBg}>
@@ -738,5 +838,53 @@ const styles = StyleSheet.create({
     backgroundColor: C.primary,
     alignItems: 'center',
     justifyContent: 'center',
+  },
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // PHOTO ACCESS: Styles for photo privacy feature
+  // ═══════════════════════════════════════════════════════════════════════════
+  photoAccessOverlay: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    right: 0,
+    bottom: 0,
+    backgroundColor: 'rgba(0,0,0,0.4)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  photoAccessContent: {
+    alignItems: 'center',
+    padding: 24,
+  },
+  photoAccessTitle: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: '#FFFFFF',
+    marginTop: 12,
+  },
+  photoAccessSubtitle: {
+    fontSize: 14,
+    color: 'rgba(255,255,255,0.8)',
+    marginTop: 4,
+    textAlign: 'center',
+  },
+  photoAccessRequestButton: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 8,
+    backgroundColor: C.primary,
+    paddingHorizontal: 20,
+    paddingVertical: 12,
+    borderRadius: 24,
+    marginTop: 20,
+  },
+  photoAccessRequestButtonPending: {
+    backgroundColor: 'rgba(255,255,255,0.2)',
+  },
+  photoAccessRequestText: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: '#FFFFFF',
   },
 });

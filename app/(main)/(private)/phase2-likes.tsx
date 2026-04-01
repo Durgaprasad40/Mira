@@ -57,18 +57,19 @@ export default function Phase2LikesScreen() {
   const isLoading = incomingLikes === undefined && !hasError;
 
   // P2-003: Error detection - timeout after 15s of loading
+  // FIX: Use functional update to clear error without needing hasError in deps
+  // This prevents potential re-render cycles from deps including state we're updating
   useEffect(() => {
     if (incomingLikes !== undefined) {
-      setHasError(false);
+      // Clear error state using functional update (only changes if currently true)
+      setHasError((prev) => (prev ? false : prev));
       return;
     }
 
     const timeout = setTimeout(() => {
-      if (incomingLikes === undefined) {
-        setHasError(true);
-        if (__DEV__) {
-          console.warn('[P2_LIKES_PAGE] Query timeout - showing error state');
-        }
+      setHasError(true);
+      if (__DEV__) {
+        console.warn('[P2_LIKES_PAGE] Query timeout - showing error state');
       }
     }, 15000);
 
@@ -110,8 +111,9 @@ export default function Phase2LikesScreen() {
 
       if (result?.isMatch) {
         // Navigate to match celebration (using shared screen with Phase-2 mode)
+        // P2-ISOLATION-FIX: Pass conversationId to prevent Phase 1 API fallback
         router.push(
-          `/(main)/match-celebration?matchId=${result.matchId}&userId=${like.fromUserId}&mode=phase2` as any
+          `/(main)/match-celebration?matchId=${result.matchId}&userId=${like.fromUserId}&mode=phase2&conversationId=${result.conversationId}` as any
         );
       } else {
         // Unlikely - they already liked us, so should be instant match
@@ -303,7 +305,7 @@ export default function Phase2LikesScreen() {
               <Ionicons name="heart-outline" size={64} color={C.textLight} />
               <Text style={styles.emptyTitle}>No likes yet</Text>
               <Text style={styles.emptySubtitle}>
-                When someone likes you in Desire Land, they'll appear here
+                When someone likes you in Deep Connect, they'll appear here
               </Text>
             </View>
           }
