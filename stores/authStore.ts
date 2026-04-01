@@ -508,28 +508,60 @@ export const useAuthStore = create<AuthState>()((set, get) => ({
   // OTHER ACTIONS
   // ==========================================================================
 
-  setOnboardingCompleted: (completed) => set({ onboardingCompleted: completed }),
+  setOnboardingCompleted: (completed) => {
+    // LOOP FIX: Equality guard
+    if (get().onboardingCompleted === completed) return;
+    set({ onboardingCompleted: completed });
+  },
 
-  setFaceVerificationPassed: (passed) => set({ faceVerificationPassed: passed }),
+  setFaceVerificationPassed: (passed) => {
+    // LOOP FIX: Equality guard
+    if (get().faceVerificationPassed === passed) return;
+    set({ faceVerificationPassed: passed });
+  },
 
-  setFaceVerificationPending: (pending) => set({ faceVerificationPending: pending }),
+  setFaceVerificationPending: (pending) => {
+    // LOOP FIX: Equality guard
+    if (get().faceVerificationPending === pending) return;
+    set({ faceVerificationPending: pending });
+  },
 
-  setLoading: (isLoading) => set({ isLoading }),
+  setLoading: (isLoading) => {
+    // LOOP FIX: Equality guard
+    if (get().isLoading === isLoading) return;
+    set({ isLoading });
+  },
 
-  setError: (error) => set({ error, isLoading: false }),
+  setError: (error) => {
+    // LOOP FIX: Equality guard (compare error string)
+    if (get().error === error) return;
+    set({ error, isLoading: false });
+  },
 
-  setHasHydrated: () => set({ _hasHydrated: true }),
+  setHasHydrated: () => {
+    // LOOP FIX: Equality guard
+    if (get()._hasHydrated === true) return;
+    set({ _hasHydrated: true });
+  },
 
-  syncFromServerValidation: (userInfo) =>
-    set((state) => ({
-      onboardingCompleted: userInfo.onboardingCompleted || state.onboardingCompleted,
-    })),
+  syncFromServerValidation: (userInfo) => {
+    // LOOP FIX: Only update if value actually changes
+    const current = get().onboardingCompleted;
+    const newValue = userInfo.onboardingCompleted || current;
+    if (current === newValue) return;
+    set({ onboardingCompleted: newValue });
+  },
 
-  setSessionValidated: (validated, error = null) =>
+  setSessionValidated: (validated, error = null) => {
+    // LOOP FIX: Equality guard - check both fields
+    const state = get();
+    const newError = validated ? null : error;
+    if (state._sessionValidated === true && state._sessionValidationError === newError) return;
     set({
       _sessionValidated: true,
-      _sessionValidationError: validated ? null : error,
-    }),
+      _sessionValidationError: newError,
+    });
+  },
 
   // ==========================================================================
   // LEGACY COMPATIBILITY

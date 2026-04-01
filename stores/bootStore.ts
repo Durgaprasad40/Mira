@@ -93,6 +93,8 @@ export const useBootStore = create<BootState>((set, get) => {
     routeDecisionMade: false,
 
     setAuthHydrated: (v) => {
+      // LOOP FIX: Equality guard - don't update if value is same
+      if (get().authHydrated === v) return;
       set({ authHydrated: v });
       // Check if boot is now ready, clear timer
       const state = get();
@@ -103,6 +105,8 @@ export const useBootStore = create<BootState>((set, get) => {
     },
 
     setDemoHydrated: (v) => {
+      // LOOP FIX: Equality guard - don't update if value is same
+      if (get().demoHydrated === v) return;
       set({ demoHydrated: v });
       // Check if boot is now ready, clear timer
       const state = get();
@@ -113,6 +117,8 @@ export const useBootStore = create<BootState>((set, get) => {
     },
 
     setRouteDecisionMade: (v) => {
+      // LOOP FIX: Equality guard - don't update if value is same
+      if (get().routeDecisionMade === v) return;
       set({ routeDecisionMade: v });
       // Check if boot is now ready, clear timer
       const state = get();

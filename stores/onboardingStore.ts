@@ -373,28 +373,72 @@ export const useOnboardingStore = create<OnboardingState>()((set, get) => ({
   _convexHydrated: false,
 
   // No-op for compatibility
-  setHasHydrated: (state) => set({ _hasHydrated: true }),
+  setHasHydrated: (state) => {
+    // LOOP FIX: Equality guard
+    if (get()._hasHydrated === true) return;
+    set({ _hasHydrated: true });
+  },
 
   // Set convex hydration complete
-  setConvexHydrated: () => set({ _convexHydrated: true }),
+  setConvexHydrated: () => {
+    // LOOP FIX: Equality guard
+    if (get()._convexHydrated === true) return;
+    set({ _convexHydrated: true });
+  },
 
-      setStep: (step) => set({ currentStep: step }),
+      setStep: (step) => {
+        // LOOP FIX: Equality guard
+        if (get().currentStep === step) return;
+        set({ currentStep: step });
+      },
 
-      setEmail: (email) => set({ email }),
+      setEmail: (email) => {
+        // LOOP FIX: Equality guard
+        if (get().email === email) return;
+        set({ email });
+      },
 
-      setPhone: (phone) => set({ phone }),
+      setPhone: (phone) => {
+        // LOOP FIX: Equality guard
+        if (get().phone === phone) return;
+        set({ phone });
+      },
 
-      setPassword: (password) => set({ password }),
+      setPassword: (password) => {
+        // LOOP FIX: Equality guard
+        if (get().password === password) return;
+        set({ password });
+      },
 
-      setFirstName: (firstName) => set({ firstName }),
+      setFirstName: (firstName) => {
+        // LOOP FIX: Equality guard
+        if (get().firstName === firstName) return;
+        set({ firstName });
+      },
 
-      setLastName: (lastName) => set({ lastName }),
+      setLastName: (lastName) => {
+        // LOOP FIX: Equality guard
+        if (get().lastName === lastName) return;
+        set({ lastName });
+      },
 
-      setNickname: (nickname) => set({ nickname }),
+      setNickname: (nickname) => {
+        // LOOP FIX: Equality guard
+        if (get().nickname === nickname) return;
+        set({ nickname });
+      },
 
-      setDateOfBirth: (dateOfBirth) => set({ dateOfBirth }),
+      setDateOfBirth: (dateOfBirth) => {
+        // LOOP FIX: Equality guard
+        if (get().dateOfBirth === dateOfBirth) return;
+        set({ dateOfBirth });
+      },
 
-      setGender: (gender) => set({ gender }),
+      setGender: (gender) => {
+        // LOOP FIX: Equality guard
+        if (get().gender === gender) return;
+        set({ gender });
+      },
 
       setLgbtqSelf: (lgbtqSelf) => set({ lgbtqSelf: lgbtqSelf.slice(0, 2) }),
 
