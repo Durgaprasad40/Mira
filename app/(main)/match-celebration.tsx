@@ -356,6 +356,17 @@ export default function MatchCelebrationScreen() {
       return;
     }
 
+    // P2-ISOLATION-FIX: Guard against Phase 2 without conversationId
+    // This prevents falling through to Phase 1 API (which would fail with wrong table ID)
+    if (isPhase2 && !conversationId) {
+      if (__DEV__) {
+        console.error('[SayHi] Phase-2 mode but no conversationId provided - cannot proceed');
+      }
+      Toast.show("Couldn't start chat. Please go back and try again.");
+      sendingRef.current = false;
+      return;
+    }
+
     // Phase-1 flow continues below
     if (!matchIdValue || !viewerId) {
       Toast.show("Something went wrong. Please go back and try again.");
@@ -464,14 +475,14 @@ export default function MatchCelebrationScreen() {
   }
 
   // P0-003 FIX: Explicit Phase-2 vs Phase-1 branching
-  // Phase-2 (Desire Land) uses incognito colors and different labels
+  // Phase-2 (Deep Connect) uses incognito colors and different labels
   const gradientColors: [string, string] = isPhase2
     ? [INCOGNITO_COLORS.primary, INCOGNITO_COLORS.accent]
     : [COLORS.primary, COLORS.secondary];
 
   const titleText = isPhase2 ? '🔥 It\'s a Connection! 🔥' : '🎉 It\'s a Match! 🎉';
   const subtitleText = isPhase2
-    ? `You and ${otherUser.name} connected in Desire Land!`
+    ? `You and ${otherUser.name} connected in Deep Connect!`
     : `You and ${otherUser.name} liked each other!`;
   const buttonText = isPhase2 ? 'Start Chatting' : 'Say Hi 👋';
   const keepSwipingText = isPhase2 ? 'Keep Exploring' : 'Keep Discovering';
