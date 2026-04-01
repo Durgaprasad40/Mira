@@ -84,6 +84,11 @@ export function BottleSpinGame({
   );
   const setTurnMutation = useMutation(api.games.setBottleSpinTurn);
 
+  // ROLE-FIX: Log raw gameSession for debugging
+  if (__DEV__ && visible && gameSession) {
+    console.log('[BOTTLE_SPIN_SESSION_DEBUG] Raw gameSession:', JSON.stringify(gameSession, null, 2));
+  }
+
   // Extract backend values (only when session is active)
   const isSessionActive = gameSession?.state === 'active';
   const backendTurnRole = isSessionActive ? gameSession.currentTurnRole : undefined;
@@ -92,14 +97,41 @@ export function BottleSpinGame({
   const backendSpinTurnRole = isSessionActive ? gameSession.spinTurnRole : undefined;
   const inviterId = isSessionActive ? gameSession.inviterId : undefined;
   const inviteeId = isSessionActive ? gameSession.inviteeId : undefined;
+  // NOTE: lastSelectedRole and consecutiveSelectedCount are handled entirely in backend
+  // Frontend does NOT need these values - all random selection logic is backend-only
 
   // ═══════════════════════════════════════════════════════════════════════════
   // ROLE DETERMINATION - Am I inviter or invitee?
   // ═══════════════════════════════════════════════════════════════════════════
   // inviterId is the auth ID stored when invite was sent
   // userId is my auth ID passed from parent
-  const amIInviter = Boolean(inviterId && userId === inviterId);
-  const amIInvitee = Boolean(inviteeId && userId === inviteeId);
+  // ROLE-FIX: Normalize IDs for comparison (trim whitespace, ensure string)
+  const normalizeId = (id: string | undefined): string => {
+    if (!id) return '';
+    return String(id).trim();
+  };
+  const normalizedUserId = normalizeId(userId);
+  const normalizedInviterId = normalizeId(inviterId);
+  const normalizedInviteeId = normalizeId(inviteeId);
+
+  // ROLE-FIX: Log exact comparison values to debug ID mismatch
+  if (__DEV__ && visible && isSessionActive) {
+    console.log('[BOTTLE_SPIN_ROLE_DEBUG] ID comparison:', {
+      userId_raw: userId,
+      userId_normalized: normalizedUserId,
+      inviterId_raw: inviterId,
+      inviterId_normalized: normalizedInviterId,
+      inviteeId_raw: inviteeId,
+      inviteeId_normalized: normalizedInviteeId,
+      inviterMatch_raw: userId === inviterId,
+      inviterMatch_normalized: normalizedUserId === normalizedInviterId,
+      inviteeMatch_raw: userId === inviteeId,
+      inviteeMatch_normalized: normalizedUserId === normalizedInviteeId,
+    });
+  }
+  // ROLE-FIX: Use normalized comparison for robustness
+  const amIInviter = Boolean(normalizedInviterId && normalizedUserId === normalizedInviterId);
+  const amIInvitee = Boolean(normalizedInviteeId && normalizedUserId === normalizedInviteeId);
   const myRole: 'inviter' | 'invitee' | null = amIInviter ? 'inviter' : (amIInvitee ? 'invitee' : null);
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -153,6 +185,16 @@ export function BottleSpinGame({
     // Priority 6: Idle phase - check spin turn ownership
     // SPIN-TURN-FIX: Show waiting state if not my spin turn
     if (backendTurnPhase === 'idle' || backendTurnPhase === undefined) {
+      // ROLE-FIX: Log uiMode decision for debugging
+      if (__DEV__) {
+        console.log('[BOTTLE_SPIN_UIMODE_DECISION] Idle phase check:', {
+          isMySpinTurn,
+          myRole,
+          currentSpinTurnRole,
+          backendSpinTurnRole,
+          decision: (!isMySpinTurn && myRole) ? 'waiting_for_spin' : 'idle',
+        });
+      }
       if (!isMySpinTurn && myRole) {
         return 'waiting_for_spin';
       }
@@ -273,6 +315,9 @@ export function BottleSpinGame({
 
   // ═══════════════════════════════════════════════════════════════════════════
   // SPIN BOTTLE
+  // RANDOM-TARGET-FIX: ALL random selection happens in BACKEND, not frontend
+  // Frontend only reads the result from backend and animates accordingly
+  // This ensures both devices always show the same selection (no desync)
   // ═══════════════════════════════════════════════════════════════════════════
   const spinBottle = useCallback(async () => {
     // VERIFICATION LOG: Spin attempt
@@ -302,41 +347,52 @@ export function BottleSpinGame({
       return;
     }
 
+    if (!userId || !conversationId) {
+      console.warn('[BOTTLE_SPIN] Cannot spin - missing userId or conversationId');
+      return;
+    }
+
     setIsSpinningLocally(true);
     setChosenOption(null);
 
-    // Notify backend
-    if (userId && conversationId) {
-      try {
-        await setTurnMutation({
-          authUserId: userId,
-          conversationId,
-          currentTurnRole: undefined,
-          turnPhase: 'spinning',
-        });
-      } catch (error) {
-        console.error('[BOTTLE_SPIN] Failed to set spinning state:', error);
-      }
+    // ═══════════════════════════════════════════════════════════════════════════
+    // BACKEND-ONLY RANDOM SELECTION
+    // Call backend with 'spinning' phase - backend generates random selection
+    // and returns it. NO Math.random() in frontend for target selection!
+    // ═══════════════════════════════════════════════════════════════════════════
+    let selectedRole: 'inviter' | 'invitee';
+    try {
+      const result = await setTurnMutation({
+        authUserId: userId,
+        conversationId,
+        currentTurnRole: undefined,
+        turnPhase: 'spinning',
+      });
+      // Backend returns the randomly selected target
+      selectedRole = result.selectedTargetRole as 'inviter' | 'invitee';
+      console.log('[BOTTLE_SPIN] Backend selected target:', { selectedRole });
+    } catch (error) {
+      console.error('[BOTTLE_SPIN] Failed to get spin result from backend:', error);
+      setIsSpinningLocally(false);
+      return;
     }
 
     const spinSession = spinSessionRef.current;
 
-    // Random spin
+    // Calculate animation direction based on backend selection (NO local random for selection)
+    const landsOnMe = selectedRole === myRole;
+
+    // Only use random for visual animation variation (not selection)
     const fullRotations = 3 + Math.floor(Math.random() * 4);
-    const landsOnMe = Math.random() < 0.5;
     const finalAngle = landsOnMe ? 0 : 180;
     const totalRotation = fullRotations * 360 + finalAngle;
+    const animDuration = 3000 + Math.random() * 1000;
 
-    // Determine which ROLE the bottle landed on
-    const selectedRole: 'inviter' | 'invitee' = landsOnMe
-      ? myRole // Landed on me = my role
-      : (myRole === 'inviter' ? 'invitee' : 'inviter'); // Landed on other = opposite role
-
-    console.log('[BOTTLE_SPIN] Spin result:', { landsOnMe, myRole, selectedRole });
+    console.log('[BOTTLE_SPIN] Animation direction:', { landsOnMe, myRole, selectedRole });
 
     Animated.timing(spinAnim, {
       toValue: totalRotation,
-      duration: 3000 + Math.random() * 1000,
+      duration: animDuration,
       easing: Easing.out(Easing.cubic),
       useNativeDriver: true,
     }).start(async () => {
@@ -348,19 +404,17 @@ export function BottleSpinGame({
       currentRotation.current = totalRotation % 360;
       setIsSpinningLocally(false);
 
-      // Update backend with the selected ROLE
-      if (userId && conversationId) {
-        try {
-          await setTurnMutation({
-            authUserId: userId,
-            conversationId,
-            currentTurnRole: selectedRole,
-            turnPhase: 'choosing',
-          });
-          console.log('[BOTTLE_SPIN] Set turn state:', { selectedRole, turnPhase: 'choosing' });
-        } catch (error) {
-          console.error('[BOTTLE_SPIN] Failed to set turn state:', error);
-        }
+      // Transition to choosing phase (backend already knows the selected target)
+      try {
+        await setTurnMutation({
+          authUserId: userId,
+          conversationId,
+          currentTurnRole: selectedRole, // Use the backend-selected role
+          turnPhase: 'choosing',
+        });
+        console.log('[BOTTLE_SPIN] Set choosing phase:', { selectedRole });
+      } catch (error) {
+        console.error('[BOTTLE_SPIN] Failed to set choosing state:', error);
       }
 
       // Haptic feedback
@@ -370,13 +424,11 @@ export function BottleSpinGame({
         // Haptics not available
       }
 
-      // Send system message
-      if (onSendResultMessage) {
-        const selectedName = landsOnMe ? currentUserName : otherUserName;
-        onSendResultMessage(`Bottle landed on ${selectedName}!`);
-      }
+      // NOTE: "Bottle landed on X" message intentionally NOT sent to chat
+      // to keep thread clean. Users see visual result in game modal.
+      // Only meaningful messages (chose Truth/Dare/Skip) are persisted.
     });
-  }, [isSpinningLocally, isSessionActive, myRole, userId, inviterId, inviteeId, conversationId, setTurnMutation, spinAnim, currentUserName, otherUserName, onSendResultMessage]);
+  }, [isSpinningLocally, isSessionActive, myRole, userId, inviterId, inviteeId, conversationId, setTurnMutation, spinAnim, currentSpinTurnRole, isMySpinTurn, backendSpinTurnRole, isAnimationLocked]);
 
   // ═══════════════════════════════════════════════════════════════════════════
   // HANDLE CHOICE (Truth/Dare/Skip)

@@ -50,6 +50,8 @@ import { PHASE2_BLUR_AVATAR } from '@/lib/phase2UI';
 import { useVoiceRecorder, type VoiceRecorderResult } from '@/hooks/useVoiceRecorder';
 import { VoiceMessageBubble } from '@/components/chat/VoiceMessageBubble';
 import type { IncognitoMessage } from '@/types';
+// P2-INSTRUMENTATION: Sentry breadcrumbs for Phase-2 debugging
+import { P2 } from '@/lib/p2Instrumentation';
 
 // SELECTOR FIX: Stable empty array reference to avoid infinite loop in useSyncExternalStore
 const EMPTY_ARRAY: IncognitoMessage[] = [];
@@ -153,20 +155,20 @@ export default function PrivateChatScreen() {
   const localConversation = conversations.find((c) => c.id === id);
 
   // ═══════════════════════════════════════════════════════════════════════════
-  // T/D PHASE2 FIX: Fetch conversation from backend when not in local store
-  // This handles T/D connect acceptances where conversation is created server-side
-  // P0-FIX: Include authUserId for custom auth fallback (ctx.auth not configured)
+  // PRESENCE-FIX: ALWAYS query backend for fresh presence data
+  // ROOT CAUSE FIX: Previously skipped backend when localConversation existed
+  // NOW: Always run backend query to get real-time presence updates
   // ═══════════════════════════════════════════════════════════════════════════
   const backendConversation = useQuery(
     api.privateConversations.getPrivateConversation,
-    id && !localConversation && currentUserId
+    id && currentUserId
       ? { conversationId: id as Id<'privateConversations'>, authUserId: currentUserId }
       : 'skip'
   );
 
-  // Use local store first, fallback to backend query for T/D connections
+  // PRESENCE-FIX: Prefer backend data for real-time presence, fallback to local for metadata
   const conversation = useMemo(() => {
-    if (localConversation) return localConversation;
+    // Backend has fresh presence data - prefer it
     if (backendConversation) {
       // Map backend response to local store format
       return {
@@ -189,8 +191,31 @@ export default function PrivateChatScreen() {
         participantLastActive: (backendConversation as any).participantLastActive ?? 0,
       };
     }
+    // Fallback to local store while backend loads (metadata only, presence may be stale)
+    if (localConversation) return localConversation;
     return null;
   }, [localConversation, backendConversation]);
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // P2-INSTRUMENTATION: Set Sentry context when conversation/user data is available
+  // ═══════════════════════════════════════════════════════════════════════════
+  useEffect(() => {
+    if (currentUserId) {
+      P2.auth.authUserIdAvailable(currentUserId);
+    }
+    if (conversation && currentUserId) {
+      P2.setContext({
+        conversationId: id || '',
+        authUserId: currentUserId,
+        otherUserId: conversation.participantId,
+        screen: 'incognito-chat',
+      });
+      P2.auth.participantIds(id || '', currentUserId, conversation.participantId);
+    }
+    return () => {
+      P2.clearContext();
+    };
+  }, [id, currentUserId, conversation?.participantId]);
 
   // ═══════════════════════════════════════════════════════════════════════════
   // PHOTO ACCESS: Request access mutation for blurred photos
@@ -359,6 +384,19 @@ export default function PrivateChatScreen() {
     id ? { conversationId: id } : 'skip'
   );
 
+  // T/D-DEBUG: Log game session changes for debugging invite flow
+  useEffect(() => {
+    if (__DEV__ && gameSession) {
+      console.log('[P2_TD_DEBUG] Session state:', gameSession.state,
+        '\n  sessionId:', gameSession.sessionId?.slice(-8),
+        '\n  inviterId:', gameSession.inviterId?.slice(-8),
+        '\n  inviteeId:', gameSession.inviteeId?.slice(-8),
+        '\n  currentUserId:', currentUserId?.slice(-8),
+        '\n  isInvitee:', gameSession.inviteeId === currentUserId
+      );
+    }
+  }, [gameSession, currentUserId]);
+
   // Game session mutations (same as Phase 1)
   const sendInviteMutation = useMutation(api.games.sendBottleSpinInvite);
   const respondToInviteMutation = useMutation(api.games.respondToBottleSpinInvite);
@@ -372,6 +410,25 @@ export default function PrivateChatScreen() {
   const [showTruthDareInvite, setShowTruthDareInvite] = useState(false);
   const [showCooldownMessage, setShowCooldownMessage] = useState(false);
   const [cooldownRemainingMin, setCooldownRemainingMin] = useState(0);
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // T/D SYSTEM MESSAGES: Helper to send T/D events to backend (persisted)
+  // These messages appear on BOTH users' chats and survive reload
+  // ═══════════════════════════════════════════════════════════════════════════
+  const sendTodSystemMessage = useCallback(async (content: string) => {
+    if (!id || !token) return;
+    try {
+      await sendMessageMutation({
+        token,
+        conversationId: id as Id<'privateConversations'>,
+        type: 'system',
+        content,
+      });
+    } catch (error) {
+      // Silent fail - T/D system messages are non-critical
+      if (__DEV__) console.warn('[P2_TD] Failed to send system message:', error);
+    }
+  }, [id, token, sendMessageMutation]);
 
   // AUTO-CLOSE: Watch game session state changes for cross-device sync (same as Phase 1)
   useEffect(() => {
@@ -423,9 +480,35 @@ export default function PrivateChatScreen() {
     }
   }, [gameSession?.state, gameSession?.turnPhase, gameSession?.currentTurnRole, gameSession?.inviterId, gameSession?.inviteeId, currentUserId, showTruthDareGame]);
 
+  // ═══════════════════════════════════════════════════════════════════════════
+  // AUTO-CLOSE MODAL AFTER TRUTH/DARE/SKIP SELECTION
+  // When turnPhase becomes 'complete', show result briefly then close modal.
+  // Both devices see this since they watch the same backend state.
+  // ═══════════════════════════════════════════════════════════════════════════
+  useEffect(() => {
+    if (!gameSession) return;
+
+    // Only auto-close when active game reaches 'complete' phase
+    if (gameSession.state !== 'active') return;
+    if (gameSession.turnPhase !== 'complete') return;
+
+    // Wait briefly to show result, then auto-close (fast, near-instant)
+    const timer = setTimeout(() => {
+      if (showTruthDareGame) {
+        console.log('[P2_TD_AUTO_CLOSE] Closing modal after T/D selection complete');
+        setShowTruthDareGame(false);
+      }
+    }, 400);
+
+    return () => clearTimeout(timer);
+  }, [gameSession?.state, gameSession?.turnPhase, showTruthDareGame]);
+
   // Handle T/D button press based on current state (same logic as Phase 1)
   const handleTruthDarePress = useCallback(() => {
     if (!gameSession) return;
+
+    // P2-INSTRUMENTATION: T/D button pressed
+    P2.tod.queryResult(id || '', gameSession.state, gameSession.sessionId, gameSession.inviterId, gameSession.inviteeId);
 
     // Priority 1: Cooldown active - show inline message
     if (gameSession.state === 'cooldown') {
@@ -438,6 +521,17 @@ export default function PrivateChatScreen() {
 
     // Priority 2: Active game exists - open game modal
     if (gameSession.state === 'active') {
+      // ROLE-FIX: Log exact values being passed to BottleSpinGame
+      if (__DEV__) {
+        console.log('[P2_TD_MODAL_OPEN] Opening game modal with:', {
+          conversationId: id,
+          userId: currentUserId,
+          gameSession_inviterId: gameSession.inviterId,
+          gameSession_inviteeId: gameSession.inviteeId,
+          gameSession_spinTurnRole: gameSession.spinTurnRole,
+        });
+      }
+      P2.tod.gameActive(id || '', gameSession.sessionId || '');
       setShowTruthDareGame(true);
       return;
     }
@@ -449,12 +543,15 @@ export default function PrivateChatScreen() {
 
     // Priority 4: No game - show invite modal
     setShowTruthDareInvite(true);
-  }, [gameSession]);
+  }, [gameSession, id]);
 
   // Send game invite (same as Phase 1)
   // INVITE-FIX: Check pending state before sending to prevent "Invite already pending" error
   const handleSendInvite = useCallback(async () => {
     if (!currentUserId || !id || !otherUserId) return;
+
+    // P2-INSTRUMENTATION: Invite pressed
+    P2.tod.invitePressed(id, currentUserId, String(otherUserId));
 
     // INVITE-FIX: Don't send if invite is already pending
     if (gameSession?.state === 'pending') {
@@ -463,26 +560,50 @@ export default function PrivateChatScreen() {
     }
 
     try {
-      await sendInviteMutation({
+      // P2-INSTRUMENTATION: Invite requested
+      P2.tod.inviteRequested(id);
+      const result = await sendInviteMutation({
         authUserId: currentUserId,
         conversationId: id,
         otherUserId: String(otherUserId),
       });
+
+      // T/D-FIX: Handle status responses (backend no longer throws)
+      if (result && !result.success) {
+        // P2-INSTRUMENTATION: Invite failed with status
+        P2.tod.inviteFailed(id, 'status_response', result.status);
+        if (result.status === 'already_pending') {
+          // Silently close modal - invite already sent
+          setShowTruthDareInvite(false);
+          return;
+        }
+        if (result.status === 'game_active') {
+          // Game is already active - close modal
+          setShowTruthDareInvite(false);
+          return;
+        }
+        if (result.status === 'cooldown_active') {
+          Alert.alert('Cooldown Active', 'Please wait before sending another invite.');
+          setShowTruthDareInvite(false);
+          return;
+        }
+      }
+
+      // P2-INSTRUMENTATION: Invite success
+      P2.tod.inviteSuccess(id);
       setShowTruthDareInvite(false);
 
-      // Send system message about invite (uses local store for now)
-      localAddMessage(id, {
-        id: `tod_invite_${Date.now()}`,
-        conversationId: id,
-        senderId: 'tod',
-        content: 'You want to play Truth or Dare!',
-        createdAt: Date.now(),
-        isRead: true,
-      });
+      // T/D PERSISTENCE FIX: Send system message via backend (appears on BOTH users, survives reload)
+      sendTodSystemMessage('You want to play Truth or Dare!');
     } catch (error: any) {
-      Alert.alert('Error', error.message || 'Failed to send invite');
+      // P2-INSTRUMENTATION: Invite failed
+      P2.tod.inviteFailed(id, error?.message || 'unknown');
+      // Fallback error handling (should rarely happen now)
+      const errorMsg = error?.message || '';
+      Alert.alert('Error', errorMsg || 'Failed to send invite');
+      setShowTruthDareInvite(false);
     }
-  }, [currentUserId, id, otherUserId, gameSession?.state, sendInviteMutation, localAddMessage]);
+  }, [currentUserId, id, otherUserId, gameSession?.state, sendInviteMutation, sendTodSystemMessage]);
 
   // Respond to game invite (same as Phase 1)
   const handleRespondToInvite = useCallback(async (accept: boolean) => {
@@ -495,18 +616,18 @@ export default function PrivateChatScreen() {
         accept,
       });
 
-      // Send system message about response
+      // P2-INSTRUMENTATION: Invite response
+      if (accept) {
+        P2.tod.inviteAccepted(id, currentUserId);
+      } else {
+        P2.tod.inviteRejected(id, currentUserId);
+      }
+
+      // T/D PERSISTENCE FIX: Send response message via backend (appears on BOTH users, survives reload)
       const responseText = accept
         ? 'Game starting...'
         : 'Game invite declined';
-      localAddMessage(id, {
-        id: `tod_response_${Date.now()}`,
-        conversationId: id,
-        senderId: 'tod',
-        content: responseText,
-        createdAt: Date.now(),
-        isRead: true,
-      });
+      sendTodSystemMessage(responseText);
 
       // If accepted, open the game
       if (accept) {
@@ -515,13 +636,15 @@ export default function PrivateChatScreen() {
     } catch (error: any) {
       Alert.alert('Error', error.message || 'Failed to respond to invite');
     }
-  }, [currentUserId, id, respondToInviteMutation, localAddMessage]);
+  }, [currentUserId, id, respondToInviteMutation, sendTodSystemMessage]);
 
   // End game (called from BottleSpinGame)
   const handleEndGame = useCallback(async () => {
     if (!currentUserId || !id) return;
 
     try {
+      // P2-INSTRUMENTATION: Game ended
+      P2.tod.gameEnded(id, gameSession?.sessionId || '');
       await endGameMutation({
         authUserId: currentUserId,
         conversationId: id,
@@ -530,7 +653,7 @@ export default function PrivateChatScreen() {
       // Silent fail - UI will close anyway
       if (__DEV__) console.warn('[P2_TD] Failed to end game:', error);
     }
-  }, [currentUserId, id, endGameMutation]);
+  }, [currentUserId, id, endGameMutation, gameSession?.sessionId]);
 
   // MESSAGE-TICKS-FIX: Mark messages as read AND delivered when screen opens
   // Following Phase-1 pattern: delivery happens when conversation opens
@@ -561,26 +684,46 @@ export default function PrivateChatScreen() {
     hasMarkedRef.current = false;
   }, [id]);
 
-  // PHASE-1 PARITY FIX: Update presence periodically while chat is open
-  // This allows the other user to see "Online" status
-  const updatePresenceMutation = useMutation(api.messages.updatePresence);
-  useEffect(() => {
-    if (!currentUserId) return;
+  // PHASE-2 ISOLATED: Update presence periodically while chat is FOCUSED
+  // Uses Phase-2 privateUserPresence table, NOT users table
+  // P2_PRESENCE_FIX: Use useFocusEffect so heartbeat stops when navigating away
+  const updatePresenceMutation = useMutation(api.privateConversations.updatePresence);
+  useFocusEffect(
+    useCallback(() => {
+      if (!currentUserId) return;
 
-    // Update presence immediately on mount
-    updatePresenceMutation({ authUserId: currentUserId }).catch(() => {
-      // Silent fail - presence is best-effort
-    });
+      // P2-INSTRUMENTATION: Chat focused
+      P2.presence.chatFocused(id || '', currentUserId);
+      P2.presence.heartbeatStarted(currentUserId, 30_000);
 
-    // Update every 30 seconds while chat is open
-    const interval = setInterval(() => {
-      updatePresenceMutation({ authUserId: currentUserId }).catch(() => {
-        // Silent fail
-      });
-    }, 30_000);
+      // [P2_PRESENCE_WRITE] Update presence immediately on focus
+      if (__DEV__) console.log('[P2_PRESENCE_WRITE] Chat focused, updating presence for:', currentUserId);
+      P2.presence.mutationRequested(currentUserId);
+      updatePresenceMutation({ authUserId: currentUserId })
+        .then(() => P2.presence.mutationSuccess(currentUserId))
+        .catch((err) => {
+          P2.presence.mutationFailed(currentUserId, err?.message || 'unknown');
+        });
 
-    return () => clearInterval(interval);
-  }, [currentUserId, updatePresenceMutation]);
+      // Update every 30 seconds while chat is focused
+      const interval = setInterval(() => {
+        if (__DEV__) console.log('[P2_PRESENCE_WRITE] Heartbeat tick for:', currentUserId);
+        P2.presence.heartbeatTick(currentUserId);
+        P2.presence.mutationRequested(currentUserId);
+        updatePresenceMutation({ authUserId: currentUserId })
+          .then(() => P2.presence.mutationSuccess(currentUserId))
+          .catch((err) => {
+            P2.presence.mutationFailed(currentUserId, err?.message || 'unknown');
+          });
+      }, 30_000);
+
+      return () => {
+        if (__DEV__) console.log('[P2_PRESENCE_WRITE] Chat unfocused, clearing heartbeat');
+        P2.presence.heartbeatStopped(currentUserId);
+        clearInterval(interval);
+      };
+    }, [currentUserId, updatePresenceMutation, id])
+  );
 
   // PHASE-1 PARITY FIX (LIVE-TICK-V2): Mark messages as delivered/read when new messages arrive
   // This ensures the sender sees tick updates (1 -> 2 -> blue) in real-time
@@ -600,22 +743,37 @@ export default function PrivateChatScreen() {
 
     // If there are unread messages from the other user, mark as delivered and read
     if (hasUnreadFromOther) {
+      // P2-INSTRUMENTATION: Deliver requested
+      P2.messages.deliverRequested(id);
       // Mark as delivered
       markDeliveredMutation({
         token,
         conversationId: id as Id<'privateConversations'>,
-      }).catch((err) => {
-        if (__DEV__) console.warn('[P2_LIVE_TICK] markDelivered error:', err);
-      });
+      })
+        .then((result) => {
+          P2.messages.deliverSuccess(id, (result as any)?.count || 0);
+        })
+        .catch((err) => {
+          if (__DEV__) console.warn('[P2_LIVE_TICK] markDelivered error:', err);
+        });
 
+      // P2-INSTRUMENTATION: Read requested
+      P2.messages.readRequested(id);
       // Mark as read
       markReadMutation({
         token,
         conversationId: id as Id<'privateConversations'>,
-      }).catch((err) => {
-        if (__DEV__) console.warn('[P2_LIVE_TICK] markRead error:', err);
-      });
+      })
+        .then((result) => {
+          P2.messages.readSuccess(id, (result as any)?.markedCount || 0);
+        })
+        .catch((err) => {
+          if (__DEV__) console.warn('[P2_LIVE_TICK] markRead error:', err);
+        });
     }
+
+    // P2-INSTRUMENTATION: Thread synced
+    P2.messages.threadSynced(id, messages.length);
 
     // Update last processed message ID
     lastProcessedMsgIdRef.current = latestMsgId;
@@ -860,16 +1018,9 @@ export default function PrivateChatScreen() {
       handleEndGame();
     }
 
-    // Add as system message (senderId: 'tod' renders as capsule)
-    localAddMessage(id, {
-      id: `tod_result_${Date.now()}`,
-      conversationId: id,
-      senderId: 'tod',
-      content: message,
-      createdAt: Date.now(),
-      isRead: true,
-    });
-  }, [id, localAddMessage, handleEndGame]);
+    // T/D PERSISTENCE FIX: Send via backend (appears on BOTH users, survives reload)
+    sendTodSystemMessage(message);
+  }, [id, handleEndGame, sendTodSystemMessage]);
 
   // Check for captured media from camera-composer when screen regains focus
   useFocusEffect(
@@ -934,18 +1085,27 @@ export default function PrivateChatScreen() {
     const content = text.trim();
     setText(''); // Clear immediately for responsiveness
 
+    // P2-INSTRUMENTATION: Send pressed
+    P2.messages.sendPressed(id, 'text');
+
     setIsSending(true);
     try {
-      await sendMessageMutation({
+      // P2-INSTRUMENTATION: Send requested
+      P2.messages.sendRequested(id, 'text');
+      const result = await sendMessageMutation({
         token,
         conversationId: id as Id<'privateConversations'>,
         type: 'text',
         content,
         clientMessageId: `msg_${Date.now()}_${Math.random().toString(36).slice(2)}`,
       });
+      // P2-INSTRUMENTATION: Send success
+      P2.messages.sendSuccess(id, (result as any)?.messageId || 'unknown');
       // Message will appear via query reactivity
       scrollToBottom(true);
     } catch (err) {
+      // P2-INSTRUMENTATION: Send failed
+      P2.messages.sendFailed(id, (err as Error)?.message || 'unknown');
       // Restore text on error
       setText(content);
       Alert.alert('Error', 'Failed to send message. Please try again.');
@@ -1146,7 +1306,8 @@ export default function PrivateChatScreen() {
     const isSameSenderAsPrev = prevMessage && prevMessage.senderId === item.senderId;
     const showAvatar = !isOwn && !isSameSenderAsPrev;
     const isSystem = item.senderId === 'system';
-    const isTodEvent = item.senderId === 'tod';
+    // T/D PERSISTENCE FIX: Detect T/D events from both local (senderId='tod') and backend (type='system')
+    const isTodEvent = item.senderId === 'tod' || item.type === 'system';
 
     // PHASE-1 PARITY FIX: Avatar blur should be conditional (match header avatar behavior)
     // Only blur when photo IS blurred AND viewer doesn't have clear access
@@ -1572,16 +1733,31 @@ export default function PrivateChatScreen() {
           onPress={handleTruthDarePress}
           hitSlop={8}
           style={styles.gameButton}
+          disabled={gameSession?.state === 'pending' && gameSession?.inviterId === currentUserId}
         >
           <View style={[
             styles.truthDareButton,
-            // Visual feedback for pending invite or active game
-            gameSession?.state === 'pending' && styles.truthDareButtonPending,
+            // PHASE 1 PARITY: Show badge dot when there's a pending invite for me
+            gameSession?.state === 'pending' && gameSession?.inviteeId === currentUserId && styles.truthDareButtonWithBadge,
+            // PHASE 1 PARITY: Dim button if I sent a pending invite (waiting for response)
+            gameSession?.state === 'pending' && gameSession?.inviterId === currentUserId && styles.truthDareButtonWaiting,
+            // PHASE 1 PARITY: Dim button during cooldown
+            gameSession?.state === 'cooldown' && styles.truthDareButtonCooldown,
+            // Green for active game
             gameSession?.state === 'active' && styles.truthDareButtonActive,
           ]}>
             <Ionicons name="wine" size={18} color="#FFFFFF" />
-            <Text style={styles.truthDareLabel}>T/D</Text>
+            <Text style={[
+              styles.truthDareLabel,
+              gameSession?.state === 'pending' && gameSession?.inviterId === currentUserId && styles.truthDareLabelWaiting,
+            ]}>
+              {gameSession?.state === 'pending' && gameSession?.inviterId === currentUserId ? 'Waiting...' : 'T/D'}
+            </Text>
           </View>
+          {/* PHASE 1 PARITY: Badge dot for pending invite for me */}
+          {gameSession?.state === 'pending' && gameSession?.inviteeId === currentUserId && (
+            <View style={styles.truthDareBadge} />
+          )}
         </TouchableOpacity>
         {/* PHASE 1 PARITY: Cooldown message toast */}
         {showCooldownMessage && (
@@ -1833,16 +2009,29 @@ export default function PrivateChatScreen() {
       </Modal>
 
       {/* PHASE 1 PARITY: Truth/Dare Pending Invite Card (for invitee) */}
-      {gameSession?.state === 'pending' && gameSession?.inviteeId === currentUserId && (
-        <View style={styles.tdPendingInviteWrapper}>
-          <TruthDareInviteCard
-            inviterName={conversation.participantName}
-            isInvitee={true}
-            onAccept={() => handleRespondToInvite(true)}
-            onReject={() => handleRespondToInvite(false)}
-          />
-        </View>
-      )}
+      {/* T/D-DEBUG: Log render condition */}
+      {(() => {
+        const shouldShow = gameSession?.state === 'pending' && gameSession?.inviteeId === currentUserId;
+        if (__DEV__ && gameSession?.state === 'pending') {
+          console.log('[P2_TD_RENDER] Invite card check:',
+            '\n  state:', gameSession.state,
+            '\n  inviteeId:', gameSession.inviteeId?.slice(-8),
+            '\n  currentUserId:', currentUserId?.slice(-8),
+            '\n  match:', gameSession.inviteeId === currentUserId,
+            '\n  shouldShow:', shouldShow
+          );
+        }
+        return shouldShow ? (
+          <View style={styles.tdPendingInviteWrapper}>
+            <TruthDareInviteCard
+              inviterName={conversation.participantName}
+              isInvitee={true}
+              onAccept={() => handleRespondToInvite(true)}
+              onReject={() => handleRespondToInvite(false)}
+            />
+          </View>
+        ) : null;
+      })()}
 
       {/* Camera Photo Sheet (gallery/camera picker -> secure options) */}
       <CameraPhotoSheet
@@ -2274,10 +2463,32 @@ const styles = StyleSheet.create({
   sendButtonDisabled: { backgroundColor: C.surface },
 
   // ═══════════════════════════════════════════════════════════════════════════
-  // PHASE 1 PARITY: T/D button visual states
+  // PHASE 1 PARITY: T/D button visual states (matches ChatScreenInner.tsx)
   // ═══════════════════════════════════════════════════════════════════════════
-  truthDareButtonPending: {
-    backgroundColor: '#E67E22', // Orange for pending invite
+  truthDareButtonWithBadge: {
+    position: 'relative' as const,
+  },
+  truthDareBadge: {
+    position: 'absolute' as const,
+    top: -2,
+    right: -2,
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    backgroundColor: '#E53E3E',
+    borderWidth: 2,
+    borderColor: C.background,
+  },
+  truthDareButtonWaiting: {
+    opacity: 0.6,
+    backgroundColor: C.textLight,
+  },
+  truthDareLabelWaiting: {
+    fontSize: 10,
+  },
+  truthDareButtonCooldown: {
+    opacity: 0.5,
+    backgroundColor: C.textMuted || '#999',
   },
   truthDareButtonActive: {
     backgroundColor: '#27AE60', // Green for active game

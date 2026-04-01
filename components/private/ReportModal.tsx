@@ -152,20 +152,19 @@ export function ReportModal({
   };
 
   // ═══════════════════════════════════════════════════════════════════════════
-  // LEAVE CONVERSATION: Backend-backed hide (Phase 2 equivalent of unmatch)
+  // UNCRUSH: Backend-backed removal (Phase 1 parity)
   // Persists to backend so conversation won't reappear after refresh
   // ═══════════════════════════════════════════════════════════════════════════
-  const handleLeave = () => {
+  const handleUncrush = () => {
     Alert.alert(
-      'Leave Conversation',
-      `Leave this conversation with ${targetName}? You can reconnect later through Deep Connect.`,
+      'Uncrush',
+      `Are you sure you want to remove your crush on ${targetName}?`,
       [
         { text: 'Cancel', style: 'cancel' },
         {
-          text: 'Leave',
-          style: 'destructive',
+          text: 'Yes',
           onPress: async () => {
-            logAction('leave');
+            logAction('uncrush');
             setIsLoading(true);
 
             try {
@@ -184,19 +183,19 @@ export function ReportModal({
               });
 
               if (!result.success) {
-                throw new Error(result.error || 'Failed to leave conversation');
+                throw new Error(result.error || 'Failed to remove crush');
               }
 
               // Also remove from local store for immediate UI feedback
               const { usePrivateChatStore } = await import('@/stores/privateChatStore');
               usePrivateChatStore.getState().removeConversation(conversationId);
 
-              Toast.show('Conversation removed');
+              Toast.show(`Removed crush on ${targetName}`);
               resetAndClose();
               onLeaveSuccess?.();
             } catch (error: any) {
               setIsLoading(false);
-              Alert.alert('Error', error.message || 'Failed to leave conversation.');
+              Alert.alert('Error', error.message || 'Failed to remove crush.');
             }
           },
         },
@@ -296,16 +295,17 @@ export function ReportModal({
         </TouchableOpacity>
       </View>
 
-      {/* Leave Conversation - only shown for private chats (with backend integration) */}
+      {/* Uncrush - only shown for private chats (with backend integration) */}
+      {/* PHASE 1 PARITY: Match wording and behavior */}
       {hasBackendIntegration && (
         <>
-          <TouchableOpacity style={styles.actionRow} onPress={handleLeave}>
+          <TouchableOpacity style={styles.actionRow} onPress={handleUncrush}>
             <View style={[styles.actionIcon, { backgroundColor: C.surface }]}>
-              <Ionicons name="exit-outline" size={20} color={C.textLight} />
+              <Ionicons name="heart-dislike-outline" size={20} color={C.textLight} />
             </View>
             <View style={styles.actionInfo}>
-              <Text style={styles.actionText}>Leave Conversation</Text>
-              <Text style={styles.actionHint}>Remove from your messages</Text>
+              <Text style={styles.actionText}>Uncrush</Text>
+              <Text style={styles.actionHint}>Remove from Deep Connect</Text>
             </View>
           </TouchableOpacity>
 

@@ -630,7 +630,8 @@ export interface IncognitoMessage {
   /** Timestamp when message should be auto-deleted */
   deleteAt?: number;
   // Voice message fields
-  type?: 'text' | 'voice' | 'image' | 'video';
+  // T/D PERSISTENCE FIX: Added 'system' type for T/D game events from backend
+  type?: 'text' | 'voice' | 'image' | 'video' | 'system';
   audioUri?: string; // Local URI (legacy, for local-only messages)
   audioUrl?: string | null; // P0-003: Backend URL from Convex storage
   durationMs?: number;

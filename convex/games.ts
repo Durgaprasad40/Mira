@@ -226,6 +226,8 @@ export const getBottleSpinSession = query({
       .withIndex('by_conversation', (q) => q.eq('conversationId', conversationId))
       .collect();
 
+    console.log('[P2_TD_INVITE_QUERY] Conv:', conversationId?.slice(-8), 'sessions:', allSessions.length);
+
     if (allSessions.length === 0) {
       return { state: 'none' as const };
     }
@@ -249,6 +251,9 @@ export const getBottleSpinSession = query({
         spinTurnRole: session.spinTurnRole,
         turnPhase: session.turnPhase,
         lastSpinResult: session.lastSpinResult,
+        // RANDOM-TARGET-FIX: Include streak tracking for fairness cap
+        lastSelectedRole: session.lastSelectedRole,
+        consecutiveSelectedCount: session.consecutiveSelectedCount ?? 0,
       };
     }
 
@@ -263,6 +268,7 @@ export const getBottleSpinSession = query({
       const pendingAge = now - session.createdAt;
       if (pendingAge < PENDING_INVITE_TIMEOUT_MS) {
         // Still valid pending invite
+        console.log('[P2_TD_INVITE_QUERY] Found PENDING session:', (session._id as string).slice(-8), 'inviter:', session.inviterId?.slice(-8), 'invitee:', session.inviteeId?.slice(-8));
         return {
           state: 'pending' as const,
           sessionId: session._id,
@@ -323,16 +329,29 @@ export const sendBottleSpinInvite = mutation({
       .withIndex('by_conversation', (q) => q.eq('conversationId', conversationId))
       .collect();
 
-    // Block if ANY session is pending
-    const pendingSession = allSessions.find((s) => s.status === 'pending');
+    // ROOT CAUSE FIX: Only block VALID (non-expired) pending sessions
+    // Must match PENDING_INVITE_TIMEOUT_MS (5 min) from getBottleSpinSession
+    // Previously: old expired pending sessions blocked new invites indefinitely
+    const pendingSession = allSessions.find((s) =>
+      s.status === 'pending' && (now - s.createdAt) < PENDING_INVITE_TIMEOUT_MS
+    );
     if (pendingSession) {
-      throw new Error('Invite already pending');
+      return { success: false, status: 'already_pending' };
     }
 
-    // Block if ANY session is active
+    // CLEANUP: Mark expired pending sessions as 'expired' to prevent future blocking
+    const expiredPendingSessions = allSessions.filter((s) =>
+      s.status === 'pending' && (now - s.createdAt) >= PENDING_INVITE_TIMEOUT_MS
+    );
+    for (const expired of expiredPendingSessions) {
+      await ctx.db.patch(expired._id, { status: 'expired' });
+      console.log('[P2_TD_CLEANUP] Marked expired pending session:', (expired._id as string).slice(-8));
+    }
+
+    // Block if ANY session is active - return status, do NOT throw
     const activeSession = allSessions.find((s) => s.status === 'active');
     if (activeSession) {
-      throw new Error('Game already active');
+      return { success: false, status: 'game_active' };
     }
 
     // Block if most recent ended/rejected session has active cooldown
@@ -340,17 +359,19 @@ export const sendBottleSpinInvite = mutation({
       (s) => (s.status === 'ended' || s.status === 'rejected') && s.cooldownUntil && s.cooldownUntil > now
     );
     if (sessionsWithCooldown.length > 0) {
-      throw new Error('Cooldown active');
+      return { success: false, status: 'cooldown_active' };
     }
 
     // Create new invite session - use Convex IDs directly (passed from frontend)
-    await ctx.db.insert('bottleSpinSessions', {
+    const sessionId = await ctx.db.insert('bottleSpinSessions', {
       conversationId,
       inviterId: authUserId,
       inviteeId: otherUserId,
       status: 'pending',
       createdAt: now,
     });
+
+    console.log('[P2_TD_INVITE_SEND] Created session:', (sessionId as string).slice(-8), 'inviter:', authUserId?.slice(-8), 'invitee:', otherUserId?.slice(-8));
 
     return { success: true };
   },
@@ -540,6 +561,50 @@ export const setBottleSpinTurn = mutation({
       }
     }
 
+    // ═══════════════════════════════════════════════════════════════════════════
+    // RANDOM-TARGET-FIX: Backend-only random selection with fairness cap
+    // ALL randomness happens in backend to ensure both devices stay in sync
+    // ═══════════════════════════════════════════════════════════════════════════
+    const MAX_CONSECUTIVE_SAME_TARGET = 3;
+    let selectedTargetRole: 'inviter' | 'invitee' | undefined = currentTurnRole;
+    let nextLastSelectedRole = session.lastSelectedRole;
+    let nextConsecutiveCount = session.consecutiveSelectedCount ?? 0;
+
+    // When spinning starts, generate the random selection NOW (not in frontend)
+    if (turnPhase === 'spinning') {
+      const lastSelected = session.lastSelectedRole;
+      const consecutiveCount = session.consecutiveSelectedCount ?? 0;
+
+      // Check if fairness cap is triggered
+      if (lastSelected && consecutiveCount >= MAX_CONSECUTIVE_SAME_TARGET) {
+        // Force the opposite of lastSelectedRole
+        selectedTargetRole = lastSelected === 'inviter' ? 'invitee' : 'inviter';
+        console.log('[RANDOM-TARGET-FIX] Backend: Fairness cap triggered!', {
+          lastSelected,
+          consecutiveCount,
+          forcedTarget: selectedTargetRole,
+        });
+      } else {
+        // Normal random selection (50/50) - BACKEND Math.random()
+        const randomValue = Math.random();
+        selectedTargetRole = randomValue < 0.5 ? 'inviter' : 'invitee';
+        console.log('[RANDOM-TARGET-FIX] Backend: Random selection', {
+          randomValue,
+          selectedTarget: selectedTargetRole,
+          lastSelected,
+          consecutiveCount,
+        });
+      }
+
+      // Update streak tracking immediately
+      if (selectedTargetRole === lastSelected) {
+        nextConsecutiveCount = consecutiveCount + 1;
+      } else {
+        nextConsecutiveCount = 1;
+      }
+      nextLastSelectedRole = selectedTargetRole;
+    }
+
     // SPIN-TURN-FIX: Calculate next spinTurnRole when round completes
     // After each complete round, alternate who gets to spin next
     let nextSpinTurnRole = session.spinTurnRole;
@@ -552,14 +617,21 @@ export const setBottleSpinTurn = mutation({
       });
     }
 
-    // Update turn state with role-based ownership
+    // Update turn state with role-based ownership and streak tracking
     await ctx.db.patch(session._id, {
-      currentTurnRole,
+      currentTurnRole: selectedTargetRole,
       turnPhase,
       spinTurnRole: nextSpinTurnRole,
       lastSpinResult: lastSpinResult ?? session.lastSpinResult,
+      // RANDOM-TARGET-FIX: Persist streak tracking
+      lastSelectedRole: nextLastSelectedRole,
+      consecutiveSelectedCount: nextConsecutiveCount,
     });
 
-    return { success: true };
+    // Return the selected target so frontend knows animation direction
+    return {
+      success: true,
+      selectedTargetRole: selectedTargetRole,
+    };
   },
 });

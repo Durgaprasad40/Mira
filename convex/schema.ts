@@ -1852,7 +1852,8 @@ export default defineSchema({
       v.literal('pending'),          // Invite sent, waiting for response
       v.literal('active'),           // Invite accepted, game in progress
       v.literal('rejected'),         // Invite rejected
-      v.literal('ended')             // Game ended
+      v.literal('ended'),            // Game ended
+      v.literal('expired')           // Pending invite timed out (5 min)
     ),
     createdAt: v.number(),
     respondedAt: v.optional(v.number()),  // When invite was accepted/rejected
@@ -1877,6 +1878,13 @@ export default defineSchema({
       v.literal('complete')          // Choice made, can spin again
     )),
     lastSpinResult: v.optional(v.string()), // 'truth' | 'dare' | 'skip' | null
+    // RANDOM-TARGET-FIX: Track consecutive target selections for fairness cap
+    // Target selection is random, but same person cannot be selected more than 3 times in a row
+    lastSelectedRole: v.optional(v.union(
+      v.literal('inviter'),          // Last spin landed on inviter
+      v.literal('invitee')           // Last spin landed on invitee
+    )),
+    consecutiveSelectedCount: v.optional(v.number()), // How many times in a row same role was selected (max 3)
   })
     .index('by_conversation', ['conversationId'])
     .index('by_inviter', ['inviterId'])
@@ -2054,6 +2062,17 @@ export default defineSchema({
     .index('by_viewer', ['viewerUserId'])
     .index('by_owner_viewer', ['ownerUserId', 'viewerUserId'])
     .index('by_owner_status', ['ownerUserId', 'status']),
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Phase-2 User Presence (ISOLATED from users table)
+  // Tracks lastActiveAt for online status display in Phase-2 Messages
+  // ═══════════════════════════════════════════════════════════════════════════
+  privateUserPresence: defineTable({
+    userId: v.id('users'),           // The user this presence record belongs to
+    lastActiveAt: v.number(),        // Timestamp of last activity
+    updatedAt: v.number(),           // When this record was last updated
+  })
+    .index('by_user', ['userId']),
 
   // User support tickets for Help & Support inquiries
   supportTickets: defineTable({

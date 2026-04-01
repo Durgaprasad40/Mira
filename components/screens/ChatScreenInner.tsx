@@ -592,6 +592,29 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
     }
   }, [isDemo, gameSession?.state, gameSession?.turnPhase, gameSession?.currentTurnRole, gameSession?.inviterId, gameSession?.inviteeId, userId, showTruthDareGame]);
 
+  // ═══════════════════════════════════════════════════════════════════════════
+  // AUTO-CLOSE MODAL AFTER TRUTH/DARE/SKIP SELECTION
+  // When turnPhase becomes 'complete', show result briefly then close modal.
+  // Both devices see this since they watch the same backend state.
+  // ═══════════════════════════════════════════════════════════════════════════
+  useEffect(() => {
+    if (isDemo || !gameSession) return;
+
+    // Only auto-close when active game reaches 'complete' phase
+    if (gameSession.state !== 'active') return;
+    if (gameSession.turnPhase !== 'complete') return;
+
+    // Wait briefly to show result, then auto-close (fast, near-instant)
+    const timer = setTimeout(() => {
+      if (showTruthDareGame) {
+        console.log('[BOTTLE_SPIN_AUTO_CLOSE] Closing modal after T/D selection complete');
+        setShowTruthDareGame(false);
+      }
+    }, 400);
+
+    return () => clearTimeout(timer);
+  }, [isDemo, gameSession?.state, gameSession?.turnPhase, showTruthDareGame]);
+
   // Handle T/D button press based on current state
   const handleTruthDarePress = useCallback(() => {
     if (isDemo) {
@@ -630,8 +653,15 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
   }, [isDemo, gameSession, userId]);
 
   // Send game invite
+  // INVITE-FIX: Handle "Invite already pending" error gracefully
   const handleSendInvite = useCallback(async () => {
     if (!userId || !conversationId || !otherUserId) return;
+
+    // INVITE-FIX: Don't send if invite is already pending
+    if (gameSession?.state === 'pending') {
+      setShowTruthDareInvite(false);
+      return;
+    }
 
     try {
       await sendInviteMutation({
@@ -652,9 +682,20 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
         type: 'text',
       });
     } catch (error: any) {
-      Alert.alert('Error', error.message || 'Failed to send invite');
+      // INVITE-FIX: Handle "Invite already pending" error gracefully
+      const errorMsg = error?.message || '';
+      if (errorMsg.toLowerCase().includes('already pending') || errorMsg.toLowerCase().includes('invite already')) {
+        // Show friendly message instead of error
+        Alert.alert(
+          'Invite Already Sent',
+          'A game invite is already pending. Wait for your match to respond.',
+          [{ text: 'OK', onPress: () => setShowTruthDareInvite(false) }]
+        );
+      } else {
+        Alert.alert('Error', errorMsg || 'Failed to send invite');
+      }
     }
-  }, [userId, conversationId, otherUserId, sendInviteMutation, currentUser, sendMessage]);
+  }, [userId, conversationId, otherUserId, gameSession?.state, sendInviteMutation, currentUser, sendMessage]);
 
   // Respond to game invite
   const handleRespondToInvite = useCallback(async (accept: boolean) => {
