@@ -1,6 +1,8 @@
 /*
- * EXPLORE TAB - Redesigned UI
- * Modern, visually rich explore experience
+ * LOCKED (EXPLORE TAB)
+ * Do NOT modify this file unless Durga Prasad explicitly unlocks it.
+ *
+ * Redesigned UI - Modern, visually rich explore experience
  */
 
 import React, { useCallback, useState, useMemo, useRef, useEffect } from "react";
