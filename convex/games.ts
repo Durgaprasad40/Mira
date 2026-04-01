@@ -207,14 +207,17 @@ export const incrementGlobalBottleSpinSkip = mutation({
 
 // ═══════════════════════════════════════════════════════════════════════════
 // BOTTLE SPIN GAME SESSIONS: Invite, Accept, Reject, End flow
+// TD-LIFECYCLE: Complete session lifecycle with timeout support
 // ═══════════════════════════════════════════════════════════════════════════
 
 const TEN_MINUTES_MS = 10 * 60 * 1000;
-// WAIT-FIX: Pending invites expire after 5 minutes if not responded
-const PENDING_INVITE_TIMEOUT_MS = 5 * 60 * 1000;
+// TD-LIFECYCLE: Timeout constants (as per requirements)
+const PENDING_INVITE_TIMEOUT_MS = 2 * 60 * 1000;    // 2 min: Pending invite expires
+const NOT_STARTED_TIMEOUT_MS = 2 * 60 * 1000;       // 2 min: Accepted but not started expires
+const INACTIVITY_TIMEOUT_MS = 10 * 60 * 1000;       // 10 min: Active game inactivity timeout
 
 // Get current game session status for a conversation
-// CRITICAL FIX: Query ALL sessions and find the active/pending one, not just the latest
+// TD-LIFECYCLE: Enhanced with timeout checking and proper state transitions
 export const getBottleSpinSession = query({
   args: {
     conversationId: v.string(),
@@ -226,7 +229,7 @@ export const getBottleSpinSession = query({
       .withIndex('by_conversation', (q) => q.eq('conversationId', conversationId))
       .collect();
 
-    console.log('[P2_TD_INVITE_QUERY] Conv:', conversationId?.slice(-8), 'sessions:', allSessions.length);
+    console.log('[TD_SESSION_QUERY] Conv:', conversationId?.slice(-8), 'sessions:', allSessions.length);
 
     if (allSessions.length === 0) {
       return { state: 'none' as const };
@@ -234,12 +237,61 @@ export const getBottleSpinSession = query({
 
     const now = Date.now();
 
-    // Priority 1: Find ACTIVE session (should only be one, but take the most recent)
+    // Priority 1: Find ACTIVE session
     const activeSessions = allSessions.filter((s) => s.status === 'active');
     if (activeSessions.length > 0) {
-      // Sort by createdAt descending to get most recent active
       activeSessions.sort((a, b) => b.createdAt - a.createdAt);
       const session = activeSessions[0];
+
+      // TD-LIFECYCLE: Check for "accepted but not started" timeout
+      // If game was accepted but never manually started within 2 minutes
+      const hasGameStarted = !!session.gameStartedAt;
+      const acceptedAt = session.acceptedAt || session.respondedAt || session.createdAt;
+      const timeSinceAccepted = now - acceptedAt;
+
+      if (!hasGameStarted && timeSinceAccepted >= NOT_STARTED_TIMEOUT_MS) {
+        console.log('[TD_TIMEOUT_CHECK] Session expired: accepted but not started', {
+          sessionId: (session._id as string).slice(-8),
+          acceptedAt,
+          timeSinceAccepted,
+          timeout: NOT_STARTED_TIMEOUT_MS,
+        });
+        // Return as expired (will be cleaned up by mutation)
+        return {
+          state: 'expired' as const,
+          endedReason: 'not_started' as const,
+          sessionId: session._id,
+        };
+      }
+
+      // TD-LIFECYCLE: Check for inactivity timeout (only if game has started)
+      if (hasGameStarted) {
+        const lastAction = session.lastActionAt || session.gameStartedAt || acceptedAt;
+        const timeSinceLastAction = now - lastAction;
+
+        if (timeSinceLastAction >= INACTIVITY_TIMEOUT_MS) {
+          console.log('[TD_TIMEOUT_CHECK] Session expired: inactivity timeout', {
+            sessionId: (session._id as string).slice(-8),
+            lastActionAt: lastAction,
+            timeSinceLastAction,
+            timeout: INACTIVITY_TIMEOUT_MS,
+          });
+          return {
+            state: 'expired' as const,
+            endedReason: 'timeout' as const,
+            sessionId: session._id,
+          };
+        }
+      }
+
+      // Session is valid - return full state
+      console.log('[TD_SESSION_QUERY] Found ACTIVE session:', {
+        sessionId: (session._id as string).slice(-8),
+        hasGameStarted,
+        turnPhase: session.turnPhase,
+        gameStartedAt: session.gameStartedAt,
+      });
+
       return {
         state: 'active' as const,
         sessionId: session._id,
@@ -247,28 +299,28 @@ export const getBottleSpinSession = query({
         inviteeId: session.inviteeId,
         currentTurnUserId: session.currentTurnUserId,
         currentTurnRole: session.currentTurnRole,
-        // SPIN-TURN-FIX: Include spinTurnRole in response
         spinTurnRole: session.spinTurnRole,
         turnPhase: session.turnPhase,
         lastSpinResult: session.lastSpinResult,
-        // RANDOM-TARGET-FIX: Include streak tracking for fairness cap
         lastSelectedRole: session.lastSelectedRole,
         consecutiveSelectedCount: session.consecutiveSelectedCount ?? 0,
+        // TD-LIFECYCLE: New fields for frontend to determine game start state
+        gameStartedAt: session.gameStartedAt,
+        acceptedAt: session.acceptedAt,
+        lastActionAt: session.lastActionAt,
       };
     }
 
     // Priority 2: Find PENDING session (invite waiting for response)
-    // WAIT-FIX: Pending invites expire after 5 minutes - treat expired ones as 'none'
     const pendingSessions = allSessions.filter((s) => s.status === 'pending');
     if (pendingSessions.length > 0) {
       pendingSessions.sort((a, b) => b.createdAt - a.createdAt);
       const session = pendingSessions[0];
 
-      // WAIT-FIX: Check if pending invite has expired
+      // TD-LIFECYCLE: Check if pending invite has expired (2 min)
       const pendingAge = now - session.createdAt;
       if (pendingAge < PENDING_INVITE_TIMEOUT_MS) {
-        // Still valid pending invite
-        console.log('[P2_TD_INVITE_QUERY] Found PENDING session:', (session._id as string).slice(-8), 'inviter:', session.inviterId?.slice(-8), 'invitee:', session.inviteeId?.slice(-8));
+        console.log('[TD_SESSION_QUERY] Found PENDING session:', (session._id as string).slice(-8));
         return {
           state: 'pending' as const,
           sessionId: session._id,
@@ -277,13 +329,23 @@ export const getBottleSpinSession = query({
           createdAt: session.createdAt,
         };
       }
-      // WAIT-FIX: Expired pending invite - fall through to cooldown/none check
-      // The pending session is stale, don't return it as pending
+
+      // TD-LIFECYCLE: Pending invite expired
+      console.log('[TD_TIMEOUT_CHECK] Pending invite expired', {
+        sessionId: (session._id as string).slice(-8),
+        pendingAge,
+        timeout: PENDING_INVITE_TIMEOUT_MS,
+      });
+      return {
+        state: 'expired' as const,
+        endedReason: 'invite_expired' as const,
+        sessionId: session._id,
+      };
     }
 
-    // Priority 3: Check for cooldown from most recent ended/rejected session
+    // Priority 3: Check for cooldown from most recent ended/rejected/expired session
     const endedSessions = allSessions.filter(
-      (s) => (s.status === 'ended' || s.status === 'rejected') && s.cooldownUntil
+      (s) => (s.status === 'ended' || s.status === 'rejected' || s.status === 'expired') && s.cooldownUntil
     );
     if (endedSessions.length > 0) {
       endedSessions.sort((a, b) => b.createdAt - a.createdAt);
@@ -414,17 +476,27 @@ export const respondToBottleSpinInvite = mutation({
     }
 
     if (accept) {
-      // Accept: activate the game AND initialize turn state
-      // SPIN-TURN-FIX: Initialize spinTurnRole to 'inviter' (inviter spins first)
+      // TD-LIFECYCLE: Accept invite - set to active but game NOT started yet
+      // Game remains in 'idle' state until inviter manually starts it
       await ctx.db.patch(session._id, {
         status: 'active',
         respondedAt: now,
-        // Initialize turn state to avoid undefined issues
+        acceptedAt: now,           // TD-LIFECYCLE: Track when accepted
+        lastActionAt: now,         // TD-LIFECYCLE: Track last activity
+        // Initialize turn state - game is idle until manual start
         turnPhase: 'idle',
-        spinTurnRole: 'inviter', // Inviter gets first spin
+        spinTurnRole: 'inviter',   // Inviter gets first spin when game starts
         currentTurnRole: undefined,
         lastSpinResult: undefined,
+        // gameStartedAt remains undefined - set when inviter manually starts
       });
+
+      console.log('[TD_SESSION_TRANSITION] Invite accepted - waiting for manual start', {
+        sessionId: (session._id as string).slice(-8),
+        inviterId: session.inviterId?.slice(-8),
+        acceptedAt: now,
+      });
+
       return { success: true, status: 'active' as const };
     } else {
       // Reject: set cooldown
@@ -473,14 +545,149 @@ export const endBottleSpinGame = mutation({
       throw new Error('Only participants can end the game');
     }
 
-    // End the game with cooldown
+    // TD-LIFECYCLE: End the game with proper reason tracking
     await ctx.db.patch(session._id, {
       status: 'ended',
       endedAt: now,
+      endedReason: 'manual',
       cooldownUntil: now + TEN_MINUTES_MS,
     });
 
+    console.log('[TD_SESSION_TRANSITION] Game ended manually', {
+      sessionId: (session._id as string).slice(-8),
+      endedBy: authUserId?.slice(-8),
+    });
+
     return { success: true };
+  },
+});
+
+// TD-LIFECYCLE: Manual start game (inviter must explicitly start after acceptance)
+// This is the critical fix: game modal should only open after this mutation succeeds
+export const startBottleSpinGame = mutation({
+  args: {
+    authUserId: v.string(),
+    conversationId: v.string(),
+  },
+  handler: async (ctx, { authUserId, conversationId }) => {
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      throw new Error('Unauthorized: user not found');
+    }
+
+    const now = Date.now();
+
+    // Find the ACTIVE session
+    const allSessions = await ctx.db
+      .query('bottleSpinSessions')
+      .withIndex('by_conversation', (q) => q.eq('conversationId', conversationId))
+      .collect();
+
+    const activeSessions = allSessions.filter((s) => s.status === 'active');
+    if (activeSessions.length === 0) {
+      throw new Error('No active game session found');
+    }
+
+    activeSessions.sort((a, b) => b.createdAt - a.createdAt);
+    const session = activeSessions[0];
+
+    // Only the INVITER can start the game
+    if (session.inviterId !== authUserId) {
+      console.log('[TD_MANUAL_START] Rejected: not inviter', {
+        authUserId: authUserId?.slice(-8),
+        inviterId: session.inviterId?.slice(-8),
+      });
+      return { success: false, reason: 'only_inviter_can_start' };
+    }
+
+    // Check if game already started
+    if (session.gameStartedAt) {
+      console.log('[TD_MANUAL_START] Game already started', {
+        sessionId: (session._id as string).slice(-8),
+        gameStartedAt: session.gameStartedAt,
+      });
+      return { success: true, alreadyStarted: true };
+    }
+
+    // TD-LIFECYCLE: Mark game as started
+    await ctx.db.patch(session._id, {
+      gameStartedAt: now,
+      lastActionAt: now,
+    });
+
+    console.log('[TD_MANUAL_START] Game started by inviter', {
+      sessionId: (session._id as string).slice(-8),
+      inviterId: authUserId?.slice(-8),
+      conversationId: conversationId?.slice(-8),
+    });
+
+    return { success: true, gameStartedAt: now };
+  },
+});
+
+// TD-LIFECYCLE: Clean up expired sessions (mark them as expired in DB)
+// Called by frontend when it detects an expired state
+export const cleanupExpiredSession = mutation({
+  args: {
+    authUserId: v.string(),
+    conversationId: v.string(),
+    endedReason: v.union(
+      v.literal('invite_expired'),
+      v.literal('not_started'),
+      v.literal('timeout')
+    ),
+  },
+  handler: async (ctx, { authUserId, conversationId, endedReason }) => {
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      throw new Error('Unauthorized: user not found');
+    }
+
+    const now = Date.now();
+
+    // Find sessions that need cleanup
+    const allSessions = await ctx.db
+      .query('bottleSpinSessions')
+      .withIndex('by_conversation', (q) => q.eq('conversationId', conversationId))
+      .collect();
+
+    let cleanedCount = 0;
+
+    // Mark expired pending sessions
+    if (endedReason === 'invite_expired') {
+      const pendingSessions = allSessions.filter((s) => s.status === 'pending');
+      for (const session of pendingSessions) {
+        await ctx.db.patch(session._id, {
+          status: 'expired',
+          endedAt: now,
+          endedReason: 'invite_expired',
+          cooldownUntil: now + TEN_MINUTES_MS,
+        });
+        cleanedCount++;
+      }
+    }
+
+    // Mark expired active sessions (not started or timeout)
+    if (endedReason === 'not_started' || endedReason === 'timeout') {
+      const activeSessions = allSessions.filter((s) => s.status === 'active');
+      for (const session of activeSessions) {
+        await ctx.db.patch(session._id, {
+          status: 'expired',
+          endedAt: now,
+          endedReason,
+          cooldownUntil: now + TEN_MINUTES_MS,
+        });
+        cleanedCount++;
+      }
+    }
+
+    console.log('[TD_SESSION_TRANSITION] Cleaned up expired sessions', {
+      conversationId: conversationId?.slice(-8),
+      endedReason,
+      cleanedCount,
+    });
+
+    return { success: true, cleanedCount };
   },
 });
 
@@ -617,7 +824,9 @@ export const setBottleSpinTurn = mutation({
       });
     }
 
-    // Update turn state with role-based ownership and streak tracking
+    const now = Date.now();
+
+    // TD-LIFECYCLE: Update turn state with role-based ownership, streak tracking, and lastActionAt
     await ctx.db.patch(session._id, {
       currentTurnRole: selectedTargetRole,
       turnPhase,
@@ -626,6 +835,14 @@ export const setBottleSpinTurn = mutation({
       // RANDOM-TARGET-FIX: Persist streak tracking
       lastSelectedRole: nextLastSelectedRole,
       consecutiveSelectedCount: nextConsecutiveCount,
+      // TD-LIFECYCLE: Update lastActionAt on every game action
+      lastActionAt: now,
+    });
+
+    console.log('[TD_ACTIVITY_UPDATE] Turn state updated', {
+      sessionId: (session._id as string).slice(-8),
+      turnPhase,
+      lastActionAt: now,
     });
 
     // Return the selected target so frontend knows animation direction

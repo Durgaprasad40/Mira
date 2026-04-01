@@ -401,6 +401,9 @@ export default function PrivateChatScreen() {
   const sendInviteMutation = useMutation(api.games.sendBottleSpinInvite);
   const respondToInviteMutation = useMutation(api.games.respondToBottleSpinInvite);
   const endGameMutation = useMutation(api.games.endBottleSpinGame);
+  // TD-LIFECYCLE: New mutations for proper session lifecycle
+  const startGameMutation = useMutation(api.games.startBottleSpinGame);
+  const cleanupExpiredGameMutation = useMutation(api.games.cleanupExpiredSession);
 
   // Get other user's ID for invite
   const otherUserId = conversation?.participantId;
@@ -410,6 +413,8 @@ export default function PrivateChatScreen() {
   const [showTruthDareInvite, setShowTruthDareInvite] = useState(false);
   const [showCooldownMessage, setShowCooldownMessage] = useState(false);
   const [cooldownRemainingMin, setCooldownRemainingMin] = useState(0);
+  // TD-UX: Lightweight waiting toast for invitee (instead of full modal)
+  const [showWaitingForStartToast, setShowWaitingForStartToast] = useState(false);
 
   // ═══════════════════════════════════════════════════════════════════════════
   // T/D SYSTEM MESSAGES: Helper to send T/D events to backend (persisted)
@@ -430,22 +435,60 @@ export default function PrivateChatScreen() {
     }
   }, [id, token, sendMessageMutation]);
 
-  // AUTO-CLOSE: Watch game session state changes for cross-device sync (same as Phase 1)
+  // TD-LIFECYCLE: Watch game session state changes for cross-device sync
   useEffect(() => {
     if (!gameSession) return;
 
-    // Auto-close game modal when game is ended/rejected on either device
-    if (gameSession.state === 'cooldown' || gameSession.state === 'none') {
+    // TD-LIFECYCLE: Debug logging for session state
+    console.log('[TD_UI_STATE] Phase 2 session update:', {
+      phase: 'P2',
+      conversationId: id,
+      sessionId: gameSession.sessionId,
+      state: gameSession.state,
+      turnPhase: gameSession.turnPhase,
+      gameStartedAt: gameSession.gameStartedAt,
+      hasGameStarted: !!gameSession.gameStartedAt,
+    });
+
+    // Auto-close game modal when game is ended/rejected/expired on either device
+    if (gameSession.state === 'cooldown' || gameSession.state === 'none' || gameSession.state === 'expired') {
       if (showTruthDareGame) {
+        console.log('[TD_MODAL_GUARD] Phase 2: Closing modal - session ended/expired');
         setShowTruthDareGame(false);
+      }
+      if (showTruthDareInvite) {
+        setShowTruthDareInvite(false);
       }
     }
 
-    // Auto-open game modal when invite is accepted (for inviter)
+    // TD-LIFECYCLE: Handle expired session - cleanup and show message
+    if (gameSession.state === 'expired' && gameSession.endedReason && currentUserId && id) {
+      // Cleanup the expired session in backend
+      cleanupExpiredGameMutation({
+        authUserId: currentUserId,
+        conversationId: id,
+        endedReason: gameSession.endedReason as 'invite_expired' | 'not_started' | 'timeout',
+      }).catch((err) => console.warn('[TD_CLEANUP] Failed:', err));
+
+      // Send appropriate system message
+      const messages: Record<string, string> = {
+        invite_expired: 'Truth or Dare invite expired',
+        not_started: 'Truth or Dare was not started in time',
+        timeout: 'Truth or Dare ended due to inactivity',
+      };
+      const msg = messages[gameSession.endedReason];
+      if (msg) {
+        sendTodSystemMessage(msg);
+      }
+    }
+
+    // TD-LIFECYCLE: Close invite modal when game becomes active
+    // Do NOT auto-open game modal - inviter must manually start
     if (gameSession.state === 'active') {
       if (showTruthDareInvite) {
+        console.log('[TD_MODAL_GUARD] Phase 2: Closing invite modal - game accepted, waiting for manual start');
         setShowTruthDareInvite(false);
-        setShowTruthDareGame(true);
+        // DO NOT open game modal - inviter must click T/D button to start
       }
     }
 
@@ -453,14 +496,21 @@ export default function PrivateChatScreen() {
     if (gameSession.state !== 'cooldown') {
       setShowCooldownMessage(false);
     }
-  }, [gameSession?.state, showTruthDareGame, showTruthDareInvite]);
+  }, [gameSession?.state, gameSession?.turnPhase, gameSession?.gameStartedAt, gameSession?.endedReason, showTruthDareGame, showTruthDareInvite, currentUserId, id, cleanupExpiredGameMutation, sendTodSystemMessage]);
 
-  // AUTO-OPEN: When it's my turn to choose, automatically open the game modal (same as Phase 1)
+  // TD-LIFECYCLE: Auto-open modal ONLY when game has started and it's my turn to choose
   useEffect(() => {
     if (!gameSession || !currentUserId) return;
 
-    // Only care about active games in choosing phase
+    // Only care about active games that have been manually started
     if (gameSession.state !== 'active') return;
+    if (!gameSession.gameStartedAt) {
+      console.log('[TD_MODAL_GUARD] Phase 2: Blocked auto-open - game not started yet', {
+        state: gameSession.state,
+        gameStartedAt: gameSession.gameStartedAt,
+      });
+      return; // Game not started yet - do NOT auto-open
+    }
     if (gameSession.turnPhase !== 'choosing') return;
     if (!gameSession.currentTurnRole) return;
 
@@ -476,9 +526,10 @@ export default function PrivateChatScreen() {
 
     // If it's my turn and modal is closed, open it automatically
     if (isMyTurn && !showTruthDareGame) {
+      console.log('[TD_MODAL_GUARD] Phase 2: Auto-opening modal - my turn to choose');
       setShowTruthDareGame(true);
     }
-  }, [gameSession?.state, gameSession?.turnPhase, gameSession?.currentTurnRole, gameSession?.inviterId, gameSession?.inviteeId, currentUserId, showTruthDareGame]);
+  }, [gameSession?.state, gameSession?.turnPhase, gameSession?.currentTurnRole, gameSession?.inviterId, gameSession?.inviteeId, gameSession?.gameStartedAt, currentUserId, showTruthDareGame]);
 
   // ═══════════════════════════════════════════════════════════════════════════
   // AUTO-CLOSE MODAL AFTER TRUTH/DARE/SKIP SELECTION
@@ -503,12 +554,23 @@ export default function PrivateChatScreen() {
     return () => clearTimeout(timer);
   }, [gameSession?.state, gameSession?.turnPhase, showTruthDareGame]);
 
-  // Handle T/D button press based on current state (same logic as Phase 1)
-  const handleTruthDarePress = useCallback(() => {
-    if (!gameSession) return;
+  // TD-LIFECYCLE: Handle T/D button press with manual start support
+  const handleTruthDarePress = useCallback(async () => {
+    if (!gameSession || !currentUserId || !id) return;
 
-    // P2-INSTRUMENTATION: T/D button pressed
-    P2.tod.queryResult(id || '', gameSession.state, gameSession.sessionId, gameSession.inviterId, gameSession.inviteeId);
+    // Debug logging
+    console.log('[TD_MODAL_GUARD] Phase 2: T/D button pressed', {
+      state: gameSession.state,
+      turnPhase: gameSession.turnPhase,
+      gameStartedAt: gameSession.gameStartedAt,
+      hasGameStarted: !!gameSession.gameStartedAt,
+      amIInviter: gameSession.inviterId === currentUserId,
+    });
+
+    // P2-INSTRUMENTATION: T/D button pressed (skip for expired state)
+    if (gameSession.state !== 'expired') {
+      P2.tod.queryResult(id, gameSession.state as 'none' | 'pending' | 'active' | 'cooldown', gameSession.sessionId, gameSession.inviterId, gameSession.inviteeId);
+    }
 
     // Priority 1: Cooldown active - show inline message
     if (gameSession.state === 'cooldown') {
@@ -519,31 +581,59 @@ export default function PrivateChatScreen() {
       return;
     }
 
-    // Priority 2: Active game exists - open game modal
+    // Priority 2: Expired session - handled by useEffect, just return
+    if (gameSession.state === 'expired') {
+      return;
+    }
+
+    // Priority 3: Active game exists
     if (gameSession.state === 'active') {
-      // ROLE-FIX: Log exact values being passed to BottleSpinGame
-      if (__DEV__) {
-        console.log('[P2_TD_MODAL_OPEN] Opening game modal with:', {
-          conversationId: id,
-          userId: currentUserId,
-          gameSession_inviterId: gameSession.inviterId,
-          gameSession_inviteeId: gameSession.inviteeId,
-          gameSession_spinTurnRole: gameSession.spinTurnRole,
-        });
+      const amIInviter = gameSession.inviterId === currentUserId;
+      const hasGameStarted = !!gameSession.gameStartedAt;
+
+      // TD-LIFECYCLE: If game not started yet, handle based on role
+      if (!hasGameStarted) {
+        if (amIInviter) {
+          // Inviter: Start the game manually
+          console.log('[TD_MANUAL_START] Phase 2: Inviter starting game');
+          try {
+            const result = await startGameMutation({
+              authUserId: currentUserId,
+              conversationId: id,
+            });
+            if (result.success) {
+              console.log('[TD_MANUAL_START] Phase 2: Game started successfully');
+              sendTodSystemMessage('Game started!');
+              setShowTruthDareGame(true);
+            } else {
+              console.warn('[TD_MANUAL_START] Phase 2: Failed to start game:', result);
+            }
+          } catch (err) {
+            console.error('[TD_MANUAL_START] Phase 2: Error starting game:', err);
+          }
+        } else {
+          // TD-UX: Invitee sees lightweight toast instead of full modal
+          console.log('[TD_UX] Phase 2: Invitee - showing waiting toast (not modal)');
+          setShowWaitingForStartToast(true);
+          setTimeout(() => setShowWaitingForStartToast(false), 3000);
+        }
+        return;
       }
-      P2.tod.gameActive(id || '', gameSession.sessionId || '');
+
+      // Game is started - open the game modal normally
+      P2.tod.gameActive(id, gameSession.sessionId || '');
       setShowTruthDareGame(true);
       return;
     }
 
-    // Priority 3: Pending invite exists - no action (invitee sees card, inviter waits)
+    // Priority 4: Pending invite exists - no action (invitee sees card, inviter waits)
     if (gameSession.state === 'pending') {
       return;
     }
 
-    // Priority 4: No game - show invite modal
+    // Priority 5: No game - show invite modal
     setShowTruthDareInvite(true);
-  }, [gameSession, id]);
+  }, [gameSession, id, currentUserId, startGameMutation, sendTodSystemMessage]);
 
   // Send game invite (same as Phase 1)
   // INVITE-FIX: Check pending state before sending to prevent "Invite already pending" error
@@ -605,7 +695,7 @@ export default function PrivateChatScreen() {
     }
   }, [currentUserId, id, otherUserId, gameSession?.state, sendInviteMutation, sendTodSystemMessage]);
 
-  // Respond to game invite (same as Phase 1)
+  // TD-UX: Respond to game invite with clean acceptance flow
   const handleRespondToInvite = useCallback(async (accept: boolean) => {
     if (!currentUserId || !id) return;
 
@@ -623,16 +713,15 @@ export default function PrivateChatScreen() {
         P2.tod.inviteRejected(id, currentUserId);
       }
 
-      // T/D PERSISTENCE FIX: Send response message via backend (appears on BOTH users, survives reload)
-      const responseText = accept
-        ? 'Game starting...'
-        : 'Game invite declined';
-      sendTodSystemMessage(responseText);
-
-      // If accepted, open the game
+      // TD-UX: Clear acceptance message (NO "Game starting..." - inviter must start)
       if (accept) {
-        setShowTruthDareGame(true);
+        sendTodSystemMessage('Invite accepted! Tap T/D to start');
+      } else {
+        sendTodSystemMessage('Invite declined');
       }
+
+      // TD-UX: Do NOT open modal on accept - inviter must tap T/D to start
+      // Modal will open only after startGame mutation succeeds
     } catch (error: any) {
       Alert.alert('Error', error.message || 'Failed to respond to invite');
     }
@@ -1358,6 +1447,9 @@ export default function PrivateChatScreen() {
             timestamp={item.createdAt}
             onDelete={isOwn ? () => handleDeleteVoiceMessage(item.id) : undefined}
             darkTheme
+            // VOICE-TICKS: Pass tick status props for sent/delivered/read indicators
+            deliveredAt={item.deliveredAt}
+            readAt={item.readAt}
           />
         </View>
       );
@@ -1743,20 +1835,30 @@ export default function PrivateChatScreen() {
             gameSession?.state === 'pending' && gameSession?.inviterId === currentUserId && styles.truthDareButtonWaiting,
             // PHASE 1 PARITY: Dim button during cooldown
             gameSession?.state === 'cooldown' && styles.truthDareButtonCooldown,
-            // Green for active game
-            gameSession?.state === 'active' && styles.truthDareButtonActive,
+            // TD-UX: Special "ready to start" style for inviter when accepted but not started
+            gameSession?.state === 'active' && !gameSession?.gameStartedAt && gameSession?.inviterId === currentUserId && styles.truthDareButtonReadyToStart,
+            // Green for active game that's already started
+            gameSession?.state === 'active' && !!gameSession?.gameStartedAt && styles.truthDareButtonActive,
           ]}>
             <Ionicons name="wine" size={18} color="#FFFFFF" />
             <Text style={[
               styles.truthDareLabel,
               gameSession?.state === 'pending' && gameSession?.inviterId === currentUserId && styles.truthDareLabelWaiting,
             ]}>
-              {gameSession?.state === 'pending' && gameSession?.inviterId === currentUserId ? 'Waiting...' : 'T/D'}
+              {gameSession?.state === 'pending' && gameSession?.inviterId === currentUserId
+                ? 'Waiting...'
+                : gameSession?.state === 'active' && !gameSession?.gameStartedAt && gameSession?.inviterId === currentUserId
+                  ? 'Start!'
+                  : 'T/D'}
             </Text>
           </View>
           {/* PHASE 1 PARITY: Badge dot for pending invite for me */}
           {gameSession?.state === 'pending' && gameSession?.inviteeId === currentUserId && (
             <View style={styles.truthDareBadge} />
+          )}
+          {/* TD-UX: Badge dot for inviter when ready to start */}
+          {gameSession?.state === 'active' && !gameSession?.gameStartedAt && gameSession?.inviterId === currentUserId && (
+            <View style={styles.truthDareStartBadge} />
           )}
         </TouchableOpacity>
         {/* PHASE 1 PARITY: Cooldown message toast */}
@@ -1764,6 +1866,14 @@ export default function PrivateChatScreen() {
           <View style={styles.cooldownToast}>
             <Text style={styles.cooldownToastText}>
               T/D available in {cooldownRemainingMin}m
+            </Text>
+          </View>
+        )}
+        {/* TD-UX: Waiting for inviter to start toast */}
+        {showWaitingForStartToast && (
+          <View style={styles.waitingStartToast}>
+            <Text style={styles.waitingStartToastText}>
+              Waiting for {conversation?.participantName || 'them'} to start
             </Text>
           </View>
         )}
@@ -2488,10 +2598,27 @@ const styles = StyleSheet.create({
   },
   truthDareButtonCooldown: {
     opacity: 0.5,
-    backgroundColor: C.textMuted || '#999',
+    backgroundColor: '#999', // Muted gray for cooldown
   },
   truthDareButtonActive: {
     backgroundColor: '#27AE60', // Green for active game
+  },
+  // TD-UX: Special style for inviter when accepted but not started
+  truthDareButtonReadyToStart: {
+    backgroundColor: '#E67E22', // Orange - attention-grabbing
+    borderWidth: 2,
+    borderColor: '#F39C12',
+  },
+  truthDareStartBadge: {
+    position: 'absolute' as const,
+    top: -2,
+    right: -2,
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    backgroundColor: '#F39C12', // Orange badge
+    borderWidth: 1,
+    borderColor: '#FFFFFF',
   },
   cooldownToast: {
     position: 'absolute' as const,
@@ -2506,6 +2633,24 @@ const styles = StyleSheet.create({
   cooldownToastText: {
     fontSize: 12,
     color: C.textLight,
+    fontWeight: '500' as const,
+  },
+  // TD-UX: Waiting for start toast
+  waitingStartToast: {
+    position: 'absolute' as const,
+    top: -40,
+    right: 50,
+    backgroundColor: '#E8F5E9', // Light green tint
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 8,
+    zIndex: 10,
+    borderWidth: 1,
+    borderColor: '#81C784',
+  },
+  waitingStartToastText: {
+    fontSize: 12,
+    color: '#2E7D32', // Dark green
     fontWeight: '500' as const,
   },
 

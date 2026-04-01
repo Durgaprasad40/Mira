@@ -10,12 +10,15 @@ import { create } from 'zustand';
  * - Used only for UI gating (BootScreen hide/show)
  *
  * STABILITY FIX: Boot safety timeout
- * - Ensures boot ALWAYS resolves within 5 seconds
+ * - Ensures boot ALWAYS resolves within 30 seconds
+ * - TIMEOUT-FIX: Increased from 5s to accommodate validation retries
  * - Prevents infinite loading if hydration fails silently
  */
 
-// Module-level safety timeout (5 seconds)
-const BOOT_SAFETY_TIMEOUT_MS = 5000;
+// Module-level safety timeout
+// TIMEOUT-FIX: Increased from 5s to 30s to accommodate validation retries
+// Validation has 3 attempts × 8s each = 24s max, plus buffer
+const BOOT_SAFETY_TIMEOUT_MS = 30000;
 let _bootSafetyTimer: ReturnType<typeof setTimeout> | null = null;
 let _bootResolved = false; // Guard: boot can only resolve once
 
@@ -58,7 +61,7 @@ function startBootSafetyTimer(forceReady: () => void) {
     if (_bootResolved) return;
 
     if (__DEV__) {
-      console.warn('[BOOT_SAFETY] Timeout reached (5s) - forcing boot to resolve');
+      console.warn('[BOOT_SAFETY] Timeout reached (30s) - forcing boot to resolve');
     }
     forceReady();
   }, BOOT_SAFETY_TIMEOUT_MS);

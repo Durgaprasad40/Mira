@@ -518,6 +518,9 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
   const sendInviteMutation = useMutation(api.games.sendBottleSpinInvite);
   const respondToInviteMutation = useMutation(api.games.respondToBottleSpinInvite);
   const endGameMutation = useMutation(api.games.endBottleSpinGame);
+  // TD-LIFECYCLE: New mutations for proper session lifecycle
+  const startGameMutation = useMutation(api.games.startBottleSpinGame);
+  const cleanupExpiredMutation = useMutation(api.games.cleanupExpiredSession);
 
   // Get other user's ID for invite
   const otherUserId = activeConversation?.otherUser?.id;
@@ -525,26 +528,71 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
   // Track cooldown state for inline UI feedback (instead of Alert spam)
   const [showCooldownMessage, setShowCooldownMessage] = useState(false);
   const [cooldownRemainingMin, setCooldownRemainingMin] = useState(0);
+  // TD-UX: Lightweight waiting toast for invitee (instead of full modal)
+  const [showWaitingForStartToast, setShowWaitingForStartToast] = useState(false);
 
   // ═══════════════════════════════════════════════════════════════════════════
-  // AUTO-CLOSE: Watch game session state changes for cross-device sync
+  // TD-LIFECYCLE: Watch game session state changes for cross-device sync
   // ═══════════════════════════════════════════════════════════════════════════
   useEffect(() => {
     if (isDemo || !gameSession) return;
 
-    // Auto-close game modal when game is ended/rejected on either device
-    if (gameSession.state === 'cooldown' || gameSession.state === 'none') {
+    // TD-LIFECYCLE: Debug logging for session state
+    console.log('[TD_UI_STATE] Phase 1 session update:', {
+      phase: 'P1',
+      conversationId,
+      sessionId: gameSession.sessionId,
+      state: gameSession.state,
+      turnPhase: gameSession.turnPhase,
+      gameStartedAt: gameSession.gameStartedAt,
+      hasGameStarted: !!gameSession.gameStartedAt,
+    });
+
+    // Auto-close game modal when game is ended/rejected/expired on either device
+    if (gameSession.state === 'cooldown' || gameSession.state === 'none' || gameSession.state === 'expired') {
       if (showTruthDareGame) {
+        console.log('[TD_MODAL_GUARD] Phase 1: Closing modal - session ended/expired');
         setShowTruthDareGame(false);
+      }
+      if (showTruthDareInvite) {
+        setShowTruthDareInvite(false);
       }
     }
 
-    // Auto-open game modal when invite is accepted (for inviter)
+    // TD-LIFECYCLE: Handle expired session - cleanup and show message
+    if (gameSession.state === 'expired' && gameSession.endedReason && userId && conversationId) {
+      // Cleanup the expired session in backend
+      cleanupExpiredMutation({
+        authUserId: userId,
+        conversationId,
+        endedReason: gameSession.endedReason as 'invite_expired' | 'not_started' | 'timeout',
+      }).catch((err) => console.warn('[TD_CLEANUP] Failed:', err));
+
+      // Show appropriate system message (using sendMessage directly)
+      const messages: Record<string, string> = {
+        invite_expired: 'Truth or Dare invite expired',
+        not_started: 'Truth or Dare was not started in time',
+        timeout: 'Truth or Dare ended due to inactivity',
+      };
+      const msg = messages[gameSession.endedReason];
+      if (msg && !isDemo) {
+        // Send system message with marker
+        sendMessage({
+          conversationId: conversationId as any,
+          authUserId: userId,
+          content: `[SYSTEM:truthdare]${msg}`,
+          type: 'text',
+        }).catch((err) => console.warn('[TD_SYSTEM_MSG] Failed:', err));
+      }
+    }
+
+    // TD-LIFECYCLE: Close invite modal when game becomes active
+    // Do NOT auto-open game modal - inviter must manually start
     if (gameSession.state === 'active') {
-      // Only auto-open if we have a pending invite modal open (inviter waiting)
       if (showTruthDareInvite) {
+        console.log('[TD_MODAL_GUARD] Phase 1: Closing invite modal - game accepted, waiting for manual start');
         setShowTruthDareInvite(false);
-        setShowTruthDareGame(true);
+        // DO NOT open game modal - inviter must click T/D button to start
       }
     }
 
@@ -552,18 +600,23 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
     if (gameSession.state !== 'cooldown') {
       setShowCooldownMessage(false);
     }
-  }, [isDemo, gameSession?.state, showTruthDareGame, showTruthDareInvite]);
+  }, [isDemo, gameSession?.state, gameSession?.turnPhase, gameSession?.gameStartedAt, gameSession?.endedReason, showTruthDareGame, showTruthDareInvite, userId, conversationId, cleanupExpiredMutation, sendMessage]);
 
   // ═══════════════════════════════════════════════════════════════════════════
-  // AUTO-OPEN MODAL WHEN IT'S MY TURN TO CHOOSE
-  // This is the critical fix: when backend says it's my turn (choosing phase),
-  // automatically open the game modal so I can see Truth/Dare/Skip buttons.
+  // TD-LIFECYCLE: Auto-open modal ONLY when game has started and it's my turn
   // ═══════════════════════════════════════════════════════════════════════════
   useEffect(() => {
     if (isDemo || !gameSession || !userId) return;
 
-    // Only care about active games in choosing phase
+    // Only care about active games that have been manually started
     if (gameSession.state !== 'active') return;
+    if (!gameSession.gameStartedAt) {
+      console.log('[TD_MODAL_GUARD] Phase 1: Blocked auto-open - game not started yet', {
+        state: gameSession.state,
+        gameStartedAt: gameSession.gameStartedAt,
+      });
+      return; // Game not started yet - do NOT auto-open
+    }
     if (gameSession.turnPhase !== 'choosing') return;
     if (!gameSession.currentTurnRole) return;
 
@@ -577,20 +630,12 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
     // Check if it's MY turn
     const isMyTurn = gameSession.currentTurnRole === myRole;
 
-    console.log('[BOTTLE_SPIN_AUTO_OPEN]', {
-      turnPhase: gameSession.turnPhase,
-      currentTurnRole: gameSession.currentTurnRole,
-      myRole,
-      isMyTurn,
-      modalCurrentlyOpen: showTruthDareGame,
-    });
-
     // If it's my turn and modal is closed, open it automatically
     if (isMyTurn && !showTruthDareGame) {
-      console.log('[BOTTLE_SPIN_AUTO_OPEN] Opening modal - it is my turn to choose!');
+      console.log('[TD_MODAL_GUARD] Phase 1: Auto-opening modal - my turn to choose');
       setShowTruthDareGame(true);
     }
-  }, [isDemo, gameSession?.state, gameSession?.turnPhase, gameSession?.currentTurnRole, gameSession?.inviterId, gameSession?.inviteeId, userId, showTruthDareGame]);
+  }, [isDemo, gameSession?.state, gameSession?.turnPhase, gameSession?.currentTurnRole, gameSession?.inviterId, gameSession?.inviteeId, gameSession?.gameStartedAt, userId, showTruthDareGame]);
 
   // ═══════════════════════════════════════════════════════════════════════════
   // AUTO-CLOSE MODAL AFTER TRUTH/DARE/SKIP SELECTION
@@ -615,42 +660,94 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
     return () => clearTimeout(timer);
   }, [isDemo, gameSession?.state, gameSession?.turnPhase, showTruthDareGame]);
 
-  // Handle T/D button press based on current state
-  const handleTruthDarePress = useCallback(() => {
+  // TD-LIFECYCLE: Handle T/D button press with manual start support
+  const handleTruthDarePress = useCallback(async () => {
     if (isDemo) {
       // Demo mode: skip invite flow, go directly to game
       setShowTruthDareGame(true);
       return;
     }
 
-    if (!gameSession) return;
+    if (!gameSession || !userId || !conversationId) return;
+
+    // Debug logging
+    console.log('[TD_MODAL_GUARD] Phase 1: T/D button pressed', {
+      state: gameSession.state,
+      turnPhase: gameSession.turnPhase,
+      gameStartedAt: gameSession.gameStartedAt,
+      hasGameStarted: !!gameSession.gameStartedAt,
+      amIInviter: gameSession.inviterId === userId,
+    });
 
     // Priority 1: Cooldown active - show inline message instead of Alert
     if (gameSession.state === 'cooldown') {
       const remainingMin = Math.ceil((gameSession.remainingMs || 0) / 60000);
       setCooldownRemainingMin(remainingMin);
       setShowCooldownMessage(true);
-      // Auto-hide after 3 seconds
       setTimeout(() => setShowCooldownMessage(false), 3000);
       return;
     }
 
-    // Priority 2: Active game exists
+    // Priority 2: Expired session - handled by useEffect, just return
+    if (gameSession.state === 'expired') {
+      return;
+    }
+
+    // Priority 3: Active game exists
     if (gameSession.state === 'active') {
+      const amIInviter = gameSession.inviterId === userId;
+      const hasGameStarted = !!gameSession.gameStartedAt;
+
+      // TD-LIFECYCLE: If game not started yet, handle based on role
+      if (!hasGameStarted) {
+        if (amIInviter) {
+          // Inviter: Start the game manually
+          console.log('[TD_MANUAL_START] Phase 1: Inviter starting game');
+          try {
+            const result = await startGameMutation({
+              authUserId: userId,
+              conversationId,
+            });
+            if (result.success) {
+              console.log('[TD_MANUAL_START] Phase 1: Game started successfully');
+              // Send system message using sendMessage directly
+              if (!isDemo) {
+                sendMessage({
+                  conversationId: conversationId as any,
+                  authUserId: userId,
+                  content: '[SYSTEM:truthdare]Game started!',
+                  type: 'text',
+                }).catch((err) => console.warn('[TD_SYSTEM_MSG] Failed:', err));
+              }
+              setShowTruthDareGame(true);
+            } else {
+              console.warn('[TD_MANUAL_START] Phase 1: Failed to start game:', result);
+            }
+          } catch (err) {
+            console.error('[TD_MANUAL_START] Phase 1: Error starting game:', err);
+          }
+        } else {
+          // TD-UX: Invitee sees lightweight toast instead of full modal
+          console.log('[TD_UX] Phase 1: Invitee - showing waiting toast (not modal)');
+          setShowWaitingForStartToast(true);
+          setTimeout(() => setShowWaitingForStartToast(false), 3000);
+        }
+        return;
+      }
+
+      // Game is started - open the game modal normally
       setShowTruthDareGame(true);
       return;
     }
 
-    // Priority 3: Pending invite exists - no action (button is disabled or visual feedback)
+    // Priority 4: Pending invite exists - no action (button is disabled or visual feedback)
     if (gameSession.state === 'pending') {
-      // Invitee sees the invite card below chat
-      // Inviter sees "Waiting..." indicator - no action needed
       return;
     }
 
-    // Priority 4: No game - show invite modal
+    // Priority 5: No game - show invite modal
     setShowTruthDareInvite(true);
-  }, [isDemo, gameSession, userId]);
+  }, [isDemo, gameSession, userId, conversationId, startGameMutation, sendMessage]);
 
   // Send game invite
   // INVITE-FIX: Handle "Invite already pending" error gracefully
@@ -697,7 +794,7 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
     }
   }, [userId, conversationId, otherUserId, gameSession?.state, sendInviteMutation, currentUser, sendMessage]);
 
-  // Respond to game invite
+  // TD-UX: Respond to game invite with clean acceptance flow
   const handleRespondToInvite = useCallback(async (accept: boolean) => {
     if (!userId || !conversationId) return;
 
@@ -708,11 +805,10 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
         accept,
       });
 
-      // Send system message about response (neutral phrasing)
-      const responderName = currentUser?.name || 'Someone';
+      // TD-UX: Clear acceptance message (NO "Game starting..." - inviter must start)
       const responseText = accept
-        ? `${responderName} is ready to play! Game starting...`
-        : `${responderName} declined the game invite`;
+        ? 'Invite accepted! Tap T/D to start'
+        : 'Invite declined';
       const markedMessage = `[SYSTEM:truthdare]${responseText}`;
       await sendMessage({
         conversationId: conversationId as any,
@@ -721,14 +817,12 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
         type: 'text',
       });
 
-      // If accepted, open the game
-      if (accept) {
-        setShowTruthDareGame(true);
-      }
+      // TD-UX: Do NOT open modal on accept - inviter must tap T/D to start
+      // Modal will open only after startGame mutation succeeds
     } catch (error: any) {
       Alert.alert('Error', error.message || 'Failed to respond to invite');
     }
-  }, [userId, conversationId, respondToInviteMutation, currentUser, sendMessage]);
+  }, [userId, conversationId, respondToInviteMutation, sendMessage]);
 
   // End game (called from BottleSpinGame)
   const handleEndGame = useCallback(async () => {
@@ -1656,20 +1750,30 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
               !isDemo && gameSession?.state === 'pending' && gameSession?.inviterId === userId && styles.truthDareButtonWaiting,
               // Dim button during cooldown
               !isDemo && gameSession?.state === 'cooldown' && styles.truthDareButtonCooldown,
+              // TD-UX: Special "ready to start" style for inviter when accepted but not started
+              !isDemo && gameSession?.state === 'active' && !gameSession?.gameStartedAt && gameSession?.inviterId === userId && styles.truthDareButtonReadyToStart,
+              // Green for active game that's already started
+              !isDemo && gameSession?.state === 'active' && !!gameSession?.gameStartedAt && styles.truthDareButtonActive,
             ]}>
               <Ionicons name="wine" size={18} color={COLORS.white} />
               <Text style={[
                 styles.truthDareLabel,
                 !isDemo && gameSession?.state === 'pending' && gameSession?.inviterId === userId && styles.truthDareLabelWaiting,
               ]} numberOfLines={1}>
-                {/* Show status on button */}
+                {/* TD-UX: Show contextual status on button */}
                 {!isDemo && gameSession?.state === 'pending' && gameSession?.inviterId === userId
                   ? 'Sent'
-                  : 'T/D'}
+                  : !isDemo && gameSession?.state === 'active' && !gameSession?.gameStartedAt && gameSession?.inviterId === userId
+                    ? 'Start!'
+                    : 'T/D'}
               </Text>
               {/* Pending invite indicator (for invitee) */}
               {gameSession?.state === 'pending' && gameSession?.inviteeId === userId && (
                 <View style={styles.truthDareBadge} />
+              )}
+              {/* TD-UX: Badge dot for inviter when ready to start */}
+              {!isDemo && gameSession?.state === 'active' && !gameSession?.gameStartedAt && gameSession?.inviterId === userId && (
+                <View style={styles.truthDareStartBadge} />
               )}
             </View>
           </TouchableOpacity>
@@ -1690,6 +1794,16 @@ export default function ChatScreenInner({ conversationId, source }: ChatScreenIn
           <Ionicons name="timer-outline" size={16} color={COLORS.warning} />
           <Text style={styles.cooldownBannerText}>
             Cooldown: wait {cooldownRemainingMin} min{cooldownRemainingMin !== 1 ? 's' : ''} before playing again
+          </Text>
+        </View>
+      )}
+
+      {/* TD-UX: Waiting for inviter to start banner (for invitee) */}
+      {showWaitingForStartToast && (
+        <View style={styles.waitingStartBanner}>
+          <Ionicons name="hourglass-outline" size={16} color="#2E7D32" />
+          <Text style={styles.waitingStartBannerText}>
+            Waiting for {activeConversation?.otherUser?.name || 'them'} to start the game
           </Text>
         </View>
       )}
@@ -2182,6 +2296,26 @@ const styles = StyleSheet.create({
     opacity: 0.5,
     backgroundColor: COLORS.textMuted,
   },
+  // TD-UX: Special style for inviter when accepted but not started
+  truthDareButtonReadyToStart: {
+    backgroundColor: '#E67E22', // Orange - attention-grabbing
+    borderWidth: 2,
+    borderColor: '#F39C12',
+  },
+  truthDareButtonActive: {
+    backgroundColor: '#27AE60', // Green for active game
+  },
+  truthDareStartBadge: {
+    position: 'absolute' as const,
+    top: -2,
+    right: -2,
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+    backgroundColor: '#F39C12', // Orange badge
+    borderWidth: 1,
+    borderColor: '#FFFFFF',
+  },
   cooldownBanner: {
     flexDirection: 'row' as const,
     alignItems: 'center' as const,
@@ -2195,6 +2329,23 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: '500' as const,
     color: COLORS.warning || '#FF9800',
+  },
+  // TD-UX: Waiting for inviter to start banner
+  waitingStartBanner: {
+    flexDirection: 'row' as const,
+    alignItems: 'center' as const,
+    justifyContent: 'center' as const,
+    gap: 8,
+    backgroundColor: '#E8F5E9', // Light green tint
+    paddingVertical: 10,
+    paddingHorizontal: 16,
+    borderBottomWidth: 1,
+    borderBottomColor: '#81C784',
+  },
+  waitingStartBannerText: {
+    fontSize: 13,
+    fontWeight: '500' as const,
+    color: '#2E7D32', // Dark green
   },
   // Truth/Dare Invite Modal styles
   tdInviteOverlay: {

@@ -252,7 +252,12 @@ export const usePrivateChatStore = create<PrivateChatState>()((set, get) => ({
           local.unreadCount !== bc.unreadCount ||
           local.participantName !== bc.participantName ||
           local.participantPhotoUrl !== bc.participantPhotoUrl ||
-          local.participantAge !== bc.participantAge;
+          local.participantAge !== bc.participantAge ||
+          // PHOTO-BLUR-FIX: Detect blur flag changes
+          local.isPhotoBlurred !== bc.isPhotoBlurred ||
+          local.canViewClearPhoto !== bc.canViewClearPhoto ||
+          // PRESENCE: Detect lastActive changes
+          local.participantLastActive !== bc.participantLastActive;
         if (hasChanges) {
           toUpdate.push(bc);
         }
@@ -285,6 +290,11 @@ export const usePrivateChatStore = create<PrivateChatState>()((set, get) => ({
             participantName: backendConvo.participantName,
             participantPhotoUrl: backendConvo.participantPhotoUrl,
             participantAge: backendConvo.participantAge,
+            // PHOTO-BLUR-FIX: Sync blur flags from backend
+            isPhotoBlurred: backendConvo.isPhotoBlurred,
+            canViewClearPhoto: backendConvo.canViewClearPhoto,
+            // PRESENCE: Sync lastActive for online status
+            participantLastActive: backendConvo.participantLastActive,
           };
         });
 

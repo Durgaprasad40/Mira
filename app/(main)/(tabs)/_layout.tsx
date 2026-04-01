@@ -21,6 +21,7 @@ import { useDemoDmStore } from "@/stores/demoDmStore";
 import { useConfessionStore } from "@/stores/confessionStore";
 import { useLocationStore } from "@/stores/locationStore";
 import { usePrivateProfileStore } from "@/stores/privateProfileStore";
+import { usePrivateChatStore } from "@/stores/privateChatStore";
 import { useBootStore } from "@/stores/bootStore";
 import { asUserId } from "@/convex/id";
 import { AppErrorBoundary, registerErrorBoundaryNavigation } from "@/components/safety";
@@ -107,6 +108,26 @@ export default function MainTabsLayout() {
   });
 
   const taggedBadgeCount = isDemoMode ? demoTaggedCount : (convexTaggedCount || 0);
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // P2-PROFILE-BADGE: Phase 2 unread badge for Profile tab
+  // Shows count of Phase 2 conversations with unread messages
+  // Note: This does NOT mix internal notification systems - only reflects badge
+  // ═══════════════════════════════════════════════════════════════════════════
+  const phase2Conversations = usePrivateChatStore((s) => s.conversations);
+  const phase2UnreadCount = useMemo(() => {
+    // Count conversations WITH unread (not total messages)
+    return phase2Conversations.filter(c => (c.unreadCount || 0) > 0).length;
+  }, [phase2Conversations]);
+
+  // DEBUG: Log Profile tab badge computation
+  if (__DEV__ && phase2UnreadCount > 0) {
+    console.log('[PROFILE_TAB_BADGE_DEBUG]', {
+      phase1Count: 0, // Phase 1 doesn't have a separate notification count here
+      phase2Count: phase2UnreadCount,
+      profileTabBadgeCount: phase2UnreadCount,
+    });
+  }
 
   // Query deletion state for Private tab entry gating (non-demo mode)
   const privateDeletionState = useQuery(
@@ -330,6 +351,10 @@ export default function MainTabsLayout() {
             tabBarIcon: ({ color, size }) => (
               <Ionicons name="person" size={size} color={color} />
             ),
+            // P2-PROFILE-BADGE: Show Phase 2 unread count on Profile tab
+            // This reflects unread private messages without mixing internal systems
+            tabBarBadge: phase2UnreadCount > 0 ? phase2UnreadCount : undefined,
+            tabBarBadgeStyle: { backgroundColor: '#9B7DC4', fontSize: 10 },
           }}
         />
       </Tabs>

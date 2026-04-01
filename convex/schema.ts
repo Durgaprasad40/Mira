@@ -1844,6 +1844,7 @@ export default defineSchema({
     .index('by_user_game_convo', ['userId', 'game', 'convoId', 'windowKey']),
 
   // Bottle Spin Game Sessions (invite + active game tracking)
+  // TD-LIFECYCLE: Enhanced session tracking with proper timeout support
   bottleSpinSessions: defineTable({
     conversationId: v.string(),
     inviterId: v.string(),           // User who sent the invite
@@ -1859,6 +1860,16 @@ export default defineSchema({
     respondedAt: v.optional(v.number()),  // When invite was accepted/rejected
     endedAt: v.optional(v.number()),      // When game was ended
     cooldownUntil: v.optional(v.number()), // Cooldown end time (10 min after rejection/end)
+    // TD-LIFECYCLE: New fields for proper session lifecycle
+    acceptedAt: v.optional(v.number()),   // When invite was accepted (separate from respondedAt for clarity)
+    gameStartedAt: v.optional(v.number()), // When inviter manually started the game
+    lastActionAt: v.optional(v.number()), // Last activity timestamp for inactivity timeout
+    endedReason: v.optional(v.union(
+      v.literal('manual'),           // User pressed End Game
+      v.literal('timeout'),          // 10 min inactivity during gameplay
+      v.literal('invite_expired'),   // Pending invite expired (2 min)
+      v.literal('not_started')       // Accepted but inviter didn't start within 2 min
+    )),
     // Turn tracking for real-time sync across devices
     // NOTE: Using role-based turn tracking to avoid ID format mismatch issues
     currentTurnUserId: v.optional(v.string()), // Legacy - kept for compatibility

@@ -364,6 +364,9 @@ export function MessageBubble({
           isOwn={isOwn}
           timestamp={message.createdAt}
           onDelete={isOwn && onVoiceDelete ? () => onVoiceDelete(message.id) : undefined}
+          // VOICE-TICKS: Pass tick status props for sent/delivered/read indicators
+          deliveredAt={message.deliveredAt}
+          readAt={message.readAt}
         />
       </Animated.View>
     );

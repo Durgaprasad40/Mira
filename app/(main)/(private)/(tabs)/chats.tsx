@@ -23,8 +23,9 @@ import { ReportModal } from '@/components/private/ReportModal';
 import { getTimeAgo } from '@/lib/utils';
 // P1-004 FIX: Removed DEMO_INCOGNITO_PROFILES - now using backend participantIntentKey
 import { useScreenTrace } from '@/lib/devTrace';
-// P2-002: Centralized blur constants
-import { PHASE2_BLUR_AVATAR, PHASE2_BLUR_AVATAR_SMALL } from '@/lib/phase2UI';
+// P2-002: Centralized blur constants and helper
+// PHOTO-BLUR-FIX: Use getAvatarBlurRadius for consistent blur based on backend flags
+import { PHASE2_BLUR_AVATAR, PHASE2_BLUR_AVATAR_SMALL, getAvatarBlurRadius } from '@/lib/phase2UI';
 // P2-006: Connection source types
 import type { ConnectionSource } from '@/types';
 // P2-INSTRUMENTATION: Sentry breadcrumbs for Phase-2 debugging
@@ -373,6 +374,9 @@ export default function ChatsScreen() {
           connectionSource: normalizeConnectionSource(source),
           // Preserve super_like info for UI badges
           matchSource: source === 'desire_super_like' ? 'super_like' as const : undefined,
+          // PHOTO-BLUR-FIX: Include blur flags from backend for consistent photo display
+          isPhotoBlurred: (bc as any).isPhotoBlurred ?? false,
+          canViewClearPhoto: (bc as any).canViewClearPhoto ?? true,
         };
       }) as import('@/types').IncognitoConversation[];
   }, [backendConversations]);
@@ -635,7 +639,11 @@ export default function ChatsScreen() {
                         source={{ uri: item.participantPhotoUrl }}
                         style={styles.matchAvatar}
                         contentFit="cover"
-                        blurRadius={PHASE2_BLUR_AVATAR}
+                        // PHOTO-BLUR-FIX: Use consistent blur based on backend flags
+                        blurRadius={getAvatarBlurRadius({
+                          isPhotoBlurred: item.isPhotoBlurred,
+                          canViewClearPhoto: item.canViewClearPhoto,
+                        })}
                       />
                     ) : (
                       <View style={[styles.matchAvatar, styles.placeholderAvatar]}>
@@ -750,7 +758,15 @@ export default function ChatsScreen() {
                 <View style={styles.chatAvatarWrap}>
                   <View style={styles.chatAvatarRing}>
                     {convo.participantPhotoUrl ? (
-                      <Image source={{ uri: convo.participantPhotoUrl }} style={styles.chatAvatar} blurRadius={PHASE2_BLUR_AVATAR} />
+                      // PHOTO-BLUR-FIX: Use consistent blur based on backend flags
+                      <Image
+                        source={{ uri: convo.participantPhotoUrl }}
+                        style={styles.chatAvatar}
+                        blurRadius={getAvatarBlurRadius({
+                          isPhotoBlurred: convo.isPhotoBlurred,
+                          canViewClearPhoto: convo.canViewClearPhoto,
+                        })}
+                      />
                     ) : (
                       <View style={[styles.chatAvatar, styles.placeholderChatAvatar]}>
                         <Text style={styles.chatAvatarInitial}>{convo.participantName?.[0] || '?'}</Text>

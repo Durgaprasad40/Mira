@@ -50,8 +50,9 @@ interface BottleSpinGameProps {
 // ═══════════════════════════════════════════════════════════════════════════
 // V4 CLEAN UI MODE - Single source of truth for render decisions
 // SPIN-TURN-FIX: Added 'waiting_for_spin' for non-turn-owner
+// TD-LIFECYCLE: Added 'waiting_for_start' for invitee waiting for inviter to start
 // ═══════════════════════════════════════════════════════════════════════════
-type UIMode = 'idle' | 'waiting_for_spin' | 'spinning_local' | 'choosing_for_me' | 'choosing_for_other' | 'complete';
+type UIMode = 'idle' | 'waiting_for_spin' | 'waiting_for_start' | 'spinning_local' | 'choosing_for_me' | 'choosing_for_other' | 'complete';
 
 export function BottleSpinGame({
   visible,
@@ -97,6 +98,9 @@ export function BottleSpinGame({
   const backendSpinTurnRole = isSessionActive ? gameSession.spinTurnRole : undefined;
   const inviterId = isSessionActive ? gameSession.inviterId : undefined;
   const inviteeId = isSessionActive ? gameSession.inviteeId : undefined;
+  // TD-LIFECYCLE: Extract gameStartedAt for manual start check
+  const gameStartedAt = isSessionActive ? gameSession.gameStartedAt : undefined;
+  const hasGameStarted = !!gameStartedAt;
   // NOTE: lastSelectedRole and consecutiveSelectedCount are handled entirely in backend
   // Frontend does NOT need these values - all random selection logic is backend-only
 
@@ -149,6 +153,7 @@ export function BottleSpinGame({
   // ═══════════════════════════════════════════════════════════════════════════
   // UI MODE DERIVATION - THE SINGLE SOURCE OF TRUTH FOR RENDERING
   // SPIN-TURN-FIX: Added 'waiting_for_spin' when it's not my turn
+  // TD-LIFECYCLE: Added 'waiting_for_start' when game hasn't started yet
   // ═══════════════════════════════════════════════════════════════════════════
   const uiMode: UIMode = (() => {
     // Priority 1: Local spinning animation takes precedence
@@ -158,6 +163,31 @@ export function BottleSpinGame({
 
     // Priority 2: No active session = idle (button still shown but backend will reject)
     if (!isSessionActive) {
+      return 'idle';
+    }
+
+    // TD-LIFECYCLE Priority 2.5: Game not started yet - invitee waits for inviter
+    // If session is active but gameStartedAt is not set, show waiting state for invitee
+    if (!hasGameStarted && amIInvitee) {
+      if (__DEV__) {
+        console.log('[TD_LIFECYCLE] Invitee waiting for game to start:', {
+          hasGameStarted,
+          gameStartedAt,
+          amIInvitee,
+        });
+      }
+      return 'waiting_for_start';
+    }
+
+    // TD-LIFECYCLE: If inviter and game not started, show idle (they can start)
+    if (!hasGameStarted && amIInviter) {
+      if (__DEV__) {
+        console.log('[TD_LIFECYCLE] Inviter can start game:', {
+          hasGameStarted,
+          gameStartedAt,
+          amIInviter,
+        });
+      }
       return 'idle';
     }
 
@@ -192,6 +222,7 @@ export function BottleSpinGame({
           myRole,
           currentSpinTurnRole,
           backendSpinTurnRole,
+          hasGameStarted,
           decision: (!isMySpinTurn && myRole) ? 'waiting_for_spin' : 'idle',
         });
       }
@@ -590,6 +621,20 @@ export function BottleSpinGame({
   );
 
   // ═══════════════════════════════════════════════════════════════════════════
+  // TD-LIFECYCLE: RENDER: WAITING FOR START (invitee waiting for inviter to start game)
+  // ═══════════════════════════════════════════════════════════════════════════
+  const renderWaitingForStart = () => (
+    <View style={styles.waitingContainer}>
+      <View style={styles.waitingContent}>
+        <Ionicons name="time-outline" size={18} color={COLORS.textLight} />
+        <Text style={styles.waitingText}>
+          Waiting for <Text style={styles.waitingName}>{otherUserName}</Text> to start
+        </Text>
+      </View>
+    </View>
+  );
+
+  // ═══════════════════════════════════════════════════════════════════════════
   // RENDER: COMPLETE STATE - Compact layout with inline actions
   // ═══════════════════════════════════════════════════════════════════════════
   const renderComplete = () => (
@@ -737,6 +782,9 @@ export function BottleSpinGame({
 
           {/* WAITING_FOR_SPIN: Show waiting text - SPIN-TURN-FIX */}
           {uiMode === 'waiting_for_spin' && renderWaitingForSpin()}
+
+          {/* TD-LIFECYCLE: WAITING_FOR_START: Invitee waiting for inviter to start */}
+          {uiMode === 'waiting_for_start' && renderWaitingForStart()}
 
           {/* CHOOSING_FOR_ME: I must choose - show Truth/Dare/Skip buttons */}
           {uiMode === 'choosing_for_me' && renderChooserButtons()}

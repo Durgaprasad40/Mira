@@ -597,6 +597,12 @@ export interface IncognitoConversation {
   connectionSource: ConnectionSource;
   /** Match origin for Desire Land matches: 'super_like' shows blue ring in New Matches row */
   matchSource?: 'super_like' | 'normal';
+  /** PHOTO-BLUR-FIX: Whether participant chose to blur their photo */
+  isPhotoBlurred?: boolean;
+  /** PHOTO-BLUR-FIX: Whether viewer has permission to see clear photo */
+  canViewClearPhoto?: boolean;
+  /** PRESENCE: Last active timestamp for online status */
+  participantLastActive?: number;
 }
 
 export interface IncognitoMessage {
