@@ -1,3 +1,7 @@
+/*
+ * LOCKED (SAFETY SETTINGS)
+ * Do NOT modify this file unless Durga Prasad explicitly unlocks it.
+ */
 import React, { useState, useRef, useCallback } from 'react';
 import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Alert, LayoutChangeEvent, Modal, ActivityIndicator } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';

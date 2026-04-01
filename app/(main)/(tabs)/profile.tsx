@@ -1,7 +1,6 @@
 /*
- * UNLOCKED (PROFILE TAB)
- * Active development area
- * Changes allowed
+ * LOCKED (PROFILE TAB)
+ * Do NOT modify this file unless Durga Prasad explicitly unlocks it.
  */
 import React, { useState, useCallback } from 'react';
 import {

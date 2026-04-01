@@ -1,3 +1,7 @@
+/*
+ * LOCKED (SUPPORT & FAQ)
+ * Do NOT modify this file unless Durga Prasad explicitly unlocks it.
+ */
 import React, { useState } from 'react';
 import {
   View,

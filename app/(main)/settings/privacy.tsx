@@ -1,3 +1,7 @@
+/*
+ * LOCKED (PRIVACY SETTINGS)
+ * Do NOT modify this file unless Durga Prasad explicitly unlocks it.
+ */
 import React, { useState, useCallback, useEffect } from 'react';
 import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Switch, Alert } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';

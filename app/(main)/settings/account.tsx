@@ -1,3 +1,7 @@
+/*
+ * LOCKED (ACCOUNT SETTINGS)
+ * Do NOT modify this file unless Durga Prasad explicitly unlocks it.
+ */
 import React, { useState, useCallback } from 'react';
 import {
   View,
