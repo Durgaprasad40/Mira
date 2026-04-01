@@ -740,6 +740,7 @@ export default defineSchema({
   notifications: defineTable({
     userId: v.id('users'),
     type: v.union(
+      // Phase 1 notification types
       v.literal('match'),
       v.literal('message'),
       v.literal('like'),
@@ -748,8 +749,11 @@ export default defineSchema({
       v.literal('subscription'),
       v.literal('weekly_refresh'),
       v.literal('profile_nudge'),
+      // Phase 2 (Deep Connect) notification types - only shown in Phase 2 bell
+      v.literal('phase2_match'),     // Match created in Deep Connect
+      v.literal('phase2_like'),      // Like received in Deep Connect
       v.literal('comment_connect'),
-      v.literal('tod_connect') // Phase-2 only: T/D connect request accepted
+      v.literal('tod_connect')       // T/D connect request accepted
     ),
     title: v.string(),
     body: v.string(),
@@ -761,6 +765,7 @@ export default defineSchema({
       likeType: v.optional(v.union(v.literal('like'), v.literal('super_like'))), // Type of like received
       confessionId: v.optional(v.string()), // For comment_connect notifications
       connectId: v.optional(v.string()), // For comment_connect notifications
+      phase: v.optional(v.string()),    // Phase identifier ('phase2' for Deep Connect)
     })),
     // 4-1: Deduplication key — same key = same logical event (upsert instead of insert)
     dedupeKey: v.optional(v.string()),
@@ -1991,6 +1996,9 @@ export default defineSchema({
     conversationId: v.id('privateConversations'),
     userId: v.id('users'),
     unreadCount: v.number(),
+    // Leave conversation feature: User can hide conversation from their view
+    // Does NOT delete the conversation - other user can still see it
+    isHidden: v.optional(v.boolean()),
   })
     .index('by_user', ['userId'])
     .index('by_conversation', ['conversationId'])
@@ -2025,6 +2033,27 @@ export default defineSchema({
     // P2-007 FIX: Add indexes for sender and read status queries
     .index('by_sender', ['senderId'])
     .index('by_read_at', ['readAt']),
+
+  // Phase-2 Private Photo Access Requests
+  // One-to-one access control for viewing blurred photos in Phase-2 Messages context
+  privatePhotoAccessRequests: defineTable({
+    ownerUserId: v.id('users'),       // The user whose photo is being requested
+    viewerUserId: v.id('users'),      // The user requesting to see the photo
+    status: v.union(
+      v.literal('pending'),
+      v.literal('approved'),
+      v.literal('declined')
+    ),
+    requestSource: v.literal('phase2_messages'), // Only Phase-2 Messages for now
+    conversationId: v.optional(v.id('privateConversations')), // Context where request was made
+    createdAt: v.number(),
+    updatedAt: v.number(),
+    respondedAt: v.optional(v.number()),
+  })
+    .index('by_owner', ['ownerUserId'])
+    .index('by_viewer', ['viewerUserId'])
+    .index('by_owner_viewer', ['ownerUserId', 'viewerUserId'])
+    .index('by_owner_status', ['ownerUserId', 'status']),
 
   // User support tickets for Help & Support inquiries
   supportTickets: defineTable({

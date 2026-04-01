@@ -106,12 +106,16 @@ export const getUserPrivateConversations = query({
     }
 
     // Get all conversation participations for this user (Phase-2 table)
-    const participations = await ctx.db
+    // Filter out hidden/left conversations
+    const allParticipations = await ctx.db
       .query('privateConversationParticipants')
       .withIndex('by_user', (q) => q.eq('userId', userId))
       .collect();
 
-    console.log('[PHASE2 MESSAGES] Found participations:', participations.length);
+    // LEAVE CONVERSATION FIX: Exclude conversations user has left/hidden
+    const participations = allParticipations.filter((p) => p.isHidden !== true);
+
+    console.log('[PHASE2 MESSAGES] Found participations:', participations.length, '(hidden:', allParticipations.length - participations.length, ')');
 
     if (participations.length === 0) {
       return [];
@@ -173,6 +177,31 @@ export const getUserPrivateConversations = query({
         // Compute unread count from source of truth (privateMessages table)
         const unreadCount = await computeUnreadCountFromPrivateMessages(ctx, conversation._id, userId);
 
+        // ═══════════════════════════════════════════════════════════════════════════
+        // PHOTO ACCESS CONTROL: Check if other user has blur enabled and access status
+        // ═══════════════════════════════════════════════════════════════════════════
+        const hasBlurredPhotos = (otherPrivateProfile?.privatePhotosBlurred?.length ?? 0) > 0;
+        const hasBlurLevel = (otherPrivateProfile?.privatePhotoBlurLevel ?? 0) > 0;
+        const isPhotoBlurred = hasBlurredPhotos || hasBlurLevel;
+
+        // Check photo access request status
+        let photoAccessStatus: 'none' | 'pending' | 'approved' | 'declined' = 'none';
+        let canViewClearPhoto = !isPhotoBlurred; // If not blurred, can always view clear
+
+        if (isPhotoBlurred) {
+          const accessRequest = await ctx.db
+            .query('privatePhotoAccessRequests')
+            .withIndex('by_owner_viewer', (q) =>
+              q.eq('ownerUserId', otherParticipantId).eq('viewerUserId', userId)
+            )
+            .first();
+
+          if (accessRequest) {
+            photoAccessStatus = accessRequest.status;
+            canViewClearPhoto = accessRequest.status === 'approved';
+          }
+        }
+
         return {
           id: conversation._id,
           conversationId: conversation._id,
@@ -181,6 +210,8 @@ export const getUserPrivateConversations = query({
           participantName: displayName,
           participantAge: otherAge,
           participantPhotoUrl: photoUrl,
+          // PHASE 1 PARITY: Include lastActiveAt for online status display
+          participantLastActive: otherUser?.lastActive ?? 0,
           // P1-004 FIX: Include first privateIntentKey for intent label lookup
           // Backend stores array (multi-select), we take the first/primary one for display
           participantIntentKey: otherPrivateProfile?.privateIntentKeys?.[0] ?? null,
@@ -190,6 +221,10 @@ export const getUserPrivateConversations = query({
           unreadCount,
           connectionSource: conversation.connectionSource || 'desire_match',
           createdAt: conversation.createdAt,
+          // PHOTO ACCESS: New fields for privacy feature
+          isPhotoBlurred,
+          photoAccessStatus,
+          canViewClearPhoto,
         };
       })
     );
@@ -589,6 +624,19 @@ export const getPrivateConversation = query({
       return null;
     }
 
+    // LEAVE CONVERSATION FIX: Check if user has hidden this conversation
+    const userParticipation = await ctx.db
+      .query('privateConversationParticipants')
+      .withIndex('by_user_conversation', (q) =>
+        q.eq('userId', userId).eq('conversationId', conversationId)
+      )
+      .first();
+
+    if (userParticipation?.isHidden === true) {
+      console.log('[PHASE2 CONVO] User has left/hidden this conversation');
+      return null;
+    }
+
     // Get other participant info
     const otherParticipantId = conversation.participants.find((pid) => pid !== userId);
     if (!otherParticipantId) {
@@ -618,12 +666,39 @@ export const getPrivateConversation = query({
     // FIX: Use Phase-2 nickname (displayName) ONLY - do NOT fall back to full name
     const displayName = otherPrivateProfile?.displayName || 'Anonymous';
 
+    // ═══════════════════════════════════════════════════════════════════════════
+    // PHOTO ACCESS CONTROL: Check if other user has blur enabled and access status
+    // ═══════════════════════════════════════════════════════════════════════════
+    const hasBlurredPhotos = (otherPrivateProfile?.privatePhotosBlurred?.length ?? 0) > 0;
+    const hasBlurLevel = (otherPrivateProfile?.privatePhotoBlurLevel ?? 0) > 0;
+    const isPhotoBlurred = hasBlurredPhotos || hasBlurLevel;
+
+    // Check photo access request status
+    let photoAccessStatus: 'none' | 'pending' | 'approved' | 'declined' = 'none';
+    let canViewClearPhoto = !isPhotoBlurred; // If not blurred, can always view clear
+
+    if (isPhotoBlurred) {
+      const accessRequest = await ctx.db
+        .query('privatePhotoAccessRequests')
+        .withIndex('by_owner_viewer', (q) =>
+          q.eq('ownerUserId', otherParticipantId).eq('viewerUserId', userId)
+        )
+        .first();
+
+      if (accessRequest) {
+        photoAccessStatus = accessRequest.status;
+        canViewClearPhoto = accessRequest.status === 'approved';
+      }
+    }
+
     return {
       id: conversation._id,
       matchId: conversation.matchId,
       participantId: otherParticipantId,
       participantName: displayName,
       participantPhotoUrl: photoUrl,
+      // PHASE 1 PARITY: Include lastActiveAt for online status display
+      participantLastActive: otherUser?.lastActive ?? 0,
       // P1-004 FIX: Include first privateIntentKey for intent label lookup
       // Backend stores array (multi-select), we take the first/primary one for display
       participantIntentKey: otherPrivateProfile?.privateIntentKeys?.[0] ?? null,
@@ -631,6 +706,10 @@ export const getPrivateConversation = query({
       connectionSource: conversation.connectionSource || 'desire_match',
       createdAt: conversation.createdAt,
       isBlocked,
+      // PHOTO ACCESS: New fields for privacy feature
+      isPhotoBlurred,
+      photoAccessStatus,
+      canViewClearPhoto,
     };
   },
 });
@@ -861,6 +940,79 @@ export const deletePrivateMessage = mutation({
 });
 
 // ═══════════════════════════════════════════════════════════════════════════
+// EXPIRED MEDIA CLEANUP: System cleanup mutation for expired secure media
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Cleanup expired private media messages.
+ * This is a SYSTEM cleanup operation (not user-initiated deletion).
+ *
+ * Rules:
+ * - Either participant can trigger cleanup (not restricted to sender)
+ * - Message must be expired (isExpired === true)
+ * - Timer must have ended (timerEndsAt <= now)
+ *
+ * This is separate from deletePrivateMessage which is for user-initiated deletion.
+ */
+export const cleanupExpiredPrivateMessage = mutation({
+  args: {
+    token: v.string(),
+    messageId: v.id('privateMessages'),
+  },
+  handler: async (ctx, args) => {
+    const { token, messageId } = args;
+
+    // Validate session token and get user ID
+    const userId = await validateSessionToken(ctx, token);
+    if (!userId) {
+      throw new Error('Unauthorized: invalid session');
+    }
+
+    // Get the message
+    const message = await ctx.db.get(messageId);
+    if (!message) {
+      // Message already deleted or doesn't exist - success (idempotent)
+      return { success: true, alreadyDeleted: true };
+    }
+
+    // Verify user is a PARTICIPANT in the conversation (not necessarily sender)
+    const conversation = await ctx.db.get(message.conversationId);
+    if (!conversation || !conversation.participants.includes(userId)) {
+      throw new Error('Unauthorized: conversation not found or access denied');
+    }
+
+    // Verify message is eligible for cleanup:
+    // 1. Must be protected media
+    // 2. Must be expired
+    // 3. Timer must have ended
+    if (!message.isProtected) {
+      throw new Error('Invalid: only protected media can be cleaned up');
+    }
+    if (!message.isExpired) {
+      throw new Error('Invalid: message is not expired');
+    }
+    if (message.timerEndsAt && message.timerEndsAt > Date.now()) {
+      throw new Error('Invalid: timer has not ended yet');
+    }
+
+    // Delete any associated storage (images, videos)
+    if (message.imageStorageId) {
+      try {
+        await ctx.storage.delete(message.imageStorageId);
+      } catch (e) {
+        // Storage may already be deleted, continue
+        console.warn('[cleanupExpiredPrivateMessage] Failed to delete storage:', e);
+      }
+    }
+
+    // Hard delete the message
+    await ctx.db.delete(messageId);
+
+    return { success: true };
+  },
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
 // P1-001: Generate Upload URL for Phase-2 Secure Media
 // ═══════════════════════════════════════════════════════════════════════════
 
@@ -884,5 +1036,190 @@ export const generateSecureMediaUploadUrl = mutation({
     // Generate upload URL
     const uploadUrl = await ctx.storage.generateUploadUrl();
     return uploadUrl;
+  },
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// LEAVE CONVERSATION: Hide conversation for current user only
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Leave (hide) a Phase-2 conversation.
+ *
+ * This hides the conversation from the current user's view only.
+ * The other participant can still see the conversation normally.
+ * This is NOT a delete - the conversation and messages remain intact.
+ *
+ * Behavior:
+ * - Sets isHidden=true on the user's participation record
+ * - Conversation won't appear in getUserPrivateConversations for this user
+ * - Other user's view is unaffected
+ * - Idempotent: calling multiple times is safe
+ */
+export const leavePrivateConversation = mutation({
+  args: {
+    token: v.string(),
+    conversationId: v.id('privateConversations'),
+  },
+  handler: async (ctx, { token, conversationId }) => {
+    // Validate session
+    const userId = await validateSessionToken(ctx, token);
+    if (!userId) {
+      return { success: false, error: 'unauthorized' };
+    }
+
+    // Get the conversation to verify it exists
+    const conversation = await ctx.db.get(conversationId);
+    if (!conversation) {
+      return { success: false, error: 'conversation_not_found' };
+    }
+
+    // SECURITY: Verify user is a participant (IDOR prevention)
+    if (!conversation.participants.includes(userId)) {
+      return { success: false, error: 'not_participant' };
+    }
+
+    // Find the user's participation record
+    const participation = await ctx.db
+      .query('privateConversationParticipants')
+      .withIndex('by_user_conversation', (q) =>
+        q.eq('userId', userId).eq('conversationId', conversationId)
+      )
+      .first();
+
+    if (!participation) {
+      // Participation record doesn't exist - shouldn't happen but handle gracefully
+      return { success: false, error: 'participation_not_found' };
+    }
+
+    // Mark as hidden (idempotent - safe to call multiple times)
+    await ctx.db.patch(participation._id, {
+      isHidden: true,
+    });
+
+    console.log('[leavePrivateConversation] User left conversation:', {
+      userId: (userId as string)?.slice(-8),
+      conversationId: (conversationId as string)?.slice(-8),
+    });
+
+    return { success: true };
+  },
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PHASE-1 PARITY: Mark Phase-2 Secure Media as Viewed
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Mark a Phase-2 secure media message as viewed.
+ * Sets viewedAt and timerEndsAt on first view.
+ *
+ * Phase-1 parity: Follows protectedMedia.markViewed pattern exactly
+ */
+export const markPrivateSecureMediaViewed = mutation({
+  args: {
+    token: v.string(),
+    messageId: v.id('privateMessages'),
+  },
+  handler: async (ctx, { token, messageId }) => {
+    const now = Date.now();
+
+    // Validate session
+    const userId = await validateSessionToken(ctx, token);
+    if (!userId) {
+      return { success: false, error: 'unauthorized' };
+    }
+
+    // Get the message
+    const message = await ctx.db.get(messageId);
+    if (!message) {
+      return { success: false, error: 'message_not_found' };
+    }
+
+    // Verify user is a participant in the conversation
+    const conversation = await ctx.db.get(message.conversationId);
+    if (!conversation || !conversation.participants.includes(userId)) {
+      return { success: false, error: 'not_authorized' };
+    }
+
+    // Skip if already viewed (idempotent)
+    if (message.viewedAt) {
+      return { success: true, alreadyViewed: true, timerEndsAt: message.timerEndsAt };
+    }
+
+    // Skip if not protected media
+    if (!message.isProtected) {
+      return { success: false, error: 'not_protected' };
+    }
+
+    // Calculate timerEndsAt based on protectedMediaTimer
+    const timerSeconds = message.protectedMediaTimer ?? 0;
+    const timerEndsAt = timerSeconds > 0 ? now + (timerSeconds * 1000) : undefined;
+
+    // Update the message
+    await ctx.db.patch(messageId, {
+      viewedAt: now,
+      timerEndsAt,
+    });
+
+    console.log('[markPrivateSecureMediaViewed]', {
+      messageId: (messageId as string)?.slice(-8),
+      timerSeconds,
+      timerEndsAt,
+    });
+
+    return { success: true, viewedAt: now, timerEndsAt };
+  },
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PHASE-1 PARITY: Mark Phase-2 Secure Media as Expired
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Mark a Phase-2 secure media message as expired.
+ * Called when timer runs out or view-once photo is closed.
+ *
+ * Phase-1 parity: Follows protectedMedia.markExpired pattern exactly
+ */
+export const markPrivateSecureMediaExpired = mutation({
+  args: {
+    token: v.string(),
+    messageId: v.id('privateMessages'),
+  },
+  handler: async (ctx, { token, messageId }) => {
+    // Validate session
+    const userId = await validateSessionToken(ctx, token);
+    if (!userId) {
+      return { success: false, error: 'unauthorized' };
+    }
+
+    // Get the message
+    const message = await ctx.db.get(messageId);
+    if (!message) {
+      return { success: false, error: 'message_not_found' };
+    }
+
+    // Verify user is a participant in the conversation
+    const conversation = await ctx.db.get(message.conversationId);
+    if (!conversation || !conversation.participants.includes(userId)) {
+      return { success: false, error: 'not_authorized' };
+    }
+
+    // Skip if already expired (idempotent)
+    if (message.isExpired) {
+      return { success: true, alreadyExpired: true };
+    }
+
+    // Update the message
+    await ctx.db.patch(messageId, {
+      isExpired: true,
+    });
+
+    console.log('[markPrivateSecureMediaExpired]', {
+      messageId: (messageId as string)?.slice(-8),
+    });
+
+    return { success: true };
   },
 });

@@ -351,24 +351,26 @@ export const swipe = mutation({
         const toDisplayName = toProfile?.displayName || 'Someone';
 
         // Notify the other user (toUser) about the match
+        // PHASE SEPARATION: Use 'phase2_match' type so it only shows in Phase 2 bell
         await ctx.db.insert('notifications', {
           userId: toUserId,
-          type: 'match',
+          type: 'phase2_match',
           title: 'New Match! 🎉',
-          body: `You matched with ${fromDisplayName} in Desire Land!`,
-          data: { matchId: matchId as string, conversationId: conversationId as string },
+          body: `You matched with ${fromDisplayName} in Deep Connect!`,
+          data: { matchId: matchId as string, conversationId: conversationId as string, phase: 'phase2' },
           dedupeKey: `p2_match:${matchId}:${toUserId}`,
           createdAt: now,
           expiresAt: now + 7 * 24 * 60 * 60 * 1000, // 7 days
         });
 
         // Notify the current user (fromUser) about the match
+        // PHASE SEPARATION: Use 'phase2_match' type so it only shows in Phase 2 bell
         await ctx.db.insert('notifications', {
           userId: fromUserId,
-          type: 'match',
+          type: 'phase2_match',
           title: 'New Match! 🎉',
-          body: `You matched with ${toDisplayName} in Desire Land!`,
-          data: { matchId: matchId as string, conversationId: conversationId as string },
+          body: `You matched with ${toDisplayName} in Deep Connect!`,
+          data: { matchId: matchId as string, conversationId: conversationId as string, phase: 'phase2' },
           dedupeKey: `p2_match:${matchId}:${fromUserId}`,
           createdAt: now,
           expiresAt: now + 7 * 24 * 60 * 60 * 1000, // 7 days
@@ -386,12 +388,13 @@ export const swipe = mutation({
         });
 
         // Notify the recipient that someone liked them (anonymous)
+        // PHASE SEPARATION: Use 'phase2_like' type so it only shows in Phase 2 bell
         await ctx.db.insert('notifications', {
           userId: toUserId,
-          type: 'like',
+          type: 'phase2_like',
           title: action === 'super_like' ? 'Someone super liked you! ⭐' : 'Someone liked you! 💜',
-          body: 'Check your likes in Desire Land to see who!',
-          data: { likeType: action },
+          body: 'Check your likes in Deep Connect to see who!',
+          data: { likeType: action, phase: 'phase2' },
           dedupeKey: `p2_like:${fromUserId}:${toUserId}`,
           createdAt: now,
           expiresAt: now + 7 * 24 * 60 * 60 * 1000, // 7 days

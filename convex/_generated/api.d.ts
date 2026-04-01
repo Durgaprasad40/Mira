@@ -55,6 +55,7 @@ import type * as photos from "../photos.js";
 import type * as privateConversations from "../privateConversations.js";
 import type * as privateDeletion from "../privateDeletion.js";
 import type * as privateDiscover from "../privateDiscover.js";
+import type * as privatePhotoAccess from "../privatePhotoAccess.js";
 import type * as privateProfiles from "../privateProfiles.js";
 import type * as privateSwipes from "../privateSwipes.js";
 import type * as protectedMedia from "../protectedMedia.js";
@@ -142,6 +143,7 @@ declare const fullApi: ApiFromModules<{
   privateConversations: typeof privateConversations;
   privateDeletion: typeof privateDeletion;
   privateDiscover: typeof privateDiscover;
+  privatePhotoAccess: typeof privatePhotoAccess;
   privateProfiles: typeof privateProfiles;
   privateSwipes: typeof privateSwipes;
   protectedMedia: typeof protectedMedia;
