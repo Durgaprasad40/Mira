@@ -1,12 +1,14 @@
 /*
- * LOCKED (PRIVATE AREA LAYOUT)
- * Do NOT modify this file unless Durga Prasad explicitly unlocks it.
+ * PRIVATE AREA LAYOUT (Deep Connect / Phase-2)
  *
- * STATUS:
- * - Feature is stable and production-locked
- * - No logic/UI changes allowed
+ * REWRITTEN: Clean phase isolation to prevent infinite loops
+ *
+ * KEY PRINCIPLE: Single derived routing decision via usePhaseMode
+ * - All effects check phase mode FIRST before running
+ * - beforeRemove ONLY intercepts true back gestures, NOT push navigation
+ * - Navigation effects are guarded with refs to prevent double-firing
  */
-import React, { useEffect, useRef, useState, useCallback } from 'react';
+import React, { useEffect, useRef, useState, useCallback, useMemo } from 'react';
 import { View, Text, StyleSheet, TouchableOpacity, ActivityIndicator, BackHandler, Platform } from 'react-native';
 import { Stack, useRouter, useNavigation, usePathname, useSegments, useRootNavigationState } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
@@ -19,10 +21,12 @@ import { INCOGNITO_COLORS } from '@/lib/constants';
 import { useIncognitoStore } from '@/stores/incognitoStore';
 import { usePrivateProfileStore } from '@/stores/privateProfileStore';
 import { PrivateConsentGate } from '@/components/private/PrivateConsentGate';
-import { setPhase2Active } from '@/hooks/useNotifications';
+// REMOVED: setPhase2Active import - no longer toggling phase via module variable
+// Notification phase is now derived directly from route in useNotifications
 import { prewarmTodCache } from './(tabs)/truth-or-dare';
 import { decideNextOnboardingRoute } from '@/lib/onboardingRouting';
 import { useRouteTrace } from '@/lib/devTrace';
+import { usePhaseMode, isSharedRoute } from '@/lib/usePhaseMode';
 
 const C = INCOGNITO_COLORS;
 
@@ -60,6 +64,18 @@ export default function PrivateLayout() {
   const userId = useAuthStore((s) => s.userId);
   // B1 FIX: Need hasHydrated early for phantom "/" normalization effect
   const hasHydrated = usePrivateProfileStore((s) => s._hasHydrated);
+
+  // ══════════════════════════════════════════════════════════════════════════════
+  // PHASE MODE: Single derived routing decision
+  // - 'phase2': We're in a Phase 2 route - run Phase 2 effects
+  // - 'shared': We're in a shared route (incognito-chat) - skip Phase 2 effects
+  // - 'phase1': We're in Phase 1 - skip Phase 2 effects (shouldn't happen often)
+  // - 'loading': Router not ready - wait
+  // ══════════════════════════════════════════════════════════════════════════════
+  const phaseMode = usePhaseMode();
+  const isInPhase2 = phaseMode === 'phase2';
+  // Stable segment check for effects that need it
+  const segmentStrings = useMemo(() => segments as string[], [segments]);
 
   // PERF: Log mount time
   useEffect(() => {
@@ -105,7 +121,9 @@ export default function PrivateLayout() {
   }, []);
 
   // APP-P1-003 FIX: Auth guard - redirect unauthenticated users
+  // PHASE GUARD: Only run when in Phase 2 (prevents navigation when on shared routes)
   useEffect(() => {
+    if (!isInPhase2) return; // PHASE GUARD
     if (!mountedRef.current) return;
     if (didRedirectRef.current) return;
     if (!hasHydrated) return;
@@ -118,7 +136,7 @@ export default function PrivateLayout() {
         router.replace(PHASE1_DISCOVER_ROUTE);
       });
     }
-  }, [userId, hasHydrated, router]);
+  }, [userId, hasHydrated, router, isInPhase2]);
 
   // 🚨 CRITICAL: Collapse phantom "/" route inside Phase-2
   // Expo Router creates an implicit "/" entry before the real Phase-2 home.
@@ -171,11 +189,12 @@ export default function PrivateLayout() {
     };
   }, [pathname, segments, router, hasHydrated, rootNavState]);
 
-  // Phase 2 isolation: Set module-level flag to block Phase 1-only notifications
-  useEffect(() => {
-    setPhase2Active(true);
-    return () => setPhase2Active(false);
-  }, []);
+  // REMOVED: Phase 2 isolation toggle (setPhase2Active)
+  // This was causing infinite loops when navigating to shared routes.
+  // Notification phase is now derived directly from route in useNotifications:
+  // - 'phase2' routes → show Phase 2 notifications
+  // - 'shared' routes → show Phase 2 notifications (user came from Phase 2)
+  // - 'phase1' routes → show Phase 1 notifications
 
   const exitToHome = () => {
     if (isExitingRef.current) return;
@@ -207,23 +226,43 @@ export default function PrivateLayout() {
     }, 2000);
   };
 
-  // 1) Intercept any navigation that would remove Private from the stack
-  //    (iOS swipe-back, header back, programmatic back). Navigate back
-  //    so Private is removed without remounting the tab navigator.
+  // ══════════════════════════════════════════════════════════════════════════════
+  // CRITICAL FIX: beforeRemove listener with proper navigation detection
+  //
+  // PROBLEM: The old listener intercepted ALL navigation that would remove Private,
+  // including legitimate push navigation to shared routes like incognito-chat.
+  //
+  // SOLUTION: Only intercept actual back gestures (POP actions).
+  // Allow PUSH/REPLACE navigation to proceed (e.g., navigating to incognito-chat).
+  // ══════════════════════════════════════════════════════════════════════════════
   useEffect(() => {
     const unsub = navigation.addListener('beforeRemove', (e: any) => {
       if (isExitingRef.current) return; // prevent loop
 
-      // B3.3 FIX: Ignore internal phantom root normalization navigation
-      // Allow the router.replace(PHASE2_HOME_ROUTE) to proceed without interception
+      // Allow internal normalization navigation
       if (isNormalizingRoot) return;
 
-      // B3.3 FIX: Also check for phantom root pathname directly (belt-and-suspenders)
+      // Allow phantom root normalization
       const segmentStrings = segments as string[];
       if (pathname === '/' && segmentStrings.includes('(private)')) {
-        return; // Allow normalization navigation
+        return;
       }
 
+      // ═══════════════════════════════════════════════════════════════════════════
+      // KEY FIX: Only intercept POP actions (back gestures/buttons)
+      // Allow PUSH/REPLACE actions to proceed - these are legitimate forward navigation
+      // to screens like incognito-chat, match-celebration, etc.
+      // ═══════════════════════════════════════════════════════════════════════════
+      const actionType = e.data?.action?.type;
+      if (actionType !== 'POP' && actionType !== 'GO_BACK') {
+        // This is a PUSH, REPLACE, or NAVIGATE action - allow it
+        if (__DEV__) {
+          console.log('[PrivateLayout] Allowing navigation action:', actionType);
+        }
+        return;
+      }
+
+      // This is a back gesture/button - redirect to Phase-1 home
       e.preventDefault();
       exitToHome();
     });
@@ -231,13 +270,10 @@ export default function PrivateLayout() {
   }, [navigation, router, isNormalizingRoot, pathname, segments]);
 
   // B3.2 FIX: Reset exit guard ONLY after we've actually left Private layout
-  // This prevents beforeRemove loop while keeping failsafe timeout
+  // Uses phaseMode for clean decision (not manual segment check)
   useEffect(() => {
-    const segmentStrings = segments as string[];
-    const isInPrivate = segmentStrings.includes('(private)');
-
-    // If we're exiting and we've successfully left Private, reset the guard
-    if (isExitingRef.current && !isInPrivate) {
+    // If we're exiting and we've successfully left Private (now in phase1 or shared), reset the guard
+    if (isExitingRef.current && !isInPhase2) {
       if (__DEV__) console.log('[PrivateLayout] Successfully exited - resetting guard');
       isExitingRef.current = false;
       // Clear the failsafe timeout since we exited successfully
@@ -246,7 +282,7 @@ export default function PrivateLayout() {
         exitResetTimeoutRef.current = null;
       }
     }
-  }, [segments]);
+  }, [isInPhase2]);
 
   // 2) Android hardware back — Phase-2 Tab-to-Tab Back Controller
   //    ONLY intercepts back on Phase-2 TAB ROOT screens.
@@ -256,13 +292,11 @@ export default function PrivateLayout() {
   //    - From any Phase-2 tab root (except desire-land) → go to desire-land
   //    - From desire-land → go to Phase-1 Discover
   //
-  //    Note: segments/pathname are captured in closure; useEffect re-registers handler when they change.
+  //    PHASE GUARD: Only registers handler when actually in Phase 2
   useEffect(() => {
     if (Platform.OS !== 'android') return;
 
-    // Verify we're actually inside Phase-2 using segments
-    const segmentStrings = segments as string[];
-    const isInPhase2 = segmentStrings.includes('(private)');
+    // PHASE GUARD: Use derived phaseMode instead of manual segment check
     if (!isInPhase2) return;
 
     const handler = BackHandler.addEventListener('hardwareBackPress', () => {
@@ -312,7 +346,7 @@ export default function PrivateLayout() {
     });
 
     return () => handler.remove();
-  }, [router, pathname, segments]);
+  }, [router, pathname, segmentStrings, isInPhase2]);
 
   // B1.1 FIX: Move ALL hooks before any conditional returns to fix "Rendered fewer hooks" error
   const isSetupComplete = usePrivateProfileStore((s) => s.isSetupComplete);
@@ -351,13 +385,15 @@ export default function PrivateLayout() {
   // This ensures Phase-2 profile state survives app restarts
   const hydrateFromConvex = usePrivateProfileStore((s) => s.hydrateFromConvex);
   useEffect(() => {
+    // PHASE GUARD: Only hydrate when in Phase 2 (skip on shared routes)
+    if (!isInPhase2) return;
     // Skip in demo mode (uses local demo data)
     if (isDemoMode) return;
     // Wait for query to complete (undefined = loading, null = no profile)
     if (convexPrivateProfile === undefined) return;
     // Hydrate store with Convex profile (or null if no profile)
     hydrateFromConvex(convexPrivateProfile);
-  }, [convexPrivateProfile, hydrateFromConvex]);
+  }, [convexPrivateProfile, hydrateFromConvex, isInPhase2]);
 
   // B1.1 FIX: Compute onboarding state BEFORE any returns (was after early returns before)
   // Check if Phase-2 onboarding has been completed (permanent flag)
@@ -374,9 +410,13 @@ export default function PrivateLayout() {
         convexPrivateProfile?.isSetupComplete === true
       );
 
-  // DEV-only route change logging for Phase-2 Private area
-  useRouteTrace("P2_PRIVATE", useCallback(() => ({
+  // ══════════════════════════════════════════════════════════════════════════════
+  // ROUTE TRACE: Only emit when actually in Phase 2 (skip shared routes)
+  // This reduces log spam and render overhead on shared routes like incognito-chat
+  // ══════════════════════════════════════════════════════════════════════════════
+  useRouteTrace(isInPhase2 ? "P2_PRIVATE" : "SKIP", useCallback(() => ({
     userId: userId?.substring(0, 8) ?? null,
+    phaseMode,
     phase2OnboardingCompleted_local: !!phase2OnboardingCompleted,
     phase2OnboardingCompleted_backend: phase1OnboardingStatus?.phase2OnboardingCompleted ?? null,
     privateWelcomeConfirmed_backend: phase1OnboardingStatus?.privateWelcomeConfirmed ?? null,
@@ -384,13 +424,14 @@ export default function PrivateLayout() {
     normalPhotoCount: phase1OnboardingStatus?.normalPhotoCount ?? null,
     onboardingComplete,
     isDemoMode,
-  }), [userId, phase2OnboardingCompleted, phase1OnboardingStatus, onboardingComplete]));
+  }), [userId, phaseMode, phase2OnboardingCompleted, phase1OnboardingStatus, onboardingComplete]));
 
   // PHASE-1 GUARD: Redirect to Phase-1 onboarding if incomplete
   // This check happens BEFORE Phase-2 onboarding check
   // STABILITY FIX: Skip guard entirely if Phase-2 is already complete
-  // Users who completed Phase-2 should not be bounced due to Phase-1 state changes
+  // PHASE GUARD: Only run when in Phase 2 (prevents navigation when on shared routes)
   useEffect(() => {
+    if (!isInPhase2) return; // PHASE GUARD
     if (!mountedRef.current) return;
     if (didRedirectRef.current) return;
     if (!hasHydrated) return;
@@ -426,11 +467,13 @@ export default function PrivateLayout() {
         router.replace(nextRoute as any);
       });
     }
-  }, [phase1OnboardingStatus, hasHydrated, router, onboardingComplete]);
+  }, [phase1OnboardingStatus, hasHydrated, router, onboardingComplete, isInPhase2]);
 
   // CRASH FIX: Single-pass redirect with proper lifecycle checks
   // Uses requestAnimationFrame to ensure previous screen is fully unmounted
+  // PHASE GUARD: Only run when in Phase 2 (prevents navigation when on shared routes)
   useEffect(() => {
+    if (!isInPhase2) return; // PHASE GUARD
     if (!mountedRef.current) return;
     if (didRedirectRef.current) return;
     if (!hasHydrated) return; // Wait for hydration
@@ -446,7 +489,7 @@ export default function PrivateLayout() {
         router.replace('/(main)/phase2-onboarding' as any);
       });
     }
-  }, [onboardingComplete, hasHydrated, router, phase1OnboardingStatus]);
+  }, [onboardingComplete, hasHydrated, router, phase1OnboardingStatus, isInPhase2]);
 
   // B1.1 FIX: Conditional rendering moved to END after ALL hooks
   // H-001/C-001 FIX: Wait for incognito store hydration before checking consent

@@ -1,6 +1,6 @@
-import React, { useEffect, useRef, useCallback, Component, ReactNode } from "react";
+import React, { useEffect, useRef, useCallback, useMemo, Component, ReactNode } from "react";
 import { View } from "react-native";
-import { Stack, useRootNavigationState, useRouter, useSegments, router as globalRouter } from "expo-router";
+import { Stack, useRootNavigationState, useRouter, useSegments, router as globalRouter, usePathname } from "expo-router";
 import { useQuery } from "convex/react";
 import { api } from "@/convex/_generated/api";
 import { useAuthStore } from "@/stores/authStore";
@@ -8,6 +8,19 @@ import { isDemoMode } from "@/hooks/useConvex";
 import { computeEnforcementLevel } from "@/lib/securityEnforcement";
 import { ToastHost } from "@/components/ui/Toast";
 import { useRouteTrace, trace } from "@/lib/devTrace";
+import { usePhaseMode, type PhaseMode } from "@/lib/usePhaseMode";
+
+// Navigation state tracking (minimal, for effect dependency)
+let _lastPathname = '';
+
+// ═══════════════════════════════════════════════════════════════════════════
+// EXPO-ROUTER SETTINGS: Control navigation state behavior
+// - initialRouteName ensures app starts at tabs, not at a stale modal
+// - This helps prevent state restoration issues with camera-composer
+// ═══════════════════════════════════════════════════════════════════════════
+export const unstable_settings = {
+  initialRouteName: '(tabs)',
+};
 
 // H-3: Session invalidation detection (NARROWED - does NOT match resource-level auth errors)
 // Only triggers logout for TRUE session invalidation, not room/resource access denials
@@ -97,25 +110,41 @@ export default function MainLayout() {
   // nav event. segmentsKey is derived as a stable string for the effect.
   const segments = useSegments();
   const rootNavState = useRootNavigationState();
+  const pathname = usePathname();
 
-  // ── ROUTE ISOLATION FIX ──
-  // Phase-2 routes are handled by their own layout trace (P2_PRIVATE).
-  // The main layout should NOT emit P1_MAIN for Phase-2 routes.
-  const isPhase2Route = segments.includes('(private)' as never) || segments.includes('(private-setup)' as never);
+  // Navigation state tracking (debug logging removed to reduce Metro noise)
+  useEffect(() => {
+    if (!rootNavState?.key) return;
+    _lastPathname = pathname;
+  }, [pathname, rootNavState]);
 
-  // DEV-only route change logging - SKIP for Phase-2 routes
-  useRouteTrace(isPhase2Route ? "P2_SKIP" : "P1_MAIN", useCallback(() => {
-    // Log route isolation confirmation for Phase-2 routes
-    if (isPhase2Route && __DEV__) {
-      trace("P2_ROUTE_ISOLATION_OK", { pathname: segments.join('/') });
-    }
+  // ══════════════════════════════════════════════════════════════════════════════
+  // PHASE MODE: Single derived routing decision (replaces multiple segment checks)
+  // - 'phase1': Route handled by MainLayout effects
+  // - 'phase2': Route handled by PrivateLayout - MainLayout should NOT run effects
+  // - 'shared': Routes like incognito-chat, match-celebration - MainLayout handles
+  // - 'loading': Router not ready
+  // ══════════════════════════════════════════════════════════════════════════════
+  const phaseMode = usePhaseMode();
+
+  // Derived: Should MainLayout handle this route?
+  // MainLayout handles Phase 1 and shared routes; Phase 2 is handled by PrivateLayout
+  const isMainLayoutRoute = phaseMode === 'phase1' || phaseMode === 'shared';
+  const isPhase2Route = phaseMode === 'phase2';
+
+  // DEV-only route change logging
+  // SKIP for shared routes (incognito-chat, etc.) to reduce log spam and render overhead
+  // SKIP for Phase-2 routes (PrivateLayout handles those)
+  const shouldTraceMain = phaseMode === 'phase1'; // Only trace actual Phase 1 routes
+  useRouteTrace(shouldTraceMain ? "P1_MAIN" : "SKIP", useCallback(() => {
     return {
       userId: userId?.substring(0, 8) ?? null,
       hasToken: !!token,
       onboardingCompleted: !!onboardingCompleted,
+      phaseMode,
       isDemoMode,
     };
-  }, [userId, token, onboardingCompleted, isPhase2Route, segments]));
+  }, [userId, token, onboardingCompleted, phaseMode]));
 
   const currentUser = useQuery(
     api.users.getCurrentUser,
@@ -123,7 +152,10 @@ export default function MainLayout() {
   );
 
   // Security gate — guarded one-shot redirect.
-  const needsVerification = !isDemoMode && currentUser && (() => {
+  // LOOP FIX: Memoize to prevent recomputation on every render
+  const needsVerification = useMemo(() => {
+    if (isDemoMode) return false;
+    if (!currentUser) return false;
     const level =
       currentUser.verificationEnforcementLevel ||
       computeEnforcementLevel({
@@ -132,15 +164,19 @@ export default function MainLayout() {
           (currentUser.verificationStatus as any) || "unverified",
       });
     return level === "security_only";
-  })();
+  }, [currentUser]);
 
   const segmentsKey = segments.join("/");
 
+  // Security gate — ONLY runs for Phase 1 and shared routes
+  // Phase 2 (PrivateLayout) handles its own guards
   useEffect(() => {
     if (didRedirect.current) return;
     if (isDemoMode) return;
     if (!rootNavState?.key) return;
     if (!needsVerification) return;
+    // PHASE ISOLATION: Don't redirect when in Phase 2 - PrivateLayout has its own guards
+    if (isPhase2Route) return;
 
     if (segmentsKey.includes("(main)/verification")) {
       didRedirect.current = true;
@@ -149,7 +185,7 @@ export default function MainLayout() {
 
     didRedirect.current = true;
     routerRef.current.replace("/(main)/verification" as any);
-  }, [needsVerification, rootNavState?.key, segmentsKey]);
+  }, [needsVerification, rootNavState?.key, segmentsKey, isPhase2Route]);
 
   return (
     <AuthErrorBoundary>
@@ -199,7 +235,18 @@ export default function MainLayout() {
       <Stack.Screen name="explore-category/[categoryId]" />
       <Stack.Screen
         name="camera-composer"
-        options={{ presentation: "fullScreenModal" }}
+        options={{
+          presentation: "fullScreenModal",
+          // SAFETY: Unique ID per params prevents stale state restoration
+          // If params are missing, the route becomes invalid and guard will redirect
+        }}
+        dangerouslySingular={(_name: string, params: Record<string, any>) => {
+          // Generate unique ID based on params - prevents state restoration with stale/missing params
+          const mode = params?.mode || 'none';
+          const convId = params?.conversationId || params?.todConversationId || '';
+          const promptId = params?.promptId || '';
+          return `camera-${mode}-${convId}-${promptId}`;
+        }}
       />
       <Stack.Screen name="incognito-chat" />
       <Stack.Screen name="incognito-room/[id]" />
