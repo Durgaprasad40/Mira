@@ -1,6 +1,11 @@
 /*
- * PHASE-2 PRIVATE CHATS SCREEN
- * P0-002 FIX: Migrated to use Phase-2 privateConversations backend
+ * LOCKED (PHASE-2 PRIVATE CHATS SCREEN)
+ * Do NOT modify this file unless Durga Prasad explicitly unlocks it.
+ *
+ * STATUS:
+ * - Feature is stable and production-locked
+ * - P0 audit passed: backend connectivity verified, Phase isolation confirmed
+ * - No local-only operations, all messages via Convex backend
  *
  * Backend source: privateConversations, privateConversationParticipants, privateMessages
  * Query: api.privateConversations.getUserPrivateConversations

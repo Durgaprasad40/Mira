@@ -1,5 +1,15 @@
 /**
- * Shared chat UI used by both:
+ * LOCKED (PHASE-1 CHAT SCREEN INNER)
+ * Do NOT modify this file unless Durga Prasad explicitly unlocks it.
+ *
+ * STATUS:
+ * - Feature is stable and production-locked
+ * - P0 audit passed: backend connectivity verified, demo mode disabled
+ * - All messages via Convex messages backend
+ * - Delivery/read ticks from backend truth
+ * - Voice messages use storage URLs (not local paths)
+ *
+ * Used by both:
  *   - app/(main)/chat/[id].tsx            (standalone stack screen)
  *   - app/(main)/(tabs)/messages/chat/[conversationId].tsx  (inside Messages tab)
  *

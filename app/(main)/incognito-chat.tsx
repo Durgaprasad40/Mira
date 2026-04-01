@@ -1,6 +1,13 @@
 /**
- * Phase-2 Private Chat Screen
- * P0-002b FIX: Migrated to use Phase-2 privateConversations backend
+ * LOCKED (PHASE-2 PRIVATE CHAT THREAD)
+ * Do NOT modify this file unless Durga Prasad explicitly unlocks it.
+ *
+ * STATUS:
+ * - Feature is stable and production-locked
+ * - P0 audit passed: backend connectivity verified, Phase isolation confirmed
+ * - All messages via Convex privateMessages backend
+ * - Delivery/read ticks from backend truth
+ * - Voice messages use storage URLs (not local paths)
  *
  * Backend source: privateMessages table
  * Queries: getPrivateMessages, sendPrivateMessage, markPrivateMessagesRead

@@ -1,10 +1,17 @@
 /**
- * VoiceMessageBubble — Voice message playback UI with play/pause and progress
+ * LOCKED (VOICE MESSAGE BUBBLE)
+ * Do NOT modify this file unless Durga Prasad explicitly unlocks it.
+ *
+ * STATUS:
+ * - Feature is stable and production-locked
+ * - P0 audit passed: uses backend storage URLs, no local file paths
+ * - Used by both Phase-1 and Phase-2 messaging
  *
  * Features:
- * - Play/pause button with progress indicator
- * - Duration label
- * - Only one voice message plays at a time (global singleton)
+ * - Waveform-style UI with play/pause
+ * - Background preload for instant first playback
+ * - Loop bug fixed with ref-based state tracking
+ * - Sender/receiver visual distinction
  * - Long-press for delete action sheet
  */
 import React, { useState, useCallback, useEffect, useRef, memo } from 'react';

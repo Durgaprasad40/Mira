@@ -1,3 +1,12 @@
+/**
+ * LOCKED (MESSAGE BUBBLE)
+ * Do NOT modify this file unless Durga Prasad explicitly unlocks it.
+ *
+ * STATUS:
+ * - Feature is stable and production-locked
+ * - P0 audit passed: renders backend message data correctly
+ * - Used by Phase-1 messaging (ChatScreenInner)
+ */
 import React from 'react';
 import { View, Text, StyleSheet, ActivityIndicator, Image, TouchableOpacity, Alert, Pressable, Dimensions } from 'react-native';
 import Animated, { FadeIn, SlideInUp } from 'react-native-reanimated';
