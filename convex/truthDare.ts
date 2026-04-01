@@ -491,33 +491,23 @@ export const unlikeAnswer = mutation({
 export const getPendingConnectRequests = query({
   args: { authUserId: v.optional(v.string()) },
   handler: async (ctx, { authUserId }) => {
-    // [T/D RECEIVE MATCH FIX] Use server-side auth identity, not client-supplied authUserId
-    // This fixes the ID mismatch where client sends different format than what's stored
-    const identity = await ctx.auth.getUserIdentity();
-
-    console.log('[T/D RECEIVE MATCH FIX] Auth check:', {
-      hasIdentity: !!identity,
-      identitySubject: identity?.subject?.slice(-8) ?? 'NULL',
-      clientAuthUserId: authUserId?.slice(-8) ?? 'NULL',
-    });
-
-    // Resolve user ID from server-side auth (authoritative) or fallback to client-supplied
+    // Resolve user ID: Try Convex auth first, fallback to client-supplied authUserId
+    // Note: Convex native auth is not configured in this app, so fallback is expected
     let userId: Id<'users'> | null = null;
 
+    // Primary: Try Convex native auth (future-proofing)
+    const identity = await ctx.auth.getUserIdentity();
     if (identity?.subject) {
-      // Primary: Use server-side auth identity
       userId = await resolveUserIdByAuthId(ctx, identity.subject);
-      console.log('[T/D RECEIVE MATCH FIX] Resolved from identity.subject:', userId?.toString().slice(-8) ?? 'NULL');
     }
 
+    // Fallback: Use client-supplied authUserId (current custom auth system)
     if (!userId && authUserId) {
-      // Fallback: Try client-supplied authUserId
       userId = await resolveUserIdByAuthId(ctx, authUserId);
-      console.log('[T/D RECEIVE MATCH FIX] Fallback to client authUserId:', userId?.toString().slice(-8) ?? 'NULL');
     }
 
     if (!userId) {
-      console.log('[T/D RECEIVE MATCH FIX] ERROR: Could not resolve user ID from any source');
+      // No valid auth - return empty (not an error, just no user context)
       return [];
     }
 
@@ -525,7 +515,7 @@ export const getPendingConnectRequests = query({
     // This bypasses potential index issues while we debug
     const userIdStr = userId as string;
 
-    // First try with index
+    // Query pending requests for this user
     let requests = await ctx.db
       .query('todConnectRequests')
       .withIndex('by_to_user', (q) => q.eq('toUserId', userIdStr))
@@ -533,42 +523,18 @@ export const getPendingConnectRequests = query({
       .order('desc')
       .collect();
 
-    console.log('[T/D RECEIVE] Index query result:', {
-      count: requests.length,
-      queryUserId: userIdStr,
-    });
-
-    // FALLBACK: If index returns nothing, try filter-based query
+    // Fallback: If index returns nothing, try filter-based query (handles ID format edge cases)
     if (requests.length === 0) {
-      console.log('[T/D RECEIVE MATCH] Index returned 0, trying filter-based query...');
       const allPending = await ctx.db
         .query('todConnectRequests')
         .filter((q) => q.eq(q.field('status'), 'pending'))
         .collect();
 
-      // FIX: Normalize both IDs to strings and trim whitespace for comparison
+      // Normalize IDs for comparison
       const normalizedQueryId = userIdStr.trim();
-
-      // Filter in memory to find requests for this user
       requests = allPending.filter((r) => {
         const normalizedStoredId = (r.toUserId || '').trim();
         return normalizedStoredId === normalizedQueryId;
-      });
-
-      console.log('[T/D RECEIVE MATCH] Filter-based result:', {
-        allPendingCount: allPending.length,
-        matchedCount: requests.length,
-        queryUserId: normalizedQueryId,
-        queryUserIdFull: userIdStr,
-        allToUserIds: allPending.map((r) => r.toUserId),
-        comparisonDetails: allPending.map((r) => ({
-          requestId: r._id?.toString().slice(-8),
-          storedToUserId: r.toUserId,
-          storedToUserIdLast8: r.toUserId?.slice(-8),
-          queryUserIdLast8: normalizedQueryId.slice(-8),
-          exactMatch: (r.toUserId || '').trim() === normalizedQueryId,
-          lengthMatch: (r.toUserId || '').length === normalizedQueryId.length,
-        })),
       });
     }
 

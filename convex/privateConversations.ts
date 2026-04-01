@@ -167,8 +167,18 @@ export const getUserPrivateConversations = query({
           .order('desc')
           .first();
 
-        // Get photo URL - use Phase-2 private profile photos only (strict isolation)
-        const photoUrl = otherPrivateProfile?.privatePhotoUrls?.[0] ?? null;
+        // PHOTO-FIX: Get photo URL from single source of truth
+        // Priority: 1) Phase-2 private photos, 2) Main photos table (consistent with chat screen)
+        let photoUrl = otherPrivateProfile?.privatePhotoUrls?.[0] ?? null;
+        if (!photoUrl) {
+          // Fallback: Get from main photos table (same source used in chat screen)
+          const primaryPhoto = await ctx.db
+            .query('photos')
+            .withIndex('by_user', (q) => q.eq('userId', otherParticipantId))
+            .filter((q) => q.eq(q.field('isPrimary'), true))
+            .first();
+          photoUrl = primaryPhoto?.url ?? otherUser.primaryPhotoUrl ?? null;
+        }
 
         // Get display name - use Phase-2 nickname (displayName) ONLY
         // FIX: Do NOT fall back to user.name (full name) - Phase-2 must use nickname only
@@ -210,8 +220,16 @@ export const getUserPrivateConversations = query({
           participantName: displayName,
           participantAge: otherAge,
           participantPhotoUrl: photoUrl,
-          // PHASE 1 PARITY: Include lastActiveAt for online status display
-          participantLastActive: otherUser?.lastActive ?? 0,
+          // PHASE 2 ISOLATED: Get lastActiveAt from privateUserPresence table (NOT users table)
+          participantLastActive: await (async () => {
+            const presence = await ctx.db
+              .query('privateUserPresence')
+              .withIndex('by_user', (q) => q.eq('userId', otherParticipantId))
+              .first();
+            const lastActive = presence?.lastActiveAt ?? 0;
+            console.log('[P2_PRESENCE_READ] List:', (otherParticipantId as string).slice(-8), 'lastActive:', lastActive ? new Date(lastActive).toISOString() : 'null');
+            return lastActive;
+          })(),
           // P1-004 FIX: Include first privateIntentKey for intent label lookup
           // Backend stores array (multi-select), we take the first/primary one for display
           participantIntentKey: otherPrivateProfile?.privateIntentKeys?.[0] ?? null,
@@ -410,6 +428,8 @@ export const markPrivateMessagesRead = mutation({
       await ctx.db.patch(message._id, { readAt: now });
     }
 
+    console.log('[P2_MSG_READ] Marked', unreadMessages.length, 'messages as read for user:', (userId as string).slice(-8));
+
     // Update participant's unread count to 0
     const participantRecord = await ctx.db
       .query('privateConversationParticipants')
@@ -439,7 +459,7 @@ export const sendPrivateMessage = mutation({
   args: {
     token: v.string(),
     conversationId: v.id('privateConversations'),
-    type: v.union(v.literal('text'), v.literal('image'), v.literal('video'), v.literal('voice')),
+    type: v.union(v.literal('text'), v.literal('image'), v.literal('video'), v.literal('voice'), v.literal('system')),
     content: v.string(),
     imageStorageId: v.optional(v.id('_storage')),
     audioStorageId: v.optional(v.id('_storage')),
@@ -501,19 +521,22 @@ export const sendPrivateMessage = mutation({
     }
 
     // Rate limiting: 10 messages per minute per sender per conversation
-    const oneMinuteAgo = now - 60000;
-    const recentMessages = await ctx.db
-      .query('privateMessages')
-      .withIndex('by_conversation_created', (q) => q.eq('conversationId', conversationId))
-      .filter((q) =>
-        q.and(
-          q.eq(q.field('senderId'), senderId),
-          q.gt(q.field('createdAt'), oneMinuteAgo)
+    // T/D SYSTEM MESSAGES: Skip rate limiting for system messages (game events)
+    if (type !== 'system') {
+      const oneMinuteAgo = now - 60000;
+      const recentMessages = await ctx.db
+        .query('privateMessages')
+        .withIndex('by_conversation_created', (q) => q.eq('conversationId', conversationId))
+        .filter((q) =>
+          q.and(
+            q.eq(q.field('senderId'), senderId),
+            q.gt(q.field('createdAt'), oneMinuteAgo)
+          )
         )
-      )
-      .take(10);
-    if (recentMessages.length >= 10) {
-      throw new Error('You are sending messages too quickly');
+        .take(10);
+      if (recentMessages.length >= 10) {
+        throw new Error('You are sending messages too quickly');
+      }
     }
 
     // Verify sender exists and is active
@@ -542,6 +565,8 @@ export const sendPrivateMessage = mutation({
       createdAt: now,
       clientMessageId,
     });
+
+    console.log('[P2_MSG_SEND] Sent:', type, 'from:', (senderId as string).slice(-8), 'msgId:', (messageId as string).slice(-8));
 
     // Update conversation's lastMessageAt
     await ctx.db.patch(conversationId, { lastMessageAt: now });
@@ -691,14 +716,23 @@ export const getPrivateConversation = query({
       }
     }
 
+    // P2_PRESENCE_FIX: Read from privateUserPresence table (NOT users.lastActive)
+    // This ensures symmetric presence display between messages list and chat header
+    const otherUserPresence = await ctx.db
+      .query('privateUserPresence')
+      .withIndex('by_user', (q) => q.eq('userId', otherParticipantId))
+      .first();
+    const participantLastActive = otherUserPresence?.lastActiveAt ?? 0;
+    console.log('[P2_PRESENCE_READ] Chat:', (otherParticipantId as string).slice(-8), 'lastActive:', participantLastActive ? new Date(participantLastActive).toISOString() : 'null');
+
     return {
       id: conversation._id,
       matchId: conversation.matchId,
       participantId: otherParticipantId,
       participantName: displayName,
       participantPhotoUrl: photoUrl,
-      // PHASE 1 PARITY: Include lastActiveAt for online status display
-      participantLastActive: otherUser?.lastActive ?? 0,
+      // P2_PRESENCE_FIX: Read from privateUserPresence table for correct online status
+      participantLastActive,
       // P1-004 FIX: Include first privateIntentKey for intent label lookup
       // Backend stores array (multi-select), we take the first/primary one for display
       participantIntentKey: otherPrivateProfile?.privateIntentKeys?.[0] ?? null,
@@ -808,6 +842,8 @@ export const markPrivateMessagesDelivered = mutation({
     for (const message of undeliveredMessages) {
       await ctx.db.patch(message._id, { deliveredAt: now });
     }
+
+    console.log('[P2_MSG_DELIVER] Marked', undeliveredMessages.length, 'messages as delivered for user:', (userId as string).slice(-8));
 
     return { success: true, count: undeliveredMessages.length };
   },
@@ -1221,5 +1257,78 @@ export const markPrivateSecureMediaExpired = mutation({
     });
 
     return { success: true };
+  },
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PRESENCE: Update user's lastActive timestamp (ISOLATED TABLE)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Update user's presence (lastActive timestamp).
+ * Called on:
+ * - App open
+ * - Chat open
+ * - Message send
+ * - Periodic heartbeat (every 15s)
+ *
+ * CRITICAL: Uses ISOLATED privateUserPresence table, NOT users table.
+ * This maintains strict Phase-2 isolation.
+ */
+export const updatePresence = mutation({
+  args: {
+    authUserId: v.string(),
+  },
+  handler: async (ctx, { authUserId }) => {
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      console.log('[P2_PRESENCE_WRITE] Failed: user_not_found for authUserId:', authUserId?.slice(-8));
+      return { success: false, error: 'user_not_found' };
+    }
+
+    const now = Date.now();
+
+    // Check if presence record exists
+    const existing = await ctx.db
+      .query('privateUserPresence')
+      .withIndex('by_user', (q) => q.eq('userId', userId))
+      .first();
+
+    if (existing) {
+      // Update existing record
+      await ctx.db.patch(existing._id, {
+        lastActiveAt: now,
+        updatedAt: now,
+      });
+      console.log('[P2_PRESENCE_WRITE] Updated:', (userId as string).slice(-8), 'at', new Date(now).toISOString());
+    } else {
+      // Create new presence record
+      await ctx.db.insert('privateUserPresence', {
+        userId,
+        lastActiveAt: now,
+        updatedAt: now,
+      });
+      console.log('[P2_PRESENCE_WRITE] Created:', (userId as string).slice(-8), 'at', new Date(now).toISOString());
+    }
+
+    return { success: true };
+  },
+});
+
+/**
+ * Get presence for a user (used by conversations query).
+ * Returns lastActiveAt from privateUserPresence table.
+ */
+export const getPresence = query({
+  args: {
+    userId: v.id('users'),
+  },
+  handler: async (ctx, { userId }) => {
+    const presence = await ctx.db
+      .query('privateUserPresence')
+      .withIndex('by_user', (q) => q.eq('userId', userId))
+      .first();
+
+    return presence?.lastActiveAt ?? 0;
   },
 });

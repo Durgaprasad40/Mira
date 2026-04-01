@@ -6,9 +6,10 @@
  * Query: api.privateConversations.getUserPrivateConversations
  */
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, FlatList, Alert, ActivityIndicator, Modal } from 'react-native';
+import { View, Text, StyleSheet, ScrollView, TouchableOpacity, FlatList, Alert, ActivityIndicator, Modal, AppState } from 'react-native';
 import { Image } from 'expo-image';
 import { useRouter } from 'expo-router';
+import { useFocusEffect } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
 import { useQuery, useMutation } from 'convex/react';
@@ -26,6 +27,8 @@ import { useScreenTrace } from '@/lib/devTrace';
 import { PHASE2_BLUR_AVATAR, PHASE2_BLUR_AVATAR_SMALL } from '@/lib/phase2UI';
 // P2-006: Connection source types
 import type { ConnectionSource } from '@/types';
+// P2-INSTRUMENTATION: Sentry breadcrumbs for Phase-2 debugging
+import { P2 } from '@/lib/p2Instrumentation';
 
 const C = INCOGNITO_COLORS;
 
@@ -67,6 +70,32 @@ const getIntentLabelFromKey = (intentKey: string | null | undefined): string | n
   const category = PRIVATE_INTENT_CATEGORIES.find((c) => c.key === intentKey);
   return category?.label ?? null;
 };
+
+// ═══════════════════════════════════════════════════════════════════════════
+// PRESENCE: Online status calculation (Phase-1 parity)
+// ═══════════════════════════════════════════════════════════════════════════
+type OnlineStatus = 'online' | 'recently_active' | 'offline';
+
+/**
+ * Calculate online status from lastActive timestamp.
+ * Matches Phase-1 behavior:
+ * - < 1 min → Online (green dot)
+ * - 1 min – 24h → Recently Active
+ * - > 24h → Offline
+ */
+const getOnlineStatus = (lastActive: number | undefined): OnlineStatus => {
+  if (!lastActive) return 'offline';
+  const now = Date.now();
+  const diff = now - lastActive;
+  const ONE_MINUTE = 60 * 1000;
+  const ONE_DAY = 24 * 60 * 60 * 1000;
+
+  if (diff < ONE_MINUTE) return 'online';
+  if (diff < ONE_DAY) return 'recently_active';
+  return 'offline';
+};
+
+const PRESENCE_HEARTBEAT_INTERVAL = 15000; // 15 seconds
 
 export default function ChatsScreen() {
   useScreenTrace("P2_CHATS");
@@ -114,22 +143,102 @@ export default function ChatsScreen() {
   // Note: Likes modal removed - now uses dedicated page at /(main)/(private)/phase2-likes
 
   // ═══════════════════════════════════════════════════════════════════════════
-  // DELIVERED-TICK-FIX: Mark ALL messages as delivered when messages list loads
-  // Following Phase-1 pattern: delivery state set when device receives messages
+  // DELIVERED-TICK-FIX: Mark ALL messages as delivered REACTIVELY
+  // ROOT CAUSE FIX: Previous code only ran ONCE on mount, missing new messages
+  // NOW: Runs on every focus AND when conversation list has unread messages
   // ═══════════════════════════════════════════════════════════════════════════
   const markAllDeliveredMutation = useMutation(api.privateConversations.markAllPrivateMessagesDelivered);
-  const hasMarkedDeliveredRef = useRef(false);
 
+  // FIX: Use useFocusEffect to mark delivered every time tab gains focus
+  useFocusEffect(
+    useCallback(() => {
+      if (!token) return;
+
+      // P2-INSTRUMENTATION: Bulk deliver on tab focus
+      if (__DEV__) console.log('[P2_MSG_DELIVER] Tab focused, marking all delivered');
+      P2.messages.deliverRequested('bulk-focus');
+      markAllDeliveredMutation({ token })
+        .then((result) => {
+          const count = (result as any)?.count || 0;
+          if (__DEV__) console.log('[P2_MSG_DELIVER] Bulk delivered count:', count);
+          P2.messages.deliverSuccess('bulk-focus', count);
+        })
+        .catch((err) => {
+          if (process.env.NODE_ENV !== 'production') {
+            console.warn('[Phase2Chats] Failed to mark all messages delivered:', err);
+          }
+        });
+    }, [token, markAllDeliveredMutation])
+  );
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // PRESENCE: Heartbeat to update lastActive timestamp (Phase-2 isolated)
+  // FIX: Use ref guards to prevent duplicate intervals and memory leaks
+  // ═══════════════════════════════════════════════════════════════════════════
+  const updatePresenceMutation = useMutation(api.privateConversations.updatePresence);
+  const heartbeatRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const isHeartbeatActiveRef = useRef(false);
+
+  // Update presence on mount and start heartbeat
+  useFocusEffect(
+    useCallback(() => {
+      if (!currentUserId) return;
+
+      // FIX: Prevent duplicate intervals using ref guard
+      if (isHeartbeatActiveRef.current) {
+        return;
+      }
+      isHeartbeatActiveRef.current = true;
+
+      // P2-INSTRUMENTATION: Messages list focused
+      P2.presence.chatFocused('messages-list', currentUserId);
+      P2.presence.heartbeatStarted(currentUserId, PRESENCE_HEARTBEAT_INTERVAL);
+
+      // Update presence immediately on focus
+      P2.presence.mutationRequested(currentUserId);
+      updatePresenceMutation({ authUserId: currentUserId })
+        .then(() => P2.presence.mutationSuccess(currentUserId))
+        .catch(() => {});
+
+      // FIX: Clear any existing interval before creating new one
+      if (heartbeatRef.current) {
+        clearInterval(heartbeatRef.current);
+        heartbeatRef.current = null;
+      }
+
+      // Start heartbeat interval (only ONE)
+      heartbeatRef.current = setInterval(() => {
+        P2.presence.heartbeatTick(currentUserId);
+        P2.presence.mutationRequested(currentUserId);
+        updatePresenceMutation({ authUserId: currentUserId })
+          .then(() => P2.presence.mutationSuccess(currentUserId))
+          .catch(() => {});
+      }, PRESENCE_HEARTBEAT_INTERVAL);
+
+      // Cleanup on blur
+      return () => {
+        P2.presence.heartbeatStopped(currentUserId);
+        if (heartbeatRef.current) {
+          clearInterval(heartbeatRef.current);
+          heartbeatRef.current = null;
+        }
+        isHeartbeatActiveRef.current = false;
+      };
+    }, [currentUserId, updatePresenceMutation])
+  );
+
+  // Update presence when app comes to foreground
   useEffect(() => {
-    if (!token || hasMarkedDeliveredRef.current) return;
-    hasMarkedDeliveredRef.current = true;
+    if (!currentUserId) return;
 
-    markAllDeliveredMutation({ token }).catch((err) => {
-      if (process.env.NODE_ENV !== 'production') {
-        console.warn('[Phase2Chats] Failed to mark all messages delivered:', err);
+    const subscription = AppState.addEventListener('change', (nextAppState) => {
+      if (nextAppState === 'active') {
+        updatePresenceMutation({ authUserId: currentUserId }).catch(() => {});
       }
     });
-  }, [token, markAllDeliveredMutation]);
+
+    return () => subscription.remove();
+  }, [currentUserId, updatePresenceMutation]);
 
   // T&D Pending Connect Requests (still uses truthDare API - T&D is a separate feature)
   const pendingRequests = useQuery(
@@ -171,6 +280,43 @@ export default function ChatsScreen() {
     api.privateConversations.getUserPrivateConversations,
     currentUserId ? { authUserId: currentUserId } : 'skip'
   );
+
+  // P2-INSTRUMENTATION: Track conversation list sync
+  useEffect(() => {
+    if (backendConversations) {
+      P2.messages.listSynced(backendConversations.length);
+    }
+  }, [backendConversations]);
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // REALTIME-DELIVERY-FIX: Mark messages delivered when subscription updates
+  // ROOT CAUSE FIX: Delivery wasn't happening when messages arrived in background
+  // NOW: Triggers delivery whenever conversation list shows new unread messages
+  // ═══════════════════════════════════════════════════════════════════════════
+  const lastUnreadHashRef = useRef<string>('');
+  useEffect(() => {
+    if (!backendConversations || !token) return;
+
+    // Calculate hash of unread messages across all conversations
+    const unreadHash = backendConversations
+      .filter((c) => (c.unreadCount || 0) > 0)
+      .map((c) => `${c.id}:${c.unreadCount}`)
+      .join('|');
+
+    // If unread hash changed (new messages arrived), mark them as delivered
+    if (unreadHash && unreadHash !== lastUnreadHashRef.current) {
+      if (__DEV__) console.log('[P2_MSG_DELIVER] Subscription detected new unread, marking delivered');
+      P2.messages.deliverRequested('subscription-update');
+      markAllDeliveredMutation({ token })
+        .then((result) => {
+          const count = (result as any)?.count || 0;
+          if (__DEV__) console.log('[P2_MSG_DELIVER] Reactive delivered count:', count);
+          P2.messages.deliverSuccess('subscription-update', count);
+        })
+        .catch(() => {});
+    }
+    lastUnreadHashRef.current = unreadHash;
+  }, [backendConversations, token, markAllDeliveredMutation]);
 
   // P2-003: Error detection - timeout after 10s of loading
   const isQueryLoading = backendConversations === undefined && !hasQueryError;
@@ -219,6 +365,8 @@ export default function ChatsScreen() {
           participantPhotoUrl: bc.participantPhotoUrl || '',
           // P1-004 FIX: Include participantIntentKey from backend for intent label lookup
           participantIntentKey: (bc as any).participantIntentKey ?? null,
+          // PRESENCE: Include lastActive for online status display
+          participantLastActive: (bc as any).participantLastActive ?? 0,
           lastMessage: bc.lastMessage || 'Say hi!',
           lastMessageAt: bc.lastMessageAt,
           unreadCount: bc.unreadCount,
@@ -588,10 +736,8 @@ export default function ChatsScreen() {
         ) : (
           /* Message threads */
           messageThreads.map((convo) => {
-            // Check if this match originated from a super like
-            const isSuperLike = convo.matchSource === 'super_like';
-            // Check if this is a T/D connection
-            const isTodConnect = convo.connectionSource === 'tod';
+            // PRESENCE: Calculate online status for green dot indicator
+            const onlineStatus = getOnlineStatus((convo as any).participantLastActive);
             return (
               <TouchableOpacity
                 key={convo.id}
@@ -600,12 +746,9 @@ export default function ChatsScreen() {
                 onLongPress={() => setReportTarget({ id: convo.participantId, name: convo.participantName, conversationId: convo.id })}
                 activeOpacity={0.8}
               >
+                {/* CLEAN UI: Profile photo only (no extra badges/icons) */}
                 <View style={styles.chatAvatarWrap}>
-                  <View style={[
-                    styles.chatAvatarRing,
-                    isSuperLike && { borderColor: COLORS.superLike, borderWidth: 2.5 },
-                    isTodConnect && !isSuperLike && { borderColor: '#FF7849', borderWidth: 2.5 }
-                  ]}>
+                  <View style={styles.chatAvatarRing}>
                     {convo.participantPhotoUrl ? (
                       <Image source={{ uri: convo.participantPhotoUrl }} style={styles.chatAvatar} blurRadius={PHASE2_BLUR_AVATAR} />
                     ) : (
@@ -614,32 +757,15 @@ export default function ChatsScreen() {
                       </View>
                     )}
                   </View>
-                  {isSuperLike ? (
-                    <View style={styles.chatSuperLikeBadge}>
-                      <Ionicons name="star" size={8} color="#FFFFFF" />
-                    </View>
-                  ) : isTodConnect ? (
-                    <View style={styles.chatTodFlameBadge}>
-                      <Ionicons name="flame" size={8} color="#FFFFFF" />
-                    </View>
-                  ) : (
-                    <View style={[styles.connectionBadge, { backgroundColor: C.surface }]}>
-                      <Ionicons name={connectionIcon(convo.connectionSource) as any} size={10} color={C.primary} />
-                    </View>
+                  {/* PRESENCE: Online indicator (green dot) - kept for essential status */}
+                  {onlineStatus === 'online' && (
+                    <View style={styles.onlineDot} />
                   )}
                 </View>
+                {/* CLEAN UI: Name, Last message, Time only (no "Active" text, no intent labels) */}
                 <View style={styles.chatInfo}>
                   <View style={styles.chatNameRow}>
-                    <View style={styles.chatNameCol}>
-                      <Text style={styles.chatName}>{convo.participantName}</Text>
-                      {/* P1-004 FIX: Use backend participantIntentKey instead of demo data */}
-                      {(() => {
-                        const intentLabel = getIntentLabelFromKey(convo.participantIntentKey);
-                        return intentLabel ? (
-                          <Text style={styles.chatIntentLabel}>{intentLabel}</Text>
-                        ) : null;
-                      })()}
-                    </View>
+                    <Text style={styles.chatName}>{convo.participantName}</Text>
                     <Text style={styles.chatTime}>{getTimeAgo(convo.lastMessageAt)}</Text>
                   </View>
                   <Text style={styles.chatLastMsg} numberOfLines={1}>{textForPublicSurface(convo.lastMessage)}</Text>
@@ -1062,8 +1188,27 @@ const styles = StyleSheet.create({
   chatInfo: { flex: 1, marginLeft: 12 },
   chatNameRow: { flexDirection: 'row', justifyContent: 'space-between', marginBottom: 4 },
   chatNameCol: { flex: 1 },
+  nameWithStatus: { flexDirection: 'row', alignItems: 'center', gap: 6 },
   chatName: { fontSize: 14, fontWeight: '600', color: C.text },
   chatIntentLabel: { fontSize: 11, color: C.primary, marginTop: 1, opacity: 0.85 },
+  // PRESENCE: Online status styles
+  onlineDot: {
+    position: 'absolute',
+    top: 0,
+    right: 0,
+    width: 14,
+    height: 14,
+    borderRadius: 7,
+    backgroundColor: '#4ADE80', // Green
+    borderWidth: 2,
+    borderColor: C.background,
+    zIndex: 10,
+  },
+  recentlyActiveText: {
+    fontSize: 11,
+    color: '#4ADE80',
+    fontWeight: '500',
+  },
   chatTime: { fontSize: 11, color: C.textLight },
   chatLastMsg: { fontSize: 13, color: C.textLight },
   unreadBadge: {
