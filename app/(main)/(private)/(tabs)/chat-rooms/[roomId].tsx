@@ -1,10 +1,11 @@
 /*
- * LOCKED (PRIVATE ROOM CHAT)
- * Do NOT modify this file unless Durga Prasad explicitly unlocks it.
+ * UNLOCKED FOR AUDIT (PRIVATE ROOM CHAT)
+ * Temporarily unlocked for deep audit and bug-fixing work.
  *
  * STATUS:
- * - Feature is stable and production-locked
- * - No logic/UI changes allowed
+ * - Under active audit
+ * - Fixes allowed during audit period
+ * - Will be re-locked after audit completion
  */
 import React, { useState, useCallback, useRef, useEffect, useMemo } from 'react';
 import {
@@ -18,6 +19,9 @@ import {
   FlatList,
   Modal,
   TouchableOpacity,
+  AppState,
+  AppStateStatus,
+  Keyboard,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useLocalSearchParams, useRouter } from 'expo-router';
@@ -29,17 +33,15 @@ import { Id } from '@/convex/_generated/dataModel';
 import { isDemoMode } from '@/hooks/useConvex';
 import { useAuthStore } from '@/stores/authStore';
 import { INCOGNITO_COLORS } from '@/lib/constants';
+// P2-001/002: Import responsive utilities
+import { CHAT_FONTS, SPACING, SIZES } from '@/lib/responsive';
 import {
   DEMO_CHAT_ROOMS,
   getDemoMessagesForRoom,
-  DEMO_DM_INBOX,
-  DEMO_FRIEND_REQUESTS,
-  DEMO_ANNOUNCEMENTS,
   DEMO_CURRENT_USER,
   DEMO_ONLINE_USERS,
   DemoChatMessage,
   DemoDM,
-  DemoFriendRequest,
   DemoAnnouncement,
   DemoOnlineUser,
 } from '@/lib/demoData';
@@ -47,13 +49,15 @@ import {
 import ChatRoomsHeader from '@/components/chatroom/ChatRoomsHeader';
 import ChatMessageItem from '@/components/chatroom/ChatMessageItem';
 import SystemMessageItem from '@/components/chatroom/SystemMessageItem';
-import ChatComposer, { type ComposerPanel } from '@/components/chatroom/ChatComposer';
+import ChatComposer, { type ComposerPanel, type MentionMember, type MentionData } from '@/components/chatroom/ChatComposer';
 import MessagesPopover from '@/components/chatroom/MessagesPopover';
-import FriendRequestsPopover from '@/components/chatroom/FriendRequestsPopover';
 import NotificationsPopover from '@/components/chatroom/NotificationsPopover';
 import ProfilePopover from '@/components/chatroom/ProfilePopover';
 import OnlineUsersPanel from '@/components/chatroom/OnlineUsersPanel';
 import MessageActionsSheet from '@/components/chatroom/MessageActionsSheet';
+import { ReactionEmoji } from '@/components/chatroom/ReactionBar';
+import ReactionChips, { ReactionGroup } from '@/components/chatroom/ReactionChips';
+import CoinFeedback from '@/components/chatroom/CoinFeedback';
 import UserProfilePopup from '@/components/chatroom/UserProfilePopup';
 import ViewProfileModal from '@/components/chatroom/ViewProfileModal';
 import ReportUserModal, { ReportReason } from '@/components/chatroom/ReportUserModal';
@@ -71,6 +75,9 @@ import { useVoiceRecorder, VoiceRecorderResult } from '@/hooks/useVoiceRecorder'
 import { usePrivateProfileStore } from '@/stores/privateProfileStore';
 import PrivateChatView from '@/components/chatroom/PrivateChatView';
 import { ensureStableFile, uploadMediaToConvex } from '@/lib/uploadUtils';
+import * as Sentry from '@sentry/react-native';
+import { setCurrentFeature, SENTRY_FEATURES } from '@/lib/sentry';
+import { preloadVideos } from '@/lib/videoCache';
 
 const C = INCOGNITO_COLORS;
 const EMPTY_MESSAGES: DemoChatMessage[] = [];
@@ -162,7 +169,6 @@ type Overlay =
   | 'none'
   | 'profile'
   | 'notifications'
-  | 'friendRequests'
   | 'messages'
   | 'onlineUsers'
   | 'messageActions'
@@ -209,12 +215,25 @@ export default function ChatRoomScreen() {
   const incrementCoins = useChatRoomSessionStore((s) => s.incrementCoins);
   const userCoinsFromStore = useChatRoomSessionStore((s) => s.coins);
 
-  // Persisted chat room profile (name/avatar/bio - separate from main profile)
+  // ─────────────────────────────────────────────────────────────────────────
+  // CHAT ROOM IDENTITY (Convex-backed - separate from main profile)
+  // ─────────────────────────────────────────────────────────────────────────
+  const chatRoomProfile = useQuery(
+    api.chatRooms.getChatRoomProfile,
+    authUserId ? { authUserId } : 'skip'
+  );
+  // Use chat room profile for display (NEVER fall back to main profile)
+  const myNickname = chatRoomProfile?.nickname ?? 'Anonymous';
+  const myAvatarUrl = chatRoomProfile?.avatarUrl ?? null;
+  const myBio = chatRoomProfile?.bio ?? null;
+
+  // Legacy store references (kept for backwards compatibility during transition)
   const persistedDisplayName = useChatRoomProfileStore((s) => s.displayName);
   const persistedAvatarUri = useChatRoomProfileStore((s) => s.avatarUri);
   const persistedBio = useChatRoomProfileStore((s) => s.bio);
 
-  // DATA-SOURCE FIX: Get real user identity from privateProfileStore (Convex-backed)
+  // DATA-SOURCE FIX: Get real user identity from privateProfileStore (for age/gender only)
+  // NOTE: We NO LONGER use realDisplayName, realPhotoUrls, realBio in Chat Rooms!
   const realDisplayName = usePrivateProfileStore((s) => s.displayName);
   const realAge = usePrivateProfileStore((s) => s.age);
   const realGender = usePrivateProfileStore((s) => s.gender);
@@ -271,11 +290,32 @@ export default function ChatRoomScreen() {
   const joinRoomMutation = useMutation(api.chatRooms.joinRoom);
   const closeRoomMutation = useMutation(api.chatRooms.closeRoom);
   const deleteMessageMutation = useMutation(api.chatRooms.deleteMessage);
+  const addReactionMutation = useMutation(api.chatRooms.addReaction);
+  const removeReactionMutation = useMutation(api.chatRooms.removeReaction);
 
   // Room preferences (muting) and reports - Convex-backed persistence
   const setUserRoomMutedMutation = useMutation(api.chatRooms.setUserRoomMuted);
   const markReportedRoomMutation = useMutation(api.chatRooms.markReportedRoom);
   const submitChatRoomReportMutation = useMutation(api.chatRooms.submitChatRoomReport);
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // ROOM-SPECIFIC PRESENCE: Heartbeat system for real-time online tracking
+  // ─────────────────────────────────────────────────────────────────────────
+  const heartbeatPresenceMutation = useMutation(api.chatRooms.heartbeatPresence);
+  const clearRoomPresenceMutation = useMutation(api.chatRooms.clearRoomPresence);
+
+  // Query real-time online count (only users with recent heartbeat)
+  const roomOnlineCountQuery = useQuery(
+    api.chatRooms.getRoomOnlineCount,
+    hasValidRoomId && !isDemoMode ? { roomId: roomIdStr as Id<'chatRooms'> } : 'skip'
+  );
+  const roomOnlineCount = roomOnlineCountQuery?.onlineCount ?? 0;
+
+  // Query room presence with profiles (for member list Online/Recently Left sections)
+  const roomPresenceQuery = useQuery(
+    api.chatRooms.getRoomPresenceWithProfiles,
+    shouldSkipProtectedQueries ? 'skip' : { roomId: roomIdStr as Id<'chatRooms'>, authUserId: authUserId! }
+  );
 
   // Skip queries that require userId in demo mode (no real user identity)
   const shouldSkipUserIdQueries = isDemoMode || !authUserId;
@@ -311,6 +351,45 @@ export default function ChatRoomScreen() {
     api.chatRooms.listMembersWithProfiles,
     shouldSkipProtectedQueries ? 'skip' : { roomId: roomIdStr as Id<'chatRooms'>, authUserId: authUserId! }
   );
+
+  // P0-FIX: Query reactions for visible messages (batched for efficiency)
+  // Extract message IDs from convex messages for the query
+  const messageIdsForReactions = useMemo(() => {
+    if (isDemoMode || !convexMessagesResult?.messages) return [];
+    return convexMessagesResult.messages.map(m => m._id);
+  }, [isDemoMode, convexMessagesResult?.messages]);
+
+  const reactionsQuery = useQuery(
+    api.chatRooms.getReactionsForMessages,
+    !isDemoMode && messageIdsForReactions.length > 0 && authUserId && hasValidRoomId
+      ? { roomId: roomIdStr as Id<'chatRooms'>, messageIds: messageIdsForReactions as Id<'chatRoomMessages'>[], authUserId }
+      : 'skip'
+  );
+
+  // P0-FIX: Create a map of reactions by message ID for efficient lookup
+  // P3-FIX: Include isUserReaction for proper typing
+  const reactionsMap = useMemo(() => {
+    if (!reactionsQuery) return new Map<string, { emoji: string; count: number; userIds: string[]; isUserReaction: boolean }[]>();
+    const map = new Map<string, { emoji: string; count: number; userIds: string[]; isUserReaction: boolean }[]>();
+    for (const [messageId, reactions] of Object.entries(reactionsQuery)) {
+      // Map reactions with isUserReaction computed from userIds
+      const mappedReactions = reactions.map((r) => ({
+        ...r,
+        isUserReaction: authUserId ? r.userIds.includes(authUserId) : false,
+      }));
+      map.set(messageId, mappedReactions);
+    }
+    return map;
+  }, [reactionsQuery, authUserId]);
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // PER-USER MUTING: Query muted users from Convex (persistent, per-room)
+  // ─────────────────────────────────────────────────────────────────────────
+  const mutedUsersQuery = useQuery(
+    api.chatRooms.getMutedUsersInRoom,
+    shouldSkipProtectedQueries ? 'skip' : { roomId: roomIdStr as Id<'chatRooms'>, authUserId: authUserId! }
+  );
+  const toggleMuteUserMutation = useMutation(api.chatRooms.toggleMuteUserInRoom);
 
   // Unified room object: prefer demoRoom if found, else use convexRoom
   const room = demoRoom ?? convexRoom;
@@ -384,6 +463,22 @@ export default function ChatRoomScreen() {
       mountedRef.current = false;
     };
   }, []);
+
+  // SENTRY-FILTER: Set feature tag on mount, clear on unmount
+  useEffect(() => {
+    // Set current feature to chat_rooms for Sentry filtering
+    setCurrentFeature(SENTRY_FEATURES.CHAT_ROOMS);
+    Sentry.setTag('feature', SENTRY_FEATURES.CHAT_ROOMS);
+    Sentry.setContext('chat_rooms', {
+      screen: 'room',
+      roomId: roomIdStr,
+    });
+
+    return () => {
+      // Clear feature on unmount
+      setCurrentFeature(null);
+    };
+  }, [roomIdStr]);
 
   // LOGOUT-RACE FIX: Navigate away when auth is lost while screen is mounted
   // This prevents protected queries from erroring during logout transition
@@ -459,21 +554,22 @@ export default function ChatRoomScreen() {
   // ─────────────────────────────────────────────────────────────────────────
   useEffect(() => {
     if (roomIdStr) {
-      // DATA-SOURCE FIX: Use real profile data in non-demo mode, demo data only in demo mode
+      // CHAT ROOM IDENTITY: Use myNickname/myAvatarUrl from Convex chatRoomProfiles
+      // NOT main profile data (realDisplayName, realPhotoUrls, etc.)
       const identity = isDemoMode
         ? {
             userId: DEMO_CURRENT_USER.id,
-            name: persistedDisplayName ?? DEMO_CURRENT_USER.username,
+            name: myNickname,
             age: DEMO_CURRENT_USER.age ?? 25,
             gender: DEMO_CURRENT_USER.gender ?? 'Unknown',
-            profilePicture: persistedAvatarUri ?? DEMO_CURRENT_USER.avatar ?? '',
+            profilePicture: myAvatarUrl ?? '',
           }
         : {
             userId: authUserId ?? 'unknown',
-            name: persistedDisplayName ?? realDisplayName ?? 'User',
+            name: myNickname,
             age: realAge ?? 0,
             gender: realGender ?? '',
-            profilePicture: persistedAvatarUri ?? '',
+            profilePicture: myAvatarUrl ?? '',
           };
       enterRoom(roomIdStr, identity);
 
@@ -491,7 +587,7 @@ export default function ChatRoomScreen() {
         });
       }
     }
-  }, [roomIdStr, enterRoom, authUserId, hasValidRoomId, setPreferredRoom, setPreferredRoomMutation, persistedDisplayName, persistedAvatarUri, realDisplayName, realAge, realGender]);
+  }, [roomIdStr, enterRoom, authUserId, hasValidRoomId, setPreferredRoom, setPreferredRoomMutation, myNickname, myAvatarUrl, realAge, realGender]);
 
   // ─────────────────────────────────────────────────────────────────────────
   // PHASE-2 BACK NAVIGATION: Go to Desire Land (not chat-rooms list)
@@ -535,6 +631,37 @@ export default function ChatRoomScreen() {
   const listRef = useRef<FlatList<ListItem>>(null);
   const [composerHeight, setComposerHeight] = useState(56);
 
+  // ─────────────────────────────────────────────────────────────────────────
+  // KEYBOARD HANDLING (Android fix: force layout reset when keyboard hides)
+  // ─────────────────────────────────────────────────────────────────────────
+  const [keyboardVisible, setKeyboardVisible] = useState(false);
+  // Key to force re-render of KeyboardAvoidingView when keyboard hides on Android
+  const [kavKey, setKavKey] = useState(0);
+
+  useEffect(() => {
+    const showListener = Keyboard.addListener(
+      Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow',
+      () => {
+        setKeyboardVisible(true);
+      }
+    );
+    const hideListener = Keyboard.addListener(
+      Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide',
+      () => {
+        setKeyboardVisible(false);
+        // Android fix: Force KeyboardAvoidingView to recalculate layout
+        if (Platform.OS === 'android') {
+          setKavKey((k) => k + 1);
+        }
+      }
+    );
+
+    return () => {
+      showListener.remove();
+      hideListener.remove();
+    };
+  }, []);
+
   // Near-bottom tracking for smart auto-scroll (don't jump when user reads older messages)
   const isNearBottomRef = useRef(true);
   const SCROLL_THRESHOLD = 120;
@@ -560,6 +687,10 @@ export default function ChatRoomScreen() {
 
   const [pendingMessages, setPendingMessages] = useState<DemoChatMessage[]>([]);
 
+  // ─────────────────────────────────────────────────────────────────────────
+  // MESSAGES: Transform Convex messages to UI format
+  // Uses senderAvatarUrl directly from message (includes primary photo fallback)
+  // ─────────────────────────────────────────────────────────────────────────
   const messages: DemoChatMessage[] = useMemo(() => {
     if (isDemoMode) return demoMessages;
     const convexMsgs = convexMessagesResult?.messages ?? [];
@@ -570,15 +701,57 @@ export default function ChatRoomScreen() {
       id: m._id,
       roomId: m.roomId,
       senderId: m.senderId,
-      senderName: 'User',
+      senderName: m.senderNickname ?? 'User',
+      // AVATAR-FIX: Use senderAvatarUrl from message (includes primary photo fallback)
+      senderAvatar: m.senderAvatarUrl ?? undefined,
       type: m.type as DemoChatMessage['type'],
       text: m.text,
       mediaUrl: m.imageUrl,
       audioUrl: m.audioUrl,
       createdAt: m.createdAt,
+      // P0-FIX: Include reply data
+      replyToMessageId: m.replyToMessageId,
+      replyToSenderNickname: m.replyToSenderNickname,
+      replyToSnippet: m.replyToSnippet,
+      replyToType: m.replyToType,
+      // P0-FIX: Include mentions for highlighting
+      mentions: m.mentions?.map(mention => ({
+        userId: mention.userId,
+        nickname: mention.nickname,
+        startIndex: mention.startIndex,
+        endIndex: mention.endIndex,
+      })),
     }));
     return [...converted, ...pendingMessages];
   }, [isDemoMode, demoMessages, convexMessagesResult, pendingMessages]);
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // VIDEO PRELOADING: Cache videos from visible messages for instant playback
+  // This ensures hold-to-view feels immediate for already-visible videos
+  // ─────────────────────────────────────────────────────────────────────────
+  useEffect(() => {
+    if (!messages || messages.length === 0) return;
+
+    // Extract video URLs from recent messages (last 10 for performance)
+    const videoUrls: string[] = [];
+    const recentMessages = messages.slice(-10);
+
+    for (const msg of recentMessages) {
+      if (msg.type === 'video' && msg.mediaUrl) {
+        const url = msg.mediaUrl;
+        if (url.startsWith('http://') || url.startsWith('https://')) {
+          videoUrls.push(url);
+        }
+      }
+    }
+
+    // Preload unique video URLs (non-blocking, max 2 concurrent)
+    if (videoUrls.length > 0) {
+      const uniqueUrls = [...new Set(videoUrls)];
+      if (__DEV__) console.log('[ChatRoom] Preloading', uniqueUrls.length, 'videos');
+      preloadVideos(uniqueUrls, 2);
+    }
+  }, [messages]);
 
   // ─────────────────────────────────────────────────────────────────────────
   // INVERTED FLATLIST: Build list items in reverse order (newest first)
@@ -684,9 +857,96 @@ export default function ChatRoomScreen() {
   }, [roomIdStr, hasValidRoomId, authUserId, joinRoomMutation, setCurrentRoom]);
 
   // ─────────────────────────────────────────────────────────────────────────
+  // ROOM-SPECIFIC PRESENCE: Heartbeat every 12 seconds while viewing room
+  // ─────────────────────────────────────────────────────────────────────────
+  useEffect(() => {
+    // Skip in demo mode or without valid auth/room
+    if (isDemoMode || !hasValidRoomId || !authUserId || !hasMemberAccess) return;
+
+    // Send initial heartbeat immediately
+    heartbeatPresenceMutation({
+      roomId: roomIdStr as Id<'chatRooms'>,
+      authUserId,
+    }).catch(() => {
+      // Silently ignore heartbeat errors (non-critical)
+    });
+
+    // Set up interval for periodic heartbeats (every 12 seconds)
+    const HEARTBEAT_INTERVAL_MS = 12 * 1000;
+    const heartbeatInterval = setInterval(() => {
+      if (!mountedRef.current) return;
+      heartbeatPresenceMutation({
+        roomId: roomIdStr as Id<'chatRooms'>,
+        authUserId,
+      }).catch(() => {
+        // Silently ignore heartbeat errors
+      });
+    }, HEARTBEAT_INTERVAL_MS);
+
+    // Cleanup: clear presence when leaving room
+    return () => {
+      clearInterval(heartbeatInterval);
+      // Clear presence on unmount (fire-and-forget)
+      clearRoomPresenceMutation({
+        roomId: roomIdStr as Id<'chatRooms'>,
+        authUserId,
+      }).catch(() => {
+        // Silently ignore cleanup errors
+      });
+    };
+  }, [roomIdStr, hasValidRoomId, authUserId, hasMemberAccess, heartbeatPresenceMutation, clearRoomPresenceMutation]);
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // APP STATE HANDLING: Clear presence when app goes background
+  // This ensures users are immediately removed from active count when backgrounding
+  // ─────────────────────────────────────────────────────────────────────────
+  useEffect(() => {
+    if (isDemoMode || !hasValidRoomId || !authUserId) return;
+
+    const appStateRef = { current: AppState.currentState };
+
+    const handleAppStateChange = (nextAppState: AppStateStatus) => {
+      if (!mountedRef.current) return;
+
+      // App going to background → clear presence immediately
+      if (appStateRef.current === 'active' && nextAppState.match(/inactive|background/)) {
+        clearRoomPresenceMutation({
+          roomId: roomIdStr as Id<'chatRooms'>,
+          authUserId,
+        }).catch(() => {
+          // Silently ignore errors
+        });
+      }
+
+      // App coming to foreground → send heartbeat immediately
+      if (appStateRef.current.match(/inactive|background/) && nextAppState === 'active') {
+        heartbeatPresenceMutation({
+          roomId: roomIdStr as Id<'chatRooms'>,
+          authUserId,
+        }).catch(() => {
+          // Silently ignore errors
+        });
+      }
+
+      appStateRef.current = nextAppState;
+    };
+
+    const subscription = AppState.addEventListener('change', handleAppStateChange);
+    return () => subscription.remove();
+  }, [roomIdStr, hasValidRoomId, authUserId, heartbeatPresenceMutation, clearRoomPresenceMutation]);
+
+  // ─────────────────────────────────────────────────────────────────────────
   // INPUT STATE
   // ─────────────────────────────────────────────────────────────────────────
   const [inputText, setInputText] = useState('');
+  // Reply-to state: track message being replied to
+  const [replyToMessage, setReplyToMessage] = useState<{
+    id: string;
+    senderNickname: string;
+    snippet: string;
+  } | null>(null);
+  // Highlight state: track message to highlight after scroll-to-message
+  const [highlightedMessageId, setHighlightedMessageId] = useState<string | null>(null);
   // WALLET-FIX: In real mode, use Convex walletCoins (source of truth, auto-updates reactively)
   // In demo mode, use session store coins (no backend persistence)
   const userCoins = isDemoMode
@@ -719,15 +979,29 @@ export default function ChatRoomScreen() {
     }));
   }, [convexMembersWithProfiles]);
 
+  // @Mention members for ChatComposer suggestions
+  // Transform room members to MentionMember shape
+  // SAFETY: Use empty array if roomMembers undefined
+  const mentionMembers: MentionMember[] = useMemo(() => {
+    return (roomMembers ?? []).map((m) => ({
+      id: m.id,
+      nickname: m.username,
+      avatar: m.avatar,
+      age: m.age,
+      gender: m.gender,
+    }));
+  }, [roomMembers]);
+
   // ─────────────────────────────────────────────────────────────────────────
-  // DM / FRIEND REQUESTS / NOTIFICATIONS STATE
-  // DATA-SOURCE FIX: Only use demo data in demo mode, empty arrays in real mode
+  // DM / NOTIFICATIONS STATE
+  // NO DEMO DATA: Private DMs start empty - no fake inbox entries
+  // Backend for Chat Room DMs does not exist yet - shows truthful empty state
   // ─────────────────────────────────────────────────────────────────────────
-  const [dms, setDMs] = useState<DemoDM[]>(isDemoMode ? DEMO_DM_INBOX : []);
+  const [dms, setDMs] = useState<DemoDM[]>([]);
   const unreadDMs = dms.filter((dm) => dm.visible && !dm.hiddenUntilNextMessage && dm.unreadCount > 0).length;
 
-  const [friendRequests, setFriendRequests] = useState<DemoFriendRequest[]>(isDemoMode ? DEMO_FRIEND_REQUESTS : []);
-  const [announcements, setAnnouncements] = useState<DemoAnnouncement[]>(isDemoMode ? DEMO_ANNOUNCEMENTS : []);
+  // NO DEMO DATA: Announcements start empty - no fake notifications
+  const [announcements, setAnnouncements] = useState<DemoAnnouncement[]>([]);
   const unseenNotifications = announcements.filter((a) => !a.seen).length;
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -740,6 +1014,13 @@ export default function ChatRoomScreen() {
   // Position for anchored message actions popup
   const [messageActionPosition, setMessageActionPosition] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
   const [selectedUser, setSelectedUser] = useState<DemoOnlineUser | null>(null);
+
+  // @Mentions state
+  const [currentMentions, setCurrentMentions] = useState<MentionData[]>([]);
+
+  // Coin feedback animation state
+  const [showCoinFeedback, setShowCoinFeedback] = useState(false);
+  const [coinFeedbackY, setCoinFeedbackY] = useState(0);
   const [viewProfileUser, setViewProfileUser] = useState<DemoOnlineUser | null>(null);
   const [reportTargetUser, setReportTargetUser] = useState<DemoOnlineUser | null>(null);
 
@@ -756,15 +1037,44 @@ export default function ChatRoomScreen() {
   // ─────────────────────────────────────────────────────────────────────────
   // Use Convex query result for room mute status
   const isRoomMuted = isRoomMutedFromConvex;
-  const [mutedUserIds, setMutedUserIds] = useState<Set<string>>(new Set());
 
-  const handleToggleMuteUser = useCallback((userId: string) => {
-    setMutedUserIds((prev) => {
-      const next = new Set(prev);
-      next.has(userId) ? next.delete(userId) : next.add(userId);
-      return next;
-    });
-  }, []);
+  // Per-user muting: derive from Convex query (persistent, per-room)
+  // In demo mode, fall back to local state (no backend persistence)
+  const [demoMutedUserIds, setDemoMutedUserIds] = useState<Set<string>>(new Set());
+  const mutedUserIds = useMemo(() => {
+    if (isDemoMode) {
+      return demoMutedUserIds;
+    }
+    // Real mode: derive from Convex query result
+    const ids = mutedUsersQuery?.mutedUserIds ?? [];
+    return new Set(ids);
+  }, [mutedUsersQuery, demoMutedUserIds]);
+
+  const handleToggleMuteUser = useCallback(async (userId: string) => {
+    if (isDemoMode) {
+      // Demo mode: local state only (no backend)
+      setDemoMutedUserIds((prev) => {
+        const next = new Set(prev);
+        next.has(userId) ? next.delete(userId) : next.add(userId);
+        return next;
+      });
+      return;
+    }
+
+    // Real mode: call Convex mutation (backend persists, query auto-updates via subscription)
+    if (!authUserId || !roomIdStr || !hasValidRoomId) return;
+    try {
+      await toggleMuteUserMutation({
+        roomId: roomIdStr as Id<'chatRooms'>,
+        targetUserId: userId as Id<'users'>,
+        authUserId,
+      });
+      // No local state update needed - Convex subscription will auto-refresh mutedUsersQuery
+    } catch (error: any) {
+      console.error('[MUTE] Toggle mute failed:', error);
+      Alert.alert('Error', error.message || 'Failed to update mute status');
+    }
+  }, [authUserId, roomIdStr, hasValidRoomId, toggleMuteUserMutation]);
 
   // Auto-clear join messages after 1 minute
   // P0 FIX: Check mountedRef before state update to prevent unmounted warning
@@ -882,29 +1192,21 @@ export default function ChatRoomScreen() {
   }, [canCloseRoom, authUserId, roomIdStr, closeRoomMutation, router, setHasRedirectedInSession]);
 
   // ─────────────────────────────────────────────────────────────────────────
-  // RELOAD HANDLER (demo mode only - resets demo state)
+  // RELOAD HANDLER (resets local state)
   // ─────────────────────────────────────────────────────────────────────────
   const handleReload = useCallback(() => {
-    if (!isDemoMode || !roomIdStr) return;
-    const baseMessages = getDemoMessagesForRoom(roomIdStr);
-    const currentMessages = useDemoChatRoomStore.getState().rooms[roomIdStr] ?? [];
-    const baseIds = new Set(baseMessages.map((m) => m.id));
-    const userSent = currentMessages.filter((m) => !baseIds.has(m.id) && !m.id.startsWith('sys_join_'));
-    const merged = [...baseMessages, ...userSent].sort((a, b) => a.createdAt - b.createdAt);
-    setStoreMessages(roomIdStr, merged);
-
-    setDMs((prev) =>
-      prev.map((dm) => {
-        const source = DEMO_DM_INBOX.find((s) => s.id === dm.id);
-        if (!source) return dm;
-        return { ...dm, unreadCount: dm.hiddenUntilNextMessage ? dm.unreadCount : source.unreadCount };
-      })
-    );
-    setFriendRequests(DEMO_FRIEND_REQUESTS);
-    setAnnouncements((prev) => {
-      const seenIds = new Set(prev.filter((a) => a.seen).map((a) => a.id));
-      return DEMO_ANNOUNCEMENTS.map((a) => ({ ...a, seen: seenIds.has(a.id) ? true : a.seen }));
-    });
+    if (!roomIdStr) return;
+    // Reload room messages (demo mode only has local store)
+    if (isDemoMode) {
+      const baseMessages = getDemoMessagesForRoom(roomIdStr);
+      const currentMessages = useDemoChatRoomStore.getState().rooms[roomIdStr] ?? [];
+      const baseIds = new Set(baseMessages.map((m) => m.id));
+      const userSent = currentMessages.filter((m) => !baseIds.has(m.id) && !m.id.startsWith('sys_join_'));
+      const merged = [...baseMessages, ...userSent].sort((a, b) => a.createdAt - b.createdAt);
+      setStoreMessages(roomIdStr, merged);
+    }
+    // DMs: No demo data to restore - DMs start empty (no backend yet)
+    // Announcements: Keep current state
   }, [roomIdStr, setStoreMessages]);
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -923,7 +1225,7 @@ export default function ChatRoomScreen() {
         id: `cm_me_${Date.now()}`,
         roomId: roomIdStr,
         senderId: DEMO_CURRENT_USER.id,
-        senderName: persistedDisplayName ?? DEMO_CURRENT_USER.username,
+        senderName: myNickname,
         type: 'text',
         text: trimmed,
         createdAt: Date.now(),
@@ -932,6 +1234,9 @@ export default function ChatRoomScreen() {
       setInputText('');
       // Demo mode: local coin increment (no backend)
       incrementCoins();
+      // P0-FIX: Show coin feedback animation in demo mode too
+      setCoinFeedbackY(composerHeight + 100);
+      setShowCoinFeedback(true);
       isSendingRef.current = false;
     } else {
       if (!authUserId || !hasValidRoomId) {
@@ -954,6 +1259,9 @@ export default function ChatRoomScreen() {
       };
       setPendingMessages((prev) => [...prev, pendingMsg]);
       setInputText('');
+      // Clear reply state before sending (will be attached to message)
+      const replyToId = replyToMessage?.id;
+      setReplyToMessage(null);
 
       // WALLET-FIX: Coin increment is handled atomically in Convex mutation
       // UI reads from reactive getUserWalletCoins query (auto-updates)
@@ -964,10 +1272,24 @@ export default function ChatRoomScreen() {
           senderId: authUserId as Id<'users'>,
           text: trimmed,
           clientId,
+          // Reply-to-message support
+          replyToMessageId: replyToId ? (replyToId as Id<'chatRoomMessages'>) : undefined,
+          // @mentions support
+          mentions: currentMentions.length > 0 ? currentMentions.map(m => ({
+            userId: m.userId as Id<'users'>,
+            nickname: m.nickname,
+            startIndex: m.startIndex,
+            endIndex: m.endIndex,
+          })) : undefined,
         });
         // Success: remove pending message (real message arrives via subscription)
         if (mountedRef.current) {
           setPendingMessages((prev) => prev.filter((m) => m.id !== pendingId));
+          // Show coin feedback animation
+          setCoinFeedbackY(composerHeight + 100);
+          setShowCoinFeedback(true);
+          // Clear mentions after successful send
+          setCurrentMentions([]);
         }
       } catch (error: any) {
         // STABILITY FIX: On failure, restore text and show error alert
@@ -980,7 +1302,7 @@ export default function ChatRoomScreen() {
         isSendingRef.current = false;
       }
     }
-  }, [inputText, roomIdStr, hasValidRoomId, addStoreMessage, authUserId, sendMessageMutation, persistedDisplayName]);
+  }, [inputText, roomIdStr, hasValidRoomId, addStoreMessage, authUserId, sendMessageMutation, myNickname, replyToMessage, currentMentions, composerHeight]);
 
   const handlePanelChange = useCallback((_panel: ComposerPanel) => {}, []);
 
@@ -1006,7 +1328,7 @@ export default function ChatRoomScreen() {
           id: `cm_me_${Date.now()}`,
           roomId: roomIdStr,
           senderId: DEMO_CURRENT_USER.id,
-          senderName: persistedDisplayName ?? DEMO_CURRENT_USER.username,
+          senderName: myNickname,
           type: mediaType,
           text: `[${labelMap[mediaType]}]`,
           mediaUrl: persistentUri,
@@ -1015,6 +1337,10 @@ export default function ChatRoomScreen() {
         // B2-HIGH FIX: Guard setState after async (ensureStableFile)
         if (mountedRef.current) {
           addStoreMessage(roomIdStr, newMessage);
+          // P0-FIX: Demo mode coin increment + feedback for media messages
+          incrementCoins();
+          setCoinFeedbackY(composerHeight + 100);
+          setShowCoinFeedback(true);
         }
       } else {
         // CR-009 FIX: Real mode - upload to cloud storage first, then send with storage ID
@@ -1045,7 +1371,7 @@ export default function ChatRoomScreen() {
         }
       }
     },
-    [roomIdStr, hasValidRoomId, addStoreMessage, authUserId, sendMessageMutation, generateUploadUrlMutation, persistedDisplayName]
+    [roomIdStr, hasValidRoomId, addStoreMessage, authUserId, sendMessageMutation, generateUploadUrlMutation, myNickname]
   );
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -1062,13 +1388,16 @@ export default function ChatRoomScreen() {
           id: `cm_voice_${Date.now()}`,
           roomId: roomIdStr,
           senderId: DEMO_CURRENT_USER.id,
-          senderName: persistedDisplayName ?? DEMO_CURRENT_USER.username,
+          senderName: myNickname,
           type: 'audio',
           audioUrl: result.audioUri,
           createdAt: Date.now(),
         };
         addStoreMessage(roomIdStr, newMessage);
         incrementCoins();
+        // P0-FIX: Show coin feedback animation for voice messages in demo mode
+        setCoinFeedbackY(composerHeight + 100);
+        setShowCoinFeedback(true);
       } else {
         // CR-009 FIX: Real mode - upload to cloud storage first, then send with storage ID
         if (!authUserId || !hasValidRoomId) return;
@@ -1096,7 +1425,7 @@ export default function ChatRoomScreen() {
         }
       }
     },
-    [roomIdStr, hasValidRoomId, addStoreMessage, authUserId, sendMessageMutation, generateUploadUrlMutation, persistedDisplayName, incrementCoins]
+    [roomIdStr, hasValidRoomId, addStoreMessage, authUserId, sendMessageMutation, generateUploadUrlMutation, myNickname, incrementCoins]
   );
 
   const { toggleRecording, isRecording, elapsedMs } = useVoiceRecorder({
@@ -1136,17 +1465,6 @@ export default function ChatRoomScreen() {
   }, []);
 
   // ─────────────────────────────────────────────────────────────────────────
-  // FRIEND REQUEST HANDLERS
-  // ─────────────────────────────────────────────────────────────────────────
-  const handleAcceptFriendRequest = useCallback((requestId: string) => {
-    setFriendRequests((prev) => prev.filter((r) => r.id !== requestId));
-  }, []);
-
-  const handleRejectFriendRequest = useCallback((requestId: string) => {
-    setFriendRequests((prev) => prev.filter((r) => r.id !== requestId));
-  }, []);
-
-  // ─────────────────────────────────────────────────────────────────────────
   // NOTIFICATION HANDLERS
   // ─────────────────────────────────────────────────────────────────────────
   const handleMarkAllNotificationsSeen = useCallback(() => {
@@ -1175,7 +1493,8 @@ export default function ChatRoomScreen() {
     const isSelf = senderId === currentUserId;
 
     // Look up user in roomMembers (Convex-backed in real mode, demo in demo mode)
-    const memberUser = roomMembers.find((u) => u.id === senderId);
+    // SAFETY: Use empty array if roomMembers undefined
+    const memberUser = (roomMembers ?? []).find((u) => u.id === senderId);
     const userToShow = memberUser ?? {
       id: senderId,
       username: messages.find((m) => m.senderId === senderId)?.senderName || 'Unknown',
@@ -1199,9 +1518,22 @@ export default function ChatRoomScreen() {
   // ─────────────────────────────────────────────────────────────────────────
   // ONLINE USER PRESS
   // ─────────────────────────────────────────────────────────────────────────
+  // Type that works for both demo users and presence users
+  type PanelUser = { id: string; username?: string; avatar?: string; isOnline?: boolean; age?: number; gender?: string; lastSeen?: number };
   // SELF-PROFILE FIX: If tapping own user in online panel, open photo viewer directly
-  const handleOnlineUserPress = useCallback((user: DemoOnlineUser) => {
+  const handleOnlineUserPress = useCallback((user: PanelUser) => {
     if (__DEV__) console.log('[TAP] online user pressed', { id: user.id, t: Date.now() });
+
+    // Convert PanelUser to DemoOnlineUser format for state
+    const userAsDemoUser: DemoOnlineUser = {
+      id: user.id,
+      username: user.username || 'Anonymous',
+      avatar: user.avatar,
+      isOnline: user.isOnline ?? false,
+      age: user.age,
+      gender: user.gender as 'male' | 'female' | undefined,
+      lastSeen: user.lastSeen,
+    };
 
     // SELF-PROFILE FIX: Check if this is the current user
     const currentUserId = isDemoMode ? DEMO_CURRENT_USER.id : authUserId;
@@ -1209,12 +1541,12 @@ export default function ChatRoomScreen() {
 
     if (isSelf) {
       // SELF-PROFILE FIX: Open photo viewer directly, skip action popup
-      setViewProfileUser(user);
+      setViewProfileUser(userAsDemoUser);
       setOverlay('viewProfile');
       if (__DEV__) console.log('[TAP] self-online → viewProfile (no actions)', { t: Date.now() });
     } else {
       // Other user: show action popup
-      setSelectedUser(user);
+      setSelectedUser(userAsDemoUser);
       setOverlay('userProfile');
     }
   }, [authUserId]);
@@ -1358,7 +1690,8 @@ export default function ChatRoomScreen() {
   const handleReportMessage = useCallback(() => {
     if (!selectedMessage) return;
     // Find the user who sent the message to open report modal
-    const senderUser = roomMembers.find((u) => u.id === selectedMessage.senderId);
+    // SAFETY: Use empty array if roomMembers undefined
+    const senderUser = (roomMembers ?? []).find((u) => u.id === selectedMessage.senderId);
     if (senderUser) {
       setReportTargetUser(senderUser);
     } else {
@@ -1374,10 +1707,161 @@ export default function ChatRoomScreen() {
   }, [selectedMessage, roomMembers]);
 
   // ─────────────────────────────────────────────────────────────────────────
+  // MESSAGE ACTION: REPLY (sets reply state for composer)
+  // FLATTEN-REPLY: Always use only the message's OWN content, never nested reply data
+  // This ensures single-level reply preview (no stacking of quote bars)
+  // ─────────────────────────────────────────────────────────────────────────
+  const handleReplyToMessage = useCallback(() => {
+    if (!selectedMessage) return;
+
+    // FLATTEN-REPLY: Extract ONLY the message's own text, ignoring any replyToSnippet
+    // This prevents nested replies from appearing in the preview
+    let snippet = '';
+    if (selectedMessage.text) {
+      // Use only the message's own text content (not any quoted/nested content)
+      const ownText = selectedMessage.text;
+      snippet = ownText.length > 50 ? ownText.slice(0, 47) + '...' : ownText;
+    } else if (selectedMessage.type === 'image') {
+      snippet = '📷 Photo';
+    } else if (selectedMessage.type === 'video') {
+      snippet = '🎥 Video';
+    } else if (selectedMessage.type === 'doodle') {
+      snippet = '🎨 Doodle';
+    } else if (selectedMessage.type === 'audio') {
+      snippet = '🎤 Voice message';
+    }
+
+    // FLATTEN-REPLY: Use only this message's sender name, not any referenced sender
+    setReplyToMessage({
+      id: selectedMessage.id,
+      senderNickname: selectedMessage.senderName || 'Anonymous',
+      snippet,
+    });
+
+    // Close the action sheet and clear selection
+    setSelectedMessage(null);
+    setOverlay('none');
+
+    // Focus the input after a brief delay (let overlay close)
+    setTimeout(() => {
+      Keyboard.dismiss();
+    }, 50);
+  }, [selectedMessage]);
+
+  // Clear reply state
+  const handleCancelReply = useCallback(() => {
+    setReplyToMessage(null);
+  }, []);
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // MESSAGE ACTION: REACT (add emoji reaction)
+  // ─────────────────────────────────────────────────────────────────────────
+  const handleReact = useCallback(async (emoji: ReactionEmoji) => {
+    if (!selectedMessage || !authUserId || !roomIdStr || isDemoMode) {
+      setSelectedMessage(null);
+      setOverlay('none');
+      return;
+    }
+
+    try {
+      await addReactionMutation({
+        roomId: roomIdStr as Id<'chatRooms'>,
+        messageId: selectedMessage.id as Id<'chatRoomMessages'>,
+        emoji,
+        authUserId,
+      });
+    } catch (error) {
+      console.error('[Reaction] Failed to add reaction:', error);
+    }
+
+    setSelectedMessage(null);
+    setOverlay('none');
+  }, [selectedMessage, authUserId, roomIdStr, addReactionMutation]);
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // P0-FIX: REACTION CHIP TAP - Toggle reaction from message chips
+  // ─────────────────────────────────────────────────────────────────────────
+  const handleReactionChipTap = useCallback(async (messageId: string, emoji: string) => {
+    if (!authUserId || !roomIdStr || isDemoMode) return;
+
+    // Check if user already reacted with this emoji
+    const messageReactions = reactionsMap.get(messageId) || [];
+    const existingReaction = messageReactions.find(r => r.emoji === emoji);
+    const userAlreadyReacted = existingReaction?.userIds.includes(authUserId);
+
+    try {
+      if (userAlreadyReacted) {
+        // P3-FIX: removeReaction finds reaction by message+user, not by emoji
+        await removeReactionMutation({
+          roomId: roomIdStr as Id<'chatRooms'>,
+          messageId: messageId as Id<'chatRoomMessages'>,
+          authUserId,
+        });
+      } else {
+        await addReactionMutation({
+          roomId: roomIdStr as Id<'chatRooms'>,
+          messageId: messageId as Id<'chatRoomMessages'>,
+          emoji: emoji as ReactionEmoji,
+          authUserId,
+        });
+      }
+    } catch (error) {
+      console.error('[Reaction] Failed to toggle reaction:', error);
+    }
+  }, [authUserId, roomIdStr, isDemoMode, reactionsMap, addReactionMutation, removeReactionMutation]);
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // SCROLL TO MESSAGE (for tap-to-jump on reply quote)
+  // ─────────────────────────────────────────────────────────────────────────
+  const handleScrollToMessage = useCallback((messageId: string) => {
+    // Find the index of the message in the inverted list
+    const index = invertedListItems.findIndex(
+      (item) => item.type === 'message' && item.id === messageId
+    );
+    if (index !== -1 && listRef.current) {
+      // Scroll to the message
+      listRef.current.scrollToIndex({
+        index,
+        animated: true,
+        viewPosition: 0.5, // Center the message in view
+      });
+
+      // Highlight the message briefly
+      setHighlightedMessageId(messageId);
+      // Clear highlight after animation completes (1.2s = 200ms fade in + 600ms hold + 400ms fade out)
+      setTimeout(() => {
+        if (mountedRef.current) {
+          setHighlightedMessageId(null);
+        }
+      }, 1300);
+    }
+  }, [invertedListItems]);
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // PERF-FIX: Use refs for frequently changing data to avoid renderItem re-creation
+  // ─────────────────────────────────────────────────────────────────────────
+  const invertedListItemsRef = useRef(invertedListItems);
+  const reactionsMapRef = useRef(reactionsMap);
+  const highlightedMessageIdRef = useRef(highlightedMessageId);
+
+  // Keep refs in sync
+  useEffect(() => {
+    invertedListItemsRef.current = invertedListItems;
+  }, [invertedListItems]);
+  useEffect(() => {
+    reactionsMapRef.current = reactionsMap;
+  }, [reactionsMap]);
+  useEffect(() => {
+    highlightedMessageIdRef.current = highlightedMessageId;
+  }, [highlightedMessageId]);
+
+  // ─────────────────────────────────────────────────────────────────────────
   // RENDER MESSAGE ITEM (reuses existing components)
+  // Implements consecutive message grouping - avatar shown only on first message of group
+  // PERF-FIX: Uses refs for frequently changing data to minimize re-renders
   // ─────────────────────────────────────────────────────────────────────────
   const renderItem = useCallback(
-    ({ item }: { item: ListItem }) => {
+    ({ item, index }: { item: ListItem; index: number }) => {
       // Hide date separators - return null for date items
       if (item.type === 'date') {
         return null;
@@ -1392,12 +1876,65 @@ export default function ChatRoomScreen() {
 
       const isMuted = mutedUserIds.has(msg.senderId);
       const isMe = (isDemoMode ? DEMO_CURRENT_USER.id : authUserId) === msg.senderId;
-      // DATA-SOURCE FIX: Use current user's avatar for outgoing messages (self)
-      // Fallback chain: persistedAvatarUri → realPhotoUrls[0] (Convex profile) → empty
-      // This matches the same source used in ProfilePopover and other places
-      const avatarUri = isMe
-        ? (isDemoMode ? (persistedAvatarUri ?? DEMO_CURRENT_USER.avatar) : (persistedAvatarUri ?? realPhotoUrls?.[0] ?? ''))
-        : msg.senderAvatar;
+      // CHAT ROOM IDENTITY: Use myAvatarUrl for outgoing messages (self)
+      // For other users, use senderAvatar from message (fetched from chatRoomProfiles)
+      const avatarUri = isMe ? (myAvatarUrl ?? '') : msg.senderAvatar;
+
+      // ─── CONSECUTIVE MESSAGE GROUPING ───
+      // In inverted FlatList: index 0 = newest (bottom), higher index = older (top)
+      // For grouping: show avatar only on FIRST message of a group (top-most visually)
+      // Check if the message ABOVE (index + 1, older) is from the same sender
+      // PERF-FIX: Use ref to avoid dependency on invertedListItems
+      const currentList = invertedListItemsRef.current;
+      let showAvatar = true;
+      if (index < currentList.length - 1) {
+        const itemAbove = currentList[index + 1];
+        if (itemAbove.type === 'message' && itemAbove.message.senderId === msg.senderId) {
+          // Message above is from same sender, so this is NOT first in group
+          showAvatar = false;
+        }
+      }
+
+      // Build replyTo data if message is a reply
+      // Check if original message is deleted (has replyToMessageId but no snippet or type)
+      const isOriginalDeleted = !!(msg.replyToMessageId && !msg.replyToSnippet && !msg.replyToType);
+      const replyTo = msg.replyToMessageId
+        ? {
+            messageId: msg.replyToMessageId,
+            senderNickname: msg.replyToSenderNickname || 'Anonymous',
+            snippet: msg.replyToSnippet || '',
+            type: msg.replyToType,
+            isDeleted: isOriginalDeleted,
+          }
+        : null;
+
+      // Handler for swipe-to-reply gesture
+      // FLATTEN-REPLY: Always use only the message's OWN content, never nested reply data
+      const handleSwipeReply = () => {
+        // FLATTEN-REPLY: Extract ONLY the message's own text, ignoring any replyToSnippet
+        // This ensures single-level reply preview (no stacking of quote bars)
+        let snippet = '';
+        if (msg.text) {
+          // Use only the message's own text content (not any quoted/nested content)
+          const ownText = msg.text;
+          snippet = ownText.length > 50 ? ownText.slice(0, 47) + '...' : ownText;
+        } else if (msg.type === 'image') {
+          snippet = 'Photo';
+        } else if (msg.type === 'video') {
+          snippet = 'Video';
+        } else if (msg.type === 'doodle') {
+          snippet = 'Doodle';
+        } else if (msg.type === 'audio') {
+          snippet = 'Voice message';
+        }
+
+        // FLATTEN-REPLY: Use only this message's sender name
+        setReplyToMessage({
+          id: msg.id,
+          senderNickname: msg.senderName || 'Anonymous',
+          snippet,
+        });
+      };
 
       return (
         <ChatMessageItem
@@ -1405,6 +1942,8 @@ export default function ChatRoomScreen() {
           senderName={msg.senderName}
           senderId={msg.senderId}
           senderAvatar={avatarUri}
+          senderAge={msg.senderAge}
+          senderGender={msg.senderGender}
           text={msg.text || ''}
           timestamp={msg.createdAt}
           isMe={isMe}
@@ -1417,23 +1956,45 @@ export default function ChatRoomScreen() {
           onNamePress={() => handleAvatarPress(msg.senderId)}
           onMediaHoldStart={handleMediaHoldStart}
           onMediaHoldEnd={handleMediaHoldEnd}
+          showAvatar={showAvatar}
+          replyTo={replyTo}
+          onReplyTap={handleScrollToMessage}
+          onSwipeReply={handleSwipeReply}
+          isHighlighted={highlightedMessageIdRef.current === msg.id}
+          mentions={msg.mentions}
+          currentUserId={authUserId ?? undefined}
+          reactions={reactionsMapRef.current.get(msg.id) || []}
+          onReactionTap={(emoji) => handleReactionChipTap(msg.id, emoji)}
         />
       );
     },
-    [mutedUserIds, authUserId, persistedAvatarUri, realPhotoUrls, handleMessageLongPress, handleAvatarPress, handleMediaHoldStart, handleMediaHoldEnd]
+    // PERF-FIX: Removed invertedListItems, highlightedMessageId, reactionsMap from deps (using refs)
+    [mutedUserIds, authUserId, myAvatarUrl, handleMessageLongPress, handleAvatarPress, handleMediaHoldStart, handleMediaHoldEnd, handleScrollToMessage, handleReactionChipTap]
   );
 
   const keyExtractor = useCallback((item: ListItem) => item.id, []);
+
+  // PERF-FIX: Estimated item layout for faster scrolling (avoids measuring each item)
+  const ESTIMATED_ITEM_HEIGHT = 72; // Average message height
+  const getItemLayout = useCallback(
+    (_data: ArrayLike<ListItem> | null | undefined, index: number) => ({
+      length: ESTIMATED_ITEM_HEIGHT,
+      offset: ESTIMATED_ITEM_HEIGHT * index,
+      index,
+    }),
+    []
+  );
 
   // ─────────────────────────────────────────────────────────────────────────
   // P0 FIX: INVALID ROOM ID FALLBACK (CR-001, CR-002)
   // ─────────────────────────────────────────────────────────────────────────
   if (!roomIdStr) {
     return (
-      <View style={[styles.container, { paddingTop: insets.top }]}>
+      // P1-004 FIX: Remove inline paddingTop - header handles topInset internally
+      <View style={styles.container}>
         <ChatRoomsHeader title="Invalid Room" hideLeftButton topInset={insets.top} />
         <View style={styles.notFound}>
-          <Ionicons name="alert-circle-outline" size={48} color={C.textLight} />
+          <Ionicons name="alert-circle-outline" size={40} color={C.textLight} />
           <Text style={styles.notFoundText}>Room ID is missing</Text>
         </View>
       </View>
@@ -1446,10 +2007,11 @@ export default function ChatRoomScreen() {
       console.log('[CHAT_ROOM] Blocked invalid roomId:', { roomIdStr });
     }
     return (
-      <View style={[styles.container, { paddingTop: insets.top }]}>
+      // P1-004 FIX: Remove inline paddingTop - header handles topInset internally
+      <View style={styles.container}>
         <ChatRoomsHeader title="Invalid Room" hideLeftButton topInset={insets.top} />
         <View style={styles.notFound}>
-          <Ionicons name="alert-circle-outline" size={48} color={C.textLight} />
+          <Ionicons name="alert-circle-outline" size={40} color={C.textLight} />
           <Text style={styles.notFoundText}>Invalid Room ID</Text>
         </View>
       </View>
@@ -1487,10 +2049,15 @@ export default function ChatRoomScreen() {
       : 'Room not found';
 
     return (
-      <View style={[styles.container, { paddingTop: insets.top }]}>
+      // P1-004 FIX: Remove inline paddingTop - header handles topInset internally
+      <View style={styles.container}>
         <ChatRoomsHeader title={errorTitle} hideLeftButton topInset={insets.top} />
         <View style={styles.notFound}>
-          <Ionicons name="alert-circle-outline" size={48} color={C.textLight} />
+          <Ionicons
+            name={isAccessDenied ? 'lock-closed-outline' : 'search-outline'}
+            size={40}
+            color={C.textLight}
+          />
           <Text style={styles.notFoundText}>{errorMessage}</Text>
           <TouchableOpacity style={styles.backToRoomsBtn} onPress={handleBackToRooms}>
             <Text style={styles.backToRoomsBtnText}>Back to Chat Rooms</Text>
@@ -1512,13 +2079,14 @@ export default function ChatRoomScreen() {
       <ChatRoomsHeader
         title={roomName}
         subtitle={countdownText ?? undefined}
+        onlineCount={isDemoMode ? undefined : roomOnlineCount}
         hideLeftButton
         topInset={insets.top}
         onRefreshPress={handleReload}
         onInboxPress={() => setOverlay('messages')}
         onNotificationsPress={() => setOverlay('notifications')}
         onProfilePress={() => setOverlay('profile')}
-        profileAvatar={isDemoMode ? (persistedAvatarUri ?? DEMO_CURRENT_USER.avatar) : (persistedAvatarUri ?? realPhotoUrls?.[0] ?? '')}
+        profileAvatar={isDemoMode ? (myAvatarUrl ?? '') : (myAvatarUrl ?? '')}
         unreadInbox={unreadDMs}
         unseenNotifications={unseenNotifications}
         showCloseButton={!!canCloseRoom}
@@ -1527,25 +2095,47 @@ export default function ChatRoomScreen() {
       />
 
       {/* ─── ACTIVE USERS STRIP ─── */}
-      {/* MEMBER-DATA FIX: Use roomMembers (Convex-backed in real mode, demo in demo mode) */}
+      {/* Room screen strip: ONLY show currently online users, no offline/recently-left */}
+      {/* Hide label - room header already shows online count */}
       <ActiveUsersStrip
-        users={roomMembers.map((u) => ({ id: u.id, avatar: u.avatar, isOnline: u.isOnline }))}
+        users={
+          isDemoMode
+            ? (roomMembers ?? []).filter((u) => u.isOnline).map((u) => ({
+                id: u.id,
+                avatar: u.avatar,
+                isOnline: true,
+                joinedAt: (u as any).joinedAt ?? Date.now(), // Demo fallback
+              }))
+            : (roomPresenceQuery?.online ?? []).map((u) => ({
+                id: u.id,
+                avatar: u.avatar,
+                isOnline: true,
+                joinedAt: u.joinedAt, // Convex provides this
+              }))
+        }
         theme="dark"
+        hideLabel
         onPress={() => setOverlay('onlineUsers')}
       />
 
       {/* ─── KEYBOARD AVOIDING VIEW ─── */}
+      {/* P1-003 FIX: Use "padding" on iOS, "height" on Android for better keyboard handling */}
+      {/* Android with softwareKeyboardLayoutMode="resize" works better with height behavior */}
+      {/* Android: Use key to force re-mount when keyboard hides, fixing layout reset */}
       <KeyboardAvoidingView
+        key={Platform.OS === 'android' ? kavKey : undefined}
         style={styles.keyboardAvoid}
         behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
-        keyboardVerticalOffset={0}
+        keyboardVerticalOffset={Platform.OS === 'ios' ? 0 : 0}
       >
         <View style={styles.chatArea}>
           {messages.length === 0 ? (
             <View style={styles.emptyContainer}>
-              <Ionicons name="chatbubble-outline" size={40} color={C.textLight} />
+              <View style={styles.emptyIconWrapper}>
+                <Ionicons name="chatbubble-outline" size={28} color={C.textLight} />
+              </View>
               <Text style={styles.emptyText}>No messages yet</Text>
-              <Text style={styles.emptySubtext}>Be the first to say something!</Text>
+              <Text style={styles.emptySubtext}>Be the first to say something</Text>
             </View>
           ) : (
             <FlatList
@@ -1553,6 +2143,9 @@ export default function ChatRoomScreen() {
               data={invertedListItems}
               keyExtractor={keyExtractor}
               renderItem={renderItem}
+              // P0-004 FIX: Removed getItemLayout - it assumes fixed height (72px)
+              // which causes scroll jumps for variable-height content (images, audio, replies)
+              // getItemLayout={getItemLayout}
               inverted={true}
               contentContainerStyle={{
                 flexGrow: 1,
@@ -1566,19 +2159,23 @@ export default function ChatRoomScreen() {
               onScroll={handleScroll}
               scrollEventThrottle={16}
               maintainVisibleContentPosition={{ minIndexForVisible: 0 }}
-              // P2 Performance: FlatList tuning props
+              // P0-004 FIX: Optimized FlatList tuning for variable-height content
               initialNumToRender={15}
-              maxToRenderPerBatch={8}
+              maxToRenderPerBatch={10}
               updateCellsBatchingPeriod={50}
               windowSize={7}
-              removeClippedSubviews={Platform.OS === 'android'}
+              // P0-004 FIX: Disable removeClippedSubviews on Android to prevent blank cells
+              removeClippedSubviews={Platform.OS === 'ios'}
+              // P0-004 FIX: Use highlightedMessageId ref only (reactions use ref, not extraData)
+              // This prevents full list re-render when reactions change
+              extraData={highlightedMessageId}
             />
           )}
 
           {/* ─── COMPOSER ─── Hidden when Private Chat sheet is open */}
           {!isPrivateChatOpen && (
             <View
-              style={[styles.composerWrapper, { paddingBottom: Platform.OS === 'ios' ? insets.bottom : 0 }]}
+              style={styles.composerWrapper}
               onLayout={(e) => setComposerHeight(e.nativeEvent.layout.height)}
             >
               {/* Phase-2: Show send-blocked notice if user has penalty */}
@@ -1597,6 +2194,14 @@ export default function ChatRoomScreen() {
                   onPanelChange={handlePanelChange}
                   isRecording={isRecording}
                   elapsedMs={elapsedMs}
+                  replyPreview={replyToMessage ? {
+                    messageId: replyToMessage.id,
+                    senderNickname: replyToMessage.senderNickname,
+                    snippet: replyToMessage.snippet,
+                  } : null}
+                  onCancelReply={handleCancelReply}
+                  mentionMembers={mentionMembers}
+                  onMentionsChange={setCurrentMentions}
                 />
               )}
             </View>
@@ -1621,14 +2226,6 @@ export default function ChatRoomScreen() {
         onHideDM={handleHideDM}
       />
 
-      <FriendRequestsPopover
-        visible={overlay === 'friendRequests'}
-        onClose={closeOverlay}
-        requests={friendRequests}
-        onAccept={handleAcceptFriendRequest}
-        onReject={handleRejectFriendRequest}
-      />
-
       <NotificationsPopover
         visible={overlay === 'notifications'}
         onClose={closeOverlay}
@@ -1641,11 +2238,11 @@ export default function ChatRoomScreen() {
         visible={overlay === 'profile'}
         onClose={closeOverlay}
         username={isDemoMode
-          ? (persistedDisplayName ?? DEMO_CURRENT_USER.username)
-          : (persistedDisplayName ?? realDisplayName ?? 'User')}
+          ? (myNickname)
+          : (myNickname)}
         avatar={isDemoMode
-          ? (persistedAvatarUri ?? DEMO_CURRENT_USER.avatar)
-          : (persistedAvatarUri ?? realPhotoUrls?.[0] ?? '')}
+          ? (myAvatarUrl ?? '')
+          : (myAvatarUrl ?? '')}
         isActive={true}
         coins={userCoins}
         age={isDemoMode ? (DEMO_CURRENT_USER.age ?? 25) : (realAge ?? 0)}
@@ -1658,11 +2255,14 @@ export default function ChatRoomScreen() {
         onEndRoom={handleEndRoom}
       />
 
-      {/* MEMBER-DATA FIX: Use roomMembers (Convex-backed in real mode) */}
+      {/* MEMBER-DATA FIX: Use room presence data in real mode, roomMembers for demo */}
+      {/* SAFETY: Use empty array if roomMembers undefined */}
       <OnlineUsersPanel
         visible={overlay === 'onlineUsers'}
         onClose={closeOverlay}
-        users={roomMembers}
+        users={isDemoMode ? (roomMembers ?? []) : undefined}
+        presenceOnline={isDemoMode ? undefined : roomPresenceQuery?.online}
+        presenceRecentlyLeft={isDemoMode ? undefined : roomPresenceQuery?.recentlyLeft}
         onUserPress={handleOnlineUserPress}
       />
 
@@ -1675,6 +2275,8 @@ export default function ChatRoomScreen() {
         canModerate={canModerate}
         onDelete={handleDeleteMessage}
         onReport={handleReportMessage}
+        onReply={handleReplyToMessage}
+        onReact={handleReact}
       />
 
       <UserProfilePopup
@@ -1694,6 +2296,7 @@ export default function ChatRoomScreen() {
         user={viewProfileUser}
       />
 
+      {/* Floating attachment menu - positioned above plus button */}
       <AttachmentPopup
         visible={overlay === 'attachment'}
         onClose={closeOverlay}
@@ -1749,6 +2352,13 @@ export default function ChatRoomScreen() {
           />
         )}
       </Modal>
+
+      {/* Coin feedback animation */}
+      <CoinFeedback
+        visible={showCoinFeedback}
+        onComplete={() => setShowCoinFeedback(false)}
+        startY={coinFeedbackY}
+      />
     </View>
   );
 }
@@ -1767,38 +2377,47 @@ const styles = StyleSheet.create({
   },
   chatArea: {
     flex: 1,
+    // Ensure chat area doesn't overflow - contains FlatList and composer
+    overflow: 'hidden',
   },
   composerWrapper: {
     backgroundColor: C.background,
+    // Ensure composer is always at bottom of chatArea, never overlapping tab bar
+    flexShrink: 0,
   },
   notFound: {
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
     gap: 12,
+    paddingHorizontal: 32,
   },
   notFoundText: {
-    fontSize: 16,
+    // P2-001: Use responsive typography
+    fontSize: CHAT_FONTS.emptyTitle,
     fontWeight: '600',
     color: C.textLight,
+    textAlign: 'center',
   },
   backToRoomsBtn: {
-    marginTop: 16,
-    paddingHorizontal: 24,
-    paddingVertical: 12,
-    backgroundColor: C.primary,
-    borderRadius: 8,
+    // P2-002: Use SPACING constants
+    marginTop: SPACING.base,
+    paddingHorizontal: SPACING.xl,
+    paddingVertical: SPACING.md,
+    backgroundColor: '#6D28D9',
+    borderRadius: SIZES.radius.sm + 2,
   },
   backToRoomsBtnText: {
-    fontSize: 14,
+    fontSize: CHAT_FONTS.buttonText,
     fontWeight: '600',
     color: '#FFFFFF',
   },
   dateSeparator: {
     flexDirection: 'row',
     alignItems: 'center',
-    marginVertical: 12,
-    paddingHorizontal: 16,
+    // P2-002: Use SPACING constants
+    marginVertical: SPACING.md,
+    paddingHorizontal: SPACING.base,
   },
   dateLine: {
     flex: 1,
@@ -1806,42 +2425,62 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(255,255,255,0.1)',
   },
   dateLabel: {
-    fontSize: 12,
+    // P2-001: Use responsive typography
+    fontSize: CHAT_FONTS.dateSeparator,
     color: C.textLight,
-    marginHorizontal: 12,
+    marginHorizontal: SPACING.md,
   },
+  // P2-010: Improved empty state styling
   emptyContainer: {
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
-    gap: 8,
+    gap: SPACING.md,
+    paddingHorizontal: SPACING.xxl,
+  },
+  emptyIconWrapper: {
+    width: 72,
+    height: 72,
+    borderRadius: 36,
+    backgroundColor: C.surface,
+    alignItems: 'center',
+    justifyContent: 'center',
+    marginBottom: SPACING.sm,
+    // P2-010: Add subtle border for definition
+    borderWidth: 1,
+    borderColor: 'rgba(109, 40, 217, 0.2)',
   },
   emptyText: {
-    fontSize: 16,
+    // P2-001: Use responsive typography
+    fontSize: CHAT_FONTS.emptyTitle,
     fontWeight: '600',
-    color: C.textLight,
-    marginTop: 8,
+    color: C.text,
+    textAlign: 'center',
   },
   emptySubtext: {
-    fontSize: 13,
+    // P2-001: Use responsive typography with proper line height
+    fontSize: CHAT_FONTS.emptySubtitle,
     color: C.textLight,
-    opacity: 0.7,
+    textAlign: 'center',
+    lineHeight: Math.round(CHAT_FONTS.emptySubtitle * 1.5),
   },
-  // Phase-2: Read-only notice styles
+  // P2-012: Improved read-only notice styling
   readOnlyNotice: {
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'center',
-    paddingVertical: 14,
-    paddingHorizontal: 16,
-    gap: 8,
-    backgroundColor: C.surface,
+    paddingVertical: SPACING.md + 2,
+    paddingHorizontal: SPACING.base,
+    gap: SPACING.sm,
+    // P2-012: More serious appearance
+    backgroundColor: 'rgba(255, 152, 0, 0.08)',
     borderTopWidth: 1,
-    borderTopColor: C.accent,
+    borderTopColor: 'rgba(255, 152, 0, 0.2)',
   },
   readOnlyText: {
-    fontSize: 14,
-    color: C.textLight,
-    fontWeight: '500',
+    fontSize: CHAT_FONTS.buttonText,
+    // P2-012: More visible warning color
+    color: '#FF9800',
+    fontWeight: '600',
   },
 });

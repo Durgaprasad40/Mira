@@ -1,17 +1,18 @@
 /*
- * LOCKED (PRIVATE CHAT ROOMS)
- * Do NOT modify this file unless Durga Prasad explicitly unlocks it.
+ * UNLOCKED FOR AUDIT (PRIVATE CHAT ROOMS)
+ * Temporarily unlocked for deep audit and bug-fixing work.
  *
  * STATUS:
- * - Feature is stable and production-locked
- * - No logic/UI changes allowed
+ * - Under active audit
+ * - Fixes allowed during audit period
+ * - Will be re-locked after audit completion
  */
 import React, { useState, useCallback, useMemo, useEffect, useRef } from 'react';
 import {
   View,
   Text,
   FlatList,
-  TouchableOpacity,
+  Pressable,
   StyleSheet,
   RefreshControl,
   Image,
@@ -31,8 +32,15 @@ import { INCOGNITO_COLORS } from '@/lib/constants';
 import { useChatRoomSessionStore } from '@/stores/chatRoomSessionStore';
 import { useAuthStore } from '@/stores/authStore';
 import { usePreferredChatRoomStore } from '@/stores/preferredChatRoomStore';
+import * as Sentry from '@sentry/react-native';
+import * as Haptics from 'expo-haptics';
+import { setCurrentFeature, SENTRY_FEATURES } from '@/lib/sentry';
+import ChatRoomIdentitySetup from '@/components/chatroom/ChatRoomIdentitySetup';
 
 const C = INCOGNITO_COLORS;
+
+// P3-004: Navigation guard delay - prevents double-tap race conditions
+const NAV_SETTLE_DELAY_MS = 500;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // ROOM ICONS - Local image assets for each room
@@ -105,23 +113,24 @@ const ROOM_FALLBACK_COLORS: Record<string, string> = {
 // Used as safety net for fresh deployments or when backend is seeding
 // ─────────────────────────────────────────────────────────────────────────────
 const FALLBACK_PUBLIC_ROOMS = [
-  { id: 'fallback_global', name: 'Global', slug: 'global', category: 'general' as const, memberCount: 0 },
-  { id: 'fallback_hindi', name: 'Hindi', slug: 'hindi', category: 'language' as const, memberCount: 0 },
-  { id: 'fallback_telugu', name: 'Telugu', slug: 'telugu', category: 'language' as const, memberCount: 0 },
-  { id: 'fallback_tamil', name: 'Tamil', slug: 'tamil', category: 'language' as const, memberCount: 0 },
-  { id: 'fallback_malayalam', name: 'Malayalam', slug: 'malayalam', category: 'language' as const, memberCount: 0 },
-  { id: 'fallback_bengali', name: 'Bengali', slug: 'bengali', category: 'language' as const, memberCount: 0 },
-  { id: 'fallback_gujarati', name: 'Gujarati', slug: 'gujarati', category: 'language' as const, memberCount: 0 },
-  { id: 'fallback_marathi', name: 'Marathi', slug: 'marathi', category: 'language' as const, memberCount: 0 },
+  { id: 'fallback_global', name: 'Global', slug: 'global', category: 'general' as const, activeUserCount: 0 },
+  { id: 'fallback_hindi', name: 'Hindi', slug: 'hindi', category: 'language' as const, activeUserCount: 0 },
+  { id: 'fallback_telugu', name: 'Telugu', slug: 'telugu', category: 'language' as const, activeUserCount: 0 },
+  { id: 'fallback_tamil', name: 'Tamil', slug: 'tamil', category: 'language' as const, activeUserCount: 0 },
+  { id: 'fallback_malayalam', name: 'Malayalam', slug: 'malayalam', category: 'language' as const, activeUserCount: 0 },
+  { id: 'fallback_bengali', name: 'Bengali', slug: 'bengali', category: 'language' as const, activeUserCount: 0 },
+  { id: 'fallback_gujarati', name: 'Gujarati', slug: 'gujarati', category: 'language' as const, activeUserCount: 0 },
+  { id: 'fallback_marathi', name: 'Marathi', slug: 'marathi', category: 'language' as const, activeUserCount: 0 },
 ];
 
 // Unified room type for Convex backend
+// LIVE PRESENCE: Uses activeUserCount (real-time presence) instead of memberCount for display
 interface ChatRoom {
   id: string;
   name: string;
   slug: string;
   category: 'language' | 'general';
-  memberCount: number;
+  activeUserCount: number;  // LIVE: Real-time presence count (users currently in room)
   lastMessageText?: string;
   // Icon support (admin-set, optional)
   iconKey?: string;   // Maps to ROOM_ICON_CONFIG or local asset
@@ -170,6 +179,21 @@ export default function ChatRoomsScreen() {
 
   // Current user ID for filtering out own messages
   const userId = useAuthStore((s) => s.userId);
+
+  // ─────────────────────────────────────────────────────────────────────────────
+  // CHAT ROOM IDENTITY CHECK
+  // Users MUST have a chat room profile before entering any room.
+  // This is separate from their main profile (nickname instead of real name).
+  // ─────────────────────────────────────────────────────────────────────────────
+  const chatRoomProfile = useQuery(
+    api.chatRooms.getChatRoomProfile,
+    userId ? { authUserId: userId } : 'skip'
+  );
+  const [profileSetupComplete, setProfileSetupComplete] = useState(false);
+
+  // Determine if we need to show setup (profile doesn't exist)
+  const isProfileLoading = chatRoomProfile === undefined;
+  const needsProfileSetup = !isProfileLoading && chatRoomProfile === null && !profileSetupComplete;
 
   // ─────────────────────────────────────────────────────────────────────────────
   // PREFERRED ROOM REDIRECT LOGIC (zero-flash)
@@ -240,6 +264,21 @@ export default function ChatRoomsScreen() {
     };
   }, []);
 
+  // SENTRY-FILTER: Set feature tag on mount, clear on unmount
+  useEffect(() => {
+    // Set current feature to chat_rooms for Sentry filtering
+    setCurrentFeature(SENTRY_FEATURES.CHAT_ROOMS);
+    Sentry.setTag('feature', SENTRY_FEATURES.CHAT_ROOMS);
+    Sentry.setContext('chat_rooms', {
+      screen: 'list',
+    });
+
+    return () => {
+      // Clear feature on unmount
+      setCurrentFeature(null);
+    };
+  }, []);
+
   // M-002/M-003 FIX: Preferred room redirect with navigation guards
   // NAV-TRAP FIX: Redirect fires ONCE per SESSION (not per mount) to prevent
   // navigation trap when user backs out of a room
@@ -296,11 +335,18 @@ export default function ChatRoomsScreen() {
   const resetMyPrivateRoomsMut = useMutation(api.chatRooms.resetMyPrivateRooms);
   // MEMBERSHIP LIFECYCLE: Leave room mutation for when user returns to homepage
   const leaveRoomMut = useMutation(api.chatRooms.leaveRoom);
+  // RESTORE TARGET POLICY: Clear preferred room when user intentionally leaves
+  const clearPreferredRoomMut = useMutation(api.users.clearPreferredChatRoom);
 
   // ─────────────────────────────────────────────────────────────────────────────
   // MEMBERSHIP LIFECYCLE: Leave room when returning to homepage
   // When user navigates back to this homepage from a room, remove them from that room.
   // This does NOT trigger when switching to other tabs (homepage doesn't focus).
+  //
+  // RESTORE TARGET POLICY:
+  // - Intentionally leaving a room clears the restore target (preferred room)
+  // - If user later enters a new room, that becomes the new restore target
+  // - If user doesn't enter a new room, homepage shows on next visit
   // ─────────────────────────────────────────────────────────────────────────────
   useFocusEffect(
     useCallback(() => {
@@ -314,6 +360,13 @@ export default function ChatRoomsScreen() {
       // Set hasRedirectedInSession to prevent redirect effect from reopening same room
       storeState.setHasRedirectedInSession(true);
 
+      // RESTORE TARGET POLICY: Clear preferred room (restore target) when intentionally leaving
+      // This ensures homepage shows on next visit instead of auto-redirecting
+      // If user enters a new room, setPreferredRoomMutation will set the new target
+      clearPreferredRoomMut({ authUserId: userId }).catch(() => {
+        // Ignore errors - best-effort
+      });
+
       // Call leaveRoom mutation to remove user from the room
       // CR-011: Pass authUserId for server-side verification
       leaveRoomMut({
@@ -325,7 +378,7 @@ export default function ChatRoomsScreen() {
 
       // Clear the tracking immediately
       storeState.setCurrentRoom(null);
-    }, [currentRoomId, userId, leaveRoomMut])
+    }, [currentRoomId, userId, leaveRoomMut, clearPreferredRoomMut])
   );
 
   // BUG FIX: Mutation to seed default public rooms
@@ -369,6 +422,7 @@ export default function ChatRoomsScreen() {
 
   // Filter private rooms into ChatRoom format
   // ISSUE 2 FIX: Mark as private so renderRoom skips message preview
+  // LIVE PRESENCE: Use activeUserCount for display
   const privateRooms: ChatRoom[] = useMemo(() => {
     if (!myPrivateRooms) return [];
     return myPrivateRooms.map((r) => ({
@@ -376,7 +430,7 @@ export default function ChatRoomsScreen() {
       name: r.name,
       slug: r.slug,
       category: r.category,
-      memberCount: r.memberCount,
+      activeUserCount: r.activeUserCount ?? 0, // LIVE: Real-time presence count
       iconKey: r.slug,
       isPrivate: true, // Flag for compact rendering
     }));
@@ -395,6 +449,7 @@ export default function ChatRoomsScreen() {
   // Filter out "English" room - users can chat in English inside Global
   // P2-AUD-006: Memoize to prevent re-computation on every render
   // Use fallback if backend returns empty (ensures public rooms always show while seeding)
+  // LIVE PRESENCE: Use activeUserCount for display (real-time presence count)
   const rooms: ChatRoom[] = useMemo(() => {
     // Always use backend rooms
     const backendRooms = (convexRooms ?? []).map((r) => ({
@@ -402,7 +457,7 @@ export default function ChatRoomsScreen() {
       name: r.name,
       slug: r.slug,
       category: r.category,
-      memberCount: r.memberCount,
+      activeUserCount: r.activeUserCount ?? 0, // LIVE: Real-time presence count
       lastMessageText: r.lastMessageText,
       iconKey: r.slug,
     })).filter((r) => r.name.toLowerCase() !== 'english');
@@ -486,7 +541,7 @@ export default function ChatRoomsScreen() {
       // NAV-RACE FIX: Reset lock after navigation settles (allows future navigations)
       setTimeout(() => {
         isNavigatingToRoomRef.current = false;
-      }, 500);
+      }, NAV_SETTLE_DELAY_MS);
     },
     [router, markRoomVisited, rooms, privateRooms, isSeedingRooms]
   );
@@ -498,12 +553,16 @@ export default function ChatRoomsScreen() {
   // Phase-2: Handle join by code
   const handleJoinByCode = useCallback(async () => {
     if (!joinCode.trim() || isJoining) return;
+    // P2-015: Light haptic feedback on join attempt
+    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Light);
     setIsJoining(true);
     try {
       const result = await joinRoomByCodeMut({ joinCode: joinCode.trim(), authUserId: userId! });
       // UNMOUNT-GUARD: Check mounted before setState after async
       if (!mountedRef.current) return;
       setJoinCode('');
+      // P2-015: Success haptic feedback
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Success);
       if (result.alreadyMember) {
         Alert.alert('Already a Member', 'You are already a member of this room.');
       }
@@ -513,6 +572,8 @@ export default function ChatRoomsScreen() {
         params: { roomName: '', isPrivate: '1' },
       } as any);
     } catch (error: any) {
+      // P2-015: Error haptic feedback for invalid/failed join
+      Haptics.notificationAsync(Haptics.NotificationFeedbackType.Error);
       Alert.alert('Error', error.message || 'Failed to join room');
     } finally {
       // UNMOUNT-GUARD: Check mounted before setState in finally
@@ -582,8 +643,9 @@ export default function ChatRoomsScreen() {
     }
   }, [newRoomName, newRoomPassword, isCreating, createPrivateRoomMut, router]);
 
-  const renderRoom = useCallback(
-    ({ item }: { item: ChatRoom }) => {
+  // Room Card component with simple opacity press feedback
+  const RoomCard = useCallback(
+    ({ item, isGeneral = false }: { item: ChatRoom; isGeneral?: boolean }) => {
       // Get icon key for this room (by slug/iconKey)
       const iconKey = item.iconKey ?? item.slug;
       const localAsset = ROOM_ICON_ASSETS[iconKey];
@@ -592,87 +654,122 @@ export default function ChatRoomsScreen() {
       // Get unread count for this room
       const unreadCount = unreadCounts[item.id] ?? 0;
 
+      // Determine activity state for styling
+      const isActive = item.activeUserCount > 0;
+
+      // Activity-based copy (truthful, no fabrication)
+      const getActivityCopy = () => {
+        if (item.activeUserCount === 0) return 'Quiet right now';
+        if (item.activeUserCount === 1) return '1 active';
+        if (item.activeUserCount >= 5) return `${item.activeUserCount} active now`;
+        return `${item.activeUserCount} active`;
+      };
+
       // Render room icon
       const renderRoomIcon = () => {
+        const categoryIsGeneral = item.category === 'general';
+
         // Priority 1: Remote URL (admin-set)
         if (item.iconUrl) {
           return (
-            <Image
-              source={{ uri: item.iconUrl }}
-              style={styles.roomIconImage}
-              resizeMode="cover"
-            />
+            <View style={styles.iconContainer}>
+              <Image
+                source={{ uri: item.iconUrl }}
+                style={styles.roomIconImage}
+                resizeMode="cover"
+              />
+              {isActive && <View style={styles.iconActiveDot} />}
+            </View>
           );
         }
 
         // Priority 2: Local asset image (when available)
         if (localAsset) {
           return (
-            <Image
-              source={localAsset}
-              style={styles.roomIconImage}
-              resizeMode="cover"
-            />
+            <View style={styles.iconContainer}>
+              <Image
+                source={localAsset}
+                style={styles.roomIconImage}
+                resizeMode="cover"
+              />
+              {isActive && <View style={styles.iconActiveDot} />}
+            </View>
           );
         }
 
-        // Fallback: Colored circle with icon based on category
-        const isGeneral = item.category === 'general';
-        const bgColor = fallbackColor ? fallbackColor + '20' : (isGeneral ? 'rgba(100,181,246,0.12)' : 'rgba(233,69,96,0.12)');
-        const iconColor = fallbackColor ?? (isGeneral ? '#64B5F6' : C.primary);
+        // Fallback: Clean icon container
+        const bgColor = fallbackColor
+          ? `${fallbackColor}15`
+          : (categoryIsGeneral ? 'rgba(99,102,241,0.1)' : 'rgba(236,72,153,0.1)');
+        const borderColor = fallbackColor
+          ? `${fallbackColor}25`
+          : (categoryIsGeneral ? 'rgba(99,102,241,0.2)' : 'rgba(236,72,153,0.2)');
+        const iconColor = fallbackColor ?? (categoryIsGeneral ? '#818CF8' : '#F472B6');
 
         return (
-          <View style={[styles.roomIcon, { backgroundColor: bgColor }]}>
-            <Ionicons
-              name={isGeneral ? 'globe' : 'language'}
-              size={22}
-              color={iconColor}
-            />
+          <View style={styles.iconContainer}>
+            <View style={[styles.roomIcon, { backgroundColor: bgColor, borderColor }]}>
+              <Ionicons
+                name={categoryIsGeneral ? 'globe' : 'chatbubbles'}
+                size={24}
+                color={iconColor}
+              />
+            </View>
+            {isActive && <View style={styles.iconActiveDot} />}
           </View>
         );
       };
 
-      // ISSUE 2 & 3 FIX: Private rooms use compact layout without message preview
       const isPrivateRoom = item.isPrivate === true;
 
       return (
-        <TouchableOpacity
-          style={[styles.roomCard, isPrivateRoom && styles.privateRoomCard]}
+        <Pressable
+          style={({ pressed }) => [
+            styles.roomCard,
+            isGeneral && styles.roomCardGeneral,
+            isPrivateRoom && styles.privateRoomCard,
+            pressed && styles.roomCardPressed,
+          ]}
           onPress={() => handleOpenRoom(item.id)}
-          activeOpacity={0.7}
         >
           {renderRoomIcon()}
 
           <View style={styles.roomInfo}>
             <View style={styles.roomNameRow}>
               {isPrivateRoom && (
-                <Ionicons name="lock-closed" size={12} color={C.textLight} style={{ marginRight: 4 }} />
+                <View style={styles.privateBadge}>
+                  <Ionicons name="lock-closed" size={10} color="#A78BFA" />
+                </View>
               )}
-              <Text style={styles.roomName}>{item.name}</Text>
+              {/* P1-002 FIX: Add numberOfLines for consistent truncation */}
+              <Text
+                style={[styles.roomName, isGeneral && styles.roomNameGeneral]}
+                numberOfLines={1}
+              >
+                {item.name}
+              </Text>
               {unreadCount > 0 && (
                 <View style={styles.unreadBadge}>
                   <Text style={styles.unreadText}>{unreadCount > 99 ? '99+' : unreadCount}</Text>
                 </View>
               )}
             </View>
-            {/* ISSUE 2 FIX: Skip message preview for private rooms */}
-            {!isPrivateRoom && (
-              item.lastMessageText ? (
-                <Text style={styles.roomPreview} numberOfLines={1}>
-                  {item.lastMessageText}
-                </Text>
-              ) : (
-                <Text style={styles.roomPreviewEmpty}>No messages yet</Text>
-              )
-            )}
-            <View style={styles.roomMeta}>
-              <Ionicons name="people" size={11} color={C.textLight} />
-              <Text style={styles.roomMembers}>{item.memberCount}</Text>
+
+            {/* Activity status */}
+            <View style={styles.activityRow}>
+              <View style={[styles.liveIndicator, isActive && styles.liveIndicatorActive]} />
+              <Text style={[styles.activityText, isActive && styles.activityTextActive]}>
+                {getActivityCopy()}
+              </Text>
             </View>
           </View>
 
-          <Ionicons name="chevron-forward" size={16} color={C.textLight} />
-        </TouchableOpacity>
+          {/* CTA arrow */}
+          <View style={styles.ctaArrow}>
+            {/* P2-009: Improved chevron contrast */}
+            <Ionicons name="chevron-forward" size={18} color="rgba(255,255,255,0.45)" />
+          </View>
+        </Pressable>
       );
     },
     [handleOpenRoom, unreadCounts]
@@ -697,8 +794,9 @@ export default function ChatRoomsScreen() {
     );
   }
 
-  // Gate: Wait for Convex data to load
-  if (checkingPreferred || isConvexLoading) {
+  // Gate 2: Wait for Convex data to load AND preferred room validation
+  // FLICKER FIX: Include isValidationLoading to prevent flash while validating preferred room access
+  if (checkingPreferred || isConvexLoading || isProfileLoading || isValidationLoading) {
     return (
       <View style={[styles.container, { paddingTop: insets.top }]}>
         <View style={styles.header}>
@@ -706,16 +804,46 @@ export default function ChatRoomsScreen() {
         </View>
         <View style={styles.loadingContainer}>
           <ActivityIndicator size="large" color={C.primary} />
+          <Text style={styles.loadingText}>Loading rooms...</Text>
         </View>
       </View>
     );
   }
 
+  // Gate 3: PENDING REDIRECT - All conditions met, waiting for useFocusEffect to fire
+  // This catches the gap between "validation complete" and "redirect effect fired"
+  // Without this gate, homepage flashes for one frame before redirect
+  const willRedirectToPreferredRoom =
+    isNavigationReady &&
+    effectivePreferredRoomId &&
+    isPreferredRoomValid &&
+    !hasRedirectedInSession;
+
+  if (willRedirectToPreferredRoom) {
+    return (
+      <View style={[styles.container, { paddingTop: insets.top }]}>
+        <View style={styles.loadingContainer}>
+          <ActivityIndicator size="large" color={C.primary} />
+        </View>
+      </View>
+    );
+  }
+
+  // Gate: Show profile setup if user doesn't have a chat room identity
+  if (needsProfileSetup) {
+    return (
+      <ChatRoomIdentitySetup
+        onComplete={() => setProfileSetupComplete(true)}
+      />
+    );
+  }
+
   return (
     <View style={[styles.container, { paddingTop: insets.top }]}>
-      {/* Simple heading - NO icons on HOME screen */}
+      {/* PREMIUM: Refined header */}
       <View style={styles.header}>
         <Text style={styles.headerTitle}>Chat Rooms</Text>
+        <Text style={styles.headerSubtitle}>Join the conversation</Text>
       </View>
 
       <FlatList
@@ -723,51 +851,59 @@ export default function ChatRoomsScreen() {
         renderItem={null}
         ListHeaderComponent={
           <>
-            {/* Section 1: General */}
-            <Text style={styles.sectionTitle}>General</Text>
+            {/* Section 1: General - Featured rooms */}
+            <View style={styles.sectionHeader}>
+              <View style={styles.sectionDot} />
+              <Text style={styles.sectionTitle}>Featured</Text>
+            </View>
             {generalRooms.map((room) => (
-              <React.Fragment key={room.id}>
-                {renderRoom({ item: room })}
-              </React.Fragment>
+              <RoomCard key={room.id} item={room} isGeneral={true} />
             ))}
 
             {/* Section 2: Languages */}
-            <Text style={styles.sectionTitle}>Languages</Text>
+            <View style={styles.sectionHeader}>
+              <View style={[styles.sectionDot, styles.sectionDotLanguage]} />
+              <Text style={styles.sectionTitle}>Languages</Text>
+            </View>
             {languageRooms.map((room) => (
-              <React.Fragment key={room.id}>
-                {renderRoom({ item: room })}
-              </React.Fragment>
+              <RoomCard key={room.id} item={room} isGeneral={false} />
             ))}
 
             {/* Section 3: Create Private Room CTA */}
             <View style={styles.createPrivateSection}>
-              <TouchableOpacity
-                style={styles.addRoomButton}
+              <Pressable
+                style={({ pressed }) => [
+                  styles.addRoomButton,
+                  pressed && styles.addRoomButtonPressed,
+                ]}
                 onPress={handleCreateRoom}
-                activeOpacity={0.7}
               >
                 <View style={styles.addRoomIcon}>
-                  <Ionicons name="lock-closed" size={22} color={C.primary} />
+                  <Ionicons name="add" size={24} color="#A78BFA" />
                 </View>
-                <Text style={styles.addRoomText}>Create Private Room</Text>
-                <Ionicons name="chevron-forward" size={16} color={C.textLight} />
-              </TouchableOpacity>
+                <View style={styles.addRoomContent}>
+                  <Text style={styles.addRoomText}>Create Private Room</Text>
+                  <Text style={styles.addRoomHint}>Invite-only conversation</Text>
+                </View>
+                <View style={styles.ctaArrow}>
+                  {/* P2-009: Improved chevron contrast */}
+            <Ionicons name="chevron-forward" size={18} color="rgba(255,255,255,0.45)" />
+                </View>
+              </Pressable>
             </View>
 
             {/* Section 4: Private Rooms - show if any private rooms exist */}
-            {/* ISSUE 1 FIX: Removed join-code input UI - tapping room card handles entry */}
             {privateRooms.length > 0 && (
               <>
                 {/* Private Rooms header */}
-                <View style={styles.privateRoomsSectionHeader}>
-                  <Text style={styles.sectionTitle}>Private Rooms</Text>
+                <View style={styles.sectionHeader}>
+                  <View style={[styles.sectionDot, styles.sectionDotPrivate]} />
+                  <Text style={styles.sectionTitle}>Your Private Rooms</Text>
                 </View>
 
                 {/* Private Rooms List */}
                 {privateRooms.map((room) => (
-                  <React.Fragment key={room.id}>
-                    {renderRoom({ item: room })}
-                  </React.Fragment>
+                  <RoomCard key={room.id} item={room} />
                 ))}
               </>
             )}
@@ -787,123 +923,207 @@ export default function ChatRoomsScreen() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: C.background,
+    backgroundColor: '#0F0F14', // Softer dark base
   },
+  // ─── HEADER ───
   header: {
-    paddingHorizontal: 16,
-    paddingVertical: 12,
+    paddingHorizontal: 20,
+    paddingTop: 16,
+    paddingBottom: 18,
     borderBottomWidth: 1,
-    borderBottomColor: C.surface,
+    borderBottomColor: 'rgba(255,255,255,0.06)',
+    backgroundColor: '#111116', // Slightly elevated
   },
   headerTitle: {
-    fontSize: 24,
+    fontSize: 32,
     fontWeight: '700',
-    color: C.text,
+    color: '#FFFFFF',
+    letterSpacing: -0.5,
+  },
+  headerSubtitle: {
+    fontSize: 14,
+    fontWeight: '500',
+    color: 'rgba(255,255,255,0.45)',
+    marginTop: 4,
   },
   listContent: {
-    paddingBottom: 24,
+    paddingBottom: 32,
+  },
+  // ─── SECTION HEADERS ───
+  sectionHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    paddingHorizontal: 16,
+    paddingTop: 24,
+    paddingBottom: 12,
+    gap: 8,
+  },
+  sectionDot: {
+    width: 4,
+    height: 4,
+    borderRadius: 2,
+    backgroundColor: '#818CF8', // Indigo for featured
+  },
+  sectionDotLanguage: {
+    backgroundColor: '#F472B6', // Pink for languages
+  },
+  sectionDotPrivate: {
+    backgroundColor: '#A78BFA', // Purple for private
   },
   sectionTitle: {
-    fontSize: 12,
-    fontWeight: '700',
-    color: C.textLight,
+    fontSize: 11,
+    fontWeight: '600',
+    color: 'rgba(255,255,255,0.5)',
     textTransform: 'uppercase',
-    letterSpacing: 0.8,
-    paddingHorizontal: 14,
-    paddingTop: 14,
-    paddingBottom: 8,
+    letterSpacing: 1.2,
   },
+  // ─── ROOM CARDS ───
   roomCard: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: C.surface,
+    backgroundColor: '#1A1A1F', // Slightly lighter surface
     marginHorizontal: 12,
     marginBottom: 8,
-    borderRadius: 12,
+    borderRadius: 14,
     paddingHorizontal: 14,
-    paddingVertical: 12,
+    paddingVertical: 14,
     gap: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.05)',
   },
-  // ISSUE 3 FIX: Compact private room card style
+  roomCardGeneral: {
+    backgroundColor: '#1C1C24', // Slightly tinted for featured
+    borderColor: 'rgba(99,102,241,0.1)',
+  },
+  roomCardPressed: {
+    opacity: 0.7,
+  },
   privateRoomCard: {
-    paddingVertical: 8,
-    marginBottom: 6,
+    paddingVertical: 12,
+    backgroundColor: '#1A1A22',
+    borderColor: 'rgba(167,139,250,0.08)',
+  },
+  // ─── ROOM ICONS ───
+  iconContainer: {
+    position: 'relative',
   },
   roomIcon: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
-    backgroundColor: 'rgba(233,69,96,0.12)',
+    width: 48,
+    height: 48,
+    borderRadius: 12,
     alignItems: 'center',
     justifyContent: 'center',
-  },
-  roomIconGeneral: {
-    backgroundColor: 'rgba(100,181,246,0.12)',
+    borderWidth: 1,
   },
   roomIconImage: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
+    width: 48,
+    height: 48,
+    borderRadius: 12,
+    borderWidth: 1,
+    borderColor: 'rgba(255,255,255,0.08)',
+  },
+  iconActiveDot: {
+    position: 'absolute',
+    bottom: -1,
+    right: -1,
+    width: 12,
+    height: 12,
+    borderRadius: 6,
+    backgroundColor: '#22C55E',
+    borderWidth: 2,
+    borderColor: '#0F0F14',
   },
   roomInfo: {
     flex: 1,
+    gap: 4,
   },
   roomNameRow: {
     flexDirection: 'row',
     alignItems: 'center',
     gap: 8,
-    marginBottom: 4,
   },
   roomName: {
-    fontSize: 15,
+    fontSize: 16,
     fontWeight: '600',
-    color: C.text,
+    color: '#FFFFFF',
+    letterSpacing: -0.2,
+    // P1-002 FIX: Enable text shrinking for truncation
+    flexShrink: 1,
   },
-  unreadBadge: {
-    minWidth: 20,
+  roomNameGeneral: {
+    fontSize: 17,
+    fontWeight: '700',
+  },
+  // P2-016: Improved private room badge - slightly larger for visibility
+  privateBadge: {
+    width: 20,
     height: 20,
-    borderRadius: 10,
-    backgroundColor: C.primary,
+    borderRadius: 6,
+    backgroundColor: 'rgba(167,139,250,0.2)',
     alignItems: 'center',
     justifyContent: 'center',
-    paddingHorizontal: 6,
+  },
+  // ─── UNREAD BADGE ───
+  unreadBadge: {
+    minWidth: 18,
+    height: 18,
+    borderRadius: 9,
+    backgroundColor: '#EC4899',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 5,
   },
   unreadText: {
-    fontSize: 11,
+    fontSize: 10,
     fontWeight: '700',
     color: '#FFFFFF',
   },
-  roomPreview: {
-    fontSize: 14,
-    color: C.textLight,
-    marginBottom: 4,
-  },
-  roomPreviewEmpty: {
-    fontSize: 14,
-    color: C.textLight,
-    fontStyle: 'italic',
-    marginBottom: 4,
-  },
-  roomMeta: {
+  // ─── ACTIVITY STATUS ───
+  activityRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 4,
+    gap: 6,
   },
-  roomMembers: {
-    fontSize: 12,
-    color: C.textLight,
+  // P2-017: Improved section dots - slightly larger for visibility
+  liveIndicator: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: 'rgba(255,255,255,0.25)',
+  },
+  liveIndicatorActive: {
+    backgroundColor: '#22C55E',
+  },
+  activityText: {
+    fontSize: 13,
+    fontWeight: '500',
+    color: 'rgba(255,255,255,0.4)',
+  },
+  activityTextActive: {
+    color: '#22C55E',
+  },
+  // P2-009: Improved chevron contrast
+  ctaArrow: {
+    width: 24,
+    height: 24,
+    borderRadius: 6,
+    backgroundColor: 'rgba(255,255,255,0.05)',
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   footerSection: {
     paddingTop: 16,
     paddingHorizontal: 12,
   },
+  // P2-018: Footer spacer using safe area aware value
   footerSpacer: {
-    height: 24,
+    height: 40, // Slightly taller for better bottom padding
   },
+  // ─── CREATE PRIVATE SECTION ───
   createPrivateSection: {
-    paddingTop: 16,
+    paddingTop: 20,
     paddingHorizontal: 12,
-    paddingBottom: 4,
+    paddingBottom: 8,
   },
   privateRoomsSectionHeader: {
     flexDirection: 'row',
@@ -915,52 +1135,68 @@ const styles = StyleSheet.create({
     flexDirection: 'row',
     alignItems: 'center',
     gap: 4,
-    paddingVertical: 4,
-    paddingHorizontal: 8,
-    borderRadius: 6,
-    backgroundColor: C.surface,
+    paddingVertical: 6,
+    paddingHorizontal: 10,
+    borderRadius: 8,
+    backgroundColor: 'rgba(167,139,250,0.1)',
   },
   resetPrivateRoomsText: {
     fontSize: 12,
-    fontWeight: '500',
-    color: C.textLight,
+    fontWeight: '600',
+    color: '#A78BFA',
   },
+  // ─── ADD ROOM BUTTON ───
   addRoomButton: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: C.surface,
-    borderRadius: 12,
+    backgroundColor: '#1A1A22',
+    borderRadius: 14,
     paddingHorizontal: 14,
     paddingVertical: 14,
     gap: 12,
     borderWidth: 1,
-    borderColor: C.accent,
+    borderColor: 'rgba(167,139,250,0.12)',
     borderStyle: 'dashed',
   },
+  addRoomButtonPressed: {
+    opacity: 0.7,
+  },
   addRoomIcon: {
-    width: 44,
-    height: 44,
-    borderRadius: 22,
-    backgroundColor: 'rgba(233,69,96,0.12)',
+    width: 48,
+    height: 48,
+    borderRadius: 12,
+    backgroundColor: 'rgba(167,139,250,0.08)',
     alignItems: 'center',
     justifyContent: 'center',
+    borderWidth: 1,
+    borderColor: 'rgba(167,139,250,0.15)',
+  },
+  addRoomContent: {
+    flex: 1,
+    gap: 2,
   },
   addRoomText: {
-    flex: 1,
-    fontSize: 15,
+    fontSize: 16,
     fontWeight: '600',
-    color: C.primary,
+    color: '#A78BFA',
+    letterSpacing: -0.2,
   },
-  // P2 CR-010: Loading state styles
+  addRoomHint: {
+    fontSize: 12,
+    fontWeight: '500',
+    color: 'rgba(167,139,250,0.6)',
+  },
+  // ─── LOADING STATE ───
   loadingContainer: {
     flex: 1,
     justifyContent: 'center',
     alignItems: 'center',
     gap: 12,
+    backgroundColor: '#0F0F14',
   },
   loadingText: {
     fontSize: 14,
-    color: C.textLight,
+    color: 'rgba(255,255,255,0.5)',
   },
   // Phase-2: Private rooms styles
   joinCodeRow: {

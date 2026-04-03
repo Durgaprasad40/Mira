@@ -223,6 +223,8 @@ export const SIZES = {
   },
   /** Touch target minimum (accessibility) */
   touchTarget: moderateScale(44, 0.25),
+  /** P2-011: Badge size for notification indicators */
+  badgeSize: moderateScale(16, 0.3),
 } as const;
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -238,6 +240,7 @@ export const SCREEN = {
   isSmall: SCREEN_WIDTH < 360,
   isMedium: SCREEN_WIDTH >= 360 && SCREEN_WIDTH < 400,
   isLarge: SCREEN_WIDTH >= 400,
+  isTablet: SCREEN_WIDTH >= 600, // Tablet detection for layout constraints
   isShort: SCREEN_HEIGHT < 700,
   isTall: SCREEN_HEIGHT >= 800,
 } as const;
@@ -290,4 +293,251 @@ export const FLEX = {
   center: { alignItems: 'center' as const, justifyContent: 'center' as const },
   /** Space between */
   spaceBetween: { justifyContent: 'space-between' as const },
+} as const;
+
+// ═══════════════════════════════════════════════════════════════════════════
+// TYPOGRAPHY SCALING
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Normalize font size for consistent rendering across devices.
+ * Uses conservative scaling to prevent text from becoming too small or large.
+ *
+ * @param size - Base font size
+ * @param options - Scaling options
+ * @returns Scaled font size
+ */
+export function normalizeFont(
+  size: number,
+  options: { minSize?: number; maxSize?: number; factor?: number } = {}
+): number {
+  const { minSize = size * 0.85, maxSize = size * 1.15, factor = 0.35 } = options;
+  const scaled = moderateScale(size, factor);
+  return Math.round(Math.max(minSize, Math.min(maxSize, scaled)));
+}
+
+/**
+ * Get responsive font size for tab labels.
+ * Ensures labels fit on smaller screens without clipping.
+ * Slightly larger on tablets for comfortable reading.
+ */
+export function getTabLabelFontSize(): number {
+  // Tablet: comfortable larger size
+  if (SCREEN.isTablet) return 12;
+  // Small phones: reduce to prevent clipping
+  if (SCREEN_WIDTH < 360) return 9;
+  if (SCREEN_WIDTH < 390) return 10;
+  return 11;
+}
+
+/**
+ * Get max width for tab labels to prevent overflow.
+ * Based on 5 tabs, accounts for icon and padding.
+ */
+export function getTabLabelMaxWidth(): number {
+  // Available width per tab = screen width / 5 tabs - icon and padding
+  const tabWidth = SCREEN_WIDTH / 5;
+  return Math.floor(tabWidth - 24); // Reserve 24px for icon and padding
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CHAT UI CONSTANTS
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Chat-specific sizing constants with responsive scaling.
+ * Tablet: slightly larger for comfortable viewing on bigger screens.
+ */
+export const CHAT_SIZES = {
+  /** Message bubble max width - wider on tablets */
+  bubbleMaxWidth: SCREEN.isTablet
+    ? Math.min(SCREEN_WIDTH * 0.65, 480)
+    : Math.min(SCREEN_WIDTH * 0.78, 320),
+  /** Avatar size in message list - larger on tablets */
+  messageAvatar: SCREEN.isTablet ? moderateScale(40, 0.3) : moderateScale(34, 0.3),
+  /** Avatar size in member strip - larger on tablets */
+  stripAvatar: SCREEN.isTablet ? moderateScale(32, 0.3) : moderateScale(28, 0.3),
+  /** Avatar size in online users panel - larger on tablets */
+  panelAvatar: SCREEN.isTablet ? moderateScale(42, 0.3) : moderateScale(38, 0.3),
+  /** Bubble border radius */
+  bubbleRadius: moderateScale(16, 0.25),
+  /** Reply preview max lines */
+  replyPreviewLines: SCREEN.isSmall ? 2 : 3,
+  /** Minimum touch target - larger on tablets */
+  touchTarget: SCREEN.isTablet ? 48 : 44,
+  /** Container padding - larger on tablets */
+  containerPadding: SCREEN.isTablet ? moderateScale(16, 0.5) : moderateScale(12, 0.5),
+  /** Emoji button size in reaction bar - needs to be touch-friendly */
+  emojiButton: moderateScale(40, 0.4),
+  /** Emoji font size in reaction bar - scales carefully to avoid rendering issues */
+  emojiSize: moderateScale(22, 0.3),  // Slightly smaller than 24 for better perf
+  /** Emoji font size in reaction chips - smaller for inline display */
+  emojiChipSize: moderateScale(14, 0.3),
+  /** Header avatar size */
+  headerAvatar: moderateScale(32, 0.4),
+  /** Header icon sizes */
+  headerIconSm: moderateScale(22, 0.3),
+  headerIconMd: moderateScale(24, 0.3),
+  headerIconLg: moderateScale(26, 0.3),
+} as const;
+
+/**
+ * Typography sizes for Chat Rooms - responsive with careful scaling.
+ * These values prevent text from becoming too small on small screens
+ * or too large on tablets.
+ */
+export const CHAT_FONTS = {
+  /** Header title (room name) */
+  headerTitle: normalizeFont(18, { minSize: 16, maxSize: 20 }),
+  /** Header subtitle (countdown, etc.) */
+  headerSubtitle: normalizeFont(12, { minSize: 11, maxSize: 13 }),
+  /** Online count badge text */
+  onlineCount: normalizeFont(12, { minSize: 11, maxSize: 13 }),
+  /** Notification badge text */
+  badgeText: normalizeFont(9, { minSize: 8, maxSize: 10 }),
+  /** Message body text */
+  messageText: normalizeFont(14, { minSize: 13, maxSize: 15 }),
+  /** Sender name in messages */
+  senderName: normalizeFont(11, { minSize: 10, maxSize: 12 }),
+  /** Reaction chip count */
+  reactionCount: normalizeFont(12, { minSize: 11, maxSize: 13 }),
+  /** User name in panels/lists */
+  userName: normalizeFont(14, { minSize: 13, maxSize: 15 }),
+  /** Secondary/timestamp text */
+  secondary: normalizeFont(10, { minSize: 9, maxSize: 11 }),
+  /** Label text (e.g., "X online") */
+  label: normalizeFont(12, { minSize: 11, maxSize: 13 }),
+  // P2-001: Additional typography constants for consistency
+  /** Panel header title */
+  panelTitle: normalizeFont(18, { minSize: 16, maxSize: 20 }),
+  /** Section header text */
+  sectionHeader: normalizeFont(11, { minSize: 10, maxSize: 12 }),
+  /** Room card title */
+  roomTitle: normalizeFont(16, { minSize: 15, maxSize: 17 }),
+  /** Room card subtitle/activity */
+  roomActivity: normalizeFont(13, { minSize: 12, maxSize: 14 }),
+  /** Empty state title */
+  emptyTitle: normalizeFont(16, { minSize: 15, maxSize: 17 }),
+  /** Empty state subtitle */
+  emptySubtitle: normalizeFont(13, { minSize: 12, maxSize: 14 }),
+  /** Button text */
+  buttonText: normalizeFont(14, { minSize: 13, maxSize: 15 }),
+  /** Input text */
+  inputText: normalizeFont(15, { minSize: 14, maxSize: 16 }),
+  /** Date separator */
+  dateSeparator: normalizeFont(12, { minSize: 11, maxSize: 13 }),
+} as const;
+
+// ═══════════════════════════════════════════════════════════════════════════
+// P2-003: AVATAR STYLING CONSTANTS
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Standardized avatar border widths for consistency across Chat Rooms.
+ * P2-003: Consistent border treatment across all avatar surfaces.
+ */
+export const AVATAR_BORDERS = {
+  /** Standard avatar ring (message list, panels) */
+  standard: 2.5,
+  /** Thicker ring for emphasis (profile, header) */
+  emphasis: 3,
+  /** Thin ring for compact displays */
+  thin: 2,
+} as const;
+
+// ═══════════════════════════════════════════════════════════════════════════
+// P3-005: GENDER-BASED AVATAR RING COLORS
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Gender-based avatar ring colors for Chat Rooms.
+ * P3-005: Centralized to avoid duplicate definitions.
+ */
+export const GENDER_COLORS = {
+  male: '#3B82F6',     // Clear blue (saturated for visibility)
+  female: '#E879F9',   // Light fuchsia/magenta (contrasts with pink/red avatars)
+  other: '#9CA3AF',    // Neutral gray
+  default: '#9CA3AF',  // Default neutral
+} as const;
+
+// ═══════════════════════════════════════════════════════════════════════════
+// P2-004: SHADOW UTILITIES
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Cross-platform shadow styles for premium depth.
+ * P2-004: Consistent shadow/elevation across iOS and Android.
+ */
+export const SHADOWS = {
+  /** Subtle shadow for message bubbles */
+  bubble: Platform.select({
+    ios: {
+      shadowColor: '#000',
+      shadowOffset: { width: 0, height: 1 },
+      shadowOpacity: 0.12,
+      shadowRadius: 3,
+    },
+    android: {
+      elevation: 2,
+    },
+  }),
+  /** Medium shadow for cards */
+  card: Platform.select({
+    ios: {
+      shadowColor: '#000',
+      shadowOffset: { width: 0, height: 2 },
+      shadowOpacity: 0.15,
+      shadowRadius: 6,
+    },
+    android: {
+      elevation: 4,
+    },
+  }),
+  /** Prominent shadow for modals/overlays */
+  modal: Platform.select({
+    ios: {
+      shadowColor: '#000',
+      shadowOffset: { width: 0, height: 4 },
+      shadowOpacity: 0.2,
+      shadowRadius: 12,
+    },
+    android: {
+      elevation: 8,
+    },
+  }),
+} as const;
+
+// ═══════════════════════════════════════════════════════════════════════════
+// P2-007: CHAT-SPECIFIC COLOR CONSTANTS
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Centralized color constants for Chat Rooms to reduce raw color duplication.
+ * P2-007: These extend INCOGNITO_COLORS for Chat-specific uses.
+ */
+export const CHAT_COLORS = {
+  /** Primary purple accent */
+  primary: '#6D28D9',
+  /** Light purple for highlights */
+  primaryLight: '#A78BFA',
+  /** Very light purple for subtle backgrounds */
+  primarySubtle: 'rgba(109, 40, 217, 0.15)',
+  /** Success/online green */
+  online: '#22C55E',
+  /** Error/warning red */
+  error: '#EF4444',
+  /** Warning orange */
+  warning: '#FF9800',
+  /** Chevron/muted icon color */
+  chevron: 'rgba(255,255,255,0.35)',
+  /** Chevron hover/active */
+  chevronActive: 'rgba(255,255,255,0.5)',
+  /** Message bubble - sender */
+  bubbleSender: '#6D28D9',
+  /** Message bubble - receiver */
+  bubbleReceiver: '#1A2238',
+  /** Quote block background */
+  quoteBackground: '#212840',
+  /** Quote accent bar */
+  quoteAccent: 'rgba(167, 139, 250, 0.6)',
 } as const;
