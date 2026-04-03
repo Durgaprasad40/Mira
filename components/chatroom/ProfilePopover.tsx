@@ -15,8 +15,11 @@ import {
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import * as ImagePicker from 'expo-image-picker';
+import { useMutation } from 'convex/react';
+import { api } from '@/convex/_generated/api';
 import { INCOGNITO_COLORS } from '@/lib/constants';
 import { useChatRoomProfileStore } from '@/stores/chatRoomProfileStore';
+import { useAuthStore } from '@/stores/authStore';
 
 const C = INCOGNITO_COLORS;
 const BIO_MAX_LENGTH = 250;
@@ -65,7 +68,13 @@ export default function ProfilePopover({
   roomPassword,
   onEndRoom,
 }: ProfilePopoverProps) {
-  // Persisted profile store
+  // Auth for Convex
+  const authUserId = useAuthStore((s) => s.userId);
+
+  // Convex mutation for saving chat room profile
+  const updateChatRoomProfile = useMutation(api.chatRooms.createOrUpdateChatRoomProfile);
+
+  // Persisted profile store (for backwards compatibility)
   const { setProfile: persistProfile, bio: persistedBio } = useChatRoomProfileStore();
 
   // Edit Profile modal state
@@ -145,35 +154,56 @@ export default function ProfilePopover({
     }
   };
 
-  const handleSaveProfile = () => {
+  const handleSaveProfile = async () => {
     const trimmedName = editName.trim();
     if (trimmedName.length < 2) {
       Alert.alert('Invalid Name', 'Display name must be at least 2 characters.');
+      return;
+    }
+    if (trimmedName.length > 30) {
+      Alert.alert('Invalid Name', 'Display name must be 30 characters or less.');
       return;
     }
 
     const trimmedBio = editBio.trim();
     if (__DEV__) console.log('[PROFILE] bio_saved', { length: trimmedBio.length });
 
+    if (!authUserId) {
+      Alert.alert('Error', 'Not authenticated. Please try again.');
+      return;
+    }
+
     setIsSaving(true);
 
-    // Persist to local store (AsyncStorage)
-    persistProfile({
-      displayName: trimmedName,
-      avatarUri: editAvatar ?? null,
-      bio: trimmedBio || null,
-    });
+    try {
+      // CHAT ROOM IDENTITY: Save to Convex backend (persistent)
+      await updateChatRoomProfile({
+        authUserId,
+        nickname: trimmedName,
+        avatarUrl: editAvatar ?? undefined,
+        bio: trimmedBio || undefined,
+      });
 
-    // Notify parent about the update
-    saveTimeoutRef.current = setTimeout(() => {
+      // Also persist to local store for immediate UI feedback
+      persistProfile({
+        displayName: trimmedName,
+        avatarUri: editAvatar ?? null,
+        bio: trimmedBio || null,
+      });
+
+      // Notify parent about the update
       onProfileUpdate?.({
         username: trimmedName !== username ? trimmedName : undefined,
         avatar: editAvatar !== avatar ? editAvatar : undefined,
       });
-      setIsSaving(false);
       setEditModalVisible(false);
       onClose();
-    }, 300);
+    } catch (error: any) {
+      console.error('[PROFILE] Save failed:', error);
+      Alert.alert('Error', error.message || 'Failed to save profile. Please try again.');
+    } finally {
+      setIsSaving(false);
+    }
   };
 
   if (!visible) return null;

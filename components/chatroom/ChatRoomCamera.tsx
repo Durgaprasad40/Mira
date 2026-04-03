@@ -160,6 +160,7 @@ export default function ChatRoomCamera({
       const photo = await cameraRef.current.takePictureAsync({
         quality: 0.85,
         skipProcessing: false,
+        shutterSound: false, // Silent capture - no shutter click sound
       });
       // STABILITY FIX: C-7 - Guard setState after async operation
       if (!mountedRef.current) return;
@@ -347,7 +348,9 @@ export default function ChatRoomCamera({
 
   // Preview captured media
   if (capturedUri && capturedKind) {
-    const unmirrorPreview = capturedFacing === 'front';
+    // SELFIE-VIDEO-FIX: Photos need preview transform (file is raw, we flip before send)
+    // Videos with mirror={true} are already correctly oriented in the file
+    const unmirrorPhotoPreview = capturedFacing === 'front' && capturedKind === 'photo';
     return (
       <Modal visible={visible} transparent={false} animationType="fade">
         <View style={[styles.container, { paddingTop: insets.top }]}>
@@ -355,13 +358,13 @@ export default function ChatRoomCamera({
             {capturedKind === 'photo' ? (
               <Image
                 source={{ uri: capturedUri }}
-                style={[styles.previewMedia, unmirrorPreview && styles.unmirror]}
+                style={[styles.previewMedia, unmirrorPhotoPreview && styles.unmirror]}
                 contentFit="contain"
               />
             ) : (
               <Video
                 source={{ uri: capturedUri }}
-                style={[styles.previewMedia, unmirrorPreview && styles.unmirror]}
+                style={styles.previewMedia}
                 resizeMode={ResizeMode.CONTAIN}
                 shouldPlay
                 isLooping
@@ -410,19 +413,21 @@ export default function ChatRoomCamera({
   }
 
   // Live camera
-  const applyUnmirror = facing === 'front';
+  // SELFIE-VIDEO-FIX: Use native mirror prop for front camera
+  // This ensures both preview AND recorded video are mirrored consistently
+  const isFrontCamera = facing === 'front';
 
   return (
     <Modal visible={visible} transparent={false} animationType="slide">
       <View style={styles.container}>
         <View style={styles.cameraStage}>
-          <View style={[styles.cameraSurface, applyUnmirror && styles.unmirror]}>
+          <View style={styles.cameraSurface}>
             <CameraView
               ref={cameraRef}
               style={styles.camera}
               facing={facing}
               mode={mode === 'photo' ? 'picture' : 'video'}
-              mirror={false}
+              mirror={isFrontCamera}
             />
           </View>
         </View>

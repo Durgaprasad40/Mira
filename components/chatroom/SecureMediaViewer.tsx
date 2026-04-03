@@ -24,7 +24,7 @@ import {
 import { Image } from 'expo-image';
 import { useVideoPlayer, VideoView } from 'expo-video';
 import { Ionicons } from '@expo/vector-icons';
-import { getVideoUri } from '@/lib/videoCache';
+import { getVideoUri, getCachedUri } from '@/lib/videoCache';
 
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 
@@ -68,12 +68,16 @@ interface SecureVideoPlayerProps {
  * VIDEO-CACHE-FIX: Uses cached video URI for instant playback on repeat views.
  */
 function SecureVideoPlayerInner({ mediaUri, isPlaying, visible }: SecureVideoPlayerProps) {
-  // VIDEO-CACHE-FIX: Track cached URI state
-  const [cachedUri, setCachedUri] = useState<string>(mediaUri);
-  const [isReady, setIsReady] = useState(false);
+  // VIDEO-CACHE-FIX: Check for synchronous cache hit first (instant playback)
+  const initialCached = getCachedUri(mediaUri);
+  const [cachedUri, setCachedUri] = useState<string>(initialCached || mediaUri);
+  const [isReady, setIsReady] = useState(!!initialCached);
 
-  // VIDEO-CACHE-FIX: Load cached URI on mount
+  // VIDEO-CACHE-FIX: Only fetch async if not already ready (sync cache miss)
   useEffect(() => {
+    // Skip if we got a sync cache hit (already ready)
+    if (isReady) return;
+
     let mounted = true;
 
     const loadCachedVideo = async () => {
@@ -97,7 +101,7 @@ function SecureVideoPlayerInner({ mediaUri, isPlaying, visible }: SecureVideoPla
     return () => {
       mounted = false;
     };
-  }, [mediaUri]);
+  }, [mediaUri, isReady]);
 
   // Use cached URI for player
   const player = useVideoPlayer(cachedUri, (p) => {

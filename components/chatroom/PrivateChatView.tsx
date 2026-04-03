@@ -12,11 +12,11 @@ import {
 } from 'react-native';
 import { Image } from 'expo-image';
 import { Ionicons } from '@expo/vector-icons';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { INCOGNITO_COLORS } from '@/lib/constants';
 import {
   DemoDM,
   DemoPrivateMessage,
-  DEMO_PRIVATE_MESSAGES,
   DEMO_CURRENT_USER,
 } from '@/lib/demoData';
 import MediaMessage from '@/components/chat/MediaMessage';
@@ -30,21 +30,8 @@ import { formatTime, shouldShowTimestamp } from '@/utils/chatTime';
 
 const C = INCOGNITO_COLORS;
 
-function getDemoPrivateMessages(dm: DemoDM): DemoPrivateMessage[] {
-  if (DEMO_PRIVATE_MESSAGES[dm.id]?.length) {
-    return DEMO_PRIVATE_MESSAGES[dm.id];
-  }
-  const now = Date.now();
-  return [
-    { id: `${dm.id}_1`, dmId: dm.id, senderId: dm.peerId, senderName: dm.peerName, text: 'Hey! Thanks for connecting.', createdAt: now - 1000 * 60 * 30 },
-    { id: `${dm.id}_me1`, dmId: dm.id, senderId: DEMO_CURRENT_USER.id, senderName: 'You', text: 'Hi! Nice to meet you here.', createdAt: now - 1000 * 60 * 28 },
-    { id: `${dm.id}_2`, dmId: dm.id, senderId: dm.peerId, senderName: dm.peerName, text: 'So what do you do?', createdAt: now - 1000 * 60 * 22 },
-    { id: `${dm.id}_me2`, dmId: dm.id, senderId: DEMO_CURRENT_USER.id, senderName: 'You', text: 'I work in tech. How about you?', createdAt: now - 1000 * 60 * 18 },
-    { id: `${dm.id}_3`, dmId: dm.id, senderId: dm.peerId, senderName: dm.peerName, text: 'Same here! I am a designer. What a coincidence.', createdAt: now - 1000 * 60 * 12 },
-    { id: `${dm.id}_me3`, dmId: dm.id, senderId: DEMO_CURRENT_USER.id, senderName: 'You', text: 'That is cool! We should chat more.', createdAt: now - 1000 * 60 * 8 },
-    { id: `${dm.id}_4`, dmId: dm.id, senderId: dm.peerId, senderName: dm.peerName, text: 'Definitely! What are you up to this weekend?', createdAt: now - 1000 * 60 * 3 },
-  ];
-}
+// NO DEMO DATA: Private messages start empty - no fake conversation history
+// Backend for Chat Room DMs does not exist yet - shows truthful empty state
 
 interface PrivateChatViewProps {
   dm: DemoDM;
@@ -59,9 +46,10 @@ interface PrivateChatViewProps {
 export default function PrivateChatView({ dm, onBack, topInset = 0, isModal = false, keyboardVisible = false }: PrivateChatViewProps) {
   const flatListRef = useRef<FlatList>(null);
   const [headerHeight, setHeaderHeight] = useState(0);
-  const [messages, setMessages] = useState<DemoPrivateMessage[]>(
-    () => getDemoPrivateMessages(dm)
-  );
+  // NO DEMO DATA: Start with empty messages - backend for Chat Room DMs does not exist yet
+  const [messages, setMessages] = useState<DemoPrivateMessage[]>([]);
+  // SAFE AREA FIX: Get bottom inset for navigation bar
+  const insets = useSafeAreaInsets();
   const [inputText, setInputText] = useState('');
   const [attachmentVisible, setAttachmentVisible] = useState(false);
   const [doodleVisible, setDoodleVisible] = useState(false);
@@ -344,13 +332,18 @@ export default function PrivateChatView({ dm, onBack, topInset = 0, isModal = fa
             ListEmptyComponent={
               <View style={styles.emptyContainer}>
                 <Ionicons name="chatbubble-outline" size={40} color={C.textLight} />
-                <Text style={styles.emptyText}>Start a conversation</Text>
+                <Text style={styles.emptyText}>No messages yet. Start the conversation.</Text>
               </View>
             }
           />
 
           {/* Input wrapper - with bottom padding for gesture bar + keyboard */}
-          <View style={[styles.inputWrapper, kbHeight > 0 && { marginBottom: kbHeight }]}>
+          {/* SAFE AREA FIX: Use insets.bottom when keyboard is hidden */}
+          <View style={[
+            styles.inputWrapper,
+            { paddingBottom: kbHeight > 0 ? 8 : insets.bottom },
+            kbHeight > 0 && { marginBottom: kbHeight }
+          ]}>
             <ChatComposer
               value={inputText}
               onChangeText={setInputText}
@@ -390,16 +383,19 @@ export default function PrivateChatView({ dm, onBack, topInset = 0, isModal = fa
             ListEmptyComponent={
               <View style={styles.emptyContainer}>
                 <Ionicons name="chatbubble-outline" size={40} color={C.textLight} />
-                <Text style={styles.emptyText}>Start a conversation</Text>
+                <Text style={styles.emptyText}>No messages yet. Start the conversation.</Text>
               </View>
             }
           />
-          <ChatComposer
-            value={inputText}
-            onChangeText={setInputText}
-            onSend={handleSend}
-            onPlusPress={() => setAttachmentVisible(true)}
-          />
+          {/* SAFE AREA FIX: Wrap ChatComposer with bottom inset padding */}
+          <View style={{ paddingBottom: insets.bottom }}>
+            <ChatComposer
+              value={inputText}
+              onChangeText={setInputText}
+              onSend={handleSend}
+              onPlusPress={() => setAttachmentVisible(true)}
+            />
+          </View>
         </KeyboardAvoidingView>
       )}
 
@@ -462,7 +458,7 @@ const styles = StyleSheet.create({
   inputWrapper: {
     paddingHorizontal: 0,
     paddingTop: 0,
-    paddingBottom: Platform.OS === 'android' ? 16 : 8, // Extra padding for gesture bar
+    // SAFE AREA FIX: paddingBottom now applied dynamically using insets.bottom
     borderTopWidth: 1,
     borderTopColor: C.accent,
     backgroundColor: C.background,

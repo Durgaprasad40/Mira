@@ -2789,11 +2789,25 @@ export interface DemoChatMessage {
   senderId: string;
   senderName: string;
   senderAvatar?: string;
+  senderAge?: number;
+  senderGender?: 'male' | 'female' | 'other';
   type: 'text' | 'image' | 'video' | 'doodle' | 'audio' | 'system';
   text?: string;
   mediaUrl?: string;
   audioUrl?: string;
   createdAt: number;
+  // Reply-to-message support
+  replyToMessageId?: string;
+  replyToSenderNickname?: string;
+  replyToSnippet?: string;
+  replyToType?: 'text' | 'image' | 'video' | 'doodle' | 'audio';
+  // @Mention support
+  mentions?: Array<{
+    userId: string;
+    nickname: string;
+    startIndex: number;
+    endIndex: number;
+  }>;
 }
 
 export const DEMO_CHAT_ROOMS: DemoChatRoom[] = [
@@ -2913,74 +2927,9 @@ export interface DemoPrivateMessage {
   createdAt: number;
 }
 
-export const DEMO_DM_INBOX: DemoDM[] = [
-  {
-    id: 'dm_1',
-    peerId: 'demo_profile_1',
-    peerName: 'Priya',
-    peerAvatar: 'https://images.unsplash.com/photo-1494790108377-be9c29b29330?w=100',
-    lastMessage: 'Hey! Saw you in the Global room.',
-    lastMessageAt: Date.now() - 1000 * 60 * 3,
-    unreadCount: 2,
-    visible: true,
-    hiddenUntilNextMessage: false,
-    sourceRoomId: 'cr_global', // From Global room
-  },
-  {
-    id: 'dm_2',
-    peerId: 'demo_profile_5',
-    peerName: 'Kavya',
-    peerAvatar: 'https://images.unsplash.com/photo-1524638431109-93d95c968f03?w=100',
-    lastMessage: 'That was hilarious 😂',
-    lastMessageAt: Date.now() - 1000 * 60 * 15,
-    unreadCount: 1,
-    visible: true,
-    hiddenUntilNextMessage: false,
-    sourceRoomId: 'cr_telugu', // From Telugu room
-  },
-  {
-    id: 'dm_3',
-    peerId: 'demo_profile_3',
-    peerName: 'Ananya',
-    peerAvatar: 'https://images.unsplash.com/photo-1517841905240-472988babdf9?w=100',
-    lastMessage: 'Sure, let me know when you are free.',
-    lastMessageAt: Date.now() - 1000 * 60 * 45,
-    unreadCount: 0,
-    visible: true,
-    hiddenUntilNextMessage: false,
-    sourceRoomId: 'cr_hindi', // From Hindi room (no unread)
-  },
-  {
-    id: 'dm_hidden_1',
-    peerId: 'demo_profile_7',
-    peerName: 'Divya',
-    peerAvatar: 'https://images.unsplash.com/photo-1502823403499-6ccfcf4fb453?w=100',
-    lastMessage: 'Hi there!',
-    lastMessageAt: Date.now() - 1000 * 60 * 60,
-    unreadCount: 0,
-    visible: false, // sent by me, no reply yet → hidden
-    hiddenUntilNextMessage: false,
-  },
-];
-
-// ──── Chat Room: Private Chat Messages (demo) ────
-export const DEMO_PRIVATE_MESSAGES: Record<string, DemoPrivateMessage[]> = {
-  dm_1: [
-    { id: 'pm_1_1', dmId: 'dm_1', senderId: 'demo_profile_1', senderName: 'Priya', text: 'Hey there!', createdAt: Date.now() - 1000 * 60 * 10 },
-    { id: 'pm_1_2', dmId: 'dm_1', senderId: 'demo_user_1', senderName: 'You', text: 'Hi! How are you?', createdAt: Date.now() - 1000 * 60 * 8 },
-    { id: 'pm_1_3', dmId: 'dm_1', senderId: 'demo_profile_1', senderName: 'Priya', text: 'Good! Just hanging out in the chat rooms.', createdAt: Date.now() - 1000 * 60 * 5 },
-    { id: 'pm_1_4', dmId: 'dm_1', senderId: 'demo_profile_1', senderName: 'Priya', text: 'Hey! Saw you in the Global room.', createdAt: Date.now() - 1000 * 60 * 3 },
-  ],
-  dm_2: [
-    { id: 'pm_2_1', dmId: 'dm_2', senderId: 'demo_user_1', senderName: 'You', text: 'That joke in the room was amazing', createdAt: Date.now() - 1000 * 60 * 20 },
-    { id: 'pm_2_2', dmId: 'dm_2', senderId: 'demo_profile_5', senderName: 'Kavya', text: 'That was hilarious 😂', createdAt: Date.now() - 1000 * 60 * 15 },
-  ],
-  dm_3: [
-    { id: 'pm_3_1', dmId: 'dm_3', senderId: 'demo_profile_3', senderName: 'Ananya', text: 'Want to catch up sometime?', createdAt: Date.now() - 1000 * 60 * 50 },
-    { id: 'pm_3_2', dmId: 'dm_3', senderId: 'demo_user_1', senderName: 'You', text: 'Sure! When works for you?', createdAt: Date.now() - 1000 * 60 * 48 },
-    { id: 'pm_3_3', dmId: 'dm_3', senderId: 'demo_profile_3', senderName: 'Ananya', text: 'Sure, let me know when you are free.', createdAt: Date.now() - 1000 * 60 * 45 },
-  ],
-};
+// REMOVED: DEMO_DM_INBOX and DEMO_PRIVATE_MESSAGES
+// Chat Room DMs now show truthful empty state (no backend exists yet)
+// Types DemoDM and DemoPrivateMessage are kept for local state structure
 
 // ──── Chat Room: Friend Requests ────
 export interface DemoFriendRequest {
