@@ -3,6 +3,7 @@ import { mutation, query, internalMutation, QueryCtx, MutationCtx } from './_gen
 import { Id } from './_generated/dataModel';
 import { softMaskText } from './softMask';
 import { resolveUserIdByAuthId } from './helpers';
+import { tryEarnCoinInDm } from './coinEarning';
 
 // Phase-2: Helper to check if user has any active chatRoom readOnly penalty
 async function hasActiveChatRoomPenalty(
@@ -243,9 +244,34 @@ export const sendMessage = mutation({
     }
 
     // Update conversation last message time
-    await ctx.db.patch(conversationId, {
+    // Anti-spam: Track initiator and recipient engagement for room-scoped threads
+    const conversationUpdate: {
+      lastMessageAt: number;
+      initiatorId?: any;
+      hasRecipientEngaged?: boolean;
+      expiresAt?: number;
+    } = {
       lastMessageAt: now,
-    });
+    };
+
+    // If this is a room-scoped conversation (sourceRoomId set)
+    if (conversation.sourceRoomId) {
+      // Set initiatorId on first message (if not already set)
+      if (!conversation.initiatorId) {
+        conversationUpdate.initiatorId = senderId;
+      }
+      // If sender is NOT the initiator, mark recipient as engaged
+      else if (conversation.initiatorId !== senderId && !conversation.hasRecipientEngaged) {
+        conversationUpdate.hasRecipientEngaged = true;
+      }
+
+      // Thread expiry: 1 hour after last message
+      // Every message extends the thread's life by 1 hour
+      const ONE_HOUR_MS = 60 * 60 * 1000;
+      conversationUpdate.expiresAt = now + ONE_HOUR_MS;
+    }
+
+    await ctx.db.patch(conversationId, conversationUpdate);
 
     // C1/C2/C3-REPAIR: Update recipient's unreadCount via recomputation (race-safe)
     // recipientId already defined from D1 blocking check above
@@ -254,6 +280,22 @@ export const sendMessage = mutation({
       await upsertParticipantUnreadCount(ctx, conversationId, recipientId);
       // Also ensure sender has a row (will have 0 unread since they just sent)
       await upsertParticipantUnreadCount(ctx, conversationId, senderId);
+    }
+
+    // ANTI-SPAM COIN REWARD: Award coin only if anti-spam rules pass
+    // Rules enforced by tryEarnCoinInDm:
+    // - Two-way interaction required (recipient messaged recently)
+    // - 12-second cooldown between coin earnings
+    // - Max 20 coins/hour per conversation
+    // - Spam messages (short/repeated) don't earn
+    if (recipientId && type === 'text') {
+      await tryEarnCoinInDm({
+        ctx,
+        senderId,
+        recipientId,
+        conversationId,
+        messageText: maskedContent,
+      });
     }
 
     // Create notification for recipient
@@ -423,6 +465,22 @@ export const sendPreMatchMessage = mutation({
     // Recompute from source of truth - avoids concurrent increment race conditions
     await upsertParticipantUnreadCount(ctx, conversation._id, toUserId);
     await upsertParticipantUnreadCount(ctx, conversation._id, fromUserId);
+
+    // ANTI-SPAM COIN REWARD: Award coin only if anti-spam rules pass
+    // Rules enforced by tryEarnCoinInDm:
+    // - Two-way interaction required (recipient messaged recently)
+    // - 12-second cooldown between coin earnings
+    // - Max 20 coins/hour per conversation
+    // - Spam messages (short/repeated) don't earn
+    if (msgType === 'text') {
+      await tryEarnCoinInDm({
+        ctx,
+        senderId: fromUserId,
+        recipientId: toUserId,
+        conversationId: conversation._id,
+        messageText: maskedContent,
+      });
+    }
 
     // 9-5: Notify recipient with TTL and dedupe
     // M1 FIX: Privacy-safe notification body - never expose message content
@@ -952,8 +1010,22 @@ export const getConversations = query({
       .filter((c) => {
         // Must be a participant
         if (!c.participants.includes(userId)) return false;
-        // Filter out expired confession-based conversations
-        if (c.confessionId && c.expiresAt && c.expiresAt <= now) return false;
+
+        // Filter out expired conversations (confession-based OR room-scoped threads)
+        // Room-scoped threads expire 1 hour after last message
+        if (c.expiresAt && c.expiresAt <= now) return false;
+
+        // Anti-spam: For room-scoped threads, hide from recipient until they engage
+        // - If I'm NOT the initiator AND recipient hasn't engaged yet, hide from my inbox
+        // - This prevents spam: one-sided outgoing messages don't clutter recipient's inbox
+        if (c.sourceRoomId && c.initiatorId) {
+          const amInitiator = c.initiatorId === userId;
+          // If I'm not the initiator and haven't engaged yet, hide this thread from my inbox
+          if (!amInitiator && !c.hasRecipientEngaged) {
+            return false;
+          }
+        }
+
         return true;
       })
       .slice(0, limit);

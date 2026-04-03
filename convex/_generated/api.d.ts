@@ -15,6 +15,7 @@ import type * as behaviorDetection from "../behaviorDetection.js";
 import type * as chatRooms from "../chatRooms.js";
 import type * as chatTod from "../chatTod.js";
 import type * as cleanup from "../cleanup.js";
+import type * as coinEarning from "../coinEarning.js";
 import type * as confessions from "../confessions.js";
 import type * as contentFilter from "../contentFilter.js";
 import type * as contentModeration from "../contentModeration.js";
@@ -103,6 +104,7 @@ declare const fullApi: ApiFromModules<{
   chatRooms: typeof chatRooms;
   chatTod: typeof chatTod;
   cleanup: typeof cleanup;
+  coinEarning: typeof coinEarning;
   confessions: typeof confessions;
   contentFilter: typeof contentFilter;
   contentModeration: typeof contentModeration;

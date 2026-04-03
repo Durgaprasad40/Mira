@@ -616,6 +616,13 @@ export default defineSchema({
       v.literal('room'),
       v.literal('desire')
     )),
+    // Anti-spam: Thread visibility control
+    // initiatorId = who started the conversation (sent first message)
+    // hasRecipientEngaged = recipient has replied (thread now visible to both)
+    // - When false/undefined: thread only visible to initiator
+    // - When true: thread visible to both in their inbox
+    initiatorId: v.optional(v.id('users')),
+    hasRecipientEngaged: v.optional(v.boolean()),
   })
     .index('by_match', ['matchId'])
     .index('by_confession', ['confessionId'])
@@ -766,6 +773,7 @@ export default defineSchema({
       confessionId: v.optional(v.string()), // For comment_connect notifications
       connectId: v.optional(v.string()), // For comment_connect notifications
       phase: v.optional(v.string()),    // Phase identifier ('phase2' for Deep Connect)
+      roomId: v.optional(v.string()),   // For chat room @mention notifications
     })),
     // 4-1: Deduplication key — same key = same logical event (upsert instead of insert)
     dedupeKey: v.optional(v.string()),
@@ -1012,6 +1020,32 @@ export default defineSchema({
     isTyping: v.boolean(),
     updatedAt: v.number(),
   }).index('by_conversation', ['conversationId']).index('by_user_conversation', ['userId', 'conversationId']),
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // ANTI-SPAM COIN TRACKING
+  // Tracks coin earning with anti-spam protections:
+  // - Two-way interaction requirement (both users must engage)
+  // - Cooldown (max 1 coin per 12 seconds per user)
+  // - Per-conversation cap (max 20 coins per hour per user pair)
+  // - Spam filtering (repeated/short messages don't earn)
+  // ═══════════════════════════════════════════════════════════════════════════
+  coinEarningLog: defineTable({
+    userId: v.id('users'),
+    // Context: chat room ID OR conversation ID (for 1-on-1 DMs)
+    contextType: v.union(v.literal('room'), v.literal('dm')),
+    contextId: v.string(), // Room ID or Conversation ID as string
+    // For DMs: the other user ID (to track pair limits)
+    // For rooms: undefined (room-level tracking only)
+    otherUserId: v.optional(v.id('users')),
+    // When coin was earned
+    earnedAt: v.number(),
+    // Message hash for spam detection (to prevent same message farming)
+    messageHash: v.optional(v.string()),
+  })
+    .index('by_user', ['userId'])
+    .index('by_user_earned', ['userId', 'earnedAt'])
+    .index('by_user_context', ['userId', 'contextType', 'contextId'])
+    .index('by_context_pair', ['contextType', 'contextId', 'userId', 'otherUserId']),
 
   // Nudges table (smart notifications)
   nudges: defineTable({
@@ -1669,6 +1703,24 @@ export default defineSchema({
     status: v.optional(v.union(v.literal('pending'), v.literal('sent'), v.literal('failed'))), // Message status
     deletedAt: v.optional(v.number()), // Soft delete
     expiresAt: v.optional(v.float64()), // For ephemeral/expiring messages
+    // @mention tagging support
+    mentions: v.optional(v.array(v.object({
+      userId: v.id('users'),           // Tagged user's ID
+      nickname: v.string(),            // Chat room nickname at time of mention
+      startIndex: v.number(),          // Position in text where @mention starts
+      endIndex: v.number(),            // Position in text where @mention ends
+    }))),
+    // Reply-to-message support
+    replyToMessageId: v.optional(v.id('chatRoomMessages')), // ID of the message being replied to
+    replyToSenderNickname: v.optional(v.string()),           // Snapshot of sender's chat-room nickname
+    replyToSnippet: v.optional(v.string()),                  // Short snippet of original message (max 100 chars)
+    replyToType: v.optional(v.union(                         // Type of original message for media labels
+      v.literal('text'),
+      v.literal('image'),
+      v.literal('video'),
+      v.literal('doodle'),
+      v.literal('audio')
+    )),
   })
     .index('by_room', ['roomId'])
     .index('by_room_created', ['roomId', 'createdAt'])
@@ -1708,6 +1760,21 @@ export default defineSchema({
   })
     .index('by_room_user', ['roomId', 'userId'])
     .index('by_user', ['userId']),
+
+  // Chat Room Message Reactions table
+  // Tracks emoji reactions on messages (👍 ❤️ 😂 😮 🔥 👎)
+  chatRoomReactions: defineTable({
+    messageId: v.id('chatRoomMessages'),
+    roomId: v.id('chatRooms'),              // Denormalized for efficient room-level queries
+    userId: v.id('users'),                   // User who reacted
+    emoji: v.string(),                       // The emoji reaction (e.g., "👍")
+    createdAt: v.number(),
+  })
+    .index('by_message', ['messageId'])                    // Get all reactions for a message
+    .index('by_message_emoji', ['messageId', 'emoji'])     // Get users who reacted with specific emoji
+    .index('by_message_user', ['messageId', 'userId'])     // Check if user already reacted
+    .index('by_room', ['roomId'])                          // For room-level cleanup
+    .index('by_user', ['userId']),                         // For user's reaction history
 
   // Filter Presets table
   filterPresets: defineTable({
@@ -1821,6 +1888,34 @@ export default defineSchema({
   })
     .index('by_user', ['userId'])
     .index('by_user_room', ['userId', 'roomId']),
+
+  // Chat Room Muted Users (per-room user muting)
+  // When user A mutes user B in room X, only user A stops seeing user B's messages in room X
+  // This does NOT affect other rooms or other users
+  chatRoomMutedUsers: defineTable({
+    roomId: v.id('chatRooms'),      // The room where muting applies
+    muterId: v.id('users'),          // The user who initiated the mute
+    mutedUserId: v.id('users'),      // The user being muted
+    mutedAt: v.number(),             // Timestamp when mute was created
+  })
+    .index('by_muter_room', ['muterId', 'roomId'])           // Get all muted users for a user in a room
+    .index('by_muter_room_target', ['muterId', 'roomId', 'mutedUserId']), // Check if specific user is muted
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // CHAT ROOM PROFILES (Separate identity for Chat Rooms)
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Each user has ONE chat room identity (global across all rooms, not per room).
+  // This is COMPLETELY SEPARATE from main profile (name, photo, bio).
+  // Backend userId remains the true identity internally for moderation/bans/reports.
+  chatRoomProfiles: defineTable({
+    userId: v.id('users'),           // Link to real user (for moderation)
+    nickname: v.string(),            // REQUIRED - display name in chat rooms
+    avatarUrl: v.optional(v.string()), // OPTIONAL - avatar URL
+    bio: v.optional(v.string()),     // OPTIONAL - short bio
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index('by_userId', ['userId']), // One profile per user (unique)
 
   // User Room Reports (track which rooms user has reported)
   userRoomReports: defineTable({
@@ -2131,4 +2226,20 @@ export default defineSchema({
     createdAt: v.number(),
   })
     .index('by_ticket', ['ticketId']),
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Chat Room Presence (Room-Specific Real-Time Presence)
+  // Tracks which users are currently active IN A SPECIFIC ROOM
+  // States: ONLINE_IN_ROOM (heartbeat within 15s), RECENTLY_LEFT (within 10min), NOT_SHOWN
+  // ═══════════════════════════════════════════════════════════════════════════
+  chatRoomPresence: defineTable({
+    roomId: v.id('chatRooms'),           // The room this presence belongs to
+    userId: v.id('users'),               // The user
+    lastHeartbeatAt: v.number(),         // Last heartbeat timestamp (updated every 10-15s)
+    joinedAt: v.number(),                // When user entered this room session
+  })
+    .index('by_room', ['roomId'])                    // List all presence in a room
+    .index('by_room_user', ['roomId', 'userId'])     // Single user lookup in room
+    .index('by_user', ['userId'])                    // All rooms user is present in
+    .index('by_heartbeat', ['lastHeartbeatAt']),     // Cleanup stale presence
 });

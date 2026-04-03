@@ -5,6 +5,7 @@ import { internal } from './_generated/api';
 import { asUserId } from './id';
 import { hashPassword, verifyPassword, encryptPassword, decryptPassword } from './cryptoUtils';
 import { resolveUserIdByAuthId } from './helpers';
+import { tryEarnCoinInRoom } from './coinEarning';
 
 // 24 hours in milliseconds
 const ROOM_LIFETIME_MS = 24 * 60 * 60 * 1000;
@@ -495,12 +496,18 @@ export const seedDefaultRoomsInternal = internalMutation({
 // Phase-2: Filters out expired rooms (expiresAt < now)
 // Note: Returns empty array if no rooms exist - UI handles with FALLBACK_PUBLIC_ROOMS
 // To seed rooms: run `npx convex run chatRooms:ensureDefaultRooms` or use seedDefaultRoomsInternal cron
+//
+// LIVE PRESENCE: Returns activeUserCount (real-time presence) instead of memberCount for display.
+// Users are counted as ACTIVE if their lastHeartbeatAt is within PRESENCE_ONLINE_THRESHOLD_MS.
+// memberCount is still computed for backwards compatibility but activeUserCount is primary.
 export const listRooms = query({
   args: {
     category: v.optional(v.union(v.literal('language'), v.literal('general'))),
   },
   handler: async (ctx, { category }) => {
     const now = Date.now();
+    const onlineThreshold = now - PRESENCE_ONLINE_THRESHOLD_MS;
+
     let rooms;
     if (category) {
       rooms = await ctx.db
@@ -516,26 +523,55 @@ export const listRooms = query({
     // Private rooms should only appear in getMyPrivateRooms query results
     rooms = rooms.filter((r) => r.isPublic === true);
 
-    // MEMBER-COUNT-SYNC FIX: Compute live member counts from chatRoomMembers table
-    // This ensures homepage count matches in-room panel (same source of truth)
+    // LIVE PRESENCE: Compute activeUserCount from chatRoomPresence table
+    // This shows REAL-TIME active users, not total membership
+    // DUPLICATE-FIX: Count DISTINCT userIds only (same user on multiple devices = 1)
     const roomsWithLiveCounts = await Promise.all(
       rooms.map(async (room) => {
+        // Get all presence records for this room
+        const presenceRecords = await ctx.db
+          .query('chatRoomPresence')
+          .withIndex('by_room', (q) => q.eq('roomId', room._id))
+          .collect();
+
+        // Count only ACTIVE users (heartbeat within threshold)
+        // DUPLICATE-FIX: Use Set to count distinct userIds
+        const activeUserIds = new Set(
+          presenceRecords
+            .filter((p) => p.lastHeartbeatAt >= onlineThreshold)
+            .map((p) => p.userId.toString())
+        );
+        const activeUserCount = activeUserIds.size;
+
+        // Keep memberCount for backwards compatibility (access control uses this)
         const members = await ctx.db
           .query('chatRoomMembers')
           .withIndex('by_room', (q) => q.eq('roomId', room._id))
           .collect();
+
         return {
           ...room,
-          memberCount: members.length,
+          activeUserCount,           // LIVE: Real-time presence count
+          memberCount: members.length, // Legacy: Total membership (for access control)
         };
       })
     );
 
-    // Sort: rooms with recent messages first, then by name
+    // SORTING: Sort by activeUserCount DESC (most active first), then alphabetical ASC
+    // General rooms (Global, India) are pinned: Global first, then India, then by activeUserCount
     roomsWithLiveCounts.sort((a, b) => {
-      const aTime = a.lastMessageAt ?? 0;
-      const bTime = b.lastMessageAt ?? 0;
-      if (bTime !== aTime) return bTime - aTime;
+      // Pin Global first within general category
+      if (a.slug === 'global' && b.slug !== 'global') return -1;
+      if (b.slug === 'global' && a.slug !== 'global') return 1;
+      // Pin India second within general category
+      if (a.slug === 'india' && b.slug !== 'india' && b.slug !== 'global') return -1;
+      if (b.slug === 'india' && a.slug !== 'india' && a.slug !== 'global') return 1;
+
+      // Primary sort: activeUserCount DESC (higher count first)
+      if (b.activeUserCount !== a.activeUserCount) {
+        return b.activeUserCount - a.activeUserCount;
+      }
+      // Tie-breaker: alphabetical ASC
       return a.name.localeCompare(b.name);
     });
     return roomsWithLiveCounts;
@@ -601,6 +637,7 @@ export const getRoom = query({
 });
 
 // List messages for a room (with pagination)
+// CHAT ROOM IDENTITY: Includes sender chat room profile (nickname, avatar) for each message
 export const listMessages = query({
   args: {
     roomId: v.id('chatRooms'),
@@ -633,8 +670,49 @@ export const listMessages = query({
     const hasMore = messages.length > limit;
     const result = hasMore ? messages.slice(0, limit) : messages;
 
+    // CHAT ROOM IDENTITY: Batch fetch sender profiles for all messages
+    // AVATAR-FIX: Also fetch primary photos as fallback when chatRoomProfile has no avatar
+    const senderIds = [...new Set(result.map((m) => m.senderId))];
+    const senderProfiles = await Promise.all(
+      senderIds.map(async (senderId) => {
+        const [profile, primaryPhoto] = await Promise.all([
+          ctx.db
+            .query('chatRoomProfiles')
+            .withIndex('by_userId', (q) => q.eq('userId', senderId))
+            .first(),
+          ctx.db
+            .query('photos')
+            .withIndex('by_user', (q) => q.eq('userId', senderId))
+            .filter((q) => q.eq(q.field('isPrimary'), true))
+            .first(),
+        ]);
+        return { senderId, profile, primaryPhoto };
+      })
+    );
+    const profileMap = new Map(
+      senderProfiles.map(({ senderId, profile, primaryPhoto }) => [
+        senderId.toString(),
+        {
+          nickname: profile?.nickname ?? 'Anonymous',
+          // AVATAR-FIX: Prefer chatRoomProfile avatar, fallback to primary photo
+          avatarUrl: profile?.avatarUrl ?? primaryPhoto?.url ?? null,
+        },
+      ])
+    );
+
+    // Enrich messages with sender profile data
+    const enrichedMessages = result.map((msg) => {
+      const senderProfile = profileMap.get(msg.senderId.toString());
+      return {
+        ...msg,
+        // CHAT ROOM IDENTITY: Use nickname/avatar from chatRoomProfiles (NOT main profile)
+        senderNickname: senderProfile?.nickname ?? 'Anonymous',
+        senderAvatarUrl: senderProfile?.avatarUrl ?? null,
+      };
+    });
+
     return {
-      messages: result.reverse(), // return oldest-first for display
+      messages: enrichedMessages.reverse(), // return oldest-first for display
       hasMore,
     };
   },
@@ -685,15 +763,22 @@ export const listMembersWithProfiles = query({
       .withIndex('by_room', (q) => q.eq('roomId', roomId))
       .take(MAX_MEMBERS_TO_FETCH);
 
-    // Fetch private profiles and user activity for all members
+    // CHAT ROOM IDENTITY: Use chatRoomProfiles for display (separate from main profile)
+    // Fallback to user record for age/gender, and to primary photo for avatar
     const membersWithProfiles = await Promise.all(
       members.map(async (member) => {
-        const [profile, user] = await Promise.all([
+        const [chatRoomProfile, user, primaryPhoto] = await Promise.all([
           ctx.db
-            .query('userPrivateProfiles')
-            .withIndex('by_user', (q) => q.eq('userId', member.userId))
+            .query('chatRoomProfiles')
+            .withIndex('by_userId', (q) => q.eq('userId', member.userId))
             .first(),
           ctx.db.get(member.userId),
+          // AVATAR-FIX: Query primary photo as fallback when chatRoomProfile has no avatar
+          ctx.db
+            .query('photos')
+            .withIndex('by_user', (q) => q.eq('userId', member.userId))
+            .filter((q) => q.eq(q.field('isPrimary'), true))
+            .first(),
         ]);
 
         // Determine "recently active" status from users.lastActive
@@ -708,13 +793,28 @@ export const listMembersWithProfiles = query({
 
         const isOnline = timeSinceActive <= ONLINE_THRESHOLD_MS;
 
+        // Calculate age from DOB
+        let age = 0;
+        if (user?.dateOfBirth) {
+          const birthDate = new Date(user.dateOfBirth);
+          const today = new Date();
+          age = today.getFullYear() - birthDate.getFullYear();
+          const monthDiff = today.getMonth() - birthDate.getMonth();
+          if (monthDiff < 0 || (monthDiff === 0 && today.getDate() < birthDate.getDate())) {
+            age--;
+          }
+        }
+
         return {
           id: member.userId,
-          displayName: profile?.displayName ?? 'User',
-          avatar: profile?.privatePhotoUrls?.[0] ?? undefined,
-          age: profile?.age ?? 0,
-          gender: profile?.gender ?? '',
-          bio: profile?.privateBio ?? undefined,
+          // CHAT ROOM IDENTITY: Use nickname from chatRoomProfiles (NOT main profile)
+          displayName: chatRoomProfile?.nickname ?? 'Anonymous',
+          // AVATAR-FIX: Prefer chatRoomProfile avatar, fallback to primary photo
+          avatar: chatRoomProfile?.avatarUrl ?? primaryPhoto?.url ?? undefined,
+          // Age/gender from user record (not exposing main profile name/photo)
+          age,
+          gender: user?.gender ?? '',
+          bio: chatRoomProfile?.bio ?? undefined,
           joinedAt: member.joinedAt,
           role: member.role ?? 'member',
           // PRESENCE STATUS: Online if within 2 min, Offline if within 3 hours
@@ -857,8 +957,17 @@ export const sendMessage = mutation({
     audioStorageId: v.optional(v.id('_storage')), // CR-009: For uploaded audio
     mediaType: v.optional(v.union(v.literal('image'), v.literal('video'), v.literal('doodle'), v.literal('audio'))),
     clientId: v.optional(v.string()),
+    // @mention tagging support
+    mentions: v.optional(v.array(v.object({
+      userId: v.id('users'),
+      nickname: v.string(),
+      startIndex: v.number(),
+      endIndex: v.number(),
+    }))),
+    // Reply-to-message support
+    replyToMessageId: v.optional(v.id('chatRoomMessages')),
   },
-  handler: async (ctx, { roomId, authUserId, senderId, text, imageUrl, audioUrl, imageStorageId, audioStorageId, mediaType, clientId }) => {
+  handler: async (ctx, { roomId, authUserId, senderId, text, imageUrl, audioUrl, imageStorageId, audioStorageId, mediaType, clientId, mentions, replyToMessageId }) => {
     // 0. SECURITY: Require send access (auth + membership + not banned + no send-blocking penalty)
     const { userId, room, membership } = await requireRoomSendAccess(ctx, roomId, authUserId);
 
@@ -925,7 +1034,90 @@ export const sendMessage = mutation({
     // Soft-mask sensitive words in text messages
     const maskedText = text ? softMaskText(text) : undefined;
 
-    // 4. Insert message with resolved URLs
+    // 4. Validate and filter mentions (max 3 per message, must be room members, no self-mention)
+    let validatedMentions: typeof mentions = undefined;
+    if (mentions && mentions.length > 0) {
+      // Anti-spam: max 3 mentions per message
+      const limitedMentions = mentions.slice(0, 3);
+
+      // Validate each mentioned user is a room member
+      const validMentions = [];
+      for (const mention of limitedMentions) {
+        // Skip self-mentions
+        if (mention.userId === senderId) continue;
+
+        // Check if user is a room member
+        const memberCheck = await ctx.db
+          .query('chatRoomMembers')
+          .withIndex('by_room_user', (q) =>
+            q.eq('roomId', roomId).eq('userId', mention.userId)
+          )
+          .first();
+
+        if (memberCheck) {
+          validMentions.push(mention);
+        }
+      }
+      validatedMentions = validMentions.length > 0 ? validMentions : undefined;
+    }
+
+    // 5. Validate and resolve reply-to-message data
+    let replyData: {
+      replyToMessageId: typeof replyToMessageId;
+      replyToSenderNickname: string | undefined;
+      replyToSnippet: string | undefined;
+      replyToType: 'text' | 'image' | 'video' | 'doodle' | 'audio' | undefined;
+    } = {
+      replyToMessageId: undefined,
+      replyToSenderNickname: undefined,
+      replyToSnippet: undefined,
+      replyToType: undefined,
+    };
+
+    if (replyToMessageId) {
+      // Fetch the original message
+      const originalMessage = await ctx.db.get(replyToMessageId);
+
+      // Validate: message exists, is in same room, and not deleted
+      if (originalMessage && originalMessage.roomId === roomId && !originalMessage.deletedAt) {
+        // Get original sender's chat-room nickname
+        const originalSenderProfile = await ctx.db
+          .query('chatRoomProfiles')
+          .withIndex('by_userId', (q) => q.eq('userId', originalMessage.senderId))
+          .first();
+        const originalNickname = originalSenderProfile?.nickname ?? 'Anonymous';
+
+        // FLATTEN-REPLY: Create snippet from ONLY the message's OWN text (max 100 chars)
+        // or media label. Never include nested replyToSnippet content.
+        // This ensures single-level reply preview (no stacking of quote bars)
+        let snippet: string | undefined;
+        if (originalMessage.text) {
+          // Use only originalMessage.text, NOT originalMessage.replyToSnippet
+          snippet = originalMessage.text.length > 100
+            ? originalMessage.text.slice(0, 97) + '...'
+            : originalMessage.text;
+        } else if (originalMessage.type === 'image') {
+          snippet = 'Photo';
+        } else if (originalMessage.type === 'video') {
+          snippet = 'Video';
+        } else if (originalMessage.type === 'doodle') {
+          snippet = 'Doodle';
+        } else if (originalMessage.type === 'audio') {
+          snippet = 'Voice message';
+        }
+
+        replyData = {
+          replyToMessageId,
+          replyToSenderNickname: originalNickname,
+          replyToSnippet: snippet,
+          replyToType: originalMessage.type === 'system' ? undefined : originalMessage.type,
+        };
+      }
+      // If message doesn't exist or is deleted, we silently ignore the reply
+      // (message still sends, just without reply attachment)
+    }
+
+    // 6. Insert message with resolved URLs, mentions, and reply data
     const messageId = await ctx.db.insert('chatRoomMessages', {
       roomId,
       senderId,
@@ -936,6 +1128,12 @@ export const sendMessage = mutation({
       createdAt: now,
       clientId,
       status: 'sent',
+      mentions: validatedMentions,
+      // Reply-to fields
+      replyToMessageId: replyData.replyToMessageId,
+      replyToSenderNickname: replyData.replyToSenderNickname,
+      replyToSnippet: replyData.replyToSnippet,
+      replyToType: replyData.replyToType,
     });
 
     // 5. Update room's last message info
@@ -947,13 +1145,24 @@ export const sendMessage = mutation({
     // 6. Update member's lastMessageAt for rate limiting tracking
     await ctx.db.patch(membership._id, { lastMessageAt: now });
 
-    // 7. REWARD: Add +1 coin to sender's wallet for successful message send
-    // This only fires for NEW messages (dedup returns early at line 670)
-    const senderUser = await ctx.db.get(senderId);
-    if (senderUser) {
-      const currentCoins = senderUser.walletCoins ?? 0;
-      await ctx.db.patch(senderId, { walletCoins: currentCoins + 1 });
-    }
+    // 7. ANTI-SPAM COIN REWARD: Interaction-based coin earning
+    // When this message is sent, we check if another user sent recently:
+    // - If yes, PREVIOUS sender gets coin (their message got engagement)
+    // - Current sender ALSO gets coin (for participating in interaction)
+    // Rules enforced:
+    // - No coins in private rooms
+    // - 90-second interaction window (must reply within 90s to trigger coins)
+    // - 12-second cooldown per user (global)
+    // - Max 20 coins/hour per user per room
+    // - Max 5 coins/hour per user-pair (anti-farming)
+    // - Spam messages don't earn
+    await tryEarnCoinInRoom({
+      ctx,
+      senderId,
+      roomId,
+      messageText: maskedText,
+      isPublicRoom: room.isPublic,
+    });
 
     // 8. DETERMINISTIC RETENTION: Delete exactly (newCount - 900) oldest when >= 1000
     // Uses room.messageCount as primary counter for efficiency
@@ -997,6 +1206,53 @@ export const sendMessage = mutation({
 
     // Record Phase-2 activity for ranking freshness (throttled to 1 update/hour)
     await ctx.runMutation(internal.phase2Ranking.recordPhase2Activity, {});
+
+    // 9. Send notifications for @mentions (deduplicated, room-specific)
+    if (validatedMentions && validatedMentions.length > 0) {
+      // Get sender's chat room profile for notification
+      const senderProfile = await ctx.db
+        .query('chatRoomProfiles')
+        .withIndex('by_userId', (q) => q.eq('userId', senderId))
+        .first();
+      const senderNickname = senderProfile?.nickname ?? 'Someone';
+
+      // Create notification for each mentioned user (no duplicate per room)
+      for (const mention of validatedMentions) {
+        // Dedupe key: one active mention notification per room per user
+        const dedupeKey = `chatroom_mention:${roomId}:${mention.userId}`;
+
+        // Check for existing notification with same dedupe key
+        const existingNotif = await ctx.db
+          .query('notifications')
+          .withIndex('by_user_dedupe', (q) =>
+            q.eq('userId', mention.userId).eq('dedupeKey', dedupeKey)
+          )
+          .first();
+
+        const notificationBody = `${senderNickname} mentioned you in ${room.name}`;
+
+        if (existingNotif) {
+          // Update existing notification
+          await ctx.db.patch(existingNotif._id, {
+            body: notificationBody,
+            createdAt: now,
+            expiresAt: now + 24 * 60 * 60 * 1000,
+          });
+        } else {
+          // Create new notification
+          await ctx.db.insert('notifications', {
+            userId: mention.userId,
+            type: 'message',
+            title: 'You were mentioned',
+            body: notificationBody,
+            data: { roomId: roomId as string },
+            dedupeKey,
+            createdAt: now,
+            expiresAt: now + 24 * 60 * 60 * 1000,
+          });
+        }
+      }
+    }
 
     return messageId;
   },
@@ -1080,6 +1336,148 @@ export const deleteMessage = mutation({
 
 // CR-015: createRoom mutation REMOVED (was unused legacy code)
 // Use createPrivateRoom for actual room creation (properly auth-hardened with coin cost)
+
+// ═══════════════════════════════════════════════════════════════════════════
+// MESSAGE REACTIONS (👍 ❤️ 😂 😮 🔥 👎)
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Valid emoji reactions
+const VALID_REACTIONS = ['👍', '❤️', '😂', '😮', '🔥', '👎'];
+
+// Add a reaction to a message
+export const addReaction = mutation({
+  args: {
+    roomId: v.id('chatRooms'),
+    messageId: v.id('chatRoomMessages'),
+    emoji: v.string(),
+    authUserId: v.string(),
+  },
+  handler: async (ctx, { roomId, messageId, emoji, authUserId }) => {
+    // 1. Validate emoji
+    if (!VALID_REACTIONS.includes(emoji)) {
+      throw new Error('Invalid reaction emoji');
+    }
+
+    // 2. Auth + resolve user
+    if (!authUserId || authUserId.trim().length === 0) {
+      throw new Error('Unauthorized: authentication required');
+    }
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      throw new Error('Unauthorized: user not found');
+    }
+
+    // 3. Check room access
+    await requireRoomReadAccess(ctx, roomId, authUserId);
+
+    // 4. Verify message exists in this room
+    const message = await ctx.db.get(messageId);
+    if (!message || message.roomId !== roomId || message.deletedAt) {
+      throw new Error('Message not found');
+    }
+
+    // 5. Check if user already reacted with any emoji to this message
+    const existingReaction = await ctx.db
+      .query('chatRoomReactions')
+      .withIndex('by_message_user', (q) => q.eq('messageId', messageId).eq('userId', userId))
+      .first();
+
+    if (existingReaction) {
+      // If same emoji, do nothing (idempotent)
+      if (existingReaction.emoji === emoji) {
+        return { success: true, reactionId: existingReaction._id };
+      }
+      // If different emoji, remove old and add new
+      await ctx.db.delete(existingReaction._id);
+    }
+
+    // 6. Add reaction
+    const reactionId = await ctx.db.insert('chatRoomReactions', {
+      messageId,
+      roomId,
+      userId,
+      emoji,
+      createdAt: Date.now(),
+    });
+
+    return { success: true, reactionId };
+  },
+});
+
+// Remove a reaction from a message
+export const removeReaction = mutation({
+  args: {
+    roomId: v.id('chatRooms'),
+    messageId: v.id('chatRoomMessages'),
+    authUserId: v.string(),
+  },
+  handler: async (ctx, { roomId, messageId, authUserId }) => {
+    // 1. Auth + resolve user
+    if (!authUserId || authUserId.trim().length === 0) {
+      throw new Error('Unauthorized: authentication required');
+    }
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      throw new Error('Unauthorized: user not found');
+    }
+
+    // 2. Check room access
+    await requireRoomReadAccess(ctx, roomId, authUserId);
+
+    // 3. Find and remove user's reaction
+    const existingReaction = await ctx.db
+      .query('chatRoomReactions')
+      .withIndex('by_message_user', (q) => q.eq('messageId', messageId).eq('userId', userId))
+      .first();
+
+    if (existingReaction) {
+      await ctx.db.delete(existingReaction._id);
+    }
+
+    return { success: true };
+  },
+});
+
+// Get reactions for messages in a room (batched for efficiency)
+export const getReactionsForMessages = query({
+  args: {
+    roomId: v.id('chatRooms'),
+    messageIds: v.array(v.id('chatRoomMessages')),
+    authUserId: v.string(),
+  },
+  handler: async (ctx, { roomId, messageIds, authUserId }) => {
+    // 1. Auth + room access
+    await requireRoomReadAccess(ctx, roomId, authUserId);
+
+    // 2. Get all reactions for the specified messages
+    const reactions: Record<string, { emoji: string; count: number; userIds: string[] }[]> = {};
+
+    for (const messageId of messageIds) {
+      const messageReactions = await ctx.db
+        .query('chatRoomReactions')
+        .withIndex('by_message', (q) => q.eq('messageId', messageId))
+        .collect();
+
+      // Group by emoji
+      const emojiGroups: Record<string, string[]> = {};
+      for (const reaction of messageReactions) {
+        if (!emojiGroups[reaction.emoji]) {
+          emojiGroups[reaction.emoji] = [];
+        }
+        emojiGroups[reaction.emoji].push(reaction.userId);
+      }
+
+      // Convert to array format
+      reactions[messageId] = Object.entries(emojiGroups).map(([emoji, userIds]) => ({
+        emoji,
+        count: userIds.length,
+        userIds,
+      }));
+    }
+
+    return reactions;
+  },
+});
 
 // Phase-2: Create a private room with optional password protection (costs 1 coin)
 export const createPrivateRoom = mutation({
@@ -1374,7 +1772,21 @@ export const getMyPrivateRooms = query({
         // Filter out expired rooms
         if (room.expiresAt && room.expiresAt <= now) return null;
 
-        // MEMBER-COUNT-SYNC FIX: Compute live member count from chatRoomMembers table
+        // LIVE PRESENCE: Compute activeUserCount from chatRoomPresence table
+        // DUPLICATE-FIX: Count DISTINCT userIds only (same user on multiple devices = 1)
+        const onlineThreshold = now - PRESENCE_ONLINE_THRESHOLD_MS;
+        const presenceRecords = await ctx.db
+          .query('chatRoomPresence')
+          .withIndex('by_room', (q) => q.eq('roomId', room._id))
+          .collect();
+        const activeUserIds = new Set(
+          presenceRecords
+            .filter((p) => p.lastHeartbeatAt >= onlineThreshold)
+            .map((p) => p.userId.toString())
+        );
+        const activeUserCount = activeUserIds.size;
+
+        // Keep memberCount for backwards compatibility (access control uses this)
         const roomMembers = await ctx.db
           .query('chatRoomMembers')
           .withIndex('by_room', (q) => q.eq('roomId', room._id))
@@ -1389,7 +1801,8 @@ export const getMyPrivateRooms = query({
           slug: room.slug,
           category: room.category,
           isPublic: room.isPublic,
-          memberCount: roomMembers.length,
+          activeUserCount,             // LIVE: Real-time presence count
+          memberCount: roomMembers.length, // Legacy: for access control
           lastMessageAt: room.lastMessageAt,
           lastMessageText: room.lastMessageText,
           createdAt: room.createdAt,
@@ -2568,6 +2981,152 @@ export const setUserRoomMuted = mutation({
   },
 });
 
+// ═══════════════════════════════════════════════════════════════════════════
+// USER MUTING (Per-Room, Per-User)
+// Muting a user hides their messages only for the muting user, only in that room.
+// Does NOT affect membership, moderation, or other users' views.
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Get all muted user IDs for the current user in a specific room.
+ * Returns an array of user IDs that should have their messages hidden.
+ */
+export const getMutedUsersInRoom = query({
+  args: {
+    roomId: v.id('chatRooms'),
+    authUserId: v.string(),
+  },
+  handler: async (ctx, { roomId, authUserId }) => {
+    // Auth guard
+    if (!authUserId || authUserId.trim().length === 0) {
+      return { mutedUserIds: [] };
+    }
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      return { mutedUserIds: [] };
+    }
+
+    // Get all muted users for this user in this room
+    const mutedEntries = await ctx.db
+      .query('chatRoomMutedUsers')
+      .withIndex('by_muter_room', (q) => q.eq('muterId', userId).eq('roomId', roomId))
+      .collect();
+
+    // Return array of muted user IDs as strings for frontend
+    return {
+      mutedUserIds: mutedEntries.map((entry) => entry.mutedUserId.toString()),
+    };
+  },
+});
+
+/**
+ * Toggle mute status for a user in a room.
+ * If currently muted, unmutes. If not muted, mutes.
+ * Returns the new mute status.
+ */
+export const toggleMuteUserInRoom = mutation({
+  args: {
+    roomId: v.id('chatRooms'),
+    targetUserId: v.id('users'),
+    authUserId: v.string(),
+  },
+  handler: async (ctx, { roomId, targetUserId, authUserId }) => {
+    // Auth guard
+    if (!authUserId || authUserId.trim().length === 0) {
+      throw new Error('Unauthorized: authentication required');
+    }
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      throw new Error('Unauthorized: user not found');
+    }
+
+    // Cannot mute yourself
+    if (userId === targetUserId) {
+      throw new Error('Cannot mute yourself');
+    }
+
+    // Check if already muted
+    const existing = await ctx.db
+      .query('chatRoomMutedUsers')
+      .withIndex('by_muter_room_target', (q) =>
+        q.eq('muterId', userId).eq('roomId', roomId).eq('mutedUserId', targetUserId)
+      )
+      .first();
+
+    if (existing) {
+      // Currently muted → unmute (delete the record)
+      await ctx.db.delete(existing._id);
+      return { muted: false };
+    } else {
+      // Not muted → mute (create the record)
+      await ctx.db.insert('chatRoomMutedUsers', {
+        roomId,
+        muterId: userId,
+        mutedUserId: targetUserId,
+        mutedAt: Date.now(),
+      });
+      return { muted: true };
+    }
+  },
+});
+
+/**
+ * Set mute status for a user in a room (explicit mute/unmute).
+ * Use this when you know the desired state instead of toggling.
+ */
+export const setMuteUserInRoom = mutation({
+  args: {
+    roomId: v.id('chatRooms'),
+    targetUserId: v.id('users'),
+    muted: v.boolean(),
+    authUserId: v.string(),
+  },
+  handler: async (ctx, { roomId, targetUserId, muted, authUserId }) => {
+    // Auth guard
+    if (!authUserId || authUserId.trim().length === 0) {
+      throw new Error('Unauthorized: authentication required');
+    }
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      throw new Error('Unauthorized: user not found');
+    }
+
+    // Cannot mute yourself
+    if (userId === targetUserId) {
+      throw new Error('Cannot mute yourself');
+    }
+
+    // Check if already muted
+    const existing = await ctx.db
+      .query('chatRoomMutedUsers')
+      .withIndex('by_muter_room_target', (q) =>
+        q.eq('muterId', userId).eq('roomId', roomId).eq('mutedUserId', targetUserId)
+      )
+      .first();
+
+    if (muted) {
+      // Want to mute
+      if (!existing) {
+        await ctx.db.insert('chatRoomMutedUsers', {
+          roomId,
+          muterId: userId,
+          mutedUserId: targetUserId,
+          mutedAt: Date.now(),
+        });
+      }
+      // If already exists, do nothing (idempotent)
+    } else {
+      // Want to unmute
+      if (existing) {
+        await ctx.db.delete(existing._id);
+      }
+      // If doesn't exist, do nothing (idempotent)
+    }
+
+    return { muted };
+  },
+});
+
 // Check if user has reported a room
 export const hasReportedRoom = query({
   args: {
@@ -2862,5 +3421,470 @@ export const clearRoomMemberships = mutation({
       roomName: room.name,
       deletedCount: members.length,
     };
+  },
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// CHAT ROOM PROFILES (Separate Identity System)
+// ═══════════════════════════════════════════════════════════════════════════
+// Each user has ONE chat room identity (global across all rooms, not per room).
+// This is COMPLETELY SEPARATE from main profile (name, photo, bio).
+// Backend userId remains the true identity internally for moderation/bans/reports.
+
+/**
+ * Get the current user's chat room profile.
+ * Returns null if profile doesn't exist (user needs to create one).
+ */
+export const getChatRoomProfile = query({
+  args: {
+    authUserId: v.string(),
+  },
+  handler: async (ctx, { authUserId }) => {
+    // Auth guard
+    if (!authUserId || authUserId.trim().length === 0) {
+      return null;
+    }
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      return null;
+    }
+
+    // Get profile
+    const profile = await ctx.db
+      .query('chatRoomProfiles')
+      .withIndex('by_userId', (q) => q.eq('userId', userId))
+      .first();
+
+    if (!profile) {
+      return null;
+    }
+
+    return {
+      id: profile._id,
+      nickname: profile.nickname,
+      avatarUrl: profile.avatarUrl ?? null,
+      bio: profile.bio ?? null,
+      createdAt: profile.createdAt,
+      updatedAt: profile.updatedAt,
+    };
+  },
+});
+
+/**
+ * Create or update the current user's chat room profile.
+ * Upsert behavior: creates if not exists, updates if exists.
+ */
+export const createOrUpdateChatRoomProfile = mutation({
+  args: {
+    authUserId: v.string(),
+    nickname: v.string(),
+    avatarUrl: v.optional(v.string()),
+    bio: v.optional(v.string()),
+  },
+  handler: async (ctx, { authUserId, nickname, avatarUrl, bio }) => {
+    // Auth guard
+    if (!authUserId || authUserId.trim().length === 0) {
+      throw new Error('Unauthorized: authentication required');
+    }
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      throw new Error('Unauthorized: user not found');
+    }
+
+    // Validate nickname
+    const trimmedNickname = nickname.trim();
+    if (trimmedNickname.length === 0) {
+      throw new Error('Nickname is required');
+    }
+    if (trimmedNickname.length > 30) {
+      throw new Error('Nickname must be 30 characters or less');
+    }
+    if (trimmedNickname.length < 2) {
+      throw new Error('Nickname must be at least 2 characters');
+    }
+
+    // Validate bio
+    const trimmedBio = bio?.trim();
+    if (trimmedBio && trimmedBio.length > 150) {
+      throw new Error('Bio must be 150 characters or less');
+    }
+
+    const now = Date.now();
+
+    // Check if profile exists
+    const existingProfile = await ctx.db
+      .query('chatRoomProfiles')
+      .withIndex('by_userId', (q) => q.eq('userId', userId))
+      .first();
+
+    if (existingProfile) {
+      // Update existing profile
+      await ctx.db.patch(existingProfile._id, {
+        nickname: trimmedNickname,
+        avatarUrl: avatarUrl ?? existingProfile.avatarUrl,
+        bio: trimmedBio ?? existingProfile.bio,
+        updatedAt: now,
+      });
+      return {
+        id: existingProfile._id,
+        nickname: trimmedNickname,
+        avatarUrl: avatarUrl ?? existingProfile.avatarUrl ?? null,
+        bio: trimmedBio ?? existingProfile.bio ?? null,
+        created: false,
+      };
+    } else {
+      // Create new profile
+      const profileId = await ctx.db.insert('chatRoomProfiles', {
+        userId,
+        nickname: trimmedNickname,
+        avatarUrl,
+        bio: trimmedBio,
+        createdAt: now,
+        updatedAt: now,
+      });
+      return {
+        id: profileId,
+        nickname: trimmedNickname,
+        avatarUrl: avatarUrl ?? null,
+        bio: trimmedBio ?? null,
+        created: true,
+      };
+    }
+  },
+});
+
+/**
+ * Get chat room profiles for multiple users at once.
+ * Used for efficient batch fetching when displaying messages/members.
+ * Returns a map of stringified-userId → chatRoomProfile.
+ */
+export const getChatRoomProfilesByUserIds = query({
+  args: {
+    userIds: v.array(v.id('users')),
+    authUserId: v.string(),
+  },
+  handler: async (ctx, { userIds, authUserId }) => {
+    // Auth guard
+    if (!authUserId || authUserId.trim().length === 0) {
+      return {};
+    }
+    const currentUserId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!currentUserId) {
+      return {};
+    }
+
+    // Fetch all profiles in parallel
+    const profiles = await Promise.all(
+      userIds.map(async (uid) => {
+        const profile = await ctx.db
+          .query('chatRoomProfiles')
+          .withIndex('by_userId', (q) => q.eq('userId', uid))
+          .first();
+        return { userId: uid, profile };
+      })
+    );
+
+    // Build map
+    const profileMap: Record<string, {
+      nickname: string;
+      avatarUrl: string | null;
+      bio: string | null;
+    }> = {};
+
+    for (const { userId, profile } of profiles) {
+      if (profile) {
+        profileMap[userId.toString()] = {
+          nickname: profile.nickname,
+          avatarUrl: profile.avatarUrl ?? null,
+          bio: profile.bio ?? null,
+        };
+      }
+    }
+
+    return profileMap;
+  },
+});
+
+/**
+ * Generate upload URL for chat room avatar.
+ */
+export const generateChatRoomAvatarUploadUrl = mutation({
+  args: {
+    authUserId: v.string(),
+  },
+  handler: async (ctx, { authUserId }) => {
+    // Auth guard
+    if (!authUserId || authUserId.trim().length === 0) {
+      throw new Error('Unauthorized: authentication required');
+    }
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      throw new Error('Unauthorized: user not found');
+    }
+
+    return await ctx.storage.generateUploadUrl();
+  },
+});
+
+/**
+ * Get storage URL for a chat room avatar.
+ */
+export const getChatRoomAvatarUrl = query({
+  args: {
+    storageId: v.id('_storage'),
+  },
+  handler: async (ctx, { storageId }) => {
+    return await ctx.storage.getUrl(storageId);
+  },
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// ROOM-SPECIFIC PRESENCE SYSTEM
+// Real-time presence tracking per room (not global)
+// States: ONLINE_IN_ROOM (heartbeat within 15s), RECENTLY_LEFT (within 10min), NOT_SHOWN
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Presence timing constants
+// Heartbeat: 12s, Online threshold: 35s (safe buffer for network jitter/app pauses)
+// This prevents flickering: user stays online if heartbeat is within 35s
+const PRESENCE_HEARTBEAT_INTERVAL_MS = 12 * 1000;     // 12 seconds between heartbeats
+const PRESENCE_ONLINE_THRESHOLD_MS = 35 * 1000;       // 35 seconds = still online (prevents flicker)
+const PRESENCE_RECENTLY_LEFT_MS = 10 * 60 * 1000;     // 10 minutes = recently left window
+
+/**
+ * Update room-specific presence heartbeat.
+ * Called every 10-15 seconds while user is viewing a room.
+ * ROOM SWITCHING SAFETY: Clears presence from other rooms to prevent double-online.
+ */
+export const heartbeatPresence = mutation({
+  args: {
+    roomId: v.id('chatRooms'),
+    authUserId: v.string(),
+  },
+  handler: async (ctx, { roomId, authUserId }) => {
+    // Resolve real user ID
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) return { success: false };
+
+    // Verify room exists
+    const room = await ctx.db.get(roomId);
+    if (!room) return { success: false };
+
+    const now = Date.now();
+
+    // ROOM SWITCHING SAFETY: Clear presence from ALL other rooms for this user
+    // This prevents double-online when user switches rooms directly
+    const allUserPresence = await ctx.db
+      .query('chatRoomPresence')
+      .withIndex('by_user', (q) => q.eq('userId', userId))
+      .collect();
+
+    for (const presence of allUserPresence) {
+      if (presence.roomId !== roomId) {
+        // Delete presence from other room
+        await ctx.db.delete(presence._id);
+      }
+    }
+
+    // Check for existing presence record in this room
+    const existing = await ctx.db
+      .query('chatRoomPresence')
+      .withIndex('by_room_user', (q) => q.eq('roomId', roomId).eq('userId', userId))
+      .first();
+
+    if (existing) {
+      // Update existing heartbeat
+      await ctx.db.patch(existing._id, { lastHeartbeatAt: now });
+    } else {
+      // Create new presence record
+      await ctx.db.insert('chatRoomPresence', {
+        roomId,
+        userId,
+        lastHeartbeatAt: now,
+        joinedAt: now,
+      });
+    }
+
+    return { success: true };
+  },
+});
+
+/**
+ * Clear room presence when user navigates away.
+ * Called when user leaves room screen.
+ */
+export const clearRoomPresence = mutation({
+  args: {
+    roomId: v.id('chatRooms'),
+    authUserId: v.string(),
+  },
+  handler: async (ctx, { roomId, authUserId }) => {
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) return { success: false };
+
+    // Find and delete presence record
+    const presence = await ctx.db
+      .query('chatRoomPresence')
+      .withIndex('by_room_user', (q) => q.eq('roomId', roomId).eq('userId', userId))
+      .first();
+
+    if (presence) {
+      await ctx.db.delete(presence._id);
+    }
+
+    return { success: true };
+  },
+});
+
+/**
+ * Get room presence with user profiles.
+ * Returns two sections: ONLINE (heartbeat within 20s) and RECENTLY_LEFT (within 10min).
+ * Used by member list UI.
+ */
+export const getRoomPresenceWithProfiles = query({
+  args: {
+    roomId: v.id('chatRooms'),
+    authUserId: v.string(),
+  },
+  handler: async (ctx, { roomId, authUserId }) => {
+    // SECURITY: Require read access
+    await requireRoomReadAccess(ctx, roomId, authUserId);
+
+    const now = Date.now();
+    const onlineThreshold = now - PRESENCE_ONLINE_THRESHOLD_MS;
+    const recentlyLeftThreshold = now - PRESENCE_RECENTLY_LEFT_MS;
+
+    // Get all presence records for this room
+    const presenceRecords = await ctx.db
+      .query('chatRoomPresence')
+      .withIndex('by_room', (q) => q.eq('roomId', roomId))
+      .collect();
+
+    // Separate into online vs recently-left
+    const onlinePresence: typeof presenceRecords = [];
+    const recentlyLeftPresence: typeof presenceRecords = [];
+
+    for (const p of presenceRecords) {
+      if (p.lastHeartbeatAt >= onlineThreshold) {
+        onlinePresence.push(p);
+      } else if (p.lastHeartbeatAt >= recentlyLeftThreshold) {
+        recentlyLeftPresence.push(p);
+      }
+      // Older than 10 min = not shown
+    }
+
+    // Helper to enrich with profile data
+    const enrichPresence = async (presence: typeof presenceRecords[0]) => {
+      const [chatRoomProfile, user, member, primaryPhoto] = await Promise.all([
+        ctx.db
+          .query('chatRoomProfiles')
+          .withIndex('by_userId', (q) => q.eq('userId', presence.userId))
+          .first(),
+        ctx.db.get(presence.userId),
+        ctx.db
+          .query('chatRoomMembers')
+          .withIndex('by_room_user', (q) => q.eq('roomId', roomId).eq('userId', presence.userId))
+          .first(),
+        // AVATAR-FIX: Query primary photo as fallback when chatRoomProfile has no avatar
+        ctx.db
+          .query('photos')
+          .withIndex('by_user', (q) => q.eq('userId', presence.userId))
+          .filter((q) => q.eq(q.field('isPrimary'), true))
+          .first(),
+      ]);
+
+      // Calculate age from DOB
+      let age = 0;
+      if (user?.dateOfBirth) {
+        const birthDate = new Date(user.dateOfBirth);
+        const today = new Date();
+        age = today.getFullYear() - birthDate.getFullYear();
+        const monthDiff = today.getMonth() - birthDate.getMonth();
+        if (monthDiff < 0 || (monthDiff === 0 && today.getDate() < birthDate.getDate())) {
+          age--;
+        }
+      }
+
+      return {
+        id: presence.userId,
+        displayName: chatRoomProfile?.nickname ?? 'Anonymous',
+        // AVATAR-FIX: Prefer chatRoomProfile avatar, fallback to primary photo
+        avatar: chatRoomProfile?.avatarUrl ?? primaryPhoto?.url ?? undefined,
+        age,
+        gender: (user?.gender ?? '') as 'male' | 'female' | 'other' | '',
+        bio: chatRoomProfile?.bio ?? undefined,
+        role: member?.role ?? 'member',
+        lastHeartbeatAt: presence.lastHeartbeatAt,
+        joinedAt: presence.joinedAt,
+      };
+    };
+
+    // Enrich all presence records with profiles
+    const [online, recentlyLeft] = await Promise.all([
+      Promise.all(onlinePresence.map(enrichPresence)),
+      Promise.all(recentlyLeftPresence.map(enrichPresence)),
+    ]);
+
+    // Sort: online by most recent heartbeat, recently-left by most recent
+    online.sort((a, b) => b.lastHeartbeatAt - a.lastHeartbeatAt);
+    recentlyLeft.sort((a, b) => b.lastHeartbeatAt - a.lastHeartbeatAt);
+
+    return {
+      onlineCount: online.length,
+      online,
+      recentlyLeft,
+    };
+  },
+});
+
+/**
+ * Get real-time online count for room header.
+ * Only counts users with heartbeat within 20 seconds.
+ * Excludes recently-left users.
+ */
+export const getRoomOnlineCount = query({
+  args: {
+    roomId: v.id('chatRooms'),
+  },
+  handler: async (ctx, { roomId }) => {
+    const now = Date.now();
+    const onlineThreshold = now - PRESENCE_ONLINE_THRESHOLD_MS;
+
+    // Count presence records with recent heartbeat
+    const presenceRecords = await ctx.db
+      .query('chatRoomPresence')
+      .withIndex('by_room', (q) => q.eq('roomId', roomId))
+      .collect();
+
+    const onlineCount = presenceRecords.filter(
+      (p) => p.lastHeartbeatAt >= onlineThreshold
+    ).length;
+
+    return { onlineCount };
+  },
+});
+
+/**
+ * Cleanup stale presence records older than 10 minutes.
+ * Called by scheduled job to prevent database bloat.
+ */
+export const cleanupStalePresence = internalMutation({
+  args: {},
+  handler: async (ctx) => {
+    const now = Date.now();
+    const staleThreshold = now - PRESENCE_RECENTLY_LEFT_MS;
+
+    // Find and delete stale presence records (in batches)
+    const staleRecords = await ctx.db
+      .query('chatRoomPresence')
+      .withIndex('by_heartbeat')
+      .filter((q) => q.lt(q.field('lastHeartbeatAt'), staleThreshold))
+      .take(100);
+
+    for (const record of staleRecords) {
+      await ctx.db.delete(record._id);
+    }
+
+    return { deleted: staleRecords.length };
   },
 });
