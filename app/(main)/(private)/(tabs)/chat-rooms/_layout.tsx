@@ -1,10 +1,11 @@
 /*
- * LOCKED (PRIVATE CHAT ROOMS LAYOUT)
- * Do NOT modify this file unless Durga Prasad explicitly unlocks it.
+ * UNLOCKED FOR AUDIT (PRIVATE CHAT ROOMS LAYOUT)
+ * Temporarily unlocked for deep audit and bug-fixing work.
  *
  * STATUS:
- * - Feature is stable and production-locked
- * - No logic/UI changes allowed
+ * - Under active audit
+ * - Fixes allowed during audit period
+ * - Will be re-locked after audit completion
  */
 
 /**

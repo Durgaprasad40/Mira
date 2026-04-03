@@ -11,12 +11,14 @@
  * - Badge updates globally via Convex subscription (not just when Messages tab focused)
  */
 import { useEffect, useRef, useMemo, useCallback } from 'react';
-import { AppState, type AppStateStatus } from 'react-native';
+import { AppState, type AppStateStatus, Platform } from 'react-native';
 import { Tabs } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useQuery, useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { INCOGNITO_COLORS } from '@/lib/constants';
+import { getTabLabelFontSize, SCREEN } from '@/lib/responsive';
 import { usePrivateChatStore } from '@/stores/privateChatStore';
 import { useDemoDmStore, computeUnreadDmCountsByRoom } from '@/stores/demoDmStore';
 import { useAuthStore } from '@/stores/authStore';
@@ -48,6 +50,9 @@ const isPhase2Source = (source: string): boolean => {
 };
 
 export default function PrivateTabsLayout() {
+  // P0-001 FIX: Safe area insets for Android bottom nav button handling
+  const insets = useSafeAreaInsets();
+
   // Auth for queries and mutations
   const authUserId = useAuthStore((s) => s.userId);
   const token = useAuthStore((s) => s.token);
@@ -203,6 +208,13 @@ export default function PrivateTabsLayout() {
   );
   const todPendingCount = pendingConnectRequests?.length ?? 0;
 
+  // P0-001 FIX: Calculate bottom padding for Android devices with software nav buttons
+  // On Android, insets.bottom is 0 for gesture nav and >0 for button nav
+  // We add a minimum of 4px padding + the inset to ensure labels are never clipped
+  const tabBarBottomPadding = Platform.OS === 'android'
+    ? Math.max(insets.bottom, 4)  // At least 4px, or the actual inset
+    : 0;  // iOS handles this automatically via safe area
+
   return (
     <Tabs
       screenOptions={{
@@ -210,15 +222,22 @@ export default function PrivateTabsLayout() {
         tabBarStyle: {
           backgroundColor: C.surface,
           borderTopColor: C.accent,
+          // P0-001 FIX: Add bottom padding for Android nav buttons
+          paddingBottom: tabBarBottomPadding,
         },
         tabBarActiveTintColor: C.primary,
         tabBarInactiveTintColor: C.textLight,
+        tabBarLabelStyle: {
+          fontSize: getTabLabelFontSize(),
+          flexShrink: 1,
+        },
       }}
     >
       <Tabs.Screen
         name="desire-land"
         options={{
-          title: 'Deep Connect',
+          // P1-001 FIX: Use shorter title on small screens to prevent truncation
+          title: SCREEN.isSmall ? 'Connect' : 'Deep Connect',
           tabBarIcon: ({ color, size }) => (
             <Ionicons name="compass" size={size} color={color} />
           ),
