@@ -15,16 +15,15 @@ import { INCOGNITO_COLORS } from '@/lib/constants';
 const C = INCOGNITO_COLORS;
 const { height: SCREEN_HEIGHT } = Dimensions.get('window');
 
+// Report reason IDs must match the schema's chatRoomUserStrikes.reasonCode union
 const REPORT_REASONS = [
   { id: 'spam', label: 'Spam / Scam' },
-  { id: 'harassment', label: 'Harassment / Bullying' },
-  { id: 'hate_speech', label: 'Hate speech' },
-  { id: 'sexual_content', label: 'Sexual content' },
-  { id: 'nudity', label: 'Nudity' },
-  { id: 'violent_threats', label: 'Violent threats' },
-  { id: 'impersonation', label: 'Impersonation / Fake profile' },
-  { id: 'selling', label: 'Selling / Promotion' },
-  { id: 'other', label: 'Other' },
+  { id: 'harassment_hate', label: 'Harassment / Hate Speech' },
+  { id: 'sexual_nudity', label: 'Sexual / Nudity' },
+  { id: 'threats', label: 'Violent Threats' },
+  { id: 'impersonation', label: 'Impersonation' },
+  { id: 'fake_profile', label: 'Fake Profile' },
+  { id: 'selling_promotion', label: 'Selling / Promotion' },
 ] as const;
 
 export type ReportReason = (typeof REPORT_REASONS)[number]['id'];
@@ -122,13 +121,11 @@ export default function ReportUserModal({
               );
             })}
 
-            {/* Details text box — always visible but especially for 'Other' */}
+            {/* Details text box — always visible with any selection */}
             {selectedReason && (
               <View style={styles.detailsContainer}>
                 <Text style={styles.detailsLabel}>
-                  {selectedReason === 'other'
-                    ? 'Please describe the issue'
-                    : 'Additional details (optional)'}
+                  Additional details (optional)
                 </Text>
                 <TextInput
                   style={styles.detailsInput}
