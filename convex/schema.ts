@@ -1761,6 +1761,28 @@ export default defineSchema({
     .index('by_room_user', ['roomId', 'userId'])
     .index('by_user', ['userId']),
 
+  // Chat Room Password Attempts table (LOCKED-ROOM-FIX)
+  // Tracks password attempts per user per room to enforce 5-attempt limit
+  // Stage model:
+  //   1: initial 3 attempts available
+  //   2: waiting 3-min cooldown, then 1 attempt
+  //   3: waiting 2-min cooldown, then 1 final attempt
+  //   4: permanently blocked
+  //   0: authorized (successfully entered with password)
+  chatRoomPasswordAttempts: defineTable({
+    roomId: v.id('chatRooms'),
+    userId: v.id('users'),
+    stage: v.number(),           // 0=authorized, 1-3=attempting, 4=blocked
+    attemptsInStage: v.number(), // attempts used in current stage
+    cooldownUntil: v.optional(v.number()), // timestamp when cooldown ends
+    blocked: v.boolean(),        // true if permanently blocked (stage 4)
+    authorized: v.optional(v.boolean()), // true if user successfully entered with password
+    lastAttemptAt: v.number(),   // timestamp of last attempt
+    createdAt: v.number(),
+  })
+    .index('by_room_user', ['roomId', 'userId'])
+    .index('by_user', ['userId']),
+
   // Chat Room Message Reactions table
   // Tracks emoji reactions on messages (👍 ❤️ 😂 😮 🔥 👎)
   chatRoomReactions: defineTable({
@@ -2277,7 +2299,8 @@ export default defineSchema({
       v.literal('text'),
       v.literal('image'),
       v.literal('video'),
-      v.literal('audio')
+      v.literal('audio'),
+      v.literal('doodle')
     )),
     mediaStorageId: v.optional(v.id('_storage')),  // For media messages
     mediaUrl: v.optional(v.string()),              // Resolved URL (cached)

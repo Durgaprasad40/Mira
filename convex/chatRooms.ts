@@ -950,6 +950,289 @@ export const joinRoom = mutation({
   },
 });
 
+// Password attempt limit constants
+const STAGE_1_MAX_ATTEMPTS = 3;  // Initial 3 attempts
+const STAGE_2_COOLDOWN_MS = 3 * 60 * 1000;  // 3 minutes
+const STAGE_3_COOLDOWN_MS = 2 * 60 * 1000;  // 2 minutes
+
+// Join a password-protected room (validates password before creating membership)
+// LOCKED-ROOM-FIX: This mutation enforces password validation + 5-attempt limit
+// Attempt model:
+//   Stage 1: 3 immediate attempts
+//   Stage 2: 3-min cooldown, then 1 attempt
+//   Stage 3: 2-min cooldown, then 1 final attempt
+//   Stage 4: permanently blocked
+export const joinRoomWithPassword = mutation({
+  args: {
+    roomId: v.id('chatRooms'),
+    password: v.optional(v.string()), // Required if room has password
+    authUserId: v.string(),
+  },
+  handler: async (ctx, { roomId, password, authUserId }) => {
+    // 1. Auth guard
+    if (!authUserId || authUserId.trim().length === 0) {
+      throw new Error('Unauthorized: authentication required');
+    }
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      throw new Error('Unauthorized: user not found');
+    }
+
+    // 2. Get room
+    const room = await ctx.db.get(roomId);
+    if (!room) {
+      throw new Error('Room not found');
+    }
+
+    const now = Date.now();
+
+    // 3. Check if room is expired
+    if (room.expiresAt && room.expiresAt <= now) {
+      throw new Error('This room has expired.');
+    }
+
+    // 4. Check if banned
+    const ban = await ctx.db
+      .query('chatRoomBans')
+      .withIndex('by_room_user', (q) => q.eq('roomId', roomId).eq('userId', userId))
+      .first();
+    if (ban) {
+      throw new Error('You are banned from this room.');
+    }
+
+    // 5. Check if already a member (idempotent)
+    const existing = await ctx.db
+      .query('chatRoomMembers')
+      .withIndex('by_room_user', (q) => q.eq('roomId', roomId).eq('userId', userId))
+      .first();
+    if (existing) {
+      return { success: true, alreadyMember: true };
+    }
+
+    // 6. For rooms without password, skip password validation
+    if (!room.passwordHash) {
+      // Create membership directly
+      await ctx.db.insert('chatRoomMembers', {
+        roomId,
+        userId,
+        joinedAt: now,
+        role: 'member',
+      });
+      await ctx.db.patch(userId, { lastActive: now });
+      const actualMemberCount = await recomputeMemberCount(ctx, roomId);
+      await ctx.db.patch(roomId, { memberCount: actualMemberCount });
+      return { success: true, alreadyMember: false };
+    }
+
+    // 7. LOCKED-ROOM-FIX: Check/update password attempt state
+    let attemptRecord = await ctx.db
+      .query('chatRoomPasswordAttempts')
+      .withIndex('by_room_user', (q) => q.eq('roomId', roomId).eq('userId', userId))
+      .first();
+
+    // Initialize attempt record if doesn't exist
+    if (!attemptRecord) {
+      const recordId = await ctx.db.insert('chatRoomPasswordAttempts', {
+        roomId,
+        userId,
+        stage: 1,
+        attemptsInStage: 0,
+        blocked: false,
+        lastAttemptAt: now,
+        createdAt: now,
+      });
+      attemptRecord = await ctx.db.get(recordId);
+    }
+
+    // Check if permanently blocked (stage 4)
+    if (attemptRecord!.blocked || attemptRecord!.stage === 4) {
+      return {
+        success: false,
+        blocked: true,
+        message: 'You have reached the maximum number of attempts for this room.',
+      };
+    }
+
+    // Check if in cooldown
+    if (attemptRecord!.cooldownUntil && attemptRecord!.cooldownUntil > now) {
+      const remainingMs = attemptRecord!.cooldownUntil - now;
+      return {
+        success: false,
+        cooldown: true,
+        cooldownRemainingMs: remainingMs,
+        message: 'Too many incorrect attempts. Please wait before trying again.',
+      };
+    }
+
+    // Check if password was provided
+    if (!password || password.trim().length === 0) {
+      return {
+        success: false,
+        message: 'Password required',
+        stage: attemptRecord!.stage,
+        attemptsRemaining: getAttemptsRemaining(attemptRecord!.stage, attemptRecord!.attemptsInStage),
+      };
+    }
+
+    // Validate password
+    const passwordValid = await verifyPassword(password, room.passwordHash);
+
+    if (passwordValid) {
+      // SUCCESS: Password correct - mark as authorized and create membership
+      // RE-ENTRY-FIX: Don't delete record, mark as authorized so user can rejoin without password after leaving
+      await ctx.db.patch(attemptRecord!._id, {
+        stage: 0,
+        attemptsInStage: 0,
+        blocked: false,
+        authorized: true,
+        cooldownUntil: undefined,
+        lastAttemptAt: now,
+      });
+
+      await ctx.db.insert('chatRoomMembers', {
+        roomId,
+        userId,
+        joinedAt: now,
+        role: 'member',
+      });
+      await ctx.db.patch(userId, { lastActive: now });
+      const actualMemberCount = await recomputeMemberCount(ctx, roomId);
+      await ctx.db.patch(roomId, { memberCount: actualMemberCount });
+
+      return { success: true, alreadyMember: false };
+    }
+
+    // WRONG PASSWORD: Update attempt state
+    const currentStage = attemptRecord!.stage;
+    const currentAttempts = attemptRecord!.attemptsInStage + 1;
+
+    let newStage = currentStage;
+    let newAttempts = currentAttempts;
+    let newCooldownUntil: number | undefined;
+    let blocked = false;
+
+    if (currentStage === 1) {
+      // Stage 1: 3 immediate attempts
+      if (currentAttempts >= STAGE_1_MAX_ATTEMPTS) {
+        // Move to stage 2 with cooldown
+        newStage = 2;
+        newAttempts = 0;
+        newCooldownUntil = now + STAGE_2_COOLDOWN_MS;
+      }
+    } else if (currentStage === 2) {
+      // Stage 2: 1 attempt after 3-min cooldown
+      // Move to stage 3 with cooldown
+      newStage = 3;
+      newAttempts = 0;
+      newCooldownUntil = now + STAGE_3_COOLDOWN_MS;
+    } else if (currentStage === 3) {
+      // Stage 3: 1 final attempt after 2-min cooldown
+      // Move to stage 4 (permanently blocked)
+      newStage = 4;
+      newAttempts = 0;
+      blocked = true;
+    }
+
+    // Update attempt record
+    await ctx.db.patch(attemptRecord!._id, {
+      stage: newStage,
+      attemptsInStage: newAttempts,
+      cooldownUntil: newCooldownUntil,
+      blocked,
+      lastAttemptAt: now,
+    });
+
+    // Return appropriate response
+    if (blocked) {
+      return {
+        success: false,
+        blocked: true,
+        message: 'You have reached the maximum number of attempts for this room.',
+      };
+    }
+
+    if (newCooldownUntil) {
+      return {
+        success: false,
+        cooldown: true,
+        cooldownRemainingMs: newCooldownUntil - now,
+        message: 'Too many incorrect attempts. Please wait before trying again.',
+      };
+    }
+
+    return {
+      success: false,
+      message: 'Incorrect password',
+      stage: newStage,
+      attemptsRemaining: getAttemptsRemaining(newStage, newAttempts),
+    };
+  },
+});
+
+// Helper to calculate remaining attempts for a stage
+function getAttemptsRemaining(stage: number, attemptsUsed: number): number {
+  if (stage === 1) {
+    return Math.max(0, STAGE_1_MAX_ATTEMPTS - attemptsUsed);
+  }
+  // Stages 2 and 3 have exactly 1 attempt each
+  return attemptsUsed === 0 ? 1 : 0;
+}
+
+// Query to get password attempt state (for UI rendering)
+export const getPasswordAttemptState = query({
+  args: {
+    roomId: v.id('chatRooms'),
+    authUserId: v.string(),
+  },
+  handler: async (ctx, { roomId, authUserId }) => {
+    if (!authUserId || authUserId.trim().length === 0) {
+      return { stage: 1, attemptsRemaining: 3, blocked: false };
+    }
+
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      return { stage: 1, attemptsRemaining: 3, blocked: false };
+    }
+
+    const attemptRecord = await ctx.db
+      .query('chatRoomPasswordAttempts')
+      .withIndex('by_room_user', (q) => q.eq('roomId', roomId).eq('userId', userId))
+      .first();
+
+    if (!attemptRecord) {
+      return { stage: 1, attemptsRemaining: 3, blocked: false };
+    }
+
+    const now = Date.now();
+
+    // Check if blocked
+    if (attemptRecord.blocked || attemptRecord.stage === 4) {
+      return {
+        stage: 4,
+        attemptsRemaining: 0,
+        blocked: true,
+      };
+    }
+
+    // Check if in cooldown
+    if (attemptRecord.cooldownUntil && attemptRecord.cooldownUntil > now) {
+      return {
+        stage: attemptRecord.stage,
+        attemptsRemaining: 0,
+        blocked: false,
+        cooldown: true,
+        cooldownRemainingMs: attemptRecord.cooldownUntil - now,
+      };
+    }
+
+    return {
+      stage: attemptRecord.stage,
+      attemptsRemaining: getAttemptsRemaining(attemptRecord.stage, attemptRecord.attemptsInStage),
+      blocked: false,
+    };
+  },
+});
+
 // Leave a room
 // Safety: Deletes ALL matching membership rows (handles duplicates) and is fully idempotent
 // CR-011 FIX: Auth hardening - verify caller can only leave for themselves
@@ -1790,6 +2073,8 @@ export const getMyPrivateRooms = query({
     // Get user's memberships (if logged in) for isMember/role flags
     let memberRoomIds = new Set<string>();
     let membershipByRoom = new Map<string, { role: string }>();
+    // RE-ENTRY-FIX: Track rooms where user was previously authorized (for password-protected rooms)
+    let authorizedRoomIds = new Set<string>();
 
     if (userId) {
       const memberships = await ctx.db
@@ -1801,6 +2086,14 @@ export const getMyPrivateRooms = query({
       membershipByRoom = new Map(
         memberships.map((m) => [m.roomId.toString(), { role: m.role }])
       );
+
+      // RE-ENTRY-FIX: Get all rooms where user was authorized via password
+      const authorizations = await ctx.db
+        .query('chatRoomPasswordAttempts')
+        .withIndex('by_user', (q) => q.eq('userId', userId))
+        .filter((q) => q.eq(q.field('authorized'), true))
+        .collect();
+      authorizedRoomIds = new Set(authorizations.map((a) => a.roomId.toString()));
     }
 
     // Process all private rooms
@@ -1833,6 +2126,8 @@ export const getMyPrivateRooms = query({
         const isMember = memberRoomIds.has(roomIdStr);
         const membership = membershipByRoom.get(roomIdStr);
         const isCreator = userId && room.createdBy === userId;
+        // RE-ENTRY-FIX: Check if user was previously authorized for this room
+        const wasAuthorized = authorizedRoomIds.has(roomIdStr);
 
         return {
           _id: room._id,
@@ -1851,6 +2146,7 @@ export const getMyPrivateRooms = query({
           hasPassword: !!room.passwordHash, // Indicate if password required
           role: membership?.role ?? (isCreator ? 'owner' : 'none'),
           isMember, // Whether user currently has membership (for UI/access)
+          wasAuthorized, // RE-ENTRY-FIX: Whether user was previously authorized (can rejoin without password)
         };
       })
     );
@@ -4069,7 +4365,8 @@ export const sendDmMessage = mutation({
       v.literal('text'),
       v.literal('image'),
       v.literal('video'),
-      v.literal('audio')
+      v.literal('audio'),
+      v.literal('doodle')
     )),
     mediaStorageId: v.optional(v.id('_storage')),
   },
@@ -4542,6 +4839,186 @@ export const markAllMentionsRead = mutation({
     }
 
     return { success: true, markedCount: unreadMentions.length };
+  },
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// DM THREAD DELETE CONSISTENCY
+// When a DM thread is deleted, all related content must be cleaned up:
+// - All messages in the thread
+// - All media storage blobs (images, videos, audio, doodles)
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Delete a DM thread and all its messages with full storage cleanup
+ * This ensures delete consistency - no orphaned messages or media
+ */
+export const deleteDmThread = mutation({
+  args: {
+    authUserId: v.string(),
+    threadId: v.id('chatRoomDmThreads'),
+  },
+  handler: async (ctx, { authUserId, threadId }) => {
+    // Resolve user ID
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      throw new Error('Unauthorized: user not found');
+    }
+
+    // Verify thread exists and user is participant
+    const thread = await ctx.db.get(threadId);
+    if (!thread) {
+      return { success: false, error: 'Thread not found', deletedMessages: 0, deletedStorage: 0 };
+    }
+
+    const isParticipant =
+      thread.participant1Id === userId || thread.participant2Id === userId;
+    if (!isParticipant) {
+      throw new Error('Unauthorized: user is not a participant in this thread');
+    }
+
+    // Step 1: Get all messages in the thread
+    const messages = await ctx.db
+      .query('chatRoomDmMessages')
+      .withIndex('by_thread', (q) => q.eq('threadId', threadId))
+      .collect();
+
+    let deletedMessages = 0;
+    let deletedStorage = 0;
+
+    // Step 2: Delete each message and its media storage
+    for (const message of messages) {
+      // If message has media, delete the storage blob
+      if (message.mediaStorageId) {
+        try {
+          await ctx.storage.delete(message.mediaStorageId);
+          deletedStorage++;
+        } catch (error) {
+          // Storage might already be deleted or invalid - log but continue
+          console.warn('[deleteDmThread] Storage delete failed for:', message.mediaStorageId, error);
+        }
+      }
+
+      // Delete the message record
+      await ctx.db.delete(message._id);
+      deletedMessages++;
+    }
+
+    // Step 3: Delete the thread itself
+    await ctx.db.delete(threadId);
+
+    return {
+      success: true,
+      deletedMessages,
+      deletedStorage,
+    };
+  },
+});
+
+/**
+ * Cleanup orphaned DM messages (messages without valid thread)
+ * This is a maintenance function to ensure data consistency
+ */
+export const cleanupOrphanedDmMessages = mutation({
+  args: {},
+  handler: async (ctx) => {
+    // Get all DM messages
+    const allMessages = await ctx.db.query('chatRoomDmMessages').collect();
+
+    let deletedMessages = 0;
+    let deletedStorage = 0;
+
+    for (const message of allMessages) {
+      // Check if thread still exists
+      const thread = await ctx.db.get(message.threadId);
+      if (!thread) {
+        // Thread is gone - clean up orphaned message
+        if (message.mediaStorageId) {
+          try {
+            await ctx.storage.delete(message.mediaStorageId);
+            deletedStorage++;
+          } catch (error) {
+            console.warn('[cleanupOrphanedDmMessages] Storage delete failed:', message.mediaStorageId);
+          }
+        }
+        await ctx.db.delete(message._id);
+        deletedMessages++;
+      }
+    }
+
+    return {
+      deletedMessages,
+      deletedStorage,
+      message: `Cleaned up ${deletedMessages} orphaned DM messages and ${deletedStorage} storage blobs`,
+    };
+  },
+});
+
+/**
+ * Delete all DM threads and messages for a user (account cleanup)
+ * Used when user deletes their account or chat room profile
+ */
+export const deleteAllUserDmThreads = mutation({
+  args: {
+    authUserId: v.string(),
+  },
+  handler: async (ctx, { authUserId }) => {
+    // Resolve user ID
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      throw new Error('Unauthorized: user not found');
+    }
+
+    // Find all threads where user is participant1
+    const threadsAsP1 = await ctx.db
+      .query('chatRoomDmThreads')
+      .withIndex('by_participant1', (q) => q.eq('participant1Id', userId))
+      .collect();
+
+    // Find all threads where user is participant2
+    const threadsAsP2 = await ctx.db
+      .query('chatRoomDmThreads')
+      .withIndex('by_participant2', (q) => q.eq('participant2Id', userId))
+      .collect();
+
+    const allThreads = [...threadsAsP1, ...threadsAsP2];
+
+    let deletedThreads = 0;
+    let deletedMessages = 0;
+    let deletedStorage = 0;
+
+    for (const thread of allThreads) {
+      // Get all messages in this thread
+      const messages = await ctx.db
+        .query('chatRoomDmMessages')
+        .withIndex('by_thread', (q) => q.eq('threadId', thread._id))
+        .collect();
+
+      // Delete messages and media
+      for (const message of messages) {
+        if (message.mediaStorageId) {
+          try {
+            await ctx.storage.delete(message.mediaStorageId);
+            deletedStorage++;
+          } catch (error) {
+            console.warn('[deleteAllUserDmThreads] Storage delete failed:', message.mediaStorageId);
+          }
+        }
+        await ctx.db.delete(message._id);
+        deletedMessages++;
+      }
+
+      // Delete the thread
+      await ctx.db.delete(thread._id);
+      deletedThreads++;
+    }
+
+    return {
+      success: true,
+      deletedThreads,
+      deletedMessages,
+      deletedStorage,
+    };
   },
 });
 
