@@ -267,6 +267,21 @@ interface PrivateProfileState {
     preferenceStrength?: PreferenceStrength;
     // Per-photo blur slots (9 slots, true = blurred)
     photoBlurSlots?: boolean[];
+    // P0-1 FIX: Privacy settings
+    hideFromDeepConnect?: boolean;
+    hideAge?: boolean;
+    hideDistance?: boolean;
+    disableReadReceipts?: boolean;
+    // P0-2 FIX: Safe Mode setting
+    safeMode?: boolean;
+    // P0-1 FIX: Notification settings
+    notificationsEnabled?: boolean;
+    notificationCategories?: {
+      deepConnect?: boolean;
+      privateMessages?: boolean;
+      chatRooms?: boolean;
+      truthOrDare?: boolean;
+    };
   } | null) => void;
 }
 
@@ -659,6 +674,26 @@ export const usePrivateProfileStore = create<PrivateProfileState>()((set) => ({
       // Hydrate from backend or keep default (all blurred for privacy)
       photoBlurSlots: convexProfile.photoBlurSlots || [true, true, true, true, true, true, true, true, true],
 
+      // P0-1 FIX: Privacy settings (hydrate from backend)
+      hideFromDeepConnect: convexProfile.hideFromDeepConnect ?? false,
+      hideAge: convexProfile.hideAge ?? false,
+      hideDistance: convexProfile.hideDistance ?? false,
+      disableReadReceipts: convexProfile.disableReadReceipts ?? false,
+
+      // P0-2 FIX: Safe Mode setting (hydrate from backend)
+      safeMode: convexProfile.safeMode ?? false,
+
+      // P0-1 FIX: Notification settings (hydrate from backend)
+      notificationsEnabled: convexProfile.notificationsEnabled ?? true,
+      notificationCategories: convexProfile.notificationCategories
+        ? {
+            deepConnect: convexProfile.notificationCategories.deepConnect ?? true,
+            privateMessages: convexProfile.notificationCategories.privateMessages ?? true,
+            chatRooms: convexProfile.notificationCategories.chatRooms ?? true,
+            truthOrDare: convexProfile.notificationCategories.truthOrDare ?? true,
+          }
+        : {},
+
       // Mark as hydrated
       _hasHydrated: true,
     });
@@ -668,6 +703,10 @@ export const usePrivateProfileStore = create<PrivateProfileState>()((set) => ({
         photoCount: convexProfile.privatePhotoUrls?.length || 0,
         promptAnswerCount: convexProfile.promptAnswers?.length || 0,
         hasPreferenceStrength: !!convexProfile.preferenceStrength,
+        // P0-1/P0-2: Log settings hydration
+        hideFromDeepConnect: convexProfile.hideFromDeepConnect,
+        safeMode: convexProfile.safeMode,
+        notificationsEnabled: convexProfile.notificationsEnabled,
       });
     }
   },

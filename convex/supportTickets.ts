@@ -489,3 +489,59 @@ export const closeTicket = mutation({
     return { success: true };
   },
 });
+
+// ============================================================================
+// P0-3 FIX: USER REPORTS (SAFETY TICKETS)
+// ============================================================================
+
+/**
+ * Get user's submitted safety reports (person reports)
+ *
+ * Returns tickets where category='safety', which includes person reports
+ * submitted via the Report Person flow. These are identified by the
+ * "[Deep Connect Report]" prefix in the message.
+ */
+export const getUserSafetyReports = query({
+  args: {
+    userId: v.id('users'),
+  },
+  handler: async (ctx, args) => {
+    // Get all safety category tickets for this user
+    const tickets = await ctx.db
+      .query('supportTickets')
+      .withIndex('by_user', (q) => q.eq('userId', args.userId))
+      .order('desc')
+      .collect();
+
+    // Filter to only safety category (reports)
+    const safetyReports = tickets.filter((t) => t.category === 'safety');
+
+    // Transform to report format expected by UI
+    return safetyReports.map((ticket) => {
+      // Extract reported user info from message if present
+      // Format: "[Deep Connect Report] Reason: harassment\nReported User: username\nUser ID: xxx\n\nDetails: ..."
+      let reportedUserName = 'Unknown User';
+      let reason = 'safety';
+
+      const reasonMatch = ticket.message.match(/Reason:\s*(\w+)/i);
+      if (reasonMatch) {
+        reason = reasonMatch[1];
+      }
+
+      const userNameMatch = ticket.message.match(/Reported User:\s*([^\n]+)/i);
+      if (userNameMatch) {
+        reportedUserName = userNameMatch[1].trim();
+      }
+
+      return {
+        _id: ticket._id,
+        reportedUserName,
+        reason,
+        status: ticket.status,
+        createdAt: ticket.createdAt,
+        updatedAt: ticket.updatedAt,
+        hasAdminReply: !!ticket.adminReply,
+      };
+    });
+  },
+});

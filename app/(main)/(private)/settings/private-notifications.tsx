@@ -16,8 +16,12 @@ import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Switch } from 're
 import { useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
+import { useMutation } from 'convex/react';
+import { api } from '@/convex/_generated/api';
 import { INCOGNITO_COLORS } from '@/lib/constants';
 import { usePrivateProfileStore } from '@/stores/privateProfileStore';
+import { useAuthStore } from '@/stores/authStore';
+import { isDemoMode } from '@/hooks/useConvex';
 
 const C = INCOGNITO_COLORS;
 
@@ -59,7 +63,11 @@ export default function PrivateNotificationsScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
 
-  // Master toggle from store (local-only until backend supports them)
+  // Auth and backend mutation
+  const { userId } = useAuthStore();
+  const updatePrivateProfile = useMutation(api.privateProfiles.updateFieldsByAuthId);
+
+  // Master toggle from store (now persisted to backend via P0-1 fix)
   const notificationsEnabled = usePrivateProfileStore((s) => s.notificationsEnabled);
   const setNotificationsEnabled = usePrivateProfileStore((s) => s.setNotificationsEnabled);
 
@@ -67,15 +75,39 @@ export default function PrivateNotificationsScreen() {
   const notificationCategories = usePrivateProfileStore((s) => s.notificationCategories);
   const setNotificationCategory = usePrivateProfileStore((s) => s.setNotificationCategory);
 
-  // Handle master toggle (local store only)
+  // P0-1 FIX: Handle master toggle (now persisted to backend)
   const handleMasterToggle = useCallback((enabled: boolean) => {
     setNotificationsEnabled(enabled);
-  }, [setNotificationsEnabled]);
+    // Persist to backend
+    if (!isDemoMode && userId) {
+      updatePrivateProfile({
+        authUserId: userId,
+        notificationsEnabled: enabled,
+      }).catch((error) => {
+        if (__DEV__) console.error('[PrivateNotifications] Backend sync failed:', error);
+      });
+    }
+  }, [setNotificationsEnabled, userId, updatePrivateProfile]);
 
-  // Handle category toggle (local store only)
+  // P0-1 FIX: Handle category toggle (now persisted to backend)
   const handleCategoryToggle = useCallback((categoryKey: string, enabled: boolean) => {
     setNotificationCategory(categoryKey, enabled);
-  }, [setNotificationCategory]);
+    // Persist to backend - build the full categories object
+    if (!isDemoMode && userId) {
+      const updatedCategories = { ...notificationCategories, [categoryKey]: enabled };
+      updatePrivateProfile({
+        authUserId: userId,
+        notificationCategories: {
+          deepConnect: updatedCategories.deepConnect,
+          privateMessages: updatedCategories.privateMessages,
+          chatRooms: updatedCategories.chatRooms,
+          truthOrDare: updatedCategories.truthOrDare,
+        },
+      }).catch((error) => {
+        if (__DEV__) console.error('[PrivateNotifications] Backend sync failed:', error);
+      });
+    }
+  }, [setNotificationCategory, userId, updatePrivateProfile, notificationCategories]);
 
   // Check if category is enabled
   const isCategoryEnabled = (key: string): boolean => {

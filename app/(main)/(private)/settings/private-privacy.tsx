@@ -15,8 +15,12 @@ import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Switch, Alert } f
 import { useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
+import { useMutation } from 'convex/react';
+import { api } from '@/convex/_generated/api';
 import { INCOGNITO_COLORS } from '@/lib/constants';
 import { usePrivateProfileStore } from '@/stores/privateProfileStore';
+import { useAuthStore } from '@/stores/authStore';
+import { isDemoMode } from '@/hooks/useConvex';
 
 const C = INCOGNITO_COLORS;
 
@@ -24,7 +28,11 @@ export default function PrivatePrivacyScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
 
-  // Local store state (Phase-2 privacy settings are local-only until backend supports them)
+  // Auth and backend mutation
+  const { userId } = useAuthStore();
+  const updatePrivateProfile = useMutation(api.privateProfiles.updateFieldsByAuthId);
+
+  // Local store state (now persisted to backend via P0-1 fix)
   const hideFromDeepConnect = usePrivateProfileStore((s) => s.hideFromDeepConnect);
   const hideAge = usePrivateProfileStore((s) => s.hideAge);
   const hideDistance = usePrivateProfileStore((s) => s.hideDistance);
@@ -38,7 +46,21 @@ export default function PrivatePrivacyScreen() {
   // Warning shown state (session only)
   const [warningShownThisSession, setWarningShownThisSession] = useState(false);
 
-  // Handle "Hide from Deep Connect" toggle (local store only)
+  // P0-1 FIX: Helper to persist privacy setting to backend
+  const persistToBackend = useCallback(async (field: string, value: boolean) => {
+    if (!isDemoMode && userId) {
+      try {
+        await updatePrivateProfile({
+          authUserId: userId,
+          [field]: value,
+        });
+      } catch (error) {
+        if (__DEV__) console.error('[PrivatePrivacy] Backend sync failed:', error);
+      }
+    }
+  }, [userId, updatePrivateProfile]);
+
+  // Handle "Hide from Deep Connect" toggle (now persisted to backend)
   const handleHideFromDeepConnectChange = useCallback((newValue: boolean) => {
     if (newValue && !warningShownThisSession) {
       Alert.alert(
@@ -51,6 +73,7 @@ export default function PrivatePrivacyScreen() {
             onPress: () => {
               setWarningShownThisSession(true);
               setHideFromDeepConnect(newValue);
+              persistToBackend('hideFromDeepConnect', newValue);
             },
           },
         ]
@@ -58,22 +81,26 @@ export default function PrivatePrivacyScreen() {
       return;
     }
     setHideFromDeepConnect(newValue);
-  }, [warningShownThisSession, setHideFromDeepConnect]);
+    persistToBackend('hideFromDeepConnect', newValue);
+  }, [warningShownThisSession, setHideFromDeepConnect, persistToBackend]);
 
-  // Handle "Hide Age" toggle (local store only)
+  // Handle "Hide Age" toggle (now persisted to backend)
   const handleHideAgeChange = useCallback((newValue: boolean) => {
     setHideAge(newValue);
-  }, [setHideAge]);
+    persistToBackend('hideAge', newValue);
+  }, [setHideAge, persistToBackend]);
 
-  // Handle "Hide Distance" toggle (local store only)
+  // Handle "Hide Distance" toggle (now persisted to backend)
   const handleHideDistanceChange = useCallback((newValue: boolean) => {
     setHideDistance(newValue);
-  }, [setHideDistance]);
+    persistToBackend('hideDistance', newValue);
+  }, [setHideDistance, persistToBackend]);
 
-  // Handle "Disable Read Receipts" toggle (local store only)
+  // Handle "Disable Read Receipts" toggle (now persisted to backend)
   const handleDisableReadReceiptsChange = useCallback((newValue: boolean) => {
     setDisableReadReceipts(newValue);
-  }, [setDisableReadReceipts]);
+    persistToBackend('disableReadReceipts', newValue);
+  }, [setDisableReadReceipts, persistToBackend]);
 
   return (
     <View style={[styles.container, { paddingTop: insets.top }]}>

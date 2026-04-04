@@ -1243,6 +1243,21 @@ export default defineSchema({
     // true = photo is blurred to other users, false = photo is visible
     // CRITICAL: This is the backend source of truth for Phase-2 per-photo blur
     photoBlurSlots: v.optional(v.array(v.boolean())),
+    // P0-1 FIX: Privacy settings (Deep Connect specific)
+    hideFromDeepConnect: v.optional(v.boolean()),
+    hideAge: v.optional(v.boolean()),
+    hideDistance: v.optional(v.boolean()),
+    disableReadReceipts: v.optional(v.boolean()),
+    // P0-2 FIX: Safe Mode setting
+    safeMode: v.optional(v.boolean()),
+    // P0-1 FIX: Notification settings
+    notificationsEnabled: v.optional(v.boolean()),
+    notificationCategories: v.optional(v.object({
+      deepConnect: v.optional(v.boolean()),
+      privateMessages: v.optional(v.boolean()),
+      chatRooms: v.optional(v.boolean()),
+      truthOrDare: v.optional(v.boolean()),
+    })),
     createdAt: v.number(),
     updatedAt: v.number(),
   })

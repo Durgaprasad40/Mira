@@ -1,10 +1,14 @@
-import React, { useState } from 'react';
+import React, { useState, useCallback } from 'react';
 import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Switch } from 'react-native';
 import { useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
+import { useMutation } from 'convex/react';
+import { api } from '@/convex/_generated/api';
 import { INCOGNITO_COLORS } from '@/lib/constants';
 import { usePrivateProfileStore } from '@/stores/privateProfileStore';
+import { useAuthStore } from '@/stores/authStore';
+import { isDemoMode } from '@/hooks/useConvex';
 
 const C = INCOGNITO_COLORS;
 
@@ -34,6 +38,10 @@ export default function SafetyScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
 
+  // Auth and backend mutation
+  const { userId } = useAuthStore();
+  const updatePrivateProfile = useMutation(api.privateProfiles.updateFieldsByAuthId);
+
   const safeMode = usePrivateProfileStore((s) => s.safeMode);
   const setSafeMode = usePrivateProfileStore((s) => s.setSafeMode);
 
@@ -42,6 +50,20 @@ export default function SafetyScreen() {
   const toggleTip = (tipKey: string) => {
     setExpandedTip(expandedTip === tipKey ? null : tipKey);
   };
+
+  // P0-2 FIX: Handle Safe Mode toggle with backend persistence
+  const handleSafeModeChange = useCallback((enabled: boolean) => {
+    setSafeMode(enabled);
+    // Persist to backend
+    if (!isDemoMode && userId) {
+      updatePrivateProfile({
+        authUserId: userId,
+        safeMode: enabled,
+      }).catch((error) => {
+        if (__DEV__) console.error('[PrivateSafety] Backend sync failed:', error);
+      });
+    }
+  }, [setSafeMode, userId, updatePrivateProfile]);
 
   return (
     <View style={[styles.container, { paddingTop: insets.top }]}>
@@ -75,7 +97,7 @@ export default function SafetyScreen() {
               </View>
               <Switch
                 value={safeMode}
-                onValueChange={setSafeMode}
+                onValueChange={handleSafeModeChange}
                 trackColor={{ false: C.border, true: C.primary }}
                 thumbColor="#FFF"
               />

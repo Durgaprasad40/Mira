@@ -9,7 +9,7 @@
  *
  * Uses Phase-2 dark premium styling (INCOGNITO_COLORS).
  */
-import React, { useState } from 'react';
+import React, { useState, useMemo } from 'react';
 import {
   View,
   Text,
@@ -18,11 +18,17 @@ import {
   TouchableOpacity,
   RefreshControl,
   Modal,
+  ActivityIndicator,
 } from 'react-native';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
+import { useQuery } from 'convex/react';
+import { api } from '@/convex/_generated/api';
 import { INCOGNITO_COLORS } from '@/lib/constants';
+import { useAuthStore } from '@/stores/authStore';
+import { isDemoMode } from '@/hooks/useConvex';
+import type { Id } from '@/convex/_generated/dataModel';
 
 const C = INCOGNITO_COLORS;
 
@@ -77,15 +83,51 @@ export default function PrivateMyReportsScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
 
+  // Auth
+  const { userId } = useAuthStore();
+
   const [refreshing, setRefreshing] = useState(false);
   const [selectedReport, setSelectedReport] = useState<Report | null>(null);
 
-  // Reports are stored as support tickets - will be empty until backend reports API is ready
-  const reports: Report[] = [];
+  // P0-3 FIX: Query real reports from backend (safety-category support tickets)
+  const backendReports = useQuery(
+    api.supportTickets.getUserSafetyReports,
+    !isDemoMode && userId ? { userId: userId as Id<'users'> } : 'skip'
+  );
+
+  // Transform backend reports to UI format
+  const reports = useMemo((): Report[] => {
+    if (!backendReports) return [];
+    return backendReports.map((r) => ({
+      _id: r._id,
+      reason: r.reason,
+      status: mapBackendStatus(r.status),
+      createdAt: r.createdAt,
+      reportedUserName: r.reportedUserName,
+      hasAttachments: false, // Could be enhanced later
+    }));
+  }, [backendReports]);
+
+  // Map backend ticket status to UI status
+  function mapBackendStatus(status: string): string {
+    switch (status) {
+      case 'open':
+        return 'submitted';
+      case 'in_review':
+        return 'under_review';
+      case 'replied':
+        return 'action_taken';
+      case 'closed':
+        return 'closed';
+      default:
+        return 'submitted';
+    }
+  }
 
   const handleRefresh = async () => {
     setRefreshing(true);
-    setTimeout(() => setRefreshing(false), 1000);
+    // Query will auto-refresh via Convex reactivity
+    setTimeout(() => setRefreshing(false), 500);
   };
 
   const formatDate = (timestamp: number): string => {
@@ -109,7 +151,7 @@ export default function PrivateMyReportsScreen() {
     setSelectedReport(null);
   };
 
-  const isLoading = false;
+  const isLoading = !isDemoMode && userId && backendReports === undefined;
   const isEmpty = reports.length === 0;
   const displayReports = reports;
 
@@ -145,7 +187,8 @@ export default function PrivateMyReportsScreen() {
         {/* Loading State */}
         {isLoading && (
           <View style={styles.emptyState}>
-            <Text style={styles.emptyStateText}>Loading reports...</Text>
+            <ActivityIndicator size="large" color={C.primary} />
+            <Text style={[styles.emptyStateText, { marginTop: 12 }]}>Loading reports...</Text>
           </View>
         )}
 
