@@ -667,6 +667,8 @@ export interface LifeRhythm {
 // Incognito Mode Colors
 export const INCOGNITO_COLORS = {
   background: '#1A1A2E',
+  // DM-VISUAL-FIX: Subtle purple-tinted background for 1-on-1 DM to distinguish from group chat
+  dmBackground: '#1F1A30',
   surface: '#16213E',
   accent: '#0F3460',
   text: '#E0E0E0',
