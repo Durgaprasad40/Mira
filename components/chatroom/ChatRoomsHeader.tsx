@@ -91,6 +91,8 @@ interface ChatRoomsHeaderProps {
   onClosePress?: () => void;
   /** Phase-2: Hide inbox and notifications icons (for private rooms) */
   hideInboxAndNotifications?: boolean;
+  /** Show 24-hour message retention indicator below title */
+  showRetentionIndicator?: boolean;
 }
 
 export default function ChatRoomsHeader({
@@ -115,6 +117,7 @@ export default function ChatRoomsHeader({
   showCloseButton = false,
   onClosePress,
   hideInboxAndNotifications = false,
+  showRetentionIndicator = false,
 }: ChatRoomsHeaderProps) {
   const spinAnim = useRef(new Animated.Value(0)).current;
   const isSpinning = useRef(false);
@@ -179,6 +182,12 @@ export default function ChatRoomsHeader({
         {subtitle && (
           <Text style={styles.subtitle} numberOfLines={1}>
             {subtitle}
+          </Text>
+        )}
+        {/* 24-hour retention indicator */}
+        {showRetentionIndicator && (
+          <Text style={styles.retentionText} numberOfLines={1}>
+            Messages disappear after 24 hours
           </Text>
         )}
       </View>
@@ -304,6 +313,13 @@ const styles = StyleSheet.create({
     fontSize: CHAT_FONTS.headerSubtitle,
     fontWeight: '500',
     color: 'rgba(255,255,255,0.75)',
+    marginTop: 2,
+  },
+  retentionText: {
+    // 24-hour retention indicator - subtle and compact
+    fontSize: 11,
+    fontWeight: '400',
+    color: 'rgba(255,255,255,0.5)',
     marginTop: 2,
   },
   rightIcons: {

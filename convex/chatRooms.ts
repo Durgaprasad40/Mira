@@ -372,7 +372,20 @@ async function requireRoomReadAccess(
     throw new Error('Access denied: you are banned from this room');
   }
 
-  // 5. Check user has active membership
+  // 5. REPORT ENFORCEMENT: Check user is not suspended from this room
+  // Suspended users cannot enter/view the room at all
+  const roomIdStr = roomId as string;
+  const strike = await ctx.db
+    .query('chatRoomUserStrikes')
+    .withIndex('by_user_room', (q) => q.eq('userId', userId).eq('roomId', roomIdStr))
+    .first();
+
+  if (strike && strike.suspendedUntil && strike.suspendedUntil > now) {
+    const remainingMinutes = Math.ceil((strike.suspendedUntil - now) / 60000);
+    throw new Error(`SUSPENDED:${remainingMinutes}:You are suspended from this room for ${remainingMinutes} more minute${remainingMinutes !== 1 ? 's' : ''}.`);
+  }
+
+  // 6. Check user has active membership
   const membership = await ctx.db
     .query('chatRoomMembers')
     .withIndex('by_room_user', (q) => q.eq('roomId', roomId).eq('userId', userId))
@@ -418,6 +431,19 @@ async function requireRoomSendAccess(
     if (SEND_BLOCKING_PENALTY_TYPES.includes(penaltyType as any)) {
       throw new Error('You are restricted from sending messages in this room');
     }
+  }
+
+  // 3. REPORT ENFORCEMENT: Check user is not suspended from reports
+  // Uses roomId string for strike lookup (since strikes use string roomId)
+  const roomIdStr = roomId as string;
+  const strike = await ctx.db
+    .query('chatRoomUserStrikes')
+    .withIndex('by_user_room', (q) => q.eq('userId', userId).eq('roomId', roomIdStr))
+    .first();
+
+  if (strike && strike.suspendedUntil && strike.suspendedUntil > now) {
+    const remainingMinutes = Math.ceil((strike.suspendedUntil - now) / 60000);
+    throw new Error(`You are suspended from this room for ${remainingMinutes} more minute${remainingMinutes !== 1 ? 's' : ''}`);
   }
 
   return { userId, room, membership };
@@ -925,6 +951,18 @@ export const joinRoom = mutation({
 
     const now = Date.now();
 
+    // REPORT ENFORCEMENT: Check if user is suspended from this room
+    const roomIdStr = roomId as string;
+    const strike = await ctx.db
+      .query('chatRoomUserStrikes')
+      .withIndex('by_user_room', (q) => q.eq('userId', userId).eq('roomId', roomIdStr))
+      .first();
+
+    if (strike && strike.suspendedUntil && strike.suspendedUntil > now) {
+      const remainingMinutes = Math.ceil((strike.suspendedUntil - now) / 60000);
+      throw new Error(`SUSPENDED:${remainingMinutes}:You are suspended from this room for ${remainingMinutes} more minute${remainingMinutes !== 1 ? 's' : ''}.`);
+    }
+
     // MEMBER-STRIP FIX: Always update lastActive so user appears online in room
     await ctx.db.patch(userId, { lastActive: now });
 
@@ -998,6 +1036,18 @@ export const joinRoomWithPassword = mutation({
       .first();
     if (ban) {
       throw new Error('You are banned from this room.');
+    }
+
+    // 4b. REPORT ENFORCEMENT: Check if user is suspended from this room
+    const roomIdStr = roomId as string;
+    const strike = await ctx.db
+      .query('chatRoomUserStrikes')
+      .withIndex('by_user_room', (q) => q.eq('userId', userId).eq('roomId', roomIdStr))
+      .first();
+
+    if (strike && strike.suspendedUntil && strike.suspendedUntil > now) {
+      const remainingMinutes = Math.ceil((strike.suspendedUntil - now) / 60000);
+      throw new Error(`SUSPENDED:${remainingMinutes}:You are suspended from this room for ${remainingMinutes} more minute${remainingMinutes !== 1 ? 's' : ''}.`);
     }
 
     // 5. Check if already a member (idempotent)
@@ -1978,6 +2028,18 @@ export const joinRoomByCode = mutation({
     const now = Date.now();
     if (room.expiresAt && room.expiresAt <= now) {
       throw new Error('This room has expired.');
+    }
+
+    // 4b. REPORT ENFORCEMENT: Check if user is suspended from this room
+    const roomIdStr = room._id as string;
+    const strike = await ctx.db
+      .query('chatRoomUserStrikes')
+      .withIndex('by_user_room', (q) => q.eq('userId', userId).eq('roomId', roomIdStr))
+      .first();
+
+    if (strike && strike.suspendedUntil && strike.suspendedUntil > now) {
+      const remainingMinutes = Math.ceil((strike.suspendedUntil - now) / 60000);
+      throw new Error(`SUSPENDED:${remainingMinutes}:You are suspended from this room for ${remainingMinutes} more minute${remainingMinutes !== 1 ? 's' : ''}.`);
     }
 
     // 5. Check if already a member
@@ -3531,30 +3593,31 @@ export const markReportedRoom = mutation({
 
 // Submit a detailed report for a user in a chat room
 // SECURITY: Reporter identity is derived from authenticated session, not client input
+// ESCALATION POLICY:
+// - 1st unique report: 5 minute suspension
+// - 2nd unique report: 30 minute suspension
+// - 3rd unique report: 3 hour suspension + moderation flag
+// - 4th+ unique reports: 24 hour suspension
 export const submitChatRoomReport = mutation({
   args: {
     authUserId: v.string(),
     reportedUserId: v.string(),
     roomId: v.optional(v.string()),
     reason: v.union(
-      // Original reasons
-      v.literal('fake_profile'),
-      v.literal('inappropriate_photos'),
-      v.literal('harassment'),
-      v.literal('spam'),
-      v.literal('underage'),
-      v.literal('other'),
-      // Chat room reasons
-      v.literal('hate_speech'),
-      v.literal('sexual_content'),
-      v.literal('nudity'),
-      v.literal('violent_threats'),
-      v.literal('impersonation'),
-      v.literal('selling')
+      // Final 7 report categories (exact product spec)
+      v.literal('spam'),                    // Spam
+      v.literal('harassment_hate'),         // Harassment / Hate Speech
+      v.literal('sexual_nudity'),           // Sexual Content / Nudity
+      v.literal('threats'),                 // Threats
+      v.literal('impersonation'),           // Impersonation
+      v.literal('fake_profile'),            // Fake Profile
+      v.literal('selling_promotion')        // Selling / Promotion
     ),
     details: v.optional(v.string()),
   },
   handler: async (ctx, { authUserId, reportedUserId, roomId, reason, details }) => {
+    const now = Date.now();
+
     // 1. SECURITY: Authenticate the reporter
     if (!authUserId || authUserId.trim().length === 0) {
       throw new Error('Unauthorized: authentication required');
@@ -3582,7 +3645,7 @@ export const submitChatRoomReport = mutation({
       reason,
       description: details ?? undefined,
       status: 'pending',
-      createdAt: Date.now(),
+      createdAt: now,
       roomId: roomId ?? undefined,
     });
 
@@ -3597,12 +3660,156 @@ export const submitChatRoomReport = mutation({
         await ctx.db.insert('userRoomReports', {
           userId: reporterId,
           roomId,
-          createdAt: Date.now(),
+          createdAt: now,
         });
       }
     }
 
+    // 6. ESCALATION: Update or create strike record for the reported user
+    // Only apply escalation if we have a roomId context
+    if (roomId) {
+      // Look up existing strike record
+      const existingStrike = await ctx.db
+        .query('chatRoomUserStrikes')
+        .withIndex('by_user_room', (q) => q.eq('userId', reportedId).eq('roomId', roomId))
+        .first();
+
+      if (existingStrike) {
+        // Check if this reporter has already reported this user (no double-counting)
+        const alreadyReported = existingStrike.uniqueReporters.some(
+          (r) => r === reporterId
+        );
+
+        if (!alreadyReported) {
+          // New unique reporter - increment count and apply escalation
+          const newReportCount = existingStrike.totalReportCount + 1;
+          const newUniqueReporters = [...existingStrike.uniqueReporters, reporterId];
+
+          // Calculate suspension duration based on count
+          // 1st=5min, 2nd=30min, 3rd=3hr, 4th+=24hr
+          const suspensionMinutes =
+            newReportCount === 1 ? 5 :
+            newReportCount === 2 ? 30 :
+            newReportCount === 3 ? 180 : // 3 hours
+            1440; // 24 hours
+
+          const suspendedUntil = now + (suspensionMinutes * 60 * 1000);
+
+          // Flag for moderation after 3+ unique reporters
+          const shouldFlagForModeration = newReportCount >= 3;
+
+          await ctx.db.patch(existingStrike._id, {
+            totalReportCount: newReportCount,
+            uniqueReporters: newUniqueReporters,
+            suspensionCount: existingStrike.suspensionCount + 1,
+            suspendedUntil,
+            lastSuspendedAt: now,
+            moderationFlag: shouldFlagForModeration || existingStrike.moderationFlag,
+            moderationFlaggedAt: shouldFlagForModeration && !existingStrike.moderationFlag
+              ? now
+              : existingStrike.moderationFlaggedAt,
+            updatedAt: now,
+          });
+
+          // IMMEDIATE KICK-OUT: Remove user's membership when suspended
+          const roomIdTyped = roomId as Id<'chatRooms'>;
+          const membership = await ctx.db
+            .query('chatRoomMembers')
+            .withIndex('by_room_user', (q) => q.eq('roomId', roomIdTyped).eq('userId', reportedId))
+            .first();
+          if (membership) {
+            await ctx.db.delete(membership._id);
+            // Update member count
+            const actualMemberCount = await recomputeMemberCount(ctx, roomIdTyped);
+            await ctx.db.patch(roomIdTyped, { memberCount: actualMemberCount });
+          }
+        }
+        // If already reported by this user, don't increment (idempotent)
+      } else {
+        // First report for this user in this room - create new strike record
+        // 1st report = 5 minute suspension
+        const suspendedUntil = now + (5 * 60 * 1000);
+
+        await ctx.db.insert('chatRoomUserStrikes', {
+          userId: reportedId,
+          roomId,
+          totalReportCount: 1,
+          uniqueReporters: [reporterId],
+          suspensionCount: 1,
+          suspendedUntil,
+          lastSuspendedAt: now,
+          moderationFlag: false,
+          createdAt: now,
+          updatedAt: now,
+        });
+
+        // IMMEDIATE KICK-OUT: Remove user's membership when suspended
+        const roomIdTyped = roomId as Id<'chatRooms'>;
+        const membership = await ctx.db
+          .query('chatRoomMembers')
+          .withIndex('by_room_user', (q) => q.eq('roomId', roomIdTyped).eq('userId', reportedId))
+          .first();
+        if (membership) {
+          await ctx.db.delete(membership._id);
+          // Update member count
+          const actualMemberCount = await recomputeMemberCount(ctx, roomIdTyped);
+          await ctx.db.patch(roomIdTyped, { memberCount: actualMemberCount });
+        }
+      }
+    }
+
     return { success: true, reportId };
+  },
+});
+
+// Check if a user is currently suspended from a chat room
+// Returns suspension status and remaining time
+export const getUserSuspensionStatus = query({
+  args: {
+    authUserId: v.string(),
+    roomId: v.string(),
+  },
+  handler: async (ctx, { authUserId, roomId }) => {
+    // Default response: not suspended
+    const notSuspended = {
+      isSuspended: false,
+      suspendedUntil: null as number | null,
+      remainingMs: 0,
+      totalReports: 0,
+      moderationFlag: false,
+    };
+
+    if (!authUserId || authUserId.trim().length === 0) {
+      return notSuspended;
+    }
+
+    // Resolve user ID
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      return notSuspended;
+    }
+
+    // Look up strike record
+    const strike = await ctx.db
+      .query('chatRoomUserStrikes')
+      .withIndex('by_user_room', (q) => q.eq('userId', userId).eq('roomId', roomId))
+      .first();
+
+    if (!strike) {
+      return notSuspended;
+    }
+
+    const now = Date.now();
+    const isSuspended = strike.suspendedUntil !== undefined && strike.suspendedUntil > now;
+    const remainingMs = isSuspended ? Math.max(0, (strike.suspendedUntil ?? 0) - now) : 0;
+
+    return {
+      isSuspended,
+      suspendedUntil: strike.suspendedUntil ?? null,
+      remainingMs,
+      totalReports: strike.totalReportCount,
+      moderationFlag: strike.moderationFlag,
+    };
   },
 });
 
@@ -4323,6 +4530,21 @@ export const getOrCreateDmThread = mutation({
       throw new Error('Cannot start DM with yourself');
     }
 
+    // MUTE-SAFETY-FIX: Check if peer has muted the current user
+    // If muted, block DM creation for safety
+    if (sourceRoomId) {
+      const muteRecord = await ctx.db
+        .query('chatRoomMutedUsers')
+        .withIndex('by_muter_room_target', (q) =>
+          q.eq('muterId', peerId).eq('roomId', sourceRoomId).eq('mutedUserId', currentUserId)
+        )
+        .first();
+
+      if (muteRecord) {
+        throw new Error('This user is not accepting private messages.');
+      }
+    }
+
     // Normalize participant order for consistent lookup
     const [participant1Id, participant2Id] = normalizeParticipants(currentUserId, peerId);
 
@@ -4387,6 +4609,26 @@ export const sendDmMessage = mutation({
       thread.participant1Id === senderId || thread.participant2Id === senderId;
     if (!isParticipant) {
       throw new Error('Not a participant in this thread');
+    }
+
+    // MUTE-SAFETY-FIX: Check if recipient has muted the sender
+    // Determine recipient (peer) ID
+    const recipientId = thread.participant1Id === senderId
+      ? thread.participant2Id
+      : thread.participant1Id;
+
+    // Check mute status in the source room (if available)
+    if (thread.sourceRoomId) {
+      const muteRecord = await ctx.db
+        .query('chatRoomMutedUsers')
+        .withIndex('by_muter_room_target', (q) =>
+          q.eq('muterId', recipientId).eq('roomId', thread.sourceRoomId!).eq('mutedUserId', senderId)
+        )
+        .first();
+
+      if (muteRecord) {
+        throw new Error('This user is not accepting private messages.');
+      }
     }
 
     // Validate message content
@@ -4475,12 +4717,20 @@ export const getDmThreads = query({
     const threadsWithIncoming: typeof uniqueThreads = [];
 
     for (const thread of uniqueThreads) {
-      // Check if there's at least one message from the peer (incoming)
-      const peerId =
-        thread.participant1Id === userId
-          ? thread.participant2Id
-          : thread.participant1Id;
+      // Determine if user is P1 or P2
+      const isP1 = thread.participant1Id === userId;
+      const peerId = isP1 ? thread.participant2Id : thread.participant1Id;
 
+      // HIDE-VS-DELETE-FIX: Check if user has hidden this thread
+      // Thread is hidden if: hiddenAt is set AND hiddenAt >= lastMessageAt
+      // Thread reappears if: lastMessageAt > hiddenAt (new message arrived)
+      const hiddenAt = isP1 ? thread.hiddenByP1At : thread.hiddenByP2At;
+      if (hiddenAt && hiddenAt >= thread.lastMessageAt) {
+        // Thread is hidden and no new messages since - skip
+        continue;
+      }
+
+      // Check if there's at least one message from the peer (incoming)
       const incomingMessage = await ctx.db
         .query('chatRoomDmMessages')
         .withIndex('by_thread', (q) => q.eq('threadId', thread._id))
@@ -4691,6 +4941,90 @@ export const markDmMessagesRead = mutation({
     }
 
     return { marked: unreadMessages.length };
+  },
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// HIDE DM THREAD (UI-level hide, data persists)
+// HIDE-VS-DELETE-FIX: X button hides thread from list without deleting data
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Hide a DM thread from the user's private list.
+ * This is a UI-level action - messages and thread data persist.
+ * Thread reappears if new message arrives (lastMessageAt > hiddenAt).
+ */
+export const hideDmThread = mutation({
+  args: {
+    authUserId: v.string(),
+    threadId: v.id('chatRoomDmThreads'),
+  },
+  handler: async (ctx, { authUserId, threadId }) => {
+    // Resolve user ID
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      throw new Error('Unauthorized: user not found');
+    }
+
+    // Get thread
+    const thread = await ctx.db.get(threadId);
+    if (!thread) {
+      return { success: false, error: 'Thread not found' };
+    }
+
+    // Verify user is participant
+    const isP1 = thread.participant1Id === userId;
+    const isP2 = thread.participant2Id === userId;
+    if (!isP1 && !isP2) {
+      throw new Error('Unauthorized: user is not a participant in this thread');
+    }
+
+    // Set hidden timestamp for the caller
+    const now = Date.now();
+    if (isP1) {
+      await ctx.db.patch(threadId, { hiddenByP1At: now });
+    } else {
+      await ctx.db.patch(threadId, { hiddenByP2At: now });
+    }
+
+    return { success: true };
+  },
+});
+
+/**
+ * Unhide a DM thread (make it visible again in private list).
+ * Called automatically when new message arrives, or manually if needed.
+ */
+export const unhideDmThread = mutation({
+  args: {
+    authUserId: v.string(),
+    threadId: v.id('chatRoomDmThreads'),
+  },
+  handler: async (ctx, { authUserId, threadId }) => {
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      throw new Error('Unauthorized: user not found');
+    }
+
+    const thread = await ctx.db.get(threadId);
+    if (!thread) {
+      return { success: false, error: 'Thread not found' };
+    }
+
+    const isP1 = thread.participant1Id === userId;
+    const isP2 = thread.participant2Id === userId;
+    if (!isP1 && !isP2) {
+      throw new Error('Unauthorized: user is not a participant');
+    }
+
+    // Clear hidden flag for the caller
+    if (isP1) {
+      await ctx.db.patch(threadId, { hiddenByP1At: undefined });
+    } else {
+      await ctx.db.patch(threadId, { hiddenByP2At: undefined });
+    }
+
+    return { success: true };
   },
 });
 
@@ -5015,6 +5349,159 @@ export const deleteAllUserDmThreads = mutation({
 
     return {
       success: true,
+      deletedThreads,
+      deletedMessages,
+      deletedStorage,
+    };
+  },
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// UNREAD DM COUNTS BY ROOM
+// Groups unread DM message counts by their source room for badges
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Get unread DM message counts grouped by source room.
+ * Used for:
+ * 1. Room-level badges in Chat Rooms list
+ * 2. Tab-level badge (binary: has any unread or not)
+ *
+ * Returns:
+ * - byRoomId: Record<string, number> - unread count per room
+ * - hasAnyUnread: boolean - true if any room has unread
+ * - totalRoomsWithUnread: number - count of rooms with unread (for tab badge)
+ */
+export const getUnreadDmCountsByRoom = query({
+  args: {
+    authUserId: v.string(),
+  },
+  handler: async (ctx, { authUserId }) => {
+    // Resolve user ID
+    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    if (!userId) {
+      return { byRoomId: {}, hasAnyUnread: false, totalRoomsWithUnread: 0 };
+    }
+
+    // Get all DM threads where user is participant
+    const threadsAsP1 = await ctx.db
+      .query('chatRoomDmThreads')
+      .withIndex('by_participant1', (q) => q.eq('participant1Id', userId))
+      .collect();
+
+    const threadsAsP2 = await ctx.db
+      .query('chatRoomDmThreads')
+      .withIndex('by_participant2', (q) => q.eq('participant2Id', userId))
+      .collect();
+
+    // Combine and dedupe
+    const allThreads = [...threadsAsP1, ...threadsAsP2];
+    const uniqueThreads = Array.from(
+      new Map(allThreads.map((t) => [t._id, t])).values()
+    );
+
+    // Count unread messages per room
+    const unreadByRoom: Record<string, number> = {};
+
+    for (const thread of uniqueThreads) {
+      // Skip threads without sourceRoomId (shouldn't happen, but safety check)
+      if (!thread.sourceRoomId) continue;
+
+      // Determine peer (sender of incoming messages)
+      const peerId =
+        thread.participant1Id === userId
+          ? thread.participant2Id
+          : thread.participant1Id;
+
+      // Count unread messages from peer
+      const unreadMessages = await ctx.db
+        .query('chatRoomDmMessages')
+        .withIndex('by_thread', (q) => q.eq('threadId', thread._id))
+        .filter((q) =>
+          q.and(
+            q.eq(q.field('senderId'), peerId),
+            q.eq(q.field('readAt'), undefined)
+          )
+        )
+        .collect();
+
+      if (unreadMessages.length > 0) {
+        const roomIdStr = thread.sourceRoomId.toString();
+        unreadByRoom[roomIdStr] = (unreadByRoom[roomIdStr] || 0) + unreadMessages.length;
+      }
+    }
+
+    const roomsWithUnread = Object.keys(unreadByRoom).length;
+
+    return {
+      byRoomId: unreadByRoom,
+      hasAnyUnread: roomsWithUnread > 0,
+      totalRoomsWithUnread: roomsWithUnread,
+    };
+  },
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// INACTIVITY CLEANUP: Delete DM threads inactive for 1 hour
+// HIDE-VS-DELETE-FIX: Threads are auto-deleted after 1 hour of no messages
+// ═══════════════════════════════════════════════════════════════════════════
+
+const ONE_HOUR_MS = 60 * 60 * 1000;
+
+/**
+ * Cleanup DM threads that have been inactive for 1 hour.
+ * Should be called periodically by a scheduled job (cron).
+ *
+ * A thread is inactive if: now - lastMessageAt >= 1 hour
+ */
+export const cleanupInactiveDmThreads = internalMutation({
+  args: {},
+  handler: async (ctx) => {
+    const now = Date.now();
+    const cutoffTime = now - ONE_HOUR_MS;
+
+    // Find all threads where lastMessageAt is older than 1 hour
+    const inactiveThreads = await ctx.db
+      .query('chatRoomDmThreads')
+      .withIndex('by_last_message')
+      .filter((q) => q.lt(q.field('lastMessageAt'), cutoffTime))
+      .collect();
+
+    let deletedThreads = 0;
+    let deletedMessages = 0;
+    let deletedStorage = 0;
+
+    for (const thread of inactiveThreads) {
+      // Get all messages in this thread
+      const messages = await ctx.db
+        .query('chatRoomDmMessages')
+        .withIndex('by_thread', (q) => q.eq('threadId', thread._id))
+        .collect();
+
+      // Delete messages and media
+      for (const message of messages) {
+        if (message.mediaStorageId) {
+          try {
+            await ctx.storage.delete(message.mediaStorageId);
+            deletedStorage++;
+          } catch {
+            // Storage might already be deleted - continue
+          }
+        }
+        await ctx.db.delete(message._id);
+        deletedMessages++;
+      }
+
+      // Delete the thread
+      await ctx.db.delete(thread._id);
+      deletedThreads++;
+    }
+
+    if (deletedThreads > 0) {
+      console.log(`[DM_CLEANUP] Deleted ${deletedThreads} inactive threads, ${deletedMessages} messages, ${deletedStorage} storage`);
+    }
+
+    return {
       deletedThreads,
       deletedMessages,
       deletedStorage,

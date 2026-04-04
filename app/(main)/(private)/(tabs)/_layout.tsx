@@ -196,10 +196,18 @@ export default function PrivateTabsLayout() {
   const dmConversations = useDemoDmStore((s) => s.conversations);
   const dmMeta = useDemoDmStore((s) => s.meta);
 
-  // Compute rooms with unread DMs (demo mode only for now)
+  // UNREAD-BADGE-FIX: Query unread DM counts by room from backend
+  const unreadDmsByRoom = useQuery(
+    api.chatRooms.getUnreadDmCountsByRoom,
+    currentUserId && !isDemoMode ? { authUserId: currentUserId } : 'skip'
+  );
+
+  // Compute rooms with unread DMs
+  // Production: Use backend query result (binary: 1 if any unread, else 0)
+  // Demo: Use demo store computation
   const roomsWithUnread = isDemoMode
     ? computeUnreadDmCountsByRoom({ conversations: dmConversations, meta: dmMeta }, currentUserId).roomsWithUnread
-    : 0;
+    : (unreadDmsByRoom?.hasAnyUnread ? 1 : 0);
 
   // P0-FIX: Query pending T/D connect requests for badge
   const pendingConnectRequests = useQuery(

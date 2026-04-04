@@ -347,6 +347,8 @@ export default function ChatRoomScreen() {
   // ─────────────────────────────────────────────────────────────────────────
   const heartbeatPresenceMutation = useMutation(api.chatRooms.heartbeatPresence);
   const clearRoomPresenceMutation = useMutation(api.chatRooms.clearRoomPresence);
+  // HIDE-VS-DELETE-FIX: Mutation to hide DM thread from list (not delete)
+  const hideDmThreadMutation = useMutation(api.chatRooms.hideDmThread);
 
   // Query real-time online count (only users with recent heartbeat)
   const roomOnlineCountQuery = useQuery(
@@ -1762,6 +1764,19 @@ export default function ChatRoomScreen() {
     }
   }, [roomIdStr, router, authUserId, markMentionReadMutation]);
 
+  // HIDE-VS-DELETE-FIX: Handler to hide DM thread from private list (not delete)
+  const handleHideDmThread = useCallback(async (threadId: string) => {
+    if (!authUserId) return;
+    try {
+      await hideDmThreadMutation({
+        authUserId,
+        threadId: threadId as Id<'chatRoomDmThreads'>,
+      });
+    } catch (err) {
+      if (__DEV__) console.error('[DM] Hide thread failed:', err);
+    }
+  }, [authUserId, hideDmThreadMutation]);
+
   const handleMarkAllMentionsRead = useCallback(async () => {
     if (!authUserId) return;
     try {
@@ -2461,6 +2476,7 @@ export default function ChatRoomScreen() {
         showCloseButton={!!canCloseRoom}
         onClosePress={handleCloseRoom}
         hideInboxAndNotifications={isPrivateRoom}
+        showRetentionIndicator
       />
 
       {/* ─── ACTIVE USERS STRIP ─── */}
@@ -2618,8 +2634,9 @@ export default function ChatRoomScreen() {
           };
           setActiveDm(dmInfo, threadId, roomIdStr!);
         }}
-        onHideDM={() => {
-          // TODO: Implement hide DM functionality with Convex
+        onHideDM={(dmId) => {
+          // HIDE-VS-DELETE-FIX: Hide DM from list (data persists, reappears on new message)
+          handleHideDmThread(dmId);
         }}
       />
 

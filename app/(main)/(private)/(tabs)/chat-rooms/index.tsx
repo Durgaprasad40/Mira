@@ -455,10 +455,15 @@ export default function ChatRoomsScreen() {
   const isConvexLoading = convexRooms === undefined;
 
   // Phase-2: Calculate DM unread counts per room (NOT group messages)
-  // Badge shows DISTINCT SENDERS with unseen DMs from that room
-  // Note: This feature is currently disabled (returns empty object)
-  // TODO: Implement with Convex backend when DM feature is enabled
-  const unreadCounts: Record<string, number> = {};
+  // Badge shows unread DM count from that room
+  // UNREAD-BADGE-FIX: Query unread counts from backend
+  const unreadDmsByRoom = useQuery(
+    api.chatRooms.getUnreadDmCountsByRoom,
+    userId ? { authUserId: userId } : 'skip'
+  );
+
+  // Use backend counts, or empty object if not available
+  const unreadCounts: Record<string, number> = unreadDmsByRoom?.byRoomId ?? {};
 
   // Rooms list from Convex backend
   // Filter out "English" room - users can chat in English inside Global

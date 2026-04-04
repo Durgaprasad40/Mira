@@ -880,19 +880,26 @@ export default defineSchema({
     reporterId: v.id('users'),
     reportedUserId: v.id('users'),
     reason: v.union(
-      // Original reasons
-      v.literal('fake_profile'),
-      v.literal('inappropriate_photos'),
+      // Final 7 report categories (exact product spec)
+      v.literal('spam'),                    // Spam
+      v.literal('harassment_hate'),         // Harassment / Hate Speech
+      v.literal('sexual_nudity'),           // Sexual Content / Nudity
+      v.literal('threats'),                 // Threats
+      v.literal('impersonation'),           // Impersonation
+      v.literal('fake_profile'),            // Fake Profile
+      v.literal('selling_promotion'),       // Selling / Promotion
+      // Legacy values (for backward compatibility with existing reports)
       v.literal('harassment'),
-      v.literal('spam'),
-      v.literal('underage'),
-      v.literal('other'),
-      // Chat room reasons
       v.literal('hate_speech'),
+      v.literal('explicit_content'),
+      v.literal('spam_scam'),
+      v.literal('violence_threats'),
+      v.literal('other'),
+      v.literal('inappropriate_photos'),
+      v.literal('underage'),
       v.literal('sexual_content'),
       v.literal('nudity'),
       v.literal('violent_threats'),
-      v.literal('impersonation'),
       v.literal('selling')
     ),
     description: v.optional(v.string()),
@@ -906,6 +913,30 @@ export default defineSchema({
     .index('by_reporter', ['reporterId'])
     .index('by_status', ['status'])
     .index('by_room', ['roomId']),
+
+  // Chat Room User Strikes - tracks reports and enforces escalation policy
+  // Escalation: 1st=5min, 2nd=30min, 3rd=3hr, 4th+=24hr suspension
+  chatRoomUserStrikes: defineTable({
+    userId: v.id('users'),
+    roomId: v.string(),
+    // Report tracking
+    totalReportCount: v.number(), // Total unique reports received in this room
+    uniqueReporters: v.array(v.id('users')), // Track unique users who reported (no double-counting)
+    // Suspension state
+    suspensionCount: v.number(), // Number of suspensions served
+    suspendedUntil: v.optional(v.number()), // Active suspension expiry timestamp
+    lastSuspendedAt: v.optional(v.number()), // When last suspension started
+    // Moderation escalation flag (after 3+ reports from different users)
+    moderationFlag: v.boolean(), // Marked for human review
+    moderationFlaggedAt: v.optional(v.number()),
+    // Audit
+    createdAt: v.number(),
+    updatedAt: v.number(),
+  })
+    .index('by_user', ['userId'])
+    .index('by_room', ['roomId'])
+    .index('by_user_room', ['userId', 'roomId'])
+    .index('by_moderation', ['moderationFlag']),
 
   // Blocks table
   blocks: defineTable({
@@ -2280,6 +2311,10 @@ export default defineSchema({
     lastMessageAt: v.number(),            // For sorting DM inbox
     lastMessagePreview: v.optional(v.string()), // Preview text for inbox
     createdAt: v.number(),
+    // HIDE-VS-DELETE-FIX: Hidden flags (timestamp when hidden, null = not hidden)
+    // If lastMessageAt > hiddenByPxAt, thread reappears (new message arrived)
+    hiddenByP1At: v.optional(v.number()), // When participant1 hid this thread
+    hiddenByP2At: v.optional(v.number()), // When participant2 hid this thread
   })
     .index('by_participants', ['participant1Id', 'participant2Id'])  // Find thread by pair
     .index('by_participant1', ['participant1Id'])                    // List all DMs for user
