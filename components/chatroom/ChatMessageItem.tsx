@@ -161,6 +161,7 @@ function ChatMessageItem({
   // Animate highlight when isHighlighted changes
   useEffect(() => {
     if (isHighlighted) {
+      console.log('[CHAT_MENTION_HIGHLIGHT] Highlighting message:', messageId.slice(-8));
       // Flash highlight animation - now uses native driver
       Animated.sequence([
         Animated.timing(highlightAnim, {
@@ -176,7 +177,7 @@ function ChatMessageItem({
         }),
       ]).start();
     }
-  }, [isHighlighted, highlightAnim]);
+  }, [isHighlighted, highlightAnim, messageId]);
 
   // Swipe gesture responder
   const panResponder = useRef(
@@ -416,110 +417,212 @@ function ChatMessageItem({
           )}
 
           {/* Content: Bubble with name inside for others */}
+          {/* REPLY-INTEGRATED: Single unified bubble with embedded reply preview */}
           <View style={[styles.content, isMe && styles.contentMe]}>
-            {/* Reply Quote Block (when this message is a reply) */}
+        {isMedia ? (
+          <View style={[styles.mediaWrapper, replyTo && styles.mediaWrapperWithReply]}>
+            {/* REPLY-INTEGRATED: Embedded reply preview for media messages */}
             {replyTo && (
               <TouchableOpacity
                 style={[
-                  styles.replyQuote,
-                  isMe && styles.replyQuoteMe,
-                  replyTo.isDeleted && styles.replyQuoteDeleted,
+                  styles.replyEmbedded,
+                  isMe && styles.replyEmbeddedMe,
+                  replyTo.isDeleted && styles.replyEmbeddedDeleted,
                 ]}
-                onPress={() => !replyTo.isDeleted && onReplyTap?.(replyTo.messageId)}
+                onPress={() => {
+                  if (!replyTo.isDeleted) {
+                    console.log('[CHAT_REPLY_NAVIGATION] Tapped reply preview:', {
+                      fromMessageId: messageId.slice(-8),
+                      toMessageId: replyTo.messageId.slice(-8),
+                    });
+                    onReplyTap?.(replyTo.messageId);
+                  }
+                }}
                 activeOpacity={replyTo.isDeleted ? 1 : 0.7}
                 disabled={replyTo.isDeleted}
               >
                 <View style={[
-                  styles.replyQuoteAccent,
-                  isMe && styles.replyQuoteAccentMe,
-                  replyTo.isDeleted && styles.replyQuoteAccentDeleted,
+                  styles.replyEmbeddedAccent,
+                  isMe && styles.replyEmbeddedAccentMe,
+                  replyTo.isDeleted && styles.replyEmbeddedAccentDeleted,
                 ]} />
-                <View style={styles.replyQuoteContent}>
+                <View style={styles.replyEmbeddedContent}>
+                  {!replyTo.isDeleted && (
+                    <Text
+                      style={[styles.replyEmbeddedName, isMe && styles.replyEmbeddedNameMe]}
+                      numberOfLines={1}
+                    >
+                      {replyTo.senderNickname}
+                    </Text>
+                  )}
                   <Text
                     style={[
-                      styles.replyQuoteName,
-                      isMe && styles.replyQuoteNameMe,
-                      replyTo.isDeleted && styles.replyQuoteTextDeleted,
+                      styles.replyEmbeddedSnippet,
+                      isMe && styles.replyEmbeddedSnippetMe,
+                      replyTo.isDeleted && styles.replyEmbeddedTextDeleted,
                     ]}
-                    numberOfLines={1}
-                  >
-                    {replyTo.isDeleted ? '' : replyTo.senderNickname}
-                  </Text>
-                  <Text
-                    style={[
-                      styles.replyQuoteSnippet,
-                      isMe && styles.replyQuoteSnippetMe,
-                      replyTo.isDeleted && styles.replyQuoteTextDeleted,
-                    ]}
-                    numberOfLines={CHAT_SIZES.replyPreviewLines}
-                    ellipsizeMode="tail"
+                    numberOfLines={2}
                   >
                     {getReplySnippet()}
                   </Text>
                 </View>
               </TouchableOpacity>
             )}
-
-        {isMedia ? (
-          <View style={styles.mediaContainer}>
-            <MediaMessage
-              messageId={messageId}
-              mediaUrl={mediaUrl!}
-              type={messageType as 'image' | 'video' | 'doodle'}
-              onHoldStart={isSecureMedia ? handleHoldStart : undefined}
-              onHoldEnd={isSecureMedia ? handleHoldEnd : undefined}
-            />
-          </View>
-        ) : isAudio ? (
-          <TouchableOpacity
-            onPress={handleAudioPress}
-            activeOpacity={0.7}
-            style={[styles.bubble, styles.audioBubble, isMe ? styles.bubbleMe : styles.bubbleOther]}
-          >
-            {!isMe && showAvatar && (
-              <TouchableOpacity onPress={onNamePress} activeOpacity={0.7}>
-                <Text style={styles.senderName}>{displayName}</Text>
-              </TouchableOpacity>
-            )}
-            <View style={styles.audioRow}>
-              {isLoading ? (
-                <ActivityIndicator size="small" color={isMe ? '#FFFFFF' : '#6D28D9'} />
-              ) : (
-                <View style={[styles.playButton, isMe && styles.playButtonMe]}>
-                  <Ionicons
-                    name={isPlaying ? 'pause' : 'play'}
-                    size={16}
-                    color={isMe ? '#6D28D9' : '#FFFFFF'}
-                  />
-                </View>
-              )}
-              <View style={styles.audioWaveform}>
-                {[5, 8, 12, 7, 14, 10, 8, 5].map((h, i) => (
-                  <View
-                    key={i}
-                    style={[
-                      styles.waveformBar,
-                      { height: h },
-                      isMe ? styles.waveformBarMe : styles.waveformBarOther,
-                      isPlaying && styles.waveformBarPlaying,
-                    ]}
-                  />
-                ))}
-              </View>
-              <Ionicons
-                name="mic"
-                size={12}
-                color={isMe ? 'rgba(255,255,255,0.6)' : C.textLight}
+            <View style={styles.mediaContainer}>
+              <MediaMessage
+                messageId={messageId}
+                mediaUrl={mediaUrl!}
+                type={messageType as 'image' | 'video' | 'doodle'}
+                onHoldStart={isSecureMedia ? handleHoldStart : undefined}
+                onHoldEnd={isSecureMedia ? handleHoldEnd : undefined}
               />
             </View>
-          </TouchableOpacity>
-        ) : (
-          <View style={[styles.bubble, isMe ? styles.bubbleMe : styles.bubbleOther]}>
+          </View>
+        ) : isAudio ? (
+          <View style={[styles.bubble, styles.audioBubble, isMe ? styles.bubbleMe : styles.bubbleOther]}>
+            {/* REPLY-INTEGRATED: Embedded reply preview for audio messages */}
+            {replyTo && (
+              <TouchableOpacity
+                style={[
+                  styles.replyEmbedded,
+                  isMe && styles.replyEmbeddedMe,
+                  replyTo.isDeleted && styles.replyEmbeddedDeleted,
+                ]}
+                onPress={() => {
+                  if (!replyTo.isDeleted) {
+                    console.log('[CHAT_REPLY_NAVIGATION] Tapped reply preview:', {
+                      fromMessageId: messageId.slice(-8),
+                      toMessageId: replyTo.messageId.slice(-8),
+                    });
+                    onReplyTap?.(replyTo.messageId);
+                  }
+                }}
+                activeOpacity={replyTo.isDeleted ? 1 : 0.7}
+                disabled={replyTo.isDeleted}
+              >
+                <View style={[
+                  styles.replyEmbeddedAccent,
+                  isMe && styles.replyEmbeddedAccentMe,
+                  replyTo.isDeleted && styles.replyEmbeddedAccentDeleted,
+                ]} />
+                <View style={styles.replyEmbeddedContent}>
+                  {!replyTo.isDeleted && (
+                    <Text
+                      style={[styles.replyEmbeddedName, isMe && styles.replyEmbeddedNameMe]}
+                      numberOfLines={1}
+                    >
+                      {replyTo.senderNickname}
+                    </Text>
+                  )}
+                  <Text
+                    style={[
+                      styles.replyEmbeddedSnippet,
+                      isMe && styles.replyEmbeddedSnippetMe,
+                      replyTo.isDeleted && styles.replyEmbeddedTextDeleted,
+                    ]}
+                    numberOfLines={2}
+                  >
+                    {getReplySnippet()}
+                  </Text>
+                </View>
+              </TouchableOpacity>
+            )}
             {!isMe && showAvatar && (
               <TouchableOpacity onPress={onNamePress} activeOpacity={0.7}>
                 <Text style={styles.senderName}>{displayName}</Text>
               </TouchableOpacity>
             )}
+            <TouchableOpacity onPress={handleAudioPress} activeOpacity={0.7}>
+              <View style={styles.audioRow}>
+                {isLoading ? (
+                  <ActivityIndicator size="small" color={isMe ? '#FFFFFF' : '#6D28D9'} />
+                ) : (
+                  <View style={[styles.playButton, isMe && styles.playButtonMe]}>
+                    <Ionicons
+                      name={isPlaying ? 'pause' : 'play'}
+                      size={16}
+                      color={isMe ? '#6D28D9' : '#FFFFFF'}
+                    />
+                  </View>
+                )}
+                <View style={styles.audioWaveform}>
+                  {[5, 8, 12, 7, 14, 10, 8, 5].map((h, i) => (
+                    <View
+                      key={i}
+                      style={[
+                        styles.waveformBar,
+                        { height: h },
+                        isMe ? styles.waveformBarMe : styles.waveformBarOther,
+                        isPlaying && styles.waveformBarPlaying,
+                      ]}
+                    />
+                  ))}
+                </View>
+                <Ionicons
+                  name="mic"
+                  size={12}
+                  color={isMe ? 'rgba(255,255,255,0.6)' : C.textLight}
+                />
+              </View>
+            </TouchableOpacity>
+          </View>
+        ) : (
+          /* REPLY-INTEGRATED: Single bubble with embedded reply preview for text messages */
+          <View style={[styles.bubble, isMe ? styles.bubbleMe : styles.bubbleOther]}>
+            {/* Embedded reply preview at TOP of bubble */}
+            {replyTo && (
+              <TouchableOpacity
+                style={[
+                  styles.replyEmbedded,
+                  isMe && styles.replyEmbeddedMe,
+                  replyTo.isDeleted && styles.replyEmbeddedDeleted,
+                ]}
+                onPress={() => {
+                  if (!replyTo.isDeleted) {
+                    console.log('[CHAT_REPLY_NAVIGATION] Tapped reply preview:', {
+                      fromMessageId: messageId.slice(-8),
+                      toMessageId: replyTo.messageId.slice(-8),
+                    });
+                    onReplyTap?.(replyTo.messageId);
+                  }
+                }}
+                activeOpacity={replyTo.isDeleted ? 1 : 0.7}
+                disabled={replyTo.isDeleted}
+              >
+                <View style={[
+                  styles.replyEmbeddedAccent,
+                  isMe && styles.replyEmbeddedAccentMe,
+                  replyTo.isDeleted && styles.replyEmbeddedAccentDeleted,
+                ]} />
+                <View style={styles.replyEmbeddedContent}>
+                  {!replyTo.isDeleted && (
+                    <Text
+                      style={[styles.replyEmbeddedName, isMe && styles.replyEmbeddedNameMe]}
+                      numberOfLines={1}
+                    >
+                      {replyTo.senderNickname}
+                    </Text>
+                  )}
+                  <Text
+                    style={[
+                      styles.replyEmbeddedSnippet,
+                      isMe && styles.replyEmbeddedSnippetMe,
+                      replyTo.isDeleted && styles.replyEmbeddedTextDeleted,
+                    ]}
+                    numberOfLines={2}
+                  >
+                    {getReplySnippet()}
+                  </Text>
+                </View>
+              </TouchableOpacity>
+            )}
+            {/* Sender name (for received messages with avatar shown) */}
+            {!isMe && showAvatar && (
+              <TouchableOpacity onPress={onNamePress} activeOpacity={0.7}>
+                <Text style={styles.senderName}>{displayName}</Text>
+              </TouchableOpacity>
+            )}
+            {/* Actual message text at BOTTOM of bubble */}
             {renderTextWithMentions()}
           </View>
         )}
@@ -702,70 +805,75 @@ const styles = StyleSheet.create({
   waveformBarPlaying: {
     backgroundColor: '#6D28D9',
   },
-  // P2-008: Reply Quote Block styles - improved visual hierarchy
-  // Structure: [Accent Bar (fixed width)] [Text Container (flex: 1)]
-  replyQuote: {
-    flexDirection: 'row',
-    alignItems: 'stretch', // Stretch accent bar to match text height
-    // P2-008: Slightly more prominent background
-    backgroundColor: '#252D45',
-    borderRadius: 8,
-    padding: 10,
-    marginBottom: 4,
-    width: '100%',
-    // P2-008: Subtle border for better definition
+  // REPLY-INTEGRATED: Media wrapper for replies to media messages
+  mediaWrapper: {
+    borderRadius: 12,
+    overflow: 'hidden',
+  },
+  mediaWrapperWithReply: {
+    backgroundColor: '#1A2238',
     borderWidth: 1,
-    borderColor: 'rgba(167, 139, 250, 0.15)',
+    borderColor: '#252D42',
   },
-  replyQuoteMe: {
-    backgroundColor: '#7C3AED',
-    borderColor: 'rgba(255,255,255,0.1)',
+  // REPLY-INTEGRATED: Embedded reply preview styles (inside the bubble)
+  // Creates a lighter section at the top of the bubble for the quoted message
+  replyEmbedded: {
+    flexDirection: 'row',
+    alignItems: 'stretch',
+    // Lighter shade background for contrast within bubble
+    backgroundColor: 'rgba(255, 255, 255, 0.08)',
+    borderRadius: 6,
+    paddingVertical: 8,
+    paddingHorizontal: 10,
+    marginBottom: 8,
+    minWidth: 140,
   },
-  replyQuoteAccent: {
-    // P2-008: Thicker, more visible accent bar
-    width: 4,
+  replyEmbeddedMe: {
+    // Darker shade for sender's purple bubble
+    backgroundColor: 'rgba(0, 0, 0, 0.15)',
+  },
+  replyEmbeddedAccent: {
+    width: 3,
     minHeight: 24,
-    borderRadius: 2,
-    backgroundColor: 'rgba(167, 139, 250, 0.6)',
+    borderRadius: 1.5,
+    backgroundColor: '#6D28D9',
     marginRight: 10,
-    flexShrink: 0, // Never shrink the accent bar
+    flexShrink: 0,
   },
-  replyQuoteAccentMe: {
-    backgroundColor: '#DDD6FE',
+  replyEmbeddedAccentMe: {
+    backgroundColor: 'rgba(255, 255, 255, 0.6)',
   },
-  replyQuoteContent: {
+  replyEmbeddedContent: {
     flex: 1,
     flexShrink: 1,
-    minWidth: 0, // Critical for text truncation/wrapping
+    minWidth: 0,
+    justifyContent: 'center',
   },
-  replyQuoteName: {
-    // P0-002 FIX: Responsive font size
+  replyEmbeddedName: {
     fontSize: CHAT_FONTS.senderName,
     fontWeight: '600',
-    color: C.textLight,
+    color: '#A78BFA',
     marginBottom: 2,
   },
-  replyQuoteNameMe: {
-    color: '#E9D5FF',
+  replyEmbeddedNameMe: {
+    color: 'rgba(255, 255, 255, 0.9)',
   },
-  replyQuoteSnippet: {
-    // P0-002 FIX: Responsive font size
+  replyEmbeddedSnippet: {
     fontSize: CHAT_FONTS.label,
+    lineHeight: Math.round(CHAT_FONTS.label * 1.35),
     color: C.textLight,
-    // Text wraps naturally based on container width - no flexWrap needed
   },
-  replyQuoteSnippetMe: {
-    color: '#DDD6FE',
+  replyEmbeddedSnippetMe: {
+    color: 'rgba(255, 255, 255, 0.75)',
   },
-  // Deleted message styles
-  replyQuoteDeleted: {
-    opacity: 0.6,
+  replyEmbeddedDeleted: {
+    opacity: 0.7,
   },
-  replyQuoteAccentDeleted: {
-    backgroundColor: '#4B5563', // Solid gray for deleted
+  replyEmbeddedAccentDeleted: {
+    backgroundColor: '#4B5563',
   },
-  replyQuoteTextDeleted: {
+  replyEmbeddedTextDeleted: {
     fontStyle: 'italic',
-    color: '#6B7280', // Solid muted gray
+    color: '#6B7280',
   },
 });

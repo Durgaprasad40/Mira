@@ -65,6 +65,8 @@ interface ChatRoomsHeaderProps {
   onRefreshPress?: () => void;
   /** Called when inbox/mail icon pressed */
   onInboxPress?: () => void;
+  /** Called when @mentions icon pressed */
+  onMentionsPress?: () => void;
   /** Called when bell/notifications pressed */
   onNotificationsPress?: () => void;
   /** Called when profile avatar pressed */
@@ -73,6 +75,8 @@ interface ChatRoomsHeaderProps {
   profileAvatar?: string;
   /** Unread inbox count */
   unreadInbox?: number;
+  /** Unread @mentions count */
+  unreadMentions?: number;
   /** Unseen notifications count */
   unseenNotifications?: number;
   /** Safe-area top inset */
@@ -98,10 +102,12 @@ export default function ChatRoomsHeader({
   onMenuPress,
   onRefreshPress,
   onInboxPress,
+  onMentionsPress,
   onNotificationsPress,
   onProfilePress,
   profileAvatar,
   unreadInbox = 0,
+  unreadMentions = 0,
   unseenNotifications = 0,
   topInset = 0,
   showCreateButton = false,
@@ -213,6 +219,8 @@ export default function ChatRoomsHeader({
             onPress={onInboxPress}
           />
         )}
+
+        {/* @Mentions moved to composer area - no longer in header */}
 
         {/* Notifications bell (hidden for private rooms) */}
         {!hideInboxAndNotifications && (

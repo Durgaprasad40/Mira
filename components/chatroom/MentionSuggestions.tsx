@@ -38,12 +38,18 @@ export default function MentionSuggestions({
   onSelect,
   isLoading = false,
 }: MentionSuggestionsProps) {
-  // Filter members by search text (case insensitive)
+  // Filter members by search text (case insensitive prefix match)
+  // MENTION-TRIGGER-FIX: Only filter when searchText has content (@ alone handled in ChatComposer)
   const filteredMembers = React.useMemo(() => {
-    if (!searchText) return members;
+    // Safety: if no search text passed, return empty (shouldn't happen with ChatComposer fix)
+    if (!searchText || searchText.length === 0) {
+      return [];
+    }
+
     const search = searchText.toLowerCase();
+    // Use startsWith for prefix matching (not includes)
     return members.filter((m) =>
-      m.nickname.toLowerCase().includes(search)
+      m.nickname.toLowerCase().startsWith(search)
     );
   }, [members, searchText]);
 
