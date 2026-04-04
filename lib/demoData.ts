@@ -2905,6 +2905,8 @@ export interface DemoDM {
   peerId: string;
   peerName: string;
   peerAvatar?: string;
+  /** Peer's gender for avatar border color */
+  peerGender?: 'male' | 'female' | 'other';
   lastMessage: string;
   lastMessageAt: number;
   unreadCount: number;

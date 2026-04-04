@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useMemo } from 'react';
+import React, { useEffect, useRef, useMemo, useCallback } from 'react';
 import {
   View,
   Text,
@@ -93,6 +93,23 @@ function getDisplayName(user: UnifiedUser): string {
   return (user.displayName || user.id || '').toLowerCase();
 }
 
+// LIST-STABILITY-FIX: Stable sort comparator using alphabetical order + userId as tiebreaker
+// Defined outside component to prevent recreation on each render
+function stableSortComparator(a: UnifiedUser, b: UnifiedUser): number {
+  // Primary: normalized display name alphabetical (case-insensitive)
+  const nameA = (a.displayName || '').toLowerCase();
+  const nameB = (b.displayName || '').toLowerCase();
+  const nameCompare = nameA.localeCompare(nameB);
+  if (nameCompare !== 0) return nameCompare;
+
+  // Secondary: exact display name for same-when-lowercased names
+  const exactCompare = (a.displayName || '').localeCompare(b.displayName || '');
+  if (exactCompare !== 0) return exactCompare;
+
+  // Tertiary: stable tiebreaker using canonical userId (immutable)
+  return (a.id || '').localeCompare(b.id || '');
+}
+
 export default function OnlineUsersPanel({
   visible,
   onClose,
@@ -136,6 +153,16 @@ export default function OnlineUsersPanel({
           lastHeartbeatAt: u.lastHeartbeatAt,
           role: u.role,
         }));
+        // LIST-STABILITY-FIX: Sort alphabetically by display name, with stable tiebreaker
+        online.sort(stableSortComparator);
+
+        if (__DEV__) {
+          console.log('[CHAT_LIST_SORT_OUTPUT] Online users sorted', {
+            count: online.length,
+            order: online.map((u) => ({ name: u.displayName, id: u.id.slice(-8) })),
+          });
+        }
+
         result.push({ title: 'Online', data: online });
       }
 
@@ -150,6 +177,8 @@ export default function OnlineUsersPanel({
           lastHeartbeatAt: u.lastHeartbeatAt,
           role: u.role,
         }));
+        // LIST-STABILITY-FIX: Sort alphabetically by display name, with stable tiebreaker
+        recentlyLeft.sort(stableSortComparator);
         result.push({ title: 'Recently Left', data: recentlyLeft });
       }
 
@@ -176,8 +205,9 @@ export default function OnlineUsersPanel({
         isOnline: true,
         lastHeartbeatAt: u.lastSeen,
         penalty: u.penalty,
-      }))
-      .sort((a, b) => getDisplayName(a).localeCompare(getDisplayName(b)));
+      }));
+    // LIST-STABILITY-FIX: Use stable sort instead of volatile lastSeen
+    online.sort(stableSortComparator);
 
     // Offline: not online, outside grace period, but within max age
     const offline = users
@@ -196,8 +226,9 @@ export default function OnlineUsersPanel({
         isOnline: false,
         lastHeartbeatAt: u.lastSeen,
         penalty: u.penalty,
-      }))
-      .sort((a, b) => (b.lastHeartbeatAt || 0) - (a.lastHeartbeatAt || 0));
+      }));
+    // LIST-STABILITY-FIX: Use stable sort instead of volatile lastSeen
+    offline.sort(stableSortComparator);
 
     const result: SectionData[] = [];
     if (online.length > 0) result.push({ title: 'Online', data: online });

@@ -153,13 +153,18 @@ export default function ChatComposer({
       if (charBefore === ' ' || charBefore === '\n' || lastAtIndex === 0) {
         // Extract search text after @
         const textAfterAt = newText.substring(lastAtIndex + 1, cursorPosition + 1);
-        // Only activate if no space after @ (still typing name)
-        if (!textAfterAt.includes(' ')) {
+
+        // MENTION-TRIGGER-FIX: Only activate if at least 1 character typed after @ AND no space
+        // "@" alone should NOT show suggestions, only "@x" or more
+        const hasValidQuery = textAfterAt.length > 0 && !textAfterAt.includes(' ');
+
+        if (hasValidQuery) {
           setMentionActive(true);
           setMentionStartIndex(lastAtIndex);
           setMentionSearchText(textAfterAt);
         } else {
           setMentionActive(false);
+          setMentionSearchText('');
         }
       } else {
         setMentionActive(false);
@@ -279,9 +284,10 @@ export default function ChatComposer({
               <Text style={styles.replyName} numberOfLines={1}>
                 {replyPreview.senderNickname}
               </Text>
+              {/* REPLY-UI-FIX: Use 1 line for cleaner preview */}
               <Text
                 style={styles.replySnippet}
-                numberOfLines={CHAT_SIZES.replyPreviewLines}
+                numberOfLines={1}
                 ellipsizeMode="tail"
               >
                 {replyPreview.snippet}
@@ -401,9 +407,10 @@ const styles = StyleSheet.create({
     marginBottom: 2,
   },
   replySnippet: {
+    // REPLY-UI-FIX: Clean single-line preview with proper sizing
     fontSize: 13,
+    lineHeight: 18,
     color: C.textLight,
-    // Text wraps naturally based on container width - no flexWrap needed
   },
   replyCancelBtn: {
     width: 28,

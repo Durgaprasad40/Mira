@@ -8,7 +8,7 @@ import {
 import { Image } from 'expo-image';
 import { Ionicons } from '@expo/vector-icons';
 import { COLORS, INCOGNITO_COLORS } from '@/lib/constants';
-import { CHAT_SIZES, CHAT_FONTS, SPACING, SIZES } from '@/lib/responsive';
+import { CHAT_SIZES, CHAT_FONTS, SPACING, SIZES, GENDER_COLORS } from '@/lib/responsive';
 
 interface ActiveUser {
   id: string;
@@ -16,6 +16,8 @@ interface ActiveUser {
   isOnline: boolean;
   /** Timestamp when user joined - used for stable time-based sorting (oldest first) */
   joinedAt?: number;
+  /** User's gender for avatar border color */
+  gender?: 'male' | 'female' | 'other';
 }
 
 interface ActiveUsersStripProps {
@@ -74,14 +76,17 @@ export default function ActiveUsersStrip({
 
       {/* Avatars row */}
       <View style={styles.avatarsRow}>
-        {visible.map((user) => (
+        {visible.map((user) => {
+          // AVATAR-BORDER-FIX: Use gender-based colors for consistency across all surfaces
+          const ringColor = GENDER_COLORS[user.gender || 'default'];
+          return (
           <View key={user.id} style={styles.avatarWrapper}>
             {user.avatar ? (
               <Image
                 source={{ uri: user.avatar }}
                 style={[
                   styles.avatar,
-                  { borderColor: isDark ? '#1F1F2E' : '#FFFFFF' },
+                  { borderColor: ringColor },
                 ]}
                 contentFit="cover"
               />
@@ -91,7 +96,7 @@ export default function ActiveUsersStrip({
                   styles.avatarFallback,
                   {
                     backgroundColor: isDark ? 'rgba(255,255,255,0.1)' : C.backgroundDark,
-                    borderColor: isDark ? '#1F1F2E' : '#FFFFFF',
+                    borderColor: ringColor,
                   },
                 ]}
               >
@@ -100,7 +105,8 @@ export default function ActiveUsersStrip({
             )}
             {user.isOnline && <View style={[styles.onlineDot, { borderColor: isDark ? '#1F1F2E' : '#FFFFFF' }]} />}
           </View>
-        ))}
+        );
+        })}
         {extraCount > 0 && (
           <View
             style={[

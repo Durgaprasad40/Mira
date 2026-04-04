@@ -208,12 +208,18 @@ export default function PrivateTabsLayout() {
   );
   const todPendingCount = pendingConnectRequests?.length ?? 0;
 
-  // P0-001 FIX: Calculate bottom padding for Android devices with software nav buttons
-  // On Android, insets.bottom is 0 for gesture nav and >0 for button nav
-  // We add a minimum of 4px padding + the inset to ensure labels are never clipped
-  const tabBarBottomPadding = Platform.OS === 'android'
-    ? Math.max(insets.bottom, 4)  // At least 4px, or the actual inset
-    : 0;  // iOS handles this automatically via safe area
+  // P0-001 FIX: Proper Android bottom navigation handling
+  // The tab bar content (icons + labels) needs a fixed usable height.
+  // On Samsung 3-button nav, insets.bottom is the system nav bar height.
+  // Total tab bar height = content height + insets.bottom
+  // This ensures content sits ABOVE the system nav area, not overlapping it.
+  const TAB_BAR_CONTENT_HEIGHT = 56;
+  const tabBarHeight = Platform.OS === 'android'
+    ? TAB_BAR_CONTENT_HEIGHT + insets.bottom
+    : TAB_BAR_CONTENT_HEIGHT;
+  const tabBarPaddingBottom = Platform.OS === 'android'
+    ? insets.bottom
+    : 0;
 
   return (
     <Tabs
@@ -222,8 +228,10 @@ export default function PrivateTabsLayout() {
         tabBarStyle: {
           backgroundColor: C.surface,
           borderTopColor: C.accent,
-          // P0-001 FIX: Add bottom padding for Android nav buttons
-          paddingBottom: tabBarBottomPadding,
+          // Total height includes content area + system nav inset
+          height: tabBarHeight,
+          // Push content above the system nav area
+          paddingBottom: tabBarPaddingBottom,
         },
         tabBarActiveTintColor: C.primary,
         tabBarInactiveTintColor: C.textLight,
