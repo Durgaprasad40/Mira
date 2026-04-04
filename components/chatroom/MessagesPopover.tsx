@@ -101,7 +101,7 @@ export default function MessagesPopover({
                 size={28}
                 color={C.textLight}
               />
-              <Text style={styles.emptyText}>No private messages yet</Text>
+              <Text style={styles.emptyText}>No active private chats</Text>
             </View>
           ) : (
             <FlatList

@@ -158,6 +158,9 @@ export default function ChatRoomsScreen() {
   const [newRoomPassword, setNewRoomPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
 
+  // ROOM SEARCH: Search query state
+  const [searchQuery, setSearchQuery] = useState('');
+
   // LOCKED-ROOM-FIX: Password entry modal state
   const [passwordModalRoom, setPasswordModalRoom] = useState<{
     id: string;
@@ -843,8 +846,24 @@ export default function ChatRoomsScreen() {
     [handleOpenRoom, unreadCounts]
   );
 
-  const generalRooms = rooms.filter((r) => r.category === 'general');
-  const languageRooms = rooms.filter((r) => r.category === 'language');
+  // ROOM SEARCH: Filter rooms by search query (case-insensitive)
+  const normalizedQuery = searchQuery.trim().toLowerCase();
+  const filteredRooms = useMemo(() => {
+    if (!normalizedQuery) return rooms;
+    return rooms.filter((r) => r.name.toLowerCase().includes(normalizedQuery));
+  }, [rooms, normalizedQuery]);
+
+  const filteredPrivateRooms = useMemo(() => {
+    if (!normalizedQuery) return privateRooms;
+    return privateRooms.filter((r) => r.name.toLowerCase().includes(normalizedQuery));
+  }, [privateRooms, normalizedQuery]);
+
+  const generalRooms = filteredRooms.filter((r) => r.category === 'general');
+  const languageRooms = filteredRooms.filter((r) => r.category === 'language');
+
+  // EMPTY STATES: Check if search has no results
+  const hasSearchResults = generalRooms.length > 0 || languageRooms.length > 0 || filteredPrivateRooms.length > 0;
+  const isSearchActive = normalizedQuery.length > 0;
 
   // ─────────────────────────────────────────────────────────────────────────────
   // RENDER GATING: Show loading while redirecting or checking preferred room
@@ -914,63 +933,109 @@ export default function ChatRoomsScreen() {
         <Text style={styles.headerSubtitle}>Join the conversation</Text>
       </View>
 
+      {/* ROOM SEARCH: Search bar */}
+      <View style={styles.searchContainer}>
+        <View style={styles.searchInputWrapper}>
+          <Ionicons name="search" size={18} color="rgba(255,255,255,0.4)" />
+          <TextInput
+            style={styles.searchInput}
+            placeholder="Search rooms..."
+            placeholderTextColor="rgba(255,255,255,0.35)"
+            value={searchQuery}
+            onChangeText={setSearchQuery}
+            autoCorrect={false}
+            autoCapitalize="none"
+            returnKeyType="search"
+          />
+          {searchQuery.length > 0 && (
+            <Pressable onPress={() => setSearchQuery('')} hitSlop={8}>
+              <Ionicons name="close-circle" size={18} color="rgba(255,255,255,0.4)" />
+            </Pressable>
+          )}
+        </View>
+      </View>
+
       <FlatList
         data={[]}
         renderItem={null}
         ListHeaderComponent={
           <>
+            {/* EMPTY STATE: No search results */}
+            {isSearchActive && !hasSearchResults && (
+              <View style={styles.emptyStateContainer}>
+                <Ionicons name="search-outline" size={48} color="rgba(255,255,255,0.2)" />
+                <Text style={styles.emptyStateTitle}>No results found</Text>
+                <Text style={styles.emptyStateSubtitle}>Try a different search term</Text>
+              </View>
+            )}
+
+            {/* EMPTY STATE: No rooms at all */}
+            {!isSearchActive && rooms.length === 0 && (
+              <View style={styles.emptyStateContainer}>
+                <Ionicons name="chatbubbles-outline" size={48} color="rgba(255,255,255,0.2)" />
+                <Text style={styles.emptyStateTitle}>No rooms yet</Text>
+                <Text style={styles.emptyStateSubtitle}>Create a private room to get started</Text>
+              </View>
+            )}
+
             {/* Section 1: General - Featured rooms */}
-            <View style={styles.sectionHeader}>
-              <View style={styles.sectionDot} />
-              <Text style={styles.sectionTitle}>Featured</Text>
-            </View>
-            {generalRooms.map((room) => (
-              <RoomCard key={room.id} item={room} isGeneral={true} />
-            ))}
+            {generalRooms.length > 0 && (
+              <>
+                <View style={styles.sectionHeader}>
+                  <View style={styles.sectionDot} />
+                  <Text style={styles.sectionTitle}>Featured</Text>
+                </View>
+                {generalRooms.map((room) => (
+                  <RoomCard key={room.id} item={room} isGeneral={true} />
+                ))}
+              </>
+            )}
 
             {/* Section 2: Languages */}
-            <View style={styles.sectionHeader}>
-              <View style={[styles.sectionDot, styles.sectionDotLanguage]} />
-              <Text style={styles.sectionTitle}>Languages</Text>
-            </View>
-            {languageRooms.map((room) => (
-              <RoomCard key={room.id} item={room} isGeneral={false} />
-            ))}
-
-            {/* Section 3: Create Private Room CTA */}
-            <View style={styles.createPrivateSection}>
-              <Pressable
-                style={({ pressed }) => [
-                  styles.addRoomButton,
-                  pressed && styles.addRoomButtonPressed,
-                ]}
-                onPress={handleCreateRoom}
-              >
-                <View style={styles.addRoomIcon}>
-                  <Ionicons name="add" size={24} color="#A78BFA" />
-                </View>
-                <View style={styles.addRoomContent}>
-                  <Text style={styles.addRoomText}>Create Private Room</Text>
-                  <Text style={styles.addRoomHint}>Invite-only conversation</Text>
-                </View>
-                <View style={styles.ctaArrow}>
-                  {/* P2-009: Improved chevron contrast */}
-            <Ionicons name="chevron-forward" size={18} color="rgba(255,255,255,0.45)" />
-                </View>
-              </Pressable>
-            </View>
-
-            {/* Section 4: Private Rooms - show if any private rooms exist */}
-            {privateRooms.length > 0 && (
+            {languageRooms.length > 0 && (
               <>
-                {/* Private Rooms header */}
+                <View style={styles.sectionHeader}>
+                  <View style={[styles.sectionDot, styles.sectionDotLanguage]} />
+                  <Text style={styles.sectionTitle}>Languages</Text>
+                </View>
+                {languageRooms.map((room) => (
+                  <RoomCard key={room.id} item={room} isGeneral={false} />
+                ))}
+              </>
+            )}
+
+            {/* Section 3: Create Private Room CTA - hide during search */}
+            {!isSearchActive && (
+              <View style={styles.createPrivateSection}>
+                <Pressable
+                  style={({ pressed }) => [
+                    styles.addRoomButton,
+                    pressed && styles.addRoomButtonPressed,
+                  ]}
+                  onPress={handleCreateRoom}
+                >
+                  <View style={styles.addRoomIcon}>
+                    <Ionicons name="add" size={24} color="#A78BFA" />
+                  </View>
+                  <View style={styles.addRoomContent}>
+                    <Text style={styles.addRoomText}>Create Private Room</Text>
+                    <Text style={styles.addRoomHint}>Invite-only conversation</Text>
+                  </View>
+                  <View style={styles.ctaArrow}>
+                    <Ionicons name="chevron-forward" size={18} color="rgba(255,255,255,0.45)" />
+                  </View>
+                </Pressable>
+              </View>
+            )}
+
+            {/* Section 4: Private Rooms - show if any exist (filtered by search) */}
+            {filteredPrivateRooms.length > 0 && (
+              <>
                 <View style={styles.sectionHeader}>
                   <View style={[styles.sectionDot, styles.sectionDotPrivate]} />
                   <Text style={styles.sectionTitle}>Your Private Rooms</Text>
                 </View>
-
-                {/* Private Rooms List */}
-                {privateRooms.map((room) => (
+                {filteredPrivateRooms.map((room) => (
                   <RoomCard key={room.id} item={room} />
                 ))}
               </>
@@ -983,6 +1048,7 @@ export default function ChatRoomsScreen() {
           <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={C.primary} />
         }
         showsVerticalScrollIndicator={false}
+        keyboardShouldPersistTaps="handled"
       />
 
       {/* LOCKED-ROOM-FIX: Password entry modal for locked rooms */}
@@ -1023,6 +1089,48 @@ const styles = StyleSheet.create({
     fontWeight: '500',
     color: 'rgba(255,255,255,0.45)',
     marginTop: 4,
+  },
+  // ─── SEARCH BAR ───
+  searchContainer: {
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    backgroundColor: '#111116',
+    borderBottomWidth: 1,
+    borderBottomColor: 'rgba(255,255,255,0.04)',
+  },
+  searchInputWrapper: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    backgroundColor: 'rgba(255,255,255,0.06)',
+    borderRadius: 10,
+    paddingHorizontal: 12,
+    paddingVertical: 10,
+    gap: 8,
+  },
+  searchInput: {
+    flex: 1,
+    fontSize: 15,
+    color: '#FFFFFF',
+    padding: 0,
+  },
+  // ─── EMPTY STATES ───
+  emptyStateContainer: {
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingVertical: 60,
+    paddingHorizontal: 32,
+  },
+  emptyStateTitle: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: 'rgba(255,255,255,0.6)',
+    marginTop: 16,
+  },
+  emptyStateSubtitle: {
+    fontSize: 13,
+    color: 'rgba(255,255,255,0.35)',
+    marginTop: 6,
+    textAlign: 'center',
   },
   listContent: {
     paddingBottom: 32,

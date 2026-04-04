@@ -359,7 +359,7 @@ export default function OnlineUsersPanel({
           ListEmptyComponent={
             <View style={styles.emptyState}>
               <Ionicons name="people-outline" size={36} color={C.textLight} />
-              <Text style={styles.emptyText}>No users found</Text>
+              <Text style={styles.emptyText}>No users online</Text>
             </View>
           }
         />
