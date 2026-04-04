@@ -20,6 +20,7 @@ import { api } from '@/convex/_generated/api';
 import { INCOGNITO_COLORS } from '@/lib/constants';
 import { useChatRoomProfileStore } from '@/stores/chatRoomProfileStore';
 import { useAuthStore } from '@/stores/authStore';
+import type { Id } from '@/convex/_generated/dataModel';
 
 const C = INCOGNITO_COLORS;
 const BIO_MAX_LENGTH = 250;
@@ -73,16 +74,24 @@ export default function ProfilePopover({
 
   // Convex mutation for saving chat room profile
   const updateChatRoomProfile = useMutation(api.chatRooms.createOrUpdateChatRoomProfile);
+  // AVATAR-UPLOAD-FIX: Mutations for uploading avatar to Convex storage
+  const generateUploadUrl = useMutation(api.chatRooms.generateChatRoomAvatarUploadUrl);
+  const getAvatarUrl = useMutation(api.chatRooms.getChatRoomAvatarUrl);
 
   // Persisted profile store (for backwards compatibility)
-  const { setProfile: persistProfile, bio: persistedBio } = useChatRoomProfileStore();
+  const { setProfile: persistProfile } = useChatRoomProfileStore();
 
   // Edit Profile modal state
   const [editModalVisible, setEditModalVisible] = useState(false);
   const [editName, setEditName] = useState(username);
   const [editAvatar, setEditAvatar] = useState(avatar);
-  const [editBio, setEditBio] = useState(persistedBio ?? '');
+  // AVATAR-UPLOAD-FIX: Track if avatar was changed (to trigger upload on save)
+  const [pendingAvatarLocalUri, setPendingAvatarLocalUri] = useState<string | null>(null);
+  // PROFILE-EDIT-FIX: Use bio prop from Convex as source of truth, not local store
+  const [editBio, setEditBio] = useState(bio ?? '');
   const [isSaving, setIsSaving] = useState(false);
+  // PROFILE-EDIT-FIX: Track if form has been initialized to prevent stale state
+  const formInitializedRef = useRef(false);
 
   // P2-AUD-004: Ref for save timeout cleanup
   const saveTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -97,14 +106,19 @@ export default function ProfilePopover({
     };
   }, []);
 
-  // Reset edit state when popover opens
+  // PROFILE-EDIT-FIX: Reset edit state when popover opens, using Convex data as source of truth
   useEffect(() => {
     if (visible) {
       setEditName(username);
       setEditAvatar(avatar);
-      setEditBio(persistedBio ?? '');
+      setPendingAvatarLocalUri(null); // AVATAR-UPLOAD-FIX: Clear pending upload
+      // PROFILE-EDIT-FIX: Use bio prop from Convex, NOT local store
+      setEditBio(bio ?? '');
+      formInitializedRef.current = true;
+    } else {
+      formInitializedRef.current = false;
     }
-  }, [visible, username, avatar, persistedBio]);
+  }, [visible, username, avatar, bio]);
 
   const handleOpenEditProfile = () => {
     setEditModalVisible(true);
@@ -114,7 +128,9 @@ export default function ProfilePopover({
     setEditModalVisible(false);
     setEditName(username);
     setEditAvatar(avatar);
-    setEditBio(persistedBio ?? '');
+    setPendingAvatarLocalUri(null); // AVATAR-UPLOAD-FIX: Clear pending upload
+    // PROFILE-EDIT-FIX: Use bio prop from Convex, NOT local store
+    setEditBio(bio ?? '');
   };
 
   const handlePickImage = async (source: 'camera' | 'gallery') => {
@@ -147,15 +163,29 @@ export default function ProfilePopover({
       }
 
       if (!result.canceled && result.assets[0]) {
-        setEditAvatar(result.assets[0].uri);
+        const localUri = result.assets[0].uri;
+        setEditAvatar(localUri); // Show preview immediately
+        setPendingAvatarLocalUri(localUri); // AVATAR-UPLOAD-FIX: Mark for upload on save
       }
-    } catch (error) {
+    } catch {
       Alert.alert('Error', 'Failed to pick image. Please try again.');
     }
   };
 
   const handleSaveProfile = async () => {
     const trimmedName = editName.trim();
+
+    // PROFILE-EDIT-FIX: Username validation - must start with letter
+    if (!/^[a-zA-Z]/.test(trimmedName)) {
+      Alert.alert('Invalid Name', 'Display name must start with a letter.');
+      return;
+    }
+    // Prevent purely numeric names
+    if (/^\d+$/.test(trimmedName)) {
+      Alert.alert('Invalid Name', 'Display name cannot be purely numeric.');
+      return;
+    }
+
     if (trimmedName.length < 2) {
       Alert.alert('Invalid Name', 'Display name must be at least 2 characters.');
       return;
@@ -176,30 +206,63 @@ export default function ProfilePopover({
     setIsSaving(true);
 
     try {
+      // AVATAR-UPLOAD-FIX: Upload new avatar to Convex storage before saving
+      let cloudAvatarUrl: string | undefined = undefined;
+
+      if (pendingAvatarLocalUri) {
+        // Step 1: Get upload URL from Convex
+        const uploadUrl = await generateUploadUrl({ authUserId });
+
+        // Step 2: Upload the image file to Convex storage
+        const response = await fetch(pendingAvatarLocalUri);
+        const blob = await response.blob();
+
+        const uploadResponse = await fetch(uploadUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': blob.type || 'image/jpeg' },
+          body: blob,
+        });
+
+        if (!uploadResponse.ok) {
+          throw new Error('Failed to upload avatar image');
+        }
+
+        // Step 3: Get the storage ID from the upload response
+        const uploadJson = await uploadResponse.json();
+        const { storageId } = uploadJson;
+
+        // Step 4: Get the cloud URL for the uploaded image
+        cloudAvatarUrl = await getAvatarUrl({ storageId: storageId as Id<'_storage'> }) ?? undefined;
+      }
+
       // CHAT ROOM IDENTITY: Save to Convex backend (persistent)
+      // Use cloud URL if we uploaded, otherwise keep existing avatar
+      const avatarUrlToSave = cloudAvatarUrl ?? (pendingAvatarLocalUri ? undefined : avatar);
+
       await updateChatRoomProfile({
         authUserId,
         nickname: trimmedName,
-        avatarUrl: editAvatar ?? undefined,
+        avatarUrl: avatarUrlToSave,
         bio: trimmedBio || undefined,
       });
 
       // Also persist to local store for immediate UI feedback
+      // Use cloud URL for local store too (so it works across app restarts)
       persistProfile({
         displayName: trimmedName,
-        avatarUri: editAvatar ?? null,
+        avatarUri: cloudAvatarUrl ?? avatar ?? null,
         bio: trimmedBio || null,
       });
 
       // Notify parent about the update
       onProfileUpdate?.({
         username: trimmedName !== username ? trimmedName : undefined,
-        avatar: editAvatar !== avatar ? editAvatar : undefined,
+        avatar: cloudAvatarUrl ?? (editAvatar !== avatar ? editAvatar : undefined),
       });
+      setPendingAvatarLocalUri(null); // Clear pending upload
       setEditModalVisible(false);
       onClose();
     } catch (error: any) {
-      console.error('[PROFILE] Save failed:', error);
       Alert.alert('Error', error.message || 'Failed to save profile. Please try again.');
     } finally {
       setIsSaving(false);
