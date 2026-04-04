@@ -434,7 +434,7 @@ export default function ChatRoomsScreen() {
       iconKey: r.slug,
       isPrivate: true, // Flag for compact rendering
     }));
-  }, [myPrivateRooms]);
+  }, [myPrivateRooms, userId]);
 
   // Track loading state for Convex queries
   const isConvexLoading = convexRooms === undefined;
@@ -604,6 +604,7 @@ export default function ChatRoomsScreen() {
       if (pwd.length > 0) {
         args.password = pwd;
       }
+
       const result = await createPrivateRoomMut(args);
 
       // UNMOUNT-GUARD: Check mounted before setState after async
