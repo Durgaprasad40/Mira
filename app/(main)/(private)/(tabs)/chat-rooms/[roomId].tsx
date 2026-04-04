@@ -77,7 +77,7 @@ import { useVoiceRecorder, VoiceRecorderResult } from '@/hooks/useVoiceRecorder'
 import { usePrivateProfileStore } from '@/stores/privateProfileStore';
 import PrivateChatView from '@/components/chatroom/PrivateChatView';
 import ChatSheet from '@/components/chatroom/ChatSheet';
-import { ensureStableFile, uploadMediaToConvex } from '@/lib/uploadUtils';
+import { ensureStableFile, uploadMediaToConvex, UploadError, validateFileSize, FILE_SIZE_LIMITS_DISPLAY } from '@/lib/uploadUtils';
 import * as Sentry from '@sentry/react-native';
 import { setCurrentFeature, SENTRY_FEATURES } from '@/lib/sentry';
 import { preloadVideos } from '@/lib/videoCache';
@@ -217,6 +217,14 @@ export default function ChatRoomScreen() {
   const mountedRef = useRef(true);
   // Synchronous guard against double-tap send (React state is async and race-prone)
   const isSendingRef = useRef(false);
+  // MEDIA-RELIABILITY: Synchronous guard against double-tap media send
+  const isSendingMediaRef = useRef(false);
+  // MEDIA-RELIABILITY: Track currently uploading media URI to prevent duplicate uploads
+  const uploadingMediaUriRef = useRef<string | null>(null);
+  // MEDIA-RELIABILITY: Synchronous guard against double-tap voice send
+  const isSendingVoiceRef = useRef(false);
+  // ACTIVITY-BASED PRESENCE: Ref to hold activity heartbeat function (defined later)
+  const sendActivityHeartbeatRef = useRef<() => void>(() => {});
 
   // ISSUE B: Read route params for instant render fallback
   // MENTION-NAV: Added targetMessageId for navigating to specific message from mention tap
@@ -346,7 +354,7 @@ export default function ChatRoomScreen() {
   // ROOM-SPECIFIC PRESENCE: Heartbeat system for real-time online tracking
   // ─────────────────────────────────────────────────────────────────────────
   const heartbeatPresenceMutation = useMutation(api.chatRooms.heartbeatPresence);
-  const clearRoomPresenceMutation = useMutation(api.chatRooms.clearRoomPresence);
+  // NOTE: clearRoomPresence removed - we rely on 2-minute timeout for offline transition
   // HIDE-VS-DELETE-FIX: Mutation to hide DM thread from list (not delete)
   const hideDmThreadMutation = useMutation(api.chatRooms.hideDmThread);
 
@@ -725,6 +733,8 @@ export default function ChatRoomScreen() {
     const wasNearBottom = isNearBottomRef.current;
     isNearBottomRef.current = contentOffset.y < SCROLL_THRESHOLD;
 
+    // ACTIVITY-BASED PRESENCE: Scroll counts as user activity
+    sendActivityHeartbeatRef.current();
   }, []);
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -1052,53 +1062,53 @@ export default function ChatRoomScreen() {
   }, [roomIdStr, hasValidRoomId, authUserId, joinRoomMutation, setCurrentRoom]);
 
   // ─────────────────────────────────────────────────────────────────────────
-  // ROOM-SPECIFIC PRESENCE: Heartbeat every 12 seconds while viewing room
+  // ACTIVITY-BASED PRESENCE: Heartbeat ONLY on real user activity
+  // User becomes offline after 2 minutes of NO activity (no blind timer)
   // ─────────────────────────────────────────────────────────────────────────
-  useEffect(() => {
-    // Skip in demo mode or without valid auth/room
-    if (isDemoMode || !hasValidRoomId || !authUserId || !hasMemberAccess) return;
+  const lastActivityHeartbeatRef = useRef<number>(0);
+  const ACTIVITY_HEARTBEAT_THROTTLE_MS = 15 * 1000; // Throttle heartbeats to max 1 per 15s
 
-    // Send initial heartbeat immediately
+  // Throttled heartbeat function - call on any user activity
+  const sendActivityHeartbeat = useCallback(() => {
+    if (isDemoMode || !hasValidRoomId || !authUserId || !hasMemberAccess) return;
+    if (!mountedRef.current) return;
+
+    const now = Date.now();
+    // Throttle: only send if 15+ seconds since last heartbeat
+    if (now - lastActivityHeartbeatRef.current < ACTIVITY_HEARTBEAT_THROTTLE_MS) return;
+
+    lastActivityHeartbeatRef.current = now;
     heartbeatPresenceMutation({
       roomId: roomIdStr as Id<'chatRooms'>,
       authUserId,
     }).catch(() => {
-      // Silently ignore heartbeat errors (non-critical)
+      // Silently ignore heartbeat errors
+    });
+  }, [isDemoMode, hasValidRoomId, authUserId, hasMemberAccess, roomIdStr, heartbeatPresenceMutation]);
+
+  // Keep ref updated for use in callbacks defined before this
+  sendActivityHeartbeatRef.current = sendActivityHeartbeat;
+
+  // Send initial heartbeat on room entry (marks user as ONLINE)
+  useEffect(() => {
+    if (isDemoMode || !hasValidRoomId || !authUserId || !hasMemberAccess) return;
+
+    // Initial heartbeat - user entered the room
+    lastActivityHeartbeatRef.current = Date.now();
+    heartbeatPresenceMutation({
+      roomId: roomIdStr as Id<'chatRooms'>,
+      authUserId,
+    }).catch(() => {
+      // Silently ignore heartbeat errors
     });
 
-    // Set up interval for periodic heartbeats (every 12 seconds)
-    const HEARTBEAT_INTERVAL_MS = 12 * 1000;
-    const heartbeatInterval = setInterval(() => {
-      if (!mountedRef.current) return;
-      heartbeatPresenceMutation({
-        roomId: roomIdStr as Id<'chatRooms'>,
-        authUserId,
-      }).catch(() => {
-        // Silently ignore heartbeat errors
-      });
-    }, HEARTBEAT_INTERVAL_MS);
-
-    // Cleanup: clear presence when leaving room
-    return () => {
-      clearInterval(heartbeatInterval);
-      // Clear presence on unmount (fire-and-forget)
-      clearRoomPresenceMutation({
-        roomId: roomIdStr as Id<'chatRooms'>,
-        authUserId,
-      }).catch(() => {
-        // Silently ignore cleanup errors
-      });
-    };
-  }, [roomIdStr, hasValidRoomId, authUserId, hasMemberAccess, heartbeatPresenceMutation, clearRoomPresenceMutation]);
+    // NOTE: No interval timer - heartbeats are activity-based only
+    // User becomes offline after 2 minutes of no activity (backend handles this)
+  }, [roomIdStr, hasValidRoomId, authUserId, hasMemberAccess, heartbeatPresenceMutation]);
 
   // ─────────────────────────────────────────────────────────────────────────
-  // APP STATE HANDLING: Grace period before clearing presence on background
-  // PRESENCE-GRACE: Users stay visible during short app switches (60s grace period)
-  // This prevents flicker when briefly switching apps or checking notifications
+  // APP STATE HANDLING: Send heartbeat on foreground return (counts as activity)
   // ─────────────────────────────────────────────────────────────────────────
-  const PRESENCE_GRACE_PERIOD_MS = 60 * 1000; // 60 seconds
-  const presenceGraceTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-
   useEffect(() => {
     if (isDemoMode || !hasValidRoomId || !authUserId) return;
 
@@ -1107,46 +1117,9 @@ export default function ChatRoomScreen() {
     const handleAppStateChange = (nextAppState: AppStateStatus) => {
       if (!mountedRef.current) return;
 
-      const logUserId = authUserId.slice(-8);
-      const logRoomId = roomIdStr?.slice(-8) ?? 'none';
-
-      // App going to background → START grace period (don't clear immediately)
-      if (appStateRef.current === 'active' && nextAppState.match(/inactive|background/)) {
-        // Clear any existing grace timeout (shouldn't happen, but safety)
-        if (presenceGraceTimeoutRef.current) {
-          clearTimeout(presenceGraceTimeoutRef.current);
-        }
-
-        // Start grace period - only clear presence after timeout
-        presenceGraceTimeoutRef.current = setTimeout(() => {
-          if (!mountedRef.current) return;
-
-          clearRoomPresenceMutation({
-            roomId: roomIdStr as Id<'chatRooms'>,
-            authUserId,
-          }).catch(() => {
-            // Silently ignore errors
-          });
-
-          presenceGraceTimeoutRef.current = null;
-        }, PRESENCE_GRACE_PERIOD_MS);
-      }
-
-      // App coming to foreground → CANCEL grace period and send heartbeat immediately
+      // App coming to foreground → counts as activity
       if (appStateRef.current.match(/inactive|background/) && nextAppState === 'active') {
-        // Cancel grace period if pending - user returned in time
-        if (presenceGraceTimeoutRef.current) {
-          clearTimeout(presenceGraceTimeoutRef.current);
-          presenceGraceTimeoutRef.current = null;
-        }
-
-        // Send heartbeat immediately to confirm presence
-        heartbeatPresenceMutation({
-          roomId: roomIdStr as Id<'chatRooms'>,
-          authUserId,
-        }).catch(() => {
-          // Silently ignore errors
-        });
+        sendActivityHeartbeat();
       }
 
       appStateRef.current = nextAppState;
@@ -1154,15 +1127,10 @@ export default function ChatRoomScreen() {
 
     const subscription = AppState.addEventListener('change', handleAppStateChange);
 
-    // Cleanup: cancel any pending grace timeout on unmount
     return () => {
       subscription.remove();
-      if (presenceGraceTimeoutRef.current) {
-        clearTimeout(presenceGraceTimeoutRef.current);
-        presenceGraceTimeoutRef.current = null;
-      }
     };
-  }, [roomIdStr, hasValidRoomId, authUserId, heartbeatPresenceMutation, clearRoomPresenceMutation]);
+  }, [roomIdStr, hasValidRoomId, authUserId, sendActivityHeartbeat]);
 
   // ─────────────────────────────────────────────────────────────────────────
   // INPUT STATE
@@ -1493,6 +1461,9 @@ export default function ChatRoomScreen() {
     if (isSendingRef.current) return;
     isSendingRef.current = true;
 
+    // ACTIVITY-BASED PRESENCE: Sending message counts as user activity
+    sendActivityHeartbeat();
+
     // AUTO-SCROLL: Mark that user just sent a message (will trigger scroll after render)
     justSentMessageRef.current = true;
 
@@ -1574,53 +1545,84 @@ export default function ChatRoomScreen() {
         isSendingRef.current = false;
       }
     }
-  }, [inputText, roomIdStr, hasValidRoomId, addStoreMessage, authUserId, sendMessageMutation, myNickname, replyToMessage, currentMentions, composerHeight]);
+  }, [inputText, roomIdStr, hasValidRoomId, addStoreMessage, authUserId, sendMessageMutation, myNickname, replyToMessage, currentMentions, composerHeight, sendActivityHeartbeat]);
 
   const handlePanelChange = useCallback((_panel: ComposerPanel) => {}, []);
 
   // ─────────────────────────────────────────────────────────────────────────
   // SEND MEDIA (CR-009 FIX: Upload to cloud storage before sending)
+  // MEDIA-RELIABILITY: Added duplicate protection, file size validation, and retry-friendly errors
   // ─────────────────────────────────────────────────────────────────────────
   const handleSendMedia = useCallback(
     async (uri: string, mediaType: 'image' | 'video' | 'doodle') => {
       if (!roomIdStr) return;
+
+      // MEDIA-RELIABILITY: Prevent duplicate sends from rapid taps
+      if (isSendingMediaRef.current) {
+        if (__DEV__) console.log('[ChatRoom] Media send blocked - already sending');
+        return;
+      }
+      // MEDIA-RELIABILITY: Prevent re-upload of same media file
+      if (uploadingMediaUriRef.current === uri) {
+        if (__DEV__) console.log('[ChatRoom] Media send blocked - same file already uploading');
+        return;
+      }
+
+      isSendingMediaRef.current = true;
+
+      // ACTIVITY-BASED PRESENCE: Sending media counts as user activity
+      sendActivityHeartbeat();
+      uploadingMediaUriRef.current = uri;
+
       const labelMap = { image: 'Photo', video: 'Video', doodle: 'Doodle' };
+      const uploadTypeMap = { image: 'photo' as const, video: 'video' as const, doodle: 'doodle' as const };
 
-      if (isDemoMode) {
-        // Demo mode: Copy media to persistent location so it survives app restart
-        let persistentUri = uri;
-        try {
-          const mediaTypeHint = mediaType === 'video' ? 'video' : 'photo';
-          persistentUri = await ensureStableFile(uri, mediaTypeHint);
-        } catch (err) {
-          console.warn('[ChatRoom] Failed to persist media, using original URI:', err);
-        }
+      try {
+        if (isDemoMode) {
+          // Demo mode: Copy media to persistent location so it survives app restart
+          let persistentUri = uri;
+          try {
+            const mediaTypeHint = mediaType === 'video' ? 'video' : 'photo';
+            persistentUri = await ensureStableFile(uri, mediaTypeHint);
+          } catch (err) {
+            console.warn('[ChatRoom] Failed to persist media, using original URI:', err);
+          }
 
-        const newMessage: DemoChatMessage = {
-          id: `cm_me_${Date.now()}`,
-          roomId: roomIdStr,
-          senderId: DEMO_CURRENT_USER.id,
-          senderName: myNickname,
-          type: mediaType,
-          text: `[${labelMap[mediaType]}]`,
-          mediaUrl: persistentUri,
-          createdAt: Date.now(),
-        };
-        // B2-HIGH FIX: Guard setState after async (ensureStableFile)
-        if (mountedRef.current) {
-          addStoreMessage(roomIdStr, newMessage);
-          // P0-FIX: Demo mode coin increment
-          incrementCoins();
-          // COIN-FLASH-FIX: Coin feedback animation removed
-        }
-      } else {
-        // CR-009 FIX: Real mode - upload to cloud storage first, then send with storage ID
-        if (!authUserId || !hasValidRoomId) return;
-        const clientId = generateUUID();
+          const newMessage: DemoChatMessage = {
+            id: `cm_me_${Date.now()}`,
+            roomId: roomIdStr,
+            senderId: DEMO_CURRENT_USER.id,
+            senderName: myNickname,
+            type: mediaType,
+            text: `[${labelMap[mediaType]}]`,
+            mediaUrl: persistentUri,
+            createdAt: Date.now(),
+          };
+          // B2-HIGH FIX: Guard setState after async (ensureStableFile)
+          if (mountedRef.current) {
+            addStoreMessage(roomIdStr, newMessage);
+            // P0-FIX: Demo mode coin increment
+            incrementCoins();
+          }
+        } else {
+          // CR-009 FIX: Real mode - upload to cloud storage first, then send with storage ID
+          if (!authUserId || !hasValidRoomId) return;
+          const clientId = generateUUID();
 
-        try {
+          // MEDIA-RELIABILITY: Validate file size before upload attempt
+          // This provides immediate feedback without starting the upload
+          try {
+            await validateFileSize(uri, uploadTypeMap[mediaType]);
+          } catch (sizeError) {
+            if (sizeError instanceof UploadError) {
+              Alert.alert('File Too Large', sizeError.message);
+              return;
+            }
+            throw sizeError;
+          }
+
           // Step 1: Upload media to Convex storage
-          const uploadHint = mediaType === 'video' ? 'video' : 'photo';
+          const uploadHint = uploadTypeMap[mediaType];
           const storageId = await uploadMediaToConvex(
             uri,
             generateUploadUrlMutation,
@@ -1636,13 +1638,28 @@ export default function ChatRoomScreen() {
             mediaType: mediaType,
             clientId,
           });
-        } catch (err: any) {
-          console.error('[ChatRoom] Media upload/send failed:', err);
+        }
+      } catch (err: any) {
+        console.error('[ChatRoom] Media upload/send failed:', err);
+
+        // MEDIA-RELIABILITY: Show specific error messages based on error type
+        if (err instanceof UploadError) {
+          const title = err.type === 'FILE_TOO_LARGE' ? 'File Too Large' :
+                        err.type === 'NETWORK_ERROR' ? 'Connection Error' :
+                        err.type === 'FILE_NOT_FOUND' ? 'File Not Found' :
+                        'Upload Failed';
+          const retryHint = err.retryable ? '\n\nPlease try again.' : '';
+          Alert.alert(title, err.message + retryHint);
+        } else {
           Alert.alert('Error', err.message || 'Failed to send media. Please try again.');
         }
+      } finally {
+        // MEDIA-RELIABILITY: Always reset guards
+        isSendingMediaRef.current = false;
+        uploadingMediaUriRef.current = null;
       }
     },
-    [roomIdStr, hasValidRoomId, addStoreMessage, authUserId, sendMessageMutation, generateUploadUrlMutation, myNickname]
+    [roomIdStr, hasValidRoomId, addStoreMessage, authUserId, sendMessageMutation, generateUploadUrlMutation, myNickname, incrementCoins, sendActivityHeartbeat]
   );
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -1652,6 +1669,15 @@ export default function ChatRoomScreen() {
   const handleVoiceRecordingComplete = useCallback(
     async (result: VoiceRecorderResult) => {
       if (!roomIdStr || !result.audioUri) return;
+
+      // MEDIA-RELIABILITY: Synchronous guard against double-tap voice send
+      if (isSendingVoiceRef.current) {
+        if (__DEV__) console.log('[ChatRoom] Voice send blocked - already sending');
+        return;
+      }
+
+      // ACTIVITY-BASED PRESENCE: Sending voice message counts as user activity
+      sendActivityHeartbeat();
 
       if (isDemoMode) {
         // Demo mode: add voice message to local store (local URI OK for demo)
@@ -1670,9 +1696,23 @@ export default function ChatRoomScreen() {
       } else {
         // CR-009 FIX: Real mode - upload to cloud storage first, then send with storage ID
         if (!authUserId || !hasValidRoomId) return;
+
+        // MEDIA-RELIABILITY: Set guard before async operation
+        isSendingVoiceRef.current = true;
         const clientId = generateUUID();
 
         try {
+          // MEDIA-RELIABILITY: Validate file size before upload
+          try {
+            await validateFileSize(result.audioUri, 'audio');
+          } catch (sizeError) {
+            if (sizeError instanceof UploadError) {
+              Alert.alert('File Too Large', sizeError.message);
+              return;
+            }
+            throw sizeError;
+          }
+
           // Step 1: Upload audio to Convex storage
           const storageId = await uploadMediaToConvex(
             result.audioUri,
@@ -1690,11 +1730,23 @@ export default function ChatRoomScreen() {
           });
         } catch (err: any) {
           console.error('[ChatRoom] Audio upload/send failed:', err);
-          Alert.alert('Error', err.message || 'Failed to send voice message. Please try again.');
+          // MEDIA-RELIABILITY: Better error handling with UploadError type checks
+          if (err instanceof UploadError) {
+            const title = err.type === 'FILE_TOO_LARGE' ? 'File Too Large' :
+                          err.type === 'NETWORK_ERROR' ? 'Network Error' :
+                          'Upload Failed';
+            const retryHint = err.retryable ? '\n\nPlease try again.' : '';
+            Alert.alert(title, err.message + retryHint);
+          } else {
+            Alert.alert('Error', err.message || 'Failed to send voice message. Please try again.');
+          }
+        } finally {
+          // MEDIA-RELIABILITY: Always reset guard
+          isSendingVoiceRef.current = false;
         }
       }
     },
-    [roomIdStr, hasValidRoomId, addStoreMessage, authUserId, sendMessageMutation, generateUploadUrlMutation, myNickname, incrementCoins]
+    [roomIdStr, hasValidRoomId, addStoreMessage, authUserId, sendMessageMutation, generateUploadUrlMutation, myNickname, incrementCoins, sendActivityHeartbeat]
   );
 
   const { toggleRecording, isRecording, elapsedMs } = useVoiceRecorder({
@@ -2260,7 +2312,8 @@ export default function ChatRoomScreen() {
       const msg = item.message;
 
       if (msg.type === 'system') {
-        const isJoin = (msg.text || '').includes('joined');
+        // SYSTEM JOIN EVENT: Check systemEventType field for join messages
+        const isJoin = (msg as any).systemEventType === 'join' || (msg.text || '').includes('joined');
         return <SystemMessageItem text={msg.text || ''} isJoin={isJoin} />;
       }
 
@@ -2590,7 +2643,11 @@ export default function ChatRoomScreen() {
               ) : (
                 <ChatComposer
                   value={inputText}
-                  onChangeText={setInputText}
+                  onChangeText={(text) => {
+                    setInputText(text);
+                    // ACTIVITY-BASED PRESENCE: Typing counts as user activity
+                    sendActivityHeartbeat();
+                  }}
                   onSend={handleSend}
                   onPlusPress={() => setOverlay('attachment')}
                   onMicPress={toggleRecording}

@@ -1,6 +1,119 @@
 import { Id } from '@/convex/_generated/dataModel';
 import * as FileSystem from 'expo-file-system/legacy';
 
+// ═══════════════════════════════════════════════════════════════════════════
+// FILE SIZE LIMITS (in bytes)
+// ═══════════════════════════════════════════════════════════════════════════
+export const FILE_SIZE_LIMITS = {
+  IMAGE_MAX_BYTES: 15 * 1024 * 1024,  // 15 MB
+  VIDEO_MAX_BYTES: 100 * 1024 * 1024, // 100 MB
+  AUDIO_MAX_BYTES: 20 * 1024 * 1024,  // 20 MB
+  DOODLE_MAX_BYTES: 5 * 1024 * 1024,  // 5 MB (small PNG)
+};
+
+export const FILE_SIZE_LIMITS_DISPLAY = {
+  IMAGE: '15 MB',
+  VIDEO: '100 MB',
+  AUDIO: '20 MB',
+  DOODLE: '5 MB',
+};
+
+// ═══════════════════════════════════════════════════════════════════════════
+// UPLOAD ERROR TYPES
+// ═══════════════════════════════════════════════════════════════════════════
+export type UploadErrorType =
+  | 'FILE_TOO_LARGE'
+  | 'FILE_NOT_FOUND'
+  | 'NETWORK_ERROR'
+  | 'TIMEOUT'
+  | 'INVALID_FILE'
+  | 'UPLOAD_FAILED'
+  | 'UNKNOWN';
+
+export class UploadError extends Error {
+  type: UploadErrorType;
+  retryable: boolean;
+
+  constructor(message: string, type: UploadErrorType, retryable: boolean = false) {
+    super(message);
+    this.name = 'UploadError';
+    this.type = type;
+    this.retryable = retryable;
+  }
+}
+
+/**
+ * Get file size limit based on media type
+ */
+function getFileSizeLimit(mediaType?: 'photo' | 'video' | 'audio' | 'doodle'): number {
+  switch (mediaType) {
+    case 'video': return FILE_SIZE_LIMITS.VIDEO_MAX_BYTES;
+    case 'audio': return FILE_SIZE_LIMITS.AUDIO_MAX_BYTES;
+    case 'doodle': return FILE_SIZE_LIMITS.DOODLE_MAX_BYTES;
+    case 'photo':
+    default: return FILE_SIZE_LIMITS.IMAGE_MAX_BYTES;
+  }
+}
+
+/**
+ * Get human-readable file size limit
+ */
+function getFileSizeLimitDisplay(mediaType?: 'photo' | 'video' | 'audio' | 'doodle'): string {
+  switch (mediaType) {
+    case 'video': return FILE_SIZE_LIMITS_DISPLAY.VIDEO;
+    case 'audio': return FILE_SIZE_LIMITS_DISPLAY.AUDIO;
+    case 'doodle': return FILE_SIZE_LIMITS_DISPLAY.DOODLE;
+    case 'photo':
+    default: return FILE_SIZE_LIMITS_DISPLAY.IMAGE;
+  }
+}
+
+/**
+ * Format bytes to human-readable string
+ */
+function formatFileSize(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+/**
+ * Validate file size before upload
+ * @throws UploadError if file is too large or not found
+ */
+export async function validateFileSize(
+  uri: string,
+  mediaType?: 'photo' | 'video' | 'audio' | 'doodle'
+): Promise<number> {
+  const info = await FileSystem.getInfoAsync(uri);
+
+  if (!info.exists) {
+    throw new UploadError(
+      'File not found. It may have been deleted or moved.',
+      'FILE_NOT_FOUND',
+      false
+    );
+  }
+
+  const fileSize = (info as any).size as number;
+  const limit = getFileSizeLimit(mediaType);
+  const limitDisplay = getFileSizeLimitDisplay(mediaType);
+
+  if (fileSize > limit) {
+    const sizeDisplay = formatFileSize(fileSize);
+    const typeLabel = mediaType === 'video' ? 'Video' :
+                      mediaType === 'audio' ? 'Audio' :
+                      mediaType === 'doodle' ? 'Doodle' : 'Image';
+    throw new UploadError(
+      `${typeLabel} is too large (${sizeDisplay}). Maximum size is ${limitDisplay}.`,
+      'FILE_TOO_LARGE',
+      false
+    );
+  }
+
+  return fileSize;
+}
+
 /**
  * Detect content type from URI extension
  */
@@ -39,7 +152,7 @@ function getContentTypeFromUri(uri: string, mediaType?: 'photo' | 'video' | 'aud
  * Returns the path to read from (may be different from input).
  * Exported for use in demo mode chatroom media persistence.
  */
-export async function ensureStableFile(uri: string, mediaType?: 'photo' | 'video' | 'audio'): Promise<string> {
+export async function ensureStableFile(uri: string, mediaType?: 'photo' | 'video' | 'audio' | 'doodle'): Promise<string> {
   const uriPrefix = uri.substring(0, Math.min(50, uri.length));
 
   // Check if file exists
@@ -59,6 +172,7 @@ export async function ensureStableFile(uri: string, mediaType?: 'photo' | 'video
     let ext = '.jpg';
     if (mediaType === 'video') ext = '.mp4';
     else if (mediaType === 'audio') ext = '.m4a';
+    else if (mediaType === 'doodle') ext = '.png'; // Doodles are PNG images
     else if (uri.includes('.png')) ext = '.png';
     else if (uri.includes('.mp4')) ext = '.mp4';
     else if (uri.includes('.mov')) ext = '.mov';
@@ -98,76 +212,147 @@ export interface UploadResult {
 /**
  * Upload a media file from a local URI to Convex storage
  * Works on real Android/iOS devices using expo-file-system uploadAsync
+ * Includes file size validation and improved error handling
  * @param uri - Local file URI
  * @param generateUploadUrl - Convex mutation to generate upload URL
  * @param mediaType - Optional hint for media type detection
  * @returns Storage ID of the uploaded file
+ * @throws UploadError with specific type for different failure scenarios
  */
 export async function uploadMediaToConvex(
   uri: string,
   generateUploadUrl: () => Promise<string>,
-  mediaType?: 'photo' | 'video' | 'audio'
+  mediaType?: 'photo' | 'video' | 'audio' | 'doodle'
 ): Promise<Id<'_storage'>> {
   const uriPrefix = uri.substring(0, Math.min(40, uri.length));
-  console.log(`[T/D UPLOAD] starting type=${mediaType ?? 'auto'} uri=${uriPrefix}...`);
+  console.log(`[UPLOAD] starting type=${mediaType ?? 'auto'} uri=${uriPrefix}...`);
 
   // Guard: skip upload for remote URLs (http/https)
-  // These are already stored remotely and shouldn't be re-uploaded
   if (uri.startsWith('http://') || uri.startsWith('https://')) {
-    console.log(`[T/D UPLOAD] skipped - remote URL detected, uri=${uriPrefix}`);
-    throw new Error('Cannot upload remote URL. Only local files (file://, content://) are supported.');
+    console.log(`[UPLOAD] skipped - remote URL detected`);
+    throw new UploadError(
+      'Cannot upload remote URL. Only local files are supported.',
+      'INVALID_FILE',
+      false
+    );
   }
 
+  let stableUri: string | null = null;
+
   try {
-    // Ensure we have a stable file path to upload from
-    const stableUri = await ensureStableFile(uri, mediaType);
+    // Step 1: Validate file size BEFORE any other processing
+    // This fails fast with a clear error if file is too large
+    const fileSize = await validateFileSize(uri, mediaType);
+    console.log(`[UPLOAD] file size validated: ${formatFileSize(fileSize)}`);
 
-    // Get upload URL from Convex
-    const uploadUrl = await generateUploadUrl();
-    console.log(`[T/D UPLOAD] got uploadUrl`);
+    // Step 2: Ensure we have a stable file path to upload from
+    stableUri = await ensureStableFile(uri, mediaType);
 
-    // Detect content type from URI
-    const contentType = getContentTypeFromUri(stableUri, mediaType);
-    console.log(`[T/D UPLOAD] contentType=${contentType}`);
-
-    // Upload file directly using FileSystem.uploadAsync with BINARY_CONTENT
-    // No base64/Blob conversion - works on real Android devices
-    const uploadResult = await FileSystem.uploadAsync(uploadUrl, stableUri, {
-      httpMethod: 'POST',
-      uploadType: FileSystem.FileSystemUploadType.BINARY_CONTENT,
-      headers: {
-        'Content-Type': contentType,
-      },
-    });
-
-    console.log(`[T/D UPLOAD] uploadAsync status=${uploadResult.status}`);
-
-    // Check for non-2xx status
-    if (uploadResult.status < 200 || uploadResult.status >= 300) {
-      console.error(`[T/D UPLOAD] upload failed: ${uploadResult.status} ${uploadResult.body}`);
-      throw new Error(`Upload failed: ${uploadResult.status}`);
+    // Step 3: Get upload URL from Convex
+    let uploadUrl: string;
+    try {
+      uploadUrl = await generateUploadUrl();
+      console.log(`[UPLOAD] got uploadUrl`);
+    } catch (urlError) {
+      console.error(`[UPLOAD] failed to get upload URL:`, urlError);
+      throw new UploadError(
+        'Unable to connect to server. Please check your connection and try again.',
+        'NETWORK_ERROR',
+        true
+      );
     }
 
-    // Parse the response to get storage ID
+    // Step 4: Detect content type from URI
+    const contentType = getContentTypeFromUri(stableUri, mediaType as 'photo' | 'video' | 'audio');
+    console.log(`[UPLOAD] contentType=${contentType}`);
+
+    // Step 5: Upload file with timeout handling
+    let uploadResult: FileSystem.FileSystemUploadResult;
+    try {
+      uploadResult = await FileSystem.uploadAsync(uploadUrl, stableUri, {
+        httpMethod: 'POST',
+        uploadType: FileSystem.FileSystemUploadType.BINARY_CONTENT,
+        headers: {
+          'Content-Type': contentType,
+        },
+      });
+    } catch (uploadError: any) {
+      console.error(`[UPLOAD] uploadAsync error:`, uploadError);
+      // Check for network-related errors
+      const errorMessage = uploadError?.message?.toLowerCase() || '';
+      if (errorMessage.includes('network') || errorMessage.includes('connection') || errorMessage.includes('timeout')) {
+        throw new UploadError(
+          'Upload failed due to network issues. Please check your connection and try again.',
+          'NETWORK_ERROR',
+          true
+        );
+      }
+      throw new UploadError(
+        'Upload was interrupted. Please try again.',
+        'UPLOAD_FAILED',
+        true
+      );
+    }
+
+    console.log(`[UPLOAD] uploadAsync status=${uploadResult.status}`);
+
+    // Step 6: Check for non-2xx status
+    if (uploadResult.status < 200 || uploadResult.status >= 300) {
+      console.error(`[UPLOAD] upload failed: ${uploadResult.status} ${uploadResult.body}`);
+      if (uploadResult.status >= 500) {
+        throw new UploadError(
+          'Server is temporarily unavailable. Please try again in a moment.',
+          'UPLOAD_FAILED',
+          true
+        );
+      }
+      throw new UploadError(
+        `Upload failed (${uploadResult.status}). Please try again.`,
+        'UPLOAD_FAILED',
+        true
+      );
+    }
+
+    // Step 7: Parse the response to get storage ID
     let result: { storageId: string };
     try {
       result = JSON.parse(uploadResult.body);
     } catch {
-      console.error(`[T/D UPLOAD] failed to parse response: ${uploadResult.body}`);
-      throw new Error('Upload failed: invalid response');
+      console.error(`[UPLOAD] failed to parse response: ${uploadResult.body}`);
+      throw new UploadError(
+        'Upload completed but response was invalid. Please try again.',
+        'UPLOAD_FAILED',
+        true
+      );
     }
 
-    console.log(`[T/D UPLOAD] success storageId=${result.storageId}`);
+    console.log(`[UPLOAD] success storageId=${result.storageId}`);
 
-    // Cleanup: delete the stable copy if we made one
+    // Step 8: Cleanup stable copy if we made one
     if (stableUri !== uri && stableUri.startsWith(FileSystem.documentDirectory || '')) {
       FileSystem.deleteAsync(stableUri, { idempotent: true }).catch(() => {});
     }
 
     return result.storageId as Id<'_storage'>;
   } catch (error) {
-    console.error('[T/D UPLOAD] error:', error);
-    throw error instanceof Error ? error : new Error('Failed to upload media');
+    console.error('[UPLOAD] error:', error);
+
+    // Cleanup stable copy on error
+    if (stableUri && stableUri !== uri && stableUri.startsWith(FileSystem.documentDirectory || '')) {
+      FileSystem.deleteAsync(stableUri, { idempotent: true }).catch(() => {});
+    }
+
+    // Re-throw UploadError as-is (preserves type and retryable info)
+    if (error instanceof UploadError) {
+      throw error;
+    }
+
+    // Wrap unknown errors
+    throw new UploadError(
+      error instanceof Error ? error.message : 'Failed to upload media',
+      'UNKNOWN',
+      true
+    );
   }
 }
 
