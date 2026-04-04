@@ -2242,4 +2242,69 @@ export default defineSchema({
     .index('by_room_user', ['roomId', 'userId'])     // Single user lookup in room
     .index('by_user', ['userId'])                    // All rooms user is present in
     .index('by_heartbeat', ['lastHeartbeatAt']),     // Cleanup stale presence
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Chat Room DM Threads (Private Messages Between Users)
+  // Stores 1:1 DM conversation threads initiated from Chat Rooms
+  // Uses canonical Convex user IDs (Id<'users'>) for both participants
+  // ═══════════════════════════════════════════════════════════════════════════
+  chatRoomDmThreads: defineTable({
+    // Participants stored in normalized order (smaller ID first for consistent lookup)
+    participant1Id: v.id('users'),        // First participant (smaller ID)
+    participant2Id: v.id('users'),        // Second participant (larger ID)
+    // Optional: room where DM was initiated (for context)
+    sourceRoomId: v.optional(v.id('chatRooms')),
+    // Thread metadata
+    lastMessageAt: v.number(),            // For sorting DM inbox
+    lastMessagePreview: v.optional(v.string()), // Preview text for inbox
+    createdAt: v.number(),
+  })
+    .index('by_participants', ['participant1Id', 'participant2Id'])  // Find thread by pair
+    .index('by_participant1', ['participant1Id'])                    // List all DMs for user
+    .index('by_participant2', ['participant2Id'])                    // List all DMs for user
+    .index('by_last_message', ['lastMessageAt']),                    // Sort by recent activity
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Chat Room DM Messages (Individual Messages in DM Threads)
+  // Messages in private 1:1 conversations from Chat Rooms
+  // ═══════════════════════════════════════════════════════════════════════════
+  chatRoomDmMessages: defineTable({
+    threadId: v.id('chatRoomDmThreads'),  // Parent thread
+    senderId: v.id('users'),              // Who sent the message
+    text: v.optional(v.string()),         // Text content (optional if media)
+    // Media support (same as group chat)
+    type: v.optional(v.union(
+      v.literal('text'),
+      v.literal('image'),
+      v.literal('video'),
+      v.literal('audio')
+    )),
+    mediaStorageId: v.optional(v.id('_storage')),  // For media messages
+    mediaUrl: v.optional(v.string()),              // Resolved URL (cached)
+    // Message status
+    readAt: v.optional(v.number()),       // When recipient read the message
+    createdAt: v.number(),
+  })
+    .index('by_thread', ['threadId', 'createdAt'])   // Messages in thread, ordered
+    .index('by_sender', ['senderId', 'createdAt']),  // Messages by sender (for moderation)
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // Chat Room Mentions (Mention Inbox / Notification Records)
+  // Tracks when users are @mentioned in chat rooms for dedicated mention inbox
+  // ═══════════════════════════════════════════════════════════════════════════
+  chatRoomMentions: defineTable({
+    mentionedUserId: v.id('users'),         // User who was mentioned
+    senderUserId: v.id('users'),            // User who sent the mention
+    senderNickname: v.string(),             // Sender's chat room nickname at time of mention
+    roomId: v.id('chatRooms'),              // Room where mention occurred
+    roomName: v.string(),                   // Room name at time of mention (denormalized)
+    messageId: v.id('chatRoomMessages'),    // Exact message containing the mention
+    messagePreview: v.string(),             // Short preview of the message (max 100 chars)
+    createdAt: v.number(),                  // When the mention was created
+    readAt: v.optional(v.number()),         // When the mentioned user viewed/acknowledged it
+  })
+    .index('by_mentioned_user', ['mentionedUserId', 'createdAt'])  // User's mention inbox
+    .index('by_mentioned_unread', ['mentionedUserId', 'readAt'])   // For unread count query
+    .index('by_message', ['messageId'])                             // For cleanup when message deleted
+    .index('by_room', ['roomId']),                                  // For room-level cleanup
 });
