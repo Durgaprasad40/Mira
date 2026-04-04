@@ -139,13 +139,12 @@ export default function ChatRoomDmScreen() {
           {/* Drag handle */}
           <View style={styles.handle} />
 
-          {/* Chat content - no KAV needed, system resizes window */}
+          {/* Chat content - uses KeyboardAvoidingView internally */}
           <PrivateChatView
             dm={activeDm}
             onBack={handleBack}
             topInset={0}
             isModal={true}
-            keyboardVisible={false}
           />
         </View>
       </View>

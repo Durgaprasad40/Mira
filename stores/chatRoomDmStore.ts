@@ -4,21 +4,32 @@
  * Minimal store to hold the active DM data when navigating
  * from a chat room to a private DM conversation.
  *
- * This enables proper Expo Router navigation (router.push)
- * instead of component-level overlay rendering.
+ * DM-ID-FIX: Now includes threadId for Convex backend sync.
  */
 import { create } from 'zustand';
-import { DemoDM } from '@/lib/demoData';
+import type { Id } from '@/convex/_generated/dataModel';
+
+// DM info for display (peer details)
+interface DmInfo {
+  id: string;
+  peerId: string;
+  peerName: string;
+  peerAvatar?: string;
+  peerGender?: 'male' | 'female' | 'other';
+}
 
 interface ChatRoomDmState {
   /** The active DM being viewed (set before navigation) */
-  activeDm: DemoDM | null;
+  activeDm: DmInfo | null;
+
+  /** Convex thread ID for backend sync */
+  activeThreadId: Id<'chatRoomDmThreads'> | null;
 
   /** The source room ID (for back navigation context) */
   sourceRoomId: string | null;
 
   /** Set the active DM before navigating to DM screen */
-  setActiveDm: (dm: DemoDM, roomId: string) => void;
+  setActiveDm: (dm: DmInfo, threadId: Id<'chatRoomDmThreads'>, roomId: string) => void;
 
   /** Clear the active DM (called on back/close) */
   clearActiveDm: () => void;
@@ -26,9 +37,18 @@ interface ChatRoomDmState {
 
 export const useChatRoomDmStore = create<ChatRoomDmState>((set) => ({
   activeDm: null,
+  activeThreadId: null,
   sourceRoomId: null,
 
-  setActiveDm: (dm, roomId) => set({ activeDm: dm, sourceRoomId: roomId }),
+  setActiveDm: (dm, threadId, roomId) => set({
+    activeDm: dm,
+    activeThreadId: threadId,
+    sourceRoomId: roomId,
+  }),
 
-  clearActiveDm: () => set({ activeDm: null, sourceRoomId: null }),
+  clearActiveDm: () => set({
+    activeDm: null,
+    activeThreadId: null,
+    sourceRoomId: null,
+  }),
 }));
