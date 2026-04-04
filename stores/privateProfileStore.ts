@@ -140,6 +140,16 @@ interface PrivateProfileState {
   deletedAt: number | null; // Timestamp when deletion was initiated
   recoverUntil: number | null; // Timestamp = deletedAt + 30 days
 
+  // Phase-2 Privacy Settings (Deep Connect specific)
+  hideFromDeepConnect: boolean;
+  hideAge: boolean;
+  hideDistance: boolean;
+  disableReadReceipts: boolean;
+
+  // Phase-2 Notifications Settings
+  notificationsEnabled: boolean;
+  notificationCategories: Record<string, boolean>;
+
   // Actions — wizard navigation
   setCurrentStep: (step: number) => void;
 
@@ -217,6 +227,16 @@ interface PrivateProfileState {
   initiatePrivateDataDeletion: () => void;
   recoverPrivateData: () => void;
 
+  // Phase-2 Privacy Actions
+  setHideFromDeepConnect: (value: boolean) => void;
+  setHideAge: (value: boolean) => void;
+  setHideDistance: (value: boolean) => void;
+  setDisableReadReceipts: (value: boolean) => void;
+
+  // Phase-2 Notifications Actions
+  setNotificationsEnabled: (value: boolean) => void;
+  setNotificationCategory: (key: string, value: boolean) => void;
+
   // ST-001 FIX: Hydrate store from Convex on app restart
   hydrateFromConvex: (convexProfile: {
     _id: string;
@@ -245,6 +265,8 @@ interface PrivateProfileState {
     promptAnswers?: Phase2PromptAnswer[];
     // Phase-2 Preference Strength
     preferenceStrength?: PreferenceStrength;
+    // Per-photo blur slots (9 slots, true = blurred)
+    photoBlurSlots?: boolean[];
   } | null) => void;
 }
 
@@ -303,6 +325,14 @@ const initialWizardState = {
   deletionStatus: 'active' as const,
   deletedAt: null,
   recoverUntil: null,
+  // Phase-2 Privacy defaults
+  hideFromDeepConnect: false,
+  hideAge: false,
+  hideDistance: false,
+  disableReadReceipts: false,
+  // Phase-2 Notifications defaults
+  notificationsEnabled: true,
+  notificationCategories: {} as Record<string, boolean>,
 };
 
 export const usePrivateProfileStore = create<PrivateProfileState>()((set) => ({
@@ -549,6 +579,18 @@ export const usePrivateProfileStore = create<PrivateProfileState>()((set) => ({
     recoverUntil: null,
   }),
 
+  // Phase-2 Privacy Actions
+  setHideFromDeepConnect: (value) => set({ hideFromDeepConnect: value }),
+  setHideAge: (value) => set({ hideAge: value }),
+  setHideDistance: (value) => set({ hideDistance: value }),
+  setDisableReadReceipts: (value) => set({ disableReadReceipts: value }),
+
+  // Phase-2 Notifications Actions
+  setNotificationsEnabled: (value) => set({ notificationsEnabled: value }),
+  setNotificationCategory: (key, value) => set((state) => ({
+    notificationCategories: { ...state.notificationCategories, [key]: value },
+  })),
+
   // ST-001 FIX: Hydrate store from Convex profile on app restart
   // This ensures Phase-2 profile state survives app restarts
   hydrateFromConvex: (convexProfile) => {
@@ -612,6 +654,10 @@ export const usePrivateProfileStore = create<PrivateProfileState>()((set) => ({
 
       // Phase-2 Preference Strength
       preferenceStrength: convexProfile.preferenceStrength || { smoking: null, drinking: null, intent: null },
+
+      // Per-photo blur slots (9 slots, true = blurred)
+      // Hydrate from backend or keep default (all blurred for privacy)
+      photoBlurSlots: convexProfile.photoBlurSlots || [true, true, true, true, true, true, true, true, true],
 
       // Mark as hydrated
       _hasHydrated: true,

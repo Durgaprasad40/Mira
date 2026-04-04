@@ -1,0 +1,1490 @@
+/**
+ * Phase-2 Edit Profile Screen (FULL CONTROL CENTER)
+ *
+ * Comprehensive edit screen with ALL profile data:
+ * 1. Basic Info (nickname, age, gender)
+ * 2. Photos (grid with add/remove)
+ * 3. Photo Visibility (blur controls)
+ * 4. About (bio)
+ * 5. Prompts (2 visible, +X more expandable)
+ * 6. Details (all onboarding fields)
+ * 7. Settings
+ *
+ * IMPORTANT:
+ * - NO onboarding routing - all edits are inline
+ * - Nickname-only (no full name)
+ * - Premium UI with proper spacing and hierarchy
+ */
+import React, { useMemo, useCallback, useState, useEffect, useRef } from 'react';
+import {
+  View,
+  Text,
+  StyleSheet,
+  ScrollView,
+  TouchableOpacity,
+  Dimensions,
+  Alert,
+  ActivityIndicator,
+  TextInput,
+  Keyboard,
+  KeyboardAvoidingView,
+  Platform,
+} from 'react-native';
+import { Image } from 'expo-image';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
+import { useRouter } from 'expo-router';
+import { Ionicons } from '@expo/vector-icons';
+import { Paths, File as ExpoFile, Directory } from 'expo-file-system';
+import * as ImagePicker from 'expo-image-picker';
+import { useQuery, useMutation } from 'convex/react';
+import { api } from '@/convex/_generated/api';
+import { uploadPhotoToConvex } from '@/lib/uploadUtils';
+import { INCOGNITO_COLORS } from '@/lib/constants';
+import { usePrivateProfileStore } from '@/stores/privateProfileStore';
+import { useAuthStore } from '@/stores/authStore';
+import { isDemoMode } from '@/hooks/useConvex';
+import { getDemoCurrentUser } from '@/lib/demoData';
+
+const C = INCOGNITO_COLORS;
+const SCREEN_WIDTH = Dimensions.get('window').width;
+const PHOTO_GAP = 8;
+const PHOTO_PADDING = 16;
+const PHOTO_SIZE = (SCREEN_WIDTH - PHOTO_PADDING * 2 - PHOTO_GAP * 2) / 3;
+const MAX_PHOTOS = 9;
+const PRIVATE_PHOTOS_DIR_NAME = 'private_photos';
+
+function getPrivatePhotosDir(): Directory {
+  return new Directory(Paths.document, PRIVATE_PHOTOS_DIR_NAME);
+}
+
+async function copyToPermamentStorage(sourceUri: string, index: number): Promise<string | null> {
+  if (sourceUri.includes(PRIVATE_PHOTOS_DIR_NAME) || sourceUri.startsWith('http')) {
+    return sourceUri;
+  }
+
+  try {
+    const privateDir = getPrivatePhotosDir();
+    if (!privateDir.exists) {
+      privateDir.create();
+    }
+
+    const timestamp = Date.now();
+    const extension = sourceUri.split('.').pop()?.toLowerCase() || 'jpg';
+    const filename = `photo_${timestamp}_${index}.${extension}`;
+    const destFile = new ExpoFile(privateDir, filename);
+
+    if (destFile.exists) {
+      return destFile.uri;
+    }
+
+    const sourceFile = new ExpoFile(sourceUri);
+    sourceFile.copy(destFile);
+
+    return destFile.uri;
+  } catch (error) {
+    if (__DEV__) {
+      console.error('[EditProfile] Copy failed:', error);
+    }
+    return null;
+  }
+}
+
+function isValidPhotoUrl(url: unknown): url is string {
+  if (typeof url !== 'string' || url.length === 0) return false;
+  if (url === 'undefined' || url === 'null') return false;
+  if (url.includes('/cache/ImagePicker/') || url.includes('/Cache/ImagePicker/')) {
+    return false;
+  }
+  return url.startsWith('http') || url.startsWith('file://');
+}
+
+// Gender options
+const GENDER_OPTIONS = [
+  { value: 'male', label: 'Male' },
+  { value: 'female', label: 'Female' },
+  { value: 'non_binary', label: 'Non-binary' },
+  { value: 'prefer_not_to_say', label: 'Prefer not to say' },
+];
+
+// Smoking options
+const SMOKING_OPTIONS = [
+  { value: 'never', label: 'Non-smoker' },
+  { value: 'socially', label: 'Socially' },
+  { value: 'regularly', label: 'Regularly' },
+];
+
+// Drinking options
+const DRINKING_OPTIONS = [
+  { value: 'never', label: 'Never' },
+  { value: 'socially', label: 'Socially' },
+  { value: 'regularly', label: 'Regularly' },
+];
+
+// Education options
+const EDUCATION_OPTIONS = [
+  { value: 'high_school', label: 'High School' },
+  { value: 'some_college', label: 'Some College' },
+  { value: 'trade_school', label: 'Trade School' },
+  { value: 'bachelors', label: "Bachelor's" },
+  { value: 'masters', label: "Master's" },
+  { value: 'doctorate', label: 'Doctorate' },
+];
+
+// Religion options
+const RELIGION_OPTIONS = [
+  { value: 'christian', label: 'Christian' },
+  { value: 'catholic', label: 'Catholic' },
+  { value: 'muslim', label: 'Muslim' },
+  { value: 'jewish', label: 'Jewish' },
+  { value: 'hindu', label: 'Hindu' },
+  { value: 'buddhist', label: 'Buddhist' },
+  { value: 'spiritual', label: 'Spiritual' },
+  { value: 'agnostic', label: 'Agnostic' },
+  { value: 'atheist', label: 'Atheist' },
+  { value: 'other', label: 'Other' },
+];
+
+export default function EditProfileScreen() {
+  const router = useRouter();
+  const insets = useSafeAreaInsets();
+
+  // Auth
+  const { userId } = useAuthStore();
+
+  // Backend profile query
+  const backendProfile = useQuery(
+    api.privateProfiles.getByAuthUserId,
+    !isDemoMode && userId ? { authUserId: userId } : 'skip'
+  );
+
+  // Backend mutations
+  const generateUploadUrl = useMutation(api.photos.generateUploadUrl);
+  const getStorageUrl = useMutation(api.photos.getStorageUrl);
+  const updatePrivateProfile = useMutation(api.privateProfiles.updateFieldsByAuthId);
+  const updatePhotoBlurSlots = useMutation(api.privateProfiles.updatePhotoBlurSlots);
+
+  // Store data
+  const selectedPhotoUrls = usePrivateProfileStore((s) => s.selectedPhotoUrls);
+  const storeDisplayName = usePrivateProfileStore((s) => s.displayName);
+  const storeAge = usePrivateProfileStore((s) => s.age);
+  const storeGender = usePrivateProfileStore((s) => s.gender);
+  const privateBio = usePrivateProfileStore((s) => s.privateBio);
+  const blurMyPhoto = usePrivateProfileStore((s) => s.blurMyPhoto);
+  const photoBlurSlots = usePrivateProfileStore((s) => s.photoBlurSlots);
+  const promptAnswers = usePrivateProfileStore((s) => s.promptAnswers);
+
+  // Profile details from store
+  const storeHeight = usePrivateProfileStore((s) => s.height);
+  const storeWeight = usePrivateProfileStore((s) => s.weight);
+  const storeSmoking = usePrivateProfileStore((s) => s.smoking);
+  const storeDrinking = usePrivateProfileStore((s) => s.drinking);
+  const storeEducation = usePrivateProfileStore((s) => s.education);
+  const storeReligion = usePrivateProfileStore((s) => s.religion);
+
+  // Resolve display values from backend or store (backend takes priority)
+  const displayName = useMemo(() => {
+    if (!isDemoMode && backendProfile?.displayName) {
+      return backendProfile.displayName;
+    }
+    return storeDisplayName || 'Anonymous';
+  }, [backendProfile?.displayName, storeDisplayName]);
+
+  const age = useMemo(() => {
+    if (!isDemoMode && backendProfile?.age) {
+      return backendProfile.age;
+    }
+    return storeAge || 0;
+  }, [backendProfile?.age, storeAge]);
+
+  const gender = useMemo(() => {
+    if (!isDemoMode && backendProfile?.gender) {
+      return backendProfile.gender;
+    }
+    return storeGender || '';
+  }, [backendProfile?.gender, storeGender]);
+
+  // Resolve details from backend or store (backend takes priority for prefill)
+  const height = useMemo(() => {
+    if (!isDemoMode && backendProfile?.height !== undefined) {
+      return backendProfile.height;
+    }
+    return storeHeight;
+  }, [backendProfile?.height, storeHeight]);
+
+  const weight = useMemo(() => {
+    if (!isDemoMode && backendProfile?.weight !== undefined) {
+      return backendProfile.weight;
+    }
+    return storeWeight;
+  }, [backendProfile?.weight, storeWeight]);
+
+  const smoking = useMemo(() => {
+    if (!isDemoMode && backendProfile?.smoking) {
+      return backendProfile.smoking;
+    }
+    return storeSmoking;
+  }, [backendProfile?.smoking, storeSmoking]);
+
+  const drinking = useMemo(() => {
+    if (!isDemoMode && backendProfile?.drinking) {
+      return backendProfile.drinking;
+    }
+    return storeDrinking;
+  }, [backendProfile?.drinking, storeDrinking]);
+
+  const education = useMemo(() => {
+    if (!isDemoMode && backendProfile?.education) {
+      return backendProfile.education;
+    }
+    return storeEducation;
+  }, [backendProfile?.education, storeEducation]);
+
+  const religion = useMemo(() => {
+    if (!isDemoMode && backendProfile?.religion) {
+      return backendProfile.religion;
+    }
+    return storeReligion;
+  }, [backendProfile?.religion, storeReligion]);
+
+  // Store actions
+  const setSelectedPhotos = usePrivateProfileStore((s) => s.setSelectedPhotos);
+  const setBlurMyPhoto = usePrivateProfileStore((s) => s.setBlurMyPhoto);
+  const togglePhotoBlurSlot = usePrivateProfileStore((s) => s.togglePhotoBlurSlot);
+  const setPrivateBio = usePrivateProfileStore((s) => s.setPrivateBio);
+  const setHeight = usePrivateProfileStore((s) => s.setHeight);
+  const setWeight = usePrivateProfileStore((s) => s.setWeight);
+  const setSmoking = usePrivateProfileStore((s) => s.setSmoking);
+  const setDrinking = usePrivateProfileStore((s) => s.setDrinking);
+  const setEducation = usePrivateProfileStore((s) => s.setEducation);
+  const setReligion = usePrivateProfileStore((s) => s.setReligion);
+
+  // Local state for editable details (synced from resolved values)
+  const [localHeight, setLocalHeight] = useState<number | null>(null);
+  const [localWeight, setLocalWeight] = useState<number | null>(null);
+  const [localSmoking, setLocalSmoking] = useState<string | null>(null);
+  const [localDrinking, setLocalDrinking] = useState<string | null>(null);
+  const [localEducation, setLocalEducation] = useState<string | null>(null);
+  const [localReligion, setLocalReligion] = useState<string | null>(null);
+  const [detailsInitialized, setDetailsInitialized] = useState(false);
+
+  // Sync local details state from resolved values (once on load)
+  useEffect(() => {
+    if (!detailsInitialized && (backendProfile !== undefined || isDemoMode)) {
+      setLocalHeight(height ?? null);
+      setLocalWeight(weight ?? null);
+      setLocalSmoking(smoking ?? null);
+      setLocalDrinking(drinking ?? null);
+      setLocalEducation(education ?? null);
+      setLocalReligion(religion ?? null);
+      setDetailsInitialized(true);
+    }
+  }, [backendProfile, height, weight, smoking, drinking, education, religion, detailsInitialized]);
+
+  // Local state
+  const [addingSlotIndex, setAddingSlotIndex] = useState<number | null>(null);
+  const [isSaving, setIsSaving] = useState(false);
+  const [saveSuccess, setSaveSuccess] = useState(false);
+  const [promptsExpanded, setPromptsExpanded] = useState(false);
+  const [editingBio, setEditingBio] = useState(false);
+  const [draftBio, setDraftBio] = useState(privateBio);
+  const [missingPhotos, setMissingPhotos] = useState<Set<string>>(new Set());
+
+  // Track mount state
+  const mountedRef = useRef(true);
+  const lastCheckedRef = useRef<string>('');
+
+  useEffect(() => {
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
+
+  // Sync draft bio with store
+  useEffect(() => {
+    if (!editingBio) {
+      setDraftBio(privateBio);
+    }
+  }, [privateBio, editingBio]);
+
+  // Check for missing photos
+  const checkPhotosExist = useCallback(async () => {
+    const photos = Array.isArray(selectedPhotoUrls) ? selectedPhotoUrls : [];
+    const photosKey = photos.join('|');
+    if (photosKey === lastCheckedRef.current) return;
+    lastCheckedRef.current = photosKey;
+
+    const fileUris = photos.filter(
+      (uri) => uri.startsWith('file://') && !uri.includes('/cache/')
+    );
+
+    if (fileUris.length === 0) {
+      if (mountedRef.current) setMissingPhotos(new Set());
+      return;
+    }
+
+    const missing = new Set<string>();
+    for (const uri of fileUris) {
+      try {
+        const file = new ExpoFile(uri);
+        if (!file.exists) missing.add(uri);
+      } catch {
+        missing.add(uri);
+      }
+    }
+
+    if (mountedRef.current) setMissingPhotos(missing);
+  }, [selectedPhotoUrls]);
+
+  useEffect(() => {
+    checkPhotosExist();
+  }, [checkPhotosExist]);
+
+  // Valid photos
+  const validPhotos = useMemo(() => {
+    const photos = Array.isArray(selectedPhotoUrls) ? selectedPhotoUrls : [];
+    return photos.filter((url) => isValidPhotoUrl(url) && !missingPhotos.has(url));
+  }, [selectedPhotoUrls, missingPhotos]);
+
+  // Create 9-slot array
+  const photoSlots = useMemo(() => {
+    const slots: (string | null)[] = Array(9).fill(null);
+    validPhotos.forEach((url, idx) => {
+      if (idx < 9) slots[idx] = url;
+    });
+    return slots;
+  }, [validPhotos]);
+
+  // Add photo
+  const handleAddPhoto = async (slotIndex: number) => {
+    if (addingSlotIndex !== null) return;
+    setAddingSlotIndex(slotIndex);
+
+    try {
+      const { status } = await ImagePicker.requestMediaLibraryPermissionsAsync();
+      if (status !== 'granted') {
+        Alert.alert('Permission Required', 'Please grant photo library access.');
+        if (mountedRef.current) setAddingSlotIndex(null);
+        return;
+      }
+
+      const result = await ImagePicker.launchImageLibraryAsync({
+        mediaTypes: 'images',
+        allowsMultipleSelection: false,
+        quality: 0.8,
+      });
+
+      if (result.canceled || !result.assets?.length) {
+        if (mountedRef.current) setAddingSlotIndex(null);
+        return;
+      }
+
+      const asset = result.assets[0];
+      let backendUrl: string | null = null;
+
+      if (!isDemoMode && userId) {
+        try {
+          const storageId = await uploadPhotoToConvex(asset.uri, generateUploadUrl);
+          const permanentUrl = await getStorageUrl({ storageId });
+          if (!permanentUrl) throw new Error('Failed to get URL');
+          backendUrl = permanentUrl;
+        } catch {
+          backendUrl = await copyToPermamentStorage(asset.uri, Date.now());
+        }
+      } else {
+        backendUrl = await copyToPermamentStorage(asset.uri, Date.now());
+      }
+
+      if (!mountedRef.current) return;
+
+      if (backendUrl) {
+        const currentPhotos = usePrivateProfileStore.getState().selectedPhotoUrls.filter(isValidPhotoUrl);
+        const newPhotos = [...currentPhotos];
+
+        if (slotIndex >= newPhotos.length) {
+          newPhotos.push(backendUrl);
+        } else {
+          newPhotos[slotIndex] = backendUrl;
+        }
+
+        const finalPhotos = newPhotos.slice(0, MAX_PHOTOS);
+        setSelectedPhotos([], finalPhotos);
+
+        if (!isDemoMode && userId) {
+          try {
+            await updatePrivateProfile({
+              authUserId: userId,
+              privatePhotoUrls: finalPhotos,
+            });
+          } catch (e) {
+            if (__DEV__) console.error('[EditProfile] Backend sync failed:', e);
+          }
+        }
+      }
+    } catch (error) {
+      Alert.alert('Error', 'Failed to add photo.');
+    } finally {
+      if (mountedRef.current) setAddingSlotIndex(null);
+    }
+  };
+
+  // Remove photo
+  const handleRemovePhoto = async (index: number) => {
+    const currentPhotos = usePrivateProfileStore.getState().selectedPhotoUrls.filter(isValidPhotoUrl);
+    if (index < 0 || index >= currentPhotos.length) return;
+
+    const removedUrl = currentPhotos[index];
+    const newPhotos = currentPhotos.filter((_, i) => i !== index);
+    setSelectedPhotos([], newPhotos);
+
+    // Clean up local file
+    if (removedUrl.includes(PRIVATE_PHOTOS_DIR_NAME) && !removedUrl.startsWith('http')) {
+      try {
+        const file = new ExpoFile(removedUrl);
+        if (file.exists) file.delete();
+      } catch {}
+    }
+
+    if (!isDemoMode && userId) {
+      try {
+        await updatePrivateProfile({
+          authUserId: userId,
+          privatePhotoUrls: newPhotos,
+        });
+      } catch {}
+    }
+  };
+
+  // Toggle photo blur
+  const handleTogglePhotoBlur = async (slotIndex: number) => {
+    togglePhotoBlurSlot(slotIndex);
+
+    const newSlots = [...photoBlurSlots];
+    newSlots[slotIndex] = !newSlots[slotIndex];
+
+    if (!isDemoMode && userId) {
+      try {
+        await updatePhotoBlurSlots({
+          authUserId: userId,
+          photoBlurSlots: newSlots,
+        });
+      } catch {}
+    }
+  };
+
+  // Save bio
+  const saveBio = async () => {
+    setPrivateBio(draftBio.trim());
+    setEditingBio(false);
+    Keyboard.dismiss();
+
+    if (!isDemoMode && userId) {
+      try {
+        await updatePrivateProfile({
+          authUserId: userId,
+          privateBio: draftBio.trim(),
+        });
+      } catch {}
+    }
+  };
+
+  // Save field to backend
+  const saveField = async (field: string, value: any) => {
+    if (!isDemoMode && userId) {
+      try {
+        await updatePrivateProfile({
+          authUserId: userId,
+          [field]: value,
+        });
+      } catch {}
+    }
+  };
+
+  // Save ALL changes at once
+  const handleSaveAll = async () => {
+    if (isSaving) return;
+
+    setIsSaving(true);
+    setSaveSuccess(false);
+    Keyboard.dismiss();
+
+    try {
+      // Update local store with current values
+      setHeight(localHeight);
+      setWeight(localWeight);
+      setSmoking(localSmoking);
+      setDrinking(localDrinking);
+      setEducation(localEducation);
+      setReligion(localReligion);
+
+      // If bio was being edited, save it
+      if (editingBio && draftBio !== privateBio) {
+        setPrivateBio(draftBio.trim());
+        setEditingBio(false);
+      }
+
+      // Save all fields to backend in one call
+      if (!isDemoMode && userId) {
+        await updatePrivateProfile({
+          authUserId: userId,
+          privateBio: editingBio ? draftBio.trim() : privateBio,
+          height: localHeight,
+          weight: localWeight,
+          smoking: localSmoking,
+          drinking: localDrinking,
+          education: localEducation,
+          religion: localReligion,
+        });
+
+        // Also save photo blur slots
+        await updatePhotoBlurSlots({
+          authUserId: userId,
+          photoBlurSlots: photoBlurSlots,
+        });
+      }
+
+      // Show success feedback
+      setSaveSuccess(true);
+      setTimeout(() => {
+        if (mountedRef.current) {
+          setSaveSuccess(false);
+        }
+      }, 2000);
+
+    } catch (error) {
+      if (__DEV__) {
+        console.error('[EditProfile] Save failed:', error);
+      }
+      Alert.alert('Error', 'Failed to save changes. Please try again.');
+    } finally {
+      if (mountedRef.current) {
+        setIsSaving(false);
+      }
+    }
+  };
+
+  // Go back
+  const handleBack = () => {
+    router.back();
+  };
+
+  return (
+    <SafeAreaView style={styles.container} edges={['top']}>
+      <KeyboardAvoidingView
+        style={{ flex: 1 }}
+        behavior={Platform.OS === 'ios' ? 'padding' : undefined}
+      >
+        {/* Header */}
+        <View style={styles.header}>
+          <TouchableOpacity
+            style={styles.backBtn}
+            onPress={handleBack}
+            hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
+          >
+            <Ionicons name="arrow-back" size={24} color={C.text} />
+          </TouchableOpacity>
+          <Text style={styles.headerTitle}>Edit Profile</Text>
+          <View style={{ width: 24 }} />
+        </View>
+
+        <ScrollView
+          style={{ flex: 1 }}
+          contentContainerStyle={styles.scrollContent}
+          showsVerticalScrollIndicator={false}
+          keyboardShouldPersistTaps="handled"
+        >
+          {/* ────────────────────────────────────────────────────────────── */}
+          {/* SECTION 1: BASIC INFO (Read-only - set during onboarding) */}
+          {/* ────────────────────────────────────────────────────────────── */}
+          <View style={styles.section}>
+            <View style={styles.sectionHeader}>
+              <Text style={styles.sectionTitle}>Basic Info</Text>
+              <View style={styles.lockedBadge}>
+                <Ionicons name="lock-closed" size={12} color={C.textLight} />
+                <Text style={styles.lockedText}>Locked</Text>
+              </View>
+            </View>
+
+            <View style={styles.infoCard}>
+              <View style={styles.infoRow}>
+                <Text style={styles.infoLabel}>Nickname</Text>
+                <View style={styles.lockedValueRow}>
+                  <Text style={styles.infoValue}>{displayName || 'Anonymous'}</Text>
+                </View>
+              </View>
+
+              <View style={styles.infoRow}>
+                <Text style={styles.infoLabel}>Age</Text>
+                <View style={styles.lockedValueRow}>
+                  <Text style={styles.infoValue}>{age > 0 ? age : '—'}</Text>
+                </View>
+              </View>
+
+              <View style={[styles.infoRow, { marginBottom: 0 }]}>
+                <Text style={styles.infoLabel}>Gender</Text>
+                <View style={styles.lockedValueRow}>
+                  <Text style={styles.infoValue}>
+                    {GENDER_OPTIONS.find((opt) => opt.value === gender)?.label || '—'}
+                  </Text>
+                </View>
+              </View>
+            </View>
+
+            <Text style={styles.lockedHint}>
+              These details are set during profile creation and cannot be changed here.
+            </Text>
+          </View>
+
+          {/* ────────────────────────────────────────────────────────────── */}
+          {/* SECTION 2: PHOTOS */}
+          {/* ────────────────────────────────────────────────────────────── */}
+          <View style={styles.section}>
+            <View style={styles.sectionHeader}>
+              <Text style={styles.sectionTitle}>Photos</Text>
+              <Text style={styles.sectionCount}>{validPhotos.length}/9</Text>
+            </View>
+
+            <View style={styles.photoGrid}>
+              {photoSlots.map((uri, slotIndex) => {
+                const hasPhoto = !!uri;
+                const isMain = slotIndex === 0 && hasPhoto;
+                const isThisSlotLoading = addingSlotIndex === slotIndex;
+
+                if (hasPhoto) {
+                  // Per-photo blur: apply blur radius when blurMyPhoto is ON and this slot is marked blurred
+                  const isPhotoBlurred = blurMyPhoto && photoBlurSlots[slotIndex];
+
+                  return (
+                    <View key={`slot-${slotIndex}`} style={styles.photoSlot}>
+                      <Image
+                        source={{ uri }}
+                        style={styles.photoImage}
+                        contentFit="cover"
+                        blurRadius={isPhotoBlurred ? 8 : 0}
+                        transition={200}
+                      />
+
+                      {isMain && (
+                        <View style={styles.mainBadge}>
+                          <Ionicons name="star" size={10} color="#FFD700" />
+                        </View>
+                      )}
+
+                      {blurMyPhoto && (
+                        <TouchableOpacity
+                          style={[styles.blurBtn, photoBlurSlots[slotIndex] && styles.blurBtnActive]}
+                          onPress={() => handleTogglePhotoBlur(slotIndex)}
+                          activeOpacity={0.7}
+                        >
+                          <Ionicons
+                            name={photoBlurSlots[slotIndex] ? 'eye-off' : 'eye'}
+                            size={14}
+                            color="#FFFFFF"
+                          />
+                        </TouchableOpacity>
+                      )}
+
+                      <TouchableOpacity
+                        style={styles.removeBtn}
+                        onPress={() => handleRemovePhoto(slotIndex)}
+                        activeOpacity={0.7}
+                      >
+                        <Ionicons name="close" size={14} color="#FF6B6B" />
+                      </TouchableOpacity>
+                    </View>
+                  );
+                }
+
+                return (
+                  <TouchableOpacity
+                    key={`slot-${slotIndex}`}
+                    style={[styles.addSlot, isThisSlotLoading && styles.addSlotDisabled]}
+                    onPress={() => handleAddPhoto(slotIndex)}
+                    disabled={addingSlotIndex !== null}
+                  >
+                    {isThisSlotLoading ? (
+                      <ActivityIndicator size="small" color={C.primary} />
+                    ) : (
+                      <>
+                        <Ionicons name="add" size={28} color={C.primary} />
+                        <Text style={styles.addSlotText}>Add</Text>
+                      </>
+                    )}
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+
+            <Text style={styles.photoHint}>First photo is your main photo</Text>
+          </View>
+
+          {/* ────────────────────────────────────────────────────────────── */}
+          {/* SECTION 3: PHOTO BLUR SETTINGS */}
+          {/* ────────────────────────────────────────────────────────────── */}
+          <View style={styles.section}>
+            <Text style={styles.sectionTitle}>Photo Blur</Text>
+
+            <View style={styles.visibilityCard}>
+              <TouchableOpacity
+                style={styles.toggleRow}
+                onPress={() => {
+                  // Toggle blur mode - enables/disables per-photo blur controls
+                  // Does NOT change individual photo blur states
+                  setBlurMyPhoto(!blurMyPhoto);
+                }}
+                activeOpacity={0.7}
+              >
+                <View style={styles.toggleInfo}>
+                  <Ionicons name="eye-off-outline" size={22} color={blurMyPhoto ? C.primary : C.textLight} />
+                  <View style={{ flex: 1 }}>
+                    <Text style={styles.toggleLabel}>Enable photo blur</Text>
+                    <Text style={styles.toggleHint}>
+                      {blurMyPhoto
+                        ? 'Tap eye icon on photos to blur them'
+                        : 'All photos visible in Deep Connect'}
+                    </Text>
+                  </View>
+                </View>
+                <View style={[styles.toggle, blurMyPhoto && styles.toggleActive]}>
+                  <View style={[styles.toggleKnob, blurMyPhoto && styles.toggleKnobActive]} />
+                </View>
+              </TouchableOpacity>
+            </View>
+
+            <View style={styles.blurExplainer}>
+              <View style={styles.blurExplainerRow}>
+                <View style={[styles.blurExplainerIcon, styles.blurExplainerIconBlurred]}>
+                  <Ionicons name="eye-off" size={12} color="#FFFFFF" />
+                </View>
+                <Text style={styles.blurExplainerText}>Blurred photos appear hidden in Deep Connect</Text>
+              </View>
+              <View style={styles.blurExplainerRow}>
+                <View style={styles.blurExplainerIcon}>
+                  <Ionicons name="eye" size={12} color="#FFFFFF" />
+                </View>
+                <Text style={styles.blurExplainerText}>Visible photos appear normally</Text>
+              </View>
+            </View>
+          </View>
+
+          {/* ────────────────────────────────────────────────────────────── */}
+          {/* SECTION 4: ABOUT */}
+          {/* ────────────────────────────────────────────────────────────── */}
+          <View style={styles.section}>
+            <View style={styles.sectionHeader}>
+              <Text style={styles.sectionTitle}>About</Text>
+              {!editingBio && (
+                <TouchableOpacity onPress={() => setEditingBio(true)}>
+                  <Text style={styles.editLink}>Edit</Text>
+                </TouchableOpacity>
+              )}
+            </View>
+
+            {editingBio ? (
+              <View style={styles.bioEditCard}>
+                <TextInput
+                  style={styles.bioInput}
+                  value={draftBio}
+                  onChangeText={setDraftBio}
+                  placeholder="Share what you're looking for..."
+                  placeholderTextColor={C.textLight}
+                  multiline
+                  maxLength={300}
+                  autoFocus
+                />
+                <Text style={styles.charCount}>{draftBio.length}/300</Text>
+                <View style={styles.bioActions}>
+                  <TouchableOpacity
+                    style={styles.cancelBtn}
+                    onPress={() => {
+                      setEditingBio(false);
+                      setDraftBio(privateBio);
+                    }}
+                  >
+                    <Text style={styles.cancelBtnText}>Cancel</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity style={styles.saveBtn} onPress={saveBio}>
+                    <Text style={styles.saveBtnText}>Save</Text>
+                  </TouchableOpacity>
+                </View>
+              </View>
+            ) : (
+              <View style={styles.bioCard}>
+                {privateBio && privateBio.trim().length > 0 ? (
+                  <Text style={styles.bioText}>{privateBio}</Text>
+                ) : (
+                  <Text style={styles.bioEmpty}>Share what you're looking for...</Text>
+                )}
+              </View>
+            )}
+          </View>
+
+          {/* ────────────────────────────────────────────────────────────── */}
+          {/* SECTION 5: PROMPTS */}
+          {/* ────────────────────────────────────────────────────────────── */}
+          {promptAnswers && promptAnswers.length > 0 && (
+            <View style={styles.section}>
+              <View style={styles.sectionHeader}>
+                <Text style={styles.sectionTitle}>My Answers</Text>
+                <TouchableOpacity onPress={() => router.push('/(main)/(private)/edit-prompts' as any)}>
+                  <Text style={styles.editLink}>Edit</Text>
+                </TouchableOpacity>
+              </View>
+
+              <View style={styles.promptsContainer}>
+                {(promptsExpanded ? promptAnswers : promptAnswers.slice(0, 2)).map((prompt, idx) => (
+                  <View key={prompt.promptId || idx} style={styles.promptCard}>
+                    <Text style={styles.promptQuestion} numberOfLines={2}>{prompt.question}</Text>
+                    <Text style={styles.promptAnswer} numberOfLines={3}>{prompt.answer}</Text>
+                  </View>
+                ))}
+              </View>
+
+              {promptAnswers.length > 2 && (
+                <TouchableOpacity
+                  style={styles.showMoreBtn}
+                  onPress={() => setPromptsExpanded(!promptsExpanded)}
+                  activeOpacity={0.7}
+                >
+                  <Text style={styles.showMoreText}>
+                    {promptsExpanded ? 'Show less' : `+${promptAnswers.length - 2} more`}
+                  </Text>
+                  <Ionicons
+                    name={promptsExpanded ? 'chevron-up' : 'chevron-down'}
+                    size={16}
+                    color={C.primary}
+                  />
+                </TouchableOpacity>
+              )}
+            </View>
+          )}
+
+          {/* ────────────────────────────────────────────────────────────── */}
+          {/* SECTION 6: DETAILS */}
+          {/* ────────────────────────────────────────────────────────────── */}
+          <View style={styles.section}>
+            <Text style={styles.sectionTitle}>Details</Text>
+
+            {/* Height */}
+            <View style={styles.detailRow}>
+              <Text style={styles.detailLabel}>Height (cm)</Text>
+              <View style={styles.detailInputRow}>
+                <TextInput
+                  style={styles.detailInput}
+                  value={localHeight ? String(localHeight) : ''}
+                  onChangeText={(val) => {
+                    const num = parseInt(val, 10);
+                    if (!isNaN(num) && num > 0 && num < 300) {
+                      setLocalHeight(num);
+                    } else if (val === '') {
+                      setLocalHeight(null);
+                    }
+                  }}
+                  onBlur={() => {
+                    setHeight(localHeight);
+                    saveField('height', localHeight);
+                  }}
+                  keyboardType="number-pad"
+                  placeholder="175"
+                  placeholderTextColor={C.textLight}
+                  maxLength={3}
+                />
+              </View>
+            </View>
+
+            {/* Weight */}
+            <View style={styles.detailRow}>
+              <Text style={styles.detailLabel}>Weight (kg)</Text>
+              <View style={styles.detailInputRow}>
+                <TextInput
+                  style={styles.detailInput}
+                  value={localWeight ? String(localWeight) : ''}
+                  onChangeText={(val) => {
+                    const num = parseInt(val, 10);
+                    if (!isNaN(num) && num > 0 && num < 500) {
+                      setLocalWeight(num);
+                    } else if (val === '') {
+                      setLocalWeight(null);
+                    }
+                  }}
+                  onBlur={() => {
+                    setWeight(localWeight);
+                    saveField('weight', localWeight);
+                  }}
+                  keyboardType="number-pad"
+                  placeholder="70"
+                  placeholderTextColor={C.textLight}
+                  maxLength={3}
+                />
+              </View>
+            </View>
+
+            {/* Smoking */}
+            <View style={styles.detailRow}>
+              <Text style={styles.detailLabel}>Smoking</Text>
+              <View style={styles.chipRow}>
+                {SMOKING_OPTIONS.map((opt) => (
+                  <TouchableOpacity
+                    key={opt.value}
+                    style={[styles.chip, localSmoking === opt.value && styles.chipSelected]}
+                    onPress={() => {
+                      setLocalSmoking(opt.value);
+                      setSmoking(opt.value);
+                      saveField('smoking', opt.value);
+                    }}
+                    activeOpacity={0.7}
+                  >
+                    <Text style={[styles.chipText, localSmoking === opt.value && styles.chipTextSelected]}>
+                      {opt.label}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            </View>
+
+            {/* Drinking */}
+            <View style={styles.detailRow}>
+              <Text style={styles.detailLabel}>Drinking</Text>
+              <View style={styles.chipRow}>
+                {DRINKING_OPTIONS.map((opt) => (
+                  <TouchableOpacity
+                    key={opt.value}
+                    style={[styles.chip, localDrinking === opt.value && styles.chipSelected]}
+                    onPress={() => {
+                      setLocalDrinking(opt.value);
+                      setDrinking(opt.value);
+                      saveField('drinking', opt.value);
+                    }}
+                    activeOpacity={0.7}
+                  >
+                    <Text style={[styles.chipText, localDrinking === opt.value && styles.chipTextSelected]}>
+                      {opt.label}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            </View>
+
+            {/* Education */}
+            <View style={styles.detailRow}>
+              <Text style={styles.detailLabel}>Education</Text>
+              <View style={styles.chipRow}>
+                {EDUCATION_OPTIONS.map((opt) => (
+                  <TouchableOpacity
+                    key={opt.value}
+                    style={[styles.chip, localEducation === opt.value && styles.chipSelected]}
+                    onPress={() => {
+                      setLocalEducation(opt.value);
+                      setEducation(opt.value);
+                      saveField('education', opt.value);
+                    }}
+                    activeOpacity={0.7}
+                  >
+                    <Text style={[styles.chipText, localEducation === opt.value && styles.chipTextSelected]}>
+                      {opt.label}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            </View>
+
+            {/* Religion */}
+            <View style={styles.detailRow}>
+              <Text style={styles.detailLabel}>Religion</Text>
+              <View style={styles.chipRow}>
+                {RELIGION_OPTIONS.map((opt) => (
+                  <TouchableOpacity
+                    key={opt.value}
+                    style={[styles.chip, localReligion === opt.value && styles.chipSelected]}
+                    onPress={() => {
+                      setLocalReligion(opt.value);
+                      setReligion(opt.value);
+                      saveField('religion', opt.value);
+                    }}
+                    activeOpacity={0.7}
+                  >
+                    <Text style={[styles.chipText, localReligion === opt.value && styles.chipTextSelected]}>
+                      {opt.label}
+                    </Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+            </View>
+          </View>
+
+          {/* Bottom spacing for save button */}
+          <View style={{ height: 100 }} />
+        </ScrollView>
+
+        {/* Fixed Bottom Save Button */}
+        <View style={[styles.saveButtonContainer, { paddingBottom: insets.bottom + 10 }]}>
+          <TouchableOpacity
+            style={[
+              styles.saveButton,
+              isSaving && styles.saveButtonDisabled,
+              saveSuccess && styles.saveButtonSuccess,
+            ]}
+            onPress={handleSaveAll}
+            disabled={isSaving}
+            activeOpacity={0.8}
+          >
+            {isSaving ? (
+              <ActivityIndicator size="small" color="#FFFFFF" />
+            ) : saveSuccess ? (
+              <>
+                <Ionicons name="checkmark-circle" size={20} color="#FFFFFF" />
+                <Text style={styles.saveButtonText}>Saved</Text>
+              </>
+            ) : (
+              <Text style={styles.saveButtonText}>Save Changes</Text>
+            )}
+          </TouchableOpacity>
+        </View>
+      </KeyboardAvoidingView>
+    </SafeAreaView>
+  );
+}
+
+const styles = StyleSheet.create({
+  container: {
+    flex: 1,
+    backgroundColor: C.background,
+  },
+  header: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    paddingHorizontal: 16,
+    paddingVertical: 12,
+    borderBottomWidth: 1,
+    borderBottomColor: C.surface,
+  },
+  backBtn: {
+    padding: 4,
+  },
+  headerTitle: {
+    fontSize: 18,
+    fontWeight: '700',
+    color: C.text,
+  },
+  scrollContent: {
+    paddingHorizontal: PHOTO_PADDING,
+    paddingTop: 20,
+  },
+
+  // Section
+  section: {
+    marginBottom: 28,
+  },
+  sectionHeader: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    marginBottom: 14,
+  },
+  sectionTitle: {
+    fontSize: 17,
+    fontWeight: '700',
+    color: C.text,
+    letterSpacing: -0.3,
+  },
+  sectionCount: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: C.textLight,
+  },
+  editLink: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: C.primary,
+  },
+
+  // Locked badge
+  lockedBadge: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 4,
+    backgroundColor: C.accent,
+    paddingVertical: 4,
+    paddingHorizontal: 8,
+    borderRadius: 10,
+  },
+  lockedText: {
+    fontSize: 11,
+    fontWeight: '600',
+    color: C.textLight,
+    textTransform: 'uppercase',
+    letterSpacing: 0.3,
+  },
+  lockedValueRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  lockedHint: {
+    fontSize: 12,
+    color: C.textLight,
+    marginTop: 10,
+    textAlign: 'center',
+    fontStyle: 'italic',
+  },
+
+  // Info Card
+  infoCard: {
+    backgroundColor: C.surface,
+    borderRadius: 16,
+    padding: 16,
+  },
+  infoRow: {
+    marginBottom: 16,
+  },
+  infoLabel: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: C.textLight,
+    marginBottom: 6,
+    textTransform: 'uppercase',
+    letterSpacing: 0.5,
+  },
+  infoValue: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: C.text,
+  },
+  chipRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 8,
+  },
+  chip: {
+    paddingVertical: 8,
+    paddingHorizontal: 14,
+    borderRadius: 20,
+    backgroundColor: C.accent,
+    borderWidth: 1,
+    borderColor: C.border,
+  },
+  chipSelected: {
+    backgroundColor: C.primary,
+    borderColor: C.primary,
+  },
+  chipText: {
+    fontSize: 13,
+    fontWeight: '500',
+    color: C.text,
+  },
+  chipTextSelected: {
+    color: '#FFFFFF',
+    fontWeight: '600',
+  },
+
+  // Photo Grid
+  photoGrid: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: PHOTO_GAP,
+  },
+  photoSlot: {
+    width: PHOTO_SIZE,
+    height: PHOTO_SIZE * 1.25,
+    borderRadius: 12,
+    overflow: 'hidden',
+    backgroundColor: C.surface,
+  },
+  photoImage: {
+    width: '100%',
+    height: '100%',
+  },
+  mainBadge: {
+    position: 'absolute',
+    top: 6,
+    left: 6,
+    width: 22,
+    height: 22,
+    borderRadius: 11,
+    backgroundColor: 'rgba(0,0,0,0.6)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  blurBtn: {
+    position: 'absolute',
+    bottom: 6,
+    right: 6,
+    width: 26,
+    height: 26,
+    borderRadius: 13,
+    backgroundColor: 'rgba(0,0,0,0.6)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  blurBtnActive: {
+    backgroundColor: C.primary,
+  },
+  removeBtn: {
+    position: 'absolute',
+    top: 6,
+    right: 6,
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    backgroundColor: 'rgba(255,107,107,0.3)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  addSlot: {
+    width: PHOTO_SIZE,
+    height: PHOTO_SIZE * 1.25,
+    borderRadius: 12,
+    backgroundColor: C.surface,
+    borderWidth: 2,
+    borderColor: C.primary + '40',
+    borderStyle: 'dashed',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  addSlotDisabled: {
+    opacity: 0.6,
+  },
+  addSlotText: {
+    fontSize: 12,
+    fontWeight: '600',
+    color: C.primary,
+    marginTop: 4,
+  },
+  photoHint: {
+    fontSize: 12,
+    color: C.textLight,
+    textAlign: 'center',
+    marginTop: 12,
+  },
+  // Blur Explainer
+  blurExplainer: {
+    marginTop: 12,
+    gap: 8,
+  },
+  blurExplainerRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+  },
+  blurExplainerIcon: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    backgroundColor: 'rgba(255,255,255,0.15)',
+    alignItems: 'center',
+    justifyContent: 'center',
+  },
+  blurExplainerIconBlurred: {
+    backgroundColor: C.primary,
+  },
+  blurExplainerText: {
+    fontSize: 13,
+    color: C.textLight,
+    flex: 1,
+  },
+
+  // Visibility Card
+  visibilityCard: {
+    backgroundColor: C.surface,
+    borderRadius: 16,
+    overflow: 'hidden',
+  },
+  toggleRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    padding: 16,
+  },
+  toggleInfo: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 12,
+    flex: 1,
+  },
+  toggleLabel: {
+    fontSize: 15,
+    fontWeight: '600',
+    color: C.text,
+  },
+  toggleHint: {
+    fontSize: 12,
+    color: C.textLight,
+    marginTop: 2,
+  },
+  toggle: {
+    width: 48,
+    height: 28,
+    borderRadius: 14,
+    backgroundColor: C.accent,
+    padding: 2,
+    justifyContent: 'center',
+  },
+  toggleActive: {
+    backgroundColor: C.primary,
+  },
+  toggleKnob: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    backgroundColor: '#FFFFFF',
+  },
+  toggleKnobActive: {
+    alignSelf: 'flex-end',
+  },
+
+  // Bio
+  bioCard: {
+    backgroundColor: C.surface,
+    borderRadius: 16,
+    padding: 16,
+    borderLeftWidth: 3,
+    borderLeftColor: C.primary,
+  },
+  bioText: {
+    fontSize: 15,
+    color: C.text,
+    lineHeight: 24,
+  },
+  bioEmpty: {
+    fontSize: 14,
+    color: C.textLight,
+    fontStyle: 'italic',
+  },
+  bioEditCard: {
+    backgroundColor: C.surface,
+    borderRadius: 16,
+    padding: 14,
+  },
+  bioInput: {
+    fontSize: 15,
+    color: C.text,
+    minHeight: 100,
+    textAlignVertical: 'top',
+  },
+  charCount: {
+    fontSize: 11,
+    color: C.textLight,
+    textAlign: 'right',
+    marginTop: 4,
+  },
+  bioActions: {
+    flexDirection: 'row',
+    justifyContent: 'flex-end',
+    gap: 12,
+    marginTop: 12,
+  },
+  cancelBtn: {
+    paddingVertical: 8,
+    paddingHorizontal: 16,
+  },
+  cancelBtnText: {
+    fontSize: 14,
+    color: C.textLight,
+    fontWeight: '500',
+  },
+  saveBtn: {
+    paddingVertical: 8,
+    paddingHorizontal: 20,
+    backgroundColor: C.primary,
+    borderRadius: 16,
+  },
+  saveBtnText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: '#FFFFFF',
+  },
+
+  // Prompts
+  promptsContainer: {
+    gap: 10,
+  },
+  promptCard: {
+    backgroundColor: C.surface,
+    padding: 14,
+    borderRadius: 12,
+    borderLeftWidth: 3,
+    borderLeftColor: C.primary,
+  },
+  promptQuestion: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: C.textLight,
+    marginBottom: 6,
+  },
+  promptAnswer: {
+    fontSize: 15,
+    color: C.text,
+    lineHeight: 22,
+  },
+  showMoreBtn: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 4,
+    marginTop: 12,
+    paddingVertical: 10,
+  },
+  showMoreText: {
+    fontSize: 14,
+    fontWeight: '600',
+    color: C.primary,
+  },
+
+  // Details
+  detailRow: {
+    marginBottom: 18,
+  },
+  detailLabel: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: C.textLight,
+    marginBottom: 8,
+  },
+  detailInputRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+  },
+  detailInput: {
+    flex: 1,
+    backgroundColor: C.surface,
+    borderRadius: 12,
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    fontSize: 15,
+    color: C.text,
+    fontWeight: '600',
+  },
+
+  // Save Button
+  saveButtonContainer: {
+    position: 'absolute',
+    bottom: 0,
+    left: 0,
+    right: 0,
+    paddingHorizontal: 16,
+    paddingTop: 12,
+    backgroundColor: C.background,
+    borderTopWidth: 1,
+    borderTopColor: C.surface,
+  },
+  saveButton: {
+    backgroundColor: C.primary,
+    borderRadius: 14,
+    height: 52,
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+  },
+  saveButtonDisabled: {
+    opacity: 0.7,
+  },
+  saveButtonSuccess: {
+    backgroundColor: '#4CAF50',
+  },
+  saveButtonText: {
+    fontSize: 16,
+    fontWeight: '700',
+    color: '#FFFFFF',
+    letterSpacing: 0.3,
+  },
+});

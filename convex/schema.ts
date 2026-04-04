@@ -1239,6 +1239,10 @@ export default defineSchema({
       drinking: v.union(v.literal('not_important'), v.literal('slight_preference'), v.literal('important'), v.literal('deal_breaker')),
       intent: v.union(v.literal('not_important'), v.literal('prefer_similar'), v.literal('important'), v.literal('must_match_exactly')),
     })),
+    // Per-photo blur state: array of 9 booleans (one per photo slot)
+    // true = photo is blurred to other users, false = photo is visible
+    // CRITICAL: This is the backend source of truth for Phase-2 per-photo blur
+    photoBlurSlots: v.optional(v.array(v.boolean())),
     createdAt: v.number(),
     updatedAt: v.number(),
   })

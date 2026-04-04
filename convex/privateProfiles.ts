@@ -243,6 +243,8 @@ export const updateFieldsByAuthId = mutation({
       question: v.string(),
       answer: v.string(),
     }))),
+    // Per-photo blur state (9 slots)
+    photoBlurSlots: v.optional(v.array(v.boolean())),
   },
   handler: async (ctx, args) => {
     const userId = await resolveUserIdByAuthId(ctx, args.authUserId);
@@ -279,6 +281,62 @@ export const updateFieldsByAuthId = mutation({
 
     await ctx.db.patch(existing._id, cleanUpdates);
     console.log('[PRIVATE_PROFILE] updateFieldsByAuthId: success');
+    return { success: true };
+  },
+});
+
+/**
+ * Update per-photo blur slots for Phase-2 profile.
+ * CRITICAL: This is the backend persistence for per-photo blur feature.
+ * Each slot (0-8) corresponds to a photo position.
+ * true = photo is blurred to other users, false = photo is visible.
+ */
+export const updatePhotoBlurSlots = mutation({
+  args: {
+    authUserId: v.string(),
+    photoBlurSlots: v.array(v.boolean()),
+  },
+  handler: async (ctx, args) => {
+    // Validate array length (max 9 slots)
+    if (args.photoBlurSlots.length > 9) {
+      console.warn('[PRIVATE_PROFILE] updatePhotoBlurSlots: invalid length');
+      return { success: false, error: 'invalid_length' };
+    }
+
+    const userId = await resolveUserIdByAuthId(ctx, args.authUserId);
+    if (!userId) {
+      console.warn('[PRIVATE_PROFILE] updatePhotoBlurSlots: user not found');
+      return { success: false, error: 'user_not_found' };
+    }
+
+    // Check if private data is in pending_deletion state
+    const isDeleted = await isPrivateDataDeleted(ctx, userId);
+    if (isDeleted) {
+      console.warn('[PRIVATE_PROFILE] updatePhotoBlurSlots: deletion pending');
+      return { success: false, error: 'deletion_pending' };
+    }
+
+    const existing = await ctx.db
+      .query('userPrivateProfiles')
+      .withIndex('by_user', (q) => q.eq('userId', userId))
+      .first();
+
+    if (!existing) {
+      console.warn('[PRIVATE_PROFILE] updatePhotoBlurSlots: profile not found');
+      return { success: false, error: 'profile_not_found' };
+    }
+
+    // Ensure array has exactly 9 elements (pad with false if shorter)
+    const normalizedSlots = Array.from({ length: 9 }, (_, i) =>
+      args.photoBlurSlots[i] ?? false
+    );
+
+    await ctx.db.patch(existing._id, {
+      photoBlurSlots: normalizedSlots,
+      updatedAt: Date.now(),
+    });
+
+    console.log('[PRIVATE_PROFILE] updatePhotoBlurSlots: success');
     return { success: true };
   },
 });
