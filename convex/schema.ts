@@ -915,15 +915,19 @@ export default defineSchema({
     .index('by_room', ['roomId']),
 
   // Chat Room User Strikes - tracks reports and enforces escalation policy
-  // Escalation: 1st=5min, 2nd=30min, 3rd=3hr, 4th+=24hr suspension
+  // Escalation: 1st=5min, 2nd=30min, 3rd=3hr, 4th=6hr, 5th+=12hr
+  // Reset: 14 days with no new reports resets escalationStage to 0
   chatRoomUserStrikes: defineTable({
     userId: v.id('users'),
     roomId: v.string(),
-    // Report tracking
-    totalReportCount: v.number(), // Total unique reports received in this room
+    // Report tracking (historical - never erased)
+    totalReportCount: v.number(), // Total unique reports received in this room (historical)
     uniqueReporters: v.array(v.id('users')), // Track unique users who reported (no double-counting)
+    // Escalation stage (resets after 14 clean days)
+    escalationStage: v.number(), // Current escalation level (0-5), resets to 0 after 14 days clean
+    lastReportAt: v.optional(v.number()), // When last unique report was received (for 14-day reset)
     // Suspension state
-    suspensionCount: v.number(), // Number of suspensions served
+    suspensionCount: v.number(), // Number of suspensions served (historical)
     suspendedUntil: v.optional(v.number()), // Active suspension expiry timestamp
     lastSuspendedAt: v.optional(v.number()), // When last suspension started
     // Moderation escalation flag (after 3+ reports from different users)
@@ -1734,6 +1738,9 @@ export default defineSchema({
     status: v.optional(v.union(v.literal('pending'), v.literal('sent'), v.literal('failed'))), // Message status
     deletedAt: v.optional(v.number()), // Soft delete
     expiresAt: v.optional(v.float64()), // For ephemeral/expiring messages
+    // System event metadata (for type='system' messages)
+    systemEventType: v.optional(v.union(v.literal('join'))), // Type of system event (extensible)
+    systemUserName: v.optional(v.string()), // User's display name for system events
     // @mention tagging support
     mentions: v.optional(v.array(v.object({
       userId: v.id('users'),           // Tagged user's ID

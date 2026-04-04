@@ -1882,6 +1882,10 @@ export const getReactionsForMessages = query({
   },
 });
 
+// Room creation rate limit: 3 rooms per 24 hours
+const MAX_ROOMS_PER_24H = 3;
+const RATE_LIMIT_WINDOW_MS = 24 * 60 * 60 * 1000; // 24 hours
+
 // Phase-2: Create a private room with optional password protection (costs 1 coin)
 export const createPrivateRoom = mutation({
   args: {
@@ -1903,10 +1907,27 @@ export const createPrivateRoom = mutation({
       throw new Error('Unauthorized: user not found');
     }
 
-    // Check if demo user (for coin bypass)
+    // Check if demo user (for coin bypass and rate limit bypass)
     const isDemoUser = isDemo === true && !!demoUserId;
 
-    // 2. Check wallet balance (skip for demo users)
+    // 2. RATE LIMIT: Check rooms created in last 24 hours (skip for demo users)
+    if (!isDemoUser) {
+      const now = Date.now();
+      const windowStart = now - RATE_LIMIT_WINDOW_MS;
+
+      // Query rooms created by this user in the last 24 hours
+      const recentRooms = await ctx.db
+        .query('chatRooms')
+        .withIndex('by_creator', (q) => q.eq('createdBy', createdBy))
+        .filter((q) => q.gte(q.field('createdAt'), windowStart))
+        .collect();
+
+      if (recentRooms.length >= MAX_ROOMS_PER_24H) {
+        throw new Error("You've reached your room creation limit (3 rooms per 24 hours). Try again later.");
+      }
+    }
+
+    // 3. Check wallet balance (skip for demo users)
     let currentCoins = 0;
     if (!isDemoUser) {
       const user = await ctx.db.get(createdBy);
@@ -3668,6 +3689,21 @@ export const submitChatRoomReport = mutation({
     // 6. ESCALATION: Update or create strike record for the reported user
     // Only apply escalation if we have a roomId context
     if (roomId) {
+      // Constants for escalation policy
+      const FOURTEEN_DAYS_MS = 14 * 24 * 60 * 60 * 1000;
+
+      // Escalation durations in minutes by stage (1-indexed for readability)
+      // Stage 1: 5min, Stage 2: 30min, Stage 3: 3hr, Stage 4: 6hr, Stage 5+: 12hr
+      const getEscalationMinutes = (stage: number): number => {
+        switch (stage) {
+          case 1: return 5;
+          case 2: return 30;
+          case 3: return 180;  // 3 hours
+          case 4: return 360;  // 6 hours
+          default: return 720; // 12 hours (stage 5+)
+        }
+      };
+
       // Look up existing strike record
       const existingStrike = await ctx.db
         .query('chatRoomUserStrikes')
@@ -3681,26 +3717,32 @@ export const submitChatRoomReport = mutation({
         );
 
         if (!alreadyReported) {
+          // 14-DAY RESET: Check if escalation stage should be reset
+          // If no new reports for 14 days, reset escalationStage to 0
+          const lastReport = existingStrike.lastReportAt ?? existingStrike.updatedAt;
+          const daysSinceLastReport = now - lastReport;
+          const shouldResetEscalation = daysSinceLastReport >= FOURTEEN_DAYS_MS;
+
+          // Calculate new escalation stage
+          const currentStage = shouldResetEscalation ? 0 : (existingStrike.escalationStage ?? existingStrike.totalReportCount);
+          const newEscalationStage = currentStage + 1;
+
           // New unique reporter - increment count and apply escalation
           const newReportCount = existingStrike.totalReportCount + 1;
           const newUniqueReporters = [...existingStrike.uniqueReporters, reporterId];
 
-          // Calculate suspension duration based on count
-          // 1st=5min, 2nd=30min, 3rd=3hr, 4th+=24hr
-          const suspensionMinutes =
-            newReportCount === 1 ? 5 :
-            newReportCount === 2 ? 30 :
-            newReportCount === 3 ? 180 : // 3 hours
-            1440; // 24 hours
-
+          // Calculate suspension duration based on escalation stage (not total count)
+          const suspensionMinutes = getEscalationMinutes(newEscalationStage);
           const suspendedUntil = now + (suspensionMinutes * 60 * 1000);
 
-          // Flag for moderation after 3+ unique reporters
-          const shouldFlagForModeration = newReportCount >= 3;
+          // Flag for moderation after 3+ escalation stage (not total reports)
+          const shouldFlagForModeration = newEscalationStage >= 3;
 
           await ctx.db.patch(existingStrike._id, {
             totalReportCount: newReportCount,
             uniqueReporters: newUniqueReporters,
+            escalationStage: newEscalationStage,
+            lastReportAt: now,
             suspensionCount: existingStrike.suspensionCount + 1,
             suspendedUntil,
             lastSuspendedAt: now,
@@ -3727,7 +3769,7 @@ export const submitChatRoomReport = mutation({
         // If already reported by this user, don't increment (idempotent)
       } else {
         // First report for this user in this room - create new strike record
-        // 1st report = 5 minute suspension
+        // Stage 1 = 5 minute suspension
         const suspendedUntil = now + (5 * 60 * 1000);
 
         await ctx.db.insert('chatRoomUserStrikes', {
@@ -3735,6 +3777,8 @@ export const submitChatRoomReport = mutation({
           roomId,
           totalReportCount: 1,
           uniqueReporters: [reporterId],
+          escalationStage: 1,
+          lastReportAt: now,
           suspensionCount: 1,
           suspendedUntil,
           lastSuspendedAt: now,
@@ -3763,7 +3807,7 @@ export const submitChatRoomReport = mutation({
 });
 
 // Check if a user is currently suspended from a chat room
-// Returns suspension status and remaining time
+// Returns suspension status, remaining time, and escalation info
 export const getUserSuspensionStatus = query({
   args: {
     authUserId: v.string(),
@@ -3776,6 +3820,7 @@ export const getUserSuspensionStatus = query({
       suspendedUntil: null as number | null,
       remainingMs: 0,
       totalReports: 0,
+      escalationStage: 0,
       moderationFlag: false,
     };
 
@@ -3808,6 +3853,7 @@ export const getUserSuspensionStatus = query({
       suspendedUntil: strike.suspendedUntil ?? null,
       remainingMs,
       totalReports: strike.totalReportCount,
+      escalationStage: strike.escalationStage ?? strike.totalReportCount,
       moderationFlag: strike.moderationFlag,
     };
   },
@@ -4216,11 +4262,14 @@ export const getChatRoomAvatarUrl = mutation({
 // ═══════════════════════════════════════════════════════════════════════════
 
 // Presence timing constants
-// Heartbeat: 12s, Online threshold: 35s (safe buffer for network jitter/app pauses)
-// This prevents flickering: user stays online if heartbeat is within 35s
-const PRESENCE_HEARTBEAT_INTERVAL_MS = 12 * 1000;     // 12 seconds between heartbeats
-const PRESENCE_ONLINE_THRESHOLD_MS = 35 * 1000;       // 35 seconds = still online (prevents flicker)
-const PRESENCE_RECENTLY_LEFT_MS = 10 * 60 * 1000;     // 10 minutes = recently left window
+// PRESENCE RULES:
+//   - User becomes ONLINE only when entering a room (not app open, not tab switch)
+//   - Online threshold: 2 minutes of inactivity → offline
+//   - Heartbeat every 15s keeps user online while active in Phase-2
+//   - Tab switching within Phase-2 does NOT mark offline (heartbeat continues)
+const PRESENCE_HEARTBEAT_INTERVAL_MS = 15 * 1000;     // 15 seconds between heartbeats
+const PRESENCE_ONLINE_THRESHOLD_MS = 2 * 60 * 1000;   // 2 minutes = still online (user requested)
+const PRESENCE_RECENTLY_LEFT_MS = 10 * 60 * 1000;     // 10 minutes = recently left window (for "last seen")
 
 /**
  * Update room-specific presence heartbeat.
@@ -4274,6 +4323,46 @@ export const heartbeatPresence = mutation({
         lastHeartbeatAt: now,
         joinedAt: now,
       });
+
+      // ─────────────────────────────────────────────────────────────────────────
+      // SYSTEM JOIN EVENT: Insert "X joined the room" message for group rooms
+      // Only for first presence (not reconnects), deduplicated by checking recent join messages
+      // ─────────────────────────────────────────────────────────────────────────
+
+      // Deduplication: Check if there's a recent join message for this user (within 10 minutes)
+      const TEN_MINUTES_AGO = now - (10 * 60 * 1000);
+      const recentMessages = await ctx.db
+        .query('chatRoomMessages')
+        .withIndex('by_room_created', (q) => q.eq('roomId', roomId).gte('createdAt', TEN_MINUTES_AGO))
+        .filter((q) =>
+          q.and(
+            q.eq(q.field('type'), 'system'),
+            q.eq(q.field('systemEventType'), 'join'),
+            q.eq(q.field('senderId'), userId)
+          )
+        )
+        .first();
+
+      // Only insert if no recent join message exists
+      if (!recentMessages) {
+        // Get user's chat room nickname
+        const chatRoomProfile = await ctx.db
+          .query('chatRoomProfiles')
+          .withIndex('by_userId', (q) => q.eq('userId', userId))
+          .first();
+        const nickname = chatRoomProfile?.nickname ?? 'Anonymous';
+
+        // Insert system join message
+        await ctx.db.insert('chatRoomMessages', {
+          roomId,
+          senderId: userId,
+          type: 'system',
+          systemEventType: 'join',
+          systemUserName: nickname,
+          text: `${nickname} joined the room`,
+          createdAt: now,
+        });
+      }
     }
 
     return { success: true };
