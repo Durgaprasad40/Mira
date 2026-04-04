@@ -21,6 +21,7 @@ import { INCOGNITO_COLORS } from '@/lib/constants';
 import { useChatRoomProfileStore } from '@/stores/chatRoomProfileStore';
 import { useAuthStore } from '@/stores/authStore';
 import type { Id } from '@/convex/_generated/dataModel';
+import ChatThemeSelector from './ChatThemeSelector';
 
 const C = INCOGNITO_COLORS;
 const BIO_MAX_LENGTH = 250;
@@ -83,6 +84,8 @@ export default function ProfilePopover({
 
   // Edit Profile modal state
   const [editModalVisible, setEditModalVisible] = useState(false);
+  // Theme selector modal state
+  const [themeModalVisible, setThemeModalVisible] = useState(false);
   const [editName, setEditName] = useState(username);
   const [editAvatar, setEditAvatar] = useState(avatar);
   // AVATAR-UPLOAD-FIX: Track if avatar was changed (to trigger upload on save)
@@ -365,6 +368,17 @@ export default function ProfilePopover({
               </TouchableOpacity>
             )}
 
+            {/* Theme selector */}
+            <TouchableOpacity
+              style={styles.menuItem}
+              activeOpacity={0.7}
+              onPress={() => setThemeModalVisible(true)}
+            >
+              <Ionicons name="color-palette-outline" size={18} color={C.text} />
+              <Text style={styles.menuLabel}>Theme</Text>
+              <Ionicons name="chevron-forward" size={16} color={C.textLight} />
+            </TouchableOpacity>
+
             {/* Leave Room button */}
             <TouchableOpacity
               style={[styles.menuItem, styles.leaveRoomItem]}
@@ -505,6 +519,12 @@ export default function ProfilePopover({
           </View>
         </KeyboardAvoidingView>
       </Modal>
+
+      {/* Theme Selector Modal */}
+      <ChatThemeSelector
+        visible={themeModalVisible}
+        onClose={() => setThemeModalVisible(false)}
+      />
     </>
   );
 }

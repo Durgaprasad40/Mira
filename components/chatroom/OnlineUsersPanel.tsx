@@ -156,13 +156,6 @@ export default function OnlineUsersPanel({
         // LIST-STABILITY-FIX: Sort alphabetically by display name, with stable tiebreaker
         online.sort(stableSortComparator);
 
-        if (__DEV__) {
-          console.log('[CHAT_LIST_SORT_OUTPUT] Online users sorted', {
-            count: online.length,
-            order: online.map((u) => ({ name: u.displayName, id: u.id.slice(-8) })),
-          });
-        }
-
         result.push({ title: 'Online', data: online });
       }
 

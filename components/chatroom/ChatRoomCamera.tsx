@@ -12,7 +12,7 @@ import { CameraView, CameraType, useCameraPermissions, useMicrophonePermissions 
 import { Image } from 'expo-image';
 import { Video, ResizeMode } from 'expo-av';
 import { Ionicons } from '@expo/vector-icons';
-import * as ImageManipulator from 'expo-image-manipulator';
+// SELFIE-MIRROR-FIX: ImageManipulator removed - no longer flipping front camera photos
 import { INCOGNITO_COLORS } from '@/lib/constants';
 
 const C = INCOGNITO_COLORS;
@@ -267,36 +267,13 @@ export default function ChatRoomCamera({
   const handleUse = useCallback(async () => {
     if (!capturedUri || !capturedKind) return;
 
-    // For front camera photos, flip horizontally to correct mirroring
-    if (capturedKind === 'photo' && capturedFacing === 'front') {
-      try {
-        setIsProcessing(true);
-        const corrected = await ImageManipulator.manipulateAsync(
-          capturedUri,
-          [{ flip: ImageManipulator.FlipType.Horizontal }],
-          { compress: 0.85, format: ImageManipulator.SaveFormat.JPEG }
-        );
-        // STABILITY FIX: C-7 - Guard callback after async operation
-        if (!mountedRef.current) return;
-        onMediaCaptured({ uri: corrected.uri, type: 'image' });
-      } catch (error) {
-        console.error('[ChatRoomCamera] Flip error, using original:', error);
-        // STABILITY FIX: C-7 - Guard callback after async error
-        if (!mountedRef.current) return;
-        onMediaCaptured({ uri: capturedUri, type: 'image' });
-      } finally {
-        // STABILITY FIX: C-7 - Guard setState in finally block
-        if (mountedRef.current) {
-          setIsProcessing(false);
-        }
-      }
-    } else {
-      onMediaCaptured({
-        uri: capturedUri,
-        type: capturedKind === 'photo' ? 'image' : 'video',
-      });
-    }
-  }, [capturedUri, capturedKind, capturedFacing, onMediaCaptured]);
+    // SELFIE-MIRROR-FIX: Modern expo-camera captures front camera photos in expected selfie orientation.
+    // No file flip needed - send raw image as-is for consistent preview/sent/received appearance.
+    onMediaCaptured({
+      uri: capturedUri,
+      type: capturedKind === 'photo' ? 'image' : 'video',
+    });
+  }, [capturedUri, capturedKind, onMediaCaptured]);
 
   const handleClose = useCallback(() => {
     if (isRecording) {
@@ -348,9 +325,8 @@ export default function ChatRoomCamera({
 
   // Preview captured media
   if (capturedUri && capturedKind) {
-    // SELFIE-VIDEO-FIX: Photos need preview transform (file is raw, we flip before send)
-    // Videos with mirror={true} are already correctly oriented in the file
-    const unmirrorPhotoPreview = capturedFacing === 'front' && capturedKind === 'photo';
+    // SELFIE-MIRROR-FIX: Modern expo-camera captures front camera photos in expected selfie orientation.
+    // No CSS transform or file flip needed - show and send raw image as-is.
     return (
       <Modal visible={visible} transparent={false} animationType="fade">
         <View style={[styles.container, { paddingTop: insets.top }]}>
@@ -358,7 +334,7 @@ export default function ChatRoomCamera({
             {capturedKind === 'photo' ? (
               <Image
                 source={{ uri: capturedUri }}
-                style={[styles.previewMedia, unmirrorPhotoPreview && styles.unmirror]}
+                style={styles.previewMedia}
                 contentFit="contain"
               />
             ) : (
@@ -545,9 +521,7 @@ const styles = StyleSheet.create({
   camera: {
     flex: 1,
   },
-  unmirror: {
-    transform: [{ scaleX: -1 }],
-  },
+  // SELFIE-MIRROR-FIX: unmirror style removed - no longer needed
   topBar: {
     position: 'absolute',
     left: 0,

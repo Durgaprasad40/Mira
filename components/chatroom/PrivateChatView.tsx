@@ -19,6 +19,7 @@ import {
   LayoutChangeEvent,
   NativeSyntheticEvent,
   NativeScrollEvent,
+  Alert,
 } from 'react-native';
 import { Image } from 'expo-image';
 import { Ionicons } from '@expo/vector-icons';
@@ -28,14 +29,20 @@ import { INCOGNITO_COLORS } from '@/lib/constants';
 import { GENDER_COLORS } from '@/lib/responsive';
 import { api } from '@/convex/_generated/api';
 import { useAuthStore } from '@/stores/authStore';
+import { useChatThemeColors } from '@/stores/chatThemeStore';
 import MediaMessage from '@/components/chat/MediaMessage';
 import ChatComposer from './ChatComposer';
 import AttachmentPopup from './AttachmentPopup';
 import DoodleCanvas from './DoodleCanvas';
 import VideoPlayerModal from './VideoPlayerModal';
 import ImagePreviewModal from './ImagePreviewModal';
-import SecureMediaViewer from './SecureMediaViewer';
-import { formatTime, shouldShowTimestamp } from '@/utils/chatTime';
+import DmAudioBubble from './DmAudioBubble';
+// DM-UX-FIX: SecureMediaViewer removed - DM uses tap-to-view
+import { shouldShowTimestamp } from '@/utils/chatTime';
+import { uploadMediaToConvex } from '@/lib/uploadUtils';
+import { useVoiceRecorder, VoiceRecorderResult } from '@/hooks/useVoiceRecorder';
+import { preloadVideos } from '@/lib/videoCache';
+import { Image as ExpoImage } from 'expo-image';
 import type { Id } from '@/convex/_generated/dataModel';
 
 const C = INCOGNITO_COLORS;
@@ -112,10 +119,8 @@ export default function PrivateChatView({
   // Auth
   const authUserId = useAuthStore((s) => s.userId);
 
-  // Secure media viewer state
-  const [secureMediaUri, setSecureMediaUri] = useState('');
-  const [secureMediaType, setSecureMediaType] = useState<'image' | 'video'>('image');
-  const [isHoldingSecureMedia, setIsHoldingSecureMedia] = useState(false);
+  // THEME: Get current chat theme colors
+  const themeColors = useChatThemeColors();
 
   // ==========================================================================
   // UNIFIED BOTTOM-ANCHOR SCROLL STRATEGY
@@ -155,7 +160,6 @@ export default function PrivateChatView({
 
   // Refs for scroll-related timeouts
   const scrollTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const secureMediaTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Threshold: how close to bottom counts as "at bottom" (in pixels)
   const NEAR_BOTTOM_THRESHOLD = 50;
@@ -172,6 +176,8 @@ export default function PrivateChatView({
   // DM-ID-FIX: Mutations for sending and marking read
   const sendDmMessage = useMutation(api.chatRooms.sendDmMessage);
   const markDmMessagesRead = useMutation(api.chatRooms.markDmMessagesRead);
+  // DM-MEDIA-FIX: Mutation for generating upload URL for media messages
+  const generateUploadUrl = useMutation(api.chatRooms.generateUploadUrl);
 
   // Mark messages as read when opening DM
   useEffect(() => {
@@ -339,10 +345,6 @@ export default function PrivateChatView({
         clearTimeout(scrollTimeoutRef.current);
         scrollTimeoutRef.current = null;
       }
-      if (secureMediaTimeoutRef.current) {
-        clearTimeout(secureMediaTimeoutRef.current);
-        secureMediaTimeoutRef.current = null;
-      }
     };
   }, []);
 
@@ -473,37 +475,57 @@ export default function PrivateChatView({
     }
   }, [inputText, threadId, authUserId, sendDmMessage, onSendComplete, scrollToLatest]);
 
-  // TODO: Implement media upload for DMs
+  // DM-MEDIA-FIX: Full media upload implementation for DMs
   const handleSendMedia = useCallback(
-    (uri: string, mediaType: 'image' | 'video') => {
-      if (__DEV__) {
-        console.log('[DM] Media upload not yet implemented', { uri, mediaType });
+    async (uri: string, mediaType: 'image' | 'video' | 'doodle' | 'audio') => {
+      if (!threadId || !authUserId) return;
+
+      try {
+        // Step 1: Upload media to Convex storage
+        const uploadHint = mediaType === 'video' ? 'video' : mediaType === 'audio' ? 'audio' : 'photo';
+        const storageId = await uploadMediaToConvex(
+          uri,
+          () => generateUploadUrl({}),
+          uploadHint
+        );
+
+        // Step 2: Send DM message with storage ID
+        // Backend will resolve storageId to mediaUrl
+        await sendDmMessage({
+          authUserId,
+          threadId,
+          type: mediaType,
+          mediaStorageId: storageId,
+        });
+
+        // Scroll to show the new message
+        scrollToLatest(true, true);
+
+        // Notify parent if needed (e.g., for ChatSheet keyboard handling)
+        onSendComplete?.();
+      } catch (error) {
+        if (__DEV__) console.error('[DM] Media send failed:', error);
       }
-      // For now, media upload is not implemented
-      // Would need to upload to storage first, then send message with storageId
     },
-    []
+    [threadId, authUserId, generateUploadUrl, sendDmMessage, scrollToLatest, onSendComplete]
   );
 
-  // Secure media hold handlers
-  const handleSecureMediaHoldStart = useCallback((mediaUrl: string, type: 'image' | 'video') => {
-    if (__DEV__) console.log('[SECURE] dm_media hold_start', { type });
-    setSecureMediaUri(mediaUrl);
-    setSecureMediaType(type);
-    setIsHoldingSecureMedia(true);
-  }, []);
+  // ─────────────────────────────────────────────────────────────────────────
+  // DM-AUDIO-FIX: Voice recording support for 1-on-1 DM
+  // ─────────────────────────────────────────────────────────────────────────
+  const handleVoiceRecordingComplete = useCallback(
+    async (result: VoiceRecorderResult) => {
+      if (!result.audioUri) return;
+      // Reuse existing handleSendMedia with 'audio' type
+      await handleSendMedia(result.audioUri, 'audio');
+    },
+    [handleSendMedia]
+  );
 
-  const handleSecureMediaHoldEnd = useCallback(() => {
-    if (__DEV__) console.log('[SECURE] dm_media hold_end');
-    setIsHoldingSecureMedia(false);
-    if (secureMediaTimeoutRef.current) {
-      clearTimeout(secureMediaTimeoutRef.current);
-    }
-    secureMediaTimeoutRef.current = setTimeout(() => {
-      setSecureMediaUri('');
-      secureMediaTimeoutRef.current = null;
-    }, 100);
-  }, []);
+  const { toggleRecording, isRecording, elapsedMs } = useVoiceRecorder({
+    onRecordingComplete: handleVoiceRecordingComplete,
+    onError: (msg) => Alert.alert('Recording Error', msg),
+  });
 
   // Enrich messages with showTimestamp
   type EnrichedMessage = DmMessage & { showTimestamp: boolean };
@@ -517,35 +539,118 @@ export default function PrivateChatView({
     });
   }, [messages]);
 
+  // MEDIA-INSTANT-FIX: Preload all media for instant open
+  useEffect(() => {
+    if (messages.length === 0) return;
+
+    // Collect media URLs from recent messages (last 15 for good coverage)
+    const recentMessages = messages.slice(-15);
+    const videoUrls: string[] = [];
+    const imageUrls: string[] = [];
+
+    for (const msg of recentMessages) {
+      const url = msg.mediaUrl;
+      if (!url || (!url.startsWith('http://') && !url.startsWith('https://'))) {
+        continue;
+      }
+
+      if (msg.type === 'video') {
+        videoUrls.push(url);
+      } else if (msg.type === 'image' || msg.type === 'doodle') {
+        imageUrls.push(url);
+      }
+      // Audio is handled by audioPlayerStore when played
+    }
+
+    // Preload videos to file system cache
+    if (videoUrls.length > 0) {
+      const uniqueUrls = [...new Set(videoUrls)];
+      if (__DEV__) console.log('[DM] Preloading', uniqueUrls.length, 'videos');
+      preloadVideos(uniqueUrls, 2);
+    }
+
+    // Prefetch images/doodles to expo-image cache
+    if (imageUrls.length > 0) {
+      const uniqueUrls = [...new Set(imageUrls)];
+      if (__DEV__) console.log('[DM] Prefetching', uniqueUrls.length, 'images');
+      ExpoImage.prefetch(uniqueUrls);
+    }
+  }, [messages]);
+
   const keyExtractor = useCallback((item: EnrichedMessage) => item.id, []);
+
+  // DM-UX-FIX: Handle tap-to-view for media (not hold-to-view)
+  const handleMediaTap = useCallback((mediaUrl: string, mediaType: 'image' | 'video' | 'doodle') => {
+    if (mediaType === 'video') {
+      setVideoPlayerUri(mediaUrl);
+    } else {
+      // Images and doodles open in image preview
+      setImagePreviewUri(mediaUrl);
+    }
+  }, []);
 
   const renderMessage = useCallback(
     ({ item }: { item: EnrichedMessage }) => {
       const isMe = item.isMe;
-      const isMedia = (item.type === 'image' || item.type === 'video') && item.mediaUrl;
-      const showTime = item.showTimestamp;
+      // DM-SECURE-FIX: Include doodle in media check
+      const isMedia = (item.type === 'image' || item.type === 'video' || item.type === 'doodle') && item.mediaUrl;
+      const isDoodle = item.type === 'doodle';
+      // AUDIO-UX-FIX: Check for audio message
+      const isAudio = item.type === 'audio' && item.mediaUrl;
 
+      // DM-SECURE-FIX: Photo/Video = blurred + tap-to-view (pass messageId + onPress)
+      // Doodle = not blurred, normal display (no messageId)
       const mediaProps = isMedia
         ? {
-            messageId: item.id,
+            // For photo/video: include messageId to enable blur, onPress for tap-to-view
+            // For doodle: no messageId (shows without blur)
+            ...(isDoodle ? {} : { messageId: item.id }),
             mediaUrl: item.mediaUrl!,
-            type: item.type as 'image' | 'video',
-            onHoldStart: () => handleSecureMediaHoldStart(item.mediaUrl!, item.type as 'image' | 'video'),
-            onHoldEnd: handleSecureMediaHoldEnd,
+            type: item.type as 'image' | 'video' | 'doodle',
+            onPress: () => handleMediaTap(item.mediaUrl!, item.type as 'image' | 'video' | 'doodle'),
           }
         : null;
 
+      // Determine bubble content
+      const renderBubbleContent = () => {
+        if (mediaProps) {
+          return <MediaMessage {...mediaProps} />;
+        }
+        if (isAudio) {
+          return (
+            <DmAudioBubble
+              messageId={item.id}
+              audioUrl={item.mediaUrl!}
+              isMe={isMe}
+              bubbleColor={isMe ? themeColors.bubbleMe : themeColors.bubbleOther}
+            />
+          );
+        }
+        return (
+          <Text
+            style={[
+              isMe ? styles.bubbleMeText : styles.bubbleOtherText,
+              { color: isMe ? themeColors.bubbleMeText : themeColors.bubbleOtherText },
+            ]}
+          >
+            {item.text}
+          </Text>
+        );
+      };
+
+      // DM-UX-FIX: No timestamps in 1-on-1 DM
+      // THEME: Apply dynamic bubble colors from theme
       if (isMe) {
         return (
           <View style={styles.rowMe}>
-            <View style={styles.bubbleMe}>
-              {mediaProps ? (
-                <MediaMessage {...mediaProps} />
-              ) : (
-                <Text style={styles.bubbleMeText}>{item.text}</Text>
-              )}
-              {showTime && <Text style={styles.timeMe}>{formatTime(item.createdAt)}</Text>}
-            </View>
+            {isAudio ? (
+              // Audio has its own bubble styling
+              renderBubbleContent()
+            ) : (
+              <View style={[styles.bubbleMe, { backgroundColor: themeColors.bubbleMe }]}>
+                {renderBubbleContent()}
+              </View>
+            )}
           </View>
         );
       }
@@ -555,29 +660,29 @@ export default function PrivateChatView({
           {dm.peerAvatar ? (
             <Image source={{ uri: dm.peerAvatar }} style={styles.avatar} />
           ) : (
-            <View style={styles.avatarPlaceholder}>
-              <Ionicons name="person" size={12} color={C.textLight} />
+            <View style={[styles.avatarPlaceholder, { backgroundColor: themeColors.surface }]}>
+              <Ionicons name="person" size={12} color={themeColors.textLight} />
             </View>
           )}
-          <View style={styles.bubbleOther}>
-            {mediaProps ? (
-              <MediaMessage {...mediaProps} />
-            ) : (
-              <Text style={styles.bubbleOtherText}>{item.text}</Text>
-            )}
-            {showTime && <Text style={styles.timeOther}>{formatTime(item.createdAt)}</Text>}
-          </View>
+          {isAudio ? (
+            // Audio has its own bubble styling
+            renderBubbleContent()
+          ) : (
+            <View style={[styles.bubbleOther, { backgroundColor: themeColors.bubbleOther }]}>
+              {renderBubbleContent()}
+            </View>
+          )}
         </View>
       );
     },
-    [dm.peerAvatar, handleSecureMediaHoldStart, handleSecureMediaHoldEnd]
+    [dm.peerAvatar, handleMediaTap, themeColors]
   );
 
   // Show loading state while messages are loading
   const isLoading = messagesResult === undefined && threadId;
 
   return (
-    <View style={styles.container}>
+    <View style={[styles.container, { backgroundColor: themeColors.dmBackground }]}>
       {/* [CHAT_SHEET_HEADER] Header row with avatar, name, and X button */}
       {/* When keyboard is open, sheet is full-screen - add safe area top padding
           to keep header content below status bar. */}
@@ -688,6 +793,9 @@ export default function PrivateChatView({
               onChangeText={setInputText}
               onSend={handleSend}
               onPlusPress={() => setAttachmentVisible(true)}
+              onMicPress={toggleRecording}
+              isRecording={isRecording}
+              elapsedMs={elapsedMs}
             />
           </View>
         </View>
@@ -741,6 +849,9 @@ export default function PrivateChatView({
               onChangeText={setInputText}
               onSend={handleSend}
               onPlusPress={() => setAttachmentVisible(true)}
+              onMicPress={toggleRecording}
+              isRecording={isRecording}
+              elapsedMs={elapsedMs}
             />
           </View>
         </KeyboardAvoidingView>
@@ -760,10 +871,11 @@ export default function PrivateChatView({
         />
 
         {/* Doodle canvas */}
+        {/* DM-UX-FIX: Send doodles as 'doodle' type (not 'image') so they render without blur */}
         <DoodleCanvas
           visible={doodleVisible}
           onClose={() => setDoodleVisible(false)}
-          onSend={(uri) => handleSendMedia(uri, 'image')}
+          onSend={(uri) => handleSendMedia(uri, 'doodle')}
         />
 
         {/* Video player */}
@@ -780,15 +892,7 @@ export default function PrivateChatView({
           onClose={() => setImagePreviewUri('')}
         />
 
-        {/* Secure media viewer */}
-        <SecureMediaViewer
-          visible={!!secureMediaUri}
-          mediaUri={secureMediaUri}
-          type={secureMediaType}
-          isHolding={isHoldingSecureMedia}
-          onClose={handleSecureMediaHoldEnd}
-          onHoldStart={() => setIsHoldingSecureMedia(true)}
-        />
+        {/* DM-UX-FIX: SecureMediaViewer removed - DM now uses tap-to-view with ImagePreviewModal/VideoPlayerModal */}
       </View>
     </View>
   );
@@ -797,7 +901,8 @@ export default function PrivateChatView({
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    backgroundColor: C.background,
+    // DM-VISUAL-FIX: Use purple-tinted background to distinguish DM from group chat
+    backgroundColor: C.dmBackground,
   },
   // Absolutely positioned container for modals - does NOT affect flex layout
   // This fixes the 80px gap that was caused by modals consuming space in the column layout
@@ -913,12 +1018,7 @@ const styles = StyleSheet.create({
     lineHeight: 20,
     color: C.text,
   },
-  timeOther: {
-    fontSize: 10,
-    color: C.textLight,
-    marginTop: 4,
-    alignSelf: 'flex-end',
-  },
+  // DM-UX-FIX: timeOther removed - no timestamps in 1-on-1 DM
   rowMe: {
     flexDirection: 'row',
     justifyContent: 'flex-end',
@@ -937,12 +1037,7 @@ const styles = StyleSheet.create({
     lineHeight: 20,
     color: C.text,
   },
-  timeMe: {
-    fontSize: 10,
-    color: C.textLight,
-    marginTop: 4,
-    alignSelf: 'flex-end',
-  },
+  // DM-UX-FIX: timeMe removed - no timestamps in 1-on-1 DM
   emptyContainer: {
     flex: 1,
     justifyContent: 'center',

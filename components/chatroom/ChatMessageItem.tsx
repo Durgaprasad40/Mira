@@ -1,4 +1,4 @@
-import React, { useCallback, useState, useRef, useEffect } from 'react';
+import React, { useCallback, useRef, useEffect } from 'react';
 import {
   View,
   Text,
@@ -12,12 +12,13 @@ import {
 } from 'react-native';
 import { Image } from 'expo-image';
 import { Ionicons } from '@expo/vector-icons';
-import { Audio } from 'expo-av';
 import * as Haptics from 'expo-haptics';
 import { INCOGNITO_COLORS } from '@/lib/constants';
 import { SPACING, CHAT_SIZES, CHAT_FONTS, SIZES, GENDER_COLORS } from '@/lib/responsive';
 import MediaMessage from '@/components/chat/MediaMessage';
 import ReactionChips, { ReactionGroup } from './ReactionChips';
+import { formatTime } from '@/utils/chatTime';
+import { useAudioPlayerStore } from '@/stores/audioPlayerStore';
 
 const C = INCOGNITO_COLORS;
 
@@ -78,10 +79,8 @@ interface ChatMessageItemProps {
   mediaUrl?: string;
   /** Audio URL for audio messages */
   audioUrl?: string;
-  /** Called when user starts holding media (opens viewer) - only for image/video */
-  onMediaHoldStart?: (messageId: string, mediaUrl: string, type: 'image' | 'video') => void;
-  /** Called when user releases hold (closes viewer) */
-  onMediaHoldEnd?: () => void;
+  /** TAP-TO-VIEW-FIX: Called when user taps media (opens viewer) - for image/video */
+  onMediaPress?: (messageId: string, mediaUrl: string, type: 'image' | 'video') => void;
   /** Whether to show the timestamp (for grouping). Defaults to true. */
   showTimestamp?: boolean;
   /** Whether to show avatar (for consecutive message grouping). Defaults to true. */
@@ -111,6 +110,7 @@ function ChatMessageItem({
   senderAge,
   senderGender,
   text,
+  timestamp,
   isMe = false,
   onLongPress,
   onAvatarPress,
@@ -119,8 +119,8 @@ function ChatMessageItem({
   messageType = 'text',
   mediaUrl,
   audioUrl,
-  onMediaHoldStart,
-  onMediaHoldEnd,
+  onMediaPress,
+  showTimestamp = true,
   showAvatar = true,
   replyTo,
   onReplyTap,
@@ -141,10 +141,12 @@ function ChatMessageItem({
   // Format display name with age: "Anonymous, 25" or just "Anonymous"
   const displayName = senderAge ? `${senderName}, ${senderAge}` : senderName;
 
-  // Audio playback state
-  const [isPlaying, setIsPlaying] = useState(false);
-  const [isLoading, setIsLoading] = useState(false);
-  const soundRef = useRef<Audio.Sound | null>(null);
+  // AUDIO-UX-FIX: Use shared audio player store for single-audio playback
+  const audioStore = useAudioPlayerStore();
+  const isThisAudioActive = audioStore.currentMessageId === messageId;
+  const isPlaying = isThisAudioActive && audioStore.isPlaying;
+  const isLoading = isThisAudioActive && audioStore.isLoading;
+  const audioProgress = isThisAudioActive ? audioStore.progress : 0;
 
   // Swipe-to-reply animation
   const swipeAnim = useRef(new Animated.Value(0)).current;
@@ -224,65 +226,18 @@ function ChatMessageItem({
     })
   ).current;
 
-  // Cleanup sound on unmount
-  useEffect(() => {
-    return () => {
-      if (soundRef.current) {
-        soundRef.current.unloadAsync().catch(() => {});
-      }
-    };
-  }, []);
-
-  // Handle audio play/pause
+  // AUDIO-UX-FIX: Handle audio play/pause via shared store
   const handleAudioPress = useCallback(async () => {
     if (!audioUrl) return;
+    await audioStore.toggle(messageId, audioUrl);
+  }, [audioUrl, messageId, audioStore]);
 
-    try {
-      if (isPlaying && soundRef.current) {
-        await soundRef.current.pauseAsync();
-        setIsPlaying(false);
-        return;
-      }
-
-      if (soundRef.current) {
-        await soundRef.current.playAsync();
-        setIsPlaying(true);
-        return;
-      }
-
-      setIsLoading(true);
-      await Audio.setAudioModeAsync({
-        allowsRecordingIOS: false,
-        playsInSilentModeIOS: true,
-      });
-      const { sound } = await Audio.Sound.createAsync(
-        { uri: audioUrl },
-        { shouldPlay: true },
-        (status) => {
-          if (status.isLoaded && status.didJustFinish) {
-            setIsPlaying(false);
-          }
-        }
-      );
-      soundRef.current = sound;
-      setIsPlaying(true);
-      setIsLoading(false);
-    } catch (error) {
-      console.error('[AudioPlayback] Error:', error);
-      setIsLoading(false);
-      setIsPlaying(false);
-    }
-  }, [audioUrl, isPlaying]);
-
-  const handleHoldStart = useCallback(() => {
+  // TAP-TO-VIEW-FIX: Handle media tap to open viewer (replaces hold-to-view)
+  const handleMediaTap = useCallback(() => {
     if (isSecureMedia && mediaUrl) {
-      onMediaHoldStart?.(messageId, mediaUrl, messageType as 'image' | 'video');
+      onMediaPress?.(messageId, mediaUrl, messageType as 'image' | 'video');
     }
-  }, [messageId, mediaUrl, messageType, isSecureMedia, onMediaHoldStart]);
-
-  const handleHoldEnd = useCallback(() => {
-    onMediaHoldEnd?.();
-  }, [onMediaHoldEnd]);
+  }, [messageId, mediaUrl, messageType, isSecureMedia, onMediaPress]);
 
   const handleLongPress = useCallback((event: GestureResponderEvent) => {
     // P2-014: Haptic feedback on long press for tactile confirmation
@@ -418,6 +373,7 @@ function ChatMessageItem({
 
           {/* Content: Bubble with name inside for others */}
           {/* REPLY-INTEGRATED: Single unified bubble with embedded reply preview */}
+          {/* REACTION-FIX: Wrap content in relative container for reaction positioning */}
           <View style={[styles.content, isMe && styles.contentMe]}>
         {isMedia ? (
           <View style={[styles.mediaWrapper, replyTo && styles.mediaWrapperWithReply]}>
@@ -469,13 +425,19 @@ function ChatMessageItem({
               </TouchableOpacity>
             )}
             <View style={styles.mediaContainer}>
+              {/* TAP-TO-VIEW-FIX: Use onPress for tap-to-view instead of onHoldStart/End */}
               <MediaMessage
                 messageId={messageId}
                 mediaUrl={mediaUrl!}
                 type={messageType as 'image' | 'video' | 'doodle'}
-                onHoldStart={isSecureMedia ? handleHoldStart : undefined}
-                onHoldEnd={isSecureMedia ? handleHoldEnd : undefined}
+                onPress={isSecureMedia ? handleMediaTap : undefined}
               />
+              {/* GROUP-TIMESTAMP: Timestamp overlay on media, bottom-right */}
+              {showTimestamp && timestamp && (
+                <View style={styles.mediaTimestampOverlay}>
+                  <Text style={styles.mediaTimestampText}>{formatTime(timestamp)}</Text>
+                </View>
+              )}
             </View>
           </View>
         ) : isAudio ? (
@@ -532,10 +494,14 @@ function ChatMessageItem({
                 <Text style={styles.senderName}>{displayName}</Text>
               </TouchableOpacity>
             )}
-            <TouchableOpacity onPress={handleAudioPress} activeOpacity={0.7}>
+            {/* AUDIO-UX-FIX: Improved audio row with progress visualization */}
+            <TouchableOpacity onPress={handleAudioPress} activeOpacity={0.7} style={styles.audioTouchable}>
               <View style={styles.audioRow}>
+                {/* Play/Pause button */}
                 {isLoading ? (
-                  <ActivityIndicator size="small" color={isMe ? '#FFFFFF' : '#6D28D9'} />
+                  <View style={[styles.playButton, isMe && styles.playButtonMe]}>
+                    <ActivityIndicator size="small" color={isMe ? '#6D28D9' : '#FFFFFF'} />
+                  </View>
                 ) : (
                   <View style={[styles.playButton, isMe && styles.playButtonMe]}>
                     <Ionicons
@@ -545,26 +511,49 @@ function ChatMessageItem({
                     />
                   </View>
                 )}
-                <View style={styles.audioWaveform}>
-                  {[5, 8, 12, 7, 14, 10, 8, 5].map((h, i) => (
-                    <View
-                      key={i}
-                      style={[
-                        styles.waveformBar,
-                        { height: h },
-                        isMe ? styles.waveformBarMe : styles.waveformBarOther,
-                        isPlaying && styles.waveformBarPlaying,
-                      ]}
-                    />
-                  ))}
+                {/* Waveform with progress overlay */}
+                <View style={styles.audioWaveformContainer}>
+                  {/* Progress underlay - shows played portion */}
+                  <View style={[styles.audioProgressTrack, { width: `${audioProgress * 100}%` }]}>
+                    <View style={[styles.audioProgressFill, isMe && styles.audioProgressFillMe]} />
+                  </View>
+                  {/* Waveform bars */}
+                  <View style={styles.audioWaveform}>
+                    {[4, 8, 12, 6, 14, 8, 16, 10, 12, 7, 14, 9, 11, 7, 10, 5, 8, 12].map((h, i) => {
+                      // Calculate if this bar is in the "played" portion
+                      const barProgress = (i + 1) / 18;
+                      const isPlayed = audioProgress >= barProgress;
+                      return (
+                        <View
+                          key={i}
+                          style={[
+                            styles.waveformBar,
+                            { height: h },
+                            isMe
+                              ? (isPlayed ? styles.waveformBarMePlayed : styles.waveformBarMe)
+                              : (isPlayed ? styles.waveformBarOtherPlayed : styles.waveformBarOther),
+                          ]}
+                        />
+                      );
+                    })}
+                  </View>
                 </View>
-                <Ionicons
-                  name="mic"
-                  size={12}
-                  color={isMe ? 'rgba(255,255,255,0.6)' : C.textLight}
-                />
+                {/* Mic badge at far right */}
+                <View style={[styles.micBadge, isMe && styles.micBadgeMe]}>
+                  <Ionicons
+                    name="mic"
+                    size={10}
+                    color={isMe ? 'rgba(255,255,255,0.8)' : '#6D28D9'}
+                  />
+                </View>
               </View>
             </TouchableOpacity>
+            {/* Timestamp below audio row */}
+            {showTimestamp && timestamp && (
+              <Text style={[styles.audioTimestamp, isMe && styles.audioTimestampMe]}>
+                {formatTime(timestamp)}
+              </Text>
+            )}
           </View>
         ) : (
           /* REPLY-INTEGRATED: Single bubble with embedded reply preview for text messages */
@@ -622,21 +611,31 @@ function ChatMessageItem({
                 <Text style={styles.senderName}>{displayName}</Text>
               </TouchableOpacity>
             )}
-            {/* Actual message text at BOTTOM of bubble */}
-            {renderTextWithMentions()}
+            {/* GROUP-TIMESTAMP-FIX: Row layout for text + timestamp inline */}
+            <View style={styles.textTimestampRow}>
+              <View style={styles.textWrapper}>
+                {renderTextWithMentions()}
+              </View>
+              {showTimestamp && timestamp && (
+                <Text style={[styles.timestampInline, isMe && styles.timestampInlineMe]}>
+                  {formatTime(timestamp)}
+                </Text>
+              )}
+            </View>
           </View>
         )}
+          {/* REACTION-FIX: Render reaction chips attached to message bubble */}
+          {reactions.length > 0 && onReactionTap && (
+            <View style={[styles.reactionWrapper, isMe && styles.reactionWrapperMe]}>
+              <ReactionChips
+                reactions={reactions}
+                onReactionTap={onReactionTap}
+                isMe={isMe}
+              />
+            </View>
+          )}
           </View>
         </TouchableOpacity>
-
-        {/* P0-FIX: Render reaction chips below message */}
-        {reactions.length > 0 && onReactionTap && (
-          <ReactionChips
-            reactions={reactions}
-            onReactionTap={onReactionTap}
-            isMe={isMe}
-          />
-        )}
       </Animated.View>
     </View>
   );
@@ -712,6 +711,17 @@ const styles = StyleSheet.create({
   contentMe: {
     alignItems: 'flex-end',
   },
+  // REACTION-FIX: Position reactions attached to bubble edge
+  reactionWrapper: {
+    marginTop: -6, // Overlap with bubble slightly
+    marginLeft: 8, // Offset from bubble edge
+    alignSelf: 'flex-start',
+  },
+  reactionWrapperMe: {
+    marginRight: 8,
+    marginLeft: 0,
+    alignSelf: 'flex-end',
+  },
   senderName: {
     // P0-002 FIX: Responsive font size for sender name
     fontSize: CHAT_FONTS.senderName,
@@ -765,45 +775,108 @@ const styles = StyleSheet.create({
     borderRadius: 12,
     overflow: 'hidden',
   },
+  // AUDIO-UX-FIX: Wider audio bubble with proper layout
   audioBubble: {
-    minWidth: 160,
+    minWidth: 220,
+    maxWidth: 280,
+    paddingVertical: SPACING.sm,
+    paddingHorizontal: SPACING.md,
+  },
+  // AUDIO-COMPACT-FIX: Remove flex:1 which was causing vertical expansion
+  audioTouchable: {
+    // No flex - let it size to content
   },
   audioRow: {
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 8,
+    gap: 10,
   },
   playButton: {
-    width: 30,
-    height: 30,
-    borderRadius: 15,
+    width: 34,
+    height: 34,
+    borderRadius: 17,
     backgroundColor: '#6D28D9',
     alignItems: 'center',
     justifyContent: 'center',
+    flexShrink: 0,
   },
   playButtonMe: {
     backgroundColor: '#FFFFFF',
   },
+  // AUDIO-UX-FIX: Container for waveform with progress overlay
+  audioWaveformContainer: {
+    flex: 1,
+    height: 28,
+    position: 'relative',
+    justifyContent: 'center',
+  },
+  audioProgressTrack: {
+    position: 'absolute',
+    left: 0,
+    top: 0,
+    bottom: 0,
+    overflow: 'hidden',
+  },
+  audioProgressFill: {
+    position: 'absolute',
+    left: 0,
+    top: 0,
+    bottom: 0,
+    width: 1000, // Large enough to cover
+    backgroundColor: 'rgba(109, 40, 217, 0.1)',
+  },
+  audioProgressFillMe: {
+    backgroundColor: 'rgba(255, 255, 255, 0.1)',
+  },
+  // AUDIO-UX-FIX: Waveform spans full width
   audioWaveform: {
     flex: 1,
     flexDirection: 'row',
     alignItems: 'center',
-    gap: 2,
-    height: 22,
+    justifyContent: 'space-between',
+    height: 28,
+    paddingHorizontal: 2,
   },
   waveformBar: {
     width: 3,
     borderRadius: 1.5,
-    backgroundColor: C.textLight,
   },
+  // Unplayed bars - subtle
   waveformBarMe: {
-    backgroundColor: 'rgba(255,255,255,0.5)',
+    backgroundColor: 'rgba(255, 255, 255, 0.35)',
   },
   waveformBarOther: {
-    backgroundColor: 'rgba(255,255,255,0.3)',
+    backgroundColor: 'rgba(109, 40, 217, 0.35)',
   },
-  waveformBarPlaying: {
+  // Played bars - vivid (progress indicator)
+  waveformBarMePlayed: {
+    backgroundColor: 'rgba(255, 255, 255, 0.9)',
+  },
+  waveformBarOtherPlayed: {
     backgroundColor: '#6D28D9',
+  },
+  // AUDIO-UX-FIX: Mic badge at far right
+  micBadge: {
+    width: 24,
+    height: 24,
+    borderRadius: 12,
+    backgroundColor: 'rgba(109, 40, 217, 0.15)',
+    alignItems: 'center',
+    justifyContent: 'center',
+    flexShrink: 0,
+  },
+  micBadgeMe: {
+    backgroundColor: 'rgba(255, 255, 255, 0.2)',
+  },
+  // AUDIO-UX-FIX: Timestamp below audio row
+  audioTimestamp: {
+    fontSize: 10,
+    color: 'rgba(158, 158, 158, 0.7)',
+    marginTop: 4,
+    alignSelf: 'flex-end',
+  },
+  audioTimestampMe: {
+    color: 'rgba(255, 255, 255, 0.5)',
   },
   // REPLY-INTEGRATED: Media wrapper for replies to media messages
   mediaWrapper: {
@@ -875,5 +948,43 @@ const styles = StyleSheet.create({
   replyEmbeddedTextDeleted: {
     fontStyle: 'italic',
     color: '#6B7280',
+  },
+  // GROUP-TIMESTAMP-FIX: Row layout for text + timestamp inline
+  textTimestampRow: {
+    flexDirection: 'row',
+    alignItems: 'flex-end',
+    flexWrap: 'wrap',
+    gap: 6,
+  },
+  textWrapper: {
+    flexShrink: 1,
+    flexGrow: 1,
+  },
+  // GROUP-TIMESTAMP: Inline timestamp styles (bottom-right, compact)
+  timestampInline: {
+    fontSize: 10,
+    color: 'rgba(158, 158, 158, 0.7)', // Subtle gray
+    marginLeft: 4,
+    letterSpacing: 0.1,
+    alignSelf: 'flex-end',
+    paddingBottom: 1,
+  },
+  timestampInlineMe: {
+    color: 'rgba(255, 255, 255, 0.5)', // Subtle white for sent bubbles
+  },
+  // GROUP-TIMESTAMP: Media timestamp overlay (bottom-right corner)
+  mediaTimestampOverlay: {
+    position: 'absolute',
+    bottom: 6,
+    right: 6,
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+  },
+  mediaTimestampText: {
+    fontSize: 9,
+    color: 'rgba(255, 255, 255, 0.9)',
+    letterSpacing: 0.2,
   },
 });

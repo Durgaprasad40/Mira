@@ -6,7 +6,6 @@ import {
   StyleSheet,
 } from 'react-native';
 import { INCOGNITO_COLORS } from '@/lib/constants';
-import { CHAT_SIZES, CHAT_FONTS, SPACING, SIZES } from '@/lib/responsive';
 
 const C = INCOGNITO_COLORS;
 
@@ -75,49 +74,50 @@ function ReactionChips({
 // P0-003 FIX: Wrap with React.memo to prevent unnecessary re-renders when parent re-renders
 export default memo(ReactionChips);
 
-// P0-002 FIX: Calculate marginLeft dynamically based on avatar size + gap
-// This ensures proper alignment across devices regardless of avatar scaling
-const REACTION_MARGIN_LEFT = CHAT_SIZES.messageAvatar + SPACING.sm;
-
+// REACTION-FIX: Compact badge-like styling
 const styles = StyleSheet.create({
   container: {
     flexDirection: 'row',
     flexWrap: 'wrap',
-    gap: SPACING.xs,
-    marginTop: SPACING.xs,
-    // P0-002 FIX: Dynamic margin based on avatar size instead of hardcoded 42
-    marginLeft: REACTION_MARGIN_LEFT,
+    gap: 4,
   },
   containerMe: {
-    marginLeft: 0,
-    marginRight: 0,
     justifyContent: 'flex-end',
   },
   chip: {
     flexDirection: 'row',
     alignItems: 'center',
-    backgroundColor: 'rgba(255,255,255,0.08)',
-    paddingVertical: SPACING.xs,
-    paddingHorizontal: SPACING.sm,
-    borderRadius: SIZES.radius.md,
-    gap: SPACING.xs,
+    // REACTION-FIX: Compact badge styling with shadow for depth
+    backgroundColor: '#1E1E2E',
+    paddingVertical: 4,
+    paddingHorizontal: 8,
+    borderRadius: 12,
+    gap: 3,
+    // Subtle shadow for floating effect
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.2,
+    shadowRadius: 2,
+    elevation: 2,
+    borderWidth: 1,
+    borderColor: 'rgba(255, 255, 255, 0.1)',
   },
   chipMe: {
-    backgroundColor: 'rgba(109, 40, 217, 0.2)',
+    backgroundColor: '#2D1B4E',
+    borderColor: 'rgba(109, 40, 217, 0.3)',
   },
   chipUserReacted: {
-    backgroundColor: 'rgba(109, 40, 217, 0.3)',
+    backgroundColor: 'rgba(109, 40, 217, 0.4)',
     borderWidth: 1,
-    borderColor: 'rgba(109, 40, 217, 0.5)',
+    borderColor: '#6D28D9',
   },
   emoji: {
-    // P0-002 FIX: Responsive emoji size for chips
-    fontSize: CHAT_SIZES.emojiChipSize,
+    // Compact emoji size
+    fontSize: 14,
   },
   count: {
-    // P0-002 FIX: Responsive font size
-    fontSize: CHAT_FONTS.reactionCount,
-    fontWeight: '600',
+    fontSize: 11,
+    fontWeight: '700',
     color: C.textLight,
   },
   countUserReacted: {
