@@ -36,6 +36,7 @@ import * as Sentry from '@sentry/react-native';
 import * as Haptics from 'expo-haptics';
 import { setCurrentFeature, SENTRY_FEATURES } from '@/lib/sentry';
 import ChatRoomIdentitySetup from '@/components/chatroom/ChatRoomIdentitySetup';
+import PasswordEntryModal from '@/components/chatroom/PasswordEntryModal';
 
 const C = INCOGNITO_COLORS;
 
@@ -137,6 +138,10 @@ interface ChatRoom {
   iconUrl?: string;   // Remote image URL (takes priority over iconKey)
   // Private room flag for compact rendering
   isPrivate?: boolean;
+  // LOCKED-ROOM-FIX: Password protection flags
+  hasPassword?: boolean;  // Room requires password to join
+  isMember?: boolean;     // Current user is already a member (can skip password)
+  wasAuthorized?: boolean; // RE-ENTRY-FIX: User was previously authorized (can rejoin without password)
 }
 
 export default function ChatRoomsScreen() {
@@ -152,6 +157,12 @@ export default function ChatRoomsScreen() {
   const [newRoomName, setNewRoomName] = useState('');
   const [newRoomPassword, setNewRoomPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
+
+  // LOCKED-ROOM-FIX: Password entry modal state
+  const [passwordModalRoom, setPasswordModalRoom] = useState<{
+    id: string;
+    name: string;
+  } | null>(null);
 
   // Navigation readiness check - prevent "navigate before mounting Root Layout" warning
   const rootNavState = useRootNavigationState();
@@ -423,6 +434,7 @@ export default function ChatRoomsScreen() {
   // Filter private rooms into ChatRoom format
   // ISSUE 2 FIX: Mark as private so renderRoom skips message preview
   // LIVE PRESENCE: Use activeUserCount for display
+  // LOCKED-ROOM-FIX: Include hasPassword and isMember for password validation
   const privateRooms: ChatRoom[] = useMemo(() => {
     if (!myPrivateRooms) return [];
     return myPrivateRooms.map((r) => ({
@@ -433,6 +445,9 @@ export default function ChatRoomsScreen() {
       activeUserCount: r.activeUserCount ?? 0, // LIVE: Real-time presence count
       iconKey: r.slug,
       isPrivate: true, // Flag for compact rendering
+      hasPassword: r.hasPassword ?? false, // LOCKED-ROOM-FIX
+      isMember: r.isMember ?? false, // LOCKED-ROOM-FIX
+      wasAuthorized: r.wasAuthorized ?? false, // RE-ENTRY-FIX
     }));
   }, [myPrivateRooms, userId]);
 
@@ -515,12 +530,6 @@ export default function ChatRoomsScreen() {
         return;
       }
 
-      // NAV-RACE FIX: Set synchronous lock before navigation
-      isNavigatingToRoomRef.current = true;
-
-      // Mark user navigated to cancel any pending preferred room redirect
-      userNavigatedRef.current = true;
-
       // ISSUE B: Find room to get name and private status for instant render
       // Check in rooms (general/language) first, then privateRooms
       const foundRoom = rooms.find((r) => r.id === roomId);
@@ -528,6 +537,21 @@ export default function ChatRoomsScreen() {
       const roomName = foundRoom?.name ?? foundPrivateRoom?.name ?? '';
       // Private rooms are in privateRooms array (or from myPrivateRooms query which has joinCode)
       const isPrivate = !!foundPrivateRoom ? '1' : '0';
+
+      // LOCKED-ROOM-FIX: Check if room requires password and user is not already a member
+      // RE-ENTRY-FIX: Also skip password if user was previously authorized
+      // If password required and not a member AND not previously authorized, show password modal
+      if (foundPrivateRoom?.hasPassword && !foundPrivateRoom?.isMember && !foundPrivateRoom?.wasAuthorized) {
+        if (__DEV__) console.log('[TAP] locked room - showing password modal', { roomId, roomName });
+        setPasswordModalRoom({ id: roomId, name: roomName });
+        return; // Don't navigate yet - wait for password validation
+      }
+
+      // NAV-RACE FIX: Set synchronous lock before navigation
+      isNavigatingToRoomRef.current = true;
+
+      // Mark user navigated to cancel any pending preferred room redirect
+      userNavigatedRef.current = true;
 
       // Navigate FIRST (instant) with route params for instant render
       router.push({
@@ -643,6 +667,44 @@ export default function ChatRoomsScreen() {
       }
     }
   }, [newRoomName, newRoomPassword, isCreating, createPrivateRoomMut, router]);
+
+  // LOCKED-ROOM-FIX: Handle successful password entry
+  const handlePasswordSuccess = useCallback(() => {
+    if (!passwordModalRoom) return;
+
+    const roomId = passwordModalRoom.id;
+    const roomName = passwordModalRoom.name;
+
+    // Close modal
+    setPasswordModalRoom(null);
+
+    // NAV-RACE FIX: Set synchronous lock before navigation
+    isNavigatingToRoomRef.current = true;
+
+    // Mark user navigated to cancel any pending preferred room redirect
+    userNavigatedRef.current = true;
+
+    // Navigate to room (password already validated, user is now a member)
+    router.push({
+      pathname: `/(main)/(private)/(tabs)/chat-rooms/${roomId}`,
+      params: { roomName, isPrivate: '1' },
+    } as any);
+
+    if (__DEV__) console.log('[NAV] password success - navigating to room', { roomId, roomName });
+
+    // Mark room as visited
+    markRoomVisited(roomId);
+
+    // Reset navigation lock after settle delay
+    setTimeout(() => {
+      isNavigatingToRoomRef.current = false;
+    }, NAV_SETTLE_DELAY_MS);
+  }, [passwordModalRoom, router, markRoomVisited]);
+
+  // LOCKED-ROOM-FIX: Handle password modal cancel
+  const handlePasswordCancel = useCallback(() => {
+    setPasswordModalRoom(null);
+  }, []);
 
   // Room Card component with simple opacity press feedback
   const RoomCard = useCallback(
@@ -916,6 +978,16 @@ export default function ChatRoomsScreen() {
           <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={C.primary} />
         }
         showsVerticalScrollIndicator={false}
+      />
+
+      {/* LOCKED-ROOM-FIX: Password entry modal for locked rooms */}
+      <PasswordEntryModal
+        visible={!!passwordModalRoom}
+        roomId={passwordModalRoom?.id ?? ''}
+        roomName={passwordModalRoom?.name ?? ''}
+        authUserId={userId ?? ''}
+        onSuccess={handlePasswordSuccess}
+        onCancel={handlePasswordCancel}
       />
     </View>
   );

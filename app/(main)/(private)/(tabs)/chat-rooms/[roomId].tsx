@@ -34,6 +34,8 @@ import { useAuthStore } from '@/stores/authStore';
 import { INCOGNITO_COLORS } from '@/lib/constants';
 // P2-001/002: Import responsive utilities
 import { CHAT_FONTS, SPACING, SIZES } from '@/lib/responsive';
+// THEME: Import chat theme store
+import { useChatThemeColors } from '@/stores/chatThemeStore';
 import {
   DEMO_CHAT_ROOMS,
   getDemoMessagesForRoom,
@@ -57,7 +59,7 @@ import OnlineUsersPanel from '@/components/chatroom/OnlineUsersPanel';
 import MessageActionsSheet from '@/components/chatroom/MessageActionsSheet';
 import { ReactionEmoji } from '@/components/chatroom/ReactionBar';
 import ReactionChips, { ReactionGroup } from '@/components/chatroom/ReactionChips';
-import CoinFeedback from '@/components/chatroom/CoinFeedback';
+// COIN-FLASH-FIX: CoinFeedback import removed - was causing yellow flash during send
 import UserProfilePopup from '@/components/chatroom/UserProfilePopup';
 import ViewProfileModal from '@/components/chatroom/ViewProfileModal';
 import ReportUserModal, { ReportReason } from '@/components/chatroom/ReportUserModal';
@@ -79,8 +81,11 @@ import { ensureStableFile, uploadMediaToConvex } from '@/lib/uploadUtils';
 import * as Sentry from '@sentry/react-native';
 import { setCurrentFeature, SENTRY_FEATURES } from '@/lib/sentry';
 import { preloadVideos } from '@/lib/videoCache';
+import { Image as ExpoImage } from 'expo-image';
 // CACHE-BUST-FIX: Import avatar utility for cache-busted URLs
 import { buildCacheBustedAvatarUrl } from '@/lib/avatarUtils';
+// GROUP-TIMESTAMP: Import timestamp utility
+import { shouldShowTimestamp } from '@/utils/chatTime';
 
 const C = INCOGNITO_COLORS;
 const EMPTY_MESSAGES: DemoChatMessage[] = [];
@@ -144,15 +149,17 @@ function formatDateLabel(timestamp: number): string {
 
 // List item types for FlatList
 // AVATAR-STABILITY: showAvatar is pre-computed during list building for determinism
+// GROUP-TIMESTAMP: showTimestamp is pre-computed for time grouping
 type ListItem =
   | { type: 'date'; id: string; label: string }
-  | { type: 'message'; id: string; message: DemoChatMessage; showAvatar: boolean };
+  | { type: 'message'; id: string; message: DemoChatMessage; showAvatar: boolean; showTimestamp: boolean };
 
 // Build list items with date separators (normal order, NOT reversed)
 // P1 CR-006: Use index in date separator ID to avoid key collisions
 // AVATAR-STABILITY: Pre-compute showAvatar for each message based on grouping rule:
 // Show avatar on the FIRST message of a consecutive group (visually at top in inverted list)
 // In chronological order: show avatar when PREVIOUS message is from different sender OR it's the first message
+// GROUP-TIMESTAMP: Pre-compute showTimestamp using shouldShowTimestamp utility
 function buildListItems(messages: DemoChatMessage[]): ListItem[] {
   const items: ListItem[] = [];
   let lastDateLabel = '';
@@ -174,20 +181,10 @@ function buildListItems(messages: DemoChatMessage[]): ListItem[] {
     const isFirstInGroup = !prevMsg || prevMsg.senderId !== msg.senderId;
     const showAvatar = isFirstInGroup;
 
-    // Only log in DEV to avoid spam
-    if (__DEV__ && i < 5) {
-      console.log('[CHAT_AVATAR_GROUPING]', {
-        index: i,
-        messageId: msg.id.slice(-8),
-        senderId: msg.senderId.slice(-8),
-        isFirstInGroup,
-        showAvatar,
-        hasPrevMsg: !!prevMsg,
-        prevSenderId: prevMsg?.senderId?.slice(-8) ?? 'none',
-      });
-    }
+    // GROUP-TIMESTAMP: Compute showTimestamp for group chat (show every 5+ minutes or day change)
+    const showTimestamp = shouldShowTimestamp(msg.createdAt, prevMsg?.createdAt);
 
-    items.push({ type: 'message', id: msg.id, message: msg, showAvatar });
+    items.push({ type: 'message', id: msg.id, message: msg, showAvatar, showTimestamp });
   }
 
   return items;
@@ -245,6 +242,9 @@ export default function ChatRoomScreen() {
   // AUTH & SESSION
   // ─────────────────────────────────────────────────────────────────────────
   const authUserId = useAuthStore((s) => s.userId);
+
+  // THEME: Get current chat theme colors
+  const themeColors = useChatThemeColors();
   const enterRoom = useChatRoomSessionStore((s) => s.enterRoom);
   const exitRoom = useChatRoomSessionStore((s) => s.exitRoom);
   const incrementCoins = useChatRoomSessionStore((s) => s.incrementCoins);
@@ -838,30 +838,56 @@ export default function ChatRoomScreen() {
   }, [convexMessagesResult]);
 
   // ─────────────────────────────────────────────────────────────────────────
-  // VIDEO PRELOADING: Cache videos from visible messages for instant playback
-  // This ensures hold-to-view feels immediate for already-visible videos
+  // MEDIA PRELOADING: Cache all media from visible messages for instant open
+  // Handles videos, images, doodles, and audio for premium feel
   // ─────────────────────────────────────────────────────────────────────────
   useEffect(() => {
     if (!messages || messages.length === 0) return;
 
-    // Extract video URLs from recent messages (last 10 for performance)
+    // Extract media URLs from recent messages (last 15 for good coverage)
     const videoUrls: string[] = [];
-    const recentMessages = messages.slice(-10);
+    const imageUrls: string[] = [];
+    const audioUrls: string[] = [];
+    const recentMessages = messages.slice(-15);
 
     for (const msg of recentMessages) {
-      if (msg.type === 'video' && msg.mediaUrl) {
-        const url = msg.mediaUrl;
-        if (url.startsWith('http://') || url.startsWith('https://')) {
+      const url = msg.mediaUrl || msg.audioUrl;
+      if (!url || (!url.startsWith('http://') && !url.startsWith('https://'))) {
+        continue;
+      }
+
+      switch (msg.type) {
+        case 'video':
           videoUrls.push(url);
-        }
+          break;
+        case 'image':
+        case 'doodle':
+          imageUrls.push(url);
+          break;
+        case 'audio':
+          audioUrls.push(url);
+          break;
       }
     }
 
-    // Preload unique video URLs (non-blocking, max 2 concurrent)
+    // Preload videos (non-blocking, max 2 concurrent)
     if (videoUrls.length > 0) {
       const uniqueUrls = [...new Set(videoUrls)];
       if (__DEV__) console.log('[ChatRoom] Preloading', uniqueUrls.length, 'videos');
       preloadVideos(uniqueUrls, 2);
+    }
+
+    // Prefetch images/doodles to expo-image cache
+    if (imageUrls.length > 0) {
+      const uniqueUrls = [...new Set(imageUrls)];
+      if (__DEV__) console.log('[ChatRoom] Prefetching', uniqueUrls.length, 'images');
+      ExpoImage.prefetch(uniqueUrls);
+    }
+
+    // Note: Audio URLs are already preloaded by the audioPlayerStore when first played
+    // We just ensure URLs are resolved - no additional preloading needed for audio
+    if (__DEV__ && audioUrls.length > 0) {
+      console.log('[ChatRoom] Found', audioUrls.length, 'audio messages (ready for playback)');
     }
   }, [messages]);
 
@@ -1265,9 +1291,7 @@ export default function ChatRoomScreen() {
   // @Mentions state
   const [currentMentions, setCurrentMentions] = useState<MentionData[]>([]);
 
-  // Coin feedback animation state
-  const [showCoinFeedback, setShowCoinFeedback] = useState(false);
-  const [coinFeedbackY, setCoinFeedbackY] = useState(0);
+  // COIN-FLASH-FIX: Coin feedback state removed - was causing yellow flash during send
   const [viewProfileUser, setViewProfileUser] = useState<DemoOnlineUser | null>(null);
   const [reportTargetUser, setReportTargetUser] = useState<DemoOnlineUser | null>(null);
 
@@ -1484,9 +1508,7 @@ export default function ChatRoomScreen() {
       setInputText('');
       // Demo mode: local coin increment (no backend)
       incrementCoins();
-      // P0-FIX: Show coin feedback animation in demo mode too
-      setCoinFeedbackY(composerHeight + 100);
-      setShowCoinFeedback(true);
+      // COIN-FLASH-FIX: Coin feedback animation removed
       isSendingRef.current = false;
     } else {
       if (!authUserId || !hasValidRoomId) {
@@ -1535,9 +1557,7 @@ export default function ChatRoomScreen() {
         // SEND-FLICKER-FIX: Don't remove pending message here - let the cleanup effect handle it
         // when the server message arrives. This prevents the ghost/flicker frame.
         if (mountedRef.current) {
-          // Show coin feedback animation
-          setCoinFeedbackY(composerHeight + 100);
-          setShowCoinFeedback(true);
+          // COIN-FLASH-FIX: Coin feedback animation removed
           // Clear mentions after successful send
           setCurrentMentions([]);
         }
@@ -1587,10 +1607,9 @@ export default function ChatRoomScreen() {
         // B2-HIGH FIX: Guard setState after async (ensureStableFile)
         if (mountedRef.current) {
           addStoreMessage(roomIdStr, newMessage);
-          // P0-FIX: Demo mode coin increment + feedback for media messages
+          // P0-FIX: Demo mode coin increment
           incrementCoins();
-          setCoinFeedbackY(composerHeight + 100);
-          setShowCoinFeedback(true);
+          // COIN-FLASH-FIX: Coin feedback animation removed
         }
       } else {
         // CR-009 FIX: Real mode - upload to cloud storage first, then send with storage ID
@@ -1645,9 +1664,7 @@ export default function ChatRoomScreen() {
         };
         addStoreMessage(roomIdStr, newMessage);
         incrementCoins();
-        // P0-FIX: Show coin feedback animation for voice messages in demo mode
-        setCoinFeedbackY(composerHeight + 100);
-        setShowCoinFeedback(true);
+        // COIN-FLASH-FIX: Coin feedback animation removed
       } else {
         // CR-009 FIX: Real mode - upload to cloud storage first, then send with storage ID
         if (!authUserId || !hasValidRoomId) return;
@@ -1684,21 +1701,16 @@ export default function ChatRoomScreen() {
   });
 
   // ─────────────────────────────────────────────────────────────────────────
-  // MEDIA HOLD (Secure hold-to-view - immediate open/close)
+  // TAP-TO-VIEW-FIX: Media tap opens viewer, close button dismisses
   // ─────────────────────────────────────────────────────────────────────────
-  const handleMediaHoldStart = useCallback((_messageId: string, mediaUrl: string, type: 'image' | 'video') => {
-    // Immediately open viewer with holding=true
+  const handleMediaPress = useCallback((_messageId: string, mediaUrl: string, type: 'image' | 'video') => {
+    // Open viewer on tap (stays open until dismissed)
     setSecureMediaState({ visible: true, isHolding: true, uri: mediaUrl, type });
   }, []);
 
-  const handleMediaHoldEnd = useCallback(() => {
-    // Immediately close viewer
+  const handleMediaClose = useCallback(() => {
+    // Close viewer when user taps close or backdrop
     setSecureMediaState({ visible: false, isHolding: false, uri: '', type: 'image' });
-  }, []);
-
-  // Called when user touches the viewer surface directly (to enable hold-to-view on viewer)
-  const handleViewerHoldStart = useCallback(() => {
-    setSecureMediaState((prev) => ({ ...prev, isHolding: true }));
   }, []);
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -2247,6 +2259,8 @@ export default function ChatRoomScreen() {
       // AVATAR-STABILITY: Use pre-computed showAvatar from ListItem for deterministic grouping
       // This prevents avatar shifting during re-renders
       const showAvatar = item.showAvatar;
+      // GROUP-TIMESTAMP: Use pre-computed showTimestamp from ListItem
+      const showTimestamp = item.showTimestamp;
 
       // Build replyTo data if message is a reply
       // Check if original message is deleted (has replyToMessageId but no snippet or type)
@@ -2307,8 +2321,8 @@ export default function ChatRoomScreen() {
           onLongPress={(pageX, pageY) => handleMessageLongPress(msg, pageX, pageY)}
           onAvatarPress={() => handleAvatarPress(msg.senderId)}
           onNamePress={() => handleAvatarPress(msg.senderId)}
-          onMediaHoldStart={handleMediaHoldStart}
-          onMediaHoldEnd={handleMediaHoldEnd}
+          onMediaPress={handleMediaPress}
+          showTimestamp={showTimestamp}
           showAvatar={showAvatar}
           replyTo={replyTo}
           onReplyTap={handleScrollToMessage}
@@ -2322,7 +2336,7 @@ export default function ChatRoomScreen() {
       );
     },
     // PERF-FIX: Removed invertedListItems, highlightedMessageId, reactionsMap from deps (using refs)
-    [mutedUserIds, authUserId, myAvatarUrl, handleMessageLongPress, handleAvatarPress, handleMediaHoldStart, handleMediaHoldEnd, handleScrollToMessage, handleReactionChipTap]
+    [mutedUserIds, authUserId, myAvatarUrl, handleMessageLongPress, handleAvatarPress, handleMediaPress, handleScrollToMessage, handleReactionChipTap]
   );
 
   const keyExtractor = useCallback((item: ListItem) => item.id, []);
@@ -2427,7 +2441,7 @@ export default function ChatRoomScreen() {
   // RENDER - KAV + FlatList + flexGrow + justifyContent:flex-end
   // ═══════════════════════════════════════════════════════════════════════
   return (
-    <View style={styles.container}>
+    <View style={[styles.container, { backgroundColor: themeColors.background }]}>
       {/* ─── HEADER ─── */}
       <ChatRoomsHeader
         title={roomName}
@@ -2640,7 +2654,7 @@ export default function ChatRoomScreen() {
         coins={userCoins}
         age={isDemoMode ? (DEMO_CURRENT_USER.age ?? 25) : (realAge ?? 0)}
         gender={isDemoMode ? (DEMO_CURRENT_USER.gender ?? 'Unknown') : (realGender ?? '')}
-        bio={isDemoMode ? undefined : (persistedBio || undefined)}
+        bio={isDemoMode ? undefined : (myBio || undefined)}
         onLeaveRoom={isPrivateRoom ? handleLeavePrivateRoom : handleLeaveRoom}
         isPrivateRoom={isPrivateRoom}
         isRoomOwner={isRoomCreator}
@@ -2712,14 +2726,13 @@ export default function ChatRoomScreen() {
         onSend={(uri) => handleSendMedia(uri, 'doodle')}
       />
 
-      {/* Secure Media Viewer (hold-to-view for images and videos) */}
+      {/* TAP-TO-VIEW-FIX: Secure Media Viewer (tap to open, tap/button to close) */}
       <SecureMediaViewer
         visible={secureMediaState.visible}
         isHolding={secureMediaState.isHolding}
         mediaUri={secureMediaState.uri}
         type={secureMediaState.type}
-        onClose={handleMediaHoldEnd}
-        onHoldStart={handleViewerHoldStart}
+        onClose={handleMediaClose}
       />
 
       <ReportUserModal
@@ -2757,12 +2770,7 @@ export default function ChatRoomScreen() {
         )}
       </ChatSheet>
 
-      {/* Coin feedback animation */}
-      <CoinFeedback
-        visible={showCoinFeedback}
-        onComplete={() => setShowCoinFeedback(false)}
-        startY={coinFeedbackY}
-      />
+      {/* COIN-FLASH-FIX: CoinFeedback animation removed - was causing yellow flash during send */}
     </View>
   );
 }

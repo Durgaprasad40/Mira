@@ -59,8 +59,7 @@ interface ChatMessageListProps {
   mutedUserIds?: Set<string>;
   onMessageLongPress?: (message: DemoChatMessage) => void;
   onAvatarPress?: (senderId: string) => void;
-  onMediaHoldStart?: (messageId: string, mediaUrl: string, type: 'image' | 'video') => void;
-  onMediaHoldEnd?: () => void;
+  onMediaPress?: (messageId: string, mediaUrl: string, type: 'image' | 'video') => void;
   /** Extra bottom padding on the list content (e.g. composerHeight + safeArea) */
   contentPaddingBottom?: number;
 }
@@ -75,8 +74,7 @@ const ChatMessageList = forwardRef<ChatMessageListHandle, ChatMessageListProps>(
   mutedUserIds,
   onMessageLongPress,
   onAvatarPress,
-  onMediaHoldStart,
-  onMediaHoldEnd,
+  onMediaPress,
   contentPaddingBottom = 0,
 }, ref) {
   const listRef = useRef<FlashListRef<ListItem>>(null);
@@ -183,12 +181,11 @@ const ChatMessageList = forwardRef<ChatMessageListHandle, ChatMessageListProps>(
           onLongPress={() => onMessageLongPress?.(msg)}
           onAvatarPress={() => onAvatarPress?.(msg.senderId)}
           onNamePress={() => onAvatarPress?.(msg.senderId)}
-          onMediaHoldStart={onMediaHoldStart}
-          onMediaHoldEnd={onMediaHoldEnd}
+          onMediaPress={onMediaPress}
         />
       );
     },
-    [currentUserId, mutedUserIds, onMessageLongPress, onAvatarPress, onMediaHoldStart, onMediaHoldEnd]
+    [currentUserId, mutedUserIds, onMessageLongPress, onAvatarPress, onMediaPress]
   );
 
   const keyExtractor = useCallback((item: ListItem) => item.id, []);
