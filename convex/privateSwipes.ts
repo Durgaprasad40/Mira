@@ -496,6 +496,8 @@ export const getSwipedUserIds = query({
 /**
  * Get incoming likes (people who liked the current user) in Phase-2
  * Used by Likes tab to show pending likes before match
+ *
+ * SECURITY: Auth-enforced - users can ONLY access their OWN incoming likes
  */
 export const getIncomingLikes = query({
   args: {
@@ -503,7 +505,34 @@ export const getIncomingLikes = query({
     limit: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
-    const { userId, limit = 50 } = args;
+    const { userId: requestedUserId, limit = 50 } = args;
+
+    // P0-SECURITY FIX: MANDATORY auth validation - fail closed
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity?.subject) {
+      console.log('[LIKES_FETCH_DENIED] No auth identity');
+      throw new Error('Authentication required');
+    }
+
+    // Resolve auth identity to Convex user ID
+    const authenticatedUserId = await resolveUserIdByAuthId(ctx, identity.subject);
+    if (!authenticatedUserId) {
+      console.log('[LIKES_FETCH_DENIED] Auth identity not linked to user:', identity.subject);
+      throw new Error('User not found');
+    }
+
+    // P0-SECURITY FIX: STRICT ownership check - NO cross-user access
+    if (authenticatedUserId !== requestedUserId) {
+      console.log('[LIKES_FETCH_DENIED] Cross-user access attempt blocked:', {
+        requestedUserId,
+        authenticatedUserId,
+        authSubject: identity.subject,
+      });
+      throw new Error('Unauthorized: cannot access other users\' likes');
+    }
+
+    // Auth verified - use authenticated user ID (not client-passed)
+    const userId = authenticatedUserId;
 
     // Get all likes TO the current user
     const incomingLikes = await ctx.db
@@ -560,13 +589,42 @@ export const getIncomingLikes = query({
 
 /**
  * Get count of pending incoming likes (for badge)
+ *
+ * SECURITY: Auth-enforced - users can ONLY access their OWN like count
  */
 export const getIncomingLikesCount = query({
   args: {
     userId: v.id('users'),
   },
   handler: async (ctx, args) => {
-    const { userId } = args;
+    const { userId: requestedUserId } = args;
+
+    // P0-SECURITY FIX: MANDATORY auth validation - fail closed
+    const identity = await ctx.auth.getUserIdentity();
+    if (!identity?.subject) {
+      console.log('[LIKES_FETCH_DENIED] No auth identity (count)');
+      throw new Error('Authentication required');
+    }
+
+    // Resolve auth identity to Convex user ID
+    const authenticatedUserId = await resolveUserIdByAuthId(ctx, identity.subject);
+    if (!authenticatedUserId) {
+      console.log('[LIKES_FETCH_DENIED] Auth identity not linked to user (count):', identity.subject);
+      throw new Error('User not found');
+    }
+
+    // P0-SECURITY FIX: STRICT ownership check - NO cross-user access
+    if (authenticatedUserId !== requestedUserId) {
+      console.log('[LIKES_FETCH_DENIED] Cross-user count access attempt blocked:', {
+        requestedUserId,
+        authenticatedUserId,
+        authSubject: identity.subject,
+      });
+      throw new Error('Unauthorized: cannot access other users\' like count');
+    }
+
+    // Auth verified - use authenticated user ID (not client-passed)
+    const userId = authenticatedUserId;
 
     // Get all likes TO the current user
     const incomingLikes = await ctx.db
