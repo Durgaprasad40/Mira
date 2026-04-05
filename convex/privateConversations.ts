@@ -299,6 +299,17 @@ export const getPrivateMessages = query({
       return [];
     }
 
+    // P0-SAFETY: Block check - blocked users cannot read message history
+    const otherParticipantId = conversation.participants.find((pid) => pid !== userId);
+    if (otherParticipantId && await isBlockedBidirectional(ctx, userId, otherParticipantId)) {
+      console.log('[P2_MSG_BLOCK_DENIED] Blocked user attempted to read messages:', {
+        userId: (userId as string)?.slice(-8),
+        otherUserId: (otherParticipantId as string)?.slice(-8),
+        conversationId: (conversationId as string)?.slice(-8),
+      });
+      return []; // Fail closed - return empty, do not leak message history
+    }
+
     // Build query
     let messagesQuery = ctx.db
       .query('privateMessages')
@@ -402,6 +413,13 @@ export const markPrivateMessagesRead = mutation({
     // SECURITY: Verify user is part of this conversation (IDOR prevention)
     if (!conversation.participants.includes(userId)) {
       throw new Error('Not authorized');
+    }
+
+    // P0-SAFETY: Block check - blocked users cannot mark messages as read
+    const otherParticipantId = conversation.participants.find((pid) => pid !== userId);
+    if (otherParticipantId && await isBlockedBidirectional(ctx, userId, otherParticipantId)) {
+      console.log('[P2_MSG_BLOCK_DENIED] Blocked user attempted to mark messages read');
+      throw new Error('Access denied');
     }
 
     // Get all unread messages sent by others
@@ -818,6 +836,13 @@ export const markPrivateMessagesDelivered = mutation({
 
     // SECURITY: Verify user is part of this conversation (IDOR prevention)
     if (!conversation.participants.includes(userId)) {
+      return { success: false, count: 0 };
+    }
+
+    // P0-SAFETY: Block check - blocked users cannot mark messages as delivered
+    const otherParticipantId = conversation.participants.find((pid) => pid !== userId);
+    if (otherParticipantId && await isBlockedBidirectional(ctx, userId, otherParticipantId)) {
+      console.log('[P2_MSG_BLOCK_DENIED] Blocked user attempted to mark messages delivered');
       return { success: false, count: 0 };
     }
 
