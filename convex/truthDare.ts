@@ -541,18 +541,26 @@ export const getPendingConnectRequests = query({
     // Enrich with sender profile and prompt data
     const enriched = await Promise.all(
       requests.map(async (req) => {
-        // P0-FIX: req.fromUserId is now stored as Convex ID, use direct lookup
-        // Previous code incorrectly queried by_auth_user_id index with Convex ID
-        const senderDbId = await resolveUserIdByAuthId(ctx, req.fromUserId);
-        const sender = senderDbId ? await ctx.db.get(senderDbId) : null;
+        // P0-FIX: req.fromUserId is stored as Convex ID (resolved in sendTodConnectRequest)
+        // DO NOT double-resolve - use directly as Convex ID
+        // ID CONTRACT: todConnectRequests stores Convex IDs, NOT authUserIds
+        const senderDbId = req.fromUserId as Id<'users'>;
+        const sender = await ctx.db.get(senderDbId);
+
+        // [TD_ID_FLOW] Validate sender exists - log if mismatch (indicates corrupted request)
+        if (!sender) {
+          console.log('[TD_ID_MISMATCH] Sender not found for stored Convex ID:', {
+            requestId: req._id,
+            fromUserId: req.fromUserId,
+          });
+          return null; // Skip this request - data integrity issue
+        }
 
         // PHASE-2 ISOLATION: Get Phase-2 private profile for photo (NO Phase-1 fallback)
-        const senderPrivateProfile = senderDbId
-          ? await ctx.db
-              .query('userPrivateProfiles')
-              .withIndex('by_user', (q: any) => q.eq('userId', senderDbId))
-              .first()
-          : null;
+        const senderPrivateProfile = await ctx.db
+          .query('userPrivateProfiles')
+          .withIndex('by_user', (q: any) => q.eq('userId', senderDbId))
+          .first();
 
         // Get prompt for context
         const prompt = await ctx.db
@@ -562,7 +570,7 @@ export const getPendingConnectRequests = query({
 
         // Calculate age from dateOfBirth
         let senderAge: number | null = null;
-        if (sender?.dateOfBirth) {
+        if (sender.dateOfBirth) {
           const birthDate = new Date(sender.dateOfBirth);
           const today = new Date();
           senderAge = today.getFullYear() - birthDate.getFullYear();
@@ -573,9 +581,7 @@ export const getPendingConnectRequests = query({
         }
 
         // PHASE-2 IDENTITY FIX: Use Phase-2 displayName (nickname), NOT real name
-        const senderDisplayName = senderDbId
-          ? await getPhase2DisplayName(ctx, senderDbId)
-          : 'Someone';
+        const senderDisplayName = await getPhase2DisplayName(ctx, senderDbId);
 
         return {
           _id: req._id,
@@ -588,7 +594,7 @@ export const getPendingConnectRequests = query({
           // PHASE-2 ISOLATION: Use ONLY Phase-2 private photos, NO Phase-1 fallback
           senderPhotoUrl: senderPrivateProfile?.privatePhotoUrls?.[0] ?? null,
           senderAge,
-          senderGender: sender?.gender ?? null,
+          senderGender: sender.gender ?? null,
           // Prompt context
           promptType: prompt?.type ?? 'truth',
           promptText: prompt?.text ?? '',
@@ -596,7 +602,8 @@ export const getPendingConnectRequests = query({
       })
     );
 
-    return enriched;
+    // Filter out null entries (corrupted requests with missing sender)
+    return enriched.filter((r): r is NonNullable<typeof r> => r !== null);
   },
 });
 
