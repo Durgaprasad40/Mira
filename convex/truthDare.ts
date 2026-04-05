@@ -884,7 +884,11 @@ export const respondToConnect = mutation({
         conversationId = existingConversationId;
         // Update lastMessageAt
         await ctx.db.patch(conversationId, { lastMessageAt: now });
-        console.log('[T/D ACCEPT PHASE2] Reusing existing conversation:', conversationId);
+        console.log('[CONVO_IDEMPOTENT] T/D reusing existing conversation:', {
+          sender: (senderDbId as string)?.slice(-8),
+          recipient: (recipientDbId as string)?.slice(-8),
+          conversationId: (conversationId as string)?.slice(-8),
+        });
       } else {
         // P1-009 FIX: Final defensive check - query by T/D source for this pair
         // This catches any conversation created between the participant check and now
@@ -902,7 +906,11 @@ export const respondToConnect = mutation({
           // Another T/D conversation was just created for this pair - reuse it
           conversationId = recentTodConvos._id;
           await ctx.db.patch(conversationId, { lastMessageAt: now });
-          console.log('[T/D ACCEPT PHASE2] Found concurrent conversation, reusing:', conversationId);
+          console.log('[CONVO_IDEMPOTENT] T/D found concurrent conversation:', {
+            sender: (senderDbId as string)?.slice(-8),
+            recipient: (recipientDbId as string)?.slice(-8),
+            conversationId: (conversationId as string)?.slice(-8),
+          });
         } else {
           // PHASE-2 FIX: Create new conversation in privateConversations table (NOT conversations)
           conversationId = await ctx.db.insert('privateConversations', {
@@ -912,14 +920,8 @@ export const respondToConnect = mutation({
             createdAt: now,
             lastMessageAt: now,
           });
-          console.log('[T/D ACCEPT PHASE2] Created new conversation:', conversationId);
 
           // Create privateConversationParticipants for BOTH users
-          console.log('[T/D ACCEPT PHASE2] Creating participants:', {
-            senderDbId: (senderDbId as string)?.slice(-8),
-            recipientDbId: (recipientDbId as string)?.slice(-8),
-            conversationId: (conversationId as string)?.slice(-8),
-          });
           await ctx.db.insert('privateConversationParticipants', {
             conversationId,
             userId: senderDbId as Id<'users'>,
@@ -932,14 +934,69 @@ export const respondToConnect = mutation({
             unreadCount: 0, // Recipient is accepting, they'll see it immediately
           });
 
-          // Create initial system message in privateMessages table
-          await ctx.db.insert('privateMessages', {
-            conversationId,
-            senderId: recipientDbId as Id<'users'>, // System message attributed to recipient
-            type: 'system',
-            content: 'T&D connection accepted! Say hi 👋',
-            createdAt: now,
-          });
+          // RACE CONDITION PROTECTION: Post-hoc duplicate cleanup (matches privateSwipes.ts pattern)
+          // Check for any duplicate conversations created for this pair during the gap
+          const allPairConvos = await ctx.db
+            .query('privateConversations')
+            .filter((q) => q.eq(q.field('participants'), participantIds))
+            .collect();
+
+          if (allPairConvos.length > 1) {
+            // Duplicates detected - keep the one with lowest _id (deterministic winner)
+            allPairConvos.sort((a, b) => a._id.localeCompare(b._id));
+            const winnerConvoId = allPairConvos[0]._id;
+
+            if (conversationId !== winnerConvoId) {
+              // Our conversation lost the race - delete it and its participants, use winner
+              console.log('[T/D RACE] Lost race, cleaning up duplicate conversation:', {
+                ours: (conversationId as string)?.slice(-8),
+                winner: (winnerConvoId as string)?.slice(-8),
+              });
+              const ourParticipants = await ctx.db
+                .query('privateConversationParticipants')
+                .withIndex('by_conversation', (q) => q.eq('conversationId', conversationId))
+                .collect();
+              for (const p of ourParticipants) {
+                await ctx.db.delete(p._id);
+              }
+              await ctx.db.delete(conversationId);
+              conversationId = winnerConvoId;
+            } else {
+              // We won the race - delete duplicate conversations and their participants
+              console.log('[T/D RACE] Won race, cleaning up', allPairConvos.length - 1, 'duplicates');
+              for (let i = 1; i < allPairConvos.length; i++) {
+                const dupeConvo = allPairConvos[i];
+                const dupeParticipants = await ctx.db
+                  .query('privateConversationParticipants')
+                  .withIndex('by_conversation', (q) => q.eq('conversationId', dupeConvo._id))
+                  .collect();
+                for (const p of dupeParticipants) {
+                  await ctx.db.delete(p._id);
+                }
+                await ctx.db.delete(dupeConvo._id);
+              }
+            }
+          } else {
+            console.log('[T/D ACCEPT] Created new conversation:', (conversationId as string)?.slice(-8));
+          }
+
+          // Create initial system message in privateMessages table (only for winner)
+          // Check if system message already exists to avoid duplicates
+          const existingSystemMsg = await ctx.db
+            .query('privateMessages')
+            .withIndex('by_conversation', (q) => q.eq('conversationId', conversationId))
+            .filter((q) => q.eq(q.field('type'), 'system'))
+            .first();
+
+          if (!existingSystemMsg) {
+            await ctx.db.insert('privateMessages', {
+              conversationId,
+              senderId: recipientDbId as Id<'users'>, // System message attributed to recipient
+              type: 'system',
+              content: 'T&D connection accepted! Say hi 👋',
+              createdAt: now,
+            });
+          }
         }
       }
 

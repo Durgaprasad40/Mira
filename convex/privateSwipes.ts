@@ -143,7 +143,12 @@ export const swipe = mutation({
           .first();
 
         if (existingMatch) {
-          // Match already exists
+          // Match already exists - return idempotently
+          console.log('[MATCH_IDEMPOTENT] Returning existing match for pair:', {
+            user1: (user1Id as string)?.slice(-8),
+            user2: (user2Id as string)?.slice(-8),
+            matchId: (existingMatch._id as string)?.slice(-8),
+          });
           return { success: true, isMatch: true, matchId: existingMatch._id };
         }
 
@@ -218,7 +223,11 @@ export const swipe = mutation({
             // Link match to existing conversation (e.g., T/D conversation now has a match)
             await ctx.db.patch(existingConversationId, { matchId });
           }
-          console.log('[PRIVATE_SWIPE] Reusing existing conversation for pair:', conversationId);
+          console.log('[CONVO_IDEMPOTENT] Reusing existing conversation for pair:', {
+            user1: (fromUserId as string)?.slice(-8),
+            user2: (toUserId as string)?.slice(-8),
+            conversationId: (conversationId as string)?.slice(-8),
+          });
         } else {
           // Create Phase-2 conversation
           conversationId = await ctx.db.insert('privateConversations', {
