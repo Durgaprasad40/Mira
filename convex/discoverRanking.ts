@@ -405,25 +405,59 @@ export function calculateRankScore(
 // ---------------------------------------------------------------------------
 
 /**
- * Fisher-Yates shuffle for uniform random ordering.
+ * P1-001 FIX: Seeded PRNG for deterministic shuffle
+ * Uses a simple mulberry32 algorithm for fast, deterministic random numbers.
+ * Same seed = same sequence of random numbers.
+ */
+function createSeededRandom(seed: number): () => number {
+  let state = seed;
+  return function() {
+    state |= 0;
+    state = (state + 0x6D2B79F5) | 0;
+    let t = Math.imul(state ^ (state >>> 15), 1 | state);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/**
+ * P1-001 FIX: Generate seed from userId + date
+ * Same user on same day = same seed = deterministic ordering
+ */
+function generateDailySeed(userId: string): number {
+  const day = Math.floor(Date.now() / (1000 * 60 * 60 * 24));
+  let hash = day;
+  for (let i = 0; i < userId.length; i++) {
+    hash = ((hash << 5) - hash + userId.charCodeAt(i)) | 0;
+  }
+  return Math.abs(hash);
+}
+
+/**
+ * P1-001 FIX: Deterministic Fisher-Yates shuffle using seeded PRNG.
+ * Same userId on same day = same shuffle order for consistent UX.
  * Returns a new shuffled array without modifying the original.
  */
-function fisherYatesShuffle<T>(array: T[]): T[] {
+function seededFisherYatesShuffle<T>(array: T[], userId: string): T[] {
+  const seed = generateDailySeed(userId);
+  const random = createSeededRandom(seed);
   const result = [...array];
   for (let i = result.length - 1; i > 0; i--) {
-    const j = Math.floor(Math.random() * (i + 1));
+    const j = Math.floor(random() * (i + 1));
     [result[i], result[j]] = [result[j], result[i]];
   }
   return result;
 }
 
 /**
- * Mix ranked candidates with exploration pool.
- * 80% from top-ranked, 20% from random exploration.
+ * P1-001 FIX: Mix ranked candidates with exploration pool using deterministic shuffle.
+ * 80% from top-ranked, 20% from seeded random exploration.
+ * @param viewerId - Used for seeded shuffle (same user = same order daily)
  */
 export function applyExplorationMix(
   sortedCandidates: CandidateProfile[],
-  limit: number
+  limit: number,
+  viewerId: string
 ): CandidateProfile[] {
   if (sortedCandidates.length <= limit) {
     return sortedCandidates;
@@ -435,13 +469,13 @@ export function applyExplorationMix(
   // Top ranked candidates
   const ranked = sortedCandidates.slice(0, rankedCount);
 
-  // Exploration pool: random selection from remaining
+  // Exploration pool: SEEDED random selection from remaining (P1-001 FIX)
   const remaining = sortedCandidates.slice(rankedCount);
   const exploration: CandidateProfile[] = [];
 
   if (remaining.length > 0 && explorationCount > 0) {
-    // Shuffle remaining for random exploration
-    const shuffled = fisherYatesShuffle(remaining);
+    // P1-001 FIX: Use seeded shuffle for deterministic ordering
+    const shuffled = seededFisherYatesShuffle(remaining, viewerId);
     exploration.push(...shuffled.slice(0, explorationCount));
   }
 
@@ -593,9 +627,9 @@ export function rankDiscoverCandidates(
   // Sort by score (descending)
   scoredCandidates.sort((a, b) => b.score - a.score);
 
-  // Apply exploration mix
+  // P1-001 FIX: Apply exploration mix with viewerId for deterministic daily ordering
   const sortedCandidates = scoredCandidates.map(s => s.candidate);
-  const mixed = applyExplorationMix(sortedCandidates, limit);
+  const mixed = applyExplorationMix(sortedCandidates, limit, currentUser._id);
 
   const exhausted = mixed.length < limit;
   let fallbackUsed = false;

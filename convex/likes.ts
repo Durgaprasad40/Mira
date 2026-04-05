@@ -125,10 +125,16 @@ export const swipe = mutation({
     const { token, toUserId, action, message } = args;
     const now = Date.now();
 
+    // P1-008 FIX: Token format validation - reject obviously invalid tokens early
+    // Valid tokens are non-empty strings within reasonable length bounds
+    if (!token || typeof token !== 'string' || token.length < 10 || token.length > 2000) {
+      throw new Error('Unauthorized: invalid session');
+    }
+
     // P1-028 FIX: Validate session and derive user from trusted server context
     const fromUserId = await validateSessionToken(ctx, token);
     if (!fromUserId) {
-      throw new Error('Unauthorized: invalid or expired session');
+      throw new Error('Unauthorized: invalid session');
     }
 
     // P2-003 FIX: Prevent self-swiping
@@ -159,17 +165,117 @@ export const swipe = mutation({
     }
 
     // 8A: Check target user is also verified (shouldn't appear in deck but double-check)
+    // P1-009 FIX: Use generic error message to prevent user enumeration
     const toUser = await ctx.db.get(toUserId);
-    if (toUser) {
-      const toStatus = toUser.verificationStatus || 'unverified';
-      if (toStatus !== 'verified') {
-        throw new Error('This user is no longer available.');
-      }
+    if (!toUser) {
+      throw new Error('This user is not available');
+    }
+    const toStatus = toUser.verificationStatus || 'unverified';
+    if (toStatus !== 'verified') {
+      throw new Error('This user is not available');
     }
 
-    // TODO: Subscription restrictions disabled for testing mode.
-    // Re-enable usage limits once testing is complete.
-    // if (fromUser.gender === 'male') { ... }
+    // ═══════════════════════════════════════════════════════════════════════════
+    // P0-004 FIX: Rate limiting BEFORE insert (not after)
+    // P0-005 FIX: Re-enable server-side daily limit enforcement
+    // P1-005 FIX: Add short-term burst rate limiting (15/min) alongside 5-min window
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    // 1. Check rapid-swiping abuse BEFORE insert (P0-004)
+    const oneMinAgo = now - 60 * 1000;
+    const fiveMinAgo = now - 5 * 60 * 1000;
+    const recentSwipes = await ctx.db
+      .query('likes')
+      .withIndex('by_from_user', (q) => q.eq('fromUserId', fromUserId))
+      .collect();
+    const oneMinCount = recentSwipes.filter(s => s.createdAt > oneMinAgo).length;
+    const recentCount = recentSwipes.filter(s => s.createdAt > fiveMinAgo).length;
+
+    // P1-005 FIX: Short-term burst limit - 15 swipes per minute (prevents fast bot-like swiping)
+    if (oneMinCount >= 15) {
+      throw new Error('Too many swipes. Please slow down.');
+    }
+
+    // Hard block at 100 swipes in 5 minutes (bot-like behavior)
+    if (recentCount >= 100) {
+      // Still log the flag for monitoring
+      const existingFlag = await ctx.db
+        .query('behaviorFlags')
+        .withIndex('by_user_type', (q) =>
+          q.eq('userId', fromUserId).eq('flagType', 'rapid_swiping')
+        )
+        .collect();
+      const recentFlag = existingFlag.find(f => now - f.createdAt < 60 * 60 * 1000);
+      if (!recentFlag) {
+        await ctx.db.insert('behaviorFlags', {
+          userId: fromUserId,
+          flagType: 'rapid_swiping',
+          severity: 'high', // Upgraded to high since they hit the hard limit
+          description: `Blocked: ${recentCount} swipes in 5 minutes`,
+          createdAt: now,
+        });
+      }
+      throw new Error('Too many swipes. Please slow down.');
+    }
+
+    // 2. Check and enforce daily limits BEFORE insert (P0-005)
+    // Daily limits only apply to like/super_like actions (pass is always allowed)
+    if (action === 'like' || action === 'super_like') {
+      const oneDayMs = 24 * 60 * 60 * 1000;
+
+      // Check if daily counters need reset
+      const likesResetAt = fromUser.likesResetAt ?? 0;
+      const superLikesResetAt = fromUser.superLikesResetAt ?? 0;
+      const shouldResetLikes = now - likesResetAt > oneDayMs;
+      const shouldResetSuperLikes = now - superLikesResetAt > oneDayMs;
+
+      // Get current remaining counts
+      let likesRemaining = fromUser.likesRemaining ?? 0;
+      let superLikesRemaining = fromUser.superLikesRemaining ?? 0;
+
+      // Reset counters if needed (daily refresh)
+      if (shouldResetLikes) {
+        // Reset to tier-based daily limits
+        const dailyLikeLimit =
+          fromUser.subscriptionTier === 'premium' ? 999 :
+          fromUser.subscriptionTier === 'basic' ? 50 : 25; // free tier = 25
+        likesRemaining = dailyLikeLimit;
+      }
+      if (shouldResetSuperLikes) {
+        const dailySuperLikeLimit =
+          fromUser.subscriptionTier === 'premium' ? 10 :
+          fromUser.subscriptionTier === 'basic' ? 3 : 1; // free tier = 1
+        superLikesRemaining = dailySuperLikeLimit;
+      }
+
+      // Check if user has remaining swipes for this action
+      if (action === 'like' && likesRemaining <= 0) {
+        throw new Error('Daily like limit reached. Upgrade for more likes or try again tomorrow.');
+      }
+      if (action === 'super_like' && superLikesRemaining <= 0) {
+        throw new Error('Daily super like limit reached. Upgrade for more or try again tomorrow.');
+      }
+
+      // Prepare counter decrements (will be applied after successful insert)
+      // Store in closure for later use
+      const newLikesRemaining = action === 'like' ? likesRemaining - 1 : likesRemaining;
+      const newSuperLikesRemaining = action === 'super_like' ? superLikesRemaining - 1 : superLikesRemaining;
+      const newLikesResetAt = shouldResetLikes ? now : likesResetAt;
+      const newSuperLikesResetAt = shouldResetSuperLikes ? now : superLikesResetAt;
+
+      // Update user's remaining counts atomically with the swipe
+      // This prevents race conditions where multiple swipes could bypass limits
+      await ctx.db.patch(fromUserId, {
+        likesRemaining: newLikesRemaining,
+        superLikesRemaining: newSuperLikesRemaining,
+        likesResetAt: newLikesResetAt,
+        superLikesResetAt: newSuperLikesResetAt,
+      });
+    }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // END P0-004/P0-005 FIXES
+    // ═══════════════════════════════════════════════════════════════════════════
 
     // Check if already swiped
     const existingLike = await ctx.db
@@ -185,13 +291,14 @@ export const swipe = mutation({
 
     // P1 SECURITY: Block check for like/super_like actions (not just text)
     // Prevents blocked users from liking each other and creating matches
+    // P1-009 FIX: Use generic error message to prevent user enumeration
     if (action === 'like' || action === 'super_like') {
       if (await isBlockedBidirectional(ctx, fromUserId, toUserId)) {
-        throw new Error('Cannot like this user');
+        throw new Error('This user is not available');
       }
     }
 
-    // Record the like
+    // Record the like (P0-004/P0-005: Rate limiting and daily limits already checked above)
     await ctx.db.insert('likes', {
       fromUserId,
       toUserId,
@@ -200,35 +307,6 @@ export const swipe = mutation({
       createdAt: now,
     });
 
-    // Inline rapid-swiping check
-    const fiveMinAgo = now - 5 * 60 * 1000;
-    const recentSwipes = await ctx.db
-      .query('likes')
-      .withIndex('by_from_user', (q) => q.eq('fromUserId', fromUserId))
-      .collect();
-    const recentCount = recentSwipes.filter(s => s.createdAt > fiveMinAgo).length;
-    if (recentCount > 100) {
-      const existingFlag = await ctx.db
-        .query('behaviorFlags')
-        .withIndex('by_user_type', (q) =>
-          q.eq('userId', fromUserId).eq('flagType', 'rapid_swiping')
-        )
-        .collect();
-      const recentFlag = existingFlag.find(f => now - f.createdAt < 60 * 60 * 1000);
-      if (!recentFlag) {
-        await ctx.db.insert('behaviorFlags', {
-          userId: fromUserId,
-          flagType: 'rapid_swiping',
-          severity: 'medium',
-          description: `${recentCount} swipes in 5 minutes`,
-          createdAt: now,
-        });
-      }
-    }
-
-    // TODO: Usage count updates disabled for testing mode.
-    // Re-enable once testing is complete.
-
     // Handle text action: send a direct message via message token (pre-match conversation)
     if (action === 'text') {
       if (!message) {
@@ -236,8 +314,9 @@ export const swipe = mutation({
       }
 
       // D1-REPAIR: Check if either user has blocked the other
+      // P1-009 FIX: Use generic error message to prevent user enumeration
       if (await isBlockedBidirectional(ctx, fromUserId, toUserId)) {
-        throw new Error('Cannot send message');
+        throw new Error('This user is not available');
       }
 
       // Create a pre-match conversation for the direct message
@@ -270,7 +349,8 @@ export const swipe = mutation({
         expiresAt: now + 24 * 60 * 60 * 1000,
       });
 
-      return { success: true, isMatch: false };
+      // P1-006 FIX: Return conversationId so client can navigate to chat
+      return { success: true, isMatch: false, conversationId };
     }
 
     // Check for match (only on like or super_like)
@@ -282,10 +362,10 @@ export const swipe = mutation({
         )
         .first();
 
+      // P1-002 FIX: Only 'like' and 'super_like' trigger matches - 'text' is separate intent
       const hasReciprocalLike = reciprocalLike && (
         reciprocalLike.action === 'like' ||
-        reciprocalLike.action === 'super_like' ||
-        reciprocalLike.action === 'text'
+        reciprocalLike.action === 'super_like'
       );
 
       // SMART MATCHING: Check for T&D connected status
@@ -526,11 +606,19 @@ export const rewind = mutation({
   handler: async (ctx, args) => {
     const { authUserId } = args;
 
-    // AUTH FIX: Resolve acting user from server-side auth
-    if (!authUserId || authUserId.trim().length === 0) {
+    // P2-010 FIX: Strengthened authUserId validation
+    // - Must be non-null and non-empty string
+    // - Must have reasonable length bounds (10-500 chars for auth IDs)
+    // - Must not contain potentially malicious characters
+    if (!authUserId || typeof authUserId !== 'string') {
       throw new Error('Unauthorized: authentication required');
     }
-    const userId = await resolveUserIdByAuthId(ctx, authUserId);
+    const trimmedAuthId = authUserId.trim();
+    if (trimmedAuthId.length === 0 || trimmedAuthId.length < 10 || trimmedAuthId.length > 500) {
+      throw new Error('Unauthorized: invalid authentication');
+    }
+
+    const userId = await resolveUserIdByAuthId(ctx, trimmedAuthId);
     if (!userId) {
       throw new Error('Unauthorized: user not found');
     }

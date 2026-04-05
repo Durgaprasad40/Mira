@@ -466,10 +466,14 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
 
     // Prefetch first PREFETCH_COUNT photos (or all if fewer)
     const toPrefetch = photos.slice(0, PREFETCH_COUNT);
-    toPrefetch.forEach((photo) => {
+    toPrefetch.forEach((photo, index) => {
       if (photo?.url) {
-        Image.prefetch(photo.url).catch(() => {
-          // Silently ignore prefetch failures - image will load on-demand
+        Image.prefetch(photo.url).catch((error) => {
+          // P2-005 FIX: Log prefetch failures for debugging (dev only)
+          // Image will still load on-demand, but logging helps identify CDN/network issues
+          if (__DEV__) {
+            console.warn(`[ProfileCard] Prefetch failed for photo ${index}:`, photo.url.slice(0, 60), error?.message || error);
+          }
         });
       }
     });

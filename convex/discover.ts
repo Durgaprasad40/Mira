@@ -1,5 +1,5 @@
 import { v } from 'convex/values';
-import { query, mutation } from './_generated/server';
+import { query, mutation, QueryCtx } from './_generated/server';
 import { Id } from './_generated/dataModel';
 import { resolveUserIdByAuthId, ensureUserByAuthId } from './helpers';
 import {
@@ -84,14 +84,16 @@ type ExclusionSets = {
 
 /**
  * Build exclusion sets for a viewer (swipes, matches, blocks, reports, conversations)
+ * P2-007 FIX: Use QueryCtx for proper type safety instead of any
  */
 async function buildExclusionSets(
-  ctx: any,
+  ctx: QueryCtx,
   viewerId: Id<'users'>,
 ): Promise<ExclusionSets> {
   const now = Date.now();
   const passExpiry = now - 7 * 24 * 60 * 60 * 1000;
 
+  // P2-007 FIX: Removed `q: any` annotations - QueryCtx provides proper types
   const [
     mySwipes,
     matchesAsUser1,
@@ -101,13 +103,13 @@ async function buildExclusionSets(
     myReports,
     myConversationParticipations,
   ] = await Promise.all([
-    ctx.db.query('likes').withIndex('by_from_user', (q: any) => q.eq('fromUserId', viewerId)).collect(),
-    ctx.db.query('matches').withIndex('by_user1', (q: any) => q.eq('user1Id', viewerId)).filter((q: any) => q.eq(q.field('isActive'), true)).collect(),
-    ctx.db.query('matches').withIndex('by_user2', (q: any) => q.eq('user2Id', viewerId)).filter((q: any) => q.eq(q.field('isActive'), true)).collect(),
-    ctx.db.query('blocks').withIndex('by_blocker', (q: any) => q.eq('blockerId', viewerId)).collect(),
-    ctx.db.query('blocks').withIndex('by_blocked', (q: any) => q.eq('blockedUserId', viewerId)).collect(),
-    ctx.db.query('reports').withIndex('by_reporter', (q: any) => q.eq('reporterId', viewerId)).collect(),
-    ctx.db.query('conversationParticipants').withIndex('by_user', (q: any) => q.eq('userId', viewerId)).collect(),
+    ctx.db.query('likes').withIndex('by_from_user', (q) => q.eq('fromUserId', viewerId)).collect(),
+    ctx.db.query('matches').withIndex('by_user1', (q) => q.eq('user1Id', viewerId)).filter((q) => q.eq(q.field('isActive'), true)).collect(),
+    ctx.db.query('matches').withIndex('by_user2', (q) => q.eq('user2Id', viewerId)).filter((q) => q.eq(q.field('isActive'), true)).collect(),
+    ctx.db.query('blocks').withIndex('by_blocker', (q) => q.eq('blockerId', viewerId)).collect(),
+    ctx.db.query('blocks').withIndex('by_blocked', (q) => q.eq('blockedUserId', viewerId)).collect(),
+    ctx.db.query('reports').withIndex('by_reporter', (q) => q.eq('reporterId', viewerId)).collect(),
+    ctx.db.query('conversationParticipants').withIndex('by_user', (q) => q.eq('userId', viewerId)).collect(),
   ]);
 
   const swipedUserIds = new Set<string>();
@@ -129,8 +131,9 @@ async function buildExclusionSets(
 
   const conversationPartnerIds = new Set<string>();
   if (myConversationParticipations.length > 0) {
+    // P2-007 FIX: Remove any annotation - type inferred from query result
     const conversations = await Promise.all(
-      myConversationParticipations.map((p: any) => ctx.db.get(p.conversationId))
+      myConversationParticipations.map((p) => ctx.db.get(p.conversationId))
     );
     for (const conv of conversations) {
       if (!conv) continue;
@@ -442,8 +445,6 @@ export const getDiscoverProfiles = query({
       blocksAgainstMe,
       likesToMe,
       myReports,
-      allReports,
-      allBlocks,
       myConversationParticipations,
     ] = await Promise.all([
       // All my swipes (likes/passes)
@@ -484,14 +485,8 @@ export const getDiscoverProfiles = query({
         .query('reports')
         .withIndex('by_reporter', (q) => q.eq('reporterId', userId))
         .collect(),
-      // All reports (for aggregate trust penalty - limited query)
-      ctx.db
-        .query('reports')
-        .take(1000),
-      // All blocks (for aggregate trust penalty - limited query)
-      ctx.db
-        .query('blocks')
-        .take(2000),
+      // P1-004 SCALABILITY FIX: Trust signals now fetched AFTER filtering (see below)
+      // Removed global .collect() - trust penalties are fetched only for filtered candidates
       // CONVERSATION PARTNER EXCLUSION: All my conversation participations
       // Users with existing message threads must not reappear in Discover
       ctx.db
@@ -542,19 +537,9 @@ export const getDiscoverProfiles = query({
       }
     }
 
-    // TRUST SIGNALS: Aggregate report counts per user (soft penalty)
-    const aggregateReportCounts = new Map<string, number>();
-    for (const report of allReports) {
-      const targetId = report.reportedUserId as string;
-      aggregateReportCounts.set(targetId, (aggregateReportCounts.get(targetId) || 0) + 1);
-    }
-
-    // TRUST SIGNALS: Aggregate block counts per user (soft penalty)
-    const aggregateBlockCounts = new Map<string, number>();
-    for (const block of allBlocks) {
-      const targetId = block.blockedUserId as string;
-      aggregateBlockCounts.set(targetId, (aggregateBlockCounts.get(targetId) || 0) + 1);
-    }
+    // P1-004 SCALABILITY FIX: Trust signals (aggregateReportCounts, aggregateBlockCounts)
+    // are now fetched AFTER filtering, only for the filtered candidate set.
+    // This avoids loading full reports/blocks tables. See below after candidates are built.
 
     // PERF #8: Use take() with buffer to avoid loading entire user table
     // Fetch more than needed since many will be filtered out
@@ -680,6 +665,53 @@ export const getDiscoverProfiles = query({
         isIncognito: user.incognitoMode === true,
       });
     }
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // P1-004 SCALABILITY FIX: Fetch trust signals ONLY for filtered candidates
+    // Uses indexed queries instead of global .collect() - scales efficiently
+    // ═══════════════════════════════════════════════════════════════════════════
+    const candidateIds = candidates.map(c => c.id as Id<'users'>);
+
+    // Batch fetch reports/blocks only for candidates being ranked (uses indexes)
+    const TRUST_BATCH_SIZE = 50;
+    const aggregateReportCounts = new Map<string, number>();
+    const aggregateBlockCounts = new Map<string, number>();
+
+    // Process in batches to avoid overwhelming the database
+    for (let i = 0; i < candidateIds.length; i += TRUST_BATCH_SIZE) {
+      const batch = candidateIds.slice(i, i + TRUST_BATCH_SIZE);
+
+      // Fetch reports and blocks for this batch in parallel
+      const batchResults = await Promise.all(
+        batch.flatMap(candidateId => [
+          // Reports against this candidate (using by_reported_user index)
+          ctx.db
+            .query('reports')
+            .withIndex('by_reported_user', (q) => q.eq('reportedUserId', candidateId))
+            .collect(),
+          // Blocks against this candidate (using by_blocked index)
+          ctx.db
+            .query('blocks')
+            .withIndex('by_blocked', (q) => q.eq('blockedUserId', candidateId))
+            .collect(),
+        ])
+      );
+
+      // Process results (interleaved reports and blocks)
+      for (let j = 0; j < batch.length; j++) {
+        const candidateId = batch[j] as string;
+        const reports = batchResults[j * 2] || [];
+        const blocks = batchResults[j * 2 + 1] || [];
+
+        if (reports.length > 0) {
+          aggregateReportCounts.set(candidateId, reports.length);
+        }
+        if (blocks.length > 0) {
+          aggregateBlockCounts.set(candidateId, blocks.length);
+        }
+      }
+    }
+    // ═══════════════════════════════════════════════════════════════════════════
 
     // Sort
     if (sortBy === 'recommended') {
@@ -863,8 +895,11 @@ export const getDiscoverProfiles = query({
           }
 
           logBatchRankingComparison(currentUser._id as string, comparisons, 'phase1');
-        } catch {
-          // Silent fail - shadow mode must never break production
+        } catch (shadowError) {
+          // P2-009 FIX: Log shadow mode errors for debugging
+          // Shadow mode must never break production, but we need visibility into failures
+          // Note: Using console.warn (not __DEV__ which is React Native only)
+          console.warn('[Shadow Ranking] Error during comparison:', shadowError);
         }
       }
 
@@ -1414,6 +1449,7 @@ export const markProfileAsShown = mutation({
 /**
  * Batch mark multiple profiles as shown (for efficiency)
  * Called when a batch of profiles is loaded in Discover
+ * P2-011 FIX: Dedupe userIds to prevent redundant writes and potential race conditions
  */
 export const batchMarkProfilesAsShown = mutation({
   args: {
@@ -1421,11 +1457,23 @@ export const batchMarkProfilesAsShown = mutation({
   },
   handler: async (ctx, args) => {
     const now = Date.now();
+
+    // P2-011 FIX: Deduplicate userIds to prevent double-patching the same user
+    // This handles edge cases where the same profile appears multiple times in the batch
+    const uniqueUserIds = [...new Set(args.userIds)];
+
+    // Skip if no valid userIds
+    if (uniqueUserIds.length === 0) {
+      return { updated: 0 };
+    }
+
     await Promise.all(
-      args.userIds.map(userId =>
+      uniqueUserIds.map(userId =>
         ctx.db.patch(userId, { lastShownInDiscoverAt: now })
       )
     );
+
+    return { updated: uniqueUserIds.length };
   },
 });
 

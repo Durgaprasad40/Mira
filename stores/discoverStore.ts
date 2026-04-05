@@ -14,8 +14,15 @@ const DAILY_STANDOUT_LIMIT = 2;
 const RANDOM_MATCH_COOLDOWN_MS = 24 * 60 * 60 * 1000; // 24 hours
 const RANDOM_MATCH_PROB = 0.10; // 10% chance per eligible swipe
 
+// P2-001 FIX: Use local date string instead of UTC
+// This ensures daily limits reset at user's local midnight, not UTC midnight
+// Format: YYYY-MM-DD (same as before, but using local time)
 function getTodayDateString(): string {
-  return new Date().toISOString().slice(0, 10);
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, '0');
+  const day = String(now.getDate()).padStart(2, '0');
+  return `${year}-${month}-${day}`;
 }
 
 interface DiscoverState {
