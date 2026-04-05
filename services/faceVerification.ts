@@ -3,16 +3,20 @@
  *
  * Handles face verification by capturing selfie frames.
  *
- * Modes:
- * - DEMO (isDemoMode=true): Auto-approve immediately after selfie capture
- * - LIVE (isDemoMode=false): Manual review by admin
+ * SECURITY: All verification decisions are made SERVER-SIDE ONLY.
+ * Demo mode is controlled exclusively by process.env.DEMO_MODE on the server.
+ * There is NO client-side bypass - all requests go through Convex verification.
  *
  * Flow:
  * 1. Client captures 3 selfie frames
  * 2. Best frame is selected and sent to server
- * 3. Server stores selfie and either:
- *    - Auto-approves (demo mode)
- *    - Sets PENDING for admin review (live mode)
+ * 3. Server stores selfie and processes based on server-side mode:
+ *    - Demo mode (env): Auto-approves
+ *    - Live mode: Sets PENDING for admin review
+ *
+ * Safe Guards:
+ * - Any error results in FAIL status (user NOT verified)
+ * - Default state is always unverified
  */
 
 import { isDemoMode, convex } from '@/hooks/useConvex';
@@ -194,30 +198,12 @@ async function mockVerify(request: FaceVerificationRequest): Promise<FaceVerific
 
 async function serverVerify(request: FaceVerificationRequest, demoMode: boolean): Promise<FaceVerificationResponse> {
   const mode = demoMode ? 'demo_auto' : 'manual_review';
-  console.log(`[FaceVerify] mode=${mode} Starting server-side verification...`);
-  console.log(`[FaceVerify] mode=${mode} userId=${request.userId} frames=${request.frames.length}`);
-
-  // DEMO BYPASS: Skip Convex call for demo users (userId is string, not v.id("users"))
-  const isDemoUser = demoMode || (typeof request.userId === 'string' && request.userId.startsWith('demo_'));
-  if (isDemoUser) {
-    console.log(`[FaceVerify] mode=demo_auto DEMO_BYPASS: Skipping Convex call, auto-approving`);
-    // Simulate brief delay for UX
-    await new Promise(resolve => setTimeout(resolve, 1000));
-    return {
-      status: 'PASS',
-      success: true,
-      score: 100,
-      message: 'Verified (Demo)',
-      reason: 'Demo mode - auto-approved',
-      reasonCode: 'MATCH',
-      mode: 'demo_auto',
-    };
-  }
+  console.log(`[FACE_VERIFY_START] mode=${mode} userId=${request.userId} frames=${request.frames.length}`);
 
   // Select the best frame for verification
   const bestFrame = selectBestFrame(request.frames);
   if (!bestFrame) {
-    console.log(`[FaceVerify] mode=${mode} status=failed reason=no_frames`);
+    console.log(`[FACE_VERIFY_FAIL] mode=${mode} reason=no_frames userId=${request.userId}`);
     return {
       status: 'FAIL',
       success: false,
@@ -229,24 +215,29 @@ async function serverVerify(request: FaceVerificationRequest, demoMode: boolean)
     };
   }
 
-  console.log(`[FaceVerify] mode=${mode} Selected best frame for verification`);
+  console.log(`[FACE_VERIFY_PROGRESS] mode=${mode} Selected best frame for verification`);
 
   try {
     // Convert the frame to base64
     const selfieBase64 = await imageToBase64(bestFrame.base64);
-    console.log(`[FaceVerify] mode=${mode} Converted selfie to base64, length=${selfieBase64.length}`);
+    console.log(`[FACE_VERIFY_PROGRESS] mode=${mode} Converted selfie to base64, length=${selfieBase64.length}`);
 
-    // Call the Convex action (demo mode determined server-side)
-    console.log(`[FaceVerify] mode=${mode} Calling Convex faceVerification.compareFaces...`);
+    // Call the Convex action (demo mode determined server-side via process.env.DEMO_MODE)
+    console.log(`[FACE_VERIFY_PROGRESS] mode=${mode} Calling Convex faceVerification.compareFaces...`);
 
-    // P0 SECURITY FIX: Removed client-controlled isDemoMode parameter
-    // Demo mode is now determined server-side via process.env.DEMO_MODE
     const result = await convex.action(api.faceVerification.compareFaces, {
       userId: request.userId,
       selfieBase64,
     });
 
-    console.log(`[FaceVerify] mode=${result.mode} status=${result.status} reasonCode=${result.reasonCode}`);
+    // Log result based on status
+    if (result.status === 'PASS') {
+      console.log(`[FACE_VERIFY_SUCCESS] mode=${result.mode} userId=${request.userId} score=${result.score} reasonCode=${result.reasonCode}`);
+    } else if (result.status === 'FAIL') {
+      console.log(`[FACE_VERIFY_FAIL] mode=${result.mode} userId=${request.userId} reasonCode=${result.reasonCode}`);
+    } else {
+      console.log(`[FACE_VERIFY_PENDING] mode=${result.mode} userId=${request.userId} reasonCode=${result.reasonCode}`);
+    }
 
     return {
       status: result.status,
@@ -260,7 +251,8 @@ async function serverVerify(request: FaceVerificationRequest, demoMode: boolean)
     };
 
   } catch (error: any) {
-    console.error(`[FaceVerify] mode=${mode} status=failed error=${error.message}`);
+    // SAFE GUARD: Any error results in FAIL status - user is NOT verified
+    console.error(`[FACE_VERIFY_FAIL] mode=${mode} userId=${request.userId} error=${error.message}`);
 
     return {
       status: 'FAIL',
@@ -290,18 +282,17 @@ async function serverVerify(request: FaceVerificationRequest, demoMode: boolean)
  */
 export async function verifyFace(request: FaceVerificationRequest): Promise<FaceVerificationResponse> {
   const mode = isDemoMode ? 'demo_auto' : 'manual_review';
-  console.log('[FaceVerify] ========================================');
-  console.log(`[FaceVerify] mode=${mode} Starting face verification`);
-  console.log(`[FaceVerify] mode=${mode} userId=${request.userId}`);
-  console.log(`[FaceVerify] mode=${mode} frames=${request.frames.length}`);
-  console.log('[FaceVerify] ========================================');
+  console.log('[FACE_VERIFY_START] ========================================');
+  console.log(`[FACE_VERIFY_START] mode=${mode} userId=${request.userId} frames=${request.frames.length}`);
+  console.log('[FACE_VERIFY_START] ========================================');
 
   try {
-    // Both demo and live modes use server verification
-    // Server handles the mode-specific logic (auto-approve vs manual review)
-    return await serverVerify(request, isDemoMode);
+    // All verification goes through server - mode is determined server-side
+    const result = await serverVerify(request, isDemoMode);
+    return result;
   } catch (error: any) {
-    console.error(`[FaceVerify] mode=${mode} Unexpected error:`, error);
+    // SAFE GUARD: Any unexpected error results in FAIL - user is NOT verified
+    console.error(`[FACE_VERIFY_FAIL] mode=${mode} userId=${request.userId} unexpected_error=${error.message}`);
 
     return {
       status: 'FAIL',
