@@ -1493,6 +1493,7 @@ export default function ChatRoomScreen() {
       const pendingId = `pending_${clientId}`;
       const textToRestore = trimmed; // Save text before clearing for retry on failure
 
+      // P0-005 FINAL FIX: Include status and clientId for failed message persistence
       const pendingMsg: DemoChatMessage = {
         id: pendingId,
         roomId: roomIdStr,
@@ -1501,6 +1502,9 @@ export default function ChatRoomScreen() {
         type: 'text',
         text: trimmed,
         createdAt: now,
+        status: 'sending',
+        _clientId: clientId,
+        _retryText: trimmed, // Preserve original text for retry
       };
       setPendingMessages((prev) => [...prev, pendingMsg]);
       setInputText('');
@@ -1535,17 +1539,66 @@ export default function ChatRoomScreen() {
           setCurrentMentions([]);
         }
       } catch (error: any) {
-        // STABILITY FIX: On failure, restore text and show error alert
+        // P0-005 FINAL FIX: Mark message as failed instead of removing
+        // Message stays visible with failed state; user can retry via tap
         if (mountedRef.current) {
-          setPendingMessages((prev) => prev.filter((m) => m.id !== pendingId));
-          setInputText(textToRestore);
+          setPendingMessages((prev) =>
+            prev.map((m) =>
+              m.id === pendingId ? { ...m, status: 'failed' as const } : m
+            )
+          );
         }
-        Alert.alert('Send Failed', error?.message || 'Message could not be sent. Please try again.');
+        Alert.alert('Send Failed', error?.message || 'Message could not be sent. Tap the message to retry.');
       } finally {
         isSendingRef.current = false;
       }
     }
   }, [inputText, roomIdStr, hasValidRoomId, addStoreMessage, authUserId, sendMessageMutation, myNickname, replyToMessage, currentMentions, composerHeight, sendActivityHeartbeat]);
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // P0-005 FINAL FIX: Retry handler for failed messages
+  // ─────────────────────────────────────────────────────────────────────────
+  const handleRetryMessage = useCallback(
+    async (failedMsg: DemoChatMessage) => {
+      if (!roomIdStr || !authUserId || !failedMsg._retryText || !failedMsg._clientId) {
+        return;
+      }
+      // Prevent double-retry
+      if (failedMsg.status !== 'failed') return;
+
+      // Mark as sending again
+      setPendingMessages((prev) =>
+        prev.map((m) =>
+          m.id === failedMsg.id ? { ...m, status: 'sending' as const } : m
+        )
+      );
+
+      try {
+        await sendMessageMutation({
+          roomId: roomIdStr as Id<'chatRooms'>,
+          authUserId: authUserId!,
+          senderId: authUserId as Id<'users'>,
+          text: failedMsg._retryText,
+          clientId: failedMsg._clientId,
+        });
+        // Success: remove pending message (server message will appear)
+        if (mountedRef.current) {
+          setPendingMessages((prev) => prev.filter((m) => m.id !== failedMsg.id));
+        }
+      } catch (error: any) {
+        // Still failed: mark as failed again
+        if (mountedRef.current) {
+          setPendingMessages((prev) =>
+            prev.map((m) =>
+              m.id === failedMsg.id ? { ...m, status: 'failed' as const } : m
+            )
+          );
+        }
+        Alert.alert('Retry Failed', error?.message || 'Could not send message. Please try again.');
+      }
+    },
+    [roomIdStr, authUserId, sendMessageMutation]
+  );
 
   const handlePanelChange = useCallback((_panel: ComposerPanel) => {}, []);
 
@@ -2371,7 +2424,11 @@ export default function ChatRoomScreen() {
         });
       };
 
-      return (
+      // P0-005 FINAL FIX: Show failed indicator with retry option
+      const isFailed = msg.status === 'failed';
+      const isSending = msg.status === 'sending';
+
+      const messageElement = (
         <ChatMessageItem
           messageId={msg.id}
           senderName={msg.senderName}
@@ -2382,11 +2439,11 @@ export default function ChatRoomScreen() {
           text={msg.text || ''}
           timestamp={msg.createdAt}
           isMe={isMe}
-          dimmed={isMuted}
+          dimmed={isMuted || isSending}
           messageType={(msg.type || 'text') as 'text' | 'image' | 'video' | 'audio'}
           mediaUrl={msg.mediaUrl}
           audioUrl={msg.audioUrl}
-          onLongPress={(pageX, pageY) => handleMessageLongPress(msg, pageX, pageY)}
+          onLongPress={isFailed ? undefined : (pageX, pageY) => handleMessageLongPress(msg, pageX, pageY)}
           onAvatarPress={() => handleAvatarPress(msg.senderId)}
           onNamePress={() => handleAvatarPress(msg.senderId)}
           onMediaPress={handleMediaPress}
@@ -2394,7 +2451,7 @@ export default function ChatRoomScreen() {
           showAvatar={showAvatar}
           replyTo={replyTo}
           onReplyTap={handleScrollToMessage}
-          onSwipeReply={handleSwipeReply}
+          onSwipeReply={isFailed ? undefined : handleSwipeReply}
           isHighlighted={highlightedMessageIdRef.current === msg.id}
           mentions={msg.mentions}
           currentUserId={authUserId ?? undefined}
@@ -2402,9 +2459,24 @@ export default function ChatRoomScreen() {
           onReactionTap={(emoji) => handleReactionChipTap(msg.id, emoji)}
         />
       );
+
+      // Wrap failed messages with retry indicator
+      if (isFailed) {
+        return (
+          <Pressable onPress={() => handleRetryMessage(msg)}>
+            {messageElement}
+            <View style={{ flexDirection: 'row', justifyContent: 'flex-end', alignItems: 'center', paddingRight: 16, marginTop: -4, marginBottom: 8 }}>
+              <Text style={{ fontSize: 12, color: '#EF4444', marginRight: 4 }}>Failed to send</Text>
+              <Text style={{ fontSize: 12, color: '#3B82F6' }}>Tap to retry</Text>
+            </View>
+          </Pressable>
+        );
+      }
+
+      return messageElement;
     },
     // PERF-FIX: Removed invertedListItems, highlightedMessageId, reactionsMap from deps (using refs)
-    [mutedUserIds, authUserId, myAvatarUrl, handleMessageLongPress, handleAvatarPress, handleMediaPress, handleScrollToMessage, handleReactionChipTap]
+    [mutedUserIds, authUserId, myAvatarUrl, handleMessageLongPress, handleAvatarPress, handleMediaPress, handleScrollToMessage, handleReactionChipTap, handleRetryMessage]
   );
 
   const keyExtractor = useCallback((item: ListItem) => item.id, []);

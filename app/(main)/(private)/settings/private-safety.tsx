@@ -1,5 +1,5 @@
 import React, { useState, useCallback } from 'react';
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Switch } from 'react-native';
+import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Switch, ActivityIndicator } from 'react-native';
 import { useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
@@ -9,6 +9,7 @@ import { INCOGNITO_COLORS } from '@/lib/constants';
 import { usePrivateProfileStore } from '@/stores/privateProfileStore';
 import { useAuthStore } from '@/stores/authStore';
 import { isDemoMode } from '@/hooks/useConvex';
+import { Toast } from '@/components/ui/Toast';
 
 const C = INCOGNITO_COLORS;
 
@@ -47,23 +48,41 @@ export default function SafetyScreen() {
 
   const [expandedTip, setExpandedTip] = useState<string | null>(null);
 
+  // P0-001 FIX: Track saving state to prevent double-toggles and show loading
+  const [isSaving, setIsSaving] = useState(false);
+
   const toggleTip = (tipKey: string) => {
     setExpandedTip(expandedTip === tipKey ? null : tipKey);
   };
 
-  // P0-2 FIX: Handle Safe Mode toggle with backend persistence
-  const handleSafeModeChange = useCallback((enabled: boolean) => {
-    setSafeMode(enabled);
-    // Persist to backend
-    if (!isDemoMode && userId) {
-      updatePrivateProfile({
+  // P0-001 FIX: Handle Safe Mode toggle - waits for backend confirmation before updating UI
+  const handleSafeModeChange = useCallback(async (enabled: boolean) => {
+    if (isSaving) return; // Prevent double-toggle while saving
+
+    if (isDemoMode) {
+      setSafeMode(enabled);
+      return;
+    }
+
+    if (!userId) {
+      Toast.show('Please sign in to change settings.');
+      return;
+    }
+
+    setIsSaving(true);
+    try {
+      await updatePrivateProfile({
         authUserId: userId,
         safeMode: enabled,
-      }).catch((error) => {
-        if (__DEV__) console.error('[PrivateSafety] Backend sync failed:', error);
       });
+      setSafeMode(enabled);
+    } catch (error) {
+      if (__DEV__) console.error('[PrivateSafety] Backend sync failed:', error);
+      Toast.show('Failed to save setting. Please try again.');
+    } finally {
+      setIsSaving(false);
     }
-  }, [setSafeMode, userId, updatePrivateProfile]);
+  }, [isSaving, setSafeMode, userId, updatePrivateProfile]);
 
   return (
     <View style={[styles.container, { paddingTop: insets.top }]}>
@@ -95,12 +114,16 @@ export default function SafetyScreen() {
                   </Text>
                 </View>
               </View>
-              <Switch
-                value={safeMode}
-                onValueChange={handleSafeModeChange}
-                trackColor={{ false: C.border, true: C.primary }}
-                thumbColor="#FFF"
-              />
+              {isSaving ? (
+                <ActivityIndicator size="small" color={C.primary} />
+              ) : (
+                <Switch
+                  value={safeMode}
+                  onValueChange={handleSafeModeChange}
+                  trackColor={{ false: C.border, true: C.primary }}
+                  thumbColor="#FFF"
+                />
+              )}
             </View>
           </View>
         </View>

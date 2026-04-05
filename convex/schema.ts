@@ -2259,6 +2259,17 @@ export default defineSchema({
   })
     .index('by_user', ['userId']),
 
+  // P1-004 FIX: Phase-2 Typing Status (ephemeral, isolated from Phase-1)
+  // Tracks when users are typing in Phase-2 private conversations
+  privateTypingStatus: defineTable({
+    conversationId: v.id('privateConversations'),
+    userId: v.id('users'),
+    isTyping: v.boolean(),
+    updatedAt: v.number(),
+  })
+    .index('by_conversation', ['conversationId'])
+    .index('by_user_conversation', ['userId', 'conversationId']),
+
   // User support tickets for Help & Support inquiries
   supportTickets: defineTable({
     userId: v.id('users'),
@@ -2370,7 +2381,9 @@ export default defineSchema({
     createdAt: v.number(),
   })
     .index('by_thread', ['threadId', 'createdAt'])   // Messages in thread, ordered
-    .index('by_sender', ['senderId', 'createdAt']),  // Messages by sender (for moderation)
+    .index('by_sender', ['senderId', 'createdAt'])   // Messages by sender (for moderation)
+    // P0-004 FIX: Index for efficient unread count query (avoids O(n²) scan)
+    .index('by_thread_read_status', ['threadId', 'readAt']),
 
   // ═══════════════════════════════════════════════════════════════════════════
   // Chat Room Mentions (Mention Inbox / Notification Records)

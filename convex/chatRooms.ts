@@ -5510,16 +5510,15 @@ export const getUnreadDmCountsByRoom = query({
           ? thread.participant2Id
           : thread.participant1Id;
 
-      // Count unread messages from peer
+      // P0-004 FIX: Use optimized index to query only unread messages
+      // Old query was O(n) per thread (fetched ALL messages, filtered in JS)
+      // New query only fetches unread messages, then filters by sender
       const unreadMessages = await ctx.db
         .query('chatRoomDmMessages')
-        .withIndex('by_thread', (q) => q.eq('threadId', thread._id))
-        .filter((q) =>
-          q.and(
-            q.eq(q.field('senderId'), peerId),
-            q.eq(q.field('readAt'), undefined)
-          )
+        .withIndex('by_thread_read_status', (q) =>
+          q.eq('threadId', thread._id).eq('readAt', undefined)
         )
+        .filter((q) => q.eq(q.field('senderId'), peerId))
         .collect();
 
       if (unreadMessages.length > 0) {

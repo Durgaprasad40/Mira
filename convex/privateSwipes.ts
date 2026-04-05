@@ -516,11 +516,12 @@ export const getIncomingLikes = query({
   handler: async (ctx, args) => {
     const { userId: requestedUserId, limit = 50 } = args;
 
-    // P0-SECURITY FIX: MANDATORY auth validation - fail closed
+    // P0-SECURITY FIX: MANDATORY auth validation - return empty during hydration
+    // Changed from throw to graceful return to prevent app crashes during auth sync
     const identity = await ctx.auth.getUserIdentity();
     if (!identity?.subject) {
-      console.log('[LIKES_FETCH_DENIED] No auth identity');
-      throw new Error('Authentication required');
+      console.log('[LIKES_FETCH_HYDRATING] No auth identity yet - returning empty (not a security issue)');
+      return []; // Return empty during hydration instead of throwing
     }
 
     // Resolve auth identity to Convex user ID
@@ -608,11 +609,12 @@ export const getIncomingLikesCount = query({
   handler: async (ctx, args) => {
     const { userId: requestedUserId } = args;
 
-    // P0-SECURITY FIX: MANDATORY auth validation - fail closed
+    // P0-SECURITY FIX: MANDATORY auth validation - return 0 during hydration
+    // Changed from throw to graceful return to prevent app crashes during auth sync
     const identity = await ctx.auth.getUserIdentity();
     if (!identity?.subject) {
-      console.log('[LIKES_FETCH_DENIED] No auth identity (count)');
-      throw new Error('Authentication required');
+      console.log('[LIKES_COUNT_HYDRATING] No auth identity yet - returning 0 (not a security issue)');
+      return 0; // Return 0 during hydration instead of throwing
     }
 
     // Resolve auth identity to Convex user ID

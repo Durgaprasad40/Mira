@@ -379,6 +379,74 @@ export default function PrivateChatScreen() {
   const generateUploadUrl = useMutation(api.photos.generateUploadUrl); // P0-003: For voice upload
   // P1-001: Secure media upload mutation
   const generateSecureMediaUploadUrl = useMutation(api.privateConversations.generateSecureMediaUploadUrl);
+  // P1-004 FIX: Typing indicator mutation
+  const setTypingStatusMutation = useMutation(api.privateConversations.setPrivateTypingStatus);
+
+  // P1-004 FIX: Typing indicator query subscription
+  const typingStatus = useQuery(
+    api.privateConversations.getPrivateTypingStatus,
+    id && currentUserId
+      ? { conversationId: id as Id<'privateConversations'>, authUserId: currentUserId }
+      : 'skip'
+  );
+  const isOtherUserTyping = typingStatus?.isTyping ?? false;
+
+  // P1-004 FIX: Debounced typing status update
+  const typingTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const lastTypingUpdateRef = useRef<number>(0);
+
+  const updateTypingStatus = useCallback((isTyping: boolean) => {
+    if (!id || !token) return;
+
+    const now = Date.now();
+    // Debounce: Only send if 500ms has passed since last update
+    if (isTyping && now - lastTypingUpdateRef.current < 500) return;
+
+    lastTypingUpdateRef.current = now;
+
+    // Clear existing timeout
+    if (typingTimeoutRef.current) {
+      clearTimeout(typingTimeoutRef.current);
+      typingTimeoutRef.current = null;
+    }
+
+    // Send typing status to backend
+    setTypingStatusMutation({
+      token,
+      conversationId: id as Id<'privateConversations'>,
+      isTyping,
+    }).catch(() => {
+      // Silent fail - typing is non-critical
+    });
+
+    // Auto-clear typing after 3 seconds of no activity
+    if (isTyping) {
+      typingTimeoutRef.current = setTimeout(() => {
+        setTypingStatusMutation({
+          token,
+          conversationId: id as Id<'privateConversations'>,
+          isTyping: false,
+        }).catch(() => {});
+      }, 3000);
+    }
+  }, [id, token, setTypingStatusMutation]);
+
+  // Cleanup typing timeout on unmount
+  useEffect(() => {
+    return () => {
+      if (typingTimeoutRef.current) {
+        clearTimeout(typingTimeoutRef.current);
+      }
+      // Clear typing status on unmount
+      if (id && token) {
+        setTypingStatusMutation({
+          token,
+          conversationId: id as Id<'privateConversations'>,
+          isTyping: false,
+        }).catch(() => {});
+      }
+    };
+  }, [id, token, setTypingStatusMutation]);
 
   // ═══════════════════════════════════════════════════════════════════════════
   // PHASE 1 PARITY: Truth/Dare Game Session Management
@@ -1781,8 +1849,11 @@ export default function PrivateChatScreen() {
             {conversation.participantName}
           </Text>
           {/* PHASE 1 PARITY: Online status text exactly like Phase 1 */}
-          <Text style={styles.headerStatus}>
+          {/* P1-004 FIX: Show "typing..." when other user is typing */}
+          <Text style={[styles.headerStatus, isOtherUserTyping && styles.headerStatusTyping]}>
             {(() => {
+              // P1-004 FIX: Typing indicator takes priority
+              if (isOtherUserTyping) return 'typing...';
               const lastActive = (conversation as any).participantLastActive ?? 0;
               const now = Date.now();
               const diff = now - lastActive;
@@ -2001,7 +2072,15 @@ export default function PrivateChatScreen() {
                 placeholder={isRecording ? 'Recording voice message...' : 'Type a message...'}
                 placeholderTextColor={isRecording ? '#FF4444' : C.textLight}
                 value={text}
-                onChangeText={setText}
+                onChangeText={(newText) => {
+                  setText(newText);
+                  // P1-004 FIX: Update typing status when user types
+                  if (newText.length > 0) {
+                    updateTypingStatus(true);
+                  } else {
+                    updateTypingStatus(false);
+                  }
+                }}
                 multiline
                 scrollEnabled
                 textAlignVertical="top"
@@ -2255,6 +2334,8 @@ const styles = StyleSheet.create({
   headerInfo: { flex: 1, marginLeft: 10 },
   headerName: { fontSize: 16, fontWeight: '600' as const, color: C.text },
   headerStatus: { fontSize: 13, color: C.textLight, marginTop: 2 },
+  // P1-004 FIX: Typing indicator style - subtle green color
+  headerStatusTyping: { color: '#22C55E', fontStyle: 'italic' },
   moreButton: { padding: 8 },
   gameButton: {
     padding: 4,

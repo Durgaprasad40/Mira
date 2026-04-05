@@ -274,6 +274,8 @@ export const updateFieldsByAuthId = mutation({
       chatRooms: v.optional(v.boolean()),
       truthOrDare: v.optional(v.boolean()),
     })),
+    // P0-003 FIX: Consent timestamp persistence
+    consentAcceptedAt: v.optional(v.number()),
   },
   handler: async (ctx, args) => {
     const userId = await resolveUserIdByAuthId(ctx, args.authUserId);

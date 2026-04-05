@@ -411,11 +411,22 @@ export function Phase2ProtectedMediaViewer({
 
   // SAFETY GUARD: If viewer opens but message is already expired, close immediately
   // This prevents any race condition from showing an expired photo
+  // P2-003 FIX: Also respond when backend updates isExpired while viewer is open
   useEffect(() => {
     if (visible && effectiveIsExpired) {
+      // Clear timer to prevent further countdown
+      clearTimer();
       onCloseRef.current();
     }
-  }, [visible, effectiveIsExpired]);
+  }, [visible, effectiveIsExpired, clearTimer]);
+
+  // P2-003 FIX: If backend timerEndsAt changes (e.g., was corrected), update local ref immediately
+  // This ensures the countdown timer uses the authoritative backend value
+  useEffect(() => {
+    if (messageData?.timerEndsAt && messageData.timerEndsAt !== timerEndsAtRef.current) {
+      timerEndsAtRef.current = messageData.timerEndsAt;
+    }
+  }, [messageData?.timerEndsAt]);
 
   // Mark as viewed when viewer opens (for ONCE expiration tracking - tap mode)
   useEffect(() => {

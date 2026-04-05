@@ -1,11 +1,18 @@
 /**
- * STORAGE POLICY: NO local persistence. Convex is ONLY source of truth.
- * Store is in-memory only. Any required rehydration must come from Convex queries/mutations.
+ * STORAGE POLICY: Convex is ONLY source of truth for profile data.
+ * Store is in-memory only EXCEPT for onboarding wizard progress (P0-002 fix).
+ *
+ * P0-002 FIX: Onboarding wizard state is persisted to AsyncStorage to prevent
+ * data loss when app closes during onboarding. This is cleared once setup completes.
  */
 import { create } from 'zustand';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import type { PrivateIntentKey, PrivateDesireTag, PrivateBoundary, DesireCategory, PhotoSlots9 } from '@/types';
 import { createEmptyPhotoSlots } from '@/types';
 import type { Phase2PromptAnswer, PreferenceStrength, PreferenceStrengthValue, IntentMatchValue } from '@/lib/privateConstants';
+
+// P0-002 FIX: AsyncStorage key for onboarding wizard progress
+const ONBOARDING_PROGRESS_KEY = 'phase2_onboarding_progress';
 
 /** Parse "YYYY-MM-DD" to local Date (noon to avoid DST issues) */
 function parseDOBString(dobString: string): Date {
@@ -237,6 +244,11 @@ interface PrivateProfileState {
   // Phase-2 Notifications Actions
   setNotificationsEnabled: (value: boolean) => void;
   setNotificationCategory: (key: string, value: boolean) => void;
+
+  // P0-002 FIX: Save/restore onboarding progress to AsyncStorage
+  saveOnboardingProgress: () => Promise<void>;
+  restoreOnboardingProgress: () => Promise<boolean>; // Returns true if progress was restored
+  clearOnboardingProgress: () => Promise<void>;
 
   // ST-001 FIX: Hydrate store from Convex on app restart
   hydrateFromConvex: (convexProfile: {
@@ -537,11 +549,15 @@ export const usePrivateProfileStore = create<PrivateProfileState>()((set) => ({
       console.log(`[P2 IMPORT] end (duration=${Date.now() - startTime}ms)`);
     }
   },
-  completeSetup: () => set({
-    isSetupComplete: true,
-    phase2OnboardingCompleted: true, // Permanent flag - never shows onboarding again
-    phase2SetupVersion: CURRENT_PHASE2_SETUP_VERSION,
-  }),
+  completeSetup: () => {
+    set({
+      isSetupComplete: true,
+      phase2OnboardingCompleted: true, // Permanent flag - never shows onboarding again
+      phase2SetupVersion: CURRENT_PHASE2_SETUP_VERSION,
+    });
+    // P0-002 FIX: Clear saved onboarding progress when setup completes
+    usePrivateProfileStore.getState().clearOnboardingProgress();
+  },
   setPhase2PhotosConfirmed: (confirmed) => set({ phase2PhotosConfirmed: confirmed }),
   setPrivateEntryNavLock: (locked) => set({ privateEntryNavLock: locked }),
 
@@ -607,6 +623,141 @@ export const usePrivateProfileStore = create<PrivateProfileState>()((set) => ({
   setNotificationCategory: (key, value) => set((state) => ({
     notificationCategories: { ...state.notificationCategories, [key]: value },
   })),
+
+  // P0-002 FIX: Save onboarding wizard progress to AsyncStorage
+  // Called after each step to prevent data loss on app close
+  saveOnboardingProgress: async () => {
+    const state = usePrivateProfileStore.getState();
+
+    // Only save if onboarding is not yet complete
+    if (state.phase2OnboardingCompleted || state.isSetupComplete) {
+      return;
+    }
+
+    const progressData = {
+      currentStep: state.currentStep,
+      acceptedTermsAt: state.acceptedTermsAt,
+      phase1PhotoSlots: state.phase1PhotoSlots,
+      selectedPhotoIds: state.selectedPhotoIds,
+      selectedPhotoUrls: state.selectedPhotoUrls,
+      blurredPhotoLocalUris: state.blurredPhotoLocalUris,
+      blurredStorageIds: state.blurredStorageIds,
+      blurredPhotoUrls: state.blurredPhotoUrls,
+      photoBlurSlots: state.photoBlurSlots,
+      intentKeys: state.intentKeys,
+      desireTags: state.desireTags,
+      boundaries: state.boundaries,
+      privateBio: state.privateBio,
+      promptAnswers: state.promptAnswers,
+      displayName: state.displayName,
+      age: state.age,
+      city: state.city,
+      gender: state.gender,
+      hobbies: state.hobbies,
+      height: state.height,
+      weight: state.weight,
+      smoking: state.smoking,
+      drinking: state.drinking,
+      education: state.education,
+      religion: state.religion,
+      phase2PhotosConfirmed: state.phase2PhotosConfirmed,
+      savedAt: Date.now(),
+    };
+
+    try {
+      await AsyncStorage.setItem(ONBOARDING_PROGRESS_KEY, JSON.stringify(progressData));
+      if (__DEV__) {
+        console.log('[P2 ONBOARDING] Progress saved at step', state.currentStep);
+      }
+    } catch (error) {
+      if (__DEV__) {
+        console.error('[P2 ONBOARDING] Failed to save progress:', error);
+      }
+    }
+  },
+
+  // P0-002 FIX: Restore onboarding wizard progress from AsyncStorage
+  // Called on app load before onboarding screen mounts
+  restoreOnboardingProgress: async () => {
+    try {
+      const stored = await AsyncStorage.getItem(ONBOARDING_PROGRESS_KEY);
+      if (!stored) return false;
+
+      const progressData = JSON.parse(stored);
+
+      // Validate saved data is not too old (24 hours max)
+      const savedAt = progressData.savedAt || 0;
+      const maxAge = 24 * 60 * 60 * 1000; // 24 hours
+      if (Date.now() - savedAt > maxAge) {
+        await AsyncStorage.removeItem(ONBOARDING_PROGRESS_KEY);
+        if (__DEV__) {
+          console.log('[P2 ONBOARDING] Expired progress cleared');
+        }
+        return false;
+      }
+
+      // Restore only if not already completed
+      const currentState = usePrivateProfileStore.getState();
+      if (currentState.phase2OnboardingCompleted || currentState.isSetupComplete) {
+        await AsyncStorage.removeItem(ONBOARDING_PROGRESS_KEY);
+        return false;
+      }
+
+      // Restore the saved state
+      usePrivateProfileStore.setState({
+        currentStep: progressData.currentStep ?? 1,
+        acceptedTermsAt: progressData.acceptedTermsAt ?? null,
+        phase1PhotoSlots: progressData.phase1PhotoSlots ?? createEmptyPhotoSlots(),
+        selectedPhotoIds: progressData.selectedPhotoIds ?? [],
+        selectedPhotoUrls: progressData.selectedPhotoUrls ?? [],
+        blurredPhotoLocalUris: progressData.blurredPhotoLocalUris ?? [],
+        blurredStorageIds: progressData.blurredStorageIds ?? [],
+        blurredPhotoUrls: progressData.blurredPhotoUrls ?? [],
+        photoBlurSlots: progressData.photoBlurSlots ?? [true, true, true, true, true, true, true, true, true],
+        intentKeys: progressData.intentKeys ?? [],
+        desireTags: progressData.desireTags ?? [],
+        boundaries: progressData.boundaries ?? [],
+        privateBio: progressData.privateBio ?? '',
+        promptAnswers: progressData.promptAnswers ?? [],
+        displayName: progressData.displayName ?? '',
+        age: progressData.age ?? 0,
+        city: progressData.city ?? '',
+        gender: progressData.gender ?? '',
+        hobbies: progressData.hobbies ?? [],
+        height: progressData.height ?? null,
+        weight: progressData.weight ?? null,
+        smoking: progressData.smoking ?? null,
+        drinking: progressData.drinking ?? null,
+        education: progressData.education ?? null,
+        religion: progressData.religion ?? null,
+        phase2PhotosConfirmed: progressData.phase2PhotosConfirmed ?? false,
+      });
+
+      if (__DEV__) {
+        console.log('[P2 ONBOARDING] Progress restored at step', progressData.currentStep);
+      }
+      return true;
+    } catch (error) {
+      if (__DEV__) {
+        console.error('[P2 ONBOARDING] Failed to restore progress:', error);
+      }
+      return false;
+    }
+  },
+
+  // P0-002 FIX: Clear saved onboarding progress (called when setup completes)
+  clearOnboardingProgress: async () => {
+    try {
+      await AsyncStorage.removeItem(ONBOARDING_PROGRESS_KEY);
+      if (__DEV__) {
+        console.log('[P2 ONBOARDING] Progress cleared');
+      }
+    } catch (error) {
+      if (__DEV__) {
+        console.error('[P2 ONBOARDING] Failed to clear progress:', error);
+      }
+    }
+  },
 
   // ST-001 FIX: Hydrate store from Convex profile on app restart
   // This ensures Phase-2 profile state survives app restarts

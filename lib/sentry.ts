@@ -1,40 +1,102 @@
 /**
  * Sentry Configuration for Mira
  *
- * P0-1 STABILITY FIX: Production crash reporting
- * SENTRY-DEBUG: Full instrumentation enabled for comprehensive debugging
+ * APP-WIDE SENTRY: Full crash reporting and error tracking for the entire app.
  *
  * This module:
- * - Initializes Sentry with FULL debug logging (tracesSampleRate=1.0)
- * - Provides helpers to capture errors with context
+ * - Initializes Sentry with app-wide coverage (all features)
+ * - Provides helpers to capture errors with feature/screen context
  * - Attaches user context when available
- * - Patches console.log/warn/error to create breadcrumbs
  * - Provides breadcrumb helpers for app-specific events
+ * - Auto-tags events with current feature for filtering in Sentry dashboard
+ *
+ * PRIVACY: Only internal IDs are sent. No personal content (messages, names, etc.)
+ *
+ * PERFORMANCE: UI interaction tracing disabled to prevent jank.
+ * Native crash reporting and JS errors are fully captured.
  *
  * USAGE:
  * - Import { initSentry } in app root and call once at startup
  * - Import { captureException, setUserContext, trackEvent } where needed
+ * - Use setCurrentFeature() to tag errors by feature
  */
 
 import * as Sentry from '@sentry/react-native';
-import { isChatRoomsFeatureActive, currentFeatureRef } from './sentryFeatureFilter';
+import {
+  getCurrentFeature,
+  getCurrentScreen,
+  getFeatureGroup,
+  currentFeatureRef,
+  currentScreenRef,
+  setCurrentFeature,
+  setCurrentScreen,
+  SENTRY_FEATURES,
+  type SentryFeature,
+} from './sentryFeatureFilter';
 
 // ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
 
 // TODO: Replace with your actual Sentry DSN from sentry.io project settings
-// Format: https://<key>@<org>.ingest.sentry.io/<project-id>
 const SENTRY_DSN = process.env.EXPO_PUBLIC_SENTRY_DSN || '';
 
 // Environment detection
 const IS_DEV = __DEV__;
 const ENVIRONMENT = IS_DEV ? 'development' : 'production';
 
-// SENTRY-DEBUG: Store original console methods for patching
+// App version (set via EAS build or package.json)
+const APP_VERSION = process.env.EXPO_PUBLIC_APP_VERSION || '1.0.0';
+const BUILD_NUMBER = process.env.EXPO_PUBLIC_BUILD_NUMBER || '1';
+
+// Store original console methods for internal use
 const originalConsoleLog = console.log;
 const originalConsoleWarn = console.warn;
 const originalConsoleError = console.error;
+
+// ---------------------------------------------------------------------------
+// Sensitive Data Filters
+// ---------------------------------------------------------------------------
+
+// Keywords that indicate sensitive data - scrub from error messages
+const SENSITIVE_KEYWORDS = [
+  'password', 'token', 'secret', 'api_key', 'apikey', 'bearer',
+  'phone', 'email', 'address', 'location', 'coordinates',
+  'message_content', 'private_bio', 'real_name',
+];
+
+/**
+ * Scrub sensitive data from error messages and context.
+ */
+function scrubSensitiveData(data: unknown): unknown {
+  if (typeof data === 'string') {
+    let scrubbed = data;
+    SENSITIVE_KEYWORDS.forEach(keyword => {
+      const regex = new RegExp(`(${keyword})[=:]["']?[^"'\\s,}]+`, 'gi');
+      scrubbed = scrubbed.replace(regex, `$1=[REDACTED]`);
+    });
+    return scrubbed;
+  }
+
+  if (Array.isArray(data)) {
+    return data.map(scrubSensitiveData);
+  }
+
+  if (data && typeof data === 'object') {
+    const scrubbed: Record<string, unknown> = {};
+    for (const [key, value] of Object.entries(data)) {
+      const lowerKey = key.toLowerCase();
+      if (SENSITIVE_KEYWORDS.some(k => lowerKey.includes(k))) {
+        scrubbed[key] = '[REDACTED]';
+      } else {
+        scrubbed[key] = scrubSensitiveData(value);
+      }
+    }
+    return scrubbed;
+  }
+
+  return data;
+}
 
 // ---------------------------------------------------------------------------
 // Initialization
@@ -49,15 +111,13 @@ let isInitialized = false;
  * Safe to call multiple times - will only initialize once.
  */
 export function initSentry(): void {
-  // Skip if already initialized
   if (isInitialized) {
     return;
   }
 
-  // Skip initialization if no DSN configured (allows running without Sentry in dev)
   if (!SENTRY_DSN) {
     if (IS_DEV) {
-      console.log('[Sentry] No DSN configured - crash reporting disabled');
+      originalConsoleLog('[Sentry] No DSN configured - crash reporting disabled');
     }
     return;
   }
@@ -66,136 +126,134 @@ export function initSentry(): void {
     Sentry.init({
       dsn: SENTRY_DSN,
       environment: ENVIRONMENT,
+      release: `mira@${APP_VERSION}+${BUILD_NUMBER}`,
 
-      // Enable Sentry in all environments when DSN is configured
-      // Safe: DSN presence controls whether events are sent
+      // Enable Sentry when DSN is configured
       enabled: true,
 
-      // SENTRY-DEBUG: Enable debug mode for full console output
-      debug: true,
+      // Debug mode only in dev
+      debug: IS_DEV,
 
-      // SENTRY-DEBUG: Enable auto session tracking
+      // Session tracking for crash-free rate
       enableAutoSessionTracking: true,
 
-      // Sample rate for errors (1.0 = 100%)
+      // Capture all errors (100%)
       sampleRate: 1.0,
 
-      // SENTRY-DEBUG: Capture ALL performance traces (100%)
-      tracesSampleRate: 1.0,
+      // Performance tracing - reduced in production for perf
+      tracesSampleRate: IS_DEV ? 1.0 : 0.2,
 
-      // SENTRY-DEBUG: Capture ALL performance profiles (100%)
-      profilesSampleRate: 1.0,
+      // Profiling disabled in prod (can cause perf issues)
+      profilesSampleRate: IS_DEV ? 0.5 : 0,
 
-      // Attach stack traces to all messages
+      // Stack traces on all messages
       attachStacktrace: true,
 
-      // SENTRY-DEBUG: Enable native crash reporting
+      // Native crash reporting
       enableNative: true,
 
-      // PERF-FIX: Disabled - see integrations filter below
-      // enableAutoPerformanceTracing: true,
-
-      // Don't send errors from these domains (add dev/staging if needed)
-      denyUrls: [],
-
-      // Normalize error depths - increased for more context
-      normalizeDepth: 10,
-
-      // SENTRY-DEBUG: Max breadcrumbs to capture
-      maxBreadcrumbs: 100,
-
-      // PERF-FIX: Disable UI interaction tracking to reduce overhead
+      // PERF: Disabled to prevent UI jank
       enableUserInteractionTracing: false,
-      enableAutoPerformanceTracing: false, // Disable auto-instrumentation
+      enableAutoPerformanceTracing: false,
 
-      // Integrations - filter out UI tracking for performance
+      // Normalize error depths
+      normalizeDepth: 8,
+
+      // Breadcrumb limit
+      maxBreadcrumbs: 50,
+
+      // Remove heavy integrations that cause jank
       integrations: (integrations) => {
-        // Remove TouchEventBoundary to prevent UI interaction tracking overhead
         return integrations.filter(
           (i) => i.name !== 'TouchEventBoundary' && i.name !== 'ReactNativeTracing'
         );
       },
 
-      // Before send hook - can modify or drop events
-      // SENTRY-FILTER: Only allow events from Chat Rooms feature
+      // APP-WIDE: Accept all events, tag with feature context
       beforeSend(event, hint) {
-        // SENTRY-FILTER: Check if event has chat_rooms feature tag
-        const featureTag = event.tags?.feature;
+        // Auto-tag with current feature and screen
+        const feature = getCurrentFeature();
+        const screen = getCurrentScreen();
+        const featureGroup = getFeatureGroup(feature);
 
-        if (featureTag === 'chat_rooms') {
-          // Allow chat_rooms events through
-          if (IS_DEV) {
-            originalConsoleLog('[SENTRY-FILTER] Allowing event (feature=chat_rooms):', event.exception?.values?.[0]?.value || event.message);
+        event.tags = {
+          ...event.tags,
+          feature: feature || 'unknown',
+          feature_group: featureGroup,
+          screen: screen || 'unknown',
+        };
+
+        // Add feature context
+        event.contexts = {
+          ...event.contexts,
+          app_context: {
+            feature,
+            screen,
+            feature_group: featureGroup,
+          },
+        };
+
+        // Filter out known non-critical errors
+        const error = hint.originalException;
+        if (error instanceof Error) {
+          const msg = error.message?.toLowerCase() || '';
+          // Skip known benign errors
+          if (
+            msg.includes('unable to activate keep awake') ||
+            msg.includes('network request failed') && !msg.includes('mutation') ||
+            msg.includes('aborted') ||
+            msg.includes('cancelled')
+          ) {
+            return null;
           }
-
-          // Filter out non-critical errors even within chat_rooms
-          const error = hint.originalException;
-          if (error instanceof Error) {
-            if (error.message?.includes('Unable to activate keep awake')) {
-              return null;
-            }
-          }
-
-          return event;
         }
 
-        // SENTRY-FILTER: Also allow if current feature is chat_rooms (for untagged events)
-        if (isChatRoomsFeatureActive()) {
-          // Auto-tag the event with chat_rooms feature
-          event.tags = { ...event.tags, feature: 'chat_rooms' };
-
-          if (IS_DEV) {
-            originalConsoleLog('[SENTRY-FILTER] Allowing event (currentFeature=chat_rooms):', event.exception?.values?.[0]?.value || event.message);
-          }
-
-          const error = hint.originalException;
-          if (error instanceof Error) {
-            if (error.message?.includes('Unable to activate keep awake')) {
-              return null;
-            }
-          }
-
-          return event;
+        // Scrub sensitive data from extras
+        if (event.extra) {
+          event.extra = scrubSensitiveData(event.extra) as Record<string, unknown>;
         }
 
-        // SENTRY-FILTER: Drop all other events (reduce noise)
-        if (IS_DEV) {
-          originalConsoleLog('[SENTRY-FILTER] Dropping event (not chat_rooms):', event.exception?.values?.[0]?.value || event.message);
-        }
-        return null;
+        return event;
       },
 
-      // SENTRY-FILTER: Before breadcrumb hook - only capture Chat Rooms breadcrumbs
+      // APP-WIDE: Accept all breadcrumbs, tag with feature
       beforeBreadcrumb(breadcrumb) {
-        // SENTRY-FILTER: Only capture breadcrumbs when Chat Rooms feature is active
-        if (isChatRoomsFeatureActive()) {
-          return breadcrumb;
+        // Tag breadcrumb with current feature
+        const feature = getCurrentFeature();
+        if (feature) {
+          breadcrumb.data = {
+            ...breadcrumb.data,
+            feature,
+          };
         }
 
-        // SENTRY-FILTER: Drop breadcrumbs from other features
-        return null;
+        // Limit console breadcrumb size
+        if (breadcrumb.category === 'console' && breadcrumb.message) {
+          if (breadcrumb.message.length > 500) {
+            breadcrumb.message = breadcrumb.message.substring(0, 500) + '... [truncated]';
+          }
+        }
+
+        return breadcrumb;
       },
     });
 
     isInitialized = true;
 
-    // SENTRY-DEBUG: Patch console methods to create breadcrumbs
-    patchConsoleMethods();
-
-    // SENTRY-DEBUG: Add initialization breadcrumb
+    // Add initialization breadcrumb
     Sentry.addBreadcrumb({
       category: 'app.lifecycle',
       message: 'Sentry initialized',
       level: 'info',
       data: {
         environment: ENVIRONMENT,
-        debug: true,
-        tracesSampleRate: 1.0,
+        version: APP_VERSION,
+        build: BUILD_NUMBER,
       },
     });
 
     if (IS_DEV) {
-      originalConsoleLog('[Sentry] Initialized with FULL DEBUG MODE (tracesSampleRate=1.0)');
+      originalConsoleLog('[Sentry] Initialized - app-wide coverage enabled');
     }
   } catch (error) {
     originalConsoleError('[Sentry] Failed to initialize:', error);
@@ -203,112 +261,87 @@ export function initSentry(): void {
 }
 
 // ---------------------------------------------------------------------------
-// Console Patching (SENTRY-DEBUG)
+// Feature & Screen Context
 // ---------------------------------------------------------------------------
 
 /**
- * Patch console.log/warn/error to create Sentry breadcrumbs.
- * SENTRY-FILTER: Only captures console output when Chat Rooms feature is active.
+ * Combined helper to set both feature and screen.
+ * Useful for screen-level useEffect hooks.
+ *
+ * @param feature - Feature identifier
+ * @param screen - Screen name
  */
-function patchConsoleMethods(): void {
-  // Patch console.log
-  console.log = (...args: any[]) => {
-    // SENTRY-FILTER: Only create breadcrumb when Chat Rooms is active
-    if (isChatRoomsFeatureActive()) {
-      addBreadcrumbSafe({
-        category: 'console',
-        message: args.map(arg =>
-          typeof arg === 'object' ? JSON.stringify(arg) : String(arg)
-        ).join(' '),
-        level: 'info',
-      });
-    }
-    // Call original
-    originalConsoleLog.apply(console, args);
-  };
+export function setFeatureAndScreen(feature: SentryFeature, screen: string): void {
+  setCurrentFeature(feature);
+  setCurrentScreen(screen);
 
-  // Patch console.warn
-  console.warn = (...args: any[]) => {
-    // SENTRY-FILTER: Only create breadcrumb when Chat Rooms is active
-    if (isChatRoomsFeatureActive()) {
-      addBreadcrumbSafe({
-        category: 'console',
-        message: args.map(arg =>
-          typeof arg === 'object' ? JSON.stringify(arg) : String(arg)
-        ).join(' '),
-        level: 'warning',
-      });
-    }
-    // Call original
-    originalConsoleWarn.apply(console, args);
-  };
-
-  // Patch console.error
-  console.error = (...args: any[]) => {
-    // SENTRY-FILTER: Only create breadcrumb when Chat Rooms is active
-    if (isChatRoomsFeatureActive()) {
-      addBreadcrumbSafe({
-        category: 'console',
-        message: args.map(arg =>
-          typeof arg === 'object' ? JSON.stringify(arg) : String(arg)
-        ).join(' '),
-        level: 'error',
-      });
-    }
-    // Call original
-    originalConsoleError.apply(console, args);
-  };
+  // Add navigation breadcrumb
+  Sentry.addBreadcrumb({
+    category: 'navigation',
+    message: `Entered ${screen}`,
+    level: 'info',
+    data: { feature, screen },
+  });
 }
 
 /**
- * SENTRY-FILTER: Safe breadcrumb wrapper that only adds breadcrumbs
- * when Chat Rooms feature is active.
+ * Clear feature context (call when leaving a feature).
  */
-function addBreadcrumbSafe(breadcrumb: Sentry.Breadcrumb): void {
-  if (isChatRoomsFeatureActive()) {
-    Sentry.addBreadcrumb(breadcrumb);
-  }
+export function clearFeatureContext(): void {
+  setCurrentFeature(null);
+  setCurrentScreen(null);
 }
 
 // ---------------------------------------------------------------------------
-// Event Tracking (SENTRY-DEBUG)
+// Event Tracking
 // ---------------------------------------------------------------------------
 
 /**
  * Track an app-specific event with Sentry breadcrumb.
- * Use this for important app events like message send, voice playback, etc.
  *
- * @param category - Event category (e.g., 'message', 'voice', 'navigation')
- * @param action - Event action (e.g., 'send', 'play', 'navigate')
- * @param data - Optional additional data
+ * @param category - Event category
+ * @param action - Event action
+ * @param data - Optional additional data (will be scrubbed)
  */
 export function trackEvent(
   category: string,
   action: string,
   data?: Record<string, unknown>
 ): void {
-  if (!isInitialized && !SENTRY_DSN) {
-    return;
-  }
+  if (!isInitialized && !SENTRY_DSN) return;
+
+  const safeData = data ? scrubSensitiveData(data) as Record<string, unknown> : undefined;
 
   Sentry.addBreadcrumb({
     category,
     message: action,
-    data,
+    data: {
+      ...safeData,
+      feature: getCurrentFeature(),
+    },
     level: 'info',
   });
+}
 
-  // Also log in dev for visibility
-  if (IS_DEV) {
-    originalConsoleLog(`[Sentry:${category}] ${action}`, data || '');
-  }
+/**
+ * Track a user action (button tap, swipe, etc.).
+ * Use for key user interactions that help debug issues.
+ *
+ * @param action - Action name (e.g., 'like_sent', 'photo_next')
+ * @param data - Optional context
+ */
+export function trackAction(
+  action: string,
+  data?: Record<string, unknown>
+): void {
+  trackEvent('user.action', action, data);
 }
 
 /**
  * Track a navigation event.
  *
  * @param screenName - The screen being navigated to
- * @param params - Optional navigation params
+ * @param params - Optional navigation params (IDs only, no content)
  */
 export function trackNavigation(
   screenName: string,
@@ -317,151 +350,16 @@ export function trackNavigation(
   trackEvent('navigation', `Navigated to ${screenName}`, params);
 }
 
-/**
- * Track a message event (send/receive).
- *
- * @param action - 'send' | 'receive' | 'delete'
- * @param data - Message metadata
- */
-export function trackMessage(
-  action: 'send' | 'receive' | 'delete',
-  data: { messageId?: string; type?: string; phase?: string | number }
-): void {
-  trackEvent('message', `Message ${action}`, data);
-}
-
-/**
- * Track a voice event (record/play/stop).
- *
- * @param action - 'record_start' | 'record_stop' | 'play' | 'pause' | 'finish'
- * @param data - Voice message metadata
- */
-export function trackVoice(
-  action: 'record_start' | 'record_stop' | 'play' | 'pause' | 'finish',
-  data?: { messageId?: string; durationMs?: number }
-): void {
-  trackEvent('voice', `Voice ${action}`, data);
-}
-
-/**
- * Track a Truth or Dare event.
- *
- * @param action - 'invite_send' | 'invite_accept' | 'game_start' | 'turn' | 'end'
- * @param data - Game metadata
- */
-export function trackTruthDare(
-  action: 'invite_send' | 'invite_accept' | 'game_start' | 'turn' | 'end',
-  data?: { sessionId?: string; phase?: string | number }
-): void {
-  trackEvent('truthdare', `T/D ${action}`, data);
-}
-
-/**
- * Wrap an operation with Sentry span tracking (Sentry v8 API).
- * Use this for performance tracking of heavy operations.
- *
- * @param name - Span name
- * @param op - Operation type
- * @param fn - The function to wrap
- */
-export async function withSentrySpan<T>(
-  name: string,
-  op: string,
-  fn: () => Promise<T>
-): Promise<T> {
-  // Add breadcrumb for start
-  Sentry.addBreadcrumb({
-    category: 'performance',
-    message: `${op}: ${name} started`,
-    level: 'info',
-  });
-
-  const startTime = Date.now();
-
-  try {
-    const result = await fn();
-
-    // Add breadcrumb for success
-    Sentry.addBreadcrumb({
-      category: 'performance',
-      message: `${op}: ${name} completed`,
-      level: 'info',
-      data: { durationMs: Date.now() - startTime },
-    });
-
-    return result;
-  } catch (error) {
-    // Add breadcrumb for failure
-    Sentry.addBreadcrumb({
-      category: 'performance',
-      message: `${op}: ${name} failed`,
-      level: 'error',
-      data: { durationMs: Date.now() - startTime },
-    });
-    throw error;
-  }
-}
-
-/**
- * Wrap a Convex mutation/query with Sentry error capture and breadcrumbs.
- *
- * @param operation - The async operation to wrap
- * @param context - Context for error reporting
- */
-export async function wrapConvexOperation<T>(
-  operation: () => Promise<T>,
-  context: { type: 'query' | 'mutation'; name: string }
-): Promise<T> {
-  // Add start breadcrumb
-  Sentry.addBreadcrumb({
-    category: 'convex',
-    message: `${context.type}: ${context.name} started`,
-    level: 'info',
-  });
-
-  const startTime = Date.now();
-
-  try {
-    const result = await operation();
-
-    // Add success breadcrumb
-    Sentry.addBreadcrumb({
-      category: 'convex',
-      message: `${context.type}: ${context.name} completed`,
-      level: 'info',
-      data: { durationMs: Date.now() - startTime },
-    });
-
-    return result;
-  } catch (error) {
-    // Add failure breadcrumb
-    Sentry.addBreadcrumb({
-      category: 'convex',
-      message: `${context.type}: ${context.name} failed`,
-      level: 'error',
-      data: { durationMs: Date.now() - startTime },
-    });
-
-    captureException(error, {
-      tags: {
-        type: `convex_${context.type}`,
-        operation: context.name,
-      },
-    });
-    throw error;
-  }
-}
-
 // ---------------------------------------------------------------------------
 // Error Capture
 // ---------------------------------------------------------------------------
 
 /**
  * Capture an exception and send to Sentry.
- * Use this for caught errors that should be reported.
+ * Auto-tagged with current feature and screen context.
  *
  * @param error - The error to capture
- * @param context - Optional context object with additional info
+ * @param context - Optional context object
  */
 export function captureException(
   error: Error | unknown,
@@ -472,14 +370,21 @@ export function captureException(
   }
 ): void {
   if (!isInitialized && !SENTRY_DSN) {
-    // Not initialized - just log in dev
     if (IS_DEV) {
-      console.error('[Sentry] captureException (not initialized):', error);
+      originalConsoleError('[Sentry] captureException (not initialized):', error);
     }
     return;
   }
 
   Sentry.withScope((scope) => {
+    // Auto-tag with current feature/screen
+    const feature = getCurrentFeature();
+    const screen = getCurrentScreen();
+
+    scope.setTag('feature', feature || 'unknown');
+    scope.setTag('screen', screen || 'unknown');
+    scope.setTag('feature_group', getFeatureGroup(feature));
+
     if (context?.tags) {
       Object.entries(context.tags).forEach(([key, value]) => {
         scope.setTag(key, value);
@@ -487,7 +392,8 @@ export function captureException(
     }
 
     if (context?.extra) {
-      Object.entries(context.extra).forEach(([key, value]) => {
+      const safeExtra = scrubSensitiveData(context.extra) as Record<string, unknown>;
+      Object.entries(safeExtra).forEach(([key, value]) => {
         scope.setExtra(key, value);
       });
     }
@@ -510,14 +416,13 @@ export function captureMessage(
   message: string,
   level: Sentry.SeverityLevel = 'info'
 ): void {
-  if (!isInitialized && !SENTRY_DSN) {
-    if (IS_DEV) {
-      console.log('[Sentry] captureMessage (not initialized):', message);
-    }
-    return;
-  }
+  if (!isInitialized && !SENTRY_DSN) return;
 
-  Sentry.captureMessage(message, level);
+  Sentry.withScope((scope) => {
+    scope.setTag('feature', getCurrentFeature() || 'unknown');
+    scope.setTag('screen', getCurrentScreen() || 'unknown');
+    Sentry.captureMessage(message, level);
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -528,33 +433,32 @@ export function captureMessage(
  * Set the current user context for error reports.
  * Call this after successful authentication.
  *
+ * PRIVACY: Only internal ID is stored. No PII.
+ *
  * @param userId - The authenticated user's ID
- * @param extra - Optional extra user info
+ * @param extra - Optional safe metadata
  */
 export function setUserContext(
   userId: string | null,
   extra?: {
-    email?: string;
-    username?: string;
     onboardingCompleted?: boolean;
+    isPhase2User?: boolean;
   }
 ): void {
-  if (!isInitialized && !SENTRY_DSN) {
-    return;
-  }
+  if (!isInitialized && !SENTRY_DSN) return;
 
   if (userId) {
     Sentry.setUser({
       id: userId,
-      email: extra?.email,
-      username: extra?.username,
-      // Custom data (appears in error context)
+      // Custom safe data only
       ...(extra?.onboardingCompleted !== undefined && {
         onboardingCompleted: String(extra.onboardingCompleted),
       }),
+      ...(extra?.isPhase2User !== undefined && {
+        isPhase2User: String(extra.isPhase2User),
+      }),
     });
   } else {
-    // Clear user context on logout
     Sentry.setUser(null);
   }
 }
@@ -563,9 +467,7 @@ export function setUserContext(
  * Clear user context (call on logout).
  */
 export function clearUserContext(): void {
-  if (!isInitialized && !SENTRY_DSN) {
-    return;
-  }
+  if (!isInitialized && !SENTRY_DSN) return;
   Sentry.setUser(null);
 }
 
@@ -575,27 +477,64 @@ export function clearUserContext(): void {
 
 /**
  * Add a breadcrumb for debugging context.
- * Breadcrumbs appear in error reports showing user actions leading to crash.
  *
  * @param message - Breadcrumb message
- * @param category - Category (e.g., 'navigation', 'user', 'api')
- * @param data - Optional additional data
+ * @param category - Category
+ * @param data - Optional data (will be scrubbed)
  */
 export function addBreadcrumb(
   message: string,
   category: string,
   data?: Record<string, unknown>
 ): void {
-  if (!isInitialized && !SENTRY_DSN) {
-    return;
-  }
+  if (!isInitialized && !SENTRY_DSN) return;
+
+  const safeData = data ? scrubSensitiveData(data) as Record<string, unknown> : undefined;
 
   Sentry.addBreadcrumb({
     message,
     category,
-    data,
+    data: {
+      ...safeData,
+      feature: getCurrentFeature(),
+    },
     level: 'info',
   });
+}
+
+// ---------------------------------------------------------------------------
+// Performance Helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Wrap an async operation with timing breadcrumbs.
+ * Use for tracking slow operations.
+ *
+ * @param name - Operation name
+ * @param op - Operation type
+ * @param fn - The function to wrap
+ */
+export async function withTiming<T>(
+  name: string,
+  op: string,
+  fn: () => Promise<T>
+): Promise<T> {
+  const startTime = Date.now();
+
+  addBreadcrumb(`${op}: ${name} started`, 'performance');
+
+  try {
+    const result = await fn();
+    addBreadcrumb(`${op}: ${name} completed`, 'performance', {
+      durationMs: Date.now() - startTime,
+    });
+    return result;
+  } catch (error) {
+    addBreadcrumb(`${op}: ${name} failed`, 'performance', {
+      durationMs: Date.now() - startTime,
+    });
+    throw error;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -604,11 +543,16 @@ export function addBreadcrumb(
 
 export { Sentry };
 
-// SENTRY-FILTER: Re-export feature filter utilities for use in screens
+// Re-export feature utilities
 export {
-  setCurrentFeature,
   getCurrentFeature,
+  getCurrentScreen,
+  getFeatureGroup,
+  setCurrentFeature,
+  setCurrentScreen,
+  SENTRY_FEATURES,
+  type SentryFeature,
+  // Legacy
   isChatRoomsFeatureActive,
   currentFeatureRef,
-  SENTRY_FEATURES,
 } from './sentryFeatureFilter';

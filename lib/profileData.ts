@@ -25,6 +25,10 @@ export interface ProfileData {
   privateIntentKeys?: string[];
   /** True if user has incognito mode enabled */
   isIncognito?: boolean;
+  /** Phase-2 only: Lifestyle data for premium card reveal */
+  height?: number | null;
+  smoking?: string | null;
+  drinking?: string | null;
 }
 
 const EMPTY_PHOTOS: { url: string }[] = [];
@@ -70,6 +74,10 @@ export function toProfileData(p: any): ProfileData {
     privateIntentKey: p.privateIntentKey ?? (p.privateIntentKeys?.[0] || p.intentKeys?.[0]),
     // Incognito mode indicator
     isIncognito: p.isIncognito === true || p.incognitoMode === true,
+    // Phase-2 only: Lifestyle data for premium card reveal
+    height: p.height ?? null,
+    smoking: p.smoking ?? null,
+    drinking: p.drinking ?? null,
   };
 
   if (__DEV__ && rawPhotos.length === 0) {

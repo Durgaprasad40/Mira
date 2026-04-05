@@ -15,10 +15,16 @@ import {
   StyleSheet,
   ScrollView,
   TouchableOpacity,
+  Pressable,
   Dimensions,
   FlatList,
   ActivityIndicator,
 } from 'react-native';
+import Animated, {
+  useSharedValue,
+  useAnimatedStyle,
+  withSpring,
+} from 'react-native-reanimated';
 import { Id } from '@/convex/_generated/dataModel';
 import { Image } from 'expo-image';
 import { useLocalSearchParams, useRouter } from 'expo-router';
@@ -44,6 +50,210 @@ import { getGenderIcon } from '@/lib/genderIcon';
 const C = INCOGNITO_COLORS;
 const { width: SCREEN_WIDTH, height: SCREEN_HEIGHT } = Dimensions.get('window');
 const PHOTO_HEIGHT = SCREEN_HEIGHT * 0.55;
+
+// ═══════════════════════════════════════════════════════════════════════════
+// FLOATING ACTION BUTTONS COMPONENT
+// Premium micro-interactions with spring animations
+// ═══════════════════════════════════════════════════════════════════════════
+interface FloatingActionButtonsProps {
+  onPass: () => void;
+  onStandOut: () => void;
+  onLike: () => void;
+  standOutsRemaining: number;
+  standOutDisabled: boolean;
+  bottomInset: number;
+}
+
+function FloatingActionButtons({
+  onPass,
+  onStandOut,
+  onLike,
+  standOutsRemaining,
+  standOutDisabled,
+  bottomInset,
+}: FloatingActionButtonsProps) {
+  // Animation scales for each button
+  const passScale = useSharedValue(1);
+  const standOutScale = useSharedValue(1);
+  const likeScale = useSharedValue(1);
+
+  // Animated styles
+  const passAnimStyle = useAnimatedStyle(() => ({
+    transform: [{ scale: passScale.value }],
+  }));
+  const standOutAnimStyle = useAnimatedStyle(() => ({
+    transform: [{ scale: standOutScale.value }],
+  }));
+  const likeAnimStyle = useAnimatedStyle(() => ({
+    transform: [{ scale: likeScale.value }],
+  }));
+
+  // Press handlers with spring animation
+  const onPassPressIn = () => {
+    passScale.value = withSpring(0.92, { damping: 15, stiffness: 400 });
+  };
+  const onPassPressOut = () => {
+    passScale.value = withSpring(1, { damping: 12, stiffness: 350 });
+  };
+
+  const onStandOutPressIn = () => {
+    standOutScale.value = withSpring(0.92, { damping: 15, stiffness: 400 });
+  };
+  const onStandOutPressOut = () => {
+    standOutScale.value = withSpring(1, { damping: 12, stiffness: 350 });
+  };
+
+  const onLikePressIn = () => {
+    likeScale.value = withSpring(0.92, { damping: 15, stiffness: 400 });
+  };
+  const onLikePressOut = () => {
+    likeScale.value = withSpring(1, { damping: 12, stiffness: 350 });
+  };
+
+  // [P2_PROFILE_ACTION_BAR] Debug logging
+  if (__DEV__) {
+    console.log('[P2_PROFILE_ACTION_BAR]', {
+      style: 'premium_floating',
+      background: 'transparent',
+      microInteractions: true,
+      buttonSizes: { pass: 56, standOut: 68, like: 56 },
+      standOutsRemaining,
+      standOutDisabled,
+    });
+  }
+
+  return (
+    <View style={[floatingStyles.cluster, { paddingBottom: Math.max(bottomInset, 24) + 8 }]}>
+      {/* Pass button - side button */}
+      <Animated.View style={passAnimStyle}>
+        <Pressable
+          style={floatingStyles.passButton}
+          onPress={onPass}
+          onPressIn={onPassPressIn}
+          onPressOut={onPassPressOut}
+        >
+          <Ionicons name="close" size={28} color="#FF5252" />
+        </Pressable>
+      </Animated.View>
+
+      {/* Stand Out button - CENTER, LARGER */}
+      <Animated.View style={standOutAnimStyle}>
+        <Pressable
+          style={[
+            floatingStyles.standOutButton,
+            standOutDisabled && floatingStyles.buttonDisabled,
+          ]}
+          onPress={onStandOut}
+          onPressIn={onStandOutPressIn}
+          onPressOut={onStandOutPressOut}
+          disabled={standOutDisabled}
+        >
+          <Ionicons name="star" size={28} color="#FFF" />
+          <View style={floatingStyles.standOutBadge}>
+            <Text style={floatingStyles.standOutBadgeText}>{standOutsRemaining}</Text>
+          </View>
+        </Pressable>
+      </Animated.View>
+
+      {/* Like button - side button */}
+      <Animated.View style={likeAnimStyle}>
+        <Pressable
+          style={floatingStyles.likeButton}
+          onPress={onLike}
+          onPressIn={onLikePressIn}
+          onPressOut={onLikePressOut}
+        >
+          <Ionicons name="heart" size={28} color="#FFF" />
+        </Pressable>
+      </Animated.View>
+    </View>
+  );
+}
+
+// Premium floating button styles - separate from main styles for clarity
+const floatingStyles = StyleSheet.create({
+  cluster: {
+    position: 'absolute',
+    bottom: 0,
+    left: 0,
+    right: 0,
+    flexDirection: 'row',
+    justifyContent: 'center',
+    alignItems: 'center',
+    paddingTop: 12,
+    gap: 24,
+    // NO background - fully transparent
+  },
+  passButton: {
+    width: 56,
+    height: 56,
+    borderRadius: 28,
+    backgroundColor: '#FFFFFF',
+    alignItems: 'center',
+    justifyContent: 'center',
+    // Soft shadow
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.12,
+    shadowRadius: 16,
+    elevation: 8,
+  },
+  standOutButton: {
+    width: 68,
+    height: 68,
+    borderRadius: 34,
+    backgroundColor: '#2196F3',
+    alignItems: 'center',
+    justifyContent: 'center',
+    position: 'relative',
+    // Colored glow shadow
+    shadowColor: '#2196F3',
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.4,
+    shadowRadius: 16,
+    elevation: 10,
+  },
+  standOutBadge: {
+    position: 'absolute',
+    top: -4,
+    right: -4,
+    minWidth: 22,
+    height: 22,
+    borderRadius: 11,
+    backgroundColor: '#FFF',
+    alignItems: 'center',
+    justifyContent: 'center',
+    paddingHorizontal: 5,
+    // Subtle badge shadow
+    shadowColor: '#000',
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.1,
+    shadowRadius: 4,
+    elevation: 3,
+  },
+  standOutBadgeText: {
+    fontSize: 11,
+    fontWeight: '700',
+    color: '#2196F3',
+  },
+  buttonDisabled: {
+    opacity: 0.4,
+  },
+  likeButton: {
+    width: 56,
+    height: 56,
+    borderRadius: 28,
+    backgroundColor: C.primary,
+    alignItems: 'center',
+    justifyContent: 'center',
+    // Brand color glow
+    shadowColor: C.primary,
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.35,
+    shadowRadius: 16,
+    elevation: 8,
+  },
+});
 
 export default function Phase2FullProfileScreen() {
   useScreenTrace('P2_FULL_PROFILE_VIEW');
@@ -178,6 +388,87 @@ export default function Phase2FullProfileScreen() {
   const canViewClearPhoto = photoAccessStatus?.canViewClear ?? !isPhotoBlurred;
   const photoAccessRequestStatus = photoAccessStatus?.status ?? 'none';
   const showPhotoAccessButton = isPhotoBlurred && !canViewClearPhoto && photoAccessRequestStatus !== 'approved';
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // P0 HOOK ORDER FIX: ALL HOOKS MUST BE DECLARED BEFORE EARLY RETURNS
+  // These hooks were previously after the early returns, causing React error:
+  // "Rendered more hooks than during the previous render"
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  // Photo navigation hooks (safe even when profile is null)
+  const photos = profile?.photos || [];
+  const hasMultiplePhotos = photos.length > 1;
+
+  const goNextPhoto = useCallback(() => {
+    if (photos.length <= 1) return;
+    const nextIndex = currentPhotoIndex + 1;
+    if (nextIndex >= photos.length) return;
+    setCurrentPhotoIndex(nextIndex);
+    photoListRef.current?.scrollToIndex({ index: nextIndex, animated: true });
+  }, [photos.length, currentPhotoIndex]);
+
+  const goPrevPhoto = useCallback(() => {
+    if (photos.length <= 1) return;
+    const prevIndex = currentPhotoIndex - 1;
+    if (prevIndex < 0) return;
+    setCurrentPhotoIndex(prevIndex);
+    photoListRef.current?.scrollToIndex({ index: prevIndex, animated: true });
+  }, [photos.length, currentPhotoIndex]);
+
+  // Tap feedback animations (Reanimated hooks)
+  const leftTapScale = useSharedValue(1);
+  const rightTapScale = useSharedValue(1);
+
+  const leftTapStyle = useAnimatedStyle(() => ({
+    transform: [{ scale: leftTapScale.value }],
+    opacity: leftTapScale.value < 1 ? 0.85 : 1,
+  }));
+
+  const rightTapStyle = useAnimatedStyle(() => ({
+    transform: [{ scale: rightTapScale.value }],
+    opacity: rightTapScale.value < 1 ? 0.85 : 1,
+  }));
+
+  const onLeftPressIn = useCallback(() => {
+    leftTapScale.value = withSpring(0.98, { damping: 15, stiffness: 400 });
+  }, [leftTapScale]);
+
+  const onLeftPressOut = useCallback(() => {
+    leftTapScale.value = withSpring(1, { damping: 15, stiffness: 400 });
+  }, [leftTapScale]);
+
+  const onRightPressIn = useCallback(() => {
+    rightTapScale.value = withSpring(0.98, { damping: 15, stiffness: 400 });
+  }, [rightTapScale]);
+
+  const onRightPressOut = useCallback(() => {
+    rightTapScale.value = withSpring(1, { damping: 15, stiffness: 400 });
+  }, [rightTapScale]);
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // EARLY RETURNS (safe now - all hooks declared above)
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  // [P2_PROFILE_MAPPED_DATA] Debug logging for full profile data from query
+  if (__DEV__ && profile) {
+    console.log('[P2_PROFILE_MAPPED_DATA]', {
+      userId: profile.userId?.slice?.(-8),
+      displayName: profile.displayName,
+      // Bio
+      hasBio: !!profile.bio,
+      bioLength: profile.bio?.length ?? 0,
+      // INTERESTS - KEY DATA PATH
+      hobbiesFromQuery: profile.hobbies,
+      hobbiesCount: profile.hobbies?.length ?? 0,
+      activitiesFromQuery: profile.activities,
+      activitiesCount: profile.activities?.length ?? 0,
+      interestsWillRender: (profile.hobbies?.length ?? 0) > 0 || (profile.activities?.length ?? 0) > 0,
+      // Other sections
+      intentKeysCount: profile.intentKeys?.length ?? 0,
+      promptAnswersCount: profile.promptAnswers?.length ?? 0,
+      hasLifestyle: !!(profile.height || profile.smoking || profile.drinking),
+    });
+  }
 
   // Loading state
   if (profile === undefined) {
@@ -328,9 +619,6 @@ export default function Phase2FullProfileScreen() {
     return items;
   };
 
-  const photos = profile.photos || [];
-  const hasMultiplePhotos = photos.length > 1;
-
   return (
     <View style={styles.container}>
       {/* ANDROID FIX: Add top safe area padding so photo doesn't overlap status bar */}
@@ -357,7 +645,34 @@ export default function Phase2FullProfileScreen() {
                   const index = Math.round(e.nativeEvent.contentOffset.x / SCREEN_WIDTH);
                   setCurrentPhotoIndex(index);
                 }}
+                scrollEnabled={hasMultiplePhotos}
               />
+
+              {/* TAP ZONES FOR PHOTO NAVIGATION (matches Discovery card UX) */}
+              {/* PREMIUM UX: Animated tap feedback with subtle scale */}
+              {hasMultiplePhotos && (
+                <>
+                  {/* Left tap zone = previous photo */}
+                  <Animated.View style={[styles.photoTapZoneLeft, leftTapStyle]}>
+                    <Pressable
+                      style={StyleSheet.absoluteFill}
+                      onPress={goPrevPhoto}
+                      onPressIn={onLeftPressIn}
+                      onPressOut={onLeftPressOut}
+                    />
+                  </Animated.View>
+                  {/* Right tap zone = next photo */}
+                  <Animated.View style={[styles.photoTapZoneRight, rightTapStyle]}>
+                    <Pressable
+                      style={StyleSheet.absoluteFill}
+                      onPress={goNextPhoto}
+                      onPressIn={onRightPressIn}
+                      onPressOut={onRightPressOut}
+                    />
+                  </Animated.View>
+                </>
+              )}
+
               {/* Photo indicators */}
               {hasMultiplePhotos && (
                 <View style={styles.photoIndicators}>
@@ -457,10 +772,11 @@ export default function Phase2FullProfileScreen() {
         </View>
 
         {/* ═══════════════════════════════════════════════════════════════════
-            BIO SECTION
+            ABOUT SECTION (Bio with proper heading)
         ═══════════════════════════════════════════════════════════════════ */}
         {profile.bio && (
           <View style={styles.section}>
+            <Text style={styles.sectionTitle}>About</Text>
             <Text style={styles.bioText}>{profile.bio}</Text>
           </View>
         )}
@@ -564,59 +880,84 @@ export default function Phase2FullProfileScreen() {
         {/* ═══════════════════════════════════════════════════════════════════
             HOBBIES & INTERESTS SECTION (max 6 for premium feel)
         ═══════════════════════════════════════════════════════════════════ */}
-        {profile.hobbies && profile.hobbies.length > 0 && (
-          <View style={styles.section}>
-            <Text style={styles.sectionTitle}>Interests</Text>
-            <View style={styles.tagsRow}>
-              {/* Deep Connect UI: Show max 6 interests with emojis */}
-              {profile.hobbies.slice(0, 6).map((hobby: string, i: number) => {
-                const info = getHobbyInfo(hobby);
-                return (
-                  <View key={i} style={styles.hobbyTag}>
-                    {info.emoji && <Text style={styles.hobbyEmoji}>{info.emoji}</Text>}
-                    <Text style={styles.hobbyTagText}>{info.label}</Text>
-                  </View>
-                );
-              })}
-            </View>
-          </View>
-        )}
+        {(() => {
+          // Try hobbies first, fall back to activities
+          const interests = profile.hobbies?.length > 0 ? profile.hobbies : profile.activities;
 
-        {/* Bottom spacing for action buttons */}
-        <View style={{ height: 120 }} />
+          // [P2_PROFILE_INTERESTS_RENDER] Debug logging
+          if (__DEV__) {
+            const willRender = interests && interests.length > 0;
+            console.log('[P2_PROFILE_INTERESTS_RENDER]', {
+              hasHobbies: !!profile.hobbies,
+              hobbiesCount: profile.hobbies?.length ?? 0,
+              hasActivities: !!profile.activities,
+              activitiesCount: profile.activities?.length ?? 0,
+              usingSource: profile.hobbies?.length > 0 ? 'hobbies' : 'activities',
+              willRender,
+              interestsToShow: willRender ? interests.slice(0, 6) : [],
+            });
+          }
+
+          if (!interests || interests.length === 0) return null;
+
+          return (
+            <View style={styles.section}>
+              <Text style={styles.sectionTitle}>Interests</Text>
+              <View style={styles.tagsRow}>
+                {/* Deep Connect UI: Show max 6 interests with emojis */}
+                {interests.slice(0, 6).map((hobby: string, i: number) => {
+                  const info = getHobbyInfo(hobby);
+                  return (
+                    <View key={i} style={styles.hobbyTag}>
+                      {info.emoji && <Text style={styles.hobbyEmoji}>{info.emoji}</Text>}
+                      <Text style={styles.hobbyTagText}>{info.label}</Text>
+                    </View>
+                  );
+                })}
+              </View>
+            </View>
+          );
+        })()}
+
+        {/* ═══════════════════════════════════════════════════════════════════
+            BOTTOM SPACER: Ensures content is visible above floating action buttons
+            Height = button height (60) + vertical padding (16+16) + safe area + extra
+        ═══════════════════════════════════════════════════════════════════ */}
+        {(() => {
+          const FLOATING_CLUSTER_HEIGHT = 60; // Largest button height
+          const FLOATING_CLUSTER_PADDING = 32; // Top + bottom padding around buttons
+          const EXTRA_BREATHING_ROOM = 20;
+          const bottomPadding = FLOATING_CLUSTER_HEIGHT + FLOATING_CLUSTER_PADDING + Math.max(insets.bottom, 16) + EXTRA_BREATHING_ROOM;
+
+          if (__DEV__) {
+            console.log('[P2_PROFILE_BOTTOM_PADDING]', {
+              clusterHeight: FLOATING_CLUSTER_HEIGHT,
+              clusterPadding: FLOATING_CLUSTER_PADDING,
+              insetsBottom: insets.bottom,
+              extraRoom: EXTRA_BREATHING_ROOM,
+              totalPadding: bottomPadding,
+            });
+          }
+
+          return <View style={{ height: bottomPadding }} />;
+        })()}
       </ScrollView>
 
       {/* ═══════════════════════════════════════════════════════════════════
-          FIXED ACTION BUTTONS (Pass / Stand Out / Like)
-          Matches Phase-2 discovery card action layout
+          FLOATING ACTION BUTTONS (Pass / Stand Out / Like)
+          Premium floating cluster with micro-interactions
+          - NO rectangular background
+          - Soft shadows for depth
+          - Spring scale on press
       ═══════════════════════════════════════════════════════════════════ */}
-      <View style={[styles.actionBar, { paddingBottom: Math.max(insets.bottom, 16) }]}>
-        {/* Pass button */}
-        <TouchableOpacity style={styles.passButton} onPress={handlePass} activeOpacity={0.8}>
-          <Ionicons name="close" size={28} color="#F44336" />
-        </TouchableOpacity>
-
-        {/* Stand Out button (same as discovery card) */}
-        <TouchableOpacity
-          style={[
-            styles.standOutButton,
-            hasReachedStandOutLimit() && styles.actionButtonDisabled,
-          ]}
-          onPress={handleStandOut}
-          disabled={hasReachedStandOutLimit()}
-          activeOpacity={0.8}
-        >
-          <Ionicons name="star" size={24} color="#FFF" />
-          <View style={styles.standOutBadge}>
-            <Text style={styles.standOutBadgeText}>{standOutsRemaining()}</Text>
-          </View>
-        </TouchableOpacity>
-
-        {/* Like button */}
-        <TouchableOpacity style={styles.likeButton} onPress={handleLike} activeOpacity={0.8}>
-          <Ionicons name="heart" size={28} color="#FFF" />
-        </TouchableOpacity>
-      </View>
+      <FloatingActionButtons
+        onPass={handlePass}
+        onStandOut={handleStandOut}
+        onLike={handleLike}
+        standOutsRemaining={standOutsRemaining()}
+        standOutDisabled={hasReachedStandOutLimit()}
+        bottomInset={insets.bottom}
+      />
     </View>
   );
 }
@@ -690,6 +1031,7 @@ const styles = StyleSheet.create({
     right: 16,
     flexDirection: 'row',
     gap: 4,
+    zIndex: 10,
   },
   photoIndicator: {
     flex: 1,
@@ -699,6 +1041,23 @@ const styles = StyleSheet.create({
   },
   photoIndicatorActive: {
     backgroundColor: '#FFF',
+  },
+  // TAP ZONES FOR PHOTO NAVIGATION (invisible, full height)
+  photoTapZoneLeft: {
+    position: 'absolute',
+    top: 0,
+    left: 0,
+    bottom: 0,
+    width: '40%',
+    zIndex: 5,
+  },
+  photoTapZoneRight: {
+    position: 'absolute',
+    top: 0,
+    right: 0,
+    bottom: 0,
+    width: '40%',
+    zIndex: 5,
   },
   backButton: {
     position: 'absolute',
@@ -872,72 +1231,6 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: '500',
     color: C.text,
-  },
-
-  // Action bar (3 buttons: Pass / Stand Out / Like)
-  actionBar: {
-    position: 'absolute',
-    bottom: 0,
-    left: 0,
-    right: 0,
-    flexDirection: 'row',
-    justifyContent: 'center',
-    alignItems: 'center',
-    paddingTop: 16,
-    paddingHorizontal: 32,
-    gap: 24,
-    backgroundColor: C.background,
-    borderTopWidth: 1,
-    borderTopColor: C.surface,
-  },
-  passButton: {
-    width: 60,
-    height: 60,
-    borderRadius: 30,
-    backgroundColor: C.surface,
-    alignItems: 'center',
-    justifyContent: 'center',
-    borderWidth: 2,
-    borderColor: '#F44336',
-  },
-  standOutButton: {
-    width: 54,
-    height: 54,
-    borderRadius: 27,
-    backgroundColor: '#2196F3',
-    alignItems: 'center',
-    justifyContent: 'center',
-    position: 'relative',
-  },
-  standOutBadge: {
-    position: 'absolute',
-    top: -4,
-    right: -4,
-    minWidth: 20,
-    height: 20,
-    borderRadius: 10,
-    backgroundColor: '#FFF',
-    alignItems: 'center',
-    justifyContent: 'center',
-    paddingHorizontal: 4,
-    borderWidth: 1.5,
-    borderColor: '#2196F3',
-  },
-  standOutBadgeText: {
-    fontSize: 11,
-    fontWeight: '700',
-    color: '#2196F3',
-  },
-  actionButtonDisabled: {
-    opacity: 0.4,
-  },
-  likeButton: {
-    width: 60,
-    height: 60,
-    borderRadius: 30,
-    backgroundColor: C.primary,
-    alignItems: 'center',
-    justifyContent: 'center',
   },
 
   // ═══════════════════════════════════════════════════════════════════════════

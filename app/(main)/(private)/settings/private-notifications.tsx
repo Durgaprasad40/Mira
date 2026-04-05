@@ -11,8 +11,8 @@
  * Uses Phase-2 dark premium styling (INCOGNITO_COLORS).
  * No Phase-1 categories.
  */
-import React, { useCallback } from 'react';
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Switch } from 'react-native';
+import React, { useCallback, useState } from 'react';
+import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Switch, ActivityIndicator } from 'react-native';
 import { useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
@@ -22,6 +22,7 @@ import { INCOGNITO_COLORS } from '@/lib/constants';
 import { usePrivateProfileStore } from '@/stores/privateProfileStore';
 import { useAuthStore } from '@/stores/authStore';
 import { isDemoMode } from '@/hooks/useConvex';
+import { Toast } from '@/components/ui/Toast';
 
 const C = INCOGNITO_COLORS;
 
@@ -75,27 +76,56 @@ export default function PrivateNotificationsScreen() {
   const notificationCategories = usePrivateProfileStore((s) => s.notificationCategories);
   const setNotificationCategory = usePrivateProfileStore((s) => s.setNotificationCategory);
 
-  // P0-1 FIX: Handle master toggle (now persisted to backend)
-  const handleMasterToggle = useCallback((enabled: boolean) => {
-    setNotificationsEnabled(enabled);
-    // Persist to backend
-    if (!isDemoMode && userId) {
-      updatePrivateProfile({
+  // P0-001 FIX: Track which field is saving to prevent double-toggles and show loading
+  const [savingField, setSavingField] = useState<string | null>(null);
+
+  // P0-001 FIX: Handle master toggle - waits for backend confirmation before updating UI
+  const handleMasterToggle = useCallback(async (enabled: boolean) => {
+    if (savingField) return; // Prevent double-toggle while saving
+
+    if (isDemoMode) {
+      setNotificationsEnabled(enabled);
+      return;
+    }
+
+    if (!userId) {
+      Toast.show('Please sign in to change settings.');
+      return;
+    }
+
+    setSavingField('master');
+    try {
+      await updatePrivateProfile({
         authUserId: userId,
         notificationsEnabled: enabled,
-      }).catch((error) => {
-        if (__DEV__) console.error('[PrivateNotifications] Backend sync failed:', error);
       });
+      setNotificationsEnabled(enabled);
+    } catch (error) {
+      if (__DEV__) console.error('[PrivateNotifications] Backend sync failed:', error);
+      Toast.show('Failed to save setting. Please try again.');
+    } finally {
+      setSavingField(null);
     }
-  }, [setNotificationsEnabled, userId, updatePrivateProfile]);
+  }, [savingField, setNotificationsEnabled, userId, updatePrivateProfile]);
 
-  // P0-1 FIX: Handle category toggle (now persisted to backend)
-  const handleCategoryToggle = useCallback((categoryKey: string, enabled: boolean) => {
-    setNotificationCategory(categoryKey, enabled);
-    // Persist to backend - build the full categories object
-    if (!isDemoMode && userId) {
+  // P0-001 FIX: Handle category toggle - waits for backend confirmation before updating UI
+  const handleCategoryToggle = useCallback(async (categoryKey: string, enabled: boolean) => {
+    if (savingField) return; // Prevent double-toggle while saving
+
+    if (isDemoMode) {
+      setNotificationCategory(categoryKey, enabled);
+      return;
+    }
+
+    if (!userId) {
+      Toast.show('Please sign in to change settings.');
+      return;
+    }
+
+    setSavingField(categoryKey);
+    try {
       const updatedCategories = { ...notificationCategories, [categoryKey]: enabled };
-      updatePrivateProfile({
+      await updatePrivateProfile({
         authUserId: userId,
         notificationCategories: {
           deepConnect: updatedCategories.deepConnect,
@@ -103,11 +133,15 @@ export default function PrivateNotificationsScreen() {
           chatRooms: updatedCategories.chatRooms,
           truthOrDare: updatedCategories.truthOrDare,
         },
-      }).catch((error) => {
-        if (__DEV__) console.error('[PrivateNotifications] Backend sync failed:', error);
       });
+      setNotificationCategory(categoryKey, enabled);
+    } catch (error) {
+      if (__DEV__) console.error('[PrivateNotifications] Backend sync failed:', error);
+      Toast.show('Failed to save setting. Please try again.');
+    } finally {
+      setSavingField(null);
     }
-  }, [setNotificationCategory, userId, updatePrivateProfile, notificationCategories]);
+  }, [savingField, setNotificationCategory, userId, updatePrivateProfile, notificationCategories]);
 
   // Check if category is enabled
   const isCategoryEnabled = (key: string): boolean => {
@@ -151,12 +185,17 @@ export default function PrivateNotificationsScreen() {
                     </Text>
                   </View>
                 </View>
-                <Switch
-                  value={notificationsEnabled}
-                  onValueChange={handleMasterToggle}
-                  trackColor={{ false: C.border, true: C.primary }}
-                  thumbColor="#FFF"
-                />
+                {savingField === 'master' ? (
+                  <ActivityIndicator size="small" color={C.primary} />
+                ) : (
+                  <Switch
+                    value={notificationsEnabled}
+                    onValueChange={handleMasterToggle}
+                    trackColor={{ false: C.border, true: C.primary }}
+                    thumbColor="#FFF"
+                    disabled={savingField !== null}
+                  />
+                )}
               </TouchableOpacity>
             </View>
           </View>
@@ -196,12 +235,17 @@ export default function PrivateNotificationsScreen() {
                         <Text style={styles.categoryDescription}>{category.description}</Text>
                       </View>
                     </View>
-                    <Switch
-                      value={isCategoryEnabled(category.key)}
-                      onValueChange={(value) => handleCategoryToggle(category.key, value)}
-                      trackColor={{ false: C.border, true: C.primary }}
-                      thumbColor="#FFF"
-                    />
+                    {savingField === category.key ? (
+                      <ActivityIndicator size="small" color={C.primary} />
+                    ) : (
+                      <Switch
+                        value={isCategoryEnabled(category.key)}
+                        onValueChange={(value) => handleCategoryToggle(category.key, value)}
+                        trackColor={{ false: C.border, true: C.primary }}
+                        thumbColor="#FFF"
+                        disabled={savingField !== null}
+                      />
+                    )}
                   </TouchableOpacity>
                 </View>
               ))}

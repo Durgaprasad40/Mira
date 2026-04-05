@@ -398,16 +398,53 @@ export const getProfiles = query({
       requestedLimit: args.limit ?? 50,
     });
 
-    // PRIVATE_DISCOVER_EMPTY: Explain WHY result is empty
+    // PRIVATE_DISCOVER_EMPTY: Detailed exclusion diagnostics when result is empty
     if (limited.length === 0) {
+      // Compute detailed exclusion counts for debugging
+      const exclusionCounts = {
+        self: profiles.filter((p) => p.userId === viewerUserId).length,
+        blocked: profiles.filter((p) => blockedUserIds.has(p.userId as string)).length,
+        deleted: profiles.filter((p) => deletedUserIds.has(p.userId as string)).length,
+        alreadySwiped: profiles.filter((p) => alreadySwipedUserIds.has(p.userId as string)).length,
+        chatPartner: profiles.filter((p) => conversationPartnerIds.has(p.userId as string)).length,
+        // Note: These are soft filters (penalized but not excluded)
+        incompleteSetup: profiles.filter((p) => !p.isSetupComplete).length,
+        noPhotos: profiles.filter((p) => !p.privatePhotoUrls?.length).length,
+      };
+
+      // Determine primary reason for empty result
+      let primaryReason = 'unknown';
+      if (profiles.length === 0) {
+        primaryReason = 'no_phase2_profiles_in_db';
+      } else if (profiles.length === 1 && profiles[0]?.userId === viewerUserId) {
+        primaryReason = 'viewer_is_only_user';
+      } else if (exclusionCounts.alreadySwiped > 0 && exclusionCounts.alreadySwiped === profiles.length - 1) {
+        primaryReason = 'all_others_already_swiped';
+      } else if (exclusionCounts.blocked > 0 && exclusionCounts.blocked === profiles.length - 1) {
+        primaryReason = 'all_others_blocked';
+      } else if (exclusionCounts.chatPartner > 0 && exclusionCounts.chatPartner === profiles.length - 1) {
+        primaryReason = 'all_others_are_chat_partners';
+      } else if (eligible.length === 0 && finalEligible.length === 0) {
+        primaryReason = 'all_filtered_by_combined_hard_filters';
+      }
+
       console.log('[PRIVATE_DISCOVER_EMPTY]', {
-        reason: profiles.length === 0
-          ? 'no_phase2_profiles_in_db'
-          : eligible.length === 0 && finalEligible.length === 0
-            ? 'all_filtered_even_after_fallback'
-            : 'unknown',
+        primaryReason,
         totalDbProfiles: profiles.length,
-        viewerWasOnlyUser: profiles.length === 1 && profiles[0]?.userId === viewerUserId,
+        otherUsersInDb: profiles.length - exclusionCounts.self,
+        // Exclusion summary (how many profiles excluded by each filter)
+        exclusionSummary: exclusionCounts,
+        // Set sizes for cross-check
+        filterSetSizes: {
+          blocked: blockedUserIds.size,
+          swiped: alreadySwipedUserIds.size,
+          chatPartners: conversationPartnerIds.size,
+          deleted: deletedUserIds.size,
+        },
+        // Fallback info
+        fallbackStage,
+        eligibleAfterHardFilters: eligible.length,
+        eligibleAfterFallback: finalEligible.length,
       });
     }
 
@@ -579,6 +616,24 @@ export const getProfileByUserId = query({
     // Cast to access optional promptAnswers field
     const profileWithPrompts = p as typeof p & { promptAnswers?: { promptId: string; question: string; answer: string }[] };
 
+    // P0-INTERESTS FIX: Resolve hobbies with Phase-1 fallback
+    // If Phase-2 hobbies are empty, try fetching from Phase-1 user.activities
+    let resolvedHobbies = profile.hobbies ?? [];
+    if (resolvedHobbies.length === 0 && user) {
+      // Fallback to Phase-1 activities from main user record
+      const userWithActivities = user as typeof user & { activities?: string[] };
+      resolvedHobbies = userWithActivities.activities ?? [];
+    }
+
+    // [P2_PROFILE_QUERY_DATA] Debug logging for interests resolution
+    console.log('[P2_PROFILE_QUERY_DATA]', {
+      userId: String(args.userId).slice(-8),
+      phase2Hobbies: profile.hobbies?.length ?? 0,
+      phase1Activities: (user as any)?.activities?.length ?? 0,
+      resolvedHobbiesCount: resolvedHobbies.length,
+      usingSource: (profile.hobbies?.length ?? 0) > 0 ? 'phase2_hobbies' : 'phase1_activities_fallback',
+    });
+
     return {
       _id: p._id,
       userId: p.userId,
@@ -600,10 +655,10 @@ export const getProfileByUserId = query({
       privateBio: p.privateBio,
       // Phase-2 prompt answers
       promptAnswers: profileWithPrompts.promptAnswers ?? [],
-      // Include hobbies and verification status if available
-      hobbies: profile.hobbies ?? [],
+      // P0-INTERESTS FIX: Use resolved hobbies (with Phase-1 fallback)
+      hobbies: resolvedHobbies,
       isVerified: profile.isVerified ?? false,
-      activities: profile.hobbies ?? [],
+      activities: resolvedHobbies,
       // Lifestyle data for full profile display
       height: profile.height ?? null,
       smoking: profile.smoking ?? null,

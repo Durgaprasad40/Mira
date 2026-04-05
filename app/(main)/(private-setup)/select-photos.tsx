@@ -168,7 +168,12 @@ export default function SelectPhotosScreen() {
       <View style={[styles.bottomBar, { paddingBottom: insets.bottom + 16 }]}>
         <TouchableOpacity
           style={[styles.nextBtn, !canProceed && styles.nextBtnDisabled]}
-          onPress={() => canProceed && router.push('/(main)/phase2-onboarding/profile-edit' as any)}
+          onPress={async () => {
+            if (!canProceed) return;
+            // P0-002 FIX: Save onboarding progress before navigating
+            await usePrivateProfileStore.getState().saveOnboardingProgress();
+            router.push('/(main)/phase2-onboarding/profile-edit' as any);
+          }}
           disabled={!canProceed}
         >
           {/* P2-PHOTO-001 FIX: Navigate to profile-edit instead of blur-preview */}

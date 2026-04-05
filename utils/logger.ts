@@ -29,6 +29,32 @@ const LOG_LEVEL: LogLevel = 'info';
 // Set to true to see logs in adb logcat for debugging
 const ENABLE_PROD_LOGGING = true;
 
+// ┌─────────────────────────────────────────────────────────────────┐
+// │  FEATURE FOCUS: Filter logs to specific feature                 │
+// │  null = show all logs (default)                                 │
+// │  'phase2' = only show Deep Connect / Phase-2 logs               │
+// │  Focused prefixes: [P2_], [PHASE2], [PRIVATE], [INCOGNITO]      │
+// └────────────────────────────────────────────────────────���────────┘
+type FocusFeature = null | 'phase2';
+const FOCUS_FEATURE: FocusFeature = 'phase2'; // Set to null to see all logs
+
+// Prefixes that are always shown (errors, critical) regardless of focus
+const ALWAYS_SHOW_PREFIXES = ['[ERROR]', '[CRASH]', '[FATAL]', '[AUTH]'];
+
+// Prefixes that match the focused feature
+const PHASE2_PREFIXES = ['[P2_', '[PHASE2', '[PRIVATE', '[INCOGNITO', '[MATCH]', 'P2_UI_'];
+
+function matchesFocusFeature(prefix: string): boolean {
+  if (FOCUS_FEATURE === null) return true; // No filter, show all
+  if (ALWAYS_SHOW_PREFIXES.some(p => prefix.includes(p))) return true;
+
+  if (FOCUS_FEATURE === 'phase2') {
+    return PHASE2_PREFIXES.some(p => prefix.includes(p));
+  }
+
+  return true;
+}
+
 const LEVEL_PRIORITY: Record<LogLevel, number> = {
   silent: 0,
   error: 1,
@@ -82,24 +108,26 @@ function buildMessage(prefix: string, message: string, data?: Record<string, unk
 export const log = {
   /**
    * Log important events (like added, match created, etc.)
+   * Respects FOCUS_FEATURE filter - non-focused logs are suppressed
    */
   info(prefix: string, message: string, data?: Record<string, unknown>): void {
-    if (shouldLog('info')) {
+    if (shouldLog('info') && matchesFocusFeature(prefix)) {
       console.log(buildMessage(prefix, message, data));
     }
   },
 
   /**
    * Log warnings (potential issues, unexpected states)
+   * Respects FOCUS_FEATURE filter - non-focused logs are suppressed
    */
   warn(prefix: string, message: string, data?: Record<string, unknown>): void {
-    if (shouldLog('warn')) {
+    if (shouldLog('warn') && matchesFocusFeature(prefix)) {
       console.warn(buildMessage(prefix, message, data));
     }
   },
 
   /**
-   * Log errors
+   * Log errors - ALWAYS shown regardless of feature focus
    */
   error(prefix: string, message: string, error?: unknown): void {
     if (shouldLog('error')) {
@@ -115,9 +143,10 @@ export const log = {
 
   /**
    * Verbose debug logs - only enabled when LOG_LEVEL = 'debug'
+   * Respects FOCUS_FEATURE filter - non-focused logs are suppressed
    */
   debug(prefix: string, message: string, data?: Record<string, unknown>): void {
-    if (shouldLog('debug')) {
+    if (shouldLog('debug') && matchesFocusFeature(prefix)) {
       console.log(buildMessage(prefix, message, data));
     }
   },
@@ -125,9 +154,10 @@ export const log = {
   /**
    * Log something only once per session (prevents spam)
    * Useful for hydration, initialization, etc.
+   * Respects FOCUS_FEATURE filter
    */
   once(key: string, prefix: string, message: string, data?: Record<string, unknown>): void {
-    if (shouldLog('info') && !loggedOnce.has(key)) {
+    if (shouldLog('info') && matchesFocusFeature(prefix) && !loggedOnce.has(key)) {
       loggedOnce.add(key);
       console.log(buildMessage(prefix, message, data));
     }

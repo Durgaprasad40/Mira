@@ -1960,19 +1960,48 @@ export const listActivePromptsWithTop2Answers = query({
 /**
  * Get trending Truth and Dare prompts (one of each type with highest engagement).
  * Used for the "🔥 Trending" section at top of feed.
+ * P1-006 FIX: Added block filtering to exclude blocked users
  */
 export const getTrendingTruthAndDare = query({
-  args: {},
-  handler: async (ctx) => {
+  args: {
+    // P1-006 FIX: Optional authUserId for block filtering
+    authUserId: v.optional(v.string()),
+  },
+  handler: async (ctx, { authUserId }) => {
     const now = Date.now();
+
+    // P1-006 FIX: Resolve viewer ID and get blocked user IDs
+    const blockedUserIds = new Set<string>();
+
+    if (authUserId) {
+      const resolvedViewerId = await resolveUserIdByAuthId(ctx, authUserId);
+      if (resolvedViewerId) {
+        // Get users blocked BY the viewer
+        const blockedByMe = await ctx.db
+          .query('blocks')
+          .withIndex('by_blocker', (q) => q.eq('blockerId', resolvedViewerId))
+          .collect();
+        blockedByMe.forEach((b) => blockedUserIds.add(b.blockedUserId as string));
+
+        // Get users who blocked the viewer
+        const blockedMe = await ctx.db
+          .query('blocks')
+          .withIndex('by_blocked', (q) => q.eq('blockedUserId', resolvedViewerId))
+          .collect();
+        blockedMe.forEach((b) => blockedUserIds.add(b.blockerId as string));
+      }
+    }
 
     // Get all prompts
     const allPrompts = await ctx.db.query('todPrompts').collect();
 
-    // Filter to active (not expired)
+    // Filter to active (not expired) and not from blocked users
     const activePrompts = allPrompts.filter((p) => {
       const expires = p.expiresAt ?? p.createdAt + TWENTY_FOUR_HOURS_MS;
-      return expires > now;
+      if (expires <= now) return false;
+      // P1-006 FIX: Exclude prompts from blocked users
+      if (blockedUserIds.has(p.ownerUserId)) return false;
+      return true;
     });
 
     // Compute totalReactionCount for each prompt

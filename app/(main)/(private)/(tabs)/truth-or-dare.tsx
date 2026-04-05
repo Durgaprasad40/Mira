@@ -668,7 +668,11 @@ export default function TruthOrDareScreen() {
   const deletePromptMutation = useMutation(api.truthDare.deleteMyPrompt);
 
   // Get trending prompts (1 Dare + 1 Truth)
-  const trendingDataQuery = useQuery(api.truthDare.getTrendingTruthAndDare);
+  // P1-006 FIX: Pass authUserId for block filtering in trending
+  const trendingDataQuery = useQuery(
+    api.truthDare.getTrendingTruthAndDare,
+    { authUserId: userId ?? undefined }
+  );
 
   // Get all prompts (sorted by engagement)
   const promptsDataQuery = useQuery(

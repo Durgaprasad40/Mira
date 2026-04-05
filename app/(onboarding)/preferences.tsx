@@ -24,7 +24,7 @@ import {
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter, useLocalSearchParams } from 'expo-router';
-import { COLORS, GENDER_OPTIONS, RELATIONSHIP_INTENTS, ACTIVITY_FILTERS } from '@/lib/constants';
+import { COLORS, GENDER_OPTIONS, RELATIONSHIP_INTENTS, ACTIVITY_FILTERS, VALIDATION } from '@/lib/constants';
 import { Input, Button } from '@/components/ui';
 import { Toast } from '@/components/ui/Toast';
 import { useOnboardingStore, LGBTQ_OPTIONS, LgbtqOption } from '@/stores/onboardingStore';
@@ -38,13 +38,13 @@ import type { Gender, ActivityFilter, RelationshipIntent } from '@/types';
 import { OnboardingProgressHeader } from '@/components/OnboardingProgressHeader';
 import { useScreenTrace } from '@/lib/devTrace';
 
-// Age range constraints
-const MIN_AGE_LIMIT = 18;
-const MAX_AGE_LIMIT = 70;
+// P2-005 FIX: Use centralized validation constants
+const MIN_AGE_LIMIT = VALIDATION.DISCOVERY_MIN_AGE;
+const MAX_AGE_LIMIT = VALIDATION.DISCOVERY_MAX_AGE;
 
-// Distance constraints
-const DISTANCE_MIN = 1;
-const DISTANCE_MAX = 150;
+// P2-005 FIX: Use centralized distance constraints
+const DISTANCE_MIN = VALIDATION.MIN_DISTANCE;
+const DISTANCE_MAX = VALIDATION.MAX_DISTANCE;
 const DISTANCE_DEFAULT = 50;
 
 const MIN_INTERESTS = 3;

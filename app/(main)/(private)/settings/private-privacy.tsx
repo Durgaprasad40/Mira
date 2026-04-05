@@ -11,7 +11,7 @@
  * No Nearby or Phase-1 specific features.
  */
 import React, { useState, useCallback } from 'react';
-import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Switch, Alert } from 'react-native';
+import { View, Text, StyleSheet, ScrollView, TouchableOpacity, Switch, Alert, ActivityIndicator } from 'react-native';
 import { useRouter } from 'expo-router';
 import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Ionicons } from '@expo/vector-icons';
@@ -21,6 +21,7 @@ import { INCOGNITO_COLORS } from '@/lib/constants';
 import { usePrivateProfileStore } from '@/stores/privateProfileStore';
 import { useAuthStore } from '@/stores/authStore';
 import { isDemoMode } from '@/hooks/useConvex';
+import { Toast } from '@/components/ui/Toast';
 
 const C = INCOGNITO_COLORS;
 
@@ -46,22 +47,41 @@ export default function PrivatePrivacyScreen() {
   // Warning shown state (session only)
   const [warningShownThisSession, setWarningShownThisSession] = useState(false);
 
-  // P0-1 FIX: Helper to persist privacy setting to backend
-  const persistToBackend = useCallback(async (field: string, value: boolean) => {
-    if (!isDemoMode && userId) {
-      try {
-        await updatePrivateProfile({
-          authUserId: userId,
-          [field]: value,
-        });
-      } catch (error) {
-        if (__DEV__) console.error('[PrivatePrivacy] Backend sync failed:', error);
-      }
+  // P0-001 FIX: Track which field is saving to prevent double-toggles and show loading
+  const [savingField, setSavingField] = useState<string | null>(null);
+
+  // P0-001 FIX: Helper to persist privacy setting to backend
+  // Returns true on success, false on failure. Does NOT do optimistic UI update.
+  const persistToBackend = useCallback(async (field: string, value: boolean): Promise<boolean> => {
+    if (isDemoMode) {
+      // Demo mode: Allow immediate UI update
+      return true;
+    }
+    if (!userId) {
+      Toast.show('Please sign in to change settings.');
+      return false;
+    }
+
+    setSavingField(field);
+    try {
+      await updatePrivateProfile({
+        authUserId: userId,
+        [field]: value,
+      });
+      return true;
+    } catch (error) {
+      if (__DEV__) console.error('[PrivatePrivacy] Backend sync failed:', error);
+      Toast.show('Failed to save setting. Please try again.');
+      return false;
+    } finally {
+      setSavingField(null);
     }
   }, [userId, updatePrivateProfile]);
 
-  // Handle "Hide from Deep Connect" toggle (now persisted to backend)
-  const handleHideFromDeepConnectChange = useCallback((newValue: boolean) => {
+  // P0-001 FIX: Handle "Hide from Deep Connect" toggle - waits for backend confirmation
+  const handleHideFromDeepConnectChange = useCallback(async (newValue: boolean) => {
+    if (savingField) return; // Prevent double-toggle while saving
+
     if (newValue && !warningShownThisSession) {
       Alert.alert(
         'Hide from Deep Connect',
@@ -70,37 +90,50 @@ export default function PrivatePrivacyScreen() {
           { text: 'Cancel', style: 'cancel' },
           {
             text: 'I Understand',
-            onPress: () => {
+            onPress: async () => {
               setWarningShownThisSession(true);
-              setHideFromDeepConnect(newValue);
-              persistToBackend('hideFromDeepConnect', newValue);
+              const success = await persistToBackend('hideFromDeepConnect', newValue);
+              if (success) {
+                setHideFromDeepConnect(newValue);
+              }
             },
           },
         ]
       );
       return;
     }
-    setHideFromDeepConnect(newValue);
-    persistToBackend('hideFromDeepConnect', newValue);
-  }, [warningShownThisSession, setHideFromDeepConnect, persistToBackend]);
+    const success = await persistToBackend('hideFromDeepConnect', newValue);
+    if (success) {
+      setHideFromDeepConnect(newValue);
+    }
+  }, [savingField, warningShownThisSession, setHideFromDeepConnect, persistToBackend]);
 
-  // Handle "Hide Age" toggle (now persisted to backend)
-  const handleHideAgeChange = useCallback((newValue: boolean) => {
-    setHideAge(newValue);
-    persistToBackend('hideAge', newValue);
-  }, [setHideAge, persistToBackend]);
+  // P0-001 FIX: Handle "Hide Age" toggle - waits for backend confirmation
+  const handleHideAgeChange = useCallback(async (newValue: boolean) => {
+    if (savingField) return;
+    const success = await persistToBackend('hideAge', newValue);
+    if (success) {
+      setHideAge(newValue);
+    }
+  }, [savingField, setHideAge, persistToBackend]);
 
-  // Handle "Hide Distance" toggle (now persisted to backend)
-  const handleHideDistanceChange = useCallback((newValue: boolean) => {
-    setHideDistance(newValue);
-    persistToBackend('hideDistance', newValue);
-  }, [setHideDistance, persistToBackend]);
+  // P0-001 FIX: Handle "Hide Distance" toggle - waits for backend confirmation
+  const handleHideDistanceChange = useCallback(async (newValue: boolean) => {
+    if (savingField) return;
+    const success = await persistToBackend('hideDistance', newValue);
+    if (success) {
+      setHideDistance(newValue);
+    }
+  }, [savingField, setHideDistance, persistToBackend]);
 
-  // Handle "Disable Read Receipts" toggle (now persisted to backend)
-  const handleDisableReadReceiptsChange = useCallback((newValue: boolean) => {
-    setDisableReadReceipts(newValue);
-    persistToBackend('disableReadReceipts', newValue);
-  }, [setDisableReadReceipts, persistToBackend]);
+  // P0-001 FIX: Handle "Disable Read Receipts" toggle - waits for backend confirmation
+  const handleDisableReadReceiptsChange = useCallback(async (newValue: boolean) => {
+    if (savingField) return;
+    const success = await persistToBackend('disableReadReceipts', newValue);
+    if (success) {
+      setDisableReadReceipts(newValue);
+    }
+  }, [savingField, setDisableReadReceipts, persistToBackend]);
 
   return (
     <View style={[styles.container, { paddingTop: insets.top }]}>
@@ -137,12 +170,17 @@ export default function PrivatePrivacyScreen() {
                   </Text>
                 </View>
               </View>
-              <Switch
-                value={hideFromDeepConnect}
-                onValueChange={handleHideFromDeepConnectChange}
-                trackColor={{ false: C.border, true: C.primary }}
-                thumbColor="#FFF"
-              />
+              {savingField === 'hideFromDeepConnect' ? (
+                <ActivityIndicator size="small" color={C.primary} />
+              ) : (
+                <Switch
+                  value={hideFromDeepConnect}
+                  onValueChange={handleHideFromDeepConnectChange}
+                  trackColor={{ false: C.border, true: C.primary }}
+                  thumbColor="#FFF"
+                  disabled={savingField !== null}
+                />
+              )}
             </TouchableOpacity>
           </View>
 
@@ -164,12 +202,17 @@ export default function PrivatePrivacyScreen() {
                   </Text>
                 </View>
               </View>
-              <Switch
-                value={hideAge}
-                onValueChange={handleHideAgeChange}
-                trackColor={{ false: C.border, true: C.primary }}
-                thumbColor="#FFF"
-              />
+              {savingField === 'hideAge' ? (
+                <ActivityIndicator size="small" color={C.primary} />
+              ) : (
+                <Switch
+                  value={hideAge}
+                  onValueChange={handleHideAgeChange}
+                  trackColor={{ false: C.border, true: C.primary }}
+                  thumbColor="#FFF"
+                  disabled={savingField !== null}
+                />
+              )}
             </TouchableOpacity>
           </View>
 
@@ -191,12 +234,17 @@ export default function PrivatePrivacyScreen() {
                   </Text>
                 </View>
               </View>
-              <Switch
-                value={hideDistance}
-                onValueChange={handleHideDistanceChange}
-                trackColor={{ false: C.border, true: C.primary }}
-                thumbColor="#FFF"
-              />
+              {savingField === 'hideDistance' ? (
+                <ActivityIndicator size="small" color={C.primary} />
+              ) : (
+                <Switch
+                  value={hideDistance}
+                  onValueChange={handleHideDistanceChange}
+                  trackColor={{ false: C.border, true: C.primary }}
+                  thumbColor="#FFF"
+                  disabled={savingField !== null}
+                />
+              )}
             </TouchableOpacity>
           </View>
         </View>
@@ -224,12 +272,17 @@ export default function PrivatePrivacyScreen() {
                   </Text>
                 </View>
               </View>
-              <Switch
-                value={disableReadReceipts}
-                onValueChange={handleDisableReadReceiptsChange}
-                trackColor={{ false: C.border, true: C.primary }}
-                thumbColor="#FFF"
-              />
+              {savingField === 'disableReadReceipts' ? (
+                <ActivityIndicator size="small" color={C.primary} />
+              ) : (
+                <Switch
+                  value={disableReadReceipts}
+                  onValueChange={handleDisableReadReceiptsChange}
+                  trackColor={{ false: C.border, true: C.primary }}
+                  thumbColor="#FFF"
+                  disabled={savingField !== null}
+                />
+              )}
             </TouchableOpacity>
           </View>
         </View>

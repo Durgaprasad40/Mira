@@ -354,8 +354,11 @@ export default function Phase2ProfileEdit() {
       setSelectedPhotos([], photoUrls);
 
       // B2-HIGH FIX: Delay navigation after keyboard dismiss to prevent Android crash
-      setTimeout(() => {
+      setTimeout(async () => {
         try {
+          // P0-002 FIX: Save onboarding progress before navigating
+          await usePrivateProfileStore.getState().saveOnboardingProgress();
+
           // FIX: If opened from review, go back to review instead of continuing to next step
           if (isFromReview) {
             router.back();

@@ -2808,6 +2808,15 @@ export interface DemoChatMessage {
     startIndex: number;
     endIndex: number;
   }>;
+  // P0-005 FINAL FIX: Message send status for persistence guarantee
+  // - 'sending': Message is being sent to backend
+  // - 'failed': Send failed, message remains visible with retry option
+  // - 'sent' or undefined: Message confirmed by server
+  status?: 'sending' | 'failed' | 'sent';
+  // Original text for retry (preserved on failure)
+  _retryText?: string;
+  // Client ID for deduplication during retry
+  _clientId?: string;
 }
 
 export const DEMO_CHAT_ROOMS: DemoChatRoom[] = [

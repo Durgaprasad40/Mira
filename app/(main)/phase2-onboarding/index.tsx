@@ -21,7 +21,7 @@ import {
 import { useRouter, usePathname } from "expo-router";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
 import { Ionicons } from "@expo/vector-icons";
-import { useQuery } from "convex/react";
+import { useQuery, useMutation } from "convex/react";
 import * as FileSystem from "expo-file-system/legacy";
 import { api } from "@/convex/_generated/api";
 import { INCOGNITO_COLORS } from "@/lib/constants";
@@ -258,8 +258,22 @@ export default function Phase2OnboardingTerms() {
     };
   }, []);
 
+  // P0-002 FIX: Restore onboarding progress from AsyncStorage on mount
+  useEffect(() => {
+    const restore = async () => {
+      const restored = await usePrivateProfileStore.getState().restoreOnboardingProgress();
+      if (restored && __DEV__) {
+        console.log('[P2 ONBOARDING] Previous progress restored');
+      }
+    };
+    restore();
+  }, []);
+
   const setAcceptedTermsAt = usePrivateProfileStore((s) => s.setAcceptedTermsAt);
   const importPhase1Data = usePrivateProfileStore((s) => s.importPhase1Data);
+
+  // P0-003 FIX: Mutation to persist consent timestamp to backend
+  const updatePrivateProfile = useMutation(api.privateProfiles.updateFieldsByAuthId);
 
   // Handle X/Cancel button - explicit exit from Phase-2 onboarding
   const handleExitOnboarding = () => {
@@ -336,7 +350,32 @@ export default function Phase2OnboardingTerms() {
 
     try {
       // Mark terms accepted
-      setAcceptedTermsAt(Date.now());
+      const consentTimestamp = Date.now();
+      setAcceptedTermsAt(consentTimestamp);
+
+      // P0-003 FINAL FIX: Persist consent timestamp to backend (BLOCKING)
+      // Legal compliance: consent MUST be recorded in Convex before proceeding
+      // This prevents any scenario where user proceeds without backend consent record
+      if (!isDemoMode && userId) {
+        try {
+          await updatePrivateProfile({
+            authUserId: userId,
+            consentAcceptedAt: consentTimestamp,
+          });
+        } catch (error) {
+          // Consent persistence failed - block progression and allow retry
+          if (__DEV__) {
+            console.error('[P2 ONBOARDING] CRITICAL: Failed to persist consent timestamp:', error);
+          }
+          setIsProcessing(false);
+          Alert.alert(
+            'Consent Recording Failed',
+            'Unable to record your consent. Please check your connection and try again.',
+            [{ text: 'OK' }]
+          );
+          return; // Exit early - do not proceed without consent record
+        }
+      }
 
       // Get Phase-1 profile data from Convex or demo
       const phase1User = isDemoMode ? demoUser : convexUser;
@@ -455,6 +494,9 @@ export default function Phase2OnboardingTerms() {
       // FIX P2-DATA-001: Import data BEFORE navigation to prevent race condition
       // NOTE: This imports profile info (name, age, gender, etc.) - photos are selected in next step
       importPhase1Data(phase1Data);
+
+      // P0-002 FIX: Save onboarding progress to AsyncStorage
+      await usePrivateProfileStore.getState().saveOnboardingProgress();
 
       // P2-PHOTO-001 FIX: Navigate to photo selection screen instead of auto-importing all photos
       // User will explicitly select which Phase-1 photos to import into Phase-2

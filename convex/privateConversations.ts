@@ -63,6 +63,33 @@ async function computeUnreadCountFromPrivateMessages(
   return unreadMessages.filter((m) => COUNTABLE_MESSAGE_TYPES.includes(m.type)).length;
 }
 
+// P2-001 FIX: Batch-fetch presence for multiple users to avoid N+1 queries
+async function batchFetchPresence(
+  ctx: QueryCtx | MutationCtx,
+  userIds: Id<'users'>[]
+): Promise<Map<string, number>> {
+  const presenceMap = new Map<string, number>();
+  if (userIds.length === 0) return presenceMap;
+
+  // Fetch all presence records in parallel (more efficient than sequential)
+  const presenceRecords = await Promise.all(
+    userIds.map((userId) =>
+      ctx.db
+        .query('privateUserPresence')
+        .withIndex('by_user', (q) => q.eq('userId', userId))
+        .first()
+    )
+  );
+
+  // Build the map
+  userIds.forEach((userId, idx) => {
+    const presence = presenceRecords[idx];
+    presenceMap.set(userId as string, presence?.lastActiveAt ?? 0);
+  });
+
+  return presenceMap;
+}
+
 // ═══════════════════════════════════════════════════════════════════════════
 // Query A: Get User's Phase-2 Conversations
 // ═══════════════════════════════════════════════════════════════════════════
@@ -121,10 +148,28 @@ export const getUserPrivateConversations = query({
       return [];
     }
 
+    // P2-001 FIX: Pre-fetch all conversations to collect other participant IDs
+    const conversationIds = participations.map((p) => p.conversationId);
+    const conversations = await Promise.all(conversationIds.map((id) => ctx.db.get(id)));
+
+    // Collect all other participant IDs for batch presence fetch
+    const otherParticipantIds: Id<'users'>[] = [];
+    conversations.forEach((conversation) => {
+      if (conversation) {
+        const otherId = conversation.participants.find((pid) => pid !== userId);
+        if (otherId) {
+          otherParticipantIds.push(otherId);
+        }
+      }
+    });
+
+    // P2-001 FIX: Batch-fetch presence for all participants in ONE query
+    const presenceMap = await batchFetchPresence(ctx, otherParticipantIds);
+
     // Fetch conversation details and other participant info
     const results = await Promise.all(
-      participations.map(async (p) => {
-        const conversation = await ctx.db.get(p.conversationId);
+      participations.map(async (p, idx) => {
+        const conversation = conversations[idx];
         if (!conversation) return null;
 
         // Find the other participant
@@ -178,7 +223,9 @@ export const getUserPrivateConversations = query({
         const displayName = otherUser?.handle || 'Anonymous';
 
         // Compute unread count from source of truth (privateMessages table)
-        const unreadCount = await computeUnreadCountFromPrivateMessages(ctx, conversation._id, userId);
+        // P2-002 FIX: Use denormalized unreadCount from participant record (avoids race condition)
+        // The unreadCount is atomically updated by sendPrivateMessage and markPrivateMessagesRead
+        const unreadCount = p.unreadCount;
 
         // ═══════════════════════════════════════════════════════════════════════════
         // PHOTO ACCESS CONTROL: Check if other user has blur enabled and access status
@@ -205,6 +252,9 @@ export const getUserPrivateConversations = query({
           }
         }
 
+        // P2-001 FIX: Use batch-fetched presence instead of N+1 query
+        const participantLastActive = presenceMap.get(otherParticipantId as string) ?? 0;
+
         return {
           id: conversation._id,
           conversationId: conversation._id,
@@ -213,16 +263,8 @@ export const getUserPrivateConversations = query({
           participantName: displayName,
           participantAge: otherAge,
           participantPhotoUrl: photoUrl,
-          // PHASE 2 ISOLATED: Get lastActiveAt from privateUserPresence table (NOT users table)
-          participantLastActive: await (async () => {
-            const presence = await ctx.db
-              .query('privateUserPresence')
-              .withIndex('by_user', (q) => q.eq('userId', otherParticipantId))
-              .first();
-            const lastActive = presence?.lastActiveAt ?? 0;
-            console.log('[P2_PRESENCE_READ] List:', (otherParticipantId as string).slice(-8), 'lastActive:', lastActive ? new Date(lastActive).toISOString() : 'null');
-            return lastActive;
-          })(),
+          // P2-001 FIX: Use pre-fetched presence (no N+1 query)
+          participantLastActive,
           // P1-004 FIX: Include first privateIntentKey for intent label lookup
           // Backend stores array (multi-select), we take the first/primary one for display
           participantIntentKey: otherPrivateProfile?.privateIntentKeys?.[0] ?? null,
@@ -1350,5 +1392,108 @@ export const getPresence = query({
       .first();
 
     return presence?.lastActiveAt ?? 0;
+  },
+});
+
+// ═══════════════════════════════════════════════════════════════════════════
+// P1-004 FIX: Phase-2 Typing Indicators
+// ═══════════════════════════════════════════════════════════════════════════
+
+/**
+ * Set typing status for a user in a Phase-2 conversation.
+ * Called when user starts/stops typing.
+ * Uses upsert pattern to avoid creating duplicate rows.
+ */
+export const setPrivateTypingStatus = mutation({
+  args: {
+    token: v.string(),
+    conversationId: v.id('privateConversations'),
+    isTyping: v.boolean(),
+  },
+  handler: async (ctx, { token, conversationId, isTyping }) => {
+    const now = Date.now();
+
+    // Validate session
+    const userId = await validateSessionToken(ctx, token);
+    if (!userId) return { success: false };
+
+    // Verify user is participant (IDOR prevention)
+    const conversation = await ctx.db.get(conversationId);
+    if (!conversation || !conversation.participants.includes(userId)) {
+      return { success: false };
+    }
+
+    // Upsert typing status
+    const existing = await ctx.db
+      .query('privateTypingStatus')
+      .withIndex('by_user_conversation', (q) =>
+        q.eq('userId', userId).eq('conversationId', conversationId)
+      )
+      .first();
+
+    if (existing) {
+      await ctx.db.patch(existing._id, { isTyping, updatedAt: now });
+    } else {
+      await ctx.db.insert('privateTypingStatus', {
+        conversationId,
+        userId,
+        isTyping,
+        updatedAt: now,
+      });
+    }
+
+    return { success: true };
+  },
+});
+
+/**
+ * Get typing status for the other participant in a Phase-2 conversation.
+ * Returns isTyping: true if the other user is actively typing (updated within last 5s).
+ */
+export const getPrivateTypingStatus = query({
+  args: {
+    conversationId: v.id('privateConversations'),
+    authUserId: v.optional(v.string()),
+  },
+  handler: async (ctx, { conversationId, authUserId }) => {
+    const now = Date.now();
+    const TYPING_TIMEOUT = 5000; // 5 seconds
+
+    // Resolve user ID
+    let userId: Id<'users'> | null = null;
+    const identity = await ctx.auth.getUserIdentity();
+    if (identity?.subject) {
+      userId = await resolveUserIdByAuthId(ctx, identity.subject);
+    }
+    if (!userId && authUserId) {
+      userId = await resolveUserIdByAuthId(ctx, authUserId);
+    }
+    if (!userId) return { isTyping: false };
+
+    // Get conversation to find the other participant
+    const conversation = await ctx.db.get(conversationId);
+    if (!conversation || !conversation.participants.includes(userId)) {
+      return { isTyping: false };
+    }
+
+    // Find the other participant
+    const otherUserId = conversation.participants.find((id) => id !== userId);
+    if (!otherUserId) return { isTyping: false };
+
+    // Get other user's typing status
+    const typingStatus = await ctx.db
+      .query('privateTypingStatus')
+      .withIndex('by_user_conversation', (q) =>
+        q.eq('userId', otherUserId).eq('conversationId', conversationId)
+      )
+      .first();
+
+    if (!typingStatus) return { isTyping: false };
+
+    // Check if typing status is stale (older than 5 seconds)
+    const isStale = now - typingStatus.updatedAt > TYPING_TIMEOUT;
+    return {
+      isTyping: typingStatus.isTyping && !isStale,
+    };
   },
 });

@@ -245,7 +245,7 @@ export default function Phase2PromptsScreen() {
   };
 
   // Validate all sections and continue
-  const handleContinue = () => {
+  const handleContinue = async () => {
     if (isNavigating.current) return;
 
     // Validation: at least 1 answered per section
@@ -273,6 +273,9 @@ export default function Phase2PromptsScreen() {
 
     setValidationError(null);
     isNavigating.current = true;
+
+    // P0-002 FIX: Save onboarding progress before navigating
+    await usePrivateProfileStore.getState().saveOnboardingProgress();
 
     // FIX: If opened from review, go back to review instead of pushing again
     if (isFromReview) {

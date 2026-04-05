@@ -63,6 +63,16 @@ export const VALIDATION = {
   BIO_MAX_LENGTH: 500,
   MIN_AGE: 18,
   MAX_AGE: 100,
+  // P2-005 FIX: Centralized age range for discovery preferences
+  // Note: Discovery/matching uses 18-70 range, profile validation uses 18-100
+  DISCOVERY_MIN_AGE: 18,
+  DISCOVERY_MAX_AGE: 70,
+  // P2-005 FIX: Height validation (in cm)
+  MIN_HEIGHT: 120,
+  MAX_HEIGHT: 250,
+  // P2-005 FIX: Weight validation (in kg)
+  MIN_WEIGHT: 30,
+  MAX_WEIGHT: 300,
   MIN_PHOTO_SIZE: 400, // px
   MAX_PHOTOS: 6,
   MIN_PHOTOS: 1,

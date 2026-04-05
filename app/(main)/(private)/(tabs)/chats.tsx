@@ -123,17 +123,46 @@ export default function ChatsScreen() {
   // Auth for queries and mutations
   const currentUserId = useAuthStore((s) => s.userId);
   const token = useAuthStore((s) => s.token);
+  // P0-AUTH-FIX: Wait for Convex auth identity to be ready before running queries
+  // This prevents "No auth identity" errors during initial hydration
+  const authReady = useAuthStore((s) => s.authReady);
+
+  // P0-AUTH-CRASH-FIX: Simple gating - requires userId + authReady
+  // Note: useConvexAuth was removed as it caused release crashes
+  // The query will return undefined until auth is ready, which is handled gracefully
+  const isAuthReadyForQueries = !!(currentUserId && authReady);
 
   // ═══════════════════════════════════════════════════════════════════════════
   // P2_LIKES: Incoming likes (people who liked current user, pending match)
+  // P0-AUTH-CRASH-FIX: Gate queries AND add delayed auth confirmation
+  // The query is skipped until auth is confirmed ready to prevent release crashes
   // ═══════════════════════════════════════════════════════════════════════════
+  // P0-AUTH-CRASH-FIX: Use delayed auth confirmation to ensure Convex identity is synced
+  // The Convex JWT (ctx.auth.getUserIdentity) takes longer to sync than Clerk token
+  // Using 500ms delay to ensure identity is fully propagated before firing queries
+  const [authConfirmed, setAuthConfirmed] = useState(false);
+  useEffect(() => {
+    if (isAuthReadyForQueries && !authConfirmed) {
+      // Longer delay to ensure Convex identity (JWT) is fully propagated
+      // Note: Clerk token (Zustand) syncs faster than Convex identity
+      const timer = setTimeout(() => setAuthConfirmed(true), 500);
+      return () => clearTimeout(timer);
+    }
+    if (!isAuthReadyForQueries) {
+      setAuthConfirmed(false);
+    }
+  }, [isAuthReadyForQueries, authConfirmed]);
+
+  // Final query gate - only fire after auth is fully confirmed
+  const canRunQueries = isAuthReadyForQueries && authConfirmed;
+
   const incomingLikes = useQuery(
     api.privateSwipes.getIncomingLikes,
-    currentUserId ? { userId: currentUserId as any } : 'skip'
+    canRunQueries ? { userId: currentUserId as any } : 'skip'
   );
   const incomingLikesCount = useQuery(
     api.privateSwipes.getIncomingLikesCount,
-    currentUserId ? { userId: currentUserId as any } : 'skip'
+    canRunQueries ? { userId: currentUserId as any } : 'skip'
   );
 
   // Log incoming likes count
@@ -247,9 +276,10 @@ export default function ChatsScreen() {
   }, [currentUserId, updatePresenceMutation]);
 
   // T&D Pending Connect Requests (still uses truthDare API - T&D is a separate feature)
+  // P0-AUTH-CRASH-FIX: Gate on canRunQueries to prevent early query errors
   const pendingRequests = useQuery(
     api.truthDare.getPendingConnectRequests,
-    currentUserId ? { authUserId: currentUserId } : 'skip'
+    canRunQueries ? { authUserId: currentUserId } : 'skip'
   );
   const respondToConnect = useMutation(api.truthDare.respondToConnect);
   const [respondingTo, setRespondingTo] = useState<string | null>(null);
@@ -280,11 +310,13 @@ export default function ChatsScreen() {
 
   // ═══════════════════════════════════════════════════════════════════════════
   // P0-002 FIX: Backend conversations from Phase-2 privateConversations table
+  // P0-AUTH-FIX: Gate on isAuthReadyForQueries to prevent early query errors
   // ═══════════════════════════════════════════════════════════════════════════
   // Note: retryKey is tracked locally but not passed to query (forces React to re-render)
+  // P0-AUTH-CRASH-FIX: Gate on canRunQueries to prevent early query errors
   const backendConversations = useQuery(
     api.privateConversations.getUserPrivateConversations,
-    currentUserId ? { authUserId: currentUserId } : 'skip'
+    canRunQueries ? { authUserId: currentUserId } : 'skip'
   );
 
   // P2-INSTRUMENTATION: Track conversation list sync

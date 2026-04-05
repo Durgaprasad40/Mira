@@ -112,6 +112,19 @@ function computeDedupeKey(type: string, data?: Record<string, string | undefined
       return `confession_reaction:${data?.confessionId ?? 'unknown'}`;
     case 'confession_reply':
       return `confession_reply:${data?.confessionId ?? 'unknown'}`;
+    // P2-007 FIX: Phase-2 notification deduplication
+    case 'phase2_match':
+      // Dedupe by conversation ID (one notification per match conversation)
+      return `phase2_match:${data?.conversationId ?? userId ?? 'unknown'}`;
+    case 'phase2_like':
+      // Per-event: each Phase-2 like is unique by liker's userId
+      return `phase2_like:${userId ?? 'unknown'}`;
+    case 'tod_connect':
+      // Dedupe by answer/prompt context to avoid duplicate connect notifications
+      return `tod_connect:${data?.answerId ?? data?.promptId ?? userId ?? 'unknown'}`;
+    case 'comment_connect':
+      // Dedupe by conversation ID for comment-based connections
+      return `comment_connect:${data?.conversationId ?? userId ?? 'unknown'}`;
     default:
       return `${type}:${Date.now()}`;
   }

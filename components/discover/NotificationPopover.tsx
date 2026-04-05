@@ -122,6 +122,25 @@ export function NotificationPopover({
           router.push(`/(main)/incognito-chat?id=${notification.data.conversationId}&${notifParams}${dedupeParam}` as any);
         }
         break;
+      // P1-001 FIX: Phase-2 match notification - navigate to Phase-2 chat
+      case 'phase2_match':
+        if (notification.data?.conversationId) {
+          router.push(`/(main)/incognito-chat?id=${notification.data.conversationId}&${notifParams}${dedupeParam}` as any);
+        }
+        break;
+      // P1-001 FIX: Phase-2 like notification - navigate to Phase-2 likes screen
+      case 'phase2_like':
+        router.push({
+          pathname: '/(main)/(private)/(tabs)/desire',
+          params: {
+            focus: 'likes',
+            profileId: notification.data?.otherUserId,
+            source: 'notification',
+            notificationId: notification._id,
+            dedupeKey: notification.dedupeKey,
+          },
+        } as any);
+        break;
       default:
         break;
     }
@@ -155,6 +174,11 @@ export function NotificationPopover({
         return 'flame';
       case 'comment_connect':
         return 'chatbubble-ellipses';
+      // P1-001 FIX: Phase-2 notification icons
+      case 'phase2_match':
+        return 'heart';
+      case 'phase2_like':
+        return 'heart-outline';
       default:
         return 'notifications';
     }
@@ -185,6 +209,11 @@ export function NotificationPopover({
         return '#FF7849'; // T/D orange flame color
       case 'comment_connect':
         return '#7C6AEF'; // Phase-2 purple accent
+      // P1-001 FIX: Phase-2 notification colors
+      case 'phase2_match':
+        return '#7C6AEF'; // Phase-2 purple accent for match
+      case 'phase2_like':
+        return '#9B7EF0'; // Phase-2 lighter purple for like
       default:
         return COLORS.textLight;
     }

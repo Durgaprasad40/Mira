@@ -40,6 +40,12 @@ export default function Phase2LikesScreen() {
   const router = useRouter();
   const insets = useSafeAreaInsets();
   const { userId, token } = useAuthStore();
+  // P0-AUTH-FIX: Wait for Convex auth identity to be ready before running queries
+  const authReady = useAuthStore((s) => s.authReady);
+
+  // P0-AUTH-CRASH-FIX: Simple gating - requires userId + authReady
+  // Note: useConvexAuth was removed as it caused release crashes
+  const isAuthReadyForQueries = !!(userId && authReady);
 
   // P2-003: Error and retry state
   const [retryKey, setRetryKey] = useState(0);
@@ -47,10 +53,11 @@ export default function Phase2LikesScreen() {
   const [loadStartTime, setLoadStartTime] = useState(Date.now());
 
   // Phase-2 incoming likes query
+  // P0-AUTH-FIX: Gate on isAuthReadyForQueries to prevent early query errors
   // Note: retryKey is tracked locally but not passed to query (forces React to re-render)
   const incomingLikes = useQuery(
     api.privateSwipes.getIncomingLikes,
-    userId ? { userId: userId as any } : 'skip'
+    isAuthReadyForQueries ? { userId: userId as any } : 'skip'
   );
 
   // P2-003: Query states

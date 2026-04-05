@@ -67,6 +67,7 @@ import type { Id } from "@/convex/_generated/dataModel";
 
 import { markPhase2Matched } from "@/lib/phase2MatchSession";
 import * as Haptics from 'expo-haptics';
+import { trackAction, setFeatureAndScreen, SENTRY_FEATURES } from '@/lib/sentry';
 
 // Type for swipe actions
 type SwipeAction = 'like' | 'pass' | 'super_like';
@@ -542,6 +543,12 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   const mountedRef = useRef(true);
   useEffect(() => {
     mountedRef.current = true;
+
+    // Set Sentry feature context for Phase-2 error tracking
+    if (isPhase2) {
+      setFeatureAndScreen(SENTRY_FEATURES.PHASE2_DISCOVER, 'DiscoverCardStack');
+    }
+
     return () => {
       mountedRef.current = false;
       // Clean up locks so a future remount starts fresh
@@ -553,7 +560,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
         randomMatchTimerRef.current = null;
       }
     };
-  }, []);
+  }, [isPhase2]);
 
   // Overlay refs + shared values (no React re-renders during drag)
   const overlayDirectionRef = useRef<"left" | "right" | "up" | null>(null);
@@ -906,6 +913,19 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
         const photoUrls = p.blurredPhotoUrls ?? [];
         const photos = photoUrls.map((url: string) => ({ url }));
 
+        // [P2_UI_PROFILE_DATA] Debug logging for intent tracing
+        if (__DEV__) {
+          console.log('[P2_UI_PROFILE_DATA]', {
+            name: p.displayName,
+            userId: p.userId?.slice?.(-8),
+            intentKeys: p.intentKeys,
+            hobbies: p.hobbies?.length ?? 0,
+            hasPrompts: (p.promptAnswers?.length ?? 0) > 0,
+            hasLifestyle: !!(p.height || p.smoking || p.drinking),
+            photoCount: photoUrls.length,
+          });
+        }
+
         return toProfileData({
           _id: p._id,
           id: p.userId, // Phase-2 uses userId as the primary identifier for matching
@@ -925,6 +945,12 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
           // SOFT_MATCH_FIX: Pass through completeness flags
           isSetupComplete: p.isSetupComplete ?? false,
           hasPhotos: p.hasPhotos ?? (photoUrls.length > 0),
+          // PREMIUM_CARD: Lifestyle data for photo-index reveal
+          height: p.height ?? null,
+          smoking: p.smoking ?? null,
+          drinking: p.drinking ?? null,
+          // PREMIUM_CARD: Profile prompts for photo-index reveal
+          profilePrompts: p.promptAnswers ?? [],
         });
       });
     }
@@ -1479,6 +1505,15 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   const openProfileCb = useCallback(() => {
     const c = currentRef.current;
     if (!c) return;
+
+    // Track profile opened for user journey replay
+    if (isPhase2) {
+      trackAction('profile_opened', {
+        userId: (c.userId || c.id)?.slice(-8),
+        name: c.name,
+      });
+    }
+
     if (isPhase2) {
       // Phase-2: Use dedicated Phase-2 profile route (no Phase-1 leakage)
       // OLD WRONG: /(main)/profile/${c.id}?mode=phase2
@@ -1676,6 +1711,15 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
 
         if (!convexUserId) { releaseSwipeLock(activeSwipeId); return; }
         const action: SwipeAction = direction === "left" ? "pass" : direction === "up" ? "super_like" : "like";
+
+        // Track swipe action for user journey replay
+        if (isPhase2) {
+          trackAction(`swipe_${action}`, {
+            profileId: swipedProfile.id?.slice(-8),
+            name: swipedProfile.name,
+          });
+        }
+
         // B5 fix: wrap mutation in Promise.race with 6s timeout to prevent stuck swipe lock
         const SWIPE_TIMEOUT_MS = 6000;
         const timeoutPromise = new Promise<null>((_, reject) =>
@@ -2305,9 +2349,14 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
               photos={next.photos}
               trustBadges={nextBadges}
               profilePrompt={next.profilePrompts?.[0]}
+              profilePrompts={next.profilePrompts}
               theme={isPhase2 ? "dark" : "light"}
               privateIntentKeys={next.privateIntentKeys ?? (next as any).intentKeys ?? (next.privateIntentKey ? [next.privateIntentKey] : [])}
               isIncognito={next.isIncognito}
+              activities={next.activities}
+              height={next.height}
+              smoking={next.smoking}
+              drinking={next.drinking}
             />
           </Animated.View>
         )}
@@ -2325,6 +2374,7 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
                 photos={current.photos}
                 trustBadges={currentBadges}
                 profilePrompt={current.profilePrompts?.[0]}
+                profilePrompts={current.profilePrompts}
                 showCarousel
                 onOpenProfile={openProfileCb}
                 theme={isPhase2 ? "dark" : "light"}
@@ -2332,6 +2382,10 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
                 isIncognito={current.isIncognito}
                 exploreTag={exploreCategoryId ? CATEGORY_TAG_LABELS[exploreCategoryId] : undefined}
                 lastActive={current.lastActive ?? (current as any).lastActiveAt}
+                activities={current.activities}
+                height={current.height}
+                smoking={current.smoking}
+                drinking={current.drinking}
               />
               <SwipeOverlay direction={overlayDirection} opacity={overlayOpacity} dark={dark} />
             </Animated.View>

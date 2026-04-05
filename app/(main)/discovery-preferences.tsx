@@ -12,7 +12,7 @@ import {
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useRouter, useLocalSearchParams, useSegments } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
-import { COLORS, GENDER_OPTIONS, ORIENTATION_OPTIONS, RELATIONSHIP_INTENTS, INCOGNITO_COLORS } from '@/lib/constants';
+import { COLORS, GENDER_OPTIONS, ORIENTATION_OPTIONS, RELATIONSHIP_INTENTS, INCOGNITO_COLORS, VALIDATION } from '@/lib/constants';
 import { PRIVATE_INTENT_CATEGORIES } from '@/lib/privateConstants';
 import { Button, Input } from '@/components/ui';
 import { useFilterStore, kmToMiles, milesToKm } from '@/stores/filterStore';
@@ -24,10 +24,10 @@ import { api } from '@/convex/_generated/api';
 import { asUserId } from '@/convex/id';
 import type { Gender, Orientation } from '@/types';
 
-// Age and distance limits
-const MIN_AGE = 18;
-const MAX_AGE = 70;
-const MAX_DISTANCE_MILES = 150; // UI shows miles
+// P2-005 FIX: Use centralized validation constants
+const MIN_AGE = VALIDATION.DISCOVERY_MIN_AGE;
+const MAX_AGE = VALIDATION.DISCOVERY_MAX_AGE;
+const MAX_DISTANCE_MILES = VALIDATION.MAX_DISTANCE; // UI shows miles
 const MAX_DISTANCE_KM = milesToKm(MAX_DISTANCE_MILES); // ~161km stored
 
 // "Looking for" is single-select (exactly 1)
