@@ -39,7 +39,8 @@ import * as ImagePicker from 'expo-image-picker';
 import { useQuery, useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { uploadPhotoToConvex } from '@/lib/uploadUtils';
-import { INCOGNITO_COLORS } from '@/lib/constants';
+import { INCOGNITO_COLORS, ACTIVITY_FILTERS } from '@/lib/constants';
+import { cmToFeetInches } from '@/lib/utils';
 import { usePrivateProfileStore } from '@/stores/privateProfileStore';
 import { useAuthStore } from '@/stores/authStore';
 import { isDemoMode } from '@/hooks/useConvex';
@@ -180,6 +181,7 @@ export default function EditProfileScreen() {
   const storeDrinking = usePrivateProfileStore((s) => s.drinking);
   const storeEducation = usePrivateProfileStore((s) => s.education);
   const storeReligion = usePrivateProfileStore((s) => s.religion);
+  const storeHobbies = usePrivateProfileStore((s) => s.hobbies);
 
   // Resolve display values from backend or store (backend takes priority)
   const displayName = useMemo(() => {
@@ -246,6 +248,13 @@ export default function EditProfileScreen() {
     return storeReligion;
   }, [backendProfile?.religion, storeReligion]);
 
+  const hobbies = useMemo(() => {
+    if (!isDemoMode && backendProfile?.hobbies) {
+      return backendProfile.hobbies;
+    }
+    return storeHobbies || [];
+  }, [backendProfile?.hobbies, storeHobbies]);
+
   // Store actions
   const setSelectedPhotos = usePrivateProfileStore((s) => s.setSelectedPhotos);
   const setBlurMyPhoto = usePrivateProfileStore((s) => s.setBlurMyPhoto);
@@ -257,6 +266,7 @@ export default function EditProfileScreen() {
   const setDrinking = usePrivateProfileStore((s) => s.setDrinking);
   const setEducation = usePrivateProfileStore((s) => s.setEducation);
   const setReligion = usePrivateProfileStore((s) => s.setReligion);
+  const setHobbies = usePrivateProfileStore((s) => s.setHobbies);
 
   // Local state for editable details (synced from resolved values)
   const [localHeight, setLocalHeight] = useState<number | null>(null);
@@ -265,6 +275,7 @@ export default function EditProfileScreen() {
   const [localDrinking, setLocalDrinking] = useState<string | null>(null);
   const [localEducation, setLocalEducation] = useState<string | null>(null);
   const [localReligion, setLocalReligion] = useState<string | null>(null);
+  const [localHobbies, setLocalHobbies] = useState<string[]>([]);
   const [detailsInitialized, setDetailsInitialized] = useState(false);
 
   // Sync local details state from resolved values (once on load)
@@ -276,9 +287,10 @@ export default function EditProfileScreen() {
       setLocalDrinking(drinking ?? null);
       setLocalEducation(education ?? null);
       setLocalReligion(religion ?? null);
+      setLocalHobbies(hobbies || []);
       setDetailsInitialized(true);
     }
-  }, [backendProfile, height, weight, smoking, drinking, education, religion, detailsInitialized]);
+  }, [backendProfile, height, weight, smoking, drinking, education, religion, hobbies, detailsInitialized]);
 
   // Local state
   const [addingSlotIndex, setAddingSlotIndex] = useState<number | null>(null);
@@ -866,7 +878,12 @@ export default function EditProfileScreen() {
 
             {/* Height */}
             <View style={styles.detailRow}>
-              <Text style={styles.detailLabel}>Height (cm)</Text>
+              <View style={styles.detailLabelRow}>
+                <Text style={styles.detailLabel}>Height (cm)</Text>
+                {localHeight && (
+                  <Text style={styles.heightPreview}>{cmToFeetInches(localHeight)}</Text>
+                )}
+              </View>
               <View style={styles.detailInputRow}>
                 <TextInput
                   style={styles.detailInput}
@@ -1009,6 +1026,48 @@ export default function EditProfileScreen() {
                 ))}
               </View>
             </View>
+          </View>
+
+          {/* ────────────────────────────────────────────────────────────── */}
+          {/* SECTION 7: INTERESTS (wrapped chip layout like Smoking/Drinking) */}
+          {/* ────────────────────────────────────────────────────────────── */}
+          <View style={styles.section}>
+            <View style={styles.sectionHeader}>
+              <Text style={styles.sectionTitle}>Interests</Text>
+              <Text style={styles.sectionCount}>{localHobbies.length}/6</Text>
+            </View>
+
+            <View style={styles.chipRow}>
+              {ACTIVITY_FILTERS.slice(0, 24).map((activity) => {
+                const isSelected = localHobbies.includes(activity.value);
+                return (
+                  <TouchableOpacity
+                    key={activity.value}
+                    style={[styles.chip, isSelected && styles.chipSelected]}
+                    onPress={() => {
+                      let newHobbies: string[];
+                      if (isSelected) {
+                        newHobbies = localHobbies.filter((h) => h !== activity.value);
+                      } else if (localHobbies.length < 6) {
+                        newHobbies = [...localHobbies, activity.value];
+                      } else {
+                        return; // Max 6 reached
+                      }
+                      setLocalHobbies(newHobbies);
+                      setHobbies(newHobbies);
+                      saveField('hobbies', newHobbies);
+                    }}
+                    activeOpacity={0.7}
+                  >
+                    <Text style={[styles.chipText, isSelected && styles.chipTextSelected]}>
+                      {activity.emoji} {activity.label}
+                    </Text>
+                  </TouchableOpacity>
+                );
+              })}
+            </View>
+
+            <Text style={styles.detailHint}>Select up to 6 interests to show on your profile</Text>
           </View>
 
           {/* Bottom spacing for save button */}
@@ -1437,7 +1496,17 @@ const styles = StyleSheet.create({
     fontSize: 13,
     fontWeight: '600',
     color: C.textLight,
+  },
+  detailLabelRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
     marginBottom: 8,
+  },
+  heightPreview: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: C.primary,
   },
   detailInputRow: {
     flexDirection: 'row',

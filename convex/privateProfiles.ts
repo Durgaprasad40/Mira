@@ -249,6 +249,8 @@ export const updateFieldsByAuthId = mutation({
     privateBio: v.optional(v.string()),
     privateIntentKeys: v.optional(v.array(v.string())),
     isPrivateEnabled: v.optional(v.boolean()),
+    // Phase-1 imported fields (editable in Phase-2)
+    hobbies: v.optional(v.array(v.string())),
     // Phase-2 Onboarding Step 3: Prompt answers
     promptAnswers: v.optional(v.array(v.object({
       promptId: v.string(),

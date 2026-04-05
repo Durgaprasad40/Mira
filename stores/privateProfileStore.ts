@@ -178,6 +178,7 @@ interface PrivateProfileState {
   setDrinking: (drinking: string | null) => void;
   setEducation: (education: string | null) => void;
   setReligion: (religion: string | null) => void;
+  setHobbies: (hobbies: string[]) => void;
 
   // Actions — completion
   setIsSetupComplete: (complete: boolean) => void;
@@ -387,6 +388,7 @@ export const usePrivateProfileStore = create<PrivateProfileState>()((set) => ({
   setDrinking: (drinking) => set({ drinking }),
   setEducation: (education) => set({ education }),
   setReligion: (religion) => set({ religion }),
+  setHobbies: (hobbies) => set({ hobbies }),
   setIsSetupComplete: (complete) => set({ isSetupComplete: complete }),
   setConvexProfileId: (id) => set({ convexProfileId: id }),
   resetWizard: () => set(initialWizardState),

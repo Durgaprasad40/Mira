@@ -86,6 +86,10 @@ export default function ActivateScreen() {
 
       if (!userId) throw new Error('Not authenticated');
 
+      // Copy interests (activities) and verification status from Phase-1 for isolation
+      const phase1Hobbies = currentUser?.activities || [];
+      const phase1Verified = currentUser?.isVerified ?? false;
+
       const result = await upsertProfile({
         userId: userId as any,
         isPrivateEnabled: true,
@@ -104,6 +108,9 @@ export default function ActivateScreen() {
         gender: store.gender || 'other',
         revealPolicy: 'mutual_only',
         isSetupComplete: true,
+        // Phase-1 imported fields (stored in Phase-2 for isolation)
+        hobbies: phase1Hobbies,
+        isVerified: phase1Verified,
       });
 
       store.setIsSetupComplete(true);

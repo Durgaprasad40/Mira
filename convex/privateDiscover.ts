@@ -560,7 +560,14 @@ export const getProfileByUserId = query({
     if (anonymousConversation) return null;
 
     // Cast to access optional schema fields that may not be in generated types yet
-    const profile = p as typeof p & { hobbies?: string[]; isVerified?: boolean; privateIntentKey?: string };
+    const profile = p as typeof p & {
+      hobbies?: string[];
+      isVerified?: boolean;
+      privateIntentKey?: string;
+      height?: number;
+      smoking?: string;
+      drinking?: string;
+    };
 
     // Backward compat: older records may only have privateIntentKey (single), not privateIntentKeys (array)
     const intentKeys = p.privateIntentKeys ?? (profile.privateIntentKey ? [profile.privateIntentKey] : []);
@@ -597,6 +604,10 @@ export const getProfileByUserId = query({
       hobbies: profile.hobbies ?? [],
       isVerified: profile.isVerified ?? false,
       activities: profile.hobbies ?? [],
+      // Lifestyle data for full profile display
+      height: profile.height ?? null,
+      smoking: profile.smoking ?? null,
+      drinking: profile.drinking ?? null,
       // Phase-2 does NOT have Phase-1 fields
       relationshipIntent: [],
       profilePrompts: [],

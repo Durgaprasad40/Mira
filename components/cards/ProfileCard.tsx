@@ -134,25 +134,14 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
   onPress,
 }) => {
   const dark = theme === 'dark';
+  // PHASE-2 DETECTION: Use privateIntentKeys presence, NOT theme
+  const isPhase2 = !!privateIntentKeys;
   const TC = dark ? INCOGNITO_COLORS : COLORS;
   const { height: windowHeight } = useWindowDimensions();
 
   // Responsive bottom offset for arrow button (was hardcoded 140px)
   // On ~850px device, 140px ≈ 16.5% from bottom — scale proportionally
   const arrowButtonBottom = Math.round(windowHeight * 0.165);
-
-  // Face 2 only: Look up intent category labels from keys (array)
-  const phase2IntentLabels = useMemo(() => {
-    if (!dark || !privateIntentKeys || privateIntentKeys.length === 0) return [];
-    return privateIntentKeys
-      .map(key => PRIVATE_INTENT_CATEGORIES.find(c => c.key === key))
-      .filter(Boolean)
-      .map(c => c!.label);
-  }, [dark, privateIntentKeys]);
-
-  // Phase-2: Show max 2 labels + overflow count
-  const phase2VisibleLabels = phase2IntentLabels.slice(0, 2);
-  const phase2OverflowCount = phase2IntentLabels.length > 2 ? phase2IntentLabels.length - 2 : 0;
 
   // Check if user is active now (within 10 minutes)
   const isActiveNow = useMemo(() => {
@@ -163,32 +152,32 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
 
   // Phase-1 only: Compute "Looking for" text
   const lookingForText = useMemo(() => {
-    if (dark || !lookingFor || lookingFor.length === 0) return null;
+    if (isPhase2 || !lookingFor || lookingFor.length === 0) return null;
     if (lookingFor.length >= 3) return 'Looking for: Everyone';
     const labels = lookingFor.map(g => GENDER_LABELS[g] || g).filter(Boolean);
     const unique = [...new Set(labels)];
     return unique.length > 0 ? `Looking for: ${unique.join(', ')}` : null;
-  }, [dark, lookingFor]);
+  }, [isPhase2, lookingFor]);
 
   // Phase-1 only: Get relationship intent labels
   const intentLabels = useMemo(() => {
-    if (dark || !relationshipIntent || relationshipIntent.length === 0) return [];
+    if (isPhase2 || !relationshipIntent || relationshipIntent.length === 0) return [];
     return relationshipIntent
       .map(key => RELATIONSHIP_INTENTS.find(i => i.value === key))
       .filter(Boolean)
       .slice(0, 2) // Show max 2 on card
       .map(i => i!.label);
-  }, [dark, relationshipIntent]);
+  }, [isPhase2, relationshipIntent]);
 
   // Phase-1 only: Get activity labels with emojis
   const activityItems = useMemo(() => {
-    if (dark || !activities || activities.length === 0) return [];
+    if (isPhase2 || !activities || activities.length === 0) return [];
     return activities
       .map(key => ACTIVITY_FILTERS.find(a => a.value === key))
       .filter(Boolean)
       .slice(0, 3) // Show max 3 on card
       .map(a => ({ emoji: a!.emoji, label: a!.label }));
-  }, [dark, activities]);
+  }, [isPhase2, activities]);
 
   const [photoIndex, setPhotoIndex] = useState(0);
   // 7-1: Track image load errors to show placeholder on failure
@@ -398,15 +387,15 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
                 </View>
               )}
             </View>
-            {/* City - subtler styling */}
-            {!!city && (
+            {/* City - Phase-1 only (Phase-2 uses distance instead) */}
+            {!!city && !isPhase2 && (
               <View style={styles.locationRow}>
-                <Ionicons name="location-outline" size={13} color={dark ? 'rgba(255,255,255,0.6)' : 'rgba(255,255,255,0.8)'} />
-                <Text style={[styles.city, dark && styles.cityDark]}>{city}</Text>
+                <Ionicons name="location-outline" size={13} color={'rgba(255,255,255,0.8)'} />
+                <Text style={styles.city}>{city}</Text>
               </View>
             )}
             {/* Phase-1 only: Looking for + intent chips */}
-            {!dark && (lookingForText || intentLabels.length > 0) && (
+            {!isPhase2 && (lookingForText || intentLabels.length > 0) && (
               <View style={styles.intentChipRow}>
                 {lookingForText && (
                   <View style={styles.intentChip}>
@@ -421,7 +410,7 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
               </View>
             )}
             {/* Phase-1 only: Activities/interests chips */}
-            {!dark && activityItems.length > 0 && (
+            {!isPhase2 && activityItems.length > 0 && (
               <View style={styles.activityChipRow}>
                 {activityItems.map((item, idx) => (
                   <View key={idx} style={styles.activityChip}>
@@ -430,29 +419,15 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
                 ))}
               </View>
             )}
-            {/* Phase-2 (Dark): Premium intent chips */}
-            {dark && phase2VisibleLabels.length > 0 && (
-              <View style={styles.phase2IntentRow}>
-                {phase2VisibleLabels.map((label, idx) => (
-                  <View key={idx} style={styles.phase2IntentChipDark}>
-                    <Text style={styles.phase2IntentTextDark}>{label}</Text>
-                  </View>
-                ))}
-                {phase2OverflowCount > 0 && (
-                  <View style={styles.phase2IntentChipOverflow}>
-                    <Text style={styles.phase2IntentTextDark}>+{phase2OverflowCount}</Text>
-                  </View>
-                )}
-              </View>
-            )}
+            {/* Phase-2: Minimal card - no intent chips (shown in full profile only) */}
           </View>
           {!!distance && (
             <Text style={[styles.distance, dark && styles.distanceDark]}>{distance.toFixed(0)} km</Text>
           )}
         </View>
 
-        {/* Trust badges - only show in light mode (Phase-1) */}
-        {!dark && trustBadges && trustBadges.length > 0 && (
+        {/* Trust badges - Phase-1 only */}
+        {!isPhase2 && trustBadges && trustBadges.length > 0 && (
           <View style={styles.trustBadgeRow}>
             {trustBadges.slice(0, 3).map((badge) => (
               <View key={badge.key} style={[styles.trustBadgeCompact, { backgroundColor: badge.color + '30' }]}>
@@ -468,9 +443,9 @@ export const ProfileCard: React.FC<ProfileCardProps> = React.memo(({
           </View>
         )}
 
-        {/* Bio - improved readability */}
-        {showCarousel && bio && (
-          <Text style={[styles.bio, dark && styles.bioDark]} numberOfLines={2}>
+        {/* Bio - Phase-1 only (Phase-2 shows bio in full profile only) */}
+        {showCarousel && bio && !isPhase2 && (
+          <Text style={[styles.bio]} numberOfLines={2}>
             {bio}
           </Text>
         )}

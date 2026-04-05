@@ -29,7 +29,8 @@ import { api } from '@/convex/_generated/api';
 import { useAuthStore } from '@/stores/authStore';
 import { useDiscoverStore } from '@/stores/discoverStore';
 import { useInteractionStore } from '@/stores/interactionStore';
-import { INCOGNITO_COLORS, COLORS } from '@/lib/constants';
+import { INCOGNITO_COLORS, COLORS, ACTIVITY_FILTERS } from '@/lib/constants';
+import { cmToFeetInches } from '@/lib/utils';
 import {
   PRIVATE_INTENT_CATEGORIES,
   PRIVATE_DESIRE_TAGS,
@@ -301,6 +302,32 @@ export default function Phase2FullProfileScreen() {
     return PRIVATE_DESIRE_TAGS.find((t) => t.key === key)?.label || key;
   };
 
+  // Get hobby/interest info with emoji
+  const getHobbyInfo = (key: string) => {
+    const activity = ACTIVITY_FILTERS.find((a) => a.value === key);
+    return activity ? { label: activity.label, emoji: activity.emoji } : { label: key, emoji: '' };
+  };
+
+  // Get lifestyle items as array for chip display
+  const getLifestyleItems = () => {
+    const items: { icon: string; label: string }[] = [];
+    const heightStr = cmToFeetInches(profile.height);
+    if (heightStr) items.push({ icon: 'resize-outline', label: heightStr });
+    if (profile.smoking) {
+      const smokingLabels: Record<string, string> = {
+        never: 'Non-smoker', socially: 'Social smoker', regularly: 'Smoker'
+      };
+      items.push({ icon: 'flame-outline', label: smokingLabels[profile.smoking] || profile.smoking });
+    }
+    if (profile.drinking) {
+      const drinkingLabels: Record<string, string> = {
+        never: "Doesn't drink", socially: 'Drinks socially', regularly: 'Drinks regularly'
+      };
+      items.push({ icon: 'wine-outline', label: drinkingLabels[profile.drinking] || profile.drinking });
+    }
+    return items;
+  };
+
   const photos = profile.photos || [];
   const hasMultiplePhotos = photos.length > 1;
 
@@ -465,13 +492,14 @@ export default function Phase2FullProfileScreen() {
         )}
 
         {/* ═══════════════════════════════════════════════════════════════════
-            DESIRES SECTION
+            DESIRES SECTION (max 4 tags for premium feel)
         ═══════════════════════════════════════════════════════════════════ */}
         {profile.desireTagKeys && profile.desireTagKeys.length > 0 && (
           <View style={styles.section}>
             <Text style={styles.sectionTitle}>Desires</Text>
             <View style={styles.tagsRow}>
-              {profile.desireTagKeys.map((key: string, i: number) => (
+              {/* Deep Connect UI: Show max 4 desire tags */}
+              {profile.desireTagKeys.slice(0, 4).map((key: string, i: number) => (
                 <View key={i} style={styles.desireTag}>
                   <Text style={styles.desireTagText}>{getDesireTagLabel(key)}</Text>
                 </View>
@@ -481,32 +509,75 @@ export default function Phase2FullProfileScreen() {
         )}
 
         {/* ═══════════════════════════════════════════════════════════════════
-            PROMPTS SECTION
+            PROMPTS SECTION (exactly 2 prompts: first + random from rest)
         ═══════════════════════════════════════════════════════════════════ */}
-        {profile.promptAnswers && profile.promptAnswers.length > 0 && (
-          <View style={styles.section}>
-            <Text style={styles.sectionTitle}>About Them</Text>
-            {profile.promptAnswers.map((prompt: { promptId: string; question: string; answer: string }, i: number) => (
-              <View key={prompt.promptId || i} style={styles.promptCard}>
-                <Text style={styles.promptQuestion}>{prompt.question}</Text>
-                <Text style={styles.promptAnswer}>{prompt.answer}</Text>
-              </View>
-            ))}
-          </View>
-        )}
+        {profile.promptAnswers && profile.promptAnswers.length > 0 && (() => {
+          // Deep Connect UI: Show exactly 2 prompts
+          // Prompt 1 = first non-empty, Prompt 2 = random from remaining
+          const validPrompts = profile.promptAnswers.filter(
+            (p: { answer: string }) => p.answer && p.answer.trim().length > 0
+          );
+          if (validPrompts.length === 0) return null;
+
+          const displayPrompts: typeof validPrompts = [validPrompts[0]];
+          if (validPrompts.length > 1) {
+            // Pick random from remaining prompts
+            const remaining = validPrompts.slice(1);
+            const randomIdx = Math.floor(Math.random() * remaining.length);
+            displayPrompts.push(remaining[randomIdx]);
+          }
+
+          return (
+            <View style={styles.section}>
+              <Text style={styles.sectionTitle}>About Them</Text>
+              {displayPrompts.map((prompt: { promptId: string; question: string; answer: string }, i: number) => (
+                <View key={prompt.promptId || i} style={styles.promptCard}>
+                  <Text style={styles.promptQuestion}>{prompt.question}</Text>
+                  <Text style={styles.promptAnswer}>{prompt.answer}</Text>
+                </View>
+              ))}
+            </View>
+          );
+        })()}
 
         {/* ═══════════════════════════════════════════════════════════════════
-            HOBBIES & INTERESTS SECTION
+            LIFESTYLE SECTION (height, smoking, drinking) - Premium chips
+        ═══════════════════════════════════════════════════════════════════ */}
+        {(() => {
+          const lifestyleItems = getLifestyleItems();
+          if (lifestyleItems.length === 0) return null;
+          return (
+            <View style={styles.section}>
+              <Text style={styles.sectionTitle}>Lifestyle</Text>
+              <View style={styles.lifestyleChipsRow}>
+                {lifestyleItems.map((item, i) => (
+                  <View key={i} style={styles.lifestyleChip}>
+                    <Ionicons name={item.icon as any} size={14} color={C.textLight} />
+                    <Text style={styles.lifestyleChipText}>{item.label}</Text>
+                  </View>
+                ))}
+              </View>
+            </View>
+          );
+        })()}
+
+        {/* ═══════════════════════════════════════════════════════════════════
+            HOBBIES & INTERESTS SECTION (max 6 for premium feel)
         ═══════════════════════════════════════════════════════════════════ */}
         {profile.hobbies && profile.hobbies.length > 0 && (
           <View style={styles.section}>
             <Text style={styles.sectionTitle}>Interests</Text>
             <View style={styles.tagsRow}>
-              {profile.hobbies.map((hobby: string, i: number) => (
-                <View key={i} style={styles.hobbyTag}>
-                  <Text style={styles.hobbyTagText}>{hobby}</Text>
-                </View>
-              ))}
+              {/* Deep Connect UI: Show max 6 interests with emojis */}
+              {profile.hobbies.slice(0, 6).map((hobby: string, i: number) => {
+                const info = getHobbyInfo(hobby);
+                return (
+                  <View key={i} style={styles.hobbyTag}>
+                    {info.emoji && <Text style={styles.hobbyEmoji}>{info.emoji}</Text>}
+                    <Text style={styles.hobbyTagText}>{info.label}</Text>
+                  </View>
+                );
+              })}
             </View>
           </View>
         )}
@@ -763,12 +834,41 @@ const styles = StyleSheet.create({
 
   // Hobby tags
   hobbyTag: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
     backgroundColor: C.accent,
     paddingHorizontal: 14,
     paddingVertical: 8,
     borderRadius: 16,
   },
+  hobbyEmoji: {
+    fontSize: 14,
+  },
   hobbyTagText: {
+    fontSize: 13,
+    fontWeight: '500',
+    color: C.text,
+  },
+
+  // Lifestyle section - premium chip style
+  lifestyleChipsRow: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    gap: 10,
+  },
+  lifestyleChip: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 6,
+    backgroundColor: C.surface,
+    paddingHorizontal: 14,
+    paddingVertical: 10,
+    borderRadius: 20,
+    borderWidth: 1,
+    borderColor: C.accent,
+  },
+  lifestyleChipText: {
     fontSize: 13,
     fontWeight: '500',
     color: C.text,
