@@ -2,7 +2,7 @@
  * LOCKED (PROFILE TAB)
  * Do NOT modify this file unless Durga Prasad explicitly unlocks it.
  */
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useMemo } from 'react';
 import {
   View,
   Text,
@@ -12,6 +12,7 @@ import {
   Platform,
   Alert,
   Modal,
+  Pressable,
 } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { useRouter, useFocusEffect } from 'expo-router';
@@ -100,6 +101,12 @@ export default function ProfileScreen() {
     !isDemoMode && userId ? { userId: userId as any } : 'skip'
   );
   const isAdmin = adminCheck?.isAdmin === true;
+
+  // Query verification status for details (date, pending session)
+  const verificationDetails = useQuery(
+    api.verification.getVerificationStatus,
+    !isDemoMode && userId ? { userId: userId as Id<'users'> } : 'skip'
+  );
 
   // CONSISTENCY FIX: Use same photo source as Edit Profile (api.photos.getUserPhotos)
   // This ensures Profile Tab shows the SAME photos as Edit Profile grid
@@ -326,11 +333,75 @@ export default function ProfileScreen() {
     });
   }
 
+  // ═══════════════════════════════════════════════════════════════════════════
+  // VERIFICATION STATUS - Computed display info
+  // ═══════════════════════════════════════════════════════════════════════════
+  const verificationStatusInfo = useMemo(() => {
+    // Demo mode: use isVerified flag
+    if (isDemoMode) {
+      return {
+        status: currentUser?.isVerified ? 'verified' : 'unverified',
+        label: currentUser?.isVerified ? 'Verified' : 'Not Verified',
+        icon: currentUser?.isVerified ? 'checkmark-circle' : 'alert-circle-outline',
+        color: currentUser?.isVerified ? COLORS.success : COLORS.textMuted,
+        bgColor: currentUser?.isVerified ? COLORS.successSubtle : COLORS.backgroundDark,
+        buttonLabel: currentUser?.isVerified ? 'Re-verify' : 'Verify Now',
+        date: null,
+      } as const;
+    }
+
+    // Live mode: use verificationDetails from backend
+    const status = verificationDetails?.status || (convexUser as any)?.verificationStatus || 'unverified';
+    const completedAt = verificationDetails?.completedAt;
+
+    // Format date if available
+    let dateLabel: string | null = null;
+    if (completedAt && status === 'verified') {
+      const date = new Date(completedAt);
+      dateLabel = date.toLocaleDateString('en-US', { month: 'short', year: 'numeric' });
+    }
+
+    if (status === 'verified') {
+      return {
+        status: 'verified',
+        label: dateLabel ? `Verified (${dateLabel})` : 'Verified',
+        icon: 'checkmark-circle',
+        color: COLORS.success,
+        bgColor: COLORS.successSubtle,
+        buttonLabel: 'Re-verify',
+        date: dateLabel,
+      } as const;
+    } else if (status === 'pending_verification' || status === 'pending') {
+      return {
+        status: 'pending',
+        label: 'Pending Review',
+        icon: 'time-outline',
+        color: COLORS.warning,
+        bgColor: COLORS.warningSubtle,
+        buttonLabel: 'Check Status',
+        date: null,
+      } as const;
+    } else {
+      return {
+        status: 'unverified',
+        label: 'Not Verified',
+        icon: 'alert-circle-outline',
+        color: COLORS.textMuted,
+        bgColor: COLORS.backgroundDark,
+        buttonLabel: 'Verify Now',
+        date: null,
+      } as const;
+    }
+  }, [isDemoMode, currentUser?.isVerified, verificationDetails, convexUser]);
+
   // Preview toggle state (UI only, doesn't change settings)
   const [previewBlur, setPreviewBlur] = useState(false);
 
   // Full-screen photo preview state
   const [showPhotoPreview, setShowPhotoPreview] = useState(false);
+
+  // Verification details modal state
+  const [showVerificationModal, setShowVerificationModal] = useState(false);
 
   // P2-033 FIX: Track main photo load error to show fallback
   const [mainPhotoError, setMainPhotoError] = useState(false);
@@ -509,21 +580,75 @@ export default function ProfileScreen() {
           </View>
         )}
 
-        {/* Name + Age + Verified (inline) */}
+        {/* Name + Age + Verified Badge (always visible, interactive) */}
         <View style={styles.nameRow}>
           <Text style={styles.name}>
             {currentUser.name}{age !== null ? `, ${age}` : ''}
           </Text>
-          {currentUser.isVerified && (
-            <View style={styles.verifiedInline}>
-              <Ionicons name="checkmark-circle" size={18} color={COLORS.primary} />
-              <Text style={styles.verifiedInlineText}>Verified</Text>
+          <TouchableOpacity
+            onPress={() => setShowVerificationModal(true)}
+            activeOpacity={0.7}
+            accessibilityRole="button"
+            accessibilityLabel={`Verification status: ${verificationStatusInfo.label}. Tap for details.`}
+          >
+            <View style={[
+              styles.verifiedInline,
+              { backgroundColor: verificationStatusInfo.bgColor }
+            ]}>
+              <Ionicons
+                name={verificationStatusInfo.icon as any}
+                size={16}
+                color={verificationStatusInfo.color}
+              />
+              <Text style={[
+                styles.verifiedInlineText,
+                { color: verificationStatusInfo.color }
+              ]}>
+                {verificationStatusInfo.status === 'verified' ? 'Verified' :
+                 verificationStatusInfo.status === 'pending' ? 'Pending' : 'Unverified'}
+              </Text>
             </View>
-          )}
+          </TouchableOpacity>
         </View>
 
         {/* Bio */}
         {currentUser.bio && <Text style={styles.bio}>{currentUser.bio}</Text>}
+
+        {/* Verification Status Row - Always Visible */}
+        <View style={styles.verificationStatusRow}>
+          <View style={styles.verificationStatusLeft}>
+            <View style={[
+              styles.verificationStatusDot,
+              {
+                backgroundColor: verificationStatusInfo.status === 'verified'
+                  ? COLORS.success
+                  : verificationStatusInfo.status === 'pending'
+                    ? COLORS.warning
+                    : COLORS.textMuted
+              }
+            ]} />
+            <Text style={styles.verificationStatusLabel}>
+              {verificationStatusInfo.label}
+            </Text>
+          </View>
+          <TouchableOpacity
+            style={[
+              styles.verificationActionButton,
+              verificationStatusInfo.status === 'verified' && styles.verificationActionButtonSecondary
+            ]}
+            onPress={() => safePush(router, '/(main)/verification', 'profile->verification')}
+            activeOpacity={0.7}
+            accessibilityRole="button"
+            accessibilityLabel={verificationStatusInfo.buttonLabel}
+          >
+            <Text style={[
+              styles.verificationActionButtonText,
+              verificationStatusInfo.status === 'verified' && styles.verificationActionButtonTextSecondary
+            ]}>
+              {verificationStatusInfo.buttonLabel}
+            </Text>
+          </TouchableOpacity>
+        </View>
 
         {/* Photo visibility status - based on main photo's individual blur state */}
         <View style={styles.visibilityRow}>
@@ -722,6 +847,98 @@ export default function ProfileScreen() {
             <Ionicons name="close" size={28} color={COLORS.white} />
           </TouchableOpacity>
         </View>
+      </Modal>
+
+      {/* Verification Details Modal */}
+      <Modal
+        visible={showVerificationModal}
+        animationType="fade"
+        transparent
+        statusBarTranslucent
+        onRequestClose={() => setShowVerificationModal(false)}
+      >
+        <Pressable
+          style={styles.verificationModalOverlay}
+          onPress={() => setShowVerificationModal(false)}
+        >
+          <Pressable style={styles.verificationModalContent} onPress={(e) => e.stopPropagation()}>
+            {/* Modal Header */}
+            <View style={styles.verificationModalHeader}>
+              <View style={[
+                styles.verificationModalIcon,
+                { backgroundColor: verificationStatusInfo.bgColor }
+              ]}>
+                <Ionicons
+                  name={verificationStatusInfo.icon as any}
+                  size={32}
+                  color={verificationStatusInfo.color}
+                />
+              </View>
+              <Text style={styles.verificationModalTitle}>
+                {verificationStatusInfo.status === 'verified' ? 'Face Verified' :
+                 verificationStatusInfo.status === 'pending' ? 'Verification Pending' :
+                 'Not Yet Verified'}
+              </Text>
+            </View>
+
+            {/* Status Details */}
+            <View style={styles.verificationModalBody}>
+              {verificationStatusInfo.status === 'verified' && (
+                <>
+                  <Text style={styles.verificationModalText}>
+                    Your face has been verified. This badge helps build trust with other users.
+                  </Text>
+                  {verificationStatusInfo.date && (
+                    <View style={styles.verificationModalRow}>
+                      <Ionicons name="calendar-outline" size={16} color={COLORS.textLight} />
+                      <Text style={styles.verificationModalRowText}>
+                        Verified: {verificationStatusInfo.date}
+                      </Text>
+                    </View>
+                  )}
+                </>
+              )}
+              {verificationStatusInfo.status === 'pending' && (
+                <Text style={styles.verificationModalText}>
+                  We're reviewing your verification. This usually takes less than 24 hours. You'll be notified once complete.
+                </Text>
+              )}
+              {verificationStatusInfo.status === 'unverified' && (
+                <Text style={styles.verificationModalText}>
+                  Verify your face to get a badge, unlock full visibility, and build trust with matches.
+                </Text>
+              )}
+            </View>
+
+            {/* Action Button */}
+            <TouchableOpacity
+              style={[
+                styles.verificationModalButton,
+                verificationStatusInfo.status === 'verified' && styles.verificationModalButtonSecondary
+              ]}
+              onPress={() => {
+                setShowVerificationModal(false);
+                safePush(router, '/(main)/verification', 'profile->verification-modal');
+              }}
+              activeOpacity={0.7}
+            >
+              <Text style={[
+                styles.verificationModalButtonText,
+                verificationStatusInfo.status === 'verified' && styles.verificationModalButtonTextSecondary
+              ]}>
+                {verificationStatusInfo.buttonLabel}
+              </Text>
+            </TouchableOpacity>
+
+            {/* Close */}
+            <TouchableOpacity
+              style={styles.verificationModalClose}
+              onPress={() => setShowVerificationModal(false)}
+            >
+              <Text style={styles.verificationModalCloseText}>Close</Text>
+            </TouchableOpacity>
+          </Pressable>
+        </Pressable>
       </Modal>
     </SafeAreaView>
   );
@@ -1003,5 +1220,150 @@ const styles = StyleSheet.create({
     backgroundColor: 'rgba(0, 0, 0, 0.5)',
     justifyContent: 'center',
     alignItems: 'center',
+  },
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // VERIFICATION STATUS ROW - Always visible status + action button
+  // ═══════════════════════════════════════════════════════════════════════════
+  verificationStatusRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'space-between',
+    backgroundColor: COLORS.backgroundDark,
+    borderRadius: 12,
+    paddingVertical: 12,
+    paddingHorizontal: 16,
+    marginTop: 16,
+    marginBottom: 12,
+    width: '100%',
+    maxWidth: 340,
+  },
+  verificationStatusLeft: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    gap: 10,
+    flex: 1,
+  },
+  verificationStatusDot: {
+    width: 10,
+    height: 10,
+    borderRadius: 5,
+  },
+  verificationStatusLabel: {
+    fontSize: 14,
+    fontWeight: '500',
+    color: COLORS.text,
+    flex: 1,
+  },
+  verificationActionButton: {
+    backgroundColor: COLORS.primary,
+    paddingVertical: 8,
+    paddingHorizontal: 14,
+    borderRadius: 16,
+  },
+  verificationActionButtonSecondary: {
+    backgroundColor: 'transparent',
+    borderWidth: 1,
+    borderColor: COLORS.border,
+  },
+  verificationActionButtonText: {
+    fontSize: 13,
+    fontWeight: '600',
+    color: COLORS.white,
+  },
+  verificationActionButtonTextSecondary: {
+    color: COLORS.text,
+  },
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // VERIFICATION DETAILS MODAL
+  // ═══════════════════════════════════════════════════════════════════════════
+  verificationModalOverlay: {
+    flex: 1,
+    backgroundColor: 'rgba(0, 0, 0, 0.5)',
+    justifyContent: 'center',
+    alignItems: 'center',
+    padding: 24,
+  },
+  verificationModalContent: {
+    backgroundColor: COLORS.background,
+    borderRadius: 20,
+    padding: 24,
+    width: '100%',
+    maxWidth: 340,
+    alignItems: 'center',
+  },
+  verificationModalHeader: {
+    alignItems: 'center',
+    marginBottom: 16,
+  },
+  verificationModalIcon: {
+    width: 64,
+    height: 64,
+    borderRadius: 32,
+    justifyContent: 'center',
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  verificationModalTitle: {
+    fontSize: 20,
+    fontWeight: '700',
+    color: COLORS.text,
+    textAlign: 'center',
+  },
+  verificationModalBody: {
+    width: '100%',
+    marginBottom: 20,
+  },
+  verificationModalText: {
+    fontSize: 15,
+    color: COLORS.textLight,
+    textAlign: 'center',
+    lineHeight: 22,
+  },
+  verificationModalRow: {
+    flexDirection: 'row',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: 8,
+    marginTop: 12,
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    backgroundColor: COLORS.backgroundDark,
+    borderRadius: 8,
+  },
+  verificationModalRowText: {
+    fontSize: 14,
+    color: COLORS.textLight,
+  },
+  verificationModalButton: {
+    backgroundColor: COLORS.primary,
+    paddingVertical: 14,
+    paddingHorizontal: 24,
+    borderRadius: 24,
+    width: '100%',
+    alignItems: 'center',
+    marginBottom: 12,
+  },
+  verificationModalButtonSecondary: {
+    backgroundColor: 'transparent',
+    borderWidth: 1.5,
+    borderColor: COLORS.border,
+  },
+  verificationModalButtonText: {
+    fontSize: 16,
+    fontWeight: '600',
+    color: COLORS.white,
+  },
+  verificationModalButtonTextSecondary: {
+    color: COLORS.text,
+  },
+  verificationModalClose: {
+    paddingVertical: 8,
+  },
+  verificationModalCloseText: {
+    fontSize: 14,
+    color: COLORS.textMuted,
+    fontWeight: '500',
   },
 });
