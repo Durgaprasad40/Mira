@@ -546,6 +546,14 @@ export const getPendingConnectRequests = query({
         const senderDbId = await resolveUserIdByAuthId(ctx, req.fromUserId);
         const sender = senderDbId ? await ctx.db.get(senderDbId) : null;
 
+        // PHASE-2 ISOLATION: Get Phase-2 private profile for photo (NO Phase-1 fallback)
+        const senderPrivateProfile = senderDbId
+          ? await ctx.db
+              .query('userPrivateProfiles')
+              .withIndex('by_user', (q: any) => q.eq('userId', senderDbId))
+              .first()
+          : null;
+
         // Get prompt for context
         const prompt = await ctx.db
           .query('todPrompts')
@@ -577,7 +585,8 @@ export const getPendingConnectRequests = query({
           createdAt: req.createdAt,
           // Sender profile snapshot - PHASE-2 IDENTITY: Use displayName
           senderName: senderDisplayName,
-          senderPhotoUrl: sender?.primaryPhotoUrl ?? null,
+          // PHASE-2 ISOLATION: Use ONLY Phase-2 private photos, NO Phase-1 fallback
+          senderPhotoUrl: senderPrivateProfile?.privatePhotoUrls?.[0] ?? null,
           senderAge,
           senderGender: sender?.gender ?? null,
           // Prompt context
@@ -801,6 +810,17 @@ export const respondToConnect = mutation({
       // Get recipient profile for response
       const recipient = await ctx.db.get(recipientDbId as Id<'users'>);
 
+      // PHASE-2 ISOLATION FIX: Fetch private profiles for Phase-2 photos
+      // Do NOT use primaryPhotoUrl (Phase-1) - use privatePhotoUrls (Phase-2) only
+      const senderPrivateProfile = await ctx.db
+        .query('userPrivateProfiles')
+        .withIndex('by_user', (q: any) => q.eq('userId', senderDbId))
+        .first();
+      const recipientPrivateProfile = await ctx.db
+        .query('userPrivateProfiles')
+        .withIndex('by_user', (q: any) => q.eq('userId', recipientDbId as Id<'users'>))
+        .first();
+
       // Calculate ages
       const calculateAge = (dob: string | undefined): number | null => {
         if (!dob) return null;
@@ -937,14 +957,16 @@ export const respondToConnect = mutation({
         senderUserId: request.fromUserId,
         senderDbId: senderDbId as string,
         senderName: senderDisplayName,
-        senderPhotoUrl: sender?.primaryPhotoUrl ?? null,
+        // PHASE-2 ISOLATION: Use Phase-2 private photos ONLY, NO fallback to primaryPhotoUrl
+        senderPhotoUrl: senderPrivateProfile?.privatePhotoUrls?.[0] ?? null,
         senderAge,
         senderGender: sender?.gender ?? null,
         // Recipient profile (for sender's display) - PHASE-2 IDENTITY: Use displayName
         recipientUserId: authUserId,
         recipientDbId: recipientDbId as string,
         recipientName: recipientDisplayName,
-        recipientPhotoUrl: recipient?.primaryPhotoUrl ?? null,
+        // PHASE-2 ISOLATION: Use Phase-2 private photos ONLY, NO fallback to primaryPhotoUrl
+        recipientPhotoUrl: recipientPrivateProfile?.privatePhotoUrls?.[0] ?? null,
         recipientAge,
         recipientGender: recipient?.gender ?? null,
       };

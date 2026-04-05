@@ -167,18 +167,10 @@ export const getUserPrivateConversations = query({
           .order('desc')
           .first();
 
-        // PHOTO-FIX: Get photo URL from single source of truth
-        // Priority: 1) Phase-2 private photos, 2) Main photos table (consistent with chat screen)
-        let photoUrl = otherPrivateProfile?.privatePhotoUrls?.[0] ?? null;
-        if (!photoUrl) {
-          // Fallback: Get from main photos table (same source used in chat screen)
-          const primaryPhoto = await ctx.db
-            .query('photos')
-            .withIndex('by_user', (q) => q.eq('userId', otherParticipantId))
-            .filter((q) => q.eq(q.field('isPrimary'), true))
-            .first();
-          photoUrl = primaryPhoto?.url ?? otherUser.primaryPhotoUrl ?? null;
-        }
+        // PHASE-2 ISOLATION: Use ONLY Phase-2 private photos
+        // NO fallback to Phase-1 photos table or primaryPhotoUrl
+        // If no Phase-2 photo exists, return null (UI will show placeholder)
+        const photoUrl = otherPrivateProfile?.privatePhotoUrls?.[0] ?? null;
 
         // PHASE-2 PRIVACY FIX: ALWAYS use handle from users table, never stored displayName
         // Stored displayName may contain old full names from before the fix
