@@ -17,7 +17,19 @@ export const getByUserId = query({
       .query('userPrivateProfiles')
       .withIndex('by_user', (q) => q.eq('userId', args.userId))
       .first();
-    return profile;
+
+    if (!profile) return null;
+
+    // PHASE-2 PRIVACY FIX: Always use handle from users table, never stored displayName
+    // This ensures old records with full names stored are overridden at read time
+    // Phase-2 must NEVER expose first name or last name
+    const user = await ctx.db.get(args.userId);
+    const safeDisplayName = user?.handle || 'Anonymous';
+
+    return {
+      ...profile,
+      displayName: safeDisplayName,
+    };
   },
 });
 
@@ -392,7 +404,19 @@ export const getByAuthUserId = query({
       .query('userPrivateProfiles')
       .withIndex('by_user', (q) => q.eq('userId', userId))
       .first();
-    return profile;
+
+    if (!profile) return null;
+
+    // PHASE-2 PRIVACY FIX: Always use handle from users table, never stored displayName
+    // This ensures old records with full names stored are overridden at read time
+    // Phase-2 must NEVER expose first name or last name
+    const user = await ctx.db.get(userId);
+    const safeDisplayName = user?.handle || 'Anonymous';
+
+    return {
+      ...profile,
+      displayName: safeDisplayName,
+    };
   },
 });
 

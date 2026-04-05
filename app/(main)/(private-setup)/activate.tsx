@@ -61,7 +61,9 @@ export default function ActivateScreen() {
       }
 
       store.setProfileInfo({
-        displayName: currentUser.name,
+        // PHASE-2 PRIVACY FIX: Use handle (nickname) ONLY, never full name
+        // Phase-2 must NEVER expose first name or last name
+        displayName: currentUser.handle || 'Anonymous',
         age,
         city: currentUser.city ?? '',
         gender: currentUser.gender,

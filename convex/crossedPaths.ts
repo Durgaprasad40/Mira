@@ -1380,7 +1380,8 @@ export const getNearbyUsers = query({
 
       results.push({
         id: user._id,
-        name: user.name,
+        // PHASE-2 PRIVACY: Use handle (anonymous username) ONLY, never real name
+        name: user.handle || 'Anonymous',
         age: calculateAge(user.dateOfBirth),
         publishedLat: fuzzed.lat,  // SEC-1 FIX: Return fuzzed coordinates
         publishedLng: fuzzed.lng,  // SEC-1 FIX: Return fuzzed coordinates
@@ -1567,10 +1568,14 @@ export const getCrossPathHistory = query({
       // Calculate relative time for display
       const relativeTime = formatRelativeTime(entry.createdAt, now);
 
+      // PHASE-2 PRIVACY FIX: Use handle (anonymous username) ONLY, never real name
+      // Phase-2 surfaces must NEVER expose first name or last name
+      const displayName = otherUser.handle || 'Anonymous';
+
       results.push({
         id: entry._id,
         otherUserId,
-        otherUserName: otherUser.name,
+        otherUserName: displayName,
         otherUserAge: calculateAge(otherUser.dateOfBirth),
         areaName: displayAreaName,
         // Approximate crossing location (not current location — persists across travel)
@@ -1590,7 +1595,7 @@ export const getCrossPathHistory = query({
         createdAt: entry.createdAt,
         expiresAt: entry.expiresAt,
         photoUrl: photosMap.get(otherUserId as string),
-        initial: otherUser.name.charAt(0),
+        initial: displayName.charAt(0).toUpperCase(),
         isVerified: otherUser.isVerified,
       });
     }
@@ -1915,7 +1920,8 @@ export const getCrossedPaths = query({
         distanceRange,
         user: {
           id: otherUserId,
-          name: otherUser.name,
+          // PHASE-2 PRIVACY: Use handle (anonymous username) ONLY, never real name
+          name: otherUser.handle || 'Anonymous',
           age: calculateAge(otherUser.dateOfBirth),
           photoUrl: photosMap.get(otherUserId as string),
           isVerified: otherUser.isVerified,

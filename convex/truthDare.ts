@@ -49,12 +49,12 @@ async function isBlockedBidirectional(
 
 // PHASE-2 IDENTITY FIX: Helper to get Phase-2 displayName (nickname) instead of real name
 // T/D is a Phase-2 feature, so MUST use Phase-2 displayName everywhere
+// PRIVACY FIX: Always use handle from users table, never stored displayName
+// This ensures old records with full names stored are overridden
 async function getPhase2DisplayName(ctx: any, userId: Id<'users'>): Promise<string> {
-  const privateProfile = await ctx.db
-    .query('userPrivateProfiles')
-    .withIndex('by_user', (q: any) => q.eq('userId', userId))
-    .first();
-  return privateProfile?.displayName || 'Anonymous';
+  // ALWAYS prefer handle from users table - stored displayName may contain old full names
+  const user = await ctx.db.get(userId);
+  return user?.handle || 'Anonymous';
 }
 
 // Get trending prompts (1 truth + 1 dare), excluding expired

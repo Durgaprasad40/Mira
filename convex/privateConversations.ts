@@ -180,9 +180,10 @@ export const getUserPrivateConversations = query({
           photoUrl = primaryPhoto?.url ?? otherUser.primaryPhotoUrl ?? null;
         }
 
-        // Get display name - use Phase-2 nickname (displayName) ONLY
-        // FIX: Do NOT fall back to user.name (full name) - Phase-2 must use nickname only
-        const displayName = otherPrivateProfile?.displayName || 'Anonymous';
+        // PHASE-2 PRIVACY FIX: ALWAYS use handle from users table, never stored displayName
+        // Stored displayName may contain old full names from before the fix
+        // Phase-2 must NEVER expose first name or last name
+        const displayName = otherUser?.handle || 'Anonymous';
 
         // Compute unread count from source of truth (privateMessages table)
         const unreadCount = await computeUnreadCountFromPrivateMessages(ctx, conversation._id, userId);
@@ -688,8 +689,10 @@ export const getPrivateConversation = query({
     // Get photo URL - use Phase-2 private profile photos only (strict isolation)
     const photoUrl = otherPrivateProfile?.privatePhotoUrls?.[0] ?? null;
 
-    // FIX: Use Phase-2 nickname (displayName) ONLY - do NOT fall back to full name
-    const displayName = otherPrivateProfile?.displayName || 'Anonymous';
+    // PHASE-2 PRIVACY FIX: ALWAYS use handle from users table, never stored displayName
+    // Stored displayName may contain old full names from before the fix
+    // Phase-2 must NEVER expose first name or last name
+    const displayName = otherUser?.handle || 'Anonymous';
 
     // ═══════════════════════════════════════════════════════════════════════════
     // PHOTO ACCESS CONTROL: Check if other user has blur enabled and access status

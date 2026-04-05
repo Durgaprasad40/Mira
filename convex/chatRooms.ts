@@ -899,6 +899,8 @@ export const listMembersWithProfiles = query({
           isOnline,
           // For "last seen" display in panel
           lastActive,
+          // TRUST SIGNAL: Verification status for member trust badges
+          isVerified: user?.isVerified ?? false,
         };
       })
     );
@@ -2997,11 +2999,17 @@ export const listJoinRequests = query({
     const requestsWithUsers = await Promise.all(
       requests.map(async (req) => {
         const user = await ctx.db.get(req.userId);
+        // Fetch chat room profile nickname for this user
+        const profile = await ctx.db
+          .query('chatRoomProfiles')
+          .withIndex('by_userId', (q) => q.eq('userId', req.userId))
+          .first();
         return {
           _id: req._id,
           userId: req.userId,
           createdAt: req.createdAt,
-          userName: user?.name ?? 'Unknown',
+          // PHASE-2 PRIVACY: Use chat room nickname, then handle, then 'Anonymous' - NEVER real name
+          userName: profile?.nickname || user?.handle || 'Anonymous',
           userAvatar: user?.displayPrimaryPhotoUrl ?? null,
         };
       })
