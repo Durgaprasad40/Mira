@@ -114,6 +114,7 @@ import { markTiming } from "@/utils/startupTiming";
 import { autoSyncPhotosOnStartup } from "@/services/photoSync";
 import { checkAndHandleResetEpoch } from "@/lib/resetEpochCheck";
 import { startBackgroundLocation } from "@/utils/backgroundLocation";
+import { usePresenceAndLocation } from "@/hooks/usePresenceAndLocation";
 import { Toast } from "@/components/ui/Toast";
 import { safePush } from "@/lib/safeRouter";
 import { asUserId } from "@/convex/id";
@@ -737,6 +738,23 @@ function DeviceFingerprintCollector() {
 }
 
 /**
+ * PresenceAndLocationManager - Handles presence heartbeat and location publish
+ *
+ * PRESENCE FIX: Ensures "Online now" is displayed correctly on Discover cards.
+ * LOCATION FIX: Ensures fresh location is published to backend for distance calculation.
+ *
+ * This component:
+ * 1. Sends heartbeat to backend on app foreground (updates lastActive)
+ * 2. Sends heartbeat periodically while app is active (every 2 minutes)
+ * 3. Publishes location to backend when available (updates latitude/longitude for distance)
+ */
+function PresenceAndLocationManager() {
+  // This hook handles all the presence and location logic
+  usePresenceAndLocation();
+  return null;
+}
+
+/**
  * BackgroundLocationManager - Starts background location tracking
  *
  * SAFETY:
@@ -928,6 +946,7 @@ export default function RootLayout() {
           <PhotoSyncManager />
           <OnboardingDraftHydrator />
           <DeviceFingerprintCollector />
+          <PresenceAndLocationManager />
           <BackgroundLocationManager />
           <CrossedPathToastManager />
           <Stack screenOptions={{ headerShown: false }}>

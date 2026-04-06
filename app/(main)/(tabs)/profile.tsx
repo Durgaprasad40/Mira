@@ -21,7 +21,7 @@ import { useQuery, useMutation } from 'convex/react';
 import { api } from '@/convex/_generated/api';
 import { Id } from '@/convex/_generated/dataModel';
 import { useAuthStore } from '@/stores/authStore';
-import { COLORS } from '@/lib/constants';
+import { COLORS, ACTIVITY_FILTERS } from '@/lib/constants';
 import { Avatar } from '@/components/ui';
 import { Ionicons } from '@expo/vector-icons';
 import { Image } from 'expo-image';
@@ -199,10 +199,12 @@ export default function ProfileScreen() {
           return { url: p, isPrimary: i === 0 };
         }
         // Handle { url: string } objects - preserve isBlurred and order from backend
+        // ORDER-BASED PRIMARY: First photo (i === 0) is always primary (order is source of truth)
         if (p?.url) {
           const result: { url: string; isPrimary: boolean; isBlurred?: boolean; order?: number } = {
             url: p.url,
-            isPrimary: p.isPrimary ?? i === 0,
+            // ORDER IS SOURCE OF TRUTH: First photo in sorted array is primary
+            isPrimary: i === 0,
           };
           if (typeof p.isBlurred === 'boolean') result.isBlurred = p.isBlurred;
           if (typeof p.order === 'number') result.order = p.order;
@@ -263,14 +265,13 @@ export default function ProfileScreen() {
       }
       return null;
     }
-    const primaryPhoto = effectivePhotos.find((p: any) => p.isPrimary);
-    const mainPhoto = primaryPhoto || effectivePhotos[0];
+    // SINGLE SOURCE OF TRUTH: First photo (index 0) is always main
+    // Photos are ordered by `order` field, with order=0 being main
+    const mainPhoto = effectivePhotos[0];
 
     if (__DEV__) {
-      console.log('[ProfileTab] 📸 Main photo selection:', {
-        hasPrimaryFlag: !!primaryPhoto,
+      console.log('[ProfileTab] 📸 Main photo (index 0):', {
         selectedUrl: mainPhoto?.url?.slice(-30),
-        isPrimary: mainPhoto?.isPrimary,
         totalPhotos: effectivePhotos.length,
         isPhotosLoading,
         usingCachedData: isPhotosLoading && hasCachedPhotos,
@@ -293,8 +294,8 @@ export default function ProfileScreen() {
     if (!effectivePhotos?.length) {
       return false;
     }
-    const primaryPhoto = effectivePhotos.find((p: any) => p.isPrimary);
-    const mainPhoto = primaryPhoto || effectivePhotos[0];
+    // SINGLE SOURCE OF TRUTH: First photo (index 0) is always main
+    const mainPhoto = effectivePhotos[0];
     return mainPhoto?.isBlurred === true;
   }, [isDemoMode, currentUser?.photos, effectivePhotos]);
 
@@ -412,22 +413,23 @@ export default function ProfileScreen() {
   }, [mainPhotoUrl]);
 
   if (__DEV__) {
-    // Photo source debug: single source for live mode (api.photos.getUserPhotos)
-    // HYDRATION FIX: Show resolved photo count from effectivePhotos (cached during loading)
+    // PHOTO_SOURCE_AUDIT: Unified source for all photo displays
+    // Live mode: api.photos.getUserPhotos (excludes verification_reference)
+    // Demo mode: demoStore
     const resolvedPhotoCount = isDemoMode
       ? (currentUser?.photos?.length ?? 0)
       : (effectivePhotos?.length ?? 0);
-    const source = isDemoMode ? 'demoStore' : 'api.photos.getUserPhotos';
+    const source = isDemoMode ? 'demoStore' : 'api.photos.getUserPhotos (pre-filtered)';
+    const photoIds = isDemoMode
+      ? currentUser?.photos?.map((p: any) => p._id?.slice?.(-6) || 'local').join(',')
+      : effectivePhotos?.map((p: any) => p._id?.slice(-6)).join(',');
 
-    console.log('[ProfileTab] 📸 Photo data (unified source):', {
+    console.log('[PHOTO_SOURCE_AUDIT] [PROFILE_MAIN_PHOTO] Profile Tab loaded:', {
       source,
-      isDemoMode,
-      isPhotosLoading,
-      hasCachedPhotos,
-      resolvedPhotoCount,
+      totalRegularPhotos: resolvedPhotoCount,
       mainPhotoUrl: mainPhotoUrl?.slice(-30) || null,
-      mainPhotoIsBlurred,
-      refreshKey,
+      photoIds: photoIds || 'none',
+      isPhotosLoading,
     });
 
     // Only log loading state if we're actually loading
@@ -613,6 +615,9 @@ export default function ProfileScreen() {
 
         {/* Bio */}
         {currentUser.bio && <Text style={styles.bio}>{currentUser.bio}</Text>}
+
+        {/* REMOVED: Interests Section - per user request, interests should NOT appear on profile homepage */}
+        {/* Interests are only shown/edited in the Edit Profile screen */}
 
         {/* Verification Status Row - Always Visible */}
         <View style={styles.verificationStatusRow}>
@@ -1050,6 +1055,27 @@ const styles = StyleSheet.create({
     marginBottom: 14,
     paddingHorizontal: 20,
     maxWidth: 300,
+  },
+  interestsContainer: {
+    flexDirection: 'row',
+    flexWrap: 'wrap',
+    justifyContent: 'center',
+    gap: 8,
+    marginBottom: 14,
+    paddingHorizontal: 20,
+  },
+  interestChip: {
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 16,
+    backgroundColor: COLORS.primarySubtle,
+    borderWidth: 1,
+    borderColor: COLORS.primary + '40',
+  },
+  interestChipText: {
+    fontSize: 13,
+    color: COLORS.primary,
+    fontWeight: '500',
   },
   visibilityRow: {
     flexDirection: 'row',

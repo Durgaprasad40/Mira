@@ -1167,9 +1167,10 @@ export default function PrivateChatScreen() {
 
   // PHASE 2 FIX: Enable profile navigation to Phase 2 profile route
   // Uses Phase 2 isolated profile screen - no Phase 1 data leakage
+  // ISOLATION FIX: Use p2-profile to avoid URL collision with Phase-1 profile
   const handleOpenProfile = useCallback(() => {
     if (!conversation?.participantId) return;
-    router.push(`/(main)/(private)/profile/${conversation.participantId}`);
+    router.push(`/(main)/(private)/p2-profile/${conversation.participantId}`);
   }, [conversation?.participantId, router]);
 
   // PHASE 1 PARITY: Send result message to chat when spin completes

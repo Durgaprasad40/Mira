@@ -62,6 +62,7 @@ import { Toast } from "@/components/ui/Toast";
 import { usePrivateChatStore } from "@/stores/privateChatStore";
 import { useExplorePrefsStore } from "@/stores/explorePrefsStore";
 import { NotificationPopover } from "@/components/discover/NotificationPopover";
+import { useLocationStore } from "@/stores/locationStore";
 // REMOVED: IncognitoConversation, ConnectionSource types - no longer needed after disabling local conversation creation
 import type { Id } from "@/convex/_generated/dataModel";
 
@@ -373,6 +374,9 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   const insets = useSafeAreaInsets();
   const userId = useAuthStore((s) => s.userId);
   const token = useAuthStore((s) => s.token);
+
+  // LIVE_LOCATION: Get cached location refresh for screen focus events
+  const refreshLocationCached = useLocationStore((s) => s.refreshLocationCached);
   // AUTH_READY_FIX: Wait for auth to be fully validated before running queries
   const authReady = useAuthStore((s) => s.authReady);
   const onboardingCompleted = useAuthStore((s) => s.onboardingCompleted);
@@ -503,6 +507,8 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
   // ── Swipe lock: prevents re-entrant swipes while animation + processing is in flight ──
   // Acquired in animateSwipe, released after advanceCard + match logic complete.
   const swipeLockRef = useRef(false);
+  // LIVE_LOCATION: Prevent duplicate location refresh requests during focus
+  const isRefreshingLocationRef = useRef(false);
 
   // ── RACE CONDITION FIX: Swipe ID for deterministic lock ownership ──
   // Each swipe gets a unique ID. Only the callback holding the current ID can release the lock.
@@ -727,6 +733,15 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
 
   const phase2Profiles = useQuery(api.privateDiscover.getProfiles, privateDiscoverArgs);
 
+  // ═══════════════════════════════════════════════════════════════════════════
+  // VIEWER PROFILE QUERY - For computing common points with candidates
+  // ═══════════════════════════════════════════════════════════════════════════
+  const viewerProfileArgs = useMemo(
+    () => userId && !isPhase2 ? { userId } : "skip" as const,
+    [userId, isPhase2]
+  );
+  const viewerProfile = useQuery(api.users.getCurrentUser, viewerProfileArgs);
+
   // Use the correct profiles based on mode
   // PERF: For Phase-1, use prefetch-aware variable that provides data during initial query loading
   const convexProfiles = isPhase2 ? phase2Profiles : phase1ProfilesWithPrefetch;
@@ -940,7 +955,10 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
           isVerified: p.isVerified ?? false,
           privateIntentKeys: p.intentKeys ?? [],
           privateIntentKey: p.intentKeys?.[0],
-          lastActive: Date.now() - 2 * 60 * 60 * 1000,
+          // PHASE2_PARITY: Include gender for identity display
+          gender: p.gender,
+          // PHASE2_PARITY: Use actual lastActive if available, else fallback
+          lastActive: p.lastActive ?? (Date.now() - 2 * 60 * 60 * 1000),
           createdAt: Date.now() - 60 * 24 * 60 * 60 * 1000,
           // SOFT_MATCH_FIX: Pass through completeness flags
           isSetupComplete: p.isSetupComplete ?? false,
@@ -1321,6 +1339,19 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
       isFocusedRef.current = true;
       navigatingRef.current = false;
       swipeLockRef.current = false;
+
+      // SCREEN_FOCUS_REFRESH: Two-step location refresh for instant distance UX
+      // Step 1: Returns cached location immediately (fast UX)
+      // Step 2: If cache stale (20-45s), triggers silent background freshen
+      if (!isRefreshingLocationRef.current) {
+        isRefreshingLocationRef.current = true;
+        refreshLocationCached({ allowBackgroundFreshen: true }).finally(() => {
+          isRefreshingLocationRef.current = false;
+        });
+        if (__DEV__) {
+          console.log('[SCREEN_FOCUS_REFRESH]', isPhase2 ? 'DeepConnect' : 'Discover', 'focus gained');
+        }
+      }
     } else {
       isFocusedRef.current = false;
       // RACE FIX: Increment swipeId to invalidate any in-flight async callbacks
@@ -1506,6 +1537,17 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
     const c = currentRef.current;
     if (!c) return;
 
+    // [P1_PROFILE_OPEN] Debug logging for phase isolation verification
+    if (__DEV__) {
+      console.log('[P1_PROFILE_OPEN] openProfileCb called', {
+        isPhase2,
+        mode,
+        profileId: c.id,
+        profileUserId: c.userId,
+        profileName: c.name,
+      });
+    }
+
     // Track profile opened for user journey replay
     if (isPhase2) {
       trackAction('profile_opened', {
@@ -1516,15 +1558,20 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
 
     if (isPhase2) {
       // Phase-2: Use dedicated Phase-2 profile route (no Phase-1 leakage)
-      // OLD WRONG: /(main)/profile/${c.id}?mode=phase2
-      // NEW CORRECT: /(main)/(private)/profile/[userId]
+      // ISOLATION FIX: Use p2-profile to avoid URL collision with Phase-1 profile
       const profileUserId = c.userId || c.id; // Prefer userId, fallback to id
-      router.push(`/(main)/(private)/profile/${profileUserId}` as any);
+      if (__DEV__) {
+        console.log('[P2_PROFILE_ROUTE] Navigating to Phase-2 profile:', `/(main)/(private)/p2-profile/${profileUserId}`);
+      }
+      router.push(`/(main)/(private)/p2-profile/${profileUserId}` as any);
     } else {
       // Phase-1: Use Phase-1 profile route
+      if (__DEV__) {
+        console.log('[P1_PROFILE_ROUTE] Navigating to Phase-1 profile:', `/(main)/profile/${c.id}`);
+      }
       router.push(`/(main)/profile/${c.id}` as any);
     }
-  }, [isPhase2]);
+  }, [isPhase2, mode]);
 
   const resetPosition = useCallback(() => {
     const currentPanX = getActivePanX();
@@ -2288,11 +2335,12 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
     );
   }
 
-  // Layout: card fills from header to bottom of content area
+  // FIX 10: Layout with safe area compliance across devices
   const cardTop = hideHeader ? 0 : insets.top + HEADER_H;
-  const actionRowBottom = Math.max(insets.bottom, 12);
-  // Leave room for the action bar so card content (bio) isn't hidden behind the buttons.
-  const cardBottom = actionRowBottom + 72;
+  // Ensure minimum 16px from bottom edge, respecting safe areas (Samsung, OnePlus, etc.)
+  const actionRowBottom = Math.max(insets.bottom, 16);
+  // Leave room for action bar so card content isn't hidden (76px for larger buttons)
+  const cardBottom = actionRowBottom + 76;
 
   const likesLeft = likesRemaining();
   const standOutsLeft = standOutsRemaining();
@@ -2354,6 +2402,17 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
               privateIntentKeys={next.privateIntentKeys ?? (next as any).intentKeys ?? (next.privateIntentKey ? [next.privateIntentKey] : [])}
               isIncognito={next.isIncognito}
               activities={next.activities}
+              gender={next.gender}
+              lookingFor={next.lookingFor}
+              relationshipIntent={next.relationshipIntent}
+              viewerProfile={!isPhase2 && viewerProfile ? {
+                activities: viewerProfile.activities,
+                relationshipIntent: viewerProfile.relationshipIntent,
+                lookingFor: viewerProfile.lookingFor,
+                smoking: viewerProfile.smoking,
+                drinking: viewerProfile.drinking,
+                height: viewerProfile.height,
+              } : undefined}
               height={next.height}
               smoking={next.smoking}
               drinking={next.drinking}
@@ -2383,6 +2442,17 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
                 exploreTag={exploreCategoryId ? CATEGORY_TAG_LABELS[exploreCategoryId] : undefined}
                 lastActive={current.lastActive ?? (current as any).lastActiveAt}
                 activities={current.activities}
+                gender={current.gender}
+                lookingFor={current.lookingFor}
+                relationshipIntent={current.relationshipIntent}
+                viewerProfile={!isPhase2 && viewerProfile ? {
+                  activities: viewerProfile.activities,
+                  relationshipIntent: viewerProfile.relationshipIntent,
+                  lookingFor: viewerProfile.lookingFor,
+                  smoking: viewerProfile.smoking,
+                  drinking: viewerProfile.drinking,
+                  height: viewerProfile.height,
+                } : undefined}
                 height={current.height}
                 smoking={current.smoking}
                 drinking={current.drinking}
@@ -2396,24 +2466,27 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
         <StarBurstAnimation visible={showSuperLikeAnimation} onComplete={clearSuperLikeAnimation} />
       </View>
 
-      {/* 3-Button Action Bar with Micro-Interaction Feedback */}
-      <View style={[styles.actions, { bottom: actionRowBottom }]} pointerEvents="box-none">
+      {/* ══════════════════════════════════════════════════════════════════════════
+          PREMIUM 3-BUTTON ACTION BAR
+          Floating, semi-transparent, with premium shadows and spacing
+          ══════════════════════════════════════════════════════════════════════════ */}
+      <View style={[styles.actions, styles.premiumActions, { bottom: Math.max(actionRowBottom, 16) }]} pointerEvents="box-none">
         {/* Skip (X) - Light feedback */}
         <AnimatedActionButton
-          style={[styles.actionButton, styles.skipBtn]}
+          style={[styles.actionButton, styles.premiumSkipBtn]}
           onPress={() => animateSwipeRef.current("left")}
-          feedbackScale={0.9}
+          feedbackScale={0.92}
           hapticType="light"
         >
-          <Ionicons name="close" size={30} color="#F44336" />
+          <Ionicons name="close" size={28} color="#F44336" />
         </AnimatedActionButton>
 
         {/* Stand Out (star) - Medium feedback */}
         <AnimatedActionButton
           style={[
             styles.actionButton,
-            styles.standOutBtn,
-            hasReachedStandOutLimit() && styles.actionBtnDisabled,
+            styles.premiumStandOutBtn,
+            hasReachedStandOutLimit() && styles.premiumBtnDisabled,
           ]}
           onPress={() => {
             const c = currentRef.current;
@@ -2422,23 +2495,23 @@ export function DiscoverCardStack({ theme = "light", mode = "phase1", externalPr
             }
           }}
           disabled={hasReachedStandOutLimit()}
-          feedbackScale={0.88}
+          feedbackScale={0.9}
           hapticType="medium"
         >
-          <Ionicons name="star" size={24} color={COLORS.white} />
-          <View style={styles.standOutBadge}>
-            <Text style={styles.standOutBadgeText}>{standOutsLeft}</Text>
+          <Ionicons name="star" size={22} color={COLORS.white} />
+          <View style={styles.premiumStandOutBadge}>
+            <Text style={styles.premiumStandOutBadgeText}>{standOutsLeft}</Text>
           </View>
         </AnimatedActionButton>
 
         {/* Like (heart) - Medium feedback with stronger scale */}
         <AnimatedActionButton
-          style={[styles.actionButton, styles.likeBtn]}
+          style={[styles.actionButton, styles.premiumLikeBtn]}
           onPress={() => animateSwipeRef.current("right")}
-          feedbackScale={0.88}
+          feedbackScale={0.9}
           hapticType="medium"
         >
-          <Ionicons name="heart" size={30} color={COLORS.white} />
+          <Ionicons name="heart" size={28} color={COLORS.white} />
         </AnimatedActionButton>
       </View>
 
@@ -2691,17 +2764,35 @@ const styles = StyleSheet.create({
     fontSize: 16,
     color: COLORS.textLight,
   },
-  emptyEmoji: { fontSize: 56, marginBottom: 16 },
-  emptyTitle: { fontSize: 22, fontWeight: "700", color: COLORS.text, marginBottom: 8, textAlign: "center" },
-  emptySubtitle: { fontSize: 15, color: COLORS.textLight, textAlign: "center", lineHeight: 22 },
+  // FIX 9: Premium empty state styles - minimal and polished
+  emptyEmoji: {
+    fontSize: 72,
+    marginBottom: 24,
+  },
+  emptyTitle: {
+    fontSize: 26,
+    fontWeight: "700",
+    color: COLORS.text,
+    marginBottom: 12,
+    textAlign: "center",
+    letterSpacing: -0.5,
+  },
+  emptySubtitle: {
+    fontSize: 15,
+    color: COLORS.textLight,
+    textAlign: "center",
+    lineHeight: 24,
+    paddingHorizontal: 32,
+    maxWidth: 320,
+  },
 
-  // Compact Header
+  // Premium Compact Header
   header: {
     flexDirection: "row",
     alignItems: "flex-end",
     justifyContent: "space-between",
-    paddingHorizontal: 16,
-    paddingBottom: 8,
+    paddingHorizontal: 20,
+    paddingBottom: 10,
     backgroundColor: COLORS.background,
     zIndex: 10,
   },
@@ -2711,17 +2802,18 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
     position: "relative",
+    borderRadius: 22,
   },
   headerLogo: {
-    fontSize: 22,
+    fontSize: 24,
     fontWeight: "800",
     color: COLORS.primary,
-    letterSpacing: 1,
+    letterSpacing: 1.5,
   },
   bellBadge: {
     position: "absolute",
-    top: 0,
-    right: -2,
+    top: 2,
+    right: 0,
     minWidth: 18,
     height: 18,
     borderRadius: 9,
@@ -2729,8 +2821,13 @@ const styles = StyleSheet.create({
     alignItems: "center",
     justifyContent: "center",
     paddingHorizontal: 4,
-    borderWidth: 1.5,
+    borderWidth: 2,
     borderColor: COLORS.background,
+    shadowColor: COLORS.error,
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.3,
+    shadowRadius: 2,
+    elevation: 2,
   },
   bellBadgeText: {
     fontSize: 10,
@@ -2754,7 +2851,7 @@ const styles = StyleSheet.create({
     overflow: "hidden",
   },
 
-  // 3-Button Action Bar
+  // 3-Button Action Bar (base)
   actions: {
     position: "absolute",
     left: 0,
@@ -2812,6 +2909,83 @@ const styles = StyleSheet.create({
   standOutBadgeText: {
     fontSize: 11,
     fontWeight: "700",
+    color: "#2196F3",
+  },
+
+  // ══════════════════════════════════════════════════════════════════════════════
+  // PREMIUM ACTION BAR STYLES
+  // Floating, semi-transparent, with premium shadows and spacing
+  // ══════════════════════════════════════════════════════════════════════════════
+  // FIX 4: Improved button positioning and feel
+  premiumActions: {
+    gap: 28,
+    paddingHorizontal: 24,
+    paddingBottom: 4, // Raise buttons slightly
+  },
+  premiumSkipBtn: {
+    width: 62,
+    height: 62,
+    borderRadius: 31,
+    backgroundColor: "rgba(255,255,255,0.95)",
+    // Softer shadow
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.12,
+    shadowRadius: 8,
+    elevation: 5,
+    borderWidth: 1,
+    borderColor: "rgba(244,67,54,0.12)",
+  },
+  premiumStandOutBtn: {
+    width: 54,
+    height: 54,
+    borderRadius: 27,
+    backgroundColor: "#2196F3",
+    position: "relative",
+    // Softer colored shadow
+    shadowColor: "#2196F3",
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+    elevation: 5,
+  },
+  premiumLikeBtn: {
+    width: 62,
+    height: 62,
+    borderRadius: 31,
+    backgroundColor: COLORS.primary,
+    // Softer colored shadow
+    shadowColor: COLORS.primary,
+    shadowOffset: { width: 0, height: 3 },
+    shadowOpacity: 0.3,
+    shadowRadius: 8,
+    elevation: 5,
+  },
+  premiumBtnDisabled: {
+    opacity: 0.35,
+    shadowOpacity: 0.08,
+  },
+  premiumStandOutBadge: {
+    position: "absolute",
+    top: -6,
+    right: -6,
+    minWidth: 22,
+    height: 22,
+    borderRadius: 11,
+    backgroundColor: COLORS.white,
+    alignItems: "center",
+    justifyContent: "center",
+    borderWidth: 2,
+    borderColor: "#2196F3",
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 1 },
+    shadowOpacity: 0.12,
+    shadowRadius: 3,
+    elevation: 3,
+  },
+  premiumStandOutBadgeText: {
+    fontSize: 11,
+    fontWeight: "800",
     color: "#2196F3",
   },
 

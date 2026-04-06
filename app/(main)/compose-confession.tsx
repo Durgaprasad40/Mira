@@ -80,7 +80,8 @@ export default function ComposeConfessionScreen() {
       return result;
     }
     if (!isDemoMode && convexCurrentUser) {
-      const primaryPhoto = convexCurrentUser.photos?.find((p: any) => p.isPrimary) || convexCurrentUser.photos?.[0];
+      // SINGLE SOURCE OF TRUTH: First photo (index 0) is always main
+      const primaryPhoto = convexCurrentUser.photos?.[0];
       const userAny = convexCurrentUser as any;
       const result = {
         authorName: userAny.firstName || userAny.name,
